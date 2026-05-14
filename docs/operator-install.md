@@ -11,6 +11,59 @@ prints the exact install command for whatever is missing.
 
 ---
 
+## Quickstart — composite first-run path
+
+The canonical six-step sequence. Run from the acc2 repo root. Every step
+is idempotent and safe to re-run. `acc doctor` reporting **PASS** is the
+canonical "system is ready" signal — do not start dispatching real work
+until you see it.
+
+```bash
+cd /home/maxbaluev/bos2/system/acc2
+bun install                          # postinstall fetches camoufox automatically
+acc admin install-deps               # verifies + finishes any missing pieces
+acc init --yes                       # state dir, admin token, knowledge + artifact seeds
+acc doctor                           # composite readiness — must be PASS
+acc daemon start                     # all workers ON by default
+acc task "your first goal"           # the loop begins
+acc watch                            # live TUI in another terminal
+```
+
+What each step does:
+
+1. `bun install` — installs npm deps; the postinstall hook fetches the
+   Camoufox firefox binary into `~/.cache/camoufox/camoufox` (best-effort,
+   non-fatal — `acc admin install-deps` finishes anything postinstall
+   skipped).
+2. `acc admin install-deps` — verifies bun ≥ 1.3.14, opencode on PATH,
+   OPENAI_API_KEY in env / `.env`, the camoufox binary, and nsjail
+   (warn-only). Emits a structured `dep_check_complete` line so the
+   harness can pattern-match it. Exit 0 iff every must-have passes.
+3. `acc init --yes` — creates `${stateDir}`, mints the admin token,
+   imports the foundational knowledge seed (10 load-bearing principles)
+   AND the canonical code-artifact seed pairs (action + verifier). Both
+   surfaces are non-empty after this step.
+4. `acc doctor` — composite readiness probe. Beyond the file-existence
+   checks (daemon /health, opencode on PATH, OPENAI_API_KEY in env), it
+   now also asserts:
+   - ≥ 5 `knowledge_promoted` events in the ledger,
+   - ≥ 5 canonical `seed_*` rows in `code_artifact`,
+   - `sqlite-vec` extension loads + `vec0(...)` virtual table works.
+   The bottom line reports `[PASS] ready for real-brain dispatch` when
+   every must-have is green.
+5. `acc daemon start` — spawns the daemon detached. All workers ON by
+   default (Father iteration, embedder catch-up, rolling reviewer,
+   amendment handler, integrity check).
+6. `acc task "..."` — opens a directive; the substrate dispatches the
+   brain. Watch the event stream live with `acc watch` in another
+   terminal.
+
+The rest of this guide explains each host dependency in detail. Use it
+when one of the six steps above reports an issue, or when you want the
+manual install path for a specific component.
+
+---
+
 ## 0. Canonical on-disk layout
 
 All persistent state — daemon lock file, admin token, SQLite events
@@ -252,24 +305,31 @@ Linux VM if you need nsjail-grade isolation.
 
 ## 7. Verification
 
-After all dependencies are installed:
-
-```bash
-cd /path/to/acc2
-bun run acc doctor
-```
+After all dependencies are installed, run the composite sequence from the
+Quickstart at the top of this file (`acc admin install-deps`, then
+`acc init --yes`, then `acc doctor`). When every step exits 0 and the
+final `acc doctor` reports `[PASS] ready for real-brain dispatch`, the
+install is complete.
 
 `acc doctor` reports the status of each component:
 
-- bun version + path
+- daemon /health reachable + healthy
+- db integrity ok (PRAGMA integrity_check at boot)
+- disk space (≥ 500MB free under stateDir; ≥ 2GB recommended)
+- bun version on PATH (≥ 1.0; install-deps enforces 1.3.14 for the bootstrap)
 - OPENAI_API_KEY present in env or `.env`
 - opencode on PATH + authenticated
 - uv on PATH + version
-- playwright in `node_modules`
 - camoufox binary resolved (override or default fetch location)
-- nsjail on PATH (optional — reported as "missing (optional)" when absent)
+- nsjail on PATH (warn-only — uv sandbox degrades w/o it; bun + browser
+  runtimes unaffected)
+- ACC2_BRIDGE_MODE (production default = real)
+- **seed knowledge** — ≥ 5 `knowledge_promoted` events (Task 3)
+- **seed artifacts** — ≥ 5 canonical `seed_*` rows in `code_artifact` (Task 3)
+- **sqlite-vec extension** — vec0 loads + virtual-table constructor works (Task 3)
 
-When every required line is green, run:
+When every must-have line is `[ ok ]` and the composite reports `[PASS]`,
+the install is ready. Run:
 
 ```bash
 bun run acc task "hello world"

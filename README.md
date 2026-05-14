@@ -29,20 +29,37 @@ Owner (Claude Code chat)
 
 Owner words → directive event → dispatch route → brain emits action + verifier artifacts → runtimes execute under sandbox → verifier returns scalar residual → credit propagates → next cycle's retrieval reflects the outcome. Knowledge candidates from both LLM substrates merge through embedding-based dedup + contradiction holding (Model D).
 
-## Install — 5 minutes, end-to-end
+## Install — composite first-run path
+
+The canonical six-step sequence. Each command is idempotent — re-running
+is always safe. `acc doctor` reporting **PASS** is the canonical
+"system is ready" signal.
 
 ```bash
-git clone <repo> bos2
-cd bos2/system/acc2
-bun install                     # postinstall fetches camoufox automatically
-acc init                        # interactive bootstrap; sets OPENAI_API_KEY, mints admin token, optional seed
-acc doctor                      # readiness check (daemon health + opencode + OPENAI + bun + uv + camoufox)
-acc daemon start                # spawn the daemon detached
-acc task "your first goal"      # the loop begins
-acc watch                       # live TUI in another terminal
+cd /home/maxbaluev/bos2/system/acc2
+bun install                          # postinstall fetches camoufox automatically
+acc admin install-deps               # verifies + finishes any missing pieces
+acc init --yes                       # state dir, admin token, knowledge + artifact seeds
+acc doctor                           # composite readiness — must be PASS
+acc daemon start                     # all workers ON by default
+acc task "your first goal"           # the loop begins
+acc watch                            # live TUI in another terminal
 ```
 
-That is the whole flow. `acc doctor` will tell you exactly what is missing if anything fails.
+What you get when the loop is ready:
+
+- `acc admin install-deps` verifies bun ≥ 1.3.14, opencode on PATH,
+  OPENAI_API_KEY, camoufox binary, nsjail (warn-only). Emits a structured
+  `dep_check_complete {passes,fails,warns}` line; exit 0 iff every
+  must-have passes.
+- `acc init --yes` seeds the foundational knowledge laws AND the canonical
+  `seed_*` code-artifact pairs. Both surfaces are non-empty post-init.
+- `acc doctor` checks file existence AND state-content correctness:
+  knowledge_promoted ≥ 5, code_artifact seed rows ≥ 5, sqlite-vec
+  extension loads. A FAIL on any of those flips the composite verdict.
+
+For per-component manual install paths, see
+[`docs/operator-install.md`](docs/operator-install.md).
 
 ## What works today
 
@@ -65,11 +82,12 @@ That is the whole flow. `acc doctor` will tell you exactly what is missing if an
 
 | Command | Purpose |
 |---|---|
-| `acc init [--yes]` | Fresh-install bootstrap. Run me first. |
+| `acc admin install-deps` | Verify + install host prereqs (bun ≥ 1.3.14, opencode, OPENAI_API_KEY, camoufox, nsjail). Single-command bootstrap. Run before `acc init`. |
+| `acc init [--yes]` | Fresh-install bootstrap. Mints admin token, seeds foundational knowledge AND canonical code artifacts. |
 | `acc task "<words>"` | Open a directive; substrate dispatches the brain. |
 | `acc daemon {start\|stop\|status\|install-service}` | Daemon lifecycle. |
 | `acc watch` | Live TUI subscribed to the daemon's event stream. |
-| `acc doctor` | Multi-check readiness report (daemon + opencode + OPENAI + bun + uv + camoufox + nsjail). |
+| `acc doctor` | Composite readiness — file existence AND state content (seed knowledge, seed artifacts, sqlite-vec). PASS is the canonical "ready" signal. |
 | `acc admin update-opencode [--yes]` | Upgrade the opencode subscription CLI in place. |
 | `acc admin opencode-version` | Print installed + latest opencode versions. |
 | `acc admin upgrade-check` | Multi-subsystem upgrade report (opencode, bun, uv, camoufox). |

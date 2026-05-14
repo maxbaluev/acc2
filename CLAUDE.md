@@ -191,19 +191,22 @@ migrated forward automatically on next `acc init` or daemon boot
 
 ## Greenfield + auto-bootstrap
 
-acc2 is greenfield. v1's substrate (`../state/accint.db`) is archived read-only; there is no migration. Fresh install:
+acc2 is greenfield. v1's substrate (`../state/accint.db`) is archived read-only; there is no migration. Fresh install — the canonical six-step composite first-run path:
 
 ```bash
 cd /home/maxbaluev/bos2/system/acc2
-bun install                     # postinstall fetches camoufox automatically
-acc init                        # interactive bootstrap: state dir, admin token, optional seed
-acc doctor                      # readiness check
-acc daemon start                # spawn the daemon detached
-acc task "your first goal"      # the loop begins
-acc watch                       # live TUI in another terminal
+bun install                          # postinstall fetches camoufox automatically
+acc admin install-deps               # verifies + finishes any missing pieces
+acc init --yes                       # state dir, admin token, knowledge + artifact seeds
+acc doctor                           # composite readiness — must be PASS
+acc daemon start                     # all workers ON by default
+acc task "your first goal"           # the loop begins
+acc watch                            # live TUI in another terminal
 ```
 
-Foundational seed is owner-approved per session (v2-design.md §16). `acc init` gates seeding behind explicit consent.
+`acc doctor` reporting **PASS** is the canonical "system is ready" signal. The composite verdict now checks state content (knowledge_promoted ≥ 5, seed_* artifacts ≥ 5, sqlite-vec extension loadable) in addition to file existence. A FAIL on any of those means the substrate is not ready to dispatch — fix it before continuing.
+
+Foundational seed AND code-artifact seed are both owner-approved per session (v2-design.md §16). `acc init --yes` gates both behind explicit consent; production install path and the integration harness now hit the SAME seed code.
 
 ## When in doubt
 
