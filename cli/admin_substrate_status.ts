@@ -22,6 +22,7 @@ import type { Database } from "bun:sqlite";
 import { openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { resolveDbPath } from "../runtime/state_paths";
+import { computeLivenessReport } from "../substrate/liveness";
 import { join } from "node:path";
 
 export type SubstrateStatusEnv = {
@@ -170,9 +171,12 @@ export const computeSubstrateStatus = (
     EMBEDDABLE_KINDS,
   );
 
-  let verdict: SubstrateStatusReport["verdict"] = "ALIVE";
-  if (events === 0) verdict = "DEAD";
-  else if (codeArtifacts === 0 || vecEvents === 0) verdict = "DEGRADED";
+  // Verdict computation is centralised in `substrate/liveness.ts` so
+  // `acc doctor` and `acc admin substrate-status` cannot drift apart on
+  // what counts as ALIVE / DEGRADED / DEAD. The count fields above stay
+  // local to substrate-status' renderer (operator-facing format), but
+  // the verdict numeric thresholds live in the liveness contract.
+  const verdict = computeLivenessReport(db).verdict;
 
   return {
     dbPath,
