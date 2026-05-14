@@ -240,6 +240,18 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   const tokenFile = opts.tokenFile ?? resolveTokenFile();
   const host = opts.host ?? "127.0.0.1";
 
+  // The bridge spawns opencode subprocesses that need to reach BACK into
+  // this daemon's MCP server (substrate.* / runtime.* tool surface). The
+  // daemon knows its own host+port at bind time; export the URL into the
+  // process env so subprocess spawns inherit it. Operator override (env
+  // var already set) wins so a reverse-proxy / containerised deploy can
+  // point opencode at a different URL. Without this, the bridge fails
+  // with `mcp_server_url_missing` on every dispatch — a hole the operator
+  // shouldn't have to discover the hard way.
+  if (!process.env.V2_MCP_SERVER_URL) {
+    process.env.V2_MCP_SERVER_URL = `http://${host}:${port}/mcp`;
+  }
+
   // Layout migration runs BEFORE the daemon touches the socket / token /
   // db files so a legacy `${stateDir}/state/<file>` install is pulled
   // forward in one boot. We pass `null` for the DB handle here because

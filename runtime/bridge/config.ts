@@ -17,8 +17,29 @@ import { join } from "node:path";
  *  including gpt-5.5. Override via ACC2_OPENCODE_MODEL or
  *  SpawnOpts.model when the brain needs a different reasoner. */
 export const DEFAULT_OPENCODE_MODEL = "openai/gpt-5.5";
-export const DEFAULT_TIMEOUT_MS = 60_000;
-export const DEFAULT_MCP_HANDSHAKE_WINDOW_MS = 30_000;
+/** Default per-dispatch wall-clock cap on the opencode subprocess. The
+ *  pre-2026-05 default was 60s — too short for gpt-5.5, which routinely
+ *  spends 60-90s reasoning + authoring artifacts + invoking verifiers
+ *  before completion. With the handshake window now at 120s (see
+ *  DEFAULT_MCP_HANDSHAKE_WINDOW_MS) a 60s overall timeout was internally
+ *  inconsistent — the parent watchdog killed the subprocess before the
+ *  handshake could even complete its budget. Bumped to 300s to match
+ *  what `tests/integration/real_matrix.ts` and `tests/integration/harness.ts`
+ *  use for real-brain runs. Override via `ACC2_OPENCODE_TIMEOUT_MS` or
+ *  `SpawnOpts.timeoutMs`. */
+export const DEFAULT_TIMEOUT_MS = 300_000;
+/** Default MCP-handshake window — the time opencode has between connecting
+ *  to v2's MCP server and invoking its first `substrate.*` / `runtime.*`
+ *  tool. The pre-gpt-5 default was 30s, which was tight even for the 5.4-mini
+ *  family. gpt-5.5 (the v2 canonical reasoner, see DEFAULT_OPENCODE_MODEL
+ *  above) routinely reads the substrate via `substrate.search` / `substrate.read`
+ *  before authoring its first artifact and 30s was killing it mid-thought —
+ *  every dispatch failed with `mcp_handshake_failed`, the scheduler hot-looped,
+ *  and operators saw the substrate as broken. The integration scenarios in
+ *  `tests/integration/scenarios.ts` already bump this to 120s manually for
+ *  real-brain runs; promote that to the default so production matches.
+ *  Override via `ACC2_OPENCODE_MCP_HANDSHAKE_MS` or `SpawnOpts.mcpHandshakeWindowMs`. */
+export const DEFAULT_MCP_HANDSHAKE_WINDOW_MS = 120_000;
 
 /** No-progress watchdog — when the opencode subprocess emits zero
  *  `bridge_frame_received`-class events for this long, the bridge kills

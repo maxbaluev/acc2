@@ -26,12 +26,16 @@ const usage = (): string => `acc — v2 thin CLI
 `;
 
 const dispatchTask = async (words: string): Promise<number> => {
+  // `substrate.open_directive` is the canonical write surface: it emits
+  // `directive_opened` AND the root `task_node_opened` in one transaction
+  // so the scheduler has a ready task to dispatch on the next tick. Using
+  // `substrate.emit` here was a structural bug — the directive landed but
+  // no root task existed, so the scheduler never picked it up and the
+  // brain was never invoked.
   let env;
   try {
-    env = await mcpCall("substrate.emit", {
-      kind: "directive_opened",
-      substrate_origin: "owner",
-      payload: { text: words },
+    env = await mcpCall("substrate.open_directive", {
+      directive_text: words,
     });
   } catch (err) {
     console.error(`acc task failed: ${(err as Error).message}`);
@@ -41,8 +45,8 @@ const dispatchTask = async (words: string): Promise<number> => {
     console.error(`acc task failed: ${env.error}`);
     return 1;
   }
-  const { id, ts } = env.result as { id: string; ts: string };
-  console.log(`directive_opened ${id} (ts=${ts})`);
+  const { directive_id, task_id } = env.result as { directive_id: string; task_id: string };
+  console.log(`directive_opened ${directive_id} (root task=${task_id})`);
   console.log(`  text: ${words}`);
   return 0;
 };

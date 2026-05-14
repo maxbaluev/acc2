@@ -56,7 +56,7 @@ afterEach(async () => {
 });
 
 describe("runDispatch", () => {
-  test("`acc task '<words>'` posts a directive_opened event and prints the id", async () => {
+  test("`acc task '<words>'` opens a directive (directive_opened + root task_node_opened)", async () => {
     const cap = captureStdout();
     const code = await runDispatch(["task", "fix", "the", "broken", "test"]);
     cap.restore();
@@ -64,16 +64,28 @@ describe("runDispatch", () => {
     expect(code).toBe(0);
     const joined = cap.lines.join("\n");
     expect(joined).toContain("directive_opened ");
+    expect(joined).toContain("root task=");
     expect(joined).toContain("fix the broken test");
 
-    // Verify the row landed in the db.
+    // Directive_opened payload carries directive_text (the canonical
+    // open_directive shape; the prior `payload.text` shape was a substrate
+    // bypass via substrate.emit).
     const db = handle!.db;
-    const rows = db
+    const directiveRows = db
       .query("SELECT payload FROM events WHERE kind = 'directive_opened' ORDER BY ts DESC")
       .all() as Array<{ payload: string }>;
-    expect(rows.length).toBeGreaterThanOrEqual(1);
-    const last = JSON.parse(rows[0]!.payload) as { text?: string };
-    expect(last.text).toBe("fix the broken test");
+    expect(directiveRows.length).toBeGreaterThanOrEqual(1);
+    const dpay = JSON.parse(directiveRows[0]!.payload) as { directive_text?: string; lifecycle?: string };
+    expect(dpay.directive_text).toBe("fix the broken test");
+    expect(dpay.lifecycle).toBe("finite");
+
+    // Root task_node_opened must exist so the scheduler can dispatch.
+    const taskRows = db
+      .query("SELECT payload FROM events WHERE kind = 'task_node_opened' ORDER BY ts DESC")
+      .all() as Array<{ payload: string }>;
+    expect(taskRows.length).toBeGreaterThanOrEqual(1);
+    const tpay = JSON.parse(taskRows[0]!.payload) as { goal?: string };
+    expect(tpay.goal).toBe("fix the broken test");
   });
 
   test("`acc task` with no words returns exit 1", async () => {
