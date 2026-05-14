@@ -129,6 +129,38 @@ The merger happens at posterior-update time. When `action_scored` lands, the sub
 - **Cross-directive interference** (v2-design.md §3.4): `directive_interference_edge` for resource conflicts, enabling, sequencing dependencies, mutual exclusion. Father respects this when ranking objectives.
 - **Crisis mode** (v2-design.md §3.5, `runtime/crisis_mode.ts`): `urgency: "crisis"` adjusts scheduler concurrency (10 → 20), halves verification timeouts, promotes irreversible-effect observations to direct logging, raises Father iteration (5 min → 30 sec), suspends LATM authoring, lowers the recipe-replay threshold (0.6 → 0.4). A `crisis_postmortem` task opens automatically post-event.
 
+## On-disk layout (canonical)
+
+All state lives DIRECTLY under one root directory — no `state/` subdir.
+The shared resolver in `runtime/state_paths.ts` is the single source of
+truth; `cli/init.ts`, `cli/rpc.ts`, and `runtime/daemon.ts` import from
+it so they cannot disagree.
+
+```
+${stateDir}/
+├── v2.sock              ← daemon lock file
+├── v2.sock.token        ← admin token (0600)
+├── state.db             ← SQLite events ledger
+├── logs/
+└── tmp/
+```
+
+Env-var precedence (each independent):
+
+| Env var               | Default                                     |
+|-----------------------|---------------------------------------------|
+| `ACC2_STATE_DIR`      | `~/.accint`                                 |
+| `ACC2_SOCKET_FILE`    | `${ACC2_STATE_DIR}/v2.sock`                 |
+| `ACC2_TOKEN_FILE`     | `${ACC2_STATE_DIR}/v2.sock.token`           |
+| `ACC2_DB_PATH`        | `${ACC2_STATE_DIR}/state.db` (or `<repo>/state/accint.db` when no env var is set) |
+
+`ACCINT_HOME` is the deprecated alias for `ACC2_STATE_DIR` — still
+honoured for back-compat. When it wins resolution a one-shot
+`logger.warn` fires and a `deprecation_warning_emitted` event lands in
+the ledger. The legacy `${stateDir}/state/<file>` layout is migrated
+forward automatically on next `acc init` or daemon boot
+(`cli_layout_migrated` event in the ledger).
+
 ## How to read state
 
 `acc state` does not exist in v2. Use MCP or the TUI:

@@ -40,11 +40,11 @@ import { createHash } from "node:crypto";
 import {
   copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { emitEvent } from "../runtime/events";
+import { resolveStateDir } from "../runtime/state_paths";
 
 export type ExportMode = "live" | "cold";
 
@@ -56,7 +56,10 @@ export type ExportOptions = {
   mode?: ExportMode;
   /** Include the logs/ + cache/ subtrees.  Default false (often huge). */
   includeLogs?: boolean;
-  /** Source state dir.  Defaults to ~/.accint/state (or $ACCINT_HOME/state). */
+  /** Source state dir.  Defaults to the canonical resolver — typically
+   *  `$ACC2_STATE_DIR` (or legacy `$ACCINT_HOME`), falling back to
+   *  `~/.accint`.  All state files live DIRECTLY under this dir (no
+   *  `state/` subdir) per the canonical layout. */
   stateDir?: string;
   /** Use a system command override.  Tests inject a stub that records the
    *  invocation instead of actually shelling out. */
@@ -75,10 +78,7 @@ export type ExportResult = {
   errors: string[];
 };
 
-const defaultStateDir = (): string => {
-  const home = process.env.ACCINT_HOME ?? join(homedir(), ".accint");
-  return join(home, "state");
-};
+const defaultStateDir = (): string => resolveStateDir();
 
 const defaultSpawn = (cmd: string, args: string[]) => {
   const r = spawnSync(cmd, args, { stdio: "pipe" });
@@ -146,11 +146,19 @@ export const runExport = async (opts: ExportOptions): Promise<ExportResult> => {
   mkdirSync(stageStateDir, { recursive: true });
 
   try {
-    const sourceDb = join(stateDir, "accint.db");
+    // The canonical filename is `state.db` (flat layout); the legacy
+    // filename is `accint.db` (state/ subdir installs). Recognise both
+    // so an export from either layout works without explicit hinting.
+    const canonicalDb = join(stateDir, "state.db");
+    const legacyDb = join(stateDir, "accint.db");
+    const sourceDb = existsSync(canonicalDb) ? canonicalDb : legacyDb;
     if (!existsSync(sourceDb)) {
       result.errors.push(`source_db_missing:${sourceDb}`);
       return result;
     }
+    // The archive always carries `state/accint.db` for backward-compat
+    // with importers; the import side maps it back to whatever the
+    // running daemon's canonical name is.
     const targetDb = join(stageStateDir, "accint.db");
 
     if (mode === "live") {

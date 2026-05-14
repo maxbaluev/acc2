@@ -1,15 +1,25 @@
 // Thin RPC helpers shared by every cli/* surface — daemon discovery, lock-file
 // read, HTTP POST/GET against the auxiliary port, and a small MCP client
 // factory for substrate.* method calls via fastmcp's StreamableHTTP transport.
+//
+// State-path resolution lives in `runtime/state_paths.ts` so init.ts,
+// rpc.ts, and daemon.ts cannot disagree about where the socket / token
+// files live. The resolvers are read LAZILY on every call (no
+// module-level constant) so a test or harness changing the env var
+// mid-process picks up the new value on the next call.
 
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { resolveSocketFile, resolveTokenFile } from "../runtime/state_paths";
 
-export const DEFAULT_SOCKET_FILE = join(homedir(), ".accint", "v2.sock");
-export const DEFAULT_TOKEN_FILE = join(homedir(), ".accint", "v2.sock.token");
+/** Backwards-compatible accessor for the default socket path. Reads the
+ *  current env every call — do NOT cache the returned string. Most call
+ *  sites should let `resolvePorts` / `auxBaseUrl` / `mcpBaseUrl` do this
+ *  internally; tests that want the literal default path call this. */
+export const getDefaultSocketFile = (): string => resolveSocketFile();
+/** Backwards-compatible accessor for the default admin-token path. */
+export const getDefaultTokenFile = (): string => resolveTokenFile();
 
 export type DaemonLock = {
   pid: number;
@@ -19,15 +29,17 @@ export type DaemonLock = {
   db_path?: string;
 };
 
-export const readDaemonLock = (socketFile = DEFAULT_SOCKET_FILE): DaemonLock | null => {
-  if (!existsSync(socketFile)) return null;
-  try { return JSON.parse(readFileSync(socketFile, "utf8")) as DaemonLock; } catch { return null; }
+export const readDaemonLock = (socketFile?: string): DaemonLock | null => {
+  const target = socketFile ?? resolveSocketFile();
+  if (!existsSync(target)) return null;
+  try { return JSON.parse(readFileSync(target, "utf8")) as DaemonLock; } catch { return null; }
 };
 
-export const readAdminToken = (tokenFile = DEFAULT_TOKEN_FILE): string | null => {
-  if (!existsSync(tokenFile)) return null;
+export const readAdminToken = (tokenFile?: string): string | null => {
+  const target = tokenFile ?? resolveTokenFile();
+  if (!existsSync(target)) return null;
   try {
-    const raw = readFileSync(tokenFile, "utf8");
+    const raw = readFileSync(target, "utf8");
     return (JSON.parse(raw) as { admin_token?: string }).admin_token ?? null;
   } catch { return null; }
 };

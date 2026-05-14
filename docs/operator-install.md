@@ -11,6 +11,59 @@ prints the exact install command for whatever is missing.
 
 ---
 
+## 0. Canonical on-disk layout
+
+All persistent state — daemon lock file, admin token, SQLite events
+ledger, logs, scratch — lives DIRECTLY under one root directory. There
+is NO `state/` subdir.
+
+```
+${stateDir}/
+├── v2.sock              ← daemon lock file (JSON; pid + ports + db path)
+├── v2.sock.token        ← admin token (0600; mint-once)
+├── state.db             ← SQLite events ledger (+ -wal / -shm sidecars)
+├── logs/                ← daemon log files (when ACC2_LOG_FILE=1)
+└── tmp/                 ← scratch space
+```
+
+**Path resolution (single source of truth: `runtime/state_paths.ts`).**
+
+| Env var               | Default                                  |
+|-----------------------|------------------------------------------|
+| `ACC2_STATE_DIR`      | `~/.accint`                              |
+| `ACC2_SOCKET_FILE`    | `${ACC2_STATE_DIR}/v2.sock`              |
+| `ACC2_TOKEN_FILE`     | `${ACC2_STATE_DIR}/v2.sock.token`        |
+| `ACC2_DB_PATH`        | `${ACC2_STATE_DIR}/state.db` when ACC2_STATE_DIR (or legacy ACCINT_HOME) is set; otherwise `<repo>/state/accint.db` for dev-from-checkout. |
+
+Each env var is honored independently — set `ACC2_SOCKET_FILE` alone to
+relocate just the socket without touching the rest. The daemon, the
+init CLI, and every admin / doctor / watch surface read through the
+same resolver so they cannot disagree.
+
+### Legacy `ACCINT_HOME` (deprecated)
+
+`ACCINT_HOME` is the v1 name for `ACC2_STATE_DIR`. It is still honoured
+for back-compat — when set (and `ACC2_STATE_DIR` is unset), it drives
+state-dir resolution exactly the same way and a one-shot deprecation
+warning fires (logger + `deprecation_warning_emitted` event in the
+ledger). Migrate by replacing the export with `ACC2_STATE_DIR`:
+
+```bash
+# Before:
+export ACCINT_HOME=/var/lib/accint
+
+# After:
+export ACC2_STATE_DIR=/var/lib/accint
+```
+
+The legacy `${stateDir}/state/<file>` layout is migrated forward
+automatically on the next `acc init` or daemon boot — a
+`cli_layout_migrated` event lands in the ledger so you can see exactly
+what moved. Operators who upgraded from a pre-canonical install do not
+need to do anything; the rename is idempotent.
+
+---
+
 ## 1. Bun (the runtime acc2 is built on)
 
 acc2 is a Bun project (TypeScript, native SQLite, native subprocess). The
