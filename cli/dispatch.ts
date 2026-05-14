@@ -13,11 +13,15 @@ import {
 
 const usage = (): string => `acc — v2 thin CLI
 
-  acc task "<owner words>"       Open a directive; brain pickup is Phase D.
+  acc init [--yes]                Fresh-install bootstrap (state dir, admin token,
+                                  optional foundational seed). Run me first.
+  acc task "<owner words>"        Open a directive; the substrate dispatches the brain.
   acc daemon start                Spawn the daemon detached if not running.
   acc daemon stop                 Auth-gated shutdown via admin token.
   acc daemon status               GET /health on the running daemon.
-  acc doctor                      See cli/doctor.ts.
+  acc daemon install-service      Write systemd unit (Linux) / launchd plist (macOS).
+  acc watch                       Live TUI subscribing to the daemon's event stream.
+  acc doctor                      Multi-check readiness report.
 `;
 
 const dispatchTask = async (words: string): Promise<number> => {
@@ -83,17 +87,29 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     console.log(usage());
     return 0;
   }
+  if (cmd === "init") {
+    const { runInit } = await import("./init");
+    return runInit(argv.slice(1));
+  }
   if (cmd === "task") {
     const words = argv.slice(1).join(" ").trim();
     if (!words) { console.error("acc task: missing directive text"); return 1; }
     return dispatchTask(words);
   }
   if (cmd === "daemon") {
-    if (sub === "start")  return daemonStart();
-    if (sub === "stop")   return daemonStop();
-    if (sub === "status") return daemonStatus();
-    console.error(`acc daemon: unknown subcommand '${sub ?? ""}'. expected: start|stop|status`);
+    if (sub === "start")          return daemonStart();
+    if (sub === "stop")           return daemonStop();
+    if (sub === "status")         return daemonStatus();
+    if (sub === "install-service") {
+      const { runServiceInstall } = await import("./service-install");
+      return runServiceInstall(argv.slice(2));
+    }
+    console.error(`acc daemon: unknown subcommand '${sub ?? ""}'. expected: start|stop|status|install-service`);
     return 1;
+  }
+  if (cmd === "watch") {
+    const { runWatch } = await import("./watch");
+    return runWatch(argv.slice(1));
   }
   if (cmd === "doctor") {
     const { runDoctor } = await import("./doctor");
