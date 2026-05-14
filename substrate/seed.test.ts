@@ -84,6 +84,38 @@ describe("seedCodeArtifacts", () => {
     expect(runtimes.has("camofox-browser")).toBe(true);
   });
 
+  test("seed_web_fetch_and_parse body carries the missing-url fast-fail guard", () => {
+    // Repro for the historical brittleness: when the brain admits a refinement
+    // step that drops `url` from inputs, the seed used to call Bun.fetch(undefined)
+    // and surface `ERR_INVALID_URL: blank string` as the artifact error. The
+    // canonical shape is a structured @@RESULT@@ payload with
+    // `{ ok: false, error: "missing_input_url" }` so the verifier (and the
+    // operator-facing event stream) sees a clean failure mode, not a stack
+    // trace. We check the body source rather than spawn a subprocess here so
+    // the unit suite stays parallel-safe — the spawn-side execution path is
+    // already covered by runBunArtifact tests.
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    const row = db
+      .query("SELECT body FROM code_artifact WHERE id = ?")
+      .get("seed_web_fetch_and_parse") as { body: string } | null;
+    expect(row).not.toBeNull();
+    if (!row) return;
+    const body = row.body;
+    // The body declares the fast-fail before any fetch call so a missing url
+    // exits at the guard with a canonical structured error, never reaching
+    // Bun.fetch(undefined).
+    expect(body).toContain("missing_input_url");
+    expect(body).toContain("typeof inputs.url === 'string'");
+    expect(body).toContain("url.length === 0");
+    // Guard precedes the fetch — defensive ordering.
+    const guardIdx = body.indexOf("missing_input_url");
+    const fetchIdx = body.indexOf("await fetch(");
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(fetchIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeLessThan(fetchIdx);
+  });
+
   test("seed_browser_session_act drives the new session.* facade (Batch 1.α)", () => {
     const db = openDb(":memory:");
     seedCodeArtifacts(db);
