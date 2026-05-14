@@ -368,6 +368,55 @@ CREATE VIEW IF NOT EXISTS irreversible_effects_view AS
   GROUP BY directive_id;
 `;
 
+// promoted_knowledge_view — Batch 3.ADMIN. Operator-facing inspection
+// surface used by `acc admin inspect-knowledge`. Joins each
+// `knowledge_promoted` event back to its source `knowledge_candidate`
+// (via the first context_ref → candidate_id) so the row carries the
+// canonical text + tags alongside the merger's score/confidence stamp.
+//
+// Columns:
+//   event_id         — knowledge_promoted event id (stable handle).
+//   ts               — promotion ts.
+//   substrate_origin — which agent first emitted the candidate.
+//   candidate_id     — the originating knowledge_candidate row id.
+//   directive_id     — directive under which the candidate was born.
+//   score            — Beta(α,β) mean at promotion time.
+//   confidence       — 1 − 1/√(α+β+1) at promotion time.
+//   text             — verbatim candidate text (NULL when the candidate
+//                      row has been GC'd or its payload lacks `text`).
+//   tags             — JSON array (TEXT) — empty array when absent.
+//   context_refs     — citation chain at promotion time (TEXT).
+//
+// The candidate join is LEFT so promotion rows whose candidate has been
+// pruned still surface (text + tags fall back to NULL / '[]'). The view
+// itself is read-only; the inspect-knowledge CLI applies filters
+// (--origin, --since, --limit) at the query site.
+const VIEW_PROMOTED_KNOWLEDGE = `
+CREATE VIEW IF NOT EXISTS promoted_knowledge_view AS
+  SELECT
+    p.id                                                          AS event_id,
+    p.ts                                                          AS ts,
+    p.substrate_origin                                            AS substrate_origin,
+    COALESCE(
+      json_extract(p.payload, '$.candidate_id'),
+      json_extract(p.context_refs, '$[0]')
+    )                                                              AS candidate_id,
+    p.directive_id                                                AS directive_id,
+    CAST(COALESCE(json_extract(p.payload, '$.score'), 0) AS REAL)  AS score,
+    CAST(COALESCE(json_extract(p.payload, '$.confidence'), 0) AS REAL) AS confidence,
+    json_extract(c.payload, '$.text')                              AS text,
+    COALESCE(json_extract(c.payload, '$.tags'), '[]')              AS tags,
+    p.context_refs                                                 AS context_refs
+  FROM events p
+  LEFT JOIN events c
+    ON c.kind = 'knowledge_candidate'
+   AND c.id = COALESCE(
+         json_extract(p.payload, '$.candidate_id'),
+         json_extract(p.context_refs, '$[0]')
+       )
+  WHERE p.kind = 'knowledge_promoted';
+`;
+
 // ── Public entrypoint ──────────────────────────────────────────────
 
 /** Create every substrate view. Idempotent — every statement is
@@ -394,6 +443,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_ACTIVE_OBJECTIVES);
   db.exec(VIEW_IRREVERSIBLE_EFFECTS);
   db.exec(VIEW_LOW_RISK_INLINE_PATTERNS);
+  db.exec(VIEW_PROMOTED_KNOWLEDGE);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────
@@ -840,4 +890,66 @@ export const originPromotionByGoalShape = (
     });
   }
   return out;
+};
+
+// ── promoted_knowledge_view accessor (Batch 3.ADMIN) ────────────────
+
+export type PromotedKnowledgeRow = {
+  event_id: string;
+  ts: string;
+  substrate_origin: string;
+  candidate_id: string | null;
+  directive_id: string;
+  score: number;
+  confidence: number;
+  text: string | null;
+  tags: string[];
+  context_refs: string[];
+};
+
+export type PromotedKnowledgeFilter = {
+  /** Filter rows to a specific substrate_origin (e.g. `opencode`, `claude_root`). */
+  origin?: string;
+  /** Only rows with ts > since (ISO-8601 string, inclusive of equal-ts). */
+  since?: string;
+  /** Cap on rows returned. */
+  limit?: number;
+};
+
+/** Promoted-knowledge rows for `acc admin inspect-knowledge`. The view
+ *  itself returns every promotion; filters compose at the query site so a
+ *  scoped read stays a single SQL pass.  Rows whose canonical candidate
+ *  has been pruned still surface with `text=null` / `tags=[]`. */
+export const promotedKnowledge = (
+  db: Database,
+  filter: PromotedKnowledgeFilter = {},
+): PromotedKnowledgeRow[] => {
+  const wheres: string[] = [];
+  const params: unknown[] = [];
+  if (filter.origin) { wheres.push("substrate_origin = ?"); params.push(filter.origin); }
+  if (filter.since) { wheres.push("ts >= ?"); params.push(filter.since); }
+  const whereSql = wheres.length === 0 ? "" : `WHERE ${wheres.join(" AND ")}`;
+  const limitSql = filter.limit && filter.limit > 0 ? `LIMIT ${Math.floor(filter.limit)}` : "";
+  const rows = db
+    .query(
+      `SELECT event_id, ts, substrate_origin, candidate_id, directive_id,
+              score, confidence, text, tags, context_refs
+       FROM promoted_knowledge_view
+       ${whereSql}
+       ORDER BY ts DESC
+       ${limitSql}`,
+    )
+    .all(...params) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    event_id: r.event_id as string,
+    ts: r.ts as string,
+    substrate_origin: r.substrate_origin as string,
+    candidate_id: (r.candidate_id as string | null) ?? null,
+    directive_id: r.directive_id as string,
+    score: (r.score as number) ?? 0,
+    confidence: (r.confidence as number) ?? 0,
+    text: (r.text as string | null) ?? null,
+    tags: parseJson<string[]>(r.tags ?? "[]"),
+    context_refs: parseJson<string[]>(r.context_refs ?? "[]"),
+  }));
 };
