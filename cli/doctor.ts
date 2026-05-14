@@ -52,6 +52,13 @@ export type SubstrateCounts = {
   /** code_artifact rows where name LIKE 'seed_%' OR id LIKE 'seed_%',
    *  or NaN on probe error. */
   seedArtifacts: number;
+  /** kind='recipe_extracted' row count, or NaN on probe error. Recipes
+   *  are seeded by `seedRecipes` (substrate/seed.ts) so the substrate-
+   *  replay lane has Tier-0 cached trajectories to match against on
+   *  first-run dispatches. A db with zero recipes silently falls back
+   *  to brain dispatch for every directive — recipe replay never fires
+   *  until the brain authors recipes from scratch. */
+  recipeRows: number;
   /** Error message when the probe could not run (DB missing, sealed,
    *  etc). null when the probe ran cleanly even if counts are 0. */
   error: string | null;
@@ -116,7 +123,7 @@ const realSubstrateCounts = (): SubstrateCounts => {
   const dbPath = resolveDbPath();
   if (!existsSync(dbPath)) {
     return {
-      knowledgePromoted: NaN, seedArtifacts: NaN,
+      knowledgePromoted: NaN, seedArtifacts: NaN, recipeRows: NaN,
       error: `state DB not found at ${dbPath} — run \`acc init --yes\``,
     };
   }
@@ -134,10 +141,18 @@ const realSubstrateCounts = (): SubstrateCounts => {
         "SELECT COUNT(*) AS n FROM code_artifact WHERE name LIKE 'seed_%' OR id LIKE 'seed_%'",
       )
       .get() as { n: number };
-    return { knowledgePromoted: k.n, seedArtifacts: a.n, error: null };
+    const r = db
+      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'recipe_extracted'")
+      .get() as { n: number };
+    return {
+      knowledgePromoted: k.n,
+      seedArtifacts: a.n,
+      recipeRows: r.n,
+      error: null,
+    };
   } catch (err) {
     return {
-      knowledgePromoted: NaN, seedArtifacts: NaN,
+      knowledgePromoted: NaN, seedArtifacts: NaN, recipeRows: NaN,
       error: `db probe failed: ${(err as Error).message}`,
     };
   }
@@ -312,6 +327,11 @@ export const checkBunVersion = (env: DoctorEnv): Check => {
 // degrade real-brain dispatch.
 export const SEED_KNOWLEDGE_MIN = 5;
 export const SEED_ARTIFACT_MIN = 5;
+// Recipe seed floor — `seedRecipes` lays down 2 canonical Tier-0
+// trajectories (URL title fetch, arithmetic) so the substrate-replay
+// lane has something to match against on first-run dispatches. Setting
+// the floor at 1 tolerates one eviction without flipping to FAIL.
+export const SEED_RECIPE_MIN = 1;
 
 /** Substrate-content check: at least SEED_KNOWLEDGE_MIN
  *  `knowledge_promoted` rows must exist in the events ledger. An empty
@@ -356,6 +376,29 @@ export const checkSeedArtifacts = (env: DoctorEnv): Check => {
   }
   return { name: "seed artifacts", verdict: "ok",
     detail: `${counts.seedArtifacts} canonical seed_* code artifacts present` };
+};
+
+/** Substrate-content check: at least SEED_RECIPE_MIN `recipe_extracted`
+ *  rows must exist. `seedRecipes` (substrate/seed.ts) lays down 2
+ *  canonical Tier-0 trajectories. With zero recipes the substrate-replay
+ *  lane never fires — every directive falls through to brain dispatch
+ *  until the brain authors recipes from scratch. A db with no recipes
+ *  is structurally incomplete and silently slow on cached goal shapes. */
+export const checkSeedRecipes = (env: DoctorEnv): Check => {
+  const counts = env.substrateCounts();
+  if (counts.error !== null) {
+    return { name: "seed recipes", verdict: "fail", detail: counts.error };
+  }
+  if (!Number.isFinite(counts.recipeRows)) {
+    return { name: "seed recipes", verdict: "fail",
+      detail: "could not read recipe_extracted count" };
+  }
+  if (counts.recipeRows < SEED_RECIPE_MIN) {
+    return { name: "seed recipes", verdict: "fail",
+      detail: `${counts.recipeRows} recipe_extracted rows (need ≥ ${SEED_RECIPE_MIN}) — run \`acc init --yes\`` };
+  }
+  return { name: "seed recipes", verdict: "ok",
+    detail: `${counts.recipeRows} recipe_extracted rows` };
 };
 
 /** Vec extension load probe: opens a fresh :memory: DB and proves
@@ -409,6 +452,7 @@ export const computeReadiness = (checks: Check[]): Readiness => {
   // degrade (empty retrieval / missing seed artifacts / vec0 not loading).
   if (find("seed knowledge")?.verdict === "fail") missing.push("seed knowledge");
   if (find("seed artifacts")?.verdict === "fail") missing.push("seed artifacts");
+  if (find("seed recipes")?.verdict === "fail") missing.push("seed recipes");
   if (find("sqlite-vec extension")?.verdict === "fail") missing.push("sqlite-vec extension");
   if (missing.length === 0) {
     return { check: { name: "ready for real-brain dispatch", verdict: "ok", detail: "all prereqs satisfied" }, missing };
@@ -466,6 +510,7 @@ export const collectChecks = async (env: DoctorEnv = defaultDoctorEnv()): Promis
   // "the daemon could open the file".
   checks.push(checkSeedKnowledge(env));
   checks.push(checkSeedArtifacts(env));
+  checks.push(checkSeedRecipes(env));
   checks.push(checkVecExtensionLoadable(env));
   return checks;
 };

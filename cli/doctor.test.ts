@@ -16,6 +16,7 @@ import {
   checkOpencode,
   checkSeedArtifacts,
   checkSeedKnowledge,
+  checkSeedRecipes,
   checkUv,
   checkVecExtensionLoadable,
   collectChecks,
@@ -24,6 +25,7 @@ import {
   runDoctor,
   SEED_ARTIFACT_MIN,
   SEED_KNOWLEDGE_MIN,
+  SEED_RECIPE_MIN,
   type DoctorEnv,
   type DaemonHealthSnapshot,
 } from "./doctor";
@@ -44,6 +46,7 @@ const makeEnv = (overrides: Partial<DoctorEnv> = {}): DoctorEnv => ({
   substrateCounts: () => ({
     knowledgePromoted: SEED_KNOWLEDGE_MIN + 5,
     seedArtifacts: SEED_ARTIFACT_MIN + 3,
+    recipeRows: SEED_RECIPE_MIN + 1,
     error: null,
   }),
   vecExtensionLoadable: () => ({ ok: true, version: "v0.1.6" }),
@@ -220,6 +223,7 @@ describe("checkSeedKnowledge (Task 3 substrate-content check)", () => {
       substrateCounts: () => ({
         knowledgePromoted: SEED_KNOWLEDGE_MIN,
         seedArtifacts: SEED_ARTIFACT_MIN,
+        recipeRows: SEED_RECIPE_MIN,
         error: null,
       }),
     }));
@@ -231,6 +235,7 @@ describe("checkSeedKnowledge (Task 3 substrate-content check)", () => {
       substrateCounts: () => ({
         knowledgePromoted: 0,
         seedArtifacts: 0,
+        recipeRows: 0,
         error: null,
       }),
     }));
@@ -242,6 +247,7 @@ describe("checkSeedKnowledge (Task 3 substrate-content check)", () => {
       substrateCounts: () => ({
         knowledgePromoted: NaN,
         seedArtifacts: NaN,
+        recipeRows: NaN,
         error: "state DB not found at /tmp/missing",
       }),
     }));
@@ -256,6 +262,7 @@ describe("checkSeedArtifacts (Task 3 substrate-content check)", () => {
       substrateCounts: () => ({
         knowledgePromoted: SEED_KNOWLEDGE_MIN,
         seedArtifacts: SEED_ARTIFACT_MIN,
+        recipeRows: SEED_RECIPE_MIN,
         error: null,
       }),
     }));
@@ -267,11 +274,51 @@ describe("checkSeedArtifacts (Task 3 substrate-content check)", () => {
       substrateCounts: () => ({
         knowledgePromoted: SEED_KNOWLEDGE_MIN,
         seedArtifacts: 0,
+        recipeRows: SEED_RECIPE_MIN,
         error: null,
       }),
     }));
     expect(c.verdict).toBe("fail");
     expect(c.detail).toContain("acc init");
+  });
+});
+
+describe("checkSeedRecipes (final substrate-content check)", () => {
+  test("ok when recipe_extracted >= SEED_RECIPE_MIN", () => {
+    const c = checkSeedRecipes(makeEnv({
+      substrateCounts: () => ({
+        knowledgePromoted: SEED_KNOWLEDGE_MIN,
+        seedArtifacts: SEED_ARTIFACT_MIN,
+        recipeRows: SEED_RECIPE_MIN,
+        error: null,
+      }),
+    }));
+    expect(c.verdict).toBe("ok");
+    expect(c.detail).toContain("recipe_extracted");
+  });
+  test("fail when no recipes seeded", () => {
+    const c = checkSeedRecipes(makeEnv({
+      substrateCounts: () => ({
+        knowledgePromoted: SEED_KNOWLEDGE_MIN,
+        seedArtifacts: SEED_ARTIFACT_MIN,
+        recipeRows: 0,
+        error: null,
+      }),
+    }));
+    expect(c.verdict).toBe("fail");
+    expect(c.detail).toContain("acc init");
+  });
+  test("fail when probe errors", () => {
+    const c = checkSeedRecipes(makeEnv({
+      substrateCounts: () => ({
+        knowledgePromoted: NaN,
+        seedArtifacts: NaN,
+        recipeRows: NaN,
+        error: "state DB not found",
+      }),
+    }));
+    expect(c.verdict).toBe("fail");
+    expect(c.detail).toContain("state DB not found");
   });
 });
 
@@ -336,6 +383,22 @@ describe("computeReadiness", () => {
     expect(r.missing).toContain("seed knowledge");
     expect(r.missing).toContain("seed artifacts");
     expect(r.missing).toContain("sqlite-vec extension");
+  });
+
+  test("FAIL when seed recipes fail (final unification pass)", () => {
+    const checks = [
+      { name: "daemon health", verdict: "ok", detail: "" },
+      { name: "OPENAI_API_KEY", verdict: "ok", detail: "" },
+      { name: "opencode", verdict: "ok", detail: "" },
+      { name: "ACC2_BRIDGE_MODE", verdict: "ok", detail: "" },
+      { name: "seed knowledge", verdict: "ok", detail: "" },
+      { name: "seed artifacts", verdict: "ok", detail: "" },
+      { name: "seed recipes", verdict: "fail", detail: "0 recipes" },
+      { name: "sqlite-vec extension", verdict: "ok", detail: "" },
+    ] as const;
+    const r = computeReadiness([...checks]);
+    expect(r.check.verdict).toBe("fail");
+    expect(r.missing).toContain("seed recipes");
   });
 });
 
@@ -407,6 +470,7 @@ describe("collectChecks ordering", () => {
       "ACC2_BRIDGE_MODE",
       "seed knowledge",
       "seed artifacts",
+      "seed recipes",
       "sqlite-vec extension",
     ]);
   });
