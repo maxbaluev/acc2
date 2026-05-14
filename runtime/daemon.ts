@@ -292,14 +292,21 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
 
   // Phase H: optional rehabilitation worker. Default off — tests must not
   // run controlled fixture invocations as a side effect. Enable with
-  // ACC2_REHAB_AUTOSTART=1. Tick every 6h; the cooldown is 14d so checking
-  // more often is wasted work.
+  // ACC2_REHAB_AUTOSTART=1. Tick interval defaults to 30 minutes
+  // (ACC2_REHAB_TICK_MS, 1_800_000ms); the 14-day cooldown still gates each
+  // candidate so checking more often only matters when many artifacts crossed
+  // the cooldown simultaneously. Worker respects the canonical deadline
+  // pattern: a `runningTick` boolean swallows overlapping ticks so a slow
+  // fixture cannot stack worker invocations.
   if (process.env.ACC2_REHAB_AUTOSTART === "1") {
-    // Rehab interval is 6h; readiness flips on the first tick. We do NOT
-    // run a synchronous initial tick because rehab can spawn subprocess
-    // fixtures.
+    const rehabTickMs = Number(process.env.ACC2_REHAB_TICK_MS ?? 30 * 60 * 1000);
+    // Rehab readiness flips on registration; we do NOT run a synchronous
+    // initial tick because rehab can spawn subprocess fixtures.
     markWorkerReady("rehabilitation");
+    let rehabRunning = false;
     const rehabTick = setInterval(() => {
+      if (rehabRunning) return; // deadline pattern: skip overlapping ticks
+      rehabRunning = true;
       void (async () => {
         try {
           await rehabilitationWorkerTick(
@@ -341,8 +348,9 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
             (event) => { try { emitEvent(db, event); } catch { /* swallow */ } },
           );
         } catch { /* swallow */ }
+        finally { rehabRunning = false; }
       })();
-    }, 6 * 60 * 60 * 1000);
+    }, rehabTickMs);
     workers.push(() => clearInterval(rehabTick));
   }
 

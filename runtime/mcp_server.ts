@@ -573,6 +573,12 @@ const callArtifactByRuntime = async (
 ): Promise<McpResult> => {
   const row = getArtifact(ctx.db, artifactId);
   if (!row) return { ok: false, error: "artifact_not_found" };
+  // Dispatcher quarantine gate (§11.6): quarantined artifacts MUST NOT be
+  // invoked. The rehab worker is the only path back to `admitted`. Fail
+  // closed so a stale brain dispatch can't poke a known-bad artifact.
+  if (row.status === "quarantined") {
+    return { ok: false, error: "artifact_quarantined" };
+  }
   const decl = row.declaredSandbox;
   if (decl.runtime !== row.runtime) {
     return { ok: false, error: "sandbox_decl_runtime_mismatch" };
