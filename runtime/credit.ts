@@ -49,8 +49,72 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { getEventById, type EmitEventInput, emitEvent } from "./events";
-import { getArtifact, applyResidualOutcome, maybePromote, maybeQuarantine } from "./artifact_store";
+import { getArtifact, maybePromote, maybeQuarantine } from "./artifact_store";
+import { goalShape } from "./goal_shape";
 import { nowIso } from "./ids";
+
+// ── LATM novelty bonus (v2-design.md §11.5) ───────────────────────
+//
+// When an artifact earns credit for a previously-unseen goal_shape (i.e. the
+// directive's hashed goal token), its first-time weight is multiplied by
+// NOVELTY_BONUS_MULTIPLIER to surface newly-useful artifacts faster. Prior
+// credits for the SAME (artifact, goal_shape) pair are detected by scanning
+// past `code_artifact_score_updated` events whose payload carries the same
+// goal_shape token. The bonus is ADDITIVE to the existing Shapley weight —
+// it multiplies the weight only on the first credit, not the residual or the
+// posterior delta computation; on later credits for the same shape the
+// weight is left untouched.
+
+const DEFAULT_NOVELTY_BONUS_MULTIPLIER = 1.5;
+
+const noveltyBonusMultiplier = (): number => {
+  const raw = process.env.ACC2_LATM_NOVELTY_BONUS;
+  if (raw === undefined || raw === "") return DEFAULT_NOVELTY_BONUS_MULTIPLIER;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_NOVELTY_BONUS_MULTIPLIER;
+  return parsed;
+};
+
+/** Resolve the goal_shape hash for a directive by reading its latest
+ *  directive_opened payload and feeding `goal`/`intent`/`directive_text`
+ *  through `goalShape()`. Returns empty string when no directive_opened row
+ *  exists; in that case the novelty check is a no-op. */
+const resolveGoalShape = (db: Database, directiveId: string): string => {
+  const row = db
+    .query(
+      `SELECT payload FROM events
+       WHERE kind = 'directive_opened' AND directive_id = ?
+       ORDER BY ts DESC LIMIT 1`,
+    )
+    .get(directiveId) as { payload: string } | null;
+  if (!row) return "";
+  try {
+    const p = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
+    const text = (p.directive_text ?? p.goal ?? p.intent ?? "") as string;
+    if (!text || typeof text !== "string") return "";
+    return goalShape(text);
+  } catch {
+    return "";
+  }
+};
+
+/** Check whether `artifactId` has already received credit on `goalShapeStr`.
+ *  Scans past `code_artifact_score_updated` events that carry the goal_shape
+ *  token in their payload (LIKE match avoids JSON1 dependency). Empty shape
+ *  → returns true (no novelty path). */
+const artifactSeenGoalShape = (db: Database, artifactId: string, goalShapeStr: string): boolean => {
+  if (!goalShapeStr) return true;
+  const row = db
+    .query(
+      `SELECT 1 AS x FROM events
+       WHERE kind = 'code_artifact_score_updated'
+         AND action_artifact_id = ?
+         AND payload LIKE ?
+       LIMIT 1`,
+    )
+    .get(artifactId, `%"goal_shape":"${goalShapeStr}"%`) as { x: number } | null;
+  return row !== null;
+};
 
 // ── Public types ──────────────────────────────────────────────────
 
@@ -157,6 +221,46 @@ const residualToBetaDeltas = (residual: number): { alphaDelta: number; betaDelta
   return { alphaDelta, betaDelta };
 };
 
+/** Apply a residual outcome to an artifact's posterior + EMA, scaling the
+ *  Beta posterior delta by `weight`. weight=1.0 is identical to the
+ *  unweighted applyResidualOutcome from artifact_store.ts; weight>1.0 is
+ *  the LATM novelty-bonus path. The EMA itself blends the weighted residual
+ *  contribution with a neutral 0.5 background — the same algebra used for
+ *  cited-artifact updates downstream — so the EMA stays monotonic in
+ *  evidence regardless of N. */
+const applyWeightedResidualOutcome = (
+  db: Database,
+  artifactId: string,
+  residual: number,
+  weight: number,
+  ts: string,
+): void => {
+  const row = getArtifact(db, artifactId);
+  if (!row) throw new Error(`code_artifact_not_found:${artifactId}`);
+  const r = Math.max(0, Math.min(1, residual));
+  const { alphaDelta, betaDelta } = residualToBetaDeltas(r);
+  const newAlpha = row.posteriorAlpha + alphaDelta * weight;
+  const newBeta = row.posteriorBeta + betaDelta * weight;
+  const newScore = newAlpha / (newAlpha + newBeta);
+  const newConfidence = 1 - 1 / Math.sqrt(newAlpha + newBeta + 1);
+  const decay = Math.pow(0.5, 1 / 20);
+  // When weight=1.0 this collapses to the unweighted EMA from artifact_store.
+  // When weight>1.0 the residual contribution is capped to [0,1] before
+  // blending so a bonused observation cannot drive the EMA outside the unit
+  // interval.
+  const weightedR = weight === 1.0 ? r : Math.min(1, r * weight + 0.5 * (1 - Math.min(1, weight)));
+  const newEma = decay * row.recentResidualMean + (1 - decay) * weightedR;
+  db.run(
+    `UPDATE code_artifact SET
+       posterior_alpha = ?, posterior_beta = ?,
+       score = ?, confidence = ?,
+       recent_residual_mean = ?,
+       updated_at = ?
+     WHERE id = ?`,
+    [newAlpha, newBeta, newScore, newConfidence, newEma, ts, artifactId],
+  );
+};
+
 // ── Citation collection from the three driving events + bodies ─────
 
 const collectCitations = (
@@ -240,6 +344,12 @@ export const distributeCredit = async (
   const inheritDirectiveId = actionEv.directive_id;
   const inheritTaskId = actionEv.task_id;
 
+  // Resolve the goal_shape hash for the directive ONCE and reuse across
+  // every credit destination. Empty shape disables the novelty path (e.g.
+  // synthetic test events that never opened a directive).
+  const directiveGoalShape = resolveGoalShape(db, inheritDirectiveId);
+  const noveltyMultiplier = noveltyBonusMultiplier();
+
   const emit = (event: EmitEventInput): string => {
     const result = emitEvent(db, {
       ...event,
@@ -251,9 +361,50 @@ export const distributeCredit = async (
     return result.id;
   };
 
+  /** Apply the LATM novelty bonus when an artifact earns credit on a
+   *  previously-unseen goal_shape. Returns the (possibly-boosted) weight.
+   *  Emits a `latm_novelty_bonus_applied` event so the bonus is auditable.
+   *  The check runs BEFORE the matching `code_artifact_score_updated` event
+   *  for this credit is emitted — that's important because the post-credit
+   *  score update is the row that "claims" this goal_shape for future calls. */
+  const applyNoveltyBonus = (artifactId: string, baseWeight: number): number => {
+    if (!directiveGoalShape) return baseWeight;
+    if (artifactSeenGoalShape(db, artifactId, directiveGoalShape)) return baseWeight;
+    const bonusWeight = baseWeight * noveltyMultiplier;
+    emit({
+      kind: "latm_novelty_bonus_applied",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: artifactId,
+      payload: {
+        artifact_id: artifactId,
+        goal_shape: directiveGoalShape,
+        base_weight: baseWeight,
+        bonus_weight: bonusWeight,
+        multiplier: noveltyMultiplier,
+        scored_event_id: params.scored_event_id,
+      } as JsonValue,
+    });
+    return bonusWeight;
+  };
+
   // 1. Primary credit — full-weight applyResidualOutcome on action + verifier.
-  applyResidualOutcome(db, actionArt.id, params.observed_residual, ts);
-  applyResidualOutcome(db, verifierArt.id, params.observed_residual, ts);
+  //
+  //    LATM novelty bonus (§11.5): if this artifact has never received credit
+  //    for this directive's goal_shape before, multiply its credit weight by
+  //    NOVELTY_BONUS_MULTIPLIER. The bonus is captured by applying the
+  //    weighted Beta delta INSTEAD of the unweighted applyResidualOutcome
+  //    when weight ≠ 1.0; the EMA still uses the raw residual so the audit
+  //    surface stays honest.
+  //
+  //    Important ordering: we must check novelty BEFORE emitting the
+  //    `code_artifact_score_updated` row that stamps this goal_shape onto
+  //    the artifact's history; otherwise the verifier's check would observe
+  //    the action's stamp and miss its own novelty.
+  const actionWeight = applyNoveltyBonus(actionArt.id, 1.0);
+  const verifierWeight = applyNoveltyBonus(verifierArt.id, 1.0);
+
+  applyWeightedResidualOutcome(db, actionArt.id, params.observed_residual, actionWeight, ts);
+  applyWeightedResidualOutcome(db, verifierArt.id, params.observed_residual, verifierWeight, ts);
 
   const actionRowPost = getArtifact(db, actionArt.id)!;
   emit({
@@ -264,10 +415,11 @@ export const distributeCredit = async (
       artifact_id: actionArt.id,
       role: "action",
       residual: params.observed_residual,
-      weight: 1.0,
+      weight: actionWeight,
       score: actionRowPost.score,
       confidence: actionRowPost.confidence,
       scored_event_id: params.scored_event_id,
+      goal_shape: directiveGoalShape,
     } as JsonValue,
   });
   const verifierRowPost = getArtifact(db, verifierArt.id)!;
@@ -279,10 +431,11 @@ export const distributeCredit = async (
       artifact_id: verifierArt.id,
       role: "verifier",
       residual: params.observed_residual,
-      weight: 1.0,
+      weight: verifierWeight,
       score: verifierRowPost.score,
       confidence: verifierRowPost.confidence,
       scored_event_id: params.scored_event_id,
+      goal_shape: directiveGoalShape,
     } as JsonValue,
   });
 
@@ -310,12 +463,17 @@ export const distributeCredit = async (
 
   for (let i = 0; i < cited.length; i++) {
     const targetId = cited[i]!;
-    const weight = weights[i]!;
-    const wAlpha = alphaDelta * weight;
-    const wBeta = betaDelta * weight;
+    const baseWeight = weights[i]!;
     const kind = classifyTarget(db, targetId);
 
     if (kind === "code_artifact") {
+      // Apply the LATM novelty bonus on the Shapley share — first-time
+      // goal_shape credit on this cited artifact gets a multiplier on its
+      // weight so a newly-useful artifact rises faster. Idempotent on
+      // subsequent credits for the same shape (returns baseWeight).
+      const weight = applyNoveltyBonus(targetId, baseWeight);
+      const wAlpha = alphaDelta * weight;
+      const wBeta = betaDelta * weight;
       // Apply the weighted Beta posterior delta directly. We hand-roll the
       // update instead of calling applyResidualOutcome because we need a
       // per-entity weighted DELTA, not a single residual the function
@@ -329,10 +487,13 @@ export const distributeCredit = async (
         // EMA blends the WEIGHTED residual contribution with a neutral 0.5
         // background: the entity owns `weight` of the responsibility and
         // shares the rest with the substrate average. This keeps the EMA
-        // monotonic in evidence regardless of N.
+        // monotonic in evidence regardless of N. Cap the weight inside the
+        // mix-formula at 1.0 to keep the EMA bounded when the novelty bonus
+        // would otherwise overshoot.
         const r = Math.max(0, Math.min(1, params.observed_residual));
         const decay = Math.pow(0.5, 1 / 20);
-        const newEma = decay * row.recentResidualMean + (1 - decay) * (r * weight + 0.5 * (1 - weight));
+        const wForEma = Math.min(1, weight);
+        const newEma = decay * row.recentResidualMean + (1 - decay) * (r * wForEma + 0.5 * (1 - wForEma));
         db.run(
           `UPDATE code_artifact SET
              posterior_alpha = ?, posterior_beta = ?,
@@ -356,6 +517,7 @@ export const distributeCredit = async (
             score: newScore,
             confidence: newConfidence,
             scored_event_id: params.scored_event_id,
+            goal_shape: directiveGoalShape,
           } as JsonValue,
         });
       }
@@ -370,7 +532,13 @@ export const distributeCredit = async (
       // Knowledge credit — emit candidate_confirmed/contradicted citing the
       // knowledge id. The existing extractor (extractors.ts) consumes these
       // and recomputes Beta posteriors → knowledge_promoted/_demoted on
-      // threshold crossings.
+      // threshold crossings. Knowledge entries do NOT receive the LATM
+      // novelty bonus — the bonus is artifact-specific (§11.5 frames it as a
+      // Voyager-style authoring-loop signal). The Shapley share is the base
+      // weight; ΔΑ/ΔΒ inherit from it.
+      const knowledgeWeight = baseWeight;
+      const kAlpha = alphaDelta * knowledgeWeight;
+      const kBeta = betaDelta * knowledgeWeight;
       const r = Math.max(0, Math.min(1, params.observed_residual));
       const knowledgeKind: "candidate_confirmed" | "candidate_contradicted" =
         r >= FAILURE_BAND ? "candidate_contradicted" : "candidate_confirmed";
@@ -381,7 +549,7 @@ export const distributeCredit = async (
         payload: {
           knowledge_id: targetId,
           residual: r,
-          weight,
+          weight: knowledgeWeight,
           scored_event_id: params.scored_event_id,
           polarity: r >= FAILURE_BAND ? "deny" : r <= SUCCESS_BAND ? "assert" : "midband",
         } as JsonValue,
@@ -391,9 +559,9 @@ export const distributeCredit = async (
       contributions.push({
         target_id: targetId,
         target_kind: "knowledge",
-        weight,
-        posterior_delta_alpha: wAlpha,
-        posterior_delta_beta: wBeta,
+        weight: knowledgeWeight,
+        posterior_delta_alpha: kAlpha,
+        posterior_delta_beta: kBeta,
       });
     }
   }

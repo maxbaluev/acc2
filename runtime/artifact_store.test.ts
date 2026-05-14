@@ -191,13 +191,15 @@ describe("maybeQuarantine", () => {
   test("quarantines once recent_residual_mean exceeds threshold with enough invocations", () => {
     const db = openDb(":memory:");
     insertSampleBunArtifact(db, "art_q");
-    // Drive enough events to exceed both the invocation floor (≥10) and the
-    // EMA threshold (>0.6) by sending repeated near-1 residuals.
+    // Drive enough events to exceed both the invocation floor (≥ MIN_OBS=5)
+    // and the EMA threshold (>0.7) by sending repeated near-1 residuals. The
+    // EMA half-life is 20 events, so ~60 events at residual=0.95 drives the
+    // EMA into the high-0.8s — well clear of the 0.7 threshold.
     let row = getArtifact(db, "art_q")!;
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 60; i++) {
       row = applyResidualOutcome(db, "art_q", 0.95, nowIso());
     }
-    expect(row.recentResidualMean).toBeGreaterThan(0.6);
+    expect(row.recentResidualMean).toBeGreaterThan(0.7);
     const events: EmitEventInput[] = [];
     const transitioned = maybeQuarantine(db, "art_q", (e) => events.push(e));
     expect(transitioned).toBe(true);
@@ -207,6 +209,57 @@ describe("maybeQuarantine", () => {
     // Idempotent.
     const again = maybeQuarantine(db, "art_q", (e) => events.push(e));
     expect(again).toBe(false);
+    expect(events.length).toBe(1);
+  });
+
+  test("quarantines on recent_kill_count >= 3 (column-backed)", () => {
+    const db = openDb(":memory:");
+    insertSampleBunArtifact(db, "art_killed");
+    // Synthetically bump the kill counter — the runtime supervisor would
+    // normally do this when a subprocess is hard-killed / orphaned.
+    db.run("UPDATE code_artifact SET recent_kill_count = ? WHERE id = ?", [3, "art_killed"]);
+    const events: EmitEventInput[] = [];
+    const transitioned = maybeQuarantine(db, "art_killed", (e) => events.push(e));
+    expect(transitioned).toBe(true);
+    expect(getArtifact(db, "art_killed")!.status).toBe("quarantined");
+    expect(events.length).toBe(1);
+    const payload = events[0]!.payload as { reason: string; recent_kill_count: number };
+    expect(payload.reason).toBe("kill_count_exceeded");
+    expect(payload.recent_kill_count).toBe(3);
+  });
+
+  test("ACC2_QUARANTINE_KILL_COUNT_THRESHOLD env overrides the default", () => {
+    const prior = process.env.ACC2_QUARANTINE_KILL_COUNT_THRESHOLD;
+    process.env.ACC2_QUARANTINE_KILL_COUNT_THRESHOLD = "5";
+    try {
+      const db = openDb(":memory:");
+      insertSampleBunArtifact(db, "art_killed_env");
+      db.run("UPDATE code_artifact SET recent_kill_count = ? WHERE id = ?", [3, "art_killed_env"]);
+      const events: EmitEventInput[] = [];
+      // Threshold is now 5; 3 kills is below the bar.
+      const stillAdmitted = maybeQuarantine(db, "art_killed_env", (e) => events.push(e));
+      expect(stillAdmitted).toBe(false);
+      db.run("UPDATE code_artifact SET recent_kill_count = ? WHERE id = ?", [5, "art_killed_env"]);
+      const transitioned = maybeQuarantine(db, "art_killed_env", (e) => events.push(e));
+      expect(transitioned).toBe(true);
+    } finally {
+      if (prior === undefined) delete process.env.ACC2_QUARANTINE_KILL_COUNT_THRESHOLD;
+      else process.env.ACC2_QUARANTINE_KILL_COUNT_THRESHOLD = prior;
+    }
+  });
+
+  test("quarantine transitions are idempotent across all three reasons", () => {
+    const db = openDb(":memory:");
+    insertSampleBunArtifact(db, "art_idem");
+    db.run("UPDATE code_artifact SET recent_kill_count = ? WHERE id = ?", [3, "art_idem"]);
+    const events: EmitEventInput[] = [];
+    expect(maybeQuarantine(db, "art_idem", (e) => events.push(e))).toBe(true);
+    // Bump residual + kill_count both — re-call must remain a no-op.
+    db.run(
+      "UPDATE code_artifact SET recent_residual_mean = ?, recent_kill_count = ? WHERE id = ?",
+      [0.95, 10, "art_idem"],
+    );
+    expect(maybeQuarantine(db, "art_idem", (e) => events.push(e))).toBe(false);
     expect(events.length).toBe(1);
   });
 
@@ -382,5 +435,60 @@ describe("maybeRehabilitate (Phase H)", () => {
     const rehabbed = results.filter((r) => r.result.rehabilitated).map((r) => r.artifact_id);
     expect(rehabbed.sort()).toEqual(["art_w1", "art_w2"]);
     expect(getArtifact(db, "art_fresh")!.status).toBe("quarantined");
+  });
+
+  test("full lifecycle: high residuals → quarantined → fixture recovers → rehabilitated → dispatcher picks it again", async () => {
+    const db = openDb(":memory:");
+    insertSampleBunArtifact(db, "art_cycle");
+
+    // 1. Drive a string of failing residuals until the EMA + invocation
+    //    counter both clear the quarantine thresholds.
+    let row = getArtifact(db, "art_cycle")!;
+    for (let i = 0; i < 60; i++) {
+      row = applyResidualOutcome(db, "art_cycle", 0.95, nowIso());
+    }
+    expect(row.recentResidualMean).toBeGreaterThan(0.7);
+
+    // 2. maybeQuarantine fires on the next observation → status flips,
+    //    code_artifact_quarantined event lands in the ledger.
+    const phase1Events: EmitEventInput[] = [];
+    expect(maybeQuarantine(db, "art_cycle", (e) => phase1Events.push(e))).toBe(true);
+    expect(getArtifact(db, "art_cycle")!.status).toBe("quarantined");
+    // Substitute the live `code_artifact_quarantined` event for the
+    // back-dated one the rehab worker expects to see; this models the same
+    // row written 15 days ago.
+    db.run(
+      "DELETE FROM events WHERE kind = 'code_artifact_quarantined' AND action_artifact_id = ?",
+      ["art_cycle"],
+    );
+    quarantine(db, "art_cycle", new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString());
+
+    // 3. Inline dispatcher quarantine gate: the same status check used by
+    //    callArtifactByRuntime + recipe_replay must refuse this artifact.
+    const dispatcherCheck = (db: Database, id: string): { ok: boolean; error?: string } => {
+      const r = getArtifact(db, id);
+      if (!r) return { ok: false, error: "artifact_not_found" };
+      if (r.status === "quarantined") return { ok: false, error: "artifact_quarantined" };
+      return { ok: true };
+    };
+    expect(dispatcherCheck(db, "art_cycle")).toEqual({ ok: false, error: "artifact_quarantined" });
+
+    // 4. Rehab worker tick — fixture re-run reports recovery (residual well
+    //    below the fixture_expected_residual threshold).
+    const rehabEvents: EmitEventInput[] = [];
+    const results = await rehabilitationWorkerTick(
+      db,
+      async () => ({ ok: true, residual: 0.05 }),
+      (e) => rehabEvents.push(e),
+    );
+    const cycleResult = results.find((r) => r.artifact_id === "art_cycle");
+    expect(cycleResult).toBeDefined();
+    expect(cycleResult!.result.rehabilitated).toBe(true);
+    expect(rehabEvents.some((e) => e.kind === "code_artifact_rehabilitated")).toBe(true);
+
+    // 5. After rehabilitation, the dispatcher gate accepts the artifact
+    //    again.
+    expect(getArtifact(db, "art_cycle")!.status).toBe("admitted");
+    expect(dispatcherCheck(db, "art_cycle")).toEqual({ ok: true });
   });
 });

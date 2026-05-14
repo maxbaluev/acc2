@@ -231,6 +231,11 @@ const runArtifactByRuntime = async (
 ): Promise<{ ok: boolean; result: JsonValue | null; error?: string }> => {
   const row = getArtifact(db, artifactId);
   if (!row) return { ok: false, result: null, error: "artifact_not_found" };
+  // Dispatcher quarantine gate (§11.6): replay MUST NOT execute quarantined
+  // artifacts. The rehab worker is the only path back to `admitted`.
+  if (row.status === "quarantined") {
+    return { ok: false, result: null, error: "artifact_quarantined" };
+  }
   const decl = row.declaredSandbox;
   if (decl.runtime !== row.runtime) {
     return { ok: false, result: null, error: "sandbox_decl_runtime_mismatch" };

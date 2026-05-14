@@ -101,6 +101,7 @@ export type EventKind =
   | "code_artifact_quarantined"
   | "code_artifact_rehabilitated"
   | "code_artifact_score_updated"
+  | "latm_novelty_bonus_applied"
   | "sandbox_violation"
   | "sandbox_unenforced_warning"
 

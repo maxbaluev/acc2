@@ -19,7 +19,9 @@
 //     score ≥ 0.85  AND  confidence ≥ 0.7  AND  total_invocations ≥ 20.
 //
 // Quarantine (v2-design.md §11.6):
-//     recent_residual_mean > 0.6  AND  total_invocations ≥ 10
+//     recent_residual_mean > 0.7  AND  total_invocations ≥ 5
+//   OR `recent_kill_count` ≥ 3 (column-backed; incremented by the runtime
+//      supervisor on hard_killed/orphaned subprocesses).
 //   OR ≥ 5 consecutive `sandbox_violation` events for this artifact in the
 //     events table.
 //
@@ -66,9 +68,37 @@ const PROMOTION_SCORE_THRESHOLD = 0.85;
 const PROMOTION_CONFIDENCE_THRESHOLD = 0.7;
 const PROMOTION_INVOCATION_THRESHOLD = 20;
 
-const QUARANTINE_RESIDUAL_THRESHOLD = 0.6;
-const QUARANTINE_MIN_INVOCATIONS = 10;
+// Quarantine thresholds (v2-design.md §11.6). Defaults are tuned for fast
+// detection of regressions; the env knobs let operators dial in per-deploy
+// sensitivity without code edits.
+const DEFAULT_QUARANTINE_RESIDUAL_THRESHOLD = 0.7;
+const DEFAULT_QUARANTINE_MIN_OBSERVATIONS = 5;
+const DEFAULT_QUARANTINE_KILL_COUNT_THRESHOLD = 3;
 const QUARANTINE_VIOLATION_THRESHOLD = 5;
+
+const quarantineResidualThreshold = (): number => {
+  const raw = process.env.ACC2_QUARANTINE_RESIDUAL_THRESHOLD;
+  if (raw === undefined || raw === "") return DEFAULT_QUARANTINE_RESIDUAL_THRESHOLD;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) return DEFAULT_QUARANTINE_RESIDUAL_THRESHOLD;
+  return parsed;
+};
+
+const quarantineMinObservations = (): number => {
+  const raw = process.env.ACC2_QUARANTINE_MIN_OBSERVATIONS;
+  if (raw === undefined || raw === "") return DEFAULT_QUARANTINE_MIN_OBSERVATIONS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_QUARANTINE_MIN_OBSERVATIONS;
+  return Math.floor(parsed);
+};
+
+const quarantineKillCountThreshold = (): number => {
+  const raw = process.env.ACC2_QUARANTINE_KILL_COUNT_THRESHOLD;
+  if (raw === undefined || raw === "") return DEFAULT_QUARANTINE_KILL_COUNT_THRESHOLD;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_QUARANTINE_KILL_COUNT_THRESHOLD;
+  return Math.floor(parsed);
+};
 
 const SUCCESS_BAND = 0.3;
 const FAILURE_BAND = 0.7;
@@ -294,9 +324,11 @@ const consecutiveViolations = (db: Database, artifactId: string): number => {
   return count;
 };
 
-/** Quarantine an artifact whose EMA crossed the threshold, OR which has
- *  emitted ≥ 5 consecutive `sandbox_violation` events. Emits
- *  `code_artifact_quarantined` on transition. */
+/** Quarantine an artifact whose EMA crossed the residual threshold, whose
+ *  recent_kill_count crossed the kill-count threshold, OR which has
+ *  emitted ≥ 5 consecutive `sandbox_violation` events. Idempotent — calling
+ *  on an already-quarantined artifact is a no-op. Emits
+ *  `code_artifact_quarantined` on transition with the triggering reason. */
 export const maybeQuarantine = (
   db: Database,
   artifactId: string,
@@ -306,13 +338,23 @@ export const maybeQuarantine = (
   if (!row) return false;
   if (row.status === "quarantined") return false;
 
+  const residualThreshold = quarantineResidualThreshold();
+  const minObservations = quarantineMinObservations();
+  const killCountThreshold = quarantineKillCountThreshold();
+
   const invocations = countInvocations(row);
   const residualBreach =
-    row.recentResidualMean > QUARANTINE_RESIDUAL_THRESHOLD &&
-    invocations >= QUARANTINE_MIN_INVOCATIONS;
+    row.recentResidualMean > residualThreshold && invocations >= minObservations;
+  const killBreach = row.recentKillCount >= killCountThreshold;
   const violationBreach = consecutiveViolations(db, artifactId) >= QUARANTINE_VIOLATION_THRESHOLD;
 
-  if (!residualBreach && !violationBreach) return false;
+  if (!residualBreach && !killBreach && !violationBreach) return false;
+
+  const reason = residualBreach
+    ? "residual_mean_exceeded"
+    : killBreach
+      ? "kill_count_exceeded"
+      : "consecutive_sandbox_violations";
 
   const ts = nowIso();
   db.run(
@@ -325,10 +367,14 @@ export const maybeQuarantine = (
     action_artifact_id: artifactId,
     payload: {
       artifact_id: artifactId,
-      reason: residualBreach ? "residual_mean_exceeded" : "consecutive_sandbox_violations",
+      reason,
       recent_residual_mean: row.recentResidualMean,
+      recent_kill_count: row.recentKillCount,
       consecutive_violations: violationBreach ? consecutiveViolations(db, artifactId) : 0,
       invocations,
+      threshold_residual: residualThreshold,
+      threshold_kill_count: killCountThreshold,
+      min_observations: minObservations,
     } as JsonValue,
   });
   return true;
