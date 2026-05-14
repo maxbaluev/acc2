@@ -6,7 +6,9 @@
   "scripts": {
     "daemon": "bun runtime/daemon.ts",
     "acc": "bun cli/dispatch.ts",
-    "test": "bun test --bail"
+    "test": "bun test --bail",
+    "postinstall": "bun scripts/postinstall.ts",
+    "browser:fetch": "bunx playwright install chromium && bun scripts/fetch-camoufox.ts"
   },
   "bin": {
     "acc": "cli/dispatch.ts"

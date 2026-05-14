@@ -560,11 +560,12 @@ type SpawnOpts = {
   mcpHandshakeWindowMs?: number;
 };
 
-// NOTE: opencode 1.4+ renamed the provider model ids; `openai/gpt-5-mini` no
-// longer resolves. The default below points at the current canonical id; the
-// Batch 2.α smoke confirmed `openai/gpt-5.4-mini` works against opencode 1.4.3.
-// Override via ACC2_OPENCODE_MODEL or SpawnOpts.model.
-const DEFAULT_OPENCODE_MODEL = "openai/gpt-5.4-mini";
+// `openai/gpt-5.5` is the v2 canonical reasoner per owner directive (post Batch 3).
+// Batch 2.α smoke originally proved opencode 1.4.x against `openai/gpt-5.4-mini`;
+// the upgrade subagent (commit 54d0921) verified opencode 1.14.50 keeps the gpt-5.x
+// family resolvable, including gpt-5.5. Override via ACC2_OPENCODE_MODEL or
+// SpawnOpts.model when the brain needs a different reasoner.
+const DEFAULT_OPENCODE_MODEL = "openai/gpt-5.5";
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MCP_HANDSHAKE_WINDOW_MS = 30_000;
 
