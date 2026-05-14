@@ -28,7 +28,7 @@
 
 import type { Server } from "bun";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import type { Database } from "bun:sqlite";
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
@@ -71,19 +71,13 @@ import {
 export const DEFAULT_DAEMON_PORT = 9387;
 export const DEFAULT_AUX_PORT_OFFSET = 1;
 
-/** Repo root anchor for the dev-checkout fallback DB path. When no
- *  ACC2_STATE_DIR / ACCINT_HOME / ACC2_DB_PATH env var is set the daemon
- *  falls back to `<repo>/state/accint.db` so a fresh `bun runtime/daemon.ts`
- *  from a clean checkout still works. */
-const REPO_ROOT = resolve(import.meta.dirname ?? ".", "..");
-
 /** Default socket/token/db paths are computed on demand from the shared
  *  resolver. The exported constants below preserve the legacy module API
  *  but evaluate at first import — DO NOT cache them anywhere downstream;
  *  the daemon itself always re-reads via the resolvers below. */
 export const DEFAULT_SOCKET_FILE = resolveSocketFile();
 export const DEFAULT_TOKEN_FILE = resolveTokenFile();
-export const DEFAULT_STATE_DB = resolveDbPath(REPO_ROOT);
+export const DEFAULT_STATE_DB = resolveDbPath();
 
 export type DaemonOpts = {
   /** MCP (fastmcp) port. Defaults to V2_DAEMON_PORT env, then 9387. */
@@ -240,7 +234,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // Resolve paths LAZILY through the shared resolver so an env var set
   // between module-load and startDaemon (common in tests that pin paths
   // per-case) is honoured. Constants above are cached at module-load only.
-  const stateDbPath = opts.stateDbPath ?? resolveDbPath(REPO_ROOT);
+  const stateDbPath = opts.stateDbPath ?? resolveDbPath();
   const socketFile = opts.socketFile ?? resolveSocketFile();
   const tokenFile = opts.tokenFile ?? resolveTokenFile();
   const host = opts.host ?? "127.0.0.1";

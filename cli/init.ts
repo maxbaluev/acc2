@@ -49,7 +49,7 @@ export type InitPaths = {
   tmpDir: string;              // ${stateDir}/tmp
   socketFile: string;          // ${stateDir}/v2.sock
   tokenFile: string;           // ${stateDir}/v2.sock.token
-  dbPath: string;              // ${stateDir}/state.db (or <repo>/state/accint.db fallback)
+  dbPath: string;              // ${stateDir}/state.db
   envFile: string;             // <cwd>/.env
 };
 
@@ -58,12 +58,6 @@ export const resolveInitPaths = (cwd: string = process.cwd()): InitPaths => {
   // first, then ACCINT_HOME (with a one-shot deprecation warn fired
   // elsewhere — runInitProgrammatic does that explicitly), then ~/.accint.
   const stateDir = resolveStateDir();
-  // The daemon's `<repo>` fallback (only used when no state-dir env is
-  // set) needs an anchor — init.ts lives at <repo>/cli/init.ts, so the
-  // repo root is two dirs up from this file. We pass it to resolveDbPath
-  // so dev-from-checkout still lands at <repo>/state/accint.db when
-  // neither ACC2_STATE_DIR nor ACCINT_HOME is set.
-  const repoRoot = join(import.meta.dirname ?? cwd, "..");
   return {
     accintHome: stateDir, // legacy alias for tests; new code uses stateDir
     stateDir,
@@ -71,7 +65,7 @@ export const resolveInitPaths = (cwd: string = process.cwd()): InitPaths => {
     tmpDir: join(stateDir, "tmp"),
     socketFile: resolveSocketFile(),
     tokenFile: resolveTokenFile(),
-    dbPath: resolveDbPath(repoRoot),
+    dbPath: resolveDbPath(),
     envFile: join(cwd, ".env"),
   };
 };

@@ -48,6 +48,7 @@ import {
 import { runExport, type ExportMode } from "./admin_export";
 import { runImport } from "./admin_import";
 import { rotateAdminToken, rotateExternalToken } from "./admin_rotate";
+import { runCleanTempState } from "./admin_clean_temp";
 
 const usage = (): string => `acc admin — operator-side maintenance
 
@@ -75,6 +76,13 @@ const usage = (): string => `acc admin — operator-side maintenance
                               Manually rehabilitate a quarantined artifact.
     archive-rolling <directive_id>
                               Manually archive a rolling-active directive.
+
+  Hygiene:
+    clean-temp-state          Remove stale /tmp/acc2-harness-* and
+                              /tmp/acc2-cli-* state dirs left behind by
+                              integration / smoke runs. OS hygiene only —
+                              no substrate events emitted. Refuses paths
+                              outside /tmp/ matching those globs.
 `;
 
 // ── Shared helpers for Batch 3.ADMIN surfaces ───────────────────────
@@ -84,13 +92,7 @@ const usage = (): string => `acc admin — operator-side maintenance
 // read env vars on every call, which keeps tests that pin paths
 // per-case working without module reload.
 
-const defaultStateDbPath = (): string => {
-  // The acc2 repo root sits two dirs up from cli/. We anchor the
-  // dev-checkout fallback DB there so `bun cli/dispatch.ts admin ...`
-  // from a clean checkout still works without any env vars set.
-  const repoRoot = join(import.meta.dirname ?? ".", "..");
-  return resolveDbPath(repoRoot);
-};
+const defaultStateDbPath = (): string => resolveDbPath();
 
 const defaultAdminTokenFile = (): string => resolveTokenFile();
 
@@ -241,8 +243,7 @@ export const runUpdateOpencode = async (env: AdminEnv): Promise<number> => {
     await new Promise((r) => setTimeout(r, 500));
   }
   // Open the substrate DB so events land even when the daemon is down.
-  const stateDb = process.env.ACC2_STATE_DB
-    ?? resolve(import.meta.dirname ?? ".", "..", "state", "accint.db");
+  const stateDb = process.env.ACC2_STATE_DB ?? defaultStateDbPath();
   const db = existsSync(stateDb) ? openDb(stateDb) : undefined;
   env.out(`upgrading opencode (${current.installMethod})…`);
   const result = await updateOpencode({ env: env.version, db });
@@ -722,6 +723,7 @@ export const runAdmin = async (argv: string[], envOverride?: AdminEnv): Promise<
   if (sub === "inspect-knowledge") return runInspectKnowledgeCmd(argv.slice(1), env);
   if (sub === "override-quarantine") return runOverrideQuarantineCmd(argv.slice(1), env);
   if (sub === "archive-rolling") return runArchiveRollingCmd(argv.slice(1), env);
+  if (sub === "clean-temp-state") return runCleanTempState(argv.slice(1));
   env.err(`acc admin: unknown subcommand '${sub}'`);
   env.err(usage());
   return 1;

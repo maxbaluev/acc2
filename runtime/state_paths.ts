@@ -23,12 +23,11 @@
 //
 //   socketFile = ACC2_SOCKET_FILE ?? ${stateDir}/v2.sock
 //   tokenFile  = ACC2_TOKEN_FILE  ?? ${stateDir}/v2.sock.token
-//   dbPath     = ACC2_DB_PATH     ?? ${stateDir}/state.db   when ACC2_STATE_DIR
-//                                                            (or ACCINT_HOME)
-//                                                            is set
-//                                ?? <repo>/state/accint.db   otherwise
-//                                                            (repo-local
-//                                                             dev fallback)
+//   dbPath     = ACC2_DB_PATH     ?? ${stateDir}/state.db
+//
+// `${stateDir}` ALWAYS resolves (to `~/.accint` when no env var is set),
+// so `${stateDir}/state.db` is always reachable. There is NO repo-local
+// dev fallback — the source tree is never a state location.
 //
 // Resolvers read process.env LAZILY on every call so the daemon (or tests)
 // can change the env mid-process and pick up the new value on the next
@@ -37,7 +36,7 @@
 
 import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 import { logger } from "./logger";
 import { emitEvent } from "./events";
@@ -129,20 +128,15 @@ export const resolveTokenFile = (): string => {
   return join(resolveStateDir(), "v2.sock.token");
 };
 
-/** Canonical SQLite path. Honors `ACC2_DB_PATH` when set; otherwise:
- *    - when a state dir was explicitly opted into (ACC2_STATE_DIR or
- *      ACCINT_HOME), the DB lives at `${stateDir}/state.db`.
- *    - otherwise, falls back to the repo-local `<repo>/state/accint.db`
- *      so dev-from-checkout still works without any env vars set.
- *
- *  `repoRoot` is the absolute path to the acc2 checkout root; tests pass
- *  a tmpdir, the daemon uses `import.meta.dirname/..`. */
-export const resolveDbPath = (repoRoot: string): string => {
+/** Canonical SQLite path. Honors `ACC2_DB_PATH` when set; otherwise
+ *  always resolves to `${stateDir}/state.db`. The state dir itself is
+ *  resolved from ACC2_STATE_DIR / ACCINT_HOME / `~/.accint` (in that
+ *  order) — so this function ALWAYS returns a path under the operator's
+ *  state directory, never the repo source tree. */
+export const resolveDbPath = (): string => {
   const explicit = process.env.ACC2_DB_PATH;
   if (explicit && explicit.length > 0) return explicit;
-  const res = resolveStateDirVerbose();
-  if (res.source !== null) return join(res.dir, "state.db");
-  return resolve(repoRoot, "state", "accint.db");
+  return join(resolveStateDir(), "state.db");
 };
 
 // ── Layout migration ──────────────────────────────────────────────────
