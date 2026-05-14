@@ -14,11 +14,16 @@ import {
   checkNsjail,
   checkOpenAiKey,
   checkOpencode,
+  checkSeedArtifacts,
+  checkSeedKnowledge,
   checkUv,
+  checkVecExtensionLoadable,
   collectChecks,
   computeReadiness,
   renderReport,
   runDoctor,
+  SEED_ARTIFACT_MIN,
+  SEED_KNOWLEDGE_MIN,
   type DoctorEnv,
   type DaemonHealthSnapshot,
 } from "./doctor";
@@ -33,6 +38,15 @@ const makeEnv = (overrides: Partial<DoctorEnv> = {}): DoctorEnv => ({
     ({ reachable: true, ok: true, pid: 999, uptime_ms: 1000, events_count: 0 }),
   homedir: () => "/home/test",
   platform: "linux",
+  // Default to "substrate looks seeded" so unrelated tests don't have to
+  // re-stub them. The three substrate-content checks have their own
+  // describe blocks below that override these on purpose.
+  substrateCounts: () => ({
+    knowledgePromoted: SEED_KNOWLEDGE_MIN + 5,
+    seedArtifacts: SEED_ARTIFACT_MIN + 3,
+    error: null,
+  }),
+  vecExtensionLoadable: () => ({ ok: true, version: "v0.1.6" }),
   ...overrides,
 });
 
@@ -200,6 +214,85 @@ describe("checkBridgeMode", () => {
   });
 });
 
+describe("checkSeedKnowledge (Task 3 substrate-content check)", () => {
+  test("ok when knowledge_promoted >= SEED_KNOWLEDGE_MIN", () => {
+    const c = checkSeedKnowledge(makeEnv({
+      substrateCounts: () => ({
+        knowledgePromoted: SEED_KNOWLEDGE_MIN,
+        seedArtifacts: SEED_ARTIFACT_MIN,
+        error: null,
+      }),
+    }));
+    expect(c.verdict).toBe("ok");
+    expect(c.detail).toContain("knowledge_promoted");
+  });
+  test("fail when below the minimum", () => {
+    const c = checkSeedKnowledge(makeEnv({
+      substrateCounts: () => ({
+        knowledgePromoted: 0,
+        seedArtifacts: 0,
+        error: null,
+      }),
+    }));
+    expect(c.verdict).toBe("fail");
+    expect(c.detail).toContain("acc init");
+  });
+  test("fail when probe errors (e.g. db missing)", () => {
+    const c = checkSeedKnowledge(makeEnv({
+      substrateCounts: () => ({
+        knowledgePromoted: NaN,
+        seedArtifacts: NaN,
+        error: "state DB not found at /tmp/missing",
+      }),
+    }));
+    expect(c.verdict).toBe("fail");
+    expect(c.detail).toContain("state DB not found");
+  });
+});
+
+describe("checkSeedArtifacts (Task 3 substrate-content check)", () => {
+  test("ok when seed_* artifacts >= SEED_ARTIFACT_MIN", () => {
+    const c = checkSeedArtifacts(makeEnv({
+      substrateCounts: () => ({
+        knowledgePromoted: SEED_KNOWLEDGE_MIN,
+        seedArtifacts: SEED_ARTIFACT_MIN,
+        error: null,
+      }),
+    }));
+    expect(c.verdict).toBe("ok");
+    expect(c.detail).toContain("seed_*");
+  });
+  test("fail when no seed artifacts present", () => {
+    const c = checkSeedArtifacts(makeEnv({
+      substrateCounts: () => ({
+        knowledgePromoted: SEED_KNOWLEDGE_MIN,
+        seedArtifacts: 0,
+        error: null,
+      }),
+    }));
+    expect(c.verdict).toBe("fail");
+    expect(c.detail).toContain("acc init");
+  });
+});
+
+describe("checkVecExtensionLoadable (Task 3 substrate-content check)", () => {
+  test("ok when vec0 loads + virtual-table constructor works", () => {
+    const c = checkVecExtensionLoadable(makeEnv({
+      vecExtensionLoadable: () => ({ ok: true, version: "v0.1.6" }),
+    }));
+    expect(c.verdict).toBe("ok");
+    expect(c.detail).toContain("v0.1.6");
+  });
+  test("fail when extension cannot load", () => {
+    const c = checkVecExtensionLoadable(makeEnv({
+      vecExtensionLoadable: () => ({ ok: false, error: "loadExtension refused" }),
+    }));
+    expect(c.verdict).toBe("fail");
+    expect(c.detail).toContain("silently degrade");
+    expect(c.detail).toContain("loadExtension refused");
+  });
+});
+
 describe("computeReadiness", () => {
   test("PASS when daemon ok + OPENAI ok + opencode ok + bridge real", () => {
     const checks = [
@@ -226,6 +319,23 @@ describe("computeReadiness", () => {
     expect(r.missing).toContain("OPENAI_API_KEY");
     expect(r.missing).toContain("opencode");
     expect(r.missing).toContain("ACC2_BRIDGE_MODE=real");
+  });
+
+  test("FAIL when seed knowledge / seed artifacts / sqlite-vec extension fail (Task 3)", () => {
+    const checks = [
+      { name: "daemon health", verdict: "ok", detail: "" },
+      { name: "OPENAI_API_KEY", verdict: "ok", detail: "" },
+      { name: "opencode", verdict: "ok", detail: "" },
+      { name: "ACC2_BRIDGE_MODE", verdict: "ok", detail: "" },
+      { name: "seed knowledge", verdict: "fail", detail: "0 promoted" },
+      { name: "seed artifacts", verdict: "fail", detail: "0 seed_*" },
+      { name: "sqlite-vec extension", verdict: "fail", detail: "vec0 not loadable" },
+    ] as const;
+    const r = computeReadiness([...checks]);
+    expect(r.check.verdict).toBe("fail");
+    expect(r.missing).toContain("seed knowledge");
+    expect(r.missing).toContain("seed artifacts");
+    expect(r.missing).toContain("sqlite-vec extension");
   });
 });
 
@@ -295,6 +405,9 @@ describe("collectChecks ordering", () => {
       "nsjail",
       "bun",
       "ACC2_BRIDGE_MODE",
+      "seed knowledge",
+      "seed artifacts",
+      "sqlite-vec extension",
     ]);
   });
 });

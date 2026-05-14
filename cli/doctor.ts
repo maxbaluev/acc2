@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { auxBaseUrl, readDaemonLock, rpcGet } from "./rpc";
+import { resolveDbPath } from "../runtime/state_paths";
 
 export type Verdict = "ok" | "warn" | "fail" | "info";
 export type Check = { name: string; verdict: Verdict; detail: string };
@@ -33,6 +34,34 @@ export type DoctorEnv = {
   daemonHealth: () => Promise<DaemonHealthSnapshot>;
   homedir: () => string;
   platform: NodeJS.Platform;
+  /** SubstrateCounts: cheap COUNT() probes against the state DB. Tests
+   *  inject deterministic values; production opens the resolved DB and
+   *  runs two SELECT COUNTs. Errors become NaN so the checks can
+   *  classify them as fail with a useful detail string. */
+  substrateCounts: () => SubstrateCounts;
+  /** Returns true when sqlite-vec loads into an ephemeral in-memory DB
+   *  AND `CREATE VIRTUAL TABLE … USING vec0(...)` succeeds. Tests
+   *  inject; production opens a fresh :memory: handle via openDb (which
+   *  loads the extension before runSchema). */
+  vecExtensionLoadable: () => VecLoadResult;
+};
+
+export type SubstrateCounts = {
+  /** kind='knowledge_promoted' row count, or NaN on probe error. */
+  knowledgePromoted: number;
+  /** code_artifact rows where name LIKE 'seed_%' OR id LIKE 'seed_%',
+   *  or NaN on probe error. */
+  seedArtifacts: number;
+  /** Error message when the probe could not run (DB missing, sealed,
+   *  etc). null when the probe ran cleanly even if counts are 0. */
+  error: string | null;
+};
+
+export type VecLoadResult = {
+  ok: boolean;
+  /** sqlite-vec version string when ok=true (e.g. "v0.1.6"). */
+  version?: string;
+  error?: string;
 };
 
 export type DaemonHealthSnapshot = {
@@ -80,6 +109,65 @@ const realDaemonHealth = async (): Promise<DaemonHealthSnapshot> => {
   }
 };
 
+const realSubstrateCounts = (): SubstrateCounts => {
+  // Resolve the canonical DB path the same way the daemon does so
+  // doctor sees what daemon-start would open. anchor = repo root (two
+  // dirs up from cli/doctor.ts).
+  const repoRoot = join(import.meta.dirname ?? ".", "..");
+  const dbPath = resolveDbPath(repoRoot);
+  if (!existsSync(dbPath)) {
+    return {
+      knowledgePromoted: NaN, seedArtifacts: NaN,
+      error: `state DB not found at ${dbPath} — run \`acc init --yes\``,
+    };
+  }
+  try {
+    // Open via the shared substrate connection cache so we don't fight
+    // the daemon's WAL handle. Read-only-style probes — we never write.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { openDb } = require("../substrate/db") as typeof import("../substrate/db");
+    const db = openDb(dbPath);
+    const k = db
+      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'knowledge_promoted'")
+      .get() as { n: number };
+    const a = db
+      .query(
+        "SELECT COUNT(*) AS n FROM code_artifact WHERE name LIKE 'seed_%' OR id LIKE 'seed_%'",
+      )
+      .get() as { n: number };
+    return { knowledgePromoted: k.n, seedArtifacts: a.n, error: null };
+  } catch (err) {
+    return {
+      knowledgePromoted: NaN, seedArtifacts: NaN,
+      error: `db probe failed: ${(err as Error).message}`,
+    };
+  }
+};
+
+const realVecExtensionLoadable = (): VecLoadResult => {
+  try {
+    // openDb(":memory:") loads sqlite-vec BEFORE runSchema, and runSchema
+    // creates the `vec_events` virtual table via vec0(…). If either the
+    // extension load or the virtual-table creation fails, this throws.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { openDb, closeDb } = require("../substrate/db") as typeof import("../substrate/db");
+    const probe = openDb(":memory:");
+    try {
+      const row = probe.query("SELECT vec_version() AS v").get() as { v: string };
+      // Independent vec0 virtual-table check: create a tiny throwaway
+      // table so we PROVE the runtime constructor works under doctor's
+      // own probe, not just the cached schema run.
+      probe.run("CREATE VIRTUAL TABLE IF NOT EXISTS vec_doctor_probe USING vec0(embedding float[8])");
+      probe.run("DROP TABLE vec_doctor_probe");
+      return { ok: true, version: row.v };
+    } finally {
+      try { closeDb(":memory:"); } catch { /* swallow */ }
+    }
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+};
+
 export const defaultDoctorEnv = (): DoctorEnv => ({
   env: process.env,
   which: realWhich,
@@ -91,6 +179,8 @@ export const defaultDoctorEnv = (): DoctorEnv => ({
   daemonHealth: realDaemonHealth,
   homedir,
   platform: process.platform,
+  substrateCounts: realSubstrateCounts,
+  vecExtensionLoadable: realVecExtensionLoadable,
 });
 
 // ── Individual checks ─────────────────────────────────────────────────────
@@ -215,6 +305,76 @@ export const checkBunVersion = (env: DoctorEnv): Check => {
   return { name: "bun", verdict: "fail", detail: `${v} (need ≥ 1.0)` };
 };
 
+// Seed minimums. `seedFoundationalKnowledge` (substrate/seed.ts) imports
+// 10 laws under owner-approval; `seedCodeArtifacts` admits 8 canonical
+// rows. The threshold below sets the floor doctor flips to FAIL on —
+// some operators may have evicted or rotated entries, but a DB with
+// fewer than 5 of either is structurally incomplete and would silently
+// degrade real-brain dispatch.
+export const SEED_KNOWLEDGE_MIN = 5;
+export const SEED_ARTIFACT_MIN = 5;
+
+/** Substrate-content check: at least SEED_KNOWLEDGE_MIN
+ *  `knowledge_promoted` rows must exist in the events ledger. An empty
+ *  ledger means `acc init` was not run (or the foundational seed was
+ *  declined). Real-brain dispatch composes prompts off this index — a
+ *  missing seed silently degrades retrieval. */
+export const checkSeedKnowledge = (env: DoctorEnv): Check => {
+  const counts = env.substrateCounts();
+  if (counts.error !== null) {
+    return { name: "seed knowledge", verdict: "fail",
+      detail: counts.error };
+  }
+  if (!Number.isFinite(counts.knowledgePromoted)) {
+    return { name: "seed knowledge", verdict: "fail",
+      detail: "could not read knowledge_promoted count" };
+  }
+  if (counts.knowledgePromoted < SEED_KNOWLEDGE_MIN) {
+    return { name: "seed knowledge", verdict: "fail",
+      detail: `${counts.knowledgePromoted} promoted entries (need ≥ ${SEED_KNOWLEDGE_MIN}) — run \`acc init --yes\`` };
+  }
+  return { name: "seed knowledge", verdict: "ok",
+    detail: `${counts.knowledgePromoted} knowledge_promoted rows` };
+};
+
+/** Substrate-content check: at least SEED_ARTIFACT_MIN canonical
+ *  `seed_*` code artifacts must exist. v2 used to only seed knowledge —
+ *  the production install path now seeds both per Task 1 wiring. A DB
+ *  with no seed artifacts means an old or partial install. */
+export const checkSeedArtifacts = (env: DoctorEnv): Check => {
+  const counts = env.substrateCounts();
+  if (counts.error !== null) {
+    return { name: "seed artifacts", verdict: "fail",
+      detail: counts.error };
+  }
+  if (!Number.isFinite(counts.seedArtifacts)) {
+    return { name: "seed artifacts", verdict: "fail",
+      detail: "could not read code_artifact count" };
+  }
+  if (counts.seedArtifacts < SEED_ARTIFACT_MIN) {
+    return { name: "seed artifacts", verdict: "fail",
+      detail: `${counts.seedArtifacts} seed_* artifacts (need ≥ ${SEED_ARTIFACT_MIN}) — run \`acc init --yes\`` };
+  }
+  return { name: "seed artifacts", verdict: "ok",
+    detail: `${counts.seedArtifacts} canonical seed_* code artifacts present` };
+};
+
+/** Vec extension load probe: opens a fresh :memory: DB and proves
+ *  sqlite-vec loads + `CREATE VIRTUAL TABLE … USING vec0(…)` succeeds.
+ *  Without this, retrieval silently degrades — substrate.search returns
+ *  candidates ordered by cosine across a vector table that does not
+ *  exist. v2 throws hard at openDb time if vec0 cannot resolve, but
+ *  doctor surfaces it BEFORE the daemon starts. */
+export const checkVecExtensionLoadable = (env: DoctorEnv): Check => {
+  const v = env.vecExtensionLoadable();
+  if (!v.ok) {
+    return { name: "sqlite-vec extension", verdict: "fail",
+      detail: `vec0 not loadable: ${v.error ?? "unknown"} — retrieval will silently degrade; reinstall the sqlite-vec npm package` };
+  }
+  return { name: "sqlite-vec extension", verdict: "ok",
+    detail: `loaded (${v.version ?? "unknown"}); vec0 virtual table constructor works` };
+};
+
 export const checkBridgeMode = (env: DoctorEnv): Check => {
   // Default is now `real` (production dispatch). Tests pin `mock` explicitly
   // via the bun test preload — if the operator sees `mock` here outside a
@@ -245,6 +405,12 @@ export const computeReadiness = (checks: Check[]): Readiness => {
   if (find("opencode")?.verdict !== "ok") missing.push("opencode");
   const mode = find("ACC2_BRIDGE_MODE");
   if (mode?.verdict !== "ok") missing.push("ACC2_BRIDGE_MODE=real");
+  // Substrate-content prereqs — a FAIL on any of these flips the composite
+  // verdict because the daemon's first real-brain dispatch would silently
+  // degrade (empty retrieval / missing seed artifacts / vec0 not loading).
+  if (find("seed knowledge")?.verdict === "fail") missing.push("seed knowledge");
+  if (find("seed artifacts")?.verdict === "fail") missing.push("seed artifacts");
+  if (find("sqlite-vec extension")?.verdict === "fail") missing.push("sqlite-vec extension");
   if (missing.length === 0) {
     return { check: { name: "ready for real-brain dispatch", verdict: "ok", detail: "all prereqs satisfied" }, missing };
   }
@@ -296,6 +462,12 @@ export const collectChecks = async (env: DoctorEnv = defaultDoctorEnv()): Promis
   checks.push(checkNsjail(env));
   checks.push(checkBunVersion(env));
   checks.push(checkBridgeMode(env));
+  // Substrate-content checks (Task 3 wiring). A passing acc doctor now
+  // means BOTH file-existence AND state-content correctness — not just
+  // "the daemon could open the file".
+  checks.push(checkSeedKnowledge(env));
+  checks.push(checkSeedArtifacts(env));
+  checks.push(checkVecExtensionLoadable(env));
   return checks;
 };
 
