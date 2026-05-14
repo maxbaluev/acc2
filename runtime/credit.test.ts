@@ -413,6 +413,226 @@ describe("distributeCredit — primary + cited entities", () => {
   });
 });
 
+describe("LATM novelty bonus (§11.5)", () => {
+  /** Open a directive_opened row carrying `directive_text` so the credit
+   *  pipeline can resolve goalShape() on the directive id. */
+  const openDirective = (db: Database, directiveId: string, text: string): void => {
+    db.run(
+      `INSERT INTO events (
+         id, ts, directive_id, task_id, parent_task_id, loop_id,
+         substrate_origin, kind, payload, context_refs,
+         predicted_residual, action_artifact_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        `${directiveId}_opened`,
+        new Date().toISOString(),
+        directiveId,
+        directiveId,
+        null,
+        "loop_root",
+        "claude_root",
+        "directive_opened",
+        JSON.stringify({ directive_text: text }),
+        JSON.stringify([]),
+        null,
+        null,
+      ],
+    );
+  };
+
+  test("first credit on a novel goal_shape emits latm_novelty_bonus_applied for action + verifier", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action body");
+    insertSampleArtifact(db, "art_verifier", "// verifier body");
+    openDirective(db, "d_novel", "audit the rolling reviewer cadence");
+
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: "d_novel",
+      task_id: "t_novel",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      payload: {},
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_novel",
+      task_id: "t_novel",
+      action_artifact_id: "art_action",
+      payload: {},
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_novel",
+      task_id: "t_novel",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0,
+      payload: {},
+    });
+
+    await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0,
+      observed_residual: 0,
+    });
+
+    const novelty = db
+      .query("SELECT action_artifact_id, payload FROM events WHERE kind = 'latm_novelty_bonus_applied' ORDER BY ts ASC")
+      .all() as Array<{ action_artifact_id: string; payload: string }>;
+    expect(novelty.length).toBe(2);
+    const ids = novelty.map((r) => r.action_artifact_id).sort();
+    expect(ids).toEqual(["art_action", "art_verifier"]);
+    const firstPayload = JSON.parse(novelty[0]!.payload) as { base_weight: number; bonus_weight: number; multiplier: number; goal_shape: string };
+    expect(firstPayload.base_weight).toBeCloseTo(1.0, 6);
+    expect(firstPayload.bonus_weight).toBeCloseTo(1.5, 6);
+    expect(firstPayload.multiplier).toBeCloseTo(1.5, 6);
+    expect(firstPayload.goal_shape).toBeTruthy();
+  });
+
+  test("second credit on the SAME goal_shape does NOT emit the bonus again", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action body");
+    insertSampleArtifact(db, "art_verifier", "// verifier body");
+    openDirective(db, "d_repeat", "audit the rolling reviewer cadence");
+
+    const runOnce = async (): Promise<void> => {
+      const ap = emitEvent(db, {
+        kind: "action_predicted",
+        substrate_origin: "opencode",
+        directive_id: "d_repeat",
+        task_id: "t_repeat",
+        action_artifact_id: "art_action",
+        verifier_artifact_id: "art_verifier",
+        payload: {},
+      });
+      const obs = emitEvent(db, {
+        kind: "artifact_observed",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_repeat",
+        task_id: "t_repeat",
+        action_artifact_id: "art_action",
+        payload: {},
+      });
+      const scored = emitEvent(db, {
+        kind: "action_scored",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_repeat",
+        task_id: "t_repeat",
+        action_artifact_id: "art_action",
+        verifier_artifact_id: "art_verifier",
+        residual: 0,
+        payload: {},
+      });
+      await distributeCredit(db, {
+        action_event_id: ap.id,
+        observation_event_id: obs.id,
+        scored_event_id: scored.id,
+        predicted_residual: 0,
+        observed_residual: 0,
+      });
+    };
+    await runOnce();
+    await runOnce();
+    const novelty = db
+      .query("SELECT action_artifact_id FROM events WHERE kind = 'latm_novelty_bonus_applied'")
+      .all() as Array<{ action_artifact_id: string }>;
+    // Two artifacts (action + verifier) × ONE bonus each = 2 total, NOT 4.
+    expect(novelty.length).toBe(2);
+  });
+
+  test("novelty bonus boosts the action artifact's posterior alpha by the multiplier", async () => {
+    const dbA = openDb(":memory:");
+    insertSampleArtifact(dbA, "art_action", "// a");
+    insertSampleArtifact(dbA, "art_verifier", "// v");
+    openDirective(dbA, "d_boost", "novel directive goal A");
+    const apA = emitEvent(dbA, { kind: "action_predicted", substrate_origin: "opencode", directive_id: "d_boost", task_id: "t_boost", action_artifact_id: "art_action", verifier_artifact_id: "art_verifier", payload: {} });
+    const obsA = emitEvent(dbA, { kind: "artifact_observed", substrate_origin: "substrate_auto", directive_id: "d_boost", task_id: "t_boost", action_artifact_id: "art_action", payload: {} });
+    const scoredA = emitEvent(dbA, { kind: "action_scored", substrate_origin: "substrate_auto", directive_id: "d_boost", task_id: "t_boost", action_artifact_id: "art_action", verifier_artifact_id: "art_verifier", residual: 0, payload: {} });
+    await distributeCredit(dbA, { action_event_id: apA.id, observation_event_id: obsA.id, scored_event_id: scoredA.id, predicted_residual: 0, observed_residual: 0 });
+    const bonusedAlpha = getArtifact(dbA, "art_action")!.posteriorAlpha;
+    closeDb();
+
+    // Same residual, but pre-seed the score-update history so novelty is OFF.
+    const dbB = openDb(":memory:");
+    insertSampleArtifact(dbB, "art_action", "// a");
+    insertSampleArtifact(dbB, "art_verifier", "// v");
+    openDirective(dbB, "d_boost", "novel directive goal A");
+    // Manually plant a prior score_update for art_action under the SAME goal_shape
+    // so the novelty check returns "already seen" → no bonus is applied.
+    const { goalShape } = require("./goal_shape") as typeof import("./goal_shape");
+    const gs = goalShape("novel directive goal A");
+    emitEvent(dbB, {
+      kind: "code_artifact_score_updated",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_prior",
+      task_id: "t_prior",
+      action_artifact_id: "art_action",
+      payload: { artifact_id: "art_action", role: "action", goal_shape: gs },
+    });
+    emitEvent(dbB, {
+      kind: "code_artifact_score_updated",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_prior",
+      task_id: "t_prior",
+      action_artifact_id: "art_verifier",
+      payload: { artifact_id: "art_verifier", role: "verifier", goal_shape: gs },
+    });
+    const apB = emitEvent(dbB, { kind: "action_predicted", substrate_origin: "opencode", directive_id: "d_boost", task_id: "t_boost2", action_artifact_id: "art_action", verifier_artifact_id: "art_verifier", payload: {} });
+    const obsB = emitEvent(dbB, { kind: "artifact_observed", substrate_origin: "substrate_auto", directive_id: "d_boost", task_id: "t_boost2", action_artifact_id: "art_action", payload: {} });
+    const scoredB = emitEvent(dbB, { kind: "action_scored", substrate_origin: "substrate_auto", directive_id: "d_boost", task_id: "t_boost2", action_artifact_id: "art_action", verifier_artifact_id: "art_verifier", residual: 0, payload: {} });
+    await distributeCredit(dbB, { action_event_id: apB.id, observation_event_id: obsB.id, scored_event_id: scoredB.id, predicted_residual: 0, observed_residual: 0 });
+    const noBonusAlpha = getArtifact(dbB, "art_action")!.posteriorAlpha;
+    // The bonused-credit alpha should be larger than the unboosted one. With
+    // multiplier=1.5 and residual=0, the bonused αΔ is 1.5 vs 1.0 → strict.
+    expect(bonusedAlpha).toBeGreaterThan(noBonusAlpha);
+  });
+
+  test("ACC2_LATM_NOVELTY_BONUS env overrides the default multiplier", async () => {
+    const prior = process.env.ACC2_LATM_NOVELTY_BONUS;
+    process.env.ACC2_LATM_NOVELTY_BONUS = "2.5";
+    try {
+      const db = openDb(":memory:");
+      insertSampleArtifact(db, "art_action", "// a");
+      insertSampleArtifact(db, "art_verifier", "// v");
+      openDirective(db, "d_env", "env-tuned multiplier directive");
+      const ap = emitEvent(db, { kind: "action_predicted", substrate_origin: "opencode", directive_id: "d_env", task_id: "t_env", action_artifact_id: "art_action", verifier_artifact_id: "art_verifier", payload: {} });
+      const obs = emitEvent(db, { kind: "artifact_observed", substrate_origin: "substrate_auto", directive_id: "d_env", task_id: "t_env", action_artifact_id: "art_action", payload: {} });
+      const scored = emitEvent(db, { kind: "action_scored", substrate_origin: "substrate_auto", directive_id: "d_env", task_id: "t_env", action_artifact_id: "art_action", verifier_artifact_id: "art_verifier", residual: 0, payload: {} });
+      await distributeCredit(db, { action_event_id: ap.id, observation_event_id: obs.id, scored_event_id: scored.id, predicted_residual: 0, observed_residual: 0 });
+      const novelty = db
+        .query("SELECT payload FROM events WHERE kind = 'latm_novelty_bonus_applied' LIMIT 1")
+        .get() as { payload: string } | null;
+      expect(novelty).not.toBeNull();
+      const p = JSON.parse(novelty!.payload) as { multiplier: number };
+      expect(p.multiplier).toBeCloseTo(2.5, 6);
+    } finally {
+      if (prior === undefined) delete process.env.ACC2_LATM_NOVELTY_BONUS;
+      else process.env.ACC2_LATM_NOVELTY_BONUS = prior;
+    }
+  });
+
+  test("novelty bonus is a no-op when the directive has no directive_opened row", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// a");
+    insertSampleArtifact(db, "art_verifier", "// v");
+    // No openDirective() call → resolveGoalShape returns "".
+    const ap = emitEvent(db, { kind: "action_predicted", substrate_origin: "opencode", action_artifact_id: "art_action", verifier_artifact_id: "art_verifier", payload: {} });
+    const obs = emitEvent(db, { kind: "artifact_observed", substrate_origin: "substrate_auto", action_artifact_id: "art_action", payload: {} });
+    const scored = emitEvent(db, { kind: "action_scored", substrate_origin: "substrate_auto", action_artifact_id: "art_action", verifier_artifact_id: "art_verifier", residual: 0, payload: {} });
+    await distributeCredit(db, { action_event_id: ap.id, observation_event_id: obs.id, scored_event_id: scored.id, predicted_residual: 0, observed_residual: 0 });
+    const novelty = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'latm_novelty_bonus_applied'")
+      .get() as { c: number };
+    expect(novelty.c).toBe(0);
+  });
+});
+
 describe("collectCitations dedup + ordering (internal helper)", () => {
   test("preserves first-seen order across event sources + body sources", () => {
     const db = openDb(":memory:");
