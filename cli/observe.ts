@@ -41,6 +41,61 @@ const FRAME_KINDS = new Set([
   "bridge_frame_received",
 ]);
 
+/** Strategic-narrative event kinds — the ones an operator needs to
+ *  understand WHAT the brain is doing, not HOW the substrate is running it.
+ *  `acc tail` defaults to this filter so the chat doesn't drown in
+ *  bridge_frame_received / runtime_subprocess_started / embedding_computed
+ *  chatter. `--verbose` opts out and shows every kind.
+ *
+ *  Inclusion rule: changes the operator's MODEL of progress. If two reads
+ *  ten minutes apart would look identical without this kind, suppress it.
+ *  Anything substrate-internal (admission, scoring, score-update, embedding,
+ *  Father heartbeats, daemon lifecycle, candidate confirm/contradict, sub-
+ *  process spawn lifecycle, gate-decision audit rows, prompt budget) is
+ *  noise from the operator's perspective. Bridge handshake / frames /
+ *  subprocess detail are diagnostic surfaces, not narrative. */
+export const NARRATIVE_KINDS = new Set([
+  // Owner / directive
+  "directive_opened",
+  "directive_amended",
+  "owner_input_received",
+  "owner_input_required",
+  "owner_decision_recorded",
+  // DAG structure
+  "task_node_opened",
+  "task_edge_recorded",
+  // Strategic actions
+  "action_predicted",
+  "action_scored",
+  // Terminal states (always shown)
+  "task_committed",
+  "task_failed",
+  "task_abandoned",
+  "dispatcher_violation",
+  "irreversible_effect_recorded",
+  // Knowledge + recipe compounding signals
+  "knowledge_candidate",
+  "knowledge_promoted",
+  "knowledge_synthesized",
+  "recipe_extracted",
+  "code_artifact_promoted",
+  // Closure + learning loop
+  "task_closure_audited",
+  "lesson_extracted",
+  "contract_amendment_proposed",
+  // Bridge failures only — successes are implied by action_predicted /
+  // task_committed downstream. We don't show the handshake fan-out.
+  "bridge_failed",
+  "bridge_stuck",
+  // Crisis + interference — narrative-level
+  "crisis_mode_engaged",
+  "crisis_mode_disengaged",
+  "stakeholder_conflict",
+  "stakeholder_conflict_detected",
+  "directive_interference_edge",
+  "directive_interference_cycle_detected",
+]);
+
 const trunc = (s: string | undefined, n: number): string => {
   if (!s) return "";
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
@@ -231,9 +286,17 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
 };
 
 /** Format one event as a single line suitable for piped consumption.
- *  Returns "" when the event should be suppressed (frames in non-verbose mode). */
+ *  Returns "" when the event should be suppressed:
+ *    - bridge_frame_received always (unless --verbose explicit)
+ *    - everything outside NARRATIVE_KINDS unless --verbose
+ *  --verbose is the diagnostic dump; default is the narrative an operator
+ *  needs to understand WHAT the brain is doing. */
 export const formatEvent = (ev: EventLike, opts: { verbose?: boolean } = {}): string => {
-  if (!opts.verbose && FRAME_KINDS.has(ev.kind ?? "")) return "";
+  const k = ev.kind ?? "";
+  if (!opts.verbose) {
+    if (FRAME_KINDS.has(k)) return "";
+    if (!NARRATIVE_KINDS.has(k)) return "";
+  }
   const ts = (ev.ts ?? "").slice(11, 19);
   const kind = ev.kind ?? "?";
   const glyph = GLYPHS[kind] ?? " ";
