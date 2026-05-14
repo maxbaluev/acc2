@@ -31,6 +31,18 @@ import { emitEvent } from "./events";
 import { readCurrentMode, applyModeAdjustments } from "./crisis_mode";
 import { findDeferringConflict } from "./interference";
 
+// Interaction kinds that block another directive's dispatch when one of the
+// two is mid-flight. `mutual_exclusion` is symmetric (either side blocks the
+// other while in flight); `resource_conflict` denotes a shared exhaustible
+// resource (attention, calendar slot, budget) — concurrent dispatch is
+// permitted to be down-ranked rather than refused, but Father-style ranking
+// uses the same set. The set is exported so Phase DAG callers and Father's
+// selector reference the same canonical taxonomy.
+export const CROSS_DIRECTIVE_BLOCKING_INTERACTIONS: ReadonlySet<string> = new Set([
+  "mutual_exclusion",
+  "resource_conflict",
+]);
+
 export type SchedulerOpts = {
   maxConcurrent?: number;
   pollIntervalMs?: number;
@@ -297,4 +309,117 @@ export const schedulerLoop = async (
 export const _resetSchedulerForTests = (): void => {
   IN_FLIGHT.clear();
   IN_FLIGHT_DIRECTIVE.clear();
+};
+
+// ── Multi-process in-flight detection (SQL-backed) ────────────────────
+//
+// The IN_FLIGHT Map above is process-local. Two daemons sharing one substrate
+// (Phase G+ when uv / camofox runtimes show up alongside the bun daemon, or
+// any operator running `acc daemon` plus `acc task` from another shell) need
+// a substrate-visible signal. The pair `brain_dispatched` (open) /
+// `brain_dispatch_closed` (close) is one such signal — every dispatch the
+// runtime begins is bracketed by these two events with a stable
+// `payload.dispatch_id`. A directive is in-flight regardless of process iff
+// at least one of its `brain_dispatched` rows lacks a matching
+// `brain_dispatch_closed` (same dispatch_id).
+
+/** Return the set of directive_ids that have an open brain dispatch (a
+ *  `brain_dispatched` event whose `payload.dispatch_id` has no matching
+ *  `brain_dispatch_closed`). Process-independent — multiple daemons can call
+ *  this concurrently and observe the same in-flight set. The OR-fold against
+ *  any in-memory IN_FLIGHT Map happens at the caller. */
+export const inFlightDirectivesFromSql = (db: Database): Set<string> => {
+  // Pull every open + close pair. Substrate is append-only — closes always
+  // follow opens — so a "set-difference by dispatch_id" projects the live set
+  // exactly. Reading both columns in one pass keeps this O(rows) and avoids
+  // a correlated subquery.
+  const openRows = db
+    .query(
+      `SELECT directive_id, payload FROM events
+       WHERE kind = 'brain_dispatched'`,
+    )
+    .all() as Array<{ directive_id: string; payload: string }>;
+
+  const closeIds = new Set<string>();
+  const closeRows = db
+    .query(
+      `SELECT payload FROM events
+       WHERE kind = 'brain_dispatch_closed'`,
+    )
+    .all() as Array<{ payload: string }>;
+  for (const r of closeRows) {
+    try {
+      const p = JSON.parse(r.payload ?? "{}") as { dispatch_id?: string };
+      if (p.dispatch_id) closeIds.add(p.dispatch_id);
+    } catch { /* skip malformed payload */ }
+  }
+
+  const inFlight = new Set<string>();
+  for (const r of openRows) {
+    try {
+      const p = JSON.parse(r.payload ?? "{}") as { dispatch_id?: string };
+      if (!p.dispatch_id) continue;
+      if (closeIds.has(p.dispatch_id)) continue;
+      if (r.directive_id) inFlight.add(r.directive_id);
+    } catch { /* skip malformed payload */ }
+  }
+  return inFlight;
+};
+
+/** Find the first cross-directive interference edge (kind = `mutual_exclusion`
+ *  or `resource_conflict`) between `candidateDirectiveId` and any in-flight
+ *  directive (per `inFlightDirectivesFromSql`). Returns `null` when no
+ *  conflict exists. This is the multi-process-safe equivalent of the helper
+ *  C's Phase DAG branch will add as `findDeferringConflict`. The scheduler
+ *  dispatch site (which C's branch will introduce) reads this; the
+ *  `task_deferred_for_interference` event is emitted there, NOT here.
+ *
+ *  The query walks `directive_interference_edge` events both directions —
+ *  `mutual_exclusion` is symmetric, so an edge `candidate → in_flight` or
+ *  `in_flight → candidate` both deferring this candidate. `resource_conflict`
+ *  is treated the same way: a shared resource is shared regardless of which
+ *  side declared the edge first. */
+export const findCrossDirectiveConflict = (
+  db: Database,
+  candidateDirectiveId: string,
+): { conflicting_directive: string; interaction: string } | null => {
+  const inFlight = inFlightDirectivesFromSql(db);
+  // The candidate's own directive being in-flight doesn't count — only OTHER
+  // in-flight directives produce a conflict.
+  inFlight.delete(candidateDirectiveId);
+  if (inFlight.size === 0) return null;
+
+  const rows = db
+    .query(
+      `SELECT payload FROM events
+       WHERE kind = 'directive_interference_edge'
+       ORDER BY ts ASC`,
+    )
+    .all() as Array<{ payload: string }>;
+
+  for (const r of rows) {
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const from = payload.from_directive as string | undefined;
+    const to = payload.to_directive as string | undefined;
+    // Some emitters use `interaction`, others use `kind` (the InterferenceEdge
+    // shape canonicalises both into `kind` on read, but here we read raw).
+    const interaction =
+      (payload.interaction as string | undefined) ??
+      (payload.kind as string | undefined);
+    if (!from || !to || !interaction) continue;
+    if (!CROSS_DIRECTIVE_BLOCKING_INTERACTIONS.has(interaction)) continue;
+
+    if (from === candidateDirectiveId && inFlight.has(to)) {
+      return { conflicting_directive: to, interaction };
+    }
+    if (to === candidateDirectiveId && inFlight.has(from)) {
+      return { conflicting_directive: from, interaction };
+    }
+  }
+  return null;
 };

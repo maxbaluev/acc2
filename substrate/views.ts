@@ -175,6 +175,49 @@ CREATE VIEW IF NOT EXISTS origin_promotion_view AS
   WHERE p.substrate_origin NOT IN (SELECT substrate_origin FROM candidates);
 `;
 
+// origin_promotion_by_directive_view — Phase DAG follow-up. Same shape as
+// `origin_promotion_view` but bucketed per (substrate_origin, directive_id)
+// so the per-(origin × goal_shape) ranking can be computed in TypeScript
+// (pure SQL cannot invoke goalShape(); the accessor maps directive_id →
+// shape via the hash function passed in). One row per
+// (substrate_origin, directive_id) with a non-zero candidate or promotion
+// count; rows where only promotions exist (candidate was GC'd or never
+// emitted) carry `candidate_count = 0`.
+const VIEW_ORIGIN_PROMOTION_BY_DIRECTIVE = `
+CREATE VIEW IF NOT EXISTS origin_promotion_by_directive_view AS
+  WITH candidates AS (
+    SELECT substrate_origin, directive_id, COUNT(*) AS cand_count
+    FROM events
+    WHERE kind = 'knowledge_candidate'
+    GROUP BY substrate_origin, directive_id
+  ),
+  promotions AS (
+    SELECT substrate_origin, directive_id, COUNT(*) AS prom_count
+    FROM events
+    WHERE kind = 'knowledge_promoted'
+    GROUP BY substrate_origin, directive_id
+  )
+  SELECT
+    COALESCE(c.substrate_origin, p.substrate_origin)        AS substrate_origin,
+    COALESCE(c.directive_id, p.directive_id)                AS directive_id,
+    COALESCE(c.cand_count, 0)                                AS candidate_count,
+    COALESCE(p.prom_count, 0)                                AS promoted_count
+  FROM candidates c
+  LEFT JOIN promotions p
+    ON c.substrate_origin = p.substrate_origin AND c.directive_id = p.directive_id
+  UNION
+  SELECT
+    p.substrate_origin                                      AS substrate_origin,
+    p.directive_id                                          AS directive_id,
+    0                                                        AS candidate_count,
+    p.prom_count                                             AS promoted_count
+  FROM promotions p
+  WHERE NOT EXISTS (
+    SELECT 1 FROM candidates c
+    WHERE c.substrate_origin = p.substrate_origin AND c.directive_id = p.directive_id
+  );
+`;
+
 // contradictory_candidates_view — Phase B2 placeholder. The semantic
 // dedup extractor emits 'contradictory_candidates' events; once embeddings
 // light up (Phase F), this view surfaces those pairs. Shape: one row per
@@ -207,10 +250,18 @@ CREATE VIEW IF NOT EXISTS owner_conversation_view AS
   ORDER BY ts ASC;
 `;
 
-// rolling_review_due_view — directives with lifecycle='rolling_active' and
-// next_review_due ≤ now. We project from the LATEST directive_opened (or
-// directive_amended) event per directive_id, reading lifecycle +
-// next_review_due from its payload.
+// rolling_review_due_view — every rolling_active directive with its latest
+// next_review_due, plus a past_due boolean. We project from the LATEST
+// directive_opened (or directive_amended) event per directive_id, reading
+// lifecycle + next_review_due from its payload.
+//
+// Phase DAG follow-up: the view used to filter to only `next_review_due ≤ now`
+// rows; that prevented operators (and downstream views) from inspecting
+// rolling directives whose review is still in the future. The widened shape
+// returns ALL rolling_active rows with `past_due` carrying the cutoff
+// decision so callers like `readRollingReviewsDue` (TS-side filter on
+// `next_review_due <= cutoff`) and the new `rollingReviewDue` accessor both
+// stay correct.
 const VIEW_ROLLING_REVIEW_DUE = `
 CREATE VIEW IF NOT EXISTS rolling_review_due_view AS
   WITH latest AS (
@@ -231,11 +282,16 @@ CREATE VIEW IF NOT EXISTS rolling_review_due_view AS
     ts                                                      AS latest_ts,
     json_extract(payload, '$.lifecycle')                    AS lifecycle,
     json_extract(payload, '$.next_review_due')              AS next_review_due,
+    CASE
+      WHEN json_extract(payload, '$.next_review_due') IS NULL THEN 0
+      WHEN json_extract(payload, '$.next_review_due')
+           <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now') THEN 1
+      ELSE 0
+    END                                                     AS past_due,
     payload                                                 AS payload
   FROM current
   WHERE json_extract(payload, '$.lifecycle') = 'rolling_active'
-    AND json_extract(payload, '$.next_review_due') IS NOT NULL
-    AND json_extract(payload, '$.next_review_due') <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+    AND json_extract(payload, '$.next_review_due') IS NOT NULL;
 `;
 
 // watch_edge_observations_view — for every `task_edge_recorded { kind:"watches",
@@ -313,13 +369,24 @@ CREATE VIEW IF NOT EXISTS watch_edge_observations_view AS
   WHERE rn = 1;
 `;
 
-// directive_conflicts_view — cross-directive interference edges.
+// directive_conflicts_view — cross-directive interference edges projected to
+// (from_directive, to_directive, interaction). The `interaction` column
+// reads payload.interaction first (v2-design.md §3.4 canonical naming) and
+// falls back to payload.kind (Phase I emitter still uses this) so the view
+// surfaces edges from both eras of the codebase. `payload` is retained for
+// callers that need the full row.
 const VIEW_DIRECTIVE_CONFLICTS = `
 CREATE VIEW IF NOT EXISTS directive_conflicts_view AS
   SELECT
-    id              AS event_id,
+    id                                                       AS event_id,
     ts,
     directive_id,
+    json_extract(payload, '$.from_directive')                AS from_directive,
+    json_extract(payload, '$.to_directive')                  AS to_directive,
+    COALESCE(
+      json_extract(payload, '$.interaction'),
+      json_extract(payload, '$.kind')
+    )                                                         AS interaction,
     payload,
     context_refs
   FROM events
@@ -510,6 +577,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_ARTIFACT_ROUTING);
   db.exec(VIEW_EMBEDDING_INDEX);
   db.exec(VIEW_ORIGIN_PROMOTION);
+  db.exec(VIEW_ORIGIN_PROMOTION_BY_DIRECTIVE);
   db.exec(VIEW_CONTRADICTORY);
   db.exec(VIEW_OWNER_CONVERSATION);
   db.exec(VIEW_ROLLING_REVIEW_DUE);
@@ -605,6 +673,7 @@ export type RollingReviewDueRow = {
   latest_ts: string;
   lifecycle: string;
   next_review_due: string;
+  past_due: boolean;
   payload: Record<string, unknown>;
 };
 
@@ -622,6 +691,9 @@ export type DirectiveConflictRow = {
   event_id: string;
   ts: string;
   directive_id: string;
+  from_directive: string | null;
+  to_directive: string | null;
+  interaction: string | null;
   payload: Record<string, unknown>;
   context_refs: string[];
 };
@@ -759,7 +831,12 @@ export const ownerConversation = (db: Database, directiveId?: string): OwnerConv
   }));
 };
 
-/** Directives whose next_review_due ≤ now and lifecycle='rolling_active'. */
+/** Every rolling_active directive with its latest next_review_due and a
+ *  `past_due` boolean (true when next_review_due ≤ now-at-query-time). The
+ *  pre-Phase-DAG shape filtered the view to only past-due rows; the new
+ *  shape projects every rolling_active row so operators can inspect future
+ *  reviews and TS-side callers (rolling_reviewer.ts) still filter on
+ *  next_review_due as they did before. */
 export const rollingReviewDue = (db: Database): RollingReviewDueRow[] => {
   const rows = db
     .query("SELECT * FROM rolling_review_due_view")
@@ -769,6 +846,7 @@ export const rollingReviewDue = (db: Database): RollingReviewDueRow[] => {
     latest_ts: r.latest_ts as string,
     lifecycle: r.lifecycle as string,
     next_review_due: r.next_review_due as string,
+    past_due: ((r.past_due as number) ?? 0) === 1,
     payload: parseJson<Record<string, unknown>>(r.payload),
   }));
 };
@@ -806,15 +884,33 @@ export const watchEdgeObservations = (
   }));
 };
 
-/** directive_interference_edge events, newest first. */
-export const directiveConflicts = (db: Database): DirectiveConflictRow[] => {
-  const rows = db
-    .query("SELECT * FROM directive_conflicts_view")
-    .all() as Array<Record<string, unknown>>;
+/** directive_interference_edge events projected to
+ *  (from_directive, to_directive, interaction). When `directiveId` is
+ *  supplied, only edges where it appears on either side are returned. The
+ *  pre-Phase-DAG shape returned just (event_id, ts, directive_id, payload);
+ *  callers that read `payload.from_directive` etc. continue to work via the
+ *  retained `payload` field. */
+export const directiveConflicts = (
+  db: Database,
+  directiveId?: string,
+): DirectiveConflictRow[] => {
+  const rows = (directiveId
+    ? db
+        .query(
+          `SELECT * FROM directive_conflicts_view
+           WHERE from_directive = ? OR to_directive = ?`,
+        )
+        .all(directiveId, directiveId)
+    : db.query("SELECT * FROM directive_conflicts_view").all()) as Array<
+      Record<string, unknown>
+    >;
   return rows.map((r) => ({
     event_id: r.event_id as string,
     ts: r.ts as string,
     directive_id: r.directive_id as string,
+    from_directive: (r.from_directive as string | null) ?? null,
+    to_directive: (r.to_directive as string | null) ?? null,
+    interaction: (r.interaction as string | null) ?? null,
     payload: parseJson<Record<string, unknown>>(r.payload),
     context_refs: parseJson<string[]>(r.context_refs),
   }));
@@ -1009,6 +1105,77 @@ export const originPromotionByGoalShape = (
     });
   }
   return out;
+};
+
+// ── origin_promotion_by_directive_view accessor (Phase DAG follow-up) ─
+
+export type OriginPromotionRankingRow = {
+  substrate_origin: string;
+  promoted_count: number;
+};
+
+/** Rank substrate_origins by how often candidates from each origin promoted
+ *  to `knowledge_promoted` under a given goal_shape. The SQL view buckets per
+ *  (substrate_origin, directive_id); this accessor maps every directive_id
+ *  to its goal_shape via the caller-supplied hash (matches §3.6.1 Rule 4 —
+ *  origin reranker bias is per-shape, not global).
+ *
+ *  Returns rows in promoted_count DESC order; rows with promoted_count = 0
+ *  are dropped (an origin that never promoted under this shape has nothing
+ *  to rank). When no candidate or promotion exists for the shape, returns
+ *  an empty array — the reranker falls back to the global per-origin ratio
+ *  in `origin_promotion_view`. */
+export const originPromotionRanking = (
+  db: Database,
+  goalShape: (text: string) => string,
+  targetShape?: string,
+): OriginPromotionRankingRow[] => {
+  // Pull directive_id → goal text → shape, then bucket the by-directive view.
+  const directives = db
+    .query(
+      `SELECT directive_id, payload FROM events
+       WHERE kind = 'directive_opened'`,
+    )
+    .all() as Array<{ directive_id: string; payload: string }>;
+  const directiveToShape = new Map<string, string>();
+  for (const d of directives) {
+    let goal = "";
+    try {
+      const p = JSON.parse(d.payload) as { goal?: unknown; intent?: unknown; directive_text?: unknown };
+      goal = String((p.goal ?? p.intent ?? p.directive_text ?? "") as string);
+    } catch { /* malformed payload — empty shape */ }
+    directiveToShape.set(d.directive_id, goalShape(goal));
+  }
+
+  const rows = db
+    .query("SELECT * FROM origin_promotion_by_directive_view")
+    .all() as Array<{
+      substrate_origin: string;
+      directive_id: string;
+      candidate_count: number;
+      promoted_count: number;
+    }>;
+
+  // When the caller doesn't pin a target shape, return the per-origin
+  // aggregate across every shape (a degenerate ranking — still useful for
+  // operator inspection). Otherwise filter to rows whose directive shares
+  // the target shape, then aggregate per origin.
+  const aggregate = new Map<string, number>();
+  for (const r of rows) {
+    if (targetShape !== undefined) {
+      const shape = directiveToShape.get(r.directive_id);
+      if (shape !== targetShape) continue;
+    }
+    aggregate.set(
+      r.substrate_origin,
+      (aggregate.get(r.substrate_origin) ?? 0) + r.promoted_count,
+    );
+  }
+
+  return Array.from(aggregate.entries())
+    .filter(([, c]) => c > 0)
+    .map(([substrate_origin, promoted_count]) => ({ substrate_origin, promoted_count }))
+    .sort((a, b) => b.promoted_count - a.promoted_count);
 };
 
 // ── promoted_knowledge_view accessor (Batch 3.ADMIN) ────────────────

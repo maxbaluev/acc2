@@ -20,17 +20,22 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent, type EmitEventInput } from "./events";
 
+// Phase I (legacy) kinds: blocks/watches/depletes — what `recordInterferenceEdge`
+// emits today. Phase DAG extends the taxonomy with the v2-design.md §3.4
+// canonical kinds: `mutual_exclusion`, `resource_conflict`,
+// `sequencing_dependency`, `enabling`. The scheduler-aware concurrency
+// conflicts (`mutual_exclusion`, `resource_conflict`) drive dispatch-time
+// deferral via `CONCURRENCY_CONFLICT_KINDS` below; the other v2-design kinds
+// surface on read so downstream consumers (Father selector, dispatch decider)
+// see every kind.
 export type InterferenceEdgeKind =
   | "blocks"
   | "watches"
   | "depletes"
-  // Phase DAG: concurrency-aware conflicts the scheduler honours when
-  // ranking ready tasks. `mutual_exclusion` — the two directives cannot run
-  // concurrently (one must finish before the other proceeds). `resource_conflict`
-  // — they contend for the same finite resource (browser profile, calendar
-  // slot, external rate limit); the scheduler also serialises these.
   | "mutual_exclusion"
-  | "resource_conflict";
+  | "resource_conflict"
+  | "sequencing_dependency"
+  | "enabling";
 
 export type InterferenceEdge = {
   from_directive: string;
@@ -41,17 +46,23 @@ export type InterferenceEdge = {
   event_id: string;
 };
 
+const INTERFERENCE_EDGE_KINDS: ReadonlySet<string> = new Set([
+  "blocks",
+  "watches",
+  "depletes",
+  "mutual_exclusion",
+  "resource_conflict",
+  "sequencing_dependency",
+  "enabling",
+]);
+
 const isEdgeKind = (k: unknown): k is InterferenceEdgeKind =>
-  k === "blocks" ||
-  k === "watches" ||
-  k === "depletes" ||
-  k === "mutual_exclusion" ||
-  k === "resource_conflict";
+  typeof k === "string" && INTERFERENCE_EDGE_KINDS.has(k);
 
 /** Scheduler-aware concurrency conflicts. When two directives are joined by
  *  an edge of one of these kinds AND any task on the source side is
  *  in-flight, the scheduler defers ready tasks on the target side. */
-const CONCURRENCY_CONFLICT_KINDS: ReadonlySet<InterferenceEdgeKind> = new Set([
+export const CONCURRENCY_CONFLICT_KINDS: ReadonlySet<InterferenceEdgeKind> = new Set([
   "mutual_exclusion",
   "resource_conflict",
 ]);

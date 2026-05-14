@@ -7,9 +7,12 @@ import { closeDb, openDb } from "./db";
 import {
   artifactRouting,
   codeArtifactRegistry,
+  directiveConflicts,
   failureCounts,
+  originPromotionRanking,
   ownerConversation,
   readyTasks,
+  rollingReviewDue,
   runViews,
   taskGraphFor,
   watchEdgeObservations,
@@ -391,5 +394,148 @@ describe("owner_conversation_view + ownerConversation", () => {
     const rows = ownerConversation(db);
     expect(rows.map((r) => r.kind)).toEqual(["owner_input_received", "owner_decision_recorded"]);
     expect(rows.map((r) => r.ts)).toEqual([tsEarly, tsLate]);
+  });
+});
+
+describe("directive_conflicts_view + directiveConflicts (Phase DAG follow-up)", () => {
+  test("projects from_directive / to_directive / interaction columns from payload", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "directive_interference_edge",
+      directive_id: "d_from",
+      task_id: "d_from",
+      payload: {
+        from_directive: "d_from",
+        to_directive: "d_to",
+        interaction: "mutual_exclusion",
+        reason: "shared budget",
+      },
+    });
+    const rows = directiveConflicts(db);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.from_directive).toBe("d_from");
+    expect(rows[0]!.to_directive).toBe("d_to");
+    expect(rows[0]!.interaction).toBe("mutual_exclusion");
+    // Filter by directiveId should return rows where it appears on either side.
+    expect(directiveConflicts(db, "d_to").length).toBe(1);
+    expect(directiveConflicts(db, "d_other").length).toBe(0);
+  });
+
+  test("falls back to payload.kind when payload.interaction is absent (Phase I emitters)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "directive_interference_edge",
+      directive_id: "d_a",
+      task_id: "d_a",
+      payload: { from_directive: "d_a", to_directive: "d_b", kind: "blocks" },
+    });
+    const rows = directiveConflicts(db);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.interaction).toBe("blocks");
+  });
+});
+
+describe("rolling_review_due_view + rollingReviewDue (Phase DAG follow-up)", () => {
+  test("surfaces every rolling_active directive with a past_due boolean", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    // Past-due directive.
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: "d_past",
+      task_id: "d_past",
+      payload: {
+        lifecycle: "rolling_active",
+        review_cadence: "weekly",
+        next_review_due: "2020-01-01T00:00:00.000Z",
+      },
+    });
+    // Future-due directive (now is 2026-05-14 per test fixtures).
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: "d_future",
+      task_id: "d_future",
+      payload: {
+        lifecycle: "rolling_active",
+        review_cadence: "monthly",
+        next_review_due: "2099-01-01T00:00:00.000Z",
+      },
+    });
+    const rows = rollingReviewDue(db);
+    const byId = new Map(rows.map((r) => [r.directive_id, r]));
+    expect(byId.has("d_past")).toBe(true);
+    expect(byId.has("d_future")).toBe(true);
+    expect(byId.get("d_past")!.past_due).toBe(true);
+    expect(byId.get("d_future")!.past_due).toBe(false);
+  });
+});
+
+describe("origin_promotion_by_directive_view + originPromotionRanking (Phase DAG follow-up)", () => {
+  test("ranks origins by promoted count for a goal_shape", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    // Two directives — both bucketing into the same goal_shape under the
+    // synthetic hash below.
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: "d_x",
+      task_id: "d_x",
+      payload: { directive_text: "shape-alpha task one" },
+    });
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: "d_y",
+      task_id: "d_y",
+      payload: { directive_text: "shape-alpha task two" },
+    });
+    // brain promoted 3 times under d_x; claude promoted 1 time under d_y.
+    for (let i = 0; i < 3; i++) {
+      insertEvent(db, {
+        kind: "knowledge_promoted",
+        directive_id: "d_x",
+        task_id: "d_x",
+        substrate_origin: "opencode",
+        payload: { candidate_id: `c${i}` },
+      });
+    }
+    insertEvent(db, {
+      kind: "knowledge_promoted",
+      directive_id: "d_y",
+      task_id: "d_y",
+      substrate_origin: "claude_root",
+      payload: { candidate_id: "c_y" },
+    });
+
+    // Synthetic shape hasher: all directives map to "shape_alpha".
+    const goalShape = (_: string): string => "shape_alpha";
+    const ranking = originPromotionRanking(db, goalShape, "shape_alpha");
+    expect(ranking.length).toBe(2);
+    expect(ranking[0]!.substrate_origin).toBe("opencode");
+    expect(ranking[0]!.promoted_count).toBe(3);
+    expect(ranking[1]!.substrate_origin).toBe("claude_root");
+    expect(ranking[1]!.promoted_count).toBe(1);
+  });
+
+  test("returns empty array when no rows match the target shape", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: "d_x",
+      task_id: "d_x",
+      payload: { directive_text: "irrelevant" },
+    });
+    insertEvent(db, {
+      kind: "knowledge_promoted",
+      directive_id: "d_x",
+      task_id: "d_x",
+      substrate_origin: "opencode",
+      payload: {},
+    });
+    const goalShape = (_: string): string => "wrong_shape";
+    const ranking = originPromotionRanking(db, goalShape, "target_shape_none");
+    expect(ranking.length).toBe(0);
   });
 });
