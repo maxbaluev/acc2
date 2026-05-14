@@ -514,9 +514,11 @@ export const REHABILITATION_CONTROLLED_INVOCATIONS_FOR_TEST = REHABILITATION_CON
 
 /** Daemon-side rehabilitation tick. Scans quarantined artifacts past their
  *  14-day cooldown and attempts rehabilitation via the supplied runner.
- *  Default off (gated by ACC2_REHAB_AUTOSTART=1 in the daemon) so tests do
- *  not run controlled fixture invocations as a side effect. Returns the
- *  per-artifact outcome list so callers can log / surface telemetry. */
+ *  Production default: ON. Tests opt-OUT via
+ *  `ACC2_DISABLE_WORKERS=rehabilitation` (set in tests/preload.ts) so the
+ *  unit suite does not run controlled fixture invocations as a side
+ *  effect. Returns the per-artifact outcome list so callers can log /
+ *  surface telemetry. */
 export const rehabilitationWorkerTick = async (
   db: Database,
   runner: RehabFixtureRunner,
