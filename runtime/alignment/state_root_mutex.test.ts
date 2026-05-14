@@ -79,11 +79,14 @@ describe("alignment / state_root_mutex (Principle 8)", () => {
   });
 
   test("mcp_server.handleRunArtifact routes camofox through runCamofoxArtifact (source check)", async () => {
-    // Verify the dispatch lane: substrate.run_artifact in mcp_server.ts
-    // must call runCamofoxArtifact for the camofox-browser runtime, which
-    // is where the mutex is acquired. No "fast path" should bypass it.
+    // Verify the dispatch lane: substrate.run_artifact in the mcp_server
+    // module must call runCamofoxArtifact for the camofox-browser runtime,
+    // which is where the mutex is acquired. No "fast path" should bypass
+    // it. After the mcp_server.ts module split the handler lives under
+    // runtime/mcp_server/substrate_tools.ts; the structural assertion is
+    // unchanged.
     const text = await Bun.file(
-      new URL("../mcp_server.ts", import.meta.url),
+      new URL("../mcp_server/substrate_tools.ts", import.meta.url),
     ).text();
     expect(text).toContain("runCamofoxArtifact");
     // The dispatcher branches by row.runtime: bun, uv, then else (camofox).
