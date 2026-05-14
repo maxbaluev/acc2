@@ -1,0 +1,27 @@
+# Secrets
+.env
+.env.local
+.env.test
+.env.*.local
+
+# Install artifacts
+node_modules/
+package-lock.json
+bun.lock
+
+# Runtime state — daemon owns this; never commit
+/state/*
+!/state/.gitkeep
+
+# Daemon runtime artifacts
+~/.accint/
+/.accint/
+
+# Editor / OS junk
+.DS_Store
+*.swp
+*.swo
+
+# Build output / scratch
+/.dist/
+/logs/

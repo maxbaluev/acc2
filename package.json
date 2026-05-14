@@ -1,0 +1,23 @@
+{
+  "name": "acc2",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "daemon": "bun runtime/daemon.ts",
+    "acc": "bun cli/dispatch.ts",
+    "test": "bun test --bail"
+  },
+  "bin": {
+    "acc": "cli/dispatch.ts"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "dependencies": {
+    "@types/bun": "^1.3.0",
+    "sqlite-vec": "^0.1.9"
+  },
+  "devDependencies": {},
+  "trustedDependencies": []
+}
