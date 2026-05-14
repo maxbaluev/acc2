@@ -316,24 +316,18 @@ export const runHarness = async (
   const originalBridgeMode = process.env.ACC2_BRIDGE_MODE;
   process.env.ACC2_BRIDGE_MODE = "mock";
 
-  // Workers default ON in production (runtime/daemon.ts flips every
-  // ACC2_*_AUTOSTART gate to opt-OUT). Plumbing scenarios run hermetically
-  // under the mock bridge and drive the scheduler / embedder / father
-  // explicitly per scenario — autostart would race against the per-test
-  // setup and (worse) the embedder worker would call OpenAI before the
-  // mock bridge has a chance to intercept. Opt the harness out for
-  // plumbing only; the ad-hoc real-brain task (scenarioAdHocTask) leaves
-  // them ON so the operator sees the full organism in flight.
-  const originalEmbedder = process.env.ACC2_EMBEDDER_AUTOSTART;
-  const originalScheduler = process.env.ACC2_AUTOSCHEDULER;
-  const originalFather = process.env.ACC2_FATHER_AUTOSTART;
-  const originalRolling = process.env.ACC2_ROLLING_AUTOSTART;
-  const originalRehab = process.env.ACC2_REHAB_AUTOSTART;
-  process.env.ACC2_EMBEDDER_AUTOSTART ??= "0";
-  process.env.ACC2_AUTOSCHEDULER ??= "0";
-  process.env.ACC2_FATHER_AUTOSTART ??= "0";
-  process.env.ACC2_ROLLING_AUTOSTART ??= "0";
-  process.env.ACC2_REHAB_AUTOSTART ??= "0";
+  // Workers default ON in production (runtime/daemon.ts gates each via
+  // `isWorkerEnabled`, which reads the canonical `ACC2_DISABLE_WORKERS`
+  // env var). Plumbing scenarios run hermetically under the mock bridge
+  // and drive the scheduler / embedder / father explicitly per scenario
+  // — autostart would race against the per-test setup and (worse) the
+  // embedder worker would call OpenAI before the mock bridge has a
+  // chance to intercept. Opt the harness out for plumbing only; the
+  // ad-hoc real-brain task (scenarioAdHocTask) leaves them ON so the
+  // operator sees the full organism in flight.
+  const originalDisableWorkers = process.env.ACC2_DISABLE_WORKERS;
+  process.env.ACC2_DISABLE_WORKERS ??=
+    "embedder,scheduler,father,rolling_reviewer,rehabilitation";
 
   // Real-brain is OPT-IN: only run it when --include-real or --real-only
   // was passed. Bare invocation runs the 20 plumbing scenarios only.
@@ -417,11 +411,7 @@ export const runHarness = async (
   try { closeDb(); } catch { /* swallow */ }
   if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
   restoreEnv(originalBridgeMode);
-  restoreEnvVar("ACC2_EMBEDDER_AUTOSTART", originalEmbedder);
-  restoreEnvVar("ACC2_AUTOSCHEDULER", originalScheduler);
-  restoreEnvVar("ACC2_FATHER_AUTOSTART", originalFather);
-  restoreEnvVar("ACC2_ROLLING_AUTOSTART", originalRolling);
-  restoreEnvVar("ACC2_REHAB_AUTOSTART", originalRehab);
+  restoreEnvVar("ACC2_DISABLE_WORKERS", originalDisableWorkers);
 
   // Summary
   const elapsedTotal = Date.now() - startedAt;

@@ -220,7 +220,17 @@ setInterval(() => {}, 60_000);
 
     const child = spawn("bun", [seederPath], {
       cwd: tmpDir,
-      env: { ...process.env, ACC2_INTEGRITY_AUTOSTART: "0", NODE_ENV: "test" },
+      env: {
+        ...process.env,
+        // Disable every worker (preload already disables five; add
+        // integrity for this seeder subprocess so the seeded WAL is the
+        // ONLY artifact under test).
+        ACC2_DISABLE_WORKERS: [
+          ...(process.env.ACC2_DISABLE_WORKERS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+          "integrity",
+        ].join(","),
+        NODE_ENV: "test",
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
 
