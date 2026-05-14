@@ -17,6 +17,9 @@ bun.lock
 ~/.accint/
 /.accint/
 
+# Subagent worktrees (per-agent git roots; never tracked)
+.claude/worktrees/
+
 # Editor / OS junk
 .DS_Store
 *.swp
