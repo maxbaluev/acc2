@@ -29,6 +29,8 @@ import { z } from "zod";
 import type { JsonValue, Runtime, SandboxDecl, SubstrateOrigin } from "../substrate/types";
 import { emitEvent, getEventById, type EmitEventInput } from "./events";
 import { runBunArtifact } from "./runtimes/bun";
+import { runUvArtifact } from "./runtimes/uv";
+import { runCamofoxArtifact } from "./runtimes/camofox";
 import { getArtifact } from "./artifact_store";
 import { admitArtifact } from "./artifact_admission";
 import { dispatchReadyTask } from "./task_dispatcher";
@@ -378,7 +380,7 @@ const handleEmbedText = async (
 // string in place so callers can still pattern-match — applyResidualOutcome
 // is exposed to the substrate elsewhere (admission + future credit pipeline).
 
-const callBunArtifactByRuntime = async (
+const callArtifactByRuntime = async (
   ctx: McpContext,
   artifactId: string,
   inputs: JsonValue,
@@ -386,25 +388,53 @@ const callBunArtifactByRuntime = async (
 ): Promise<McpResult> => {
   const row = getArtifact(ctx.db, artifactId);
   if (!row) return { ok: false, error: "artifact_not_found" };
-  if (row.runtime !== "bun") {
-    return { ok: false, error: `phase_g_runtime_unsupported:${row.runtime}` };
-  }
   const decl = row.declaredSandbox;
-  if (decl.runtime !== "bun") {
+  if (decl.runtime !== row.runtime) {
     return { ok: false, error: "sandbox_decl_runtime_mismatch" };
   }
-  const observation = await runBunArtifact({
-    artifactId: row.id,
-    body: row.body,
-    declaredSandbox: decl,
-    inputs,
-    budget: { wallMs: budget?.wall_ms, memoryMb: budget?.memory_mb },
-    emit: (event) => {
-      try {
-        emitEvent(ctx.db, { ...event, invoker: event.invoker ?? ctx.invoker });
-      } catch { /* event-emission failure must not poison the runtime */ }
-    },
-  });
+  const emit = (event: EmitEventInput): void => {
+    try {
+      emitEvent(ctx.db, { ...event, invoker: event.invoker ?? ctx.invoker });
+    } catch { /* event-emission failure must not poison the runtime */ }
+  };
+  let observation: {
+    ok: boolean;
+    result?: JsonValue;
+    error?: string;
+    durationMs: number;
+    exitCode: number;
+    stderrTail: string;
+    sandboxWarnings: string[];
+    irreversibleEffects: Array<{ kind: string; description: string }>;
+  };
+  if (row.runtime === "bun") {
+    observation = await runBunArtifact({
+      artifactId: row.id,
+      body: row.body,
+      declaredSandbox: decl as Extract<SandboxDecl, { runtime: "bun" }>,
+      inputs,
+      budget: { wallMs: budget?.wall_ms, memoryMb: budget?.memory_mb },
+      emit,
+    });
+  } else if (row.runtime === "uv") {
+    observation = await runUvArtifact({
+      artifactId: row.id,
+      body: row.body,
+      declaredSandbox: decl as Extract<SandboxDecl, { runtime: "uv" }>,
+      inputs,
+      budget: { wallMs: budget?.wall_ms, memoryMb: budget?.memory_mb },
+      emit,
+    });
+  } else {
+    observation = await runCamofoxArtifact({
+      artifactId: row.id,
+      body: row.body,
+      declaredSandbox: decl as Extract<SandboxDecl, { runtime: "camofox-browser" }>,
+      inputs,
+      budget: { wallMs: budget?.wall_ms, memoryMb: budget?.memory_mb },
+      emit,
+    });
+  }
   return {
     ok: true,
     result: {
@@ -425,7 +455,7 @@ const handleRunArtifact = async (
   args: z.infer<typeof RunArtifactSchema>,
 ): Promise<McpResult> => {
   const inputs = (args.inputs ?? args.input ?? null) as JsonValue;
-  return callBunArtifactByRuntime(ctx, args.artifact_id, inputs, args.budget as { wall_ms?: number; memory_mb?: number } | undefined);
+  return callArtifactByRuntime(ctx, args.artifact_id, inputs, args.budget as { wall_ms?: number; memory_mb?: number } | undefined);
 };
 
 const handleRunVerifier = async (
@@ -433,7 +463,7 @@ const handleRunVerifier = async (
   args: z.infer<typeof RunVerifierSchema>,
 ): Promise<McpResult> => {
   const observation = (args.observation ?? null) as JsonValue;
-  return callBunArtifactByRuntime(ctx, args.verifier_artifact_id, observation, args.budget as { wall_ms?: number; memory_mb?: number } | undefined);
+  return callArtifactByRuntime(ctx, args.verifier_artifact_id, observation, args.budget as { wall_ms?: number; memory_mb?: number } | undefined);
 };
 
 const handleAdmitArtifact = async (

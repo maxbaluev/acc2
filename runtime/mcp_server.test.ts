@@ -188,6 +188,73 @@ describe("fastmcp substrate tools — stdio transport", () => {
     expect(run.result.result.value).toBe(42);
   });
 
+  test("substrate.run_artifact routes uv-runtime artifacts (admit-or-skip when uv absent)", async () => {
+    // Phase G: a uv-runtime artifact admits when uv is on PATH, otherwise the
+    // admission cleanly refuses with `runtime_unavailable`. Either branch
+    // proves the dispatch is wired (vs. the Phase-C stub returning
+    // `phase_g_runtime_unsupported`).
+    const body = "result = inputs.get('x', 0) + 1\nprint('@@RESULT@@ ' + json.dumps({'value': result}))";
+    const admit = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.admit_artifact",
+        arguments: {
+          runtime: "uv",
+          body,
+          declared_sandbox: {
+            runtime: "uv",
+            cpu_ms: 5000, wall_ms: 15000, memory_mb: 256,
+          },
+          fixture_input: { x: 1 },
+          fixture_expected_residual_below: 0.2,
+        },
+      })) as ToolCallResponse,
+    );
+    if (admit.ok) {
+      // uv is installed — round-trip works.
+      const run = parseEnvelope(
+        (await h!.client.callTool({
+          name: "substrate.run_artifact",
+          arguments: { artifact_id: admit.result.artifact_id, inputs: { x: 41 } },
+        })) as ToolCallResponse,
+      );
+      expect(run.ok).toBe(true);
+      expect(run.result.ok).toBe(true);
+      expect(run.result.result.value).toBe(42);
+    } else {
+      // uv absent — admission must surface runtime_unavailable, NOT the old
+      // phase_g_runtime_unsupported error string.
+      expect(admit.error).toContain("runtime_unavailable");
+    }
+  });
+
+  test("substrate.run_artifact routes camofox-runtime artifacts cleanly (playwright-gated)", async () => {
+    // Phase G: a camofox-browser artifact admits only when playwright is
+    // installed. The default test harness has no playwright, so admission
+    // must refuse with `runtime_unavailable` — but the dispatch must NOT
+    // throw or return the old `phase_g_runtime_unsupported`.
+    const admit = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.admit_artifact",
+        arguments: {
+          runtime: "camofox-browser",
+          body: "await session.goto(inputs.url); console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));",
+          declared_sandbox: {
+            runtime: "camofox-browser",
+            browser_allow_domains: ["example.com"],
+            browser_profile_root: "/tmp/acc2-mcp-test-profile",
+            wall_ms: 30000,
+            memory_mb: 1024,
+          },
+          fixture_input: { url: "https://example.com" },
+          fixture_expected_residual_below: 0.2,
+        },
+      })) as ToolCallResponse,
+    );
+    if (!admit.ok) {
+      expect(admit.error).toContain("runtime_unavailable");
+    }
+  });
+
   test("substrate.credit returns the Phase H stub", async () => {
     const env = parseEnvelope(
       (await h!.client.callTool({

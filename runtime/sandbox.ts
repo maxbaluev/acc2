@@ -158,12 +158,119 @@ export const buildBunPermissionArgs = (
   return { argv, env, warnings };
 };
 
-/** Phase G — uv runtime sandbox is not implemented in Phase C. */
-export const buildUvPermissionArgs = (_decl: SandboxDecl): never => {
-  throw new Error("phase_g_runtime_unsupported:uv_sandbox");
+export type UvPermissionArgs = {
+  /** argv prefix when nsjail is available; empty when nsjail is absent.
+   *  The runtime module decides whether to prepend nsjail itself; this
+   *  surface is the policy, not the spawn-line. */
+  argv: string[];
+  /** Env vars to merge into the spawned process. */
+  env: Record<string, string>;
+  /** Human-readable warnings about declared permissions the uv runtime
+   *  cannot enforce without nsjail. */
+  warnings: string[];
 };
 
-/** Phase G — camofox-browser runtime sandbox is not implemented in Phase C. */
-export const buildCamofoxPermissionArgs = (_decl: SandboxDecl): never => {
-  throw new Error("phase_g_runtime_unsupported:camofox_sandbox");
+export type CamofoxPermissionArgs = {
+  /** Env vars to merge into the spawned process. The chromium subprocess is
+   *  spawned by the wrapper, so there is no argv prefix here. */
+  env: Record<string, string>;
+  /** Human-readable warnings about declared permissions the camofox runtime
+   *  cannot enforce (e.g. malformed allow-domain entries, missing profile
+   *  root parent dir). */
+  warnings: string[];
+};
+
+/** Translate a `runtime: 'uv'` SandboxDecl into env vars + warnings.
+ *
+ *  Phase-G enforcement matrix:
+ *    - cpu_ms / wall_ms / memory_mb: outer watchdog enforces wall_ms (see
+ *      runtimes/uv.ts). When nsjail is on PATH it ALSO enforces via its
+ *      `--time_limit` / `--rlimit_as`; the runtime decides at spawn time.
+ *    - fs_read / fs_write: not enforced without nsjail. Warning emitted.
+ *    - net_allow: not enforced without nsjail. Warning emitted.
+ *    - pypi_allow: enforced by `uv run --with-requirements`; only the
+ *      declared package list is installed in the ephemeral env.
+ *
+ *  The argv list is empty here — the uv runtime decides whether to wrap
+ *  with nsjail at spawn time based on `which nsjail`. We surface the
+ *  policy via env + warnings; the runtime composes the actual argv.
+ */
+export const buildUvPermissionArgs = (
+  decl: SandboxDecl & { runtime: "uv" },
+): UvPermissionArgs => {
+  const v = validateSandboxDecl(decl);
+  if (!v.ok) {
+    throw new Error(`invalid uv sandbox decl: ${v.reason}`);
+  }
+  const env: Record<string, string> = {
+    ACC2_SANDBOX_RUNTIME: "uv",
+    ACC2_SANDBOX_WALL_MS: String(decl.wall_ms),
+    ACC2_SANDBOX_CPU_MS: String(decl.cpu_ms),
+    ACC2_SANDBOX_MEMORY_MB: String(decl.memory_mb),
+    ACC2_SANDBOX_NET_ALLOW: JSON.stringify(decl.net_allow ?? []),
+    ACC2_SANDBOX_FS_READ: JSON.stringify(decl.fs_read ?? []),
+    ACC2_SANDBOX_FS_WRITE: JSON.stringify(decl.fs_write ?? []),
+    ACC2_ALLOWED_PYPI: JSON.stringify(decl.pypi_allow ?? []),
+  };
+  const warnings: string[] = [];
+  if ((decl.net_allow ?? []).length > 0) {
+    warnings.push(
+      `net_allow declared (${(decl.net_allow ?? []).join(",")}) — uv runtime can only enforce when nsjail is present`,
+    );
+  }
+  // Catch malformed pypi entries early. We allow ==pin, >=range, and bare
+  // package names; anything else is suspicious enough to warn about.
+  for (const entry of decl.pypi_allow ?? []) {
+    if (!/^[A-Za-z0-9_.\-]+(\s*[<>=!~]=?\s*[A-Za-z0-9_.\-]+)?$/.test(entry.trim())) {
+      warnings.push(`pypi_allow entry '${entry}' does not look like a pip requirement spec`);
+    }
+  }
+  return { argv: [], env, warnings };
+};
+
+/** Translate a `runtime: 'camofox-browser'` SandboxDecl into env vars + warnings.
+ *
+ *  Phase-G enforcement matrix:
+ *    - wall_ms / memory_mb: outer watchdog enforces wall_ms via SIGTERM at
+ *      wall_ms and SIGKILL at wall_ms × 2 (see runtimes/camofox.ts).
+ *    - browser_allow_domains: enforced by the wrapper's `page.route()` —
+ *      requests to disallowed domains are aborted before they hit the wire.
+ *    - browser_profile_root: validated for shape; the wrapper creates the
+ *      directory tree under it on first launch.
+ *    - browser_allow_downloads_to: surfaced via env; the wrapper reads
+ *      ACC2_DOWNLOAD_DIR when set and rejects writes elsewhere.
+ *
+ *  No argv prefix — chromium is spawned by playwright inside the wrapper,
+ *  so the sandbox here only shapes the env passed to the wrapper.
+ */
+export const buildCamofoxPermissionArgs = (
+  decl: SandboxDecl & { runtime: "camofox-browser" },
+): CamofoxPermissionArgs => {
+  const v = validateSandboxDecl(decl);
+  if (!v.ok) {
+    throw new Error(`invalid camofox sandbox decl: ${v.reason}`);
+  }
+  const env: Record<string, string> = {
+    ACC2_SANDBOX_RUNTIME: "camofox-browser",
+    ACC2_SANDBOX_WALL_MS: String(decl.wall_ms),
+    ACC2_SANDBOX_MEMORY_MB: String(decl.memory_mb),
+    ACC2_BROWSER_PROFILE: decl.browser_profile_root,
+    ACC2_ALLOWED_DOMAINS: JSON.stringify(decl.browser_allow_domains),
+  };
+  if (decl.browser_allow_downloads_to) {
+    env.ACC2_DOWNLOAD_DIR = decl.browser_allow_downloads_to;
+  }
+  const warnings: string[] = [];
+  for (const dom of decl.browser_allow_domains) {
+    // A canonical allow-domain entry is a bare hostname (no scheme, no path,
+    // no port). Anything else is honored but flagged so the audit trail
+    // catches drift.
+    if (/^https?:\/\//.test(dom) || dom.includes("/") || dom.includes(":")) {
+      warnings.push(`browser_allow_domains entry '${dom}' should be a bare hostname (no scheme/port/path)`);
+    }
+  }
+  if (decl.browser_allow_domains.length === 0) {
+    warnings.push("browser_allow_domains is empty — chromium will allow ALL outbound requests");
+  }
+  return { env, warnings };
 };

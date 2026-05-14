@@ -325,7 +325,34 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   {
     seedName: "web_search",
     runtime: "bun",
-    body: "// stub Phase B+: will be authored per LATM. Serper.dev wrapper for web search.",
+    // Honest minimal serper.dev wrapper — when SERPER_API_KEY isn't set we
+    // return ok:false with the canonical error rather than emitting a fake
+    // success. The substrate's verifier scores the residual; an unconfigured
+    // key looks like a configuration drift, not a successful answer.
+    body: [
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
+      "const apiKey = process.env.SERPER_API_KEY;",
+      "if (!apiKey) {",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'serper_api_key_missing' }));",
+      "  process.exit(0);",
+      "}",
+      "try {",
+      "  const resp = await fetch('https://google.serper.dev/search', {",
+      "    method: 'POST',",
+      "    headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },",
+      "    body: JSON.stringify({ q: inputs.query }),",
+      "  });",
+      "  if (!resp.ok) {",
+      "    console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'serper_http_' + resp.status }));",
+      "    process.exit(0);",
+      "  }",
+      "  const data = await resp.json();",
+      "  const hits = (data.organic ?? []).slice(0, 10).map((h) => ({ title: h.title, url: h.link, snippet: h.snippet }));",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, query: inputs.query, hits }));",
+      "} catch (err) {",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'serper_fetch_failed:' + String(err) }));",
+      "}",
+    ].join("\n"),
     declared_sandbox: {
       runtime: "bun",
       net_allow: ["google.serper.dev"],
@@ -343,7 +370,39 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   {
     seedName: "web_fetch_and_parse",
     runtime: "bun",
-    body: "// stub Phase B+: will be authored per LATM. HTTP fetch + readability extract.",
+    // Phase-G honest impl: Bun.fetch + a tiny readability heuristic. We strip
+    // <script>/<style> blocks, then strip remaining tags, then collapse
+    // whitespace. This is intentionally NOT a full readability port — Phase H
+    // can layer a richer extractor on top once the brain has examples.
+    body: [
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
+      "try {",
+      "  const resp = await fetch(inputs.url, { headers: { 'User-Agent': 'acc2/0.0.1' } });",
+      "  if (!resp.ok) {",
+      "    console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'http_' + resp.status }));",
+      "    process.exit(0);",
+      "  }",
+      "  const html = await resp.text();",
+      "  const titleMatch = html.match(/<title[^>]*>([^<]+)<\\/title>/i);",
+      "  const title = titleMatch ? titleMatch[1].trim() : null;",
+      "  // Strip <script> + <style> blocks, then collapse remaining tags.",
+      "  let text = html",
+      "    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')",
+      "    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')",
+      "    .replace(/<[^>]+>/g, ' ')",
+      "    .replace(/&nbsp;/g, ' ')",
+      "    .replace(/&amp;/g, '&')",
+      "    .replace(/&lt;/g, '<')",
+      "    .replace(/&gt;/g, '>')",
+      "    .replace(/&quot;/g, '\"')",
+      "    .replace(/\\s+/g, ' ')",
+      "    .trim();",
+      "  if (text.length > 8000) text = text.slice(0, 8000) + '…';",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, url: inputs.url, title, text }));",
+      "} catch (err) {",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'fetch_failed:' + String(err) }));",
+      "}",
+    ].join("\n"),
     declared_sandbox: {
       runtime: "bun",
       net_allow: ["*"],
@@ -361,7 +420,17 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   {
     seedName: "browser_session_act",
     runtime: "camofox-browser",
-    body: "// stub Phase B+: will be authored per LATM. Opens chromium against a profile, runs a sequence of page operations.",
+    // Phase-G minimal browser-session seed. The runtime wrapper provides a
+    // `session` facade (goto / fill / click / text / url / screenshot) over
+    // playwright's persistent context. When playwright isn't installed the
+    // runtime returns `ok:false, error:"camofox_runtime_unavailable"`; this
+    // body is structured to surface that cleanly.
+    body: [
+      "// inputs: { url: string }",
+      "await session.goto(inputs.url);",
+      "const title = await session.text('title');",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, title, final_url: session.url }));",
+    ].join("\n"),
     declared_sandbox: {
       runtime: "camofox-browser",
       browser_allow_domains: ["example.com"],
@@ -372,14 +441,35 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     state_root: "substrate/browser",
     initial_score: 0.75,
     initial_confidence: 0.65,
-    fixture_input: { url: "https://example.com", actions: [] },
+    fixture_input: { url: "https://example.com" },
     fixture_expected_residual: 0.0,
     display_name: "browser_session_act",
   },
   {
     seedName: "shell_run",
     runtime: "bun",
-    body: "// stub Phase B+: will be authored per LATM. Spawn a subprocess with declared argv.",
+    // Phase-G honest impl: Bun.spawnSync against the declared argv. The
+    // sandbox decl's proc_allow is advisory at the bun layer (see
+    // sandbox.ts) — this body checks the argv[0] against the allow list at
+    // run time and refuses if it's missing. Cooperating-script enforcement
+    // for the Phase-G surface.
+    body: [
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
+      "const allow = JSON.parse(process.env.ACC2_SANDBOX_PROC_ALLOW ?? '[]');",
+      "const argv = inputs.argv ?? [];",
+      "if (argv.length === 0) {",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'argv_empty' }));",
+      "  process.exit(0);",
+      "}",
+      "if (allow.length > 0 && !allow.includes(argv[0])) {",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'proc_not_allowed:' + argv[0] }));",
+      "  process.exit(0);",
+      "}",
+      "const proc = Bun.spawnSync({ cmd: argv, stdout: 'pipe', stderr: 'pipe' });",
+      "const stdout = new TextDecoder().decode(proc.stdout);",
+      "const stderr = new TextDecoder().decode(proc.stderr);",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ ok: proc.exitCode === 0, exit_code: proc.exitCode, stdout, stderr }));",
+    ].join("\n"),
     declared_sandbox: {
       runtime: "bun",
       proc_allow: ["echo", "ls", "cat"],
@@ -397,7 +487,23 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   {
     seedName: "py_run",
     runtime: "uv",
-    body: "# stub Phase B+: will be authored per LATM. Run a Python snippet under nsjail with declared deps.",
+    // Phase-G honest impl: a Python body that reads `source` from inputs,
+    // exec()'s it under a captured namespace, then prints the captured
+    // result. The runtime wrapper adds the json import + result-marker
+    // emission; this body only authors the user-visible behaviour.
+    body: [
+      "src = inputs.get('source') if isinstance(inputs, dict) else None",
+      "if not src:",
+      "    print('@@RESULT@@ ' + json.dumps({'ok': False, 'error': 'no_source'}))",
+      "else:",
+      "    ns = {}",
+      "    try:",
+      "        exec(src, ns)",
+      "        result = ns.get('result')",
+      "        print('@@RESULT@@ ' + json.dumps({'ok': True, 'result': result}))",
+      "    except Exception as e:",
+      "        print('@@RESULT@@ ' + json.dumps({'ok': False, 'error': 'exec_failed:' + repr(e)}))",
+    ].join("\n"),
     declared_sandbox: {
       runtime: "uv",
       pypi_allow: [],
@@ -408,7 +514,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     state_root: "substrate/py",
     initial_score: 0.75,
     initial_confidence: 0.70,
-    fixture_input: { code: "print('ok')" },
+    fixture_input: { source: "result = 'ok'" },
     fixture_expected_residual: 0.0,
     display_name: "py_run",
   },

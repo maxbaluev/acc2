@@ -154,23 +154,105 @@ describe("buildBunPermissionArgs", () => {
   });
 });
 
-describe("Phase G stubs (uv / camofox)", () => {
-  test("buildUvPermissionArgs throws with phase_g signal", () => {
-    expect(() =>
-      buildUvPermissionArgs({
-        runtime: "uv", cpu_ms: 1, wall_ms: 1, memory_mb: 1,
-      }),
-    ).toThrow(/phase_g_runtime_unsupported:uv_sandbox/);
+describe("buildUvPermissionArgs (Phase G)", () => {
+  test("returns env + zero warnings for a minimal valid decl", () => {
+    const out = buildUvPermissionArgs({
+      runtime: "uv",
+      cpu_ms: 1000, wall_ms: 5000, memory_mb: 256,
+    });
+    expect(out.argv).toEqual([]);
+    expect(out.env.ACC2_SANDBOX_RUNTIME).toBe("uv");
+    expect(out.env.ACC2_SANDBOX_WALL_MS).toBe("5000");
+    expect(out.env.ACC2_SANDBOX_MEMORY_MB).toBe("256");
+    expect(JSON.parse(out.env.ACC2_ALLOWED_PYPI!)).toEqual([]);
+    expect(out.warnings).toEqual([]);
   });
 
-  test("buildCamofoxPermissionArgs throws with phase_g signal", () => {
-    expect(() =>
-      buildCamofoxPermissionArgs({
-        runtime: "camofox-browser",
-        browser_allow_domains: ["example.com"],
-        browser_profile_root: "/tmp/p",
-        wall_ms: 1, memory_mb: 1,
-      }),
-    ).toThrow(/phase_g_runtime_unsupported:camofox_sandbox/);
+  test("exposes pypi_allow via env for the uv runtime to convert into requirements.txt", () => {
+    const out = buildUvPermissionArgs({
+      runtime: "uv",
+      pypi_allow: ["requests==2.31.0", "numpy"],
+      cpu_ms: 1000, wall_ms: 5000, memory_mb: 256,
+    });
+    expect(JSON.parse(out.env.ACC2_ALLOWED_PYPI!)).toEqual(["requests==2.31.0", "numpy"]);
+  });
+
+  test("declares a warning when net_allow is non-empty (without nsjail enforcement)", () => {
+    const out = buildUvPermissionArgs({
+      runtime: "uv",
+      net_allow: ["pypi.org"],
+      cpu_ms: 1000, wall_ms: 5000, memory_mb: 256,
+    });
+    expect(out.warnings.length).toBeGreaterThanOrEqual(1);
+    expect(out.warnings.some((w) => w.includes("net_allow"))).toBe(true);
+  });
+
+  test("warns when pypi_allow entry is malformed", () => {
+    const out = buildUvPermissionArgs({
+      runtime: "uv",
+      pypi_allow: ["a bad pkg with spaces!"],
+      cpu_ms: 1000, wall_ms: 5000, memory_mb: 256,
+    });
+    expect(out.warnings.some((w) => w.includes("pip requirement spec"))).toBe(true);
+  });
+
+  test("throws on a malformed uv decl rather than returning bad permissions", () => {
+    const bad = { runtime: "uv" } as unknown as SandboxDecl & { runtime: "uv" };
+    expect(() => buildUvPermissionArgs(bad)).toThrow(/invalid uv sandbox decl/);
+  });
+});
+
+describe("buildCamofoxPermissionArgs (Phase G)", () => {
+  test("returns env populated with allow_domains + profile_root for a valid decl", () => {
+    const out = buildCamofoxPermissionArgs({
+      runtime: "camofox-browser",
+      browser_allow_domains: ["example.com"],
+      browser_profile_root: "/tmp/p",
+      wall_ms: 30000, memory_mb: 1024,
+    });
+    expect(out.env.ACC2_SANDBOX_RUNTIME).toBe("camofox-browser");
+    expect(out.env.ACC2_BROWSER_PROFILE).toBe("/tmp/p");
+    expect(JSON.parse(out.env.ACC2_ALLOWED_DOMAINS!)).toEqual(["example.com"]);
+    expect(out.warnings).toEqual([]);
+  });
+
+  test("warns when an allow-domain entry contains a scheme/port/path", () => {
+    const out = buildCamofoxPermissionArgs({
+      runtime: "camofox-browser",
+      browser_allow_domains: ["https://example.com/path", "good.example.com"],
+      browser_profile_root: "/tmp/p",
+      wall_ms: 1000, memory_mb: 64,
+    });
+    expect(out.warnings.some((w) => w.includes("bare hostname"))).toBe(true);
+  });
+
+  test("warns when allow_domains is empty (full-open policy)", () => {
+    const out = buildCamofoxPermissionArgs({
+      runtime: "camofox-browser",
+      browser_allow_domains: [],
+      browser_profile_root: "/tmp/p",
+      wall_ms: 1000, memory_mb: 64,
+    });
+    // The decl validator requires non-empty in admit; the BUILDER still
+    // surfaces the warning for any odd code path that bypasses validation.
+    // But validateSandboxDecl currently requires it be a string array
+    // (empty allowed). Either way: warning fires when empty.
+    expect(out.warnings.some((w) => w.includes("empty"))).toBe(true);
+  });
+
+  test("surfaces browser_allow_downloads_to via env when declared", () => {
+    const out = buildCamofoxPermissionArgs({
+      runtime: "camofox-browser",
+      browser_allow_domains: ["example.com"],
+      browser_profile_root: "/tmp/p",
+      browser_allow_downloads_to: "/tmp/dl",
+      wall_ms: 1000, memory_mb: 64,
+    });
+    expect(out.env.ACC2_DOWNLOAD_DIR).toBe("/tmp/dl");
+  });
+
+  test("throws on a malformed camofox decl rather than returning bad permissions", () => {
+    const bad = { runtime: "camofox-browser" } as unknown as SandboxDecl & { runtime: "camofox-browser" };
+    expect(() => buildCamofoxPermissionArgs(bad)).toThrow(/invalid camofox sandbox decl/);
   });
 });

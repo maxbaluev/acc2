@@ -30,6 +30,8 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue, Runtime, SandboxDecl } from "../substrate/types";
 import { validateSandboxDecl } from "./sandbox";
 import { runBunArtifact } from "./runtimes/bun";
+import { runUvArtifact } from "./runtimes/uv";
+import { runCamofoxArtifact } from "./runtimes/camofox";
 import { getArtifact, insertArtifact } from "./artifact_store";
 import type { EmitEventInput } from "./events";
 
@@ -52,7 +54,7 @@ export type AdmissionRejectionReason =
   | "sandbox_decl_invalid"
   | "fixture_residual_too_high"
   | "runtime_error"
-  | "phase_g_runtime_unsupported";
+  | "runtime_unavailable";
 
 export type AdmissionResult =
   | { ok: true; artifactId: string }
@@ -103,20 +105,7 @@ export const admitArtifact = async (
     };
   }
 
-  // 2. Phase G runtimes are not yet implemented. Refuse cleanly.
-  if (input.runtime !== "bun") {
-    emit({
-      kind: "code_artifact_admission_rejected",
-      substrate_origin: "substrate_auto",
-      payload: {
-        reason: "phase_g_runtime_unsupported",
-        runtime: input.runtime,
-      } as JsonValue,
-    });
-    return { ok: false, reason: "phase_g_runtime_unsupported", detail: input.runtime };
-  }
-
-  // 3. Insert at admit priors. We do this BEFORE running the fixture so the
+  // 2. Insert at admit priors. We do this BEFORE running the fixture so the
   //    artifact_id is stable across the artifact_invoked / artifact_observed
   //    events; if the fixture fails we DELETE the row in the rejection branch.
   const row = insertArtifact(db, {
@@ -137,14 +126,68 @@ export const admitArtifact = async (
     id: input.artifactId,
   });
 
-  // 4. Run the fixture in the bun runtime.
-  const observation = await runBunArtifact({
-    artifactId: row.id,
-    body: input.body,
-    declaredSandbox: input.declaredSandbox as Extract<SandboxDecl, { runtime: "bun" }>,
-    inputs: input.fixtureInput,
-    emit,
-  });
+  // 3. Run the fixture in the artifact's declared runtime. Phase G lights up
+  //    uv and camofox-browser; bun was always wired. Each runtime returns the
+  //    same observation envelope shape so this dispatch is purely a router.
+  let observation: {
+    ok: boolean;
+    result?: JsonValue;
+    error?: string;
+    durationMs: number;
+    exitCode: number;
+    stderrTail: string;
+    sandboxWarnings: string[];
+    irreversibleEffects: Array<{ kind: string; description: string }>;
+  };
+  if (input.runtime === "bun") {
+    observation = await runBunArtifact({
+      artifactId: row.id,
+      body: input.body,
+      declaredSandbox: input.declaredSandbox as Extract<SandboxDecl, { runtime: "bun" }>,
+      inputs: input.fixtureInput,
+      emit,
+    });
+  } else if (input.runtime === "uv") {
+    observation = await runUvArtifact({
+      artifactId: row.id,
+      body: input.body,
+      declaredSandbox: input.declaredSandbox as Extract<SandboxDecl, { runtime: "uv" }>,
+      inputs: input.fixtureInput,
+      emit,
+    });
+  } else {
+    observation = await runCamofoxArtifact({
+      artifactId: row.id,
+      body: input.body,
+      declaredSandbox: input.declaredSandbox as Extract<SandboxDecl, { runtime: "camofox-browser" }>,
+      inputs: input.fixtureInput,
+      emit,
+    });
+  }
+
+  // Surface "runtime not installed" cleanly as `runtime_unavailable` so the
+  // caller can treat it as a soft refusal (e.g. admit the artifact anyway,
+  // run at execution time once playwright/uv are present). For Phase G we
+  // KEEP the rejection: admission is a smoke test and a smoke test that
+  // can't be run isn't a pass.
+  if (!observation.ok && (
+    observation.error === "uv_runtime_unavailable" ||
+    observation.error === "camofox_runtime_unavailable"
+  )) {
+    db.run("DELETE FROM code_artifact WHERE id = ?", [row.id]);
+    emit({
+      kind: "code_artifact_admission_rejected",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: row.id,
+      payload: {
+        reason: "runtime_unavailable",
+        detail: observation.error,
+        runtime: input.runtime,
+        sandbox_warnings: observation.sandboxWarnings as unknown as JsonValue,
+      } as JsonValue,
+    });
+    return { ok: false, reason: "runtime_unavailable", detail: observation.error };
+  }
 
   if (!observation.ok) {
     db.run("DELETE FROM code_artifact WHERE id = ?", [row.id]);

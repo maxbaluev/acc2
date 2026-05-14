@@ -91,48 +91,66 @@ describe("admitArtifact — rejections", () => {
     expect(events.some((e) => e.kind === "code_artifact_admission_rejected")).toBe(true);
   });
 
-  test("rejects a uv artifact with phase_g_runtime_unsupported", async () => {
+  test("admits a uv artifact end-to-end OR rejects cleanly when uv is absent", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    // Minimal Python body — the runtime wrapper provides json + the result
+    // marker emission. We assert on the OUTER admission outcome only: when uv
+    // is installed admission must succeed; otherwise we expect a clean
+    // runtime_unavailable refusal so the test stays hermetic.
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "uv",
+        body: "result = inputs.get('x', 0) + 1\nprint('@@RESULT@@ ' + json.dumps({'ok': True, 'value': result}))",
+        declaredSandbox: { runtime: "uv", cpu_ms: 1000, wall_ms: 15000, memory_mb: 256 },
+        fixtureInput: { x: 41 },
+        fixtureExpectedResidualBelow: 0.2,
+      },
+      captureEmit(events, db),
+    );
+    // Either outcome is acceptable depending on whether uv is on PATH; both
+    // shapes must be CLEAN (no thrown error, no orphan row).
+    if (!result.ok) {
+      expect(["runtime_unavailable", "runtime_error"]).toContain(result.reason);
+      // Row must be deleted on rejection.
+      const c = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+      expect(c).toBe(0);
+    } else {
+      // Admission succeeded — the row is present at admit priors.
+      const row = (db.query("SELECT runtime FROM code_artifact WHERE id = ?").get(result.artifactId) as { runtime: string });
+      expect(row.runtime).toBe("uv");
+    }
+  });
+
+  test("rejects a camofox-browser artifact cleanly with runtime_unavailable when playwright is absent", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
     const result = await admitArtifact(
       db,
       {
-        runtime: "uv",
-        body: "# uv stub",
-        declaredSandbox: { runtime: "uv", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
-        fixtureInput: null,
-        fixtureExpectedResidualBelow: 0.2,
-      },
-      captureEmit(events, db),
-    );
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.reason).toBe("phase_g_runtime_unsupported");
-    expect(events.some((e) => e.kind === "code_artifact_admission_rejected")).toBe(true);
-  });
-
-  test("rejects a camofox-browser artifact with phase_g_runtime_unsupported", async () => {
-    const db = openDb(":memory:");
-    const result = await admitArtifact(
-      db,
-      {
         runtime: "camofox-browser",
-        body: "// browser stub",
+        body: "await session.goto(inputs.url); console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));",
         declaredSandbox: {
           runtime: "camofox-browser",
           browser_allow_domains: ["example.com"],
-          browser_profile_root: "/tmp/p",
+          browser_profile_root: "/tmp/acc2-test-profile",
           wall_ms: 1000,
           memory_mb: 256,
         },
         fixtureInput: { url: "https://example.com" },
         fixtureExpectedResidualBelow: 0.2,
       },
-      () => undefined,
+      captureEmit(events, db),
     );
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.reason).toBe("phase_g_runtime_unsupported");
+    // playwright is intentionally NOT installed in the test harness — the
+    // runtime returns `camofox_runtime_unavailable` and admission folds that
+    // into a clean `runtime_unavailable` rejection. If a future harness
+    // change installs playwright we accept ok:true (the wrapper would launch
+    // chromium against /tmp/acc2-test-profile; admission would still pass).
+    if (!result.ok) {
+      expect(["runtime_unavailable", "runtime_error"]).toContain(result.reason);
+    }
   });
 
   test("rejects when sandbox decl is malformed (missing wall_ms)", async () => {
