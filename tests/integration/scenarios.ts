@@ -1728,6 +1728,8 @@ export const scenarioRealBrainEndToEnd = async (): Promise<void> => {
 
 // ── Ad-hoc task — operator-driven real-brain validation ────────────
 
+export type AdHocTaskUrgency = "normal" | "elevated" | "crisis";
+
 export type AdHocTaskOptions = {
   /** The natural-language directive to send to the brain. */
   taskText: string;
@@ -1736,6 +1738,10 @@ export type AdHocTaskOptions = {
   /** When true, keep the temp state dir + DB on exit so the operator can inspect.
    *  The path is printed in the final summary. */
   keepState?: boolean;
+  /** Directive urgency. `crisis` engages crisis-mode dispatch (v2-design.md §3.5);
+   *  the post-run summary reports `crisis_mode_engaged: yes/no` based on whether
+   *  a `crisis_mode_engaged` event fired during the run. Default "normal". */
+  urgency?: AdHocTaskUrgency;
   /** Output sink (default: process.stdout.write). */
   writer?: (s: string) => void;
 };
@@ -1752,6 +1758,11 @@ export type AdHocTaskResult = {
   artifactsCount: number;
   violations: number;
   refinementEdges: number;
+  /** Echo of the requested urgency from AdHocTaskOptions. */
+  urgency: AdHocTaskUrgency;
+  /** True iff a `crisis_mode_engaged` event was emitted under this directive
+   *  during the run. Always false when urgency !== "crisis". */
+  crisisModeEngaged: boolean;
 };
 
 /**
@@ -1772,6 +1783,7 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
   const write = opts.writer ?? ((s: string) => process.stdout.write(s));
   const timeoutMs = opts.timeoutMs ?? 5 * 60_000;
   const keepState = opts.keepState ?? false;
+  const urgency: AdHocTaskUrgency = opts.urgency ?? "normal";
 
   // Flip bridge to real for this run; restore on exit.
   const originalMode = process.env.ACC2_BRIDGE_MODE;
@@ -1800,6 +1812,7 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
     committed: false, failed: false, timedOut: false, residual: null,
     durationMs: 0, directiveId, stateDir: "",
     eventsCount: 0, artifactsCount: 0, violations: 0, refinementEdges: 0,
+    urgency, crisisModeEngaged: false,
   };
 
   try {
@@ -1835,6 +1848,7 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
         directive_text: opts.taskText,
         smoke: "harness_adhoc_task",
         lifecycle: "finite",
+        urgency,
       } as JsonValue,
     });
     emitEvent(handle.db, {
@@ -1846,10 +1860,28 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
       payload: {
         goal: opts.taskText,
         lifecycle: "finite",
-        urgency: "normal",
+        urgency,
       } as JsonValue,
     });
-    write(`emit: directive_opened ${directiveId.slice(0,12)}... (task ${taskId.slice(0,12)}...)\n\n`);
+    // Crisis directives engage crisis-mode dispatch (v2-design.md §3.5). The
+    // mode change is recorded as a structural `crisis_mode_engaged` event so
+    // downstream surfaces (and the post-run summary) can tell whether the
+    // substrate actually flipped into the lowered-threshold lane —
+    // readCurrentMode() then reads the directive's payload urgency and
+    // delivers CRISIS_MODE adjustments to the scheduler / dispatcher. The
+    // event is the canonical observable; emitting it here mirrors what
+    // `openCrisisDirective` (runtime/crisis_mode.ts) does for non-harness
+    // call sites.
+    if (urgency === "crisis") {
+      emitEvent(handle.db, {
+        kind: "crisis_mode_engaged",
+        substrate_origin: "substrate_auto",
+        directive_id: directiveId,
+        payload: { reason: "harness_adhoc_task_urgency_crisis" } as JsonValue,
+      });
+      write(`crisis: mode engaged (urgency=${urgency})\n`);
+    }
+    write(`emit: directive_opened ${directiveId.slice(0,12)}... (task ${taskId.slice(0,12)}..., urgency=${urgency})\n\n`);
 
     // Snapshot the artifact baseline so the post-run count reflects only
     // what the brain admitted during THIS dispatch (the seed already loaded N).
@@ -1953,6 +1985,14 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
       "SELECT residual FROM events WHERE kind = 'action_scored' AND directive_id = ? ORDER BY ts ASC LIMIT 1",
     ).get(directiveId) as { residual: number } | null;
 
+    // Crisis-mode probe: a `crisis_mode_engaged` row scoped to this directive
+    // means the substrate flipped into CRISIS_MODE. We probe even on
+    // urgency=normal so an unexpected mode transition surfaces in the
+    // summary rather than vanishing.
+    const crisisRow = handle.db.query(
+      "SELECT COUNT(*) AS c FROM events WHERE kind = 'crisis_mode_engaged' AND directive_id = ?",
+    ).get(directiveId) as { c: number };
+
     result = {
       committed: terminal?.kind === "task_committed",
       failed: terminal?.kind === "task_failed",
@@ -1965,6 +2005,8 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
       artifactsCount: artifacts.n,
       violations: violations.n,
       refinementEdges: refineCount,
+      urgency,
+      crisisModeEngaged: crisisRow.c > 0,
     };
 
     write(`\n──────────────────────────────────────\n`);
@@ -1976,6 +2018,9 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
     write(`  dispatcher_violation: ${result.violations}${result.violations === 0 ? "" : "  ⚠"}\n`);
     write(`  refinement edges: ${result.refinementEdges}\n`);
     write(`  duration: ${(result.durationMs / 1000).toFixed(1)}s\n`);
+    if (urgency === "crisis") {
+      write(`  crisis_mode_engaged: ${result.crisisModeEngaged ? "yes" : "no"}\n`);
+    }
 
     return result;
   } finally {

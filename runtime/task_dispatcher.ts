@@ -38,6 +38,7 @@ import { logger } from "./logger";
 import { readCurrentMode } from "./crisis_mode";
 import { isCycleViolation } from "./cycle_one_gate";
 import { recordDispatch, recordActionResidual } from "./metrics";
+import { extractRecipeFromCommit } from "../substrate/extractors";
 
 const REFINEMENT_DEPTH_CAP = 5;
 
@@ -541,6 +542,36 @@ export const dispatchReadyTask = async (
                 } as JsonValue,
               });
             }
+          }
+          // Inline recipe extraction: the FIRST successful commit for a
+          // (goal_shape, topology_signature) pair seeds a Tier-0 recipe at
+          // confidence=1.0 so the dispatcher's recipe_replay route can
+          // catch the next dispatch with the same shape without waiting
+          // for Father / the rolling reviewer to fire the 3-success
+          // statistical extractor. Idempotent: re-firing on the same
+          // composite key is a no-op. Errors surfaced as error_caught
+          // (recoverable) — recipe seeding failing must not derail the
+          // committed dispatch.
+          try {
+            extractRecipeFromCommit(db, task.id);
+          } catch (err) {
+            logger.warn(
+              { where: "task_dispatcher.extractRecipeFromCommit", task_id: task.id, err: (err as Error).message },
+              "extractRecipeFromCommit failed — surfaced as error_caught",
+            );
+            try {
+              emitEvent(db, {
+                kind: "error_caught",
+                substrate_origin: "substrate_auto",
+                directive_id: task.directive_id,
+                task_id: task.id,
+                payload: {
+                  where: "task_dispatcher.extractRecipeFromCommit",
+                  recoverable: true,
+                  message: (err as Error).message,
+                } as JsonValue,
+              });
+            } catch { /* db likely closed */ }
           }
         } else {
           // High-residual path — emit a refinement edge + new task_node_opened

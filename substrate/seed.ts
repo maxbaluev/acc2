@@ -377,9 +377,14 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     // whitespace. This is intentionally NOT a full readability port — Phase H
     // can layer a richer extractor on top once the brain has examples.
     body: [
-      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null') ?? {};",
+      "const url = inputs && typeof inputs.url === 'string' ? inputs.url : '';",
+      "if (url.length === 0) {",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'missing_input_url' }));",
+      "  process.exit(0);",
+      "}",
       "try {",
-      "  const resp = await fetch(inputs.url, { headers: { 'User-Agent': 'acc2/0.0.1' } });",
+      "  const resp = await fetch(url, { headers: { 'User-Agent': 'acc2/0.0.1' } });",
       "  if (!resp.ok) {",
       "    console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'http_' + resp.status }));",
       "    process.exit(0);",
@@ -400,7 +405,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
       "    .replace(/\\s+/g, ' ')",
       "    .trim();",
       "  if (text.length > 8000) text = text.slice(0, 8000) + '…';",
-      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, url: inputs.url, title, text }));",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, url, title, text }));",
       "} catch (err) {",
       "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'fetch_failed:' + String(err) }));",
       "}",

@@ -834,3 +834,95 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
 
   return { extracted };
 };
+
+// ── 5. Recipe extraction on every commit (inline, post-task_committed) ─
+//
+// `extractRecipeCandidates` (above) is the statistical 3-success path —
+// the brain accumulates evidence before the substrate commits to caching
+// a trajectory at confidence=0.5. That cadence depends on Father / the
+// rolling reviewer firing periodically, which under pre-flip defaults was
+// off in tests and in fresh installs.
+//
+// `extractRecipeFromCommit` is the synchronous post-commit path the task
+// dispatcher calls right after emitting `task_committed`. It records a
+// recipe the FIRST time a (goal_shape, topology_signature) pair lands
+// successfully — confidence=1.0 because the trajectory just succeeded in
+// the wild. The 3-shape extractor will skip the same composite key on
+// its next run (dedup is by composite key), so the two paths compose
+// cleanly: a single successful commit seeds a high-confidence recipe;
+// the statistical extractor remains the fallback that catches batches
+// the inline path missed.
+//
+// Idempotent: looks up the latest recipe row for the same
+// (goal_shape, topology_signature) before emitting. Re-running for the
+// same directive is a no-op.
+
+export type RecipeFromCommitSummary = { extracted: 0 | 1; recipe_id: string | null };
+
+export const extractRecipeFromCommit = (
+  db: Database,
+  taskId: string,
+): RecipeFromCommitSummary => {
+  // Read the task_committed row — that's the anchor for the rest of the lookups.
+  const committed = db
+    .query(
+      `SELECT id, ts, directive_id, task_id, loop_id
+       FROM events
+       WHERE kind = 'task_committed' AND task_id = ?
+       ORDER BY ts DESC LIMIT 1`,
+    )
+    .get(taskId) as { id: string; ts: string; directive_id: string; task_id: string; loop_id: string | null } | null;
+  if (!committed) return { extracted: 0, recipe_id: null };
+
+  const goalShape = goalShapeFor(db, committed.directive_id);
+  const topology = topologySignatureFor(db, committed.directive_id);
+
+  // Dedup by composite key — if a recipe already exists for this
+  // (goal_shape, topology) we leave it alone. `updateRecipeConfidence`
+  // (recipe_replay.ts) is the canonical surface for refining the
+  // confidence of an existing recipe; the inline path is a one-shot
+  // seeder, not a confidence-adjuster.
+  const existingRows = db
+    .query(
+      `SELECT id, payload FROM events WHERE kind = 'recipe_extracted' ORDER BY ts DESC`,
+    )
+    .all() as Array<{ id: string; payload: string }>;
+  for (const r of existingRows) {
+    try {
+      const p = JSON.parse(r.payload) as { goal_shape?: string; topology_signature?: string };
+      if (p.goal_shape === goalShape && p.topology_signature === topology) {
+        return { extracted: 0, recipe_id: r.id };
+      }
+    } catch { /* skip malformed */ }
+  }
+
+  const trajectory = buildTrajectoryFor(db, committed.directive_id);
+  let recipeId = "";
+  withImmediateTransaction(db, () => {
+    recipeId = insertEvent(db, {
+      kind: "recipe_extracted",
+      directive_id: committed.directive_id,
+      task_id: committed.task_id,
+      loop_id: committed.loop_id ?? "",
+      substrate_origin: "substrate_auto",
+      payload: {
+        goal_shape: goalShape,
+        topology_signature: topology,
+        success_count: 1,
+        window_days: 30,
+        // Inline first-commit seed lands at the canonical 0.5 prior — below
+        // the 0.6 replay threshold — so the recipe is observable but does
+        // NOT yet preempt the brain. Two successful replays via
+        // updateRecipeConfidence(+0.05 each) push it above threshold; that
+        // matches the statistical extractor's prior so the two paths
+        // converge on the same posterior trajectory.
+        confidence: 0.5,
+        directive_ids: [committed.directive_id],
+        trajectory,
+        seeded_by: "inline_post_commit",
+      },
+      context_refs: [committed.id],
+    });
+  });
+  return { extracted: 1, recipe_id: recipeId };
+};

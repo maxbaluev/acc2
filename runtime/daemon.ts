@@ -333,14 +333,20 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // so /ready can refuse traffic until each has completed its first tick.
   // Robustness: declare each worker's tick interval so /health can flag
   // "stuck" workers that miss 3× consecutive ticks.
+  //
+  // All subsystems default ON. Production wants the full organism running
+  // out of the box — embedder + recipe-replay + rolling-review + father +
+  // scheduler. Tests opt OUT in tests/preload.ts (the suite must never call
+  // OpenAI or alter long-lived state). The opt-out lever is the same env
+  // var, set to "0".
   registerWorker("amendment", amendmentTickMs);
   registerWorker("metrics_gauge_refresh", gaugeTickMs);
   if (process.env.ACC2_INTEGRITY_AUTOSTART !== "0") registerWorker("integrity", integrityIntervalMs);
-  if (process.env.ACC2_EMBEDDER_AUTOSTART === "1") registerWorker("embedder", embedderIntervalMs);
-  if (process.env.ACC2_REHAB_AUTOSTART === "1") registerWorker("rehabilitation", rehabIntervalMs);
-  if (process.env.ACC2_ROLLING_AUTOSTART === "1") registerWorker("rolling_reviewer", rollingIntervalMs);
-  if (process.env.ACC2_FATHER_AUTOSTART === "1") registerWorker("father", fatherIntervalMs);
-  if (process.env.ACC2_AUTOSCHEDULER === "1") registerWorker("scheduler");
+  if (process.env.ACC2_EMBEDDER_AUTOSTART !== "0") registerWorker("embedder", embedderIntervalMs);
+  if (process.env.ACC2_REHAB_AUTOSTART !== "0") registerWorker("rehabilitation", rehabIntervalMs);
+  if (process.env.ACC2_ROLLING_AUTOSTART !== "0") registerWorker("rolling_reviewer", rollingIntervalMs);
+  if (process.env.ACC2_FATHER_AUTOSTART !== "0") registerWorker("father", fatherIntervalMs);
+  if (process.env.ACC2_AUTOSCHEDULER !== "0") registerWorker("scheduler");
 
   // Phase E: amendment worker — drain unapplied directive_amended events on
   // a configurable interval (default 2s; tests may pin a shorter value via
@@ -423,11 +429,14 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     workers.push(() => clearInterval(integrityTick));
   }
 
-  // Phase F: optional embedder worker. Default off — tests must not hit
-  // the OpenAI API. Enable with ACC2_EMBEDDER_AUTOSTART=1 in production.
-  // Tick every 10s with batch=20; errors surface as error_caught events so
-  // a single bad row can't kill the daemon and never vanishes silently.
-  if (process.env.ACC2_EMBEDDER_AUTOSTART === "1") {
+  // Phase F: embedder worker. Default ON — production wants every
+  // text-bearing event embedded so substrate.search returns useful
+  // results from the first directive forward. Opt-OUT with
+  // ACC2_EMBEDDER_AUTOSTART=0 (tests/preload.ts pins it so the unit
+  // suite never hits the OpenAI API). Tick every 10s with batch=20;
+  // errors surface as error_caught events so a single bad row can't
+  // kill the daemon and never vanishes silently.
+  if (process.env.ACC2_EMBEDDER_AUTOSTART !== "0") {
     let embedderMarked = false;
     const embedderTick = setInterval(
       supervisedTick(db, "embedder", embedderIntervalMs, async () => {
@@ -469,15 +478,17 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     workers.push(() => clearInterval(embedderTick));
   }
 
-  // Phase H: optional rehabilitation worker. Default off — tests must not
-  // run controlled fixture invocations as a side effect. Enable with
-  // ACC2_REHAB_AUTOSTART=1. Tick interval defaults to 30 minutes
-  // (ACC2_REHAB_TICK_MS, 1_800_000ms); the 14-day cooldown still gates each
-  // candidate so checking more often only matters when many artifacts crossed
-  // the cooldown simultaneously. Worker respects the canonical deadline
-  // pattern: a `runningTick` boolean swallows overlapping ticks so a slow
-  // fixture cannot stack worker invocations.
-  if (process.env.ACC2_REHAB_AUTOSTART === "1") {
+  // Phase H: rehabilitation worker. Default ON — production wants
+  // quarantined artifacts to get a recovery chance on the canonical
+  // cadence. Opt-OUT with ACC2_REHAB_AUTOSTART=0 (tests/preload.ts pins
+  // it so unit tests don't spawn fixture subprocesses). Tick interval
+  // defaults to 30 minutes (ACC2_REHAB_TICK_MS, 1_800_000ms); the
+  // 14-day cooldown still gates each candidate so checking more often
+  // only matters when many artifacts crossed the cooldown
+  // simultaneously. Worker respects the canonical deadline pattern: a
+  // `runningTick` boolean swallows overlapping ticks so a slow fixture
+  // cannot stack worker invocations.
+  if (process.env.ACC2_REHAB_AUTOSTART !== "0") {
     const rehabTickMs = Number(process.env.ACC2_REHAB_TICK_MS ?? 30 * 60 * 1000);
     // Rehab readiness flips on registration; we do NOT run a synchronous
     // initial tick because rehab can spawn subprocess fixtures.
@@ -538,12 +549,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     workers.push(() => clearInterval(rehabTick));
   }
 
-  // Phase I: optional rolling-review worker. Default off — tests don't want
-  // rolling reviews firing automatically. Enable with
-  // ACC2_ROLLING_AUTOSTART=1. Tick every 60s; errors swallowed so a single
-  // malformed directive can't kill the daemon. Father (Phase K) will turn
-  // this on in production.
-  if (process.env.ACC2_ROLLING_AUTOSTART === "1") {
+  // Phase I: rolling-review worker. Default ON — production wants
+  // rolling-active directives to receive cadence-driven re-opens.
+  // Opt-OUT with ACC2_ROLLING_AUTOSTART=0 (tests/preload.ts pins it).
+  // Tick every 60s; errors swallowed so a single malformed directive
+  // can't kill the daemon. Father (Phase K) drives the same loop on
+  // its own tick when both are on.
+  if (process.env.ACC2_ROLLING_AUTOSTART !== "0") {
     let rollingMarked = false;
     const rollingTick = setInterval(
       supervisedTick(db, "rolling_reviewer", rollingIntervalMs, async () => {
@@ -583,15 +595,17 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     workers.push(() => clearInterval(rollingTick));
   }
 
-  // Phase K: optional Father worker. Default off — tests don't want Father
-  // firing automatically. Enable with ACC2_FATHER_AUTOSTART=1. Per §14
-  // Father's cadence is 5 min normal; tests can pass a smaller interval
-  // explicitly. When Father is enabled it ALSO processes rolling reviews on
-  // its own tick (simplification: one autostart flag for the whole
-  // orchestration — owner-controlled, per task brief K.4). Father has zero
-  // LLM-call capability; it only opens directives compiled from templates
-  // and records its cycle.
-  if (process.env.ACC2_FATHER_AUTOSTART === "1") {
+  // Phase K: Father worker. Default ON — production wants the
+  // long-horizon orchestrator driving objective re-ranking and rolling
+  // reviews on the canonical 5-min cadence (§14). Opt-OUT with
+  // ACC2_FATHER_AUTOSTART=0 (tests/preload.ts pins it). Tests that
+  // want Father deterministically can also pin
+  // ACC2_FATHER_INTERVAL_MS to a smaller value. When Father is enabled
+  // it ALSO processes rolling reviews on its own tick (simplification:
+  // one autostart flag for the whole orchestration — owner-controlled,
+  // per task brief K.4). Father has zero LLM-call capability; it only
+  // opens directives compiled from templates and records its cycle.
+  if (process.env.ACC2_FATHER_AUTOSTART !== "0") {
     let fatherMarked = false;
     const fatherTick = setInterval(
       supervisedTick(db, "father", fatherIntervalMs, async () => {
@@ -652,10 +666,12 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     workers.push(() => clearInterval(fatherTick));
   }
 
-  // Phase E: optional autoscheduler. Default off — tests don't want the
-  // scheduler firing dispatches. Enable with ACC2_AUTOSCHEDULER=1.
+  // Phase E: autoscheduler. Default ON — production wants the
+  // scheduler drain-loop firing every ready dispatch as it lands.
+  // Opt-OUT with ACC2_AUTOSCHEDULER=0 (tests/preload.ts pins it so the
+  // unit suite drives the scheduler explicitly per test).
   let schedulerAbort: AbortController | null = null;
-  if (process.env.ACC2_AUTOSCHEDULER === "1") {
+  if (process.env.ACC2_AUTOSCHEDULER !== "0") {
     schedulerAbort = new AbortController();
     markWorkerReady("scheduler");
     recordWorkerTick("scheduler");

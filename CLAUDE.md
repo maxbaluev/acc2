@@ -222,6 +222,8 @@ acc watch                            # live TUI in another terminal
 
 Foundational seed AND code-artifact seed are both owner-approved per session (v2-design.md §16). `acc init --yes` gates both behind explicit consent; production install path and the integration harness now hit the SAME seed code.
 
+All necessary subsystems are ON by default — the daemon starts the embedder, scheduler, father, rolling-reviewer, rehabilitation, and integrity workers without any `ACC2_*_AUTOSTART=1` opt-in. Every `ACC2_*_AUTOSTART` env var is an opt-OUT (set to `"0"` to disable a worker for an unusual setup). Tests pin them all to `"0"` via `tests/preload.ts` so the unit suite stays hermetic. Do NOT set them to `"1"` — that is the legacy opt-in shape; the canonical opt-OUT value is `"0"`.
+
 ## When in doubt
 
 - **`docs/v2-design.md`** — canonical architectural ground-truth (1,940+ lines). Everything is there.

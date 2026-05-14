@@ -252,12 +252,20 @@ describe("task_dispatcher", () => {
         await dispatchReadyTask(db, ready[0]!, { fixtureTargetPath: tempDir });
         await new Promise((r) => setTimeout(r, 5));
       }
-      const summary = extractRecipeCandidates(db);
-      expect(summary.extracted).toBeGreaterThanOrEqual(1);
+      // Task 5: extractRecipeFromCommit fires inline on every task_committed,
+      // so the first dispatch already seeded a confidence=1.0 recipe — the
+      // 3-shape statistical extractor's run is a structural fallback that
+      // skips composite keys it already saw. Either path is acceptable here;
+      // the test only needs A recipe to exist before the replay dispatch
+      // below.
+      extractRecipeCandidates(db);
       const recipeRow = db
         .query("SELECT id FROM events WHERE kind = 'recipe_extracted' ORDER BY ts DESC LIMIT 1")
         .get() as { id: string };
-      // Bump twice to bring 0.5 prior up to 0.6 default threshold.
+      expect(recipeRow).not.toBeNull();
+      // Bump twice — the inline recipe lands at confidence=1.0 (already above
+      // the 0.6 default threshold), but bumping is idempotent and keeps the
+      // pre-Task-5 shape of this test intact.
       updateRecipeConfidence(db, recipeRow.id, true);
       updateRecipeConfidence(db, recipeRow.id, true);
 
