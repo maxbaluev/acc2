@@ -57,9 +57,9 @@ export type ExportOptions = {
   /** Include the logs/ + cache/ subtrees.  Default false (often huge). */
   includeLogs?: boolean;
   /** Source state dir.  Defaults to the canonical resolver — typically
-   *  `$ACC2_STATE_DIR` (or legacy `$ACCINT_HOME`), falling back to
-   *  `~/.accint`.  All state files live DIRECTLY under this dir (no
-   *  `state/` subdir) per the canonical layout. */
+   *  `$ACC2_STATE_DIR`, falling back to `~/.accint`.  All state files
+   *  live DIRECTLY under this dir (no `state/` subdir) per the canonical
+   *  layout. */
   stateDir?: string;
   /** Use a system command override.  Tests inject a stub that records the
    *  invocation instead of actually shelling out. */

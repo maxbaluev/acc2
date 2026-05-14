@@ -37,7 +37,7 @@ import { subscribe, resetBus, type BusEvent } from "./event_bus";
 import { newAdminToken } from "./ids";
 import { createMcpServer } from "./mcp_server";
 import {
-  maybeWarnAccintHomeDeprecated, migrateLegacyLayout,
+  migrateLegacyLayout,
   resolveDbPath, resolveSocketFile, resolveStateDir, resolveTokenFile,
 } from "./state_paths";
 import { createExternalIngressState, handleExternalPush, type ExternalIngressState } from "./external_ingress";
@@ -72,9 +72,9 @@ export const DEFAULT_DAEMON_PORT = 9387;
 export const DEFAULT_AUX_PORT_OFFSET = 1;
 
 /** Repo root anchor for the dev-checkout fallback DB path. When no
- *  ACC2_STATE_DIR / ACCINT_HOME / ACC2_DB_PATH env var is set the daemon
- *  falls back to `<repo>/state/accint.db` so a fresh `bun runtime/daemon.ts`
- *  from a clean checkout still works. */
+ *  ACC2_STATE_DIR / ACC2_DB_PATH env var is set the daemon falls back
+ *  to `<repo>/state/accint.db` so a fresh `bun runtime/daemon.ts` from
+ *  a clean checkout still works. */
 const REPO_ROOT = resolve(import.meta.dirname ?? ".", "..");
 
 /** Default socket/token/db paths are computed on demand from the shared
@@ -811,13 +811,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       transport: "fastmcp:httpStream",
     },
   });
-  // ACCINT_HOME deprecation + layout-migration audit. We fire the helpers
-  // with the live DB so the ledger carries the canonical audit row, and
-  // the warn-once latch (shared with cli/init.ts) prevents duplicate
-  // logger.warn output across cli surfaces in the same process. Both
-  // helpers are no-ops when the trigger condition is absent.
+  // Layout-migration audit. We fire the helper with the live DB so the
+  // ledger carries the canonical `cli_layout_migrated` audit row when a
+  // rename happened. The helper is a no-op when the trigger condition is
+  // absent.
   if (opts.stateDbPath === undefined && opts.socketFile === undefined && opts.tokenFile === undefined) {
-    maybeWarnAccintHomeDeprecated(db);
     // Re-fire migrateLegacyLayout with the live DB so a migration that
     // happened above now lands the `cli_layout_migrated` event in the
     // ledger. Idempotent: if no legacy files remain, returns immediately.

@@ -15,9 +15,8 @@ import {
 } from "./init";
 
 let tmpRoot = "";
-let accintHome = "";
+let stateDir = "";
 let envFile = "";
-let prevAccintHome: string | undefined;
 let prevAcc2StateDir: string | undefined;
 let prevOpenAiKey: string | undefined;
 let prevCwd = "";
@@ -26,28 +25,21 @@ const silent = () => { /* swallow output */ };
 
 beforeEach(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), "acc2-init-"));
-  accintHome = join(tmpRoot, ".accint");
+  stateDir = join(tmpRoot, ".accint");
   prevCwd = process.cwd();
   // Each test makes its own working dir so .env writes don't collide.
   const workDir = join(tmpRoot, "work");
   require("node:fs").mkdirSync(workDir, { recursive: true });
   process.chdir(workDir);
   envFile = join(workDir, ".env");
-  prevAccintHome = process.env.ACCINT_HOME;
   prevAcc2StateDir = process.env.ACC2_STATE_DIR;
   prevOpenAiKey = process.env.OPENAI_API_KEY;
-  // We exercise the LEGACY (ACCINT_HOME) path in these tests so the
-  // deprecation surface remains covered. Make sure ACC2_STATE_DIR is
-  // not set — its presence wins and would skip the deprecation branch.
-  delete process.env.ACC2_STATE_DIR;
-  process.env.ACCINT_HOME = accintHome;
+  process.env.ACC2_STATE_DIR = stateDir;
   delete process.env.OPENAI_API_KEY;
 });
 
 afterAll(() => {
   closeDb();
-  if (prevAccintHome === undefined) delete process.env.ACCINT_HOME;
-  else process.env.ACCINT_HOME = prevAccintHome;
   if (prevAcc2StateDir === undefined) delete process.env.ACC2_STATE_DIR;
   else process.env.ACC2_STATE_DIR = prevAcc2StateDir;
   if (prevOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -61,17 +53,14 @@ const cleanup = () => {
 };
 
 describe("resolveInitPaths", () => {
-  test("honors ACCINT_HOME override (legacy alias) — canonical flat layout", () => {
-    process.env.ACCINT_HOME = accintHome;
-    delete process.env.ACC2_STATE_DIR;
+  test("honors ACC2_STATE_DIR override — canonical flat layout", () => {
+    process.env.ACC2_STATE_DIR = stateDir;
     const paths = resolveInitPaths();
     // Under the canonical layout the state dir IS the root — there is
-    // no longer a `state/` subdir. `accintHome` is kept as a legacy
-    // alias on the InitPaths shape pointing at the same value.
-    expect(paths.stateDir).toBe(accintHome);
-    expect(paths.accintHome).toBe(accintHome);
-    expect(paths.tokenFile).toBe(join(accintHome, "v2.sock.token"));
-    expect(paths.dbPath).toBe(join(accintHome, "state.db"));
+    // no longer a `state/` subdir.
+    expect(paths.stateDir).toBe(stateDir);
+    expect(paths.tokenFile).toBe(join(stateDir, "v2.sock.token"));
+    expect(paths.dbPath).toBe(join(stateDir, "state.db"));
     cleanup();
   });
 });
@@ -164,7 +153,7 @@ describe("runInitProgrammatic(--yes mode)", () => {
     expect(summary.tokenMinted).toBe(true);
 
     // Canonical flat layout — no `state/` subdir.
-    const tokenFile = join(accintHome, "v2.sock.token");
+    const tokenFile = join(stateDir, "v2.sock.token");
     expect(existsSync(tokenFile)).toBe(true);
     const st = statSync(tokenFile);
     // 0o600 — owner rw only. statSync().mode masks the file type bits.
@@ -191,7 +180,7 @@ describe("runInitProgrammatic(--yes mode)", () => {
 
   test("recognises an existing partial state (state dir but no token) and heals forward", async () => {
     // Pre-create the (flat) state dir but no token.
-    require("node:fs").mkdirSync(accintHome, { recursive: true });
+    require("node:fs").mkdirSync(stateDir, { recursive: true });
     const summary = await runInitProgrammatic({ yes: true, log: silent, warn: silent });
     expect(summary.exitCode).toBe(0);
     expect(summary.stateDirCreated).toBe(false); // dir was already there

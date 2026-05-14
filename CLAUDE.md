@@ -154,11 +154,9 @@ Env-var precedence (each independent):
 | `ACC2_TOKEN_FILE`     | `${ACC2_STATE_DIR}/v2.sock.token`           |
 | `ACC2_DB_PATH`        | `${ACC2_STATE_DIR}/state.db` (or `<repo>/state/accint.db` when no env var is set) |
 
-`ACCINT_HOME` is the deprecated alias for `ACC2_STATE_DIR` — still
-honoured for back-compat. When it wins resolution a one-shot
-`logger.warn` fires and a `deprecation_warning_emitted` event lands in
-the ledger. The legacy `${stateDir}/state/<file>` layout is migrated
-forward automatically on next `acc init` or daemon boot
+The v1-era `ACCINT_HOME` alias has been removed — only `ACC2_STATE_DIR`
+is honoured now. The legacy `${stateDir}/state/<file>` layout is
+migrated forward automatically on next `acc init` or daemon boot
 (`cli_layout_migrated` event in the ledger).
 
 ## How to read state

@@ -1,7 +1,6 @@
-// runtime/state_paths.test.ts — covers the shared path resolver: each
-// env-var branch (ACC2_STATE_DIR / ACCINT_HOME / default), socket/token/
-// db precedence, the legacy → canonical layout migration, and the
-// ACCINT_HOME deprecation warn-once contract.
+// runtime/state_paths.test.ts — covers the shared path resolver: the
+// ACC2_STATE_DIR env-var branch (vs default), socket/token/db
+// precedence, and the legacy → canonical layout migration.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
@@ -11,36 +10,29 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import {
-  _resetDeprecationLatchForTests, maybeWarnAccintHomeDeprecated,
   migrateLegacyLayout, resolveDbPath, resolveSocketFile, resolveStateDir,
   resolveStateDirVerbose, resolveTokenFile,
 } from "./state_paths";
 
 let prevStateDir: string | undefined;
-let prevAccintHome: string | undefined;
 let prevSocketFile: string | undefined;
 let prevTokenFile: string | undefined;
 let prevDbPath: string | undefined;
 
 beforeEach(() => {
   prevStateDir = process.env.ACC2_STATE_DIR;
-  prevAccintHome = process.env.ACCINT_HOME;
   prevSocketFile = process.env.ACC2_SOCKET_FILE;
   prevTokenFile = process.env.ACC2_TOKEN_FILE;
   prevDbPath = process.env.ACC2_DB_PATH;
   delete process.env.ACC2_STATE_DIR;
-  delete process.env.ACCINT_HOME;
   delete process.env.ACC2_SOCKET_FILE;
   delete process.env.ACC2_TOKEN_FILE;
   delete process.env.ACC2_DB_PATH;
-  _resetDeprecationLatchForTests();
 });
 
 afterEach(() => {
   if (prevStateDir === undefined) delete process.env.ACC2_STATE_DIR;
   else process.env.ACC2_STATE_DIR = prevStateDir;
-  if (prevAccintHome === undefined) delete process.env.ACCINT_HOME;
-  else process.env.ACCINT_HOME = prevAccintHome;
   if (prevSocketFile === undefined) delete process.env.ACC2_SOCKET_FILE;
   else process.env.ACC2_SOCKET_FILE = prevSocketFile;
   if (prevTokenFile === undefined) delete process.env.ACC2_TOKEN_FILE;
@@ -50,33 +42,24 @@ afterEach(() => {
 });
 
 describe("resolveStateDirVerbose — env-var precedence", () => {
-  test("ACC2_STATE_DIR wins over everything", () => {
+  test("ACC2_STATE_DIR wins when set", () => {
     process.env.ACC2_STATE_DIR = "/tmp/state-from-acc2";
-    process.env.ACCINT_HOME = "/tmp/state-from-legacy";
     const res = resolveStateDirVerbose();
     expect(res.dir).toBe("/tmp/state-from-acc2");
     expect(res.source).toBe("ACC2_STATE_DIR");
   });
 
-  test("ACCINT_HOME wins when ACC2_STATE_DIR is unset", () => {
-    process.env.ACCINT_HOME = "/tmp/state-from-legacy";
-    const res = resolveStateDirVerbose();
-    expect(res.dir).toBe("/tmp/state-from-legacy");
-    expect(res.source).toBe("ACCINT_HOME");
-  });
-
-  test("falls back to ~/.accint when neither is set", () => {
+  test("falls back to ~/.accint when unset", () => {
     const res = resolveStateDirVerbose();
     expect(res.dir).toBe(join(homedir(), ".accint"));
     expect(res.source).toBe(null);
   });
 
-  test("treats empty-string env vars as unset", () => {
+  test("treats empty-string ACC2_STATE_DIR as unset", () => {
     process.env.ACC2_STATE_DIR = "";
-    process.env.ACCINT_HOME = "/tmp/legacy";
     const res = resolveStateDirVerbose();
-    expect(res.dir).toBe("/tmp/legacy");
-    expect(res.source).toBe("ACCINT_HOME");
+    expect(res.dir).toBe(join(homedir(), ".accint"));
+    expect(res.source).toBe(null);
   });
 
   test("resolveStateDir returns the same string", () => {
@@ -110,11 +93,6 @@ describe("resolveSocketFile / resolveTokenFile / resolveDbPath", () => {
   test("dbPath = ${ACC2_STATE_DIR}/state.db when set", () => {
     process.env.ACC2_STATE_DIR = "/tmp/dir";
     expect(resolveDbPath("/repo-root")).toBe("/tmp/dir/state.db");
-  });
-
-  test("dbPath = ${ACCINT_HOME}/state.db when only the legacy env is set", () => {
-    process.env.ACCINT_HOME = "/tmp/legacy";
-    expect(resolveDbPath("/repo-root")).toBe("/tmp/legacy/state.db");
   });
 
   test("dbPath falls back to <repo>/state/accint.db when no env is set", () => {
@@ -201,67 +179,5 @@ describe("migrateLegacyLayout", () => {
     // migration, so existsSync(legacyDir) is true; but no files inside
     // means no renames.
     expect(second.migrated).toBe(false);
-  });
-});
-
-describe("maybeWarnAccintHomeDeprecated", () => {
-  let tmpRoot = "";
-  let dbPath = "";
-
-  beforeEach(() => {
-    tmpRoot = mkdtempSync(join(tmpdir(), "acc2-dep-"));
-    dbPath = join(tmpRoot, "audit.db");
-  });
-  afterEach(() => {
-    closeDb(dbPath);
-    rmSync(tmpRoot, { recursive: true, force: true });
-  });
-
-  test("emits the deprecation_warning_emitted event exactly once per process", () => {
-    process.env.ACCINT_HOME = "/tmp/legacy";
-    const db = openDb(dbPath);
-    maybeWarnAccintHomeDeprecated(db);
-    maybeWarnAccintHomeDeprecated(db);
-    maybeWarnAccintHomeDeprecated(db);
-    const row = db
-      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'deprecation_warning_emitted'")
-      .get() as { n: number };
-    expect(row.n).toBe(1);
-  });
-
-  test("does NOT emit when ACC2_STATE_DIR is the source", () => {
-    process.env.ACC2_STATE_DIR = "/tmp/canonical";
-    process.env.ACCINT_HOME = "/tmp/legacy"; // also set — should be IGNORED
-    const db = openDb(dbPath);
-    maybeWarnAccintHomeDeprecated(db);
-    const row = db
-      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'deprecation_warning_emitted'")
-      .get() as { n: number };
-    expect(row.n).toBe(0);
-  });
-
-  test("payload identifies the deprecated key and the canonical replacement", () => {
-    process.env.ACCINT_HOME = "/tmp/legacy";
-    const db = openDb(dbPath);
-    maybeWarnAccintHomeDeprecated(db);
-    const row = db
-      .query("SELECT payload FROM events WHERE kind = 'deprecation_warning_emitted' LIMIT 1")
-      .get() as { payload: string };
-    const payload = JSON.parse(row.payload) as { key?: string; canonical?: string };
-    expect(payload.key).toBe("ACCINT_HOME");
-    expect(payload.canonical).toBe("ACC2_STATE_DIR");
-  });
-
-  test("warn-once latch survives the absence of a DB handle", () => {
-    process.env.ACCINT_HOME = "/tmp/legacy";
-    // First call: no DB — only the logger.warn happens. Latch flips.
-    maybeWarnAccintHomeDeprecated(null);
-    // Second call with a DB: the latch is already set, so no event lands.
-    const db = openDb(dbPath);
-    maybeWarnAccintHomeDeprecated(db);
-    const row = db
-      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'deprecation_warning_emitted'")
-      .get() as { n: number };
-    expect(row.n).toBe(0);
   });
 });

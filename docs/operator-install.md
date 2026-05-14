@@ -33,20 +33,18 @@ ${stateDir}/
 | `ACC2_STATE_DIR`      | `~/.accint`                              |
 | `ACC2_SOCKET_FILE`    | `${ACC2_STATE_DIR}/v2.sock`              |
 | `ACC2_TOKEN_FILE`     | `${ACC2_STATE_DIR}/v2.sock.token`        |
-| `ACC2_DB_PATH`        | `${ACC2_STATE_DIR}/state.db` when ACC2_STATE_DIR (or legacy ACCINT_HOME) is set; otherwise `<repo>/state/accint.db` for dev-from-checkout. |
+| `ACC2_DB_PATH`        | `${ACC2_STATE_DIR}/state.db` when ACC2_STATE_DIR is set; otherwise `<repo>/state/accint.db` for dev-from-checkout. |
 
 Each env var is honored independently — set `ACC2_SOCKET_FILE` alone to
 relocate just the socket without touching the rest. The daemon, the
 init CLI, and every admin / doctor / watch surface read through the
 same resolver so they cannot disagree.
 
-### Legacy `ACCINT_HOME` (deprecated)
+### Legacy `ACCINT_HOME` (removed)
 
-`ACCINT_HOME` is the v1 name for `ACC2_STATE_DIR`. It is still honoured
-for back-compat — when set (and `ACC2_STATE_DIR` is unset), it drives
-state-dir resolution exactly the same way and a one-shot deprecation
-warning fires (logger + `deprecation_warning_emitted` event in the
-ledger). Migrate by replacing the export with `ACC2_STATE_DIR`:
+The v1-era `ACCINT_HOME` alias has been removed. Operators who still
+have the export in their environment must rename it to
+`ACC2_STATE_DIR`:
 
 ```bash
 # Before:

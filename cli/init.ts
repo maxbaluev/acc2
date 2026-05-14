@@ -3,8 +3,7 @@
 //
 // Steps (all idempotent):
 //   1. Banner.
-//   2. State directory (~/.accint, override via ACC2_STATE_DIR; legacy
-//      ACCINT_HOME still honored with a deprecation warning).
+//   2. State directory (~/.accint, override via ACC2_STATE_DIR).
 //   3. Admin token (${stateDir}/v2.sock.token, 0600).
 //   4. OPENAI_API_KEY detection or interactive prompt.
 //   5. opencode CLI check (`which opencode`).
@@ -30,18 +29,14 @@ import { newAdminToken } from "../runtime/ids";
 import { openDb, closeDb } from "../substrate/db";
 import { seedFoundationalKnowledge } from "../substrate/seed";
 import {
-  maybeWarnAccintHomeDeprecated, migrateLegacyLayout,
-  resolveDbPath, resolveSocketFile, resolveStateDir, resolveStateDirVerbose,
+  migrateLegacyLayout,
+  resolveDbPath, resolveSocketFile, resolveStateDir,
   resolveTokenFile,
 } from "../runtime/state_paths";
 
 // ── paths ─────────────────────────────────────────────────────────
 
 export type InitPaths = {
-  /** The state-dir root. Same value as `stateDir` — kept for backward
-   *  compatibility with tests that read `paths.accintHome`. New code
-   *  should prefer `stateDir`. */
-  accintHome: string;
   /** Canonical state directory (e.g. ~/.accint). All state files live
    *  DIRECTLY under this path — no `state/` subdir. */
   stateDir: string;
@@ -55,17 +50,15 @@ export type InitPaths = {
 
 export const resolveInitPaths = (cwd: string = process.cwd()): InitPaths => {
   // Single source of truth: the resolver module honours ACC2_STATE_DIR
-  // first, then ACCINT_HOME (with a one-shot deprecation warn fired
-  // elsewhere — runInitProgrammatic does that explicitly), then ~/.accint.
+  // first, then falls back to ~/.accint.
   const stateDir = resolveStateDir();
   // The daemon's `<repo>` fallback (only used when no state-dir env is
   // set) needs an anchor — init.ts lives at <repo>/cli/init.ts, so the
   // repo root is two dirs up from this file. We pass it to resolveDbPath
   // so dev-from-checkout still lands at <repo>/state/accint.db when
-  // neither ACC2_STATE_DIR nor ACCINT_HOME is set.
+  // ACC2_STATE_DIR is unset.
   const repoRoot = join(import.meta.dirname ?? cwd, "..");
   return {
-    accintHome: stateDir, // legacy alias for tests; new code uses stateDir
     stateDir,
     logsDir: join(stateDir, "logs"),
     tmpDir: join(stateDir, "tmp"),
@@ -224,7 +217,6 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
   banner(log);
 
   // 1. State directory.
-  const stateRes = resolveStateDirVerbose();
   const state = ensureDir(paths.stateDir);
   ensureDir(paths.logsDir);
   ensureDir(paths.tmpDir);
@@ -242,19 +234,6 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
     for (const r of migration.renamed) log(`       ${r.from} → ${r.to}`);
   }
   log(`[1/8] state directory: ${paths.stateDir}` + (summary.stateDirCreated ? "  (created)" : "  (existing)"));
-  // ACCINT_HOME deprecation — emit the warn-once signal as soon as we
-  // confirm ACCINT_HOME drove the resolution. We pass `null` for the
-  // db handle so the helper only fires the logger.warn here; the
-  // substrate event will land later once the daemon (or the seed step
-  // below) opens the DB.
-  if (stateRes.source === "ACCINT_HOME") {
-    warn(
-      "[1/8] ACCINT_HOME is deprecated — set ACC2_STATE_DIR instead. " +
-        "ACCINT_HOME support will be removed in a future release.",
-    );
-    maybeWarnAccintHomeDeprecated(null);
-    summary.warnings.push("ACCINT_HOME is deprecated; set ACC2_STATE_DIR");
-  }
 
   // 2. Admin token.
   const tok = ensureAdminToken(paths.tokenFile);
@@ -338,11 +317,6 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
   if (approve) {
     const db = openDb(paths.dbPath);
     try {
-      // With the DB now open, re-fire the deprecation event so the
-      // substrate ledger carries the audit alongside the logger.warn
-      // emitted earlier. The latch in state_paths.ts is shared, so the
-      // logger.warn does NOT fire a second time.
-      maybeWarnAccintHomeDeprecated(db);
       // Re-run the migration helper with the live DB handle so the
       // `cli_layout_migrated` event lands in the ledger when a migration
       // happened on this run. The helper is idempotent — calling it

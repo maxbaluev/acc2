@@ -32,8 +32,8 @@ import { resolveStateDir } from "../runtime/state_paths";
 export type ImportOptions = {
   archivePath: string;
   /** Override the target state dir.  Defaults to the canonical resolver
-   *  (`$ACC2_STATE_DIR` / legacy `$ACCINT_HOME` / `~/.accint`).  All
-   *  state files land DIRECTLY under this dir per the canonical layout. */
+   *  (`$ACC2_STATE_DIR` / `~/.accint`).  All state files land DIRECTLY
+   *  under this dir per the canonical layout. */
   stateDir?: string;
   /** Force overwrite + ignore daemon-running guard. */
   force?: boolean;

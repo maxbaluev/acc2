@@ -17,14 +17,11 @@
 //
 // Env-var precedence (each independent):
 //
-//   stateDir   = ACC2_STATE_DIR ?? ACCINT_HOME ?? ~/.accint
-//                (ACCINT_HOME is deprecated; emits a one-shot logger.warn +
-//                 deprecation_warning_emitted event when it wins.)
+//   stateDir   = ACC2_STATE_DIR ?? ~/.accint
 //
 //   socketFile = ACC2_SOCKET_FILE ?? ${stateDir}/v2.sock
 //   tokenFile  = ACC2_TOKEN_FILE  ?? ${stateDir}/v2.sock.token
 //   dbPath     = ACC2_DB_PATH     ?? ${stateDir}/state.db   when ACC2_STATE_DIR
-//                                                            (or ACCINT_HOME)
 //                                                            is set
 //                                ?? <repo>/state/accint.db   otherwise
 //                                                            (repo-local
@@ -32,26 +29,17 @@
 //
 // Resolvers read process.env LAZILY on every call so the daemon (or tests)
 // can change the env mid-process and pick up the new value on the next
-// resolution. The deprecation warning is fired ONCE per process; we keep
-// the latch in module scope.
+// resolution.
+//
+// The v1-era `ACCINT_HOME` alias was deprecated and then removed; only
+// `ACC2_STATE_DIR` is honoured now. Operators upgrading from a pre-removal
+// install should rename the export.
 
 import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Database } from "bun:sqlite";
-import { logger } from "./logger";
 import { emitEvent } from "./events";
-
-// ── Deprecation warn-once latch ───────────────────────────────────────
-
-let accintHomeDeprecationLatched = false;
-
-/** Test-only — reset the deprecation latch so a unit test can reassert
- *  the warn-once contract from a clean slate. NOT exported via the
- *  module's main API; callers must import explicitly. */
-export const _resetDeprecationLatchForTests = (): void => {
-  accintHomeDeprecationLatched = false;
-};
 
 // ── State-dir resolver (single source of truth) ──────────────────────
 
@@ -59,20 +47,15 @@ export type StateDirResolution = {
   dir: string;
   /** Which env var (if any) drove the resolution. `null` when the default
    *  `~/.accint` was used. */
-  source: "ACC2_STATE_DIR" | "ACCINT_HOME" | null;
+  source: "ACC2_STATE_DIR" | null;
 };
 
-/** Resolve the canonical state directory. ACC2_STATE_DIR wins; ACCINT_HOME
- *  is honoured for back-compat and triggers the one-shot deprecation
- *  warning when it does. */
+/** Resolve the canonical state directory. Honours `ACC2_STATE_DIR`; falls
+ *  back to `~/.accint` when unset. */
 export const resolveStateDirVerbose = (): StateDirResolution => {
   const fromAcc2 = process.env.ACC2_STATE_DIR;
   if (fromAcc2 && fromAcc2.length > 0) {
     return { dir: fromAcc2, source: "ACC2_STATE_DIR" };
-  }
-  const fromAccintHome = process.env.ACCINT_HOME;
-  if (fromAccintHome && fromAccintHome.length > 0) {
-    return { dir: fromAccintHome, source: "ACCINT_HOME" };
   }
   return { dir: join(homedir(), ".accint"), source: null };
 };
@@ -80,36 +63,6 @@ export const resolveStateDirVerbose = (): StateDirResolution => {
 /** Convenience: just return the directory string. Identical to
  *  `resolveStateDirVerbose().dir`. */
 export const resolveStateDir = (): string => resolveStateDirVerbose().dir;
-
-/** Emit the ACCINT_HOME deprecation signal — at most once per process.
- *  Fires both a `logger.warn` (for operator-visible log streams) and a
- *  `deprecation_warning_emitted` event into the substrate so the ledger
- *  carries the audit. The event is best-effort; a failure to insert
- *  must NOT prevent the daemon from starting (the warning is advisory).
- *
- *  Call this from every site that touches the state dir. The latch
- *  guarantees the message appears once even when several sites race. */
-export const maybeWarnAccintHomeDeprecated = (db: Database | null): void => {
-  if (accintHomeDeprecationLatched) return;
-  const res = resolveStateDirVerbose();
-  if (res.source !== "ACCINT_HOME") return;
-  accintHomeDeprecationLatched = true;
-  try {
-    logger.warn(
-      { canonical: "ACC2_STATE_DIR", deprecated: "ACCINT_HOME" },
-      "ACCINT_HOME is deprecated — set ACC2_STATE_DIR instead. ACCINT_HOME support will be removed in a future release.",
-    );
-  } catch { /* swallow — logger failure must not block boot */ }
-  if (db) {
-    try {
-      emitEvent(db, {
-        kind: "deprecation_warning_emitted",
-        substrate_origin: "substrate_auto",
-        payload: { key: "ACCINT_HOME", canonical: "ACC2_STATE_DIR" },
-      });
-    } catch { /* swallow — audit-event failure is non-fatal */ }
-  }
-};
 
 // ── Socket / token / db resolvers ────────────────────────────────────
 
@@ -130,8 +83,8 @@ export const resolveTokenFile = (): string => {
 };
 
 /** Canonical SQLite path. Honors `ACC2_DB_PATH` when set; otherwise:
- *    - when a state dir was explicitly opted into (ACC2_STATE_DIR or
- *      ACCINT_HOME), the DB lives at `${stateDir}/state.db`.
+ *    - when a state dir was explicitly opted into via ACC2_STATE_DIR, the
+ *      DB lives at `${stateDir}/state.db`.
  *    - otherwise, falls back to the repo-local `<repo>/state/accint.db`
  *      so dev-from-checkout still works without any env vars set.
  *
