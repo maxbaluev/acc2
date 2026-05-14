@@ -7,8 +7,11 @@
 //
 // The scenarios cover the §17 + §18 cutover criteria end-to-end against a
 // real daemon (real fastmcp wire, real Bun.serve aux port, real SQLite, real
-// bun-runtime artifacts). The bridge runs in mock mode (ACC2_BRIDGE_MODE=mock
-// by default) so no opencode subprocess is spawned.
+// bun-runtime artifacts). The bridge runs in mock mode for the 9 plumbing
+// scenarios — the production default is `real`, but harness.ts and the bun
+// test preload (`tests/preload.ts`) pin `ACC2_BRIDGE_MODE=mock` so no
+// opencode subprocess is spawned. The 10th scenario (scenarioRealBrainEndToEnd)
+// flips to real for its own dispatch and restores on exit.
 
 import type { Database } from "bun:sqlite";
 import type { DaemonHandle } from "../../runtime/daemon";
@@ -835,4 +838,250 @@ export const scenarioAmendmentSupersession = async (handle: DaemonHandle): Promi
     predRow!.outcome === "amended",
     `predicted outcome must be 'amended' (got ${predRow!.outcome})`,
   );
+};
+
+// ── Scenario 10 — real_brain_end_to_end (opt-in opencode dispatch) ─
+
+/**
+ * Real-brain pre-flight: returns `null` when every prerequisite is present
+ * and the scenario should run; returns a short reason string when the
+ * scenario should be SKIPPED (printed by the harness as a `[skip]` line,
+ * not failed).
+ *
+ * Skip conditions (all "the operator has not opted in"):
+ *  - `--skip-real` flag on argv (operator wants the legacy 9-scenario run).
+ *  - `OPENAI_API_KEY` absent (embedder/downstream cannot warm).
+ *  - `opencode` binary not on PATH.
+ *
+ * The skip path is deliberate. The mock-only suite proves plumbing; the
+ * real-brain scenario proves the loop end-to-end against a live LLM. CI
+ * gates on the mock suite; operators run the real scenario before
+ * promoting a build.
+ */
+export const realBrainPreflight = (argv: string[]): string | null => {
+  if (argv.includes("--skip-real")) return "--skip-real flag";
+  if (!process.env.OPENAI_API_KEY) return "OPENAI_API_KEY absent";
+  try {
+    const r = Bun.spawnSync(["which", "opencode"], { stdout: "pipe", stderr: "pipe" });
+    if (r.exitCode !== 0) return "opencode CLI not on PATH";
+    const out = (r.stdout?.toString() ?? "").trim();
+    if (out.length === 0) return "opencode CLI not on PATH";
+  } catch {
+    return "opencode CLI not on PATH";
+  }
+  return null;
+};
+
+/**
+ * Open the example.com title-fetch directive, run one scheduler tick with
+ * ACC2_BRIDGE_MODE=real, and assert the full event chain landed
+ * (bridge_invoked → action_predicted → artifact_invoked → artifact_observed
+ * → action_scored → task_committed when residual < 0.3). Owns its own
+ * daemon — the shared harness daemon is mock-pinned, this one is real.
+ *
+ * Failure: throws with a classified reason from the bridge's failure
+ * taxonomy (auth_missing / rate_limit / timeout / parse_error /
+ * subprocess_crash / cycle_1_only_breach / verifier_residual_high /
+ * no_action_predicted) so the harness's per-scenario FAIL line carries
+ * actionable detail.
+ */
+export const scenarioRealBrainEndToEnd = async (): Promise<void> => {
+  // The harness pins ACC2_BRIDGE_MODE=mock for the 9 plumbing scenarios.
+  // This scenario flips to real for its own dispatch, then restores.
+  const originalMode = process.env.ACC2_BRIDGE_MODE;
+  process.env.ACC2_BRIDGE_MODE = "real";
+
+  // Real opencode dispatch can take 60-180s on cold boot (model warm-up +
+  // reasoning + tool calls). Widen the bridge watchdog + MCP handshake
+  // window unless the operator already overrode them.
+  const originalTimeout = process.env.ACC2_OPENCODE_TIMEOUT_MS;
+  const originalHandshake = process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS;
+  if (!originalTimeout) process.env.ACC2_OPENCODE_TIMEOUT_MS = "600000";
+  if (!originalHandshake) process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS = "120000";
+
+  const REAL_DIRECTIVE_TEXT = [
+    "Fetch the URL https://example.com via Bun.fetch (the bun runtime).",
+    "Parse the HTML response and extract the contents of the <title> tag.",
+    "Return the observation as JSON in the shape { result: { title: string } }.",
+    "Author TWO bun code artifacts:",
+    "  1. ACTION artifact: a bun script using `Bun.fetch(\"https://example.com\")`",
+    "     that prints exactly one line `@@RESULT@@ {\"result\":{\"title\":\"<extracted>\"}}`.",
+    "  2. VERIFIER artifact: a bun script that reads the action's observation",
+    "     from `process.env.ACC2_INPUTS` (a JSON string) and prints",
+    "     `@@RESULT@@ {\"residual\":0}` when result.title is a non-empty string,",
+    "     `@@RESULT@@ {\"residual\":1}` otherwise.",
+    "Admit both via substrate.admit_artifact and emit ONE action_predicted event",
+    "that cites both artifact ids. This is a single-cycle dispatch — emit a",
+    "refinement edge instead of self-iterating if anything is incomplete.",
+  ].join("\n");
+
+  const tmpDir = mkdtempSync(join(tmpdir(), "acc2-harness-real-brain-"));
+  const dbPath = join(tmpDir, "state.db");
+
+  let handle: DaemonHandle | null = null;
+  try {
+    handle = await bootDaemon(tmpDir, dbPath);
+    // Expose the MCP URL so the real opencode subprocess can connect back.
+    process.env.V2_MCP_SERVER_URL = `http://127.0.0.1:${handle.port}/mcp`;
+
+    // Seed substrate (the real brain reads from the foundational knowledge
+    // index + code-artifact registry during composition).
+    const { seedFoundationalKnowledge, seedCodeArtifacts } =
+      await import("../../substrate/seed");
+    seedFoundationalKnowledge(handle.db, { ownerApproved: true });
+    seedCodeArtifacts(handle.db);
+
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(handle.db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: {
+        directive_text: REAL_DIRECTIVE_TEXT,
+        smoke: "harness_real_brain_end_to_end",
+        lifecycle: "finite",
+      } as JsonValue,
+    });
+    emitEvent(handle.db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      parent_task_id: null,
+      payload: {
+        goal: REAL_DIRECTIVE_TEXT,
+        lifecycle: "finite",
+        urgency: "normal",
+      } as JsonValue,
+    });
+
+    const tick = await schedulerTick(handle.db, {
+      directiveId,
+      maxConcurrent: 1,
+    });
+    assert(
+      tick.dispatched.includes(taskId),
+      `scheduler did not dispatch task ${taskId} (dispatched=[${tick.dispatched.join(",")}])`,
+    );
+
+    // Classify bridge failure first — the operator wants the failure mode
+    // word from the taxonomy, not a low-level assertion miss.
+    const bridgeFailed = handle.db
+      .query(
+        "SELECT payload FROM events WHERE kind = 'bridge_failed' AND directive_id = ? ORDER BY ts DESC LIMIT 1",
+      )
+      .get(directiveId) as { payload: string } | null;
+    if (bridgeFailed) {
+      const p = JSON.parse(bridgeFailed.payload ?? "{}") as Record<string, unknown>;
+      const reason = String(p.reason ?? "unknown");
+      throw new Error(`bridge_failed: ${reason} (see docs/real-brain-runbook.md)`);
+    }
+
+    const bridgeInvoked = handle.db
+      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'bridge_invoked' AND directive_id = ?")
+      .get(directiveId) as { n: number };
+    assert(bridgeInvoked.n >= 1, "bridge_invoked must be emitted");
+
+    const predicted = handle.db
+      .query(
+        "SELECT action_artifact_id, verifier_artifact_id FROM events WHERE kind = 'action_predicted' AND directive_id = ? ORDER BY ts ASC",
+      )
+      .all(directiveId) as Array<{
+      action_artifact_id: string | null;
+      verifier_artifact_id: string | null;
+    }>;
+    assert(predicted.length >= 1, "action_predicted must be emitted by the brain (no_action_predicted)");
+    const pred = predicted[0]!;
+    assert(
+      typeof pred.action_artifact_id === "string" && pred.action_artifact_id.length > 0,
+      "action_artifact_id must be set",
+    );
+    assert(
+      typeof pred.verifier_artifact_id === "string" && pred.verifier_artifact_id.length > 0,
+      "verifier_artifact_id must be set",
+    );
+
+    const action = getArtifact(handle.db, pred.action_artifact_id!);
+    const verifier = getArtifact(handle.db, pred.verifier_artifact_id!);
+    assert(action !== null, `action artifact ${pred.action_artifact_id} must resolve`);
+    assert(verifier !== null, `verifier artifact ${pred.verifier_artifact_id} must resolve`);
+
+    const invoked = handle.db
+      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'artifact_invoked' AND directive_id = ?")
+      .get(directiveId) as { n: number };
+    const observed = handle.db
+      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'artifact_observed' AND directive_id = ?")
+      .get(directiveId) as { n: number };
+    assert(invoked.n >= 1, "artifact_invoked must be emitted");
+    assert(observed.n >= 1, "artifact_observed must be emitted");
+
+    const scoredRows = handle.db
+      .query(
+        "SELECT residual, payload FROM events WHERE kind = 'action_scored' AND directive_id = ? ORDER BY ts ASC",
+      )
+      .all(directiveId) as Array<{ residual: number; payload: string }>;
+    assert(scoredRows.length >= 1, "action_scored must be emitted");
+    const residual = scoredRows[0]!.residual;
+    assert(
+      Number.isFinite(residual) && residual >= 0 && residual <= 1,
+      `residual must be in [0,1] (got ${residual}) — verifier_residual_high if >= 0.3`,
+    );
+
+    const violations = handle.db
+      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'dispatcher_violation' AND directive_id = ?")
+      .get(directiveId) as { n: number };
+    assert(violations.n === 0, `dispatcher_violation must not fire (cycle_1_only_breach; count=${violations.n})`);
+
+    if (residual < 0.3) {
+      const committed = handle.db
+        .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'task_committed' AND directive_id = ?")
+        .get(directiveId) as { n: number };
+      assert(committed.n >= 1, "task_committed must be emitted when residual < 0.3");
+
+      // Title-extraction proof — search action_scored.payload.action_result for
+      // result.title (the runtime-observed payload the dispatcher captured).
+      let title: string | null = null;
+      for (const r of scoredRows) {
+        try {
+          const p = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
+          const ar = p.action_result as Record<string, unknown> | undefined;
+          const result = ar?.result as Record<string, unknown> | undefined;
+          if (result && typeof result.title === "string" && result.title.length > 0) {
+            title = result.title;
+            break;
+          }
+        } catch { /* skip */ }
+      }
+      assert(
+        title !== null,
+        "result.title must be a non-empty string (action_scored.payload.action_result.result.title)",
+      );
+    } else {
+      // Refinement edge gate.
+      const edges = handle.db
+        .query("SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND directive_id = ?")
+        .all(directiveId) as Array<{ payload: string }>;
+      const refines = edges
+        .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+        .filter((p) => p.kind === "refines");
+      assert(refines.length >= 1, "refinement edge must be emitted when residual >= 0.3");
+    }
+  } finally {
+    if (handle) {
+      try { await stopDaemon(handle); } catch { /* swallow */ }
+    }
+    try {
+      const { closeDb } = await import("../../substrate/db");
+      closeDb(dbPath);
+    } catch { /* swallow */ }
+    rmSync(tmpDir, { recursive: true, force: true });
+    if (originalMode === undefined) delete process.env.ACC2_BRIDGE_MODE;
+    else process.env.ACC2_BRIDGE_MODE = originalMode;
+    if (originalTimeout === undefined) delete process.env.ACC2_OPENCODE_TIMEOUT_MS;
+    else process.env.ACC2_OPENCODE_TIMEOUT_MS = originalTimeout;
+    if (originalHandshake === undefined) delete process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS;
+    else process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS = originalHandshake;
+  }
 };

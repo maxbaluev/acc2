@@ -539,9 +539,9 @@ export const opencodeQueryMock = async (
 //
 // Watchdog: SIGTERM at req.timeout_ms (default 60s), SIGKILL at timeout × 1.5.
 //
-// Mock vs real selection lives in `opencodeQuery` below — env
-// ACC2_BRIDGE_MODE=mock (default for tests) routes to opencodeQueryMock;
-// ACC2_BRIDGE_MODE=real routes here.
+// Mock vs real selection lives in `opencodeQuery` below — default is `real`
+// (production dispatch). Tests opt into `ACC2_BRIDGE_MODE=mock` explicitly via
+// the bun test preload (`tests/preload.ts`).
 
 type SpawnOpts = {
   timeoutMs?: number;
@@ -1106,19 +1106,22 @@ const spawnRealOpencode = async (
   };
 };
 
-/** Mode-aware entrypoint. ACC2_BRIDGE_MODE=mock (default in tests, also the
- *  Phase E daemon default per CLAUDE.md) routes to opencodeQueryMock so the
- *  test suite stays hermetic. ACC2_BRIDGE_MODE=real spawns the real
- *  `opencode run` subprocess. */
+/** Mode-aware entrypoint. **Default is `real`** (production dispatch via the
+ *  real `opencode run` subprocess). Tests opt into `mock` explicitly by
+ *  setting `ACC2_BRIDGE_MODE=mock` — the `bun test` runner does so via the
+ *  `bunfig.toml` preload (`tests/preload.ts`) so unit tests stay hermetic by
+ *  default. The integration harness's 9 plumbing scenarios also pin mock
+ *  explicitly; the 10th scenario (`real_brain_end_to_end`) and
+ *  `tests/integration/real_brain_smoke.ts` exercise the real path. */
 export const opencodeQuery = async (
   req: BridgeRequest,
   db: Database,
 ): Promise<BridgeResult> => {
-  const mode = process.env.ACC2_BRIDGE_MODE ?? "mock";
-  if (mode === "real") {
-    return spawnRealOpencode(req, db);
+  const mode = process.env.ACC2_BRIDGE_MODE ?? "real";
+  if (mode === "mock") {
+    return opencodeQueryMock(req, db);
   }
-  return opencodeQueryMock(req, db);
+  return spawnRealOpencode(req, db);
 };
 
 export { spawnRealOpencode };

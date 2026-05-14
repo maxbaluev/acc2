@@ -9,7 +9,7 @@ Operator-facing recipe for `tests/integration/real_brain_smoke.ts`. This is the 
 - `OPENAI_API_KEY` exported in the shell (or loaded via `.env`). Required even though the brain dispatch itself does not call OpenAI directly — downstream embedder workers need the key, and the smoke's `--print-prompt` flag composes a prompt that retrieves through the index.
 - `opencode` CLI on PATH. Install from https://github.com/sst/opencode. Run `opencode auth` once so the subprocess can reach the model provider non-interactively.
 - Bun >= 1.0.0. Check via `bun --version`.
-- No `ACC2_BRIDGE_MODE=mock` already pinned in the shell (the smoke overrides, but warns if it sees a contradicting value).
+- No `ACC2_BRIDGE_MODE=mock` already pinned in the shell. `real` is the production default (set in `runtime/bridge.ts:opencodeQuery`) — tests opt into `mock` explicitly via `bunfig.toml` → `tests/preload.ts`, NOT via the env var. The smoke pins `real` itself for its own dispatch and warns if it sees a contradicting env value.
 
 ## How to run
 

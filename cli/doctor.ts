@@ -216,13 +216,16 @@ export const checkBunVersion = (env: DoctorEnv): Check => {
 };
 
 export const checkBridgeMode = (env: DoctorEnv): Check => {
-  const mode = env.env.ACC2_BRIDGE_MODE ?? "mock";
+  // Default is now `real` (production dispatch). Tests pin `mock` explicitly
+  // via the bun test preload — if the operator sees `mock` here outside a
+  // test run, they intentionally overrode the production default.
+  const mode = env.env.ACC2_BRIDGE_MODE ?? "real";
   if (mode === "real") {
-    return { name: "ACC2_BRIDGE_MODE", verdict: "ok", detail: "real (production dispatch)" };
+    return { name: "ACC2_BRIDGE_MODE", verdict: "ok", detail: "real (production dispatch — default)" };
   }
   if (mode === "mock") {
     return { name: "ACC2_BRIDGE_MODE", verdict: "info",
-      detail: "mock (tests only; set to 'real' for production dispatch)" };
+      detail: "mock (override; tests use this — unset to restore real default)" };
   }
   return { name: "ACC2_BRIDGE_MODE", verdict: "warn",
     detail: `unknown value '${mode}' (expected mock | real)` };

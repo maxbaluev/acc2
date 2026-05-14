@@ -1,0 +1,10 @@
+# bun runtime config for acc2.
+#
+# [test] section: applied only when running `bun test`. The preload runs
+# before each test file is loaded and pins ACC2_BRIDGE_MODE=mock so the
+# hermetic bridge fixtures drive every dispatch path. Production code (and
+# every non-test entrypoint, including the daemon, the CLI, and the
+# integration harness's real_brain_end_to_end scenario) defaults to `real`.
+
+[test]
+preload = ["./tests/preload.ts"]

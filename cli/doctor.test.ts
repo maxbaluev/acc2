@@ -192,8 +192,8 @@ describe("checkBridgeMode", () => {
   test("info at 'mock'", () => {
     expect(checkBridgeMode(makeEnv({ env: { ACC2_BRIDGE_MODE: "mock" } })).verdict).toBe("info");
   });
-  test("info when absent (defaults to mock)", () => {
-    expect(checkBridgeMode(makeEnv({ env: {} })).verdict).toBe("info");
+  test("ok when absent (defaults to real per production default)", () => {
+    expect(checkBridgeMode(makeEnv({ env: {} })).verdict).toBe("ok");
   });
   test("warn for unknown value", () => {
     expect(checkBridgeMode(makeEnv({ env: { ACC2_BRIDGE_MODE: "weird" } })).verdict).toBe("warn");

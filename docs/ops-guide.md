@@ -44,7 +44,10 @@ Phase 1.γ adds an interactive `acc init` (not in this batch). For now, manually
 ```bash
 cp .env.example .env
 # Edit .env to add OPENAI_API_KEY if you have one.
-# Set ACC2_BRIDGE_MODE=real when you are ready for production dispatch.
+# ACC2_BRIDGE_MODE defaults to `real` (production dispatch via opencode); leave
+# it unset / `real` for normal operation. Tests pin `mock` via bunfig.toml →
+# tests/preload.ts — do NOT set ACC2_BRIDGE_MODE=mock in .env unless you
+# intentionally want non-test paths to route through the canned fixture mock.
 ```
 
 Then run the diagnostic:
@@ -66,7 +69,7 @@ bun cli/doctor.ts
 | `camoufox binary` | `CAMOUFOX_BINARY_PATH` is set OR `~/.cache/camoufox/camoufox` exists. |
 | `nsjail` | The `nsjail` binary is on `PATH` (info only — uv sandbox is honor-system without it). |
 | `bun` | Bun ≥ 1.0 on `PATH`. |
-| `ACC2_BRIDGE_MODE` | `real` is the production setting; `mock` is for tests. |
+| `ACC2_BRIDGE_MODE` | `real` is the production default (no override needed); tests pin `mock` via `bunfig.toml` → `tests/preload.ts`. |
 | **Composite readiness** | A single PASS/FAIL line summarising whether the install can dispatch to the real brain. The composite passes when daemon ok + `OPENAI_API_KEY` ok + `opencode` ok + `ACC2_BRIDGE_MODE=real`. |
 
 Exit code is `0` if every check is `ok`/`warn`/`info`, `1` if any check is `fail` or the composite is `FAIL`.
@@ -219,7 +222,7 @@ Symptoms: brain dispatches return a stub-shaped response or fail with "opencode:
 
 1. Run `opencode --help` outside of AccInt to confirm the CLI itself works.
 2. Re-authenticate per the opencode README. AccInt does not handle opencode auth; it shells out to the subscription CLI.
-3. Confirm `ACC2_BRIDGE_MODE=real`. The default (mock) routes to a hermetic stub for tests.
+3. Confirm `ACC2_BRIDGE_MODE` is unset or `real` — `real` is the production default (`runtime/bridge.ts:opencodeQuery`). Tests pin `mock` via `bunfig.toml` → `tests/preload.ts`; only set `mock` here if you intentionally want non-test paths to route through the canned mock.
 
 ### camoufox missing
 

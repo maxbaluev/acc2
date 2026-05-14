@@ -2,12 +2,28 @@
 // acc2 integration harness — the final cutover gate.
 //
 // Boots the real daemon (fastmcp + Bun.serve aux + SQLite + workers) in a
-// temp state directory on free ports, then runs nine scenarios end-to-end.
-// Each scenario asserts a §17 / §18 cutover criterion. Exit code 0 iff every
-// scenario passes; exit code 1 otherwise.
+// temp state directory on free ports, then runs ten scenarios end-to-end.
+// Nine scenarios assert §17 / §18 plumbing under ACC2_BRIDGE_MODE=mock
+// (hermetic — no opencode subprocess); the tenth (real_brain_end_to_end)
+// dispatches to live opencode (gpt-5-mini by default) under
+// ACC2_BRIDGE_MODE=real so the harness proves the full LLM-brain loop end
+// to end. The real scenario is SKIPPED (not failed) when its prerequisites
+// are absent (OPENAI_API_KEY / opencode CLI / --skip-real flag).
+//
+// Exit code 0 iff every executed scenario passes; exit code 1 otherwise.
+// Skipped scenarios do not affect the exit code — they appear in the
+// summary as `[skip]`.
 //
 // Run:
 //   cd /home/maxbaluev/bos2/system/acc2 && bun tests/integration/harness.ts
+//
+// Flags:
+//   --mock-only        Run only the 9 plumbing scenarios (legacy 9-scenario
+//                      suite). Skips real_brain_end_to_end unconditionally.
+//   --real-only        Run only real_brain_end_to_end (useful for fast
+//                      smoke checks). Skips the 9 plumbing scenarios.
+//   --skip-real        Same as the absence of OPENAI_API_KEY / opencode —
+//                      registers the real scenario as skipped with reason.
 //
 // The harness does NOT use bun:test — it is the integration gate, not a
 // unit-test suite. A separate smoke test (tests/harness-smoke.test.ts)
@@ -22,6 +38,7 @@ import { closeDb } from "../../substrate/db";
 import type { DaemonHandle } from "../../runtime/daemon";
 import {
   bootDaemon,
+  realBrainPreflight,
   scenarioAmendmentSupersession,
   scenarioCreditChainClosure,
   scenarioCycleOneEnforcement,
@@ -30,6 +47,7 @@ import {
   scenarioExternalPushRetrievable,
   scenarioFatherOneShot,
   scenarioMvpFixture,
+  scenarioRealBrainEndToEnd,
   scenarioRefinementEdge,
 } from "./scenarios";
 import { stopDaemon } from "../../runtime/daemon";
@@ -40,6 +58,8 @@ type ScenarioEntry = {
   label: string;
   /** Scenarios that take a daemon handle vs. those that own their own. */
   kind: "shared_daemon" | "own_daemon";
+  /** Optional pre-flight returning a skip reason; `null` means "run me". */
+  preflight?: (argv: string[]) => string | null;
   run: (handle: DaemonHandle | null) => Promise<void>;
 };
 
@@ -49,7 +69,7 @@ const formatLabel = (s: string): string => {
   return s + " " + ".".repeat(Math.max(0, PAD_LABEL - s.length - 1));
 };
 
-const SCENARIOS: ScenarioEntry[] = [
+const PLUMBING_SCENARIOS: ScenarioEntry[] = [
   {
     id: "daemon_lifecycle",
     label: "daemon_lifecycle",
@@ -106,42 +126,110 @@ const SCENARIOS: ScenarioEntry[] = [
   },
 ];
 
+const REAL_BRAIN_SCENARIO: ScenarioEntry = {
+  id: "real_brain_end_to_end",
+  label: "real_brain_end_to_end",
+  kind: "own_daemon",
+  preflight: realBrainPreflight,
+  run: async (_h) => { await scenarioRealBrainEndToEnd(); },
+};
+
 type ScenarioResult = {
   id: string;
   label: string;
-  status: "pass" | "fail";
+  status: "pass" | "fail" | "skip";
   elapsedMs: number;
+  detail?: string;
   error?: Error;
 };
 
 const formatSeconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
 
-export const runHarness = async (): Promise<number> => {
+type HarnessOpts = {
+  mockOnly: boolean;
+  realOnly: boolean;
+  skipReal: boolean;
+};
+
+const parseArgs = (argv: string[]): HarnessOpts => {
+  return {
+    mockOnly: argv.includes("--mock-only"),
+    realOnly: argv.includes("--real-only"),
+    skipReal: argv.includes("--skip-real"),
+  };
+};
+
+export const runHarness = async (
+  argv: string[] = [],
+): Promise<number> => {
   const startedAt = Date.now();
-  const tmpDir = mkdtempSync(join(tmpdir(), "acc2-harness-shared-"));
-  const dbPath = join(tmpDir, "state.db");
+  const opts = parseArgs(argv);
+
+  if (opts.mockOnly && opts.realOnly) {
+    process.stdout.write("acc2 harness: --mock-only and --real-only are mutually exclusive\n");
+    return 1;
+  }
 
   process.stdout.write("acc2 integration harness — Phase Harness\n");
   process.stdout.write("========================================\n");
 
-  // Boot the shared daemon (used by every scenario except scenario 1, which
-  // exercises lifecycle on its own dedicated daemon pair).
+  // Pin mock for plumbing scenarios (must happen BEFORE bootDaemon so any
+  // bridge calls during boot see mock). The real-brain scenario flips to
+  // `real` for its own dispatch and restores on exit. The production
+  // default for bridge.ts is `real` — the harness explicitly overrides
+  // because the 9 plumbing scenarios use canned fixture markers.
+  const originalBridgeMode = process.env.ACC2_BRIDGE_MODE;
+  process.env.ACC2_BRIDGE_MODE = "mock";
+
+  const runPlumbing = !opts.realOnly;
+  const runReal = !opts.mockOnly;
+
+  // Build the schedule.
+  const scheduled: ScenarioEntry[] = [];
+  if (runPlumbing) scheduled.push(...PLUMBING_SCENARIOS);
+  if (runReal) scheduled.push(REAL_BRAIN_SCENARIO);
+
+  // Shared daemon for plumbing scenarios (skip booting it if no plumbing
+  // scenario will run).
   let handle: DaemonHandle | null = null;
-  try {
-    handle = await bootDaemon(tmpDir, dbPath);
-  } catch (err) {
-    process.stdout.write(`boot: FAILED — ${(err as Error).message}\n`);
-    rmSync(tmpDir, { recursive: true, force: true });
-    return 1;
+  let tmpDir: string | null = null;
+  let dbPath: string | null = null;
+  if (runPlumbing && scheduled.some((s) => s.kind === "shared_daemon")) {
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-harness-shared-"));
+    dbPath = join(tmpDir, "state.db");
+    try {
+      handle = await bootDaemon(tmpDir, dbPath);
+    } catch (err) {
+      process.stdout.write(`boot: FAILED — ${(err as Error).message}\n`);
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreEnv(originalBridgeMode);
+      return 1;
+    }
+    process.stdout.write(
+      `boot: daemon up on mcp=${handle.port} aux=${handle.auxPort} state=${dbPath}\n\n`,
+    );
   }
-  process.stdout.write(
-    `boot: daemon up on mcp=${handle.port} aux=${handle.auxPort} state=${dbPath}\n\n`,
-  );
 
   const results: ScenarioResult[] = [];
   let index = 1;
-  for (const sc of SCENARIOS) {
-    const labelTxt = `[${index}/${SCENARIOS.length}] ${formatLabel(sc.label)}`;
+  for (const sc of scheduled) {
+    const labelTxt = `[${index}/${scheduled.length}] ${formatLabel(sc.label)}`;
+
+    // Skip honoring: pre-flight may report a skip reason (e.g. real-brain
+    // pre-flight when OPENAI_API_KEY is absent). Also honor --skip-real.
+    let skipReason: string | null = null;
+    if (sc.id === "real_brain_end_to_end" && opts.skipReal) {
+      skipReason = "--skip-real flag";
+    } else if (sc.preflight) {
+      skipReason = sc.preflight(argv);
+    }
+    if (skipReason !== null) {
+      results.push({ id: sc.id, label: sc.label, status: "skip", elapsedMs: 0, detail: skipReason });
+      process.stdout.write(`${labelTxt} SKIP — ${skipReason}\n`);
+      index++;
+      continue;
+    }
+
     const scStart = Date.now();
     try {
       await sc.run(handle);
@@ -163,38 +251,72 @@ export const runHarness = async (): Promise<number> => {
   }
 
   // Shut the shared daemon down cleanly.
-  process.stdout.write("\n");
-  try {
-    await stopDaemon(handle);
-    process.stdout.write("shutdown: daemon stopped cleanly\n");
-  } catch (err) {
-    process.stdout.write(`shutdown: error stopping daemon — ${(err as Error).message}\n`);
+  if (handle) {
+    process.stdout.write("\n");
+    try {
+      await stopDaemon(handle);
+      process.stdout.write("shutdown: daemon stopped cleanly\n");
+    } catch (err) {
+      process.stdout.write(`shutdown: error stopping daemon — ${(err as Error).message}\n`);
+    }
   }
   try { closeDb(); } catch { /* swallow */ }
-  rmSync(tmpDir, { recursive: true, force: true });
+  if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+  restoreEnv(originalBridgeMode);
 
   // Summary
   const elapsedTotal = Date.now() - startedAt;
   const passed = results.filter((r) => r.status === "pass").length;
-  const failed = results.length - passed;
+  const failed = results.filter((r) => r.status === "fail").length;
+  const skipped = results.filter((r) => r.status === "skip").length;
   process.stdout.write("\n========================================\n");
+
+  const total = results.length;
   if (failed === 0) {
+    if (skipped === 0) {
+      process.stdout.write(
+        `${passed}/${total} scenarios passed in ${formatSeconds(elapsedTotal)}` +
+        (total >= 10 ? `  (9 plumbing + 1 real-brain)\n` : "\n"),
+      );
+      if (results.some((r) => r.id === "real_brain_end_to_end" && r.status === "pass")) {
+        process.stdout.write("[ok] acc2 is fully workable end-to-end against a live LLM brain\n");
+      } else {
+        process.stdout.write("[ok] acc2 is fully workable end-to-end\n");
+      }
+      return 0;
+    }
+    // Some skipped, none failed — still green.
+    const skipDetails = results
+      .filter((r) => r.status === "skip")
+      .map((r) => `${r.id}: ${r.detail ?? "skipped"}`)
+      .join("; ");
     process.stdout.write(
-      `${passed}/${results.length} scenarios passed in ${formatSeconds(elapsedTotal)}\n`,
+      `${passed}/${total} scenarios passed; ${skipped} skipped in ${formatSeconds(elapsedTotal)} (${skipDetails})\n`,
     );
-    process.stdout.write("[ok] acc2 is fully workable end-to-end\n");
+    if (results.some((r) => r.id === "real_brain_end_to_end" && r.status === "skip")) {
+      process.stdout.write("[ok] acc2 plumbing is end-to-end green\n");
+      process.stdout.write("[skip] real-brain proof skipped — install opencode + set OPENAI_API_KEY to enable\n");
+    } else {
+      process.stdout.write("[ok] acc2 plumbing is end-to-end green\n");
+    }
     return 0;
   }
   process.stdout.write(
-    `${passed}/${results.length} passed — ${failed} failure${failed > 1 ? "s" : ""}\n`,
+    `${passed}/${total} passed — ${failed} failure${failed > 1 ? "s" : ""}` +
+    (skipped > 0 ? `, ${skipped} skipped\n` : "\n"),
   );
   return 1;
+};
+
+const restoreEnv = (originalBridgeMode: string | undefined): void => {
+  if (originalBridgeMode === undefined) delete process.env.ACC2_BRIDGE_MODE;
+  else process.env.ACC2_BRIDGE_MODE = originalBridgeMode;
 };
 
 // Entrypoint when invoked directly.
 if (import.meta.main) {
   void (async () => {
-    const code = await runHarness();
+    const code = await runHarness(process.argv.slice(2));
     process.exit(code);
   })();
 }

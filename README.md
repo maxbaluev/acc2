@@ -1,33 +1,126 @@
-# acc2 — AccInt v2
+# AccInt v2
 
-A universal Recursive Language Model whose recursive memory, synthesis operator, and code-runtime broker live in a persistent substrate daemon.
+A universal **Recursive Language Model** whose recursive memory, synthesis operator, and code-runtime broker all live in a persistent substrate daemon. The owner speaks naturally; Claude Code (you) routes; opencode (gpt-5.5) reasons; the substrate compounds.
 
-**Canonical design:** [`docs/v2-design.md`](docs/v2-design.md). Read this end-to-end before contributing.
+**Canonical design:** [`docs/v2-design.md`](docs/v2-design.md) (1,940+ lines, ground truth).
 
-## Quick orientation
+## How it works
 
-- Substrate is a persistent daemon (always-on, no cold start).
-- Three code runtimes: bun, uv, camofox-browser. The brain writes code; the substrate runs it sandboxed; a verifier code artifact returns a scalar residual.
-- Every brain dispatch is exactly one cycle. Refinement edges in the DAG replace iteration.
-- Two LLM substrates contribute knowledge via subscription CLIs (Claude Code, opencode). The substrate is the merger (Model D).
-- Owner is the only human in the loop, via Claude Code chat.
+```
+Owner (Claude Code chat)
+        │ "your first goal"
+        ▼
+┌─────────────────────────────────────────────────────────────┐
+│ acc task → substrate (always-on daemon)                     │
+│ ┌─────────────────────────────────────────────────────────┐ │
+│ │  events ledger (SQLite, one table)                      │ │
+│ │  • directive_opened → task_node_opened → brain_*        │ │
+│ │  • action_predicted → artifact_invoked/observed/scored  │ │
+│ │  • task_committed | task_edge_recorded(refines)         │ │
+│ └─────────────────────────────────────────────────────────┘ │
+│  dispatch_decider → recipe_replay | inline lane | opencode  │
+│  three runtimes: bun.ts | uv.ts | camofox.ts                │
+│  cycle-1-only gate; refinement edges replace iteration      │
+└─────────────────────────────────────────────────────────────┘
+        │ MCP (substrate.* + runtime.* tools)
+        ▼
+   opencode run (gpt-5.5 brain) — one cycle per dispatch
+```
+
+Owner words → directive event → dispatch route → brain emits action + verifier artifacts → runtimes execute under sandbox → verifier returns scalar residual → credit propagates → next cycle's retrieval reflects the outcome. Knowledge candidates from both LLM substrates merge through embedding-based dedup + contradiction holding (Model D).
+
+## Install — 5 minutes, end-to-end
+
+```bash
+git clone <repo> bos2
+cd bos2/system/acc2
+bun install                     # postinstall fetches camoufox automatically
+acc init                        # interactive bootstrap; sets OPENAI_API_KEY, mints admin token, optional seed
+acc doctor                      # readiness check (daemon health + opencode + OPENAI + bun + uv + camoufox)
+acc daemon start                # spawn the daemon detached
+acc task "your first goal"      # the loop begins
+acc watch                       # live TUI in another terminal
+```
+
+That is the whole flow. `acc doctor` will tell you exactly what is missing if anything fails.
+
+## What works today
+
+- [x] Directives via natural language (`acc task "<words>"`).
+- [x] Persistent daemon with `/health`, `/shutdown` (auth-gated), `/external/push` (token-gated).
+- [x] Three runtimes: `bun` (TS/JS), `uv` (Python under nsjail when present), `camofox-browser` (Camoufox via Playwright).
+- [x] Real-brain dispatch via opencode CLI (gpt-5-mini default; pass `--model=<id>` to override).
+- [x] Cycle-1-only structural enforcement + refinement edges in the task DAG.
+- [x] Recipe replay (tier-0 cost compression — high-confidence recipes skip the brain).
+- [x] Father scheduler (brainless recurring task driver — `runtime/father.ts`).
+- [x] sqlite-vec retrieval backend (k-NN via the `vec_events` virtual table; `ACC2_USE_VEC=1`).
+- [x] Production observability: structured logging (`runtime/logger.ts`, pino), Prometheus metrics (`runtime/metrics.ts`), readiness probes (`runtime/readiness.ts`).
+- [x] Admin surface: `acc admin update-opencode`, `acc admin opencode-version`, `acc admin upgrade-check`, export/import/rotate.
+- [x] Auto-fetch of Camoufox via `bun install` postinstall (`scripts/fetch-camoufox.ts`).
+- [x] Integration harness: 9 plumbing scenarios + 1 real-brain scenario, exit-coded for CI.
+
+**Test status.** 570 unit tests passing across 56 test files (`bun test`). Integration harness: 10/10 scenarios green when `OPENAI_API_KEY` + `opencode` are present (9/10 + 1 skip otherwise). Real-brain smoke (`tests/integration/real_brain_smoke.ts`) confirms the loop end-to-end against live opencode.
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `acc init [--yes]` | Fresh-install bootstrap. Run me first. |
+| `acc task "<words>"` | Open a directive; substrate dispatches the brain. |
+| `acc daemon {start\|stop\|status\|install-service}` | Daemon lifecycle. |
+| `acc watch` | Live TUI subscribed to the daemon's event stream. |
+| `acc doctor` | Multi-check readiness report (daemon + opencode + OPENAI + bun + uv + camoufox + nsjail). |
+| `acc admin update-opencode [--yes]` | Upgrade the opencode subscription CLI in place. |
+| `acc admin opencode-version` | Print installed + latest opencode versions. |
+| `acc admin upgrade-check` | Multi-subsystem upgrade report (opencode, bun, uv, camoufox). |
+| `bun tests/integration/harness.ts [--mock-only\|--real-only\|--skip-real]` | End-to-end integration harness. |
+| `bun tests/integration/real_brain_smoke.ts [--mock-bridge]` | Standalone real-brain smoke (Batch 2.α). |
+| `bun test` | Unit suite (570+ tests). |
+
+## Architecture
+
+- **Canonical design:** [`docs/v2-design.md`](docs/v2-design.md) — the architectural ground truth.
+- **Operator install:** [`docs/operator-install.md`](docs/operator-install.md) — first-install walkthrough.
+- **Ops guide:** [`docs/ops-guide.md`](docs/ops-guide.md) — running, updating, backing up, troubleshooting.
+- **Real-brain runbook:** [`docs/real-brain-runbook.md`](docs/real-brain-runbook.md) — diagnosing real-bridge failures.
+- **Production-readiness audit:** [`docs/production-readiness.md`](docs/production-readiness.md) — honest assessment of what is production-grade and what is maturing.
+- **Operator contract:** [`CLAUDE.md`](CLAUDE.md) — the Claude Code operating contract.
 
 ## Layout
 
 ```
 acc2/
-├── substrate/         schema, types, extractors, views, seed
-├── runtime/           daemon, three runtimes, sandbox, artifact store, embedder, retrieval, dispatch decider, bridge
-│   └── runtimes/      bun.ts, uv.ts, camofox.ts
-├── cli/               thin RPC clients to the daemon (acc dispatch, state, doctor, watch)
-├── tests/             fixtures + falsifiability + invariant tests
-└── docs/              v2-design.md (canonical), whitepaper.md
+├── substrate/            schema, types, extractors, views, seed, db
+├── runtime/              daemon, three runtimes, sandbox, artifact_store, embedder, retrieval, dispatch decider, bridge,
+│   │                     cycle_one_gate, credit, father, recipe_replay, prompt_composer, integrity_worker, metrics, ...
+│   └── runtimes/         bun.ts, uv.ts, camofox.ts
+├── cli/                  thin RPC clients to the daemon (init, dispatch, doctor, watch, admin, service-install, rpc)
+├── tests/                unit tests + harness-smoke + real-brain-smoke-shape
+│   └── integration/      harness.ts, scenarios.ts (10 scenarios), real_brain_smoke.ts, crash_recovery.ts
+├── docs/                 v2-design.md (canonical), whitepaper.md, ops-guide.md, real-brain-runbook.md, production-readiness.md
+├── scripts/              postinstall.ts (camoufox fetcher), fetch-camoufox.ts
+└── bunfig.toml           pins ACC2_BRIDGE_MODE=mock for `bun test`
 ```
 
 ## Environment
 
-`.env` holds `OPENAI_API_KEY` (for `text-embedding-3-small`) and any owner-provisioned external-source bearer tokens. Claude Code and opencode authenticate via their subscription CLIs — no API keys needed for the LLM substrates.
+`acc2/.env` (copy from `.env.example`) holds:
 
-## First commit
+- `OPENAI_API_KEY` — required for `text-embedding-3-small` retrieval. The one external API key v2 needs.
+- `ACC2_BRIDGE_MODE=real` — production default. Tests pin `mock` via the `bunfig.toml` preload.
+- `ACC2_OPENCODE_TIMEOUT_MS`, `ACC2_OPENCODE_MCP_HANDSHAKE_MS`, `ACC2_OPENCODE_MODEL` — opencode subprocess tuning.
+- `ACC2_DAEMON_PORT`, `ACC2_DAEMON_AUX_PORT` — pinned ports (auto-pick when unset).
+- `CAMOUFOX_BINARY_PATH` — override the auto-detected Camoufox binary.
+- Worker autostart toggles: `ACC2_EMBEDDER_AUTOSTART`, `ACC2_FATHER_AUTOSTART`, `ACC2_ROLLING_AUTOSTART`, `ACC2_INTEGRITY_AUTOSTART`, `ACC2_AUTOSCHEDULER`.
 
-This repository is a scaffold. No implementation yet. Phase A (this scaffold + design doc) is complete; Phase B (daemon + minimum substrate) is next per `docs/v2-design.md` §17.
+Claude Code and opencode authenticate via their subscription CLIs — no API keys needed for the LLM substrates themselves.
+
+## Project status
+
+acc2 is a substrate-recursive operator system that compiles, boots, dispatches to a live LLM brain, and round-trips real directives end-to-end. The plumbing (daemon, runtimes, dispatch routes, refinement edges, credit, retrieval, sandbox, MCP wire) is well-tested. Production hardening (logging, metrics, readiness probes, admin surface, opencode upgrade path) has landed.
+
+What is still maturing — and what an operator should know before promoting a build:
+
+- The mock bridge recognizes two fixture markers (`fixture_d_count_todos` + `example.com`). Any other prompt under `ACC2_BRIDGE_MODE=mock` returns `mock_bridge_prompt_unrecognized` by design.
+- Real-bridge cold-boot can take 60–180s on first dispatch (model warm-up + reasoning + tool calls). Widen `ACC2_OPENCODE_TIMEOUT_MS` for slow reasoners.
+- See [`docs/production-readiness.md`](docs/production-readiness.md) for the full audit and known gaps.
