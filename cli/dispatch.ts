@@ -17,7 +17,6 @@ const usage = (): string => `acc — v2 thin CLI
   acc daemon start                Spawn the daemon detached if not running.
   acc daemon stop                 Auth-gated shutdown via admin token.
   acc daemon status               GET /health on the running daemon.
-  acc state {me,focus,search,...} See cli/state.ts.
   acc doctor                      See cli/doctor.ts.
 `;
 
@@ -95,10 +94,6 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     if (sub === "status") return daemonStatus();
     console.error(`acc daemon: unknown subcommand '${sub ?? ""}'. expected: start|stop|status`);
     return 1;
-  }
-  if (cmd === "state") {
-    const { runState } = await import("./state");
-    return runState(argv.slice(1));
   }
   if (cmd === "doctor") {
     const { runDoctor } = await import("./doctor");
