@@ -4,7 +4,14 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "./db";
-import { seedArtifactIds, seedCodeArtifacts, seedFoundationalKnowledge } from "./seed";
+import {
+  seedArtifactIds,
+  seedCodeArtifacts,
+  seedFoundationalKnowledge,
+  seedRecipeGoalTexts,
+  seedRecipes,
+} from "./seed";
+import { goalShape } from "../runtime/goal_shape";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -176,6 +183,105 @@ describe("seedFoundationalKnowledge", () => {
       expect(refs.length).toBe(1);
       expect(payload.candidate_id).toBeDefined();
       expect(refs[0]).toBe(payload.candidate_id);
+    }
+  });
+});
+
+describe("seedRecipes", () => {
+  test("inserts one recipe_extracted row per canonical goal shape", () => {
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    const summary = seedRecipes(db);
+    expect(summary.count).toBeGreaterThan(0);
+    expect(summary.count).toBe(seedRecipeGoalTexts().length);
+
+    const rows = db
+      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .all() as Array<{ payload: string }>;
+    expect(rows.length).toBe(summary.count);
+
+    const goalShapesSeeded = new Set(rows.map((r) => {
+      const p = JSON.parse(r.payload) as { goal_shape: string };
+      return p.goal_shape;
+    }));
+    for (const text of seedRecipeGoalTexts()) {
+      expect(goalShapesSeeded.has(goalShape(text))).toBe(true);
+    }
+  });
+
+  test("idempotent — re-running does not duplicate rows", () => {
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    const first = seedRecipes(db);
+    const second = seedRecipes(db);
+    expect(second.count).toBe(0);
+    const total = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_extracted'")
+      .get() as { c: number }).c;
+    expect(total).toBe(first.count);
+  });
+
+  test("each recipe references real seed artifact ids", () => {
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    seedRecipes(db);
+    const validIds = new Set(seedArtifactIds());
+    const rows = db
+      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .all() as Array<{ payload: string }>;
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload) as {
+        trajectory: Array<{ artifact_id: string }>;
+      };
+      expect(payload.trajectory.length).toBeGreaterThan(0);
+      for (const step of payload.trajectory) {
+        expect(validIds.has(step.artifact_id)).toBe(true);
+      }
+    }
+  });
+
+  test("recipes seed at confidence=0.7 (above replay threshold, below promoted)", () => {
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    seedRecipes(db);
+    const rows = db
+      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .all() as Array<{ payload: string }>;
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload) as { confidence: number; seeded: boolean };
+      expect(payload.confidence).toBe(0.7);
+      expect(payload.seeded).toBe(true);
+    }
+  });
+
+  test("after seedFoundationalKnowledge + seedCodeArtifacts + seedRecipes the substrate is populated", () => {
+    const db = openDb(":memory:");
+    seedFoundationalKnowledge(db, { ownerApproved: true });
+    seedCodeArtifacts(db);
+    const recipeSummary = seedRecipes(db);
+
+    const knowledgeCandidates = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate'")
+      .get() as { c: number }).c;
+    expect(knowledgeCandidates).toBeGreaterThan(0);
+
+    const artifactCount = (db
+      .query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    expect(artifactCount).toBeGreaterThan(0);
+
+    const recipeRows = db
+      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .all() as Array<{ payload: string }>;
+    expect(recipeRows.length).toBe(recipeSummary.count);
+    // Every recipe row's trajectory must point at a real artifact id.
+    const artifactIds = new Set(seedArtifactIds());
+    for (const r of recipeRows) {
+      const payload = JSON.parse(r.payload) as {
+        trajectory: Array<{ artifact_id: string }>;
+      };
+      for (const step of payload.trajectory) {
+        expect(artifactIds.has(step.artifact_id)).toBe(true);
+      }
     }
   });
 });
