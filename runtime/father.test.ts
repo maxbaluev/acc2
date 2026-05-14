@@ -386,4 +386,45 @@ describe("selectByPriorityAndFreshnessAndConflicts", () => {
     );
     expect(choice.kind).toBe("yield_template");
   });
+
+  test("down-ranks objectives with mutual_exclusion edges to in-flight directives", () => {
+    // Two objectives at the same urgency: A and B. There's an in-flight
+    // directive X. B has a mutual_exclusion edge to X (so B is conflict-
+    // deferred). Even though both have equal urgency and B opened later,
+    // the selector must pick A — the non-conflicted objective.
+    const inFlightX = "d_in_flight";
+    const objA = {
+      directive_id: "d_a",
+      opened_ts: "2026-05-13T11:00:00.000Z",
+      payload: { directive_text: "A — no conflict", urgency: "normal" },
+    };
+    const objB = {
+      directive_id: "d_b",
+      opened_ts: "2026-05-13T10:00:00.000Z", // older — would normally win on freshness
+      payload: { directive_text: "B — conflicts with X", urgency: "normal" },
+    };
+    const edges = [
+      {
+        from_directive: "d_b",
+        to_directive: inFlightX,
+        kind: "mutual_exclusion" as const,
+        reason: "shared resource",
+        ts: "2026-05-13T09:00:00.000Z",
+        event_id: "e1",
+      },
+    ];
+    const choice = selectByPriorityAndFreshnessAndConflicts(
+      [objA, objB],
+      [],
+      edges,
+      DIRECTIVE_TEMPLATES,
+      new Map(),
+      "2026-05-13T12:00:00.000Z",
+      new Set([inFlightX]),
+    );
+    expect(choice.kind).toBe("normal_objective");
+    if (choice.kind === "normal_objective") {
+      expect(choice.directive_id).toBe("d_a");
+    }
+  });
 });

@@ -20,7 +20,21 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent, type EmitEventInput } from "./events";
 
-export type InterferenceEdgeKind = "blocks" | "watches" | "depletes";
+// Phase I (legacy) kinds: blocks/watches/depletes — what `recordInterferenceEdge`
+// emits today.
+// Phase DAG (C's branch) extends the taxonomy with the v2-design.md §3.4
+// canonical kinds: `mutual_exclusion`, `resource_conflict`,
+// `sequencing_dependency`, `enabling`. C's branch adds the dispatch-time
+// deferral; this module simply surfaces the wider taxonomy on read so
+// downstream consumers (Father selector, dispatch decider) see every kind.
+export type InterferenceEdgeKind =
+  | "blocks"
+  | "watches"
+  | "depletes"
+  | "mutual_exclusion"
+  | "resource_conflict"
+  | "sequencing_dependency"
+  | "enabling";
 
 export type InterferenceEdge = {
   from_directive: string;
@@ -31,8 +45,18 @@ export type InterferenceEdge = {
   event_id: string;
 };
 
+const INTERFERENCE_EDGE_KINDS: ReadonlySet<string> = new Set([
+  "blocks",
+  "watches",
+  "depletes",
+  "mutual_exclusion",
+  "resource_conflict",
+  "sequencing_dependency",
+  "enabling",
+]);
+
 const isEdgeKind = (k: unknown): k is InterferenceEdgeKind =>
-  k === "blocks" || k === "watches" || k === "depletes";
+  typeof k === "string" && INTERFERENCE_EDGE_KINDS.has(k);
 
 /** Read every directive_interference_edge event as a typed edge row. Older
  *  edges remain — the substrate is append-only — so retraction is modelled

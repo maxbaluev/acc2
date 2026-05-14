@@ -3,7 +3,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
-import { schedulerTick, schedulerLoop, _resetSchedulerForTests } from "./task_scheduler";
+import {
+  schedulerTick,
+  schedulerLoop,
+  _resetSchedulerForTests,
+  inFlightDirectivesFromSql,
+  findCrossDirectiveConflict,
+} from "./task_scheduler";
 import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
@@ -184,5 +190,113 @@ describe("task_scheduler", () => {
     const tick = await schedulerTick(db, { directiveId });
     expect(tick.skipped_recipe).toContain(taskId);
     expect(tick.dispatched).not.toContain(taskId);
+  });
+});
+
+describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
+  test("SQL in-flight set: directive with brain_dispatched and no brain_dispatch_closed surfaces; closed directive does not", () => {
+    const db = openDb(":memory:");
+    const dirOpen = newId();
+    const dirClosed = newId();
+    const dispOpen = newId();
+    const dispClosed = newId();
+
+    // Open dispatch — still in flight.
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: dirOpen,
+      payload: { dispatch_id: dispOpen },
+    });
+    // Open + close on a different directive — NOT in flight.
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: dirClosed,
+      payload: { dispatch_id: dispClosed },
+    });
+    emitEvent(db, {
+      kind: "brain_dispatch_closed",
+      substrate_origin: "substrate_auto",
+      directive_id: dirClosed,
+      payload: { dispatch_id: dispClosed, reason: "ok" },
+    });
+
+    const inFlight = inFlightDirectivesFromSql(db);
+    expect(inFlight.has(dirOpen)).toBe(true);
+    expect(inFlight.has(dirClosed)).toBe(false);
+  });
+
+  test("findCrossDirectiveConflict returns the conflicting in-flight directive + interaction for mutual_exclusion edges", () => {
+    const db = openDb(":memory:");
+    const candidate = newId();
+    const inFlightDir = newId();
+    const otherIdle = newId();
+
+    // Make `inFlightDir` mid-flight (open dispatch, no close).
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: inFlightDir,
+      payload: { dispatch_id: newId() },
+    });
+    // mutual_exclusion edge candidate → inFlightDir.
+    emitEvent(db, {
+      kind: "directive_interference_edge",
+      substrate_origin: "owner",
+      directive_id: candidate,
+      payload: {
+        from_directive: candidate,
+        to_directive: inFlightDir,
+        interaction: "mutual_exclusion",
+      },
+    });
+    // An unrelated edge to an idle directive — must NOT match.
+    emitEvent(db, {
+      kind: "directive_interference_edge",
+      substrate_origin: "owner",
+      directive_id: candidate,
+      payload: {
+        from_directive: candidate,
+        to_directive: otherIdle,
+        interaction: "resource_conflict",
+      },
+    });
+
+    const conflict = findCrossDirectiveConflict(db, candidate);
+    expect(conflict).not.toBeNull();
+    expect(conflict!.conflicting_directive).toBe(inFlightDir);
+    expect(conflict!.interaction).toBe("mutual_exclusion");
+  });
+
+  test("findCrossDirectiveConflict returns null when no in-flight directive conflicts", () => {
+    const db = openDb(":memory:");
+    const candidate = newId();
+    const otherDir = newId();
+    // Closed dispatch on otherDir — not in flight.
+    const dispId = newId();
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: otherDir,
+      payload: { dispatch_id: dispId },
+    });
+    emitEvent(db, {
+      kind: "brain_dispatch_closed",
+      substrate_origin: "substrate_auto",
+      directive_id: otherDir,
+      payload: { dispatch_id: dispId },
+    });
+    emitEvent(db, {
+      kind: "directive_interference_edge",
+      substrate_origin: "owner",
+      directive_id: candidate,
+      payload: {
+        from_directive: candidate,
+        to_directive: otherDir,
+        interaction: "mutual_exclusion",
+      },
+    });
+    expect(findCrossDirectiveConflict(db, candidate)).toBeNull();
   });
 });

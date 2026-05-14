@@ -35,6 +35,7 @@ import { activeObjectives, type ActiveObjectiveRow } from "../substrate/views";
 import { readRollingReviewsDue, processRollingReviews, type RollingDirective } from "./rolling_reviewer";
 import { readInterferenceEdges } from "./interference";
 import { readCurrentMode } from "./crisis_mode";
+import { inFlightDirectivesFromSql, CROSS_DIRECTIVE_BLOCKING_INTERACTIONS } from "./task_scheduler";
 
 export type FatherAction =
   | "read_objectives"
@@ -147,10 +148,18 @@ export type PriorityChoice =
  *    1. Any rolling_review_due directive — long-horizon goals must not slip.
  *    2. Active objectives sorted by urgency (crisis → elevated → normal),
  *       skipping any directive that is the target of an unresolved `blocks`
- *       edge from a non-terminal source.
+ *       edge from a non-terminal source AND down-ranking any directive that
+ *       has an outbound cross-directive interference edge (`mutual_exclusion`
+ *       or `resource_conflict`) pointing at an in-flight directive (so
+ *       Father doesn't journal on it while the conflicting partner runs).
  *    3. If no work qualifies, fall back to a maintenance template whose last
  *       use is older than TEMPLATE_USE_COOLDOWN_MS.
- *    4. Otherwise yield (no work to do this tick). */
+ *    4. Otherwise yield (no work to do this tick).
+ *
+ *  `inFlightDirectives` is the set of directives currently running a brain
+ *  dispatch — read SQL-side via `inFlightDirectivesFromSql` (multi-process
+ *  safe). Pass an empty set when no scheduler is active; the down-rank
+ *  collapses to a no-op. */
 export const selectByPriorityAndFreshnessAndConflicts = (
   objectives: ActiveObjectiveRow[],
   rollingReviews: RollingDirective[],
@@ -158,6 +167,7 @@ export const selectByPriorityAndFreshnessAndConflicts = (
   templates: readonly FatherDirectiveTemplate[],
   recentTemplateUses: Map<string, string>,
   nowIso: string,
+  inFlightDirectives: ReadonlySet<string> = new Set<string>(),
 ): PriorityChoice => {
   if (rollingReviews.length > 0) {
     const sorted = [...rollingReviews].sort((a, b) =>
@@ -171,8 +181,22 @@ export const selectByPriorityAndFreshnessAndConflicts = (
   // goal_committed/abandoned on the from_directive" — since this function is
   // pure, we accept that information from the caller as a derived map.
   const blockedSet = new Set<string>();
+  // Build a "conflict-deferred" set: directive_ids that have a
+  // `mutual_exclusion` / `resource_conflict` edge to an in-flight directive
+  // (in either direction — these interactions are symmetric). The set is
+  // computed even when `inFlightDirectives` is empty (collapses to empty).
+  const conflictDeferred = new Set<string>();
   for (const e of interferenceEdges) {
     if (e.kind === "blocks") blockedSet.add(e.to_directive);
+    // `kind` on InterferenceEdge is canonicalised; cross-directive
+    // interaction kinds (`mutual_exclusion`, `resource_conflict`) live in the
+    // wider taxonomy C's Phase DAG branch extends. Read the payload-string
+    // path to stay forward-compatible with both naming conventions.
+    const interaction = (e as { kind: string }).kind;
+    if (CROSS_DIRECTIVE_BLOCKING_INTERACTIONS.has(interaction)) {
+      if (inFlightDirectives.has(e.to_directive)) conflictDeferred.add(e.from_directive);
+      if (inFlightDirectives.has(e.from_directive)) conflictDeferred.add(e.to_directive);
+    }
   }
 
   const urgencyOrder = (urgency: string): number => {
@@ -183,6 +207,11 @@ export const selectByPriorityAndFreshnessAndConflicts = (
   const objectivesSorted = [...objectives]
     .filter((o) => !blockedSet.has(o.directive_id))
     .sort((a, b) => {
+      // Conflict-deferred objectives sort AFTER non-deferred ones (down-rank,
+      // do not skip — they remain selectable when nothing else qualifies).
+      const da = conflictDeferred.has(a.directive_id) ? 1 : 0;
+      const db = conflictDeferred.has(b.directive_id) ? 1 : 0;
+      if (da !== db) return da - db;
       const ua = ((a.payload.urgency as string | undefined) ?? "normal");
       const ub = ((b.payload.urgency as string | undefined) ?? "normal");
       const orderA = urgencyOrder(ua);
@@ -308,6 +337,11 @@ export const fatherIterate = async (
   const rolling = readRollingReviewsDue(db, ts);
   const edges = readInterferenceEdges(db);
   const templateUses = readTemplateUseTimestamps(db);
+  // Multi-process in-flight set (SQL-backed; no dependency on the scheduler's
+  // in-memory Map). Used by the priority selector to down-rank objectives
+  // that have a mutual_exclusion / resource_conflict edge to a directive
+  // currently running a brain dispatch.
+  const inFlight = inFlightDirectivesFromSql(db);
 
   const choice = selectByPriorityAndFreshnessAndConflicts(
     objectives,
@@ -316,6 +350,7 @@ export const fatherIterate = async (
     DIRECTIVE_TEMPLATES,
     templateUses,
     ts,
+    inFlight,
   );
 
   if (choice.kind === "rolling_review") {
