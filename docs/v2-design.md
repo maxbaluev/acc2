@@ -650,9 +650,10 @@ The substrate is not a SQLite file that CLI commands open per-invocation. It is 
 │  v2/runtime/daemon.ts          (single bun process, supervisor)  │
 │                                                                  │
 │  ┌─────────────────────────┐  ┌──────────────────────────────┐   │
-│  │  SQLite WAL             │  │  In-memory embedding index   │   │
-│  │  (persistent connection)│  │  (HNSW; rebuilt at boot from │   │
-│  │                         │  │   embedding_index_view)       │   │
+│  │  SQLite WAL             │  │  sqlite-vec embedding index  │   │
+│  │  (persistent connection)│  │  (vec0 virtual table; on disk │  │
+│  │                         │  │   alongside the WAL — NO      │   │
+│  │                         │  │   in-memory rebuild at boot)  │   │
 │  └─────────────────────────┘  └──────────────────────────────┘   │
 │                                                                  │
 │  ┌─────────────────────────┐  ┌──────────────────────────────┐   │
@@ -719,7 +720,7 @@ Each source is registered via `substrate.register_external_source({ name, bearer
 SQLite WAL guarantees durability up to the last fsync. On daemon restart:
 1. Acquire the port lock + Unix socket.
 2. Open the WAL connection; verify integrity.
-3. Rebuild the in-memory embedding index from `embedding_index_view` (parallel batch load).
+3. The embedding index is the **sqlite-vec `vec_events` virtual table** (substrate/schema.sql) — persistent on disk alongside the WAL. There is NO in-memory rebuild step; the index is queryable the moment the WAL connection is open. The legacy `events.embedding` BLOB column is kept transitionally for parity testing during the cutover window (see substrate/schema.sql header comment) and the `EmbeddingIndex` wrapper backfills `vec_events` from it at first open.
 4. Re-arm the background workers (embedder catches up on any payloads emitted after the last `embedding_computed` for them; posterior updater catches up on any `action_scored` events emitted after the last `code_artifact_score_updated`).
 5. Resume MCP server + external-push endpoint.
 
@@ -1703,6 +1704,11 @@ Only items that remain genuinely empirical after the daemon (§5) + cycle-1-only
 3. **Webhook authentication and policy.** Owner-provisioned bearer token is the MVP. Open: per-source policy (rate limits, sensitivity classification on inbound, allowed-event-kind whitelist), and what happens when the token leaks.
 4. **Crisis-mode trigger.** Currently owner-declared. Future: substrate-detected via pattern recognition on directive intent. Default: owner-declared only; reconsider after Phase I if owners can articulate a useful trigger heuristic.
 
+**Resolved (kept for traceability):**
+
+- **Embedding model.** `text-embedding-3-small` via `OPENAI_API_KEY`, dim 1536. See `runtime/embedder.ts` `EMBEDDING_MODEL` / `EMBEDDING_DIMS`.
+- **Embedding storage.** `sqlite-vec` (`vec0` virtual table `vec_events` in `substrate/schema.sql`). Replaces the prior in-memory linear-scan (HNSW was promised but never materialised in code). Disk-resident — no boot rebuild, no JS-side Float32Array footprint at scale. Filter columns (`kind`, `ts`, `embedding_version`) participate in WHERE clauses in the same KNN statement, enabling hybrid queries in one SQL pass.
+
 ## 21. Module Breakdown — v2/ Directory Layout
 
 ```
@@ -1723,7 +1729,7 @@ v2/
 │   ├── artifact_store.ts        ~250 LOC — code_artifact CRUD + posterior update + LATM promotion threshold
 │   ├── artifact_admission.ts    ~180 LOC — admission fixture runner + sandbox-decl-vs-actual check
 │   ├── embedder.ts              ~150 LOC — text → vector via OpenAI text-embedding-3-small (OPENAI_API_KEY); version-stamps embeddings
-│   ├── embedding_index.ts       ~200 LOC — in-memory HNSW index; rebuilt at daemon boot; live-updated by embedder worker
+│   ├── embedding_index.ts       ~140 LOC — thin wrapper over sqlite-vec `vec_events` virtual table; SQL knn for 1536-dim production embeddings, JS-fallback for test-dim vectors; no in-memory rebuild
 │   ├── retrieval.ts             ~200 LOC — cosine × posterior reranker; depth-1 retrieval enforcing per-section K caps
 │   ├── external_ingress.ts      ~180 LOC — webhook POST /external/push handler + pluggable inbox pollers
 │   ├── task_scheduler.ts        ~150 LOC

@@ -2,8 +2,19 @@
 // Single source of truth for opening / closing / transacting against
 // the events + code_artifact tables. Schema is applied on first open
 // per path; connections are cached so re-opens reuse the same handle.
+//
+// sqlite-vec extension:
+//   Loaded once per connection right before schema application so the
+//   vec0 virtual table in schema.sql can be created. The extension is
+//   shipped by the `sqlite-vec` npm package; its loadable path resolves
+//   to `node_modules/sqlite-vec-<platform>-<arch>/vec0.<ext>`. Failure
+//   to load is a hard fault (we throw) — vec0 is now the canonical
+//   embedding index per v2-design.md §5.1, replacing the in-memory
+//   linear-scan. We do NOT fall back silently; a broken vec0 surface
+//   would degrade retrieval invisibly which is worse than failing fast.
 
 import { Database } from "bun:sqlite";
+import * as sqliteVec from "sqlite-vec";
 import schemaSql from "./schema.sql" with { type: "text" };
 
 // ── Per-path connection cache ──────────────────────────────────────
@@ -23,6 +34,14 @@ const applyWalPragmas = (db: Database): void => {
   db.run("PRAGMA foreign_keys = ON");
   db.run("PRAGMA cache_size = 10000");
   db.run("PRAGMA mmap_size = 268435456");
+};
+
+/** Load the sqlite-vec extension into the open connection. Idempotent —
+ *  Bun's bun:sqlite handles repeated loads of the same shared object
+ *  gracefully (subsequent calls are no-ops). Throws on failure: see the
+ *  module header for why we do not fall back silently. */
+const loadSqliteVec = (db: Database): void => {
+  db.loadExtension(sqliteVec.getLoadablePath());
 };
 
 /** Execute the schema DDL against the open connection.
@@ -45,6 +64,10 @@ export const openDb = (dbPath: string): Database => {
   _dbCache.set(dbPath, db);
 
   applyWalPragmas(db);
+  // Order matters: load the vec0 extension BEFORE runSchema so the
+  // `CREATE VIRTUAL TABLE IF NOT EXISTS vec_events USING vec0(...)`
+  // statement in schema.sql can resolve the `vec0` module.
+  loadSqliteVec(db);
   runSchema(db);
   return db;
 };

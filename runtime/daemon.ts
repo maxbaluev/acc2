@@ -381,13 +381,25 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       transport: "fastmcp:httpStream",
     },
   });
+  // Per v2-design.md §5.1 the canonical embedding index is sqlite-vec
+  // (substrate/schema.sql `vec_events` virtual table). The "rebuild"
+  // step is now effectively instant — we backfill vec_events from the
+  // legacy events.embedding BLOB column for cutover-window parity, then
+  // hand back a thin wrapper over the SQL surface. The `mode` field
+  // distinguishes the new path so log consumers (and the integration
+  // smoke that asserts the event was emitted) can tell which storage
+  // backed the daemon at boot.
+  const vecCount = (
+    db.query("SELECT COUNT(*) AS n FROM vec_events").get() as { n: number } | null
+  )?.n ?? 0;
   emitEvent(db, {
     kind: "daemon_index_rebuilt",
     substrate_origin: "substrate_auto",
     payload: {
-      mode: "in_memory_linear",
+      mode: "sqlite_vec_backed",
       size: index.size(),
-      note: "phase_f_in_memory_index",
+      vec_count: vecCount,
+      note: "phase_f_sqlite_vec_index",
     },
   });
 

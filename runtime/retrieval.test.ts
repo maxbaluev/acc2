@@ -147,6 +147,75 @@ describe("retrieve (full async path with mocked query embed)", () => {
   });
 });
 
+describe("sqlite-vec backed retrieval — clustered synthetic events", () => {
+  // End-to-end exercise of the canonical SQL path. We embed 20 events
+  // across three clusters at 1536-dim (so vec_events accepts them) and
+  // confirm that querying for one cluster's centroid returns hits from
+  // that cluster, NOT the other clusters.
+  const makeClusterVec = (cluster: number, jitterSeed: number): number[] => {
+    const v = new Array<number>(EMBEDDING_DIMS).fill(0);
+    // Cluster centroid axes: 0..3, 100..103, 200..203. The seed adds
+    // tiny per-event jitter so each event has a unique embedding.
+    const base = cluster * 100;
+    v[base] = 1;
+    v[base + 1] = 0.5;
+    v[base + 2] = 0.5;
+    v[base + 3] = 0.5;
+    // Add small uniform jitter outside the cluster centre.
+    const j = ((jitterSeed * 9301 + 49297) % 233280) / 233280;
+    v[base + 4] = j * 0.01;
+    return v;
+  };
+  const seedClusterEvent = (
+    db: ReturnType<typeof openDb>,
+    cluster: number,
+    seed: number,
+  ): string => {
+    const seeded = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: `cluster-${cluster}-seed-${seed}` },
+    });
+    const vec = makeClusterVec(cluster, seed);
+    db.run(
+      "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
+      [encodeEmbeddingBlob(vec), EMBEDDING_VERSION, seeded.id],
+    );
+    return seeded.id;
+  };
+
+  test("top-K results all come from the queried cluster", async () => {
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    // Query embedding = cluster 1's centroid (no jitter).
+    const queryVec = (() => {
+      const v = new Array<number>(EMBEDDING_DIMS).fill(0);
+      v[100] = 1; v[101] = 0.5; v[102] = 0.5; v[103] = 0.5;
+      return v;
+    })();
+    installMockFetch(async () => {
+      const data = { data: [{ embedding: queryVec, index: 0 }] };
+      return new Response(JSON.stringify(data), { status: 200 });
+    });
+
+    const db = openDb(":memory:");
+    runViews(db);
+    const cluster1Ids = new Set<string>();
+    // 20 events: 7 in cluster 1, 7 in cluster 0, 6 in cluster 2.
+    for (let i = 0; i < 7; i++) cluster1Ids.add(seedClusterEvent(db, 1, i));
+    for (let i = 0; i < 7; i++) seedClusterEvent(db, 0, i + 100);
+    for (let i = 0; i < 6; i++) seedClusterEvent(db, 2, i + 200);
+
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    expect(idx.size()).toBe(20);
+    const result = await retrieve(db, idx, { text: "cluster 1 query", k: 5 });
+    expect(result.hits.length).toBe(5);
+    // All top-5 must come from cluster 1.
+    for (const hit of result.hits) {
+      expect(cluster1Ids.has(hit.event_id)).toBe(true);
+    }
+  });
+});
+
 describe("retrieveWithEmbedding (sync variant, no API call)", () => {
   test("ranks identical entries against a unit-axis query in the expected order", () => {
     const db = openDb(":memory:");

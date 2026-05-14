@@ -202,11 +202,47 @@ const readUnembedded = (db: Database, batchSize: number): UnembeddedRow[] => {
   return rows;
 };
 
+/** Insert (or replace) the matching row in the vec0 virtual table.
+ *  Idempotent — we DELETE-by-PK first then INSERT, since vec0 does not
+ *  reliably support UPSERT semantics across versions. We READ kind + ts
+ *  from the source event row (one cheap PK lookup) rather than threading
+ *  them through every caller. Per v2-design.md §5.1, vec_events is the
+ *  canonical embedding index.
+ *
+ *  Failure handling: if the vec_events insert fails (extension didn't
+ *  load, or schema mismatch on an upgraded substrate), we surface the
+ *  exception so the caller can swallow it. The events.embedding BLOB
+ *  column is still written by persistEmbedding before this runs, so
+ *  retrieval can degrade to the in-memory path. */
+export const upsertVecEventRow = (
+  db: Database,
+  eventId: string,
+  embedding: number[],
+  version: string,
+): void => {
+  const row = db
+    .query("SELECT kind, ts FROM events WHERE id = ?")
+    .get(eventId) as { kind: string; ts: string } | null;
+  if (!row) return;
+  // vec0 stores the vector as JSON or BLOB; we send JSON for portability
+  // (smaller code path, no Buffer juggling) — the extension parses it
+  // into the internal float[N] representation either way.
+  const vec = JSON.stringify(embedding);
+  // Replace-if-present: DELETE then INSERT keeps the rebuild + live-add
+  // paths convergent without relying on UPSERT.
+  db.run("DELETE FROM vec_events WHERE event_id = ?", [eventId]);
+  db.run(
+    "INSERT INTO vec_events(event_id, embedding, kind, ts, embedding_version) VALUES (?, ?, ?, ?, ?)",
+    [eventId, vec, row.kind, row.ts, version],
+  );
+};
+
 /** Persist one embedding back onto the source row. We UPDATE the source
- *  event row's `embedding` + `embedding_version` columns (the columns added
- *  by Phase F's schema migration). The post-update emission of
- *  `embedding_computed` keeps the four-link chain auditable: the source
- *  event id appears in context_refs. */
+ *  event row's `embedding` + `embedding_version` columns (transitional —
+ *  kept for parity testing per the schema deprecation note) AND insert
+ *  into the canonical vec_events virtual table. The post-update emission
+ *  of `embedding_computed` keeps the four-link chain auditable: the
+ *  source event id appears in context_refs. */
 const persistEmbedding = (
   db: Database,
   sourceEventId: string,
@@ -218,6 +254,15 @@ const persistEmbedding = (
     "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
     [blob, version, sourceEventId],
   );
+  // Canonical v2 path — see schema.sql for vec_events shape + reasoning.
+  // We swallow failures here so a vec0 mishap doesn't stall the embedder
+  // loop; retrieval degrades to the in-memory wrapper which reads the
+  // legacy BLOB column.
+  try {
+    upsertVecEventRow(db, sourceEventId, embedding, version);
+  } catch (err) {
+    console.warn(`[embedder] vec_events upsert failed for ${sourceEventId}: ${err}`);
+  }
   emitEvent(db, {
     kind: "embedding_computed",
     substrate_origin: "substrate_auto",

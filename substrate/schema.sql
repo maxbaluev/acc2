@@ -11,8 +11,15 @@ CREATE TABLE IF NOT EXISTS meta (
 -- Append-only immutable fact ledger. id is a ULID (TEXT). Every column
 -- after the eight required ones is optional and lifted from Event in
 -- substrate/types.ts. payload + context_refs are JSON-encoded TEXT.
--- embedding is a raw float32 BLOB so sqlite-vec virtual tables can read
--- it back without a copy.
+-- embedding is a raw float32 BLOB.
+--
+-- DEPRECATED — events.embedding (and events.embedding_version):
+-- Replaced by the vec_events virtual table at the bottom of this file
+-- (sqlite-vec / vec0). The BLOB column stays for one cutover window
+-- so we can compare new sqlite-vec retrieval results against the old
+-- in-memory linear-scan during parity testing. A follow-up phase drops
+-- the column entirely. New code should NOT read events.embedding for
+-- retrieval — query vec_events instead.
 CREATE TABLE IF NOT EXISTS events (
   id                    TEXT PRIMARY KEY,
   ts                    TEXT NOT NULL,
@@ -74,3 +81,33 @@ CREATE TABLE IF NOT EXISTS code_artifact (
 CREATE INDEX IF NOT EXISTS idx_code_artifact_runtime ON code_artifact(runtime);
 CREATE INDEX IF NOT EXISTS idx_code_artifact_status  ON code_artifact(status);
 CREATE INDEX IF NOT EXISTS idx_code_artifact_score   ON code_artifact(score DESC);
+
+-- ── sqlite-vec virtual table: canonical embedding index ────────────
+-- Per v2-design.md §3.6.1 Rule 1 (embedding-based candidate dedup) and
+-- §5.1 / §13.1 (depth-1 retrieval). vec_events is the SOLE embedding
+-- index in v2. The `events.embedding` BLOB column above is kept as a
+-- TRANSITIONAL field for one cutover window so we can compare new
+-- sqlite-vec results against the old in-memory linear-scan during
+-- parity testing. A follow-up phase drops the BLOB column.
+--
+-- Columns:
+--   event_id          — primary key, FK-shaped reference to events.id.
+--   embedding         — float[1536] (text-embedding-3-small).
+--   kind              — plain metadata column: indexable, filterable in
+--                       the WHERE clause of a KNN query.
+--   ts                — plain metadata column: indexable, filterable.
+--   embedding_version — plain metadata column: lets the reranker filter
+--                       out stale-model rows in one SQL pass instead of
+--                       walking every entry post-scan.
+--
+-- Note on aux columns: sqlite-vec 0.1.9's `+name` "auxiliary" syntax
+-- DOES NOT allow WHERE constraints in KNN queries (errors with "illegal
+-- WHERE constraint on a vec0 auxiliary column"). We use plain metadata
+-- columns instead — they participate in WHERE filters at KNN time.
+CREATE VIRTUAL TABLE IF NOT EXISTS vec_events USING vec0(
+  event_id          TEXT PRIMARY KEY,
+  embedding         float[1536],
+  kind              TEXT,
+  ts                TEXT,
+  embedding_version TEXT
+);

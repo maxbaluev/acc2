@@ -580,3 +580,24 @@ A short list of things I expected to find one way and found the other:
 10. **The mock bridge can only handle two fixture prompts.** `FIXTURE_D_MARKER` and `EXAMPLE_COM_MARKER`. Any other directive routed through `ACC2_BRIDGE_MODE=mock` returns `auth_missing`. The mock was never expanded as new fixtures landed. Tests workaround this with explicit mode-real spawnFn injection. **info** — by design, but worth knowing.
 
 — end of report.
+
+---
+
+## Resolutions
+
+### Top-3 + dead-dep `sqlite-vec` — resolved (2026-05-13)
+
+**Blocker #3 ("Embedder + retrieval index has no HNSW … brute-force linear cosine")** and the dead-dep finding (`sqlite-vec` was installed but never imported) both close with one cutover. We did NOT add HNSW; we wired the already-installed `sqlite-vec` extension as the canonical embedding index, which is the better answer for the substrate shape:
+
+- `substrate/db.ts` loads the extension at every `openDb()` (failure throws — no silent degradation).
+- `substrate/schema.sql` declares a `vec_events` vec0 virtual table with `float[1536]` embedding column plus filterable metadata columns (`kind`, `ts`, `embedding_version`).
+- `runtime/embedder.ts:upsertVecEventRow` upserts the vec0 row alongside the legacy BLOB column update (the BLOB column stays for one cutover window, then drops in a follow-up phase).
+- `runtime/embedding_index.ts` is now a thin wrapper: its `knn` for production-dim (1536) embeddings is a single SQL query against `vec_events`; the daemon no longer materialises every Float32Array in JS memory at boot. (A small JS-fallback path remains for tests that seed non-1536-dim vectors — `vec_events` rejects those by schema, so the wrapper stashes them inline. Production callers always emit 1536-dim through OpenAI.)
+- `runtime/daemon.ts`'s `daemon_index_rebuilt` payload now carries `{ mode: "sqlite_vec_backed", vec_count }` so log consumers can identify the new path.
+- New hermetic smoke at `runtime/sqlite_vec.test.ts` proves extension load, KNN ordering, metadata-WHERE filters, and the dim-mismatch contract the wrapper's fallback relies on.
+
+At pilot scale (20 events, 1536-dim) the SQL KNN path measures ~0.6 ms per query. The 300 MB Float32Array footprint that would have appeared at 50k embedded events no longer exists. Hybrid queries (vector match + SQL filter) compose in one statement, matching the §3.6.1 Rule-1 dedup shape directly.
+
+Two related findings remain explicitly open, intentionally:
+- The `events.embedding` BLOB column stays for one cutover window so we can compare new-vs-old retrieval on regressions; a follow-up phase drops it.
+- The audit's text at §"Top-3" and "Unused production dep" describes the pre-resolution state and is preserved unchanged for traceability.

@@ -214,6 +214,17 @@ describe("embedderWorkerTick", () => {
     expect(back).not.toBeNull();
     expect(back!.version).toBe(EMBEDDING_VERSION);
     expect(back!.vector.length).toBe(EMBEDDING_DIMS);
+
+    // Canonical v2 path: the embedder ALSO upserts into the sqlite-vec
+    // virtual table. Verify the row landed with the same event_id and
+    // version stamp so the SQL retrieval path can find it.
+    const vecRow = db
+      .query("SELECT event_id, kind, embedding_version FROM vec_events WHERE event_id = ?")
+      .get(seeded.id) as { event_id: string; kind: string; embedding_version: string } | null;
+    expect(vecRow).not.toBeNull();
+    expect(vecRow!.event_id).toBe(seeded.id);
+    expect(vecRow!.kind).toBe("knowledge_candidate");
+    expect(vecRow!.embedding_version).toBe(EMBEDDING_VERSION);
   });
 
   test("idempotent — a second tick does not re-embed an already-embedded row", async () => {
