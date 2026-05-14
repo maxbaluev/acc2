@@ -56,9 +56,12 @@ afterEach(async () => {
 });
 
 describe("runDispatch", () => {
-  test("`acc task '<words>'` opens a directive (directive_opened + root task_node_opened)", async () => {
+  test("`acc task '<words>' --bare` opens a directive (directive_opened + root task_node_opened)", async () => {
+    // Default mode now follows the event stream — that's tested with a
+    // bounded deadline in a separate case. Here we assert the bare
+    // "open + ack" shape with --bare so the test stays deterministic.
     const cap = captureStdout();
-    const code = await runDispatch(["task", "fix", "the", "broken", "test"]);
+    const code = await runDispatch(["task", "--bare", "fix", "the", "broken", "test"]);
     cap.restore();
 
     expect(code).toBe(0);

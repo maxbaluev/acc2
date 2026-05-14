@@ -52,6 +52,28 @@ The substrate (not you) decides what happens next: `substrate_replay` (Tier-0 re
 
 If you catch yourself about to spawn an Explore agent, run `grep -r` across the codebase, or read more than a couple of files in a row to "form a view" — **stop, surface the directive verbatim to `acc task`, and observe the stream** (poll-and-react per orchestrator-runtime.md "Background command observability" if applicable, otherwise let the scheduler dispatch).
 
+### How to actually invoke `acc task` (Claude-native streaming)
+
+The canonical dispatch pattern, mandated for every orchestrator session:
+
+```ts
+Bash({
+  command: 'bun cli/dispatch.ts task "<owner words>"',
+  run_in_background: true,
+  description: "..."
+})
+```
+
+`acc task` follows by default — it opens the directive AND streams the narrative event surface (decomposition, action_predicted, action_scored, knowledge_candidate, recipe_extracted, task_closure_audited, lesson_extracted, contract_amendment_proposed, terminal events) via SSE until the root task hits a terminal state. Because the orchestrator runs it as a Claude background task, **each stdout line becomes one Claude notification in the conversation**. No separate Monitor wiring, no manual SSE subscription, no `bun -e mcpCall(...)` interpretation.
+
+Three corollaries:
+
+- **DO NOT** open a Monitor in parallel for the same directive. The CLI's follow tail IS the observation surface. Doubling up duplicates notifications.
+- **DO NOT** call `acc task` without `run_in_background: true`. A long-running brain cycle synchronous in the foreground blocks the conversation.
+- **DO NOT** add `--no-follow` / `--bare` unless you genuinely need the fire-and-return shape (writing a directive then dispatching another command immediately). The default is the right surface 95% of the time.
+
+The narrative filter (`acc tail` / `acc events` defaults, defined in `cli/observe.ts:NARRATIVE_KINDS`) compresses ~50 raw substrate events per brain cycle to ~8 strategic events. `--verbose` opts into the full diagnostic dump if you need to see bridge frames, subprocess lifecycle, or candidate-confirm churn.
+
 ## The event ledger is the universal language
 
 One SQLite table (`events`), one ordered stream, one source of truth. Every brain emission, runtime observation, owner directive, and Claude milestone is one row. Nothing survives a daemon restart that isn't in the ledger.

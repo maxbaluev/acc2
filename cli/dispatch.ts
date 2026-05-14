@@ -15,12 +15,14 @@ const usage = (): string => `acc — v2 thin CLI
 
   acc init [--yes]                Fresh-install bootstrap (state dir, admin token,
                                   optional foundational seed). Run me first.
-  acc task "<owner words>" [--follow]
+  acc task "<owner words>" [--no-follow] [--timeout SECS]
                                   Open a directive; the substrate dispatches the
-                                  brain. --follow tails the event stream until the
-                                  root task hits a terminal state (claude-native
-                                  background-task surface — every brain emit is
-                                  one stdout line).
+                                  brain. By default, tails the narrative event
+                                  stream until the root task hits a terminal state
+                                  — designed for run_in_background:true so each
+                                  brain emit is one Claude notification with no
+                                  separate Monitor wiring. --no-follow / --bare
+                                  reverts to fire-and-return (just emit + ack).
   acc events [--limit N] [--task PREFIX] [--directive PREFIX] [--kind K] [--verbose]
                                   Recent events, one structured line per event.
                                   Replaces inline 'bun -e mcpCall(...)' boilerplate.
@@ -67,14 +69,17 @@ const dispatchTask = async (
   console.log(`directive_opened ${directive_id} (root task=${task_id})`);
   console.log(`  text: ${words}`);
   if (!opts.follow) return 0;
-  // --follow: stream brain progress as structured one-liners. Exits when
-  // the ROOT task hits a terminal event. Designed to mirror cleanly into
-  // a Claude Code background task — each emit becomes a notification.
+  // Default mode (when invoked under run_in_background:true): stream the
+  // narrative event surface as structured one-liners. Each stdout line is
+  // one Claude notification — no separate Monitor wiring required. Exits
+  // when the ROOT task hits a terminal event (task_committed / task_failed
+  // / dispatcher_violation) or --timeout is reached.
   const { runTail } = await import("./observe");
   console.log(`  (following — scoped to task=${task_id.slice(0, 16)}…; root-terminal will exit)`);
   return runTail({
     task: task_id,
-    pollMs: 1500,
+    // SSE push by default — each event arrives the instant the bus emits.
+    stream: true,
     exitOnTerminal: true,
     deadlineMs: opts.timeoutSecs ? Date.now() + opts.timeoutSecs * 1000 : undefined,
   });
@@ -129,12 +134,24 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
   }
   if (cmd === "task") {
     const rest = argv.slice(1);
-    const follow = rest.includes("--follow");
+    // Follow-mode is the default — the dispatch tail streams events as
+    // structured notifications when the orchestrator runs this command
+    // with run_in_background:true (each stdout line becomes a Claude
+    // notification automatically). Opt OUT with `--no-follow` for the
+    // bare directive-open shape (just emit and return).
+    const noFollow = rest.includes("--no-follow") || rest.includes("--bare");
+    const follow = !noFollow;
     const timeoutIdx = rest.findIndex((x) => x === "--timeout");
     const timeoutSecs = timeoutIdx >= 0 && rest[timeoutIdx + 1]
       ? Number(rest[timeoutIdx + 1]) : undefined;
     const words = rest
-      .filter((x, i) => x !== "--follow" && x !== "--timeout" && rest[i - 1] !== "--timeout")
+      .filter((x, i) =>
+        x !== "--follow" &&
+        x !== "--no-follow" &&
+        x !== "--bare" &&
+        x !== "--timeout" &&
+        rest[i - 1] !== "--timeout"
+      )
       .join(" ").trim();
     if (!words) { console.error("acc task: missing directive text"); return 1; }
     return dispatchTask(words, { follow, timeoutSecs });
