@@ -45,16 +45,20 @@ const collectTsFiles = (dir: string): string[] => {
 };
 
 describe("alignment / code_as_capability (Principle 4)", () => {
-  test("Bun.spawn outside runtime modules is restricted to bridge.ts", () => {
+  test("Bun.spawn outside runtime modules is restricted to bridge subprocess code", () => {
     const root = join(import.meta.dir, "..", "..", "runtime");
     const files = collectTsFiles(root);
     // Acceptable callers: runtime/runtimes/*.ts (the legitimate runtime
-    // executors) and runtime/bridge.ts (opencode subprocess). Anything else
-    // bypassing artifact resolution is a substrate violation.
+    // executors) and runtime/bridge/opencode.ts (the opencode subprocess
+    // wrangler after the bridge.ts module split). Anything else bypassing
+    // artifact resolution is a substrate violation.
     const offenders: string[] = [];
     for (const f of files) {
       if (f.includes("/runtime/runtimes/")) continue;
-      if (f.endsWith("/runtime/bridge.ts")) continue;
+      if (f.endsWith("/runtime/bridge/opencode.ts")) continue;
+      // bridge/types.ts only references Bun.spawn as a TYPE (`typeof
+      // Bun.spawn`) for the SpawnOpts injection seam — no invocation site.
+      if (f.endsWith("/runtime/bridge/types.ts")) continue;
       if (f.endsWith("/runtime/sandbox.ts")) continue; // sandbox.ts only mentions Bun.spawn in JSDoc comments
       const text = readFileSync(f, "utf-8");
       // Strip line comments so the JSDoc references in module docstrings

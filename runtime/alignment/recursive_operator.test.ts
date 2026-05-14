@@ -63,20 +63,30 @@ describe("alignment / recursive_operator (Principle 1)", () => {
     }
   });
 
-  test("bridge.ts never writes events outside emitEvent (audit of source text)", async () => {
-    // Structural check: read bridge.ts and assert it imports emitEvent and
-    // never references the `events` SQL surface directly with `INSERT`. If
-    // a future refactor inlined raw inserts the brain bridge would no
-    // longer route through the substrate.
-    const bridgePath = join(import.meta.dir, "..", "bridge.ts");
-    const text = await Bun.file(bridgePath).text();
-    expect(text).toContain('import { emitEvent } from "./events"');
-    // We tolerate the word "INSERT" appearing inside a comment, but no
-    // direct `db.run("INSERT INTO events`-style statement.
-    expect(text.includes('INSERT INTO events')).toBe(false);
-    // Same for direct UPDATE/DELETE on events table.
-    expect(text.includes('UPDATE events')).toBe(false);
-    expect(text.includes('DELETE FROM events')).toBe(false);
+  test("bridge code never writes events outside emitEvent (audit of source text)", async () => {
+    // Structural check: read every bridge module (the top-level shim plus
+    // every file under runtime/bridge/) and assert at least one site
+    // imports emitEvent AND that none reference the `events` SQL surface
+    // directly with INSERT/UPDATE/DELETE. If a future refactor inlined raw
+    // inserts the brain bridge would no longer route through the substrate.
+    const { readdirSync } = require("node:fs") as typeof import("node:fs");
+    const bridgeDir = join(import.meta.dir, "..", "bridge");
+    const shimPath = join(import.meta.dir, "..", "bridge.ts");
+    const files = [shimPath, ...readdirSync(bridgeDir).map((f) => join(bridgeDir, f))];
+    let importsEmitEvent = false;
+    for (const path of files) {
+      if (!path.endsWith(".ts")) continue;
+      const text = await Bun.file(path).text();
+      if (/import\s*\{[^}]*emitEvent[^}]*\}\s*from\s*"[^"]*events"/.test(text)) {
+        importsEmitEvent = true;
+      }
+      // We tolerate the word "INSERT" appearing inside a comment, but no
+      // direct `db.run("INSERT INTO events`-style statement.
+      expect(text.includes("INSERT INTO events")).toBe(false);
+      expect(text.includes("UPDATE events")).toBe(false);
+      expect(text.includes("DELETE FROM events")).toBe(false);
+    }
+    expect(importsEmitEvent).toBe(true);
   });
 
   test("task_dispatcher reads bridge-emitted events via SELECT, not via shared state", async () => {

@@ -33,13 +33,22 @@ describe("alignment / cycle_one (Principle 3)", () => {
   });
 
   test("both bridge and dispatcher route through the shared gate (source text)", () => {
-    const bridgeText = readFileSync(join(import.meta.dir, "..", "bridge.ts"), "utf-8");
+    // The bridge implementation lives under `runtime/bridge/` after the
+    // module split; the real-subprocess path (opencode.ts) is the one
+    // that needs the cycle-1 gate, since it scans the streamed JSON for
+    // forbidden kinds. The mock path emits forbidden kinds in the
+    // adversarial fixture but does not need a guard (the dispatcher's
+    // event-stream scan catches it post-emission).
+    const bridgeOpencodeText = readFileSync(
+      join(import.meta.dir, "..", "bridge", "opencode.ts"),
+      "utf-8",
+    );
     const dispatcherText = readFileSync(join(import.meta.dir, "..", "task_dispatcher.ts"), "utf-8");
-    expect(bridgeText.includes('from "./cycle_one_gate"')).toBe(true);
+    expect(bridgeOpencodeText.includes('from "../cycle_one_gate"')).toBe(true);
     expect(dispatcherText.includes('from "./cycle_one_gate"')).toBe(true);
     // Neither file should hand-roll its own literal forbidden-kind list.
     // We bar the literal disjunction that used to live in both places.
-    expect(bridgeText).not.toContain(
+    expect(bridgeOpencodeText).not.toContain(
       'kind === "brain_cycle_2_started" || kind === "continue_cycle_requested"',
     );
     expect(dispatcherText).not.toContain(
