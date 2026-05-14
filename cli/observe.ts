@@ -15,7 +15,7 @@
 // `acc task --follow` reuses `tailEvents` to stream brain progress as
 // Claude-native background-task stdout: every emit becomes a notification.
 
-import { mcpCall } from "./rpc";
+import { mcpCall, sseConnect } from "./rpc";
 
 // ── one-line formatter per event kind ──────────────────────────────
 
@@ -305,9 +305,71 @@ export type TailOpts = EventsOpts & {
   exitOnTerminal?: boolean;
   /** Absolute deadline (Date.now() + ms). When exceeded, exit non-zero. */
   deadlineMs?: number;
+  /** Use SSE push (canonical, ~realtime) instead of polling. Default true —
+   *  SSE eliminates the 2s poll lag and the missed-events-between-polls window.
+   *  Polling is the fallback used only when SSE cannot connect. */
+  stream?: boolean;
 };
 
-export const runTail = async (opts: TailOpts): Promise<number> => {
+// SSE-backed live stream — the canonical Claude-native observation path.
+// Each event arrives via the daemon's `/events/stream` push transport (no
+// polling lag), is filtered + formatted into one structured line, and is
+// written to stdout. When this command runs as a Claude Code background
+// task, each line becomes a notification automatically.
+const runTailStream = async (opts: TailOpts): Promise<number> => {
+  const exitOnTerminal = opts.exitOnTerminal ?? Boolean(opts.task || opts.directive);
+  const deadlineMs = opts.deadlineMs;
+  const ac = new AbortController();
+  let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  if (deadlineMs) {
+    const ms = deadlineMs - Date.now();
+    if (ms <= 0) {
+      console.error("acc tail: deadline already exceeded");
+      return 2;
+    }
+    deadlineTimer = setTimeout(() => ac.abort(), ms);
+  }
+  let sawTerminal = false;
+  try {
+    for await (const ev of sseConnect({ signal: ac.signal, reconnect: true })) {
+      // SseEvent shape: { event_id, kind, ts, directive_id?, task_id?, substrate_origin?, payload? }
+      // matches EventLike directly — no .data unwrap.
+      const e = ev as unknown as EventLike;
+      if (opts.task && !(e.task_id ?? "").startsWith(opts.task)) continue;
+      if (opts.directive && !(e.directive_id ?? "").startsWith(opts.directive)) continue;
+      if (opts.kind && e.kind !== opts.kind) continue;
+      const line = formatEvent(e, { verbose: opts.verbose });
+      if (line) console.log(line);
+      if (TERMINAL_KINDS.has(e.kind ?? "")) {
+        sawTerminal = true;
+        if (exitOnTerminal) {
+          ac.abort();
+          return 0;
+        }
+      }
+    }
+  } catch (err) {
+    if (ac.signal.aborted) {
+      if (sawTerminal) return 0;
+      if (deadlineMs) {
+        console.error("acc tail: deadline exceeded (no terminal event)");
+        return 2;
+      }
+      return 0;
+    }
+    console.error(`acc tail: ${(err as Error).message}`);
+    return 1;
+  } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+  }
+  // SSE generator exhausted without abort — shouldn't happen, daemon keeps
+  // connection alive. Fall through gracefully.
+  return sawTerminal ? 0 : 0;
+};
+
+// Polling fallback (kept for when SSE cannot connect — e.g. daemon down at
+// start, restricted network). Server caps at k=200; we re-poll every pollMs.
+const runTailPoll = async (opts: TailOpts): Promise<number> => {
   const pollMs = opts.pollMs ?? 2000;
   const exitOnTerminal = opts.exitOnTerminal ?? Boolean(opts.task || opts.directive);
   const deadlineMs = opts.deadlineMs;
@@ -328,7 +390,6 @@ export const runTail = async (opts: TailOpts): Promise<number> => {
       return 1;
     }
     const evs = ((env.result as { events?: EventLike[] })?.events ?? []) as EventLike[];
-    // Server returns ts-ascending; emit only fresh ids.
     let sawTerminal: EventLike | null = null;
     for (const e of evs) {
       const id = eventId(e);
@@ -341,15 +402,20 @@ export const runTail = async (opts: TailOpts): Promise<number> => {
       if (line) console.log(line);
       if (TERMINAL_KINDS.has(e.kind ?? "")) sawTerminal = e;
     }
-    if (sawTerminal && exitOnTerminal) {
-      return 0;
-    }
+    if (sawTerminal && exitOnTerminal) return 0;
     if (deadlineMs && Date.now() > deadlineMs) {
-      console.error(`acc tail: deadline exceeded (no terminal event)`);
+      console.error("acc tail: deadline exceeded (no terminal event)");
       return 2;
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }
+};
+
+export const runTail = async (opts: TailOpts): Promise<number> => {
+  // Default to SSE — Claude-native push, no poll lag, no missed events.
+  // Operator can force polling with --no-stream / stream=false.
+  if (opts.stream === false) return runTailPoll(opts);
+  return runTailStream(opts);
 };
 
 // ── acc graph ──────────────────────────────────────────────────────
@@ -489,6 +555,8 @@ export const runObserve = async (cmd: string, argv: string[]): Promise<number> =
         deadlineMs: flags.timeout
           ? Date.now() + Number(flags.timeout) * 1000
           : undefined,
+        // Default = SSE stream. `--no-stream` forces polling fallback.
+        stream: flags["no-stream"] ? false : (flags.stream !== false),
       });
     case "graph": {
       const did = argv.find((a) => !a.startsWith("--"));
