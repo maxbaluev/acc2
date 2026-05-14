@@ -7,6 +7,7 @@
 import type { Database } from "bun:sqlite";
 import type { Event, EventKind, JsonValue, SubstrateOrigin } from "../substrate/types";
 import { newId, nowIso } from "./ids";
+import { publishEvent } from "./event_bus";
 
 export type EmitEventInput = {
   kind: EventKind;
@@ -74,6 +75,18 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       input.invoker ?? null,
     ],
   );
+  // Phase 1.β: broadcast to the in-process bus so SSE subscribers and tests
+  // see the event without polling SQLite. The bus catches subscriber errors
+  // so this is fail-soft.
+  publishEvent({
+    event_id: id,
+    kind: input.kind,
+    ts,
+    directive_id,
+    task_id,
+    substrate_origin,
+    payload: (input.payload ?? {}) as JsonValue,
+  });
   return { id, ts };
 };
 

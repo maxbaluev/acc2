@@ -111,6 +111,7 @@ export const McpMethods = [
   "substrate.find_recipe",
   "runtime.replay_recipe",
   "substrate.register_external_source",
+  "runtime.recent_events",
 ] as const;
 export type McpMethodName = (typeof McpMethods)[number];
 
@@ -307,6 +308,11 @@ const RegisterExternalSourceSchema = z.object({
   schema_hint: z.string().optional(),
   rate_limit_per_min: z.number().optional(),
   default_sensitivity: z.enum(["public", "internal", "private"]).optional(),
+});
+
+const RecentEventsSchema = z.object({
+  k: z.number().optional(),
+  kinds: z.array(z.string()).optional(),
 });
 
 // ── Handlers (pure functions over (ctx, args) → McpResult) ──────────
@@ -1046,6 +1052,54 @@ const handleRegisterExternalSource = (
   };
 };
 
+// ── runtime.recent_events ──────────────────────────────────────────
+//
+// Initial-buffer fill for `acc watch`: returns the most recent K events
+// (default 30, max 200), optionally filtered by kind. Used by the TUI
+// before its SSE subscription has caught up. Pure SQL read; no bus
+// involvement.
+
+const handleRecentEvents = (
+  ctx: McpContext,
+  args: z.infer<typeof RecentEventsSchema>,
+): McpResult => {
+  const k = Math.max(1, Math.min(200, args.k ?? 30));
+  const kinds = (args.kinds ?? []).filter((s) => typeof s === "string" && s.length > 0);
+  let rows: Array<Record<string, unknown>>;
+  if (kinds.length > 0) {
+    const placeholders = kinds.map(() => "?").join(",");
+    rows = ctx.db
+      .query(
+        `SELECT id, ts, kind, directive_id, task_id, substrate_origin, payload
+         FROM events
+         WHERE kind IN (${placeholders})
+         ORDER BY ts DESC
+         LIMIT ?`,
+      )
+      .all(...kinds, k) as Array<Record<string, unknown>>;
+  } else {
+    rows = ctx.db
+      .query(
+        `SELECT id, ts, kind, directive_id, task_id, substrate_origin, payload
+         FROM events
+         ORDER BY ts DESC
+         LIMIT ?`,
+      )
+      .all(k) as Array<Record<string, unknown>>;
+  }
+  // Return ts-ascending so the TUI can append straight into its buffer.
+  const events = rows.reverse().map((r) => ({
+    event_id: r.id as string,
+    ts: r.ts as string,
+    kind: r.kind as string,
+    directive_id: r.directive_id as string,
+    task_id: r.task_id as string,
+    substrate_origin: r.substrate_origin as string,
+    payload: JSON.parse((r.payload as string) ?? "{}") as JsonValue,
+  }));
+  return { ok: true, result: { events } as unknown as JsonValue };
+};
+
 // ── FastMCP server factory ─────────────────────────────────────────
 
 export type McpServerOptions = {
@@ -1332,6 +1386,16 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     execute: wrap(handleRegisterExternalSource),
   });
 
+  server.addTool({
+    name: "runtime.recent_events",
+    description:
+      "Return the most-recent K events (default 30, max 200), optionally " +
+      "filtered by kind. Used by `acc watch` to fill its event buffer before " +
+      "SSE has caught up. Result is `{events: [...]}` in ts-ASC order.",
+    parameters: RecentEventsSchema,
+    execute: wrap(handleRecentEvents),
+  });
+
   return server;
 };
 
@@ -1366,6 +1430,7 @@ const HTTP_DISPATCH: Record<string, (ctx: McpContext, args: any) => McpResult | 
   "substrate.find_recipe": handleFindRecipe as any,
   "runtime.replay_recipe": handleReplayRecipe as any,
   "substrate.register_external_source": handleRegisterExternalSource as any,
+  "runtime.recent_events": handleRecentEvents as any,
 };
 
 /** Bun.serve route handler: POST /mcp/<method>. Parses JSON body, validates

@@ -34,6 +34,7 @@ import type { Database } from "bun:sqlite";
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { emitEvent } from "./events";
+import { subscribe, resetBus, type BusEvent } from "./event_bus";
 import { newAdminToken } from "./ids";
 import { createMcpServer } from "./mcp_server";
 import { createExternalIngressState, handleExternalPush, type ExternalIngressState } from "./external_ingress";
@@ -323,6 +324,9 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     } catch { /* db may already be closed */ }
     try { auxServer?.stop(true); } catch { /* swallow */ }
     try { if (mcpServer) await mcpServer.stop(); } catch { /* swallow */ }
+    // Drop any lingering SSE subscribers — the daemon owns the bus singleton
+    // and a new daemon instance in the same process must start clean.
+    resetBus();
     closeDb(stateDbPath);
     tryRemove(socketFile);
     tryRemove(tokenFile);
@@ -457,7 +461,81 @@ const routeAux = async (
     return handleExternalPush(db, ingressState, req);
   }
 
+  if (url.pathname === "/events/stream" && req.method === "GET") {
+    return handleEventsStream(req);
+  }
+
   return Response.json({ ok: false, error: `unknown_route:${url.pathname}` }, { status: 404 });
+};
+
+// ── SSE: /events/stream ─────────────────────────────────────────────
+//
+// One controller per open connection. We register a bus subscriber that
+// formats each BusEvent into a `data: <json>\n\n` frame and pushes it to
+// the controller. On disconnect (cancel) we unsubscribe so the bus never
+// retains a dead controller. Heartbeat comments every 15s keep idle
+// proxies from killing the connection.
+
+const handleEventsStream = (req: Request): Response => {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      // Emit a comment line so the client knows the stream is alive even
+      // when no event has been published yet (some SSE consumers wait for
+      // the first byte before resolving the connection promise).
+      try { controller.enqueue(encoder.encode(": connected\n\n")); } catch { /* swallow */ }
+      const subscriber = (event: BusEvent) => {
+        try {
+          const frame =
+            `data: ${JSON.stringify({
+              event_id: event.event_id,
+              kind: event.kind,
+              ts: event.ts,
+              directive_id: event.directive_id,
+              task_id: event.task_id,
+              substrate_origin: event.substrate_origin,
+              payload: event.payload,
+            })}\n\n`;
+          controller.enqueue(encoder.encode(frame));
+        } catch {
+          // Best effort — if the controller is closed the bus will catch
+          // the throw on the NEXT publish and drop us.
+          try { unsubscribe(); } catch { /* swallow */ }
+        }
+      };
+      const unsubscribe = subscribe(subscriber);
+      const heartbeat = setInterval(() => {
+        try { controller.enqueue(encoder.encode(": keepalive\n\n")); } catch { /* swallow */ }
+      }, 15_000);
+      // Stop on abort signal from the request (client disconnect).
+      req.signal.addEventListener("abort", () => {
+        try { clearInterval(heartbeat); } catch { /* swallow */ }
+        try { unsubscribe(); } catch { /* swallow */ }
+        try { controller.close(); } catch { /* swallow */ }
+      });
+      // Attach cleanup metadata to the controller via a private cancel hook
+      // — set on the stream directly below.
+      (controller as unknown as { _accClose?: () => void })._accClose = () => {
+        try { clearInterval(heartbeat); } catch { /* swallow */ }
+        try { unsubscribe(); } catch { /* swallow */ }
+      };
+    },
+    cancel(reason) {
+      void reason;
+      // ReadableStream's cancel runs when the consumer (or the runtime on
+      // teardown) closes the stream. We have no direct controller handle
+      // here — the abort/close path inside start() already runs unsubscribe.
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    },
+  });
 };
 
 // ── Entrypoint when invoked directly (`bun runtime/daemon.ts`) ─────
