@@ -396,7 +396,19 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
 // normalized goal text from the directive payload + the count of
 // task nodes under that directive. When ≥3 shapes succeed within a
 // 30-day window, emit a recipe_extracted event with confidence=0.5.
-// Idempotent via meta cursor + dedup on shape-hash.
+//
+// Phase J refines the matching:
+//   - `goal_shape` is normalised text (the existing token, retained so
+//     pre-Phase-J tests keep passing).
+//   - `topology_signature` is a hash of the task DAG shape — nodes by
+//     parent-id structure, ignoring specific artifact ids. Two trajectories
+//     count as similar ONLY when goal_shape AND topology_signature match.
+//   - `trajectory` is the cached sequence of action_predicted + verifier
+//     ids the replay engine consumes. Each step carries `step_kind` plus
+//     `artifact_id` and a small `payload_template` (the original payload
+//     verbatim, modulo task_id/directive_id which the replayer rewrites).
+//
+// Idempotent via meta cursor + dedup on (goal_shape, topology_signature).
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const RECIPE_THRESHOLD = 3;
@@ -412,8 +424,11 @@ const goalShapeFor = (db: Database, directiveId: string): string => {
   let normGoal = "";
   if (dirRow) {
     try {
-      const p = JSON.parse(dirRow.payload) as { goal?: unknown; intent?: unknown };
-      const goal = (p.goal ?? p.intent ?? "") as string;
+      const p = JSON.parse(dirRow.payload) as { goal?: unknown; intent?: unknown; directive_text?: unknown };
+      // Accept `goal`, `intent`, OR `directive_text` (production directives
+      // store the human-readable directive as `directive_text`; tests often
+      // use `goal`/`intent`).
+      const goal = (p.goal ?? p.intent ?? p.directive_text ?? "") as string;
       normGoal = String(goal).toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 80);
     } catch { /* malformed payload — fall through to empty */ }
   }
@@ -424,6 +439,73 @@ const goalShapeFor = (db: Database, directiveId: string): string => {
     )
     .get(directiveId) as { c: number }).c;
   return `${normGoal}::n${taskCount}`;
+};
+
+/** Topology signature for one directive — a hash of (parent_task_id → task_id)
+ *  edges, ignoring specific artifact ids. Two directives with the same DAG
+ *  shape collide. */
+const topologySignatureFor = (db: Database, directiveId: string): string => {
+  const rows = db
+    .query(
+      `SELECT task_id, parent_task_id FROM events
+       WHERE kind = 'task_node_opened' AND directive_id = ?
+       ORDER BY ts ASC`,
+    )
+    .all(directiveId) as Array<{ task_id: string; parent_task_id: string | null }>;
+  // Normalize: each task gets an ordinal index by insertion order. The signature
+  // is a sorted list of (parent_ord → child_ord) edges, hashed.
+  const ordinal = new Map<string, number>();
+  rows.forEach((r, idx) => { ordinal.set(r.task_id, idx); });
+  const edges: string[] = [];
+  for (const r of rows) {
+    const child = ordinal.get(r.task_id) ?? -1;
+    const parent = r.parent_task_id !== null ? (ordinal.get(r.parent_task_id) ?? -1) : -1;
+    edges.push(`${parent}->${child}`);
+  }
+  edges.sort();
+  const canonical = `n${rows.length}::${edges.join(",")}`;
+  // Cheap, stable hash (no need for SHA — the input is short).
+  let h = 5381;
+  for (let i = 0; i < canonical.length; i++) {
+    h = ((h * 33) ^ canonical.charCodeAt(i)) | 0;
+  }
+  return `topo_${(h >>> 0).toString(16).padStart(8, "0")}::${rows.length}`;
+};
+
+/** Build a replay trajectory for a directive from its action_predicted +
+ *  verifier sequence. Each step carries the artifact id (if any) and a
+ *  payload template the replayer can re-stamp with fresh task_id /
+ *  directive_id at replay time. */
+const buildTrajectoryFor = (
+  db: Database,
+  directiveId: string,
+): Array<{ step_kind: string; artifact_id: string | null; verifier_artifact_id: string | null; payload_template: unknown }> => {
+  const rows = db
+    .query(
+      `SELECT kind, action_artifact_id, verifier_artifact_id, predicted_residual, payload
+       FROM events
+       WHERE directive_id = ?
+         AND kind IN ('task_node_opened', 'action_predicted')
+       ORDER BY ts ASC`,
+    )
+    .all(directiveId) as Array<{
+      kind: string;
+      action_artifact_id: string | null;
+      verifier_artifact_id: string | null;
+      predicted_residual: number | null;
+      payload: string;
+    }>;
+  return rows.map((r) => {
+    let parsed: unknown;
+    try { parsed = JSON.parse(r.payload ?? "{}"); } catch { parsed = {}; }
+    return {
+      step_kind: r.kind,
+      artifact_id: r.action_artifact_id,
+      verifier_artifact_id: r.verifier_artifact_id,
+      payload_template: parsed,
+      predicted_residual: r.predicted_residual,
+    };
+  });
 };
 
 export type RecipeCandidateSummary = { extracted: number };
@@ -442,16 +524,20 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
     )
     .all(cutoff) as Array<Record<string, unknown>>;
 
-  // Group by goal shape.
-  const shapeGroups = new Map<string, Array<Record<string, unknown>>>();
+  // Group by (goal_shape, topology_signature) — both must match to count as
+  // similar. The composite key is what dedup operates on.
+  type RowEntry = { row: Record<string, unknown>; goalShape: string; topology: string };
+  const shapeGroups = new Map<string, RowEntry[]>();
   for (const row of committed) {
-    const shape = goalShapeFor(db, row.directive_id as string);
-    const arr = shapeGroups.get(shape) ?? [];
-    arr.push(row);
-    shapeGroups.set(shape, arr);
+    const goalShape = goalShapeFor(db, row.directive_id as string);
+    const topology = topologySignatureFor(db, row.directive_id as string);
+    const compositeKey = `${goalShape}||${topology}`;
+    const arr = shapeGroups.get(compositeKey) ?? [];
+    arr.push({ row, goalShape, topology });
+    shapeGroups.set(compositeKey, arr);
   }
 
-  // Already-extracted shapes — dedup so we don't double-emit.
+  // Already-extracted shapes — dedup by composite key (goal_shape, topology).
   const alreadyExtracted = new Set(
     (db
       .query(
@@ -459,8 +545,10 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
       )
       .all() as Array<{ payload: string }>)
       .map((r) => {
-        try { return (JSON.parse(r.payload) as { goal_shape?: string }).goal_shape ?? ""; }
-        catch { return ""; }
+        try {
+          const p = JSON.parse(r.payload) as { goal_shape?: string; topology_signature?: string };
+          return `${p.goal_shape ?? ""}||${p.topology_signature ?? ""}`;
+        } catch { return ""; }
       }),
   );
 
@@ -468,12 +556,17 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
   let latestTs = cursor;
 
   withImmediateTransaction(db, () => {
-    for (const [shape, rows] of shapeGroups) {
-      if (rows.length < RECIPE_THRESHOLD) continue;
-      if (alreadyExtracted.has(shape)) continue;
-      const directiveIds = Array.from(new Set(rows.map((r) => r.directive_id as string)));
+    for (const [compositeKey, entries] of shapeGroups) {
+      if (entries.length < RECIPE_THRESHOLD) continue;
+      if (alreadyExtracted.has(compositeKey)) continue;
+      const directiveIds = Array.from(new Set(entries.map((e) => e.row.directive_id as string)));
       // Use the latest committed row's directive_id as the recipe's anchor.
-      const anchor = rows[rows.length - 1]!;
+      const anchor = entries[entries.length - 1]!.row;
+      const goalShape = entries[entries.length - 1]!.goalShape;
+      const topology = entries[entries.length - 1]!.topology;
+      // The trajectory is read off the most recent successful directive — the
+      // replayer will use this exact sequence of action artifacts + verifiers.
+      const trajectory = buildTrajectoryFor(db, anchor.directive_id as string);
       insertEvent(db, {
         kind: "recipe_extracted",
         directive_id: anchor.directive_id as string,
@@ -481,13 +574,15 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
         loop_id: anchor.loop_id as string,
         substrate_origin: "substrate_auto",
         payload: {
-          goal_shape: shape,
-          success_count: rows.length,
+          goal_shape: goalShape,
+          topology_signature: topology,
+          success_count: entries.length,
           window_days: 30,
           confidence: 0.5,
           directive_ids: directiveIds,
+          trajectory,
         },
-        context_refs: rows.map((r) => r.id as string),
+        context_refs: entries.map((e) => e.row.id as string),
       });
       extracted++;
       latestTs = anchor.ts as string;

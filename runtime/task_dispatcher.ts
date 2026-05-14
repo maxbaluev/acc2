@@ -33,6 +33,8 @@ import { getArtifact, applyResidualOutcome } from "./artifact_store";
 import { runBunArtifact } from "./runtimes/bun";
 import { nowIso } from "./ids";
 import { distributeCredit } from "./credit";
+import { findRecipeMatch, replayRecipe } from "./recipe_replay";
+import { readCurrentMode } from "./crisis_mode";
 
 const REFINEMENT_DEPTH_CAP = 5;
 
@@ -150,20 +152,83 @@ export const dispatchReadyTask = async (
   });
 
   let bridgeResult: BridgeResult | undefined;
+  // The effective route may change mid-dispatch (substrate_replay → fallback
+  // opencode_brain on abort). We track it in a local so we can rewrite cleanly.
+  let effectiveRoute: typeof decision.route = decision.route;
 
   if (decision.route === "substrate_replay") {
-    // Phase J wires recipe replay; Phase D never returns this lane.
+    // Phase J: route through recipe_replay.ts. The decider already validated
+    // confidence ≥ threshold, but we re-fetch the full match so we have the
+    // trajectory in hand.
+    const mode = readCurrentMode(db, task.directive_id);
+    const match = findRecipeMatch(db, task, { minConfidence: mode.recipe_confidence_threshold });
+    if (!match) {
+      // Decider and matcher disagreed (rare; e.g. recipe demoted between
+      // decider call and now). Fall back to opencode_brain dispatch.
+      emitEvent(db, {
+        kind: "brain_dispatch_closed",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        payload: { dispatch_id: dispatchId, reason: "recipe_match_disappeared" } as JsonValue,
+      });
+      return { dispatch_id: dispatchId, task_id: task.id, events: [], violations: [] };
+    }
+
     emitEvent(db, {
-      kind: "brain_dispatch_closed",
+      kind: "recipe_invoked",
+      substrate_origin: "recipe",
+      directive_id: task.directive_id,
+      task_id: task.id,
+      payload: {
+        dispatch_id: dispatchId,
+        recipe_id: match.recipe_id,
+        goal_shape: match.goal_shape,
+        topology_signature: match.topology_signature,
+        confidence: match.confidence,
+      } as JsonValue,
+    });
+
+    const outcome = await replayRecipe(db, task, match);
+    if (outcome.task_committed) {
+      emitEvent(db, {
+        kind: "brain_dispatch_closed",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        payload: {
+          dispatch_id: dispatchId,
+          reason: "recipe_replayed",
+          recipe_id: match.recipe_id,
+          residuals: outcome.residuals,
+        } as JsonValue,
+      });
+      return {
+        dispatch_id: dispatchId,
+        task_id: task.id,
+        events: readEventsSinceTs(db, dispatchStartedTs, task.id),
+        violations: [],
+      };
+    }
+    // Replay aborted — fall through to opencode_brain dispatch as a
+    // refinement (§15 "any verifier residual exceeds threshold, replay
+    // aborts and the dispatcher routes the task back to opencode_brain").
+    emitEvent(db, {
+      kind: "constitutional_gate_decision",
       substrate_origin: "substrate_auto",
       directive_id: task.directive_id,
       task_id: task.id,
-      payload: { dispatch_id: dispatchId, reason: "substrate_replay_phase_j_stub" } as JsonValue,
+      payload: {
+        dispatch_id: dispatchId,
+        route: "opencode_brain",
+        reason: `recipe_replay_aborted:${outcome.abort_reason ?? "unknown"}`,
+        previous_route: "substrate_replay",
+      } as JsonValue,
     });
-    return { dispatch_id: dispatchId, task_id: task.id, events: [], violations: [] };
+    effectiveRoute = "opencode_brain";
   }
 
-  if (decision.route === "claude_inline") {
+  if (effectiveRoute === "claude_inline") {
     // Phase E wires Claude inline lane; Phase D never returns this lane.
     emitEvent(db, {
       kind: "brain_dispatch_closed",
@@ -484,7 +549,8 @@ export const dispatchReadyTask = async (
     payload: {
       dispatch_id: dispatchId,
       events_count: finalEvents.length,
-      route: decision.route,
+      route: effectiveRoute,
+      original_route: decision.route,
     } as JsonValue,
   });
 

@@ -270,4 +270,59 @@ describe("extractRecipeCandidates", () => {
     const summary = extractRecipeCandidates(db);
     expect(summary.extracted).toBe(0);
   });
+
+  test("Phase J: payload includes topology_signature + trajectory + directive_text fallback", () => {
+    const db = openDb(":memory:");
+    for (let i = 0; i < 3; i++) {
+      const did = `d_${i}`;
+      // Use directive_text (production shape) — Phase J extractor falls back
+      // to it when neither goal nor intent is present.
+      insertEvent(db, {
+        kind: "directive_opened",
+        directive_id: did,
+        task_id: did,
+        payload: { directive_text: "audit recent commits" },
+      });
+      insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: `t_${i}` });
+      insertEvent(db, { kind: "task_committed", directive_id: did, task_id: `t_${i}` });
+    }
+    const summary = extractRecipeCandidates(db);
+    expect(summary.extracted).toBe(1);
+
+    const recipes = db
+      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .all() as Array<{ payload: string }>;
+    expect(recipes.length).toBe(1);
+    const p = JSON.parse(recipes[0]!.payload) as Record<string, unknown>;
+    expect(p.goal_shape).toContain("audit_recent_commits");
+    expect(typeof p.topology_signature).toBe("string");
+    expect((p.topology_signature as string).startsWith("topo_")).toBe(true);
+    expect(Array.isArray(p.trajectory)).toBe(true);
+    expect(p.success_count).toBe(3);
+  });
+
+  test("Phase J: distinct topology signatures DO NOT collapse into one recipe", () => {
+    const db = openDb(":memory:");
+    // Group 1: 3 directives with a single root task (topology n=1)
+    for (let i = 0; i < 3; i++) {
+      const did = `d_solo_${i}`;
+      insertEvent(db, { kind: "directive_opened", directive_id: did, task_id: did, payload: { goal: "solo" } });
+      insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: `t_solo_${i}` });
+      insertEvent(db, { kind: "task_committed", directive_id: did, task_id: `t_solo_${i}` });
+    }
+    // Group 2: 3 directives with a two-task DAG (topology n=2)
+    for (let i = 0; i < 3; i++) {
+      const did = `d_pair_${i}`;
+      insertEvent(db, { kind: "directive_opened", directive_id: did, task_id: did, payload: { goal: "solo" } });
+      const root = `t_pair_root_${i}`;
+      const child = `t_pair_child_${i}`;
+      insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: root });
+      insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: child });
+      insertEvent(db, { kind: "task_committed", directive_id: did, task_id: child });
+    }
+    const summary = extractRecipeCandidates(db);
+    // The goal_shape token is the same ("solo") but the topology differs
+    // (n1 vs n2), so two recipes should emit.
+    expect(summary.extracted).toBe(2);
+  });
 });

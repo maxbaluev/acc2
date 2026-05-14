@@ -45,6 +45,8 @@ import type { EmbeddingIndex } from "./embedding_index";
 import { recordStakeholderState, type StakeholderVisibility } from "./stakeholder_compositor";
 import { recordInterferenceEdge, type InterferenceEdgeKind } from "./interference";
 import { processRollingReviews } from "./rolling_reviewer";
+import { fatherIterate, detectFatherDrift } from "./father";
+import { findRecipeMatch, replayRecipe } from "./recipe_replay";
 import { newId } from "./ids";
 
 export type McpContext = {
@@ -84,6 +86,10 @@ export const McpMethods = [
   "runtime.dispatch_ready_task",
   "runtime.scheduler_tick",
   "runtime.process_rolling_reviews",
+  "runtime.father_iterate",
+  "runtime.detect_father_drift",
+  "substrate.find_recipe",
+  "runtime.replay_recipe",
 ] as const;
 export type McpMethodName = (typeof McpMethods)[number];
 
@@ -253,6 +259,25 @@ const OpenDirectiveSchema = z.object({
 const ProcessRollingReviewsSchema = z.object({
   now: z.string().optional(),
   max_missed_reviews: z.number().optional(),
+});
+
+const FatherIterateSchema = z.object({
+  now: z.string().optional(),
+  owner_active_window_ms: z.number().optional(),
+});
+
+const DetectFatherDriftSchema = z.object({
+  lookback_events: z.number().optional(),
+});
+
+const FindRecipeSchema = z.object({
+  task_id: z.string(),
+  min_confidence: z.number().optional(),
+});
+
+const ReplayRecipeSchema = z.object({
+  task_id: z.string(),
+  recipe_id: z.string(),
 });
 
 // ── Handlers (pure functions over (ctx, args) → McpResult) ──────────
@@ -792,6 +817,124 @@ const handleProcessRollingReviews = async (
   };
 };
 
+// ── Phase J + K handlers ──────────────────────────────────────────
+
+const handleFatherIterate = async (
+  ctx: McpContext,
+  args: z.infer<typeof FatherIterateSchema>,
+): Promise<McpResult> => {
+  const result = await fatherIterate(ctx.db, {
+    now: args.now,
+    ownerActiveWindowMs: args.owner_active_window_ms,
+  });
+  return {
+    ok: true,
+    result: {
+      cycle_id: result.cycle_id,
+      action: result.action,
+      detail: result.detail,
+      ts: result.ts,
+    } as JsonValue,
+  };
+};
+
+const handleDetectFatherDrift = (
+  ctx: McpContext,
+  args: z.infer<typeof DetectFatherDriftSchema>,
+): McpResult => {
+  const report = detectFatherDrift(ctx.db, args.lookback_events);
+  return {
+    ok: true,
+    result: {
+      drift_count: report.drift_count,
+      offending_event_ids: report.offending_event_ids,
+    } as JsonValue,
+  };
+};
+
+const handleFindRecipe = (
+  ctx: McpContext,
+  args: z.infer<typeof FindRecipeSchema>,
+): McpResult => {
+  const taskRow = ctx.db
+    .query("SELECT directive_id FROM events WHERE task_id = ? AND kind = 'task_node_opened' LIMIT 1")
+    .get(args.task_id) as { directive_id: string } | null;
+  if (!taskRow) return { ok: false, error: "task_not_found" };
+  const taskPayloadRow = ctx.db
+    .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'task_node_opened' LIMIT 1")
+    .get(args.task_id) as { payload: string } | null;
+  let goal = "";
+  if (taskPayloadRow) {
+    try {
+      const p = JSON.parse(taskPayloadRow.payload ?? "{}") as Record<string, unknown>;
+      goal = (p.goal as string | undefined) ?? "";
+    } catch { /* swallow */ }
+  }
+  const match = findRecipeMatch(
+    ctx.db,
+    { id: args.task_id, directive_id: taskRow.directive_id, parent_id: null, goal, status: "pending" },
+    { minConfidence: args.min_confidence },
+  );
+  if (!match) return { ok: true, result: null as unknown as JsonValue };
+  return {
+    ok: true,
+    result: {
+      recipe_id: match.recipe_id,
+      goal_shape: match.goal_shape,
+      topology_signature: match.topology_signature,
+      confidence: match.confidence,
+      trajectory_length: match.trajectory.length,
+    } as JsonValue,
+  };
+};
+
+const handleReplayRecipe = async (
+  ctx: McpContext,
+  args: z.infer<typeof ReplayRecipeSchema>,
+): Promise<McpResult> => {
+  const taskRow = ctx.db
+    .query("SELECT directive_id, payload FROM events WHERE task_id = ? AND kind = 'task_node_opened' LIMIT 1")
+    .get(args.task_id) as { directive_id: string; payload: string } | null;
+  if (!taskRow) return { ok: false, error: "task_not_found" };
+  let goal = "";
+  try {
+    const p = JSON.parse(taskRow.payload ?? "{}") as Record<string, unknown>;
+    goal = (p.goal as string | undefined) ?? "";
+  } catch { /* swallow */ }
+
+  const recipeRow = ctx.db
+    .query("SELECT payload FROM events WHERE id = ? AND kind = 'recipe_extracted'")
+    .get(args.recipe_id) as { payload: string } | null;
+  if (!recipeRow) return { ok: false, error: "recipe_not_found" };
+  let recipePayload: Record<string, unknown> = {};
+  try { recipePayload = JSON.parse(recipeRow.payload ?? "{}") as Record<string, unknown>; } catch { /* swallow */ }
+  const match = {
+    recipe_id: args.recipe_id,
+    recipe_extracted_event_id: args.recipe_id,
+    goal_shape: (recipePayload.goal_shape as string | undefined) ?? "",
+    topology_signature: (recipePayload.topology_signature as string | undefined) ?? "",
+    confidence: (recipePayload.confidence as number | undefined) ?? 0,
+    trajectory: ((recipePayload.trajectory as unknown[]) ?? []) as Array<{
+      step_kind: string;
+      artifact_id?: string | null;
+      verifier_artifact_id?: string | null;
+      payload_template: JsonValue;
+      predicted_residual?: number | null;
+    }>,
+  };
+  const task = { id: args.task_id, directive_id: taskRow.directive_id, parent_id: null, goal, status: "pending" as const };
+  const outcome = await replayRecipe(ctx.db, task, match);
+  return {
+    ok: true,
+    result: {
+      task_committed: outcome.task_committed,
+      residuals: outcome.residuals,
+      emitted_event_ids: outcome.emitted_event_ids,
+      abort_reason: outcome.abort_reason ?? null,
+    } as JsonValue,
+  };
+};
+
 // ── FastMCP server factory ─────────────────────────────────────────
 
 export type McpServerOptions = {
@@ -1016,6 +1159,51 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     execute: wrap(handleProcessRollingReviews),
   });
 
+  server.addTool({
+    name: "runtime.father_iterate",
+    description:
+      "One Father tick (Phase K, §14). Reads active_objectives_view, " +
+      "rolling_review_due_view, and directive_conflicts_view; selects the " +
+      "highest-priority unblocked work; opens a directive from a template " +
+      "(NEVER calls an LLM). Honors §3 owner-yield: if owner_input_received " +
+      "is within the active window, Father yields without opening anything.",
+    parameters: FatherIterateSchema,
+    execute: wrap(handleFatherIterate),
+  });
+
+  server.addTool({
+    name: "runtime.detect_father_drift",
+    description:
+      "Diagnostic: scan recent events with substrate_origin='father' and emit " +
+      "father_drift_detected for any event whose kind is outside the §14 " +
+      "FATHER_ACTION_EVENT_KINDS taxonomy. Idempotent — already-reported " +
+      "offenders are not re-emitted.",
+    parameters: DetectFatherDriftSchema,
+    execute: wrap(handleDetectFatherDrift),
+  });
+
+  server.addTool({
+    name: "substrate.find_recipe",
+    description:
+      "Find a recipe matching the supplied task by goal_shape + topology " +
+      "signature with confidence ≥ min_confidence (Phase J, §15). Returns the " +
+      "RecipeMatch or null.",
+    parameters: FindRecipeSchema,
+    execute: wrap(handleFindRecipe),
+  });
+
+  server.addTool({
+    name: "runtime.replay_recipe",
+    description:
+      "Replay a matched recipe against a task — execute its trajectory's " +
+      "action + verifier artifacts WITHOUT calling the brain (Phase J, §15). " +
+      "On success emits action_predicted/scored/task_committed with " +
+      "recipe_replayed=true; on residual ≥ threshold emits " +
+      "recipe_replay_aborted and the dispatcher routes back to opencode_brain.",
+    parameters: ReplayRecipeSchema,
+    execute: wrap(handleReplayRecipe),
+  });
+
   return server;
 };
 
@@ -1045,6 +1233,10 @@ const HTTP_DISPATCH: Record<string, (ctx: McpContext, args: any) => McpResult | 
   "runtime.dispatch_ready_task": handleDispatchReadyTask as any,
   "runtime.scheduler_tick": handleSchedulerTick as any,
   "runtime.process_rolling_reviews": handleProcessRollingReviews as any,
+  "runtime.father_iterate": handleFatherIterate as any,
+  "runtime.detect_father_drift": handleDetectFatherDrift as any,
+  "substrate.find_recipe": handleFindRecipe as any,
+  "runtime.replay_recipe": handleReplayRecipe as any,
 };
 
 /** Bun.serve route handler: POST /mcp/<method>. Parses JSON body, validates

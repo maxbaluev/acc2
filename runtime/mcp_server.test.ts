@@ -527,4 +527,55 @@ describe("fastmcp substrate tools — stdio transport", () => {
     expect(env.result.new_tasks_opened.length).toBe(2);
     expect(env.result.already_applied).toBe(false);
   });
+
+  test("Phase K: runtime.father_iterate opens a templated directive on an empty substrate", async () => {
+    const res = (await h!.client.callTool({
+      name: "runtime.father_iterate",
+      arguments: { now: "2026-05-13T12:00:00.000Z" },
+    })) as ToolCallResponse;
+    const env = parseEnvelope(res);
+    expect(env.ok).toBe(true);
+    expect(typeof env.result.cycle_id).toBe("string");
+    expect(["compile_directive_from_template", "yield"]).toContain(env.result.action);
+  });
+
+  test("Phase K: runtime.detect_father_drift returns a structured report", async () => {
+    const res = (await h!.client.callTool({
+      name: "runtime.detect_father_drift",
+      arguments: {},
+    })) as ToolCallResponse;
+    const env = parseEnvelope(res);
+    expect(env.ok).toBe(true);
+    expect(typeof env.result.drift_count).toBe("number");
+    expect(Array.isArray(env.result.offending_event_ids)).toBe(true);
+  });
+
+  test("Phase J: substrate.find_recipe returns null when no matching recipe exists", async () => {
+    // Open a fresh directive + task so the find_recipe handler has something
+    // to project against.
+    const dir = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.open_directive",
+        arguments: { directive_text: "no-recipe directive" },
+      })) as ToolCallResponse,
+    );
+    const taskId = dir.result.task_id;
+    const res = (await h!.client.callTool({
+      name: "substrate.find_recipe",
+      arguments: { task_id: taskId },
+    })) as ToolCallResponse;
+    const env = parseEnvelope(res);
+    expect(env.ok).toBe(true);
+    expect(env.result).toBeNull();
+  });
+
+  test("Phase J: substrate.find_recipe returns task_not_found for an unknown task_id", async () => {
+    const res = (await h!.client.callTool({
+      name: "substrate.find_recipe",
+      arguments: { task_id: "00000000000000000000000000" },
+    })) as ToolCallResponse;
+    const env = parseEnvelope(res);
+    expect(env.ok).toBe(false);
+    expect(env.error).toBe("task_not_found");
+  });
 });

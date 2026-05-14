@@ -41,6 +41,7 @@ import type { FastMCP } from "fastmcp";
 import { applyAmendment, findUnappliedAmendments } from "./amendment_handler";
 import { schedulerLoop } from "./task_scheduler";
 import { rollingReviewerWorkerTick } from "./rolling_reviewer";
+import { fatherIterate } from "./father";
 import { EmbeddingIndex } from "./embedding_index";
 import { embedderWorkerTick } from "./embedder";
 import { rehabilitationWorkerTick, getArtifact } from "./artifact_store";
@@ -256,6 +257,29 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       })();
     }, 60_000);
     workers.push(() => clearInterval(rollingTick));
+  }
+
+  // Phase K: optional Father worker. Default off — tests don't want Father
+  // firing automatically. Enable with ACC2_FATHER_AUTOSTART=1. Per §14
+  // Father's cadence is 5 min normal; tests can pass a smaller interval
+  // explicitly. When Father is enabled it ALSO processes rolling reviews on
+  // its own tick (simplification: one autostart flag for the whole
+  // orchestration — owner-controlled, per task brief K.4). Father has zero
+  // LLM-call capability; it only opens directives compiled from templates
+  // and records its cycle.
+  if (process.env.ACC2_FATHER_AUTOSTART === "1") {
+    const fatherIntervalMs = Number(process.env.ACC2_FATHER_INTERVAL_MS ?? 5 * 60 * 1000);
+    const fatherTick = setInterval(() => {
+      void (async () => {
+        try {
+          // Drive rolling reviews here so Father owns the whole long-horizon
+          // orchestration when enabled (§K.4).
+          await rollingReviewerWorkerTick(db);
+        } catch { /* swallow */ }
+        try { await fatherIterate(db); } catch { /* swallow */ }
+      })();
+    }, fatherIntervalMs);
+    workers.push(() => clearInterval(fatherTick));
   }
 
   // Phase E: optional autoscheduler. Default off — tests don't want the

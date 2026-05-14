@@ -152,10 +152,13 @@ export type EventKind =
   | "constitutional_gate_decision"
   | "self_modification_recorded"
   | "recipe_extracted"
+  | "recipe_invoked"
+  | "recipe_replay_aborted"
 
   // Father
   | "father_cycle_recorded"
   | "father_yielded"
+  | "father_drift_detected"
 
   // Lifecycle
   | "goal_committed"

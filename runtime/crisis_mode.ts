@@ -34,7 +34,10 @@ export const NORMAL_MODE: CrisisModeAdjustments = Object.freeze({
   max_concurrent: 5,
   verification_timeout_multiplier: 1.0,
   recipe_preferred: false,
-  recipe_confidence_threshold: 0.7,
+  // Phase J: recipe replay default threshold. Recipes start at 0.5 prior;
+  // two successful replays push them to 0.6 and admit them to the Tier-0
+  // lane. Crisis mode (§3.5) lowers this to 0.4 to prefer cached over fresh.
+  recipe_confidence_threshold: 0.6,
   latm_authoring_suspended: false,
   father_interval_ms: 5 * 60 * 1000,
 });

@@ -236,6 +236,71 @@ describe("task_dispatcher", () => {
     }
   }, 60_000);
 
+  test("Phase J: substrate_replay route commits without calling the bridge", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-disp-replay-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO\n");
+
+    try {
+      // Build a 3-success history so extractRecipeCandidates emits a recipe.
+      const { extractRecipeCandidates } = await import("../substrate/extractors");
+      const { updateRecipeConfidence } = await import("./recipe_replay");
+
+      for (let i = 0; i < 3; i++) {
+        const { directiveId, taskId } = await openFixtureDCountTodos(db, tempDir);
+        const ready = readyTasks(db, directiveId);
+        await dispatchReadyTask(db, ready[0]!, { fixtureTargetPath: tempDir });
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      const summary = extractRecipeCandidates(db);
+      expect(summary.extracted).toBeGreaterThanOrEqual(1);
+      const recipeRow = db
+        .query("SELECT id FROM events WHERE kind = 'recipe_extracted' ORDER BY ts DESC LIMIT 1")
+        .get() as { id: string };
+      // Bump twice to bring 0.5 prior up to 0.6 default threshold.
+      updateRecipeConfidence(db, recipeRow.id, true);
+      updateRecipeConfidence(db, recipeRow.id, true);
+
+      const bridgeBefore = (db
+        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'bridge_invoked'")
+        .get() as { c: number }).c;
+
+      // Fresh fixture run — dispatcher should route to substrate_replay.
+      const { directiveId, taskId } = await openFixtureDCountTodos(db, tempDir);
+      const ready = readyTasks(db, directiveId);
+      const task = ready.find((r) => r.id === taskId)!;
+
+      // Track: bridge MUST NOT be called. We pass a spy bridge that throws.
+      let bridgeWasCalled = false;
+      const result = await dispatchReadyTask(db, task, {
+        fixtureTargetPath: tempDir,
+        bridge: async () => {
+          bridgeWasCalled = true;
+          return { ok: false, reason: { kind: "auth_missing" } };
+        },
+      });
+      expect(bridgeWasCalled).toBe(false);
+      expect(result.violations).toEqual([]);
+
+      const invoked = db
+        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_invoked' AND task_id = ?")
+        .get(taskId) as { c: number };
+      expect(invoked.c).toBe(1);
+
+      const bridgeAfter = (db
+        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'bridge_invoked'")
+        .get() as { c: number }).c;
+      expect(bridgeAfter).toBe(bridgeBefore);
+
+      const committed = db
+        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_committed' AND task_id = ?")
+        .get(taskId) as { c: number };
+      expect(committed.c).toBe(1);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
   test("refinement depth cap fires task_failed with refinement_depth_exceeded after 5 levels", async () => {
     const db = openDb(":memory:");
     const directiveId = newId();

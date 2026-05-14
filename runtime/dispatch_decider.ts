@@ -20,8 +20,13 @@ import type { Database } from "bun:sqlite";
 import type { TaskNode } from "./task_topology";
 import { readCurrentMode } from "./crisis_mode";
 import { blockersOf } from "./interference";
+import { findRecipeMatch as findRealRecipeMatch } from "./recipe_replay";
 
-export const RECIPE_REPLAY_THRESHOLD = 0.7;
+/** Default Tier-0 recipe-replay confidence threshold (§15). Recipes seed at
+ *  0.5 and accumulate via updateRecipeConfidence; two successful replays push
+ *  a recipe to 0.6 and admit it to the Tier-0 lane. Crisis-mode lowers the
+ *  effective threshold to 0.4 via `CRISIS_MODE.recipe_confidence_threshold`. */
+export const RECIPE_REPLAY_THRESHOLD = 0.6;
 export const INLINE_PATTERN_SCORE_THRESHOLD = 0.7;
 export const INLINE_PATTERN_CONFIDENCE_THRESHOLD = 0.6;
 
@@ -33,30 +38,14 @@ export type DispatchDecision =
 
 type RecipeMatch = { id: string; confidence: number };
 
+/** Phase J: delegate to the real matcher in runtime/recipe_replay.ts which
+ *  computes goal_shape via runtime/goal_shape.ts and topology_signature off
+ *  the task's directive DAG. The wrapper preserves the local RecipeMatch
+ *  shape the decider uses. */
 const findRecipeMatch = (db: Database, task: TaskNode, confidenceThreshold: number): RecipeMatch | null => {
-  // Phase D: recipes_view doesn't exist yet. We look for `recipe_extracted`
-  // events whose payload.goal_embedding_match flag is set true for this task.
-  // None are emitted in Phase D, so this returns null — the test asserts that.
-  const rows = db
-    .query(
-      "SELECT id, payload FROM events WHERE kind = 'recipe_extracted' ORDER BY ts DESC LIMIT 20",
-    )
-    .all() as Array<{ id: string; payload: string }>;
-  for (const r of rows) {
-    try {
-      const payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
-      const confidence = (payload.confidence as number) ?? 0;
-      const goalShape = (payload.goal_shape as string | undefined) ?? "";
-      // Cheap shape match — does the recipe's goal_shape token appear in the
-      // task goal? Phase J replaces with embedding cosine.
-      if (goalShape && task.goal.toLowerCase().includes(goalShape.toLowerCase())) {
-        if (confidence >= confidenceThreshold) {
-          return { id: r.id, confidence };
-        }
-      }
-    } catch { /* skip */ }
-  }
-  return null;
+  const match = findRealRecipeMatch(db, task, { minConfidence: confidenceThreshold });
+  if (!match) return null;
+  return { id: match.recipe_id, confidence: match.confidence };
 };
 
 type InlinePattern = {
