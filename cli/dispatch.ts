@@ -15,7 +15,22 @@ const usage = (): string => `acc — v2 thin CLI
 
   acc init [--yes]                Fresh-install bootstrap (state dir, admin token,
                                   optional foundational seed). Run me first.
-  acc task "<owner words>"        Open a directive; the substrate dispatches the brain.
+  acc task "<owner words>" [--follow]
+                                  Open a directive; the substrate dispatches the
+                                  brain. --follow tails the event stream until the
+                                  root task hits a terminal state (claude-native
+                                  background-task surface — every brain emit is
+                                  one stdout line).
+  acc events [--limit N] [--task PREFIX] [--directive PREFIX] [--kind K] [--verbose]
+                                  Recent events, one structured line per event.
+                                  Replaces inline 'bun -e mcpCall(...)' boilerplate.
+  acc tail   [--directive PREFIX] [--task PREFIX] [--kind K] [--timeout SECS]
+                                  Poll-and-stream events; exits on the first
+                                  terminal event (task_committed / task_failed /
+                                  dispatcher_violation) when scoped, runs until
+                                  Ctrl-C otherwise.
+  acc graph <directive_id>        Render the task DAG (nodes ranked, edges).
+  acc inspect <task_id_prefix>    Per-task report: event histogram + chronology.
   acc daemon start                Spawn the daemon detached if not running.
   acc daemon stop                 Auth-gated shutdown via admin token.
   acc daemon status               GET /health on the running daemon.
@@ -25,7 +40,10 @@ const usage = (): string => `acc — v2 thin CLI
   acc doctor                      Multi-check readiness report.
 `;
 
-const dispatchTask = async (words: string): Promise<number> => {
+const dispatchTask = async (
+  words: string,
+  opts: { follow?: boolean; timeoutSecs?: number } = {},
+): Promise<number> => {
   // `substrate.open_directive` is the canonical write surface: it emits
   // `directive_opened` AND the root `task_node_opened` in one transaction
   // so the scheduler has a ready task to dispatch on the next tick. Using
@@ -48,7 +66,18 @@ const dispatchTask = async (words: string): Promise<number> => {
   const { directive_id, task_id } = env.result as { directive_id: string; task_id: string };
   console.log(`directive_opened ${directive_id} (root task=${task_id})`);
   console.log(`  text: ${words}`);
-  return 0;
+  if (!opts.follow) return 0;
+  // --follow: stream brain progress as structured one-liners. Exits when
+  // the ROOT task hits a terminal event. Designed to mirror cleanly into
+  // a Claude Code background task — each emit becomes a notification.
+  const { runTail } = await import("./observe");
+  console.log(`  (following — scoped to task=${task_id.slice(0, 16)}…; root-terminal will exit)`);
+  return runTail({
+    task: task_id,
+    pollMs: 1500,
+    exitOnTerminal: true,
+    deadlineMs: opts.timeoutSecs ? Date.now() + opts.timeoutSecs * 1000 : undefined,
+  });
 };
 
 const daemonStart = async (): Promise<number> => {
@@ -99,9 +128,20 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     return runInit(argv.slice(1));
   }
   if (cmd === "task") {
-    const words = argv.slice(1).join(" ").trim();
+    const rest = argv.slice(1);
+    const follow = rest.includes("--follow");
+    const timeoutIdx = rest.findIndex((x) => x === "--timeout");
+    const timeoutSecs = timeoutIdx >= 0 && rest[timeoutIdx + 1]
+      ? Number(rest[timeoutIdx + 1]) : undefined;
+    const words = rest
+      .filter((x, i) => x !== "--follow" && x !== "--timeout" && rest[i - 1] !== "--timeout")
+      .join(" ").trim();
     if (!words) { console.error("acc task: missing directive text"); return 1; }
-    return dispatchTask(words);
+    return dispatchTask(words, { follow, timeoutSecs });
+  }
+  if (cmd === "events" || cmd === "tail" || cmd === "graph" || cmd === "inspect") {
+    const { runObserve } = await import("./observe");
+    return runObserve(cmd, argv.slice(1));
   }
   if (cmd === "daemon") {
     if (sub === "start")          return daemonStart();
