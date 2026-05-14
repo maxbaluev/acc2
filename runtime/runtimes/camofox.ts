@@ -70,10 +70,32 @@ export type CamofoxRuntimeObservation = {
 };
 
 const RESULT_PREFIX = "@@RESULT@@ ";
+const IRREVERSIBLE_PREFIX = "@@IRREVERSIBLE@@ ";
 const STDERR_TAIL_BYTES = 1024;
 // Per §5.5: SIGKILL at wall_ms × 2 (chromium hung-page recovery is slow).
 const HARD_KILL_MULTIPLIER = 2;
 const KILL_GRACE_MS = 1000;
+
+/** See runtimes/bun.ts for the convention — same parser, same semantics.
+ *  The camofox wrapper captures console.log; user code emits the marker
+ *  via `console.log('@@IRREVERSIBLE@@ <kind>:<description>')`. */
+const parseIrreversibleLines = (stdout: string): Array<{ kind: string; description: string }> => {
+  const out: Array<{ kind: string; description: string }> = [];
+  for (const ln of stdout.split(/\r?\n/)) {
+    if (!ln.startsWith(IRREVERSIBLE_PREFIX)) continue;
+    const suffix = ln.slice(IRREVERSIBLE_PREFIX.length);
+    const sep = suffix.indexOf(":");
+    if (sep <= 0) {
+      out.push({ kind: "unspecified", description: suffix.trim() });
+    } else {
+      out.push({
+        kind: suffix.slice(0, sep).trim(),
+        description: suffix.slice(sep + 1).trim(),
+      });
+    }
+  }
+  return out;
+};
 
 // ── Per-state-root mutex (v2-design.md §11.2) ─────────────────────
 //
@@ -366,11 +388,13 @@ const runCamofoxArtifactInner = async (
       });
     }
 
+    const irreversibleEffects = parseIrreversibleLines(stdoutText);
+
     if (exitCode !== 0) {
       return {
         ok: false,
         error: softFired || hardFired ? "wall_timeout" : `nonzero_exit:${exitCode}`,
-        irreversibleEffects: [],
+        irreversibleEffects,
         durationMs,
         exitCode,
         stderrTail,
@@ -384,7 +408,7 @@ const runCamofoxArtifactInner = async (
       return {
         ok: false,
         error: parsed.reason,
-        irreversibleEffects: [],
+        irreversibleEffects,
         durationMs,
         exitCode,
         stderrTail,
@@ -403,7 +427,7 @@ const runCamofoxArtifactInner = async (
     return {
       ok: true,
       result: parsed.value,
-      irreversibleEffects: [],
+      irreversibleEffects,
       durationMs,
       exitCode,
       stderrTail,

@@ -255,15 +255,38 @@ describe("fastmcp substrate tools — stdio transport", () => {
     }
   });
 
-  test("substrate.credit returns the Phase H stub", async () => {
+  test("substrate.credit rejects malformed args (Phase H wired)", async () => {
+    // The Phase H pipeline requires five typed fields; calling with an empty
+    // arg map must raise an MCP InputValidationError before the handler runs.
+    let threw = false;
+    try {
+      await h!.client.callTool({
+        name: "substrate.credit",
+        arguments: {},
+      });
+    } catch (err) {
+      threw = true;
+      // The error message references the missing fields.
+      expect(String(err)).toContain("action_event_id");
+    }
+    expect(threw).toBe(true);
+  });
+
+  test("substrate.credit returns credit_distribution_failed on unknown action_event_id", async () => {
     const env = parseEnvelope(
       (await h!.client.callTool({
         name: "substrate.credit",
-        arguments: {},
+        arguments: {
+          action_event_id: "does_not_exist",
+          observation_event_id: "x",
+          scored_event_id: "y",
+          predicted_residual: 0.1,
+          observed_residual: 0.1,
+        },
       })) as ToolCallResponse,
     );
     expect(env.ok).toBe(false);
-    expect(env.error).toBe("credit_pipeline_phase_h");
+    expect(env.error).toContain("credit_distribution_failed");
   });
 
   test("substrate.read with unknown view returns view_not_implemented", async () => {

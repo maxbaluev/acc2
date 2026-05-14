@@ -162,3 +162,109 @@ describe("retrieveWithEmbedding (sync variant, no API call)", () => {
     expect(result.hits[0].event_id).toBe(nearId);
   });
 });
+
+describe("per-(origin, goal_shape) bias (Phase H)", () => {
+  test("two distinct goal_texts produce distinct origin-bias maps when shape-specific data differs", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dims = 8;
+
+    // Seed two directives with distinct goals.
+    const d1 = emitEvent(db, {
+      kind: "directive_opened",
+      directive_id: "dir_alpha",
+      task_id: "t_alpha",
+      payload: { goal: "Count TODO markers in scripts" },
+    });
+    const d2 = emitEvent(db, {
+      kind: "directive_opened",
+      directive_id: "dir_beta",
+      task_id: "t_beta",
+      payload: { goal: "Audit substrate events for failures" },
+    });
+    expect(d1.id).toBeTruthy();
+    expect(d2.id).toBeTruthy();
+
+    // Under dir_alpha: opencode has high candidate→promotion rate (looks good on this shape).
+    for (let i = 0; i < 4; i++) {
+      emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "opencode",
+        directive_id: "dir_alpha",
+        task_id: "t_alpha",
+        payload: { text: `candidate-${i}` },
+      });
+      emitEvent(db, {
+        kind: "knowledge_promoted",
+        substrate_origin: "opencode",
+        directive_id: "dir_alpha",
+        task_id: "t_alpha",
+        payload: { text: `promoted-${i}` },
+      });
+    }
+    // Under dir_beta: opencode has poor ratio (only candidates, no promotions).
+    for (let i = 0; i < 4; i++) {
+      emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "opencode",
+        directive_id: "dir_beta",
+        task_id: "t_beta",
+        payload: { text: `candidate-${i}` },
+      });
+    }
+
+    // Seed an embedded knowledge_candidate so the index has content. Its
+    // origin = opencode so the per-(origin, goal_shape) lookup is what we
+    // exercise.
+    const evId = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      payload: { text: "target hit" },
+    });
+    db.run(
+      "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
+      [encodeEmbeddingBlob(makeUnitVec(dims, 0)), EMBEDDING_VERSION, evId.id],
+    );
+
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    const query = new Float32Array(makeUnitVec(dims, 0));
+
+    // With the dir_alpha goal text, opencode bias is high (~1.0 ratio).
+    const alphaResult = retrieveWithEmbedding(db, idx, query, {
+      k: 1,
+      goalText: "Count TODO markers in scripts",
+    });
+    // With the dir_beta goal text, opencode bias is low (0 promotions).
+    const betaResult = retrieveWithEmbedding(db, idx, query, {
+      k: 1,
+      goalText: "Audit substrate events for failures",
+    });
+
+    expect(alphaResult.hits.length).toBe(1);
+    expect(betaResult.hits.length).toBe(1);
+    // The same hit content, different rerank_score because the per-shape
+    // origin-bias multiplier differs across goal_shapes.
+    expect(alphaResult.hits[0].rerank_score).not.toBe(betaResult.hits[0].rerank_score);
+    // The good-shape result must dominate the bad-shape result.
+    expect(alphaResult.hits[0].rerank_score).toBeGreaterThan(betaResult.hits[0].rerank_score);
+  });
+
+  test("missing goalText falls back to the global per-origin ratio", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dims = 8;
+    const evId = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      payload: { text: "hit" },
+    });
+    db.run(
+      "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
+      [encodeEmbeddingBlob(makeUnitVec(dims, 0)), EMBEDDING_VERSION, evId.id],
+    );
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    const query = new Float32Array(makeUnitVec(dims, 0));
+    const result = retrieveWithEmbedding(db, idx, query, { k: 1 });
+    expect(result.hits.length).toBe(1);
+  });
+});

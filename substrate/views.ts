@@ -135,8 +135,12 @@ CREATE VIEW IF NOT EXISTS embedding_index_view AS
 // origin_promotion_view — per substrate_origin, summarise how often candidate
 // events from that origin promoted to knowledge_promoted. Used by the
 // reranker (retrieval.ts) to bias scoring per origin (§3.6.1 Rule 4).
-// Phase F: goal_shape hashing is deferred; we return one row per origin with
-// a global ratio. The reranker treats absent origins as 1.0 (neutral).
+// Phase H: still returns the GLOBAL per-origin aggregation here; the
+// per-(origin, goal_shape) refinement is computed in TypeScript via
+// `originPromotionByGoalShape` (substrate/views.ts) — pure SQL cannot
+// invoke the goalShape() hash function. The reranker reads BOTH: the
+// per-shape map first, falling back to the global ratio (this view) when
+// no shape-specific data exists.
 const VIEW_ORIGIN_PROMOTION = `
 CREATE VIEW IF NOT EXISTS origin_promotion_view AS
   WITH candidates AS (
@@ -564,4 +568,94 @@ export const originPromotion = (db: Database): OriginPromotionRow[] => {
     promoted_count: r.promoted_count as number,
     promotion_ratio: r.promotion_ratio as number,
   }));
+};
+
+export type OriginGoalShapeRow = {
+  substrate_origin: string;
+  goal_shape: string;
+  candidate_count: number;
+  promoted_count: number;
+  promotion_ratio: number;
+};
+
+/** Per-(origin, goal_shape) promotion ratio — Phase H (§3.6.1 Rule 4,
+ *  §18 cutover criterion 19). The goal_shape is computed by hashing each
+ *  knowledge_candidate's owning directive's goal text via `goalShape(...)`
+ *  in runtime/goal_shape.ts. The reranker reads this map first; when no
+ *  shape-specific row exists it falls back to the global per-origin ratio
+ *  in `origin_promotion_view`. */
+export const originPromotionByGoalShape = (
+  db: Database,
+  goalShape: (text: string) => string,
+): OriginGoalShapeRow[] => {
+  // Step 1 — pull every directive's goal text once.
+  const directives = db
+    .query(
+      `SELECT directive_id, payload FROM events
+       WHERE kind = 'directive_opened'`,
+    )
+    .all() as Array<{ directive_id: string; payload: string }>;
+
+  const directiveToShape = new Map<string, string>();
+  for (const d of directives) {
+    let goal = "";
+    try {
+      const p = JSON.parse(d.payload) as { goal?: unknown; intent?: unknown };
+      goal = String((p.goal ?? p.intent ?? "") as string);
+    } catch { /* malformed payload — empty shape */ }
+    directiveToShape.set(d.directive_id, goalShape(goal));
+  }
+
+  // Step 2 — count candidates and promotions per (origin, directive_id).
+  const candidates = db
+    .query(
+      `SELECT substrate_origin, directive_id, COUNT(*) AS c
+       FROM events
+       WHERE kind = 'knowledge_candidate'
+       GROUP BY substrate_origin, directive_id`,
+    )
+    .all() as Array<{ substrate_origin: string; directive_id: string; c: number }>;
+
+  const promotions = db
+    .query(
+      `SELECT substrate_origin, directive_id, COUNT(*) AS c
+       FROM events
+       WHERE kind = 'knowledge_promoted'
+       GROUP BY substrate_origin, directive_id`,
+    )
+    .all() as Array<{ substrate_origin: string; directive_id: string; c: number }>;
+
+  // Step 3 — aggregate per (origin, goal_shape).
+  type Key = string;
+  const candMap = new Map<Key, number>();
+  const promMap = new Map<Key, number>();
+  for (const c of candidates) {
+    const shape = directiveToShape.get(c.directive_id) ?? goalShape("");
+    const key = `${c.substrate_origin}::${shape}`;
+    candMap.set(key, (candMap.get(key) ?? 0) + c.c);
+  }
+  for (const p of promotions) {
+    const shape = directiveToShape.get(p.directive_id) ?? goalShape("");
+    const key = `${p.substrate_origin}::${shape}`;
+    promMap.set(key, (promMap.get(key) ?? 0) + p.c);
+  }
+
+  const out: OriginGoalShapeRow[] = [];
+  const seenKeys = new Set<string>([...candMap.keys(), ...promMap.keys()]);
+  for (const key of seenKeys) {
+    const sep = key.indexOf("::");
+    const origin = key.slice(0, sep);
+    const shape = key.slice(sep + 2);
+    const cand = candMap.get(key) ?? 0;
+    const prom = promMap.get(key) ?? 0;
+    const ratio = cand === 0 ? 1.0 : prom / cand;
+    out.push({
+      substrate_origin: origin,
+      goal_shape: shape,
+      candidate_count: cand,
+      promoted_count: prom,
+      promotion_ratio: ratio,
+    });
+  }
+  return out;
 };

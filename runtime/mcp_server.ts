@@ -34,6 +34,7 @@ import { runCamofoxArtifact } from "./runtimes/camofox";
 import { getArtifact } from "./artifact_store";
 import { admitArtifact } from "./artifact_admission";
 import { dispatchReadyTask } from "./task_dispatcher";
+import { distributeCredit } from "./credit";
 import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { readDagForDirective } from "./task_topology";
 import { schedulerTick } from "./task_scheduler";
@@ -173,15 +174,13 @@ const AdmitArtifactSchema = z.object({
   name: z.string().optional(),
 });
 
-const CreditSchema = z
-  .object({
-    // Phase H wires the real credit pipeline. The shape stays flexible so the
-    // stub doesn't constrain the design before we ship the pipeline.
-    knowledge_id: z.string().optional(),
-    artifact_id: z.string().optional(),
-    outcome: z.string().optional(),
-  })
-  .passthrough();
+const CreditSchema = z.object({
+  action_event_id: z.string(),
+  observation_event_id: z.string(),
+  scored_event_id: z.string(),
+  predicted_residual: z.number(),
+  observed_residual: z.number(),
+});
 
 const OpenFixtureSchema = z.object({
   fixture: z.literal("d_count_todos"),
@@ -495,10 +494,34 @@ const handleAdmitArtifact = async (
   return { ok: false, error: `${result.reason}${result.detail ? `:${result.detail}` : ""}` };
 };
 
-const handleCredit = (): McpResult => ({
-  ok: false,
-  error: "credit_pipeline_phase_h",
-});
+const handleCredit = async (
+  ctx: McpContext,
+  args: z.infer<typeof CreditSchema>,
+): Promise<McpResult> => {
+  try {
+    const result = await distributeCredit(ctx.db, {
+      action_event_id: args.action_event_id,
+      observation_event_id: args.observation_event_id,
+      scored_event_id: args.scored_event_id,
+      predicted_residual: args.predicted_residual,
+      observed_residual: args.observed_residual,
+    });
+    return {
+      ok: true,
+      result: {
+        action_artifact_id: result.action_artifact_id,
+        verifier_artifact_id: result.verifier_artifact_id,
+        predicted_residual: result.predicted_residual,
+        observed_residual: result.observed_residual,
+        delta: result.delta,
+        contributions: result.contributions as unknown as JsonValue,
+        emitted_events: result.emitted_events as unknown as JsonValue,
+      } as JsonValue,
+    };
+  } catch (err) {
+    return { ok: false, error: `credit_distribution_failed:${(err as Error).message}` };
+  }
+};
 
 // ── Phase D handlers ──────────────────────────────────────────────
 
@@ -724,9 +747,10 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
   server.addTool({
     name: "substrate.credit",
     description:
-      "Credit a knowledge / artifact citation with an outcome. " +
-      "(Phase H wires the credit pipeline; until then returns " +
-      "credit_pipeline_phase_h.)",
+      "Distribute one action_scored outcome across cited knowledge + " +
+      "code artifacts via Shapley decomposition by corroboration order " +
+      "(§3.6.1 Rule 3). Returns the per-entity weights, Beta posterior " +
+      "deltas, and ids of every emitted event.",
     parameters: CreditSchema,
     execute: wrap(handleCredit),
   });

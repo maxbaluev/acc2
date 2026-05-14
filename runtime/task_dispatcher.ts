@@ -32,6 +32,7 @@ import { refinementDepth } from "./task_topology";
 import { getArtifact, applyResidualOutcome } from "./artifact_store";
 import { runBunArtifact } from "./runtimes/bun";
 import { nowIso } from "./ids";
+import { distributeCredit } from "./credit";
 
 const REFINEMENT_DEPTH_CAP = 5;
 
@@ -273,8 +274,34 @@ export const dispatchReadyTask = async (
         },
       });
 
+      // Phase H: surface any declared irreversible effects via
+      // `irreversible_effect_recorded`. Bun/uv/camofox artifacts opt in by
+      // printing `@@IRREVERSIBLE@@ <kind>:<description>` lines; the runtime
+      // parses them into observation.irreversibleEffects.
+      if (actionObs.irreversibleEffects.length > 0) {
+        for (const eff of actionObs.irreversibleEffects) {
+          emitEvent(db, {
+            kind: "irreversible_effect_recorded",
+            substrate_origin: "substrate_auto",
+            directive_id: task.directive_id,
+            task_id: task.id,
+            action_artifact_id: actionArtifact.id,
+            payload: { kind: eff.kind, description: eff.description } as JsonValue,
+          });
+        }
+      }
+
       if (!actionObs.ok) {
-        emitEvent(db, {
+        // Locate the most recent artifact_observed row on this task — that's
+        // the artifact's own "I ran" row, even when ok is false (the runtime
+        // emits an observed row for soft/hard timeouts too).
+        const obsRow = db
+          .query(
+            `SELECT id FROM events WHERE task_id = ? AND kind = 'artifact_observed'
+             AND action_artifact_id = ? ORDER BY ts DESC LIMIT 1`,
+          )
+          .get(task.id, actionArtifact.id) as { id: string } | null;
+        const scored = emitEvent(db, {
           kind: "action_scored",
           substrate_origin: "substrate_auto",
           directive_id: task.directive_id,
@@ -289,7 +316,22 @@ export const dispatchReadyTask = async (
             stderr_tail: actionObs.stderrTail,
           } as JsonValue,
         });
-        applyResidualOutcome(db, actionArtifact.id, 1, nowIso());
+        // Route through the Phase H credit pipeline. When the observation
+        // event is missing (rare — runtime crash before any emit) we fall
+        // back to applyResidualOutcome directly so the artifact's posterior
+        // still moves; credit-pipeline gracefully handles the missing event
+        // (collectCitations skips a null event).
+        try {
+          await distributeCredit(db, {
+            action_event_id: actionPredicted.id,
+            observation_event_id: obsRow?.id ?? actionPredicted.id,
+            scored_event_id: scored.id,
+            predicted_residual: actionPredicted.predicted_residual ?? 1,
+            observed_residual: 1,
+          });
+        } catch {
+          applyResidualOutcome(db, actionArtifact.id, 1, nowIso());
+        }
       } else {
         // Run the verifier on the observation.
         const verifierObs = await runBunArtifact({
@@ -318,7 +360,7 @@ export const dispatchReadyTask = async (
           residual = (verifierObs.result as { residual: number }).residual;
         }
 
-        emitEvent(db, {
+        const scored = emitEvent(db, {
           kind: "action_scored",
           substrate_origin: "substrate_auto",
           directive_id: task.directive_id,
@@ -334,10 +376,30 @@ export const dispatchReadyTask = async (
           } as JsonValue,
         });
 
-        // Credit both artifacts' posteriors. Verifier and action both share
-        // the residual; v2-design §11.5 treats verifier promotion identically.
-        applyResidualOutcome(db, actionArtifact.id, residual, nowIso());
-        applyResidualOutcome(db, verifierArtifact.id, residual, nowIso());
+        // Phase H: credit pipeline distributes the residual across the
+        // action + verifier + every cited knowledge/artifact via Shapley
+        // decomposition (§3.6.1 Rule 3). The pipeline calls
+        // applyResidualOutcome on the primary action + verifier; cited
+        // entities receive a weighted Beta posterior delta.
+        const obsRow = db
+          .query(
+            `SELECT id FROM events WHERE task_id = ? AND kind = 'artifact_observed'
+             AND action_artifact_id = ? ORDER BY ts DESC LIMIT 1`,
+          )
+          .get(task.id, actionArtifact.id) as { id: string } | null;
+        try {
+          await distributeCredit(db, {
+            action_event_id: actionPredicted.id,
+            observation_event_id: obsRow?.id ?? actionPredicted.id,
+            scored_event_id: scored.id,
+            predicted_residual: actionPredicted.predicted_residual ?? residual,
+            observed_residual: residual,
+          });
+        } catch {
+          // Fail-safe: keep posterior accounting honest even if credit fails.
+          applyResidualOutcome(db, actionArtifact.id, residual, nowIso());
+          applyResidualOutcome(db, verifierArtifact.id, residual, nowIso());
+        }
 
         // 6. Commit if residual is below the success band.
         if (residual < COMMIT_RESIDUAL_THRESHOLD) {

@@ -9,8 +9,13 @@ import {
   getArtifact,
   insertArtifact,
   listArtifactsByRuntime,
+  listRehabilitationCandidates,
   maybePromote,
   maybeQuarantine,
+  maybeRehabilitate,
+  rehabilitationWorkerTick,
+  REHABILITATION_COOLDOWN_MS_FOR_TEST,
+  REHABILITATION_CONTROLLED_INVOCATIONS_FOR_TEST,
 } from "./artifact_store";
 import { nowIso } from "./ids";
 import type { Database } from "bun:sqlite";
@@ -235,5 +240,147 @@ describe("maybeQuarantine", () => {
     const transitioned = maybeQuarantine(db, "art_calm", (e) => events.push(e));
     expect(transitioned).toBe(false);
     expect(events.length).toBe(0);
+  });
+});
+
+describe("maybeRehabilitate (Phase H)", () => {
+  const quarantine = (db: Database, id: string, tsIso?: string): void => {
+    db.run("UPDATE code_artifact SET status = ? WHERE id = ?", ["quarantined", id]);
+    // Insert a code_artifact_quarantined event with a backdated ts if supplied.
+    const eventTs = tsIso ?? new Date().toISOString();
+    db.run(
+      `INSERT INTO events (
+         id, ts, directive_id, task_id, parent_task_id, loop_id,
+         substrate_origin, kind, payload, context_refs,
+         predicted_residual, action_artifact_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        `q_${id}_${Math.random().toString(36).slice(2, 8)}`,
+        eventTs,
+        "d_test",
+        "t_test",
+        null,
+        "loop_root",
+        "substrate_auto",
+        "code_artifact_quarantined",
+        JSON.stringify({ reason: "test" }),
+        JSON.stringify([]),
+        null,
+        id,
+      ],
+    );
+  };
+
+  test("returns not_quarantined for an admitted artifact", async () => {
+    const db = openDb(":memory:");
+    insertSampleBunArtifact(db, "art_admitted");
+    const result = await maybeRehabilitate(
+      db,
+      "art_admitted",
+      async () => ({ ok: true, residual: 0 }),
+      () => undefined,
+    );
+    expect(result.rehabilitated).toBe(false);
+    if (!result.rehabilitated) expect(result.reason).toBe("not_quarantined");
+  });
+
+  test("returns cooldown_pending for a recently-quarantined artifact", async () => {
+    const db = openDb(":memory:");
+    insertSampleBunArtifact(db, "art_fresh_q");
+    quarantine(db, "art_fresh_q"); // ts = now
+    const result = await maybeRehabilitate(
+      db,
+      "art_fresh_q",
+      async () => ({ ok: true, residual: 0 }),
+      () => undefined,
+    );
+    expect(result.rehabilitated).toBe(false);
+    if (!result.rehabilitated) expect(result.reason).toBe("cooldown_pending");
+  });
+
+  test("rehabilitates after 14-day cooldown + 10 successful fixture runs", async () => {
+    const db = openDb(":memory:");
+    insertSampleBunArtifact(db, "art_rehab");
+    const fifteenDaysAgo = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+    quarantine(db, "art_rehab", fifteenDaysAgo);
+
+    const events: EmitEventInput[] = [];
+    let runCount = 0;
+    const result = await maybeRehabilitate(
+      db,
+      "art_rehab",
+      async () => {
+        runCount++;
+        return { ok: true, residual: 0.05 };
+      },
+      (e) => events.push(e),
+    );
+    expect(result.rehabilitated).toBe(true);
+    if (result.rehabilitated) expect(result.controlledRuns).toBe(REHABILITATION_CONTROLLED_INVOCATIONS_FOR_TEST);
+    expect(runCount).toBe(REHABILITATION_CONTROLLED_INVOCATIONS_FOR_TEST);
+    expect(getArtifact(db, "art_rehab")!.status).toBe("admitted");
+    expect(events.length).toBe(1);
+    expect(events[0]!.kind).toBe("code_artifact_rehabilitated");
+  });
+
+  test("fails rehabilitation when a controlled run returns high residual", async () => {
+    const db = openDb(":memory:");
+    insertSampleBunArtifact(db, "art_partial");
+    const fifteenDaysAgo = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+    quarantine(db, "art_partial", fifteenDaysAgo);
+
+    let runCount = 0;
+    const result = await maybeRehabilitate(
+      db,
+      "art_partial",
+      async () => {
+        runCount++;
+        // The 4th run returns a residual above the threshold.
+        if (runCount === 4) return { ok: true, residual: 0.5 };
+        return { ok: true, residual: 0.05 };
+      },
+      () => undefined,
+    );
+    expect(result.rehabilitated).toBe(false);
+    if (!result.rehabilitated) expect(result.reason).toBe("fixture_residual_too_high");
+    // The artifact stays quarantined.
+    expect(getArtifact(db, "art_partial")!.status).toBe("quarantined");
+  });
+
+  test("listRehabilitationCandidates returns quarantined artifacts past the cooldown", () => {
+    const db = openDb(":memory:");
+    insertSampleBunArtifact(db, "art_old");
+    insertSampleBunArtifact(db, "art_new");
+    const fifteenDaysAgo = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+    quarantine(db, "art_old", fifteenDaysAgo);
+    quarantine(db, "art_new"); // now
+    const candidates = listRehabilitationCandidates(db);
+    const ids = candidates.map((c) => c.id);
+    expect(ids).toContain("art_old");
+    expect(ids).not.toContain("art_new");
+  });
+
+  test("REHABILITATION_COOLDOWN_MS_FOR_TEST equals 14 days", () => {
+    expect(REHABILITATION_COOLDOWN_MS_FOR_TEST).toBe(14 * 24 * 60 * 60 * 1000);
+  });
+
+  test("rehabilitationWorkerTick processes every past-cooldown candidate", async () => {
+    const db = openDb(":memory:");
+    insertSampleBunArtifact(db, "art_w1");
+    insertSampleBunArtifact(db, "art_w2");
+    insertSampleBunArtifact(db, "art_fresh");
+    const fifteenDaysAgo = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+    quarantine(db, "art_w1", fifteenDaysAgo);
+    quarantine(db, "art_w2", fifteenDaysAgo);
+    quarantine(db, "art_fresh"); // now
+    const events: EmitEventInput[] = [];
+    const results = await rehabilitationWorkerTick(
+      db,
+      async () => ({ ok: true, residual: 0.05 }),
+      (e) => events.push(e),
+    );
+    const rehabbed = results.filter((r) => r.result.rehabilitated).map((r) => r.artifact_id);
+    expect(rehabbed.sort()).toEqual(["art_w1", "art_w2"]);
+    expect(getArtifact(db, "art_fresh")!.status).toBe("quarantined");
   });
 });

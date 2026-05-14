@@ -63,10 +63,30 @@ export type UvRuntimeObservation = {
 };
 
 const RESULT_PREFIX = "@@RESULT@@ ";
+const IRREVERSIBLE_PREFIX = "@@IRREVERSIBLE@@ ";
 const STDERR_TAIL_BYTES = 1024;
 // Per §5.5: SIGKILL at wall_ms × 1.5 (Python unwinding is slower than bun).
 const HARD_KILL_MULTIPLIER = 1.5;
 const KILL_GRACE_MS = 500;
+
+/** See runtimes/bun.ts for the convention — same parser, same semantics. */
+const parseIrreversibleLines = (stdout: string): Array<{ kind: string; description: string }> => {
+  const out: Array<{ kind: string; description: string }> = [];
+  for (const ln of stdout.split(/\r?\n/)) {
+    if (!ln.startsWith(IRREVERSIBLE_PREFIX)) continue;
+    const suffix = ln.slice(IRREVERSIBLE_PREFIX.length);
+    const sep = suffix.indexOf(":");
+    if (sep <= 0) {
+      out.push({ kind: "unspecified", description: suffix.trim() });
+    } else {
+      out.push({
+        kind: suffix.slice(0, sep).trim(),
+        description: suffix.slice(sep + 1).trim(),
+      });
+    }
+  }
+  return out;
+};
 
 const readStream = async (stream: ReadableStream<Uint8Array> | null): Promise<string> => {
   if (!stream) return "";
@@ -308,11 +328,13 @@ export const runUvArtifact = async (
       });
     }
 
+    const irreversibleEffects = parseIrreversibleLines(stdoutText);
+
     if (exitCode !== 0) {
       return {
         ok: false,
         error: softFired || hardFired ? "wall_timeout" : `nonzero_exit:${exitCode}`,
-        irreversibleEffects: [],
+        irreversibleEffects,
         durationMs,
         exitCode,
         stderrTail,
@@ -325,7 +347,7 @@ export const runUvArtifact = async (
       return {
         ok: false,
         error: parsed.reason,
-        irreversibleEffects: [],
+        irreversibleEffects,
         durationMs,
         exitCode,
         stderrTail,
@@ -343,7 +365,7 @@ export const runUvArtifact = async (
     return {
       ok: true,
       result: parsed.value,
-      irreversibleEffects: [],
+      irreversibleEffects,
       durationMs,
       exitCode,
       stderrTail,

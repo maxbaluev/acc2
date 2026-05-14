@@ -42,6 +42,12 @@ import { applyAmendment, findUnappliedAmendments } from "./amendment_handler";
 import { schedulerLoop } from "./task_scheduler";
 import { EmbeddingIndex } from "./embedding_index";
 import { embedderWorkerTick } from "./embedder";
+import { rehabilitationWorkerTick, getArtifact } from "./artifact_store";
+import { runBunArtifact } from "./runtimes/bun";
+import { runUvArtifact } from "./runtimes/uv";
+import { runCamofoxArtifact } from "./runtimes/camofox";
+import type { SandboxDecl } from "../substrate/types";
+import { emitEvent } from "./events";
 
 export const DEFAULT_DAEMON_PORT = 9387;
 export const DEFAULT_AUX_PORT_OFFSET = 1;
@@ -184,6 +190,58 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       })();
     }, 10_000);
     workers.push(() => clearInterval(embedderTick));
+  }
+
+  // Phase H: optional rehabilitation worker. Default off — tests must not
+  // run controlled fixture invocations as a side effect. Enable with
+  // ACC2_REHAB_AUTOSTART=1. Tick every 6h; the cooldown is 14d so checking
+  // more often is wasted work.
+  if (process.env.ACC2_REHAB_AUTOSTART === "1") {
+    const rehabTick = setInterval(() => {
+      void (async () => {
+        try {
+          await rehabilitationWorkerTick(
+            db,
+            async (artifactId) => {
+              const row = getArtifact(db, artifactId);
+              if (!row) return { ok: false, residual: 1 };
+              const fixtureInput = row.fixtureInput ?? null;
+              const observation = row.runtime === "bun"
+                ? await runBunArtifact({
+                    artifactId: row.id,
+                    body: row.body,
+                    declaredSandbox: row.declaredSandbox as Extract<SandboxDecl, { runtime: "bun" }>,
+                    inputs: fixtureInput,
+                  })
+                : row.runtime === "uv"
+                  ? await runUvArtifact({
+                      artifactId: row.id,
+                      body: row.body,
+                      declaredSandbox: row.declaredSandbox as Extract<SandboxDecl, { runtime: "uv" }>,
+                      inputs: fixtureInput,
+                    })
+                  : await runCamofoxArtifact({
+                      artifactId: row.id,
+                      body: row.body,
+                      declaredSandbox: row.declaredSandbox as Extract<SandboxDecl, { runtime: "camofox-browser" }>,
+                      inputs: fixtureInput,
+                    });
+              const residual =
+                observation.ok &&
+                observation.result &&
+                typeof observation.result === "object" &&
+                !Array.isArray(observation.result) &&
+                typeof (observation.result as Record<string, unknown>).residual === "number"
+                  ? (observation.result as { residual: number }).residual
+                  : (observation.ok ? 0 : 1);
+              return { ok: observation.ok, residual };
+            },
+            (event) => { try { emitEvent(db, event); } catch { /* swallow */ } },
+          );
+        } catch { /* swallow */ }
+      })();
+    }, 6 * 60 * 60 * 1000);
+    workers.push(() => clearInterval(rehabTick));
   }
 
   // Phase E: optional autoscheduler. Default off — tests don't want the

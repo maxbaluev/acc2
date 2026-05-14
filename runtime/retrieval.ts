@@ -22,7 +22,8 @@
 import type { Database } from "bun:sqlite";
 import { computeEmbedding, EMBEDDING_VERSION } from "./embedder";
 import type { EmbeddingIndex, IndexEntry, KnnHit } from "./embedding_index";
-import { originPromotion } from "../substrate/views";
+import { originPromotion, originPromotionByGoalShape } from "../substrate/views";
+import { goalShape as computeGoalShape } from "./goal_shape";
 
 export type RetrievalQuery = {
   text: string;
@@ -36,6 +37,10 @@ export type RetrievalQuery = {
   minScore?: number;
   /** Optional event-kind whitelist. */
   kindFilter?: string[];
+  /** Optional task goal text — when present the reranker uses the
+   *  per-(origin, goal_shape) bias map first, falling back to the
+   *  global per-origin ratio when no shape-specific data exists. Phase H. */
+  goalText?: string;
 };
 
 export type RetrievalHit = {
@@ -58,6 +63,8 @@ export type RetrievalResult = {
   query_embedding_unavailable: boolean;
 };
 
+const clampBias = (r: number): number => (r < 0.5 ? 0.5 : r > 1.5 ? 1.5 : r);
+
 /** Build a Map<origin, promotion_ratio> snapshot. Origins absent from the
  *  view default to 1.0 at the lookup site. */
 const readOriginBias = (db: Database): Map<string, number> => {
@@ -66,9 +73,26 @@ const readOriginBias = (db: Database): Map<string, number> => {
     // Clamp into [0.5, 1.5]: a pure ratio risks washing posterior scores
     // when one origin happens to have low candidate volume. The ±0.5 band
     // keeps the bias informative without dominating the cosine signal.
-    const r = row.promotion_ratio;
-    const clamped = r < 0.5 ? 0.5 : r > 1.5 ? 1.5 : r;
-    out.set(row.substrate_origin, clamped);
+    out.set(row.substrate_origin, clampBias(row.promotion_ratio));
+  }
+  return out;
+};
+
+/** Build a per-(origin, goal_shape) bias map for a SPECIFIC goal_shape.
+ *  Falls back to the global per-origin ratio when no shape-specific row
+ *  exists for an origin. Phase H — §3.6.1 Rule 4 + §18 criterion 19. */
+const readOriginBiasForGoalShape = (db: Database, goalShape: string): Map<string, number> => {
+  const out = new Map<string, number>();
+  // Per-shape data
+  for (const row of originPromotionByGoalShape(db, computeGoalShape)) {
+    if (row.goal_shape !== goalShape) continue;
+    out.set(row.substrate_origin, clampBias(row.promotion_ratio));
+  }
+  // Fill any origin that has global data but no shape-specific row.
+  for (const row of originPromotion(db)) {
+    if (!out.has(row.substrate_origin)) {
+      out.set(row.substrate_origin, clampBias(row.promotion_ratio));
+    }
   }
   return out;
 };
@@ -184,7 +208,9 @@ export const retrieve = async (
   const overFetch = Math.max(q.k, q.k * 3);
   const knnHits = index.knn(queryVec, overFetch, indexFilter);
 
-  const originBias = readOriginBias(db);
+  const originBias = q.goalText
+    ? readOriginBiasForGoalShape(db, computeGoalShape(q.goalText))
+    : readOriginBias(db);
   let packed = knnHits.map((h) => packHit(db, h, originBias));
   if (typeof q.minScore === "number") {
     packed = packed.filter((h) => h.posterior >= q.minScore!);
@@ -234,7 +260,9 @@ export const retrieveWithEmbedding = (
   };
   const overFetch = Math.max(q.k, q.k * 3);
   const knnHits = index.knn(queryEmbedding, overFetch, indexFilter);
-  const originBias = readOriginBias(db);
+  const originBias = q.goalText
+    ? readOriginBiasForGoalShape(db, computeGoalShape(q.goalText))
+    : readOriginBias(db);
   let packed = knnHits.map((h) => packHit(db, h, originBias));
   if (typeof q.minScore === "number") {
     packed = packed.filter((h) => h.posterior >= q.minScore!);

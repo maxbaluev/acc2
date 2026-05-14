@@ -333,3 +333,156 @@ export const maybeQuarantine = (
   });
   return true;
 };
+
+// ── Rehabilitation (Phase H — v2-design.md §11.6) ──────────────────
+//
+// Quarantined artifacts can re-enter `admitted` status after:
+//   (a) 14-day cooldown elapsed since the latest `code_artifact_quarantined` event,
+//   (b) the admission fixture re-passes,
+//   (c) ≥ 10 controlled fixture invocations succeed in sequence.
+//
+// (c) is approximated: the rehabilitation flow runs the stored fixture 10
+// times via the appropriate runtime (bun / uv / camofox) and ALL ten must
+// return residual below the artifact's admission threshold. The runtime
+// runner is injected so tests can substitute a deterministic stub.
+
+const REHABILITATION_COOLDOWN_MS = 14 * 24 * 60 * 60 * 1000;
+const REHABILITATION_CONTROLLED_INVOCATIONS = 10;
+
+export type RehabFixtureRunner = (artifactId: string) => Promise<{ ok: boolean; residual: number }>;
+
+export type RehabResult =
+  | { rehabilitated: true; controlledRuns: number }
+  | { rehabilitated: false; reason: "not_quarantined" | "cooldown_pending" | "fixture_run_failed" | "fixture_residual_too_high"; detail?: string };
+
+/** Read the latest `code_artifact_quarantined` event ts for an artifact. */
+const latestQuarantineTs = (db: Database, artifactId: string): string | null => {
+  const row = db
+    .query(
+      `SELECT ts FROM events
+       WHERE action_artifact_id = ? AND kind = 'code_artifact_quarantined'
+       ORDER BY ts DESC LIMIT 1`,
+    )
+    .get(artifactId) as { ts: string } | null;
+  return row?.ts ?? null;
+};
+
+/** Per v2-design.md §11.6: a quarantined artifact may re-enter `admitted`
+ *  status after the 14-day cooldown elapses, the admission fixture
+ *  re-passes, and 10 controlled fixture invocations all return residual
+ *  below the artifact's admission threshold. The runner closure is
+ *  injected so callers wire it to the appropriate runtime; tests pass a
+ *  deterministic stub. Emits `code_artifact_rehabilitated` on transition. */
+export const maybeRehabilitate = async (
+  db: Database,
+  artifactId: string,
+  runner: RehabFixtureRunner,
+  emit: (event: EmitEventInput) => void,
+  opts?: { nowMs?: number },
+): Promise<RehabResult> => {
+  const row = getArtifact(db, artifactId);
+  if (!row) return { rehabilitated: false, reason: "not_quarantined", detail: "artifact_not_found" };
+  if (row.status !== "quarantined") {
+    return { rehabilitated: false, reason: "not_quarantined" };
+  }
+  const quarantinedAt = latestQuarantineTs(db, artifactId);
+  if (!quarantinedAt) {
+    return { rehabilitated: false, reason: "not_quarantined", detail: "quarantine_event_missing" };
+  }
+  const now = opts?.nowMs ?? Date.now();
+  const elapsed = now - new Date(quarantinedAt).getTime();
+  if (elapsed < REHABILITATION_COOLDOWN_MS) {
+    return {
+      rehabilitated: false,
+      reason: "cooldown_pending",
+      detail: `${Math.floor(elapsed / 86_400_000)}d/14d`,
+    };
+  }
+
+  // Run the admission fixture once. Subsequent runs constitute the
+  // controlled-invocation gate — the spec says "≥ 10 controlled fixture
+  // invocations succeed" so we run 10 total iterations, all of which must
+  // pass. We collapse "admission fixture re-passes" with the first of the
+  // 10 controlled runs (the spec's two clauses are the same fixture
+  // executed under the same constraints).
+  const threshold = row.fixtureExpectedResidual ?? 0.2;
+  for (let i = 0; i < REHABILITATION_CONTROLLED_INVOCATIONS; i++) {
+    const outcome = await runner(artifactId);
+    if (!outcome.ok) {
+      return {
+        rehabilitated: false,
+        reason: "fixture_run_failed",
+        detail: `attempt_${i + 1}_of_${REHABILITATION_CONTROLLED_INVOCATIONS}`,
+      };
+    }
+    if (outcome.residual >= threshold) {
+      return {
+        rehabilitated: false,
+        reason: "fixture_residual_too_high",
+        detail: `attempt_${i + 1}_residual_${outcome.residual.toFixed(3)}_threshold_${threshold.toFixed(3)}`,
+      };
+    }
+  }
+
+  const ts = nowIso();
+  db.run(
+    "UPDATE code_artifact SET status = ?, updated_at = ? WHERE id = ?",
+    ["admitted", ts, artifactId],
+  );
+  emit({
+    kind: "code_artifact_rehabilitated",
+    substrate_origin: "substrate_auto",
+    action_artifact_id: artifactId,
+    payload: {
+      artifact_id: artifactId,
+      quarantined_at: quarantinedAt,
+      cooldown_ms: elapsed,
+      controlled_runs: REHABILITATION_CONTROLLED_INVOCATIONS,
+    } as JsonValue,
+  });
+  return { rehabilitated: true, controlledRuns: REHABILITATION_CONTROLLED_INVOCATIONS };
+};
+
+/** List quarantined artifacts whose latest quarantine event is older than
+ *  the cooldown window. The daemon's rehabilitation worker tick consumes
+ *  this. */
+export const listRehabilitationCandidates = (db: Database, nowMs?: number): CodeArtifactRow[] => {
+  const ts = new Date((nowMs ?? Date.now()) - REHABILITATION_COOLDOWN_MS).toISOString();
+  const rows = db
+    .query(
+      `SELECT ca.* FROM code_artifact ca
+       WHERE ca.status = 'quarantined'
+         AND EXISTS (
+           SELECT 1 FROM events e
+           WHERE e.action_artifact_id = ca.id
+             AND e.kind = 'code_artifact_quarantined'
+             AND e.ts <= ?
+         )`,
+    )
+    .all(ts) as Array<Record<string, unknown>>;
+  return rows.map(mapRow);
+};
+
+export const REHABILITATION_COOLDOWN_MS_FOR_TEST = REHABILITATION_COOLDOWN_MS;
+export const REHABILITATION_CONTROLLED_INVOCATIONS_FOR_TEST = REHABILITATION_CONTROLLED_INVOCATIONS;
+
+/** Daemon-side rehabilitation tick. Scans quarantined artifacts past their
+ *  14-day cooldown and attempts rehabilitation via the supplied runner.
+ *  Default off (gated by ACC2_REHAB_AUTOSTART=1 in the daemon) so tests do
+ *  not run controlled fixture invocations as a side effect. Returns the
+ *  per-artifact outcome list so callers can log / surface telemetry. */
+export const rehabilitationWorkerTick = async (
+  db: Database,
+  runner: RehabFixtureRunner,
+  emit: (event: EmitEventInput) => void,
+  opts?: { nowMs?: number; maxArtifacts?: number },
+): Promise<Array<{ artifact_id: string; result: RehabResult }>> => {
+  const candidates = listRehabilitationCandidates(db, opts?.nowMs);
+  const cap = opts?.maxArtifacts ?? candidates.length;
+  const out: Array<{ artifact_id: string; result: RehabResult }> = [];
+  for (const c of candidates.slice(0, cap)) {
+    const result = await maybeRehabilitate(db, c.id, runner, emit, { nowMs: opts?.nowMs });
+    out.push({ artifact_id: c.id, result });
+  }
+  return out;
+};
