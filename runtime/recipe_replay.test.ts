@@ -51,13 +51,19 @@ const seedThreeSuccessRecipe = async (
     // committed shapes with the same goal_shape.
     await sleepMs(5);
   }
-  const summary = extractRecipeCandidates(db);
-  expect(summary.extracted).toBeGreaterThanOrEqual(1);
-  const row = db
-    .query(
-      "SELECT id, payload FROM events WHERE kind = 'recipe_extracted' ORDER BY ts DESC LIMIT 1",
-    )
-    .get() as { id: string; payload: string };
+  // Task 5 inlines extractRecipeFromCommit on every task_committed — the
+  // FIRST commit seeds a confidence=1.0 recipe synchronously, so by the
+  // time the statistical 3-shape extractor runs the composite key is
+  // already deduped. We accept either path: a recipe must EXIST in the
+  // ledger (regardless of whether the inline or statistical path emitted
+  // it). Tests that care about the inline-vs-statistical distinction are
+  // in substrate/extractors.test.ts.
+  extractRecipeCandidates(db);
+  const recipeRows = db
+    .query("SELECT id, payload FROM events WHERE kind = 'recipe_extracted' ORDER BY ts DESC")
+    .all() as Array<{ id: string; payload: string }>;
+  expect(recipeRows.length).toBeGreaterThanOrEqual(1);
+  const row = recipeRows[0]!;
   const p = JSON.parse(row.payload) as { goal_shape: string };
   if (bump) {
     updateRecipeConfidence(db, row.id, true);

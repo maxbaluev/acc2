@@ -8,6 +8,7 @@ import {
   extractCodeArtifactScores,
   extractKnowledgePromotions,
   extractRecipeCandidates,
+  extractRecipeFromCommit,
   extractSemanticDedup,
 } from "./extractors";
 
@@ -325,4 +326,122 @@ describe("extractRecipeCandidates", () => {
     // (n1 vs n2), so two recipes should emit.
     expect(summary.extracted).toBe(2);
   });
+});
+
+describe("extractRecipeFromCommit (inline post-commit path)", () => {
+  test("seeds a confidence=1.0 recipe on the first commit for a new (goal_shape, topology)", () => {
+    const db = openDb(":memory:");
+    const did = "d_inline_1";
+    const taskId = "t_inline_1";
+    insertEvent(db, { kind: "directive_opened", directive_id: did, task_id: taskId, payload: { goal: "fetch title from page" } });
+    insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: taskId });
+    insertEvent(db, { kind: "task_committed", directive_id: did, task_id: taskId });
+
+    const summary = extractRecipeFromCommit(db, taskId);
+    expect(summary.extracted).toBe(1);
+    expect(summary.recipe_id).not.toBeNull();
+
+    const recipes = db
+      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .all() as Array<{ payload: string }>;
+    expect(recipes.length).toBe(1);
+    const p = JSON.parse(recipes[0]!.payload) as Record<string, unknown>;
+    // Inline first-commit seed lands at the canonical 0.5 prior — same as
+    // the statistical 3-shape extractor — so the two paths converge on the
+    // same posterior trajectory through updateRecipeConfidence.
+    expect(p.confidence).toBe(0.5);
+    expect(p.success_count).toBe(1);
+    expect(p.seeded_by).toBe("inline_post_commit");
+    expect(typeof p.goal_shape).toBe("string");
+    expect((p.goal_shape as string).startsWith("fetch_title_from_page")).toBe(true);
+    expect(typeof p.topology_signature).toBe("string");
+    expect((p.topology_signature as string).startsWith("topo_")).toBe(true);
+  });
+
+  test("idempotent — calling twice on the same task produces no second row", () => {
+    const db = openDb(":memory:");
+    const did = "d_inline_2";
+    const taskId = "t_inline_2";
+    insertEvent(db, { kind: "directive_opened", directive_id: did, task_id: taskId, payload: { goal: "shared shape" } });
+    insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: taskId });
+    insertEvent(db, { kind: "task_committed", directive_id: did, task_id: taskId });
+
+    const first = extractRecipeFromCommit(db, taskId);
+    expect(first.extracted).toBe(1);
+    const second = extractRecipeFromCommit(db, taskId);
+    expect(second.extracted).toBe(0);
+    expect(second.recipe_id).toBe(first.recipe_id);
+    const count = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_extracted'")
+      .get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
+  test("dedup composes with extractRecipeCandidates — the 3-shape statistical path skips an already-seeded composite key", () => {
+    const db = openDb(":memory:");
+    // Three directives with the same (goal_shape, topology). Seed the recipe
+    // inline from the FIRST commit, then run the 3-shape extractor and
+    // assert it doesn't double-emit.
+    for (let i = 0; i < 3; i++) {
+      const did = `d_compose_${i}`;
+      const t = `t_compose_${i}`;
+      insertEvent(db, { kind: "directive_opened", directive_id: did, task_id: t, payload: { goal: "compose shape" } });
+      insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: t });
+      insertEvent(db, { kind: "task_committed", directive_id: did, task_id: t });
+      if (i === 0) extractRecipeFromCommit(db, t);
+    }
+    const summary = extractRecipeCandidates(db);
+    expect(summary.extracted).toBe(0);
+    const count = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_extracted'")
+      .get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
+  test("no-op when the task has no task_committed row", () => {
+    const db = openDb(":memory:");
+    const summary = extractRecipeFromCommit(db, "t_missing");
+    expect(summary).toEqual({ extracted: 0, recipe_id: null });
+  });
+});
+
+describe("task_dispatcher inline recipe seeding (Task 5)", () => {
+  test("a successful dispatch emits recipe_extracted within the same call", async () => {
+    // End-to-end check that the dispatcher wires extractRecipeFromCommit on
+    // the task_committed branch (k_555: create → retrieve → mutate → credit).
+    // Uses the canonical d_count_todos fixture under the mock bridge so the
+    // run is hermetic.
+    const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { dispatchReadyTask } = await import("../runtime/task_dispatcher");
+    const { readyTasks } = await import("../runtime/task_topology");
+    const { openFixtureDCountTodos } = await import("../runtime/fixtures/d_count_todos");
+
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-recipe-inline-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO one", "utf-8");
+    writeFileSync(join(tempDir, "b.txt"), "// TODO two", "utf-8");
+    try {
+      const { directiveId, taskId } = await openFixtureDCountTodos(db, tempDir);
+      const ready = readyTasks(db, directiveId);
+      expect(ready.length).toBeGreaterThan(0);
+      await dispatchReadyTask(db, ready[0]!, { fixtureTargetPath: tempDir });
+
+      const committed = db
+        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_committed' AND task_id = ?")
+        .get(taskId) as { c: number };
+      expect(committed.c).toBe(1);
+
+      const recipeRows = db
+        .query("SELECT payload FROM events WHERE kind = 'recipe_extracted' AND directive_id = ?")
+        .all(directiveId) as Array<{ payload: string }>;
+      expect(recipeRows.length).toBe(1);
+      const p = JSON.parse(recipeRows[0]!.payload) as Record<string, unknown>;
+      expect(p.seeded_by).toBe("inline_post_commit");
+      expect(p.confidence).toBe(0.5);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
