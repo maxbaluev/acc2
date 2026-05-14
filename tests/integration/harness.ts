@@ -33,6 +33,9 @@
 //   --task "<text>"       Ad-hoc mode: drive the brain on the given directive.
 //   --timeout-ms <n>      Ad-hoc timeout (default 300000 = 5 min).
 //   --keep-state          Ad-hoc only: keep temp state dir on exit (printed in summary).
+//   --urgency <level>     Ad-hoc only: directive urgency (normal | elevated | crisis,
+//                         default "normal"). `crisis` engages crisis-mode dispatch
+//                         (lowered recipe threshold, halved verifier timeouts, …).
 //
 // Real-brain prereqs (both modes): OPENAI_API_KEY + opencode on PATH.
 //
@@ -239,23 +242,36 @@ type ScenarioResult = {
 
 const formatSeconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
 
+export type Urgency = "normal" | "elevated" | "crisis";
+
 type HarnessOpts = {
   includeReal: boolean;
   realOnly: boolean;
   taskText: string | null;
   timeoutMs: number;
   keepState: boolean;
+  urgency: Urgency;
 };
 
-const parseArgs = (argv: string[]): HarnessOpts => {
+const parseUrgency = (raw: string | undefined): Urgency => {
+  if (raw === "elevated" || raw === "crisis" || raw === "normal") return raw;
+  if (raw === undefined) return "normal";
+  throw new Error(
+    `--urgency expected one of normal|elevated|crisis (got '${raw}')`,
+  );
+};
+
+export const parseArgs = (argv: string[]): HarnessOpts => {
   const taskIdx = argv.indexOf("--task");
   const timeoutIdx = argv.indexOf("--timeout-ms");
+  const urgencyIdx = argv.indexOf("--urgency");
   return {
     includeReal: argv.includes("--include-real"),
     realOnly: argv.includes("--real-only"),
     taskText: taskIdx >= 0 && argv[taskIdx + 1] ? argv[taskIdx + 1]! : null,
     timeoutMs: timeoutIdx >= 0 && argv[timeoutIdx + 1] ? Number(argv[timeoutIdx + 1]) : 5 * 60_000,
     keepState: argv.includes("--keep-state"),
+    urgency: parseUrgency(urgencyIdx >= 0 && argv[urgencyIdx + 1] ? argv[urgencyIdx + 1] : undefined),
   };
 };
 
@@ -272,6 +288,7 @@ const runAdHocTask = async (opts: HarnessOpts): Promise<number> => {
     taskText: opts.taskText!,
     timeoutMs: opts.timeoutMs,
     keepState: opts.keepState,
+    urgency: opts.urgency,
   });
   if (result.committed && result.violations === 0) return 0;
   return 1;
@@ -298,6 +315,25 @@ export const runHarness = async (
   // because the 20 plumbing scenarios use canned fixture markers.
   const originalBridgeMode = process.env.ACC2_BRIDGE_MODE;
   process.env.ACC2_BRIDGE_MODE = "mock";
+
+  // Workers default ON in production (runtime/daemon.ts flips every
+  // ACC2_*_AUTOSTART gate to opt-OUT). Plumbing scenarios run hermetically
+  // under the mock bridge and drive the scheduler / embedder / father
+  // explicitly per scenario — autostart would race against the per-test
+  // setup and (worse) the embedder worker would call OpenAI before the
+  // mock bridge has a chance to intercept. Opt the harness out for
+  // plumbing only; the ad-hoc real-brain task (scenarioAdHocTask) leaves
+  // them ON so the operator sees the full organism in flight.
+  const originalEmbedder = process.env.ACC2_EMBEDDER_AUTOSTART;
+  const originalScheduler = process.env.ACC2_AUTOSCHEDULER;
+  const originalFather = process.env.ACC2_FATHER_AUTOSTART;
+  const originalRolling = process.env.ACC2_ROLLING_AUTOSTART;
+  const originalRehab = process.env.ACC2_REHAB_AUTOSTART;
+  process.env.ACC2_EMBEDDER_AUTOSTART ??= "0";
+  process.env.ACC2_AUTOSCHEDULER ??= "0";
+  process.env.ACC2_FATHER_AUTOSTART ??= "0";
+  process.env.ACC2_ROLLING_AUTOSTART ??= "0";
+  process.env.ACC2_REHAB_AUTOSTART ??= "0";
 
   // Real-brain is OPT-IN: only run it when --include-real or --real-only
   // was passed. Bare invocation runs the 20 plumbing scenarios only.
@@ -381,6 +417,11 @@ export const runHarness = async (
   try { closeDb(); } catch { /* swallow */ }
   if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
   restoreEnv(originalBridgeMode);
+  restoreEnvVar("ACC2_EMBEDDER_AUTOSTART", originalEmbedder);
+  restoreEnvVar("ACC2_AUTOSCHEDULER", originalScheduler);
+  restoreEnvVar("ACC2_FATHER_AUTOSTART", originalFather);
+  restoreEnvVar("ACC2_ROLLING_AUTOSTART", originalRolling);
+  restoreEnvVar("ACC2_REHAB_AUTOSTART", originalRehab);
 
   // Summary
   const elapsedTotal = Date.now() - startedAt;
@@ -429,6 +470,11 @@ export const runHarness = async (
 const restoreEnv = (originalBridgeMode: string | undefined): void => {
   if (originalBridgeMode === undefined) delete process.env.ACC2_BRIDGE_MODE;
   else process.env.ACC2_BRIDGE_MODE = originalBridgeMode;
+};
+
+const restoreEnvVar = (name: string, original: string | undefined): void => {
+  if (original === undefined) delete process.env[name];
+  else process.env[name] = original;
 };
 
 // Entrypoint when invoked directly.

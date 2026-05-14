@@ -138,6 +138,23 @@ bun cli/dispatch.ts daemon start
 
 Each daemon then writes its own lock file under its own state dir, runs its own MCP server, and refuses to clobber the other.
 
+### 4e. Background workers (all ON by default)
+
+The daemon starts six background workers automatically: the **embedder** (text-embedding-3-small over every text-bearing event), the **scheduler** (drains ready dispatches), **father** (long-horizon re-ranking, 5-min cadence), the **rolling-reviewer** (cadence-driven re-opens), **rehabilitation** (probes quarantined artifacts), and **integrity** (PRAGMA integrity + WAL hygiene, 6-hour cadence). All are ON by default — the substrate is meant to run the full organism out of the box.
+
+Each worker has an `ACC2_*_AUTOSTART` env var as an opt-OUT only. Set it to `0` to disable a worker for an unusual setup (e.g. you run father out-of-band, or you are isolating the embedder during an OpenAI outage):
+
+```bash
+ACC2_EMBEDDER_AUTOSTART=0    # disable embedder (no OpenAI calls)
+ACC2_AUTOSCHEDULER=0         # disable scheduler drain loop
+ACC2_FATHER_AUTOSTART=0      # disable father
+ACC2_ROLLING_AUTOSTART=0     # disable rolling-reviewer
+ACC2_REHAB_AUTOSTART=0       # disable rehabilitation
+ACC2_INTEGRITY_AUTOSTART=0   # disable integrity worker
+```
+
+Do NOT set them to `1` — that is the legacy opt-in shape. The canonical opt-OUT value is `"0"`. The test suite (`bun test`) pins all six off via `tests/preload.ts` so it stays hermetic; production code does not need to touch them.
+
 ---
 
 ## 5. Updating
