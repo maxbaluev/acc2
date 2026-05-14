@@ -1,0 +1,219 @@
+// Registry tests — pin the unification invariants so the four derived
+// lists (`EventKind` union, `EMBEDDABLE_KINDS`, `HEALTH_METRIC_KINDS`,
+// `MIRROR_INLINE_EVENT_TYPES`) cannot silently drift from
+// `EVENT_KINDS` again.
+
+import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import {
+  EMBEDDABLE_KINDS,
+  EVENT_KINDS,
+  HEALTH_METRIC_KINDS,
+  MIRROR_INLINE_EVENT_TYPES,
+  type EventKind,
+} from "./event_kinds";
+
+// ── helpers ────────────────────────────────────────────────────────
+
+/** Recursively walk a directory and return every .ts file, skipping
+ *  __pycache__ / node_modules / .test.ts. Used to grep production
+ *  call sites for `kind: "<literal>"` patterns. */
+const walkTsFiles = (root: string): string[] => {
+  const out: string[] = [];
+  const skip = new Set(["node_modules", ".git", "__pycache__", "fixtures"]);
+  const walk = (dir: string): void => {
+    let entries: string[];
+    try { entries = readdirSync(dir); } catch { return; }
+    for (const name of entries) {
+      if (skip.has(name)) continue;
+      const p = join(dir, name);
+      let s: ReturnType<typeof statSync>;
+      try { s = statSync(p); } catch { continue; }
+      if (s.isDirectory()) walk(p);
+      else if (s.isFile() && p.endsWith(".ts") && !p.endsWith(".test.ts")) {
+        out.push(p);
+      }
+    }
+  };
+  walk(root);
+  return out;
+};
+
+/** Test-only event kinds enumerated in docs/substrate-entity-map.md
+ *  §"Test-only event kinds" — these live in test fixtures and never
+ *  flow through production emitters, so they intentionally stay out of
+ *  the registry. */
+const TEST_ONLY_KINDS = new Set([
+  "watch_test_any",
+  "watch_test_inflight",
+  "watch_test_runwatch",
+  "watch_test_seed",
+  "watch_test_synthetic",
+]);
+
+/** Strings that grep matches as `kind: "<value>"` but are NOT event
+ *  kinds — `failure_kind` enum members, `target_kind` discriminators,
+ *  edge kinds, view row_kind discriminators, lifecycle enum strings,
+ *  stakeholder interaction enum members, etc. The canonical list lives
+ *  in docs/substrate-entity-map.md §"Sub-payload string-literals".
+ *  Keeping this set narrow forces the registry to absorb any actual
+ *  new event kind rather than pretending it is a sub-payload value. */
+const NON_EVENT_KIND_LITERALS = new Set([
+  // task_edge_recorded.payload.kind values
+  "requires", "refines", "watches", "blocks", "depletes",
+  // FailureKind enum members (substrate/types.ts:34)
+  "auth_missing", "rate_limit", "timeout", "parse_error",
+  "subprocess_crash", "cycle_1_only_breach", "refinement_depth_exceeded",
+  "verification_high_residual", "bridge_killed", "bridge_timeout",
+  "artifact_runtime_error", "rolling_directive_archived",
+  "directive_interference_cycle",
+  // credit.ts target_kind values
+  "knowledge", "code_artifact",
+  // View row_kind discriminators
+  "node", "extension",
+  // Lifecycle / cadence enum strings
+  "rolling_active", "rolling_review", "normal_objective",
+  "promoted", "demoted",
+  // Stakeholder interaction enum
+  "mutual_exclusion", "water_damage", "evacuation",
+  "none", "unspecified", "yield_template",
+  // Compositor task-kind strings
+  "stakeholder_consult",
+  // Bridge / extractor outcome enums
+  "no_action", "mock_bridge_prompt_unrecognized",
+  // irreversible_effect payload.kind values (not event kinds themselves)
+  "net_outbound", "fs_write",
+]);
+
+// ── tests ──────────────────────────────────────────────────────────
+
+describe("EVENT_KINDS registry coverage", () => {
+  test("every event kind emitted in production code is registered", () => {
+    // Walk the three production directories and collect every
+    // `kind: "<literal>"` occurrence. Cross-check against the registry.
+    const root = join(import.meta.dirname ?? ".", "..");
+    const files = [
+      ...walkTsFiles(join(root, "substrate")),
+      ...walkTsFiles(join(root, "runtime")),
+      ...walkTsFiles(join(root, "cli")),
+    ];
+    const literals = new Set<string>();
+    for (const file of files) {
+      const text = readFileSync(file, "utf8");
+      // Match `kind: "<literal>"` and `kind: '<literal>'` and
+      // `kind: \`<literal>\`` — only simple alphanumeric+underscore
+      // values (excludes template expressions and dynamic kinds).
+      const re = /kind:\s*["'`]([a-z_][a-z_0-9]*)["'`]/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) literals.add(m[1]);
+    }
+    // The grep also catches strings like `"kind: 'recipe_extracted'"`
+    // inside SQL queries (which DO carry real event kinds) and false
+    // positives like `kind: "fs_write"` (an irreversible_effect payload
+    // discriminator) — we filter the false-positive set explicitly via
+    // NON_EVENT_KIND_LITERALS so future drift is loud.
+    const missingFromRegistry: string[] = [];
+    for (const lit of literals) {
+      if (NON_EVENT_KIND_LITERALS.has(lit)) continue;
+      if (TEST_ONLY_KINDS.has(lit)) continue;
+      if (!(lit in EVENT_KINDS)) missingFromRegistry.push(lit);
+    }
+    expect(missingFromRegistry).toEqual([]);
+  });
+
+  test("the two previously-missing kinds are now registered", () => {
+    // Per R's audit in docs/substrate-entity-map.md §"Non-union event
+    // kinds emitted by live producers" — both were emitted at runtime
+    // but absent from the union. Registering them is the unification
+    // pass's load-bearing acceptance criterion.
+    expect("embedding_skipped_missing_api_key" in EVENT_KINDS).toBe(true);
+    expect("cli_layout_migrated" in EVENT_KINDS).toBe(true);
+    const skipMeta = EVENT_KINDS.embedding_skipped_missing_api_key as
+      typeof EVENT_KINDS[keyof typeof EVENT_KINDS];
+    const migrMeta = EVENT_KINDS.cli_layout_migrated as
+      typeof EVENT_KINDS[keyof typeof EVENT_KINDS];
+    expect(skipMeta.producer).toBe("runtime");
+    expect(migrMeta.producer).toBe("runtime");
+  });
+});
+
+describe("derived sets match their pre-unification shape", () => {
+  test("EMBEDDABLE_KINDS includes the 12 historically-embeddable kinds", () => {
+    // These 12 kinds were hard-coded in cli/admin_substrate_status.ts
+    // AND runtime/embedder.ts before the registry landed. The registry
+    // is the new source of truth; both consumers now read from here.
+    const expected = new Set([
+      "directive_opened",
+      "directive_amended",
+      "task_node_opened",
+      "knowledge_candidate",
+      "knowledge_promoted",
+      "code_artifact_candidate",
+      "code_artifact_admitted",
+      "owner_input_received",
+      "owner_decision_recorded",
+      "external_event_received",
+      "action_predicted",
+      "action_scored",
+    ]);
+    const derived = new Set(EMBEDDABLE_KINDS);
+    for (const kind of expected) expect(derived.has(kind as EventKind)).toBe(true);
+    // And no surprises in the derived set — every embeddable kind has
+    // the flag set in EVENT_KINDS.
+    for (const kind of derived) {
+      expect(EVENT_KINDS[kind].embeddable).toBe(true);
+    }
+  });
+
+  test("HEALTH_METRIC_KINDS is the three substrate-status counters", () => {
+    // The pre-unification cli/admin_substrate_status.ts hard-coded
+    // these three SQL `COUNT(*)` lookups. The registry derivation
+    // collapses them into one loop.
+    const expected = new Set([
+      "dispatcher_violation",
+      "irreversible_effect_recorded",
+      "worker_tick_overrun",
+    ]);
+    const derived = new Set(HEALTH_METRIC_KINDS);
+    expect(derived.size).toBe(expected.size);
+    for (const kind of expected) expect(derived.has(kind as EventKind)).toBe(true);
+    for (const kind of derived) {
+      expect(EVENT_KINDS[kind].health_metric).toBe(true);
+    }
+  });
+
+  test("MIRROR_INLINE_EVENT_TYPES has the expected pre-set members", () => {
+    // acc2 has no progress-event bus today; the set is empty until a
+    // v2 mirror surface lands. The test pins the empty contract so a
+    // future contributor cannot tag `mirror_inline: true` without also
+    // wiring the operator-facing surface.
+    expect(MIRROR_INLINE_EVENT_TYPES.size).toBe(0);
+    // Also pin the bidirectional invariant: every entry with the flag
+    // appears in the set, and every set member has the flag.
+    for (const [kind, meta] of Object.entries(EVENT_KINDS)) {
+      const inSet = MIRROR_INLINE_EVENT_TYPES.has(kind as EventKind);
+      expect(inSet).toBe(meta.mirror_inline);
+    }
+  });
+
+  test("EventKind union is exactly keyof typeof EVENT_KINDS", () => {
+    // Compile-time identity is what we actually care about; runtime
+    // verification is a smoke test that the derived `EventKind`
+    // re-export from `substrate/types.ts` matches the registry's
+    // keyspace.
+    const keys = Object.keys(EVENT_KINDS);
+    // Each entry has all four flags.
+    for (const k of keys) {
+      const m = EVENT_KINDS[k];
+      expect(typeof m.producer).toBe("string");
+      expect(typeof m.embeddable).toBe("boolean");
+      expect(typeof m.mirror_inline).toBe("boolean");
+      expect(typeof m.health_metric).toBe("boolean");
+    }
+    // Sanity: registry has at least the 108 canonical kinds from
+    // docs/substrate-entity-map.md plus the two previously-missing
+    // kinds plus any subsequent additions.
+    expect(keys.length).toBeGreaterThanOrEqual(110);
+  });
+});
