@@ -21,6 +21,7 @@ const usage = (): string => `acc — v2 thin CLI
   acc daemon status               GET /health on the running daemon.
   acc daemon install-service      Write systemd unit (Linux) / launchd plist (macOS).
   acc watch                       Live TUI subscribing to the daemon's event stream.
+  acc admin <sub>                 Operator maintenance (update-opencode, opencode-version, ...).
   acc doctor                      Multi-check readiness report.
 `;
 
@@ -110,6 +111,10 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
   if (cmd === "watch") {
     const { runWatch } = await import("./watch");
     return runWatch(argv.slice(1));
+  }
+  if (cmd === "admin") {
+    const { runAdmin } = await import("./admin");
+    return runAdmin(argv.slice(1));
   }
   if (cmd === "doctor") {
     const { runDoctor } = await import("./doctor");
