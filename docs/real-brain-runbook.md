@@ -138,3 +138,49 @@ When this smoke exits 0 against the real bridge, acc2 is officially capable of:
 - Scoring the verifier residual, emitting `action_scored`, distributing credit via `distributeCredit`, and committing the task with `task_committed` when residual < 0.3.
 
 That is the full Batch 2.α end-to-end loop: a non-trivial real-world directive (fetch HTML, extract title) solved without any human intervention, with the audit trail preserved as event rows in the substrate.
+
+## Updating opencode
+
+opencode evolves quickly (1.4.3 → 1.14.50 within weeks) and each release can rename models or shift the JSON event shape. AccInt v2 ships first-class controls so the operator can keep the brain subprocess current without leaving the CLI.
+
+### Inspect what is installed and what is available
+
+```bash
+bun cli/admin.ts opencode-version
+```
+
+Prints three lines: `current:` (resolved version + install method + path), `latest:` (newest GitHub release, cached for 1 hour at `~/.accint/state/cache/opencode-latest.json`), and `status:` (`up to date`, `upgrade available`, or `ahead of latest`). When rate-limited by GitHub, set `GITHUB_TOKEN` to authenticate the API call.
+
+`acc doctor` reports the currently-installed version on the `opencode` row; `acc admin opencode-version` is the surface that ALSO surfaces the latest-available comparison.
+
+### Run the upgrade
+
+```bash
+bun cli/admin.ts update-opencode          # interactive — prompts before upgrading
+bun cli/admin.ts update-opencode --yes    # unattended (use in scripts / CI)
+```
+
+The upgrade routine:
+
+1. Detects the install method by inspecting the resolved binary path:
+   - `~/.opencode/bin/opencode` → official installer (`curl -fsSL https://opencode.ai/install | bash`).
+   - `*/node_modules/.bin/opencode` or `/usr/local/bin/opencode` with `npm list -g opencode-ai` matching → npm (`npm install -g opencode-ai@latest`).
+   - `~/.bun/install/global/bin/opencode` → bun (`bun upgrade -g opencode-ai`).
+   - Anything else → refused with `permission_denied` (the operator must upgrade manually).
+2. **Stops the daemon** if it is running (so the running brain process is not torn out from under a live dispatch). Restarts it automatically when the upgrade returns.
+3. Emits three substrate events for the trajectory: `opencode_upgrade_started`, `opencode_upgrade_completed` (success) or `opencode_upgrade_failed` (with `reason: auth_required | network_error | install_failed | permission_denied`).
+4. Re-detects the version after the install command returns so the reported `from → to` is the actual new binary, not the GitHub tag.
+
+### Multi-subsystem check
+
+```bash
+bun cli/admin.ts upgrade-check
+```
+
+Renders one row per external dependency (opencode, bun, uv, camoufox) with a `[UPGRADE]` / `[ok]` flag and the canonical refresh command. Only opencode is checked against a remote registry; the others surface their installed version and the documented refresh path (`bun upgrade`, `uv self update`, `python -m camoufox fetch`).
+
+### What to do after upgrading
+
+1. Run `bun test` to confirm the unit suite still passes against the new opencode.
+2. Run `bun tests/integration/real_brain_smoke.ts --mock-bridge` to confirm the scenario chain is still green (the mock bridge does not call opencode, but seeds + scheduler ticks still exercise the full substrate).
+3. Optionally run `bun tests/integration/real_brain_smoke.ts` to drive the real-bridge end-to-end loop against the new opencode. If a model id was renamed (recurring failure pattern: `ProviderModelNotFoundError`), pass `--model=<new-id>` after consulting `opencode models openai` for the live list.

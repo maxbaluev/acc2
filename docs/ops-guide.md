@@ -130,6 +130,20 @@ bun cli/doctor.ts                        # confirm the new build came up cleanly
 
 The substrate schema is versioned in `substrate/schema.sql`. Schema migrations are applied at daemon boot; the daemon refuses to start if the migration fails, so the old process keeps running until you restart cleanly.
 
+### 5a. Keeping the system current
+
+External dependencies evolve independently of acc2. The brain subprocess (opencode) in particular ships breaking model-id renames between minor versions (e.g. `openai/gpt-5-mini` → `openai/gpt-5.4-mini` between 1.3 and 1.4). Each dependency has a documented refresh path; the table below is the canonical list.
+
+| Component | Check version | Update procedure |
+|---|---|---|
+| **opencode** | `bun cli/admin.ts opencode-version` | `bun cli/admin.ts update-opencode [--yes]` — auto-detects install method (official-script / npm / bun), stops the daemon, runs the upgrade, restarts the daemon. Emits `opencode_upgrade_started` + `opencode_upgrade_completed` events on the substrate so every upgrade is auditable. |
+| **camoufox** | `ls ~/.cache/camoufox/camoufox` or `$CAMOUFOX_BINARY_PATH` | `python -m camoufox fetch` — refreshes the bundled Firefox build. The Python package itself comes from `pip install -U camoufox` or `uv pip install -U camoufox`. |
+| **uv** (Astral) | `uv --version` | `uv self update` — Astral provides built-in self-update. |
+| **bun** | `bun --version` | `bun upgrade` — upgrades the bun runtime in-place. |
+| **AccInt v2** | `git -C bos2 log -1` | `git pull && bun install` (see the block above), then restart the daemon. |
+
+`bun cli/admin.ts upgrade-check` queries every external subsystem and renders a one-line summary per row so you can see at a glance which need attention. For opencode it ALSO compares the installed version against the GitHub `releases/latest` tag (cached 1h at `~/.accint/state/cache/opencode-latest.json`; set `GITHUB_TOKEN` if you hit the 60 req/h anonymous rate limit).
+
 ---
 
 ## 6. Backup
