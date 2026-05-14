@@ -199,20 +199,31 @@ const isPlaywrightInstalled = (): boolean => {
 // canonical install recipe documented in docs/operator-install.md.
 
 const camoufoxBinaryCandidates = (): string[] => {
-  const out: string[] = [];
-  const override = process.env.CAMOUFOX_BINARY_PATH;
-  if (override) out.push(override);
   const home = homedir();
-  // Linux fetch location (`python -m camoufox fetch` writes here on Linux).
-  out.push(join(home, ".cache", "camoufox", "camoufox"));
-  // macOS fetch location.
-  out.push(join(home, "Library", "Caches", "camoufox", "camoufox"));
-  return out;
+  return [
+    // Linux fetch location (`python -m camoufox fetch` writes here on Linux).
+    join(home, ".cache", "camoufox", "camoufox"),
+    // macOS fetch location.
+    join(home, "Library", "Caches", "camoufox", "camoufox"),
+  ];
 };
 
 /** Resolve the camoufox binary path or return `null` when none of the
- *  candidate paths exist. Pure — no filesystem mutation. */
+ *  candidate paths exist. Pure — no filesystem mutation.
+ *
+ *  CAMOUFOX_BINARY_PATH is authoritative when set: the operator explicitly
+ *  pointed at a binary, so we honor their choice (existence-checked) without
+ *  falling back to the cache locations. Falling back would silently mask a
+ *  typo in the env var and surprise the operator. */
 const resolveCamoufoxBinary = (): string | null => {
+  const override = process.env.CAMOUFOX_BINARY_PATH;
+  if (override !== undefined && override.length > 0) {
+    try {
+      return existsSync(override) ? override : null;
+    } catch {
+      return null;
+    }
+  }
   for (const candidate of camoufoxBinaryCandidates()) {
     try {
       if (existsSync(candidate)) return candidate;

@@ -589,11 +589,16 @@ type DirectivePayload = Record<string, unknown> & { lifecycle?: unknown };
 const latestDirectivePayload = (
   db: Database, directiveId: string,
 ): { payload: DirectivePayload; ts: string } | null => {
+  // `ts` is ISO millisecond precision; rapid back-to-back emissions (e.g.
+  // archive + amend within one runArchiveRollingCmd call) can collide on
+  // the same millisecond. Tie-break on rowid (monotonic insertion order)
+  // so "latest" is deterministically the most recently inserted row even
+  // under tight test loops where every emission lands in the same ms.
   const row = db
     .query(
       `SELECT ts, payload FROM events
        WHERE directive_id = ? AND kind IN ('directive_opened', 'directive_amended')
-       ORDER BY ts DESC LIMIT 1`,
+       ORDER BY ts DESC, rowid DESC LIMIT 1`,
     )
     .get(directiveId) as { ts: string; payload: string } | null;
   if (!row) return null;
@@ -644,14 +649,18 @@ export const runArchiveRollingCmd = async (
     env.err(`acc admin archive-rolling: directive not found: ${directiveId}`);
     return 1;
   }
+  // Check "already archived" BEFORE the lifecycle check: once a directive
+  // has been archived its most recent payload will reflect the post-archive
+  // amendment (lifecycle = 'committed'), which would otherwise trip the
+  // 'not rolling_active' refusal and break idempotency.
+  if (alreadyArchived(db, directiveId)) {
+    env.out(`directive ${directiveId} already archived; nothing to do`);
+    return 0;
+  }
   const lifecycleKind = liftLifecycleKind(latest.payload);
   if (lifecycleKind !== "rolling_active") {
     env.err(`acc admin archive-rolling: directive lifecycle is '${lifecycleKind ?? "(unknown)"}', not 'rolling_active'`);
     return 1;
-  }
-  if (alreadyArchived(db, directiveId)) {
-    env.out(`directive ${directiveId} already archived; nothing to do`);
-    return 0;
   }
   // 1. Emit the canonical archive event.
   emitEvent(db, {

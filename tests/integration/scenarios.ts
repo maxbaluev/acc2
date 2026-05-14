@@ -848,18 +848,19 @@ export const scenarioAmendmentSupersession = async (handle: DaemonHandle): Promi
  * scenario should be SKIPPED (printed by the harness as a `[skip]` line,
  * not failed).
  *
- * Skip conditions (all "the operator has not opted in"):
- *  - `--skip-real` flag on argv (operator wants the legacy 9-scenario run).
+ * The harness wrapper decides inclusion (default: skip real-brain; opt
+ * in via `--include-real` or `--real-only`). This pre-flight only checks
+ * environmental prerequisites — by the time it runs, the wrapper has
+ * already chosen to include the scenario.
+ *
+ * Skip conditions:
  *  - `OPENAI_API_KEY` absent (embedder/downstream cannot warm).
  *  - `opencode` binary not on PATH.
  *
- * The skip path is deliberate. The mock-only suite proves plumbing; the
- * real-brain scenario proves the loop end-to-end against a live LLM. CI
- * gates on the mock suite; operators run the real scenario before
- * promoting a build.
+ * Real-brain is opt-in because each run burns ~2 min wall-clock + opencode
+ * tokens; the plumbing suite proves the loop end-to-end without that cost.
  */
-export const realBrainPreflight = (argv: string[]): string | null => {
-  if (argv.includes("--skip-real")) return "--skip-real flag";
+export const realBrainPreflight = (_argv: string[]): string | null => {
   if (!process.env.OPENAI_API_KEY) return "OPENAI_API_KEY absent";
   try {
     const r = Bun.spawnSync(["which", "opencode"], { stdout: "pipe", stderr: "pipe" });
@@ -1083,5 +1084,436 @@ export const scenarioRealBrainEndToEnd = async (): Promise<void> => {
     else process.env.ACC2_OPENCODE_TIMEOUT_MS = originalTimeout;
     if (originalHandshake === undefined) delete process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS;
     else process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS = originalHandshake;
+  }
+};
+
+// ── Ad-hoc task — operator-driven real-brain validation ────────────
+
+export type AdHocTaskOptions = {
+  /** The natural-language directive to send to the brain. */
+  taskText: string;
+  /** Max wall-clock to wait for a terminal event (default 5 min). */
+  timeoutMs?: number;
+  /** When true, keep the temp state dir + DB on exit so the operator can inspect.
+   *  The path is printed in the final summary. */
+  keepState?: boolean;
+  /** Output sink (default: process.stdout.write). */
+  writer?: (s: string) => void;
+};
+
+export type AdHocTaskResult = {
+  committed: boolean;
+  failed: boolean;
+  timedOut: boolean;
+  residual: number | null;
+  durationMs: number;
+  directiveId: string;
+  stateDir: string;
+  eventsCount: number;
+  artifactsCount: number;
+  violations: number;
+  refinementEdges: number;
+};
+
+/**
+ * Drive the real brain (opencode → gpt-5.5) on an arbitrary operator-supplied
+ * directive in a fresh ephemeral daemon. Prints the full event chain to the
+ * writer as it unfolds, then prints a verdict + structured result.
+ *
+ * Unlike scenarioRealBrainEndToEnd this scenario makes NO content assertions
+ * (no "title equals X") — it only verifies structural invariants of the loop:
+ * bridge_invoked, action_predicted, artifact_invoked, action_scored, no
+ * dispatcher_violation, and a terminal event (task_committed OR a refinement
+ * edge) within the timeout.
+ *
+ * Returns a structured result instead of throwing — the harness wrapper
+ * decides exit-code based on { committed, failed, timedOut }.
+ */
+export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTaskResult> => {
+  const write = opts.writer ?? ((s: string) => process.stdout.write(s));
+  const timeoutMs = opts.timeoutMs ?? 5 * 60_000;
+  const keepState = opts.keepState ?? false;
+
+  // Flip bridge to real for this run; restore on exit.
+  const originalMode = process.env.ACC2_BRIDGE_MODE;
+  process.env.ACC2_BRIDGE_MODE = "real";
+  const originalTimeout = process.env.ACC2_OPENCODE_TIMEOUT_MS;
+  const originalHandshake = process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS;
+  if (!originalTimeout) process.env.ACC2_OPENCODE_TIMEOUT_MS = "600000";
+  if (!originalHandshake) process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS = "120000";
+
+  const tmpDir = mkdtempSync(join(tmpdir(), "acc2-harness-task-"));
+  const dbPath = join(tmpDir, "state.db");
+  const startedAt = Date.now();
+  const directiveId = newId();
+  const taskId = newId();
+
+  let handle: DaemonHandle | null = null;
+  let result: AdHocTaskResult = {
+    committed: false, failed: false, timedOut: false, residual: null,
+    durationMs: 0, directiveId, stateDir: tmpDir,
+    eventsCount: 0, artifactsCount: 0, violations: 0, refinementEdges: 0,
+  };
+
+  try {
+    write(`acc2 harness — ad-hoc real-brain task\n`);
+    write(`======================================\n`);
+    write(`task:  ${opts.taskText}\n`);
+    write(`state: ${tmpDir}\n\n`);
+
+    handle = await bootDaemon(tmpDir, dbPath);
+    process.env.V2_MCP_SERVER_URL = `http://127.0.0.1:${handle.port}/mcp`;
+    write(`boot: daemon up on mcp=${handle.port} aux=${handle.auxPort} (${((Date.now()-startedAt)/1000).toFixed(2)}s)\n`);
+
+    const { seedFoundationalKnowledge, seedCodeArtifacts } =
+      await import("../../substrate/seed");
+    seedFoundationalKnowledge(handle.db, { ownerApproved: true });
+    seedCodeArtifacts(handle.db);
+    // Knowledge lives as `events` rows (kind=knowledge_promoted) — one substrate,
+    // one ledger (k_2367). code_artifact is the only materialized projection.
+    const seededK = handle.db.query(
+      "SELECT COUNT(*) AS n FROM events WHERE kind = 'knowledge_promoted'",
+    ).get() as { n: number };
+    const seededA = handle.db.query("SELECT COUNT(*) AS n FROM code_artifact").get() as { n: number };
+    write(`seed: knowledge_promoted=${seededK.n}, code_artifacts=${seededA.n}\n`);
+
+    emitEvent(handle.db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: {
+        directive_text: opts.taskText,
+        smoke: "harness_adhoc_task",
+        lifecycle: "finite",
+      } as JsonValue,
+    });
+    emitEvent(handle.db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      parent_task_id: null,
+      payload: {
+        goal: opts.taskText,
+        lifecycle: "finite",
+        urgency: "normal",
+      } as JsonValue,
+    });
+    write(`emit: directive_opened ${directiveId.slice(0,12)}... (task ${taskId.slice(0,12)}...)\n\n`);
+
+    // Snapshot the artifact baseline so the post-run count reflects only
+    // what the brain admitted during THIS dispatch (the seed already loaded N).
+    const artifactsBaseline = (
+      handle.db.query("SELECT COUNT(*) AS n FROM code_artifact").get() as { n: number }
+    ).n;
+
+    // Stream EVERY event for this directive as it lands — the brain's MCP
+    // tool calls land here as event rows (substrate.admit_artifact emits
+    // code_artifact_admitted, etc.), so this surfaces brain activity that
+    // would otherwise be invisible during the ~2 min opencode window.
+    // Plus a heartbeat every 15s of silence so the operator can tell
+    // "thinking" from "hung".
+    const seen = new Set<string>();
+    let lastTs = "1970-01-01";
+    let lastEventAt = Date.now();
+
+    write(`dispatch: scheduler tick…\n`);
+    const tickPromise = schedulerTick(handle.db, { directiveId, maxConcurrent: 1 });
+
+    const HEARTBEAT_MS = 15_000;
+    const heartbeat = setInterval(() => {
+      const sinceLast = ((Date.now() - lastEventAt) / 1000).toFixed(1);
+      const total = ((Date.now() - startedAt) / 1000).toFixed(1);
+      write(`  … still working — ${total}s elapsed, last event ${sinceLast}s ago\n`);
+    }, HEARTBEAT_MS);
+
+    const deadline = startedAt + timeoutMs;
+    let terminal: { kind: string; payload: string } | null = null;
+
+    try {
+      while (Date.now() < deadline) {
+        const rows = handle.db
+          .query(
+            `SELECT id, kind, ts, payload, substrate_origin,
+                    predicted_residual, action_artifact_id, verifier_artifact_id,
+                    outcome, residual, failure_kind, invoker
+             FROM events WHERE directive_id = ? AND ts > ?
+             ORDER BY ts ASC, rowid ASC`,
+          )
+          .all(directiveId, lastTs) as EventRow[];
+        for (const r of rows) {
+          if (seen.has(r.id)) continue;
+          seen.add(r.id);
+          const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1) + "s";
+          const summary = summarizeEventForCli(r);
+          // Compact: [   7.4s] kind                          summary
+          write(`  [${elapsed.padStart(7)}] ${r.kind.padEnd(28)} ${summary}\n`);
+          lastTs = r.ts > lastTs ? r.ts : lastTs;
+          lastEventAt = Date.now();
+          if (r.kind === "task_committed" || r.kind === "task_failed") {
+            terminal = { kind: r.kind, payload: r.payload };
+          }
+        }
+        if (terminal) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    } finally {
+      clearInterval(heartbeat);
+    }
+    try { await tickPromise; } catch { /* swallow — terminal already known */ }
+
+    // On timeout, dump diagnostic info so the operator knows what was last
+    // observed and what the daemon thinks is going on.
+    if (terminal === null && Date.now() >= deadline) {
+      write(`\n⚠ timed out after ${(timeoutMs / 1000).toFixed(0)}s — diagnostic dump:\n`);
+      const lastEvents = handle.db
+        .query(
+          `SELECT ts, kind, substrate_origin, substr(payload, 1, 80) AS p
+           FROM events WHERE directive_id = ? ORDER BY ts DESC LIMIT 10`,
+        )
+        .all(directiveId) as Array<{ ts: string; kind: string; substrate_origin: string; p: string }>;
+      for (const e of lastEvents.reverse()) {
+        write(`    ${e.ts}  ${e.kind.padEnd(28)} [${e.substrate_origin}]  ${e.p}\n`);
+      }
+      try {
+        const h = await fetch(`http://127.0.0.1:${handle.auxPort}/health`);
+        const body = await h.text();
+        write(`  daemon /health: ${h.status} ${body.slice(0, 200)}\n`);
+      } catch (err) {
+        write(`  daemon /health: ${(err as Error).message}\n`);
+      }
+    }
+
+    // Tally final state.
+    const totals = handle.db.query("SELECT COUNT(*) AS n FROM events WHERE directive_id = ?").get(directiveId) as { n: number };
+    const artifactsAfter = (
+      handle.db.query("SELECT COUNT(*) AS n FROM code_artifact").get() as { n: number }
+    ).n;
+    const artifacts = { n: artifactsAfter - artifactsBaseline };
+    const violations = handle.db.query(
+      "SELECT COUNT(*) AS n FROM events WHERE kind = 'dispatcher_violation' AND directive_id = ?",
+    ).get(directiveId) as { n: number };
+    const refines = handle.db.query(
+      "SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND directive_id = ?",
+    ).all(directiveId) as Array<{ payload: string }>;
+    const refineCount = refines
+      .map((e) => { try { return JSON.parse(e.payload) as Record<string, unknown>; } catch { return {}; } })
+      .filter((p) => p.kind === "refines").length;
+    const scoredRow = handle.db.query(
+      "SELECT residual FROM events WHERE kind = 'action_scored' AND directive_id = ? ORDER BY ts ASC LIMIT 1",
+    ).get(directiveId) as { residual: number } | null;
+
+    result = {
+      committed: terminal?.kind === "task_committed",
+      failed: terminal?.kind === "task_failed",
+      timedOut: terminal === null,
+      residual: scoredRow?.residual ?? null,
+      durationMs: Date.now() - startedAt,
+      directiveId,
+      stateDir: tmpDir,
+      eventsCount: totals.n,
+      artifactsCount: artifacts.n,
+      violations: violations.n,
+      refinementEdges: refineCount,
+    };
+
+    write(`\n──────────────────────────────────────\n`);
+    write(`verdict: ${result.committed ? "COMMITTED" : result.failed ? "FAILED" : "TIMED OUT"}`);
+    if (result.residual !== null) write(`  residual=${result.residual.toFixed(3)}`);
+    write(`\n`);
+    write(`  events emitted: ${result.eventsCount}\n`);
+    write(`  artifacts admitted: ${result.artifactsCount}\n`);
+    write(`  dispatcher_violation: ${result.violations}${result.violations === 0 ? "" : "  ⚠"}\n`);
+    write(`  refinement edges: ${result.refinementEdges}\n`);
+    write(`  duration: ${(result.durationMs / 1000).toFixed(1)}s\n`);
+
+    return result;
+  } finally {
+    if (handle) {
+      try { await stopDaemon(handle); } catch { /* swallow */ }
+    }
+    try {
+      const { closeDb } = await import("../../substrate/db");
+      closeDb(dbPath);
+    } catch { /* swallow */ }
+    if (keepState) {
+      write(`\nstate kept at: ${tmpDir} (--keep-state)\n`);
+    } else {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+    if (originalMode === undefined) delete process.env.ACC2_BRIDGE_MODE;
+    else process.env.ACC2_BRIDGE_MODE = originalMode;
+    if (originalTimeout === undefined) delete process.env.ACC2_OPENCODE_TIMEOUT_MS;
+    else process.env.ACC2_OPENCODE_TIMEOUT_MS = originalTimeout;
+    if (originalHandshake === undefined) delete process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS;
+    else process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS = originalHandshake;
+  }
+};
+
+type EventRow = {
+  id: string;
+  kind: string;
+  ts: string;
+  payload: string;
+  substrate_origin: string;
+  predicted_residual: number | null;
+  action_artifact_id: string | null;
+  verifier_artifact_id: string | null;
+  outcome: string | null;
+  residual: number | null;
+  failure_kind: string | null;
+  invoker: string | null;
+};
+
+/**
+ * Compact one-line summary per event kind for the streaming CLI output.
+ * Reads from EVENT ROW COLUMNS (predicted_residual, action_artifact_id,
+ * residual, etc.) — not just payload — because the schema stores those
+ * fields as dedicated columns, not as JSON inside payload.
+ */
+const summarizeEventForCli = (r: EventRow): string => {
+  let p: Record<string, unknown> = {};
+  try { p = JSON.parse(r.payload ?? "{}") as Record<string, unknown>; } catch { /* keep empty */ }
+  const short = (s: string | null | undefined): string =>
+    typeof s === "string" && s.length > 0 ? s.slice(0, 10) : "?";
+  const origin = r.substrate_origin ? `[${r.substrate_origin}]` : "";
+  switch (r.kind) {
+    // Bridge / dispatch
+    case "bridge_invoked":
+      return `${origin} → opencode  prompt_chars=${p.prompt_chars ?? "?"}  model=${p.model ?? "?"}`;
+    case "bridge_failed":
+      return `${origin} reason=${String(p.reason ?? "unknown")}  ⚠`;
+    case "brain_dispatched":
+      return `${origin} task=${short(p.task_id as string)}`;
+    case "brain_dispatch_closed":
+      return `${origin} events_count=${p.events_count ?? "?"}`;
+    case "dispatcher_violation":
+      return `${origin} failure_kind=${r.failure_kind ?? p.failure_kind ?? "?"}  ⚠`;
+
+    // Action / verification
+    case "action_predicted":
+      return `${origin} action=${short(r.action_artifact_id)} verifier=${short(r.verifier_artifact_id)} predicted_residual=${r.predicted_residual ?? "?"}`;
+    case "artifact_invoked":
+      return `artifact=${short(p.artifact_id as string)}  runtime=${p.runtime ?? "?"}`;
+    case "artifact_observed":
+      return `ok=${p.ok ?? "?"}  duration_ms=${p.duration_ms ?? "?"}`;
+    case "action_scored":
+      return `residual=${r.residual ?? p.residual ?? "?"}  outcome=${r.outcome ?? "?"}`;
+    case "task_committed":
+      return `residual=${r.residual ?? p.residual ?? "?"}`;
+    case "task_failed":
+      return `failure_kind=${r.failure_kind ?? p.failure_kind ?? "?"}  ⚠`;
+    case "task_edge_recorded":
+      return `edge=${String(p.kind ?? "?")}  from=${short(p.from_task as string)} → to=${short(p.to_task as string)}`;
+    case "task_node_opened":
+      return `task=${short(r.id)}  goal="${String(p.goal ?? "").slice(0, 50)}"`;
+
+    // Brain MCP traffic — the most diagnostic stream during the brain's
+    // "thinking" window. bridge_frame_received fires for each opencode tool
+    // call (both built-ins like grep/glob/read AND v2's substrate.* / runtime.*
+    // MCP tools). opencode 1.x stashes inputs/outputs under several field
+    // paths depending on the tool kind and revision — we probe all of them
+    // so the operator sees WHAT the brain is doing, not just which verb it
+    // chose.
+    case "bridge_frame_received": {
+      const type = String(p.type ?? "?");
+      const part = (p.part as Record<string, unknown> | undefined) ?? {};
+      const state = (part.state as Record<string, unknown> | undefined) ?? {};
+      const toolName = String(
+        part.tool ?? part.name ?? p.tool ?? p.name ?? "?",
+      )
+        .replace(/^acc2-substrate_substrate_/, "substrate.")
+        .replace(/^acc2-substrate_runtime_/, "runtime.");
+      // Probe every plausible input location. opencode 1.14 stashes most
+      // tool inputs under `part.state.input` while older builds used
+      // `part.input`; some tools route through `part.arguments`.
+      const input =
+        (state.input as unknown) ??
+        (part.input as unknown) ??
+        (part.arguments as unknown) ??
+        (part.params as unknown) ??
+        (p.input as unknown) ??
+        null;
+      // Likewise for outputs/results.
+      const output =
+        (state.output as unknown) ??
+        (state.result as unknown) ??
+        (part.output as unknown) ??
+        (part.result as unknown) ??
+        null;
+      const truncate = (raw: string, max: number): string =>
+        raw.length > max ? raw.slice(0, max - 3) + "..." : raw;
+      const fmt = (v: unknown, max: number): string => {
+        if (v === null || v === undefined) return "";
+        if (typeof v === "string") return truncate(v, max);
+        try { return truncate(JSON.stringify(v), max); } catch { return ""; }
+      };
+      if (type === "tool_use" || type === "tool_call") {
+        const inputStr = fmt(input, 140);
+        return `${origin} → ${toolName}${inputStr ? "  " + inputStr : ""}`;
+      }
+      if (type === "tool_result") {
+        const outStr = fmt(output, 140);
+        return `${origin} ← ${toolName}${outStr ? "  " + outStr : ""}`;
+      }
+      return `${origin} ${type}  ${toolName}`;
+    }
+    case "bridge_mcp_connected":
+      return `${origin} ✓ MCP handshake  first_tool=${String(p.first_tool ?? "?").replace(/^acc2-substrate_substrate_/, "substrate.").replace(/^acc2-substrate_runtime_/, "runtime.")}`;
+    case "constitutional_gate_decision":
+      return `${origin} route=${p.route ?? "?"}  reason=${p.reason ?? "?"}`;
+
+    case "code_artifact_admitted":
+      return `${origin} artifact=${short(p.artifact_id as string)}  runtime=${p.runtime ?? "?"}  ${p.role ? "role=" + p.role : ""}`;
+    case "code_artifact_admission_failed":
+      return `${origin} reason=${String(p.reason ?? "?")}  ⚠`;
+    case "code_artifact_candidate":
+      return `${origin} runtime=${p.runtime ?? "?"}`;
+    case "knowledge_candidate":
+      return `${origin} text="${String(p.text ?? "").slice(0, 60)}"`;
+    case "knowledge_promoted":
+    case "knowledge_admitted":
+      return `${origin} text="${String(p.text ?? "").slice(0, 60)}"`;
+    case "knowledge_synthesized":
+      return `${origin} corroborators=${Array.isArray(p.corroborator_event_ids) ? (p.corroborator_event_ids as unknown[]).length : "?"}`;
+
+    // Retrieval / state
+    case "retrieval_query_made":
+      return `${origin} query="${String(p.query ?? "").slice(0, 50)}"  k=${p.k ?? "?"}`;
+    case "external_event_received":
+      return `${origin} source=${p.source ?? "?"}`;
+
+    // Directive lifecycle (rare, but useful)
+    case "directive_amended":
+      return `${origin} superseded=${Array.isArray(p.superseded_tasks) ? (p.superseded_tasks as unknown[]).length : "?"}`;
+
+    default: {
+      // Default: extract the most-useful top-level fields from payload as
+      // `key=value` pairs (more informative than dumping a JSON prefix that
+      // gets cut mid-key). Keeps unknown event kinds legible without
+      // teaching this switch every one.
+      const PREFER_KEYS = [
+        "reason", "failure_kind", "task_id", "artifact_id", "runtime",
+        "tool", "ok", "source", "kind", "route", "directive_id",
+        "text", "goal", "model", "query", "k",
+      ];
+      const parts: string[] = [];
+      for (const k of PREFER_KEYS) {
+        if (k in p) {
+          const v = p[k];
+          let s = typeof v === "string" ? v : JSON.stringify(v);
+          if (typeof s === "string" && s.length > 60) s = s.slice(0, 57) + "...";
+          parts.push(`${k}=${s}`);
+        }
+      }
+      // If none of the preferred keys exist, fall back to a wider raw prefix
+      // (200 chars — terminal will wrap, which is preferable to truncation).
+      if (parts.length === 0) {
+        const raw = String(r.payload ?? "");
+        return `${origin} ${raw.length > 200 ? raw.slice(0, 197) + "..." : raw}`;
+      }
+      return `${origin} ${parts.join("  ")}`;
+    }
   }
 };

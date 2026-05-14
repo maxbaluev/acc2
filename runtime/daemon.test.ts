@@ -255,49 +255,57 @@ describe("startDaemon — boot + health + shutdown", () => {
   });
 
   test("amendment worker drains unapplied directive_amended events automatically", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
-    // Emit a directive_amended event directly into the daemon's db. The
-    // background worker (interval=2s) should pick it up within a few seconds.
-    const directiveId = "d_daemon_amend_test";
-    const taskId = "t_daemon_amend_task";
-    const { emitEvent } = await import("./events");
-    emitEvent(handle.db, {
-      kind: "directive_opened",
-      directive_id: directiveId,
-      task_id: directiveId,
-      payload: { directive_text: "x" },
-    });
-    emitEvent(handle.db, {
-      kind: "task_node_opened",
-      directive_id: directiveId,
-      task_id: taskId,
-      payload: { goal: "supersede me" },
-    });
-    emitEvent(handle.db, {
-      kind: "directive_amended",
-      directive_id: directiveId,
-      substrate_origin: "owner",
-      payload: {
-        original_directive_id: directiveId,
-        amendment_text: "amend it",
-        superseded_tasks: [taskId],
-        new_task_goals: ["new daemon task"],
-      },
-    });
-    // Wait for the worker tick (interval=2s) — poll up to 6s.
-    let supersededCount = 0;
-    for (let i = 0; i < 12; i++) {
-      const row = handle.db
-        .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_committed_superseded' AND task_id = ?")
-        .get(taskId) as { c: number };
-      supersededCount = row.c;
-      if (supersededCount > 0) break;
-      await new Promise((r) => setTimeout(r, 500));
+    // Pin the amendment worker to a fast interval for this test (default
+    // production interval is 2s; we want the worker to fire within ~50ms so
+    // the test doesn't sleep for seconds).
+    const prevTick = process.env.ACC2_AMENDMENT_TICK_MS;
+    process.env.ACC2_AMENDMENT_TICK_MS = "50";
+    try {
+      const ports = pickPortPair();
+      handle = await startDaemon({
+        port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+        socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+      });
+      const directiveId = "d_daemon_amend_test";
+      const taskId = "t_daemon_amend_task";
+      const { emitEvent } = await import("./events");
+      emitEvent(handle.db, {
+        kind: "directive_opened",
+        directive_id: directiveId,
+        task_id: directiveId,
+        payload: { directive_text: "x" },
+      });
+      emitEvent(handle.db, {
+        kind: "task_node_opened",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { goal: "supersede me" },
+      });
+      emitEvent(handle.db, {
+        kind: "directive_amended",
+        directive_id: directiveId,
+        substrate_origin: "owner",
+        payload: {
+          original_directive_id: directiveId,
+          amendment_text: "amend it",
+          superseded_tasks: [taskId],
+          new_task_goals: ["new daemon task"],
+        },
+      });
+      // Worker tick interval=50ms; poll every 25ms up to 1s.
+      let supersededCount = 0;
+      for (let i = 0; i < 40; i++) {
+        const row = handle.db
+          .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_committed_superseded' AND task_id = ?")
+          .get(taskId) as { c: number };
+        supersededCount = row.c;
+        if (supersededCount > 0) break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(supersededCount).toBeGreaterThanOrEqual(1);
+    } finally {
+      if (prevTick === undefined) delete process.env.ACC2_AMENDMENT_TICK_MS;
+      else process.env.ACC2_AMENDMENT_TICK_MS = prevTick;
     }
-    expect(supersededCount).toBeGreaterThanOrEqual(1);
-  }, 15_000);
+  }, 5_000);
 });

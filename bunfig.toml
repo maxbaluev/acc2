@@ -5,6 +5,13 @@
 # hermetic bridge fixtures drive every dispatch path. Production code (and
 # every non-test entrypoint, including the daemon, the CLI, and the
 # integration harness's real_brain_end_to_end scenario) defaults to `real`.
+#
+# Canonical invocation: `bun test --parallel`. The suite is parallel-safe
+# (each file isolated per worker process; --parallel implies --isolate);
+# typical wall-clock is ~7s parallel vs ~27s serial. Bun 1.3.14 does not
+# expose a bunfig.toml key for --parallel — pass it on the CLI or wrap in
+# a package.json script. Use plain `bun test` only when debugging output
+# interleaving or a worker-crash regression.
 
 [test]
 preload = ["./tests/preload.ts"]

@@ -73,7 +73,7 @@ That is the whole flow. `acc doctor` will tell you exactly what is missing if an
 | `acc admin update-opencode [--yes]` | Upgrade the opencode subscription CLI in place. |
 | `acc admin opencode-version` | Print installed + latest opencode versions. |
 | `acc admin upgrade-check` | Multi-subsystem upgrade report (opencode, bun, uv, camoufox). |
-| `bun tests/integration/harness.ts [--mock-only\|--real-only\|--skip-real]` | End-to-end integration harness. |
+| `bun tests/integration/harness.ts [--include-real\|--real-only]` | End-to-end integration harness (9 plumbing scenarios by default; real-brain opt-in). |
 | `bun tests/integration/real_brain_smoke.ts [--mock-bridge]` | Standalone real-brain smoke (Batch 2.α). |
 | `bun test` | Unit suite (570+ tests). |
 

@@ -83,7 +83,16 @@ describe("alignment / cycle_one (Principle 3)", () => {
     const result = await spawnRealOpencode(
       { prompt: "noop", taskId: newId(), directiveId: newId() },
       db,
-      { spawnFn: fakeSpawn, timeoutMs: 30_000 },
+      {
+        spawnFn: fakeSpawn,
+        timeoutMs: 30_000,
+        // The bridge fails fast (parse_error / mcp_server_url_missing) when
+        // V2_MCP_SERVER_URL is unset. Under `bun test --parallel --isolate`
+        // each test worker is its own process, so env leaks from earlier
+        // tests do not propagate; we must inject the URL explicitly so the
+        // bridge reaches the cycle-violation gate this test is exercising.
+        mcpServerUrl: "http://127.0.0.1:1/mcp",
+      },
     );
 
     expect(result.ok).toBe(false);

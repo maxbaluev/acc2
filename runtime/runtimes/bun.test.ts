@@ -128,11 +128,14 @@ describe("runBunArtifact — watchdog", () => {
 describe("runBunArtifact — tempdir hygiene", () => {
   test("no acc2-bun-* tempdirs survive after a run", async () => {
     const tmp = tmpdir();
-    // Capture pre-existing acc2-bun-* dirs so concurrent test runs do not
-    // foul this check. We only assert ours got cleaned up — we don't assume
-    // a globally clean tempdir.
+    // The runtime stamps tempdirs with `acc2-bun-<pid>-`, so under
+    // `bun test --parallel --isolate` each worker process sees ONLY its
+    // own dirs in the filtered listing — concurrent workers (different
+    // pids) cannot foul this assertion. We only assert this process's
+    // dirs got cleaned up.
+    const ourPrefix = `acc2-bun-${process.pid}-`;
     const before = new Set(
-      readdirSync(tmp).filter((n) => n.startsWith("acc2-bun-")),
+      readdirSync(tmp).filter((n) => n.startsWith(ourPrefix)),
     );
     const body = `console.log('@@RESULT@@ ' + JSON.stringify({ done: true }));`;
     const obs = await runBunArtifact({
@@ -142,9 +145,7 @@ describe("runBunArtifact — tempdir hygiene", () => {
       inputs: null,
     });
     expect(obs.ok).toBe(true);
-    const after = readdirSync(tmp).filter((n) => n.startsWith("acc2-bun-"));
-    // At minimum, no NEW acc2-bun-* dir is left behind by THIS run. (Other
-    // concurrent tests may have their own dirs; we tolerate them.)
+    const after = readdirSync(tmp).filter((n) => n.startsWith(ourPrefix));
     const leaked = after.filter((n) => !before.has(n));
     expect(leaked).toEqual([]);
   });

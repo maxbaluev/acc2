@@ -123,33 +123,42 @@ describe("admitArtifact — rejections", () => {
     }
   });
 
-  test("rejects a camofox-browser artifact cleanly with runtime_unavailable when playwright is absent", async () => {
-    const db = openDb(":memory:");
-    const events: EmitEventInput[] = [];
-    const result = await admitArtifact(
-      db,
-      {
-        runtime: "camofox-browser",
-        body: "await session.goto(inputs.url); console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));",
-        declaredSandbox: {
+  test("rejects a camofox-browser artifact cleanly with runtime_unavailable when the camoufox binary is absent", async () => {
+    // Force the fast-fail branch in runtime/runtimes/camofox.ts by pointing
+    // CAMOUFOX_BINARY_PATH at a non-existent path. Without this pin the test
+    // env (which has playwright + ~/.cache/camoufox/camoufox both present)
+    // would exercise the happy path and burn ~1.5s actually launching firefox.
+    const prevBin = process.env.CAMOUFOX_BINARY_PATH;
+    process.env.CAMOUFOX_BINARY_PATH = "/nonexistent/acc2-test-camoufox-missing";
+    try {
+      const db = openDb(":memory:");
+      const events: EmitEventInput[] = [];
+      const result = await admitArtifact(
+        db,
+        {
           runtime: "camofox-browser",
-          browser_allow_domains: ["example.com"],
-          browser_profile_root: "/tmp/acc2-test-profile",
-          wall_ms: 1000,
-          memory_mb: 256,
+          body: "await session.goto(inputs.url); console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));",
+          declaredSandbox: {
+            runtime: "camofox-browser",
+            browser_allow_domains: ["example.com"],
+            browser_profile_root: "/tmp/acc2-test-profile",
+            wall_ms: 1000,
+            memory_mb: 256,
+          },
+          fixtureInput: { url: "https://example.com" },
+          fixtureExpectedResidualBelow: 0.2,
         },
-        fixtureInput: { url: "https://example.com" },
-        fixtureExpectedResidualBelow: 0.2,
-      },
-      captureEmit(events, db),
-    );
-    // playwright is intentionally NOT installed in the test harness — the
-    // runtime returns `camofox_runtime_unavailable` and admission folds that
-    // into a clean `runtime_unavailable` rejection. If a future harness
-    // change installs playwright we accept ok:true (the wrapper would launch
-    // chromium against /tmp/acc2-test-profile; admission would still pass).
-    if (!result.ok) {
-      expect(["runtime_unavailable", "runtime_error"]).toContain(result.reason);
+        captureEmit(events, db),
+      );
+      // The runtime fast-fails on missing binary and admission folds that
+      // into `runtime_unavailable` (or `runtime_error`) cleanly.
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(["runtime_unavailable", "runtime_error"]).toContain(result.reason);
+      }
+    } finally {
+      if (prevBin === undefined) delete process.env.CAMOUFOX_BINARY_PATH;
+      else process.env.CAMOUFOX_BINARY_PATH = prevBin;
     }
   });
 

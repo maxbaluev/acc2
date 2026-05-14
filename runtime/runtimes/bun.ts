@@ -143,7 +143,7 @@ export const runBunArtifact = async (
   const perm = buildBunPermissionArgs(inv.declaredSandbox);
   const wallMs = inv.budget?.wallMs ?? inv.declaredSandbox.wall_ms;
   const memoryMb = inv.budget?.memoryMb ?? inv.declaredSandbox.memory_mb;
-  const dir = mkdtempSync(join(tmpdir(), "acc2-bun-"));
+  const dir = mkdtempSync(join(tmpdir(), `acc2-bun-${process.pid}-`));
   const entryPath = join(dir, "entry.ts");
   // The artifact body is written verbatim. Phase D's prompt composer will
   // ensure brain-emitted bodies follow the @@RESULT@@ convention; for now any

@@ -215,10 +215,12 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (process.env.ACC2_FATHER_AUTOSTART === "1") registerWorker("father");
   if (process.env.ACC2_AUTOSCHEDULER === "1") registerWorker("scheduler");
 
-  // Phase E: amendment worker — every 2s, drain unapplied directive_amended
-  // events. Errors are swallowed so a malformed amendment can't kill the
-  // daemon (each amendment will surface its own diagnostic events anyway).
+  // Phase E: amendment worker — drain unapplied directive_amended events on
+  // a configurable interval (default 2s; tests may pin a shorter value via
+  // ACC2_AMENDMENT_TICK_MS). Errors are swallowed so a malformed amendment
+  // can't kill the daemon (each surfaces its own diagnostic events anyway).
   let amendmentMarked = false;
+  const amendmentTickMs = Number(process.env.ACC2_AMENDMENT_TICK_MS ?? 2000);
   const amendmentTick = setInterval(() => {
     void (async () => {
       try {
@@ -229,7 +231,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       } catch { /* swallow */ }
       if (!amendmentMarked) { markWorkerReady("amendment"); amendmentMarked = true; }
     })();
-  }, 2000);
+  }, amendmentTickMs);
   // Fire one synchronous mark right away so amendment readiness does
   // not block /ready for 2s on a quiet daemon.
   markWorkerReady("amendment");

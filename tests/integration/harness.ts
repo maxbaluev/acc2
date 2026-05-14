@@ -1,29 +1,37 @@
 #!/usr/bin/env bun
-// acc2 integration harness — the final cutover gate.
+// acc2 integration harness — the final cutover gate AND the operator's
+// real-brain validation tool.
 //
-// Boots the real daemon (fastmcp + Bun.serve aux + SQLite + workers) in a
-// temp state directory on free ports, then runs ten scenarios end-to-end.
-// Nine scenarios assert §17 / §18 plumbing under ACC2_BRIDGE_MODE=mock
-// (hermetic — no opencode subprocess); the tenth (real_brain_end_to_end)
-// dispatches to live opencode (gpt-5-mini by default) under
-// ACC2_BRIDGE_MODE=real so the harness proves the full LLM-brain loop end
-// to end. The real scenario is SKIPPED (not failed) when its prerequisites
-// are absent (OPENAI_API_KEY / opencode CLI / --skip-real flag).
+// Two modes:
 //
-// Exit code 0 iff every executed scenario passes; exit code 1 otherwise.
-// Skipped scenarios do not affect the exit code — they appear in the
-// summary as `[skip]`.
+// 1. Scenario gate (default). Boots an ephemeral daemon and runs the 9
+//    plumbing scenarios under ACC2_BRIDGE_MODE=mock (~1.1s, hermetic).
+//    `--include-real` adds the 10th canned real-brain scenario; `--real-only`
+//    runs only that one. Real-brain runs are opt-in because each burns
+//    ~2 min wall-clock + opencode tokens.
+//
+// 2. Ad-hoc task (`--task "<owner words>"`). Boots an ephemeral daemon,
+//    flips ACC2_BRIDGE_MODE=real, dispatches the operator's directive
+//    through the real brain (opencode → gpt-5.5), and streams the full
+//    event chain live as it lands. Exits 0 on task_committed, 1 on
+//    task_failed / timeout / dispatcher_violation. Lets the operator
+//    validate the loop on any goal without touching production state.
 //
 // Run:
-//   cd /home/maxbaluev/bos2/system/acc2 && bun tests/integration/harness.ts
+//   cd /home/maxbaluev/bos2/system/acc2
+//   bun tests/integration/harness.ts                              # 9 plumbing
+//   bun tests/integration/harness.ts --include-real               # 9+1
+//   bun tests/integration/harness.ts --real-only                  # canned real-brain
+//   bun tests/integration/harness.ts --task "<owner words>"       # ad-hoc real-brain
 //
 // Flags:
-//   --mock-only        Run only the 9 plumbing scenarios (legacy 9-scenario
-//                      suite). Skips real_brain_end_to_end unconditionally.
-//   --real-only        Run only real_brain_end_to_end (useful for fast
-//                      smoke checks). Skips the 9 plumbing scenarios.
-//   --skip-real        Same as the absence of OPENAI_API_KEY / opencode —
-//                      registers the real scenario as skipped with reason.
+//   --include-real        Add real_brain_end_to_end to the scenario run.
+//   --real-only           Run ONLY real_brain_end_to_end (skips plumbing).
+//   --task "<text>"       Ad-hoc mode: drive the brain on the given directive.
+//   --timeout-ms <n>      Ad-hoc timeout (default 300000 = 5 min).
+//   --keep-state          Ad-hoc only: keep temp state dir on exit (printed in summary).
+//
+// Real-brain prereqs (both modes): OPENAI_API_KEY + opencode on PATH.
 //
 // The harness does NOT use bun:test — it is the integration gate, not a
 // unit-test suite. A separate smoke test (tests/harness-smoke.test.ts)
@@ -39,6 +47,7 @@ import type { DaemonHandle } from "../../runtime/daemon";
 import {
   bootDaemon,
   realBrainPreflight,
+  scenarioAdHocTask,
   scenarioAmendmentSupersession,
   scenarioCreditChainClosure,
   scenarioCycleOneEnforcement,
@@ -146,17 +155,41 @@ type ScenarioResult = {
 const formatSeconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
 
 type HarnessOpts = {
-  mockOnly: boolean;
+  includeReal: boolean;
   realOnly: boolean;
-  skipReal: boolean;
+  taskText: string | null;
+  timeoutMs: number;
+  keepState: boolean;
 };
 
 const parseArgs = (argv: string[]): HarnessOpts => {
+  const taskIdx = argv.indexOf("--task");
+  const timeoutIdx = argv.indexOf("--timeout-ms");
   return {
-    mockOnly: argv.includes("--mock-only"),
+    includeReal: argv.includes("--include-real"),
     realOnly: argv.includes("--real-only"),
-    skipReal: argv.includes("--skip-real"),
+    taskText: taskIdx >= 0 && argv[taskIdx + 1] ? argv[taskIdx + 1]! : null,
+    timeoutMs: timeoutIdx >= 0 && argv[timeoutIdx + 1] ? Number(argv[timeoutIdx + 1]) : 5 * 60_000,
+    keepState: argv.includes("--keep-state"),
   };
+};
+
+/** Dispatch the operator's directive through the real brain in an ephemeral
+ *  daemon and stream the event chain. Exit 0 on task_committed, 1 otherwise. */
+const runAdHocTask = async (opts: HarnessOpts): Promise<number> => {
+  // Real-brain prereqs: OPENAI_API_KEY + opencode on PATH.
+  const skip = realBrainPreflight([]);
+  if (skip !== null) {
+    process.stdout.write(`acc2 harness: cannot run --task — ${skip}\n`);
+    return 1;
+  }
+  const result = await scenarioAdHocTask({
+    taskText: opts.taskText!,
+    timeoutMs: opts.timeoutMs,
+    keepState: opts.keepState,
+  });
+  if (result.committed && result.violations === 0) return 0;
+  return 1;
 };
 
 export const runHarness = async (
@@ -165,9 +198,9 @@ export const runHarness = async (
   const startedAt = Date.now();
   const opts = parseArgs(argv);
 
-  if (opts.mockOnly && opts.realOnly) {
-    process.stdout.write("acc2 harness: --mock-only and --real-only are mutually exclusive\n");
-    return 1;
+  // Ad-hoc mode short-circuits the scenario gate.
+  if (opts.taskText !== null) {
+    return runAdHocTask(opts);
   }
 
   process.stdout.write("acc2 integration harness — Phase Harness\n");
@@ -181,8 +214,10 @@ export const runHarness = async (
   const originalBridgeMode = process.env.ACC2_BRIDGE_MODE;
   process.env.ACC2_BRIDGE_MODE = "mock";
 
+  // Real-brain is OPT-IN: only run it when --include-real or --real-only
+  // was passed. Bare invocation runs the 9 plumbing scenarios only.
   const runPlumbing = !opts.realOnly;
-  const runReal = !opts.mockOnly;
+  const runReal = opts.realOnly || opts.includeReal;
 
   // Build the schedule.
   const scheduled: ScenarioEntry[] = [];
@@ -216,11 +251,9 @@ export const runHarness = async (
     const labelTxt = `[${index}/${scheduled.length}] ${formatLabel(sc.label)}`;
 
     // Skip honoring: pre-flight may report a skip reason (e.g. real-brain
-    // pre-flight when OPENAI_API_KEY is absent). Also honor --skip-real.
+    // pre-flight when OPENAI_API_KEY is absent or opencode is not on PATH).
     let skipReason: string | null = null;
-    if (sc.id === "real_brain_end_to_end" && opts.skipReal) {
-      skipReason = "--skip-real flag";
-    } else if (sc.preflight) {
+    if (sc.preflight) {
       skipReason = sc.preflight(argv);
     }
     if (skipReason !== null) {

@@ -6,7 +6,7 @@
   "scripts": {
     "daemon": "bun runtime/daemon.ts",
     "acc": "bun cli/dispatch.ts",
-    "test": "bun test --bail",
+    "test": "bun test --parallel --bail",
     "postinstall": "bun scripts/postinstall.ts",
     "browser:fetch": "bun scripts/fetch-camoufox.ts"
   },

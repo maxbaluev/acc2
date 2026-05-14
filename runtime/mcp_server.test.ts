@@ -9,10 +9,14 @@
 // The MCP-standard client used here is `@modelcontextprotocol/sdk/client` (a
 // transitive dep of fastmcp). It opens an stdio pair against a child bun
 // process running `mcp_server_stdio_entry.ts`, which boots a fresh in-memory
-// SQLite + a fastmcp server on stdio. Each test isolates state via a fresh
-// child process so concurrent test files cannot bleed into each other.
+// SQLite + a fastmcp server on stdio.
+//
+// Speed: a single stdio harness is spawned once for the whole file (beforeAll)
+// and reused across tests. Between tests `runtime.test_reset` truncates every
+// state table so each test sees a fresh substrate. The reset tool is gated
+// behind ACC2_TEST_MODE=1 in the stdio entry — it never reaches production.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +44,7 @@ const spawnHarness = async (): Promise<Harness> => {
     env: {
       ...process.env,
       ACC2_TEST_DB_PATH: dbPath,
+      ACC2_TEST_MODE: "1",
     },
     stderr: "pipe",
   });
@@ -57,6 +62,10 @@ const closeHarness = async (h: Harness): Promise<void> => {
   rmSync(h.dir, { recursive: true, force: true });
 };
 
+const resetHarness = async (h: Harness): Promise<void> => {
+  await h.client.callTool({ name: "runtime.test_reset", arguments: {} });
+};
+
 /** Parse the JSON-stringified McpResult that every tool returns as its first
  *  text-content block. fastmcp ships strings as one TextContent entry. */
 const parseEnvelope = (res: ToolCallResponse): { ok: boolean; result?: any; error?: string } => {
@@ -70,12 +79,20 @@ const parseEnvelope = (res: ToolCallResponse): { ok: boolean; result?: any; erro
 describe("fastmcp substrate tools — stdio transport", () => {
   let h: Harness | null = null;
 
-  beforeEach(async () => { h = await spawnHarness(); });
-  afterEach(async () => { if (h) await closeHarness(h); h = null; });
+  beforeAll(async () => { h = await spawnHarness(); });
+  afterAll(async () => { if (h) await closeHarness(h); h = null; });
+  beforeEach(async () => { if (h) await resetHarness(h); });
 
   test("ListTools exposes every substrate method exactly once", async () => {
     const listed = await h!.client.listTools();
-    const names = listed.tools.map((t) => t.name).sort();
+    // The stdio entry registers an additional `runtime.test_reset` tool when
+    // ACC2_TEST_MODE=1 (used here so a single harness can be reused across
+    // tests). It is NOT part of the production McpMethods whitelist — filter
+    // it out before the equality check.
+    const names = listed.tools
+      .map((t) => t.name)
+      .filter((n) => n !== "runtime.test_reset")
+      .sort();
     const expected = [...McpMethods].sort();
     expect(names).toEqual(expected);
     // Each tool advertises its zod-derived input schema.
