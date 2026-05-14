@@ -47,6 +47,7 @@ import {
 } from "./rpc";
 import { runExport, type ExportMode } from "./admin_export";
 import { runImport } from "./admin_import";
+import { runInstallDeps } from "./admin_install_deps";
 import { rotateAdminToken, rotateExternalToken } from "./admin_rotate";
 
 const usage = (): string => `acc admin — operator-side maintenance
@@ -57,6 +58,9 @@ const usage = (): string => `acc admin — operator-side maintenance
 
   Updates:
     update-opencode [--yes]   Upgrade opencode to the latest version.
+    install-deps              Verify + install host prereqs (bun, opencode,
+                              OPENAI_API_KEY, camoufox, nsjail). Single-command
+                              bootstrap; idempotent.
 
   Backup:
     export <path> [--cold] [--include-logs]
@@ -714,6 +718,7 @@ export const runAdmin = async (argv: string[], envOverride?: AdminEnv): Promise<
   if (sub === "opencode-version") return runOpencodeVersion(env);
   if (sub === "update-opencode") return runUpdateOpencode(env);
   if (sub === "upgrade-check") return runUpgradeCheck(env);
+  if (sub === "install-deps") return runInstallDeps(argv.slice(1));
   // Batch 3.ADMIN surfaces.
   if (sub === "export") return runExportCmd(argv.slice(1), env);
   if (sub === "import") return runImportCmd(argv.slice(1), env);
