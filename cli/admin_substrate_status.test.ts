@@ -146,6 +146,11 @@ describe("renderSubstrateStatus", () => {
         knowledgePromoted: 10,
         stakeholderState: 0,
         directiveInterference: 0,
+        healthMetricCounts: {
+          dispatcher_violation: 0,
+          irreversible_effect_recorded: 0,
+          worker_tick_overrun: 0,
+        },
         dispatcherViolations: 0,
         irreversibleEffects: 0,
         workerTickOverruns: 0,
@@ -165,7 +170,9 @@ describe("renderSubstrateStatus", () => {
     expect(joined).toContain("all embedded");
     expect(joined).toContain("health metrics:");
     expect(joined).toContain("dispatcher_violation:");
-    expect(joined).toContain("irreversible_effect:");
+    // Registry now emits the canonical kind verbatim (was the
+    // shortened `irreversible_effect:` before unification).
+    expect(joined).toContain("irreversible_effect_recorded:");
     expect(joined).toContain("worker_tick_overrun:");
   });
 

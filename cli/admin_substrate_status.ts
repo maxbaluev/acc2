@@ -23,6 +23,10 @@ import { openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { resolveDbPath } from "../runtime/state_paths";
 import { computeLivenessReport } from "../substrate/liveness";
+import {
+  EMBEDDABLE_KINDS,
+  HEALTH_METRIC_KINDS,
+} from "../substrate/event_kinds";
 import { join } from "node:path";
 
 export type SubstrateStatusEnv = {
@@ -43,21 +47,6 @@ const defaultEnv = (): SubstrateStatusEnv => ({
   out: (line) => console.log(line),
   err: (line) => console.error(line),
 });
-
-const EMBEDDABLE_KINDS = [
-  "directive_opened",
-  "directive_amended",
-  "task_node_opened",
-  "knowledge_candidate",
-  "knowledge_promoted",
-  "code_artifact_candidate",
-  "code_artifact_admitted",
-  "owner_input_received",
-  "owner_decision_recorded",
-  "external_event_received",
-  "action_predicted",
-  "action_scored",
-];
 
 const safeCount = (db: Database, sql: string, params: unknown[] = []): number => {
   try {
@@ -93,6 +82,13 @@ export type SubstrateStatusReport = {
   // is silently degrading (dispatcher violations) or producing real-
   // world side effects (irreversible_effect_recorded) without having to
   // grep the ledger.
+  //
+  // The set is the registry's `HEALTH_METRIC_KINDS` derivation
+  // (`substrate/event_kinds.ts`). The named fields below are convenience
+  // accessors backed by `healthMetricCounts` — adding a new health-
+  // metric kind to the registry surfaces its count automatically through
+  // the generic map without needing a new named field.
+  healthMetricCounts: Record<string, number>;
   dispatcherViolations: number;
   irreversibleEffects: number;
   workerTickOverruns: number;
@@ -123,7 +119,7 @@ export const computeSubstrateStatus = (
   const embeddableTotal = safeCount(
     db,
     `SELECT COUNT(*) AS c FROM events WHERE kind IN (${placeholders})`,
-    EMBEDDABLE_KINDS,
+    EMBEDDABLE_KINDS as unknown as unknown[],
   );
 
   const recipeRows = safeCount(
@@ -142,18 +138,22 @@ export const computeSubstrateStatus = (
     db,
     "SELECT COUNT(*) AS c FROM events WHERE kind = 'directive_interference_edge'",
   );
-  const dispatcherViolations = safeCount(
-    db,
-    "SELECT COUNT(*) AS c FROM events WHERE kind = 'dispatcher_violation'",
-  );
-  const irreversibleEffects = safeCount(
-    db,
-    "SELECT COUNT(*) AS c FROM events WHERE kind = 'irreversible_effect_recorded'",
-  );
-  const workerTickOverruns = safeCount(
-    db,
-    "SELECT COUNT(*) AS c FROM events WHERE kind = 'worker_tick_overrun'",
-  );
+
+  // Health-metric counters — one safeCount per registry-declared
+  // health-metric kind. Adding a kind with `health_metric: true` in
+  // `substrate/event_kinds.ts` extends this map automatically; the
+  // renderer iterates the same set so no second list to keep in sync.
+  const healthMetricCounts: Record<string, number> = {};
+  for (const kind of HEALTH_METRIC_KINDS) {
+    healthMetricCounts[kind] = safeCount(
+      db,
+      "SELECT COUNT(*) AS c FROM events WHERE kind = ?",
+      [kind],
+    );
+  }
+  const dispatcherViolations = healthMetricCounts.dispatcher_violation ?? 0;
+  const irreversibleEffects = healthMetricCounts.irreversible_effect_recorded ?? 0;
+  const workerTickOverruns = healthMetricCounts.worker_tick_overrun ?? 0;
 
   const latestEvent = safeScalar<{ ts: string }>(
     db,
@@ -168,7 +168,7 @@ export const computeSubstrateStatus = (
     `SELECT ts FROM events
      WHERE embedding IS NULL AND kind IN (${placeholders})
      ORDER BY ts ASC LIMIT 1`,
-    EMBEDDABLE_KINDS,
+    EMBEDDABLE_KINDS as unknown as unknown[],
   );
 
   // Verdict computation is centralised in `substrate/liveness.ts` so
@@ -190,6 +190,7 @@ export const computeSubstrateStatus = (
     knowledgePromoted,
     stakeholderState,
     directiveInterference,
+    healthMetricCounts,
     dispatcherViolations,
     irreversibleEffects,
     workerTickOverruns,
@@ -226,9 +227,17 @@ export const renderSubstrateStatus = (
   out(`directive_interference:     ${fmt(report.directiveInterference)}`);
   out("─".repeat(50));
   out("health metrics:");
-  out(`  dispatcher_violation:     ${fmt(report.dispatcherViolations)}`);
-  out(`  irreversible_effect:      ${fmt(report.irreversibleEffects)}`);
-  out(`  worker_tick_overrun:      ${fmt(report.workerTickOverruns)}`);
+  // Iterate the report's healthMetricCounts so adding a new
+  // `health_metric: true` kind to the registry surfaces here
+  // automatically. Width pads to the longest registry kind so the
+  // column stays aligned as the set grows.
+  const labelWidth = Math.max(
+    ...Object.keys(report.healthMetricCounts).map((k) => k.length),
+    1,
+  );
+  for (const [kind, count] of Object.entries(report.healthMetricCounts)) {
+    out(`  ${(kind + ":").padEnd(labelWidth + 2)} ${fmt(count)}`);
+  }
   out("─".repeat(50));
   out("freshness:");
   out(`  latest_event_ts:          ${report.latestEventTs ?? "(none)"}`);
