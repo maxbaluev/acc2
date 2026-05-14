@@ -221,6 +221,8 @@ All necessary subsystems are ON by default — the daemon starts the embedder, s
 - **`docs/operator-install.md`** + **`docs/ops-guide.md`** — owner-facing install / run / backup / troubleshooting.
 - **`docs/real-brain-runbook.md`** — failure taxonomy: `auth_missing`, `rate_limit`, `timeout`, `parse_error`, `subprocess_crash`, `cycle_1_only_breach`, `verifier_residual_high`, `no_action_predicted`, `mcp_handshake_failed`.
 - **`docs/production-readiness.md`** — honest verdict on what is production-grade and what is still maturing.
-- **`acc doctor`** — composite readiness; pass it before promoting a build.
+- **`docs/substrate-entity-map.md`** — canonical inventory of every base table, virtual table, view, and event kind, tagged with which surface (seed / doctor / substrate-status / view) covers it. Consult before adding a new event kind, table, or health surface so coverage stays aligned.
+- **`acc doctor`** — composite readiness; pass it before promoting a build. Doctor gates seed knowledge, seed artifacts, seed recipes, and vec0 loadability — all four must pass for real-brain dispatch.
+- **`acc admin substrate-status`** — one-screen substrate liveness verdict (ALIVE / DEGRADED / DEAD) with event / artifact / vec_events / recipe / knowledge counts plus health-metric counts (`dispatcher_violation`, `irreversible_effect_recorded`, `worker_tick_overrun`).
 - **`bun tests/integration/harness.ts`** — 9 plumbing scenarios by default; `--include-real` to add real-brain.
 - **`bun test`** — unit suite (570+ tests across 56 files). Tests pin `ACC2_BRIDGE_MODE=mock` automatically.
