@@ -43,6 +43,7 @@ export type BridgeResult =
   | { ok: false; reason: BridgeFailureReason };
 
 const FIXTURE_D_MARKER = "FIXTURE: fixture_d_count_todos";
+const EXAMPLE_COM_MARKER = "Fetch the URL https://example.com via Bun.fetch (the bun runtime).";
 
 // ── Fixture D — TODO counter ──────────────────────────────────────
 //
@@ -102,6 +103,26 @@ if (observation && typeof observation === "object" &&
 process.stdout.write("@@RESULT@@ " + JSON.stringify({ residual }) + "\\n");
 `;
 
+// NOTE: the body below is interpolated through a template literal, so any
+// `\X` escape must be written `\\X` to survive into the rendered artifact.
+// In particular `[\\s\\S]` keeps the literal `\s\S` in the regex char-class.
+const EXAMPLE_COM_ACTION_BODY = `// fetch example.com title
+const resp = await Bun.fetch("https://example.com");
+const html = await resp.text();
+const match = html.match(/<title[^>]*>([\\s\\S]*?)<\\/title>/i);
+const title = (match?.[1] ?? "").trim();
+console.log("@@RESULT@@ " + JSON.stringify({ result: { title } }));
+`;
+
+const EXAMPLE_COM_VERIFIER_BODY = `// verify example.com title observation
+const observation = JSON.parse(process.env.ACC2_INPUTS ?? "null") ?? {};
+const title = observation && typeof observation === "object" && observation.result && typeof observation.result === "object"
+  ? observation.result.title
+  : "";
+const residual = typeof title === "string" && title.trim().length > 0 ? 0 : 1;
+console.log("@@RESULT@@ " + JSON.stringify({ residual }));
+`;
+
 const BUN_DEFAULT_SANDBOX = (): SandboxDecl => ({
   runtime: "bun",
   fs_read: ["**/*"],
@@ -114,10 +135,10 @@ const BUN_DEFAULT_SANDBOX = (): SandboxDecl => ({
   memory_mb: 128,
 });
 
-/** Phase D mock: react to the fixture_d_count_todos prompt by admitting the
- *  canonical action + verifier artifacts and emitting action_predicted that
- *  references both. For prompts that don't carry the fixture marker we return
- *  auth_missing so future fixtures can compose against this stub. */
+/** Phase D mock: react to known prompt markers by admitting canonical
+ *  bun action + verifier artifacts and emitting action_predicted that
+ *  references both. Unknown prompts return auth_missing so future fixtures
+ *  can compose against this stub. */
 export const opencodeQueryMock = async (
   req: BridgeRequest,
   db: Database,
@@ -132,7 +153,7 @@ export const opencodeQueryMock = async (
     invoker: "opencode",
   });
 
-  if (!req.prompt.includes(FIXTURE_D_MARKER)) {
+  if (!req.prompt.includes(FIXTURE_D_MARKER) && !req.prompt.includes(EXAMPLE_COM_MARKER)) {
     emitEvent(db, {
       kind: "bridge_failed",
       substrate_origin: "opencode",
@@ -142,6 +163,162 @@ export const opencodeQueryMock = async (
       invoker: "opencode",
     });
     return { ok: false, reason: { kind: "auth_missing" } };
+  }
+
+  if (req.prompt.includes(EXAMPLE_COM_MARKER)) {
+    const emittedEventIds: string[] = [];
+
+    emitEvent(db, {
+      kind: "code_artifact_candidate",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        runtime: "bun",
+        purpose: "example_com_title_fetch_action",
+      } as JsonValue,
+      invoker: "opencode",
+    });
+
+    const actionAdmission = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body: EXAMPLE_COM_ACTION_BODY,
+        declaredSandbox: {
+          runtime: "bun",
+          fs_read: [],
+          fs_write: [],
+          net_allow: ["example.com"],
+          proc_allow: [],
+          substrate_access: "none",
+          cpu_ms: 5000,
+          wall_ms: 5000,
+          memory_mb: 128,
+        },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        name: "example_com_title_fetch_action",
+      },
+      (ev) => {
+        const out = emitEvent(db, {
+          ...ev,
+          directive_id: ev.directive_id ?? req.directiveId,
+          task_id: ev.task_id ?? req.taskId,
+          invoker: ev.invoker ?? "opencode",
+        });
+        emittedEventIds.push(out.id);
+      },
+    );
+
+    if (!actionAdmission.ok) {
+      emitEvent(db, {
+        kind: "bridge_failed",
+        substrate_origin: "opencode",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        payload: { reason: `action_admission_failed:${actionAdmission.reason}` } as JsonValue,
+        invoker: "opencode",
+      });
+      return {
+        ok: false,
+        reason: { kind: "subprocess_crash", stderr_tail: actionAdmission.reason },
+      };
+    }
+
+    emitEvent(db, {
+      kind: "code_artifact_candidate",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        runtime: "bun",
+        purpose: "example_com_title_fetch_verifier",
+      } as JsonValue,
+      invoker: "opencode",
+    });
+
+    const verifierAdmission = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body: EXAMPLE_COM_VERIFIER_BODY,
+        declaredSandbox: {
+          runtime: "bun",
+          fs_read: [],
+          fs_write: [],
+          net_allow: [],
+          proc_allow: [],
+          substrate_access: "none",
+          cpu_ms: 5000,
+          wall_ms: 5000,
+          memory_mb: 128,
+        },
+        fixtureInput: { result: { title: "Example Domain" } } as JsonValue,
+        fixtureExpectedResidualBelow: 0.2,
+        name: "example_com_title_fetch_verifier",
+      },
+      (ev) => {
+        const out = emitEvent(db, {
+          ...ev,
+          directive_id: ev.directive_id ?? req.directiveId,
+          task_id: ev.task_id ?? req.taskId,
+          invoker: ev.invoker ?? "opencode",
+        });
+        emittedEventIds.push(out.id);
+      },
+    );
+
+    if (!verifierAdmission.ok) {
+      emitEvent(db, {
+        kind: "bridge_failed",
+        substrate_origin: "opencode",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        payload: { reason: `verifier_admission_failed:${verifierAdmission.reason}` } as JsonValue,
+        invoker: "opencode",
+      });
+      return {
+        ok: false,
+        reason: { kind: "subprocess_crash", stderr_tail: verifierAdmission.reason },
+      };
+    }
+
+    const predicted = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      action_artifact_id: actionAdmission.artifactId,
+      verifier_artifact_id: verifierAdmission.artifactId,
+      predicted_residual: 0.05,
+      payload: {
+        intent: "fetch example.com and extract the title",
+        url: "https://example.com",
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    emittedEventIds.push(predicted.id);
+
+    emitEvent(db, {
+      kind: "bridge_completed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        action_artifact_id: actionAdmission.artifactId,
+        verifier_artifact_id: verifierAdmission.artifactId,
+        predicted_residual: 0.05,
+      } as JsonValue,
+      invoker: "opencode",
+    });
+
+    return {
+      ok: true,
+      final_response: "example_com_title_fetch action_predicted emitted",
+      usage: { tokens: 0 },
+      emitted_event_ids: emittedEventIds,
+    };
   }
 
   const emittedEventIds: string[] = [];
@@ -315,7 +492,11 @@ type SpawnOpts = {
   spawnFn?: typeof Bun.spawn;
 };
 
-const DEFAULT_OPENCODE_MODEL = "openai/gpt-5-mini";
+// NOTE: opencode 1.4+ renamed the provider model ids; `openai/gpt-5-mini` no
+// longer resolves. The default below points at the current canonical id; the
+// Batch 2.α smoke confirmed `openai/gpt-5.4-mini` works against opencode 1.4.3.
+// Override via ACC2_OPENCODE_MODEL or SpawnOpts.model.
+const DEFAULT_OPENCODE_MODEL = "openai/gpt-5.4-mini";
 const DEFAULT_TIMEOUT_MS = 60_000;
 
 const spawnRealOpencode = async (
@@ -324,7 +505,13 @@ const spawnRealOpencode = async (
   spawnOpts: SpawnOpts = {},
 ): Promise<BridgeResult> => {
   const model = spawnOpts.model ?? process.env.ACC2_OPENCODE_MODEL ?? DEFAULT_OPENCODE_MODEL;
-  const timeoutMs = spawnOpts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // Real opencode dispatches for non-trivial directives routinely exceed 60s
+  // (model boot + reasoning + tool calls). Allow env override via
+  // ACC2_OPENCODE_TIMEOUT_MS so operators don't have to recompile to bump
+  // the watchdog. Defaults stay at 60s for hermetic test runs.
+  const envTimeout = Number(process.env.ACC2_OPENCODE_TIMEOUT_MS ?? "");
+  const timeoutMs = spawnOpts.timeoutMs
+    ?? (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_TIMEOUT_MS);
   const spawn = spawnOpts.spawnFn ?? Bun.spawn;
 
   emitEvent(db, {
@@ -382,24 +569,50 @@ const spawnRealOpencode = async (
   let stderrBuf = "";
   let cycleViolation: string | null = null;
   let finalResponse = "";
+  // opencode 1.4+ emits a top-level `{type:"error", error:{...}}` event when a
+  // model id is invalid / auth fails / a provider call errors. opencode then
+  // exits 0 anyway (the operator only gets the JSON), so the bridge must
+  // surface the error explicitly rather than treating exit_code==0 as
+  // success. The Batch 2.α smoke confirmed this against opencode 1.4.3 with
+  // an invalid model id.
+  let opencodeErrorEvent: { name?: string; message?: string } | null = null;
 
   // Stream stdout line-by-line.
   const reader = proc.stdout.getReader();
   const decoder = new TextDecoder();
   const consumeLine = (line: string): void => {
-    if (!line.trim()) return;
+    // Tolerate trailing whitespace and bare \r\n (Windows-spawned shells).
+    const trimmed = line.replace(/\r$/, "").trim();
+    if (!trimmed) return;
     let parsed: Record<string, unknown> | null = null;
     try {
-      parsed = JSON.parse(line);
+      parsed = JSON.parse(trimmed);
     } catch {
       // Non-JSON line — append to final-response buffer (opencode's default
       // text mode would do this; --format=json should never hit here, but
       // we tolerate stray text).
-      finalResponse += line + "\n";
+      finalResponse += trimmed + "\n";
       return;
     }
     if (!parsed || typeof parsed !== "object") return;
     const kind = parsed.type as string | undefined;
+    // opencode 1.4+ structured error — capture and surface on completion.
+    if (kind === "error") {
+      const errObj = parsed.error as Record<string, unknown> | undefined;
+      const data = (errObj?.data as Record<string, unknown> | undefined) ?? {};
+      opencodeErrorEvent = {
+        name: (errObj?.name as string) ?? "UnknownError",
+        message: (data.message as string) ?? JSON.stringify(errObj ?? {}),
+      };
+    }
+    // opencode 1.4+ final-answer text is delivered as one or more
+    // `{type:"text", part:{text:"..."}}` events. Concatenate the part text
+    // into finalResponse so callers see the brain's natural-language reply.
+    if (kind === "text") {
+      const part = parsed.part as Record<string, unknown> | undefined;
+      const text = (part?.text as string) ?? "";
+      if (text.length > 0) finalResponse += text;
+    }
     // Mirror opencode's tool_call events into the substrate for audit.
     if (kind === "tool_call" || kind === "tool_result") {
       emitEvent(db, {
@@ -419,7 +632,8 @@ const spawnRealOpencode = async (
       cycleViolation = kind ?? null;
       try { proc.kill("SIGTERM"); } catch { /* swallow */ }
     }
-    // Final response marker
+    // Legacy final-response marker (opencode pre-1.4 emitted these). Kept for
+    // forward-compat with future format revisions.
     if (kind === "final_response" || kind === "completed") {
       finalResponse = (parsed.text as string) ?? (parsed.final_response as string) ?? finalResponse;
     }
@@ -491,6 +705,29 @@ const spawnRealOpencode = async (
       invoker: "opencode",
     });
     return { ok: false, reason: { kind: "subprocess_crash", stderr_tail: stderrBuf.slice(-512) } };
+  }
+
+  // Exit-code 0 + a structured opencode error event = parse_error / auth /
+  // provider failure. opencode 1.4+ exits 0 even on `Model not found` so the
+  // bridge must inspect the JSON event stream rather than trust the exit
+  // code alone (Batch 2.α hardening).
+  if (opencodeErrorEvent) {
+    const msg = opencodeErrorEvent.message ?? "unknown opencode error";
+    const reason: BridgeFailureReason = msg.toLowerCase().includes("auth")
+      ? { kind: "auth_missing" }
+      : { kind: "parse_error", raw: msg.slice(0, 512) };
+    emitEvent(db, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        reason: `opencode_error_event:${opencodeErrorEvent.name ?? "UnknownError"}`,
+        message: msg,
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    return { ok: false, reason };
   }
 
   emitEvent(db, {
