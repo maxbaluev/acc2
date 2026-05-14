@@ -145,6 +145,95 @@ export const bootDaemon = async (
   });
 };
 
+// ── Production-equivalent boot for ad-hoc real-brain runs ──────────
+//
+// The harness's `--task` mode (and the canned scenarioRealBrainEndToEnd)
+// must prove the EXACT code paths an operator gets after `acc init` +
+// `acc daemon start`, not a privileged side door. The helper below:
+//
+//   1. Sets ACC2_STATE_DIR (+ ACC2_DB_PATH / V2_DAEMON_*PORT) to fresh
+//      tmpdir values — so the production resolver in runtime/state_paths.ts
+//      lands at this isolated location.
+//   2. Calls `runInitProgrammatic({ yes: true })` — the SAME function
+//      `bun cli/dispatch.ts init --yes` invokes. This seeds foundational
+//      knowledge + the canonical code_artifact rows via the production
+//      init path (Task 1 wiring).
+//   3. Calls `startDaemon({})` with NO opts — env-var-driven, same as the
+//      operator's `acc daemon start`. Default externalPushToken (null)
+//      mirrors production: the harness does NOT inject the
+//      "harness-default-token" privileged value.
+//
+// Returns the live handle + a cleanup callback that stops the daemon,
+// closes the db, restores every env var, and removes the tmpdir unless
+// keepState=true.
+export type ProductionBootResult = {
+  handle: DaemonHandle;
+  tmpDir: string;
+  dbPath: string;
+  cleanup: () => Promise<void>;
+};
+
+export const bootDaemonProduction = async (opts: {
+  /** When true, the cleanup callback leaves the tmpdir on disk so the
+   *  operator can inspect. The path is returned for the caller to surface. */
+  keepState?: boolean;
+}): Promise<ProductionBootResult> => {
+  const tmpDir = mkdtempSync(join(tmpdir(), "acc2-harness-prod-"));
+  const dbPath = join(tmpDir, "state.db");
+  const ports = pickPortPair();
+
+  // Snapshot env vars we mutate so cleanup can restore them exactly.
+  const prev: Record<string, string | undefined> = {
+    ACC2_STATE_DIR: process.env.ACC2_STATE_DIR,
+    ACC2_DB_PATH: process.env.ACC2_DB_PATH,
+    ACC2_SOCKET_FILE: process.env.ACC2_SOCKET_FILE,
+    ACC2_TOKEN_FILE: process.env.ACC2_TOKEN_FILE,
+    V2_DAEMON_PORT: process.env.V2_DAEMON_PORT,
+    V2_DAEMON_AUX_PORT: process.env.V2_DAEMON_AUX_PORT,
+  };
+
+  process.env.ACC2_STATE_DIR = tmpDir;
+  // Force the DB into the tmpdir even when the dev-checkout fallback path
+  // would otherwise win in the resolver.
+  process.env.ACC2_DB_PATH = dbPath;
+  process.env.ACC2_SOCKET_FILE = join(tmpDir, "v2.sock");
+  process.env.ACC2_TOKEN_FILE = join(tmpDir, "v2.sock.token");
+  process.env.V2_DAEMON_PORT = String(ports.mcp);
+  process.env.V2_DAEMON_AUX_PORT = String(ports.aux);
+
+  // Run the production init code path. The same function that backs
+  // `bun cli/dispatch.ts init --yes`. Resolved paths come from env vars
+  // we just set, so it lands in our tmpdir.
+  const { runInitProgrammatic } = await import("../../cli/init");
+  const initSummary = await runInitProgrammatic({
+    yes: true,
+    log: () => { /* swallow — harness prints its own narration */ },
+    warn: () => { /* swallow */ },
+  });
+  if (initSummary.exitCode !== 0) {
+    throw new Error(`acc init failed: ${initSummary.warnings.join("; ")}`);
+  }
+
+  // Now call startDaemon with NO opts — the production code path. Env
+  // vars we set above route the daemon at the harness tmpdir + ports.
+  const handle = await startDaemon();
+
+  const cleanup = async (): Promise<void> => {
+    try { await stopDaemon(handle); } catch { /* swallow */ }
+    try {
+      const { closeDb } = await import("../../substrate/db");
+      closeDb(dbPath);
+    } catch { /* swallow */ }
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    if (!opts.keepState) rmSync(tmpDir, { recursive: true, force: true });
+  };
+
+  return { handle, tmpDir, dbPath, cleanup };
+};
+
 export const scenarioDaemonLifecycle = async (): Promise<void> => {
   const tmpDir = mkdtempSync(join(tmpdir(), "acc2-harness-s1-"));
   const dbPath = join(tmpDir, "state.db");
@@ -1475,21 +1564,19 @@ export const scenarioRealBrainEndToEnd = async (): Promise<void> => {
     "refinement edge instead of self-iterating if anything is incomplete.",
   ].join("\n");
 
-  const tmpDir = mkdtempSync(join(tmpdir(), "acc2-harness-real-brain-"));
-  const dbPath = join(tmpDir, "state.db");
-
-  let handle: DaemonHandle | null = null;
+  // PRODUCTION BOOT PATH. The harness MUST exercise the same code paths
+  // an operator gets from `acc init && acc daemon start`. We no longer
+  // call `bootDaemon(...)` with custom opts and seed via a privileged
+  // side door — instead `bootDaemonProduction()` runs `runInitProgrammatic`
+  // (which seeds knowledge + code_artifacts via Task 1 wiring) and then
+  // `startDaemon()` with NO opts. Real-brain proof of the loop now also
+  // proves the operator-install seed surface.
+  let prod: ProductionBootResult | null = null;
   try {
-    handle = await bootDaemon(tmpDir, dbPath);
+    prod = await bootDaemonProduction({ keepState: false });
+    const handle = prod.handle;
     // Expose the MCP URL so the real opencode subprocess can connect back.
     process.env.V2_MCP_SERVER_URL = `http://127.0.0.1:${handle.port}/mcp`;
-
-    // Seed substrate (the real brain reads from the foundational knowledge
-    // index + code-artifact registry during composition).
-    const { seedFoundationalKnowledge, seedCodeArtifacts } =
-      await import("../../substrate/seed");
-    seedFoundationalKnowledge(handle.db, { ownerApproved: true });
-    seedCodeArtifacts(handle.db);
 
     const directiveId = newId();
     const taskId = newId();
@@ -1629,14 +1716,7 @@ export const scenarioRealBrainEndToEnd = async (): Promise<void> => {
       assert(refines.length >= 1, "refinement edge must be emitted when residual >= 0.3");
     }
   } finally {
-    if (handle) {
-      try { await stopDaemon(handle); } catch { /* swallow */ }
-    }
-    try {
-      const { closeDb } = await import("../../substrate/db");
-      closeDb(dbPath);
-    } catch { /* swallow */ }
-    rmSync(tmpDir, { recursive: true, force: true });
+    if (prod) await prod.cleanup();
     if (originalMode === undefined) delete process.env.ACC2_BRIDGE_MODE;
     else process.env.ACC2_BRIDGE_MODE = originalMode;
     if (originalTimeout === undefined) delete process.env.ACC2_OPENCODE_TIMEOUT_MS;
@@ -1701,16 +1781,24 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
   if (!originalTimeout) process.env.ACC2_OPENCODE_TIMEOUT_MS = "600000";
   if (!originalHandshake) process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS = "120000";
 
-  const tmpDir = mkdtempSync(join(tmpdir(), "acc2-harness-task-"));
-  const dbPath = join(tmpDir, "state.db");
   const startedAt = Date.now();
   const directiveId = newId();
   const taskId = newId();
 
-  let handle: DaemonHandle | null = null;
+  // PRODUCTION BOOT PATH. The harness's --task mode MUST exercise the
+  // same code paths an operator gets from `acc init && acc daemon start`.
+  // No more bootDaemon(...) side door + manual seedFoundationalKnowledge /
+  // seedCodeArtifacts call — bootDaemonProduction below sets
+  // ACC2_STATE_DIR + ports, runs `runInitProgrammatic({yes:true})` (the
+  // SAME function `bun cli/dispatch.ts init --yes` invokes — seeds both
+  // knowledge and code_artifacts via Task 1 wiring), then calls
+  // `startDaemon()` with NO opts. If today's flow skipped any seed step,
+  // it surfaces explicitly: the production init path is now the only
+  // surface that decides what the substrate contains at boot.
+  let prod: ProductionBootResult | null = null;
   let result: AdHocTaskResult = {
     committed: false, failed: false, timedOut: false, residual: null,
-    durationMs: 0, directiveId, stateDir: tmpDir,
+    durationMs: 0, directiveId, stateDir: "",
     eventsCount: 0, artifactsCount: 0, violations: 0, refinementEdges: 0,
   };
 
@@ -1718,18 +1806,20 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
     write(`acc2 harness — ad-hoc real-brain task\n`);
     write(`======================================\n`);
     write(`task:  ${opts.taskText}\n`);
-    write(`state: ${tmpDir}\n\n`);
 
-    handle = await bootDaemon(tmpDir, dbPath);
+    prod = await bootDaemonProduction({ keepState });
+    const handle = prod.handle;
+    result.stateDir = prod.tmpDir;
+    write(`state: ${prod.tmpDir}\n\n`);
+
     process.env.V2_MCP_SERVER_URL = `http://127.0.0.1:${handle.port}/mcp`;
     write(`boot: daemon up on mcp=${handle.port} aux=${handle.auxPort} (${((Date.now()-startedAt)/1000).toFixed(2)}s)\n`);
+    write(`boot: production code path — acc init + acc daemon start (no privileged side door)\n`);
 
-    const { seedFoundationalKnowledge, seedCodeArtifacts } =
-      await import("../../substrate/seed");
-    seedFoundationalKnowledge(handle.db, { ownerApproved: true });
-    seedCodeArtifacts(handle.db);
     // Knowledge lives as `events` rows (kind=knowledge_promoted) — one substrate,
     // one ledger (k_2367). code_artifact is the only materialized projection.
+    // We probe the seeded counts after init+start so the operator can see
+    // the substrate contents WITHOUT the harness directly calling seed code.
     const seededK = handle.db.query(
       "SELECT COUNT(*) AS n FROM events WHERE kind = 'knowledge_promoted'",
     ).get() as { n: number };
@@ -1870,7 +1960,7 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
       residual: scoredRow?.residual ?? null,
       durationMs: Date.now() - startedAt,
       directiveId,
-      stateDir: tmpDir,
+      stateDir: prod.tmpDir,
       eventsCount: totals.n,
       artifactsCount: artifacts.n,
       violations: violations.n,
@@ -1889,17 +1979,11 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
 
     return result;
   } finally {
-    if (handle) {
-      try { await stopDaemon(handle); } catch { /* swallow */ }
-    }
-    try {
-      const { closeDb } = await import("../../substrate/db");
-      closeDb(dbPath);
-    } catch { /* swallow */ }
-    if (keepState) {
-      write(`\nstate kept at: ${tmpDir} (--keep-state)\n`);
-    } else {
-      rmSync(tmpDir, { recursive: true, force: true });
+    // Production-boot cleanup: stops daemon, closes db, restores every env
+    // var the boot path mutated, removes the tmpdir unless keepState.
+    if (prod) {
+      await prod.cleanup();
+      if (keepState) write(`\nstate kept at: ${prod.tmpDir} (--keep-state)\n`);
     }
     if (originalMode === undefined) delete process.env.ACC2_BRIDGE_MODE;
     else process.env.ACC2_BRIDGE_MODE = originalMode;
