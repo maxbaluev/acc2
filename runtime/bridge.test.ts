@@ -293,6 +293,86 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     }
   });
 
+  test("no-progress watchdog fires bridge_stuck when subprocess emits zero frames within stuckThresholdMs", async () => {
+    const db = openDb(":memory:");
+    // Build a fake subprocess that stays alive (`exited` resolves only after
+    // we signal it) and emits NO stdout. This simulates the wedge symptom the
+    // harness --task surfaced: subprocess running, no progress, no signal to
+    // the operator until the 600s overall watchdog fires.
+    let resolveExit: ((code: number) => void) | null = null;
+    const exitedPromise = new Promise<number>((resolve) => { resolveExit = resolve; });
+    let killed = false;
+    const sentinel = {
+      kill: (_signal?: string) => {
+        if (killed) return;
+        killed = true;
+        // Simulate the subprocess receiving SIGTERM and exiting after a tick.
+        setTimeout(() => resolveExit?.(143), 1);
+      },
+      stdout: {
+        getReader: () => ({
+          read: async () => {
+            // Block until the subprocess exits (mirroring real stdout EOF
+            // semantics — the reader resolves with done=true on exit).
+            await exitedPromise;
+            return { done: true, value: undefined };
+          },
+        }),
+      },
+      stderr: {
+        getReader: () => ({
+          read: async () => {
+            await exitedPromise;
+            return { done: true, value: undefined };
+          },
+        }),
+      },
+      exited: exitedPromise,
+    };
+    const fakeSpawn = (() => sentinel) as unknown as typeof Bun.spawn;
+
+    const before = Date.now();
+    const result = await spawnRealOpencode(
+      { prompt: "stuck probe", taskId: newId(), directiveId: newId() },
+      db,
+      {
+        spawnFn: fakeSpawn,
+        mcpServerUrl: "http://127.0.0.1:1/mcp",
+        // Short stuck threshold so the test runs fast — 200ms.
+        stuckThresholdMs: 200,
+        // Long handshake + dispatch watchdogs so they don't fire first; the
+        // stuck path must be the one that surfaces.
+        mcpHandshakeWindowMs: 10_000,
+        timeoutMs: 10_000,
+      },
+    );
+    const elapsed = Date.now() - before;
+    // The stuck watchdog fires its first poll within max(500ms, threshold/4)
+    // so the run should complete well below the 10s dispatch timeout. The
+    // upper bound below leaves slack for slow CI runners.
+    expect(elapsed).toBeLessThan(5_000);
+    expect(result.ok).toBe(false);
+
+    // A bridge_stuck event was emitted with reason=no_frames_received.
+    const stuckRow = db
+      .query("SELECT payload FROM events WHERE kind = 'bridge_stuck' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(stuckRow).not.toBeNull();
+    const stuckPayload = JSON.parse(stuckRow!.payload) as Record<string, unknown>;
+    expect(stuckPayload.reason).toBe("no_frames_received");
+    expect(typeof stuckPayload.elapsed_ms).toBe("number");
+    expect(stuckPayload.threshold_ms).toBe(200);
+
+    // The bridge_failed taxonomy entry carries the subprocess_stuck reason.
+    const failedRow = db
+      .query("SELECT payload FROM events WHERE kind = 'bridge_failed' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(failedRow).not.toBeNull();
+    const failedPayload = JSON.parse(failedRow!.payload) as Record<string, unknown>;
+    expect(failedPayload.reason).toBe("subprocess_stuck");
+    expect(failedPayload.no_frames_received).toBe(true);
+  }, 15_000);
+
   test("v2 MCP tool surface advertises every substrate.* and runtime.* tool the daemon exposes", () => {
     // Defensive: the brain prompt composer ships V2_MCP_TOOL_SURFACE as a
     // discovery hint. Keep this list in sync with runtime/mcp_server.ts —

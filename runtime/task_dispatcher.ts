@@ -34,6 +34,7 @@ import { runBunArtifact } from "./runtimes/bun";
 import { nowIso } from "./ids";
 import { distributeCredit } from "./credit";
 import { findRecipeMatch, replayRecipe } from "./recipe_replay";
+import { logger } from "./logger";
 import { readCurrentMode } from "./crisis_mode";
 import { isCycleViolation } from "./cycle_one_gate";
 import { recordDispatch, recordActionResidual } from "./metrics";
@@ -399,7 +400,11 @@ export const dispatchReadyTask = async (
             predicted_residual: actionPredicted.predicted_residual ?? 1,
             observed_residual: 1,
           });
-        } catch {
+        } catch (err) {
+          logger.warn(
+            { where: "task_dispatcher.credit.no_verifier", task_id: task.id, err: (err as Error).message },
+            "distributeCredit failed (no-verifier branch) — falling back to direct posterior",
+          );
           applyResidualOutcome(db, actionArtifact.id, 1, nowIso());
         }
       } else {
@@ -465,8 +470,12 @@ export const dispatchReadyTask = async (
             predicted_residual: actionPredicted.predicted_residual ?? residual,
             observed_residual: residual,
           });
-        } catch {
+        } catch (err) {
           // Fail-safe: keep posterior accounting honest even if credit fails.
+          logger.warn(
+            { where: "task_dispatcher.credit.verifier_branch", task_id: task.id, residual, err: (err as Error).message },
+            "distributeCredit failed (verifier branch) — falling back to direct posterior",
+          );
           applyResidualOutcome(db, actionArtifact.id, residual, nowIso());
           applyResidualOutcome(db, verifierArtifact.id, residual, nowIso());
         }

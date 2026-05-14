@@ -63,8 +63,12 @@ export type BunRuntimeObservation = {
 const RESULT_PREFIX = "@@RESULT@@ ";
 const IRREVERSIBLE_PREFIX = "@@IRREVERSIBLE@@ ";
 const STDERR_TAIL_BYTES = 1024;
-const HARD_KILL_MULTIPLIER = 1.25;
-const KILL_GRACE_MS = 250;
+/** Robustness: SIGKILL fires this many ms AFTER SIGTERM if the subprocess
+ *  has not exited. Matches the camofox `SIGTERM_SIGKILL_ESCALATION_MS`
+ *  constant — escalation is decoupled from wall_ms so a long-wall artifact
+ *  that hangs at wall_ms still hard-kills 2s later, not wall_ms × 1.25.
+ *  Override via ACC2_BUN_SIGKILL_ESCALATION_MS (rarely needed). */
+const SIGTERM_SIGKILL_ESCALATION_MS = 2_000;
 
 /** Scan stdout for `@@IRREVERSIBLE@@ <kind>:<description>` lines. The
  *  artifact opts in to declaring its irreversible effects via this marker
@@ -104,7 +108,13 @@ const readStream = async (stream: ReadableStream<Uint8Array> | null): Promise<st
     }
     out += decoder.decode();
   } finally {
-    try { reader.releaseLock(); } catch { /* swallow */ }
+    try {
+      reader.releaseLock();
+    } catch (err) {
+      // releaseLock throws if the reader was already released — this is a
+      // benign post-drain race, not a real failure. No emit needed.
+      void err;
+    }
   }
   return out;
 };
@@ -201,18 +211,39 @@ export const runBunArtifact = async (
     });
 
     // Soft watchdog — SIGTERM at wall_ms.
+    // When SIGTERM fires we arm a follow-up SIGKILL `SIGTERM_SIGKILL_ESCALATION_MS`
+    // later (independent of wall_ms) so a wedged subprocess always escalates
+    // within a bounded window. This was previously scaled with wall_ms — long-
+    // wall artifacts that hung at wall_ms had to wait wall_ms × 0.25 for the
+    // hard kill, which hides the wedge behind the long timeout.
+    const envEsc = Number(process.env.ACC2_BUN_SIGKILL_ESCALATION_MS ?? "");
+    const escMs = Number.isFinite(envEsc) && envEsc > 0 ? envEsc : SIGTERM_SIGKILL_ESCALATION_MS;
     softTimer = setTimeout(() => {
       softFired = true;
-      try { proc?.kill("SIGTERM"); } catch { /* already exited */ }
-    }, Math.max(1, wallMs));
-
-    // Hard watchdog — SIGKILL at wall_ms × 1.25, only if soft didn't drain.
-    hardTimer = setTimeout(() => {
-      if (proc && proc.exitCode === null) {
-        hardFired = true;
-        try { proc.kill("SIGKILL"); } catch { /* already exited */ }
+      try { proc?.kill("SIGTERM"); } catch (killErr) {
+        // already exited — debug only so the audit trail records the cause
+        void killErr;
       }
-    }, Math.max(1, Math.floor(wallMs * HARD_KILL_MULTIPLIER) + KILL_GRACE_MS));
+      // Hard watchdog — SIGKILL escalation 2s after SIGTERM. Only fires if the
+      // subprocess didn't drain in response to SIGTERM.
+      hardTimer = setTimeout(() => {
+        if (proc && proc.exitCode === null) {
+          hardFired = true;
+          try { proc.kill("SIGKILL"); } catch (killErr) { void killErr; }
+          inv.emit?.({
+            kind: "runtime_subprocess_killed",
+            substrate_origin: "substrate_auto",
+            action_artifact_id: inv.artifactId,
+            payload: {
+              runtime: "bun",
+              reason: "sigterm_did_not_drain",
+              escalation_ms: escMs,
+              wall_ms: wallMs,
+            } as JsonValue,
+          });
+        }
+      }, escMs);
+    }, Math.max(1, wallMs));
 
     // Read both streams concurrently with the exit code.
     const [stdoutText, stderrText, exitCode] = await Promise.all([

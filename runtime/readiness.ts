@@ -28,6 +28,14 @@ export type ReadinessState = {
   readyAtMs: number | null;
   /** Single-fire callback (emit daemon_ready event from the daemon). */
   onReady: (() => void) | null;
+  /** Last successful-tick timestamp (ms since epoch) per worker — drives
+   *  /health degraded-state detection. A worker that hasn't ticked in
+   *  3× its declared interval is reported as stuck. */
+  lastTickMs: Map<string, number>;
+  /** Declared interval (ms) per worker — set when the worker registers so
+   *  the stuck threshold (3× interval) can be computed without consulting
+   *  daemon-side env defaults from outside. */
+  tickIntervalMs: Map<string, number>;
 };
 
 const createState = (): ReadinessState => ({
@@ -35,6 +43,8 @@ const createState = (): ReadinessState => ({
   ready: new Set(),
   readyAtMs: null,
   onReady: null,
+  lastTickMs: new Map(),
+  tickIntervalMs: new Map(),
 });
 
 let state: ReadinessState = createState();
@@ -47,9 +57,49 @@ export const resetReadiness = (): void => {
 
 /** Register a worker name. Idempotent. Must be called BEFORE the worker
  *  starts ticking (otherwise the first markReady would arrive against
- *  an unregistered slot). */
-export const registerWorker = (name: string): void => {
+ *  an unregistered slot). Optionally records the worker's tick interval
+ *  so /health can compute the "stuck after 3× interval" threshold. */
+export const registerWorker = (name: string, tickIntervalMs?: number): void => {
   state.registered.add(name);
+  if (typeof tickIntervalMs === "number" && tickIntervalMs > 0) {
+    state.tickIntervalMs.set(name, tickIntervalMs);
+  }
+};
+
+/** Record a successful tick for the given worker — drives /health degraded
+ *  state. Idempotent: calling twice in the same ms is fine. Safe to call
+ *  for workers that did not declare an interval (the stuck check just
+ *  skips them). */
+export const recordWorkerTick = (name: string, atMs: number = Date.now()): void => {
+  state.lastTickMs.set(name, atMs);
+};
+
+/** Return any registered worker that has not ticked within 3× its declared
+ *  interval. Workers without a declared interval (e.g. one-shot integrity
+ *  check) are skipped. Returned `last_tick_ms_ago` is `null` for workers
+ *  that have never ticked since boot. */
+export const stuckWorkers = (
+  nowMs: number = Date.now(),
+): Array<{ worker: string; last_tick_ms_ago: number | null; tick_interval_ms: number }> => {
+  const out: Array<{ worker: string; last_tick_ms_ago: number | null; tick_interval_ms: number }> = [];
+  for (const name of state.registered) {
+    const interval = state.tickIntervalMs.get(name);
+    if (!interval) continue;
+    const last = state.lastTickMs.get(name);
+    if (last === undefined) {
+      // Never ticked since registration — only flag once the readiness flip
+      // is past (i.e. the worker SHOULD have ticked by now).
+      if (state.readyAtMs !== null && nowMs - state.readyAtMs > interval * 3) {
+        out.push({ worker: name, last_tick_ms_ago: null, tick_interval_ms: interval });
+      }
+      continue;
+    }
+    const ago = nowMs - last;
+    if (ago > interval * 3) {
+      out.push({ worker: name, last_tick_ms_ago: ago, tick_interval_ms: interval });
+    }
+  }
+  return out;
 };
 
 /** Mark a worker's first tick as complete. After every registered worker

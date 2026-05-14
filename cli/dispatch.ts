@@ -65,6 +65,8 @@ const daemonStop = async (): Promise<number> => {
   if (!base) { console.log("daemon not running"); return 0; }
   const token = readAdminToken();
   if (!token) { console.error("admin token file missing — cannot stop daemon safely"); return 1; }
+  // rpcPostAuth applies SHUTDOWN_TIMEOUT_MS (10s) implicitly via the URL
+  // resolver — a wedged daemon now fails the CLI fast instead of hanging.
   const reply = await rpcPostAuth<{ ok?: boolean; error?: string }>(`${base}/shutdown`, token, {});
   if (!reply.ok) { console.error(`shutdown refused: ${reply.error}`); return 1; }
   console.log("daemon shutdown requested");

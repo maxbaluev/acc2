@@ -1,6 +1,15 @@
 // Thin RPC helpers shared by every cli/* surface — daemon discovery, lock-file
 // read, HTTP POST/GET against the auxiliary port, and a small MCP client
 // factory for substrate.* method calls via fastmcp's StreamableHTTP transport.
+//
+// Robustness: every fetch() bound by AbortSignal.timeout so a wedged daemon
+// cannot hang the operator's CLI. Timeouts by endpoint:
+//   /health          5s    — liveness probe; must be near-instant
+//   /shutdown       10s    — graceful stop request
+//   /external/push  10s    — owner-tagged event ingress
+//   MCP tool calls  30s    — substrate.* / runtime.* surface
+//   /events/stream  none   — long-lived SSE; the caller owns abort
+//   acc daemon stop 10s    — daemonStop() wraps the /shutdown rpc
 
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -10,6 +19,16 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 
 export const DEFAULT_SOCKET_FILE = join(homedir(), ".accint", "v2.sock");
 export const DEFAULT_TOKEN_FILE = join(homedir(), ".accint", "v2.sock.token");
+
+/** Per-endpoint fetch timeout taxonomy. Fail-fast: any of these expiring
+ *  raises AbortError; the helper rewrites it into a clean ok:false envelope.
+ *  Numbers chosen to bound operator-visible latency while leaving enough
+ *  headroom for the daemon to do real work behind the route. */
+export const HEALTH_TIMEOUT_MS = 5_000;
+export const SHUTDOWN_TIMEOUT_MS = 10_000;
+export const EXTERNAL_PUSH_TIMEOUT_MS = 10_000;
+export const MCP_CALL_TIMEOUT_MS = 30_000;
+export const DEFAULT_RPC_TIMEOUT_MS = 10_000;
 
 export type DaemonLock = {
   pid: number;
@@ -75,20 +94,59 @@ export const requireMcp = (opts: RpcOpts = {}): string => {
   return u;
 };
 
-export const rpcGet = async <T = unknown>(url: string): Promise<T> => {
-  const res = await fetch(url);
-  const text = await res.text();
-  try { return (text ? JSON.parse(text) : {}) as T; } catch { return { ok: false, error: `non_json:${text.slice(0, 200)}` } as T; }
+/** Resolve a per-endpoint timeout from the URL. Keeps the helpers thin —
+ *  callers pass the endpoint URL, this function applies the canonical
+ *  taxonomy. Callers that want a different number set `timeoutMs` explicitly. */
+const resolveTimeoutMs = (url: string, override?: number): number => {
+  if (typeof override === "number" && override > 0) return override;
+  if (url.endsWith("/health")) return HEALTH_TIMEOUT_MS;
+  if (url.endsWith("/shutdown")) return SHUTDOWN_TIMEOUT_MS;
+  if (url.endsWith("/external/push")) return EXTERNAL_PUSH_TIMEOUT_MS;
+  return DEFAULT_RPC_TIMEOUT_MS;
 };
 
-export const rpcPostAuth = async <T = unknown>(url: string, token: string, body: unknown): Promise<T> => {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify(body ?? {}),
-  });
-  const text = await res.text();
-  try { return (text ? JSON.parse(text) : {}) as T; } catch { return { ok: false, error: `non_json:${text.slice(0, 200)}` } as T; }
+export const rpcGet = async <T = unknown>(url: string, opts?: { timeoutMs?: number }): Promise<T> => {
+  const timeoutMs = resolveTimeoutMs(url, opts?.timeoutMs);
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    const text = await res.text();
+    try { return (text ? JSON.parse(text) : {}) as T; } catch {
+      return { ok: false, error: `non_json:${text.slice(0, 200)}` } as T;
+    }
+  } catch (err) {
+    const name = (err as Error).name;
+    if (name === "TimeoutError" || name === "AbortError") {
+      return { ok: false, error: `timeout:${timeoutMs}ms:${url}` } as T;
+    }
+    return { ok: false, error: `fetch_failed:${(err as Error).message}` } as T;
+  }
+};
+
+export const rpcPostAuth = async <T = unknown>(
+  url: string,
+  token: string,
+  body: unknown,
+  opts?: { timeoutMs?: number },
+): Promise<T> => {
+  const timeoutMs = resolveTimeoutMs(url, opts?.timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify(body ?? {}),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const text = await res.text();
+    try { return (text ? JSON.parse(text) : {}) as T; } catch {
+      return { ok: false, error: `non_json:${text.slice(0, 200)}` } as T;
+    }
+  } catch (err) {
+    const name = (err as Error).name;
+    if (name === "TimeoutError" || name === "AbortError") {
+      return { ok: false, error: `timeout:${timeoutMs}ms:${url}` } as T;
+    }
+    return { ok: false, error: `fetch_failed:${(err as Error).message}` } as T;
+  }
 };
 
 // ── SSE client (/events/stream) ────────────────────────────────────
@@ -210,9 +268,16 @@ export async function* sseConnect(opts: SseConnectOpts = {}): AsyncGenerator<Sse
         }
       }
     } catch {
-      // Disconnect / cancel — fall through to reconnect (or exit).
+      // Disconnect / cancel — fall through to reconnect (or exit). This is
+      // expected on graceful close; SSE is long-lived and the caller owns
+      // abort. No emit because we have no db handle from a CLI surface.
     } finally {
-      try { await reader.cancel(); } catch { /* swallow */ }
+      try {
+        await reader.cancel();
+      } catch (cancelErr) {
+        // cancel after close throws — benign tail in the disconnect path
+        void cancelErr;
+      }
     }
     if (!reconnect || opts.signal?.aborted) return;
     await sleep(backoff, opts.signal);
@@ -235,16 +300,51 @@ const parseEnvelope = (res: { content: Array<{ type: string; text?: string }> })
 };
 
 /** Open an MCP client against the daemon's MCP port, invoke one tool, close.
- *  This is the canonical CLI → substrate call path for substrate.* methods. */
-export const mcpCall = async (toolName: string, args: Record<string, unknown>, opts: RpcOpts = {}): Promise<McpEnvelope> => {
+ *  This is the canonical CLI → substrate call path for substrate.* methods.
+ *  Robustness: the entire connect + callTool path is bounded by
+ *  `MCP_CALL_TIMEOUT_MS` (30s default; bridge → daemon tool calls). A wedged
+ *  daemon now produces a structured `{ ok:false, error:"timeout:..." }`
+ *  envelope instead of hanging the CLI indefinitely. */
+export const mcpCall = async (
+  toolName: string,
+  args: Record<string, unknown>,
+  opts: RpcOpts & { timeoutMs?: number } = {},
+): Promise<McpEnvelope> => {
   const base = requireMcp(opts);
+  const timeoutMs = opts.timeoutMs ?? MCP_CALL_TIMEOUT_MS;
   const transport = new StreamableHTTPClientTransport(new URL(base));
   const client = new Client({ name: "acc2-cli", version: "0.0.1" }, { capabilities: {} });
   try {
-    await client.connect(transport);
-    const res = await client.callTool({ name: toolName, arguments: args }) as { content: Array<{ type: string; text?: string }> };
+    // Bound the connect step explicitly — a wedged transport handshake
+    // would otherwise sit forever waiting on the daemon's first frame.
+    await Promise.race([
+      client.connect(transport),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`mcp_connect_timeout:${timeoutMs}ms`)), timeoutMs),
+      ),
+    ]);
+    // callTool accepts a RequestOptions.timeout — feeds the protocol's own
+    // RequestTimeout enforcement so the daemon side learns the request was
+    // abandoned and frees its slot.
+    const res = await client.callTool(
+      { name: toolName, arguments: args },
+      undefined,
+      { timeout: timeoutMs },
+    ) as { content: Array<{ type: string; text?: string }> };
     return parseEnvelope(res);
+  } catch (err) {
+    const msg = (err as Error).message ?? String(err);
+    if (msg.includes("timeout") || msg.includes("Timeout") || msg.includes("RequestTimeout")) {
+      return { ok: false, error: `timeout:${timeoutMs}ms:mcp:${toolName}` };
+    }
+    return { ok: false, error: `mcp_call_failed:${msg}` };
   } finally {
-    try { await client.close(); } catch { /* swallow */ }
+    try {
+      await client.close();
+    } catch (closeErr) {
+      // close() throws when the client never connected — benign during
+      // shutdown / timeout paths. Caller already has the envelope it needs.
+      void closeErr;
+    }
   }
 };

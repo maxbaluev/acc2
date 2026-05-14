@@ -99,9 +99,11 @@ export type CamofoxRuntimeObservation = {
 const RESULT_PREFIX = "@@RESULT@@ ";
 const IRREVERSIBLE_PREFIX = "@@IRREVERSIBLE@@ ";
 const STDERR_TAIL_BYTES = 1024;
-// Per §5.5: SIGKILL at wall_ms × 2 (firefox hung-page recovery is slow).
-const HARD_KILL_MULTIPLIER = 2;
-const KILL_GRACE_MS = 1000;
+/** Robustness: SIGKILL fires this many ms AFTER SIGTERM if the subprocess
+ *  has not exited. Firefox hung-page recovery is slow — we keep the
+ *  established 1s grace as default but allow operators to widen via
+ *  ACC2_CAMOFOX_SIGKILL_ESCALATION_MS when running on resource-starved hosts. */
+const SIGTERM_SIGKILL_ESCALATION_MS = 1_000;
 
 /** See runtimes/bun.ts for the convention — same parser, same semantics.
  *  The camofox wrapper captures console.log; user code emits the marker
@@ -468,17 +470,32 @@ const runCamofoxArtifactInner = async (
       } as JsonValue,
     });
 
+    // SIGTERM at wall_ms; SIGKILL escalation a fixed window later (independent
+    // of wall_ms — firefox hung pages should hard-kill within a bounded
+    // window, not after wall_ms × 2 + 1s).
+    const envEsc = Number(process.env.ACC2_CAMOFOX_SIGKILL_ESCALATION_MS ?? "");
+    const escMs = Number.isFinite(envEsc) && envEsc > 0 ? envEsc : SIGTERM_SIGKILL_ESCALATION_MS;
     softTimer = setTimeout(() => {
       softFired = true;
-      try { proc?.kill("SIGTERM"); } catch { /* already exited */ }
+      try { proc?.kill("SIGTERM"); } catch (killErr) { void killErr; }
+      hardTimer = setTimeout(() => {
+        if (proc && proc.exitCode === null) {
+          hardFired = true;
+          try { proc.kill("SIGKILL"); } catch (killErr) { void killErr; }
+          inv.emit?.({
+            kind: "runtime_subprocess_killed",
+            substrate_origin: "substrate_auto",
+            action_artifact_id: inv.artifactId,
+            payload: {
+              runtime: "camofox-browser",
+              reason: "sigterm_did_not_drain",
+              escalation_ms: escMs,
+              wall_ms: wallMs,
+            } as JsonValue,
+          });
+        }
+      }, escMs);
     }, Math.max(1, wallMs));
-
-    hardTimer = setTimeout(() => {
-      if (proc && proc.exitCode === null) {
-        hardFired = true;
-        try { proc.kill("SIGKILL"); } catch { /* already exited */ }
-      }
-    }, Math.max(1, Math.floor(wallMs * HARD_KILL_MULTIPLIER) + KILL_GRACE_MS));
 
     const [stdoutText, stderrText, exitCode] = await Promise.all([
       readStream(proc.stdout),
