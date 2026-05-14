@@ -26,8 +26,11 @@
 import type { Database } from "bun:sqlite";
 import { FastMCP } from "fastmcp";
 import { z } from "zod";
-import type { JsonValue, SubstrateOrigin } from "../substrate/types";
+import type { JsonValue, Runtime, SandboxDecl, SubstrateOrigin } from "../substrate/types";
 import { emitEvent, getEventById, type EmitEventInput } from "./events";
+import { runBunArtifact } from "./runtimes/bun";
+import { getArtifact } from "./artifact_store";
+import { admitArtifact } from "./artifact_admission";
 
 export type McpContext = {
   db: Database;
@@ -51,6 +54,7 @@ export const McpMethods = [
   "substrate.run_artifact",
   "substrate.run_verifier",
   "substrate.credit",
+  "substrate.admit_artifact",
 ] as const;
 export type McpMethodName = (typeof McpMethods)[number];
 
@@ -111,12 +115,37 @@ const SearchSchema = z.object({
 
 const RunArtifactSchema = z.object({
   artifact_id: z.string(),
+  inputs: z.unknown().optional(),
+  // Legacy alias from B3 surface — accepted for backwards compatibility with
+  // any caller that still sends `input` (singular).
   input: z.unknown().optional(),
+  budget: z
+    .object({
+      wall_ms: z.number().optional(),
+      memory_mb: z.number().optional(),
+    })
+    .optional(),
 });
 
 const RunVerifierSchema = z.object({
   verifier_artifact_id: z.string(),
   observation: z.unknown().optional(),
+  budget: z
+    .object({
+      wall_ms: z.number().optional(),
+      memory_mb: z.number().optional(),
+    })
+    .optional(),
+});
+
+const AdmitArtifactSchema = z.object({
+  runtime: z.enum(["bun", "uv", "camofox-browser"]),
+  body: z.string(),
+  declared_sandbox: z.unknown(),
+  fixture_input: z.unknown(),
+  fixture_expected_residual_below: z.number().optional(),
+  state_root: z.string().optional(),
+  name: z.string().optional(),
 });
 
 const CreditSchema = z
@@ -243,16 +272,107 @@ const handleSearch = (
   };
 };
 
-// Phase C / Phase H stubs — stable error strings so callers can pattern-match
-// the runtime-not-yet-implemented signal and skip the call.
-const handleRunArtifact = (): McpResult => ({
-  ok: false,
-  error: "runtime_not_yet_implemented",
-});
-const handleRunVerifier = (): McpResult => ({
-  ok: false,
-  error: "runtime_not_yet_implemented",
-});
+// ── Phase C runtime handlers ──────────────────────────────────────
+//
+// substrate.run_artifact dispatches by the artifact's stored runtime:
+//   - bun  → runBunArtifact (Phase C wires this)
+//   - uv / camofox-browser → return `phase_g_runtime_unsupported`
+// substrate.run_verifier is structurally identical — verifiers are just
+// code artifacts whose body is expected to return `{residual: number}`.
+// We do NOT enforce the shape; we pass the observation as inputs and let
+// the verifier body decide what to do.
+//
+// Phase H wires substrate.credit. For Phase C we leave the stub error
+// string in place so callers can still pattern-match — applyResidualOutcome
+// is exposed to the substrate elsewhere (admission + future credit pipeline).
+
+const callBunArtifactByRuntime = async (
+  ctx: McpContext,
+  artifactId: string,
+  inputs: JsonValue,
+  budget: { wall_ms?: number; memory_mb?: number } | undefined,
+): Promise<McpResult> => {
+  const row = getArtifact(ctx.db, artifactId);
+  if (!row) return { ok: false, error: "artifact_not_found" };
+  if (row.runtime !== "bun") {
+    return { ok: false, error: `phase_g_runtime_unsupported:${row.runtime}` };
+  }
+  const decl = row.declaredSandbox;
+  if (decl.runtime !== "bun") {
+    return { ok: false, error: "sandbox_decl_runtime_mismatch" };
+  }
+  const observation = await runBunArtifact({
+    artifactId: row.id,
+    body: row.body,
+    declaredSandbox: decl,
+    inputs,
+    budget: { wallMs: budget?.wall_ms, memoryMb: budget?.memory_mb },
+    emit: (event) => {
+      try {
+        emitEvent(ctx.db, { ...event, invoker: event.invoker ?? ctx.invoker });
+      } catch { /* event-emission failure must not poison the runtime */ }
+    },
+  });
+  return {
+    ok: true,
+    result: {
+      ok: observation.ok,
+      result: observation.result ?? null,
+      error: observation.error ?? null,
+      duration_ms: observation.durationMs,
+      exit_code: observation.exitCode,
+      stderr_tail: observation.stderrTail,
+      sandbox_warnings: observation.sandboxWarnings,
+      irreversible_effects: observation.irreversibleEffects,
+    } as JsonValue,
+  };
+};
+
+const handleRunArtifact = async (
+  ctx: McpContext,
+  args: z.infer<typeof RunArtifactSchema>,
+): Promise<McpResult> => {
+  const inputs = (args.inputs ?? args.input ?? null) as JsonValue;
+  return callBunArtifactByRuntime(ctx, args.artifact_id, inputs, args.budget as { wall_ms?: number; memory_mb?: number } | undefined);
+};
+
+const handleRunVerifier = async (
+  ctx: McpContext,
+  args: z.infer<typeof RunVerifierSchema>,
+): Promise<McpResult> => {
+  const observation = (args.observation ?? null) as JsonValue;
+  return callBunArtifactByRuntime(ctx, args.verifier_artifact_id, observation, args.budget as { wall_ms?: number; memory_mb?: number } | undefined);
+};
+
+const handleAdmitArtifact = async (
+  ctx: McpContext,
+  args: z.infer<typeof AdmitArtifactSchema>,
+): Promise<McpResult> => {
+  const runtime = args.runtime as Runtime;
+  const decl = args.declared_sandbox as SandboxDecl;
+  const result = await admitArtifact(
+    ctx.db,
+    {
+      runtime,
+      body: args.body,
+      declaredSandbox: decl,
+      fixtureInput: (args.fixture_input ?? null) as JsonValue,
+      fixtureExpectedResidualBelow: args.fixture_expected_residual_below ?? 0.2,
+      stateRoot: args.state_root,
+      name: args.name,
+    },
+    (event) => {
+      try {
+        emitEvent(ctx.db, { ...event, invoker: event.invoker ?? ctx.invoker });
+      } catch { /* swallow */ }
+    },
+  );
+  if (result.ok) {
+    return { ok: true, result: { artifact_id: result.artifactId } as JsonValue };
+  }
+  return { ok: false, error: `${result.reason}${result.detail ? `:${result.detail}` : ""}` };
+};
+
 const handleCredit = (): McpResult => ({
   ok: false,
   error: "credit_pipeline_phase_h",
@@ -287,12 +407,14 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
 
   // Each tool's `execute` returns `JSON.stringify(McpResult)` so the wire shape
   // is uniform regardless of which method was called. The MCP standard ships
-  // text content; the test client / brain re-parses the JSON.
+  // text content; the test client / brain re-parses the JSON. Handlers can be
+  // sync or async — we await the return so Phase C's runtime handlers (which
+  // spawn subprocesses) plug in without contortion.
   const wrap =
-    <A>(handler: (ctx: McpContext, args: A) => McpResult) =>
+    <A>(handler: (ctx: McpContext, args: A) => McpResult | Promise<McpResult>) =>
     async (args: unknown): Promise<string> => {
       try {
-        const result = handler(ctx, args as A);
+        const result = await handler(ctx, args as A);
         return JSON.stringify(result);
       } catch (err) {
         return JSON.stringify({
@@ -347,7 +469,8 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     name: "substrate.run_artifact",
     description:
       "Run a code artifact through its declared runtime + sandbox. " +
-      "(Phase C wires this up; until then returns runtime_not_yet_implemented.)",
+      "Phase C: bun-runtime artifacts execute end-to-end; uv and " +
+      "camofox-browser return phase_g_runtime_unsupported until Phase G.",
     parameters: RunArtifactSchema,
     execute: wrap(handleRunArtifact),
   });
@@ -355,8 +478,9 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
   server.addTool({
     name: "substrate.run_verifier",
     description:
-      "Run a verifier artifact against an observation; returns residual. " +
-      "(Phase C wires this up; until then returns runtime_not_yet_implemented.)",
+      "Run a verifier artifact against an observation; returns the " +
+      "verifier's JSON output (expected shape `{residual: number}`). " +
+      "Phase C wires bun verifiers; uv/camofox return phase_g_runtime_unsupported.",
     parameters: RunVerifierSchema,
     execute: wrap(handleRunVerifier),
   });
@@ -371,6 +495,17 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     execute: wrap(handleCredit),
   });
 
+  server.addTool({
+    name: "substrate.admit_artifact",
+    description:
+      "Admit a new code artifact. Validates its sandbox declaration, runs " +
+      "its fixture under the declared runtime, and on success inserts at " +
+      "score=0.5/confidence=0.3. uv and camofox-browser admissions are " +
+      "deferred to Phase G.",
+    parameters: AdmitArtifactSchema,
+    execute: wrap(handleAdmitArtifact),
+  });
+
   return server;
 };
 
@@ -381,7 +516,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
 // This export keeps that surface alive alongside the fastmcp transport so
 // the daemon's plain-HTTP route handler can dispatch by method name.
 
-const HTTP_DISPATCH: Record<string, (ctx: McpContext, args: any) => McpResult> = {
+const HTTP_DISPATCH: Record<string, (ctx: McpContext, args: any) => McpResult | Promise<McpResult>> = {
   "substrate.emit": handleEmit as any,
   "substrate.read": handleRead as any,
   "substrate.get_event": handleGetEvent as any,
@@ -390,6 +525,7 @@ const HTTP_DISPATCH: Record<string, (ctx: McpContext, args: any) => McpResult> =
   "substrate.run_artifact": handleRunArtifact as any,
   "substrate.run_verifier": handleRunVerifier as any,
   "substrate.credit": handleCredit as any,
+  "substrate.admit_artifact": handleAdmitArtifact as any,
 };
 
 /** Bun.serve route handler: POST /mcp/<method>. Parses JSON body, validates
@@ -413,7 +549,7 @@ export const handleMcpRequest = async (ctx: McpContext, req: Request): Promise<R
     return Response.json({ ok: false, error: `bad_json:${(err as Error).message}` }, { status: 400 });
   }
   try {
-    const result = handler(ctx, body);
+    const result = await handler(ctx, body);
     return Response.json(result, { status: result.ok ? 200 : 400 });
   } catch (err) {
     return Response.json(

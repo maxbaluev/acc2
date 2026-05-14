@@ -128,7 +128,7 @@ describe("fastmcp substrate tools — stdio transport", () => {
     expect(env.error).toBe("event_not_found");
   });
 
-  test("substrate.run_artifact returns the Phase C stub", async () => {
+  test("substrate.run_artifact returns artifact_not_found for an unknown id", async () => {
     const env = parseEnvelope(
       (await h!.client.callTool({
         name: "substrate.run_artifact",
@@ -136,10 +136,10 @@ describe("fastmcp substrate tools — stdio transport", () => {
       })) as ToolCallResponse,
     );
     expect(env.ok).toBe(false);
-    expect(env.error).toBe("runtime_not_yet_implemented");
+    expect(env.error).toBe("artifact_not_found");
   });
 
-  test("substrate.run_verifier returns the Phase C stub", async () => {
+  test("substrate.run_verifier returns artifact_not_found for an unknown id", async () => {
     const env = parseEnvelope(
       (await h!.client.callTool({
         name: "substrate.run_verifier",
@@ -147,7 +147,45 @@ describe("fastmcp substrate tools — stdio transport", () => {
       })) as ToolCallResponse,
     );
     expect(env.ok).toBe(false);
-    expect(env.error).toBe("runtime_not_yet_implemented");
+    expect(env.error).toBe("artifact_not_found");
+  });
+
+  test("substrate.admit_artifact + substrate.run_artifact light up the bun runtime end-to-end", async () => {
+    // Admit a tiny artifact that echoes its inputs and prints the result marker.
+    const body = [
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ value: (inputs?.x ?? 0) + 1 }));",
+    ].join("\n");
+    const admit = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.admit_artifact",
+        arguments: {
+          runtime: "bun",
+          body,
+          declared_sandbox: {
+            runtime: "bun",
+            cpu_ms: 2000,
+            wall_ms: 5000,
+            memory_mb: 128,
+          },
+          fixture_input: { x: 1 },
+          fixture_expected_residual_below: 0.2,
+        },
+      })) as ToolCallResponse,
+    );
+    expect(admit.ok).toBe(true);
+    const artifactId = admit.result.artifact_id as string;
+    expect(typeof artifactId).toBe("string");
+
+    const run = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.run_artifact",
+        arguments: { artifact_id: artifactId, inputs: { x: 41 } },
+      })) as ToolCallResponse,
+    );
+    expect(run.ok).toBe(true);
+    expect(run.result.ok).toBe(true);
+    expect(run.result.result.value).toBe(42);
   });
 
   test("substrate.credit returns the Phase H stub", async () => {
