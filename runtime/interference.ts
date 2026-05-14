@@ -20,7 +20,17 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent, type EmitEventInput } from "./events";
 
-export type InterferenceEdgeKind = "blocks" | "watches" | "depletes";
+export type InterferenceEdgeKind =
+  | "blocks"
+  | "watches"
+  | "depletes"
+  // Phase DAG: concurrency-aware conflicts the scheduler honours when
+  // ranking ready tasks. `mutual_exclusion` — the two directives cannot run
+  // concurrently (one must finish before the other proceeds). `resource_conflict`
+  // — they contend for the same finite resource (browser profile, calendar
+  // slot, external rate limit); the scheduler also serialises these.
+  | "mutual_exclusion"
+  | "resource_conflict";
 
 export type InterferenceEdge = {
   from_directive: string;
@@ -32,7 +42,19 @@ export type InterferenceEdge = {
 };
 
 const isEdgeKind = (k: unknown): k is InterferenceEdgeKind =>
-  k === "blocks" || k === "watches" || k === "depletes";
+  k === "blocks" ||
+  k === "watches" ||
+  k === "depletes" ||
+  k === "mutual_exclusion" ||
+  k === "resource_conflict";
+
+/** Scheduler-aware concurrency conflicts. When two directives are joined by
+ *  an edge of one of these kinds AND any task on the source side is
+ *  in-flight, the scheduler defers ready tasks on the target side. */
+const CONCURRENCY_CONFLICT_KINDS: ReadonlySet<InterferenceEdgeKind> = new Set([
+  "mutual_exclusion",
+  "resource_conflict",
+]);
 
 /** Read every directive_interference_edge event as a typed edge row. Older
  *  edges remain — the substrate is append-only — so retraction is modelled
@@ -248,6 +270,36 @@ export const renderInterferenceBlock = (
     lines.push(`  ${e.from_directive} ${arrow}[${e.kind}] ${other} — ${e.reason || "(no reason)"}`);
   }
   return lines.join("\n");
+};
+
+/** Scheduler-side concurrency check (v2-design.md §3.4, Phase DAG).
+ *
+ *  For a candidate ready task that belongs to `directiveId`, return the FIRST
+ *  in-flight directive that conflicts with it via a `mutual_exclusion` or
+ *  `resource_conflict` edge in either direction. Returns `null` when no such
+ *  conflict exists; the scheduler then dispatches normally. When non-null,
+ *  the caller defers the candidate and emits `task_deferred_for_interference`.
+ *
+ *  Edges are direction-agnostic for these two kinds — a mutual-exclusion edge
+ *  A↔B serialises the pair regardless of which side authored the edge. */
+export const findDeferringConflict = (
+  db: Database,
+  directiveId: string,
+  inFlightDirectiveIds: ReadonlySet<string>,
+): { conflicting_directive: string; kind: InterferenceEdgeKind } | null => {
+  if (inFlightDirectiveIds.size === 0) return null;
+  const edges = readInterferenceEdges(db).filter((e) =>
+    CONCURRENCY_CONFLICT_KINDS.has(e.kind),
+  );
+  for (const e of edges) {
+    if (e.from_directive === directiveId && inFlightDirectiveIds.has(e.to_directive)) {
+      return { conflicting_directive: e.to_directive, kind: e.kind };
+    }
+    if (e.to_directive === directiveId && inFlightDirectiveIds.has(e.from_directive)) {
+      return { conflicting_directive: e.from_directive, kind: e.kind };
+    }
+  }
+  return null;
 };
 
 /** Return the set of directive_ids that currently block `directiveId` via

@@ -12,6 +12,7 @@ import {
   readyTasks,
   runViews,
   taskGraphFor,
+  watchEdgeObservations,
 } from "./views";
 
 afterAll(() => closeDb());
@@ -85,6 +86,7 @@ describe("runViews", () => {
       "ready_tasks_view",
       "rolling_review_due_view",
       "task_graph_view",
+      "watch_edge_observations_view",
     ]) {
       expect(views).toContain(expected);
     }
@@ -135,6 +137,100 @@ describe("task_graph_view + taskGraphFor", () => {
     expect(edges).toHaveLength(1);
     expect(nodes.map((n) => n.task_id).sort()).toEqual(["t_a", "t_b"]);
     expect(edges[0]!.payload).toMatchObject({ from: "t_a", to: "t_b", kind: "requires" });
+  });
+});
+
+describe("watch_edge_observations_view + watchEdgeObservations", () => {
+  test("surfaces latest upstream observation for a downstream watcher", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    // A watches→ B; A emits two action_scored events; the view returns the
+    // most-recent one.
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d1", task_id: "t_a" });
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d1", task_id: "t_b" });
+    insertEvent(db, {
+      kind: "task_edge_recorded",
+      directive_id: "d1",
+      task_id: "t_b",
+      payload: { from_task: "t_a", to_task: "t_b", kind: "watches", consistency_mode: "snapshot_now" },
+    });
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d1",
+      task_id: "t_a",
+      payload: { iter: 1, value: "early" },
+    });
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d1",
+      task_id: "t_a",
+      payload: { iter: 2, value: "LATEST_PROBE" },
+    });
+
+    const rows = watchEdgeObservations(db, "t_b");
+    // One row per (upstream, event_kind): task_node_opened + action_scored.
+    // The action_scored row carries the LATEST of the two iterations.
+    const scored = rows.find((r) => r.event_kind === "action_scored");
+    expect(scored).toBeDefined();
+    expect(scored!.downstream_task_id).toBe("t_b");
+    expect(scored!.upstream_task_id).toBe("t_a");
+    expect(scored!.consistency_mode).toBe("snapshot_now");
+    expect((scored!.payload as Record<string, unknown>).value).toBe("LATEST_PROBE");
+  });
+
+  test("returns empty result when no watch edges target the task", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d1", task_id: "t_solo" });
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d1",
+      task_id: "t_solo",
+      payload: { iter: 1 },
+    });
+    expect(watchEdgeObservations(db, "t_solo")).toEqual([]);
+  });
+
+  test("multiple watched upstreams each contribute a row per event_kind", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    for (const t of ["t_u1", "t_u2", "t_down"]) {
+      insertEvent(db, { kind: "task_node_opened", directive_id: "d1", task_id: t });
+    }
+    insertEvent(db, {
+      kind: "task_edge_recorded",
+      directive_id: "d1",
+      task_id: "t_down",
+      payload: { from_task: "t_u1", to_task: "t_down", kind: "watches", consistency_mode: "snapshot_now" },
+    });
+    insertEvent(db, {
+      kind: "task_edge_recorded",
+      directive_id: "d1",
+      task_id: "t_down",
+      payload: { from_task: "t_u2", to_task: "t_down", kind: "watches", consistency_mode: "snapshot_now" },
+    });
+    insertEvent(db, {
+      kind: "artifact_observed",
+      directive_id: "d1",
+      task_id: "t_u1",
+      payload: { from: "u1" },
+    });
+    insertEvent(db, {
+      kind: "artifact_observed",
+      directive_id: "d1",
+      task_id: "t_u2",
+      payload: { from: "u2" },
+    });
+
+    const rows = watchEdgeObservations(db, "t_down");
+    // One row per (upstream, event_kind). The task_node_opened on each
+    // upstream + the artifact_observed both surface; the unique upstream
+    // ids are still exactly {t_u1, t_u2}.
+    const upstreams = Array.from(new Set(rows.map((r) => r.upstream_task_id))).sort();
+    expect(upstreams).toEqual(["t_u1", "t_u2"]);
+    const observed = rows.filter((r) => r.event_kind === "artifact_observed");
+    expect(observed.map((r) => r.upstream_task_id).sort()).toEqual(["t_u1", "t_u2"]);
   });
 });
 

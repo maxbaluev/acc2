@@ -26,6 +26,7 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent, type EmitEventInput } from "./events";
+import { newId } from "./ids";
 
 export type StakeholderVisibility = "full" | "limited" | "blind";
 
@@ -237,7 +238,17 @@ export const renderStakeholderBlock = (
 
 /** Emit a stakeholder_conflict event AND an owner_input_required event so the
  *  orchestrator can route the question to the owner via chat. Used by callers
- *  that detect a conflict during DAG composition or post-amendment review. */
+ *  that detect a conflict during DAG composition or post-amendment review.
+ *
+ *  Phase DAG additions:
+ *   - `stakeholder_conflict_detected` — a typed detection event distinct from
+ *     the (legacy) `stakeholder_conflict` adjudication event. Downstream
+ *     surfaces (TUI, scenario harness) read this to know a conflict was found
+ *     in this iteration vs. carried over from history.
+ *   - `task_node_opened` for a `stakeholder_consult` review subtask under the
+ *     same directive — gives the brain a concrete DAG node to dispatch when
+ *     resolving the disagreement instead of relying on owner chat alone.
+ */
 export const emitStakeholderConflict = (
   db: Database,
   directiveId: string,
@@ -256,6 +267,34 @@ export const emitStakeholderConflict = (
     } as JsonValue,
   });
   emit({
+    kind: "stakeholder_conflict_detected",
+    substrate_origin: "substrate_auto",
+    directive_id: directiveId,
+    failure_kind: "stakeholder_conflict",
+    payload: {
+      pair: conflict.pair,
+      conflicting_field: conflict.conflicting_field,
+      detail: conflict.detail,
+      detected_by: "stakeholder_compositor",
+    } as JsonValue,
+  });
+  const consultTaskId = newId();
+  emit({
+    kind: "task_node_opened",
+    substrate_origin: "substrate_auto",
+    directive_id: directiveId,
+    task_id: consultTaskId,
+    parent_task_id: null,
+    payload: {
+      goal: `stakeholder_consult: resolve ${conflict.pair[0]} ↔ ${conflict.pair[1]} on ${conflict.conflicting_field}`,
+      lifecycle: "finite",
+      urgency: "elevated",
+      task_kind: "stakeholder_consult",
+      pair: conflict.pair,
+      conflicting_field: conflict.conflicting_field,
+    } as JsonValue,
+  });
+  emit({
     kind: "owner_input_required",
     substrate_origin: "substrate_auto",
     directive_id: directiveId,
@@ -264,6 +303,7 @@ export const emitStakeholderConflict = (
       pair: conflict.pair,
       conflicting_field: conflict.conflicting_field,
       detail: conflict.detail,
+      consult_task_id: consultTaskId,
       prompt:
         `Stakeholders ${conflict.pair[0]} and ${conflict.pair[1]} disagree on ` +
         `${conflict.conflicting_field}. ${conflict.detail}. How should this resolve?`,

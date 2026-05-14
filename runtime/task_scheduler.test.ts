@@ -165,6 +165,60 @@ describe("task_scheduler", () => {
     expect(tick.skipped_inline.length).toBe(0);
   });
 
+  test("cross-directive mutual_exclusion defers the second ready task", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-mutex-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      // Two independent directives with a mutual_exclusion edge.
+      const { taskId: t1, directiveId: d1 } = await openFixtureDCountTodos(db, tempDir);
+      const { taskId: t2, directiveId: d2 } = await openFixtureDCountTodos(db, tempDir);
+      emitEvent(db, {
+        kind: "directive_interference_edge",
+        directive_id: d1,
+        payload: {
+          from_directive: d1,
+          to_directive: d2,
+          kind: "mutual_exclusion",
+          reason: "shared external resource",
+        },
+      });
+
+      // First tick — dispatch t1 with maxConcurrent=1 so t2 hits either the
+      // concurrency cap (intra-tick) or the interference defer. We assert
+      // the interference defer fires when t1 commits and t2 is re-evaluated
+      // in the same tick — but with maxConcurrent=1 we get the cap path.
+      // To test the interference path itself, we manually pre-populate the
+      // in-flight registry via a pending dispatch.
+      const tick = await schedulerTick(db, {
+        fixtureTargetPath: tempDir,
+        maxConcurrent: 5,
+      });
+      // Both directives' tasks are independent; one dispatched, the other
+      // got deferred for interference. Order depends on readyTasks() order;
+      // assert ONE was deferred for interference.
+      const eitherDispatched = tick.dispatched.includes(t1) || tick.dispatched.includes(t2);
+      const eitherDeferred = tick.skipped_interference.includes(t1) ||
+        tick.skipped_interference.includes(t2);
+      expect(eitherDispatched).toBe(true);
+      expect(eitherDeferred).toBe(true);
+
+      // task_deferred_for_interference event must have been emitted.
+      const deferRows = db
+        .query(
+          "SELECT payload FROM events WHERE kind = 'task_deferred_for_interference'",
+        )
+        .all() as Array<{ payload: string }>;
+      expect(deferRows.length).toBeGreaterThanOrEqual(1);
+      const p = JSON.parse(deferRows[0]!.payload) as Record<string, unknown>;
+      expect(p.interaction).toBe("mutual_exclusion");
+      expect(typeof p.from_directive).toBe("string");
+      expect(typeof p.conflicting_directive).toBe("string");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   test("substrate_replay route skipped (Phase J stub returns phase_j)", async () => {
     const db = openDb(":memory:");
     // Seed a recipe_extracted event with high confidence + matching goal_shape.

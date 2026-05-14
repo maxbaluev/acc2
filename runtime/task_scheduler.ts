@@ -29,6 +29,7 @@ import { dispatchReadyTask } from "./task_dispatcher";
 import { decideDispatch } from "./dispatch_decider";
 import { emitEvent } from "./events";
 import { readCurrentMode, applyModeAdjustments } from "./crisis_mode";
+import { findDeferringConflict } from "./interference";
 
 export type SchedulerOpts = {
   maxConcurrent?: number;
@@ -44,6 +45,10 @@ export type SchedulerTick = {
   skipped_recipe: string[];
   skipped_inline: string[];
   skipped_blocked: string[];
+  /** Tasks deferred because a `mutual_exclusion` or `resource_conflict`
+   *  interference edge points at an in-flight peer directive. The scheduler
+   *  emits `task_deferred_for_interference` for each entry here. */
+  skipped_interference: string[];
 };
 
 const DEFAULT_MAX_CONCURRENT = 5;
@@ -53,6 +58,12 @@ const DEFAULT_POLL_INTERVAL_MS = 500;
 // dispatcher promises resolve here. Keys are task_ids; values are the
 // underlying promise so the loop can await any completion when needed.
 const IN_FLIGHT: Map<string, Promise<unknown>> = new Map();
+
+// Companion map: task_id → directive_id so the scheduler can compute the set
+// of in-flight directives without re-reading SQLite. Kept in sync with
+// IN_FLIGHT (same insertion / deletion sites). Used for the interference
+// concurrency check (`findDeferringConflict`).
+const IN_FLIGHT_DIRECTIVE: Map<string, string> = new Map();
 
 const phaseJRecipeReplay = (): { ok: false; error: "phase_j" } => ({
   ok: false,
@@ -101,6 +112,7 @@ export const schedulerTick = async (
   for (const [taskId, p] of IN_FLIGHT) {
     if ((p as Promise<unknown> & { _settled?: boolean })._settled) {
       IN_FLIGHT.delete(taskId);
+      IN_FLIGHT_DIRECTIVE.delete(taskId);
     }
   }
 
@@ -109,10 +121,35 @@ export const schedulerTick = async (
   const skippedRecipe: string[] = [];
   const skippedInline: string[] = [];
   const skippedBlocked: string[] = [];
+  const skippedInterference: string[] = [];
   const pending: Array<Promise<unknown>> = [];
 
   for (const task of ready) {
     if (IN_FLIGHT.has(task.id)) continue; // already dispatched in a prior tick.
+
+    // Cross-directive interference (Phase DAG): defer when a peer directive
+    // joined by `mutual_exclusion` / `resource_conflict` is in-flight. We
+    // assemble the in-flight directive set from the live registry (the same
+    // tick's dispatches are appended below so two intra-tick conflicts also
+    // serialise).
+    const inFlightDirectives = new Set<string>(IN_FLIGHT_DIRECTIVE.values());
+    const conflict = findDeferringConflict(db, task.directive_id, inFlightDirectives);
+    if (conflict !== null) {
+      skippedInterference.push(task.id);
+      emitEvent(db, {
+        kind: "task_deferred_for_interference",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        payload: {
+          from_directive: task.directive_id,
+          conflicting_directive: conflict.conflicting_directive,
+          interaction: conflict.kind,
+          reason: "concurrency_conflict_with_in_flight_directive",
+        } as JsonValue,
+      });
+      continue;
+    }
 
     const slotsLeft = maxConcurrent - IN_FLIGHT.size;
     if (slotsLeft <= 0) {
@@ -185,6 +222,7 @@ export const schedulerTick = async (
       })
       .finally(() => {
         IN_FLIGHT.delete(task.id);
+        IN_FLIGHT_DIRECTIVE.delete(task.id);
       });
     // Mark settled-flag accessor lazily — best-effort cleanup helper.
     (promise as Promise<unknown> & { _settled?: boolean })._settled = false;
@@ -193,6 +231,7 @@ export const schedulerTick = async (
       () => ((promise as Promise<unknown> & { _settled?: boolean })._settled = true),
     );
     IN_FLIGHT.set(task.id, promise);
+    IN_FLIGHT_DIRECTIVE.set(task.id, task.directive_id);
     pending.push(promise);
     dispatched.push(task.id);
   }
@@ -212,6 +251,7 @@ export const schedulerTick = async (
     skipped_recipe: skippedRecipe,
     skipped_inline: skippedInline,
     skipped_blocked: skippedBlocked,
+    skipped_interference: skippedInterference,
   };
 };
 
@@ -256,4 +296,5 @@ export const schedulerLoop = async (
 /** Test-only: clear the process-local in-flight registry. */
 export const _resetSchedulerForTests = (): void => {
   IN_FLIGHT.clear();
+  IN_FLIGHT_DIRECTIVE.clear();
 };
