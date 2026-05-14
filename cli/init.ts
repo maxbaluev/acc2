@@ -27,7 +27,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { newAdminToken } from "../runtime/ids";
 import { openDb, closeDb } from "../substrate/db";
-import { seedCodeArtifacts, seedFoundationalKnowledge } from "../substrate/seed";
+import { seedCodeArtifacts, seedFoundationalKnowledge, seedRecipes } from "../substrate/seed";
+import { embedPendingEvents } from "../runtime/embedder";
 import {
   migrateLegacyLayout,
   resolveDbPath, resolveSocketFile, resolveStateDir,
@@ -192,6 +193,13 @@ export type InitSummary = {
   /** Number of canonical seed_* code artifacts inserted on this run.
    *  0 means "already seeded" (idempotent re-run) — see seedCodeArtifacts. */
   codeArtifactsImported: number;
+  /** Number of canonical Tier-0 recipe templates seeded on this run.
+   *  0 means "already seeded" (idempotent). See seedRecipes. */
+  recipesSeeded: number;
+  /** Number of events synchronously embedded into vec_events on this run.
+   *  0 when OPENAI_API_KEY is missing (operator must run `acc admin embed-all`
+   *  after setting the key) or when there were no embeddable events. */
+  eventsEmbedded: number;
   warnings: string[];
 };
 
@@ -209,6 +217,8 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
     camoufoxPath: null,
     foundationalSeedImported: 0,
     codeArtifactsImported: 0,
+    recipesSeeded: 0,
+    eventsEmbedded: 0,
     warnings: [],
   };
 
@@ -336,6 +346,28 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
         `[7b/8] code artifacts: imported ${artifactSummary.inserted} canonical artifacts (action + verifier pairs)` +
           (artifactSummary.skipped > 0 ? `  (${artifactSummary.skipped} already present)` : ""),
       );
+      // Step 7c — canonical Tier-0 recipe templates so substrate_replay has
+      // something to match on day 1 (otherwise every first dispatch routes
+      // through opencode_brain even for shapes we've already solved).
+      const recipeSummary = seedRecipes(db);
+      summary.recipesSeeded = recipeSummary.count;
+      log(
+        `[7c/8] recipes: seeded ${recipeSummary.count} canonical Tier-0 recipe templates`,
+      );
+      // Step 7d — synchronously embed every freshly-seeded event so
+      // vec_events is populated at init time. The brain's mid-cycle
+      // `substrate.search` would otherwise return empty until the embedder
+      // worker catches up. Honors OPENAI_API_KEY presence — without it,
+      // emits a single audit row and skips cleanly.
+      const embedSummary = await embedPendingEvents(db);
+      summary.eventsEmbedded = embedSummary.embedded;
+      if (embedSummary.embedded > 0) {
+        log(`[7d/8] embeddings: indexed ${embedSummary.embedded} events into vec_events`);
+      } else if (embedSummary.skipped > 0 && !process.env.OPENAI_API_KEY) {
+        log(`[7d/8] embeddings: skipped (OPENAI_API_KEY missing) — set it and run \`acc admin embed-all\``);
+      } else {
+        log(`[7d/8] embeddings: nothing pending`);
+      }
     } finally {
       closeDb(paths.dbPath);
     }
