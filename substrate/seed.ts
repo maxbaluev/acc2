@@ -534,6 +534,111 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     fixture_expected_residual: 0.0,
     display_name: "py_run",
   },
+  {
+    // Reusable gap-contract action for strategic-governance decomposition.
+    // The lesson (event 1WH7V4VBHD37968S22VPKD3MEG, task T_FATHER_GOVERNANCE_06)
+    // observed that governance refinement subtasks land more useful when
+    // each gap is packaged as an executable contract (action + scalar
+    // verifier) instead of prose. ONE artifact pair (this body + the
+    // verifier below) validates many ranked gap contracts because the
+    // task-specific metric / gates ride in `inputs`.
+    //
+    // inputs: { gap_kind, target, current_state, desired_state,
+    //           metric_name, evidence_event_ids[] }
+    // result: { ok, contract_id, gap_kind, target, current_state,
+    //           desired_state, metric_name, evidence_event_ids[] }
+    seedName: "governance_gap_contract_action",
+    runtime: "bun",
+    body: [
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null') ?? {};",
+      "const required = ['gap_kind', 'target', 'current_state', 'desired_state', 'metric_name'];",
+      "const missing = required.filter((k) => !(k in inputs) || typeof inputs[k] !== 'string' || inputs[k].length === 0);",
+      "if (missing.length > 0) {",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'missing_fields:' + missing.join(',') }));",
+      "  process.exit(0);",
+      "}",
+      "const evidence = Array.isArray(inputs.evidence_event_ids) ? inputs.evidence_event_ids.filter((e) => typeof e === 'string' && e.length > 0) : [];",
+      "if (evidence.length === 0) {",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'evidence_event_ids_empty' }));",
+      "  process.exit(0);",
+      "}",
+      "// Stable contract id derived from gap_kind + target + metric_name so two",
+      "// dispatches with the same gap shape land on the same canonical contract.",
+      "const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 32);",
+      "const contractId = 'gap_' + slug(inputs.gap_kind) + '__' + slug(inputs.target) + '__' + slug(inputs.metric_name);",
+      "console.log('@@RESULT@@ ' + JSON.stringify({",
+      "  ok: true,",
+      "  contract_id: contractId,",
+      "  gap_kind: inputs.gap_kind,",
+      "  target: inputs.target,",
+      "  current_state: inputs.current_state,",
+      "  desired_state: inputs.desired_state,",
+      "  metric_name: inputs.metric_name,",
+      "  evidence_event_ids: evidence,",
+      "}));",
+    ].join("\n"),
+    declared_sandbox: {
+      runtime: "bun",
+      cpu_ms: 2000,
+      wall_ms: 5000,
+      memory_mb: 128,
+    },
+    state_root: "substrate/governance/gap_contract",
+    initial_score: 0.80,
+    initial_confidence: 0.70,
+    fixture_input: {
+      gap_kind: "verifier_gap",
+      target: "T_FATHER_GOVERNANCE_06",
+      current_state: "refinement subtasks land as prose",
+      desired_state: "refinement subtasks land as executable gap contracts",
+      metric_name: "subtasks_with_scalar_verifier_ratio",
+      evidence_event_ids: ["1WH7V4VBHD37968S22VPKD3MEG"],
+    },
+    fixture_expected_residual: 0.0,
+    display_name: "governance_gap_contract_action",
+  },
+  {
+    // Companion scalar verifier for governance_gap_contract_action. Reads
+    // the upstream observation and returns residual=0 iff every required
+    // field is present, evidence_event_ids is non-empty, and contract_id
+    // matches the slug shape. Any other shape returns residual=1. The
+    // verifier is task-agnostic — multiple ranked gap contracts share the
+    // same code path while the action's inputs carry the task-specific
+    // metric and evidence.
+    seedName: "governance_gap_contract_verifier",
+    runtime: "bun",
+    body: [
+      "const obs = JSON.parse(process.env.ACC2_INPUTS ?? 'null') ?? {};",
+      "const required = ['contract_id', 'gap_kind', 'target', 'current_state', 'desired_state', 'metric_name'];",
+      "const fieldsOk = obs.ok === true && required.every((k) => typeof obs[k] === 'string' && obs[k].length > 0);",
+      "const evidenceOk = Array.isArray(obs.evidence_event_ids) && obs.evidence_event_ids.length > 0",
+      "  && obs.evidence_event_ids.every((e) => typeof e === 'string' && e.length > 0);",
+      "const contractIdOk = typeof obs.contract_id === 'string' && /^gap_[a-z0-9_]+__[a-z0-9_]+__[a-z0-9_]+$/.test(obs.contract_id);",
+      "const residual = fieldsOk && evidenceOk && contractIdOk ? 0 : 1;",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ residual }));",
+    ].join("\n"),
+    declared_sandbox: {
+      runtime: "bun",
+      cpu_ms: 2000,
+      wall_ms: 5000,
+      memory_mb: 128,
+    },
+    state_root: "substrate/governance/gap_contract/verifier",
+    initial_score: 0.80,
+    initial_confidence: 0.70,
+    fixture_input: {
+      ok: true,
+      contract_id: "gap_verifier_gap__t_father_governance_06__subtasks_with_scalar_verifier_ra",
+      gap_kind: "verifier_gap",
+      target: "T_FATHER_GOVERNANCE_06",
+      current_state: "refinement subtasks land as prose",
+      desired_state: "refinement subtasks land as executable gap contracts",
+      metric_name: "subtasks_with_scalar_verifier_ratio",
+      evidence_event_ids: ["1WH7V4VBHD37968S22VPKD3MEG"],
+    },
+    fixture_expected_residual: 0.0,
+    display_name: "governance_gap_contract_verifier",
+  },
 ];
 
 export type CodeArtifactSeedSummary = { inserted: number; skipped: number };
