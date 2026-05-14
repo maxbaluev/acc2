@@ -86,7 +86,7 @@ ${stateDir}/
 | `ACC2_STATE_DIR`      | `~/.accint`                              |
 | `ACC2_SOCKET_FILE`    | `${ACC2_STATE_DIR}/v2.sock`              |
 | `ACC2_TOKEN_FILE`     | `${ACC2_STATE_DIR}/v2.sock.token`        |
-| `ACC2_DB_PATH`        | `${ACC2_STATE_DIR}/state.db` when ACC2_STATE_DIR is set; otherwise `<repo>/state/accint.db` for dev-from-checkout. |
+| `ACC2_DB_PATH`        | `${ACC2_STATE_DIR}/state.db` (always — no dev fallback; the source tree is never a state location). |
 
 Each env var is honored independently — set `ACC2_SOCKET_FILE` alone to
 relocate just the socket without touching the rest. The daemon, the
@@ -112,6 +112,17 @@ automatically on the next `acc init` or daemon boot — a
 `cli_layout_migrated` event lands in the ledger so you can see exactly
 what moved. Operators who upgraded from a pre-canonical install do not
 need to do anything; the rename is idempotent.
+
+Integration / smoke runs occasionally leave stale state dirs under
+`/tmp/` (notably `/tmp/acc2-harness-task-*` and `/tmp/acc2-cli-*`).
+Sweep them with:
+
+```bash
+acc admin clean-temp-state
+```
+
+The command emits zero substrate events (OS hygiene only) and refuses
+any path outside the matching globs as a safety guard.
 
 ---
 

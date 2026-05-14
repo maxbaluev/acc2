@@ -9,11 +9,7 @@ node_modules/
 package-lock.json
 bun.lock
 
-# Runtime state — daemon owns this; never commit
-/state/*
-!/state/.gitkeep
-
-# Daemon runtime artifacts
+# Daemon runtime artifacts — state lives outside the source tree
 ~/.accint/
 /.accint/
 

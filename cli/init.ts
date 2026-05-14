@@ -44,7 +44,7 @@ export type InitPaths = {
   tmpDir: string;              // ${stateDir}/tmp
   socketFile: string;          // ${stateDir}/v2.sock
   tokenFile: string;           // ${stateDir}/v2.sock.token
-  dbPath: string;              // ${stateDir}/state.db (or <repo>/state/accint.db fallback)
+  dbPath: string;              // ${stateDir}/state.db
   envFile: string;             // <cwd>/.env
 };
 
@@ -52,19 +52,13 @@ export const resolveInitPaths = (cwd: string = process.cwd()): InitPaths => {
   // Single source of truth: the resolver module honours ACC2_STATE_DIR
   // first, then falls back to ~/.accint.
   const stateDir = resolveStateDir();
-  // The daemon's `<repo>` fallback (only used when no state-dir env is
-  // set) needs an anchor — init.ts lives at <repo>/cli/init.ts, so the
-  // repo root is two dirs up from this file. We pass it to resolveDbPath
-  // so dev-from-checkout still lands at <repo>/state/accint.db when
-  // ACC2_STATE_DIR is unset.
-  const repoRoot = join(import.meta.dirname ?? cwd, "..");
   return {
     stateDir,
     logsDir: join(stateDir, "logs"),
     tmpDir: join(stateDir, "tmp"),
     socketFile: resolveSocketFile(),
     tokenFile: resolveTokenFile(),
-    dbPath: resolveDbPath(repoRoot),
+    dbPath: resolveDbPath(),
     envFile: join(cwd, ".env"),
   };
 };

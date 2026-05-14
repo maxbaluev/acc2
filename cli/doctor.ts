@@ -111,10 +111,9 @@ const realDaemonHealth = async (): Promise<DaemonHealthSnapshot> => {
 
 const realSubstrateCounts = (): SubstrateCounts => {
   // Resolve the canonical DB path the same way the daemon does so
-  // doctor sees what daemon-start would open. anchor = repo root (two
-  // dirs up from cli/doctor.ts).
-  const repoRoot = join(import.meta.dirname ?? ".", "..");
-  const dbPath = resolveDbPath(repoRoot);
+  // doctor sees what daemon-start would open. resolveDbPath honors
+  // ACC2_DB_PATH / ${stateDir}/state.db with no repo fallback.
+  const dbPath = resolveDbPath();
   if (!existsSync(dbPath)) {
     return {
       knowledgePromoted: NaN, seedArtifacts: NaN,

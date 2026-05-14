@@ -84,19 +84,19 @@ describe("resolveSocketFile / resolveTokenFile / resolveDbPath", () => {
     expect(resolveSocketFile()).toBe("/tmp/dir/v2.sock");
   });
 
-  test("ACC2_DB_PATH wins over ACC2_STATE_DIR and over the repo fallback", () => {
+  test("ACC2_DB_PATH wins over ACC2_STATE_DIR", () => {
     process.env.ACC2_STATE_DIR = "/tmp/dir";
     process.env.ACC2_DB_PATH = "/tmp/custom.db";
-    expect(resolveDbPath("/repo-root")).toBe("/tmp/custom.db");
+    expect(resolveDbPath()).toBe("/tmp/custom.db");
   });
 
   test("dbPath = ${ACC2_STATE_DIR}/state.db when set", () => {
     process.env.ACC2_STATE_DIR = "/tmp/dir";
-    expect(resolveDbPath("/repo-root")).toBe("/tmp/dir/state.db");
+    expect(resolveDbPath()).toBe("/tmp/dir/state.db");
   });
 
-  test("dbPath falls back to <repo>/state/accint.db when no env is set", () => {
-    expect(resolveDbPath("/repo-root")).toBe("/repo-root/state/accint.db");
+  test("dbPath falls back to ~/.accint/state.db when no env is set", () => {
+    expect(resolveDbPath()).toBe(join(homedir(), ".accint", "state.db"));
   });
 
   test("resolvers re-read env on every call (lazy semantics)", () => {

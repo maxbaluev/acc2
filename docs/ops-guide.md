@@ -174,18 +174,18 @@ External dependencies evolve independently of acc2. The brain subprocess (openco
 
 ## 6. Backup
 
-The substrate is one SQLite file (`~/.accint/state/accint.db` by default, configurable via `ACC2_STATE_DIR`/`ACC2_DB_PATH`). It is the canonical state — if you lose it, you lose accumulated judgment.
+The substrate is one SQLite file (`~/.accint/state.db` by default, configurable via `ACC2_STATE_DIR`/`ACC2_DB_PATH`). It is the canonical state — if you lose it, you lose accumulated judgment. There is no dev-from-checkout fallback; the source tree is never a state location.
 
 **Stop the daemon, copy the file:**
 
 ```bash
 bun cli/dispatch.ts daemon stop
 # Wait for /health to stop responding.
-cp -a ~/.accint/state ~/accint-backup-$(date +%Y%m%d)
+cp -a ~/.accint ~/accint-backup-$(date +%Y%m%d)
 bun cli/dispatch.ts daemon start
 ```
 
-You must copy both `accint.db` and any sibling files (`accint.db-wal`, `accint.db-shm`) — they are part of the same database.
+You must copy both `state.db` and any sibling files (`state.db-wal`, `state.db-shm`) — they are part of the same database.
 
 A full `acc admin export` flow with online snapshots ships in Batch 3.
 
@@ -241,7 +241,7 @@ The composite readiness check requires four greens: daemon health + `OPENAI_API_
 
 | Path | Purpose |
 |---|---|
-| `~/.accint/state/accint.db` | Substrate SQLite (the only state that matters). |
+| `~/.accint/state.db` | Substrate SQLite (the only state that matters). |
 | `~/.accint/v2.sock` | Lock file with MCP + aux port. |
 | `~/.accint/v2.sock.token` | Admin token (required for `daemon stop`). |
 | `~/.config/systemd/user/accint.service` | systemd user unit, if installed. |
@@ -249,4 +249,8 @@ The composite readiness check requires four greens: daemon health + `OPENAI_API_
 | `~/Library/LaunchAgents/com.accint.daemon.plist` | launchd plist (macOS), if installed. |
 | `~/Library/Logs/accint.daemon.{out,err}.log` | launchd stdout/stderr (macOS). |
 
-All of these paths respect the `ACC2_STATE_DIR` env var if set.
+All of these paths respect the `ACC2_STATE_DIR` env var if set. There is
+no `state/` subdir under the state root and no fallback into the source
+tree — the resolver always lands at `${stateDir}/state.db`. Sweep stale
+`/tmp/acc2-harness-*` and `/tmp/acc2-cli-*` dirs left behind by
+integration / smoke runs with `acc admin clean-temp-state`.
