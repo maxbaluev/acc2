@@ -8,7 +8,7 @@
     "acc": "bun cli/dispatch.ts",
     "test": "bun test --bail",
     "postinstall": "bun scripts/postinstall.ts",
-    "browser:fetch": "bunx playwright install chromium && bun scripts/fetch-camoufox.ts"
+    "browser:fetch": "bun scripts/fetch-camoufox.ts"
   },
   "bin": {
     "acc": "cli/dispatch.ts"
