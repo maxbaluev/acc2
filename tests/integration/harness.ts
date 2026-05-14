@@ -4,9 +4,9 @@
 //
 // Two modes:
 //
-// 1. Scenario gate (default). Boots an ephemeral daemon and runs the 9
+// 1. Scenario gate (default). Boots an ephemeral daemon and runs the 12
 //    plumbing scenarios under ACC2_BRIDGE_MODE=mock (~1.1s, hermetic).
-//    `--include-real` adds the 10th canned real-brain scenario; `--real-only`
+//    `--include-real` adds the 13th canned real-brain scenario; `--real-only`
 //    runs only that one. Real-brain runs are opt-in because each burns
 //    ~2 min wall-clock + opencode tokens.
 //
@@ -19,8 +19,8 @@
 //
 // Run:
 //   cd /home/maxbaluev/bos2/system/acc2
-//   bun tests/integration/harness.ts                              # 9 plumbing
-//   bun tests/integration/harness.ts --include-real               # 9+1
+//   bun tests/integration/harness.ts                              # 12 plumbing
+//   bun tests/integration/harness.ts --include-real               # 12+1
 //   bun tests/integration/harness.ts --real-only                  # canned real-brain
 //   bun tests/integration/harness.ts --task "<owner words>"       # ad-hoc real-brain
 //
@@ -50,6 +50,7 @@ import {
   scenarioAdHocTask,
   scenarioAmendmentSupersession,
   scenarioCreditChainClosure,
+  scenarioCrossDirectiveInterference,
   scenarioCycleOneEnforcement,
   scenarioDaemonLifecycle,
   scenarioDistributionMerger,
@@ -58,6 +59,8 @@ import {
   scenarioMvpFixture,
   scenarioRealBrainEndToEnd,
   scenarioRefinementEdge,
+  scenarioRollingActiveReview,
+  scenarioStakeholderConflict,
 } from "./scenarios";
 import { stopDaemon } from "../../runtime/daemon";
 
@@ -132,6 +135,24 @@ const PLUMBING_SCENARIOS: ScenarioEntry[] = [
     label: "amendment_supersession",
     kind: "shared_daemon",
     run: async (h) => { await scenarioAmendmentSupersession(h!); },
+  },
+  {
+    id: "rolling_active_review",
+    label: "rolling_active_review",
+    kind: "shared_daemon",
+    run: async (h) => { await scenarioRollingActiveReview(h!); },
+  },
+  {
+    id: "stakeholder_conflict",
+    label: "stakeholder_conflict",
+    kind: "shared_daemon",
+    run: async (h) => { await scenarioStakeholderConflict(h!); },
+  },
+  {
+    id: "cross_directive_interference",
+    label: "cross_directive_interference",
+    kind: "shared_daemon",
+    run: async (h) => { await scenarioCrossDirectiveInterference(h!); },
   },
 ];
 
@@ -210,12 +231,12 @@ export const runHarness = async (
   // bridge calls during boot see mock). The real-brain scenario flips to
   // `real` for its own dispatch and restores on exit. The production
   // default for bridge.ts is `real` — the harness explicitly overrides
-  // because the 9 plumbing scenarios use canned fixture markers.
+  // because the 12 plumbing scenarios use canned fixture markers.
   const originalBridgeMode = process.env.ACC2_BRIDGE_MODE;
   process.env.ACC2_BRIDGE_MODE = "mock";
 
   // Real-brain is OPT-IN: only run it when --include-real or --real-only
-  // was passed. Bare invocation runs the 9 plumbing scenarios only.
+  // was passed. Bare invocation runs the 12 plumbing scenarios only.
   const runPlumbing = !opts.realOnly;
   const runReal = opts.realOnly || opts.includeReal;
 
@@ -309,7 +330,7 @@ export const runHarness = async (
     if (skipped === 0) {
       process.stdout.write(
         `${passed}/${total} scenarios passed in ${formatSeconds(elapsedTotal)}` +
-        (total >= 10 ? `  (9 plumbing + 1 real-brain)\n` : "\n"),
+        (total >= 13 ? `  (12 plumbing + 1 real-brain)\n` : "\n"),
       );
       if (results.some((r) => r.id === "real_brain_end_to_end" && r.status === "pass")) {
         process.stdout.write("[ok] acc2 is fully workable end-to-end against a live LLM brain\n");

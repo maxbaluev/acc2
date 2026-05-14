@@ -238,6 +238,81 @@ CREATE VIEW IF NOT EXISTS rolling_review_due_view AS
     AND json_extract(payload, '$.next_review_due') <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
 `;
 
+// watch_edge_observations_view — for every `task_edge_recorded { kind:"watches",
+// from_task: A, to_task: T }`, surface the most-recent visible event emitted on
+// the upstream task A. The brain (and prompt composer) read this so a
+// downstream task T sees what its watched upstreams have produced mid-flight.
+// "Visible" kinds are the ones snapshotWatchedOutputs surfaces:
+// task_committed / action_scored / artifact_observed / task_ready /
+// task_node_opened. We keep the MOST-RECENT row per (downstream, upstream,
+// event_kind) — this matches `snapshot_now` consistency at the view level; the
+// TS helper (`runtime/watch_edges.ts:snapshotWatchedOutputs`) still owns the
+// per-edge consistency-mode dispatch when callers need monotonic history.
+//
+// Columns:
+//   downstream_task_id  — the watching task (edge.to_task).
+//   upstream_task_id    — the watched task   (edge.from_task).
+//   event_kind          — the observed event kind on upstream.
+//   observed_at         — ts of the observation.
+//   payload             — the observation payload (TEXT JSON; caller parses).
+//   consistency_mode    — declared on the edge (`monotonic` / `snapshot_now` /
+//                         `read_your_writes`); the view stamps the literal so
+//                         the caller can route deeper if needed.
+const VIEW_WATCH_EDGE_OBSERVATIONS = `
+CREATE VIEW IF NOT EXISTS watch_edge_observations_view AS
+  WITH watch_edges AS (
+    SELECT
+      json_extract(payload, '$.from_task')                     AS upstream_task_id,
+      json_extract(payload, '$.to_task')                       AS downstream_task_id,
+      COALESCE(
+        json_extract(payload, '$.consistency_mode'),
+        'monotonic'
+      )                                                         AS consistency_mode
+    FROM events
+    WHERE kind = 'task_edge_recorded'
+      AND json_extract(payload, '$.kind') = 'watches'
+      AND json_extract(payload, '$.from_task') IS NOT NULL
+      AND json_extract(payload, '$.to_task')   IS NOT NULL
+  ),
+  upstream_events AS (
+    SELECT
+      e.task_id    AS upstream_task_id,
+      e.ts         AS ts,
+      e.kind       AS event_kind,
+      e.payload    AS payload,
+      e.id         AS event_id
+    FROM events e
+    WHERE e.kind IN (
+      'task_committed',
+      'action_scored',
+      'artifact_observed',
+      'task_ready',
+      'task_node_opened'
+    )
+  ),
+  joined AS (
+    SELECT
+      w.downstream_task_id                                       AS downstream_task_id,
+      w.upstream_task_id                                         AS upstream_task_id,
+      w.consistency_mode                                         AS consistency_mode,
+      u.event_kind                                               AS event_kind,
+      u.ts                                                       AS observed_at,
+      u.payload                                                  AS payload,
+      u.event_id                                                 AS event_id,
+      ROW_NUMBER() OVER (
+        PARTITION BY w.downstream_task_id, w.upstream_task_id, u.event_kind
+        ORDER BY u.ts DESC, u.event_id DESC
+      ) AS rn
+    FROM watch_edges w
+    JOIN upstream_events u
+      ON u.upstream_task_id = w.upstream_task_id
+  )
+  SELECT downstream_task_id, upstream_task_id, consistency_mode,
+         event_kind, observed_at, payload, event_id
+  FROM joined
+  WHERE rn = 1;
+`;
+
 // directive_conflicts_view — cross-directive interference edges.
 const VIEW_DIRECTIVE_CONFLICTS = `
 CREATE VIEW IF NOT EXISTS directive_conflicts_view AS
@@ -438,6 +513,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_CONTRADICTORY);
   db.exec(VIEW_OWNER_CONVERSATION);
   db.exec(VIEW_ROLLING_REVIEW_DUE);
+  db.exec(VIEW_WATCH_EDGE_OBSERVATIONS);
   db.exec(VIEW_DIRECTIVE_CONFLICTS);
   db.exec(VIEW_STAKEHOLDER_STATE);
   db.exec(VIEW_ACTIVE_OBJECTIVES);
@@ -530,6 +606,16 @@ export type RollingReviewDueRow = {
   lifecycle: string;
   next_review_due: string;
   payload: Record<string, unknown>;
+};
+
+export type WatchEdgeObservationRow = {
+  downstream_task_id: string;
+  upstream_task_id: string;
+  consistency_mode: "monotonic" | "snapshot_now" | "read_your_writes";
+  event_kind: string;
+  observed_at: string;
+  payload: Record<string, unknown>;
+  event_id: string;
 };
 
 export type DirectiveConflictRow = {
@@ -684,6 +770,39 @@ export const rollingReviewDue = (db: Database): RollingReviewDueRow[] => {
     lifecycle: r.lifecycle as string,
     next_review_due: r.next_review_due as string,
     payload: parseJson<Record<string, unknown>>(r.payload),
+  }));
+};
+
+/** Latest visible observation per (downstream, upstream, event_kind). When
+ *  `downstreamTaskId` is supplied the result is scoped to that watcher; when
+ *  omitted, every watch edge's observation row is returned (useful for
+ *  audit / TUI). The TS helper `snapshotWatchedOutputs` in
+ *  `runtime/watch_edges.ts` owns the per-edge consistency-mode dispatch when
+ *  the caller needs `monotonic` (full history) or `read_your_writes`
+ *  semantics; this view is the `snapshot_now`-equivalent SQL projection. */
+export const watchEdgeObservations = (
+  db: Database,
+  downstreamTaskId?: string,
+): WatchEdgeObservationRow[] => {
+  const rows = (downstreamTaskId
+    ? db
+        .query(
+          "SELECT * FROM watch_edge_observations_view WHERE downstream_task_id = ? ORDER BY upstream_task_id ASC, event_kind ASC",
+        )
+        .all(downstreamTaskId)
+    : db
+        .query(
+          "SELECT * FROM watch_edge_observations_view ORDER BY downstream_task_id ASC, upstream_task_id ASC, event_kind ASC",
+        )
+        .all()) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    downstream_task_id: r.downstream_task_id as string,
+    upstream_task_id: r.upstream_task_id as string,
+    consistency_mode: (r.consistency_mode as WatchEdgeObservationRow["consistency_mode"]) ?? "monotonic",
+    event_kind: r.event_kind as string,
+    observed_at: r.observed_at as string,
+    payload: parseJson<Record<string, unknown>>(r.payload),
+    event_id: r.event_id as string,
   }));
 };
 

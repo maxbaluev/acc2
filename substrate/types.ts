@@ -64,6 +64,7 @@ export type EventKind =
   | "directive_milestone_recorded"
   | "directive_interference_edge"
   | "directive_interference_cycle_detected"
+  | "task_deferred_for_interference"
   | "directive_archived_missed_reviews"
 
   // DAG topology
@@ -152,6 +153,7 @@ export type EventKind =
 
   // Stakeholder adjudication
   | "stakeholder_conflict"
+  | "stakeholder_conflict_detected"
 
   // External-service push
   | "external_event_received"
