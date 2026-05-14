@@ -3,8 +3,9 @@
 //
 // Steps (all idempotent):
 //   1. Banner.
-//   2. State directory (~/.accint, override via ACCINT_HOME).
-//   3. Admin token (~/.accint/state/v2.sock.token, 0600).
+//   2. State directory (~/.accint, override via ACC2_STATE_DIR; legacy
+//      ACCINT_HOME still honored with a deprecation warning).
+//   3. Admin token (${stateDir}/v2.sock.token, 0600).
 //   4. OPENAI_API_KEY detection or interactive prompt.
 //   5. opencode CLI check (`which opencode`).
 //   6. uv check (`which uv`).
@@ -14,41 +15,71 @@
 //
 // Re-running is safe — every probe is idempotent. `--yes` skips
 // prompts and uses defaults (seed=yes, no key prompt).
+//
+// Canonical on-disk layout: ALL state files live DIRECTLY under
+// `${stateDir}/` (NO `state/` subdir). The shared resolver in
+// `runtime/state_paths.ts` is the single source of truth — init.ts,
+// rpc.ts, and daemon.ts agree by importing from there.
 
 import {
   appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { newAdminToken } from "../runtime/ids";
 import { openDb, closeDb } from "../substrate/db";
 import { seedFoundationalKnowledge } from "../substrate/seed";
+import {
+  maybeWarnAccintHomeDeprecated, migrateLegacyLayout,
+  resolveDbPath, resolveSocketFile, resolveStateDir, resolveStateDirVerbose,
+  resolveTokenFile,
+} from "../runtime/state_paths";
 
 // ── paths ─────────────────────────────────────────────────────────
 
 export type InitPaths = {
-  accintHome: string;          // ~/.accint
-  stateDir: string;            // ~/.accint/state
-  logsDir: string;             // ~/.accint/logs
-  tmpDir: string;              // ~/.accint/tmp
-  tokenFile: string;           // ~/.accint/state/v2.sock.token
-  dbPath: string;              // ~/.accint/state/accint.db
+  /** The state-dir root. Same value as `stateDir` — kept for backward
+   *  compatibility with tests that read `paths.accintHome`. New code
+   *  should prefer `stateDir`. */
+  accintHome: string;
+  /** Canonical state directory (e.g. ~/.accint). All state files live
+   *  DIRECTLY under this path — no `state/` subdir. */
+  stateDir: string;
+  logsDir: string;             // ${stateDir}/logs
+  tmpDir: string;              // ${stateDir}/tmp
+  socketFile: string;          // ${stateDir}/v2.sock
+  tokenFile: string;           // ${stateDir}/v2.sock.token
+  dbPath: string;              // ${stateDir}/state.db (or <repo>/state/accint.db fallback)
   envFile: string;             // <cwd>/.env
 };
 
 export const resolveInitPaths = (cwd: string = process.cwd()): InitPaths => {
-  const accintHome = process.env.ACCINT_HOME ?? join(homedir(), ".accint");
-  const stateDir = join(accintHome, "state");
+  // Single source of truth: the resolver module honours ACC2_STATE_DIR
+  // first, then ACCINT_HOME (with a one-shot deprecation warn fired
+  // elsewhere — runInitProgrammatic does that explicitly), then ~/.accint.
+  const stateDir = resolveStateDir();
+  // The daemon's `<repo>` fallback (only used when no state-dir env is
+  // set) needs an anchor — init.ts lives at <repo>/cli/init.ts, so the
+  // repo root is two dirs up from this file. We pass it to resolveDbPath
+  // so dev-from-checkout still lands at <repo>/state/accint.db when
+  // neither ACC2_STATE_DIR nor ACCINT_HOME is set.
+  const repoRoot = join(import.meta.dirname ?? cwd, "..");
   return {
-    accintHome,
+    accintHome: stateDir, // legacy alias for tests; new code uses stateDir
     stateDir,
-    logsDir: join(accintHome, "logs"),
-    tmpDir: join(accintHome, "tmp"),
-    tokenFile: join(stateDir, "v2.sock.token"),
-    dbPath: join(stateDir, "accint.db"),
+    logsDir: join(stateDir, "logs"),
+    tmpDir: join(stateDir, "tmp"),
+    socketFile: resolveSocketFile(),
+    tokenFile: resolveTokenFile(),
+    dbPath: resolveDbPath(repoRoot),
     envFile: join(cwd, ".env"),
   };
 };
+
+// Reference `homedir` so future test injection hooks can keep the import
+// hot without an unused-warning. The resolver itself reads `homedir()`
+// internally; init.ts no longer needs to.
+void homedir;
 
 // ── helpers ───────────────────────────────────────────────────────
 
@@ -193,12 +224,37 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
   banner(log);
 
   // 1. State directory.
-  const home = ensureDir(paths.accintHome);
+  const stateRes = resolveStateDirVerbose();
   const state = ensureDir(paths.stateDir);
   ensureDir(paths.logsDir);
   ensureDir(paths.tmpDir);
-  summary.stateDirCreated = home.created || state.created;
-  log(`[1/8] state directory: ${paths.accintHome}` + (summary.stateDirCreated ? "  (created)" : "  (existing)"));
+  summary.stateDirCreated = state.created;
+  // One-time migration: pull the legacy `${stateDir}/state/<file>` layout
+  // forward into the canonical flat layout BEFORE the rest of init looks
+  // at tokenFile / dbPath. We pass `null` for the DB handle because the
+  // db is not open yet; the rename still happens, and the audit event
+  // will be re-emitted at daemon-start time when the same call is made
+  // with a live DB handle. (The migration helper is idempotent: a second
+  // call with no legacy files left is a no-op.)
+  const migration = migrateLegacyLayout(paths.stateDir, null);
+  if (migration.migrated) {
+    log(`[1/8] state directory: migrated ${migration.renamed.length} legacy file(s) into the canonical flat layout`);
+    for (const r of migration.renamed) log(`       ${r.from} → ${r.to}`);
+  }
+  log(`[1/8] state directory: ${paths.stateDir}` + (summary.stateDirCreated ? "  (created)" : "  (existing)"));
+  // ACCINT_HOME deprecation — emit the warn-once signal as soon as we
+  // confirm ACCINT_HOME drove the resolution. We pass `null` for the
+  // db handle so the helper only fires the logger.warn here; the
+  // substrate event will land later once the daemon (or the seed step
+  // below) opens the DB.
+  if (stateRes.source === "ACCINT_HOME") {
+    warn(
+      "[1/8] ACCINT_HOME is deprecated — set ACC2_STATE_DIR instead. " +
+        "ACCINT_HOME support will be removed in a future release.",
+    );
+    maybeWarnAccintHomeDeprecated(null);
+    summary.warnings.push("ACCINT_HOME is deprecated; set ACC2_STATE_DIR");
+  }
 
   // 2. Admin token.
   const tok = ensureAdminToken(paths.tokenFile);
@@ -282,6 +338,16 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
   if (approve) {
     const db = openDb(paths.dbPath);
     try {
+      // With the DB now open, re-fire the deprecation event so the
+      // substrate ledger carries the audit alongside the logger.warn
+      // emitted earlier. The latch in state_paths.ts is shared, so the
+      // logger.warn does NOT fire a second time.
+      maybeWarnAccintHomeDeprecated(db);
+      // Re-run the migration helper with the live DB handle so the
+      // `cli_layout_migrated` event lands in the ledger when a migration
+      // happened on this run. The helper is idempotent — calling it
+      // again after the rename is a cheap dir-exists check.
+      migrateLegacyLayout(paths.stateDir, db);
       const result = seedFoundationalKnowledge(db, { ownerApproved: true });
       summary.foundationalSeedImported = result.imported;
       if (result.imported > 0) log(`       imported ${result.imported} foundational knowledge entries`);

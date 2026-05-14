@@ -23,15 +23,17 @@
 import {
   cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { emitEvent } from "../runtime/events";
+import { resolveStateDir } from "../runtime/state_paths";
 
 export type ImportOptions = {
   archivePath: string;
-  /** Override the target state dir.  Defaults to $ACCINT_HOME/state. */
+  /** Override the target state dir.  Defaults to the canonical resolver
+   *  (`$ACC2_STATE_DIR` / legacy `$ACCINT_HOME` / `~/.accint`).  All
+   *  state files land DIRECTLY under this dir per the canonical layout. */
   stateDir?: string;
   /** Force overwrite + ignore daemon-running guard. */
   force?: boolean;
@@ -64,10 +66,7 @@ type Manifest = {
   sha256_db?: string;
 };
 
-const defaultStateDir = (): string => {
-  const home = process.env.ACCINT_HOME ?? join(homedir(), ".accint");
-  return join(home, "state");
-};
+const defaultStateDir = (): string => resolveStateDir();
 
 const defaultSpawn = (cmd: string, args: string[]) => {
   const r = spawnSync(cmd, args, { stdio: "pipe" });

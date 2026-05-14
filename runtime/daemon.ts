@@ -28,8 +28,7 @@
 
 import type { Server } from "bun";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import type { Database } from "bun:sqlite";
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
@@ -37,6 +36,10 @@ import { emitEvent } from "./events";
 import { subscribe, resetBus, type BusEvent } from "./event_bus";
 import { newAdminToken } from "./ids";
 import { createMcpServer } from "./mcp_server";
+import {
+  maybeWarnAccintHomeDeprecated, migrateLegacyLayout,
+  resolveDbPath, resolveSocketFile, resolveStateDir, resolveTokenFile,
+} from "./state_paths";
 import { createExternalIngressState, handleExternalPush, type ExternalIngressState } from "./external_ingress";
 import type { FastMCP } from "fastmcp";
 import { applyAmendment, findUnappliedAmendments } from "./amendment_handler";
@@ -65,10 +68,20 @@ import {
 
 export const DEFAULT_DAEMON_PORT = 9387;
 export const DEFAULT_AUX_PORT_OFFSET = 1;
-export const DEFAULT_SOCKET_DIR = join(homedir(), ".accint");
-export const DEFAULT_SOCKET_FILE = join(DEFAULT_SOCKET_DIR, "v2.sock");
-export const DEFAULT_TOKEN_FILE = join(DEFAULT_SOCKET_DIR, "v2.sock.token");
-export const DEFAULT_STATE_DB = resolve(import.meta.dirname ?? ".", "..", "state", "accint.db");
+
+/** Repo root anchor for the dev-checkout fallback DB path. When no
+ *  ACC2_STATE_DIR / ACCINT_HOME / ACC2_DB_PATH env var is set the daemon
+ *  falls back to `<repo>/state/accint.db` so a fresh `bun runtime/daemon.ts`
+ *  from a clean checkout still works. */
+const REPO_ROOT = resolve(import.meta.dirname ?? ".", "..");
+
+/** Default socket/token/db paths are computed on demand from the shared
+ *  resolver. The exported constants below preserve the legacy module API
+ *  but evaluate at first import — DO NOT cache them anywhere downstream;
+ *  the daemon itself always re-reads via the resolvers below. */
+export const DEFAULT_SOCKET_FILE = resolveSocketFile();
+export const DEFAULT_TOKEN_FILE = resolveTokenFile();
+export const DEFAULT_STATE_DB = resolveDbPath(REPO_ROOT);
 
 export type DaemonOpts = {
   /** MCP (fastmcp) port. Defaults to V2_DAEMON_PORT env, then 9387. */
@@ -135,10 +148,25 @@ const pidAlive = (pid: number): boolean => {
 export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> => {
   const port = opts.port ?? Number(process.env.V2_DAEMON_PORT ?? DEFAULT_DAEMON_PORT);
   const auxPort = opts.auxPort ?? Number(process.env.V2_DAEMON_AUX_PORT ?? port + DEFAULT_AUX_PORT_OFFSET);
-  const stateDbPath = opts.stateDbPath ?? DEFAULT_STATE_DB;
-  const socketFile = opts.socketFile ?? DEFAULT_SOCKET_FILE;
-  const tokenFile = opts.tokenFile ?? DEFAULT_TOKEN_FILE;
+  // Resolve paths LAZILY through the shared resolver so an env var set
+  // between module-load and startDaemon (common in tests that pin paths
+  // per-case) is honoured. Constants above are cached at module-load only.
+  const stateDbPath = opts.stateDbPath ?? resolveDbPath(REPO_ROOT);
+  const socketFile = opts.socketFile ?? resolveSocketFile();
+  const tokenFile = opts.tokenFile ?? resolveTokenFile();
   const host = opts.host ?? "127.0.0.1";
+
+  // Layout migration runs BEFORE the daemon touches the socket / token /
+  // db files so a legacy `${stateDir}/state/<file>` install is pulled
+  // forward in one boot. We pass `null` for the DB handle here because
+  // the DB has not been opened yet; once openDb succeeds below we
+  // re-fire the helper with the live handle so the audit event lands.
+  // When the caller passes explicit overrides (tests pin a tmp dir),
+  // we skip the migration entirely — the override paths are scoped to
+  // the test's tmp dir, not the operator's real state dir.
+  if (opts.stateDbPath === undefined && opts.socketFile === undefined && opts.tokenFile === undefined) {
+    migrateLegacyLayout(resolveStateDir(), null);
+  }
 
   // Single-instance guard: if the lock file exists AND names a live pid,
   // refuse to start. A stale lock (pid not alive) gets reaped.
@@ -516,6 +544,18 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       transport: "fastmcp:httpStream",
     },
   });
+  // ACCINT_HOME deprecation + layout-migration audit. We fire the helpers
+  // with the live DB so the ledger carries the canonical audit row, and
+  // the warn-once latch (shared with cli/init.ts) prevents duplicate
+  // logger.warn output across cli surfaces in the same process. Both
+  // helpers are no-ops when the trigger condition is absent.
+  if (opts.stateDbPath === undefined && opts.socketFile === undefined && opts.tokenFile === undefined) {
+    maybeWarnAccintHomeDeprecated(db);
+    // Re-fire migrateLegacyLayout with the live DB so a migration that
+    // happened above now lands the `cli_layout_migrated` event in the
+    // ledger. Idempotent: if no legacy files remain, returns immediately.
+    migrateLegacyLayout(resolveStateDir(), db);
+  }
   // Per v2-design.md §5.1 the canonical embedding index is sqlite-vec
   // (substrate/schema.sql `vec_events` virtual table). The "rebuild"
   // step is now effectively instant — we backfill vec_events from the

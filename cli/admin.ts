@@ -29,6 +29,7 @@ import { resolve, join } from "node:path";
 import { createInterface } from "node:readline";
 import { Database } from "bun:sqlite";
 import { openDb } from "../substrate/db";
+import { resolveDbPath, resolveTokenFile } from "../runtime/state_paths";
 import { runViews, promotedKnowledge, type PromotedKnowledgeFilter } from "../substrate/views";
 import {
   checkLatestOpencodeVersion,
@@ -77,16 +78,21 @@ const usage = (): string => `acc admin — operator-side maintenance
 `;
 
 // ── Shared helpers for Batch 3.ADMIN surfaces ───────────────────────
+//
+// Paths flow through `runtime/state_paths.ts` so admin / init / daemon /
+// rpc agree about where things live. The resolvers are lazy — they
+// read env vars on every call, which keeps tests that pin paths
+// per-case working without module reload.
 
 const defaultStateDbPath = (): string => {
-  const home = process.env.ACCINT_HOME ?? join(homedir(), ".accint");
-  return join(home, "state", "accint.db");
+  // The acc2 repo root sits two dirs up from cli/. We anchor the
+  // dev-checkout fallback DB there so `bun cli/dispatch.ts admin ...`
+  // from a clean checkout still works without any env vars set.
+  const repoRoot = join(import.meta.dirname ?? ".", "..");
+  return resolveDbPath(repoRoot);
 };
 
-const defaultAdminTokenFile = (): string => {
-  const home = process.env.ACCINT_HOME ?? join(homedir(), ".accint");
-  return join(home, "state", "v2.sock.token");
-};
+const defaultAdminTokenFile = (): string => resolveTokenFile();
 
 /** Walk argv for a flag value (`--name value`).  Returns undefined when
  *  the flag is absent or trails the array. */
@@ -376,7 +382,7 @@ export const runExportCmd = async (argv: string[], env: AdminEnv): Promise<numbe
     archivePath,
     mode,
     includeLogs,
-    stateDir: env.stateDbPath ? resolveStateDir(env.stateDbPath) : undefined,
+    stateDir: env.stateDbPath ? stateDirFromDbPath(env.stateDbPath) : undefined,
   });
   if (!result.ok) {
     env.err(`acc admin export failed: ${result.errors.join("; ")}`);
@@ -393,9 +399,14 @@ export const runExportCmd = async (argv: string[], env: AdminEnv): Promise<numbe
   return 0;
 };
 
-const resolveStateDir = (dbPath: string): string => {
-  // The DB is always `<stateDir>/accint.db`.
-  return dbPath.endsWith("accint.db") ? dbPath.slice(0, -("accint.db".length + 1)) : dbPath;
+/** Derive the export's state-dir root from a known DB file path. Under
+ *  the canonical layout the DB sits at `${stateDir}/state.db` (flat);
+ *  the legacy path `${stateDir}/state/accint.db` is also recognised so
+ *  pre-migration installs export cleanly. Anything else passes through. */
+const stateDirFromDbPath = (dbPath: string): string => {
+  if (dbPath.endsWith("/state.db")) return dbPath.slice(0, -("state.db".length + 1));
+  if (dbPath.endsWith("accint.db")) return dbPath.slice(0, -("accint.db".length + 1));
+  return dbPath;
 };
 
 export const runImportCmd = async (argv: string[], env: AdminEnv): Promise<number> => {
@@ -408,7 +419,7 @@ export const runImportCmd = async (argv: string[], env: AdminEnv): Promise<numbe
   const force = hasFlag(argv, "--force");
   const result = await runImport({
     archivePath,
-    stateDir: env.stateDbPath ? resolveStateDir(env.stateDbPath) : undefined,
+    stateDir: env.stateDbPath ? stateDirFromDbPath(env.stateDbPath) : undefined,
     force,
     auxBaseUrlProbe: env.auxBaseUrlProbe,
     currentSchemaVersion: env.currentSchemaVersion ?? "0",
