@@ -420,11 +420,16 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   {
     seedName: "browser_session_act",
     runtime: "camofox-browser",
-    // Phase-G minimal browser-session seed. The runtime wrapper provides a
-    // `session` facade (goto / fill / click / text / url / screenshot) over
-    // playwright's persistent context. When playwright isn't installed the
-    // runtime returns `ok:false, error:"camofox_runtime_unavailable"`; this
-    // body is structured to surface that cleanly.
+    // Batch 1.α minimal browser-session seed. The runtime wrapper drives the
+    // real Camoufox firefox binary via playwright's
+    // `firefox.launchPersistentContext({ executablePath, ... })`, then
+    // exposes a `session` facade (goto / fill / click / text / url /
+    // screenshot / close, plus `session.page` for raw playwright Page
+    // methods). When either playwright or the camoufox binary is absent
+    // (no `~/.cache/camoufox/camoufox`, no CAMOUFOX_BINARY_PATH override)
+    // the runtime returns `ok:false, error:"camofox_runtime_unavailable"`
+    // with install instructions in sandboxWarnings; this body is
+    // structured to surface that cleanly.
     body: [
       "// inputs: { url: string }",
       "await session.goto(inputs.url);",
@@ -435,6 +440,9 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
       runtime: "camofox-browser",
       browser_allow_domains: ["example.com"],
       browser_profile_root: "/var/acc2/browser/profile",
+      fingerprint_os: "linux",
+      fingerprint_locale: "en-US",
+      headless: true,
       wall_ms: 60000,
       memory_mb: 1024,
     },

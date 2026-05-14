@@ -59,6 +59,28 @@ describe("seedCodeArtifacts", () => {
     expect(runtimes.has("uv")).toBe(true);
     expect(runtimes.has("camofox-browser")).toBe(true);
   });
+
+  test("seed_browser_session_act drives the new session.* facade (Batch 1.α)", () => {
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    const row = db
+      .query("SELECT body, declared_sandbox FROM code_artifact WHERE id = ?")
+      .get("seed_browser_session_act") as { body: string; declared_sandbox: string } | null;
+    expect(row).not.toBeNull();
+    if (!row) return;
+    // Body uses the wrapper's session facade (goto / text / url), not raw
+    // playwright / chromium identifiers — the body is wrapper-agnostic.
+    expect(row.body).toContain("session.goto");
+    expect(row.body).toContain("session.text");
+    expect(row.body).toContain("session.url");
+    expect(row.body).not.toContain("chromium");
+    expect(row.body).not.toContain("playwright");
+    // Declared sandbox carries the Batch 1.α fingerprint hints.
+    const decl = JSON.parse(row.declared_sandbox) as Record<string, unknown>;
+    expect(decl.fingerprint_os).toBe("linux");
+    expect(decl.fingerprint_locale).toBe("en-US");
+    expect(decl.headless).toBe(true);
+  });
 });
 
 describe("seedFoundationalKnowledge", () => {

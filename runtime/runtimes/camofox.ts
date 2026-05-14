@@ -1,17 +1,41 @@
-// acc2 camofox-browser runtime — chromium driven against a long-lived
+// acc2 camofox-browser runtime — REAL Camoufox (firefox fork) driven via
+// playwright's `firefox.launchPersistentContext` against a long-lived,
 // substrate-owned profile root (v2-design.md §6.1 row "camofox-browser",
 // §11.3 camofox variant, §5.5 supervision).
 //
-// Phase G implementation reality: v1's camofox-browser is a v1-internal MCP
-// tool that v2 cannot import. The Phase-G shim is structured so the WIRING
-// and the sandbox/policy plumbing are real and exercised by tests, while
-// actual chromium execution is gated on `playwright` (a Bun-installable
-// chromium driver) being present in node_modules. The operator install path
-// (`bun add playwright && bunx playwright install chromium`) is documented
-// at every refusal site so the runtime is self-explaining when invoked
-// without playwright.
+// Batch 1.α reality: the runtime spawns the real Camoufox binary —
+// distributed at https://github.com/daijro/camoufox/releases and typically
+// fetched via `python -m camoufox fetch` to `~/.cache/camoufox/camoufox`
+// (Linux) or `~/Library/Caches/camoufox/camoufox` (macOS). Camoufox is a
+// Firefox build with anti-fingerprint randomization patched in; we drive it
+// from TypeScript via playwright's `firefox.launchPersistentContext({
+// executablePath, userDataDir, ... })`.
 //
-// Lifecycle when playwright IS installed:
+// The wrapper still imports `playwright` for the JS driver; the binary
+// pointed at by `executablePath` is the camoufox firefox build. Operators
+// install playwright via `bun add playwright` (the chromium download step
+// `bunx playwright install chromium` is NOT required — camoufox brings its
+// own firefox binary).
+//
+// Binary detection chain (`isCamoufoxAvailable`):
+//   1. `process.env.CAMOUFOX_BINARY_PATH` — operator override.
+//   2. `${HOME}/.cache/camoufox/camoufox` (Linux fetch location).
+//   3. `${HOME}/Library/Caches/camoufox/camoufox` (macOS fetch location).
+// If none of those exist, the runtime returns `camoufox_runtime_unavailable`
+// with an install-instructions message threaded into `sandboxWarnings`.
+//
+// Playwright availability is ALSO a gate — without the JS driver we cannot
+// launch a process. The check is layered: playwright first (cheap), camoufox
+// binary second (cheap, just `existsSync`).
+//
+// Fingerprint env hints — read by the wrapper code that calls
+// `firefox.launch`. The orchestrator (substrate/runtime/sandbox.ts builder)
+// sets these from the SandboxDecl:
+//   - CAMOUFOX_OS       — "linux" | "macos" | "windows"
+//   - CAMOUFOX_LOCALE   — BCP 47 (e.g. "en-US")
+//   - CAMOUFOX_HEADLESS — "true" | "false"
+//
+// Lifecycle when camoufox + playwright are BOTH present:
 //   1. Acquire the per-profile-root mutex (v2-design.md §11.2 — stateful
 //      artifacts queue on a per-state-root mutex; camofox is stateful per
 //      profile_root). Concurrent invocations against the SAME profile_root
@@ -19,30 +43,33 @@
 //   2. Materialize the artifact body into an ephemeral tempdir. The wrapper
 //      provides a `camofox` virtual module with a minimal session API
 //      (`session.goto`, `session.fill`, `session.click`, `session.text`,
-//      `session.url`, `session.screenshot`) on top of playwright's
-//      `chromium.launchPersistentContext`. Inputs flow in via ACC2_INPUTS.
-//   3. Launch chromium with `userDataDir = browser_profile_root`. The
-//      profile root is owned by the substrate; the wrapper does not delete
-//      it on exit so state survives across invocations.
+//      `session.url`, `session.screenshot`, `session.close`, plus raw
+//      `session.page` for any extra playwright Page method) on top of
+//      playwright's `firefox.launchPersistentContext`. Inputs flow in via
+//      ACC2_INPUTS.
+//   3. Launch firefox via the Camoufox binary with `userDataDir =
+//      browser_profile_root`. The profile root is owned by the substrate;
+//      the wrapper does not delete it on exit so state survives across
+//      invocations.
 //   4. Enforce `browser_allow_domains` via `page.route()` — block requests
 //      to disallowed domains.
 //   5. Watchdog per §5.5 row "camofox": graceful `session.close()` at
-//      wall_ms; SIGKILL at wall_ms × 2 (chromium hung-page recovery is
-//      slow). If chromium fails to exit after SIGKILL, emit a
-//      `profile_quarantine_pending` event so the supervisor spawns fresh
-//      chromium on next invocation.
+//      wall_ms; SIGKILL at wall_ms × 2 (firefox hung-page recovery is
+//      slow). If firefox fails to exit after SIGKILL, emit a
+//      `profile_quarantine_pending` event so the supervisor spawns a
+//      fresh context on next invocation.
 //   6. Drain stdout + stderr. Parse `@@RESULT@@ <json>`.
 //   7. Tempdir cleanup unconditional in `finally`. Profile root persists.
 //
-// Lifecycle when playwright is NOT installed:
+// Lifecycle when EITHER is absent:
 //   - Return `{ok:false, error:"camofox_runtime_unavailable"}` cleanly with
 //     a sandboxWarnings entry pointing at the install command. Admission
 //     paths can still admit the artifact (the sandbox decl validates); only
 //     RUNNING the artifact is gated.
 
 import type { Subprocess } from "bun";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JsonValue, SandboxDecl } from "../../substrate/types";
 import { buildCamofoxPermissionArgs } from "../sandbox";
@@ -72,7 +99,7 @@ export type CamofoxRuntimeObservation = {
 const RESULT_PREFIX = "@@RESULT@@ ";
 const IRREVERSIBLE_PREFIX = "@@IRREVERSIBLE@@ ";
 const STDERR_TAIL_BYTES = 1024;
-// Per §5.5: SIGKILL at wall_ms × 2 (chromium hung-page recovery is slow).
+// Per §5.5: SIGKILL at wall_ms × 2 (firefox hung-page recovery is slow).
 const HARD_KILL_MULTIPLIER = 2;
 const KILL_GRACE_MS = 1000;
 
@@ -135,10 +162,10 @@ export const __getProfileMutexQueueDepth = (profileRoot: string): boolean =>
   profileMutexes.has(profileRoot);
 
 /** Test surface: run an arbitrary async function under the per-profile-root
- *  mutex without spawning chromium. Phase Align Principle 8 uses this to
+ *  mutex without spawning firefox. Phase Align Principle 8 uses this to
  *  prove the mutex serializes concurrent invocations against the same
  *  state root. NOT exported for production callers — only the runtime's
- *  own `runCamofoxArtifact` should drive the chromium pipeline. */
+ *  own `runCamofoxArtifact` should drive the firefox pipeline. */
 export const __acquireProfileMutexForTest = <T>(
   profileRoot: string,
   fn: () => Promise<T>,
@@ -147,14 +174,13 @@ export const __acquireProfileMutexForTest = <T>(
 // ── Playwright availability detection ──────────────────────────────
 //
 // We look up the `playwright` module without `await import()` because
-// node_modules can be present without chromium having been downloaded. Two
-// existence checks: the package manifest and the chromium binary cache.
-// The runtime still attempts `await import("playwright")` lazily so any
-// other resolver shape (e.g. a workspace symlink) still works.
+// node_modules can be present without firefox having been downloaded — but
+// for Camoufox we point `executablePath` at the Camoufox firefox binary, so
+// the playwright-bundled firefox download (`bunx playwright install firefox`)
+// is NOT needed. Existence of the `playwright` package manifest is sufficient.
 
 const isPlaywrightInstalled = (): boolean => {
   try {
-    // Module path inside the acc2/node_modules layout.
     const candidates = [
       join(import.meta.dir, "..", "..", "node_modules", "playwright", "package.json"),
       join(import.meta.dir, "..", "..", "node_modules", "playwright-core", "package.json"),
@@ -163,6 +189,36 @@ const isPlaywrightInstalled = (): boolean => {
   } catch {
     return false;
   }
+};
+
+// ── Camoufox binary detection ──────────────────────────────────────
+//
+// Three-step chain. The override is honoured first so operators with custom
+// install layouts (corp shares, build-from-source) can point at any path.
+// The default locations match what `python -m camoufox fetch` writes — the
+// canonical install recipe documented in docs/operator-install.md.
+
+const camoufoxBinaryCandidates = (): string[] => {
+  const out: string[] = [];
+  const override = process.env.CAMOUFOX_BINARY_PATH;
+  if (override) out.push(override);
+  const home = homedir();
+  // Linux fetch location (`python -m camoufox fetch` writes here on Linux).
+  out.push(join(home, ".cache", "camoufox", "camoufox"));
+  // macOS fetch location.
+  out.push(join(home, "Library", "Caches", "camoufox", "camoufox"));
+  return out;
+};
+
+/** Resolve the camoufox binary path or return `null` when none of the
+ *  candidate paths exist. Pure — no filesystem mutation. */
+const resolveCamoufoxBinary = (): string | null => {
+  for (const candidate of camoufoxBinaryCandidates()) {
+    try {
+      if (existsSync(candidate)) return candidate;
+    } catch { /* swallow */ }
+  }
+  return null;
 };
 
 // ── Result-parsing helpers (shared shape with bun/uv runtimes) ─────
@@ -208,25 +264,45 @@ const lastBytes = (s: string, n: number): string =>
 
 // ── Wrapper script generation ──────────────────────────────────────
 //
-// The wrapper imports playwright, exposes a thin `session` facade matching
-// the camofox API the seed artifacts use, runs the user body, and prints
-// `@@RESULT@@ <json>` on exit. The user body is wrapped in an async IIFE so
-// `await` works at the top level.
+// The wrapper imports playwright, points firefox at the Camoufox binary via
+// `executablePath`, exposes a thin `session` facade matching the camofox API
+// the seed artifacts use, runs the user body, and prints `@@RESULT@@ <json>`
+// on exit. The user body is wrapped in an async IIFE so `await` works at the
+// top level.
+//
+// Fingerprint env hints (CAMOUFOX_OS / CAMOUFOX_LOCALE / CAMOUFOX_HEADLESS)
+// are surfaced to the launch options inside the wrapper — Camoufox itself
+// reads several of these as launch-time env vars (e.g. CAMOUFOX_OS picks the
+// fingerprint family), and we additionally thread `locale` and `headless`
+// into playwright's `launchPersistentContext` options.
 
-const wrapBrowserBody = (body: string, profileRoot: string, allowDomains: string[]): string => [
-  "import { chromium } from 'playwright';",
+const wrapBrowserBody = (
+  body: string,
+  profileRoot: string,
+  allowDomains: string[],
+  camoufoxBinary: string,
+): string => [
+  "import { firefox } from 'playwright';",
   "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
   `const __profileRoot = ${JSON.stringify(profileRoot)};`,
   `const __allowDomains = ${JSON.stringify(allowDomains)};`,
+  `const __executablePath = ${JSON.stringify(camoufoxBinary)};`,
+  "const __headless = (process.env.CAMOUFOX_HEADLESS ?? 'true') !== 'false';",
+  "const __locale = process.env.CAMOUFOX_LOCALE ?? 'en-US';",
   "const __isAllowed = (url) => {",
   "  if (__allowDomains.length === 0) return true;",
   "  try { const u = new URL(url); return __allowDomains.some((d) => u.hostname === d || u.hostname.endsWith('.' + d)); }",
   "  catch { return false; }",
   "};",
-  "const __ctx = await chromium.launchPersistentContext(__profileRoot, { headless: true });",
+  "const __ctx = await firefox.launchPersistentContext(__profileRoot, {",
+  "  executablePath: __executablePath,",
+  "  headless: __headless,",
+  "  locale: __locale,",
+  "});",
   "const __page = (await __ctx.pages())[0] ?? await __ctx.newPage();",
   "await __page.route('**/*', (route) => { __isAllowed(route.request().url()) ? route.continue() : route.abort(); });",
   "const session = {",
+  "  page: __page,",
   "  goto: async (url) => { await __page.goto(url); },",
   "  fill: async (sel, text) => { await __page.fill(sel, text); },",
   "  click: async (sel) => { await __page.click(sel); },",
@@ -257,6 +333,12 @@ const wrapBrowserBody = (body: string, profileRoot: string, allowDomains: string
   "}",
 ].join("\n");
 
+const installHint =
+  "camoufox binary not found — install via `pip install camoufox && python -m camoufox fetch` " +
+  "(writes to ~/.cache/camoufox/camoufox), OR download from " +
+  "https://github.com/daijro/camoufox/releases and set CAMOUFOX_BINARY_PATH=/path/to/camoufox. " +
+  "Also ensure playwright is installed via `bun add playwright`.";
+
 // ── Public runtime entry point ─────────────────────────────────────
 
 export const runCamofoxArtifact = async (
@@ -268,9 +350,10 @@ export const runCamofoxArtifact = async (
   const profileRoot = inv.declaredSandbox.browser_profile_root;
   const allowDomains = inv.declaredSandbox.browser_allow_domains;
 
-  // Phase-G availability gate. If playwright isn't installed, refuse cleanly
-  // with the operator-install hint surfaced as a sandboxWarning so the audit
-  // trail has a pointer.
+  // Batch 1.α availability gate. We gate on TWO conditions:
+  //   1. playwright JS driver installed (`bun add playwright`).
+  //   2. camoufox binary present (override or default fetch location).
+  // Either missing -> refuse cleanly with operator-install hint.
   if (!isPlaywrightInstalled()) {
     return {
       ok: false,
@@ -280,35 +363,63 @@ export const runCamofoxArtifact = async (
       exitCode: -1,
       stderrTail: "",
       sandboxWarnings: perm.warnings.concat([
-        "playwright not installed — run `bun add playwright && bunx playwright install chromium` to enable camofox-browser execution",
+        "playwright not installed — run `bun add playwright` to enable camofox-browser execution",
+        installHint,
       ]),
       profileRoot,
     };
   }
 
-  return acquireProfileMutex(profileRoot, () => runCamofoxArtifactInner(inv, perm.warnings, wallMs, memoryMb, profileRoot, allowDomains));
+  const camoufoxBinary = resolveCamoufoxBinary();
+  if (!camoufoxBinary) {
+    return {
+      ok: false,
+      error: "camofox_runtime_unavailable",
+      irreversibleEffects: [],
+      durationMs: 0,
+      exitCode: -1,
+      stderrTail: "",
+      sandboxWarnings: perm.warnings.concat([installHint]),
+      profileRoot,
+    };
+  }
+
+  return acquireProfileMutex(profileRoot, () => runCamofoxArtifactInner(
+    inv,
+    perm.warnings,
+    perm.env,
+    wallMs,
+    memoryMb,
+    profileRoot,
+    allowDomains,
+    camoufoxBinary,
+  ));
 };
 
 const runCamofoxArtifactInner = async (
   inv: CamofoxRuntimeInvocation,
   baseWarnings: string[],
+  permEnv: Record<string, string>,
   wallMs: number,
   memoryMb: number,
   profileRoot: string,
   allowDomains: string[],
+  camoufoxBinary: string,
 ): Promise<CamofoxRuntimeObservation> => {
   const dir = mkdtempSync(join(tmpdir(), "acc2-camofox-"));
   const entryPath = join(dir, "entry.mjs");
-  writeFileSync(entryPath, wrapBrowserBody(inv.body, profileRoot, allowDomains), { mode: 0o600 });
+  writeFileSync(entryPath, wrapBrowserBody(inv.body, profileRoot, allowDomains, camoufoxBinary), { mode: 0o600 });
 
   const env: Record<string, string> = {
     ...process.env,
+    ...permEnv,
     ACC2_INPUTS: JSON.stringify(inv.inputs ?? null),
     ACC2_ARTIFACT_ID: inv.artifactId,
     ACC2_BUDGET_WALL_MS: String(wallMs),
     ACC2_BUDGET_MEMORY_MB: String(memoryMb),
     ACC2_BROWSER_PROFILE: profileRoot,
     ACC2_ALLOWED_DOMAINS: JSON.stringify(allowDomains),
+    CAMOUFOX_BINARY_PATH: camoufoxBinary,
   };
 
   const startMs = Date.now();
@@ -342,6 +453,7 @@ const runCamofoxArtifactInner = async (
         memory_mb: memoryMb,
         profile_root: profileRoot,
         allow_domains: allowDomains as unknown as JsonValue,
+        camoufox_binary: camoufoxBinary,
       } as JsonValue,
     });
 
@@ -378,7 +490,7 @@ const runCamofoxArtifactInner = async (
       });
     }
     if (hardFired) {
-      // Per §5.5: chromium hung-page recovery — if SIGKILL didn't drain,
+      // Per §5.5: firefox hung-page recovery — if SIGKILL didn't drain,
       // mark the profile root quarantine_pending so the next invocation
       // gets a fresh context. We can't observe "didn't drain" reliably from
       // the parent without proc-tree probing, so we conservatively emit on
@@ -464,6 +576,7 @@ const runCamofoxArtifactInner = async (
 };
 
 // Exposed for tests — checks that the wrapper script generation is stable
-// without spawning chromium.
+// without spawning firefox.
 export const __wrapBrowserBodyForTest = wrapBrowserBody;
 export const __isPlaywrightInstalledForTest = isPlaywrightInstalled;
+export const __resolveCamoufoxBinaryForTest = resolveCamoufoxBinary;

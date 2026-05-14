@@ -236,6 +236,14 @@ export type SandboxDecl =
       browser_allow_domains: string[];
       browser_profile_root: string;
       browser_allow_downloads_to?: string;
+      // Camoufox fingerprint hints (Batch 1.α). All optional; defaults are
+      // applied in the sandbox builder so old decls remain valid.
+      //   fingerprint_os      — "linux" | "macos" | "windows" (default linux)
+      //   fingerprint_locale  — BCP 47 string, e.g. "en-US" (default en-US)
+      //   headless            — boolean (default true)
+      fingerprint_os?: "linux" | "macos" | "windows";
+      fingerprint_locale?: string;
+      headless?: boolean;
       wall_ms: number;
       memory_mb: number;
     };

@@ -98,6 +98,16 @@ export const validateSandboxDecl = (decl: SandboxDecl): SandboxResult => {
   if (d.browser_allow_downloads_to !== undefined && typeof d.browser_allow_downloads_to !== "string") {
     return { ok: false, reason: "browser_allow_downloads_to_bad_type" };
   }
+  if (d.fingerprint_os !== undefined &&
+      d.fingerprint_os !== "linux" && d.fingerprint_os !== "macos" && d.fingerprint_os !== "windows") {
+    return { ok: false, reason: `bad_fingerprint_os:${String(d.fingerprint_os)}` };
+  }
+  if (d.fingerprint_locale !== undefined && typeof d.fingerprint_locale !== "string") {
+    return { ok: false, reason: "fingerprint_locale_bad_type" };
+  }
+  if (d.headless !== undefined && typeof d.headless !== "boolean") {
+    return { ok: false, reason: "headless_bad_type" };
+  }
   return { ok: true };
 };
 
@@ -230,7 +240,7 @@ export const buildUvPermissionArgs = (
 
 /** Translate a `runtime: 'camofox-browser'` SandboxDecl into env vars + warnings.
  *
- *  Phase-G enforcement matrix:
+ *  Batch 1.α enforcement matrix:
  *    - wall_ms / memory_mb: outer watchdog enforces wall_ms via SIGTERM at
  *      wall_ms and SIGKILL at wall_ms × 2 (see runtimes/camofox.ts).
  *    - browser_allow_domains: enforced by the wrapper's `page.route()` —
@@ -239,8 +249,16 @@ export const buildUvPermissionArgs = (
  *      directory tree under it on first launch.
  *    - browser_allow_downloads_to: surfaced via env; the wrapper reads
  *      ACC2_DOWNLOAD_DIR when set and rejects writes elsewhere.
+ *    - fingerprint_os / fingerprint_locale / headless: Camoufox-specific
+ *      fingerprint randomization hints. Surfaced via env keys CAMOUFOX_OS,
+ *      CAMOUFOX_LOCALE, CAMOUFOX_HEADLESS — these are read by the wrapper
+ *      code that calls `firefox.launchPersistentContext` (CAMOUFOX_OS picks
+ *      the fingerprint family the camoufox binary emulates; CAMOUFOX_LOCALE
+ *      and CAMOUFOX_HEADLESS thread directly into the launch options).
+ *      Defaults: linux / en-US / true. All are optional on the decl so
+ *      pre-Batch-1.α decls remain valid (backward-compatible).
  *
- *  No argv prefix — chromium is spawned by playwright inside the wrapper,
+ *  No argv prefix — firefox is spawned by playwright inside the wrapper,
  *  so the sandbox here only shapes the env passed to the wrapper.
  */
 export const buildCamofoxPermissionArgs = (
@@ -250,12 +268,18 @@ export const buildCamofoxPermissionArgs = (
   if (!v.ok) {
     throw new Error(`invalid camofox sandbox decl: ${v.reason}`);
   }
+  const fingerprintOs = decl.fingerprint_os ?? "linux";
+  const fingerprintLocale = decl.fingerprint_locale ?? "en-US";
+  const headless = decl.headless ?? true;
   const env: Record<string, string> = {
     ACC2_SANDBOX_RUNTIME: "camofox-browser",
     ACC2_SANDBOX_WALL_MS: String(decl.wall_ms),
     ACC2_SANDBOX_MEMORY_MB: String(decl.memory_mb),
     ACC2_BROWSER_PROFILE: decl.browser_profile_root,
     ACC2_ALLOWED_DOMAINS: JSON.stringify(decl.browser_allow_domains),
+    CAMOUFOX_OS: fingerprintOs,
+    CAMOUFOX_LOCALE: fingerprintLocale,
+    CAMOUFOX_HEADLESS: headless ? "true" : "false",
   };
   if (decl.browser_allow_downloads_to) {
     env.ACC2_DOWNLOAD_DIR = decl.browser_allow_downloads_to;
@@ -270,7 +294,7 @@ export const buildCamofoxPermissionArgs = (
     }
   }
   if (decl.browser_allow_domains.length === 0) {
-    warnings.push("browser_allow_domains is empty — chromium will allow ALL outbound requests");
+    warnings.push("browser_allow_domains is empty — camoufox will allow ALL outbound requests");
   }
   return { env, warnings };
 };

@@ -202,7 +202,7 @@ describe("buildUvPermissionArgs (Phase G)", () => {
   });
 });
 
-describe("buildCamofoxPermissionArgs (Phase G)", () => {
+describe("buildCamofoxPermissionArgs (Batch 1.α)", () => {
   test("returns env populated with allow_domains + profile_root for a valid decl", () => {
     const out = buildCamofoxPermissionArgs({
       runtime: "camofox-browser",
@@ -214,6 +214,55 @@ describe("buildCamofoxPermissionArgs (Phase G)", () => {
     expect(out.env.ACC2_BROWSER_PROFILE).toBe("/tmp/p");
     expect(JSON.parse(out.env.ACC2_ALLOWED_DOMAINS!)).toEqual(["example.com"]);
     expect(out.warnings).toEqual([]);
+  });
+
+  test("populates CAMOUFOX_OS / CAMOUFOX_LOCALE / CAMOUFOX_HEADLESS env with defaults when fingerprint hints are omitted", () => {
+    const out = buildCamofoxPermissionArgs({
+      runtime: "camofox-browser",
+      browser_allow_domains: ["example.com"],
+      browser_profile_root: "/tmp/p",
+      wall_ms: 30000, memory_mb: 1024,
+    });
+    expect(out.env.CAMOUFOX_OS).toBe("linux");
+    expect(out.env.CAMOUFOX_LOCALE).toBe("en-US");
+    expect(out.env.CAMOUFOX_HEADLESS).toBe("true");
+  });
+
+  test("propagates fingerprint_os / fingerprint_locale / headless overrides into env", () => {
+    const out = buildCamofoxPermissionArgs({
+      runtime: "camofox-browser",
+      browser_allow_domains: ["example.com"],
+      browser_profile_root: "/tmp/p",
+      fingerprint_os: "macos",
+      fingerprint_locale: "fr-FR",
+      headless: false,
+      wall_ms: 30000, memory_mb: 1024,
+    });
+    expect(out.env.CAMOUFOX_OS).toBe("macos");
+    expect(out.env.CAMOUFOX_LOCALE).toBe("fr-FR");
+    expect(out.env.CAMOUFOX_HEADLESS).toBe("false");
+  });
+
+  test("rejects an invalid fingerprint_os value at validation", () => {
+    const decl = {
+      runtime: "camofox-browser",
+      browser_allow_domains: ["example.com"],
+      browser_profile_root: "/tmp/p",
+      fingerprint_os: "plan9",
+      wall_ms: 30000, memory_mb: 1024,
+    } as unknown as SandboxDecl & { runtime: "camofox-browser" };
+    expect(() => buildCamofoxPermissionArgs(decl)).toThrow(/bad_fingerprint_os/);
+  });
+
+  test("rejects a non-boolean headless at validation", () => {
+    const decl = {
+      runtime: "camofox-browser",
+      browser_allow_domains: ["example.com"],
+      browser_profile_root: "/tmp/p",
+      headless: "yes",
+      wall_ms: 30000, memory_mb: 1024,
+    } as unknown as SandboxDecl & { runtime: "camofox-browser" };
+    expect(() => buildCamofoxPermissionArgs(decl)).toThrow(/headless_bad_type/);
   });
 
   test("warns when an allow-domain entry contains a scheme/port/path", () => {
