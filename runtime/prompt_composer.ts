@@ -226,14 +226,24 @@ const RUNTIMES_AVAILABLE_TEXT = [
 
 const WORKFLOW_TEXT = [
   "YOUR WORKFLOW (one cycle per dispatch — refinement via DAG edges, not re-prompting):",
-  "  1. Write or reuse a code artifact for one of the three runtimes AND a verifier artifact",
-  "     that returns a scalar residual in [0,1].",
+  "  1. Write/reuse a code artifact for one of the three runtimes + a verifier returning residual in [0,1].",
   "  2. Emit action_predicted with action_artifact_id + verifier_artifact_id + predicted_residual.",
-  "  3. For complex sub-goals, propose task_node_opened + task_edge_recorded. If work is",
-  "     incomplete, emit a refinement edge — the next single-cycle session picks it up.",
+  "  3. For complex sub-goals, emit task_node_opened + task_edge_recorded (refines/requires).",
+  "     Incomplete work → emit a refinement edge; the next cycle picks it up.",
   "  4. Propose knowledge_candidate events for new patterns; substrate promotes via outcome.",
   "  5. For new reusable scripts, emit code_artifact_candidate.",
   "  6. Commit task via task_committed when verifier residual is below threshold.",
+  "  CLOSURE + LEARNING (required before committing a DIRECTIVE's root task):",
+  "  7. Run a CLOSURE VERIFIER (a code artifact) that reads the trajectory and scores",
+  "     closure_residual = w1·goal_solved + w2·sub_tasks_covered + w3·lessons_captured + w4·no_violation.",
+  "     Emit task_closure_audited { closure_residual, breakdown, original_goal_text,",
+  "     covered_sub_tasks[], uncovered_aspects[] }. closure_residual ≥ 0.3 → refine, do NOT commit root.",
+  "  8. Extract lessons. For each friction or improvement, emit ONE of:",
+  "     - contract_amendment_proposed { target (CLAUDE.md / docs / .claude/rules / cli / runtime),",
+  "       anchor, current_behavior, proposed_behavior, evidence_event_ids[] }",
+  "     - lesson_extracted { lesson_kind (recipe_candidate/process_improvement/failure_pattern/",
+  "       sandbox_gap/verifier_gap/retrieval_gap), summary, evidence_event_ids[], proposed_action }",
+  "     Lessons are the trajectory's gift to future cycles — without them, knowledge does not compound.",
 ].join("\n");
 
 const buildKnowledgeSection = (rows: Array<{ id: string; text: string; score: number }>): string => {

@@ -106,6 +106,9 @@ const GLYPHS: Record<string, string> = {
   prompt_truncated: "✂",
   integrity_check_completed: "🩺",
   sandbox_unenforced_warning: "🛡⚠",
+  task_closure_audited: "🎓",
+  lesson_extracted: "💡",
+  contract_amendment_proposed: "📝",
 };
 
 const formatPayload = (kind: string, p: Record<string, unknown>): string => {
@@ -204,6 +207,23 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       const runtime = p.runtime as string | undefined;
       const warning = (p.warning as string) ?? "";
       return `${runtime ? `runtime=${runtime} ` : ""}${trunc(warning, 100)}`;
+    }
+    case "task_closure_audited": {
+      const residual = p.closure_residual;
+      const uncovered = (p.uncovered_aspects as unknown[] | undefined)?.length ?? 0;
+      const covered = (p.covered_sub_tasks as unknown[] | undefined)?.length ?? 0;
+      return `closure_residual=${residual} covered=${covered} uncovered=${uncovered}`;
+    }
+    case "lesson_extracted": {
+      const kind = p.lesson_kind as string | undefined;
+      const summary = p.summary as string | undefined;
+      return `lesson_kind=${kind ?? "?"} ${summary ? `summary=${JSON.stringify(trunc(summary, 120))}` : ""}`;
+    }
+    case "contract_amendment_proposed": {
+      const target = p.target as string | undefined;
+      const anchor = p.anchor as string | undefined;
+      const proposed = (p.proposed_behavior as string) ?? (p.summary as string) ?? "";
+      return `target=${target ?? "?"}${anchor ? ` anchor=${JSON.stringify(trunc(anchor, 60))}` : ""}${proposed ? ` → ${JSON.stringify(trunc(proposed, 100))}` : ""}`;
     }
     default:
       return "";

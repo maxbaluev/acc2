@@ -165,6 +165,18 @@ export const EVENT_KINDS = {
   wal_checkpointed:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
   dispatch_recovered_orphan:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
 
+  // ── Closure audit + lessons learned (universal post-trajectory loop) ─
+  //
+  // Every task's terminal commit MUST be preceded by a task_closure_audited
+  // event scoring closure_residual ∈ [0,1] against the ORIGINAL goal text.
+  // The brain emits task_closure_audited + zero-or-more lesson_extracted +
+  // optional contract_amendment_proposed events before task_committed for
+  // the root task of any directive. See prompt_composer.ts WORKFLOW_TEXT
+  // steps 7-8 for the exact contract and CLAUDE.md §"Closure + learning".
+  task_closure_audited:                    { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
+  lesson_extracted:                        { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
+  contract_amendment_proposed:             { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
+
   // ── Substrate self-events ───────────────────────────────────────────
   projection_checkpointed:                 { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   constitutional_gate_decision:            { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },

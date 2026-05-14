@@ -136,6 +136,24 @@ Credit is Shapley-weighted across citations: `1/2^(i+1)` normalized (`runtime/cr
 
 Citation is mutation (k_554). If you read a knowledge entry and acted on it, cite its id in your `action_executed` event — the substrate updates the entry's posterior. Decorative citations are detectable and penalized.
 
+## Closure + learning — universal post-trajectory loop
+
+**Every directive that commits its root task MUST be preceded by a closure audit + lesson extraction.** Per-action verifiers prove that one bun script ran with the right output; they do NOT prove the original goal was solved or that the trajectory taught the organism anything. Without a task-level closure verifier, the substrate is expensive prose: it produces motion, not learning. This loop is the structural cure.
+
+The brain executes steps 7–8 of `WORKFLOW_TEXT` (P0, every cycle) before emitting `task_committed` on a directive's root task:
+
+| step | event kind | what it carries |
+|---|---|---|
+| 7. Closure audit | `task_closure_audited` | `closure_residual` ∈ [0,1] = weighted blend of `goal_solved` × `sub_tasks_covered` × `lessons_captured` × `violation_count`. `closure_residual ≥ 0.3` means the root is **not** ready to commit — emit a refinement edge instead. |
+| 8a. Contract drift | `contract_amendment_proposed` | `{ target: CLAUDE.md / docs/v2-design.md / .claude/rules/*.md / cli/* / runtime/*, anchor, current_behavior, proposed_behavior, evidence_event_ids[] }`. Required when the trajectory revealed friction with the operating contract / docs / CLI / sandbox / recipe surface. |
+| 8b. Other lessons | `lesson_extracted` | `{ lesson_kind: recipe_candidate / process_improvement / failure_pattern / sandbox_gap / verifier_gap / retrieval_gap, summary, evidence_event_ids[], proposed_action }`. Required for any reusable insight that doesn't fit step 8a. |
+
+The closure verifier is itself a code artifact the brain authors — it reads the directive's full task DAG (via `substrate.read({view_name:"task_graph_view"})`), compares the original `directive_text` against the trajectory, and returns the scalar residual. The verifier is its own teachable surface: low-quality verifiers get demoted by the substrate's posterior loop like any other artifact.
+
+**Why this lives at the contract level, not as advisory prose:** k_252 ("advisory = fake"). Steps 7–8 are in the *required* WORKFLOW_TEXT the brain reads on every dispatch — exactly the same priority as steps 1–6. The closure verifier's residual gates the root commit structurally: if the brain skips the audit, the root task can't reach `task_committed` because no closure_residual is on file. If it skips lesson extraction on a substantive trajectory, the closure verifier itself can be authored to penalize the omission (`lessons_captured` component of the residual).
+
+The owner reviews `contract_amendment_proposed` and `lesson_extracted` events the same way operators review brain-authored artifacts: through the substrate, on cadence (Father iteration), with full audit chain. `acc events --kind contract_amendment_proposed` and `acc events --kind lesson_extracted` are the canonical surfaces; the orchestrator surfaces high-confidence amendments to the owner conversationally.
+
 ## Event-type partition — who writes what (v2-design.md §3.6)
 
 | Event kind | You (Claude) | Brain (opencode) | Substrate |

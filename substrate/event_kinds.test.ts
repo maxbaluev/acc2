@@ -104,7 +104,12 @@ describe("EVENT_KINDS registry coverage", () => {
       // Match `kind: "<literal>"` and `kind: '<literal>'` and
       // `kind: \`<literal>\`` — only simple alphanumeric+underscore
       // values (excludes template expressions and dynamic kinds).
-      const re = /kind:\s*["'`]([a-z_][a-z_0-9]*)["'`]/g;
+      // The negative lookbehind `(?<!\w)` rejects compound field names
+      // like `lesson_kind:`, `failure_kind:`, `pattern_kind:`, etc.,
+      // whose values are sub-payload enums, not event kinds. Without
+      // this guard every FailureKind / lesson_kind value would leak
+      // into the literals set and clog NON_EVENT_KIND_LITERALS.
+      const re = /(?<!\w)kind:\s*["'`]([a-z_][a-z_0-9]*)["'`]/g;
       let m: RegExpExecArray | null;
       while ((m = re.exec(text)) !== null) literals.add(m[1]);
     }
