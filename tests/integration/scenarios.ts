@@ -1763,6 +1763,16 @@ export type AdHocTaskResult = {
   /** True iff a `crisis_mode_engaged` event was emitted under this directive
    *  during the run. Always false when urgency !== "crisis". */
   crisisModeEngaged: boolean;
+  /** Count of bridge_invoked events for this directive — how many opencode cycles fired. */
+  bridgeInvokedCount: number;
+  /** Count of recipe_extracted events for this directive — did the task contribute to Tier-0 recipes? */
+  recipeExtractedCount: number;
+  /** vec_events row count delta from before/after this run (synchronous embedder indexes events). */
+  vecEventsIndexed: number;
+  /** Distinct runtimes invoked during this directive (e.g. ["bun", "uv"]). */
+  runtimesInvoked: string[];
+  /** Count of artifact_invoked events for this directive — total artifact executions. */
+  artifactInvokedCount: number;
 };
 
 /**
@@ -1813,6 +1823,8 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
     durationMs: 0, directiveId, stateDir: "",
     eventsCount: 0, artifactsCount: 0, violations: 0, refinementEdges: 0,
     urgency, crisisModeEngaged: false,
+    bridgeInvokedCount: 0, recipeExtractedCount: 0,
+    vecEventsIndexed: 0, runtimesInvoked: [], artifactInvokedCount: 0,
   };
 
   try {
@@ -1888,6 +1900,19 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
     const artifactsBaseline = (
       handle.db.query("SELECT COUNT(*) AS n FROM code_artifact").get() as { n: number }
     ).n;
+    // Snapshot vec_events row count so the post-run delta isolates THIS run's
+    // embedder activity (the seed indexes its own knowledge_promoted rows).
+    // Synchronous embedder indexes events as they land — the delta reports
+    // how many events were vectorised during the dispatch window.
+    const vecEventsBaseline = ((): number => {
+      try {
+        return (
+          handle.db.query("SELECT COUNT(*) AS n FROM vec_events").get() as { n: number }
+        ).n;
+      } catch {
+        return 0;
+      }
+    })();
 
     // Stream EVERY event for this directive as it lands — the brain's MCP
     // tool calls land here as event rows (substrate.admit_artifact emits
@@ -1993,6 +2018,36 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
       "SELECT COUNT(*) AS c FROM events WHERE kind = 'crisis_mode_engaged' AND directive_id = ?",
     ).get(directiveId) as { c: number };
 
+    // Extended stats: count brain cycles, recipe extractions, runtimes used,
+    // total artifact invocations, and vec_events delta. These let the
+    // real-brain matrix runner answer "did the organism actually do work?"
+    // rather than just "did the dispatch return".
+    const bridgeRow = handle.db.query(
+      "SELECT COUNT(*) AS n FROM events WHERE kind = 'bridge_invoked' AND directive_id = ?",
+    ).get(directiveId) as { n: number };
+    const recipeRow = handle.db.query(
+      "SELECT COUNT(*) AS n FROM events WHERE kind = 'recipe_extracted' AND directive_id = ?",
+    ).get(directiveId) as { n: number };
+    const artifactInvokedRow = handle.db.query(
+      "SELECT COUNT(*) AS n FROM events WHERE kind = 'artifact_invoked' AND directive_id = ?",
+    ).get(directiveId) as { n: number };
+    const runtimeRows = handle.db.query(
+      "SELECT DISTINCT json_extract(payload, '$.runtime') AS r FROM events WHERE kind = 'artifact_invoked' AND directive_id = ?",
+    ).all(directiveId) as Array<{ r: string | null }>;
+    const runtimesInvoked = runtimeRows
+      .map((r) => r.r)
+      .filter((r): r is string => typeof r === "string" && r.length > 0)
+      .sort();
+    const vecEventsAfter = ((): number => {
+      try {
+        return (
+          handle.db.query("SELECT COUNT(*) AS n FROM vec_events").get() as { n: number }
+        ).n;
+      } catch {
+        return vecEventsBaseline;
+      }
+    })();
+
     result = {
       committed: terminal?.kind === "task_committed",
       failed: terminal?.kind === "task_failed",
@@ -2007,6 +2062,11 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
       refinementEdges: refineCount,
       urgency,
       crisisModeEngaged: crisisRow.c > 0,
+      bridgeInvokedCount: bridgeRow.n,
+      recipeExtractedCount: recipeRow.n,
+      vecEventsIndexed: Math.max(0, vecEventsAfter - vecEventsBaseline),
+      runtimesInvoked,
+      artifactInvokedCount: artifactInvokedRow.n,
     };
 
     write(`\n──────────────────────────────────────\n`);
@@ -2017,6 +2077,11 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
     write(`  artifacts admitted: ${result.artifactsCount}\n`);
     write(`  dispatcher_violation: ${result.violations}${result.violations === 0 ? "" : "  ⚠"}\n`);
     write(`  refinement edges: ${result.refinementEdges}\n`);
+    write(`  bridge_invoked: ${result.bridgeInvokedCount}\n`);
+    write(`  recipe_extracted: ${result.recipeExtractedCount}\n`);
+    write(`  vec_events indexed: ${result.vecEventsIndexed}\n`);
+    write(`  runtimes: ${result.runtimesInvoked.length > 0 ? result.runtimesInvoked.join(",") : "(none)"}\n`);
+    write(`  artifact_invoked: ${result.artifactInvokedCount}\n`);
     write(`  duration: ${(result.durationMs / 1000).toFixed(1)}s\n`);
     if (urgency === "crisis") {
       write(`  crisis_mode_engaged: ${result.crisisModeEngaged ? "yes" : "no"}\n`);
