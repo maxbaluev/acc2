@@ -10,6 +10,7 @@ import {
   computeEmbedding,
   decodeEmbeddingBlob,
   embedderWorkerTick,
+  embedPendingEvents,
   EMBEDDING_DIMS,
   EMBEDDING_MODEL,
   EMBEDDING_VERSION,
@@ -261,5 +262,89 @@ describe("embedderWorkerTick", () => {
     const result = await embedderWorkerTick(db, { batchSize: 5 });
     expect(result.embedded).toBe(0);
     expect(result.skipped_no_text).toBe(1);
+  });
+});
+
+describe("embedPendingEvents", () => {
+  test("returns zeros on a fresh DB with no pending events", async () => {
+    const db = openDb(":memory:");
+    const result = await embedPendingEvents(db);
+    expect(result).toEqual({ embedded: 0, skipped: 0, failed: 0 });
+  });
+
+  test("embeds pending events synchronously and populates vec_events", async () => {
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    installMockFetch(async (_url, init) => {
+      const reqBody = JSON.parse((init.body as string) ?? "{}") as { input: string[] };
+      const data = reqBody.input.map((_t, i) => ({ embedding: synthEmbedding(i + 3), index: i }));
+      return new Response(JSON.stringify({ data }), { status: 200 });
+    });
+    const db = openDb(":memory:");
+    const seeded = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "embed me please" },
+    });
+    const result = await embedPendingEvents(db);
+    expect(result.embedded).toBe(1);
+    expect(result.failed).toBe(0);
+    const vecRow = db
+      .query("SELECT event_id FROM vec_events WHERE event_id = ?")
+      .get(seeded.id) as { event_id: string } | null;
+    expect(vecRow).not.toBeNull();
+    const eventRow = db
+      .query("SELECT embedding FROM events WHERE id = ?")
+      .get(seeded.id) as { embedding: Uint8Array | null };
+    expect(eventRow.embedding).not.toBeNull();
+  });
+
+  test("emits embedding_skipped_missing_api_key when OPENAI_API_KEY is unset", async () => {
+    delete process.env.OPENAI_API_KEY;
+    const db = openDb(":memory:");
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "needs embedding" },
+    });
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "another one" },
+    });
+    const result = await embedPendingEvents(db);
+    expect(result.embedded).toBe(0);
+    expect(result.failed).toBe(0);
+    expect(result.skipped).toBe(2);
+    const auditRows = db
+      .query("SELECT payload FROM events WHERE kind = 'embedding_skipped_missing_api_key'")
+      .all() as Array<{ payload: string }>;
+    expect(auditRows.length).toBe(1);
+    const payload = JSON.parse(auditRows[0]!.payload) as { pending_count: number; reason: string };
+    expect(payload.pending_count).toBe(2);
+    expect(payload.reason).toBe("openai_api_key_missing");
+  });
+
+  test("idempotent — a second call after success is a cheap no-op", async () => {
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    let calls = 0;
+    installMockFetch(async (_url, init) => {
+      calls++;
+      const reqBody = JSON.parse((init.body as string) ?? "{}") as { input: string[] };
+      const data = reqBody.input.map((_t, i) => ({ embedding: synthEmbedding(i + 7), index: i }));
+      return new Response(JSON.stringify({ data }), { status: 200 });
+    });
+    const db = openDb(":memory:");
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "first" },
+    });
+    const first = await embedPendingEvents(db);
+    expect(first.embedded).toBe(1);
+    const second = await embedPendingEvents(db);
+    expect(second.embedded).toBe(0);
+    expect(second.skipped).toBe(0);
+    expect(second.failed).toBe(0);
+    expect(calls).toBe(1);
   });
 });

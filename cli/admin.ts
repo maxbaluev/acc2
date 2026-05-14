@@ -50,6 +50,8 @@ import { runImport } from "./admin_import";
 import { runInstallDeps } from "./admin_install_deps";
 import { rotateAdminToken, rotateExternalToken } from "./admin_rotate";
 import { runCleanTempState } from "./admin_clean_temp";
+import { runEmbedAll } from "./admin_embed_all";
+import { runSubstrateStatus } from "./admin_substrate_status";
 
 const usage = (): string => `acc admin — operator-side maintenance
 
@@ -87,6 +89,10 @@ const usage = (): string => `acc admin — operator-side maintenance
                               integration / smoke runs. OS hygiene only —
                               no substrate events emitted. Refuses paths
                               outside /tmp/ matching those globs.
+
+  Substrate liveness:
+    embed-all                 Synchronously embed every pending event into vec_events.
+    substrate-status          Print a single-screen ALIVE/DEGRADED/DEAD verdict.
 `;
 
 // ── Shared helpers for Batch 3.ADMIN surfaces ───────────────────────
@@ -729,6 +735,8 @@ export const runAdmin = async (argv: string[], envOverride?: AdminEnv): Promise<
   if (sub === "override-quarantine") return runOverrideQuarantineCmd(argv.slice(1), env);
   if (sub === "archive-rolling") return runArchiveRollingCmd(argv.slice(1), env);
   if (sub === "clean-temp-state") return runCleanTempState(argv.slice(1));
+  if (sub === "embed-all") return runEmbedAll(argv.slice(1));
+  if (sub === "substrate-status") return runSubstrateStatus(argv.slice(1));
   env.err(`acc admin: unknown subcommand '${sub}'`);
   env.err(usage());
   return 1;

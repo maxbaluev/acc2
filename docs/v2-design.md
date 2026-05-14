@@ -761,6 +761,41 @@ A subprocess that triggers `runtime_subprocess_hard_killed` or `runtime_subproce
 
 Runtime supervision lives in `v2/runtime/sandbox.ts` (the policy layer) + `v2/runtime/daemon.ts` (the watchdog ticks) + each `v2/runtime/runtimes/<runtime>.ts` (the subprocess-specific signal handling). This is the missing implementer-grade detail beneath §5.1's single-process supervisor claim.
 
+### 5.6 Substrate liveness invariant — live at boot
+
+A fresh `acc init` followed by `acc daemon start` must produce a **LIVE** substrate, not a partially-populated shell that is technically "running" but starves the RLM surface. The bug class this closes: a freshly-installed daemon ticks happily while `substrate.search` returns nothing because no event has an embedding, no recipe priors exist, and no code artifact has been admitted yet — the brain's first dispatch runs without retrieval context and the RLM mechanism is dead before the system ever observes a real task.
+
+**The invariant (enforced structurally, not by convention):**
+
+1. **After `acc init`** — every canonical table/view has at least one row:
+   - `events` ≥ 10 (foundational knowledge seed, owner-approved at install time)
+   - `code_artifact` ≥ 8 (seed code artifacts: bun / uv / camofox-browser runtime entries)
+   - `events` (recipe_extracted) ≥ 2 (canonical priors for repeated goal shapes: "fetch URL title" + "arithmetic")
+   - `vec_events` > 0 (synchronous embedder pass over the seeded events)
+2. **After `acc daemon start`** — the embedder worker ticks within 10s and produces `embedding_computed` events. Any embeddable event written after the synchronous boot pass (owner directives, brain candidates) lands in `vec_events` on the next tick.
+3. **`acc doctor` PASS implies substrate is ALIVE.** The composite check now includes the substrate-content verdict surfaced by `acc admin substrate-status`. A PASS means events > 0 AND code_artifact > 0 AND vec_events > 0.
+4. **The harness `--task` mode inherits the same liveness invariant** via the shared init + startDaemon path. A scenario that boots a substrate for an integration test sees the same seeded baseline a real operator install sees.
+
+**Verdict taxonomy (`acc admin substrate-status`):**
+
+| Verdict | Meaning | Recovery |
+|---|---|---|
+| **ALIVE** | events > 0 AND code_artifact > 0 AND vec_events > 0 | Substrate is ready; RLM surface populated |
+| **DEGRADED** | events > 0 but vec_events == 0 or code_artifact == 0 | Run `acc admin embed-all` (closes vec_events gap) or re-run `acc init` to re-seed artifacts |
+| **DEAD** | events == 0 | Substrate has never been seeded; run `acc init` |
+
+**Operator-facing surfaces:**
+
+- `acc admin substrate-status` — single-screen ALIVE/DEGRADED/DEAD report with per-table counts, freshness (latest event ts, oldest unembedded ts), and the seed-vs-brain-authored artifact split.
+- `acc admin embed-all` — synchronous one-shot embedder pass. Refuses while the daemon is running (would race the embedder worker — operator must `acc daemon stop` first). Idempotent: a second call with no pending rows is a cheap no-op.
+
+**Implementation surfaces:**
+
+- `runtime/embedder.ts::embedPendingEvents(db)` — public synchronous batch embedder. Drains every event where `kind ∈ EMBEDDABLE_KINDS AND embedding IS NULL` through the existing batch-of-100 OpenAI request path; emits `embedding_skipped_missing_api_key` (one row, carrying the pending count) when `OPENAI_API_KEY` is unset and returns `{embedded: 0, skipped: N, failed: 0}` rather than throwing.
+- `substrate/seed.ts::seedRecipes(db)` — canonical Tier-0 priors for "fetch URL title" + "arithmetic". Seeds at confidence=0.7 (above replay threshold 0.6, below the "promoted" mark) so they're elective from cycle one but decay quickly if reality contradicts them (failed replay −0.10, auto-archive < 0.2). Each recipe references real seed artifact ids so `runArtifactByRuntime` in replay can resolve them.
+
+The synchronous boot pass is what separates "DEGRADED, daemon is running but substrate is dead" from "ALIVE, retrieval is populated". `acc init` step 7 (post-seed) calls `seedRecipes(db)` and then `await embedPendingEvents(db)` so the synchronous handoff to `acc daemon start` cannot leave the substrate in DEGRADED.
+
 ## 6. The Universal `act` Primitive
 
 The brain expresses **intent + an action code artifact + a verifier code artifact + predicted residual**. The substrate runs both in sandboxed runtimes; the verifier's scalar return is the residual. There is no discrete capability menu and no typed predicate lattice — the universal mechanism is code-as-capability.

@@ -13,6 +13,7 @@
 
 import type { Database } from "bun:sqlite";
 import { withImmediateTransaction } from "./db";
+import { goalShape } from "../runtime/goal_shape";
 import type { CodeArtifactStatus, Runtime, SandboxDecl } from "./types";
 
 const newId = (): string =>
@@ -593,3 +594,149 @@ export const seedCodeArtifacts = (db: Database): CodeArtifactSeedSummary => {
 /** Convenience helper — primarily for tests / the daemon boot path.
  *  Returns the canonical seed ids so callers can join against them. */
 export const seedArtifactIds = (): string[] => SEED_ARTIFACTS.map((s) => seedIdFor(s.seedName));
+
+// ── Seed recipes (§15 Tier-0 priors) ─────────────────────────────────
+//
+// Recipes are normally extracted from real `task_committed` traces via
+// `extractRecipeCandidates` (substrate/extractors.ts) once ≥3 successful
+// replays of the same goal_shape × topology accumulate. Day-1 substrates
+// have zero trace history, so the recipe-replay lane is dead until the
+// first dozen tasks have committed — that starves the Tier-0 cost
+// compression path described in v2-design.md §15.
+//
+// `seedRecipes` lays down canonical priors for goal shapes the brain
+// will see repeatedly in practice (URL title fetch + arithmetic). The
+// recipes seed at confidence=0.7 (above the default replay threshold
+// 0.6, below the "promoted" mark) so they're elective from cycle one but
+// can decay quickly if reality contradicts them (failed replay −0.10,
+// auto-archive < 0.2).
+//
+// Idempotent via meta gate (re-running the same install does NOT
+// duplicate rows). Each seeded recipe references real seed code-artifact
+// ids so `runArtifactByRuntime` in replay can resolve them.
+
+const META_SEEDED_RECIPES = "seed:recipes";
+
+type SeedRecipe = {
+  /** Canonical English description of the goal — fed through `goalShape`
+   *  so the matcher collides on the same hash a real user directive
+   *  would produce. */
+  goalText: string;
+  /** Stable display label for the recipe's canonical_id. */
+  label: string;
+  /** Per-step trajectory — action artifact + optional verifier. */
+  trajectory: Array<{
+    action_artifact_id: string;
+    verifier_artifact_id: string | null;
+    payload_template: Record<string, unknown>;
+    predicted_residual: number;
+  }>;
+};
+
+const SEED_RECIPES: SeedRecipe[] = [
+  {
+    // URL title fetch — uses seed_web_fetch_and_parse, which returns
+    // `{ok, url, title, text}`. The replay lane will set `recipe_replayed:true`
+    // and stamp the recipe id on every per-step action_predicted event.
+    goalText: "fetch URL title",
+    label: "fetch_url_title",
+    trajectory: [
+      {
+        action_artifact_id: "seed_web_fetch_and_parse",
+        // No verifier seed exists today; the recipe-replayer treats a
+        // null verifier as residual=0 when the action returns ok=true.
+        // Phase J can replace this with a content-presence verifier once
+        // an authored verifier seed lands.
+        verifier_artifact_id: null,
+        payload_template: { url: "https://example.com" },
+        predicted_residual: 0,
+      },
+    ],
+  },
+  {
+    // Arithmetic — uses seed_py_run which exec()s the provided source.
+    // The brain's typical arithmetic dispatch fills `source` from the
+    // owner's directive text; the recipe captures the topology only,
+    // not a literal expression.
+    goalText: "arithmetic",
+    label: "arithmetic",
+    trajectory: [
+      {
+        action_artifact_id: "seed_py_run",
+        verifier_artifact_id: null,
+        payload_template: { source: "result = 2 + 2" },
+        predicted_residual: 0,
+      },
+    ],
+  },
+];
+
+export type RecipeSeedSummary = { count: number };
+
+export const seedRecipes = (db: Database): RecipeSeedSummary => {
+  if (readMeta(db, META_SEEDED_RECIPES) !== null) {
+    return { count: 0 };
+  }
+
+  const directiveId = "dir_seed_recipes";
+  const loopId = "loop_seed_recipes";
+  let count = 0;
+
+  withImmediateTransaction(db, () => {
+    for (const recipe of SEED_RECIPES) {
+      const goal = goalShape(recipe.goalText);
+      // Topology signature mirrors `extractRecipeCandidates`: degenerate
+      // single-root trajectory. The replay matcher accepts a recipe
+      // whose topology endsWith("::1") as a wildcard against any
+      // single-task DAG, so this is the minimal-binding shape.
+      const topology = `topo_00000000::1`;
+      const trajectory = recipe.trajectory.map((step) => ({
+        step_kind: "action_predicted" as const,
+        artifact_id: step.action_artifact_id,
+        verifier_artifact_id: step.verifier_artifact_id,
+        payload_template: step.payload_template,
+        predicted_residual: step.predicted_residual,
+      }));
+      const recipeId = newId();
+      const taskId = `task_seed_recipe_${recipe.label}`;
+      db.run(
+        `INSERT INTO events (
+           id, ts, directive_id, task_id, loop_id, substrate_origin,
+           kind, payload, context_refs
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          recipeId,
+          nowIso(),
+          directiveId,
+          taskId,
+          loopId,
+          "substrate_auto",
+          "recipe_extracted",
+          JSON.stringify({
+            goal_shape: goal,
+            goal_text: recipe.goalText,
+            label: recipe.label,
+            topology_signature: topology,
+            confidence: 0.7,
+            success_count: 0,
+            window_days: 30,
+            directive_ids: [],
+            trajectory,
+            seeded: true,
+            skip_corroboration: true,
+          }),
+          JSON.stringify(recipe.trajectory.map((s) => s.action_artifact_id)),
+        ],
+      );
+      count++;
+    }
+    writeMeta(db, META_SEEDED_RECIPES, nowIso());
+  });
+
+  return { count };
+};
+
+/** Convenience helper — primarily for tests. Returns the canonical
+ *  goal texts seeded by `seedRecipes` so tests can assert on them
+ *  without re-hashing. */
+export const seedRecipeGoalTexts = (): string[] => SEED_RECIPES.map((r) => r.goalText);
