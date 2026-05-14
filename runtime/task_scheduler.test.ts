@@ -225,6 +225,85 @@ describe("task_scheduler", () => {
     }
   }, 60_000);
 
+  test("consecutive-failure backoff quarantines a task after N bridge_failed in a row (no retry storm)", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      payload: { directive_text: "test consecutive bridge failures", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { goal: "test consecutive bridge failures" },
+    });
+    // Three back-to-back bridge_failed rows — past the default cap.
+    for (let i = 0; i < 3; i++) {
+      emitEvent(db, {
+        kind: "bridge_failed",
+        substrate_origin: "opencode",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { reason: "mcp_handshake_failed" },
+        invoker: "opencode",
+      });
+    }
+    const tick = await schedulerTick(db, { directiveId });
+    expect(tick.skipped_failure_capped).toContain(taskId);
+    expect(tick.dispatched).not.toContain(taskId);
+
+    // Substrate now carries a task_failed row with the canonical failure_kind
+    // so readyTasks drops it on the next tick (no retry storm).
+    const failed = db
+      .query("SELECT failure_kind, payload FROM events WHERE task_id = ? AND kind = 'task_failed'")
+      .get(taskId) as { failure_kind: string; payload: string } | null;
+    expect(failed).not.toBeNull();
+    expect(failed!.failure_kind).toBe("consecutive_bridge_failures");
+    const fp = JSON.parse(failed!.payload) as { consecutive_failures: number; cap: number };
+    expect(fp.consecutive_failures).toBe(3);
+    expect(fp.cap).toBeGreaterThanOrEqual(3);
+
+    // Next tick: task no longer ready (now task_failed), no dispatch.
+    const tick2 = await schedulerTick(db, { directiveId });
+    expect(tick2.skipped_failure_capped).not.toContain(taskId);
+    expect(tick2.dispatched).not.toContain(taskId);
+  });
+
+  test("an interleaving successful event resets the consecutive-failure streak", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      payload: { directive_text: "test streak reset", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { goal: "test streak reset" },
+    });
+    // Two failures, then a successful frame, then two more failures = streak of 2 only.
+    for (let i = 0; i < 2; i++) {
+      emitEvent(db, { kind: "bridge_failed", substrate_origin: "opencode", directive_id: directiveId, task_id: taskId, payload: { reason: "x" }, invoker: "opencode" });
+    }
+    emitEvent(db, { kind: "bridge_mcp_connected", substrate_origin: "opencode", directive_id: directiveId, task_id: taskId, payload: { first_tool: "substrate.search" }, invoker: "opencode" });
+    for (let i = 0; i < 2; i++) {
+      emitEvent(db, { kind: "bridge_failed", substrate_origin: "opencode", directive_id: directiveId, task_id: taskId, payload: { reason: "x" }, invoker: "opencode" });
+    }
+    const tick = await schedulerTick(db, { directiveId });
+    // Streak is 2 (the trailing failures), below the default cap of 3 — task still eligible.
+    expect(tick.skipped_failure_capped).not.toContain(taskId);
+  });
+
   test("substrate_replay route skipped (Phase J stub returns phase_j)", async () => {
     const db = openDb(":memory:");
     // Seed a recipe_extracted event with high confidence + matching goal_shape.

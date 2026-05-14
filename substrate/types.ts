@@ -50,7 +50,11 @@ export type FailureKind =
   | "cycle_1_only_breach"
   | "refinement_depth_exceeded"
   | "directive_interference_cycle"
-  | "rolling_directive_archived";
+  | "rolling_directive_archived"
+  /** Scheduler quarantined the task after MAX_CONSECUTIVE_BRIDGE_FAILURES
+   *  in a row with no successful interleaving event. Prevents the retry
+   *  storm a structurally broken dispatch would otherwise produce. */
+  | "consecutive_bridge_failures";
 
 export type TaskEdgeKind = "requires" | "refines" | "watches";
 

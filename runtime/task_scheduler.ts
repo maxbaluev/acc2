@@ -61,10 +61,54 @@ export type SchedulerTick = {
    *  interference edge points at an in-flight peer directive. The scheduler
    *  emits `task_deferred_for_interference` for each entry here. */
   skipped_interference: string[];
+  /** Tasks the scheduler quarantined because they hit
+   *  `MAX_CONSECUTIVE_BRIDGE_FAILURES` in a row with no successful
+   *  interleaving event. Each entry corresponds to a `task_failed` row with
+   *  `failure_kind: "consecutive_bridge_failures"`. */
+  skipped_failure_capped: string[];
 };
 
 const DEFAULT_MAX_CONCURRENT = 5;
 const DEFAULT_POLL_INTERVAL_MS = 500;
+
+/** Max consecutive `bridge_failed` events for a single task before the
+ *  scheduler quarantines it with `task_failed { failure_kind:
+ *  "consecutive_bridge_failures" }`. Without this cap, a structural issue
+ *  (mcp_server_url_missing, mcp_handshake_failed, auth_missing) causes the
+ *  scheduler to hot-loop the same task forever — every 500ms tick re-picks
+ *  the same task because `readyTasks` only filters by committed/failed and
+ *  no `task_failed` is ever emitted for bridge-level failures. The cap is
+ *  generous enough to absorb transient network blips (default 3) but tight
+ *  enough that an operator notices fast. Override via
+ *  `ACC2_SCHEDULER_MAX_CONSECUTIVE_FAILURES`. */
+export const MAX_CONSECUTIVE_BRIDGE_FAILURES = Math.max(
+  1,
+  Number(process.env.ACC2_SCHEDULER_MAX_CONSECUTIVE_FAILURES ?? 3),
+);
+
+/** Count consecutive `bridge_failed` events for a task with no intervening
+ *  successful frame (`action_predicted`, `bridge_mcp_connected`, or
+ *  `task_committed`). Returns the run-length of the most recent failure
+ *  streak. */
+const consecutiveBridgeFailures = (db: Database, taskId: string): number => {
+  const rows = db
+    .query(
+      `SELECT kind FROM events
+       WHERE task_id = ?
+         AND kind IN ('bridge_failed','action_predicted','bridge_mcp_connected','task_committed')
+       ORDER BY ts DESC, rowid DESC LIMIT 50`,
+    )
+    .all(taskId) as Array<{ kind: string }>;
+  let streak = 0;
+  for (const r of rows) {
+    if (r.kind === "bridge_failed") {
+      streak++;
+    } else {
+      break;
+    }
+  }
+  return streak;
+};
 
 // Process-local in-flight registry. The scheduler is the only writer; the
 // dispatcher promises resolve here. Keys are task_ids; values are the
@@ -134,10 +178,36 @@ export const schedulerTick = async (
   const skippedInline: string[] = [];
   const skippedBlocked: string[] = [];
   const skippedInterference: string[] = [];
+  const skippedFailureCapped: string[] = [];
   const pending: Array<Promise<unknown>> = [];
 
   for (const task of ready) {
     if (IN_FLIGHT.has(task.id)) continue; // already dispatched in a prior tick.
+
+    // Consecutive-failure backoff (no retry storm). If the task's most-recent
+    // bridge_failed streak hit the cap, emit `task_failed` so it drops out of
+    // `readyTasks` on the next call — the cap prevents the scheduler from
+    // hot-looping a structurally broken dispatch (mcp_server_url_missing,
+    // mcp_handshake_failed, auth_missing). Operators see the failure verbatim
+    // in the substrate and can re-open the task once the underlying gap is
+    // fixed (the next `acc task` call gets a fresh task_id).
+    const failureStreak = consecutiveBridgeFailures(db, task.id);
+    if (failureStreak >= MAX_CONSECUTIVE_BRIDGE_FAILURES) {
+      skippedFailureCapped.push(task.id);
+      emitEvent(db, {
+        kind: "task_failed",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        failure_kind: "consecutive_bridge_failures",
+        payload: {
+          consecutive_failures: failureStreak,
+          cap: MAX_CONSECUTIVE_BRIDGE_FAILURES,
+          reason: "consecutive_bridge_failures_exceeded_cap",
+        } as JsonValue,
+      });
+      continue;
+    }
 
     // Cross-directive interference (Phase DAG): defer when a peer directive
     // joined by `mutual_exclusion` / `resource_conflict` is in-flight. We
@@ -264,6 +334,7 @@ export const schedulerTick = async (
     skipped_inline: skippedInline,
     skipped_blocked: skippedBlocked,
     skipped_interference: skippedInterference,
+    skipped_failure_capped: skippedFailureCapped,
   };
 };
 

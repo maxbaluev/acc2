@@ -67,7 +67,7 @@ const NON_EVENT_KIND_LITERALS = new Set([
   "subprocess_crash", "cycle_1_only_breach", "refinement_depth_exceeded",
   "verification_high_residual", "bridge_killed", "bridge_timeout",
   "artifact_runtime_error", "rolling_directive_archived",
-  "directive_interference_cycle",
+  "directive_interference_cycle", "consecutive_bridge_failures",
   // credit.ts target_kind values
   "knowledge", "code_artifact",
   // View row_kind discriminators
