@@ -33,6 +33,15 @@ const usage = (): string => `acc — v2 thin CLI
                                   Ctrl-C otherwise.
   acc graph <directive_id>        Render the task DAG (nodes ranked, edges).
   acc inspect <task_id_prefix>    Per-task report: event histogram + chronology.
+  acc apply <event_id> [--owner-approved]
+                                  Render the Claude Agent subagent prompt for a
+                                  lesson_extracted / contract_amendment_proposed
+                                  event. Orchestrator feeds output into the Agent
+                                  tool (run_in_background:true) to apply the edit.
+  acc apply --record <event_id> --status applied|failed|refused [...]
+                                  Emit the lesson_applied / contract_amendment_applied
+                                  event back to substrate so the source proposal is
+                                  credited.
   acc daemon start                Spawn the daemon detached if not running.
   acc daemon stop                 Auth-gated shutdown via admin token.
   acc daemon status               GET /health on the running daemon.
@@ -159,6 +168,10 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
   if (cmd === "events" || cmd === "tail" || cmd === "graph" || cmd === "inspect") {
     const { runObserve } = await import("./observe");
     return runObserve(cmd, argv.slice(1));
+  }
+  if (cmd === "apply") {
+    const { runApply } = await import("./apply");
+    return runApply(argv.slice(1));
   }
   if (cmd === "daemon") {
     if (sub === "start")          return daemonStart();

@@ -83,6 +83,9 @@ export const NARRATIVE_KINDS = new Set([
   "task_closure_audited",
   "lesson_extracted",
   "contract_amendment_proposed",
+  // Application of lessons + amendments (Option D + Claude subagent executor)
+  "lesson_applied",
+  "contract_amendment_applied",
   // Bridge failures only — successes are implied by action_predicted /
   // task_committed downstream. We don't show the handshake fan-out.
   "bridge_failed",
@@ -164,6 +167,8 @@ const GLYPHS: Record<string, string> = {
   task_closure_audited: "🎓",
   lesson_extracted: "💡",
   contract_amendment_proposed: "📝",
+  lesson_applied: "💡✓",
+  contract_amendment_applied: "📝✓",
 };
 
 const formatPayload = (kind: string, p: Record<string, unknown>): string => {
@@ -279,6 +284,21 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       const anchor = p.anchor as string | undefined;
       const proposed = (p.proposed_behavior as string) ?? (p.summary as string) ?? "";
       return `target=${target ?? "?"}${anchor ? ` anchor=${JSON.stringify(trunc(anchor, 60))}` : ""}${proposed ? ` → ${JSON.stringify(trunc(proposed, 100))}` : ""}`;
+    }
+    case "lesson_applied":
+    case "contract_amendment_applied": {
+      const src = p.source_event_id as string | undefined;
+      const status = (p.status as string) ?? "applied";
+      const commit = p.commit_sha as string | undefined;
+      const subagentId = p.subagent_task_id as string | undefined;
+      const summary = p.summary as string | undefined;
+      return [
+        status !== "applied" ? `status=${status}` : "applied",
+        src ? `source=${idPrefix(src, 12)}` : "",
+        commit ? `commit=${commit.slice(0, 10)}` : "",
+        subagentId ? `subagent=${idPrefix(subagentId, 10)}` : "",
+        summary ? `summary=${JSON.stringify(trunc(summary, 100))}` : "",
+      ].filter(Boolean).join(" ");
     }
     default:
       return "";

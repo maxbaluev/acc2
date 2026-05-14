@@ -177,6 +177,19 @@ export const EVENT_KINDS = {
   lesson_extracted:                        { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
   contract_amendment_proposed:             { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
 
+  // ── Application of lessons + amendments (Option D + Claude subagent executor) ──
+  //
+  // The brain proposes via lesson_extracted / contract_amendment_proposed.
+  // The orchestrator (main Claude Code) reads those events, spawns a Claude
+  // Agent subagent in background_task that performs the semantic file edit
+  // + runs the verifier (bun test, lint, type-check) + commits via git, and
+  // emits the corresponding *_applied event on success citing the originating
+  // lesson/amendment id. The applied event's posterior credits the lesson.
+  // Failure path: same event with payload.status: "failed" + reason.
+  // See CLAUDE.md §"Applying lessons via Claude Agent subagents".
+  lesson_applied:                          { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  contract_amendment_applied:              { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+
   // ── Substrate self-events ───────────────────────────────────────────
   projection_checkpointed:                 { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   constitutional_gate_decision:            { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
