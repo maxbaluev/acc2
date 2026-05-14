@@ -183,6 +183,12 @@ export type EventKind =
   | "father_cycle_recorded"
   | "father_yielded"
   | "father_drift_detected"
+  | "father_self_suspended"
+  | "father_drift_resolved"
+
+  // Runtime sandbox enforcement (Batch 4)
+  | "sandbox_enforced"
+  | "sandbox_degraded"
 
   // Lifecycle
   | "goal_committed"

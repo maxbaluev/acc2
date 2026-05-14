@@ -142,6 +142,92 @@ const whichSync = (cmd: string): string | null => {
   return null;
 };
 
+/** Per-process cache for the nsjail probe + one-shot degraded warning.
+ *  Batch 4 Hole 1 — we only want ONE `sandbox_degraded` event per process
+ *  (not per uv invocation), but every successful nsjail launch emits its
+ *  own `sandbox_enforced` row carrying the actual limits for audit. */
+let nsjailPathCache: string | null | undefined;
+let sandboxDegradedReported = false;
+
+/** Resolve nsjail path with a per-process cache (testable via the
+ *  internal reset hook below). */
+const resolveNsjailPath = (): string | null => {
+  if (nsjailPathCache !== undefined) return nsjailPathCache;
+  nsjailPathCache = whichSync("nsjail");
+  return nsjailPathCache;
+};
+
+/** Build the nsjail argv prefix from the declared sandbox. Mounts read globs
+ *  as read-only and write globs as read-write; when `net.allow_domains` is
+ *  empty we disable the network namespace entirely (nsjail does not support
+ *  per-domain allowlists natively, so the coarse-but-honest gate is "all-or-
+ *  nothing"). When the array is non-empty we keep the host network namespace
+ *  so the artifact can reach the declared domains. */
+export const buildNsjailArgv = (
+  nsjailPath: string,
+  uvPath: string,
+  uvArgs: string[],
+  sandbox: SandboxDecl & { runtime: "uv" },
+  cwd: string,
+  wallMs: number,
+  memoryMb: number,
+): string[] => {
+  const wallS = Math.max(1, Math.ceil(wallMs / 1000));
+  const rlimitBytes = Math.max(1, memoryMb) * 1024 * 1024;
+  const argv: string[] = [
+    nsjailPath,
+    "--quiet",
+    "--time_limit",
+    String(wallS),
+    "--rlimit_as",
+    String(rlimitBytes),
+    "--cwd",
+    cwd,
+    // /tmp must be visible — the uv cache + entry.py live there.
+    "--bindmount",
+    "/tmp:/tmp",
+  ];
+
+  // Read globs → readonly bind mounts. We resolve a glob to its directory
+  // prefix (everything before the first wildcard) so nsjail accepts it.
+  const fsRead = sandbox.fs_read ?? [];
+  for (const g of fsRead) {
+    const dir = g.split(/[*?[]/)[0] ?? g;
+    if (!dir) continue;
+    argv.push("--bindmount_ro", `${dir}:${dir}`);
+  }
+
+  // Write globs → read-write bind mounts.
+  const fsWrite = sandbox.fs_write ?? [];
+  for (const g of fsWrite) {
+    const dir = g.split(/[*?[]/)[0] ?? g;
+    if (!dir) continue;
+    argv.push("--bindmount", `${dir}:${dir}`);
+  }
+
+  // Network namespace gate: when no domains are allowed, disable cloning the
+  // net ns (nsjail's --disable_clone_newnet keeps the host network — we WANT
+  // the opposite: when net is forbidden, ENABLE the new-net namespace so the
+  // child has its own empty stack). nsjail's default IS clone_newnet, so
+  // when allowlist is non-empty we pass --disable_clone_newnet to keep host
+  // networking reachable.
+  const netAllow = sandbox.net_allow ?? [];
+  if (netAllow.length > 0) {
+    argv.push("--disable_clone_newnet");
+  }
+
+  argv.push("--", uvPath, ...uvArgs);
+  return argv;
+};
+
+/** Test hook — reset the per-process nsjail caches so test cases can
+ *  exercise both the "nsjail present" and "nsjail absent" paths without a
+ *  module reload. Production callers MUST NOT invoke this. */
+export const __resetNsjailCacheForTest = (overridePath: string | null | undefined): void => {
+  nsjailPathCache = overridePath;
+  sandboxDegradedReported = false;
+};
+
 /** Wrap the user-supplied Python body so it (a) reads inputs from ACC2_INPUTS,
  *  (b) binds the unpacked inputs to a `inputs` local before user code, and
  *  (c) only emits the @@RESULT@@ marker when the user code didn't already.
@@ -224,36 +310,63 @@ export const runUvArtifact = async (
   }
   uvArgs.push("python", entryPath);
 
-  // Detect nsjail. When present, wrap the uv call. When absent, run uv
-  // directly and emit a sandbox_unenforced_warning so the audit trail is
-  // honest about the degraded sandbox.
-  const nsjailPath = whichSync("nsjail");
+  // Detect nsjail. When present, wrap the uv call. When absent, emit a
+  // one-per-process `sandbox_degraded` event and continue under the
+  // honor-system limits the outer Bun watchdog already enforces.
+  const nsjailPath = resolveNsjailPath();
   const sandboxWarnings = [...perm.warnings];
   let argv: string[];
   if (nsjailPath) {
-    // Conservative argv: --time_limit (seconds) is enforced by nsjail; we
-    // ALSO keep the outer Bun watchdog so a misbehaving nsjail still gets
-    // SIGKILL'd at wall_ms × 1.5. --rlimit_as caps virtual memory in MB.
-    // --bind makes /tmp visible so the entry script and uv cache are reachable.
-    const wallS = Math.max(1, Math.ceil(wallMs / 1000));
-    argv = [
+    // Build the nsjail argv from the full sandbox grammar (fs/net/pypi/wall).
+    // The outer Bun watchdog is kept ALSO so a misbehaving nsjail still gets
+    // SIGKILL'd at wall_ms × 1.5.
+    argv = buildNsjailArgv(
       nsjailPath,
-      "--quiet",
-      "--time_limit",
-      String(wallS),
-      "--rlimit_as",
-      String(memoryMb),
-      "--bind_mount",
-      "/tmp:/tmp",
-      "--",
       uvPath,
-      ...uvArgs,
-    ];
+      uvArgs,
+      inv.declaredSandbox,
+      dir,
+      wallMs,
+      memoryMb,
+    );
+    inv.emit?.({
+      kind: "sandbox_enforced",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: inv.artifactId,
+      payload: {
+        runtime: "uv",
+        nsjail_path: nsjailPath,
+        limits: {
+          wall_ms: wallMs,
+          memory_mb: memoryMb,
+          fs_read: inv.declaredSandbox.fs_read ?? [],
+          fs_write: inv.declaredSandbox.fs_write ?? [],
+          net_allow: inv.declaredSandbox.net_allow ?? [],
+          pypi_allow: inv.declaredSandbox.pypi_allow ?? [],
+        },
+      } as JsonValue,
+    });
   } else {
     argv = [uvPath, ...uvArgs];
     sandboxWarnings.push(
       "nsjail not on PATH — uv runtime executing without syscall sandbox (install nsjail to enforce per-process limits)",
     );
+    // One-per-process degraded event so the ledger records the operating
+    // environment without flooding the stream on every invocation.
+    if (!sandboxDegradedReported) {
+      sandboxDegradedReported = true;
+      inv.emit?.({
+        kind: "sandbox_degraded",
+        substrate_origin: "substrate_auto",
+        action_artifact_id: inv.artifactId,
+        payload: {
+          runtime: "uv",
+          reason: "nsjail_not_on_path",
+          guidance:
+            "Install nsjail (https://github.com/google/nsjail) for hardened uv sandboxing; honor-system limits remain in effect.",
+        } as JsonValue,
+      });
+    }
   }
 
   const startMs = Date.now();

@@ -275,7 +275,15 @@ const runArtifactByRuntime = async (
  *  dispatcher falls through to opencode_brain refinement.
  *
  *  NO brain call ever happens during replay — that's the whole point of
- *  Tier-0 (§15). */
+ *  Tier-0 (§15).
+ *
+ *  Batch 4 Hole 4 — multi-step replay: a recipe whose trajectory contains
+ *  multiple `action_predicted` steps is replayed in trajectory order. Each
+ *  step's residual is appended to `residuals[]`. If any step's verifier
+ *  residual >= RECIPE_VERIFIER_ABORT_THRESHOLD the replay aborts at that
+ *  step (the dispatcher routes back to opencode_brain). The recipe's
+ *  terminal residual (used for `task_committed`) is the LAST step's
+ *  verifier residual on success, or the worst observed when aborted. */
 export const replayRecipe = async (
   db: Database,
   task: TaskNode,
@@ -284,11 +292,14 @@ export const replayRecipe = async (
   const emitted: string[] = [];
   const residuals: number[] = [];
 
-  // Find the trajectory's action_predicted step (Phase J directives are
-  // single-action; future multi-step recipes will iterate). If the recipe
-  // has no executable step, abort.
-  const actionStep = match.trajectory.find((s) => s.step_kind === "action_predicted");
-  if (!actionStep || !actionStep.artifact_id) {
+  // Walk every action_predicted step in trajectory order (Batch 4 Hole 4).
+  // Phase J recipes were single-step; multi-step recipes are now first
+  // class. Steps without an artifact_id are skipped (some trajectories
+  // include task_node_opened markers for audit but no executable artifact).
+  const actionSteps = match.trajectory.filter(
+    (s) => s.step_kind === "action_predicted" && !!s.artifact_id,
+  );
+  if (actionSteps.length === 0) {
     const ev = emitEvent(db, {
       kind: "recipe_replay_aborted",
       substrate_origin: "recipe",
@@ -309,166 +320,199 @@ export const replayRecipe = async (
     };
   }
 
-  // Replay action_predicted on the substrate so the audit trail matches a
-  // normal brain dispatch. The `recipe_replayed: true` flag tells extractors
-  // and credit pipeline this was a replay, not a fresh prediction.
-  const actionTemplate = (actionStep.payload_template ?? {}) as Record<string, unknown>;
-  const stampedPayload: Record<string, unknown> = {
-    ...actionTemplate,
-    recipe_replayed: true,
-    recipe_id: match.recipe_id,
-    // Inputs sourced from the task — strip the original task_id and
-    // directive_id so we don't pollute the replay with the recipe's anchor.
-    target_path: (actionTemplate.target_path as string | undefined) ?? null,
-  };
-  const predictedEv = emitEvent(db, {
-    kind: "action_predicted",
-    substrate_origin: "recipe",
-    directive_id: task.directive_id,
-    task_id: task.id,
-    action_artifact_id: actionStep.artifact_id,
-    verifier_artifact_id: actionStep.verifier_artifact_id ?? undefined,
-    predicted_residual: actionStep.predicted_residual ?? 0,
-    payload: stampedPayload as JsonValue,
-  });
-  emitted.push(predictedEv.id);
+  // Last action artifact + verifier ids — needed for the final task_committed
+  // row that closes the task. On a partial-failure abort we still want the
+  // commit row (when emitted) to cite the step that observed the residual.
+  let lastActionArtifactId = "";
+  let lastVerifierArtifactId: string | undefined;
+  // Pipe each step's `action_result` into the next step's inputs so a
+  // multi-step trajectory can pass data downstream (matches the dispatch
+  // path that runs cycle-by-cycle from a brain refinement).
+  let upstreamResult: JsonValue | null = null;
 
-  // Inputs for the action artifact. We honor any target_path the task carries
-  // (the fixture uses it); otherwise fall back to the recipe's template.
-  const actionInputs: JsonValue = {
-    target_path:
-      (stampedPayload.target_path as string | undefined) ??
-      (actionTemplate.target_path as string | undefined) ??
-      ".",
-  } as JsonValue;
+  for (let stepIdx = 0; stepIdx < actionSteps.length; stepIdx++) {
+    const actionStep = actionSteps[stepIdx]!;
+    if (!actionStep.artifact_id) continue;
+    lastActionArtifactId = actionStep.artifact_id;
+    lastVerifierArtifactId = actionStep.verifier_artifact_id ?? undefined;
 
-  // Run the action artifact through the appropriate runtime.
-  const actionObs = await runArtifactByRuntime(db, actionStep.artifact_id, actionInputs);
-  if (!actionObs.ok) {
-    const ev = emitEvent(db, {
-      kind: "recipe_replay_aborted",
-      substrate_origin: "recipe",
-      directive_id: task.directive_id,
-      task_id: task.id,
-      failure_kind: "artifact_runtime_error",
-      payload: {
-        recipe_id: match.recipe_id,
-        reason: `action_runtime_failed:${actionObs.error ?? "unknown"}`,
-      } as JsonValue,
-    });
-    emitted.push(ev.id);
-    updateRecipeConfidence(db, match.recipe_id, false);
-    return {
-      task_committed: false,
-      residuals,
-      emitted_event_ids: emitted,
-      abort_reason: `action_runtime_failed:${actionObs.error ?? "unknown"}`,
-    };
-  }
-
-  // Run the verifier artifact (when present). Verifier output shape is
-  // `{residual: number}`; anything else falls to residual=1.
-  let residual = 1;
-  if (actionStep.verifier_artifact_id) {
-    const verifierObs = await runArtifactByRuntime(
-      db,
-      actionStep.verifier_artifact_id,
-      (actionObs.result ?? null) as JsonValue,
-    );
-    if (
-      verifierObs.ok &&
-      verifierObs.result &&
-      typeof verifierObs.result === "object" &&
-      !Array.isArray(verifierObs.result) &&
-      typeof (verifierObs.result as Record<string, unknown>).residual === "number"
-    ) {
-      residual = (verifierObs.result as { residual: number }).residual;
-    }
-  } else {
-    residual = actionObs.ok ? 0 : 1;
-  }
-  residuals.push(residual);
-
-  // Emit action_scored so credit accounting flows the same way it would on a
-  // fresh brain dispatch (Phase H credit pipeline scoring still applies).
-  const scoredEv = emitEvent(db, {
-    kind: "action_scored",
-    substrate_origin: "recipe",
-    directive_id: task.directive_id,
-    task_id: task.id,
-    action_artifact_id: actionStep.artifact_id,
-    verifier_artifact_id: actionStep.verifier_artifact_id ?? undefined,
-    predicted_residual: actionStep.predicted_residual ?? 0,
-    residual,
-    payload: {
+    const actionTemplate = (actionStep.payload_template ?? {}) as Record<string, unknown>;
+    const stampedPayload: Record<string, unknown> = {
+      ...actionTemplate,
       recipe_replayed: true,
       recipe_id: match.recipe_id,
-      action_result: actionObs.result ?? null,
-    } as JsonValue,
-  });
-  emitted.push(scoredEv.id);
-
-  // Close the credit chain (v2-design.md §3.6.1 Rule 3; Phase Align Principle 6).
-  // Every action_scored event MUST be followed by a distributeCredit call so the
-  // four-link chain (action → observe → score → distribute) holds for recipe
-  // replays just as it does for fresh brain dispatches. We fall back to the
-  // direct applyResidualOutcome path on credit-pipeline error so the artifact
-  // posterior still moves — the design's "no scored event left uncredited"
-  // invariant is preserved.
-  try {
-    await distributeCredit(db, {
-      action_event_id: predictedEv.id,
-      observation_event_id: scoredEv.id,
-      scored_event_id: scoredEv.id,
-      predicted_residual: actionStep.predicted_residual ?? residual,
-      observed_residual: residual,
-    });
-  } catch {
-    applyResidualOutcome(db, actionStep.artifact_id, residual, nowIso());
-    if (actionStep.verifier_artifact_id) {
-      applyResidualOutcome(db, actionStep.verifier_artifact_id, residual, nowIso());
-    }
-  }
-
-  // If verifier residual exceeds the abort threshold, the replay is rejected;
-  // the dispatcher routes the task back to opencode_brain for refinement.
-  if (residual >= RECIPE_VERIFIER_ABORT_THRESHOLD) {
-    const ev = emitEvent(db, {
-      kind: "recipe_replay_aborted",
+      recipe_step_index: stepIdx,
+      recipe_step_count: actionSteps.length,
+      // Inputs sourced from the task — strip the original task_id and
+      // directive_id so we don't pollute the replay with the recipe's anchor.
+      target_path: (actionTemplate.target_path as string | undefined) ?? null,
+    };
+    const predictedEv = emitEvent(db, {
+      kind: "action_predicted",
       substrate_origin: "recipe",
       directive_id: task.directive_id,
       task_id: task.id,
-      failure_kind: "verification_high_residual",
+      action_artifact_id: actionStep.artifact_id,
+      verifier_artifact_id: actionStep.verifier_artifact_id ?? undefined,
+      predicted_residual: actionStep.predicted_residual ?? 0,
+      payload: stampedPayload as JsonValue,
+    });
+    emitted.push(predictedEv.id);
+
+    // Inputs for THIS step's action artifact. Step 0 honors any target_path
+    // the task carries (the single-step legacy fixture path); subsequent
+    // steps receive the previous step's `action_result` as their inputs,
+    // mirroring the brain-refinement contract where each cycle reads the
+    // last cycle's outcome.
+    const actionInputs: JsonValue = stepIdx === 0
+      ? ({
+          target_path:
+            (stampedPayload.target_path as string | undefined) ??
+            (actionTemplate.target_path as string | undefined) ??
+            ".",
+        } as JsonValue)
+      : (upstreamResult ?? ({} as JsonValue));
+
+    const actionObs = await runArtifactByRuntime(db, actionStep.artifact_id, actionInputs);
+    if (!actionObs.ok) {
+      const ev = emitEvent(db, {
+        kind: "recipe_replay_aborted",
+        substrate_origin: "recipe",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        failure_kind: "artifact_runtime_error",
+        payload: {
+          recipe_id: match.recipe_id,
+          step_index: stepIdx,
+          step_count: actionSteps.length,
+          reason: `action_runtime_failed:${actionObs.error ?? "unknown"}`,
+        } as JsonValue,
+      });
+      emitted.push(ev.id);
+      updateRecipeConfidence(db, match.recipe_id, false);
+      return {
+        task_committed: false,
+        residuals,
+        emitted_event_ids: emitted,
+        abort_reason: `action_runtime_failed:${actionObs.error ?? "unknown"}`,
+      };
+    }
+
+    upstreamResult = (actionObs.result ?? null) as JsonValue;
+
+    // Run the verifier (when present). `{residual: number}` is the canonical
+    // shape; anything else falls to residual=1.
+    let residual = 1;
+    if (actionStep.verifier_artifact_id) {
+      const verifierObs = await runArtifactByRuntime(
+        db,
+        actionStep.verifier_artifact_id,
+        (actionObs.result ?? null) as JsonValue,
+      );
+      if (
+        verifierObs.ok &&
+        verifierObs.result &&
+        typeof verifierObs.result === "object" &&
+        !Array.isArray(verifierObs.result) &&
+        typeof (verifierObs.result as Record<string, unknown>).residual === "number"
+      ) {
+        residual = (verifierObs.result as { residual: number }).residual;
+      }
+    } else {
+      residual = actionObs.ok ? 0 : 1;
+    }
+    residuals.push(residual);
+
+    // Emit action_scored for THIS step so credit accounting flows per-step
+    // (Phase H credit pipeline scoring applies to every step independently).
+    const scoredEv = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "recipe",
+      directive_id: task.directive_id,
+      task_id: task.id,
+      action_artifact_id: actionStep.artifact_id,
+      verifier_artifact_id: actionStep.verifier_artifact_id ?? undefined,
+      predicted_residual: actionStep.predicted_residual ?? 0,
+      residual,
       payload: {
+        recipe_replayed: true,
         recipe_id: match.recipe_id,
-        residual,
-        threshold: RECIPE_VERIFIER_ABORT_THRESHOLD,
-        reason: "verifier_residual_above_threshold",
+        recipe_step_index: stepIdx,
+        recipe_step_count: actionSteps.length,
+        action_result: actionObs.result ?? null,
       } as JsonValue,
     });
-    emitted.push(ev.id);
-    updateRecipeConfidence(db, match.recipe_id, false);
-    return {
-      task_committed: false,
-      residuals,
-      emitted_event_ids: emitted,
-      abort_reason: "verifier_residual_above_threshold",
-    };
+    emitted.push(scoredEv.id);
+
+    // Close the credit chain (v2-design.md §3.6.1 Rule 3; Phase Align Principle 6).
+    // Every action_scored event MUST be followed by a distributeCredit call.
+    try {
+      await distributeCredit(db, {
+        action_event_id: predictedEv.id,
+        observation_event_id: scoredEv.id,
+        scored_event_id: scoredEv.id,
+        predicted_residual: actionStep.predicted_residual ?? residual,
+        observed_residual: residual,
+      });
+    } catch {
+      applyResidualOutcome(db, actionStep.artifact_id, residual, nowIso());
+      if (actionStep.verifier_artifact_id) {
+        applyResidualOutcome(db, actionStep.verifier_artifact_id, residual, nowIso());
+      }
+    }
+
+    // If THIS step's verifier residual exceeds the abort threshold, the
+    // replay is rejected and the dispatcher routes the task back to
+    // opencode_brain for refinement. The recipe's terminal residual on
+    // abort is the worst observed (= this step's residual, since it's the
+    // first to fail).
+    if (residual >= RECIPE_VERIFIER_ABORT_THRESHOLD) {
+      const ev = emitEvent(db, {
+        kind: "recipe_replay_aborted",
+        substrate_origin: "recipe",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        failure_kind: "verification_high_residual",
+        payload: {
+          recipe_id: match.recipe_id,
+          step_index: stepIdx,
+          step_count: actionSteps.length,
+          residual,
+          worst_residual: residuals.reduce((a, b) => Math.max(a, b), 0),
+          threshold: RECIPE_VERIFIER_ABORT_THRESHOLD,
+          reason: "verifier_residual_above_threshold",
+        } as JsonValue,
+      });
+      emitted.push(ev.id);
+      updateRecipeConfidence(db, match.recipe_id, false);
+      return {
+        task_committed: false,
+        residuals,
+        emitted_event_ids: emitted,
+        abort_reason: "verifier_residual_above_threshold",
+      };
+    }
   }
 
-  // Success — commit the task and credit the recipe.
+  // Every step's verifier passed. The task's terminal residual is the LAST
+  // step's residual (the final ground truth — multi-step trajectories close
+  // on the final verifier, not an aggregate). Emit task_committed citing
+  // the last step's action + verifier artifacts.
+  const terminalResidual = residuals[residuals.length - 1]!;
   const commitEv = emitEvent(db, {
     kind: "task_committed",
     substrate_origin: "recipe",
     directive_id: task.directive_id,
     task_id: task.id,
     outcome: "succeeded",
-    residual,
-    action_artifact_id: actionStep.artifact_id,
-    verifier_artifact_id: actionStep.verifier_artifact_id ?? undefined,
+    residual: terminalResidual,
+    action_artifact_id: lastActionArtifactId,
+    verifier_artifact_id: lastVerifierArtifactId,
     payload: {
       recipe_replayed: true,
       recipe_id: match.recipe_id,
+      step_count: actionSteps.length,
+      residuals,
     } as JsonValue,
   });
   emitted.push(commitEv.id);

@@ -17,7 +17,7 @@ import {
 } from "./recipe_replay";
 import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { dispatchReadyTask } from "./task_dispatcher";
-import { readyTasks, readDagForDirective } from "./task_topology";
+import { readyTasks, readDagForDirective, type TaskNode } from "./task_topology";
 import { admitArtifact } from "./artifact_admission";
 
 afterAll(() => closeDb());
@@ -277,6 +277,287 @@ describe("recipe_replay.replayRecipe", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  }, 60_000);
+});
+
+describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
+  test("a 2-step recipe replays BOTH action_predicted steps in order before commit", async () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    // Action 1 — emits a result that step 2 can consume.
+    const action1Body = [
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ phase: 'step_one_done', echo: inputs }));",
+    ].join("\n");
+    const action1 = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body: action1Body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: {},
+        fixtureExpectedResidualBelow: 1.1,
+      },
+      (ev) => { emitEvent(db, ev); },
+    );
+    expect(action1.ok).toBe(true);
+    const action1Id = action1.ok ? action1.artifactId : "";
+
+    // Action 2 — its result also goes through a verifier.
+    const action2Body = [
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ phase: 'step_two_done', upstream: inputs }));",
+    ].join("\n");
+    const action2 = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body: action2Body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: {},
+        fixtureExpectedResidualBelow: 1.1,
+      },
+      (ev) => { emitEvent(db, ev); },
+    );
+    expect(action2.ok).toBe(true);
+    const action2Id = action2.ok ? action2.artifactId : "";
+
+    // Shared verifier — always passes (residual = 0).
+    const verifierBody = [
+      "console.log('@@RESULT@@ ' + JSON.stringify({ residual: 0 }));",
+    ].join("\n");
+    const verifier = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body: verifierBody,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: {},
+        fixtureExpectedResidualBelow: 1.1,
+      },
+      (ev) => { emitEvent(db, ev); },
+    );
+    expect(verifier.ok).toBe(true);
+    const verifierId = verifier.ok ? verifier.artifactId : "";
+
+    // Hand-roll a recipe_extracted row whose trajectory has TWO action steps.
+    const recipeRow = emitEvent(db, {
+      kind: "recipe_extracted",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_two_step",
+      task_id: "t_two_step",
+      payload: {
+        goal_shape: "two step pipeline",
+        topology_signature: "topo_00000000::1",
+        confidence: 0.9,
+        trajectory: [
+          {
+            step_kind: "action_predicted",
+            artifact_id: action1Id,
+            verifier_artifact_id: verifierId,
+            payload_template: {},
+            predicted_residual: 0,
+          },
+          {
+            step_kind: "action_predicted",
+            artifact_id: action2Id,
+            verifier_artifact_id: verifierId,
+            payload_template: {},
+            predicted_residual: 0,
+          },
+        ],
+      },
+    });
+
+    const task: TaskNode = {
+      id: "t_two_step",
+      directive_id: "d_two_step",
+      parent_id: null,
+      goal: "two step pipeline",
+      status: "pending",
+    } as unknown as TaskNode;
+
+    const match = findRecipeMatch(db, task);
+    expect(match).not.toBeNull();
+    expect(match!.trajectory.length).toBe(2);
+
+    const outcome = await replayRecipe(db, task, match!);
+    expect(outcome.task_committed).toBe(true);
+    expect(outcome.residuals.length).toBe(2);
+    expect(outcome.residuals.every((r) => r === 0)).toBe(true);
+
+    // Both action artifacts MUST have been invoked — one artifact_invoked
+    // event per step (artifact_admission already burns one fixture run,
+    // so we count action_predicted rows from substrate_origin='recipe'
+    // for THIS task).
+    const recipePredicted = db
+      .query(
+        "SELECT action_artifact_id, payload FROM events WHERE kind = 'action_predicted' AND substrate_origin = 'recipe' AND task_id = ?",
+      )
+      .all(task.id) as Array<{ action_artifact_id: string; payload: string }>;
+    expect(recipePredicted.length).toBe(2);
+    expect(recipePredicted[0]!.action_artifact_id).toBe(action1Id);
+    expect(recipePredicted[1]!.action_artifact_id).toBe(action2Id);
+
+    const p0 = JSON.parse(recipePredicted[0]!.payload) as Record<string, number>;
+    const p1 = JSON.parse(recipePredicted[1]!.payload) as Record<string, number>;
+    expect(p0.recipe_step_index).toBe(0);
+    expect(p1.recipe_step_index).toBe(1);
+    expect(p0.recipe_step_count).toBe(2);
+    expect(p1.recipe_step_count).toBe(2);
+
+    // action_scored ALSO emitted per step.
+    const scored = db
+      .query(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'action_scored' AND substrate_origin = 'recipe' AND task_id = ?",
+      )
+      .get(task.id) as { c: number };
+    expect(scored.c).toBe(2);
+
+    // task_committed fires ONCE at the end, citing the LAST step's
+    // action + verifier artifacts.
+    const committed = db
+      .query(
+        "SELECT action_artifact_id, verifier_artifact_id, payload, residual FROM events WHERE kind = 'task_committed' AND task_id = ?",
+      )
+      .all(task.id) as Array<{
+        action_artifact_id: string;
+        verifier_artifact_id: string;
+        payload: string;
+        residual: number;
+      }>;
+    expect(committed.length).toBe(1);
+    expect(committed[0]!.action_artifact_id).toBe(action2Id);
+    expect(committed[0]!.verifier_artifact_id).toBe(verifierId);
+    expect(committed[0]!.residual).toBe(0);
+    const commitPayload = JSON.parse(committed[0]!.payload) as Record<string, unknown>;
+    expect(commitPayload.step_count).toBe(2);
+    expect(Array.isArray(commitPayload.residuals)).toBe(true);
+
+    void recipeRow;
+  }, 60_000);
+
+  test("a 2-step recipe aborts at the failing step and surfaces the worst residual", async () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    // Action 1 succeeds; action 2 also "runs" but its verifier always fails.
+    const actionBody = [
+      "console.log('@@RESULT@@ ' + JSON.stringify({ phase: 'done' }));",
+    ].join("\n");
+    const action1 = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body: actionBody,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: {},
+        fixtureExpectedResidualBelow: 1.1,
+      },
+      (ev) => { emitEvent(db, ev); },
+    );
+    const action2 = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body: actionBody,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: {},
+        fixtureExpectedResidualBelow: 1.1,
+      },
+      (ev) => { emitEvent(db, ev); },
+    );
+
+    const goodVerifierBody = "console.log('@@RESULT@@ ' + JSON.stringify({ residual: 0 }));";
+    const badVerifierBody = "console.log('@@RESULT@@ ' + JSON.stringify({ residual: 1 }));";
+    const goodVerifier = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body: goodVerifierBody,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: {},
+        fixtureExpectedResidualBelow: 1.1,
+      },
+      (ev) => { emitEvent(db, ev); },
+    );
+    const badVerifier = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body: badVerifierBody,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: {},
+        fixtureExpectedResidualBelow: 1.1,
+      },
+      (ev) => { emitEvent(db, ev); },
+    );
+    const action1Id = action1.ok ? action1.artifactId : "";
+    const action2Id = action2.ok ? action2.artifactId : "";
+    const goodVerifierId = goodVerifier.ok ? goodVerifier.artifactId : "";
+    const badVerifierId = badVerifier.ok ? badVerifier.artifactId : "";
+
+    emitEvent(db, {
+      kind: "recipe_extracted",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_partial",
+      task_id: "t_partial",
+      payload: {
+        goal_shape: "two step partial",
+        topology_signature: "topo_00000000::1",
+        confidence: 0.9,
+        trajectory: [
+          {
+            step_kind: "action_predicted",
+            artifact_id: action1Id,
+            verifier_artifact_id: goodVerifierId,
+            payload_template: {},
+            predicted_residual: 0,
+          },
+          {
+            step_kind: "action_predicted",
+            artifact_id: action2Id,
+            verifier_artifact_id: badVerifierId,
+            payload_template: {},
+            predicted_residual: 0,
+          },
+        ],
+      },
+    });
+
+    const task: TaskNode = {
+      id: "t_partial",
+      directive_id: "d_partial",
+      parent_id: null,
+      goal: "two step partial",
+      status: "pending",
+    } as unknown as TaskNode;
+
+    const match = findRecipeMatch(db, task);
+    expect(match).not.toBeNull();
+    const outcome = await replayRecipe(db, task, match!);
+    expect(outcome.task_committed).toBe(false);
+    expect(outcome.abort_reason).toBe("verifier_residual_above_threshold");
+    // Step 0 ran and produced residual 0; step 1 ran and produced residual 1.
+    expect(outcome.residuals).toEqual([0, 1]);
+
+    // No task_committed should land for this task.
+    const committedCount = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_committed' AND task_id = ?")
+      .get(task.id) as { c: number }).c;
+    expect(committedCount).toBe(0);
+
+    // The abort payload carries the step index + worst residual seen.
+    const aborted = db
+      .query("SELECT payload FROM events WHERE kind = 'recipe_replay_aborted' AND task_id = ?")
+      .get(task.id) as { payload: string } | null;
+    expect(aborted).not.toBeNull();
+    const ap = JSON.parse(aborted!.payload) as Record<string, number>;
+    expect(ap.step_index).toBe(1);
+    expect(ap.step_count).toBe(2);
+    expect(ap.residual).toBe(1);
+    expect(ap.worst_residual).toBe(1);
   }, 60_000);
 });
 
