@@ -18,6 +18,8 @@
 
 import type { Database } from "bun:sqlite";
 import type { TaskNode } from "./task_topology";
+import { readCurrentMode } from "./crisis_mode";
+import { blockersOf } from "./interference";
 
 export const RECIPE_REPLAY_THRESHOLD = 0.7;
 export const INLINE_PATTERN_SCORE_THRESHOLD = 0.7;
@@ -26,11 +28,12 @@ export const INLINE_PATTERN_CONFIDENCE_THRESHOLD = 0.6;
 export type DispatchDecision =
   | { route: "substrate_replay"; recipe_id: string; reason: string }
   | { route: "claude_inline"; cited_artifact_ids: string[]; reason: string }
-  | { route: "opencode_brain"; predicted_complexity: "low" | "mid" | "high"; reason: string };
+  | { route: "opencode_brain"; predicted_complexity: "low" | "mid" | "high"; reason: string }
+  | { route: "deferred_blocked"; blockers: string[]; reason: string };
 
 type RecipeMatch = { id: string; confidence: number };
 
-const findRecipeMatch = (db: Database, task: TaskNode): RecipeMatch | null => {
+const findRecipeMatch = (db: Database, task: TaskNode, confidenceThreshold: number): RecipeMatch | null => {
   // Phase D: recipes_view doesn't exist yet. We look for `recipe_extracted`
   // events whose payload.goal_embedding_match flag is set true for this task.
   // None are emitted in Phase D, so this returns null — the test asserts that.
@@ -47,7 +50,7 @@ const findRecipeMatch = (db: Database, task: TaskNode): RecipeMatch | null => {
       // Cheap shape match — does the recipe's goal_shape token appear in the
       // task goal? Phase J replaces with embedding cosine.
       if (goalShape && task.goal.toLowerCase().includes(goalShape.toLowerCase())) {
-        if (confidence >= RECIPE_REPLAY_THRESHOLD) {
+        if (confidence >= confidenceThreshold) {
           return { id: r.id, confidence };
         }
       }
@@ -104,12 +107,29 @@ const estimateComplexity = (task: TaskNode): "low" | "mid" | "high" => {
   return "high";
 };
 
-/** Route a ready task to its execution lane. Returns one of three decisions.
+/** Route a ready task to its execution lane. Returns one of four decisions.
  *  Phase D effectively always returns `opencode_brain` because no recipes or
- *  inline patterns exist — that's the expected behavior. */
+ *  inline patterns exist — that's the expected behavior. Phase I adds two
+ *  modulators on top of the original three lanes:
+ *    - If the directive is the target of a `blocks` interference edge from
+ *      an unresolved source directive, we down-rank to `deferred_blocked`.
+ *    - In crisis mode (urgency='crisis' on the directive) we lower the
+ *      recipe-match threshold from 0.7 → 0.4 so Tier-0 fires harder. */
 export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision => {
-  // 1. Tier-0 recipe replay.
-  const recipe = findRecipeMatch(db, task);
+  // 0. Down-rank: directive blocked by an unresolved higher-priority directive.
+  const blockers = blockersOf(db, task.directive_id);
+  if (blockers.length > 0) {
+    return {
+      route: "deferred_blocked",
+      blockers,
+      reason: `blocked_by:${blockers.join(",")}`,
+    };
+  }
+
+  // 1. Tier-0 recipe replay. Crisis mode lowers the confidence threshold.
+  const mode = readCurrentMode(db, task.directive_id);
+  const recipeThreshold = mode.recipe_confidence_threshold;
+  const recipe = findRecipeMatch(db, task, recipeThreshold);
   if (recipe) {
     return { route: "substrate_replay", recipe_id: recipe.id, reason: "recipe_match" };
   }

@@ -252,6 +252,64 @@ CREATE VIEW IF NOT EXISTS directive_conflicts_view AS
   ORDER BY ts DESC;
 `;
 
+// stakeholder_state_view — latest stakeholder_state_recorded row per
+// (directive_id, stakeholder_id). Older rows stay in events for audit but
+// the view projects only the freshest declaration. Phase I (§3.3, §4.2).
+const VIEW_STAKEHOLDER_STATE = `
+CREATE VIEW IF NOT EXISTS stakeholder_state_view AS
+  WITH ranked AS (
+    SELECT
+      e.id                                                AS event_id,
+      e.ts                                                AS ts,
+      e.directive_id                                      AS directive_id,
+      json_extract(e.payload, '$.stakeholder_id')         AS stakeholder_id,
+      json_extract(e.payload, '$.declared_utility')       AS declared_utility,
+      json_extract(e.payload, '$.inferred_constraints')   AS inferred_constraints,
+      json_extract(e.payload, '$.information_visibility') AS information_visibility,
+      e.payload                                            AS payload,
+      ROW_NUMBER() OVER (
+        PARTITION BY e.directive_id, json_extract(e.payload, '$.stakeholder_id')
+        ORDER BY e.ts DESC, e.id DESC
+      ) AS rn
+    FROM events e
+    WHERE e.kind = 'stakeholder_state_recorded'
+  )
+  SELECT event_id, ts, directive_id, stakeholder_id, declared_utility,
+         inferred_constraints, information_visibility, payload
+  FROM ranked
+  WHERE rn = 1;
+`;
+
+// active_objectives_view — directives that are NOT terminal (not goal_committed
+// / goal_abandoned) AND not archived via directive_archived_missed_reviews.
+// Used by Father (§14) to pick its next work surface. Phase I (§3.1).
+const VIEW_ACTIVE_OBJECTIVES = `
+CREATE VIEW IF NOT EXISTS active_objectives_view AS
+  WITH directives AS (
+    SELECT directive_id, MAX(ts) AS opened_ts, payload
+    FROM events
+    WHERE kind = 'directive_opened'
+    GROUP BY directive_id
+  ),
+  terminal AS (
+    SELECT DISTINCT directive_id
+    FROM events
+    WHERE kind IN ('goal_committed', 'goal_abandoned')
+  ),
+  archived AS (
+    SELECT DISTINCT directive_id
+    FROM events
+    WHERE kind = 'directive_archived_missed_reviews'
+  )
+  SELECT
+    d.directive_id,
+    d.opened_ts,
+    d.payload
+  FROM directives d
+  WHERE d.directive_id NOT IN (SELECT directive_id FROM terminal)
+    AND d.directive_id NOT IN (SELECT directive_id FROM archived);
+`;
+
 // irreversible_effects_view — physical-world side effects per directive.
 const VIEW_IRREVERSIBLE_EFFECTS = `
 CREATE VIEW IF NOT EXISTS irreversible_effects_view AS
@@ -287,6 +345,8 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_OWNER_CONVERSATION);
   db.exec(VIEW_ROLLING_REVIEW_DUE);
   db.exec(VIEW_DIRECTIVE_CONFLICTS);
+  db.exec(VIEW_STAKEHOLDER_STATE);
+  db.exec(VIEW_ACTIVE_OBJECTIVES);
   db.exec(VIEW_IRREVERSIBLE_EFFECTS);
 };
 
@@ -389,6 +449,23 @@ export type IrreversibleEffectRow = {
   effect_count: number;
   latest_ts: string;
   earliest_ts: string;
+};
+
+export type StakeholderStateRow = {
+  event_id: string;
+  ts: string;
+  directive_id: string;
+  stakeholder_id: string;
+  declared_utility: unknown;
+  inferred_constraints: unknown;
+  information_visibility: string;
+  payload: Record<string, unknown>;
+};
+
+export type ActiveObjectiveRow = {
+  directive_id: string;
+  opened_ts: string;
+  payload: Record<string, unknown>;
 };
 
 const parseJson = <T>(s: unknown): T => {
@@ -525,6 +602,36 @@ export const directiveConflicts = (db: Database): DirectiveConflictRow[] => {
     directive_id: r.directive_id as string,
     payload: parseJson<Record<string, unknown>>(r.payload),
     context_refs: parseJson<string[]>(r.context_refs),
+  }));
+};
+
+/** Latest stakeholder_state_recorded per (directive_id, stakeholder_id). */
+export const stakeholderStateRows = (db: Database, directiveId?: string): StakeholderStateRow[] => {
+  const rows = (directiveId
+    ? db.query("SELECT * FROM stakeholder_state_view WHERE directive_id = ?").all(directiveId)
+    : db.query("SELECT * FROM stakeholder_state_view").all()) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    event_id: r.event_id as string,
+    ts: r.ts as string,
+    directive_id: r.directive_id as string,
+    stakeholder_id: r.stakeholder_id as string,
+    declared_utility: typeof r.declared_utility === "string" ? parseJson(r.declared_utility) : r.declared_utility,
+    inferred_constraints:
+      typeof r.inferred_constraints === "string" ? parseJson(r.inferred_constraints) : r.inferred_constraints,
+    information_visibility: r.information_visibility as string,
+    payload: parseJson<Record<string, unknown>>(r.payload),
+  }));
+};
+
+/** Non-terminal, non-archived directives. Father reads this. */
+export const activeObjectives = (db: Database): ActiveObjectiveRow[] => {
+  const rows = db
+    .query("SELECT * FROM active_objectives_view ORDER BY opened_ts ASC")
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    directive_id: r.directive_id as string,
+    opened_ts: r.opened_ts as string,
+    payload: parseJson<Record<string, unknown>>(r.payload),
   }));
 };
 

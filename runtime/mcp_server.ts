@@ -42,6 +42,10 @@ import { emitAndApplyAmendment } from "./amendment_handler";
 import { computeEmbedding } from "./embedder";
 import { retrieve } from "./retrieval";
 import type { EmbeddingIndex } from "./embedding_index";
+import { recordStakeholderState, type StakeholderVisibility } from "./stakeholder_compositor";
+import { recordInterferenceEdge, type InterferenceEdgeKind } from "./interference";
+import { processRollingReviews } from "./rolling_reviewer";
+import { newId } from "./ids";
 
 export type McpContext = {
   db: Database;
@@ -74,8 +78,12 @@ export const McpMethods = [
   "substrate.admit_artifact",
   "substrate.open_fixture",
   "substrate.amend_directive",
+  "substrate.record_stakeholder_state",
+  "substrate.record_interference_edge",
+  "substrate.open_directive",
   "runtime.dispatch_ready_task",
   "runtime.scheduler_tick",
+  "runtime.process_rolling_reviews",
 ] as const;
 export type McpMethodName = (typeof McpMethods)[number];
 
@@ -206,6 +214,45 @@ const AmendDirectiveSchema = z.object({
   new_task_goals: z.array(z.string()).optional(),
   rationale: z.string().optional(),
   amended_by: z.enum(["owner", "claude_root", "opencode"]).optional(),
+});
+
+const RecordStakeholderStateSchema = z.object({
+  directive_id: z.string(),
+  stakeholder_id: z.string(),
+  declared_utility: z.unknown(),
+  inferred_constraints: z.array(z.string()).optional(),
+  information_visibility: z.enum(["full", "limited", "blind"]).optional(),
+});
+
+const RecordInterferenceEdgeSchema = z.object({
+  from_directive: z.string(),
+  to_directive: z.string(),
+  kind: z.enum(["blocks", "watches", "depletes"]),
+  reason: z.string(),
+});
+
+const OpenDirectiveSchema = z.object({
+  directive_text: z.string(),
+  lifecycle: z.enum(["finite", "rolling_active"]).optional(),
+  urgency: z.enum(["normal", "elevated", "crisis"]).optional(),
+  review_cadence: z.enum(["daily", "weekly", "monthly", "quarterly", "annually"]).optional(),
+  next_review_due: z.string().optional(),
+  initial_task_goal: z.string().optional(),
+  stakeholders: z
+    .array(
+      z.object({
+        stakeholder_id: z.string(),
+        declared_utility: z.unknown(),
+        inferred_constraints: z.array(z.string()).optional(),
+        information_visibility: z.enum(["full", "limited", "blind"]).optional(),
+      }),
+    )
+    .optional(),
+});
+
+const ProcessRollingReviewsSchema = z.object({
+  now: z.string().optional(),
+  max_missed_reviews: z.number().optional(),
 });
 
 // ── Handlers (pure functions over (ctx, args) → McpResult) ──────────
@@ -559,6 +606,7 @@ const handleSchedulerTick = async (
       skipped_concurrency_cap: tick.skipped_concurrency_cap,
       skipped_recipe: tick.skipped_recipe,
       skipped_inline: tick.skipped_inline,
+      skipped_blocked: tick.skipped_blocked,
     } as JsonValue,
   };
 };
@@ -619,6 +667,127 @@ const handleDispatchReadyTask = async (
       events_count: result.events.length,
       violations: result.violations,
       bridge_ok: result.bridge_result?.ok ?? null,
+    } as JsonValue,
+  };
+};
+
+const handleRecordStakeholderState = (
+  ctx: McpContext,
+  args: z.infer<typeof RecordStakeholderStateSchema>,
+): McpResult => {
+  const result = recordStakeholderState(ctx.db, {
+    directive_id: args.directive_id,
+    stakeholder_id: args.stakeholder_id,
+    declared_utility: (args.declared_utility ?? null) as JsonValue,
+    inferred_constraints: args.inferred_constraints,
+    information_visibility: args.information_visibility as StakeholderVisibility | undefined,
+  });
+  return {
+    ok: true,
+    result: {
+      event_id: result.event_id,
+      conflict_count: result.conflicts.length,
+      conflicts: result.conflicts as unknown as JsonValue,
+    } as JsonValue,
+  };
+};
+
+const handleRecordInterferenceEdge = (
+  ctx: McpContext,
+  args: z.infer<typeof RecordInterferenceEdgeSchema>,
+): McpResult => {
+  const result = recordInterferenceEdge(ctx.db, {
+    from_directive: args.from_directive,
+    to_directive: args.to_directive,
+    kind: args.kind as InterferenceEdgeKind,
+    reason: args.reason,
+  });
+  if (!result.ok) {
+    return { ok: false, error: result.error };
+  }
+  return { ok: true, result: { event_id: result.event_id } as JsonValue };
+};
+
+const handleOpenDirective = (
+  ctx: McpContext,
+  args: z.infer<typeof OpenDirectiveSchema>,
+): McpResult => {
+  const directiveId = newId();
+  const taskId = newId();
+  const lifecyclePayload: Record<string, unknown> = {
+    directive_text: args.directive_text,
+    lifecycle: args.lifecycle ?? "finite",
+    urgency: args.urgency ?? "normal",
+  };
+  if (args.lifecycle === "rolling_active") {
+    lifecyclePayload.review_cadence = args.review_cadence ?? "weekly";
+    lifecyclePayload.next_review_due = args.next_review_due ?? new Date().toISOString();
+    lifecyclePayload.partial_commit_checkpoints = [];
+  }
+  emitEvent(ctx.db, {
+    kind: "directive_opened",
+    substrate_origin: "owner",
+    directive_id: directiveId,
+    task_id: directiveId,
+    payload: lifecyclePayload as JsonValue,
+  });
+
+  if (args.urgency === "crisis") {
+    emitEvent(ctx.db, {
+      kind: "crisis_mode_engaged",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      payload: { reason: "directive_urgency_crisis" } as JsonValue,
+    });
+  }
+
+  emitEvent(ctx.db, {
+    kind: "task_node_opened",
+    substrate_origin: "owner",
+    directive_id: directiveId,
+    task_id: taskId,
+    parent_task_id: null,
+    payload: {
+      goal: args.initial_task_goal ?? args.directive_text,
+      lifecycle: "finite",
+      urgency: args.urgency ?? "normal",
+    } as JsonValue,
+  });
+
+  const stakeholderEventIds: string[] = [];
+  if (args.stakeholders) {
+    for (const s of args.stakeholders) {
+      const r = recordStakeholderState(ctx.db, {
+        directive_id: directiveId,
+        stakeholder_id: s.stakeholder_id,
+        declared_utility: (s.declared_utility ?? null) as JsonValue,
+        inferred_constraints: s.inferred_constraints,
+        information_visibility: s.information_visibility as StakeholderVisibility | undefined,
+      });
+      stakeholderEventIds.push(r.event_id);
+    }
+  }
+
+  return {
+    ok: true,
+    result: {
+      directive_id: directiveId,
+      task_id: taskId,
+      stakeholder_event_ids: stakeholderEventIds,
+    } as JsonValue,
+  };
+};
+
+const handleProcessRollingReviews = async (
+  ctx: McpContext,
+  args: z.infer<typeof ProcessRollingReviewsSchema>,
+): Promise<McpResult> => {
+  const summary = await processRollingReviews(ctx.db, args.now);
+  return {
+    ok: true,
+    result: {
+      reviews_opened: summary.reviews_opened,
+      missed_advanced: summary.missed_advanced,
     } as JsonValue,
   };
 };
@@ -805,6 +974,48 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     execute: wrap(handleAmendDirective),
   });
 
+  server.addTool({
+    name: "substrate.record_stakeholder_state",
+    description:
+      "Record a stakeholder_state_recorded event for a multi-stakeholder " +
+      "directive. Auto-detects conflicts against prior stakeholder declarations " +
+      "and emits stakeholder_conflict + owner_input_required when they disagree. Phase I.",
+    parameters: RecordStakeholderStateSchema,
+    execute: wrap(handleRecordStakeholderState),
+  });
+
+  server.addTool({
+    name: "substrate.record_interference_edge",
+    description:
+      "Record a directive_interference_edge (kind: blocks | watches | depletes). " +
+      "Validates against self-loops, refuses cycle-introducing blocks edges only " +
+      "after surfacing them, and emits directive_interference_cycle_detected for " +
+      "any cycle in the blocks subgraph. Phase I.",
+    parameters: RecordInterferenceEdgeSchema,
+    execute: wrap(handleRecordInterferenceEdge),
+  });
+
+  server.addTool({
+    name: "substrate.open_directive",
+    description:
+      "Convenience: open a fresh directive with optional lifecycle (finite | " +
+      "rolling_active), urgency (normal | elevated | crisis), review cadence, " +
+      "initial root task, and an initial stakeholders list. Emits crisis_mode_engaged " +
+      "when urgency=crisis. Phase I.",
+    parameters: OpenDirectiveSchema,
+    execute: wrap(handleOpenDirective),
+  });
+
+  server.addTool({
+    name: "runtime.process_rolling_reviews",
+    description:
+      "Drain rolling_review_due_view: emit directive_review_due, open a review " +
+      "subtask, advance next_review_due by one cadence period. Father (Phase K) " +
+      "calls this on its tick. Phase I.",
+    parameters: ProcessRollingReviewsSchema,
+    execute: wrap(handleProcessRollingReviews),
+  });
+
   return server;
 };
 
@@ -828,8 +1039,12 @@ const HTTP_DISPATCH: Record<string, (ctx: McpContext, args: any) => McpResult | 
   "substrate.admit_artifact": handleAdmitArtifact as any,
   "substrate.open_fixture": handleOpenFixture as any,
   "substrate.amend_directive": handleAmendDirective as any,
+  "substrate.record_stakeholder_state": handleRecordStakeholderState as any,
+  "substrate.record_interference_edge": handleRecordInterferenceEdge as any,
+  "substrate.open_directive": handleOpenDirective as any,
   "runtime.dispatch_ready_task": handleDispatchReadyTask as any,
   "runtime.scheduler_tick": handleSchedulerTick as any,
+  "runtime.process_rolling_reviews": handleProcessRollingReviews as any,
 };
 
 /** Bun.serve route handler: POST /mcp/<method>. Parses JSON body, validates

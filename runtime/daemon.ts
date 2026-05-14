@@ -40,6 +40,7 @@ import { createExternalIngressState, handleExternalPush, type ExternalIngressSta
 import type { FastMCP } from "fastmcp";
 import { applyAmendment, findUnappliedAmendments } from "./amendment_handler";
 import { schedulerLoop } from "./task_scheduler";
+import { rollingReviewerWorkerTick } from "./rolling_reviewer";
 import { EmbeddingIndex } from "./embedding_index";
 import { embedderWorkerTick } from "./embedder";
 import { rehabilitationWorkerTick, getArtifact } from "./artifact_store";
@@ -47,7 +48,6 @@ import { runBunArtifact } from "./runtimes/bun";
 import { runUvArtifact } from "./runtimes/uv";
 import { runCamofoxArtifact } from "./runtimes/camofox";
 import type { SandboxDecl } from "../substrate/types";
-import { emitEvent } from "./events";
 
 export const DEFAULT_DAEMON_PORT = 9387;
 export const DEFAULT_AUX_PORT_OFFSET = 1;
@@ -242,6 +242,20 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       })();
     }, 6 * 60 * 60 * 1000);
     workers.push(() => clearInterval(rehabTick));
+  }
+
+  // Phase I: optional rolling-review worker. Default off — tests don't want
+  // rolling reviews firing automatically. Enable with
+  // ACC2_ROLLING_AUTOSTART=1. Tick every 60s; errors swallowed so a single
+  // malformed directive can't kill the daemon. Father (Phase K) will turn
+  // this on in production.
+  if (process.env.ACC2_ROLLING_AUTOSTART === "1") {
+    const rollingTick = setInterval(() => {
+      void (async () => {
+        try { await rollingReviewerWorkerTick(db); } catch { /* swallow */ }
+      })();
+    }, 60_000);
+    workers.push(() => clearInterval(rollingTick));
   }
 
   // Phase E: optional autoscheduler. Default off — tests don't want the

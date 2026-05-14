@@ -363,6 +363,121 @@ describe("fastmcp substrate tools — stdio transport", () => {
     expect(Array.isArray(env.result.skipped_inline)).toBe(true);
   });
 
+  test("substrate.open_directive opens a directive + root task and emits crisis_mode_engaged when urgency=crisis", async () => {
+    const res = (await h!.client.callTool({
+      name: "substrate.open_directive",
+      arguments: {
+        directive_text: "medical emergency",
+        urgency: "crisis",
+        initial_task_goal: "triage",
+      },
+    })) as ToolCallResponse;
+    const env = parseEnvelope(res);
+    expect(env.ok).toBe(true);
+    expect(typeof env.result.directive_id).toBe("string");
+    expect(typeof env.result.task_id).toBe("string");
+
+    // Read the directive_opened back via substrate.get_event.
+    const id = env.result.directive_id;
+    const search = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.search",
+        arguments: { query: "crisis", opts: { k: 50 } },
+      })) as ToolCallResponse,
+    );
+    const seenKinds = new Set(search.result.hits.map((h: any) => h.kind));
+    expect(seenKinds.has("crisis_mode_engaged")).toBe(true);
+    expect(typeof id).toBe("string");
+  });
+
+  test("substrate.record_stakeholder_state records and detects conflicts", async () => {
+    const dir = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.open_directive",
+        arguments: { directive_text: "negotiate salary" },
+      })) as ToolCallResponse,
+    );
+    const directiveId = dir.result.directive_id;
+
+    const first = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.record_stakeholder_state",
+        arguments: {
+          directive_id: directiveId,
+          stakeholder_id: "self",
+          declared_utility: { min_salary: 280000 },
+        },
+      })) as ToolCallResponse,
+    );
+    expect(first.ok).toBe(true);
+    expect(first.result.conflict_count).toBe(0);
+
+    const second = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.record_stakeholder_state",
+        arguments: {
+          directive_id: directiveId,
+          stakeholder_id: "counterpart",
+          declared_utility: { max_salary: 200000 },
+        },
+      })) as ToolCallResponse,
+    );
+    expect(second.ok).toBe(true);
+    expect(second.result.conflict_count).toBeGreaterThan(0);
+  });
+
+  test("substrate.record_interference_edge rejects self-loops and records valid edges", async () => {
+    const a = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.open_directive",
+        arguments: { directive_text: "A" },
+      })) as ToolCallResponse,
+    );
+    const b = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.open_directive",
+        arguments: { directive_text: "B" },
+      })) as ToolCallResponse,
+    );
+    const self = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.record_interference_edge",
+        arguments: {
+          from_directive: a.result.directive_id,
+          to_directive: a.result.directive_id,
+          kind: "blocks",
+          reason: "no",
+        },
+      })) as ToolCallResponse,
+    );
+    expect(self.ok).toBe(false);
+
+    const valid = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.record_interference_edge",
+        arguments: {
+          from_directive: a.result.directive_id,
+          to_directive: b.result.directive_id,
+          kind: "depletes",
+          reason: "shared budget",
+        },
+      })) as ToolCallResponse,
+    );
+    expect(valid.ok).toBe(true);
+    expect(typeof valid.result.event_id).toBe("string");
+  });
+
+  test("runtime.process_rolling_reviews returns the summary shape", async () => {
+    const res = (await h!.client.callTool({
+      name: "runtime.process_rolling_reviews",
+      arguments: { now: "2026-05-13T12:00:00.000Z" },
+    })) as ToolCallResponse;
+    const env = parseEnvelope(res);
+    expect(env.ok).toBe(true);
+    expect(typeof env.result.reviews_opened).toBe("number");
+    expect(typeof env.result.missed_advanced).toBe("number");
+  });
+
   test("substrate.amend_directive opens new tasks and supersedes named ones", async () => {
     // Seed a directive + a task via substrate.emit so the amendment has
     // something to supersede / a root to attach new tasks to.

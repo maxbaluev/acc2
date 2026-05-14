@@ -48,7 +48,9 @@ export type FailureKind =
   | "stakeholder_conflict"
   | "amendment_invalidates_prediction"
   | "cycle_1_only_breach"
-  | "refinement_depth_exceeded";
+  | "refinement_depth_exceeded"
+  | "directive_interference_cycle"
+  | "rolling_directive_archived";
 
 export type TaskEdgeKind = "requires" | "refines" | "watches";
 
@@ -61,6 +63,8 @@ export type EventKind =
   | "directive_review_due"
   | "directive_milestone_recorded"
   | "directive_interference_edge"
+  | "directive_interference_cycle_detected"
+  | "directive_archived_missed_reviews"
 
   // DAG topology
   | "task_node_opened"
@@ -122,6 +126,16 @@ export type EventKind =
   // Owner channel
   | "owner_input_received"
   | "owner_decision_recorded"
+  | "owner_input_required"
+
+  // Crisis mode
+  | "crisis_mode_engaged"
+  | "crisis_mode_disengaged"
+  | "crisis_postmortem_opened"
+  | "latm_suspended_in_crisis"
+
+  // Stakeholder adjudication
+  | "stakeholder_conflict"
 
   // External-service push
   | "external_event_received"

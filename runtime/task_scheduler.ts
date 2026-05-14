@@ -28,6 +28,7 @@ import { readyTasks, type TaskNode } from "./task_topology";
 import { dispatchReadyTask } from "./task_dispatcher";
 import { decideDispatch } from "./dispatch_decider";
 import { emitEvent } from "./events";
+import { readCurrentMode, applyModeAdjustments } from "./crisis_mode";
 
 export type SchedulerOpts = {
   maxConcurrent?: number;
@@ -42,6 +43,7 @@ export type SchedulerTick = {
   skipped_concurrency_cap: string[];
   skipped_recipe: string[];
   skipped_inline: string[];
+  skipped_blocked: string[];
 };
 
 const DEFAULT_MAX_CONCURRENT = 5;
@@ -83,7 +85,16 @@ export const schedulerTick = async (
   db: Database,
   opts: SchedulerOpts = {},
 ): Promise<SchedulerTick> => {
-  const maxConcurrent = Math.max(1, opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
+  // Crisis-mode adjustments: if a directive scope is supplied AND that
+  // directive is in crisis, raise maxConcurrent before applying the cap.
+  // Without a directive scope we keep the caller's baseline (Phase K Father
+  // will pick the active directive for us).
+  let effectiveOpts: SchedulerOpts = { ...opts };
+  if (opts.directiveId) {
+    const mode = readCurrentMode(db, opts.directiveId);
+    effectiveOpts = applyModeAdjustments(effectiveOpts, mode);
+  }
+  const maxConcurrent = Math.max(1, effectiveOpts.maxConcurrent ?? opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
   const ready = readyTasks(db, opts.directiveId);
 
   // Cull resolved entries (cheap — Map iteration).
@@ -97,6 +108,7 @@ export const schedulerTick = async (
   const skippedConcurrencyCap: string[] = [];
   const skippedRecipe: string[] = [];
   const skippedInline: string[] = [];
+  const skippedBlocked: string[] = [];
   const pending: Array<Promise<unknown>> = [];
 
   for (const task of ready) {
@@ -109,6 +121,22 @@ export const schedulerTick = async (
     }
 
     const decision = decideDispatch(db, task);
+    if (decision.route === "deferred_blocked") {
+      skippedBlocked.push(task.id);
+      emitEvent(db, {
+        kind: "constitutional_gate_decision",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        payload: {
+          gate: "directive_blocked_deferred",
+          blockers: decision.blockers,
+          reason: decision.reason,
+        } as JsonValue,
+      });
+      continue;
+    }
+
     if (decision.route === "substrate_replay") {
       // Phase J recipe replay: stub returns {ok:false, error:"phase_j"}.
       const replay = phaseJRecipeReplay();
@@ -183,6 +211,7 @@ export const schedulerTick = async (
     skipped_concurrency_cap: skippedConcurrencyCap,
     skipped_recipe: skippedRecipe,
     skipped_inline: skippedInline,
+    skipped_blocked: skippedBlocked,
   };
 };
 

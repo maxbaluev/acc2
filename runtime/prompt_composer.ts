@@ -20,6 +20,8 @@ import { snapshotWatchedOutputs } from "./watch_edges";
 import { encodingForModel, type Tiktoken } from "js-tiktoken";
 import type { EmbeddingIndex } from "./embedding_index";
 import type { RetrievalHit, RetrievalResult } from "./retrieval";
+import { renderStakeholderBlock } from "./stakeholder_compositor";
+import { renderInterferenceBlock } from "./interference";
 
 export type PromptComposeOptions = {
   taskId: string;
@@ -370,8 +372,18 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
         return lines.join("\n");
       })();
   candidates.push({ name: "watched_outputs", p: 2, body: watchedBody });
-  candidates.push({ name: "stakeholder_state", p: 3, body: "STAKEHOLDER STATE: (none)" });
-  candidates.push({ name: "cross_directive_interference", p: 3, body: "CROSS-DIRECTIVE INTERFERENCE: (none)" });
+  const stakeholderBody = renderStakeholderBlock(db, task.directive_id);
+  candidates.push({
+    name: "stakeholder_state",
+    p: 3,
+    body: stakeholderBody.length > 0 ? stakeholderBody : "STAKEHOLDER STATE: (none)",
+  });
+  const interferenceBody = renderInterferenceBlock(db, task.directive_id);
+  candidates.push({
+    name: "cross_directive_interference",
+    p: 3,
+    body: interferenceBody.length > 0 ? interferenceBody : "CROSS-DIRECTIVE INTERFERENCE: (none)",
+  });
 
   candidates.push({ name: "active_failures", p: 4, body: buildFailuresSection(readRecentFailures(db, 3)) });
   candidates.push({ name: "constitutional_gates", p: 4, body: buildGatesSection(readConstitutionalGates(db)) });
