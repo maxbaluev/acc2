@@ -86,6 +86,15 @@ export type SubstrateStatusReport = {
   knowledgePromoted: number;
   stakeholderState: number;
   directiveInterference: number;
+  // Health-metric counts (final substrate-wide unification pass). These
+  // are emitted by the substrate's own workers; surfacing their counts
+  // here gives the operator a one-screen view of whether the substrate
+  // is silently degrading (dispatcher violations) or producing real-
+  // world side effects (irreversible_effect_recorded) without having to
+  // grep the ledger.
+  dispatcherViolations: number;
+  irreversibleEffects: number;
+  workerTickOverruns: number;
   latestEventTs: string | null;
   latestArtifactTs: string | null;
   oldestUnembeddedTs: string | null;
@@ -132,6 +141,18 @@ export const computeSubstrateStatus = (
     db,
     "SELECT COUNT(*) AS c FROM events WHERE kind = 'directive_interference_edge'",
   );
+  const dispatcherViolations = safeCount(
+    db,
+    "SELECT COUNT(*) AS c FROM events WHERE kind = 'dispatcher_violation'",
+  );
+  const irreversibleEffects = safeCount(
+    db,
+    "SELECT COUNT(*) AS c FROM events WHERE kind = 'irreversible_effect_recorded'",
+  );
+  const workerTickOverruns = safeCount(
+    db,
+    "SELECT COUNT(*) AS c FROM events WHERE kind = 'worker_tick_overrun'",
+  );
 
   const latestEvent = safeScalar<{ ts: string }>(
     db,
@@ -165,6 +186,9 @@ export const computeSubstrateStatus = (
     knowledgePromoted,
     stakeholderState,
     directiveInterference,
+    dispatcherViolations,
+    irreversibleEffects,
+    workerTickOverruns,
     latestEventTs: latestEvent?.ts ?? null,
     latestArtifactTs: latestArtifact?.ts ?? null,
     oldestUnembeddedTs: oldestUnembedded?.ts ?? null,
@@ -196,6 +220,11 @@ export const renderSubstrateStatus = (
   out(`knowledge_promoted:         ${fmt(report.knowledgePromoted)}`);
   out(`stakeholder_state:          ${fmt(report.stakeholderState)}`);
   out(`directive_interference:     ${fmt(report.directiveInterference)}`);
+  out("─".repeat(50));
+  out("health metrics:");
+  out(`  dispatcher_violation:     ${fmt(report.dispatcherViolations)}`);
+  out(`  irreversible_effect:      ${fmt(report.irreversibleEffects)}`);
+  out(`  worker_tick_overrun:      ${fmt(report.workerTickOverruns)}`);
   out("─".repeat(50));
   out("freshness:");
   out(`  latest_event_ts:          ${report.latestEventTs ?? "(none)"}`);

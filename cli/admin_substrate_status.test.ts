@@ -146,6 +146,9 @@ describe("renderSubstrateStatus", () => {
         knowledgePromoted: 10,
         stakeholderState: 0,
         directiveInterference: 0,
+        dispatcherViolations: 0,
+        irreversibleEffects: 0,
+        workerTickOverruns: 0,
         latestEventTs: "2026-01-01T00:00:00Z",
         latestArtifactTs: "2026-01-01T00:00:00Z",
         oldestUnembeddedTs: null,
@@ -160,6 +163,39 @@ describe("renderSubstrateStatus", () => {
     expect(joined).toContain("vec_events:");
     expect(joined).toContain("(8 seed, 0 brain-authored)");
     expect(joined).toContain("all embedded");
+    expect(joined).toContain("health metrics:");
+    expect(joined).toContain("dispatcher_violation:");
+    expect(joined).toContain("irreversible_effect:");
+    expect(joined).toContain("worker_tick_overrun:");
+  });
+
+  test("counts health-metric event kinds (dispatcher_violation, irreversible_effect_recorded, worker_tick_overrun)", () => {
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    emitEvent(db, {
+      kind: "dispatcher_violation" as never,
+      substrate_origin: "substrate_auto",
+      payload: { failure_kind: "cycle_1_only_breach" },
+    });
+    emitEvent(db, {
+      kind: "irreversible_effect_recorded" as never,
+      substrate_origin: "substrate_auto",
+      payload: { kind: "net_outbound", target: "https://example.com" },
+    });
+    emitEvent(db, {
+      kind: "irreversible_effect_recorded" as never,
+      substrate_origin: "substrate_auto",
+      payload: { kind: "fs_write", path: "/tmp/x" },
+    });
+    emitEvent(db, {
+      kind: "worker_tick_overrun" as never,
+      substrate_origin: "substrate_auto",
+      payload: { worker: "scheduler", expected_ms: 1000, actual_ms: 2500 },
+    });
+    const r = computeSubstrateStatus(db, "/tmp/x.db");
+    expect(r.dispatcherViolations).toBe(1);
+    expect(r.irreversibleEffects).toBe(2);
+    expect(r.workerTickOverruns).toBe(1);
   });
 });
 
