@@ -31,6 +31,9 @@ import { emitEvent, getEventById, type EmitEventInput } from "./events";
 import { runBunArtifact } from "./runtimes/bun";
 import { getArtifact } from "./artifact_store";
 import { admitArtifact } from "./artifact_admission";
+import { dispatchReadyTask } from "./task_dispatcher";
+import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
+import { readDagForDirective } from "./task_topology";
 
 export type McpContext = {
   db: Database;
@@ -55,6 +58,8 @@ export const McpMethods = [
   "substrate.run_verifier",
   "substrate.credit",
   "substrate.admit_artifact",
+  "substrate.open_fixture",
+  "runtime.dispatch_ready_task",
 ] as const;
 export type McpMethodName = (typeof McpMethods)[number];
 
@@ -157,6 +162,16 @@ const CreditSchema = z
     outcome: z.string().optional(),
   })
   .passthrough();
+
+const OpenFixtureSchema = z.object({
+  fixture: z.literal("d_count_todos"),
+  target_path: z.string().optional(),
+});
+
+const DispatchReadyTaskSchema = z.object({
+  task_id: z.string(),
+  fixture_target_path: z.string().optional(),
+});
 
 // ── Handlers (pure functions over (ctx, args) → McpResult) ──────────
 //
@@ -378,6 +393,60 @@ const handleCredit = (): McpResult => ({
   error: "credit_pipeline_phase_h",
 });
 
+// ── Phase D handlers ──────────────────────────────────────────────
+
+const handleOpenFixture = async (
+  ctx: McpContext,
+  args: z.infer<typeof OpenFixtureSchema>,
+): Promise<McpResult> => {
+  if (args.fixture !== "d_count_todos") {
+    return { ok: false, error: `unknown_fixture:${args.fixture}` };
+  }
+  const result = await openFixtureDCountTodos(ctx.db, args.target_path);
+  return {
+    ok: true,
+    result: {
+      directive_id: result.directiveId,
+      task_id: result.taskId,
+    } as JsonValue,
+  };
+};
+
+const handleDispatchReadyTask = async (
+  ctx: McpContext,
+  args: z.infer<typeof DispatchReadyTaskSchema>,
+): Promise<McpResult> => {
+  // Resolve the TaskNode for the supplied task_id by walking the directive's
+  // DAG. The dispatcher needs goal + directive_id + status, which readDag
+  // provides.
+  const rows = ctx.db
+    .query(
+      "SELECT directive_id FROM events WHERE task_id = ? AND kind = 'task_node_opened' LIMIT 1",
+    )
+    .get(args.task_id) as { directive_id: string } | null;
+  if (!rows) {
+    return { ok: false, error: "task_not_found" };
+  }
+  const { nodes } = readDagForDirective(ctx.db, rows.directive_id);
+  const node = nodes.find((n) => n.id === args.task_id);
+  if (!node) {
+    return { ok: false, error: "task_not_found_in_dag" };
+  }
+  const result = await dispatchReadyTask(ctx.db, node, {
+    fixtureTargetPath: args.fixture_target_path,
+  });
+  return {
+    ok: true,
+    result: {
+      dispatch_id: result.dispatch_id,
+      task_id: result.task_id,
+      events_count: result.events.length,
+      violations: result.violations,
+      bridge_ok: result.bridge_result?.ok ?? null,
+    } as JsonValue,
+  };
+};
+
 // ── FastMCP server factory ─────────────────────────────────────────
 
 export type McpServerOptions = {
@@ -506,6 +575,25 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     execute: wrap(handleAdmitArtifact),
   });
 
+  server.addTool({
+    name: "substrate.open_fixture",
+    description:
+      "Open a named test fixture directive. Phase D ships d_count_todos. " +
+      "Returns {directive_id, task_id} so the caller can drive the dispatcher.",
+    parameters: OpenFixtureSchema,
+    execute: wrap(handleOpenFixture),
+  });
+
+  server.addTool({
+    name: "runtime.dispatch_ready_task",
+    description:
+      "Dispatch one ready task through the single-cycle brain pipeline. " +
+      "Phase D: composes prompt, calls mocked bridge, runs action + verifier, " +
+      "emits action_scored + task_committed when residual < threshold.",
+    parameters: DispatchReadyTaskSchema,
+    execute: wrap(handleDispatchReadyTask),
+  });
+
   return server;
 };
 
@@ -526,6 +614,8 @@ const HTTP_DISPATCH: Record<string, (ctx: McpContext, args: any) => McpResult | 
   "substrate.run_verifier": handleRunVerifier as any,
   "substrate.credit": handleCredit as any,
   "substrate.admit_artifact": handleAdmitArtifact as any,
+  "substrate.open_fixture": handleOpenFixture as any,
+  "runtime.dispatch_ready_task": handleDispatchReadyTask as any,
 };
 
 /** Bun.serve route handler: POST /mcp/<method>. Parses JSON body, validates

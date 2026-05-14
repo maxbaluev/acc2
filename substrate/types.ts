@@ -46,7 +46,9 @@ export type FailureKind =
   | "concurrency_conflict"
   | "governance_block"
   | "stakeholder_conflict"
-  | "amendment_invalidates_prediction";
+  | "amendment_invalidates_prediction"
+  | "cycle_1_only_breach"
+  | "refinement_depth_exceeded";
 
 export type TaskEdgeKind = "requires" | "refines" | "watches";
 
@@ -103,6 +105,13 @@ export type EventKind =
   | "bridge_frame_received"
   | "bridge_completed"
   | "bridge_failed"
+
+  // Dispatcher (Phase D — §3.7 cycle-1 enforcement)
+  | "brain_dispatched"
+  | "brain_dispatch_closed"
+  | "brain_cycle_2_started"
+  | "continue_cycle_requested"
+  | "dispatcher_violation"
 
   // Stakeholder model
   | "stakeholder_state_recorded"
