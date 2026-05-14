@@ -332,6 +332,119 @@ export const embedderWorkerTick = async (
   return { embedded, skipped_no_text, failed };
 };
 
+/** Public, synchronous-style batch embedder. Unlike `embedderWorkerTick`
+ *  (which the daemon fires every few seconds), this entry blocks the
+ *  caller until the FULL batch of pending events is embedded — `acc init`
+ *  and `acc admin embed-all` use this so the substrate is LIVE before
+ *  the daemon starts ticking.
+ *
+ *  Selects every event where `kind IN EMBEDDABLE_KINDS AND embedding IS
+ *  NULL`, walks them in stable `ts ASC` order through the existing
+ *  batch-of-100 path, and persists each successful embedding via the
+ *  same `persistEmbedding` route the worker uses (events row UPDATE +
+ *  vec_events upsert + `embedding_computed` audit row).
+ *
+ *  Behavior contract:
+ *    - returns `{ embedded, skipped, failed }` where `skipped` = events
+ *      whose payload carried no embeddable text (still counted so the
+ *      caller can audit content gaps);
+ *    - when OPENAI_API_KEY is unset: emits ONE `embedding_skipped_missing_api_key`
+ *      event carrying the pending count and returns `{ embedded: 0,
+ *      skipped: <pending>, failed: 0 }` — no throw, no partial work;
+ *    - idempotent: pending count is recomputed every call, an empty
+ *      pending set returns `{0, 0, 0}` cheaply.
+ *
+ *  `opts.batchSize` overrides the per-iteration slice (default 100,
+ *  capped at 500); `opts.timeoutMs` is reserved for future wall-clock
+ *  bounding — today the helper runs to completion since `batchComputeEmbeddings`
+ *  already bounds per-request via `fetch`. */
+export const embedPendingEvents = async (
+  db: Database,
+  opts: { batchSize?: number; timeoutMs?: number } = {},
+): Promise<{ embedded: number; skipped: number; failed: number }> => {
+  const batchSize = Math.max(1, Math.min(500, opts.batchSize ?? 100));
+  // Honour the no-API-key path up front: emit ONE audit row carrying the
+  // pending count so the substrate explains why nothing was indexed.
+  const pendingCount = (db
+    .query(
+      `SELECT COUNT(*) AS c FROM events
+       WHERE embedding IS NULL AND kind IN (${Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ")})`,
+    )
+    .get(...Array.from(EMBEDDABLE_KINDS)) as { c: number }).c;
+  if (pendingCount === 0) {
+    return { embedded: 0, skipped: 0, failed: 0 };
+  }
+  const apiConfig = getApiConfig();
+  if (!apiConfig) {
+    emitEvent(db, {
+      kind: "embedding_skipped_missing_api_key",
+      substrate_origin: "substrate_auto",
+      payload: {
+        pending_count: pendingCount,
+        reason: "openai_api_key_missing",
+        model: EMBEDDING_MODEL,
+      },
+    });
+    return { embedded: 0, skipped: pendingCount, failed: 0 };
+  }
+
+  let embedded = 0;
+  let skipped = 0;
+  let failed = 0;
+  // Drain in successive slices of `batchSize` until no unembedded rows
+  // remain. Each iteration calls into `batchComputeEmbeddings` (chunked
+  // at 100 per OpenAI request) and persists each successful row.
+  while (true) {
+    const rows = readUnembedded(db, batchSize);
+    if (rows.length === 0) break;
+    const items: Array<{ id: string; text: string }> = [];
+    for (const r of rows) {
+      let payload: unknown = {};
+      try { payload = JSON.parse(r.payload ?? "{}"); } catch { /* skip */ }
+      const text = extractTextFromEvent(r.kind, payload);
+      if (!text) {
+        skipped++;
+        // Stamp a sentinel embedding_version so subsequent calls don't
+        // re-attempt the same row. We mark the row as "no-text" by
+        // setting embedding_version to a stable marker and leaving the
+        // BLOB null — readUnembedded filters on `embedding IS NULL` so
+        // we need a different escape: instead, write a 0-byte blob
+        // so the row is removed from the pending pool. Empty BLOB is
+        // a legitimate marker because decodeEmbeddingBlob returns null
+        // for zero-length input.
+        db.run(
+          "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
+          [new Uint8Array(0), "no_text", r.id],
+        );
+        continue;
+      }
+      items.push({ id: r.id, text });
+    }
+    if (items.length === 0) {
+      // Nothing embeddable in this slice; loop again only if readUnembedded
+      // returned <= skipped (the skipped rows are now marked, so the next
+      // iteration won't re-see them). Break to avoid an infinite loop.
+      continue;
+    }
+    const embeddings = await batchComputeEmbeddings(items);
+    for (const item of items) {
+      const vec = embeddings.get(item.id);
+      if (!vec) { failed++; continue; }
+      try {
+        persistEmbedding(db, item.id, vec, EMBEDDING_VERSION);
+        embedded++;
+      } catch {
+        failed++;
+      }
+    }
+    // Defensive cap: if a slice came back with EVERY item failing (no
+    // network, bad key, etc) we'd loop forever — bail out so the caller
+    // sees the failed count without hanging.
+    if (embeddings.size === 0 && items.length > 0) break;
+  }
+  return { embedded, skipped, failed };
+};
+
 /** Convenience: read one event's stored embedding as a Float32Array, or
  *  null if no embedding or version mismatch. The reranker uses this to
  *  fetch the query embedding back when seeded by tests. */
