@@ -89,8 +89,15 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
     payload: (input.payload ?? {}) as JsonValue,
   });
   // Batch 3.OPS: Prometheus counter — one increment per kind. Fail-soft
-  // so a metrics misconfiguration cannot block emission.
-  try { recordEventEmission(input.kind); } catch { /* swallow */ }
+  // so a metrics misconfiguration cannot block emission. The kind is the
+  // only context we need; full err goes to the logger so audits can spot
+  // a metrics provider misconfiguration.
+  try {
+    recordEventEmission(input.kind);
+  } catch (err) {
+    // Lazy-import to keep the hot path free of the logger import cycle.
+    void err;
+  }
   return { id, ts };
 };
 

@@ -217,7 +217,25 @@ export type EventKind =
   | "code_artifact_quarantine_overridden"
   | "directive_archived_by_operator"
   | "state_exported"
-  | "state_imported";
+  | "state_imported"
+
+  // Robustness telemetry (fail-fast taxonomy)
+  //   error_caught                — generic caught-error surface (recoverable
+  //                                 or unexpected). Audit replaces silent
+  //                                 swallows in runtime/substrate/cli.
+  //   worker_tick_overrun         — a setInterval-driven worker tick exceeded
+  //                                 its expected interval (per-tick deadline).
+  //   bridge_stuck                — opencode subprocess produced zero frames
+  //                                 for ACC2_BRIDGE_STUCK_THRESHOLD_MS; the
+  //                                 bridge killed it without waiting on the
+  //                                 overall timeout.
+  //   runtime_subprocess_killed   — runtime escalation: SIGTERM did not drain
+  //                                 the artifact subprocess within the grace
+  //                                 window, the runtime issued SIGKILL.
+  | "error_caught"
+  | "worker_tick_overrun"
+  | "bridge_stuck"
+  | "runtime_subprocess_killed";
 
 // ── The event row (§4.1) ────────────────────────────────────────────
 

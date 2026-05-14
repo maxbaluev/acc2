@@ -28,7 +28,16 @@ const _dbCache = new Map<string, Database>();
 // "memory" — that branch is allowed. All other pragmas are mandatory:
 // if the driver rejects them we want the error loud.
 const applyWalPragmas = (db: Database): void => {
-  try { db.run("PRAGMA journal_mode = wal"); } catch { /* :memory: */ }
+  try {
+    db.run("PRAGMA journal_mode = wal");
+  } catch (err) {
+    // :memory: silently falls back to "memory" — the journal pragma raises
+    // there. We keep the swallow but emit a stderr trace under verbose mode
+    // so a real failure on a file-backed DB doesn't vanish.
+    if (process.env.ACC2_DB_VERBOSE === "1") {
+      process.stderr.write(`acc2 db: PRAGMA journal_mode=wal refused (${(err as Error).message})\n`);
+    }
+  }
   db.run("PRAGMA synchronous = NORMAL");
   db.run("PRAGMA busy_timeout = 5000");
   db.run("PRAGMA foreign_keys = ON");

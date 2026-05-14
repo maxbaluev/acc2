@@ -64,6 +64,8 @@ import {
   setOnReady,
   resetReadiness,
   readyAt,
+  recordWorkerTick,
+  stuckWorkers,
 } from "./readiness";
 
 export const DEFAULT_DAEMON_PORT = 9387;
@@ -130,7 +132,94 @@ const writeLockFile = (path: string, payload: Record<string, unknown>): void => 
 };
 
 const tryRemove = (path: string): void => {
-  try { if (existsSync(path)) rmSync(path, { force: true }); } catch { /* swallow */ }
+  try {
+    if (existsSync(path)) rmSync(path, { force: true });
+  } catch (err) {
+    logger.debug({ where: "daemon.tryRemove", path, err: String(err) }, "remove failed (best-effort)");
+  }
+};
+
+/** Wrap a tick body with per-tick deadline + overrun detection.
+ *
+ *  Semantics:
+ *    - If the previous tick body is still running when the next interval
+ *      fires, the new tick is SKIPPED and a `worker_tick_overrun` event is
+ *      emitted (with `expected_ms` = interval, `observed_ms` = elapsed). The
+ *      already-running tick is allowed to finish — we never cancel mid-body.
+ *    - When the tick body completes successfully, `recordWorkerTick(name)`
+ *      stamps the last-tick timestamp so /health can compute degraded state.
+ *    - Errors thrown by the body are caught + logged + emitted as
+ *      `error_caught` so per-tick failures never crash the daemon AND never
+ *      vanish silently (audit-1: no swallow without at least a debug line).
+ *
+ *  Returns a tick callback suitable for `setInterval(fn, intervalMs)`. The
+ *  callback returns void; internal Promise chains are fire-and-forget. */
+const supervisedTick = (
+  db: Database,
+  workerName: string,
+  intervalMs: number,
+  body: () => Promise<void>,
+): (() => void) => {
+  let running = false;
+  let runningSinceMs = 0;
+  return () => {
+    const now = Date.now();
+    if (running) {
+      const observedMs = now - runningSinceMs;
+      logger.warn(
+        { worker: workerName, expected_ms: intervalMs, observed_ms: observedMs },
+        "worker tick overrun — previous tick still running, skipping this fire",
+      );
+      try {
+        emitEvent(db, {
+          kind: "worker_tick_overrun",
+          substrate_origin: "substrate_auto",
+          payload: {
+            worker: workerName,
+            expected_ms: intervalMs,
+            observed_ms: observedMs,
+          },
+        });
+      } catch (err) {
+        logger.debug(
+          { where: "supervisedTick.emit_overrun", err: String(err) },
+          "could not emit worker_tick_overrun (db likely closed)",
+        );
+      }
+      return;
+    }
+    running = true;
+    runningSinceMs = now;
+    void (async () => {
+      try {
+        await body();
+        recordWorkerTick(workerName);
+      } catch (err) {
+        logger.warn(
+          { worker: workerName, err: (err as Error).message },
+          "worker tick threw — caught and surfaced as error_caught",
+        );
+        try {
+          emitEvent(db, {
+            kind: "error_caught",
+            substrate_origin: "substrate_auto",
+            payload: {
+              where: `daemon.worker.${workerName}`,
+              recoverable: true,
+              message: (err as Error).message,
+            },
+          });
+        } catch (emitErr) {
+          logger.debug(
+            { where: "supervisedTick.emit_error_caught", err: String(emitErr) },
+            "could not emit error_caught (db likely closed)",
+          );
+        }
+      } finally {
+        running = false;
+      }
+    })();
+  };
 };
 
 const countEvents = (db: Database): number => {
@@ -203,7 +292,9 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       `${bootIntegrity.pragma_integrity_check}`;
     process.stderr.write(msg + "\n");
     logger.fatal({ pragma_result: bootIntegrity.pragma_integrity_check }, msg);
-    try { closeDb(stateDbPath); } catch { /* swallow */ }
+    try { closeDb(stateDbPath); } catch (closeErr) {
+      logger.debug({ where: "daemon.boot.integrity_close", err: String(closeErr) }, "closeDb after integrity refusal failed");
+    }
     throw new Error(msg);
   }
   const orphans = reconcileOrphanedDispatches(db);
@@ -232,87 +323,153 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   const heartbeat = setInterval(() => { /* phase F: embedder catch-up, posterior updater, … */ }, 5000);
   workers.push(() => clearInterval(heartbeat));
 
+  // Worker tick intervals — declared here so /health can compute the
+  // "stuck after 3× interval" threshold without reading env vars twice.
+  const amendmentTickMs = Number(process.env.ACC2_AMENDMENT_TICK_MS ?? 2000);
+  const gaugeTickMs = 30_000;
+  const integrityIntervalMs = Number(
+    process.env.ACC2_INTEGRITY_INTERVAL_MS ?? 6 * 60 * 60 * 1000,
+  );
+  const embedderIntervalMs = 10_000;
+  const rehabIntervalMs = 6 * 60 * 60 * 1000;
+  const rollingIntervalMs = 60_000;
+  const fatherIntervalMs = Number(process.env.ACC2_FATHER_INTERVAL_MS ?? 5 * 60 * 1000);
+
   // Batch 3.OPS readiness: always-on workers must be registered up-front
   // so /ready can refuse traffic until each has completed its first tick.
-  registerWorker("amendment");
-  registerWorker("metrics_gauge_refresh");
-  if (process.env.ACC2_INTEGRITY_AUTOSTART !== "0") registerWorker("integrity");
-  if (process.env.ACC2_EMBEDDER_AUTOSTART === "1") registerWorker("embedder");
-  if (process.env.ACC2_REHAB_AUTOSTART === "1") registerWorker("rehabilitation");
-  if (process.env.ACC2_ROLLING_AUTOSTART === "1") registerWorker("rolling_reviewer");
-  if (process.env.ACC2_FATHER_AUTOSTART === "1") registerWorker("father");
+  // Robustness: declare each worker's tick interval so /health can flag
+  // "stuck" workers that miss 3× consecutive ticks.
+  registerWorker("amendment", amendmentTickMs);
+  registerWorker("metrics_gauge_refresh", gaugeTickMs);
+  if (process.env.ACC2_INTEGRITY_AUTOSTART !== "0") registerWorker("integrity", integrityIntervalMs);
+  if (process.env.ACC2_EMBEDDER_AUTOSTART === "1") registerWorker("embedder", embedderIntervalMs);
+  if (process.env.ACC2_REHAB_AUTOSTART === "1") registerWorker("rehabilitation", rehabIntervalMs);
+  if (process.env.ACC2_ROLLING_AUTOSTART === "1") registerWorker("rolling_reviewer", rollingIntervalMs);
+  if (process.env.ACC2_FATHER_AUTOSTART === "1") registerWorker("father", fatherIntervalMs);
   if (process.env.ACC2_AUTOSCHEDULER === "1") registerWorker("scheduler");
 
   // Phase E: amendment worker — drain unapplied directive_amended events on
   // a configurable interval (default 2s; tests may pin a shorter value via
-  // ACC2_AMENDMENT_TICK_MS). Errors are swallowed so a malformed amendment
-  // can't kill the daemon (each surfaces its own diagnostic events anyway).
+  // ACC2_AMENDMENT_TICK_MS). Errors are surfaced as error_caught events
+  // (one per amendment) so a malformed amendment can't kill the daemon AND
+  // never vanishes silently.
   let amendmentMarked = false;
-  const amendmentTickMs = Number(process.env.ACC2_AMENDMENT_TICK_MS ?? 2000);
-  const amendmentTick = setInterval(() => {
-    void (async () => {
-      try {
-        const unapplied = findUnappliedAmendments(db);
-        for (const id of unapplied) {
-          try { await applyAmendment(db, id); } catch { /* swallow per-amendment */ }
+  const amendmentTick = setInterval(
+    supervisedTick(db, "amendment", amendmentTickMs, async () => {
+      const unapplied = findUnappliedAmendments(db);
+      for (const id of unapplied) {
+        try {
+          await applyAmendment(db, id);
+        } catch (err) {
+          logger.warn(
+            { amendment_id: id, err: (err as Error).message },
+            "applyAmendment failed — surfaced as error_caught, continuing",
+          );
+          try {
+            emitEvent(db, {
+              kind: "error_caught",
+              substrate_origin: "substrate_auto",
+              payload: {
+                where: "daemon.amendment.apply",
+                recoverable: true,
+                amendment_id: id,
+                message: (err as Error).message,
+              },
+            });
+          } catch (emitErr) {
+            logger.debug(
+              { where: "daemon.amendment.emit", err: String(emitErr) },
+              "could not emit error_caught (db likely closed)",
+            );
+          }
         }
-      } catch { /* swallow */ }
+      }
       if (!amendmentMarked) { markWorkerReady("amendment"); amendmentMarked = true; }
-    })();
-  }, amendmentTickMs);
+    }),
+    amendmentTickMs,
+  );
   // Fire one synchronous mark right away so amendment readiness does
   // not block /ready for 2s on a quiet daemon.
   markWorkerReady("amendment");
   amendmentMarked = true;
+  recordWorkerTick("amendment");
   workers.push(() => clearInterval(amendmentTick));
 
   // Batch 3.OPS: gauge refresh (every 30s) keeps the SQLite-backed gauges
   // (substrate_events_total, code_artifacts_*) live for /metrics scrapes.
-  const gaugeTick = setInterval(() => { refreshGauges(db, startedAtMs); }, 30_000);
+  const gaugeTick = setInterval(
+    supervisedTick(db, "metrics_gauge_refresh", gaugeTickMs, async () => {
+      refreshGauges(db, startedAtMs);
+    }),
+    gaugeTickMs,
+  );
   refreshGauges(db, startedAtMs); // initial snapshot
   markWorkerReady("metrics_gauge_refresh");
+  recordWorkerTick("metrics_gauge_refresh");
   workers.push(() => clearInterval(gaugeTick));
 
   // Batch 3.OPS: DB integrity worker. Default ON unless explicitly
   // disabled (ACC2_INTEGRITY_AUTOSTART=0 for tests). Tick interval is
   // 6h by default; configurable via ACC2_INTEGRITY_INTERVAL_MS.
   if (process.env.ACC2_INTEGRITY_AUTOSTART !== "0") {
-    const integrityIntervalMs = Number(
-      process.env.ACC2_INTEGRITY_INTERVAL_MS ?? 6 * 60 * 60 * 1000,
-    );
     let integrityMarked = false;
-    const integrityTick = setInterval(() => {
-      void (async () => {
-        try { await integrityWorkerTick(db); } catch (err) {
-          logger.warn({ err: (err as Error).message }, "integrity worker tick failed");
-        }
+    const integrityTick = setInterval(
+      supervisedTick(db, "integrity", integrityIntervalMs, async () => {
+        await integrityWorkerTick(db);
         if (!integrityMarked) { markWorkerReady("integrity"); integrityMarked = true; }
-      })();
-    }, integrityIntervalMs);
+      }),
+      integrityIntervalMs,
+    );
     // Mark ready immediately — the boot-time runIntegrityCheck already
     // proved the substrate is healthy. The interval tick repeats every
     // 6h thereafter.
     markWorkerReady("integrity");
     integrityMarked = true;
+    recordWorkerTick("integrity");
     workers.push(() => clearInterval(integrityTick));
   }
 
   // Phase F: optional embedder worker. Default off — tests must not hit
   // the OpenAI API. Enable with ACC2_EMBEDDER_AUTOSTART=1 in production.
-  // Tick every 10s with batch=20; errors swallowed so a single bad row
-  // can't kill the daemon.
+  // Tick every 10s with batch=20; errors surface as error_caught events so
+  // a single bad row can't kill the daemon and never vanishes silently.
   if (process.env.ACC2_EMBEDDER_AUTOSTART === "1") {
     let embedderMarked = false;
-    const embedderTick = setInterval(() => {
-      void (async () => {
-        try { await embedderWorkerTick(db, { batchSize: 20 }); } catch { /* swallow */ }
+    const embedderTick = setInterval(
+      supervisedTick(db, "embedder", embedderIntervalMs, async () => {
+        await embedderWorkerTick(db, { batchSize: 20 });
         if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
-      })();
-    }, 10_000);
+      }),
+      embedderIntervalMs,
+    );
     // Run one tick synchronously at boot so /ready can flip without
     // waiting 10s.
     void (async () => {
-      try { await embedderWorkerTick(db, { batchSize: 20 }); } catch { /* swallow */ }
+      try {
+        await embedderWorkerTick(db, { batchSize: 20 });
+        recordWorkerTick("embedder");
+      } catch (err) {
+        logger.warn(
+          { err: (err as Error).message },
+          "embedder boot-tick failed — surfaced as error_caught",
+        );
+        try {
+          emitEvent(db, {
+            kind: "error_caught",
+            substrate_origin: "substrate_auto",
+            payload: {
+              where: "daemon.embedder.boot_tick",
+              recoverable: true,
+              message: (err as Error).message,
+            },
+          });
+        } catch (emitErr) {
+          logger.debug(
+            { where: "daemon.embedder.boot_emit", err: String(emitErr) },
+            "could not emit error_caught (db likely closed)",
+          );
+        }
+      }
       if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
     })();
     workers.push(() => clearInterval(embedderTick));
@@ -331,54 +488,59 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // Rehab readiness flips on registration; we do NOT run a synchronous
     // initial tick because rehab can spawn subprocess fixtures.
     markWorkerReady("rehabilitation");
-    let rehabRunning = false;
-    const rehabTick = setInterval(() => {
-      if (rehabRunning) return; // deadline pattern: skip overlapping ticks
-      rehabRunning = true;
-      void (async () => {
-        try {
-          await rehabilitationWorkerTick(
-            db,
-            async (artifactId) => {
-              const row = getArtifact(db, artifactId);
-              if (!row) return { ok: false, residual: 1 };
-              const fixtureInput = row.fixtureInput ?? null;
-              const observation = row.runtime === "bun"
-                ? await runBunArtifact({
+    recordWorkerTick("rehabilitation");
+    const rehabTick = setInterval(
+      supervisedTick(db, "rehabilitation", rehabTickMs, async () => {
+        await rehabilitationWorkerTick(
+          db,
+          async (artifactId) => {
+            const row = getArtifact(db, artifactId);
+            if (!row) return { ok: false, residual: 1 };
+            const fixtureInput = row.fixtureInput ?? null;
+            const observation = row.runtime === "bun"
+              ? await runBunArtifact({
+                  artifactId: row.id,
+                  body: row.body,
+                  declaredSandbox: row.declaredSandbox as Extract<SandboxDecl, { runtime: "bun" }>,
+                  inputs: fixtureInput,
+                })
+              : row.runtime === "uv"
+                ? await runUvArtifact({
                     artifactId: row.id,
                     body: row.body,
-                    declaredSandbox: row.declaredSandbox as Extract<SandboxDecl, { runtime: "bun" }>,
+                    declaredSandbox: row.declaredSandbox as Extract<SandboxDecl, { runtime: "uv" }>,
                     inputs: fixtureInput,
                   })
-                : row.runtime === "uv"
-                  ? await runUvArtifact({
-                      artifactId: row.id,
-                      body: row.body,
-                      declaredSandbox: row.declaredSandbox as Extract<SandboxDecl, { runtime: "uv" }>,
-                      inputs: fixtureInput,
-                    })
-                  : await runCamofoxArtifact({
-                      artifactId: row.id,
-                      body: row.body,
-                      declaredSandbox: row.declaredSandbox as Extract<SandboxDecl, { runtime: "camofox-browser" }>,
-                      inputs: fixtureInput,
-                    });
-              const residual =
-                observation.ok &&
-                observation.result &&
-                typeof observation.result === "object" &&
-                !Array.isArray(observation.result) &&
-                typeof (observation.result as Record<string, unknown>).residual === "number"
-                  ? (observation.result as { residual: number }).residual
-                  : (observation.ok ? 0 : 1);
-              return { ok: observation.ok, residual };
-            },
-            (event) => { try { emitEvent(db, event); } catch { /* swallow */ } },
-          );
-        } catch { /* swallow */ }
-        finally { rehabRunning = false; }
-      })();
-    }, rehabTickMs);
+                : await runCamofoxArtifact({
+                    artifactId: row.id,
+                    body: row.body,
+                    declaredSandbox: row.declaredSandbox as Extract<SandboxDecl, { runtime: "camofox-browser" }>,
+                    inputs: fixtureInput,
+                  });
+            const residual =
+              observation.ok &&
+              observation.result &&
+              typeof observation.result === "object" &&
+              !Array.isArray(observation.result) &&
+              typeof (observation.result as Record<string, unknown>).residual === "number"
+                ? (observation.result as { residual: number }).residual
+                : (observation.ok ? 0 : 1);
+            return { ok: observation.ok, residual };
+          },
+          (event) => {
+            try {
+              emitEvent(db, event);
+            } catch (err) {
+              logger.debug(
+                { where: "daemon.rehab.emit", kind: event.kind, err: String(err) },
+                "rehab event emission failed",
+              );
+            }
+          },
+        );
+      }),
+      rehabTickMs,
+    );
     workers.push(() => clearInterval(rehabTick));
   }
 
@@ -389,14 +551,39 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // this on in production.
   if (process.env.ACC2_ROLLING_AUTOSTART === "1") {
     let rollingMarked = false;
-    const rollingTick = setInterval(() => {
-      void (async () => {
-        try { await rollingReviewerWorkerTick(db); } catch { /* swallow */ }
+    const rollingTick = setInterval(
+      supervisedTick(db, "rolling_reviewer", rollingIntervalMs, async () => {
+        await rollingReviewerWorkerTick(db);
         if (!rollingMarked) { markWorkerReady("rolling_reviewer"); rollingMarked = true; }
-      })();
-    }, 60_000);
+      }),
+      rollingIntervalMs,
+    );
     void (async () => {
-      try { await rollingReviewerWorkerTick(db); } catch { /* swallow */ }
+      try {
+        await rollingReviewerWorkerTick(db);
+        recordWorkerTick("rolling_reviewer");
+      } catch (err) {
+        logger.warn(
+          { err: (err as Error).message },
+          "rolling_reviewer boot-tick failed — surfaced as error_caught",
+        );
+        try {
+          emitEvent(db, {
+            kind: "error_caught",
+            substrate_origin: "substrate_auto",
+            payload: {
+              where: "daemon.rolling_reviewer.boot_tick",
+              recoverable: true,
+              message: (err as Error).message,
+            },
+          });
+        } catch (emitErr) {
+          logger.debug(
+            { where: "daemon.rolling_reviewer.boot_emit", err: String(emitErr) },
+            "could not emit error_caught (db likely closed)",
+          );
+        }
+      }
       if (!rollingMarked) { markWorkerReady("rolling_reviewer"); rollingMarked = true; }
     })();
     workers.push(() => clearInterval(rollingTick));
@@ -411,23 +598,63 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // LLM-call capability; it only opens directives compiled from templates
   // and records its cycle.
   if (process.env.ACC2_FATHER_AUTOSTART === "1") {
-    const fatherIntervalMs = Number(process.env.ACC2_FATHER_INTERVAL_MS ?? 5 * 60 * 1000);
     let fatherMarked = false;
-    const fatherTick = setInterval(() => {
-      void (async () => {
+    const fatherTick = setInterval(
+      supervisedTick(db, "father", fatherIntervalMs, async () => {
+        // Drive rolling reviews here so Father owns the whole long-horizon
+        // orchestration when enabled (§K.4). Failures in EITHER step are
+        // surfaced individually as error_caught — neither aborts the tick.
         try {
-          // Drive rolling reviews here so Father owns the whole long-horizon
-          // orchestration when enabled (§K.4).
           await rollingReviewerWorkerTick(db);
-        } catch { /* swallow */ }
-        try { await fatherIterate(db); } catch { /* swallow */ }
+        } catch (err) {
+          logger.warn(
+            { err: (err as Error).message },
+            "father.rollingReview failed — surfaced as error_caught",
+          );
+          try {
+            emitEvent(db, {
+              kind: "error_caught",
+              substrate_origin: "substrate_auto",
+              payload: {
+                where: "daemon.father.rolling_reviewer_step",
+                recoverable: true,
+                message: (err as Error).message,
+              },
+            });
+          } catch (emitErr) {
+            logger.debug({ err: String(emitErr) }, "could not emit error_caught (db closed)");
+          }
+        }
+        try {
+          await fatherIterate(db);
+        } catch (err) {
+          logger.warn(
+            { err: (err as Error).message },
+            "father.iterate failed — surfaced as error_caught",
+          );
+          try {
+            emitEvent(db, {
+              kind: "error_caught",
+              substrate_origin: "substrate_auto",
+              payload: {
+                where: "daemon.father.iterate_step",
+                recoverable: true,
+                message: (err as Error).message,
+              },
+            });
+          } catch (emitErr) {
+            logger.debug({ err: String(emitErr) }, "could not emit error_caught (db closed)");
+          }
+        }
         if (!fatherMarked) { markWorkerReady("father"); fatherMarked = true; }
-      })();
-    }, fatherIntervalMs);
+      }),
+      fatherIntervalMs,
+    );
     // Father is registered as ready immediately — its 5-min cadence is
     // too long to gate /ready behind.
     markWorkerReady("father");
     fatherMarked = true;
+    recordWorkerTick("father");
     workers.push(() => clearInterval(fatherTick));
   }
 
@@ -437,6 +664,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (process.env.ACC2_AUTOSCHEDULER === "1") {
     schedulerAbort = new AbortController();
     markWorkerReady("scheduler");
+    recordWorkerTick("scheduler");
     void (async () => {
       try {
         // schedulerLoop returns on quiescence; we keep restarting it on a
@@ -448,9 +676,29 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
             maxConcurrent: 5,
             abort: schedulerAbort?.signal,
           });
+          recordWorkerTick("scheduler");
           await new Promise((r) => setTimeout(r, 2000));
         }
-      } catch { /* swallow */ }
+      } catch (err) {
+        logger.error(
+          { err: (err as Error).message, stack: (err as Error).stack },
+          "scheduler loop crashed — surfacing as error_caught(unrecoverable)",
+        );
+        try {
+          emitEvent(db, {
+            kind: "error_caught",
+            substrate_origin: "substrate_auto",
+            payload: {
+              where: "daemon.scheduler.loop",
+              recoverable: false,
+              message: (err as Error).message,
+              stack: ((err as Error).stack ?? "").slice(0, 2048),
+            },
+          });
+        } catch (emitErr) {
+          logger.debug({ err: String(emitErr) }, "could not emit error_caught (db closed)");
+        }
+      }
     })();
     workers.push(() => schedulerAbort?.abort());
   }
@@ -470,9 +718,15 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
         substrate_origin: "substrate_auto",
         payload: { pid: process.pid, uptime_ms: Date.now() - startedAtMs },
       });
-    } catch { /* db may already be closed */ }
-    try { auxServer?.stop(true); } catch { /* swallow */ }
-    try { if (mcpServer) await mcpServer.stop(); } catch { /* swallow */ }
+    } catch (err) {
+      logger.debug({ where: "daemon.stop.emit_shutdown", err: String(err) }, "db may already be closed");
+    }
+    try { auxServer?.stop(true); } catch (err) {
+      logger.debug({ where: "daemon.stop.aux_server", err: String(err) }, "aux server stop failed (best-effort)");
+    }
+    try { if (mcpServer) await mcpServer.stop(); } catch (err) {
+      logger.debug({ where: "daemon.stop.mcp_server", err: String(err) }, "mcp server stop failed (best-effort)");
+    }
     // Drop any lingering SSE subscribers — the daemon owns the bus singleton
     // and a new daemon instance in the same process must start clean.
     resetBus();
@@ -500,7 +754,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
         { startup_duration_ms: Date.now() - startedAtMs },
         "daemon is ready — all workers completed first tick",
       );
-    } catch { /* swallow — emission failure should not crash boot */ }
+    } catch (err) {
+      // emission failure should not crash boot — log at debug only
+      logger.debug({ where: "daemon.setOnReady.emit", err: String(err) }, "could not emit daemon_ready");
+    }
   });
 
   // 1. Bind the FastMCP HTTP-streaming transport on the primary port.
@@ -526,7 +783,9 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     });
   } catch (err) {
     for (const dispose of workers) dispose();
-    try { await mcpServer.stop(); } catch { /* swallow */ }
+    try { await mcpServer.stop(); } catch (stopErr) {
+      logger.debug({ where: "daemon.boot.aux_bind_recovery", err: String(stopErr) }, "mcp stop during aux-bind failure");
+    }
     closeDb(stateDbPath);
     throw new Error(`failed to bind aux port ${auxPort}: ${(err as Error).message}`);
   }
@@ -631,8 +890,13 @@ const routeAux = async (
   const url = new URL(req.url);
 
   if (url.pathname === "/health" && req.method === "GET") {
+    // Fail-fast surface: any worker that hasn't ticked in 3× its declared
+    // interval shows up as "stuck". HTTP status stays 200 so liveness probes
+    // don't restart the process — operators reading the body see the
+    // degraded state directly.
+    const stuck = stuckWorkers();
     return Response.json({
-      status: "ok",
+      status: stuck.length === 0 ? "ok" : "degraded",
       pid: process.pid,
       uptime_ms: Date.now() - startedAtMs,
       db_path: stateDbPath,
@@ -640,6 +904,7 @@ const routeAux = async (
       mcp_port: mcpPort,
       aux_port: auxPort,
       mcp_transport: "fastmcp:httpStream",
+      stuck_workers: stuck,
     });
   }
 

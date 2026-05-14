@@ -88,6 +88,10 @@ describe("startDaemon — boot + health + shutdown", () => {
     expect(body.mcp_port).toBe(handle.port);
     expect(body.aux_port).toBe(handle.auxPort);
     expect(body.mcp_transport).toBe("fastmcp:httpStream");
+    // Robustness: /health now carries a stuck_workers array. On a fresh
+    // daemon every worker just ticked, so the array is empty.
+    expect(Array.isArray(body.stuck_workers)).toBe(true);
+    expect((body.stuck_workers as unknown[]).length).toBe(0);
   });
 
   test("stopDaemon emits daemon_shutdown, removes the lockfile, closes both ports", async () => {

@@ -65,9 +65,11 @@ export type UvRuntimeObservation = {
 const RESULT_PREFIX = "@@RESULT@@ ";
 const IRREVERSIBLE_PREFIX = "@@IRREVERSIBLE@@ ";
 const STDERR_TAIL_BYTES = 1024;
-// Per §5.5: SIGKILL at wall_ms × 1.5 (Python unwinding is slower than bun).
-const HARD_KILL_MULTIPLIER = 1.5;
-const KILL_GRACE_MS = 500;
+/** Robustness: SIGKILL fires this many ms AFTER SIGTERM if the subprocess
+ *  has not exited. Python unwinding is slower than bun, so we keep a 2s
+ *  grace by default but allow operator override via
+ *  ACC2_UV_SIGKILL_ESCALATION_MS (e.g. 3000 for slower interpreters). */
+const SIGTERM_SIGKILL_ESCALATION_MS = 2_000;
 
 /** See runtimes/bun.ts for the convention — same parser, same semantics. */
 const parseIrreversibleLines = (stdout: string): Array<{ kind: string; description: string }> => {
@@ -400,17 +402,30 @@ export const runUvArtifact = async (
       } as JsonValue,
     });
 
+    // SIGTERM at wall_ms; SIGKILL escalation 2s later (independent of wall_ms).
+    const envEsc = Number(process.env.ACC2_UV_SIGKILL_ESCALATION_MS ?? "");
+    const escMs = Number.isFinite(envEsc) && envEsc > 0 ? envEsc : SIGTERM_SIGKILL_ESCALATION_MS;
     softTimer = setTimeout(() => {
       softFired = true;
-      try { proc?.kill("SIGTERM"); } catch { /* already exited */ }
+      try { proc?.kill("SIGTERM"); } catch (killErr) { void killErr; }
+      hardTimer = setTimeout(() => {
+        if (proc && proc.exitCode === null) {
+          hardFired = true;
+          try { proc.kill("SIGKILL"); } catch (killErr) { void killErr; }
+          inv.emit?.({
+            kind: "runtime_subprocess_killed",
+            substrate_origin: "substrate_auto",
+            action_artifact_id: inv.artifactId,
+            payload: {
+              runtime: "uv",
+              reason: "sigterm_did_not_drain",
+              escalation_ms: escMs,
+              wall_ms: wallMs,
+            } as JsonValue,
+          });
+        }
+      }, escMs);
     }, Math.max(1, wallMs));
-
-    hardTimer = setTimeout(() => {
-      if (proc && proc.exitCode === null) {
-        hardFired = true;
-        try { proc.kill("SIGKILL"); } catch { /* already exited */ }
-      }
-    }, Math.max(1, Math.floor(wallMs * HARD_KILL_MULTIPLIER) + KILL_GRACE_MS));
 
     const [stdoutText, stderrText, exitCode] = await Promise.all([
       readStream(proc.stdout),

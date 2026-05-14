@@ -14,6 +14,7 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
+import { logger } from "./logger";
 import { recordExternalPush } from "./metrics";
 
 const DEFAULT_RATE_LIMIT = 60; // requests per minute per source
@@ -180,7 +181,13 @@ export const handleExternalPush = async (
       data: payload,
     },
   });
-  try { recordExternalPush(source); } catch { /* swallow */ }
+  try {
+    recordExternalPush(source);
+  } catch (err) {
+    // Metrics are best-effort. The event is already on the substrate; a
+    // metrics failure must not turn a successful push into a 5xx.
+    logger.debug({ where: "external_ingress.metrics", source, err: String(err) }, "metrics push failed");
+  }
 
   return Response.json({ ok: true, event_id: emitted.id, ts: emitted.ts }, { status: 200 });
 };

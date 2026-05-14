@@ -1372,6 +1372,11 @@ type SpawnOpts = {
    *  tool call must land for the MCP handshake to be considered successful.
    *  Default 30s. */
   mcpHandshakeWindowMs?: number;
+  /** Override the no-progress watchdog window (ms). If zero `bridge_frame_received`
+   *  frames arrive within this window the bridge SIGTERMs the subprocess and
+   *  emits a `bridge_stuck` event. Default 90s; env override
+   *  `ACC2_BRIDGE_STUCK_THRESHOLD_MS`. */
+  stuckThresholdMs?: number;
 };
 
 // `openai/gpt-5.5` is the v2 canonical reasoner per owner directive (post Batch 3).
@@ -1382,6 +1387,14 @@ type SpawnOpts = {
 const DEFAULT_OPENCODE_MODEL = "openai/gpt-5.5";
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MCP_HANDSHAKE_WINDOW_MS = 30_000;
+
+/** No-progress watchdog — when the opencode subprocess emits zero
+ *  `bridge_frame_received`-class events for this long, the bridge kills it
+ *  without waiting for the overall timeout. The default (90s) is roomy
+ *  enough for slow models / cold caches while still catching genuine wedges
+ *  long before the 600s harness timeout. Override via
+ *  `ACC2_BRIDGE_STUCK_THRESHOLD_MS`. */
+const DEFAULT_BRIDGE_STUCK_THRESHOLD_MS = 90_000;
 
 /** Canonical name for v2's MCP server in the materialized opencode config.
  *  Stable across dispatches so the brain's prompts can reference it by name
@@ -1503,6 +1516,12 @@ const spawnRealOpencode = async (
   const envHandshake = Number(process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS ?? "");
   const handshakeWindowMs = spawnOpts.mcpHandshakeWindowMs
     ?? (Number.isFinite(envHandshake) && envHandshake > 0 ? envHandshake : DEFAULT_MCP_HANDSHAKE_WINDOW_MS);
+  // No-progress watchdog: orthogonal to the overall timeout. Fires when the
+  // subprocess goes silent (zero bridge_frame_received emissions) for
+  // stuckThresholdMs.
+  const envStuck = Number(process.env.ACC2_BRIDGE_STUCK_THRESHOLD_MS ?? "");
+  const stuckThresholdMs = spawnOpts.stuckThresholdMs
+    ?? (Number.isFinite(envStuck) && envStuck > 0 ? envStuck : DEFAULT_BRIDGE_STUCK_THRESHOLD_MS);
 
   emitEvent(db, {
     kind: "bridge_invoked",
@@ -1625,8 +1644,53 @@ const spawnRealOpencode = async (
   const mcpHandshakeWatchdog = setTimeout(() => {
     if (mcpHandshakeOk) return;
     mcpHandshakeTimedOut = true;
-    try { proc.kill("SIGTERM"); } catch { /* swallow */ }
+    try { proc.kill("SIGTERM"); } catch (err) {
+      // already exited — log at debug only
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      void err;
+    }
   }, handshakeWindowMs);
+
+  // ── No-progress watchdog (robustness, fail-fast) ──
+  // Mirrors the harness's --task validation finding: an opencode subprocess
+  // that wedges produces no further frames; the operator waits out the full
+  // 600s before learning anything is wrong. This watchdog fires when zero
+  // bridge_frame_received events have been observed for stuckThresholdMs
+  // (default 90s, env ACC2_BRIDGE_STUCK_THRESHOLD_MS). On fire we SIGTERM
+  // the subprocess and emit `bridge_stuck` so operators see the wedge
+  // immediately. `lastFrameMs` advances inside consumeLine() below every
+  // time a tool_use / tool_call / tool_result is parsed.
+  const stuckStartMs = Date.now();
+  let lastFrameMs = stuckStartMs;
+  let bridgeStuckFired = false;
+  const stuckInterval = setInterval(() => {
+    if (bridgeStuckFired) return;
+    const now = Date.now();
+    const sinceLastFrame = now - lastFrameMs;
+    if (sinceLastFrame < stuckThresholdMs) return;
+    bridgeStuckFired = true;
+    const elapsedMs = now - stuckStartMs;
+    try {
+      emitEvent(db, {
+        kind: "bridge_stuck",
+        substrate_origin: "opencode",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        payload: {
+          reason: "no_frames_received",
+          elapsed_ms: elapsedMs,
+          last_frame_ms_ago: sinceLastFrame,
+          threshold_ms: stuckThresholdMs,
+        } as JsonValue,
+        invoker: "opencode",
+      });
+    } catch (err) {
+      // db may have been closed mid-flight; the SIGTERM below is the
+      // load-bearing reaction. Continue without throwing.
+      void err;
+    }
+    try { proc.kill("SIGTERM"); } catch (err) { void err; }
+  }, Math.min(5_000, Math.max(500, Math.floor(stuckThresholdMs / 4))));
 
   let stdoutBuf = "";
   let stderrBuf = "";
@@ -1695,6 +1759,9 @@ const spawnRealOpencode = async (
     const isToolEvent =
       kind === "tool_use" || kind === "tool_call" || kind === "tool_result";
     if (isToolEvent) {
+      // Bump the no-progress watchdog clock on every frame received so the
+      // bridge_stuck path only fires when the subprocess goes truly silent.
+      lastFrameMs = Date.now();
       emitEvent(db, {
         kind: "bridge_frame_received",
         substrate_origin: "opencode",
@@ -1772,12 +1839,17 @@ const spawnRealOpencode = async (
       if (done) break;
       stderrBuf += decoder.decode(value, { stream: true });
     }
-  } catch { /* swallow */ }
+  } catch (err) {
+    // stderr draining is best-effort — never throw. Keep the diagnostic so
+    // operators auditing JSONL output can see the read died vs ended.
+    stderrBuf += `\nstderr_drain_error:${(err as Error).message}`;
+  }
 
   const exitCode = await proc.exited;
   clearTimeout(sigTerm);
   clearTimeout(sigKill);
   clearTimeout(mcpHandshakeWatchdog);
+  clearInterval(stuckInterval);
   if (stdoutLogFh) {
     try { await stdoutLogFh.end(); } catch { /* swallow */ }
   }
@@ -1830,6 +1902,35 @@ const spawnRealOpencode = async (
       reason: {
         kind: "subprocess_crash",
         stderr_tail: `mcp_handshake_failed:no substrate.* tool call in ${handshakeWindowMs}ms`,
+      },
+    };
+  }
+
+  // No-progress watchdog fired during this run — surface the wedge as a
+  // bridge_failed row whose reason is `subprocess_stuck`. The bridge_stuck
+  // event was already emitted at fire time; the bridge_failed row is the
+  // taxonomy entry callers consume. This is additive to the existing
+  // bridge failure taxonomy — no reshaping (per brief).
+  if (bridgeStuckFired) {
+    cleanupConfig();
+    emitEvent(db, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        reason: "subprocess_stuck",
+        no_frames_received: true,
+        threshold_ms: stuckThresholdMs,
+        exit_code: exitCode,
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    return {
+      ok: false,
+      reason: {
+        kind: "subprocess_crash",
+        stderr_tail: `subprocess_stuck:no_frames_received in ${stuckThresholdMs}ms`,
       },
     };
   }

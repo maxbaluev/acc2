@@ -91,11 +91,15 @@ export const runIntegrityCheck = async (db: Database): Promise<IntegrityReport> 
   try {
     const e = db.query("SELECT COUNT(*) AS n FROM events").get() as { n: number } | null;
     events_count = e?.n ?? 0;
-  } catch { /* swallow */ }
+  } catch (err) {
+    logger.debug({ where: "integrity.events_count", err: String(err) }, "events count failed");
+  }
   try {
     const v = db.query("SELECT COUNT(*) AS n FROM vec_events").get() as { n: number } | null;
     embeddings_count = v?.n ?? 0;
-  } catch { /* swallow */ }
+  } catch (err) {
+    logger.debug({ where: "integrity.embeddings_count", err: String(err) }, "vec_events count failed");
+  }
 
   return {
     ok,
@@ -180,8 +184,13 @@ export const integrityWorkerTick = async (db: Database): Promise<IntegrityReport
         "integrity check FAILED — operator action required",
       );
     }
-  } catch {
-    // Emission failure must not crash the worker — the report stands.
+  } catch (err) {
+    // Emission failure must not crash the worker — the report stands. Log
+    // at warn since this is structurally important state.
+    logger.warn(
+      { where: "integrity.emit", err: (err as Error).message },
+      "integrity event emission failed — report not lost (in-memory)",
+    );
   }
   // After emit, opportunistically truncate WAL if it's grown past
   // threshold. (We do this AFTER the check emission so the audit log
@@ -224,8 +233,17 @@ export const reconcileOrphanedDispatches = (db: Database): Array<{ dispatch_even
         },
       });
       orphans.push({ dispatch_event_id: row.dispatch_event_id, task_id: row.task_id });
-    } catch {
-      // Skip on emission failure; the next boot will retry.
+    } catch (err) {
+      // Skip on emission failure; the next boot will retry. Log so the
+      // audit trail isn't entirely silent.
+      logger.warn(
+        {
+          where: "integrity.reconcile_orphan",
+          dispatch_event_id: row.dispatch_event_id,
+          err: (err as Error).message,
+        },
+        "could not emit dispatch_recovered_orphan",
+      );
     }
   }
   if (orphans.length > 0) {
