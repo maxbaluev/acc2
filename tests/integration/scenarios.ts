@@ -7,11 +7,13 @@
 //
 // The scenarios cover the §17 + §18 cutover criteria end-to-end against a
 // real daemon (real fastmcp wire, real Bun.serve aux port, real SQLite, real
-// bun-runtime artifacts). The bridge runs in mock mode for the 9 plumbing
-// scenarios — the production default is `real`, but harness.ts and the bun
-// test preload (`tests/preload.ts`) pin `ACC2_BRIDGE_MODE=mock` so no
-// opencode subprocess is spawned. The 10th scenario (scenarioRealBrainEndToEnd)
-// flips to real for its own dispatch and restores on exit.
+// bun-runtime artifacts). The bridge runs in mock mode for the 17 plumbing
+// scenarios — 9 cutover-criteria scenarios plus 8 Batch 5 universal-goal
+// pilots covering v2-design.md §10.2-10.9. The production default is `real`,
+// but harness.ts and the bun test preload (`tests/preload.ts`) pin
+// `ACC2_BRIDGE_MODE=mock` so no opencode subprocess is spawned. The 18th
+// scenario (scenarioRealBrainEndToEnd) flips to real for its own dispatch
+// and restores on exit.
 
 import type { Database } from "bun:sqlite";
 import type { DaemonHandle } from "../../runtime/daemon";
@@ -19,6 +21,15 @@ import { startDaemon, stopDaemon } from "../../runtime/daemon";
 import { openDb } from "../../substrate/db";
 import { emitEvent } from "../../runtime/events";
 import { openFixtureDCountTodos } from "../../runtime/fixtures/d_count_todos";
+import { openFixtureBusinessOutreach } from "../../runtime/fixtures/d_business_outreach";
+import { openFixtureResearchSummary } from "../../runtime/fixtures/d_research_summary";
+import { openFixtureCreativeConstraint } from "../../runtime/fixtures/d_creative_constraint";
+import { openFixtureMultiStakeholder } from "../../runtime/fixtures/d_multi_stakeholder";
+import { openFixtureHealthDecision } from "../../runtime/fixtures/d_health_decision";
+import { openFixtureEmbodiedRecipe } from "../../runtime/fixtures/d_embodied_recipe";
+import { openFixtureLongHorizonSavings } from "../../runtime/fixtures/d_long_horizon_savings";
+import { openFixtureCrisisResponse } from "../../runtime/fixtures/d_crisis_response";
+import { CRISIS_MODE, readCurrentMode } from "../../runtime/crisis_mode";
 import { schedulerTick } from "../../runtime/task_scheduler";
 import { dispatchReadyTask } from "../../runtime/task_dispatcher";
 import {
@@ -840,6 +851,284 @@ export const scenarioAmendmentSupersession = async (handle: DaemonHandle): Promi
   );
 };
 
+// ── Batch 5 universal-goal pilot scenarios (v2-design.md §10.2-10.9) ──
+//
+// Each scenario mirrors its sibling fixture under the shared daemon. The
+// substrate runs an unmodified scheduler tick against the fixture's directive,
+// the mock bridge admits its canonical action + verifier pair, the dispatcher
+// runs them, and the verifier scores residual=0. Plumbing-only — no real
+// brain — to keep the harness's <2s wall-clock budget.
+
+const assertUniversalFixtureCommits = (
+  handle: DaemonHandle,
+  directiveId: string,
+  taskId: string,
+  fixtureLabel: string,
+): void => {
+  const scored = handle.db
+    .query("SELECT residual FROM events WHERE kind = 'action_scored' AND directive_id = ?")
+    .get(directiveId) as { residual: number } | null;
+  assert(scored !== null, `${fixtureLabel}: action_scored must be emitted`);
+  assert(
+    scored!.residual === 0,
+    `${fixtureLabel}: residual must be 0 (got ${scored!.residual})`,
+  );
+
+  const committed = handle.db
+    .query("SELECT residual FROM events WHERE kind = 'task_committed' AND directive_id = ?")
+    .get(directiveId) as { residual: number } | null;
+  assert(committed !== null, `${fixtureLabel}: task_committed must be emitted`);
+  assert(
+    committed!.residual < 0.3,
+    `${fixtureLabel}: commit residual must be < 0.3 (got ${committed!.residual})`,
+  );
+
+  const violations = handle.db
+    .query("SELECT COUNT(*) as c FROM events WHERE kind = 'dispatcher_violation' AND directive_id = ?")
+    .get(directiveId) as { c: number };
+  assert(violations.c === 0, `${fixtureLabel}: no dispatcher_violation rows`);
+
+  // Cross-check the canonical event chain — same shape as scenario 2's MVP gate.
+  const expectedKinds = [
+    "directive_opened",
+    "task_node_opened",
+    "brain_dispatched",
+    "brain_dispatch_closed",
+    "action_predicted",
+    "artifact_invoked",
+    "artifact_observed",
+    "action_scored",
+    "task_committed",
+  ];
+  for (const kind of expectedKinds) {
+    const rows = handle.db
+      .query("SELECT id FROM events WHERE kind = ? AND directive_id = ?")
+      .all(kind, directiveId) as Array<{ id: string }>;
+    assert(rows.length >= 1, `${fixtureLabel}: expected ${kind} event`);
+  }
+
+  // No refines edges — these fixtures all commit in one cycle.
+  const refines = handle.db
+    .query("SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND directive_id = ?")
+    .all(directiveId) as Array<{ payload: string }>;
+  for (const r of refines) {
+    const p = JSON.parse(r.payload) as Record<string, unknown>;
+    assert(
+      p.kind !== "refines",
+      `${fixtureLabel}: unexpected refines edge: ${r.payload}`,
+    );
+  }
+};
+
+export const scenarioBusinessOutreach = async (handle: DaemonHandle): Promise<void> => {
+  const { directiveId, taskId } = await openFixtureBusinessOutreach(handle.db);
+  const tick = await schedulerTick(handle.db, { directiveId, maxConcurrent: 1 });
+  assert(tick.dispatched.includes(taskId), "scheduler must dispatch the outreach root task");
+  assertUniversalFixtureCommits(handle, directiveId, taskId, "business_outreach");
+
+  // The action's observation envelope must include a written file_path that
+  // exists on disk and a body containing the recipient name. This is the §10.2
+  // "compose_emails leaf" assertion the design's verification surface calls for.
+  const scored = handle.db
+    .query("SELECT payload FROM events WHERE kind = 'action_scored' AND directive_id = ?")
+    .get(directiveId) as { payload: string };
+  const payload = JSON.parse(scored.payload) as Record<string, unknown>;
+  const actionResult = payload.action_result as { result: { recipient: string; file_path: string; body: string } } | null;
+  assert(actionResult !== null, "business_outreach: action_result must be set");
+  assert(
+    typeof actionResult!.result.file_path === "string" && existsSync(actionResult!.result.file_path),
+    `business_outreach: tempfile must exist on disk (path=${actionResult!.result.file_path})`,
+  );
+  assert(
+    actionResult!.result.body.includes(actionResult!.result.recipient),
+    "business_outreach: email body must include the recipient name",
+  );
+};
+
+export const scenarioResearchSummary = async (handle: DaemonHandle): Promise<void> => {
+  const { directiveId, taskId } = await openFixtureResearchSummary(handle.db);
+  const tick = await schedulerTick(handle.db, { directiveId, maxConcurrent: 1 });
+  assert(tick.dispatched.includes(taskId), "scheduler must dispatch the research-summary task");
+  assertUniversalFixtureCommits(handle, directiveId, taskId, "research_summary");
+
+  // Verify the summary string itself ended up legible: present in the action
+  // result envelope, between 40 and 1200 chars, and every keyword present.
+  const scored = handle.db
+    .query("SELECT payload FROM events WHERE kind = 'action_scored' AND directive_id = ?")
+    .get(directiveId) as { payload: string };
+  const payload = JSON.parse(scored.payload) as Record<string, unknown>;
+  const actionResult = payload.action_result as {
+    result: { summary: string; keywords: string[] };
+  } | null;
+  assert(actionResult !== null, "research_summary: action_result must be set");
+  assert(
+    actionResult!.result.summary.length >= 40 && actionResult!.result.summary.length <= 1200,
+    `research_summary: summary length must be in [40, 1200] (got ${actionResult!.result.summary.length})`,
+  );
+  for (const kw of actionResult!.result.keywords) {
+    assert(
+      actionResult!.result.summary.toLowerCase().includes(kw.toLowerCase()),
+      `research_summary: summary must reference keyword "${kw}"`,
+    );
+  }
+};
+
+export const scenarioCreativeConstraint = async (handle: DaemonHandle): Promise<void> => {
+  const { directiveId, taskId } = await openFixtureCreativeConstraint(handle.db);
+  const tick = await schedulerTick(handle.db, { directiveId, maxConcurrent: 1 });
+  assert(tick.dispatched.includes(taskId), "scheduler must dispatch the haiku task");
+  assertUniversalFixtureCommits(handle, directiveId, taskId, "creative_constraint");
+
+  const scored = handle.db
+    .query("SELECT payload FROM events WHERE kind = 'action_scored' AND directive_id = ?")
+    .get(directiveId) as { payload: string };
+  const payload = JSON.parse(scored.payload) as Record<string, unknown>;
+  const actionResult = payload.action_result as { result: { lines: string[] } } | null;
+  assert(actionResult !== null, "creative_constraint: action_result must be set");
+  assert(
+    Array.isArray(actionResult!.result.lines) && actionResult!.result.lines.length === 3,
+    `creative_constraint: must produce three lines (got ${actionResult!.result.lines.length})`,
+  );
+};
+
+export const scenarioMultiStakeholder = async (handle: DaemonHandle): Promise<void> => {
+  const { directiveId, taskId } = await openFixtureMultiStakeholder(handle.db);
+  const tick = await schedulerTick(handle.db, { directiveId, maxConcurrent: 1 });
+  assert(tick.dispatched.includes(taskId), "scheduler must dispatch the stakeholder task");
+  assertUniversalFixtureCommits(handle, directiveId, taskId, "multi_stakeholder");
+
+  const scored = handle.db
+    .query("SELECT payload FROM events WHERE kind = 'action_scored' AND directive_id = ?")
+    .get(directiveId) as { payload: string };
+  const payload = JSON.parse(scored.payload) as Record<string, unknown>;
+  const actionResult = payload.action_result as {
+    result: {
+      chosen: number | null;
+      feasible: boolean;
+      stakeholders: Array<{ low: number; high: number }>;
+    };
+  } | null;
+  assert(actionResult !== null, "multi_stakeholder: action_result must be set");
+  assert(actionResult!.result.feasible === true, "multi_stakeholder: intersection must be feasible");
+  assert(typeof actionResult!.result.chosen === "number", "multi_stakeholder: chosen must be a number");
+  const v = actionResult!.result.chosen as number;
+  for (const s of actionResult!.result.stakeholders) {
+    assert(
+      v >= s.low && v <= s.high,
+      `multi_stakeholder: chosen ${v} must lie in [${s.low}, ${s.high}]`,
+    );
+  }
+};
+
+export const scenarioHealthDecision = async (handle: DaemonHandle): Promise<void> => {
+  const { directiveId, taskId } = await openFixtureHealthDecision(handle.db);
+  const tick = await schedulerTick(handle.db, { directiveId, maxConcurrent: 1 });
+  assert(tick.dispatched.includes(taskId), "scheduler must dispatch the health-decision task");
+  assertUniversalFixtureCommits(handle, directiveId, taskId, "health_decision");
+
+  const scored = handle.db
+    .query("SELECT payload FROM events WHERE kind = 'action_scored' AND directive_id = ?")
+    .get(directiveId) as { payload: string };
+  const payload = JSON.parse(scored.payload) as Record<string, unknown>;
+  const actionResult = payload.action_result as {
+    result: { recommendation: string; citation_knowledge_id: string; safety_note: string };
+  } | null;
+  assert(actionResult !== null, "health_decision: action_result must be set");
+  assert(actionResult!.result.recommendation.length > 0, "health_decision: recommendation must be non-empty");
+  assert(
+    actionResult!.result.citation_knowledge_id.length > 0,
+    "health_decision: citation_knowledge_id must be non-empty (knowledge anchor)",
+  );
+  assert(
+    actionResult!.result.safety_note.toLowerCase().includes("consult a clinician"),
+    "health_decision: safety_note must include 'consult a clinician'",
+  );
+};
+
+export const scenarioEmbodiedRecipe = async (handle: DaemonHandle): Promise<void> => {
+  const { directiveId, taskId } = await openFixtureEmbodiedRecipe(handle.db);
+  const tick = await schedulerTick(handle.db, { directiveId, maxConcurrent: 1 });
+  assert(tick.dispatched.includes(taskId), "scheduler must dispatch the recipe task");
+  assertUniversalFixtureCommits(handle, directiveId, taskId, "embodied_recipe");
+
+  const scored = handle.db
+    .query("SELECT payload FROM events WHERE kind = 'action_scored' AND directive_id = ?")
+    .get(directiveId) as { payload: string };
+  const payload = JSON.parse(scored.payload) as Record<string, unknown>;
+  const actionResult = payload.action_result as {
+    result: { ingredients: string[]; steps: string[] };
+  } | null;
+  assert(actionResult !== null, "embodied_recipe: action_result must be set");
+  assert(actionResult!.result.steps.length > 0, "embodied_recipe: steps must be non-empty");
+  const lowerIngs = actionResult!.result.ingredients.map((s) => s.toLowerCase());
+  for (const step of actionResult!.result.steps) {
+    assert(step.trim().length > 0, "embodied_recipe: each step must be non-empty");
+    const hit = lowerIngs.some((ing) => step.toLowerCase().includes(ing));
+    assert(hit, `embodied_recipe: step "${step}" must reference at least one ingredient`);
+  }
+};
+
+export const scenarioLongHorizonSavings = async (handle: DaemonHandle): Promise<void> => {
+  const { directiveId, taskId } = await openFixtureLongHorizonSavings(handle.db);
+  const tick = await schedulerTick(handle.db, { directiveId, maxConcurrent: 1 });
+  assert(tick.dispatched.includes(taskId), "scheduler must dispatch the savings task");
+  assertUniversalFixtureCommits(handle, directiveId, taskId, "long_horizon_savings");
+
+  const scored = handle.db
+    .query("SELECT payload FROM events WHERE kind = 'action_scored' AND directive_id = ?")
+    .get(directiveId) as { payload: string };
+  const payload = JSON.parse(scored.payload) as Record<string, unknown>;
+  const actionResult = payload.action_result as {
+    result: { target: number; months: number; monthly: number; total: number };
+  } | null;
+  assert(actionResult !== null, "long_horizon_savings: action_result must be set");
+  assert(actionResult!.result.monthly > 0, "long_horizon_savings: monthly must be positive");
+  assert(
+    actionResult!.result.total >= actionResult!.result.target,
+    `long_horizon_savings: total (${actionResult!.result.total}) must cover target (${actionResult!.result.target})`,
+  );
+  assert(
+    actionResult!.result.total <= actionResult!.result.target * 1.05,
+    `long_horizon_savings: total must stay within +5% of target`,
+  );
+};
+
+export const scenarioCrisisResponse = async (handle: DaemonHandle): Promise<void> => {
+  const { directiveId, taskId } = await openFixtureCrisisResponse(handle.db);
+
+  // crisis_mode_engaged fired alongside directive_opened.
+  const engaged = handle.db
+    .query("SELECT id FROM events WHERE kind = 'crisis_mode_engaged' AND directive_id = ?")
+    .all(directiveId) as Array<{ id: string }>;
+  assert(engaged.length >= 1, "crisis_response: crisis_mode_engaged must fire");
+
+  // Scheduler concurrency cap rises to CRISIS_MODE.max_concurrent (20).
+  const mode = readCurrentMode(handle.db, directiveId);
+  assert(
+    mode.max_concurrent === CRISIS_MODE.max_concurrent,
+    `crisis_response: max_concurrent must be ${CRISIS_MODE.max_concurrent} (got ${mode.max_concurrent})`,
+  );
+  assert(mode.latm_authoring_suspended === true, "crisis_response: LATM authoring must be suspended");
+
+  const tick = await schedulerTick(handle.db, { directiveId, maxConcurrent: 1 });
+  assert(tick.dispatched.includes(taskId), "scheduler must dispatch the crisis task");
+  assertUniversalFixtureCommits(handle, directiveId, taskId, "crisis_response");
+
+  const scored = handle.db
+    .query("SELECT payload FROM events WHERE kind = 'action_scored' AND directive_id = ?")
+    .get(directiveId) as { payload: string };
+  const payload = JSON.parse(scored.payload) as Record<string, unknown>;
+  const actionResult = payload.action_result as {
+    result: { triage_steps: string[]; urgency: string };
+  } | null;
+  assert(actionResult !== null, "crisis_response: action_result must be set");
+  assert(
+    actionResult!.result.triage_steps.length >= 3,
+    `crisis_response: triage_steps must have at least 3 (got ${actionResult!.result.triage_steps.length})`,
+  );
+  assert(actionResult!.result.urgency === "crisis", "crisis_response: urgency must be 'crisis'");
+};
+
 // ── Scenario 10 — real_brain_end_to_end (opt-in opencode dispatch) ─
 
 /**
@@ -887,7 +1176,7 @@ export const realBrainPreflight = (_argv: string[]): string | null => {
  * actionable detail.
  */
 export const scenarioRealBrainEndToEnd = async (): Promise<void> => {
-  // The harness pins ACC2_BRIDGE_MODE=mock for the 9 plumbing scenarios.
+  // The harness pins ACC2_BRIDGE_MODE=mock for the 17 plumbing scenarios.
   // This scenario flips to real for its own dispatch, then restores.
   const originalMode = process.env.ACC2_BRIDGE_MODE;
   process.env.ACC2_BRIDGE_MODE = "real";

@@ -4,11 +4,13 @@
 //
 // Two modes:
 //
-// 1. Scenario gate (default). Boots an ephemeral daemon and runs the 9
-//    plumbing scenarios under ACC2_BRIDGE_MODE=mock (~1.1s, hermetic).
-//    `--include-real` adds the 10th canned real-brain scenario; `--real-only`
-//    runs only that one. Real-brain runs are opt-in because each burns
-//    ~2 min wall-clock + opencode tokens.
+// 1. Scenario gate (default). Boots an ephemeral daemon and runs the 17
+//    plumbing scenarios under ACC2_BRIDGE_MODE=mock — the 9 §17/§18 cutover
+//    scenarios plus 8 Batch 5 universal-goal pilots covering v2-design.md
+//    §10.2-10.9 (each hermetic, sub-second). `--include-real` adds the 18th
+//    canned real-brain scenario; `--real-only` runs only that one.
+//    Real-brain runs are opt-in because each burns ~2 min wall-clock +
+//    opencode tokens.
 //
 // 2. Ad-hoc task (`--task "<owner words>"`). Boots an ephemeral daemon,
 //    flips ACC2_BRIDGE_MODE=real, dispatches the operator's directive
@@ -19,8 +21,8 @@
 //
 // Run:
 //   cd /home/maxbaluev/bos2/system/acc2
-//   bun tests/integration/harness.ts                              # 9 plumbing
-//   bun tests/integration/harness.ts --include-real               # 9+1
+//   bun tests/integration/harness.ts                              # 17 plumbing
+//   bun tests/integration/harness.ts --include-real               # 17+1
 //   bun tests/integration/harness.ts --real-only                  # canned real-brain
 //   bun tests/integration/harness.ts --task "<owner words>"       # ad-hoc real-brain
 //
@@ -49,15 +51,23 @@ import {
   realBrainPreflight,
   scenarioAdHocTask,
   scenarioAmendmentSupersession,
+  scenarioBusinessOutreach,
+  scenarioCreativeConstraint,
   scenarioCreditChainClosure,
+  scenarioCrisisResponse,
   scenarioCycleOneEnforcement,
   scenarioDaemonLifecycle,
   scenarioDistributionMerger,
+  scenarioEmbodiedRecipe,
   scenarioExternalPushRetrievable,
   scenarioFatherOneShot,
+  scenarioHealthDecision,
+  scenarioLongHorizonSavings,
+  scenarioMultiStakeholder,
   scenarioMvpFixture,
   scenarioRealBrainEndToEnd,
   scenarioRefinementEdge,
+  scenarioResearchSummary,
 } from "./scenarios";
 import { stopDaemon } from "../../runtime/daemon";
 
@@ -132,6 +142,57 @@ const PLUMBING_SCENARIOS: ScenarioEntry[] = [
     label: "amendment_supersession",
     kind: "shared_daemon",
     run: async (h) => { await scenarioAmendmentSupersession(h!); },
+  },
+  // Batch 5 universal-goal pilots (v2-design.md §10.2-10.9) — eight additional
+  // plumbing scenarios proving the substrate handles each canonical goal shape
+  // under the mock bridge.
+  {
+    id: "business_outreach",
+    label: "business_outreach (§10.2)",
+    kind: "shared_daemon",
+    run: async (h) => { await scenarioBusinessOutreach(h!); },
+  },
+  {
+    id: "research_summary",
+    label: "research_summary (§10.3)",
+    kind: "shared_daemon",
+    run: async (h) => { await scenarioResearchSummary(h!); },
+  },
+  {
+    id: "creative_constraint",
+    label: "creative_constraint (§10.4)",
+    kind: "shared_daemon",
+    run: async (h) => { await scenarioCreativeConstraint(h!); },
+  },
+  {
+    id: "multi_stakeholder",
+    label: "multi_stakeholder (§10.5)",
+    kind: "shared_daemon",
+    run: async (h) => { await scenarioMultiStakeholder(h!); },
+  },
+  {
+    id: "health_decision",
+    label: "health_decision (§10.6)",
+    kind: "shared_daemon",
+    run: async (h) => { await scenarioHealthDecision(h!); },
+  },
+  {
+    id: "embodied_recipe",
+    label: "embodied_recipe (§10.7)",
+    kind: "shared_daemon",
+    run: async (h) => { await scenarioEmbodiedRecipe(h!); },
+  },
+  {
+    id: "long_horizon_savings",
+    label: "long_horizon_savings (§10.8)",
+    kind: "shared_daemon",
+    run: async (h) => { await scenarioLongHorizonSavings(h!); },
+  },
+  {
+    id: "crisis_response",
+    label: "crisis_response (§10.9)",
+    kind: "shared_daemon",
+    run: async (h) => { await scenarioCrisisResponse(h!); },
   },
 ];
 
@@ -210,12 +271,12 @@ export const runHarness = async (
   // bridge calls during boot see mock). The real-brain scenario flips to
   // `real` for its own dispatch and restores on exit. The production
   // default for bridge.ts is `real` — the harness explicitly overrides
-  // because the 9 plumbing scenarios use canned fixture markers.
+  // because the 17 plumbing scenarios use canned fixture markers.
   const originalBridgeMode = process.env.ACC2_BRIDGE_MODE;
   process.env.ACC2_BRIDGE_MODE = "mock";
 
   // Real-brain is OPT-IN: only run it when --include-real or --real-only
-  // was passed. Bare invocation runs the 9 plumbing scenarios only.
+  // was passed. Bare invocation runs the 17 plumbing scenarios only.
   const runPlumbing = !opts.realOnly;
   const runReal = opts.realOnly || opts.includeReal;
 
@@ -309,7 +370,7 @@ export const runHarness = async (
     if (skipped === 0) {
       process.stdout.write(
         `${passed}/${total} scenarios passed in ${formatSeconds(elapsedTotal)}` +
-        (total >= 10 ? `  (9 plumbing + 1 real-brain)\n` : "\n"),
+        (total >= 18 ? `  (17 plumbing + 1 real-brain)\n` : "\n"),
       );
       if (results.some((r) => r.id === "real_brain_end_to_end" && r.status === "pass")) {
         process.stdout.write("[ok] acc2 is fully workable end-to-end against a live LLM brain\n");

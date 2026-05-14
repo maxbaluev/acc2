@@ -323,9 +323,13 @@ export const dispatchReadyTask = async (
     const verifierArtifact = getArtifact(db, actionPredicted.verifier_artifact_id);
     if (actionArtifact && verifierArtifact && actionArtifact.declaredSandbox.runtime === "bun" && verifierArtifact.declaredSandbox.runtime === "bun") {
       // Run the action. Inputs come from the predicted event's payload
-      // (target_path etc).
+      // (target_path etc). Batch 5: we spread the predicted payload into the
+      // action inputs envelope so universal-goal fixtures (recipe ingredients,
+      // savings target, stakeholder utility windows, …) can pass arbitrary
+      // parameters through ACC2_INPUTS alongside the canonical target_path.
       const predictedPayload = actionPredicted.payload as Record<string, unknown>;
       const actionInputs: JsonValue = {
+        ...(predictedPayload as Record<string, unknown>),
         target_path: ((predictedPayload as Record<string, unknown>).target_path as string) ?? deps.fixtureTargetPath ?? ".",
       } as JsonValue;
 
