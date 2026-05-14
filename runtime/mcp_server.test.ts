@@ -258,4 +258,68 @@ describe("fastmcp substrate tools — stdio transport", () => {
     }
     expect(threw).toBe(true);
   });
+
+  test("runtime.scheduler_tick returns the SchedulerTick shape on an empty substrate", async () => {
+    const res = (await h!.client.callTool({
+      name: "runtime.scheduler_tick",
+      arguments: { max_concurrent: 5 },
+    })) as ToolCallResponse;
+    const env = parseEnvelope(res);
+    expect(env.ok).toBe(true);
+    expect(Array.isArray(env.result.dispatched)).toBe(true);
+    expect(Array.isArray(env.result.in_flight)).toBe(true);
+    expect(Array.isArray(env.result.skipped_concurrency_cap)).toBe(true);
+    expect(Array.isArray(env.result.skipped_recipe)).toBe(true);
+    expect(Array.isArray(env.result.skipped_inline)).toBe(true);
+  });
+
+  test("substrate.amend_directive opens new tasks and supersedes named ones", async () => {
+    // Seed a directive + a task via substrate.emit so the amendment has
+    // something to supersede / a root to attach new tasks to.
+    const dirRes = (await h!.client.callTool({
+      name: "substrate.emit",
+      arguments: {
+        kind: "directive_opened",
+        directive_id: "d_amend_test",
+        task_id: "d_amend_test",
+        payload: { directive_text: "original goal", lifecycle: "finite" },
+      },
+    })) as ToolCallResponse;
+    expect(parseEnvelope(dirRes).ok).toBe(true);
+
+    await h!.client.callTool({
+      name: "substrate.emit",
+      arguments: {
+        kind: "task_node_opened",
+        directive_id: "d_amend_test",
+        task_id: "t_root_amend",
+        payload: { goal: "root", lifecycle: "finite" },
+      },
+    });
+    await h!.client.callTool({
+      name: "substrate.emit",
+      arguments: {
+        kind: "task_node_opened",
+        directive_id: "d_amend_test",
+        task_id: "t_will_be_superseded",
+        payload: { goal: "will-be-superseded", lifecycle: "finite" },
+      },
+    });
+
+    const amend = (await h!.client.callTool({
+      name: "substrate.amend_directive",
+      arguments: {
+        original_directive_id: "d_amend_test",
+        amendment_text: "narrow scope",
+        superseded_tasks: ["t_will_be_superseded"],
+        new_task_goals: ["alpha", "beta"],
+        rationale: "owner reframed",
+      },
+    })) as ToolCallResponse;
+    const env = parseEnvelope(amend);
+    expect(env.ok).toBe(true);
+    expect(env.result.superseded_tasks_closed).toContain("t_will_be_superseded");
+    expect(env.result.new_tasks_opened.length).toBe(2);
+    expect(env.result.already_applied).toBe(false);
+  });
 });

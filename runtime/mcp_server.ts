@@ -34,6 +34,8 @@ import { admitArtifact } from "./artifact_admission";
 import { dispatchReadyTask } from "./task_dispatcher";
 import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { readDagForDirective } from "./task_topology";
+import { schedulerTick } from "./task_scheduler";
+import { emitAndApplyAmendment } from "./amendment_handler";
 
 export type McpContext = {
   db: Database;
@@ -59,7 +61,9 @@ export const McpMethods = [
   "substrate.credit",
   "substrate.admit_artifact",
   "substrate.open_fixture",
+  "substrate.amend_directive",
   "runtime.dispatch_ready_task",
+  "runtime.scheduler_tick",
 ] as const;
 export type McpMethodName = (typeof McpMethods)[number];
 
@@ -171,6 +175,22 @@ const OpenFixtureSchema = z.object({
 const DispatchReadyTaskSchema = z.object({
   task_id: z.string(),
   fixture_target_path: z.string().optional(),
+});
+
+const SchedulerTickSchema = z.object({
+  max_concurrent: z.number().optional(),
+  directive_id: z.string().optional(),
+  fixture_target_path: z.string().optional(),
+});
+
+const AmendDirectiveSchema = z.object({
+  original_directive_id: z.string(),
+  amendment_text: z.string(),
+  superseded_tasks: z.array(z.string()).optional(),
+  superseded_predictions: z.array(z.string()).optional(),
+  new_task_goals: z.array(z.string()).optional(),
+  rationale: z.string().optional(),
+  amended_by: z.enum(["owner", "claude_root", "opencode"]).optional(),
 });
 
 // ── Handlers (pure functions over (ctx, args) → McpResult) ──────────
@@ -412,6 +432,52 @@ const handleOpenFixture = async (
   };
 };
 
+const handleSchedulerTick = async (
+  ctx: McpContext,
+  args: z.infer<typeof SchedulerTickSchema>,
+): Promise<McpResult> => {
+  const tick = await schedulerTick(ctx.db, {
+    maxConcurrent: args.max_concurrent,
+    directiveId: args.directive_id,
+    fixtureTargetPath: args.fixture_target_path,
+  });
+  return {
+    ok: true,
+    result: {
+      dispatched: tick.dispatched,
+      in_flight: tick.in_flight,
+      skipped_concurrency_cap: tick.skipped_concurrency_cap,
+      skipped_recipe: tick.skipped_recipe,
+      skipped_inline: tick.skipped_inline,
+    } as JsonValue,
+  };
+};
+
+const handleAmendDirective = async (
+  ctx: McpContext,
+  args: z.infer<typeof AmendDirectiveSchema>,
+): Promise<McpResult> => {
+  const summary = await emitAndApplyAmendment(ctx.db, {
+    original_directive_id: args.original_directive_id,
+    amendment_text: args.amendment_text,
+    superseded_tasks: args.superseded_tasks,
+    superseded_predictions: args.superseded_predictions,
+    new_task_goals: args.new_task_goals,
+    rationale: args.rationale,
+    amended_by: args.amended_by,
+  });
+  return {
+    ok: true,
+    result: {
+      amendment_event_id: summary.amendment_event_id,
+      superseded_tasks_closed: summary.superseded_tasks_closed,
+      superseded_predictions_marked: summary.superseded_predictions_marked,
+      new_tasks_opened: summary.new_tasks_opened,
+      already_applied: summary.already_applied,
+    } as JsonValue,
+  };
+};
+
 const handleDispatchReadyTask = async (
   ctx: McpContext,
   args: z.infer<typeof DispatchReadyTaskSchema>,
@@ -594,6 +660,26 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     execute: wrap(handleDispatchReadyTask),
   });
 
+  server.addTool({
+    name: "runtime.scheduler_tick",
+    description:
+      "Run one tick of the parallel scheduler. Picks up to max_concurrent " +
+      "ready tasks (default 5), routes by dispatch lane, returns the per-tick " +
+      "summary (dispatched / in_flight / skipped_*). Phase E.",
+    parameters: SchedulerTickSchema,
+    execute: wrap(handleSchedulerTick),
+  });
+
+  server.addTool({
+    name: "substrate.amend_directive",
+    description:
+      "Emit a directive_amended event AND immediately apply it: supersede " +
+      "the named tasks/predictions, open task_node_opened for each new_task_goals " +
+      "entry, return the amendment summary. Phase E.",
+    parameters: AmendDirectiveSchema,
+    execute: wrap(handleAmendDirective),
+  });
+
   return server;
 };
 
@@ -615,7 +701,9 @@ const HTTP_DISPATCH: Record<string, (ctx: McpContext, args: any) => McpResult | 
   "substrate.credit": handleCredit as any,
   "substrate.admit_artifact": handleAdmitArtifact as any,
   "substrate.open_fixture": handleOpenFixture as any,
+  "substrate.amend_directive": handleAmendDirective as any,
   "runtime.dispatch_ready_task": handleDispatchReadyTask as any,
+  "runtime.scheduler_tick": handleSchedulerTick as any,
 };
 
 /** Bun.serve route handler: POST /mcp/<method>. Parses JSON body, validates

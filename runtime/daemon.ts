@@ -38,6 +38,8 @@ import { newAdminToken } from "./ids";
 import { createMcpServer } from "./mcp_server";
 import { createExternalIngressState, handleExternalPush, type ExternalIngressState } from "./external_ingress";
 import type { FastMCP } from "fastmcp";
+import { applyAmendment, findUnappliedAmendments } from "./amendment_handler";
+import { schedulerLoop } from "./task_scheduler";
 
 export const DEFAULT_DAEMON_PORT = 9387;
 export const DEFAULT_AUX_PORT_OFFSET = 1;
@@ -144,6 +146,44 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   const workers: Array<() => void> = [];
   const heartbeat = setInterval(() => { /* phase F: embedder catch-up, posterior updater, … */ }, 5000);
   workers.push(() => clearInterval(heartbeat));
+
+  // Phase E: amendment worker — every 2s, drain unapplied directive_amended
+  // events. Errors are swallowed so a malformed amendment can't kill the
+  // daemon (each amendment will surface its own diagnostic events anyway).
+  const amendmentTick = setInterval(() => {
+    void (async () => {
+      try {
+        const unapplied = findUnappliedAmendments(db);
+        for (const id of unapplied) {
+          try { await applyAmendment(db, id); } catch { /* swallow per-amendment */ }
+        }
+      } catch { /* swallow */ }
+    })();
+  }, 2000);
+  workers.push(() => clearInterval(amendmentTick));
+
+  // Phase E: optional autoscheduler. Default off — tests don't want the
+  // scheduler firing dispatches. Enable with ACC2_AUTOSCHEDULER=1.
+  let schedulerAbort: AbortController | null = null;
+  if (process.env.ACC2_AUTOSCHEDULER === "1") {
+    schedulerAbort = new AbortController();
+    void (async () => {
+      try {
+        // schedulerLoop returns on quiescence; we keep restarting it on a
+        // long poll interval so new directives wake the loop without busy
+        // spin.
+        while (!schedulerAbort?.signal.aborted) {
+          await schedulerLoop(db, {
+            pollIntervalMs: 1000,
+            maxConcurrent: 5,
+            abort: schedulerAbort?.signal,
+          });
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      } catch { /* swallow */ }
+    })();
+    workers.push(() => schedulerAbort?.abort());
+  }
 
   // Declare `stop` BEFORE Bun.serve so the fetch closure can capture it; the
   // handles are filled in after binding succeeds.

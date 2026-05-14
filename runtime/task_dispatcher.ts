@@ -28,9 +28,12 @@ import { composePrompt } from "./prompt_composer";
 import { decideDispatch } from "./dispatch_decider";
 import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge";
 import type { TaskNode } from "./task_topology";
+import { refinementDepth } from "./task_topology";
 import { getArtifact, applyResidualOutcome } from "./artifact_store";
 import { runBunArtifact } from "./runtimes/bun";
 import { nowIso } from "./ids";
+
+const REFINEMENT_DEPTH_CAP = 5;
 
 export type DispatchResult = {
   dispatch_id: string;
@@ -351,8 +354,60 @@ export const dispatchReadyTask = async (
               verifier_artifact_id: verifierArtifact.id,
             } as JsonValue,
           });
+        } else {
+          // High-residual path — emit a refinement edge + new task_node_opened
+          // for the refinement child, OR cap-fail if we've exhausted depth.
+          const depth = refinementDepth(db, task.id);
+          if (depth >= REFINEMENT_DEPTH_CAP) {
+            emitEvent(db, {
+              kind: "task_failed",
+              substrate_origin: "substrate_auto",
+              directive_id: task.directive_id,
+              task_id: task.id,
+              outcome: "failed",
+              residual,
+              failure_kind: "refinement_depth_exceeded",
+              payload: {
+                dispatch_id: dispatchId,
+                refinement_depth: depth,
+                cap: REFINEMENT_DEPTH_CAP,
+                action_artifact_id: actionArtifact.id,
+                verifier_artifact_id: verifierArtifact.id,
+              } as JsonValue,
+            });
+          } else {
+            const refinedTaskId = newId();
+            const refinementHint =
+              `refine: previous attempt returned residual ${residual.toFixed(2)} on goal "${task.goal}" — ` +
+              `investigate why and adjust action/verifier (refinement depth=${depth + 1}).`;
+            emitEvent(db, {
+              kind: "task_node_opened",
+              substrate_origin: "substrate_auto",
+              directive_id: task.directive_id,
+              task_id: refinedTaskId,
+              parent_task_id: task.id,
+              payload: {
+                goal: refinementHint,
+                lifecycle: "finite",
+                urgency: "normal",
+                refines_task_id: task.id,
+                prior_residual: residual,
+              } as JsonValue,
+            });
+            emitEvent(db, {
+              kind: "task_edge_recorded",
+              substrate_origin: "substrate_auto",
+              directive_id: task.directive_id,
+              task_id: refinedTaskId,
+              parent_task_id: task.id,
+              payload: {
+                from_task: task.id,
+                to_task: refinedTaskId,
+                kind: "refines",
+              } as JsonValue,
+            });
+          }
         }
-        // Phase E adds refinement-edge emission when residual ≥ threshold.
       }
     }
   }

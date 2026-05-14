@@ -16,6 +16,7 @@
 // mid-cycle (§13.2). Depth-1 retrieval is the RLM constraint.
 
 import type { Database } from "bun:sqlite";
+import { snapshotWatchedOutputs } from "./watch_edges";
 
 export type PromptComposeOptions = {
   taskId: string;
@@ -261,7 +262,26 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // yet). Including the headers anyway so the brain sees the structural
   // surface and Phase E only has to populate the bodies.
   candidates.push({ name: "upstream_outputs", p: 2, body: "UPSTREAM OUTPUTS: (none)" });
-  candidates.push({ name: "watched_outputs", p: 2, body: "WATCHED OUTPUTS: (none)" });
+  // Watch edges (v2-design.md §9.4) — projected through declared consistency
+  // mode. Empty when no watch edges target this task.
+  const watched = snapshotWatchedOutputs(db, opts.taskId);
+  const watchedBody = watched.length === 0
+    ? "WATCHED OUTPUTS: (none)"
+    : (() => {
+        const lines: string[] = [
+          "WATCHED OUTPUTS (upstream observations under declared consistency mode):",
+        ];
+        for (const w of watched.slice(0, 12)) {
+          const payloadJson = JSON.stringify(w.payload);
+          const truncated = payloadJson.length > 240 ? `${payloadJson.slice(0, 240)}…` : payloadJson;
+          lines.push(
+            `  [${w.upstream_task_id}] mode=${w.consistency_mode} kind=${w.event_kind} @${w.observed_at}: ${truncated}`,
+          );
+        }
+        if (watched.length > 12) lines.push(`  … (${watched.length - 12} more elided)`);
+        return lines.join("\n");
+      })();
+  candidates.push({ name: "watched_outputs", p: 2, body: watchedBody });
   candidates.push({ name: "stakeholder_state", p: 3, body: "STAKEHOLDER STATE: (none)" });
   candidates.push({ name: "cross_directive_interference", p: 3, body: "CROSS-DIRECTIVE INTERFERENCE: (none)" });
 

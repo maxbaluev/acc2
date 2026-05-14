@@ -117,7 +117,7 @@ const BUN_DEFAULT_SANDBOX = (): SandboxDecl => ({
  *  canonical action + verifier artifacts and emitting action_predicted that
  *  references both. For prompts that don't carry the fixture marker we return
  *  auth_missing so future fixtures can compose against this stub. */
-export const opencodeQuery = async (
+export const opencodeQueryMock = async (
   req: BridgeRequest,
   db: Database,
 ): Promise<BridgeResult> => {
@@ -291,11 +291,334 @@ export const opencodeQuery = async (
   };
 };
 
+// ── Real opencode subprocess (Phase E §12) ────────────────────────
+//
+// Spawns the `opencode run` CLI as a subprocess and streams its JSON event
+// output. The subprocess is configured to use the daemon's MCP server (via
+// MCP_SERVER_URL env, set by the dispatcher caller). Cycle-1-only is honored
+// by SIGTERM-ing the subprocess if it ever emits a `brain_cycle_2_started`
+// or `continue_cycle_requested` event — though that enforcement is also done
+// downstream by task_dispatcher's event-stream scan, so this is defense in
+// depth.
+//
+// Watchdog: SIGTERM at req.timeout_ms (default 60s), SIGKILL at timeout × 1.5.
+//
+// Mock vs real selection lives in `opencodeQuery` below — env
+// ACC2_BRIDGE_MODE=mock (default for tests) routes to opencodeQueryMock;
+// ACC2_BRIDGE_MODE=real routes here.
+
+type SpawnOpts = {
+  timeoutMs?: number;
+  model?: string;
+  /** Inject Bun.spawn for tests. Defaults to Bun.spawn. */
+  spawnFn?: typeof Bun.spawn;
+};
+
+const DEFAULT_OPENCODE_MODEL = "openai/gpt-5-mini";
+const DEFAULT_TIMEOUT_MS = 60_000;
+
+const spawnRealOpencode = async (
+  req: BridgeRequest,
+  db: Database,
+  spawnOpts: SpawnOpts = {},
+): Promise<BridgeResult> => {
+  const model = spawnOpts.model ?? process.env.ACC2_OPENCODE_MODEL ?? DEFAULT_OPENCODE_MODEL;
+  const timeoutMs = spawnOpts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const spawn = spawnOpts.spawnFn ?? Bun.spawn;
+
+  emitEvent(db, {
+    kind: "bridge_invoked",
+    substrate_origin: "opencode",
+    directive_id: req.directiveId,
+    task_id: req.taskId,
+    payload: { prompt_chars: req.prompt.length, model, real: true } as JsonValue,
+    invoker: "opencode",
+  });
+
+  // `opencode run` expects the message as positional args; piping via stdin
+  // is not the documented path. We pass --format=json so opencode emits one
+  // JSON event per stdout line.
+  let proc: ReturnType<typeof spawn>;
+  try {
+    proc = spawn([
+      "opencode", "run",
+      "--format=json",
+      "--model", model,
+      "--dangerously-skip-permissions",
+      req.prompt,
+    ], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        MCP_SERVER_URL: process.env.V2_MCP_SERVER_URL ?? "",
+      },
+    });
+  } catch (err) {
+    const reason: BridgeFailureReason = { kind: "auth_missing" };
+    emitEvent(db, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: { reason: `spawn_failed:${(err as Error).message}` } as JsonValue,
+      invoker: "opencode",
+    });
+    return { ok: false, reason };
+  }
+
+  // Watchdog: SIGTERM at timeoutMs, SIGKILL at timeoutMs * 1.5.
+  let killed = false;
+  const sigTerm = setTimeout(() => {
+    killed = true;
+    try { proc.kill("SIGTERM"); } catch { /* swallow */ }
+  }, timeoutMs);
+  const sigKill = setTimeout(() => {
+    try { proc.kill("SIGKILL"); } catch { /* swallow */ }
+  }, Math.floor(timeoutMs * 1.5));
+
+  let stdoutBuf = "";
+  let stderrBuf = "";
+  let cycleViolation: string | null = null;
+  let finalResponse = "";
+
+  // Stream stdout line-by-line.
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  const consumeLine = (line: string): void => {
+    if (!line.trim()) return;
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      // Non-JSON line — append to final-response buffer (opencode's default
+      // text mode would do this; --format=json should never hit here, but
+      // we tolerate stray text).
+      finalResponse += line + "\n";
+      return;
+    }
+    if (!parsed || typeof parsed !== "object") return;
+    const kind = parsed.type as string | undefined;
+    // Mirror opencode's tool_call events into the substrate for audit.
+    if (kind === "tool_call" || kind === "tool_result") {
+      emitEvent(db, {
+        kind: "bridge_frame_received",
+        substrate_origin: "opencode",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        payload: parsed as JsonValue,
+        invoker: "opencode",
+      });
+    }
+    // Cycle-1-only self-iteration signals — kill the process.
+    if (kind === "brain_cycle_2_started" || kind === "continue_cycle_requested") {
+      cycleViolation = kind;
+      try { proc.kill("SIGTERM"); } catch { /* swallow */ }
+    }
+    // Final response marker
+    if (kind === "final_response" || kind === "completed") {
+      finalResponse = (parsed.text as string) ?? (parsed.final_response as string) ?? finalResponse;
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      stdoutBuf += decoder.decode(value, { stream: true });
+      let nl = stdoutBuf.indexOf("\n");
+      while (nl !== -1) {
+        const line = stdoutBuf.slice(0, nl);
+        stdoutBuf = stdoutBuf.slice(nl + 1);
+        consumeLine(line);
+        nl = stdoutBuf.indexOf("\n");
+      }
+    }
+    if (stdoutBuf.length > 0) consumeLine(stdoutBuf);
+  } catch (err) {
+    stderrBuf += `\nreader_error:${(err as Error).message}`;
+  }
+
+  // Capture any remaining stderr for diagnostics.
+  try {
+    const stderrReader = proc.stderr.getReader();
+    while (true) {
+      const { done, value } = await stderrReader.read();
+      if (done) break;
+      stderrBuf += decoder.decode(value, { stream: true });
+    }
+  } catch { /* swallow */ }
+
+  const exitCode = await proc.exited;
+  clearTimeout(sigTerm);
+  clearTimeout(sigKill);
+
+  if (cycleViolation) {
+    emitEvent(db, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: { reason: `cycle_violation:${cycleViolation}` } as JsonValue,
+      invoker: "opencode",
+    });
+    return { ok: false, reason: { kind: "subprocess_crash", stderr_tail: `cycle_violation:${cycleViolation}` } };
+  }
+
+  if (killed) {
+    emitEvent(db, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: { reason: "timeout", ms_elapsed: timeoutMs } as JsonValue,
+      invoker: "opencode",
+    });
+    return { ok: false, reason: { kind: "timeout", ms_elapsed: timeoutMs } };
+  }
+
+  if (exitCode !== 0) {
+    emitEvent(db, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: { reason: "subprocess_crash", exit_code: exitCode, stderr_tail: stderrBuf.slice(-512) } as JsonValue,
+      invoker: "opencode",
+    });
+    return { ok: false, reason: { kind: "subprocess_crash", stderr_tail: stderrBuf.slice(-512) } };
+  }
+
+  emitEvent(db, {
+    kind: "bridge_completed",
+    substrate_origin: "opencode",
+    directive_id: req.directiveId,
+    task_id: req.taskId,
+    payload: { final_response_chars: finalResponse.length, model, real: true } as JsonValue,
+    invoker: "opencode",
+  });
+
+  return {
+    ok: true,
+    final_response: finalResponse,
+    usage: { tokens: 0 }, // opencode does not surface usage on stdout reliably
+    emitted_event_ids: [],
+  };
+};
+
+/** Mode-aware entrypoint. ACC2_BRIDGE_MODE=mock (default in tests, also the
+ *  Phase E daemon default per CLAUDE.md) routes to opencodeQueryMock so the
+ *  test suite stays hermetic. ACC2_BRIDGE_MODE=real spawns the real
+ *  `opencode run` subprocess. */
+export const opencodeQuery = async (
+  req: BridgeRequest,
+  db: Database,
+): Promise<BridgeResult> => {
+  const mode = process.env.ACC2_BRIDGE_MODE ?? "mock";
+  if (mode === "real") {
+    return spawnRealOpencode(req, db);
+  }
+  return opencodeQueryMock(req, db);
+};
+
+export { spawnRealOpencode };
+
 // ── Adversarial mock (cycle-1 enforcement test) ────────────────────
 //
 // Phase D wires a SECOND mock entry point used only by the dispatcher's
 // adversarial test fixture — it emits a `brain_cycle_2_started` event the
 // dispatcher MUST reject. Real opencode never has access to this surface.
+
+// ── High-residual mock (refinement-edge test) ─────────────────────
+//
+// Phase E: a third mock that admits a verifier returning residual=1 so the
+// dispatcher's refinement-edge path is exercised. The action artifact runs
+// successfully (so the verifier even gets called) — the verifier is the one
+// declaring "this isn't good enough yet."
+
+const FIXTURE_HIGH_RESIDUAL_ACTION = `// fixture high residual — action returns trivial observation
+process.stdout.write("@@RESULT@@ " + JSON.stringify({ result: { value: 1 } }) + "\\n");
+`;
+
+const FIXTURE_HIGH_RESIDUAL_VERIFIER = `// fixture high residual — verifier always returns residual=1
+process.stdout.write("@@RESULT@@ " + JSON.stringify({ residual: 1 }) + "\\n");
+`;
+
+export const opencodeQueryHighResidual = async (
+  req: BridgeRequest,
+  db: Database,
+): Promise<BridgeResult> => {
+  emitEvent(db, {
+    kind: "bridge_invoked",
+    substrate_origin: "opencode",
+    directive_id: req.directiveId,
+    task_id: req.taskId,
+    payload: { fixture: "high_residual" } as JsonValue,
+    invoker: "opencode",
+  });
+
+  const actionAdmission = await admitArtifact(
+    db,
+    {
+      runtime: "bun",
+      body: FIXTURE_HIGH_RESIDUAL_ACTION,
+      declaredSandbox: BUN_DEFAULT_SANDBOX(),
+      fixtureInput: {} as JsonValue,
+      fixtureExpectedResidualBelow: 1.1, // accept anything — fixture-admission has its OWN verifier shape
+      name: "fixture_high_residual_action",
+    },
+    (ev) => {
+      emitEvent(db, {
+        ...ev,
+        directive_id: ev.directive_id ?? req.directiveId,
+        task_id: ev.task_id ?? req.taskId,
+        invoker: ev.invoker ?? "opencode",
+      });
+    },
+  );
+  if (!actionAdmission.ok) {
+    return { ok: false, reason: { kind: "subprocess_crash", stderr_tail: actionAdmission.reason } };
+  }
+
+  // The verifier's admission fixture sees an arbitrary input; the verifier
+  // returns residual=1 always, so admission's expected-below threshold must
+  // be 1.1 (so admission accepts residual=1 cleanly).
+  const verifierAdmission = await admitArtifact(
+    db,
+    {
+      runtime: "bun",
+      body: FIXTURE_HIGH_RESIDUAL_VERIFIER,
+      declaredSandbox: BUN_DEFAULT_SANDBOX(),
+      fixtureInput: {} as JsonValue,
+      fixtureExpectedResidualBelow: 1.1,
+      name: "fixture_high_residual_verifier",
+    },
+    (ev) => {
+      emitEvent(db, {
+        ...ev,
+        directive_id: ev.directive_id ?? req.directiveId,
+        task_id: ev.task_id ?? req.taskId,
+        invoker: ev.invoker ?? "opencode",
+      });
+    },
+  );
+  if (!verifierAdmission.ok) {
+    return { ok: false, reason: { kind: "subprocess_crash", stderr_tail: verifierAdmission.reason } };
+  }
+
+  emitEvent(db, {
+    kind: "action_predicted",
+    substrate_origin: "opencode",
+    directive_id: req.directiveId,
+    task_id: req.taskId,
+    action_artifact_id: actionAdmission.artifactId,
+    verifier_artifact_id: verifierAdmission.artifactId,
+    predicted_residual: 0.95,
+    payload: { intent: "intentionally-high-residual fixture" } as JsonValue,
+    invoker: "opencode",
+  });
+  return { ok: true, final_response: "high-residual mock", usage: { tokens: 0 }, emitted_event_ids: [] };
+};
 
 export const opencodeQueryAdversarialCycle2 = async (
   req: BridgeRequest,

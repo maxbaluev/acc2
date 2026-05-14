@@ -76,4 +76,38 @@ describe("prompt_composer", () => {
     const composed = composePrompt(db, { taskId });
     expect(composed.text).toContain("Prefer recursive grep");
   });
+
+  test("renders WATCHED OUTPUTS with the upstream observation when a watch edge exists", () => {
+    const db = openDb(":memory:");
+    const { directiveId, taskId } = openTask(db);
+    const upstream = newId();
+    emitEvent(db, {
+      kind: "task_node_opened",
+      directive_id: directiveId,
+      task_id: upstream,
+      payload: { goal: "upstream emit" },
+    });
+    emitEvent(db, {
+      kind: "task_edge_recorded",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { from_task: upstream, to_task: taskId, kind: "watches", consistency_mode: "snapshot_now" },
+    });
+    emitEvent(db, {
+      kind: "action_scored",
+      directive_id: directiveId,
+      task_id: upstream,
+      payload: { observed_value: "PROBE_WATCH_TOKEN" },
+    });
+    const composed = composePrompt(db, { taskId });
+    expect(composed.text).toContain("WATCHED OUTPUTS");
+    expect(composed.text).toContain("PROBE_WATCH_TOKEN");
+  });
+
+  test("WATCHED OUTPUTS reads as (none) when no watch edges target this task", () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    const composed = composePrompt(db, { taskId });
+    expect(composed.text).toContain("WATCHED OUTPUTS: (none)");
+  });
 });

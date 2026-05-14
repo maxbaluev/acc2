@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import { dispatchReadyTask } from "./task_dispatcher";
-import { opencodeQueryAdversarialCycle2 } from "./bridge";
+import { opencodeQueryAdversarialCycle2, opencodeQueryHighResidual } from "./bridge";
 import { readyTasks } from "./task_topology";
 import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
+import { emitEvent } from "./events";
+import { newId } from "./ids";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -91,5 +93,151 @@ describe("task_dispatcher", () => {
       .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_committed' AND task_id = ?")
       .get(taskId) as { c: number };
     expect(committed.c).toBe(0);
+  }, 30_000);
+
+  test("high-residual dispatch emits refinement edge + new task_node_opened child", async () => {
+    const db = openDb(":memory:");
+    const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
+    const ready = readyTasks(db, directiveId);
+    const task = ready[0]!;
+
+    const result = await dispatchReadyTask(db, task, {
+      bridge: opencodeQueryHighResidual,
+    });
+    expect(result.violations).toEqual([]);
+
+    // action_scored landed with residual=1
+    const scored = db
+      .query("SELECT residual FROM events WHERE kind = 'action_scored' AND task_id = ?")
+      .get(taskId) as { residual: number } | null;
+    expect(scored).not.toBeNull();
+    expect(scored!.residual).toBe(1);
+
+    // NO task_committed event
+    const committed = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_committed' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(committed.c).toBe(0);
+
+    // task_failed (refinement_depth_exceeded) MUST NOT fire at depth 0
+    const failed = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_failed' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(failed.c).toBe(0);
+
+    // A refinement edge MUST exist from this task to a new child.
+    const refines = db
+      .query(
+        "SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND directive_id = ?",
+      )
+      .all(directiveId) as Array<{ payload: string }>;
+    const refinementEdge = refines
+      .map((r) => JSON.parse(r.payload) as Record<string, unknown>)
+      .find((p) => p.kind === "refines" && p.from_task === taskId);
+    expect(refinementEdge).not.toBeUndefined();
+
+    // A new task_node_opened for the refinement child.
+    const child = refinementEdge!.to_task as string;
+    const childOpened = db
+      .query("SELECT payload FROM events WHERE kind = 'task_node_opened' AND task_id = ?")
+      .get(child) as { payload: string } | null;
+    expect(childOpened).not.toBeNull();
+    const childPayload = JSON.parse(childOpened!.payload);
+    expect(childPayload.refines_task_id).toBe(taskId);
+    expect(childPayload.prior_residual).toBe(1);
+  }, 30_000);
+
+  test("at depth 4 (below cap), refinement edge still emits — task_failed must not fire", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const ids = Array.from({ length: 5 }, () => newId());
+    for (let i = 0; i < 5; i++) {
+      emitEvent(db, {
+        kind: "task_node_opened",
+        directive_id: directiveId,
+        task_id: ids[i]!,
+        payload: { goal: `chain-${i}` },
+      });
+      if (i > 0) {
+        emitEvent(db, {
+          kind: "task_edge_recorded",
+          directive_id: directiveId,
+          task_id: ids[i]!,
+          payload: { from_task: ids[i - 1]!, to_task: ids[i]!, kind: "refines" },
+        });
+      }
+    }
+    const deep = ids[4]!; // depth = 4 (1 below cap=5)
+    const { nodes } = (await import("./task_topology")).readDagForDirective(db, directiveId);
+    const node = nodes.find((n) => n.id === deep)!;
+
+    const result = await dispatchReadyTask(db, node, { bridge: opencodeQueryHighResidual });
+    expect(result.violations).toEqual([]);
+    // Must emit a refinement edge (depth becomes 5), NOT task_failed.
+    const failed = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_failed' AND task_id = ?")
+      .get(deep) as { c: number };
+    expect(failed.c).toBe(0);
+    const edges = db
+      .query("SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND directive_id = ?")
+      .all(directiveId) as Array<{ payload: string }>;
+    const newEdge = edges
+      .map((r) => JSON.parse(r.payload) as Record<string, unknown>)
+      .find((p) => p.from_task === deep && p.kind === "refines");
+    expect(newEdge).not.toBeUndefined();
+  }, 30_000);
+
+  test("refinement depth cap fires task_failed with refinement_depth_exceeded after 5 levels", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    // Build a 6-deep refines chain manually so the dispatched task starts at depth=5.
+    const ids = Array.from({ length: 6 }, () => newId());
+    for (let i = 0; i < 6; i++) {
+      emitEvent(db, {
+        kind: "task_node_opened",
+        directive_id: directiveId,
+        task_id: ids[i]!,
+        payload: { goal: `chain-step-${i}` },
+      });
+      if (i > 0) {
+        emitEvent(db, {
+          kind: "task_edge_recorded",
+          directive_id: directiveId,
+          task_id: ids[i]!,
+          payload: { from_task: ids[i - 1]!, to_task: ids[i]!, kind: "refines" },
+        });
+      }
+    }
+    // The deepest task is at depth=5. Dispatching it through high-residual
+    // MUST hit the cap and emit task_failed instead of opening a 6th refine.
+    const deepest = ids[5]!;
+    const { nodes } = (await import("./task_topology")).readDagForDirective(db, directiveId);
+    const deepNode = nodes.find((n) => n.id === deepest)!;
+    expect(deepNode).toBeTruthy();
+
+    const result = await dispatchReadyTask(db, deepNode, {
+      bridge: opencodeQueryHighResidual,
+    });
+    expect(result.violations).toEqual([]);
+
+    const failed = db
+      .query(
+        "SELECT failure_kind, residual FROM events WHERE kind = 'task_failed' AND task_id = ?",
+      )
+      .get(deepest) as { failure_kind: string; residual: number } | null;
+    expect(failed).not.toBeNull();
+    expect(failed!.failure_kind).toBe("refinement_depth_exceeded");
+    expect(failed!.residual).toBe(1);
+
+    // NO refinement edge should be emitted past the cap.
+    const refinementEdges = db
+      .query(
+        "SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND directive_id = ?",
+      )
+      .all(directiveId) as Array<{ payload: string }>;
+    const newRefines = refinementEdges
+      .map((r) => JSON.parse(r.payload) as Record<string, unknown>)
+      .filter((p) => p.kind === "refines" && p.from_task === deepest);
+    expect(newRefines.length).toBe(0);
   }, 30_000);
 });
