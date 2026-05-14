@@ -8,6 +8,7 @@ import type { Database } from "bun:sqlite";
 import type { Event, EventKind, JsonValue, SubstrateOrigin } from "../substrate/types";
 import { newId, nowIso } from "./ids";
 import { publishEvent } from "./event_bus";
+import { recordEventEmission } from "./metrics";
 
 export type EmitEventInput = {
   kind: EventKind;
@@ -87,6 +88,9 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
     substrate_origin,
     payload: (input.payload ?? {}) as JsonValue,
   });
+  // Batch 3.OPS: Prometheus counter — one increment per kind. Fail-soft
+  // so a metrics misconfiguration cannot block emission.
+  try { recordEventEmission(input.kind); } catch { /* swallow */ }
   return { id, ts };
 };
 

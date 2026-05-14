@@ -24,6 +24,8 @@
 import type { Database } from "bun:sqlite";
 import type { Event } from "../substrate/types";
 import { emitEvent } from "./events";
+import { logger } from "./logger";
+import { recordEmbedding } from "./metrics";
 
 export const EMBEDDING_MODEL = "text-embedding-3-small";
 export const EMBEDDING_DIMS = 1536;
@@ -261,7 +263,10 @@ const persistEmbedding = (
   try {
     upsertVecEventRow(db, sourceEventId, embedding, version);
   } catch (err) {
-    console.warn(`[embedder] vec_events upsert failed for ${sourceEventId}: ${err}`);
+    logger.warn(
+      { source_event_id: sourceEventId, err: (err as Error).message ?? String(err) },
+      "vec_events upsert failed",
+    );
   }
   emitEvent(db, {
     kind: "embedding_computed",
@@ -307,7 +312,9 @@ export const embedderWorkerTick = async (
   if (items.length === 0) {
     return { embedded: 0, skipped_no_text, failed: 0 };
   }
+  const batchStartMs = Date.now();
   const embeddings = await batchComputeEmbeddings(items);
+  const batchDurMs = Date.now() - batchStartMs;
   let embedded = 0;
   let failed = 0;
   for (const item of items) {
@@ -316,6 +323,8 @@ export const embedderWorkerTick = async (
     try {
       persistEmbedding(db, item.id, vec, EMBEDDING_VERSION);
       embedded++;
+      // Amortize the batch duration evenly across successful embeddings.
+      try { recordEmbedding(batchDurMs / Math.max(1, embeddings.size) / 1000); } catch { /* swallow */ }
     } catch {
       failed++;
     }

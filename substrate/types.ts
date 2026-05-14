@@ -162,6 +162,13 @@ export type EventKind =
   | "daemon_started"
   | "daemon_shutdown"
   | "daemon_index_rebuilt"
+  | "daemon_ready"
+
+  // Daemon ops (Batch 3.OPS: crash recovery + DB integrity)
+  | "integrity_check_completed"
+  | "integrity_check_failed"
+  | "wal_checkpointed"
+  | "dispatch_recovered_orphan"
 
   // Substrate self-events
   | "projection_checkpointed"
@@ -186,7 +193,22 @@ export type EventKind =
   // upgrade (start → completion or failure) is auditable on the substrate.
   | "opencode_upgrade_started"
   | "opencode_upgrade_completed"
-  | "opencode_upgrade_failed";
+  | "opencode_upgrade_failed"
+
+  // Admin maintenance surface (Batch 3.ADMIN — operator-facing audit trail)
+  //   admin_token_rotated                  — `acc admin rotate-admin-token`
+  //   external_source_token_rotated        — `acc admin rotate-external-token <source>`
+  //   code_artifact_quarantine_overridden  — `acc admin override-quarantine`
+  //   directive_archived_by_operator       — `acc admin archive-rolling` (distinct
+  //                                          from `directive_archived_missed_reviews`)
+  //   state_exported                       — `acc admin export <path>`
+  //   state_imported                       — `acc admin import <path>`
+  | "admin_token_rotated"
+  | "external_source_token_rotated"
+  | "code_artifact_quarantine_overridden"
+  | "directive_archived_by_operator"
+  | "state_exported"
+  | "state_imported";
 
 // ── The event row (§4.1) ────────────────────────────────────────────
 

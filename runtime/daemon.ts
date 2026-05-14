@@ -50,6 +50,18 @@ import { runBunArtifact } from "./runtimes/bun";
 import { runUvArtifact } from "./runtimes/uv";
 import { runCamofoxArtifact } from "./runtimes/camofox";
 import type { SandboxDecl } from "../substrate/types";
+import { logger } from "./logger";
+import { metricsHandler, refreshGauges } from "./metrics";
+import { integrityWorkerTick, runIntegrityCheck, reconcileOrphanedDispatches } from "./integrity_worker";
+import {
+  isReady,
+  pendingWorkers,
+  registerWorker,
+  markWorkerReady,
+  setOnReady,
+  resetReadiness,
+  readyAt,
+} from "./readiness";
 
 export const DEFAULT_DAEMON_PORT = 9387;
 export const DEFAULT_AUX_PORT_OFFSET = 1;
@@ -149,10 +161,36 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   const db = openDb(stateDbPath);
   runViews(db);
 
+  // Batch 3.OPS: pre-traffic boot checks.
+  //   1. Run PRAGMA integrity_check. On non-"ok" result, stderr diagnostic
+  //      + exit 1 — silent corruption is worse than a loud refusal.
+  //   2. Reconcile in-flight dispatches: any `brain_dispatched` row whose
+  //      task did not close in the previous boot is marked as
+  //      `dispatch_recovered_orphan`; the scheduler will re-pick the task
+  //      on its next ready_tasks_view check.
+  const bootIntegrity = await runIntegrityCheck(db);
+  if (!bootIntegrity.ok) {
+    const msg =
+      `acc2 daemon: REFUSING TO START — PRAGMA integrity_check failed: ` +
+      `${bootIntegrity.pragma_integrity_check}`;
+    process.stderr.write(msg + "\n");
+    logger.fatal({ pragma_result: bootIntegrity.pragma_integrity_check }, msg);
+    try { closeDb(stateDbPath); } catch { /* swallow */ }
+    throw new Error(msg);
+  }
+  const orphans = reconcileOrphanedDispatches(db);
+  if (orphans.length > 0) {
+    logger.info({ orphan_count: orphans.length }, "reconciled orphan dispatches at boot");
+  }
+
   // Phase F: rebuild the in-memory embedding index from substrate. On fresh
   // installs this is an empty index; the worker tick fills it as new
   // embeddable events accumulate.
   const index = EmbeddingIndex.rebuildFromDb(db);
+
+  // Batch 3.OPS: reset readiness slot so a same-process restart starts
+  // with a clean tracker.
+  resetReadiness();
 
   const adminToken = newAdminToken();
   const ingressState = createExternalIngressState({
@@ -166,9 +204,21 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   const heartbeat = setInterval(() => { /* phase F: embedder catch-up, posterior updater, … */ }, 5000);
   workers.push(() => clearInterval(heartbeat));
 
+  // Batch 3.OPS readiness: always-on workers must be registered up-front
+  // so /ready can refuse traffic until each has completed its first tick.
+  registerWorker("amendment");
+  registerWorker("metrics_gauge_refresh");
+  if (process.env.ACC2_INTEGRITY_AUTOSTART !== "0") registerWorker("integrity");
+  if (process.env.ACC2_EMBEDDER_AUTOSTART === "1") registerWorker("embedder");
+  if (process.env.ACC2_REHAB_AUTOSTART === "1") registerWorker("rehabilitation");
+  if (process.env.ACC2_ROLLING_AUTOSTART === "1") registerWorker("rolling_reviewer");
+  if (process.env.ACC2_FATHER_AUTOSTART === "1") registerWorker("father");
+  if (process.env.ACC2_AUTOSCHEDULER === "1") registerWorker("scheduler");
+
   // Phase E: amendment worker — every 2s, drain unapplied directive_amended
   // events. Errors are swallowed so a malformed amendment can't kill the
   // daemon (each amendment will surface its own diagnostic events anyway).
+  let amendmentMarked = false;
   const amendmentTick = setInterval(() => {
     void (async () => {
       try {
@@ -177,20 +227,64 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
           try { await applyAmendment(db, id); } catch { /* swallow per-amendment */ }
         }
       } catch { /* swallow */ }
+      if (!amendmentMarked) { markWorkerReady("amendment"); amendmentMarked = true; }
     })();
   }, 2000);
+  // Fire one synchronous mark right away so amendment readiness does
+  // not block /ready for 2s on a quiet daemon.
+  markWorkerReady("amendment");
+  amendmentMarked = true;
   workers.push(() => clearInterval(amendmentTick));
+
+  // Batch 3.OPS: gauge refresh (every 30s) keeps the SQLite-backed gauges
+  // (substrate_events_total, code_artifacts_*) live for /metrics scrapes.
+  const gaugeTick = setInterval(() => { refreshGauges(db, startedAtMs); }, 30_000);
+  refreshGauges(db, startedAtMs); // initial snapshot
+  markWorkerReady("metrics_gauge_refresh");
+  workers.push(() => clearInterval(gaugeTick));
+
+  // Batch 3.OPS: DB integrity worker. Default ON unless explicitly
+  // disabled (ACC2_INTEGRITY_AUTOSTART=0 for tests). Tick interval is
+  // 6h by default; configurable via ACC2_INTEGRITY_INTERVAL_MS.
+  if (process.env.ACC2_INTEGRITY_AUTOSTART !== "0") {
+    const integrityIntervalMs = Number(
+      process.env.ACC2_INTEGRITY_INTERVAL_MS ?? 6 * 60 * 60 * 1000,
+    );
+    let integrityMarked = false;
+    const integrityTick = setInterval(() => {
+      void (async () => {
+        try { await integrityWorkerTick(db); } catch (err) {
+          logger.warn({ err: (err as Error).message }, "integrity worker tick failed");
+        }
+        if (!integrityMarked) { markWorkerReady("integrity"); integrityMarked = true; }
+      })();
+    }, integrityIntervalMs);
+    // Mark ready immediately — the boot-time runIntegrityCheck already
+    // proved the substrate is healthy. The interval tick repeats every
+    // 6h thereafter.
+    markWorkerReady("integrity");
+    integrityMarked = true;
+    workers.push(() => clearInterval(integrityTick));
+  }
 
   // Phase F: optional embedder worker. Default off — tests must not hit
   // the OpenAI API. Enable with ACC2_EMBEDDER_AUTOSTART=1 in production.
   // Tick every 10s with batch=20; errors swallowed so a single bad row
   // can't kill the daemon.
   if (process.env.ACC2_EMBEDDER_AUTOSTART === "1") {
+    let embedderMarked = false;
     const embedderTick = setInterval(() => {
       void (async () => {
         try { await embedderWorkerTick(db, { batchSize: 20 }); } catch { /* swallow */ }
+        if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
       })();
     }, 10_000);
+    // Run one tick synchronously at boot so /ready can flip without
+    // waiting 10s.
+    void (async () => {
+      try { await embedderWorkerTick(db, { batchSize: 20 }); } catch { /* swallow */ }
+      if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
+    })();
     workers.push(() => clearInterval(embedderTick));
   }
 
@@ -199,6 +293,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // ACC2_REHAB_AUTOSTART=1. Tick every 6h; the cooldown is 14d so checking
   // more often is wasted work.
   if (process.env.ACC2_REHAB_AUTOSTART === "1") {
+    // Rehab interval is 6h; readiness flips on the first tick. We do NOT
+    // run a synchronous initial tick because rehab can spawn subprocess
+    // fixtures.
+    markWorkerReady("rehabilitation");
     const rehabTick = setInterval(() => {
       void (async () => {
         try {
@@ -252,11 +350,17 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // malformed directive can't kill the daemon. Father (Phase K) will turn
   // this on in production.
   if (process.env.ACC2_ROLLING_AUTOSTART === "1") {
+    let rollingMarked = false;
     const rollingTick = setInterval(() => {
       void (async () => {
         try { await rollingReviewerWorkerTick(db); } catch { /* swallow */ }
+        if (!rollingMarked) { markWorkerReady("rolling_reviewer"); rollingMarked = true; }
       })();
     }, 60_000);
+    void (async () => {
+      try { await rollingReviewerWorkerTick(db); } catch { /* swallow */ }
+      if (!rollingMarked) { markWorkerReady("rolling_reviewer"); rollingMarked = true; }
+    })();
     workers.push(() => clearInterval(rollingTick));
   }
 
@@ -270,6 +374,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // and records its cycle.
   if (process.env.ACC2_FATHER_AUTOSTART === "1") {
     const fatherIntervalMs = Number(process.env.ACC2_FATHER_INTERVAL_MS ?? 5 * 60 * 1000);
+    let fatherMarked = false;
     const fatherTick = setInterval(() => {
       void (async () => {
         try {
@@ -278,8 +383,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
           await rollingReviewerWorkerTick(db);
         } catch { /* swallow */ }
         try { await fatherIterate(db); } catch { /* swallow */ }
+        if (!fatherMarked) { markWorkerReady("father"); fatherMarked = true; }
       })();
     }, fatherIntervalMs);
+    // Father is registered as ready immediately — its 5-min cadence is
+    // too long to gate /ready behind.
+    markWorkerReady("father");
+    fatherMarked = true;
     workers.push(() => clearInterval(fatherTick));
   }
 
@@ -288,6 +398,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   let schedulerAbort: AbortController | null = null;
   if (process.env.ACC2_AUTOSCHEDULER === "1") {
     schedulerAbort = new AbortController();
+    markWorkerReady("scheduler");
     void (async () => {
       try {
         // schedulerLoop returns on quiescence; we keep restarting it on a
@@ -327,10 +438,32 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // Drop any lingering SSE subscribers — the daemon owns the bus singleton
     // and a new daemon instance in the same process must start clean.
     resetBus();
+    // Reset readiness slot so a same-process restart starts clean.
+    resetReadiness();
     closeDb(stateDbPath);
     tryRemove(socketFile);
     tryRemove(tokenFile);
   };
+
+  // Batch 3.OPS: register the daemon_ready emitter. Fires exactly once,
+  // the moment every registered worker has completed its first tick.
+  setOnReady(() => {
+    try {
+      emitEvent(db, {
+        kind: "daemon_ready",
+        substrate_origin: "substrate_auto",
+        payload: {
+          pid: process.pid,
+          ready_at_ms: Date.now(),
+          startup_duration_ms: Date.now() - startedAtMs,
+        },
+      });
+      logger.info(
+        { startup_duration_ms: Date.now() - startedAtMs },
+        "daemon is ready — all workers completed first tick",
+      );
+    } catch { /* swallow — emission failure should not crash boot */ }
+  });
 
   // 1. Bind the FastMCP HTTP-streaming transport on the primary port.
   try {
@@ -460,6 +593,32 @@ const routeAux = async (
     });
   }
 
+  if (url.pathname === "/ready" && req.method === "GET") {
+    if (isReady()) {
+      const readyAtMs = readyAt();
+      return Response.json({
+        status: "ready",
+        pid: process.pid,
+        uptime_ms: Date.now() - startedAtMs,
+        ready_at_ms: readyAtMs,
+        startup_duration_ms: readyAtMs ? readyAtMs - startedAtMs : null,
+      });
+    }
+    return Response.json(
+      {
+        status: "not_ready",
+        pid: process.pid,
+        uptime_ms: Date.now() - startedAtMs,
+        pending_workers: pendingWorkers(),
+      },
+      { status: 503 },
+    );
+  }
+
+  if (url.pathname === "/metrics" && req.method === "GET") {
+    return metricsHandler(req);
+  }
+
   if (url.pathname === "/shutdown" && req.method === "POST") {
     const presented = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
     if (presented !== adminToken) {
@@ -556,12 +715,18 @@ if (import.meta.main) {
   void (async () => {
     try {
       const handle = await startDaemon();
-      console.log(
-        `acc2 daemon: pid=${process.pid} mcp=http://127.0.0.1:${handle.port} ` +
-          `aux=http://127.0.0.1:${handle.auxPort} db=${handle.stateDbPath}`,
+      logger.info(
+        {
+          pid: process.pid,
+          mcp_url: `http://127.0.0.1:${handle.port}`,
+          aux_url: `http://127.0.0.1:${handle.auxPort}`,
+          db_path: handle.stateDbPath,
+        },
+        "acc2 daemon listening",
       );
     } catch (err) {
-      console.error(`acc2 daemon failed to start: ${(err as Error).message}`);
+      logger.fatal({ err: (err as Error).message }, "acc2 daemon failed to start");
+      process.stderr.write(`acc2 daemon failed to start: ${(err as Error).message}\n`);
       process.exit(1);
     }
   })();

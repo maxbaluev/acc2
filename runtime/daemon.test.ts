@@ -172,6 +172,88 @@ describe("startDaemon — boot + health + shutdown", () => {
     expect(res.status).toBe(401);
   });
 
+  test("GET /ready returns 200 once amendment+gauge+integrity workers complete", async () => {
+    const ports = pickPortPair();
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+    // Workers are marked ready synchronously inside startDaemon (no LLM
+    // calls, no real subprocess fixtures), so /ready should flip almost
+    // immediately. Poll up to 3s for safety.
+    let lastBody: Record<string, unknown> | null = null;
+    let lastStatus = 0;
+    for (let i = 0; i < 30; i++) {
+      const res = await fetch(`http://127.0.0.1:${handle.auxPort}/ready`);
+      lastStatus = res.status;
+      lastBody = (await res.json()) as Record<string, unknown>;
+      if (lastStatus === 200) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(lastStatus).toBe(200);
+    expect(lastBody!.status).toBe("ready");
+    expect(typeof lastBody!.ready_at_ms).toBe("number");
+  });
+
+  test("daemon_ready event is emitted exactly once after readiness flips", async () => {
+    const ports = pickPortPair();
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+    // Wait for readiness
+    for (let i = 0; i < 30; i++) {
+      const res = await fetch(`http://127.0.0.1:${handle.auxPort}/ready`);
+      if (res.status === 200) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const rows = handle.db
+      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'daemon_ready'")
+      .get() as { n: number };
+    expect(rows.n).toBeGreaterThanOrEqual(1);
+  });
+
+  test("GET /metrics returns Prometheus exposition format", async () => {
+    const ports = pickPortPair();
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+    const res = await fetch(`http://127.0.0.1:${handle.auxPort}/metrics`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/plain");
+    const body = await res.text();
+    // Spot-check several Prometheus-format markers.
+    expect(body).toContain("# TYPE acc2_dispatches_total counter");
+    expect(body).toContain("# TYPE acc2_events_emitted_total counter");
+    expect(body).toContain("# TYPE acc2_daemon_uptime_seconds gauge");
+  });
+
+  test("boot reconciles orphaned dispatches from the previous run", async () => {
+    // Stage 1: open the db directly and seed an unclosed brain_dispatched
+    // row so the next daemon start sees it as an orphan.
+    const { emitEvent: emit } = await import("./events");
+    const db = openDb(tmp.dbPath);
+    emit(db, {
+      kind: "brain_dispatched",
+      directive_id: "d_orphan_boot",
+      task_id: "t_orphan_boot",
+      payload: { dispatch_id: "disp_orphan_boot" },
+    });
+    closeDb(tmp.dbPath);
+
+    // Stage 2: start the daemon and assert dispatch_recovered_orphan landed.
+    const ports = pickPortPair();
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+    const recovered = handle.db
+      .query("SELECT * FROM events WHERE kind = 'dispatch_recovered_orphan' AND task_id = ?")
+      .all("t_orphan_boot");
+    expect(recovered.length).toBe(1);
+  });
+
   test("amendment worker drains unapplied directive_amended events automatically", async () => {
     const ports = pickPortPair();
     handle = await startDaemon({

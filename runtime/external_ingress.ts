@@ -14,6 +14,7 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
+import { recordExternalPush } from "./metrics";
 
 const DEFAULT_RATE_LIMIT = 60; // requests per minute per source
 
@@ -179,6 +180,7 @@ export const handleExternalPush = async (
       data: payload,
     },
   });
+  try { recordExternalPush(source); } catch { /* swallow */ }
 
   return Response.json({ ok: true, event_id: emitted.id, ts: emitted.ts }, { status: 200 });
 };
