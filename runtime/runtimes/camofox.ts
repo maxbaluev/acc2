@@ -134,6 +134,16 @@ const acquireProfileMutex = <T>(profileRoot: string, fn: () => Promise<T>): Prom
 export const __getProfileMutexQueueDepth = (profileRoot: string): boolean =>
   profileMutexes.has(profileRoot);
 
+/** Test surface: run an arbitrary async function under the per-profile-root
+ *  mutex without spawning chromium. Phase Align Principle 8 uses this to
+ *  prove the mutex serializes concurrent invocations against the same
+ *  state root. NOT exported for production callers — only the runtime's
+ *  own `runCamofoxArtifact` should drive the chromium pipeline. */
+export const __acquireProfileMutexForTest = <T>(
+  profileRoot: string,
+  fn: () => Promise<T>,
+): Promise<T> => acquireProfileMutex(profileRoot, fn);
+
 // ── Playwright availability detection ──────────────────────────────
 //
 // We look up the `playwright` module without `await import()` because

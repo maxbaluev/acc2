@@ -169,6 +169,7 @@ export type EventKind =
   | "recipe_extracted"
   | "recipe_invoked"
   | "recipe_replay_aborted"
+  | "prompt_truncated"
 
   // Father
   | "father_cycle_recorded"

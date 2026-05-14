@@ -35,6 +35,7 @@ import { nowIso } from "./ids";
 import { distributeCredit } from "./credit";
 import { findRecipeMatch, replayRecipe } from "./recipe_replay";
 import { readCurrentMode } from "./crisis_mode";
+import { isCycleViolation } from "./cycle_one_gate";
 
 const REFINEMENT_DEPTH_CAP = 5;
 
@@ -257,10 +258,12 @@ export const dispatchReadyTask = async (
   //    that's the symmetry §3.6 calls for.
   const dispatchEvents = readEventsSinceTs(db, dispatchStartedTs, task.id);
 
-  // Cycle-1 enforcement: scan for forbidden self-iteration kinds.
+  // Cycle-1 enforcement: scan for forbidden self-iteration kinds. The
+  // forbidden set is owned by `cycle_one_gate.ts` so the real-bridge
+  // stdout scan and this post-bridge event scan stay in lock-step.
   let cycleViolationDetected = false;
   for (const ev of dispatchEvents) {
-    if (ev.kind === "brain_cycle_2_started" || ev.kind === "continue_cycle_requested") {
+    if (isCycleViolation(ev.kind)) {
       emitEvent(db, {
         kind: "dispatcher_violation",
         substrate_origin: "substrate_auto",

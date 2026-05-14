@@ -13,6 +13,19 @@
 //   - Successful replay → +0.05 (capped at 0.95).
 //   - Failed replay     → −0.10 (floored at 0.0; auto-archive at < 0.2).
 //
+// Why this is a DIFFERENT formula than the Beta posterior used for
+// code_artifact + knowledge_candidate (see artifact_store.ts / extractors.ts):
+// recipes do not carry a residual-driven posterior — they have a single
+// "did the cached trajectory replay successfully" bit. The Beta model
+// (alpha/beta + EMA half-life 20) is designed for noisy residual signals
+// where each observation contributes proportionally to the success or
+// failure mass. Recipe confidence is qualitative-coarse: it is a sticky
+// score that compounds slowly on success (+0.05) and falls fast on
+// failure (−0.10) so a recipe that worked once but stops working gets
+// retired before it pollutes the Tier-0 lane. This divergence is
+// intentional; Phase Align Principle 9 pins both the band constants and
+// this comment so a future refactor cannot silently unify them.
+//
 // Goal-shape match is computed via runtime/goal_shape.ts. Topology match is the
 // signature emitted on the recipe payload by extractRecipeCandidates. When
 // crisis mode is active (§3.5) the dispatcher lowers the confidence threshold
@@ -22,11 +35,13 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue, SandboxDecl } from "../substrate/types";
 import { emitEvent } from "./events";
 import { goalShape } from "./goal_shape";
-import { getArtifact } from "./artifact_store";
+import { getArtifact, applyResidualOutcome } from "./artifact_store";
 import { runBunArtifact } from "./runtimes/bun";
 import { runUvArtifact } from "./runtimes/uv";
 import { runCamofoxArtifact } from "./runtimes/camofox";
 import type { TaskNode } from "./task_topology";
+import { distributeCredit } from "./credit";
+import { nowIso } from "./ids";
 
 export const RECIPE_DEFAULT_MIN_CONFIDENCE = 0.6;
 export const RECIPE_MAX_CONFIDENCE = 0.95;
@@ -392,6 +407,28 @@ export const replayRecipe = async (
     } as JsonValue,
   });
   emitted.push(scoredEv.id);
+
+  // Close the credit chain (v2-design.md §3.6.1 Rule 3; Phase Align Principle 6).
+  // Every action_scored event MUST be followed by a distributeCredit call so the
+  // four-link chain (action → observe → score → distribute) holds for recipe
+  // replays just as it does for fresh brain dispatches. We fall back to the
+  // direct applyResidualOutcome path on credit-pipeline error so the artifact
+  // posterior still moves — the design's "no scored event left uncredited"
+  // invariant is preserved.
+  try {
+    await distributeCredit(db, {
+      action_event_id: predictedEv.id,
+      observation_event_id: scoredEv.id,
+      scored_event_id: scoredEv.id,
+      predicted_residual: actionStep.predicted_residual ?? residual,
+      observed_residual: residual,
+    });
+  } catch {
+    applyResidualOutcome(db, actionStep.artifact_id, residual, nowIso());
+    if (actionStep.verifier_artifact_id) {
+      applyResidualOutcome(db, actionStep.verifier_artifact_id, residual, nowIso());
+    }
+  }
 
   // If verifier residual exceeds the abort threshold, the replay is rejected;
   // the dispatcher routes the task back to opencode_brain for refinement.

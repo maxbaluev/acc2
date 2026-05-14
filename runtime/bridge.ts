@@ -19,6 +19,7 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue, SandboxDecl } from "../substrate/types";
 import { emitEvent } from "./events";
 import { admitArtifact } from "./artifact_admission";
+import { isCycleViolation } from "./cycle_one_gate";
 
 export type BridgeRequest = {
   prompt: string;
@@ -410,9 +411,12 @@ const spawnRealOpencode = async (
         invoker: "opencode",
       });
     }
-    // Cycle-1-only self-iteration signals — kill the process.
-    if (kind === "brain_cycle_2_started" || kind === "continue_cycle_requested") {
-      cycleViolation = kind;
+    // Cycle-1-only self-iteration signals — kill the process. Predicate
+    // sourced from `cycle_one_gate.ts` so the mock-bridge dispatcher scan
+    // and this real-bridge stdout scan can never drift on what counts as
+    // a violation (v2-design.md §3.7).
+    if (isCycleViolation(kind)) {
+      cycleViolation = kind ?? null;
       try { proc.kill("SIGTERM"); } catch { /* swallow */ }
     }
     // Final response marker

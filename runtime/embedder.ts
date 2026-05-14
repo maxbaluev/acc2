@@ -148,7 +148,11 @@ export const batchComputeEmbeddings = async (
 };
 
 /** Extract the embedding-target text from one event row payload. Returns
- *  null when the kind isn't embeddable or no text-like field is present. */
+ *  null when the kind isn't embeddable or no text-like field is present.
+ *  v2-design.md §5.2: external-pushed events wrap their payload in a
+ *  `data: { ... }` envelope under `payload.data`; we look there too so an
+ *  ingested external event becomes first-class for retrieval just like
+ *  brain-emitted rows. */
 export const extractTextFromEvent = (kind: string, payload: unknown): string | null => {
   if (!EMBEDDABLE_KINDS.has(kind)) return null;
   if (!payload || typeof payload !== "object") return null;
@@ -164,6 +168,18 @@ export const extractTextFromEvent = (kind: string, payload: unknown): string | n
     p.message as string | undefined,
     p.claim as string | undefined,
   ];
+  // External-push envelope: payload.data.{summary|text|body|message|...}.
+  const data = p.data as Record<string, unknown> | undefined;
+  if (data && typeof data === "object") {
+    candidates.push(
+      data.text as string | undefined,
+      data.summary as string | undefined,
+      data.body as string | undefined,
+      data.message as string | undefined,
+      data.title as string | undefined,
+      data.description as string | undefined,
+    );
+  }
   for (const c of candidates) {
     if (typeof c === "string" && c.trim().length > 0) return c;
   }
