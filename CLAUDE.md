@@ -21,6 +21,37 @@ Four actors, one substrate:
 
 Both LLMs connect to the **same** MCP server as native clients (`runtime/bridge.ts`, 24 tools — 17 `substrate.*` + 7 `runtime.*`). One registry, one posterior per artifact, one invocation transport — the symmetry is what makes the knowledge merger genuinely two-sided.
 
+## First action on every owner directive — `acc task`
+
+**The orchestrator does not analyze, audit, design, or refactor on its own.** Every owner directive that is not a trivial known fact routes through the substrate as your literal first action:
+
+```bash
+acc task "<owner's words, verbatim>"
+```
+
+The substrate (not you) decides what happens next: `substrate_replay` (Tier-0 recipe, no LLM), `claude_inline` (you execute the leaf only because the scored inline lane fired), `opencode_brain` (brain composes depth-1 retrieval, decomposes the DAG, emits refinement edges), or `deferred_blocked`. Routing is the substrate's job — `runtime/dispatch_decider.ts` makes the call; **you read the decision, you do not pre-empt it**.
+
+**The bright line.** If a request requires reading more than one or two files to answer, comparing the codebase against docs, synthesizing across modules, finding inconsistencies, ranking what matters, or deciding what to change — it is **strategic work the brain owns**. Open `acc task` and let depth-1 retrieval do its job. The brain's prompt composer (`runtime/prompt_composer.ts`) reads the substrate via top-K retrievals; if it needs more, it pulls mid-cycle via `substrate.search`. You stuffing the same files into your context defeats the recursion that makes this a Recursive Language Model.
+
+**Specifically: route via `acc task`, do not answer yourself,** when the owner says any of these (the list is illustrative, not exhaustive):
+
+- "find holes / inconsistencies / problems" — DAG-decomposition task.
+- "deeply understand X" / "audit Y" / "review Z" — strategic synthesis.
+- "what should we work on" — Father ranking + objective selection.
+- "design / refactor / fix W" — brain proposes contracts, you implement leaf nodes.
+- "improve / harden / extend V" — same shape.
+
+**The narrow exceptions** — things you legitimately handle inline, without `acc task`:
+
+- Trivial known facts citable directly from `docs/v2-design.md`, `docs/operator-install.md`, `docs/ops-guide.md`, or this file (e.g. "how does cycle-1 enforcement work" → cite §3.7 + `runtime/cycle_one_gate.ts`).
+- Operator health / state reads: `acc daemon status`, `acc doctor`, `acc admin substrate-status`, `acc watch`.
+- Mechanical execution of a contract / action the substrate already dispatched to you (the scored inline lane, or a leaf task the brain assigned).
+- Owner-facing chat: greeting, confirming, surfacing brain-emitted milestones, asking clarification questions before composing the directive text.
+
+**Failure mode you must avoid (this contract was added because it kept happening).** The orchestrator hears "find holes in the system" or "deeply understand X", opens 10+ files with `Read`/`grep`, queues its own `TaskCreate` list, drafts fixes, runs `bun test`, and reports a punch list — all without ever calling `acc task`. That is "LLM with tools" mode. AccInt v2 is not that. The substrate must be the operator on EVERY non-trivial directive, including (especially) the meta-directives about the system itself. The orchestrator's value is the conversational + mechanical surface around the substrate — not parallel analysis.
+
+If you catch yourself about to spawn an Explore agent, run `grep -r` across the codebase, or read more than a couple of files in a row to "form a view" — **stop, surface the directive verbatim to `acc task`, and observe the stream** (poll-and-react per orchestrator-runtime.md "Background command observability" if applicable, otherwise let the scheduler dispatch).
+
 ## The event ledger is the universal language
 
 One SQLite table (`events`), one ordered stream, one source of truth. Every brain emission, runtime observation, owner directive, and Claude milestone is one row. Nothing survives a daemon restart that isn't in the ledger.
