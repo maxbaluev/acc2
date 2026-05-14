@@ -23,6 +23,7 @@
 
 import type { Database } from "bun:sqlite";
 import type { Event } from "../substrate/types";
+import { EMBEDDABLE_KINDS as REGISTRY_EMBEDDABLE_KINDS } from "../substrate/event_kinds";
 import { emitEvent } from "./events";
 import { logger } from "./logger";
 import { recordEmbedding } from "./metrics";
@@ -31,22 +32,14 @@ export const EMBEDDING_MODEL = "text-embedding-3-small";
 export const EMBEDDING_DIMS = 1536;
 export const EMBEDDING_VERSION = "v1"; // bump when model or dim changes
 
-/** Event kinds whose payload text we embed. Other kinds are structural
- *  control-flow events with no useful embedding surface. */
-export const EMBEDDABLE_KINDS = new Set<string>([
-  "directive_opened",
-  "directive_amended",
-  "task_node_opened",
-  "knowledge_candidate",
-  "knowledge_promoted",
-  "code_artifact_candidate",
-  "code_artifact_admitted",
-  "owner_input_received",
-  "owner_decision_recorded",
-  "external_event_received",
-  "action_predicted",
-  "action_scored",
-]);
+/** Event kinds whose payload text we embed. Derived from the canonical
+ *  registry (`substrate/event_kinds.ts`) so adding `embeddable: true` to
+ *  a kind there propagates here without a second list to keep in sync.
+ *  Other kinds are structural control-flow events with no useful
+ *  embedding surface. */
+export const EMBEDDABLE_KINDS: ReadonlySet<string> = new Set<string>(
+  REGISTRY_EMBEDDABLE_KINDS,
+);
 
 export type EmbeddingResult = { embedding: number[]; version: string };
 
