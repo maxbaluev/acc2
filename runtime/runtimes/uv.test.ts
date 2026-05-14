@@ -292,7 +292,10 @@ describe("buildNsjailArgv — argv shape verification (Batch 4 Hole 1)", () => {
 describe.skipIf(!UV_AVAILABLE)("runUvArtifact — tempdir hygiene", () => {
   test("no acc2-uv-* tempdirs survive after a run", async () => {
     const tmp = tmpdir();
-    const before = new Set(readdirSync(tmp).filter((n) => n.startsWith("acc2-uv-")));
+    // Scope to THIS worker's tempdirs only — uv.ts uses a pid-namespaced
+    // prefix so parallel test workers don't see each other's in-flight dirs.
+    const prefix = `acc2-uv-${process.pid}-`;
+    const before = new Set(readdirSync(tmp).filter((n) => n.startsWith(prefix)));
     const body = "print('@@RESULT@@ ' + json.dumps({'done': True}))";
     const obs = await runUvArtifact({
       artifactId: "art_uv_tempdir_hygiene",
@@ -301,7 +304,7 @@ describe.skipIf(!UV_AVAILABLE)("runUvArtifact — tempdir hygiene", () => {
       inputs: null,
     });
     expect(obs.ok).toBe(true);
-    const after = readdirSync(tmp).filter((n) => n.startsWith("acc2-uv-"));
+    const after = readdirSync(tmp).filter((n) => n.startsWith(prefix));
     const leaked = after.filter((n) => !before.has(n));
     expect(leaked).toEqual([]);
   }, 60000);

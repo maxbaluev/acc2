@@ -282,7 +282,9 @@ export const runUvArtifact = async (
     };
   }
 
-  const dir = mkdtempSync(join(tmpdir(), "acc2-uv-"));
+  // Pid-namespaced prefix so parallel `bun test --parallel` workers can audit
+  // their own tempdirs without seeing siblings' in-flight dirs.
+  const dir = mkdtempSync(join(tmpdir(), `acc2-uv-${process.pid}-`));
   const entryPath = join(dir, "entry.py");
   writeFileSync(entryPath, wrapPythonBody(inv.body), { mode: 0o600 });
 
