@@ -19,6 +19,7 @@ import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { auxBaseUrl, readDaemonLock, rpcGet } from "./rpc";
 import { resolveDbPath } from "../runtime/state_paths";
+import { LIVENESS_THRESHOLDS } from "../substrate/liveness";
 
 export type Verdict = "ok" | "warn" | "fail" | "info";
 export type Check = { name: string; verdict: Verdict; detail: string };
@@ -321,17 +322,19 @@ export const checkBunVersion = (env: DoctorEnv): Check => {
 
 // Seed minimums. `seedFoundationalKnowledge` (substrate/seed.ts) imports
 // 10 laws under owner-approval; `seedCodeArtifacts` admits 8 canonical
-// rows. The threshold below sets the floor doctor flips to FAIL on —
-// some operators may have evicted or rotated entries, but a DB with
-// fewer than 5 of either is structurally incomplete and would silently
-// degrade real-brain dispatch.
-export const SEED_KNOWLEDGE_MIN = 5;
-export const SEED_ARTIFACT_MIN = 5;
-// Recipe seed floor — `seedRecipes` lays down 2 canonical Tier-0
-// trajectories (URL title fetch, arithmetic) so the substrate-replay
-// lane has something to match against on first-run dispatches. Setting
-// the floor at 1 tolerates one eviction without flipping to FAIL.
-export const SEED_RECIPE_MIN = 1;
+// rows; `seedRecipes` lays down 2 canonical Tier-0 trajectories. The
+// floors below set the levels doctor flips to FAIL on — some operators
+// may have evicted or rotated entries, but a DB below the floor is
+// structurally incomplete and would silently degrade real-brain
+// dispatch.
+//
+// The floor numbers themselves live in `substrate/liveness.ts` so that
+// `acc admin substrate-status` and `acc doctor` cannot disagree about
+// what "seeded" means. Re-exported here for back-compat with tests that
+// import the names directly.
+export const SEED_KNOWLEDGE_MIN = LIVENESS_THRESHOLDS.knowledgePromoted;
+export const SEED_ARTIFACT_MIN = LIVENESS_THRESHOLDS.codeArtifactsSeed;
+export const SEED_RECIPE_MIN = LIVENESS_THRESHOLDS.recipesSeed;
 
 /** Substrate-content check: at least SEED_KNOWLEDGE_MIN
  *  `knowledge_promoted` rows must exist in the events ledger. An empty
