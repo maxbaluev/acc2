@@ -142,18 +142,17 @@ Each daemon then writes its own lock file under its own state dir, runs its own 
 
 The daemon starts six background workers automatically: the **embedder** (text-embedding-3-small over every text-bearing event), the **scheduler** (drains ready dispatches), **father** (long-horizon re-ranking, 5-min cadence), the **rolling-reviewer** (cadence-driven re-opens), **rehabilitation** (probes quarantined artifacts), and **integrity** (PRAGMA integrity + WAL hygiene, 6-hour cadence). All are ON by default — the substrate is meant to run the full organism out of the box.
 
-Each worker has an `ACC2_*_AUTOSTART` env var as an opt-OUT only. Set it to `0` to disable a worker for an unusual setup (e.g. you run father out-of-band, or you are isolating the embedder during an OpenAI outage):
+The canonical opt-OUT is ONE env var — `ACC2_DISABLE_WORKERS` — carrying a comma-separated list of worker names. Empty / unset = all six workers run (the production default). Example: disable the embedder during an OpenAI outage and the father during a controlled long-horizon test:
 
 ```bash
-ACC2_EMBEDDER_AUTOSTART=0    # disable embedder (no OpenAI calls)
-ACC2_AUTOSCHEDULER=0         # disable scheduler drain loop
-ACC2_FATHER_AUTOSTART=0      # disable father
-ACC2_ROLLING_AUTOSTART=0     # disable rolling-reviewer
-ACC2_REHAB_AUTOSTART=0       # disable rehabilitation
-ACC2_INTEGRITY_AUTOSTART=0   # disable integrity worker
+ACC2_DISABLE_WORKERS=embedder,father
 ```
 
-Do NOT set them to `1` — that is the legacy opt-in shape. The canonical opt-OUT value is `"0"`. The test suite (`bun test`) pins all six off via `tests/preload.ts` so it stays hermetic; production code does not need to touch them.
+Canonical worker names: `embedder`, `scheduler`, `father`, `rolling_reviewer`, `rehabilitation`, `integrity`. Unknown names in the list are silently ignored (no crash) so forgetting a worker after a rename is a no-op rather than a hard failure.
+
+The test suite (`bun test`) pins five of the six off (`embedder,scheduler,father,rolling_reviewer,rehabilitation`) via `tests/preload.ts`; integrity stays on because it is pure-SQLite and required for `/ready`. Production code does not need to touch any of this.
+
+The legacy per-worker env vars (`ACC2_EMBEDDER_AUTOSTART`, `ACC2_FATHER_AUTOSTART`, `ACC2_ROLLING_AUTOSTART`, `ACC2_REHAB_AUTOSTART`, `ACC2_INTEGRITY_AUTOSTART`, `ACC2_AUTOSCHEDULER`) have been REMOVED. Operators who still export them will have no effect — migrate to `ACC2_DISABLE_WORKERS`.
 
 ---
 

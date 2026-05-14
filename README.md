@@ -129,7 +129,7 @@ acc2/
 - `ACC2_OPENCODE_TIMEOUT_MS`, `ACC2_OPENCODE_MCP_HANDSHAKE_MS`, `ACC2_OPENCODE_MODEL` — opencode subprocess tuning.
 - `ACC2_DAEMON_PORT`, `ACC2_DAEMON_AUX_PORT` — pinned ports (auto-pick when unset).
 - `CAMOUFOX_BINARY_PATH` — override the auto-detected Camoufox binary.
-- Worker autostart opt-OUTs (all default ON; set to `0` to disable for unusual setups): `ACC2_EMBEDDER_AUTOSTART`, `ACC2_FATHER_AUTOSTART`, `ACC2_ROLLING_AUTOSTART`, `ACC2_INTEGRITY_AUTOSTART`, `ACC2_REHAB_AUTOSTART`, `ACC2_AUTOSCHEDULER`. Tests pin them off via `tests/preload.ts`.
+- Worker autostart opt-OUT (all six workers default ON): `ACC2_DISABLE_WORKERS=embedder,father,...` — single comma-separated env var. Canonical names: `embedder`, `scheduler`, `father`, `rolling_reviewer`, `rehabilitation`, `integrity`. Tests pin five off via `tests/preload.ts` (integrity stays on for `/ready`).
 
 Claude Code and opencode authenticate via their subscription CLIs — no API keys needed for the LLM substrates themselves.
 
