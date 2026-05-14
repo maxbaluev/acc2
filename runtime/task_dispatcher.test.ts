@@ -301,6 +301,186 @@ describe("task_dispatcher", () => {
     }
   }, 90_000);
 
+  test("Batch 3.CLEANUP: self_modification_recorded fires when the action observation declares modified_paths under /system/acc2/", async () => {
+    // The dispatcher emits self_modification_recorded immediately after
+    // task_committed when (a) the action observation carries a
+    // `modified_paths` array AND (b) at least one path falls under the acc2
+    // codebase root. This narrow heuristic wires §10.1's self-improvement
+    // walkthrough into the event stream so the substrate can see when a
+    // brain-authored dispatch mutated the v2 source tree itself.
+    const db = openDb(":memory:");
+    const { admitArtifact } = await import("./artifact_admission");
+    const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
+    const ready = readyTasks(db, directiveId);
+    const task = ready[0]!;
+
+    // Custom bridge: admit an action whose observation prints
+    // `modified_paths` (a string array containing an acc2-relative path) plus
+    // a permissive verifier (residual=0 always). Both artifacts are bun.
+    const customBridge = async (
+      req: { directiveId: string; taskId: string; prompt: string },
+      bridgeDb: typeof db,
+    ): Promise<{ ok: true; final_response: string; usage: { tokens: number }; emitted_event_ids: string[] }> => {
+      const ACTION_BODY = `
+        const paths = [
+          "/home/maxbaluev/bos2/system/acc2/runtime/task_dispatcher.ts",
+          "/home/maxbaluev/bos2/some/unrelated/file.ts",
+        ];
+        // Use the wrapped convention (matches fixture_d_count_todos shape) so
+        // the dispatcher's heuristic exercises the result.modified_paths path.
+        process.stdout.write("@@RESULT@@ " + JSON.stringify({ result: { modified_paths: paths } }) + "\\n");
+      `;
+      const VERIFIER_BODY = `process.stdout.write("@@RESULT@@ " + JSON.stringify({ residual: 0 }) + "\\n");`;
+      const emit = (ev: { directive_id?: string; task_id?: string; invoker?: string; [k: string]: unknown }) => {
+        emitEvent(bridgeDb, {
+          ...ev as Parameters<typeof emitEvent>[1],
+          directive_id: (ev.directive_id as string) ?? req.directiveId,
+          task_id: (ev.task_id as string) ?? req.taskId,
+          invoker: (ev.invoker as Parameters<typeof emitEvent>[1]["invoker"]) ?? "opencode",
+        });
+      };
+      const sandbox = {
+        runtime: "bun" as const,
+        fs_read: ["**/*"],
+        fs_write: [],
+        net_allow: [],
+        proc_allow: [],
+        substrate_access: "none" as const,
+        cpu_ms: 5000,
+        wall_ms: 5000,
+        memory_mb: 128,
+      };
+      const action = await admitArtifact(
+        bridgeDb,
+        {
+          runtime: "bun",
+          body: ACTION_BODY,
+          declaredSandbox: sandbox,
+          fixtureInput: null,
+          fixtureExpectedResidualBelow: 1.1,
+          name: "self_mod_action_fixture",
+        },
+        emit,
+      );
+      if (!action.ok) throw new Error("admit failed: " + action.reason);
+      const verifier = await admitArtifact(
+        bridgeDb,
+        {
+          runtime: "bun",
+          body: VERIFIER_BODY,
+          declaredSandbox: sandbox,
+          fixtureInput: { result: { modified_paths: [] } },
+          fixtureExpectedResidualBelow: 1.1,
+          name: "self_mod_verifier_fixture",
+        },
+        emit,
+      );
+      if (!verifier.ok) throw new Error("admit failed: " + verifier.reason);
+      emitEvent(bridgeDb, {
+        kind: "action_predicted",
+        substrate_origin: "opencode",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        action_artifact_id: action.artifactId,
+        verifier_artifact_id: verifier.artifactId,
+        predicted_residual: 0.05,
+        payload: { intent: "self-modification fixture" },
+        invoker: "opencode",
+      });
+      return {
+        ok: true,
+        final_response: "self-mod fixture",
+        usage: { tokens: 0 },
+        emitted_event_ids: [],
+      };
+    };
+
+    const result = await dispatchReadyTask(db, task, {
+      bridge: customBridge as Parameters<typeof dispatchReadyTask>[2] extends infer D
+        ? D extends { bridge?: infer B } ? B : never
+        : never,
+    });
+    expect(result.violations).toEqual([]);
+    const committed = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_committed' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(committed.c).toBe(1);
+
+    const selfMod = db
+      .query("SELECT payload FROM events WHERE kind = 'self_modification_recorded' AND task_id = ?")
+      .get(taskId) as { payload: string } | null;
+    expect(selfMod).not.toBeNull();
+    if (!selfMod) return;
+    const payload = JSON.parse(selfMod.payload) as Record<string, unknown>;
+    const modifiedPaths = payload.modified_paths as string[];
+    expect(Array.isArray(modifiedPaths)).toBe(true);
+    // Only paths under the acc2 root survive the filter — the unrelated path
+    // must be dropped, the acc2-relative path must be kept.
+    expect(modifiedPaths.length).toBe(1);
+    expect(modifiedPaths[0]).toContain("/system/acc2/");
+    expect(payload.total_declared_paths).toBe(2);
+    expect(payload.detection).toBe("action_observation_modified_paths_acc2_root");
+  }, 60_000);
+
+  test("Batch 3.CLEANUP: self_modification_recorded does NOT fire when modified_paths are all outside acc2 root", async () => {
+    const db = openDb(":memory:");
+    const { admitArtifact } = await import("./artifact_admission");
+    const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
+    const ready = readyTasks(db, directiveId);
+    const task = ready[0]!;
+
+    const customBridge = async (
+      req: { directiveId: string; taskId: string; prompt: string },
+      bridgeDb: typeof db,
+    ): Promise<{ ok: true; final_response: string; usage: { tokens: number }; emitted_event_ids: string[] }> => {
+      const ACTION_BODY = `
+        process.stdout.write("@@RESULT@@ " + JSON.stringify({ result: { modified_paths: ["/tmp/foo.txt", "/var/log/bar"] } }) + "\\n");
+      `;
+      const VERIFIER_BODY = `process.stdout.write("@@RESULT@@ " + JSON.stringify({ residual: 0 }) + "\\n");`;
+      const emit = (ev: Record<string, unknown>) => {
+        emitEvent(bridgeDb, {
+          ...ev as Parameters<typeof emitEvent>[1],
+          directive_id: (ev.directive_id as string) ?? req.directiveId,
+          task_id: (ev.task_id as string) ?? req.taskId,
+          invoker: (ev.invoker as Parameters<typeof emitEvent>[1]["invoker"]) ?? "opencode",
+        });
+      };
+      const sandbox = {
+        runtime: "bun" as const,
+        fs_read: ["**/*"], fs_write: [], net_allow: [], proc_allow: [],
+        substrate_access: "none" as const,
+        cpu_ms: 5000, wall_ms: 5000, memory_mb: 128,
+      };
+      const action = await admitArtifact(bridgeDb, {
+        runtime: "bun", body: ACTION_BODY, declaredSandbox: sandbox,
+        fixtureInput: null, fixtureExpectedResidualBelow: 1.1,
+        name: "non_self_mod_action_fixture",
+      }, emit);
+      const verifier = await admitArtifact(bridgeDb, {
+        runtime: "bun", body: VERIFIER_BODY, declaredSandbox: sandbox,
+        fixtureInput: { result: {} }, fixtureExpectedResidualBelow: 1.1,
+        name: "non_self_mod_verifier_fixture",
+      }, emit);
+      if (!action.ok || !verifier.ok) throw new Error("admit failed");
+      emitEvent(bridgeDb, {
+        kind: "action_predicted", substrate_origin: "opencode",
+        directive_id: req.directiveId, task_id: req.taskId,
+        action_artifact_id: action.artifactId, verifier_artifact_id: verifier.artifactId,
+        predicted_residual: 0.05, payload: { intent: "non-acc2 modify" }, invoker: "opencode",
+      });
+      return { ok: true, final_response: "x", usage: { tokens: 0 }, emitted_event_ids: [] };
+    };
+    await dispatchReadyTask(db, task, {
+      bridge: customBridge as Parameters<typeof dispatchReadyTask>[2] extends infer D
+        ? D extends { bridge?: infer B } ? B : never
+        : never,
+    });
+    const selfMod = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'self_modification_recorded' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(selfMod.c).toBe(0);
+  }, 60_000);
+
   test("refinement depth cap fires task_failed with refinement_depth_exceeded after 5 levels", async () => {
     const db = openDb(":memory:");
     const directiveId = newId();

@@ -163,8 +163,13 @@ describe("checkNsjail", () => {
     const c = checkNsjail(makeEnv({ which: (cmd) => cmd === "nsjail" ? "/usr/bin/nsjail" : null }));
     expect(c.verdict).toBe("ok");
   });
-  test("info when missing (not failure)", () => {
-    expect(checkNsjail(makeEnv({ which: () => null })).verdict).toBe("info");
+  test("warn when missing (Batch 3.CLEANUP — security-sensitive surfacing)", () => {
+    // Bumped from `info` to `warn` so the doctor's overall verdict surfaces
+    // the gap. nsjail is the uv runtime's enforcement boundary; without it
+    // the sandbox is honor-system and brain-authored artifacts can escape.
+    const c = checkNsjail(makeEnv({ which: () => null }));
+    expect(c.verdict).toBe("warn");
+    expect(c.detail).toContain("honor-system");
   });
 });
 

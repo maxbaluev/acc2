@@ -13,7 +13,7 @@ describe("seedCodeArtifacts", () => {
   test("inserts every seed artifact on first run", () => {
     const db = openDb(":memory:");
     const summary = seedCodeArtifacts(db);
-    expect(summary.inserted).toBeGreaterThanOrEqual(10);
+    expect(summary.inserted).toBeGreaterThanOrEqual(8);
     expect(summary.skipped).toBe(0);
 
     const rows = db.query("SELECT id, runtime, status, name FROM code_artifact ORDER BY id").all() as Array<{
@@ -46,6 +46,30 @@ describe("seedCodeArtifacts", () => {
     const ids = (db.query("SELECT id FROM code_artifact").all() as Array<{ id: string }>).map((r) => r.id);
     for (const id of ids) {
       expect(id.startsWith("seed_")).toBe(true);
+    }
+  });
+
+  test("every admitted seed artifact has a non-stub body (Batch 3.CLEANUP)", () => {
+    // The audit flagged three seed artifacts (substrate_embed, substrate_search,
+    // agent_invoke) whose bodies were literally "// stub Phase B+: …" — they
+    // admitted at install time but would emit `result_marker_missing` if the
+    // brain ever picked them. Batch 3.CLEANUP resolves by giving substrate_embed
+    // a real OpenAI embedding fetch body and removing the two seeds that
+    // overlap with v2's MCP tool surface (substrate.search) / opencode-only
+    // dispatch model (no sub-agent invocation).
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    const rows = db.query("SELECT id, body FROM code_artifact").all() as Array<{
+      id: string;
+      body: string;
+    }>;
+    for (const r of rows) {
+      expect(r.body.includes("stub Phase B+")).toBe(false);
+      expect(r.body.includes("will be authored per LATM")).toBe(false);
+      // Real-body invariant: the script either invokes Bun/fetch/process or
+      // wraps the camofox session facade. A body that is ONLY a comment block
+      // would fail this — every seed must do something observable.
+      expect(r.body.length).toBeGreaterThan(40);
     }
   });
 

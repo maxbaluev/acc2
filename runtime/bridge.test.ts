@@ -84,7 +84,7 @@ describe("bridge (Phase D mock, default mode)", () => {
     expect(verifier?.body ?? "").toContain("ACC2_INPUTS");
   }, 30_000);
 
-  test("returns auth_missing for prompts without the fixture marker", async () => {
+  test("returns mock_bridge_prompt_unrecognized for prompts without a fixture marker (Batch 3.CLEANUP)", async () => {
     const db = openDb(":memory:");
     process.env.ACC2_BRIDGE_MODE = "mock";
     const result = await opencodeQuery(
@@ -93,12 +93,24 @@ describe("bridge (Phase D mock, default mode)", () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason.kind).toBe("auth_missing");
+      expect(result.reason.kind).toBe("mock_bridge_prompt_unrecognized");
+      if (result.reason.kind === "mock_bridge_prompt_unrecognized") {
+        // The reason carries the supported-marker list so callers see why the
+        // dispatch declined without grepping the bridge source.
+        expect(result.reason.supported_markers.length).toBeGreaterThanOrEqual(2);
+        expect(result.reason.supported_markers.some((m) => m.includes("fixture_d_count_todos"))).toBe(true);
+        expect(result.reason.supported_markers.some((m) => m.includes("example.com"))).toBe(true);
+      }
     }
-    const failed = db
-      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'bridge_failed'")
-      .get() as { c: number };
-    expect(failed.c).toBe(1);
+    const failedRows = db
+      .query("SELECT payload FROM events WHERE kind = 'bridge_failed' ORDER BY ts DESC LIMIT 1")
+      .all() as Array<{ payload: string }>;
+    expect(failedRows.length).toBe(1);
+    const payload = JSON.parse(failedRows[0]!.payload) as Record<string, unknown>;
+    // The substrate row mirrors the typed reason so log consumers can see the
+    // unrecognized marker without reconstructing it from the BridgeResult shape.
+    expect(payload.reason).toBe("mock_bridge_prompt_unrecognized");
+    expect(Array.isArray(payload.supported_markers)).toBe(true);
   });
 
   test("explicit opencodeQueryMock entry stays callable for legacy callers", async () => {

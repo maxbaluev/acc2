@@ -192,8 +192,13 @@ export const checkCamoufoxBinary = (env: DoctorEnv): Check => {
 export const checkNsjail = (env: DoctorEnv): Check => {
   const path = env.which("nsjail");
   if (path) return { name: "nsjail", verdict: "ok", detail: path };
-  return { name: "nsjail", verdict: "info",
-    detail: "not installed — uv sandbox is honor-system without nsjail (runs still work)" };
+  // Batch 3.CLEANUP: bumped from `info` to `warn` because nsjail is
+  // security-sensitive — the uv runtime's net/proc/fs restrictions degrade to
+  // honor-system without it. Operators running untrusted brain-authored uv
+  // artifacts SHOULD see this in the doctor's overall verdict, not silently
+  // bucketed alongside informational rows.
+  return { name: "nsjail", verdict: "warn",
+    detail: "not installed — uv sandbox degrades to honor-system (runs still work, but net/proc/fs restrictions are advisory)" };
 };
 
 export const checkBunVersion = (env: DoctorEnv): Check => {

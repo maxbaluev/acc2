@@ -36,6 +36,7 @@ import { distributeCredit } from "./credit";
 import { findRecipeMatch, replayRecipe } from "./recipe_replay";
 import { readCurrentMode } from "./crisis_mode";
 import { isCycleViolation } from "./cycle_one_gate";
+import { recordDispatch, recordActionResidual } from "./metrics";
 
 const REFINEMENT_DEPTH_CAP = 5;
 
@@ -121,6 +122,7 @@ export const dispatchReadyTask = async (
   deps: DispatchDeps = {},
 ): Promise<DispatchResult> => {
   const dispatchId = newId();
+  const dispatchStartMs = Date.now();
   const violations: string[] = [];
   const bridge = deps.bridge ?? opencodeQuery;
 
@@ -484,6 +486,49 @@ export const dispatchReadyTask = async (
               verifier_artifact_id: verifierArtifact.id,
             } as JsonValue,
           });
+          // Self-modification heuristic (Batch 3.CLEANUP §10.1): when the
+          // action artifact's observation declares a `modified_paths` array AND
+          // any path falls under the acc2 codebase root, surface the trajectory
+          // via `self_modification_recorded`. The event is observational — the
+          // commit has already landed; this row makes the self-as-target dispatch
+          // auditable downstream (e.g. by govern-side rolling reviews). The
+          // heuristic deliberately reads ACTION_OBSERVATION, not the diff on
+          // disk: artifacts opt in by printing the paths they touched into
+          // `modified_paths` (flat) or `result.modified_paths` (wrapped — the
+          // existing fixture convention used by fixture_d_count_todos). Nothing
+          // fires automatically when an artifact silently mutates files
+          // outside that envelope.
+          const observed = actionObs.result as Record<string, unknown> | null;
+          let modifiedPaths: unknown = undefined;
+          if (observed && typeof observed === "object" && !Array.isArray(observed)) {
+            const flat = (observed as { modified_paths?: unknown }).modified_paths;
+            const wrapped = (observed as { result?: { modified_paths?: unknown } }).result;
+            modifiedPaths = Array.isArray(flat)
+              ? flat
+              : (wrapped && typeof wrapped === "object" && !Array.isArray(wrapped)
+                  ? (wrapped as { modified_paths?: unknown }).modified_paths
+                  : undefined);
+          }
+          if (Array.isArray(modifiedPaths)) {
+            const selfPaths = modifiedPaths
+              .filter((p): p is string => typeof p === "string")
+              .filter((p) => p.includes("/system/acc2/") || p.startsWith("acc2/") || p.startsWith("system/acc2/"));
+            if (selfPaths.length > 0) {
+              emitEvent(db, {
+                kind: "self_modification_recorded",
+                substrate_origin: "substrate_auto",
+                directive_id: task.directive_id,
+                task_id: task.id,
+                action_artifact_id: actionArtifact.id,
+                payload: {
+                  dispatch_id: dispatchId,
+                  modified_paths: selfPaths,
+                  total_declared_paths: modifiedPaths.length,
+                  detection: "action_observation_modified_paths_acc2_root",
+                } as JsonValue,
+              });
+            }
+          }
         } else {
           // High-residual path — emit a refinement edge + new task_node_opened
           // for the refinement child, OR cap-fail if we've exhausted depth.
@@ -556,6 +601,24 @@ export const dispatchReadyTask = async (
       original_route: decision.route,
     } as JsonValue,
   });
+
+  // Batch 3.OPS: record dispatch metric. Outcome is derived from terminal
+  // events on this task during the dispatch window.
+  try {
+    const closedEvents = readEventsSinceTs(db, dispatchStartedTs, task.id);
+    const hasCommit = closedEvents.some((e) => e.kind === "task_committed");
+    const hasFail = closedEvents.some((e) => e.kind === "task_failed");
+    const hasRefine = closedEvents.some((e) => e.kind === "task_edge_recorded" &&
+      (e.payload as Record<string, unknown> | null)?.kind === "refines");
+    const outcome = hasCommit ? "committed" : hasFail ? "failed" : hasRefine ? "refined" : "closed";
+    recordDispatch(effectiveRoute, outcome, (Date.now() - dispatchStartMs) / 1000);
+    // Record observed residuals as well.
+    for (const e of closedEvents) {
+      if (e.kind === "action_scored" && typeof e.residual === "number") {
+        recordActionResidual("bun", e.residual);
+      }
+    }
+  } catch { /* swallow — metrics are best-effort */ }
 
   return {
     dispatch_id: dispatchId,

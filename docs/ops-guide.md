@@ -16,7 +16,8 @@ AccInt v2 is bound by [v2-design.md §1](v2-design.md) to **subscription CLIs on
 | **opencode** | Yes for `ACC2_BRIDGE_MODE=real` | Subscription CLI for GPT-5.5 brain dispatches. | <https://github.com/sst/opencode> — authenticate per their README. |
 | **Claude Code** | Yes (you are reading this from inside it) | Subscription CLI for orchestrator + inline mechanical work. | <https://docs.claude.com/en/docs/claude-code> |
 | **uv** (Astral) | Optional | Required for the `uv` runtime (Python code artifacts). Without uv, `bun` and `camofox-browser` runtimes still work. | <https://github.com/astral-sh/uv> — `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| **camoufox** | Optional | Required for the `camofox-browser` runtime (browser-touching code artifacts). | Download from <https://github.com/daijro/camoufox/releases> into `~/.cache/camoufox/camoufox` OR set `CAMOUFOX_BINARY_PATH`. |
+| **playwright** | Optional | JS driver for the `camofox-browser` runtime (declared in `package.json`'s `dependencies` and installed by `bun install`). Without playwright, camofox-browser artifacts fail with `camofox_runtime_unavailable`; non-browser directives still work. | Installed automatically by `bun install`; pinned to `^1.50.0`. |
+| **camoufox** | Optional | Required for the `camofox-browser` runtime (browser-touching code artifacts). Camoufox brings its own firefox build — you do NOT need `bunx playwright install firefox`. | `pip install camoufox && python -m camoufox fetch` (writes `~/.cache/camoufox/camoufox`) OR download from <https://github.com/daijro/camoufox/releases> + set `CAMOUFOX_BINARY_PATH`. |
 | **nsjail** | Optional | Hardens the `uv` runtime sandbox. Without it, uv runs honor-system on a temp dir. | <https://github.com/google/nsjail> — `apt install nsjail` on Debian/Ubuntu. |
 | **OpenAI API key** | Optional (recommended) | Embeddings via `text-embedding-3-small`. Without it, knowledge embeddings silently no-op, which degrades retrieval relevance. | <https://platform.openai.com/api-keys> |
 
@@ -111,6 +112,28 @@ The generated unit / plist propagates relevant env vars (`OPENAI_API_KEY`, `ACC2
 bun cli/dispatch.ts daemon status        # JSON /health response
 bun cli/doctor.ts                        # full readiness sweep
 ```
+
+### 4d. Single-instance per host
+
+The daemon binds a TCP port + writes a lock file at `~/.accint/v2.sock` carrying the MCP port, aux port, pid, and admin token. The acquire path is atomic — a second `bun runtime/daemon.ts` invocation on the same host either picks free ports and a different state dir or refuses to start. There is **no internal coordination** between two daemons sharing the same SQLite file: WAL writers race, the embedding rebuilder duplicates work, and the lock file ends up pointing at whichever process wrote it last. Treat the lock as authoritative.
+
+To run two isolated AccInt environments on the same host (e.g. a stable install plus a development checkout), point each at its own state dir AND its own ports:
+
+```bash
+# Terminal A — production
+export ACC2_STATE_DIR=$HOME/.accint
+export ACC2_DAEMON_PORT=9387
+export ACC2_DAEMON_AUX_PORT=9388
+bun cli/dispatch.ts daemon start
+
+# Terminal B — development
+export ACC2_STATE_DIR=$HOME/.accint-dev
+export ACC2_DAEMON_PORT=9487
+export ACC2_DAEMON_AUX_PORT=9488
+bun cli/dispatch.ts daemon start
+```
+
+Each daemon then writes its own lock file under its own state dir, runs its own MCP server, and refuses to clobber the other.
 
 ---
 

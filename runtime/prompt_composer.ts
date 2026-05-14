@@ -139,8 +139,12 @@ const readDirectiveGoal = (db: Database, directiveId: string): string | null => 
 };
 
 const readKnowledgeTopK = (db: Database, k: number): Array<{ id: string; text: string; score: number }> => {
-  // Phase D stand-in: pull recent promoted knowledge candidates. Phase F lights
-  // up embedding × posterior reranking against the task goal.
+  // Recency fallback for the RETRIEVED KNOWLEDGE section: pulls recent
+  // promoted knowledge candidates when the caller did NOT pre-compute a
+  // reranker hit list (i.e. the embedding index is empty or the caller chose
+  // not to run retrieval). When `opts.retrievedKnowledge` is provided, the
+  // canonical embedding × posterior reranker (`runtime/retrieval.ts`) supplies
+  // the section instead — see `buildRetrievedKnowledgeSection` above.
   const rows = db
     .query(
       "SELECT id, payload FROM events WHERE kind = 'knowledge_promoted' ORDER BY ts DESC LIMIT ?",
@@ -350,9 +354,12 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     : buildArtifactSection(readArtifactRegistryTopK(db, 6));
   candidates.push({ name: "code_artifact_registry", p: 1, body: artifactBody });
 
-  // P2/P3 sections are stubs in Phase D (no upstream-task or stakeholder data
-  // yet). Including the headers anyway so the brain sees the structural
-  // surface and Phase E only has to populate the bodies.
+  // P2/P3 sections. Upstream-task outputs land via the watch_edges walk just
+  // below (Phase E `watch_edges.ts`); stakeholder + cross-directive interference
+  // are populated by their respective compositors at the bottom. The
+  // `upstream_outputs` placeholder header below remains a stand-in until
+  // the upstream-task projection lands (no producer wires non-watch outputs
+  // into this slot yet).
   candidates.push({ name: "upstream_outputs", p: 2, body: "UPSTREAM OUTPUTS: (none)" });
   // Watch edges (v2-design.md §9.4) — projected through declared consistency
   // mode. Empty when no watch edges target this task.

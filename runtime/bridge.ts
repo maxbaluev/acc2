@@ -81,7 +81,8 @@ export type BridgeFailureReason =
   | { kind: "rate_limit"; retry_after_ms: number }
   | { kind: "timeout"; ms_elapsed: number }
   | { kind: "subprocess_crash"; stderr_tail: string }
-  | { kind: "parse_error"; raw: string };
+  | { kind: "parse_error"; raw: string }
+  | { kind: "mock_bridge_prompt_unrecognized"; supported_markers: string[] };
 
 export type BridgeResult =
   | { ok: true; final_response: string; usage: { tokens: number }; emitted_event_ids: string[] }
@@ -182,8 +183,10 @@ const BUN_DEFAULT_SANDBOX = (): SandboxDecl => ({
 
 /** Phase D mock: react to known prompt markers by admitting canonical
  *  bun action + verifier artifacts and emitting action_predicted that
- *  references both. Unknown prompts return auth_missing so future fixtures
- *  can compose against this stub. */
+ *  references both. Unknown prompts return `mock_bridge_prompt_unrecognized`
+ *  with the list of supported markers so operators understand why the
+ *  dispatch declined (Batch 3.CLEANUP: audit flagged the prior
+ *  `auth_missing` shape as misleading — auth is not the real cause). */
 export const opencodeQueryMock = async (
   req: BridgeRequest,
   db: Database,
@@ -199,15 +202,25 @@ export const opencodeQueryMock = async (
   });
 
   if (!req.prompt.includes(FIXTURE_D_MARKER) && !req.prompt.includes(EXAMPLE_COM_MARKER)) {
+    const supportedMarkers = [FIXTURE_D_MARKER, EXAMPLE_COM_MARKER];
     emitEvent(db, {
       kind: "bridge_failed",
       substrate_origin: "opencode",
       directive_id: req.directiveId,
       task_id: req.taskId,
-      payload: { reason: "phase_e_real_bridge_not_wired" } as JsonValue,
+      payload: {
+        reason: "mock_bridge_prompt_unrecognized",
+        supported_markers: supportedMarkers,
+        prompt_chars: req.prompt.length,
+        hint: "set ACC2_BRIDGE_MODE=real to dispatch arbitrary prompts via opencode; "
+          + "the mock bridge only recognizes the two fixture markers listed in supported_markers",
+      } as JsonValue,
       invoker: "opencode",
     });
-    return { ok: false, reason: { kind: "auth_missing" } };
+    return {
+      ok: false,
+      reason: { kind: "mock_bridge_prompt_unrecognized", supported_markers: supportedMarkers },
+    };
   }
 
   if (req.prompt.includes(EXAMPLE_COM_MARKER)) {
