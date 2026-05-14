@@ -140,6 +140,13 @@ const EmitSchema = z.object({
   event: EmitEventSchema.optional(),
   // Top-level fallback (mirrors EmitEventSchema, all optional except `kind`
   // which the handler validates from whichever surface is present).
+  //
+  // Batch 2.β: opencode's MCP-client flattens our zod schema into top-level
+  // tool-call args (no `event` wrapper). action_predicted carries
+  // action_artifact_id / verifier_artifact_id / predicted_residual at the top
+  // level — so the FLAT schema must accept them too or those fields are
+  // silently dropped (no-action-predicted gap). Mirroring EmitEventSchema
+  // exactly here closes that gap.
   kind: z.string().optional(),
   payload: z.unknown().optional(),
   directive_id: z.string().optional(),
@@ -148,6 +155,11 @@ const EmitSchema = z.object({
   loop_id: z.string().optional(),
   substrate_origin: z.string().optional(),
   context_refs: z.array(z.string()).optional(),
+  predicted_residual: z.number().optional(),
+  action_artifact_id: z.string().optional(),
+  verifier_artifact_id: z.string().optional(),
+  outcome: z.string().optional(),
+  residual: z.number().optional(),
 });
 
 const ReadSchema = z.object({
@@ -343,15 +355,16 @@ const handleEmit = (
     context_refs: src.context_refs,
     invoker: ctx.invoker,
   };
-  // Optional fields that only exist on EmitEventSchema (not on the flat shape).
-  if (args.event) {
-    const e = args.event;
-    input.predicted_residual = e.predicted_residual;
-    input.action_artifact_id = e.action_artifact_id;
-    input.verifier_artifact_id = e.verifier_artifact_id;
-    input.outcome = e.outcome as EmitEventInput["outcome"];
-    input.residual = e.residual;
-  }
+  // Optional event fields. Accept BOTH the `args.event.*` wrapped shape and
+  // the flat `args.*` shape — opencode 1.4+ flattens our zod schema when
+  // surfacing the tool to the brain, so flat is the dominant calling shape.
+  // The wrapper shape stays for callers using the explicit `event` envelope.
+  const e = args.event ?? args;
+  input.predicted_residual = e.predicted_residual;
+  input.action_artifact_id = e.action_artifact_id;
+  input.verifier_artifact_id = e.verifier_artifact_id;
+  input.outcome = e.outcome as EmitEventInput["outcome"];
+  input.residual = e.residual;
   const emitted = emitEvent(ctx.db, input);
   return { ok: true, result: { id: emitted.id, ts: emitted.ts } };
 };

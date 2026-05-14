@@ -1,7 +1,17 @@
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import { getArtifact } from "./artifact_store";
-import { opencodeQuery, opencodeQueryMock, spawnRealOpencode } from "./bridge";
+import {
+  materializeOpencodeMcpConfig,
+  opencodeQuery,
+  opencodeQueryMock,
+  spawnRealOpencode,
+  V2_OPENCODE_MCP_SERVER_NAME,
+  V2_MCP_TOOL_SURFACE,
+} from "./bridge";
 import { newId } from "./ids";
 
 afterAll(() => closeDb());
@@ -115,7 +125,12 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     const result = await spawnRealOpencode(
       { prompt: "real-spawn probe", taskId: newId(), directiveId: newId() },
       db,
-      { spawnFn: fakeSpawn },
+      {
+        spawnFn: fakeSpawn,
+        // Provide a stub MCP URL so the bridge proceeds to the spawn step
+        // (which is where the fake spawn throws).
+        mcpServerUrl: "http://127.0.0.1:1/mcp",
+      },
     );
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -126,4 +141,177 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       .get() as { c: number };
     expect(failed.c).toBeGreaterThanOrEqual(1);
   }, 30_000);
+
+  test("real spawn fails fast when V2_MCP_SERVER_URL is missing", async () => {
+    const db = openDb(":memory:");
+    // The bridge would refuse to invoke opencode without an MCP URL because
+    // opencode would then have no v2 tool surface and the dispatch would
+    // certainly hit `no_action_predicted`. Fail fast at the bridge instead.
+    const originalUrl = process.env.V2_MCP_SERVER_URL;
+    delete process.env.V2_MCP_SERVER_URL;
+    try {
+      const sentinel = {
+        kill: () => {},
+        stdout: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+        stderr: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+        exited: Promise.resolve(0),
+      };
+      const fakeSpawn = (() => sentinel) as unknown as typeof Bun.spawn;
+      const result = await spawnRealOpencode(
+        { prompt: "no-mcp-url probe", taskId: newId(), directiveId: newId() },
+        db,
+        { spawnFn: fakeSpawn },
+      );
+      expect(result.ok).toBe(false);
+      const failed = db
+        .query(
+          "SELECT payload FROM events WHERE kind = 'bridge_failed' ORDER BY ts DESC LIMIT 1",
+        )
+        .get() as { payload: string } | null;
+      expect(failed).not.toBeNull();
+      const payload = JSON.parse(failed!.payload) as Record<string, unknown>;
+      expect(payload.reason).toBe("mcp_server_url_missing");
+    } finally {
+      if (originalUrl !== undefined) process.env.V2_MCP_SERVER_URL = originalUrl;
+    }
+  }, 10_000);
+
+  test("real spawn materializes opencode-config.json declaring v2 MCP server and sets OPENCODE_CONFIG env", async () => {
+    const db = openDb(":memory:");
+    // Capture the args + env passed to spawn so we can assert the wiring.
+    let capturedArgv: string[] | null = null;
+    let capturedEnv: Record<string, string | undefined> | null = null;
+    const sentinel = {
+      kill: () => {},
+      stdout: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      stderr: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      exited: Promise.resolve(0),
+    };
+    const fakeSpawn = ((argv: string[], opts: { env?: Record<string, string | undefined> }) => {
+      capturedArgv = argv;
+      capturedEnv = opts.env ?? null;
+      return sentinel;
+    }) as unknown as typeof Bun.spawn;
+
+    const tmpConfigDir = mkdtempSync(join(tmpdir(), "acc2-bridge-test-cfg-"));
+    try {
+      // No MCP handshake will land (the fake spawn never emits stdout) so the
+      // watchdog will fire. We don't care — we want the config-materialization
+      // side effect, and the inspection below is synchronous.
+      const result = await spawnRealOpencode(
+        { prompt: "config probe", taskId: newId(), directiveId: newId() },
+        db,
+        {
+          spawnFn: fakeSpawn,
+          mcpServerUrl: "http://127.0.0.1:45678/mcp",
+          configDir: tmpConfigDir,
+          // Short handshake window so the test completes quickly when the
+          // watchdog fires (the fake spawn never emits a tool_call).
+          mcpHandshakeWindowMs: 200,
+          // Disable the long dispatch watchdogs so the test exits as soon as
+          // the handshake watchdog fires.
+          timeoutMs: 1_000,
+        },
+      );
+      // The bridge MUST have materialized the config file with v2's MCP
+      // server declaration before reaching the spawn call. Read it back from
+      // disk and assert the shape — cleanup happens in finally, but the
+      // file exists during the test for inspection.
+      const configPath = join(tmpConfigDir, "opencode-config.json");
+      // Note: the bridge cleans up the tempdir after the subprocess exits,
+      // so by the time await spawnRealOpencode returns, the file is gone.
+      // Instead we assert on the captured env, which preserves the path the
+      // bridge wrote even after cleanup.
+      expect(capturedEnv).not.toBeNull();
+      const env = capturedEnv!;
+      expect(env.OPENCODE_CONFIG).toBe(configPath);
+      expect(env.V2_MCP_SERVER_URL).toBe("http://127.0.0.1:45678/mcp");
+      expect(env.MCP_SERVER_URL).toBe("http://127.0.0.1:45678/mcp");
+
+      // The argv must NOT include any --mcp-* flag (we wire via env/config).
+      expect(capturedArgv).not.toBeNull();
+      const argv = capturedArgv!;
+      expect(argv[0]).toBe("opencode");
+      expect(argv[1]).toBe("run");
+      expect(argv).toContain("--format=json");
+      expect(argv).toContain("--dangerously-skip-permissions");
+      expect(argv.find((a) => a.startsWith("--mcp"))).toBeUndefined();
+
+      // The bridge always either returns ok=true or ok=false with a reason;
+      // in this case the MCP handshake watchdog fires (no tool_call from the
+      // fake spawn) so we get mcp_handshake_failed.
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason.kind).toBe("subprocess_crash");
+      }
+      const failed = db
+        .query(
+          "SELECT payload FROM events WHERE kind = 'bridge_failed' ORDER BY ts DESC LIMIT 1",
+        )
+        .get() as { payload: string } | null;
+      expect(failed).not.toBeNull();
+      const payload = JSON.parse(failed!.payload) as Record<string, unknown>;
+      expect(payload.reason).toBe("mcp_handshake_failed");
+      expect(payload.mcp_server_url).toBe("http://127.0.0.1:45678/mcp");
+    } finally {
+      try { rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* swallow */ }
+    }
+  }, 10_000);
+
+  test("materializeOpencodeMcpConfig writes a valid opencode.json with v2's MCP server declaration", () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "acc2-materialize-test-"));
+    try {
+      const { configPath, tempDir } = materializeOpencodeMcpConfig({
+        mcpServerUrl: "http://127.0.0.1:9387/mcp",
+        configDir: tmpDir,
+      });
+      expect(existsSync(configPath)).toBe(true);
+      expect(tempDir).toBe(tmpDir);
+      const cfg = JSON.parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>;
+      expect(cfg.$schema).toBe("https://opencode.ai/config.json");
+      const mcp = cfg.mcp as Record<string, unknown>;
+      expect(mcp).toBeDefined();
+      const server = mcp[V2_OPENCODE_MCP_SERVER_NAME] as Record<string, unknown>;
+      expect(server).toBeDefined();
+      expect(server.type).toBe("remote");
+      expect(server.url).toBe("http://127.0.0.1:9387/mcp");
+      expect(server.enabled).toBe(true);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("v2 MCP tool surface advertises every substrate.* and runtime.* tool the daemon exposes", () => {
+    // Defensive: the brain prompt composer ships V2_MCP_TOOL_SURFACE as a
+    // discovery hint. Keep this list in sync with runtime/mcp_server.ts —
+    // when a new tool lands there, append it here so the hint stays
+    // accurate. This test surfaces accidental drift.
+    const expected = [
+      "substrate.emit",
+      "substrate.read",
+      "substrate.get_event",
+      "substrate.get_artifact",
+      "substrate.search",
+      "substrate.embed_text",
+      "substrate.run_artifact",
+      "substrate.run_verifier",
+      "substrate.credit",
+      "substrate.admit_artifact",
+      "substrate.open_fixture",
+      "substrate.amend_directive",
+      "substrate.record_stakeholder_state",
+      "substrate.record_interference_edge",
+      "substrate.open_directive",
+      "substrate.find_recipe",
+      "substrate.register_external_source",
+      "runtime.dispatch_ready_task",
+      "runtime.scheduler_tick",
+      "runtime.process_rolling_reviews",
+      "runtime.father_iterate",
+      "runtime.detect_father_drift",
+      "runtime.replay_recipe",
+      "runtime.recent_events",
+    ];
+    expect([...V2_MCP_TOOL_SURFACE].sort()).toEqual([...expected].sort());
+  });
 });

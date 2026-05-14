@@ -29,7 +29,7 @@ Typical wall-time:
 - `--mock-bridge`: ~3-6 seconds (boot + canned dispatch + assertions).
 - Real bridge: ~60-180 seconds (opencode boot + one full reasoning cycle + bun action + verifier run).
 
-## Expected stdout (real bridge, success)
+## Expected stdout (real bridge, success — Batch 2.β reference run)
 
 ```
 acc2 real-opencode smoke — Batch 2.α
@@ -37,26 +37,31 @@ acc2 real-opencode smoke — Batch 2.α
 mode: real
 
 preflight: PASS
-boot: daemon up on mcp=45123 aux=47456 (0.32s)
-seed: knowledge=8, code_artifacts=10 (skipped=0)
+[FastMCP info] server is running on HTTP Stream at http://127.0.0.1:46480/mcp
+boot: daemon up on mcp=46480 aux=48602 (0.04s)
+seed: knowledge=10, code_artifacts=10 (skipped=0)
 
 dispatch: launching scheduler tick (target mode=real)…
-dispatch: scheduler tick returned dispatched=[t_…] in 95.41s
+[FastMCP info] HTTP Stream session established
+[mcp-proxy] establishing new SSE stream for session ID 5ed4d57f-d73f-4725-ab70-50c140293a20
+dispatch: scheduler tick returned dispatched=[NJ74W6CFW1159BT0NRNTFYP9HW] in 93.58s
 
-scheduler dispatched the task ................. PASS (95.41s)  task=t_…
-bridge_invoked event .......................... PASS (0.00s)  count=1
-action_predicted with both artifact ids ....... PASS (0.00s)  action=ca_… verifier=cv_…
-both artifacts resolve via getArtifact ........ PASS (0.00s)  action.runtime=bun verifier.runtime=bun
-artifact_invoked + artifact_observed .......... PASS (0.00s)  invoked=2 observed=2
-action_scored with residual in [0,1] .......... PASS (0.00s)  residual=0.000
-no dispatcher_violation events ................ PASS (0.00s)  count=0
-task_committed (residual < 0.3) ............... PASS (0.00s)  count=1
-observation result.title is non-empty string .. PASS (0.00s)  title="Example Domain"
+scheduler dispatched the task .................... PASS (93.58s)  task=NJ74W6CFW1159BT0NRNTFYP9HW
+bridge_invoked event ............................. PASS (0.00s)  count=1
+action_predicted with both artifact ids .......... PASS (0.00s)  action=KG0VK4E4R11MV3Y8AY040SM75R verifier=X19HKSEQ8X4AK816DXKNAEZ470
+both artifacts resolve via getArtifact ........... PASS (0.00s)  action.runtime=bun verifier.runtime=bun
+artifact_invoked + artifact_observed ............. PASS (0.00s)  invoked=2 observed=2
+action_scored with residual in [0,1] ............. PASS (0.00s)  residual=0.000
+no dispatcher_violation events ................... PASS (0.00s)  count=0
+task_committed (residual < 0.3) .................. PASS (0.00s)  count=1
+observation result.title is non-empty string ..... PASS (0.00s)  title="Example Domain"
 
 ========================================
-9/9 steps passed in 95.78s
+9/9 steps passed in 93.63s
 [ok] real opencode dispatch solved the directive end-to-end
 ```
+
+The `[FastMCP info] HTTP Stream session established` line is the daemon's confirmation that opencode connected as an MCP client. The `[mcp-proxy] establishing new SSE stream` is the streamable-HTTP handshake completing. Under Batch 2.β both lines appear before the first brain emission — that's the structural proof the MCP wire is up.
 
 ## Failure modes
 
@@ -94,13 +99,32 @@ The brain authored an action whose verifier rejected the observation (residual �
 2. Inspect the verifier output for the residual reasoning.
 3. The smoke does NOT fail on residual≥0.3 — it accepts the refinement-edge path. A real-world directive would emit `task_edge_recorded` kind=refines, and the next scheduler tick would pick up the refined task. The smoke runs ONE tick, so it stops there.
 
-### `no_action_predicted`
-The brain returned a response but never emitted `action_predicted`. This is the canonical Batch 2.α gap: opencode reasons about the directive (the bridge captures its text reply) but never invokes `substrate.admit_artifact`. Two likely root causes:
+### `no_action_predicted` — RESOLVED (Batch 2.β)
+The Batch 2.α gap where opencode reasoned about the directive but never invoked `substrate.admit_artifact` is **closed** as of Batch 2.β. The bridge now:
 
-1. **opencode is not configured with the daemon's MCP server.** v2-design.md §12.1 says opencode discovers the substrate via the `MCP_SERVER_URL` environment variable; the bridge sets `V2_MCP_SERVER_URL` → `MCP_SERVER_URL`, but opencode also needs its own `opencode.json` or `--mcp` flag to register the URL as a usable MCP server. Until that wiring is complete, opencode produces a natural-language reply only.
-2. **The model isn't strong enough.** Try `--model=openai/gpt-5.4` (or whatever the strongest current opencode-resolvable id is). The default `openai/gpt-5.4-mini` is fast but sometimes balks at multi-step reasoning under the substrate-projected prompt.
+1. **Materializes a per-dispatch `opencode-config.json`** under a `mkdtemp(os.tmpdir(), "acc2-opencode-cfg-")` tempdir declaring v2's MCP server (`type:"remote"`, `url:"http://127.0.0.1:<port>/mcp"`, `enabled:true`).
+2. **Sets `OPENCODE_CONFIG=<that-path>` in the opencode subprocess env** so opencode, on boot, registers v2's full `substrate.*` + `runtime.*` tool surface (24 tools — see `runtime/bridge.ts:V2_MCP_TOOL_SURFACE` for the canonical list).
+3. **Watches the stdout event stream for the MCP handshake** — every `tool_use` event whose tool name matches `substrate.*` / `runtime.*` natively OR its opencode-mangled form (`acc2-substrate_substrate_*` / `acc2-substrate_runtime_*`) emits a `bridge_mcp_connected` substrate event with the first-tool name.
+4. **Fails fast with `mcp_handshake_failed` if no v2 tool call lands within the handshake window** (default 30s; override via `ACC2_OPENCODE_MCP_HANDSHAKE_MS`). Operators see the gap immediately rather than waiting out the full dispatch watchdog.
+5. **Cleans up the materialized config tempdir** after the subprocess exits (best-effort, regardless of outcome).
 
-Re-run with `--print-prompt`; check `composed.text` ends with the workflow instructions correctly. Inspect the database for `code_artifact_candidate` rows on the directive — if those appear without `code_artifact_admitted`, admission rejected the artifacts (likely a sandbox-declaration violation). When the bridge completes with `final_response_chars > 0` but no `action_predicted`, the gap is the MCP wiring, not the brain itself.
+The Batch 2.β smoke confirmed the wiring is sound — the brain authored bun action + verifier artifacts, admitted them via the MCP wire, emitted `action_predicted` with both artifact ids, and the dispatcher ran both artifacts to `task_committed` in ~95s wall.
+
+If `no_action_predicted` re-appears after Batch 2.β, the cause is no longer the MCP wiring; it's likely the model itself failing to reason about the directive. Re-run with `--print-prompt` to inspect `composed.text`, and consider `--model=openai/gpt-5.4` if the default mini balks.
+
+### `mcp_handshake_failed`
+opencode connected to v2's MCP server (the daemon's stdout shows `HTTP Stream session established` + `establishing new SSE stream`) but never invoked any `substrate.*` / `runtime.*` tool within the handshake window. The bridge SIGTERMs the subprocess and emits `bridge_failed { reason: "mcp_handshake_failed", window_ms, mcp_server_url, hint, … }`.
+
+Check, in order:
+
+1. **Is the daemon actually serving `/mcp`?** Run `curl -i http://127.0.0.1:<port>/mcp` from a separate shell while the smoke is mid-flight — fastmcp's httpStream transport should respond with a 405/406 (it requires a session handshake; a bare GET is rejected but the connection succeeds, proving the port is live).
+2. **Did opencode pick up our `OPENCODE_CONFIG`?** Set `ACC2_OPENCODE_STDOUT_LOG=/tmp/oc-stdout.log` and re-run; grep the dump for `acc2-substrate` tool names. If absent, opencode did not register the server — verify `OPENCODE_CONFIG=<path>` shows up in `ps aux | grep opencode` env.
+3. **Did the model emit any tool_use events at all?** `grep '"type":"tool_use"' /tmp/oc-stdout.log` — if zero, the brain produced text only (model too weak, or prompt insufficient).
+4. **Port conflict.** If the smoke booted on a port someone else is also using (rare with the smoke's random 45000-50000 band, but possible), opencode might be connecting to the wrong process. Confirm via `ss -tlnp | grep <port>`.
+5. **Firewall / docker bridge.** WSL2 / docker-desktop networking sometimes interferes with `127.0.0.1` between sub-processes. Verify with `curl http://127.0.0.1:<port>/mcp` from the same shell that ran the smoke.
+6. **fastmcp not started.** If `bridge_invoked` fired but no `HTTP Stream session established` appeared in stderr, the daemon's MCP server didn't bind. Re-check `bun tests/integration/real_brain_smoke.ts` boot output for the line `boot: daemon up on mcp=<port>` — if absent, the daemon never came up.
+
+Widen the handshake window via `ACC2_OPENCODE_MCP_HANDSHAKE_MS=120000` (or higher) for slow models / cold model caches — the default 30s is enough for the `openai/gpt-5.4-mini` family but a stronger reasoner may spend 60s+ reading the substrate before calling any tool.
 
 ## What this proves
 

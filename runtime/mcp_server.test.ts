@@ -97,6 +97,41 @@ describe("fastmcp substrate tools — stdio transport", () => {
     expect(typeof env.result.ts).toBe("string");
   });
 
+  test("substrate.emit flat-shape action_predicted carries action_artifact_id / verifier_artifact_id / predicted_residual (Batch 2.β)", async () => {
+    // opencode 1.4+ flattens MCP tool schemas — the brain calls
+    // substrate.emit with top-level arguments, not a nested `{event:{...}}`.
+    // Before Batch 2.β the FLAT schema dropped the artifact-id and residual
+    // fields, leaving action_predicted half-baked (the dispatcher then could
+    // not find the artifacts and emitted no action). This test pins the fix.
+    const emit = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.emit",
+        arguments: {
+          kind: "action_predicted",
+          substrate_origin: "opencode",
+          directive_id: "d_flat_batch_2b",
+          task_id: "t_flat_batch_2b",
+          action_artifact_id: "ca_flat_action_id_001",
+          verifier_artifact_id: "cv_flat_verifier_id_002",
+          predicted_residual: 0.05,
+          payload: { intent: "flat-shape probe" },
+        },
+      })) as ToolCallResponse,
+    );
+    expect(emit.ok).toBe(true);
+    const got = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.get_event",
+        arguments: { id: emit.result.id as string },
+      })) as ToolCallResponse,
+    );
+    expect(got.ok).toBe(true);
+    expect(got.result.kind).toBe("action_predicted");
+    expect(got.result.action_artifact_id).toBe("ca_flat_action_id_001");
+    expect(got.result.verifier_artifact_id).toBe("cv_flat_verifier_id_002");
+    expect(got.result.predicted_residual).toBe(0.05);
+  });
+
   test("substrate.get_event round-trips the event we just emitted", async () => {
     const emit = parseEnvelope(
       (await h!.client.callTool({

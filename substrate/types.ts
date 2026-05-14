@@ -125,6 +125,7 @@ export type EventKind =
   | "bridge_frame_received"
   | "bridge_completed"
   | "bridge_failed"
+  | "bridge_mcp_connected"
 
   // Dispatcher (Phase D — §3.7 cycle-1 enforcement)
   | "brain_dispatched"
@@ -178,7 +179,14 @@ export type EventKind =
 
   // Lifecycle
   | "goal_committed"
-  | "goal_abandoned";
+  | "goal_abandoned"
+
+  // Opencode subsystem upgrade (Batch 2.γ — `acc admin update-opencode`)
+  // Emitted by runtime/opencode_version.ts so the trajectory of every
+  // upgrade (start → completion or failure) is auditable on the substrate.
+  | "opencode_upgrade_started"
+  | "opencode_upgrade_completed"
+  | "opencode_upgrade_failed";
 
 // ── The event row (§4.1) ────────────────────────────────────────────
 
