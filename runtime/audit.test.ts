@@ -183,6 +183,113 @@ describe("audit A.3.6: low_risk_inline_patterns_view drives the scored inline la
       .get() as { c: number };
     expect(contradicted.c).toBe(1);
   });
+
+  test("Batch 4 Hole 3 — inline-lane Beta posterior refresh: outcomes stamp updated score/confidence on the promotion row", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    // Seed: a knowledge_candidate row (the truth-bearing source) and a
+    // knowledge_promoted row tagged as a low_risk_inline_pattern but whose
+    // payload starts BELOW the inline thresholds (score 0.6, confidence 0.5)
+    // so the view excludes it initially.
+    const candidateId = newId();
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, parent_task_id, loop_id,
+         substrate_origin, kind, payload, context_refs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        candidateId,
+        new Date(Date.now() - 1000).toISOString(),
+        candidateId,
+        candidateId,
+        null,
+        "loop_root",
+        "claude_root",
+        "knowledge_candidate",
+        JSON.stringify({ text: "TypeScript runtime files are low-risk inline targets" }),
+        JSON.stringify([]),
+      ],
+    );
+    const promotion = emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      context_refs: [candidateId],
+      payload: {
+        candidate_id: candidateId,
+        tags: ["low_risk_inline_pattern"],
+        pattern_kind: "extension",
+        pattern: ".ts",
+        score: 0.6,
+        confidence: 0.5,
+        alpha: 1,
+        beta: 1,
+        wins: 0,
+        losses: 0,
+      },
+    });
+
+    // Pre-refresh: the view filters by score ≥ 0.7 AND confidence ≥ 0.6 → row
+    // excluded → dispatcher returns opencode_brain.
+    expect(lowRiskInlinePatterns(db).length).toBe(0);
+    const taskBefore = {
+      id: "t_before",
+      directive_id: "d_before",
+      parent_id: null,
+      goal: "edit runtime/foo.ts",
+      status: "pending" as const,
+      target_files: ["runtime/foo.ts"],
+    } as const;
+    expect(decideDispatch(db, taskBefore as TaskNode).route).toBe("opencode_brain");
+
+    // Drive eight successes. Beta(α=9, β=1) → mean 0.9, confidence
+    // 1 − 1/√(9) ≈ 0.667. Both thresholds satisfied.
+    for (let i = 0; i < 8; i++) {
+      recordLowRiskInlineOutcome(db, promotion.id, "success");
+    }
+
+    // Post-refresh: the promotion row's payload should carry the new score
+    // and confidence, and the view should now surface the pattern.
+    const refreshed = db
+      .query("SELECT payload FROM events WHERE id = ?")
+      .get(promotion.id) as { payload: string };
+    const payload = JSON.parse(refreshed.payload) as Record<string, number>;
+    expect(payload.alpha).toBe(9);
+    expect(payload.beta).toBe(1);
+    expect(payload.wins).toBe(8);
+    expect(payload.losses).toBe(0);
+    expect(payload.score).toBeCloseTo(0.9, 3);
+    expect(payload.confidence).toBeGreaterThanOrEqual(0.6);
+    expect(payload.score).toBeGreaterThanOrEqual(0.7);
+
+    const rows = lowRiskInlinePatterns(db);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.score).toBeCloseTo(0.9, 3);
+    expect(rows[0]!.confidence).toBeGreaterThanOrEqual(0.6);
+
+    // Dispatcher's inline lane should now flip to claude_inline for a task
+    // whose every target_file matches the .ts pattern.
+    const taskAfter = {
+      id: "t_after",
+      directive_id: "d_after",
+      parent_id: null,
+      goal: "edit runtime/foo.ts",
+      status: "pending" as const,
+      target_files: ["runtime/foo.ts"],
+    } as const;
+    expect(decideDispatch(db, taskAfter as TaskNode).route).toBe("claude_inline");
+
+    // A failure outcome flips wins/losses → score drops; dispatcher must
+    // immediately respond on the next read (no stale frozen value).
+    for (let i = 0; i < 30; i++) {
+      recordLowRiskInlineOutcome(db, promotion.id, "failure");
+    }
+    const dropped = db
+      .query("SELECT payload FROM events WHERE id = ?")
+      .get(promotion.id) as { payload: string };
+    const droppedPayload = JSON.parse(dropped.payload) as Record<string, number>;
+    expect(droppedPayload.losses).toBe(30);
+    expect(droppedPayload.score).toBeLessThan(0.7);
+    expect(decideDispatch(db, taskAfter as TaskNode).route).toBe("opencode_brain");
+  });
 });
 
 // ── A.3.6.1 semantic merger — Rules 1/2/3 ──────────────────────────

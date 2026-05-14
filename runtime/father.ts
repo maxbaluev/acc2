@@ -43,7 +43,8 @@ export type FatherAction =
   | "open_directive"
   | "open_review_directive"
   | "journal_cycle"
-  | "yield";
+  | "yield"
+  | "self_suspend";
 
 /** Canonical Father action set. The drift detector compares every event from
  *  substrate_origin='father' against this taxonomy. */
@@ -52,6 +53,7 @@ export const FATHER_ACTION_EVENT_KINDS: ReadonlySet<string> = new Set([
   "father_cycle_recorded",
   "father_yielded",
   "father_drift_detected",
+  "father_self_suspended",
   // Father may also open directives + review tasks. The §14 taxonomy folds
   // those into compile_directive_from_template / open_directive /
   // open_review_directive — they are valid events for Father to emit.
@@ -272,6 +274,64 @@ export type FatherIterateOpts = {
   ownerActiveWindowMs?: number;
 };
 
+/** Check whether Father is currently suspended due to a drift detection.
+ *
+ *  A suspension is active when the LATEST `father_drift_detected` event has
+ *  not yet been cleared by a `father_drift_resolved` event that cites it via
+ *  `context_refs`. The owner clears the suspension by emitting
+ *  `father_drift_resolved` (manual admin path or via a future
+ *  `acc admin father-resume` command).
+ *
+ *  Returns the drift event id when suspended, or null when clear. */
+export const fatherSuspensionActive = (db: Database): string | null => {
+  const drift = db
+    .query(
+      `SELECT id, ts FROM events
+       WHERE kind = 'father_drift_detected'
+       ORDER BY ts DESC LIMIT 1`,
+    )
+    .get() as { id: string; ts: string } | null;
+  if (!drift) return null;
+
+  // A resolve event clears the suspension when it cites the drift id in
+  // context_refs. Citing is more robust than timestamp comparison because
+  // sub-millisecond bursts (drift detect → immediate resolve) share a ts.
+  const resolved = db
+    .query(
+      `SELECT id FROM events
+       WHERE kind = 'father_drift_resolved'
+         AND context_refs LIKE '%"' || ? || '"%'
+       LIMIT 1`,
+    )
+    .get(drift.id) as { id: string } | null;
+  if (resolved) return null;
+  return drift.id;
+};
+
+/** Operator-facing API for clearing a Father drift suspension. Emits a
+ *  `father_drift_resolved` event citing the drift detection so the next
+ *  Father tick can resume normal iteration. Returns the resolved event id
+ *  on success, or null when no suspension is active (no-op). */
+export const resolveFatherDrift = (
+  db: Database,
+  opts: { reason?: string; now?: string } = {},
+): { resolved_event_id: string; drift_event_id: string } | null => {
+  const driftId = fatherSuspensionActive(db);
+  if (!driftId) return null;
+  const ts = opts.now ?? nowIso();
+  const result = emitEvent(db, {
+    kind: "father_drift_resolved",
+    substrate_origin: "owner",
+    context_refs: [driftId],
+    payload: {
+      drift_event_id: driftId,
+      reason: opts.reason ?? "operator_acknowledged",
+      ts,
+    } as JsonValue,
+  });
+  return { resolved_event_id: result.id, drift_event_id: driftId };
+};
+
 /** One Father tick. Reads state, picks priority, opens a directive (or
  *  yields), emits father_cycle_recorded. NO LLM call ever happens — Father
  *  has zero bridge capability (drift-prevention enforced by detectFatherDrift
@@ -283,6 +343,32 @@ export const fatherIterate = async (
   const cycleId = newId();
   const ts = opts.now ?? nowIso();
   const windowMs = opts.ownerActiveWindowMs ?? OWNER_ACTIVE_WINDOW_MS_DEFAULT;
+
+  // Drift self-suspend (Batch 4 Hole 2). If the most recent
+  // `father_drift_detected` event has NOT yet been cleared by a
+  // `father_drift_resolved` row, Father refuses to iterate — the suspension
+  // protects the substrate from compounding bad rows while the operator
+  // investigates. The suspend itself is recorded as `father_self_suspended`
+  // (a valid FATHER_ACTION event so it doesn't re-trigger the drift detector).
+  const driftId = fatherSuspensionActive(db);
+  if (driftId) {
+    emitEvent(db, {
+      kind: "father_self_suspended",
+      substrate_origin: "father",
+      context_refs: [driftId],
+      payload: {
+        cycle_id: cycleId,
+        reason: "drift_detected",
+        drift_event_id: driftId,
+      } as JsonValue,
+    });
+    return {
+      cycle_id: cycleId,
+      action: "self_suspend",
+      detail: { reason: "drift_detected", drift_event_id: driftId } as JsonValue,
+      ts,
+    };
+  }
 
   // Owner-active backoff (§3 yield contract).
   if (ownerIsActive(db, ts, windowMs)) {

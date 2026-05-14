@@ -176,6 +176,14 @@ filesystem / network isolation. Without nsjail the sandbox runs in
 honor-system mode (declarations are validated; enforcement is partial). The
 runtime detects nsjail on PATH at launch time and uses it if present.
 
+When nsjail is present, every uv artifact invocation emits a
+`sandbox_enforced` event carrying the resolved limits (wall_ms, memory_mb,
+fs_read / fs_write / net_allow / pypi_allow). When nsjail is absent, a
+**single** `sandbox_degraded` event is emitted per process (not per
+invocation) so the audit trail records the operating environment without
+flooding the stream. Install nsjail for hardened uv sandboxing; without it
+the runtime falls back to honor-system limits and the outer Bun watchdog.
+
 Install on Linux:
 
 ```bash

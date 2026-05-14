@@ -9,6 +9,8 @@ import {
   fatherIterate,
   fatherLoop,
   detectFatherDrift,
+  fatherSuspensionActive,
+  resolveFatherDrift,
   DIRECTIVE_TEMPLATES,
   FATHER_ACTION_EVENT_KINDS,
   selectByPriorityAndFreshnessAndConflicts,
@@ -317,6 +319,67 @@ describe("fatherIterate multi-tick", () => {
     // its own templated ones — the dispatcher / scheduler handle them).
     const r2 = await fatherIterate(db, { now: "2026-05-13T12:01:00.000Z" });
     expect(r2.action).toBe("journal_cycle");
+  });
+});
+
+describe("Father drift self-suspend (Batch 4 Hole 2)", () => {
+  test("detects drift → suspends next tick → resume after resolve event", async () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    // 1. Cause drift: emit a non-FatherAction event from father origin and
+    //    run the detector. This emits `father_drift_detected`.
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "father",
+      payload: { text: "father wrote knowledge candidate (drift)" },
+    });
+    const report = detectFatherDrift(db);
+    expect(report.drift_count).toBe(1);
+
+    expect(fatherSuspensionActive(db)).not.toBeNull();
+
+    // 2. The next tick must self-suspend — NOT open a template, NOT yield
+    //    for "no work in queue", and NOT iterate.
+    const r1 = await fatherIterate(db, { now: "2026-05-14T12:00:00.000Z" });
+    expect(r1.action).toBe("self_suspend");
+
+    const suspended = db
+      .query("SELECT payload FROM events WHERE kind = 'father_self_suspended'")
+      .get() as { payload: string } | null;
+    expect(suspended).not.toBeNull();
+    const sp = JSON.parse(suspended!.payload);
+    expect(sp.reason).toBe("drift_detected");
+    expect(typeof sp.drift_event_id).toBe("string");
+
+    // No new directive opened during the suspended tick.
+    const openedDuring = (db
+      .query(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'directive_opened' AND substrate_origin = 'father'",
+      )
+      .get() as { c: number }).c;
+    expect(openedDuring).toBe(0);
+
+    // 3. Operator resolves the drift.
+    const resolved = resolveFatherDrift(db, { reason: "operator_acknowledged" });
+    expect(resolved).not.toBeNull();
+    expect(fatherSuspensionActive(db)).toBeNull();
+
+    // 4. Next tick resumes — should fall back to a template since there is
+    //    still no queued work.
+    const r2 = await fatherIterate(db, { now: "2026-05-14T12:01:00.000Z" });
+    expect(r2.action).toBe("compile_directive_from_template");
+  });
+
+  test("father_self_suspended is a member of FATHER_ACTION_EVENT_KINDS (does not re-trigger drift)", () => {
+    expect(FATHER_ACTION_EVENT_KINDS.has("father_self_suspended")).toBe(true);
+  });
+
+  test("resolveFatherDrift is a no-op when no suspension is active", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const result = resolveFatherDrift(db);
+    expect(result).toBeNull();
   });
 });
 

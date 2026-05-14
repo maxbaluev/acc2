@@ -12,7 +12,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxDecl } from "../../substrate/types";
-import { runUvArtifact } from "./uv";
+import { runUvArtifact, buildNsjailArgv, __resetNsjailCacheForTest } from "./uv";
 
 const whichSync = (cmd: string): string | null => {
   const path = process.env.PATH ?? "";
@@ -147,6 +147,146 @@ describe.skipIf(!UV_AVAILABLE)("runUvArtifact — watchdog", () => {
     expect(obs.ok).toBe(false);
     expect(obs.error).toBe("wall_timeout");
   }, 30000);
+});
+
+describe("buildNsjailArgv — argv shape verification (Batch 4 Hole 1)", () => {
+  test("includes the declared wall_ms, memory_mb, and bind mounts", () => {
+    const sandbox: SandboxDecl & { runtime: "uv" } = {
+      runtime: "uv",
+      cpu_ms: 5000,
+      wall_ms: 12_000,
+      memory_mb: 128,
+      fs_read: ["/home/proj/src/"],
+      fs_write: ["/home/proj/build/"],
+      net_allow: [],
+      pypi_allow: ["numpy"],
+    };
+    const argv = buildNsjailArgv(
+      "/usr/bin/nsjail",
+      "/usr/bin/uv",
+      ["run", "--no-project", "python", "entry.py"],
+      sandbox,
+      "/tmp/acc2-uv-test",
+      sandbox.wall_ms,
+      sandbox.memory_mb,
+    );
+    // Time limit is in seconds (ceil(wall_ms/1000)).
+    expect(argv).toContain("--time_limit");
+    const timeIdx = argv.indexOf("--time_limit");
+    expect(argv[timeIdx + 1]).toBe("12");
+
+    // Memory rlimit in bytes.
+    expect(argv).toContain("--rlimit_as");
+    const memIdx = argv.indexOf("--rlimit_as");
+    expect(argv[memIdx + 1]).toBe(String(128 * 1024 * 1024));
+
+    // /tmp bindmount.
+    const bindIdx = argv.indexOf("--bindmount");
+    expect(bindIdx).toBeGreaterThan(0);
+    expect(argv[bindIdx + 1]).toBe("/tmp:/tmp");
+
+    // Read glob → readonly bindmount.
+    const roIdx = argv.indexOf("--bindmount_ro");
+    expect(roIdx).toBeGreaterThan(0);
+    expect(argv[roIdx + 1]).toBe("/home/proj/src/:/home/proj/src/");
+
+    // Write glob → read-write bindmount (the second --bindmount entry).
+    const allBindRw = argv.flatMap((arg, i) => arg === "--bindmount" ? [argv[i + 1]] : []);
+    expect(allBindRw).toContain("/home/proj/build/:/home/proj/build/");
+
+    // CWD pin.
+    expect(argv).toContain("--cwd");
+
+    // No net allowlist → leave nsjail's default clone_newnet (child has empty
+    // network stack). buildNsjailArgv only emits --disable_clone_newnet when
+    // net_allow is non-empty.
+    expect(argv).not.toContain("--disable_clone_newnet");
+
+    // The terminator + payload command come last.
+    const sepIdx = argv.indexOf("--");
+    expect(sepIdx).toBeGreaterThan(0);
+    expect(argv[sepIdx + 1]).toBe("/usr/bin/uv");
+    expect(argv[sepIdx + 2]).toBe("run");
+  });
+
+  test("net.allow_domains non-empty disables clone_newnet (host net reachable)", () => {
+    const sandbox: SandboxDecl & { runtime: "uv" } = {
+      runtime: "uv",
+      cpu_ms: 5000,
+      wall_ms: 5000,
+      memory_mb: 64,
+      net_allow: ["pypi.org"],
+    };
+    const argv = buildNsjailArgv(
+      "/usr/bin/nsjail",
+      "/usr/bin/uv",
+      ["run", "python", "x.py"],
+      sandbox,
+      "/tmp/x",
+      sandbox.wall_ms,
+      sandbox.memory_mb,
+    );
+    expect(argv).toContain("--disable_clone_newnet");
+  });
+
+  test("runUvArtifact emits sandbox_enforced when nsjail path is forced and uv is available", async () => {
+    if (!UV_AVAILABLE) return;
+    if (!NSJAIL_AVAILABLE) {
+      // We can't actually spawn a fake nsjail; the test verifies the
+      // sandbox_enforced emit fires on the real nsjail path only when one
+      // is on PATH. Skip in environments without nsjail.
+      return;
+    }
+    __resetNsjailCacheForTest(undefined); // force re-probe
+    const events: Array<{ kind: string; payload?: unknown }> = [];
+    const body = "print('@@RESULT@@ ' + json.dumps({'ok': True}))";
+    const obs = await runUvArtifact({
+      artifactId: "art_uv_enforced",
+      body,
+      declaredSandbox: {
+        runtime: "uv",
+        cpu_ms: 2000,
+        wall_ms: 8000,
+        memory_mb: 64,
+      },
+      inputs: null,
+      emit: (e) => events.push({ kind: e.kind, payload: e.payload }),
+    });
+    expect(obs.ok).toBe(true);
+    const enforced = events.find((e) => e.kind === "sandbox_enforced");
+    expect(enforced).toBeTruthy();
+    const payload = enforced!.payload as { runtime: string; limits: Record<string, unknown> };
+    expect(payload.runtime).toBe("uv");
+    expect(payload.limits.wall_ms).toBe(8000);
+    expect(payload.limits.memory_mb).toBe(64);
+  }, 60000);
+
+  test("runUvArtifact emits sandbox_degraded ONCE per process when nsjail is forced absent", async () => {
+    if (!UV_AVAILABLE) return;
+    __resetNsjailCacheForTest(null); // force "not on PATH"
+    const events1: Array<{ kind: string }> = [];
+    const events2: Array<{ kind: string }> = [];
+    const body = "print('@@RESULT@@ ' + json.dumps({'ok': True}))";
+    await runUvArtifact({
+      artifactId: "art_uv_degraded_1",
+      body,
+      declaredSandbox: { runtime: "uv", cpu_ms: 2000, wall_ms: 8000, memory_mb: 64 },
+      inputs: null,
+      emit: (e) => events1.push({ kind: e.kind }),
+    });
+    await runUvArtifact({
+      artifactId: "art_uv_degraded_2",
+      body,
+      declaredSandbox: { runtime: "uv", cpu_ms: 2000, wall_ms: 8000, memory_mb: 64 },
+      inputs: null,
+      emit: (e) => events2.push({ kind: e.kind }),
+    });
+    // First call emits sandbox_degraded; second does not (one-per-process cap).
+    expect(events1.filter((e) => e.kind === "sandbox_degraded").length).toBe(1);
+    expect(events2.filter((e) => e.kind === "sandbox_degraded").length).toBe(0);
+    // Restore default probe behavior for downstream tests.
+    __resetNsjailCacheForTest(undefined);
+  }, 90000);
 });
 
 describe.skipIf(!UV_AVAILABLE)("runUvArtifact — tempdir hygiene", () => {

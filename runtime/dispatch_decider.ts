@@ -137,13 +137,128 @@ const estimateComplexity = (task: TaskNode): "low" | "mid" | "high" => {
  *      an unresolved source directive, we down-rank to `deferred_blocked`.
  *    - In crisis mode (urgency='crisis' on the directive) we lower the
  *      recipe-match threshold from 0.7 → 0.4 so Tier-0 fires harder. */
+/** Beta-distribution mean. Mirrors the canonical scorer used by the
+ *  knowledge promotion extractor (`substrate/extractors.ts:betaMean`) so
+ *  inline-lane refreshes use exactly the same algebra. */
+const betaMean = (alpha: number, beta: number): number => alpha / (alpha + beta);
+
+/** Beta-distribution confidence proxy = 1 − 1/√(n+1), where n = α+β−2 is
+ *  the evidence count. Matches `substrate/extractors.ts:betaConfidence`
+ *  and §11.5; keeping the formula identical here lets a single test prove
+ *  the inline view, the dispatcher, and the extractor converge on the
+ *  same posterior values. */
+const betaConfidence = (alpha: number, beta: number): number => {
+  const n = alpha + beta - 2;
+  return 1 - 1 / Math.sqrt(Math.max(0, n) + 1);
+};
+
+/** Recompute the Beta posterior on the existing `knowledge_promoted` row
+ *  for this candidate by counting the live `candidate_confirmed` /
+ *  `candidate_contradicted` events that cite it, then stamp the new
+ *  alpha/beta/score/confidence onto the promotion payload. The
+ *  `low_risk_inline_patterns_view` reads the payload directly, so this
+ *  refresh is what makes the inline lane adapt to outcomes (Batch 4 Hole 3).
+ *
+ *  The `knowledgeId` is the id of the `knowledge_promoted` event surfaced
+ *  by the view (`cited_id`). Internally that event cites the original
+ *  `knowledge_candidate` row via `context_refs[0]`; the verdicts cite the
+ *  candidate id. We resolve both directions so callers can pass either id. */
+const refreshInlinePatternPosterior = (db: Database, knowledgeId: string): void => {
+  // Locate the promotion row. The view's `cited_id` IS the
+  // `knowledge_promoted` event id, so callers normally pass that. If the
+  // caller passed a candidate id, fall back to the promotion that cites it.
+  let promotion = db
+    .query(
+      `SELECT id, payload, context_refs FROM events
+       WHERE kind = 'knowledge_promoted' AND id = ? LIMIT 1`,
+    )
+    .get(knowledgeId) as { id: string; payload: string; context_refs: string } | null;
+  if (!promotion) {
+    promotion = db
+      .query(
+        `SELECT id, payload, context_refs FROM events
+         WHERE kind = 'knowledge_promoted'
+           AND context_refs LIKE '%"' || ? || '"%'
+         ORDER BY ts DESC LIMIT 1`,
+      )
+      .get(knowledgeId) as { id: string; payload: string; context_refs: string } | null;
+  }
+  if (!promotion) return;
+
+  // Resolve the candidate id: payload.candidate_id wins, otherwise the first
+  // context_ref. Knowledge verdicts cite the candidate (matches what
+  // `extractKnowledgePromotions` counts).
+  let candidateId: string | null = null;
+  try {
+    const parsedPayload = JSON.parse(promotion.payload ?? "{}") as Record<string, unknown>;
+    if (typeof parsedPayload.candidate_id === "string") {
+      candidateId = parsedPayload.candidate_id;
+    }
+  } catch { /* fall through */ }
+  if (!candidateId) {
+    try {
+      const refs = JSON.parse(promotion.context_refs ?? "[]") as string[];
+      if (refs.length > 0) candidateId = refs[0]!;
+    } catch { /* skip */ }
+  }
+  if (!candidateId) return;
+
+  // Count verdicts citing either the candidate id (canonical) or the
+  // promotion id (inline-lane callers pass the cited_id from the view,
+  // which IS the promotion id). Both citation styles count toward the
+  // same posterior — they refer to the same knowledge claim at different
+  // lifecycle moments.
+  const verdicts = db
+    .query(
+      `SELECT kind, context_refs FROM events
+       WHERE kind IN ('candidate_confirmed', 'candidate_contradicted')`,
+    )
+    .all() as Array<{ kind: string; context_refs: string }>;
+  let wins = 0;
+  let losses = 0;
+  for (const v of verdicts) {
+    let refs: string[] = [];
+    try { refs = JSON.parse(v.context_refs ?? "[]") as string[]; } catch { /* skip */ }
+    if (!refs.includes(candidateId) && !refs.includes(promotion.id)) continue;
+    if (v.kind === "candidate_confirmed") wins++; else losses++;
+  }
+  const alpha = 1 + wins;
+  const beta = 1 + losses;
+  const score = betaMean(alpha, beta);
+  const confidence = betaConfidence(alpha, beta);
+
+  // Stamp the refreshed posterior onto the promotion payload. The view reads
+  // `payload.score` / `payload.confidence` directly so this update is what
+  // makes the dispatcher's INLINE_PATTERN_SCORE_THRESHOLD / _CONFIDENCE_
+  // THRESHOLD reads see the new values.
+  let merged: Record<string, unknown> = {};
+  try {
+    merged = JSON.parse(promotion.payload ?? "{}") as Record<string, unknown>;
+  } catch { merged = {}; }
+  merged.alpha = alpha;
+  merged.beta = beta;
+  merged.wins = wins;
+  merged.losses = losses;
+  merged.score = score;
+  merged.confidence = confidence;
+  merged.last_outcome_ts = new Date().toISOString();
+  db.run("UPDATE events SET payload = ? WHERE id = ?", [JSON.stringify(merged), promotion.id]);
+};
+
 /** Credit the inspiring `knowledge_promoted` row for an inline-lane outcome
  *  (k_555 four-link chain — create → retrieve → mutate → credit). Emits a
  *  `candidate_confirmed` (success) or `candidate_contradicted` (failure)
  *  event citing the promotion id; the existing knowledge extractor consumes
  *  these and recomputes the Beta posterior so the inline-vs-delegate
  *  selector adapts to outcomes. v2-design.md §3.6, k_252 "advisory=fake"
- *  remediated by structural credit emission. */
+ *  remediated by structural credit emission.
+ *
+ *  Batch 4 Hole 3: after emitting the verdict, also refresh the promotion
+ *  row's payload (`score`, `confidence`, `alpha`, `beta`) so the
+ *  `low_risk_inline_patterns_view` — which reads these scalars directly —
+ *  reflects the new posterior on the very next dispatch tick. Without this
+ *  refresh the verdict events accumulate but the view stays frozen at
+ *  promotion time and the dispatcher cannot adapt. */
 export const recordLowRiskInlineOutcome = (
   db: Database,
   knowledgeId: string,
@@ -166,6 +281,10 @@ export const recordLowRiskInlineOutcome = (
       source: "low_risk_inline_lane",
     },
   });
+  // Recompute and stamp the new posterior onto the inline-pattern promotion
+  // row. The view reads payload.score/confidence directly; without this the
+  // dispatcher's score≥0.7 + confidence≥0.6 gate is frozen at promotion time.
+  refreshInlinePatternPosterior(db, knowledgeId);
 };
 
 export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision => {
