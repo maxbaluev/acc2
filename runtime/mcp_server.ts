@@ -48,6 +48,22 @@ import { processRollingReviews } from "./rolling_reviewer";
 import { fatherIterate, detectFatherDrift } from "./father";
 import { findRecipeMatch, replayRecipe } from "./recipe_replay";
 import { newId } from "./ids";
+import {
+  codeArtifactRegistry,
+  readyTasks,
+  taskGraphFor,
+  failureCounts,
+  artifactRouting,
+  stakeholderStateRows,
+  activeObjectives,
+  rollingReviewDue,
+  directiveConflicts,
+  irreversibleEffects,
+  embeddingIndex,
+  originPromotion,
+  ownerConversation,
+  lowRiskInlinePatterns,
+} from "../substrate/views";
 
 export type McpContext = {
   db: Database;
@@ -59,6 +75,10 @@ export type McpContext = {
    *  the recency stand-in (which stays correct on fresh / unembedded
    *  substrates). */
   index?: EmbeddingIndex | null;
+  /** Optional handle on the daemon's external-ingress state. When
+   *  present, `substrate.register_external_source` mutates this state.
+   *  Tests that don't run the daemon may leave this null. */
+  ingressState?: import("./external_ingress").ExternalIngressState | null;
 };
 
 export type McpResult =
@@ -90,6 +110,7 @@ export const McpMethods = [
   "runtime.detect_father_drift",
   "substrate.find_recipe",
   "runtime.replay_recipe",
+  "substrate.register_external_source",
 ] as const;
 export type McpMethodName = (typeof McpMethods)[number];
 
@@ -280,6 +301,14 @@ const ReplayRecipeSchema = z.object({
   recipe_id: z.string(),
 });
 
+const RegisterExternalSourceSchema = z.object({
+  name: z.string(),
+  bearer_token: z.string(),
+  schema_hint: z.string().optional(),
+  rate_limit_per_min: z.number().optional(),
+  default_sensitivity: z.enum(["public", "internal", "private"]).optional(),
+});
+
 // ── Handlers (pure functions over (ctx, args) → McpResult) ──────────
 //
 // fastmcp's `execute` calls these and JSON-stringifies the result; this
@@ -322,16 +351,82 @@ const handleEmit = (
 };
 
 const handleRead = (
-  _ctx: McpContext,
+  ctx: McpContext,
   args: z.infer<typeof ReadSchema>,
 ): McpResult => {
-  // TODO(B2/F): once the named-view dispatcher lands, route `view_name` to
-  // the substrate/views.ts accessor. For B3 we explicitly signal not-yet-
-  // implemented so callers get a clear error instead of a silent empty.
-  return {
-    ok: false,
-    error: `view_not_implemented:${args.view_name}`,
-  };
+  // Phase Audit: route `view_name` to the substrate/views.ts accessor.
+  // Views not yet implemented return `view_not_implemented:<name>` so
+  // callers see a clear signal instead of a silent empty. The set below
+  // mirrors §4.2 of v2-design.md; views computed in TS (knowledge_view,
+  // judgment_packet_view) still return view_not_implemented until their
+  // accessors land.
+  const db = ctx.db;
+  const view = args.view_name;
+  try {
+    switch (view) {
+      case "code_artifact_registry_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const runtime = typeof arg.runtime === "string" ? arg.runtime : undefined;
+        return { ok: true, result: codeArtifactRegistry(db, runtime) as unknown as JsonValue };
+      }
+      case "ready_tasks_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return { ok: true, result: readyTasks(db, limit) as unknown as JsonValue };
+      }
+      case "task_graph_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : null;
+        if (!directiveId) return { ok: false, error: "task_graph_view_requires_directive_id" };
+        return { ok: true, result: taskGraphFor(db, directiveId) as unknown as JsonValue };
+      }
+      case "failure_view":
+        return { ok: true, result: failureCounts(db) as unknown as JsonValue };
+      case "artifact_routing_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const runtime = typeof arg.runtime === "string" ? arg.runtime : undefined;
+        return { ok: true, result: artifactRouting(db, runtime) as unknown as JsonValue };
+      }
+      case "stakeholder_state_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        return { ok: true, result: stakeholderStateRows(db, directiveId) as unknown as JsonValue };
+      }
+      case "active_objectives_view":
+        return { ok: true, result: activeObjectives(db) as unknown as JsonValue };
+      case "rolling_review_due_view":
+        return { ok: true, result: rollingReviewDue(db) as unknown as JsonValue };
+      case "directive_conflicts_view":
+        return { ok: true, result: directiveConflicts(db) as unknown as JsonValue };
+      case "irreversible_effects_view":
+        return { ok: true, result: irreversibleEffects(db) as unknown as JsonValue };
+      case "embedding_index_view":
+        return { ok: true, result: embeddingIndex(db) as unknown as JsonValue };
+      case "origin_promotion_view":
+        return { ok: true, result: originPromotion(db) as unknown as JsonValue };
+      case "owner_conversation_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        return { ok: true, result: ownerConversation(db, directiveId) as unknown as JsonValue };
+      }
+      case "contradictory_candidates_view": {
+        const rows = db
+          .query("SELECT * FROM contradictory_candidates_view ORDER BY ts DESC")
+          .all() as Array<Record<string, unknown>>;
+        return { ok: true, result: rows as unknown as JsonValue };
+      }
+      case "low_risk_inline_patterns_view": {
+        return {
+          ok: true,
+          result: lowRiskInlinePatterns(db) as unknown as JsonValue,
+        };
+      }
+      default:
+        return { ok: false, error: `view_not_implemented:${view}` };
+    }
+  } catch (err) {
+    return { ok: false, error: `view_read_failed:${(err as Error).message}` };
+  }
 };
 
 const handleGetEvent = (
@@ -935,6 +1030,22 @@ const handleReplayRecipe = async (
   };
 };
 
+const handleRegisterExternalSource = (
+  ctx: McpContext,
+  args: z.infer<typeof RegisterExternalSourceSchema>,
+): McpResult => {
+  if (!ctx.ingressState) {
+    return { ok: false, error: "external_ingress_not_mounted" };
+  }
+  const { registerExternalSource } = require("./external_ingress") as typeof import("./external_ingress");
+  const r = registerExternalSource(ctx.db, ctx.ingressState, args);
+  if (!r.ok) return { ok: false, error: r.error };
+  return {
+    ok: true,
+    result: { source: r.source, token_preview: r.token_preview } as JsonValue,
+  };
+};
+
 // ── FastMCP server factory ─────────────────────────────────────────
 
 export type McpServerOptions = {
@@ -945,6 +1056,10 @@ export type McpServerOptions = {
   /** Embedding index handed to substrate.search. The daemon builds this at
    *  boot via EmbeddingIndex.rebuildFromDb; tests can pass null. */
   index?: EmbeddingIndex | null;
+  /** Optional external-ingress state — when provided, the MCP server
+   *  exposes `substrate.register_external_source` so a new external source
+   *  can be registered without restarting the daemon (§5.2). */
+  ingressState?: import("./external_ingress").ExternalIngressState | null;
 };
 
 /** Build a FastMCP server with every substrate tool wired against `ctx.db`.
@@ -956,6 +1071,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     db: opts.db,
     invoker: opts.invoker ?? "claude_root",
     index: opts.index ?? null,
+    ingressState: opts.ingressState ?? null,
   };
 
   const server = new FastMCP({
@@ -1204,6 +1320,18 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     execute: wrap(handleReplayRecipe),
   });
 
+  server.addTool({
+    name: "substrate.register_external_source",
+    description:
+      "Register a new external-event source (calendar, email, IoT…). Mints a " +
+      "per-source bearer token override on the daemon's ingress state and " +
+      "emits external_source_registered for audit (§5.2). Requires the " +
+      "ingress state to be wired into the MCP context (i.e. running inside " +
+      "the daemon, not bare stdio).",
+    parameters: RegisterExternalSourceSchema,
+    execute: wrap(handleRegisterExternalSource),
+  });
+
   return server;
 };
 
@@ -1237,6 +1365,7 @@ const HTTP_DISPATCH: Record<string, (ctx: McpContext, args: any) => McpResult | 
   "runtime.detect_father_drift": handleDetectFatherDrift as any,
   "substrate.find_recipe": handleFindRecipe as any,
   "runtime.replay_recipe": handleReplayRecipe as any,
+  "substrate.register_external_source": handleRegisterExternalSource as any,
 };
 
 /** Bun.serve route handler: POST /mcp/<method>. Parses JSON body, validates

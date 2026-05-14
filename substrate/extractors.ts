@@ -226,6 +226,83 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
   return { promoted, demoted };
 };
 
+/** Promote (or demote) ONE knowledge candidate by id — parallel API to
+ *  `maybePromote` in artifact_store.ts. Returns the verdict so callers
+ *  (Father, brain) can branch on the result without re-querying. The
+ *  thresholds match the bulk extractor above so single-row and bulk
+ *  passes are interchangeable. v2-design.md §3.6.1 + §7.2 + Phase Audit. */
+export type KnowledgeVerdict =
+  | { kind: "promoted"; candidate_id: string; score: number; confidence: number; alpha: number; beta: number }
+  | { kind: "demoted"; candidate_id: string; score: number; confidence: number; alpha: number; beta: number }
+  | { kind: "no_action"; candidate_id: string; score: number; confidence: number };
+
+export const maybePromoteKnowledge = (db: Database, candidateId: string): KnowledgeVerdict => {
+  const row = db
+    .query(
+      `SELECT id, directive_id, task_id, loop_id, substrate_origin, payload
+       FROM events WHERE kind = 'knowledge_candidate' AND id = ?`,
+    )
+    .get(candidateId) as Record<string, unknown> | null;
+  if (!row) return { kind: "no_action", candidate_id: candidateId, score: 0, confidence: 0 };
+
+  // Already promoted/demoted?
+  const already = db
+    .query(
+      `SELECT kind FROM events
+       WHERE kind IN ('knowledge_promoted', 'knowledge_demoted')
+         AND context_refs LIKE '%"' || ? || '"%'`,
+    )
+    .get(candidateId) as { kind: string } | null;
+  if (already) {
+    return { kind: "no_action", candidate_id: candidateId, score: 0, confidence: 0 };
+  }
+
+  const verdicts = db
+    .query(
+      `SELECT kind, context_refs FROM events
+       WHERE kind IN ('candidate_confirmed', 'candidate_contradicted')`,
+    )
+    .all() as Array<{ kind: string; context_refs: string }>;
+  let wins = 0;
+  let losses = 0;
+  for (const v of verdicts) {
+    let refs: string[] = [];
+    try { refs = JSON.parse(v.context_refs); } catch { /* skip */ }
+    if (!refs.includes(candidateId)) continue;
+    if (v.kind === "candidate_confirmed") wins++; else losses++;
+  }
+  const alpha = 1 + wins;
+  const beta = 1 + losses;
+  const score = betaMean(alpha, beta);
+  const conf = betaConfidence(alpha, beta);
+
+  if (wins >= POSTERIOR.countThreshold && score >= POSTERIOR.promoteScore) {
+    insertEvent(db, {
+      kind: "knowledge_promoted",
+      directive_id: row.directive_id as string,
+      task_id: row.task_id as string,
+      loop_id: row.loop_id as string,
+      substrate_origin: "substrate_auto",
+      payload: { candidate_id: candidateId, wins, losses, score, confidence: conf, alpha, beta },
+      context_refs: [candidateId],
+    });
+    return { kind: "promoted", candidate_id: candidateId, score, confidence: conf, alpha, beta };
+  }
+  if (losses >= POSTERIOR.countThreshold && score <= POSTERIOR.demoteScore) {
+    insertEvent(db, {
+      kind: "knowledge_demoted",
+      directive_id: row.directive_id as string,
+      task_id: row.task_id as string,
+      loop_id: row.loop_id as string,
+      substrate_origin: "substrate_auto",
+      payload: { candidate_id: candidateId, wins, losses, score, confidence: conf, alpha, beta },
+      context_refs: [candidateId],
+    });
+    return { kind: "demoted", candidate_id: candidateId, score, confidence: conf, alpha, beta };
+  }
+  return { kind: "no_action", candidate_id: candidateId, score, confidence: conf };
+};
+
 // ── 2. Code artifact score extractor ───────────────────────────────
 //
 // For each code_artifact, walk recent action_scored events that cite
@@ -342,10 +419,44 @@ const polarityOf = (text: string): "assert" | "deny" => {
 
 export type SemanticDedupSummary = { merged: number; contradicted: number };
 
+/** Decode an event-embedding BLOB into a Float32Array. Tolerates non-aligned
+ *  views — copies bytes into an aligned buffer before constructing the view. */
+const decodeEmbeddingBlobLocal = (blob: Uint8Array | null): Float32Array | null => {
+  if (!blob || blob.byteLength === 0) return null;
+  if (blob.byteLength % 4 !== 0) return null;
+  const aligned = new Uint8Array(blob.byteLength);
+  aligned.set(blob);
+  return new Float32Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 4);
+};
+
+const cosineSimilarity = (a: Float32Array, b: Float32Array): number => {
+  if (a.length !== b.length) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i]! * b[i]!;
+    na += a[i]! * a[i]!;
+    nb += b[i]! * b[i]!;
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+};
+
+const KNOWLEDGE_DEDUP_COSINE_THRESHOLD = 0.92;
+const SYNTHESIS_CORROBORATION_THRESHOLD = 2;
+
+/** Read text from a knowledge_candidate payload (handles `text` or `claim`). */
+const candidateText = (payload: unknown): string => {
+  if (!payload || typeof payload !== "object") return "";
+  const p = payload as Record<string, unknown>;
+  return ((p.text as string | undefined) ?? (p.claim as string | undefined) ?? "").toString();
+};
+
 export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
   const cursor = readMeta(db, META_KEYS.dedup);
 
-  // New candidates since last run.
+  // New candidates since last run (with their embeddings + text).
   const candidates = db
     .query(
       `SELECT id, ts, directive_id, task_id, loop_id, substrate_origin,
@@ -370,24 +481,155 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
     return { merged: 0, contradicted: 0 };
   }
 
-  // Phase B2 gate: if NONE of the new candidates carry embeddings,
-  // we cannot do cosine-based dedup and must no-op cleanly. Phase F
-  // wires the real path through sqlite-vec; until then keep the
-  // cursor advancing so we don't re-scan.
   const haveEmbeddings = candidates.some((c) => c.embedding !== null);
   const latestTs = candidates[candidates.length - 1]!.ts;
 
   if (!haveEmbeddings) {
+    // §3.6.1 Rule 1 needs cosine similarity; without embeddings we
+    // cannot honestly dedup. We advance the cursor so we do not rescan
+    // unembedded rows on every tick — the embedder worker will revisit
+    // when text-embedding-3-small lands.
     writeMeta(db, META_KEYS.dedup, latestTs);
     return { merged: 0, contradicted: 0 };
   }
 
-  // Phase F will replace this body with sqlite-vec KNN queries. Until
-  // then we hold the contract that "embeddings present" still produces
-  // a {0,0} summary because the cosine path is not wired. The branch
-  // exists so tests can prove the wire-up point is single-source.
-  writeMeta(db, META_KEYS.dedup, latestTs);
-  return { merged: 0, contradicted: 0 };
+  // Existing open candidates (every candidate, including pre-cursor rows —
+  // the new candidate must compare against ALL prior open candidates, not
+  // only the new ones, so the merge is correct).
+  const openCandidates = db
+    .query(
+      `SELECT id, ts, directive_id, task_id, loop_id, substrate_origin,
+              payload, embedding
+       FROM events
+       WHERE kind = 'knowledge_candidate'
+         AND embedding IS NOT NULL
+       ORDER BY ts ASC`,
+    )
+    .all() as Array<{
+      id: string;
+      ts: string;
+      directive_id: string;
+      task_id: string;
+      loop_id: string;
+      substrate_origin: string;
+      payload: string;
+      embedding: Uint8Array;
+    }>;
+
+  // Already-synthesised candidate ids so we don't double-emit.
+  const synthesisedFor = new Set(
+    (db
+      .query(`SELECT context_refs FROM events WHERE kind = 'knowledge_synthesized'`)
+      .all() as Array<{ context_refs: string }>)
+      .flatMap((r) => { try { return JSON.parse(r.context_refs) as string[]; } catch { return []; } }),
+  );
+
+  let merged = 0;
+  let contradicted = 0;
+
+  withImmediateTransaction(db, () => {
+    for (const cand of candidates) {
+      if (!cand.embedding) continue;
+      const vecA = decodeEmbeddingBlobLocal(cand.embedding);
+      if (!vecA) continue;
+      const textA = candidateText(JSON.parse(cand.payload ?? "{}"));
+      const polA = polarityOf(textA);
+
+      // Compare against every prior candidate with an embedding.
+      for (const prior of openCandidates) {
+        if (prior.id === cand.id) continue;
+        // Only consider strictly-earlier candidates so we don't re-match
+        // the same pair twice in either direction.
+        if (prior.ts > cand.ts) continue;
+        const vecB = decodeEmbeddingBlobLocal(prior.embedding);
+        if (!vecB) continue;
+        if (vecB.length !== vecA.length) continue;
+        const cos = cosineSimilarity(vecA, vecB);
+        if (cos < KNOWLEDGE_DEDUP_COSINE_THRESHOLD) continue;
+        const textB = candidateText(JSON.parse(prior.payload ?? "{}"));
+        const polB = polarityOf(textB);
+
+        if (polA === polB) {
+          // Rule 1: dedup — attach the new candidate as corroborating evidence
+          // on the prior candidate. We emit a candidate_confirmed citing the
+          // prior candidate's id, carrying the new candidate's origin so
+          // multi-origin corroboration is observable.
+          insertEvent(db, {
+            kind: "candidate_confirmed",
+            directive_id: cand.directive_id,
+            task_id: cand.task_id,
+            loop_id: cand.loop_id,
+            substrate_origin: "substrate_auto",
+            payload: {
+              corroborator_event_id: cand.id,
+              corroborated_origin: cand.substrate_origin,
+              cosine: cos,
+              reason: "embedding_dedup",
+            },
+            context_refs: [prior.id, cand.id],
+          });
+          merged++;
+          // Rule 3: synthesis when ≥ N corroborations from ≥ 2 distinct origins.
+          if (!synthesisedFor.has(prior.id)) {
+            const origins = (db
+              .query(
+                `SELECT DISTINCT substrate_origin FROM events
+                 WHERE kind = 'candidate_confirmed'
+                   AND context_refs LIKE '%"' || ? || '"%'`,
+              )
+              .all(prior.id) as Array<{ substrate_origin: string }>).map((r) => r.substrate_origin);
+            const distinctOrigins = new Set([prior.substrate_origin, ...origins]);
+            const corroborationCount = (db
+              .query(
+                `SELECT COUNT(*) AS c FROM events
+                 WHERE kind = 'candidate_confirmed'
+                   AND context_refs LIKE '%"' || ? || '"%'`,
+              )
+              .get(prior.id) as { c: number }).c;
+            if (corroborationCount >= SYNTHESIS_CORROBORATION_THRESHOLD && distinctOrigins.size >= 2) {
+              insertEvent(db, {
+                kind: "knowledge_synthesized",
+                directive_id: prior.directive_id,
+                task_id: prior.task_id,
+                loop_id: prior.loop_id,
+                substrate_origin: "substrate_auto",
+                payload: {
+                  primary_candidate_id: prior.id,
+                  synthesized_text: textB.length > 0 ? textB : textA,
+                  corroborator_event_id: cand.id,
+                  origins: Array.from(distinctOrigins),
+                  corroboration_count: corroborationCount,
+                },
+                context_refs: [prior.id, cand.id],
+              });
+              synthesisedFor.add(prior.id);
+            }
+          }
+        } else {
+          // Rule 2: polarity disagreement → contradictory_candidates row.
+          insertEvent(db, {
+            kind: "contradictory_candidates",
+            directive_id: cand.directive_id,
+            task_id: cand.task_id,
+            loop_id: cand.loop_id,
+            substrate_origin: "substrate_auto",
+            payload: {
+              candidate_a: prior.id,
+              candidate_b: cand.id,
+              cosine: cos,
+              polarity_a: polB,
+              polarity_b: polA,
+            },
+            context_refs: [prior.id, cand.id],
+          });
+          contradicted++;
+        }
+      }
+    }
+    writeMeta(db, META_KEYS.dedup, latestTs);
+  });
+
+  return { merged, contradicted };
 };
 
 // ── 4. Recipe-candidate extractor ──────────────────────────────────

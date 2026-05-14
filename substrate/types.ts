@@ -101,6 +101,21 @@ export type EventKind =
   | "code_artifact_rehabilitated"
   | "code_artifact_score_updated"
   | "sandbox_violation"
+  | "sandbox_unenforced_warning"
+
+  // Runtime supervision (§5.5)
+  | "runtime_subprocess_started"
+  | "runtime_subprocess_resource_warning"
+  | "runtime_subprocess_soft_terminated"
+  | "runtime_subprocess_hard_killed"
+  | "runtime_subprocess_orphaned"
+  | "runtime_subprocess_completed"
+
+  // Knowledge synthesis (§3.6.1 Rule 3)
+  | "knowledge_synthesized"
+
+  // External-source registration (§5.2)
+  | "external_source_registered"
 
   // Embeddings
   | "embedding_computed"

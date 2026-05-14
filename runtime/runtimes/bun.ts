@@ -187,6 +187,18 @@ export const runBunArtifact = async (
         memory_mb: memoryMb,
       } as JsonValue,
     });
+    // §5.5 supervision event — pid + sandbox decl recorded at start.
+    inv.emit?.({
+      kind: "runtime_subprocess_started",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: inv.artifactId,
+      payload: {
+        runtime: "bun",
+        pid: proc.pid ?? null,
+        wall_ms: wallMs,
+        memory_mb: memoryMb,
+      } as JsonValue,
+    });
 
     // Soft watchdog — SIGTERM at wall_ms.
     softTimer = setTimeout(() => {
@@ -222,6 +234,14 @@ export const runBunArtifact = async (
         action_artifact_id: inv.artifactId,
         payload: { phase: "soft_timeout", signal: "SIGTERM", wall_ms: wallMs } as JsonValue,
       });
+      // §5.5 — pair the artifact_observed phase row with the canonical
+      // runtime_subprocess_soft_terminated supervision event.
+      inv.emit?.({
+        kind: "runtime_subprocess_soft_terminated",
+        substrate_origin: "substrate_auto",
+        action_artifact_id: inv.artifactId,
+        payload: { runtime: "bun", wall_ms: wallMs, signal: "SIGTERM" } as JsonValue,
+      });
     }
     if (hardFired) {
       inv.emit?.({
@@ -229,6 +249,25 @@ export const runBunArtifact = async (
         substrate_origin: "substrate_auto",
         action_artifact_id: inv.artifactId,
         payload: { phase: "hard_kill", signal: "SIGKILL", wall_ms: wallMs } as JsonValue,
+      });
+      inv.emit?.({
+        kind: "runtime_subprocess_hard_killed",
+        substrate_origin: "substrate_auto",
+        action_artifact_id: inv.artifactId,
+        payload: { runtime: "bun", wall_ms: wallMs, signal: "SIGKILL" } as JsonValue,
+      });
+    }
+
+    // Surface sandbox warnings (e.g. unenforceable net_allow on bun) as
+    // discoverable substrate events. §5.5 + §6.1 — warnings declared but
+    // unenforced previously were swallowed inside the observation; the
+    // event makes them queryable.
+    for (const w of perm.warnings) {
+      inv.emit?.({
+        kind: "sandbox_unenforced_warning",
+        substrate_origin: "substrate_auto",
+        action_artifact_id: inv.artifactId,
+        payload: { runtime: "bun", warning: w } as JsonValue,
       });
     }
 
@@ -264,6 +303,16 @@ export const runBunArtifact = async (
       substrate_origin: "substrate_auto",
       action_artifact_id: inv.artifactId,
       payload: { phase: "completed", duration_ms: durationMs } as JsonValue,
+    });
+    inv.emit?.({
+      kind: "runtime_subprocess_completed",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: inv.artifactId,
+      payload: {
+        runtime: "bun",
+        duration_ms: durationMs,
+        exit_code: exitCode,
+      } as JsonValue,
     });
 
     return {

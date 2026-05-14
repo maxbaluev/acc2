@@ -69,7 +69,11 @@ export const stakeholderStateView = (
 ): StakeholderEntry[] => {
   const rows = db
     .query(
-      "SELECT id, ts, payload FROM events WHERE directive_id = ? AND kind = 'stakeholder_state_recorded' ORDER BY ts ASC, id ASC",
+      // Phase Audit: order by ts ASC then rowid ASC (insertion order). `id`
+      // is not monotonic (newId() is UUID-derived) so two events fired in
+      // the same millisecond would tie-break randomly — the rowid is
+      // SQLite's append-order surrogate and stays strictly monotonic.
+      "SELECT id, ts, payload FROM events WHERE directive_id = ? AND kind = 'stakeholder_state_recorded' ORDER BY ts ASC, rowid ASC",
     )
     .all(directiveId) as Array<{ id: string; ts: string; payload: string }>;
 

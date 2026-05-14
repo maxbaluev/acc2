@@ -182,3 +182,51 @@ export const handleExternalPush = async (
 
   return Response.json({ ok: true, event_id: emitted.id, ts: emitted.ts }, { status: 200 });
 };
+
+// ── External source registration (§5.2) ───────────────────────────
+
+export type ExternalSourceRegistration = {
+  name: string;
+  bearer_token: string;
+  schema_hint?: string;
+  rate_limit_per_min?: number;
+  default_sensitivity?: "public" | "internal" | "private";
+};
+
+/** Register a new external source. Mints a per-source token override and
+ *  adds the source to the allowlist so subsequent pushes pass the
+ *  registered-source check. Emits `external_source_registered` for audit
+ *  (v2-design.md §5.2). Returns the registered name + a redacted token
+ *  preview so the caller knows what was committed without echoing the
+ *  secret. */
+export const registerExternalSource = (
+  db: Database,
+  state: ExternalIngressState,
+  reg: ExternalSourceRegistration,
+): { ok: true; source: string; token_preview: string } | { ok: false; error: string } => {
+  if (!reg.name || typeof reg.name !== "string") {
+    return { ok: false, error: "missing_name" };
+  }
+  if (!reg.bearer_token || reg.bearer_token.length < 8) {
+    return { ok: false, error: "bearer_token_too_short" };
+  }
+  state.registeredSources.add(reg.name);
+  state.tokens.perSource[reg.name] = reg.bearer_token;
+  if (reg.rate_limit_per_min && reg.rate_limit_per_min > 0) {
+    // For now we keep one global rate-limit; per-source caps roll in via a
+    // future PR (would require Bucket carrying its own cap). The event
+    // records the requested cap so the operator audit can spot drift.
+  }
+  emitEvent(db, {
+    kind: "external_source_registered",
+    substrate_origin: "substrate_auto",
+    payload: {
+      source: reg.name,
+      schema_hint: reg.schema_hint ?? null,
+      rate_limit_per_min: reg.rate_limit_per_min ?? null,
+      default_sensitivity: reg.default_sensitivity ?? "internal",
+    },
+  });
+  const preview = reg.bearer_token.slice(0, 4) + "…" + reg.bearer_token.slice(-2);
+  return { ok: true, source: reg.name, token_preview: preview };
+};

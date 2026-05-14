@@ -255,6 +255,13 @@ CREATE VIEW IF NOT EXISTS directive_conflicts_view AS
 // stakeholder_state_view — latest stakeholder_state_recorded row per
 // (directive_id, stakeholder_id). Older rows stay in events for audit but
 // the view projects only the freshest declaration. Phase I (§3.3, §4.2).
+//
+// Tie-break: when two events share `ts` (sub-millisecond inserts in tests
+// or under load), `id` is not monotonic (newId() is UUID-derived, not ULID
+// time-prefixed). We use the SQLite implicit `rowid` (insertion order) as
+// the secondary key — that is always monotonic and matches the actual
+// append order in the event log. This closes the Phase Audit stakeholder
+// flake (millisecond ts tie-break).
 const VIEW_STAKEHOLDER_STATE = `
 CREATE VIEW IF NOT EXISTS stakeholder_state_view AS
   WITH ranked AS (
@@ -269,7 +276,7 @@ CREATE VIEW IF NOT EXISTS stakeholder_state_view AS
       e.payload                                            AS payload,
       ROW_NUMBER() OVER (
         PARTITION BY e.directive_id, json_extract(e.payload, '$.stakeholder_id')
-        ORDER BY e.ts DESC, e.id DESC
+        ORDER BY e.ts DESC, e.rowid DESC
       ) AS rn
     FROM events e
     WHERE e.kind = 'stakeholder_state_recorded'
@@ -310,6 +317,44 @@ CREATE VIEW IF NOT EXISTS active_objectives_view AS
     AND d.directive_id NOT IN (SELECT directive_id FROM archived);
 `;
 
+// low_risk_inline_patterns_view — Phase Audit (§3.6 dispatch decider).
+// Surfaces `knowledge_promoted` rows tagged `low_risk_inline_pattern` whose
+// score AND confidence cross the inline lane thresholds. The dispatch
+// decider reads this view to decide if a directive's target files match a
+// promoted pattern; when the array is empty (default until Phase H+ seeds
+// some), the inline lane is fail-closed (see runtime/dispatch_decider.ts).
+//
+// The view emits one row per promoted pattern carrying:
+//   - cited_id       (the knowledge_promoted event id; passed to
+//                     recordLowRiskInlineOutcome for credit)
+//   - pattern_kind   ('extension' | 'prefix' | 'exact' | 'glob')
+//   - pattern        (the literal pattern body)
+//   - score / confidence
+// Origins promoting "advisory" knowledge that lack the required tag are
+// excluded entirely; the view is the single source of truth for the
+// inline lane.
+const VIEW_LOW_RISK_INLINE_PATTERNS = `
+CREATE VIEW IF NOT EXISTS low_risk_inline_patterns_view AS
+  SELECT
+    id                                                  AS cited_id,
+    ts                                                  AS ts,
+    substrate_origin                                    AS substrate_origin,
+    json_extract(payload, '$.pattern_kind')             AS pattern_kind,
+    json_extract(payload, '$.pattern')                  AS pattern,
+    json_extract(payload, '$.score')                    AS score,
+    json_extract(payload, '$.confidence')               AS confidence,
+    payload                                              AS payload
+  FROM events
+  WHERE kind = 'knowledge_promoted'
+    AND EXISTS (
+      SELECT 1
+      FROM json_each(coalesce(json_extract(payload, '$.tags'), '[]'))
+      WHERE json_each.value = 'low_risk_inline_pattern'
+    )
+    AND CAST(json_extract(payload, '$.score') AS REAL) >= 0.7
+    AND CAST(json_extract(payload, '$.confidence') AS REAL) >= 0.6;
+`;
+
 // irreversible_effects_view — physical-world side effects per directive.
 const VIEW_IRREVERSIBLE_EFFECTS = `
 CREATE VIEW IF NOT EXISTS irreversible_effects_view AS
@@ -348,6 +393,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_STAKEHOLDER_STATE);
   db.exec(VIEW_ACTIVE_OBJECTIVES);
   db.exec(VIEW_IRREVERSIBLE_EFFECTS);
+  db.exec(VIEW_LOW_RISK_INLINE_PATTERNS);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────
@@ -683,6 +729,35 @@ export type OriginGoalShapeRow = {
   candidate_count: number;
   promoted_count: number;
   promotion_ratio: number;
+};
+
+export type LowRiskInlinePatternRow = {
+  cited_id: string;
+  ts: string;
+  substrate_origin: string;
+  pattern_kind: "extension" | "prefix" | "exact" | "glob";
+  pattern: string;
+  score: number;
+  confidence: number;
+};
+
+/** Promoted knowledge entries tagged `low_risk_inline_pattern` with
+ *  score ≥ 0.7 AND confidence ≥ 0.6. The dispatch decider reads this view
+ *  to decide whether a directive can take the Claude inline lane. Fail-
+ *  closed: empty result → no inline lane (§3.6). */
+export const lowRiskInlinePatterns = (db: Database): LowRiskInlinePatternRow[] => {
+  const rows = db
+    .query("SELECT * FROM low_risk_inline_patterns_view ORDER BY ts DESC")
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    cited_id: r.cited_id as string,
+    ts: r.ts as string,
+    substrate_origin: r.substrate_origin as string,
+    pattern_kind: ((r.pattern_kind as string) ?? "exact") as LowRiskInlinePatternRow["pattern_kind"],
+    pattern: (r.pattern as string) ?? "",
+    score: (r.score as number) ?? 0,
+    confidence: (r.confidence as number) ?? 0,
+  }));
 };
 
 /** Per-(origin, goal_shape) promotion ratio — Phase H (§3.6.1 Rule 4,

@@ -21,6 +21,7 @@ import type { TaskNode } from "./task_topology";
 import { readCurrentMode } from "./crisis_mode";
 import { blockersOf } from "./interference";
 import { findRecipeMatch as findRealRecipeMatch } from "./recipe_replay";
+import { lowRiskInlinePatterns, type LowRiskInlinePatternRow } from "../substrate/views";
 
 /** Default Tier-0 recipe-replay confidence threshold (§15). Recipes seed at
  *  0.5 and accumulate via updateRecipeConfidence; two successful replays push
@@ -57,34 +58,66 @@ type InlinePattern = {
 };
 
 const readLowRiskInlinePatterns = (db: Database): InlinePattern[] => {
-  // Phase D: low-risk patterns are knowledge_promoted rows tagged
-  // 'low_risk_inline_pattern' with score ≥ threshold AND confidence ≥ threshold.
-  // None are seeded in Phase D, so this returns an empty array.
-  const rows = db
-    .query(
-      "SELECT id, payload FROM events WHERE kind = 'knowledge_promoted' ORDER BY ts DESC",
-    )
-    .all() as Array<{ id: string; payload: string }>;
-  const patterns: InlinePattern[] = [];
-  for (const r of rows) {
-    try {
-      const payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
-      const tags = (payload.tags as string[] | undefined) ?? [];
-      if (!tags.includes("low_risk_inline_pattern")) continue;
-      const score = (payload.score as number) ?? 0;
-      const confidence = (payload.confidence as number) ?? 0;
-      if (score < INLINE_PATTERN_SCORE_THRESHOLD) continue;
-      if (confidence < INLINE_PATTERN_CONFIDENCE_THRESHOLD) continue;
-      patterns.push({
-        cited_id: r.id,
-        pattern_kind: ((payload.pattern_kind as string) ?? "exact") as InlinePattern["pattern_kind"],
-        pattern: (payload.pattern as string) ?? "",
-        score,
-        confidence,
-      });
-    } catch { /* skip */ }
+  // Phase Audit: route through `low_risk_inline_patterns_view` (the SQL
+  // view scoped by tag + score + confidence) so dispatch_decider and the
+  // MCP `substrate.read` surface share one source of truth (§3.6). The
+  // accessor handles missing views gracefully — if `runViews(db)` has not
+  // been called the catch returns [], which keeps the decider fail-closed.
+  try {
+    const rows = lowRiskInlinePatterns(db);
+    return rows.map((r): InlinePattern => ({
+      cited_id: r.cited_id,
+      pattern_kind: r.pattern_kind,
+      pattern: r.pattern,
+      score: r.score,
+      confidence: r.confidence,
+    }));
+  } catch {
+    return [];
   }
-  return patterns;
+};
+
+/** Match a target string against one of the four pattern kinds. */
+const matchPattern = (target: string, p: InlinePattern): boolean => {
+  switch (p.pattern_kind) {
+    case "extension":
+      return target.endsWith(p.pattern);
+    case "prefix":
+      return target.startsWith(p.pattern);
+    case "exact":
+      return target === p.pattern;
+    case "glob": {
+      // Minimal glob: `*` → `.*`, escape other regex metacharacters.
+      const re = new RegExp(
+        "^" + p.pattern.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$",
+      );
+      return re.test(target);
+    }
+    default:
+      return false;
+  }
+};
+
+/** Return the set of patterns the task's targets match. Empty array means
+ *  no inline lane. A target = each entry in `task.target_files` (added by
+ *  callers when known) OR `task.goal` token-fallback. The decider rejects
+ *  inline unless EVERY target matches at least one pattern. */
+const inlineMatchingPatterns = (
+  task: TaskNode & { target_files?: string[] },
+  patterns: InlinePattern[],
+): InlinePattern[] | null => {
+  if (patterns.length === 0) return null;
+  const targets = (task.target_files && task.target_files.length > 0)
+    ? task.target_files
+    : []; // no concrete targets → not eligible (fail-closed)
+  if (targets.length === 0) return null;
+  const matched: InlinePattern[] = [];
+  for (const t of targets) {
+    const hit = patterns.find((p) => matchPattern(t, p));
+    if (!hit) return null; // ANY mismatch disqualifies the entire task
+    matched.push(hit);
+  }
+  return matched;
 };
 
 const estimateComplexity = (task: TaskNode): "low" | "mid" | "high" => {
@@ -104,6 +137,37 @@ const estimateComplexity = (task: TaskNode): "low" | "mid" | "high" => {
  *      an unresolved source directive, we down-rank to `deferred_blocked`.
  *    - In crisis mode (urgency='crisis' on the directive) we lower the
  *      recipe-match threshold from 0.7 → 0.4 so Tier-0 fires harder. */
+/** Credit the inspiring `knowledge_promoted` row for an inline-lane outcome
+ *  (k_555 four-link chain — create → retrieve → mutate → credit). Emits a
+ *  `candidate_confirmed` (success) or `candidate_contradicted` (failure)
+ *  event citing the promotion id; the existing knowledge extractor consumes
+ *  these and recomputes the Beta posterior so the inline-vs-delegate
+ *  selector adapts to outcomes. v2-design.md §3.6, k_252 "advisory=fake"
+ *  remediated by structural credit emission. */
+export const recordLowRiskInlineOutcome = (
+  db: Database,
+  knowledgeId: string,
+  outcome: "success" | "failure",
+  ts?: string,
+): void => {
+  // Lazy import to avoid a circular: emit lives in runtime/events.ts and
+  // the dispatch_decider is imported by the MCP server which also imports
+  // events.ts. Static import is fine; we keep the call here so any caller
+  // (Father, dispatcher, tests) can credit uniformly.
+  const { emitEvent } = require("./events") as typeof import("./events");
+  emitEvent(db, {
+    kind: outcome === "success" ? "candidate_confirmed" : "candidate_contradicted",
+    substrate_origin: "substrate_auto",
+    context_refs: [knowledgeId],
+    payload: {
+      knowledge_id: knowledgeId,
+      outcome,
+      ts: ts ?? new Date().toISOString(),
+      source: "low_risk_inline_lane",
+    },
+  });
+};
+
 export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision => {
   // 0. Down-rank: directive blocked by an unresolved higher-priority directive.
   const blockers = blockersOf(db, task.directive_id);
@@ -125,12 +189,13 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
 
   // 2. Scored inline lane. Fail-closed: no knowledge → no inline.
   const inlinePatterns = readLowRiskInlinePatterns(db);
-  if (inlinePatterns.length > 0) {
-    // In Phase D we treat "task has no concrete file targets" as
-    // not-inline-eligible (the brain still has to design the artifact).
-    // Phase E will compare task.target_files against pattern.pattern.
-    // For now, claude_inline requires explicit `payload.target_files`.
-    // We have none in the MVP fixture, so we fall through.
+  const matched = inlineMatchingPatterns(task as TaskNode & { target_files?: string[] }, inlinePatterns);
+  if (matched && matched.length > 0) {
+    return {
+      route: "claude_inline",
+      cited_artifact_ids: matched.map((m) => m.cited_id),
+      reason: "scored_inline_lane",
+    };
   }
 
   // 3. Default — opencode brain.

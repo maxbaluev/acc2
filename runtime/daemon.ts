@@ -330,7 +330,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
 
   // 1. Bind the FastMCP HTTP-streaming transport on the primary port.
   try {
-    mcpServer = createMcpServer({ db, invoker: "claude_root", index });
+    mcpServer = createMcpServer({ db, invoker: "claude_root", index, ingressState });
     await mcpServer.start({
       transportType: "httpStream",
       httpStream: { host, port },
