@@ -27,7 +27,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { newAdminToken } from "../runtime/ids";
 import { openDb, closeDb } from "../substrate/db";
-import { seedFoundationalKnowledge } from "../substrate/seed";
+import { seedCodeArtifacts, seedFoundationalKnowledge } from "../substrate/seed";
 import {
   migrateLegacyLayout,
   resolveDbPath, resolveSocketFile, resolveStateDir,
@@ -195,6 +195,9 @@ export type InitSummary = {
   uvPath: string | null;
   camoufoxPath: string | null;
   foundationalSeedImported: number;
+  /** Number of canonical seed_* code artifacts inserted on this run.
+   *  0 means "already seeded" (idempotent re-run) — see seedCodeArtifacts. */
+  codeArtifactsImported: number;
   warnings: string[];
 };
 
@@ -211,6 +214,7 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
     uvPath: null,
     camoufoxPath: null,
     foundationalSeedImported: 0,
+    codeArtifactsImported: 0,
     warnings: [],
   };
 
@@ -326,6 +330,18 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
       summary.foundationalSeedImported = result.imported;
       if (result.imported > 0) log(`       imported ${result.imported} foundational knowledge entries`);
       else log("       already seeded (skipped)");
+      // Step 7b — canonical seed code artifacts (§11.4). Idempotent: a
+      // re-run reports inserted=0 / skipped=N. Operators getting their
+      // first install end up with N action+verifier seed rows in
+      // code_artifact, matching what the harness already pre-loads for
+      // scenarioAdHocTask / scenarioRealBrainEndToEnd. Production and
+      // harness now hit the SAME seed path.
+      const artifactSummary = seedCodeArtifacts(db);
+      summary.codeArtifactsImported = artifactSummary.inserted;
+      log(
+        `[7b/8] code artifacts: imported ${artifactSummary.inserted} canonical artifacts (action + verifier pairs)` +
+          (artifactSummary.skipped > 0 ? `  (${artifactSummary.skipped} already present)` : ""),
+      );
     } finally {
       closeDb(paths.dbPath);
     }

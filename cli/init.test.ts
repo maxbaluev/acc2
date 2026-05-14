@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeDb } from "../substrate/db";
+import { closeDb, openDb } from "../substrate/db";
 import {
   detectOpenAiKey, ensureAdminToken, resolveInitPaths,
   runInit, runInitProgrammatic, writeOpenAiKey,
@@ -161,6 +161,25 @@ describe("runInitProgrammatic(--yes mode)", () => {
 
     // Foundational seed should have imported >0 rows.
     expect(summary.foundationalSeedImported).toBeGreaterThan(0);
+    // Code-artifact seed should also have imported >0 rows (action +
+    // verifier pairs from §11.4). Production install path now matches
+    // what the integration harness already does.
+    expect(summary.codeArtifactsImported).toBeGreaterThan(0);
+
+    // The DB itself must show post-init code_artifact rows > 0 — this is
+    // the substrate-content invariant `acc doctor` checks (Task 3).
+    const dbPath = join(stateDir, "state.db");
+    const db = openDb(dbPath);
+    try {
+      const row = db.query("SELECT COUNT(*) AS n FROM code_artifact").get() as { n: number };
+      expect(row.n).toBeGreaterThan(0);
+      const seedRow = db
+        .query("SELECT COUNT(*) AS n FROM code_artifact WHERE name LIKE 'seed_%' OR id LIKE 'seed_%'")
+        .get() as { n: number };
+      expect(seedRow.n).toBeGreaterThanOrEqual(5);
+    } finally {
+      closeDb(dbPath);
+    }
     cleanup();
   });
 
@@ -168,6 +187,7 @@ describe("runInitProgrammatic(--yes mode)", () => {
     const first = await runInitProgrammatic({ yes: true, log: silent, warn: silent });
     expect(first.tokenMinted).toBe(true);
     expect(first.foundationalSeedImported).toBeGreaterThan(0);
+    expect(first.codeArtifactsImported).toBeGreaterThan(0);
 
     const second = await runInitProgrammatic({ yes: true, log: silent, warn: silent });
     expect(second.exitCode).toBe(0);
@@ -175,6 +195,8 @@ describe("runInitProgrammatic(--yes mode)", () => {
     expect(second.tokenMinted).toBe(false);
     // Already-seeded — substrate refuses a second import.
     expect(second.foundationalSeedImported).toBe(0);
+    // Code-artifact seed is also idempotent — re-run inserts 0 rows.
+    expect(second.codeArtifactsImported).toBe(0);
     cleanup();
   });
 
