@@ -40,6 +40,8 @@ import { createExternalIngressState, handleExternalPush, type ExternalIngressSta
 import type { FastMCP } from "fastmcp";
 import { applyAmendment, findUnappliedAmendments } from "./amendment_handler";
 import { schedulerLoop } from "./task_scheduler";
+import { EmbeddingIndex } from "./embedding_index";
+import { embedderWorkerTick } from "./embedder";
 
 export const DEFAULT_DAEMON_PORT = 9387;
 export const DEFAULT_AUX_PORT_OFFSET = 1;
@@ -78,6 +80,9 @@ export type DaemonHandle = {
   tokenFile: string;
   ingressState: ExternalIngressState;
   workers: Array<() => void>;
+  /** In-memory embedding index rebuilt at boot from embedding_index_view.
+   *  Used by substrate.search for cosine × posterior retrieval. */
+  index: EmbeddingIndex;
   stop: () => Promise<void>;
 };
 
@@ -135,6 +140,12 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   ensureDir(stateDbPath);
   const db = openDb(stateDbPath);
   runViews(db);
+
+  // Phase F: rebuild the in-memory embedding index from substrate. On fresh
+  // installs this is an empty index; the worker tick fills it as new
+  // embeddable events accumulate.
+  const index = EmbeddingIndex.rebuildFromDb(db);
+
   const adminToken = newAdminToken();
   const ingressState = createExternalIngressState({
     ownerDefaultToken: opts.externalPushToken ?? process.env.ACC2_EXTERNAL_PUSH_TOKEN ?? null,
@@ -161,6 +172,19 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     })();
   }, 2000);
   workers.push(() => clearInterval(amendmentTick));
+
+  // Phase F: optional embedder worker. Default off — tests must not hit
+  // the OpenAI API. Enable with ACC2_EMBEDDER_AUTOSTART=1 in production.
+  // Tick every 10s with batch=20; errors swallowed so a single bad row
+  // can't kill the daemon.
+  if (process.env.ACC2_EMBEDDER_AUTOSTART === "1") {
+    const embedderTick = setInterval(() => {
+      void (async () => {
+        try { await embedderWorkerTick(db, { batchSize: 20 }); } catch { /* swallow */ }
+      })();
+    }, 10_000);
+    workers.push(() => clearInterval(embedderTick));
+  }
 
   // Phase E: optional autoscheduler. Default off — tests don't want the
   // scheduler firing dispatches. Enable with ACC2_AUTOSCHEDULER=1.
@@ -210,7 +234,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
 
   // 1. Bind the FastMCP HTTP-streaming transport on the primary port.
   try {
-    mcpServer = createMcpServer({ db, invoker: "claude_root" });
+    mcpServer = createMcpServer({ db, invoker: "claude_root", index });
     await mcpServer.start({
       transportType: "httpStream",
       httpStream: { host, port },
@@ -260,7 +284,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   emitEvent(db, {
     kind: "daemon_index_rebuilt",
     substrate_origin: "substrate_auto",
-    payload: { mode: "stub", note: "phase_f_real_hnsw_rebuild_pending" },
+    payload: {
+      mode: "in_memory_linear",
+      size: index.size(),
+      note: "phase_f_in_memory_index",
+    },
   });
 
   // POSIX signal hooks — node-style, Bun honours them.
@@ -281,6 +309,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     tokenFile,
     ingressState,
     workers,
+    index,
     stop,
   };
 };

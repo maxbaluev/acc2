@@ -26,6 +26,13 @@ export type EmitEventInput = {
   blob_ref?: string;
   failure_kind?: Event["failure_kind"];
   invoker?: SubstrateOrigin;
+  /** Raw float32 little-endian bytes of the embedding vector. The events
+   *  table BLOB column accepts this directly. Set ONLY by the embedder
+   *  worker — most call sites leave it undefined. */
+  embedding?: Uint8Array;
+  /** Embedding model/version stamp. Stored alongside the BLOB so the
+   *  reranker can exclude mixed-version sets (v2-design §19 risk 16). */
+  embedding_version?: string;
 };
 
 export type EmittedEvent = { id: string; ts: string };
@@ -48,8 +55,9 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
        id, ts, directive_id, task_id, parent_task_id, loop_id,
        substrate_origin, kind, payload, context_refs,
        predicted_residual, action_artifact_id, verifier_artifact_id,
-       outcome, residual, payload_hash, blob_ref, failure_kind, invoker
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       outcome, residual, embedding, embedding_version,
+       payload_hash, blob_ref, failure_kind, invoker
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id, ts, directive_id, task_id, input.parent_task_id ?? null, loop_id,
       substrate_origin, input.kind, payload, context_refs,
@@ -58,6 +66,8 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       input.verifier_artifact_id ?? null,
       input.outcome ?? null,
       input.residual ?? null,
+      input.embedding ?? null,
+      input.embedding_version ?? null,
       input.payload_hash ?? null,
       input.blob_ref ?? null,
       input.failure_kind ?? null,

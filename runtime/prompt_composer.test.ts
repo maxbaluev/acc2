@@ -110,4 +110,69 @@ describe("prompt_composer", () => {
     const composed = composePrompt(db, { taskId });
     expect(composed.text).toContain("WATCHED OUTPUTS: (none)");
   });
+
+  test("when retrievedKnowledge is supplied, RETRIEVED KNOWLEDGE renders the rerank lines instead of recency", () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    // Seed a recency stand-in entry; rerank must override it.
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      payload: { text: "RECENCY_FALLBACK_STAND_IN", score: 0.7 },
+    });
+    const composed = composePrompt(db, {
+      taskId,
+      retrievedKnowledge: {
+        hits: [
+          {
+            event_id: "evt_rerank_top",
+            kind: "knowledge_promoted",
+            distance: 0.12,
+            posterior: 0.9,
+            rerank_score: 1.5,
+            origin: "claude_root",
+            snippet: "RERANK_FROM_INDEX_TOPHIT",
+          },
+        ],
+        retrieved_at: "2026-05-13T12:00:00Z",
+        mixed_version_excluded: 0,
+        query_embedding_unavailable: false,
+      },
+    });
+    expect(composed.text).toContain("RERANK_FROM_INDEX_TOPHIT");
+    expect(composed.text).not.toContain("RECENCY_FALLBACK_STAND_IN");
+  });
+
+  test("when retrievedArtifacts is supplied, CODE ARTIFACT REGISTRY renders the rerank lines", () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    const composed = composePrompt(db, {
+      taskId,
+      retrievedArtifacts: {
+        hits: [
+          {
+            event_id: "evt_artifact_top",
+            kind: "code_artifact_admitted",
+            distance: 0.2,
+            posterior: 0.8,
+            rerank_score: 1.4,
+            origin: "opencode",
+            snippet: "RERANK_ARTIFACT_TOPHIT",
+          },
+        ],
+        retrieved_at: "2026-05-13T12:00:00Z",
+        mixed_version_excluded: 0,
+        query_embedding_unavailable: false,
+      },
+    });
+    expect(composed.text).toContain("RERANK_ARTIFACT_TOPHIT");
+  });
+
+  test("estimateTokens returns positive integer counts via the real tokenizer", () => {
+    expect(estimateTokens("hello world")).toBeGreaterThan(0);
+    expect(estimateTokens("")).toBeGreaterThanOrEqual(0);
+    // Tokens should be fewer than characters for typical English text.
+    expect(estimateTokens("hello world this is a longer test sentence"))
+      .toBeLessThan("hello world this is a longer test sentence".length);
+  });
 });

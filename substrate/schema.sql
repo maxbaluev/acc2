@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS events (
   outcome               TEXT,
   residual              REAL,
   embedding             BLOB,
+  embedding_version     TEXT,
   payload_hash          TEXT,
   blob_ref              TEXT,
   failure_kind          TEXT,
@@ -41,6 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_events_directive_id ON events(directive_id);
 CREATE INDEX IF NOT EXISTS idx_events_task_id      ON events(task_id);
 CREATE INDEX IF NOT EXISTS idx_events_ts           ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_action_aid   ON events(action_artifact_id);
+CREATE INDEX IF NOT EXISTS idx_events_embedding_version ON events(embedding_version);
 
 -- ── code_artifact ──────────────────────────────────────────────────
 -- Registry row per LATM/Voyager artifact. declared_sandbox + fixture_input

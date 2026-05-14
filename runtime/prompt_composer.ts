@@ -17,10 +17,24 @@
 
 import type { Database } from "bun:sqlite";
 import { snapshotWatchedOutputs } from "./watch_edges";
+import { encodingForModel, type Tiktoken } from "js-tiktoken";
+import type { EmbeddingIndex } from "./embedding_index";
+import type { RetrievalHit, RetrievalResult } from "./retrieval";
 
 export type PromptComposeOptions = {
   taskId: string;
   budgetTokens?: number;
+  /** Optional embedding-index handle. When provided AND `index.size() > 0`,
+   *  RETRIEVED KNOWLEDGE and CODE ARTIFACT REGISTRY pull through the
+   *  reranker via `retrievedKnowledge` / `retrievedArtifacts` below (which
+   *  the caller pre-computes — the composer stays synchronous). */
+  retrievedKnowledge?: RetrievalResult | null;
+  retrievedArtifacts?: RetrievalResult | null;
+  /** When the caller has an EmbeddingIndex but no pre-computed retrieval
+   *  result, it can be omitted entirely — the existing recency-based fallback
+   *  applies. Phase F wires the async retrieve() in the dispatcher
+   *  caller (Phase G); composePrompt itself stays sync. */
+  index?: EmbeddingIndex | null;
 };
 
 export type PromptSection = {
@@ -37,10 +51,43 @@ export type ComposedPrompt = {
 
 const DEFAULT_BUDGET_TOKENS = 8000;
 
-/** Approximate token count — 4 chars per token rough average. Phase F swaps in
- *  a real tokenizer (e.g. tiktoken). The estimate is conservative enough that
- *  small overshoots cannot push the brain over its real budget. */
-export const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
+// Phase F: real tokenizer via js-tiktoken's cl100k_base (the BPE that
+// text-embedding-3-small uses). One encoder is initialised lazily on first
+// call — encoders are stateless after construction, safe to share across
+// composer invocations. We swallow construction errors and fall back to the
+// chars/4 heuristic; tiktoken's data file fetches at module load if the
+// runtime resolves it lazily, so we want this to degrade gracefully.
+let _tiktokenEncoder: Tiktoken | null = null;
+let _tiktokenInitTried = false;
+
+const initTokenizer = (): Tiktoken | null => {
+  if (_tiktokenEncoder) return _tiktokenEncoder;
+  if (_tiktokenInitTried) return _tiktokenEncoder;
+  _tiktokenInitTried = true;
+  try {
+    _tiktokenEncoder = encodingForModel("text-embedding-3-small");
+  } catch {
+    _tiktokenEncoder = null;
+  }
+  return _tiktokenEncoder;
+};
+
+/** Real token count via js-tiktoken's cl100k_base (matches the
+ *  text-embedding-3-small family). Falls back to a chars/4 heuristic on the
+ *  one path where tiktoken initialisation fails (no native data file in the
+ *  bundle). Phase F resolution: kept under 200kB install size, no native
+ *  deps required. */
+export const estimateTokens = (text: string): number => {
+  const enc = initTokenizer();
+  if (enc) {
+    try {
+      return enc.encode(text).length;
+    } catch {
+      /* fall through to char heuristic */
+    }
+  }
+  return Math.ceil(text.length / 4);
+};
 
 type TaskRow = {
   id: string;
@@ -190,11 +237,43 @@ const buildKnowledgeSection = (rows: Array<{ id: string; text: string; score: nu
   return lines.join("\n");
 };
 
+/** Render reranked retrieval hits into the RETRIEVED KNOWLEDGE section.
+ *  Used when the caller passed `retrievedKnowledge` (i.e. the index lit
+ *  up and reranker produced hits). Each row cites the source event id +
+ *  posterior + cosine distance so the brain can audit retrieval. */
+const buildRetrievedKnowledgeSection = (hits: RetrievalHit[]): string => {
+  if (hits.length === 0) return "RETRIEVED KNOWLEDGE: (none)";
+  const lines: string[] = ["RETRIEVED KNOWLEDGE (top-K by embedding × posterior):"];
+  for (const h of hits) {
+    const snippet = h.snippet.length > 0 ? h.snippet : "(no snippet)";
+    lines.push(
+      `  [${h.event_id}] (rerank=${h.rerank_score.toFixed(2)} d=${h.distance.toFixed(3)} p=${h.posterior.toFixed(2)} origin=${h.origin}) ${snippet}`,
+    );
+  }
+  return lines.join("\n");
+};
+
 const buildArtifactSection = (rows: Array<{ id: string; runtime: string; name: string; score: number }>): string => {
   if (rows.length === 0) return "CODE ARTIFACT REGISTRY: (none)";
   const lines: string[] = ["CODE ARTIFACT REGISTRY (top-K by posterior, scoped to your runtimes):"];
   for (const r of rows) {
     lines.push(`  [${r.id}] runtime=${r.runtime} name=${r.name} score=${r.score.toFixed(2)}`);
+  }
+  return lines.join("\n");
+};
+
+/** Render reranked code-artifact retrieval hits. The brain reads this to
+ *  pick reusable artifacts; the rerank surface ensures cosine-similar
+ *  artifacts (by event embedding) bubble up over pure posterior-only
+ *  ordering. */
+const buildRetrievedArtifactSection = (hits: RetrievalHit[]): string => {
+  if (hits.length === 0) return "CODE ARTIFACT REGISTRY: (none)";
+  const lines: string[] = ["CODE ARTIFACT REGISTRY (top-K by embedding × posterior, scoped to your runtimes):"];
+  for (const h of hits) {
+    const snippet = h.snippet.length > 0 ? h.snippet : "(no snippet)";
+    lines.push(
+      `  [${h.event_id}] (rerank=${h.rerank_score.toFixed(2)} p=${h.posterior.toFixed(2)}) ${snippet}`,
+    );
   }
   return lines.join("\n");
 };
@@ -255,8 +334,17 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     candidates.push({ name: "fixture_marker", p: 0, body: FIXTURE_D_MARKER });
   }
 
-  candidates.push({ name: "retrieved_knowledge", p: 1, body: buildKnowledgeSection(readKnowledgeTopK(db, 8)) });
-  candidates.push({ name: "code_artifact_registry", p: 1, body: buildArtifactSection(readArtifactRegistryTopK(db, 6)) });
+  // P1 sections: when the caller pre-computed reranker hits (index lit up),
+  // render those; otherwise fall back to the recency stand-in (Phase D shape).
+  const knowledgeBody = opts.retrievedKnowledge && opts.retrievedKnowledge.hits.length > 0
+    ? buildRetrievedKnowledgeSection(opts.retrievedKnowledge.hits)
+    : buildKnowledgeSection(readKnowledgeTopK(db, 8));
+  candidates.push({ name: "retrieved_knowledge", p: 1, body: knowledgeBody });
+
+  const artifactBody = opts.retrievedArtifacts && opts.retrievedArtifacts.hits.length > 0
+    ? buildRetrievedArtifactSection(opts.retrievedArtifacts.hits)
+    : buildArtifactSection(readArtifactRegistryTopK(db, 6));
+  candidates.push({ name: "code_artifact_registry", p: 1, body: artifactBody });
 
   // P2/P3 sections are stubs in Phase D (no upstream-task or stakeholder data
   // yet). Including the headers anyway so the brain sees the structural

@@ -127,9 +127,48 @@ CREATE VIEW IF NOT EXISTS artifact_routing_view AS
 // rebuilds its HNSW index from this view at boot.
 const VIEW_EMBEDDING_INDEX = `
 CREATE VIEW IF NOT EXISTS embedding_index_view AS
-  SELECT id, kind, ts, directive_id, task_id, embedding
+  SELECT id, kind, ts, directive_id, task_id, embedding, embedding_version, substrate_origin, payload
   FROM events
   WHERE embedding IS NOT NULL;
+`;
+
+// origin_promotion_view — per substrate_origin, summarise how often candidate
+// events from that origin promoted to knowledge_promoted. Used by the
+// reranker (retrieval.ts) to bias scoring per origin (§3.6.1 Rule 4).
+// Phase F: goal_shape hashing is deferred; we return one row per origin with
+// a global ratio. The reranker treats absent origins as 1.0 (neutral).
+const VIEW_ORIGIN_PROMOTION = `
+CREATE VIEW IF NOT EXISTS origin_promotion_view AS
+  WITH candidates AS (
+    SELECT substrate_origin, COUNT(*) AS cand_count
+    FROM events
+    WHERE kind = 'knowledge_candidate'
+    GROUP BY substrate_origin
+  ),
+  promotions AS (
+    SELECT substrate_origin, COUNT(*) AS prom_count
+    FROM events
+    WHERE kind = 'knowledge_promoted'
+    GROUP BY substrate_origin
+  )
+  SELECT
+    COALESCE(c.substrate_origin, p.substrate_origin)            AS substrate_origin,
+    COALESCE(c.cand_count, 0)                                   AS candidate_count,
+    COALESCE(p.prom_count, 0)                                   AS promoted_count,
+    CASE
+      WHEN COALESCE(c.cand_count, 0) = 0 THEN 1.0
+      ELSE CAST(COALESCE(p.prom_count, 0) AS REAL) / CAST(c.cand_count AS REAL)
+    END                                                          AS promotion_ratio
+  FROM candidates c
+  LEFT JOIN promotions p ON c.substrate_origin = p.substrate_origin
+  UNION
+  SELECT
+    p.substrate_origin                                          AS substrate_origin,
+    0                                                            AS candidate_count,
+    p.prom_count                                                 AS promoted_count,
+    1.0                                                          AS promotion_ratio
+  FROM promotions p
+  WHERE p.substrate_origin NOT IN (SELECT substrate_origin FROM candidates);
 `;
 
 // contradictory_candidates_view — Phase B2 placeholder. The semantic
@@ -239,6 +278,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_CODE_ARTIFACT_REGISTRY);
   db.exec(VIEW_ARTIFACT_ROUTING);
   db.exec(VIEW_EMBEDDING_INDEX);
+  db.exec(VIEW_ORIGIN_PROMOTION);
   db.exec(VIEW_CONTRADICTORY);
   db.exec(VIEW_OWNER_CONVERSATION);
   db.exec(VIEW_ROLLING_REVIEW_DUE);
@@ -302,6 +342,16 @@ export type EmbeddingIndexRow = {
   directive_id: string;
   task_id: string;
   embedding: Uint8Array;
+  embedding_version: string | null;
+  substrate_origin: string;
+  payload: Record<string, unknown>;
+};
+
+export type OriginPromotionRow = {
+  substrate_origin: string;
+  candidate_count: number;
+  promoted_count: number;
+  promotion_ratio: number;
 };
 
 export type OwnerConversationRow = {
@@ -487,7 +537,7 @@ export const irreversibleEffects = (db: Database): IrreversibleEffectRow[] => {
   }));
 };
 
-/** Events with an embedding BLOB — daemon rebuilds HNSW index from this. */
+/** Events with an embedding BLOB — daemon rebuilds in-memory index from this. */
 export const embeddingIndex = (db: Database): EmbeddingIndexRow[] => {
   const rows = db.query("SELECT * FROM embedding_index_view").all() as Array<Record<string, unknown>>;
   return rows.map((r) => ({
@@ -497,5 +547,21 @@ export const embeddingIndex = (db: Database): EmbeddingIndexRow[] => {
     directive_id: r.directive_id as string,
     task_id: r.task_id as string,
     embedding: r.embedding as Uint8Array,
+    embedding_version: (r.embedding_version as string | null) ?? null,
+    substrate_origin: r.substrate_origin as string,
+    payload: parseJson<Record<string, unknown>>(r.payload),
+  }));
+};
+
+/** Per-origin promotion ratio (knowledge_promoted / knowledge_candidate). The
+ *  reranker reads this to bias scoring per substrate_origin (§3.6.1 Rule 4).
+ *  Origins missing from this view default to 1.0 at the call site. */
+export const originPromotion = (db: Database): OriginPromotionRow[] => {
+  const rows = db.query("SELECT * FROM origin_promotion_view").all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    substrate_origin: r.substrate_origin as string,
+    candidate_count: r.candidate_count as number,
+    promoted_count: r.promoted_count as number,
+    promotion_ratio: r.promotion_ratio as number,
   }));
 };

@@ -36,12 +36,20 @@ import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { readDagForDirective } from "./task_topology";
 import { schedulerTick } from "./task_scheduler";
 import { emitAndApplyAmendment } from "./amendment_handler";
+import { computeEmbedding } from "./embedder";
+import { retrieve } from "./retrieval";
+import type { EmbeddingIndex } from "./embedding_index";
 
 export type McpContext = {
   db: Database;
   /** Caller for any audit event we synthesize. CLI clients default to
    *  `claude_root`; the brain bridge tags `opencode`. */
   invoker: SubstrateOrigin;
+  /** Optional embedding index handle. When present AND size > 0 the
+   *  search tool routes through the reranker; otherwise it falls back to
+   *  the recency stand-in (which stays correct on fresh / unembedded
+   *  substrates). */
+  index?: EmbeddingIndex | null;
 };
 
 export type McpResult =
@@ -56,6 +64,7 @@ export const McpMethods = [
   "substrate.get_event",
   "substrate.get_artifact",
   "substrate.search",
+  "substrate.embed_text",
   "substrate.run_artifact",
   "substrate.run_verifier",
   "substrate.credit",
@@ -118,8 +127,13 @@ const SearchSchema = z.object({
       k: z.number().optional(),
       runtime: z.string().optional(),
       min_score: z.number().optional(),
+      kind_filter: z.array(z.string()).optional(),
     })
     .optional(),
+});
+
+const EmbedTextSchema = z.object({
+  text: z.string(),
 });
 
 const RunArtifactSchema = z.object({
@@ -274,14 +288,39 @@ const handleGetArtifact = (
   };
 };
 
-const handleSearch = (
+const handleSearch = async (
   ctx: McpContext,
   args: z.infer<typeof SearchSchema>,
-): McpResult => {
-  // Phase F lights up embedding-based retrieval (cosine × posterior reranker).
-  // For B3 we return the most recent N events as a structurally-correct stand-
-  // in so the tool surface is wired end-to-end and tests can assert hits.
+): Promise<McpResult> => {
   const k = Math.max(1, Math.min(100, args.opts?.k ?? 20));
+
+  // Phase F: when the daemon mounted an index AND it has entries, route
+  // through the reranker. Otherwise fall back to the recency stand-in so
+  // fresh substrates / no-API-key environments still return structurally-
+  // correct hits.
+  if (ctx.index && ctx.index.size() > 0) {
+    const result = await retrieve(ctx.db, ctx.index, {
+      text: args.query,
+      k,
+      runtime: args.opts?.runtime,
+      minScore: args.opts?.min_score,
+      kindFilter: args.opts?.kind_filter,
+    });
+    if (!result.query_embedding_unavailable) {
+      return {
+        ok: true,
+        result: {
+          hits: result.hits,
+          mode: "rerank",
+          query: args.query,
+          mixed_version_excluded: result.mixed_version_excluded,
+          retrieved_at: result.retrieved_at,
+        } as JsonValue,
+      };
+    }
+    // fall through to recency stand-in when query embedding unavailable
+  }
+
   const rows = ctx.db
     .query(
       "SELECT id, ts, kind, directive_id, task_id, substrate_origin, payload " +
@@ -303,6 +342,24 @@ const handleSearch = (
       hits,
       mode: "recent_events_stub",
       query: args.query,
+    } as JsonValue,
+  };
+};
+
+const handleEmbedText = async (
+  _ctx: McpContext,
+  args: z.infer<typeof EmbedTextSchema>,
+): Promise<McpResult> => {
+  const result = await computeEmbedding(args.text);
+  if (!result) {
+    return { ok: false, error: "embedding_unavailable" };
+  }
+  return {
+    ok: true,
+    result: {
+      embedding: result.embedding,
+      version: result.version,
+      model: "text-embedding-3-small",
     } as JsonValue,
   };
 };
@@ -520,6 +577,9 @@ export type McpServerOptions = {
   invoker?: SubstrateOrigin;
   name?: string;
   version?: `${number}.${number}.${number}`;
+  /** Embedding index handed to substrate.search. The daemon builds this at
+   *  boot via EmbeddingIndex.rebuildFromDb; tests can pass null. */
+  index?: EmbeddingIndex | null;
 };
 
 /** Build a FastMCP server with every substrate tool wired against `ctx.db`.
@@ -530,6 +590,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
   const ctx: McpContext = {
     db: opts.db,
     invoker: opts.invoker ?? "claude_root",
+    index: opts.index ?? null,
   };
 
   const server = new FastMCP({
@@ -594,10 +655,20 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
   server.addTool({
     name: "substrate.search",
     description:
-      "Search the substrate. (B3: recent-events stand-in; Phase F adds " +
-      "cosine × posterior retrieval.)",
+      "Search the substrate. Phase F: routes through the cosine × posterior " +
+      "reranker when an embedding index is mounted; falls back to recent-events " +
+      "stand-in on fresh / unembedded substrates. Supports kind_filter to scope.",
     parameters: SearchSchema,
     execute: wrap(handleSearch),
+  });
+
+  server.addTool({
+    name: "substrate.embed_text",
+    description:
+      "Embed an arbitrary text via the same model the substrate indexes with " +
+      "(text-embedding-3-small). Returns {embedding: number[], version, model}.",
+    parameters: EmbedTextSchema,
+    execute: wrap(handleEmbedText),
   });
 
   server.addTool({
@@ -696,6 +767,7 @@ const HTTP_DISPATCH: Record<string, (ctx: McpContext, args: any) => McpResult | 
   "substrate.get_event": handleGetEvent as any,
   "substrate.get_artifact": handleGetArtifact as any,
   "substrate.search": handleSearch as any,
+  "substrate.embed_text": handleEmbedText as any,
   "substrate.run_artifact": handleRunArtifact as any,
   "substrate.run_verifier": handleRunVerifier as any,
   "substrate.credit": handleCredit as any,
