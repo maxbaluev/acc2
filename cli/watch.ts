@@ -135,6 +135,11 @@ export type WatchState = {
   selected?: Partial<Record<ViewKey, number>>;
   filter?: string;
   showHelp?: boolean;
+  /** Enter toggles a full-screen detail viewer that shows the selected
+   *  row's full untrimmed body. j/k scroll within the viewer. Esc/Enter
+   *  exits back to the split list+preview layout. */
+  expanded?: boolean;
+  detailScrollY?: number;
 };
 
 type ListItem = {
@@ -235,6 +240,20 @@ const formatPayloadPreview = (payload: unknown, max = 90): string => {
     const s = typeof payload === "string" ? payload : JSON.stringify(payload);
     return truncate(s.replace(/\s+/g, " "), max);
   } catch { return ""; }
+};
+
+/** Full pretty-printed payload, no truncation, preserves whitespace. Used by
+ *  the events/supervisor body fields so the side-pane preview and the
+ *  Enter-toggled full-screen viewer can render every byte. */
+const formatPayloadFull = (payload: unknown): string => {
+  if (payload === null || payload === undefined) return "";
+  if (typeof payload === "string") {
+    if (payload.length > 0 && (payload[0] === "{" || payload[0] === "[")) {
+      try { return JSON.stringify(JSON.parse(payload), null, 2); } catch { return payload; }
+    }
+    return payload;
+  }
+  try { return JSON.stringify(payload, null, 2); } catch { return String(payload); }
 };
 
 const labelForView = (view: ViewKey): string => VIEWS.find((v) => v.key === view)?.label ?? view;
@@ -542,14 +561,20 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
     }));
   }
   if (view === "events") {
-    return groupEvents(state.events ?? []).map((e) => {
+    // Newest-first: reverse the chronological group so items[0] is the most
+    // recent event. Pre-fix the list grew downward, so new events landed below
+    // the fold and the user had to scroll. Now the live tail is always at the
+    // top of the visible window.
+    return groupEvents(state.events ?? []).reverse().map((e) => {
       const p = asObject(e.payload);
       const count = asNumber(p.grouped_count, 1);
       return {
         id: e.event_id,
         title: `${e.kind}${count > 1 ? ` x${count}` : ""}`,
         meta: `${e.ts.slice(11, 19)} dir=${shortId(e.directive_id)} task=${shortId(e.task_id)}`,
-        body: `event_id=${e.event_id}\nts=${e.ts}\nkind=${e.kind}\ndirective_id=${e.directive_id ?? ""}\ntask_id=${e.task_id ?? ""}\n\npayload=${formatPayloadPreview(e.payload, 2000)}`,
+        // body holds the full untrimmed payload — Enter opens the full-screen
+        // viewer; the side-pane preview also no longer caps at 2000 chars.
+        body: `event_id=${e.event_id}\nts=${e.ts}\nkind=${e.kind}\ndirective_id=${e.directive_id ?? ""}\ntask_id=${e.task_id ?? ""}\n\npayload=${formatPayloadFull(e.payload)}`,
         kind: e.kind,
         status: e.kind,
         raw: e,
@@ -598,11 +623,12 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
     const source = (state.supervisorEvents && state.supervisorEvents.length > 0)
       ? state.supervisorEvents
       : (state.events ?? []).filter((e) => SUPERVISOR_EVENT_KINDS.includes(e.kind));
-    return source.map((e) => ({
+    // Newest-first; full payload (no trim).
+    return [...source].reverse().map((e) => ({
       id: e.event_id,
       title: e.kind,
       meta: `${e.ts.slice(11, 19)} dir=${shortId(e.directive_id)} task=${shortId(e.task_id)}`,
-      body: `event_id=${e.event_id}\nts=${e.ts}\nkind=${e.kind}\n\n${formatPayloadPreview(e.payload, 2000)}`,
+      body: `event_id=${e.event_id}\nts=${e.ts}\nkind=${e.kind}\n\n${formatPayloadFull(e.payload)}`,
       kind: e.kind,
       status: e.kind,
       raw: e,
@@ -654,9 +680,32 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
   const view = state.view ?? "events";
   const items = filteredItems(state, view);
   const selectedMap = state.selected ?? {};
-  const defaultSelected = view === "events" ? Math.max(0, items.length - 1) : 0;
-  const selected = clamp(selectedMap[view] ?? defaultSelected, 0, Math.max(0, items.length - 1));
+  // Newest-first ordering: items[0] is the most recent row across every view,
+  // so the default selection is always the top of the list.
+  const selected = clamp(selectedMap[view] ?? 0, 0, Math.max(0, items.length - 1));
   const detail = items[selected];
+
+  // Full-screen detail viewer (Enter to enter, Esc/Enter to exit). Renders
+  // the entire body of the selected row with whitespace preserved and no
+  // truncation — operator can read every byte of any event payload.
+  if (state.expanded && detail) {
+    const ePartsViewer = [CLEAR_SCREEN, HOME];
+    ePartsViewer.push(moveTo(1, 1));
+    ePartsViewer.push(`${BOLD}${CYAN}acc watch — full payload${RESET} ${DIM}j/k scroll  Enter/Esc back  q quit${RESET}`);
+    ePartsViewer.push(moveTo(2, 1));
+    ePartsViewer.push(`${BOLD}${labelForView(view)}${RESET} ${DIM}${shortId(detail.id, 24)} ${detail.title}${RESET}`);
+    const viewerRows = safeRows - 3;
+    const lines = wrapLines(detail.body, safeCols, Number.MAX_SAFE_INTEGER);
+    const scrollY = clamp(state.detailScrollY ?? 0, 0, Math.max(0, lines.length - viewerRows));
+    for (let i = 0; i < viewerRows; i++) {
+      ePartsViewer.push(moveTo(4 + i, 1));
+      ePartsViewer.push(pad(lines[scrollY + i] ?? "", safeCols));
+    }
+    ePartsViewer.push(moveTo(safeRows, 1));
+    ePartsViewer.push(`${DIM}line ${Math.min(scrollY + 1, lines.length)}/${lines.length}${RESET}`);
+    return ePartsViewer.join("");
+  }
+
   const listWidth = Math.max(34, Math.floor(safeCols * 0.48));
   const detailWidth = safeCols - listWidth - 3;
   const listRows = safeRows - 6;
@@ -664,7 +713,7 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
   const parts: string[] = [CLEAR_SCREEN, HOME];
 
   parts.push(moveTo(1, 1));
-  parts.push(`${BOLD}${CYAN}acc watch${RESET} ${DIM}Tab/1-8 view  j/k move  Enter detail  / filter  ? help  r refresh  q quit${RESET}`);
+  parts.push(`${BOLD}${CYAN}acc watch${RESET} ${DIM}Tab/1-8 view  j/k move  Enter expand  Esc back  / filter  ? help  r refresh  q quit${RESET}`);
 
   parts.push(moveTo(2, 1));
   let col = 1;
@@ -823,6 +872,19 @@ const appendEvent = (state: WatchState, ev: SseEvent): void => {
     payload: ev.payload,
   });
   if (state.events.length > MAX_EVENTS) state.events.splice(0, state.events.length - MAX_EVENTS);
+  // Anchor the cursor on the row the user was reading. Events render
+  // newest-first, so each arrival inserts a new row at items[0] and
+  // shifts every following row down by one. If the user has scrolled
+  // (selected > 0), bump selected by 1 to keep them on the same event.
+  // Selected==0 means "follow the live tail" — leave it alone so the
+  // top of the list always shows the newest arrival.
+  const view = state.view ?? "events";
+  if ((view === "events" || view === "interventions")) {
+    const sel = state.selected?.events ?? 0;
+    if (sel > 0) {
+      state.selected = { ...(state.selected ?? {}), events: Math.min(sel + 1, MAX_EVENTS - 1) };
+    }
+  }
   state.lessons = deriveLessons(state);
 };
 
@@ -897,14 +959,38 @@ export const runWatch = async (argv: string[], opts: RunWatchOpts = {}): Promise
         renderTick();
         return;
       }
+      // Esc: exit expanded mode first; otherwise close the help overlay.
+      if (str === "\x1b") {
+        if (state.expanded) { state.expanded = false; state.detailScrollY = 0; renderTick(); return; }
+        if (state.showHelp) { state.showHelp = false; renderTick(); return; }
+        return;
+      }
+      // Enter: toggle the full-screen detail viewer. Inside it Enter exits.
+      if (str === "\r" || str === "\n") {
+        state.expanded = !state.expanded;
+        if (!state.expanded) state.detailScrollY = 0;
+        renderTick();
+        return;
+      }
+      // j/k inside the expanded viewer scroll within the body; outside, they
+      // move the list cursor.
+      if (str === "j" || str === "J" || str === "\x1b[B") {
+        if (state.expanded) { state.detailScrollY = (state.detailScrollY ?? 0) + 1; }
+        else { adjustSelection(1); }
+        renderTick();
+        return;
+      }
+      if (str === "k" || str === "K" || str === "\x1b[A") {
+        if (state.expanded) { state.detailScrollY = Math.max(0, (state.detailScrollY ?? 0) - 1); }
+        else { adjustSelection(-1); }
+        renderTick();
+        return;
+      }
       if (str === "/") { filtering = true; state.filter = ""; renderTick(); return; }
       if (str === "?") { state.showHelp = !state.showHelp; renderTick(); return; }
       if (str === "\t") { setView(nextView(state.view ?? "events")); renderTick(); return; }
       if (/^[1-8]$/.test(str)) { setView(VIEWS[Number(str) - 1]!.key); renderTick(); return; }
-      if (str === "j" || str === "J" || str === "\x1b[B") { adjustSelection(1); renderTick(); return; }
-      if (str === "k" || str === "K" || str === "\x1b[A") { adjustSelection(-1); renderTick(); return; }
       if (str === "r" || str === "R") { void refreshAll(state).then(renderTick).catch(() => { /* stale is better than blank */ }); return; }
-      if (str === "\r" || str === "\n") { renderTick(); return; }
     };
     stdin.on("data", keyHandler);
   }
