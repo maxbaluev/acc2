@@ -50,23 +50,19 @@ const usage = (): string => `acc — v2 thin CLI
   acc doctor                      Multi-check readiness report.
 `;
 
-// Credential preflight (universal gate, 2026-05-15). Scans the owner's
-// directive text for any ALL_CAPS env-var-shaped identifier
-// (`<NAME>_KEY` / `_TOKEN` / `_SECRET` / `_PASSWORD`). If any is referenced
-// but unset in process.env, refuse to dispatch.
+// Pre-dispatch credential preflight (cli-quick first line of defense).
 //
-// Universal — no hardcoded service list. Works for SERPER_API_KEY,
-// OPENAI_API_KEY, GITHUB_TOKEN, STRIPE_SECRET_KEY, DATABASE_PASSWORD,
-// or any future credential the owner mentions.
+// Architecture: the BRAIN's artifact declared_sandbox.env_requires is the
+// canonical authority on what env vars an artifact needs (runtime gate in
+// runtime/runtimes/bun.ts). This CLI check is the FAST-LANE belt-and-
+// suspenders: if the owner explicitly names an env-var-shaped identifier
+// in their directive AND that var isn't on the daemon process, refuse to
+// dispatch immediately — no need to round-trip through the brain.
 //
-// Fail-closed: missing → refuse + clear "add to .env" message.
-// (User directives: "no fallbacks" + "if system need something from user
-// — it should ask".) The matching runtime gate in
-// runtime/runtimes/bun.ts catches credentials the brain references
-// internally (process.env.X in artifact body) without owner naming them.
+// Token shape is universal: `<NAME>_KEY` / `_TOKEN` / `_SECRET` /
+// `_PASSWORD`. The runtime gate covers dynamic + library-indirected env
+// access (which a directive-text scan can't see) via the declared_sandbox.
 const ENV_VAR_TOKEN = /\b([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)*(?:_KEY|_TOKEN|_SECRET|_PASSWORD))\b/g;
-// Exclude env vars the substrate manages itself (these are operational and
-// always present after `acc init`).
 const PREFLIGHT_IGNORE = new Set([
   "ACC2_ADMIN_TOKEN", "ACC2_EXTERNAL_PUSH_TOKEN",
 ]);

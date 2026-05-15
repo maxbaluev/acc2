@@ -110,6 +110,14 @@ export type Event = {
 
 export type Runtime = "bun" | "uv" | "camofox-browser";
 
+// Brain sandbox audit bsfxsvgh9 + dataflow audit bxdhdkm9e (2026-05-15):
+// `env_requires` declares which environment variables an artifact needs
+// in process.env at invocation time. Universal — no regex, no hardcoded
+// service list. The brain composes the artifact AND declares its env
+// dependencies; the runtime checks declared vars against process.env
+// BEFORE spawning the subprocess. Missing → emit owner_input_required
+// (flows to the operator via SSE → Claude shell), refuse to invoke.
+// One source of truth replacing the previous body-scan heuristic.
 export type SandboxDecl =
   | {
       runtime: "bun";
@@ -118,6 +126,7 @@ export type SandboxDecl =
       net_allow?: string[];
       proc_allow?: string[];
       substrate_access?: "ro" | "rw" | "none";
+      env_requires?: string[];
       cpu_ms: number;
       wall_ms: number;
       memory_mb: number;
@@ -128,6 +137,7 @@ export type SandboxDecl =
       fs_write?: string[];
       net_allow?: string[];
       pypi_allow?: string[];
+      env_requires?: string[];
       cpu_ms: number;
       wall_ms: number;
       memory_mb: number;
@@ -145,6 +155,7 @@ export type SandboxDecl =
       fingerprint_os?: "linux" | "macos" | "windows";
       fingerprint_locale?: string;
       headless?: boolean;
+      env_requires?: string[];
       wall_ms: number;
       memory_mb: number;
     };
