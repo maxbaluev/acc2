@@ -63,6 +63,13 @@ type InsertEventInput = {
   context_refs?: string[];
   outcome?: string;
   residual?: number;
+  // Universal act-loop fields (k_555 spine support): action_predicted +
+  // action_scored events carry these, and substrate.credit traverses
+  // them at credit-distribution time. Without writing these columns,
+  // any spine the extractors emit is invisible to retrieval-by-artifact.
+  action_artifact_id?: string;
+  verifier_artifact_id?: string;
+  predicted_residual?: number;
 };
 
 const insertEvent = (db: Database, ev: InsertEventInput): string => {
@@ -70,8 +77,9 @@ const insertEvent = (db: Database, ev: InsertEventInput): string => {
   db.run(
     `INSERT INTO events (
        id, ts, directive_id, task_id, parent_task_id, loop_id,
-       substrate_origin, kind, payload, context_refs, outcome, residual
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       substrate_origin, kind, payload, context_refs, outcome, residual,
+       action_artifact_id, verifier_artifact_id, predicted_residual
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       nowIso(),
@@ -85,6 +93,9 @@ const insertEvent = (db: Database, ev: InsertEventInput): string => {
       JSON.stringify(ev.context_refs ?? []),
       ev.outcome ?? null,
       ev.residual ?? null,
+      ev.action_artifact_id ?? null,
+      ev.verifier_artifact_id ?? null,
+      ev.predicted_residual ?? null,
     ],
   );
   return id;
@@ -1361,7 +1372,17 @@ const validateAgainstSchema = (value: unknown, schema: unknown): boolean => {
 // They are NOT part of OWNER_PROFILE_JSON_SCHEMA; strip them when reading
 // back so a subsequent merge + re-validate doesn't trip
 // additionalProperties=false.
-const OWNER_PROFILE_META_FIELDS = ["promoted_from", "promotion_route"] as const;
+const OWNER_PROFILE_META_FIELDS = [
+  "promoted_from",
+  "promotion_route",
+  // k_555 spine pointers — added 2026-05-15 when the owner_profile
+  // promoter started emitting action_predicted + action_scored before
+  // each owner_profile_recorded. They live on the row for audit but
+  // aren't part of OWNER_PROFILE_JSON_SCHEMA, so re-validation on
+  // subsequent merge passes would fail without stripping them.
+  "action_event_id",
+  "scored_event_id",
+] as const;
 
 const readLatestOwnerProfile = (db: Database): OwnerProfile => {
   const row = db
@@ -1524,14 +1545,52 @@ export const maybePromoteOwnerProfile = (
 
   let recordedId = "";
   withImmediateTransaction(db, () => {
+    // Close the k_555 four-link spine: action_predicted → action_scored →
+    // owner_profile_recorded. Without the predict/score pair,
+    // substrate.credit has no action_scored row to attach Shapley
+    // credit to, and the source candidate's Beta posterior never
+    // updates from this promotion. The promoter IS its own action:
+    // the merge is the action, the schema validation is the verifier,
+    // residual=0 because the validator returned true.
+    const actionId = insertEvent(db, {
+      kind: "action_predicted",
+      directive_id: (row.directive_id as string) ?? "owner_profile",
+      task_id: (row.task_id as string) ?? "owner_profile",
+      loop_id: (row.loop_id as string) ?? "loop_root",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "owner_profile_promoter_action",
+      verifier_artifact_id: "owner_profile_schema_verifier",
+      predicted_residual: 0,
+      payload: { candidate_id: sourceCandidateId, field, route },
+      context_refs: [sourceCandidateId],
+    });
+    const scoredId = insertEvent(db, {
+      kind: "action_scored",
+      directive_id: (row.directive_id as string) ?? "owner_profile",
+      task_id: (row.task_id as string) ?? "owner_profile",
+      loop_id: (row.loop_id as string) ?? "loop_root",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "owner_profile_promoter_action",
+      verifier_artifact_id: "owner_profile_schema_verifier",
+      outcome: "succeeded",
+      residual: 0,
+      payload: { candidate_id: sourceCandidateId, field, route },
+      context_refs: [sourceCandidateId, actionId],
+    });
     recordedId = insertEvent(db, {
       kind: "owner_profile_recorded",
       directive_id: (row.directive_id as string) ?? "owner_profile",
       task_id: (row.task_id as string) ?? "owner_profile",
       loop_id: (row.loop_id as string) ?? "loop_root",
       substrate_origin: "substrate_auto",
-      payload: { ...merged, promoted_from: sourceCandidateId, promotion_route: route },
-      context_refs: [sourceCandidateId],
+      payload: {
+        ...merged,
+        promoted_from: sourceCandidateId,
+        promotion_route: route,
+        action_event_id: actionId,
+        scored_event_id: scoredId,
+      },
+      context_refs: [sourceCandidateId, actionId, scoredId],
     });
   });
   return { kind: "promoted", candidate_id: sourceCandidateId, recorded_event_id: recordedId, field, route };

@@ -546,6 +546,41 @@ describe("maybePromoteOwnerProfile (Layer-2 owner autonomy)", () => {
     expect(count).toBe(0);
   });
 
+  test("k_555 four-link spine: each promotion emits action_predicted + action_scored before owner_profile_recorded", () => {
+    const db = openDb(":memory:");
+    const candidateId = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      payload: { field: "detected_language", value: "es", confidence: 0.95, claim: "Spanish-first owner" },
+    });
+    const verdict = maybePromoteOwnerProfile(db, candidateId);
+    expect(verdict.kind).toBe("promoted");
+
+    // All three spine events must exist with the right context chain.
+    const action = db
+      .query("SELECT id, context_refs FROM events WHERE kind='action_predicted' AND action_artifact_id='owner_profile_promoter_action'")
+      .get() as { id: string; context_refs: string };
+    expect(action).not.toBeNull();
+    expect(JSON.parse(action.context_refs)).toEqual([candidateId]);
+
+    const scored = db
+      .query("SELECT id, context_refs, outcome, residual FROM events WHERE kind='action_scored' AND action_artifact_id='owner_profile_promoter_action'")
+      .get() as { id: string; context_refs: string; outcome: string; residual: number };
+    expect(scored).not.toBeNull();
+    expect(scored.outcome).toBe("succeeded");
+    expect(scored.residual).toBe(0);
+    expect(JSON.parse(scored.context_refs)).toEqual([candidateId, action.id]);
+
+    const recorded = db
+      .query("SELECT context_refs, payload FROM events WHERE kind='owner_profile_recorded'")
+      .get() as { context_refs: string; payload: string };
+    expect(recorded).not.toBeNull();
+    const refs = JSON.parse(recorded.context_refs) as string[];
+    expect(refs).toEqual([candidateId, action.id, scored.id]);
+    const payload = JSON.parse(recorded.payload) as Record<string, unknown>;
+    expect(payload.action_event_id).toBe(action.id);
+    expect(payload.scored_event_id).toBe(scored.id);
+  });
+
   test("extractOwnerProfilePromotions bulk path promotes every eligible candidate exactly once", () => {
     const db = openDb(":memory:");
     const c1 = insertEvent(db, {
