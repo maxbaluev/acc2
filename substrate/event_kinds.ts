@@ -226,6 +226,12 @@ export const EVENT_KINDS = {
   applied_change_committed:                { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   lesson_applied:                          { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   contract_amendment_applied:              { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  // Auto-apply worker (DGT1MKXY proposal, 2026-05-15): daemon-side scanner
+  // signals each lesson_implementer_queue_view row whose auto_apply_eligible=1.
+  // Stage-1 emits this signal so the orchestrator (or future stage-2 mechanical
+  // applier) sees the eligible row without polling. Carries {source_event_id,
+  // source_kind, target, anchor, structured: bool, scanned_at}.
+  auto_apply_signaled:                     { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   // ── Lesson-apply flywheel intermediates (audit-#7, 2026-05-15) ───────
   // Pre-fix these kinds were emitted by the lesson-apply subsystem but
   // absent from EVENT_KINDS — they bypassed embedding eligibility, the

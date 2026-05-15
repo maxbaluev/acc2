@@ -51,7 +51,13 @@ export type WorkerName =
   // ACC2_DISABLE_WORKERS taxonomy. Operators couldn't turn them off via
   // the canonical env knob and tests/preload.ts didn't pin them OFF.
   | "amendment"
-  | "metrics_gauge_refresh";
+  | "metrics_gauge_refresh"
+  // Brain proposal DGT1MKXY (2026-05-15): auto_apply worker drains
+  // lesson_implementer_queue_view.auto_apply_eligible=1 rows. Stage-1
+  // mode emits auto_apply_signaled events; Stage-2 (future) will perform
+  // the mechanical anchored_replace_v1 edit + bun test + git commit +
+  // recordApplyOutcome credit chain.
+  | "auto_apply";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -68,6 +74,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "extractors",
   "amendment",
   "metrics_gauge_refresh",
+  "auto_apply",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into
