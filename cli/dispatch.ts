@@ -83,9 +83,15 @@ const dispatchTask = async (
   // when the ROOT task hits a terminal event (task_committed / task_failed
   // / dispatcher_violation) or --timeout is reached.
   const { runTail } = await import("./observe");
-  console.log(`  (following — scoped to task=${task_id.slice(0, 16)}…; root-terminal will exit)`);
+  // Scope by directive_id, not task_id. Brain dispatches spawn sub-tasks
+  // with NEW task_ids (refines edges) — filtering by the root task hides
+  // every brain frame after the first decomposition. The directive_id
+  // is stable across the whole subtree, so this captures the full
+  // brain trajectory under one follow stream.
+  console.log(`  (following — scoped to directive=${directive_id.slice(0, 16)}…; root-terminal will exit)`);
   return runTail({
-    task: task_id,
+    directive: directive_id,
+    rootTaskId: task_id,
     // SSE push by default — each event arrives the instant the bus emits.
     stream: true,
     exitOnTerminal: true,

@@ -422,6 +422,11 @@ export type TailOpts = EventsOpts & {
    *  SSE eliminates the 2s poll lag and the missed-events-between-polls window.
    *  Polling is the fallback used only when SSE cannot connect. */
   stream?: boolean;
+  /** When the caller follows a whole directive subtree but still wants to
+   *  exit only on the ROOT task's terminal event (not the first sub-task
+   *  to commit), pass the root task id here. Terminal events for
+   *  non-root tasks are still printed but do not end the follow. */
+  rootTaskId?: string;
 };
 
 // SSE-backed live stream — the canonical Claude-native observation path.
@@ -459,10 +464,18 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
       const line = formatEvent(e, { verbose: opts.verbose });
       if (line) console.log(line);
       if (TERMINAL_KINDS.has(e.kind ?? "")) {
-        sawTerminal = true;
-        if (exitOnTerminal) {
-          ac.abort();
-          return 0;
+        // When a rootTaskId is specified (typical for `acc task` which
+        // follows the whole directive subtree but should exit only on
+        // the ROOT task's terminal), accept terminal events from
+        // sub-tasks as informational and continue. Only the root task's
+        // terminal closes the stream.
+        const isRootTerminal = !opts.rootTaskId || (e.task_id === opts.rootTaskId);
+        if (isRootTerminal) {
+          sawTerminal = true;
+          if (exitOnTerminal) {
+            ac.abort();
+            return 0;
+          }
         }
       }
     }
@@ -528,7 +541,10 @@ const runTailPoll = async (opts: TailOpts): Promise<number> => {
       if (opts.kind && e.kind !== opts.kind) continue;
       const line = formatEvent(e, { verbose: opts.verbose });
       if (line) console.log(line);
-      if (TERMINAL_KINDS.has(e.kind ?? "")) sawTerminal = e;
+      if (TERMINAL_KINDS.has(e.kind ?? "")) {
+        const isRootTerminal = !opts.rootTaskId || (e.task_id === opts.rootTaskId);
+        if (isRootTerminal) sawTerminal = e;
+      }
     }
     if (sawTerminal && exitOnTerminal) return 0;
     if (deadlineMs && Date.now() > deadlineMs) {
