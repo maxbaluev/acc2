@@ -83,6 +83,23 @@ type DaemonHealth = {
   aux_port?: number;
   ok?: boolean;
   status?: string;
+  // Brain audit boxbz1d1q axis J + TUI rewrite proposal axis F (2026-05-15):
+  // organism-pulse fields surfaced from /health so the TUI's footer
+  // line is always-visible substrate health.
+  stuck_workers?: Array<{ worker: string; last_tick_ms_ago: number | null }>;
+  hotreload?: {
+    last_reload_ts?: string | null;
+    last_reload_module?: string | null;
+    last_failure?: { ts: string; module: string; reason: string } | null;
+    watched_module_count?: number;
+    reload_total?: number;
+    failure_total?: number;
+  } | null;
+  activation_listener_count?: number;
+  pathology_budget_exhausted_recent_count?: number;
+  pathology_budget_debited_recent_count?: number;
+  brain_failed_recent_count?: number;
+  health_window_iso?: string;
 };
 
 type EventRow = {
@@ -144,7 +161,19 @@ const VIEWS: Array<{ key: ViewKey; label: string }> = [
   { key: "interventions", label: "Supervisor" },
   { key: "knowledge", label: "Knowledge" },
 ];
-const HEARTBEAT_KINDS = new Set(["father_cycle_recorded", "scheduler_tick_completed"]);
+// Brain TUI rewrite proposal (btqner8jn axis B, 2026-05-15): treat noisy
+// heartbeat events as semantic folds — keep them in the buffer but
+// collapse consecutive identical-kind rows under one entry with a
+// grouped_count + latest_ts. Pre-fix the Recent Events panel was
+// 300 rows of worker_tick_completed and the operator saw no signal.
+const HEARTBEAT_KINDS = new Set([
+  "father_cycle_recorded",
+  "scheduler_tick_completed",
+  "worker_tick_completed",
+  "bridge_frame_received",
+  "brain_reasoning_recorded",
+  "brain_message_emitted",
+]);
 
 const emptyState = (): WatchState => ({
   events: [],
@@ -701,7 +730,30 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
   parts.push(moveTo(statusRow, 1));
   parts.push(`${BOLD}Status${RESET} view=${labelForView(view)} items=${items.length} selected=${items.length ? selected + 1 : 0} filter=${filter} daemon=${healthLabel(h)}`);
   parts.push(moveTo(statusRow + 1, 1));
-  const healthLine = `Daemon pid=${h.pid ?? "?"} uptime_ms=${h.uptime_ms ?? 0} events=${h.events_count ?? state.events.length} mcp=${h.mcp_port ?? "?"} aux=${h.aux_port ?? "?"}`;
+  // Brain TUI rewrite axis F (2026-05-15): always-visible organism pulse.
+  // /health now surfaces activation listeners, pathology counts,
+  // brain-failure rate, hotreload state — render them on the footer so
+  // operators see the substrate's vitals without leaving the view.
+  const stuckSummary = (h.stuck_workers && h.stuck_workers.length > 0)
+    ? ` stuck=${h.stuck_workers.length}`
+    : "";
+  const pulseFragments: string[] = [];
+  if (typeof h.activation_listener_count === "number") pulseFragments.push(`act=${h.activation_listener_count}`);
+  if (typeof h.pathology_budget_exhausted_recent_count === "number" && h.pathology_budget_exhausted_recent_count > 0) {
+    pulseFragments.push(`pathology=${h.pathology_budget_exhausted_recent_count}/${h.pathology_budget_debited_recent_count ?? 0}`);
+  } else if (typeof h.pathology_budget_debited_recent_count === "number" && h.pathology_budget_debited_recent_count > 0) {
+    pulseFragments.push(`debits=${h.pathology_budget_debited_recent_count}`);
+  }
+  if (typeof h.brain_failed_recent_count === "number" && h.brain_failed_recent_count > 0) {
+    pulseFragments.push(`brain_failed=${h.brain_failed_recent_count}`);
+  }
+  if (h.hotreload && typeof h.hotreload.reload_total === "number" && h.hotreload.reload_total > 0) {
+    pulseFragments.push(`reloads=${h.hotreload.reload_total}/${h.hotreload.failure_total ?? 0}`);
+  } else if (h.hotreload && typeof h.hotreload.watched_module_count === "number") {
+    pulseFragments.push(`watched=${h.hotreload.watched_module_count}`);
+  }
+  const pulse = pulseFragments.length > 0 ? ` ${pulseFragments.join(" ")}` : "";
+  const healthLine = `Daemon pid=${h.pid ?? "?"} uptime_ms=${h.uptime_ms ?? 0} events=${h.events_count ?? state.events.length} mcp=${h.mcp_port ?? "?"} aux=${h.aux_port ?? "?"}${stuckSummary}${pulse}`;
   parts.push(truncate(healthLine, safeCols));
 
   return parts.join("");
