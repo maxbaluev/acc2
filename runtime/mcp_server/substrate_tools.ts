@@ -642,6 +642,8 @@ export const handleAdmitArtifact = async (
       fixtureExpectedResidualBelow: args.fixture_expected_residual_below ?? 0.2,
       stateRoot: args.state_root,
       name: args.name,
+      targetFiles: args.target_files,
+      targetResources: args.target_resources,
       governance: (args.directive_id || args.owner_consent_event_id) ? {
         directiveId: args.directive_id,
         ownerConsentEventId: args.owner_consent_event_id,
@@ -840,6 +842,27 @@ export const handleOpenDirective = (
     directive_id: directiveId,
     task_id: directiveId,
     payload: lifecyclePayload as JsonValue,
+  });
+
+  // Owner input is, by definition, the directive text. Emitting
+  // owner_input_received here is the structural fix for the gap that
+  // left OWNER CONTEXT empty in production — until 2026-05-15, this
+  // kind had zero producers in the main repo even though OWNER
+  // CONTEXT (last-8 readOwnerContext) + the vocabulary extractor +
+  // the rendering-signal classifier all consume it. Without this
+  // emit, the brain saw an empty owner-context section on every cycle
+  // and the Layer-2 extractor pipeline had no input vocabulary to
+  // mine. The emit also gives the embedder real text to vectorize so
+  // semantic retrieval against owner phrasing actually works.
+  emitEvent(ctx.db, {
+    kind: "owner_input_received",
+    substrate_origin: "owner",
+    directive_id: directiveId,
+    task_id: directiveId,
+    payload: {
+      text: args.directive_text,
+      source: "acc_task_directive",
+    } as JsonValue,
   });
 
   if (args.urgency === "crisis") {
