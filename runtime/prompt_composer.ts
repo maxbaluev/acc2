@@ -145,19 +145,49 @@ const readKnowledgeTopK = (db: Database, k: number): Array<{ id: string; text: s
   // not to run retrieval). When `opts.retrievedKnowledge` is provided, the
   // canonical embedding × posterior reranker (`runtime/retrieval.ts`) supplies
   // the section instead — see `buildRetrievedKnowledgeSection` above.
+  //
+  // Brain knowledge audit bc5vdkrik finding #2 (2026-05-15): the promotion
+  // payload typically carries only metadata (candidate_id, score). The
+  // truth-bearing text lives on the candidate row under any of
+  // {text, claim, summary, insight}. Join through to candidate via
+  // payload.candidate_id (or context_refs[0]) and walk the fallback chain
+  // so the prompt section renders useful text instead of '(no text)'.
   const rows = db
     .query(
-      "SELECT id, payload FROM events WHERE kind = 'knowledge_promoted' ORDER BY ts DESC LIMIT ?",
+      `SELECT
+         p.id              AS id,
+         p.payload         AS p_payload,
+         p.context_refs    AS p_ctx,
+         c.payload         AS c_payload
+       FROM events p
+       LEFT JOIN events c
+         ON c.kind = 'knowledge_candidate'
+        AND c.id = COALESCE(
+              json_extract(p.payload, '$.candidate_id'),
+              json_extract(p.context_refs, '$[0]')
+            )
+       WHERE p.kind = 'knowledge_promoted'
+       ORDER BY p.ts DESC
+       LIMIT ?`,
     )
     .all(k) as Array<Record<string, unknown>>;
   const out: Array<{ id: string; text: string; score: number }> = [];
   for (const r of rows) {
     try {
-      const payload = JSON.parse((r.payload as string) ?? "{}") as Record<string, unknown>;
+      const pPayload = JSON.parse((r.p_payload as string) ?? "{}") as Record<string, unknown>;
+      const cPayload = JSON.parse((r.c_payload as string) ?? "{}") as Record<string, unknown>;
+      const text =
+        (cPayload.text as string | undefined) ??
+        (cPayload.claim as string | undefined) ??
+        (cPayload.summary as string | undefined) ??
+        (cPayload.insight as string | undefined) ??
+        (pPayload.synthesized_text as string | undefined) ??
+        (pPayload.text as string | undefined) ??
+        "(no text)";
       out.push({
         id: r.id as string,
-        text: (payload.text as string) ?? "(no text)",
-        score: (payload.score as number) ?? 0,
+        text,
+        score: (pPayload.score as number) ?? 0,
       });
     } catch { /* skip malformed */ }
   }
