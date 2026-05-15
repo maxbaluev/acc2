@@ -738,6 +738,110 @@ type SeedRecipe = {
   }>;
 };
 
+// Onboarding demo classifier (brain dispatch bp93s80hn, PHVQAJRMWS6N).
+// Given one owner sentence ("I waste time on PRs"), DEMO_MATCHERS routes to
+// a demo recipe id. Each matcher carries token alternatives, domain hints,
+// required auth, confidence prior, and the one-line prompt the orchestrator
+// reads back to the owner in their language. The orchestrator (Claude Code)
+// uses these to render the first demo within ~30 seconds of the owner's
+// first sentence — the dramatic-fast-value north star.
+
+export type DemoRecipeId =
+  | "summarize_url"
+  | "compare_options"
+  | "monitor_feed"
+  | "audit_inbox_or_prs"
+  | "research_question"
+  | "personal_goal_plan"
+  | "workflow_audit"
+  | "local_file_summary";
+
+export type DemoMatcher = {
+  id: string;
+  demo_recipe_id: DemoRecipeId;
+  tokens_any: string[];
+  tokens_all?: string[];
+  domain_hints: string[];
+  requires_auth: Array<"OPENAI_API_KEY" | "SERPER_API_KEY" | "opencode">;
+  confidence: number;
+  first_demo_prompt: string;
+};
+
+export const DEMO_MATCHERS: DemoMatcher[] = [
+  {
+    id: "prs_reviews_code",
+    demo_recipe_id: "audit_inbox_or_prs",
+    tokens_any: ["pr", "prs", "pull request", "review", "github", "merge", "code review"],
+    domain_hints: ["software", "engineering"],
+    requires_auth: [],
+    confidence: 0.86,
+    first_demo_prompt: "I can audit a PR/checklist-shaped text you paste and return the top risks plus one fix-first recommendation.",
+  },
+  {
+    id: "industry_research",
+    demo_recipe_id: "research_question",
+    tokens_any: ["understand", "research", "industry", "market", "cardano", "competitors", "landscape"],
+    domain_hints: ["research", "business", "crypto"],
+    requires_auth: ["SERPER_API_KEY"],
+    confidence: 0.82,
+    first_demo_prompt: "I can turn that into a short research brief with claims, sources, and open questions.",
+  },
+  {
+    id: "weight_loss_or_habit",
+    demo_recipe_id: "personal_goal_plan",
+    tokens_any: ["lose", "kg", "weight", "habit", "sleep", "fitness", "diet", "health"],
+    domain_hints: ["self_improvement", "health"],
+    requires_auth: [],
+    confidence: 0.78,
+    first_demo_prompt: "I can turn that into a tiny measurable plan with the first action and a weekly review loop.",
+  },
+  {
+    id: "url_summary",
+    demo_recipe_id: "summarize_url",
+    tokens_any: ["http://", "https://", "link", "article", "page", "url", "summarize"],
+    domain_hints: ["web", "reading"],
+    requires_auth: [],
+    confidence: 0.90,
+    first_demo_prompt: "I can fetch that link and summarize what matters in your context.",
+  },
+  {
+    id: "options_decision",
+    demo_recipe_id: "compare_options",
+    tokens_any: ["choose", "compare", "vs", "versus", "option", "which", "vendor", "tool"],
+    domain_hints: ["decision", "procurement", "planning"],
+    requires_auth: [],
+    confidence: 0.80,
+    first_demo_prompt: "I can compare the options against your constraints and recommend a next step.",
+  },
+  {
+    id: "monitoring_feed",
+    demo_recipe_id: "monitor_feed",
+    tokens_any: ["monitor", "watch", "track", "alert", "feed", "updates", "notify"],
+    domain_hints: ["monitoring", "operations"],
+    requires_auth: ["SERPER_API_KEY"],
+    confidence: 0.76,
+    first_demo_prompt: "I can set up a lightweight monitor and tell you what changed since last time.",
+  },
+  {
+    id: "workflow_frustration",
+    demo_recipe_id: "workflow_audit",
+    tokens_any: ["waste time", "frustrating", "manual", "repetitive", "annoying", "too long"],
+    domain_hints: ["workflow", "automation"],
+    requires_auth: [],
+    confidence: 0.72,
+    first_demo_prompt: "I can map that workflow into bottlenecks and pick one automation-shaped next move.",
+  },
+  {
+    id: "fallback_text_artifact",
+    demo_recipe_id: "local_file_summary",
+    tokens_any: [],
+    domain_hints: ["fallback"],
+    requires_auth: [],
+    confidence: 0.45,
+    first_demo_prompt: "Paste one small sample and I will extract the useful structure from it.",
+  },
+];
+
 const SEED_RECIPES: SeedRecipe[] = [
   {
     // URL title fetch — uses seed_web_fetch_and_parse, which returns

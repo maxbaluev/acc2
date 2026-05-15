@@ -11,6 +11,97 @@ export type JsonValue =
   | JsonValue[]
   | { [k: string]: JsonValue };
 
+// ── Layer-2 owner-communication autonomy (brain dispatch bs3r8kdhw, 85EYVZM4T531) ──
+//
+// The owner-driven preferences that gate substrate autonomy ON TOP of the
+// existing structural Layer 1 (cli/* + runtime/* targets, 5-min cooldown,
+// one-per-tick rate limit). Layer 2 RESTRICTS or RE-ROUTES within Layer 1,
+// never overrides — the safety floor stays inviolate.
+//
+// Profile values accumulate via owner_insight_candidate events (brain or
+// Claude emit on chat observation) and get promoted to owner_profile_recorded
+// by the substrate's Model D extractor (substrate/extractors.ts) when either
+// multi-origin corroboration OR confidence ≥ 0.85 OR explicit owner_decision_recorded
+// approval fires. The auto-apply worker + prompt composer read the latest
+// profile row via substrate/views.ts:owner_profile_view.
+
+export type OwnerAutonomyTrustLevel = "cautious" | "normal" | "high";
+
+export type OwnerProfileTimeWindow = {
+  timezone?: string;
+  days?: Array<"mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun">;
+  start_hour?: number;
+  end_hour?: number;
+};
+
+export type OwnerAutonomyScope = {
+  /** Glob patterns to include. Defaults to ["cli/**", "runtime/**"] —
+   *  the same as Layer 1's safe-auto-apply policy. Owner can NARROW
+   *  (exclude *.test.ts, exclude WIP files) but cannot widen beyond
+   *  the cli/runtime floor. */
+  include?: string[];
+  /** Glob patterns to exclude. Layered on top of `include`. */
+  exclude?: string[];
+};
+
+export type OwnerProfile = {
+  detected_language?: string;
+  autonomy_scope?: OwnerAutonomyScope;
+  autonomy_trust_level?: OwnerAutonomyTrustLevel;
+  /** Paths/patterns the auto-apply worker MUST signal (stage-1) only,
+   *  never apply (stage-2), even if Layer 1 says they're eligible. */
+  manual_review_patterns?: string[];
+  /** Working-hours window for the owner. Outside this window, stage-2
+   *  apply pauses (stage-1 signaling continues). */
+  time_window?: OwnerProfileTimeWindow;
+  /** Topics the owner cares about — biases Father objective ranking
+   *  + capability-discoverability suggestions. */
+  hot_topics?: string[];
+  /** Hard-block patterns. Even with autonomy_trust_level=high, the
+   *  worker refuses to apply edits matching any of these. */
+  things_to_never_do?: string[];
+};
+
+export const OWNER_PROFILE_DEFAULTS = {
+  detected_language: "en",
+  autonomy_scope: { include: ["cli/**", "runtime/**"], exclude: [] },
+  autonomy_trust_level: "normal",
+  manual_review_patterns: [],
+  time_window: null,
+  hot_topics: [],
+  things_to_never_do: [],
+} as const;
+
+export const OWNER_PROFILE_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    detected_language: { type: "string", minLength: 2, maxLength: 32 },
+    autonomy_scope: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        include: { type: "array", items: { type: "string", minLength: 1 }, default: ["cli/**", "runtime/**"] },
+        exclude: { type: "array", items: { type: "string", minLength: 1 }, default: [] },
+      },
+    },
+    autonomy_trust_level: { enum: ["cautious", "normal", "high"], default: "normal" },
+    manual_review_patterns: { type: "array", items: { type: "string", minLength: 1 }, default: [] },
+    time_window: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        timezone: { type: "string", minLength: 1 },
+        days: { type: "array", items: { enum: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] } },
+        start_hour: { type: "integer", minimum: 0, maximum: 23 },
+        end_hour: { type: "integer", minimum: 0, maximum: 23 },
+      },
+    },
+    hot_topics: { type: "array", items: { type: "string", minLength: 1 }, default: [] },
+    things_to_never_do: { type: "array", items: { type: "string", minLength: 1 }, default: [] },
+  },
+} as const;
+
 // ── Origin / outcome / failure / edge kinds (§4.1) ──────────────────
 
 export type SubstrateOrigin =

@@ -253,6 +253,16 @@ export const EVENT_KINDS = {
   // canonical owner_profile_recorded row.
   owner_profile_recorded:                  { producer: "substrate", embeddable: true,  mirror_inline: false, health_metric: false },
   owner_insight_candidate:                 { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
+  // Onboarding adaptive surface (brain dispatch bp93s80hn MW1K1Z8B5S4W):
+  // Claude/orchestrator emits when chat patterns reveal whether the owner
+  // wants substrate detail (developer) or outcome-language (operator/casual).
+  // Payload: {persona: "developer"|"operator"|"casual", confidence: 0..1, signals: string[]}.
+  owner_persona_detected:                  { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  // Onboarding demo router (brain dispatch bp93s80hn): records the
+  // classifier decision before the demo action runs so outcomes train which
+  // demo family fits which owner sentence.
+  // Payload: {demo_recipe_id, matcher_id, confidence, owner_sentence, required_auth?: string[]}.
+  demo_dispatched:                         { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
 
   // Auto-apply worker (DGT1MKXY proposal, 2026-05-15): daemon-side scanner
   // signals each lesson_implementer_queue_view row whose auto_apply_eligible=1.
