@@ -321,6 +321,7 @@ export const dispatchReadyTask = async (
   // bc5vdkrik #1 + lesson "memory surface can appear healthy while being
   // operationally dead if prompt composition renders only handles").
   let retrievedKnowledge: import("./retrieval").RetrievalResult | null = null;
+  let retrievalUnavailable: { reason: string } | null = null;
   if (deps.index) {
     try {
       const { retrieve } = await import("./retrieval");
@@ -330,36 +331,64 @@ export const dispatchReadyTask = async (
         kindFilter: ["knowledge_candidate", "knowledge_promoted", "knowledge_synthesized"],
         goalText: task.goal,
       });
-      // Emit retrieval_binding for each hit so the credit chain
-      // (action_predicted.context_refs → binding → source_event_id) can
-      // mutate the cited posterior on outcome (k_554 citation = mutation).
-      for (let rank = 0; rank < retrievedKnowledge.hits.length; rank++) {
-        const hit = retrievedKnowledge.hits[rank]!;
+      // Organism-alignment audit b3qc9ryzj #2 (2026-05-15): surface
+      // query_embedding_unavailable as a fail-loud retrievalUnavailable
+      // metadata instead of letting it silently degrade to recency-fallback.
+      // Emit owner_input_required so the operator sees the missing
+      // prerequisite via SSE → Claude shell.
+      if (retrievedKnowledge.query_embedding_unavailable) {
+        retrievalUnavailable = { reason: "query_embedding_unavailable" };
+        retrievedKnowledge = null;
         emitEvent(db, {
-          kind: "retrieval_binding",
+          kind: "owner_input_required",
           substrate_origin: "substrate_auto",
           directive_id: task.directive_id,
           task_id: task.id,
           payload: {
-            query: task.goal ?? "",
-            source_event_id: hit.event_id,
-            rendered_snippet: hit.snippet,
-            rank,
-            rerank_score: hit.rerank_score,
-            posterior: hit.posterior,
-            binding_surface: "prompt",
+            reason: "depth_1_retrieval_unavailable",
+            cause: "query_embedding_unavailable",
+            instruction: "set OPENAI_API_KEY on the daemon process so text-embedding-3-small can compute query embeddings; retrieval is fail-closed until the prerequisite is met.",
           } as JsonValue,
         });
+      } else {
+        // Emit retrieval_binding for each hit so the credit chain
+        // (action_predicted.context_refs → binding → source_event_id) can
+        // mutate the cited posterior on outcome (k_554 citation = mutation).
+        for (let rank = 0; rank < retrievedKnowledge.hits.length; rank++) {
+          const hit = retrievedKnowledge.hits[rank]!;
+          emitEvent(db, {
+            kind: "retrieval_binding",
+            substrate_origin: "substrate_auto",
+            directive_id: task.directive_id,
+            task_id: task.id,
+            payload: {
+              query: task.goal ?? "",
+              source_event_id: hit.event_id,
+              rendered_snippet: hit.snippet,
+              rank,
+              rerank_score: hit.rerank_score,
+              posterior: hit.posterior,
+              binding_surface: "prompt",
+            } as JsonValue,
+          });
+        }
       }
     } catch (err) {
-      logger.warn(
-        { where: "dispatcher.retrieve", err: (err as Error).message, task_id: task.id },
-        "depth-1 retrieval failed — composing prompt without KNOWLEDGE section",
-      );
+      // Organism-alignment audit b3qc9ryzj #3 (2026-05-15): exceptions
+      // are fail-loud now. Pre-fix retrievedKnowledge was set to null
+      // and composePrompt fell back to recency-scan. Now the composer
+      // gets retrievalUnavailable metadata and renders an explicit
+      // "(unavailable)" section.
+      const reason = (err as Error).message ?? "unknown";
+      retrievalUnavailable = { reason: `exception:${reason}` };
       retrievedKnowledge = null;
+      logger.warn(
+        { where: "dispatcher.retrieve", err: reason, task_id: task.id },
+        "depth-1 retrieval threw — composing prompt with explicit unavailable marker",
+      );
     }
   }
-  const composed = composePrompt(db, { taskId: task.id, retrievedKnowledge });
+  const composed = composePrompt(db, { taskId: task.id, retrievedKnowledge, retrievalUnavailable });
   bridgeResult = await bridge(
     {
       prompt: composed.text,

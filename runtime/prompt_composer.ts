@@ -35,9 +35,15 @@ export type PromptComposeOptions = {
   retrievedKnowledge?: RetrievalResult | null;
   retrievedArtifacts?: RetrievalResult | null;
   /** When the caller has an EmbeddingIndex but no pre-computed retrieval
-   *  result, it can be omitted entirely — the existing recency-based fallback
-   *  applies. Phase F wires the async retrieve() in the dispatcher
-   *  caller (Phase G); composePrompt itself stays sync. */
+   *  result, it can be omitted entirely. Organism-alignment audit
+   *  b3qc9ryzj #2/#3 (2026-05-15): for the production path the dispatcher
+   *  now signals an explicit `retrievalUnavailable` reason when retrieval
+   *  failed (no API key, index empty, retrieve() exception). The composer
+   *  then renders an explicit "(unavailable: <reason>)" section instead
+   *  of falling back to the recency-stand-in — fail-loud beats silent
+   *  stale knowledge. The recency stand-in remains only for callers that
+   *  don't pass either field (tests + fresh-empty substrates). */
+  retrievalUnavailable?: { reason: string } | null;
   index?: EmbeddingIndex | null;
 };
 
@@ -395,11 +401,18 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     candidates.push({ name: "fixture_marker", p: 0, body: FIXTURE_D_MARKER });
   }
 
-  // P1 sections: when the caller pre-computed reranker hits (index lit up),
-  // render those; otherwise fall back to the recency stand-in (Phase D shape).
-  const knowledgeBody = opts.retrievedKnowledge && opts.retrievedKnowledge.hits.length > 0
-    ? buildRetrievedKnowledgeSection(opts.retrievedKnowledge.hits)
-    : buildKnowledgeSection(readKnowledgeTopK(db, 8));
+  // P1 sections: organism-alignment audit b3qc9ryzj #2/#3 (2026-05-15).
+  // Three explicit paths:
+  //   1. retrievalUnavailable set → render fail-loud section so the brain
+  //      sees that depth-1 retrieval was attempted but unavailable. NO
+  //      silent recency fallback (that masquerade hid SERPER-style holes).
+  //   2. retrievedKnowledge present + has hits → render reranked section.
+  //   3. neither flag set → recency stand-in (tests / fresh empty substrate).
+  const knowledgeBody = opts.retrievalUnavailable
+    ? `RETRIEVED KNOWLEDGE: (unavailable: ${opts.retrievalUnavailable.reason})`
+    : opts.retrievedKnowledge && opts.retrievedKnowledge.hits.length > 0
+      ? buildRetrievedKnowledgeSection(opts.retrievedKnowledge.hits)
+      : buildKnowledgeSection(readKnowledgeTopK(db, 8));
   candidates.push({ name: "retrieved_knowledge", p: 1, body: knowledgeBody });
 
   const artifactBody = opts.retrievedArtifacts && opts.retrievedArtifacts.hits.length > 0
