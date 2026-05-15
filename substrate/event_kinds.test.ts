@@ -249,14 +249,22 @@ describe("derived sets match their pre-unification shape", () => {
   });
 
   test("MIRROR_INLINE_EVENT_TYPES has the expected pre-set members", () => {
-    // The first v2 mirror-inline surface is HIDL: substrate-emitted
-    // blockers (auth_expired / quota_exhausted / env_missing / …) that
-    // the orchestrator MUST surface inline so the owner sees the
-    // blocker in the chat surface without opening logs. The empty set
-    // is no longer the contract; future additions are pinned the same
-    // way — by enumerating the expected mirror members here.
+    // Every kind in this set is one the orchestrator MUST surface
+    // inline to the operator (per .claude/rules/orchestrator-runtime.md
+    // "Background command observability"). `acc notify` subscribes to
+    // this set directly. The chat-worthy operator events (HIDL blocker,
+    // owner-input prompts, auto-apply outcomes, dispatcher violations,
+    // bridge failures) are all routed here. Future additions are
+    // pinned the same way — enumerate, then the bidirectional
+    // invariant below catches drift.
     const expected = new Set([
       "hidl_action_required",
+      "owner_input_required",
+      "auto_apply_signaled",
+      "applied_change_committed",
+      "applied_change_failed",
+      "dispatcher_violation",
+      "bridge_failed",
     ]);
     const derived = new Set(MIRROR_INLINE_EVENT_TYPES);
     expect(derived.size).toBe(expected.size);

@@ -401,7 +401,13 @@ export type EventsOpts = {
   limit?: number;
   task?: string;      // task_id prefix filter
   directive?: string; // directive_id prefix filter
-  kind?: string;      // event kind filter (exact)
+  kind?: string;      // event kind filter (exact, single)
+  /** Multi-kind filter — when set, kind is ignored. Used by `acc notify`
+   *  to subscribe to the entire mirror-inline set in one call instead
+   *  of running N parallel tails. The MCP `runtime.recent_events` API
+   *  already accepts an array on the `kinds` argument; the client-side
+   *  filter passes the union through. */
+  kinds?: string[];
   verbose?: boolean;
 };
 
@@ -410,10 +416,12 @@ export const runEvents = async (opts: EventsOpts): Promise<number> => {
   let env;
   try {
     // runtime.recent_events takes `k` (count, ≤200) and optional `kinds` (string[]
-    // filter). When `--kind` is set, pass it to the server so we don't burn the
-    // window on irrelevant rows.
+    // filter). When `--kind` or `--kinds` is set, pass it to the server so we
+    // don't burn the window on irrelevant rows. `kinds[]` takes precedence
+    // over `kind` when both are provided.
     const args: Record<string, unknown> = { k };
-    if (opts.kind) args.kinds = [opts.kind];
+    if (opts.kinds && opts.kinds.length > 0) args.kinds = opts.kinds;
+    else if (opts.kind) args.kinds = [opts.kind];
     env = await mcpCall("runtime.recent_events", args);
   } catch (err) {
     console.error(`acc events: ${(err as Error).message}`);
@@ -429,8 +437,10 @@ export const runEvents = async (opts: EventsOpts): Promise<number> => {
   for (const e of evs) {
     if (opts.task && !(e.task_id ?? "").startsWith(opts.task)) continue;
     if (opts.directive && !(e.directive_id ?? "").startsWith(opts.directive)) continue;
-    // kind already server-filtered when set; double-check (no-op when filtered server-side)
-    if (opts.kind && e.kind !== opts.kind) continue;
+    // kind/kinds already server-filtered when set; double-check (no-op when filtered server-side)
+    if (opts.kinds && opts.kinds.length > 0) {
+      if (!opts.kinds.includes(e.kind ?? "")) continue;
+    } else if (opts.kind && e.kind !== opts.kind) continue;
     const line = formatEvent(e, { verbose: opts.verbose });
     if (line) {
       console.log(line);
@@ -498,7 +508,9 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
       const e = ev as unknown as EventLike;
       if (opts.task && !(e.task_id ?? "").startsWith(opts.task)) continue;
       if (opts.directive && !(e.directive_id ?? "").startsWith(opts.directive)) continue;
-      if (opts.kind && e.kind !== opts.kind) continue;
+      if (opts.kinds && opts.kinds.length > 0) {
+        if (!opts.kinds.includes(e.kind ?? "")) continue;
+      } else if (opts.kind && e.kind !== opts.kind) continue;
       const line = formatEvent(e, { verbose: opts.verbose });
       if (line) console.log(line);
       if (TERMINAL_KINDS.has(e.kind ?? "")) {
@@ -558,7 +570,8 @@ const runTailPoll = async (opts: TailOpts): Promise<number> => {
     let env;
     try {
       const args: Record<string, unknown> = { k: Math.min(200, opts.limit ?? 60) };
-      if (opts.kind) args.kinds = [opts.kind];
+      if (opts.kinds && opts.kinds.length > 0) args.kinds = opts.kinds;
+      else if (opts.kind) args.kinds = [opts.kind];
       env = await mcpCall("runtime.recent_events", args);
     } catch (err) {
       console.error(`acc tail: ${(err as Error).message}`);
@@ -576,7 +589,9 @@ const runTailPoll = async (opts: TailOpts): Promise<number> => {
       seen.add(id);
       if (opts.task && !(e.task_id ?? "").startsWith(opts.task)) continue;
       if (opts.directive && !(e.directive_id ?? "").startsWith(opts.directive)) continue;
-      if (opts.kind && e.kind !== opts.kind) continue;
+      if (opts.kinds && opts.kinds.length > 0) {
+        if (!opts.kinds.includes(e.kind ?? "")) continue;
+      } else if (opts.kind && e.kind !== opts.kind) continue;
       const line = formatEvent(e, { verbose: opts.verbose });
       if (line) console.log(line);
       if (TERMINAL_KINDS.has(e.kind ?? "")) {
@@ -713,6 +728,52 @@ const parseFlags = (argv: string[]): Record<string, string | boolean> => {
     }
   }
   return out;
+};
+
+/** Mirror-inline event kind set — every event the orchestrator MUST
+ *  surface to the operator inline per .claude/rules/orchestrator-runtime.md
+ *  "Background command observability". `acc notify` is the CLI surface
+ *  that subscribes to exactly this set. Sourced from the canonical
+ *  registry's `mirror_inline: true` flag so the two cannot drift. */
+import { MIRROR_INLINE_EVENT_TYPES } from "../substrate/event_kinds";
+
+/** `acc notify` — Claude Code chat-friendly event stream. Thin alias
+ *  over `runTail` with the mirror-inline kind set pre-filled. Defaults
+ *  to `--follow` (SSE stream) when invoked without args, since the
+ *  whole point is to watch for HIDL / apply / dispatcher-violation
+ *  events in real time. Without --follow, prints the most recent N
+ *  matching rows and exits. */
+export const runNotify = async (argv: string[]): Promise<number> => {
+  const flags = parseFlags(argv);
+  const kinds = Array.from(MIRROR_INLINE_EVENT_TYPES);
+  if (kinds.length === 0) {
+    // No kinds registered yet — guidance instead of silent no-op.
+    console.error("acc notify: no event kinds are registered with mirror_inline=true. " +
+      "Either you're on a very old build (the HIDL kind landed 2026-05-15) or the registry is empty. " +
+      "Try `acc events --kind hidl_action_required` to inspect manually.");
+    return 1;
+  }
+  // --no-follow → one-shot; default is follow (the canonical Claude
+  // Code chat-stream use). `acc notify --no-follow --limit N` prints
+  // the most recent matching rows and exits 0.
+  const noFollow = Boolean(flags["no-follow"]);
+  if (noFollow) {
+    return runEvents({
+      kinds,
+      limit: flags.limit ? Number(flags.limit) : undefined,
+      verbose: Boolean(flags.verbose),
+    });
+  }
+  return runTail({
+    kinds,
+    limit: flags.limit ? Number(flags.limit) : undefined,
+    pollMs: flags["poll-ms"] ? Number(flags["poll-ms"]) : undefined,
+    deadlineMs: flags.timeout
+      ? Date.now() + Number(flags.timeout) * 1000
+      : undefined,
+    stream: flags["no-stream"] ? false : (flags.stream !== false),
+    verbose: Boolean(flags.verbose),
+  });
 };
 
 export const runObserve = async (cmd: string, argv: string[]): Promise<number> => {

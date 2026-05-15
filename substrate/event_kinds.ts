@@ -162,7 +162,7 @@ export const EVENT_KINDS = {
   bridge_invoked:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
   bridge_frame_received:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
   bridge_completed:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
-  bridge_failed:                           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
+  bridge_failed:                           { producer: "runtime",   embeddable: false, mirror_inline: true,  health_metric: false },
   bridge_mcp_connected:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
 
   // ── Dispatcher (cycle-1 enforcement) ────────────────────────────────
@@ -170,7 +170,7 @@ export const EVENT_KINDS = {
   brain_dispatch_closed:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
   brain_cycle_2_started:                   { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false },
   continue_cycle_requested:                { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false },
-  dispatcher_violation:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true  },
+  dispatcher_violation:                    { producer: "runtime",   embeddable: false, mirror_inline: true,  health_metric: true  },
 
   // ── Stakeholder model ───────────────────────────────────────────────
   stakeholder_state_recorded:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
@@ -180,7 +180,7 @@ export const EVENT_KINDS = {
   // ── Owner channel ───────────────────────────────────────────────────
   owner_input_received:                    { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   owner_decision_recorded:                 { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
-  owner_input_required:                    { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false },
+  owner_input_required:                    { producer: "brain",     embeddable: false, mirror_inline: true,  health_metric: false },
   // ── Human-In-the-Loop (HIDL) action surface ─────────────────────────
   // Substrate-emitted when an in-flight action cannot proceed without an
   // out-of-band human decision (auth/quota/env missing, an irreversible
@@ -263,7 +263,7 @@ export const EVENT_KINDS = {
   // are routing/commit records. The semantic text lives on the source
   // lesson_extracted / contract_amendment_proposed events they cite.
   lesson_apply_requested:                  { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
-  applied_change_committed:                { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
+  applied_change_committed:                { producer: "claude",    embeddable: false, mirror_inline: true,  health_metric: false },
   lesson_applied:                          { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   contract_amendment_applied:              { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   // Owner profile (UX dispatch b71pfyddv, 2026-05-15, knowledge_candidate
@@ -291,13 +291,13 @@ export const EVENT_KINDS = {
   // Stage-1 emits this signal so the orchestrator (or future stage-2 mechanical
   // applier) sees the eligible row without polling. Carries {source_event_id,
   // source_kind, target, anchor, structured: bool, scanned_at}.
-  auto_apply_signaled:                     { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
+  auto_apply_signaled:                     { producer: "substrate", embeddable: false, mirror_inline: true,  health_metric: false },
   // Stage-2 outcome: emitted when the auto-apply worker attempted a
   // mechanical replacement, ran tests, and EITHER tests failed OR the
   // diff couldn't be applied unambiguously. The source proposal's
   // posterior should demote on this signal — the brain's proposed shape
   // was wrong even though it passed structural gates.
-  applied_change_failed:                   { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true  },
+  applied_change_failed:                   { producer: "substrate", embeddable: false, mirror_inline: true,  health_metric: true  },
   // ── Lesson-apply flywheel intermediates (audit-#7, 2026-05-15) ───────
   // Pre-fix these kinds were emitted by the lesson-apply subsystem but
   // absent from EVENT_KINDS — they bypassed embedding eligibility, the

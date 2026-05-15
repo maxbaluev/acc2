@@ -31,6 +31,15 @@ const usage = (): string => `acc — v2 thin CLI
                                   terminal event (task_committed / task_failed /
                                   dispatcher_violation) when scoped, runs until
                                   Ctrl-C otherwise.
+  acc notify [--follow]           Claude Code chat-friendly event stream for the
+                                  canonical mirror-inline kinds only: HIDL,
+                                  owner_input_required, auto_apply_signaled,
+                                  applied_change_committed, applied_change_failed,
+                                  dispatcher_violation, bridge_failed. Thin
+                                  alias over 'acc tail --kind <mirror-set>
+                                  --follow'; does not inspect SQLite directly.
+                                  Without --follow, prints the most recent N
+                                  matching rows and exits.
   acc graph <directive_id>        Render the task DAG (nodes ranked, edges).
   acc inspect <task_id_prefix>    Per-task report: event histogram + chronology.
   acc apply <event_id> [--owner-approved]
@@ -276,6 +285,10 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
   if (cmd === "events" || cmd === "tail" || cmd === "graph" || cmd === "inspect") {
     const { runObserve } = await import("./observe");
     return runObserve(cmd, argv.slice(1));
+  }
+  if (cmd === "notify") {
+    const { runNotify } = await import("./observe");
+    return runNotify(argv.slice(1));
   }
   if (cmd === "apply") {
     const { runApply } = await import("./apply");

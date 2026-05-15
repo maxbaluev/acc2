@@ -78,6 +78,19 @@ Three corollaries:
 
 The narrative filter (`acc tail` / `acc events` defaults, defined in `cli/observe.ts:NARRATIVE_KINDS`) compresses ~50 raw substrate events per brain cycle to ~8 strategic events. `--verbose` opts into the full diagnostic dump if you need to see bridge frames, subprocess lifecycle, or candidate-confirm churn.
 
+### Claude Code native capability policy
+
+Use Claude Code's native tools as the owner-facing runtime around the substrate, not as a second strategic planner:
+
+- **`TaskCreate` / `TaskUpdate`** — track every orchestrator-initiated operation expected to run longer than ~30 seconds: `acc task` dispatches, apply chains, daemon restart / doctor loops, embedder catch-up, multi-Agent executor runs. Mark `in_progress` BEFORE work begins; `completed` AS SOON AS the work lands. Never batch completions.
+- **`Agent`** — use for isolated semantic apply executors and bounded post-dispatch investigations. Do NOT spawn exploratory Agents BEFORE `acc task` for strategic owner directives — `acc task` IS the strategic surface; an Agent run that duplicates it is the "LLM with tools" anti-pattern. Agents are appropriate AFTER a substrate-routed dispatch when a leaf needs isolated context.
+- **`Monitor`** — do NOT duplicate an `acc task` follow stream (the CLI's follow tail IS the observation surface). Use Monitor ONLY for independent mirror-inline subscriptions: `auto_apply_signaled`, `applied_change_committed`, `applied_change_failed`, `owner_input_required`, `hidl_action_required`, `dispatcher_violation`, `bridge_failed`.
+- **`ScheduleWakeup`** — belongs to explicit autonomous/loop mode or owner-approved watches. Default idle polling in normal chat is noise. In operator mode: 60–270s for active-watch ticks (stays in prompt cache), 10–30min for apply-queue / daemon-health checks.
+- **`WebFetch` / `WebSearch`** — preflight only: fetch owner-supplied URLs or simple public-source enrichment, then CITE the result into the substrate directive (via `acc task` or as evidence in an `owner_input_received` payload). Must NOT replace substrate routing for strategic codebase work or cross-file synthesis — that's the brain's job.
+- **Recipes are the substrate-native skill surface** — posterior-scored, compounding, and credit-bound via the four-link chain (k_555). There is NO parallel `/acc skills` manifest; discoverability lives in the existing `acc` CLI surfaces (`acc task`, `acc state …`, `acc tail`, `acc doctor`). When you find yourself wanting a "skill" for a recurring shape, emit a `recipe_extracted` candidate instead — the substrate scores it, the daemon replays it on goal-shape match (Tier-0 lane, no LLM), and credit flows back to the inspiring trajectory. That's the substrate-native way; manifest entries don't earn posterior.
+
+**Render events by owner persona when known.** `owner_persona_detected=developer` gets event ids, residuals, citations, file paths, and raw kind names. `operator` gets outcome-language, blockers, decisions needed, and concise next steps (no event ids unless asked). `casual` gets one-sentence what-happened/what-next pairs in the owner's detected language. Surface HIDL / `owner_input_required` / `hidl_action_required` as decision cards (one question at a time, never a wall). Surface autonomous `applied_change_committed` events with commit sha + target + verifier outcome + source proposal id so the owner can audit without opening logs.
+
 ## The event ledger is the universal language
 
 One SQLite table (`events`), one ordered stream, one source of truth. Every brain emission, runtime observation, owner directive, and Claude milestone is one row. Nothing survives a daemon restart that isn't in the ledger.
