@@ -458,11 +458,18 @@ export const buildOwnerProfileSection = (profile: OwnerProfile): string => {
   if (lang && lang !== OWNER_PROFILE_DEFAULTS.detected_language) {
     lines.push(`detected_language: ${lang}`);
   }
-  // Conversation-as-learning-surface fields (DSGSAZGMF1): persona →
-  // rendering depth; preferred_terms → mirror back; avoided_terms →
-  // never use; exposed_concepts → explain on first encounter only.
-  if (profile.persona) {
-    lines.push(`persona: ${profile.persona}`);
+  // Conversation-as-learning-surface fields (DSGSAZGMF1, universal):
+  // rendering_signals → per-dimension bias (continuous, open-ended);
+  // preferred_terms → mirror back; avoided_terms → never use;
+  // exposed_concepts → explain on first encounter only.
+  if (profile.rendering_signals && typeof profile.rendering_signals === "object") {
+    const sigs = Object.entries(profile.rendering_signals)
+      .filter(([, v]) => typeof v === "number" && (v as number) > 0);
+    if (sigs.length > 0) {
+      sigs.sort((a, b) => (b[1] as number) - (a[1] as number));
+      const lineParts = sigs.map(([k, v]) => `${k}=${(v as number).toFixed(2)}`);
+      lines.push(`rendering_signals (continuous, 0..1; raise dimension → bias output that way): ${lineParts.join(", ")}`);
+    }
   }
   if (Array.isArray(profile.preferred_terms) && profile.preferred_terms.length > 0) {
     lines.push(`preferred_terms (mirror these back; do NOT use jargon equivalents): ${profile.preferred_terms.join(", ")}`);

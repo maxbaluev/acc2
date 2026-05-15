@@ -126,14 +126,15 @@ const dispatchTask = async (
   console.log(`directive_opened ${directive_id} (root task=${task_id})`);
   console.log(`  text: ${words}`);
 
-  // Conversation-as-learning-surface (DSGSAZGMF1): classify the
-  // owner's persona from the directive text + recent prior input.
-  // Emits owner_insight_candidate; the Layer-2 extractor promotes it
-  // into owner_profile_recorded.persona once confidence ≥ 0.85 OR
-  // multi-turn corroboration accumulates. Best-effort — never blocks
-  // dispatch, never throws upward.
+  // Conversation-as-learning-surface (DSGSAZGMF1, universalized per
+  // owner feedback "people not 3 types, all of them different"):
+  // extract continuous rendering signals from the directive text +
+  // recent prior input. Each signal is independent — code_density,
+  // ops_vocabulary, explanation_appetite, etc. — and accumulates
+  // into a per-owner vector. NO persona enum, NO bucketing.
+  // Best-effort — classifier failure never blocks dispatch.
   try {
-    const { classifyOwnerPersona } = await import("../substrate/owner_persona_classifier");
+    const { classifyOwnerRenderingSignals } = await import("../substrate/owner_rendering_classifier");
     const priorEnv = await mcpCall("runtime.recent_events", {
       k: 5,
       kinds: ["owner_input_received"],
@@ -147,23 +148,30 @@ const dispatchTask = async (
         if (typeof t === "string" && t.length > 0 && t !== words) priorTexts.push(t);
       }
     }
-    const cls = classifyOwnerPersona(words, priorTexts);
-    await mcpCall("substrate.emit", {
-      kind: "owner_insight_candidate",
-      substrate_origin: "claude_root",
-      directive_id,
-      payload: {
-        field: "persona",
-        value: cls.persona,
-        confidence: cls.confidence,
-        claim: `Owner persona classified as ${cls.persona} (signals: ${cls.signals.join("; ")})`,
-        signals: cls.signals,
-      },
-    }).catch(() => null);
+    const cls = classifyOwnerRenderingSignals(words, priorTexts);
+    if (Object.keys(cls.signals).length > 0) {
+      // Only emit when at least one signal fired — silent observations
+      // pollute the ledger without earning posterior.
+      const summary = Object.entries(cls.signals)
+        .map(([k, v]) => `${k}=${v.toFixed(2)}`)
+        .join(", ");
+      await mcpCall("substrate.emit", {
+        kind: "owner_insight_candidate",
+        substrate_origin: "claude_root",
+        directive_id,
+        payload: {
+          field: "rendering_signals",
+          value: cls.signals,
+          confidence: cls.confidence,
+          claim: `Rendering signals extracted from directive text: ${summary}. Evidence: ${cls.evidence.join("; ")}.`,
+          evidence: cls.evidence,
+        },
+      }).catch(() => null);
+    }
   } catch {
     // Classifier failure must not block dispatch. The brain's cycle-1
-    // OWNER PROFILE section will just render "no persona detected" and
-    // the next directive will retry.
+    // OWNER PROFILE section will just render "no rendering signals
+    // recorded yet" and the next directive will retry.
   }
 
   if (!opts.follow) return 0;

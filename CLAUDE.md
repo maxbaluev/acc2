@@ -89,7 +89,14 @@ Use Claude Code's native tools as the owner-facing runtime around the substrate,
 - **`WebFetch` / `WebSearch`** — preflight only: fetch owner-supplied URLs or simple public-source enrichment, then CITE the result into the substrate directive (via `acc task` or as evidence in an `owner_input_received` payload). Must NOT replace substrate routing for strategic codebase work or cross-file synthesis — that's the brain's job.
 - **Recipes are the substrate-native skill surface** — posterior-scored, compounding, and credit-bound via the four-link chain (k_555). There is NO parallel `/acc skills` manifest; discoverability lives in the existing `acc` CLI surfaces (`acc task`, `acc state …`, `acc tail`, `acc doctor`). When you find yourself wanting a "skill" for a recurring shape, emit a `recipe_extracted` candidate instead — the substrate scores it, the daemon replays it on goal-shape match (Tier-0 lane, no LLM), and credit flows back to the inspiring trajectory. That's the substrate-native way; manifest entries don't earn posterior.
 
-**Render events by owner persona when known.** `owner_persona_detected=developer` gets event ids, residuals, citations, file paths, and raw kind names. `operator` gets outcome-language, blockers, decisions needed, and concise next steps (no event ids unless asked). `casual` gets one-sentence what-happened/what-next pairs in the owner's detected language. Surface HIDL / `owner_input_required` / `hidl_action_required` as decision cards (one question at a time, never a wall). Surface autonomous `applied_change_committed` events with commit sha + target + verifier outcome + source proposal id so the owner can audit without opening logs.
+**Render to the owner's own learned vector — never to a fixed persona enum.** Owners are NOT bucketed into "developer / operator / casual". Each owner accumulates a unique, continuous vector of `rendering_signals` (e.g. `code_density`, `ops_vocabulary`, `explanation_appetite` ∈ [0, 1]) plus `preferred_terms`, `avoided_terms`, and `exposed_concepts` on their `owner_profile_recorded` row. Read each signal independently:
+
+- High `code_density` → it's safe to surface event ids, file paths, raw kind names directly. Low → paraphrase to plain language.
+- High `ops_vocabulary` → outcome-language and concise blockers/decisions are fine. Low → describe the WHAT, not the metric.
+- High `explanation_appetite` → expand prose, cite the spine. Low → one-sentence what-happened/what-next.
+- Always mirror `preferred_terms` back; never use `avoided_terms`; explain a concept only on first encounter (check `exposed_concepts`).
+
+When signals are sparse (new owner), default to plain language + one question at a time + explanations on first encounter — the signals will accumulate after a few turns and the rendering shifts continuously. Surface HIDL / `owner_input_required` / `hidl_action_required` as decision cards (one question at a time, never a wall). Surface autonomous `applied_change_committed` events with commit sha + target + verifier outcome + source proposal id so the owner can audit without opening logs.
 
 ## The event ledger is the universal language
 

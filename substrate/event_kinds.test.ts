@@ -180,8 +180,10 @@ describe("derived sets match their pre-unification shape", () => {
       // stable preferences + Claude/brain observations about the owner.
       "owner_profile_recorded",
       "owner_insight_candidate",
-      // Onboarding (bp93s80hn): adaptive-surface persona + demo router.
-      "owner_persona_detected",
+      // Onboarding (bp93s80hn): demo router. The earlier
+      // `owner_persona_detected` kind was removed 2026-05-15 — owner
+      // adaptation is now a continuous rendering_signals map on
+      // owner_profile_recorded (no fixed persona enum).
       "demo_dispatched",
       // External-push envelope.
       "external_event_received",

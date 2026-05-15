@@ -44,16 +44,24 @@ export type OwnerAutonomyScope = {
   exclude?: string[];
 };
 
-// Conversation-as-learning-surface (brain dispatch DSGSAZGMF1, 2026-05-15):
+// Conversation-as-learning-surface (brain dispatch DSGSAZGMF1, 2026-05-15;
+// universalized 2026-05-15 per owner feedback "people not 3 types, all
+// of them different"):
 //
-// The substrate adapts its owner-facing rendering based on persistent
-// signals extracted from the owner's first turns of conversation:
+// Owners are NOT bucketed into a fixed enum. Every owner is a unique
+// continuous vector of learned signals that the substrate accumulates
+// over many interactions. The renderer reads the signal map and adapts
+// per-dimension; no signal carries a meaning the renderer can't ignore
+// (so adding signals is purely additive, never breaking).
 //
-//   - `persona` — controls rendering DEPTH. `developer` gets event ids,
-//     residuals, citations, file paths, raw kind names. `operator` gets
-//     outcome-language, blockers, decisions-needed, concise next steps
-//     (no event ids unless asked). `casual` gets one-sentence
-//     what-happened/what-next pairs in the owner's detected language.
+// Signals that exist today (the classifier seeds these; future
+// extractors add more):
+//
+//   - `rendering_signals` — open-ended map of signal name → continuous
+//     strength ∈ [0, 1]. Examples: `code_density`,
+//     `ops_vocabulary`, `explanation_appetite`, `question_tolerance`.
+//     The renderer biases output per-signal; a new signal means
+//     "renderer can adapt one more dimension". NO enum, NO fixed set.
 //   - `preferred_terms` — the owner's own words for substrate concepts.
 //     The orchestrator + brain MUST mirror these back instead of jargon
 //     ("my weekly grind" instead of "recurring friction task"; "the
@@ -73,8 +81,6 @@ export type OwnerAutonomyScope = {
 // NO parallel state. The schema extension below is the single source
 // of truth.
 
-export type OwnerPersona = "developer" | "operator" | "casual";
-
 export type OwnerConceptExposure = {
   /** event_id of the first owner_input_received / brain output where
    *  this concept appeared in the owner's view. The orchestrator cites
@@ -88,10 +94,14 @@ export type OwnerConceptExposure = {
 
 export type OwnerProfile = {
   detected_language?: string;
-  /** Owner's interaction depth — classified from the first 2 owner
-   *  messages (heuristic OR brain-side artifact). Controls rendering
-   *  verbosity, jargon level, and citation density. */
-  persona?: OwnerPersona;
+  /** Open-ended map of continuous rendering signals for this specific
+   *  owner. Each key is a signal name (e.g. "code_density",
+   *  "ops_vocabulary", "explanation_appetite", "question_tolerance");
+   *  each value is a learned strength ∈ [0, 1]. The renderer reads
+   *  what it knows; ignores unknown keys. NEW signals can be added by
+   *  any classifier or extractor without a schema migration. There is
+   *  NO fixed persona enum — every owner is unique. */
+  rendering_signals?: Record<string, number>;
   /** Words the owner uses for substrate concepts. The renderer mirrors
    *  these back instead of canonical jargon. */
   preferred_terms?: string[];
@@ -122,7 +132,7 @@ export type OwnerProfile = {
 
 export const OWNER_PROFILE_DEFAULTS = {
   detected_language: "en",
-  persona: null,
+  rendering_signals: {},
   preferred_terms: [],
   avoided_terms: [],
   exposed_concepts: {},
@@ -139,7 +149,14 @@ export const OWNER_PROFILE_JSON_SCHEMA = {
   additionalProperties: false,
   properties: {
     detected_language: { type: "string", minLength: 2, maxLength: 32 },
-    persona: { enum: ["developer", "operator", "casual"] },
+    rendering_signals: {
+      type: "object",
+      // Open-ended: keys are signal names (any string), values are
+      // continuous strengths ∈ [0, 1]. No fixed key enum — universal
+      // adaptation per owner. Out-of-range values are clamped by
+      // consumers, not rejected by the schema.
+      additionalProperties: { type: "number", minimum: 0, maximum: 1 },
+    },
     preferred_terms: { type: "array", items: { type: "string", minLength: 1, maxLength: 200 }, default: [] },
     avoided_terms: { type: "array", items: { type: "string", minLength: 1, maxLength: 200 }, default: [] },
     exposed_concepts: {
