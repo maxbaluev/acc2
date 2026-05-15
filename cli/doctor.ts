@@ -285,6 +285,93 @@ export const checkOpencode = (env: DoctorEnv): Check => {
   return { name: "opencode", verdict: "ok", detail: `${path} (${ver.split("\n")[0]})` };
 };
 
+/** Parsed snapshot of `opencode auth list` output. */
+export type OpencodeAuthState = {
+  /** Total number of OAuth/api credentials stored under
+   *  ~/.local/share/opencode/auth.json. */
+  credentialCount: number;
+  /** Number of environment-variable providers detected (e.g.
+   *  ANTHROPIC_API_KEY, GEMINI_API_KEY) — these are non-OAuth fallbacks. */
+  envProviderCount: number;
+  /** Provider list visible under the Credentials block. */
+  credentials: string[];
+  /** Provider list visible under the Environment block. */
+  envProviders: string[];
+};
+
+/** Strip ANSI escape sequences so the parser is colour-independent. */
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+/** Parse `opencode auth list` stdout into an OpencodeAuthState. The
+ *  output uses a tree-renderer with two sections (Credentials,
+ *  Environment) and a trailing footer "└  N credentials" /
+ *  "└  N environment variables". The parser tolerates missing
+ *  sections and unparseable counts (returns 0). Pure — no I/O. */
+export const parseOpencodeAuth = (raw: string): OpencodeAuthState => {
+  const lines = stripAnsi(raw).split(/\r?\n/);
+  const credentials: string[] = [];
+  const envProviders: string[] = [];
+  let credentialCount = 0;
+  let envProviderCount = 0;
+  let section: "none" | "credentials" | "environment" = "none";
+  for (const line of lines) {
+    const trimmed = line.replace(/^[│\s┌●└]+/, "").trim();
+    if (line.includes("Credentials")) { section = "credentials"; continue; }
+    if (line.includes("Environment")) { section = "environment"; continue; }
+    const footer = line.match(/└\s+(\d+)\s+(credentials|environment variables)/);
+    if (footer) {
+      if (footer[2] === "credentials") credentialCount = Number(footer[1]);
+      else envProviderCount = Number(footer[1]);
+      section = "none";
+      continue;
+    }
+    if (line.includes("●")) {
+      const m = line.match(/●\s+(\S+)/);
+      if (m) {
+        if (section === "credentials") credentials.push(m[1]);
+        else if (section === "environment") envProviders.push(m[1]);
+      }
+    }
+  }
+  // If the footer line was missing/unparseable, fall back to list length.
+  if (credentialCount === 0 && credentials.length > 0) credentialCount = credentials.length;
+  if (envProviderCount === 0 && envProviders.length > 0) envProviderCount = envProviders.length;
+  return { credentialCount, envProviderCount, credentials, envProviders };
+};
+
+/** Live auth probe — runs `opencode auth list` and classifies the
+ *  result. This is the structural fix for the b9e3hr0ar lesson:
+ *  "credential checks that only test presence defer the failure to
+ *  the first real artifact invocation; onboarding should validate
+ *  live". A passing checkOpencode means the binary is on PATH; a
+ *  passing checkOpencodeAuth means at least one provider is wired
+ *  AND the brain can actually dispatch. */
+export const checkOpencodeAuth = (env: DoctorEnv): Check => {
+  const path = env.which("opencode");
+  if (!path) {
+    // Skip — checkOpencode already failed; this would be redundant.
+    return { name: "opencode auth", verdict: "warn",
+      detail: "opencode binary missing — auth check skipped" };
+  }
+  const raw = env.version("opencode", ["auth", "list"]);
+  if (!raw) {
+    return { name: "opencode auth", verdict: "warn",
+      detail: "could not probe `opencode auth list` (exit non-zero); skipping until next run" };
+  }
+  const state = parseOpencodeAuth(raw);
+  if (state.credentialCount === 0 && state.envProviderCount === 0) {
+    return { name: "opencode auth", verdict: "fail",
+      detail: "no provider credentials configured; run `opencode auth login` and pick OpenAI for the brain (gpt-5.5 via OpenAI Max subscription is the canonical path)" };
+  }
+  if (state.credentialCount === 0) {
+    return { name: "opencode auth", verdict: "warn",
+      detail: `env-var providers only (${state.envProviders.join(", ")}); OAuth login recommended — run \`opencode auth login\` and pick OpenAI for the brain` };
+  }
+  const detail = `${state.credentialCount} credential(s): ${state.credentials.join(", ")}` +
+    (state.envProviderCount > 0 ? ` + ${state.envProviderCount} env provider(s): ${state.envProviders.join(", ")}` : "");
+  return { name: "opencode auth", verdict: "ok", detail };
+};
+
 export const checkUv = (env: DoctorEnv): Check => {
   const path = env.which("uv");
   if (!path) {
@@ -518,6 +605,7 @@ export const collectChecks = async (env: DoctorEnv = defaultDoctorEnv()): Promis
   checks.push(checkOpenAiKey(env));
   checks.push(checkSerperKey(env));
   checks.push(checkOpencode(env));
+  checks.push(checkOpencodeAuth(env));
   checks.push(checkUv(env));
   checks.push(checkCamoufoxBinary(env));
   checks.push(checkNsjail(env));

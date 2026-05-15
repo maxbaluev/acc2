@@ -160,6 +160,87 @@ describe("checkOpencode", () => {
   });
 });
 
+describe("parseOpencodeAuth", () => {
+  const { parseOpencodeAuth } = require("./doctor");
+  test("parses two credentials + two env providers", () => {
+    const raw = [
+      "┌  Credentials ~/.local/share/opencode/auth.json",
+      "│",
+      "●  Cerebras api",
+      "│",
+      "●  OpenAI oauth",
+      "│",
+      "└  2 credentials",
+      "",
+      "┌  Environment",
+      "│",
+      "●  Google GEMINI_API_KEY",
+      "●  Anthropic ANTHROPIC_API_KEY",
+      "└  2 environment variables",
+    ].join("\n");
+    const s = parseOpencodeAuth(raw);
+    expect(s.credentialCount).toBe(2);
+    expect(s.envProviderCount).toBe(2);
+    expect(s.credentials).toEqual(["Cerebras", "OpenAI"]);
+    expect(s.envProviders).toEqual(["Google", "Anthropic"]);
+  });
+  test("ignores ANSI escape sequences", () => {
+    const raw = "\x1b[0m┌  Credentials \x1b[90m~/auth.json\n●  OpenAI \x1b[90moauth\n└  1 credentials";
+    const s = parseOpencodeAuth(raw);
+    expect(s.credentialCount).toBe(1);
+    expect(s.credentials).toEqual(["OpenAI"]);
+  });
+  test("empty when no sections", () => {
+    const s = parseOpencodeAuth("");
+    expect(s.credentialCount).toBe(0);
+    expect(s.envProviderCount).toBe(0);
+  });
+});
+
+describe("checkOpencodeAuth", () => {
+  const { checkOpencodeAuth } = require("./doctor");
+  test("warn when opencode binary is missing", () => {
+    const c = checkOpencodeAuth(makeEnv({ which: () => null }));
+    expect(c.verdict).toBe("warn");
+    expect(c.detail).toContain("skipped");
+  });
+  test("warn when `opencode auth list` exits non-zero", () => {
+    const c = checkOpencodeAuth(makeEnv({
+      which: (cmd) => cmd === "opencode" ? "/u/b/opencode" : null,
+      version: () => null,
+    }));
+    expect(c.verdict).toBe("warn");
+    expect(c.detail).toContain("could not probe");
+  });
+  test("fail when zero credentials AND zero env providers", () => {
+    const raw = "┌  Credentials ~/auth.json\n└  0 credentials\n┌  Environment\n└  0 environment variables";
+    const c = checkOpencodeAuth(makeEnv({
+      which: (cmd) => cmd === "opencode" ? "/u/b/opencode" : null,
+      version: () => raw,
+    }));
+    expect(c.verdict).toBe("fail");
+    expect(c.detail).toContain("opencode auth login");
+  });
+  test("warn when env-var providers only (no OAuth)", () => {
+    const raw = "┌  Credentials ~/auth.json\n└  0 credentials\n┌  Environment\n●  Anthropic ANTHROPIC_API_KEY\n└  1 environment variables";
+    const c = checkOpencodeAuth(makeEnv({
+      which: (cmd) => cmd === "opencode" ? "/u/b/opencode" : null,
+      version: () => raw,
+    }));
+    expect(c.verdict).toBe("warn");
+    expect(c.detail).toContain("OAuth login recommended");
+  });
+  test("ok when at least one credential is present", () => {
+    const raw = "┌  Credentials ~/auth.json\n●  OpenAI oauth\n└  1 credentials\n┌  Environment\n└  0 environment variables";
+    const c = checkOpencodeAuth(makeEnv({
+      which: (cmd) => cmd === "opencode" ? "/u/b/opencode" : null,
+      version: () => raw,
+    }));
+    expect(c.verdict).toBe("ok");
+    expect(c.detail).toContain("OpenAI");
+  });
+});
+
 describe("checkUv", () => {
   test("ok when on PATH", () => {
     const c = checkUv(makeEnv({ which: (cmd) => cmd === "uv" ? "/home/u/.local/bin/uv" : null, version: () => "uv 0.8.23" }));
@@ -441,7 +522,15 @@ describe("runDoctor end-to-end (stubbed)", () => {
     const env = makeEnv({
       env: { OPENAI_API_KEY: "sk-test", ACC2_BRIDGE_MODE: "real" },
       which: (cmd) => cmd === "opencode" ? "/usr/bin/opencode" : cmd === "uv" ? "/usr/bin/uv" : cmd === "nsjail" ? "/usr/bin/nsjail" : null,
-      version: (cmd) => cmd === "bun" ? "1.3.11" : cmd === "opencode" ? "opencode 1.0" : cmd === "uv" ? "uv 0.8" : null,
+      version: (cmd, args) => {
+        if (cmd === "bun") return "1.3.11";
+        if (cmd === "opencode" && args[0] === "auth") {
+          return "┌  Credentials ~/auth.json\n●  OpenAI oauth\n└  1 credentials";
+        }
+        if (cmd === "opencode") return "opencode 1.0";
+        if (cmd === "uv") return "uv 0.8";
+        return null;
+      },
       fileExists: () => true,
       daemonHealth: async () => ({ reachable: true, ok: true, pid: 1, uptime_ms: 100, events_count: 5 }),
     });
@@ -479,6 +568,7 @@ describe("collectChecks ordering", () => {
       "OPENAI_API_KEY",
       "SERPER_API_KEY",
       "opencode",
+      "opencode auth",
       "uv",
       "camoufox binary",
       "nsjail",
