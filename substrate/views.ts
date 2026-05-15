@@ -687,8 +687,13 @@ CREATE VIEW IF NOT EXISTS recipe_registry_view AS
   WHERE NOT EXISTS (
     SELECT 1
     FROM recipes newer
-    WHERE COALESCE(newer.goal_shape, '') = COALESCE(r.goal_shape, '')
-      AND COALESCE(newer.topology_signature, '') = COALESCE(r.topology_signature, '')
+    -- Organism-alignment audit b3qc9ryzj #6 (2026-05-15): distinguish
+    -- absent (NULL) from explicit empty string. Pre-fix COALESCE(...,'')
+    -- merged NULL goal_shape with '' goal_shape, collapsing two
+    -- structurally-distinct recipe keys into one. Now NULL matches
+    -- NULL exactly and '' matches '' exactly, never crosswise.
+    WHERE ((newer.goal_shape = r.goal_shape) OR (newer.goal_shape IS NULL AND r.goal_shape IS NULL))
+      AND ((newer.topology_signature = r.topology_signature) OR (newer.topology_signature IS NULL AND r.topology_signature IS NULL))
       AND (newer.ts > r.ts OR (newer.ts = r.ts AND newer.event_rowid > r.event_rowid))
   );
 `;

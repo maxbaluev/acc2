@@ -321,6 +321,7 @@ export const dispatchReadyTask = async (
   // bc5vdkrik #1 + lesson "memory surface can appear healthy while being
   // operationally dead if prompt composition renders only handles").
   let retrievedKnowledge: import("./retrieval").RetrievalResult | null = null;
+  let retrievedArtifacts: import("./retrieval").RetrievalResult | null = null;
   let retrievalUnavailable: { reason: string } | null = null;
   if (deps.index) {
     try {
@@ -331,6 +332,21 @@ export const dispatchReadyTask = async (
         kindFilter: ["knowledge_candidate", "knowledge_promoted", "knowledge_synthesized"],
         goalText: task.goal,
       });
+      // Organism-alignment audit b3qc9ryzj #4 (2026-05-15): retrieve
+      // task-similar code artifacts too — the registry has a reranked
+      // prompt path but pre-fix the dispatcher only fed it posterior-
+      // sorted results (artifact_routing_view), not task-similarity
+      // aware. Now the brain's CODE ARTIFACT REGISTRY prompt section
+      // gets cosine × posterior × origin reranked artifacts.
+      try {
+        retrievedArtifacts = await retrieve(db, deps.index, {
+          text: task.goal ?? task.directive_id,
+          k: 6,
+          kindFilter: ["code_artifact_candidate", "code_artifact_admitted", "code_artifact_promoted"],
+          goalText: task.goal,
+        });
+        if (retrievedArtifacts.query_embedding_unavailable) retrievedArtifacts = null;
+      } catch { retrievedArtifacts = null; }
       // Organism-alignment audit b3qc9ryzj #2 (2026-05-15): surface
       // query_embedding_unavailable as a fail-loud retrievalUnavailable
       // metadata instead of letting it silently degrade to recency-fallback.
@@ -388,7 +404,7 @@ export const dispatchReadyTask = async (
       );
     }
   }
-  const composed = composePrompt(db, { taskId: task.id, retrievedKnowledge, retrievalUnavailable });
+  const composed = composePrompt(db, { taskId: task.id, retrievedKnowledge, retrievedArtifacts, retrievalUnavailable });
   bridgeResult = await bridge(
     {
       prompt: composed.text,
