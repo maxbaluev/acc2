@@ -664,17 +664,27 @@ describe("lesson implementer flywheel views", () => {
     const byDirective = new Map(rows.map((r) => [r.directive_id, r]));
     expect(byDirective.get("d_contract")!.owner_gate_required).toBe(true);
     expect(byDirective.get("d_contract")!.owner_approved).toBe(true);
+    expect(byDirective.get("d_contract")!.owner_gate_verdict).toBe("owner_consent_approved");
+    expect(byDirective.get("d_contract")!.auto_apply_gate_verdict).toBe("not_auto_apply_owner_gated");
     expect(byDirective.get("d_contract")!.apply_gate_status).toBe("authorized_owner");
     expect(byDirective.get("d_runtime")!.auto_apply_eligible).toBe(true);
+    expect(byDirective.get("d_runtime")!.auto_apply_target).toBe(true);
+    expect(byDirective.get("d_runtime")!.structured_change).toBe(true);
+    expect(byDirective.get("d_runtime")!.owner_gate_verdict).toBe("owner_consent_not_required");
+    expect(byDirective.get("d_runtime")!.auto_apply_gate_verdict).toBe("auto_apply_eligible");
     expect(byDirective.get("d_runtime")!.apply_gate_status).toBe("authorized_auto");
     expect(byDirective.get("d_rule")!.owner_gate_required).toBe(true);
+    expect(byDirective.get("d_rule")!.owner_gate_verdict).toBe("owner_consent_required");
     expect(byDirective.get("d_rule")!.apply_gate_status).toBe("blocked_owner_consent");
     expect(byDirective.get("d_rule")!.apply_gate_reason).toBe("owner_consent_missing");
     expect(byDirective.get("d_runtime_unstructured")!.auto_apply_eligible).toBe(false);
+    expect(byDirective.get("d_runtime_unstructured")!.structured_change).toBe(false);
+    expect(byDirective.get("d_runtime_unstructured")!.auto_apply_gate_verdict).toBe("blocked_unstructured_proposal");
     expect(byDirective.get("d_runtime_unstructured")!.apply_gate_status).toBe("blocked_unstructured_proposal");
     expect(byDirective.get("d_runtime_unstructured")!.apply_gate_reason).toBe("structured_proposed_behavior_required");
     expect(byDirective.get("d_hazard")!.auto_apply_eligible).toBe(false);
     expect(byDirective.get("d_hazard")!.trajectory_hazard_count).toBe(1);
+    expect(byDirective.get("d_hazard")!.auto_apply_gate_verdict).toBe("blocked_trajectory_hazard");
     expect(byDirective.get("d_hazard")!.apply_gate_status).toBe("blocked_trajectory_hazard");
     expect(byDirective.get("d_hazard")!.apply_gate_reason).toBe("trajectory_hazard_present");
     expect(byDirective.get("d_lesson_runtime")!.auto_apply_eligible).toBe(true);
@@ -690,6 +700,7 @@ describe("lesson implementer flywheel views", () => {
     expect(byDirective.get("d_lesson_contract")!.apply_gate_status).toBe("blocked_owner_consent");
     expect(byDirective.get("d_mixed_targets")!.owner_gate_required).toBe(true);
     expect(byDirective.get("d_mixed_targets")!.auto_apply_eligible).toBe(false);
+    expect(byDirective.get("d_mixed_targets")!.auto_apply_gate_verdict).toBe("not_auto_apply_owner_gated");
     expect(byDirective.get("d_mixed_targets")!.apply_gate_status).toBe("blocked_owner_consent");
   });
 

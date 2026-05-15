@@ -361,6 +361,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("rolling_reviewer")) registerWorker("rolling_reviewer", rollingIntervalMs);
   if (isWorkerEnabled("father")) registerWorker("father", fatherIntervalMs);
   if (isWorkerEnabled("scheduler")) registerWorker("scheduler");
+  if (isWorkerEnabled("supervisor")) registerWorker("supervisor", Number(process.env.ACC2_SUPERVISOR_INTERVAL_MS ?? 30_000));
 
   // Phase E: amendment worker — drain unapplied directive_amended events on
   // a configurable interval (default 2s; tests may pin a shorter value via
@@ -441,6 +442,28 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     integrityMarked = true;
     recordWorkerTick("integrity");
     workers.push(() => clearInterval(integrityTick));
+  }
+
+  // Batch 8.B: supervisor worker — runs the three stuck/loop detectors
+  // (redispatch storm / DAG explosion / bridge health) on a tight 30s
+  // interval. Default ON unless ACC2_DISABLE_WORKERS=supervisor.
+  // Decoupled from the integrity worker (whose default tick is 6h, far
+  // too slow to catch tight loops live).
+  const SUPERVISOR_INTERVAL_MS = Number(process.env.ACC2_SUPERVISOR_INTERVAL_MS ?? 30_000);
+  if (isWorkerEnabled("supervisor")) {
+    const { supervisorTick } = await import("./supervisor");
+    let supervisorMarked = false;
+    const supervisorTickHandle = setInterval(
+      supervisedTick(db, "supervisor", SUPERVISOR_INTERVAL_MS, async () => {
+        supervisorTick(db);
+        if (!supervisorMarked) { markWorkerReady("supervisor"); supervisorMarked = true; }
+      }),
+      SUPERVISOR_INTERVAL_MS,
+    );
+    markWorkerReady("supervisor");
+    supervisorMarked = true;
+    recordWorkerTick("supervisor");
+    workers.push(() => clearInterval(supervisorTickHandle));
   }
 
   // Phase F: embedder worker. Default ON — production wants every

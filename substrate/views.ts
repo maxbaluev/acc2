@@ -802,6 +802,15 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
     p.apply_candidate,
     p.owner_gate_required,
     CASE WHEN oa.source_event_id IS NULL THEN 0 ELSE 1 END AS owner_approved,
+    CASE
+      WHEN p.owner_gate_required = 1 AND oa.source_event_id IS NULL
+      THEN 'owner_consent_required'
+      WHEN p.owner_gate_required = 1
+      THEN 'owner_consent_approved'
+      ELSE 'owner_consent_not_required'
+    END AS owner_gate_verdict,
+    p.auto_apply_target,
+    p.structured_change,
     COALESCE(h.hazard_count, 0) AS trajectory_hazard_count,
     CASE
       WHEN p.auto_apply_target = 1
@@ -809,6 +818,17 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
        AND COALESCE(h.hazard_count, 0) = 0
       THEN 1 ELSE 0
     END AS auto_apply_eligible,
+    CASE
+      WHEN p.owner_gate_required = 1
+      THEN 'not_auto_apply_owner_gated'
+      WHEN p.auto_apply_target = 0
+      THEN 'not_auto_apply_target'
+      WHEN COALESCE(h.hazard_count, 0) > 0
+      THEN 'blocked_trajectory_hazard'
+      WHEN p.structured_change = 0
+      THEN 'blocked_unstructured_proposal'
+      ELSE 'auto_apply_eligible'
+    END AS auto_apply_gate_verdict,
     CASE
       WHEN p.owner_gate_required = 1 AND oa.source_event_id IS NULL
       THEN 'blocked_owner_consent'
@@ -1492,8 +1512,12 @@ export type LessonImplementerQueueRow = {
   apply_candidate: Record<string, unknown>;
   owner_gate_required: boolean;
   owner_approved: boolean;
+  owner_gate_verdict: string;
+  auto_apply_target: boolean;
+  structured_change: boolean;
   trajectory_hazard_count: number;
   auto_apply_eligible: boolean;
+  auto_apply_gate_verdict: string;
   apply_gate_status: string;
   apply_gate_reason: string | null;
   apply_event_id: string | null;
@@ -1829,8 +1853,12 @@ export const lessonImplementerQueue = (db: Database): LessonImplementerQueueRow[
     apply_candidate: parseJson<Record<string, unknown>>(r.apply_candidate),
     owner_gate_required: ((r.owner_gate_required as number) ?? 0) === 1,
     owner_approved: ((r.owner_approved as number) ?? 0) === 1,
+    owner_gate_verdict: r.owner_gate_verdict as string,
+    auto_apply_target: ((r.auto_apply_target as number) ?? 0) === 1,
+    structured_change: ((r.structured_change as number) ?? 0) === 1,
     trajectory_hazard_count: (r.trajectory_hazard_count as number) ?? 0,
     auto_apply_eligible: ((r.auto_apply_eligible as number) ?? 0) === 1,
+    auto_apply_gate_verdict: r.auto_apply_gate_verdict as string,
     apply_gate_status: r.apply_gate_status as string,
     apply_gate_reason: (r.apply_gate_reason as string | null) ?? null,
     apply_event_id: (r.apply_event_id as string | null) ?? null,

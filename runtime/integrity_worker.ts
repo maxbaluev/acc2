@@ -223,20 +223,10 @@ export const integrityWorkerTick = async (db: Database): Promise<IntegrityReport
     );
   }
 
-  // Batch 8.B supervisor: stop stucks/loops at task / directive / bridge
-  // scope. Cites brain lesson 5SWP11NZFS3YX68Y95T164HT9W which surfaced
-  // bridge_stuck streaks as the dominant structural blocker. Composes
-  // three detectors: redispatch-storm (task), dag-explosion (directive),
-  // bridge-health (global). All emit append-only corrective events.
-  try {
-    const { supervisorTick } = await import("./supervisor");
-    supervisorTick(db);
-  } catch (err) {
-    logger.warn(
-      { where: "integrity.supervisor_tick", err: (err as Error).message },
-      "supervisor tick failed — will retry next tick",
-    );
-  }
+  // Supervisor runs on its OWN worker now (60s tick, see runtime/daemon.ts).
+  // It WAS piggybacked here, but the integrity worker ticks every 6 HOURS
+  // by default (ACC2_INTEGRITY_INTERVAL_MS) — far too slow to catch
+  // redispatch storms or DAG explosions. Decoupled 2026-05-15.
 
   // After emit, opportunistically truncate WAL if it's grown past
   // threshold. (We do this AFTER the check emission so the audit log

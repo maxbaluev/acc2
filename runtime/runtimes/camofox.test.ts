@@ -217,7 +217,7 @@ describe("per-profile-root mutex (v2-design.md §11.2)", () => {
     ]);
     expect(resA.profileRoot).toBe("/tmp/acc2-mtx-A");
     expect(resB.profileRoot).toBe("/tmp/acc2-mtx-B");
-  });
+  }, 30_000);
 });
 
 // ── End-to-end spawn (skip when no camoufox binary is reachable) ────

@@ -46,26 +46,26 @@ import { logger } from "./logger";
 
 /** Maximum brain_dispatched events allowed on ONE task within the
  *  redispatch window. Above this, the supervisor force-fails the task as
- *  `redispatch_storm`. 5 is generous — a healthy refinement-edge cycle
- *  needs at most 1-2 dispatches per task. 5 means "the scheduler is
- *  clearly looping on a structurally broken target". */
-export const SUPERVISOR_MAX_REDISPATCHES_PER_TASK = 5;
+ *  `redispatch_storm`. 3 is tight — a healthy cycle needs at most 1-2
+ *  dispatches per task; 3+ in a window means the scheduler is looping. */
+export const SUPERVISOR_MAX_REDISPATCHES_PER_TASK = 3;
 
-/** Window over which redispatch counts accumulate. 10 minutes lets a
- *  single legitimately-retrying task (e.g. transient bridge timeout +
- *  retry) age out of the count, while still catching tight loops. */
-export const SUPERVISOR_REDISPATCH_WINDOW_MS = 10 * 60 * 1000;
+/** Window over which redispatch counts accumulate. 5 minutes is the
+ *  bridge timeout — within one cycle window, more than 3 dispatches on
+ *  the same task is a tight loop. */
+export const SUPERVISOR_REDISPATCH_WINDOW_MS = 5 * 60 * 1000;
 
 /** Maximum ready task_node_opened entries under ONE directive before the
- *  supervisor flags DAG explosion. The brain's depth-1 retrieval pattern
- *  should never produce > 50 simultaneously-ready siblings; > 50 means
- *  uncontrolled refinement-edge fanout. */
-export const SUPERVISOR_MAX_READY_TASKS_PER_DIRECTIVE = 50;
+ *  supervisor flags DAG explosion. Lowered from 50 → 20 because live
+ *  evidence (2026-05-15 06:30+) showed QB07F9XX at 45 ready tasks for 7+
+ *  hours without ever triggering — too lax. The brain's depth-1 retrieval
+ *  should produce ≤ 10 ready siblings; 20 is a clear-runaway signal. */
+export const SUPERVISOR_MAX_READY_TASKS_PER_DIRECTIVE = 20;
 
 /** Directive age (hours) past which the DAG-explosion gate fires AND no
- *  root commit has landed. 4 hours is well above the worst-case healthy
- *  brain cycle (5-10 min) × the depth cap (5) + retries. */
-export const SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS = 4;
+ *  root commit has landed. Lowered from 4 → 2 — a healthy directive
+ *  with the new 600s bridge timeout should close in < 1h. 2h is generous. */
+export const SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS = 2;
 
 const SUPERVISOR_DIRECTIVE_AGE_MS = SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS * 60 * 60 * 1000;
 

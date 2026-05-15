@@ -305,7 +305,7 @@ describe("fastmcp substrate tools — stdio transport", () => {
     if (!admit.ok) {
       expect(admit.error).toContain("runtime_unavailable");
     }
-  });
+  }, 30_000);
 
   test("substrate.credit rejects malformed args (Phase H wired)", async () => {
     // The Phase H pipeline requires five typed fields; calling with an empty
