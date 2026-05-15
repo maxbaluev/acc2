@@ -48,9 +48,17 @@ const parsePayload = (row: EventRow): Record<string, unknown> => {
 
 const computeStatus = (taskId: string, eventsByTask: Map<string, EventRow[]>): TaskNodeStatus => {
   const evs = eventsByTask.get(taskId) ?? [];
-  // Walk in order; latest terminal kind wins.
+  // Terminal states are MONOTONIC. Once a task reaches committed / failed /
+  // abandoned, NO subsequent event reopens it on the same task_id. Pre-fix
+  // a stale `task_node_opened` (from Father loops re-emitting the same
+  // template, or from brain refinement re-emits using the same id) would
+  // reset status to "pending" and the scheduler would re-dispatch — exactly
+  // the zombie-loop pattern this session exposed. Re-attempting work uses
+  // a NEW task_id linked via task_edge_recorded { kind: "refines" }, not
+  // the same id.
   let status: TaskNodeStatus = "pending";
   for (const e of evs) {
+    if (status === "committed" || status === "failed") continue;
     if (e.kind === "task_node_opened") status = "pending";
     else if (e.kind === "task_ready") status = "ready";
     else if (e.kind === "task_claimed") status = "in_progress";

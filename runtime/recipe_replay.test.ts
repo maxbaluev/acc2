@@ -28,8 +28,11 @@ const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // Build a synthetic three-success recipe by driving the fixture through the
 // dispatcher three times then running the extractor. Returns the recipe id +
 // the directive that the fixture last opened. By default the seed bumps
-// confidence twice so freshly-extracted recipes (prior 0.5) reach the
-// default match threshold (0.6).
+// confidence SEVEN times so freshly-extracted recipes (prior 0.5) reach the
+// default match threshold (now 0.85 — was 0.6 pre-fix). The bump count is
+// 7 because (0.85 − 0.5) / 0.05 = 7 successful replays — the new policy is
+// "no Tier-0 lane until seven proven replays" (RECIPE_DEFAULT_MIN_CONFIDENCE
+// in recipe_replay.ts, pinned for false-positive prevention).
 const seedThreeSuccessRecipe = async (
   tempDir: string,
   opts: { bumpConfidence?: boolean } = {},
@@ -66,8 +69,8 @@ const seedThreeSuccessRecipe = async (
   const row = recipeRows[0]!;
   const p = JSON.parse(row.payload) as { goal_shape: string };
   if (bump) {
-    updateRecipeConfidence(db, row.id, true);
-    updateRecipeConfidence(db, row.id, true);
+    // Bump 7× to cross the new 0.85 default threshold (0.5 + 7·0.05 = 0.85).
+    for (let i = 0; i < 7; i++) updateRecipeConfidence(db, row.id, true);
   }
   return { db, recipeId: row.id, goalShape: p.goal_shape };
 };
@@ -354,8 +357,13 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
       directive_id: "d_two_step",
       task_id: "t_two_step",
       payload: {
-        goal_shape: "two step pipeline",
-        topology_signature: "topo_00000000::1",
+        // Hardened matcher requires ≥3 underscore-separated tokens of length ≥3
+        // with ≥0.9 overlap, so the recipe's goal_shape uses the production
+        // shape `<token>_<token>_<token>::nN`. Topology "" is the legacy seed
+        // escape kept for hand-rolled tests; production recipes carry an exact
+        // hash that must match strictly.
+        goal_shape: "two_step_pipeline::n1",
+        topology_signature: "",
         confidence: 0.9,
         trajectory: [
           {
@@ -380,7 +388,7 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
       id: "t_two_step",
       directive_id: "d_two_step",
       parent_id: null,
-      goal: "two step pipeline",
+      goal: "two step pipeline task",
       status: "pending",
     } as unknown as TaskNode;
 
@@ -510,8 +518,8 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
       directive_id: "d_partial",
       task_id: "t_partial",
       payload: {
-        goal_shape: "two step partial",
-        topology_signature: "topo_00000000::1",
+        goal_shape: "two_step_partial::n1",
+        topology_signature: "",
         confidence: 0.9,
         trajectory: [
           {
@@ -536,7 +544,7 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
       id: "t_partial",
       directive_id: "d_partial",
       parent_id: null,
-      goal: "two step partial",
+      goal: "two step partial task",
       status: "pending",
     } as unknown as TaskNode;
 

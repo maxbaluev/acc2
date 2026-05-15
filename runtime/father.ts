@@ -36,6 +36,7 @@ import { readRollingReviewsDue, processRollingReviews, type RollingDirective } f
 import { readInterferenceEdges } from "./interference";
 import { readCurrentMode } from "./crisis_mode";
 import { inFlightDirectivesFromSql, CROSS_DIRECTIVE_BLOCKING_INTERACTIONS } from "./task_scheduler";
+import { findRecipeMatch, RECIPE_DEFAULT_MIN_CONFIDENCE } from "./recipe_replay";
 
 export type FatherAction =
   | "read_objectives"
@@ -73,6 +74,8 @@ export type FatherCycleResult = {
 
 export type FatherDirectiveTemplate = {
   template_id: string;
+  /** Fixed §14 action Father will record when this template fires. */
+  action: Extract<FatherAction, "compile_directive_from_template">;
   directive_text: string;
   lifecycle: "finite" | "rolling_active";
   urgency: "normal" | "elevated";
@@ -86,6 +89,7 @@ export type FatherDirectiveTemplate = {
 export const DIRECTIVE_TEMPLATES: readonly FatherDirectiveTemplate[] = Object.freeze([
   {
     template_id: "father_recipe_extraction_pass",
+    action: "compile_directive_from_template",
     directive_text:
       "Substrate maintenance: run extractRecipeCandidates across recent task_committed events to surface new Tier-0 recipes.",
     lifecycle: "finite",
@@ -95,6 +99,7 @@ export const DIRECTIVE_TEMPLATES: readonly FatherDirectiveTemplate[] = Object.fr
   },
   {
     template_id: "father_knowledge_promotion_pass",
+    action: "compile_directive_from_template",
     directive_text:
       "Substrate maintenance: run extractKnowledgePromotions to promote candidates that have ≥5 corroborations and Beta-mean ≥ 0.85.",
     lifecycle: "finite",
@@ -104,6 +109,7 @@ export const DIRECTIVE_TEMPLATES: readonly FatherDirectiveTemplate[] = Object.fr
   },
   {
     template_id: "father_code_artifact_rescore_pass",
+    action: "compile_directive_from_template",
     directive_text:
       "Substrate maintenance: run extractCodeArtifactScores to refresh posteriors and promote artifacts that crossed the §11.5 threshold.",
     lifecycle: "finite",
@@ -113,6 +119,7 @@ export const DIRECTIVE_TEMPLATES: readonly FatherDirectiveTemplate[] = Object.fr
   },
   {
     template_id: "father_owner_status_summary",
+    action: "compile_directive_from_template",
     directive_text:
       "Owner-channel summary: enumerate active objectives, in-flight tasks, and any unresolved owner_input_required rows.",
     lifecycle: "finite",
@@ -170,6 +177,7 @@ export const selectByPriorityAndFreshnessAndConflicts = (
   recentTemplateUses: Map<string, string>,
   nowIso: string,
   inFlightDirectives: ReadonlySet<string> = new Set<string>(),
+  recipeBackedTemplateIds: ReadonlySet<string> = new Set<string>(),
 ): PriorityChoice => {
   if (rollingReviews.length > 0) {
     const sorted = [...rollingReviews].sort((a, b) =>
@@ -226,18 +234,55 @@ export const selectByPriorityAndFreshnessAndConflicts = (
     return { kind: "normal_objective", directive_id: head.directive_id, row: head };
   }
 
-  // Pick the oldest unused template (cool-down respected).
+  // Pick the oldest unused template (cool-down respected), preferring any
+  // template whose root task currently has a Tier-0 recipe match. This keeps
+  // recurring Father work on the substrate_replay lane whenever the organism
+  // has already learned a safe trajectory for that recurring shape.
   const nowMs = Date.parse(nowIso);
-  for (const t of templates) {
+  const eligibleTemplates = templates.filter((t) => {
     const last = recentTemplateUses.get(t.template_id);
     if (last) {
       const dt = nowMs - Date.parse(last);
-      if (dt < TEMPLATE_USE_COOLDOWN_MS) continue;
+      if (dt < TEMPLATE_USE_COOLDOWN_MS) return false;
     }
+    return true;
+  });
+  const orderedTemplates = [...eligibleTemplates].sort((a, b) => {
+    const ar = recipeBackedTemplateIds.has(a.template_id) ? 0 : 1;
+    const br = recipeBackedTemplateIds.has(b.template_id) ? 0 : 1;
+    return ar - br;
+  });
+  for (const t of orderedTemplates) {
     return { kind: "yield_template", template: t };
   }
 
   return { kind: "none" };
+};
+
+const fatherTemplateToProbeTask = (template: FatherDirectiveTemplate) => ({
+  id: `father_template_probe:${template.template_id}`,
+  directive_id: `father_template_probe:${template.template_id}`,
+  parent_id: null,
+  goal: template.initial_task_goal ?? template.directive_text,
+  status: "ready" as const,
+});
+
+/** Return template ids whose root task would route through Tier-0 replay.
+ *  Father does not replay directly and never calls an LLM; it only biases its
+ *  recurring template selection toward learned, verifier-backed recipes so the
+ *  scheduler/dispatcher can take the substrate_replay lane first. */
+export const recipeBackedFatherTemplateIds = (
+  db: Database,
+  templates: readonly FatherDirectiveTemplate[] = DIRECTIVE_TEMPLATES,
+): Set<string> => {
+  const out = new Set<string>();
+  for (const template of templates) {
+    const match = findRecipeMatch(db, fatherTemplateToProbeTask(template), {
+      minConfidence: RECIPE_DEFAULT_MIN_CONFIDENCE,
+    });
+    if (match) out.add(template.template_id);
+  }
+  return out;
 };
 
 /** Find the most-recent fire timestamp for each Father directive template
@@ -267,6 +312,9 @@ const openTemplatedDirective = (
   template: FatherDirectiveTemplate,
   cycleId: string,
 ): { directive_id: string; task_id: string } => {
+  if (template.action !== "compile_directive_from_template") {
+    throw new Error(`invalid_father_template_action:${template.action}`);
+  }
   const directiveId = newId();
   const taskId = newId();
   emitEvent(db, {
@@ -280,6 +328,7 @@ const openTemplatedDirective = (
       urgency: template.urgency,
       father_template_id: template.template_id,
       father_cycle_id: cycleId,
+      father_action: template.action,
     } as JsonValue,
   });
   emitEvent(db, {
@@ -293,6 +342,7 @@ const openTemplatedDirective = (
       lifecycle: "finite",
       urgency: template.urgency,
       father_template_id: template.template_id,
+      father_action: template.action,
     } as JsonValue,
   });
   return { directive_id: directiveId, task_id: taskId };
@@ -423,6 +473,7 @@ export const fatherIterate = async (
   const rolling = readRollingReviewsDue(db, ts);
   const edges = readInterferenceEdges(db);
   const templateUses = readTemplateUseTimestamps(db);
+  const recipeBackedTemplates = recipeBackedFatherTemplateIds(db, DIRECTIVE_TEMPLATES);
   // Multi-process in-flight set (SQL-backed; no dependency on the scheduler's
   // in-memory Map). Used by the priority selector to down-rank objectives
   // that have a mutual_exclusion / resource_conflict edge to a directive
@@ -437,6 +488,7 @@ export const fatherIterate = async (
     templateUses,
     ts,
     inFlight,
+    recipeBackedTemplates,
   );
 
   if (choice.kind === "rolling_review") {
@@ -495,9 +547,10 @@ export const fatherIterate = async (
       directive_id: opened.directive_id,
       payload: {
         cycle_id: cycleId,
-        action: "compile_directive_from_template",
+        action: choice.template.action,
         template_id: choice.template.template_id,
         directive_id: opened.directive_id,
+        tier0_replay_preferred: recipeBackedTemplates.has(choice.template.template_id),
       } as JsonValue,
     });
     return {

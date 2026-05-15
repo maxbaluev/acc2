@@ -263,11 +263,15 @@ describe("task_dispatcher", () => {
         .query("SELECT id FROM events WHERE kind = 'recipe_extracted' ORDER BY ts DESC LIMIT 1")
         .get() as { id: string };
       expect(recipeRow).not.toBeNull();
-      // Bump twice — the inline recipe lands at confidence=1.0 (already above
-      // the 0.6 default threshold), but bumping is idempotent and keeps the
-      // pre-Task-5 shape of this test intact.
-      updateRecipeConfidence(db, recipeRow.id, true);
-      updateRecipeConfidence(db, recipeRow.id, true);
+      // Inline-seeded recipes land at confidence=0.5; +0.05 per successful
+      // bump. The new replay threshold is 0.85 (= seven proven replays). We
+      // bump 7× here to push the recipe above the floor — this is exactly the
+      // hardening contract from runtime/crisis_mode.ts (see the comment on
+      // recipe_confidence_threshold). Pre-fix the threshold was 0.6 (= one
+      // bump from the 0.5 seed); the loose threshold + loose goal_shape match
+      // caused false-positive replays of unrelated recipes against new
+      // directives. 0.85 = SEVEN proven replays = real evidence.
+      for (let i = 0; i < 7; i++) updateRecipeConfidence(db, recipeRow.id, true);
 
       const bridgeBefore = (db
         .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'bridge_invoked'")

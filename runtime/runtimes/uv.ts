@@ -307,8 +307,10 @@ export const runUvArtifact = async (
 
   // Build the uv invocation. `--no-project` keeps uv from looking for a
   // pyproject.toml in the tempdir (we don't author one — uv falls back to
-  // the system Python interpreter for `uv run`).
-  const uvArgs: string[] = ["run", "--no-project"];
+  // the system Python interpreter for `uv run`). `--isolated` prevents
+  // undeclared packages from leaking in through the operator's ambient Python
+  // environment; only pypi_allow entries are installed below.
+  const uvArgs: string[] = ["run", "--no-project", "--isolated"];
   if (reqsPath) {
     uvArgs.push("--with-requirements", reqsPath);
   }

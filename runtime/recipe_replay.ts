@@ -43,10 +43,27 @@ import type { TaskNode } from "./task_topology";
 import { distributeCredit } from "./credit";
 import { nowIso } from "./ids";
 
-export const RECIPE_DEFAULT_MIN_CONFIDENCE = 0.6;
+// Tier-0 replay must be STRICTLY conservative — a false-positive match
+// against a new directive replays the wrong recipe, residual=0 fires from
+// the recipe's own verifier, and the directive is "committed" without the
+// brain ever seeing the prompt. This session exposed the bug: a recipe
+// extracted from the convergence DAG matched the foundational STOP-FUNCTION
+// directive via loose-topology escape (endsWith "::1") + 0.6 token overlap
+// and falsely committed it. Conservative thresholds prevent this class.
+export const RECIPE_DEFAULT_MIN_CONFIDENCE = 0.85;
 export const RECIPE_MAX_CONFIDENCE = 0.95;
 export const RECIPE_AUTO_ARCHIVE_FLOOR = 0.2;
 export const RECIPE_VERIFIER_ABORT_THRESHOLD = 0.3;
+/** Minimum token-overlap fraction for the legacy goal_shape match path.
+ *  Pre-fix this was 0.6 — generic strategic words ("design", "extract",
+ *  "verifier") matched too easily. 1.0 requires EVERY recipe token to appear
+ *  in the task goal: a recipe `scrape_inventory::n1` matches `scrape inventory
+ *  of warehouse` (both tokens present) but a 7-token convergence recipe will
+ *  not match an unrelated foundational directive. The accompanying minimum
+ *  `RECIPE_MIN_TOKEN_COUNT` (≥ 2) prevents single-generic-token recipes from
+ *  matching anything by accident. */
+export const RECIPE_TOKEN_OVERLAP_FLOOR = 1.0;
+export const RECIPE_MIN_TOKEN_COUNT = 2;
 
 export type RecipeTrajectoryStep = {
   step_kind: "action_predicted" | "task_node_opened" | string;
@@ -174,28 +191,36 @@ export const findRecipeMatch = (
     //   1. Exact: recipe.goal_shape == task's goalShape() hash.
     //   2. Token overlap: recipe.goal_shape is the legacy normalized-text
     //      token (e.g. "count_todos_in_repo::n1"). Treat it as a bag of
-    //      tokens (length ≥ 3); accept when ≥ 60% of the recipe's tokens
-    //      appear in the task goal. This survives the 80-char slice that
-    //      may have truncated the recipe text mid-word.
+    //      tokens (length ≥ 3); accept ONLY when ≥ RECIPE_TOKEN_OVERLAP_FLOOR
+    //      (0.9) of the recipe's tokens appear in the task goal AND ≥ 3 tokens
+    //      match. Pre-fix this was 0.6 — generic strategic vocabulary
+    //      ("design", "extract", "verifier") was enough to claim a match,
+    //      replaying the wrong recipe against unrelated directives.
     const exactGoalMatch = payload.goal_shape === taskGoalShape;
     const recipeToken = payload.goal_shape.split("::")[0] ?? "";
     const taskGoalLower = task.goal.toLowerCase();
     const recipeTokens = recipeToken.split("_").filter((t) => t.length >= 3);
-    let tokenMatchScore = 0;
+    let tokenMatchHits = 0;
     if (recipeTokens.length > 0) {
-      let hits = 0;
       for (const tk of recipeTokens) {
-        if (taskGoalLower.includes(tk)) hits++;
+        if (taskGoalLower.includes(tk)) tokenMatchHits++;
       }
-      tokenMatchScore = hits / recipeTokens.length;
     }
-    const legacyTokenMatch = recipeTokens.length > 0 && tokenMatchScore >= 0.6;
+    const tokenMatchScore = recipeTokens.length > 0
+      ? tokenMatchHits / recipeTokens.length
+      : 0;
+    const legacyTokenMatch =
+      recipeTokens.length >= RECIPE_MIN_TOKEN_COUNT &&  // ≥2 tokens (specificity)
+      tokenMatchScore >= RECIPE_TOKEN_OVERLAP_FLOOR;    // 100% overlap (no false-positive)
     if (!exactGoalMatch && !legacyTokenMatch) continue;
 
-    // Topology match: exact OR recipe topology is degenerate (single root).
+    // Topology match: STRICTLY exact. The pre-fix `endsWith("::1")` escape
+    // accepted any recipe extracted from a single-task DAG (which is most
+    // of them) against ANY new task — combined with loose goal_shape this
+    // matched anything to anything. The `=""` exact-empty path stays for
+    // recipes seeded without a topology stamp (substrate/seed.ts).
     const topologyMatch =
       payload.topology_signature === taskTopology ||
-      payload.topology_signature.endsWith("::1") ||
       payload.topology_signature === "";
     if (!topologyMatch) continue;
 

@@ -24,10 +24,15 @@ import { findRecipeMatch as findRealRecipeMatch } from "./recipe_replay";
 import { lowRiskInlinePatterns, type LowRiskInlinePatternRow } from "../substrate/views";
 
 /** Default Tier-0 recipe-replay confidence threshold (§15). Recipes seed at
- *  0.5 and accumulate via updateRecipeConfidence; two successful replays push
- *  a recipe to 0.6 and admit it to the Tier-0 lane. Crisis-mode lowers the
- *  effective threshold to 0.4 via `CRISIS_MODE.recipe_confidence_threshold`. */
-export const RECIPE_REPLAY_THRESHOLD = 0.6;
+ *  0.5 and accumulate via updateRecipeConfidence; SEVEN successful replays
+ *  push a recipe to 0.85 (capped at 0.95) and admit it to the Tier-0 lane.
+ *  Pre-fix this was 0.6 — combined with the loose goal_shape match in
+ *  recipe_replay.ts:findRecipeMatch, fresh recipes (confidence 0.5+0.05·k)
+ *  matched almost anything after a single success, replaying the wrong
+ *  trajectory against unrelated directives. 0.85 forces real evidence of
+ *  reusability. Crisis-mode lowers to 0.7 via
+ *  `CRISIS_MODE.recipe_confidence_threshold`. */
+export const RECIPE_REPLAY_THRESHOLD = 0.85;
 export const INLINE_PATTERN_SCORE_THRESHOLD = 0.7;
 export const INLINE_PATTERN_CONFIDENCE_THRESHOLD = 0.6;
 

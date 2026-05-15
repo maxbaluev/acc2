@@ -34,10 +34,14 @@ export const NORMAL_MODE: CrisisModeAdjustments = Object.freeze({
   max_concurrent: 5,
   verification_timeout_multiplier: 1.0,
   recipe_preferred: false,
-  // Phase J: recipe replay default threshold. Recipes start at 0.5 prior;
-  // two successful replays push them to 0.6 and admit them to the Tier-0
-  // lane. Crisis mode (§3.5) lowers this to 0.4 to prefer cached over fresh.
-  recipe_confidence_threshold: 0.6,
+  // Recipe-replay threshold. Recipes start at confidence 0.5 and gain +0.05
+  // per successful replay (cap 0.95). The Tier-0 lane only accepts recipes
+  // at 0.85+ — that is SEVEN proven replays, not just one. Pre-fix this was
+  // 0.6 (= one success); combined with the loose goal_shape match in
+  // recipe_replay.ts, fresh recipes from unrelated DAGs falsely matched new
+  // directives and committed them without brain involvement. Crisis mode
+  // (§3.5) lowers to 0.7 (= four proven replays) — still conservative.
+  recipe_confidence_threshold: 0.85,
   latm_authoring_suspended: false,
   father_interval_ms: 5 * 60 * 1000,
 });
@@ -46,7 +50,7 @@ export const CRISIS_MODE: CrisisModeAdjustments = Object.freeze({
   max_concurrent: 20,
   verification_timeout_multiplier: 0.5,
   recipe_preferred: true,
-  recipe_confidence_threshold: 0.4,
+  recipe_confidence_threshold: 0.7,
   latm_authoring_suspended: true,
   father_interval_ms: 30 * 1000,
 });

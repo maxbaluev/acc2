@@ -41,7 +41,11 @@ describe("dispatch_decider", () => {
   test("routes to substrate_replay when a high-confidence recipe matches", () => {
     const db = openDb(":memory:");
     runViews(db);
-    // Synthetic recipe targeting the task's goal text.
+    // Synthetic recipe targeting the task's goal text. topology_signature
+    // is "" so the seed-style empty-topology exception applies (this is the
+    // ONE legacy escape kept after recipe-match hardening — it covers
+    // hand-seeded recipes from substrate/seed.ts that have no topology
+    // stamp). confidence 0.9 is comfortably above the new 0.85 floor.
     emitEvent(db, {
       kind: "recipe_extracted",
       substrate_origin: "substrate_auto",
@@ -49,7 +53,7 @@ describe("dispatch_decider", () => {
       task_id: "t_recipe",
       payload: {
         goal_shape: "count_todos_in_scripts::n1",
-        topology_signature: "topo_00000000::1",
+        topology_signature: "",
         confidence: 0.9,
         trajectory: [
           { step_kind: "action_predicted", artifact_id: "art_x", verifier_artifact_id: "art_v", payload_template: {} },
@@ -64,7 +68,7 @@ describe("dispatch_decider", () => {
     }
   });
 
-  test("crisis-mode lowers the recipe threshold so a 0.5-confidence recipe still routes", () => {
+  test("crisis-mode lowers the recipe threshold so a mid-confidence recipe still routes", () => {
     const db = openDb(":memory:");
     runViews(db);
     const directiveId = newId();
@@ -76,8 +80,8 @@ describe("dispatch_decider", () => {
       task_id: directiveId,
       payload: { directive_text: "scrape inventory", urgency: "crisis", lifecycle: "finite" },
     });
-    // Recipe seeded at 0.5 — below the 0.7 normal threshold but above the
-    // 0.4 crisis threshold.
+    // Recipe seeded at 0.75 — above the 0.7 crisis threshold but below the
+    // 0.85 normal threshold, so it ONLY routes when crisis mode is active.
     emitEvent(db, {
       kind: "recipe_extracted",
       substrate_origin: "substrate_auto",
@@ -85,8 +89,8 @@ describe("dispatch_decider", () => {
       task_id: directiveId,
       payload: {
         goal_shape: "scrape_inventory::n1",
-        topology_signature: "topo_00000000::1",
-        confidence: 0.5,
+        topology_signature: "",
+        confidence: 0.75,
         trajectory: [
           { step_kind: "action_predicted", artifact_id: "art_x", verifier_artifact_id: "art_v", payload_template: {} },
         ],

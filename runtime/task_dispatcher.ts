@@ -52,6 +52,20 @@ export type DispatchResult = {
 
 const COMMIT_RESIDUAL_THRESHOLD = 0.3;
 
+const irreversibleConsentEventId = (
+  db: Database,
+  directiveId: string,
+  payload: Record<string, unknown>,
+): string | null => {
+  const consentId = payload.owner_consent_event_id;
+  if (typeof consentId !== "string" || consentId.trim().length === 0) return null;
+  const row = db
+    .query("SELECT kind, directive_id FROM events WHERE id = ?")
+    .get(consentId) as { kind: string; directive_id: string } | null;
+  if (!row || row.kind !== "owner_decision_recorded" || row.directive_id !== directiveId) return null;
+  return consentId;
+};
+
 type DispatchDeps = {
   /** Override the bridge call — Phase D tests use this to inject the
    *  adversarial cycle-2 mock. Defaults to opencodeQuery. */
@@ -355,6 +369,60 @@ export const dispatchReadyTask = async (
       // printing `@@IRREVERSIBLE@@ <kind>:<description>` lines; the runtime
       // parses them into observation.irreversibleEffects.
       if (actionObs.irreversibleEffects.length > 0) {
+        const ownerConsentEventId = irreversibleConsentEventId(db, task.directive_id, predictedPayload);
+        if (!ownerConsentEventId) {
+          const obsRow = db
+            .query(
+              `SELECT id FROM events WHERE task_id = ? AND kind = 'artifact_observed'
+               AND action_artifact_id = ? ORDER BY ts DESC LIMIT 1`,
+            )
+            .get(task.id, actionArtifact.id) as { id: string } | null;
+          const scored = emitEvent(db, {
+            kind: "action_scored",
+            substrate_origin: "substrate_auto",
+            directive_id: task.directive_id,
+            task_id: task.id,
+            action_artifact_id: actionArtifact.id,
+            verifier_artifact_id: verifierArtifact.id,
+            predicted_residual: actionPredicted.predicted_residual ?? undefined,
+            residual: 1,
+            failure_kind: "governance_block",
+            payload: {
+              dispatch_id: dispatchId,
+              reason: "owner_consent_missing",
+              irreversible_effects_detected: actionObs.irreversibleEffects,
+              required_field: "owner_consent_event_id",
+            } as JsonValue,
+          });
+          try {
+            await distributeCredit(db, {
+              action_event_id: actionPredicted.id,
+              observation_event_id: obsRow?.id ?? actionPredicted.id,
+              scored_event_id: scored.id,
+              predicted_residual: actionPredicted.predicted_residual ?? 1,
+              observed_residual: 1,
+            });
+          } catch (err) {
+            logger.warn(
+              { where: "task_dispatcher.credit.irreversible_consent_gate", task_id: task.id, err: (err as Error).message },
+              "distributeCredit failed (irreversible consent gate) — falling back to direct posterior",
+            );
+            applyResidualOutcome(db, actionArtifact.id, 1, nowIso());
+            applyResidualOutcome(db, verifierArtifact.id, 1, nowIso());
+          }
+          emitEvent(db, {
+            kind: "brain_dispatch_closed",
+            substrate_origin: "substrate_auto",
+            directive_id: task.directive_id,
+            task_id: task.id,
+            payload: {
+              dispatch_id: dispatchId,
+              reason: "irreversible_owner_consent_missing",
+              events_count: dispatchEvents.length,
+            } as JsonValue,
+          });
+          return { dispatch_id: dispatchId, task_id: task.id, events: dispatchEvents, violations, bridge_result: bridgeResult };
+        }
         for (const eff of actionObs.irreversibleEffects) {
           emitEvent(db, {
             kind: "irreversible_effect_recorded",
@@ -362,7 +430,8 @@ export const dispatchReadyTask = async (
             directive_id: task.directive_id,
             task_id: task.id,
             action_artifact_id: actionArtifact.id,
-            payload: { kind: eff.kind, description: eff.description } as JsonValue,
+            context_refs: [ownerConsentEventId],
+            payload: { kind: eff.kind, description: eff.description, owner_consent_event_id: ownerConsentEventId } as JsonValue,
           });
         }
       }

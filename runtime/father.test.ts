@@ -13,8 +13,10 @@ import {
   resolveFatherDrift,
   DIRECTIVE_TEMPLATES,
   FATHER_ACTION_EVENT_KINDS,
+  recipeBackedFatherTemplateIds,
   selectByPriorityAndFreshnessAndConflicts,
 } from "./father";
+import { goalShape } from "./goal_shape";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -250,6 +252,12 @@ describe("detectFatherDrift", () => {
     expect(FATHER_ACTION_EVENT_KINDS.has("father_yielded")).toBe(true);
     expect(FATHER_ACTION_EVENT_KINDS.has("directive_opened")).toBe(true);
   });
+
+  test("Father templates are bound to the fixed compile action taxonomy", () => {
+    for (const template of DIRECTIVE_TEMPLATES) {
+      expect(template.action).toBe("compile_directive_from_template");
+    }
+  });
 });
 
 describe("fatherLoop", () => {
@@ -450,6 +458,36 @@ describe("selectByPriorityAndFreshnessAndConflicts", () => {
     expect(choice.kind).toBe("yield_template");
   });
 
+  test("prefers recipe-backed Father templates over unlearned recurring templates", () => {
+    const templates = [
+      {
+        ...DIRECTIVE_TEMPLATES[0]!,
+        template_id: "unlearned_first",
+        initial_task_goal: "run an unlearned maintenance pass",
+      },
+      {
+        ...DIRECTIVE_TEMPLATES[1]!,
+        template_id: "recipe_backed_second",
+        initial_task_goal: "run a learned maintenance pass",
+      },
+    ];
+
+    const choice = selectByPriorityAndFreshnessAndConflicts(
+      [],
+      [],
+      [],
+      templates,
+      new Map(),
+      "2026-05-13T12:00:00.000Z",
+      new Set(),
+      new Set(["recipe_backed_second"]),
+    );
+    expect(choice.kind).toBe("yield_template");
+    if (choice.kind === "yield_template") {
+      expect(choice.template.template_id).toBe("recipe_backed_second");
+    }
+  });
+
   test("down-ranks objectives with mutual_exclusion edges to in-flight directives", () => {
     // Two objectives at the same urgency: A and B. There's an in-flight
     // directive X. B has a mutual_exclusion edge to X (so B is conflict-
@@ -489,5 +527,54 @@ describe("selectByPriorityAndFreshnessAndConflicts", () => {
     if (choice.kind === "normal_objective") {
       expect(choice.directive_id).toBe("d_a");
     }
+  });
+});
+
+describe("Father Tier-0 replay preference", () => {
+  test("detects templates with matching recipe_extracted rows", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const template = DIRECTIVE_TEMPLATES[1]!;
+
+    emitEvent(db, {
+      kind: "recipe_extracted",
+      substrate_origin: "substrate_auto",
+      payload: {
+        goal_shape: goalShape(template.initial_task_goal ?? template.directive_text),
+        topology_signature: "",
+        confidence: 0.9,
+        trajectory: [],
+      },
+    });
+
+    const backed = recipeBackedFatherTemplateIds(db);
+    expect(backed.has(template.template_id)).toBe(true);
+  });
+
+  test("fatherIterate selects a recipe-backed template before earlier unbacked templates", async () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const recipeBackedTemplate = DIRECTIVE_TEMPLATES[1]!;
+
+    emitEvent(db, {
+      kind: "recipe_extracted",
+      substrate_origin: "substrate_auto",
+      payload: {
+        goal_shape: goalShape(recipeBackedTemplate.initial_task_goal ?? recipeBackedTemplate.directive_text),
+        topology_signature: "",
+        confidence: 0.9,
+        trajectory: [],
+      },
+    });
+
+    const result = await fatherIterate(db, { now: "2026-05-13T12:00:00.000Z" });
+    expect(result.action).toBe("compile_directive_from_template");
+    expect((result.detail as { template_id: string }).template_id).toBe(recipeBackedTemplate.template_id);
+
+    const cycle = db
+      .query("SELECT payload FROM events WHERE kind = 'father_cycle_recorded'")
+      .get() as { payload: string };
+    const payload = JSON.parse(cycle.payload);
+    expect(payload.tier0_replay_preferred).toBe(true);
   });
 });
