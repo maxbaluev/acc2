@@ -61,6 +61,9 @@ export const NARRATIVE_KINDS = new Set([
   "owner_input_received",
   "owner_input_required",
   "owner_decision_recorded",
+  "hidl_action_required",
+  "owner_persona_detected",
+  "owner_profile_recorded",
   // DAG structure
   "task_node_opened",
   "task_edge_recorded",
@@ -85,7 +88,9 @@ export const NARRATIVE_KINDS = new Set([
   "contract_amendment_proposed",
   // Application of lessons + amendments (Option D + Claude subagent executor)
   "lesson_apply_requested",
+  "auto_apply_signaled",
   "applied_change_committed",
+  "applied_change_failed",
   "lesson_applied",
   "contract_amendment_applied",
   // Bridge failures only — successes are implied by action_predicted /
@@ -191,6 +196,11 @@ const GLYPHS: Record<string, string> = {
   worker_tick_completed: "·",
   lesson_applied: "💡✓",
   contract_amendment_applied: "📝✓",
+  hidl_action_required: "🔐",
+  owner_persona_detected: "👤?",
+  owner_profile_recorded: "👤✓",
+  auto_apply_signaled: "Δ!",
+  applied_change_failed: "Δ✗",
 };
 
 const formatPayload = (kind: string, p: Record<string, unknown>): string => {
@@ -295,6 +305,34 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       const uncovered = (p.uncovered_aspects as unknown[] | undefined)?.length ?? 0;
       const covered = (p.covered_sub_tasks as unknown[] | undefined)?.length ?? 0;
       return `closure_residual=${residual} covered=${covered} uncovered=${uncovered}`;
+    }
+    case "hidl_action_required": {
+      const reason = (p.reason as string) ?? "owner action required";
+      const summary = p.summary as string | undefined;
+      const action = p.suggested_action as string | undefined;
+      return `reason=${reason}${summary ? ` summary=${JSON.stringify(trunc(summary, 80))}` : ""}${action ? ` action=${JSON.stringify(trunc(action, 80))}` : ""}`;
+    }
+    case "owner_persona_detected": {
+      const persona = (p.persona as string) ?? "unknown";
+      const confidence = p.confidence;
+      return `persona=${persona}${confidence !== undefined ? ` confidence=${confidence}` : ""}`;
+    }
+    case "owner_profile_recorded": {
+      const lang = p.detected_language as string | undefined;
+      const trust = p.autonomy_trust_level as string | undefined;
+      return [lang ? `language=${lang}` : "", trust ? `trust=${trust}` : ""].filter(Boolean).join(" ");
+    }
+    case "auto_apply_signaled": {
+      const src = p.source_event_id as string | undefined;
+      const target = p.target as string | undefined;
+      const next = p.next_action as string | undefined;
+      return `${src ? `source=${idPrefix(src, 12)} ` : ""}${target ? `target=${target} ` : ""}${next ? `next=${JSON.stringify(trunc(next, 100))}` : ""}`.trim();
+    }
+    case "applied_change_failed": {
+      const src = p.source_event_id as string | undefined;
+      const target = p.target as string | undefined;
+      const reason = (p.reason as string) ?? "unknown";
+      return `${src ? `source=${idPrefix(src, 12)} ` : ""}${target ? `target=${target} ` : ""}reason=${JSON.stringify(trunc(reason, 80))}`.trim();
     }
     case "lesson_extracted": {
       const kind = p.lesson_kind as string | undefined;
