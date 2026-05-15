@@ -223,6 +223,10 @@ describe("derived sets match their pre-unification shape", () => {
       // Brain sandbox audit bsfxsvgh9 (2026-05-15): terminal retirement
       // of chronically-failing artifacts is a substrate-status metric.
       "code_artifact_retired",
+      // Stage-2 auto-apply worker (2026-05-15): mechanical apply
+      // failures are a substrate-status signal — the brain's proposal
+      // passed structural gates but tests refused it.
+      "applied_change_failed",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

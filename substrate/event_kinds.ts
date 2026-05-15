@@ -245,6 +245,12 @@ export const EVENT_KINDS = {
   // applier) sees the eligible row without polling. Carries {source_event_id,
   // source_kind, target, anchor, structured: bool, scanned_at}.
   auto_apply_signaled:                     { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
+  // Stage-2 outcome: emitted when the auto-apply worker attempted a
+  // mechanical replacement, ran tests, and EITHER tests failed OR the
+  // diff couldn't be applied unambiguously. The source proposal's
+  // posterior should demote on this signal — the brain's proposed shape
+  // was wrong even though it passed structural gates.
+  applied_change_failed:                   { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true  },
   // ── Lesson-apply flywheel intermediates (audit-#7, 2026-05-15) ───────
   // Pre-fix these kinds were emitted by the lesson-apply subsystem but
   // absent from EVENT_KINDS — they bypassed embedding eligibility, the

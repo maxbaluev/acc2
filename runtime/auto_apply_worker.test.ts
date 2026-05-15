@@ -1,7 +1,8 @@
-// acc2 auto-apply worker tests — eligibility scan + signal idempotence.
+// acc2 auto-apply worker tests — eligibility scan + signal idempotence
+// + stage-2 helpers (anchored_replace_v1 parse + mechanical replacement).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
@@ -9,7 +10,10 @@ import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
 import {
   collectAutoApplyEligible,
+  collectStage2Candidates,
+  computeReplacement,
   emitAutoApplySignal,
+  extractAnchoredReplaceV1,
   runAutoApplyWorkerTick,
 } from "./auto_apply_worker";
 
@@ -141,5 +145,108 @@ describe("auto_apply_worker", () => {
     });
     const second = runAutoApplyWorkerTick(db);
     expect(second.signaled).toEqual([id2]);
+  });
+
+  // ── Stage-2 helpers ──────────────────────────────────────────
+
+  test("extractAnchoredReplaceV1 reads object-form diff with before/after", () => {
+    const p = {
+      target: "runtime/foo.ts",
+      current_behavior: "ignored when diff is object",
+      proposed_behavior: {
+        file_path: "runtime/foo.ts",
+        anchor: "x",
+        diff: { kind: "anchored_replace_v1", before: "OLD", after: "NEW" },
+      },
+    };
+    const r = extractAnchoredReplaceV1(p);
+    expect(r).toEqual({ filePath: "runtime/foo.ts", before: "OLD", after: "NEW" });
+  });
+
+  test("extractAnchoredReplaceV1 falls back to current_behavior + string diff", () => {
+    const p = {
+      target: "runtime/foo.ts",
+      current_behavior: "OLD",
+      proposed_behavior: {
+        file_path: "runtime/foo.ts",
+        anchor: "x",
+        diff: "NEW",
+      },
+    };
+    const r = extractAnchoredReplaceV1(p);
+    expect(r).toEqual({ filePath: "runtime/foo.ts", before: "OLD", after: "NEW" });
+  });
+
+  test("extractAnchoredReplaceV1 rejects shapes missing required fields", () => {
+    expect(extractAnchoredReplaceV1({ proposed_behavior: "freeform prose" })).toBeNull();
+    expect(extractAnchoredReplaceV1({ proposed_behavior: { file_path: "x" } })).toBeNull();
+    expect(extractAnchoredReplaceV1({ proposed_behavior: { file_path: "x", diff: { before: "" } } })).toBeNull();
+  });
+
+  test("computeReplacement applies a unique replacement and returns updated content", () => {
+    const target = "test_target.ts";
+    writeFileSync(join(tmpDir, target), "alpha BEFORE omega\n");
+    const r = computeReplacement(target, "BEFORE", "AFTER", tmpDir);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.updated).toBe("alpha AFTER omega\n");
+  });
+
+  test("computeReplacement refuses ambiguous matches", () => {
+    const target = "test_ambig.ts";
+    writeFileSync(join(tmpDir, target), "BEFORE\nthen BEFORE again\n");
+    const r = computeReplacement(target, "BEFORE", "AFTER", tmpDir);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("before_text_ambiguous");
+  });
+
+  test("computeReplacement refuses missing target file", () => {
+    const r = computeReplacement("does/not/exist.ts", "x", "y", tmpDir);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("target_file_not_found");
+  });
+
+  test("computeReplacement refuses when before text is not present", () => {
+    const target = "test_missing.ts";
+    writeFileSync(join(tmpDir, target), "completely different content\n");
+    const r = computeReplacement(target, "BEFORE", "AFTER", tmpDir);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("before_text_not_found");
+  });
+
+  test("collectStage2Candidates returns signaled-but-not-applied rows", () => {
+    const id1 = emitProposal(db, {
+      target: "runtime/a.ts",
+      anchor: "anchor-a",
+      diff: "diff-a",
+    });
+    const id2 = emitProposal(db, {
+      target: "runtime/b.ts",
+      anchor: "anchor-b",
+      diff: "diff-b",
+    });
+    // Both signaled but not applied.
+    runAutoApplyWorkerTick(db);
+    const beforeApply = collectStage2Candidates(db);
+    expect(beforeApply.length).toBe(2);
+
+    // Mark id1 applied; id2 remains in the candidate pool.
+    emitEvent(db, {
+      kind: "contract_amendment_applied",
+      substrate_origin: "claude_root",
+      directive_id: "d_auto_apply_test",
+      task_id: "t_auto_apply_test",
+      context_refs: [id1],
+      payload: { source_event_id: id1, status: "applied", commit_sha: "abcd1234" },
+    });
+    const afterApply = collectStage2Candidates(db);
+    expect(afterApply.length).toBe(1);
+    expect(afterApply[0]?.source_event_id).toBe(id2);
+  });
+
+  test("runAutoApplyWorkerTick reports stage2_candidates count", () => {
+    emitProposal(db, { target: "runtime/c.ts", anchor: "anc", diff: "txt" });
+    const first = runAutoApplyWorkerTick(db);
+    // After signaling, the row enters the stage-2 candidate pool.
+    expect(first.stage2_candidates).toBe(1);
   });
 });
