@@ -75,6 +75,13 @@ export const decodeEmbeddingBlob = (blob: Uint8Array): Float32Array | null => {
  *  credentials OR network/HTTP error — the caller decides whether to
  *  degrade. We deliberately do not throw: the embedder worker should
  *  continue past one bad event rather than crash the daemon. */
+/** Per-request OpenAI fetch deadline. Native Bun/Node fetch has NO default
+ *  timeout — a hung OpenAI endpoint would hang the embedder worker
+ *  indefinitely, blocking every subsequent embedding job. 30s is comfortably
+ *  above OpenAI's published p99 (typically 1-3s for text-embedding-3-small
+ *  on 100-item batches) while still failing fast on a genuine wedge. */
+const EMBED_FETCH_TIMEOUT_MS = 30_000;
+
 export const computeEmbedding = async (
   text: string,
 ): Promise<EmbeddingResult | null> => {
@@ -88,6 +95,7 @@ export const computeEmbedding = async (
         Authorization: `Bearer ${config.apiKey}`,
       },
       body: JSON.stringify({ model: EMBEDDING_MODEL, input: text, dimensions: EMBEDDING_DIMS }),
+      signal: AbortSignal.timeout(EMBED_FETCH_TIMEOUT_MS),
     });
     if (!response.ok) return null;
     const data = (await response.json()) as { data?: Array<{ embedding: number[] }> };
@@ -126,6 +134,7 @@ export const batchComputeEmbeddings = async (
           input: slice.map((i) => i.text),
           dimensions: EMBEDDING_DIMS,
         }),
+        signal: AbortSignal.timeout(EMBED_FETCH_TIMEOUT_MS),
       });
       if (!response.ok) continue;
       const data = (await response.json()) as { data?: Array<{ embedding: number[]; index: number }> };

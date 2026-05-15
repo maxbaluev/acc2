@@ -48,6 +48,9 @@ const insertEvent = (
     context_refs?: string[];
     failure_kind?: string | null;
     residual?: number | null;
+    predicted_residual?: number | null;
+    action_artifact_id?: string | null;
+    verifier_artifact_id?: string | null;
     ts?: string;
   },
 ): string => {
@@ -55,8 +58,9 @@ const insertEvent = (
   db.run(
     `INSERT INTO events (
        id, ts, directive_id, task_id, parent_task_id, loop_id,
-       substrate_origin, kind, payload, context_refs, failure_kind, residual
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       substrate_origin, kind, payload, context_refs, failure_kind, residual,
+       predicted_residual, action_artifact_id, verifier_artifact_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       fields.ts ?? tickTs(),
@@ -70,6 +74,9 @@ const insertEvent = (
       JSON.stringify(fields.context_refs ?? []),
       fields.failure_kind ?? null,
       fields.residual ?? null,
+      fields.predicted_residual ?? null,
+      fields.action_artifact_id ?? null,
+      fields.verifier_artifact_id ?? null,
     ],
   );
   return id;
@@ -608,7 +615,7 @@ describe("lesson implementer flywheel views", () => {
     expect(byDirective.get("d_hazard")!.trajectory_hazard_count).toBe(1);
   });
 
-  test("status projects requested, scored, applied, and committed transitions", () => {
+  test("status projects requested, predicted, scored, applied, and committed transitions", () => {
     const db = openDb(":memory:");
     runViews(db);
     const source = insertEvent(db, {
@@ -623,6 +630,16 @@ describe("lesson implementer flywheel views", () => {
       task_id: "t_apply",
       payload: { source_event_id: source },
       context_refs: [source],
+    });
+    const predicted = insertEvent(db, {
+      kind: "action_predicted",
+      directive_id: "d_apply",
+      task_id: "t_apply",
+      payload: { source_event_id: source },
+      context_refs: [source, requested],
+      action_artifact_id: "apply_action",
+      verifier_artifact_id: "apply_verifier",
+      predicted_residual: 0.2,
     });
     const scored = insertEvent(db, {
       kind: "action_scored",
@@ -650,10 +667,54 @@ describe("lesson implementer flywheel views", () => {
 
     const row = lessonImplementationStatus(db).find((r) => r.source_event_id === source)!;
     expect(row.request_event_id).toBe(requested);
+    expect(row.action_event_id).toBe(predicted);
+    expect(row.action_artifact_id).toBe("apply_action");
+    expect(row.verifier_artifact_id).toBe("apply_verifier");
+    expect(row.predicted_residual).toBe(0.2);
     expect(row.scored_event_id).toBe(scored);
     expect(row.verifier_passed).toBe(true);
     expect(row.flywheel_status).toBe("committed");
     expect(row.commit_sha).toBe("abcdef1234");
+  });
+
+  test("queue and status do not treat high-residual attempts as committed", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const source = insertEvent(db, {
+      kind: "lesson_extracted",
+      directive_id: "d_apply_high",
+      task_id: "t_apply_high",
+      payload: { lesson_kind: "verifier_gap", summary: "tighten verifier" },
+    });
+    insertEvent(db, {
+      kind: "lesson_apply_requested",
+      directive_id: "d_apply_high",
+      task_id: "t_apply_high",
+      payload: { source_event_id: source },
+      context_refs: [source],
+    });
+    insertEvent(db, {
+      kind: "action_predicted",
+      directive_id: "d_apply_high",
+      task_id: "t_apply_high",
+      payload: { source_event_id: source },
+      context_refs: [source],
+      predicted_residual: 0.2,
+    });
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_apply_high",
+      task_id: "t_apply_high",
+      payload: { source_event_id: source },
+      context_refs: [source],
+      residual: 0.3,
+    });
+
+    const row = lessonImplementationStatus(db).find((r) => r.source_event_id === source)!;
+    expect(row.verifier_passed).toBe(false);
+    expect(row.committed_event_id).toBeNull();
+    expect(row.flywheel_status).toBe("verified");
+    expect(lessonImplementerQueue(db).some((r) => r.source_event_id === source)).toBe(true);
   });
 
   test("effectiveness marks compounded when the next cited trajectory is cheaper", () => {

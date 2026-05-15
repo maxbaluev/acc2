@@ -70,6 +70,14 @@ type LessonQueueRow = {
   auto_apply_eligible?: boolean | number;
 };
 
+type ApplyAuthorization = {
+  ok: true;
+  target: string;
+  ownerGateRequired: boolean;
+  ownerApproved: boolean;
+  queueRow: LessonQueueRow | null;
+};
+
 const DEFAULT_APPLY_ACTION_ARTIFACT_ID = "claude_agent_apply_change_action";
 const DEFAULT_APPLY_VERIFIER_ARTIFACT_ID = "claude_agent_apply_change_verifier";
 
@@ -166,11 +174,35 @@ const emitApplyDenied = async (
   return 1;
 };
 
+const emitOwnerDecisionIfNeeded = async (
+  ev: EventRow,
+  eventId: string,
+  auth: ApplyAuthorization,
+  ownerApprovedFlag: boolean | undefined,
+): Promise<string | undefined> => {
+  if (!auth.ownerGateRequired || !ownerApprovedFlag || boolish(auth.queueRow?.owner_approved)) return undefined;
+  const env = await mcpCall("substrate.emit", {
+    kind: "owner_decision_recorded",
+    substrate_origin: "claude_root",
+    directive_id: ev.directive_id,
+    task_id: ev.task_id,
+    context_refs: [eventId],
+    payload: {
+      source_event_id: eventId,
+      decision: "approved",
+      decision_kind: "lesson_apply_owner_gate",
+      target: auth.target,
+    },
+  });
+  if (!env.ok) throw new Error(`owner_decision_recorded emit failed - ${env.error}`);
+  return (env.result as { id?: string })?.id;
+};
+
 const authorizeApply = async (
   ev: EventRow,
   eventId: string,
   opts: { ownerApproved?: boolean; target?: string },
-): Promise<{ ok: true; target: string; queueRow: LessonQueueRow | null } | { ok: false; code: number }> => {
+): Promise<ApplyAuthorization | { ok: false; code: number }> => {
   const payload = parsePayload(ev.payload);
   const target = opts.target || targetFromPayload(payload);
   const queueRow = await fetchQueueRow(eventId);
@@ -194,7 +226,7 @@ const authorizeApply = async (
       return { ok: false, code: await emitApplyDenied(ev, eventId, "structured_proposed_behavior_required", target) };
     }
   }
-  return { ok: true, target, queueRow };
+  return { ok: true, target, ownerGateRequired, ownerApproved, queueRow };
 };
 
 /** Construct the Agent subagent prompt for a lesson_extracted /
@@ -312,17 +344,25 @@ const renderPromptCommand = async (eventId: string, ownerApproved: boolean): Pro
   const payload = parsePayload(ev.payload);
   const auth = await authorizeApply(ev, eventId, { ownerApproved, target: targetFromPayload(payload) });
   if (!auth.ok) return auth.code;
+  let ownerDecisionEventId: string | undefined;
+  try {
+    ownerDecisionEventId = await emitOwnerDecisionIfNeeded(ev, eventId, auth, ownerApproved);
+  } catch (err) {
+    console.error(`acc apply: ${(err as Error).message}`);
+    return 1;
+  }
   const requestEnv = await mcpCall("substrate.emit", {
     kind: "lesson_apply_requested",
     substrate_origin: "claude_root",
     directive_id: ev.directive_id,
     task_id: ev.task_id,
-    context_refs: [eventId],
+    context_refs: [eventId, ownerDecisionEventId].filter(Boolean),
     payload: {
       source_event_id: eventId,
       source_kind: ev.kind,
       owner_approved: ownerApproved,
-      owner_gate_required: boolish(auth.queueRow?.owner_gate_required),
+      owner_decision_event_id: ownerDecisionEventId,
+      owner_gate_required: auth.ownerGateRequired,
       authorization_status: "approved",
       target: auth.target || payload.target,
       design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
@@ -367,6 +407,13 @@ const recordApply = async (
   const verifierArtifactId = opts.verifierArtifactId || DEFAULT_APPLY_VERIFIER_ARTIFACT_ID;
   const auth = await authorizeApply(ev, eventId, { ownerApproved: opts.ownerApproved, target: opts.target });
   if (!auth.ok) return auth.code;
+  let ownerDecisionEventId: string | undefined;
+  try {
+    ownerDecisionEventId = await emitOwnerDecisionIfNeeded(ev, eventId, auth, opts.ownerApproved);
+  } catch (err) {
+    console.error(`acc apply --record: ${(err as Error).message}`);
+    return 1;
+  }
   const target = auth.target || opts.target;
 
   const requestEnv = await mcpCall("substrate.emit", {
@@ -374,15 +421,16 @@ const recordApply = async (
     substrate_origin: "claude_root",
     directive_id: ev.directive_id,
     task_id: ev.task_id,
-    context_refs: [eventId],
+    context_refs: [eventId, ownerDecisionEventId].filter(Boolean),
     payload: {
       source_event_id: eventId,
       source_kind: ev.kind,
       status,
       target,
       owner_gate_checked: true,
-      owner_gate_required: boolish(auth.queueRow?.owner_gate_required),
-      owner_approved: Boolean(opts.ownerApproved) || boolish(auth.queueRow?.owner_approved),
+      owner_gate_required: auth.ownerGateRequired,
+      owner_approved: auth.ownerApproved,
+      owner_decision_event_id: ownerDecisionEventId,
       authorization_status: "approved",
       design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
     },
@@ -469,9 +517,8 @@ const recordApply = async (
         subagent_task_id: opts.subagentTaskId,
         summary: opts.summary,
         reason: opts.reason,
-      target: opts.target,
-      target,
-      residual,
+        target,
+        residual,
         request_event_id: requestEventId,
         action_event_id: actionEventId,
         scored_event_id: scoredEventId,

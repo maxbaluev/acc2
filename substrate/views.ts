@@ -686,8 +686,9 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
 `;
 
 // lesson_implementation_status_view — one row per proposal with its latest
-// request, verifier residual (via action_scored citing the proposal), apply
-// event, and terminal applied_change_committed event. This is the flywheel's
+// authorization request, action_predicted row, verifier residual (via
+// action_scored citing the proposal), apply event, and terminal
+// applied_change_committed event. This is the flywheel's
 // observable state machine; cheaper-next effects remain ledger-derived via
 // later recipe_extracted / action_scored rows citing the same source.
 const VIEW_LESSON_IMPLEMENTATION_STATUS = `
@@ -708,6 +709,21 @@ CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
       ) AS rn
     FROM events
     WHERE kind = 'lesson_apply_requested'
+  ),
+  latest_action AS (
+    SELECT
+      COALESCE(json_extract(payload, '$.source_event_id'), json_extract(context_refs, '$[0]')) AS source_event_id,
+      id AS action_event_id,
+      ts AS predicted_at,
+      action_artifact_id,
+      verifier_artifact_id,
+      predicted_residual,
+      ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(json_extract(payload, '$.source_event_id'), json_extract(context_refs, '$[0]'))
+        ORDER BY ts DESC, rowid DESC
+      ) AS rn
+    FROM events
+    WHERE kind = 'action_predicted'
   ),
   latest_scored AS (
     SELECT
@@ -759,6 +775,11 @@ CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
     p.task_id,
     lr.request_event_id,
     lr.requested_at,
+    laction.action_event_id,
+    laction.predicted_at,
+    laction.action_artifact_id,
+    laction.verifier_artifact_id,
+    laction.predicted_residual,
     ls.scored_event_id,
     ls.scored_at,
     ls.verifier_residual,
@@ -774,6 +795,7 @@ CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
       WHEN t.committed_event_id IS NOT NULL THEN 'committed'
       WHEN la.apply_status IS NOT NULL THEN la.apply_status
       WHEN ls.verifier_residual IS NOT NULL THEN 'verified'
+      WHEN laction.action_event_id IS NOT NULL THEN 'predicted'
       WHEN lr.request_event_id IS NOT NULL THEN 'requested'
       ELSE 'proposed'
     END AS flywheel_status,
@@ -781,6 +803,7 @@ CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
     p.context_refs
   FROM proposals p
   LEFT JOIN latest_request lr ON lr.source_event_id = p.source_event_id AND lr.rn = 1
+  LEFT JOIN latest_action laction ON laction.source_event_id = p.source_event_id AND laction.rn = 1
   LEFT JOIN latest_scored ls ON ls.source_event_id = p.source_event_id AND ls.rn = 1
   LEFT JOIN latest_apply la ON la.source_event_id = p.source_event_id AND la.rn = 1
   LEFT JOIN terminal t ON t.source_event_id = p.source_event_id AND t.rn = 1;
@@ -1130,6 +1153,11 @@ export type LessonImplementationStatusRow = {
   task_id: string;
   request_event_id: string | null;
   requested_at: string | null;
+  action_event_id: string | null;
+  predicted_at: string | null;
+  action_artifact_id: string | null;
+  verifier_artifact_id: string | null;
+  predicted_residual: number | null;
   scored_event_id: string | null;
   scored_at: string | null;
   verifier_residual: number | null;
@@ -1141,7 +1169,7 @@ export type LessonImplementationStatusRow = {
   applied_at: string | null;
   committed_event_id: string | null;
   committed_at: string | null;
-  flywheel_status: "proposed" | "requested" | "verified" | "applied" | "failed" | "refused" | "committed" | string;
+  flywheel_status: "proposed" | "requested" | "predicted" | "verified" | "applied" | "failed" | "refused" | "committed" | string;
   payload: Record<string, unknown>;
   context_refs: string[];
 };
@@ -1431,7 +1459,7 @@ export const lessonImplementerQueue = (db: Database): LessonImplementerQueueRow[
 };
 
 /** Observable state machine for each proposal in the lesson-implementer
- *  flywheel: proposed → requested → verified → applied → committed. */
+ *  flywheel: proposed → requested → predicted → verified → applied → committed. */
 export const lessonImplementationStatus = (db: Database): LessonImplementationStatusRow[] => {
   const rows = db
     .query("SELECT * FROM lesson_implementation_status_view ORDER BY ts ASC")
@@ -1444,6 +1472,11 @@ export const lessonImplementationStatus = (db: Database): LessonImplementationSt
     task_id: r.task_id as string,
     request_event_id: (r.request_event_id as string | null) ?? null,
     requested_at: (r.requested_at as string | null) ?? null,
+    action_event_id: (r.action_event_id as string | null) ?? null,
+    predicted_at: (r.predicted_at as string | null) ?? null,
+    action_artifact_id: (r.action_artifact_id as string | null) ?? null,
+    verifier_artifact_id: (r.verifier_artifact_id as string | null) ?? null,
+    predicted_residual: (r.predicted_residual as number | null) ?? null,
     scored_event_id: (r.scored_event_id as string | null) ?? null,
     scored_at: (r.scored_at as string | null) ?? null,
     verifier_residual: (r.verifier_residual as number | null) ?? null,

@@ -344,6 +344,46 @@ describe("task_scheduler", () => {
       expect(p.gate).not.toBe("substrate_replay_skipped");
     }
   });
+
+  test("fairness: older ready tasks dispatch BEFORE younger ones across directives (anti-starvation)", async () => {
+    // Live ledger evidence (2026-05-15) showed a verification directive
+    // opened at 01:09:18 sitting unprocessed for 30+ min while a Father
+    // directive's children (opened 01:11:35-01:16:57) kept burning the 5
+    // dispatch slots. The fix: schedulerTick sorts `ready` by the oldest
+    // task_node_opened ts before iterating, so the oldest waiting task
+    // dispatches first regardless of which directive it lives under.
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-fair-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO line", "utf-8");
+    try {
+      // Seed an OLD ready task — manually back-date its task_node_opened.
+      const oldDirective = newId();
+      const oldTask = newId();
+      emitEvent(db, {
+        kind: "directive_opened",
+        substrate_origin: "owner",
+        directive_id: oldDirective,
+        task_id: oldDirective,
+        payload: { directive_text: "old waiting work", lifecycle: "finite" },
+      });
+      // Manually back-date the task_node_opened ts to 1 hour ago.
+      const oldTs = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      db.query(
+        `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+         VALUES (?, ?, 'task_node_opened', 'owner', ?, ?, '', ?)`,
+      ).run(newId(), oldTs, oldDirective, oldTask, JSON.stringify({ goal: "old goal" }));
+
+      // Seed a YOUNGER ready task via the standard fixture.
+      const { taskId: youngTask } = await openFixtureDCountTodos(db, tempDir);
+
+      // Tick with maxConcurrent=1 so only the oldest dispatches.
+      const tick = await schedulerTick(db, { maxConcurrent: 1, fixtureTargetPath: tempDir });
+      expect(tick.dispatched).toContain(oldTask);
+      expect(tick.dispatched).not.toContain(youngTask);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {

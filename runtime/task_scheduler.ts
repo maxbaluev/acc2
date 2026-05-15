@@ -159,13 +159,25 @@ export const schedulerTick = async (
   const maxConcurrent = Math.max(1, effectiveOpts.maxConcurrent ?? opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
   const ready = readyTasks(db, opts.directiveId);
 
-  // Cull resolved entries (cheap — Map iteration).
-  for (const [taskId, p] of IN_FLIGHT) {
-    if ((p as Promise<unknown> & { _settled?: boolean })._settled) {
-      IN_FLIGHT.delete(taskId);
-      IN_FLIGHT_DIRECTIVE.delete(taskId);
-    }
-  }
+  // Fairness: dispatch the OLDEST ready task first. Pre-fix readyTasks
+  // returned tasks grouped by directive (insertion order of dagDirectiveIds
+  // Set), then by event ts within a directive. A busy directive with many
+  // ready children could iterate first, fill every slot, and STARVE
+  // older-but-newer-directive tasks indefinitely. Live ledger evidence
+  // (2026-05-15) showed a verification directive opened at 01:09:18 sitting
+  // unprocessed for 30+ min while a Father directive's children burned slots.
+  // Sorting by the task_node_opened ts (the topology layer's first row for
+  // the task) puts the oldest waiting work first across all directives.
+  ready.sort((a, b) => {
+    const aRow = db
+      .query("SELECT ts FROM events WHERE kind = 'task_node_opened' AND task_id = ? ORDER BY ts ASC LIMIT 1")
+      .get(a.id) as { ts: string } | null;
+    const bRow = db
+      .query("SELECT ts FROM events WHERE kind = 'task_node_opened' AND task_id = ? ORDER BY ts ASC LIMIT 1")
+      .get(b.id) as { ts: string } | null;
+    if (!aRow || !bRow) return 0;
+    return aRow.ts.localeCompare(bRow.ts);
+  });
 
   const dispatched: string[] = [];
   const skippedConcurrencyCap: string[] = [];

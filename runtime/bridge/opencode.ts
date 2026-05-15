@@ -172,23 +172,40 @@ export const spawnRealOpencode = async (
     try { proc.kill("SIGKILL"); } catch { /* swallow */ }
   }, Math.floor(timeoutMs * 1.5));
 
-  // ── MCP handshake watchdog (Batch 2.β) ──
-  // Fires after handshakeWindowMs if opencode never invokes a substrate.*
-  // or runtime.* tool. The bridge SIGTERMs the subprocess and surfaces
-  // `mcp_handshake_failed` so operators see the wiring gap immediately
-  // rather than waiting out the full dispatch watchdog. Cleared the moment
-  // the first v2-tool call lands (bridge_mcp_connected event emission).
+  // ── MCP handshake watchdog (Batch 2.β, sliding window 2026-05-15) ──
+  // Tracks whether opencode invoked any v2-tool (substrate.* / runtime.*).
+  // Cleared the moment the first v2-tool call lands (bridge_mcp_connected
+  // event emission).
+  //
+  // Pre-fix: a setTimeout at handshakeWindowMs (120s) SIGTERMed the
+  // subprocess if no MCP tool had been called. This false-positive-killed
+  // brain runs that legitimately used opencode built-in tools (`bash`,
+  // `read`, `grep`) for the first 120s before invoking MCP — exactly the
+  // pattern the user surfaced in the live ledger (bridge_frame_received
+  // tool_use at 01:41:39 was a non-MCP tool, the bridge killed the brain
+  // 4s later at 01:41:43 even though the subprocess was actively working).
+  //
+  // Post-fix: handshake failure surfaces ONLY when the subprocess exits
+  // having never invoked an MCP tool. The no-progress watchdog (90s
+  // silence) handles wedged subprocesses; the overall timeout (600s)
+  // bounds runaway ones. The handshake is a result classification, not a
+  // kill trigger.
   let mcpHandshakeOk = false;
   let mcpHandshakeTimedOut = false;
-  const mcpHandshakeWatchdog = setTimeout(() => {
-    if (mcpHandshakeOk) return;
-    mcpHandshakeTimedOut = true;
-    try { proc.kill("SIGTERM"); } catch (err) {
-      // already exited — log at debug only
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      void err;
+  const mcpHandshakeDeadlineMs = Date.now() + handshakeWindowMs;
+  const mcpHandshakeWatchdog = setInterval(() => {
+    if (mcpHandshakeOk) {
+      clearInterval(mcpHandshakeWatchdog);
+      return;
     }
-  }, handshakeWindowMs);
+    if (Date.now() >= mcpHandshakeDeadlineMs && !mcpHandshakeTimedOut) {
+      mcpHandshakeTimedOut = true;
+      // Diagnostic only — do NOT kill. Brain may legitimately use built-in
+      // tools before invoking MCP. The exit-time handshake check will
+      // surface mcp_handshake_failed if the subprocess ends without an
+      // MCP call; before that, give the full overall-timeout budget.
+    }
+  }, Math.min(5_000, Math.max(500, Math.floor(handshakeWindowMs / 10))));
 
   // ── No-progress watchdog (robustness, fail-fast) ──
   // Mirrors the harness's --task validation finding: an opencode subprocess
@@ -321,7 +338,7 @@ export const spawnRealOpencode = async (
         const hit = candidates.find((c) => isV2McpToolName(c));
         if (hit) {
           mcpHandshakeOk = true;
-          clearTimeout(mcpHandshakeWatchdog);
+          clearInterval(mcpHandshakeWatchdog);
           emitEvent(db, {
             kind: "bridge_mcp_connected",
             substrate_origin: "opencode",
@@ -387,7 +404,7 @@ export const spawnRealOpencode = async (
   const exitCode = await proc.exited;
   clearTimeout(sigTerm);
   clearTimeout(sigKill);
-  clearTimeout(mcpHandshakeWatchdog);
+  clearInterval(mcpHandshakeWatchdog);
   clearInterval(stuckInterval);
   if (stdoutLogFh) {
     try { await stdoutLogFh.end(); } catch { /* swallow */ }
