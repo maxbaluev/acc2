@@ -582,6 +582,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       extractOwnerProfilePromotions,
     } = await import("../substrate/extractors");
     const { runOwnerVocabularyExtractorTick } = await import("../substrate/owner_vocabulary_extractor");
+    const { runOwnerAutonomyAdjusterTick } = await import("../substrate/owner_autonomy_adjuster");
     const runExtractorsOnce = async (): Promise<void> => {
       try { extractKnowledgePromotions(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.knowledge", err: (err as Error).message }, "knowledge extractor tick failed");
@@ -616,6 +617,16 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       // canonical owner_profile_recorded row.
       try { runOwnerVocabularyExtractorTick(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.owner_vocabulary", err: (err as Error).message }, "owner-vocabulary extractor tick failed");
+      }
+      // Outcome-driven autonomy_score adjuster (DSGSAZGMF1 follow-up,
+      // 2026-05-15): fold recent applied_change_committed / failed /
+      // irreversible_effect_recorded events into a delta on
+      // owner_profile.autonomy_score. Idempotent via context_refs
+      // back-pointers. Without this, the score is "continuous" in
+      // type but static in practice — every owner sits at the default
+      // forever. With it, the substrate EARNS trust through outcomes.
+      try { runOwnerAutonomyAdjusterTick(db); } catch (err) {
+        logger.warn({ where: "daemon.extractors.autonomy_adjuster", err: (err as Error).message }, "autonomy-adjuster tick failed");
       }
     };
     let extractorsMarked = false;
