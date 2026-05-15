@@ -146,9 +146,25 @@ const daemonStart = async (): Promise<number> => {
     return 0;
   }
   const entry = resolve(import.meta.dirname ?? ".", "..", "runtime", "daemon.ts");
-  const child = spawn("bun", [entry], { detached: true, stdio: "ignore", env: { ...process.env } });
+  // PRIOR 2 (never silently fail): pre-fix the daemon spawned with
+  // stdio: "ignore", so any startup crash / runtime panic disappeared
+  // into /dev/null and operators had no way to diagnose. Now wire
+  // stdout/stderr to a rotating file under ${stateDir}/logs so a
+  // silent death leaves a trace the operator can tail.
+  const fs = await import("node:fs");
+  const { resolveStateDir } = await import("../runtime/state_paths");
+  const logsDir = `${resolveStateDir()}/logs`;
+  try { fs.mkdirSync(logsDir, { recursive: true }); } catch { /* exists */ }
+  const logPath = `${logsDir}/daemon.log`;
+  const logFd = fs.openSync(logPath, "a");
+  const child = spawn("bun", [entry], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    env: { ...process.env },
+  });
   child.unref();
   console.log(`daemon spawn requested (pid=${child.pid}); poll with \`acc daemon status\``);
+  console.log(`  logs: ${logPath}`);
   return 0;
 };
 
