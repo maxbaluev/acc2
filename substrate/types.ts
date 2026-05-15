@@ -151,7 +151,12 @@ export type SandboxDecl =
 
 // ── Code artifact registry row (§11) ────────────────────────────────
 
-export type CodeArtifactStatus = "admitted" | "quarantined" | "promoted";
+// Brain sandbox audit bsfxsvgh9 (2026-05-15): `retired` is the terminal
+// status for chronically-failing artifacts — rehabilitation does NOT
+// re-admit a retired artifact (only quarantined → admitted is allowed).
+// Used when an artifact has accumulated ≥ 3 quarantines, ≥ 10 hard
+// kills, or ≥ 3 irreversible_effect_recorded rows without owner consent.
+export type CodeArtifactStatus = "admitted" | "quarantined" | "promoted" | "retired";
 
 export type CodeArtifact = {
   id: Ulid;

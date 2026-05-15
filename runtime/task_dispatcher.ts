@@ -47,6 +47,46 @@ import { extractRecipeFromCommit } from "../substrate/extractors";
 
 const REFINEMENT_DEPTH_CAP = 5;
 
+// Brain sandbox audit bsfxsvgh9 (2026-05-15): hard fence against
+// dispatching to artifacts that have proven chronically bad. Pre-fix the
+// dispatcher fetched the artifact and ran it without status / posterior
+// / kill-count checks — only MCP substrate.run_artifact had a
+// quarantined gate. Stale brain predictions kept executing known-bad
+// code, regenerating the same sandbox violations forever.
+const ARTIFACT_HARD_KILL_FENCE = Number(process.env.ACC2_ARTIFACT_HARD_KILL_FENCE ?? "5");
+const ARTIFACT_POSTERIOR_BETA_FLOOR = 5;
+const ARTIFACT_POSTERIOR_BETA_RATIO = 3;
+
+type DispatchableBlock = { ok: false; reason: string; counters: Record<string, number | string> } | { ok: true };
+
+const assertDispatchableArtifact = (
+  artifact: { id: string; status: string; recentKillCount: number; posteriorAlpha: number; posteriorBeta: number },
+): DispatchableBlock => {
+  if (artifact.status === "quarantined" || artifact.status === "retired") {
+    return {
+      ok: false,
+      reason: `artifact_${artifact.status}`,
+      counters: { status: artifact.status, recent_kill_count: artifact.recentKillCount },
+    };
+  }
+  if (artifact.recentKillCount >= ARTIFACT_HARD_KILL_FENCE) {
+    return {
+      ok: false,
+      reason: "hard_kill_fence",
+      counters: { recent_kill_count: artifact.recentKillCount, fence: ARTIFACT_HARD_KILL_FENCE },
+    };
+  }
+  if (artifact.posteriorBeta >= ARTIFACT_POSTERIOR_BETA_FLOOR &&
+      artifact.posteriorBeta >= artifact.posteriorAlpha * ARTIFACT_POSTERIOR_BETA_RATIO) {
+    return {
+      ok: false,
+      reason: "posterior_collapsed",
+      counters: { alpha: artifact.posteriorAlpha, beta: artifact.posteriorBeta },
+    };
+  }
+  return { ok: true };
+};
+
 export type DispatchResult = {
   dispatch_id: string;
   task_id: string;
@@ -443,6 +483,41 @@ export const dispatchReadyTask = async (
   if (actionPredicted && actionPredicted.action_artifact_id && actionPredicted.verifier_artifact_id) {
     const actionArtifact = getArtifact(db, actionPredicted.action_artifact_id);
     const verifierArtifact = getArtifact(db, actionPredicted.verifier_artifact_id);
+    // Hard fence: refuse to invoke a quarantined / retired / chronically-
+    // failing artifact. Emits governance_block action_scored so the audit
+    // chain shows WHY this dispatch didn't run, then closes the dispatch.
+    const actionCheck = actionArtifact ? assertDispatchableArtifact(actionArtifact) : { ok: true as const };
+    const verifierCheck = verifierArtifact ? assertDispatchableArtifact(verifierArtifact) : { ok: true as const };
+    if (!actionCheck.ok || !verifierCheck.ok) {
+      const blocked = !actionCheck.ok ? actionCheck : verifierCheck;
+      const role = !actionCheck.ok ? "action" : "verifier";
+      const blockedArtifactId = role === "action" ? actionArtifact!.id : verifierArtifact!.id;
+      emitEvent(db, {
+        kind: "action_scored",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        action_artifact_id: actionArtifact?.id,
+        verifier_artifact_id: verifierArtifact?.id,
+        residual: 1,
+        payload: {
+          dispatch_id: dispatchId,
+          reason: "artifact_health_fence",
+          role,
+          artifact_id: blockedArtifactId,
+          fence_reason: (blocked as { reason: string }).reason,
+          counters: (blocked as { counters: Record<string, unknown> }).counters,
+        } as JsonValue,
+      });
+      emitEvent(db, {
+        kind: "brain_dispatch_closed",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        payload: { dispatch_id: dispatchId, reason: "artifact_health_fence", role, artifact_id: blockedArtifactId } as JsonValue,
+      });
+      return { dispatch_id: dispatchId, task_id: task.id, events: [], violations: [], bridge_result: bridgeResult };
+    }
     if (actionArtifact && verifierArtifact && actionArtifact.declaredSandbox.runtime === "bun" && verifierArtifact.declaredSandbox.runtime === "bun") {
       // Run the action. Inputs come from the predicted event's payload
       // (target_path etc). Batch 5: we spread the predicted payload into the
