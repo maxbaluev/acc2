@@ -107,6 +107,13 @@ export const EVENT_KINDS = {
   code_artifact_admission_rejected:        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   code_artifact_promoted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   code_artifact_quarantined:               { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
+  // Terminal retirement (sandbox audit bsfxsvgh9, 2026-05-15): unlike
+  // quarantine, retired artifacts are NEVER re-admitted. Triggered by
+  // accumulated hard kills / repeat quarantines / unconsented irreversibles.
+  code_artifact_retired:                   { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true  },
+  // Per-counter audit emitted by recordArtifactKill so the substrate
+  // shows WHY recent_kill_count climbed (and from which event).
+  artifact_health_counter_updated:         { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   code_artifact_rehabilitated:             { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   code_artifact_score_updated:             { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   latm_novelty_bonus_applied:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },

@@ -29,7 +29,7 @@ import { decideDispatch } from "./dispatch_decider";
 import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge";
 import type { TaskNode } from "./task_topology";
 import { refinementDepth } from "./task_topology";
-import { getArtifact, applyResidualOutcome } from "./artifact_store";
+import { getArtifact, applyResidualOutcome, recordArtifactKill, maybeRetire } from "./artifact_store";
 import { runBunArtifact } from "./runtimes/bun";
 import { nowIso } from "./ids";
 import { distributeCredit } from "./credit";
@@ -615,9 +615,41 @@ export const dispatchReadyTask = async (
             payload: { kind: eff.kind, description: eff.description, owner_consent_event_id: ownerConsentEventId } as JsonValue,
           });
         }
+        // After emitting the irreversible rows, evaluate retirement —
+        // chronic irreversible violators (≥ 3 in 24h) transition to
+        // terminal `retired` status. Owner-consent events ARE recorded
+        // on the irreversible row, so consented effects are NOT counted
+        // toward retirement (countRecentIrreversibleWithoutConsent
+        // skips rows whose payload carries owner_consent_event_id).
+        maybeRetire(db, actionArtifact.id, (ev) => {
+          emitEvent(db, {
+            ...ev,
+            directive_id: ev.directive_id ?? task.directive_id,
+            task_id: ev.task_id ?? task.id,
+          });
+        });
       }
 
       if (!actionObs.ok) {
+        // Brain sandbox audit bsfxsvgh9 (2026-05-15): feed the kill
+        // counter when the action observation indicates a hard kill or
+        // sandbox-violation error. recordArtifactKill increments
+        // recent_kill_count and runs maybeQuarantine + maybeRetire so
+        // chronic offenders transition to terminal `retired` status.
+        // Sandbox unenforced warnings are NOT counted — they're
+        // capability-gap signals, not artifact misconduct.
+        const errStr = String(actionObs.error ?? "");
+        const isHardKill = errStr.includes("hard_killed") || errStr.includes("hard_kill") || actionObs.exitCode === -1 * (process.platform === "linux" ? 9 : 9);
+        const isSandboxViolation = errStr.includes("sandbox_violation");
+        if (isHardKill || isSandboxViolation) {
+          recordArtifactKill(db, actionArtifact.id, (ev) => {
+            emitEvent(db, {
+              ...ev,
+              directive_id: ev.directive_id ?? task.directive_id,
+              task_id: ev.task_id ?? task.id,
+            });
+          }, isHardKill ? "subprocess_hard_killed" : "sandbox_violation");
+        }
         // Locate the most recent artifact_observed row on this task — that's
         // the artifact's own "I ran" row, even when ok is false (the runtime
         // emits an observed row for soft/hard timeouts too).

@@ -380,6 +380,144 @@ export const maybeQuarantine = (
   return true;
 };
 
+// ── Hard-kill counter + terminal retirement (brain sandbox audit
+//    bsfxsvgh9, 2026-05-15) ────────────────────────────────────────
+//
+// Pre-fix: recent_kill_count was a column on code_artifact but NO
+// production code path incremented it on runtime_subprocess_hard_killed
+// / artifact_observed hard_kill events. The kill-count quarantine gate
+// (>= 3 kills triggers quarantine) was therefore dead — the artifact
+// could be hard-killed indefinitely and stay admitted.
+//
+// recordArtifactKill: increments the counter, emits a structural
+// `artifact_health_counter_updated` event for audit, and runs
+// maybeQuarantine + maybeRetire so the artifact transitions
+// status when thresholds breach. Idempotency: the increment is
+// always recorded; the quarantine/retire transitions are no-ops on
+// repeat.
+//
+// maybeRetire: terminal state. Unlike quarantine (rehabilitatable),
+// retired artifacts are NEVER re-admitted. Triggers:
+//   - recent_kill_count >= 10
+//   - >= 3 prior code_artifact_quarantined events
+//   - >= 3 irreversible_effect_recorded events without
+//     owner_consent_event_id (in the last 24h)
+
+const RETIRE_KILL_COUNT_THRESHOLD = 10;
+const RETIRE_QUARANTINE_COUNT_THRESHOLD = 3;
+const RETIRE_IRREVERSIBLE_COUNT_THRESHOLD = 3;
+const RETIRE_IRREVERSIBLE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+const countPriorQuarantines = (db: Database, artifactId: string): number => {
+  const row = db
+    .query(
+      `SELECT COUNT(*) AS n FROM events
+       WHERE kind = 'code_artifact_quarantined'
+         AND action_artifact_id = ?`,
+    )
+    .get(artifactId) as { n: number } | null;
+  return row?.n ?? 0;
+};
+
+const countRecentIrreversibleWithoutConsent = (
+  db: Database,
+  artifactId: string,
+  windowMs: number = RETIRE_IRREVERSIBLE_WINDOW_MS,
+): number => {
+  const cutoff = new Date(Date.now() - windowMs).toISOString();
+  const rows = db
+    .query(
+      `SELECT payload FROM events
+       WHERE kind = 'irreversible_effect_recorded'
+         AND action_artifact_id = ?
+         AND ts > ?`,
+    )
+    .all(artifactId, cutoff) as Array<{ payload: string }>;
+  let n = 0;
+  for (const r of rows) {
+    try {
+      const p = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
+      if (!p.owner_consent_event_id) n++;
+    } catch { /* malformed → count it (worst-case for the artifact, fail-closed) */ n++; }
+  }
+  return n;
+};
+
+/** Increment recent_kill_count and run downstream transitions. */
+export const recordArtifactKill = (
+  db: Database,
+  artifactId: string,
+  emit: (event: EmitEventInput) => void,
+  reason: string,
+): { newCount: number; quarantined: boolean; retired: boolean } => {
+  const row = getArtifact(db, artifactId);
+  if (!row) return { newCount: 0, quarantined: false, retired: false };
+  const newCount = row.recentKillCount + 1;
+  const ts = nowIso();
+  db.run(
+    "UPDATE code_artifact SET recent_kill_count = ?, updated_at = ? WHERE id = ?",
+    [newCount, ts, artifactId],
+  );
+  emit({
+    kind: "artifact_health_counter_updated",
+    substrate_origin: "substrate_auto",
+    action_artifact_id: artifactId,
+    payload: {
+      artifact_id: artifactId,
+      counter: "recent_kill_count",
+      new_value: newCount,
+      reason,
+    } as JsonValue,
+  });
+  const quarantined = maybeQuarantine(db, artifactId, emit);
+  const retired = maybeRetire(db, artifactId, emit);
+  return { newCount, quarantined, retired };
+};
+
+/** Terminal retirement transition. Idempotent (no-op when already retired). */
+export const maybeRetire = (
+  db: Database,
+  artifactId: string,
+  emit: (event: EmitEventInput) => void,
+): boolean => {
+  const row = getArtifact(db, artifactId);
+  if (!row) return false;
+  if (row.status === "retired") return false;
+
+  const killExceeded = row.recentKillCount >= RETIRE_KILL_COUNT_THRESHOLD;
+  const priorQuarantines = countPriorQuarantines(db, artifactId);
+  const quarantinesExceeded = priorQuarantines >= RETIRE_QUARANTINE_COUNT_THRESHOLD;
+  const irreversibleCount = countRecentIrreversibleWithoutConsent(db, artifactId);
+  const irreversibleExceeded = irreversibleCount >= RETIRE_IRREVERSIBLE_COUNT_THRESHOLD;
+
+  if (!killExceeded && !quarantinesExceeded && !irreversibleExceeded) return false;
+
+  const reason = killExceeded
+    ? "kill_count_terminal"
+    : quarantinesExceeded
+      ? "repeat_quarantines_terminal"
+      : "irreversible_violations_terminal";
+
+  const ts = nowIso();
+  db.run(
+    "UPDATE code_artifact SET status = ?, updated_at = ? WHERE id = ?",
+    ["retired", ts, artifactId],
+  );
+  emit({
+    kind: "code_artifact_retired",
+    substrate_origin: "substrate_auto",
+    action_artifact_id: artifactId,
+    payload: {
+      artifact_id: artifactId,
+      reason,
+      recent_kill_count: row.recentKillCount,
+      prior_quarantines: priorQuarantines,
+      recent_irreversible_without_consent: irreversibleCount,
+    } as JsonValue,
+  });
+  return true;
+};
+
 // ── Rehabilitation (Phase H — v2-design.md §11.6) ──────────────────
 //
 // Quarantined artifacts can re-enter `admitted` status after:

@@ -110,6 +110,16 @@ const POSTERIOR = {
   promoteScore: 0.85,
   demoteScore: 0.30,
   countThreshold: 5,
+  // Brain knowledge audit bc5vdkrik finding #3 (2026-05-15): the rigid
+  // (wins ≥ 5 AND score ≥ 0.85) gate favored near-duplicate stamping
+  // and under-promoted rich non-duplicate insights. Multi-origin
+  // corroboration is a STRONGER signal than count alone — two distinct
+  // substrate_origin values confirming the same claim is harder to
+  // forge than five stamps from the same origin. Lower the score bar
+  // when the confirmations come from ≥ 2 origins.
+  multiOriginPromoteScore: 0.75,
+  multiOriginMinCount: 3,
+  multiOriginMinOrigins: 2,
 };
 
 const betaMean = (alpha: number, beta: number): number => alpha / (alpha + beta);
@@ -150,21 +160,27 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
     .all(cursor, cursor) as Array<Record<string, unknown>>;
 
   // Pull every confirmation/contradiction event once; partition by cited id.
+  // Track substrate_origin per win so the multi-origin promotion gate can
+  // count distinct origins. Brain knowledge audit bc5vdkrik #3.
   const verdicts = db
     .query(
-      `SELECT kind, context_refs FROM events
+      `SELECT kind, substrate_origin, context_refs FROM events
        WHERE kind IN ('candidate_confirmed', 'candidate_contradicted')`,
     )
-    .all() as Array<{ kind: string; context_refs: string }>;
+    .all() as Array<{ kind: string; substrate_origin: string; context_refs: string }>;
 
   const winsByCandidate = new Map<string, number>();
   const lossesByCandidate = new Map<string, number>();
+  const winOriginsByCandidate = new Map<string, Set<string>>();
   for (const v of verdicts) {
     let refs: string[];
     try { refs = JSON.parse(v.context_refs); } catch { refs = []; }
     for (const ref of refs) {
       if (v.kind === "candidate_confirmed") {
         winsByCandidate.set(ref, (winsByCandidate.get(ref) ?? 0) + 1);
+        const origins = winOriginsByCandidate.get(ref) ?? new Set<string>();
+        origins.add(v.substrate_origin);
+        winOriginsByCandidate.set(ref, origins);
       } else {
         lossesByCandidate.set(ref, (lossesByCandidate.get(ref) ?? 0) + 1);
       }
@@ -186,9 +202,20 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
       const score = betaMean(alpha, beta);
       const conf = betaConfidence(alpha, beta);
 
-      const eligibleForPromote =
+      const originsCount = winOriginsByCandidate.get(cid)?.size ?? 0;
+      const eligibleForPromoteStrict =
         wins >= POSTERIOR.countThreshold &&
         score >= POSTERIOR.promoteScore;
+      // Brain knowledge audit bc5vdkrik #3 (2026-05-15): multi-origin
+      // corroboration relaxes the score bar from 0.85 to 0.75 with a
+      // lower count requirement (≥ 3) when confirmations come from
+      // ≥ 2 distinct substrate_origin values. Forging two origins is
+      // structurally harder than stamping five identical near-duplicates.
+      const eligibleForPromoteMultiOrigin =
+        wins >= POSTERIOR.multiOriginMinCount &&
+        score >= POSTERIOR.multiOriginPromoteScore &&
+        originsCount >= POSTERIOR.multiOriginMinOrigins;
+      const eligibleForPromote = eligibleForPromoteStrict || eligibleForPromoteMultiOrigin;
       const eligibleForDemote =
         losses >= POSTERIOR.countThreshold &&
         score <= POSTERIOR.demoteScore;
@@ -200,7 +227,17 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
           task_id: c.task_id as string,
           loop_id: c.loop_id as string,
           substrate_origin: "substrate_auto",
-          payload: { candidate_id: cid, wins, losses, score, confidence: conf, alpha, beta },
+          payload: {
+            candidate_id: cid,
+            wins,
+            losses,
+            score,
+            confidence: conf,
+            alpha,
+            beta,
+            origin_count: originsCount,
+            promotion_path: eligibleForPromoteStrict ? "strict" : "multi_origin",
+          },
           context_refs: [cid],
         });
         promoted++;

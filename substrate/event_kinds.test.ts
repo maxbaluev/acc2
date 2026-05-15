@@ -188,6 +188,9 @@ describe("derived sets match their pre-unification shape", () => {
       // Brain elegance bc8je5f3x (2026-05-15): pathology budget
       // exhaustion is the unified "directive not converging" signal.
       "pathology_budget_exhausted",
+      // Brain sandbox audit bsfxsvgh9 (2026-05-15): terminal retirement
+      // of chronically-failing artifacts is a substrate-status metric.
+      "code_artifact_retired",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);
