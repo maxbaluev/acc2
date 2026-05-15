@@ -1501,11 +1501,15 @@ const OWNER_PROFILE_META_FIELDS = [
 ] as const;
 
 const readLatestOwnerProfile = (db: Database): OwnerProfile => {
+  // ts has 1-second resolution in some test envs; the rowid tiebreaker
+  // ensures we get the GENUINELY-LATEST row when two promotions land
+  // in the same second (common in test setups + back-to-back tick
+  // promotions in production).
   const row = db
     .query(
       `SELECT payload FROM events
        WHERE kind = 'owner_profile_recorded'
-       ORDER BY ts DESC LIMIT 1`,
+       ORDER BY ts DESC, rowid DESC LIMIT 1`,
     )
     .get() as { payload: string } | null;
   if (!row) return { ...OWNER_PROFILE_DEFAULTS } as OwnerProfile;
@@ -1642,9 +1646,32 @@ export const maybePromoteOwnerProfile = (
   }
 
   // Merge the assertion's value into the latest profile.
+  //
+  // ADDITIVE-MERGE fields (Record<string, …>): rendering_signals and
+  // exposed_concepts are open-ended maps that DIFFERENT producers
+  // contribute different keys to. Pure-replace would overwrite the
+  // entire map every time a new key arrived. For these fields, we
+  // shallow-merge: existing keys stay, new keys are added, conflicting
+  // keys are overwritten with the new value (so signal updates land).
+  //
+  // PURE-REPLACE fields (everything else): scalars (autonomy_score,
+  // detected_language) replace cleanly. Arrays (preferred_terms,
+  // avoided_terms, hot_topics, things_to_never_do) are also replace —
+  // the producers (vocabulary extractor, brain emit) always send the
+  // FULL current list, so replace is correct + cheap.
+  const ADDITIVE_RECORD_FIELDS = new Set(["rendering_signals", "exposed_concepts"]);
   const latest = readLatestOwnerProfile(db);
   const merged: Record<string, unknown> = { ...latest };
-  merged[field] = value;
+  if (ADDITIVE_RECORD_FIELDS.has(field) && value && typeof value === "object" && !Array.isArray(value)) {
+    const existing = merged[field];
+    if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+      merged[field] = { ...(existing as Record<string, unknown>), ...(value as Record<string, unknown>) };
+    } else {
+      merged[field] = value;
+    }
+  } else {
+    merged[field] = value;
+  }
   // The defaults set `time_window: null` to mark "no window declared";
   // the schema only describes the object shape (no null union), so
   // strip null values before validation. Same for any other null-marker

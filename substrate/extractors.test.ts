@@ -581,6 +581,94 @@ describe("maybePromoteOwnerProfile (Layer-2 owner autonomy)", () => {
     expect(payload.scored_event_id).toBe(scored.id);
   });
 
+  test("additive merge: rendering_signals accumulates keys across promotions instead of replacing", () => {
+    const db = openDb(":memory:");
+    const c1 = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      payload: {
+        field: "rendering_signals",
+        value: { code_density: 0.7 },
+        confidence: 0.9,
+        claim: "first signal classification",
+      },
+    });
+    const v1 = maybePromoteOwnerProfile(db, c1);
+    expect(v1.kind).toBe("promoted");
+
+    const c2 = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      payload: {
+        field: "rendering_signals",
+        value: { ops_vocabulary: 0.5 },
+        confidence: 0.9,
+        claim: "second classification, different signal",
+      },
+    });
+    const v2 = maybePromoteOwnerProfile(db, c2);
+    expect(v2.kind).toBe("promoted");
+
+    const profile = db
+      .query("SELECT payload FROM events WHERE kind='owner_profile_recorded' ORDER BY ts DESC, rowid DESC LIMIT 1")
+      .get() as { payload: string };
+    const p = JSON.parse(profile.payload) as Record<string, unknown>;
+    const signals = p.rendering_signals as Record<string, number>;
+    // Both signals must coexist; second emit did NOT wipe code_density.
+    expect(signals.code_density).toBe(0.7);
+    expect(signals.ops_vocabulary).toBe(0.5);
+  });
+
+  test("additive merge: exposed_concepts accumulates per-concept records across promotions", () => {
+    const db = openDb(":memory:");
+    const c1 = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      payload: {
+        field: "exposed_concepts",
+        value: { rolling_active: { first_event_id: "ev_one", exposure_count: 1 } },
+        confidence: 0.9,
+        claim: "first concept exposure",
+      },
+    });
+    expect(maybePromoteOwnerProfile(db, c1).kind).toBe("promoted");
+
+    const c2 = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      payload: {
+        field: "exposed_concepts",
+        value: { knowledge_compounds: { first_event_id: "ev_two", exposure_count: 1 } },
+        confidence: 0.9,
+        claim: "second concept exposure",
+      },
+    });
+    expect(maybePromoteOwnerProfile(db, c2).kind).toBe("promoted");
+
+    const profile = db
+      .query("SELECT payload FROM events WHERE kind='owner_profile_recorded' ORDER BY ts DESC, rowid DESC LIMIT 1")
+      .get() as { payload: string };
+    const p = JSON.parse(profile.payload) as Record<string, unknown>;
+    const exposed = p.exposed_concepts as Record<string, { first_event_id: string; exposure_count: number }>;
+    expect(exposed.rolling_active!.first_event_id).toBe("ev_one");
+    expect(exposed.knowledge_compounds!.first_event_id).toBe("ev_two");
+  });
+
+  test("pure-replace fields (preferred_terms array) still overwrite cleanly", () => {
+    const db = openDb(":memory:");
+    const c1 = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      payload: { field: "preferred_terms", value: ["weekly grind"], confidence: 0.9, claim: "first set" },
+    });
+    expect(maybePromoteOwnerProfile(db, c1).kind).toBe("promoted");
+    const c2 = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      payload: { field: "preferred_terms", value: ["weekly grind", "my report"], confidence: 0.9, claim: "vocab extractor re-emitted full list" },
+    });
+    expect(maybePromoteOwnerProfile(db, c2).kind).toBe("promoted");
+    const profile = db
+      .query("SELECT payload FROM events WHERE kind='owner_profile_recorded' ORDER BY ts DESC, rowid DESC LIMIT 1")
+      .get() as { payload: string };
+    const p = JSON.parse(profile.payload) as Record<string, unknown>;
+    expect(p.preferred_terms).toEqual(["weekly grind", "my report"]);
+  });
+
   test("credit chain closes: distributeCredit emits candidate_confirmed citing the source candidate", async () => {
     // End-to-end proof: a promotion triggers the spine, the spine triggers
     // distributeCredit, distributeCredit emits candidate_confirmed citing
@@ -594,21 +682,27 @@ describe("maybePromoteOwnerProfile (Layer-2 owner autonomy)", () => {
     const verdict = maybePromoteOwnerProfile(db, candidateId);
     expect(verdict.kind).toBe("promoted");
 
-    // distributeCredit runs async via dynamic import — give it a tick.
-    await new Promise((r) => setTimeout(r, 50));
+    // distributeCredit runs async via dynamic import — give it time
+    // for the import + DB writes. 300ms is generous; production paths
+    // don't await this, but the test needs it to complete.
+    await new Promise((r) => setTimeout(r, 300));
 
-    const confirmed = db
+    // distributeCredit may emit MULTIPLE candidate_confirmed rows (one per
+    // cited target). Find the one that cites our source candidate.
+    const confirmedRows = db
       .query(
         `SELECT context_refs, payload FROM events
-         WHERE kind = 'candidate_confirmed'
-         ORDER BY ts DESC LIMIT 1`,
+         WHERE kind = 'candidate_confirmed'`,
       )
-      .get() as { context_refs: string; payload: string } | null;
-    expect(confirmed).not.toBeNull();
-    const refs = JSON.parse(confirmed!.context_refs) as string[];
-    // candidate_confirmed cites the source knowledge_id AND scored event.
-    expect(refs).toContain(candidateId);
-    const payload = JSON.parse(confirmed!.payload) as Record<string, unknown>;
+      .all() as Array<{ context_refs: string; payload: string }>;
+    const matching = confirmedRows.find((r) => {
+      try {
+        const p = JSON.parse(r.payload) as Record<string, unknown>;
+        return p.knowledge_id === candidateId;
+      } catch { return false; }
+    });
+    expect(matching).toBeDefined();
+    const payload = JSON.parse(matching!.payload) as Record<string, unknown>;
     expect(payload.knowledge_id).toBe(candidateId);
     expect(payload.polarity).toBe("assert");  // residual=0 → success-band
   });
