@@ -52,6 +52,12 @@ import { getEventById, type EmitEventInput, emitEvent } from "./events";
 import { getArtifact, maybePromote, maybeQuarantine } from "./artifact_store";
 import { goalShape } from "./goal_shape";
 import { nowIso } from "./ids";
+// Audit b7kjyk2k1 / Z9MXJ8YHXN1ZH knowledge cold-start (8.2% candidates ever
+// get a verdict). Brain proposal TNY4XZY0GD1W: after each candidate_confirmed
+// / candidate_contradicted credit emit, refresh the candidate's posterior
+// synchronously so promotion happens at credit time, not at the 5-min
+// extractor cadence. Bulk cadence remains the fallback if this refresh fails.
+import { maybePromoteKnowledge } from "../substrate/extractors";
 
 // ── LATM novelty bonus (v2-design.md §11.5) ───────────────────────
 //
@@ -656,6 +662,15 @@ export const distributeCredit = async (
       });
       // The id is already appended inside emit(); avoid double-pushing.
       void id;
+      // Synchronous promotion refresh (audit b7kjyk2k1 / TNY4XZY0GD1W).
+      // Newly-credited candidates become searchable immediately rather
+      // than waiting the full extractors cadence. Bulk cadence remains
+      // the fallback — credit emission must not fail if refresh did.
+      try {
+        maybePromoteKnowledge(db, targetId);
+      } catch {
+        /* bulk extractor cadence remains the fallback */
+      }
       contributions.push({
         target_id: targetId,
         target_kind: "knowledge",

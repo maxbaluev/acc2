@@ -731,6 +731,23 @@ export const recordApplyOutcome = async (opts: {
     return { ok: false, reason: `action_scored emit failed - ${scoredEnv.error}`, exitCode: 1 };
   }
   const scoredEventId = (scoredEnv.result as { id?: string })?.id;
+  // k_555 four-link spine: distribute credit so context_refs cites mutate
+  // posterior state. Without this call the candidate_confirmed / artifact
+  // posterior updates never happen — audit b7kjyk2k1 / WTF8EZSFAD measured
+  // only 11.8% of action_scored rows actually closing the credit loop.
+  // Applies brain proposal MB9YVKN25H3KF8R6P7KJM6SCFM.
+  if (actionEventId && scoredEventId) {
+    const creditEnv = await mcpCall("substrate.credit", {
+      action_event_id: actionEventId,
+      observation_event_id: scoredEventId,
+      scored_event_id: scoredEventId,
+      predicted_residual: 0.2,
+      observed_residual: residual,
+    });
+    if (!creditEnv.ok) {
+      return { ok: false, reason: `credit distribution failed - ${creditEnv.error}`, exitCode: 1 };
+    }
+  }
 
   const verifierPassed = status === "applied" && residual < 0.3;
   let committedEventId: string | undefined;
