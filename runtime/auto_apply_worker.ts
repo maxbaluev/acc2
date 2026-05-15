@@ -236,10 +236,14 @@ export const evaluateOwnerProfileGate = (
   sourcePayload: Record<string, unknown>,
   nowMs: number,
 ): OwnerProfileGateResult => {
-  // 1. Hard blocks — substring match against any entry in things_to_never_do.
+  // 1. Hard blocks — glob match (unified with manual_review_patterns
+  // below). Same matcher means owners only need to learn ONE pattern
+  // language, and bare strings like "docs/" still work because
+  // matchesGlob falls through to substring when no `*` is present.
   if (Array.isArray(profile.things_to_never_do)) {
     for (const block of profile.things_to_never_do) {
-      if (typeof block === "string" && block.length > 0 && targetPath.includes(block)) {
+      if (typeof block !== "string" || block.length === 0) continue;
+      if (matchesGlob(targetPath, block)) {
         return {
           gated: true,
           field: "things_to_never_do",
