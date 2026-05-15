@@ -213,6 +213,114 @@ const readKnowledgeTopK = (db: Database, k: number): Array<{ id: string; text: s
   return out;
 };
 
+// Organism-alignment audit b3qc9ryzj finding #5 (2026-05-15): pending
+// lesson_extracted / contract_amendment_proposed rows lived in a view
+// (lesson_implementer_queue_view) but never entered the brain prompt.
+// Now they do — the brain SEES its own past proposals at decision time
+// and can route them through new task DAGs / actions. Owner-gated
+// proposals are excluded (those need orchestrator-side apply, not
+// brain-side automation). Capped at k entries by ts ASC (oldest first).
+const readPendingProposals = (
+  db: Database,
+  k: number,
+  excludeDirectiveId?: string,
+): Array<{ id: string; ts: string; kind: string; target: string | null; summary: string; directive_id: string }> => {
+  // lesson_implementer_queue_view already filters out applied proposals
+  // (its WHERE clause excludes rows with applied_change_committed). We
+  // additionally skip owner-gated proposals — those need orchestrator-
+  // side apply, not brain-side automation. Filter by directive when
+  // excludeDirectiveId is set so the section doesn't echo the current
+  // goal's own proposals.
+  const rows = db
+    .query(
+      `SELECT source_event_id, ts, source_kind, directive_id, target, anchor,
+              proposed_behavior, proposed_action, lesson_kind, owner_gate_required
+       FROM lesson_implementer_queue_view
+       WHERE COALESCE(owner_gate_required, 0) = 0
+         AND (? IS NULL OR directive_id != ?)
+       ORDER BY ts ASC
+       LIMIT ?`,
+    )
+    .all(excludeDirectiveId ?? null, excludeDirectiveId ?? null, k) as Array<Record<string, unknown>>;
+  return rows.map((r) => {
+    const proposedBehavior = (r.proposed_behavior as string | null) ?? "";
+    const proposedAction = (r.proposed_action as string | null) ?? "";
+    // The proposed_behavior / proposed_action JSON carries a `summary` or
+    // `description` field; fall back to the lesson_kind label otherwise.
+    let summary = "";
+    for (const raw of [proposedBehavior, proposedAction]) {
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        summary = (parsed.summary as string | undefined) ??
+          (parsed.description as string | undefined) ??
+          summary;
+      } catch { /* skip malformed */ }
+    }
+    return {
+      id: r.source_event_id as string,
+      ts: r.ts as string,
+      kind: (r.source_kind as string) ?? "unknown",
+      target: (r.target as string | null) ?? null,
+      directive_id: (r.directive_id as string) ?? "",
+      summary: summary || (r.lesson_kind as string | null) || "(no summary)",
+    };
+  });
+};
+
+const buildPendingProposalsSection = (rows: ReturnType<typeof readPendingProposals>): string => {
+  if (rows.length === 0) return "PENDING PROPOSALS: (none)";
+  const lines = ["PENDING PROPOSALS:"];
+  for (const r of rows) {
+    const targetSuffix = r.target ? ` → ${r.target}` : "";
+    lines.push(`  [${r.id.slice(0, 12)}] ${r.kind}${targetSuffix}: ${r.summary.slice(0, 240)}`);
+  }
+  return lines.join("\n");
+};
+
+// Cross-goal context (multi-directive parallelism): list OTHER active
+// directives so the brain knows what concurrent work is in flight and
+// can avoid duplication / cite peer work / propose interference edges.
+const readOtherActiveGoals = (
+  db: Database,
+  currentDirectiveId: string,
+  k: number,
+): Array<{ id: string; opened_ts: string; text: string; lifecycle: string }> => {
+  const rows = db
+    .query(
+      `SELECT directive_id, opened_ts, payload
+       FROM active_objectives_view
+       WHERE directive_id != ?
+       ORDER BY opened_ts DESC
+       LIMIT ?`,
+    )
+    .all(currentDirectiveId, k) as Array<Record<string, unknown>>;
+  return rows.map((r) => {
+    let text = "";
+    let lifecycle = "finite";
+    try {
+      const p = JSON.parse((r.payload as string) ?? "{}") as Record<string, unknown>;
+      text = (p.directive_text as string) ?? (p.text as string) ?? "";
+      lifecycle = (p.lifecycle as string) ?? "finite";
+    } catch { /* malformed */ }
+    return {
+      id: r.directive_id as string,
+      opened_ts: r.opened_ts as string,
+      text,
+      lifecycle,
+    };
+  });
+};
+
+const buildOtherGoalsSection = (rows: ReturnType<typeof readOtherActiveGoals>): string => {
+  if (rows.length === 0) return "OTHER ACTIVE GOALS: (none — this is the only goal in flight)";
+  const lines = ["OTHER ACTIVE GOALS:"];
+  for (const r of rows) {
+    lines.push(`  [${r.id.slice(0, 12)}] ${r.lifecycle}: ${r.text.slice(0, 180)}`);
+  }
+  return lines.join("\n");
+};
+
 const readArtifactRegistryTopK = (db: Database, k: number): Array<{ id: string; runtime: string; name: string; score: number }> => {
   const rows = db
     .query(
@@ -459,6 +567,23 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     p: 3,
     body: interferenceBody.length > 0 ? interferenceBody : "CROSS-DIRECTIVE INTERFERENCE: (none)",
   });
+  // Organism-alignment audit b3qc9ryzj finding #5 (2026-05-15):
+  // surface PENDING PROPOSALS so the brain sees lesson_extracted /
+  // contract_amendment_proposed rows it (or peers) previously emitted
+  // and can route them through new task DAGs / actions. Owner-gated
+  // proposals are filtered out — those need orchestrator-side apply.
+  const proposalsBody = buildPendingProposalsSection(
+    readPendingProposals(db, 6, task.directive_id),
+  );
+  candidates.push({ name: "pending_proposals", p: 3, body: proposalsBody });
+  // Multi-goal cross-pollination: surface OTHER active directives so the
+  // brain knows what concurrent work is in flight and can defer / cite
+  // / coordinate. Pre-fix the brain saw only its own directive in the
+  // prompt — couldn't tell if a peer goal was already covering this work.
+  const otherGoalsBody = buildOtherGoalsSection(
+    readOtherActiveGoals(db, task.directive_id, 5),
+  );
+  candidates.push({ name: "other_active_goals", p: 3, body: otherGoalsBody });
 
   candidates.push({ name: "active_failures", p: 4, body: buildFailuresSection(readRecentFailures(db, 3)) });
   candidates.push({ name: "constitutional_gates", p: 4, body: buildGatesSection(readConstitutionalGates(db)) });

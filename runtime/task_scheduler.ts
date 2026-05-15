@@ -54,6 +54,12 @@ export type SchedulerOpts = {
    *  prompt's KNOWLEDGE section is always built from recency, not the
    *  cosine × posterior reranker. Knowledge audit bc5vdkrik #1. */
   index?: import("./embedding_index").EmbeddingIndex;
+  /** Multi-goal alignment (2026-05-15): per-directive in-flight cap so
+   *  one runaway goal cannot consume every scheduler slot and starve
+   *  parallel goals. Defaults to ceil(maxConcurrent / 2) — at most half
+   *  of the global slots can belong to a single directive at any time.
+   *  Explicit 0 disables (legacy behaviour). */
+  maxConcurrentPerDirective?: number;
 };
 
 export type SchedulerTick = {
@@ -163,6 +169,13 @@ export const schedulerTick = async (
     effectiveOpts = applyModeAdjustments(effectiveOpts, mode);
   }
   const maxConcurrent = Math.max(1, effectiveOpts.maxConcurrent ?? opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
+  // Multi-goal alignment (2026-05-15): per-directive cap so one
+  // runaway goal can't starve concurrent goals. Default to half the
+  // global cap; explicit 0 disables.
+  const rawPerDir = effectiveOpts.maxConcurrentPerDirective ?? opts.maxConcurrentPerDirective;
+  const maxConcurrentPerDirective = rawPerDir === 0
+    ? Number.MAX_SAFE_INTEGER
+    : Math.max(1, rawPerDir ?? Math.ceil(maxConcurrent / 2));
   const ready = readyTasks(db, opts.directiveId);
 
   // Fairness: dispatch the OLDEST ready task first. Pre-fix readyTasks
@@ -248,6 +261,18 @@ export const schedulerTick = async (
 
     const slotsLeft = maxConcurrent - IN_FLIGHT.size;
     if (slotsLeft <= 0) {
+      skippedConcurrencyCap.push(task.id);
+      continue;
+    }
+    // Per-directive cap: how many slots is THIS directive already using?
+    // When ≥ maxConcurrentPerDirective, defer this task so peer goals
+    // get a turn. Logged via skippedConcurrencyCap so the scheduler-
+    // tick payload shows the queue pressure.
+    let perDirCount = 0;
+    for (const d of IN_FLIGHT_DIRECTIVE.values()) {
+      if (d === task.directive_id) perDirCount++;
+    }
+    if (perDirCount >= maxConcurrentPerDirective) {
       skippedConcurrencyCap.push(task.id);
       continue;
     }

@@ -16,6 +16,7 @@
 import { Database } from "bun:sqlite";
 import * as sqliteVec from "sqlite-vec";
 import schemaSql from "./schema.sql" with { type: "text" };
+import { runViews } from "./views";
 
 // ── Per-path connection cache ──────────────────────────────────────
 // One live `Database` per path. closeDb(path) flushes + removes the entry
@@ -108,6 +109,14 @@ export const openDb = (dbPath: string): Database => {
   loadSqliteVec(db);
   runSchema(db);
   runMigrations(db);
+  // Organism-alignment (2026-05-15): runViews was previously called
+  // separately by daemon.ts + a handful of tests, leaving prompt_composer
+  // tests / unit-level callers with a half-built substrate where queries
+  // against views (lesson_implementer_queue_view, active_objectives_view,
+  // etc.) raised "no such table". Now every openDb() yields a fully
+  // queryable substrate. Idempotent — runViews uses CREATE IF NOT EXISTS
+  // or DROP+CREATE under each view definition.
+  runViews(db);
   return db;
 };
 
