@@ -85,38 +85,20 @@ export type FatherDirectiveTemplate = {
 
 /** Father's compiled directive templates. Each template is fully self-
  *  contained — Father never composes or generates text outside this list.
- *  Adding a template here is a code change subject to review. */
+ *  Adding a template here is a code change subject to review.
+ *
+ *  Brain legacy-cleanup audit byaeuflif #2 (2026-05-15): the three
+ *  extractor-pass templates (recipe / knowledge / code_artifact)
+ *  were removed because the extractors worker (runtime/daemon.ts)
+ *  now runs `extractRecipeCandidates`, `extractKnowledgePromotions`,
+ *  `extractCodeArtifactScores`, and `extractSemanticDedup` on a
+ *  bounded 5-minute cadence as substrate liveness functions. Father
+ *  templating the same work duplicated the cadence and forked credit:
+ *  promotions emitted by Father got tagged `substrate_origin=father`
+ *  while those emitted by the worker got `substrate_auto`, so a single
+ *  causal pass produced two competing-origin promotion events. Father
+ *  now only templates work NOT owned by a canonical worker. */
 export const DIRECTIVE_TEMPLATES: readonly FatherDirectiveTemplate[] = Object.freeze([
-  {
-    template_id: "father_recipe_extraction_pass",
-    action: "compile_directive_from_template",
-    directive_text:
-      "Substrate maintenance: run extractRecipeCandidates across recent task_committed events to surface new Tier-0 recipes.",
-    lifecycle: "finite",
-    urgency: "normal",
-    initial_task_goal:
-      "Run substrate.extractRecipeCandidates; record summary.extracted in the closing payload.",
-  },
-  {
-    template_id: "father_knowledge_promotion_pass",
-    action: "compile_directive_from_template",
-    directive_text:
-      "Substrate maintenance: run extractKnowledgePromotions to promote candidates that have ≥5 corroborations and Beta-mean ≥ 0.85.",
-    lifecycle: "finite",
-    urgency: "normal",
-    initial_task_goal:
-      "Run substrate.extractKnowledgePromotions; record summary.promoted in the closing payload.",
-  },
-  {
-    template_id: "father_code_artifact_rescore_pass",
-    action: "compile_directive_from_template",
-    directive_text:
-      "Substrate maintenance: run extractCodeArtifactScores to refresh posteriors and promote artifacts that crossed the §11.5 threshold.",
-    lifecycle: "finite",
-    urgency: "normal",
-    initial_task_goal:
-      "Run substrate.extractCodeArtifactScores; record summary.promoted in the closing payload.",
-  },
   {
     template_id: "father_owner_status_summary",
     action: "compile_directive_from_template",

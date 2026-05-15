@@ -534,7 +534,10 @@ describe("Father Tier-0 replay preference", () => {
   test("detects templates with matching recipe_extracted rows", () => {
     const db = openDb(":memory:");
     runViews(db);
-    const template = DIRECTIVE_TEMPLATES[1]!;
+    // Brain audit byaeuflif #2 (2026-05-15) shrank DIRECTIVE_TEMPLATES
+    // to a single non-extractor entry; the Tier-0 replay preference
+    // logic is exercised against whichever template is canonical.
+    const template = DIRECTIVE_TEMPLATES[0]!;
 
     emitEvent(db, {
       kind: "recipe_extracted",
@@ -554,7 +557,7 @@ describe("Father Tier-0 replay preference", () => {
   test("fatherIterate selects a recipe-backed template before earlier unbacked templates", async () => {
     const db = openDb(":memory:");
     runViews(db);
-    const recipeBackedTemplate = DIRECTIVE_TEMPLATES[1]!;
+    const recipeBackedTemplate = DIRECTIVE_TEMPLATES[0]!;
 
     emitEvent(db, {
       kind: "recipe_extracted",
