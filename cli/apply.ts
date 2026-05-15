@@ -569,28 +569,50 @@ const renderPromptCommand = async (eventId: string, ownerApproved: boolean): Pro
   return 0;
 };
 
-const recordApply = async (
-  eventId: string,
-  opts: {
-    status: string;
-    commitSha?: string;
-    subagentTaskId?: string;
-    summary?: string;
-    reason?: string;
-    target?: string;
-    residual?: number;
-    actionArtifactId?: string;
-    verifierArtifactId?: string;
-    ownerApproved?: boolean;
-  },
-): Promise<number> => {
-  const ev = await fetchEvent(eventId);
+/** Outcome of recording an apply through the substrate credit chain. */
+export type ApplyOutcomeResult =
+  | { ok: false; reason: string; exitCode: number }
+  | {
+      ok: true;
+      appliedKind: "contract_amendment_applied" | "lesson_applied";
+      appliedEventId: string;
+      committedEventId?: string;
+      residual: number;
+      status: string;
+      verifierPassed: boolean;
+    };
+
+/** Emit the full apply credit chain for one substrate-emitted lesson or
+ *  contract amendment. Used by both the CLI (`acc apply --record`) and the
+ *  daemon-side auto-apply worker (`runtime/auto_apply_worker.ts`) — one
+ *  implementation guarantees both callers update posteriors and lineage
+ *  identically. The four-link chain (k_555) is:
+ *
+ *      lesson_apply_requested → action_predicted → action_scored
+ *      → applied_change_committed → contract_amendment_applied / lesson_applied
+ *
+ *  Returns a structured result; callers handle stdout / exit codes. */
+export const recordApplyOutcome = async (opts: {
+  eventId: string;
+  status: string;
+  commitSha?: string;
+  subagentTaskId?: string;
+  summary?: string;
+  reason?: string;
+  target?: string;
+  residual?: number;
+  actionArtifactId?: string;
+  verifierArtifactId?: string;
+  ownerApproved?: boolean;
+}): Promise<ApplyOutcomeResult> => {
+  const ev = await fetchEvent(opts.eventId);
   if (!ev) {
-    console.error(`acc apply --record: source event ${eventId} not found`);
-    return 1;
+    return { ok: false, reason: `source event ${opts.eventId} not found`, exitCode: 1 };
   }
   const isAmendment = ev.kind === "contract_amendment_proposed";
-  const appliedKind = isAmendment ? "contract_amendment_applied" : "lesson_applied";
+  const appliedKind = (isAmendment ? "contract_amendment_applied" : "lesson_applied") as
+    | "contract_amendment_applied"
+    | "lesson_applied";
   const status = opts.status || "applied";
   const residual = typeof opts.residual === "number" && Number.isFinite(opts.residual)
     ? Math.min(1, Math.max(0, opts.residual))
@@ -598,14 +620,14 @@ const recordApply = async (
   const actionArtifactId = opts.actionArtifactId || DEFAULT_APPLY_ACTION_ARTIFACT_ID;
   const verifierArtifactId = opts.verifierArtifactId || DEFAULT_APPLY_VERIFIER_ARTIFACT_ID;
   const payload = parsePayload(ev.payload);
-  const auth = await authorizeApply(ev, eventId, { ownerApproved: opts.ownerApproved, target: opts.target });
-  if (!auth.ok) return auth.code;
+  const auth = await authorizeApply(ev, opts.eventId, { ownerApproved: opts.ownerApproved, target: opts.target });
+  if (!auth.ok) return { ok: false, reason: "authorization denied", exitCode: auth.code };
+  const eventId = opts.eventId;
   let ownerDecisionEventId: string | undefined;
   try {
     ownerDecisionEventId = await emitOwnerDecisionIfNeeded(ev, eventId, auth, opts.ownerApproved);
   } catch (err) {
-    console.error(`acc apply --record: ${(err as Error).message}`);
-    return 1;
+    return { ok: false, reason: (err as Error).message, exitCode: 1 };
   }
   const target = auth.target || opts.target;
   let gateActionEventId: string | undefined;
@@ -622,8 +644,7 @@ const recordApply = async (
     gateActionEventId = gateEval.actionEventId;
     gateScoredEventId = gateEval.scoredEventId;
   } catch (err) {
-    console.error(`acc apply --record: ${(err as Error).message}`);
-    return 1;
+    return { ok: false, reason: (err as Error).message, exitCode: 1 };
   }
 
   const requestEnv = await mcpCall("substrate.emit", {
@@ -649,8 +670,7 @@ const recordApply = async (
     },
   });
   if (!requestEnv.ok) {
-    console.error(`acc apply --record: lesson_apply_requested emit failed - ${requestEnv.error}`);
-    return 1;
+    return { ok: false, reason: `lesson_apply_requested emit failed - ${requestEnv.error}`, exitCode: 1 };
   }
   const requestEventId = (requestEnv.result as { id?: string })?.id;
 
@@ -678,8 +698,7 @@ const recordApply = async (
     },
   });
   if (!actionEnv.ok) {
-    console.error(`acc apply --record: action_predicted emit failed - ${actionEnv.error}`);
-    return 1;
+    return { ok: false, reason: `action_predicted emit failed - ${actionEnv.error}`, exitCode: 1 };
   }
   const actionEventId = (actionEnv.result as { id?: string })?.id;
 
@@ -709,8 +728,7 @@ const recordApply = async (
     },
   });
   if (!scoredEnv.ok) {
-    console.error(`acc apply --record: action_scored emit failed - ${scoredEnv.error}`);
-    return 1;
+    return { ok: false, reason: `action_scored emit failed - ${scoredEnv.error}`, exitCode: 1 };
   }
   const scoredEventId = (scoredEnv.result as { id?: string })?.id;
 
@@ -747,8 +765,7 @@ const recordApply = async (
       },
     });
     if (!committedEnv.ok) {
-      console.error(`acc apply --record: applied_change_committed emit failed - ${committedEnv.error}`);
-      return 1;
+      return { ok: false, reason: `applied_change_committed emit failed - ${committedEnv.error}`, exitCode: 1 };
     }
     committedEventId = (committedEnv.result as { id?: string })?.id;
   }
@@ -783,14 +800,50 @@ const recordApply = async (
     payload: appliedPayload,
   });
   if (!env.ok) {
-    console.error(`acc apply --record: emit failed — ${env.error}`);
-    return 1;
+    return { ok: false, reason: `emit failed — ${env.error}`, exitCode: 1 };
   }
   const result = env.result as { id?: string };
-  if (committedEventId) console.log(`applied_change_committed ${committedEventId} residual=${residual}`);
-  else console.log(`applied_change_committed skipped residual=${residual} status=${status}`);
-  console.log(`${appliedKind} ${result.id ?? "?"} (source=${eventId.slice(0, 12)} status=${status})`);
-  return status === "applied" && !verifierPassed ? 1 : 0;
+  return {
+    ok: true,
+    appliedKind,
+    appliedEventId: result.id ?? "?",
+    committedEventId,
+    residual,
+    status,
+    verifierPassed,
+  };
+};
+
+/** CLI wrapper for `acc apply --record`. Calls recordApplyOutcome and
+ *  prints the stdout summary lines the operator expects, returning the
+ *  appropriate exit code. */
+const recordApply = async (
+  eventId: string,
+  opts: {
+    status: string;
+    commitSha?: string;
+    subagentTaskId?: string;
+    summary?: string;
+    reason?: string;
+    target?: string;
+    residual?: number;
+    actionArtifactId?: string;
+    verifierArtifactId?: string;
+    ownerApproved?: boolean;
+  },
+): Promise<number> => {
+  const result = await recordApplyOutcome({ eventId, ...opts });
+  if (!result.ok) {
+    console.error(`acc apply --record: ${result.reason}`);
+    return result.exitCode;
+  }
+  if (result.committedEventId) {
+    console.log(`applied_change_committed ${result.committedEventId} residual=${result.residual}`);
+  } else {
+    console.log(`applied_change_committed skipped residual=${result.residual} status=${result.status}`);
+  }
+  console.log(`${result.appliedKind} ${result.appliedEventId} (source=${eventId.slice(0, 12)} status=${result.status})`);
+  return result.status === "applied" && !result.verifierPassed ? 1 : 0;
 };
 
 export const runApply = async (argv: string[]): Promise<number> => {
