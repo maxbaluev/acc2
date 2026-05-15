@@ -303,14 +303,32 @@ export const embedderWorkerTick = async (
     return { embedded: 0, skipped_no_text: 0, failed: 0 };
   }
   const items: Array<{ id: string; text: string }> = [];
-  let skipped_no_text = 0;
+  const noTextIds: string[] = [];
   for (const r of rows) {
     let payload: unknown = {};
     try { payload = JSON.parse(r.payload ?? "{}"); } catch { /* skip */ }
     const text = extractTextFromEvent(r.kind, payload);
-    if (!text) { skipped_no_text++; continue; }
+    if (!text) { noTextIds.push(r.id); continue; }
     items.push({ id: r.id, text });
   }
+  // Mark text-less rows with a 0-byte sentinel BLOB so subsequent ticks don't
+  // keep re-reading them. `readUnembedded` filters on `embedding IS NULL`, so
+  // the sentinel takes them out of the queue without polluting `vec_events`
+  // (vec0 only receives rows with real vectors). Without this the embedder
+  // gets stuck on the oldest events of kinds whose payloads carry no
+  // embeddable text (e.g. code_artifact_admitted, action_scored — they're
+  // registered embeddable historically but the runtime emitter writes only
+  // structured fields, so extractTextFromEvent returns null forever).
+  if (noTextIds.length > 0) {
+    const placeholders = noTextIds.map(() => "?").join(", ");
+    try {
+      db.run(
+        `UPDATE events SET embedding = X'' WHERE id IN (${placeholders}) AND embedding IS NULL`,
+        noTextIds,
+      );
+    } catch { /* swallow — next tick re-checks; retry is harmless */ }
+  }
+  const skipped_no_text = noTextIds.length;
   if (items.length === 0) {
     return { embedded: 0, skipped_no_text, failed: 0 };
   }
