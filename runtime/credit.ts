@@ -286,6 +286,34 @@ const collectCitations = (
   for (const id of actionBodyCitations) ordered.push(id);
   for (const id of verifierBodyCitations) ordered.push(id);
 
+  // Organism-alignment audit b3qc9ryzj follow-up (2026-05-15): close
+  // the four-link credit chain for depth-1 retrieval (k_554/k_555).
+  // retrieval_binding events emitted by the dispatcher record which
+  // knowledge entries actually landed in the brain prompt. Pre-fix
+  // those bindings emitted but no consumer used them — the loop was
+  // structurally open. Now collectCitations pulls source_event_id
+  // from every retrieval_binding emitted on this dispatch's task
+  // before the scored event, so the cited knowledge entries get
+  // candidate_confirmed/contradicted automatically on outcome.
+  if (actionEv && actionEv.task_id && scoredEv) {
+    const bindings = db
+      .query(
+        `SELECT payload FROM events
+         WHERE kind = 'retrieval_binding'
+           AND task_id = ?
+           AND ts < ?
+         ORDER BY ts ASC`,
+      )
+      .all(actionEv.task_id, scoredEv.ts) as Array<{ payload: string }>;
+    for (const b of bindings) {
+      try {
+        const p = JSON.parse(b.payload) as Record<string, unknown>;
+        const sourceId = p.source_event_id as string | undefined;
+        if (sourceId) ordered.push(sourceId);
+      } catch { /* skip malformed */ }
+    }
+  }
+
   for (const id of ordered) {
     // Skip the action + verifier artifact ids themselves — they receive
     // primary credit, not third-party citation credit.
