@@ -12,6 +12,7 @@
 
 import type { Database } from "bun:sqlite";
 import type { TaskEdgeKind } from "../substrate/types";
+import { closedDirectiveIds } from "./directive_closure";
 
 export type TaskNodeStatus = "pending" | "ready" | "in_progress" | "committed" | "failed";
 
@@ -136,8 +137,16 @@ export const readyTasks = (db: Database, directiveId?: string): TaskNode[] => {
     for (const r of rows) dagDirectiveIds.add(r.directive_id);
   }
 
+  // Exclude directives whose work is over (directive_closed emitted by
+  // maybeCloseFinishedDirective once all tasks are terminal; or operator/
+  // rolling-housekeeping archive events). This is the structural fix for
+  // the "scheduler keeps re-dispatching tasks whose directive is done"
+  // class of zombie-loop bugs.
+  const closed = closedDirectiveIds(db);
+
   const ready: TaskNode[] = [];
   for (const d of dagDirectiveIds) {
+    if (closed.has(d)) continue;
     const { nodes, edges } = readDagForDirective(db, d);
     const committedTasks = new Set(nodes.filter((n) => n.status === "committed").map((n) => n.id));
 

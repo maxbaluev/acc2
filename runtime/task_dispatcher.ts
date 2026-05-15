@@ -35,6 +35,7 @@ import { nowIso } from "./ids";
 import { distributeCredit } from "./credit";
 import { findRecipeMatch, replayRecipe } from "./recipe_replay";
 import { logger } from "./logger";
+import { maybeCloseFinishedDirective } from "./directive_closure";
 import { readCurrentMode } from "./crisis_mode";
 import { isCycleViolation } from "./cycle_one_gate";
 import { recordDispatch, recordActionResidual } from "./metrics";
@@ -717,10 +718,12 @@ export const dispatchReadyTask = async (
 
   // Batch 3.OPS: record dispatch metric. Outcome is derived from terminal
   // events on this task during the dispatch window.
+  let dispatchHadTerminal = false;
   try {
     const closedEvents = readEventsSinceTs(db, dispatchStartedTs, task.id);
     const hasCommit = closedEvents.some((e) => e.kind === "task_committed");
     const hasFail = closedEvents.some((e) => e.kind === "task_failed");
+    dispatchHadTerminal = hasCommit || hasFail;
     const hasRefine = closedEvents.some((e) => e.kind === "task_edge_recorded" &&
       (e.payload as Record<string, unknown> | null)?.kind === "refines");
     const outcome = hasCommit ? "committed" : hasFail ? "failed" : hasRefine ? "refined" : "closed";
@@ -732,6 +735,21 @@ export const dispatchReadyTask = async (
       }
     }
   } catch { /* swallow — metrics are best-effort */ }
+
+  // Batch-2 directive closure: if a terminal event fired on this task,
+  // check whether the whole directive is now done and emit
+  // directive_closed idempotently. This closes the zombie-loop class
+  // (scheduler kept re-dispatching tasks for finished directives).
+  if (dispatchHadTerminal) {
+    try {
+      maybeCloseFinishedDirective(db, task.directive_id);
+    } catch (err) {
+      logger.warn(
+        { where: "task_dispatcher.maybe_close_finished_directive", directive_id: task.directive_id, err: (err as Error).message },
+        "maybeCloseFinishedDirective failed — directive_closed not emitted (will retry on next terminal event)",
+      );
+    }
+  }
 
   return {
     dispatch_id: dispatchId,

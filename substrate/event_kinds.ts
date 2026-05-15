@@ -52,6 +52,13 @@ export const EVENT_KINDS = {
   // ── Directive lifecycle ─────────────────────────────────────────────
   directive_opened:                        { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   directive_amended:                       { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  // Substrate-emitted when every task_node_opened under a finite directive
+  // has reached a terminal state (task_committed / task_failed /
+  // task_abandoned). Scheduler readyTasks() + ready_tasks_view both filter
+  // these directives out so no further dispatch fires against a finished
+  // DAG. Rolling-active directives never receive this event — they cycle
+  // through review subtasks instead (directive_review_due).
+  directive_closed:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
   directive_review_due:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
   directive_milestone_recorded:            { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
   directive_interference_edge:             { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },

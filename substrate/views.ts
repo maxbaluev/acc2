@@ -66,6 +66,21 @@ CREATE VIEW IF NOT EXISTS ready_tasks_view AS
   committed AS (
     SELECT task_id FROM events WHERE kind = 'task_committed' GROUP BY task_id
   ),
+  -- Terminal task events that should ALSO suppress re-dispatch. Pre-Batch-2
+  -- this was committed-only; we widened to task_failed / task_abandoned to
+  -- match the Batch-1 monotone terminal-state contract in computeStatus.
+  terminal AS (
+    SELECT task_id FROM events
+    WHERE kind IN ('task_committed', 'task_failed', 'task_abandoned')
+    GROUP BY task_id
+  ),
+  -- Closed/archived directives: Batch-2 directive_closed event + the
+  -- pre-existing archival events. readyTasks() in task_topology.ts mirrors
+  -- this exclusion so both the SQL view and the in-process helper agree.
+  closed_directives AS (
+    SELECT DISTINCT directive_id FROM events
+    WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+  ),
   -- Convention: edge.from is the upstream (must commit before edge.to is ready).
   -- A task is blocked iff it has any 'requires' edge whose 'from' task is not committed.
   blocked AS (
@@ -77,7 +92,8 @@ CREATE VIEW IF NOT EXISTS ready_tasks_view AS
   SELECT n.event_id, n.ts, n.directive_id, n.task_id, n.payload
   FROM nodes n
   WHERE n.task_id NOT IN (SELECT task_id FROM blocked)
-    AND n.task_id NOT IN (SELECT task_id FROM committed);
+    AND n.task_id NOT IN (SELECT task_id FROM terminal)
+    AND n.directive_id NOT IN (SELECT directive_id FROM closed_directives);
 `;
 
 // failure_view — task_failed rows grouped by failure_kind. The aggregate
