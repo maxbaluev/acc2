@@ -358,7 +358,7 @@ describe("extractRecipeFromCommit (inline post-commit path)", () => {
     expect((p.topology_signature as string).startsWith("topo_")).toBe(true);
   });
 
-  test("idempotent — calling twice on the same task produces no second row", () => {
+  test("idempotent — calling twice on the same task produces no duplicate seed row", () => {
     const db = openDb(":memory:");
     const did = "d_inline_2";
     const taskId = "t_inline_2";
@@ -369,8 +369,17 @@ describe("extractRecipeFromCommit (inline post-commit path)", () => {
     const first = extractRecipeFromCommit(db, taskId);
     expect(first.extracted).toBe(1);
     const second = extractRecipeFromCommit(db, taskId);
+    // The seed is idempotent — second call returns extracted=0 with the
+    // SAME recipe_id. The bump-row check (context_refs LIKE %committed_id%)
+    // ALSO short-circuits the second call so no duplicate bump emits.
     expect(second.extracted).toBe(0);
     expect(second.recipe_id).toBe(first.recipe_id);
+    // Pre-Batch-10: this asserted exactly 1 row. Post-Batch-10 (recipe
+    // auto-promotion via brain-replay bump) the second call to
+    // extractRecipeFromCommit ALSO finds the existing seed; the per-task
+    // idempotency guard suppresses any further bump, so we end up with
+    // exactly 1 row in this 2-call scenario (seed + zero bumps because
+    // the test sets up one task that doesn't trigger bump path).
     const count = (db
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_extracted'")
       .get() as { c: number }).c;

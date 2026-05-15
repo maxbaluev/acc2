@@ -878,10 +878,17 @@ export const extractRecipeFromCommit = (
   const topology = topologySignatureFor(db, committed.directive_id);
 
   // Dedup by composite key — if a recipe already exists for this
-  // (goal_shape, topology) we leave it alone. `updateRecipeConfidence`
-  // (recipe_replay.ts) is the canonical surface for refining the
-  // confidence of an existing recipe; the inline path is a one-shot
-  // seeder, not a confidence-adjuster.
+  // (goal_shape, topology) we bump its confidence by +0.05 (the same
+  // success delta updateRecipeConfidence applies on a successful Tier-0
+  // replay). The brain just hand-proved the recipe's trajectory by
+  // committing a task with the same goal_shape + topology, so the
+  // recipe is observably correct.
+  //
+  // Without this bump, recipes seeded at 0.5 prior could NEVER reach
+  // the 0.85 dispatch threshold — Tier-0 replay only fires above
+  // threshold, and confidence only bumps from successful replays.
+  // Catch-22. Now every brain-driven commit on a matching shape ratchets
+  // the recipe toward Tier-0 eligibility (~7 brain successes = 0.85).
   const existingRows = db
     .query(
       `SELECT id, payload FROM events WHERE kind = 'recipe_extracted' ORDER BY ts DESC`,
@@ -889,8 +896,69 @@ export const extractRecipeFromCommit = (
     .all() as Array<{ id: string; payload: string }>;
   for (const r of existingRows) {
     try {
-      const p = JSON.parse(r.payload) as { goal_shape?: string; topology_signature?: string };
+      const p = JSON.parse(r.payload) as { goal_shape?: string; topology_signature?: string; confidence?: number };
       if (p.goal_shape === goalShape && p.topology_signature === topology) {
+        // The originating recipe row exists. Find the LATEST confidence
+        // for this composite key (recipes append new rows on each update)
+        // and emit a fresh confidence-bumped row so the matcher reads it.
+        let latestConfidence = typeof p.confidence === "number" ? p.confidence : 0.5;
+        for (const r2 of existingRows) {
+          try {
+            const p2 = JSON.parse(r2.payload) as { goal_shape?: string; topology_signature?: string; confidence?: number };
+            if (p2.goal_shape === goalShape && p2.topology_signature === topology) {
+              if (typeof p2.confidence === "number") {
+                latestConfidence = p2.confidence;
+                break; // existingRows is ORDER BY ts DESC — first match is latest.
+              }
+            }
+          } catch { /* skip */ }
+        }
+        // Idempotency: a single committed_task should bump confidence at
+        // most ONCE. Look for an existing bump row whose context_refs
+        // include this committed.id; if found, no-op.
+        const alreadyBumped = db
+          .query(
+            `SELECT 1 FROM events
+             WHERE kind = 'recipe_extracted'
+               AND context_refs LIKE ?
+               AND substrate_origin = 'substrate_auto'
+               AND task_id = ?
+             LIMIT 1`,
+          )
+          .get(`%${committed.id}%`, committed.task_id);
+        const RECIPE_MAX_CONFIDENCE = 0.95;
+        const bumped = Math.min(RECIPE_MAX_CONFIDENCE, latestConfidence + 0.05);
+        if (!alreadyBumped && bumped > latestConfidence) {
+          // Carry the seed row's trajectory across — the matcher reads the
+          // LATEST row for a (goal_shape, topology) key, so the bump must
+          // preserve the original trajectory or replayRecipe runs an empty
+          // playback. Re-fetch from the seed `r` row's payload.
+          let seedTrajectory: unknown = [];
+          try {
+            const seedPayload = JSON.parse(r.payload) as Record<string, unknown>;
+            seedTrajectory = seedPayload.trajectory ?? [];
+          } catch { /* leave empty array */ }
+          try {
+            insertEvent(db, {
+              kind: "recipe_extracted",
+              directive_id: committed.directive_id,
+              task_id: committed.task_id,
+              loop_id: committed.loop_id ?? "",
+              substrate_origin: "substrate_auto",
+              payload: {
+                goal_shape: goalShape,
+                topology_signature: topology,
+                confidence: bumped,
+                previous_confidence: latestConfidence,
+                confidence_update: "brain_replay_success",
+                derived_from_recipe_id: r.id,
+                seeded_by: "inline_post_commit_bump",
+                trajectory: seedTrajectory,
+              },
+              context_refs: [r.id, committed.id],
+            });
+          } catch { /* failure to write a bump row is non-fatal — recipe still matches */ }
+        }
         return { extracted: 0, recipe_id: r.id };
       }
     } catch { /* skip malformed */ }

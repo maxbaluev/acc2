@@ -425,6 +425,11 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
     deadlineTimer = setTimeout(() => ac.abort(), ms);
   }
   let sawTerminal = false;
+  // Also wire process-signal abort so SIGTERM/SIGINT triggers abort cleanly
+  // and the exit-code path below reports an honest "didn't see terminal".
+  const onSig = () => ac.abort();
+  process.once("SIGTERM", onSig);
+  process.once("SIGINT", onSig);
   try {
     for await (const ev of sseConnect({ signal: ac.signal, reconnect: true })) {
       // SseEvent shape: { event_id, kind, ts, directive_id?, task_id?, substrate_origin?, payload? }
@@ -450,16 +455,26 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
         console.error("acc tail: deadline exceeded (no terminal event)");
         return 2;
       }
-      return 0;
+      // Aborted (likely SIGTERM/SIGINT) before any terminal event landed.
+      // Report this honestly — exit code 0 would imply "directive completed"
+      // and confuse callers (live evidence: bd80w5fsx + bj6umku93 reported
+      // exit 0 when actually killed mid-flight by the operator).
+      console.error("acc tail: aborted before any terminal event (directive may still be in-flight)");
+      return 3;
     }
     console.error(`acc tail: ${(err as Error).message}`);
     return 1;
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
+    process.off("SIGTERM", onSig);
+    process.off("SIGINT", onSig);
   }
-  // SSE generator exhausted without abort — shouldn't happen, daemon keeps
-  // connection alive. Fall through gracefully.
-  return sawTerminal ? 0 : 0;
+  // SSE generator returned gracefully without abort — only happens when
+  // reconnect=false and a fatal error occurs OR when signal aborts during
+  // a backoff sleep. With reconnect=true the generator should not exhaust.
+  if (sawTerminal) return 0;
+  console.error("acc tail: SSE stream closed before any terminal event (daemon may have stopped)");
+  return 3;
 };
 
 // Polling fallback (kept for when SSE cannot connect — e.g. daemon down at
