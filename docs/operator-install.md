@@ -11,12 +11,36 @@ prints the exact install command for whatever is missing.
 
 ---
 
-## Quickstart — composite first-run path
+## Quickstart — conversational first-run path
 
-The canonical six-step sequence. Run from the acc2 repo root. Every step
-is idempotent and safe to re-run. `acc doctor` reporting **PASS** is the
-canonical "system is ready" signal — do not start dispatching real work
-until you see it.
+The primary install path is paste-driven: Claude Code walks the owner
+through `acc init --interactive`, not by reading this document first.
+The interactive flow probes Bun, opencode, OpenAI, Serper, Camoufox,
+seed state, daemon health, and demo readiness; explains each missing
+item in one sentence; offers the exact repair command; re-probes after
+repair; validates pasted keys before persistence; then offers 3-5 demo
+directives matched to available capabilities.
+
+This page is the **manual install path** used by integration tests, CI,
+and operators who prefer scripted setup. See
+[docs/quickstart.md](quickstart.md) for the paste-and-go path.
+
+### Auth model (read once)
+
+- **`OPENAI_API_KEY`** pays ONLY for embeddings (`text-embedding-3-small`).
+  It does NOT pay for brain calls.
+- **Brain (gpt-5.5) auth comes from opencode**, signed in to your own
+  account. For sustained use, an **OpenAI Max subscription** (Plus / Pro /
+  Team / Enterprise) keeps brain dispatch within rate + quota limits
+  instead of pay-per-token billing.
+- **`SERPER_API_KEY`** is highly recommended for information-search
+  directives. Tasks degrade gracefully without it.
+
+### Manual six-step sequence
+
+Run from the acc2 repo root. Every step is idempotent and safe to re-run.
+`acc doctor` reporting **PASS** is the canonical "system is ready" signal
+— do not start dispatching real work until you see it.
 
 ```bash
 cd /home/maxbaluev/bos2/system/acc2

@@ -37,9 +37,17 @@ That is all the dependency installation v2 needs. Everything else is operator co
 
 ---
 
-## 3. First run — `acc init` + `acc doctor`
+## 3. First run — `acc init --interactive` + `acc doctor`
 
-Phase 1.γ adds an interactive `acc init` (not in this batch). For now, manually create `.env` from `.env.example`:
+Run `acc init --interactive` from Claude Code's guided onboarding flow.
+It detects host dependencies, validates and persists `OPENAI_API_KEY`
+(used ONLY for embeddings — brain auth is separate, via opencode + your
+OpenAI Max subscription), offers `SERPER_API_KEY` as highly recommended
+for information search, seeds the substrate, embeds seed events, starts
+or verifies the daemon, and then runs `acc doctor`. Manual `.env`
+editing is the fallback, not the primary path.
+
+For scripted / CI setup, the manual flow is still available:
 
 ```bash
 cp .env.example .env
@@ -63,7 +71,8 @@ bun cli/doctor.ts
 | `daemon health` | The daemon process is running and `/health` returns `status: "ok"`. |
 | `db integrity` | `events_count` is reachable through `/health` (the daemon runs `PRAGMA integrity_check` at boot — if the file were corrupt it would refuse to start). |
 | `disk space` | The state dir has ≥ 2GB free (warn) / ≥ 500MB free (fail). |
-| `OPENAI_API_KEY` | Present and non-empty. |
+| `OPENAI_API_KEY` | Present and non-empty. Used ONLY for embeddings (`text-embedding-3-small`); brain auth is separate (via opencode + OpenAI Max subscription). |
+| `SERPER_API_KEY` | Present and non-empty (warn-only — highly recommended for information-search directives but tasks degrade gracefully without it). |
 | `opencode` | The `opencode` binary is on `PATH`. |
 | `uv` | The `uv` binary is on `PATH`. |
 | `camoufox binary` | `CAMOUFOX_BINARY_PATH` is set OR `~/.cache/camoufox/camoufox` exists. |

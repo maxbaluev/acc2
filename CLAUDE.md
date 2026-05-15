@@ -10,6 +10,10 @@ Most agent systems are "LLM with tools." AccInt v2 inverts this. A persistent SQ
 
 **The load-bearing invariant: depth-1 retrieval (v2-design.md §13).** The brain runs on a thin 8K-token prompt — every section a top-K retrieval, never an "everything" dump. What the brain lacks, it pulls mid-cycle via `substrate.search`. Recursion happens via **fresh refinement-edge dispatches with newly-composed prompts**, not by stuffing more context into the current cycle. That is what makes this a Recursive Language Model rather than a prompt-flooded agent. It is also the system's falsifiability test (V1).
 
+**RLM mapping.** The event ledger is the external environment E; directive/task ids are symbolic handles to the prompt and trajectory; MCP reads/searches are bounded peeks; refinement edges are recursive sub-calls with fresh substrate-composed prompts; event rows, artifacts, and task DAGs are the persistent variables. Do not copy the environment into chat. Move work by emitting/observing ledger mutations.
+
+**Owner-facing chat language.** Respond in the owner's detected language by default. If the owner explicitly requests another language or corrects language/tone, emit/preserve an `owner_profile_recorded` event (or candidate via `owner_insight_candidate`) so future dispatches and orchestration respect it. Do not translate code identifiers, file paths, or command names — those stay literal regardless of language.
+
 Four actors, one substrate:
 
 | Actor | Owns |
@@ -327,7 +331,7 @@ acc watch                            # live TUI in another terminal
 
 Foundational seed AND code-artifact seed are both owner-approved per session (v2-design.md §16). `acc init --yes` gates both behind explicit consent; production install path and the integration harness now hit the SAME seed code.
 
-All necessary subsystems are ON by default — the daemon starts the embedder, scheduler, father, rolling-reviewer, rehabilitation, and integrity workers without any per-worker opt-in. The canonical opt-OUT is ONE env var — `ACC2_DISABLE_WORKERS` — carrying a comma-separated list of worker names (`embedder`, `scheduler`, `father`, `rolling_reviewer`, `rehabilitation`, `integrity`). Empty / unset = all workers run. Example: `ACC2_DISABLE_WORKERS=embedder,father` disables those two; everything else runs. Tests pin the full set via `tests/preload.ts` so the unit suite stays hermetic. The legacy per-worker env vars (`ACC2_EMBEDDER_AUTOSTART`, `ACC2_FATHER_AUTOSTART`, `ACC2_ROLLING_AUTOSTART`, `ACC2_REHAB_AUTOSTART`, `ACC2_INTEGRITY_AUTOSTART`, `ACC2_AUTOSCHEDULER`) have been REMOVED — clean break, no back-compat (per the "No legacy/fallback/backward-compatibility code" rule).
+All necessary subsystems are ON by default — the daemon starts the canonical worker set without any per-worker opt-in: `embedder`, `scheduler`, `father`, `rolling_reviewer`, `rehabilitation`, `integrity`, `supervisor`, `compaction`, `extractors`, `amendment`, `metrics_gauge_refresh`, and `auto_apply` (full list lives in `runtime/worker_autostart.ts:59-78`). The canonical opt-OUT is ONE env var — `ACC2_DISABLE_WORKERS` — carrying a comma-separated list of worker names from that set. Empty / unset = all workers run. Example: `ACC2_DISABLE_WORKERS=embedder,father` disables those two; everything else runs. Tests pin the full set via `tests/preload.ts` so the unit suite stays hermetic. The legacy per-worker env vars (`ACC2_EMBEDDER_AUTOSTART`, `ACC2_FATHER_AUTOSTART`, `ACC2_ROLLING_AUTOSTART`, `ACC2_REHAB_AUTOSTART`, `ACC2_INTEGRITY_AUTOSTART`, `ACC2_AUTOSCHEDULER`) have been REMOVED — clean break, no back-compat (per the "No legacy/fallback/backward-compatibility code" rule).
 
 ## When in doubt
 

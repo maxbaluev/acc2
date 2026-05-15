@@ -255,10 +255,10 @@ export const checkOpenAiKey = (env: DoctorEnv): Check => {
   const v = env.env.OPENAI_API_KEY;
   if (v && v.trim().length > 0) {
     return { name: "OPENAI_API_KEY", verdict: "ok",
-      detail: "present (required for embeddings and real-brain retrieval; validated by `acc init --interactive`)" };
+      detail: "present (used ONLY by text-embedding-3-small for substrate retrieval; brain auth comes from opencode, not this key)" };
   }
   return { name: "OPENAI_API_KEY", verdict: "fail",
-    detail: "missing; run `acc init --interactive` to paste and validate it before daemon start" };
+    detail: "missing; required for embeddings (text-embedding-3-small). Brain (gpt-5.5) auth is separate — via opencode + OpenAI Max subscription. Run `acc init --interactive` to paste and validate the embeddings key." };
 };
 
 // UX dispatch b71pfyddv knowledge_candidate 3E0KGJYR + amendment
