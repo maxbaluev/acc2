@@ -66,10 +66,14 @@ export type RetrievalResult = {
 const clampBias = (r: number): number => (r < 0.5 ? 0.5 : r > 1.5 ? 1.5 : r);
 
 /** Build a Map<origin, promotion_ratio> snapshot. Origins absent from the
- *  view default to 1.0 at the lookup site. */
+ *  view default to 1.0 at the lookup site. Rows with NULL promotion_ratio
+ *  (no signal: candidate_count = 0) are skipped — the view now returns
+ *  NULL instead of the misleading 1.0 placeholder. Brain dataflow audit
+ *  bxdhdkm9e #4 (2026-05-15). */
 const readOriginBias = (db: Database): Map<string, number> => {
   const out = new Map<string, number>();
   for (const row of originPromotion(db)) {
+    if (row.promotion_ratio === null || row.promotion_ratio === undefined || Number.isNaN(row.promotion_ratio)) continue;
     // Clamp into [0.5, 1.5]: a pure ratio risks washing posterior scores
     // when one origin happens to have low candidate volume. The ±0.5 band
     // keeps the bias informative without dominating the cosine signal.
@@ -83,16 +87,17 @@ const readOriginBias = (db: Database): Map<string, number> => {
  *  exists for an origin. Phase H — §3.6.1 Rule 4 + §18 criterion 19. */
 const readOriginBiasForGoalShape = (db: Database, goalShape: string): Map<string, number> => {
   const out = new Map<string, number>();
-  // Per-shape data
+  // Per-shape data — skip NULL promotion_ratio (no-signal rows).
   for (const row of originPromotionByGoalShape(db, computeGoalShape)) {
     if (row.goal_shape !== goalShape) continue;
+    if (row.promotion_ratio === null || row.promotion_ratio === undefined || Number.isNaN(row.promotion_ratio)) continue;
     out.set(row.substrate_origin, clampBias(row.promotion_ratio));
   }
   // Fill any origin that has global data but no shape-specific row.
   for (const row of originPromotion(db)) {
-    if (!out.has(row.substrate_origin)) {
-      out.set(row.substrate_origin, clampBias(row.promotion_ratio));
-    }
+    if (out.has(row.substrate_origin)) continue;
+    if (row.promotion_ratio === null || row.promotion_ratio === undefined || Number.isNaN(row.promotion_ratio)) continue;
+    out.set(row.substrate_origin, clampBias(row.promotion_ratio));
   }
   return out;
 };

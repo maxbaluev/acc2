@@ -640,7 +640,15 @@ const buildDagNodes = (state: WatchState): DagNode[] => {
     });
   }
 
-  for (const t of deriveTasks(state)) {
+  // Canonical task source: state.ready (ready_tasks_view projection).
+  // Pre-fix this loop pulled from deriveTasks(state), which synthesized
+  // a "task" entry for ANY event with a task_id — turning every
+  // artifact_invoked/worker_tick/etc. payload into a fake task whose
+  // goal was a JSON preview of the payload. That painted hundreds of
+  // garbage "T {runtime:bun,pid:...}" rows in the DAG view.
+  // Real tasks are: (a) rows in state.ready, (b) task_node_opened events
+  // in the buffer (handled in the next loop).
+  for (const t of state.ready ?? []) {
     taskMap.set(t.task_id, {
       id: t.task_id,
       rowKind: "task",
@@ -733,73 +741,127 @@ const buildDagNodes = (state: WatchState): DagNode[] => {
     hasParent.add(to.id);
   }
 
+  const orphanTasks: DagNode[] = [];
   for (const task of taskMap.values()) {
     if (hasParent.has(task.id)) continue;
-    const targetDirId = task.directive_id ?? "unknown_directive";
-    let dir = task.directive_id ? directiveMap.get(task.directive_id) : undefined;
-    if (!dir) {
-      // Directive_opened header is not in the local buffer (or never
-      // emitted). Create a synthetic root keyed on the directive id so
-      // the task is visible — never silently drop.
-      dir = {
-        id: targetDirId,
-        rowKind: "directive",
-        title: targetDirId === "unknown_directive"
-          ? "(tasks with no directive)"
-          : `(directive ${shortId(targetDirId, 12)} — header not in local buffer)`,
-        meta: "unloaded directive",
-        body: `directive_id=${targetDirId}\n(directive_opened event is older than the recent_events buffer)`,
-        status: "unloaded",
-        directive_id: targetDirId,
-        depth: 0,
-        children: [],
-        raw: { directive_id: targetDirId, orphan: true },
-      };
-      directiveMap.set(targetDirId, dir);
+    const dir = task.directive_id ? directiveMap.get(task.directive_id) : undefined;
+    if (dir) {
+      task.edgeKind = "contains";
+      task.parent_id = dir.id;
+      task.depth = 1;
+      dir.children.push(task);
+    } else {
+      // Task whose directive_opened header is older than the local buffer.
+      // Stash for the unthreaded bucket instead of spawning a placeholder
+      // directive — preserves visibility without inflating the root count.
+      task.depth = 1;
+      orphanTasks.push(task);
     }
-    task.edgeKind = "contains";
-    task.parent_id = dir.id;
-    task.depth = 1;
-    dir.children.push(task);
   }
 
+  // Events whose directive_opened header is not in the local buffer get
+  // routed to the unthreaded bucket — pre-fix each got its own synthetic
+  // "(directive XX — header not in local buffer)" root, which painted
+  // hundreds of placeholder rows. We KEEP every event (no drop), but
+  // group them into one operator-visible bucket so the DAG stays readable.
   for (const [directiveId, events] of directiveEvents) {
     const dir = directiveMap.get(directiveId);
     if (dir) {
       dir.children.push(...groupDagHeartbeatNodes(events, 1));
     } else {
-      // Orphan events pointing at a directive that never produced a
-      // directive_opened in the local buffer — surface them anyway under
-      // a synthetic directive root keyed by the directive_id so the
-      // operator can SEE every event, never silently drop.
-      directiveMap.set(directiveId, {
-        id: directiveId,
-        rowKind: "directive",
-        title: `(directive ${shortId(directiveId, 12)} — header not in local buffer)`,
-        meta: "unloaded directive",
-        body: `directive_id=${directiveId}\n(directive_opened event is older than the recent_events buffer)`,
-        status: "unloaded",
-        directive_id: directiveId,
-        depth: 0,
-        children: groupDagHeartbeatNodes(events, 1),
-        raw: { directive_id: directiveId, orphan: true },
-      });
+      unthreaded.push(...events);
     }
   }
 
   const roots = [...directiveMap.values()].sort((a, b) => b.id.localeCompare(a.id));
-  if (unthreaded.length > 0) {
+  if (unthreaded.length > 0 || orphanTasks.length > 0) {
+    // Reverse so newest unthreaded events render at the top of the
+    // substrate-noise subtree — matches the "new items at top" rule.
+    const unthreadedNewestFirst = [...unthreaded].reverse();
+    const unthreadedChildren = groupDagHeartbeatNodes(unthreadedNewestFirst, 1);
+    const orphanCount = orphanTasks.length;
     roots.push({
       id: "substrate",
       rowKind: "substrate",
-      title: "Unthreaded substrate events",
-      meta: `${unthreaded.length} events without directive/task`,
-      body: "Events with neither directive_id nor task_id are still visible here.",
+      title: "Substrate noise (no in-buffer directive)",
+      meta: `${unthreaded.length} events + ${orphanCount} orphan tasks`,
+      body: `Events whose directive_opened is older than the recent_events buffer,\nplus tasks whose directive header is similarly out-of-range.\n\nCount: ${unthreaded.length} events + ${orphanCount} tasks.`,
       depth: 0,
-      children: groupDagHeartbeatNodes(unthreaded, 1),
+      children: [...orphanTasks, ...unthreadedChildren],
     });
   }
   return roots;
+};
+
+// Brain in-flight panel detector (option B, 2026-05-15). Scans the event
+// buffer for the most recent `bridge_invoked` whose matching
+// `brain_dispatch_closed` hasn't landed yet. Returns a snapshot for the
+// footer panel so the operator can see what the brain is doing right now
+// — answers the recurring "is the brain working?" question without leaving
+// the view. Returns null when no brain dispatch is in flight.
+type BrainInFlight = {
+  task_id: string;
+  directive_id: string;
+  started_ts: string;
+  elapsed_ms: number;
+  intent: string;
+  latest_kind: string;
+  latest_text: string;
+};
+
+const findBrainInFlight = (state: WatchState, nowMs: number = Date.now()): BrainInFlight | null => {
+  const events = state.events ?? [];
+  let invokedIdx = -1;
+  // Walk newest-first to find the latest bridge_invoked, then check there's
+  // no subsequent brain_dispatch_closed for the same task.
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]!;
+    if (ev.kind === "bridge_invoked") { invokedIdx = i; break; }
+  }
+  if (invokedIdx === -1) return null;
+  const invoked = events[invokedIdx]!;
+  // Any brain_dispatch_closed or bridge_completed AFTER the invoked event
+  // for the same task = closed; suppress the panel.
+  for (let i = invokedIdx + 1; i < events.length; i++) {
+    const ev = events[i]!;
+    if ((ev.kind === "brain_dispatch_closed" || ev.kind === "bridge_completed" || ev.kind === "bridge_failed") &&
+        (ev.task_id === invoked.task_id || !ev.task_id)) {
+      return null;
+    }
+  }
+  const startedMs = Date.parse(invoked.ts);
+  const elapsed = Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : 0;
+  // Find the latest narrative line for this task to surface in the panel.
+  let latestKind = "";
+  let latestText = "";
+  let intent = "";
+  for (let i = events.length - 1; i >= invokedIdx; i--) {
+    const ev = events[i]!;
+    if (ev.task_id !== invoked.task_id) continue;
+    if (!latestKind && (
+      ev.kind === "brain_message_emitted" ||
+      ev.kind === "brain_reasoning_recorded" ||
+      ev.kind === "bridge_frame_received"
+    )) {
+      const p = asObject(ev.payload);
+      latestKind = ev.kind;
+      latestText = asString(p.text, asString(p.message, asString(p.summary, formatPayloadPreview(ev.payload, 180))));
+    }
+    if (!intent && ev.kind === "action_predicted") {
+      const p = asObject(ev.payload);
+      intent = asString(p.intent, "");
+    }
+    if (latestKind && intent) break;
+  }
+  return {
+    task_id: invoked.task_id ?? "(no task)",
+    directive_id: invoked.directive_id ?? "(no directive)",
+    started_ts: invoked.ts,
+    elapsed_ms: elapsed,
+    intent: intent || "(no action_predicted yet)",
+    latest_kind: latestKind || "bridge_invoked",
+    latest_text: latestText || "(waiting for first frame)",
+  };
 };
 
 const flattenDag = (nodes: DagNode[]): ListItem[] => {
@@ -1112,7 +1174,12 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
 
   const listWidth = Math.max(34, Math.floor(safeCols * 0.48));
   const detailWidth = safeCols - listWidth - 3;
-  const listRows = safeRows - 6;
+  const brainFlight = findBrainInFlight(state);
+  // When a brain dispatch is in flight, reserve 2 rows above the status
+  // footer for the BRAIN panel so the operator sees what's running right
+  // now without leaving the view.
+  const brainPanelRows = brainFlight ? 2 : 0;
+  const listRows = safeRows - 6 - brainPanelRows;
   const start = clamp(selected - Math.floor(listRows / 2), 0, Math.max(0, items.length - listRows));
   const parts: string[] = [CLEAR_SCREEN, HOME];
 
@@ -1177,6 +1244,20 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
       parts.push(moveTo(helpTop + i, helpLeft));
       parts.push(`${INVERT}${pad(help[i]!, 56)}${RESET}`);
     }
+  }
+
+  // Brain in-flight panel: 2 rows above the status footer. Row 1 shows
+  // task + directive + elapsed; row 2 shows the latest narrative kind +
+  // text (truncated to the line width). Reuses the YELLOW colour so
+  // "active brain" is visible at a glance.
+  if (brainFlight) {
+    const elapsedS = (brainFlight.elapsed_ms / 1000).toFixed(0);
+    const head = `${BOLD}${YELLOW}BRAIN ⚡${RESET} ${DIM}task=${shortId(brainFlight.task_id, 12)} dir=${shortId(brainFlight.directive_id, 10)} elapsed=${elapsedS}s${RESET} intent=${truncate(brainFlight.intent, Math.max(20, safeCols - 60))}`;
+    const tail = `  ${DIM}${brainFlight.latest_kind}${RESET}: ${truncate(brainFlight.latest_text, safeCols - brainFlight.latest_kind.length - 4)}`;
+    parts.push(moveTo(safeRows - 3, 1));
+    parts.push(truncate(head, safeCols));
+    parts.push(moveTo(safeRows - 2, 1));
+    parts.push(truncate(tail, safeCols));
   }
 
   const statusRow = safeRows - 1;

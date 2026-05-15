@@ -178,12 +178,18 @@ CREATE VIEW IF NOT EXISTS origin_promotion_view AS
     WHERE kind = 'knowledge_promoted'
     GROUP BY substrate_origin
   )
+  -- promotion_ratio is NULL (not 1.0) when there is no signal — candidate
+  -- count = 0 means "we have no evidence yet", not "this origin promotes
+  -- perfectly". Callers (retrieval.ts) treat NULL the same way they treat
+  -- a missing row: fall back to neutral bias. Brain dataflow audit
+  -- bxdhdkm9e #4 (2026-05-15) called the 1.0 fallback an opaque
+  -- placeholder that masked absence as perfection.
   SELECT
     COALESCE(c.substrate_origin, p.substrate_origin)            AS substrate_origin,
     COALESCE(c.cand_count, 0)                                   AS candidate_count,
     COALESCE(p.prom_count, 0)                                   AS promoted_count,
     CASE
-      WHEN COALESCE(c.cand_count, 0) = 0 THEN 1.0
+      WHEN COALESCE(c.cand_count, 0) = 0 THEN NULL
       ELSE CAST(COALESCE(p.prom_count, 0) AS REAL) / CAST(c.cand_count AS REAL)
     END                                                          AS promotion_ratio
   FROM candidates c
@@ -193,7 +199,7 @@ CREATE VIEW IF NOT EXISTS origin_promotion_view AS
     p.substrate_origin                                          AS substrate_origin,
     0                                                            AS candidate_count,
     p.prom_count                                                 AS promoted_count,
-    1.0                                                          AS promotion_ratio
+    NULL                                                         AS promotion_ratio
   FROM promotions p
   WHERE p.substrate_origin NOT IN (SELECT substrate_origin FROM candidates);
 `;
@@ -627,8 +633,13 @@ CREATE VIEW IF NOT EXISTS recipe_registry_view AS
       e.task_id                                                      AS task_id,
       CAST(COALESCE(json_extract(e.payload, '$.confidence'), 0) AS REAL) AS confidence,
       json_extract(e.payload, '$.goal_shape')                        AS goal_shape,
-      COALESCE(json_extract(e.payload, '$.topology_signature'), '')   AS topology_signature,
-      COALESCE(json_extract(e.payload, '$.seeded_by'), 'extracted')   AS status,
+      -- Topology / status: preserve NULL semantics so callers can
+      -- distinguish "absent" from "explicit empty string" / "explicit
+      -- 'extracted'". Brain dataflow audit bxdhdkm9e #4 (2026-05-15) —
+      -- the prior COALESCE-to-empty / COALESCE-to-'extracted' fallback
+      -- hid absence under a default value.
+      json_extract(e.payload, '$.topology_signature')                AS topology_signature,
+      json_extract(e.payload, '$.seeded_by')                         AS status,
       e.payload                                                      AS payload,
       e.context_refs                                                 AS context_refs
     FROM events e
@@ -1509,7 +1520,11 @@ export type OriginPromotionRow = {
   substrate_origin: string;
   candidate_count: number;
   promoted_count: number;
-  promotion_ratio: number;
+  /** NULL when there is no signal (candidate_count = 0) or when the row
+   *  came from the promotions-only UNION branch. Callers MUST treat null
+   *  as "no bias data" — do not coerce to 1.0 (that masks absence as
+   *  perfection). Brain dataflow audit bxdhdkm9e #4. */
+  promotion_ratio: number | null;
 };
 
 export type OwnerConversationRow = {
@@ -2084,7 +2099,7 @@ export const originPromotion = (db: Database): OriginPromotionRow[] => {
     substrate_origin: r.substrate_origin as string,
     candidate_count: r.candidate_count as number,
     promoted_count: r.promoted_count as number,
-    promotion_ratio: r.promotion_ratio as number,
+    promotion_ratio: r.promotion_ratio === null ? null : (r.promotion_ratio as number),
   }));
 };
 

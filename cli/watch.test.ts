@@ -139,6 +139,33 @@ describe("renderFrame", () => {
     expect(out.includes("kind_0 ")).toBe(false);
   });
 
+  test("renders the brain in-flight panel when bridge_invoked is open", () => {
+    const state = {
+      events: [
+        { event_id: "inv_ev", ts: new Date(Date.now() - 7000).toISOString(), kind: "bridge_invoked", directive_id: "D1", task_id: "T1", payload: {} },
+        { event_id: "intent_ev", ts: new Date(Date.now() - 6000).toISOString(), kind: "action_predicted", directive_id: "D1", task_id: "T1", payload: { intent: "audit substrate dataflow holes" } },
+        { event_id: "msg_ev", ts: new Date(Date.now() - 2000).toISOString(), kind: "brain_message_emitted", directive_id: "D1", task_id: "T1", payload: { text: "reasoning step three: cross-checking views" } },
+      ],
+      active: [], ready: [], artifacts: [], health: {},
+    };
+    const out = renderFrame(state, 140, 40);
+    expect(out).toContain("BRAIN");
+    expect(out).toContain("audit substrate dataflow holes");
+    expect(out).toContain("reasoning step three");
+  });
+
+  test("suppresses brain in-flight panel when bridge_completed lands", () => {
+    const state = {
+      events: [
+        { event_id: "inv_ev", ts: "2026-05-13T10:00:00.000Z", kind: "bridge_invoked", directive_id: "D1", task_id: "T1", payload: {} },
+        { event_id: "done_ev", ts: "2026-05-13T10:01:00.000Z", kind: "bridge_completed", directive_id: "D1", task_id: "T1", payload: {} },
+      ],
+      active: [], ready: [], artifacts: [], health: {},
+    };
+    const out = renderFrame(state, 140, 40);
+    expect(out).not.toContain("BRAIN ⚡");
+  });
+
   test("renders DAG view as canonical entry surface (brain audit bs00e26fx)", () => {
     const state = {
       events: [
