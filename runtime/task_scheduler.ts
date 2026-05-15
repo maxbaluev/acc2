@@ -49,6 +49,11 @@ export type SchedulerOpts = {
   pollIntervalMs?: number;
   directiveId?: string;
   fixtureTargetPath?: string;
+  /** EmbeddingIndex threaded through to dispatchReadyTask so depth-1
+   *  retrieval can fire before composePrompt. Without this the brain
+   *  prompt's KNOWLEDGE section is always built from recency, not the
+   *  cosine × posterior reranker. Knowledge audit bc5vdkrik #1. */
+  index?: import("./embedding_index").EmbeddingIndex;
 };
 
 export type SchedulerTick = {
@@ -305,6 +310,7 @@ export const schedulerTick = async (
     // opencode_brain lane → actual dispatch.
     const promise = dispatchReadyTask(db, task, {
       fixtureTargetPath: opts.fixtureTargetPath,
+      index: opts.index,
     })
       .catch((err: Error) => {
         // Per-dispatch error isolation. Record a failure event so the audit

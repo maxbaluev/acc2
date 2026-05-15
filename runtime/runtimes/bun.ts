@@ -143,6 +143,35 @@ const lastBytes = (s: string, n: number): string => {
   return s.slice(s.length - n);
 };
 
+// Universal env-var preflight (2026-05-15). Scans the artifact body for any
+// `process.env.X` reference and verifies X is present on the daemon process.
+// When missing, the runtime emits `owner_input_required` (which flows
+// through SSE → follow tail → Claude Code shell → orchestrator → owner) and
+// refuses to invoke. The brain may have written
+// `fetch(..., { headers: { 'X-API-KEY': process.env.SERPER_API_KEY } })`
+// without owner naming the key in the directive — this gate catches that
+// silently before tokens burn.
+//
+// No fallback: fail-closed when a credential is missing. (User directive:
+// "if system need something from user — it should ask".)
+const ENV_REF_PATTERN = /\bprocess\.env\.([A-Z][A-Z0-9_]+)/g;
+const RUNTIME_ENV_IGNORE = new Set([
+  "ACC2_INPUTS", "ACC2_ARTIFACT_ID", "ACC2_BUDGET_WALL_MS", "ACC2_BUDGET_MEMORY_MB",
+  "PATH", "HOME", "USER", "PWD", "SHELL", "LANG", "LC_ALL", "TERM",
+  "NODE_ENV", "DEBUG",
+]);
+
+const requiredEnvFromBody = (body: string): string[] => {
+  const seen = new Set<string>();
+  for (const m of body.matchAll(ENV_REF_PATTERN)) {
+    const name = m[1]!;
+    if (RUNTIME_ENV_IGNORE.has(name)) continue;
+    if (name.startsWith("ACC2_")) continue;
+    seen.add(name);
+  }
+  return [...seen];
+};
+
 /** Execute an artifact body under a bun subprocess and return the observation.
  *  Tempdir is created + cleaned up here; the caller does not need to manage it.
  *  Watchdog wakes at wall_ms (SIGTERM) and wall_ms × 1.25 (SIGKILL); both
@@ -150,6 +179,35 @@ const lastBytes = (s: string, n: number): string => {
 export const runBunArtifact = async (
   inv: BunRuntimeInvocation,
 ): Promise<BunRuntimeObservation> => {
+  // Universal env preflight — refuse to invoke when the artifact references
+  // process.env.X for X that isn't set. Emit owner_input_required so the
+  // owner sees the gap in the Claude Code shell (NARRATIVE_KINDS already
+  // includes it; the follow tail propagates the event automatically).
+  const refsRequired = requiredEnvFromBody(inv.body);
+  const missingEnv = refsRequired.filter((k) => !process.env[k] || process.env[k]!.length === 0);
+  if (missingEnv.length > 0) {
+    inv.emit?.({
+      kind: "owner_input_required",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: inv.artifactId,
+      payload: {
+        reason: "missing_env_credentials",
+        missing_env_vars: missingEnv,
+        artifact_id: inv.artifactId,
+        instruction: `add ${missingEnv.join(", ")} to .env (or export in your shell), then retry.`,
+      },
+    });
+    return {
+      ok: false,
+      error: `missing_env:${missingEnv.join(",")}`,
+      irreversibleEffects: [],
+      durationMs: 0,
+      exitCode: -1,
+      stderrTail: `acc2 bun runtime: refusing to invoke — artifact references missing env var(s): ${missingEnv.join(", ")}. Add to .env and retry.`,
+      sandboxWarnings: [],
+    };
+  }
+
   const perm = buildBunPermissionArgs(inv.declaredSandbox);
   const wallMs = inv.budget?.wallMs ?? inv.declaredSandbox.wall_ms;
   const memoryMb = inv.budget?.memoryMb ?? inv.declaredSandbox.memory_mb;

@@ -91,6 +91,15 @@ export const EVENT_KINDS = {
   knowledge_promoted:                      { producer: "substrate", embeddable: true,  mirror_inline: false, health_metric: false },
   knowledge_demoted:                       { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   contradictory_candidates:                { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
+  // Knowledge audit bc5vdkrik finding #4 (2026-05-15): emitted by the
+  // substrate every time a knowledge entry is injected into a brain prompt
+  // section (depth-1 retrieval) OR returned by substrate.search. Carries
+  // {query, source_event_id, rendered_snippet, rank, rerank_score,
+  // posterior, binding_surface: "prompt" | "search"}. Closes the four-link
+  // credit chain (k_554/k_555): action_predicted.context_refs cites the
+  // binding id, credit resolves binding → source_event_id, posterior
+  // updates on the cited candidate/promoted row.
+  retrieval_binding:                       { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
 
   // ── Code artifacts (LATM / Voyager) ─────────────────────────────────
   code_artifact_candidate:                 { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },

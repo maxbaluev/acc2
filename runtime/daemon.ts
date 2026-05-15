@@ -918,6 +918,12 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
             pollIntervalMs: 1000,
             maxConcurrent: 5,
             abort: schedulerAbort?.signal,
+            // Knowledge audit bc5vdkrik #1 (2026-05-15): thread the
+            // embedding index through to the dispatcher so depth-1
+            // retrieval runs against the task goal text before the
+            // brain prompt is composed. Without this the brain prompt's
+            // KNOWLEDGE section is recency-only — operationally dead.
+            index,
           });
           recordWorkerTick("scheduler");
           // Brain audit D (2026-05-15): the scheduler doesn't go through

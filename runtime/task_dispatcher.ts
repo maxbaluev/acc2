@@ -78,6 +78,14 @@ type DispatchDeps = {
   /** Optional fixture path threaded into the bridge request. The MVP fixture
    *  reads it to point the bun grep at a deterministic directory. */
   fixtureTargetPath?: string;
+  /** Embedding index for depth-1 retrieval. When present, the dispatcher
+   *  calls `retrieve(db, index, ...)` against the task goal text BEFORE
+   *  composePrompt and passes the result as `retrievedKnowledge` so the
+   *  brain prompt's KNOWLEDGE section is reranked by cosine × posterior
+   *  × origin bias (not recency). Knowledge audit bc5vdkrik finding #1
+   *  (2026-05-15): without this wiring depth-1 retrieval is dead — the
+   *  prompt section always fell back to readKnowledgeTopK's recency scan. */
+  index?: import("./embedding_index").EmbeddingIndex;
 };
 
 const readEventsForDispatch = (db: Database, dispatchId: string): Event[] => {
@@ -265,7 +273,53 @@ export const dispatchReadyTask = async (
   }
 
   // 3. opencode_brain — compose prompt + call bridge.
-  const composed = composePrompt(db, { taskId: task.id });
+  //
+  // Depth-1 retrieval: when an embedding index is available, retrieve
+  // knowledge against the task goal text + emit one `retrieval_binding`
+  // event per hit. Without this, the brain prompt's KNOWLEDGE section
+  // falls back to recency scan (operationally dead — knowledge audit
+  // bc5vdkrik #1 + lesson "memory surface can appear healthy while being
+  // operationally dead if prompt composition renders only handles").
+  let retrievedKnowledge: import("./retrieval").RetrievalResult | null = null;
+  if (deps.index) {
+    try {
+      const { retrieve } = await import("./retrieval");
+      retrievedKnowledge = await retrieve(db, deps.index, {
+        text: task.goal ?? task.directive_id,
+        k: 8,
+        kindFilter: ["knowledge_candidate", "knowledge_promoted", "knowledge_synthesized"],
+        goalText: task.goal,
+      });
+      // Emit retrieval_binding for each hit so the credit chain
+      // (action_predicted.context_refs → binding → source_event_id) can
+      // mutate the cited posterior on outcome (k_554 citation = mutation).
+      for (let rank = 0; rank < retrievedKnowledge.hits.length; rank++) {
+        const hit = retrievedKnowledge.hits[rank]!;
+        emitEvent(db, {
+          kind: "retrieval_binding",
+          substrate_origin: "substrate_auto",
+          directive_id: task.directive_id,
+          task_id: task.id,
+          payload: {
+            query: task.goal ?? "",
+            source_event_id: hit.event_id,
+            rendered_snippet: hit.snippet,
+            rank,
+            rerank_score: hit.rerank_score,
+            posterior: hit.posterior,
+            binding_surface: "prompt",
+          } as JsonValue,
+        });
+      }
+    } catch (err) {
+      logger.warn(
+        { where: "dispatcher.retrieve", err: (err as Error).message, task_id: task.id },
+        "depth-1 retrieval failed — composing prompt without KNOWLEDGE section",
+      );
+      retrievedKnowledge = null;
+    }
+  }
+  const composed = composePrompt(db, { taskId: task.id, retrievedKnowledge });
   bridgeResult = await bridge(
     {
       prompt: composed.text,

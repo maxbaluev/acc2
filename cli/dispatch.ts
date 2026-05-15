@@ -50,10 +50,54 @@ const usage = (): string => `acc — v2 thin CLI
   acc doctor                      Multi-check readiness report.
 `;
 
+// Credential preflight (universal gate, 2026-05-15). Scans the owner's
+// directive text for any ALL_CAPS env-var-shaped identifier
+// (`<NAME>_KEY` / `_TOKEN` / `_SECRET` / `_PASSWORD`). If any is referenced
+// but unset in process.env, refuse to dispatch.
+//
+// Universal — no hardcoded service list. Works for SERPER_API_KEY,
+// OPENAI_API_KEY, GITHUB_TOKEN, STRIPE_SECRET_KEY, DATABASE_PASSWORD,
+// or any future credential the owner mentions.
+//
+// Fail-closed: missing → refuse + clear "add to .env" message.
+// (User directives: "no fallbacks" + "if system need something from user
+// — it should ask".) The matching runtime gate in
+// runtime/runtimes/bun.ts catches credentials the brain references
+// internally (process.env.X in artifact body) without owner naming them.
+const ENV_VAR_TOKEN = /\b([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)*(?:_KEY|_TOKEN|_SECRET|_PASSWORD))\b/g;
+// Exclude env vars the substrate manages itself (these are operational and
+// always present after `acc init`).
+const PREFLIGHT_IGNORE = new Set([
+  "ACC2_ADMIN_TOKEN", "ACC2_EXTERNAL_PUSH_TOKEN",
+]);
+
+const preflightCredentials = (words: string): string[] => {
+  const seen = new Set<string>();
+  for (const m of words.matchAll(ENV_VAR_TOKEN)) {
+    const name = m[1]!;
+    if (PREFLIGHT_IGNORE.has(name)) continue;
+    if (process.env[name] && process.env[name]!.length > 0) continue;
+    seen.add(name);
+  }
+  return [...seen];
+};
+
 const dispatchTask = async (
   words: string,
   opts: { follow?: boolean; timeoutSecs?: number } = {},
 ): Promise<number> => {
+  // Pre-dispatch credential check. Refuses when an env-var-shaped token
+  // appears in the directive text without a value in process.env.
+  const missing = preflightCredentials(words);
+  if (missing.length > 0) {
+    console.error(`acc task: missing required env var(s): ${missing.join(", ")}`);
+    console.error(`  the directive references these credentials but they are not set on the daemon process.`);
+    console.error(`  add to .env (or export in your shell) and rerun:`);
+    for (const k of missing) console.error(`    ${k}=...`);
+    console.error(`  refusing to dispatch — would have burned brain tokens probing without the credential.`);
+    return 2;
+  }
+
   // `substrate.open_directive` is the canonical write surface: it emits
   // `directive_opened` AND the root `task_node_opened` in one transaction
   // so the scheduler has a ready task to dispatch on the next tick. Using
