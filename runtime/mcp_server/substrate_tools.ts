@@ -86,6 +86,62 @@ const isBrainInvoker = (invoker: string | undefined): boolean => {
   return invoker === "opencode" || invoker === "recipe";
 };
 
+/** Detect directive_text that looks like a leaked prompt-composer
+ *  template — the brain's prompt fed BACK as a new directive's content.
+ *  Live ledger 2026-05-15 02:00-03:07 showed recursive openings whose
+ *  text begins with "TASK GOAL:" (or quoted variants) plus WORKFLOW /
+ *  DIRECTIVE ID markers. These are the signatures the prompt composer
+ *  injects into the brain's prompt; they should never appear in a fresh
+ *  directive_text. Returns the matched signature string on detection,
+ *  null when the text is clean. */
+const detectPromptTemplateLeak = (text: string): string | null => {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return null;
+  // (1) Recursive prefix doubling — the smoking gun from the live ledger.
+  if (/TASK GOAL:\s*TASK GOAL:/i.test(trimmed)) return "recursive_task_goal_doubled";
+  // (2) Single TASK GOAL: at the start of a fresh directive is almost
+  // always a prompt-leak (real owner phrasing rarely begins this way).
+  if (/^\s*"?TASK GOAL:/i.test(trimmed)) return "leading_task_goal_marker";
+  // (3) WORKFLOW + DIRECTIVE ID + RUNTIMES — three markers the prompt
+  // composer always injects; their joint presence is conclusive.
+  const markers = [
+    /\bDIRECTIVE ID:\s*\w/i,
+    /\bRUNTIMES AVAILABLE\b/i,
+    /\bYOUR WORKFLOW\b/i,
+    /\bRETRIEVED KNOWLEDGE\b/i,
+    /\bCONSTITUTIONAL GATES ACTIVE\b/i,
+  ];
+  const hits = markers.reduce((n, re) => n + (re.test(trimmed) ? 1 : 0), 0);
+  if (hits >= 2) return `prompt_composer_markers_count=${hits}`;
+  return null;
+};
+
+/** Find an already-open (non-closed, non-archived) directive whose
+ *  directive_text matches the supplied text exactly. Used by
+ *  handleOpenDirective for idempotent same-directive dedup — pre-fix the
+ *  CLI / brain / Father autonomous loop could legitimately retry an
+ *  opening and produce duplicate top-level directives competing for the
+ *  same scheduler slots. */
+const findOpenDirectiveByText = (
+  ctxDb: Parameters<typeof emitEvent>[0],
+  text: string,
+): string | null => {
+  const row = ctxDb
+    .query(
+      `SELECT directive_id FROM events
+       WHERE kind = 'directive_opened'
+         AND json_extract(payload, '$.directive_text') = ?
+         AND directive_id NOT IN (
+           SELECT directive_id FROM events
+           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         )
+       ORDER BY ts ASC LIMIT 1`,
+    )
+    .get(text) as { directive_id: string } | null;
+  return row?.directive_id ?? null;
+};
+
 export const handleEmit = (
   ctx: McpContext,
   args: z.infer<typeof EmitSchema>,
@@ -103,6 +159,33 @@ export const handleEmit = (
       ok: false,
       error: `brain_forbidden_kind:${kind}; brain decomposes via task_node_opened+task_edge_recorded under the current directive`,
     };
+  }
+  // Idempotent task dedup: same (directive_id, goal) under an open
+  // directive is a no-op. Pre-fix the brain looping a refinement edge
+  // would re-emit task_node_opened with the same goal, the scheduler
+  // would see "new task" each time, and the DAG would explode with
+  // duplicate work. We return the existing task_id so the caller's
+  // refinement-edge wiring still resolves correctly.
+  if (kind === "task_node_opened") {
+    const directiveId = src.directive_id as string | undefined;
+    const goalRaw = ((src.payload as Record<string, unknown> | undefined)?.goal) ?? undefined;
+    const goal = typeof goalRaw === "string" ? goalRaw : undefined;
+    if (directiveId && goal && goal.length > 0) {
+      const existing = ctx.db
+        .query(
+          `SELECT task_id FROM events
+           WHERE kind = 'task_node_opened' AND directive_id = ?
+             AND json_extract(payload, '$.goal') = ?
+           ORDER BY ts ASC LIMIT 1`,
+        )
+        .get(directiveId, goal) as { task_id: string } | null;
+      if (existing) {
+        return {
+          ok: true,
+          result: { id: existing.task_id, deduped: true, reason: "task_goal_already_opened" } as JsonValue,
+        };
+      }
+    }
   }
   const input: EmitEventInput = {
     kind: kind as EmitEventInput["kind"],
@@ -588,6 +671,35 @@ export const handleOpenDirective = (
     return {
       ok: false,
       error: "brain_forbidden_op:substrate.open_directive; use task_node_opened + task_edge_recorded (refines) under the current directive instead",
+    };
+  }
+  // Structural prompt-template-leak gate: refuse directive_text that looks
+  // like a leaked prompt-composer template (TASK GOAL: markers, WORKFLOW
+  // / DIRECTIVE ID / RUNTIMES AVAILABLE prefaces, recursive doubling).
+  // Catches the autonomous Father / shelled-out brain loop that fed its
+  // OWN prompt back as a directive — the live ledger 2026-05-15 02:00-03:07
+  // had 10+ such recursive openings before this gate.
+  const leak = detectPromptTemplateLeak(args.directive_text);
+  if (leak) {
+    return {
+      ok: false,
+      error: `prompt_template_leak_refused:${leak}; directive_text must be fresh owner intent, not a re-injected prompt`,
+    };
+  }
+  // Idempotent dedup: if an OPEN directive with the exact same text
+  // already exists (not closed / not archived), return its id instead of
+  // opening a duplicate. Pre-fix double-clicks and shell loops produced
+  // sibling directives competing for the same concurrency slots.
+  const existing = findOpenDirectiveByText(ctx.db, args.directive_text);
+  if (existing) {
+    return {
+      ok: true,
+      result: {
+        directive_id: existing,
+        task_id: existing,
+        deduped: true,
+        reason: "open_directive_text_already_exists",
+      } as JsonValue,
     };
   }
   const directiveId = newId();
