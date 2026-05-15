@@ -1065,3 +1065,138 @@ export const extractRecipeFromCommit = (
   });
   return { extracted: 1, recipe_id: recipeId };
 };
+
+// ──────────────────────────────────────────────────────────────────────
+// Auto cross-directive interference detection (organism-alignment Track C,
+// 2026-05-15). Scans code_artifact rows for overlapping target_files
+// across directives. When two distinct directives admit artifacts that
+// mutate the same file path, that's a structural `resource_conflict` —
+// dispatching them concurrently risks racing edits. Emits one
+// `directive_interference_edge` event per discovered conflict; dedupes
+// against existing edges so re-running is a no-op.
+//
+// Pre-fix the substrate had the mechanism (`directive_interference_edge`
+// kind + scheduler defer logic) but only manual `substrate.record_
+// interference_edge` calls populated it. Parallel multi-goal work was
+// therefore racing on shared files invisibly.
+
+export type DirectiveInterferenceSummary = { proposed: number; deduped: number };
+
+const collectArtifactDirectives = (
+  db: Database,
+): Map<string, Map<string, Set<string>>> => {
+  // file_path → directive_id → Set<artifact_id>
+  // Two distinct directives sharing a file → resource_conflict.
+  const byFile = new Map<string, Map<string, Set<string>>>();
+
+  // code_artifact.source_candidate_id points back to the originating
+  // code_artifact_candidate event; that event's directive_id is the
+  // artifact's owning goal. Old artifacts without source_candidate_id
+  // are skipped — they pre-date the schema and we don't synthesize
+  // ownership from heuristics (PRIOR 2: never silently fallback).
+  const rows = db
+    .query(
+      `SELECT
+         a.id              AS artifact_id,
+         a.target_files    AS target_files,
+         e.directive_id    AS directive_id
+       FROM code_artifact a
+       LEFT JOIN events e
+         ON e.kind = 'code_artifact_candidate'
+        AND e.id = a.source_candidate_id
+       WHERE a.target_files IS NOT NULL
+         AND a.source_candidate_id IS NOT NULL
+         AND a.status IN ('admitted', 'promoted')`,
+    )
+    .all() as Array<{ artifact_id: string; target_files: string; directive_id: string | null }>;
+
+  for (const r of rows) {
+    if (!r.directive_id) continue;
+    let files: string[];
+    try {
+      const parsed = JSON.parse(r.target_files);
+      if (!Array.isArray(parsed)) continue;
+      files = parsed.map(String);
+    } catch { continue; }
+    for (const file of files) {
+      const byDirective = byFile.get(file) ?? new Map<string, Set<string>>();
+      const artifacts = byDirective.get(r.directive_id) ?? new Set<string>();
+      artifacts.add(r.artifact_id);
+      byDirective.set(r.directive_id, artifacts);
+      byFile.set(file, byDirective);
+    }
+  }
+  return byFile;
+};
+
+const readExistingInterferencePairs = (db: Database): Set<string> => {
+  // Build a "from→to|kind" set so we can dedupe. resource_conflict is
+  // symmetric: we treat (a→b) and (b→a) as the same edge for the dedup
+  // check by also adding the reverse key.
+  const out = new Set<string>();
+  const rows = db
+    .query(
+      `SELECT payload FROM events
+       WHERE kind = 'directive_interference_edge'`,
+    )
+    .all() as Array<{ payload: string }>;
+  for (const r of rows) {
+    try {
+      const p = JSON.parse(r.payload) as Record<string, unknown>;
+      const from = p.from_directive as string | undefined;
+      const to = p.to_directive as string | undefined;
+      const kind = p.kind as string | undefined;
+      if (!from || !to || !kind) continue;
+      out.add(`${from}|${to}|${kind}`);
+      out.add(`${to}|${from}|${kind}`);
+    } catch { /* skip */ }
+  }
+  return out;
+};
+
+export const extractDirectiveInterference = (
+  db: Database,
+): DirectiveInterferenceSummary => {
+  const byFile = collectArtifactDirectives(db);
+  const existing = readExistingInterferencePairs(db);
+  let proposed = 0;
+  let deduped = 0;
+
+  // For each file with > 1 owning directive, emit pairwise edges. The
+  // owning-artifact ids land in the payload as evidence so an operator
+  // can audit which artifacts are causing the conflict.
+  for (const [file, byDirective] of byFile) {
+    const directives = [...byDirective.keys()];
+    if (directives.length < 2) continue;
+    for (let i = 0; i < directives.length; i++) {
+      for (let j = i + 1; j < directives.length; j++) {
+        const a = directives[i]!;
+        const b = directives[j]!;
+        const key = `${a}|${b}|resource_conflict`;
+        if (existing.has(key)) { deduped++; continue; }
+        const evidenceA = [...byDirective.get(a)!];
+        const evidenceB = [...byDirective.get(b)!];
+        insertEvent(db, {
+          kind: "directive_interference_edge",
+          directive_id: a,
+          substrate_origin: "substrate_auto",
+          payload: {
+            from_directive: a,
+            to_directive: b,
+            kind: "resource_conflict",
+            reason: `shared_target_file:${file}`,
+            shared_file: file,
+            evidence_artifacts_from: evidenceA,
+            evidence_artifacts_to: evidenceB,
+            detected_by: "extractDirectiveInterference",
+          },
+          context_refs: [...evidenceA, ...evidenceB],
+        });
+        proposed++;
+        existing.add(key);
+        existing.add(`${b}|${a}|resource_conflict`);
+      }
+    }
+  }
+  return { proposed, deduped };
+};

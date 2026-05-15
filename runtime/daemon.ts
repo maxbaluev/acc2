@@ -578,6 +578,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       extractCodeArtifactScores,
       extractRecipeCandidates,
       extractSemanticDedup,
+      extractDirectiveInterference,
     } = await import("../substrate/extractors");
     const runExtractorsOnce = async (): Promise<void> => {
       try { extractKnowledgePromotions(db); } catch (err) {
@@ -591,6 +592,14 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       }
       try { extractSemanticDedup(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.semantic_dedup", err: (err as Error).message }, "semantic-dedup extractor tick failed");
+      }
+      // Auto cross-directive interference (organism-alignment Track C,
+      // 2026-05-15): scan code_artifact.target_files for cross-directive
+      // overlap and emit resource_conflict edges so the scheduler defers
+      // racing dispatches. Idempotent — re-runs dedupe against existing
+      // edges.
+      try { extractDirectiveInterference(db); } catch (err) {
+        logger.warn({ where: "daemon.extractors.directive_interference", err: (err as Error).message }, "directive-interference extractor tick failed");
       }
     };
     let extractorsMarked = false;

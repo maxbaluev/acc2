@@ -77,6 +77,8 @@ const NON_EVENT_KIND_LITERALS = new Set([
   "promoted", "demoted",
   // Stakeholder interaction enum
   "mutual_exclusion", "water_damage", "evacuation",
+  // Interference-edge kinds (payload values of directive_interference_edge)
+  "resource_conflict",
   "none", "unspecified", "yield_template",
   // Compositor task-kind strings
   "stakeholder_consult",

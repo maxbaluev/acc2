@@ -160,6 +160,12 @@ export const selectByPriorityAndFreshnessAndConflicts = (
   nowIso: string,
   inFlightDirectives: ReadonlySet<string> = new Set<string>(),
   recipeBackedTemplateIds: ReadonlySet<string> = new Set<string>(),
+  /** Multi-goal alignment (2026-05-15): directives that have unresolved
+   *  owner_input_required events. Father MUST NOT pick a goal that's
+   *  waiting for human input — that wastes brain dispatches on a goal
+   *  that cannot make progress until the operator answers. Caller
+   *  derives the set from the events ledger (see fatherIterate). */
+  ownerBlockedDirectives: ReadonlySet<string> = new Set<string>(),
 ): PriorityChoice => {
   if (rollingReviews.length > 0) {
     const sorted = [...rollingReviews].sort((a, b) =>
@@ -198,7 +204,18 @@ export const selectByPriorityAndFreshnessAndConflicts = (
   };
   const objectivesSorted = [...objectives]
     .filter((o) => !blockedSet.has(o.directive_id))
+    // Owner-input-required directives are NOT skipped silently — they
+    // remain in the list but sort to the bottom via the ownerBlocked
+    // tier below, so they get picked only when nothing else qualifies.
+    // (Skipping entirely would hide them from Father's view; down-ranking
+    // keeps the audit chain visible.)
     .sort((a, b) => {
+      // Owner-blocked sort to bottom — Father picks them only if nothing
+      // else qualifies; this preserves visibility (operator can SEE the
+      // queue) while preventing wasted dispatches.
+      const oa = ownerBlockedDirectives.has(a.directive_id) ? 1 : 0;
+      const ob = ownerBlockedDirectives.has(b.directive_id) ? 1 : 0;
+      if (oa !== ob) return oa - ob;
       // Conflict-deferred objectives sort AFTER non-deferred ones (down-rank,
       // do not skip — they remain selectable when nothing else qualifies).
       const da = conflictDeferred.has(a.directive_id) ? 1 : 0;
@@ -265,6 +282,30 @@ export const recipeBackedFatherTemplateIds = (
     if (match) out.add(template.template_id);
   }
   return out;
+};
+
+/** Directives with unresolved owner_input_required events. A directive
+ *  is owner-blocked when its most-recent owner_input_required has no
+ *  later owner_decision_recorded for the same directive. Brain audit
+ *  organism-alignment Track D (2026-05-15). */
+const readOwnerBlockedDirectives = (db: Database): Set<string> => {
+  const rows = db
+    .query(
+      `SELECT directive_id, kind, ts FROM events
+       WHERE kind IN ('owner_input_required', 'owner_decision_recorded')
+         AND directive_id IS NOT NULL
+       ORDER BY ts ASC`,
+    )
+    .all() as Array<{ directive_id: string; kind: string; ts: string }>;
+  // Walk in chronological order; track which directives are currently
+  // open-on-input. owner_input_required opens the block; the next
+  // owner_decision_recorded on the same directive closes it.
+  const blocked = new Set<string>();
+  for (const r of rows) {
+    if (r.kind === "owner_input_required") blocked.add(r.directive_id);
+    else if (r.kind === "owner_decision_recorded") blocked.delete(r.directive_id);
+  }
+  return blocked;
 };
 
 /** Find the most-recent fire timestamp for each Father directive template
@@ -461,6 +502,13 @@ export const fatherIterate = async (
   // that have a mutual_exclusion / resource_conflict edge to a directive
   // currently running a brain dispatch.
   const inFlight = inFlightDirectivesFromSql(db);
+  // Multi-goal alignment (2026-05-15): directives with unresolved
+  // owner_input_required events. A directive is owner-blocked when
+  // its most-recent owner_input_required has no later owner_decision_recorded
+  // (or task_committed clearing the gate). Father down-ranks owner-blocked
+  // directives so brain dispatches don't waste cycles on goals that can't
+  // make progress until the operator answers.
+  const ownerBlocked = readOwnerBlockedDirectives(db);
 
   const choice = selectByPriorityAndFreshnessAndConflicts(
     objectives,
@@ -471,6 +519,7 @@ export const fatherIterate = async (
     ts,
     inFlight,
     recipeBackedTemplates,
+    ownerBlocked,
   );
 
   if (choice.kind === "rolling_review") {
