@@ -611,8 +611,13 @@ CREATE VIEW IF NOT EXISTS promoted_knowledge_view AS
       json_extract(p.context_refs, '$[0]')
     )                                                              AS candidate_id,
     p.directive_id                                                AS directive_id,
-    CAST(COALESCE(json_extract(p.payload, '$.score'), 0) AS REAL)  AS score,
-    CAST(COALESCE(json_extract(p.payload, '$.confidence'), 0) AS REAL) AS confidence,
+    -- Organism-alignment audit b3qc9ryzj finding #7 (2026-05-15):
+    -- absent score/confidence/tags shouldn't masquerade as
+    -- "explicit zero / empty tags". Preserve NULL semantics so
+    -- callers can distinguish "producer omitted the field" from
+    -- "producer wrote 0".
+    CAST(json_extract(p.payload, '$.score') AS REAL)               AS score,
+    CAST(json_extract(p.payload, '$.confidence') AS REAL)          AS confidence,
     -- Brain knowledge audit bc5vdkrik finding #2 (2026-05-15): the
     -- candidate payload can carry the truth-bearing text under any of
     -- {text, claim, summary, insight}. The synthesized variant lives
@@ -626,7 +631,7 @@ CREATE VIEW IF NOT EXISTS promoted_knowledge_view AS
       json_extract(c.payload, '$.insight'),
       json_extract(p.payload, '$.synthesized_text')
     )                                                              AS text,
-    COALESCE(json_extract(c.payload, '$.tags'), '[]')              AS tags,
+    json_extract(c.payload, '$.tags')                              AS tags,
     p.context_refs                                                 AS context_refs
   FROM events p
   LEFT JOIN events c

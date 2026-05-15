@@ -261,6 +261,38 @@ const wrapPythonBody = (body: string): string => [
 export const runUvArtifact = async (
   inv: UvRuntimeInvocation,
 ): Promise<UvRuntimeObservation> => {
+  // Organism-alignment audit finding #1 (b3qc9ryzj, 2026-05-15): env_requires
+  // was only enforced in the bun runtime. uv silently passed ambient
+  // process.env into the subprocess and let missing credentials fail
+  // opaquely inside the Python script. Apply the same declared-grammar
+  // gate here — refuse to invoke when declared env vars are missing,
+  // emit owner_input_required so operator sees the gap via SSE.
+  const envRequires = inv.declaredSandbox.env_requires ?? [];
+  const missingEnv = envRequires.filter((k) => !process.env[k] || process.env[k]!.length === 0);
+  if (missingEnv.length > 0) {
+    inv.emit?.({
+      kind: "owner_input_required",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: inv.artifactId,
+      payload: {
+        reason: "missing_env_credentials",
+        missing_env_vars: missingEnv,
+        artifact_id: inv.artifactId,
+        runtime: "uv",
+        instruction: `add ${missingEnv.join(", ")} to .env (or export in your shell), then retry.`,
+      },
+    });
+    return {
+      ok: false,
+      error: `missing_env:${missingEnv.join(",")}`,
+      irreversibleEffects: [],
+      durationMs: 0,
+      exitCode: -1,
+      stderrTail: `acc2 uv runtime: refusing to invoke — declared env_requires missing: ${missingEnv.join(", ")}`,
+      sandboxWarnings: [],
+    };
+  }
+
   const perm = buildUvPermissionArgs(inv.declaredSandbox);
   const wallMs = inv.budget?.wallMs ?? inv.declaredSandbox.wall_ms;
   const memoryMb = inv.budget?.memoryMb ?? inv.declaredSandbox.memory_mb;

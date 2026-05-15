@@ -357,6 +357,36 @@ const installHint =
 export const runCamofoxArtifact = async (
   inv: CamofoxRuntimeInvocation,
 ): Promise<CamofoxRuntimeObservation> => {
+  // Organism-alignment audit finding #1 (b3qc9ryzj, 2026-05-15): apply the
+  // bun runtime's env_requires gate uniformly to camofox-browser. Missing
+  // declared env vars now emit owner_input_required + refuse to invoke.
+  const envRequires = inv.declaredSandbox.env_requires ?? [];
+  const missingEnv = envRequires.filter((k) => !process.env[k] || process.env[k]!.length === 0);
+  if (missingEnv.length > 0) {
+    inv.emit?.({
+      kind: "owner_input_required",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: inv.artifactId,
+      payload: {
+        reason: "missing_env_credentials",
+        missing_env_vars: missingEnv,
+        artifact_id: inv.artifactId,
+        runtime: "camofox-browser",
+        instruction: `add ${missingEnv.join(", ")} to .env (or export in your shell), then retry.`,
+      },
+    });
+    return {
+      ok: false,
+      error: `missing_env:${missingEnv.join(",")}`,
+      irreversibleEffects: [],
+      durationMs: 0,
+      exitCode: -1,
+      stderrTail: `acc2 camofox runtime: refusing to invoke — declared env_requires missing: ${missingEnv.join(", ")}`,
+      sandboxWarnings: [],
+      profileRoot: inv.declaredSandbox.browser_profile_root,
+    };
+  }
+
   const perm = buildCamofoxPermissionArgs(inv.declaredSandbox);
   const wallMs = inv.budget?.wallMs ?? inv.declaredSandbox.wall_ms;
   const memoryMb = inv.budget?.memoryMb ?? inv.declaredSandbox.memory_mb;

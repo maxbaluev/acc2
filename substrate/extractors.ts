@@ -551,10 +551,16 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
 
   if (!haveEmbeddings) {
     // §3.6.1 Rule 1 needs cosine similarity; without embeddings we
-    // cannot honestly dedup. We advance the cursor so we do not rescan
-    // unembedded rows on every tick — the embedder worker will revisit
-    // when text-embedding-3-small lands.
-    writeMeta(db, META_KEYS.dedup, latestTs);
+    // cannot honestly dedup. Organism-alignment audit b3qc9ryzj
+    // finding #8 (2026-05-15): pre-fix this branch advanced the
+    // cursor PAST unembedded candidates so they were never revisited
+    // — when the embedder worker later filled the embedding column,
+    // those rows had ts older than the cursor and got permanently
+    // skipped, breaking the four-link credit chain for those entries.
+    // Fix: do NOT advance the cursor when no embeddings landed yet.
+    // The next tick will rescan the same window; once the embedder
+    // fills at least one row, the loop falls through to the dedup
+    // pass and advances honestly.
     return { merged: 0, contradicted: 0 };
   }
 
