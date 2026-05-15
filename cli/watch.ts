@@ -1,33 +1,9 @@
 #!/usr/bin/env bun
-// `acc watch` — Bun-native ANSI TUI subscribing to the daemon's SSE event
-// stream. Per v2-design.md §21, the v2 watch surface subscribes to the
-// daemon's event stream instead of polling SQLite. Regions (top-to-bottom,
-// columns inferred at render time from process.stdout.columns):
-//
-//   • Active Directives (top, ~5 lines) — last N rolling-active or recently
-//     opened directives.
-//   • Recent Events (middle, ~20 lines) — tail of the last 30 events as they
-//     stream in via SSE.
-//   • Ready Tasks / Artifact Leaderboard (right column) — refreshed every
-//     2s by polling substrate.read views.
-//   • Daemon Health (bottom, 2 lines) — pid, uptime, events_count, ports.
-//
-// Keystrokes (raw mode):
-//   q / Ctrl-C → exit cleanly (restore cursor + alt-buffer mode).
-//   r → force a full re-render against fresh substrate reads.
-//
-// Implementation notes:
-//   - No external TUI deps. Plain ANSI escape codes via the constants below.
-//   - The alt-buffer (CSI ?1049 h/l) is entered on startup and exited on
-//     teardown so the operator's existing shell scrollback is preserved.
-//   - Cursor is hidden during runtime and restored on exit.
-//   - Initial buffer fill via runtime.recent_events; SSE keeps it warm.
-//   - Polling for the side regions runs on a 2s setInterval; the timer is
-//     cleared on shutdown so the process exits cleanly.
+// `acc watch` - ANSI TUI for the substrate event stream. The public test
+// surface is intentionally small: keep runWatch(argv, opts?) and
+// renderFrame(state, columns, rows) stable and side-effect free.
 
 import { mcpCall, sseConnect, type SseEvent, requireAux, rpcGet } from "./rpc";
-
-// ── ANSI codes ─────────────────────────────────────────────────────
 
 const CSI = "\x1b[";
 const CLEAR_SCREEN = `${CSI}2J`;
@@ -39,26 +15,31 @@ const ALT_EXIT = `${CSI}?1049l`;
 const RESET = `${CSI}0m`;
 const BOLD = `${CSI}1m`;
 const DIM = `${CSI}2m`;
-const CYAN = `${CSI}36m`;
+const RED = `${CSI}31m`;
 const GREEN = `${CSI}32m`;
 const YELLOW = `${CSI}33m`;
 const MAGENTA = `${CSI}35m`;
+const CYAN = `${CSI}36m`;
+const WHITE = `${CSI}37m`;
+const INVERT = `${CSI}7m`;
 
 const moveTo = (row: number, col: number): string => `${CSI}${row};${col}H`;
-
-// ── Types ──────────────────────────────────────────────────────────
 
 type ActiveDirective = {
   directive_id: string;
   opened_ts: string;
   text: string;
   lifecycle: string;
+  status?: string;
+  urgency?: string;
 };
 
 type ReadyTask = {
   task_id: string;
   directive_id: string;
   goal: string;
+  status?: string;
+  depth?: number;
 };
 
 type ArtifactRow = {
@@ -67,6 +48,31 @@ type ArtifactRow = {
   score: number;
   status: string;
   name: string | null;
+  confidence?: number;
+};
+
+type RecipeRow = {
+  id: string;
+  name: string;
+  confidence: number;
+  goal_shape?: string;
+  status?: string;
+};
+
+type LessonRow = {
+  id: string;
+  kind: string;
+  summary: string;
+  target?: string;
+  ts?: string;
+};
+
+type KnowledgeRow = {
+  id: string;
+  text: string;
+  score: number;
+  status?: string;
+  origin?: string;
 };
 
 type DaemonHealth = {
@@ -75,6 +81,8 @@ type DaemonHealth = {
   events_count?: number;
   mcp_port?: number;
   aux_port?: number;
+  ok?: boolean;
+  status?: string;
 };
 
 type EventRow = {
@@ -86,95 +94,187 @@ type EventRow = {
   payload?: unknown;
 };
 
+type ViewKey = "directives" | "tasks" | "events" | "artifacts" | "recipes" | "lessons" | "interventions" | "knowledge";
+
 export type WatchState = {
-  events: EventRow[]; // ts-ASC, max length = MAX_EVENTS
+  events: EventRow[];
   active: ActiveDirective[];
   ready: ReadyTask[];
   artifacts: ArtifactRow[];
   health: DaemonHealth;
+  recipes?: RecipeRow[];
+  lessons?: LessonRow[];
+  knowledge?: KnowledgeRow[];
+  view?: ViewKey;
+  selected?: Partial<Record<ViewKey, number>>;
+  filter?: string;
+  showHelp?: boolean;
 };
 
-const MAX_EVENTS = 30;
-const MAX_ACTIVE = 5;
-const MAX_READY = 10;
-const MAX_ARTIFACTS = 10;
+type ListItem = {
+  id: string;
+  title: string;
+  meta: string;
+  body: string;
+  status?: string;
+  kind?: string;
+  score?: number;
+  raw?: unknown;
+};
 
-// ── State helpers ──────────────────────────────────────────────────
+const MAX_EVENTS = 300;
+const MAX_INITIAL_EVENTS = 120;
+const POLL_INTERVAL_MS = 2000;
+const VIEWS: Array<{ key: ViewKey; label: string }> = [
+  { key: "directives", label: "Directives" },
+  { key: "tasks", label: "Tasks" },
+  { key: "events", label: "Recent Events" },
+  { key: "artifacts", label: "Code Artifacts" },
+  { key: "recipes", label: "Recipes" },
+  { key: "lessons", label: "Lessons" },
+  { key: "interventions", label: "Supervisor" },
+  { key: "knowledge", label: "Knowledge" },
+];
+const HEARTBEAT_KINDS = new Set(["father_cycle_recorded", "scheduler_tick_completed"]);
 
 const emptyState = (): WatchState => ({
   events: [],
   active: [],
   ready: [],
   artifacts: [],
+  recipes: [],
+  lessons: [],
+  knowledge: [],
   health: {},
+  view: "events",
+  selected: {},
+  filter: "",
+  showHelp: false,
 });
 
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+const visibleLength = (s: string): number => stripAnsi(s).length;
+
 const truncate = (s: string, max: number): string => {
-  if (s.length <= max) return s;
+  if (max <= 0) return "";
+  const plain = stripAnsi(s);
+  if (plain.length <= max) return s;
+  if (s !== plain) return plain.slice(0, Math.max(0, max - 1)) + "…";
   return s.slice(0, Math.max(0, max - 1)) + "…";
 };
 
 const pad = (s: string, width: number): string => {
-  if (s.length >= width) return s.slice(0, width);
-  return s + " ".repeat(width - s.length);
+  const clipped = truncate(s, width);
+  return clipped + " ".repeat(Math.max(0, width - visibleLength(clipped)));
 };
 
-// ── Substrate reads ─────────────────────────────────────────────────
+const asObject = (v: unknown): Record<string, unknown> =>
+  v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
+
+const asString = (v: unknown, fallback = ""): string => typeof v === "string" ? v : fallback;
+const asNumber = (v: unknown, fallback = 0): number => typeof v === "number" && Number.isFinite(v) ? v : fallback;
+
+const shortId = (s: string | undefined, n = 10): string => s ? s.slice(0, n) : "-";
+
+const formatPayloadPreview = (payload: unknown, max = 90): string => {
+  if (payload === null || payload === undefined) return "";
+  try {
+    const s = typeof payload === "string" ? payload : JSON.stringify(payload);
+    return truncate(s.replace(/\s+/g, " "), max);
+  } catch { return ""; }
+};
+
+const labelForView = (view: ViewKey): string => VIEWS.find((v) => v.key === view)?.label ?? view;
+const clamp = (n: number, min: number, max: number): number => Math.max(min, Math.min(max, n));
+
+const eventColor = (kind = ""): string => {
+  if (kind.includes("failed") || kind.includes("violation") || kind.includes("conflict")) return RED;
+  if (kind.includes("committed") || kind.includes("promoted") || kind.includes("scored")) return GREEN;
+  if (kind.includes("opened") || kind.includes("predicted") || kind.includes("candidate")) return CYAN;
+  if (kind.includes("lesson") || kind.includes("amendment")) return MAGENTA;
+  if (HEARTBEAT_KINDS.has(kind)) return DIM;
+  return WHITE;
+};
+
+const statusColor = (status = "", score?: number): string => {
+  const s = status.toLowerCase();
+  if (s.includes("fail") || s.includes("blocked") || s.includes("hold")) return RED;
+  if (s.includes("commit") || s.includes("success") || s.includes("active") || s.includes("ready")) return GREEN;
+  if (typeof score === "number" && score >= 0.85) return GREEN;
+  if (typeof score === "number" && score >= 0.6) return YELLOW;
+  if (typeof score === "number" && score > 0) return MAGENTA;
+  return WHITE;
+};
+
+const readGenericView = async (view_name: string, args?: Record<string, unknown>): Promise<Array<Record<string, unknown>>> => {
+  try {
+    const env = await mcpCall("substrate.read", { view_name, ...(args ? { args } : {}) });
+    if (!env.ok || !Array.isArray(env.result)) return [];
+    return env.result as Array<Record<string, unknown>>;
+  } catch { return []; }
+};
 
 const readActiveDirectives = async (): Promise<ActiveDirective[]> => {
-  try {
-    const env = await mcpCall("substrate.read", { view_name: "active_objectives_view" });
-    if (!env.ok) return [];
-    const rows = (env.result as Array<Record<string, unknown>>).slice(0, MAX_ACTIVE);
-    return rows.map((r) => {
-      const payload = (r.payload ?? {}) as Record<string, unknown>;
-      const text =
-        typeof payload.text === "string" ? payload.text :
-        typeof payload.directive_text === "string" ? payload.directive_text :
-        typeof payload.goal === "string" ? payload.goal :
-        "(no text)";
-      const lifecycle =
-        typeof payload.lifecycle === "string" ? payload.lifecycle : "finite";
-      return {
-        directive_id: r.directive_id as string,
-        opened_ts: r.opened_ts as string,
-        text,
-        lifecycle,
-      };
-    });
-  } catch { return []; }
+  const rows = await readGenericView("active_objectives_view");
+  return rows.slice(0, 80).map((r) => {
+    const payload = asObject(r.payload);
+    return {
+      directive_id: asString(r.directive_id, asString(r.id, "unknown")),
+      opened_ts: asString(r.opened_ts, asString(r.ts, "")),
+      text: asString(payload.text, asString(payload.directive_text, asString(payload.goal, "(no text)"))),
+      lifecycle: asString(payload.lifecycle, asString(r.lifecycle, "finite")),
+      status: asString(r.status, asString(payload.status, "active")),
+      urgency: asString(payload.urgency, asString(r.urgency, "normal")),
+    };
+  });
 };
 
 const readReadyTasks = async (): Promise<ReadyTask[]> => {
-  try {
-    const env = await mcpCall("substrate.read", { view_name: "ready_tasks_view", args: { limit: MAX_READY } });
-    if (!env.ok) return [];
-    const rows = (env.result as Array<Record<string, unknown>>).slice(0, MAX_READY);
-    return rows.map((r) => {
-      const payload = (r.payload ?? {}) as Record<string, unknown>;
-      const goal = typeof payload.goal === "string" ? payload.goal : "(no goal)";
-      return {
-        task_id: r.task_id as string,
-        directive_id: r.directive_id as string,
-        goal,
-      };
-    });
-  } catch { return []; }
+  const rows = await readGenericView("ready_tasks_view", { limit: 120 });
+  return rows.slice(0, 120).map((r) => {
+    const payload = asObject(r.payload);
+    return {
+      task_id: asString(r.task_id, asString(r.id, "unknown")),
+      directive_id: asString(r.directive_id, ""),
+      goal: asString(payload.goal, asString(r.goal, "(no goal)")),
+      status: asString(r.status, asString(payload.status, "ready")),
+      depth: asNumber(r.depth, asNumber(payload.depth, 0)),
+    };
+  });
 };
 
 const readArtifactLeaderboard = async (): Promise<ArtifactRow[]> => {
-  try {
-    const env = await mcpCall("substrate.read", { view_name: "code_artifact_registry_view" });
-    if (!env.ok) return [];
-    const rows = (env.result as Array<Record<string, unknown>>).slice(0, MAX_ARTIFACTS);
-    return rows.map((r) => ({
-      id: r.id as string,
-      runtime: r.runtime as string,
-      score: typeof r.score === "number" ? r.score : 0,
-      status: (r.status as string) ?? "unknown",
-      name: (r.name as string | null) ?? null,
-    }));
-  } catch { return []; }
+  const rows = await readGenericView("code_artifact_registry_view");
+  return rows.slice(0, 120).map((r) => ({
+    id: asString(r.id, asString(r.artifact_id, "unknown")),
+    runtime: asString(r.runtime, "?"),
+    score: asNumber(r.score, asNumber(r.posterior, 0)),
+    status: asString(r.status, "unknown"),
+    name: asString(r.name, "") || null,
+    confidence: asNumber(r.confidence, 0),
+  }));
+};
+
+const readRecipes = async (): Promise<RecipeRow[]> => {
+  const rows = await readGenericView("recipe_registry_view");
+  return rows.slice(0, 120).map((r) => ({
+    id: asString(r.id, asString(r.recipe_id, "unknown")),
+    name: asString(r.name, asString(r.goal_shape, "recipe")),
+    confidence: asNumber(r.confidence, asNumber(r.score, 0)),
+    goal_shape: asString(r.goal_shape, ""),
+    status: asString(r.status, "available"),
+  }));
+};
+
+const readKnowledge = async (): Promise<KnowledgeRow[]> => {
+  const rows = await readGenericView("promoted_knowledge_view");
+  return rows.slice(0, 160).map((r) => ({
+    id: asString(r.id, asString(r.knowledge_id, "unknown")),
+    text: asString(r.text, asString(r.summary, asString(r.content, "(no text)"))),
+    score: asNumber(r.score, asNumber(r.posterior, 0)),
+    status: asString(r.status, "promoted"),
+    origin: asString(r.substrate_origin, asString(r.origin, "")),
+  }));
 };
 
 const readHealth = async (): Promise<DaemonHealth> => {
@@ -186,174 +286,377 @@ const readHealth = async (): Promise<DaemonHealth> => {
 
 const readRecentEvents = async (): Promise<EventRow[]> => {
   try {
-    const env = await mcpCall("runtime.recent_events", { k: MAX_EVENTS });
+    const env = await mcpCall("runtime.recent_events", { k: MAX_INITIAL_EVENTS });
     if (!env.ok) return [];
     const data = env.result as { events?: Array<Record<string, unknown>> };
-    const evs = data.events ?? [];
-    return evs.map((e) => ({
-      event_id: e.event_id as string,
-      ts: e.ts as string,
-      kind: e.kind as string,
-      directive_id: e.directive_id as string | undefined,
-      task_id: e.task_id as string | undefined,
+    return (data.events ?? []).map((e) => ({
+      event_id: asString(e.event_id, asString(e.id, "")),
+      ts: asString(e.ts, ""),
+      kind: asString(e.kind, "unknown"),
+      directive_id: asString(e.directive_id, "") || undefined,
+      task_id: asString(e.task_id, "") || undefined,
       payload: e.payload,
     }));
   } catch { return []; }
 };
 
-// ── Rendering ──────────────────────────────────────────────────────
-
-const formatPayloadPreview = (payload: unknown): string => {
-  if (payload === null || payload === undefined) return "";
-  try {
-    const s = typeof payload === "string" ? payload : JSON.stringify(payload);
-    return truncate(s.replace(/\s+/g, " "), 60);
-  } catch { return ""; }
+const deriveDirectives = (state: WatchState): ActiveDirective[] => {
+  const byId = new Map<string, ActiveDirective>();
+  for (const d of state.active ?? []) byId.set(d.directive_id, d);
+  for (const ev of state.events ?? []) {
+    if (!ev.directive_id && ev.kind !== "directive_opened") continue;
+    const payload = asObject(ev.payload);
+    const id = ev.directive_id ?? asString(payload.directive_id, ev.event_id);
+    if (!id || byId.has(id)) continue;
+    if (ev.kind === "directive_opened" || asString(payload.directive_text) || asString(payload.text)) {
+      byId.set(id, {
+        directive_id: id,
+        opened_ts: ev.ts,
+        text: asString(payload.directive_text, asString(payload.text, asString(payload.goal, "(no directive text)"))),
+        lifecycle: asString(payload.lifecycle, "finite"),
+        status: "seen",
+        urgency: asString(payload.urgency, "normal"),
+      });
+    }
+  }
+  return [...byId.values()].sort((a, b) => (b.opened_ts || "").localeCompare(a.opened_ts || ""));
 };
 
-const shortId = (s: string | undefined): string => {
-  if (!s) return "—".padEnd(12);
-  return s.slice(0, 12).padEnd(12);
+const deriveTasks = (state: WatchState): ReadyTask[] => {
+  const byId = new Map<string, ReadyTask>();
+  for (const t of state.ready ?? []) byId.set(t.task_id, t);
+  for (const ev of state.events ?? []) {
+    if (!ev.task_id) continue;
+    const payload = asObject(ev.payload);
+    const existing = byId.get(ev.task_id);
+    const status = ev.kind === "task_committed" ? "committed" : ev.kind === "task_failed" ? "failed" : ev.kind === "task_node_opened" ? "opened" : existing?.status ?? "seen";
+    byId.set(ev.task_id, {
+      task_id: ev.task_id,
+      directive_id: ev.directive_id ?? existing?.directive_id ?? "",
+      goal: asString(payload.goal, existing?.goal ?? (formatPayloadPreview(ev.payload, 120) || ev.kind)),
+      status,
+      depth: existing?.depth,
+    });
+  }
+  return [...byId.values()];
 };
 
-/** Render the full screen as one string. Pure function over state + screen
- *  dimensions; tests drive this directly so the TUI is verifiable without a
- *  real TTY. */
-export const renderFrame = (
-  state: WatchState,
-  cols: number,
-  rows: number,
-): string => {
-  const parts: string[] = [];
-  parts.push(CLEAR_SCREEN);
-  parts.push(HOME);
+const deriveRecipes = (state: WatchState): RecipeRow[] => {
+  const rows = [...(state.recipes ?? [])];
+  for (const ev of state.events ?? []) {
+    if (ev.kind !== "recipe_extracted" && ev.kind !== "recipe_replayed" && ev.kind !== "recipe_replay_aborted") continue;
+    const p = asObject(ev.payload);
+    rows.push({
+      id: asString(p.recipe_id, ev.event_id),
+      name: asString(p.name, asString(p.goal_shape, ev.kind)),
+      confidence: asNumber(p.confidence, asNumber(p.score, 0)),
+      goal_shape: asString(p.goal_shape, ""),
+      status: ev.kind,
+    });
+  }
+  return rows;
+};
 
-  const safeCols = Math.max(40, cols);
-  const safeRows = Math.max(20, rows);
+const deriveLessons = (state: WatchState): LessonRow[] => {
+  const rows: LessonRow[] = [];
+  for (const ev of state.events ?? []) {
+    if (ev.kind !== "lesson_extracted" && ev.kind !== "contract_amendment_proposed") continue;
+    const p = asObject(ev.payload);
+    rows.push({
+      id: ev.event_id,
+      kind: asString(p.lesson_kind, ev.kind),
+      summary: asString(p.summary, asString(p.proposed_behavior, formatPayloadPreview(ev.payload, 160))),
+      target: asString(p.target, ""),
+      ts: ev.ts,
+    });
+  }
+  return rows;
+};
 
-  // Layout: split right column 40 cols at col=safeCols-39, main area to the left.
-  const rightWidth = Math.min(45, Math.floor(safeCols / 2.5));
-  const leftWidth = safeCols - rightWidth - 1;
+const deriveKnowledge = (state: WatchState): KnowledgeRow[] => {
+  const rows = [...(state.knowledge ?? [])];
+  for (const ev of state.events ?? []) {
+    if (!ev.kind.startsWith("knowledge_") && ev.kind !== "candidate_confirmed" && ev.kind !== "contradictory_candidates") continue;
+    const p = asObject(ev.payload);
+    rows.push({
+      id: asString(p.knowledge_id, ev.event_id),
+      text: asString(p.text, asString(p.summary, formatPayloadPreview(ev.payload, 180))),
+      score: asNumber(p.score, asNumber(p.posterior, 0)),
+      status: ev.kind,
+      origin: asString(ev.kind, ""),
+    });
+  }
+  return rows;
+};
 
-  // Row 1: header.
-  parts.push(moveTo(1, 1));
-  parts.push(`${BOLD}${CYAN}acc watch${RESET}  ${DIM}q=quit  r=refresh${RESET}`);
-
-  // Row 3-7: Active Directives (5 lines visible)
-  parts.push(moveTo(3, 1));
-  parts.push(`${BOLD}Active Directives${RESET}`);
-  for (let i = 0; i < MAX_ACTIVE; i++) {
-    parts.push(moveTo(4 + i, 1));
-    const d = state.active[i];
-    if (!d) {
-      parts.push(pad("", leftWidth));
+const groupEvents = (events: EventRow[]): EventRow[] => {
+  const grouped: EventRow[] = [];
+  for (const ev of events) {
+    const prev = grouped[grouped.length - 1];
+    if (prev && prev.kind === ev.kind && HEARTBEAT_KINDS.has(ev.kind)) {
+      const prevPayload = asObject(prev.payload);
+      prev.payload = { ...prevPayload, grouped_count: asNumber(prevPayload.grouped_count, 1) + 1, latest_ts: ev.ts };
+      prev.ts = ev.ts;
       continue;
     }
-    const tag = d.lifecycle === "rolling_active" ? `${MAGENTA}[rolling]${RESET}` : `${DIM}[finite] ${RESET}`;
-    const line = `${tag} ${shortId(d.directive_id)} ${truncate(d.text, Math.max(20, leftWidth - 28))}`;
-    parts.push(pad(line, leftWidth));
+    grouped.push({ ...ev });
+  }
+  return grouped;
+};
+
+const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
+  if (view === "directives") {
+    return deriveDirectives(state).map((d) => ({
+      id: d.directive_id,
+      title: d.text,
+      meta: `${d.lifecycle} ${d.status ?? ""} ${d.urgency ?? ""}`.trim(),
+      body: `directive_id=${d.directive_id}\nopened=${d.opened_ts}\nlifecycle=${d.lifecycle}\nurgency=${d.urgency ?? "normal"}\n\n${d.text}`,
+      status: d.status ?? d.lifecycle,
+      raw: d,
+    }));
+  }
+  if (view === "tasks") {
+    return deriveTasks(state).map((t) => ({
+      id: t.task_id,
+      title: t.goal,
+      meta: `${t.status ?? "ready"} dir=${shortId(t.directive_id)} depth=${t.depth ?? 0}`,
+      body: `task_id=${t.task_id}\ndirective_id=${t.directive_id}\nstatus=${t.status ?? "ready"}\ndepth=${t.depth ?? 0}\n\n${t.goal}`,
+      status: t.status ?? "ready",
+      raw: t,
+    }));
+  }
+  if (view === "events") {
+    return groupEvents(state.events ?? []).map((e) => {
+      const p = asObject(e.payload);
+      const count = asNumber(p.grouped_count, 1);
+      return {
+        id: e.event_id,
+        title: `${e.kind}${count > 1 ? ` x${count}` : ""}`,
+        meta: `${e.ts.slice(11, 19)} dir=${shortId(e.directive_id)} task=${shortId(e.task_id)}`,
+        body: `event_id=${e.event_id}\nts=${e.ts}\nkind=${e.kind}\ndirective_id=${e.directive_id ?? ""}\ntask_id=${e.task_id ?? ""}\n\npayload=${formatPayloadPreview(e.payload, 2000)}`,
+        kind: e.kind,
+        status: e.kind,
+        raw: e,
+      };
+    });
+  }
+  if (view === "artifacts") {
+    return (state.artifacts ?? []).map((a) => ({
+      id: a.id,
+      title: a.name ?? a.id,
+      meta: `${a.runtime} score=${a.score.toFixed(2)} conf=${(a.confidence ?? 0).toFixed(2)} ${a.status}`,
+      body: `artifact_id=${a.id}\nname=${a.name ?? ""}\nruntime=${a.runtime}\nscore=${a.score.toFixed(3)}\nconfidence=${(a.confidence ?? 0).toFixed(3)}\nstatus=${a.status}`,
+      score: a.score,
+      status: a.status,
+      raw: a,
+    }));
+  }
+  if (view === "recipes") {
+    return deriveRecipes(state).map((r) => ({
+      id: r.id,
+      title: r.name,
+      meta: `confidence=${r.confidence.toFixed(2)} ${r.status ?? ""}`,
+      body: `recipe_id=${r.id}\nname=${r.name}\nconfidence=${r.confidence.toFixed(3)}\nstatus=${r.status ?? ""}\ngoal_shape=${r.goal_shape ?? ""}`,
+      score: r.confidence,
+      status: r.status,
+      raw: r,
+    }));
+  }
+  if (view === "lessons") {
+    return deriveLessons(state).map((l) => ({
+      id: l.id,
+      title: l.summary,
+      meta: `${l.kind} ${l.target ?? ""}`.trim(),
+      body: `id=${l.id}\nts=${l.ts ?? ""}\nkind=${l.kind}\ntarget=${l.target ?? ""}\n\n${l.summary}`,
+      kind: l.kind,
+      status: l.kind,
+      raw: l,
+    }));
+  }
+  if (view === "interventions") {
+    return (state.events ?? [])
+      .filter((e) => /violation|conflict|owner_input_required|supervisor|intervention|crisis|irreversible/.test(e.kind))
+      .map((e) => ({
+        id: e.event_id,
+        title: e.kind,
+        meta: `${e.ts.slice(11, 19)} dir=${shortId(e.directive_id)} task=${shortId(e.task_id)}`,
+        body: `event_id=${e.event_id}\nts=${e.ts}\nkind=${e.kind}\n\n${formatPayloadPreview(e.payload, 2000)}`,
+        kind: e.kind,
+        status: e.kind,
+        raw: e,
+      }));
+  }
+  return deriveKnowledge(state).map((k) => ({
+    id: k.id,
+    title: k.text,
+    meta: `score=${k.score.toFixed(2)} ${k.status ?? ""} ${k.origin ?? ""}`.trim(),
+    body: `knowledge_id=${k.id}\nscore=${k.score.toFixed(3)}\nstatus=${k.status ?? ""}\norigin=${k.origin ?? ""}\n\n${k.text}`,
+    score: k.score,
+    status: k.status,
+    raw: k,
+  }));
+};
+
+const filteredItems = (state: WatchState, view: ViewKey): ListItem[] => {
+  const q = (state.filter ?? "").trim().toLowerCase();
+  const items = itemsForView(state, view);
+  if (!q) return items;
+  return items.filter((item) => `${item.id} ${item.title} ${item.meta} ${item.body}`.toLowerCase().includes(q));
+};
+
+const wrapLines = (text: string, width: number, maxLines: number): string[] => {
+  const out: string[] = [];
+  for (const raw of text.split("\n")) {
+    let line = raw;
+    if (line.length === 0) { out.push(""); continue; }
+    while (line.length > width) {
+      out.push(line.slice(0, width));
+      line = line.slice(width);
+      if (out.length >= maxLines) return out;
+    }
+    out.push(line);
+    if (out.length >= maxLines) return out;
+  }
+  return out;
+};
+
+const healthLabel = (h: DaemonHealth): string => {
+  if (h.status) return h.status;
+  if (h.pid || h.ok) return "ALIVE";
+  return "UNKNOWN";
+};
+
+export const renderFrame = (state: WatchState, cols: number, rows: number): string => {
+  const safeCols = Math.max(60, cols);
+  const safeRows = Math.max(20, rows);
+  const view = state.view ?? "events";
+  const items = filteredItems(state, view);
+  const selectedMap = state.selected ?? {};
+  const defaultSelected = view === "events" ? Math.max(0, items.length - 1) : 0;
+  const selected = clamp(selectedMap[view] ?? defaultSelected, 0, Math.max(0, items.length - 1));
+  const detail = items[selected];
+  const listWidth = Math.max(34, Math.floor(safeCols * 0.48));
+  const detailWidth = safeCols - listWidth - 3;
+  const listRows = safeRows - 6;
+  const start = clamp(selected - Math.floor(listRows / 2), 0, Math.max(0, items.length - listRows));
+  const parts: string[] = [CLEAR_SCREEN, HOME];
+
+  parts.push(moveTo(1, 1));
+  parts.push(`${BOLD}${CYAN}acc watch${RESET} ${DIM}Tab/1-8 view  j/k move  Enter detail  / filter  ? help  r refresh  q quit${RESET}`);
+
+  parts.push(moveTo(2, 1));
+  let col = 1;
+  for (let i = 0; i < VIEWS.length; i++) {
+    const v = VIEWS[i]!;
+    const text = `${i + 1}:${v.label}`;
+    const styled = v.key === view ? `${INVERT}${text}${RESET}` : `${DIM}${text}${RESET}`;
+    parts.push(moveTo(2, col));
+    parts.push(styled);
+    col += text.length + 2;
+    if (col > safeCols - 10) break;
   }
 
-  // Row 9: Recent Events header.
-  const eventsTopRow = 9;
-  parts.push(moveTo(eventsTopRow, 1));
-  parts.push(`${BOLD}Recent Events${RESET} ${DIM}(${state.events.length}/${MAX_EVENTS})${RESET}`);
-  const maxEventRows = Math.max(5, safeRows - eventsTopRow - 3);
-  // Show the LAST `maxEventRows` events; if fewer, leave blank lines.
-  const start = Math.max(0, state.events.length - maxEventRows);
-  for (let i = 0; i < maxEventRows; i++) {
-    const r = eventsTopRow + 1 + i;
-    parts.push(moveTo(r, 1));
-    const ev = state.events[start + i];
-    if (!ev) { parts.push(pad("", leftWidth)); continue; }
-    const ts = ev.ts.slice(11, 19); // HH:MM:SS
-    const kind = pad(truncate(ev.kind, 28), 28);
-    const did = shortId(ev.directive_id);
-    const preview = formatPayloadPreview(ev.payload);
-    const line = `${DIM}${ts}${RESET}  ${kind}  ${did}  ${preview}`;
-    parts.push(pad(line, leftWidth));
+  parts.push(moveTo(4, 1));
+  parts.push(`${BOLD}${labelForView(view)}${RESET} ${DIM}(${items.length})${RESET}`);
+  parts.push(moveTo(4, listWidth + 3));
+  parts.push(`${BOLD}Detail${RESET} ${DIM}${detail ? shortId(detail.id, 18) : "no selection"}${RESET}`);
+
+  for (let i = 0; i < listRows; i++) {
+    const row = 5 + i;
+    const item = items[start + i];
+    parts.push(moveTo(row, 1));
+    if (!item) {
+      parts.push(pad("", listWidth));
+      continue;
+    }
+    const marker = start + i === selected ? ">" : " ";
+    const color = item.kind ? eventColor(item.kind) : statusColor(item.status, item.score);
+    const id = shortId(item.id, 9).padEnd(9);
+    const titleWidth = Math.max(8, listWidth - 31);
+    const line = `${marker} ${color}${id}${RESET} ${truncate(item.title, titleWidth)} ${DIM}${truncate(item.meta, 16)}${RESET}`;
+    parts.push(pad(line, listWidth));
   }
 
-  // Right column: Ready Tasks (top half) + Artifacts (bottom half).
-  const rightCol = leftWidth + 2;
-  parts.push(moveTo(3, rightCol));
-  parts.push(`${BOLD}Ready Tasks${RESET} ${DIM}(${state.ready.length})${RESET}`);
-  for (let i = 0; i < MAX_READY; i++) {
-    parts.push(moveTo(4 + i, rightCol));
-    const t = state.ready[i];
-    if (!t) { parts.push(pad("", rightWidth)); continue; }
-    const line = `${GREEN}${shortId(t.task_id)}${RESET} ${truncate(t.goal, Math.max(8, rightWidth - 14))}`;
-    parts.push(pad(line, rightWidth));
+  const detailLines = detail
+    ? wrapLines(detail.body, detailWidth, listRows)
+    : [`No ${labelForView(view).toLowerCase()} rows match the current filter.`];
+  for (let i = 0; i < listRows; i++) {
+    parts.push(moveTo(5 + i, listWidth + 3));
+    parts.push(pad(detailLines[i] ?? "", detailWidth));
   }
 
-  const artRow = 4 + MAX_READY + 1;
-  parts.push(moveTo(artRow, rightCol));
-  parts.push(`${BOLD}Top Artifacts${RESET} ${DIM}(score)${RESET}`);
-  for (let i = 0; i < MAX_ARTIFACTS; i++) {
-    parts.push(moveTo(artRow + 1 + i, rightCol));
-    const a = state.artifacts[i];
-    if (!a) { parts.push(pad("", rightWidth)); continue; }
-    const scoreStr = a.score.toFixed(2);
-    const label = a.name ?? a.id;
-    const line = `${YELLOW}${scoreStr}${RESET} ${pad(a.runtime, 8)} ${truncate(label, Math.max(8, rightWidth - 16))}`;
-    parts.push(pad(line, rightWidth));
+  if (state.showHelp) {
+    const helpTop = Math.max(6, Math.floor(safeRows / 2) - 4);
+    const helpLeft = Math.max(2, Math.floor(safeCols / 2) - 28);
+    const help = [
+      "Help",
+      "1-8 or Tab: switch views",
+      "j/k or arrows: move selection",
+      "Enter: keep focus on selected detail",
+      "/: type live filter, Esc clears filter mode",
+      "r: refresh substrate snapshots, q: quit",
+    ];
+    for (let i = 0; i < help.length; i++) {
+      parts.push(moveTo(helpTop + i, helpLeft));
+      parts.push(`${INVERT}${pad(help[i]!, 56)}${RESET}`);
+    }
   }
 
-  // Bottom 2 lines: Daemon Health.
-  const hRow = safeRows - 1;
-  parts.push(moveTo(hRow, 1));
-  parts.push(`${BOLD}Daemon${RESET}`);
-  parts.push(moveTo(hRow + 1, 1));
-  const h = state.health;
-  const healthLine = `pid=${h.pid ?? "?"}  uptime_ms=${h.uptime_ms ?? 0}  events=${h.events_count ?? 0}  mcp=${h.mcp_port ?? "?"}  aux=${h.aux_port ?? "?"}`;
+  const statusRow = safeRows - 1;
+  const h = state.health ?? {};
+  const filter = state.filter ? `/${state.filter}` : "none";
+  parts.push(moveTo(statusRow, 1));
+  parts.push(`${BOLD}Status${RESET} view=${labelForView(view)} items=${items.length} selected=${items.length ? selected + 1 : 0} filter=${filter} daemon=${healthLabel(h)}`);
+  parts.push(moveTo(statusRow + 1, 1));
+  const healthLine = `Daemon pid=${h.pid ?? "?"} uptime_ms=${h.uptime_ms ?? 0} events=${h.events_count ?? state.events.length} mcp=${h.mcp_port ?? "?"} aux=${h.aux_port ?? "?"}`;
   parts.push(truncate(healthLine, safeCols));
 
   return parts.join("");
 };
 
-// ── Run loop ───────────────────────────────────────────────────────
-
-const POLL_INTERVAL_MS = 2000;
-
 export type RunWatchOpts = {
-  /** Stop after this many ms — used by tests. Default: run until signal/key. */
   durationMs?: number;
-  /** Write rendered frames here instead of process.stdout. */
   writer?: (s: string) => void;
-  /** Override poll interval (ms). Default: 2000. */
   pollIntervalMs?: number;
-  /** Cancel from outside. */
   signal?: AbortSignal;
-  /** Skip the SSE subscription (tests can feed events directly via injected
-   *  recent-events polling). Default false. */
   disableSse?: boolean;
 };
 
 const refreshAll = async (state: WatchState): Promise<void> => {
-  const [active, ready, artifacts, health, events] = await Promise.all([
+  const [active, ready, artifacts, recipes, knowledge, health, events] = await Promise.all([
     readActiveDirectives(),
     readReadyTasks(),
     readArtifactLeaderboard(),
+    readRecipes(),
+    readKnowledge(),
     readHealth(),
     state.events.length === 0 ? readRecentEvents() : Promise.resolve(state.events),
   ]);
   state.active = active;
   state.ready = ready;
   state.artifacts = artifacts;
+  state.recipes = recipes;
+  state.knowledge = knowledge;
+  state.lessons = deriveLessons({ ...state, events });
   state.health = health;
   state.events = events;
 };
 
-const refreshSideRegions = async (state: WatchState): Promise<void> => {
-  const [active, ready, artifacts, health] = await Promise.all([
+const refreshSnapshots = async (state: WatchState): Promise<void> => {
+  const [active, ready, artifacts, recipes, knowledge, health] = await Promise.all([
     readActiveDirectives(),
     readReadyTasks(),
     readArtifactLeaderboard(),
+    readRecipes(),
+    readKnowledge(),
     readHealth(),
   ]);
   state.active = active;
   state.ready = ready;
   state.artifacts = artifacts;
+  state.recipes = recipes;
+  state.knowledge = knowledge;
+  state.lessons = deriveLessons(state);
   state.health = health;
 };
 
@@ -366,92 +669,100 @@ const appendEvent = (state: WatchState, ev: SseEvent): void => {
     task_id: ev.task_id,
     payload: ev.payload,
   });
-  if (state.events.length > MAX_EVENTS) {
-    state.events.splice(0, state.events.length - MAX_EVENTS);
-  }
+  if (state.events.length > MAX_EVENTS) state.events.splice(0, state.events.length - MAX_EVENTS);
+  state.lessons = deriveLessons(state);
 };
 
-const screenDims = (): { cols: number; rows: number } => {
-  const cols = (process.stdout as { columns?: number }).columns ?? 120;
-  const rows = (process.stdout as { rows?: number }).rows ?? 40;
-  return { cols, rows };
-};
+const screenDims = (): { cols: number; rows: number } => ({
+  cols: (process.stdout as { columns?: number }).columns ?? 120,
+  rows: (process.stdout as { rows?: number }).rows ?? 40,
+});
 
-/** Programmatic entry — driven by tests and by the CLI dispatcher. Returns
- *  the process exit code (0 on clean exit). */
+const nextView = (view: ViewKey): ViewKey => VIEWS[(VIEWS.findIndex((v) => v.key === view) + 1) % VIEWS.length]!.key;
+
 export const runWatch = async (argv: string[], opts: RunWatchOpts = {}): Promise<number> => {
-  void argv; // no flags in 1.β
+  void argv;
   const writer = opts.writer ?? ((s: string) => { process.stdout.write(s); });
   const pollMs = opts.pollIntervalMs ?? POLL_INTERVAL_MS;
   const state = emptyState();
   const isInteractive = !opts.writer && !!process.stdout.isTTY;
+  let filtering = false;
 
-  // Initial full read so the first frame shows something.
   await refreshAll(state);
-  const initial = screenDims();
   if (isInteractive) writer(ALT_ENTER + HIDE_CURSOR);
-  writer(renderFrame(state, initial.cols, initial.rows));
+  writer(renderFrame(state, screenDims().cols, screenDims().rows));
 
-  // SSE subscription — events go through appendEvent + re-render.
   const sseAbort = new AbortController();
   const onAbort = () => sseAbort.abort();
   opts.signal?.addEventListener("abort", onAbort, { once: true });
 
-  const renderTick = (): void => {
-    const dims = screenDims();
-    writer(renderFrame(state, dims.cols, dims.rows));
+  const renderTick = (): void => writer(renderFrame(state, screenDims().cols, screenDims().rows));
+  const adjustSelection = (delta: number): void => {
+    const view = state.view ?? "events";
+    const count = filteredItems(state, view).length;
+    const selected = state.selected ?? {};
+    selected[view] = clamp((selected[view] ?? 0) + delta, 0, Math.max(0, count - 1));
+    state.selected = selected;
+  };
+  const setView = (view: ViewKey): void => {
+    state.view = view;
+    const selected = state.selected ?? {};
+    selected[view] = clamp(selected[view] ?? 0, 0, Math.max(0, filteredItems(state, view).length - 1));
+    state.selected = selected;
   };
 
-  const sseLoop = async (): Promise<void> => {
+  const ssePromise = (async () => {
     if (opts.disableSse) return;
     try {
       for await (const ev of sseConnect({ signal: sseAbort.signal })) {
         appendEvent(state, ev);
         renderTick();
       }
-    } catch { /* swallow — backoff loop handles disconnect */ }
-  };
-
-  const ssePromise = sseLoop();
+    } catch { /* disconnects are non-fatal for the TUI */ }
+  })();
 
   const pollTimer = setInterval(() => {
-    void refreshSideRegions(state).then(renderTick).catch(() => { /* swallow */ });
+    void refreshSnapshots(state).then(renderTick).catch(() => { /* keep stale data */ });
   }, pollMs);
 
-  // Raw-mode keystroke handling — only when running on a real TTY and no
-  // custom writer was supplied. Tests drive the loop programmatically.
   const stdin = process.stdin as NodeJS.ReadStream & { setRawMode?: (b: boolean) => void };
   const wasRaw = stdin.isRaw;
-  let exitCode = 0;
   const keyResolver: { resolve: ((v: void) => void) | null } = { resolve: null };
   const keyPromise = new Promise<void>((resolve) => { keyResolver.resolve = resolve; });
   let keyHandler: ((chunk: Buffer | string) => void) | null = null;
+
   if (isInteractive && typeof stdin.setRawMode === "function") {
     stdin.setRawMode(true);
     stdin.resume();
     keyHandler = (chunk: Buffer | string) => {
       const str = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      if (str === "q" || str === "Q" || str === "") {
-        keyResolver.resolve?.();
+      if (str === "\u0003" || (!filtering && (str === "q" || str === "Q"))) { keyResolver.resolve?.(); return; }
+      if (filtering) {
+        if (str === "\r" || str === "\n" || str === "\x1b") filtering = false;
+        else if (str === "\x7f") state.filter = (state.filter ?? "").slice(0, -1);
+        else if (/^[ -~]$/.test(str)) state.filter = `${state.filter ?? ""}${str}`;
+        renderTick();
         return;
       }
-      if (str === "r" || str === "R") {
-        void refreshAll(state).then(renderTick).catch(() => { /* swallow */ });
-      }
+      if (str === "/") { filtering = true; state.filter = ""; renderTick(); return; }
+      if (str === "?") { state.showHelp = !state.showHelp; renderTick(); return; }
+      if (str === "\t") { setView(nextView(state.view ?? "events")); renderTick(); return; }
+      if (/^[1-8]$/.test(str)) { setView(VIEWS[Number(str) - 1]!.key); renderTick(); return; }
+      if (str === "j" || str === "J" || str === "\x1b[B") { adjustSelection(1); renderTick(); return; }
+      if (str === "k" || str === "K" || str === "\x1b[A") { adjustSelection(-1); renderTick(); return; }
+      if (str === "r" || str === "R") { void refreshAll(state).then(renderTick).catch(() => { /* stale is better than blank */ }); return; }
+      if (str === "\r" || str === "\n") { renderTick(); return; }
     };
     stdin.on("data", keyHandler);
   }
 
-  // Duration-bounded run (tests). On signal abort or duration timeout, exit.
   const durationPromise = opts.durationMs
-    ? new Promise<void>((resolve) => { setTimeout(() => resolve(), opts.durationMs); })
+    ? new Promise<void>((resolve) => { setTimeout(resolve, opts.durationMs); })
     : new Promise<void>(() => { /* never */ });
   const signalPromise = new Promise<void>((resolve) => {
     if (opts.signal?.aborted) { resolve(); return; }
     opts.signal?.addEventListener("abort", () => resolve(), { once: true });
   });
-
-  // SIGINT — wire only when interactive so tests don't fight signal handlers.
   const sigintHandler = (): void => { keyResolver.resolve?.(); };
   if (isInteractive) process.once("SIGINT", sigintHandler);
 
@@ -467,12 +778,12 @@ export const runWatch = async (argv: string[], opts: RunWatchOpts = {}): Promise
     }
     if (isInteractive) {
       writer(SHOW_CURSOR + ALT_EXIT + RESET);
-      try { process.off("SIGINT", sigintHandler); } catch { /* swallow */ }
+      try { process.off("SIGINT", sigintHandler); } catch { /* ignore */ }
     }
     opts.signal?.removeEventListener("abort", onAbort);
-    try { await ssePromise; } catch { /* swallow */ }
+    try { await ssePromise; } catch { /* ignore */ }
   }
-  return exitCode;
+  return 0;
 };
 
 if (import.meta.main) {
