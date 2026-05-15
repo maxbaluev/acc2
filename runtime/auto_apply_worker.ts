@@ -35,9 +35,10 @@
 // lesson_applied / applied_change_failed for the same source_event_id.
 
 import type { Database } from "bun:sqlite";
-import type { JsonValue } from "../substrate/types";
+import type { JsonValue, OwnerProfile } from "../substrate/types";
 import { emitEvent } from "./events";
 import { logger } from "./logger";
+import { readOwnerProfile } from "./prompt_composer";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -154,6 +155,162 @@ export const emitAutoApplySignal = (db: Database, row: QueueRow, nowMs: number):
   }
 };
 
+// ── Layer-2 OwnerProfile gate (brain dispatch ZMJQQ963Z124V7VS, 2026-05-15) ──
+//
+// Stage-2 already enforces structural safety (Layer 1: cli/runtime scope,
+// cooldown, test-pass-revert). The OwnerProfile adds owner-driven autonomy
+// preferences ON TOP. Layer 2 RESTRICTS within Layer 1 — never widens.
+//
+// Refusals: emit `auto_apply_signaled` with `payload.reason: "owner_profile_blocked"`
+// + the matching field so an operator can see exactly which owner preference
+// gated the run. Does NOT proceed to mechanical apply.
+
+/** Very small glob → predicate: supports `*` as "match any characters
+ *  (including slashes)" — enough for the common patterns operators write
+ *  in `manual_review_patterns` (e.g. `runtime/*.test.ts`, `cli/*`, etc).
+ *  Returns true when target matches pattern. */
+const matchesGlob = (target: string, pattern: string): boolean => {
+  if (!pattern) return false;
+  if (!pattern.includes("*")) {
+    // No glob metacharacters → substring match (the brief says "substring or glob").
+    return target.includes(pattern);
+  }
+  // Escape regex special chars, then replace `*` with `.*`.
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`).test(target);
+};
+
+/** Returns true when "now" falls outside the owner's working hours window.
+ *  When no window is configured, returns false (never out-of-window). */
+const outsideTimeWindow = (window: OwnerProfile["time_window"], nowMs: number): boolean => {
+  if (!window || typeof window !== "object") return false;
+  const start = window.start_hour;
+  const end = window.end_hour;
+  if (typeof start !== "number" || typeof end !== "number") return false;
+  // Use UTC hours; tz-aware checks would need a tzdb. Operators can
+  // include the tz tag for audit, but the substrate runs UTC.
+  const hour = new Date(nowMs).getUTCHours();
+  if (start <= end) {
+    return hour < start || hour >= end;
+  }
+  // Window wraps midnight (e.g. 22:00-06:00).
+  return hour < start && hour >= end;
+};
+
+/** Count file-distinct touches in a proposed anchored_replace_v1. The
+ *  current shape is single-file — count is 1 when parse succeeds, 0
+ *  otherwise. The hook exists so multi-file shapes (when introduced)
+ *  inherit the cautious gate automatically. */
+const countTouchedFiles = (payload: Record<string, unknown>): number => {
+  const parsed = extractAnchoredReplaceV1(payload);
+  return parsed ? 1 : 0;
+};
+
+export type OwnerProfileGateResult =
+  | { gated: false }
+  | { gated: true; field: string; matched_pattern?: string; reason: string };
+
+/** Evaluate the Layer-2 OwnerProfile gate against a stage-2 candidate.
+ *  Returns `gated: true` when an owner preference refuses the apply;
+ *  otherwise `gated: false`. Pure / side-effect-free — the caller emits
+ *  any blocking signal. */
+export const evaluateOwnerProfileGate = (
+  profile: OwnerProfile,
+  targetPath: string,
+  sourcePayload: Record<string, unknown>,
+  nowMs: number,
+): OwnerProfileGateResult => {
+  // 1. Hard blocks — substring match against any entry in things_to_never_do.
+  if (Array.isArray(profile.things_to_never_do)) {
+    for (const block of profile.things_to_never_do) {
+      if (typeof block === "string" && block.length > 0 && targetPath.includes(block)) {
+        return {
+          gated: true,
+          field: "things_to_never_do",
+          matched_pattern: block,
+          reason: `target_matches_things_to_never_do:${block}`,
+        };
+      }
+    }
+  }
+  // 2. Manual-review patterns — substring or simple glob.
+  if (Array.isArray(profile.manual_review_patterns)) {
+    for (const pat of profile.manual_review_patterns) {
+      if (typeof pat !== "string" || pat.length === 0) continue;
+      if (matchesGlob(targetPath, pat)) {
+        return {
+          gated: true,
+          field: "manual_review_patterns",
+          matched_pattern: pat,
+          reason: `target_matches_manual_review_pattern:${pat}`,
+        };
+      }
+    }
+  }
+  // 3. Working hours window — outside the window, stage-2 pauses.
+  if (outsideTimeWindow(profile.time_window, nowMs)) {
+    return {
+      gated: true,
+      field: "time_window",
+      reason: "outside_owner_time_window",
+    };
+  }
+  // 4. Cautious trust level — refuse multi-file diffs.
+  if (profile.autonomy_trust_level === "cautious") {
+    const touched = countTouchedFiles(sourcePayload);
+    if (touched > 1) {
+      return {
+        gated: true,
+        field: "autonomy_trust_level",
+        reason: `cautious_trust_refuses_multi_file:${touched}_files`,
+      };
+    }
+  }
+  return { gated: false };
+};
+
+/** Emit one `auto_apply_signaled` event marking a stage-2 candidate as
+ *  owner_profile_blocked so an operator sees exactly why the apply did
+ *  not proceed. The structural marker (`reason: owner_profile_blocked`)
+ *  lets observers filter the queue without re-evaluating the gate. */
+const emitOwnerProfileBlock = (
+  db: Database,
+  row: QueueRow,
+  gate: Extract<OwnerProfileGateResult, { gated: true }>,
+  nowMs: number,
+): void => {
+  const payload: Record<string, JsonValue> = {
+    source_event_id: row.source_event_id,
+    source_kind: row.source_kind,
+    target: row.target ?? "(none)",
+    anchor: row.anchor ?? "",
+    structured: row.structured_change === 1,
+    scanned_at: new Date(nowMs).toISOString(),
+    apply_gate_status: row.apply_gate_status,
+    stage: "stage_2_owner_profile_block",
+    reason: "owner_profile_blocked",
+    owner_profile_field: gate.field,
+    matched_pattern: gate.matched_pattern ?? null,
+    detail: gate.reason,
+    mirror_inline: true,
+  };
+  try {
+    emitEvent(db, {
+      kind: "auto_apply_signaled",
+      substrate_origin: "substrate_auto",
+      directive_id: row.directive_id ?? undefined,
+      task_id: row.task_id ?? undefined,
+      context_refs: [row.source_event_id],
+      payload: payload as JsonValue,
+    });
+  } catch (err) {
+    logger.warn(
+      { where: "auto_apply.owner_profile_block", source_event_id: row.source_event_id, err: (err as Error).message },
+      "could not emit owner_profile_blocked signal",
+    );
+  }
+};
+
 /** Result of a stage-2 mechanical apply attempt. Tests + git operations
  *  are wrapped by the caller; this layer reports what happened in a
  *  structured shape the credit chain can consume. */
@@ -170,11 +327,13 @@ export const extractAnchoredReplaceV1 = (
   const pb = payload.proposed_behavior ?? payload.proposed_action;
   if (!pb || typeof pb !== "object") return null;
   const p = pb as Record<string, unknown>;
-  const filePath = p.file_path;
+  const target = p.target_resource ?? p.resource_uri ?? p.target ?? p.file_path;
+  if (typeof target !== "string" || target.length === 0) return null;
+  const filePath = target.startsWith("repo:") ? target.slice("repo:".length) : target;
+  if (filePath.startsWith("/") || filePath.includes("..")) return null;
   const diff = p.diff;
-  if (typeof filePath !== "string" || filePath.length === 0) return null;
   if (typeof diff === "string" && diff.length > 0) {
-    // Plain-string diff form: treat current_behavior as `before` and diff as `after`.
+    // Legacy string diff form: treat current_behavior as `before` and diff as `after`.
     const current = payload.current_behavior;
     if (typeof current !== "string" || current.length === 0) return null;
     return { filePath, before: current, after: diff };
@@ -183,6 +342,7 @@ export const extractAnchoredReplaceV1 = (
     const d = diff as Record<string, unknown>;
     const before = d.before;
     const after = d.after;
+    if (d.kind !== "anchored_replace_v1") return null;
     if (typeof before !== "string" || before.length === 0) return null;
     if (typeof after !== "string") return null;
     return { filePath, before, after };
@@ -379,7 +539,7 @@ export const applyStage2Candidate = (
 export const runAutoApplyWorkerTick = (
   db: Database,
   opts?: { nowMs?: number; repoRoot?: string },
-): { signaled: string[]; skipped: number; stage2_candidates: number; stage2_applied?: string; stage2_failed?: string } => {
+): { signaled: string[]; skipped: number; stage2_candidates: number; stage2_applied?: string; stage2_failed?: string; stage2_blocked?: string } => {
   const nowMs = opts?.nowMs ?? Date.now();
   const eligible = collectAutoApplyEligible(db);
   const signaled: string[] = [];
@@ -401,7 +561,12 @@ export const runAutoApplyWorkerTick = (
   //      so unit tests + mock-brain harness can't trigger real commits.
   //   2. cooldown check: skip if any applied_change_failed landed in the
   //      last STAGE2_COOLDOWN_MS — bad proposals naturally pause the loop.
-  //   3. one-at-a-time: take the oldest candidate, apply, return. A flood
+  //   3. Layer-2 OwnerProfile gate: refuse when an owner preference
+  //      (things_to_never_do / manual_review_patterns / time_window /
+  //      cautious autonomy_trust_level + multi-file diff) blocks the
+  //      candidate. Emits a structural auto_apply_signaled with
+  //      reason=owner_profile_blocked instead of running mechanical apply.
+  //   4. one-at-a-time: take the oldest candidate, apply, return. A flood
   //      of bad proposals can't cascade because the next tick is 60s away
   //      and any failure triggers cooldown.
   if (
@@ -411,6 +576,39 @@ export const runAutoApplyWorkerTick = (
   ) {
     const candidate = stage2Candidates[0]!;
     const repoRoot = opts?.repoRoot ?? process.env.ACC2_PROJECT_ROOT ?? process.cwd();
+
+    // Layer-2 OwnerProfile gate. Read latest profile (defaults when none
+    // recorded), evaluate against the candidate's target + source payload.
+    const profile = readOwnerProfile(db);
+    let sourcePayload: Record<string, unknown> = {};
+    const srcRow = db
+      .query("SELECT payload FROM events WHERE id = ?")
+      .get(candidate.source_event_id) as { payload: string } | null;
+    if (srcRow) {
+      try { sourcePayload = JSON.parse(srcRow.payload ?? "{}") as Record<string, unknown>; }
+      catch { /* leave empty — gate evaluates against target path alone */ }
+    }
+    const targetPath = candidate.target ?? "";
+    const gate = evaluateOwnerProfileGate(profile, targetPath, sourcePayload, nowMs);
+    if (gate.gated) {
+      emitOwnerProfileBlock(db, candidate, gate, nowMs);
+      logger.info(
+        {
+          source_event_id: candidate.source_event_id,
+          field: gate.field,
+          matched_pattern: gate.matched_pattern,
+          target: candidate.target,
+        },
+        "auto_apply_worker stage-2 blocked by owner profile",
+      );
+      return {
+        signaled,
+        skipped: eligible.length - signaled.length,
+        stage2_candidates: stage2Candidates.length,
+        stage2_blocked: candidate.source_event_id,
+      };
+    }
+
     const result = applyStage2Candidate(db, candidate, repoRoot);
     emitApplyChain(db, candidate, result, nowMs);
     if (result.ok) {

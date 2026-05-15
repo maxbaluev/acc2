@@ -23,7 +23,8 @@ import type { RetrievalHit, RetrievalResult } from "./retrieval";
 import { renderStakeholderBlock } from "./stakeholder_compositor";
 import { renderInterferenceBlock } from "./interference";
 import { emitEvent } from "./events";
-import type { JsonValue } from "../substrate/types";
+import type { JsonValue, OwnerProfile } from "../substrate/types";
+import { OWNER_PROFILE_DEFAULTS } from "../substrate/types";
 
 export type PromptComposeOptions = {
   taskId: string;
@@ -378,6 +379,113 @@ const buildOwnerContextSection = (rows: ReturnType<typeof readOwnerContext>): st
   return lines.length === 1 ? "OWNER CONTEXT: (no readable owner text on file)" : lines.join("\n");
 };
 
+// Owner profile — Layer-2 autonomy preferences (UX dispatch b71pfyddv,
+// brain dispatch ZMJQQ963Z124V7VS amendment 2026-05-15). The substrate
+// promotes owner_insight_candidate rows into owner_profile_recorded via
+// Model D consensus (substrate/extractors.ts:maybePromoteOwnerProfile).
+// The prompt composer surfaces the LATEST profile row so the brain has
+// persistent owner preferences (language, autonomy_trust_level, hot_topics,
+// hard blocks, working hours, manual-review patterns) on every dispatch —
+// continuity that outlives the rolling 8-row OWNER CONTEXT window.
+//
+// Never omit this section even when defaults are in force — the brain
+// learns to look for it, so an explicit "no owner profile recorded yet"
+// is more useful than absence.
+export const readOwnerProfile = (db: Database): OwnerProfile => {
+  const row = db
+    .query(
+      `SELECT payload FROM events
+       WHERE kind = 'owner_profile_recorded'
+       ORDER BY ts DESC LIMIT 1`,
+    )
+    .get() as { payload: string } | null;
+  if (!row) return { ...OWNER_PROFILE_DEFAULTS } as OwnerProfile;
+  try {
+    const parsed = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
+    // Strip substrate-stamped audit fields — they live on the row for
+    // provenance (which candidate inspired this promotion + via which
+    // route) but aren't part of OWNER_PROFILE_JSON_SCHEMA.
+    delete parsed.promoted_from;
+    delete parsed.promotion_route;
+    return { ...OWNER_PROFILE_DEFAULTS, ...parsed } as OwnerProfile;
+  } catch {
+    return { ...OWNER_PROFILE_DEFAULTS } as OwnerProfile;
+  }
+};
+
+const formatTimeWindow = (tw: OwnerProfile["time_window"]): string => {
+  if (!tw || typeof tw !== "object") return "";
+  const parts: string[] = [];
+  if (typeof tw.start_hour === "number" && typeof tw.end_hour === "number") {
+    parts.push(`${tw.start_hour}:00-${tw.end_hour}:00`);
+  }
+  if (Array.isArray(tw.days) && tw.days.length > 0) parts.push(tw.days.join(","));
+  if (typeof tw.timezone === "string" && tw.timezone) parts.push(tw.timezone);
+  return parts.join(" ");
+};
+
+const formatAutonomyScope = (s: OwnerProfile["autonomy_scope"]): string => {
+  if (!s || typeof s !== "object") return "";
+  const parts: string[] = [];
+  if (Array.isArray(s.include) && s.include.length > 0) {
+    parts.push(`include=[${s.include.join(", ")}]`);
+  }
+  if (Array.isArray(s.exclude) && s.exclude.length > 0) {
+    parts.push(`exclude=[${s.exclude.join(", ")}]`);
+  }
+  return parts.join(" ");
+};
+
+const arrayEquals = (a: readonly unknown[] | undefined, b: readonly unknown[] | undefined): boolean => {
+  if (!a || !b) return a === b;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+};
+
+const isDefaultAutonomyScope = (s: OwnerProfile["autonomy_scope"]): boolean => {
+  if (!s || typeof s !== "object") return true;
+  const d = OWNER_PROFILE_DEFAULTS.autonomy_scope;
+  return arrayEquals(s.include, d.include) && arrayEquals(s.exclude, d.exclude);
+};
+
+export const buildOwnerProfileSection = (profile: OwnerProfile): string => {
+  // Render only non-default fields so the prompt stays lean when the
+  // owner hasn't expressed any preference. When everything is default,
+  // emit a stub so the brain learns to look for this section.
+  const lines: string[] = [];
+  const lang = profile.detected_language;
+  if (lang && lang !== OWNER_PROFILE_DEFAULTS.detected_language) {
+    lines.push(`detected_language: ${lang}`);
+  }
+  const trust = profile.autonomy_trust_level;
+  if (trust && trust !== OWNER_PROFILE_DEFAULTS.autonomy_trust_level) {
+    lines.push(`autonomy_trust_level: ${trust}`);
+  }
+  if (Array.isArray(profile.hot_topics) && profile.hot_topics.length > 0) {
+    lines.push(`hot_topics: ${profile.hot_topics.join(", ")}`);
+  }
+  if (Array.isArray(profile.things_to_never_do) && profile.things_to_never_do.length > 0) {
+    lines.push("things_to_never_do:");
+    for (const t of profile.things_to_never_do) lines.push(`  - ${t}`);
+  }
+  if (Array.isArray(profile.manual_review_patterns) && profile.manual_review_patterns.length > 0) {
+    lines.push("manual_review_patterns:");
+    for (const p of profile.manual_review_patterns) lines.push(`  - ${p}`);
+  }
+  const tw = formatTimeWindow(profile.time_window);
+  if (tw) lines.push(`time_window: ${tw}`);
+  if (!isDefaultAutonomyScope(profile.autonomy_scope)) {
+    const scope = formatAutonomyScope(profile.autonomy_scope);
+    if (scope) lines.push(`autonomy_scope: ${scope}`);
+  }
+
+  if (lines.length === 0) {
+    return "## OWNER PROFILE\n(no owner profile recorded yet)";
+  }
+  return ["## OWNER PROFILE", ...lines].join("\n");
+};
+
 const readArtifactRegistryTopK = (db: Database, k: number): Array<{ id: string; runtime: string; name: string; score: number }> => {
   const rows = db
     .query(
@@ -510,20 +618,22 @@ const EMISSION_GRAMMARS_TEXT = [
   "",
   "  contract_amendment_proposed.payload (STRUCTURED — required for auto-apply):",
   "    {",
-  "      target:           \"runtime/foo.ts\",     // file_path == target",
-  "      anchor:           \"<unique line/section anchor in current file>\",",
+  "      target_resource:  \"repo:runtime/foo.ts\", // resource URI; repo: is required for auto-apply",
+  "      resource_uri:     \"repo:runtime/foo.ts\", // alias accepted for cross-domain proposals",
+  "      anchor:           \"<unique line/section anchor in current resource>\",",
   "      current_behavior: \"<exact current text at anchor — for audit + reversibility>\",",
   "      proposed_behavior: {",
-  "        file_path: \"runtime/foo.ts\",          // MUST equal payload.target",
-  "        anchor:    \"<same anchor>\",            // mechanical edit locator",
-  "        diff: {                                // anchored_replace_v1 (preferred)",
+  "        target_resource: \"repo:runtime/foo.ts\", // MUST equal payload.target_resource/resource_uri",
+  "        resource_uri:    \"repo:runtime/foo.ts\", // same value; use one or both consistently",
+  "        anchor:          \"<same anchor>\",       // mechanical edit locator",
+  "        diff: {                                   // anchored_replace_v1 (preferred)",
   "          kind: \"anchored_replace_v1\",",
   "          before: \"<exact existing text near anchor>\",",
   "          after:  \"<exact replacement text>\",",
   "          occurrence?: 1                       // 1-based within anchor window, default 1",
   "        }",
-  "        // OR diff: \"<plain replacement text>\" — string form is accepted for",
-  "        // simple cases; the worker treats it as `after` with current_behavior as `before`.",
+  "        // OR legacy diff: \"<plain replacement text>\" — accepted only as a",
+  "        // fallback for existing proposals; prefer object-form anchored_replace_v1.",
   "      },",
   "      evidence_event_ids: [\"<source_event_id>\", ...]",
   "    }",
@@ -533,7 +643,7 @@ const EMISSION_GRAMMARS_TEXT = [
   "    remains Claude/owner mediated.",
   "    The structured proposed_behavior is what unlocks lesson_implementer_queue_view.",
   "    auto_apply_eligible=1 (and surfaces an auto_apply_signaled event); the gate",
-  "    REFUSES unstructured prose for cli/* + runtime/* targets (owner-consent targets",
+  "    REFUSES unstructured prose for repo:cli/* + repo:runtime/* resources (owner-consent targets",
   "    like CLAUDE.md require explicit approval regardless).",
   "    Freeform prose is fine ONLY for lesson_extracted (process insights, not code edits).",
   "",
@@ -714,6 +824,8 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // preferences, prior corrections, explicit constraints the owner stated
   // out loud. P2 so it survives normal-budget composition; drops with the
   // upstream/watched pair when the budget tightens.
+  const ownerProfileBody = buildOwnerProfileSection(readOwnerProfile(db));
+  candidates.push({ name: "owner_profile", p: 2, body: ownerProfileBody });
   const ownerContextBody = buildOwnerContextSection(readOwnerContext(db, 8));
   candidates.push({ name: "owner_context", p: 2, body: ownerContextBody });
   const stakeholderBody = renderStakeholderBlock(db, task.directive_id);

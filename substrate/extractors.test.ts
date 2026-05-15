@@ -7,9 +7,11 @@ import { closeDb, openDb } from "./db";
 import {
   extractCodeArtifactScores,
   extractKnowledgePromotions,
+  extractOwnerProfilePromotions,
   extractRecipeCandidates,
   extractRecipeFromCommit,
   extractSemanticDedup,
+  maybePromoteOwnerProfile,
 } from "./extractors";
 
 afterAll(() => closeDb());
@@ -453,4 +455,117 @@ describe("task_dispatcher inline recipe seeding (Task 5)", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+describe("maybePromoteOwnerProfile (Layer-2 owner autonomy)", () => {
+  test("promotes a high-confidence single-origin candidate via the confidence route, merging the field into a fresh owner_profile_recorded row, and is idempotent on a second call", () => {
+    const db = openDb(":memory:");
+    const candidateId = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      substrate_origin: "claude_root",
+      payload: {
+        field: "detected_language",
+        value: "es",
+        confidence: 0.95,
+        claim: "Owner consistently writes in Spanish across the last 10 chat turns.",
+      },
+    });
+    const verdict = maybePromoteOwnerProfile(db, candidateId);
+    expect(verdict.kind).toBe("promoted");
+    if (verdict.kind === "promoted") {
+      expect(verdict.field).toBe("detected_language");
+      expect(verdict.route).toBe("confidence");
+    }
+    // Exactly one owner_profile_recorded row landed, with the new field.
+    const recorded = db
+      .query("SELECT payload, context_refs FROM events WHERE kind = 'owner_profile_recorded'")
+      .all() as Array<{ payload: string; context_refs: string }>;
+    expect(recorded.length).toBe(1);
+    const payload = JSON.parse(recorded[0]!.payload) as Record<string, unknown>;
+    expect(payload.detected_language).toBe("es");
+    expect(payload.promotion_route).toBe("confidence");
+    expect(JSON.parse(recorded[0]!.context_refs)).toContain(candidateId);
+
+    // Idempotent — second call must NOT emit a duplicate row.
+    const second = maybePromoteOwnerProfile(db, candidateId);
+    expect(second.kind).toBe("no_action");
+    if (second.kind === "no_action") expect(second.reason).toBe("already_promoted");
+    const count2 = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'owner_profile_recorded'")
+      .get() as { c: number }).c;
+    expect(count2).toBe(1);
+  });
+
+  test("low-confidence single-origin candidate without sibling or owner approval is rejected (no_action)", () => {
+    const db = openDb(":memory:");
+    const candidateId = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      substrate_origin: "claude_root",
+      payload: { field: "autonomy_trust_level", value: "cautious", confidence: 0.4, claim: "weak signal" },
+    });
+    const verdict = maybePromoteOwnerProfile(db, candidateId);
+    expect(verdict.kind).toBe("no_action");
+    if (verdict.kind === "no_action") expect(verdict.reason).toBe("no_promotion_route");
+    const count = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'owner_profile_recorded'")
+      .get() as { c: number }).c;
+    expect(count).toBe(0);
+  });
+
+  test("owner_decision_recorded approval bypass promotes a low-confidence candidate via the owner_approval route", () => {
+    const db = openDb(":memory:");
+    const candidateId = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      substrate_origin: "claude_root",
+      payload: { field: "hot_topics", value: ["recipes"], confidence: 0.3, claim: "owner mentioned recipes once" },
+    });
+    insertEvent(db, {
+      kind: "owner_decision_recorded",
+      substrate_origin: "owner",
+      context_refs: [candidateId],
+      payload: { decision: "approve", note: "yes, recipes matter" },
+    });
+    const verdict = maybePromoteOwnerProfile(db, candidateId);
+    expect(verdict.kind).toBe("promoted");
+    if (verdict.kind === "promoted") expect(verdict.route).toBe("owner_approval");
+  });
+
+  test("schema-invalid value (autonomy_trust_level outside enum) drops the candidate silently", () => {
+    const db = openDb(":memory:");
+    const candidateId = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      substrate_origin: "claude_root",
+      payload: { field: "autonomy_trust_level", value: "reckless", confidence: 0.95, claim: "garbage" },
+    });
+    const verdict = maybePromoteOwnerProfile(db, candidateId);
+    expect(verdict.kind).toBe("no_action");
+    if (verdict.kind === "no_action") expect(verdict.reason).toBe("schema_validation_failed");
+    const count = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'owner_profile_recorded'")
+      .get() as { c: number }).c;
+    expect(count).toBe(0);
+  });
+
+  test("extractOwnerProfilePromotions bulk path promotes every eligible candidate exactly once", () => {
+    const db = openDb(":memory:");
+    const c1 = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      payload: { field: "detected_language", value: "fr", confidence: 0.95, claim: "consistently French" },
+    });
+    const c2 = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      payload: { field: "autonomy_trust_level", value: "high", confidence: 0.9, claim: "owner explicit" },
+    });
+    const c3 = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      payload: { field: "detected_language", value: "fr", confidence: 0.2, claim: "low confidence" },
+    });
+    const summary = extractOwnerProfilePromotions(db);
+    expect(summary.promoted).toBe(2);
+    expect(summary.skipped).toBe(1);
+    // Idempotent on rerun.
+    const again = extractOwnerProfilePromotions(db);
+    expect(again.promoted).toBe(0);
+    void c1; void c2; void c3;
+  });
 });

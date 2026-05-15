@@ -18,7 +18,9 @@
 
 import type { Database } from "bun:sqlite";
 import { withImmediateTransaction } from "./db";
-import type { EventKind, SubstrateOrigin } from "./types";
+import type { EventKind, OwnerProfile, SubstrateOrigin } from "./types";
+import { OWNER_PROFILE_DEFAULTS, OWNER_PROFILE_JSON_SCHEMA } from "./types";
+import { parseResourceRefs } from "../runtime/resource_uri";
 
 // ── ULID-ish id minter (same convention as Phase B1 tests) ─────────
 
@@ -1145,9 +1147,10 @@ export const extractRecipeFromCommit = (
 
 // ──────────────────────────────────────────────────────────────────────
 // Auto cross-directive interference detection (organism-alignment Track C,
-// 2026-05-15). Scans code_artifact rows for overlapping target_files
-// across directives. When two distinct directives admit artifacts that
-// mutate the same file path, that's a structural `resource_conflict` —
+// 2026-05-15). Scans code_artifact rows for overlapping normalized
+// target_resources across directives. Artifacts without valid target_resources
+// fail closed; target_files are display compatibility only, not matching input.
+// When two distinct directives admit artifacts that touch the same resource, that's a structural `resource_conflict` —
 // dispatching them concurrently risks racing edits. Emits one
 // `directive_interference_edge` event per discovered conflict; dedupes
 // against existing edges so re-running is a no-op.
@@ -1162,9 +1165,9 @@ export type DirectiveInterferenceSummary = { proposed: number; deduped: number }
 const collectArtifactDirectives = (
   db: Database,
 ): Map<string, Map<string, Set<string>>> => {
-  // file_path → directive_id → Set<artifact_id>
-  // Two distinct directives sharing a file → resource_conflict.
-  const byFile = new Map<string, Map<string, Set<string>>>();
+  // resource_uri -> directive_id -> Set<artifact_id>
+  // Two distinct directives sharing a resource -> resource_conflict.
+  const byResource = new Map<string, Map<string, Set<string>>>();
 
   // code_artifact.source_candidate_id points back to the originating
   // code_artifact_candidate event; that event's directive_id is the
@@ -1174,36 +1177,33 @@ const collectArtifactDirectives = (
   const rows = db
     .query(
       `SELECT
-         a.id              AS artifact_id,
-         a.target_files    AS target_files,
-         e.directive_id    AS directive_id
+         a.id                 AS artifact_id,
+         a.target_resources   AS target_resources,
+         e.directive_id       AS directive_id
        FROM code_artifact a
        LEFT JOIN events e
          ON e.kind = 'code_artifact_candidate'
         AND e.id = a.source_candidate_id
-       WHERE a.target_files IS NOT NULL
+       WHERE a.target_resources IS NOT NULL
          AND a.source_candidate_id IS NOT NULL
          AND a.status IN ('admitted', 'promoted')`,
     )
-    .all() as Array<{ artifact_id: string; target_files: string; directive_id: string | null }>;
+    .all() as Array<{ artifact_id: string; target_resources: string | null; directive_id: string | null }>;
 
   for (const r of rows) {
     if (!r.directive_id) continue;
-    let files: string[];
-    try {
-      const parsed = JSON.parse(r.target_files);
-      if (!Array.isArray(parsed)) continue;
-      files = parsed.map(String);
-    } catch { continue; }
-    for (const file of files) {
-      const byDirective = byFile.get(file) ?? new Map<string, Set<string>>();
+    const resources = parseResourceRefs(r.target_resources);
+    if (!resources) continue;
+    for (const resourceRef of resources) {
+      const resource = resourceRef.uri;
+      const byDirective = byResource.get(resource) ?? new Map<string, Set<string>>();
       const artifacts = byDirective.get(r.directive_id) ?? new Set<string>();
       artifacts.add(r.artifact_id);
       byDirective.set(r.directive_id, artifacts);
-      byFile.set(file, byDirective);
+      byResource.set(resource, byDirective);
     }
   }
-  return byFile;
+  return byResource;
 };
 
 const readExistingInterferencePairs = (db: Database): Set<string> => {
@@ -1234,15 +1234,15 @@ const readExistingInterferencePairs = (db: Database): Set<string> => {
 export const extractDirectiveInterference = (
   db: Database,
 ): DirectiveInterferenceSummary => {
-  const byFile = collectArtifactDirectives(db);
+  const byResource = collectArtifactDirectives(db);
   const existing = readExistingInterferencePairs(db);
   let proposed = 0;
   let deduped = 0;
 
-  // For each file with > 1 owning directive, emit pairwise edges. The
+  // For each resource with > 1 owning directive, emit pairwise edges. The
   // owning-artifact ids land in the payload as evidence so an operator
   // can audit which artifacts are causing the conflict.
-  for (const [file, byDirective] of byFile) {
+  for (const [resource, byDirective] of byResource) {
     const directives = [...byDirective.keys()];
     if (directives.length < 2) continue;
     for (let i = 0; i < directives.length; i++) {
@@ -1261,8 +1261,8 @@ export const extractDirectiveInterference = (
             from_directive: a,
             to_directive: b,
             kind: "resource_conflict",
-            reason: `shared_target_file:${file}`,
-            shared_file: file,
+            reason: `shared_target_resource:${resource}`,
+            shared_resource: resource,
             evidence_artifacts_from: evidenceA,
             evidence_artifacts_to: evidenceB,
             detected_by: "extractDirectiveInterference",
@@ -1276,4 +1276,282 @@ export const extractDirectiveInterference = (
     }
   }
   return { proposed, deduped };
+};
+
+// ──────────────────────────────────────────────────────────────────────
+// 6. Owner-profile promotion (Layer-2 autonomy, brain dispatch
+//    ZMJQQ963Z124V7VS amendment, 2026-05-15).
+//
+// `owner_insight_candidate` events carry one assertion about owner
+// preferences:
+//   payload = { field: keyof OwnerProfile, value: unknown, confidence: number, claim: string }
+// Promotion rule (per substrate/types.ts:14-26 design comment):
+//   (a) sibling cosine ≥ 0.85 against another owner_insight_candidate
+//       AND the sibling's confidence supports the same field/value, OR
+//   (b) payload.confidence ≥ 0.85 (high-confidence single-origin), OR
+//   (c) an explicit owner_decision_recorded with payload.decision === "approve"
+//       cites this candidate's id (manual approval bypass).
+//
+// On promotion: merge the assertion's field into the latest
+// owner_profile_recorded row's payload, validate against
+// OWNER_PROFILE_JSON_SCHEMA, and emit a NEW owner_profile_recorded with the
+// merged JSON. Validation failure drops the candidate silently — the
+// runtime stays fail-closed against malformed data.
+//
+// Idempotent: a candidate already cited as a context_ref by a prior
+// owner_profile_recorded row is skipped.
+
+const OWNER_PROFILE_PROMOTE_CONFIDENCE_THRESHOLD = 0.85;
+const OWNER_PROFILE_COSINE_THRESHOLD = 0.85;
+
+// Mini JSON-schema validator — handles the OWNER_PROFILE_JSON_SCHEMA shape
+// (object/array/enum/string-min-max/integer-min-max). Returns true when
+// the value conforms; false on any structural violation. Keep this local
+// to extractors.ts so we don't pull in a 1MB ajv dep for a 100-line shape.
+const validateAgainstSchema = (value: unknown, schema: unknown): boolean => {
+  if (!schema || typeof schema !== "object") return true;
+  const s = schema as Record<string, unknown>;
+  if (s.enum && Array.isArray(s.enum)) {
+    return (s.enum as unknown[]).includes(value);
+  }
+  if (s.type === "object") {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const props = (s.properties as Record<string, unknown> | undefined) ?? {};
+    const additional = s.additionalProperties;
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (k in props) {
+        if (!validateAgainstSchema(v, props[k])) return false;
+      } else if (additional === false) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (s.type === "array") {
+    if (!Array.isArray(value)) return false;
+    const items = s.items;
+    for (const v of value) {
+      if (!validateAgainstSchema(v, items)) return false;
+    }
+    return true;
+  }
+  if (s.type === "string") {
+    if (typeof value !== "string") return false;
+    if (typeof s.minLength === "number" && value.length < (s.minLength as number)) return false;
+    if (typeof s.maxLength === "number" && value.length > (s.maxLength as number)) return false;
+    return true;
+  }
+  if (s.type === "integer") {
+    if (typeof value !== "number" || !Number.isInteger(value)) return false;
+    if (typeof s.minimum === "number" && value < (s.minimum as number)) return false;
+    if (typeof s.maximum === "number" && value > (s.maximum as number)) return false;
+    return true;
+  }
+  return true;
+};
+
+// Meta fields the substrate stamps on each owner_profile_recorded row
+// for audit (which candidate inspired this promotion + via which route).
+// They are NOT part of OWNER_PROFILE_JSON_SCHEMA; strip them when reading
+// back so a subsequent merge + re-validate doesn't trip
+// additionalProperties=false.
+const OWNER_PROFILE_META_FIELDS = ["promoted_from", "promotion_route"] as const;
+
+const readLatestOwnerProfile = (db: Database): OwnerProfile => {
+  const row = db
+    .query(
+      `SELECT payload FROM events
+       WHERE kind = 'owner_profile_recorded'
+       ORDER BY ts DESC LIMIT 1`,
+    )
+    .get() as { payload: string } | null;
+  if (!row) return { ...OWNER_PROFILE_DEFAULTS } as OwnerProfile;
+  try {
+    const parsed = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
+    for (const m of OWNER_PROFILE_META_FIELDS) delete parsed[m];
+    return { ...OWNER_PROFILE_DEFAULTS, ...parsed } as OwnerProfile;
+  } catch {
+    return { ...OWNER_PROFILE_DEFAULTS } as OwnerProfile;
+  }
+};
+
+const candidateAlreadyPromoted = (db: Database, candidateId: string): boolean => {
+  const row = db
+    .query(
+      `SELECT 1 AS x FROM events
+       WHERE kind = 'owner_profile_recorded'
+         AND context_refs LIKE '%"' || ? || '"%'
+       LIMIT 1`,
+    )
+    .get(candidateId) as { x: number } | null;
+  return row !== null;
+};
+
+const ownerApprovalExists = (db: Database, candidateId: string): boolean => {
+  const rows = db
+    .query(
+      `SELECT payload FROM events
+       WHERE kind = 'owner_decision_recorded'
+         AND context_refs LIKE '%"' || ? || '"%'`,
+    )
+    .all(candidateId) as Array<{ payload: string }>;
+  for (const r of rows) {
+    try {
+      const p = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
+      if (typeof p.decision === "string" && p.decision.toLowerCase() === "approve") return true;
+    } catch { /* skip malformed */ }
+  }
+  return false;
+};
+
+const siblingCosineSupports = (
+  db: Database,
+  candidateId: string,
+  field: string,
+): boolean => {
+  // Pull the candidate's embedding + sibling embeddings (other open
+  // owner_insight_candidate rows targeting the SAME field). If cosine ≥
+  // OWNER_PROFILE_COSINE_THRESHOLD against any sibling, that's
+  // multi-origin corroboration the dedup path can latch onto.
+  const me = db
+    .query("SELECT embedding FROM events WHERE id = ?")
+    .get(candidateId) as { embedding: Uint8Array | null } | null;
+  if (!me?.embedding) return false;
+  const vecA = decodeEmbeddingBlobLocal(me.embedding);
+  if (!vecA) return false;
+  const siblings = db
+    .query(
+      `SELECT id, payload, embedding FROM events
+       WHERE kind = 'owner_insight_candidate'
+         AND id != ?
+         AND embedding IS NOT NULL`,
+    )
+    .all(candidateId) as Array<{ id: string; payload: string; embedding: Uint8Array }>;
+  for (const s of siblings) {
+    try {
+      const sp = JSON.parse(s.payload ?? "{}") as Record<string, unknown>;
+      if (sp.field !== field) continue;
+      const vecB = decodeEmbeddingBlobLocal(s.embedding);
+      if (!vecB || vecB.length !== vecA.length) continue;
+      const cos = cosineSimilarity(vecA, vecB);
+      if (cos >= OWNER_PROFILE_COSINE_THRESHOLD) return true;
+    } catch { /* skip */ }
+  }
+  return false;
+};
+
+export type OwnerProfileVerdict =
+  | { kind: "promoted"; candidate_id: string; recorded_event_id: string; field: string; route: "cosine" | "confidence" | "owner_approval" }
+  | { kind: "no_action"; candidate_id: string; reason: string };
+
+/** Promote a single owner_insight_candidate into a fresh
+ *  owner_profile_recorded row when promotion rules fire. Returns the
+ *  verdict so callers can audit / surface. Idempotent: a candidate
+ *  already cited by an owner_profile_recorded row is skipped. */
+export const maybePromoteOwnerProfile = (
+  db: Database,
+  sourceCandidateId: string,
+): OwnerProfileVerdict => {
+  const row = db
+    .query(
+      `SELECT id, directive_id, task_id, loop_id, substrate_origin, payload
+       FROM events
+       WHERE kind = 'owner_insight_candidate' AND id = ?`,
+    )
+    .get(sourceCandidateId) as Record<string, unknown> | null;
+  if (!row) {
+    return { kind: "no_action", candidate_id: sourceCandidateId, reason: "candidate_missing" };
+  }
+  if (candidateAlreadyPromoted(db, sourceCandidateId)) {
+    return { kind: "no_action", candidate_id: sourceCandidateId, reason: "already_promoted" };
+  }
+
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse((row.payload as string) ?? "{}") as Record<string, unknown>;
+  } catch {
+    return { kind: "no_action", candidate_id: sourceCandidateId, reason: "payload_unparseable" };
+  }
+  const field = payload.field;
+  const value = payload.value;
+  const confidence = typeof payload.confidence === "number" ? payload.confidence : 0;
+  if (typeof field !== "string" || field.length === 0) {
+    return { kind: "no_action", candidate_id: sourceCandidateId, reason: "missing_field" };
+  }
+  // Field must be one of OwnerProfile's keys — anything else is rejected
+  // before we touch the profile (fail closed).
+  const allowedFields = Object.keys(OWNER_PROFILE_JSON_SCHEMA.properties as Record<string, unknown>);
+  if (!allowedFields.includes(field)) {
+    return { kind: "no_action", candidate_id: sourceCandidateId, reason: "field_not_in_owner_profile" };
+  }
+
+  // Determine the promotion route.
+  let route: "cosine" | "confidence" | "owner_approval" | null = null;
+  if (ownerApprovalExists(db, sourceCandidateId)) {
+    route = "owner_approval";
+  } else if (confidence >= OWNER_PROFILE_PROMOTE_CONFIDENCE_THRESHOLD) {
+    route = "confidence";
+  } else if (siblingCosineSupports(db, sourceCandidateId, field)) {
+    route = "cosine";
+  }
+  if (!route) {
+    return { kind: "no_action", candidate_id: sourceCandidateId, reason: "no_promotion_route" };
+  }
+
+  // Merge the assertion's value into the latest profile.
+  const latest = readLatestOwnerProfile(db);
+  const merged: Record<string, unknown> = { ...latest };
+  merged[field] = value;
+  // The defaults set `time_window: null` to mark "no window declared";
+  // the schema only describes the object shape (no null union), so
+  // strip null values before validation. Same for any other null-marker
+  // defaults — schema validation runs against present fields only.
+  const forValidation: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(merged)) {
+    if (v !== null && v !== undefined) forValidation[k] = v;
+  }
+
+  // Validate the merged profile against the JSON schema before emitting.
+  if (!validateAgainstSchema(forValidation, OWNER_PROFILE_JSON_SCHEMA)) {
+    return { kind: "no_action", candidate_id: sourceCandidateId, reason: "schema_validation_failed" };
+  }
+
+  let recordedId = "";
+  withImmediateTransaction(db, () => {
+    recordedId = insertEvent(db, {
+      kind: "owner_profile_recorded",
+      directive_id: (row.directive_id as string) ?? "owner_profile",
+      task_id: (row.task_id as string) ?? "owner_profile",
+      loop_id: (row.loop_id as string) ?? "loop_root",
+      substrate_origin: "substrate_auto",
+      payload: { ...merged, promoted_from: sourceCandidateId, promotion_route: route },
+      context_refs: [sourceCandidateId],
+    });
+  });
+  return { kind: "promoted", candidate_id: sourceCandidateId, recorded_event_id: recordedId, field, route };
+};
+
+export type OwnerProfilePromotionSummary = { promoted: number; skipped: number };
+
+/** Bulk extractor — scans every owner_insight_candidate that hasn't been
+ *  promoted yet and runs `maybePromoteOwnerProfile` on each. Idempotent
+ *  via the per-candidate skip in `candidateAlreadyPromoted`. */
+export const extractOwnerProfilePromotions = (
+  db: Database,
+): OwnerProfilePromotionSummary => {
+  const rows = db
+    .query(
+      `SELECT id FROM events
+       WHERE kind = 'owner_insight_candidate'
+       ORDER BY ts ASC`,
+    )
+    .all() as Array<{ id: string }>;
+  let promoted = 0;
+  let skipped = 0;
+  for (const r of rows) {
+    const verdict = maybePromoteOwnerProfile(db, r.id);
+    if (verdict.kind === "promoted") promoted++;
+    else skipped++;
+  }
+  return { promoted, skipped };
 };

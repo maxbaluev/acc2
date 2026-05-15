@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
-import { composePrompt, estimateTokens } from "./prompt_composer";
+import { buildOwnerProfileSection, composePrompt, estimateTokens, readOwnerProfile } from "./prompt_composer";
 import { newId } from "./ids";
 
 afterAll(() => closeDb());
@@ -55,6 +55,9 @@ describe("prompt_composer", () => {
     expect(composed.text).toContain("CONSTANT ACT-LOOP METADATA");
     expect(composed.text).toContain("target_resources:");
     expect(composed.text).toContain("repo:runtime/foo.ts");
+    expect(composed.text).toContain("target_resource:");
+    expect(composed.text).toContain("resource_uri:");
+    expect(composed.text).toContain("anchored_replace_v1");
     expect(composed.text).toContain("browser_session:research/customer-a");
     expect(composed.text).toContain("sensor:habit_tracker/<stream>");
     expect(composed.text).not.toContain('target_files:        ["path/to/touched.ts", ...]');
@@ -186,5 +189,55 @@ describe("prompt_composer", () => {
     // Tokens should be fewer than characters for typical English text.
     expect(estimateTokens("hello world this is a longer test sentence"))
       .toBeLessThan("hello world this is a longer test sentence".length);
+  });
+
+  test("OWNER PROFILE section renders defaults stub when no owner_profile_recorded row exists, and renders the latest profile fields when one does", () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    // Before any owner_profile_recorded: section MUST be present with the
+    // "no owner profile recorded yet" stub — the brain learns to look for it.
+    const composedDefaults = composePrompt(db, { taskId });
+    expect(composedDefaults.text).toContain("## OWNER PROFILE");
+    expect(composedDefaults.text).toContain("(no owner profile recorded yet)");
+
+    // Emit one owner_profile_recorded with non-default fields, then recompose.
+    emitEvent(db, {
+      kind: "owner_profile_recorded",
+      substrate_origin: "substrate_auto",
+      payload: {
+        detected_language: "ru",
+        autonomy_trust_level: "cautious",
+        hot_topics: ["onboarding", "recipes"],
+        things_to_never_do: ["docs/operator-install.md"],
+        manual_review_patterns: ["runtime/*.test.ts"],
+        time_window: { timezone: "UTC", days: ["mon", "tue"], start_hour: 9, end_hour: 17 },
+        autonomy_scope: { include: ["cli/**", "runtime/**"], exclude: ["**/*.test.ts"] },
+      },
+    });
+    const profile = readOwnerProfile(db);
+    expect(profile.detected_language).toBe("ru");
+    expect(profile.autonomy_trust_level).toBe("cautious");
+
+    const rendered = buildOwnerProfileSection(profile);
+    expect(rendered).toContain("## OWNER PROFILE");
+    expect(rendered).toContain("detected_language: ru");
+    expect(rendered).toContain("autonomy_trust_level: cautious");
+    expect(rendered).toContain("hot_topics: onboarding, recipes");
+    expect(rendered).toContain("things_to_never_do:");
+    expect(rendered).toContain("- docs/operator-install.md");
+    expect(rendered).toContain("manual_review_patterns:");
+    expect(rendered).toContain("- runtime/*.test.ts");
+    expect(rendered).toContain("time_window: 9:00-17:00 mon,tue UTC");
+    expect(rendered).toContain("autonomy_scope: include=[cli/**, runtime/**] exclude=[**/*.test.ts]");
+
+    const composed = composePrompt(db, { taskId });
+    expect(composed.text).toContain("## OWNER PROFILE");
+    expect(composed.text).toContain("detected_language: ru");
+    expect(composed.text).toContain("autonomy_trust_level: cautious");
+    // OWNER PROFILE must render BEFORE OWNER CONTEXT (amendment shape).
+    const profileIdx = composed.text.indexOf("## OWNER PROFILE");
+    const contextIdx = composed.text.indexOf("OWNER CONTEXT");
+    expect(profileIdx).toBeGreaterThan(-1);
+    expect(contextIdx).toBeGreaterThan(profileIdx);
   });
 });
