@@ -185,6 +185,11 @@ describe("derived sets match their pre-unification shape", () => {
       "demo_dispatched",
       // External-push envelope.
       "external_event_received",
+      // Human-In-the-Loop blocker (substrate-side HIDL surface): retrieval
+      // over `summary` + `reason` lets the brain spot recurrence of the
+      // same blocker (auth_expired, quota_exhausted, env_missing, …) and
+      // propose a structural fix rather than re-asking the owner.
+      "hidl_action_required",
     ]);
     const derived = new Set(EMBEDDABLE_KINDS);
     for (const kind of expected) expect(derived.has(kind as EventKind)).toBe(true);
@@ -244,11 +249,18 @@ describe("derived sets match their pre-unification shape", () => {
   });
 
   test("MIRROR_INLINE_EVENT_TYPES has the expected pre-set members", () => {
-    // acc2 has no progress-event bus today; the set is empty until a
-    // v2 mirror surface lands. The test pins the empty contract so a
-    // future contributor cannot tag `mirror_inline: true` without also
-    // wiring the operator-facing surface.
-    expect(MIRROR_INLINE_EVENT_TYPES.size).toBe(0);
+    // The first v2 mirror-inline surface is HIDL: substrate-emitted
+    // blockers (auth_expired / quota_exhausted / env_missing / …) that
+    // the orchestrator MUST surface inline so the owner sees the
+    // blocker in the chat surface without opening logs. The empty set
+    // is no longer the contract; future additions are pinned the same
+    // way — by enumerating the expected mirror members here.
+    const expected = new Set([
+      "hidl_action_required",
+    ]);
+    const derived = new Set(MIRROR_INLINE_EVENT_TYPES);
+    expect(derived.size).toBe(expected.size);
+    for (const kind of expected) expect(derived.has(kind as EventKind)).toBe(true);
     // Also pin the bidirectional invariant: every entry with the flag
     // appears in the set, and every set member has the flag.
     for (const [kind, meta] of Object.entries(EVENT_KINDS)) {

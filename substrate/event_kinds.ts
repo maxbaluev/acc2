@@ -181,6 +181,28 @@ export const EVENT_KINDS = {
   owner_input_received:                    { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   owner_decision_recorded:                 { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   owner_input_required:                    { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false },
+  // ── Human-In-the-Loop (HIDL) action surface ─────────────────────────
+  // Substrate-emitted when an in-flight action cannot proceed without an
+  // out-of-band human decision (auth/quota/env missing, an irreversible
+  // effect is about to fire, or a constitutional gate refused). This
+  // generalizes the legacy `owner_input_required` brain-side prompt:
+  // anywhere in the runtime can route a block to the operator via this
+  // event, and the orchestrator MUST surface it inline (mirror_inline)
+  // so the owner sees the blocker in the chat surface without opening
+  // logs. Embeddable so retrieval lookups over `summary` + `reason`
+  // find the precedent (recurrence of the same HIDL reason is itself
+  // a learnable signal).
+  //
+  // Payload shape:
+  //   {
+  //     summary: string;            // one-line human-readable reason
+  //     reason: "auth_expired" | "quota_exhausted" | "env_missing"
+  //           | "irreversible_about_to_fire" | "owner_decision_needed";
+  //     blocked_task_id: string;    // the task pausing on this HIDL
+  //     suggested_action: string;   // what the owner should DO next
+  //     evidence_event_ids: string[]; // upstream rows the operator can audit
+  //   }
+  hidl_action_required:                    { producer: "substrate", embeddable: true,  mirror_inline: true,  health_metric: false },
 
   // ── Crisis mode ─────────────────────────────────────────────────────
   crisis_mode_engaged:                     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
