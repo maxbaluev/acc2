@@ -500,6 +500,24 @@ const emitApplyChain = (
       commit_sha: result.commitSha,
     } as JsonValue,
   });
+  // Distribute credit citing the source proposal. The synthetic-actuator
+  // path in runtime/credit.ts skips the primary artifact posterior
+  // (auto_apply_worker_stage2_action isn't a registered code_artifact)
+  // but DOES walk collectCitations, so the source proposal's posterior
+  // (knowledge_candidate / contract_amendment_proposed) updates with
+  // candidate_confirmed evidence — closing the k_555 four-link spine.
+  void import("./credit").then(({ distributeCredit }) => distributeCredit(db, {
+    action_event_id: action.id,
+    observation_event_id: scored.id,
+    scored_event_id: scored.id,
+    predicted_residual: 0.1,
+    observed_residual: 0,
+  })).catch((err) => {
+    logger.warn(
+      { where: "auto_apply.credit", err: (err as Error).message },
+      "auto-apply credit distribution failed",
+    );
+  });
   const committed = emitEvent(db, {
     kind: "applied_change_committed",
     substrate_origin: "substrate_auto",

@@ -64,10 +64,14 @@ describe("alignment / depth_one (Principle 5)", () => {
 
     // Compose under a tight budget. We pick a budget the P0 sections fit
     // into but everything else gets clipped — the goal is to PROVE that
-    // truncation is honest and emits the audit row.
-    const result = composePrompt(db, { taskId, budgetTokens: 800 });
+    // truncation is honest and emits the audit row. Budget tuned so the
+    // current P0 set (task_goal + runtimes_available + workflow + do_not)
+    // fits; the WORKFLOW_TEXT grew as universal-rendering and learning
+    // rules landed (commits 2830ce2 / 1f6ab5d / 28c7a2a). Production
+    // budget is 8000; this is "still small enough to force truncation".
+    const result = composePrompt(db, { taskId, budgetTokens: 2000 });
     const tokens = estimateTokens(result.text);
-    expect(tokens).toBeLessThanOrEqual(800);
+    expect(tokens).toBeLessThanOrEqual(2000);
     expect(result.truncated.length).toBeGreaterThan(0);
 
     const trunc = db
@@ -80,7 +84,7 @@ describe("alignment / depth_one (Principle 5)", () => {
       kept_sections: string[];
       truncated_sections: string[];
     };
-    expect(payload.budget_tokens).toBe(800);
+    expect(payload.budget_tokens).toBe(2000);
     expect(payload.truncated_sections.length).toBe(result.truncated.length);
     // P0 sections must always survive — they're load-bearing.
     expect(payload.kept_sections).toContain("task_goal");

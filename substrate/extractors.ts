@@ -174,6 +174,23 @@ const emitPromotionSpine = (
     payload: { ...args.payload, action_event_id: action_id, scored_event_id: scored_id },
     context_refs: [...baseRefs, action_id, scored_id],
   });
+  // Close the credit loop: call distributeCredit so the cited candidate
+  // (+ extra_context_refs) get candidate_confirmed evidence on the
+  // promotion. Without this, the spine events exist but no credit
+  // flows to inspiring candidates' Beta posteriors — the loop is
+  // open. The synthetic-actuator path in runtime/credit.ts handles
+  // the missing-artifact case cleanly (skip artifact posterior,
+  // continue with citation credit). Best-effort: errors are logged
+  // but don't roll back the promotion.
+  void import("../runtime/credit")
+    .then(({ distributeCredit }) => distributeCredit(db, {
+      action_event_id: action_id,
+      observation_event_id: scored_id,
+      scored_event_id: scored_id,
+      predicted_residual: 0,
+      observed_residual: 0,
+    }))
+    .catch(() => { /* extractor cadence remains best-effort */ });
   return { action_id, scored_id, result_id };
 };
 

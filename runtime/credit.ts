@@ -449,8 +449,17 @@ export const distributeCredit = async (
   }
   const actionArt = getArtifact(db, actionArtifactId);
   const verifierArt = getArtifact(db, verifierArtifactId);
-  if (!actionArt) throw new Error(`action_artifact_not_found:${actionArtifactId}`);
-  if (!verifierArt) throw new Error(`verifier_artifact_not_found:${verifierArtifactId}`);
+  // Synthetic substrate actuators — owner_profile_promoter,
+  // knowledge_promotion, code_artifact_promotion, recipe_*,
+  // auto_apply_worker_stage2, etc — emit action_predicted +
+  // action_scored events but are NOT registered code_artifact rows
+  // (they're substrate-side primitives, not brain-authored scripts).
+  // For these paths, skip the primary artifact posterior updates
+  // (there's no row to update) but CONTINUE through collectCitations
+  // so cited candidates/knowledge still receive
+  // candidate_confirmed/candidate_contradicted evidence. Throwing
+  // here would leave every substrate-side spine without credit flow.
+  const primaryArtifactsRegistered = Boolean(actionArt && verifierArt);
 
   const ts = nowIso();
   const emittedEvents: string[] = [];
@@ -517,61 +526,86 @@ export const distributeCredit = async (
   //    `code_artifact_score_updated` row that stamps this goal_shape onto
   //    the artifact's history; otherwise the verifier's check would observe
   //    the action's stamp and miss its own novelty.
-  const actionWeight = applyNoveltyBonus(actionArt.id, 1.0);
-  const verifierWeight = applyNoveltyBonus(verifierArt.id, 1.0);
+  let computedActionWeight = 1.0;
+  let computedVerifierWeight = 1.0;
+  if (primaryArtifactsRegistered) {
+    computedActionWeight = applyNoveltyBonus(actionArt!.id, 1.0);
+    computedVerifierWeight = applyNoveltyBonus(verifierArt!.id, 1.0);
+    applyWeightedResidualOutcome(db, actionArt!.id, params.observed_residual, computedActionWeight, ts);
+    applyWeightedResidualOutcome(db, verifierArt!.id, params.observed_residual, computedVerifierWeight, ts);
+  } else {
+    // Synthetic actuator path: record the skip so observers can see the
+    // credit chain ran but skipped primary artifact updates. Cited
+    // candidates STILL get credit downstream via collectCitations.
+    emit({
+      kind: "constitutional_gate_decision",
+      substrate_origin: "substrate_auto",
+      payload: {
+        gate: "credit_synthetic_actuator",
+        reason: "primary artifacts not registered; skipping artifact posterior update, continuing citation credit",
+        action_artifact_id: actionArtifactId,
+        verifier_artifact_id: verifierArtifactId,
+        scored_event_id: params.scored_event_id,
+      } as JsonValue,
+    });
+  }
 
-  applyWeightedResidualOutcome(db, actionArt.id, params.observed_residual, actionWeight, ts);
-  applyWeightedResidualOutcome(db, verifierArt.id, params.observed_residual, verifierWeight, ts);
+  // Artifact-row-dependent surface (score_updated, promotion checks,
+  // body citation extraction) only runs when primary artifacts are
+  // registered. Synthetic actuators skip cleanly here and still
+  // distribute citation credit below.
+  if (primaryArtifactsRegistered) {
+    const actionRowPost = getArtifact(db, actionArt!.id)!;
+    emit({
+      kind: "code_artifact_score_updated",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: actionArt!.id,
+      payload: {
+        artifact_id: actionArt!.id,
+        role: "action",
+        residual: params.observed_residual,
+        weight: computedActionWeight,
+        score: actionRowPost.score,
+        confidence: actionRowPost.confidence,
+        scored_event_id: params.scored_event_id,
+        goal_shape: directiveGoalShape,
+      } as JsonValue,
+    });
+    const verifierRowPost = getArtifact(db, verifierArt!.id)!;
+    emit({
+      kind: "code_artifact_score_updated",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: verifierArt!.id,
+      payload: {
+        artifact_id: verifierArt!.id,
+        role: "verifier",
+        residual: params.observed_residual,
+        weight: computedVerifierWeight,
+        score: verifierRowPost.score,
+        confidence: verifierRowPost.confidence,
+        scored_event_id: params.scored_event_id,
+        goal_shape: directiveGoalShape,
+      } as JsonValue,
+    });
 
-  const actionRowPost = getArtifact(db, actionArt.id)!;
-  emit({
-    kind: "code_artifact_score_updated",
-    substrate_origin: "substrate_auto",
-    action_artifact_id: actionArt.id,
-    payload: {
-      artifact_id: actionArt.id,
-      role: "action",
-      residual: params.observed_residual,
-      weight: actionWeight,
-      score: actionRowPost.score,
-      confidence: actionRowPost.confidence,
-      scored_event_id: params.scored_event_id,
-      goal_shape: directiveGoalShape,
-    } as JsonValue,
-  });
-  const verifierRowPost = getArtifact(db, verifierArt.id)!;
-  emit({
-    kind: "code_artifact_score_updated",
-    substrate_origin: "substrate_auto",
-    action_artifact_id: verifierArt.id,
-    payload: {
-      artifact_id: verifierArt.id,
-      role: "verifier",
-      residual: params.observed_residual,
-      weight: verifierWeight,
-      score: verifierRowPost.score,
-      confidence: verifierRowPost.confidence,
-      scored_event_id: params.scored_event_id,
-      goal_shape: directiveGoalShape,
-    } as JsonValue,
-  });
+    // 2. Promotion / quarantine checks on action + verifier.
+    maybePromote(db, actionArt!.id, (e) => emit(e));
+    maybeQuarantine(db, actionArt!.id, (e) => emit(e));
+    maybePromote(db, verifierArt!.id, (e) => emit(e));
+    maybeQuarantine(db, verifierArt!.id, (e) => emit(e));
+  }
 
-  // 2. Promotion / quarantine checks on action + verifier.
-  maybePromote(db, actionArt.id, (e) => emit(e));
-  maybeQuarantine(db, actionArt.id, (e) => emit(e));
-  maybePromote(db, verifierArt.id, (e) => emit(e));
-  maybeQuarantine(db, verifierArt.id, (e) => emit(e));
-
-  // 3. Third-party citations — Shapley distribute.
-  const actionBodyCites = extractBodyCitations(actionArt.body);
-  const verifierBodyCites = extractBodyCitations(verifierArt.body);
+  // 3. Third-party citations — Shapley distribute. Body citations only
+  // exist when artifacts are registered (no body to scan otherwise).
+  const actionBodyCites = primaryArtifactsRegistered ? extractBodyCitations(actionArt!.body) : [];
+  const verifierBodyCites = primaryArtifactsRegistered ? extractBodyCitations(verifierArt!.body) : [];
   const cited = collectCitations(
     db,
     params,
     actionBodyCites,
     verifierBodyCites,
-    actionArt.id,
-    verifierArt.id,
+    actionArtifactId,
+    verifierArtifactId,
   );
   const weights = shapleyWeightsByCorroboration(cited.length);
   const { alphaDelta, betaDelta } = residualToBetaDeltas(params.observed_residual);
