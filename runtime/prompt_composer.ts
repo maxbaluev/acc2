@@ -617,6 +617,12 @@ const WORKFLOW_TEXT = [
   "     Mirror preferred_terms back; NEVER use avoided_terms; explain a concept only on",
   "     FIRST encounter (check exposed_concepts). When signals are sparse (new owner),",
   "     default to plain language + one question at a time + explanations on first encounter.",
+  "  LEARNING FROM OWNER INPUT (universal input side — no fixed intent/persona buckets):",
+  "  10. Treat every owner_input_received / owner_decision_recorded row as evidence for",
+  "      owner_insight_candidate when it changes language, constraints, preferred terms,",
+  "      avoided terms, autonomy bounds, hot topics, or recurring decision patterns.",
+  "      Cite the source owner event ids in context_refs; do NOT infer durable profile facts",
+  "      from uncited chat memory. The substrate promotes/demotes via Model D + outcomes.",
 ].join("\n");
 
 // Detailed emission grammar — P1 so it drops first under tight-budget
@@ -872,15 +878,18 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
         return lines.join("\n");
       })();
   candidates.push({ name: "watched_outputs", p: 2, body: watchedBody });
-  // Persistent owner-profile memory (Batch 2): show recent owner-channel
-  // events so the brain has continuity across directives — tone,
-  // preferences, prior corrections, explicit constraints the owner stated
-  // out loud. P2 so it survives normal-budget composition; drops with the
-  // upstream/watched pair when the budget tightens.
+  // Persistent owner-profile memory is part of depth-1 retrieval, not a
+  // decorative UX footer. P1 (with retrieved knowledge + artifacts) so
+  // the brain reads the owner's continuous signals, vocabulary, and
+  // accumulated context on every cycle — even when P2/P3 sections are
+  // trimmed under tight-budget pressure. The owner-channel data is
+  // load-bearing for the LLM-on-the-fly demo generation (WORKFLOW step
+  // 3) AND for the rendering rule (step 9) AND for owner-input learning
+  // (step 10) — three workflow steps depend on this being present.
   const ownerProfileBody = buildOwnerProfileSection(readOwnerProfile(db));
-  candidates.push({ name: "owner_profile", p: 2, body: ownerProfileBody });
+  candidates.push({ name: "owner_profile", p: 1, body: ownerProfileBody });
   const ownerContextBody = buildOwnerContextSection(readOwnerContext(db, 8));
-  candidates.push({ name: "owner_context", p: 2, body: ownerContextBody });
+  candidates.push({ name: "owner_context", p: 1, body: ownerContextBody });
   const stakeholderBody = renderStakeholderBlock(db, task.directive_id);
   candidates.push({
     name: "stakeholder_state",

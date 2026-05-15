@@ -460,18 +460,54 @@ const emitApplyChain = (
     });
     return;
   }
-  // Full chain on success: emit applied_change_committed first, then the
-  // *_applied row citing it. The four-link spine (k_555) closes when
-  // candidate_confirmed / candidate_contradicted fires later via the
-  // credit pipeline; this worker doesn't run substrate.credit itself
-  // because there's no action_predicted/scored pair to score — the
-  // mechanical apply IS its own observation.
+  // Full four-link spine (k_555) on success: action_predicted →
+  // action_scored → applied_change_committed → *_applied. Adding the
+  // action_predicted/scored pair makes the apply visible to the
+  // universal act-loop telemetry: the residual is on file, the
+  // verifier ran (the bun test --bail gate IS the verifier), and
+  // substrate.credit can later score the source proposal's posterior
+  // against this row chain. Without these two events the chain
+  // started at applied_change_committed and the substrate had no
+  // place to attach action-level posterior signal.
+  const action = emitEvent(db, {
+    kind: "action_predicted",
+    substrate_origin: "substrate_auto",
+    directive_id: row.directive_id ?? undefined,
+    task_id: row.task_id ?? undefined,
+    context_refs: [row.source_event_id],
+    action_artifact_id: "auto_apply_worker_stage2_action",
+    verifier_artifact_id: "auto_apply_worker_stage2_verifier",
+    predicted_residual: 0.1,
+    payload: {
+      source_event_id: row.source_event_id,
+      target: row.target,
+      stage: "stage_2_mechanical_apply",
+    } as JsonValue,
+  });
+  const scored = emitEvent(db, {
+    kind: "action_scored",
+    substrate_origin: "substrate_auto",
+    directive_id: row.directive_id ?? undefined,
+    task_id: row.task_id ?? undefined,
+    context_refs: [row.source_event_id, action.id],
+    action_artifact_id: "auto_apply_worker_stage2_action",
+    verifier_artifact_id: "auto_apply_worker_stage2_verifier",
+    outcome: "succeeded",
+    residual: 0,
+    payload: {
+      source_event_id: row.source_event_id,
+      target: row.target,
+      commit_sha: result.commitSha,
+    } as JsonValue,
+  });
   const committed = emitEvent(db, {
     kind: "applied_change_committed",
     substrate_origin: "substrate_auto",
     directive_id: row.directive_id ?? undefined,
     task_id: row.task_id ?? undefined,
-    context_refs: [row.source_event_id],
+    context_refs: [row.source_event_id, action.id, scored.id],
+    action_artifact_id: "auto_apply_worker_stage2_action",
+    verifier_artifact_id: "auto_apply_worker_stage2_verifier",
     residual: 0,
     payload: {
       source_event_id: row.source_event_id,
@@ -481,6 +517,8 @@ const emitApplyChain = (
       summary: result.summary,
       stage: "stage_2_mechanical_apply",
       applied_by: "auto_apply_worker",
+      action_event_id: action.id,
+      scored_event_id: scored.id,
     } as JsonValue,
   });
   emitEvent(db, {
