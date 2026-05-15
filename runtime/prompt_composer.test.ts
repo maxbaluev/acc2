@@ -206,7 +206,7 @@ describe("prompt_composer", () => {
       substrate_origin: "substrate_auto",
       payload: {
         detected_language: "ru",
-        autonomy_trust_level: "cautious",
+        autonomy_score: 0.3,
         hot_topics: ["onboarding", "recipes"],
         things_to_never_do: ["docs/operator-install.md"],
         manual_review_patterns: ["runtime/*.test.ts"],
@@ -216,12 +216,12 @@ describe("prompt_composer", () => {
     });
     const profile = readOwnerProfile(db);
     expect(profile.detected_language).toBe("ru");
-    expect(profile.autonomy_trust_level).toBe("cautious");
+    expect(profile.autonomy_score).toBe(0.3);
 
     const rendered = buildOwnerProfileSection(profile);
     expect(rendered).toContain("## OWNER PROFILE");
     expect(rendered).toContain("detected_language: ru");
-    expect(rendered).toContain("autonomy_trust_level: cautious");
+    expect(rendered).toContain("autonomy_score: 0.30");
     expect(rendered).toContain("hot_topics: onboarding, recipes");
     expect(rendered).toContain("things_to_never_do:");
     expect(rendered).toContain("- docs/operator-install.md");
@@ -233,7 +233,7 @@ describe("prompt_composer", () => {
     const composed = composePrompt(db, { taskId });
     expect(composed.text).toContain("## OWNER PROFILE");
     expect(composed.text).toContain("detected_language: ru");
-    expect(composed.text).toContain("autonomy_trust_level: cautious");
+    expect(composed.text).toContain("autonomy_score: 0.30");
     // OWNER PROFILE must render BEFORE OWNER CONTEXT (amendment shape).
     const profileIdx = composed.text.indexOf("## OWNER PROFILE");
     const contextIdx = composed.text.indexOf("OWNER CONTEXT");

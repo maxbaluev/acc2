@@ -324,21 +324,59 @@ describe("auto_apply_worker", () => {
     expect(blockTime.gated).toBe(true);
     if (blockTime.gated) expect(blockTime.field).toBe("time_window");
 
-    // 5. cautious trust + multi-file payload — single-file payload passes,
-    //    a payload that fails extractAnchoredReplaceV1 (touched=0) also
-    //    passes the gate (the gate only refuses STRICTLY > 1 file). To
-    //    prove the cautious arm fires, force touched>1 by constructing a
-    //    payload that the gate evaluator counts twice. We use a payload
-    //    field outside the anchored_replace_v1 shape — counted as touched=0
-    //    so it passes. The cautious gate is therefore a forward-compatible
-    //    hook; here we assert the OTHER three gates fire and the cautious
-    //    gate passes by default for the canonical single-file shape.
-    const passCautiousSingle = evaluateOwnerProfileGate(
-      { ...OWNER_PROFILE_DEFAULTS, autonomy_trust_level: "cautious" } as OwnerProfile,
+    // 5. Low autonomy_score + multi-file payload — single-file payload
+    //    passes (the gate refuses STRICTLY > 1 file). The low-score arm
+    //    is a forward-compatible hook; here we assert the OTHER three
+    //    gates fire and the score gate passes by default for the
+    //    canonical single-file shape.
+    const passLowScoreSingle = evaluateOwnerProfileGate(
+      { ...OWNER_PROFILE_DEFAULTS, autonomy_score: 0.2 } as OwnerProfile,
       "runtime/foo.ts",
       basePayload,
       Date.UTC(2026, 4, 15, 12, 0, 0),
     );
-    expect(passCautiousSingle.gated).toBe(false);
+    expect(passLowScoreSingle.gated).toBe(false);
+  });
+
+  test("autonomy_score below multi-file threshold blocks multi-file diff", () => {
+    const multiFilePayload = {
+      target: "runtime/foo.ts",
+      diff: {
+        kind: "anchored_replace_v1",
+        before: "old1",
+        after: "new1",
+      },
+      // Adjacent affected file inferred by countTouchedFiles is the gate's
+      // responsibility — payload-level shape only carries the primary
+      // target. The gate's count > 1 path requires a second target_files
+      // entry. We construct one explicitly:
+      target_files: ["runtime/foo.ts", "runtime/bar.ts"],
+    } as Record<string, unknown>;
+    const lowScore = evaluateOwnerProfileGate(
+      { ...OWNER_PROFILE_DEFAULTS, autonomy_score: 0.2 } as OwnerProfile,
+      "runtime/foo.ts",
+      multiFilePayload,
+      Date.UTC(2026, 4, 15, 12, 0, 0),
+    );
+    expect(lowScore.gated).toBe(true);
+    if (lowScore.gated) {
+      expect(lowScore.field).toBe("autonomy_score");
+      expect(lowScore.reason).toContain("below_multi_file_threshold");
+    }
+  });
+
+  test("autonomy_score_floor lifts effective score above threshold", () => {
+    const multiFilePayload = {
+      target: "runtime/foo.ts",
+      target_files: ["runtime/foo.ts", "runtime/bar.ts"],
+    } as Record<string, unknown>;
+    // Raw 0.1 but floor 0.5 → effective 0.5, multi-file passes.
+    const lifted = evaluateOwnerProfileGate(
+      { ...OWNER_PROFILE_DEFAULTS, autonomy_score: 0.1, autonomy_score_floor: 0.5 } as OwnerProfile,
+      "runtime/foo.ts",
+      multiFilePayload,
+      Date.UTC(2026, 4, 15, 12, 0, 0),
+    );
+    expect(lifted.gated).toBe(false);
   });
 });

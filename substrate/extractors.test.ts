@@ -501,7 +501,7 @@ describe("maybePromoteOwnerProfile (Layer-2 owner autonomy)", () => {
     const candidateId = insertEvent(db, {
       kind: "owner_insight_candidate",
       substrate_origin: "claude_root",
-      payload: { field: "autonomy_trust_level", value: "cautious", confidence: 0.4, claim: "weak signal" },
+      payload: { field: "autonomy_score", value: 0.3, confidence: 0.4, claim: "weak signal" },
     });
     const verdict = maybePromoteOwnerProfile(db, candidateId);
     expect(verdict.kind).toBe("no_action");
@@ -530,12 +530,12 @@ describe("maybePromoteOwnerProfile (Layer-2 owner autonomy)", () => {
     if (verdict.kind === "promoted") expect(verdict.route).toBe("owner_approval");
   });
 
-  test("schema-invalid value (autonomy_trust_level outside enum) drops the candidate silently", () => {
+  test("schema-invalid value (autonomy_score outside [0,1]) drops the candidate silently", () => {
     const db = openDb(":memory:");
     const candidateId = insertEvent(db, {
       kind: "owner_insight_candidate",
       substrate_origin: "claude_root",
-      payload: { field: "autonomy_trust_level", value: "reckless", confidence: 0.95, claim: "garbage" },
+      payload: { field: "autonomy_score", value: 99, confidence: 0.95, claim: "garbage" },
     });
     const verdict = maybePromoteOwnerProfile(db, candidateId);
     expect(verdict.kind).toBe("no_action");
@@ -554,7 +554,7 @@ describe("maybePromoteOwnerProfile (Layer-2 owner autonomy)", () => {
     });
     const c2 = insertEvent(db, {
       kind: "owner_insight_candidate",
-      payload: { field: "autonomy_trust_level", value: "high", confidence: 0.9, claim: "owner explicit" },
+      payload: { field: "autonomy_score", value: 0.9, confidence: 0.9, claim: "owner explicit" },
     });
     const c3 = insertEvent(db, {
       kind: "owner_insight_candidate",

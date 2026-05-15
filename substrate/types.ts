@@ -25,8 +25,6 @@ export type JsonValue =
 // approval fires. The auto-apply worker + prompt composer read the latest
 // profile row via substrate/views.ts:owner_profile_view.
 
-export type OwnerAutonomyTrustLevel = "cautious" | "normal" | "high";
-
 export type OwnerProfileTimeWindow = {
   timezone?: string;
   days?: Array<"mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun">;
@@ -115,7 +113,28 @@ export type OwnerProfile = {
    *  only. */
   exposed_concepts?: Record<string, OwnerConceptExposure>;
   autonomy_scope?: OwnerAutonomyScope;
-  autonomy_trust_level?: OwnerAutonomyTrustLevel;
+  /** Continuous autonomy score ∈ [0, 1]. Universal — every owner has
+   *  their own score; no fixed enum of "cautious/normal/high" tiers.
+   *  The substrate ADJUSTS this score from outcomes: +Δ on each
+   *  applied_change_committed without revert, −Δ on each
+   *  applied_change_failed or irreversible_effect_recorded. The owner
+   *  can also clamp the floor via `autonomy_score_floor` so a bad
+   *  outcome never drops trust below their declared minimum.
+   *
+   *  Gate behavior (auto_apply_worker): when autonomy_score is below
+   *  AUTONOMY_MULTI_FILE_THRESHOLD (default 0.4), multi-file diffs are
+   *  blocked. Higher dimensions (irreversible, cross-runtime,
+   *  permission-sensitive paths) can use other thresholds — the score
+   *  is one continuous knob, the thresholds vary by what's at stake.
+   *
+   *  Default 0.5 (above the multi-file threshold, so a fresh owner's
+   *  behavior matches the prior "normal" tier). */
+  autonomy_score?: number;
+  /** Optional owner-declared floor — autonomy_score never falls below
+   *  this. Lets the owner say "even after a bad apply, treat me as ≥
+   *  0.3 trust" or "I'm a beginner — clamp me at 0.6 forever". When
+   *  omitted, no floor (substrate can drive the score to 0). */
+  autonomy_score_floor?: number;
   /** Paths/patterns the auto-apply worker MUST signal (stage-1) only,
    *  never apply (stage-2), even if Layer 1 says they're eligible. */
   manual_review_patterns?: string[];
@@ -125,8 +144,8 @@ export type OwnerProfile = {
   /** Topics the owner cares about — biases Father objective ranking
    *  + capability-discoverability suggestions. */
   hot_topics?: string[];
-  /** Hard-block patterns. Even with autonomy_trust_level=high, the
-   *  worker refuses to apply edits matching any of these. */
+  /** Hard-block patterns. Even with autonomy_score=1.0 the worker
+   *  refuses to apply edits matching any of these. */
   things_to_never_do?: string[];
 };
 
@@ -137,7 +156,7 @@ export const OWNER_PROFILE_DEFAULTS = {
   avoided_terms: [],
   exposed_concepts: {},
   autonomy_scope: { include: ["cli/**", "runtime/**"], exclude: [] },
-  autonomy_trust_level: "normal",
+  autonomy_score: 0.5,
   manual_review_patterns: [],
   time_window: null,
   hot_topics: [],
@@ -178,7 +197,8 @@ export const OWNER_PROFILE_JSON_SCHEMA = {
         exclude: { type: "array", items: { type: "string", minLength: 1 }, default: [] },
       },
     },
-    autonomy_trust_level: { enum: ["cautious", "normal", "high"], default: "normal" },
+    autonomy_score: { type: "number", minimum: 0, maximum: 1, default: 0.5 },
+    autonomy_score_floor: { type: "number", minimum: 0, maximum: 1 },
     manual_review_patterns: { type: "array", items: { type: "string", minLength: 1 }, default: [] },
     time_window: {
       type: "object",

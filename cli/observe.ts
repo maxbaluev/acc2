@@ -312,12 +312,16 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
     }
     case "owner_profile_recorded": {
       const lang = p.detected_language as string | undefined;
-      const trust = p.autonomy_trust_level as string | undefined;
+      const score = typeof p.autonomy_score === "number" ? p.autonomy_score : undefined;
       const sigs = p.rendering_signals as Record<string, number> | undefined;
       const sigSummary = sigs && Object.keys(sigs).length > 0
         ? `signals=${Object.entries(sigs).map(([k, v]) => `${k}:${(v as number).toFixed(2)}`).join(",")}`
         : "";
-      return [lang ? `language=${lang}` : "", trust ? `trust=${trust}` : "", sigSummary].filter(Boolean).join(" ");
+      return [
+        lang ? `language=${lang}` : "",
+        score !== undefined ? `autonomy_score=${score.toFixed(2)}` : "",
+        sigSummary,
+      ].filter(Boolean).join(" ");
     }
     case "auto_apply_signaled": {
       const src = p.source_event_id as string | undefined;

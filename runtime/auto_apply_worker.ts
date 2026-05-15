@@ -36,6 +36,7 @@
 
 import type { Database } from "bun:sqlite";
 import type { JsonValue, OwnerProfile } from "../substrate/types";
+import { OWNER_PROFILE_DEFAULTS } from "../substrate/types";
 import { emitEvent } from "./events";
 import { logger } from "./logger";
 import { readOwnerProfile } from "./prompt_composer";
@@ -202,6 +203,21 @@ const outsideTimeWindow = (window: OwnerProfile["time_window"], nowMs: number): 
  *  otherwise. The hook exists so multi-file shapes (when introduced)
  *  inherit the cautious gate automatically. */
 const countTouchedFiles = (payload: Record<string, unknown>): number => {
+  // Multi-file shapes the gate must count:
+  //   - payload.target_files: ["a.ts", "b.ts"]      (canonical list)
+  //   - payload.targets:      ["a.ts", "b.ts"]      (legacy synonym)
+  //   - payload.diff:         anchored_replace_v1[] (future array form)
+  // Falls back to extractAnchoredReplaceV1 for the canonical single-file
+  // diff shape (counted as 1).
+  if (Array.isArray(payload.target_files)) {
+    return (payload.target_files as unknown[]).filter((x) => typeof x === "string" && x.length > 0).length;
+  }
+  if (Array.isArray(payload.targets)) {
+    return (payload.targets as unknown[]).filter((x) => typeof x === "string" && x.length > 0).length;
+  }
+  if (Array.isArray(payload.diff)) {
+    return (payload.diff as unknown[]).length;
+  }
   const parsed = extractAnchoredReplaceV1(payload);
   return parsed ? 1 : 0;
 };
@@ -255,19 +271,37 @@ export const evaluateOwnerProfileGate = (
       reason: "outside_owner_time_window",
     };
   }
-  // 4. Cautious trust level — refuse multi-file diffs.
-  if (profile.autonomy_trust_level === "cautious") {
+  // 4. Continuous autonomy_score — refuse multi-file diffs when the
+  // owner's accumulated trust score is below the multi-file threshold.
+  // Universal — no fixed "cautious/normal/high" tiers; the score is
+  // owner-specific and substrate-adjusted from outcomes. The effective
+  // score honors an optional owner-declared floor.
+  const rawScore = typeof profile.autonomy_score === "number"
+    ? profile.autonomy_score
+    : (OWNER_PROFILE_DEFAULTS.autonomy_score as number);
+  const floor = typeof profile.autonomy_score_floor === "number"
+    ? profile.autonomy_score_floor
+    : 0;
+  const effectiveScore = Math.max(rawScore, floor);
+  if (effectiveScore < AUTONOMY_MULTI_FILE_THRESHOLD) {
     const touched = countTouchedFiles(sourcePayload);
     if (touched > 1) {
       return {
         gated: true,
-        field: "autonomy_trust_level",
-        reason: `cautious_trust_refuses_multi_file:${touched}_files`,
+        field: "autonomy_score",
+        reason: `autonomy_score_below_multi_file_threshold:${effectiveScore.toFixed(2)}<${AUTONOMY_MULTI_FILE_THRESHOLD}:${touched}_files`,
       };
     }
   }
   return { gated: false };
 };
+
+/** Multi-file diff threshold. Owners with autonomy_score < 0.4 (the
+ *  prior "cautious" tier on the old enum) have multi-file diffs
+ *  blocked. Higher-stakes dimensions (irreversible, cross-runtime,
+ *  permission-sensitive paths) can use their own thresholds — see
+ *  evaluateOwnerProfileGate for the per-dimension gate logic. */
+export const AUTONOMY_MULTI_FILE_THRESHOLD = 0.4;
 
 /** Emit one `auto_apply_signaled` event marking a stage-2 candidate as
  *  owner_profile_blocked so an operator sees exactly why the apply did
@@ -563,7 +597,7 @@ export const runAutoApplyWorkerTick = (
   //      last STAGE2_COOLDOWN_MS — bad proposals naturally pause the loop.
   //   3. Layer-2 OwnerProfile gate: refuse when an owner preference
   //      (things_to_never_do / manual_review_patterns / time_window /
-  //      cautious autonomy_trust_level + multi-file diff) blocks the
+  //      autonomy_score below AUTONOMY_MULTI_FILE_THRESHOLD + multi-file diff) blocks the
   //      candidate. Emits a structural auto_apply_signaled with
   //      reason=owner_profile_blocked instead of running mechanical apply.
   //   4. one-at-a-time: take the oldest candidate, apply, return. A flood

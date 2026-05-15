@@ -1347,6 +1347,12 @@ const validateAgainstSchema = (value: unknown, schema: unknown): boolean => {
     if (typeof s.maximum === "number" && value > (s.maximum as number)) return false;
     return true;
   }
+  if (s.type === "number") {
+    if (typeof value !== "number" || !Number.isFinite(value)) return false;
+    if (typeof s.minimum === "number" && value < (s.minimum as number)) return false;
+    if (typeof s.maximum === "number" && value > (s.maximum as number)) return false;
+    return true;
+  }
   return true;
 };
 

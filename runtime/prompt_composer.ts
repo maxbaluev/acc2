@@ -384,7 +384,7 @@ const buildOwnerContextSection = (rows: ReturnType<typeof readOwnerContext>): st
 // promotes owner_insight_candidate rows into owner_profile_recorded via
 // Model D consensus (substrate/extractors.ts:maybePromoteOwnerProfile).
 // The prompt composer surfaces the LATEST profile row so the brain has
-// persistent owner preferences (language, autonomy_trust_level, hot_topics,
+// persistent owner preferences (language, autonomy_score, hot_topics,
 // hard blocks, working hours, manual-review patterns) on every dispatch —
 // continuity that outlives the rolling 8-row OWNER CONTEXT window.
 //
@@ -488,9 +488,12 @@ export const buildOwnerProfileSection = (profile: OwnerProfile): string => {
       }
     }
   }
-  const trust = profile.autonomy_trust_level;
-  if (trust && trust !== OWNER_PROFILE_DEFAULTS.autonomy_trust_level) {
-    lines.push(`autonomy_trust_level: ${trust}`);
+  const score = profile.autonomy_score;
+  if (typeof score === "number" && score !== OWNER_PROFILE_DEFAULTS.autonomy_score) {
+    lines.push(`autonomy_score: ${score.toFixed(2)} (continuous 0..1; below ~0.4 → block multi-file diffs)`);
+  }
+  if (typeof profile.autonomy_score_floor === "number") {
+    lines.push(`autonomy_score_floor: ${profile.autonomy_score_floor.toFixed(2)}`);
   }
   if (Array.isArray(profile.hot_topics) && profile.hot_topics.length > 0) {
     lines.push(`hot_topics: ${profile.hot_topics.join(", ")}`);
