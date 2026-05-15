@@ -6,6 +6,7 @@
 
 import type { Database } from "bun:sqlite";
 import type { Event, EventKind, JsonValue, SubstrateOrigin } from "../substrate/types";
+import { EVENT_KINDS } from "../substrate/event_kinds";
 import { newId, nowIso } from "./ids";
 import { publishEvent } from "./event_bus";
 import { publishActivation } from "./activation_bus";
@@ -44,6 +45,29 @@ export type EmittedEvent = { id: string; ts: string };
  *  selecting `substrate_origin` — daemon events use `substrate_auto`, MCP
  *  RPC events tag the actual invoker, external-push tags `owner` etc. */
 export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => {
+  // Brain convergence audit boxbz1d1q axis I (2026-05-15): the substrate.emit
+  // MCP handler rejects unknown event kinds at the wire boundary, but
+  // daemon-side workers writing through this helper could persist any
+  // string cast to EventKind. Apply the same gate so the rule is uniform
+  // — typos in worker code surface as a thrown error instead of silently
+  // landing in the ledger and bypassing embedding / health-metric / view
+  // routing.
+  //
+  // Test bypass: the test suite uses synthetic `*_test_*` kinds (catalogued
+  // in substrate/event_kinds.test.ts TEST_ONLY_KINDS) to exercise the bus
+  // surface without polluting the production registry. We accept those
+  // under the convention plus the explicit ACC2_BRIDGE_MODE=mock env that
+  // tests/preload.ts pins. Production daemon (no env, no `*_test_*` kind)
+  // gets the strict gate.
+  if (!(input.kind in EVENT_KINDS)) {
+    const isTestKind = typeof input.kind === "string" && input.kind.includes("_test_");
+    const isTestMode = process.env.ACC2_BRIDGE_MODE === "mock" || process.env.NODE_ENV === "test";
+    if (!isTestKind && !isTestMode) {
+      throw new Error(
+        `unknown_event_kind:${input.kind}; register it in substrate/event_kinds.ts EVENT_KINDS before emitting`,
+      );
+    }
+  }
   const id = newId();
   const ts = nowIso();
   const directive_id = input.directive_id ?? id; // self-rooted if not supplied

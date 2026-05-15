@@ -520,11 +520,51 @@ export const supervisorTick = (
   // debit this tick. One pathology_budget_exhausted may fire per
   // directive; the event payload enumerates every contributing
   // pathology so operators see ONE archive signal instead of six
-  // scattered alarms.
+  // scattered alarms. Brain convergence audit axis H (2026-05-15):
+  // when exhaustion fires, ALSO archive the directive with the same
+  // recoverable operator-archive shape used by dispatch-budget
+  // exhaustion so quarantined_tasks are preserved and the operator
+  // can resume via `acc directive resume <id>`.
   for (const directiveId of affectedDirectives) {
     try {
       const emittedId = maybeExhaustPathologyBudget(db, directiveId, opts);
-      if (emittedId) result.pathology_budget_exhausted_count++;
+      if (emittedId) {
+        result.pathology_budget_exhausted_count++;
+        // Idempotency: skip if already closed/archived.
+        const alreadyClosed = db
+          .query(
+            `SELECT 1 FROM events
+             WHERE directive_id = ?
+               AND kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+             LIMIT 1`,
+          )
+          .get(directiveId);
+        if (!alreadyClosed) {
+          const unfinished = collectUnfinishedTasks(db, directiveId);
+          emitEvent(db, {
+            kind: "directive_archived_by_operator",
+            substrate_origin: "substrate_auto",
+            directive_id: directiveId,
+            payload: {
+              reason: "pathology_budget_exhausted",
+              evidence_event_id: emittedId,
+              quarantined_tasks: unfinished,
+              recoverable: true,
+              resume_command: `acc directive resume ${directiveId}`,
+            } as JsonValue,
+          });
+          emitEvent(db, {
+            kind: "supervisor_intervention_recorded",
+            substrate_origin: "substrate_auto",
+            directive_id: directiveId,
+            payload: {
+              pathology: "pathology_budget_exhausted",
+              corrective_event: "directive_archived_by_operator",
+              evidence_event_id: emittedId,
+            } as JsonValue,
+          });
+        }
+      }
     } catch (err) {
       logger.warn(
         { where: "supervisor.tick.budget_exhaust", directive_id: directiveId, err: (err as Error).message },

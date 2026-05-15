@@ -567,13 +567,30 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // bounded 5-min cadence makes promotion a substrate liveness function.
   const EXTRACTORS_INTERVAL_MS = Number(process.env.ACC2_EXTRACTORS_INTERVAL_MS ?? 5 * 60 * 1000);
   if (isWorkerEnabled("extractors")) {
-    const { extractKnowledgePromotions, extractCodeArtifactScores } = await import("../substrate/extractors");
+    // Brain convergence axis F (2026-05-15): the extractors worker now
+    // also runs extractRecipeCandidates and extractSemanticDedup so
+    // recipe extraction is a substrate liveness function on the same
+    // 5-min cadence; pre-fix Father's recipe_extraction_pass template
+    // was the only path, leaving long gaps when Father was busy on
+    // other objectives.
+    const {
+      extractKnowledgePromotions,
+      extractCodeArtifactScores,
+      extractRecipeCandidates,
+      extractSemanticDedup,
+    } = await import("../substrate/extractors");
     const runExtractorsOnce = async (): Promise<void> => {
       try { extractKnowledgePromotions(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.knowledge", err: (err as Error).message }, "knowledge extractor tick failed");
       }
       try { extractCodeArtifactScores(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.code_artifact", err: (err as Error).message }, "code artifact extractor tick failed");
+      }
+      try { extractRecipeCandidates(db); } catch (err) {
+        logger.warn({ where: "daemon.extractors.recipes", err: (err as Error).message }, "recipe extractor tick failed");
+      }
+      try { extractSemanticDedup(db); } catch (err) {
+        logger.warn({ where: "daemon.extractors.semantic_dedup", err: (err as Error).message }, "semantic-dedup extractor tick failed");
       }
     };
     let extractorsMarked = false;
@@ -1140,6 +1157,29 @@ const routeAux = async (
       const mod = await import("./hotreload_worker");
       hotreloadState = mod.getHotreloadState();
     } catch { /* worker may not have started; tolerate */ }
+    // Brain convergence audit axis J (2026-05-15): surface in-process
+    // observability that wasn't in /health before — pathology budget
+    // pressure, recent brain failures, activation bus subscriber count.
+    let activationListenerCount = 0;
+    try {
+      const mod = await import("./activation_bus");
+      activationListenerCount = mod.activationListenerCount();
+    } catch { /* tolerate */ }
+    const recentCutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const recent = (kinds: string[]): number => {
+      try {
+        const placeholders = kinds.map(() => "?").join(",");
+        const row = db
+          .query(
+            `SELECT COUNT(*) AS c FROM events WHERE kind IN (${placeholders}) AND ts >= ?`,
+          )
+          .get(...kinds, recentCutoff) as { c: number };
+        return row.c;
+      } catch { return 0; }
+    };
+    const pathologyExhaustedRecent = recent(["pathology_budget_exhausted"]);
+    const pathologyDebitedRecent = recent(["pathology_budget_debited"]);
+    const brainFailedRecent = recent(["bridge_failed", "dispatcher_violation"]);
     return Response.json({
       status: stuck.length === 0 ? "ok" : "degraded",
       pid: process.pid,
@@ -1151,6 +1191,11 @@ const routeAux = async (
       mcp_transport: "fastmcp:httpStream",
       stuck_workers: stuck,
       hotreload: hotreloadState,
+      activation_listener_count: activationListenerCount,
+      pathology_budget_exhausted_recent_count: pathologyExhaustedRecent,
+      pathology_budget_debited_recent_count: pathologyDebitedRecent,
+      brain_failed_recent_count: brainFailedRecent,
+      health_window_iso: recentCutoff,
     });
   }
 

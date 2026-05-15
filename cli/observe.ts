@@ -171,6 +171,24 @@ const GLYPHS: Record<string, string> = {
   contract_amendment_proposed: "📝",
   lesson_apply_requested: "Δ?",
   applied_change_committed: "Δ✓",
+  // Brain convergence axis D (2026-05-15): brain observability glyphs.
+  // NOT added to NARRATIVE_KINDS — too chatty for the default surface;
+  // visible via `acc events --kind brain_message_emitted` or `--verbose`.
+  brain_prompt_composed: "🧠📝",
+  brain_message_emitted: "🧠💬",
+  brain_reasoning_recorded: "🧠💭",
+  // Pathology budget (axis B/H): debits + exhausted.
+  pathology_budget_debited: "⚠️-",
+  pathology_budget_exhausted: "⚠️✗",
+  // Hot-reload telemetry.
+  daemon_hotreload_triggered: "♻︎↑",
+  daemon_hotreload_completed: "♻︎✓",
+  daemon_hotreload_failed: "♻︎✗",
+  // Prompt cache telemetry.
+  prompt_composition_cache_hit: "💾✓",
+  prompt_composition_cache_miss: "💾·",
+  // Worker tick liveness.
+  worker_tick_completed: "·",
   lesson_applied: "💡✓",
   contract_amendment_applied: "📝✓",
 };
