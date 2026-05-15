@@ -383,24 +383,61 @@ const RUNTIMES_AVAILABLE_TEXT = [
 
 const WORKFLOW_TEXT = [
   "YOUR WORKFLOW (one cycle per dispatch — refinement via DAG edges, not re-prompting):",
-  "  1. Write/reuse a code artifact for one of the three runtimes + a verifier returning residual in [0,1].",
+  "  1. Write/reuse a code artifact for a runtime + a verifier returning residual in [0,1].",
   "  2. Emit action_predicted with action_artifact_id + verifier_artifact_id + predicted_residual.",
   "  3. For complex sub-goals, emit task_node_opened + task_edge_recorded (refines/requires).",
-  "     Incomplete work → emit a refinement edge; the next cycle picks it up.",
-  "  4. Propose knowledge_candidate events for new patterns; substrate promotes via outcome.",
+  "  4. Propose knowledge_candidate events for new patterns (substrate promotes via outcome).",
+  "     EMIT MID-CYCLE — don't wait for closure. See EMISSION GRAMMARS for the rich schema.",
   "  5. For new reusable scripts, emit code_artifact_candidate.",
   "  6. Commit task via task_committed when verifier residual is below threshold.",
   "  CLOSURE + LEARNING (required before committing a DIRECTIVE's root task):",
-  "  7. Run a CLOSURE VERIFIER (a code artifact) that reads the trajectory and scores",
-  "     closure_residual = w1·goal_solved + w2·sub_tasks_covered + w3·lessons_captured + w4·no_violation.",
-  "     Emit task_closure_audited { closure_residual, breakdown, original_goal_text,",
-  "     covered_sub_tasks[], uncovered_aspects[] }. closure_residual ≥ 0.3 → refine, do NOT commit root.",
-  "  8. Extract lessons. For each friction or improvement, emit ONE of:",
-  "     - contract_amendment_proposed { target (CLAUDE.md / docs / .claude/rules / cli / runtime),",
-  "       anchor, current_behavior, proposed_behavior, evidence_event_ids[] }",
-  "     - lesson_extracted { lesson_kind (recipe_candidate/process_improvement/failure_pattern/",
-  "       sandbox_gap/verifier_gap/retrieval_gap), summary, evidence_event_ids[], proposed_action }",
-  "     Lessons are the trajectory's gift to future cycles — without them, knowledge does not compound.",
+  "  7. Run a CLOSURE VERIFIER (a code artifact); emit task_closure_audited.",
+  "     closure_residual ≥ 0.3 → refine, do NOT commit root.",
+  "  8. Extract lessons: emit contract_amendment_proposed OR lesson_extracted for every friction.",
+  "     Route prior PENDING PROPOSALS through new task_nodes instead of letting them accumulate.",
+].join("\n");
+
+// Detailed emission grammar — P1 so it drops first under tight-budget
+// pressure but is present in the standard 8K budget. Brain prompt
+// teaching for env_requires + rich knowledge schema + provenance fields
+// landed 2026-05-15 (organism-alignment follow-up to b3qc9ryzj).
+const EMISSION_GRAMMARS_TEXT = [
+  "EMISSION GRAMMARS (use these shapes when emitting candidates):",
+  "",
+  "  declared_sandbox (on every code_artifact_candidate):",
+  "    {",
+  "      runtime: \"bun\" | \"uv\" | \"camofox-browser\",",
+  "      fs_read: [\"src/**\"], fs_write: [\"out/**\"],",
+  "      net_allow: [\"api.example.com\"], proc_allow: [\"bun\"],",
+  "      env_requires: [\"SERPER_API_KEY\",...],   // UNIVERSAL credential gate.",
+  "      // Declare every process.env.X your body reads. Runtime fails closed",
+  "      // on missing env and emits owner_input_required so operator sees the gap.",
+  "      cpu_ms: 1000, wall_ms: 5000, memory_mb: 256",
+  "    }",
+  "",
+  "  knowledge_candidate.payload (rich schema):",
+  "    {",
+  "      claim:              \"<one-sentence falsifiable assertion>\",",
+  "      evidence:           [\"<observation>\", ...],",
+  "      implications:       [\"<what follows>\", ...],",
+  "      applies_to:         [\"<domain/context tag>\", ...],",
+  "      confidence_estimate: 0.0-1.0,",
+  "      source_files:       [\"path/to/file.ts:120\", ...]",
+  "    }",
+  "",
+  "  code_artifact_candidate.payload (provenance):",
+  "    {",
+  "      intent:              \"<why this artifact exists>\",",
+  "      summary:             \"<short summary>\",",
+  "      target_files:        [\"path/to/touched.ts\", ...],",
+  "      source_candidate_id: \"<originating knowledge_candidate event id>\",",
+  "      declared_sandbox:    { ... }, body: \"<source>\", ...",
+  "    }",
+  "",
+  "  CITATIONS (action_predicted.context_refs[]):",
+  "    Cite every source_event_id you used (knowledge entries, retrieval_binding",
+  "    ids from RETRIEVED KNOWLEDGE above, prior artifacts). Citation = mutation:",
+  "    cited entries get candidate_confirmed/contradicted on outcome.",
 ].join("\n");
 
 const buildKnowledgeSection = (rows: Array<{ id: string; text: string; score: number }>): string => {
@@ -502,6 +539,10 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   candidates.push({ name: "runtimes_available", p: 0, body: RUNTIMES_AVAILABLE_TEXT });
   candidates.push({ name: "workflow", p: 0, body: WORKFLOW_TEXT });
   candidates.push({ name: "do_not", p: 0, body: NOT_DO_TEXT });
+  // Detailed emission grammars — env_requires + rich knowledge schema +
+  // artifact provenance. P1 so it drops first under tight-budget pressure
+  // (depth-1 tests pin a tiny 800-token budget) but lands in normal flow.
+  candidates.push({ name: "emission_grammars", p: 1, body: EMISSION_GRAMMARS_TEXT });
 
   // Phase D fixture marker — the mocked bridge keys off this so the
   // fixture_d_count_todos dispatch can be reproduced deterministically.

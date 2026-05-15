@@ -223,8 +223,39 @@ export const listArtifactsByRuntime = (
 
 // ── Posterior update ───────────────────────────────────────────────
 
+// Time-decay half-life on Beta posteriors (2026-05-15). Old corroborations
+// shouldn't outweigh fresh contradictions indefinitely — that locks an
+// artifact's posterior into its early history. Apply an exponential decay
+// to (alpha-1, beta-1) before adding the new delta so each prior
+// observation halves its weight every POSTERIOR_HALF_LIFE_MS. The Beta
+// shape is preserved (deltas still produce monotone score moves) but
+// stale evidence gracefully ages out, letting recent reality dominate.
+//
+// alpha=1, beta=1 is the prior — those baselines stay fixed (we only
+// decay the EVIDENCE accumulated on top of the prior). Override via
+// ACC2_POSTERIOR_HALF_LIFE_MS env (0 disables decay).
+const DEFAULT_POSTERIOR_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const posteriorHalfLifeMs = (): number => {
+  const raw = process.env.ACC2_POSTERIOR_HALF_LIFE_MS;
+  if (raw === undefined || raw === "") return DEFAULT_POSTERIOR_HALF_LIFE_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_POSTERIOR_HALF_LIFE_MS;
+  return parsed;
+};
+
+const decayedEvidence = (currentEvidence: number, dtMs: number): number => {
+  const halfLife = posteriorHalfLifeMs();
+  if (halfLife <= 0 || dtMs <= 0) return currentEvidence;
+  const decayFactor = Math.pow(0.5, dtMs / halfLife);
+  return currentEvidence * decayFactor;
+};
+
 /** Apply a single action_scored outcome to an artifact's posterior + EMA.
- *  Returns the refreshed row. residual is clamped to [0,1] defensively. */
+ *  Returns the refreshed row. residual is clamped to [0,1] defensively.
+ *  Time-decay (2026-05-15): the accumulated alpha-1 + beta-1 evidence is
+ *  exponentially decayed by the elapsed wall time since the last update
+ *  (default half-life: 30 days) before the new delta lands. This stops
+ *  ancient corroborations from outweighing fresh contradictions. */
 export const applyResidualOutcome = (
   db: Database,
   artifactId: string,
@@ -251,8 +282,14 @@ export const applyResidualOutcome = (
     betaDelta = t * 0.5;        // taper from 0 → 0.5 across mid-band
   }
 
-  const newAlpha = row.posteriorAlpha + alphaDelta;
-  const newBeta = row.posteriorBeta + betaDelta;
+  // Decay accumulated evidence (alpha-1, beta-1 — the prior stays fixed).
+  const prevTs = Date.parse(row.updatedAt);
+  const curTs = Date.parse(ts);
+  const dtMs = Number.isFinite(prevTs) && Number.isFinite(curTs) ? Math.max(0, curTs - prevTs) : 0;
+  const decayedAlphaEvidence = decayedEvidence(Math.max(0, row.posteriorAlpha - 1), dtMs);
+  const decayedBetaEvidence  = decayedEvidence(Math.max(0, row.posteriorBeta  - 1), dtMs);
+  const newAlpha = 1 + decayedAlphaEvidence + alphaDelta;
+  const newBeta  = 1 + decayedBetaEvidence  + betaDelta;
   const newScore = recomputeScore(newAlpha, newBeta);
   const newConfidence = recomputeConfidence(newAlpha, newBeta);
   const newEma = EMA_DECAY * row.recentResidualMean + (1 - EMA_DECAY) * r;
