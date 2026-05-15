@@ -34,6 +34,28 @@ import {
   materializeOpencodeMcpConfig,
 } from "./config";
 
+/** Module-level registry of live opencode subprocesses. The daemon's
+ *  stop() handler calls killAllLiveOpencodeProcs() to SIGTERM-then-SIGKILL
+ *  every still-running brain dispatch so they cannot survive past daemon
+ *  shutdown (orphan-to-init pattern that produced stale MCP handshake
+ *  failures against a dead daemon URL on the next boot). Each spawn
+ *  registers its proc here and de-registers on exit. */
+type LiveProc = { pid: number; kill: (sig: NodeJS.Signals) => boolean };
+const LIVE_OPENCODE_PROCS: Set<LiveProc> = new Set();
+
+/** Kill every live opencode subprocess. SIGTERM first; SIGKILL after 1.5s
+ *  per process. Called from daemon.stop() so children never outlive the
+ *  parent. Returns the number of procs that were signalled. */
+export const killAllLiveOpencodeProcs = (): number => {
+  const snapshot = Array.from(LIVE_OPENCODE_PROCS);
+  for (const p of snapshot) {
+    try { p.kill("SIGTERM"); } catch { /* swallow */ }
+    setTimeout(() => { try { p.kill("SIGKILL"); } catch { /* swallow */ } }, 1_500).unref();
+  }
+  LIVE_OPENCODE_PROCS.clear();
+  return snapshot.length;
+};
+
 export const spawnRealOpencode = async (
   req: BridgeRequest,
   db: Database,
@@ -161,6 +183,16 @@ export const spawnRealOpencode = async (
     });
     return { ok: false, reason };
   }
+
+  // Register the live proc so daemon shutdown can kill it (prevents
+  // orphan-to-init zombies that fail MCP handshake against a dead URL
+  // on the next daemon boot).
+  const liveEntry: LiveProc = {
+    pid: proc.pid ?? 0,
+    kill: (sig) => { try { proc.kill(sig); return true; } catch { return false; } },
+  };
+  LIVE_OPENCODE_PROCS.add(liveEntry);
+  proc.exited.finally(() => { LIVE_OPENCODE_PROCS.delete(liveEntry); });
 
   // Watchdog: SIGTERM at timeoutMs, SIGKILL at timeoutMs * 1.5.
   let killed = false;

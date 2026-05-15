@@ -26,10 +26,33 @@ import type {
   SchedulerTickSchema,
 } from "./types";
 
+/** runtime.* control-plane tools the brain (opencode) is NOT allowed to
+ *  call. Live evidence (2026-05-15) showed the brain invoking these via
+ *  MCP to trigger MORE brain dispatches inside its own cycle — a tight
+ *  feedback loop that produced cascading bridge_stuck / mcp_handshake
+ *  failures and blocked the daemon's MCP server.
+ *
+ *  The brain operates within ONE cycle per dispatch (§3.7). Triggering a
+ *  scheduler tick, father iteration, recipe replay, or another dispatch
+ *  from inside its current cycle violates the cycle-1-only contract AND
+ *  the depth-1-retrieval contract. These are daemon-internal control
+ *  surfaces; the brain emits events + reads views, nothing more. */
+const brainForbiddenRuntimeOp = (ctx: McpContext, opName: string): McpResult | null => {
+  if (ctx.invoker === "opencode" || ctx.invoker === "recipe") {
+    return {
+      ok: false,
+      error: `brain_forbidden_runtime_op:${opName}; the brain emits events and reads views — control-plane tools are daemon-internal`,
+    };
+  }
+  return null;
+};
+
 export const handleSchedulerTick = async (
   ctx: McpContext,
   args: z.infer<typeof SchedulerTickSchema>,
 ): Promise<McpResult> => {
+  const blocked = brainForbiddenRuntimeOp(ctx, "runtime.scheduler_tick");
+  if (blocked) return blocked;
   const tick = await schedulerTick(ctx.db, {
     maxConcurrent: args.max_concurrent,
     directiveId: args.directive_id,
@@ -52,6 +75,8 @@ export const handleDispatchReadyTask = async (
   ctx: McpContext,
   args: z.infer<typeof DispatchReadyTaskSchema>,
 ): Promise<McpResult> => {
+  const blocked = brainForbiddenRuntimeOp(ctx, "runtime.dispatch_ready_task");
+  if (blocked) return blocked;
   // Resolve the TaskNode for the supplied task_id by walking the directive's
   // DAG. The dispatcher needs goal + directive_id + status, which readDag
   // provides.
@@ -87,6 +112,8 @@ export const handleProcessRollingReviews = async (
   ctx: McpContext,
   args: z.infer<typeof ProcessRollingReviewsSchema>,
 ): Promise<McpResult> => {
+  const blocked = brainForbiddenRuntimeOp(ctx, "runtime.process_rolling_reviews");
+  if (blocked) return blocked;
   const summary = await processRollingReviews(ctx.db, args.now);
   return {
     ok: true,
@@ -103,6 +130,8 @@ export const handleFatherIterate = async (
   ctx: McpContext,
   args: z.infer<typeof FatherIterateSchema>,
 ): Promise<McpResult> => {
+  const blocked = brainForbiddenRuntimeOp(ctx, "runtime.father_iterate");
+  if (blocked) return blocked;
   const result = await fatherIterate(ctx.db, {
     now: args.now,
     ownerActiveWindowMs: args.owner_active_window_ms,
@@ -136,6 +165,8 @@ export const handleReplayRecipe = async (
   ctx: McpContext,
   args: z.infer<typeof ReplayRecipeSchema>,
 ): Promise<McpResult> => {
+  const blocked = brainForbiddenRuntimeOp(ctx, "runtime.replay_recipe");
+  if (blocked) return blocked;
   const taskRow = ctx.db
     .query("SELECT directive_id, payload FROM events WHERE task_id = ? AND kind = 'task_node_opened' LIMIT 1")
     .get(args.task_id) as { directive_id: string; payload: string } | null;

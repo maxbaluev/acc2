@@ -760,6 +760,17 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    // Kill any live opencode subprocesses BEFORE tearing down workers so
+    // brain dispatches cannot survive past daemon shutdown as orphans-to-init
+    // (the live evidence pattern that produced stale-MCP-URL handshake
+    // failures on the next daemon boot). SIGTERM first, SIGKILL at +1.5s.
+    try {
+      const { killAllLiveOpencodeProcs } = await import("./bridge/opencode");
+      const killed = killAllLiveOpencodeProcs();
+      if (killed > 0) logger.info({ killed_opencode_procs: killed }, "daemon shutdown — terminated live brain subprocesses");
+    } catch (err) {
+      logger.debug({ where: "daemon.stop.kill_opencode_procs", err: String(err) }, "killAllLiveOpencodeProcs import/call failed (best-effort)");
+    }
     for (const dispose of workers) dispose();
     try {
       emitEvent(db, {
