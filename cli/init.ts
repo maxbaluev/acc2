@@ -176,6 +176,8 @@ const banner = (log: Logger): void => {
 
 export type InitOptions = {
   yes?: boolean;          // non-interactive mode
+  interactive?: boolean;  // guided first-run repair loop; default when TTY and not --yes (UX dispatch b71pfyddv FMX0MZYDK)
+  validateKeys?: boolean; // cheap OpenAI/Serper validation before .env persistence (UX dispatch b71pfyddv JNKK2C18 lesson)
   paths?: InitPaths;      // injection for tests
   log?: Logger;           // injection for tests
   warn?: Logger;

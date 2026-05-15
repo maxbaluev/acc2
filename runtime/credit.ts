@@ -314,6 +314,7 @@ const applyWeightedResidualOutcome = (
 //   This implements precise attribution without requiring the brain to
 //   actively exclude prompt entries; absence-of-citation is the signal.
 const EXPOSURE_ONLY_FACTOR = 0.2;
+const PROPAGATION_ONLY_FACTOR = 0.35;
 
 type CitationEntry = { id: string; weightFactor: number };
 
@@ -334,20 +335,20 @@ const collectCitations = (
 
   // First pass: every EXPLICIT citation (context_refs across the three
   // events + body @cite markers). These get the full Shapley share.
-  const ordered: Array<{ id: string; explicit: boolean }> = [];
+  const ordered: CitationEntry[] = [];
   for (const ev of [actionEv, obsEv, scoredEv]) {
     if (!ev) continue;
     for (const ref of ev.context_refs ?? []) {
-      ordered.push({ id: ref, explicit: true });
+      ordered.push({ id: ref, weightFactor: 1.0 });
       explicitlyCited.add(ref);
     }
   }
   for (const id of actionBodyCitations) {
-    ordered.push({ id, explicit: true });
+    ordered.push({ id, weightFactor: 1.0 });
     explicitlyCited.add(id);
   }
   for (const id of verifierBodyCitations) {
-    ordered.push({ id, explicit: true });
+    ordered.push({ id, weightFactor: 1.0 });
     explicitlyCited.add(id);
   }
 
@@ -361,7 +362,7 @@ const collectCitations = (
         `SELECT payload FROM events
          WHERE kind = 'retrieval_binding'
            AND task_id = ?
-           AND ts < ?
+           AND ts <= ?
          ORDER BY ts ASC`,
       )
       .all(actionEv.task_id, scoredEv.ts) as Array<{ payload: string }>;
@@ -370,8 +371,29 @@ const collectCitations = (
         const p = JSON.parse(b.payload) as Record<string, unknown>;
         const sourceId = p.source_event_id as string | undefined;
         if (!sourceId) continue;
-        const explicit = explicitlyCited.has(sourceId);
-        ordered.push({ id: sourceId, explicit });
+        const factor = explicitlyCited.has(sourceId) ? 1.0 : EXPOSURE_ONLY_FACTOR;
+        ordered.push({ id: sourceId, weightFactor: factor });
+      } catch { /* skip malformed */ }
+    }
+  }
+
+  if (actionEv && actionEv.task_id && scoredEv) {
+    const propagated = db
+      .query(
+        `SELECT payload FROM events
+         WHERE kind = 'knowledge_propagated'
+           AND task_id = ?
+           AND ts <= ?
+         ORDER BY ts ASC`,
+      )
+      .all(actionEv.task_id, scoredEv.ts) as Array<{ payload: string }>;
+    for (const row of propagated) {
+      try {
+        const p = JSON.parse(row.payload) as Record<string, unknown>;
+        const sourceId = p.source_event_id as string | undefined;
+        if (!sourceId) continue;
+        const factor = explicitlyCited.has(sourceId) ? 1.0 : PROPAGATION_ONLY_FACTOR;
+        ordered.push({ id: sourceId, weightFactor: factor });
       } catch { /* skip malformed */ }
     }
   }
@@ -380,12 +402,14 @@ const collectCitations = (
     // Skip the action + verifier artifact ids themselves — they receive
     // primary credit, not third-party citation credit.
     if (entry.id === actionArtifactId || entry.id === verifierArtifactId) continue;
+    const existing = out.find((c) => c.id === entry.id);
+    if (existing) {
+      existing.weightFactor = Math.max(existing.weightFactor, entry.weightFactor);
+      continue;
+    }
     if (!seen.has(entry.id)) {
       seen.add(entry.id);
-      out.push({
-        id: entry.id,
-        weightFactor: entry.explicit ? 1.0 : EXPOSURE_ONLY_FACTOR,
-      });
+      out.push(entry);
     }
   }
   return out;

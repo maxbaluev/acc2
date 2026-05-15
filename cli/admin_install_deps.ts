@@ -5,7 +5,9 @@
 //
 //   - bun >= 1.3.14            (probe `bun --version`; instruct upgrade)
 //   - opencode on PATH         (probe `which opencode` + --version)
-//   - OPENAI_API_KEY in env / .env (presence + length only — never the value)
+//   - OPENAI_API_KEY in env / .env (cheap validation, never print the value)
+//   - SERPER_API_KEY in env / .env (highly recommended for information search;
+//                                    cheap validation, never print the value)
 //   - camoufox firefox binary  (re-run the same logic as scripts/postinstall.ts)
 //   - nsjail on PATH           (warn-only — uv sandbox degrades without it)
 //

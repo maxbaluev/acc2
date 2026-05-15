@@ -273,6 +273,9 @@ CREATE VIEW IF NOT EXISTS contradictory_candidates_view AS
 `;
 
 // owner_conversation_view — owner-channel events ordered by ts.
+// Includes owner_profile_recorded + owner_insight_candidate so a single
+// view surfaces every owner-touching event the prompt composer + UI care
+// about (UX dispatch b71pfyddv knowledge_candidate 540ZQYN3, 2026-05-15).
 const VIEW_OWNER_CONVERSATION = `
 CREATE VIEW IF NOT EXISTS owner_conversation_view AS
   SELECT
@@ -284,8 +287,28 @@ CREATE VIEW IF NOT EXISTS owner_conversation_view AS
     payload,
     substrate_origin
   FROM events
-  WHERE kind IN ('owner_input_received', 'owner_decision_recorded')
+  WHERE kind IN (
+    'owner_input_received',
+    'owner_decision_recorded',
+    'owner_profile_recorded',
+    'owner_insight_candidate'
+  )
   ORDER BY ts ASC;
+`;
+
+// owner_profile_view — the latest substrate-promoted owner profile row.
+// Stable preferences (language, tone, working hours, boundaries)
+// accumulate slowly as the substrate (Model D) merges owner_insight_candidate
+// observations from BOTH Claude and the brain. The prompt composer reads
+// this view to surface persistent owner context that outlives the rolling
+// 8-row OWNER CONTEXT window.
+const VIEW_OWNER_PROFILE = `
+CREATE VIEW IF NOT EXISTS owner_profile_view AS
+  SELECT id AS event_id, ts, payload, substrate_origin
+  FROM events
+  WHERE kind = 'owner_profile_recorded'
+  ORDER BY ts DESC
+  LIMIT 1;
 `;
 
 // rolling_review_due_view — every rolling_active directive with its latest
@@ -1444,6 +1467,7 @@ const VIEW_NAMES = [
   "watch_edge_observations_view",
   "rolling_review_due_view",
   "owner_conversation_view",
+  "owner_profile_view",
   "contradictory_candidates_view",
   "origin_promotion_by_directive_view",
   "origin_promotion_view",
@@ -1471,6 +1495,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_ORIGIN_PROMOTION_BY_DIRECTIVE);
   db.exec(VIEW_CONTRADICTORY);
   db.exec(VIEW_OWNER_CONVERSATION);
+  db.exec(VIEW_OWNER_PROFILE);
   db.exec(VIEW_ROLLING_REVIEW_DUE);
   db.exec(VIEW_WATCH_EDGE_OBSERVATIONS);
   db.exec(VIEW_DIRECTIVE_CONFLICTS);

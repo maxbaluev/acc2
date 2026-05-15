@@ -331,7 +331,7 @@ const buildOtherGoalsSection = (rows: ReturnType<typeof readOtherActiveGoals>): 
 const readOwnerContext = (
   db: Database,
   k: number,
-): Array<{ id: string; ts: string; kind: string; directive_id: string | null; text: string }> => {
+): Array<{ id: string; ts: string; kind: string; directive_id: string | null; text: string; detected_language?: string | null }> => {
   const rows = db
     .query(
       `SELECT event_id, ts, directive_id, kind, payload

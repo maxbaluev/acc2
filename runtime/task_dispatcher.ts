@@ -57,6 +57,22 @@ const ARTIFACT_HARD_KILL_FENCE = Number(process.env.ACC2_ARTIFACT_HARD_KILL_FENC
 const ARTIFACT_POSTERIOR_BETA_FLOOR = 5;
 const ARTIFACT_POSTERIOR_BETA_RATIO = 3;
 
+const resolveKnowledgeSourceDirective = (db: Database, eventId: string): string | null => {
+  const row = db
+    .query("SELECT directive_id, kind, payload FROM events WHERE id = ? LIMIT 1")
+    .get(eventId) as { directive_id: string | null; kind: string; payload: string } | null;
+  if (!row) return null;
+  if (row.directive_id) return row.directive_id;
+  if (row.kind === "knowledge_promoted" || row.kind === "knowledge_synthesized") {
+    try {
+      const payload = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
+      const candidateId = payload.candidate_id as string | undefined;
+      if (candidateId) return resolveKnowledgeSourceDirective(db, candidateId);
+    } catch { /* malformed payload: no source directive */ }
+  }
+  return null;
+};
+
 type DispatchableBlock = { ok: false; reason: string; counters: Record<string, number | string> } | { ok: true };
 
 const assertDispatchableArtifact = (
@@ -372,7 +388,7 @@ export const dispatchReadyTask = async (
         // mutate the cited posterior on outcome (k_554 citation = mutation).
         for (let rank = 0; rank < retrievedKnowledge.hits.length; rank++) {
           const hit = retrievedKnowledge.hits[rank]!;
-          emitEvent(db, {
+          const binding = emitEvent(db, {
             kind: "retrieval_binding",
             substrate_origin: "substrate_auto",
             directive_id: task.directive_id,
@@ -387,6 +403,27 @@ export const dispatchReadyTask = async (
               binding_surface: "prompt",
             } as JsonValue,
           });
+          const sourceDirectiveId = resolveKnowledgeSourceDirective(db, hit.event_id);
+          if (sourceDirectiveId && sourceDirectiveId !== task.directive_id) {
+            emitEvent(db, {
+              kind: "knowledge_propagated",
+              substrate_origin: "substrate_auto",
+              directive_id: task.directive_id,
+              task_id: task.id,
+              context_refs: [hit.event_id, binding.id],
+              payload: {
+                source_event_id: hit.event_id,
+                source_directive_id: sourceDirectiveId,
+                target_directive_id: task.directive_id,
+                retrieval_binding_id: binding.id,
+                query: task.goal ?? "",
+                rank,
+                rerank_score: hit.rerank_score,
+                posterior: hit.posterior,
+                propagation_surface: "prompt",
+              } as JsonValue,
+            });
+          }
         }
       }
     } catch (err) {

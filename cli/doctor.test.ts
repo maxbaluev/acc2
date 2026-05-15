@@ -123,11 +123,26 @@ describe("checkOpenAiKey", () => {
   test("ok when present", () => {
     expect(checkOpenAiKey(makeEnv({ env: { OPENAI_API_KEY: "sk-test" } })).verdict).toBe("ok");
   });
-  test("warn when absent", () => {
-    expect(checkOpenAiKey(makeEnv({ env: {} })).verdict).toBe("warn");
+  // UX dispatch b71pfyddv W8EPM66KFH (2026-05-15): missing OPENAI_API_KEY
+  // is now a HARD FAIL, not a warn. Embeddings + real-brain retrieval
+  // silently no-op without it; the system feels half-broken. The new
+  // detail message points at `acc init --interactive` for paste+validate.
+  test("fail when absent", () => {
+    expect(checkOpenAiKey(makeEnv({ env: {} })).verdict).toBe("fail");
   });
-  test("warn when empty string", () => {
-    expect(checkOpenAiKey(makeEnv({ env: { OPENAI_API_KEY: "   " } })).verdict).toBe("warn");
+  test("fail when empty string", () => {
+    expect(checkOpenAiKey(makeEnv({ env: { OPENAI_API_KEY: "   " } })).verdict).toBe("fail");
+  });
+});
+
+describe("checkSerperKey", () => {
+  test("ok when present", () => {
+    const { checkSerperKey } = require("./doctor");
+    expect(checkSerperKey(makeEnv({ env: { SERPER_API_KEY: "abc" } })).verdict).toBe("ok");
+  });
+  test("warn when absent (recommended, not required)", () => {
+    const { checkSerperKey } = require("./doctor");
+    expect(checkSerperKey(makeEnv({ env: {} })).verdict).toBe("warn");
   });
 });
 
@@ -462,6 +477,7 @@ describe("collectChecks ordering", () => {
       "db integrity",
       "disk space",
       "OPENAI_API_KEY",
+      "SERPER_API_KEY",
       "opencode",
       "uv",
       "camoufox binary",

@@ -176,6 +176,10 @@ describe("derived sets match their pre-unification shape", () => {
       // Owner channel.
       "owner_input_received",
       "owner_decision_recorded",
+      // Owner profile + insight candidates (UX dispatch 2026-05-15):
+      // stable preferences + Claude/brain observations about the owner.
+      "owner_profile_recorded",
+      "owner_insight_candidate",
       // External-push envelope.
       "external_event_received",
     ]);

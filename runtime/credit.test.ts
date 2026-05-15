@@ -634,6 +634,81 @@ describe("LATM novelty bonus (§11.5)", () => {
 });
 
 describe("collectCitations dedup + ordering (internal helper)", () => {
+  test("knowledge_propagated raises implicit cross-directive transfer above plain exposure", () => {
+    const db = openDb(":memory:");
+    const source = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      directive_id: "d_source",
+      task_id: "t_source",
+      payload: { text: "source-domain insight", confidence_estimate: 1 },
+    });
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: "d_target",
+      task_id: "t_target",
+      action_artifact_id: "AA",
+      verifier_artifact_id: "VV",
+      payload: {},
+    });
+    const binding = emitEvent(db, {
+      kind: "retrieval_binding",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_target",
+      task_id: "t_target",
+      payload: { source_event_id: source.id, binding_surface: "prompt" },
+    });
+    emitEvent(db, {
+      kind: "knowledge_propagated",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_target",
+      task_id: "t_target",
+      context_refs: [source.id, binding.id],
+      payload: {
+        source_event_id: source.id,
+        source_directive_id: "d_source",
+        target_directive_id: "d_target",
+        retrieval_binding_id: binding.id,
+      },
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_target",
+      task_id: "t_target",
+      action_artifact_id: "AA",
+      payload: {},
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_target",
+      task_id: "t_target",
+      action_artifact_id: "AA",
+      verifier_artifact_id: "VV",
+      residual: 0,
+      payload: {},
+    });
+
+    const cited = __collectCitationsForTest(
+      db,
+      {
+        action_event_id: ap.id,
+        observation_event_id: obs.id,
+        scored_event_id: scored.id,
+        predicted_residual: 0,
+        observed_residual: 0,
+      },
+      [],
+      [],
+      "AA",
+      "VV",
+    );
+
+    expect(cited).toEqual([{ id: source.id, weightFactor: 0.35 }]);
+  });
+
   test("preserves first-seen order across event sources + body sources", () => {
     const db = openDb(":memory:");
     const ap = emitEvent(db, {

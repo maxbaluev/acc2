@@ -255,10 +255,24 @@ export const checkOpenAiKey = (env: DoctorEnv): Check => {
   const v = env.env.OPENAI_API_KEY;
   if (v && v.trim().length > 0) {
     return { name: "OPENAI_API_KEY", verdict: "ok",
-      detail: "present (used by text-embedding-3-small per v2-design §1)" };
+      detail: "present (required for embeddings and real-brain retrieval; validated by `acc init --interactive`)" };
   }
-  return { name: "OPENAI_API_KEY", verdict: "warn",
-    detail: "missing; run `acc init` to set it (embeddings silently no-op without it)" };
+  return { name: "OPENAI_API_KEY", verdict: "fail",
+    detail: "missing; run `acc init --interactive` to paste and validate it before daemon start" };
+};
+
+// UX dispatch b71pfyddv knowledge_candidate 3E0KGJYR + amendment
+// W8EPM66KFH: SERPER_API_KEY is highly recommended for information-search
+// directives. Present → ok. Missing → warn (not fail) because the system
+// still runs; search-shaped artifacts gracefully degrade or ask for it.
+export const checkSerperKey = (env: DoctorEnv): Check => {
+  const v = env.env.SERPER_API_KEY;
+  if (v && v.trim().length > 0) {
+    return { name: "SERPER_API_KEY", verdict: "ok",
+      detail: "present (highly recommended for information search tasks; validated by `acc init --interactive`)" };
+  }
+  return { name: "SERPER_API_KEY", verdict: "warn",
+    detail: "missing; search-backed tasks will ask for it or degrade to non-search demos" };
 };
 
 export const checkOpencode = (env: DoctorEnv): Check => {
@@ -502,6 +516,7 @@ export const collectChecks = async (env: DoctorEnv = defaultDoctorEnv()): Promis
   checks.push(await checkDbIntegrity(env));
   checks.push(checkDiskFree(env));
   checks.push(checkOpenAiKey(env));
+  checks.push(checkSerperKey(env));
   checks.push(checkOpencode(env));
   checks.push(checkUv(env));
   checks.push(checkCamoufoxBinary(env));

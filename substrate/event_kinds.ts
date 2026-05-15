@@ -111,6 +111,11 @@ export const EVENT_KINDS = {
   // binding id, credit resolves binding → source_event_id, posterior
   // updates on the cited candidate/promoted row.
   retrieval_binding:                       { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
+  // Substrate-authored when a retrieval_binding injects knowledge from one
+  // directive into another directive's prompt/search surface. This makes
+  // implicit cross-directive transfer auditable and creditable without
+  // requiring the brain to explicitly cite the source directive.
+  knowledge_propagated:                     { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
 
   // ── Code artifacts (LATM / Voyager) ─────────────────────────────────
   code_artifact_candidate:                 { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
@@ -239,6 +244,16 @@ export const EVENT_KINDS = {
   applied_change_committed:                { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
   lesson_applied:                          { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   contract_amendment_applied:              { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  // Owner profile (UX dispatch b71pfyddv, 2026-05-15, knowledge_candidate
+  // 540ZQYN3): stable owner preferences (language, tone, working hours,
+  // boundaries) accumulate as substrate-side profile events so they
+  // outlive the rolling 8-row OWNER CONTEXT window. Claude + brain BOTH
+  // emit owner_insight_candidate from chat / trajectory observations; the
+  // substrate (Model D) periodically promotes consensus insights into a
+  // canonical owner_profile_recorded row.
+  owner_profile_recorded:                  { producer: "substrate", embeddable: true,  mirror_inline: false, health_metric: false },
+  owner_insight_candidate:                 { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
+
   // Auto-apply worker (DGT1MKXY proposal, 2026-05-15): daemon-side scanner
   // signals each lesson_implementer_queue_view row whose auto_apply_eligible=1.
   // Stage-1 emits this signal so the orchestrator (or future stage-2 mechanical

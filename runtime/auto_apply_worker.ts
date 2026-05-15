@@ -40,8 +40,20 @@ import { emitEvent } from "./events";
 import { logger } from "./logger";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 export const AUTO_APPLY_WORKER_DEFAULT_INTERVAL_MS = 60 * 1000;
+
+/** Stage-2 cooldown window: if any applied_change_failed event landed
+ *  within this window, the worker skips stage-2 this tick. Implements
+ *  organic backoff without an opt-in env knob — bad proposals naturally
+ *  pause the autonomy loop instead of cascading. */
+const STAGE2_COOLDOWN_MS = 5 * 60 * 1000;
+
+/** Test-suite execution timeout (ms). bun test --bail typically completes
+ *  in 15-25s on a healthy substrate; the cap stops a hung subprocess from
+ *  freezing the worker tick. */
+const STAGE2_TEST_TIMEOUT_MS = 90 * 1000;
 
 type QueueRow = {
   source_event_id: string;
@@ -198,14 +210,176 @@ export const computeReplacement = (
   return { ok: true, original, updated };
 };
 
-/** One tick of the auto-apply worker. Returns the list of source event ids
- *  signaled this tick. Stage-2 attempts (when enabled) are returned in
- *  `applied` (success) and `failed` (revert). Side-effect: one
- *  auto_apply_signaled per eligible row, plus optional stage-2 events. */
+/** Has any applied_change_failed event landed within the cooldown window?
+ *  When true, the worker skips the stage-2 apply pass — organic backoff
+ *  without an opt-in env knob. */
+const inStage2Cooldown = (db: Database, nowMs: number): boolean => {
+  const cutoffIso = new Date(nowMs - STAGE2_COOLDOWN_MS).toISOString();
+  const row = db
+    .query("SELECT 1 AS x FROM events WHERE kind = 'applied_change_failed' AND ts > ? LIMIT 1")
+    .get(cutoffIso) as { x: number } | null;
+  return row !== null;
+};
+
+/** Tests-only stop-gap: tests/preload.ts pins ACC2_DISABLE_WORKERS to
+ *  include auto_apply, so this never runs in the unit suite. We also
+ *  refuse to run when ACC2_BRIDGE_MODE=mock (= tests) so a test that
+ *  spawns the daemon doesn't trigger real git commits. */
+const stage2RuntimeAllowed = (): boolean => {
+  if (process.env.ACC2_BRIDGE_MODE === "mock") return false;
+  if (process.env.NODE_ENV === "test") return false;
+  return true;
+};
+
+/** Emit the credit-chain events for a successful or failed stage-2 apply.
+ *  Mirrors cli/apply.ts:recordApplyOutcome but uses direct emitEvent
+ *  (no MCP) so the daemon worker doesn't need an HTTP roundtrip to its
+ *  own server. */
+const emitApplyChain = (
+  db: Database,
+  row: QueueRow,
+  result: { ok: true; commitSha: string; summary: string } | { ok: false; reason: string },
+  nowMs: number,
+): void => {
+  const isAmendment = row.source_kind === "contract_amendment_proposed";
+  const appliedKind: "contract_amendment_applied" | "lesson_applied" =
+    isAmendment ? "contract_amendment_applied" : "lesson_applied";
+  if (!result.ok) {
+    emitEvent(db, {
+      kind: "applied_change_failed",
+      substrate_origin: "substrate_auto",
+      directive_id: row.directive_id ?? undefined,
+      task_id: row.task_id ?? undefined,
+      context_refs: [row.source_event_id],
+      payload: {
+        source_event_id: row.source_event_id,
+        source_kind: row.source_kind,
+        target: row.target,
+        reason: result.reason,
+        stage: "stage_2_mechanical_apply",
+        scanned_at: new Date(nowMs).toISOString(),
+      } as JsonValue,
+    });
+    return;
+  }
+  // Full chain on success: emit applied_change_committed first, then the
+  // *_applied row citing it. The four-link spine (k_555) closes when
+  // candidate_confirmed / candidate_contradicted fires later via the
+  // credit pipeline; this worker doesn't run substrate.credit itself
+  // because there's no action_predicted/scored pair to score — the
+  // mechanical apply IS its own observation.
+  const committed = emitEvent(db, {
+    kind: "applied_change_committed",
+    substrate_origin: "substrate_auto",
+    directive_id: row.directive_id ?? undefined,
+    task_id: row.task_id ?? undefined,
+    context_refs: [row.source_event_id],
+    residual: 0,
+    payload: {
+      source_event_id: row.source_event_id,
+      source_kind: row.source_kind,
+      target: row.target,
+      commit_sha: result.commitSha,
+      summary: result.summary,
+      stage: "stage_2_mechanical_apply",
+      applied_by: "auto_apply_worker",
+    } as JsonValue,
+  });
+  emitEvent(db, {
+    kind: appliedKind,
+    substrate_origin: "substrate_auto",
+    directive_id: row.directive_id ?? undefined,
+    task_id: row.task_id ?? undefined,
+    context_refs: [row.source_event_id, committed.id],
+    payload: {
+      source_event_id: row.source_event_id,
+      source_kind: row.source_kind,
+      status: "applied",
+      target: row.target,
+      commit_sha: result.commitSha,
+      summary: result.summary,
+      applied_change_event_id: committed.id,
+      applied_at: new Date(nowMs).toISOString(),
+      applied_by: "auto_apply_worker",
+    } as JsonValue,
+  });
+};
+
+/** Attempt one stage-2 mechanical apply: write file, run tests, commit
+ *  on pass, revert on fail. Returns the credit-chain result so the caller
+ *  can emit it. */
+export const applyStage2Candidate = (
+  db: Database,
+  row: QueueRow,
+  repoRoot: string,
+): { ok: true; commitSha: string; summary: string } | { ok: false; reason: string } => {
+  // 1. Resolve the source event payload.
+  const srcRow = db
+    .query("SELECT payload FROM events WHERE id = ?")
+    .get(row.source_event_id) as { payload: string } | null;
+  if (!srcRow) return { ok: false, reason: "source_event_missing" };
+  let payload: Record<string, unknown> = {};
+  try { payload = JSON.parse(srcRow.payload ?? "{}") as Record<string, unknown>; }
+  catch { return { ok: false, reason: "source_payload_unparseable" }; }
+
+  const parsed = extractAnchoredReplaceV1(payload);
+  if (!parsed) return { ok: false, reason: "proposed_behavior_not_anchored_replace_v1" };
+
+  // 2. Compute the mechanical replacement.
+  const repl = computeReplacement(parsed.filePath, parsed.before, parsed.after, repoRoot);
+  if (!repl.ok) return { ok: false, reason: repl.reason };
+
+  // 3. Write the file.
+  const abs = parsed.filePath.startsWith("/") ? parsed.filePath : join(repoRoot, parsed.filePath);
+  try { writeFileSync(abs, repl.updated, "utf8"); }
+  catch (err) { return { ok: false, reason: "write_failed:" + (err as Error).message }; }
+
+  // 4. Run the test suite. We pass --bail so the FIRST failure exits
+  // immediately — the verifier need not enumerate every breakage.
+  // 5. On failure: revert with `git checkout HEAD -- <file>` and refuse
+  // to commit.
+  const test = spawnSync("bun", ["test", "--bail"], {
+    cwd: repoRoot,
+    timeout: STAGE2_TEST_TIMEOUT_MS,
+    encoding: "utf8",
+    env: { ...process.env, ACC2_BRIDGE_MODE: "mock" },
+  });
+  if (test.status !== 0) {
+    spawnSync("git", ["checkout", "HEAD", "--", parsed.filePath], { cwd: repoRoot });
+    const tail = (test.stderr ?? "").slice(-400);
+    return { ok: false, reason: "tests_failed:" + tail };
+  }
+
+  // 6. Stage + commit. We use a fixed author footer so the commit
+  // chain is grep-able. No --no-verify; if hooks fail the commit
+  // fails and we treat that as a stage-2 failure (revert path runs).
+  spawnSync("git", ["add", parsed.filePath], { cwd: repoRoot });
+  const summary = "auto-apply: " + parsed.filePath;
+  const msg =
+    summary + "\n\n" +
+    "Applies brain proposal " + row.source_event_id + ".\n" +
+    "Stage-2 mechanical anchored_replace_v1 by runtime/auto_apply_worker.\n\n" +
+    "Co-Authored-By: AccInt v2 auto_apply_worker <noreply@accint>";
+  const commit = spawnSync("git", ["commit", "-m", msg], { cwd: repoRoot, encoding: "utf8" });
+  if (commit.status !== 0) {
+    spawnSync("git", ["checkout", "HEAD", "--", parsed.filePath], { cwd: repoRoot });
+    return { ok: false, reason: "git_commit_failed:" + (commit.stderr ?? "") };
+  }
+  const sha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" });
+  const commitSha = (sha.stdout ?? "").trim().slice(0, 10);
+  return { ok: true, commitSha, summary };
+};
+
+/** One tick of the auto-apply worker. Stage-1: scan + signal eligible
+ *  rows. Stage-2 (always-on, gated by safety constraints, not env):
+ *  pick ONE signaled-but-not-applied row and run the mechanical apply
+ *  pipeline (write + bun test --bail + git commit, or revert + emit
+ *  applied_change_failed). Skips stage-2 when within cooldown after a
+ *  recent failure, or when running under the test bridge. */
 export const runAutoApplyWorkerTick = (
   db: Database,
-  opts?: { nowMs?: number },
-): { signaled: string[]; skipped: number; stage2_candidates: number } => {
+  opts?: { nowMs?: number; repoRoot?: string },
+): { signaled: string[]; skipped: number; stage2_candidates: number; stage2_applied?: string; stage2_failed?: string } => {
   const nowMs = opts?.nowMs ?? Date.now();
   const eligible = collectAutoApplyEligible(db);
   const signaled: string[] = [];
@@ -219,11 +393,51 @@ export const runAutoApplyWorkerTick = (
       "auto_apply_worker signaled eligible rows",
     );
   }
-  // Stage-2 candidate count is observational only at this tick layer; the
-  // actual stage-2 apply pass is driven externally (by the daemon, by
-  // bun cli/auto_apply.ts, or by future expansion of this tick). Reporting
-  // the count makes the worker's stage-2 readiness observable from tests.
+
   const stage2Candidates = collectStage2Candidates(db);
+
+  // Stage-2 gating, NO env knob — organic safety only:
+  //   1. test-runtime check: refuse under mock bridge / NODE_ENV=test
+  //      so unit tests + mock-brain harness can't trigger real commits.
+  //   2. cooldown check: skip if any applied_change_failed landed in the
+  //      last STAGE2_COOLDOWN_MS — bad proposals naturally pause the loop.
+  //   3. one-at-a-time: take the oldest candidate, apply, return. A flood
+  //      of bad proposals can't cascade because the next tick is 60s away
+  //      and any failure triggers cooldown.
+  if (
+    stage2Candidates.length > 0 &&
+    stage2RuntimeAllowed() &&
+    !inStage2Cooldown(db, nowMs)
+  ) {
+    const candidate = stage2Candidates[0]!;
+    const repoRoot = opts?.repoRoot ?? process.env.ACC2_PROJECT_ROOT ?? process.cwd();
+    const result = applyStage2Candidate(db, candidate, repoRoot);
+    emitApplyChain(db, candidate, result, nowMs);
+    if (result.ok) {
+      logger.info(
+        { source_event_id: candidate.source_event_id, commit_sha: result.commitSha, target: candidate.target },
+        "auto_apply_worker stage-2 applied",
+      );
+      return {
+        signaled,
+        skipped: eligible.length - signaled.length,
+        stage2_candidates: stage2Candidates.length,
+        stage2_applied: candidate.source_event_id,
+      };
+    } else {
+      logger.warn(
+        { source_event_id: candidate.source_event_id, reason: result.reason, target: candidate.target },
+        "auto_apply_worker stage-2 failed — cooldown engaged",
+      );
+      return {
+        signaled,
+        skipped: eligible.length - signaled.length,
+        stage2_candidates: stage2Candidates.length,
+        stage2_failed: candidate.source_event_id,
+      };
+    }
+  }
+
   return {
     signaled,
     skipped: eligible.length - signaled.length,
