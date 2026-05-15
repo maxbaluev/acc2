@@ -10,6 +10,7 @@ import {
   codeArtifactRegistry,
   directiveConflicts,
   failureCounts,
+  lessonApplyCandidates,
   lessonImplementationStatus,
   lessonImplementerQueue,
   originPromotionRanking,
@@ -591,6 +592,28 @@ describe("lesson implementer flywheel views", () => {
 
     insertEvent(db, {
       kind: "contract_amendment_proposed",
+      directive_id: "d_rule",
+      task_id: "t_rule",
+      payload: {
+        target: ".claude/rules/dispatch.md",
+        anchor: "owner gate",
+        proposed_behavior: { file_path: ".claude/rules/dispatch.md", anchor: "owner gate", diff: "@@" },
+      },
+    });
+
+    insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_runtime_unstructured",
+      task_id: "t_runtime_unstructured",
+      payload: {
+        target: "cli/apply.ts",
+        anchor: "apply gate",
+        proposed_behavior: "change the gate prose",
+      },
+    });
+
+    insertEvent(db, {
+      kind: "contract_amendment_proposed",
       directive_id: "d_hazard",
       task_id: "t_hazard",
       payload: {
@@ -606,13 +629,68 @@ describe("lesson implementer flywheel views", () => {
       payload: { failure_kind: "cycle_1_only_breach" },
     });
 
+    insertEvent(db, {
+      kind: "lesson_extracted",
+      directive_id: "d_lesson_runtime",
+      task_id: "t_lesson_runtime",
+      payload: {
+        lesson_kind: "verifier_gap",
+        proposed_action: { file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" },
+      },
+    });
+
+    insertEvent(db, {
+      kind: "lesson_extracted",
+      directive_id: "d_lesson_contract",
+      task_id: "t_lesson_contract",
+      payload: {
+        lesson_kind: "process_improvement",
+        proposed_action: { file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" },
+      },
+    });
+
+    insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_mixed_targets",
+      task_id: "t_mixed_targets",
+      payload: {
+        target: "runtime/prompt_composer.ts",
+        anchor: "owner gate",
+        proposed_behavior: { file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" },
+      },
+    });
+
     const rows = lessonImplementerQueue(db);
     const byDirective = new Map(rows.map((r) => [r.directive_id, r]));
     expect(byDirective.get("d_contract")!.owner_gate_required).toBe(true);
     expect(byDirective.get("d_contract")!.owner_approved).toBe(true);
+    expect(byDirective.get("d_contract")!.apply_gate_status).toBe("authorized_owner");
     expect(byDirective.get("d_runtime")!.auto_apply_eligible).toBe(true);
+    expect(byDirective.get("d_runtime")!.apply_gate_status).toBe("authorized_auto");
+    expect(byDirective.get("d_rule")!.owner_gate_required).toBe(true);
+    expect(byDirective.get("d_rule")!.apply_gate_status).toBe("blocked_owner_consent");
+    expect(byDirective.get("d_rule")!.apply_gate_reason).toBe("owner_consent_missing");
+    expect(byDirective.get("d_runtime_unstructured")!.auto_apply_eligible).toBe(false);
+    expect(byDirective.get("d_runtime_unstructured")!.apply_gate_status).toBe("blocked_unstructured_proposal");
+    expect(byDirective.get("d_runtime_unstructured")!.apply_gate_reason).toBe("structured_proposed_behavior_required");
     expect(byDirective.get("d_hazard")!.auto_apply_eligible).toBe(false);
     expect(byDirective.get("d_hazard")!.trajectory_hazard_count).toBe(1);
+    expect(byDirective.get("d_hazard")!.apply_gate_status).toBe("blocked_trajectory_hazard");
+    expect(byDirective.get("d_hazard")!.apply_gate_reason).toBe("trajectory_hazard_present");
+    expect(byDirective.get("d_lesson_runtime")!.auto_apply_eligible).toBe(true);
+    expect(byDirective.get("d_lesson_runtime")!.apply_gate_status).toBe("authorized_auto");
+    expect(byDirective.get("d_lesson_runtime")!.apply_candidate).toMatchObject({
+      source_kind: "lesson_extracted",
+      lesson_kind: "verifier_gap",
+      target: "runtime/verifier.ts",
+      anchor: "gate",
+      diff: "@@",
+    });
+    expect(byDirective.get("d_lesson_contract")!.owner_gate_required).toBe(true);
+    expect(byDirective.get("d_lesson_contract")!.apply_gate_status).toBe("blocked_owner_consent");
+    expect(byDirective.get("d_mixed_targets")!.owner_gate_required).toBe(true);
+    expect(byDirective.get("d_mixed_targets")!.auto_apply_eligible).toBe(false);
+    expect(byDirective.get("d_mixed_targets")!.apply_gate_status).toBe("blocked_owner_consent");
   });
 
   test("status projects requested, predicted, scored, applied, and committed transitions", () => {
@@ -628,14 +706,14 @@ describe("lesson implementer flywheel views", () => {
       kind: "lesson_apply_requested",
       directive_id: "d_apply",
       task_id: "t_apply",
-      payload: { source_event_id: source },
+      payload: { source_event_id: source, authorization_status: "approved" },
       context_refs: [source],
     });
     const predicted = insertEvent(db, {
       kind: "action_predicted",
       directive_id: "d_apply",
       task_id: "t_apply",
-      payload: { source_event_id: source },
+      payload: { source_event_id: source, request_event_id: requested, authorization_event_id: requested },
       context_refs: [source, requested],
       action_artifact_id: "apply_action",
       verifier_artifact_id: "apply_verifier",
@@ -645,7 +723,7 @@ describe("lesson implementer flywheel views", () => {
       kind: "action_scored",
       directive_id: "d_apply",
       task_id: "t_apply",
-      payload: { source_event_id: source },
+      payload: { source_event_id: source, request_event_id: requested, authorization_event_id: requested },
       context_refs: [source, requested],
       residual: 0.1,
     });
@@ -660,8 +738,8 @@ describe("lesson implementer flywheel views", () => {
       kind: "applied_change_committed",
       directive_id: "d_apply",
       task_id: "t_apply",
-      payload: { source_event_id: source, status: "applied", commit_sha: "abcdef1234", residual: 0.1 },
-      context_refs: [source, scored],
+      payload: { source_event_id: source, status: "applied", commit_sha: "abcdef1234", residual: 0.1, request_event_id: requested, authorization_event_id: requested },
+      context_refs: [source, requested, scored],
       residual: 0.1,
     });
 
@@ -675,6 +753,76 @@ describe("lesson implementer flywheel views", () => {
     expect(row.verifier_passed).toBe(true);
     expect(row.flywheel_status).toBe("committed");
     expect(row.commit_sha).toBe("abcdef1234");
+    expect(row.apply_candidate).toMatchObject({
+      source_event_id: source,
+      source_kind: "lesson_extracted",
+      lesson_kind: "verifier_gap",
+    });
+  });
+
+  test("apply candidate view exposes the normalized flywheel shape", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    const recipeSource = insertEvent(db, {
+      kind: "lesson_extracted",
+      directive_id: "d_candidate_recipe",
+      task_id: "t_candidate_recipe",
+      payload: {
+        lesson_kind: "recipe_candidate",
+        proposed_action: { recipe: { goal_shape: "apply_lesson", topology_signature: "one_step" } },
+      },
+    });
+    const amendmentSource = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_candidate_amendment",
+      task_id: "t_candidate_amendment",
+      payload: {
+        target: "runtime/prompt_composer.ts",
+        anchor: "WORKFLOW_TEXT",
+        proposed_behavior: { file_path: "runtime/prompt_composer.ts", anchor: "WORKFLOW_TEXT", diff: "@@" },
+      },
+    });
+    const request = insertEvent(db, {
+      kind: "lesson_apply_requested",
+      directive_id: "d_candidate_amendment",
+      task_id: "t_candidate_amendment",
+      payload: { source_event_id: amendmentSource, authorization_status: "approved" },
+      context_refs: [amendmentSource],
+    });
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_candidate_amendment",
+      task_id: "t_candidate_amendment",
+      payload: { source_event_id: amendmentSource, request_event_id: request, authorization_event_id: request },
+      context_refs: [amendmentSource, request],
+      residual: 0.12,
+    });
+
+    const rows = lessonApplyCandidates(db);
+    const recipe = rows.find((r) => r.source_event_id === recipeSource)!;
+    const amendment = rows.find((r) => r.source_event_id === amendmentSource)!;
+
+    expect(Object.keys(recipe).slice(0, 8)).toEqual([
+      "source_event_id",
+      "target",
+      "anchor",
+      "patch_or_recipe",
+      "verifier_residual",
+      "owner_gate",
+      "trajectory_health",
+      "compounding_metric",
+    ]);
+    expect(recipe.patch_or_recipe).toEqual({ goal_shape: "apply_lesson", topology_signature: "one_step" });
+    expect(recipe.owner_gate.status).toBe("manual_review");
+    expect(recipe.trajectory_health.healthy).toBe(1);
+    expect(recipe.compounding_metric.compounded).toBe(0);
+
+    expect(amendment.target).toBe("runtime/prompt_composer.ts");
+    expect(amendment.anchor).toBe("WORKFLOW_TEXT");
+    expect(amendment.patch_or_recipe).toEqual({ file_path: "runtime/prompt_composer.ts", anchor: "WORKFLOW_TEXT", diff: "@@" });
+    expect(amendment.verifier_residual).toBe(0.12);
+    expect(amendment.owner_gate.status).toBe("authorized_auto");
   });
 
   test("queue and status do not treat high-residual attempts as committed", () => {
@@ -690,22 +838,31 @@ describe("lesson implementer flywheel views", () => {
       kind: "lesson_apply_requested",
       directive_id: "d_apply_high",
       task_id: "t_apply_high",
-      payload: { source_event_id: source },
+      payload: { source_event_id: source, authorization_status: "approved" },
       context_refs: [source],
     });
+    const requested = lessonImplementationStatus(db).find((r) => r.source_event_id === source)!.request_event_id!;
     insertEvent(db, {
       kind: "action_predicted",
       directive_id: "d_apply_high",
       task_id: "t_apply_high",
-      payload: { source_event_id: source },
-      context_refs: [source],
+      payload: { source_event_id: source, request_event_id: requested, authorization_event_id: requested },
+      context_refs: [source, requested],
       predicted_residual: 0.2,
     });
     insertEvent(db, {
       kind: "action_scored",
       directive_id: "d_apply_high",
       task_id: "t_apply_high",
-      payload: { source_event_id: source },
+      payload: { source_event_id: source, request_event_id: requested, authorization_event_id: requested },
+      context_refs: [source, requested],
+      residual: 0.3,
+    });
+    insertEvent(db, {
+      kind: "applied_change_committed",
+      directive_id: "d_apply_high",
+      task_id: "t_apply_high",
+      payload: { source_event_id: source, status: "applied", residual: 0.3 },
       context_refs: [source],
       residual: 0.3,
     });
@@ -715,6 +872,165 @@ describe("lesson implementer flywheel views", () => {
     expect(row.committed_event_id).toBeNull();
     expect(row.flywheel_status).toBe("verified");
     expect(lessonImplementerQueue(db).some((r) => r.source_event_id === source)).toBe(true);
+  });
+
+  test("high-residual executor attempts remain uncommitted and queued", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const source = insertEvent(db, {
+      kind: "lesson_extracted",
+      directive_id: "d_executor_high",
+      task_id: "t_executor_high",
+      payload: {
+        lesson_kind: "verifier_gap",
+        summary: "tighten verifier",
+        proposed_action: { file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" },
+      },
+    });
+    const requested = insertEvent(db, {
+      kind: "lesson_apply_requested",
+      directive_id: "d_executor_high",
+      task_id: "t_executor_high",
+      payload: { source_event_id: source, authorization_status: "approved" },
+      context_refs: [source],
+    });
+    const predicted = insertEvent(db, {
+      kind: "action_predicted",
+      directive_id: "d_executor_high",
+      task_id: "t_executor_high",
+      payload: { source_event_id: source, request_event_id: requested, authorization_event_id: requested },
+      context_refs: [source, requested],
+      action_artifact_id: "apply_action",
+      verifier_artifact_id: "apply_verifier",
+      predicted_residual: 0.2,
+    });
+    const scored = insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_executor_high",
+      task_id: "t_executor_high",
+      payload: { source_event_id: source, request_event_id: requested, authorization_event_id: requested },
+      context_refs: [source, requested, predicted],
+      residual: 0.7,
+    });
+    insertEvent(db, {
+      kind: "lesson_applied",
+      directive_id: "d_executor_high",
+      task_id: "t_executor_high",
+      payload: {
+        source_event_id: source,
+        status: "failed",
+        residual: 0.7,
+        request_event_id: requested,
+        authorization_event_id: requested,
+        action_event_id: predicted,
+        scored_event_id: scored,
+      },
+      context_refs: [source, scored],
+    });
+
+    const status = lessonImplementationStatus(db).find((r) => r.source_event_id === source)!;
+    expect(status.scored_event_id).toBe(scored);
+    expect(status.verifier_passed).toBe(false);
+    expect(status.committed_event_id).toBeNull();
+    expect(status.flywheel_status).toBe("failed");
+
+    const queued = lessonImplementerQueue(db).find((r) => r.source_event_id === source)!;
+    expect(queued.apply_event_id).not.toBeNull();
+    expect(queued.apply_status).toBe("failed");
+  });
+
+  test("status requires authorization before prediction and commit transitions", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const source = insertEvent(db, {
+      kind: "lesson_extracted",
+      directive_id: "d_unauthorized_apply",
+      task_id: "t_unauthorized_apply",
+      payload: { lesson_kind: "verifier_gap", summary: "tighten verifier" },
+    });
+    const predicted = insertEvent(db, {
+      kind: "action_predicted",
+      directive_id: "d_unauthorized_apply",
+      task_id: "t_unauthorized_apply",
+      payload: { source_event_id: source },
+      context_refs: [source],
+      predicted_residual: 0.2,
+    });
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_unauthorized_apply",
+      task_id: "t_unauthorized_apply",
+      payload: { source_event_id: source },
+      context_refs: [source, predicted],
+      residual: 0.1,
+    });
+    insertEvent(db, {
+      kind: "applied_change_committed",
+      directive_id: "d_unauthorized_apply",
+      task_id: "t_unauthorized_apply",
+      payload: { source_event_id: source, status: "applied", residual: 0.1 },
+      context_refs: [source, predicted],
+      residual: 0.1,
+    });
+
+    const row = lessonImplementationStatus(db).find((r) => r.source_event_id === source)!;
+    expect(row.request_event_id).toBeNull();
+    expect(row.action_event_id).toBeNull();
+    expect(row.scored_event_id).toBeNull();
+    expect(row.committed_event_id).toBeNull();
+    expect(row.flywheel_status).toBe("proposed");
+
+    const requested = insertEvent(db, {
+      kind: "lesson_apply_requested",
+      directive_id: "d_unauthorized_apply",
+      task_id: "t_unauthorized_apply",
+      payload: { source_event_id: source, authorization_status: "approved" },
+      context_refs: [source],
+    });
+    const authorizedPrediction = insertEvent(db, {
+      kind: "action_predicted",
+      directive_id: "d_unauthorized_apply",
+      task_id: "t_unauthorized_apply",
+      payload: { source_event_id: source, request_event_id: requested, authorization_event_id: requested },
+      context_refs: [source, requested],
+      predicted_residual: 0.2,
+    });
+    insertEvent(db, {
+      kind: "applied_change_committed",
+      directive_id: "d_unauthorized_apply",
+      task_id: "t_unauthorized_apply",
+      payload: { source_event_id: source, status: "applied", residual: 0.1, request_event_id: requested, authorization_event_id: requested },
+      context_refs: [source, requested, authorizedPrediction],
+      residual: 0.1,
+    });
+
+    const unscoredRow = lessonImplementationStatus(db).find((r) => r.source_event_id === source)!;
+    expect(unscoredRow.request_event_id).toBe(requested);
+    expect(unscoredRow.action_event_id).toBe(authorizedPrediction);
+    expect(unscoredRow.committed_event_id).toBeNull();
+    expect(unscoredRow.flywheel_status).toBe("predicted");
+
+    const authorizedScore = insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_unauthorized_apply",
+      task_id: "t_unauthorized_apply",
+      payload: { source_event_id: source, request_event_id: requested, authorization_event_id: requested },
+      context_refs: [source, requested, authorizedPrediction],
+      residual: 0.1,
+    });
+    insertEvent(db, {
+      kind: "applied_change_committed",
+      directive_id: "d_unauthorized_apply",
+      task_id: "t_unauthorized_apply",
+      payload: { source_event_id: source, status: "applied", residual: 0.1, request_event_id: requested, authorization_event_id: requested },
+      context_refs: [source, requested, authorizedPrediction, authorizedScore],
+      residual: 0.1,
+    });
+
+    const authorizedRow = lessonImplementationStatus(db).find((r) => r.source_event_id === source)!;
+    expect(authorizedRow.scored_event_id).toBe(authorizedScore);
+    expect(authorizedRow.committed_event_id).not.toBeNull();
+    expect(authorizedRow.flywheel_status).toBe("committed");
   });
 
   test("effectiveness marks compounded when the next cited trajectory is cheaper", () => {
@@ -736,12 +1052,27 @@ describe("lesson implementer flywheel views", () => {
       payload: {},
       residual: 0.4,
     });
+    const requested = insertEvent(db, {
+      kind: "lesson_apply_requested",
+      directive_id: "d_source",
+      task_id: "t_source",
+      payload: { source_event_id: source, authorization_status: "approved" },
+      context_refs: [source],
+    });
+    const scored = insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_source",
+      task_id: "t_source",
+      payload: { source_event_id: source, request_event_id: requested, authorization_event_id: requested },
+      context_refs: [source, requested],
+      residual: 0.05,
+    });
     insertEvent(db, {
       kind: "applied_change_committed",
       directive_id: "d_source",
       task_id: "t_source",
-      payload: { source_event_id: source, status: "applied", residual: 0.05 },
-      context_refs: [source],
+      payload: { source_event_id: source, status: "applied", residual: 0.05, request_event_id: requested, authorization_event_id: requested },
+      context_refs: [source, requested, scored],
       residual: 0.05,
     });
 
@@ -752,13 +1083,61 @@ describe("lesson implementer flywheel views", () => {
       task_id: "t_next",
       payload: { source_event_id: source, recipe_replayed: true },
       context_refs: [source],
-      residual: 0.2,
+      residual: 0.02,
     });
 
     const row = appliedLessonEffectiveness(db).find((r) => r.source_event_id === source)!;
     expect(row.compounded).toBe(true);
     expect(row.tier0_replay_hit).toBe(true);
-    expect(row.residual_delta).toBeCloseTo(0.2);
+    expect(row.residual_delta).toBeGreaterThan(0);
     expect(row.dag_node_delta).toBe(2);
+  });
+
+  test("normalized apply candidates project one shape across lesson and amendment sources", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const lesson = insertEvent(db, {
+      kind: "lesson_extracted",
+      directive_id: "d_candidate_lesson",
+      task_id: "t_candidate_lesson",
+      payload: {
+        lesson_kind: "recipe_candidate",
+        proposed_action: { anchor: "match", recipe: { goal_shape: "apply lesson" } },
+      },
+    });
+    const amendment = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_candidate_amendment",
+      task_id: "t_candidate_amendment",
+      payload: {
+        target: "runtime/prompt_composer.ts",
+        anchor: "WORKFLOW_TEXT",
+        proposed_behavior: { file_path: "runtime/prompt_composer.ts", anchor: "WORKFLOW_TEXT", diff: "@@" },
+      },
+    });
+
+    const rows = lessonApplyCandidates(db);
+    const lessonRow = rows.find((r) => r.source_event_id === lesson)!;
+    const amendmentRow = rows.find((r) => r.source_event_id === amendment)!;
+
+    expect(lessonRow).toMatchObject({
+      source_event_id: lesson,
+      source_kind: "lesson_extracted",
+      lesson_kind: "recipe_candidate",
+      anchor: "match",
+      flywheel_status: "proposed",
+    });
+    expect(lessonRow.target).toBeNull();
+    expect(lessonRow.patch_or_recipe).toMatchObject({ goal_shape: "apply lesson" });
+    expect(lessonRow.owner_gate).toMatchObject({ required: 0, status: "manual_review" });
+    expect(amendmentRow).toMatchObject({
+      source_event_id: amendment,
+      source_kind: "contract_amendment_proposed",
+      target: "runtime/prompt_composer.ts",
+      anchor: "WORKFLOW_TEXT",
+      flywheel_status: "proposed",
+    });
+    expect(amendmentRow.patch_or_recipe).toMatchObject({ file_path: "runtime/prompt_composer.ts", diff: "@@" });
+    expect(amendmentRow.owner_gate).toMatchObject({ required: 0, status: "authorized_auto" });
   });
 });

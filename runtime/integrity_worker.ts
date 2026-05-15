@@ -223,6 +223,21 @@ export const integrityWorkerTick = async (db: Database): Promise<IntegrityReport
     );
   }
 
+  // Batch 8.B supervisor: stop stucks/loops at task / directive / bridge
+  // scope. Cites brain lesson 5SWP11NZFS3YX68Y95T164HT9W which surfaced
+  // bridge_stuck streaks as the dominant structural blocker. Composes
+  // three detectors: redispatch-storm (task), dag-explosion (directive),
+  // bridge-health (global). All emit append-only corrective events.
+  try {
+    const { supervisorTick } = await import("./supervisor");
+    supervisorTick(db);
+  } catch (err) {
+    logger.warn(
+      { where: "integrity.supervisor_tick", err: (err as Error).message },
+      "supervisor tick failed — will retry next tick",
+    );
+  }
+
   // After emit, opportunistically truncate WAL if it's grown past
   // threshold. (We do this AFTER the check emission so the audit log
   // reflects the state at check time.)

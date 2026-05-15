@@ -245,6 +245,22 @@ export const EVENT_KINDS = {
   bridge_stuck:                            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
   runtime_subprocess_killed:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
 
+  // ── Bridge-health gate (Batch 8.A, cites brain lesson 5SWP11NZFS3YX68Y95T164HT9W) ─
+  // Substrate-emitted when ≥ BRIDGE_DEGRADATION_THRESHOLD bridge_failed events
+  // land within BRIDGE_FAILURE_WINDOW_MS. Scheduler refuses opencode_brain
+  // dispatches until bridge_health_recovered fires (no failures for
+  // BRIDGE_HEALTH_COOLDOWN_MS). Brain proposed this in WORKFLOW_TEXT step-8
+  // lesson_extracted (kind=failure_pattern) on 2026-05-15T02:10:08.725Z.
+  bridge_health_degraded:                  { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true  },
+  bridge_health_recovered:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
+
+  // ── Supervisor (Batch 8.B) — auto-stop stucks/loops at every level ──
+  // Periodic worker emits this when it detects a pathology and applies the
+  // corresponding corrective action (task_failed / directive_archived_by_operator
+  // / bridge_health_degraded). Records what the supervisor saw + what it did
+  // so operators can audit the auto-intervention chain.
+  supervisor_intervention_recorded:        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true  },
+
   // ── Previously-missing kinds (emitted at runtime, now registered) ───
   embedding_skipped_missing_api_key:       { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
   cli_layout_migrated:                     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },

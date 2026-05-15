@@ -22,6 +22,7 @@
 //       create -> retrieve -> mutate -> credit, k_555).
 
 import { mcpCall } from "./rpc";
+import { lessonApplyTargetsPolicy } from "../substrate/lesson_apply_policy";
 
 type Args = Record<string, string | boolean>;
 
@@ -80,6 +81,8 @@ type ApplyAuthorization = {
 
 const DEFAULT_APPLY_ACTION_ARTIFACT_ID = "claude_agent_apply_change_action";
 const DEFAULT_APPLY_VERIFIER_ARTIFACT_ID = "claude_agent_apply_change_verifier";
+const DEFAULT_APPLY_GATE_ACTION_ARTIFACT_ID = "lesson_apply_gate_action";
+const DEFAULT_APPLY_GATE_VERIFIER_ARTIFACT_ID = "lesson_apply_gate_verifier";
 
 const fetchEvent = async (eventId: string): Promise<EventRow | null> => {
   const env = await mcpCall("substrate.get_event", { id: eventId });
@@ -96,30 +99,28 @@ const parsePayload = (p: unknown): Record<string, unknown> => {
   return {};
 };
 
-// Owner-consent territory: amendments touching these targets MUST have an
-// explicit owner_decision_recorded { decision: "approved" } in the same
-// trajectory OR an --owner-approved flag on the apply call. CLAUDE.md
-// §"Closure + learning" + v2-design.md §6.2 (irreversible-effect gate).
-const OWNER_GATED_TARGETS = [
-  /\bCLAUDE\.md$/,
-  /\.claude\/rules\//,
-  /docs\/v2-design\.md$/,
-  /docs\/operator-install\.md$/,
-  /docs\/ops-guide\.md$/,
-];
-
-const isOwnerGated = (target: string): boolean =>
-  OWNER_GATED_TARGETS.some((re) => re.test(target));
-
 const targetFromPayload = (payload: Record<string, unknown>): string => {
   const direct = payload.target;
   if (typeof direct === "string") return direct;
-  const proposed = payload.proposed_behavior;
+  const proposed = payload.proposed_behavior ?? payload.proposed_action;
   if (proposed && typeof proposed === "object") {
     const path = (proposed as Record<string, unknown>).file_path;
     if (typeof path === "string") return path;
   }
   return "";
+};
+
+const targetCandidatesFromPayload = (payload: Record<string, unknown>): string[] => {
+  const targets = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value === "string" && value.trim().length > 0) targets.add(value.trim());
+  };
+  add(payload.target);
+  for (const key of ["proposed_behavior", "proposed_action"] as const) {
+    const proposed = payload[key];
+    if (proposed && typeof proposed === "object") add((proposed as Record<string, unknown>).file_path);
+  }
+  return [...targets];
 };
 
 const boolish = (v: unknown): boolean => v === true || v === 1 || v === "1" || v === "true";
@@ -130,8 +131,8 @@ const fetchQueueRow = async (eventId: string): Promise<LessonQueueRow | null> =>
   return (env.result as LessonQueueRow[]).find((r) => r.source_event_id === eventId) ?? null;
 };
 
-const structuredProposedBehavior = (payload: Record<string, unknown>, target: string): boolean => {
-  const proposed = payload.proposed_behavior;
+const structuredChangeProposal = (payload: Record<string, unknown>, target: string): boolean => {
+  const proposed = payload.proposed_behavior ?? payload.proposed_action;
   if (!proposed || typeof proposed !== "object") return false;
   const p = proposed as Record<string, unknown>;
   return typeof p.file_path === "string"
@@ -142,27 +143,176 @@ const structuredProposedBehavior = (payload: Record<string, unknown>, target: st
     && p.diff.trim().length > 0;
 };
 
-const isRuntimeAutoApplyTarget = (target: string): boolean =>
-  target.startsWith("cli/") || target.startsWith("runtime/");
+const proposalText = (value: unknown): string => {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") return JSON.stringify(value);
+  return "";
+};
+
+const proposedChangeFields = (
+  payload: Record<string, unknown>,
+): { sourceField: "proposed_behavior" | "proposed_action"; proposal: Record<string, unknown> } | null => {
+  for (const sourceField of ["proposed_behavior", "proposed_action"] as const) {
+    const proposal = payload[sourceField];
+    if (proposal && typeof proposal === "object" && !Array.isArray(proposal)) {
+      return { sourceField, proposal: proposal as Record<string, unknown> };
+    }
+  }
+  return null;
+};
+
+const formatPromptValue = (value: unknown): string => {
+  if (value === undefined || value === null || value === "") return "(missing)";
+  return typeof value === "string" ? value : JSON.stringify(value);
+};
+
+const renderStructuredProposalBlock = (payload: Record<string, unknown>): string => {
+  const structured = proposedChangeFields(payload);
+  if (!structured) {
+    const fallback = proposalText(payload.proposed_behavior) || proposalText(payload.proposed_action);
+    return [
+      `STRUCTURED PROPOSED CHANGE`,
+      `  status: unstructured`,
+      fallback ? `  proposal_text: ${JSON.stringify(fallback)}` : `  proposal_text: (missing)`,
+    ].join("\n");
+  }
+
+  const { sourceField, proposal } = structured;
+  return [
+    `STRUCTURED PROPOSED CHANGE`,
+    `  source_field: ${sourceField}`,
+    `  file_path:    ${formatPromptValue(proposal.file_path)}`,
+    `  anchor:       ${formatPromptValue(proposal.anchor)}`,
+    `  diff:`,
+    `\`\`\`diff`,
+    typeof proposal.diff === "string" ? proposal.diff : JSON.stringify(proposal.diff ?? ""),
+    `\`\`\``,
+  ].join("\n");
+};
+
+const renderGateBlock = (
+  payload: Record<string, unknown>,
+  auth: ApplyAuthorization,
+  policy: ReturnType<typeof lessonApplyTargetsPolicy>,
+): string => {
+  const hazardCount = Number(auth.queueRow?.trajectory_hazard_count ?? 0);
+  const structured = structuredChangeProposal(payload, auth.target);
+  return [
+    `APPLY GATES`,
+    `  owner_gate.required: ${auth.ownerGateRequired}`,
+    `  owner_gate.approved: ${auth.ownerApproved}`,
+    `  owner_gate.rule: CLAUDE.md, docs/v2-design.md, docs/operator-install.md, docs/ops-guide.md, and .claude/rules/* require explicit owner consent before apply.`,
+    `  cli_runtime_gate.target_in_scope: ${policy.autoApplyTarget}`,
+    `  cli_runtime_gate.rule: cli/* and runtime/* may auto-apply only with structured {file_path, anchor, diff}, verifier residual < 0.3, and no dispatcher_violation or irreversible_effect_recorded in the trajectory.`,
+    `  cli_runtime_gate.structured_change: ${structured || !policy.autoApplyTarget}`,
+    `  cli_runtime_gate.trajectory_hazard_count: ${hazardCount}`,
+  ].join("\n");
+};
+
+const emitApplyGateEvaluation = async (
+  ev: EventRow,
+  eventId: string,
+  args: {
+    target: string;
+    status: "approved" | "denied";
+    reason?: string;
+    ownerGateRequired: boolean;
+    ownerApproved: boolean;
+    autoApplyTarget: boolean;
+  },
+): Promise<{ actionEventId?: string; scoredEventId?: string; residual: number }> => {
+  const residual = args.status === "approved" ? 0 : 1;
+  const actionEnv = await mcpCall("substrate.emit", {
+    kind: "action_predicted",
+    substrate_origin: "claude_root",
+    directive_id: ev.directive_id,
+    task_id: ev.task_id,
+    context_refs: [eventId],
+    action_artifact_id: DEFAULT_APPLY_GATE_ACTION_ARTIFACT_ID,
+    verifier_artifact_id: DEFAULT_APPLY_GATE_VERIFIER_ARTIFACT_ID,
+    predicted_residual: args.status === "approved" ? 0.05 : 0.95,
+    payload: {
+      intent: "Evaluate owner/auto gate for applying a substrate-emitted lesson or contract amendment.",
+      source_event_id: eventId,
+      source_kind: ev.kind,
+      target: args.target,
+      authorization_status: args.status,
+      reason: args.reason,
+      owner_gate_required: args.ownerGateRequired,
+      owner_approved: args.ownerApproved,
+      auto_apply_target: args.autoApplyTarget,
+      design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
+    },
+  });
+  if (!actionEnv.ok) throw new Error(`gate action_predicted emit failed - ${actionEnv.error}`);
+  const actionEventId = (actionEnv.result as { id?: string })?.id;
+
+  const scoredEnv = await mcpCall("substrate.emit", {
+    kind: "action_scored",
+    substrate_origin: "claude_root",
+    directive_id: ev.directive_id,
+    task_id: ev.task_id,
+    context_refs: [eventId, actionEventId].filter(Boolean),
+    action_artifact_id: DEFAULT_APPLY_GATE_ACTION_ARTIFACT_ID,
+    verifier_artifact_id: DEFAULT_APPLY_GATE_VERIFIER_ARTIFACT_ID,
+    outcome: args.status,
+    residual,
+    payload: {
+      source_event_id: eventId,
+      source_kind: ev.kind,
+      action_event_id: actionEventId,
+      target: args.target,
+      authorization_status: args.status,
+      reason: args.reason,
+      owner_gate_required: args.ownerGateRequired,
+      owner_approved: args.ownerApproved,
+      auto_apply_target: args.autoApplyTarget,
+    },
+  });
+  if (!scoredEnv.ok) throw new Error(`gate action_scored emit failed - ${scoredEnv.error}`);
+  return { actionEventId, scoredEventId: (scoredEnv.result as { id?: string })?.id, residual };
+};
 
 const emitApplyDenied = async (
   ev: EventRow,
   eventId: string,
   reason: string,
   target: string,
+  gate: { ownerGateRequired: boolean; ownerApproved: boolean; autoApplyTarget: boolean },
 ): Promise<number> => {
+  let gateActionEventId: string | undefined;
+  let gateScoredEventId: string | undefined;
+  try {
+    const gateEval = await emitApplyGateEvaluation(ev, eventId, {
+      target,
+      status: "denied",
+      reason,
+      ...gate,
+    });
+    gateActionEventId = gateEval.actionEventId;
+    gateScoredEventId = gateEval.scoredEventId;
+  } catch (err) {
+    console.error(`acc apply: ${(err as Error).message}`);
+    return 1;
+  }
   const env = await mcpCall("substrate.emit", {
     kind: "lesson_apply_requested",
     substrate_origin: "claude_root",
     directive_id: ev.directive_id,
     task_id: ev.task_id,
-    context_refs: [eventId],
+    context_refs: [eventId, gateActionEventId, gateScoredEventId].filter(Boolean),
     payload: {
       source_event_id: eventId,
       source_kind: ev.kind,
       target,
       authorization_status: "denied",
       reason,
+      gate_action_event_id: gateActionEventId,
+      gate_scored_event_id: gateScoredEventId,
+      gate_residual: 1,
+      owner_gate_required: gate.ownerGateRequired,
+      owner_approved: gate.ownerApproved,
+      auto_apply_target: gate.autoApplyTarget,
       design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
     },
   });
@@ -205,25 +355,41 @@ const authorizeApply = async (
 ): Promise<ApplyAuthorization | { ok: false; code: number }> => {
   const payload = parsePayload(ev.payload);
   const target = opts.target || targetFromPayload(payload);
+  const targets = [...new Set(
+    [...targetCandidatesFromPayload(payload), opts.target]
+      .filter((t): t is string => typeof t === "string" && t.trim().length > 0),
+  )];
   const queueRow = await fetchQueueRow(eventId);
   const kind = ev.kind ?? "";
   if (kind !== "lesson_extracted" && kind !== "contract_amendment_proposed") {
     console.error(`acc apply: event ${eventId} is ${kind}, not lesson_extracted or contract_amendment_proposed`);
     return { ok: false, code: 1 };
   }
-  const ownerGateRequired = kind === "contract_amendment_proposed"
-    && (isOwnerGated(target) || boolish(queueRow?.owner_gate_required));
+  const policy = lessonApplyTargetsPolicy(targets);
+  const ownerGateRequired = policy.ownerGateRequired || boolish(queueRow?.owner_gate_required);
   const ownerApproved = Boolean(opts.ownerApproved) || boolish(queueRow?.owner_approved);
   if (ownerGateRequired && !ownerApproved) {
-    return { ok: false, code: await emitApplyDenied(ev, eventId, "owner_consent_missing", target) };
+    return { ok: false, code: await emitApplyDenied(ev, eventId, "owner_consent_missing", target, {
+      ownerGateRequired,
+      ownerApproved,
+      autoApplyTarget: policy.autoApplyTarget,
+    }) };
   }
-  if (kind === "contract_amendment_proposed" && isRuntimeAutoApplyTarget(target)) {
+  if (policy.autoApplyTarget) {
     const hazards = Number(queueRow?.trajectory_hazard_count ?? 0);
     if (hazards > 0) {
-      return { ok: false, code: await emitApplyDenied(ev, eventId, "trajectory_hazard_present", target) };
+      return { ok: false, code: await emitApplyDenied(ev, eventId, "trajectory_hazard_present", target, {
+        ownerGateRequired,
+        ownerApproved,
+        autoApplyTarget: policy.autoApplyTarget,
+      }) };
     }
-    if (!structuredProposedBehavior(payload, target)) {
-      return { ok: false, code: await emitApplyDenied(ev, eventId, "structured_proposed_behavior_required", target) };
+    if (!structuredChangeProposal(payload, target)) {
+      return { ok: false, code: await emitApplyDenied(ev, eventId, "structured_proposed_behavior_required", target, {
+        ownerGateRequired,
+        ownerApproved,
+        autoApplyTarget: policy.autoApplyTarget,
+      }) };
     }
   }
   return { ok: true, target, ownerGateRequired, ownerApproved, queueRow };
@@ -234,7 +400,7 @@ const authorizeApply = async (
  *  makes the edit, runs the verifier (`bun test --bail`), commits to git,
  *  and returns a strict JSON summary the orchestrator pipes into
  *  `acc apply --record`. */
-const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean }): string => {
+const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean; auth: ApplyAuthorization }): string => {
   const payload = parsePayload(ev.payload);
   const kind = ev.kind ?? "?";
   const evId = ev.event_id ?? ev.id ?? "?";
@@ -244,16 +410,18 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean }): 
   const resolvedTarget = targetFromPayload(payload);
   const target = resolvedTarget || "(unspecified — subagent must infer from summary)";
   const anchor = (payload.anchor as string | undefined) ?? "";
-  const proposed = (payload.proposed_behavior as string | undefined) ?? (payload.proposed_action as string | undefined) ?? "";
+  const proposed = proposalText(payload.proposed_behavior) || proposalText(payload.proposed_action);
   const current = (payload.current_behavior as string | undefined) ?? "";
   const summary = (payload.summary as string | undefined) ?? "";
   const lessonKind = (payload.lesson_kind as string | undefined) ?? "";
 
-  const ownerGated = target ? isOwnerGated(target) : false;
-  const ownerGateLine = ownerGated && !opts.ownerApproved
+  const policy = lessonApplyTargetsPolicy(targetCandidatesFromPayload(payload));
+  const ownerGateLine = policy.ownerGateRequired && !opts.ownerApproved
     ? `OWNER GATE — REFUSE: this target is in owner-consent territory and --owner-approved was not set on the apply call. STOP, emit a clarifying lesson_extracted, and return {"status":"refused","reason":"owner_consent_missing"}.`
-    : ownerGated
-      ? `OWNER GATE — APPROVED: --owner-approved was set on the apply call. Proceed but emit irreversible_effect_recorded BEFORE the write.`
+    : policy.ownerGateRequired
+      ? `OWNER GATE — APPROVED: owner consent is recorded for this source event.`
+    : policy.autoApplyTarget
+        ? `AUTO-APPLY GATE — CLI/RUNTIME: proceed only because acc apply verified a structured proposed change {file_path, anchor, diff}, verifier residual must be < 0.3, and this trajectory has no dispatcher_violation or irreversible_effect_recorded rows.`
       : `(target outside owner-consent territory — apply directly)`;
 
   return [
@@ -281,6 +449,10 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean }): 
           summary ? `  summary:         ${JSON.stringify(summary)}` : ``,
           proposed ? `  proposed_action: ${JSON.stringify(proposed)}` : ``,
         ].filter(Boolean).join("\n"),
+    ``,
+    renderStructuredProposalBlock(payload),
+    ``,
+    renderGateBlock(payload, opts.auth, policy),
     ``,
     `EVIDENCE EVENT IDS (resolve via substrate.get_event before editing — they`,
     `cite the trajectory rows that led to this proposal):`,
@@ -351,18 +523,38 @@ const renderPromptCommand = async (eventId: string, ownerApproved: boolean): Pro
     console.error(`acc apply: ${(err as Error).message}`);
     return 1;
   }
+  let gateActionEventId: string | undefined;
+  let gateScoredEventId: string | undefined;
+  try {
+    const gatePolicy = lessonApplyTargetsPolicy(targetCandidatesFromPayload(payload));
+    const gateEval = await emitApplyGateEvaluation(ev, eventId, {
+      target: auth.target || targetFromPayload(payload),
+      status: "approved",
+      ownerGateRequired: auth.ownerGateRequired,
+      ownerApproved: auth.ownerApproved,
+      autoApplyTarget: gatePolicy.autoApplyTarget,
+    });
+    gateActionEventId = gateEval.actionEventId;
+    gateScoredEventId = gateEval.scoredEventId;
+  } catch (err) {
+    console.error(`acc apply: ${(err as Error).message}`);
+    return 1;
+  }
   const requestEnv = await mcpCall("substrate.emit", {
     kind: "lesson_apply_requested",
     substrate_origin: "claude_root",
     directive_id: ev.directive_id,
     task_id: ev.task_id,
-    context_refs: [eventId, ownerDecisionEventId].filter(Boolean),
+    context_refs: [eventId, ownerDecisionEventId, gateActionEventId, gateScoredEventId].filter(Boolean),
     payload: {
       source_event_id: eventId,
       source_kind: ev.kind,
-      owner_approved: ownerApproved,
+      owner_approved: auth.ownerApproved,
       owner_decision_event_id: ownerDecisionEventId,
       owner_gate_required: auth.ownerGateRequired,
+      gate_action_event_id: gateActionEventId,
+      gate_scored_event_id: gateScoredEventId,
+      gate_residual: 0,
       authorization_status: "approved",
       target: auth.target || payload.target,
       design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
@@ -372,7 +564,7 @@ const renderPromptCommand = async (eventId: string, ownerApproved: boolean): Pro
     console.error(`acc apply: lesson_apply_requested emit failed - ${requestEnv.error}`);
     return 1;
   }
-  const prompt = renderSubagentPrompt(ev, { ownerApproved });
+  const prompt = renderSubagentPrompt(ev, { ownerApproved: auth.ownerApproved, auth });
   console.log(prompt);
   return 0;
 };
@@ -405,6 +597,7 @@ const recordApply = async (
     : status === "applied" ? 0 : 1;
   const actionArtifactId = opts.actionArtifactId || DEFAULT_APPLY_ACTION_ARTIFACT_ID;
   const verifierArtifactId = opts.verifierArtifactId || DEFAULT_APPLY_VERIFIER_ARTIFACT_ID;
+  const payload = parsePayload(ev.payload);
   const auth = await authorizeApply(ev, eventId, { ownerApproved: opts.ownerApproved, target: opts.target });
   if (!auth.ok) return auth.code;
   let ownerDecisionEventId: string | undefined;
@@ -415,13 +608,30 @@ const recordApply = async (
     return 1;
   }
   const target = auth.target || opts.target;
+  let gateActionEventId: string | undefined;
+  let gateScoredEventId: string | undefined;
+  try {
+    const gatePolicy = lessonApplyTargetsPolicy(opts.target ? [opts.target] : targetCandidatesFromPayload(payload));
+    const gateEval = await emitApplyGateEvaluation(ev, eventId, {
+      target: target || targetFromPayload(payload),
+      status: "approved",
+      ownerGateRequired: auth.ownerGateRequired,
+      ownerApproved: auth.ownerApproved,
+      autoApplyTarget: gatePolicy.autoApplyTarget,
+    });
+    gateActionEventId = gateEval.actionEventId;
+    gateScoredEventId = gateEval.scoredEventId;
+  } catch (err) {
+    console.error(`acc apply --record: ${(err as Error).message}`);
+    return 1;
+  }
 
   const requestEnv = await mcpCall("substrate.emit", {
     kind: "lesson_apply_requested",
     substrate_origin: "claude_root",
     directive_id: ev.directive_id,
     task_id: ev.task_id,
-    context_refs: [eventId, ownerDecisionEventId].filter(Boolean),
+    context_refs: [eventId, ownerDecisionEventId, gateActionEventId, gateScoredEventId].filter(Boolean),
     payload: {
       source_event_id: eventId,
       source_kind: ev.kind,
@@ -431,6 +641,9 @@ const recordApply = async (
       owner_gate_required: auth.ownerGateRequired,
       owner_approved: auth.ownerApproved,
       owner_decision_event_id: ownerDecisionEventId,
+      gate_action_event_id: gateActionEventId,
+      gate_scored_event_id: gateScoredEventId,
+      gate_residual: 0,
       authorization_status: "approved",
       design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
     },
@@ -454,8 +667,13 @@ const recordApply = async (
       intent: "Apply a substrate-emitted lesson or contract amendment as a committed code change.",
       source_event_id: eventId,
       request_event_id: requestEventId,
+      authorization_event_id: requestEventId,
       source_kind: ev.kind,
       target,
+      owner_gate_checked: true,
+      owner_gate_required: auth.ownerGateRequired,
+      owner_approved: auth.ownerApproved,
+      authorization_status: "approved",
       design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
     },
   });
@@ -478,11 +696,16 @@ const recordApply = async (
     payload: {
       source_event_id: eventId,
       request_event_id: requestEventId,
+      authorization_event_id: requestEventId,
       source_kind: ev.kind,
       commit_sha: opts.commitSha,
       target,
       summary: opts.summary,
       reason: opts.reason,
+      owner_gate_checked: true,
+      owner_gate_required: auth.ownerGateRequired,
+      owner_approved: auth.ownerApproved,
+      authorization_status: "approved",
     },
   });
   if (!scoredEnv.ok) {
@@ -490,12 +713,6 @@ const recordApply = async (
     return 1;
   }
   const scoredEventId = (scoredEnv.result as { id?: string })?.id;
-
-  if (status !== "applied" || residual >= 0.3) {
-    console.log(`action_scored ${scoredEventId ?? "?"} residual=${residual}`);
-    console.log(`applied_change_committed skipped (status=${status} residual=${residual})`);
-    return status === "applied" ? 1 : 0;
-  }
 
   const verifierPassed = status === "applied" && residual < 0.3;
   let committedEventId: string | undefined;
@@ -520,8 +737,13 @@ const recordApply = async (
         target,
         residual,
         request_event_id: requestEventId,
+        authorization_event_id: requestEventId,
         action_event_id: actionEventId,
         scored_event_id: scoredEventId,
+        owner_gate_checked: true,
+        owner_gate_required: auth.ownerGateRequired,
+        owner_approved: auth.ownerApproved,
+        authorization_status: "approved",
       },
     });
     if (!committedEnv.ok) {
@@ -531,29 +753,34 @@ const recordApply = async (
     committedEventId = (committedEnv.result as { id?: string })?.id;
   }
 
-  const payload: Record<string, unknown> = {
+  const appliedPayload: Record<string, unknown> = {
     source_event_id: eventId,
     source_kind: ev.kind,
     status,
     applied_at: new Date().toISOString(),
     request_event_id: requestEventId,
+    authorization_event_id: requestEventId,
     action_event_id: actionEventId,
     scored_event_id: scoredEventId,
     residual,
+    owner_gate_checked: true,
+    owner_gate_required: auth.ownerGateRequired,
+    owner_approved: auth.ownerApproved,
+    authorization_status: "approved",
   };
-  if (committedEventId) payload.applied_change_event_id = committedEventId;
-  if (opts.commitSha) payload.commit_sha = opts.commitSha;
-  if (opts.subagentTaskId) payload.subagent_task_id = opts.subagentTaskId;
-  if (opts.summary) payload.summary = opts.summary;
-  if (opts.reason) payload.reason = opts.reason;
-  if (target) payload.target = target;
+  if (committedEventId) appliedPayload.applied_change_event_id = committedEventId;
+  if (opts.commitSha) appliedPayload.commit_sha = opts.commitSha;
+  if (opts.subagentTaskId) appliedPayload.subagent_task_id = opts.subagentTaskId;
+  if (opts.summary) appliedPayload.summary = opts.summary;
+  if (opts.reason) appliedPayload.reason = opts.reason;
+  if (target) appliedPayload.target = target;
   const env = await mcpCall("substrate.emit", {
     kind: appliedKind,
     substrate_origin: "claude_root",
     directive_id: ev.directive_id,
     task_id: ev.task_id,
     context_refs: [eventId, committedEventId].filter(Boolean),
-    payload,
+    payload: appliedPayload,
   });
   if (!env.ok) {
     console.error(`acc apply --record: emit failed — ${env.error}`);
@@ -563,7 +790,7 @@ const recordApply = async (
   if (committedEventId) console.log(`applied_change_committed ${committedEventId} residual=${residual}`);
   else console.log(`applied_change_committed skipped residual=${residual} status=${status}`);
   console.log(`${appliedKind} ${result.id ?? "?"} (source=${eventId.slice(0, 12)} status=${status})`);
-  return 0;
+  return status === "applied" && !verifierPassed ? 1 : 0;
 };
 
 export const runApply = async (argv: string[]): Promise<number> => {

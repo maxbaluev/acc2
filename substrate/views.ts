@@ -1,16 +1,18 @@
 // acc2 substrate views — pure SQL view definitions per docs/v2-design.md §4.2.
-// Each view is a CREATE VIEW IF NOT EXISTS over the events + code_artifact
+// Each view is a CREATE VIEW over the events + code_artifact
 // tables already declared in schema.sql. Accessor functions are thin: one
 // query, parse JSON columns, return rows. Heavier projections (semantic
 // merger, recipe extraction) live in extractors.ts because they emit new
 // events, which a view cannot do.
 //
-// runViews(db) is idempotent — every statement is CREATE VIEW IF NOT EXISTS.
+// runViews(db) is idempotent — it replaces view definitions so warm daemon
+// DBs pick up projection changes instead of keeping stale CREATE VIEW SQL.
 // We do NOT call it from openDb so Phase B1's db.test.ts contracts are
 // untouched; the daemon (Phase B3) and any test that uses views must
 // invoke runViews(db) explicitly. Documented choice (per task brief).
 
 import type { Database } from "bun:sqlite";
+import { lessonApplyTargetPolicyValuesSql } from "./lesson_apply_policy";
 
 // ── View DDL (one statement per view; runViews runs them all) ───────
 
@@ -579,11 +581,15 @@ CREATE VIEW IF NOT EXISTS promoted_knowledge_view AS
 // flywheel. It projects lesson_extracted / contract_amendment_proposed rows
 // that have not reached applied_change_committed. Owner gating is derived
 // from target path + owner_decision_recorded rows; auto-apply eligibility is
-// derived from structured proposed_behavior and absence of trajectory hazards.
+// derived from structured proposed_behavior/proposed_action and absence of
+// trajectory hazards. The gates are target/shape based, not lesson-kind based.
 // No posterior or queue table is stored; the ledger remains the source.
 const VIEW_LESSON_IMPLEMENTER_QUEUE = `
 CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
-  WITH proposals AS (
+  WITH apply_target_policy AS (
+    ${lessonApplyTargetPolicyValuesSql()}
+  ),
+  proposals AS (
     SELECT
       e.id            AS source_event_id,
       e.ts            AS ts,
@@ -595,13 +601,82 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       json_extract(e.payload, '$.lesson_kind')       AS lesson_kind,
       COALESCE(
         json_extract(e.payload, '$.target'),
-        json_extract(e.payload, '$.proposed_behavior.file_path')
+        json_extract(e.payload, '$.proposed_behavior.file_path'),
+        json_extract(e.payload, '$.proposed_action.file_path')
       )                                             AS target,
       json_extract(e.payload, '$.anchor')            AS anchor,
       json_extract(e.payload, '$.proposed_behavior') AS proposed_behavior,
-      json_extract(e.payload, '$.proposed_action')   AS proposed_action
+      json_extract(e.payload, '$.proposed_action')   AS proposed_action,
+      COALESCE(
+        json_extract(e.payload, '$.target'),
+        json_extract(e.payload, '$.proposed_behavior.file_path'),
+        json_extract(e.payload, '$.proposed_action.file_path')
+      )                                             AS candidate_target,
+      COALESCE(
+        json_extract(e.payload, '$.anchor'),
+        json_extract(e.payload, '$.proposed_behavior.anchor'),
+        json_extract(e.payload, '$.proposed_action.anchor')
+      )                                             AS candidate_anchor,
+      COALESCE(
+        json_extract(e.payload, '$.proposed_behavior.diff'),
+        json_extract(e.payload, '$.proposed_action.diff')
+      )                                             AS candidate_diff,
+      json_object(
+        'source_event_id', e.id,
+        'source_kind', e.kind,
+        'lesson_kind', json_extract(e.payload, '$.lesson_kind'),
+        'target', COALESCE(
+          json_extract(e.payload, '$.target'),
+          json_extract(e.payload, '$.proposed_behavior.file_path'),
+          json_extract(e.payload, '$.proposed_action.file_path')
+        ),
+        'anchor', COALESCE(
+          json_extract(e.payload, '$.anchor'),
+          json_extract(e.payload, '$.proposed_behavior.anchor'),
+          json_extract(e.payload, '$.proposed_action.anchor')
+        ),
+        'diff', COALESCE(
+          json_extract(e.payload, '$.proposed_behavior.diff'),
+          json_extract(e.payload, '$.proposed_action.diff')
+        )
+      )                                             AS apply_candidate
     FROM events e
     WHERE e.kind IN ('lesson_extracted', 'contract_amendment_proposed')
+  ),
+  target_candidates AS (
+    SELECT source_event_id, trim(target) AS target
+    FROM proposals
+    WHERE target IS NOT NULL AND length(trim(target)) > 0
+    UNION
+    SELECT source_event_id, trim(json_extract(payload, '$.proposed_behavior.file_path')) AS target
+    FROM proposals
+    WHERE json_type(payload, '$.proposed_behavior') = 'object'
+      AND json_extract(payload, '$.proposed_behavior.file_path') IS NOT NULL
+      AND length(trim(json_extract(payload, '$.proposed_behavior.file_path'))) > 0
+    UNION
+    SELECT source_event_id, trim(json_extract(payload, '$.proposed_action.file_path')) AS target
+    FROM proposals
+    WHERE json_type(payload, '$.proposed_action') = 'object'
+      AND json_extract(payload, '$.proposed_action.file_path') IS NOT NULL
+      AND length(trim(json_extract(payload, '$.proposed_action.file_path'))) > 0
+  ),
+  authorized_requests AS (
+    SELECT
+      json_extract(payload, '$.source_event_id') AS source_event_id,
+      id AS request_event_id,
+      ts AS requested_at
+    FROM events
+    WHERE kind = 'lesson_apply_requested'
+      AND json_extract(payload, '$.authorization_status') = 'approved'
+  ),
+  passed_scores AS (
+    SELECT
+      COALESCE(json_extract(payload, '$.source_event_id'), json_extract(context_refs, '$[0]')) AS source_event_id,
+      COALESCE(json_extract(payload, '$.request_event_id'), json_extract(payload, '$.authorization_event_id')) AS request_event_id,
+      ts AS scored_at
+    FROM events
+    WHERE kind = 'action_scored'
+      AND CAST(COALESCE(residual, json_extract(payload, '$.residual'), 1) AS REAL) < 0.3
   ),
   committed AS (
     SELECT DISTINCT json_extract(payload, '$.source_event_id') AS source_event_id
@@ -609,6 +684,20 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
     WHERE kind = 'applied_change_committed'
       AND json_extract(payload, '$.status') = 'applied'
       AND CAST(COALESCE(residual, json_extract(payload, '$.residual'), 1) AS REAL) < 0.3
+      AND EXISTS (
+        SELECT 1 FROM authorized_requests ar
+        JOIN passed_scores ps
+          ON ps.source_event_id = ar.source_event_id
+         AND ps.request_event_id = ar.request_event_id
+         AND ps.scored_at <= events.ts
+        WHERE ar.source_event_id = json_extract(events.payload, '$.source_event_id')
+          AND ar.requested_at <= events.ts
+          AND (
+            json_extract(events.payload, '$.request_event_id') = ar.request_event_id
+            OR json_extract(events.payload, '$.authorization_event_id') = ar.request_event_id
+            OR EXISTS (SELECT 1 FROM json_each(events.context_refs) WHERE value = ar.request_event_id)
+          )
+      )
   ),
   latest_apply AS (
     SELECT
@@ -638,6 +727,63 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
     FROM events
     WHERE kind IN ('dispatcher_violation', 'irreversible_effect_recorded')
     GROUP BY directive_id
+  ),
+  shaped AS (
+    SELECT
+      p.*,
+      CASE
+        WHEN json_type(p.payload, '$.proposed_behavior') = 'object'
+         AND json_extract(p.payload, '$.proposed_behavior.file_path') = p.target
+         AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_behavior.anchor'), ''))) > 0
+         AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_behavior.diff'), ''))) > 0
+        THEN 1
+        WHEN json_type(p.payload, '$.proposed_action') = 'object'
+         AND json_extract(p.payload, '$.proposed_action.file_path') = p.target
+         AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_action.anchor'), ''))) > 0
+         AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_action.diff'), ''))) > 0
+        THEN 1
+        ELSE 0
+      END AS structured_change
+    FROM proposals p
+  ),
+  target_policy AS (
+    SELECT
+      s.*,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM apply_target_policy r
+        JOIN target_candidates tc ON tc.source_event_id = s.source_event_id
+        WHERE r.effect = 'owner_consent_required'
+          AND (
+            (r.match = 'exact' AND tc.target = r.pattern)
+            OR (r.match = 'prefix' AND tc.target LIKE r.pattern || '%')
+          )
+      ) THEN 1 ELSE 0 END AS owner_gate_required,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM target_candidates tc
+        WHERE tc.source_event_id = s.source_event_id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM target_candidates tc
+        WHERE tc.source_event_id = s.source_event_id
+          AND NOT EXISTS (
+            SELECT 1 FROM apply_target_policy r
+            WHERE r.effect = 'safe_auto_apply_candidate'
+              AND (
+                (r.match = 'exact' AND tc.target = r.pattern)
+                OR (r.match = 'prefix' AND tc.target LIKE r.pattern || '%')
+              )
+          )
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM apply_target_policy r
+        JOIN target_candidates tc ON tc.source_event_id = s.source_event_id
+        WHERE r.effect = 'owner_consent_required'
+          AND (
+            (r.match = 'exact' AND tc.target = r.pattern)
+            OR (r.match = 'prefix' AND tc.target LIKE r.pattern || '%')
+          )
+      ) THEN 1 ELSE 0 END AS auto_apply_target
+    FROM shaped s
   )
   SELECT
     p.source_event_id,
@@ -650,34 +796,52 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
     p.anchor,
     p.proposed_behavior,
     p.proposed_action,
-    CASE
-      WHEN p.source_kind = 'contract_amendment_proposed'
-       AND (
-         p.target = 'CLAUDE.md'
-         OR p.target = 'docs/v2-design.md'
-         OR p.target LIKE '.claude/rules/%'
-       ) THEN 1
-      ELSE 0
-    END AS owner_gate_required,
+    p.candidate_target,
+    p.candidate_anchor,
+    p.candidate_diff,
+    p.apply_candidate,
+    p.owner_gate_required,
     CASE WHEN oa.source_event_id IS NULL THEN 0 ELSE 1 END AS owner_approved,
     COALESCE(h.hazard_count, 0) AS trajectory_hazard_count,
     CASE
-      WHEN p.source_kind = 'contract_amendment_proposed'
-       AND (p.target LIKE 'cli/%' OR p.target LIKE 'runtime/%')
-       AND json_type(p.payload, '$.proposed_behavior') = 'object'
-       AND json_extract(p.payload, '$.proposed_behavior.file_path') = p.target
-       AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_behavior.anchor'), ''))) > 0
-       AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_behavior.diff'), ''))) > 0
+      WHEN p.auto_apply_target = 1
+       AND p.structured_change = 1
        AND COALESCE(h.hazard_count, 0) = 0
       THEN 1 ELSE 0
     END AS auto_apply_eligible,
-    la.apply_event_id,
+    CASE
+      WHEN p.owner_gate_required = 1 AND oa.source_event_id IS NULL
+      THEN 'blocked_owner_consent'
+      WHEN p.auto_apply_target = 1
+       AND COALESCE(h.hazard_count, 0) > 0
+      THEN 'blocked_trajectory_hazard'
+      WHEN p.auto_apply_target = 1
+       AND p.structured_change = 0
+      THEN 'blocked_unstructured_proposal'
+      WHEN p.owner_gate_required = 1
+      THEN 'authorized_owner'
+      WHEN p.auto_apply_target = 1
+      THEN 'authorized_auto'
+      ELSE 'manual_review'
+    END AS apply_gate_status,
+    CASE
+      WHEN p.owner_gate_required = 1 AND oa.source_event_id IS NULL
+      THEN 'owner_consent_missing'
+      WHEN p.auto_apply_target = 1
+       AND COALESCE(h.hazard_count, 0) > 0
+      THEN 'trajectory_hazard_present'
+      WHEN p.auto_apply_target = 1
+       AND p.structured_change = 0
+      THEN 'structured_proposed_behavior_required'
+      ELSE NULL
+    END AS apply_gate_reason,
+     la.apply_event_id,
     la.apply_kind,
     la.apply_status,
     la.apply_ts,
     p.payload,
     p.context_refs
-  FROM proposals p
+  FROM target_policy p
   LEFT JOIN committed c ON c.source_event_id = p.source_event_id
   LEFT JOIN latest_apply la ON la.source_event_id = p.source_event_id AND la.rn = 1
   LEFT JOIN owner_approvals oa ON oa.source_event_id = p.source_event_id
@@ -688,13 +852,39 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
 // lesson_implementation_status_view — one row per proposal with its latest
 // authorization request, action_predicted row, verifier residual (via
 // action_scored citing the proposal), apply event, and terminal
-// applied_change_committed event. This is the flywheel's
-// observable state machine; cheaper-next effects remain ledger-derived via
-// later recipe_extracted / action_scored rows citing the same source.
+// applied_change_committed event. Executor prediction and terminal commit are
+// only projected when they cite a prior approved authorization request, so the
+// observable state machine cannot skip the owner/auto gate.
 const VIEW_LESSON_IMPLEMENTATION_STATUS = `
 CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
   WITH proposals AS (
-    SELECT id AS source_event_id, ts, kind AS source_kind, directive_id, task_id, payload, context_refs
+    SELECT
+      id AS source_event_id,
+      ts,
+      kind AS source_kind,
+      directive_id,
+      task_id,
+      json_object(
+        'source_event_id', id,
+        'source_kind', kind,
+        'lesson_kind', json_extract(payload, '$.lesson_kind'),
+        'target', COALESCE(
+          json_extract(payload, '$.target'),
+          json_extract(payload, '$.proposed_behavior.file_path'),
+          json_extract(payload, '$.proposed_action.file_path')
+        ),
+        'anchor', COALESCE(
+          json_extract(payload, '$.anchor'),
+          json_extract(payload, '$.proposed_behavior.anchor'),
+          json_extract(payload, '$.proposed_action.anchor')
+        ),
+        'diff', COALESCE(
+          json_extract(payload, '$.proposed_behavior.diff'),
+          json_extract(payload, '$.proposed_action.diff')
+        )
+      ) AS apply_candidate,
+      payload,
+      context_refs
     FROM events
     WHERE kind IN ('lesson_extracted', 'contract_amendment_proposed')
   ),
@@ -703,12 +893,22 @@ CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
       json_extract(payload, '$.source_event_id') AS source_event_id,
       id AS request_event_id,
       ts AS requested_at,
+      json_extract(payload, '$.authorization_status') AS authorization_status,
       ROW_NUMBER() OVER (
         PARTITION BY json_extract(payload, '$.source_event_id')
         ORDER BY ts DESC, rowid DESC
       ) AS rn
     FROM events
     WHERE kind = 'lesson_apply_requested'
+  ),
+  authorized_requests AS (
+    SELECT
+      json_extract(payload, '$.source_event_id') AS source_event_id,
+      id AS request_event_id,
+      ts AS requested_at
+    FROM events
+    WHERE kind = 'lesson_apply_requested'
+      AND json_extract(payload, '$.authorization_status') = 'approved'
   ),
   latest_action AS (
     SELECT
@@ -724,6 +924,16 @@ CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
       ) AS rn
     FROM events
     WHERE kind = 'action_predicted'
+      AND EXISTS (
+        SELECT 1 FROM authorized_requests ar
+        WHERE ar.source_event_id = COALESCE(json_extract(events.payload, '$.source_event_id'), json_extract(events.context_refs, '$[0]'))
+          AND ar.requested_at <= events.ts
+          AND (
+            json_extract(events.payload, '$.request_event_id') = ar.request_event_id
+            OR json_extract(events.payload, '$.authorization_event_id') = ar.request_event_id
+            OR EXISTS (SELECT 1 FROM json_each(events.context_refs) WHERE value = ar.request_event_id)
+          )
+      )
   ),
   latest_scored AS (
     SELECT
@@ -737,6 +947,16 @@ CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
       ) AS rn
     FROM events
     WHERE kind = 'action_scored'
+      AND EXISTS (
+        SELECT 1 FROM authorized_requests ar
+        WHERE ar.source_event_id = COALESCE(json_extract(events.payload, '$.source_event_id'), json_extract(events.context_refs, '$[0]'))
+          AND ar.requested_at <= events.ts
+          AND (
+            json_extract(events.payload, '$.request_event_id') = ar.request_event_id
+            OR json_extract(events.payload, '$.authorization_event_id') = ar.request_event_id
+            OR EXISTS (SELECT 1 FROM json_each(events.context_refs) WHERE value = ar.request_event_id)
+          )
+      )
   ),
   latest_apply AS (
     SELECT
@@ -766,6 +986,26 @@ CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
     WHERE kind = 'applied_change_committed'
       AND json_extract(payload, '$.status') = 'applied'
       AND CAST(COALESCE(residual, json_extract(payload, '$.residual'), 1) AS REAL) < 0.3
+      AND EXISTS (
+        SELECT 1 FROM authorized_requests ar
+        JOIN events s
+          ON s.kind = 'action_scored'
+         AND COALESCE(json_extract(s.payload, '$.source_event_id'), json_extract(s.context_refs, '$[0]')) = ar.source_event_id
+         AND CAST(COALESCE(s.residual, json_extract(s.payload, '$.residual'), 1) AS REAL) < 0.3
+         AND s.ts <= events.ts
+         AND (
+           json_extract(s.payload, '$.request_event_id') = ar.request_event_id
+           OR json_extract(s.payload, '$.authorization_event_id') = ar.request_event_id
+           OR EXISTS (SELECT 1 FROM json_each(s.context_refs) WHERE value = ar.request_event_id)
+         )
+        WHERE ar.source_event_id = json_extract(events.payload, '$.source_event_id')
+          AND ar.requested_at <= events.ts
+          AND (
+            json_extract(events.payload, '$.request_event_id') = ar.request_event_id
+            OR json_extract(events.payload, '$.authorization_event_id') = ar.request_event_id
+            OR EXISTS (SELECT 1 FROM json_each(events.context_refs) WHERE value = ar.request_event_id)
+          )
+      )
   )
   SELECT
     p.source_event_id,
@@ -799,6 +1039,7 @@ CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
       WHEN lr.request_event_id IS NOT NULL THEN 'requested'
       ELSE 'proposed'
     END AS flywheel_status,
+    p.apply_candidate,
     p.payload,
     p.context_refs
   FROM proposals p
@@ -831,6 +1072,28 @@ CREATE VIEW IF NOT EXISTS applied_lesson_effectiveness_view AS
     WHERE kind = 'applied_change_committed'
       AND json_extract(payload, '$.status') = 'applied'
       AND CAST(COALESCE(residual, json_extract(payload, '$.residual'), 1) AS REAL) < 0.3
+      AND EXISTS (
+        SELECT 1 FROM events ar
+        JOIN events s
+          ON s.kind = 'action_scored'
+         AND COALESCE(json_extract(s.payload, '$.source_event_id'), json_extract(s.context_refs, '$[0]')) = json_extract(ar.payload, '$.source_event_id')
+         AND CAST(COALESCE(s.residual, json_extract(s.payload, '$.residual'), 1) AS REAL) < 0.3
+         AND s.ts <= events.ts
+         AND (
+           json_extract(s.payload, '$.request_event_id') = ar.id
+           OR json_extract(s.payload, '$.authorization_event_id') = ar.id
+           OR EXISTS (SELECT 1 FROM json_each(s.context_refs) WHERE value = ar.id)
+         )
+        WHERE ar.kind = 'lesson_apply_requested'
+          AND json_extract(ar.payload, '$.authorization_status') = 'approved'
+          AND json_extract(ar.payload, '$.source_event_id') = json_extract(events.payload, '$.source_event_id')
+          AND ar.ts <= events.ts
+          AND (
+            json_extract(events.payload, '$.request_event_id') = ar.id
+            OR json_extract(events.payload, '$.authorization_event_id') = ar.id
+            OR EXISTS (SELECT 1 FROM json_each(events.context_refs) WHERE value = ar.id)
+          )
+      )
   ),
   source_cost AS (
     SELECT
@@ -956,17 +1219,106 @@ CREATE VIEW IF NOT EXISTS applied_lesson_effectiveness_view AS
   LEFT JOIN future_recipe fr ON fr.source_event_id = c.source_event_id AND fr.rn = 1;
 `;
 
+// lesson_apply_candidate_view — normalized apply-candidate shape for every
+// lesson/amendment proposal. This is intentionally derived from the queue,
+// status, and effectiveness views instead of adding a table: source proposal,
+// gate state, verifier residual, trajectory health, and compounding signal are
+// all ledger facts. The projection is kind-agnostic: recipe_candidate,
+// verifier_gap, and contract_amendment_proposed differ only in patch_or_recipe.
+const VIEW_LESSON_APPLY_CANDIDATE = `
+CREATE VIEW IF NOT EXISTS lesson_apply_candidate_view AS
+  SELECT
+    s.source_event_id,
+    COALESCE(
+      q.target,
+      json_extract(s.payload, '$.target'),
+      json_extract(s.payload, '$.proposed_behavior.file_path'),
+      json_extract(s.payload, '$.proposed_action.file_path')
+    ) AS target,
+    COALESCE(
+      q.anchor,
+      json_extract(s.payload, '$.anchor'),
+      json_extract(s.payload, '$.proposed_behavior.anchor'),
+      json_extract(s.payload, '$.proposed_action.anchor')
+    ) AS anchor,
+    CASE
+      WHEN json_extract(s.payload, '$.lesson_kind') = 'recipe_candidate'
+      THEN COALESCE(
+        json_extract(s.payload, '$.proposed_action.recipe'),
+        json_extract(s.payload, '$.proposed_action'),
+        json_extract(s.payload, '$.patch_or_recipe'),
+        json_extract(s.payload, '$.recipe')
+      )
+      ELSE COALESCE(
+        json_extract(s.payload, '$.proposed_behavior'),
+        json_extract(s.payload, '$.proposed_action'),
+        json_extract(s.payload, '$.patch_or_recipe')
+      )
+    END AS patch_or_recipe,
+    s.verifier_residual,
+    json_object(
+      'required', COALESCE(q.owner_gate_required, 0),
+      'approved', COALESCE(q.owner_approved, CASE WHEN s.flywheel_status = 'committed' THEN 1 ELSE 0 END),
+      'status', COALESCE(q.apply_gate_status, s.flywheel_status),
+      'reason', q.apply_gate_reason
+    ) AS owner_gate,
+    json_object(
+      'hazard_count', COALESCE(q.trajectory_hazard_count, 0),
+      'healthy', CASE WHEN COALESCE(q.trajectory_hazard_count, 0) = 0 THEN 1 ELSE 0 END
+    ) AS trajectory_health,
+    json_object(
+      'compounded', COALESCE(e.compounded, 0),
+      'tier0_replay_hit', COALESCE(e.tier0_replay_hit, 0),
+      'residual_delta', e.residual_delta,
+      'dag_node_delta', e.dag_node_delta,
+      'next_scored_event_id', e.next_scored_event_id,
+      'recipe_replay_event_id', e.recipe_replay_event_id
+    ) AS compounding_metric,
+    s.source_kind,
+    json_extract(s.payload, '$.lesson_kind') AS lesson_kind,
+    s.directive_id,
+    s.task_id,
+    s.flywheel_status,
+    s.payload,
+    s.context_refs
+  FROM lesson_implementation_status_view s
+  LEFT JOIN lesson_implementer_queue_view q ON q.source_event_id = s.source_event_id
+  LEFT JOIN applied_lesson_effectiveness_view e ON e.source_event_id = s.source_event_id;
+`;
+
 // ── Public entrypoint ──────────────────────────────────────────────
 
-/** Create every substrate view. Idempotent — every statement is
- *  CREATE VIEW IF NOT EXISTS so running this on a warm db is a no-op.
+const VIEW_NAMES = [
+  "lesson_apply_candidate_view",
+  "applied_lesson_effectiveness_view",
+  "lesson_implementation_status_view",
+  "lesson_implementer_queue_view",
+  "promoted_knowledge_view",
+  "irreversible_effects_view",
+  "low_risk_inline_patterns_view",
+  "active_objectives_view",
+  "stakeholder_state_view",
+  "directive_conflicts_view",
+  "watch_edge_observations_view",
+  "rolling_review_due_view",
+  "owner_conversation_view",
+  "contradictory_candidates_view",
+  "origin_promotion_by_directive_view",
+  "origin_promotion_view",
+  "embedding_index_view",
+  "artifact_routing_view",
+  "code_artifact_registry_view",
+  "failure_view",
+  "ready_tasks_view",
+  "task_graph_view",
+] as const;
+
+/** Create every substrate view. Idempotent — existing views are dropped in
+ *  reverse dependency order first so changed projection SQL reaches warm DBs.
  *  Daemon callers should run this once at boot AFTER runSchema. Tests
  *  that touch views must call this explicitly. */
 export const runViews = (db: Database): void => {
-  // SQL line-comments using `--` were inadvertently rendered with `--`
-  // outside of string literals above; strip them before exec to keep
-  // sqlite happy. (The TypeScript // comments are fine; the embedded
-  // -- comments inside the SQL strings parse natively.)
+  for (const viewName of VIEW_NAMES) db.exec(`DROP VIEW IF EXISTS ${viewName}`);
   db.exec(VIEW_TASK_GRAPH);
   db.exec(VIEW_READY_TASKS);
   db.exec(VIEW_FAILURE);
@@ -988,6 +1340,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_LESSON_IMPLEMENTER_QUEUE);
   db.exec(VIEW_LESSON_IMPLEMENTATION_STATUS);
   db.exec(VIEW_APPLIED_LESSON_EFFECTIVENESS);
+  db.exec(VIEW_LESSON_APPLY_CANDIDATE);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────
@@ -1133,10 +1486,16 @@ export type LessonImplementerQueueRow = {
   anchor: string | null;
   proposed_behavior: unknown;
   proposed_action: unknown;
+  candidate_target: string | null;
+  candidate_anchor: string | null;
+  candidate_diff: string | null;
+  apply_candidate: Record<string, unknown>;
   owner_gate_required: boolean;
   owner_approved: boolean;
   trajectory_hazard_count: number;
   auto_apply_eligible: boolean;
+  apply_gate_status: string;
+  apply_gate_reason: string | null;
   apply_event_id: string | null;
   apply_kind: string | null;
   apply_status: string | null;
@@ -1170,6 +1529,7 @@ export type LessonImplementationStatusRow = {
   committed_event_id: string | null;
   committed_at: string | null;
   flywheel_status: "proposed" | "requested" | "predicted" | "verified" | "applied" | "failed" | "refused" | "committed" | string;
+  apply_candidate: Record<string, unknown>;
   payload: Record<string, unknown>;
   context_refs: string[];
 };
@@ -1197,6 +1557,24 @@ export type AppliedLessonEffectivenessRow = {
   compounded: boolean;
   applied_payload: Record<string, unknown>;
   applied_context_refs: string[];
+};
+
+export type LessonApplyCandidateRow = {
+  source_event_id: string;
+  target: string | null;
+  anchor: string | null;
+  patch_or_recipe: unknown;
+  verifier_residual: number | null;
+  owner_gate: Record<string, unknown>;
+  trajectory_health: Record<string, unknown>;
+  compounding_metric: Record<string, unknown>;
+  source_kind: "lesson_extracted" | "contract_amendment_proposed";
+  lesson_kind: string | null;
+  directive_id: string;
+  task_id: string;
+  flywheel_status: string;
+  payload: Record<string, unknown>;
+  context_refs: string[];
 };
 
 const parseJson = <T>(s: unknown): T => {
@@ -1445,10 +1823,16 @@ export const lessonImplementerQueue = (db: Database): LessonImplementerQueueRow[
     anchor: (r.anchor as string | null) ?? null,
     proposed_behavior: parseMaybeJson(r.proposed_behavior),
     proposed_action: parseMaybeJson(r.proposed_action),
+    candidate_target: (r.candidate_target as string | null) ?? null,
+    candidate_anchor: (r.candidate_anchor as string | null) ?? null,
+    candidate_diff: (r.candidate_diff as string | null) ?? null,
+    apply_candidate: parseJson<Record<string, unknown>>(r.apply_candidate),
     owner_gate_required: ((r.owner_gate_required as number) ?? 0) === 1,
     owner_approved: ((r.owner_approved as number) ?? 0) === 1,
     trajectory_hazard_count: (r.trajectory_hazard_count as number) ?? 0,
     auto_apply_eligible: ((r.auto_apply_eligible as number) ?? 0) === 1,
+    apply_gate_status: r.apply_gate_status as string,
+    apply_gate_reason: (r.apply_gate_reason as string | null) ?? null,
     apply_event_id: (r.apply_event_id as string | null) ?? null,
     apply_kind: (r.apply_kind as string | null) ?? null,
     apply_status: (r.apply_status as string | null) ?? null,
@@ -1489,6 +1873,7 @@ export const lessonImplementationStatus = (db: Database): LessonImplementationSt
     committed_event_id: (r.committed_event_id as string | null) ?? null,
     committed_at: (r.committed_at as string | null) ?? null,
     flywheel_status: r.flywheel_status as LessonImplementationStatusRow["flywheel_status"],
+    apply_candidate: parseJson<Record<string, unknown>>(r.apply_candidate),
     payload: parseJson<Record<string, unknown>>(r.payload),
     context_refs: parseJson<string[]>(r.context_refs ?? "[]"),
   }));
@@ -1523,6 +1908,32 @@ export const appliedLessonEffectiveness = (db: Database): AppliedLessonEffective
     compounded: ((r.compounded as number) ?? 0) === 1,
     applied_payload: parseJson<Record<string, unknown>>(r.applied_payload),
     applied_context_refs: parseJson<string[]>(r.applied_context_refs ?? "[]"),
+  }));
+};
+
+/** Kind-agnostic normalized candidate shape consumed by the lesson applier.
+ *  The first eight fields are the stable flywheel contract requested by the
+ *  brain; trailing fields preserve audit context for operators. */
+export const lessonApplyCandidates = (db: Database): LessonApplyCandidateRow[] => {
+  const rows = db
+    .query("SELECT * FROM lesson_apply_candidate_view ORDER BY source_event_id ASC")
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    source_event_id: r.source_event_id as string,
+    target: (r.target as string | null) ?? null,
+    anchor: (r.anchor as string | null) ?? null,
+    patch_or_recipe: parseMaybeJson(r.patch_or_recipe),
+    verifier_residual: (r.verifier_residual as number | null) ?? null,
+    owner_gate: parseJson<Record<string, unknown>>(r.owner_gate),
+    trajectory_health: parseJson<Record<string, unknown>>(r.trajectory_health),
+    compounding_metric: parseJson<Record<string, unknown>>(r.compounding_metric),
+    source_kind: r.source_kind as LessonApplyCandidateRow["source_kind"],
+    lesson_kind: (r.lesson_kind as string | null) ?? null,
+    directive_id: r.directive_id as string,
+    task_id: r.task_id as string,
+    flywheel_status: r.flywheel_status as string,
+    payload: parseJson<Record<string, unknown>>(r.payload),
+    context_refs: parseJson<string[]>(r.context_refs ?? "[]"),
   }));
 };
 

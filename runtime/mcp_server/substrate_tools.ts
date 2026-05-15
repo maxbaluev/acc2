@@ -41,6 +41,7 @@ import {
   lessonImplementerQueue,
   lessonImplementationStatus,
   appliedLessonEffectiveness,
+  lessonApplyCandidates,
 } from "../../substrate/views";
 import type {
   AdmitArtifactSchema,
@@ -206,6 +207,8 @@ export const handleRead = (
         return { ok: true, result: lessonImplementationStatus(db) as unknown as JsonValue };
       case "applied_lesson_effectiveness_view":
         return { ok: true, result: appliedLessonEffectiveness(db) as unknown as JsonValue };
+      case "lesson_apply_candidate_view":
+        return { ok: true, result: lessonApplyCandidates(db) as unknown as JsonValue };
       default:
         return { ok: false, error: `view_not_implemented:${view}` };
     }

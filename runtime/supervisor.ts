@@ -1,0 +1,264 @@
+// acc2 supervisor (Batch 8.B, 2026-05-15) — owner directive:
+//   "make monitor to always stop daemon (old tasks) to prevent stucks and
+//    loops at all levels"
+//
+// Cites brain-authored lesson_extracted 5SWP11NZFS3YX68Y95T164HT9W
+// (PPVP3S5V9506DA6A1BZ9ZCWPKW @ 02:10:08.725Z) which surfaced bridge_stuck
+// streaks as the dominant structural blocker class.
+//
+// The supervisor runs as a periodic worker tick alongside the integrity
+// worker. It enumerates pathologies that produce stucks / loops at three
+// scopes — task, directive, bridge — and applies the canonical corrective
+// event so the scheduler / readyTasks / dispatch lane immediately stops
+// firing on the broken target:
+//
+//   1. Task-scope:  redispatch storm
+//      → ≥ SUPERVISOR_MAX_REDISPATCHES_PER_TASK brain_dispatched on ONE
+//        task within SUPERVISOR_REDISPATCH_WINDOW_MS (10min) AND no
+//        task_committed in that window.
+//      → emit task_failed { failure_kind: "redispatch_storm" } + the
+//        supervisor_intervention_recorded audit row.
+//
+//   2. Directive-scope:  DAG explosion
+//      → directive has > SUPERVISOR_MAX_READY_TASKS_PER_DIRECTIVE ready
+//        tasks AND ≥ SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS hours old with no
+//        terminal root commit yet.
+//      → emit directive_archived_by_operator { reason: "supervisor_dag_explosion" }
+//        so readyTasks drops the entire directive subtree.
+//
+//   3. Bridge-scope:  global instability
+//      → already handled by runtime/bridge_health.ts; the supervisor calls
+//        maybeMarkDegraded + maybeMarkRecovered on every tick.
+//
+// The supervisor is FAIL-CLOSED — its interventions emit append-only
+// events that REMOVE work from readyTasks. It never resurrects a task or
+// directive. Operators inspect supervisor_intervention_recorded rows to
+// audit each auto-intervention.
+
+import type { Database } from "bun:sqlite";
+import type { JsonValue } from "../substrate/types";
+import { emitEvent } from "./events";
+import {
+  maybeMarkDegraded,
+  maybeMarkRecovered,
+} from "./bridge_health";
+import { logger } from "./logger";
+
+/** Maximum brain_dispatched events allowed on ONE task within the
+ *  redispatch window. Above this, the supervisor force-fails the task as
+ *  `redispatch_storm`. 5 is generous — a healthy refinement-edge cycle
+ *  needs at most 1-2 dispatches per task. 5 means "the scheduler is
+ *  clearly looping on a structurally broken target". */
+export const SUPERVISOR_MAX_REDISPATCHES_PER_TASK = 5;
+
+/** Window over which redispatch counts accumulate. 10 minutes lets a
+ *  single legitimately-retrying task (e.g. transient bridge timeout +
+ *  retry) age out of the count, while still catching tight loops. */
+export const SUPERVISOR_REDISPATCH_WINDOW_MS = 10 * 60 * 1000;
+
+/** Maximum ready task_node_opened entries under ONE directive before the
+ *  supervisor flags DAG explosion. The brain's depth-1 retrieval pattern
+ *  should never produce > 50 simultaneously-ready siblings; > 50 means
+ *  uncontrolled refinement-edge fanout. */
+export const SUPERVISOR_MAX_READY_TASKS_PER_DIRECTIVE = 50;
+
+/** Directive age (hours) past which the DAG-explosion gate fires AND no
+ *  root commit has landed. 4 hours is well above the worst-case healthy
+ *  brain cycle (5-10 min) × the depth cap (5) + retries. */
+export const SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS = 4;
+
+const SUPERVISOR_DIRECTIVE_AGE_MS = SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS * 60 * 60 * 1000;
+
+/** Detect tasks in a redispatch storm and fail them. Returns the list of
+ *  task ids that were quarantined this tick. Idempotent — a task that
+ *  already has a task_failed event will not be re-failed. */
+export const detectRedispatchStorm = (
+  db: Database,
+  opts?: { nowMs?: number },
+): Array<{ task_id: string; directive_id: string; dispatch_count: number }> => {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const cutoffIso = new Date(nowMs - SUPERVISOR_REDISPATCH_WINDOW_MS).toISOString();
+  const rows = db
+    .query(
+      `SELECT task_id, directive_id, COUNT(*) AS dispatch_count
+       FROM events
+       WHERE kind = 'brain_dispatched' AND ts >= ?
+       GROUP BY task_id
+       HAVING dispatch_count > ?`,
+    )
+    .all(cutoffIso, SUPERVISOR_MAX_REDISPATCHES_PER_TASK) as Array<{
+      task_id: string;
+      directive_id: string;
+      dispatch_count: number;
+    }>;
+
+  const quarantined: Array<{ task_id: string; directive_id: string; dispatch_count: number }> = [];
+  for (const r of rows) {
+    // Skip if the task already has any terminal event in the window —
+    // the scheduler's consecutive_bridge_failures cap may already have
+    // fired, or the brain may have just committed it.
+    const terminal = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE task_id = ?
+           AND kind IN ('task_committed', 'task_failed', 'task_abandoned')
+         LIMIT 1`,
+      )
+      .get(r.task_id);
+    if (terminal) continue;
+    try {
+      emitEvent(db, {
+        kind: "task_failed",
+        substrate_origin: "substrate_auto",
+        directive_id: r.directive_id,
+        task_id: r.task_id,
+        failure_kind: "redispatch_storm",
+        payload: {
+          reason: "supervisor_redispatch_storm",
+          dispatch_count: r.dispatch_count,
+          window_ms: SUPERVISOR_REDISPATCH_WINDOW_MS,
+          threshold: SUPERVISOR_MAX_REDISPATCHES_PER_TASK,
+        } as JsonValue,
+      });
+      emitEvent(db, {
+        kind: "supervisor_intervention_recorded",
+        substrate_origin: "substrate_auto",
+        directive_id: r.directive_id,
+        task_id: r.task_id,
+        payload: {
+          pathology: "redispatch_storm",
+          corrective_event: "task_failed",
+          dispatch_count: r.dispatch_count,
+          threshold: SUPERVISOR_MAX_REDISPATCHES_PER_TASK,
+          window_ms: SUPERVISOR_REDISPATCH_WINDOW_MS,
+        } as JsonValue,
+      });
+      quarantined.push(r);
+    } catch (err) {
+      logger.warn(
+        { where: "supervisor.redispatch_storm", task_id: r.task_id, err: (err as Error).message },
+        "supervisor failed to fail redispatch-storm task",
+      );
+    }
+  }
+  return quarantined;
+};
+
+/** Detect directives whose ready-task subtree has exploded (uncontrolled
+ *  refinement fanout) AND have been running past the age threshold. Emits
+ *  directive_archived_by_operator so readyTasks drops the entire DAG.
+ *  Returns the directive ids that were archived this tick. */
+export const detectDagExplosion = (
+  db: Database,
+  opts?: { nowMs?: number },
+): Array<{ directive_id: string; ready_count: number; age_hours: number }> => {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const ageCutoffIso = new Date(nowMs - SUPERVISOR_DIRECTIVE_AGE_MS).toISOString();
+
+  // Directives whose oldest task_node_opened is older than the age threshold
+  // AND have no terminal root commit yet.
+  const aged = db
+    .query(
+      `SELECT directive_id, MIN(ts) AS first_ts
+       FROM events
+       WHERE kind = 'task_node_opened'
+       GROUP BY directive_id
+       HAVING first_ts <= ?`,
+    )
+    .all(ageCutoffIso) as Array<{ directive_id: string; first_ts: string }>;
+
+  const archived: Array<{ directive_id: string; ready_count: number; age_hours: number }> = [];
+  for (const r of aged) {
+    // Skip directives already closed/archived.
+    const closed = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE directive_id = ?
+           AND kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         LIMIT 1`,
+      )
+      .get(r.directive_id);
+    if (closed) continue;
+    // Count ready (opened but not terminal) tasks under this directive.
+    const readyCount = (db
+      .query(
+        `SELECT COUNT(*) AS c FROM events n
+         WHERE n.kind = 'task_node_opened' AND n.directive_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM events t
+             WHERE t.task_id = n.task_id
+               AND t.kind IN ('task_committed', 'task_failed', 'task_abandoned')
+           )`,
+      )
+      .get(r.directive_id) as { c: number }).c;
+    if (readyCount <= SUPERVISOR_MAX_READY_TASKS_PER_DIRECTIVE) continue;
+
+    const ageHours = (nowMs - Date.parse(r.first_ts)) / (60 * 60 * 1000);
+    try {
+      emitEvent(db, {
+        kind: "directive_archived_by_operator",
+        substrate_origin: "substrate_auto",
+        directive_id: r.directive_id,
+        payload: {
+          reason: "supervisor_dag_explosion",
+          ready_task_count: readyCount,
+          age_hours: ageHours,
+          threshold_ready_tasks: SUPERVISOR_MAX_READY_TASKS_PER_DIRECTIVE,
+          threshold_age_hours: SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS,
+        } as JsonValue,
+      });
+      emitEvent(db, {
+        kind: "supervisor_intervention_recorded",
+        substrate_origin: "substrate_auto",
+        directive_id: r.directive_id,
+        payload: {
+          pathology: "dag_explosion",
+          corrective_event: "directive_archived_by_operator",
+          ready_task_count: readyCount,
+          age_hours: ageHours,
+        } as JsonValue,
+      });
+      archived.push({ directive_id: r.directive_id, ready_count: readyCount, age_hours: ageHours });
+    } catch (err) {
+      logger.warn(
+        { where: "supervisor.dag_explosion", directive_id: r.directive_id, err: (err as Error).message },
+        "supervisor failed to archive DAG-explosion directive",
+      );
+    }
+  }
+  return archived;
+};
+
+export type SupervisorTickResult = {
+  redispatch_storm_count: number;
+  dag_explosion_count: number;
+  bridge_health_degraded: boolean;
+  bridge_health_recovered: boolean;
+};
+
+/** One supervisor tick. Composes the three detectors + bridge_health
+ *  gate. Safe to call repeatedly; every detector is idempotent. */
+export const supervisorTick = (
+  db: Database,
+  opts?: { nowMs?: number },
+): SupervisorTickResult => {
+  const result: SupervisorTickResult = {
+    redispatch_storm_count: 0,
+    dag_explosion_count: 0,
+    bridge_health_degraded: false,
+    bridge_health_recovered: false,
+  };
+  try { result.redispatch_storm_count = detectRedispatchStorm(db, opts).length; } catch (err) {
+    logger.warn({ where: "supervisor.tick.redispatch", err: (err as Error).message }, "redispatch detector failed");
+  }
+  try { result.dag_explosion_count = detectDagExplosion(db, opts).length; } catch (err) {
+    logger.warn({ where: "supervisor.tick.dag_explosion", err: (err as Error).message }, "dag-explosion detector failed");
+  }
+  try { result.bridge_health_degraded = maybeMarkDegraded(db, opts); } catch (err) {
+    logger.warn({ where: "supervisor.tick.bridge_degraded", err: (err as Error).message }, "bridge_health degraded check failed");
+  }
+  try { result.bridge_health_recovered = maybeMarkRecovered(db, opts); } catch (err) {
+    logger.warn({ where: "supervisor.tick.bridge_recovered", err: (err as Error).message }, "bridge_health recovered check failed");
+  }
+  return result;
+};

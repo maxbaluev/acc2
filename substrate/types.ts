@@ -59,7 +59,14 @@ export type FailureKind =
    *  ZOMBIE_TASK_NODE_THRESHOLD_MS without ever being dispatched. Drops
    *  the task out of readyTasks / ready_tasks_view; operators can
    *  re-open via a fresh task_id. */
-  | "abandoned_no_dispatch";
+  | "abandoned_no_dispatch"
+  /** Supervisor detected > SUPERVISOR_MAX_REDISPATCHES_PER_TASK
+   *  brain_dispatched events on the same task within
+   *  SUPERVISOR_REDISPATCH_WINDOW_MS. The scheduler was looping despite
+   *  the per-task consecutive_bridge_failures cap (which can be bypassed
+   *  by interleaved non-bridge_failed events). Force-fails the task to
+   *  drop it from readyTasks. */
+  | "redispatch_storm";
 
 export type TaskEdgeKind = "requires" | "refines" | "watches";
 

@@ -30,6 +30,7 @@ import { decideDispatch } from "./dispatch_decider";
 import { emitEvent } from "./events";
 import { readCurrentMode, applyModeAdjustments } from "./crisis_mode";
 import { findDeferringConflict } from "./interference";
+import { isBridgeHealthDegraded } from "./bridge_health";
 
 // Interaction kinds that block another directive's dispatch when one of the
 // two is mid-flight. `mutual_exclusion` is symmetric (either side blocks the
@@ -273,6 +274,31 @@ export const schedulerTick = async (
     if (decision.route === "claude_inline") {
       skippedInline.push(task.id);
       emitInlineLaneRouted(db, task, decision.reason);
+      continue;
+    }
+
+    // Batch 8.A bridge-health gate (cite brain lesson 5SWP11NZFS3YX68Y95T164HT9W):
+    // when ≥ BRIDGE_DEGRADATION_THRESHOLD bridge_failed events fired within
+    // BRIDGE_FAILURE_WINDOW_MS, the substrate flips to degraded. The brain
+    // surfaced this pattern in WORKFLOW_TEXT step-8 lesson_extracted:
+    //   "Add a pre-dispatch bridge-health gate or scheduler backoff that
+    //    pauses repeated opencode dispatch after bridge_stuck/no-frame
+    //    streaks and opens a diagnostic task instead of spawning duplicate
+    //    stale dispatches."
+    // Tier-0 substrate_replay and claude_inline lanes still dispatch; only
+    // the opencode_brain lane is paused. Auto-clears via bridge_health_recovered
+    // when BRIDGE_HEALTH_COOLDOWN_MS passes with no further failures.
+    if (decision.route === "opencode_brain" && isBridgeHealthDegraded(db)) {
+      emitEvent(db, {
+        kind: "constitutional_gate_decision",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        payload: {
+          gate: "bridge_health_degraded",
+          reason: "opencode_brain_dispatch_paused_pending_bridge_recovery",
+        } as JsonValue,
+      });
       continue;
     }
 

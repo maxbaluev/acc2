@@ -78,6 +78,7 @@ All views are CREATE VIEW IF NOT EXISTS over `events` ± `code_artifact`.
 | `lesson_implementer_queue_view`            | `lesson_extracted`, `contract_amendment_proposed`, `owner_decision_recorded`, `dispatcher_violation`, `irreversible_effect_recorded`, `applied_change_committed` | lesson apply orchestrator | empty |
 | `lesson_implementation_status_view`        | `lesson_extracted`, `contract_amendment_proposed`, `lesson_apply_requested`, `action_scored`, `lesson_applied`, `contract_amendment_applied`, `applied_change_committed` | lesson apply orchestrator, audit | empty |
 | `applied_lesson_effectiveness_view`        | `applied_change_committed`, future cited `action_scored`, `recipe_invoked`, `action_predicted`, `task_committed`, `task_node_opened` | compounding measurement | empty |
+| `lesson_apply_candidate_view`              | `lesson_implementation_status_view` × `lesson_implementer_queue_view` × `applied_lesson_effectiveness_view` | normalized apply candidate | empty |
 
 Every view is covered by `substrate/views.test.ts`. None requires a
 separate seed-population path: views read whatever `events` /
@@ -285,11 +286,11 @@ the code-artifact authoring loop in §11.5, and recipe replay compounding in §1
 Irreducible data-structure contract:
 
 - New event kinds: `lesson_apply_requested` records the owner/auto-gated handoff into the applier; `applied_change_committed` records the residual-gated terminal mutation. Existing `lesson_applied` and `contract_amendment_applied` remain credit/audit aliases for source-kind-specific consumers.
-- New derived views: `lesson_implementer_queue_view`, `lesson_implementation_status_view`, and `applied_lesson_effectiveness_view`.
+- New derived views: `lesson_implementer_queue_view`, `lesson_implementation_status_view`, `applied_lesson_effectiveness_view`, and `lesson_apply_candidate_view`. The candidate view exposes the single normalized apply-candidate projection `{ source_event_id, target, anchor, patch_or_recipe, verifier_residual, owner_gate, trajectory_health, compounding_metric }` for `recipe_candidate`, `verifier_gap`, and `contract_amendment_proposed` sources.
 - New tables: none.
 - New posterior shapes: none. Compounding updates flow through existing cited `action_scored`, knowledge, code-artifact, and recipe posterior paths.
-- Owner gating: `lesson_implementer_queue_view` derives explicit-consent requirements for `CLAUDE.md`, `docs/v2-design.md`, and `.claude/rules/*`; cli/runtime amendments are auto-apply candidates only when `proposed_behavior` is structured as `{ file_path, anchor, diff }` and the source trajectory has no `dispatcher_violation` or `irreversible_effect_recorded`.
-- Flywheel sequence: `lesson_extracted` or `contract_amendment_proposed` -> `lesson_apply_requested` -> `action_predicted` -> `action_scored` with residual < 0.3 -> `applied_change_committed` -> future cited `action_scored` / `recipe_invoked` rows measured by `applied_lesson_effectiveness_view`.
+- Owner gating: `lesson_implementer_queue_view` derives explicit-consent and safe auto-apply eligibility from the declarative target policy in `substrate/lesson_apply_policy.ts`; cli/runtime targets are auto-apply candidates only when the proposal is structured as `{ file_path, anchor, diff }` and the source trajectory has no `dispatcher_violation` or `irreversible_effect_recorded`.
+- Flywheel sequence: `lesson_extracted` or `contract_amendment_proposed` -> gate `action_predicted` / `action_scored` -> `lesson_apply_requested` -> apply `action_predicted` -> apply `action_scored` with residual < 0.3 -> `applied_change_committed` -> future cited `action_scored` / `recipe_invoked` rows measured by `applied_lesson_effectiveness_view`.
 
 ### Father (`substrate/types.ts:185-190`)
 

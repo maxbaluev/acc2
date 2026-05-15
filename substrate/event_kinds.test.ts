@@ -171,14 +171,16 @@ describe("derived sets match their pre-unification shape", () => {
     }
   });
 
-  test("HEALTH_METRIC_KINDS is the three substrate-status counters", () => {
-    // The pre-unification cli/admin_substrate_status.ts hard-coded
-    // these three SQL `COUNT(*)` lookups. The registry derivation
-    // collapses them into one loop.
+  test("HEALTH_METRIC_KINDS is the substrate-status counter set", () => {
+    // Pinned: the registry-derived HEALTH_METRIC_KINDS must include the
+    // three pre-unification SQL `COUNT(*)` lookups plus any later additions
+    // (Batch 8 added bridge_health_degraded + supervisor_intervention_recorded).
     const expected = new Set([
       "dispatcher_violation",
       "irreversible_effect_recorded",
       "worker_tick_overrun",
+      "bridge_health_degraded",
+      "supervisor_intervention_recorded",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);
