@@ -321,6 +321,63 @@ const buildOtherGoalsSection = (rows: ReturnType<typeof readOtherActiveGoals>): 
   return lines.join("\n");
 };
 
+// Persistent owner-profile memory (Batch 2 / universal-for-any-human-work):
+// Project the last k owner-channel rows (owner_input_received +
+// owner_decision_recorded) so the brain sees what the owner actually said /
+// decided in recent history. Tone, preferences, prior corrections, explicit
+// constraints — the kind of context a careful human collaborator would
+// remember between sessions. Stored on the ledger; surfaced through the
+// canonical owner_conversation_view (substrate/views.ts:275-289).
+const readOwnerContext = (
+  db: Database,
+  k: number,
+): Array<{ id: string; ts: string; kind: string; directive_id: string | null; text: string }> => {
+  const rows = db
+    .query(
+      `SELECT event_id, ts, directive_id, kind, payload
+       FROM owner_conversation_view
+       ORDER BY ts DESC
+       LIMIT ?`,
+    )
+    .all(k) as Array<Record<string, unknown>>;
+  // Sort ascending for chronological narrative (oldest → newest of the recent window).
+  return rows.reverse().map((r) => {
+    let text = "";
+    try {
+      const p = JSON.parse((r.payload as string) ?? "{}") as Record<string, unknown>;
+      // Owner input payloads vary across surface: directive amendments carry
+      // amendment_text, chat turns carry text / words / input. Walk a small
+      // fallback chain so the prompt actually sees the owner's words.
+      text =
+        (p.text as string | undefined) ??
+        (p.input as string | undefined) ??
+        (p.words as string | undefined) ??
+        (p.amendment_text as string | undefined) ??
+        (p.decision as string | undefined) ??
+        (p.note as string | undefined) ??
+        "";
+    } catch { /* malformed */ }
+    return {
+      id: r.event_id as string,
+      ts: r.ts as string,
+      kind: (r.kind as string) ?? "owner_input_received",
+      directive_id: (r.directive_id as string | null) ?? null,
+      text,
+    };
+  });
+};
+
+const buildOwnerContextSection = (rows: ReturnType<typeof readOwnerContext>): string => {
+  if (rows.length === 0) return "OWNER CONTEXT: (no prior owner messages on file)";
+  const lines = ["OWNER CONTEXT (recent owner-channel events, oldest → newest):"];
+  for (const r of rows) {
+    if (!r.text) continue;
+    const kindLabel = r.kind === "owner_decision_recorded" ? "decision" : "input";
+    lines.push(`  [${r.id.slice(0, 12)}] ${kindLabel}: ${r.text.slice(0, 220)}`);
+  }
+  return lines.length === 1 ? "OWNER CONTEXT: (no readable owner text on file)" : lines.join("\n");
+};
+
 const readArtifactRegistryTopK = (db: Database, k: number): Array<{ id: string; runtime: string; name: string; score: number }> => {
   const rows = db
     .query(
@@ -605,6 +662,13 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
         return lines.join("\n");
       })();
   candidates.push({ name: "watched_outputs", p: 2, body: watchedBody });
+  // Persistent owner-profile memory (Batch 2): show recent owner-channel
+  // events so the brain has continuity across directives — tone,
+  // preferences, prior corrections, explicit constraints the owner stated
+  // out loud. P2 so it survives normal-budget composition; drops with the
+  // upstream/watched pair when the budget tightens.
+  const ownerContextBody = buildOwnerContextSection(readOwnerContext(db, 8));
+  candidates.push({ name: "owner_context", p: 2, body: ownerContextBody });
   const stakeholderBody = renderStakeholderBlock(db, task.directive_id);
   candidates.push({
     name: "stakeholder_state",
