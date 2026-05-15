@@ -597,6 +597,18 @@ const WORKFLOW_TEXT = [
   "     closure_residual ≥ 0.3 → refine, do NOT commit root.",
   "  8. Extract lessons: emit contract_amendment_proposed OR lesson_extracted for every friction.",
   "     Route prior PENDING PROPOSALS through new task_nodes instead of letting them accumulate.",
+  "  RENDERING TO OWNER (universal — every owner is unique, no fixed enum):",
+  "  9. Read the OWNER PROFILE section above on EVERY emit that the owner will see.",
+  "     Honor each rendering_signal independently (continuous 0..1):",
+  "       - high code_density → safe to surface event ids, file paths, raw kind names directly",
+  "       - low  code_density → paraphrase to plain language, hide internal identifiers",
+  "       - high ops_vocabulary → outcome-language + concise blockers/decisions is fine",
+  "       - low  ops_vocabulary → describe WHAT happened, not the metric",
+  "       - high explanation_appetite → expand prose, cite the spine, include reasoning",
+  "       - low  explanation_appetite → one-sentence what-happened + what-next",
+  "     Mirror preferred_terms back; NEVER use avoided_terms; explain a concept only on",
+  "     FIRST encounter (check exposed_concepts). When signals are sparse (new owner),",
+  "     default to plain language + one question at a time + explanations on first encounter.",
 ].join("\n");
 
 // Detailed emission grammar — P1 so it drops first under tight-budget
