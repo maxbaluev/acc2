@@ -48,6 +48,18 @@ describe("prompt_composer", () => {
     expect(composed.text).toContain("FIXTURE: fixture_d_count_todos");
   });
 
+  test("renders universal act-loop metadata and target_resources URI grammar", () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    const composed = composePrompt(db, { taskId });
+    expect(composed.text).toContain("CONSTANT ACT-LOOP METADATA");
+    expect(composed.text).toContain("target_resources:");
+    expect(composed.text).toContain("repo:runtime/foo.ts");
+    expect(composed.text).toContain("browser_session:research/customer-a");
+    expect(composed.text).toContain("sensor:habit_tracker/<stream>");
+    expect(composed.text).not.toContain('target_files:        ["path/to/touched.ts", ...]');
+  });
+
   test("under heavy budget pressure, P4 sections drop first", () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
