@@ -88,6 +88,15 @@ export const EVENT_KINDS = {
   knowledge_candidate:                     { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
   candidate_confirmed:                     { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   candidate_contradicted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
+  // Brain-side negative knowledge (loop-elegance gap #2, 2026-05-15):
+  // brain can DIRECTLY mutate a knowledge entry's posterior toward
+  // contradiction without waiting for an action_scored outcome. Use
+  // when the brain reads a retrieved entry and IMMEDIATELY recognizes
+  // it as wrong / outdated / domain-mismatched. Payload:
+  //   { knowledge_id, reason, weight? (default 0.5) }
+  // The extractor counts this as a contradicted observation with the
+  // declared weight in the knowledge posterior math.
+  knowledge_contradiction_observed:        { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false },
   knowledge_promoted:                      { producer: "substrate", embeddable: true,  mirror_inline: false, health_metric: false },
   knowledge_demoted:                       { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   contradictory_candidates:                { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },

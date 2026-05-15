@@ -169,12 +169,17 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
   // entry from being locked in by ancient corroborations when recent
   // reality contradicts it. Half-life mirrors artifact_store.ts
   // (default 30 days, override via ACC2_POSTERIOR_HALF_LIFE_MS).
+  // Brain-side negative knowledge (gap #2, 2026-05-15): the brain can
+  // DIRECTLY mutate a knowledge entry's posterior toward contradiction
+  // via knowledge_contradiction_observed. Treated identically to
+  // candidate_contradicted for the count, but with a single citation
+  // path (payload.knowledge_id → context_refs[0] effective).
   const verdicts = db
     .query(
-      `SELECT kind, substrate_origin, ts, context_refs FROM events
-       WHERE kind IN ('candidate_confirmed', 'candidate_contradicted')`,
+      `SELECT kind, substrate_origin, ts, context_refs, payload FROM events
+       WHERE kind IN ('candidate_confirmed', 'candidate_contradicted', 'knowledge_contradiction_observed')`,
     )
-    .all() as Array<{ kind: string; substrate_origin: string; ts: string; context_refs: string }>;
+    .all() as Array<{ kind: string; substrate_origin: string; ts: string; context_refs: string; payload: string }>;
 
   const halfLifeMsRaw = Number(process.env.ACC2_POSTERIOR_HALF_LIFE_MS ?? "");
   const halfLifeMs = Number.isFinite(halfLifeMsRaw) && halfLifeMsRaw >= 0
@@ -195,7 +200,31 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
   for (const v of verdicts) {
     let refs: string[];
     try { refs = JSON.parse(v.context_refs); } catch { refs = []; }
-    const w = verdictWeight(v.ts);
+    // knowledge_contradiction_observed carries the knowledge_id in
+    // payload (not necessarily context_refs); pull it explicitly so
+    // brain-side contradictions land on the right entry.
+    if (v.kind === "knowledge_contradiction_observed") {
+      try {
+        const p = JSON.parse(v.payload ?? "{}") as Record<string, unknown>;
+        const kid = p.knowledge_id as string | undefined;
+        if (kid && !refs.includes(kid)) refs.push(kid);
+      } catch { /* skip malformed */ }
+    }
+    const ageWeight = verdictWeight(v.ts);
+    // Brain-side negative knowledge may declare its own weight via
+    // payload.weight (default 0.5 — the brain's snap judgment counts
+    // less than an action-validated contradiction by default). The
+    // declared weight × the time-decay weight gives the final
+    // contribution.
+    let weightMul = 1;
+    if (v.kind === "knowledge_contradiction_observed") {
+      try {
+        const p = JSON.parse(v.payload ?? "{}") as Record<string, unknown>;
+        const w = p.weight;
+        weightMul = (typeof w === "number" && Number.isFinite(w) && w >= 0 && w <= 1) ? w : 0.5;
+      } catch { weightMul = 0.5; }
+    }
+    const w = ageWeight * weightMul;
     for (const ref of refs) {
       if (v.kind === "candidate_confirmed") {
         winsByCandidate.set(ref, (winsByCandidate.get(ref) ?? 0) + w);
@@ -203,6 +232,7 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
         origins.add(v.substrate_origin);
         winOriginsByCandidate.set(ref, origins);
       } else {
+        // candidate_contradicted OR knowledge_contradiction_observed
         lossesByCandidate.set(ref, (lossesByCandidate.get(ref) ?? 0) + w);
       }
     }

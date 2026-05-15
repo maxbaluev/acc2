@@ -438,6 +438,15 @@ const EMISSION_GRAMMARS_TEXT = [
   "    Cite every source_event_id you used (knowledge entries, retrieval_binding",
   "    ids from RETRIEVED KNOWLEDGE above, prior artifacts). Citation = mutation:",
   "    cited entries get candidate_confirmed/contradicted on outcome.",
+  "    EXPOSURE-ONLY entries (in RETRIEVED KNOWLEDGE but NOT in your context_refs)",
+  "    earn diminished posterior moves — your deliberate citation is the signal.",
+  "",
+  "  knowledge_contradiction_observed (brain-side negative knowledge):",
+  "    Emit { knowledge_id, reason, weight? (0..1, default 0.5) } when you read",
+  "    a retrieved entry and IMMEDIATELY recognize it as wrong / outdated /",
+  "    domain-mismatched, WITHOUT waiting for an action_scored outcome. The",
+  "    extractor counts this as a contradicted observation with the declared",
+  "    weight; the entry's posterior shifts toward demotion on the next pass.",
 ].join("\n");
 
 const buildKnowledgeSection = (rows: Array<{ id: string; text: string; score: number }>): string => {
