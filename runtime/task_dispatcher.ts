@@ -35,7 +35,11 @@ import { nowIso } from "./ids";
 import { distributeCredit } from "./credit";
 import { findRecipeMatch, replayRecipe } from "./recipe_replay";
 import { logger } from "./logger";
-import { maybeCloseFinishedDirective } from "./directive_closure";
+import {
+  cascadeRootCommitToDescendants,
+  cascadeUpwardWhenChildrenTerminal,
+  maybeCloseFinishedDirective,
+} from "./directive_closure";
 import { readCurrentMode } from "./crisis_mode";
 import { isCycleViolation } from "./cycle_one_gate";
 import { recordDispatch, recordActionResidual } from "./metrics";
@@ -788,6 +792,55 @@ export const dispatchReadyTask = async (
   // directive_closed idempotently. This closes the zombie-loop class
   // (scheduler kept re-dispatching tasks for finished directives).
   if (dispatchHadTerminal) {
+    // Orphan-children fix (2026-05-15): when the brain commits a directive's
+    // ROOT task (the closure_residual<0.3 audit covers all sub-goals), its
+    // refinement children are often left in `ready_tasks_view` with no
+    // terminal event. They get re-dispatched on the next scheduler tick,
+    // bridge-fail with timeout, and burn tokens on work the root already
+    // completed. Cascade-emit `task_committed` for every dangling descendant
+    // BEFORE the close check so maybeCloseFinishedDirective finds them all
+    // terminal and the directive actually closes.
+    try {
+      const committedRow = closedEvents.find((e) => e.kind === "task_committed" && e.task_id === task.id);
+      if (committedRow) {
+        const payload = committedRow.payload as { closure_residual?: number } | null;
+        const cascaded = cascadeRootCommitToDescendants(
+          db,
+          task.id,
+          payload?.closure_residual,
+        );
+        if (cascaded > 0) {
+          logger.info(
+            { where: "task_dispatcher.cascade_root_commit", root_task_id: task.id, cascaded },
+            "cascaded task_committed to dangling descendants of committed root",
+          );
+        }
+      }
+    } catch (err) {
+      logger.warn(
+        { where: "task_dispatcher.cascade_root_commit", task_id: task.id, err: (err as Error).message },
+        "cascadeRootCommitToDescendants failed — descendants may remain in ready_tasks_view",
+      );
+    }
+    // Upward cascade: if the brain committed only a child (e.g. MEASURE
+    // verifier) without sealing the root, walk up the refines edges and
+    // auto-commit parents whose every child is now terminal. Pairs with
+    // cascadeRootCommitToDescendants — together they handle both
+    // top-down and bottom-up partial commits the brain might emit.
+    try {
+      const cascadedUp = cascadeUpwardWhenChildrenTerminal(db, task.id);
+      if (cascadedUp > 0) {
+        logger.info(
+          { where: "task_dispatcher.cascade_upward", task_id: task.id, cascaded_up: cascadedUp },
+          "cascaded task_committed upward — parents auto-committed because all children terminal",
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { where: "task_dispatcher.cascade_upward", task_id: task.id, err: (err as Error).message },
+        "cascadeUpwardWhenChildrenTerminal failed — parent task may remain in ready_tasks_view",
+      );
+    }
     try {
       maybeCloseFinishedDirective(db, task.directive_id);
     } catch (err) {

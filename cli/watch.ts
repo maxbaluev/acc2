@@ -105,6 +105,15 @@ export type WatchState = {
   recipes?: RecipeRow[];
   lessons?: LessonRow[];
   knowledge?: KnowledgeRow[];
+  // Dedicated buffers for rare-event panels. Pre-fix these views filtered
+  // state.events post-hoc, but the recent-events buffer is bounded (160 rows
+  // by default) and supervisor / lesson rows can be hours old — they drop
+  // off the buffer and the panel renders empty even when many such rows
+  // exist in the substrate. Each panel now fetches its OWN buffer via
+  // runtime.recent_events with a kinds filter so the data flow doesn't
+  // depend on the live event stream's rotation.
+  supervisorEvents?: EventRow[];
+  lessonEvents?: EventRow[];
   view?: ViewKey;
   selected?: Partial<Record<ViewKey, number>>;
   filter?: string;
@@ -168,8 +177,23 @@ const pad = (s: string, width: number): string => {
   return clipped + " ".repeat(Math.max(0, width - visibleLength(clipped)));
 };
 
-const asObject = (v: unknown): Record<string, unknown> =>
-  v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
+const asObject = (v: unknown): Record<string, unknown> => {
+  if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
+  // Substrate views return event payloads as JSON-serialised TEXT columns
+  // (the underlying events.payload column is TEXT). Pre-fix the TUI treated
+  // these as opaque strings and fell through to "(no text)" for every
+  // directive / ready task. Try one parse pass so the panels see structured
+  // fields like directive_text / goal / lifecycle.
+  if (typeof v === "string" && v.length > 0 && (v[0] === "{" || v[0] === "[")) {
+    try {
+      const parsed = JSON.parse(v) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch { /* malformed JSON — fall through to {} */ }
+  }
+  return {};
+};
 
 const asString = (v: unknown, fallback = ""): string => typeof v === "string" ? v : fallback;
 const asNumber = (v: unknown, fallback = 0): number => typeof v === "number" && Number.isFinite(v) ? v : fallback;
@@ -269,7 +293,17 @@ const readRecipes = async (): Promise<RecipeRow[]> => {
 const readKnowledge = async (): Promise<KnowledgeRow[]> => {
   const rows = await readGenericView("promoted_knowledge_view");
   return rows.slice(0, 160).map((r) => ({
-    id: asString(r.id, asString(r.knowledge_id, "unknown")),
+    // promoted_knowledge_view exposes the promotion row's id as `event_id`
+    // (the canonical handle) and the originating candidate as `candidate_id`.
+    // Fall through to those before defaulting to "unknown" so the operator
+    // sees real ids instead of placeholders.
+    id: asString(
+      r.id,
+      asString(
+        r.knowledge_id,
+        asString(r.event_id, asString(r.candidate_id, "unknown")),
+      ),
+    ),
     text: asString(r.text, asString(r.summary, asString(r.content, "(no text)"))),
     score: asNumber(r.score, asNumber(r.posterior, 0)),
     status: asString(r.status, "promoted"),
@@ -290,6 +324,49 @@ const readRecentEvents = async (): Promise<EventRow[]> => {
     if (!env.ok) return [];
     const data = env.result as { events?: Array<Record<string, unknown>> };
     return (data.events ?? []).map((e) => ({
+      event_id: asString(e.event_id, asString(e.id, "")),
+      ts: asString(e.ts, ""),
+      kind: asString(e.kind, "unknown"),
+      directive_id: asString(e.directive_id, "") || undefined,
+      task_id: asString(e.task_id, "") || undefined,
+      payload: e.payload,
+    }));
+  } catch { return []; }
+};
+
+// Kinds the Lessons panel surfaces. Centralised so the buffer fetch and the
+// post-fetch render contract stay aligned — the same canonical kind list
+// gates both the dedicated runtime.recent_events query AND the SSE-time
+// state-events filter.
+const LESSON_EVENT_KINDS = ["lesson_extracted", "contract_amendment_proposed"];
+
+// Kinds the Supervisor panel surfaces. Mirrors the structural-fault and
+// observability taxonomy emitted by runtime/supervisor.ts +
+// runtime/bridge_health.ts + crisis_mode + integrity workers.
+const SUPERVISOR_EVENT_KINDS = [
+  "supervisor_intervention_recorded",
+  "bridge_health_degraded",
+  "bridge_health_recovered",
+  "dispatcher_violation",
+  "irreversible_effect_recorded",
+  "redispatch_storm_detected",
+  "dag_explosion_detected",
+  "dispatch_budget_exceeded",
+  "crisis_postmortem",
+  "owner_input_required",
+];
+
+// Dedicated buffer fetch for low-frequency events. We pull the most recent
+// k=200 rows matching the kinds filter; this surfaces hours-old supervisor
+// interventions that the bounded live-events buffer would have rotated out.
+const readKindBuffer = async (kinds: string[], k = 200): Promise<EventRow[]> => {
+  try {
+    const env = await mcpCall("runtime.recent_events", { k, kinds });
+    if (!env.ok) return [];
+    const data = env.result as { events?: Array<Record<string, unknown>> };
+    // runtime.recent_events returns ts-ascending; reverse so the panel
+    // renders newest-first like every other surface.
+    return (data.events ?? []).reverse().map((e) => ({
       event_id: asString(e.event_id, asString(e.id, "")),
       ts: asString(e.ts, ""),
       kind: asString(e.kind, "unknown"),
@@ -358,9 +435,19 @@ const deriveRecipes = (state: WatchState): RecipeRow[] => {
 };
 
 const deriveLessons = (state: WatchState): LessonRow[] => {
+  // Prefer the dedicated lesson buffer when present (it carries the FULL
+  // history of lesson-class events independent of the bounded live stream).
+  // Fall back to scanning state.events so the legacy path still works for
+  // any test that doesn't seed lessonEvents.
+  const source = (state.lessonEvents && state.lessonEvents.length > 0)
+    ? state.lessonEvents
+    : (state.events ?? []);
   const rows: LessonRow[] = [];
-  for (const ev of state.events ?? []) {
+  const seen = new Set<string>();
+  for (const ev of source) {
     if (ev.kind !== "lesson_extracted" && ev.kind !== "contract_amendment_proposed") continue;
+    if (seen.has(ev.event_id)) continue;
+    seen.add(ev.event_id);
     const p = asObject(ev.payload);
     rows.push({
       id: ev.event_id,
@@ -474,17 +561,23 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
     }));
   }
   if (view === "interventions") {
-    return (state.events ?? [])
-      .filter((e) => /violation|conflict|owner_input_required|supervisor|intervention|crisis|irreversible/.test(e.kind))
-      .map((e) => ({
-        id: e.event_id,
-        title: e.kind,
-        meta: `${e.ts.slice(11, 19)} dir=${shortId(e.directive_id)} task=${shortId(e.task_id)}`,
-        body: `event_id=${e.event_id}\nts=${e.ts}\nkind=${e.kind}\n\n${formatPayloadPreview(e.payload, 2000)}`,
-        kind: e.kind,
-        status: e.kind,
-        raw: e,
-      }));
+    // Use the dedicated supervisor buffer (populated by readKindBuffer
+    // with SUPERVISOR_EVENT_KINDS). Falls back to scanning state.events
+    // when the buffer hasn't loaded yet (e.g. very first frame after
+    // boot) so the panel never goes silent during the half-second
+    // before refreshAll completes.
+    const source = (state.supervisorEvents && state.supervisorEvents.length > 0)
+      ? state.supervisorEvents
+      : (state.events ?? []).filter((e) => SUPERVISOR_EVENT_KINDS.includes(e.kind));
+    return source.map((e) => ({
+      id: e.event_id,
+      title: e.kind,
+      meta: `${e.ts.slice(11, 19)} dir=${shortId(e.directive_id)} task=${shortId(e.task_id)}`,
+      body: `event_id=${e.event_id}\nts=${e.ts}\nkind=${e.kind}\n\n${formatPayloadPreview(e.payload, 2000)}`,
+      kind: e.kind,
+      status: e.kind,
+      raw: e,
+    }));
   }
   return deriveKnowledge(state).map((k) => ({
     id: k.id,
@@ -623,7 +716,7 @@ export type RunWatchOpts = {
 };
 
 const refreshAll = async (state: WatchState): Promise<void> => {
-  const [active, ready, artifacts, recipes, knowledge, health, events] = await Promise.all([
+  const [active, ready, artifacts, recipes, knowledge, health, events, lessonEvents, supervisorEvents] = await Promise.all([
     readActiveDirectives(),
     readReadyTasks(),
     readArtifactLeaderboard(),
@@ -631,31 +724,39 @@ const refreshAll = async (state: WatchState): Promise<void> => {
     readKnowledge(),
     readHealth(),
     state.events.length === 0 ? readRecentEvents() : Promise.resolve(state.events),
+    readKindBuffer(LESSON_EVENT_KINDS),
+    readKindBuffer(SUPERVISOR_EVENT_KINDS),
   ]);
   state.active = active;
   state.ready = ready;
   state.artifacts = artifacts;
   state.recipes = recipes;
   state.knowledge = knowledge;
-  state.lessons = deriveLessons({ ...state, events });
-  state.health = health;
   state.events = events;
+  state.lessonEvents = lessonEvents;
+  state.supervisorEvents = supervisorEvents;
+  state.lessons = deriveLessons(state);
+  state.health = health;
 };
 
 const refreshSnapshots = async (state: WatchState): Promise<void> => {
-  const [active, ready, artifacts, recipes, knowledge, health] = await Promise.all([
+  const [active, ready, artifacts, recipes, knowledge, health, lessonEvents, supervisorEvents] = await Promise.all([
     readActiveDirectives(),
     readReadyTasks(),
     readArtifactLeaderboard(),
     readRecipes(),
     readKnowledge(),
     readHealth(),
+    readKindBuffer(LESSON_EVENT_KINDS),
+    readKindBuffer(SUPERVISOR_EVENT_KINDS),
   ]);
   state.active = active;
   state.ready = ready;
   state.artifacts = artifacts;
   state.recipes = recipes;
   state.knowledge = knowledge;
+  state.lessonEvents = lessonEvents;
+  state.supervisorEvents = supervisorEvents;
   state.lessons = deriveLessons(state);
   state.health = health;
 };

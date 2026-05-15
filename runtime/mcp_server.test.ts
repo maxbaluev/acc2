@@ -352,6 +352,19 @@ describe("fastmcp substrate tools — stdio transport", () => {
     expect(env.error).toContain("view_not_implemented:");
   });
 
+  test("substrate.read exposes operator recipe and knowledge registry views", async () => {
+    for (const view_name of ["recipe_registry_view", "promoted_knowledge_view"]) {
+      const env = parseEnvelope(
+        (await h!.client.callTool({
+          name: "substrate.read",
+          arguments: { view_name },
+        })) as ToolCallResponse,
+      );
+      expect(env.ok).toBe(true);
+      expect(Array.isArray(env.result)).toBe(true);
+    }
+  });
+
   test("substrate.search returns the recent-events stub shape", async () => {
     await h!.client.callTool({
       name: "substrate.emit",

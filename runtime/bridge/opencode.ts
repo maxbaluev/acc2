@@ -25,6 +25,7 @@ import { emitEvent } from "../events";
 import { isCycleViolation } from "../cycle_one_gate";
 import type { BridgeFailureReason, BridgeRequest, BridgeResult, SpawnOpts } from "./types";
 import {
+  DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS,
   DEFAULT_BRIDGE_STUCK_THRESHOLD_MS,
   DEFAULT_MCP_HANDSHAKE_WINDOW_MS,
   DEFAULT_OPENCODE_MODEL,
@@ -77,12 +78,20 @@ export const spawnRealOpencode = async (
   const envHandshake = Number(process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS ?? "");
   const handshakeWindowMs = spawnOpts.mcpHandshakeWindowMs
     ?? (Number.isFinite(envHandshake) && envHandshake > 0 ? envHandshake : DEFAULT_MCP_HANDSHAKE_WINDOW_MS);
-  // No-progress watchdog: orthogonal to the overall timeout. Fires when the
-  // subprocess goes silent (zero bridge_frame_received emissions) for
-  // stuckThresholdMs.
+  // No-progress watchdog: orthogonal to the overall timeout. Two tiers:
+  //   • firstFrameThresholdMs — budget between SPAWN and the first
+  //     bridge_frame_received (allows slow strategic first-cycle reasoning).
+  //   • stuckThresholdMs — budget between consecutive frames once at least
+  //     one has landed (catches real inter-tool wedges fast).
+  // The split fixes the false-positive kill pattern observed 2026-05-15
+  // where opencode's first-tool-call took 110-205s on slow first cycles
+  // and the old single 90s budget killed legitimate brain thinking.
   const envStuck = Number(process.env.ACC2_BRIDGE_STUCK_THRESHOLD_MS ?? "");
   const stuckThresholdMs = spawnOpts.stuckThresholdMs
     ?? (Number.isFinite(envStuck) && envStuck > 0 ? envStuck : DEFAULT_BRIDGE_STUCK_THRESHOLD_MS);
+  const envFirstFrame = Number(process.env.ACC2_BRIDGE_FIRST_FRAME_THRESHOLD_MS ?? "");
+  const firstFrameThresholdMs = spawnOpts.firstFrameThresholdMs
+    ?? (Number.isFinite(envFirstFrame) && envFirstFrame > 0 ? envFirstFrame : DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS);
 
   emitEvent(db, {
     kind: "bridge_invoked",
@@ -92,6 +101,37 @@ export const spawnRealOpencode = async (
     payload: { prompt_chars: req.prompt.length, model, real: true } as JsonValue,
     invoker: "opencode",
   });
+
+  // Brain audit b0kheqg3g hole D (2026-05-15): persist the composed prompt
+  // so auditors can inspect what the brain saw. The depth-1-retrieval claim
+  // (v2-design §13) is falsifiable only when the prompt is in the ledger.
+  // Capped at PROMPT_FULL_CAP_CHARS to keep SQLite bounded; sha256 +
+  // chars_original give exact provenance.
+  const PROMPT_FULL_CAP_CHARS = 32_768;
+  try {
+    const promptHasher = new Bun.CryptoHasher("sha256");
+    promptHasher.update(req.prompt);
+    const promptSha256 = promptHasher.digest("hex");
+    const truncated = req.prompt.length > PROMPT_FULL_CAP_CHARS;
+    emitEvent(db, {
+      kind: "brain_prompt_composed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        sha256: promptSha256,
+        chars_original: req.prompt.length,
+        truncated,
+        text: truncated ? req.prompt.slice(0, PROMPT_FULL_CAP_CHARS) : req.prompt,
+        cap_chars: PROMPT_FULL_CAP_CHARS,
+        model,
+      } as JsonValue,
+      invoker: "opencode",
+    });
+  } catch (err) {
+    // Observability is best-effort — never break the dispatch.
+    void err;
+  }
 
   // ── Batch 2.β: materialize the per-dispatch opencode MCP config ──
   // The config declares v2's daemon MCP server (type=remote, HTTP) so
@@ -114,6 +154,11 @@ export const spawnRealOpencode = async (
       task_id: req.taskId,
       payload: {
         reason: "mcp_server_url_missing",
+        // Round-2 audit (2026-05-15): every bridge_failed carries
+        // mcp_handshake_ok so the depth-1 retrieval health metric is a
+        // single SQL scan. Pre-spawn failures hard-code false (no MCP
+        // call is structurally possible).
+        mcp_handshake_ok: false,
         hint: "V2_MCP_SERVER_URL must point at the daemon's /mcp endpoint",
       } as JsonValue,
       invoker: "opencode",
@@ -136,6 +181,7 @@ export const spawnRealOpencode = async (
       task_id: req.taskId,
       payload: {
         reason: `mcp_config_materialize_failed:${(err as Error).message}`,
+        mcp_handshake_ok: false,
       } as JsonValue,
       invoker: "opencode",
     });
@@ -179,7 +225,10 @@ export const spawnRealOpencode = async (
       substrate_origin: "opencode",
       directive_id: req.directiveId,
       task_id: req.taskId,
-      payload: { reason: `spawn_failed:${(err as Error).message}` } as JsonValue,
+      payload: {
+        reason: `spawn_failed:${(err as Error).message}`,
+        mcp_handshake_ok: false,
+      } as JsonValue,
       invoker: "opencode",
     });
     return { ok: false, reason };
@@ -241,22 +290,33 @@ export const spawnRealOpencode = async (
   }, Math.min(5_000, Math.max(500, Math.floor(handshakeWindowMs / 10))));
 
   // ── No-progress watchdog (robustness, fail-fast) ──
-  // Mirrors the harness's --task validation finding: an opencode subprocess
-  // that wedges produces no further frames; the operator waits out the full
-  // 600s before learning anything is wrong. This watchdog fires when zero
-  // bridge_frame_received events have been observed for stuckThresholdMs
-  // (default 90s, env ACC2_BRIDGE_STUCK_THRESHOLD_MS). On fire we SIGTERM
-  // the subprocess and emit `bridge_stuck` so operators see the wedge
-  // immediately. `lastFrameMs` advances inside consumeLine() below every
-  // time a tool_use / tool_call / tool_result is parsed.
+  // The watchdog only fires BEFORE the first MCP frame lands. Once
+  // `firstFrameSeen` flips true (the subprocess proved it can drive
+  // MCP), the watchdog disables itself — the overall `timeoutMs`
+  // budget (default 600s) becomes the sole inter-frame cap. Live
+  // ledger evidence proved an inter-frame watchdog at any sub-overall
+  // threshold (90s, 240s) kills the brain mid-strategic-synthesis;
+  // the brain legitimately reasons silently for minutes between MCP
+  // tool calls.
+  // Surfaced as `bridge_stuck` with `tier=first_frame` when it fires,
+  // and `tier=disabled` would only appear in the (impossible-by-
+  // construction) case where firstFrameSeen flipped and then somehow
+  // the watchdog fired anyway — we never emit it in practice.
   const stuckStartMs = Date.now();
   let lastFrameMs = stuckStartMs;
+  let firstFrameSeen = false;
   let bridgeStuckFired = false;
+  const pollCadenceMs = Math.min(5_000, Math.max(500, Math.floor(firstFrameThresholdMs / 8)));
   const stuckInterval = setInterval(() => {
     if (bridgeStuckFired) return;
+    // Once we've seen a frame, the subprocess is alive — trust the
+    // overall timeout (600s default) as the cap. This is the
+    // load-bearing fix: pre-fix inter-frame watchdog killed slow
+    // legitimate brain reasoning between MCP calls.
+    if (firstFrameSeen) return;
     const now = Date.now();
     const sinceLastFrame = now - lastFrameMs;
-    if (sinceLastFrame < stuckThresholdMs) return;
+    if (sinceLastFrame < firstFrameThresholdMs) return;
     bridgeStuckFired = true;
     const elapsedMs = now - stuckStartMs;
     try {
@@ -269,7 +329,9 @@ export const spawnRealOpencode = async (
           reason: "no_frames_received",
           elapsed_ms: elapsedMs,
           last_frame_ms_ago: sinceLastFrame,
-          threshold_ms: stuckThresholdMs,
+          threshold_ms: firstFrameThresholdMs,
+          first_frame_seen: false,
+          tier: "first_frame",
         } as JsonValue,
         invoker: "opencode",
       });
@@ -279,12 +341,67 @@ export const spawnRealOpencode = async (
       void err;
     }
     try { proc.kill("SIGTERM"); } catch (err) { void err; }
-  }, Math.min(5_000, Math.max(500, Math.floor(stuckThresholdMs / 4))));
+  }, pollCadenceMs);
 
   let stdoutBuf = "";
   let stderrBuf = "";
   let cycleViolation: string | null = null;
   let finalResponse = "";
+  // Brain audit b0kheqg3g (2026-05-15): persist a CAPPED slice of the
+  // brain's message + reasoning frames so auditors can see what the
+  // model actually said between tool calls. Hard caps keep the ledger
+  // bounded:
+  //   - 4096 chars per emitted brain_message_emitted / brain_reasoning_recorded
+  //   - 20 emits per task in total; further frames are summarised by a
+  //     single brain_message_emitted with payload.suppressed=true so
+  //     auditors see the drop without flooding rows.
+  const BRAIN_OBS_MAX_CHARS = 4096;
+  const BRAIN_OBS_MAX_EMITS = 20;
+  let brainObsEmitCount = 0;
+  let brainObsSuppressionFired = false;
+  const emitBrainObs = (eventKind: "brain_message_emitted" | "brain_reasoning_recorded", frameType: string, text: string, extra?: Record<string, unknown>) => {
+    if (brainObsEmitCount >= BRAIN_OBS_MAX_EMITS) {
+      if (!brainObsSuppressionFired) {
+        brainObsSuppressionFired = true;
+        try {
+          emitEvent(db, {
+            kind: "brain_message_emitted",
+            substrate_origin: "opencode",
+            directive_id: req.directiveId,
+            task_id: req.taskId,
+            payload: {
+              suppressed: true,
+              reason: "brain_obs_cap_reached",
+              cap: BRAIN_OBS_MAX_EMITS,
+              note: "further model messages/reasoning omitted from the ledger to keep payload bounded",
+            } as JsonValue,
+            invoker: "opencode",
+          });
+        } catch (err) { void err; }
+      }
+      return;
+    }
+    const truncated = text.length > BRAIN_OBS_MAX_CHARS;
+    const capped = truncated ? text.slice(0, BRAIN_OBS_MAX_CHARS) : text;
+    try {
+      emitEvent(db, {
+        kind: eventKind,
+        substrate_origin: "opencode",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        payload: {
+          frame_type: frameType,
+          text: capped,
+          chars_original: text.length,
+          truncated,
+          cap_chars: BRAIN_OBS_MAX_CHARS,
+          ...(extra ?? {}),
+        } as JsonValue,
+        invoker: "opencode",
+      });
+      brainObsEmitCount++;
+    } catch (err) { void err; }
+  };
   // Diagnostic mirror: when ACC2_OPENCODE_STDOUT_LOG points at a writable
   // path, every raw stdout line opencode emits is appended there. Operators
   // use this to inspect the exact JSON event sequence after an
@@ -337,7 +454,25 @@ export const spawnRealOpencode = async (
     if (kind === "text") {
       const part = parsed.part as Record<string, unknown> | undefined;
       const text = (part?.text as string) ?? "";
-      if (text.length > 0) finalResponse += text;
+      if (text.length > 0) {
+        finalResponse += text;
+        // Brain audit b0kheqg3g: mirror the model's final-answer text to
+        // the substrate (capped + rate-limited) so auditors can review the
+        // brain's natural-language reply without scraping the bridge stdout.
+        emitBrainObs("brain_message_emitted", "text", text);
+      }
+    }
+    // Brain audit b0kheqg3g (2026-05-15): persist the model's MESSAGE
+    // and STEP frames so the brain's mid-cycle reasoning is observable.
+    // These were previously dropped silently into finalResponse.
+    if (kind === "message") {
+      const text = (parsed.text as string) ?? ((parsed.content as Record<string, unknown> | undefined)?.text as string) ?? "";
+      if (text.length > 0) emitBrainObs("brain_message_emitted", "message", text);
+    }
+    if (kind === "step_start" || kind === "step_complete") {
+      const label = (parsed.label as string) ?? (parsed.step as string) ?? "";
+      const text = label.length > 0 ? label : JSON.stringify(parsed).slice(0, 1024);
+      emitBrainObs("brain_reasoning_recorded", kind, text);
     }
     // Mirror opencode tool events into the substrate for audit and detect
     // the MCP handshake. opencode 1.4.3 emits a tool invocation as
@@ -350,7 +485,10 @@ export const spawnRealOpencode = async (
     if (isToolEvent) {
       // Bump the no-progress watchdog clock on every frame received so the
       // bridge_stuck path only fires when the subprocess goes truly silent.
+      // Flip the first-frame bit so the watchdog switches from the
+      // generous first-frame budget to the tight inter-frame threshold.
       lastFrameMs = Date.now();
+      firstFrameSeen = true;
       emitEvent(db, {
         kind: "bridge_frame_received",
         substrate_origin: "opencode",
@@ -474,6 +612,11 @@ export const spawnRealOpencode = async (
       task_id: req.taskId,
       payload: {
         reason: "mcp_handshake_failed",
+        // Brain audit E (2026-05-15): normalize mcp_handshake_ok on every
+        // bridge terminal event (success AND failure) so the depth-1
+        // retrieval health metric is measurable as a single SQL query
+        // instead of joining two payload shapes.
+        mcp_handshake_ok: false,
         window_ms: handshakeWindowMs,
         mcp_server_url: mcpServerUrl,
         timed_out: mcpHandshakeTimedOut,
@@ -502,6 +645,10 @@ export const spawnRealOpencode = async (
   // bridge failure taxonomy — no reshaping (per brief).
   if (bridgeStuckFired) {
     cleanupConfig();
+    // The watchdog now only fires on first_frame_seen=false (subprocess
+    // never proved it can drive MCP). The inter-frame tier is structurally
+    // unreachable — kept in the type for diagnostic clarity if a future
+    // change re-introduces it.
     emitEvent(db, {
       kind: "bridge_failed",
       substrate_origin: "opencode",
@@ -509,8 +656,13 @@ export const spawnRealOpencode = async (
       task_id: req.taskId,
       payload: {
         reason: "subprocess_stuck",
+        // Brain audit E (2026-05-15): normalize mcp_handshake_ok on
+        // every bridge terminal event for single-query handshake health.
+        mcp_handshake_ok: mcpHandshakeOk,
         no_frames_received: true,
-        threshold_ms: stuckThresholdMs,
+        threshold_ms: firstFrameThresholdMs,
+        first_frame_seen: false,
+        tier: "first_frame",
         exit_code: exitCode,
       } as JsonValue,
       invoker: "opencode",
@@ -519,7 +671,7 @@ export const spawnRealOpencode = async (
       ok: false,
       reason: {
         kind: "subprocess_crash",
-        stderr_tail: `subprocess_stuck:no_frames_received in ${stuckThresholdMs}ms`,
+        stderr_tail: `subprocess_stuck:no_frames_received in ${firstFrameThresholdMs}ms tier=first_frame`,
       },
     };
   }
@@ -531,7 +683,13 @@ export const spawnRealOpencode = async (
       substrate_origin: "opencode",
       directive_id: req.directiveId,
       task_id: req.taskId,
-      payload: { reason: `cycle_violation:${cycleViolation}` } as JsonValue,
+      payload: {
+        reason: `cycle_violation:${cycleViolation}`,
+        // Round-2 audit (2026-05-15): every post-spawn bridge_failed
+        // carries mcp_handshake_ok so handshake health is queryable
+        // across the entire failure taxonomy in one SQL scan.
+        mcp_handshake_ok: mcpHandshakeOk,
+      } as JsonValue,
       invoker: "opencode",
     });
     return { ok: false, reason: { kind: "subprocess_crash", stderr_tail: `cycle_violation:${cycleViolation}` } };
@@ -544,7 +702,11 @@ export const spawnRealOpencode = async (
       substrate_origin: "opencode",
       directive_id: req.directiveId,
       task_id: req.taskId,
-      payload: { reason: "timeout", ms_elapsed: timeoutMs } as JsonValue,
+      payload: {
+        reason: "timeout",
+        ms_elapsed: timeoutMs,
+        mcp_handshake_ok: mcpHandshakeOk,
+      } as JsonValue,
       invoker: "opencode",
     });
     return { ok: false, reason: { kind: "timeout", ms_elapsed: timeoutMs } };
@@ -557,7 +719,12 @@ export const spawnRealOpencode = async (
       substrate_origin: "opencode",
       directive_id: req.directiveId,
       task_id: req.taskId,
-      payload: { reason: "subprocess_crash", exit_code: exitCode, stderr_tail: stderrBuf.slice(-512) } as JsonValue,
+      payload: {
+        reason: "subprocess_crash",
+        exit_code: exitCode,
+        stderr_tail: stderrBuf.slice(-512),
+        mcp_handshake_ok: mcpHandshakeOk,
+      } as JsonValue,
       invoker: "opencode",
     });
     return { ok: false, reason: { kind: "subprocess_crash", stderr_tail: stderrBuf.slice(-512) } };
@@ -581,6 +748,7 @@ export const spawnRealOpencode = async (
       payload: {
         reason: `opencode_error_event:${opencodeErrorEvent.name ?? "UnknownError"}`,
         message: msg,
+        mcp_handshake_ok: mcpHandshakeOk,
       } as JsonValue,
       invoker: "opencode",
     });

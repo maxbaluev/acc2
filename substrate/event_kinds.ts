@@ -201,6 +201,23 @@ export const EVENT_KINDS = {
   applied_change_committed:                { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   lesson_applied:                          { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   contract_amendment_applied:              { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  // ── Lesson-apply flywheel intermediates (audit-#7, 2026-05-15) ───────
+  // Pre-fix these kinds were emitted by the lesson-apply subsystem but
+  // absent from EVENT_KINDS — they bypassed embedding eligibility, the
+  // health-metric tag filter, and the type system. Registering them
+  // properly closes the kind-registry drift gap and ensures the surfaces
+  // (TUI Lessons panel, embedding worker, mirror-inline rule) see them.
+  apply_candidate_selected:                { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  apply_owner_gate_evaluated:              { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
+  apply_executor_action_predicted:         { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  apply_change_verified:                   { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
+  applied_change_compounding_measured:     { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
+  lesson_apply_candidate_opened:           { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  lesson_apply_gate_evaluated:             { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
+  lesson_apply_plan_verified:              { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
+  lesson_apply_planned:                    { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  lesson_apply_verifier_scored:            { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
+  lesson_compounding_measured:             { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
 
   // ── Substrate self-events ───────────────────────────────────────────
   projection_checkpointed:                 { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
@@ -242,8 +259,64 @@ export const EVENT_KINDS = {
   // ── Robustness telemetry (fail-fast taxonomy) ───────────────────────
   error_caught:                            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
   worker_tick_overrun:                     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true  },
+  // Substrate-side proof of worker liveness (audit-#5, 2026-05-15). Emitted
+  // by supervisedTick AFTER each successful body() with per-worker dampening
+  // (WORKER_TICK_EVENT_DAMPEN_MS = 60s) so the scheduler's 500ms cadence
+  // doesn't flood the ledger. Pre-fix the only liveness record was an
+  // in-process Map lost across daemon restarts; the TUI Supervisor panel
+  // and auditors could never see workers ticking.
+  worker_tick_completed:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
   bridge_stuck:                            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
   runtime_subprocess_killed:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
+  // ── Brain-observability (audit b0kheqg3g, 2026-05-15) ───────────────
+  // Pre-fix the brain was a black box: tool frames were persisted but the
+  // model's MESSAGE / reasoning text + the composed prompt + the model's
+  // decisions-that-didn't-fire-tools were never persisted. These three
+  // event kinds close the observability gap with hard payload caps so the
+  // ledger doesn't bloat:
+  //   - brain_prompt_composed: emitted by the bridge just after bridge_invoked,
+  //     before spawn. Carries sha256(prompt) + capped preview (32768 chars max)
+  //     + truncated boolean + chars_original. Not embeddable (contains owner
+  //     context retrieved from substrate; auditor-only surface).
+  //   - brain_message_emitted: emitted by consumeLine when opencode produces
+  //     a `message` or `text` frame. Capped at 4096 chars per emit and 20
+  //     emits per task (then one suppression summary). Embeddable so Model-D
+  //     can retrieve and credit reasoning that didn't fire a tool call.
+  //   - brain_reasoning_recorded: same shape as brain_message_emitted but
+  //     for `step_start` / `step_complete` / structured reasoning frames.
+  brain_prompt_composed:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
+  brain_message_emitted:                   { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
+  brain_reasoning_recorded:                { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
+  // ── Daemon source hot-reload (brain audit bqlr29psq, 2026-05-15) ────
+  // When a source file under runtime/, substrate/, or cli/ changes, the
+  // daemon's fs.watch worker emits daemon_hotreload_triggered. On success
+  // (dynamic import + validation passed) daemon_hotreload_completed lands
+  // with the swapped module path. On failure (syntax error / missing
+  // expected export / quiescence-blocked target) daemon_hotreload_failed
+  // lands with the rollback reason and the previous module reference
+  // stays installed so the daemon never goes down on a bad edit.
+  daemon_hotreload_triggered:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
+  daemon_hotreload_completed:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
+  daemon_hotreload_failed:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true  },
+  // ── Unified pathology budget (brain elegance bc8je5f3x, 2026-05-15) ─
+  // Pre-fix six backpressure mechanisms (bridge_failure_streak,
+  // consecutive_bridge_failures, supervisor_redispatch_storm,
+  // dispatch_budget_exceeded, ready_starvation, bridge_health_degraded)
+  // each had their own thresholds and emit shapes. The directive-scoped
+  // pathology budget collapses them: every existing detector now ALSO
+  // debits the budget; one canonical pathology_budget_exhausted event
+  // fires when the accumulated weight crosses the threshold, enumerating
+  // every contributing pathology in one payload so operators see a single
+  // "this directive is consuming attention without converging" signal.
+  pathology_budget_debited:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
+  pathology_budget_exhausted:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true  },
+  // ── Prompt composition cache (brain elegance bc8je5f3x bet #4, 2026-05-15) ─
+  // Telemetry only: cache_hit means composePrompt returned a recently-built
+  // prompt without re-scanning the substrate; cache_miss means a fresh
+  // composition ran. Operators watch hit rate to spot regressions where the
+  // cache is too aggressive (stale prompts) or too lax (no measurable speedup).
+  prompt_composition_cache_hit:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
+  prompt_composition_cache_miss:           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
 
   // ── Bridge-health gate (Batch 8.A, cites brain lesson 5SWP11NZFS3YX68Y95T164HT9W) ─
   // Substrate-emitted when ≥ BRIDGE_DEGRADATION_THRESHOLD bridge_failed events

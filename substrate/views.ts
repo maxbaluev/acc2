@@ -57,10 +57,15 @@ CREATE VIEW IF NOT EXISTS ready_tasks_view AS
     WHERE kind = 'task_node_opened'
   ),
   edges AS (
+    -- Brain audit A1 (2026-05-15): runtime emitters carry edge endpoints
+    -- as payload.from_task / payload.to_task; this CTE used to only read
+    -- payload.$.from / payload.$.to and silently dropped requires edges
+    -- with the canonical keys. COALESCE both shapes so the SQL view
+    -- agrees with runtime/task_topology.ts on readiness.
     SELECT
       directive_id,
-      json_extract(payload, '$.from') AS from_task,
-      json_extract(payload, '$.to')   AS to_task,
+      COALESCE(json_extract(payload, '$.from_task'), json_extract(payload, '$.from')) AS from_task,
+      COALESCE(json_extract(payload, '$.to_task'),   json_extract(payload, '$.to'))   AS to_task,
       json_extract(payload, '$.kind') AS edge_kind
     FROM events
     WHERE kind = 'task_edge_recorded'
@@ -458,15 +463,41 @@ CREATE VIEW IF NOT EXISTS active_objectives_view AS
     WHERE kind = 'directive_opened'
     GROUP BY directive_id
   ),
+  -- Brain audit A2 (2026-05-15): pre-fix the terminal CTE only included
+  -- goal_committed / goal_abandoned and ignored the substrate's own
+  -- directive_closed (emitted by maybeCloseFinishedDirective when every
+  -- task in a finite directive reaches a terminal state). Father saw
+  -- already-closed finite directives as active objectives. Also include
+  -- directive_archived_by_operator — owner-initiated archives are
+  -- terminal for the active-objectives projection.
   terminal AS (
     SELECT DISTINCT directive_id
     FROM events
-    WHERE kind IN ('goal_committed', 'goal_abandoned')
+    WHERE kind IN ('goal_committed', 'goal_abandoned', 'directive_closed', 'directive_archived_by_operator')
   ),
+  -- A directive marked archived via missed reviews is also off the
+  -- active list; this CTE existed pre-A2 and is kept separate to
+  -- preserve test fixtures that rely on the archived kind alone.
   archived AS (
     SELECT DISTINCT directive_id
     FROM events
     WHERE kind = 'directive_archived_missed_reviews'
+  ),
+  -- A directive can be resumed AFTER an archive/close event; the latest
+  -- archive/resume row determines liveness (mirrors closedDirectiveIds
+  -- in runtime/directive_closure.ts). Without this CTE a directive
+  -- archived once-and-then-resumed would stay off active_objectives_view
+  -- forever even though the operator explicitly resumed it.
+  latest_lifecycle AS (
+    SELECT e.directive_id, e.kind
+    FROM events e
+    JOIN (
+      SELECT directive_id, MAX(ts) AS max_ts
+      FROM events
+      WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews', 'directive_resumed')
+      GROUP BY directive_id
+    ) latest ON latest.directive_id = e.directive_id AND latest.max_ts = e.ts
+    WHERE e.kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews', 'directive_resumed')
   )
   SELECT
     d.directive_id,
@@ -474,7 +505,10 @@ CREATE VIEW IF NOT EXISTS active_objectives_view AS
     d.payload
   FROM directives d
   WHERE d.directive_id NOT IN (SELECT directive_id FROM terminal)
-    AND d.directive_id NOT IN (SELECT directive_id FROM archived);
+    AND d.directive_id NOT IN (SELECT directive_id FROM archived)
+    AND d.directive_id NOT IN (
+      SELECT directive_id FROM latest_lifecycle WHERE kind != 'directive_resumed'
+    );
 `;
 
 // low_risk_inline_patterns_view — Phase Audit (§3.6 dispatch decider).
@@ -575,6 +609,51 @@ CREATE VIEW IF NOT EXISTS promoted_knowledge_view AS
          json_extract(p.context_refs, '$[0]')
        )
   WHERE p.kind = 'knowledge_promoted';
+`;
+
+// recipe_registry_view — operator-facing projection of the latest
+// recipe_extracted row per (goal_shape, topology_signature). Recipe updates are
+// append-only recipe_extracted rows, so callers need the freshest row for each
+// composite recipe key rather than a raw history scan.
+const VIEW_RECIPE_REGISTRY = `
+CREATE VIEW IF NOT EXISTS recipe_registry_view AS
+  WITH recipes AS (
+    SELECT
+      e.rowid                                                        AS event_rowid,
+      e.id                                                           AS recipe_id,
+      e.id                                                           AS id,
+      e.ts                                                           AS ts,
+      e.directive_id                                                 AS directive_id,
+      e.task_id                                                      AS task_id,
+      CAST(COALESCE(json_extract(e.payload, '$.confidence'), 0) AS REAL) AS confidence,
+      json_extract(e.payload, '$.goal_shape')                        AS goal_shape,
+      COALESCE(json_extract(e.payload, '$.topology_signature'), '')   AS topology_signature,
+      COALESCE(json_extract(e.payload, '$.seeded_by'), 'extracted')   AS status,
+      e.payload                                                      AS payload,
+      e.context_refs                                                 AS context_refs
+    FROM events e
+    WHERE e.kind = 'recipe_extracted'
+  )
+  SELECT
+    recipe_id,
+    id,
+    ts,
+    directive_id,
+    task_id,
+    confidence,
+    goal_shape,
+    topology_signature,
+    status,
+    payload,
+    context_refs
+  FROM recipes r
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM recipes newer
+    WHERE COALESCE(newer.goal_shape, '') = COALESCE(r.goal_shape, '')
+      AND COALESCE(newer.topology_signature, '') = COALESCE(r.topology_signature, '')
+      AND (newer.ts > r.ts OR (newer.ts = r.ts AND newer.event_rowid > r.event_rowid))
+  );
 `;
 
 // lesson_implementer_queue_view — derived inbox for the lesson-implementer
@@ -1313,6 +1392,7 @@ const VIEW_NAMES = [
   "applied_lesson_effectiveness_view",
   "lesson_implementation_status_view",
   "lesson_implementer_queue_view",
+  "recipe_registry_view",
   "promoted_knowledge_view",
   "irreversible_effects_view",
   "low_risk_inline_patterns_view",
@@ -1357,6 +1437,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_IRREVERSIBLE_EFFECTS);
   db.exec(VIEW_LOW_RISK_INLINE_PATTERNS);
   db.exec(VIEW_PROMOTED_KNOWLEDGE);
+  db.exec(VIEW_RECIPE_REGISTRY);
   db.exec(VIEW_LESSON_IMPLEMENTER_QUEUE);
   db.exec(VIEW_LESSON_IMPLEMENTATION_STATUS);
   db.exec(VIEW_APPLIED_LESSON_EFFECTIVENESS);
@@ -2221,6 +2302,20 @@ export type PromotedKnowledgeFilter = {
   limit?: number;
 };
 
+export type RecipeRegistryRow = {
+  recipe_id: string;
+  id: string;
+  ts: string;
+  directive_id: string;
+  task_id: string;
+  confidence: number;
+  goal_shape: string | null;
+  topology_signature: string;
+  status: string;
+  payload: Record<string, unknown>;
+  context_refs: string[];
+};
+
 /** Promoted-knowledge rows for `acc admin inspect-knowledge`. The view
  *  itself returns every promotion; filters compose at the query site so a
  *  scoped read stays a single SQL pass.  Rows whose canonical candidate
@@ -2255,6 +2350,33 @@ export const promotedKnowledge = (
     confidence: (r.confidence as number) ?? 0,
     text: (r.text as string | null) ?? null,
     tags: parseJson<string[]>(r.tags ?? "[]"),
+    context_refs: parseJson<string[]>(r.context_refs ?? "[]"),
+  }));
+};
+
+/** Latest recipe_extracted row per recipe key, ordered newest first. */
+export const recipeRegistry = (db: Database, limit?: number): RecipeRegistryRow[] => {
+  const limitSql = limit && limit > 0 ? `LIMIT ${Math.floor(limit)}` : "";
+  const rows = db
+    .query(
+      `SELECT recipe_id, id, ts, directive_id, task_id, confidence,
+              goal_shape, topology_signature, status, payload, context_refs
+       FROM recipe_registry_view
+       ORDER BY ts DESC
+       ${limitSql}`,
+    )
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    recipe_id: r.recipe_id as string,
+    id: r.id as string,
+    ts: r.ts as string,
+    directive_id: r.directive_id as string,
+    task_id: r.task_id as string,
+    confidence: (r.confidence as number) ?? 0,
+    goal_shape: (r.goal_shape as string | null) ?? null,
+    topology_signature: (r.topology_signature as string | null) ?? "",
+    status: (r.status as string | null) ?? "available",
+    payload: parseJson<Record<string, unknown>>(r.payload ?? "{}"),
     context_refs: parseJson<string[]>(r.context_refs ?? "[]"),
   }));
 };

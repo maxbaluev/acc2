@@ -103,6 +103,252 @@ export const directiveCloseReason = (db: Database, directiveId: string): string 
   return "all_tasks_terminal";
 };
 
+/** Cascade-commit dangling descendants when a directive root commits.
+ *
+ *  Brain dispatches frequently open refinement children via
+ *  `task_node_opened` + `task_edge_recorded(refines)`, then directly
+ *  emit `task_committed` on the ROOT task once the closure verifier
+ *  passes (closure_residual < 0.3). The children never receive their own
+ *  terminal events, so the directive stays open and the scheduler
+ *  re-dispatches them — burning tokens on work the root already completed.
+ *
+ *  When a ROOT task commits, this helper walks every descendant reachable
+ *  via `refines` edges from the root, and emits `task_committed` for any
+ *  descendant that has no terminal event yet. The cascaded event carries
+ *  `reason: "cascaded_from_root_commit"` and cites the root task id so the
+ *  credit chain stays intact and operators can audit the cascade.
+ *
+ *  "Root" = `task_node_opened` whose `parent_task_id` is null (the
+ *  directive's top-level task). Non-root commits do not cascade — the
+ *  brain is allowed to commit a single refinement node without sealing
+ *  its siblings.
+ *
+ *  Returns the count of cascaded descendants. Idempotent: a re-call
+ *  immediately after the first finds zero un-terminated descendants. */
+export const cascadeRootCommitToDescendants = (
+  db: Database,
+  rootTaskId: string,
+  rootClosureResidual?: number,
+): number => {
+  // Verify this IS a root task: task_node_opened row with parent_task_id IS NULL.
+  const rootRow = db
+    .query(
+      `SELECT 1 FROM events
+       WHERE kind = 'task_node_opened' AND task_id = ? AND parent_task_id IS NULL
+       LIMIT 1`,
+    )
+    .get(rootTaskId) as { 1: number } | null;
+  if (!rootRow) return 0;
+
+  // BFS over refines edges to collect every descendant.
+  const visited = new Set<string>();
+  const queue: string[] = [rootTaskId];
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    const children = db
+      .query(
+        `SELECT json_extract(payload, '$.to_task') AS to_task
+         FROM events
+         WHERE kind = 'task_edge_recorded'
+           AND json_extract(payload, '$.kind') = 'refines'
+           AND json_extract(payload, '$.from_task') = ?`,
+      )
+      .all(cur) as Array<{ to_task: string | null }>;
+    for (const c of children) {
+      if (c.to_task && !visited.has(c.to_task)) queue.push(c.to_task);
+    }
+  }
+  visited.delete(rootTaskId);
+  if (visited.size === 0) return 0;
+
+  // Resolve the root's directive_id once — descendants inherit it. The
+  // brain sometimes emits task_node_opened only for the root and refers
+  // to children solely via task_edge_recorded(refines) with synthesised
+  // to_task IDs (e.g. `<root>-MEASURE`). Those synthetic descendant IDs
+  // never appear in task_node_opened, so we must fall back to the
+  // root's directive scope.
+  const rootDirective = db
+    .query(
+      `SELECT directive_id FROM events
+       WHERE kind = 'task_node_opened' AND task_id = ?
+       ORDER BY ts ASC, rowid ASC LIMIT 1`,
+    )
+    .get(rootTaskId) as { directive_id: string } | null;
+  if (!rootDirective) return 0;
+
+  let cascaded = 0;
+  for (const taskId of visited) {
+    // Skip descendants that already have a terminal event.
+    const terminal = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE kind IN ('task_committed', 'task_failed', 'task_abandoned')
+           AND task_id = ?
+         LIMIT 1`,
+      )
+      .get(taskId) as { 1: number } | null;
+    if (terminal) continue;
+    // Prefer the descendant's own task_node_opened directive_id when
+    // available; otherwise inherit from the root (handles brain edge
+    // emissions that synthesise child IDs without backing them with
+    // task_node_opened).
+    const opened = db
+      .query(
+        `SELECT directive_id FROM events
+         WHERE kind = 'task_node_opened' AND task_id = ?
+         ORDER BY ts ASC, rowid ASC LIMIT 1`,
+      )
+      .get(taskId) as { directive_id: string } | null;
+    const directiveId = opened?.directive_id ?? rootDirective.directive_id;
+    emitEvent(db, {
+      kind: "task_committed",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: {
+        reason: "cascaded_from_root_commit",
+        root_task_id: rootTaskId,
+        root_closure_residual: typeof rootClosureResidual === "number"
+          ? rootClosureResidual
+          : null,
+        directive_source: opened ? "own_task_node_opened" : "inherited_from_root",
+      } as JsonValue,
+    });
+    cascaded++;
+  }
+  return cascaded;
+};
+
+/** Upward cascade: when EVERY refines-child of a task has a terminal
+ *  event, auto-commit the task. This complements `cascadeRootCommitToDescendants`
+ *  — together they ensure a directive reaches `all_tasks_terminal` even
+ *  when the brain commits only some nodes in the DAG.
+ *
+ *  The "older test-speedup" case observed 2026-05-15: the brain emitted
+ *  `task_committed` on the MEASURE child after running the timing verifier,
+ *  but never sealed the ROOT. Without an upward cascade, the root sat in
+ *  `ready_tasks_view` forever, kept getting re-dispatched, and burned
+ *  bridge_failed:timeout retries on work that was already done downstream.
+ *
+ *  Algorithm: from the given task, walk UP the refines edges (to_task →
+ *  from_task) to find its parent. If every refines-child of that parent
+ *  has a terminal event, emit `task_committed` for the parent with
+ *  `reason="cascaded_upward_from_all_children_terminal"`. Recurse upward
+ *  until a node with non-terminal siblings, a node already terminal,
+ *  or the root (no parent) is reached.
+ *
+ *  Returns the count of cascaded parent commits. */
+export const cascadeUpwardWhenChildrenTerminal = (
+  db: Database,
+  startingTaskId: string,
+): number => {
+  let cascaded = 0;
+  let cursor = startingTaskId;
+  // Bounded loop so a corrupted edge graph can't spin forever.
+  for (let depth = 0; depth < 64; depth++) {
+    // The cursor itself must be terminal — only then does the parent see
+    // "all children terminal" reach the threshold.
+    const ownTerminal = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE task_id = ?
+           AND kind IN ('task_committed', 'task_failed', 'task_abandoned')
+         LIMIT 1`,
+      )
+      .get(cursor) as { 1: number } | null;
+    if (!ownTerminal) break;
+
+    // Find PARENT via reverse refines edge.
+    const parentRow = db
+      .query(
+        `SELECT json_extract(payload, '$.from_task') AS from_task
+         FROM events
+         WHERE kind = 'task_edge_recorded'
+           AND json_extract(payload, '$.kind') = 'refines'
+           AND json_extract(payload, '$.to_task') = ?
+         LIMIT 1`,
+      )
+      .get(cursor) as { from_task: string | null } | null;
+    if (!parentRow || !parentRow.from_task) break;
+    const parentId = parentRow.from_task;
+
+    // Parent already terminal — nothing to cascade.
+    const parentTerminal = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE task_id = ?
+           AND kind IN ('task_committed', 'task_failed', 'task_abandoned')
+         LIMIT 1`,
+      )
+      .get(parentId) as { 1: number } | null;
+    if (parentTerminal) break;
+
+    // Check every refines-child of parent is terminal.
+    const siblings = db
+      .query(
+        `SELECT DISTINCT json_extract(payload, '$.to_task') AS to_task
+         FROM events
+         WHERE kind = 'task_edge_recorded'
+           AND json_extract(payload, '$.kind') = 'refines'
+           AND json_extract(payload, '$.from_task') = ?`,
+      )
+      .all(parentId) as Array<{ to_task: string | null }>;
+    let allTerminal = true;
+    for (const sib of siblings) {
+      if (!sib.to_task) continue;
+      const t = db
+        .query(
+          `SELECT 1 FROM events
+           WHERE task_id = ?
+             AND kind IN ('task_committed', 'task_failed', 'task_abandoned')
+           LIMIT 1`,
+        )
+        .get(sib.to_task) as { 1: number } | null;
+      if (!t) { allTerminal = false; break; }
+    }
+    if (!allTerminal) break;
+
+    // Resolve parent's directive_id, falling back to walking the cursor's
+    // task_node_opened in case the parent only appears in edges.
+    const parentOpened = db
+      .query(
+        `SELECT directive_id FROM events
+         WHERE kind = 'task_node_opened' AND task_id = ?
+         ORDER BY ts ASC, rowid ASC LIMIT 1`,
+      )
+      .get(parentId) as { directive_id: string } | null;
+    let directiveId = parentOpened?.directive_id;
+    if (!directiveId) {
+      const cursorOpened = db
+        .query(
+          `SELECT directive_id FROM events
+           WHERE kind = 'task_node_opened' AND task_id = ?
+           ORDER BY ts ASC, rowid ASC LIMIT 1`,
+        )
+        .get(cursor) as { directive_id: string } | null;
+      directiveId = cursorOpened?.directive_id;
+    }
+    if (!directiveId) break;
+
+    emitEvent(db, {
+      kind: "task_committed",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: parentId,
+      payload: {
+        reason: "cascaded_upward_from_all_children_terminal",
+        child_task_id: cursor,
+        sibling_count: siblings.length,
+      } as JsonValue,
+    });
+    cascaded++;
+    cursor = parentId;
+  }
+  return cascaded;
+};
+
 /** Idempotent: emits `directive_closed` once per directive when every task
  *  under it has reached a terminal state. Re-emits are suppressed by the
  *  closed-set check. Returns the close reason when an event was emitted,

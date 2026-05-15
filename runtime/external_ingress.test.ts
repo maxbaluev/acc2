@@ -2,47 +2,31 @@
 // limit, quarantine. Tests target the auxiliary HTTP port (handle.auxPort)
 // which hosts /external/push alongside /health and /shutdown.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { closeDb } from "../substrate/db";
-import { startDaemon, stopDaemon, type DaemonHandle } from "./daemon";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { useSharedDaemon } from "../tests/daemon_fixture";
 
 // Tight ingress-only band, well-disjoint from runtime/daemon.test.ts
 // ([19000, 60000)) and cli/dispatch.test.ts ([12000, 18000)) so all three
 // test files can run in parallel without colliding on either port.
 const MCP_BASE = 8000;
 const AUX_BASE = 10000;
-const pickMcp = () => MCP_BASE + Math.floor(Math.random() * 1000);
-const pickAux = () => AUX_BASE + Math.floor(Math.random() * 1000);
 
-let handle: DaemonHandle | null = null;
-let dir = "";
 const TOKEN = "test-bearer-token-deadbeef";
+const daemon = useSharedDaemon({
+  tmpPrefix: "acc2-ingress-",
+  dbName: "ingress.db",
+  mcpBase: MCP_BASE,
+  auxBase: AUX_BASE,
+  externalPushToken: TOKEN,
+  setEnvPorts: false,
+});
 
-beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), "acc2-ingress-"));
-  const mcp = pickMcp();
-  const auxPort = pickAux();
-  handle = await startDaemon({
-    port: mcp,
-    auxPort,
-    stateDbPath: join(dir, "ingress.db"),
-    socketFile: join(dir, "v2.sock"),
-    tokenFile: join(dir, "v2.sock.token"),
-    externalPushToken: TOKEN,
-  });
+beforeEach(() => {
+  const handle = daemon.handle();
+  handle.ingressState.buckets.clear();
   // Shrink the rate limit so we can exercise breaches without sending dozens
   // of requests; default is 60/min.
   handle.ingressState.rateLimitPerMin = 5;
-});
-
-afterEach(async () => {
-  if (handle) await stopDaemon(handle);
-  handle = null;
-  closeDb();
-  rmSync(dir, { recursive: true, force: true });
 });
 
 const push = async (
@@ -52,7 +36,7 @@ const push = async (
 ): Promise<{ status: number; body: any }> => {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (bearer) headers.authorization = `Bearer ${bearer}`;
-  const res = await fetch(`http://127.0.0.1:${handle!.auxPort}/external/push`, {
+  const res = await fetch(`http://127.0.0.1:${daemon.handle().auxPort}/external/push`, {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -91,7 +75,7 @@ describe("POST /external/push", () => {
   });
 
   test("wrong kind (not external_event_received) returns 400", async () => {
-    const res = await fetch(`http://127.0.0.1:${handle!.auxPort}/external/push`, {
+    const res = await fetch(`http://127.0.0.1:${daemon.handle().auxPort}/external/push`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({ source: "test_source", kind: "owner_input_received", payload: {} }),
@@ -115,7 +99,7 @@ describe("POST /external/push", () => {
     expect(fourth.status).toBe(429);
     expect(fourth.body.error).toBe("source_quarantined");
 
-    const db = handle!.db;
+    const db = daemon.handle().db;
     const row = db
       .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'external_source_quarantined'")
       .get() as { n: number };

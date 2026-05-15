@@ -39,7 +39,19 @@ export type WorkerName =
   | "rehabilitation"
   | "integrity"
   | "supervisor"
-  | "compaction";
+  | "compaction"
+  // Brain audit B (2026-05-15): Model-D promotion pipeline was relying on
+  // Father opening maintenance directives to scan candidates — chance
+  // dispatch only. A first-class extractors tick scans candidates on a
+  // bounded cadence and emits knowledge_promoted / code_artifact_promoted /
+  // recipe_promoted when posteriors cross promotion thresholds.
+  | "extractors"
+  // Brain audit D (2026-05-15): amendment + metrics_gauge_refresh workers
+  // were registered + ticked in daemon.ts but absent from
+  // ACC2_DISABLE_WORKERS taxonomy. Operators couldn't turn them off via
+  // the canonical env knob and tests/preload.ts didn't pin them OFF.
+  | "amendment"
+  | "metrics_gauge_refresh";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -53,6 +65,9 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "integrity",
   "supervisor",
   "compaction",
+  "extractors",
+  "amendment",
+  "metrics_gauge_refresh",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

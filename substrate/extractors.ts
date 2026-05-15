@@ -348,11 +348,11 @@ export const extractCodeArtifactScores = (db: Database): CodeArtifactScoreSummar
     for (const art of artifacts) {
       const events = db
         .query(
-          `SELECT residual FROM events
+          `SELECT residual, directive_id, task_id, loop_id FROM events
            WHERE kind = 'action_scored' AND action_artifact_id = ? AND residual IS NOT NULL
            ORDER BY ts ASC`,
         )
-        .all(art.id) as Array<{ residual: number }>;
+        .all(art.id) as Array<{ residual: number; directive_id: string; task_id: string; loop_id: string }>;
 
       if (events.length === 0) continue;
 
@@ -392,7 +392,35 @@ export const extractCodeArtifactScores = (db: Database): CodeArtifactScoreSummar
         [alpha, beta, score, confidence, recentMean, newStatus, newName, nowIso(), art.id],
       );
       updated++;
-      if (shouldPromote) promoted++;
+      if (shouldPromote) {
+        promoted++;
+        // Brain audit B (2026-05-15): pre-fix extractCodeArtifactScores
+        // updated the row's status but never emitted the canonical
+        // code_artifact_promoted event. Operator surfaces (TUI artifact
+        // panel, promotion telemetry) showed zero promotions even though
+        // many artifacts crossed the bar. Emit at promotion time so the
+        // event ledger is the source of truth. We attribute the row to
+        // the LATEST action_scored that drove the posterior so the
+        // directive/task lineage stays intact.
+        const lastDriver = events[events.length - 1]!;
+        insertEvent(db, {
+          kind: "code_artifact_promoted",
+          directive_id: lastDriver.directive_id,
+          task_id: lastDriver.task_id,
+          loop_id: lastDriver.loop_id,
+          substrate_origin: "substrate_auto",
+          payload: {
+            artifact_id: art.id,
+            score,
+            confidence,
+            posterior_alpha: alpha,
+            posterior_beta: beta,
+            sample_count: count,
+            name: newName,
+          },
+          context_refs: [art.id],
+        });
+      }
     }
   });
 

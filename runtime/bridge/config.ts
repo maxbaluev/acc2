@@ -49,13 +49,38 @@ export const DEFAULT_TIMEOUT_MS = 600_000;
  *  Override via `ACC2_OPENCODE_MCP_HANDSHAKE_MS` or `SpawnOpts.mcpHandshakeWindowMs`. */
 export const DEFAULT_MCP_HANDSHAKE_WINDOW_MS = 120_000;
 
-/** No-progress watchdog — when the opencode subprocess emits zero
- *  `bridge_frame_received`-class events for this long, the bridge kills
- *  it without waiting for the overall timeout. The default (90s) is
- *  roomy enough for slow models / cold caches while still catching
- *  genuine wedges long before the 600s harness timeout. Override via
- *  `ACC2_BRIDGE_STUCK_THRESHOLD_MS`. */
-export const DEFAULT_BRIDGE_STUCK_THRESHOLD_MS = 90_000;
+/** Inter-frame no-progress threshold — RESERVED, currently unused.
+ *  After live ledger evidence (2026-05-15 10:34-10:40) proved that any
+ *  sub-overall inter-frame watchdog (90s, 240s) kills the brain mid
+ *  strategic synthesis (the brain reasons silently for 4+ min between
+ *  MCP calls; opencode built-ins like web_search take 30-60s; complex
+ *  bash sequences chain), we DISABLED the inter-frame watchdog
+ *  entirely. Once `firstFrameSeen=true` the watchdog yields to the
+ *  overall `timeoutMs` budget (default 600s) as the sole upper bound.
+ *  This constant is retained so the bridge module surface stays
+ *  backwards-compatible with any caller that still passes
+ *  `stuckThresholdMs` (tests, programmatic callers); the value has no
+ *  observable effect in production. Override via
+ *  `ACC2_BRIDGE_STUCK_THRESHOLD_MS` (kept for future re-enable). */
+export const DEFAULT_BRIDGE_STUCK_THRESHOLD_MS = 240_000;
+
+/** First-frame budget — the budget the subprocess gets between SPAWN
+ *  and its FIRST `bridge_frame_received` event. The brain's strategic
+ *  synthesis on a fresh dispatch often spends 2-4 minutes reasoning
+ *  before its first MCP tool call (substrate.search / substrate.read
+ *  during depth-1 retrieval; large prompts; cold model caches). The
+ *  old 90s inter-frame default was killing legitimate first-cycle
+ *  thinking as a false-positive wedge. 300s (5 min) is generous enough
+ *  for slow first cycles; the 600s overall timeout still bounds the
+ *  worst case. Override via `ACC2_BRIDGE_FIRST_FRAME_THRESHOLD_MS`.
+ *
+ *  Live ledger evidence (2026-05-15 10:09-10:13): four consecutive
+ *  bridge_failed events across distinct tasks, every one with
+ *  no_frames_received elapsed_ms ∈ [110, 205] — opencode subprocesses
+ *  reasoning past the 90s inter-frame cap on slow first cycles. The
+ *  fix splits the watchdog into TWO tiers and stops killing strategic
+ *  thinking. */
+export const DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS = 300_000;
 
 /** Canonical name for v2's MCP server in the materialized opencode
  *  config. Stable across dispatches so the brain's prompts can reference

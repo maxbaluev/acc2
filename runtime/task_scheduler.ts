@@ -377,6 +377,19 @@ export const schedulerLoop = async (
   let ticks = 0;
   let drainedStreak = 0;
 
+  // Brain elegance bc8je5f3x (2026-05-15): wake immediately when a new
+  // ready-task signal lands on the activation bus instead of waiting
+  // for the next poll tick. Polling stays as the safety-net max-timeout
+  // so a missed publish (cross-process / subscriber crash) still drains.
+  const { waitForActivation } = await import("./activation_bus");
+  const WAKE_KINDS = [
+    "directive_opened",
+    "task_node_opened",
+    "task_committed",
+    "task_failed",
+    "directive_resumed",
+  ] as const;
+
   while (ticks < stopAfterTicks) {
     if (opts.abort?.aborted) return;
     const tick = await schedulerTick(db, opts);
@@ -385,15 +398,22 @@ export const schedulerLoop = async (
       drainedStreak++;
       if (drainedStreak >= 2 && stopAfterTicks === Infinity) {
         // Quiescent — yield. The daemon can call schedulerLoop again when a
-        // new directive arrives. Long-running daemons would replace this
-        // with a substrate-event-driven wake instead of polling.
+        // new directive arrives.
         return;
       }
     } else {
       drainedStreak = 0;
     }
     if (ticks >= stopAfterTicks) return;
-    await new Promise((r) => setTimeout(r, pollIntervalMs));
+    // Wait for either the next poll tick OR an activation event. The race
+    // means a fresh directive_opened wakes the scheduler within ~1ms
+    // instead of pollIntervalMs (default 500ms). When activation fires,
+    // the returned promise resolves with the payload; we ignore it and
+    // just loop — the next tick will see the row in ready_tasks_view.
+    await Promise.race([
+      new Promise((r) => setTimeout(r, pollIntervalMs)),
+      waitForActivation(WAKE_KINDS, opts.abort),
+    ]);
   }
 };
 

@@ -181,6 +181,13 @@ describe("derived sets match their pre-unification shape", () => {
       "worker_tick_overrun",
       "bridge_health_degraded",
       "supervisor_intervention_recorded",
+      // Brain audit bqlr29psq (2026-05-15): hot-reload failures count
+      // toward substrate-status so operators can spot a noisy source
+      // editor pumping bad code into the daemon.
+      "daemon_hotreload_failed",
+      // Brain elegance bc8je5f3x (2026-05-15): pathology budget
+      // exhaustion is the unified "directive not converging" signal.
+      "pathology_budget_exhausted",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

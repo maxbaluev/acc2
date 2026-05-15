@@ -8,6 +8,7 @@ import type { Database } from "bun:sqlite";
 import type { Event, EventKind, JsonValue, SubstrateOrigin } from "../substrate/types";
 import { newId, nowIso } from "./ids";
 import { publishEvent } from "./event_bus";
+import { publishActivation } from "./activation_bus";
 import { recordEventEmission } from "./metrics";
 
 export type EmitEventInput = {
@@ -87,6 +88,16 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
     task_id,
     substrate_origin,
     payload: (input.payload ?? {}) as JsonValue,
+  });
+  // Brain elegance bc8je5f3x (2026-05-15): also publish to the activation
+  // bus so workers awaiting specific event kinds wake immediately
+  // instead of polling. Polling remains the safety-net fallback.
+  publishActivation({
+    event_id: id,
+    kind: input.kind,
+    ts,
+    directive_id,
+    task_id,
   });
   // Batch 3.OPS: Prometheus counter — one increment per kind. Fail-soft
   // so a metrics misconfiguration cannot block emission. The kind is the

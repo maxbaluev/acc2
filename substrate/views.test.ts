@@ -15,7 +15,9 @@ import {
   lessonImplementerQueue,
   originPromotionRanking,
   ownerConversation,
+  promotedKnowledge,
   readyTasks,
+  recipeRegistry,
   rollingReviewDue,
   runViews,
   taskGraphFor,
@@ -553,6 +555,87 @@ describe("origin_promotion_by_directive_view + originPromotionRanking (Phase DAG
     const goalShape = (_: string): string => "wrong_shape";
     const ranking = originPromotionRanking(db, goalShape, "target_shape_none");
     expect(ranking.length).toBe(0);
+  });
+});
+
+describe("operator registry views", () => {
+  test("promotedKnowledge exposes promoted rows through the accessor", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    const candidateId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d_k",
+      task_id: "t_k",
+      substrate_origin: "opencode",
+      payload: { text: "Operator projections should expose promoted knowledge.", tags: ["projection"] },
+    });
+    const promotedId = insertEvent(db, {
+      kind: "knowledge_promoted",
+      directive_id: "d_k",
+      task_id: "t_k",
+      substrate_origin: "substrate_auto",
+      payload: { candidate_id: candidateId, score: 0.9, confidence: 0.85 },
+      context_refs: [candidateId],
+    });
+
+    const rows = promotedKnowledge(db);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.event_id).toBe(promotedId);
+    expect(rows[0]!.candidate_id).toBe(candidateId);
+    expect(rows[0]!.text).toBe("Operator projections should expose promoted knowledge.");
+    expect(rows[0]!.tags).toEqual(["projection"]);
+  });
+
+  test("recipeRegistry returns the latest recipe row per goal/topology key", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    const oldId = insertEvent(db, {
+      kind: "recipe_extracted",
+      directive_id: "d_r",
+      task_id: "t_r",
+      payload: {
+        goal_shape: "shape_a",
+        topology_signature: "topo_1",
+        confidence: 0.5,
+        trajectory: [],
+      },
+      ts: "2026-01-01T00:00:01.000Z",
+    });
+    const latestId = insertEvent(db, {
+      kind: "recipe_extracted",
+      directive_id: "d_r",
+      task_id: "t_r",
+      payload: {
+        goal_shape: "shape_a",
+        topology_signature: "topo_1",
+        confidence: 0.6,
+        seeded_by: "inline_post_commit_bump",
+        trajectory: [{ step_kind: "action_predicted" }],
+      },
+      context_refs: [oldId],
+      ts: "2026-01-01T00:00:02.000Z",
+    });
+    insertEvent(db, {
+      kind: "recipe_extracted",
+      directive_id: "d_other",
+      task_id: "t_other",
+      payload: {
+        goal_shape: "shape_b",
+        topology_signature: "topo_2",
+        confidence: 0.55,
+        trajectory: [],
+      },
+      ts: "2026-01-01T00:00:03.000Z",
+    });
+
+    const rows = recipeRegistry(db);
+    expect(rows.length).toBe(2);
+    const shapeA = rows.find((r) => r.goal_shape === "shape_a");
+    expect(shapeA!.recipe_id).toBe(latestId);
+    expect(shapeA!.confidence).toBe(0.6);
+    expect(shapeA!.status).toBe("inline_post_commit_bump");
   });
 });
 

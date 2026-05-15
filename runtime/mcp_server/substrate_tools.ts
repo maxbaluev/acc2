@@ -8,7 +8,9 @@
 
 import type { z } from "zod";
 import type { JsonValue, Runtime, SandboxDecl, SubstrateOrigin } from "../../substrate/types";
+import { EVENT_KINDS } from "../../substrate/event_kinds";
 import { emitEvent, getEventById, type EmitEventInput } from "../events";
+import { summarizeEffectiveness } from "../brain_effectiveness";
 import { runBunArtifact } from "../runtimes/bun";
 import { runUvArtifact } from "../runtimes/uv";
 import { runCamofoxArtifact } from "../runtimes/camofox";
@@ -42,6 +44,8 @@ import {
   lessonImplementationStatus,
   appliedLessonEffectiveness,
   lessonApplyCandidates,
+  promotedKnowledge,
+  recipeRegistry,
 } from "../../substrate/views";
 import type {
   AdmitArtifactSchema,
@@ -152,6 +156,18 @@ export const handleEmit = (
   if (!kind || typeof kind !== "string") {
     return { ok: false, error: "missing 'kind'" };
   }
+  // Brain audit C (2026-05-15): reject any kind not declared in the
+  // canonical EVENT_KINDS registry at the ledger write boundary. Pre-fix
+  // a dynamic caller (brain emitting via MCP) could persist an arbitrary
+  // string and bypass the embedding filter, health-metric tagging,
+  // mirror-inline classification, and downstream view filters. The
+  // registry is the only safe vocabulary.
+  if (!(kind in EVENT_KINDS)) {
+    return {
+      ok: false,
+      error: `unknown_event_kind:${kind}; register it in substrate/event_kinds.ts EVENT_KINDS before emitting`,
+    };
+  }
   // Brain privilege gate: the brain may NOT emit owner/orchestrator
   // kinds via substrate.emit. See BRAIN_FORBIDDEN_KINDS doc above.
   if (isBrainInvoker(ctx.invoker) && BRAIN_FORBIDDEN_KINDS.has(kind)) {
@@ -168,8 +184,55 @@ export const handleEmit = (
   // refinement-edge wiring still resolves correctly.
   if (kind === "task_node_opened") {
     const directiveId = src.directive_id as string | undefined;
+    const taskId = src.task_id as string | undefined;
+    const parentTaskId = src.parent_task_id as string | null | undefined;
     const goalRaw = ((src.payload as Record<string, unknown> | undefined)?.goal) ?? undefined;
     const goal = typeof goalRaw === "string" ? goalRaw : undefined;
+    // Audit-#8 (2026-05-15): the brain has been observed reusing the root
+    // task_id when opening refinement CHILDREN — directive 97DNBDA4P93N
+    // had 4 task_node_opened rows all carrying the same task_id but
+    // different goals. This breaks readyTasks dedup and the cascade
+    // (children invisible to the refines-edge walk because they have
+    // no distinct task_id). Reject any task_node_opened whose task_id
+    // already has a row UNDER THE SAME DIRECTIVE.
+    //   - If the existing row was the root (parent IS NULL) and the new
+    //     row is also presented as the root (parent IS NULL) AND the
+    //     goal matches → return the existing id (idempotent open).
+    //   - If the existing row is the root and the new row is a child
+    //     (parent_task_id non-null) reusing the root's id → reject with
+    //     a clear error so the brain rewrites with a fresh id.
+    //   - Same kind+task_id but different goal text under the same
+    //     directive → reject.
+    if (directiveId && taskId) {
+      const existing = ctx.db
+        .query(
+          `SELECT task_id, parent_task_id, json_extract(payload, '$.goal') AS goal
+           FROM events
+           WHERE kind = 'task_node_opened'
+             AND directive_id = ?
+             AND task_id = ?
+           ORDER BY ts ASC LIMIT 1`,
+        )
+        .get(directiveId, taskId) as { task_id: string; parent_task_id: string | null; goal: string } | null;
+      if (existing) {
+        const existingGoalMatches = (goal ?? "") === (existing.goal ?? "");
+        const existingIsRoot = existing.parent_task_id == null;
+        const newIsRoot = parentTaskId == null;
+        if (existingIsRoot && newIsRoot && existingGoalMatches) {
+          // True idempotent re-open of the same root with the same goal.
+          return {
+            ok: true,
+            result: { id: existing.task_id, deduped: true, reason: "root_task_already_opened" } as JsonValue,
+          };
+        }
+        return {
+          ok: false,
+          error: `task_id_reuse:${taskId};existing_parent_task_id=${existing.parent_task_id ?? "null"};existing_goal=${(existing.goal ?? "").slice(0, 80)};new_parent_task_id=${parentTaskId ?? "null"};hint=mint a fresh task_id for each task_node_opened — the brain must NOT reuse the root id when opening refinement children`,
+        };
+      }
+    }
+    // Existing dedup: same (directive_id, goal) → return the existing
+    // task_id so a refinement-edge wiring still resolves.
     if (directiveId && goal && goal.length > 0) {
       const existing = ctx.db
         .query(
@@ -183,6 +246,42 @@ export const handleEmit = (
         return {
           ok: true,
           result: { id: existing.task_id, deduped: true, reason: "task_goal_already_opened" } as JsonValue,
+        };
+      }
+    }
+  }
+  // Brain audit F (2026-05-15): refuse task_edge_recorded events whose
+  // from_task/to_task endpoints don't exist as task_node_opened rows
+  // under the same directive. Without this gate, refinement edges can
+  // point at non-existent children → DAG cascade walks a graph that
+  // disagrees with the renderer.
+  if (kind === "task_edge_recorded") {
+    const directiveId = src.directive_id as string | undefined;
+    const payload = (src.payload as Record<string, unknown> | undefined) ?? {};
+    const fromTask = (payload.from_task ?? payload.from) as string | undefined;
+    const toTask = (payload.to_task ?? payload.to) as string | undefined;
+    if (directiveId && fromTask && toTask) {
+      const fromExists = ctx.db
+        .query(
+          `SELECT 1 FROM events
+           WHERE kind = 'task_node_opened' AND directive_id = ? AND task_id = ?
+           LIMIT 1`,
+        )
+        .get(directiveId, fromTask);
+      const toExists = ctx.db
+        .query(
+          `SELECT 1 FROM events
+           WHERE kind = 'task_node_opened' AND directive_id = ? AND task_id = ?
+           LIMIT 1`,
+        )
+        .get(directiveId, toTask);
+      if (!fromExists || !toExists) {
+        const missing: string[] = [];
+        if (!fromExists) missing.push(`from_task=${fromTask}`);
+        if (!toExists) missing.push(`to_task=${toTask}`);
+        return {
+          ok: false,
+          error: `task_edge_endpoint_missing:${missing.join(",")};hint=open the endpoint via task_node_opened in the same directive before recording the edge`,
         };
       }
     }
@@ -292,6 +391,27 @@ export const handleRead = (
         return { ok: true, result: appliedLessonEffectiveness(db) as unknown as JsonValue };
       case "lesson_apply_candidate_view":
         return { ok: true, result: lessonApplyCandidates(db) as unknown as JsonValue };
+      case "promoted_knowledge_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const origin = typeof arg.origin === "string" ? arg.origin : undefined;
+        const since = typeof arg.since === "string" ? arg.since : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return { ok: true, result: promotedKnowledge(db, { origin, since, limit }) as unknown as JsonValue };
+      }
+      case "recipe_registry_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return { ok: true, result: recipeRegistry(db, limit) as unknown as JsonValue };
+      }
+      case "brain_effectiveness_view": {
+        // Brain elegance bc8je5f3x (2026-05-15): the brain can query its
+        // own classification rate to learn whether depth-1 retrieval is
+        // producing prompts the model can act on without refinement.
+        // Pure read over events — no schema changes.
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const windowMs = typeof arg.window_ms === "number" ? arg.window_ms : undefined;
+        return { ok: true, result: summarizeEffectiveness(db, { windowMs }) as unknown as JsonValue };
+      }
       default:
         return { ok: false, error: `view_not_implemented:${view}` };
     }

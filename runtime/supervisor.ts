@@ -42,6 +42,7 @@ import {
   maybeMarkDegraded,
   maybeMarkRecovered,
 } from "./bridge_health";
+import { debit, maybeExhaustPathologyBudget, type PathologyKind } from "./pathology_budget";
 import { logger } from "./logger";
 
 /** Maximum brain_dispatched events allowed on ONE task within the
@@ -345,10 +346,102 @@ export const detectDispatchBudgetExceeded = (
   return archived;
 };
 
+/** Round-2 audit (2026-05-15): ready-starvation detector. A task that
+ *  sits in ready_tasks_view for longer than this without any
+ *  dispatch_decided / brain_dispatched / action_predicted /
+ *  terminal event is slow-drift starvation — neither a tight redispatch
+ *  storm nor a DAG explosion. 2 hours default; override via
+ *  ACC2_SUPERVISOR_READY_STARVATION_MS. */
+export const SUPERVISOR_READY_STARVATION_MS = Number(
+  process.env.ACC2_SUPERVISOR_READY_STARVATION_MS ?? 2 * 60 * 60 * 1000,
+);
+
+/** Scan ready_tasks_view for rows opened more than
+ *  SUPERVISOR_READY_STARVATION_MS ago whose task has no
+ *  dispatch_decided / brain_dispatched / action_predicted /
+ *  task_committed / task_failed / task_abandoned event. Emits one
+ *  supervisor_intervention_recorded with pathology=ready_starvation
+ *  per starved task so operators see slow-drift without manual
+ *  query. Returns the list of starved task ids. Idempotent — skips
+ *  tasks whose latest event already includes a recent intervention. */
+export const probeReadyStarvation = (
+  db: Database,
+  opts?: { nowMs?: number },
+): Array<{ task_id: string; directive_id: string; ready_age_ms: number }> => {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const cutoffIso = new Date(nowMs - SUPERVISOR_READY_STARVATION_MS).toISOString();
+  const candidates = db
+    .query(
+      `SELECT task_id, directive_id, ts FROM ready_tasks_view
+       WHERE ts <= ?`,
+    )
+    .all(cutoffIso) as Array<{ task_id: string; directive_id: string; ts: string }>;
+
+  const starved: Array<{ task_id: string; directive_id: string; ready_age_ms: number }> = [];
+  for (const c of candidates) {
+    // Skip if the task has any progress signal — even a single
+    // brain_dispatched proves the scheduler engaged.
+    const progress = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE task_id = ?
+           AND kind IN (
+             'dispatch_decided', 'brain_dispatched', 'action_predicted',
+             'task_committed', 'task_failed', 'task_abandoned'
+           )
+         LIMIT 1`,
+      )
+      .get(c.task_id);
+    if (progress) continue;
+    // Idempotent: skip tasks that already have a recent ready_starvation
+    // intervention so a long-stuck task doesn't generate an event every
+    // 30s supervisor tick.
+    const lastInterventionIso = new Date(nowMs - SUPERVISOR_READY_STARVATION_MS).toISOString();
+    const already = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE task_id = ?
+           AND kind = 'supervisor_intervention_recorded'
+           AND ts >= ?
+           AND json_extract(payload, '$.pathology') = 'ready_starvation'
+         LIMIT 1`,
+      )
+      .get(c.task_id, lastInterventionIso);
+    if (already) continue;
+
+    const readyAgeMs = nowMs - new Date(c.ts).getTime();
+    try {
+      emitEvent(db, {
+        kind: "supervisor_intervention_recorded",
+        substrate_origin: "substrate_auto",
+        directive_id: c.directive_id,
+        task_id: c.task_id,
+        payload: {
+          pathology: "ready_starvation",
+          ready_age_ms: readyAgeMs,
+          threshold_ms: SUPERVISOR_READY_STARVATION_MS,
+          // Observational only — supervisor surfaces the drift but does
+          // not auto-archive; operators decide whether to amend/resume.
+          corrective_event: null,
+        } as JsonValue,
+      });
+      starved.push({ task_id: c.task_id, directive_id: c.directive_id, ready_age_ms: readyAgeMs });
+    } catch (err) {
+      logger.warn(
+        { where: "supervisor.ready_starvation", task_id: c.task_id, err: (err as Error).message },
+        "supervisor failed to emit ready_starvation intervention",
+      );
+    }
+  }
+  return starved;
+};
+
 export type SupervisorTickResult = {
   redispatch_storm_count: number;
   dag_explosion_count: number;
   dispatch_budget_exceeded_count: number;
+  ready_starvation_count: number;
+  pathology_budget_exhausted_count: number;
   bridge_health_degraded: boolean;
   bridge_health_recovered: boolean;
 };
@@ -363,23 +456,81 @@ export const supervisorTick = (
     redispatch_storm_count: 0,
     dag_explosion_count: 0,
     dispatch_budget_exceeded_count: 0,
+    ready_starvation_count: 0,
+    pathology_budget_exhausted_count: 0,
     bridge_health_degraded: false,
     bridge_health_recovered: false,
   };
-  try { result.redispatch_storm_count = detectRedispatchStorm(db, opts).length; } catch (err) {
+  // Unified pathology budget (brain elegance bc8je5f3x, 2026-05-15): each
+  // detector still emits its canonical event, but supervisorTick now ALSO
+  // debits the budget for every quarantined item. After all detectors run,
+  // we check maybeExhaustPathologyBudget for the affected directives — one
+  // exhaustion event collapses scattered backpressure alarms into a single
+  // canonical "directive not converging" signal.
+  const affectedDirectives = new Set<string>();
+  const debitOnDirective = (directiveId: string, kind: PathologyKind, sourceWorker: string): void => {
+    if (!directiveId) return;
+    try {
+      debit(db, {
+        directive_id: directiveId,
+        pathology_kind: kind,
+        source_worker: sourceWorker,
+      });
+      affectedDirectives.add(directiveId);
+    } catch (err) {
+      logger.warn({ where: "supervisor.budget.debit", kind, err: (err as Error).message }, "pathology budget debit failed");
+    }
+  };
+
+  try {
+    const storms = detectRedispatchStorm(db, opts);
+    result.redispatch_storm_count = storms.length;
+    for (const s of storms) debitOnDirective(s.directive_id, "redispatch_storm", "supervisor.redispatch_storm");
+  } catch (err) {
     logger.warn({ where: "supervisor.tick.redispatch", err: (err as Error).message }, "redispatch detector failed");
   }
-  try { result.dag_explosion_count = detectDagExplosion(db, opts).length; } catch (err) {
+  try {
+    const explosions = detectDagExplosion(db, opts);
+    result.dag_explosion_count = explosions.length;
+    for (const e of explosions) debitOnDirective(e.directive_id, "dag_explosion", "supervisor.dag_explosion");
+  } catch (err) {
     logger.warn({ where: "supervisor.tick.dag_explosion", err: (err as Error).message }, "dag-explosion detector failed");
   }
-  try { result.dispatch_budget_exceeded_count = detectDispatchBudgetExceeded(db).length; } catch (err) {
+  try {
+    const overBudget = detectDispatchBudgetExceeded(db);
+    result.dispatch_budget_exceeded_count = overBudget.length;
+    for (const b of overBudget) debitOnDirective(b.directive_id, "dispatch_budget_exceeded", "supervisor.dispatch_budget");
+  } catch (err) {
     logger.warn({ where: "supervisor.tick.dispatch_budget", err: (err as Error).message }, "dispatch-budget detector failed");
+  }
+  try {
+    const starved = probeReadyStarvation(db, opts);
+    result.ready_starvation_count = starved.length;
+    for (const s of starved) debitOnDirective(s.directive_id, "ready_starvation", "supervisor.ready_starvation");
+  } catch (err) {
+    logger.warn({ where: "supervisor.tick.ready_starvation", err: (err as Error).message }, "ready-starvation detector failed");
   }
   try { result.bridge_health_degraded = maybeMarkDegraded(db, opts); } catch (err) {
     logger.warn({ where: "supervisor.tick.bridge_degraded", err: (err as Error).message }, "bridge_health degraded check failed");
   }
   try { result.bridge_health_recovered = maybeMarkRecovered(db, opts); } catch (err) {
     logger.warn({ where: "supervisor.tick.bridge_recovered", err: (err as Error).message }, "bridge_health recovered check failed");
+  }
+  // Final pass: check the budget for every directive that received a
+  // debit this tick. One pathology_budget_exhausted may fire per
+  // directive; the event payload enumerates every contributing
+  // pathology so operators see ONE archive signal instead of six
+  // scattered alarms.
+  for (const directiveId of affectedDirectives) {
+    try {
+      const emittedId = maybeExhaustPathologyBudget(db, directiveId, opts);
+      if (emittedId) result.pathology_budget_exhausted_count++;
+    } catch (err) {
+      logger.warn(
+        { where: "supervisor.tick.budget_exhaust", directive_id: directiveId, err: (err as Error).message },
+        "pathology budget exhaustion check failed",
+      );
+    }
   }
   return result;
 };

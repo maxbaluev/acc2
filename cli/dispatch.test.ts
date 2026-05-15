@@ -2,26 +2,21 @@
 // daemon running on a free port; assert it posts a `directive_opened` event
 // with the owner's words and prints the directive id.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { closeDb } from "../substrate/db";
-import { startDaemon, stopDaemon, type DaemonHandle } from "../runtime/daemon";
+import { describe, expect, test } from "bun:test";
 import { runDispatch } from "./dispatch";
+import { useSharedDaemon } from "../tests/daemon_fixture";
 
 // Stay in a tight band well-disjoint from runtime/*.test.ts (which sit in
 // [19000, 60000)) so the daemon's MCP + aux ports don't collide with sibling
 // test files when bun runs them in parallel.
 const MCP_BASE = 12000;
 const AUX_BASE = 17000;
-const pickMcp = () => MCP_BASE + Math.floor(Math.random() * 1000);
-const pickAux = () => AUX_BASE + Math.floor(Math.random() * 1000);
-
-let handle: DaemonHandle | null = null;
-let dir = "";
-let prevPort: string | undefined;
-let prevAuxPort: string | undefined;
+const daemon = useSharedDaemon({
+  tmpPrefix: "acc2-dispatch-",
+  dbName: "dispatch.db",
+  mcpBase: MCP_BASE,
+  auxBase: AUX_BASE,
+});
 
 const captureStdout = (): { lines: string[]; restore: () => void } => {
   const lines: string[] = [];
@@ -29,31 +24,6 @@ const captureStdout = (): { lines: string[]; restore: () => void } => {
   console.log = (...a: unknown[]) => { lines.push(a.map((x) => typeof x === "string" ? x : JSON.stringify(x)).join(" ")); };
   return { lines, restore: () => { console.log = orig; } };
 };
-
-beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), "acc2-dispatch-"));
-  const port = pickMcp();
-  const auxPort = pickAux();
-  handle = await startDaemon({
-    port, auxPort, stateDbPath: join(dir, "dispatch.db"),
-    socketFile: join(dir, "v2.sock"), tokenFile: join(dir, "v2.sock.token"),
-  });
-  prevPort = process.env.V2_DAEMON_PORT;
-  prevAuxPort = process.env.V2_DAEMON_AUX_PORT;
-  process.env.V2_DAEMON_PORT = String(port);
-  process.env.V2_DAEMON_AUX_PORT = String(auxPort);
-});
-
-afterEach(async () => {
-  if (handle) await stopDaemon(handle);
-  handle = null;
-  closeDb();
-  rmSync(dir, { recursive: true, force: true });
-  if (prevPort === undefined) delete process.env.V2_DAEMON_PORT;
-  else process.env.V2_DAEMON_PORT = prevPort;
-  if (prevAuxPort === undefined) delete process.env.V2_DAEMON_AUX_PORT;
-  else process.env.V2_DAEMON_AUX_PORT = prevAuxPort;
-});
 
 describe("runDispatch", () => {
   test("`acc task '<words>' --bare` opens a directive (directive_opened + root task_node_opened)", async () => {
@@ -73,7 +43,7 @@ describe("runDispatch", () => {
     // Directive_opened payload carries directive_text (the canonical
     // open_directive shape; the prior `payload.text` shape was a substrate
     // bypass via substrate.emit).
-    const db = handle!.db;
+    const db = daemon.handle().db;
     const directiveRows = db
       .query("SELECT payload FROM events WHERE kind = 'directive_opened' ORDER BY ts DESC")
       .all() as Array<{ payload: string }>;

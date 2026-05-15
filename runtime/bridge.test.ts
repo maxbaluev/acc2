@@ -362,8 +362,12 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       {
         spawnFn: fakeSpawn,
         mcpServerUrl: "http://127.0.0.1:1/mcp",
-        // Short stuck threshold so the test runs fast — 200ms.
+        // Short stuck thresholds so the test runs fast. The first-frame
+        // budget governs the pre-handshake wedge path; without a frame
+        // ever landing, the watchdog must use this budget. 200ms is well
+        // under the 10s timeoutMs ceiling.
         stuckThresholdMs: 200,
+        firstFrameThresholdMs: 200,
         // Long handshake + dispatch watchdogs so they don't fire first; the
         // stuck path must be the one that surfaces.
         mcpHandshakeWindowMs: 10_000,
@@ -378,6 +382,7 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     expect(result.ok).toBe(false);
 
     // A bridge_stuck event was emitted with reason=no_frames_received.
+    // Because no frame ever landed, the first-frame tier fired.
     const stuckRow = db
       .query("SELECT payload FROM events WHERE kind = 'bridge_stuck' ORDER BY ts DESC LIMIT 1")
       .get() as { payload: string } | null;
@@ -386,6 +391,8 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     expect(stuckPayload.reason).toBe("no_frames_received");
     expect(typeof stuckPayload.elapsed_ms).toBe("number");
     expect(stuckPayload.threshold_ms).toBe(200);
+    expect(stuckPayload.first_frame_seen).toBe(false);
+    expect(stuckPayload.tier).toBe("first_frame");
 
     // The bridge_failed taxonomy entry carries the subprocess_stuck reason.
     const failedRow = db
@@ -395,6 +402,8 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     const failedPayload = JSON.parse(failedRow!.payload) as Record<string, unknown>;
     expect(failedPayload.reason).toBe("subprocess_stuck");
     expect(failedPayload.no_frames_received).toBe(true);
+    expect(failedPayload.first_frame_seen).toBe(false);
+    expect(failedPayload.tier).toBe("first_frame");
   }, 15_000);
 
   test("v2 MCP tool surface advertises every substrate.* and runtime.* tool the daemon exposes", () => {

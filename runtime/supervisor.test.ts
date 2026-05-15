@@ -154,6 +154,8 @@ describe("supervisor — supervisorTick composition", () => {
       redispatch_storm_count: 0,
       dag_explosion_count: 0,
       dispatch_budget_exceeded_count: 0,
+      ready_starvation_count: 0,
+      pathology_budget_exhausted_count: 0,
       bridge_health_degraded: false,
       bridge_health_recovered: false,
     });

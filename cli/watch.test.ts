@@ -3,51 +3,22 @@
 // runWatch programmatically with a captured buffer and assert the event kind
 // shows up in the rendered output.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { closeDb } from "../substrate/db";
-import { startDaemon, stopDaemon, type DaemonHandle } from "../runtime/daemon";
+import { describe, expect, test } from "bun:test";
 import { emitEvent } from "../runtime/events";
 import { sseConnect, mcpCall } from "./rpc";
 import { runWatch, renderFrame } from "./watch";
+import { useSharedDaemon } from "../tests/daemon_fixture";
 
 // Disjoint port band from dispatch.test.ts (12000/17000) and daemon.test.ts
 // (30000/31000) and runtime/*.test.ts ([19000, 60000)) — choose [38000, 39500).
 const MCP_BASE = 38000;
 const AUX_BASE = 38500;
-const pickMcp = () => MCP_BASE + Math.floor(Math.random() * 500);
-const pickAux = () => AUX_BASE + Math.floor(Math.random() * 500);
-
-let handle: DaemonHandle | null = null;
-let dir = "";
-let prevPort: string | undefined;
-let prevAuxPort: string | undefined;
-
-beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), "acc2-watch-"));
-  const port = pickMcp();
-  const auxPort = pickAux();
-  handle = await startDaemon({
-    port, auxPort, stateDbPath: join(dir, "watch.db"),
-    socketFile: join(dir, "v2.sock"), tokenFile: join(dir, "v2.sock.token"),
-  });
-  prevPort = process.env.V2_DAEMON_PORT;
-  prevAuxPort = process.env.V2_DAEMON_AUX_PORT;
-  process.env.V2_DAEMON_PORT = String(port);
-  process.env.V2_DAEMON_AUX_PORT = String(auxPort);
-});
-
-afterEach(async () => {
-  if (handle) await stopDaemon(handle);
-  handle = null;
-  closeDb();
-  rmSync(dir, { recursive: true, force: true });
-  if (prevPort === undefined) delete process.env.V2_DAEMON_PORT;
-  else process.env.V2_DAEMON_PORT = prevPort;
-  if (prevAuxPort === undefined) delete process.env.V2_DAEMON_AUX_PORT;
-  else process.env.V2_DAEMON_AUX_PORT = prevAuxPort;
+const daemon = useSharedDaemon({
+  tmpPrefix: "acc2-watch-",
+  dbName: "watch.db",
+  mcpBase: MCP_BASE,
+  auxBase: AUX_BASE,
+  portRange: 500,
 });
 
 describe("SSE /events/stream + sseConnect", () => {
@@ -67,7 +38,7 @@ describe("SSE /events/stream + sseConnect", () => {
     await new Promise((r) => setTimeout(r, 200));
 
     // Emit a synthetic event directly into the daemon's db.
-    emitEvent(handle!.db, {
+    emitEvent(daemon.handle().db, {
       kind: "watch_test_synthetic" as never,
       substrate_origin: "substrate_auto",
       payload: { hello: "world" },
@@ -89,7 +60,7 @@ describe("SSE /events/stream + sseConnect", () => {
     // millisecond-granularity ts strings stay distinct (the DB ORDER BY ts
     // is then deterministic).
     for (let i = 0; i < 3; i++) {
-      emitEvent(handle!.db, {
+      emitEvent(daemon.handle().db, {
         kind: "watch_test_seed" as never,
         substrate_origin: "substrate_auto",
         payload: { i },
@@ -107,7 +78,7 @@ describe("SSE /events/stream + sseConnect", () => {
   });
 
   test("runtime.recent_events without kinds returns the most recent K across all kinds", async () => {
-    emitEvent(handle!.db, {
+    emitEvent(daemon.handle().db, {
       kind: "watch_test_any" as never,
       substrate_origin: "substrate_auto",
       payload: {},
@@ -172,7 +143,7 @@ describe("renderFrame", () => {
 describe("runWatch programmatic", () => {
   test("runWatch buffers events and renders the kind text", async () => {
     // Pre-emit a watcher event so the initial recent_events fill captures it.
-    emitEvent(handle!.db, {
+    emitEvent(daemon.handle().db, {
       kind: "watch_test_runwatch" as never,
       substrate_origin: "substrate_auto",
       payload: { hello: "watch" },
@@ -194,20 +165,18 @@ describe("runWatch programmatic", () => {
     const buffer: string[] = [];
     const writer = (s: string) => { buffer.push(s); };
 
-    // Fire-and-forget: emit a synthetic event ~500ms into the run, after the
-    // SSE consumer has had time to subscribe. Bumped from 200→500ms +
-    // durationMs 1200→3000 to be robust against parallel-test IO contention.
+    // Fire-and-forget: emit after the SSE consumer has had time to subscribe.
     setTimeout(() => {
       try {
-        emitEvent(handle!.db, {
+        emitEvent(daemon.handle().db, {
           kind: "watch_test_inflight" as never,
           substrate_origin: "substrate_auto",
           payload: { stage: "mid_run" },
         });
       } catch { /* swallow */ }
-    }, 500);
+    }, 250);
 
-    await runWatch([], { durationMs: 3000, writer, pollIntervalMs: 10_000 });
+    await runWatch([], { durationMs: 1200, writer, pollIntervalMs: 10_000 });
 
     const joined = buffer.join("");
     expect(joined).toContain("watch_test_inflight");

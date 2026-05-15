@@ -4,6 +4,8 @@ import { runViews } from "../substrate/views";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
 import {
+  cascadeRootCommitToDescendants,
+  cascadeUpwardWhenChildrenTerminal,
   closedDirectiveIds,
   directiveCloseReason,
   maybeCloseFinishedDirective,
@@ -194,6 +196,300 @@ describe("directive_closure", () => {
     const ready = readyTasks(db);
     const ids = new Set(ready.map((n) => n.id));
     expect(ids.has(taskId)).toBe(true);
+  });
+
+  test("cascadeRootCommitToDescendants emits task_committed for every refines descendant of a committed root", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const directiveId = newId();
+    const rootTaskId = newId();
+    const childA = newId();
+    const childB = newId();
+    const grandchild = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "cascade fixture", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: rootTaskId,
+      parent_task_id: null,
+      payload: { goal: "root goal" },
+    });
+    for (const id of [childA, childB, grandchild]) {
+      emitEvent(db, {
+        kind: "task_node_opened",
+        substrate_origin: "owner",
+        directive_id: directiveId,
+        task_id: id,
+        parent_task_id: rootTaskId,
+        payload: { goal: `child ${id}` },
+      });
+    }
+    emitEvent(db, {
+      kind: "task_edge_recorded",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: rootTaskId,
+      payload: { kind: "refines", from_task: rootTaskId, to_task: childA },
+    });
+    emitEvent(db, {
+      kind: "task_edge_recorded",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: rootTaskId,
+      payload: { kind: "refines", from_task: rootTaskId, to_task: childB },
+    });
+    emitEvent(db, {
+      kind: "task_edge_recorded",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: childA,
+      payload: { kind: "refines", from_task: childA, to_task: grandchild },
+    });
+
+    const cascaded = cascadeRootCommitToDescendants(db, rootTaskId, 0.12);
+    expect(cascaded).toBe(3);
+
+    // Each descendant now has a task_committed with cascade payload.
+    for (const id of [childA, childB, grandchild]) {
+      const row = db
+        .query(
+          `SELECT payload FROM events WHERE kind = 'task_committed' AND task_id = ? LIMIT 1`,
+        )
+        .get(id) as { payload: string } | null;
+      expect(row).not.toBeNull();
+      const p = JSON.parse(row!.payload) as Record<string, unknown>;
+      expect(p.reason).toBe("cascaded_from_root_commit");
+      expect(p.root_task_id).toBe(rootTaskId);
+      expect(p.root_closure_residual).toBe(0.12);
+    }
+
+    // Re-call is idempotent — no further commits emitted.
+    const second = cascadeRootCommitToDescendants(db, rootTaskId, 0.12);
+    expect(second).toBe(0);
+  });
+
+  test("cascadeUpwardWhenChildrenTerminal seals the parent once every refines-child is terminal", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const rootId = newId();
+    const childA = newId();
+    const childB = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "upward", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: rootId,
+      parent_task_id: null,
+      payload: { goal: "root" },
+    });
+    for (const id of [childA, childB]) {
+      emitEvent(db, {
+        kind: "task_node_opened",
+        substrate_origin: "owner",
+        directive_id: directiveId,
+        task_id: id,
+        parent_task_id: rootId,
+        payload: { goal: `child ${id}` },
+      });
+      emitEvent(db, {
+        kind: "task_edge_recorded",
+        substrate_origin: "owner",
+        directive_id: directiveId,
+        task_id: rootId,
+        payload: { kind: "refines", from_task: rootId, to_task: id },
+      });
+    }
+    // Commit childA only — parent should NOT yet cascade.
+    emitEvent(db, {
+      kind: "task_committed",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: childA,
+      payload: { summary: "did A" },
+    });
+    expect(cascadeUpwardWhenChildrenTerminal(db, childA)).toBe(0);
+    // Confirm root still uncommitted.
+    const rootBefore = db
+      .query(`SELECT COUNT(*) AS c FROM events WHERE kind='task_committed' AND task_id=?`)
+      .get(rootId) as { c: number };
+    expect(rootBefore.c).toBe(0);
+
+    // Commit childB — parent should now cascade.
+    emitEvent(db, {
+      kind: "task_committed",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: childB,
+      payload: { summary: "did B" },
+    });
+    expect(cascadeUpwardWhenChildrenTerminal(db, childB)).toBe(1);
+    const rootAfter = db
+      .query(`SELECT payload FROM events WHERE kind='task_committed' AND task_id=? ORDER BY ts ASC LIMIT 1`)
+      .get(rootId) as { payload: string } | null;
+    expect(rootAfter).not.toBeNull();
+    const p = JSON.parse(rootAfter!.payload) as Record<string, unknown>;
+    expect(p.reason).toBe("cascaded_upward_from_all_children_terminal");
+    expect(p.child_task_id).toBe(childB);
+  });
+
+  test("cascadeUpwardWhenChildrenTerminal is idempotent and stops at terminal ancestors", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const rootId = newId();
+    const childId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "idem", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: rootId,
+      parent_task_id: null,
+      payload: { goal: "root" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: childId,
+      parent_task_id: rootId,
+      payload: { goal: "child" },
+    });
+    emitEvent(db, {
+      kind: "task_edge_recorded",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: rootId,
+      payload: { kind: "refines", from_task: rootId, to_task: childId },
+    });
+    emitEvent(db, {
+      kind: "task_committed",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: childId,
+      payload: {},
+    });
+    expect(cascadeUpwardWhenChildrenTerminal(db, childId)).toBe(1);
+    // Re-call — root is now terminal, no further cascade.
+    expect(cascadeUpwardWhenChildrenTerminal(db, childId)).toBe(0);
+    // Only one task_committed for root.
+    const cnt = db
+      .query(`SELECT COUNT(*) AS c FROM events WHERE kind='task_committed' AND task_id=?`)
+      .get(rootId) as { c: number };
+    expect(cnt.c).toBe(1);
+  });
+
+  test("cascadeRootCommitToDescendants is a no-op on non-root task ids", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const rootTaskId = newId();
+    const childId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "non-root", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: rootTaskId,
+      parent_task_id: null,
+      payload: { goal: "root" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: childId,
+      parent_task_id: rootTaskId,
+      payload: { goal: "child" },
+    });
+    // Pass the CHILD (non-root) — must do nothing.
+    const cascaded = cascadeRootCommitToDescendants(db, childId, 0.1);
+    expect(cascaded).toBe(0);
+  });
+
+  test("cascadeRootCommitToDescendants does not re-commit already-terminal descendants", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const rootTaskId = newId();
+    const liveChild = newId();
+    const alreadyDoneChild = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "mixed", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: rootTaskId,
+      parent_task_id: null,
+      payload: { goal: "root" },
+    });
+    for (const id of [liveChild, alreadyDoneChild]) {
+      emitEvent(db, {
+        kind: "task_node_opened",
+        substrate_origin: "owner",
+        directive_id: directiveId,
+        task_id: id,
+        parent_task_id: rootTaskId,
+        payload: { goal: `child ${id}` },
+      });
+      emitEvent(db, {
+        kind: "task_edge_recorded",
+        substrate_origin: "owner",
+        directive_id: directiveId,
+        task_id: rootTaskId,
+        payload: { kind: "refines", from_task: rootTaskId, to_task: id },
+      });
+    }
+    // Pre-commit one child so the cascade should skip it.
+    emitEvent(db, {
+      kind: "task_committed",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: alreadyDoneChild,
+      payload: {},
+    });
+
+    const cascaded = cascadeRootCommitToDescendants(db, rootTaskId, 0.08);
+    expect(cascaded).toBe(1);
+    // Live child got its cascade commit.
+    const liveCommitted = db
+      .query(`SELECT COUNT(*) AS c FROM events WHERE kind='task_committed' AND task_id=?`)
+      .get(liveChild) as { c: number };
+    expect(liveCommitted.c).toBe(1);
+    // The already-done child still has exactly one task_committed.
+    const oldCommitted = db
+      .query(`SELECT COUNT(*) AS c FROM events WHERE kind='task_committed' AND task_id=?`)
+      .get(alreadyDoneChild) as { c: number };
+    expect(oldCommitted.c).toBe(1);
   });
 
   test("ready_tasks_view (SQL) also filters closed directives", () => {

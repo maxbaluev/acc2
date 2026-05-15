@@ -149,6 +149,45 @@ const tryRemove = (path: string): void => {
  *
  *  Returns a tick callback suitable for `setInterval(fn, intervalMs)`. The
  *  callback returns void; internal Promise chains are fire-and-forget. */
+/** Min interval (ms) between consecutive `worker_tick_completed` event
+ *  emissions per worker. The scheduler ticks every 500ms = 7200/h; without
+ *  dampening we'd write that to the ledger. The dampening keeps each worker
+ *  at most ~60 rows/hour while still letting auditors reconstruct tick
+ *  liveness from the substrate (audit-#5 fix, 2026-05-15). */
+const WORKER_TICK_EVENT_DAMPEN_MS = 60_000;
+const lastEmittedWorkerTickMs = new Map<string, number>();
+
+/** Emit a dampened `worker_tick_completed` for workers that don't go
+ *  through supervisedTick (e.g. the scheduler runs in its own async loop).
+ *  Brain audit D (2026-05-15) — the scheduler ticked but was invisible
+ *  from the ledger before this helper. */
+const emitWorkerTickIfDue = (
+  db: Database,
+  workerName: string,
+  intervalMs: number,
+): void => {
+  const lastEmit = lastEmittedWorkerTickMs.get(workerName) ?? 0;
+  const now = Date.now();
+  if (now - lastEmit < WORKER_TICK_EVENT_DAMPEN_MS) return;
+  lastEmittedWorkerTickMs.set(workerName, now);
+  try {
+    emitEvent(db, {
+      kind: "worker_tick_completed",
+      substrate_origin: "substrate_auto",
+      payload: {
+        worker: workerName,
+        expected_interval_ms: intervalMs,
+        dampen_ms: WORKER_TICK_EVENT_DAMPEN_MS,
+      },
+    });
+  } catch (err) {
+    logger.debug(
+      { where: "emitWorkerTickIfDue", worker: workerName, err: String(err) },
+      "could not emit worker_tick_completed (db likely closed)",
+    );
+  }
+};
+
 const supervisedTick = (
   db: Database,
   workerName: string,
@@ -189,6 +228,33 @@ const supervisedTick = (
       try {
         await body();
         recordWorkerTick(workerName);
+        // Audit-#5 (2026-05-15): emit a rate-limited `worker_tick_completed`
+        // so the substrate carries proof of liveness for every worker, not
+        // just the process-local lastTickMs map. Dampened to
+        // WORKER_TICK_EVENT_DAMPEN_MS so a 500ms scheduler tick doesn't
+        // spam the ledger.
+        const elapsedMs = Date.now() - runningSinceMs;
+        const lastEmit = lastEmittedWorkerTickMs.get(workerName) ?? 0;
+        if (Date.now() - lastEmit >= WORKER_TICK_EVENT_DAMPEN_MS) {
+          lastEmittedWorkerTickMs.set(workerName, Date.now());
+          try {
+            emitEvent(db, {
+              kind: "worker_tick_completed",
+              substrate_origin: "substrate_auto",
+              payload: {
+                worker: workerName,
+                expected_interval_ms: intervalMs,
+                tick_duration_ms: elapsedMs,
+                dampen_ms: WORKER_TICK_EVENT_DAMPEN_MS,
+              },
+            });
+          } catch (err) {
+            logger.debug(
+              { where: "supervisedTick.emit_completed", err: String(err) },
+              "could not emit worker_tick_completed (db likely closed)",
+            );
+          }
+        }
       } catch (err) {
         logger.warn(
           { worker: workerName, err: (err as Error).message },
@@ -363,6 +429,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("scheduler")) registerWorker("scheduler");
   if (isWorkerEnabled("supervisor")) registerWorker("supervisor", Number(process.env.ACC2_SUPERVISOR_INTERVAL_MS ?? 30_000));
   if (isWorkerEnabled("compaction")) registerWorker("compaction", Number(process.env.ACC2_COMPACTION_INTERVAL_MS ?? 60 * 60 * 1000));
+  // Brain audit B (2026-05-15): register the Model-D extractors worker
+  // so candidate→promoted advancement happens on a bounded cadence,
+  // not by chance dispatch through Father.
+  if (isWorkerEnabled("extractors")) registerWorker("extractors", Number(process.env.ACC2_EXTRACTORS_INTERVAL_MS ?? 5 * 60 * 1000));
 
   // Phase E: amendment worker — drain unapplied directive_amended events on
   // a configurable interval (default 2s; tests may pin a shorter value via
@@ -487,6 +557,89 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     compactionMarked = true;
     recordWorkerTick("compaction");
     workers.push(() => clearInterval(compactionTickHandle));
+  }
+
+  // Brain audit B (2026-05-15): extractors worker — periodic scan of
+  // open knowledge_candidate and code_artifact rows that have crossed
+  // the promotion thresholds. Pre-fix the only way these advanced was
+  // chance dispatch through Father; substrate counts showed 0/53
+  // code_artifact_promoted and 0/70 recipe_promoted. Running on a
+  // bounded 5-min cadence makes promotion a substrate liveness function.
+  const EXTRACTORS_INTERVAL_MS = Number(process.env.ACC2_EXTRACTORS_INTERVAL_MS ?? 5 * 60 * 1000);
+  if (isWorkerEnabled("extractors")) {
+    const { extractKnowledgePromotions, extractCodeArtifactScores } = await import("../substrate/extractors");
+    const runExtractorsOnce = async (): Promise<void> => {
+      try { extractKnowledgePromotions(db); } catch (err) {
+        logger.warn({ where: "daemon.extractors.knowledge", err: (err as Error).message }, "knowledge extractor tick failed");
+      }
+      try { extractCodeArtifactScores(db); } catch (err) {
+        logger.warn({ where: "daemon.extractors.code_artifact", err: (err as Error).message }, "code artifact extractor tick failed");
+      }
+    };
+    let extractorsMarked = false;
+    const extractorsTickHandle = setInterval(
+      supervisedTick(db, "extractors", EXTRACTORS_INTERVAL_MS, async () => {
+        await runExtractorsOnce();
+        if (!extractorsMarked) { markWorkerReady("extractors"); extractorsMarked = true; }
+      }),
+      EXTRACTORS_INTERVAL_MS,
+    );
+    // Round-2 audit (2026-05-15): run ONE extractor pass synchronously at
+    // boot so candidates accumulated while the daemon was off don't have
+    // to wait the full 5-min cadence before being promoted. Marks ready
+    // AFTER the first pass completes so /ready reflects real liveness.
+    void (async () => {
+      try {
+        await runExtractorsOnce();
+      } finally {
+        markWorkerReady("extractors");
+        extractorsMarked = true;
+        recordWorkerTick("extractors");
+      }
+    })();
+    workers.push(() => clearInterval(extractorsTickHandle));
+  }
+
+  // Brain audit bqlr29psq (2026-05-15): daemon source hot-reload worker.
+  // Watches runtime/, substrate/, cli/ via fs.watch (recursive). When a
+  // change matches HOTRELOAD_MANIFEST, emits daemon_hotreload_triggered
+  // and applies the declared strategy (in_process / quiescent_only /
+  // full_restart). The daemon stays alive on syntax errors — the
+  // previous module reference is never overwritten.
+  //
+  // Opt-out: set ACC2_DISABLE_HOTRELOAD=1.
+  if (process.env.ACC2_DISABLE_HOTRELOAD !== "1") {
+    try {
+      const { startHotreloadWorker } = await import("./hotreload_worker");
+      // Quiescence = no brain dispatch currently in-flight. Cheap SQL
+      // probe: count brain_dispatched events that have no matching
+      // brain_dispatch_closed after the same ts.
+      const isQuiescent = (): boolean => {
+        try {
+          const row = db
+            .query(
+              `SELECT COUNT(*) AS c FROM events b
+               WHERE b.kind = 'brain_dispatched'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM events c
+                   WHERE c.kind = 'brain_dispatch_closed'
+                     AND c.task_id = b.task_id
+                     AND c.ts >= b.ts
+                 )`,
+            )
+            .get() as { c: number };
+          return row.c === 0;
+        } catch { return true; }
+      };
+      const projectRoot = process.env.ACC2_PROJECT_ROOT ?? process.cwd();
+      const disposer = startHotreloadWorker(db, { projectRoot, isQuiescent });
+      workers.push(disposer);
+    } catch (err) {
+      logger.warn(
+        { where: "daemon.hotreload_worker.start", err: (err as Error).message },
+        "hot-reload worker could not start — daemon continues without it",
+      );
+    }
   }
 
   // Phase F: embedder worker. Default ON — production wants every
@@ -737,6 +890,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     schedulerAbort = new AbortController();
     markWorkerReady("scheduler");
     recordWorkerTick("scheduler");
+    emitWorkerTickIfDue(db, "scheduler", 1000);
     void (async () => {
       try {
         // schedulerLoop returns on quiescence; we keep restarting it on a
@@ -749,6 +903,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
             abort: schedulerAbort?.signal,
           });
           recordWorkerTick("scheduler");
+          // Brain audit D (2026-05-15): the scheduler doesn't go through
+          // supervisedTick, so we explicitly stamp dampened liveness here
+          // — the ledger now carries scheduler ticks just like every
+          // other worker.
+          emitWorkerTickIfDue(db, "scheduler", 1000);
           await new Promise((r) => setTimeout(r, 2000));
         }
       } catch (err) {
@@ -976,6 +1135,11 @@ const routeAux = async (
     // don't restart the process — operators reading the body see the
     // degraded state directly.
     const stuck = stuckWorkers();
+    let hotreloadState: unknown = null;
+    try {
+      const mod = await import("./hotreload_worker");
+      hotreloadState = mod.getHotreloadState();
+    } catch { /* worker may not have started; tolerate */ }
     return Response.json({
       status: stuck.length === 0 ? "ok" : "degraded",
       pid: process.pid,
@@ -986,6 +1150,7 @@ const routeAux = async (
       aux_port: auxPort,
       mcp_transport: "fastmcp:httpStream",
       stuck_workers: stuck,
+      hotreload: hotreloadState,
     });
   }
 
