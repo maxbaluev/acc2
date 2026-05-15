@@ -101,6 +101,82 @@ const insertEvent = (db: Database, ev: InsertEventInput): string => {
   return id;
 };
 
+// ── k_555 four-link spine helper ───────────────────────────────────
+//
+// Every substrate-side promotion / demotion / extraction event the
+// extractors emit IS its own action: the extractor logic is the
+// action, the posterior calculation (or schema validation) is the
+// verifier, residual=0 on success. Without action_predicted +
+// action_scored events citing the same candidate, substrate.credit
+// has no row to attach Shapley-weighted credit to — the inspiring
+// candidate's Beta posterior never updates from the promotion.
+//
+// emitPromotionSpine writes the three rows atomically and returns
+// their ids so the caller can wire context_refs through. The
+// artifactPrefix names a stable pseudo-artifact pair
+// (`<prefix>_action` + `<prefix>_verifier`); it doesn't have to
+// correspond to a real registered code_artifact row, but it must
+// be stable so substrate.search-by-artifact-id can group the action
+// chains for posterior aggregation.
+
+type PromotionResultKind =
+  | "knowledge_promoted"
+  | "knowledge_demoted"
+  | "code_artifact_promoted"
+  | "recipe_extracted"
+  | "owner_profile_recorded";
+
+const emitPromotionSpine = (
+  db: Database,
+  args: {
+    kind: PromotionResultKind;
+    candidate_id: string;
+    directive_id: string;
+    task_id: string;
+    loop_id: string;
+    payload: Record<string, unknown>;
+    artifact_prefix: string;
+    extra_context_refs?: string[];
+  },
+): { action_id: string; scored_id: string; result_id: string } => {
+  const baseRefs = [args.candidate_id, ...(args.extra_context_refs ?? [])];
+  const action_id = insertEvent(db, {
+    kind: "action_predicted",
+    directive_id: args.directive_id,
+    task_id: args.task_id,
+    loop_id: args.loop_id,
+    substrate_origin: "substrate_auto",
+    action_artifact_id: `${args.artifact_prefix}_action`,
+    verifier_artifact_id: `${args.artifact_prefix}_verifier`,
+    predicted_residual: 0,
+    payload: { candidate_id: args.candidate_id, target_kind: args.kind },
+    context_refs: baseRefs,
+  });
+  const scored_id = insertEvent(db, {
+    kind: "action_scored",
+    directive_id: args.directive_id,
+    task_id: args.task_id,
+    loop_id: args.loop_id,
+    substrate_origin: "substrate_auto",
+    action_artifact_id: `${args.artifact_prefix}_action`,
+    verifier_artifact_id: `${args.artifact_prefix}_verifier`,
+    outcome: "succeeded",
+    residual: 0,
+    payload: { candidate_id: args.candidate_id, target_kind: args.kind },
+    context_refs: [...baseRefs, action_id],
+  });
+  const result_id = insertEvent(db, {
+    kind: args.kind,
+    directive_id: args.directive_id,
+    task_id: args.task_id,
+    loop_id: args.loop_id,
+    substrate_origin: "substrate_auto",
+    payload: { ...args.payload, action_event_id: action_id, scored_event_id: scored_id },
+    context_refs: [...baseRefs, action_id, scored_id],
+  });
+  return { action_id, scored_id, result_id };
+};
+
 // ── 1. Knowledge promotion / demotion extractor ────────────────────
 //
 // For each open knowledge_candidate (no later knowledge_promoted /
@@ -302,12 +378,13 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
             (cp.text as string | undefined) ??
             (cp.summary as string | undefined);
         } catch { /* skip annotation */ }
-        insertEvent(db, {
+        emitPromotionSpine(db, {
           kind: "knowledge_promoted",
+          candidate_id: cid,
           directive_id: c.directive_id as string,
           task_id: c.task_id as string,
           loop_id: c.loop_id as string,
-          substrate_origin: "substrate_auto",
+          artifact_prefix: "knowledge_promotion",
           payload: {
             candidate_id: cid,
             wins,
@@ -318,29 +395,22 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
             beta,
             origin_count: originsCount,
             promotion_path: eligibleForPromoteStrict ? "strict" : "multi_origin",
-            // Rich-schema propagation (Batch 1, 2026-05-15): downstream
-            // retrieval / prompt sections can filter or rank by domain
-            // (applies_to) and inspect the brain's self-confidence at
-            // emission time (candidate_confidence_estimate). Snippet
-            // surfaces the claim text inline so view consumers don't
-            // have to JOIN back to the candidate for previews.
             applies_to: appliesTo,
             candidate_confidence_estimate: candConfidenceEstimate,
             claim_snippet: claimSnippet,
           },
-          context_refs: [cid],
         });
         promoted++;
         promotedIds.add(cid);
       } else if (eligibleForDemote) {
-        insertEvent(db, {
-          kind: "knowledge_demoted",
+        emitPromotionSpine(db, {
+          kind: "knowledge_demoted" as PromotionResultKind,
+          candidate_id: cid,
           directive_id: c.directive_id as string,
           task_id: c.task_id as string,
           loop_id: c.loop_id as string,
-          substrate_origin: "substrate_auto",
+          artifact_prefix: "knowledge_demotion",
           payload: { candidate_id: cid, wins, losses, score, confidence: conf, alpha, beta },
-          context_refs: [cid],
         });
         demoted++;
         promotedIds.add(cid);
@@ -404,26 +474,26 @@ export const maybePromoteKnowledge = (db: Database, candidateId: string): Knowle
   const conf = betaConfidence(alpha, beta);
 
   if (wins >= POSTERIOR.countThreshold && score >= POSTERIOR.promoteScore) {
-    insertEvent(db, {
+    emitPromotionSpine(db, {
       kind: "knowledge_promoted",
+      candidate_id: candidateId,
       directive_id: row.directive_id as string,
       task_id: row.task_id as string,
       loop_id: row.loop_id as string,
-      substrate_origin: "substrate_auto",
+      artifact_prefix: "knowledge_promotion",
       payload: { candidate_id: candidateId, wins, losses, score, confidence: conf, alpha, beta },
-      context_refs: [candidateId],
     });
     return { kind: "promoted", candidate_id: candidateId, score, confidence: conf, alpha, beta };
   }
   if (losses >= POSTERIOR.countThreshold && score <= POSTERIOR.demoteScore) {
-    insertEvent(db, {
-      kind: "knowledge_demoted",
+    emitPromotionSpine(db, {
+      kind: "knowledge_demoted" as PromotionResultKind,
+      candidate_id: candidateId,
       directive_id: row.directive_id as string,
       task_id: row.task_id as string,
       loop_id: row.loop_id as string,
-      substrate_origin: "substrate_auto",
+      artifact_prefix: "knowledge_demotion",
       payload: { candidate_id: candidateId, wins, losses, score, confidence: conf, alpha, beta },
-      context_refs: [candidateId],
     });
     return { kind: "demoted", candidate_id: candidateId, score, confidence: conf, alpha, beta };
   }
@@ -530,12 +600,13 @@ export const extractCodeArtifactScores = (db: Database): CodeArtifactScoreSummar
         // the LATEST action_scored that drove the posterior so the
         // directive/task lineage stays intact.
         const lastDriver = events[events.length - 1]!;
-        insertEvent(db, {
+        emitPromotionSpine(db, {
           kind: "code_artifact_promoted",
+          candidate_id: art.id,
           directive_id: lastDriver.directive_id,
           task_id: lastDriver.task_id,
           loop_id: lastDriver.loop_id,
-          substrate_origin: "substrate_auto",
+          artifact_prefix: "code_artifact_promotion",
           payload: {
             artifact_id: art.id,
             score,
@@ -545,7 +616,6 @@ export const extractCodeArtifactScores = (db: Database): CodeArtifactScoreSummar
             sample_count: count,
             name: newName,
           },
-          context_refs: [art.id],
         });
       }
     }
@@ -970,12 +1040,15 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
       // The trajectory is read off the most recent successful directive — the
       // replayer will use this exact sequence of action artifacts + verifiers.
       const trajectory = buildTrajectoryFor(db, anchor.directive_id as string);
-      insertEvent(db, {
+      const entryIds = entries.map((e) => e.row.id as string);
+      emitPromotionSpine(db, {
         kind: "recipe_extracted",
+        candidate_id: entryIds[0]!,
+        extra_context_refs: entryIds.slice(1),
         directive_id: anchor.directive_id as string,
         task_id: anchor.task_id as string,
         loop_id: anchor.loop_id as string,
-        substrate_origin: "substrate_auto",
+        artifact_prefix: "recipe_cluster_extraction",
         payload: {
           goal_shape: goalShape,
           topology_signature: topology,
@@ -985,7 +1058,6 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
           directive_ids: directiveIds,
           trajectory,
         },
-        context_refs: entries.map((e) => e.row.id as string),
       });
       extracted++;
       latestTs = anchor.ts as string;
@@ -1100,12 +1172,14 @@ export const extractRecipeFromCommit = (
             seedTrajectory = seedPayload.trajectory ?? [];
           } catch { /* leave empty array */ }
           try {
-            insertEvent(db, {
+            emitPromotionSpine(db, {
               kind: "recipe_extracted",
+              candidate_id: r.id,                       // the seed recipe being bumped
+              extra_context_refs: [committed.id],       // the successful commit driving the bump
               directive_id: committed.directive_id,
               task_id: committed.task_id,
               loop_id: committed.loop_id ?? "",
-              substrate_origin: "substrate_auto",
+              artifact_prefix: "recipe_confidence_bump",
               payload: {
                 goal_shape: goalShape,
                 topology_signature: topology,
@@ -1116,7 +1190,6 @@ export const extractRecipeFromCommit = (
                 seeded_by: "inline_post_commit_bump",
                 trajectory: seedTrajectory,
               },
-              context_refs: [r.id, committed.id],
             });
           } catch { /* failure to write a bump row is non-fatal — recipe still matches */ }
         }
