@@ -176,14 +176,27 @@ const readKnowledgeTopK = (db: Database, k: number): Array<{ id: string; text: s
     try {
       const pPayload = JSON.parse((r.p_payload as string) ?? "{}") as Record<string, unknown>;
       const cPayload = JSON.parse((r.c_payload as string) ?? "{}") as Record<string, unknown>;
-      const text =
-        (cPayload.text as string | undefined) ??
+      // Rich candidate schema (brain knowledge audit bc5vdkrik #4):
+      // when the candidate emitter includes structural fields, render
+      // claim + compressed evidence + implications inline so the brain
+      // sees the WHY, not just the headline. Falls through the
+      // canonical text-extraction chain when rich fields are absent.
+      const claim =
         (cPayload.claim as string | undefined) ??
+        (cPayload.text as string | undefined) ??
         (cPayload.summary as string | undefined) ??
         (cPayload.insight as string | undefined) ??
         (pPayload.synthesized_text as string | undefined) ??
-        (pPayload.text as string | undefined) ??
-        "(no text)";
+        (pPayload.text as string | undefined);
+      const evidence = Array.isArray(cPayload.evidence) ? (cPayload.evidence as unknown[]).map(String) : [];
+      const implications = Array.isArray(cPayload.implications) ? (cPayload.implications as unknown[]).map(String) : [];
+      const text = claim
+        ? [
+            claim,
+            evidence.length > 0 ? `  evidence: ${evidence.slice(0, 3).join("; ")}` : "",
+            implications.length > 0 ? `  implications: ${implications.slice(0, 3).join("; ")}` : "",
+          ].filter((s) => s !== "").join("\n")
+        : "(no text)";
       out.push({
         id: r.id as string,
         text,

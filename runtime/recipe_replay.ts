@@ -261,6 +261,17 @@ const runArtifactByRuntime = async (
   if (row.status === "quarantined") {
     return { ok: false, result: null, error: "artifact_quarantined" };
   }
+  // Brain sandbox audit bsfxsvgh9 (2026-05-15): terminal-retired
+  // artifacts are NEVER auto-readmitted. Mirror the dispatcher hard
+  // fence so Tier-0 recipes can't replay known-bad trajectories.
+  if (row.status === "retired") {
+    return { ok: false, result: null, error: "artifact_retired" };
+  }
+  // Hard kill-count fence (mirrors task_dispatcher.ts ARTIFACT_HARD_KILL_FENCE).
+  const killFence = Number(process.env.ACC2_ARTIFACT_HARD_KILL_FENCE ?? "5");
+  if (row.recentKillCount >= killFence) {
+    return { ok: false, result: null, error: `artifact_kill_fenced:count=${row.recentKillCount}` };
+  }
   const decl = row.declaredSandbox;
   if (decl.runtime !== row.runtime) {
     return { ok: false, result: null, error: "sandbox_decl_runtime_mismatch" };
