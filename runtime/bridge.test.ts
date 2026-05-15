@@ -439,4 +439,197 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     ];
     expect([...V2_MCP_TOOL_SURFACE].sort()).toEqual([...expected].sort());
   });
+
+  test("auth pre-flight: opencode has no auth providers → HIDL emitted and dispatch skipped", async () => {
+    const db = openDb(":memory:");
+    // Track whether spawn was even called. The pre-flight check must short
+    // the dispatch BEFORE the subprocess is touched — wasted process cost is
+    // the failure mode the HIDL surface is meant to prevent.
+    let spawnCalled = 0;
+    const fakeSpawn = (() => {
+      spawnCalled++;
+      throw new Error("spawn should never have been called once auth pre-flight fails");
+    }) as unknown as typeof Bun.spawn;
+    const result = await spawnRealOpencode(
+      { prompt: "auth-preflight probe", taskId: newId(), directiveId: newId() },
+      db,
+      {
+        spawnFn: fakeSpawn,
+        mcpServerUrl: "http://127.0.0.1:1/mcp",
+        // Inject a probe that reports zero credentials + zero env providers
+        // — the canonical auth_missing shape.
+        authProbe: () => ({ credentialCount: 0, envProviderCount: 0 }),
+      },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason.kind).toBe("auth_missing");
+    expect(spawnCalled).toBe(0);
+
+    // HIDL row exists with reason=auth_missing and mirror-inline visibility.
+    const hidl = db
+      .query(
+        `SELECT payload FROM events
+         WHERE kind = 'hidl_action_required'
+         ORDER BY ts DESC LIMIT 1`,
+      )
+      .get() as { payload: string } | null;
+    expect(hidl).not.toBeNull();
+    const hidlPayload = JSON.parse(hidl!.payload) as Record<string, unknown>;
+    expect(hidlPayload.reason).toBe("auth_missing");
+    expect(typeof hidlPayload.summary).toBe("string");
+    expect(String(hidlPayload.suggested_action)).toContain("opencode auth login");
+
+    // bridge_failed row was also emitted carrying the pre-flight reason.
+    const failed = db
+      .query("SELECT payload FROM events WHERE kind = 'bridge_failed' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(failed).not.toBeNull();
+    const failedPayload = JSON.parse(failed!.payload) as Record<string, unknown>;
+    expect(failedPayload.reason).toBe("auth_missing");
+    expect(failedPayload.mcp_handshake_ok).toBe(false);
+  }, 5_000);
+
+  test("auth pre-flight: probe returns null (unknown) → dispatch proceeds, no HIDL emitted", async () => {
+    const db = openDb(":memory:");
+    // Null probe = transient probe glitch / opencode binary missing. The
+    // bridge must NOT short-circuit on this — the downstream spawn / exit
+    // paths surface the gap if it materialises there.
+    let spawnCalled = 0;
+    const sentinel = {
+      kill: () => {},
+      stdout: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      stderr: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      exited: Promise.resolve(0),
+    };
+    const fakeSpawn = (() => { spawnCalled++; return sentinel; }) as unknown as typeof Bun.spawn;
+    await spawnRealOpencode(
+      { prompt: "auth-probe-null", taskId: newId(), directiveId: newId() },
+      db,
+      {
+        spawnFn: fakeSpawn,
+        mcpServerUrl: "http://127.0.0.1:1/mcp",
+        authProbe: () => null,
+        mcpHandshakeWindowMs: 100,
+        firstFrameThresholdMs: 100,
+        timeoutMs: 1_000,
+      },
+    );
+    expect(spawnCalled).toBe(1);
+    const hidlCount = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'hidl_action_required'")
+      .get() as { c: number };
+    expect(hidlCount.c).toBe(0);
+  }, 5_000);
+
+  test("auth post-flight: opencode exits non-zero with auth-shaped stderr → HIDL reason=auth_expired", async () => {
+    const db = openDb(":memory:");
+    // Build a fake subprocess that exits non-zero with stderr matching a
+    // canonical auth-shaped error string (401 + "unauthorized"). The bridge
+    // must promote this to a HIDL emission with reason=auth_expired —
+    // distinct from the pre-flight `auth_missing` so the ledger preserves
+    // WHEN the auth went bad.
+    const stderrBytes = new TextEncoder().encode(
+      "Error: 401 Unauthorized — authentication failed (token may be expired)\n",
+    );
+    const sentinel = {
+      kill: () => {},
+      stdout: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      stderr: {
+        getReader: () => {
+          let delivered = false;
+          return {
+            read: async () => {
+              if (delivered) return { done: true, value: undefined };
+              delivered = true;
+              return { done: false, value: stderrBytes };
+            },
+          };
+        },
+      },
+      exited: Promise.resolve(1),
+    };
+    const fakeSpawn = (() => sentinel) as unknown as typeof Bun.spawn;
+    const result = await spawnRealOpencode(
+      { prompt: "auth-postflight probe", taskId: newId(), directiveId: newId() },
+      db,
+      {
+        spawnFn: fakeSpawn,
+        mcpServerUrl: "http://127.0.0.1:1/mcp",
+        // Probe says auth is configured — the post-flight path is the one
+        // we're exercising.
+        authProbe: () => ({ credentialCount: 1, envProviderCount: 0 }),
+        mcpHandshakeWindowMs: 100,
+        firstFrameThresholdMs: 100,
+        timeoutMs: 1_000,
+      },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason.kind).toBe("auth_missing");
+
+    const hidl = db
+      .query(
+        `SELECT payload FROM events
+         WHERE kind = 'hidl_action_required'
+         ORDER BY ts DESC LIMIT 1`,
+      )
+      .get() as { payload: string } | null;
+    expect(hidl).not.toBeNull();
+    const hidlPayload = JSON.parse(hidl!.payload) as Record<string, unknown>;
+    expect(hidlPayload.reason).toBe("auth_expired");
+    expect(String(hidlPayload.summary).toLowerCase()).toContain("auth");
+
+    // bridge_failed row carries reason=auth_expired (distinct from the
+    // pre-Bridge default subprocess_crash bucket).
+    const failed = db
+      .query("SELECT payload FROM events WHERE kind = 'bridge_failed' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(failed).not.toBeNull();
+    const failedPayload = JSON.parse(failed!.payload) as Record<string, unknown>;
+    expect(failedPayload.reason).toBe("auth_expired");
+  }, 5_000);
+
+  test("HIDL idempotency: two auth failures within one hour emit only one HIDL row", async () => {
+    const db = openDb(":memory:");
+    let spawnCalled = 0;
+    const fakeSpawn = (() => {
+      spawnCalled++;
+      throw new Error("spawn should not run when pre-flight short-circuits");
+    }) as unknown as typeof Bun.spawn;
+    const baseOpts = {
+      spawnFn: fakeSpawn,
+      mcpServerUrl: "http://127.0.0.1:1/mcp",
+      authProbe: () => ({ credentialCount: 0, envProviderCount: 0 }),
+    };
+    await spawnRealOpencode(
+      { prompt: "idem-1", taskId: newId(), directiveId: newId() },
+      db,
+      baseOpts,
+    );
+    await spawnRealOpencode(
+      { prompt: "idem-2", taskId: newId(), directiveId: newId() },
+      db,
+      baseOpts,
+    );
+    expect(spawnCalled).toBe(0);
+    const hidlCount = db
+      .query(
+        `SELECT COUNT(*) as c FROM events
+         WHERE kind = 'hidl_action_required'
+           AND json_extract(payload, '$.reason') = 'auth_missing'`,
+      )
+      .get() as { c: number };
+    // Two dispatch attempts, one HIDL row — the canonical idempotency shape.
+    expect(hidlCount.c).toBe(1);
+    // Both attempts still emit their bridge_failed taxonomy rows (the dispatch
+    // outcome must be observable on every call); idempotency lives on the
+    // owner-facing HIDL surface only.
+    const failedCount = db
+      .query(
+        `SELECT COUNT(*) as c FROM events
+         WHERE kind = 'bridge_failed'
+           AND json_extract(payload, '$.reason') = 'auth_missing'`,
+      )
+      .get() as { c: number };
+    expect(failedCount.c).toBe(2);
+  }, 5_000);
 });

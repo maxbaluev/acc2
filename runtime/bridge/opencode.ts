@@ -20,9 +20,11 @@
 
 import type { Database } from "bun:sqlite";
 import { rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import type { JsonValue } from "../../substrate/types";
 import { emitEvent } from "../events";
 import { isCycleViolation } from "../cycle_one_gate";
+import { parseOpencodeAuth } from "../../cli/doctor";
 import type { BridgeFailureReason, BridgeRequest, BridgeResult, SpawnOpts } from "./types";
 import {
   DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS,
@@ -43,6 +45,98 @@ import {
  *  registers its proc here and de-registers on exit. */
 type LiveProc = { pid: number; kill: (sig: NodeJS.Signals) => boolean };
 const LIVE_OPENCODE_PROCS: Set<LiveProc> = new Set();
+
+/** Default opencode auth probe — runs `opencode auth list` and parses the
+ *  output into a credential / env-provider snapshot. Returns null when the
+ *  probe could not run (binary missing, exit non-zero). The bridge treats
+ *  a null result as "unknown — proceed and let the spawn-time error path
+ *  surface the failure" so a transient probe glitch doesn't block real
+ *  dispatches. Tests inject deterministic values via SpawnOpts.authProbe. */
+const defaultAuthProbe = (): { credentialCount: number; envProviderCount: number } | null => {
+  const out = spawnSync("opencode", ["auth", "list"], { encoding: "utf8" });
+  if (out.status !== 0) return null;
+  const raw = (out.stdout ?? out.stderr ?? "").trim();
+  if (raw.length === 0) return null;
+  const state = parseOpencodeAuth(raw);
+  return { credentialCount: state.credentialCount, envProviderCount: state.envProviderCount };
+};
+
+/** Idempotency window for `hidl_action_required` emission. Two failures of
+ *  the same reason within this window collapse to one HIDL row so the
+ *  owner sees the gap once, not on every retry. */
+const HIDL_AUTH_IDEMPOTENCY_WINDOW = "-1 hour";
+
+/** Returns true when a `hidl_action_required` row with the matching reason
+ *  was emitted within the last hour. Used by both the pre-flight
+ *  ("auth_missing") and post-flight ("auth_expired") paths so a stuck-auth
+ *  scenario doesn't flood the ledger with duplicate HIDL cards. */
+const hasRecentAuthHidl = (db: Database, reason: "auth_missing" | "auth_expired"): boolean => {
+  const row = db
+    .query(
+      `SELECT 1 FROM events
+       WHERE kind = 'hidl_action_required'
+         AND json_extract(payload, '$.reason') = ?
+         AND ts > datetime('now', ?)
+       LIMIT 1`,
+    )
+    .get(reason, HIDL_AUTH_IDEMPOTENCY_WINDOW);
+  return row !== null;
+};
+
+/** Emit `hidl_action_required` carrying the owner-facing summary +
+ *  suggested action so the gap shows up inline (mirror_inline=true on the
+ *  kind registry, see substrate/event_kinds.ts:205). Idempotent — caller
+ *  must check `hasRecentAuthHidl` first. */
+const emitAuthHidl = (
+  db: Database,
+  req: BridgeRequest,
+  reason: "auth_missing" | "auth_expired",
+  detail: string,
+): void => {
+  emitEvent(db, {
+    kind: "hidl_action_required",
+    substrate_origin: "substrate_auto",
+    directive_id: req.directiveId,
+    task_id: req.taskId,
+    payload: {
+      summary:
+        reason === "auth_missing"
+          ? "Brain dispatch blocked — opencode has no auth providers configured"
+          : "Brain dispatch failed — opencode auth appears expired or rejected",
+      reason,
+      blocked_task_id: req.taskId,
+      suggested_action:
+        "Run: opencode auth login   (pick OpenAI for the brain; OpenAI Max subscription is the canonical path)",
+      detail,
+      evidence_event_ids: [],
+    } as JsonValue,
+    invoker: "opencode",
+  });
+};
+
+/** Stderr substrings that signal an auth-shaped post-flight failure. Match
+ *  is case-insensitive; any hit promotes a non-zero opencode exit into an
+ *  `auth_expired` HIDL emission so the owner sees the gap inline rather
+ *  than buried in a `subprocess_crash` row. */
+const AUTH_STDERR_MARKERS = [
+  "no provider",
+  "no providers",
+  "authentication failed",
+  "authentication error",
+  "401",
+  "unauthorized",
+  "invalid api key",
+  "invalid_api_key",
+  "missing api key",
+  "auth token expired",
+  "expired token",
+];
+
+const stderrIndicatesAuthFailure = (stderr: string): boolean => {
+  if (!stderr) return false;
+  const lower = stderr.toLowerCase();
+  return AUTH_STDERR_MARKERS.some((m) => lower.includes(m));
+};
 
 /** Kill every live opencode subprocess. SIGTERM first; SIGKILL after 1.5s
  *  per process. Called from daemon.stop() so children never outlive the
@@ -101,6 +195,51 @@ export const spawnRealOpencode = async (
     payload: { prompt_chars: req.prompt.length, model, real: true } as JsonValue,
     invoker: "opencode",
   });
+
+  // ── Auth pre-flight (2026-05-15) ──
+  // Run `opencode auth list` BEFORE materializing config or spawning the
+  // subprocess. If the probe reports 0 credentials AND 0 env providers,
+  // the dispatch is known-failed — surface the gap as a HIDL action card
+  // (mirror_inline=true via the event-kind registry) and return immediately
+  // so the scheduler doesn't burn a subprocess on a guaranteed auth failure.
+  // Idempotent: at most one HIDL row per reason per hour. A null probe
+  // result (binary missing, transient error) is treated as "unknown,
+  // proceed" — the existing spawn-time / exit-code paths surface the gap
+  // if it materializes there. Matches the structural pattern from
+  // runtime/embedder.ts (env_missing / OPENAI_API_KEY) so the owner sees
+  // both brain and embedder auth gaps through the same HIDL surface.
+  // Test-mode coupling: when `spawnFn` is injected but `authProbe` is not,
+  // we default to "probe unknown" (return null) rather than running the
+  // real `opencode auth list` subprocess. Tests that stub spawn already
+  // own the dispatch surface; the auth probe would otherwise leak host
+  // state (developer machine auth) into deterministic test fixtures. Tests
+  // exercising the pre-flight path inject `authProbe` explicitly.
+  const probeDefault = spawnOpts.spawnFn ? ((): null => null) : defaultAuthProbe;
+  const authProbe = spawnOpts.authProbe ?? probeDefault;
+  const authState = authProbe();
+  if (authState !== null && authState.credentialCount === 0 && authState.envProviderCount === 0) {
+    if (!hasRecentAuthHidl(db, "auth_missing")) {
+      emitAuthHidl(
+        db,
+        req,
+        "auth_missing",
+        "opencode auth list reported 0 credentials and 0 env providers",
+      );
+    }
+    emitEvent(db, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        reason: "auth_missing",
+        mcp_handshake_ok: false,
+        hint: "opencode has no auth providers configured — run `opencode auth login`",
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    return { ok: false, reason: { kind: "auth_missing" } };
+  }
 
   // Brain audit b0kheqg3g hole D (2026-05-15): persist the composed prompt
   // so auditors can inspect what the brain saw. The depth-1-retrieval claim
@@ -714,19 +853,38 @@ export const spawnRealOpencode = async (
 
   if (exitCode !== 0) {
     cleanupConfig();
+    // Auth-shaped post-flight: opencode exited non-zero AND stderr matches an
+    // auth marker (401 / unauthorized / authentication failed / etc). Surface
+    // the gap as a HIDL action card with reason="auth_expired" so the owner
+    // sees the gap inline. Distinct reason from the pre-flight `auth_missing`
+    // path so the ledger preserves WHEN the auth went bad (never configured
+    // vs. configured-but-rejected). Idempotent: at most one HIDL row per
+    // reason per hour.
+    const authStderrHit = stderrIndicatesAuthFailure(stderrBuf);
+    if (authStderrHit && !hasRecentAuthHidl(db, "auth_expired")) {
+      emitAuthHidl(
+        db,
+        req,
+        "auth_expired",
+        `opencode exit ${exitCode}; stderr matched auth marker (tail: ${stderrBuf.slice(-256)})`,
+      );
+    }
     emitEvent(db, {
       kind: "bridge_failed",
       substrate_origin: "opencode",
       directive_id: req.directiveId,
       task_id: req.taskId,
       payload: {
-        reason: "subprocess_crash",
+        reason: authStderrHit ? "auth_expired" : "subprocess_crash",
         exit_code: exitCode,
         stderr_tail: stderrBuf.slice(-512),
         mcp_handshake_ok: mcpHandshakeOk,
       } as JsonValue,
       invoker: "opencode",
     });
+    if (authStderrHit) {
+      return { ok: false, reason: { kind: "auth_missing" } };
+    }
     return { ok: false, reason: { kind: "subprocess_crash", stderr_tail: stderrBuf.slice(-512) } };
   }
 
@@ -737,9 +895,22 @@ export const spawnRealOpencode = async (
   if (opencodeErrorEvent) {
     cleanupConfig();
     const msg = opencodeErrorEvent.message ?? "unknown opencode error";
-    const reason: BridgeFailureReason = msg.toLowerCase().includes("auth")
+    const isAuth = stderrIndicatesAuthFailure(msg) || msg.toLowerCase().includes("auth");
+    const reason: BridgeFailureReason = isAuth
       ? { kind: "auth_missing" }
       : { kind: "parse_error", raw: msg.slice(0, 512) };
+    // Structured opencode error matched an auth pattern — surface the HIDL
+    // card the same way the non-zero-exit branch does. The two paths bucket
+    // the same operator-visible gap; the ledger's bridge_failed reason field
+    // preserves which subprocess shape produced it.
+    if (isAuth && !hasRecentAuthHidl(db, "auth_expired")) {
+      emitAuthHidl(
+        db,
+        req,
+        "auth_expired",
+        `opencode structured error event ${opencodeErrorEvent.name ?? "UnknownError"}: ${msg.slice(0, 256)}`,
+      );
+    }
     emitEvent(db, {
       kind: "bridge_failed",
       substrate_origin: "opencode",

@@ -60,4 +60,14 @@ export type SpawnOpts = {
    *  env override `ACC2_BRIDGE_FIRST_FRAME_THRESHOLD_MS`. Allows slow
    *  first-cycle brain reasoning without false-positive wedge kills. */
   firstFrameThresholdMs?: number;
+  /** Inject the opencode-auth pre-flight probe. Returns
+   *  `{ credentialCount, envProviderCount }`. When both are zero, the
+   *  bridge emits `hidl_action_required { reason: "auth_missing" }` and
+   *  skips the subprocess spawn entirely — a known-failed dispatch is not
+   *  worth the subprocess cost. Tests inject deterministic values;
+   *  production calls `parseOpencodeAuth(spawnSync("opencode auth list"))`.
+   *  Returns null when the probe couldn't run (binary missing, etc) — the
+   *  bridge treats that as "unknown, proceed" so a transient probe failure
+   *  doesn't block legitimate dispatches. */
+  authProbe?: () => { credentialCount: number; envProviderCount: number } | null;
 };

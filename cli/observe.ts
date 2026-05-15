@@ -63,6 +63,7 @@ export const NARRATIVE_KINDS = new Set([
   "owner_decision_recorded",
   "hidl_action_required",
   "owner_profile_recorded",
+  "owner_insight_candidate",
   // DAG structure
   "task_node_opened",
   "task_edge_recorded",
