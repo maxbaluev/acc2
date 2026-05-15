@@ -119,7 +119,32 @@ type EventRow = {
   payload?: unknown;
 };
 
-type ViewKey = "directives" | "tasks" | "events" | "artifacts" | "recipes" | "lessons" | "interventions" | "knowledge";
+type ViewKey = "dag" | "directives" | "tasks" | "events" | "artifacts" | "recipes" | "lessons" | "interventions" | "knowledge";
+
+// DAG-first TUI (brain audit bs00e26fx, 2026-05-15): the substrate IS a
+// DAG of directive → task → event nodes joined by task_edge_recorded
+// `refines | requires | blocks | contains` edges. The DAG view is the
+// canonical entry surface; the other tabs are saved-filter overlays
+// over the same underlying ledger.
+type DagEdgeKind = "refines" | "requires" | "blocks" | "contains" | "event";
+type DagRowKind = "directive" | "task" | "event" | "fold" | "surface" | "substrate";
+
+type DagNode = {
+  id: string;
+  rowKind: DagRowKind;
+  title: string;
+  meta: string;
+  body: string;
+  status?: string;
+  eventKind?: string;
+  directive_id?: string;
+  task_id?: string;
+  parent_id?: string;
+  edgeKind?: DagEdgeKind;
+  depth: number;
+  children: DagNode[];
+  raw?: unknown;
+};
 
 export type WatchState = {
   events: EventRow[];
@@ -165,14 +190,14 @@ const MAX_EVENTS = 300;
 const MAX_INITIAL_EVENTS = 120;
 const POLL_INTERVAL_MS = 2000;
 const VIEWS: Array<{ key: ViewKey; label: string }> = [
-  { key: "directives", label: "Directives" },
-  { key: "tasks", label: "Tasks" },
-  { key: "events", label: "Recent Events" },
-  { key: "artifacts", label: "Code Artifacts" },
-  { key: "recipes", label: "Recipes" },
-  { key: "lessons", label: "Lessons" },
-  { key: "interventions", label: "Supervisor" },
+  { key: "dag", label: "DAG" },
   { key: "knowledge", label: "Knowledge" },
+  { key: "lessons", label: "Lessons" },
+  { key: "recipes", label: "Recipes" },
+  { key: "artifacts", label: "Code Artifacts" },
+  { key: "interventions", label: "Supervisor" },
+  { key: "events", label: "Recent Events" },
+  { key: "directives", label: "Directives" },
 ];
 // Brain TUI rewrite proposal (btqner8jn axis B, 2026-05-15): treat noisy
 // heartbeat events as semantic folds — keep them in the buffer but
@@ -197,7 +222,7 @@ const emptyState = (): WatchState => ({
   lessons: [],
   knowledge: [],
   health: {},
-  view: "events",
+  view: "dag",
   selected: {},
   filter: "",
   showHelp: false,
@@ -535,6 +560,268 @@ const deriveKnowledge = (state: WatchState): KnowledgeRow[] => {
   return rows;
 };
 
+// ----------------------------------------------------------------------------
+// DAG view builders (brain audit bs00e26fx, 2026-05-15)
+// ----------------------------------------------------------------------------
+
+const STRUCTURAL_EVENT_KINDS = new Set([
+  "action_predicted", "action_scored", "task_committed", "task_failed",
+  "knowledge_candidate", "code_artifact_candidate", "lesson_extracted",
+  "contract_amendment_proposed", "recipe_extracted", "recipe_replayed",
+  "dispatcher_violation",
+]);
+void STRUCTURAL_EVENT_KINDS;
+
+const taskGoalFromEvent = (ev: EventRow): string => {
+  const p = asObject(ev.payload);
+  return asString(p.goal, asString(p.task_goal, formatPayloadPreview(ev.payload, 120) || ev.kind));
+};
+
+const edgePayload = (ev: EventRow): { from?: string; to?: string; kind: DagEdgeKind } => {
+  const p = asObject(ev.payload);
+  return {
+    from: asString(p.from_task, asString(p.from, "")) || undefined,
+    to: asString(p.to_task, asString(p.to, "")) || undefined,
+    kind: (asString(p.kind, "refines") as DagEdgeKind),
+  };
+};
+
+const makeEventNode = (ev: EventRow, depth: number): DagNode => ({
+  id: ev.event_id,
+  rowKind: HEARTBEAT_KINDS.has(ev.kind) ? "fold" : "event",
+  title: ev.kind,
+  meta: `${ev.ts.slice(11, 19)} dir=${shortId(ev.directive_id)} task=${shortId(ev.task_id)}`,
+  body: `event_id=${ev.event_id}\nts=${ev.ts}\nkind=${ev.kind}\ndirective_id=${ev.directive_id ?? ""}\ntask_id=${ev.task_id ?? ""}\n\npayload=${formatPayloadFull(ev.payload)}`,
+  status: ev.kind,
+  eventKind: ev.kind,
+  directive_id: ev.directive_id,
+  task_id: ev.task_id,
+  depth,
+  children: [],
+  raw: ev,
+});
+
+const groupDagHeartbeatNodes = (nodes: DagNode[], depth: number): DagNode[] => {
+  const grouped: DagNode[] = [];
+  for (const node of nodes) {
+    const prev = grouped[grouped.length - 1];
+    if (prev && prev.eventKind === node.eventKind && node.eventKind && HEARTBEAT_KINDS.has(node.eventKind)) {
+      prev.children.push({ ...node, depth: depth + 1 });
+      prev.title = `${node.eventKind} x${prev.children.length + 1}`;
+      prev.meta = `${prev.meta} latest=${node.meta.slice(0, 8)}`;
+      prev.body = `${prev.body}\n\n--- folded member ---\n${node.body}`;
+      continue;
+    }
+    grouped.push({ ...node, depth });
+  }
+  return grouped;
+};
+
+const buildDagNodes = (state: WatchState): DagNode[] => {
+  const directiveMap = new Map<string, DagNode>();
+  const taskMap = new Map<string, DagNode>();
+  const taskEvents = new Map<string, DagNode[]>();
+  const directiveEvents = new Map<string, DagNode[]>();
+  const unthreaded: DagNode[] = [];
+  const edges: Array<{ from: string; to: string; kind: DagEdgeKind }> = [];
+
+  for (const d of deriveDirectives(state)) {
+    directiveMap.set(d.directive_id, {
+      id: d.directive_id,
+      rowKind: "directive",
+      title: d.text,
+      meta: `${d.lifecycle} ${d.status ?? ""} ${d.urgency ?? ""}`.trim(),
+      body: `directive_id=${d.directive_id}\nopened=${d.opened_ts}\nlifecycle=${d.lifecycle}\nurgency=${d.urgency ?? "normal"}\n\n${d.text}`,
+      status: d.status ?? d.lifecycle,
+      directive_id: d.directive_id,
+      depth: 0,
+      children: [],
+      raw: d,
+    });
+  }
+
+  for (const t of deriveTasks(state)) {
+    taskMap.set(t.task_id, {
+      id: t.task_id,
+      rowKind: "task",
+      title: t.goal,
+      meta: `${t.status ?? "ready"} dir=${shortId(t.directive_id)} depth=${t.depth ?? 0}`,
+      body: `task_id=${t.task_id}\ndirective_id=${t.directive_id}\nstatus=${t.status ?? "ready"}\ndepth=${t.depth ?? 0}\n\n${t.goal}`,
+      status: t.status ?? "ready",
+      directive_id: t.directive_id,
+      task_id: t.task_id,
+      depth: Math.max(1, (t.depth ?? 0) + 1),
+      children: [],
+      raw: t,
+    });
+  }
+
+  for (const ev of state.events ?? []) {
+    if (ev.kind === "task_node_opened" && ev.task_id && !taskMap.has(ev.task_id)) {
+      const p = asObject(ev.payload);
+      taskMap.set(ev.task_id, {
+        id: ev.task_id,
+        rowKind: "task",
+        title: taskGoalFromEvent(ev),
+        meta: `opened dir=${shortId(ev.directive_id)} depth=${asNumber(p.depth, 0)}`,
+        body: `task_id=${ev.task_id}\ndirective_id=${ev.directive_id ?? ""}\nstatus=opened\n\n${formatPayloadFull(ev.payload)}`,
+        status: "opened",
+        directive_id: ev.directive_id,
+        task_id: ev.task_id,
+        depth: Math.max(1, asNumber(p.depth, 0) + 1),
+        children: [],
+        raw: ev,
+      });
+    }
+    if (ev.kind === "task_edge_recorded") {
+      const edge = edgePayload(ev);
+      if (edge.from && edge.to) edges.push({ from: edge.from, to: edge.to, kind: edge.kind });
+    }
+  }
+
+  for (const ev of state.events ?? []) {
+    if (ev.kind === "task_node_opened" || ev.kind === "task_edge_recorded") continue;
+    // Self-referential dir=/task= rows (events.ts:73-74 fallback to event id
+    // when the field is genuinely absent) shouldn't fake a DAG link. Treat
+    // them as unthreaded so heartbeat / global events don't pollute task
+    // children. Brain dataflow audit bxdhdkm9e finding #1 (2026-05-15).
+    const realTask = ev.task_id && ev.task_id !== ev.event_id ? ev.task_id : undefined;
+    const realDirective = ev.directive_id && ev.directive_id !== ev.event_id ? ev.directive_id : undefined;
+    const node = makeEventNode(ev, 0);
+    if (realTask) {
+      const list = taskEvents.get(realTask) ?? [];
+      list.push(node);
+      taskEvents.set(realTask, list);
+    } else if (realDirective) {
+      const list = directiveEvents.get(realDirective) ?? [];
+      list.push(node);
+      directiveEvents.set(realDirective, list);
+    } else {
+      unthreaded.push(node);
+    }
+  }
+
+  for (const [taskId, events] of taskEvents) {
+    const task = taskMap.get(taskId);
+    if (task) {
+      task.children.push(...groupDagHeartbeatNodes(events, task.depth + 1));
+      continue;
+    }
+    // No task node was opened for this id — surface the orphan events under
+    // the directive (when known) instead of silently dropping them.
+    const firstEv = events[0]?.raw as EventRow | undefined;
+    const dirId = firstEv?.directive_id;
+    if (dirId && dirId !== firstEv?.event_id) {
+      const list = directiveEvents.get(dirId) ?? [];
+      list.push(...events);
+      directiveEvents.set(dirId, list);
+    } else {
+      unthreaded.push(...events);
+    }
+  }
+
+  const hasParent = new Set<string>();
+  for (const edge of edges) {
+    const from = taskMap.get(edge.from);
+    const to = taskMap.get(edge.to);
+    if (!from || !to) continue;
+    if (to.id === from.id) continue;
+    to.edgeKind = edge.kind;
+    to.parent_id = from.id;
+    to.depth = from.depth + 1;
+    from.children.push(to);
+    hasParent.add(to.id);
+  }
+
+  for (const task of taskMap.values()) {
+    if (hasParent.has(task.id)) continue;
+    const targetDirId = task.directive_id ?? "unknown_directive";
+    let dir = task.directive_id ? directiveMap.get(task.directive_id) : undefined;
+    if (!dir) {
+      // Directive_opened header is not in the local buffer (or never
+      // emitted). Create a synthetic root keyed on the directive id so
+      // the task is visible — never silently drop.
+      dir = {
+        id: targetDirId,
+        rowKind: "directive",
+        title: targetDirId === "unknown_directive"
+          ? "(tasks with no directive)"
+          : `(directive ${shortId(targetDirId, 12)} — header not in local buffer)`,
+        meta: "unloaded directive",
+        body: `directive_id=${targetDirId}\n(directive_opened event is older than the recent_events buffer)`,
+        status: "unloaded",
+        directive_id: targetDirId,
+        depth: 0,
+        children: [],
+        raw: { directive_id: targetDirId, orphan: true },
+      };
+      directiveMap.set(targetDirId, dir);
+    }
+    task.edgeKind = "contains";
+    task.parent_id = dir.id;
+    task.depth = 1;
+    dir.children.push(task);
+  }
+
+  for (const [directiveId, events] of directiveEvents) {
+    const dir = directiveMap.get(directiveId);
+    if (dir) {
+      dir.children.push(...groupDagHeartbeatNodes(events, 1));
+    } else {
+      // Orphan events pointing at a directive that never produced a
+      // directive_opened in the local buffer — surface them anyway under
+      // a synthetic directive root keyed by the directive_id so the
+      // operator can SEE every event, never silently drop.
+      directiveMap.set(directiveId, {
+        id: directiveId,
+        rowKind: "directive",
+        title: `(directive ${shortId(directiveId, 12)} — header not in local buffer)`,
+        meta: "unloaded directive",
+        body: `directive_id=${directiveId}\n(directive_opened event is older than the recent_events buffer)`,
+        status: "unloaded",
+        directive_id: directiveId,
+        depth: 0,
+        children: groupDagHeartbeatNodes(events, 1),
+        raw: { directive_id: directiveId, orphan: true },
+      });
+    }
+  }
+
+  const roots = [...directiveMap.values()].sort((a, b) => b.id.localeCompare(a.id));
+  if (unthreaded.length > 0) {
+    roots.push({
+      id: "substrate",
+      rowKind: "substrate",
+      title: "Unthreaded substrate events",
+      meta: `${unthreaded.length} events without directive/task`,
+      body: "Events with neither directive_id nor task_id are still visible here.",
+      depth: 0,
+      children: groupDagHeartbeatNodes(unthreaded, 1),
+    });
+  }
+  return roots;
+};
+
+const flattenDag = (nodes: DagNode[]): ListItem[] => {
+  const out: ListItem[] = [];
+  const walk = (n: DagNode): void => {
+    const edge = n.edgeKind && n.edgeKind !== "contains" ? `${n.edgeKind} ` : "";
+    const glyph = n.rowKind === "directive" ? "D" : n.rowKind === "task" ? "T" : n.rowKind === "fold" ? "F" : "E";
+    out.push({
+      id: n.id,
+      title: `${"  ".repeat(n.depth)}${edge}${glyph} ${n.title}`,
+      meta: n.meta,
+      body: n.body,
+      status: n.status,
+      kind: n.eventKind,
+      raw: n.raw ?? n,
+    });
+    for (const child of n.children) walk(child);
+  };
+  for (const root of nodes) walk(root);
+  return out;
+};
+
 const groupEvents = (events: EventRow[]): EventRow[] => {
   const grouped: EventRow[] = [];
   for (const ev of events) {
@@ -551,6 +838,7 @@ const groupEvents = (events: EventRow[]): EventRow[] => {
 };
 
 const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
+  if (view === "dag") return flattenDag(buildDagNodes(state));
   if (view === "directives") {
     return deriveDirectives(state).map((d) => ({
       id: d.directive_id,
@@ -744,11 +1032,28 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
   });
 };
 
+// Scoped filter grammar (brain audit bs00e26fx, 2026-05-15):
+//   kind:foo        — match item.kind/status substring
+//   directive:abc   — body must include directive_id=abc (substring)
+//   task:abc        — body must include task_id=abc (substring)
+//   edge:refines    — title must include edge prefix (refines/requires/blocks)
+//   plain term      — full-text substring across id+title+meta+body
+// Multiple space-separated terms are ANDed.
+const matchesScopedFilter = (item: ListItem, rawQuery: string): boolean => {
+  const q = rawQuery.trim().toLowerCase();
+  if (!q) return true;
+  const hay = `${item.id} ${item.title} ${item.meta} ${item.body}`.toLowerCase();
+  return q.split(/\s+/).every((term) => {
+    if (term.startsWith("kind:")) return (item.kind ?? item.status ?? "").toLowerCase().includes(term.slice(5));
+    if (term.startsWith("directive:")) return item.body.toLowerCase().includes(`directive_id=${term.slice(10)}`) || hay.includes(term.slice(10));
+    if (term.startsWith("task:")) return item.body.toLowerCase().includes(`task_id=${term.slice(5)}`) || hay.includes(term.slice(5));
+    if (term.startsWith("edge:")) return item.title.toLowerCase().includes(term.slice(5));
+    return hay.includes(term);
+  });
+};
+
 const filteredItems = (state: WatchState, view: ViewKey): ListItem[] => {
-  const q = (state.filter ?? "").trim().toLowerCase();
-  const items = itemsForView(state, view);
-  if (!q) return items;
-  return items.filter((item) => `${item.id} ${item.title} ${item.meta} ${item.body}`.toLowerCase().includes(q));
+  return itemsForView(state, view).filter((item) => matchesScopedFilter(item, state.filter ?? ""));
 };
 
 const wrapLines = (text: string, width: number, maxLines: number): string[] => {
@@ -776,7 +1081,7 @@ const healthLabel = (h: DaemonHealth): string => {
 export const renderFrame = (state: WatchState, cols: number, rows: number): string => {
   const safeCols = Math.max(60, cols);
   const safeRows = Math.max(20, rows);
-  const view = state.view ?? "events";
+  const view = state.view ?? "dag";
   const items = filteredItems(state, view);
   const selectedMap = state.selected ?? {};
   // Newest-first ordering: items[0] is the most recent row across every view,
@@ -812,7 +1117,7 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
   const parts: string[] = [CLEAR_SCREEN, HOME];
 
   parts.push(moveTo(1, 1));
-  parts.push(`${BOLD}${CYAN}acc watch${RESET} ${DIM}Tab/1-8 view  j/k move  Enter expand  Esc back  / filter  ? help  r refresh  q quit${RESET}`);
+  parts.push(`${BOLD}${CYAN}acc watch${RESET} ${DIM}DAG-first  1 DAG  2-8 overlays  j/k move  Enter expand  Esc back  / filter (kind: directive: task: edge:)  ? help  r refresh  q quit${RESET}`);
 
   parts.push(moveTo(2, 1));
   let col = 1;
@@ -827,7 +1132,9 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
   }
 
   parts.push(moveTo(4, 1));
-  parts.push(`${BOLD}${labelForView(view)}${RESET} ${DIM}(${items.length})${RESET}`);
+  const sectionLabel = view === "dag" ? "Task DAG" : labelForView(view);
+  const sectionSub = view === "dag" ? "directives → tasks → structural events" : "";
+  parts.push(`${BOLD}${sectionLabel}${RESET} ${DIM}(${items.length})${sectionSub ? ` ${sectionSub}` : ""}${RESET}`);
   parts.push(moveTo(4, listWidth + 3));
   parts.push(`${BOLD}Detail${RESET} ${DIM}${detail ? shortId(detail.id, 18) : "no selection"}${RESET}`);
 
@@ -977,11 +1284,11 @@ const appendEvent = (state: WatchState, ev: SseEvent): void => {
   // (selected > 0), bump selected by 1 to keep them on the same event.
   // Selected==0 means "follow the live tail" — leave it alone so the
   // top of the list always shows the newest arrival.
-  const view = state.view ?? "events";
-  if ((view === "events" || view === "interventions")) {
-    const sel = state.selected?.events ?? 0;
+  const view = state.view ?? "dag";
+  if ((view === "dag" || view === "events" || view === "interventions")) {
+    const sel = state.selected?.[view] ?? 0;
     if (sel > 0) {
-      state.selected = { ...(state.selected ?? {}), events: Math.min(sel + 1, MAX_EVENTS - 1) };
+      state.selected = { ...(state.selected ?? {}), [view]: Math.min(sel + 1, MAX_EVENTS - 1) };
     }
   }
   state.lessons = deriveLessons(state);
@@ -1012,7 +1319,7 @@ export const runWatch = async (argv: string[], opts: RunWatchOpts = {}): Promise
 
   const renderTick = (): void => writer(renderFrame(state, screenDims().cols, screenDims().rows));
   const adjustSelection = (delta: number): void => {
-    const view = state.view ?? "events";
+    const view = state.view ?? "dag";
     const count = filteredItems(state, view).length;
     const selected = state.selected ?? {};
     selected[view] = clamp((selected[view] ?? 0) + delta, 0, Math.max(0, count - 1));
@@ -1087,7 +1394,7 @@ export const runWatch = async (argv: string[], opts: RunWatchOpts = {}): Promise
       }
       if (str === "/") { filtering = true; state.filter = ""; renderTick(); return; }
       if (str === "?") { state.showHelp = !state.showHelp; renderTick(); return; }
-      if (str === "\t") { setView(nextView(state.view ?? "events")); renderTick(); return; }
+      if (str === "\t") { setView(nextView(state.view ?? "dag")); renderTick(); return; }
       if (/^[1-8]$/.test(str)) { setView(VIEWS[Number(str) - 1]!.key); renderTick(); return; }
       if (str === "r" || str === "R") { void refreshAll(state).then(renderTick).catch(() => { /* stale is better than blank */ }); return; }
     };

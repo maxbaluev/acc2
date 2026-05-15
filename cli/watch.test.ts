@@ -138,6 +138,26 @@ describe("renderFrame", () => {
     expect(out).toContain("kind_59");
     expect(out.includes("kind_0 ")).toBe(false);
   });
+
+  test("renders DAG view as canonical entry surface (brain audit bs00e26fx)", () => {
+    const state = {
+      events: [
+        { event_id: "d_ev", ts: "2026-05-13T10:00:00.000Z", kind: "directive_opened", directive_id: "D1", task_id: "D1", payload: { text: "ship dag tui" } },
+        { event_id: "t1_ev", ts: "2026-05-13T10:01:00.000Z", kind: "task_node_opened", directive_id: "D1", task_id: "T1", payload: { goal: "root task" } },
+        { event_id: "t2_ev", ts: "2026-05-13T10:02:00.000Z", kind: "task_node_opened", directive_id: "D1", task_id: "T2", payload: { goal: "sub task" } },
+        { event_id: "edge_ev", ts: "2026-05-13T10:03:00.000Z", kind: "task_edge_recorded", directive_id: "D1", task_id: "T2", payload: { from_task: "T1", to_task: "T2", kind: "refines" } },
+        { event_id: "score_ev", ts: "2026-05-13T10:04:00.000Z", kind: "action_scored", directive_id: "D1", task_id: "T2", payload: { residual: 0.1 } },
+      ],
+      active: [], ready: [], artifacts: [], health: {},
+    };
+    const out = renderFrame(state, 140, 40);
+    expect(out).toContain("Task DAG");
+    expect(out).toContain("ship dag tui");
+    // sub task is reachable via "refines T1->T2" edge labeling
+    expect(out).toContain("sub task");
+    expect(out).toContain("refines");
+    expect(out).toContain("action_scored");
+  });
 });
 
 describe("runWatch programmatic", () => {
