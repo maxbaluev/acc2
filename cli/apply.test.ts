@@ -158,6 +158,23 @@ describe("runApply gates", () => {
     expect(rowPayload(gateScore).authorization_status).toBe("approved");
   });
 
+  test("lesson_extracted proposed_action to repo target_resource accepts object-form anchored_replace_v1", async () => {
+    const eventId = await emitLesson({
+      target_resource: "repo:runtime/verifier.ts",
+      anchor: "gate",
+      diff: { kind: "anchored_replace_v1", before: "OLD", after: "NEW" },
+    });
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+
+    const prompt = cap.out.join("\n");
+    expect(code).toBe(0);
+    expect(prompt).toContain("AUTO-APPLY GATE");
+    expect(prompt).toContain("target_resource: repo:runtime/verifier.ts");
+    expect(prompt).toContain("anchored_replace_v1");
+  });
+
   test("lesson_extracted proposed_action to cli target uses auto-apply gate", async () => {
     const eventId = await emitLesson({ file_path: "cli/apply.ts", anchor: "gate", diff: "@@" });
     const cap = captureConsole();
@@ -209,8 +226,8 @@ describe("runApply gates", () => {
     expect(code).toBe(0);
     expect(prompt).toContain("STRUCTURED PROPOSED CHANGE");
     expect(prompt).toContain("source_field: proposed_behavior");
-    expect(prompt).toContain("file_path:    runtime/prompt_composer.ts");
-    expect(prompt).toContain("anchor:       WORKFLOW_TEXT");
+    expect(prompt).toContain("target_resource: repo:runtime/prompt_composer.ts");
+    expect(prompt).toContain("anchor:          WORKFLOW_TEXT");
     expect(prompt).toContain("```diff");
     expect(prompt).toContain("APPLY GATES");
     expect(prompt).toContain("owner_gate.required: false");

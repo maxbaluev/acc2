@@ -99,14 +99,21 @@ const parsePayload = (p: unknown): Record<string, unknown> => {
   return {};
 };
 
-const targetFromPayload = (payload: Record<string, unknown>): string => {
-  const direct = payload.target;
-  if (typeof direct === "string") return direct;
-  const proposed = payload.proposed_behavior ?? payload.proposed_action;
-  if (proposed && typeof proposed === "object") {
-    const path = (proposed as Record<string, unknown>).file_path;
-    if (typeof path === "string") return path;
+const proposalResource = (proposal: Record<string, unknown>): string => {
+  for (const key of ["target_resource", "resource_uri", "target", "file_path"] as const) {
+    const value = proposal[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
   }
+  return "";
+};
+
+const targetFromPayload = (payload: Record<string, unknown>): string => {
+  for (const key of ["target_resource", "resource_uri", "target"] as const) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  const proposed = payload.proposed_behavior ?? payload.proposed_action;
+  if (proposed && typeof proposed === "object") return proposalResource(proposed as Record<string, unknown>);
   return "";
 };
 
@@ -115,12 +122,39 @@ const targetCandidatesFromPayload = (payload: Record<string, unknown>): string[]
   const add = (value: unknown) => {
     if (typeof value === "string" && value.trim().length > 0) targets.add(value.trim());
   };
-  add(payload.target);
+  for (const key of ["target_resource", "resource_uri", "target"] as const) add(payload[key]);
   for (const key of ["proposed_behavior", "proposed_action"] as const) {
     const proposed = payload[key];
-    if (proposed && typeof proposed === "object") add((proposed as Record<string, unknown>).file_path);
+    if (proposed && typeof proposed === "object") {
+      const p = proposed as Record<string, unknown>;
+      for (const field of ["target_resource", "resource_uri", "target", "file_path"] as const) add(p[field]);
+      if (typeof p.file_path === "string" && p.file_path.trim().length > 0) add("repo:" + p.file_path.trim());
+    }
   }
   return [...targets];
+};
+
+const normalizeTargetForCompare = (target: string): string => target.startsWith("repo:") ? target.slice("repo:".length) : target;
+
+const proposalTargetsPayloadTarget = (proposal: Record<string, unknown>, target: string): boolean => {
+  const normalizedTarget = normalizeTargetForCompare(target);
+  for (const field of ["target_resource", "resource_uri", "target", "file_path"] as const) {
+    const value = proposal[field];
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed === target || normalizeTargetForCompare(trimmed) === normalizedTarget) return true;
+  }
+  return false;
+};
+
+const structuredDiff = (diff: unknown): boolean => {
+  if (typeof diff === "string") return diff.trim().length > 0;
+  if (!diff || typeof diff !== "object" || Array.isArray(diff)) return false;
+  const d = diff as Record<string, unknown>;
+  return d.kind === "anchored_replace_v1"
+    && typeof d.before === "string"
+    && d.before.length > 0
+    && typeof d.after === "string";
 };
 
 const boolish = (v: unknown): boolean => v === true || v === 1 || v === "1" || v === "true";
@@ -135,12 +169,10 @@ const structuredChangeProposal = (payload: Record<string, unknown>, target: stri
   const proposed = payload.proposed_behavior ?? payload.proposed_action;
   if (!proposed || typeof proposed !== "object") return false;
   const p = proposed as Record<string, unknown>;
-  return typeof p.file_path === "string"
-    && p.file_path === target
+  return proposalTargetsPayloadTarget(p, target)
     && typeof p.anchor === "string"
     && p.anchor.trim().length > 0
-    && typeof p.diff === "string"
-    && p.diff.trim().length > 0;
+    && structuredDiff(p.diff);
 };
 
 const proposalText = (value: unknown): string => {
@@ -181,8 +213,9 @@ const renderStructuredProposalBlock = (payload: Record<string, unknown>): string
   return [
     `STRUCTURED PROPOSED CHANGE`,
     `  source_field: ${sourceField}`,
-    `  file_path:    ${formatPromptValue(proposal.file_path)}`,
-    `  anchor:       ${formatPromptValue(proposal.anchor)}`,
+    `  target_resource: ${formatPromptValue(proposal.target_resource ?? proposal.resource_uri ?? proposal.target ?? (typeof proposal.file_path === "string" ? "repo:" + proposal.file_path : undefined))}`,
+    `  file_path:       ${formatPromptValue(proposal.file_path)} (legacy fallback)`,
+    `  anchor:          ${formatPromptValue(proposal.anchor)}`,
     `  diff:`,
     `\`\`\`diff`,
     typeof proposal.diff === "string" ? proposal.diff : JSON.stringify(proposal.diff ?? ""),
@@ -203,7 +236,7 @@ const renderGateBlock = (
     `  owner_gate.approved: ${auth.ownerApproved}`,
     `  owner_gate.rule: CLAUDE.md, docs/v2-design.md, docs/operator-install.md, docs/ops-guide.md, and .claude/rules/* require explicit owner consent before apply.`,
     `  cli_runtime_gate.target_in_scope: ${policy.autoApplyTarget}`,
-    `  cli_runtime_gate.rule: cli/* and runtime/* may auto-apply only with structured {file_path, anchor, diff}, verifier residual < 0.3, and no dispatcher_violation or irreversible_effect_recorded in the trajectory.`,
+    `  cli_runtime_gate.rule: repo:cli/* and repo:runtime/* may auto-apply only with structured {target_resource|resource_uri, anchor, diff:{kind:\"anchored_replace_v1\", before, after}}, verifier residual < 0.3, and no dispatcher_violation or irreversible_effect_recorded in the trajectory. Legacy file_path is accepted only as a fallback for existing proposals.`,
     `  cli_runtime_gate.structured_change: ${structured || !policy.autoApplyTarget}`,
     `  cli_runtime_gate.trajectory_hazard_count: ${hazardCount}`,
   ].join("\n");
@@ -421,7 +454,7 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean; aut
     : policy.ownerGateRequired
       ? `OWNER GATE — APPROVED: owner consent is recorded for this source event.`
     : policy.autoApplyTarget
-        ? `AUTO-APPLY GATE — CLI/RUNTIME: proceed only because acc apply verified a structured proposed change {file_path, anchor, diff}, verifier residual must be < 0.3, and this trajectory has no dispatcher_violation or irreversible_effect_recorded rows.`
+        ? `AUTO-APPLY GATE — CLI/RUNTIME: proceed only because acc apply verified a structured proposed change {target_resource|resource_uri, anchor, diff:{kind:\"anchored_replace_v1\", before, after}}, verifier residual must be < 0.3, and this trajectory has no dispatcher_violation or irreversible_effect_recorded rows.`
       : `(target outside owner-consent territory — apply directly)`;
 
   return [
