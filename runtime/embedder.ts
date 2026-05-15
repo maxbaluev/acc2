@@ -171,7 +171,31 @@ export const extractTextFromEvent = (kind: string, payload: unknown): string | n
     p.summary as string | undefined,
     p.message as string | undefined,
     p.claim as string | undefined,
+    // contract_amendment_proposed / lesson_extracted carry payload.current_behavior
+    // (the audit trail snapshot) — useful for retrieval when the diff itself is
+    // structured.
+    p.current_behavior as string | undefined,
   ];
+  // contract_amendment_proposed.proposed_behavior shape (the canonical
+  // anchored_replace_v1 structure): pick the most semantic-rich pieces.
+  // Most brain proposals carry either a string (prose direction) or an
+  // object { file_path, anchor, diff: { kind, before, after } }. We
+  // surface the `after` text since that's "what the amendment WILL look
+  // like" — most descriptive for retrieval. Falls back to the wrapping
+  // anchor/path when no diff text exists.
+  const proposed = p.proposed_behavior ?? p.proposed_action;
+  if (typeof proposed === "string") {
+    candidates.push(proposed);
+  } else if (proposed && typeof proposed === "object") {
+    const pb = proposed as Record<string, unknown>;
+    const diff = pb.diff;
+    if (typeof diff === "string") candidates.push(diff);
+    else if (diff && typeof diff === "object") {
+      const d = diff as Record<string, unknown>;
+      candidates.push(d.after as string | undefined, d.before as string | undefined);
+    }
+    candidates.push(pb.anchor as string | undefined, pb.file_path as string | undefined);
+  }
   // External-push envelope: payload.data.{summary|text|body|message|...}.
   const data = p.data as Record<string, unknown> | undefined;
   if (data && typeof data === "object") {
@@ -191,6 +215,36 @@ export const extractTextFromEvent = (kind: string, payload: unknown): string | n
 };
 
 type UnembeddedRow = { id: string; kind: string; payload: string };
+
+/** Resolve the embedding text for one event row, including cross-table joins
+ *  for kinds where the truth-bearing text lives on a different row. Called by
+ *  the worker tick after extractTextFromEvent comes up empty — gives us one
+ *  retry path before marking the row text-less. Currently handles:
+ *    - knowledge_promoted: payload carries candidate_id pointing at the
+ *      original knowledge_candidate; that row's payload.claim is the truth.
+ *      Without this join, every promoted row would be sentinel'd (the
+ *      promotion event itself records metadata, not the claim text). */
+const resolveJoinedText = (db: Database, kind: string, payload: Record<string, unknown>): string | null => {
+  if (kind === "knowledge_promoted") {
+    const candidateId = (payload.candidate_id as string | undefined) ?? (() => {
+      const refs = payload.context_refs as unknown;
+      if (Array.isArray(refs) && refs.length > 0 && typeof refs[0] === "string") return refs[0] as string;
+      return undefined;
+    })();
+    if (!candidateId) return null;
+    const row = db
+      .query("SELECT payload FROM events WHERE id = ? AND kind = 'knowledge_candidate' LIMIT 1")
+      .get(candidateId) as { payload: string } | null;
+    if (!row) return null;
+    try {
+      const p = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
+      return extractTextFromEvent("knowledge_candidate", p);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+};
 
 const readUnembedded = (db: Database, batchSize: number): UnembeddedRow[] => {
   const placeholders = Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ");
@@ -305,9 +359,15 @@ export const embedderWorkerTick = async (
   const items: Array<{ id: string; text: string }> = [];
   const noTextIds: string[] = [];
   for (const r of rows) {
-    let payload: unknown = {};
-    try { payload = JSON.parse(r.payload ?? "{}"); } catch { /* skip */ }
-    const text = extractTextFromEvent(r.kind, payload);
+    let payload: Record<string, unknown> = {};
+    try { payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>; } catch { /* skip */ }
+    let text = extractTextFromEvent(r.kind, payload);
+    if (!text) {
+      // Fall back to cross-table JOIN resolution (e.g. knowledge_promoted →
+      // candidate.claim). Saves the row from being sentinel-marked when its
+      // text genuinely exists but lives on a different row.
+      text = resolveJoinedText(db, r.kind, payload);
+    }
     if (!text) { noTextIds.push(r.id); continue; }
     items.push({ id: r.id, text });
   }
@@ -419,9 +479,13 @@ export const embedPendingEvents = async (
     if (rows.length === 0) break;
     const items: Array<{ id: string; text: string }> = [];
     for (const r of rows) {
-      let payload: unknown = {};
-      try { payload = JSON.parse(r.payload ?? "{}"); } catch { /* skip */ }
-      const text = extractTextFromEvent(r.kind, payload);
+      let payload: Record<string, unknown> = {};
+      try { payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>; } catch { /* skip */ }
+      let text = extractTextFromEvent(r.kind, payload);
+      if (!text) {
+        // Cross-table JOIN fallback (knowledge_promoted → candidate.claim).
+        text = resolveJoinedText(db, r.kind, payload);
+      }
       if (!text) {
         skipped++;
         // Stamp a sentinel embedding_version so subsequent calls don't

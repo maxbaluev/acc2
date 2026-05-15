@@ -146,23 +146,38 @@ describe("EVENT_KINDS registry coverage", () => {
 });
 
 describe("derived sets match their pre-unification shape", () => {
-  test("EMBEDDABLE_KINDS includes the 12 historically-embeddable kinds", () => {
-    // These 12 kinds were hard-coded in cli/admin_substrate_status.ts
-    // AND runtime/embedder.ts before the registry landed. The registry
-    // is the new source of truth; both consumers now read from here.
+  test("EMBEDDABLE_KINDS is the right-sized retrieval surface", () => {
+    // 2026-05-15 right-sizing audit (sample=30/kind over 25k events):
+    // 12 kinds carry retrievable semantic text 50-100% of the time and
+    // are kept. Kinds that historically had embeddable:true but in
+    // practice yielded 0-20% text hits (structured-only payloads:
+    // action_scored, code_artifact_admitted, task_closure_audited,
+    // applied_change_committed, lesson_apply_*, brain_message_emitted,
+    // brain_reasoning_recorded) were flipped off — they polluted
+    // retrieval with structured noise + brain self-talk.
     const expected = new Set([
+      // Goals + sub-goals.
       "directive_opened",
       "directive_amended",
       "task_node_opened",
+      // Brain knowledge.
       "knowledge_candidate",
-      "knowledge_promoted",
+      "knowledge_promoted",      // resolved via JOIN to candidate.claim
+      // Brain action surface (intent text, 100% hit).
+      "action_predicted",
+      // Tools.
       "code_artifact_candidate",
-      "code_artifact_admitted",
+      // Structural amendments + their apply outcomes.
+      "contract_amendment_proposed",
+      "contract_amendment_applied",
+      // Process insights + their apply outcomes.
+      "lesson_extracted",
+      "lesson_applied",
+      // Owner channel.
       "owner_input_received",
       "owner_decision_recorded",
+      // External-push envelope.
       "external_event_received",
-      "action_predicted",
-      "action_scored",
     ]);
     const derived = new Set(EMBEDDABLE_KINDS);
     for (const kind of expected) expect(derived.has(kind as EventKind)).toBe(true);
@@ -171,6 +186,21 @@ describe("derived sets match their pre-unification shape", () => {
     for (const kind of derived) {
       expect(EVENT_KINDS[kind].embeddable).toBe(true);
     }
+    // The flipped-off kinds must NOT appear in the embeddable set.
+    const removed = new Set([
+      "action_scored",
+      "code_artifact_admitted",
+      "task_closure_audited",
+      "applied_change_committed",
+      "lesson_apply_requested",
+      "apply_candidate_selected",
+      "apply_executor_action_predicted",
+      "lesson_apply_candidate_opened",
+      "lesson_apply_planned",
+      "brain_message_emitted",
+      "brain_reasoning_recorded",
+    ]);
+    for (const kind of removed) expect(derived.has(kind as EventKind)).toBe(false);
   });
 
   test("HEALTH_METRIC_KINDS is the substrate-status counter set", () => {

@@ -81,7 +81,9 @@ export const EVENT_KINDS = {
   action_predicted:                        { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
   artifact_invoked:                        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   artifact_observed:                       { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
-  action_scored:                           { producer: "substrate", embeddable: true,  mirror_inline: false, health_metric: false },
+  // 2026-05-15 embedder right-sizing: action_scored carries numeric residuals
+  // + structured outcome — no semantic text. Cosine retrieval over it is noise.
+  action_scored:                           { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   irreversible_effect_recorded:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true  },
 
   // ── Knowledge (Model D) ─────────────────────────────────────────────
@@ -112,7 +114,12 @@ export const EVENT_KINDS = {
 
   // ── Code artifacts (LATM / Voyager) ─────────────────────────────────
   code_artifact_candidate:                 { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
-  code_artifact_admitted:                  { producer: "substrate", embeddable: true,  mirror_inline: false, health_metric: false },
+  // 2026-05-15 right-sizing: code_artifact_admitted payload carries only
+  // {artifact_id, runtime, score, confidence} — the BODY lives in
+  // code_artifact.body, never in the event. Retrieval over artifacts goes
+  // through code_artifact_registry_view; embedding the admission record
+  // returned 0% text-hit on 342 events.
+  code_artifact_admitted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   code_artifact_admission_rejected:        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   code_artifact_promoted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
   code_artifact_quarantined:               { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false },
@@ -205,7 +212,10 @@ export const EVENT_KINDS = {
   // optional contract_amendment_proposed events before task_committed for
   // the root task of any directive. See prompt_composer.ts WORKFLOW_TEXT
   // steps 7-8 for the exact contract and CLAUDE.md §"Closure + learning".
-  task_closure_audited:                    { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
+  // 2026-05-15 right-sizing: closure audits carry structured residual metadata,
+  // not retrievable text. The semantic content (what the goal was, what was
+  // missed) lives on the directive/task nodes themselves.
+  task_closure_audited:                    { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false },
   lesson_extracted:                        { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
   contract_amendment_proposed:             { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
 
@@ -222,8 +232,11 @@ export const EVENT_KINDS = {
   // as action_scored + *_applied rows. The optional legacy *_applied rows remain
   // readable, but applied_change_committed is the normalized flywheel terminal event.
   // See CLAUDE.md §"Applying lessons via Claude Agent subagents".
-  lesson_apply_requested:                  { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
-  applied_change_committed:                { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  // 2026-05-15 right-sizing: lesson_apply_requested + applied_change_committed
+  // are routing/commit records. The semantic text lives on the source
+  // lesson_extracted / contract_amendment_proposed events they cite.
+  lesson_apply_requested:                  { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
+  applied_change_committed:                { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
   lesson_applied:                          { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   contract_amendment_applied:              { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   // Auto-apply worker (DGT1MKXY proposal, 2026-05-15): daemon-side scanner
@@ -238,15 +251,17 @@ export const EVENT_KINDS = {
   // health-metric tag filter, and the type system. Registering them
   // properly closes the kind-registry drift gap and ensures the surfaces
   // (TUI Lessons panel, embedding worker, mirror-inline rule) see them.
-  apply_candidate_selected:                { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  // 2026-05-15 right-sizing: pipeline intermediates with structured payloads
+  // (no retrievable semantic text).
+  apply_candidate_selected:                { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
   apply_owner_gate_evaluated:              { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
-  apply_executor_action_predicted:         { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  apply_executor_action_predicted:         { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
   apply_change_verified:                   { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
   applied_change_compounding_measured:     { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
-  lesson_apply_candidate_opened:           { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  lesson_apply_candidate_opened:           { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
   lesson_apply_gate_evaluated:             { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
   lesson_apply_plan_verified:              { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
-  lesson_apply_planned:                    { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  lesson_apply_planned:                    { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
   lesson_apply_verifier_scored:            { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
   lesson_compounding_measured:             { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
 
@@ -316,8 +331,12 @@ export const EVENT_KINDS = {
   //   - brain_reasoning_recorded: same shape as brain_message_emitted but
   //     for `step_start` / `step_complete` / structured reasoning frames.
   brain_prompt_composed:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
-  brain_message_emitted:                   { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
-  brain_reasoning_recorded:                { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false },
+  // 2026-05-15 right-sizing: brain stdout chatter (1500+ events) and raw
+  // reasoning frames pollute retrieval — the brain re-encounters its own
+  // verbose self-talk. The distilled semantic claims live in
+  // knowledge_candidate / lesson_extracted; embed those, not the trace.
+  brain_message_emitted:                   { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false },
+  brain_reasoning_recorded:                { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false },
   // ── Daemon source hot-reload (brain audit bqlr29psq, 2026-05-15) ────
   // When a source file under runtime/, substrate/, or cli/ changes, the
   // daemon's fs.watch worker emits daemon_hotreload_triggered. On success

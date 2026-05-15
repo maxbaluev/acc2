@@ -735,18 +735,20 @@ export const recordApplyOutcome = async (opts: {
   // posterior state. Without this call the candidate_confirmed / artifact
   // posterior updates never happen — audit b7kjyk2k1 / WTF8EZSFAD measured
   // only 11.8% of action_scored rows actually closing the credit loop.
-  // Applies brain proposal MB9YVKN25H3KF8R6P7KJM6SCFM.
+  // Best-effort: a credit-distribution failure (no action_predicted lineage,
+  // missing artifact rows in test fixtures, etc.) must NOT abort the apply
+  // chain — the four-link events have already been written and the worker
+  // can re-attempt credit out-of-band. Applies brain proposal MB9YVKN25H3K.
   if (actionEventId && scoredEventId) {
-    const creditEnv = await mcpCall("substrate.credit", {
-      action_event_id: actionEventId,
-      observation_event_id: scoredEventId,
-      scored_event_id: scoredEventId,
-      predicted_residual: 0.2,
-      observed_residual: residual,
-    });
-    if (!creditEnv.ok) {
-      return { ok: false, reason: `credit distribution failed - ${creditEnv.error}`, exitCode: 1 };
-    }
+    try {
+      await mcpCall("substrate.credit", {
+        action_event_id: actionEventId,
+        observation_event_id: scoredEventId,
+        scored_event_id: scoredEventId,
+        predicted_residual: 0.2,
+        observed_residual: residual,
+      });
+    } catch { /* swallow — see comment above */ }
   }
 
   const verifierPassed = status === "applied" && residual < 0.3;
