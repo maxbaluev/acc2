@@ -11,8 +11,12 @@ import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
 import {
   integrityWorkerTick,
+  reapZombieTaskNodes,
   reconcileOrphanedDispatches,
+  reconcileStaleDispatches,
   runIntegrityCheck,
+  STALE_DISPATCH_THRESHOLD_MS,
+  ZOMBIE_TASK_NODE_THRESHOLD_MS,
 } from "./integrity_worker";
 
 const eventsByKind = (db: Database, kind: string): Array<Record<string, unknown>> => {
@@ -166,6 +170,200 @@ describe("reconcileOrphanedDispatches — emits dispatch_recovered_orphan", () =
     }
     const recovered = reconcileOrphanedDispatches(db);
     expect(recovered.length).toBe(3);
+  });
+});
+
+describe("reconcileStaleDispatches — mid-session zombie sweep", () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-stale-"));
+    dbPath = join(tmpDir, "state.db");
+  });
+
+  afterEach(() => {
+    closeDb(dbPath);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("a freshly-started dispatch (under age threshold) is NOT flagged stale", () => {
+    const db = openDb(dbPath);
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      directive_id: "d_fresh",
+      task_id: "t_fresh",
+      payload: { dispatch_id: "disp_fresh" },
+    });
+    // Default age threshold is 15 min — a row emitted milliseconds ago is
+    // safely below it. Healthy in-flight dispatches must not be flagged.
+    const recovered = reconcileStaleDispatches(db);
+    expect(recovered.length).toBe(0);
+  });
+
+  test("a stale dispatch (older than threshold) IS flagged and emits dispatch_recovered_orphan", () => {
+    const db = openDb(dbPath);
+    // Spoof the dispatch timestamp by writing it directly with an old ts.
+    // The emitEvent helper stamps `nowIso()`; we override via raw insert.
+    const oldTs = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'brain_dispatched', 'substrate_auto', ?, ?, '', ?)`,
+    ).run("e_stale_disp", oldTs, "d_stale", "t_stale", JSON.stringify({ dispatch_id: "disp_stale" }));
+
+    const recovered = reconcileStaleDispatches(db);
+    expect(recovered.length).toBe(1);
+    expect(recovered[0].task_id).toBe("t_stale");
+    expect(recovered[0].age_ms).toBeGreaterThanOrEqual(STALE_DISPATCH_THRESHOLD_MS);
+    const orphans = eventsByKind(db, "dispatch_recovered_orphan");
+    expect(orphans.length).toBe(1);
+  });
+
+  test("a stale dispatch already recovered is NOT flagged again — idempotent", () => {
+    const db = openDb(dbPath);
+    const oldTs = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'brain_dispatched', 'substrate_auto', ?, ?, '', ?)`,
+    ).run("e_stale_2", oldTs, "d_idem", "t_idem", JSON.stringify({ dispatch_id: "disp_idem" }));
+
+    expect(reconcileStaleDispatches(db).length).toBe(1);
+    // Second sweep should be a no-op — the orphan event already exists.
+    expect(reconcileStaleDispatches(db).length).toBe(0);
+    expect(eventsByKind(db, "dispatch_recovered_orphan").length).toBe(1);
+  });
+
+  test("a stale dispatch with a closing event (committed/failed/closed/violation) is NOT flagged", () => {
+    const db = openDb(dbPath);
+    const oldTs = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'brain_dispatched', 'substrate_auto', ?, ?, '', ?)`,
+    ).run("e_closed_old", oldTs, "d_closed_old", "t_closed_old", JSON.stringify({ dispatch_id: "disp_old" }));
+    // Closing event lands slightly later but still in the past.
+    const closedTs = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'brain_dispatch_closed', 'substrate_auto', ?, ?, '', ?)`,
+    ).run("e_closed_old_close", closedTs, "d_closed_old", "t_closed_old", JSON.stringify({ dispatch_id: "disp_old" }));
+
+    const recovered = reconcileStaleDispatches(db);
+    expect(recovered.length).toBe(0);
+  });
+});
+
+describe("reapZombieTaskNodes — never-dispatched task cleanup", () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  const seedDirective = (db: Database, directiveId: string) => {
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'directive_opened', 'owner', ?, ?, '', ?)`,
+    ).run(
+      `e_${directiveId}_open`,
+      new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+      directiveId,
+      directiveId,
+      JSON.stringify({ directive_text: "fixture", lifecycle: "finite" }),
+    );
+  };
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-zombie-"));
+    dbPath = join(tmpDir, "state.db");
+  });
+
+  afterEach(() => {
+    closeDb(dbPath);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("a fresh task_node_opened (under age threshold) is NOT reaped", () => {
+    const db = openDb(dbPath);
+    seedDirective(db, "d_fresh_zombie");
+    emitEvent(db, {
+      kind: "task_node_opened",
+      directive_id: "d_fresh_zombie",
+      task_id: "t_fresh_zombie",
+      payload: { goal: "fresh" },
+    });
+    const reaped = reapZombieTaskNodes(db);
+    expect(reaped.length).toBe(0);
+  });
+
+  test("an aged task_node_opened with no dispatch IS reaped as zombie", () => {
+    const db = openDb(dbPath);
+    seedDirective(db, "d_zombie");
+    const oldTs = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'task_node_opened', 'owner', ?, ?, '', ?)`,
+    ).run("e_zombie_open", oldTs, "d_zombie", "t_zombie", JSON.stringify({ goal: "stuck" }));
+
+    const reaped = reapZombieTaskNodes(db);
+    expect(reaped.length).toBe(1);
+    expect(reaped[0].task_id).toBe("t_zombie");
+    expect(reaped[0].age_ms).toBeGreaterThanOrEqual(ZOMBIE_TASK_NODE_THRESHOLD_MS);
+
+    const failedRows = db
+      .query("SELECT failure_kind FROM events WHERE kind = 'task_failed' AND task_id = ?")
+      .all("t_zombie") as Array<{ failure_kind: string }>;
+    expect(failedRows.length).toBe(1);
+    expect(failedRows[0].failure_kind).toBe("abandoned_no_dispatch");
+  });
+
+  test("an aged task that WAS dispatched (even once) is NOT reaped as zombie", () => {
+    const db = openDb(dbPath);
+    seedDirective(db, "d_dispatched");
+    const oldTs = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'task_node_opened', 'owner', ?, ?, '', ?)`,
+    ).run("e_dispatched_open", oldTs, "d_dispatched", "t_dispatched", JSON.stringify({ goal: "stuck" }));
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'brain_dispatched', 'substrate_auto', ?, ?, '', ?)`,
+    ).run("e_dispatched_disp", oldTs, "d_dispatched", "t_dispatched", JSON.stringify({ dispatch_id: "x" }));
+
+    const reaped = reapZombieTaskNodes(db);
+    expect(reaped.length).toBe(0);
+  });
+
+  test("a task in a closed directive is NOT reaped (Batch-2 closure already excludes it)", () => {
+    const db = openDb(dbPath);
+    seedDirective(db, "d_already_closed");
+    const oldTs = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'task_node_opened', 'owner', ?, ?, '', ?)`,
+    ).run("e_in_closed_open", oldTs, "d_already_closed", "t_in_closed", JSON.stringify({ goal: "x" }));
+    emitEvent(db, {
+      kind: "directive_closed",
+      directive_id: "d_already_closed",
+      payload: { reason: "test_archive" },
+    });
+
+    const reaped = reapZombieTaskNodes(db);
+    expect(reaped.length).toBe(0);
+  });
+
+  test("a task that already has task_failed is NOT re-reaped (idempotent)", () => {
+    const db = openDb(dbPath);
+    seedDirective(db, "d_already_failed");
+    const oldTs = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'task_node_opened', 'owner', ?, ?, '', ?)`,
+    ).run("e_failed_open", oldTs, "d_already_failed", "t_already_failed", JSON.stringify({ goal: "x" }));
+
+    expect(reapZombieTaskNodes(db).length).toBe(1);
+    // Second sweep should be a no-op — task_failed already exists.
+    expect(reapZombieTaskNodes(db).length).toBe(0);
+    const failedCount = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_failed' AND task_id = ?")
+      .get("t_already_failed") as { c: number };
+    expect(failedCount.c).toBe(1);
   });
 });
 

@@ -54,7 +54,12 @@ export type FailureKind =
   /** Scheduler quarantined the task after MAX_CONSECUTIVE_BRIDGE_FAILURES
    *  in a row with no successful interleaving event. Prevents the retry
    *  storm a structurally broken dispatch would otherwise produce. */
-  | "consecutive_bridge_failures";
+  | "consecutive_bridge_failures"
+  /** Integrity worker reaped a task_node_opened row that lingered past
+   *  ZOMBIE_TASK_NODE_THRESHOLD_MS without ever being dispatched. Drops
+   *  the task out of readyTasks / ready_tasks_view; operators can
+   *  re-open via a fresh task_id. */
+  | "abandoned_no_dispatch";
 
 export type TaskEdgeKind = "requires" | "refines" | "watches";
 
