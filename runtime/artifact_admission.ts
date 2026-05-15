@@ -49,6 +49,16 @@ export type AdmissionInput = {
   artifactId?: string;
   stateRoot?: string;
   name?: string;
+  /** Brain dataflow audit bxdhdkm9e #3 (2026-05-15): provenance metadata
+   *  the brain emits on code_artifact_candidate but the admission path
+   *  previously dropped. The fields are all OPTIONAL — legacy seed
+   *  admissions that don't supply them remain valid. When supplied,
+   *  they land on the code_artifact row and become readable via the
+   *  registry view + TUI artifact detail pane. */
+  intent?: string;
+  summary?: string;
+  targetFiles?: string[];
+  sourceCandidateId?: string;
   /** Owner-consent envelope. When the sandbox's fs_write globs would let
    *  the artifact body mutate an owner-gated path (CLAUDE.md,
    *  docs/v2-design.md, .claude/rules/**, operator guides), admission
@@ -174,6 +184,13 @@ export const admitArtifact = async (
     name: input.name ?? null,
     fixtureInput: input.fixtureInput,
     fixtureExpectedResidual: input.fixtureExpectedResidualBelow,
+    intent: input.intent ?? null,
+    summary: input.summary ?? null,
+    targetFiles: input.targetFiles ?? null,
+    sourceCandidateId: input.sourceCandidateId ?? null,
+    // owner_gate_verdict is "auto" when no owner gate fired, else "owner_approved"
+    // (we already passed the gate check above for the require_consent branch).
+    ownerGateVerdict: gate.requires_consent ? "owner_approved" : "auto",
     id: input.artifactId,
   });
 

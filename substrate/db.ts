@@ -61,6 +61,35 @@ export const runSchema = (db: Database): void => {
   db.exec(schemaSql);
 };
 
+/** Brain dataflow audit bxdhdkm9e #3 (2026-05-15): code_artifact gained
+ *  five provenance/intent columns (intent, summary, target_files,
+ *  source_candidate_id, owner_gate_verdict). Fresh installs get them via
+ *  schema.sql's CREATE TABLE; existing DBs need ALTER TABLE here. Each
+ *  ALTER is wrapped in a try/catch so re-running this on an already-
+ *  migrated DB is a no-op (SQLite raises "duplicate column name" which
+ *  we swallow). No other patterns of fallback — the column either
+ *  exists or it doesn't. */
+const ARTIFACT_METADATA_COLUMNS: Array<{ name: string; ddl: string }> = [
+  { name: "intent",              ddl: "ALTER TABLE code_artifact ADD COLUMN intent TEXT" },
+  { name: "summary",             ddl: "ALTER TABLE code_artifact ADD COLUMN summary TEXT" },
+  { name: "target_files",        ddl: "ALTER TABLE code_artifact ADD COLUMN target_files TEXT" },
+  { name: "source_candidate_id", ddl: "ALTER TABLE code_artifact ADD COLUMN source_candidate_id TEXT" },
+  { name: "owner_gate_verdict",  ddl: "ALTER TABLE code_artifact ADD COLUMN owner_gate_verdict TEXT" },
+];
+
+export const runMigrations = (db: Database): void => {
+  for (const col of ARTIFACT_METADATA_COLUMNS) {
+    try {
+      db.run(col.ddl);
+    } catch (err) {
+      // "duplicate column name" — column already exists. Any other
+      // error is real and should propagate.
+      const msg = (err as Error).message ?? "";
+      if (!msg.includes("duplicate column name")) throw err;
+    }
+  }
+};
+
 /** Open (or reuse) a connection to `dbPath`, apply pragmas, run schema.
  *  `:memory:` is supported and gets its own cache slot — useful for tests.
  *  Throws if SQLite cannot open the file (e.g. parent dir missing); we
@@ -78,6 +107,7 @@ export const openDb = (dbPath: string): Database => {
   // statement in schema.sql can resolve the `vec0` module.
   loadSqliteVec(db);
   runSchema(db);
+  runMigrations(db);
   return db;
 };
 

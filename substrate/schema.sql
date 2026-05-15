@@ -74,6 +74,17 @@ CREATE TABLE IF NOT EXISTS code_artifact (
   name                        TEXT,
   fixture_input               TEXT NOT NULL,
   fixture_expected_residual   REAL NOT NULL,
+  -- Brain dataflow audit bxdhdkm9e #3 (2026-05-15): per-artifact
+  -- provenance + intent metadata that the brain emits on
+  -- code_artifact_candidate but the admission path used to drop.
+  -- Operators can now see WHY an artifact exists, WHAT it touches,
+  -- and WHICH owner gate (if any) approved it. NULL-allowed because
+  -- legacy seeded artifacts pre-date these fields.
+  intent                      TEXT,
+  summary                     TEXT,
+  target_files                TEXT,          -- JSON array
+  source_candidate_id         TEXT,
+  owner_gate_verdict          TEXT,          -- 'auto' | 'owner_approved' | 'owner_rejected' | NULL
   created_at                  TEXT NOT NULL,
   updated_at                  TEXT NOT NULL
 );

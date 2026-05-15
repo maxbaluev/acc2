@@ -120,13 +120,22 @@ CREATE VIEW IF NOT EXISTS failure_view AS
 
 // code_artifact_registry_view — admitted or promoted artifacts ordered by
 // score DESC. This is what retrieval and the prompt composer read.
+// Brain dataflow audit bxdhdkm9e #3 (2026-05-15): the registry view now
+// exposes the provenance/intent columns the brain emits on
+// code_artifact_candidate (intent, summary, target_files, source candidate
+// id, owner_gate_verdict). Pre-fix the admission path persisted these
+// fields on the events ledger but the view dropped them — the operator
+// could not tell WHY an artifact existed or WHICH owner gate (if any)
+// approved it.
 const VIEW_CODE_ARTIFACT_REGISTRY = `
+DROP VIEW IF EXISTS code_artifact_registry_view;
 CREATE VIEW IF NOT EXISTS code_artifact_registry_view AS
   SELECT
     id, runtime, body, declared_sandbox, state_root,
     posterior_alpha, posterior_beta, score, confidence,
     recent_residual_mean, recent_kill_count, status, name,
     fixture_input, fixture_expected_residual,
+    intent, summary, target_files, source_candidate_id, owner_gate_verdict,
     created_at, updated_at
   FROM code_artifact
   WHERE status IN ('admitted', 'promoted')

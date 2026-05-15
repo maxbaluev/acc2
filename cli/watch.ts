@@ -955,6 +955,17 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
       const fixtureExp = asNumber(v.fixture_expected_residual, NaN);
       const createdAt = asString(v.created_at, "");
       const updatedAt = asString(v.updated_at, "");
+      // Brain dataflow audit bxdhdkm9e #3 (2026-05-15): provenance columns
+      // that previously didn't surface. Operator can now SEE the artifact's
+      // intent, summary, target files, source candidate, owner gate.
+      const intent = asString(v.intent, "");
+      const summary = asString(v.summary, "");
+      const targetFilesRaw = v.target_files;
+      const targetFiles = (typeof targetFilesRaw === "string" && targetFilesRaw)
+        ? (() => { try { return JSON.parse(targetFilesRaw) as string[]; } catch { return []; } })()
+        : [];
+      const sourceCandidate = asString(v.source_candidate_id, "");
+      const ownerGate = asString(v.owner_gate_verdict, "");
       const rich = [
         `artifact_id=${a.id}`,
         `name=${a.name ?? ""}`,
@@ -967,6 +978,11 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
         Number.isFinite(fixtureExp) ? `fixture_expected_residual=${fixtureExp.toFixed(3)}` : "",
         createdAt ? `created_at=${createdAt}` : "",
         updatedAt ? `updated_at=${updatedAt}` : "",
+        ownerGate ? `owner_gate_verdict=${ownerGate}` : "",
+        sourceCandidate ? `source_candidate_id=${sourceCandidate}` : "",
+        intent ? `\n--- intent ---\n${intent}` : "",
+        summary ? `\n--- summary ---\n${summary}` : "",
+        targetFiles.length > 0 ? `\n--- target_files ---\n${targetFiles.join("\n")}` : "",
         "",
         "--- declared_sandbox ---",
         sandbox,

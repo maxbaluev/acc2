@@ -51,6 +51,15 @@ export type CodeArtifactRow = {
   name: string | null;
   fixtureInput: JsonValue | null;
   fixtureExpectedResidual: number | null;
+  // Brain dataflow audit bxdhdkm9e #3 (2026-05-15): provenance + intent.
+  // Why the artifact exists, what it touches, which candidate produced
+  // it, and which owner gate (if any) approved it. NULL for legacy
+  // seed artifacts pre-dating these fields.
+  intent: string | null;
+  summary: string | null;
+  targetFiles: string[] | null;
+  sourceCandidateId: string | null;
+  ownerGateVerdict: "auto" | "owner_approved" | "owner_rejected" | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -113,6 +122,15 @@ const clamp01 = (x: number): number => Math.max(0, Math.min(1, x));
 
 // ── Row mapping ────────────────────────────────────────────────────
 
+const parseTargetFiles = (raw: unknown): string[] | null => {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "string" || raw === "") return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(String) : null;
+  } catch { return null; }
+};
+
 const mapRow = (raw: Record<string, unknown>): CodeArtifactRow => ({
   id: raw.id as string,
   runtime: raw.runtime as Runtime,
@@ -129,6 +147,11 @@ const mapRow = (raw: Record<string, unknown>): CodeArtifactRow => ({
   name: (raw.name as string | null) ?? null,
   fixtureInput: JSON.parse((raw.fixture_input as string) ?? "null") as JsonValue | null,
   fixtureExpectedResidual: (raw.fixture_expected_residual as number | null) ?? null,
+  intent: (raw.intent as string | null) ?? null,
+  summary: (raw.summary as string | null) ?? null,
+  targetFiles: parseTargetFiles(raw.target_files),
+  sourceCandidateId: (raw.source_candidate_id as string | null) ?? null,
+  ownerGateVerdict: (raw.owner_gate_verdict as CodeArtifactRow["ownerGateVerdict"]) ?? null,
   createdAt: raw.created_at as string,
   updatedAt: raw.updated_at as string,
 });
@@ -148,8 +171,9 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): CodeAr
        posterior_alpha, posterior_beta, score, confidence,
        recent_residual_mean, recent_kill_count, status, name,
        fixture_input, fixture_expected_residual,
+       intent, summary, target_files, source_candidate_id, owner_gate_verdict,
        created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.runtime,
@@ -166,6 +190,11 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): CodeAr
       input.name,
       JSON.stringify(input.fixtureInput ?? null),
       input.fixtureExpectedResidual ?? 0,
+      input.intent,
+      input.summary,
+      input.targetFiles ? JSON.stringify(input.targetFiles) : null,
+      input.sourceCandidateId,
+      input.ownerGateVerdict,
       ts,
       ts,
     ],
