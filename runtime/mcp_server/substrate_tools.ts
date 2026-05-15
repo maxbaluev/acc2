@@ -63,6 +63,28 @@ import type {
   SearchSchema,
 } from "./types";
 
+/** Event kinds the brain (opencode) is NOT allowed to emit. These are
+ *  owner / orchestrator privileged surfaces — letting the brain emit them
+ *  via substrate.emit lets it impersonate the owner and recursively spawn
+ *  new top-level directives. Live ledger evidence (2026-05-15 02:00+)
+ *  showed the brain calling substrate.open_directive with its OWN prompt
+ *  text as directive_text, each iteration doubling the "TASK GOAL:"
+ *  prefix until the substrate filled with `"TASK GOAL: \"TASK GOAL:
+ *  \\\"TASK GOAL:..."` zombie directives. The brain decomposes work via
+ *  task_node_opened + task_edge_recorded (refines/requires) under its
+ *  CURRENT directive, never by opening a new one. */
+const BRAIN_FORBIDDEN_KINDS = new Set<string>([
+  "directive_opened",
+  "directive_amended",
+  "directive_archived_by_operator",
+  "owner_input_received",
+  "owner_decision_recorded",
+]);
+
+const isBrainInvoker = (invoker: string | undefined): boolean => {
+  return invoker === "opencode" || invoker === "recipe";
+};
+
 export const handleEmit = (
   ctx: McpContext,
   args: z.infer<typeof EmitSchema>,
@@ -72,6 +94,14 @@ export const handleEmit = (
   const kind = src.kind;
   if (!kind || typeof kind !== "string") {
     return { ok: false, error: "missing 'kind'" };
+  }
+  // Brain privilege gate: the brain may NOT emit owner/orchestrator
+  // kinds via substrate.emit. See BRAIN_FORBIDDEN_KINDS doc above.
+  if (isBrainInvoker(ctx.invoker) && BRAIN_FORBIDDEN_KINDS.has(kind)) {
+    return {
+      ok: false,
+      error: `brain_forbidden_kind:${kind}; brain decomposes via task_node_opened+task_edge_recorded under the current directive`,
+    };
   }
   const input: EmitEventInput = {
     kind: kind as EmitEventInput["kind"],
@@ -475,6 +505,15 @@ export const handleAmendDirective = async (
   ctx: McpContext,
   args: z.infer<typeof AmendDirectiveSchema>,
 ): Promise<McpResult> => {
+  // Brain privilege gate (parallel to open_directive): amendments are
+  // owner/orchestrator actions. The brain refines work via task_edge_recorded
+  // (refines) on NEW task_ids, not by amending the original directive.
+  if (isBrainInvoker(ctx.invoker)) {
+    return {
+      ok: false,
+      error: "brain_forbidden_op:substrate.amend_directive; use task_edge_recorded(refines) on the current directive instead",
+    };
+  }
   const summary = await emitAndApplyAmendment(ctx.db, {
     original_directive_id: args.original_directive_id,
     amendment_text: args.amendment_text,
@@ -537,6 +576,17 @@ export const handleOpenDirective = (
   ctx: McpContext,
   args: z.infer<typeof OpenDirectiveSchema>,
 ): McpResult => {
+  // Brain privilege gate: opening a NEW top-level directive is an
+  // owner/orchestrator action. The brain decomposes within its current
+  // directive via task_node_opened + task_edge_recorded. Live evidence
+  // (2026-05-15 02:00+) showed the brain recursively calling open_directive
+  // with its own prompt text, doubling the "TASK GOAL:" prefix each cycle.
+  if (isBrainInvoker(ctx.invoker)) {
+    return {
+      ok: false,
+      error: "brain_forbidden_op:substrate.open_directive; use task_node_opened + task_edge_recorded (refines) under the current directive instead",
+    };
+  }
   const directiveId = newId();
   const taskId = newId();
   const lifecyclePayload: Record<string, unknown> = {
