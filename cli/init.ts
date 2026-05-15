@@ -280,11 +280,41 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
     }
   }
 
-  // 4. opencode CLI.
+  // 4. opencode CLI + live auth probe (b9e3hr0ar: presence-only checks
+  // defer the real failure to first brain dispatch — probe live here).
   const opencode = await which("opencode");
   summary.opencodePath = opencode;
   if (opencode) {
     log(`[4/8] opencode CLI:    ${opencode}`);
+    // Live auth probe — run `opencode auth list` and classify.
+    try {
+      const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+      const out = spawnSync("opencode", ["auth", "list"], { encoding: "utf8" });
+      if (out.status !== 0) {
+        warn(`       auth probe: could not run (exit ${out.status}); first brain dispatch may fail`);
+        summary.warnings.push("opencode auth probe failed");
+      } else {
+        const raw = (out.stdout ?? "") + (out.stderr ?? "");
+        const { parseOpencodeAuth } = require("./doctor") as typeof import("./doctor");
+        const state = parseOpencodeAuth(raw);
+        if (state.credentialCount === 0 && state.envProviderCount === 0) {
+          warn("       auth: NO PROVIDER configured — brain dispatch will fail");
+          log("       Run: opencode auth login   (pick OpenAI for the brain; OpenAI Max subscription is the canonical path)");
+          summary.warnings.push("opencode has no auth providers — run `opencode auth login`");
+        } else if (state.credentialCount === 0) {
+          warn(`       auth: env-var providers only (${state.envProviders.join(", ")}); OAuth login recommended`);
+          log("       Run: opencode auth login   (pick OpenAI Max for the canonical brain path)");
+          summary.warnings.push("opencode missing OAuth credentials (env-only)");
+        } else {
+          const detail = `${state.credentialCount} credential(s): ${state.credentials.join(", ")}` +
+            (state.envProviderCount > 0 ? ` + ${state.envProviderCount} env provider(s)` : "");
+          log(`       auth: ${detail}`);
+        }
+      }
+    } catch (err) {
+      warn(`       auth probe: ${(err as Error).message}`);
+      summary.warnings.push("opencode auth probe threw");
+    }
   } else {
     warn("[4/8] opencode CLI:    NOT FOUND — install from https://github.com/sst/opencode");
     summary.warnings.push("opencode CLI missing — brain dispatch will fail until installed");
