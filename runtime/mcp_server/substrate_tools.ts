@@ -397,6 +397,10 @@ export const handleAdmitArtifact = async (
       fixtureExpectedResidualBelow: args.fixture_expected_residual_below ?? 0.2,
       stateRoot: args.state_root,
       name: args.name,
+      governance: (args.directive_id || args.owner_consent_event_id) ? {
+        directiveId: args.directive_id,
+        ownerConsentEventId: args.owner_consent_event_id,
+      } : undefined,
     },
     (event) => {
       try {

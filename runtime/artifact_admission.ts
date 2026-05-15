@@ -33,6 +33,7 @@ import { runBunArtifact } from "./runtimes/bun";
 import { runUvArtifact } from "./runtimes/uv";
 import { runCamofoxArtifact } from "./runtimes/camofox";
 import { getArtifact, insertArtifact } from "./artifact_store";
+import { ownerGateDecision, verifyOwnerConsent } from "./owner_gate";
 import type { EmitEventInput } from "./events";
 
 export type AdmissionInput = {
@@ -48,13 +49,24 @@ export type AdmissionInput = {
   artifactId?: string;
   stateRoot?: string;
   name?: string;
+  /** Owner-consent envelope. When the sandbox's fs_write globs would let
+   *  the artifact body mutate an owner-gated path (CLAUDE.md,
+   *  docs/v2-design.md, .claude/rules/**, operator guides), admission
+   *  requires `ownerConsentEventId` to cite an `owner_decision_recorded`
+   *  event. Optional `directiveId` scopes the consent to the dispatching
+   *  directive so a stale or mis-scoped decision cannot be reused. */
+  governance?: {
+    directiveId?: string;
+    ownerConsentEventId?: string;
+  };
 };
 
 export type AdmissionRejectionReason =
   | "sandbox_decl_invalid"
   | "fixture_residual_too_high"
   | "runtime_error"
-  | "runtime_unavailable";
+  | "runtime_unavailable"
+  | "owner_consent_missing";
 
 export type AdmissionResult =
   | { ok: true; artifactId: string }
@@ -103,6 +115,45 @@ export const admitArtifact = async (
       reason: "sandbox_decl_invalid",
       detail: `runtime_mismatch:${input.declaredSandbox.runtime}!=${input.runtime}`,
     };
+  }
+
+  // 1b. Owner-gate: if any fs_write glob would let the body mutate a
+  //     contract surface (CLAUDE.md, docs/v2-design.md, .claude/rules/**,
+  //     operator guides), the admission MUST cite an
+  //     owner_decision_recorded consent event. Pre-fix the brain
+  //     self-modified 18 files in one session — including a syntax-broken
+  //     `continue;` that crashed the daemon. The gate forces every such
+  //     change through explicit owner review.
+  const gate = ownerGateDecision(input.declaredSandbox);
+  if (gate.requires_consent) {
+    const consentId = input.governance?.ownerConsentEventId;
+    let consentOk = false;
+    let consentDetail = "no_consent_cited";
+    if (consentId) {
+      const verdict = verifyOwnerConsent(db, consentId, input.governance?.directiveId);
+      if (verdict.ok) {
+        consentOk = true;
+      } else {
+        consentDetail = verdict.reason;
+      }
+    }
+    if (!consentOk) {
+      emit({
+        kind: "code_artifact_admission_rejected",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: "owner_consent_missing",
+          detail: consentDetail,
+          matched_patterns: gate.matched_patterns,
+          runtime: input.runtime,
+        } as JsonValue,
+      });
+      return {
+        ok: false,
+        reason: "owner_consent_missing",
+        detail: `${consentDetail}:${gate.matched_patterns.join(",")}`,
+      };
+    }
   }
 
   // 2. Insert at admit priors. We do this BEFORE running the fixture so the
