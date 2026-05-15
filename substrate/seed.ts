@@ -738,16 +738,36 @@ type SeedRecipe = {
   }>;
 };
 
-// Onboarding demo classifier — universal, any-human framing.
+// Onboarding demo capabilities — substrate-native semantic retrieval.
 //
-// Every demo here is phrased in plain everyday language a non-technical
-// owner would say in their own words ("I want to lose weight", "should I
+// Owner pushback (2026-05-15): "DEMO MATCHER not universal — we should
+// use semantic knowledge about the user to understand how to align
+// with him better." The earlier `tokens_any` keyword table was a
+// category error: keyword matching doesn't translate across languages,
+// doesn't compound, doesn't respect the owner's vocabulary, and
+// duplicates a primitive the substrate already provides — embedded
+// semantic retrieval over the event ledger.
+//
+// What stayed: rich first-person capability descriptions (one per
+// demo) phrased in plain everyday language a non-technical owner
+// would say in their own words ("I want to lose weight", "should I
 // switch jobs", "I keep redoing this every Monday"). No developer
-// vocabulary. No service-specific assumptions (Stripe / Notion / GitHub).
-// The brain's btfc5wrc6 dispatch proposed vertical-tech demos (Stripe
-// disputes, GitHub PR style, Notion contradictions) — the owner pushed
-// back: "demos should be product-friendly, for any human to solve any
-// goal, not technical". This table is the answer to that pushback.
+// vocabulary. No service-specific assumptions.
+//
+// What changed: these descriptions are SEEDED INTO THE SUBSTRATE as
+// knowledge_candidate + knowledge_promoted pairs by `seedDemoKnowledge`
+// below. The embedder vectorizes them on its next tick; the brain's
+// prompt composer surfaces them via `promoted_knowledge_view` ranked
+// by semantic similarity to the owner's directive — automatically,
+// in any language, without a keyword table.
+//
+// As the owner accumulates their own owner_input_received history +
+// owner_profile signals, real conversational evidence outranks these
+// seed demos naturally. No suppression logic needed; the substrate's
+// posterior loop handles it. The categorial DemoRecipeId names below
+// are RETRIEVAL TAGS, not categories — they let the brain reference a
+// specific capability by id when proposing it, but the seed is the
+// authoritative source of truth (every demo is a row in the ledger).
 //
 // Each demo is wired to exercise ONE substrate capability that NO
 // chat-based LLM can replicate:
@@ -790,36 +810,34 @@ export type DemoSubstrateCapability =
   | "stakeholder_tracked"
   | "recipe_compounds";
 
-export type DemoMatcher = {
+export type DemoCapability = {
   id: string;
   demo_recipe_id: DemoRecipeId;
-  tokens_any: string[];
-  tokens_all?: string[];
-  domain_hints: string[];
   /** Auth the demo NEEDS to actually fire. Empty means it works with
    *  zero external services — just the brain + the substrate. */
   requires_auth: Array<"OPENAI_API_KEY" | "SERPER_API_KEY" | "opencode">;
+  /** Confidence the demo is universally valuable (seed-time prior).
+   *  Embedded into the knowledge_promoted payload; the substrate's
+   *  posterior loop adjusts from real owner outcomes over time. */
   confidence: number;
   /** "finite" closes on terminal; "rolling_active" stays open and the
    *  Father reopens the review subtask on cadence. */
   lifecycle: "finite" | "rolling_active";
   /** One short sentence the orchestrator reads to the owner in their
-   *  language. No developer words. No service names. */
+   *  language. No developer words. No service names. This is the
+   *  TEXT EMBEDDED into the substrate — the embedder vectorizes it
+   *  and substrate.search ranks it against owner directives semantically. */
   first_demo_prompt: string;
-  /** Why this demo can't be replicated by a fresh chat session. Surfaced
-   *  to the owner ONLY when they ask "why use this instead of ChatGPT?". */
+  /** Why this demo can't be replicated by a fresh chat session. Used as
+   *  evidence on the seeded knowledge_candidate so the brain can cite
+   *  the differentiator when proposing the demo. */
   substrate_capability: DemoSubstrateCapability[];
 };
 
-export const DEMO_MATCHERS: DemoMatcher[] = [
+export const DEMO_CAPABILITIES: DemoCapability[] = [
   {
     id: "learn_topic_deeply_rolling",
     demo_recipe_id: "learn_topic_deeply",
-    tokens_any: [
-      "understand", "learn", "deeply", "research", "really know", "get good at",
-      "wrap my head around", "figure out", "study", "become an expert",
-    ],
-    domain_hints: ["learning", "self_improvement", "research"],
     requires_auth: [],
     confidence: 0.88,
     lifecycle: "rolling_active",
@@ -830,11 +848,6 @@ export const DEMO_MATCHERS: DemoMatcher[] = [
   {
     id: "keep_an_eye_on_anything",
     demo_recipe_id: "keep_an_eye_on",
-    tokens_any: [
-      "watch", "monitor", "keep an eye", "track", "let me know when",
-      "tell me if", "follow", "notify me", "alert me", "any updates",
-    ],
-    domain_hints: ["monitoring", "rolling_diff"],
     requires_auth: [],
     confidence: 0.86,
     lifecycle: "rolling_active",
@@ -845,12 +858,6 @@ export const DEMO_MATCHERS: DemoMatcher[] = [
   {
     id: "finish_my_goal_weekly",
     demo_recipe_id: "finish_my_goal",
-    tokens_any: [
-      "goal", "want to", "trying to", "plan", "lose", "build", "launch",
-      "finish", "write", "start", "quit", "save", "habit", "diet",
-      "fitness", "sleep", "weight",
-    ],
-    domain_hints: ["self_improvement", "goal_tracking"],
     requires_auth: [],
     confidence: 0.85,
     lifecycle: "rolling_active",
@@ -861,12 +868,6 @@ export const DEMO_MATCHERS: DemoMatcher[] = [
   {
     id: "make_my_decision_grounded",
     demo_recipe_id: "make_my_decision",
-    tokens_any: [
-      "should i", "decide", "decision", "choose", "compare", "vs", "versus",
-      "stuck between", "which one", "torn", "switch", "change jobs",
-      "move", "buy", "quit", "drop",
-    ],
-    domain_hints: ["decision", "owner_profile_grounded"],
     requires_auth: [],
     confidence: 0.83,
     lifecycle: "finite",
@@ -877,12 +878,6 @@ export const DEMO_MATCHERS: DemoMatcher[] = [
   {
     id: "remember_my_life",
     demo_recipe_id: "remember_my_life",
-    tokens_any: [
-      "remember", "don't forget", "keep in mind", "save this", "note that",
-      "for next time", "my preference", "i like", "i don't like",
-      "i can't", "i won't", "always", "never",
-    ],
-    domain_hints: ["owner_profile", "persistent_memory"],
     requires_auth: [],
     confidence: 0.92,
     lifecycle: "rolling_active",
@@ -893,11 +888,6 @@ export const DEMO_MATCHERS: DemoMatcher[] = [
   {
     id: "negotiate_for_me",
     demo_recipe_id: "negotiate_for_me",
-    tokens_any: [
-      "draft", "reply", "message", "email", "respond", "tell my", "write to",
-      "landlord", "boss", "customer", "client", "partner", "conversation with",
-    ],
-    domain_hints: ["communication", "stakeholder_memory"],
     requires_auth: [],
     confidence: 0.81,
     lifecycle: "rolling_active",
@@ -908,12 +898,6 @@ export const DEMO_MATCHERS: DemoMatcher[] = [
   {
     id: "kill_my_recurring_friction",
     demo_recipe_id: "kill_my_recurring_friction",
-    tokens_any: [
-      "every week", "every monday", "every day", "i keep doing", "redo",
-      "waste time", "manually", "by hand", "repetitive", "annoying",
-      "tired of", "sick of",
-    ],
-    domain_hints: ["workflow", "automation", "recipe_compounds"],
     requires_auth: [],
     confidence: 0.79,
     lifecycle: "rolling_active",
@@ -924,12 +908,6 @@ export const DEMO_MATCHERS: DemoMatcher[] = [
   {
     id: "find_my_next_move",
     demo_recipe_id: "find_my_next_move",
-    tokens_any: [
-      "what should i", "next move", "next step", "what now", "spend time on",
-      "this weekend", "this evening", "free time", "where to focus",
-      "priority", "most important",
-    ],
-    domain_hints: ["planning", "father_ranking"],
     requires_auth: [],
     confidence: 0.77,
     lifecycle: "finite",
@@ -938,6 +916,98 @@ export const DEMO_MATCHERS: DemoMatcher[] = [
     substrate_capability: ["father_ranked", "owner_profile_grounded"],
   },
 ];
+
+// META key for the demo-knowledge seed — idempotency marker.
+const META_SEEDED_DEMO_KNOWLEDGE = "seed:demo_knowledge";
+
+export type DemoKnowledgeSeedSummary = { imported: number };
+
+/** Seeds each demo capability as a knowledge_candidate + knowledge_promoted
+ *  pair so the substrate's embedded retrieval finds them by semantic
+ *  similarity to whatever the owner says — universally, in any language,
+ *  without a keyword table. Owner-approved gate (same posture as
+ *  seedFoundationalKnowledge): no-op unless ownerApproved=true. */
+export const seedDemoKnowledge = (
+  db: Database,
+  options?: { ownerApproved?: boolean },
+): DemoKnowledgeSeedSummary => {
+  if (!options?.ownerApproved) return { imported: 0 };
+  if (readMeta(db, META_SEEDED_DEMO_KNOWLEDGE) !== null) return { imported: 0 };
+
+  const directiveId = "dir_seed_demo_knowledge";
+  const loopId = "loop_seed_demo_knowledge";
+  const taskId = "task_seed_demo_knowledge";
+  let imported = 0;
+
+  withImmediateTransaction(db, () => {
+    for (const cap of DEMO_CAPABILITIES) {
+      const candidateId = newId();
+      // The `claim` is the first_demo_prompt — that's what gets
+      // embedded and searched. Tags + applies_to let the brain filter
+      // these knowledge rows when explicitly looking for demos.
+      db.run(
+        `INSERT INTO events (
+           id, ts, directive_id, task_id, loop_id, substrate_origin,
+           kind, payload, context_refs
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          candidateId,
+          nowIso(),
+          directiveId,
+          taskId,
+          loopId,
+          "substrate_auto",
+          "knowledge_candidate",
+          JSON.stringify({
+            claim: cap.first_demo_prompt,
+            evidence: [
+              `substrate capability: ${cap.substrate_capability.join(", ")}`,
+              `lifecycle: ${cap.lifecycle}`,
+              ...(cap.requires_auth.length > 0
+                ? [`requires: ${cap.requires_auth.join(", ")}`]
+                : ["requires no external services"]),
+            ],
+            applies_to: ["demo", "onboarding", cap.demo_recipe_id, ...cap.substrate_capability],
+            tags: ["demo", "onboarding", "first_run"],
+            proposed_tier: "demo_capability",
+            confidence_estimate: cap.confidence,
+            demo_recipe_id: cap.demo_recipe_id,
+            skip_corroboration: true,
+          }),
+          JSON.stringify([]),
+        ],
+      );
+      const promoteId = newId();
+      db.run(
+        `INSERT INTO events (
+           id, ts, directive_id, task_id, loop_id, substrate_origin,
+           kind, payload, context_refs
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          promoteId,
+          nowIso(),
+          directiveId,
+          taskId,
+          loopId,
+          "substrate_auto",
+          "knowledge_promoted",
+          JSON.stringify({
+            candidate_id: candidateId,
+            score: cap.confidence,
+            confidence: cap.confidence,
+            skip_corroboration: true,
+            demo_recipe_id: cap.demo_recipe_id,
+          }),
+          JSON.stringify([candidateId]),
+        ],
+      );
+      imported++;
+    }
+    writeMeta(db, META_SEEDED_DEMO_KNOWLEDGE, nowIso());
+  });
+
+  return { imported };
+};
 
 const SEED_RECIPES: SeedRecipe[] = [
   {

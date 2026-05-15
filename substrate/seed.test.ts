@@ -317,3 +317,67 @@ describe("seedRecipes", () => {
     }
   });
 });
+
+describe("seedDemoKnowledge", () => {
+  test("no-ops when ownerApproved is false (default)", () => {
+    const { seedDemoKnowledge } = require("./seed");
+    const db = openDb(":memory:");
+    const r = seedDemoKnowledge(db);
+    expect(r.imported).toBe(0);
+    expect((db.query("SELECT COUNT(*) AS c FROM events WHERE kind='knowledge_candidate'").get() as { c: number }).c).toBe(0);
+  });
+
+  test("seeds each demo as a knowledge_candidate + knowledge_promoted pair when approved", () => {
+    const { seedDemoKnowledge, DEMO_CAPABILITIES } = require("./seed");
+    const db = openDb(":memory:");
+    const r = seedDemoKnowledge(db, { ownerApproved: true });
+    expect(r.imported).toBe(DEMO_CAPABILITIES.length);
+
+    const candidates = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind='knowledge_candidate'")
+      .get() as { c: number }).c;
+    expect(candidates).toBe(DEMO_CAPABILITIES.length);
+
+    const promoted = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind='knowledge_promoted'")
+      .get() as { c: number }).c;
+    expect(promoted).toBe(DEMO_CAPABILITIES.length);
+  });
+
+  test("idempotent — second call on same db imports nothing", () => {
+    const { seedDemoKnowledge } = require("./seed");
+    const db = openDb(":memory:");
+    seedDemoKnowledge(db, { ownerApproved: true });
+    const r2 = seedDemoKnowledge(db, { ownerApproved: true });
+    expect(r2.imported).toBe(0);
+  });
+
+  test("each candidate's claim equals its first_demo_prompt — the text that gets embedded", () => {
+    const { seedDemoKnowledge, DEMO_CAPABILITIES } = require("./seed");
+    const db = openDb(":memory:");
+    seedDemoKnowledge(db, { ownerApproved: true });
+    const rows = db
+      .query("SELECT payload FROM events WHERE kind='knowledge_candidate' ORDER BY rowid ASC")
+      .all() as Array<{ payload: string }>;
+    expect(rows.length).toBe(DEMO_CAPABILITIES.length);
+    for (let i = 0; i < rows.length; i++) {
+      const payload = JSON.parse(rows[i]!.payload) as Record<string, unknown>;
+      expect(payload.claim).toBe(DEMO_CAPABILITIES[i]!.first_demo_prompt);
+      expect((payload.tags as string[]).includes("demo")).toBe(true);
+      expect(payload.demo_recipe_id).toBe(DEMO_CAPABILITIES[i]!.demo_recipe_id);
+    }
+  });
+
+  test("promoted events cite their candidate via context_refs", () => {
+    const { seedDemoKnowledge } = require("./seed");
+    const db = openDb(":memory:");
+    seedDemoKnowledge(db, { ownerApproved: true });
+    const promoted = db
+      .query("SELECT context_refs FROM events WHERE kind='knowledge_promoted'")
+      .all() as Array<{ context_refs: string }>;
+    for (const r of promoted) {
+      const refs = JSON.parse(r.context_refs) as string[];
+      expect(refs.length).toBe(1);
+    }
+  });
+});

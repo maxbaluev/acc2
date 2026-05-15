@@ -27,7 +27,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { newAdminToken } from "../runtime/ids";
 import { openDb, closeDb } from "../substrate/db";
-import { seedCodeArtifacts, seedFoundationalKnowledge, seedRecipes } from "../substrate/seed";
+import { seedCodeArtifacts, seedDemoKnowledge, seedFoundationalKnowledge, seedRecipes } from "../substrate/seed";
 import { embedPendingEvents } from "../runtime/embedder";
 import {
   migrateLegacyLayout,
@@ -386,6 +386,14 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
       log(
         `[7c/8] recipes: seeded ${recipeSummary.count} canonical Tier-0 recipe templates`,
       );
+      // Step 7c.demo — seed onboarding demos as embedded knowledge so
+      // substrate.search ranks them by semantic similarity to whatever
+      // the owner says next, universally + multilingual + no keyword
+      // table. Same owner-approved gate as the rest of the seed steps.
+      const demoSummary = seedDemoKnowledge(db, { ownerApproved: true });
+      if (demoSummary.imported > 0) {
+        log(`       demo capabilities: seeded ${demoSummary.imported} onboarding demos as knowledge`);
+      }
       // Step 7d — synchronously embed every freshly-seeded event so
       // vec_events is populated at init time. The brain's mid-cycle
       // `substrate.search` would otherwise return empty until the embedder
