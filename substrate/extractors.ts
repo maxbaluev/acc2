@@ -162,12 +162,32 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
   // Pull every confirmation/contradiction event once; partition by cited id.
   // Track substrate_origin per win so the multi-origin promotion gate can
   // count distinct origins. Brain knowledge audit bc5vdkrik #3.
+  //
+  // Time-decay (2026-05-15): each verdict event is weighted by
+  // exp(-dt/halfLife) where dt is the age of the verdict in ms. Older
+  // confirmations contribute less than fresh ones — stops a knowledge
+  // entry from being locked in by ancient corroborations when recent
+  // reality contradicts it. Half-life mirrors artifact_store.ts
+  // (default 30 days, override via ACC2_POSTERIOR_HALF_LIFE_MS).
   const verdicts = db
     .query(
-      `SELECT kind, substrate_origin, context_refs FROM events
+      `SELECT kind, substrate_origin, ts, context_refs FROM events
        WHERE kind IN ('candidate_confirmed', 'candidate_contradicted')`,
     )
-    .all() as Array<{ kind: string; substrate_origin: string; context_refs: string }>;
+    .all() as Array<{ kind: string; substrate_origin: string; ts: string; context_refs: string }>;
+
+  const halfLifeMsRaw = Number(process.env.ACC2_POSTERIOR_HALF_LIFE_MS ?? "");
+  const halfLifeMs = Number.isFinite(halfLifeMsRaw) && halfLifeMsRaw >= 0
+    ? halfLifeMsRaw
+    : 30 * 24 * 60 * 60 * 1000;
+  const nowMs = Date.now();
+  const verdictWeight = (ts: string): number => {
+    if (halfLifeMs <= 0) return 1;
+    const verdictMs = Date.parse(ts);
+    if (!Number.isFinite(verdictMs)) return 1;
+    const ageMs = Math.max(0, nowMs - verdictMs);
+    return Math.pow(0.5, ageMs / halfLifeMs);
+  };
 
   const winsByCandidate = new Map<string, number>();
   const lossesByCandidate = new Map<string, number>();
@@ -175,14 +195,15 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
   for (const v of verdicts) {
     let refs: string[];
     try { refs = JSON.parse(v.context_refs); } catch { refs = []; }
+    const w = verdictWeight(v.ts);
     for (const ref of refs) {
       if (v.kind === "candidate_confirmed") {
-        winsByCandidate.set(ref, (winsByCandidate.get(ref) ?? 0) + 1);
+        winsByCandidate.set(ref, (winsByCandidate.get(ref) ?? 0) + w);
         const origins = winOriginsByCandidate.get(ref) ?? new Set<string>();
         origins.add(v.substrate_origin);
         winOriginsByCandidate.set(ref, origins);
       } else {
-        lossesByCandidate.set(ref, (lossesByCandidate.get(ref) ?? 0) + 1);
+        lossesByCandidate.set(ref, (lossesByCandidate.get(ref) ?? 0) + w);
       }
     }
   }
