@@ -9,6 +9,7 @@ import {
   _resetSchedulerForTests,
   inFlightDirectivesFromSql,
   findCrossDirectiveConflict,
+  computeBrainDispatchCap,
 } from "./task_scheduler";
 import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { emitEvent } from "./events";
@@ -89,6 +90,23 @@ describe("task_scheduler", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 60_000);
+
+  test("computeBrainDispatchCap returns a positive integer scaled to host RAM", () => {
+    // Dynamic cap = floor((min(freemem, totalmem - 2GB)) / 1.8GB), floor 1.
+    // We can't assert the exact number (depends on the test host) but we CAN
+    // assert the invariants: integer, >= 1, never larger than what total RAM
+    // can physically support. This is the OOM defence: opencode subprocesses
+    // run gpt-5.5 at ~1.8GB each, and 4-way parallel on an 8GB host hits the
+    // OOM-killer (exit 137). The cap must scale automatically — no env knob.
+    const cap = computeBrainDispatchCap();
+    expect(Number.isInteger(cap)).toBe(true);
+    expect(cap).toBeGreaterThanOrEqual(1);
+    // Total RAM bound (1.8GB per slot, 2GB reserved): cap can never exceed
+    // floor((totalmem - 2GB) / 1.8GB).
+    const os = require("node:os") as typeof import("node:os");
+    const ceiling = Math.max(1, Math.floor((os.totalmem() - 2_000_000_000) / 1_800_000_000));
+    expect(cap).toBeLessThanOrEqual(ceiling);
+  });
 
   test("schedulerLoop drains queue and stops on quiescence", async () => {
     const db = openDb(":memory:");

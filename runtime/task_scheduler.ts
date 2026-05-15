@@ -83,6 +83,46 @@ export type SchedulerTick = {
 const DEFAULT_MAX_CONCURRENT = 5;
 const DEFAULT_POLL_INTERVAL_MS = 500;
 
+/** OOM defence: opencode subprocesses run gpt-5.5 and consume ~1-2GB RAM
+ *  each. Four parallel brain dispatches on an 8GB host trigger the OS
+ *  OOM-killer (exit 137 SIGKILL) — observed 2026-05-15 during a 4-way
+ *  parallel orchestrator dispatch. The cap is computed DYNAMICALLY from
+ *  available host RAM at dispatch time so the same daemon runs sensibly
+ *  on a 4GB laptop (cap=1), an 8GB workstation (cap=2-3), and a 32GB
+ *  workhorse (cap=10+) WITHOUT operator tuning. No env knob — matches
+ *  the "no new env vars" operating rule and the user's directive that
+ *  the system should self-determine brain parallelism. */
+const BRAIN_PROCESS_RAM_BYTES = 1_800_000_000; // ~1.8GB conservative per opencode subprocess
+const HOST_RAM_RESERVE_BYTES = 2_000_000_000;  // ~2GB kept for OS + daemon + bun + tests
+
+/** Compute the brain-dispatch cap from live host memory. We use the
+ *  *less* of available-free and the conservative free-from-total
+ *  estimate to avoid optimism when the OS reports stale "free" while
+ *  the page cache is hot. Floor of 1 — we never block dispatch entirely
+ *  even on a tiny host; the user can always run one brain at a time. */
+export const computeBrainDispatchCap = (): number => {
+  let totalBytes = 0;
+  let freeBytes = 0;
+  try {
+    // Use require-like indirection so the field is read at call time, not
+    // module load time — important for tests that mock process.memoryUsage.
+    const os = require("node:os") as typeof import("node:os");
+    totalBytes = os.totalmem();
+    freeBytes = os.freemem();
+  } catch {
+    return 2; // os module shouldn't fail; conservative default if it does.
+  }
+  const usableBytes = Math.max(0, Math.min(freeBytes, totalBytes - HOST_RAM_RESERVE_BYTES));
+  const cap = Math.floor(usableBytes / BRAIN_PROCESS_RAM_BYTES);
+  return Math.max(1, cap);
+};
+
+/** Track in-flight opencode_brain dispatches separately so the brain cap
+ *  is enforced independently of the global cap. Same lifecycle as
+ *  IN_FLIGHT — entries inserted at dispatch, deleted on promise
+ *  resolution / rejection / catch. */
+const IN_FLIGHT_BRAIN: Set<string> = new Set();
+
 /** Max consecutive `bridge_failed` events for a single task before the
  *  scheduler quarantines it with `task_failed { failure_kind:
  *  "consecutive_bridge_failures" }`. Without this cap, a structural issue
@@ -332,7 +372,36 @@ export const schedulerTick = async (
       continue;
     }
 
+    // OOM defence: each opencode subprocess consumes ~1-2GB. The global
+    // maxConcurrent cap counts ALL routes (substrate_replay + claude_inline
+    // + opencode_brain) — cheap routes shouldn't squeeze brain runs out, but
+    // ALSO brain runs shouldn't pile up unbounded on top of cheap ones. The
+    // brain cap is computed dynamically from live host RAM at dispatch time
+    // (computeBrainDispatchCap) so the same daemon runs correctly on hosts
+    // with 4GB / 8GB / 32GB / 64GB RAM without operator tuning. When full,
+    // the task stays in ready state and re-attempts next tick.
+    if (decision.route === "opencode_brain") {
+      const brainCap = computeBrainDispatchCap();
+      if (IN_FLIGHT_BRAIN.size >= brainCap) {
+        emitEvent(db, {
+          kind: "constitutional_gate_decision",
+          substrate_origin: "substrate_auto",
+          directive_id: task.directive_id,
+          task_id: task.id,
+          payload: {
+            gate: "brain_concurrency_cap",
+            reason: "opencode_brain_in_flight_at_cap",
+            in_flight_brain: IN_FLIGHT_BRAIN.size,
+            cap: brainCap,
+            cap_source: "dynamic_host_ram",
+          } as JsonValue,
+        });
+        continue;
+      }
+    }
+
     // opencode_brain lane → actual dispatch.
+    if (decision.route === "opencode_brain") IN_FLIGHT_BRAIN.add(task.id);
     const promise = dispatchReadyTask(db, task, {
       fixtureTargetPath: opts.fixtureTargetPath,
       index: opts.index,
@@ -357,6 +426,11 @@ export const schedulerTick = async (
       .finally(() => {
         IN_FLIGHT.delete(task.id);
         IN_FLIGHT_DIRECTIVE.delete(task.id);
+        // Safe to call unconditionally: Set.delete is a no-op when the key
+        // is absent, so non-brain routes (substrate_replay, claude_inline,
+        // deferred_blocked) cost nothing here. Releases the brain slot so
+        // the next tick can dispatch a queued opencode_brain task.
+        IN_FLIGHT_BRAIN.delete(task.id);
       });
     // Mark settled-flag accessor lazily — best-effort cleanup helper.
     (promise as Promise<unknown> & { _settled?: boolean })._settled = false;
