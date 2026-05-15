@@ -136,7 +136,11 @@ describe("task_scheduler", () => {
     }
   }, 30_000);
 
-  test("schedulerTick records constitutional_gate_decision events for skipped routes", async () => {
+  test("schedulerTick does NOT emit substrate_replay_skipped (Phase-J stub is gone)", async () => {
+    // Pre-fix: a recipe match → substrate_replay decision → scheduler emitted
+    // substrate_replay_skipped on every tick (Phase-J stub returned phase_j),
+    // tight loop. Post-fix: substrate_replay route falls through to
+    // dispatchReadyTask which calls replayRecipe properly.
     const db = openDb(":memory:");
     const directiveId = newId();
     const taskId = newId();
@@ -152,14 +156,16 @@ describe("task_scheduler", () => {
       payload: { goal: "Run audit-shape-x replay" },
     });
     await schedulerTick(db, { directiveId });
-    const row = db
+    const rows = db
       .query(
         "SELECT payload FROM events WHERE kind = 'constitutional_gate_decision' AND task_id = ?",
       )
-      .get(taskId) as { payload: string };
-    expect(row).not.toBeNull();
-    const p = JSON.parse(row.payload);
-    expect(p.gate).toBe("substrate_replay_skipped");
+      .all(taskId) as Array<{ payload: string }>;
+    for (const r of rows) {
+      const p = JSON.parse(r.payload) as { gate?: string; reason?: string };
+      expect(p.gate).not.toBe("substrate_replay_skipped");
+      expect(p.reason).not.toBe("phase_j");
+    }
   });
 
   test("tick with no ready tasks returns empty dispatched + empty skipped", async () => {
@@ -304,9 +310,13 @@ describe("task_scheduler", () => {
     expect(tick.skipped_failure_capped).not.toContain(taskId);
   });
 
-  test("substrate_replay route skipped (Phase J stub returns phase_j)", async () => {
+  test("substrate_replay route falls through to dispatchReadyTask (no Phase-J stub skip)", async () => {
+    // Pre-fix: scheduler short-circuited substrate_replay with a stub returning
+    // {ok:false, error:"phase_j"} on every tick → tight loop emitting
+    // substrate_replay_skipped because readyTasks kept returning the same task.
+    // Post-fix: substrate_replay routes through dispatchReadyTask, which calls
+    // the real replayRecipe (runtime/recipe_replay.ts).
     const db = openDb(":memory:");
-    // Seed a recipe_extracted event with high confidence + matching goal_shape.
     const directiveId = newId();
     const taskId = newId();
     emitEvent(db, {
@@ -321,8 +331,18 @@ describe("task_scheduler", () => {
       payload: { goal: "phase-j-recipe-shape recipe test goal" },
     });
     const tick = await schedulerTick(db, { directiveId });
-    expect(tick.skipped_recipe).toContain(taskId);
-    expect(tick.dispatched).not.toContain(taskId);
+    // The task is NOT routed through the old phase_j skip path.
+    expect(tick.skipped_recipe).not.toContain(taskId);
+    // The task DID enter the dispatch path (either dispatched, or one of the
+    // other gates — but NOT silently skipped with no event of its own).
+    const events = db
+      .query("SELECT kind, payload FROM events WHERE task_id = ? AND kind = 'constitutional_gate_decision'")
+      .all(taskId) as Array<{ payload: string }>;
+    for (const e of events) {
+      const p = JSON.parse(e.payload) as { gate?: string; reason?: string };
+      expect(p.reason).not.toBe("phase_j");
+      expect(p.gate).not.toBe("substrate_replay_skipped");
+    }
   });
 });
 

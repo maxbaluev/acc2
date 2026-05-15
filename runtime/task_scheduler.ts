@@ -7,8 +7,8 @@
 //   - Tracks in-flight dispatches via an in-memory map keyed by task_id so
 //     successive ticks know how many slots are free.
 //   - Routes through decideDispatch:
-//       substrate_replay → Phase J recipe replay (stub returns {ok:false,
-//                          error:"phase_j"}, scheduler accepts).
+//       substrate_replay → dispatchReadyTask (which calls replayRecipe from
+//                          runtime/recipe_replay.ts — real Tier-0 replay).
 //       claude_inline    → emit `claude_inline_lane_routed` event; main
 //                          Claude reads the event stream and runs inline.
 //                          Scheduler does NOT dispatch from this lane.
@@ -120,11 +120,6 @@ const IN_FLIGHT: Map<string, Promise<unknown>> = new Map();
 // IN_FLIGHT (same insertion / deletion sites). Used for the interference
 // concurrency check (`findDeferringConflict`).
 const IN_FLIGHT_DIRECTIVE: Map<string, string> = new Map();
-
-const phaseJRecipeReplay = (): { ok: false; error: "phase_j" } => ({
-  ok: false,
-  error: "phase_j",
-});
 
 const emitInlineLaneRouted = (
   db: Database,
@@ -256,24 +251,12 @@ export const schedulerTick = async (
       continue;
     }
 
-    if (decision.route === "substrate_replay") {
-      // Phase J recipe replay: stub returns {ok:false, error:"phase_j"}.
-      const replay = phaseJRecipeReplay();
-      if (!replay.ok) {
-        skippedRecipe.push(task.id);
-        emitEvent(db, {
-          kind: "constitutional_gate_decision",
-          substrate_origin: "substrate_auto",
-          directive_id: task.directive_id,
-          task_id: task.id,
-          payload: {
-            gate: "substrate_replay_skipped",
-            reason: replay.error,
-          } as JsonValue,
-        });
-      }
-      continue;
-    }
+    // substrate_replay falls through to dispatchReadyTask below, which calls
+    // replayRecipe (runtime/recipe_replay.ts) internally. The scheduler used
+    // to short-circuit this route with a Phase-J stub (returning
+    // {ok:false, error:"phase_j"} on every tick — tight loop emitting
+    // `substrate_replay_skipped` because readyTasks kept returning the same
+    // task forever). Real Tier-0 replay now runs.
 
     if (decision.route === "claude_inline") {
       skippedInline.push(task.id);
