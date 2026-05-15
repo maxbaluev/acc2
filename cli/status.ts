@@ -44,7 +44,7 @@ export const runStatus = async (_argv: string[]): Promise<number> => {
   }
 
   // Open the substrate DB read-only for the rest of the snapshot.
-  const dbPath = process.env.ACC2_STATE_DB ?? resolveDbPath();
+  const dbPath = resolveDbPath();
   let db: Database;
   try {
     db = openDb(dbPath);

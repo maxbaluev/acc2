@@ -81,6 +81,24 @@ export const HOTRELOAD_MANIFEST: readonly HotReloadEntry[] = [
     reason: "Bounded SQL workload; re-import safe.",
   },
   {
+    name: "runtime_elegance_primitives",
+    globs: [
+      "runtime/pathology_budget.ts",
+      "runtime/activation_bus.ts",
+      "runtime/brain_effectiveness.ts",
+      "runtime/credit.ts",
+    ],
+    strategy: "in_process",
+    reason: "Pure helpers (budget aggregation, pub/sub, classifier, Shapley credit). Re-import refreshes the math without daemon restart.",
+  },
+  {
+    name: "runtime_prompt_cache",
+    globs: ["runtime/prompt_cache.ts"],
+    strategy: "in_process",
+    reason: "Cache lookup module; re-import recomputes lookup logic. Invalidate the cache itself so stale entries don't leak into the new code path.",
+    invalidates: ["prompt_cache"],
+  },
+  {
     name: "runtime_prompt_composer",
     globs: ["runtime/prompt_composer.ts"],
     strategy: "in_process",

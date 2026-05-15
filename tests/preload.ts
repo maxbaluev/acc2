@@ -45,6 +45,6 @@ const homePrefix = process.env.HOME ?? "/no-such-prefix";
 if (!process.env.ACC2_STATE_DIR || process.env.ACC2_STATE_DIR.startsWith(homePrefix)) {
   process.env.ACC2_STATE_DIR = `/tmp/acc2-test-state-${process.pid}`;
 }
-if (process.env.ACC2_STATE_DB?.startsWith(homePrefix)) {
-  process.env.ACC2_STATE_DB = `${process.env.ACC2_STATE_DIR}/state.db`;
-}
+// ACC2_STATE_DB legacy alias removed (brain audit byaeuflif #7, 2026-05-15):
+// ACC2_DB_PATH is the sole canonical override; tests pin ACC2_STATE_DIR and
+// let runtime/state_paths.ts compose the DB path from it.

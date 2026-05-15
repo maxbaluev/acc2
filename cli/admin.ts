@@ -255,7 +255,7 @@ export const runUpdateOpencode = async (env: AdminEnv): Promise<number> => {
   // Open the substrate DB so events land even when the daemon is down.
   // Respect env.stateDbPath / env.openSubstrate overrides so tests can
   // hermetic-isolate; default to the real state DB in production.
-  const stateDb = env.stateDbPath ?? process.env.ACC2_STATE_DB ?? defaultStateDbPath();
+  const stateDb = env.stateDbPath ?? defaultStateDbPath();
   let db: Database | undefined;
   try {
     if (env.openSubstrate) db = env.openSubstrate(stateDb);

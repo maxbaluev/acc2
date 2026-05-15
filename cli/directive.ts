@@ -32,7 +32,7 @@ export const runDirective = async (argv: string[]): Promise<number> => {
       console.error("acc directive resume: missing <directive_id>");
       return 1;
     }
-    const dbPath = process.env.ACC2_STATE_DB ?? resolveDbPath();
+    const dbPath = resolveDbPath();
     let db;
     try { db = openDb(dbPath); } catch (err) {
       console.error(`could not open substrate DB at ${dbPath}: ${(err as Error).message}`);
