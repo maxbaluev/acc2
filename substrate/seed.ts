@@ -738,23 +738,57 @@ type SeedRecipe = {
   }>;
 };
 
-// Onboarding demo classifier (brain dispatch bp93s80hn, PHVQAJRMWS6N).
-// Given one owner sentence ("I waste time on PRs"), DEMO_MATCHERS routes to
-// a demo recipe id. Each matcher carries token alternatives, domain hints,
-// required auth, confidence prior, and the one-line prompt the orchestrator
-// reads back to the owner in their language. The orchestrator (Claude Code)
-// uses these to render the first demo within ~30 seconds of the owner's
-// first sentence — the dramatic-fast-value north star.
+// Onboarding demo classifier — universal, any-human framing.
+//
+// Every demo here is phrased in plain everyday language a non-technical
+// owner would say in their own words ("I want to lose weight", "should I
+// switch jobs", "I keep redoing this every Monday"). No developer
+// vocabulary. No service-specific assumptions (Stripe / Notion / GitHub).
+// The brain's btfc5wrc6 dispatch proposed vertical-tech demos (Stripe
+// disputes, GitHub PR style, Notion contradictions) — the owner pushed
+// back: "demos should be product-friendly, for any human to solve any
+// goal, not technical". This table is the answer to that pushback.
+//
+// Each demo is wired to exercise ONE substrate capability that NO
+// chat-based LLM can replicate:
+//   - `lifecycle: rolling_active` → persists across sessions, daemon
+//     reopens the review subtask on cadence (a chat starts over)
+//   - `compounds_via: knowledge_promoted` → every retrieval mutates the
+//     Beta posterior; the answer next week is sharper than this week
+//   - `owner_profile_grounded` → answer is conditioned on persistent
+//     owner facts (constraints, hot_topics, things_to_never_do)
+//   - `father_ranked` → daemon picks the next session for the owner
+//   - `stakeholder_tracked` → counterparty history persists across
+//     every conversation about that person/org
+//   - `recipe_compounds` → workflow observed once becomes a callable
+//     trajectory the substrate can replay
+//
+// Given one owner sentence, `tokens_any` routes to the most-confident
+// demo; the orchestrator (Claude Code) reads back the matched
+// `first_demo_prompt` in the owner's language and offers the next
+// concrete step. Confidence ordering is intentional — universal demos
+// (learn_topic_deeply, finish_my_goal) score higher than narrow vertical
+// matches.
 
 export type DemoRecipeId =
-  | "summarize_url"
-  | "compare_options"
-  | "monitor_feed"
-  | "audit_inbox_or_prs"
-  | "research_question"
-  | "personal_goal_plan"
-  | "workflow_audit"
-  | "local_file_summary";
+  | "learn_topic_deeply"
+  | "keep_an_eye_on"
+  | "finish_my_goal"
+  | "make_my_decision"
+  | "remember_my_life"
+  | "negotiate_for_me"
+  | "kill_my_recurring_friction"
+  | "find_my_next_move";
+
+/** The substrate capability each demo exercises — used by docs/UX to
+ *  explain WHY the owner should care, not to filter routing. */
+export type DemoSubstrateCapability =
+  | "rolling_active"
+  | "knowledge_compounds"
+  | "owner_profile_grounded"
+  | "father_ranked"
+  | "stakeholder_tracked"
+  | "recipe_compounds";
 
 export type DemoMatcher = {
   id: string;
@@ -762,83 +796,146 @@ export type DemoMatcher = {
   tokens_any: string[];
   tokens_all?: string[];
   domain_hints: string[];
+  /** Auth the demo NEEDS to actually fire. Empty means it works with
+   *  zero external services — just the brain + the substrate. */
   requires_auth: Array<"OPENAI_API_KEY" | "SERPER_API_KEY" | "opencode">;
   confidence: number;
+  /** "finite" closes on terminal; "rolling_active" stays open and the
+   *  Father reopens the review subtask on cadence. */
+  lifecycle: "finite" | "rolling_active";
+  /** One short sentence the orchestrator reads to the owner in their
+   *  language. No developer words. No service names. */
   first_demo_prompt: string;
+  /** Why this demo can't be replicated by a fresh chat session. Surfaced
+   *  to the owner ONLY when they ask "why use this instead of ChatGPT?". */
+  substrate_capability: DemoSubstrateCapability[];
 };
 
 export const DEMO_MATCHERS: DemoMatcher[] = [
   {
-    id: "prs_reviews_code",
-    demo_recipe_id: "audit_inbox_or_prs",
-    tokens_any: ["pr", "prs", "pull request", "review", "github", "merge", "code review"],
-    domain_hints: ["software", "engineering"],
+    id: "learn_topic_deeply_rolling",
+    demo_recipe_id: "learn_topic_deeply",
+    tokens_any: [
+      "understand", "learn", "deeply", "research", "really know", "get good at",
+      "wrap my head around", "figure out", "study", "become an expert",
+    ],
+    domain_hints: ["learning", "self_improvement", "research"],
+    requires_auth: [],
+    confidence: 0.88,
+    lifecycle: "rolling_active",
+    first_demo_prompt:
+      "Pick a topic you wish you understood better. I'll learn it for you a little more every week — every time we talk, I'll know more about it than last time. A chat would start over.",
+    substrate_capability: ["rolling_active", "knowledge_compounds"],
+  },
+  {
+    id: "keep_an_eye_on_anything",
+    demo_recipe_id: "keep_an_eye_on",
+    tokens_any: [
+      "watch", "monitor", "keep an eye", "track", "let me know when",
+      "tell me if", "follow", "notify me", "alert me", "any updates",
+    ],
+    domain_hints: ["monitoring", "rolling_diff"],
     requires_auth: [],
     confidence: 0.86,
-    first_demo_prompt: "I can audit a PR/checklist-shaped text you paste and return the top risks plus one fix-first recommendation.",
+    lifecycle: "rolling_active",
+    first_demo_prompt:
+      "Tell me anything you'd like me to keep an eye on — a website, a person, a price, a topic. I'll only ping you when something actually changes. Want to point me at it?",
+    substrate_capability: ["rolling_active", "knowledge_compounds"],
   },
   {
-    id: "industry_research",
-    demo_recipe_id: "research_question",
-    tokens_any: ["understand", "research", "industry", "market", "cardano", "competitors", "landscape"],
-    domain_hints: ["research", "business", "crypto"],
-    requires_auth: ["SERPER_API_KEY"],
-    confidence: 0.82,
-    first_demo_prompt: "I can turn that into a short research brief with claims, sources, and open questions.",
-  },
-  {
-    id: "weight_loss_or_habit",
-    demo_recipe_id: "personal_goal_plan",
-    tokens_any: ["lose", "kg", "weight", "habit", "sleep", "fitness", "diet", "health"],
-    domain_hints: ["self_improvement", "health"],
+    id: "finish_my_goal_weekly",
+    demo_recipe_id: "finish_my_goal",
+    tokens_any: [
+      "goal", "want to", "trying to", "plan", "lose", "build", "launch",
+      "finish", "write", "start", "quit", "save", "habit", "diet",
+      "fitness", "sleep", "weight",
+    ],
+    domain_hints: ["self_improvement", "goal_tracking"],
     requires_auth: [],
-    confidence: 0.78,
-    first_demo_prompt: "I can turn that into a tiny measurable plan with the first action and a weekly review loop.",
+    confidence: 0.85,
+    lifecycle: "rolling_active",
+    first_demo_prompt:
+      "Tell me a goal you've been putting off. I'll break it into the smallest first step, keep one ready for you every week, and check in on what worked. The plan won't disappear.",
+    substrate_capability: ["rolling_active", "father_ranked"],
   },
   {
-    id: "url_summary",
-    demo_recipe_id: "summarize_url",
-    tokens_any: ["http://", "https://", "link", "article", "page", "url", "summarize"],
-    domain_hints: ["web", "reading"],
+    id: "make_my_decision_grounded",
+    demo_recipe_id: "make_my_decision",
+    tokens_any: [
+      "should i", "decide", "decision", "choose", "compare", "vs", "versus",
+      "stuck between", "which one", "torn", "switch", "change jobs",
+      "move", "buy", "quit", "drop",
+    ],
+    domain_hints: ["decision", "owner_profile_grounded"],
     requires_auth: [],
-    confidence: 0.90,
-    first_demo_prompt: "I can fetch that link and summarize what matters in your context.",
+    confidence: 0.83,
+    lifecycle: "finite",
+    first_demo_prompt:
+      "Tell me a decision you're stuck on. I'll weigh it against what you've already told me about yourself, ask about the gaps, and lay out the trade-offs. Next time, I'll already know your context.",
+    substrate_capability: ["owner_profile_grounded", "knowledge_compounds"],
   },
   {
-    id: "options_decision",
-    demo_recipe_id: "compare_options",
-    tokens_any: ["choose", "compare", "vs", "versus", "option", "which", "vendor", "tool"],
-    domain_hints: ["decision", "procurement", "planning"],
+    id: "remember_my_life",
+    demo_recipe_id: "remember_my_life",
+    tokens_any: [
+      "remember", "don't forget", "keep in mind", "save this", "note that",
+      "for next time", "my preference", "i like", "i don't like",
+      "i can't", "i won't", "always", "never",
+    ],
+    domain_hints: ["owner_profile", "persistent_memory"],
     requires_auth: [],
-    confidence: 0.80,
-    first_demo_prompt: "I can compare the options against your constraints and recommend a next step.",
+    confidence: 0.92,
+    lifecycle: "rolling_active",
+    first_demo_prompt:
+      "Tell me anything you want me to remember about you — how you work, what you care about, what's off-limits, who matters to you. I'll keep it forever and use it the next time we talk.",
+    substrate_capability: ["owner_profile_grounded"],
   },
   {
-    id: "monitoring_feed",
-    demo_recipe_id: "monitor_feed",
-    tokens_any: ["monitor", "watch", "track", "alert", "feed", "updates", "notify"],
-    domain_hints: ["monitoring", "operations"],
-    requires_auth: ["SERPER_API_KEY"],
-    confidence: 0.76,
-    first_demo_prompt: "I can set up a lightweight monitor and tell you what changed since last time.",
-  },
-  {
-    id: "workflow_frustration",
-    demo_recipe_id: "workflow_audit",
-    tokens_any: ["waste time", "frustrating", "manual", "repetitive", "annoying", "too long"],
-    domain_hints: ["workflow", "automation"],
+    id: "negotiate_for_me",
+    demo_recipe_id: "negotiate_for_me",
+    tokens_any: [
+      "draft", "reply", "message", "email", "respond", "tell my", "write to",
+      "landlord", "boss", "customer", "client", "partner", "conversation with",
+    ],
+    domain_hints: ["communication", "stakeholder_memory"],
     requires_auth: [],
-    confidence: 0.72,
-    first_demo_prompt: "I can map that workflow into bottlenecks and pick one automation-shaped next move.",
+    confidence: 0.81,
+    lifecycle: "rolling_active",
+    first_demo_prompt:
+      "Tell me who you're talking to and what you need from them. I'll remember them — their history with you, what they responded to before — every time you come back about them. A chat forgets the moment you close the tab.",
+    substrate_capability: ["stakeholder_tracked", "owner_profile_grounded"],
   },
   {
-    id: "fallback_text_artifact",
-    demo_recipe_id: "local_file_summary",
-    tokens_any: [],
-    domain_hints: ["fallback"],
+    id: "kill_my_recurring_friction",
+    demo_recipe_id: "kill_my_recurring_friction",
+    tokens_any: [
+      "every week", "every monday", "every day", "i keep doing", "redo",
+      "waste time", "manually", "by hand", "repetitive", "annoying",
+      "tired of", "sick of",
+    ],
+    domain_hints: ["workflow", "automation", "recipe_compounds"],
     requires_auth: [],
-    confidence: 0.45,
-    first_demo_prompt: "Paste one small sample and I will extract the useful structure from it.",
+    confidence: 0.79,
+    lifecycle: "rolling_active",
+    first_demo_prompt:
+      "Tell me one thing you redo every week. I'll watch you do it once, turn it into a routine I can run for you, and only ask you when something genuinely needs your judgment. It'll get faster every time.",
+    substrate_capability: ["recipe_compounds", "knowledge_compounds"],
+  },
+  {
+    id: "find_my_next_move",
+    demo_recipe_id: "find_my_next_move",
+    tokens_any: [
+      "what should i", "next move", "next step", "what now", "spend time on",
+      "this weekend", "this evening", "free time", "where to focus",
+      "priority", "most important",
+    ],
+    domain_hints: ["planning", "father_ranking"],
+    requires_auth: [],
+    confidence: 0.77,
+    lifecycle: "finite",
+    first_demo_prompt:
+      "List the things you've been meaning to do. I'll pick the one most likely to actually move the needle for you right now — using what I know about your goals, energy, and what's already in flight.",
+    substrate_capability: ["father_ranked", "owner_profile_grounded"],
   },
 ];
 
