@@ -575,6 +575,364 @@ CREATE VIEW IF NOT EXISTS promoted_knowledge_view AS
   WHERE p.kind = 'knowledge_promoted';
 `;
 
+// lesson_implementer_queue_view — derived inbox for the lesson-implementer
+// flywheel. It projects lesson_extracted / contract_amendment_proposed rows
+// that have not reached applied_change_committed. Owner gating is derived
+// from target path + owner_decision_recorded rows; auto-apply eligibility is
+// derived from structured proposed_behavior and absence of trajectory hazards.
+// No posterior or queue table is stored; the ledger remains the source.
+const VIEW_LESSON_IMPLEMENTER_QUEUE = `
+CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
+  WITH proposals AS (
+    SELECT
+      e.id            AS source_event_id,
+      e.ts            AS ts,
+      e.kind          AS source_kind,
+      e.directive_id  AS directive_id,
+      e.task_id       AS task_id,
+      e.payload       AS payload,
+      e.context_refs  AS context_refs,
+      json_extract(e.payload, '$.lesson_kind')       AS lesson_kind,
+      COALESCE(
+        json_extract(e.payload, '$.target'),
+        json_extract(e.payload, '$.proposed_behavior.file_path')
+      )                                             AS target,
+      json_extract(e.payload, '$.anchor')            AS anchor,
+      json_extract(e.payload, '$.proposed_behavior') AS proposed_behavior,
+      json_extract(e.payload, '$.proposed_action')   AS proposed_action
+    FROM events e
+    WHERE e.kind IN ('lesson_extracted', 'contract_amendment_proposed')
+  ),
+  committed AS (
+    SELECT DISTINCT json_extract(payload, '$.source_event_id') AS source_event_id
+    FROM events
+    WHERE kind = 'applied_change_committed'
+      AND json_extract(payload, '$.status') = 'applied'
+      AND CAST(COALESCE(residual, json_extract(payload, '$.residual'), 1) AS REAL) < 0.3
+  ),
+  latest_apply AS (
+    SELECT
+      json_extract(payload, '$.source_event_id') AS source_event_id,
+      id AS apply_event_id,
+      kind AS apply_kind,
+      json_extract(payload, '$.status') AS apply_status,
+      ts AS apply_ts,
+      ROW_NUMBER() OVER (
+        PARTITION BY json_extract(payload, '$.source_event_id')
+        ORDER BY ts DESC, rowid DESC
+      ) AS rn
+    FROM events
+    WHERE kind IN ('lesson_applied', 'contract_amendment_applied')
+  ),
+  owner_approvals AS (
+    SELECT DISTINCT COALESCE(
+      json_extract(payload, '$.source_event_id'),
+      json_extract(context_refs, '$[0]')
+    ) AS source_event_id
+    FROM events
+    WHERE kind = 'owner_decision_recorded'
+      AND json_extract(payload, '$.decision') IN ('approved', 'approve', 'yes')
+  ),
+  hazards AS (
+    SELECT directive_id, COUNT(*) AS hazard_count
+    FROM events
+    WHERE kind IN ('dispatcher_violation', 'irreversible_effect_recorded')
+    GROUP BY directive_id
+  )
+  SELECT
+    p.source_event_id,
+    p.ts,
+    p.source_kind,
+    p.directive_id,
+    p.task_id,
+    p.lesson_kind,
+    p.target,
+    p.anchor,
+    p.proposed_behavior,
+    p.proposed_action,
+    CASE
+      WHEN p.source_kind = 'contract_amendment_proposed'
+       AND (
+         p.target = 'CLAUDE.md'
+         OR p.target = 'docs/v2-design.md'
+         OR p.target LIKE '.claude/rules/%'
+       ) THEN 1
+      ELSE 0
+    END AS owner_gate_required,
+    CASE WHEN oa.source_event_id IS NULL THEN 0 ELSE 1 END AS owner_approved,
+    COALESCE(h.hazard_count, 0) AS trajectory_hazard_count,
+    CASE
+      WHEN p.source_kind = 'contract_amendment_proposed'
+       AND (p.target LIKE 'cli/%' OR p.target LIKE 'runtime/%')
+       AND json_type(p.payload, '$.proposed_behavior') = 'object'
+       AND json_extract(p.payload, '$.proposed_behavior.file_path') = p.target
+       AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_behavior.anchor'), ''))) > 0
+       AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_behavior.diff'), ''))) > 0
+       AND COALESCE(h.hazard_count, 0) = 0
+      THEN 1 ELSE 0
+    END AS auto_apply_eligible,
+    la.apply_event_id,
+    la.apply_kind,
+    la.apply_status,
+    la.apply_ts,
+    p.payload,
+    p.context_refs
+  FROM proposals p
+  LEFT JOIN committed c ON c.source_event_id = p.source_event_id
+  LEFT JOIN latest_apply la ON la.source_event_id = p.source_event_id AND la.rn = 1
+  LEFT JOIN owner_approvals oa ON oa.source_event_id = p.source_event_id
+  LEFT JOIN hazards h ON h.directive_id = p.directive_id
+  WHERE c.source_event_id IS NULL;
+`;
+
+// lesson_implementation_status_view — one row per proposal with its latest
+// request, verifier residual (via action_scored citing the proposal), apply
+// event, and terminal applied_change_committed event. This is the flywheel's
+// observable state machine; cheaper-next effects remain ledger-derived via
+// later recipe_extracted / action_scored rows citing the same source.
+const VIEW_LESSON_IMPLEMENTATION_STATUS = `
+CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
+  WITH proposals AS (
+    SELECT id AS source_event_id, ts, kind AS source_kind, directive_id, task_id, payload, context_refs
+    FROM events
+    WHERE kind IN ('lesson_extracted', 'contract_amendment_proposed')
+  ),
+  latest_request AS (
+    SELECT
+      json_extract(payload, '$.source_event_id') AS source_event_id,
+      id AS request_event_id,
+      ts AS requested_at,
+      ROW_NUMBER() OVER (
+        PARTITION BY json_extract(payload, '$.source_event_id')
+        ORDER BY ts DESC, rowid DESC
+      ) AS rn
+    FROM events
+    WHERE kind = 'lesson_apply_requested'
+  ),
+  latest_scored AS (
+    SELECT
+      COALESCE(json_extract(payload, '$.source_event_id'), json_extract(context_refs, '$[0]')) AS source_event_id,
+      id AS scored_event_id,
+      ts AS scored_at,
+      residual AS verifier_residual,
+      ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(json_extract(payload, '$.source_event_id'), json_extract(context_refs, '$[0]'))
+        ORDER BY ts DESC, rowid DESC
+      ) AS rn
+    FROM events
+    WHERE kind = 'action_scored'
+  ),
+  latest_apply AS (
+    SELECT
+      json_extract(payload, '$.source_event_id') AS source_event_id,
+      id AS apply_event_id,
+      kind AS apply_kind,
+      json_extract(payload, '$.status') AS apply_status,
+      json_extract(payload, '$.commit_sha') AS commit_sha,
+      ts AS applied_at,
+      ROW_NUMBER() OVER (
+        PARTITION BY json_extract(payload, '$.source_event_id')
+        ORDER BY ts DESC, rowid DESC
+      ) AS rn
+    FROM events
+    WHERE kind IN ('lesson_applied', 'contract_amendment_applied')
+  ),
+  terminal AS (
+    SELECT
+      json_extract(payload, '$.source_event_id') AS source_event_id,
+      id AS committed_event_id,
+      ts AS committed_at,
+      ROW_NUMBER() OVER (
+        PARTITION BY json_extract(payload, '$.source_event_id')
+        ORDER BY ts DESC, rowid DESC
+      ) AS rn
+    FROM events
+    WHERE kind = 'applied_change_committed'
+      AND json_extract(payload, '$.status') = 'applied'
+      AND CAST(COALESCE(residual, json_extract(payload, '$.residual'), 1) AS REAL) < 0.3
+  )
+  SELECT
+    p.source_event_id,
+    p.ts,
+    p.source_kind,
+    p.directive_id,
+    p.task_id,
+    lr.request_event_id,
+    lr.requested_at,
+    ls.scored_event_id,
+    ls.scored_at,
+    ls.verifier_residual,
+    CASE WHEN ls.verifier_residual IS NOT NULL AND CAST(ls.verifier_residual AS REAL) < 0.3 THEN 1 ELSE 0 END AS verifier_passed,
+    la.apply_event_id,
+    la.apply_kind,
+    la.apply_status,
+    la.commit_sha,
+    la.applied_at,
+    t.committed_event_id,
+    t.committed_at,
+    CASE
+      WHEN t.committed_event_id IS NOT NULL THEN 'committed'
+      WHEN la.apply_status IS NOT NULL THEN la.apply_status
+      WHEN ls.verifier_residual IS NOT NULL THEN 'verified'
+      WHEN lr.request_event_id IS NOT NULL THEN 'requested'
+      ELSE 'proposed'
+    END AS flywheel_status,
+    p.payload,
+    p.context_refs
+  FROM proposals p
+  LEFT JOIN latest_request lr ON lr.source_event_id = p.source_event_id AND lr.rn = 1
+  LEFT JOIN latest_scored ls ON ls.source_event_id = p.source_event_id AND ls.rn = 1
+  LEFT JOIN latest_apply la ON la.source_event_id = p.source_event_id AND la.rn = 1
+  LEFT JOIN terminal t ON t.source_event_id = p.source_event_id AND t.rn = 1;
+`;
+
+// applied_lesson_effectiveness_view — feedback signal for compounding. It is
+// entirely derived from event citations: a future trajectory must cite the
+// original lesson/amendment source_event_id for the cheaper-next signal to
+// accrue. Signals are lower verifier residual, fewer DAG nodes, or Tier-0
+// recipe replay; no separate posterior table is necessary because the normal
+// action_scored credit path updates cited entities.
+const VIEW_APPLIED_LESSON_EFFECTIVENESS = `
+CREATE VIEW IF NOT EXISTS applied_lesson_effectiveness_view AS
+  WITH committed AS (
+    SELECT
+      json_extract(payload, '$.source_event_id') AS source_event_id,
+      id AS applied_change_event_id,
+      directive_id AS source_directive_id,
+      task_id AS source_task_id,
+      ts AS committed_at,
+      CAST(COALESCE(residual, json_extract(payload, '$.residual'), 1) AS REAL) AS apply_residual,
+      payload AS applied_payload,
+      context_refs AS applied_context_refs
+    FROM events
+    WHERE kind = 'applied_change_committed'
+      AND json_extract(payload, '$.status') = 'applied'
+      AND CAST(COALESCE(residual, json_extract(payload, '$.residual'), 1) AS REAL) < 0.3
+  ),
+  source_cost AS (
+    SELECT
+      c.source_event_id,
+      COUNT(DISTINCT n.task_id) AS source_dag_nodes,
+      MIN(CAST(s.residual AS REAL)) AS source_best_residual
+    FROM committed c
+    LEFT JOIN events n
+      ON n.directive_id = c.source_directive_id
+     AND n.kind = 'task_node_opened'
+    LEFT JOIN events s
+      ON s.directive_id = c.source_directive_id
+     AND s.kind = 'action_scored'
+     AND s.residual IS NOT NULL
+    GROUP BY c.source_event_id
+  ),
+  future_scored AS (
+    SELECT
+      c.source_event_id,
+      s.id AS next_scored_event_id,
+      s.directive_id AS next_directive_id,
+      s.task_id AS next_task_id,
+      s.ts AS next_scored_at,
+      CAST(s.residual AS REAL) AS next_residual,
+      ROW_NUMBER() OVER (
+        PARTITION BY c.source_event_id
+        ORDER BY s.ts ASC, s.rowid ASC
+      ) AS rn
+    FROM committed c
+    JOIN events s
+      ON s.kind = 'action_scored'
+     AND s.ts > c.committed_at
+     AND (
+       json_extract(s.payload, '$.source_event_id') = c.source_event_id
+       OR EXISTS (
+         SELECT 1 FROM json_each(COALESCE(s.context_refs, '[]'))
+         WHERE value = c.source_event_id
+       )
+     )
+  ),
+  next_cost AS (
+    SELECT
+      fs.source_event_id,
+      fs.next_scored_event_id,
+      fs.next_directive_id,
+      fs.next_task_id,
+      fs.next_scored_at,
+      fs.next_residual,
+      COUNT(DISTINCT n.task_id) AS next_dag_nodes
+    FROM future_scored fs
+    LEFT JOIN events n
+      ON n.directive_id = fs.next_directive_id
+     AND n.kind = 'task_node_opened'
+    WHERE fs.rn = 1
+    GROUP BY fs.source_event_id
+  ),
+  future_recipe AS (
+    SELECT
+      c.source_event_id,
+      r.id AS recipe_replay_event_id,
+      r.ts AS recipe_replayed_at,
+      ROW_NUMBER() OVER (
+        PARTITION BY c.source_event_id
+        ORDER BY r.ts ASC, r.rowid ASC
+      ) AS rn
+    FROM committed c
+    JOIN events r
+      ON r.ts > c.committed_at
+     AND r.kind IN ('recipe_invoked', 'action_predicted', 'action_scored', 'task_committed')
+     AND (
+       json_extract(r.payload, '$.recipe_replayed') = 1
+       OR json_extract(r.payload, '$.recipe_replayed') = 'true'
+       OR json_extract(r.payload, '$.route') = 'substrate_replay'
+       OR r.kind = 'recipe_invoked'
+     )
+     AND (
+       json_extract(r.payload, '$.source_event_id') = c.source_event_id
+       OR EXISTS (
+         SELECT 1 FROM json_each(COALESCE(r.context_refs, '[]'))
+         WHERE value = c.source_event_id
+       )
+     )
+  )
+  SELECT
+    c.source_event_id,
+    c.applied_change_event_id,
+    c.source_directive_id,
+    c.source_task_id,
+    c.committed_at,
+    c.apply_residual,
+    COALESCE(sc.source_dag_nodes, 0) AS source_dag_nodes,
+    sc.source_best_residual,
+    nc.next_scored_event_id,
+    nc.next_directive_id,
+    nc.next_task_id,
+    nc.next_scored_at,
+    nc.next_residual,
+    COALESCE(nc.next_dag_nodes, 0) AS next_dag_nodes,
+    fr.recipe_replay_event_id,
+    fr.recipe_replayed_at,
+    CASE
+      WHEN nc.next_residual IS NOT NULL AND sc.source_best_residual IS NOT NULL
+      THEN sc.source_best_residual - nc.next_residual
+      ELSE NULL
+    END AS residual_delta,
+    CASE
+      WHEN nc.next_scored_event_id IS NOT NULL
+      THEN COALESCE(sc.source_dag_nodes, 0) - COALESCE(nc.next_dag_nodes, 0)
+      ELSE NULL
+    END AS dag_node_delta,
+    CASE WHEN fr.recipe_replay_event_id IS NULL THEN 0 ELSE 1 END AS tier0_replay_hit,
+    CASE
+      WHEN fr.recipe_replay_event_id IS NOT NULL THEN 1
+      WHEN nc.next_residual IS NOT NULL AND sc.source_best_residual IS NOT NULL AND nc.next_residual < sc.source_best_residual THEN 1
+      WHEN nc.next_scored_event_id IS NOT NULL AND COALESCE(nc.next_dag_nodes, 0) < COALESCE(sc.source_dag_nodes, 0) THEN 1
+      ELSE 0
+    END AS compounded,
+    c.applied_payload,
+    c.applied_context_refs
+  FROM committed c
+  LEFT JOIN source_cost sc ON sc.source_event_id = c.source_event_id
+  LEFT JOIN next_cost nc ON nc.source_event_id = c.source_event_id
+  LEFT JOIN future_recipe fr ON fr.source_event_id = c.source_event_id AND fr.rn = 1;
+`;
+
 // ── Public entrypoint ──────────────────────────────────────────────
 
 /** Create every substrate view. Idempotent — every statement is
@@ -604,6 +962,9 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_IRREVERSIBLE_EFFECTS);
   db.exec(VIEW_LOW_RISK_INLINE_PATTERNS);
   db.exec(VIEW_PROMOTED_KNOWLEDGE);
+  db.exec(VIEW_LESSON_IMPLEMENTER_QUEUE);
+  db.exec(VIEW_LESSON_IMPLEMENTATION_STATUS);
+  db.exec(VIEW_APPLIED_LESSON_EFFECTIVENESS);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────
@@ -738,9 +1099,86 @@ export type ActiveObjectiveRow = {
   payload: Record<string, unknown>;
 };
 
+export type LessonImplementerQueueRow = {
+  source_event_id: string;
+  ts: string;
+  source_kind: "lesson_extracted" | "contract_amendment_proposed";
+  directive_id: string;
+  task_id: string;
+  lesson_kind: string | null;
+  target: string | null;
+  anchor: string | null;
+  proposed_behavior: unknown;
+  proposed_action: unknown;
+  owner_gate_required: boolean;
+  owner_approved: boolean;
+  trajectory_hazard_count: number;
+  auto_apply_eligible: boolean;
+  apply_event_id: string | null;
+  apply_kind: string | null;
+  apply_status: string | null;
+  apply_ts: string | null;
+  payload: Record<string, unknown>;
+  context_refs: string[];
+};
+
+export type LessonImplementationStatusRow = {
+  source_event_id: string;
+  ts: string;
+  source_kind: "lesson_extracted" | "contract_amendment_proposed";
+  directive_id: string;
+  task_id: string;
+  request_event_id: string | null;
+  requested_at: string | null;
+  scored_event_id: string | null;
+  scored_at: string | null;
+  verifier_residual: number | null;
+  verifier_passed: boolean;
+  apply_event_id: string | null;
+  apply_kind: string | null;
+  apply_status: string | null;
+  commit_sha: string | null;
+  applied_at: string | null;
+  committed_event_id: string | null;
+  committed_at: string | null;
+  flywheel_status: "proposed" | "requested" | "verified" | "applied" | "failed" | "refused" | "committed" | string;
+  payload: Record<string, unknown>;
+  context_refs: string[];
+};
+
+export type AppliedLessonEffectivenessRow = {
+  source_event_id: string;
+  applied_change_event_id: string;
+  source_directive_id: string;
+  source_task_id: string;
+  committed_at: string;
+  apply_residual: number;
+  source_dag_nodes: number;
+  source_best_residual: number | null;
+  next_scored_event_id: string | null;
+  next_directive_id: string | null;
+  next_task_id: string | null;
+  next_scored_at: string | null;
+  next_residual: number | null;
+  next_dag_nodes: number;
+  recipe_replay_event_id: string | null;
+  recipe_replayed_at: string | null;
+  residual_delta: number | null;
+  dag_node_delta: number | null;
+  tier0_replay_hit: boolean;
+  compounded: boolean;
+  applied_payload: Record<string, unknown>;
+  applied_context_refs: string[];
+};
+
 const parseJson = <T>(s: unknown): T => {
   if (typeof s !== "string") return s as T;
   return JSON.parse(s) as T;
+};
+
+const parseMaybeJson = (s: unknown): unknown => {
+  if (typeof s !== "string") return s;
+  try { return JSON.parse(s) as unknown; } catch { return s; }
 };
 
 /** Return every task_graph_view row for one directive, ts-ascending. */
@@ -959,6 +1397,99 @@ export const activeObjectives = (db: Database): ActiveObjectiveRow[] => {
     directive_id: r.directive_id as string,
     opened_ts: r.opened_ts as string,
     payload: parseJson<Record<string, unknown>>(r.payload),
+  }));
+};
+
+/** Pending lesson/amendment proposals with owner-gate and auto-apply flags
+ *  derived entirely from events. This is the orchestrator's apply inbox. */
+export const lessonImplementerQueue = (db: Database): LessonImplementerQueueRow[] => {
+  const rows = db
+    .query("SELECT * FROM lesson_implementer_queue_view ORDER BY ts ASC")
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    source_event_id: r.source_event_id as string,
+    ts: r.ts as string,
+    source_kind: r.source_kind as LessonImplementerQueueRow["source_kind"],
+    directive_id: r.directive_id as string,
+    task_id: r.task_id as string,
+    lesson_kind: (r.lesson_kind as string | null) ?? null,
+    target: (r.target as string | null) ?? null,
+    anchor: (r.anchor as string | null) ?? null,
+    proposed_behavior: parseMaybeJson(r.proposed_behavior),
+    proposed_action: parseMaybeJson(r.proposed_action),
+    owner_gate_required: ((r.owner_gate_required as number) ?? 0) === 1,
+    owner_approved: ((r.owner_approved as number) ?? 0) === 1,
+    trajectory_hazard_count: (r.trajectory_hazard_count as number) ?? 0,
+    auto_apply_eligible: ((r.auto_apply_eligible as number) ?? 0) === 1,
+    apply_event_id: (r.apply_event_id as string | null) ?? null,
+    apply_kind: (r.apply_kind as string | null) ?? null,
+    apply_status: (r.apply_status as string | null) ?? null,
+    apply_ts: (r.apply_ts as string | null) ?? null,
+    payload: parseJson<Record<string, unknown>>(r.payload),
+    context_refs: parseJson<string[]>(r.context_refs ?? "[]"),
+  }));
+};
+
+/** Observable state machine for each proposal in the lesson-implementer
+ *  flywheel: proposed → requested → verified → applied → committed. */
+export const lessonImplementationStatus = (db: Database): LessonImplementationStatusRow[] => {
+  const rows = db
+    .query("SELECT * FROM lesson_implementation_status_view ORDER BY ts ASC")
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    source_event_id: r.source_event_id as string,
+    ts: r.ts as string,
+    source_kind: r.source_kind as LessonImplementationStatusRow["source_kind"],
+    directive_id: r.directive_id as string,
+    task_id: r.task_id as string,
+    request_event_id: (r.request_event_id as string | null) ?? null,
+    requested_at: (r.requested_at as string | null) ?? null,
+    scored_event_id: (r.scored_event_id as string | null) ?? null,
+    scored_at: (r.scored_at as string | null) ?? null,
+    verifier_residual: (r.verifier_residual as number | null) ?? null,
+    verifier_passed: ((r.verifier_passed as number) ?? 0) === 1,
+    apply_event_id: (r.apply_event_id as string | null) ?? null,
+    apply_kind: (r.apply_kind as string | null) ?? null,
+    apply_status: (r.apply_status as string | null) ?? null,
+    commit_sha: (r.commit_sha as string | null) ?? null,
+    applied_at: (r.applied_at as string | null) ?? null,
+    committed_event_id: (r.committed_event_id as string | null) ?? null,
+    committed_at: (r.committed_at as string | null) ?? null,
+    flywheel_status: r.flywheel_status as LessonImplementationStatusRow["flywheel_status"],
+    payload: parseJson<Record<string, unknown>>(r.payload),
+    context_refs: parseJson<string[]>(r.context_refs ?? "[]"),
+  }));
+};
+
+/** Feedback signal for whether an applied lesson made the next cited similar
+ *  trajectory cheaper: lower residual, shorter DAG, or Tier-0 replay. */
+export const appliedLessonEffectiveness = (db: Database): AppliedLessonEffectivenessRow[] => {
+  const rows = db
+    .query("SELECT * FROM applied_lesson_effectiveness_view ORDER BY committed_at ASC")
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    source_event_id: r.source_event_id as string,
+    applied_change_event_id: r.applied_change_event_id as string,
+    source_directive_id: r.source_directive_id as string,
+    source_task_id: r.source_task_id as string,
+    committed_at: r.committed_at as string,
+    apply_residual: (r.apply_residual as number) ?? 1,
+    source_dag_nodes: (r.source_dag_nodes as number) ?? 0,
+    source_best_residual: (r.source_best_residual as number | null) ?? null,
+    next_scored_event_id: (r.next_scored_event_id as string | null) ?? null,
+    next_directive_id: (r.next_directive_id as string | null) ?? null,
+    next_task_id: (r.next_task_id as string | null) ?? null,
+    next_scored_at: (r.next_scored_at as string | null) ?? null,
+    next_residual: (r.next_residual as number | null) ?? null,
+    next_dag_nodes: (r.next_dag_nodes as number) ?? 0,
+    recipe_replay_event_id: (r.recipe_replay_event_id as string | null) ?? null,
+    recipe_replayed_at: (r.recipe_replayed_at as string | null) ?? null,
+    residual_delta: (r.residual_delta as number | null) ?? null,
+    dag_node_delta: (r.dag_node_delta as number | null) ?? null,
+    tier0_replay_hit: ((r.tier0_replay_hit as number) ?? 0) === 1,
+    compounded: ((r.compounded as number) ?? 0) === 1,
+    applied_payload: parseJson<Record<string, unknown>>(r.applied_payload),
+    applied_context_refs: parseJson<string[]>(r.applied_context_refs ?? "[]"),
   }));
 };
 

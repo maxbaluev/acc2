@@ -17,17 +17,25 @@ import { join } from "node:path";
  *  including gpt-5.5. Override via ACC2_OPENCODE_MODEL or
  *  SpawnOpts.model when the brain needs a different reasoner. */
 export const DEFAULT_OPENCODE_MODEL = "openai/gpt-5.5";
-/** Default per-dispatch wall-clock cap on the opencode subprocess. The
- *  pre-2026-05 default was 60s — too short for gpt-5.5, which routinely
- *  spends 60-90s reasoning + authoring artifacts + invoking verifiers
- *  before completion. With the handshake window now at 120s (see
- *  DEFAULT_MCP_HANDSHAKE_WINDOW_MS) a 60s overall timeout was internally
- *  inconsistent — the parent watchdog killed the subprocess before the
- *  handshake could even complete its budget. Bumped to 300s to match
- *  what `tests/integration/real_matrix.ts` and `tests/integration/harness.ts`
- *  use for real-brain runs. Override via `ACC2_OPENCODE_TIMEOUT_MS` or
+/** Default per-dispatch wall-clock cap on the opencode subprocess.
+ *  Bumped from 300s → 600s after live ledger inspection (2026-05-15)
+ *  showed real brain cycles exceeding 5 minutes:
+ *    01:08:48 brain_dispatched
+ *    01:12:46 action_predicted    (4 min into cycle)
+ *    01:13:23 action_scored
+ *    01:13:39 task_closure_audited (5 min step-7 closure verifier)
+ *    01:13:48 bridge_failed:timeout (cut off BEFORE task_committed)
+ *    01:13:49 re-dispatched, brain restarts from scratch
+ *  The brain's WORKFLOW_TEXT now includes step-7 closure audit + step-8
+ *  lesson extraction (added in the closure+learning batch). These add real
+ *  cycle time. 300s was internally inconsistent — the closure verifier
+ *  COULD finish but task_committed/refinement-edge couldn't be emitted
+ *  before the watchdog fired. 600s gives the brain a comfortable margin
+ *  AFTER closure-audit lands to decide commit-vs-refine. The Batch-3
+ *  STALE_DISPATCH_THRESHOLD_MS (15min) still catches genuinely hung
+ *  dispatches above this. Override via `ACC2_OPENCODE_TIMEOUT_MS` or
  *  `SpawnOpts.timeoutMs`. */
-export const DEFAULT_TIMEOUT_MS = 300_000;
+export const DEFAULT_TIMEOUT_MS = 600_000;
 /** Default MCP-handshake window — the time opencode has between connecting
  *  to v2's MCP server and invoking its first `substrate.*` / `runtime.*`
  *  tool. The pre-gpt-5 default was 30s, which was tight even for the 5.4-mini

@@ -187,13 +187,18 @@ export const EVENT_KINDS = {
   // ── Application of lessons + amendments (Option D + Claude subagent executor) ──
   //
   // The brain proposes via lesson_extracted / contract_amendment_proposed.
-  // The orchestrator (main Claude Code) reads those events, spawns a Claude
+  // lesson_apply_requested records the owner/auto-gated handoff into the
+  // applier before any semantic edit occurs. The orchestrator (main Claude
+  // Code) reads those events, spawns a Claude
   // Agent subagent in background_task that performs the semantic file edit
-  // + runs the verifier (bun test, lint, type-check) + commits via git, and
-  // emits the corresponding *_applied event on success citing the originating
-  // lesson/amendment id. The applied event's posterior credits the lesson.
-  // Failure path: same event with payload.status: "failed" + reason.
+  // + runs the verifier (bun test, lint, type-check) + commits via git. Only
+  // a successful, verifier-passing apply emits applied_change_committed citing
+  // the originating lesson/amendment id; failed/refused attempts remain visible
+  // as action_scored + *_applied rows. The optional legacy *_applied rows remain
+  // readable, but applied_change_committed is the normalized flywheel terminal event.
   // See CLAUDE.md §"Applying lessons via Claude Agent subagents".
+  lesson_apply_requested:                  { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
+  applied_change_committed:                { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   lesson_applied:                          { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
   contract_amendment_applied:              { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false },
 

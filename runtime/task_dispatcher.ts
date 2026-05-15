@@ -319,6 +319,53 @@ export const dispatchReadyTask = async (
   }
 
   if (!bridgeResult.ok) {
+    // Bridge-timeout safety net (added 2026-05-15 after live ledger inspection).
+    // If the closure verifier ran cleanly during this dispatch
+    // (task_closure_audited with closure_residual below the 0.3 commit
+    // threshold) AND the bridge then timed out before the brain could
+    // emit task_committed, the substrate auto-commits citing the closure
+    // event as evidence. WHY: the closure verifier IS the commit gate
+    // (WORKFLOW_TEXT step 7); the brain emitting task_committed afterward
+    // is the "rubber stamp" that a 300-600s bridge window sometimes can't
+    // accommodate. Pre-fix the next dispatch would re-run the entire
+    // cycle from scratch, paying tokens for work the verifier had already
+    // scored as complete.
+    const isTimeout = bridgeResult.reason.kind === "timeout";
+    if (isTimeout) {
+      const closureAudit = dispatchEvents.find((e) => e.kind === "task_closure_audited");
+      if (closureAudit) {
+        try {
+          const auditPayload = (closureAudit.payload ?? {}) as Record<string, unknown>;
+          const closureResidual = typeof auditPayload.closure_residual === "number"
+            ? auditPayload.closure_residual
+            : null;
+          if (closureResidual !== null && closureResidual < 0.3) {
+            const alreadyCommitted = dispatchEvents.find((e) => e.kind === "task_committed");
+            if (!alreadyCommitted) {
+              emitEvent(db, {
+                kind: "task_committed",
+                substrate_origin: "substrate_auto",
+                directive_id: task.directive_id,
+                task_id: task.id,
+                residual: closureResidual,
+                context_refs: [closureAudit.id],
+                payload: {
+                  dispatch_id: dispatchId,
+                  reason: "auto_commit_on_bridge_timeout_after_clean_closure_audit",
+                  closure_audit_event_id: closureAudit.id,
+                  closure_residual: closureResidual,
+                } as JsonValue,
+              });
+            }
+          }
+        } catch (err) {
+          logger.warn(
+            { where: "task_dispatcher.timeout_auto_commit", task_id: task.id, err: (err as Error).message },
+            "auto-commit on bridge timeout failed — falling through to normal close path",
+          );
+        }
+      }
+    }
     emitEvent(db, {
       kind: "brain_dispatch_closed",
       substrate_origin: "substrate_auto",

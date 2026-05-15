@@ -38,6 +38,9 @@ import {
   originPromotion,
   ownerConversation,
   lowRiskInlinePatterns,
+  lessonImplementerQueue,
+  lessonImplementationStatus,
+  appliedLessonEffectiveness,
 } from "../../substrate/views";
 import type {
   AdmitArtifactSchema,
@@ -167,6 +170,12 @@ export const handleRead = (
           result: lowRiskInlinePatterns(db) as unknown as JsonValue,
         };
       }
+      case "lesson_implementer_queue_view":
+        return { ok: true, result: lessonImplementerQueue(db) as unknown as JsonValue };
+      case "lesson_implementation_status_view":
+        return { ok: true, result: lessonImplementationStatus(db) as unknown as JsonValue };
+      case "applied_lesson_effectiveness_view":
+        return { ok: true, result: appliedLessonEffectiveness(db) as unknown as JsonValue };
       default:
         return { ok: false, error: `view_not_implemented:${view}` };
     }

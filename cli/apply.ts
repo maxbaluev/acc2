@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // `acc apply <event_id>` — render a Claude Agent subagent prompt for
 // applying a lesson_extracted or contract_amendment_proposed event, AND
-// record the lesson_applied / contract_amendment_applied event when the
+// record the act-shaped applied_change_committed spine plus the
+// lesson_applied / contract_amendment_applied credit event when the
 // subagent finishes. Option D + Claude subagent executor (CLAUDE.md
 // §"Applying lessons via Claude Agent subagents").
 //
@@ -14,9 +15,11 @@
 //
 //   acc apply --record <event_id> --status (applied|failed) [--commit-sha X]
 //             [--subagent-task-id Y] [--summary "..."] [--reason "..."]
-//       Emits the corresponding *_applied event back into the substrate so
-//       the originating lesson/amendment is credited (closes the four-link
-//       chain: create → retrieve → mutate → credit, k_555).
+//       Emits action_predicted -> action_scored, then applied_change_committed
+//       only when the verifier residual passes, followed by the corresponding
+//       *_applied event so the originating lesson/amendment is credited
+//       (closes the four-link chain:
+//       create -> retrieve -> mutate -> credit, k_555).
 
 import { mcpCall } from "./rpc";
 
@@ -57,8 +60,21 @@ type EventRow = {
   payload?: unknown;
 };
 
+type LessonQueueRow = {
+  source_event_id?: string;
+  source_kind?: string;
+  target?: string | null;
+  owner_gate_required?: boolean | number;
+  owner_approved?: boolean | number;
+  trajectory_hazard_count?: number;
+  auto_apply_eligible?: boolean | number;
+};
+
+const DEFAULT_APPLY_ACTION_ARTIFACT_ID = "claude_agent_apply_change_action";
+const DEFAULT_APPLY_VERIFIER_ARTIFACT_ID = "claude_agent_apply_change_verifier";
+
 const fetchEvent = async (eventId: string): Promise<EventRow | null> => {
-  const env = await mcpCall("substrate.get_event", { event_id: eventId });
+  const env = await mcpCall("substrate.get_event", { id: eventId });
   if (!env.ok) return null;
   return (env.result as EventRow) ?? null;
 };
@@ -87,6 +103,100 @@ const OWNER_GATED_TARGETS = [
 const isOwnerGated = (target: string): boolean =>
   OWNER_GATED_TARGETS.some((re) => re.test(target));
 
+const targetFromPayload = (payload: Record<string, unknown>): string => {
+  const direct = payload.target;
+  if (typeof direct === "string") return direct;
+  const proposed = payload.proposed_behavior;
+  if (proposed && typeof proposed === "object") {
+    const path = (proposed as Record<string, unknown>).file_path;
+    if (typeof path === "string") return path;
+  }
+  return "";
+};
+
+const boolish = (v: unknown): boolean => v === true || v === 1 || v === "1" || v === "true";
+
+const fetchQueueRow = async (eventId: string): Promise<LessonQueueRow | null> => {
+  const env = await mcpCall("substrate.read", { view_name: "lesson_implementer_queue_view" });
+  if (!env.ok || !Array.isArray(env.result)) return null;
+  return (env.result as LessonQueueRow[]).find((r) => r.source_event_id === eventId) ?? null;
+};
+
+const structuredProposedBehavior = (payload: Record<string, unknown>, target: string): boolean => {
+  const proposed = payload.proposed_behavior;
+  if (!proposed || typeof proposed !== "object") return false;
+  const p = proposed as Record<string, unknown>;
+  return typeof p.file_path === "string"
+    && p.file_path === target
+    && typeof p.anchor === "string"
+    && p.anchor.trim().length > 0
+    && typeof p.diff === "string"
+    && p.diff.trim().length > 0;
+};
+
+const isRuntimeAutoApplyTarget = (target: string): boolean =>
+  target.startsWith("cli/") || target.startsWith("runtime/");
+
+const emitApplyDenied = async (
+  ev: EventRow,
+  eventId: string,
+  reason: string,
+  target: string,
+): Promise<number> => {
+  const env = await mcpCall("substrate.emit", {
+    kind: "lesson_apply_requested",
+    substrate_origin: "claude_root",
+    directive_id: ev.directive_id,
+    task_id: ev.task_id,
+    context_refs: [eventId],
+    payload: {
+      source_event_id: eventId,
+      source_kind: ev.kind,
+      target,
+      authorization_status: "denied",
+      reason,
+      design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
+    },
+  });
+  if (!env.ok) {
+    console.error(`acc apply: authorization denial emit failed - ${env.error}`);
+    return 1;
+  }
+  console.error(`acc apply: authorization denied - ${reason}`);
+  return 1;
+};
+
+const authorizeApply = async (
+  ev: EventRow,
+  eventId: string,
+  opts: { ownerApproved?: boolean; target?: string },
+): Promise<{ ok: true; target: string; queueRow: LessonQueueRow | null } | { ok: false; code: number }> => {
+  const payload = parsePayload(ev.payload);
+  const target = opts.target || targetFromPayload(payload);
+  const queueRow = await fetchQueueRow(eventId);
+  const kind = ev.kind ?? "";
+  if (kind !== "lesson_extracted" && kind !== "contract_amendment_proposed") {
+    console.error(`acc apply: event ${eventId} is ${kind}, not lesson_extracted or contract_amendment_proposed`);
+    return { ok: false, code: 1 };
+  }
+  const ownerGateRequired = kind === "contract_amendment_proposed"
+    && (isOwnerGated(target) || boolish(queueRow?.owner_gate_required));
+  const ownerApproved = Boolean(opts.ownerApproved) || boolish(queueRow?.owner_approved);
+  if (ownerGateRequired && !ownerApproved) {
+    return { ok: false, code: await emitApplyDenied(ev, eventId, "owner_consent_missing", target) };
+  }
+  if (kind === "contract_amendment_proposed" && isRuntimeAutoApplyTarget(target)) {
+    const hazards = Number(queueRow?.trajectory_hazard_count ?? 0);
+    if (hazards > 0) {
+      return { ok: false, code: await emitApplyDenied(ev, eventId, "trajectory_hazard_present", target) };
+    }
+    if (!structuredProposedBehavior(payload, target)) {
+      return { ok: false, code: await emitApplyDenied(ev, eventId, "structured_proposed_behavior_required", target) };
+    }
+  }
+  return { ok: true, target, queueRow };
+};
+
 /** Construct the Agent subagent prompt for a lesson_extracted /
  *  contract_amendment_proposed event. The subagent reads evidence via MCP,
  *  makes the edit, runs the verifier (`bun test --bail`), commits to git,
@@ -99,7 +209,8 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean }): 
   const evidenceIds = (payload.evidence_event_ids as string[] | undefined) ?? [];
   const isAmendment = kind === "contract_amendment_proposed";
 
-  const target = (payload.target as string | undefined) ?? "(unspecified — subagent must infer from summary)";
+  const resolvedTarget = targetFromPayload(payload);
+  const target = resolvedTarget || "(unspecified — subagent must infer from summary)";
   const anchor = (payload.anchor as string | undefined) ?? "";
   const proposed = (payload.proposed_behavior as string | undefined) ?? (payload.proposed_action as string | undefined) ?? "";
   const current = (payload.current_behavior as string | undefined) ?? "";
@@ -168,6 +279,9 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean }): 
     `          "target":         "<repo-relative file path>",`,
     `          "commit_sha":     "<10-char sha>"  // when status=applied`,
     `          "summary":        "<one-sentence summary of the change>",`,
+    `          "residual":       0,  // verifier residual in [0,1], if known`,
+    `          "action_artifact_id":   "<optional substrate code artifact id>",`,
+    `          "verifier_artifact_id": "<optional substrate verifier artifact id>",`,
     `          "reason":         "<failure reason>"  // when status=failed or refused`,
     `        }`,
     ``,
@@ -179,9 +293,9 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean }): 
     `  - DO NOT push to remote. Local commit only.`,
     ``,
     `When done, return the JSON summary on stdout. The orchestrator will pipe it`,
-    `into \`acc apply --record ${evId} --status <status> --commit-sha <sha> --summary <text>\``,
-    `to emit the corresponding ${isAmendment ? "contract_amendment_applied" : "lesson_applied"} event`,
-    `and close the four-link credit chain.`,
+    `into \`acc apply --record ${evId} --status <status> --commit-sha <sha> --summary <text> --residual <n>\``,
+    `to emit action_predicted -> action_scored -> applied_change_committed plus the`,
+    `corresponding ${isAmendment ? "contract_amendment_applied" : "lesson_applied"} event and close the four-link credit chain.`,
   ].join("\n");
 };
 
@@ -193,6 +307,29 @@ const renderPromptCommand = async (eventId: string, ownerApproved: boolean): Pro
   }
   if (ev.kind !== "lesson_extracted" && ev.kind !== "contract_amendment_proposed") {
     console.error(`acc apply: event ${eventId} is ${ev.kind}, not lesson_extracted or contract_amendment_proposed`);
+    return 1;
+  }
+  const payload = parsePayload(ev.payload);
+  const auth = await authorizeApply(ev, eventId, { ownerApproved, target: targetFromPayload(payload) });
+  if (!auth.ok) return auth.code;
+  const requestEnv = await mcpCall("substrate.emit", {
+    kind: "lesson_apply_requested",
+    substrate_origin: "claude_root",
+    directive_id: ev.directive_id,
+    task_id: ev.task_id,
+    context_refs: [eventId],
+    payload: {
+      source_event_id: eventId,
+      source_kind: ev.kind,
+      owner_approved: ownerApproved,
+      owner_gate_required: boolish(auth.queueRow?.owner_gate_required),
+      authorization_status: "approved",
+      target: auth.target || payload.target,
+      design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
+    },
+  });
+  if (!requestEnv.ok) {
+    console.error(`acc apply: lesson_apply_requested emit failed - ${requestEnv.error}`);
     return 1;
   }
   const prompt = renderSubagentPrompt(ev, { ownerApproved });
@@ -209,6 +346,10 @@ const recordApply = async (
     summary?: string;
     reason?: string;
     target?: string;
+    residual?: number;
+    actionArtifactId?: string;
+    verifierArtifactId?: string;
+    ownerApproved?: boolean;
   },
 ): Promise<number> => {
   const ev = await fetchEvent(eventId);
@@ -218,23 +359,153 @@ const recordApply = async (
   }
   const isAmendment = ev.kind === "contract_amendment_proposed";
   const appliedKind = isAmendment ? "contract_amendment_applied" : "lesson_applied";
+  const status = opts.status || "applied";
+  const residual = typeof opts.residual === "number" && Number.isFinite(opts.residual)
+    ? Math.min(1, Math.max(0, opts.residual))
+    : status === "applied" ? 0 : 1;
+  const actionArtifactId = opts.actionArtifactId || DEFAULT_APPLY_ACTION_ARTIFACT_ID;
+  const verifierArtifactId = opts.verifierArtifactId || DEFAULT_APPLY_VERIFIER_ARTIFACT_ID;
+  const auth = await authorizeApply(ev, eventId, { ownerApproved: opts.ownerApproved, target: opts.target });
+  if (!auth.ok) return auth.code;
+  const target = auth.target || opts.target;
+
+  const requestEnv = await mcpCall("substrate.emit", {
+    kind: "lesson_apply_requested",
+    substrate_origin: "claude_root",
+    directive_id: ev.directive_id,
+    task_id: ev.task_id,
+    context_refs: [eventId],
+    payload: {
+      source_event_id: eventId,
+      source_kind: ev.kind,
+      status,
+      target,
+      owner_gate_checked: true,
+      owner_gate_required: boolish(auth.queueRow?.owner_gate_required),
+      owner_approved: Boolean(opts.ownerApproved) || boolish(auth.queueRow?.owner_approved),
+      authorization_status: "approved",
+      design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
+    },
+  });
+  if (!requestEnv.ok) {
+    console.error(`acc apply --record: lesson_apply_requested emit failed - ${requestEnv.error}`);
+    return 1;
+  }
+  const requestEventId = (requestEnv.result as { id?: string })?.id;
+
+  const actionEnv = await mcpCall("substrate.emit", {
+    kind: "action_predicted",
+    substrate_origin: "claude_root",
+    directive_id: ev.directive_id,
+    task_id: ev.task_id,
+    context_refs: [eventId, requestEventId].filter(Boolean),
+    action_artifact_id: actionArtifactId,
+    verifier_artifact_id: verifierArtifactId,
+    predicted_residual: 0.2,
+    payload: {
+      intent: "Apply a substrate-emitted lesson or contract amendment as a committed code change.",
+      source_event_id: eventId,
+      request_event_id: requestEventId,
+      source_kind: ev.kind,
+      target,
+      design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
+    },
+  });
+  if (!actionEnv.ok) {
+    console.error(`acc apply --record: action_predicted emit failed - ${actionEnv.error}`);
+    return 1;
+  }
+  const actionEventId = (actionEnv.result as { id?: string })?.id;
+
+  const scoredEnv = await mcpCall("substrate.emit", {
+    kind: "action_scored",
+    substrate_origin: "claude_root",
+    directive_id: ev.directive_id,
+    task_id: ev.task_id,
+    context_refs: [eventId, requestEventId, actionEventId].filter(Boolean),
+    action_artifact_id: actionArtifactId,
+    verifier_artifact_id: verifierArtifactId,
+    outcome: status,
+    residual,
+    payload: {
+      source_event_id: eventId,
+      request_event_id: requestEventId,
+      source_kind: ev.kind,
+      commit_sha: opts.commitSha,
+      target,
+      summary: opts.summary,
+      reason: opts.reason,
+    },
+  });
+  if (!scoredEnv.ok) {
+    console.error(`acc apply --record: action_scored emit failed - ${scoredEnv.error}`);
+    return 1;
+  }
+  const scoredEventId = (scoredEnv.result as { id?: string })?.id;
+
+  if (status !== "applied" || residual >= 0.3) {
+    console.log(`action_scored ${scoredEventId ?? "?"} residual=${residual}`);
+    console.log(`applied_change_committed skipped (status=${status} residual=${residual})`);
+    return status === "applied" ? 1 : 0;
+  }
+
+  const verifierPassed = status === "applied" && residual < 0.3;
+  let committedEventId: string | undefined;
+  if (verifierPassed) {
+    const committedEnv = await mcpCall("substrate.emit", {
+      kind: "applied_change_committed",
+      substrate_origin: "claude_root",
+      directive_id: ev.directive_id,
+      task_id: ev.task_id,
+      context_refs: [eventId, requestEventId, actionEventId, scoredEventId].filter(Boolean),
+      action_artifact_id: actionArtifactId,
+      verifier_artifact_id: verifierArtifactId,
+      residual,
+      payload: {
+        source_event_id: eventId,
+        source_kind: ev.kind,
+        status,
+        commit_sha: opts.commitSha,
+        subagent_task_id: opts.subagentTaskId,
+        summary: opts.summary,
+        reason: opts.reason,
+      target: opts.target,
+      target,
+      residual,
+        request_event_id: requestEventId,
+        action_event_id: actionEventId,
+        scored_event_id: scoredEventId,
+      },
+    });
+    if (!committedEnv.ok) {
+      console.error(`acc apply --record: applied_change_committed emit failed - ${committedEnv.error}`);
+      return 1;
+    }
+    committedEventId = (committedEnv.result as { id?: string })?.id;
+  }
+
   const payload: Record<string, unknown> = {
     source_event_id: eventId,
     source_kind: ev.kind,
-    status: opts.status,
+    status,
     applied_at: new Date().toISOString(),
+    request_event_id: requestEventId,
+    action_event_id: actionEventId,
+    scored_event_id: scoredEventId,
+    residual,
   };
+  if (committedEventId) payload.applied_change_event_id = committedEventId;
   if (opts.commitSha) payload.commit_sha = opts.commitSha;
   if (opts.subagentTaskId) payload.subagent_task_id = opts.subagentTaskId;
   if (opts.summary) payload.summary = opts.summary;
   if (opts.reason) payload.reason = opts.reason;
-  if (opts.target) payload.target = opts.target;
+  if (target) payload.target = target;
   const env = await mcpCall("substrate.emit", {
     kind: appliedKind,
     substrate_origin: "claude_root",
     directive_id: ev.directive_id,
     task_id: ev.task_id,
-    context_refs: [eventId],
+    context_refs: [eventId, committedEventId].filter(Boolean),
     payload,
   });
   if (!env.ok) {
@@ -242,7 +513,9 @@ const recordApply = async (
     return 1;
   }
   const result = env.result as { id?: string };
-  console.log(`${appliedKind} ${result.id ?? "?"} (source=${eventId.slice(0, 12)} status=${opts.status})`);
+  if (committedEventId) console.log(`applied_change_committed ${committedEventId} residual=${residual}`);
+  else console.log(`applied_change_committed skipped residual=${residual} status=${status}`);
+  console.log(`${appliedKind} ${result.id ?? "?"} (source=${eventId.slice(0, 12)} status=${status})`);
   return 0;
 };
 
@@ -253,8 +526,9 @@ export const runApply = async (argv: string[]): Promise<number> => {
     console.log("        Render the subagent prompt for applying the event.");
     console.log("acc apply --record <event_id> --status applied|failed|refused");
     console.log("                  [--commit-sha X] [--subagent-task-id Y]");
-    console.log("                  [--summary Z] [--reason W] [--target FILE]");
-    console.log("        Emit the matching *_applied event back to the substrate.");
+    console.log("                  [--summary Z] [--reason W] [--target FILE] [--residual N]");
+    console.log("                  [--action-artifact-id A] [--verifier-artifact-id V]");
+    console.log("        Emit action_predicted/action_scored, gated applied_change_committed, and *_applied.");
     return positional.length === 0 ? 1 : 0;
   }
   const eventId = (typeof flags.record === "string" ? flags.record : positional[0]) ?? "";
@@ -271,6 +545,10 @@ export const runApply = async (argv: string[]): Promise<number> => {
       summary: typeof flags.summary === "string" ? flags.summary : undefined,
       reason: typeof flags.reason === "string" ? flags.reason : undefined,
       target: typeof flags.target === "string" ? flags.target : undefined,
+      residual: typeof flags.residual === "string" ? Number(flags.residual) : undefined,
+      actionArtifactId: typeof flags["action-artifact-id"] === "string" ? flags["action-artifact-id"] : undefined,
+      verifierArtifactId: typeof flags["verifier-artifact-id"] === "string" ? flags["verifier-artifact-id"] : undefined,
+      ownerApproved: Boolean(flags["owner-approved"]),
     });
   }
   return renderPromptCommand(eventId, Boolean(flags["owner-approved"]));

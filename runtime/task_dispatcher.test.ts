@@ -546,4 +546,126 @@ describe("task_dispatcher", () => {
       .filter((p) => p.kind === "refines" && p.from_task === deepest);
     expect(newRefines.length).toBe(0);
   }, 30_000);
+
+  test("bridge-timeout safety net: auto-commit fires when closure_audited landed cleanly before bridge timeout", async () => {
+    // Live-ledger evidence (2026-05-15 01:13:39 / 01:13:48) showed a real
+    // brain run that reached task_closure_audited but then lost the
+    // dispatch to bridge_failed:timeout 9s later — before task_committed
+    // could be emitted. The next dispatch re-did the full cycle from
+    // scratch. The fix: when bridge_failed.kind === "timeout" AND a clean
+    // task_closure_audited landed in the dispatch window (residual < 0.3),
+    // the substrate auto-emits task_committed citing the closure event.
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "fixture", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      parent_task_id: null,
+      payload: { goal: "long-running goal exceeding bridge window" },
+    });
+
+    // Custom bridge: emits task_closure_audited with low residual, then
+    // returns a timeout failure (mimicking the production pattern).
+    const customBridge = async (
+      req: { directiveId: string; taskId: string; prompt: string },
+      bridgeDb: typeof db,
+    ): Promise<{ ok: false; reason: { kind: "timeout"; detail?: string } }> => {
+      emitEvent(bridgeDb, {
+        kind: "task_closure_audited",
+        substrate_origin: "brain",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        payload: {
+          closure_residual: 0.12,
+          breakdown: { goal_solved: 1, sub_tasks_covered: 1, lessons_captured: 1, violation_count: 0 },
+          original_goal_text: "long-running goal exceeding bridge window",
+          covered_sub_tasks: [],
+          uncovered_aspects: [],
+        },
+      });
+      return { ok: false, reason: { kind: "timeout", detail: "test_simulated_timeout" } };
+    };
+
+    const result = await dispatchReadyTask(
+      db,
+      { id: taskId, directive_id: directiveId, parent_id: null, goal: "long goal", status: "ready" },
+      { bridge: customBridge as unknown as typeof dispatchReadyTask extends (db: unknown, t: unknown, d: { bridge?: infer B }) => unknown ? B : never },
+    );
+
+    expect(result.bridge_result?.ok).toBe(false);
+
+    const committed = db
+      .query("SELECT residual, payload FROM events WHERE kind = 'task_committed' AND task_id = ?")
+      .get(taskId) as { residual: number; payload: string } | null;
+    expect(committed).not.toBeNull();
+    expect(committed!.residual).toBe(0.12);
+    const cp = JSON.parse(committed!.payload);
+    expect(cp.reason).toBe("auto_commit_on_bridge_timeout_after_clean_closure_audit");
+    expect(cp.closure_residual).toBe(0.12);
+  }, 30_000);
+
+  test("bridge-timeout safety net: does NOT auto-commit when closure_residual is too high", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "fixture", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      parent_task_id: null,
+      payload: { goal: "incomplete goal" },
+    });
+
+    const customBridge = async (
+      req: { directiveId: string; taskId: string; prompt: string },
+      bridgeDb: typeof db,
+    ): Promise<{ ok: false; reason: { kind: "timeout"; detail?: string } }> => {
+      // closure_residual = 0.45 — above the 0.3 commit threshold; should NOT auto-commit
+      emitEvent(bridgeDb, {
+        kind: "task_closure_audited",
+        substrate_origin: "brain",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        payload: {
+          closure_residual: 0.45,
+          breakdown: { goal_solved: 0.5, sub_tasks_covered: 0.4, lessons_captured: 0.6, violation_count: 0 },
+          original_goal_text: "incomplete goal",
+          covered_sub_tasks: [],
+          uncovered_aspects: ["main_step_unfinished"],
+        },
+      });
+      return { ok: false, reason: { kind: "timeout", detail: "test_simulated_timeout" } };
+    };
+
+    await dispatchReadyTask(
+      db,
+      { id: taskId, directive_id: directiveId, parent_id: null, goal: "incomplete", status: "ready" },
+      { bridge: customBridge as unknown as typeof dispatchReadyTask extends (db: unknown, t: unknown, d: { bridge?: infer B }) => unknown ? B : never },
+    );
+
+    const committed = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_committed' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(committed.c).toBe(0);
+  }, 30_000);
 });

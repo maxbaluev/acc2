@@ -5,10 +5,13 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "./db";
 import {
+  appliedLessonEffectiveness,
   artifactRouting,
   codeArtifactRegistry,
   directiveConflicts,
   failureCounts,
+  lessonImplementationStatus,
+  lessonImplementerQueue,
   originPromotionRanking,
   ownerConversation,
   readyTasks,
@@ -44,6 +47,7 @@ const insertEvent = (
     payload?: unknown;
     context_refs?: string[];
     failure_kind?: string | null;
+    residual?: number | null;
     ts?: string;
   },
 ): string => {
@@ -51,8 +55,8 @@ const insertEvent = (
   db.run(
     `INSERT INTO events (
        id, ts, directive_id, task_id, parent_task_id, loop_id,
-       substrate_origin, kind, payload, context_refs, failure_kind
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       substrate_origin, kind, payload, context_refs, failure_kind, residual
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       fields.ts ?? tickTs(),
@@ -65,6 +69,7 @@ const insertEvent = (
       JSON.stringify(fields.payload ?? {}),
       JSON.stringify(fields.context_refs ?? []),
       fields.failure_kind ?? null,
+      fields.residual ?? null,
     ],
   );
   return id;
@@ -79,12 +84,15 @@ describe("runViews", () => {
       .all() as Array<{ name: string }>).map((r) => r.name);
     for (const expected of [
       "artifact_routing_view",
+      "applied_lesson_effectiveness_view",
       "code_artifact_registry_view",
       "contradictory_candidates_view",
       "directive_conflicts_view",
       "embedding_index_view",
       "failure_view",
       "irreversible_effects_view",
+      "lesson_implementation_status_view",
+      "lesson_implementer_queue_view",
       "owner_conversation_view",
       "ready_tasks_view",
       "rolling_review_due_view",
@@ -537,5 +545,159 @@ describe("origin_promotion_by_directive_view + originPromotionRanking (Phase DAG
     const goalShape = (_: string): string => "wrong_shape";
     const ranking = originPromotionRanking(db, goalShape, "target_shape_none");
     expect(ranking.length).toBe(0);
+  });
+});
+
+describe("lesson implementer flywheel views", () => {
+  test("queue derives owner gate, auto-apply eligibility, and hazards", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    const gated = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_contract",
+      task_id: "t_contract",
+      payload: {
+        target: "docs/v2-design.md",
+        anchor: "§11.5",
+        proposed_behavior: { file_path: "docs/v2-design.md", anchor: "§11.5", diff: "@@" },
+      },
+    });
+    insertEvent(db, {
+      kind: "owner_decision_recorded",
+      directive_id: "d_contract",
+      task_id: "t_contract",
+      payload: { source_event_id: gated, decision: "approved" },
+      context_refs: [gated],
+    });
+
+    insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_runtime",
+      task_id: "t_runtime",
+      payload: {
+        target: "runtime/prompt_composer.ts",
+        anchor: "WORKFLOW_TEXT",
+        proposed_behavior: { file_path: "runtime/prompt_composer.ts", anchor: "WORKFLOW_TEXT", diff: "@@" },
+      },
+    });
+
+    insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_hazard",
+      task_id: "t_hazard",
+      payload: {
+        target: "runtime/task_dispatcher.ts",
+        anchor: "dispatch",
+        proposed_behavior: { file_path: "runtime/task_dispatcher.ts", anchor: "dispatch", diff: "@@" },
+      },
+    });
+    insertEvent(db, {
+      kind: "dispatcher_violation",
+      directive_id: "d_hazard",
+      task_id: "t_hazard",
+      payload: { failure_kind: "cycle_1_only_breach" },
+    });
+
+    const rows = lessonImplementerQueue(db);
+    const byDirective = new Map(rows.map((r) => [r.directive_id, r]));
+    expect(byDirective.get("d_contract")!.owner_gate_required).toBe(true);
+    expect(byDirective.get("d_contract")!.owner_approved).toBe(true);
+    expect(byDirective.get("d_runtime")!.auto_apply_eligible).toBe(true);
+    expect(byDirective.get("d_hazard")!.auto_apply_eligible).toBe(false);
+    expect(byDirective.get("d_hazard")!.trajectory_hazard_count).toBe(1);
+  });
+
+  test("status projects requested, scored, applied, and committed transitions", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const source = insertEvent(db, {
+      kind: "lesson_extracted",
+      directive_id: "d_apply",
+      task_id: "t_apply",
+      payload: { lesson_kind: "verifier_gap", summary: "tighten verifier" },
+    });
+    const requested = insertEvent(db, {
+      kind: "lesson_apply_requested",
+      directive_id: "d_apply",
+      task_id: "t_apply",
+      payload: { source_event_id: source },
+      context_refs: [source],
+    });
+    const scored = insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_apply",
+      task_id: "t_apply",
+      payload: { source_event_id: source },
+      context_refs: [source, requested],
+      residual: 0.1,
+    });
+    insertEvent(db, {
+      kind: "lesson_applied",
+      directive_id: "d_apply",
+      task_id: "t_apply",
+      payload: { source_event_id: source, status: "applied", commit_sha: "abcdef1234" },
+      context_refs: [source, scored],
+    });
+    insertEvent(db, {
+      kind: "applied_change_committed",
+      directive_id: "d_apply",
+      task_id: "t_apply",
+      payload: { source_event_id: source, status: "applied", commit_sha: "abcdef1234", residual: 0.1 },
+      context_refs: [source, scored],
+      residual: 0.1,
+    });
+
+    const row = lessonImplementationStatus(db).find((r) => r.source_event_id === source)!;
+    expect(row.request_event_id).toBe(requested);
+    expect(row.scored_event_id).toBe(scored);
+    expect(row.verifier_passed).toBe(true);
+    expect(row.flywheel_status).toBe("committed");
+    expect(row.commit_sha).toBe("abcdef1234");
+  });
+
+  test("effectiveness marks compounded when the next cited trajectory is cheaper", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const source = insertEvent(db, {
+      kind: "lesson_extracted",
+      directive_id: "d_source",
+      task_id: "t_source",
+      payload: { lesson_kind: "recipe_candidate", summary: "cache the shape" },
+    });
+    for (const task_id of ["t_source", "t_source_a", "t_source_b"]) {
+      insertEvent(db, { kind: "task_node_opened", directive_id: "d_source", task_id });
+    }
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_source",
+      task_id: "t_source",
+      payload: {},
+      residual: 0.4,
+    });
+    insertEvent(db, {
+      kind: "applied_change_committed",
+      directive_id: "d_source",
+      task_id: "t_source",
+      payload: { source_event_id: source, status: "applied", residual: 0.05 },
+      context_refs: [source],
+      residual: 0.05,
+    });
+
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_next", task_id: "t_next" });
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_next",
+      task_id: "t_next",
+      payload: { source_event_id: source, recipe_replayed: true },
+      context_refs: [source],
+      residual: 0.2,
+    });
+
+    const row = appliedLessonEffectiveness(db).find((r) => r.source_event_id === source)!;
+    expect(row.compounded).toBe(true);
+    expect(row.tier0_replay_hit).toBe(true);
+    expect(row.residual_delta).toBeCloseTo(0.2);
+    expect(row.dag_node_delta).toBe(2);
   });
 });

@@ -39,9 +39,8 @@ const usage = (): string => `acc — v2 thin CLI
                                   event. Orchestrator feeds output into the Agent
                                   tool (run_in_background:true) to apply the edit.
   acc apply --record <event_id> --status applied|failed|refused [...]
-                                  Emit the lesson_applied / contract_amendment_applied
-                                  event back to substrate so the source proposal is
-                                  credited.
+                                  Emit the act-shaped applied_change_committed spine
+                                  plus the *_applied credit event.
   acc daemon start                Spawn the daemon detached if not running.
   acc daemon stop                 Auth-gated shutdown via admin token.
   acc daemon status               GET /health on the running daemon.

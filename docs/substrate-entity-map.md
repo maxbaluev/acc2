@@ -75,6 +75,9 @@ All views are CREATE VIEW IF NOT EXISTS over `events` ± `code_artifact`.
 | `low_risk_inline_patterns_view`            | `knowledge_promoted` (tag=low_risk_inline_pattern)                               | dispatch decider (claude_inline lane)    | yes (seed knowledge)  |
 | `irreversible_effects_view`                | `irreversible_effect_recorded`                                                   | crisis mode, audit                       | empty                 |
 | `promoted_knowledge_view`                  | `knowledge_promoted`                                                             | retrieval, prompt composer               | yes — 10 promoted seed rows |
+| `lesson_implementer_queue_view`            | `lesson_extracted`, `contract_amendment_proposed`, `owner_decision_recorded`, `dispatcher_violation`, `irreversible_effect_recorded`, `applied_change_committed` | lesson apply orchestrator | empty |
+| `lesson_implementation_status_view`        | `lesson_extracted`, `contract_amendment_proposed`, `lesson_apply_requested`, `action_scored`, `lesson_applied`, `contract_amendment_applied`, `applied_change_committed` | lesson apply orchestrator, audit | empty |
+| `applied_lesson_effectiveness_view`        | `applied_change_committed`, future cited `action_scored`, `recipe_invoked`, `action_predicted`, `task_committed`, `task_node_opened` | compounding measurement | empty |
 
 Every view is covered by `substrate/views.test.ts`. None requires a
 separate seed-population path: views read whatever `events` /
@@ -82,7 +85,7 @@ separate seed-population path: views read whatever `events` /
 
 ## Event kinds (canonical union — substrate/types.ts `EventKind`)
 
-108 canonical event kinds. Grouped by lifecycle phase. The `status`
+119 canonical event kinds. Grouped by lifecycle phase. The `status`
 column means the kind contributes to a count exposed by
 `acc admin substrate-status`; `doctor` means the kind has a content
 check in `cli/doctor.ts`; `seed` means rows of this kind are emitted by
@@ -259,6 +262,34 @@ check in `cli/doctor.ts`; `seed` means rows of this kind are emitted by
 | `recipe_invoked`                           | runtime (recipe replay) | — | — | — | — |
 | `recipe_replay_aborted`                    | runtime (recipe replay) | — | — | — | — |
 | `prompt_truncated`                         | runtime (prompt composer) | — | — | — | — |
+
+### Closure learning and application (`substrate/event_kinds.ts`)
+
+The lesson-implementer flywheel uses the existing event ledger as its only
+storage surface. It adds no table and no posterior family: queue state,
+authorization state, verifier state, terminal mutation state, and cheaper-next
+economics are derived from events. This preserves the universal workflow in
+`v2-design.md` §3, the act primitive in §6, the cited-event credit path in §7,
+the code-artifact authoring loop in §11.5, and recipe replay compounding in §15.
+
+| Kind                                       | Producer       | seed | doctor | status | GAP |
+|--------------------------------------------|----------------|------|--------|--------|-----|
+| `task_closure_audited`                     | brain          | —    | —      | embeddable | — |
+| `lesson_extracted`                         | brain          | —    | —      | embeddable | — |
+| `contract_amendment_proposed`              | brain          | —    | —      | embeddable | — |
+| `lesson_apply_requested`                   | claude         | —    | —      | embeddable | — |
+| `applied_change_committed`                 | claude         | —    | —      | embeddable | — |
+| `lesson_applied`                           | claude         | —    | —      | embeddable | — |
+| `contract_amendment_applied`               | claude         | —    | —      | embeddable | — |
+
+Irreducible data-structure contract:
+
+- New event kinds: `lesson_apply_requested` records the owner/auto-gated handoff into the applier; `applied_change_committed` records the residual-gated terminal mutation. Existing `lesson_applied` and `contract_amendment_applied` remain credit/audit aliases for source-kind-specific consumers.
+- New derived views: `lesson_implementer_queue_view`, `lesson_implementation_status_view`, and `applied_lesson_effectiveness_view`.
+- New tables: none.
+- New posterior shapes: none. Compounding updates flow through existing cited `action_scored`, knowledge, code-artifact, and recipe posterior paths.
+- Owner gating: `lesson_implementer_queue_view` derives explicit-consent requirements for `CLAUDE.md`, `docs/v2-design.md`, and `.claude/rules/*`; cli/runtime amendments are auto-apply candidates only when `proposed_behavior` is structured as `{ file_path, anchor, diff }` and the source trajectory has no `dispatcher_violation` or `irreversible_effect_recorded`.
+- Flywheel sequence: `lesson_extracted` or `contract_amendment_proposed` -> `lesson_apply_requested` -> `action_predicted` -> `action_scored` with residual < 0.3 -> `applied_change_committed` -> future cited `action_scored` / `recipe_invoked` rows measured by `applied_lesson_effectiveness_view`.
 
 ### Father (`substrate/types.ts:185-190`)
 
