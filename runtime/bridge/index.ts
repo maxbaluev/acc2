@@ -62,7 +62,9 @@ export {
 export { spawnRealOpencode } from "./opencode";
 
 export {
+  BRAIN_READONLY_PERMISSION,
   V2_OPENCODE_MCP_SERVER_NAME,
   V2_MCP_TOOL_SURFACE,
+  isBrainReadonlyToolAllowed,
   materializeOpencodeMcpConfig,
 } from "./config";

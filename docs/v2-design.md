@@ -298,6 +298,8 @@ function decideDispatch(directive: Directive, substrate: Substrate): DispatchDec
 | `directive_amended` | ✓ (owner speaks amendment via chat) | — | — |
 | `task_committed` / `task_failed` | ✓ (inline) | ✓ (brain) | — |
 
+Hard invariant: opencode brain dispatches are read-only against the source checkout. The bridge must not launch the brain with blanket permission approval; its per-dispatch config allows read/list/glob/grep plus acc2 MCP tools and denies direct edit/write/bash/git/source-mutation surfaces. The brain proposes source changes only through substrate events (`code_artifact_candidate`, `lesson_extracted`, `contract_amendment_proposed`). Claude-side orchestration applies accepted proposals and owns any resulting git commit.
+
 The merger HAPPENS at posterior-update time. When `action_scored` lands, the substrate credits every knowledge_id and code_artifact_id cited by either the action artifact or the verifier artifact, regardless of who wrote them. There is no "Claude's posterior" vs "opencode's posterior" — there is one substrate posterior per cited artifact, and both substrates' contributions accumulate against it. That is what makes the merger genuinely symmetric (k_3566-k_3572).
 
 Opencode runs **one cycle per dispatch** (the cycle-1-only constraint, §3.7). Claude is conversational and does not run "cycles" — it observes chat turns, decides per turn whether to dispatch, and otherwise stays idle. Father (§14) is a recurring scheduler that may also trigger dispatches on cadence (rolling reviews, queued backlog) without an owner turn.

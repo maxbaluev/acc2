@@ -195,13 +195,13 @@ substrate     emits lesson_applied / contract_amendment_applied citing the sourc
               → source lesson's posterior updates from outcome
 ```
 
-**Why Claude subagents, not bun-script editors?** Bun scripts patch via regex; they don't understand the codebase. A Claude Agent subagent reads the cited evidence, inspects the actual target file, infers the right anchor, and makes a semantic edit that respects imports, types, indentation, and surrounding context. The verifier (the same `bun test --bail` gate) scores the result; bad subagent edits get the prompt template's posterior demoted exactly like a bad bun script.
+**Why Claude-side editors, not brain-side edits or bun-script editors?** Bun scripts patch via regex; they don't understand the codebase. The opencode brain is read-only against the source checkout: it may inspect files and emit `code_artifact_candidate`, `lesson_extracted`, and `contract_amendment_proposed` events, but it must never call edit/write/bash/commit tools directly. A Claude-side executor reads the cited evidence, inspects the actual target file, infers the right anchor, and makes a semantic edit that respects imports, types, indentation, and surrounding context. The verifier (the same `bun test --bail` gate) scores the result; bad executor edits get the prompt template's posterior demoted exactly like a bad bun script.
 
 **Canonical orchestrator behaviour** for each pending proposal:
 
 1. **Read the event** — `acc apply <event_id>` renders the structured subagent prompt (event payload verbatim, evidence_event_ids, target, anchor, owner-gate verdict).
 2. **Owner gate** — if `target ∈ { CLAUDE.md, docs/v2-design.md, .claude/rules/*.md, docs/operator-install.md, docs/ops-guide.md }`, require explicit owner approval before passing `--owner-approved`. Outside that set, auto-apply is allowed when posterior is high and trajectory has no `dispatcher_violation` / `irreversible_effect_recorded`.
-3. **Spawn the subagent**:
+3. **Apply the source edit from the orchestrator side** — either main Claude Code applies it directly with its normal file-edit tools, or it spawns the isolated subagent when the change benefits from fresh context:
    ```ts
    Agent({
      description: "Apply lesson <event_id_prefix>",
@@ -210,12 +210,12 @@ substrate     emits lesson_applied / contract_amendment_applied citing the sourc
      run_in_background: true
    })
    ```
-4. **Wait for completion notification** — subagent returns JSON: `{status, target, commit_sha, summary, reason?}`.
+4. **Wait for completion notification when a subagent is used** — subagent returns JSON: `{status, target, commit_sha, summary, reason?}`. If main Claude applied the edit directly, it records the same fields from the local verification/commit result.
 5. **Record the apply** — `acc apply --record <event_id> --status <s> --commit-sha <c> --summary <m>` emits the matching `lesson_applied` / `contract_amendment_applied` event with `context_refs: [<source_event_id>]`. The substrate's four-link credit chain closes; the source proposal's posterior updates from the outcome.
 
 **Anti-patterns specific to this loop:**
 
-- DO NOT make the edit yourself (main Claude). The subagent's isolated context is the editor — main Claude is the dispatcher, not the implementer. Editing in-session bloats the main context and skips the Agent's worktree isolation.
+- DO NOT let opencode/brain mutate source files or run git directly. The brain proposes through ledger events; Claude-side orchestration applies and commits.
 - DO NOT skip the `--record` step. An applied edit without `lesson_applied` leaves the source proposal uncredited; the substrate cannot learn whether the apply improved anything.
 - DO NOT auto-apply owner-gated targets without explicit consent. The four protected paths are the contract itself; touching them without owner approval is the canonical "self-modification gone wild" anti-pattern (v2-design.md §6.2).
 

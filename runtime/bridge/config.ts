@@ -63,6 +63,51 @@ export const DEFAULT_BRIDGE_STUCK_THRESHOLD_MS = 90_000;
  *  mentions). */
 export const V2_OPENCODE_MCP_SERVER_NAME = "acc2-substrate";
 
+/**
+ * Hard policy for the opencode brain subprocess. The brain may inspect source
+ * and call acc2's MCP tools, but it must never mutate the checkout directly;
+ * source edits flow brain -> event -> Claude orchestrator.
+ */
+export const BRAIN_READONLY_PERMISSION = {
+  "*": "deny",
+  read: "allow",
+  glob: "allow",
+  grep: "allow",
+  list: "allow",
+  edit: "deny",
+  write: "deny",
+  apply_patch: "deny",
+  bash: "deny",
+  task: "deny",
+  external_directory: "deny",
+  repo_clone: "deny",
+  repo_overview: "deny",
+  lsp: "allow",
+  ["substrate.*"]: "allow",
+  ["runtime.*"]: "allow",
+  [`${V2_OPENCODE_MCP_SERVER_NAME}_substrate_*`]: "allow",
+  [`${V2_OPENCODE_MCP_SERVER_NAME}_runtime_*`]: "allow",
+} as const;
+
+const permissionPatternMatches = (pattern: string, toolName: string): boolean => {
+  if (pattern === "*") return true;
+  if (!pattern.includes("*")) return pattern === toolName;
+  const escaped = pattern
+    .split("*")
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
+  return new RegExp(`^${escaped}$`).test(toolName);
+};
+
+/** Test/verifier helper mirroring the top-level opencode permission shape. */
+export const isBrainReadonlyToolAllowed = (toolName: string): boolean => {
+  let decision: "allow" | "ask" | "deny" = "allow";
+  for (const [pattern, action] of Object.entries(BRAIN_READONLY_PERMISSION)) {
+    if (permissionPatternMatches(pattern, toolName)) decision = action;
+  }
+  return decision === "allow";
+};
+
 /** v2's full MCP tool surface — kept here as a discovery hint for the
  *  brain prompt composer and so future contributors can see at a glance
  *  which tools the daemon advertises. The actual list is owned by
@@ -148,6 +193,7 @@ export const materializeOpencodeMcpConfig = (opts: {
   // port).
   const cfg = {
     $schema: "https://opencode.ai/config.json",
+    permission: BRAIN_READONLY_PERMISSION,
     mcp: {
       [serverName]: {
         type: "remote",

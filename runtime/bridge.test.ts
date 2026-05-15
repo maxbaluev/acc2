@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import { getArtifact } from "./artifact_store";
 import {
+  BRAIN_READONLY_PERMISSION,
   materializeOpencodeMcpConfig,
+  isBrainReadonlyToolAllowed,
   opencodeQuery,
   opencodeQueryMock,
   spawnRealOpencode,
@@ -246,7 +248,7 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       expect(argv[0]).toBe("opencode");
       expect(argv[1]).toBe("run");
       expect(argv).toContain("--format=json");
-      expect(argv).toContain("--dangerously-skip-permissions");
+      expect(argv).not.toContain("--dangerously-skip-permissions");
       expect(argv.find((a) => a.startsWith("--mcp"))).toBeUndefined();
 
       // The bridge always either returns ok=true or ok=false with a reason;
@@ -281,6 +283,7 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       expect(tempDir).toBe(tmpDir);
       const cfg = JSON.parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>;
       expect(cfg.$schema).toBe("https://opencode.ai/config.json");
+      expect(cfg.permission).toEqual(BRAIN_READONLY_PERMISSION);
       const mcp = cfg.mcp as Record<string, unknown>;
       expect(mcp).toBeDefined();
       const server = mcp[V2_OPENCODE_MCP_SERVER_NAME] as Record<string, unknown>;
@@ -291,6 +294,27 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  test("brain readonly permission policy blocks direct source edits while preserving read-only and MCP tools", () => {
+    expect(isBrainReadonlyToolAllowed("read")).toBe(true);
+    expect(isBrainReadonlyToolAllowed("glob")).toBe(true);
+    expect(isBrainReadonlyToolAllowed("grep")).toBe(true);
+    expect(isBrainReadonlyToolAllowed("list")).toBe(true);
+    expect(isBrainReadonlyToolAllowed("substrate.search")).toBe(true);
+    expect(isBrainReadonlyToolAllowed("runtime.run_artifact")).toBe(true);
+    expect(isBrainReadonlyToolAllowed("acc2-substrate_substrate_emit")).toBe(true);
+    expect(isBrainReadonlyToolAllowed("acc2-substrate_runtime_dispatch_ready_task")).toBe(true);
+
+    // This is the verifier shape for the owner-reported failure: a brain that
+    // tries to patch source or commit from its opencode process must be denied.
+    expect(isBrainReadonlyToolAllowed("edit")).toBe(false);
+    expect(isBrainReadonlyToolAllowed("write")).toBe(false);
+    expect(isBrainReadonlyToolAllowed("apply_patch")).toBe(false);
+    expect(isBrainReadonlyToolAllowed("bash")).toBe(false);
+    expect(isBrainReadonlyToolAllowed("task")).toBe(false);
+    expect(isBrainReadonlyToolAllowed("repo_clone")).toBe(false);
+    expect(isBrainReadonlyToolAllowed("unknown_future_write_tool")).toBe(false);
   });
 
   test("no-progress watchdog fires bridge_stuck when subprocess emits zero frames within stuckThresholdMs", async () => {

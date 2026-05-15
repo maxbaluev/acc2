@@ -144,14 +144,15 @@ export const spawnRealOpencode = async (
 
   // `opencode run` expects the message as positional args; piping via stdin
   // is not the documented path. We pass --format=json so opencode emits one
-  // JSON event per stdout line.
+  // JSON event per stdout line. Do NOT pass
+  // --dangerously-skip-permissions: the per-dispatch config explicitly keeps
+  // the brain read-only and denies direct source mutation tools.
   let proc: ReturnType<typeof spawn>;
   try {
     proc = spawn([
       "opencode", "run",
       "--format=json",
       "--model", model,
-      "--dangerously-skip-permissions",
       req.prompt,
     ], {
       stdout: "pipe",
