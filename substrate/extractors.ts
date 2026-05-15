@@ -1660,6 +1660,8 @@ export const maybePromoteOwnerProfile = (
   }
 
   let recordedId = "";
+  let actionId = "";
+  let scoredId = "";
   withImmediateTransaction(db, () => {
     // Close the k_555 four-link spine: action_predicted → action_scored →
     // owner_profile_recorded. Without the predict/score pair,
@@ -1668,7 +1670,7 @@ export const maybePromoteOwnerProfile = (
     // updates from this promotion. The promoter IS its own action:
     // the merge is the action, the schema validation is the verifier,
     // residual=0 because the validator returned true.
-    const actionId = insertEvent(db, {
+    actionId = insertEvent(db, {
       kind: "action_predicted",
       directive_id: (row.directive_id as string) ?? "owner_profile",
       task_id: (row.task_id as string) ?? "owner_profile",
@@ -1680,7 +1682,7 @@ export const maybePromoteOwnerProfile = (
       payload: { candidate_id: sourceCandidateId, field, route },
       context_refs: [sourceCandidateId],
     });
-    const scoredId = insertEvent(db, {
+    scoredId = insertEvent(db, {
       kind: "action_scored",
       directive_id: (row.directive_id as string) ?? "owner_profile",
       task_id: (row.task_id as string) ?? "owner_profile",
@@ -1709,6 +1711,21 @@ export const maybePromoteOwnerProfile = (
       context_refs: [sourceCandidateId, actionId, scoredId],
     });
   });
+  // Close the credit loop: call distributeCredit so the source candidate
+  // gets candidate_confirmed evidence and its Beta posterior updates.
+  // The synthetic-actuator path in runtime/credit.ts skips primary
+  // artifact updates (owner_profile_promoter_action isn't a registered
+  // code_artifact) and continues with citation credit. Best-effort:
+  // distributor failures don't roll back the promotion.
+  void import("../runtime/credit")
+    .then(({ distributeCredit }) => distributeCredit(db, {
+      action_event_id: actionId,
+      observation_event_id: scoredId,
+      scored_event_id: scoredId,
+      predicted_residual: 0,
+      observed_residual: 0,
+    }))
+    .catch(() => { /* extractor cadence is best-effort */ });
   return { kind: "promoted", candidate_id: sourceCandidateId, recorded_event_id: recordedId, field, route };
 };
 

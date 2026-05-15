@@ -581,6 +581,38 @@ describe("maybePromoteOwnerProfile (Layer-2 owner autonomy)", () => {
     expect(payload.scored_event_id).toBe(scored.id);
   });
 
+  test("credit chain closes: distributeCredit emits candidate_confirmed citing the source candidate", async () => {
+    // End-to-end proof: a promotion triggers the spine, the spine triggers
+    // distributeCredit, distributeCredit emits candidate_confirmed citing
+    // the source candidate id. Without this, the source candidate's Beta
+    // posterior never updates — the loop was structurally open.
+    const db = openDb(":memory:");
+    const candidateId = insertEvent(db, {
+      kind: "owner_insight_candidate",
+      payload: { field: "detected_language", value: "fr", confidence: 0.95, claim: "owner spoke French" },
+    });
+    const verdict = maybePromoteOwnerProfile(db, candidateId);
+    expect(verdict.kind).toBe("promoted");
+
+    // distributeCredit runs async via dynamic import — give it a tick.
+    await new Promise((r) => setTimeout(r, 50));
+
+    const confirmed = db
+      .query(
+        `SELECT context_refs, payload FROM events
+         WHERE kind = 'candidate_confirmed'
+         ORDER BY ts DESC LIMIT 1`,
+      )
+      .get() as { context_refs: string; payload: string } | null;
+    expect(confirmed).not.toBeNull();
+    const refs = JSON.parse(confirmed!.context_refs) as string[];
+    // candidate_confirmed cites the source knowledge_id AND scored event.
+    expect(refs).toContain(candidateId);
+    const payload = JSON.parse(confirmed!.payload) as Record<string, unknown>;
+    expect(payload.knowledge_id).toBe(candidateId);
+    expect(payload.polarity).toBe("assert");  // residual=0 → success-band
+  });
+
   test("extractOwnerProfilePromotions bulk path promotes every eligible candidate exactly once", () => {
     const db = openDb(":memory:");
     const c1 = insertEvent(db, {
