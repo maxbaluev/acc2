@@ -22,7 +22,7 @@
 // source event id.
 
 import type { Database } from "bun:sqlite";
-import type { Event } from "../substrate/types";
+import type { Event, JsonValue } from "../substrate/types";
 import { EMBEDDABLE_KINDS as REGISTRY_EMBEDDABLE_KINDS } from "../substrate/event_kinds";
 import { emitEvent } from "./events";
 import { logger } from "./logger";
@@ -456,7 +456,7 @@ export const embedPendingEvents = async (
   }
   const apiConfig = getApiConfig();
   if (!apiConfig) {
-    emitEvent(db, {
+    const skipRow = emitEvent(db, {
       kind: "embedding_skipped_missing_api_key",
       substrate_origin: "substrate_auto",
       payload: {
@@ -465,6 +465,35 @@ export const embedPendingEvents = async (
         model: EMBEDDING_MODEL,
       },
     });
+    // Surface the gap as a HIDL action card so the owner sees it inline
+    // in chat (mirror_inline=true), not buried in worker logs. Idempotent:
+    // emit at most one HIDL row per missing-key window. Cite the embed
+    // skip row so observers can audit which events are stalled.
+    const recentHidl = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE kind = 'hidl_action_required'
+           AND json_extract(payload, '$.reason') = 'env_missing'
+           AND json_extract(payload, '$.env_var') = 'OPENAI_API_KEY'
+           AND ts > datetime('now', '-1 hour')
+         LIMIT 1`,
+      )
+      .get();
+    if (!recentHidl) {
+      emitEvent(db, {
+        kind: "hidl_action_required",
+        substrate_origin: "substrate_auto",
+        context_refs: [skipRow.id],
+        payload: {
+          summary: `Embeddings paused — OPENAI_API_KEY missing (${pendingCount} events pending vectorization)`,
+          reason: "env_missing",
+          env_var: "OPENAI_API_KEY",
+          blocked_task_id: "embedder_worker",
+          suggested_action: "Add OPENAI_API_KEY=<your-key> to .env and restart the daemon. Semantic retrieval (substrate.search) returns empty results until embeddings catch up.",
+          evidence_event_ids: [skipRow.id],
+        } as JsonValue,
+      });
+    }
     return { embedded: 0, skipped: pendingCount, failed: 0 };
   }
 

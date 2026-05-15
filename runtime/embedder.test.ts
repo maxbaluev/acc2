@@ -298,7 +298,7 @@ describe("embedPendingEvents", () => {
     expect(eventRow.embedding).not.toBeNull();
   });
 
-  test("emits embedding_skipped_missing_api_key when OPENAI_API_KEY is unset", async () => {
+  test("emits embedding_skipped_missing_api_key + hidl_action_required when OPENAI_API_KEY is unset", async () => {
     delete process.env.OPENAI_API_KEY;
     const db = openDb(":memory:");
     emitEvent(db, {
@@ -322,6 +322,37 @@ describe("embedPendingEvents", () => {
     const payload = JSON.parse(auditRows[0]!.payload) as { pending_count: number; reason: string };
     expect(payload.pending_count).toBe(2);
     expect(payload.reason).toBe("openai_api_key_missing");
+    // HIDL emit: owner sees the gap inline (mirror_inline=true on the kind).
+    const hidlRows = db
+      .query("SELECT payload FROM events WHERE kind = 'hidl_action_required'")
+      .all() as Array<{ payload: string }>;
+    expect(hidlRows.length).toBe(1);
+    const hidlPayload = JSON.parse(hidlRows[0]!.payload) as { reason: string; env_var: string; suggested_action: string };
+    expect(hidlPayload.reason).toBe("env_missing");
+    expect(hidlPayload.env_var).toBe("OPENAI_API_KEY");
+    expect(hidlPayload.suggested_action).toContain("OPENAI_API_KEY");
+  });
+
+  test("HIDL emit is idempotent within the dedup window — second call without key emits one HIDL only", async () => {
+    delete process.env.OPENAI_API_KEY;
+    const db = openDb(":memory:");
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "first" },
+    });
+    await embedPendingEvents(db);
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "second" },
+    });
+    await embedPendingEvents(db);
+    const hidlRows = db
+      .query("SELECT payload FROM events WHERE kind = 'hidl_action_required'")
+      .all() as Array<{ payload: string }>;
+    // Two embedding_skipped events but only one HIDL within the hour window.
+    expect(hidlRows.length).toBe(1);
   });
 
   test("idempotent — a second call after success is a cheap no-op", async () => {

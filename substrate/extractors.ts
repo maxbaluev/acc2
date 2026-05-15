@@ -962,6 +962,25 @@ const topologySignatureFor = (db: Database, directiveId: string): string => {
   return `topo_${(h >>> 0).toString(16).padStart(8, "0")}::${rows.length}`;
 };
 
+/** Read the event ids that actually drove the trajectory for a
+ *  directive — task_node_opened + action_predicted + action_scored
+ *  rows in chronological order. recipe_extracted then cites these
+ *  via context_refs so the credit chain has explicit pointers from
+ *  every recipe back to the actions that proved it. Without these
+ *  citations, recipe → action posterior credit had no path; brain
+ *  audit by166hjyv flagged this as a credit-spine gap. */
+const trajectoryEventIdsFor = (db: Database, directiveId: string): string[] => {
+  const rows = db
+    .query(
+      `SELECT id FROM events
+       WHERE directive_id = ?
+         AND kind IN ('task_node_opened', 'action_predicted', 'action_scored')
+       ORDER BY ts ASC, rowid ASC`,
+    )
+    .all(directiveId) as Array<{ id: string }>;
+  return rows.map((r) => r.id);
+};
+
 /** Build a replay trajectory for a directive from its action_predicted +
  *  verifier sequence. Each step carries the artifact id (if any) and a
  *  payload template the replayer can re-stamp with fresh task_id /
@@ -1058,10 +1077,17 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
       // replayer will use this exact sequence of action artifacts + verifiers.
       const trajectory = buildTrajectoryFor(db, anchor.directive_id as string);
       const entryIds = entries.map((e) => e.row.id as string);
+      // Cite trajectory event ids (task_node_opened / action_predicted /
+      // action_scored) for the anchor directive so the recipe carries
+      // explicit credit pointers back to the actions that proved it.
+      // Brain audit by166hjyv flagged this as a credit-spine gap: without
+      // these citations, distributeCredit could only reach the cluster
+      // entries, not the underlying action_scored ancestors.
+      const trajectoryRefs = trajectoryEventIdsFor(db, anchor.directive_id as string);
       emitPromotionSpine(db, {
         kind: "recipe_extracted",
         candidate_id: entryIds[0]!,
-        extra_context_refs: entryIds.slice(1),
+        extra_context_refs: [...entryIds.slice(1), ...trajectoryRefs],
         directive_id: anchor.directive_id as string,
         task_id: anchor.task_id as string,
         loop_id: anchor.loop_id as string,
