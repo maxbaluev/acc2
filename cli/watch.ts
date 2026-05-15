@@ -42,6 +42,10 @@ type ReadyTask = {
   depth?: number;
 };
 
+// Each substrate row carries every column the source view exposed in
+// `view_row` so the TUI's Detail pane / Enter-toggled viewer can render
+// the full record (declared_sandbox, posterior alpha/beta, body code,
+// trajectory, etc.) without a second round-trip to the substrate.
 type ArtifactRow = {
   id: string;
   runtime: string;
@@ -49,6 +53,7 @@ type ArtifactRow = {
   status: string;
   name: string | null;
   confidence?: number;
+  view_row?: Record<string, unknown>;
 };
 
 type RecipeRow = {
@@ -57,6 +62,7 @@ type RecipeRow = {
   confidence: number;
   goal_shape?: string;
   status?: string;
+  view_row?: Record<string, unknown>;
 };
 
 type LessonRow = {
@@ -65,6 +71,7 @@ type LessonRow = {
   summary: string;
   target?: string;
   ts?: string;
+  view_row?: Record<string, unknown>;
 };
 
 type KnowledgeRow = {
@@ -73,6 +80,7 @@ type KnowledgeRow = {
   score: number;
   status?: string;
   origin?: string;
+  view_row?: Record<string, unknown>;
 };
 
 type DaemonHealth = {
@@ -324,6 +332,7 @@ const readArtifactLeaderboard = async (): Promise<ArtifactRow[]> => {
     status: asString(r.status, "unknown"),
     name: asString(r.name, "") || null,
     confidence: asNumber(r.confidence, 0),
+    view_row: r,
   }));
 };
 
@@ -335,6 +344,7 @@ const readRecipes = async (): Promise<RecipeRow[]> => {
     confidence: asNumber(r.confidence, asNumber(r.score, 0)),
     goal_shape: asString(r.goal_shape, ""),
     status: asString(r.status, "available"),
+    view_row: r,
   }));
 };
 
@@ -356,6 +366,7 @@ const readKnowledge = async (): Promise<KnowledgeRow[]> => {
     score: asNumber(r.score, asNumber(r.posterior, 0)),
     status: asString(r.status, "promoted"),
     origin: asString(r.substrate_origin, asString(r.origin, "")),
+    view_row: r,
   }));
 };
 
@@ -582,37 +593,102 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
     });
   }
   if (view === "artifacts") {
-    return (state.artifacts ?? []).map((a) => ({
-      id: a.id,
-      title: a.name ?? a.id,
-      meta: `${a.runtime} score=${a.score.toFixed(2)} conf=${(a.confidence ?? 0).toFixed(2)} ${a.status}`,
-      body: `artifact_id=${a.id}\nname=${a.name ?? ""}\nruntime=${a.runtime}\nscore=${a.score.toFixed(3)}\nconfidence=${(a.confidence ?? 0).toFixed(3)}\nstatus=${a.status}`,
-      score: a.score,
-      status: a.status,
-      raw: a,
-    }));
+    return (state.artifacts ?? []).map((a) => {
+      const v = a.view_row ?? {};
+      const sandbox = formatPayloadFull(v.declared_sandbox);
+      const codeBody = asString(v.body, "");
+      const alpha = asNumber(v.posterior_alpha, 0);
+      const beta = asNumber(v.posterior_beta, 0);
+      const residualMean = asNumber(v.recent_residual_mean, 0);
+      const killCount = asNumber(v.recent_kill_count, 0);
+      const stateRoot = asString(v.state_root, "");
+      const fixtureExp = asNumber(v.fixture_expected_residual, NaN);
+      const createdAt = asString(v.created_at, "");
+      const updatedAt = asString(v.updated_at, "");
+      const rich = [
+        `artifact_id=${a.id}`,
+        `name=${a.name ?? ""}`,
+        `runtime=${a.runtime}`,
+        `score=${a.score.toFixed(3)}  alpha=${alpha.toFixed(2)}  beta=${beta.toFixed(2)}`,
+        `confidence=${(a.confidence ?? 0).toFixed(3)}`,
+        `status=${a.status}`,
+        `recent_residual_mean=${Number.isFinite(residualMean) ? residualMean.toFixed(3) : "—"}  recent_kill_count=${killCount}`,
+        `state_root=${stateRoot}`,
+        Number.isFinite(fixtureExp) ? `fixture_expected_residual=${fixtureExp.toFixed(3)}` : "",
+        createdAt ? `created_at=${createdAt}` : "",
+        updatedAt ? `updated_at=${updatedAt}` : "",
+        "",
+        "--- declared_sandbox ---",
+        sandbox,
+        "",
+        "--- body ---",
+        codeBody || "(no body)",
+      ].filter((s) => s !== "").join("\n");
+      return {
+        id: a.id,
+        title: a.name ?? a.id,
+        meta: `${a.runtime} score=${a.score.toFixed(2)} conf=${(a.confidence ?? 0).toFixed(2)} ${a.status}`,
+        body: rich,
+        score: a.score,
+        status: a.status,
+        raw: a,
+      };
+    });
   }
   if (view === "recipes") {
-    return deriveRecipes(state).map((r) => ({
-      id: r.id,
-      title: r.name,
-      meta: `confidence=${r.confidence.toFixed(2)} ${r.status ?? ""}`,
-      body: `recipe_id=${r.id}\nname=${r.name}\nconfidence=${r.confidence.toFixed(3)}\nstatus=${r.status ?? ""}\ngoal_shape=${r.goal_shape ?? ""}`,
-      score: r.confidence,
-      status: r.status,
-      raw: r,
-    }));
+    return deriveRecipes(state).map((r) => {
+      const v = r.view_row ?? {};
+      const goalShape = asString(v.goal_shape, r.goal_shape ?? "");
+      const topology = asString(v.topology_signature, "");
+      const ts = asString(v.ts, "");
+      const trajectory = formatPayloadFull(v.payload);
+      const rich = [
+        `recipe_id=${r.id}`,
+        `name=${r.name}`,
+        `confidence=${r.confidence.toFixed(3)}`,
+        `status=${r.status ?? ""}`,
+        `goal_shape=${goalShape}`,
+        topology ? `topology_signature=${topology}` : "",
+        ts ? `ts=${ts}` : "",
+        "",
+        "--- payload / trajectory ---",
+        trajectory,
+      ].filter((s) => s !== "").join("\n");
+      return {
+        id: r.id,
+        title: r.name,
+        meta: `confidence=${r.confidence.toFixed(2)} ${r.status ?? ""}`,
+        body: rich,
+        score: r.confidence,
+        status: r.status,
+        raw: r,
+      };
+    });
   }
   if (view === "lessons") {
-    return deriveLessons(state).map((l) => ({
-      id: l.id,
-      title: l.summary,
-      meta: `${l.kind} ${l.target ?? ""}`.trim(),
-      body: `id=${l.id}\nts=${l.ts ?? ""}\nkind=${l.kind}\ntarget=${l.target ?? ""}\n\n${l.summary}`,
-      kind: l.kind,
-      status: l.kind,
-      raw: l,
-    }));
+    return deriveLessons(state).map((l) => {
+      const v = l.view_row ?? {};
+      const rich = [
+        `id=${l.id}`,
+        l.ts ? `ts=${l.ts}` : "",
+        `kind=${l.kind}`,
+        l.target ? `target=${l.target}` : "",
+        "",
+        l.summary,
+        "",
+        "--- substrate row ---",
+        formatPayloadFull(v),
+      ].filter((s) => s !== "").join("\n");
+      return {
+        id: l.id,
+        title: l.summary,
+        meta: `${l.kind} ${l.target ?? ""}`.trim(),
+        body: rich,
+        kind: l.kind,
+        status: l.kind,
+        raw: l,
+      };
+    });
   }
   if (view === "interventions") {
     // Use the dedicated supervisor buffer (populated by readKindBuffer
@@ -634,15 +710,38 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
       raw: e,
     }));
   }
-  return deriveKnowledge(state).map((k) => ({
-    id: k.id,
-    title: k.text,
-    meta: `score=${k.score.toFixed(2)} ${k.status ?? ""} ${k.origin ?? ""}`.trim(),
-    body: `knowledge_id=${k.id}\nscore=${k.score.toFixed(3)}\nstatus=${k.status ?? ""}\norigin=${k.origin ?? ""}\n\n${k.text}`,
-    score: k.score,
-    status: k.status,
-    raw: k,
-  }));
+  return deriveKnowledge(state).map((k) => {
+    const v = k.view_row ?? {};
+    const ts = asString(v.ts, "");
+    const candidateId = asString(v.candidate_id, "");
+    const directiveId = asString(v.directive_id, "");
+    const tags = formatPayloadFull(v.tags);
+    const refs = formatPayloadFull(v.context_refs);
+    const rich = [
+      `knowledge_id=${k.id}`,
+      `score=${k.score.toFixed(3)}`,
+      `confidence=${asNumber(v.confidence, 0).toFixed(3)}`,
+      `status=${k.status ?? ""}`,
+      `origin=${k.origin ?? ""}`,
+      ts ? `ts=${ts}` : "",
+      candidateId ? `candidate_id=${candidateId}` : "",
+      directiveId ? `directive_id=${directiveId}` : "",
+      "",
+      k.text,
+      "",
+      tags !== "{}" && tags !== "" ? `--- tags ---\n${tags}` : "",
+      refs !== "[]" && refs !== "" ? `--- context_refs ---\n${refs}` : "",
+    ].filter((s) => s !== "").join("\n");
+    return {
+      id: k.id,
+      title: k.text,
+      meta: `score=${k.score.toFixed(2)} ${k.status ?? ""} ${k.origin ?? ""}`.trim(),
+      body: rich,
+      score: k.score,
+      status: k.status,
+      raw: k,
+    };
+  });
 };
 
 const filteredItems = (state: WatchState, view: ViewKey): ListItem[] => {
