@@ -242,6 +242,23 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
         score <= POSTERIOR.demoteScore;
 
       if (eligibleForPromote) {
+        // Domain-aware annotation (Batch 1 — 2026-05-15): if the source
+        // candidate carries rich-schema applies_to[] + confidence_estimate
+        // fields, propagate them onto the promotion event so downstream
+        // consumers (retrieval reranker, prompt composer, TUI) can filter
+        // / rank by domain. Flat candidates carry no annotation and the
+        // promotion stays domain-global (backward compatible).
+        let appliesTo: string[] | undefined;
+        let candConfidenceEstimate: number | undefined;
+        let claimSnippet: string | undefined;
+        try {
+          const cp = JSON.parse((c.payload as string) ?? "{}") as Record<string, unknown>;
+          if (Array.isArray(cp.applies_to)) appliesTo = (cp.applies_to as unknown[]).map(String);
+          if (typeof cp.confidence_estimate === "number") candConfidenceEstimate = cp.confidence_estimate;
+          claimSnippet = (cp.claim as string | undefined) ??
+            (cp.text as string | undefined) ??
+            (cp.summary as string | undefined);
+        } catch { /* skip annotation */ }
         insertEvent(db, {
           kind: "knowledge_promoted",
           directive_id: c.directive_id as string,
@@ -258,6 +275,15 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
             beta,
             origin_count: originsCount,
             promotion_path: eligibleForPromoteStrict ? "strict" : "multi_origin",
+            // Rich-schema propagation (Batch 1, 2026-05-15): downstream
+            // retrieval / prompt sections can filter or rank by domain
+            // (applies_to) and inspect the brain's self-confidence at
+            // emission time (candidate_confidence_estimate). Snippet
+            // surfaces the claim text inline so view consumers don't
+            // have to JOIN back to the candidate for previews.
+            applies_to: appliesTo,
+            candidate_confidence_estimate: candConfidenceEstimate,
+            claim_snippet: claimSnippet,
           },
           context_refs: [cid],
         });

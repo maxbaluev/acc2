@@ -182,6 +182,38 @@ const classifyTarget = (db: Database, id: string): "knowledge" | "code_artifact"
   return "unknown";
 };
 
+/** Look up the confidence_estimate field from a cited knowledge entry's
+ *  source candidate. When the target id is itself a knowledge_candidate,
+ *  read its own payload; when it's a knowledge_promoted, traverse to the
+ *  originating candidate via payload.candidate_id. Returns 1.0 (full
+ *  weight) when the field is absent or out of [0,1] — backward compatible
+ *  with flat-text candidates that don't carry the rich schema. */
+const readCandidateConfidenceEstimate = (db: Database, knowledgeId: string): number => {
+  const ev = db.query("SELECT kind, payload FROM events WHERE id = ?").get(knowledgeId) as
+    | { kind: string; payload: string }
+    | null;
+  if (!ev) return 1;
+  let payloadStr = ev.payload;
+  if (ev.kind === "knowledge_promoted") {
+    try {
+      const p = JSON.parse(payloadStr) as Record<string, unknown>;
+      const candId = (p.candidate_id as string | undefined) ?? undefined;
+      if (candId) {
+        const candEv = db.query("SELECT payload FROM events WHERE id = ?").get(candId) as
+          | { payload: string }
+          | null;
+        if (candEv) payloadStr = candEv.payload;
+      }
+    } catch { /* fall through with original payload */ }
+  }
+  try {
+    const p = JSON.parse(payloadStr) as Record<string, unknown>;
+    const raw = p.confidence_estimate;
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 1) return raw;
+  } catch { /* malformed → default */ }
+  return 1;
+};
+
 // ── Shapley weight computation ────────────────────────────────────
 
 /** Compute Shapley shares by corroboration order. raw_weight_i = 1/2^(i+1);
@@ -562,9 +594,17 @@ export const distributeCredit = async (
       // and recomputes Beta posteriors → knowledge_promoted/_demoted on
       // threshold crossings. Knowledge entries do NOT receive the LATM
       // novelty bonus — the bonus is artifact-specific (§11.5 frames it as a
-      // Voyager-style authoring-loop signal). The Shapley share is the base
-      // weight; ΔΑ/ΔΒ inherit from it.
-      const knowledgeWeight = baseWeight;
+      // Voyager-style authoring-loop signal).
+      //
+      // Confidence-weighted credit (Batch 1 — 2026-05-15): the brain emits
+      // a confidence_estimate on rich-schema knowledge_candidates. Scale
+      // the Shapley share by that confidence so the brain's self-assessed
+      // strong claims get more weight than tentative ones. Flat candidates
+      // (without confidence_estimate) default to weight=1.0 — backward
+      // compatible. The weight lands on candidate_confirmed.payload so the
+      // extractor reads the fractional contribution.
+      const confidenceEstimate = readCandidateConfidenceEstimate(db, targetId);
+      const knowledgeWeight = baseWeight * confidenceEstimate;
       const kAlpha = alphaDelta * knowledgeWeight;
       const kBeta = betaDelta * knowledgeWeight;
       const r = Math.max(0, Math.min(1, params.observed_residual));
@@ -578,6 +618,8 @@ export const distributeCredit = async (
           knowledge_id: targetId,
           residual: r,
           weight: knowledgeWeight,
+          base_shapley_weight: baseWeight,
+          confidence_estimate: confidenceEstimate,
           scored_event_id: params.scored_event_id,
           polarity: r >= FAILURE_BAND ? "deny" : r <= SUCCESS_BAND ? "assert" : "midband",
         } as JsonValue,
