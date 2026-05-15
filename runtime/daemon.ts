@@ -579,7 +579,9 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       extractRecipeCandidates,
       extractSemanticDedup,
       extractDirectiveInterference,
+      extractOwnerProfilePromotions,
     } = await import("../substrate/extractors");
+    const { runOwnerVocabularyExtractorTick } = await import("../substrate/owner_vocabulary_extractor");
     const runExtractorsOnce = async (): Promise<void> => {
       try { extractKnowledgePromotions(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.knowledge", err: (err as Error).message }, "knowledge extractor tick failed");
@@ -594,12 +596,26 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
         logger.warn({ where: "daemon.extractors.semantic_dedup", err: (err as Error).message }, "semantic-dedup extractor tick failed");
       }
       // Auto cross-directive interference (organism-alignment Track C,
-      // 2026-05-15): scan code_artifact.target_files for cross-directive
+      // 2026-05-15): scan code_artifact.target_resources/target_files for cross-directive
       // overlap and emit resource_conflict edges so the scheduler defers
       // racing dispatches. Idempotent — re-runs dedupe against existing
       // edges.
       try { extractDirectiveInterference(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.directive_interference", err: (err as Error).message }, "directive-interference extractor tick failed");
+      }
+      // Owner profile promotions (Layer-2 conversation-as-learning-surface,
+      // DSGSAZGMF1): owner_insight_candidate → owner_profile_recorded via
+      // confidence ≥ 0.85 / owner-approval bypass / sibling cosine.
+      try { extractOwnerProfilePromotions(db); } catch (err) {
+        logger.warn({ where: "daemon.extractors.owner_profile", err: (err as Error).message }, "owner-profile extractor tick failed");
+      }
+      // Owner vocabulary mining (DSGSAZGMF1, universal): scan owner_input_received
+      // history for the owner's distinctive n-grams + explicit rejection
+      // patterns. Emits owner_insight_candidate rows for preferred_terms
+      // and avoided_terms which the promotion pass above merges into the
+      // canonical owner_profile_recorded row.
+      try { runOwnerVocabularyExtractorTick(db); } catch (err) {
+        logger.warn({ where: "daemon.extractors.owner_vocabulary", err: (err as Error).message }, "owner-vocabulary extractor tick failed");
       }
     };
     let extractorsMarked = false;
