@@ -458,6 +458,29 @@ export const buildOwnerProfileSection = (profile: OwnerProfile): string => {
   if (lang && lang !== OWNER_PROFILE_DEFAULTS.detected_language) {
     lines.push(`detected_language: ${lang}`);
   }
+  // Conversation-as-learning-surface fields (DSGSAZGMF1): persona →
+  // rendering depth; preferred_terms → mirror back; avoided_terms →
+  // never use; exposed_concepts → explain on first encounter only.
+  if (profile.persona) {
+    lines.push(`persona: ${profile.persona}`);
+  }
+  if (Array.isArray(profile.preferred_terms) && profile.preferred_terms.length > 0) {
+    lines.push(`preferred_terms (mirror these back; do NOT use jargon equivalents): ${profile.preferred_terms.join(", ")}`);
+  }
+  if (Array.isArray(profile.avoided_terms) && profile.avoided_terms.length > 0) {
+    lines.push("avoided_terms (NEVER use in chat output to this owner):");
+    for (const t of profile.avoided_terms) lines.push(`  - ${t}`);
+  }
+  if (profile.exposed_concepts && typeof profile.exposed_concepts === "object") {
+    const concepts = Object.keys(profile.exposed_concepts).filter((k) => k.length > 0);
+    if (concepts.length > 0) {
+      lines.push("exposed_concepts (already explained — do NOT re-explain; use owner's vocabulary):");
+      for (const c of concepts) {
+        const e = profile.exposed_concepts[c];
+        lines.push(`  - ${c} (seen ${e?.exposure_count ?? 0}x)`);
+      }
+    }
+  }
   const trust = profile.autonomy_trust_level;
   if (trust && trust !== OWNER_PROFILE_DEFAULTS.autonomy_trust_level) {
     lines.push(`autonomy_trust_level: ${trust}`);

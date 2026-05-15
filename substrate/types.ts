@@ -44,8 +44,66 @@ export type OwnerAutonomyScope = {
   exclude?: string[];
 };
 
+// Conversation-as-learning-surface (brain dispatch DSGSAZGMF1, 2026-05-15):
+//
+// The substrate adapts its owner-facing rendering based on persistent
+// signals extracted from the owner's first turns of conversation:
+//
+//   - `persona` — controls rendering DEPTH. `developer` gets event ids,
+//     residuals, citations, file paths, raw kind names. `operator` gets
+//     outcome-language, blockers, decisions-needed, concise next steps
+//     (no event ids unless asked). `casual` gets one-sentence
+//     what-happened/what-next pairs in the owner's detected language.
+//   - `preferred_terms` — the owner's own words for substrate concepts.
+//     The orchestrator + brain MUST mirror these back instead of jargon
+//     ("my weekly grind" instead of "recurring friction task"; "the
+//     daemon" instead of "the substrate" if the owner used that word).
+//   - `avoided_terms` — words the owner explicitly rejected ("don't
+//     call it a recipe", "stop saying RLM"). The orchestrator MUST
+//     never use these.
+//   - `exposed_concepts` — map of substrate-concept identifier to
+//     first-encounter event id + exposure count. The orchestrator
+//     explains a concept on FIRST encounter only; after that, uses
+//     the owner's vocabulary and does not re-explain. Updated each
+//     time the orchestrator surfaces a concept to the owner.
+//
+// All four are populated via the existing Layer-2 path —
+// `owner_insight_candidate` → Model D extractor → `owner_profile_recorded`
+// (substrate/extractors.ts) — so there is NO separate event registry,
+// NO parallel state. The schema extension below is the single source
+// of truth.
+
+export type OwnerPersona = "developer" | "operator" | "casual";
+
+export type OwnerConceptExposure = {
+  /** event_id of the first owner_input_received / brain output where
+   *  this concept appeared in the owner's view. The orchestrator cites
+   *  it when explaining the concept for posterior credit. */
+  first_event_id: string;
+  /** How many times the orchestrator has surfaced this concept since
+   *  the first encounter. Increments each time the renderer references
+   *  it. Used to detect "owner has seen this enough — stop explaining". */
+  exposure_count: number;
+};
+
 export type OwnerProfile = {
   detected_language?: string;
+  /** Owner's interaction depth — classified from the first 2 owner
+   *  messages (heuristic OR brain-side artifact). Controls rendering
+   *  verbosity, jargon level, and citation density. */
+  persona?: OwnerPersona;
+  /** Words the owner uses for substrate concepts. The renderer mirrors
+   *  these back instead of canonical jargon. */
+  preferred_terms?: string[];
+  /** Words the owner explicitly rejected. The renderer MUST never use
+   *  these in chat output to this owner. */
+  avoided_terms?: string[];
+  /** Substrate concepts the owner has already been exposed to. Keys are
+   *  stable concept identifiers (e.g. "rolling_active",
+   *  "knowledge_compounds", "father_ranked"); values track first-event
+   *  id + exposure count so the renderer explains on first encounter
+   *  only. */
+  exposed_concepts?: Record<string, OwnerConceptExposure>;
   autonomy_scope?: OwnerAutonomyScope;
   autonomy_trust_level?: OwnerAutonomyTrustLevel;
   /** Paths/patterns the auto-apply worker MUST signal (stage-1) only,
@@ -64,6 +122,10 @@ export type OwnerProfile = {
 
 export const OWNER_PROFILE_DEFAULTS = {
   detected_language: "en",
+  persona: null,
+  preferred_terms: [],
+  avoided_terms: [],
+  exposed_concepts: {},
   autonomy_scope: { include: ["cli/**", "runtime/**"], exclude: [] },
   autonomy_trust_level: "normal",
   manual_review_patterns: [],
@@ -77,6 +139,20 @@ export const OWNER_PROFILE_JSON_SCHEMA = {
   additionalProperties: false,
   properties: {
     detected_language: { type: "string", minLength: 2, maxLength: 32 },
+    persona: { enum: ["developer", "operator", "casual"] },
+    preferred_terms: { type: "array", items: { type: "string", minLength: 1, maxLength: 200 }, default: [] },
+    avoided_terms: { type: "array", items: { type: "string", minLength: 1, maxLength: 200 }, default: [] },
+    exposed_concepts: {
+      type: "object",
+      additionalProperties: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          first_event_id: { type: "string", minLength: 1 },
+          exposure_count: { type: "integer", minimum: 0 },
+        },
+      },
+    },
     autonomy_scope: {
       type: "object",
       additionalProperties: false,

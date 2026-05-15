@@ -125,6 +125,47 @@ const dispatchTask = async (
   const { directive_id, task_id } = env.result as { directive_id: string; task_id: string };
   console.log(`directive_opened ${directive_id} (root task=${task_id})`);
   console.log(`  text: ${words}`);
+
+  // Conversation-as-learning-surface (DSGSAZGMF1): classify the
+  // owner's persona from the directive text + recent prior input.
+  // Emits owner_insight_candidate; the Layer-2 extractor promotes it
+  // into owner_profile_recorded.persona once confidence ≥ 0.85 OR
+  // multi-turn corroboration accumulates. Best-effort — never blocks
+  // dispatch, never throws upward.
+  try {
+    const { classifyOwnerPersona } = await import("../substrate/owner_persona_classifier");
+    const priorEnv = await mcpCall("runtime.recent_events", {
+      k: 5,
+      kinds: ["owner_input_received"],
+    }).catch(() => null);
+    const priorTexts: string[] = [];
+    if (priorEnv?.ok) {
+      const evs = ((priorEnv.result as { events?: Array<{ payload?: unknown }> })?.events ?? []);
+      for (const e of evs) {
+        const p = e.payload as { text?: string; directive_text?: string } | undefined;
+        const t = p?.text ?? p?.directive_text;
+        if (typeof t === "string" && t.length > 0 && t !== words) priorTexts.push(t);
+      }
+    }
+    const cls = classifyOwnerPersona(words, priorTexts);
+    await mcpCall("substrate.emit", {
+      kind: "owner_insight_candidate",
+      substrate_origin: "claude_root",
+      directive_id,
+      payload: {
+        field: "persona",
+        value: cls.persona,
+        confidence: cls.confidence,
+        claim: `Owner persona classified as ${cls.persona} (signals: ${cls.signals.join("; ")})`,
+        signals: cls.signals,
+      },
+    }).catch(() => null);
+  } catch {
+    // Classifier failure must not block dispatch. The brain's cycle-1
+    // OWNER PROFILE section will just render "no persona detected" and
+    // the next directive will retry.
+  }
+
   if (!opts.follow) return 0;
   // Default mode (when invoked under run_in_background:true): stream the
   // narrative event surface as structured one-liners. Each stdout line is
