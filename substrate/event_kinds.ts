@@ -260,6 +260,15 @@ export const EVENT_KINDS = {
   // / bridge_health_degraded). Records what the supervisor saw + what it did
   // so operators can audit the auto-intervention chain.
   supervisor_intervention_recorded:        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true  },
+  // Owner re-activates a directive previously archived by the supervisor
+  // (task-explosion / dispatch-budget). The archive event preserved
+  // quarantined_tasks payload; resume lifts the readyTasks filter so the
+  // scheduler picks them up again. Owner directive 2026-05-15:
+  // "system never should loose tasks if task explosion".
+  directive_resumed:                       { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false },
+  // Substrate compactor (Batch 10) — emitted when bridge_frame_received rows
+  // older than COMPACTION_FRAME_RETENTION_MS were pruned. Audit-only.
+  substrate_compacted:                     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },
 
   // ── Previously-missing kinds (emitted at runtime, now registered) ───
   embedding_skipped_missing_api_key:       { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false },

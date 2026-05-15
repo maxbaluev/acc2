@@ -362,6 +362,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("father")) registerWorker("father", fatherIntervalMs);
   if (isWorkerEnabled("scheduler")) registerWorker("scheduler");
   if (isWorkerEnabled("supervisor")) registerWorker("supervisor", Number(process.env.ACC2_SUPERVISOR_INTERVAL_MS ?? 30_000));
+  if (isWorkerEnabled("compaction")) registerWorker("compaction", Number(process.env.ACC2_COMPACTION_INTERVAL_MS ?? 60 * 60 * 1000));
 
   // Phase E: amendment worker — drain unapplied directive_amended events on
   // a configurable interval (default 2s; tests may pin a shorter value via
@@ -464,6 +465,28 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     supervisorMarked = true;
     recordWorkerTick("supervisor");
     workers.push(() => clearInterval(supervisorTickHandle));
+  }
+
+  // Batch 10: substrate compactor — periodic pruning of bridge_frame_received
+  // rows older than COMPACTION_FRAME_RETENTION_MS (24h default). The
+  // canonical events (brain_dispatched, action_predicted, action_scored,
+  // task_committed) STAY forever; only the per-frame mirror is pruned.
+  // Runs hourly so steady-state growth never exceeds one day of frames.
+  const COMPACTION_INTERVAL_MS = Number(process.env.ACC2_COMPACTION_INTERVAL_MS ?? 60 * 60 * 1000);
+  if (isWorkerEnabled("compaction")) {
+    const { compactionWorkerTick } = await import("./compaction");
+    let compactionMarked = false;
+    const compactionTickHandle = setInterval(
+      supervisedTick(db, "compaction", COMPACTION_INTERVAL_MS, async () => {
+        compactionWorkerTick(db);
+        if (!compactionMarked) { markWorkerReady("compaction"); compactionMarked = true; }
+      }),
+      COMPACTION_INTERVAL_MS,
+    );
+    markWorkerReady("compaction");
+    compactionMarked = true;
+    recordWorkerTick("compaction");
+    workers.push(() => clearInterval(compactionTickHandle));
   }
 
   // Phase F: embedder worker. Default ON — production wants every

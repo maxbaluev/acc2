@@ -38,7 +38,8 @@ export type WorkerName =
   | "rolling_reviewer"
   | "rehabilitation"
   | "integrity"
-  | "supervisor";
+  | "supervisor"
+  | "compaction";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -51,6 +52,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "rehabilitation",
   "integrity",
   "supervisor",
+  "compaction",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

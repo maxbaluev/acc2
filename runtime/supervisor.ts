@@ -151,6 +151,43 @@ export const detectRedispatchStorm = (
   return quarantined;
 };
 
+/** Collect the unfinished task ids + goals under a directive. Used by
+ *  the supervisor when archiving a runaway directive so the archive event
+ *  records WHAT work was paused — owner directive: "system never should
+ *  loose tasks if task explosion, etc". The substrate is append-only;
+ *  nothing is ever deleted, but this payload makes the dormant work
+ *  immediately visible to operators via `acc status` / `acc events`. */
+const collectUnfinishedTasks = (
+  db: Database,
+  directiveId: string,
+): Array<{ task_id: string; goal: string }> => {
+  const rows = db
+    .query(
+      `SELECT n.task_id AS task_id, n.payload AS payload FROM events n
+       WHERE n.kind = 'task_node_opened' AND n.directive_id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM events t
+           WHERE t.task_id = n.task_id
+             AND t.kind IN ('task_committed', 'task_failed', 'task_abandoned')
+         )
+       ORDER BY n.ts ASC LIMIT 200`,
+    )
+    .all(directiveId) as Array<{ task_id: string; payload: string }>;
+  const out: Array<{ task_id: string; goal: string }> = [];
+  const seen = new Set<string>();
+  for (const r of rows) {
+    if (seen.has(r.task_id)) continue;
+    seen.add(r.task_id);
+    let goal = "";
+    try {
+      const p = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
+      goal = ((p.goal as string | undefined) ?? "").slice(0, 200);
+    } catch { /* leave blank */ }
+    out.push({ task_id: r.task_id, goal });
+  }
+  return out;
+};
+
 /** Detect directives whose ready-task subtree has exploded (uncontrolled
  *  refinement fanout) AND have been running past the age threshold. Emits
  *  directive_archived_by_operator so readyTasks drops the entire DAG.
@@ -202,6 +239,8 @@ export const detectDagExplosion = (
 
     const ageHours = (nowMs - Date.parse(r.first_ts)) / (60 * 60 * 1000);
     try {
+      // Preserve unfinished task ids + goals so the archive is recoverable.
+      const unfinished = collectUnfinishedTasks(db, r.directive_id);
       emitEvent(db, {
         kind: "directive_archived_by_operator",
         substrate_origin: "substrate_auto",
@@ -212,6 +251,9 @@ export const detectDagExplosion = (
           age_hours: ageHours,
           threshold_ready_tasks: SUPERVISOR_MAX_READY_TASKS_PER_DIRECTIVE,
           threshold_age_hours: SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS,
+          quarantined_tasks: unfinished,
+          recoverable: true,
+          resume_command: `acc directive resume ${r.directive_id}`,
         } as JsonValue,
       });
       emitEvent(db, {
@@ -267,6 +309,7 @@ export const detectDispatchBudgetExceeded = (
       .get(r.directive_id);
     if (closed) continue;
     try {
+      const unfinished = collectUnfinishedTasks(db, r.directive_id);
       emitEvent(db, {
         kind: "directive_archived_by_operator",
         substrate_origin: "substrate_auto",
@@ -275,6 +318,9 @@ export const detectDispatchBudgetExceeded = (
           reason: "supervisor_dispatch_budget_exceeded",
           dispatch_count: r.dispatch_count,
           threshold: SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE,
+          quarantined_tasks: unfinished,
+          recoverable: true,
+          resume_command: `acc directive resume ${r.directive_id}`,
         } as JsonValue,
       });
       emitEvent(db, {

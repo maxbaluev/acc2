@@ -243,6 +243,14 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     const { runDoctor } = await import("./doctor");
     return runDoctor(argv.slice(1));
   }
+  if (cmd === "status") {
+    const { runStatus } = await import("./status");
+    return runStatus(argv.slice(1));
+  }
+  if (cmd === "directive") {
+    const { runDirective } = await import("./directive");
+    return runDirective(argv.slice(1));
+  }
   console.error(`acc: unknown command '${cmd}'`);
   console.error(usage());
   return 1;

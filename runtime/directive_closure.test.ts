@@ -170,6 +170,32 @@ describe("directive_closure", () => {
     expect(readyIds.has(finishedButNotClosed.taskId)).toBe(false);
   });
 
+  test("directive_resumed unblocks a previously-archived directive", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const { directiveId, taskId } = openFiniteDirective(db);
+    // Archive it
+    emitEvent(db, {
+      kind: "directive_archived_by_operator",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      payload: { reason: "test" },
+    });
+    expect(closedDirectiveIds(db).has(directiveId)).toBe(true);
+    // Now resume it
+    emitEvent(db, {
+      kind: "directive_resumed",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      payload: { prior_state: "directive_archived_by_operator" },
+    });
+    expect(closedDirectiveIds(db).has(directiveId)).toBe(false);
+    // readyTasks should once again include the task
+    const ready = readyTasks(db);
+    const ids = new Set(ready.map((n) => n.id));
+    expect(ids.has(taskId)).toBe(true);
+  });
+
   test("ready_tasks_view (SQL) also filters closed directives", () => {
     const db = openDb(":memory:");
     runViews(db);

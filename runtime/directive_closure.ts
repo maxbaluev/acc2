@@ -47,16 +47,28 @@ const readDirectiveLifecycle = (db: Database, directiveId: string): "finite" | "
  *  the substrate when all tasks are terminal), directive_archived_by_operator
  *  (owner-initiated), or directive_archived_missed_reviews (rolling
  *  housekeeping). Used by the scheduler / readyTasks() to skip the whole
- *  DAG. */
+ *  DAG. Directives whose LATEST archive/close event was followed by a
+ *  `directive_resumed` are considered live again — operators can recover
+ *  supervisor-quarantined directives (owner directive 2026-05-15: "system
+ *  never should loose tasks if task explosion"). */
 export const closedDirectiveIds = (db: Database): Set<string> => {
   const rows = db
     .query(
-      `SELECT DISTINCT directive_id FROM events
-       WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')`,
+      `SELECT directive_id, kind, ts FROM events
+       WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews', 'directive_resumed')
+       ORDER BY ts ASC, rowid ASC`,
     )
-    .all() as Array<{ directive_id: string }>;
+    .all() as Array<{ directive_id: string; kind: string; ts: string }>;
+  const latest = new Map<string, string>();
+  for (const r of rows) {
+    if (!r.directive_id) continue;
+    latest.set(r.directive_id, r.kind);
+  }
   const out = new Set<string>();
-  for (const r of rows) if (r.directive_id) out.add(r.directive_id);
+  for (const [id, kind] of latest) {
+    if (kind === "directive_resumed") continue;
+    out.add(id);
+  }
   return out;
 };
 
