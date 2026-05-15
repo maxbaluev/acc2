@@ -35,3 +35,16 @@ if (process.env.ACC2_BRIDGE_MODE !== "mock") {
 // crash_recovery.ts) override per-spawn.
 process.env.ACC2_DISABLE_WORKERS ??=
   "embedder,scheduler,father,rolling_reviewer,rehabilitation,supervisor";
+
+// Tests must NEVER read or write the operator's live ~/.accint/state.db.
+// Pin a per-suite hermetic state dir so admin / CLI tests that open the
+// default substrate path don't inherit production substrate state (e.g.
+// the updateOpencode cooldown gate would consult real opencode_upgrade_failed
+// rows from operator usage and short-circuit the test path).
+const homePrefix = process.env.HOME ?? "/no-such-prefix";
+if (!process.env.ACC2_STATE_DIR || process.env.ACC2_STATE_DIR.startsWith(homePrefix)) {
+  process.env.ACC2_STATE_DIR = `/tmp/acc2-test-state-${process.pid}`;
+}
+if (process.env.ACC2_STATE_DB?.startsWith(homePrefix)) {
+  process.env.ACC2_STATE_DB = `${process.env.ACC2_STATE_DIR}/state.db`;
+}

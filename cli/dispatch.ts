@@ -127,6 +127,53 @@ const daemonStatus = async (): Promise<number> => {
   return 0;
 };
 
+/** Atomic stop+start with readiness polling. Operator workflow: edit
+ *  code → `acc daemon restart` → resume work. Returns 0 once the new
+ *  daemon's /health surface returns status=ok or 1 on timeout. */
+const daemonRestart = async (): Promise<number> => {
+  const wasRunning = auxBaseUrl();
+  if (wasRunning) {
+    const stopCode = await daemonStop();
+    if (stopCode !== 0) return stopCode;
+    // Poll until the old daemon's lock + port are clear (up to 10s).
+    const stopDeadline = Date.now() + 10_000;
+    while (Date.now() < stopDeadline) {
+      if (!auxBaseUrl()) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  // Clean any lingering stale lock from a killed daemon.
+  try {
+    const { homedir } = await import("node:os");
+    const path = await import("node:path");
+    const fs = await import("node:fs");
+    const sock = path.join(homedir(), ".accint", "v2.sock");
+    const token = path.join(homedir(), ".accint", "v2.sock.token");
+    if (fs.existsSync(sock)) fs.unlinkSync(sock);
+    if (fs.existsSync(token)) fs.unlinkSync(token);
+  } catch { /* best-effort */ }
+  const startCode = await daemonStart();
+  if (startCode !== 0) return startCode;
+  // Poll until the NEW daemon is ready (up to 30s — boot includes integrity
+  // check + worker first-tick).
+  const readyDeadline = Date.now() + 30_000;
+  while (Date.now() < readyDeadline) {
+    try {
+      const base = auxBaseUrl();
+      if (base) {
+        const health = await rpcGet<{ status?: string }>(`${base}/health`).catch(() => null);
+        if (health && health.status === "ok") {
+          console.log("daemon restart complete (status=ok)");
+          return 0;
+        }
+      }
+    } catch { /* poll retry */ }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  console.error("daemon restart timed out waiting for /health=ok");
+  return 1;
+};
+
 /** Programmatic entry — exported so dispatch.test.ts can drive it without
  *  shelling out. Returns the process exit code. */
 export const runDispatch = async (argv: string[]): Promise<number> => {
@@ -175,6 +222,7 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
   if (cmd === "daemon") {
     if (sub === "start")          return daemonStart();
     if (sub === "stop")           return daemonStop();
+    if (sub === "restart" || sub === "reload") return daemonRestart();
     if (sub === "status")         return daemonStatus();
     if (sub === "install-service") {
       const { runServiceInstall } = await import("./service-install");

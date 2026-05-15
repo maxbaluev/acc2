@@ -153,6 +153,7 @@ describe("supervisor — supervisorTick composition", () => {
     expect(result).toEqual({
       redispatch_storm_count: 0,
       dag_explosion_count: 0,
+      dispatch_budget_exceeded_count: 0,
       bridge_health_degraded: false,
       bridge_health_recovered: false,
     });

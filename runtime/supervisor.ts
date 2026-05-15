@@ -69,6 +69,13 @@ export const SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS = 2;
 
 const SUPERVISOR_DIRECTIVE_AGE_MS = SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS * 60 * 60 * 1000;
 
+/** Token-burn budget per directive — maximum total brain_dispatched
+ *  events allowed under ONE directive before the supervisor archives it.
+ *  A healthy DAG with 5-10 sub-tasks should produce 10-20 dispatches
+ *  total; > 50 means the brain is looping without converging. Caps
+ *  cost-burn from any pathology the per-task / per-bridge gates miss. */
+export const SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE = 50;
+
 /** Detect tasks in a redispatch storm and fail them. Returns the list of
  *  task ids that were quarantined this tick. Idempotent — a task that
  *  already has a task_failed event will not be re-failed. */
@@ -229,14 +236,78 @@ export const detectDagExplosion = (
   return archived;
 };
 
+/** Detect directives whose total brain_dispatched count exceeds the
+ *  budget. Token-burn prevention — a single directive cannot infinitely
+ *  spend brain cycles. Catches the recurring-cycle-no-convergence
+ *  pattern that the DAG-explosion gate misses when the directive has
+ *  few simultaneously-ready tasks but many sequential rounds.
+ *  Idempotent: skips directives already closed/archived. */
+export const detectDispatchBudgetExceeded = (
+  db: Database,
+): Array<{ directive_id: string; dispatch_count: number }> => {
+  const rows = db
+    .query(
+      `SELECT directive_id, COUNT(*) AS dispatch_count
+       FROM events
+       WHERE kind = 'brain_dispatched'
+       GROUP BY directive_id
+       HAVING dispatch_count > ?`,
+    )
+    .all(SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE) as Array<{ directive_id: string; dispatch_count: number }>;
+
+  const archived: Array<{ directive_id: string; dispatch_count: number }> = [];
+  for (const r of rows) {
+    const closed = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE directive_id = ?
+           AND kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         LIMIT 1`,
+      )
+      .get(r.directive_id);
+    if (closed) continue;
+    try {
+      emitEvent(db, {
+        kind: "directive_archived_by_operator",
+        substrate_origin: "substrate_auto",
+        directive_id: r.directive_id,
+        payload: {
+          reason: "supervisor_dispatch_budget_exceeded",
+          dispatch_count: r.dispatch_count,
+          threshold: SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE,
+        } as JsonValue,
+      });
+      emitEvent(db, {
+        kind: "supervisor_intervention_recorded",
+        substrate_origin: "substrate_auto",
+        directive_id: r.directive_id,
+        payload: {
+          pathology: "dispatch_budget_exceeded",
+          corrective_event: "directive_archived_by_operator",
+          dispatch_count: r.dispatch_count,
+          threshold: SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE,
+        } as JsonValue,
+      });
+      archived.push(r);
+    } catch (err) {
+      logger.warn(
+        { where: "supervisor.dispatch_budget", directive_id: r.directive_id, err: (err as Error).message },
+        "supervisor failed to archive over-budget directive",
+      );
+    }
+  }
+  return archived;
+};
+
 export type SupervisorTickResult = {
   redispatch_storm_count: number;
   dag_explosion_count: number;
+  dispatch_budget_exceeded_count: number;
   bridge_health_degraded: boolean;
   bridge_health_recovered: boolean;
 };
 
-/** One supervisor tick. Composes the three detectors + bridge_health
+/** One supervisor tick. Composes the four detectors + bridge_health
  *  gate. Safe to call repeatedly; every detector is idempotent. */
 export const supervisorTick = (
   db: Database,
@@ -245,6 +316,7 @@ export const supervisorTick = (
   const result: SupervisorTickResult = {
     redispatch_storm_count: 0,
     dag_explosion_count: 0,
+    dispatch_budget_exceeded_count: 0,
     bridge_health_degraded: false,
     bridge_health_recovered: false,
   };
@@ -253,6 +325,9 @@ export const supervisorTick = (
   }
   try { result.dag_explosion_count = detectDagExplosion(db, opts).length; } catch (err) {
     logger.warn({ where: "supervisor.tick.dag_explosion", err: (err as Error).message }, "dag-explosion detector failed");
+  }
+  try { result.dispatch_budget_exceeded_count = detectDispatchBudgetExceeded(db).length; } catch (err) {
+    logger.warn({ where: "supervisor.tick.dispatch_budget", err: (err as Error).message }, "dispatch-budget detector failed");
   }
   try { result.bridge_health_degraded = maybeMarkDegraded(db, opts); } catch (err) {
     logger.warn({ where: "supervisor.tick.bridge_degraded", err: (err as Error).message }, "bridge_health degraded check failed");

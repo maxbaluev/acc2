@@ -253,8 +253,14 @@ export const runUpdateOpencode = async (env: AdminEnv): Promise<number> => {
     await new Promise((r) => setTimeout(r, 500));
   }
   // Open the substrate DB so events land even when the daemon is down.
-  const stateDb = process.env.ACC2_STATE_DB ?? defaultStateDbPath();
-  const db = existsSync(stateDb) ? openDb(stateDb) : undefined;
+  // Respect env.stateDbPath / env.openSubstrate overrides so tests can
+  // hermetic-isolate; default to the real state DB in production.
+  const stateDb = env.stateDbPath ?? process.env.ACC2_STATE_DB ?? defaultStateDbPath();
+  let db: Database | undefined;
+  try {
+    if (env.openSubstrate) db = env.openSubstrate(stateDb);
+    else if (existsSync(stateDb)) db = openDb(stateDb);
+  } catch { /* leave db undefined */ }
   env.out(`upgrading opencode (${current.installMethod})…`);
   const result = await updateOpencode({ env: env.version, db });
   if (wasRunning) await env.startDaemon();

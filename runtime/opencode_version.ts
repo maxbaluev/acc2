@@ -311,6 +311,15 @@ export type UpdateOpts = {
   env?: VersionEnv;
 };
 
+/** Cooldown window after a failed upgrade attempt. Any caller (operator,
+ *  brain shell, autonomous loop) that hits updateOpencode with the same
+ *  (from, to) target within this window is short-circuited with
+ *  `recent_failure_cooldown`. Prevents the retry storms observed
+ *  2026-05-15 07:00-07:05 (15+ attempts in 5 min, all failing with the
+ *  same install_failed reason). 10min gives a real upstream fix time
+ *  to land while making retries cheap to ignore. Override with `force`. */
+export const UPDATE_OPENCODE_COOLDOWN_MS = 10 * 60 * 1000;
+
 /** Run the upgrade. Detects install method, dispatches the appropriate
  *  command, emits substrate events for the trajectory. */
 export const updateOpencode = async (opts: UpdateOpts = {}): Promise<UpdateResult> => {
@@ -319,6 +328,31 @@ export const updateOpencode = async (opts: UpdateOpts = {}): Promise<UpdateResul
   const latest = await checkLatestOpencodeVersion(env);
   const fromVersion = current.version;
   const toVersion = latest?.version ?? "unknown";
+
+  // Recent-failure cooldown gate. If the same (from→to) recently failed,
+  // refuse without spawning. Caller can force with opts.force.
+  if (!opts.force && opts.db && toVersion !== "unknown") {
+    const cutoffIso = new Date(Date.now() - UPDATE_OPENCODE_COOLDOWN_MS).toISOString();
+    const recentFail = opts.db
+      .query(
+        `SELECT ts, payload FROM events
+         WHERE kind = 'opencode_upgrade_failed' AND ts >= ?
+         ORDER BY ts DESC LIMIT 1`,
+      )
+      .get(cutoffIso) as { ts: string; payload: string } | null;
+    if (recentFail) {
+      try {
+        const p = JSON.parse(recentFail.payload ?? "{}") as { from?: string; to?: string; reason?: string };
+        if (p.from === fromVersion && p.to === toVersion) {
+          return {
+            ok: false,
+            reason: "no_update_available",
+            detail: `recent_failure_cooldown:last_failure_at=${recentFail.ts} reason=${p.reason ?? "?"}; window=${UPDATE_OPENCODE_COOLDOWN_MS}ms`,
+          };
+        }
+      } catch { /* malformed payload — fall through to attempt */ }
+    }
+  }
 
   // Refuse if we don't know how to upgrade this install.
   const command = upgradeCommand(current.installMethod);

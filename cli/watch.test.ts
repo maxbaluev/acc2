@@ -194,8 +194,9 @@ describe("runWatch programmatic", () => {
     const buffer: string[] = [];
     const writer = (s: string) => { buffer.push(s); };
 
-    // Fire-and-forget: emit a synthetic event ~200ms into the run, after the
-    // SSE consumer has had time to subscribe.
+    // Fire-and-forget: emit a synthetic event ~500ms into the run, after the
+    // SSE consumer has had time to subscribe. Bumped from 200→500ms +
+    // durationMs 1200→3000 to be robust against parallel-test IO contention.
     setTimeout(() => {
       try {
         emitEvent(handle!.db, {
@@ -204,9 +205,9 @@ describe("runWatch programmatic", () => {
           payload: { stage: "mid_run" },
         });
       } catch { /* swallow */ }
-    }, 200);
+    }, 500);
 
-    await runWatch([], { durationMs: 1200, writer, pollIntervalMs: 10_000 });
+    await runWatch([], { durationMs: 3000, writer, pollIntervalMs: 10_000 });
 
     const joined = buffer.join("");
     expect(joined).toContain("watch_test_inflight");
