@@ -439,10 +439,12 @@ const RUNTIMES_AVAILABLE_TEXT = [
 ].join("\n");
 
 const WORKFLOW_TEXT = [
-  "YOUR WORKFLOW (one cycle per dispatch — refinement via DAG edges, not re-prompting):",
+  "YOUR WORKFLOW (RLM cycle: prompt is metadata; substrate is external state; recurse via DAG edges, not chat history):",
   "  1. Write/reuse a code artifact for a runtime + a verifier returning residual in [0,1].",
   "  2. Emit action_predicted with action_artifact_id + verifier_artifact_id + predicted_residual.",
   "  3. For complex sub-goals, emit task_node_opened + task_edge_recorded (refines/requires).",
+  "     Use substrate.search/read as BOUNDED PEEKS into external state; if the next semantic slice",
+  "     is too large or independent, emit a refinement edge so the scheduler composes a fresh prompt.",
   "  4. Propose knowledge_candidate events for new patterns (substrate promotes via outcome).",
   "     EMIT MID-CYCLE — don't wait for closure. See EMISSION GRAMMARS for the rich schema.",
   "  5. For new reusable scripts, emit code_artifact_candidate.",
@@ -479,8 +481,13 @@ const EMISSION_GRAMMARS_TEXT = [
   "      implications:       [\"<what follows>\", ...],",
   "      applies_to:         [\"<domain/context tag>\", ...],",
   "      confidence_estimate: 0.0-1.0,",
-  "      source_files:       [\"path/to/file.ts:120\", ...]",
+  "      source_files:       [\"path/to/file.ts:120\", ...],",
+  "      rlm_mechanism?:     \"external_state\" | \"bounded_peek\" | \"symbolic_recursion\"",
+  "                         | \"constant_metadata\" | \"closure_learning\",",
+  "      paper_citation?:    \"arXiv:2512.24601v3 §<section>\"   // RLM-claim grounding",
   "    }",
+  "    For RLM / design claims, cite the paper section and tag the mechanism;",
+  "    do not invent paper terms — verify literal tokens before quoting them.",
   "",
   "  code_artifact_candidate.payload (provenance):",
   "    {",
@@ -573,6 +580,7 @@ const NOT_DO_TEXT = [
   "  - Look for a tool menu — there isn't one. Write code for a runtime.",
   "  - Author canonical knowledge directly — propose candidates; substrate promotes via outcome correlation.",
   "  - Iterate within this cycle — emit a refinement edge if more work remains.",
+  "  - Rebuild the environment in-context or summarize it as a substitute for substrate state; use symbolic handles + ledger mutations instead.",
 ].join("\n");
 
 const FIXTURE_D_MARKER = "FIXTURE: fixture_d_count_todos";
