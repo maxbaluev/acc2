@@ -147,6 +147,32 @@ export const startHotreloadWorker = (
         state.reload_total++;
         pendingQuiescent.delete(relPath);
         state.pending_quiescent_count = pendingQuiescent.size;
+        // Brain convergence axis E (2026-05-15): invalidate any
+        // process-local caches the manifest declares the reloaded
+        // module owns. Without this, hot-reloading prompt_composer
+        // would re-import the new code but downstream dispatches
+        // would still serve cached prompts built by the old code.
+        const invalidatedCaches: string[] = [];
+        if (entry.invalidates && entry.invalidates.length > 0) {
+          for (const cacheName of entry.invalidates) {
+            try {
+              if (cacheName === "prompt_cache") {
+                const { invalidatePromptCache } = await import("./prompt_cache");
+                invalidatePromptCache();
+                invalidatedCaches.push(cacheName);
+              } else if (cacheName === "activation_bus_listeners") {
+                // Reserved — listener cleanup would break in-flight
+                // worker subscriptions. Implementing this needs a
+                // worker-reregister hook, deferred.
+              }
+            } catch (err) {
+              logger.warn(
+                { where: "hotreload.invalidate_cache", cache: cacheName, err: (err as Error).message },
+                "cache invalidation failed",
+              );
+            }
+          }
+        }
         try {
           emitEvent(db, {
             kind: "daemon_hotreload_completed",
@@ -156,6 +182,7 @@ export const startHotreloadWorker = (
               file_path: relPath,
               strategy: entry.strategy,
               cache_bust_url: url,
+              invalidated_caches: invalidatedCaches,
             },
           });
         } catch (err) {

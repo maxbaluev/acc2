@@ -29,6 +29,13 @@ export type HotReloadEntry = {
   excludes?: string[];
   strategy: ReloadStrategy;
   reason: string;
+  /** Brain convergence axis E (2026-05-15): process-local caches the
+   *  worker must invalidate after a successful in-process reload.
+   *  Without this list, a hot-reloaded prompt_composer or extractor
+   *  would still hand stale memoised values to subsequent dispatches.
+   *  Keys are well-known cache names; the worker maps them to
+   *  invalidate-callbacks at reload time. */
+  invalidates?: ReadonlyArray<"prompt_cache" | "activation_bus_listeners">;
 };
 
 /** Globs are minimatch-style: `**` matches any path segment. Excludes
@@ -78,6 +85,9 @@ export const HOTRELOAD_MANIFEST: readonly HotReloadEntry[] = [
     globs: ["runtime/prompt_composer.ts"],
     strategy: "in_process",
     reason: "Pure prompt composition; re-import refreshes the section selection logic.",
+    // Reloading the composer may change the output for identical inputs.
+    // Drop the prompt_cache so the next dispatch composes fresh.
+    invalidates: ["prompt_cache"],
   },
   {
     name: "runtime_scheduler",
