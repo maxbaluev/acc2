@@ -295,6 +295,22 @@ const applyWeightedResidualOutcome = (
 
 // ── Citation collection from the three driving events + bodies ─────
 
+// Differential weighting (2026-05-15 — loop-elegance gap #1):
+//   The brain saw K entries in the RETRIEVED KNOWLEDGE prompt section
+//   but typically only cites 2-3 of them in action_predicted.context_refs.
+//   Pre-fix every prompt-exposed entry got the same Shapley share as
+//   an explicitly-cited one — noise drowned signal. Now:
+//     - explicit citations (action/obs/scored.context_refs + body @cite)
+//       get FULL Shapley weight (factor 1.0).
+//     - exposure-only entries (retrieval_binding emitted, NOT cited)
+//       get the EXPOSURE_ONLY_FACTOR. Smaller share — they were in the
+//       prompt but didn't drive the action, so they earn / lose less.
+//   This implements precise attribution without requiring the brain to
+//   actively exclude prompt entries; absence-of-citation is the signal.
+const EXPOSURE_ONLY_FACTOR = 0.2;
+
+type CitationEntry = { id: string; weightFactor: number };
+
 const collectCitations = (
   db: Database,
   params: DistributeCreditParams,
@@ -302,31 +318,37 @@ const collectCitations = (
   verifierBodyCitations: string[],
   actionArtifactId: string,
   verifierArtifactId: string,
-): string[] => {
+): CitationEntry[] => {
   const seen = new Set<string>();
-  const out: string[] = [];
+  const out: CitationEntry[] = [];
+  const explicitlyCited = new Set<string>();
   const actionEv = getEventById(db, params.action_event_id);
   const obsEv = getEventById(db, params.observation_event_id);
   const scoredEv = getEventById(db, params.scored_event_id);
-  const ordered: string[] = [];
+
+  // First pass: every EXPLICIT citation (context_refs across the three
+  // events + body @cite markers). These get the full Shapley share.
+  const ordered: Array<{ id: string; explicit: boolean }> = [];
   for (const ev of [actionEv, obsEv, scoredEv]) {
     if (!ev) continue;
     for (const ref of ev.context_refs ?? []) {
-      ordered.push(ref);
+      ordered.push({ id: ref, explicit: true });
+      explicitlyCited.add(ref);
     }
   }
-  for (const id of actionBodyCitations) ordered.push(id);
-  for (const id of verifierBodyCitations) ordered.push(id);
+  for (const id of actionBodyCitations) {
+    ordered.push({ id, explicit: true });
+    explicitlyCited.add(id);
+  }
+  for (const id of verifierBodyCitations) {
+    ordered.push({ id, explicit: true });
+    explicitlyCited.add(id);
+  }
 
-  // Organism-alignment audit b3qc9ryzj follow-up (2026-05-15): close
-  // the four-link credit chain for depth-1 retrieval (k_554/k_555).
-  // retrieval_binding events emitted by the dispatcher record which
-  // knowledge entries actually landed in the brain prompt. Pre-fix
-  // those bindings emitted but no consumer used them — the loop was
-  // structurally open. Now collectCitations pulls source_event_id
-  // from every retrieval_binding emitted on this dispatch's task
-  // before the scored event, so the cited knowledge entries get
-  // candidate_confirmed/contradicted automatically on outcome.
+  // Second pass: retrieval_binding source ids — but only as EXPOSURE-ONLY
+  // when not already in the explicit set. The dispatch's k_554 four-link
+  // chain still closes (every binding feeds credit) but the magnitude
+  // tracks whether the brain ACTUALLY cited the entry vs merely saw it.
   if (actionEv && actionEv.task_id && scoredEv) {
     const bindings = db
       .query(
@@ -341,18 +363,23 @@ const collectCitations = (
       try {
         const p = JSON.parse(b.payload) as Record<string, unknown>;
         const sourceId = p.source_event_id as string | undefined;
-        if (sourceId) ordered.push(sourceId);
+        if (!sourceId) continue;
+        const explicit = explicitlyCited.has(sourceId);
+        ordered.push({ id: sourceId, explicit });
       } catch { /* skip malformed */ }
     }
   }
 
-  for (const id of ordered) {
+  for (const entry of ordered) {
     // Skip the action + verifier artifact ids themselves — they receive
     // primary credit, not third-party citation credit.
-    if (id === actionArtifactId || id === verifierArtifactId) continue;
-    if (!seen.has(id)) {
-      seen.add(id);
-      out.push(id);
+    if (entry.id === actionArtifactId || entry.id === verifierArtifactId) continue;
+    if (!seen.has(entry.id)) {
+      seen.add(entry.id);
+      out.push({
+        id: entry.id,
+        weightFactor: entry.explicit ? 1.0 : EXPOSURE_ONLY_FACTOR,
+      });
     }
   }
   return out;
@@ -522,8 +549,11 @@ export const distributeCredit = async (
   const contributions: CreditContribution[] = [];
 
   for (let i = 0; i < cited.length; i++) {
-    const targetId = cited[i]!;
-    const baseWeight = weights[i]!;
+    const targetId = cited[i]!.id;
+    // Differential weighting: explicit citations get full Shapley share;
+    // exposure-only (in prompt via retrieval_binding but uncited) gets
+    // EXPOSURE_ONLY_FACTOR. See collectCitations for rationale.
+    const baseWeight = weights[i]! * cited[i]!.weightFactor;
     const kind = classifyTarget(db, targetId);
 
     if (kind === "code_artifact") {

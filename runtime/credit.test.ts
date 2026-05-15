@@ -660,7 +660,7 @@ describe("collectCitations dedup + ordering (internal helper)", () => {
       residual: 0,
       payload: {},
     });
-    const ids = __collectCitationsForTest(
+    const cited = __collectCitationsForTest(
       db,
       {
         action_event_id: ap.id,
@@ -674,6 +674,11 @@ describe("collectCitations dedup + ordering (internal helper)", () => {
       "AA",
       "VV",
     );
-    expect(ids).toEqual(["k_001", "k_002", "k_003", "k_004", "k_005"]);
+    // collectCitations now returns CitationEntry[] (id + weightFactor)
+    // for differential weighting of explicit-cite vs exposure-only.
+    // Every entry in this test was cited via context_refs / body @cite,
+    // so weightFactor should be 1.0 for all.
+    expect(cited.map((c) => c.id)).toEqual(["k_001", "k_002", "k_003", "k_004", "k_005"]);
+    expect(cited.every((c) => c.weightFactor === 1.0)).toBe(true);
   });
 });
