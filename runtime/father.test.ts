@@ -258,6 +258,16 @@ describe("detectFatherDrift", () => {
       expect(template.action).toBe("compile_directive_from_template");
     }
   });
+
+
+  test("includes a static compression-review objective ranked by architectural entropy reduction", () => {
+    const template = DIRECTIVE_TEMPLATES.find((t) => t.template_id === "father_compression_review");
+    expect(template).toBeTruthy();
+    expect(template!.directive_text).toContain("duplicated prompt clauses");
+    expect(template!.directive_text).toContain("fragmented recipes");
+    expect(template!.directive_text).toContain("architectural entropy reduction");
+    expect(template!.initial_task_goal).toContain("deletion/merge/compression amendments");
+  });
 });
 
 describe("fatherLoop", () => {

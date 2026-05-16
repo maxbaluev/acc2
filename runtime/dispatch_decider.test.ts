@@ -29,6 +29,26 @@ describe("dispatch_decider", () => {
     }
   });
 
+  test("exposes open-ended route axes and learned verifier evidence on every decision", () => {
+    const db = openDb(":memory:");
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      residual: 0.1,
+      payload: {
+        outcome_dimensions: { one_shot_confidence: 0.9, information_gap: 0.2 },
+        reliability_profile: { reversibility: 0.8, owner_control_need: 0.3 },
+        verifier_result: { breakdown: { decomposition_value: 0.4, cost_pressure: 0.7, time_sensitivity: 0.6 } },
+      },
+    });
+    const decision = decideDispatch(db, sampleTask({ goal: "fix typo", target_resources: ["repo:docs/README.md"] } as Partial<TaskNode>));
+    expect(decision.routing_axes.one_shot_confidence).toBeGreaterThan(0.5);
+    expect(decision.routing_axes.information_gap).toBeGreaterThanOrEqual(0);
+    expect(decision.route_scores.opencode_brain).toBeGreaterThanOrEqual(0);
+    expect(decision.route_scores.claude_inline).toBeGreaterThanOrEqual(0);
+    expect(decision.verifier_evidence.action_scored_rows_considered).toBeGreaterThan(0);
+  });
+
   test("estimates short goals as low complexity", () => {
     const db = openDb(":memory:");
     const decision = decideDispatch(db, sampleTask({ goal: "count todos" }));

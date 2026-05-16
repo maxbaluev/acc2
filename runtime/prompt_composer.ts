@@ -23,6 +23,7 @@ import type { RetrievalHit, RetrievalResult } from "./retrieval";
 import { renderStakeholderBlock } from "./stakeholder_compositor";
 import { renderInterferenceBlock } from "./interference";
 import { emitEvent } from "./events";
+import { goalShape } from "./goal_shape";
 import type { JsonValue, OwnerProfile } from "../substrate/types";
 import { OWNER_PROFILE_DEFAULTS } from "../substrate/types";
 
@@ -108,6 +109,13 @@ type TaskRow = {
   urgency: string;
 };
 
+type OwnerContextRow = { id: string; ts: string; kind: string; directive_id: string | null; text: string; detected_language?: string | null };
+
+type OwnerPolicyProjectionInput = {
+  recentOwnerContext?: OwnerContextRow[];
+  directive?: { text?: string | null; goal?: string; lifecycle?: string; urgency?: string };
+};
+
 const readTaskRow = (db: Database, taskId: string): TaskRow | null => {
   // Phase D: task rows live as `task_node_opened` events with payload.goal.
   // Once a tasks table exists (Phase E DAG topology), we'll query it directly.
@@ -145,7 +153,7 @@ const readDirectiveGoal = (db: Database, directiveId: string): string | null => 
   }
 };
 
-const readKnowledgeTopK = (db: Database, k: number): Array<{ id: string; text: string; score: number }> => {
+const readKnowledgeTopK = (db: Database, k: number, goalText?: string | null): Array<{ id: string; text: string; score: number }> => {
   // Recency fallback for the RETRIEVED KNOWLEDGE section: pulls recent
   // promoted knowledge candidates when the caller did NOT pre-compute a
   // reranker hit list (i.e. the embedding index is empty or the caller chose
@@ -159,13 +167,24 @@ const readKnowledgeTopK = (db: Database, k: number): Array<{ id: string; text: s
   // {text, claim, summary, insight}. Join through to candidate via
   // payload.candidate_id (or context_refs[0]) and walk the fallback chain
   // so the prompt section renders useful text instead of '(no text)'.
+  const shape = goalText ? goalShape(goalText) : null;
   const rows = db
     .query(
       `SELECT
          p.id              AS id,
          p.payload         AS p_payload,
          p.context_refs    AS p_ctx,
-         c.payload         AS c_payload
+         c.payload         AS c_payload,
+         CASE
+           WHEN ? IS NOT NULL AND (
+             json_extract(p.payload, '$.goal_shape') = ?
+             OR EXISTS (
+               SELECT 1 FROM json_each(p.payload, '$.goal_shapes')
+               WHERE value = ?
+             )
+           ) THEN 1
+           ELSE 0
+         END AS shape_match
        FROM events p
        LEFT JOIN events c
          ON c.kind = 'knowledge_candidate'
@@ -174,10 +193,10 @@ const readKnowledgeTopK = (db: Database, k: number): Array<{ id: string; text: s
               json_extract(p.context_refs, '$[0]')
             )
        WHERE p.kind = 'knowledge_promoted'
-       ORDER BY p.ts DESC
+       ORDER BY shape_match DESC, p.ts DESC
        LIMIT ?`,
     )
-    .all(k) as Array<Record<string, unknown>>;
+    .all(shape, shape, shape, k) as Array<Record<string, unknown>>;
   const out: Array<{ id: string; text: string; score: number }> = [];
   for (const r of rows) {
     try {
@@ -332,7 +351,7 @@ const buildOtherGoalsSection = (rows: ReturnType<typeof readOtherActiveGoals>): 
 const readOwnerContext = (
   db: Database,
   k: number,
-): Array<{ id: string; ts: string; kind: string; directive_id: string | null; text: string; detected_language?: string | null }> => {
+): OwnerContextRow[] => {
   const rows = db
     .query(
       `SELECT event_id, ts, directive_id, kind, payload
@@ -456,28 +475,71 @@ const bootstrapPolicyForObservationCount = (count: unknown): string => {
   return "bootstrap_policy: sparse profile (new); use plain language + one question at a time + explain concepts on first encounter; respond in the owner's detected language when available and do not assume English";
 };
 
-export const buildOwnerProfileSection = (profile: OwnerProfile): string => {
+const ownerPolicyNumber = (n: number): string => Math.max(0, Math.min(1, n)).toFixed(2);
+
+const buildSituationalOwnerPolicyLines = (profile: OwnerProfile, input: OwnerPolicyProjectionInput = {}): string[] => {
+  const directiveText = String(input.directive?.text ?? "") + "\n" + String(input.directive?.goal ?? "");
+  const recent = input.recentOwnerContext ?? [];
+  const signals = profile.rendering_signals && typeof profile.rendering_signals === "object" ? profile.rendering_signals : {};
+  const understoodCount = profile.understood_concepts && typeof profile.understood_concepts === "object" ? Object.keys(profile.understood_concepts).length : 0;
+  const recentDecisions = recent.filter((r) => r.kind === "owner_decision_recorded").length;
+  const recentConsent = recent.some((r) => /\b(consent granted|approved|authorized|apply|implement)\b/i.test(r.text));
+  const directiveRisk = Math.min(1, (/\b(runtime|cli|docs|contract|irreversible|delete|external|stakeholder)\b/i.test(directiveText) ? 0.45 : 0.15) + (/\b(multi-file|parallel|amendments|refactor|audit)\b/i.test(directiveText) ? 0.30 : 0));
+  const taskAmbiguity = Math.min(1, (/\b(audit|understand|improve|design|complex|universal)\b/i.test(directiveText) ? 0.45 : 0.15) + (directiveText.split(/\s+/).filter(Boolean).length > 80 ? 0.30 : 0));
+  const autonomy = typeof profile.autonomy_score === "number" ? profile.autonomy_score : OWNER_PROFILE_DEFAULTS.autonomy_score;
+  const autonomyControl = Math.min(1, (1 - autonomy) * 0.70 + (recentConsent ? -0.10 : 0.10) + (directiveRisk * 0.35));
+  const observedComprehension = Math.min(1, understoodCount * 0.08 + ((signals.code_density ?? 0) * 0.35) + ((signals.ops_vocabulary ?? 0) * 0.30));
+  const urgencyPressure = input.directive?.urgency === "crisis" ? 1 : input.directive?.urgency === "elevated" ? 0.65 : 0.25;
+  const axes: Record<string, number> = {
+    directive_risk: directiveRisk,
+    task_ambiguity: taskAmbiguity,
+    autonomy_control_need: Math.max(0, autonomyControl),
+    observed_comprehension: observedComprehension,
+    urgency_pressure: urgencyPressure,
+    recent_owner_decision_density: Math.min(1, recentDecisions / 4),
+  };
+  const axisText = Object.entries(axes).map(([k, v]) => k + "=" + ownerPolicyNumber(v)).join(", ");
+  const terms = Array.isArray(profile.preferred_terms) && profile.preferred_terms.length > 0 ? profile.preferred_terms.slice(0, 12).join(", ") : "(none recorded)";
+  return [
+    "owner_policy (situational projection; open-ended Records, no persona enums):",
+    "  axes: " + axisText,
+    "  control_surface: autonomy_score=" + ownerPolicyNumber(autonomy) + " recent_consent=" + (recentConsent ? 1 : 0) + " recent_decisions=" + recentDecisions,
+    "  render_policy: mirror preferred_terms; keep code identifiers literal; use compact evidence/event language when code_density or ops_vocabulary is high",
+    "  preferred_terms_sample: " + terms,
+  ];
+};
+
+export const buildOwnerProfileSection = (profile: OwnerProfile, input: OwnerPolicyProjectionInput = {}): string => {
   // Render only non-default fields so the prompt stays lean when the
   // owner hasn't expressed any preference. When everything is default,
   // emit a stub so the brain learns to look for this section.
   const lines: string[] = [];
+  const ownerPolicyLines = buildSituationalOwnerPolicyLines(profile, input);
+  lines.push(...ownerPolicyLines);
   const lang = profile.detected_language;
   if (lang && lang !== OWNER_PROFILE_DEFAULTS.detected_language) {
     lines.push(`detected_language: ${lang}`);
     lines.push("owner_language_policy: respond to owner-visible summaries in detected_language when confidence >= 0.7; do not assume English; keep substrate-internal claims/artifact summaries in English");
   }
-  // Conversation-as-learning-surface fields (DSGSAZGMF1, universal):
-  // rendering_signals → per-dimension bias (continuous, open-ended);
-  // preferred_terms → mirror back; avoided_terms → never use;
-  // exposed_concepts → explain on first encounter only.
-  if (profile.rendering_signals && typeof profile.rendering_signals === "object") {
-    const sigs = Object.entries(profile.rendering_signals)
+  // Conversation-as-learning-surface fields (universal): open-ended
+  // signal maps are discovered dimensions, not fixed persona enums.
+  const signalFields = [
+    "rendering_signals",
+    "autonomy_signals",
+    "control_signals",
+    "risk_signals",
+    "collaboration_signals",
+    "goal_continuity_signals",
+  ] as const;
+  for (const field of signalFields) {
+    const raw = profile[field];
+    if (!raw || typeof raw !== "object") continue;
+    const sigs = Object.entries(raw)
       .filter(([, v]) => typeof v === "number" && (v as number) > 0);
-    if (sigs.length > 0) {
-      sigs.sort((a, b) => (b[1] as number) - (a[1] as number));
-      const lineParts = sigs.map(([k, v]) => `${k}=${(v as number).toFixed(2)}`);
-      lines.push(`rendering_signals (continuous, 0..1; raise dimension → bias output that way): ${lineParts.join(", ")}`);
-    }
+    if (sigs.length === 0) continue;
+    sigs.sort((a, b) => (b[1] as number) - (a[1] as number));
+    const lineParts = sigs.map(([k, v]) => `${k}=${(v as number).toFixed(2)}`);
+    lines.push(`${field} (continuous, open-ended Record<string,number>): ${lineParts.join(", ")}`);
   }
   if (Array.isArray(profile.preferred_terms) && profile.preferred_terms.length > 0) {
     lines.push(`preferred_terms (mirror these back; do NOT use jargon equivalents): ${profile.preferred_terms.join(", ")}`);
@@ -546,13 +608,14 @@ export const buildOwnerProfileSection = (profile: OwnerProfile): string => {
     if (scope) lines.push(`autonomy_scope: ${scope}`);
   }
 
-  if (lines.length === 0) {
+  if (lines.length === ownerPolicyLines.length) {
     return [
       "## OWNER PROFILE",
+      ...ownerPolicyLines,
       bootstrapPolicyForObservationCount(profile.observation_count),
       `detected_language: ${OWNER_PROFILE_DEFAULTS.detected_language} (default; update via owner_insight_candidate when evidence appears)`,
       `autonomy_score: ${OWNER_PROFILE_DEFAULTS.autonomy_score.toFixed(2)} (default; below ~0.4 blocks multi-file diffs)`,
-      "rendering_signals: sparse (do not infer code_density, ops_vocabulary, formality, abstraction, redundancy, narrative, or pace without evidence)",
+      "signal maps: sparse (rendering/autonomy/control/risk/collaboration/goal_continuity are open-ended; do not infer absent axes without evidence)",
     ].join("\n");
   }
   return ["## OWNER PROFILE", ...lines].join("\n");
@@ -662,7 +725,7 @@ const WORKFLOW_TEXT = [
   "  8. Extract lessons: emit contract_amendment_proposed OR lesson_extracted for every friction.",
   "     Route prior PENDING PROPOSALS through new task_nodes instead of letting them accumulate.",
   "  RENDERING + OWNER INPUT (conditional surfaces; no fixed enum):",
-  "  9. For owner-visible output, read OWNER PROFILE and render through open-ended rendering_signals, preferred_terms, avoided_terms, and detected_language confidence.",
+  "  9. For owner-visible output, read OWNER PROFILE and render through open-ended rendering/autonomy/control/risk/collaboration/goal_continuity signals, preferred_terms, avoided_terms, and detected_language confidence.",
   "     Keep substrate-internal English fields unchanged. If corrected, emit owner_insight_candidate citing the owner event.",
   "  10. When owner_input_received / owner_decision_recorded changes durable constraints, terms, autonomy bounds, hot topics, or recurring decision patterns, emit owner_insight_candidate with cited source event ids.",
 ].join("\n");
@@ -895,7 +958,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     ? `RETRIEVED KNOWLEDGE: (unavailable: ${opts.retrievalUnavailable.reason})`
     : opts.retrievedKnowledge && opts.retrievedKnowledge.hits.length > 0
       ? buildRetrievedKnowledgeSection(opts.retrievedKnowledge.hits)
-      : buildKnowledgeSection(readKnowledgeTopK(db, 8));
+      : buildKnowledgeSection(readKnowledgeTopK(db, 8, directiveText ?? task.goal));
   candidates.push({ name: "retrieved_knowledge", p: 1, body: knowledgeBody });
 
   const artifactBody = opts.retrievedArtifacts && opts.retrievedArtifacts.hits.length > 0
@@ -938,9 +1001,18 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // load-bearing for the LLM-on-the-fly demo generation (WORKFLOW step
   // 3) AND for the rendering rule (step 9) AND for owner-input learning
   // (step 10) — three workflow steps depend on this being present.
-  const ownerProfileBody = buildOwnerProfileSection(readOwnerProfile(db));
+  const ownerContextRows = readOwnerContext(db, 8);
+  const ownerProfileBody = buildOwnerProfileSection(readOwnerProfile(db), {
+    recentOwnerContext: ownerContextRows,
+    directive: {
+      text: directiveText,
+      goal: task.goal,
+      lifecycle: task.lifecycle,
+      urgency: task.urgency,
+    },
+  });
   candidates.push({ name: "owner_profile", p: 1, body: ownerProfileBody });
-  const ownerContextBody = buildOwnerContextSection(readOwnerContext(db, 8));
+  const ownerContextBody = buildOwnerContextSection(ownerContextRows);
   candidates.push({ name: "owner_context", p: 1, body: ownerContextBody });
   const stakeholderBody = renderStakeholderBlock(db, task.directive_id);
   candidates.push({

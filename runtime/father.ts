@@ -109,6 +109,16 @@ export const DIRECTIVE_TEMPLATES: readonly FatherDirectiveTemplate[] = Object.fr
     initial_task_goal:
       "Compose a short owner-status summary from active_objectives_view, ready tasks, and owner_conversation_view.",
   },
+  {
+    template_id: "father_compression_review",
+    action: "compile_directive_from_template",
+    directive_text:
+      "Compression review: search the substrate and repo for duplicated prompt clauses, workflow branches, low-value event kinds, overlapping lessons, repeated verifier axes, and fragmented recipes; propose deletion, merge, or compression work ranked by architectural entropy reduction.",
+    lifecycle: "finite",
+    urgency: "normal",
+    initial_task_goal:
+      "Measure duplicated prompt clauses, workflow branches, low-value event kinds, overlapping lessons, repeated verifier axes, and fragmented recipes; propose concrete deletion/merge/compression amendments ranked by expected architectural entropy reduction.",
+  },
 ]);
 
 const OWNER_ACTIVE_WINDOW_MS_DEFAULT = 60_000;

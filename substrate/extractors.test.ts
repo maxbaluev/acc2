@@ -617,6 +617,19 @@ describe("maybePromoteOwnerProfile (Layer-2 owner autonomy)", () => {
     expect(signals.ops_vocabulary).toBe(0.5);
   });
 
+  test("additive merge: generalized owner signal maps accumulate keys", () => {
+    const db = openDb(":memory:");
+    const c1 = insertEvent(db, { kind: "owner_insight_candidate", payload: { field: "risk_signals", value: { multi_file_diff_caution: 0.8 }, confidence: 0.9, claim: "risk signal classification" } });
+    expect(maybePromoteOwnerProfile(db, c1).kind).toBe("promoted");
+    const c2 = insertEvent(db, { kind: "owner_insight_candidate", payload: { field: "risk_signals", value: { protected_target_caution: 0.6 }, confidence: 0.9, claim: "second risk signal classification" } });
+    expect(maybePromoteOwnerProfile(db, c2).kind).toBe("promoted");
+    const profile = db.query("SELECT payload FROM events WHERE kind='owner_profile_recorded' ORDER BY ts DESC, rowid DESC LIMIT 1").get() as { payload: string };
+    const p = JSON.parse(profile.payload) as Record<string, unknown>;
+    const signals = p.risk_signals as Record<string, number>;
+    expect(signals.multi_file_diff_caution).toBe(0.8);
+    expect(signals.protected_target_caution).toBe(0.6);
+  });
+
   test("additive merge: exposed_concepts accumulates per-concept records across promotions", () => {
     const db = openDb(":memory:");
     const c1 = insertEvent(db, {

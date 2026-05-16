@@ -3,6 +3,7 @@ import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
 import { buildOwnerProfileSection, composePrompt, estimateTokens, readOwnerProfile } from "./prompt_composer";
 import { newId } from "./ids";
+import { goalShape } from "./goal_shape";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -211,6 +212,7 @@ describe("prompt_composer", () => {
     expect(composedDefaults.text).toContain("bootstrap_policy: sparse profile");
     expect(composedDefaults.text).toContain("do not assume English");
     expect(composedDefaults.text).toContain("autonomy_score:");
+    expect(composedDefaults.text).toContain("owner_policy (situational projection; open-ended Records, no persona enums):");
 
     // Emit one owner_profile_recorded with non-default fields, then recompose.
     emitEvent(db, {
@@ -219,6 +221,12 @@ describe("prompt_composer", () => {
       payload: {
         detected_language: "ru",
         autonomy_score: 0.3,
+        rendering_signals: { code_density: 0.8 },
+        autonomy_signals: { parallel_apply: 0.7 },
+        control_signals: { explicit_approval: 0.6 },
+        risk_signals: { multi_file_diff_caution: 0.9 },
+        collaboration_signals: { batch_updates: 0.5 },
+        goal_continuity_signals: { long_arc_memory: 0.4 },
         hot_topics: ["onboarding", "recipes"],
         things_to_never_do: ["docs/operator-install.md"],
         manual_review_patterns: ["runtime/*.test.ts"],
@@ -230,11 +238,23 @@ describe("prompt_composer", () => {
     expect(profile.detected_language).toBe("ru");
     expect(profile.autonomy_score).toBe(0.3);
 
-    const rendered = buildOwnerProfileSection(profile);
+    const rendered = buildOwnerProfileSection(profile, {
+      recentOwnerContext: [{ id: "e_owner", ts: "2026-05-16T00:00:00.000Z", kind: "owner_decision_recorded", directive_id: "d", text: "Owner consent granted; apply anchored amendment" }],
+      directive: { text: "Implement runtime amendments against current master", goal: "runtime amendment", urgency: "normal", lifecycle: "finite" },
+    });
     expect(rendered).toContain("## OWNER PROFILE");
     expect(rendered).toContain("detected_language: ru");
+    expect(rendered).toContain("owner_policy (situational projection; open-ended Records, no persona enums):");
+    expect(rendered).toContain("recent_consent=1");
+    expect(rendered).toContain("directive_risk=");
     expect(rendered).toContain("owner_language_policy: respond to owner-visible summaries in detected_language");
     expect(rendered).toContain("autonomy_score: 0.30");
+    expect(rendered).toContain("rendering_signals (continuous, open-ended Record<string,number>): code_density=0.80");
+    expect(rendered).toContain("autonomy_signals (continuous, open-ended Record<string,number>): parallel_apply=0.70");
+    expect(rendered).toContain("control_signals (continuous, open-ended Record<string,number>): explicit_approval=0.60");
+    expect(rendered).toContain("risk_signals (continuous, open-ended Record<string,number>): multi_file_diff_caution=0.90");
+    expect(rendered).toContain("collaboration_signals (continuous, open-ended Record<string,number>): batch_updates=0.50");
+    expect(rendered).toContain("goal_continuity_signals (continuous, open-ended Record<string,number>): long_arc_memory=0.40");
     expect(rendered).toContain("hot_topics: onboarding, recipes");
     expect(rendered).toContain("things_to_never_do:");
     expect(rendered).toContain("- docs/operator-install.md");
@@ -247,10 +267,23 @@ describe("prompt_composer", () => {
     expect(composed.text).toContain("## OWNER PROFILE");
     expect(composed.text).toContain("detected_language: ru");
     expect(composed.text).toContain("autonomy_score: 0.30");
+    expect(composed.text).toContain("owner_policy (situational projection; open-ended Records, no persona enums):");
     // OWNER PROFILE must render BEFORE OWNER CONTEXT (amendment shape).
     const profileIdx = composed.text.indexOf("## OWNER PROFILE");
     const contextIdx = composed.text.indexOf("OWNER CONTEXT");
     expect(profileIdx).toBeGreaterThan(-1);
     expect(contextIdx).toBeGreaterThan(profileIdx);
+  });
+});
+
+
+describe("prompt_composer goal-shape knowledge fallback", () => {
+  test("promoted knowledge with matching goal_shape is pulled before recency-only rows", () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "RECENT_BUT_GENERIC", score: 0.9 } });
+    emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "GOAL_SHAPE_MATCHED_KNOWLEDGE", score: 0.6, goal_shape: goalShape("Count files containing TODO substring") } });
+    const composed = composePrompt(db, { taskId, budgetTokens: 1200 });
+    expect(composed.text.indexOf("GOAL_SHAPE_MATCHED_KNOWLEDGE")).toBeLessThan(composed.text.indexOf("RECENT_BUT_GENERIC"));
   });
 });

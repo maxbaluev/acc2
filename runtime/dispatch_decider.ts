@@ -39,11 +39,24 @@ export const RECIPE_REPLAY_THRESHOLD = 0.85;
 export const INLINE_PATTERN_SCORE_THRESHOLD = 0.7;
 export const INLINE_PATTERN_CONFIDENCE_THRESHOLD = 0.6;
 
+export type DispatchRouteScores = Record<string, number>;
+
+export type DispatchDecisionEvidence = {
+  /** Open-ended axis vector used to score the route choice. These keys are
+   *  learned/reweighted from verifier and knowledge outcomes; consumers must
+   *  treat the record as extensible, not a closed enum. */
+  routing_axes: Record<string, number>;
+  route_scores: DispatchRouteScores;
+  verifier_evidence: Record<string, number>;
+};
+
+type DispatchDecisionBase = { reason: string } & DispatchDecisionEvidence;
+
 export type DispatchDecision =
-  | { route: "substrate_replay"; recipe_id: string; reason: string }
-  | { route: "claude_inline"; cited_artifact_ids: string[]; reason: string }
-  | { route: "opencode_brain"; predicted_complexity: "low" | "mid" | "high"; reason: string }
-  | { route: "deferred_blocked"; blockers: string[]; reason: string };
+  | ({ route: "substrate_replay"; recipe_id: string } & DispatchDecisionBase)
+  | ({ route: "claude_inline"; cited_artifact_ids: string[] } & DispatchDecisionBase)
+  | ({ route: "opencode_brain"; predicted_complexity: "low" | "mid" | "high" } & DispatchDecisionBase)
+  | ({ route: "deferred_blocked"; blockers: string[] } & DispatchDecisionBase);
 
 type RecipeMatch = { id: string; confidence: number };
 
@@ -140,6 +153,134 @@ const hardTaskReason = (hardness: HardTaskClassification, suffix: string): strin
     .map(([k, v]) => `${k}=${v}`)
     .join(",");
   return `hard_task_dag_required:axes=${axes};score=${hardness.score};diagnostics=${diagnostics};${suffix}`;
+};
+
+
+const DISPATCH_ROUTE_AXIS_KEYS = [
+  "one_shot_confidence",
+  "information_gap",
+  "reversibility",
+  "owner_control_need",
+  "decomposition_value",
+  "cost_pressure",
+  "time_sensitivity",
+] as const;
+
+const clamp01 = (n: number): number => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
+
+const addAxisSample = (sums: Record<string, number>, counts: Record<string, number>, value: unknown): void => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const record = value as Record<string, unknown>;
+  for (const axis of DISPATCH_ROUTE_AXIS_KEYS) {
+    const v = record[axis];
+    if (typeof v !== "number" || !Number.isFinite(v)) continue;
+    sums[axis] = (sums[axis] ?? 0) + clamp01(v);
+    counts[axis] = (counts[axis] ?? 0) + 1;
+  }
+};
+
+const readLearnedDispatchAxisEvidence = (db: Database): { axes: Record<string, number>; verifier_evidence: Record<string, number> } => {
+  const sums: Record<string, number> = {};
+  const counts: Record<string, number> = {};
+  let scoredRows = 0;
+  let promotedRows = 0;
+  try {
+    const rows = db.query("SELECT residual, payload FROM events WHERE kind = 'action_scored' ORDER BY ts DESC, rowid DESC LIMIT 50").all() as Array<{ residual: number | null; payload: string }>;
+    scoredRows = rows.length;
+    for (const row of rows) {
+      const payload = safeJson(row.payload);
+      addAxisSample(sums, counts, payload.outcome_dimensions);
+      addAxisSample(sums, counts, payload.breakdown);
+      addAxisSample(sums, counts, payload.reliability_profile);
+      addAxisSample(sums, counts, payload.budget_observed);
+      addAxisSample(sums, counts, payload.dispatch_axes);
+      const verifier = payload.verifier_result;
+      if (verifier && typeof verifier === "object" && !Array.isArray(verifier)) {
+        const vr = verifier as Record<string, unknown>;
+        addAxisSample(sums, counts, vr.outcome_dimensions);
+        addAxisSample(sums, counts, vr.breakdown);
+        addAxisSample(sums, counts, vr.reliability_profile);
+        addAxisSample(sums, counts, vr.budget_observed);
+        addAxisSample(sums, counts, vr.dispatch_axes);
+      }
+      if (typeof row.residual === "number" && Number.isFinite(row.residual)) {
+        sums.one_shot_confidence = (sums.one_shot_confidence ?? 0) + clamp01(1 - row.residual);
+        counts.one_shot_confidence = (counts.one_shot_confidence ?? 0) + 1;
+      }
+    }
+  } catch { /* fresh schemas or tests may not have matching rows */ }
+  try {
+    const rows = db.query("SELECT payload FROM events WHERE kind = 'knowledge_promoted' ORDER BY ts DESC, rowid DESC LIMIT 50").all() as Array<{ payload: string }>;
+    promotedRows = rows.length;
+    for (const row of rows) {
+      const payload = safeJson(row.payload);
+      addAxisSample(sums, counts, payload.dispatch_axes);
+      addAxisSample(sums, counts, payload.routing_axes);
+      addAxisSample(sums, counts, payload.verifier_evidence);
+    }
+  } catch { /* skip */ }
+  const axes: Record<string, number> = {};
+  for (const axis of DISPATCH_ROUTE_AXIS_KEYS) {
+    if ((counts[axis] ?? 0) > 0) axes[axis] = clamp01((sums[axis] ?? 0) / counts[axis]!);
+  }
+  return {
+    axes,
+    verifier_evidence: {
+      action_scored_rows_considered: scoredRows,
+      knowledge_promoted_rows_considered: promotedRows,
+      learned_axis_count: Object.keys(axes).length,
+    },
+  };
+};
+
+const blendLearnedAxis = (learned: Record<string, number>, axis: string, fallback: number): number => {
+  const v = learned[axis];
+  if (typeof v === "number" && Number.isFinite(v)) return clamp01(v * 0.65 + fallback * 0.35);
+  return clamp01(fallback);
+};
+
+const scoreRoutesFromAxes = (axes: Record<string, number>): DispatchRouteScores => {
+  const oneShot = axes.one_shot_confidence ?? 0;
+  const gap = axes.information_gap ?? 0;
+  const reversible = axes.reversibility ?? 0;
+  const control = axes.owner_control_need ?? 0;
+  const decomposition = axes.decomposition_value ?? 0;
+  const cost = axes.cost_pressure ?? 0;
+  const time = axes.time_sensitivity ?? 0;
+  return {
+    substrate_replay: clamp01(oneShot * 0.45 + cost * 0.25 + time * 0.15 + (1 - gap) * 0.10 + (1 - decomposition) * 0.05),
+    claude_inline: clamp01(oneShot * 0.35 + reversible * 0.25 + (1 - control) * 0.20 + (1 - gap) * 0.10 + cost * 0.10),
+    opencode_brain: clamp01(gap * 0.25 + decomposition * 0.35 + control * 0.15 + (1 - oneShot) * 0.15 + (1 - reversible) * 0.10),
+    deferred_blocked: clamp01(control * 0.25 + gap * 0.20 + (1 - reversible) * 0.25),
+  };
+};
+
+const buildDispatchDecisionEvidence = (db: Database, task: TaskNode, hardness: HardTaskClassification): DispatchDecisionEvidence => {
+  const directivePayload = readDirectivePayload(db, task.directive_id);
+  const text = String(typeof directivePayload.directive_text === "string" ? directivePayload.directive_text : "") + "\n" + task.goal;
+  const targets = taskTargetsForHardness(task);
+  const urgency = typeof directivePayload.urgency === "string" ? directivePayload.urgency : "normal";
+  const learned = readLearnedDispatchAxisEvidence(db);
+  const fallbackAxes: Record<string, number> = {
+    one_shot_confidence: 0.85 - hardness.score * 0.12 - Math.max(0, targets.length - 1) * 0.10,
+    information_gap: 0.15 + hardness.score * 0.12 + (targets.length === 0 ? 0.10 : 0),
+    reversibility: /\b(irreversible|payment|delete|destructive|external|stakeholder)\b/i.test(text) ? 0.25 : 0.80,
+    owner_control_need: /\b(consent|owner|manual|review|approval|stakeholder|irreversible)\b/i.test(text) ? 0.80 : (targets.length > 1 ? 0.55 : 0.25),
+    decomposition_value: hardness.is_hard ? 0.85 : 0.20 + hardness.axes.length * 0.15,
+    cost_pressure: urgency === "crisis" ? 0.85 : (hardness.diagnostics.budget_high_fields > 0 ? 0.70 : 0.35),
+    time_sensitivity: urgency === "crisis" ? 0.95 : (urgency === "elevated" ? 0.65 : 0.25),
+  };
+  const routing_axes: Record<string, number> = {};
+  for (const axis of DISPATCH_ROUTE_AXIS_KEYS) routing_axes[axis] = blendLearnedAxis(learned.axes, axis, fallbackAxes[axis] ?? 0);
+  return {
+    routing_axes,
+    route_scores: scoreRoutesFromAxes(routing_axes),
+    verifier_evidence: {
+      ...learned.verifier_evidence,
+      hard_axis_count: hardness.axes.length,
+      target_count: targets.length,
+    },
+  };
 };
 
 type RecipeReplayHealth = {
@@ -412,6 +553,9 @@ export const recordLowRiskInlineOutcome = (
 };
 
 export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision => {
+  const hardness = classifyHardTask(db, task);
+  const evidence = buildDispatchDecisionEvidence(db, task, hardness);
+
   // 0. Down-rank: directive blocked by an unresolved higher-priority directive.
   const blockers = blockersOf(db, task.directive_id);
   if (blockers.length > 0) {
@@ -419,10 +563,9 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
       route: "deferred_blocked",
       blockers,
       reason: `blocked_by:${blockers.join(",")}`,
+      ...evidence,
     };
   }
-
-  const hardness = classifyHardTask(db, task);
 
   // 1. Tier-0 recipe replay. Crisis mode lowers the confidence threshold.
   // Hard tasks only allow recipe override when recent replay residuals prove
@@ -438,11 +581,12 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
           route: "opencode_brain",
           predicted_complexity: "high",
           reason: hardTaskReason(hardness, `recipe=${recipe.id};recipe_replay_observed=${replayHealth.observed};recipe_replay_max_residual=${replayHealth.max_residual ?? "none"}`),
+          ...evidence,
         };
       }
-      return { route: "substrate_replay", recipe_id: recipe.id, reason: "recipe_match_hard_override_verified" };
+      return { route: "substrate_replay", recipe_id: recipe.id, reason: "recipe_match_hard_override_verified", ...evidence };
     }
-    return { route: "substrate_replay", recipe_id: recipe.id, reason: "recipe_match" };
+    return { route: "substrate_replay", recipe_id: recipe.id, reason: "recipe_match", ...evidence };
   }
 
   // 2. Hard-task DAG gate. This sits before the inline lane so a broad
@@ -453,6 +597,7 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
       route: "opencode_brain",
       predicted_complexity: "high",
       reason: hardTaskReason(hardness, "no_verified_recipe_override"),
+      ...evidence,
     };
   }
 
@@ -464,6 +609,7 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
       route: "claude_inline",
       cited_artifact_ids: matched.map((m) => m.cited_id),
       reason: "scored_inline_lane",
+      ...evidence,
     };
   }
 
@@ -472,5 +618,6 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
     route: "opencode_brain",
     predicted_complexity: estimateComplexity(task),
     reason: "no_recipe_no_inline_match",
+    ...evidence,
   };
 };
