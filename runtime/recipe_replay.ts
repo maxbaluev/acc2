@@ -370,7 +370,7 @@ const runArtifactByRuntime = async (
     return { ok: false, result: null, error: "artifact_retired" };
   }
   // Hard kill-count fence (mirrors task_dispatcher.ts ARTIFACT_HARD_KILL_FENCE).
-  const killFence = Number(process.env.ACC2_ARTIFACT_HARD_KILL_FENCE ?? "5");
+  const killFence = 5;
   if (row.recentKillCount >= killFence) {
     return { ok: false, result: null, error: `artifact_kill_fenced:count=${row.recentKillCount}` };
   }

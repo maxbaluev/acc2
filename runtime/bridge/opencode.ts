@@ -157,35 +157,11 @@ export const spawnRealOpencode = async (
   spawnOpts: SpawnOpts = {},
 ): Promise<BridgeResult> => {
   const model = spawnOpts.model ?? process.env.ACC2_OPENCODE_MODEL ?? DEFAULT_OPENCODE_MODEL;
-  // Real opencode dispatches for non-trivial directives routinely exceed 60s
-  // (model boot + reasoning + tool calls). Allow env override via
-  // ACC2_OPENCODE_TIMEOUT_MS so operators don't have to recompile to bump
-  // the watchdog. Defaults stay at 60s for hermetic test runs.
-  const envTimeout = Number(process.env.ACC2_OPENCODE_TIMEOUT_MS ?? "");
-  const timeoutMs = spawnOpts.timeoutMs
-    ?? (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_TIMEOUT_MS);
+  const timeoutMs = spawnOpts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const spawn = spawnOpts.spawnFn ?? Bun.spawn;
-  // Handshake-window env override: operators bumping ACC2_OPENCODE_TIMEOUT_MS
-  // for slow models / cold caches typically also need to widen the handshake
-  // window (the brain may spend tens of seconds reasoning before its first
-  // tool call). Defaults stay at 30s for hermetic tests.
-  const envHandshake = Number(process.env.ACC2_OPENCODE_MCP_HANDSHAKE_MS ?? "");
-  const handshakeWindowMs = spawnOpts.mcpHandshakeWindowMs
-    ?? (Number.isFinite(envHandshake) && envHandshake > 0 ? envHandshake : DEFAULT_MCP_HANDSHAKE_WINDOW_MS);
-  // No-progress watchdog: orthogonal to the overall timeout. Two tiers:
-  //   • firstFrameThresholdMs — budget between SPAWN and the first
-  //     bridge_frame_received (allows slow strategic first-cycle reasoning).
-  //   • stuckThresholdMs — budget between consecutive frames once at least
-  //     one has landed (catches real inter-tool wedges fast).
-  // The split fixes the false-positive kill pattern observed 2026-05-15
-  // where opencode's first-tool-call took 110-205s on slow first cycles
-  // and the old single 90s budget killed legitimate brain thinking.
-  const envStuck = Number(process.env.ACC2_BRIDGE_STUCK_THRESHOLD_MS ?? "");
-  const stuckThresholdMs = spawnOpts.stuckThresholdMs
-    ?? (Number.isFinite(envStuck) && envStuck > 0 ? envStuck : DEFAULT_BRIDGE_STUCK_THRESHOLD_MS);
-  const envFirstFrame = Number(process.env.ACC2_BRIDGE_FIRST_FRAME_THRESHOLD_MS ?? "");
-  const firstFrameThresholdMs = spawnOpts.firstFrameThresholdMs
-    ?? (Number.isFinite(envFirstFrame) && envFirstFrame > 0 ? envFirstFrame : DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS);
+  const handshakeWindowMs = spawnOpts.mcpHandshakeWindowMs ?? DEFAULT_MCP_HANDSHAKE_WINDOW_MS;
+  const stuckThresholdMs = spawnOpts.stuckThresholdMs ?? DEFAULT_BRIDGE_STUCK_THRESHOLD_MS;
+  const firstFrameThresholdMs = spawnOpts.firstFrameThresholdMs ?? DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS;
 
   emitEvent(db, {
     kind: "bridge_invoked",

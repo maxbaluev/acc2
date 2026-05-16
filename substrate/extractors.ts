@@ -287,10 +287,7 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
     )
     .all() as Array<{ kind: string; substrate_origin: string; ts: string; context_refs: string; payload: string }>;
 
-  const halfLifeMsRaw = Number(process.env.ACC2_POSTERIOR_HALF_LIFE_MS ?? "");
-  const halfLifeMs = Number.isFinite(halfLifeMsRaw) && halfLifeMsRaw >= 0
-    ? halfLifeMsRaw
-    : 30 * 24 * 60 * 60 * 1000;
+  const halfLifeMs = 30 * 24 * 60 * 60 * 1000;
   const nowMs = Date.now();
   const verdictWeight = (ts: string): number => {
     if (halfLifeMs <= 0) return 1;

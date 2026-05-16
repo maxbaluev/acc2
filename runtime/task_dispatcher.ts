@@ -55,7 +55,7 @@ const TREE_SEARCH_FANOUT_THRESHOLD = 5;
 // / kill-count checks — only MCP substrate.run_artifact had a
 // quarantined gate. Stale brain predictions kept executing known-bad
 // code, regenerating the same sandbox violations forever.
-const ARTIFACT_HARD_KILL_FENCE = Number(process.env.ACC2_ARTIFACT_HARD_KILL_FENCE ?? "5");
+const ARTIFACT_HARD_KILL_FENCE = 5;
 const ARTIFACT_POSTERIOR_BETA_FLOOR = 5;
 const ARTIFACT_POSTERIOR_BETA_RATIO = 3;
 
@@ -402,6 +402,9 @@ export const dispatchReadyTask = async (
               rank,
               rerank_score: hit.rerank_score,
               posterior: hit.posterior,
+              aspect_scores: hit.aspect_scores,
+              domain_scores: hit.domain_scores,
+              routing_score_breakdown: hit.routing_score_breakdown,
               binding_surface: "prompt",
             } as JsonValue,
           });

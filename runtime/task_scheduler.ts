@@ -131,12 +131,8 @@ const IN_FLIGHT_BRAIN: Set<string> = new Set();
  *  the same task because `readyTasks` only filters by committed/failed and
  *  no `task_failed` is ever emitted for bridge-level failures. The cap is
  *  generous enough to absorb transient network blips (default 3) but tight
- *  enough that an operator notices fast. Override via
- *  `ACC2_SCHEDULER_MAX_CONSECUTIVE_FAILURES`. */
-export const MAX_CONSECUTIVE_BRIDGE_FAILURES = Math.max(
-  1,
-  Number(process.env.ACC2_SCHEDULER_MAX_CONSECUTIVE_FAILURES ?? 3),
-);
+ *  enough that an operator notices fast. */
+export const MAX_CONSECUTIVE_BRIDGE_FAILURES = 3;
 
 /** Count consecutive `bridge_failed` events for a task with no intervening
  *  successful frame (`action_predicted`, `bridge_mcp_connected`, or

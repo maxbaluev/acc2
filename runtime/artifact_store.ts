@@ -242,16 +242,9 @@ export const listArtifactsByRuntime = (
 // stale evidence gracefully ages out, letting recent reality dominate.
 //
 // alpha=1, beta=1 is the prior — those baselines stay fixed (we only
-// decay the EVIDENCE accumulated on top of the prior). Override via
-// ACC2_POSTERIOR_HALF_LIFE_MS env (0 disables decay).
+// decay the EVIDENCE accumulated on top of the prior).
 const DEFAULT_POSTERIOR_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const posteriorHalfLifeMs = (): number => {
-  const raw = process.env.ACC2_POSTERIOR_HALF_LIFE_MS;
-  if (raw === undefined || raw === "") return DEFAULT_POSTERIOR_HALF_LIFE_MS;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_POSTERIOR_HALF_LIFE_MS;
-  return parsed;
-};
+const posteriorHalfLifeMs = (): number => DEFAULT_POSTERIOR_HALF_LIFE_MS;
 
 const decayedEvidence = (currentEvidence: number, dtMs: number): number => {
   const halfLife = posteriorHalfLifeMs();

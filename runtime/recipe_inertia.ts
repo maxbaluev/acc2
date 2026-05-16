@@ -45,12 +45,8 @@ import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { recipesLatestView, type RecipesLatestRow } from "../substrate/views";
 
-/** Days a recipe can sit un-replayed before decay applies on the next tick.
- *  Tunable via env so production / crisis-mode operators can tighten the
- *  half-life without a redeploy. Default 14 days. */
-export const RECIPE_INERTIA_DECAY_DAYS = Number(
-  process.env.ACC2_RECIPE_INERTIA_DAYS ?? "14",
-);
+/** Days a recipe can sit un-replayed before decay applies on the next tick. */
+export const RECIPE_INERTIA_DECAY_DAYS = 14;
 
 /** Multiplicative decay applied per tick. 5% is small enough that a
  *  single missed replay doesn't tank the recipe, large enough that
