@@ -66,6 +66,8 @@ The same recursion solves any high-level human goal — coding, research, busine
 
 The substrate is not storage and not a CLI tool. It is **a persistent thinking daemon — the recursive operator AND the runtime broker AND the external-push ingress**. Sessions are workers; both LLM substrates are stateless at the session layer; durable state lives in the daemon and its delegated runtime processes. The brain operates on a strict prompt budget that surfaces depth-1 retrieval (per the RLM paper) — recursion happens via fresh refinement-edge calls with newly-composed prompts, not by flooding the current cycle with everything the substrate knows. That is the falsifiable test (V1).
 
+Actor separation is an execution boundary, not a cognitive ontology. "Owner", "Claude", "opencode brain", "Father", and "substrate" name who may execute, schedule, speak, or mutate a given surface; they do not imply separate minds with separate memory/planning/reflection/communication/learning modules. Those functions are ledger-level operations over one substrate: memory is event persistence plus retrieval, planning is task-DAG mutation, reflection is verifier-scored closure plus lesson extraction, communication is owner-channel event rendering, and learning is posterior credit over cited events and artifacts.
+
 ## 3. The Universal Workflow
 
 Every goal — any domain — flows through the same shape:
@@ -125,6 +127,8 @@ Substrate computes (via SQL views):
 ```
 
 The brain never picks from a tool menu and never writes a typed verification predicate. It writes an action code artifact, a verifier code artifact, and a predicted residual. The substrate runs both; reality scores the prediction via the verifier's scalar return; knowledge and artifacts accrete via outcome correlation. The owner is the only human in the loop, reached through Claude Code chat. This is universal across every domain.
+
+Grounded world modeling uses the same shape. The substrate does not need a separate "world model" ontology before evidence demands one; it stores provisional, posterior-scored predictions and causal claims about resources, people, environments, organizations, software, and other external systems. Prefer reusing `knowledge_candidate` and `lesson_extracted` payloads with fields such as `predicted_outcome`, `causal_claim`, `hidden_state_estimate`, `validity_horizon`, `later_observation_refs`, and `calibration_residual` before adding new event kinds. A later verifier or observation can cite the original claim and move its posterior through the same credit chain as any other knowledge.
 
 ### 3.1 Rolling-active directives (closes `k_3608`, `k_3612`, `k_3620`)
 
@@ -303,6 +307,8 @@ Hard invariant: opencode brain dispatches are read-only against the source check
 The merger HAPPENS at posterior-update time. When `action_scored` lands, the substrate credits every knowledge_id and code_artifact_id cited by either the action artifact or the verifier artifact, regardless of who wrote them. There is no "Claude's posterior" vs "opencode's posterior" — there is one substrate posterior per cited artifact, and both substrates' contributions accumulate against it. That is what makes the merger genuinely symmetric (k_3566-k_3572).
 
 Opencode runs **one cycle per dispatch** (the cycle-1-only constraint, §3.7). Claude is conversational and does not run "cycles" — it observes chat turns, decides per turn whether to dispatch, and otherwise stays idle. Father (§14) is a recurring scheduler that may also trigger dispatches on cadence (rolling reviews, queued backlog) without an owner turn.
+
+This separation is about execution rights and observability, not about splitting cognition into actor-local faculties. Claude may speak to the owner and apply approved edits; opencode may synthesize and propose artifacts; Father may open scheduled directives without an LLM; the substrate alone owns durable state, scheduling, retrieval, scoring, and posterior updates. Memory, planning, reflection, communication, and learning therefore remain substrate functions expressed as events, views, verifiers, and credit updates, even when different actors execute the immediate step.
 
 #### 3.6.1 Semantic knowledge merger — what the substrate does when both substrates have an opinion
 
@@ -894,6 +900,8 @@ This collapses what was previously twelve typed adapters into one universal mech
 
 Both LLMs (Claude root, Claude sub, opencode) propose `knowledge_candidate` events. Substrate auto-promotes via outcome correlation.
 
+Grounded world-model claims are knowledge candidates unless a later measured need proves otherwise. A candidate may predict what will happen, assert a causal mechanism, estimate hidden state, name a validity horizon, and later cite observations that calibrate it. This keeps world modeling provisional and posterior-scored: the substrate records claims about resources, people, environments, organizations, and software as falsifiable event payloads, then moves their posteriors when `action_scored`, `artifact_observed`, `owner_input_received`, or other evidence confirms or contradicts them.
+
 ### 7.1 Candidate proposal
 
 Any session emits:
@@ -903,11 +911,20 @@ substrate.emit({
   kind: 'knowledge_candidate',
   substrate_origin: 'claude_root' | 'claude_sub' | 'opencode',
   payload: {
-    text: 'claim text',
-    tags: [...],
-    proposed_tier: 'pattern',
-    derived_from: [evidence_event_ids],
+    claim: 'falsifiable claim text',
+    evidence: [evidence_event_ids_or_observations],
+    applies_to: ['goal-shape or resource tag'],
     confidence_estimate: 0.7,
+
+    // Optional world-model fields. Keep them open-ended; do not add a new
+    // event kind until verifier outcomes show this shape cannot be represented
+    // as scored knowledge.
+    predicted_outcome: 'what the claim expects to happen',
+    causal_claim: 'why the outcome should happen',
+    hidden_state_estimate: { /* resource/person/environment/org/software state */ },
+    validity_horizon: 'time, version, situation, or condition where claim expires',
+    later_observation_refs: [],
+    calibration_residual: null,
   },
 });
 ```
@@ -916,7 +933,7 @@ substrate.emit({
 
 ```sql
 WITH candidate_outcomes AS (
-  SELECT c.id, c.payload->>'text' AS claim, c.substrate_origin,
+  SELECT c.id, COALESCE(c.payload->>'claim', c.payload->>'text') AS claim, c.substrate_origin,
          COUNT(CASE WHEN o.kind = 'candidate_confirmed' THEN 1 END) AS wins,
          COUNT(CASE WHEN o.kind = 'candidate_contradicted' THEN 1 END) AS losses
   FROM events c
@@ -1453,28 +1470,32 @@ The capability broker (§11.2) holds one mutex per `state_root` (e.g., `~/.camof
 
 ## 13. Brain Prompt — Substrate Projection Under a Strict Budget
 
-The brain prompt is a **substrate projection**, not a hand-authored template with placeholders. Each section is bound to a substrate view and composed at dispatch time from rows the daemon already holds in memory. Two principles govern composition:
+The brain prompt is a **minimal substrate projection**, not a hand-authored template with placeholders and not a transcript of the substrate. The prompt is only the contract needed for one dispatch: task identity, available runtimes, the universal act tuple, top-K evidence handles, and the current owner rendering policy. Everything else is retrievable knowledge or event state.
 
-1. **Strict token budget.** A dispatch's total prompt size is capped at `PROMPT_BUDGET_TOKENS` (default 8,000). Sections are filled in priority order; lower-priority sections are truncated or omitted when the budget runs out. The brain MUST be able to operate on a thin prompt — what it lacks, it pulls via `substrate.search(...)` mid-cycle.
+Two principles govern composition:
+
+1. **Strict token budget.** A dispatch's total prompt size is capped at `PROMPT_BUDGET_TOKENS` (default 8,000). Sections are filled in priority order; lower-priority sections are truncated or omitted when the budget runs out. The brain MUST be able to operate on a thin prompt — what it lacks, it pulls via `substrate.search(...)` or `substrate.read(...)` mid-cycle.
 2. **Depth-1 retrieval (per the RLM paper).** No section dumps "everything"; every retrieval is K-nearest by embedding distance × posterior reranking, where K is per-section (see table below). This is the load-bearing constraint that makes the system genuinely a Recursive Language Model: each level of recursion sees a controlled top-K subset, and deeper drill-down happens via fresh recursive calls (refinement edges), not by flooding the current prompt.
+3. **Minimal prompt contract.** P0 prompt material is limited to: task identity and lifecycle, available runtimes, the universal `act` tuple (`intent + action_artifact_id + verifier_artifact_id + predicted_residual`), top-K evidence handles with ids, and current `owner_policy`. Emission grammars, examples, failure taxonomies, proposal gates, and long runbooks must live as retrievable knowledge or docs that can be pulled by id. They are not copied into every prompt by default.
 
 ### 13.1 Section budget and priority
 
-| Section | Priority | K default | Source view |
-|---|---|---|---|
-| TASK GOAL + ID + lifecycle + urgency + budget | P0 (always) | — | task row |
-| RUNTIMES AVAILABLE (one-line each) | P0 (always) | 3 | static |
-| YOUR WORKFLOW (5-7 lines) | P0 (always) | — | static |
-| RETRIEVED KNOWLEDGE (embedding × posterior) | P1 | 8 | `knowledge_view` reranked by embedding distance to task goal × posterior |
-| CODE ARTIFACT REGISTRY (top-K reusable artifacts) | P1 | 6 | `code_artifact_registry_view` reranked the same way, scoped to your runtimes |
-| UPSTREAM OUTPUTS (completed-task snapshot) | P2 | all required edges, summarized to 200 chars each | `requires_edge_observations` |
-| WATCHED OUTPUTS (mid-flight, monotonic) | P2 | all watched, summarized | `watch_edge_observations` |
-| STAKEHOLDER STATE (multi-stakeholder only) | P3 | all stakeholders, current row each | `stakeholder_state_view` |
-| CROSS-DIRECTIVE INTERFERENCE (portfolio context) | P3 | 5 | `directive_conflicts_view` |
-| ACTIVE FAILURES (recent failures for similar goals) | P4 | 3 | `failure_view` reranked by goal embedding |
-| CONSTITUTIONAL GATES ACTIVE | P4 | all | `constitutional_state_view` |
+| Section | Priority | K default | Source view | Contract role |
+|---|---|---|---|---|
+| TASK IDENTITY (goal + task/directive ids + lifecycle + urgency + budget) | P0 (always) | — | task row | Names the symbolic handle being executed |
+| RUNTIMES AVAILABLE (one-line each) | P0 (always) | 3 | static/runtime registry | Names where artifacts may run |
+| UNIVERSAL ACT CONTRACT | P0 (always) | — | static | Defines `intent + action_artifact_id + verifier_artifact_id + predicted_residual` and scalar residual scoring |
+| CURRENT OWNER POLICY | P0 (always) | 1 | `owner_profile_view` / policy renderer | Controls owner-visible rendering language, terms, and density |
+| RETRIEVED KNOWLEDGE (embedding × posterior evidence handles) | P1 | 8 | `knowledge_view` reranked by embedding distance to task goal × posterior | Supplies citeable evidence ids, not a full memory dump |
+| CODE ARTIFACT REGISTRY (top-K reusable artifacts) | P1 | 6 | `code_artifact_registry_view` reranked the same way, scoped to your runtimes | Supplies reusable action/verifier handles |
+| UPSTREAM OUTPUTS (completed-task snapshot) | P2 | all required edges, summarized to 200 chars each | `requires_edge_observations` | Bounded local DAG context |
+| WATCHED OUTPUTS (mid-flight, monotonic) | P2 | all watched, summarized | `watch_edge_observations` | Bounded live dependency context |
+| STAKEHOLDER STATE (multi-stakeholder only) | P3 | all stakeholders, current row each | `stakeholder_state_view` | Bounded social context |
+| CROSS-DIRECTIVE INTERFERENCE (portfolio context) | P3 | 5 | `directive_conflicts_view` | Bounded portfolio context |
+| ACTIVE FAILURES (recent failures for similar goals) | P4 | 3 | `failure_view` reranked by goal embedding | Optional warning handles |
+| RETRIEVABLE OPERATING KNOWLEDGE (grammars, examples, runbooks, gates, taxonomies) | pulled on demand | K by query | `knowledge_view` / docs handles | Not in the default prompt; retrieve only when needed |
 
-When the budget is exceeded, the daemon truncates from the BOTTOM of the priority list. A dispatched brain always sees P0+P1; P2+P3 are best-effort; P4 is dropped first under pressure.
+When the budget is exceeded, the daemon truncates from the BOTTOM of the priority list. A dispatched brain always sees P0+P1 handles; P2+P3 are best-effort; P4 is dropped first under pressure. Long emission grammars, proposal-gate details, failure taxonomies, and examples are not protected prompt mass. If a task needs one, the brain cites the handle and pulls that slice deliberately.
 
 ### 13.2 Substrate API the brain queries mid-cycle
 
@@ -1488,16 +1509,16 @@ substrate.get_artifact(artifact_id: string): CodeArtifact
 substrate.read_view(view_name: string, args?: JsonValue): Row[]
 
 // Writes (the brain emits these as typed events)
-substrate.emit_action_predicted({ action_artifact_id, verifier_artifact_id, predicted_residual })
+substrate.emit_action_predicted({ intent, action_artifact_id, verifier_artifact_id, predicted_residual })
 substrate.emit_task_node_opened({ parent_task_id, goal, edge_kind })  // edge_kind ∈ requires|refines|watches
-substrate.emit_knowledge_candidate({ text, origin, evidence_refs })
+substrate.emit_knowledge_candidate({ claim, evidence, applies_to, confidence_estimate, ...open_world_model_fields })
 substrate.emit_code_artifact_candidate({ runtime, body, declared_sandbox, fixture })
 substrate.emit_directive_amended({ original_directive_id, amendment_text, ... })  // owner-only by default
 ```
 
 Every read is depth-1 retrieval at that call — the brain decides when to retrieve more, and the substrate decides what is returned per call. Together they realize the RLM pattern: the brain is the language model, the substrate is the recursive operator, and recursion happens via controlled retrieval calls rather than by stuffing the prompt up-front.
 
-### 13.3 Prompt template (under the budget)
+### 13.3 Prompt template (minimal contract under the budget)
 
 ```text
 You are operating as one task node in the AccInt v2 substrate.
@@ -1505,62 +1526,44 @@ You are operating as one task node in the AccInt v2 substrate.
 TASK GOAL: {task.payload.goal}
 TASK ID: {task.id}
 DIRECTIVE ID: {task.directive_id}
-DIRECTIVE LIFECYCLE: {finite | rolling_active (review_cadence)} 
+DIRECTIVE LIFECYCLE: {finite | rolling_active (review_cadence)}
 URGENCY: {normal | elevated | crisis}
 BUDGET: wall_clock_ms={...}, max_tokens={...}
 
-RETRIEVED KNOWLEDGE (top-K by embedding × posterior):
-{knowledge_entries — each must be cited or dismissed}
+OWNER POLICY (current rendering contract):
+{owner_policy — language, rendering_signals, preferred_terms, avoided_terms, exposed concepts}
 
-UPSTREAM OUTPUTS (completed-task snapshot):
-{requires_edge_observations}
+RUNTIMES AVAILABLE (you write code for these):
+  - bun
+  - uv
+  - camofox-browser
 
-WATCHED OUTPUTS (mid-flight, consistency={consistency_mode}):
-{watch_edge_observations}
+UNIVERSAL ACT CONTRACT:
+  action = intent + action_artifact_id + verifier_artifact_id + predicted_residual
+  verifier returns residual ∈ [0,1] plus optional open-ended breakdown/reliability maps
+  substrate runs action + verifier, records action_scored, and credits cited evidence
 
-STAKEHOLDER STATE (if multi-stakeholder):
-{stakeholder_state_entries — utilities, constraints, interactions}
-
-CROSS-DIRECTIVE INTERFERENCE (if portfolio-context):
-{directive_conflict_entries}
-
-JUDGMENT PACKET (top-K promoted knowledge for this goal-shape):
-{packet_entries — each must be cited or dismissed}
+RETRIEVED KNOWLEDGE (top-K evidence handles by embedding × posterior):
+{knowledge_entries — ids, claims/summaries, scores; cite used ids or dismiss stale ids}
 
 CODE ARTIFACT REGISTRY (top-K by posterior, scoped to your runtimes):
 {code_artifact_entries — id, runtime, declared_sandbox, score, confidence, recent_residual_mean}
 
-RUNTIMES AVAILABLE (you write code for these):
-  - bun           — TypeScript, substrate API, HTTP, arithmetic, text composition
-  - uv            — Python, numpy/pandas/PIL/sklearn, image processing, sensor parsing
-  - camofox-browser — TypeScript against the camofox API; real chromium driven against a profile
+UPSTREAM OUTPUTS / WATCHED OUTPUTS / STAKEHOLDER STATE / INTERFERENCE / FAILURES:
+{bounded handles and summaries only when present}
 
-ACTIVE FAILURES (recent failure_recorded for similar goals):
-{recent_failures}
-
-CONSTITUTIONAL GATES ACTIVE:
-{gate_list}
-
-YOUR WORKFLOW (one cycle per dispatch — refinement happens via DAG edges, not re-prompting):
-  1. For each act you intend, write or reuse a code artifact for one of the three runtimes
-     AND write or reuse a verifier code artifact that returns a scalar residual ∈ [0,1].
-  2. Emit action_predicted with action_artifact_id + verifier_artifact_id + predicted_residual.
-     Substrate runs the action artifact (sandboxed), then runs the verifier on the observation.
-  3. For complex sub-goals, propose task_node_opened + task_edge_recorded.
-     If this cycle's work is incomplete, emit a refinement edge — the next single-cycle session
-     will pick it up. Do NOT try to iterate within this cycle.
-  4. For new patterns observed, propose knowledge_candidate events. The substrate decides
-     whether to promote, based on outcome correlation — not on what you assert.
-  5. For new reusable scripts you wrote that worked well, emit code_artifact_candidate so
-     the substrate can index + score them for future reuse.
-  6. For irreversible physical actions, predict the effect AND record irreversible_effect_recorded.
-  7. Commit task via task_committed when the verifier residual is below threshold.
+YOUR WORKFLOW (one cycle per dispatch; retrieve details by handle when needed):
+  1. Choose bounded peek vs symbolic recursion.
+  2. For each act, write or reuse action + verifier artifacts and emit action_predicted.
+  3. If work remains, emit refinement edges instead of iterating in context.
+  4. Propose knowledge_candidate or lesson_extracted for reusable claims, including
+     world-model fields when the claim predicts outcomes or causal structure.
+  5. Before root commit, run closure audit and extract lessons.
 
 DO NOT:
-  - Look for a tool menu — there isn't one. Write code for a runtime.
-  - Author canonical knowledge directly — propose candidates; substrate promotes via outcome correlation.
-  - Iterate within this cycle — emit a refinement edge if more work remains.
-  - Try to be a doctor/lawyer/accountant — research and summarize for the owner; the owner is your only human channel.
+  - Dump the environment into the prompt. Pull missing slices by substrate handle.
+  - Treat emission grammars, examples, gates, or failure taxonomies as default prompt mass.
+  - Iterate within this cycle. Emit a refinement edge if more work remains.
 
 The substrate is your recursive memory AND your code-runtime broker.
 Reality scores your predictions through the verifier you wrote.
