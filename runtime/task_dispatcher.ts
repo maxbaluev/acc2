@@ -605,12 +605,15 @@ export const dispatchReadyTask = async (
       });
       return { dispatch_id: dispatchId, task_id: task.id, events: [], violations: [], bridge_result: bridgeResult };
     }
-    if (actionArtifact && verifierArtifact && actionArtifact.declaredSandbox.runtime === "bun" && verifierArtifact.declaredSandbox.runtime === "bun") {
-      // Run the action. Inputs come from the predicted event's payload
-      // (target_path etc). Batch 5: we spread the predicted payload into the
-      // action inputs envelope so universal-goal fixtures (recipe ingredients,
-      // savings target, stakeholder utility windows, …) can pass arbitrary
-      // parameters through ACC2_INPUTS alongside the canonical target_path.
+    if (actionArtifact && verifierArtifact) {
+      // Run action/verifier through the declared runtime, not a bun-only lane.
+      // Universal act() requires the same observation + residual wrapper for bun,
+      // uv, and camofox-browser; runtime-specific sandboxing belongs inside the
+      // runtime runner selected by runArtifactForRuntime.
+      // Inputs come from the predicted event's payload (target_path, resource
+      // handles, stakeholder utility windows, browser_session ids, sensor streams,
+      // etc.) and pass through ACC2_INPUTS unchanged alongside the canonical
+      // target_path fallback.
       const predictedPayload = actionPredicted.payload as Record<string, unknown>;
       const actionInputs: JsonValue = {
         ...(predictedPayload as Record<string, unknown>),
