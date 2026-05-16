@@ -430,6 +430,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("supervisor")) registerWorker("supervisor", Number(process.env.ACC2_SUPERVISOR_INTERVAL_MS ?? 30_000));
   if (isWorkerEnabled("compaction")) registerWorker("compaction", Number(process.env.ACC2_COMPACTION_INTERVAL_MS ?? 60 * 60 * 1000));
   if (isWorkerEnabled("recipe_inertia")) registerWorker("recipe_inertia", Number(process.env.ACC2_RECIPE_INERTIA_TICK_MS ?? 60 * 60 * 1000));
+  if (isWorkerEnabled("verify_heal")) registerWorker("verify_heal", Number(process.env.ACC2_VERIFY_HEAL_TICK_MS ?? 60 * 60 * 1000));
   // Brain audit B (2026-05-15): register the Model-D extractors worker
   // so candidate→promoted advancement happens on a bounded cadence,
   // not by chance dispatch through Father.
@@ -860,6 +861,26 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       inertiaTickMs,
     );
     workers.push(() => clearInterval(inertiaTick));
+  }
+
+  // Self-healing chain Layer 3 (owner-approved 2026-05-16, option d):
+  // periodically scans for old knowledge_contradiction_observed events
+  // (Layer 2 drift signal) and opens corrective directives so the brain
+  // designs a fix. Caps per-tick dispatch to bound brain spend. Opt-OUT
+  // via `ACC2_DISABLE_WORKERS=verify_heal`. Interval env-configurable
+  // via `ACC2_VERIFY_HEAL_TICK_MS` (default 1h).
+  if (isWorkerEnabled("verify_heal")) {
+    const healTickMs = Number(process.env.ACC2_VERIFY_HEAL_TICK_MS ?? 60 * 60 * 1000);
+    const { verifyHealWorkerTick } = await import("./verify_heal");
+    markWorkerReady("verify_heal");
+    recordWorkerTick("verify_heal");
+    const healTick = setInterval(
+      supervisedTick(db, "verify_heal", healTickMs, async () => {
+        verifyHealWorkerTick(db);
+      }),
+      healTickMs,
+    );
+    workers.push(() => clearInterval(healTick));
   }
 
   // Phase I: rolling-review worker. Default ON — production wants

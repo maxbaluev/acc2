@@ -66,7 +66,13 @@ export type WorkerName =
   // calls applyRecipeInertiaDecay (runtime/recipe_inertia.ts) to multiply the
   // confidence of recipes that haven't been replayed in N days by 0.95, with
   // a 0.1 floor. Ticks hourly; idempotent per-second.
-  | "recipe_inertia";
+  | "recipe_inertia"
+  // Self-healing chain Layer 3 (owner-approved 2026-05-16): when acc verify
+  // detects drift and Layer 2 emits knowledge_contradiction_observed, this
+  // worker periodically scans for drift contradictions older than the age
+  // threshold (default 24h) and auto-opens a corrective directive so the
+  // brain designs the fix. Dispatch capped per tick to bound brain spend.
+  | "verify_heal";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -86,6 +92,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "auto_apply",
   "hotreload",
   "recipe_inertia",
+  "verify_heal",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into
