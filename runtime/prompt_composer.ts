@@ -514,7 +514,13 @@ export const buildOwnerProfileSection = (profile: OwnerProfile): string => {
   }
 
   if (lines.length === 0) {
-    return "## OWNER PROFILE\n(no owner profile recorded yet)";
+    return [
+      "## OWNER PROFILE",
+      "bootstrap_policy: sparse profile; use plain language + one question at a time + explain concepts on first encounter",
+      `detected_language: ${OWNER_PROFILE_DEFAULTS.detected_language} (default; update via owner_insight_candidate when evidence appears)`,
+      `autonomy_score: ${OWNER_PROFILE_DEFAULTS.autonomy_score.toFixed(2)} (default; below ~0.4 blocks multi-file diffs)`,
+      "rendering_signals: sparse (do not infer high code_density or ops_vocabulary without evidence)",
+    ].join("\n");
   }
   return ["## OWNER PROFILE", ...lines].join("\n");
 };
