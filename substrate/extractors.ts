@@ -21,6 +21,7 @@ import { withImmediateTransaction } from "./db";
 import type { EventKind, OwnerProfile, SubstrateOrigin } from "./types";
 import { OWNER_PROFILE_DEFAULTS, OWNER_PROFILE_JSON_SCHEMA } from "./types";
 import { parseResourceRefs } from "../runtime/resource_uri";
+import { betaMean as canonicalBetaMean, betaEvidenceConfidence } from "../runtime/posterior";
 
 // ── ULID-ish id minter (same convention as Phase B1 tests) ─────────
 
@@ -228,14 +229,13 @@ const POSTERIOR = {
   multiOriginMinOrigins: 2,
 };
 
-const betaMean = (alpha: number, beta: number): number => alpha / (alpha + beta);
-
-const betaConfidence = (alpha: number, beta: number): number => {
-  // 1 - 1/sqrt(n+1), where n = alpha+beta-2 (evidence count).
-  // Matches §11.5 confidence formula used for code artifacts.
-  const n = alpha + beta - 2;
-  return 1 - 1 / Math.sqrt(Math.max(0, n) + 1);
-};
+// Canonical Beta math lives in `runtime/posterior.ts`. Local aliases
+// preserve the existing call-site names (`betaMean`, `betaConfidence`)
+// and keep the surrounding diff minimal. `betaConfidence` resolves to
+// the evidence-count variant `1 − 1/√(max(0, α + β − 2) + 1)` so the
+// Beta(1, 1) prior reads as zero confirmations (v2-design.md §11.5).
+const betaMean = canonicalBetaMean;
+const betaConfidence = betaEvidenceConfidence;
 
 export type KnowledgePromotionSummary = { promoted: number; demoted: number };
 

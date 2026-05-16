@@ -52,6 +52,7 @@ import { getEventById, type EmitEventInput, emitEvent } from "./events";
 import { getArtifact, maybePromote, maybeQuarantine } from "./artifact_store";
 import { goalShape } from "./goal_shape";
 import { nowIso } from "./ids";
+import { betaMean, betaStreamConfidence } from "./posterior";
 // Audit b7kjyk2k1 / Z9MXJ8YHXN1ZH knowledge cold-start (8.2% candidates ever
 // get a verdict). Brain proposal TNY4XZY0GD1W: after each candidate_confirmed
 // / candidate_contradicted credit emit, refresh the candidate's posterior
@@ -279,8 +280,8 @@ const applyWeightedResidualOutcome = (
   const { alphaDelta, betaDelta } = residualToBetaDeltas(r);
   const newAlpha = row.posteriorAlpha + alphaDelta * weight;
   const newBeta = row.posteriorBeta + betaDelta * weight;
-  const newScore = newAlpha / (newAlpha + newBeta);
-  const newConfidence = 1 - 1 / Math.sqrt(newAlpha + newBeta + 1);
+  const newScore = betaMean(newAlpha, newBeta);
+  const newConfidence = betaStreamConfidence(newAlpha, newBeta);
   const decay = Math.pow(0.5, 1 / 20);
   // When weight=1.0 this collapses to the unweighted EMA from artifact_store.
   // When weight>1.0 the residual contribution is capped to [0,1] before
@@ -636,8 +637,8 @@ export const distributeCredit = async (
       if (row) {
         const newAlpha = row.posteriorAlpha + wAlpha;
         const newBeta = row.posteriorBeta + wBeta;
-        const newScore = newAlpha / (newAlpha + newBeta);
-        const newConfidence = 1 - 1 / Math.sqrt(newAlpha + newBeta + 1);
+        const newScore = betaMean(newAlpha, newBeta);
+        const newConfidence = betaStreamConfidence(newAlpha, newBeta);
         // EMA blends the WEIGHTED residual contribution with a neutral 0.5
         // background: the entity owns `weight` of the responsibility and
         // shares the rest with the substrate average. This keeps the EMA

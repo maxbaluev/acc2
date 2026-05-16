@@ -35,6 +35,7 @@ import type { CodeArtifactStatus, JsonValue, Runtime, SandboxDecl } from "../sub
 import { newId, nowIso } from "./ids";
 import type { EmitEventInput } from "./events";
 import { parseResourceRefs, repoTargetFilesFromResources, resourcesFromTargetFiles, type ResourceRef } from "./resource_uri";
+import { betaMean, betaStreamConfidence } from "./posterior";
 
 export type CodeArtifactRow = {
   id: string;
@@ -115,11 +116,13 @@ const quarantineKillCountThreshold = (): number => {
 const SUCCESS_BAND = 0.3;
 const FAILURE_BAND = 0.7;
 
-const recomputeScore = (alpha: number, beta: number): number => alpha / (alpha + beta);
-const recomputeConfidence = (alpha: number, beta: number): number => {
-  const n = alpha + beta;
-  return 1 - 1 / Math.sqrt(n + 1);
-};
+// Canonical Beta math lives in `runtime/posterior.ts`; the local
+// aliases preserve the call-site names so the surrounding diff stays
+// minimal. `recomputeScore` = `betaMean`; `recomputeConfidence` is the
+// stream-form variant (`1 − 1/√(α + β + 1)`), the same shape used in
+// `runtime/credit.ts` for residual-stream updates.
+const recomputeScore = betaMean;
+const recomputeConfidence = betaStreamConfidence;
 
 const clamp01 = (x: number): number => Math.max(0, Math.min(1, x));
 

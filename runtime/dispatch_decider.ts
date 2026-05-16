@@ -24,6 +24,7 @@ import { blockersOf } from "./interference";
 import { findRecipeMatch as findRealRecipeMatch } from "./recipe_replay";
 import { lowRiskInlinePatterns } from "../substrate/views";
 import { parseResourceRefs, resourceMatchesPattern, type ResourceRef } from "./resource_uri";
+import { betaMean as canonicalBetaMean, betaEvidenceConfidence } from "./posterior";
 
 /** Default Tier-0 recipe-replay confidence threshold (§15). Recipes seed at
  *  0.5 and accumulate via updateRecipeConfidence; SEVEN successful replays
@@ -120,20 +121,15 @@ const estimateComplexity = (task: TaskNode): "low" | "mid" | "high" => {
  *      an unresolved source directive, we down-rank to `deferred_blocked`.
  *    - In crisis mode (urgency='crisis' on the directive) we lower the
  *      recipe-match threshold from 0.7 → 0.4 so Tier-0 fires harder. */
-/** Beta-distribution mean. Mirrors the canonical scorer used by the
- *  knowledge promotion extractor (`substrate/extractors.ts:betaMean`) so
- *  inline-lane refreshes use exactly the same algebra. */
-const betaMean = (alpha: number, beta: number): number => alpha / (alpha + beta);
-
-/** Beta-distribution confidence proxy = 1 − 1/√(n+1), where n = α+β−2 is
- *  the evidence count. Matches `substrate/extractors.ts:betaConfidence`
- *  and §11.5; keeping the formula identical here lets a single test prove
- *  the inline view, the dispatcher, and the extractor converge on the
- *  same posterior values. */
-const betaConfidence = (alpha: number, beta: number): number => {
-  const n = alpha + beta - 2;
-  return 1 - 1 / Math.sqrt(Math.max(0, n) + 1);
-};
+/** Beta-distribution mean and evidence-count confidence proxy. Both
+ *  delegate to the canonical implementation in `runtime/posterior.ts`
+ *  so the inline-lane refresh, the knowledge-promotion extractor in
+ *  `substrate/extractors.ts`, and the dispatcher all share exactly the
+ *  same algebra (v2-design.md §11.5; posterior-consistency alignment
+ *  test pins both formulas). Local aliases keep the call-site names
+ *  unchanged. */
+const betaMean = canonicalBetaMean;
+const betaConfidence = betaEvidenceConfidence;
 
 /** Recompute the Beta posterior on the existing `knowledge_promoted` row
  *  for this candidate by counting the live `candidate_confirmed` /
