@@ -25,6 +25,16 @@
 
 export type OwnerRenderingSignals = Record<string, number>;
 
+export type OwnerTurnPatternMetrics = {
+  reply_length_chars?: number;
+  reply_word_count?: number;
+  latency_ms?: number;
+  edit_count?: number;
+  command_token_count?: number;
+  prose_token_count?: number;
+  prior_turn_count?: number;
+};
+
 export type OwnerRenderingClassification = {
   /** Map of signal name → strength ∈ [0, 1]. Only includes signals that
    *  fired above zero — absent keys mean "no evidence this owner
@@ -48,6 +58,7 @@ export type OwnerRenderingClassification = {
    *  script languages. The substrate can accumulate these observations over
    *  multiple turns instead of treating one turn as certainty. */
   language_distribution?: Array<{ lang: string; confidence: number; evidence: string }>;
+  turn_pattern?: OwnerTurnPatternMetrics;
 };
 
 // Heuristic vocabularies. Each list is short — strong signals only.
@@ -76,6 +87,13 @@ const OPS_TOKENS = [
   "stakeholder", "customer", "vendor", "contract", "renewal",
   "compliance", "security review", "approval", "sign-off", "signoff",
 ];
+
+const FORMAL_TOKENS = ["please", "would you", "could you", "kindly", "thank you", "regards", "appreciate"];
+const CASUAL_TOKENS = ["hey", "yeah", "yep", "nah", "ok", "cool", "btw", "wanna", "gonna", "doesn't", "don't"];
+const EXAMPLE_TOKENS = ["example", "for example", "show me", "walkthrough", "demo", "concrete", "real case"];
+const CONFIRMATION_TOKENS = ["confirm", "double-check", "repeat", "recap", "make sure", "verify with me"];
+const LINEAR_TOKENS = ["step by step", "one step", "first", "then", "next", "simple", "slowly"];
+const BATCH_TOKENS = ["all at once", "batch", "everything", "parallel", "multiple", "full list", "comprehensive"];
 
 const lowerCase = (s: string): string => s.toLowerCase();
 
@@ -118,6 +136,9 @@ const continuousFromCount = (n: number, saturate: number): number => {
   if (n <= 0) return 0;
   return Math.min(1, n / saturate);
 };
+
+const wordCount = (text: string): number => lowerCase(text).match(/[\p{L}\p{N}_-]+/gu)?.length ?? 0;
+const commandTokenCount = (text: string): number => text.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^(acc|bun|git|npm|pnpm|yarn|uv|cargo|docker|kubectl)\b/.test(l)).length;
 
 type LanguageCandidate = { lang: string; confidence: number; evidence: string };
 
@@ -234,6 +255,7 @@ const detectLanguageDistribution = (text: string): LanguageCandidate[] => {
 export const classifyOwnerRenderingSignals = (
   primaryText: string,
   priorTexts: readonly string[] = [],
+  turnPattern: OwnerTurnPatternMetrics = {},
 ): OwnerRenderingClassification => {
   const allText = [primaryText, ...priorTexts].join("\n");
   const signals: OwnerRenderingSignals = {};
@@ -293,6 +315,28 @@ export const classifyOwnerRenderingSignals = (
     signals.explanation_appetite = continuousFromCount(explanationFeatures, 3);
   }
 
+  const formalCount = countMatches(allText, FORMAL_TOKENS);
+  if (formalCount > 0) { signals.formal_register = continuousFromCount(formalCount, 3); evidence.push("formal_tokens:" + formalCount); }
+  const casualCount = countMatches(allText, CASUAL_TOKENS);
+  if (casualCount > 0) { signals.casual_register = continuousFromCount(casualCount, 3); evidence.push("casual_tokens:" + casualCount); }
+  const exampleCount = countMatches(allText, EXAMPLE_TOKENS);
+  if (exampleCount > 0) { signals.concrete_examples_appetite = continuousFromCount(exampleCount, 2); evidence.push("example_tokens:" + exampleCount); }
+  const confirmationCount = countMatches(allText, CONFIRMATION_TOKENS);
+  if (confirmationCount > 0) { signals.repeat_for_confirmation = continuousFromCount(confirmationCount, 2); evidence.push("confirmation_tokens:" + confirmationCount); }
+  const linearCount = countMatches(allText, LINEAR_TOKENS);
+  if (linearCount > 0) { signals.linear_vs_branched = Math.max(signals.linear_vs_branched ?? 0, continuousFromCount(linearCount, 3)); evidence.push("linear_tokens:" + linearCount); }
+  const batchCount = countMatches(allText, BATCH_TOKENS);
+  if (batchCount > 0) { signals.one_step_at_a_time_vs_batch = Math.max(signals.one_step_at_a_time_vs_batch ?? 0, 1 - continuousFromCount(batchCount, 3)); evidence.push("batch_tokens:" + batchCount); }
+  const primaryWords = turnPattern.reply_word_count ?? wordCount(primaryText);
+  const primaryCommandTokens = turnPattern.command_token_count ?? commandTokenCount(primaryText);
+  const proseTokens = turnPattern.prose_token_count ?? Math.max(0, primaryWords - primaryCommandTokens);
+  if (primaryWords > 0 && primaryWords <= 3) { signals.one_step_at_a_time_vs_batch = Math.max(signals.one_step_at_a_time_vs_batch ?? 0, 0.75); evidence.push("short_reply_words:" + primaryWords); }
+  if (primaryWords >= 40 && hasNaturalQuestion(primaryText)) { signals.concrete_examples_appetite = Math.max(signals.concrete_examples_appetite ?? 0, 0.65); signals.linear_vs_branched = Math.max(signals.linear_vs_branched ?? 0, 0.6); evidence.push("verbose_learning_turn_words:" + primaryWords); }
+  if (primaryCommandTokens > 0) { signals.code_density = Math.max(signals.code_density ?? 0, continuousFromCount(primaryCommandTokens + codeFeatures, 4)); evidence.push("command_tokens:" + primaryCommandTokens); }
+  if (proseTokens > 30 && primaryCommandTokens === 0 && codeFeatures === 0) { signals.explanation_appetite = Math.max(signals.explanation_appetite ?? 0, 0.55); evidence.push("prose_heavy_turn:" + proseTokens); }
+  if (typeof turnPattern.latency_ms === "number" && turnPattern.latency_ms < 30000 && primaryWords <= 5) { signals.rapid_decision_mode = Math.max(signals.rapid_decision_mode ?? 0, 0.7); evidence.push("rapid_short_reply_ms:" + turnPattern.latency_ms); }
+  if (typeof turnPattern.edit_count === "number" && turnPattern.edit_count > 0) { signals.repeat_for_confirmation = Math.max(signals.repeat_for_confirmation ?? 0, continuousFromCount(turnPattern.edit_count, 3)); evidence.push("edits_after_send:" + turnPattern.edit_count); }
+
   // Confidence: how many DIFFERENT signal dimensions fired? More
   // dimensions → more evidence that the classifier saw a real owner
   // (not a void / noise input). Saturates at 3 dimensions = 0.95.
@@ -300,6 +344,6 @@ export const classifyOwnerRenderingSignals = (
   const confidence = Math.min(0.95, Math.max(0.5, 0.5 + dimensions * 0.15));
 
   return detectedLanguage !== undefined
-    ? { signals, confidence, evidence, detected_language: detectedLanguage, language_distribution: languageDistribution }
-    : { signals, confidence, evidence };
+    ? { signals, confidence, evidence, detected_language: detectedLanguage, language_distribution: languageDistribution, turn_pattern: turnPattern }
+    : { signals, confidence, evidence, turn_pattern: turnPattern };
 };
