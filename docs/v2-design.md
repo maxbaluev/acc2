@@ -128,6 +128,8 @@ Substrate computes (via SQL views):
 
 The brain never picks from a tool menu and never writes a typed verification predicate. It writes an action code artifact, a verifier code artifact, and a predicted residual. The substrate runs both; reality scores the prediction via the verifier's scalar return; knowledge and artifacts accrete via outcome correlation. The owner is the only human in the loop, reached through Claude Code chat. This is universal across every domain.
 
+Owner-visible UX is the same universal workflow rendered through the owner profile: capture the owner's words, route through the substrate, expose residual/evidence/decision state, and propose the next concrete capability in the owner's vocabulary. Seeded capability descriptions are retrieval vocabulary, not a menu to echo; the owner should see a tailored proposal, pending decision card, or verified closure summary rather than substrate internals unless their profile shows they want those details.
+
 Grounded world modeling uses the same shape. The substrate does not need a separate "world model" ontology before evidence demands one; it stores provisional, posterior-scored predictions and causal claims about resources, people, environments, organizations, software, and other external systems. Prefer reusing `knowledge_candidate` and `lesson_extracted` payloads with fields such as `predicted_outcome`, `causal_claim`, `hidden_state_estimate`, `validity_horizon`, `later_observation_refs`, and `calibration_residual` before adding new event kinds. A later verifier or observation can cite the original claim and move its posterior through the same credit chain as any other knowledge.
 
 ### 3.1 Rolling-active directives (closes `k_3608`, `k_3612`, `k_3620`)
@@ -337,7 +339,7 @@ This makes every refinement step:
 - **Inspectable** — the owner can see "task X needed 3 refinement edges to converge" in `task_graph_view`.
 - **Bounded** — a per-task refinement-depth cap prevents runaway loops; exceeding the cap surfaces as `failure_kind: 'refinement_depth_exceeded'` for owner judgment.
 
-**Dispatcher enforcement (not just a stated rule, per k_252).** Cycle-1-only is enforced structurally by `v2/runtime/task_dispatcher.ts`. The dispatcher emits exactly one `brain_dispatched` event per ready task, spawns one opencode subprocess, and closes the dispatch when the subprocess exits — regardless of what the subprocess claims about needing more cycles. Any attempt by the brain to self-iterate (e.g. emitting a `brain_cycle_2_started` event, calling a `continue_cycle` substrate primitive, or returning a "needs another cycle" sentinel in its final response) is rejected as `dispatcher_violation` and the dispatch closes anyway:
+**Dispatcher enforcement (not just a stated rule, per k_252).** Cycle-1-only is enforced structurally by `runtime/task_dispatcher.ts`. The dispatcher emits exactly one `brain_dispatched` event per ready task, spawns one opencode subprocess, and closes the dispatch when the subprocess exits — regardless of what the subprocess claims about needing more cycles. Any attempt by the brain to self-iterate (e.g. emitting a `brain_cycle_2_started` event, calling a `continue_cycle` substrate primitive, or returning a "needs another cycle" sentinel in its final response) is rejected as `dispatcher_violation` and the dispatch closes anyway:
 
 ```typescript
 // v2/runtime/task_dispatcher.ts (sketch)
@@ -1369,6 +1371,8 @@ Same as before, but applied to code artifacts:
 (O2.)
 
 The bridge is simple: spawn opencode subprocess, give it a prompt, capture its text response. **Opencode connects to the substrate's MCP server natively** (not through the bridge) — capability invocations from opencode flow through MCP, not through bridge stream parsing. The bridge is purely for the opencode text response when Claude calls `Agent`-style for GPT-5/GPT-5-mini reasoning.
+
+Claude Code uses the same separation when acting as the owner conversation surface: MCP carries substrate/runtime invocations, while hooks, settings, slash commands, SDK sessions, and chat output are observation or ingress surfaces that must be normalized into ledger rows. The observer must render background work from ledger state, not terminal scrollback: prompt/message/reasoning rows are capped, cap suppression is surfaced as `at_cap`, stale detection compares last observation time against terminal lifecycle rows and process liveness when available, and slash-command intent still enters the owner_input_received/directive_opened dispatch loop.
 
 ```typescript
 type OpenCodeRequest = {

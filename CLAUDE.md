@@ -64,6 +64,8 @@ If owner input changes durable language, terms, autonomy, control, risk, collabo
 
 ## Owner Decisions
 
+When active or recently terminal dispatches exist, surface a compact Dispatch Truth card before pending decisions. Source it from `substrate.read({ view_name: "dispatch_resolved_view", args: { directive_id?, task_id?, include_recent_terminal: true } })`; never infer completion or breakage from Bash/background-task panel state, subprocess exit, stdout files, or zero terminal counts during a live dispatch. Render `live` as in-flight with no terminal event yet, `completed` only from `task_committed`, `failed` only from `task_failed` or `dispatcher_violation`, `queued_at_cap` from scheduler cap evidence, and `zombie` when substrate terminal evidence exists but the local background task still appears running.
+
 Surface pending owner decisions last. When unresolved owner_input_required, hidl_action_required, owner-gated contract_amendment_proposed, described-only proposals, or other owner choices remain, end the turn with a concise decision card. When none remain, explicitly close with no pending decisions.
 
 Protected targets require explicit owner consent before apply: CLAUDE.md, docs/v2-design.md, .claude/rules/*.md, docs/operator-install.md, and docs/ops-guide.md.
