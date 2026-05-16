@@ -97,7 +97,7 @@ describe("audit A.3.6: low_risk_inline_patterns_view drives the scored inline la
       payload: {
         tags: ["low_risk_inline_pattern"],
         pattern_kind: "extension",
-        pattern: ".md",
+        pattern: "repo:.md",
         score: 0.92,
         confidence: 0.8,
       },
@@ -105,12 +105,12 @@ describe("audit A.3.6: low_risk_inline_patterns_view drives the scored inline la
     const rows = lowRiskInlinePatterns(db);
     expect(rows.length).toBe(1);
     expect(rows[0]!.pattern_kind).toBe("extension");
-    expect(rows[0]!.pattern).toBe(".md");
+    expect(rows[0]!.pattern).toBe("repo:.md");
     expect(rows[0]!.score).toBeGreaterThanOrEqual(0.7);
     expect(rows[0]!.confidence).toBeGreaterThanOrEqual(0.6);
   });
 
-  test("decider returns claude_inline when EVERY target_file matches a promoted pattern", () => {
+  test("decider returns claude_inline when EVERY target_resource matches a promoted pattern", () => {
     const db = openDb(":memory:");
     runViews(db);
     emitEvent(db, {
@@ -119,7 +119,7 @@ describe("audit A.3.6: low_risk_inline_patterns_view drives the scored inline la
       payload: {
         tags: ["low_risk_inline_pattern"],
         pattern_kind: "extension",
-        pattern: ".md",
+        pattern: "repo:.md",
         score: 0.95,
         confidence: 0.9,
       },
@@ -130,7 +130,7 @@ describe("audit A.3.6: low_risk_inline_patterns_view drives the scored inline la
       parent_id: null,
       goal: "edit README.md and CHANGELOG.md",
       status: "pending" as const,
-      target_files: ["README.md", "docs/CHANGELOG.md"],
+      target_resources: ["repo:README.md", "repo:docs/CHANGELOG.md"],
     };
     const decision = decideDispatch(db, task as TaskNode);
     expect(decision.route).toBe("claude_inline");
@@ -139,7 +139,7 @@ describe("audit A.3.6: low_risk_inline_patterns_view drives the scored inline la
     }
   });
 
-  test("decider rejects inline when ANY target_file misses the pattern (fail-closed)", () => {
+  test("decider rejects inline when ANY target_resource misses the pattern (fail-closed)", () => {
     const db = openDb(":memory:");
     runViews(db);
     emitEvent(db, {
@@ -148,7 +148,7 @@ describe("audit A.3.6: low_risk_inline_patterns_view drives the scored inline la
       payload: {
         tags: ["low_risk_inline_pattern"],
         pattern_kind: "extension",
-        pattern: ".md",
+        pattern: "repo:.md",
         score: 0.95,
         confidence: 0.9,
       },
@@ -159,7 +159,7 @@ describe("audit A.3.6: low_risk_inline_patterns_view drives the scored inline la
       parent_id: null,
       goal: "edit README.md and runtime/foo.ts",
       status: "pending" as const,
-      target_files: ["README.md", "runtime/foo.ts"],
+      target_resources: ["repo:README.md", "repo:runtime/foo.ts"],
     };
     const decision = decideDispatch(db, task as TaskNode);
     expect(decision.route).toBe("opencode_brain");
@@ -217,7 +217,7 @@ describe("audit A.3.6: low_risk_inline_patterns_view drives the scored inline la
         candidate_id: candidateId,
         tags: ["low_risk_inline_pattern"],
         pattern_kind: "extension",
-        pattern: ".ts",
+        pattern: "repo:.ts",
         score: 0.6,
         confidence: 0.5,
         alpha: 1,
@@ -236,7 +236,7 @@ describe("audit A.3.6: low_risk_inline_patterns_view drives the scored inline la
       parent_id: null,
       goal: "edit runtime/foo.ts",
       status: "pending" as const,
-      target_files: ["runtime/foo.ts"],
+      target_resources: ["repo:runtime/foo.ts"],
     } as const;
     expect(decideDispatch(db, taskBefore as TaskNode).route).toBe("opencode_brain");
 
@@ -273,7 +273,7 @@ describe("audit A.3.6: low_risk_inline_patterns_view drives the scored inline la
       parent_id: null,
       goal: "edit runtime/foo.ts",
       status: "pending" as const,
-      target_files: ["runtime/foo.ts"],
+      target_resources: ["repo:runtime/foo.ts"],
     } as const;
     expect(decideDispatch(db, taskAfter as TaskNode).route).toBe("claude_inline");
 
