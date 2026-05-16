@@ -1867,6 +1867,110 @@ CREATE VIEW IF NOT EXISTS lesson_apply_candidate_view AS
   LEFT JOIN applied_lesson_effectiveness_view e ON e.source_event_id = s.source_event_id;
 `;
 
+// dispatch_resolved_view — single SQL projection for dispatch lifecycle
+// state. Authored from brain amendment WYESZ6XB3H2DQEGZG7DNGX3RW8
+// (meta-audit E1S5DWGPR97KXAKKWE1ZABAPMC, 2026-05-16). One row per
+// (directive_id, root_task_id) — the orchestrator's only authoritative
+// source for "is this dispatch done?" per .claude/rules/
+// orchestrator-runtime.md "Dispatch Observation Protocol". Status enum:
+//   completed     — task_committed landed on root
+//   failed        — task_failed landed on root (any failure_kind)
+//   zombie        — brain_dispatched without matching brain_dispatch_closed
+//                   AND no terminal event AND age > 5min
+//   live          — brain_dispatched + brain_dispatch_closed, no terminal,
+//                   age < 5min (cycle still running or about to terminal)
+//   queued_at_cap — task in ready_tasks_view, gate_decision present with
+//                   gate=brain_concurrency_cap, no brain_dispatched yet
+const VIEW_DISPATCH_RESOLVED = `
+CREATE VIEW IF NOT EXISTS dispatch_resolved_view AS
+WITH roots AS (
+  SELECT
+    e.directive_id,
+    e.task_id AS root_task_id,
+    e.ts AS root_opened_ts
+  FROM events e
+  WHERE e.kind = 'task_node_opened'
+    AND (e.parent_task_id IS NULL OR e.parent_task_id = '')
+),
+terminal AS (
+  SELECT
+    r.root_task_id,
+    t.kind AS terminal_kind,
+    t.id AS terminal_event_id,
+    t.ts AS terminal_ts,
+    ROW_NUMBER() OVER (PARTITION BY r.root_task_id ORDER BY t.ts ASC) AS rn
+  FROM roots r
+  JOIN events t
+    ON t.task_id = r.root_task_id
+   AND t.kind IN ('task_committed', 'task_failed', 'dispatcher_violation')
+),
+latest_dispatch AS (
+  SELECT
+    r.root_task_id,
+    d.id AS dispatch_event_id,
+    d.ts AS dispatch_ts,
+    json_extract(d.payload, '$.dispatch_id') AS dispatch_id,
+    ROW_NUMBER() OVER (PARTITION BY r.root_task_id ORDER BY d.ts DESC) AS rn
+  FROM roots r
+  JOIN events d
+    ON d.task_id = r.root_task_id
+   AND d.kind = 'brain_dispatched'
+),
+latest_close AS (
+  SELECT
+    r.root_task_id,
+    c.id AS close_event_id,
+    c.ts AS close_ts,
+    json_extract(c.payload, '$.dispatch_id') AS close_dispatch_id,
+    ROW_NUMBER() OVER (PARTITION BY r.root_task_id ORDER BY c.ts DESC) AS rn
+  FROM roots r
+  JOIN events c
+    ON c.task_id = r.root_task_id
+   AND c.kind = 'brain_dispatch_closed'
+),
+gate_at_cap AS (
+  SELECT
+    r.root_task_id,
+    g.id AS gate_event_id,
+    g.ts AS gate_ts,
+    ROW_NUMBER() OVER (PARTITION BY r.root_task_id ORDER BY g.ts DESC) AS rn
+  FROM roots r
+  JOIN events g
+    ON g.task_id = r.root_task_id
+   AND g.kind = 'constitutional_gate_decision'
+   AND json_extract(g.payload, '$.gate') = 'brain_concurrency_cap'
+)
+SELECT
+  r.directive_id,
+  r.root_task_id,
+  CASE
+    WHEN t.terminal_kind = 'task_committed' THEN 'completed'
+    WHEN t.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
+    WHEN ld.dispatch_event_id IS NOT NULL
+         AND (lc.close_event_id IS NULL OR lc.close_ts < ld.dispatch_ts)
+         AND CAST((julianday('now') - julianday(ld.dispatch_ts)) * 86400000 AS INTEGER) > 300000
+      THEN 'zombie'
+    WHEN ld.dispatch_event_id IS NOT NULL THEN 'live'
+    WHEN gc.gate_event_id IS NOT NULL THEN 'queued_at_cap'
+    ELSE 'unknown'
+  END AS lifecycle_status,
+  t.terminal_kind,
+  t.terminal_event_id,
+  ld.dispatch_event_id AS latest_dispatch_event_id,
+  ld.dispatch_id AS latest_dispatch_id,
+  ld.dispatch_ts AS latest_dispatch_at,
+  lc.close_ts AS latest_closed_at,
+  gc.gate_event_id AS latest_gate_event_id,
+  gc.gate_ts AS latest_gate_at,
+  r.root_opened_ts,
+  CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) AS age_ms
+FROM roots r
+LEFT JOIN terminal t ON t.root_task_id = r.root_task_id AND t.rn = 1
+LEFT JOIN latest_dispatch ld ON ld.root_task_id = r.root_task_id AND ld.rn = 1
+LEFT JOIN latest_close lc ON lc.root_task_id = r.root_task_id AND lc.rn = 1
+LEFT JOIN gate_at_cap gc ON gc.root_task_id = r.root_task_id AND gc.rn = 1;
+`;
+
 // ── Public entrypoint ──────────────────────────────────────────────
 
 const VIEW_NAMES = [
@@ -1896,6 +2000,7 @@ const VIEW_NAMES = [
   "failure_view",
   "ready_tasks_view",
   "task_graph_view",
+  "dispatch_resolved_view",
 ] as const;
 
 /** Create every substrate view. Idempotent — existing views are dropped in
@@ -1930,6 +2035,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_LESSON_IMPLEMENTATION_STATUS);
   db.exec(VIEW_APPLIED_LESSON_EFFECTIVENESS);
   db.exec(VIEW_LESSON_APPLY_CANDIDATE);
+  db.exec(VIEW_DISPATCH_RESOLVED);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────
