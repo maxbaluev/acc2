@@ -2014,7 +2014,7 @@ SELECT
     WHEN COALESCE(ds.dispatched_count, 0) > 0 THEN 'live'
     WHEN cg.latest_cap_gate_at IS NOT NULL THEN 'queued_at_cap'
     ELSE 'live'
-  END AS status,
+  END AS lifecycle_status,
   COALESCE(ds.dispatched_count, 0) AS dispatched_count,
   COALESCE(ds.open_dispatch_count, 0) AS open_dispatch_count,
   ds.latest_dispatched_at,
@@ -2134,7 +2134,7 @@ export type DispatchResolvedStatus = "live" | "completed" | "failed" | "queued_a
 export type DispatchResolvedRow = {
   directive_id: string;
   root_task_id: string;
-  status: DispatchResolvedStatus;
+  lifecycle_status: DispatchResolvedStatus;
   dispatched_count: number;
   open_dispatch_count: number;
   latest_dispatched_at: string | null;
@@ -2455,7 +2455,7 @@ export const dispatchResolved = (
   return rows.map((r) => ({
     directive_id: r.directive_id as string,
     root_task_id: r.root_task_id as string,
-    status: r.status as DispatchResolvedStatus,
+    lifecycle_status: r.lifecycle_status as DispatchResolvedStatus,
     dispatched_count: Number(r.dispatched_count ?? 0),
     open_dispatch_count: Number(r.open_dispatch_count ?? 0),
     latest_dispatched_at: (r.latest_dispatched_at as string | null) ?? null,

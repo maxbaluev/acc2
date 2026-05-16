@@ -310,12 +310,12 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     insertEvent(db, { kind: "brain_dispatched", directive_id: "d_zombie", task_id: "t_zombie", ts: oldTs, payload: { dispatch_id: "disp_zombie" } });
 
     const byDirective = new Map(dispatchResolved(db).map((r) => [r.directive_id, r]));
-    expect(byDirective.get("d_live")?.status).toBe("live");
-    expect(byDirective.get("d_done")?.status).toBe("completed");
+    expect(byDirective.get("d_live")?.lifecycle_status).toBe("live");
+    expect(byDirective.get("d_done")?.lifecycle_status).toBe("completed");
     expect(byDirective.get("d_done")?.terminal_kind).toBe("task_committed");
-    expect(byDirective.get("d_fail")?.status).toBe("failed");
-    expect(byDirective.get("d_cap")?.status).toBe("queued_at_cap");
-    expect(byDirective.get("d_zombie")?.status).toBe("zombie");
+    expect(byDirective.get("d_fail")?.lifecycle_status).toBe("failed");
+    expect(byDirective.get("d_cap")?.lifecycle_status).toBe("queued_at_cap");
+    expect(byDirective.get("d_zombie")?.lifecycle_status).toBe("zombie");
   });
 
   test("groups child dispatch events under the root task id and supports filters", () => {
@@ -330,7 +330,7 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     const rows = dispatchResolved(db, { directiveId: "d_tree", rootTaskId: "t_root" });
     expect(rows).toHaveLength(1);
     expect(rows[0]!.root_task_id).toBe("t_root");
-    expect(rows[0]!.status).toBe("completed");
+    expect(rows[0]!.lifecycle_status).toBe("completed");
     expect(dispatchResolved(db, { directiveId: "missing" })).toEqual([]);
   });
 });
