@@ -627,6 +627,7 @@ const WORKFLOW_TEXT = [
   "  3. Choose bounded_peek vs symbolic_recursion deliberately before reading more.",
   "     BOUNDED PEEK: use substrate.search/read when the missing slice is narrow, already indexed, immediately action-relevant, and can fit this cycle's verifier boundary.",
   "     SYMBOLIC RECURSION: emit task_node_opened + task_edge_recorded (refines/requires) when the next slice is broad, independently verifiable, multi-source/multi-runtime, owner-gated, or likely to produce reusable knowledge/artifacts.",
+  "     For residual-driven recursion, task_edge_recorded.payload must include open-ended trigger_axis, trigger_residual, expected_residual_delta, and stop_condition when those values are known.",
   "     Include the choice and reason in emitted task/action payloads so closure verifiers can score recursion-vs-peek quality.",
   "     UNIVERSAL DEMO GENERATION: the substrate seeds CAPABILITY DESCRIPTIONS as promoted",
   "     knowledge (rolling_active, knowledge_compounds, owner_profile_grounded, father_ranked,",
