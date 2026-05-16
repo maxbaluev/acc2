@@ -21,6 +21,7 @@ import { withImmediateTransaction } from "./db";
 import type { EventKind, OwnerProfile, SubstrateOrigin } from "./types";
 import { OWNER_PROFILE_DEFAULTS, OWNER_PROFILE_JSON_SCHEMA } from "./types";
 import { parseResourceRefs } from "../runtime/resource_uri";
+import { decodeEmbeddingBlob } from "../runtime/embedder";
 import { betaMean as canonicalBetaMean, betaEvidenceConfidence } from "../runtime/posterior";
 
 // ── ULID-ish id minter (same convention as Phase B1 tests) ─────────
@@ -658,15 +659,9 @@ const polarityOf = (text: string): "assert" | "deny" => {
 
 export type SemanticDedupSummary = { merged: number; contradicted: number };
 
-/** Decode an event-embedding BLOB into a Float32Array. Tolerates non-aligned
- *  views — copies bytes into an aligned buffer before constructing the view. */
-const decodeEmbeddingBlobLocal = (blob: Uint8Array | null): Float32Array | null => {
-  if (!blob || blob.byteLength === 0) return null;
-  if (blob.byteLength % 4 !== 0) return null;
-  const aligned = new Uint8Array(blob.byteLength);
-  aligned.set(blob);
-  return new Float32Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 4);
-};
+// Embedder dedup (audit T3AUDEMBEDDER5M7 follow-up, owner-approved
+// 2026-05-16): the local decodeEmbeddingBlob copy is gone — imported
+// from runtime/embedder.ts as the single source of truth.
 
 const cosineSimilarity = (a: Float32Array, b: Float32Array): number => {
   if (a.length !== b.length) return 0;
@@ -775,7 +770,7 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
   withImmediateTransaction(db, () => {
     for (const cand of candidates) {
       if (!cand.embedding) continue;
-      const vecA = decodeEmbeddingBlobLocal(cand.embedding);
+      const vecA = decodeEmbeddingBlob(cand.embedding);
       if (!vecA) continue;
       const textA = candidateText(JSON.parse(cand.payload ?? "{}"));
       const polA = polarityOf(textA);
@@ -786,7 +781,7 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
         // Only consider strictly-earlier candidates so we don't re-match
         // the same pair twice in either direction.
         if (prior.ts > cand.ts) continue;
-        const vecB = decodeEmbeddingBlobLocal(prior.embedding);
+        const vecB = decodeEmbeddingBlob(prior.embedding);
         if (!vecB) continue;
         if (vecB.length !== vecA.length) continue;
         const cos = cosineSimilarity(vecA, vecB);
@@ -1589,7 +1584,7 @@ const siblingCosineSupports = (
     .query("SELECT embedding FROM events WHERE id = ?")
     .get(candidateId) as { embedding: Uint8Array | null } | null;
   if (!me?.embedding) return false;
-  const vecA = decodeEmbeddingBlobLocal(me.embedding);
+  const vecA = decodeEmbeddingBlob(me.embedding);
   if (!vecA) return false;
   const siblings = db
     .query(
@@ -1603,7 +1598,7 @@ const siblingCosineSupports = (
     try {
       const sp = JSON.parse(s.payload ?? "{}") as Record<string, unknown>;
       if (sp.field !== field) continue;
-      const vecB = decodeEmbeddingBlobLocal(s.embedding);
+      const vecB = decodeEmbeddingBlob(s.embedding);
       if (!vecB || vecB.length !== vecA.length) continue;
       const cos = cosineSimilarity(vecA, vecB);
       if (cos >= OWNER_PROFILE_COSINE_THRESHOLD) return true;

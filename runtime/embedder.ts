@@ -60,8 +60,11 @@ export const encodeEmbeddingBlob = (embedding: number[]): Uint8Array => {
 };
 
 /** Decode a stored BLOB back into a Float32Array. Length-checked; returns
- *  null if the byte length is not a multiple of 4. */
-export const decodeEmbeddingBlob = (blob: Uint8Array): Float32Array | null => {
+ *  null if the byte length is not a multiple of 4 OR the input is null/empty.
+ *  Tolerates non-aligned views — copies bytes into an aligned buffer before
+ *  constructing the Float32Array. Used by both the embedder worker and
+ *  substrate/extractors.ts (Model D similarity scoring). */
+export const decodeEmbeddingBlob = (blob: Uint8Array | null): Float32Array | null => {
   if (!blob || blob.byteLength === 0) return null;
   if (blob.byteLength % 4 !== 0) return null;
   // Make a properly-aligned copy in case the BLOB straddles a non-aligned
