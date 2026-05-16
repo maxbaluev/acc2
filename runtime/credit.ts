@@ -238,6 +238,8 @@ export const shapleyWeightsByCorroboration = (n: number): number[] => {
 // ── Posterior-delta computation (mirrors artifact_store internals) ─
 
 const SUCCESS_BAND = 0.3;
+const MIDBAND_UNCERTAINTY_LOW = 0.4;
+const MIDBAND_UNCERTAINTY_HIGH = 0.6;
 const FAILURE_BAND = 0.7;
 
 /** Compute the alpha/beta deltas for a single residual observation —
@@ -726,6 +728,32 @@ export const distributeCredit = async (
           },
         } as JsonValue,
       });
+      if (r >= MIDBAND_UNCERTAINTY_LOW && r <= MIDBAND_UNCERTAINTY_HIGH) {
+        emit({
+          kind: "knowledge_uncertainty_observed",
+          substrate_origin: "substrate_auto",
+          context_refs: [targetId, params.scored_event_id],
+          payload: {
+            knowledge_id: targetId,
+            residual: r,
+            residual_band: "midband",
+            uncertainty_range: [MIDBAND_UNCERTAINTY_LOW, MIDBAND_UNCERTAINTY_HIGH],
+            scored_event_id: params.scored_event_id,
+            calibration_evidence_event_id: params.scored_event_id,
+            origin_calibration: {
+              origin: citedKnowledgeOrigin,
+              predicted_confidence: confidenceEstimate,
+              observed_success_probability: outcomeProbability,
+              calibration_error: Math.abs(confidenceEstimate - outcomeProbability),
+            },
+            merger_quality_axes: {
+              uncertainty: 1 - Math.abs(r - 0.5) * 2,
+              confidence_error: Math.abs(confidenceEstimate - outcomeProbability),
+              shapley_weight: baseWeight,
+            },
+          } as JsonValue,
+        });
+      }
       const id = emit({
         kind: knowledgeKind,
         substrate_origin: "substrate_auto",

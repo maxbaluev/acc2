@@ -318,6 +318,71 @@ describe("distributeCredit — primary + cited entities", () => {
     expect(contradicted.length).toBeGreaterThan(0);
   });
 
+  test("midband knowledge outcomes emit knowledge_uncertainty_observed with calibration evidence", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action");
+    insertSampleArtifact(db, "art_verifier", "// verifier");
+    const kc = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      payload: { text: "candidate gamma", confidence_estimate: 0.8 },
+    });
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      context_refs: [kc.id],
+      payload: {},
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "art_action",
+      payload: {},
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0.5,
+      payload: {},
+    });
+
+    const result = await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0.2,
+      observed_residual: 0.5,
+    });
+
+    const uncertainty = db
+      .query("SELECT context_refs, payload FROM events WHERE kind = 'knowledge_uncertainty_observed'")
+      .get() as { context_refs: string; payload: string } | null;
+    expect(uncertainty).not.toBeNull();
+    expect(result.emitted_events.length).toBeGreaterThan(0);
+    const refs = JSON.parse(uncertainty!.context_refs) as string[];
+    expect(refs).toEqual([kc.id, scored.id]);
+    const payload = JSON.parse(uncertainty!.payload) as {
+      knowledge_id: string;
+      residual: number;
+      residual_band: string;
+      calibration_evidence_event_id: string;
+      origin_calibration: { origin: string; predicted_confidence: number; observed_success_probability: number; calibration_error: number };
+      merger_quality_axes: Record<string, number>;
+    };
+    expect(payload.knowledge_id).toBe(kc.id);
+    expect(payload.residual).toBeCloseTo(0.5, 6);
+    expect(payload.residual_band).toBe("midband");
+    expect(payload.calibration_evidence_event_id).toBe(scored.id);
+    expect(payload.origin_calibration.origin).toBe("opencode");
+    expect(payload.origin_calibration.predicted_confidence).toBeCloseTo(0.8, 6);
+    expect(payload.origin_calibration.observed_success_probability).toBeCloseTo(0.5, 6);
+    expect(payload.merger_quality_axes.uncertainty).toBeCloseTo(1, 6);
+  });
+
   test("citation from artifact bodies via @cite markers is honored", async () => {
     const db = openDb(":memory:");
     insertSampleArtifact(

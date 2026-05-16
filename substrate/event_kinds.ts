@@ -159,6 +159,7 @@ export const EVENT_KINDS = {
   merger_debate_resolved:                  { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   cross_origin_verification_recorded:      { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   origin_calibration_recorded:             { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  knowledge_uncertainty_observed:          { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
 
   // ── External-source registration ────────────────────────────────────
   external_source_registered:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
