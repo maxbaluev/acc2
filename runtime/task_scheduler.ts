@@ -133,6 +133,16 @@ export const computeBrainDispatchCap = (): number => {
  *  resolution / rejection / catch. */
 const IN_FLIGHT_BRAIN: Set<string> = new Set();
 
+/** Tasks that have already had a constitutional_gate_decision emitted for
+ *  at_cap this queueing pass. Without this dedupe the scheduler tick (every
+ *  500ms) would re-emit at_cap for every ready task on every tick while the
+ *  cap stays saturated, flooding the SQLite write queue (~340 events / 10min
+ *  observed 2026-05-16, which throttled FastMCP request handling and made
+ *  substrate.open_directive time out). The set is cleared whenever
+ *  IN_FLIGHT_BRAIN drops below cap so each new saturation cycle still gets a
+ *  fresh observability signal. Tests call _resetSchedulerForTests to clear. */
+const AT_CAP_NOTIFIED: Set<string> = new Set();
+
 /** Max consecutive `bridge_failed` events for a single task before the
  *  scheduler quarantines it with `task_failed { failure_kind:
  *  "consecutive_bridge_failures" }`. Without this cap, a structural issue
@@ -457,19 +467,28 @@ export const schedulerTick = async (
     if (decision.route === "opencode_brain") {
       const brainCap = computeBrainDispatchCap();
       if (IN_FLIGHT_BRAIN.size >= brainCap) {
-        emitEvent(db, {
-          kind: "constitutional_gate_decision",
-          substrate_origin: "substrate_auto",
-          directive_id: task.directive_id,
-          task_id: task.id,
-          payload: {
-            gate: "brain_concurrency_cap",
-            reason: "opencode_brain_in_flight_at_cap",
-            in_flight_brain: IN_FLIGHT_BRAIN.size,
-            cap: brainCap,
-            cap_source: "dynamic_host_ram",
-          } as JsonValue,
-        });
+        // Dedupe at_cap notifications per task while the cap is saturated.
+        // Without this, the 500ms scheduler tick re-emits the same
+        // constitutional_gate_decision for every ready task on every tick,
+        // flooding the SQLite write queue and throttling FastMCP request
+        // handling. See AT_CAP_NOTIFIED docstring.
+        if (!AT_CAP_NOTIFIED.has(task.id)) {
+          AT_CAP_NOTIFIED.add(task.id);
+          emitEvent(db, {
+            kind: "constitutional_gate_decision",
+            substrate_origin: "substrate_auto",
+            directive_id: task.directive_id,
+            task_id: task.id,
+            payload: {
+              gate: "brain_concurrency_cap",
+              reason: "opencode_brain_in_flight_at_cap",
+              in_flight_brain: IN_FLIGHT_BRAIN.size,
+              cap: brainCap,
+              cap_source: "dynamic_host_ram",
+              note: "single notification per saturation cycle; tick keeps trying silently until cap clears",
+            } as JsonValue,
+          });
+        }
         continue;
       }
     }
@@ -506,6 +525,14 @@ export const schedulerTick = async (
         // deferred_blocked) cost nothing here. Releases the brain slot so
         // the next tick can dispatch a queued opencode_brain task.
         IN_FLIGHT_BRAIN.delete(task.id);
+        // Clear at_cap notification flags whenever ANY brain slot opens —
+        // gives every queued task a fresh observability signal on the next
+        // saturation cycle (rather than staying permanently silent after
+        // the first notification). Cheap O(n) clear; n stays small in
+        // practice (≤ ready_tasks count).
+        if (IN_FLIGHT_BRAIN.size === 0 || AT_CAP_NOTIFIED.has(task.id)) {
+          AT_CAP_NOTIFIED.delete(task.id);
+        }
       });
     // Mark settled-flag accessor lazily — best-effort cleanup helper.
     (promise as Promise<unknown> & { _settled?: boolean })._settled = false;
@@ -608,6 +635,7 @@ export const _resetSchedulerForTests = (): void => {
   // so a test that didn't drain leaves IN_FLIGHT_BRAIN populated. Cleared
   // here so the next test's brain dispatch isn't artificially capped.
   IN_FLIGHT_BRAIN.clear();
+  AT_CAP_NOTIFIED.clear();
 };
 
 /** Await every in-flight dispatch tracked in the process-local IN_FLIGHT

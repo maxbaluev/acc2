@@ -418,8 +418,19 @@ export const reconcileOrphanedDispatches = (db: Database): Array<{ dispatch_even
          AND NOT EXISTS (
            SELECT 1 FROM events c
            WHERE c.task_id = e.task_id
-             AND c.kind IN ('brain_dispatch_closed', 'dispatcher_violation', 'task_failed')
+             AND c.kind IN ('brain_dispatch_closed', 'dispatcher_violation', 'task_failed', 'task_committed')
              AND c.ts >= e.ts
+         )
+         AND NOT EXISTS (
+           -- Dedupe: skip orphans that already had a recovery emitted; the
+           -- scheduler is responsible for re-picking them. Without this, the
+           -- worker tick re-emits dispatch_recovered_orphan every cadence
+           -- for the same orphans, flooding the SQLite write queue (~56
+           -- events / 10min observed 2026-05-16 when 9 orphans persisted).
+           SELECT 1 FROM events r
+           WHERE r.kind = 'dispatch_recovered_orphan'
+             AND r.task_id = e.task_id
+             AND json_extract(r.payload, '$.original_dispatch_event_id') = e.id
          )`,
     )
     .all() as Array<{ dispatch_event_id: string; task_id: string; directive_id: string; payload: string }>;
