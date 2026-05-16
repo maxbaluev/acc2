@@ -57,7 +57,10 @@ export type WorkerName =
   // mode emits auto_apply_signaled events; Stage-2 (future) will perform
   // the mechanical anchored_replace_v1 edit + bun test + git commit +
   // recordApplyOutcome credit chain.
-  | "auto_apply";
+  | "auto_apply"
+  // Axis E alignment: source hotreload is a daemon-started periodic subsystem
+  // and should use the same ACC2_DISABLE_WORKERS taxonomy as other workers.
+  | "hotreload";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
