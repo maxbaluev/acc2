@@ -24,6 +24,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { McpMethods } from "./mcp_server";
 import { SearchSchema } from "./mcp_server/types";
+import { __isPlaywrightInstalledForTest } from "./runtimes/camofox";
 
 const STDIO_ENTRY = join(import.meta.dir, "mcp_server_stdio_entry.ts");
 
@@ -285,6 +286,15 @@ describe("fastmcp substrate tools — stdio transport", () => {
     // installed. The default test harness has no playwright, so admission
     // must refuse with `runtime_unavailable` — but the dispatch must NOT
     // throw or return the old `phase_g_runtime_unsupported`.
+    //
+    // Environmental flake guard (owner directive 2026-05-16): when playwright
+    // IS installed locally but the camoufox binary fetch hasn't completed (or
+    // is mid-launch), this admit call can hang past the 30s wall and kill the
+    // stdio transport, cascading every subsequent test in this file as
+    // "Connection closed". Skip when playwright is present — the dedicated
+    // runtime/runtimes/camofox.test.ts already covers the binary-absent and
+    // end-to-end-spawn cases under their own `describe.skipIf` gates.
+    if (__isPlaywrightInstalledForTest()) return;
     const admit = parseEnvelope(
       (await h!.client.callTool({
         name: "substrate.admit_artifact",
