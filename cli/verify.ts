@@ -16,6 +16,7 @@ import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { openDb } from "../substrate/db";
 import { resolveDbPath } from "../runtime/state_paths";
+import { mcpCall } from "./rpc";
 
 const HELP = `acc verify <directive_id_prefix>
 
@@ -135,6 +136,10 @@ type AggregateBucket = {
   drift: number;
   missing: number;
   appliedCommits: string[];
+  /** Drifted proposal rows (full event id + sha) — Layer 2 uses these
+   *  to emit knowledge_contradiction_observed events so the brain's
+   *  posterior updates from drift evidence without re-dispatch. */
+  driftCases: Array<{ proposal_id: string; commit_sha: string; verdict: "drift" | "missing" }>;
 };
 
 export const aggregateVerify = (db: Database, directiveId: string, repoRoot: string): AggregateBucket => {
@@ -163,6 +168,7 @@ export const aggregateVerify = (db: Database, directiveId: string, repoRoot: str
   const out: AggregateBucket = {
     applied: 0, failed: 0, refused: 0, stranded: [],
     verified: 0, drift: 0, missing: 0, appliedCommits: [],
+    driftCases: [],
   };
 
   for (const proposal of proposals) {
@@ -187,8 +193,13 @@ export const aggregateVerify = (db: Database, directiveId: string, repoRoot: str
     if (sha) out.appliedCommits.push(sha.slice(0, 10));
     const verdict = classifyApply(parseJson(proposal.payload), sha, repoRoot);
     if (verdict === "verified") out.verified += 1;
-    else if (verdict === "drift") out.drift += 1;
-    else out.missing += 1;
+    else if (verdict === "drift") {
+      out.drift += 1;
+      out.driftCases.push({ proposal_id: proposal.id, commit_sha: sha ?? "", verdict: "drift" });
+    } else {
+      out.missing += 1;
+      out.driftCases.push({ proposal_id: proposal.id, commit_sha: sha ?? "", verdict: "missing" });
+    }
   }
   return out;
 };
@@ -216,8 +227,54 @@ const renderReport = (directiveId: string, status: string, totals: AggregateBuck
   return lines.join("\n");
 };
 
+/** Layer 2 self-healing (brain-symmetric): emit knowledge_contradiction_observed
+ *  for every drift/missing case so the substrate's Model D extractor demotes
+ *  the brain's posterior on the original proposal. Default-on; suppress with
+ *  --no-learn for read-only inspection.
+ *
+ *  Idempotence: SQL checks for an existing contradiction event citing the
+ *  same proposal_id with the same commit_sha; skips re-emit when found.
+ *  Multiple verify runs on the same drift therefore push one signal, not N. */
+const emitDriftContradictions = async (
+  db: Database,
+  directiveId: string,
+  driftCases: Array<{ proposal_id: string; commit_sha: string; verdict: "drift" | "missing" }>,
+): Promise<number> => {
+  let emitted = 0;
+  for (const c of driftCases) {
+    const exists = db.query(
+      `SELECT 1 FROM events
+       WHERE kind='knowledge_contradiction_observed'
+         AND json_extract(payload, '$.knowledge_id')=?
+         AND json_extract(payload, '$.commit_sha')=?
+       LIMIT 1`,
+    ).get(c.proposal_id, c.commit_sha);
+    if (exists) continue;
+    const reason = c.verdict === "drift"
+      ? `diff_verification_drift: claimed apply at ${c.commit_sha.slice(0, 10)} does not contain proposed before/after markers`
+      : `diff_verification_missing: claimed apply at ${c.commit_sha.slice(0, 10)} not present in git history`;
+    const r = await mcpCall("substrate.emit", {
+      kind: "knowledge_contradiction_observed",
+      substrate_origin: "claude_root",
+      directive_id: directiveId,
+      context_refs: [c.proposal_id],
+      payload: {
+        knowledge_id: c.proposal_id,
+        commit_sha: c.commit_sha,
+        verdict: c.verdict,
+        weight: 0.5,
+        reason,
+        evidence: [`acc verify ${directiveId.slice(0, 10)} classified the apply as ${c.verdict}`],
+      },
+    }).catch((err: Error) => ({ ok: false, error: err.message }));
+    if (r.ok) emitted += 1;
+  }
+  return emitted;
+};
+
 export const runVerify = async (argv: string[]): Promise<number> => {
   if (argv.includes("--help") || argv.includes("-h")) { process.stdout.write(HELP); return 0; }
+  const learn = !argv.includes("--no-learn");
   const repoIdx = argv.indexOf("--repo");
   const repoRoot = repoIdx >= 0 && argv[repoIdx + 1] ? resolve(argv[repoIdx + 1]!) : resolve(process.cwd());
   const positional = argv.filter((x, i) => !x.startsWith("--") && argv[i - 1] !== "--repo");
@@ -232,6 +289,12 @@ export const runVerify = async (argv: string[]): Promise<number> => {
   const status = rootStatus(db, directiveId);
   const totals = aggregateVerify(db, directiveId, repoRoot);
   process.stdout.write(renderReport(directiveId, status, totals));
+  if (learn && totals.driftCases.length > 0) {
+    const emitted = await emitDriftContradictions(db, directiveId, totals.driftCases);
+    if (emitted > 0) {
+      process.stdout.write(`\nlayer-2 self-healing: emitted ${emitted} knowledge_contradiction_observed event(s); brain posterior will demote on next Model-D tick.\n`);
+    }
+  }
   if (totals.drift > 0 || totals.missing > 0) return 2;
   if (totals.stranded.length > 0) return 1;
   return 0;
