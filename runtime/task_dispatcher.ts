@@ -196,6 +196,23 @@ export const dispatchReadyTask = async (
 
   // 2. decideDispatch
   const decision = decideDispatch(db, task);
+  const dispatchDecisionEvidence = {
+    route: decision.route,
+    reason: decision.reason,
+    routing_axes: decision.routing_axes,
+    route_scores: decision.route_scores,
+    verifier_evidence: decision.verifier_evidence,
+  };
+  emitEvent(db, {
+    kind: "dispatch_decided",
+    substrate_origin: "substrate_auto",
+    directive_id: task.directive_id,
+    task_id: task.id,
+    payload: {
+      dispatch_id: dispatchId,
+      ...dispatchDecisionEvidence,
+    } as JsonValue,
+  });
   emitEvent(db, {
     kind: "constitutional_gate_decision",
     substrate_origin: "substrate_auto",
@@ -205,6 +222,9 @@ export const dispatchReadyTask = async (
       dispatch_id: dispatchId,
       route: decision.route,
       reason: decision.reason,
+      routing_axes: decision.routing_axes,
+      route_scores: decision.route_scores,
+      verifier_evidence: decision.verifier_evidence,
     } as JsonValue,
   });
 
@@ -619,6 +639,10 @@ export const dispatchReadyTask = async (
               reason: "owner_consent_missing",
               irreversible_effects_detected: actionObs.irreversibleEffects,
               required_field: "owner_consent_event_id",
+            dispatch_decision: dispatchDecisionEvidence,
+            routing_axes: decision.routing_axes,
+            route_scores: decision.route_scores,
+            dispatch_verifier_evidence: decision.verifier_evidence,
             } as JsonValue,
           });
           try {
@@ -718,6 +742,10 @@ export const dispatchReadyTask = async (
             dispatch_id: dispatchId,
             action_error: actionObs.error ?? "unknown",
             stderr_tail: actionObs.stderrTail,
+            dispatch_decision: dispatchDecisionEvidence,
+            routing_axes: decision.routing_axes,
+            route_scores: decision.route_scores,
+            dispatch_verifier_evidence: decision.verifier_evidence,
           } as JsonValue,
         });
         // Route through the Phase H credit pipeline. When the observation
@@ -787,6 +815,10 @@ export const dispatchReadyTask = async (
             reliability_profile: verifierObs.result && typeof verifierObs.result === "object" && !Array.isArray(verifierObs.result)
               ? ((verifierObs.result as Record<string, unknown>).reliability_profile ?? null)
               : null,
+            dispatch_decision: dispatchDecisionEvidence,
+            routing_axes: decision.routing_axes,
+            route_scores: decision.route_scores,
+            dispatch_verifier_evidence: decision.verifier_evidence,
           } as JsonValue,
         });
 

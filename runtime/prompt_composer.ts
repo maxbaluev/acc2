@@ -153,6 +153,15 @@ const readDirectiveGoal = (db: Database, directiveId: string): string | null => 
   }
 };
 
+const goalShapeTags = (goalText?: string | null): string[] => {
+  const tokens = String(goalText ?? "")
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}]+/gu, " ")
+    .split(/\s+/u)
+    .filter((t) => t.length >= 3);
+  return Array.from(new Set(tokens)).slice(0, 24);
+};
+
 const readKnowledgeTopK = (
   db: Database,
   k: number,
@@ -173,6 +182,7 @@ const readKnowledgeTopK = (
   // payload.candidate_id (or context_refs[0]) and walk the fallback chain
   // so the prompt section renders useful text instead of '(no text)'.
   const shape = goalText ? goalShape(goalText) : null;
+  const shapeTagsJson = JSON.stringify(goalShapeTags(goalText));
   const rows = db
     .query(
       `SELECT
@@ -186,6 +196,10 @@ const readKnowledgeTopK = (
              OR EXISTS (
                SELECT 1 FROM json_each(p.payload, '$.goal_shapes')
                WHERE value = ?
+             )
+             OR EXISTS (
+               SELECT 1 FROM json_each(p.payload, '$.goal_shape_tags')
+               WHERE lower(value) IN (SELECT value FROM json_each(?))
              )
            ) THEN 1
            ELSE 0
@@ -207,13 +221,17 @@ const readKnowledgeTopK = (
                  SELECT 1 FROM json_each(p.payload, '$.goal_shapes')
                  WHERE value = ?
                )
+               OR EXISTS (
+                 SELECT 1 FROM json_each(p.payload, '$.goal_shape_tags')
+                 WHERE lower(value) IN (SELECT value FROM json_each(?))
+               )
              )
            )
          )
        ORDER BY shape_match DESC, p.ts DESC
        LIMIT ?`,
     )
-    .all(shape, shape, shape, shapeMatchOnly ? 1 : 0, shape, shape, shape, k) as Array<Record<string, unknown>>;
+    .all(shape, shape, shape, shapeTagsJson, shapeMatchOnly ? 1 : 0, shape, shape, shape, shapeTagsJson, k) as Array<Record<string, unknown>>;
   const out: Array<{ id: string; text: string; score: number }> = [];
   for (const r of rows) {
     try {

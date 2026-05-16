@@ -173,6 +173,7 @@ export const EVENT_KINDS = {
   bridge_frame_received:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   bridge_completed:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   bridge_failed:                           { producer: "runtime",   embeddable: false, mirror_inline: true,  health_metric: false, narrative: true },
+  bridge_mcp_preflight:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   bridge_mcp_connected:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Dispatcher (cycle-1 enforcement) ────────────────────────────────
@@ -326,6 +327,7 @@ export const EVENT_KINDS = {
   // ── Substrate self-events ───────────────────────────────────────────
   projection_checkpointed:                 { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   constitutional_gate_decision:            { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  dispatch_decided:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   self_modification_recorded:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   recipe_extracted:                        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   recipe_invoked:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },

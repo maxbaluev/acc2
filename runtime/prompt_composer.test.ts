@@ -293,4 +293,13 @@ describe("prompt_composer goal-shape knowledge fallback", () => {
     const composed = composePrompt(db, { taskId, budgetTokens: 1200 });
     expect(composed.text.indexOf("GOAL_SHAPE_MATCHED_KNOWLEDGE")).toBeLessThan(composed.text.indexOf("RECENT_BUT_GENERIC"));
   });
+
+  test("promoted knowledge with matching goal_shape_tags is pulled before recency-only rows", () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "RECENT_BUT_GENERIC_TAG_CASE", score: 0.9 } });
+    emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "TAG_MATCHED_MOVED_CONTRACT_KNOWLEDGE", score: 0.6, goal_shape_tags: ["todo"] } });
+    const composed = composePrompt(db, { taskId, budgetTokens: 1200 });
+    expect(composed.text.indexOf("TAG_MATCHED_MOVED_CONTRACT_KNOWLEDGE")).toBeLessThan(composed.text.indexOf("RECENT_BUT_GENERIC_TAG_CASE"));
+  });
 });
