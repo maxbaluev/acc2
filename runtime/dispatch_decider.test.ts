@@ -68,6 +68,52 @@ describe("dispatch_decider", () => {
     }
   });
 
+  test("routes inline only when every target_resource matches a scheme-aware pattern", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_inline",
+      task_id: "t_inline",
+      payload: {
+        tags: ["low_risk_inline_pattern"],
+        pattern_kind: "glob",
+        pattern: "repo:docs/*.md",
+        score: 0.9,
+        confidence: 0.8,
+      },
+    });
+    const decision = decideDispatch(db, sampleTask({
+      goal: "fix doc typo",
+      target_resources: ["repo:docs/README.md"],
+    } as Partial<TaskNode>));
+    expect(decision.route).toBe("claude_inline");
+  });
+
+  test("does not route inline from legacy target_files alone", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_inline",
+      task_id: "t_inline",
+      payload: {
+        tags: ["low_risk_inline_pattern"],
+        pattern_kind: "glob",
+        pattern: "repo:docs/*.md",
+        score: 0.9,
+        confidence: 0.8,
+      },
+    });
+    const decision = decideDispatch(db, sampleTask({
+      goal: "fix doc typo",
+      target_files: ["docs/README.md"],
+    } as Partial<TaskNode>));
+    expect(decision.route).toBe("opencode_brain");
+  });
+
   test("crisis-mode lowers the recipe threshold so a mid-confidence recipe still routes", () => {
     const db = openDb(":memory:");
     runViews(db);

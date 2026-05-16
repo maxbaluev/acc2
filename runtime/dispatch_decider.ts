@@ -5,10 +5,11 @@
 //      confidence ≥ RECIPE_REPLAY_THRESHOLD. No LLM call. Phase J wires the
 //      recipe view; Phase D never returns this lane because no recipes
 //      have been extracted yet.
-//   2. claude_inline     — every target in the task matches at least one
-//      knowledge entry tagged `low_risk_inline_pattern` with
-//      score ≥ 0.7 AND confidence ≥ 0.6. Phase D never returns this lane
-//      because no low-risk patterns have been promoted yet.
+//   2. claude_inline     — every normalized target_resource on the task
+//      matches at least one scheme-aware knowledge entry tagged
+//      `low_risk_inline_pattern` with score ≥ 0.7 AND confidence ≥ 0.6.
+//      Phase D never returns this lane because no low-risk patterns have
+//      been promoted yet.
 //   3. opencode_brain    — default. Strategic work, DAG decomposition,
 //      code-artifact authoring. Phase D's MVP fixture always hits this
 //      lane (and that's correct — the brain designs the bun grep + verifier).
@@ -21,7 +22,8 @@ import type { TaskNode } from "./task_topology";
 import { readCurrentMode } from "./crisis_mode";
 import { blockersOf } from "./interference";
 import { findRecipeMatch as findRealRecipeMatch } from "./recipe_replay";
-import { lowRiskInlinePatterns, type LowRiskInlinePatternRow } from "../substrate/views";
+import { lowRiskInlinePatterns } from "../substrate/views";
+import { parseResourceRefs, resourceMatchesPattern, type ResourceRef } from "./resource_uri";
 
 /** Default Tier-0 recipe-replay confidence threshold (§15). Recipes seed at
  *  0.5 and accumulate via updateRecipeConfidence; SEVEN successful replays
@@ -82,43 +84,19 @@ const readLowRiskInlinePatterns = (db: Database): InlinePattern[] => {
   }
 };
 
-/** Match a target string against one of the four pattern kinds. */
-const matchPattern = (target: string, p: InlinePattern): boolean => {
-  switch (p.pattern_kind) {
-    case "extension":
-      return target.endsWith(p.pattern);
-    case "prefix":
-      return target.startsWith(p.pattern);
-    case "exact":
-      return target === p.pattern;
-    case "glob": {
-      // Minimal glob: `*` → `.*`, escape other regex metacharacters.
-      const re = new RegExp(
-        "^" + p.pattern.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$",
-      );
-      return re.test(target);
-    }
-    default:
-      return false;
-  }
-};
-
-/** Return the set of patterns the task's targets match. Empty array means
- *  no inline lane. A target = each entry in `task.target_files` (added by
- *  callers when known) OR `task.goal` token-fallback. The decider rejects
- *  inline unless EVERY target matches at least one pattern. */
+/** Return the set of patterns the task's resources match. Empty array means
+ *  no inline lane. The decider rejects inline unless EVERY normalized
+ *  target_resource matches at least one scheme-aware pattern. */
 const inlineMatchingPatterns = (
-  task: TaskNode & { target_files?: string[] },
+  task: TaskNode & { target_resources?: string[] },
   patterns: InlinePattern[],
 ): InlinePattern[] | null => {
   if (patterns.length === 0) return null;
-  const targets = (task.target_files && task.target_files.length > 0)
-    ? task.target_files
-    : []; // no concrete targets → not eligible (fail-closed)
-  if (targets.length === 0) return null;
+  const targets = parseResourceRefs(task.target_resources);
+  if (!targets || targets.length === 0) return null;
   const matched: InlinePattern[] = [];
   for (const t of targets) {
-    const hit = patterns.find((p) => matchPattern(t, p));
+    const hit = patterns.find((p) => resourceMatchesPattern(t as ResourceRef, p.pattern_kind, p.pattern));
     if (!hit) return null; // ANY mismatch disqualifies the entire task
     matched.push(hit);
   }
@@ -313,7 +291,7 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
 
   // 2. Scored inline lane. Fail-closed: no knowledge → no inline.
   const inlinePatterns = readLowRiskInlinePatterns(db);
-  const matched = inlineMatchingPatterns(task as TaskNode & { target_files?: string[] }, inlinePatterns);
+  const matched = inlineMatchingPatterns(task as TaskNode & { target_resources?: string[] }, inlinePatterns);
   if (matched && matched.length > 0) {
     return {
       route: "claude_inline",

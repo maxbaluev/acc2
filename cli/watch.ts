@@ -964,6 +964,10 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
       const targetFiles = (typeof targetFilesRaw === "string" && targetFilesRaw)
         ? (() => { try { return JSON.parse(targetFilesRaw) as string[]; } catch { return []; } })()
         : [];
+      const targetResourcesRaw = v.target_resources;
+      const targetResources = (typeof targetResourcesRaw === "string" && targetResourcesRaw)
+        ? (() => { try { return JSON.parse(targetResourcesRaw) as string[]; } catch { return []; } })()
+        : [];
       const sourceCandidate = asString(v.source_candidate_id, "");
       const ownerGate = asString(v.owner_gate_verdict, "");
       const rich = [
@@ -982,6 +986,7 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
         sourceCandidate ? `source_candidate_id=${sourceCandidate}` : "",
         intent ? `\n--- intent ---\n${intent}` : "",
         summary ? `\n--- summary ---\n${summary}` : "",
+        targetResources.length > 0 ? `\n--- target_resources ---\n${targetResources.join("\n")}` : "",
         targetFiles.length > 0 ? `\n--- target_files ---\n${targetFiles.join("\n")}` : "",
         "",
         "--- declared_sandbox ---",
