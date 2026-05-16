@@ -648,7 +648,7 @@ const WORKFLOW_TEXT = [
   "     Gate residual ≥ 0.3 → refine, do NOT commit.",
   "  CLOSURE + LEARNING (required before committing a DIRECTIVE's root task):",
   "  7. Run a CLOSURE VERIFIER (a code artifact); emit task_closure_audited.",
-  "     Include reliability_profile={consistency,robustness,predictability,safety} when available; residual stays the universal scalar.",
+  "     Include reliability_profile as an OPEN-ENDED Record<string,number> of domain-discovered axes when available — cooking has {repeatability, taste_consistency, ingredient_availability, time_predictability, dietary_safety}; learning has {retention, transferability, motivation_sustained}; engineering has {consistency, robustness, predictability, safety}; relationships has {trust, communication_quality, emotional_safety}. NEVER enumerate axes as a fixed schema — discover them per goal-domain from outcomes. Residual stays the universal scalar; reliability_profile is the discovered axis-vector behind it.",
   "     closure_residual ≥ 0.3 → refine, do NOT commit root.",
   "  8. Extract lessons: emit contract_amendment_proposed OR lesson_extracted for every friction.",
   "     Route prior PENDING PROPOSALS through new task_nodes instead of letting them accumulate.",
