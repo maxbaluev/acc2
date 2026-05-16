@@ -5,6 +5,7 @@ import { classifyHardTask, decideDispatch } from "./dispatch_decider";
 import type { TaskNode } from "./task_topology";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
+import { goalShape } from "./goal_shape";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -119,7 +120,7 @@ describe("dispatch_decider", () => {
       directive_id: "d_recipe",
       task_id: "t_recipe",
       payload: {
-        goal_shape: "audit_runtime_design::n1",
+        goal_shape: goalShape("audit runtime design"),
         topology_signature: "",
         confidence: 0.95,
         trajectory: [
@@ -180,7 +181,7 @@ describe("dispatch_decider", () => {
       directive_id: "d_recipe",
       task_id: "t_recipe",
       payload: {
-        goal_shape: "audit_runtime_design::n1",
+        goal_shape: goalShape("audit runtime design"),
         topology_signature: "",
         confidence: 0.95,
         trajectory: [
@@ -198,6 +199,24 @@ describe("dispatch_decider", () => {
         payload: { recipe_replayed: true, recipe_id: recipe.id, residual },
       });
     }
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_prior",
+      task_id: newId(),
+      residual: 0.03,
+      payload: {
+        dispatch_axes: {
+          one_shot_confidence: 1,
+          information_gap: 0,
+          decomposition_value: 0,
+          cost_pressure: 1,
+          time_sensitivity: 1,
+          reversibility: 1,
+          owner_control_need: 0,
+        },
+      },
+    });
     const decision = decideDispatch(db, sampleTask({ goal: "audit runtime design" }));
     expect(decision.route).toBe("substrate_replay");
     if (decision.route === "substrate_replay") {
@@ -286,5 +305,50 @@ describe("dispatch_decider", () => {
     });
     const decision = decideDispatch(db, task);
     expect(decision.route).toBe("substrate_replay");
+  });
+  test("uses learned open-ended axes to choose among feasible non-blocked routes", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_inline",
+      task_id: "t_inline",
+      payload: {
+        tags: ["low_risk_inline_pattern"],
+        pattern_kind: "glob",
+        pattern: "repo:docs/*.md",
+        score: 0.9,
+        confidence: 0.8,
+      },
+    });
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      residual: 0.2,
+      payload: {
+        verifier_result: {
+          breakdown: {
+            one_shot_confidence: 0.1,
+            information_gap: 0.9,
+            reversibility: 0.2,
+            owner_control_need: 0.8,
+            decomposition_value: 0.9,
+            cost_pressure: 0.2,
+            time_sensitivity: 0.2,
+          },
+        },
+      },
+    });
+
+    const decision = decideDispatch(db, sampleTask({
+      goal: "fix doc typo",
+      target_resources: ["repo:docs/README.md"],
+    } as Partial<TaskNode>));
+
+    expect(decision.route).toBe("opencode_brain");
+    expect(decision.route_scores.opencode_brain).toBeGreaterThan(decision.route_scores.claude_inline);
+    expect(decision.verifier_evidence.selected_route_score).toBe(decision.route_scores.opencode_brain);
+    expect(decision.verifier_evidence.feasible_route_count).toBe(2);
   });
 });

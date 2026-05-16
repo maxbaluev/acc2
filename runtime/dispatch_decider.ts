@@ -58,6 +58,8 @@ export type DispatchDecision =
   | ({ route: "opencode_brain"; predicted_complexity: "low" | "mid" | "high" } & DispatchDecisionBase)
   | ({ route: "deferred_blocked"; blockers: string[] } & DispatchDecisionBase);
 
+type DispatchRoute = DispatchDecision["route"];
+
 type RecipeMatch = { id: string; confidence: number };
 
 export type HardTaskClassification = {
@@ -255,6 +257,32 @@ const scoreRoutesFromAxes = (axes: Record<string, number>): DispatchRouteScores 
   };
 };
 
+const chooseHighestScoredRoute = (routeScores: DispatchRouteScores, feasibleRoutes: DispatchRoute[]): DispatchRoute => {
+  let best = feasibleRoutes[0] ?? "opencode_brain";
+  let bestScore = routeScores[best] ?? 0;
+  for (const route of feasibleRoutes.slice(1)) {
+    const score = routeScores[route] ?? 0;
+    if (score > bestScore) {
+      best = route;
+      bestScore = score;
+    }
+  }
+  return best;
+};
+
+const evidenceForSelectedRoute = (
+  evidence: DispatchDecisionEvidence,
+  selectedRoute: DispatchRoute,
+  feasibleRoutes: DispatchRoute[],
+): DispatchDecisionEvidence => ({
+  ...evidence,
+  verifier_evidence: {
+    ...evidence.verifier_evidence,
+    selected_route_score: evidence.route_scores[selectedRoute] ?? 0,
+    feasible_route_count: feasibleRoutes.length,
+  },
+});
+
 const buildDispatchDecisionEvidence = (db: Database, task: TaskNode, hardness: HardTaskClassification): DispatchDecisionEvidence => {
   const directivePayload = readDirectivePayload(db, task.directive_id);
   const text = String(typeof directivePayload.directive_text === "string" ? directivePayload.directive_text : "") + "\n" + task.goal;
@@ -262,10 +290,10 @@ const buildDispatchDecisionEvidence = (db: Database, task: TaskNode, hardness: H
   const urgency = typeof directivePayload.urgency === "string" ? directivePayload.urgency : "normal";
   const learned = readLearnedDispatchAxisEvidence(db);
   const fallbackAxes: Record<string, number> = {
-    one_shot_confidence: 0.85 - hardness.score * 0.12 - Math.max(0, targets.length - 1) * 0.10,
-    information_gap: 0.15 + hardness.score * 0.12 + (targets.length === 0 ? 0.10 : 0),
+    one_shot_confidence: hardness.is_hard ? 0.35 : 0.85 - hardness.score * 0.12 - Math.max(0, targets.length - 1) * 0.10,
+    information_gap: hardness.is_hard ? Math.max(0.55, 0.15 + hardness.score * 0.12 + (targets.length === 0 ? 0.10 : 0)) : 0.15 + hardness.score * 0.12 + (targets.length === 0 ? 0.10 : 0),
     reversibility: /\b(irreversible|payment|delete|destructive|external|stakeholder)\b/i.test(text) ? 0.25 : 0.80,
-    owner_control_need: /\b(consent|owner|manual|review|approval|stakeholder|irreversible)\b/i.test(text) ? 0.80 : (targets.length > 1 ? 0.55 : 0.25),
+    owner_control_need: /\b(consent|owner|manual|review|approval|stakeholder|irreversible)\b/i.test(text) ? 0.80 : (hardness.is_hard || targets.length > 1 ? 0.55 : 0.25),
     decomposition_value: hardness.is_hard ? 0.85 : 0.20 + hardness.axes.length * 0.15,
     cost_pressure: urgency === "crisis" ? 0.85 : (hardness.diagnostics.budget_high_fields > 0 ? 0.70 : 0.35),
     time_sensitivity: urgency === "crisis" ? 0.95 : (urgency === "elevated" ? 0.65 : 0.25),
@@ -554,66 +582,77 @@ export const recordLowRiskInlineOutcome = (
 
 export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision => {
   const hardness = classifyHardTask(db, task);
-  const evidence = buildDispatchDecisionEvidence(db, task, hardness);
+  const baseEvidence = buildDispatchDecisionEvidence(db, task, hardness);
 
   // 0. Down-rank: directive blocked by an unresolved higher-priority directive.
   const blockers = blockersOf(db, task.directive_id);
   if (blockers.length > 0) {
+    const feasibleRoutes: DispatchRoute[] = ["deferred_blocked"];
+    const evidence = evidenceForSelectedRoute(baseEvidence, "deferred_blocked", feasibleRoutes);
     return {
       route: "deferred_blocked",
       blockers,
-      reason: `blocked_by:${blockers.join(",")}`,
+      reason: "blocked_by:" + blockers.join(","),
       ...evidence,
     };
   }
 
-  // 1. Tier-0 recipe replay. Crisis mode lowers the confidence threshold.
-  // Hard tasks only allow recipe override when recent replay residuals prove
-  // the recipe is genuinely known-shape; thin matches fall through to DAG.
   const mode = readCurrentMode(db, task.directive_id);
   const recipeThreshold = mode.recipe_confidence_threshold;
   const recipe = findRecipeMatch(db, task, recipeThreshold);
+  let recipeRouteReason: string | null = null;
+  let hardRecipeFallthroughReason: string | null = null;
   if (recipe) {
     if (hardness.is_hard) {
       const replayHealth = readRecipeReplayHealth(db, recipe.id);
-      if (!replayHealth.can_override_hardness) {
-        return {
-          route: "opencode_brain",
-          predicted_complexity: "high",
-          reason: hardTaskReason(hardness, `recipe=${recipe.id};recipe_replay_observed=${replayHealth.observed};recipe_replay_max_residual=${replayHealth.max_residual ?? "none"}`),
-          ...evidence,
-        };
+      if (replayHealth.can_override_hardness) {
+        recipeRouteReason = "recipe_match_hard_override_verified";
+      } else {
+        hardRecipeFallthroughReason = hardTaskReason(
+          hardness,
+          "recipe=" + recipe.id + ";recipe_replay_observed=" + replayHealth.observed + ";recipe_replay_max_residual=" + (replayHealth.max_residual ?? "none"),
+        );
       }
-      return { route: "substrate_replay", recipe_id: recipe.id, reason: "recipe_match_hard_override_verified", ...evidence };
+    } else {
+      recipeRouteReason = "recipe_match";
     }
-    return { route: "substrate_replay", recipe_id: recipe.id, reason: "recipe_match", ...evidence };
   }
 
-  // 2. Hard-task DAG gate. This sits before the inline lane so a broad
-  // strategic/refactor/audit target cannot be collapsed into a one-shot edit
-  // solely because every target_resource matches a low-risk pattern.
-  if (hardness.is_hard) {
-    return {
-      route: "opencode_brain",
-      predicted_complexity: "high",
-      reason: hardTaskReason(hardness, "no_verified_recipe_override"),
-      ...evidence,
-    };
-  }
-
-  // 3. Scored inline lane. Fail-closed: no knowledge → no inline.
   const inlinePatterns = readLowRiskInlinePatterns(db);
-  const matched = inlineMatchingPatterns(task as TaskNode & { target_resources?: string[] }, inlinePatterns);
-  if (matched && matched.length > 0) {
+  const matchedInlinePatterns = inlineMatchingPatterns(task as TaskNode & { target_resources?: string[] }, inlinePatterns);
+
+  const feasibleRoutes: DispatchRoute[] = ["opencode_brain"];
+  if (recipe && recipeRouteReason) feasibleRoutes.push("substrate_replay");
+  if (matchedInlinePatterns && matchedInlinePatterns.length > 0) feasibleRoutes.push("claude_inline");
+
+  // Route availability still fails closed (no recipe/no inline knowledge means
+  // no such lane), but the selected feasible lane is now the highest-scored
+  // open-ended axis outcome rather than a fixed task-class branch.
+  const selectedRoute = chooseHighestScoredRoute(baseEvidence.route_scores, feasibleRoutes);
+  const evidence = evidenceForSelectedRoute(baseEvidence, selectedRoute, feasibleRoutes);
+
+  if (selectedRoute === "substrate_replay" && recipe && recipeRouteReason) {
+    return { route: "substrate_replay", recipe_id: recipe.id, reason: recipeRouteReason, ...evidence };
+  }
+
+  if (selectedRoute === "claude_inline" && matchedInlinePatterns && matchedInlinePatterns.length > 0) {
     return {
       route: "claude_inline",
-      cited_artifact_ids: matched.map((m) => m.cited_id),
+      cited_artifact_ids: matchedInlinePatterns.map((m) => m.cited_id),
       reason: "scored_inline_lane",
       ...evidence,
     };
   }
 
-  // 4. Default — opencode brain.
+  if (hardness.is_hard) {
+    return {
+      route: "opencode_brain",
+      predicted_complexity: "high",
+      reason: hardRecipeFallthroughReason ?? hardTaskReason(hardness, "no_verified_recipe_override"),
+      ...evidence,
+    };
+  }
+
   return {
     route: "opencode_brain",
     predicted_complexity: estimateComplexity(task),

@@ -82,10 +82,23 @@ describe("prompt_composer", () => {
   test("under heavy budget pressure, P4 sections drop first", () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
+    emitEvent(db, {
+      kind: "task_failed",
+      substrate_origin: "substrate_auto",
+      task_id: taskId,
+      failure_kind: "artifact_runtime_error",
+      payload: { failure_kind: "artifact_runtime_error" },
+    });
+    emitEvent(db, {
+      kind: "constitutional_gate_decision",
+      substrate_origin: "substrate_auto",
+      task_id: taskId,
+      payload: { gate: "brain_concurrency_cap" },
+    });
     // Tiny budget — even with approximate token counting we should not fit P4.
     const composed = composePrompt(db, { taskId, budgetTokens: 150 });
-    // P0 sections must remain — but constitutional gates / active failures
-    // must drop first.
+    // P0 sections must remain — but seeded constitutional gates / active
+    // failures must drop before higher-priority owner/task context.
     expect(composed.truncated).toContain("active_failures");
     expect(composed.truncated).toContain("constitutional_gates");
   });
