@@ -346,6 +346,29 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(row?.latest_event_id).toBe(dispatchEventId);
   });
 
+  test("classifies an orphan root past the 5min window as zombie", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_orphan", task_id: "t_orphan", ts: tenMinAgo });
+
+    const [row] = dispatchResolved(db, { directiveId: "d_orphan", rootTaskId: "t_orphan" });
+    expect(row?.lifecycle_status).toBe("zombie");
+    expect(row?.status_reason).toBe("orphan_root_no_dispatch");
+    expect(row?.dispatched_count).toBe(0);
+    expect(row?.terminal_kind).toBeNull();
+  });
+
+  test("keeps a fresh orphan root classified as live inside the 5min window", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_fresh", task_id: "t_fresh", ts: nowIso() });
+
+    const [row] = dispatchResolved(db, { directiveId: "d_fresh", rootTaskId: "t_fresh" });
+    expect(row?.lifecycle_status).toBe("live");
+    expect(row?.status_reason).not.toBe("orphan_root_no_dispatch");
+  });
+
   test("groups child dispatch events under the root task id and supports filters", () => {
     const db = openDb(":memory:");
     runViews(db);

@@ -2099,6 +2099,13 @@ SELECT
          AND ds.oldest_open_dispatched_at IS NOT NULL
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
       THEN 'zombie'
+    WHEN term.terminal_kind IS NULL
+         AND COALESCE(ds.dispatched_count, 0) = 0
+         AND COALESCE(ds.open_dispatch_count, 0) = 0
+         AND cg.latest_cap_gate_at IS NULL
+         AND r.root_opened_ts IS NOT NULL
+         AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 300000
+      THEN 'zombie'
     WHEN cg.latest_cap_gate_at IS NOT NULL
          AND COALESCE(ds.open_dispatch_count, 0) = 0
       THEN 'queued_at_cap'
@@ -2111,6 +2118,13 @@ SELECT
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
+      THEN 'zombie'
+    WHEN term.terminal_kind IS NULL
+         AND COALESCE(ds.dispatched_count, 0) = 0
+         AND COALESCE(ds.open_dispatch_count, 0) = 0
+         AND cg.latest_cap_gate_at IS NULL
+         AND r.root_opened_ts IS NOT NULL
+         AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 300000
       THEN 'zombie'
     WHEN cg.latest_cap_gate_at IS NOT NULL
          AND COALESCE(ds.open_dispatch_count, 0) = 0
@@ -2146,6 +2160,13 @@ SELECT
          AND ds.oldest_open_dispatched_at IS NOT NULL
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
       THEN 'open_dispatch_zombie'
+    WHEN term.terminal_kind IS NULL
+         AND COALESCE(ds.dispatched_count, 0) = 0
+         AND COALESCE(ds.open_dispatch_count, 0) = 0
+         AND cg.latest_cap_gate_at IS NULL
+         AND r.root_opened_ts IS NOT NULL
+         AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 300000
+      THEN 'orphan_root_no_dispatch'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0 THEN 'brain_dispatch_open'
     WHEN cg.latest_cap_gate_at IS NOT NULL
          AND COALESCE(ds.open_dispatch_count, 0) = 0
