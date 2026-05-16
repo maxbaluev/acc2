@@ -4,10 +4,15 @@
 // shows up in the rendered output.
 
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { emitEvent } from "../runtime/events";
 import { sseConnect, mcpCall } from "./rpc";
-import { runWatch, renderFrame } from "./watch";
+import { runWatch, renderFrame, renderPanelLines, readPendingDecisions, readDriftSummaries } from "./watch";
 import { useSharedDaemon } from "../tests/daemon_fixture";
+import { closeDb, openDb } from "../substrate/db";
+import type { TrustMetrics } from "./trust";
 
 // Disjoint port band from dispatch.test.ts (12000/17000) and daemon.test.ts
 // (30000/31000) and runtime/*.test.ts ([19000, 60000)) — choose [38000, 39500).
@@ -184,6 +189,128 @@ describe("renderFrame", () => {
     expect(out).toContain("sub task");
     expect(out).toContain("refines");
     expect(out).toContain("action_scored");
+  });
+});
+
+describe("operator dashboard panels", () => {
+  const makeTrust = (overrides: Partial<TrustMetrics> = {}): TrustMetrics => ({
+    autonomy_score: 0.42,
+    recipes_extracted: 7, recipes_replayed_success: 3, recipes_replayed_aborted: 1,
+    knowledge_promoted_7d: 5, knowledge_demoted_7d: 1,
+    artifacts_promoted_recent: [{ artifact_id: "art_abc123", ts: "2026-05-15T10:00:00.000Z", summary: "useful artifact" }],
+    closure_residual_7d: { avg: 0.18, min: 0.05, max: 0.42, count: 9 },
+    amendments_7d: { applied: 4, failed: 1, refused: 0 },
+    recommendation: "trust looks healthy; consider raising father --max-cycles",
+    ...overrides,
+  });
+
+  test("trust panel renders autonomy_score line", () => {
+    const state = {
+      events: [], active: [], ready: [], artifacts: [], health: {},
+      view: "trust" as const,
+      trust: makeTrust(),
+      decisions: [], drift: [],
+    };
+    const out = renderFrame(state, 140, 40);
+    expect(out).toContain("autonomy_score");
+    expect(out).toContain("0.42");
+    expect(out).toContain("recipes");
+    expect(out).toContain("closure_residual");
+    expect(out).toContain("recommendation");
+    // Footer surfaces the first word of the recommendation.
+    expect(out).toContain("trust=trust");
+  });
+
+  test("decisions panel renders pending HIDL + owner-gated amendment events", () => {
+    const now = Date.now();
+    const state = {
+      events: [], active: [], ready: [], artifacts: [], health: {},
+      view: "decisions" as const,
+      decisions: [
+        { event_id: "ev_hidl_001abcdef", kind: "hidl_action_required", target: "review proposal", anchor: "approve commit X?", age_ms: 3 * 60_000 },
+        { event_id: "ev_oir_002defabc", kind: "owner_input_required", target: "language preference", anchor: "russian or english?", age_ms: 30 * 60_000 },
+        { event_id: "ev_am_003fedcba", kind: "contract_amendment_proposed", target: "CLAUDE.md", anchor: "owner-facing chat language", age_ms: 5 * 3_600_000 },
+      ],
+      drift: [], trust: makeTrust(),
+    };
+    void now;
+    const out = renderFrame(state, 160, 40);
+    expect(out).toContain("Pending owner decisions");
+    expect(out).toContain("hidl_action_required");
+    expect(out).toContain("owner_input_required");
+    expect(out).toContain("contract_amendment_proposed");
+    expect(out).toContain("CLAUDE.md");
+    expect(out).toContain("decisions=3");
+  });
+
+  test("verify drift panel renders directive summaries with drift/missing counts", () => {
+    const state = {
+      events: [], active: [], ready: [], artifacts: [], health: {},
+      view: "drift" as const,
+      drift: [
+        { directive_id: "d_aaa11111", status: "committed", applied: 5, failed: 0, refused: 0, stranded: 0, drift: 2, missing: 1 },
+        { directive_id: "d_bbb22222", status: "in-flight", applied: 1, failed: 0, refused: 0, stranded: 1, drift: 0, missing: 0 },
+        { directive_id: "d_ccc33333", status: "committed", applied: 3, failed: 0, refused: 0, stranded: 0, drift: 0, missing: 0 },
+      ],
+      decisions: [], trust: makeTrust(),
+    };
+    const out = renderFrame(state, 160, 40);
+    expect(out).toContain("Verify drift");
+    // Directive ids are truncated to 8 chars in the table column.
+    expect(out).toContain("d_aaa111");
+    expect(out).toContain("d_bbb222");
+    expect(out).toContain("d_ccc333");
+    // Footer aggregates drift+missing across all directives (2+1 = 3).
+    expect(out).toContain("drift=3");
+  });
+
+  test("readPendingDecisions joins unresolved owner_input_required + owner-gated amendments", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acc2-watch-decisions-"));
+    const dbPath = join(dir, "decisions.db");
+    try {
+      const db = openDb(dbPath);
+      const insert = (id: string, kind: string, payload: object, context_refs: unknown[] = []) =>
+        db.run(`INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [id, new Date(Date.now() - 60_000).toISOString(), "d_t", "t_t", "loop", "test", kind, JSON.stringify(payload), JSON.stringify(context_refs)]);
+      // Anchor a directive_opened so readDriftSummaries finds the directive.
+      insert("dir_opened", "directive_opened", { text: "test directive" });
+      insert("oir_pending", "owner_input_required", { question: "stay open?" });
+      insert("oir_resolved", "owner_input_required", { question: "answered already?" });
+      insert("dec_for_resolved", "owner_decision_recorded", { decision: "yes" }, ["oir_resolved"]);
+      insert("amp_gated", "contract_amendment_proposed", { target: "CLAUDE.md", anchor: "x" });
+      insert("amp_ungated", "contract_amendment_proposed", { target: "runtime/foo.ts", anchor: "y" });
+      const out = readPendingDecisions(db, Date.now());
+      const ids = out.map((d) => d.event_id);
+      expect(ids).toContain("oir_pending");
+      expect(ids).toContain("amp_gated");
+      expect(ids).not.toContain("oir_resolved");
+      expect(ids).not.toContain("amp_ungated");
+      // readDriftSummaries on the same DB produces a row for d_t (no commits in dir, so verify is harmless).
+      const drifts = readDriftSummaries(db, dir, 5);
+      expect(drifts.length).toBeGreaterThanOrEqual(1);
+      expect(drifts[0]!.directive_id).toBe("d_t");
+    } finally {
+      closeDb(dbPath); // close ONLY our path so the daemon fixture's cached db survives
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("renderPanelLines health view renders pid + hotreload section", () => {
+    const lines = renderPanelLines({
+      events: [], active: [], ready: [], artifacts: [], health: {
+        pid: 99, uptime_ms: 12345, events_count: 7, mcp_port: 38000, aux_port: 38001,
+        stuck_workers: [{ worker: "embedder", last_tick_ms_ago: 99999 }],
+        hotreload: { watched_module_count: 3, reload_total: 2, failure_total: 1, last_failure: { ts: "2026-05-15T10:00:00.000Z", module: "runtime/x.ts", reason: "syntax error" } },
+      } as unknown as Parameters<typeof renderPanelLines>[0]["health"],
+    } as Parameters<typeof renderPanelLines>[0], "health", 160);
+    const joined = lines.join("\n");
+    expect(joined).toContain("pid=99");
+    expect(joined).toContain("stuck workers");
+    expect(joined).toContain("embedder");
+    expect(joined).toContain("hotreload");
+    expect(joined).toContain("last_failure");
+    expect(joined).toContain("syntax error");
   });
 });
 

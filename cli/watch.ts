@@ -4,6 +4,13 @@
 // renderFrame(state, columns, rows) stable and side-effect free.
 
 import { mcpCall, sseConnect, type SseEvent, requireAux, rpcGet } from "./rpc";
+import type { Database } from "bun:sqlite";
+import { resolve as resolvePath } from "node:path";
+import { openDb } from "../substrate/db";
+import { resolveDbPath } from "../runtime/state_paths";
+import { gatherTrustMetrics, type TrustMetrics } from "./trust";
+import { aggregateVerify } from "./verify";
+import { OWNER_GATED_PATH_PATTERNS } from "../runtime/owner_gate";
 
 const CSI = "\x1b[";
 const CLEAR_SCREEN = `${CSI}2J`;
@@ -119,7 +126,15 @@ type EventRow = {
   payload?: unknown;
 };
 
-type ViewKey = "dag" | "directives" | "tasks" | "events" | "artifacts" | "recipes" | "lessons" | "interventions" | "knowledge";
+type ViewKey = "dag" | "directives" | "tasks" | "events" | "artifacts" | "recipes" | "lessons" | "interventions" | "knowledge" | "trust" | "decisions" | "health" | "drift";
+
+// Operator-dashboard panels (consolidated `acc watch` per brain audit
+// V7FBAW66C95FD3447GHAXK48XM). Render as full-pane text blocks, kept OUT
+// of the numbered tab list so existing 1-8 shortcuts stay unchanged.
+const PANEL_VIEWS: ReadonlySet<ViewKey> = new Set<ViewKey>(["trust", "decisions", "health", "drift"]);
+
+type PendingDecision = { event_id: string; kind: string; target: string; anchor: string; age_ms: number };
+type DriftSummary = { directive_id: string; status: string; applied: number; failed: number; refused: number; stranded: number; drift: number; missing: number };
 
 // DAG-first TUI (brain audit bs00e26fx, 2026-05-15): the substrate IS a
 // DAG of directive → task → event nodes joined by task_edge_recorded
@@ -168,6 +183,13 @@ export type WatchState = {
   selected?: Partial<Record<ViewKey, number>>;
   filter?: string;
   showHelp?: boolean;
+  // Operator-dashboard panels populated by refreshPanels()
+  trust?: TrustMetrics | null;
+  trust_refreshed_ms?: number;
+  decisions?: PendingDecision[];
+  decisions_refreshed_ms?: number;
+  drift?: DriftSummary[];
+  drift_refreshed_ms?: number;
   /** Enter toggles a full-screen detail viewer that shows the selected
    *  row's full untrimmed body. j/k scroll within the viewer. Esc/Enter
    *  exits back to the split list+preview layout. */
@@ -401,6 +423,66 @@ const readHealth = async (): Promise<DaemonHealth> => {
     return await rpcGet<DaemonHealth>(`${base}/health`);
   } catch { return {}; }
 };
+
+// Operator-dashboard readers (re-use gatherTrustMetrics, aggregateVerify, OWNER_GATED_PATH_PATTERNS).
+let _panelDb: Database | null = null;
+const panelDb = (): Database | null => {
+  if (_panelDb) return _panelDb;
+  try { _panelDb = openDb(resolveDbPath()); } catch { _panelDb = null; }
+  return _panelDb;
+};
+const parseJsonSafe = (s: unknown): Record<string, unknown> => {
+  if (s && typeof s === "object") return s as Record<string, unknown>;
+  try { return JSON.parse(String(s ?? "{}")) as Record<string, unknown>; } catch { return {}; }
+};
+const ageOf = (ts: string, now: number): number => { const t = Date.parse(ts || ""); return Number.isFinite(t) ? Math.max(0, now - t) : 0; };
+
+export const readPendingDecisions = (db: Database, nowMs: number): PendingDecision[] => {
+  type R = { id: string; ts: string; payload: string };
+  const out: PendingDecision[] = [];
+  const isResolved = (id: string, kinds: string) =>
+    !!db.query(`SELECT 1 FROM events WHERE kind IN (${kinds}) AND context_refs LIKE ? LIMIT 1`).get(`%${id}%`);
+  for (const r of db.query(`SELECT id, ts, payload FROM events WHERE kind='owner_input_required' ORDER BY ts DESC LIMIT 200`).all() as R[]) {
+    if (isResolved(r.id, `'owner_decision_recorded'`)) continue;
+    const p = parseJsonSafe(r.payload);
+    out.push({ event_id: r.id, kind: "owner_input_required", target: String(p.target ?? p.question ?? "—").slice(0, 60), anchor: String(p.anchor ?? p.summary ?? p.question ?? "").slice(0, 30), age_ms: ageOf(r.ts, nowMs) });
+  }
+  for (const r of db.query(`SELECT id, ts, payload FROM events WHERE kind='hidl_action_required' ORDER BY ts DESC LIMIT 200`).all() as R[]) {
+    if (isResolved(r.id, `'hidl_action_resolved','owner_decision_recorded'`)) continue;
+    const p = parseJsonSafe(r.payload);
+    out.push({ event_id: r.id, kind: "hidl_action_required", target: String(p.target ?? p.action ?? "—").slice(0, 60), anchor: String(p.anchor ?? p.summary ?? p.action ?? "").slice(0, 30), age_ms: ageOf(r.ts, nowMs) });
+  }
+  for (const r of db.query(`SELECT id, ts, payload FROM events WHERE kind='contract_amendment_proposed' ORDER BY ts DESC LIMIT 400`).all() as R[]) {
+    const p = parseJsonSafe(r.payload);
+    const target = String(p.target ?? "");
+    if (!target || !OWNER_GATED_PATH_PATTERNS.some(({ regex }) => regex.test(target))) continue;
+    if (db.query(`SELECT 1 FROM events WHERE kind='contract_amendment_applied' AND (context_refs LIKE ? OR json_extract(payload,'$.source_event_id')=?) LIMIT 1`).get(`%${r.id}%`, r.id)) continue;
+    out.push({ event_id: r.id, kind: "contract_amendment_proposed", target: target.slice(0, 60), anchor: String(p.anchor ?? "").slice(0, 30), age_ms: ageOf(r.ts, nowMs) });
+  }
+  out.sort((a, b) => b.age_ms - a.age_ms);
+  return out;
+};
+
+export const readDriftSummaries = (db: Database, repoRoot: string, n = 10): DriftSummary[] => {
+  const ids = (db.query(`SELECT directive_id FROM events WHERE kind='directive_opened' GROUP BY directive_id ORDER BY MAX(ts) DESC LIMIT ?`).all(n) as Array<{ directive_id: string }>).map((r) => r.directive_id).filter(Boolean);
+  const out: DriftSummary[] = [];
+  for (const directive_id of ids) {
+    try {
+      const agg = aggregateVerify(db, directive_id, repoRoot);
+      const term = db.query(`SELECT kind FROM events WHERE directive_id=? AND kind IN ('task_committed','task_failed') ORDER BY ts DESC LIMIT 1`).get(directive_id) as { kind?: string } | null;
+      const status = term?.kind === "task_committed" ? "committed" : term?.kind === "task_failed" ? "failed" : "in-flight";
+      out.push({ directive_id, status, applied: agg.applied, failed: agg.failed, refused: agg.refused, stranded: agg.stranded.length, drift: agg.drift, missing: agg.missing });
+    } catch { /* skip directives we can't verify */ }
+  }
+  out.sort((a, b) => (b.drift + b.missing) - (a.drift + a.missing));
+  return out;
+};
+
+const formatAge = (ms: number): string =>
+  ms < 60_000 ? `${Math.floor(ms / 1000)}s`
+  : ms < 3_600_000 ? `${Math.floor(ms / 60_000)}m`
+  : ms < 86_400_000 ? `${Math.floor(ms / 3_600_000)}h` : `${Math.floor(ms / 86_400_000)}d`;
+const firstWord = (s: string): string => { const m = String(s ?? "").trim().match(/^[\w-]+/); return m ? m[0] : "—"; };
 
 const readRecentEvents = async (): Promise<EventRow[]> => {
   try {
@@ -1161,10 +1243,99 @@ const healthLabel = (h: DaemonHealth): string => {
   return "UNKNOWN";
 };
 
+export const renderPanelLines = (state: WatchState, view: ViewKey, cols: number): string[] => {
+  const w = Math.max(40, cols);
+  const lines: string[] = [];
+  const H = (s: string) => `${BOLD}${s}${RESET}`;
+  if (view === "trust") {
+    const t = state.trust;
+    if (!t) return ["(no trust metrics yet — daemon DB unreachable or empty)"];
+    const cr = t.closure_residual_7d, am = t.amendments_7d;
+    lines.push(`${H("autonomy_score")}: ${t.autonomy_score.toFixed(2)}`, "");
+    lines.push(`${H("recipes")}  extracted=${t.recipes_extracted}  replayed_success=${t.recipes_replayed_success}  replayed_aborted=${t.recipes_replayed_aborted}`);
+    lines.push(`${H("knowledge (7d)")}  promoted=${t.knowledge_promoted_7d}  demoted=${t.knowledge_demoted_7d}`);
+    lines.push(`${H("closure_residual (7d)")}  avg=${cr.avg.toFixed(3)}  min=${cr.min.toFixed(3)}  max=${cr.max.toFixed(3)}  n=${cr.count}`);
+    lines.push(`${H("amendments (7d)")}  applied=${am.applied}  failed=${am.failed}  refused=${am.refused}`, "", H("recent artifact promotions"));
+    if (t.artifacts_promoted_recent.length === 0) lines.push("  (none)");
+    for (const a of t.artifacts_promoted_recent) lines.push(`  ${a.ts.slice(0, 19)}  ${a.artifact_id.slice(0, 24).padEnd(24)}  ${truncate(a.summary, w - 50)}`);
+    lines.push("", `${H("recommendation")}: ${t.recommendation}`);
+    return lines;
+  }
+  if (view === "decisions") {
+    const d = state.decisions ?? [];
+    lines.push(`${H("Pending owner decisions")}  (${d.length})  sorted by age DESC`, "");
+    if (d.length === 0) { lines.push("  (no pending owner_input_required / hidl_action_required / owner-gated amendments)"); return lines; }
+    lines.push(`  ${"id".padEnd(9)}  ${"kind".padEnd(28)}  ${"target".padEnd(34)}  ${"anchor".padEnd(30)}  age`);
+    for (const r of d) lines.push(`  ${shortId(r.event_id, 8).padEnd(9)}  ${YELLOW}${r.kind.slice(0, 28).padEnd(28)}${RESET}  ${r.target.slice(0, 34).padEnd(34)}  ${DIM}${r.anchor.slice(0, 30).padEnd(30)}${RESET}  ${formatAge(r.age_ms)}`);
+    return lines;
+  }
+  if (view === "health") {
+    const h = state.health ?? {}; const hr = h.hotreload ?? null;
+    lines.push(`${H("Daemon health")}  ${healthLabel(h)}`);
+    lines.push(`  pid=${h.pid ?? "?"}  uptime_ms=${h.uptime_ms ?? 0}  events_count=${h.events_count ?? 0}  mcp_port=${h.mcp_port ?? "?"}  aux_port=${h.aux_port ?? "?"}`);
+    if (h.stuck_workers && h.stuck_workers.length > 0) {
+      lines.push("", `${H("stuck workers")}  (${h.stuck_workers.length})`);
+      for (const s of h.stuck_workers) lines.push(`  ${RED}${s.worker}${RESET}  last_tick_ms_ago=${s.last_tick_ms_ago ?? "?"}`);
+    }
+    lines.push("", H("hotreload"));
+    if (!hr) lines.push("  (no hotreload state in /health payload)");
+    else {
+      lines.push(`  watched=${hr.watched_module_count ?? 0}  reload_total=${hr.reload_total ?? 0}  failure_total=${hr.failure_total ?? 0}  last_module=${hr.last_reload_module ?? "(none)"}`);
+      if (hr.last_failure) {
+        lines.push(`  ${RED}last_failure${RESET}  ts=${hr.last_failure.ts}  module=${hr.last_failure.module}`);
+        lines.push(`               reason=${truncate(hr.last_failure.reason, w - 22)}`);
+      } else lines.push(`  last_failure=(none)`);
+    }
+    if (typeof h.activation_listener_count === "number" || typeof h.brain_failed_recent_count === "number") {
+      lines.push("", H("organism pulse"));
+      if (typeof h.activation_listener_count === "number") lines.push(`  activation_listeners=${h.activation_listener_count}`);
+      if (typeof h.pathology_budget_debited_recent_count === "number") lines.push(`  pathology_debits=${h.pathology_budget_debited_recent_count}  exhausted=${h.pathology_budget_exhausted_recent_count ?? 0}`);
+      if (typeof h.brain_failed_recent_count === "number") lines.push(`  brain_failed_recent=${h.brain_failed_recent_count}`);
+    }
+    return lines;
+  }
+  // view === "drift"
+  const rows = state.drift ?? [];
+  lines.push(`${H("Verify drift")}  (${rows.length} directives)  sorted by drift+missing DESC`, "");
+  if (rows.length === 0) { lines.push("  (no recent directives — empty ledger?)"); return lines; }
+  lines.push(`  ${"directive".padEnd(9)}  ${"status".padEnd(11)}  ${"appl".padEnd(4)}  ${"fail".padEnd(4)}  ${"refu".padEnd(4)}  ${"stra".padEnd(4)}  ${"drift".padEnd(5)}  ${"miss".padEnd(4)}`);
+  for (const r of rows) {
+    const color = (r.drift + r.missing) > 0 ? RED : r.status === "committed" ? GREEN : r.status === "failed" ? RED : WHITE;
+    lines.push(`  ${color}${shortId(r.directive_id, 8).padEnd(9)}${RESET}  ${r.status.padEnd(11)}  ${String(r.applied).padEnd(4)}  ${String(r.failed).padEnd(4)}  ${String(r.refused).padEnd(4)}  ${String(r.stranded).padEnd(4)}  ${String(r.drift).padEnd(5)}  ${String(r.missing).padEnd(4)}`);
+  }
+  return lines;
+};
+
+const renderPanelFrame = (state: WatchState, cols: number, rows: number, view: ViewKey): string => {
+  const safeCols = Math.max(60, cols);
+  const safeRows = Math.max(20, rows);
+  const parts: string[] = [CLEAR_SCREEN, HOME, moveTo(1, 1),
+    `${BOLD}${CYAN}acc watch — operator dashboard${RESET} ${DIM}t trust  d decisions  h health  v drift  1-8 lists  ? help  r refresh  q quit${RESET}`,
+    moveTo(2, 1)];
+  const tabs: Array<[ViewKey, string]> = [["trust", "t:Trust"], ["decisions", "d:Decisions"], ["health", "h:Health"], ["drift", "v:Drift"]];
+  let col = 1;
+  for (const [k, label] of tabs) {
+    parts.push(moveTo(2, col), k === view ? `${INVERT}${label}${RESET}` : `${DIM}${label}${RESET}`);
+    col += label.length + 2;
+  }
+  const lines = renderPanelLines(state, view, safeCols);
+  const bodyRows = safeRows - 5;
+  for (let i = 0; i < bodyRows; i++) { parts.push(moveTo(4 + i, 1), pad(lines[i] ?? "", safeCols)); }
+  const h = state.health ?? {};
+  const decisionsN = (state.decisions ?? []).length;
+  const driftN = (state.drift ?? []).reduce((acc, r) => acc + r.drift + r.missing, 0);
+  const trustWord = firstWord(state.trust?.recommendation ?? "—");
+  parts.push(moveTo(safeRows - 1, 1), `${BOLD}Status${RESET} daemon=${healthLabel(h)} events=${h.events_count ?? state.events.length} decisions=${decisionsN} drift=${driftN} trust=${trustWord}`);
+  parts.push(moveTo(safeRows, 1), truncate(`Daemon pid=${h.pid ?? "?"} uptime_ms=${h.uptime_ms ?? 0} mcp=${h.mcp_port ?? "?"} aux=${h.aux_port ?? "?"}`, safeCols));
+  return parts.join("");
+};
+
 export const renderFrame = (state: WatchState, cols: number, rows: number): string => {
   const safeCols = Math.max(60, cols);
   const safeRows = Math.max(20, rows);
   const view = state.view ?? "dag";
+  // Operator-dashboard panels render as a single full-pane text block.
+  if (PANEL_VIEWS.has(view)) return renderPanelFrame(state, safeCols, safeRows, view);
   const items = filteredItems(state, view);
   const selectedMap = state.selected ?? {};
   // Newest-first ordering: items[0] is the most recent row across every view,
@@ -1255,7 +1426,8 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
     const helpLeft = Math.max(2, Math.floor(safeCols / 2) - 28);
     const help = [
       "Help",
-      "1-8 or Tab: switch views",
+      "1-8 or Tab: switch list views",
+      "t: trust panel  d: decisions  h: health  v: verify drift",
       "j/k or arrows: move selection",
       "Enter: keep focus on selected detail",
       "/: type live filter, Esc clears filter mode",
@@ -1285,7 +1457,10 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
   const h = state.health ?? {};
   const filter = state.filter ? `/${state.filter}` : "none";
   parts.push(moveTo(statusRow, 1));
-  parts.push(`${BOLD}Status${RESET} view=${labelForView(view)} items=${items.length} selected=${items.length ? selected + 1 : 0} filter=${filter} daemon=${healthLabel(h)}`);
+  const decisionsN = (state.decisions ?? []).length;
+  const driftN = (state.drift ?? []).reduce((acc, r) => acc + r.drift + r.missing, 0);
+  const trustWord = firstWord(state.trust?.recommendation ?? "—");
+  parts.push(`${BOLD}Status${RESET} view=${labelForView(view)} items=${items.length} selected=${items.length ? selected + 1 : 0} filter=${filter} daemon=${healthLabel(h)} decisions=${decisionsN} drift=${driftN} trust=${trustWord}`);
   parts.push(moveTo(statusRow + 1, 1));
   // Brain TUI rewrite axis F (2026-05-15): always-visible organism pulse.
   // /health now surfaces activation listeners, pathology counts,
@@ -1324,6 +1499,23 @@ export type RunWatchOpts = {
   disableSse?: boolean;
 };
 
+// Panel refresh cadences (trust+drift are heavy, decisions is light).
+const refreshPanels = (state: WatchState, force = false): void => {
+  const db = panelDb();
+  if (!db) return;
+  const now = Date.now();
+  const due = (last?: number, ms = 30_000) => force || !last || now - last > ms;
+  if (due(state.trust_refreshed_ms, 30_000)) {
+    try { state.trust = gatherTrustMetrics(db); state.trust_refreshed_ms = now; } catch { /* keep stale */ }
+  }
+  if (due(state.decisions_refreshed_ms, 5_000)) {
+    try { state.decisions = readPendingDecisions(db, now); state.decisions_refreshed_ms = now; } catch { /* keep stale */ }
+  }
+  if (due(state.drift_refreshed_ms, 30_000)) {
+    try { state.drift = readDriftSummaries(db, resolvePath(process.cwd()), 10); state.drift_refreshed_ms = now; } catch { /* keep stale */ }
+  }
+};
+
 const refreshAll = async (state: WatchState): Promise<void> => {
   const [active, ready, artifacts, recipes, knowledge, health, events, lessonEvents, supervisorEvents] = await Promise.all([
     readActiveDirectives(),
@@ -1346,6 +1538,7 @@ const refreshAll = async (state: WatchState): Promise<void> => {
   state.supervisorEvents = supervisorEvents;
   state.lessons = deriveLessons(state);
   state.health = health;
+  refreshPanels(state, true);
 };
 
 const refreshSnapshots = async (state: WatchState): Promise<void> => {
@@ -1368,6 +1561,7 @@ const refreshSnapshots = async (state: WatchState): Promise<void> => {
   state.supervisorEvents = supervisorEvents;
   state.lessons = deriveLessons(state);
   state.health = health;
+  refreshPanels(state);
 };
 
 const appendEvent = (state: WatchState, ev: SseEvent): void => {
@@ -1498,6 +1692,11 @@ export const runWatch = async (argv: string[], opts: RunWatchOpts = {}): Promise
       if (str === "?") { state.showHelp = !state.showHelp; renderTick(); return; }
       if (str === "\t") { setView(nextView(state.view ?? "dag")); renderTick(); return; }
       if (/^[1-8]$/.test(str)) { setView(VIEWS[Number(str) - 1]!.key); renderTick(); return; }
+      // Operator-dashboard panel shortcuts (brain audit V7FBAW…): t/d/h/v.
+      if (str === "t" || str === "d" || str === "h" || str === "v") {
+        const map: Record<string, ViewKey> = { t: "trust", d: "decisions", h: "health", v: "drift" };
+        refreshPanels(state, true); setView(map[str]!); renderTick(); return;
+      }
       if (str === "r" || str === "R") { void refreshAll(state).then(renderTick).catch(() => { /* stale is better than blank */ }); return; }
     };
     stdin.on("data", keyHandler);
