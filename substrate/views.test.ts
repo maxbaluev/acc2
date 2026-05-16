@@ -100,6 +100,7 @@ describe("runViews", () => {
       "contradictory_candidates_view",
       "directive_conflicts_view",
       "embedding_index_view",
+      "entity_relationship_view",
       "failure_view",
       "irreversible_effects_view",
       "lesson_implementation_status_view",

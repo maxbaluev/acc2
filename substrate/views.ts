@@ -1822,6 +1822,18 @@ export type DirectiveConflictRow = {
   context_refs: string[];
 };
 
+export type EntityRelationshipRow = {
+  event_id: string;
+  ts: string;
+  directive_id: string;
+  from_entity: string | null;
+  to_entity: string | null;
+  relationship: string | null;
+  relationship_payload: unknown;
+  payload: Record<string, unknown>;
+  source_kind: string;
+};
+
 export type IrreversibleEffectRow = {
   directive_id: string;
   effect_count: number;
@@ -2150,6 +2162,24 @@ export const directiveConflicts = (
     interaction: (r.interaction as string | null) ?? null,
     payload: parseJson<Record<string, unknown>>(r.payload),
     context_refs: parseJson<string[]>(r.context_refs),
+  }));
+};
+
+/** Normalized entity graph edges from stakeholder declarations and directive interference. */
+export const entityRelationshipRows = (db: Database, directiveId?: string): EntityRelationshipRow[] => {
+  const rows = (directiveId
+    ? db.query("SELECT * FROM entity_relationship_view WHERE directive_id = ? ORDER BY ts DESC").all(directiveId)
+    : db.query("SELECT * FROM entity_relationship_view ORDER BY ts DESC").all()) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    event_id: r.event_id as string,
+    ts: r.ts as string,
+    directive_id: r.directive_id as string,
+    from_entity: (r.from_entity as string | null) ?? null,
+    to_entity: (r.to_entity as string | null) ?? null,
+    relationship: (r.relationship as string | null) ?? null,
+    relationship_payload: parseMaybeJson(r.relationship_payload),
+    payload: parseJson<Record<string, unknown>>(r.payload),
+    source_kind: r.source_kind as string,
   }));
 };
 

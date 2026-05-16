@@ -366,6 +366,58 @@ describe("fastmcp substrate tools — stdio transport", () => {
     }
   });
 
+  test("substrate.read exposes entity_relationship_view", async () => {
+    const dir = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.open_directive",
+        arguments: { directive_text: "map customer supplier relationship" },
+      })) as ToolCallResponse,
+    );
+    const directiveId = dir.result.directive_id;
+
+    await h!.client.callTool({
+      name: "substrate.record_stakeholder_state",
+      arguments: {
+        directive_id: directiveId,
+        stakeholder_id: "supplier:acme",
+        declared_utility: { entity: "customer:globex", relationship: "supplies_parts" },
+      },
+    });
+    await h!.client.callTool({
+      name: "substrate.record_interference_edge",
+      arguments: {
+        from_directive: directiveId,
+        to_directive: "downstream-directive",
+        kind: "watches",
+        reason: "shares entity graph context",
+      },
+    });
+
+    const env = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.read",
+        arguments: { view_name: "entity_relationship_view", args: { directive_id: directiveId } },
+      })) as ToolCallResponse,
+    );
+    expect(env.ok).toBe(true);
+    expect(env.result).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          from_entity: "supplier:acme",
+          to_entity: "customer:globex",
+          relationship: "supplies_parts",
+          source_kind: "stakeholder_state_recorded",
+        }),
+        expect.objectContaining({
+          from_entity: directiveId,
+          to_entity: "downstream-directive",
+          relationship: "watches",
+          source_kind: "directive_interference_edge",
+        }),
+      ]),
+    );
+  });
+
   test("substrate.search accepts open-ended multi-vector routing records", () => {
     const parsed = SearchSchema.parse({
       query: "knowledge retrieval calibration",

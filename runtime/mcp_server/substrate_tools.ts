@@ -35,6 +35,7 @@ import {
   activeObjectives,
   rollingReviewDue,
   directiveConflicts,
+  entityRelationshipRows,
   irreversibleEffects,
   embeddingIndex,
   originPromotion,
@@ -360,6 +361,11 @@ export const handleRead = (
         return { ok: true, result: rollingReviewDue(db) as unknown as JsonValue };
       case "directive_conflicts_view":
         return { ok: true, result: directiveConflicts(db) as unknown as JsonValue };
+      case "entity_relationship_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        return { ok: true, result: entityRelationshipRows(db, directiveId) as unknown as JsonValue };
+      }
       case "irreversible_effects_view":
         return { ok: true, result: irreversibleEffects(db) as unknown as JsonValue };
       case "embedding_index_view":
