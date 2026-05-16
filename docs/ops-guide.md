@@ -216,7 +216,21 @@ A full `acc admin export` flow with online snapshots ships in Batch 3.
 
 ---
 
-## 7. Troubleshooting
+## 7. Daily Operator Ritual
+
+Run this short ritual when supervising a live AccInt v2 install:
+
+1. `acc daemon status` to confirm the substrate is reachable.
+2. `acc doctor` after code updates, daemon restarts, or dependency changes.
+3. `acc trust` to inspect the trust/autonomy surface: `autonomy_score`, recipe extraction and replay success, knowledge promotion/demotion, artifact posterior movement, rolling closure residuals, and amendment-apply outcomes.
+4. `acc events --kind dispatcher_violation --limit 20` when `acc trust` or `acc watch` shows regressions.
+5. Review owner-gated `contract_amendment_proposed` rows before applying changes to `CLAUDE.md`, `docs/v2-design.md`, `.claude/rules/*.md`, `docs/operator-install.md`, or `docs/ops-guide.md`.
+
+The ritual is evidence-oriented: trust increases when replay succeeds, closure residuals stay low, posteriors move after scored actions, and amendments apply with verifier-passing `applied_change_committed` rows.
+
+---
+
+## 8. Troubleshooting
 
 ### Daemon won't start
 
@@ -262,7 +276,7 @@ The composite readiness check requires four greens: daemon health + `OPENAI_API_
 
 ---
 
-## 8. Where state lives
+## 9. Where state lives
 
 | Path | Purpose |
 |---|---|
