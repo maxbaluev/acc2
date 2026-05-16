@@ -147,6 +147,9 @@ describe("prompt_composer", () => {
             rerank_score: 1.5,
             origin: "claude_root",
             snippet: "RERANK_FROM_INDEX_TOPHIT",
+            aspect_scores: { claim_vector: 0.8 },
+            domain_scores: { accint_knowledge_efficiency: 1 },
+            routing_score_breakdown: { similarity: 0.9, posterior: 0.9, origin_bias: 1, aspect_boost: 0.8, domain_boost: 1, routing_multiplier: 1.5 },
           },
         ],
         retrieved_at: "2026-05-13T12:00:00Z",
@@ -155,6 +158,8 @@ describe("prompt_composer", () => {
       },
     });
     expect(composed.text).toContain("RERANK_FROM_INDEX_TOPHIT");
+    expect(composed.text).toContain("aspect:claim_vector=0.80");
+    expect(composed.text).toContain("domain:accint_knowledge_efficiency=1.00");
     expect(composed.text).not.toContain("RECENCY_FALLBACK_STAND_IN");
   });
 
@@ -173,6 +178,9 @@ describe("prompt_composer", () => {
             rerank_score: 1.4,
             origin: "opencode",
             snippet: "RERANK_ARTIFACT_TOPHIT",
+            aspect_scores: {},
+            domain_scores: {},
+            routing_score_breakdown: { similarity: 0.9, posterior: 0.8, origin_bias: 1, aspect_boost: 0, domain_boost: 0, routing_multiplier: 1 },
           },
         ],
         retrieved_at: "2026-05-13T12:00:00Z",

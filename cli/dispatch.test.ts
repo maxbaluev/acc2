@@ -3,7 +3,7 @@
 // with the owner's words and prints the directive id.
 
 import { describe, expect, test } from "bun:test";
-import { runDispatch } from "./dispatch";
+import { runDispatch, scoreAskRoutes } from "./dispatch";
 import { useSharedDaemon } from "../tests/daemon_fixture";
 
 // Stay in a tight band well-disjoint from runtime/*.test.ts (which sit in
@@ -82,6 +82,22 @@ describe("runDispatch", () => {
     cap.restore();
     expect(code).toBe(0);
     expect(cap.lines.join("\n")).toContain("acc task");
+  });
+
+  test("scoreAskRoutes maps ordinary words without fixed owner enums", () => {
+    expect(scoreAskRoutes("is the system ready or missing setup?").route).toBe("doctor");
+    expect(scoreAskRoutes("show me live progress").route).toBe("watch");
+    expect(scoreAskRoutes("is accint learning from outcomes?").route).toBe("trust");
+    expect(scoreAskRoutes("fix onboarding for normal humans").route).toBe("task");
+    expect(scoreAskRoutes("what can I ask you?").route).toBe("help");
+  });
+
+  test("acc ask help text is sparse-profile friendly", async () => {
+    const cap = captureStdout();
+    const code = await runDispatch(["ask", "what", "can", "I", "ask", "you?"]);
+    cap.restore();
+    expect(code).toBe(0);
+    expect(cap.lines.join("\n")).toContain("ordinary language");
   });
 
   test("unknown command returns exit 1", async () => {

@@ -260,7 +260,7 @@ describe("runApply gates", () => {
     expect(await emittedGateReason(eventId)).toBe("structured_proposed_behavior_required");
   });
 
-  test("auto-apply target blocks hazardous trajectories", async () => {
+  test("auto-apply target blocks hazardous trajectories without owner consent", async () => {
     const eventId = await emitLesson({ file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" });
     const hazard = await mcpCall("substrate.emit", {
       kind: "dispatcher_violation",
@@ -278,6 +278,54 @@ describe("runApply gates", () => {
     expect(code).toBe(1);
     expect(cap.err.join("\n")).toContain("trajectory_hazard_present");
     expect(await emittedGateReason(eventId)).toBe("trajectory_hazard_present");
+  });
+
+  test("owner_decision_recorded approval overrides hazardous auto-apply target", async () => {
+    const eventId = await emitLesson({ file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" });
+    const hazard = await mcpCall("substrate.emit", {
+      kind: "dispatcher_violation",
+      substrate_origin: "substrate",
+      directive_id: "d_apply_gate",
+      task_id: "t_apply_gate",
+      payload: { failure_kind: "cycle_1_only_breach" },
+    });
+    expect(hazard.ok).toBe(true);
+    const decision = await mcpCall("substrate.emit", {
+      kind: "owner_decision_recorded",
+      substrate_origin: "owner",
+      directive_id: "d_apply_gate",
+      task_id: "t_apply_gate",
+      payload: { source_event_id: eventId, outcome: "approved" },
+      context_refs: [eventId],
+    });
+    expect(decision.ok).toBe(true);
+
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+
+    expect(code).toBe(0);
+    expect(cap.out.join("\n")).toContain("AUTO-APPLY GATE");
+    expect(cap.err.join("\n")).not.toContain("trajectory_hazard_present");
+  });
+
+  test("directive-scoped owner_decision_recorded satisfies protected target gate", async () => {
+    const eventId = await emitLesson({ file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" });
+    const decision = await mcpCall("substrate.emit", {
+      kind: "owner_decision_recorded",
+      substrate_origin: "owner",
+      directive_id: "d_apply_gate",
+      task_id: "t_apply_gate",
+      payload: { outcome: "approved" },
+    });
+    expect(decision.ok).toBe(true);
+
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+
+    expect(code).toBe(0);
+    expect(cap.out.join("\n")).toContain("OWNER GATE — APPROVED");
   });
 
   test("protected structured file_path requires consent even when top-level target is safe", async () => {
@@ -303,7 +351,7 @@ describe("runApply gates", () => {
     expect(cap.err.join("\n")).toContain("owner_consent_missing");
   });
 
-  test("owner-approved mixed protected target does not fall through to auto-apply shape gate", async () => {
+  test("owner_decision_recorded mixed protected target does not fall through to auto-apply shape gate", async () => {
     const env = await mcpCall("substrate.emit", {
       kind: "contract_amendment_proposed",
       substrate_origin: "opencode",

@@ -172,7 +172,7 @@ export type WatchState = {
   knowledge?: KnowledgeRow[];
   // Dedicated buffers for rare-event panels. Pre-fix these views filtered
   // state.events post-hoc, but the recent-events buffer is bounded (160 rows
-  // by default) and supervisor / lesson rows can be hours old — they drop
+  // by default) and supervisor / lesson rows can be hours old - they drop
   // off the buffer and the panel renders empty even when many such rows
   // exist in the substrate. Each panel now fetches its OWN buffer via
   // runtime.recent_events with a kinds filter so the data flow doesn't
@@ -222,7 +222,7 @@ const VIEWS: Array<{ key: ViewKey; label: string }> = [
   { key: "directives", label: "Directives" },
 ];
 // Brain TUI rewrite proposal (btqner8jn axis B, 2026-05-15): treat noisy
-// heartbeat events as semantic folds — keep them in the buffer but
+// heartbeat events as semantic folds - keep them in the buffer but
 // collapse consecutive identical-kind rows under one entry with a
 // grouped_count + latest_ts. Pre-fix the Recent Events panel was
 // 300 rows of worker_tick_completed and the operator saw no signal.
@@ -257,8 +257,8 @@ const truncate = (s: string, max: number): string => {
   if (max <= 0) return "";
   const plain = stripAnsi(s);
   if (plain.length <= max) return s;
-  if (s !== plain) return plain.slice(0, Math.max(0, max - 1)) + "…";
-  return s.slice(0, Math.max(0, max - 1)) + "…";
+  if (s !== plain) return plain.slice(0, Math.max(0, max - 1)) + "...";
+  return s.slice(0, Math.max(0, max - 1)) + "...";
 };
 
 const pad = (s: string, width: number): string => {
@@ -279,7 +279,7 @@ const asObject = (v: unknown): Record<string, unknown> => {
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         return parsed as Record<string, unknown>;
       }
-    } catch { /* malformed JSON — fall through to {} */ }
+    } catch { /* malformed JSON - fall through to {} */ }
   }
   return {};
 };
@@ -445,12 +445,12 @@ export const readPendingDecisions = (db: Database, nowMs: number): PendingDecisi
   for (const r of db.query(`SELECT id, ts, payload FROM events WHERE kind='owner_input_required' ORDER BY ts DESC LIMIT 200`).all() as R[]) {
     if (isResolved(r.id, `'owner_decision_recorded'`)) continue;
     const p = parseJsonSafe(r.payload);
-    out.push({ event_id: r.id, kind: "owner_input_required", target: String(p.target ?? p.question ?? "—").slice(0, 60), anchor: String(p.anchor ?? p.summary ?? p.question ?? "").slice(0, 30), age_ms: ageOf(r.ts, nowMs) });
+    out.push({ event_id: r.id, kind: "owner_input_required", target: String(p.target ?? p.question ?? "-").slice(0, 60), anchor: String(p.anchor ?? p.summary ?? p.question ?? "").slice(0, 30), age_ms: ageOf(r.ts, nowMs) });
   }
   for (const r of db.query(`SELECT id, ts, payload FROM events WHERE kind='hidl_action_required' ORDER BY ts DESC LIMIT 200`).all() as R[]) {
     if (isResolved(r.id, `'hidl_action_resolved','owner_decision_recorded'`)) continue;
     const p = parseJsonSafe(r.payload);
-    out.push({ event_id: r.id, kind: "hidl_action_required", target: String(p.target ?? p.action ?? "—").slice(0, 60), anchor: String(p.anchor ?? p.summary ?? p.action ?? "").slice(0, 30), age_ms: ageOf(r.ts, nowMs) });
+    out.push({ event_id: r.id, kind: "hidl_action_required", target: String(p.target ?? p.action ?? "-").slice(0, 60), anchor: String(p.anchor ?? p.summary ?? p.action ?? "").slice(0, 30), age_ms: ageOf(r.ts, nowMs) });
   }
   for (const r of db.query(`SELECT id, ts, payload FROM events WHERE kind='contract_amendment_proposed' ORDER BY ts DESC LIMIT 400`).all() as R[]) {
     const p = parseJsonSafe(r.payload);
@@ -482,7 +482,7 @@ const formatAge = (ms: number): string =>
   ms < 60_000 ? `${Math.floor(ms / 1000)}s`
   : ms < 3_600_000 ? `${Math.floor(ms / 60_000)}m`
   : ms < 86_400_000 ? `${Math.floor(ms / 3_600_000)}h` : `${Math.floor(ms / 86_400_000)}d`;
-const firstWord = (s: string): string => { const m = String(s ?? "").trim().match(/^[\w-]+/); return m ? m[0] : "—"; };
+const firstWord = (s: string): string => { const m = String(s ?? "").trim().match(/^[\w-]+/); return m ? m[0] : "-"; };
 
 const readRecentEvents = async (): Promise<EventRow[]> => {
   try {
@@ -501,7 +501,7 @@ const readRecentEvents = async (): Promise<EventRow[]> => {
 };
 
 // Kinds the Lessons panel surfaces. Centralised so the buffer fetch and the
-// post-fetch render contract stay aligned — the same canonical kind list
+// post-fetch render contract stay aligned - the same canonical kind list
 // gates both the dedicated runtime.recent_events query AND the SSE-time
 // state-events filter.
 const LESSON_EVENT_KINDS = ["lesson_extracted", "contract_amendment_proposed"];
@@ -724,7 +724,7 @@ const buildDagNodes = (state: WatchState): DagNode[] => {
 
   // Canonical task source: state.ready (ready_tasks_view projection).
   // Pre-fix this loop pulled from deriveTasks(state), which synthesized
-  // a "task" entry for ANY event with a task_id — turning every
+  // a "task" entry for ANY event with a task_id - turning every
   // artifact_invoked/worker_tick/etc. payload into a fake task whose
   // goal was a JSON preview of the payload. That painted hundreds of
   // garbage "T {runtime:bun,pid:...}" rows in the DAG view.
@@ -797,7 +797,7 @@ const buildDagNodes = (state: WatchState): DagNode[] => {
       task.children.push(...groupDagHeartbeatNodes(events, task.depth + 1));
       continue;
     }
-    // No task node was opened for this id — surface the orphan events under
+    // No task node was opened for this id - surface the orphan events under
     // the directive (when known) instead of silently dropping them.
     const firstEv = events[0]?.raw as EventRow | undefined;
     const dirId = firstEv?.directive_id;
@@ -835,15 +835,15 @@ const buildDagNodes = (state: WatchState): DagNode[] => {
     } else {
       // Task whose directive_opened header is older than the local buffer.
       // Stash for the unthreaded bucket instead of spawning a placeholder
-      // directive — preserves visibility without inflating the root count.
+      // directive - preserves visibility without inflating the root count.
       task.depth = 1;
       orphanTasks.push(task);
     }
   }
 
   // Events whose directive_opened header is not in the local buffer get
-  // routed to the unthreaded bucket — pre-fix each got its own synthetic
-  // "(directive XX — header not in local buffer)" root, which painted
+  // routed to the unthreaded bucket - pre-fix each got its own synthetic
+  // "(directive XX - header not in local buffer)" root, which painted
   // hundreds of placeholder rows. We KEEP every event (no drop), but
   // group them into one operator-visible bucket so the DAG stays readable.
   for (const [directiveId, events] of directiveEvents) {
@@ -858,7 +858,7 @@ const buildDagNodes = (state: WatchState): DagNode[] => {
   const roots = [...directiveMap.values()].sort((a, b) => b.id.localeCompare(a.id));
   if (unthreaded.length > 0 || orphanTasks.length > 0) {
     // Reverse so newest unthreaded events render at the top of the
-    // substrate-noise subtree — matches the "new items at top" rule.
+    // substrate-noise subtree - matches the "new items at top" rule.
     const unthreadedNewestFirst = [...unthreaded].reverse();
     const unthreadedChildren = groupDagHeartbeatNodes(unthreadedNewestFirst, 1);
     const orphanCount = orphanTasks.length;
@@ -879,7 +879,7 @@ const buildDagNodes = (state: WatchState): DagNode[] => {
 // buffer for the most recent `bridge_invoked` whose matching
 // `brain_dispatch_closed` hasn't landed yet. Returns a snapshot for the
 // footer panel so the operator can see what the brain is doing right now
-// — answers the recurring "is the brain working?" question without leaving
+// - answers the recurring "is the brain working?" question without leaving
 // the view. Returns null when no brain dispatch is in flight.
 type BrainInFlight = {
   task_id: string;
@@ -1015,7 +1015,7 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
         id: e.event_id,
         title: `${e.kind}${count > 1 ? ` x${count}` : ""}`,
         meta: `${e.ts.slice(11, 19)} dir=${shortId(e.directive_id)} task=${shortId(e.task_id)}`,
-        // body holds the full untrimmed payload — Enter opens the full-screen
+        // body holds the full untrimmed payload - Enter opens the full-screen
         // viewer; the side-pane preview also no longer caps at 2000 chars.
         body: `event_id=${e.event_id}\nts=${e.ts}\nkind=${e.kind}\ndirective_id=${e.directive_id ?? ""}\ntask_id=${e.task_id ?? ""}\n\npayload=${formatPayloadFull(e.payload)}`,
         kind: e.kind,
@@ -1059,7 +1059,7 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
         `score=${a.score.toFixed(3)}  alpha=${alpha.toFixed(2)}  beta=${beta.toFixed(2)}`,
         `confidence=${(a.confidence ?? 0).toFixed(3)}`,
         `status=${a.status}`,
-        `recent_residual_mean=${Number.isFinite(residualMean) ? residualMean.toFixed(3) : "—"}  recent_kill_count=${killCount}`,
+        `recent_residual_mean=${Number.isFinite(residualMean) ? residualMean.toFixed(3) : "-"}  recent_kill_count=${killCount}`,
         `state_root=${stateRoot}`,
         Number.isFinite(fixtureExp) ? `fixture_expected_residual=${fixtureExp.toFixed(3)}` : "",
         createdAt ? `created_at=${createdAt}` : "",
@@ -1069,7 +1069,7 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
         intent ? `\n--- intent ---\n${intent}` : "",
         summary ? `\n--- summary ---\n${summary}` : "",
         targetResources.length > 0 ? `\n--- target_resources ---\n${targetResources.join("\n")}` : "",
-        targetFiles.length > 0 ? `\n--- target_files ---\n${targetFiles.join("\n")}` : "",
+        targetResources.length > 0 ? `\n--- target_resources ---\n${targetResources.join("\n")}` : "",
         "",
         "--- declared_sandbox ---",
         sandbox,
@@ -1198,11 +1198,11 @@ const itemsForView = (state: WatchState, view: ViewKey): ListItem[] => {
 };
 
 // Scoped filter grammar (brain audit bs00e26fx, 2026-05-15):
-//   kind:foo        — match item.kind/status substring
-//   directive:abc   — body must include directive_id=abc (substring)
-//   task:abc        — body must include task_id=abc (substring)
-//   edge:refines    — title must include edge prefix (refines/requires/blocks)
-//   plain term      — full-text substring across id+title+meta+body
+//   kind:foo        - match item.kind/status substring
+//   directive:abc   - body must include directive_id=abc (substring)
+//   task:abc        - body must include task_id=abc (substring)
+//   edge:refines    - title must include edge prefix (refines/requires/blocks)
+//   plain term      - full-text substring across id+title+meta+body
 // Multiple space-separated terms are ANDed.
 const matchesScopedFilter = (item: ListItem, rawQuery: string): boolean => {
   const q = rawQuery.trim().toLowerCase();
@@ -1249,7 +1249,7 @@ export const renderPanelLines = (state: WatchState, view: ViewKey, cols: number)
   const H = (s: string) => `${BOLD}${s}${RESET}`;
   if (view === "trust") {
     const t = state.trust;
-    if (!t) return ["(no trust metrics yet — daemon DB unreachable or empty)"];
+    if (!t) return ["(no trust metrics yet - daemon DB unreachable or empty)"];
     const cr = t.closure_residual_7d, am = t.amendments_7d;
     lines.push(`${H("autonomy_score")}: ${t.autonomy_score.toFixed(2)}`, "");
     lines.push(`${H("recipes")}  extracted=${t.recipes_extracted}  replayed_success=${t.recipes_replayed_success}  replayed_aborted=${t.recipes_replayed_aborted}`);
@@ -1297,7 +1297,7 @@ export const renderPanelLines = (state: WatchState, view: ViewKey, cols: number)
   // view === "drift"
   const rows = state.drift ?? [];
   lines.push(`${H("Verify drift")}  (${rows.length} directives)  sorted by drift+missing DESC`, "");
-  if (rows.length === 0) { lines.push("  (no recent directives — empty ledger?)"); return lines; }
+  if (rows.length === 0) { lines.push("  (no recent directives - empty ledger?)"); return lines; }
   lines.push(`  ${"directive".padEnd(9)}  ${"status".padEnd(11)}  ${"appl".padEnd(4)}  ${"fail".padEnd(4)}  ${"refu".padEnd(4)}  ${"stra".padEnd(4)}  ${"drift".padEnd(5)}  ${"miss".padEnd(4)}`);
   for (const r of rows) {
     const color = (r.drift + r.missing) > 0 ? RED : r.status === "committed" ? GREEN : r.status === "failed" ? RED : WHITE;
@@ -1310,7 +1310,7 @@ const renderPanelFrame = (state: WatchState, cols: number, rows: number, view: V
   const safeCols = Math.max(60, cols);
   const safeRows = Math.max(20, rows);
   const parts: string[] = [CLEAR_SCREEN, HOME, moveTo(1, 1),
-    `${BOLD}${CYAN}acc watch — operator dashboard${RESET} ${DIM}t trust  d decisions  h health  v drift  1-8 lists  ? help  r refresh  q quit${RESET}`,
+    `${BOLD}${CYAN}acc watch - operator dashboard${RESET} ${DIM}t trust  d decisions  h health  v drift  1-8 lists  ? help  r refresh  q quit${RESET}`,
     moveTo(2, 1)];
   const tabs: Array<[ViewKey, string]> = [["trust", "t:Trust"], ["decisions", "d:Decisions"], ["health", "h:Health"], ["drift", "v:Drift"]];
   let col = 1;
@@ -1324,7 +1324,7 @@ const renderPanelFrame = (state: WatchState, cols: number, rows: number, view: V
   const h = state.health ?? {};
   const decisionsN = (state.decisions ?? []).length;
   const driftN = (state.drift ?? []).reduce((acc, r) => acc + r.drift + r.missing, 0);
-  const trustWord = firstWord(state.trust?.recommendation ?? "—");
+  const trustWord = firstWord(state.trust?.recommendation ?? "-");
   parts.push(moveTo(safeRows - 1, 1), `${BOLD}Status${RESET} daemon=${healthLabel(h)} events=${h.events_count ?? state.events.length} decisions=${decisionsN} drift=${driftN} trust=${trustWord}`);
   parts.push(moveTo(safeRows, 1), truncate(`Daemon pid=${h.pid ?? "?"} uptime_ms=${h.uptime_ms ?? 0} mcp=${h.mcp_port ?? "?"} aux=${h.aux_port ?? "?"}`, safeCols));
   return parts.join("");
@@ -1345,11 +1345,11 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
 
   // Full-screen detail viewer (Enter to enter, Esc/Enter to exit). Renders
   // the entire body of the selected row with whitespace preserved and no
-  // truncation — operator can read every byte of any event payload.
+  // truncation - operator can read every byte of any event payload.
   if (state.expanded && detail) {
     const ePartsViewer = [CLEAR_SCREEN, HOME];
     ePartsViewer.push(moveTo(1, 1));
-    ePartsViewer.push(`${BOLD}${CYAN}acc watch — full payload${RESET} ${DIM}j/k scroll  Enter/Esc back  q quit${RESET}`);
+    ePartsViewer.push(`${BOLD}${CYAN}acc watch - full payload${RESET} ${DIM}j/k scroll  Enter/Esc back  q quit${RESET}`);
     ePartsViewer.push(moveTo(2, 1));
     ePartsViewer.push(`${BOLD}${labelForView(view)}${RESET} ${DIM}${shortId(detail.id, 24)} ${detail.title}${RESET}`);
     const viewerRows = safeRows - 3;
@@ -1459,12 +1459,12 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
   parts.push(moveTo(statusRow, 1));
   const decisionsN = (state.decisions ?? []).length;
   const driftN = (state.drift ?? []).reduce((acc, r) => acc + r.drift + r.missing, 0);
-  const trustWord = firstWord(state.trust?.recommendation ?? "—");
+  const trustWord = firstWord(state.trust?.recommendation ?? "-");
   parts.push(`${BOLD}Status${RESET} view=${labelForView(view)} items=${items.length} selected=${items.length ? selected + 1 : 0} filter=${filter} daemon=${healthLabel(h)} decisions=${decisionsN} drift=${driftN} trust=${trustWord}`);
   parts.push(moveTo(statusRow + 1, 1));
   // Brain TUI rewrite axis F (2026-05-15): always-visible organism pulse.
   // /health now surfaces activation listeners, pathology counts,
-  // brain-failure rate, hotreload state — render them on the footer so
+  // brain-failure rate, hotreload state - render them on the footer so
   // operators see the substrate's vitals without leaving the view.
   const stuckSummary = (h.stuck_workers && h.stuck_workers.length > 0)
     ? ` stuck=${h.stuck_workers.length}`
@@ -1578,7 +1578,7 @@ const appendEvent = (state: WatchState, ev: SseEvent): void => {
   // newest-first, so each arrival inserts a new row at items[0] and
   // shifts every following row down by one. If the user has scrolled
   // (selected > 0), bump selected by 1 to keep them on the same event.
-  // Selected==0 means "follow the live tail" — leave it alone so the
+  // Selected==0 means "follow the live tail" - leave it alone so the
   // top of the list always shows the newest arrival.
   const view = state.view ?? "dag";
   if ((view === "dag" || view === "events" || view === "interventions")) {
@@ -1692,7 +1692,7 @@ export const runWatch = async (argv: string[], opts: RunWatchOpts = {}): Promise
       if (str === "?") { state.showHelp = !state.showHelp; renderTick(); return; }
       if (str === "\t") { setView(nextView(state.view ?? "dag")); renderTick(); return; }
       if (/^[1-8]$/.test(str)) { setView(VIEWS[Number(str) - 1]!.key); renderTick(); return; }
-      // Operator-dashboard panel shortcuts (brain audit V7FBAW…): t/d/h/v.
+      // Operator-dashboard panel shortcuts (brain audit V7FBAW...): t/d/h/v.
       if (str === "t" || str === "d" || str === "h" || str === "v") {
         const map: Record<string, ViewKey> = { t: "trust", d: "decisions", h: "health", v: "drift" };
         refreshPanels(state, true); setView(map[str]!); renderTick(); return;

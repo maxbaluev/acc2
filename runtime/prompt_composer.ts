@@ -767,13 +767,22 @@ const buildKnowledgeSection = (rows: Array<{ id: string; text: string; score: nu
  *  Used when the caller passed `retrievedKnowledge` (i.e. the index lit
  *  up and reranker produced hits). Each row cites the source event id +
  *  posterior + cosine distance so the brain can audit retrieval. */
+const formatScoreRecord = (prefix: string, scores: Record<string, number> | undefined): string => {
+  if (!scores) return "";
+  const entries = Object.entries(scores).filter(([, v]) => Number.isFinite(v));
+  if (entries.length === 0) return "";
+  return " " + entries.map(([k, v]) => `${prefix}:${k}=${v.toFixed(2)}`).join(" ");
+};
+
 const buildRetrievedKnowledgeSection = (hits: RetrievalHit[]): string => {
   if (hits.length === 0) return "RETRIEVED KNOWLEDGE: (none)";
   const lines: string[] = ["RETRIEVED KNOWLEDGE (top-K by embedding × posterior):"];
   for (const h of hits) {
     const snippet = h.snippet.length > 0 ? h.snippet : "(no snippet)";
+    const aspectAxes = formatScoreRecord("aspect", h.aspect_scores);
+    const domainAxes = formatScoreRecord("domain", h.domain_scores);
     lines.push(
-      `  [${h.event_id}] (rerank=${h.rerank_score.toFixed(2)} d=${h.distance.toFixed(3)} p=${h.posterior.toFixed(2)} origin=${h.origin}) ${snippet}`,
+      `  [${h.event_id}] (rerank=${h.rerank_score.toFixed(2)} d=${h.distance.toFixed(3)} p=${h.posterior.toFixed(2)} origin=${h.origin}${aspectAxes}${domainAxes}) ${snippet}`,
     );
   }
   return lines.join("\n");

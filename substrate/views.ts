@@ -1010,11 +1010,16 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
   owner_approvals AS (
     SELECT DISTINCT COALESCE(
       json_extract(payload, '$.source_event_id'),
-      json_extract(context_refs, '$[0]')
-    ) AS source_event_id
+      json_extract(context_refs, '$[0]'),
+      json_extract(payload, '$.directive_id'),
+      directive_id
+    ) AS approval_scope
     FROM events
     WHERE kind = 'owner_decision_recorded'
-      AND json_extract(payload, '$.decision') IN ('approved', 'approve', 'yes')
+      AND (
+        json_extract(payload, '$.decision') IN ('approved', 'approve', 'yes')
+        OR json_extract(payload, '$.outcome') = 'approved'
+      )
   ),
   hazards AS (
     SELECT directive_id, COUNT(*) AS hazard_count
@@ -1121,9 +1126,9 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
     p.candidate_diff,
     p.apply_candidate,
     p.owner_gate_required,
-    CASE WHEN oa.source_event_id IS NULL THEN 0 ELSE 1 END AS owner_approved,
+    CASE WHEN oa.approval_scope IS NULL THEN 0 ELSE 1 END AS owner_approved,
     CASE
-      WHEN p.owner_gate_required = 1 AND oa.source_event_id IS NULL
+      WHEN p.owner_gate_required = 1 AND oa.approval_scope IS NULL
       THEN 'owner_consent_required'
       WHEN p.owner_gate_required = 1
       THEN 'owner_consent_approved'
@@ -1150,7 +1155,7 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       ELSE 'auto_apply_eligible'
     END AS auto_apply_gate_verdict,
     CASE
-      WHEN p.owner_gate_required = 1 AND oa.source_event_id IS NULL
+      WHEN p.owner_gate_required = 1 AND oa.approval_scope IS NULL
       THEN 'blocked_owner_consent'
       WHEN p.auto_apply_target = 1
        AND COALESCE(h.hazard_count, 0) > 0
@@ -1165,7 +1170,7 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       ELSE 'manual_review'
     END AS apply_gate_status,
     CASE
-      WHEN p.owner_gate_required = 1 AND oa.source_event_id IS NULL
+      WHEN p.owner_gate_required = 1 AND oa.approval_scope IS NULL
       THEN 'owner_consent_missing'
       WHEN p.auto_apply_target = 1
        AND COALESCE(h.hazard_count, 0) > 0
@@ -1184,7 +1189,7 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
   FROM target_policy p
   LEFT JOIN committed c ON c.source_event_id = p.source_event_id
   LEFT JOIN latest_apply la ON la.source_event_id = p.source_event_id AND la.rn = 1
-  LEFT JOIN owner_approvals oa ON oa.source_event_id = p.source_event_id
+  LEFT JOIN owner_approvals oa ON oa.approval_scope = p.source_event_id OR oa.approval_scope = p.directive_id
   LEFT JOIN hazards h ON h.directive_id = p.directive_id
   WHERE c.source_event_id IS NULL;
 `;

@@ -8,7 +8,8 @@
 //
 // Two modes:
 //   acc apply <event_id>
-//       Reads the source event via mcpCall, renders the structured prompt
+//       Requires any owner consent as owner_decision_recorded in the ledger,
+//       then reads the source event via mcpCall, renders the structured prompt
 //       template, prints it to stdout. The orchestrator (main Claude) feeds
 //       this prompt into the Agent tool with run_in_background:true so the
 //       subagent does the actual Edit/test/git work in an isolated context.
@@ -60,6 +61,7 @@ type EventRow = {
   task_id?: string;
   directive_id?: string;
   payload?: unknown;
+  context_refs?: string[];
 };
 
 type LessonQueueRow = {
@@ -164,6 +166,27 @@ const fetchQueueRow = async (eventId: string): Promise<LessonQueueRow | null> =>
   const env = await mcpCall("substrate.read", { view_name: "lesson_implementer_queue_view" });
   if (!env.ok || !Array.isArray(env.result)) return null;
   return (env.result as LessonQueueRow[]).find((r) => r.source_event_id === eventId) ?? null;
+};
+
+const ownerConsentDecisionApproved = (payload: Record<string, unknown>): boolean =>
+  payload.decision === "approve" || payload.decision === "approved" || payload.outcome === "approved";
+
+const resolveOwnerConsentFromSubstrate = async (
+  sourceEventId: string,
+  directiveId: string | undefined,
+  queueRow: LessonQueueRow | null,
+): Promise<boolean> => {
+  if (boolish(queueRow?.owner_approved)) return true;
+  const env = await mcpCall("runtime.recent_events", { k: 200, kinds: ["owner_decision_recorded"] });
+  const events = (env.ok ? (env.result as { events?: EventRow[] }).events : undefined) ?? [];
+  return events.some((row) => {
+    const payload = parsePayload(row.payload);
+    if (!ownerConsentDecisionApproved(payload)) return false;
+    if (payload.source_event_id === sourceEventId) return true;
+    if (Array.isArray(row.context_refs) && row.context_refs.includes(sourceEventId)) return true;
+    if (!directiveId) return false;
+    return payload.directive_id === directiveId || (payload.source_event_id === undefined && row.directive_id === directiveId);
+  });
 };
 
 const structuredChangeProposal = (payload: Record<string, unknown>, target: string): boolean => {
@@ -358,34 +381,10 @@ const emitApplyDenied = async (
   return 1;
 };
 
-const emitOwnerDecisionIfNeeded = async (
-  ev: EventRow,
-  eventId: string,
-  auth: ApplyAuthorization,
-  ownerApprovedFlag: boolean | undefined,
-): Promise<string | undefined> => {
-  if (!auth.ownerGateRequired || !ownerApprovedFlag || boolish(auth.queueRow?.owner_approved)) return undefined;
-  const env = await mcpCall("substrate.emit", {
-    kind: "owner_decision_recorded",
-    substrate_origin: "claude_root",
-    directive_id: ev.directive_id,
-    task_id: ev.task_id,
-    context_refs: [eventId],
-    payload: {
-      source_event_id: eventId,
-      decision: "approved",
-      decision_kind: "lesson_apply_owner_gate",
-      target: auth.target,
-    },
-  });
-  if (!env.ok) throw new Error(`owner_decision_recorded emit failed - ${env.error}`);
-  return (env.result as { id?: string })?.id;
-};
-
 const authorizeApply = async (
   ev: EventRow,
   eventId: string,
-  opts: { ownerApproved?: boolean; target?: string },
+  opts: { target?: string },
 ): Promise<ApplyAuthorization | { ok: false; code: number }> => {
   const payload = parsePayload(ev.payload);
   const target = opts.target || targetFromPayload(payload);
@@ -401,7 +400,7 @@ const authorizeApply = async (
   }
   const policy = lessonApplyTargetsPolicy(targets);
   const ownerGateRequired = policy.ownerGateRequired || boolish(queueRow?.owner_gate_required);
-  const ownerApproved = Boolean(opts.ownerApproved) || boolish(queueRow?.owner_approved);
+  const ownerApproved = await resolveOwnerConsentFromSubstrate(eventId, ev.directive_id, queueRow);
   if (ownerGateRequired && !ownerApproved) {
     return { ok: false, code: await emitApplyDenied(ev, eventId, "owner_consent_missing", target, {
       ownerGateRequired,
@@ -411,7 +410,7 @@ const authorizeApply = async (
   }
   if (policy.autoApplyTarget) {
     const hazards = Number(queueRow?.trajectory_hazard_count ?? 0);
-    if (hazards > 0) {
+    if (hazards > 0 && !ownerApproved) {
       return { ok: false, code: await emitApplyDenied(ev, eventId, "trajectory_hazard_present", target, {
         ownerGateRequired,
         ownerApproved,
@@ -451,11 +450,11 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean; aut
 
   const policy = lessonApplyTargetsPolicy(targetCandidatesFromPayload(payload));
   const ownerGateLine = policy.ownerGateRequired && !opts.ownerApproved
-    ? `OWNER GATE — REFUSE: this target is in owner-consent territory and --owner-approved was not set on the apply call. STOP, emit a clarifying lesson_extracted, and return {"status":"refused","reason":"owner_consent_missing"}.`
+    ? `OWNER GATE — REFUSE: this target is in owner-consent territory and no owner_decision_recorded approval exists for the source event or directive. STOP, emit a clarifying lesson_extracted, and return {"status":"refused","reason":"owner_consent_missing"}.`
     : policy.ownerGateRequired
       ? `OWNER GATE — APPROVED: owner consent is recorded for this source event.`
     : policy.autoApplyTarget
-        ? `AUTO-APPLY GATE — CLI/RUNTIME: proceed only because acc apply verified a structured proposed change {target_resource|resource_uri, anchor, diff:{kind:\"anchored_replace_v1\", before, after}}, verifier residual must be < 0.3, and this trajectory has no dispatcher_violation or irreversible_effect_recorded rows.`
+        ? `AUTO-APPLY GATE — CLI/RUNTIME: proceed only because acc apply verified a structured proposed change {target_resource|resource_uri, anchor, diff:{kind:\"anchored_replace_v1\", before, after}}, verifier residual must be < 0.3, and this trajectory has no dispatcher_violation or irreversible_effect_recorded rows unless owner_decision_recorded approves this source event or directive.`
       : `(target outside owner-consent territory — apply directly)`;
 
   return [
@@ -544,7 +543,7 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean; aut
   ].join("\n");
 };
 
-const renderPromptCommand = async (eventId: string, ownerApproved: boolean): Promise<number> => {
+const renderPromptCommand = async (eventId: string): Promise<number> => {
   const ev = await fetchEvent(eventId);
   if (!ev) {
     console.error(`acc apply: event ${eventId} not found in substrate`);
@@ -555,15 +554,8 @@ const renderPromptCommand = async (eventId: string, ownerApproved: boolean): Pro
     return 1;
   }
   const payload = parsePayload(ev.payload);
-  const auth = await authorizeApply(ev, eventId, { ownerApproved, target: targetFromPayload(payload) });
+  const auth = await authorizeApply(ev, eventId, { target: targetFromPayload(payload) });
   if (!auth.ok) return auth.code;
-  let ownerDecisionEventId: string | undefined;
-  try {
-    ownerDecisionEventId = await emitOwnerDecisionIfNeeded(ev, eventId, auth, ownerApproved);
-  } catch (err) {
-    console.error(`acc apply: ${(err as Error).message}`);
-    return 1;
-  }
   let gateActionEventId: string | undefined;
   let gateScoredEventId: string | undefined;
   try {
@@ -586,12 +578,11 @@ const renderPromptCommand = async (eventId: string, ownerApproved: boolean): Pro
     substrate_origin: "claude_root",
     directive_id: ev.directive_id,
     task_id: ev.task_id,
-    context_refs: [eventId, ownerDecisionEventId, gateActionEventId, gateScoredEventId].filter(Boolean),
+    context_refs: [eventId, gateActionEventId, gateScoredEventId].filter(Boolean),
     payload: {
       source_event_id: eventId,
       source_kind: ev.kind,
       owner_approved: auth.ownerApproved,
-      owner_decision_event_id: ownerDecisionEventId,
       owner_gate_required: auth.ownerGateRequired,
       gate_action_event_id: gateActionEventId,
       gate_scored_event_id: gateScoredEventId,
@@ -644,7 +635,6 @@ export const recordApplyOutcome = async (opts: {
   residual?: number;
   actionArtifactId?: string;
   verifierArtifactId?: string;
-  ownerApproved?: boolean;
 }): Promise<ApplyOutcomeResult> => {
   const ev = await fetchEvent(opts.eventId);
   if (!ev) {
@@ -661,7 +651,7 @@ export const recordApplyOutcome = async (opts: {
   const actionArtifactId = opts.actionArtifactId || DEFAULT_APPLY_ACTION_ARTIFACT_ID;
   const verifierArtifactId = opts.verifierArtifactId || DEFAULT_APPLY_VERIFIER_ARTIFACT_ID;
   const payload = parsePayload(ev.payload);
-  const auth = await authorizeApply(ev, opts.eventId, { ownerApproved: opts.ownerApproved, target: opts.target });
+  const auth = await authorizeApply(ev, opts.eventId, { target: opts.target });
   if (!auth.ok) return { ok: false, reason: "authorization denied", exitCode: auth.code };
   const eventId = opts.eventId;
 
@@ -683,12 +673,6 @@ export const recordApplyOutcome = async (opts: {
     }
   }
 
-  let ownerDecisionEventId: string | undefined;
-  try {
-    ownerDecisionEventId = await emitOwnerDecisionIfNeeded(ev, eventId, auth, opts.ownerApproved);
-  } catch (err) {
-    return { ok: false, reason: (err as Error).message, exitCode: 1 };
-  }
   const target = auth.target || opts.target;
   let gateActionEventId: string | undefined;
   let gateScoredEventId: string | undefined;
@@ -712,7 +696,7 @@ export const recordApplyOutcome = async (opts: {
     substrate_origin: "claude_root",
     directive_id: ev.directive_id,
     task_id: ev.task_id,
-    context_refs: [eventId, ownerDecisionEventId, gateActionEventId, gateScoredEventId].filter(Boolean),
+    context_refs: [eventId, gateActionEventId, gateScoredEventId].filter(Boolean),
     payload: {
       source_event_id: eventId,
       source_kind: ev.kind,
@@ -721,7 +705,6 @@ export const recordApplyOutcome = async (opts: {
       owner_gate_checked: true,
       owner_gate_required: auth.ownerGateRequired,
       owner_approved: auth.ownerApproved,
-      owner_decision_event_id: ownerDecisionEventId,
       gate_action_event_id: gateActionEventId,
       gate_scored_event_id: gateScoredEventId,
       gate_residual: 0,
@@ -908,7 +891,6 @@ const recordApply = async (
     residual?: number;
     actionArtifactId?: string;
     verifierArtifactId?: string;
-    ownerApproved?: boolean;
   },
 ): Promise<number> => {
   const result = await recordApplyOutcome({ eventId, ...opts });
@@ -928,8 +910,8 @@ const recordApply = async (
 export const runApply = async (argv: string[]): Promise<number> => {
   const { positional, flags } = parseArgs(argv);
   if (flags.help || flags.h || (positional.length === 0 && !flags.record)) {
-    console.log("acc apply <event_id> [--owner-approved]");
-    console.log("        Render the subagent prompt for applying the event.");
+    console.log("acc apply <event_id>");
+    console.log("        Render the subagent prompt for applying the event. Owner consent is read only from owner_decision_recorded events scoped to the source event or directive.");
     console.log("acc apply --record <event_id> --status applied|failed|refused");
     console.log("                  [--commit-sha X] [--subagent-task-id Y]");
     console.log("                  [--summary Z] [--reason W] [--target FILE] [--residual N]");
@@ -954,10 +936,9 @@ export const runApply = async (argv: string[]): Promise<number> => {
       residual: typeof flags.residual === "string" ? Number(flags.residual) : undefined,
       actionArtifactId: typeof flags["action-artifact-id"] === "string" ? flags["action-artifact-id"] : undefined,
       verifierArtifactId: typeof flags["verifier-artifact-id"] === "string" ? flags["verifier-artifact-id"] : undefined,
-      ownerApproved: Boolean(flags["owner-approved"]),
     });
   }
-  return renderPromptCommand(eventId, Boolean(flags["owner-approved"]));
+  return renderPromptCommand(eventId);
 };
 
 if (import.meta.main) {
