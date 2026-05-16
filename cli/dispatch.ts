@@ -50,6 +50,12 @@ const usage = (): string => `acc — v2 thin CLI
   acc apply --record <event_id> --status applied|failed|refused [...]
                                   Emit the act-shaped applied_change_committed spine
                                   plus the *_applied credit event.
+  acc verify <directive_id>       Orchestrator-side merger verification — aggregate
+                                  every contract_amendment_proposed under a directive,
+                                  join to contract_amendment_applied, and verify each
+                                  named commit_sha touches the proposed target with
+                                  the expected text. Exit 0 clean / 1 stranded /
+                                  2 drift|missing.
   acc daemon start                Spawn the daemon detached if not running.
   acc daemon stop                 Auth-gated shutdown via admin token.
   acc daemon status               GET /health on the running daemon.
@@ -366,6 +372,10 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
   if (cmd === "trust") {
     const { runTrust } = await import("./trust");
     return runTrust(argv.slice(1));
+  }
+  if (cmd === "verify") {
+    const { runVerify } = await import("./verify");
+    return runVerify(argv.slice(1));
   }
   if (cmd === "daemon") {
     if (sub === "start")          return daemonStart();
