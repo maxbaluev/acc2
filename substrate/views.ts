@@ -2210,6 +2210,108 @@ LEFT JOIN ready ON ready.directive_id = r.directive_id AND ready.root_task_id = 
 LEFT JOIN latest_signal ls ON ls.directive_id = r.directive_id AND ls.root_task_id = r.root_task_id;
 `;
 
+// pending_owner_decision_queue_view — ranked, de-duplicated projection
+// of owner-gated proposals the substrate is still waiting on. Sources
+// from lesson_implementer_queue_view but applies four corrections that
+// the raw queue lacked (see brain design KHA109RW5972D2BZMYQ63HX0F4):
+//
+//  1. Filter out any source_event_id that has ANY owner_decision_recorded
+//     (approve OR decline). The lesson view only tracks approves, so
+//     declines silently stayed visible — exactly the bug today.
+//  2. Group by (normalized_target, anchor) so 16 variants of the same
+//     idea collapse to one ranked row with duplicate_count.
+//  3. Score open-ended axes (target_risk / shape_quality / staleness /
+//     duplicate weight) and compute decision_rank for ordering.
+//  4. Mark malformed proposals (anchor missing / empty after-text /
+//     missing diff) with decline_candidate_reason so the operator
+//     surface can auto-decline them in one stroke.
+const VIEW_PENDING_OWNER_DECISION_QUEUE = `
+CREATE VIEW IF NOT EXISTS pending_owner_decision_queue_view AS
+WITH base AS (
+  SELECT
+    q.source_event_id,
+    q.ts,
+    q.source_kind,
+    q.directive_id,
+    q.task_id,
+    q.target,
+    q.anchor,
+    q.candidate_diff,
+    q.owner_gate_required,
+    q.owner_gate_verdict,
+    CASE WHEN q.target LIKE 'repo:%' THEN substr(q.target, 6) ELSE q.target END AS normalized_target
+  FROM lesson_implementer_queue_view q
+  WHERE q.owner_gate_required = 1
+    AND NOT EXISTS (
+      SELECT 1 FROM events odr
+      WHERE odr.kind = 'owner_decision_recorded'
+        AND (
+          json_extract(odr.payload, '$.source_event_id') = q.source_event_id
+          OR EXISTS (SELECT 1 FROM json_each(COALESCE(odr.context_refs, '[]')) WHERE value = q.source_event_id)
+        )
+    )
+),
+shape AS (
+  SELECT
+    b.*,
+    CASE
+      WHEN b.anchor IS NULL OR length(trim(b.anchor)) = 0 THEN 'anchor_missing'
+      WHEN b.candidate_diff IS NULL THEN 'diff_missing'
+      WHEN json_extract(b.candidate_diff, '$.kind') = 'anchored_replace_v1'
+        AND length(COALESCE(json_extract(b.candidate_diff, '$.after'), '')) = 0 THEN 'empty_after'
+      WHEN json_extract(b.candidate_diff, '$.kind') = 'anchored_replace_v1'
+        AND length(COALESCE(json_extract(b.candidate_diff, '$.before'), '')) = 0 THEN 'empty_before'
+      ELSE NULL
+    END AS decline_candidate_reason,
+    CASE
+      WHEN b.anchor IS NULL OR length(trim(b.anchor)) = 0 THEN 0.0
+      WHEN b.candidate_diff IS NULL THEN 0.2
+      WHEN json_extract(b.candidate_diff, '$.kind') = 'anchored_replace_v1'
+        AND length(COALESCE(json_extract(b.candidate_diff, '$.before'), '')) > 0
+        AND length(COALESCE(json_extract(b.candidate_diff, '$.after'), '')) > 0 THEN 1.0
+      ELSE 0.5
+    END AS shape_quality_score,
+    CASE
+      WHEN b.normalized_target LIKE '%CLAUDE.md' THEN 1.0
+      WHEN b.normalized_target LIKE '%.claude/rules/%' THEN 1.0
+      WHEN b.normalized_target = 'docs/v2-design.md' THEN 0.95
+      WHEN b.normalized_target = 'docs/operator-install.md' THEN 0.85
+      WHEN b.normalized_target = 'docs/ops-guide.md' THEN 0.85
+      WHEN b.normalized_target LIKE 'docs/%' THEN 0.65
+      WHEN b.normalized_target LIKE 'substrate/%' OR b.normalized_target LIKE 'runtime/%' THEN 0.55
+      WHEN b.normalized_target LIKE 'cli/%' THEN 0.5
+      ELSE 0.3
+    END AS target_risk_score,
+    MIN(1.0, MAX(0.0, CAST((julianday('now') - julianday(b.ts)) AS REAL) / 7.0)) AS staleness_score,
+    (COALESCE(b.normalized_target, '?') || '|' || COALESCE(b.anchor, '')) AS group_key
+  FROM base b
+)
+SELECT
+  s.group_key,
+  s.normalized_target AS target,
+  s.anchor,
+  COUNT(*) AS duplicate_count,
+  (SELECT s2.source_event_id FROM shape s2
+   WHERE s2.group_key = s.group_key
+   ORDER BY s2.shape_quality_score DESC, s2.ts DESC
+   LIMIT 1) AS representative_event_id,
+  MIN(s.ts) AS oldest_ts,
+  MAX(s.ts) AS newest_ts,
+  MAX(s.shape_quality_score) AS shape_quality_score,
+  MAX(s.target_risk_score) AS target_risk_score,
+  MAX(s.staleness_score) AS staleness_score,
+  CASE WHEN SUM(CASE WHEN s.decline_candidate_reason IS NULL THEN 1 ELSE 0 END) = 0
+    THEN MIN(s.decline_candidate_reason)
+    ELSE NULL END AS group_decline_reason,
+  (MAX(s.target_risk_score) * 0.5
+   + MAX(s.shape_quality_score) * 0.3
+   + MAX(s.staleness_score) * 0.1
+   + MIN(1.0, COUNT(*) * 0.05)) AS decision_rank
+FROM shape s
+GROUP BY s.group_key, s.normalized_target, s.anchor
+ORDER BY decision_rank DESC, MAX(s.ts) DESC;
+`;
+
 // ── Public entrypoint ──────────────────────────────────────────────
 
 const VIEW_NAMES = [
@@ -2217,6 +2319,7 @@ const VIEW_NAMES = [
   "applied_lesson_effectiveness_view",
   "lesson_implementation_status_view",
   "lesson_implementer_queue_view",
+  "pending_owner_decision_queue_view",
   "recipes_latest_view",
   "recipe_registry_view",
   "promoted_knowledge_view",
@@ -2275,6 +2378,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_APPLIED_LESSON_EFFECTIVENESS);
   db.exec(VIEW_LESSON_APPLY_CANDIDATE);
   db.exec(VIEW_DISPATCH_RESOLVED);
+  db.exec(VIEW_PENDING_OWNER_DECISION_QUEUE);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────
@@ -2914,6 +3018,46 @@ export const lessonImplementerQueue = (db: Database): LessonImplementerQueueRow[
     apply_ts: (r.apply_ts as string | null) ?? null,
     payload: parseJson<Record<string, unknown>>(r.payload),
     context_refs: parseJson<string[]>(r.context_refs ?? "[]"),
+  }));
+};
+
+export type PendingOwnerDecisionRow = {
+  group_key: string;
+  target: string | null;
+  anchor: string | null;
+  duplicate_count: number;
+  representative_event_id: string;
+  oldest_ts: string;
+  newest_ts: string;
+  shape_quality_score: number;
+  target_risk_score: number;
+  staleness_score: number;
+  group_decline_reason: string | null;
+  decision_rank: number;
+};
+
+/** Ranked, de-duplicated owner-decision inbox. Source of truth for
+ *  the orchestrator's end-of-turn decision card and for any bulk
+ *  triage / auto-decline tooling. Rows where every member is a
+ *  decline candidate carry a non-null group_decline_reason so the
+ *  CLI can offer a one-shot auto-decline. */
+export const pendingOwnerDecisionQueue = (db: Database): PendingOwnerDecisionRow[] => {
+  const rows = db
+    .query("SELECT * FROM pending_owner_decision_queue_view")
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    group_key: r.group_key as string,
+    target: (r.target as string | null) ?? null,
+    anchor: (r.anchor as string | null) ?? null,
+    duplicate_count: (r.duplicate_count as number) ?? 0,
+    representative_event_id: r.representative_event_id as string,
+    oldest_ts: r.oldest_ts as string,
+    newest_ts: r.newest_ts as string,
+    shape_quality_score: (r.shape_quality_score as number) ?? 0,
+    target_risk_score: (r.target_risk_score as number) ?? 0,
+    staleness_score: (r.staleness_score as number) ?? 0,
+    group_decline_reason: (r.group_decline_reason as string | null) ?? null,
+    decision_rank: (r.decision_rank as number) ?? 0,
   }));
 };
 

@@ -1,25 +1,37 @@
-// `acc admin pending-decisions [--json]` — owner-decision inbox.
+// `acc admin pending-decisions` — owner-decision inbox.
 //
-// The orchestrator-runtime contract says: "Surface pending owner decisions
-// last. When unresolved … owner-gated contract_amendment_proposed … remain,
-// end the turn with a concise decision card." Until this CLI existed there
-// was no canonical query — the orchestrator's stub readPendingDecisions in
-// cli/watch.ts returned []. This is the structural surface that closes the
-// gap.
+// Defaults to the ranked, de-duplicated projection from
+// pending_owner_decision_queue_view (substrate/views.ts). Per the brain's
+// design (lesson KHA109RW5972D2BZMYQ63HX0F4) the orchestrator should never
+// dump 92 rows when 4 grouped ranked rows tell the same story; nor should
+// it silently miss decisions because the raw queue counts approves but not
+// declines. This surface fixes both:
 //
-// Source: lesson_implementer_queue_view (substrate/views.ts:861). One row
-// per pending lesson_extracted / contract_amendment_proposed with computed
-// owner_gate_verdict and apply_status. We filter to rows that:
-//   - have owner_gate_verdict = 'owner_consent_required' (gate is real)
-//   - are not yet applied (apply_status != 'applied' / 'committed')
+//   - Default mode: top N groups by decision_rank, with duplicate_count
+//     and group_decline_reason exposed so the operator can bulk-decline
+//     malformed shapes in one stroke.
+//   - --all: ungrouped legacy projection (lesson_implementer_queue_view).
+//   - --target <substr>: filter rows whose normalized_target contains substr.
+//   - --limit N: cap the ranked output (default 10).
+//   - --json: machine-readable for orchestrator polling.
 //
 // Usage:
-//   acc admin pending-decisions             # human table
-//   acc admin pending-decisions --json      # JSON for orchestrator polling
+//   acc admin pending-decisions                       # ranked top 10
+//   acc admin pending-decisions --limit 20            # top 20 groups
+//   acc admin pending-decisions --target rules        # filter by substring
+//   acc admin pending-decisions --all                 # raw ungrouped view
+//   acc admin pending-decisions --json                # JSON (ranked by default)
+//   acc admin pending-decisions --all --json          # JSON ungrouped
 
 import type { Database } from "bun:sqlite";
 import { openDb } from "../substrate/db";
-import { lessonImplementerQueue, runViews, type LessonImplementerQueueRow } from "../substrate/views";
+import {
+  lessonImplementerQueue,
+  pendingOwnerDecisionQueue,
+  runViews,
+  type LessonImplementerQueueRow,
+  type PendingOwnerDecisionRow,
+} from "../substrate/views";
 import { resolveDbPath } from "../runtime/state_paths";
 
 type PendingDecisionsEnv = {
@@ -57,7 +69,44 @@ const formatAge = (ms: number): string => {
   return rem === 0 ? `${h}h` : `${h}h${rem}m`;
 };
 
-const renderHuman = (
+const pad = (s: string | null, n: number): string =>
+  (s ?? "").slice(0, n).padEnd(n);
+
+const renderRanked = (
+  rows: PendingOwnerDecisionRow[],
+  out: (s: string) => void,
+): void => {
+  if (rows.length === 0) {
+    out("pending owner decisions: none (pending_owner_decision_queue_view is empty)");
+    return;
+  }
+  out("acc admin pending-decisions — ranked groups from pending_owner_decision_queue_view");
+  out("");
+  out("  rank  age    dup risk shape target                                          anchor                                  representative");
+  out("  ──── ────── ─── ──── ───── ─────────────────────────────────────────────── ─────────────────────────────────────── ──────────────────────────");
+  for (const r of rows) {
+    const rank = r.decision_rank.toFixed(2).padStart(4);
+    const age = formatAge(ageMs(r.newest_ts)).padEnd(6);
+    const dup = String(r.duplicate_count).padStart(3);
+    const risk = r.target_risk_score.toFixed(2).padStart(4);
+    const shape = r.shape_quality_score.toFixed(2).padStart(5);
+    const target = pad(r.target, 47);
+    const anchor = pad(r.anchor, 39);
+    const rep = (r.representative_event_id ?? "").slice(0, 26);
+    const declineMark = r.group_decline_reason ? ` [decline:${r.group_decline_reason}]` : "";
+    out(`  ${rank} ${age} ${dup} ${risk} ${shape} ${target} ${anchor} ${rep}${declineMark}`);
+  }
+  out("");
+  const declineCount = rows.filter((r) => r.group_decline_reason).length;
+  out(
+    `${rows.length} pending group${rows.length === 1 ? "" : "s"}` +
+      (declineCount > 0
+        ? ` (${declineCount} are auto-decline candidates — anchor missing, empty after-text, or malformed diff).`
+        : "."),
+  );
+};
+
+const renderAll = (
   rows: LessonImplementerQueueRow[],
   out: (s: string) => void,
 ): void => {
@@ -65,19 +114,32 @@ const renderHuman = (
     out("pending owner decisions: none (substrate has no owner-gated, unapplied proposals)");
     return;
   }
-  out("acc admin pending-decisions — owner-gated proposals from substrate (lesson_implementer_queue_view)");
+  out("acc admin pending-decisions --all — raw ungrouped lesson_implementer_queue_view rows");
   out("");
   out("  age   source                          target                                                anchor");
   out("  ───── ─────────────────────────────── ───────────────────────────────────────────────────── ───────────────────────────────");
   for (const r of rows) {
     const age = formatAge(ageMs(r.ts)).padEnd(5);
-    const src = (r.source_event_id ?? "").slice(0, 31).padEnd(31);
-    const target = (r.target ?? "?").slice(0, 53).padEnd(53);
-    const anchor = (r.anchor ?? "-").slice(0, 31);
+    const src = pad(r.source_event_id, 31);
+    const target = pad(r.target, 53);
+    const anchor = pad(r.anchor, 31);
     out(`  ${age} ${src} ${target} ${anchor}`);
   }
   out("");
-  out(`${rows.length} pending owner decision${rows.length === 1 ? "" : "s"}. Each is a contract_amendment_proposed or lesson_extracted that touches a protected target.`);
+  out(`${rows.length} pending owner decision${rows.length === 1 ? "" : "s"}.`);
+};
+
+const parseLimitArg = (argv: string[]): number => {
+  const idx = argv.indexOf("--limit");
+  if (idx === -1) return 10;
+  const v = parseInt(argv[idx + 1] ?? "10", 10);
+  return Number.isFinite(v) && v > 0 ? v : 10;
+};
+
+const parseTargetArg = (argv: string[]): string | null => {
+  const idx = argv.indexOf("--target");
+  if (idx === -1) return null;
+  return argv[idx + 1] ?? null;
 };
 
 export const runPendingDecisions = async (
@@ -86,6 +148,9 @@ export const runPendingDecisions = async (
 ): Promise<number> => {
   const env: PendingDecisionsEnv = { ...defaultEnv(), ...(envOverride ?? {}) };
   const wantJson = argv.includes("--json");
+  const wantAll = argv.includes("--all");
+  const limit = parseLimitArg(argv);
+  const targetFilter = parseTargetArg(argv);
 
   let db: Database;
   const path = env.stateDbPath ?? defaultStateDbPath();
@@ -97,29 +162,34 @@ export const runPendingDecisions = async (
   }
 
   runViews(db);
-  const rows = selectPendingDecisions(lessonImplementerQueue(db));
+
+  if (wantAll) {
+    const all = selectPendingDecisions(lessonImplementerQueue(db));
+    const filtered = targetFilter
+      ? all.filter((r) => (r.target ?? "").includes(targetFilter))
+      : all;
+    if (wantJson) {
+      env.out(JSON.stringify(filtered, null, 2));
+    } else {
+      renderAll(filtered, env.out);
+    }
+    return 0;
+  }
+
+  const ranked = pendingOwnerDecisionQueue(db);
+  const filtered = targetFilter
+    ? ranked.filter((r) => (r.target ?? "").includes(targetFilter))
+    : ranked;
+  const limited = filtered.slice(0, limit);
 
   if (wantJson) {
-    env.out(
-      JSON.stringify(
-        rows.map((r) => ({
-          source_event_id: r.source_event_id,
-          ts: r.ts,
-          source_kind: r.source_kind,
-          target: r.target,
-          anchor: r.anchor,
-          owner_gate_verdict: r.owner_gate_verdict,
-          apply_status: r.apply_status,
-          auto_apply_eligible: r.auto_apply_eligible,
-          directive_id: r.directive_id,
-          task_id: r.task_id,
-        })),
-        null,
-        2,
-      ),
-    );
+    env.out(JSON.stringify(limited, null, 2));
   } else {
-    renderHuman(rows, env.out);
+    renderRanked(limited, env.out);
+    if (filtered.length > limit) {
+      env.out("");
+      env.out(`(${filtered.length - limit} more rows hidden; pass --limit ${filtered.length} to show all.)`);
+    }
   }
   return 0;
 };

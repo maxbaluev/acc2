@@ -49,9 +49,14 @@ export const runWatch = async (_argv: string[]): Promise<number> => {
 };
 
 // Re-exported empty stubs so any stale import path remains a compile-time
-// resolution rather than a runtime crash. Real implementations belong in
-// the next observation surface.
+// resolution rather than a runtime crash. The pending-decisions stub
+// (readPendingDecisions = (): never[] => []) was deleted because it
+// caused the orchestrator to silently miss 89 owner-gated proposals
+// over 33 hours. The canonical surface for pending decisions is now
+// `acc admin pending-decisions` (cli/admin_pending_decisions.ts) which
+// reads pending_owner_decision_queue_view directly. If a future TUI
+// wants the same data, call that view via substrate.read — do NOT
+// reintroduce a local stub that returns [].
 export const renderFrame = (): string => "";
 export const renderPanelLines = (): string[] => [];
-export const readPendingDecisions = (): never[] => [];
 export const readDriftSummaries = (): never[] => [];

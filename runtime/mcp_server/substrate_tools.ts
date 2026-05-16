@@ -43,6 +43,7 @@ import {
   ownerConversation,
   lowRiskInlinePatterns,
   lessonImplementerQueue,
+  pendingOwnerDecisionQueue,
   lessonImplementationStatus,
   appliedLessonEffectiveness,
   lessonApplyCandidates,
@@ -413,6 +414,8 @@ export const handleRead = (
       }
       case "lesson_implementer_queue_view":
         return { ok: true, result: lessonImplementerQueue(db) as unknown as JsonValue };
+      case "pending_owner_decision_queue_view":
+        return { ok: true, result: pendingOwnerDecisionQueue(db) as unknown as JsonValue };
       case "lesson_implementation_status_view":
         return { ok: true, result: lessonImplementationStatus(db) as unknown as JsonValue };
       case "applied_lesson_effectiveness_view":

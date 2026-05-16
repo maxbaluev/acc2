@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { openDb, closeDb } from "../substrate/db";
-import { runViews, lessonImplementerQueue, type LessonImplementerQueueRow } from "../substrate/views";
+import { runViews, lessonImplementerQueue, pendingOwnerDecisionQueue, type LessonImplementerQueueRow } from "../substrate/views";
 import { runPendingDecisions, selectPendingDecisions } from "./admin_pending_decisions";
 
 const newId = (): string => "I" + Math.random().toString(36).slice(2, 12).toUpperCase().padEnd(11, "X");
@@ -114,5 +114,65 @@ describe("admin_pending_decisions", () => {
     });
     expect(code).toBe(0);
     expect(lines.join("\n")).toContain("none");
+  });
+
+  test("pending_owner_decision_queue_view groups duplicates and flags decline candidates", () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    // Two well-formed amendments on the SAME (target, anchor) → one group, duplicate_count=2.
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "## Owner Decisions", consent_required: true });
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "## Owner Decisions", consent_required: true });
+    // One malformed (empty after) on a different anchor → its own group with group_decline_reason='empty_after'.
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "## Other", consent_required: true, diff: { before: "old", after: "" } });
+
+    const ranked = pendingOwnerDecisionQueue(db);
+    expect(ranked.length).toBe(2);
+    const ownerGroup = ranked.find((r) => r.anchor === "## Owner Decisions")!;
+    expect(ownerGroup.duplicate_count).toBe(2);
+    expect(ownerGroup.group_decline_reason).toBeNull();
+    expect(ownerGroup.target_risk_score).toBe(1.0);
+    const emptyGroup = ranked.find((r) => r.anchor === "## Other")!;
+    expect(emptyGroup.duplicate_count).toBe(1);
+    expect(emptyGroup.group_decline_reason).toBe("empty_after");
+  });
+
+  test("pending_owner_decision_queue_view excludes rows with any owner_decision_recorded", () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    const id1 = insertAmendment(db, { target: "CLAUDE.md", anchor: "## A", consent_required: true });
+    const id2 = insertAmendment(db, { target: "CLAUDE.md", anchor: "## B", consent_required: true });
+    // Record decline (NOT approve) for id1 — should still exclude.
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [newId(), new Date().toISOString(), "d_test", "t_test", "loop_t", "claude_root", "owner_decision_recorded",
+       JSON.stringify({ source_event_id: id1, decision: "decline" }), JSON.stringify([id1])],
+    );
+
+    const ranked = pendingOwnerDecisionQueue(db);
+    expect(ranked.length).toBe(1);
+    expect(ranked[0]!.anchor).toBe("## B");
+    expect(ranked[0]!.representative_event_id).toBe(id2);
+  });
+
+  test("--limit caps ranked output and hides the rest", async () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "## A", consent_required: true });
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "## B", consent_required: true });
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "## C", consent_required: true });
+
+    const lines: string[] = [];
+    const code = await runPendingDecisions(["--limit", "2"], {
+      out: (s) => lines.push(s),
+      err: () => {},
+      openSubstrate: () => db,
+    });
+    expect(code).toBe(0);
+    const text = lines.join("\n");
+    expect(text).toContain("1 more rows hidden");
   });
 });

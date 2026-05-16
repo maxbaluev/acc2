@@ -8,7 +8,7 @@
 // replacement plan.
 
 import { describe, expect, test } from "bun:test";
-import { runWatch, renderFrame, renderPanelLines, readPendingDecisions, readDriftSummaries } from "./watch";
+import { runWatch, renderFrame, renderPanelLines, readDriftSummaries } from "./watch";
 
 describe("acc watch skeleton placeholder", () => {
   test("runWatch is a callable async function returning a numeric exit", async () => {
@@ -21,7 +21,16 @@ describe("acc watch skeleton placeholder", () => {
   test("empty stubs resolve to inert values without throwing", () => {
     expect(renderFrame()).toBe("");
     expect(renderPanelLines()).toEqual([]);
-    expect(readPendingDecisions()).toEqual([]);
     expect(readDriftSummaries()).toEqual([]);
+  });
+
+  test("readPendingDecisions stub was deleted — canonical surface is acc admin pending-decisions", async () => {
+    // This is the structural fix: a hardcoded readPendingDecisions = (): never[] => []
+    // caused the orchestrator to silently miss 89 owner-gated proposals over 33 hours.
+    // The substitute is pending_owner_decision_queue_view + acc admin pending-decisions.
+    // If any future TUI work tries to re-import readPendingDecisions, the module
+    // resolution will fail (no such named export). That is intentional.
+    const mod = await import("./watch");
+    expect((mod as Record<string, unknown>).readPendingDecisions).toBeUndefined();
   });
 });
