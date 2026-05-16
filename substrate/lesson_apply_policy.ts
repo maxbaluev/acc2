@@ -26,7 +26,11 @@ export type LessonApplyTargetPolicy = {
   autoApplyTarget: boolean;
 };
 
-const normalizeTarget = (target: string): string => target.trim().replace(/^\.\//, "");
+const normalizeTarget = (target: string): string => {
+  const trimmed = target.trim();
+  const repoRelative = trimmed.startsWith("repo:") ? trimmed.slice("repo:".length) : trimmed;
+  return repoRelative.replace(/^\.\//, "");
+};
 
 const policyRuleMatches = (rule: LessonApplyPolicyRule, target: string): boolean => {
   if (rule.match === "exact") return target === rule.pattern;

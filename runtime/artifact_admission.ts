@@ -58,6 +58,7 @@ export type AdmissionInput = {
   intent?: string;
   summary?: string;
   targetFiles?: string[];
+  targetResources?: string[];
   sourceCandidateId?: string;
   /** Owner-consent envelope. When the sandbox's fs_write globs would let
    *  the artifact body mutate an owner-gated path (CLAUDE.md,
@@ -187,6 +188,7 @@ export const admitArtifact = async (
     intent: input.intent ?? null,
     summary: input.summary ?? null,
     targetFiles: input.targetFiles ?? null,
+    targetResources: input.targetResources ?? null,
     sourceCandidateId: input.sourceCandidateId ?? null,
     // owner_gate_verdict is "auto" when no owner gate fired, else "owner_approved"
     // (we already passed the gate check above for the require_consent branch).
@@ -329,6 +331,8 @@ export const admitArtifact = async (
       runtime: input.runtime,
       score: final?.score ?? ADMIT_SCORE,
       confidence: final?.confidence ?? ADMIT_CONFIDENCE,
+      target_files: final?.targetFiles ?? null,
+      target_resources: final?.targetResources?.map((r) => r.uri) ?? null,
     } as JsonValue,
   });
   return { ok: true, artifactId: row.id };

@@ -34,6 +34,7 @@ import type { Database } from "bun:sqlite";
 import type { CodeArtifactStatus, JsonValue, Runtime, SandboxDecl } from "../substrate/types";
 import { newId, nowIso } from "./ids";
 import type { EmitEventInput } from "./events";
+import { parseResourceRefs, repoTargetFilesFromResources, resourcesFromTargetFiles, type ResourceRef } from "./resource_uri";
 
 export type CodeArtifactRow = {
   id: string;
@@ -58,14 +59,16 @@ export type CodeArtifactRow = {
   intent: string | null;
   summary: string | null;
   targetFiles: string[] | null;
+  targetResources: ResourceRef[] | null;
   sourceCandidateId: string | null;
   ownerGateVerdict: "auto" | "owner_approved" | "owner_rejected" | null;
   createdAt: string;
   updatedAt: string;
 };
 
-export type InsertArtifactInput = Omit<CodeArtifactRow, "createdAt" | "updatedAt" | "id"> & {
+export type InsertArtifactInput = Omit<CodeArtifactRow, "createdAt" | "updatedAt" | "id" | "targetResources"> & {
   id?: string;
+  targetResources?: ResourceRef[] | string[] | null;
 };
 
 // ── EMA / scoring helpers ──────────────────────────────────────────
@@ -122,7 +125,7 @@ const clamp01 = (x: number): number => Math.max(0, Math.min(1, x));
 
 // ── Row mapping ────────────────────────────────────────────────────
 
-const parseTargetFiles = (raw: unknown): string[] | null => {
+const parseStringArray = (raw: unknown): string[] | null => {
   if (raw === null || raw === undefined) return null;
   if (typeof raw !== "string" || raw === "") return null;
   try {
@@ -149,7 +152,8 @@ const mapRow = (raw: Record<string, unknown>): CodeArtifactRow => ({
   fixtureExpectedResidual: (raw.fixture_expected_residual as number | null) ?? null,
   intent: (raw.intent as string | null) ?? null,
   summary: (raw.summary as string | null) ?? null,
-  targetFiles: parseTargetFiles(raw.target_files),
+  targetFiles: parseStringArray(raw.target_files),
+  targetResources: parseResourceRefs(raw.target_resources) ?? resourcesFromTargetFiles(parseStringArray(raw.target_files)),
   sourceCandidateId: (raw.source_candidate_id as string | null) ?? null,
   ownerGateVerdict: (raw.owner_gate_verdict as CodeArtifactRow["ownerGateVerdict"]) ?? null,
   createdAt: raw.created_at as string,
@@ -165,15 +169,17 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): CodeAr
   const id = input.id ?? newId();
   const ts = nowIso();
   const stateRoot = input.stateRoot ?? "";
+  const targetResources = parseResourceRefs(input.targetResources) ?? resourcesFromTargetFiles(input.targetFiles ?? null);
+  const targetFiles = input.targetFiles ?? repoTargetFilesFromResources(targetResources);
   db.run(
     `INSERT INTO code_artifact (
        id, runtime, body, declared_sandbox, state_root,
        posterior_alpha, posterior_beta, score, confidence,
        recent_residual_mean, recent_kill_count, status, name,
        fixture_input, fixture_expected_residual,
-       intent, summary, target_files, source_candidate_id, owner_gate_verdict,
+       intent, summary, target_files, target_resources, source_candidate_id, owner_gate_verdict,
        created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.runtime,
@@ -192,7 +198,8 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): CodeAr
       input.fixtureExpectedResidual ?? 0,
       input.intent,
       input.summary,
-      input.targetFiles ? JSON.stringify(input.targetFiles) : null,
+      targetFiles ? JSON.stringify(targetFiles) : null,
+      targetResources ? JSON.stringify(targetResources.map((r) => r.uri)) : null,
       input.sourceCandidateId,
       input.ownerGateVerdict,
       ts,

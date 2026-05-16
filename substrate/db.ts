@@ -63,8 +63,8 @@ export const runSchema = (db: Database): void => {
 };
 
 /** Brain dataflow audit bxdhdkm9e #3 (2026-05-15): code_artifact gained
- *  five provenance/intent columns (intent, summary, target_files,
- *  source_candidate_id, owner_gate_verdict). Fresh installs get them via
+ *  six provenance/intent columns (intent, summary, target_files,
+ *  target_resources, source_candidate_id, owner_gate_verdict). Fresh installs get them via
  *  schema.sql's CREATE TABLE; existing DBs need ALTER TABLE here. Each
  *  ALTER is wrapped in a try/catch so re-running this on an already-
  *  migrated DB is a no-op (SQLite raises "duplicate column name" which
@@ -74,6 +74,7 @@ const ARTIFACT_METADATA_COLUMNS: Array<{ name: string; ddl: string }> = [
   { name: "intent",              ddl: "ALTER TABLE code_artifact ADD COLUMN intent TEXT" },
   { name: "summary",             ddl: "ALTER TABLE code_artifact ADD COLUMN summary TEXT" },
   { name: "target_files",        ddl: "ALTER TABLE code_artifact ADD COLUMN target_files TEXT" },
+  { name: "target_resources",    ddl: "ALTER TABLE code_artifact ADD COLUMN target_resources TEXT" },
   { name: "source_candidate_id", ddl: "ALTER TABLE code_artifact ADD COLUMN source_candidate_id TEXT" },
   { name: "owner_gate_verdict",  ddl: "ALTER TABLE code_artifact ADD COLUMN owner_gate_verdict TEXT" },
 ];

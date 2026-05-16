@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS code_artifact (
   -- legacy seeded artifacts pre-date these fields.
   intent                      TEXT,
   summary                     TEXT,
-  target_files                TEXT,          -- JSON array
+  target_files                TEXT,          -- JSON array of repo paths; kept for repo: parity
+  target_resources            TEXT,          -- JSON array of ResourceUri strings
   source_candidate_id         TEXT,
   owner_gate_verdict          TEXT,          -- 'auto' | 'owner_approved' | 'owner_rejected' | NULL
   created_at                  TEXT NOT NULL,

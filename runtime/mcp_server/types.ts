@@ -166,6 +166,8 @@ export const AdmitArtifactSchema = z.object({
   fixture_expected_residual_below: z.number().optional(),
   state_root: z.string().optional(),
   name: z.string().optional(),
+  target_files: z.array(z.string()).optional(),
+  target_resources: z.array(z.string()).optional(),
   /** Optional owner-consent envelope — required only when the sandbox's
    *  fs_write would mutate an owner-gated contract path. The dispatcher /
    *  caller cites an existing owner_decision_recorded event id; the
