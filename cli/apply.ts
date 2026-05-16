@@ -408,23 +408,21 @@ const authorizeApply = async (
       autoApplyTarget: policy.autoApplyTarget,
     }) };
   }
-  if (policy.autoApplyTarget) {
-    const hazards = Number(queueRow?.trajectory_hazard_count ?? 0);
-    if (hazards > 0 && !ownerApproved) {
-      return { ok: false, code: await emitApplyDenied(ev, eventId, "trajectory_hazard_present", target, {
-        ownerGateRequired,
-        ownerApproved,
-        autoApplyTarget: policy.autoApplyTarget,
-      }) };
-    }
-    if (!structuredChangeProposal(payload, target)) {
-      return { ok: false, code: await emitApplyDenied(ev, eventId, "structured_proposed_behavior_required", target, {
-        ownerGateRequired,
-        ownerApproved,
-        autoApplyTarget: policy.autoApplyTarget,
-      }) };
-    }
-  }
+  // Universal verifier replaces the gate stack (owner-approved 2026-05-16,
+  // "we do not need gates, we have verify universal system!"). The two
+  // refusals that used to live here — trajectory_hazard_present and
+  // structured_proposed_behavior_required — both fought the verifier residual
+  // instead of trusting it. Concrete failure modes (witnessed this session):
+  //   - trajectory_hazard refused credit when the only "hazard" was a CLI
+  //     follower process exit (observability layer), not a substrate fault.
+  //   - structured_proposed_behavior_required refused prose lessons on
+  //     repo:runtime/* even when the orchestrator semantically applied the
+  //     right edit and a commit existed touching the target.
+  // Owner consent (above) stays — it's orthogonal: it gates WHO can change
+  // CLAUDE.md / docs / .claude/rules, not WHETHER the change is correct.
+  // Residual + breakdown (v2-design.md §6) decides correctness; posteriors
+  // close the loop. Auto_apply_worker.ts retains its own structured-change
+  // filter for autonomous landings — this surface is operator-initiated.
   return { ok: true, target, ownerGateRequired, ownerApproved, queueRow };
 };
 
@@ -655,20 +653,20 @@ export const recordApplyOutcome = async (opts: {
   if (!auth.ok) return { ok: false, reason: "authorization denied", exitCode: auth.code };
   const eventId = opts.eventId;
 
-  // Layer 1 write-time gate (brain-symmetric self-healing, owner-approved 2026-05-16):
-  // when status=applied AND commit_sha was provided AND the source event is a
-  // contract_amendment_proposed with a structured payload, verify the git
-  // commit actually contains the proposed diff before recording the apply.
-  // Refuses with apply_diff_mismatch when drift/missing — prevents lying to
-  // the substrate at write time, complementing the after-the-fact `acc verify`
-  // surface. Legacy plain-string proposed_behavior (no before/after markers)
-  // is accepted on target-touch alone — the classifier handles that case.
+  // Layer 1 write-time prerequisite (owner-approved 2026-05-16 gate-deletion):
+  // when status=applied + commit_sha + structured payload, verify the commit
+  // exists AND touches the proposed target file. Only "missing" refuses —
+  // that's a real prerequisite (no commit, or commit doesn't touch target),
+  // not byte-level pedantry. Previous "drift" refusal fought the verifier
+  // residual: brain payload encodes \n escapes that don't byte-match commit
+  // hunk-context even when the edit is semantically identical (witnessed
+  // PSWPPZMKVS5G this session). Drift is now an informational signal
+  // consumed by the residual + breakdown packet, not a hard refusal.
   if (status === "applied" && opts.commitSha && isAmendment) {
     const verdict = classifyApply(payload, opts.commitSha, process.cwd());
-    if (verdict === "drift" || verdict === "missing") {
-      console.error(`acc apply --record: refusing status=applied — diff verification reports ${verdict} for commit ${opts.commitSha}`);
-      console.error(`  the commit either does not exist, does not touch the proposed target, or its patch text does not contain the proposed before/after markers.`);
-      console.error(`  re-run with --status failed and a clear --reason, or correct the commit + retry.`);
+    if (verdict === "missing") {
+      console.error(`acc apply --record: refusing status=applied — commit ${opts.commitSha} either does not exist or does not touch the proposed target.`);
+      console.error(`  correct the commit + retry, or use --status failed.`);
       return { ok: false, reason: `apply_diff_mismatch:${verdict}`, exitCode: 3 };
     }
   }

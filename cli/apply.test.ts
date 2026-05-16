@@ -236,7 +236,14 @@ describe("runApply gates", () => {
     expect(prompt).toContain("cli_runtime_gate.trajectory_hazard_count: 0");
   });
 
-  test("auto-apply target blocks unstructured proposals", async () => {
+  // Gate-deletion (owner-approved 2026-05-16): the universal verifier
+  // (residual + breakdown) replaces structured_proposed_behavior_required
+  // and trajectory_hazard_present. Both refusals fought the verifier
+  // instead of trusting it. These tests now assert the inverse — prose
+  // proposals and hazardous trajectories proceed; the residual decides
+  // whether the apply was correct.
+
+  test("auto-apply target accepts unstructured proposals (universal verifier scores them)", async () => {
     const env = await mcpCall("substrate.emit", {
       kind: "contract_amendment_proposed",
       substrate_origin: "opencode",
@@ -255,12 +262,11 @@ describe("runApply gates", () => {
     const code = await runApply([eventId]);
     cap.restore();
 
-    expect(code).toBe(1);
-    expect(cap.err.join("\n")).toContain("structured_proposed_behavior_required");
-    expect(await emittedGateReason(eventId)).toBe("structured_proposed_behavior_required");
+    expect(code).toBe(0);
+    expect(cap.err.join("\n")).not.toContain("structured_proposed_behavior_required");
   });
 
-  test("auto-apply target blocks hazardous trajectories without owner consent", async () => {
+  test("auto-apply target proceeds on hazardous trajectories (residual decides, not the hazard count)", async () => {
     const eventId = await emitLesson({ file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" });
     const hazard = await mcpCall("substrate.emit", {
       kind: "dispatcher_violation",
@@ -270,42 +276,12 @@ describe("runApply gates", () => {
       payload: { failure_kind: "cycle_1_only_breach" },
     });
     expect(hazard.ok).toBe(true);
-
-    const cap = captureConsole();
-    const code = await runApply([eventId]);
-    cap.restore();
-
-    expect(code).toBe(1);
-    expect(cap.err.join("\n")).toContain("trajectory_hazard_present");
-    expect(await emittedGateReason(eventId)).toBe("trajectory_hazard_present");
-  });
-
-  test("owner_decision_recorded approval overrides hazardous auto-apply target", async () => {
-    const eventId = await emitLesson({ file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" });
-    const hazard = await mcpCall("substrate.emit", {
-      kind: "dispatcher_violation",
-      substrate_origin: "substrate",
-      directive_id: "d_apply_gate",
-      task_id: "t_apply_gate",
-      payload: { failure_kind: "cycle_1_only_breach" },
-    });
-    expect(hazard.ok).toBe(true);
-    const decision = await mcpCall("substrate.emit", {
-      kind: "owner_decision_recorded",
-      substrate_origin: "owner",
-      directive_id: "d_apply_gate",
-      task_id: "t_apply_gate",
-      payload: { source_event_id: eventId, outcome: "approved" },
-      context_refs: [eventId],
-    });
-    expect(decision.ok).toBe(true);
 
     const cap = captureConsole();
     const code = await runApply([eventId]);
     cap.restore();
 
     expect(code).toBe(0);
-    expect(cap.out.join("\n")).toContain("AUTO-APPLY GATE");
     expect(cap.err.join("\n")).not.toContain("trajectory_hazard_present");
   });
 
