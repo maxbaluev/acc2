@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../../substrate/db";
 import { openFixtureMultiStakeholder } from "./d_multi_stakeholder";
-import { schedulerTick } from "../task_scheduler";
+import { schedulerTick, drainInFlightDispatches } from "../task_scheduler";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -12,6 +12,7 @@ describe("fixture_d_multi_stakeholder — Batch 5 universal-goal pilot (§10.5)"
     const { directiveId, taskId } = await openFixtureMultiStakeholder(db);
 
     const tick = await schedulerTick(db, { directiveId });
+    await drainInFlightDispatches();
     expect(tick.dispatched).toContain(taskId);
 
     const scored = db

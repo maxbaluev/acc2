@@ -35,7 +35,7 @@ import { stopDaemon } from "../../runtime/daemon";
 import { emitEvent } from "../../runtime/events";
 import { newId } from "../../runtime/ids";
 import { composePrompt } from "../../runtime/prompt_composer";
-import { schedulerTick } from "../../runtime/task_scheduler";
+import { schedulerTick, drainInFlightDispatches } from "../../runtime/task_scheduler";
 import { seedFoundationalKnowledge, seedCodeArtifacts } from "../../substrate/seed";
 import { getArtifact } from "../../runtime/artifact_store";
 import type { JsonValue } from "../../substrate/types";
@@ -350,6 +350,9 @@ export const runRealBrainSmoke = async (opts: SmokeOpts = {}): Promise<number> =
       fixtureTargetPath,
       maxConcurrent: 1,
     });
+    // schedulerTick returns after launch (parallel-dispatch contract,
+    // commit 1826363); drain in-flight before downstream assertions.
+    await drainInFlightDispatches();
     const dispatchElapsedMs = Date.now() - dispatchStart;
     process.stdout.write(
       `dispatch: scheduler tick returned dispatched=[${tick.dispatched.join(",")}] in ${fmtSec(dispatchElapsedMs)}\n\n`,

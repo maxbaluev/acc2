@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../../substrate/db";
 import { openFixtureHealthDecision } from "./d_health_decision";
-import { schedulerTick } from "../task_scheduler";
+import { schedulerTick, drainInFlightDispatches } from "../task_scheduler";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -12,6 +12,7 @@ describe("fixture_d_health_decision — Batch 5 universal-goal pilot (§10.6)", 
     const { directiveId, taskId } = await openFixtureHealthDecision(db);
 
     const tick = await schedulerTick(db, { directiveId });
+    await drainInFlightDispatches();
     expect(tick.dispatched).toContain(taskId);
 
     const scored = db

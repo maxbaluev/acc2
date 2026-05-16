@@ -30,7 +30,7 @@ import { openFixtureEmbodiedRecipe } from "../../runtime/fixtures/d_embodied_rec
 import { openFixtureLongHorizonSavings } from "../../runtime/fixtures/d_long_horizon_savings";
 import { openFixtureCrisisResponse } from "../../runtime/fixtures/d_crisis_response";
 import { CRISIS_MODE, readCurrentMode } from "../../runtime/crisis_mode";
-import { schedulerTick } from "../../runtime/task_scheduler";
+import { schedulerTick, drainInFlightDispatches } from "../../runtime/task_scheduler";
 import { dispatchReadyTask } from "../../runtime/task_dispatcher";
 import {
   opencodeQueryHighResidual,
@@ -336,6 +336,9 @@ export const scenarioMvpFixture = async (handle: DaemonHandle): Promise<void> =>
       fixtureTargetPath: tmpDir,
       maxConcurrent: 1,
     });
+    // schedulerTick returns after launch (parallel-dispatch contract,
+    // commit 1826363); drain in-flight before asserting ledger state.
+    await drainInFlightDispatches();
     assert(tick.dispatched.includes(taskId), `scheduler must have dispatched task ${taskId}`);
 
     // The canonical event chain must be present.
@@ -612,6 +615,9 @@ export const scenarioCreditChainClosure = async (handle: DaemonHandle): Promise<
       fixtureTargetPath: tmpDir,
       maxConcurrent: 1,
     });
+    // schedulerTick returns after launch (parallel-dispatch contract,
+    // commit 1826363); drain in-flight before asserting ledger state.
+    await drainInFlightDispatches();
     assert(tick.dispatched.includes(taskId), "MVP dispatch must run");
 
     // Read the action + verifier artifact ids from the action_predicted row.

@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../../substrate/db";
 import { openFixtureCrisisResponse } from "./d_crisis_response";
-import { schedulerTick } from "../task_scheduler";
+import { schedulerTick, drainInFlightDispatches } from "../task_scheduler";
 import { readCurrentMode, CRISIS_MODE } from "../crisis_mode";
 
 afterAll(() => closeDb());
@@ -24,6 +24,7 @@ describe("fixture_d_crisis_response — Batch 5 universal-goal pilot (§10.9)", 
     expect(mode.max_concurrent).toBe(20);
 
     const tick = await schedulerTick(db, { directiveId });
+    await drainInFlightDispatches();
     expect(tick.dispatched).toContain(taskId);
 
     const scored = db

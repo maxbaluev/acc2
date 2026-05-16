@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, openDb } from "../../substrate/db";
 import { openFixtureDCountTodos } from "./d_count_todos";
-import { schedulerTick } from "../task_scheduler";
+import { schedulerTick, drainInFlightDispatches } from "../task_scheduler";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -24,6 +24,7 @@ describe("fixture_d_count_todos — Phase D MVP end-to-end", () => {
       const { directiveId, taskId } = await openFixtureDCountTodos(db, tempDir);
 
       const tick = await schedulerTick(db, { fixtureTargetPath: tempDir });
+    await drainInFlightDispatches();
       expect(tick.dispatched).toContain(taskId);
 
       // Required canonical event presence — one row each.
