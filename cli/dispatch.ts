@@ -15,10 +15,6 @@ const usage = (): string => `acc — v2 thin CLI
 
   acc init [--yes]                Fresh-install bootstrap (state dir, admin token,
                                   optional foundational seed). Run me first.
-  acc ask <ordinary words>        Natural-language owner router. Maps plain
-                                  language to task / doctor / watch / help
-                                  without requiring acc vocabulary.
-  acc help me with <words>          Friendly alias for opening a task.
   acc task "<owner words>" [--no-follow] [--timeout SECS]
                                   Open a directive; the substrate dispatches the
                                   brain. By default, tails the narrative event
@@ -71,50 +67,16 @@ const usage = (): string => `acc — v2 thin CLI
   acc doctor                      Multi-check readiness report.
 `;
 
-type AskRoute = "task" | "doctor" | "watch" | "help";
-
-export const scoreAskRoutes = (words: string): { route: AskRoute; routing_scores: Record<string, number> } => {
-  const text = words.toLowerCase();
-  const has = (...patterns: RegExp[]) => patterns.some((p) => p.test(text));
-  const routing_scores: Record<string, number> = {
-    task: 0.45,
-    doctor: 0,
-    watch: 0,
-    help: words.trim().length === 0 ? 1 : 0.05,
-  };
-
-  if (has(new RegExp("\\b(broken|ready|install|setup|health|doctor|check|diagnos|missing|why.*not.*work)\\b"))) routing_scores.doctor += 0.75;
-  if (has(new RegExp("\\b(watch|dashboard|live|progress|stream|what.*happen|show.*work|observe|monitor)\\b"))) routing_scores.watch += 0.75;
-  if (has(new RegExp("\\b(help|what can|how do i|commands|explain|possible|guide)\\b"))) routing_scores.help += 0.65;
-  if (has(new RegExp("\\b(do|make|build|fix|change|audit|research|find|write|implement|create|improve|redesign)\\b"))) routing_scores.task += 0.55;
-
-  if (routing_scores.doctor > 0) routing_scores.task -= 0.15;
-  if (routing_scores.watch > 0) routing_scores.task -= 0.1;
-
-  for (const k of Object.keys(routing_scores)) routing_scores[k] = Math.max(0, Math.min(1, routing_scores[k]!));
-  const route = Object.entries(routing_scores).sort((a, b) => b[1] - a[1])[0]![0] as AskRoute;
-  return { route, routing_scores };
-};
-
-const renderAskHelp = (): string => [
-  "acc ask — say what you want in ordinary language",
-  "",
-  "Examples:",
-  "  acc ask fix the onboarding flow",
-  "  acc ask is the system ready?",
-  "  acc ask show me live progress",
-  "  acc ask is accint learning from outcomes?",
-  "",
-  "Routes:",
-  "  task    opens real work through the substrate",
-  "  doctor  checks readiness / missing setup",
-  "  watch   opens the live dashboard",
-  "",
-  "Operator-status projections (subcommands, not ask routes):",
-  "  acc admin trust            owner growth + autonomy snapshot",
-  "  acc admin substrate-status one-screen substrate liveness verdict",
-  "",
-].join("\n");
+// `acc ask` + `scoreAskRoutes` + `acc help me with <words>` all removed
+// 2026-05-16 per owner directive (one universal workflow). Regex
+// classification of natural language is exactly the anti-pattern
+// CLAUDE.md warns about. Single owner entrypoint is `acc task <words>`;
+// the substrate's dispatch_decider picks the route from open-ended
+// residual-scored axes (one_shot_confidence, decomposition_value,
+// information_gap, reversibility, owner_control_need, cost_pressure,
+// time_sensitivity) wired up in commit 302d09c. Operators who need
+// direct access to doctor / watch / admin / etc. still type those
+// commands directly.
 const dispatchTask = async (
   words: string,
   opts: { follow?: boolean; timeoutSecs?: number; verbose?: boolean } = {},
@@ -375,29 +337,8 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     return 0;
   }
   if (cmd === "help") {
-    const tail = argv.slice(1).join(" ").trim();
-    const m = tail.match(/^me\s+with\s+(.+)$/i);
-    if (m?.[1]) return dispatchTask(m[1].trim(), { follow: true });
     console.log(usage());
     return 0;
-  }
-  if (cmd === "ask") {
-    const words = argv.slice(1).join(" ").trim();
-    const { route, routing_scores } = scoreAskRoutes(words);
-    if (route === "help") {
-      console.log(renderAskHelp());
-      return 0;
-    }
-    console.log("acc ask routed to " + route + " scores=" + JSON.stringify(routing_scores));
-    if (route === "doctor") {
-      const { runDoctor } = await import("./doctor");
-      return runDoctor([]);
-    }
-    if (route === "watch") {
-      const { runWatch } = await import("./watch");
-      return runWatch([]);
-    }
-    return dispatchTask(words, { follow: true });
   }
   if (cmd === "init") {
     const { runInit } = await import("./init");

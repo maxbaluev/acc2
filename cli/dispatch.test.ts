@@ -3,7 +3,7 @@
 // with the owner's words and prints the directive id.
 
 import { describe, expect, test } from "bun:test";
-import { runDispatch, scoreAskRoutes } from "./dispatch";
+import { runDispatch } from "./dispatch";
 import { useSharedDaemon } from "../tests/daemon_fixture";
 
 // Stay in a tight band well-disjoint from runtime/*.test.ts (which sit in
@@ -95,24 +95,10 @@ describe("runDispatch", () => {
     expect(cap.lines.join("\n")).toContain("acc task");
   });
 
-  test("scoreAskRoutes maps ordinary words without fixed owner enums", () => {
-    expect(scoreAskRoutes("is the system ready or missing setup?").route).toBe("doctor");
-    expect(scoreAskRoutes("show me live progress").route).toBe("watch");
-    // "trust" route was removed 2026-05-16 — merged under `acc admin trust`.
-    // Owner-side learning/autonomy phrases now fall through to the `task`
-    // default (substrate decides what the brain does).
-    expect(scoreAskRoutes("is accint learning from outcomes?").route).toBe("task");
-    expect(scoreAskRoutes("fix onboarding for normal humans").route).toBe("task");
-    expect(scoreAskRoutes("what can I ask you?").route).toBe("help");
-  });
-
-  test("acc ask help text is sparse-profile friendly", async () => {
-    const cap = captureStdout();
-    const code = await runDispatch(["ask", "what", "can", "I", "ask", "you?"]);
-    cap.restore();
-    expect(code).toBe(0);
-    expect(cap.lines.join("\n")).toContain("ordinary language");
-  });
+  // `acc ask`, scoreAskRoutes, and `acc help me with <words>` were all
+  // removed 2026-05-16 (universal workflow: one entrypoint `acc task`;
+  // substrate decides the lane via dispatch_decider open-ended axes).
+  // Unknown-command behaviour now covers the former routes.
 
   test("unknown command returns exit 1", async () => {
     const orig = console.error;
