@@ -154,7 +154,24 @@ const dispatchTask = async (
         if (typeof t === "string" && t.length > 0 && t !== words) priorTexts.push(t);
       }
     }
-    const cls = classifyOwnerRenderingSignals(words, priorTexts);
+    const replyWords = words.match(/[\p{L}\p{N}_-]+/gu)?.length ?? 0;
+    const commandTokens = words.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^(acc|bun|git|npm|pnpm|yarn|uv|cargo|docker|kubectl)\b/.test(l)).length;
+    const turnPattern = {
+      reply_length_chars: words.length,
+      reply_word_count: replyWords,
+      command_token_count: commandTokens,
+      prose_token_count: Math.max(0, replyWords - commandTokens),
+      prior_turn_count: priorTexts.length,
+    };
+    const ownerInputEnv = await mcpCall("substrate.emit", {
+      kind: "owner_input_received",
+      substrate_origin: "owner",
+      directive_id,
+      task_id,
+      payload: { text: words, directive_text: words, turn_pattern: turnPattern },
+    }).catch(() => null);
+    const ownerInputId = ownerInputEnv?.ok ? (ownerInputEnv.result as { id?: string })?.id : undefined;
+    const cls = classifyOwnerRenderingSignals(words, priorTexts, turnPattern);
     const languageConfidence = cls.language_distribution?.[0]?.confidence ?? cls.confidence;
     if (cls.detected_language) {
       await mcpCall("substrate.emit", {
@@ -167,6 +184,7 @@ const dispatchTask = async (
           confidence: languageConfidence,
           claim: `Detected owner directive language '${cls.detected_language}' from dispatch text.`,
           evidence: cls.evidence,
+          turn_pattern: cls.turn_pattern,
           language_distribution: cls.language_distribution ?? [{ lang: cls.detected_language, confidence: cls.confidence, evidence: "legacy_classifier" }],
         },
       }).catch(() => null);
@@ -187,7 +205,9 @@ const dispatchTask = async (
           confidence: cls.confidence,
           claim: `Rendering signals extracted from directive text: ${summary}. Evidence: ${cls.evidence.join("; ")}.`,
           evidence: cls.evidence,
+          turn_pattern: cls.turn_pattern,
         },
+        context_refs: ownerInputId ? [ownerInputId] : [],
       }).catch(() => null);
     }
   } catch {
