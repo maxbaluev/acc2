@@ -45,12 +45,9 @@ const walkTsFiles = (root: string): string[] => {
  *  §"Test-only event kinds" — these live in test fixtures and never
  *  flow through production emitters, so they intentionally stay out of
  *  the registry. */
-const TEST_ONLY_KINDS = new Set([
-  "watch_test_any",
-  "watch_test_inflight",
-  "watch_test_runwatch",
-  "watch_test_seed",
-  "watch_test_synthetic",
+const TEST_ONLY_KINDS = new Set<string>([
+  // (watch_test_* removed 2026-05-16 with the legacy TUI; see cli/watch.ts
+  // skeleton header. Add new test-only kinds here as fixtures need them.)
 ]);
 
 /** Strings that grep matches as `kind: "<value>"` but are NOT event

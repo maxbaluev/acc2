@@ -66,7 +66,7 @@ const usage = (): string => `acc — v2 thin CLI
   acc daemon stop                 Auth-gated shutdown via admin token.
   acc daemon status               GET /health on the running daemon.
   acc daemon install-service      Write systemd unit (Linux) / launchd plist (macOS).
-  acc watch                       Live TUI subscribing to the daemon's event stream.
+  acc watch                       Skeleton placeholder; legacy TUI removed pending replacement.
   acc admin <sub>                 Operator maintenance (update-opencode, opencode-version, ...).
   acc doctor                      Multi-check readiness report.
 `;
