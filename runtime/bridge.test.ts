@@ -275,6 +275,105 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     }
   }, 10_000);
 
+  test("brain spawn cwd is an isolated tempdir when checkoutIsolation is not passed (defense-in-depth against opencode native filesystem tools)", async () => {
+    const db = openDb(":memory:");
+    let capturedCwd: string | undefined = undefined;
+    let capturedEnv: Record<string, string | undefined> | null = null;
+    const sentinel = {
+      kill: () => {},
+      stdout: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      stderr: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      exited: Promise.resolve(0),
+    };
+    const fakeSpawn = ((_argv: string[], opts: { cwd?: string; env?: Record<string, string | undefined> }) => {
+      capturedCwd = opts.cwd;
+      capturedEnv = opts.env ?? null;
+      return sentinel;
+    }) as unknown as typeof Bun.spawn;
+
+    const tmpConfigDir = mkdtempSync(join(tmpdir(), "acc2-bridge-cwd-test-"));
+    try {
+      await spawnRealOpencode(
+        { prompt: "cwd probe", taskId: newId(), directiveId: newId() },
+        db,
+        {
+          spawnFn: fakeSpawn,
+          mcpServerUrl: "http://127.0.0.1:45678/mcp",
+          configDir: tmpConfigDir,
+          mcpHandshakeWindowMs: 200,
+          timeoutMs: 1_000,
+        },
+      );
+      // Brain cwd MUST NOT equal the daemon's cwd (the source checkout).
+      // That is the structural guarantee: opencode native edit/write/bash
+      // tools, even if the BRAIN_READONLY_PERMISSION policy fails to apply
+      // for any reason, cannot reach the source checkout from the brain's
+      // CWD. Source paths the brain may need to reason about are exposed
+      // via ACC2_CHECKOUT_ISOLATION_ROOT so it can read via substrate.read.
+      expect(capturedCwd).toBeDefined();
+      expect(capturedCwd).not.toBe(process.cwd());
+      expect(capturedCwd!).toContain("acc2-brain-ws-");
+      expect(capturedEnv).not.toBeNull();
+      const env = capturedEnv!;
+      // The source checkout path is still surfaced via env so the brain
+      // can ask MCP to read from it; it just cannot write there itself.
+      expect(env.ACC2_CHECKOUT_ISOLATION_ROOT).toBe(process.cwd());
+      expect(env.ACC2_BRAIN_WORKSPACE).toBe(capturedCwd);
+    } finally {
+      try { rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* swallow */ }
+    }
+  }, 10_000);
+
+  test("brain spawn cwd honors explicit checkoutIsolation.root (workflow-isolated dispatches keep their declared root)", async () => {
+    const db = openDb(":memory:");
+    let capturedCwd: string | undefined = undefined;
+    let capturedEnv: Record<string, string | undefined> | null = null;
+    const sentinel = {
+      kill: () => {},
+      stdout: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      stderr: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      exited: Promise.resolve(0),
+    };
+    const fakeSpawn = ((_argv: string[], opts: { cwd?: string; env?: Record<string, string | undefined> }) => {
+      capturedCwd = opts.cwd;
+      capturedEnv = opts.env ?? null;
+      return sentinel;
+    }) as unknown as typeof Bun.spawn;
+
+    const tmpConfigDir = mkdtempSync(join(tmpdir(), "acc2-bridge-cwd-iso-test-"));
+    const declaredRoot = mkdtempSync(join(tmpdir(), "acc2-declared-root-"));
+    try {
+      await spawnRealOpencode(
+        {
+          prompt: "iso probe",
+          taskId: newId(),
+          directiveId: newId(),
+          checkoutIsolation: { root: declaredRoot, reason: "test_isolation" },
+        },
+        db,
+        {
+          spawnFn: fakeSpawn,
+          mcpServerUrl: "http://127.0.0.1:45678/mcp",
+          configDir: tmpConfigDir,
+          mcpHandshakeWindowMs: 200,
+          timeoutMs: 1_000,
+        },
+      );
+      // Explicit checkoutIsolation MUST be honored verbatim; the ephemeral
+      // workspace path is only the default-when-absent behavior.
+      expect(capturedCwd).toBe(declaredRoot);
+      expect(capturedEnv).not.toBeNull();
+      expect(capturedEnv!.ACC2_CHECKOUT_ISOLATION_ROOT).toBe(declaredRoot);
+      expect(capturedEnv!.ACC2_CHECKOUT_ISOLATION_REASON).toBe("test_isolation");
+      // And the declared root must still exist after the bridge call —
+      // caller owns its lifecycle, so cleanupConfig must not nuke it.
+      expect(existsSync(declaredRoot)).toBe(true);
+    } finally {
+      try { rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* swallow */ }
+      try { rmSync(declaredRoot, { recursive: true, force: true }); } catch { /* swallow */ }
+    }
+  }, 10_000);
+
   // The MCP-preflight test that ran `opencode mcp list` before each
   // dispatch was removed 2026-05-16: it failed for every production
   // dispatch because the parser's expectations didn't match opencode's
