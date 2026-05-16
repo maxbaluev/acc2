@@ -49,12 +49,13 @@ describe("runOwnerPolicy", () => {
     expect(c.err.join("")).toBe("");
   });
 
-  test("`acc owner policy` with no profile prints the empty-profile section", async () => {
+  test("`acc owner policy` with no profile prints the bootstrap-policy section", async () => {
     openDb(process.env.ACC2_DB_PATH!);
     const c = cap(); const code = await runOwnerPolicy(["policy"]); c.restore();
     expect(code).toBe(0);
     expect(c.out.join("")).toContain("## OWNER PROFILE");
-    expect(c.out.join("")).toContain("no owner profile recorded yet");
+    expect(c.out.join("")).toContain("bootstrap_policy: sparse profile");
+    expect(c.out.join("")).toContain("autonomy_score:");
   });
 
   test("`acc owner policy` with seeded profile renders preferred_terms", async () => {
