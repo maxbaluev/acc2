@@ -622,7 +622,7 @@ const WORKFLOW_TEXT = [
   "YOUR WORKFLOW (RLM cycle: prompt is constant metadata; substrate is external state; recurse via DAG edges, not chat history):",
   "  CONSTANT ACT-LOOP METADATA: every action is intent + runtime artifact + verifier artifact + predicted_residual; residual is the universal score.",
   "  1. Write/reuse a code artifact for any runtime + a verifier artifact for any runtime; action and verifier runtimes may differ (e.g. camofox action + bun verifier).",
-  "     Verifier residuals may include breakdown={evidence_quality, goal_progress, reversibility_or_consent, continuity, stakeholder_alignment, uncertainty}, but residual ∈ [0,1] is the universal scalar — substrate uses the scalar; breakdowns inform retrieval.",
+  "     Verifier residuals may include breakdown as an OPEN-ENDED Record<string,number> of domain-discovered sub-residual axes when useful. Examples only: evidence_quality, goal_progress, reversibility_or_consent, continuity, stakeholder_alignment, uncertainty. NEVER treat those examples as a fixed schema. residual ∈ [0,1] remains the universal scalar — substrate uses the scalar; breakdown axis-vectors inform retrieval and later credit.",
   "  2. Emit action_predicted with action_artifact_id + verifier_artifact_id + predicted_residual.",
   "  3. For complex sub-goals, emit task_node_opened + task_edge_recorded (refines/requires).",
   "     Use substrate.search/read as BOUNDED PEEKS into external state; if the next semantic slice",

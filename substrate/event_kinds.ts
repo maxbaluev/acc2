@@ -236,6 +236,10 @@ export const EVENT_KINDS = {
   //
   // Every task's terminal commit MUST be preceded by a task_closure_audited
   // event scoring closure_residual ∈ [0,1] against the ORIGINAL goal text.
+  // When closure has decomposable reliability / quality evidence, payload
+  // SHOULD include open-ended Record<string,number> axis vectors such as
+  // reliability_profile, closure_breakdown, or outcome_dimensions. Axis names
+  // are discovered per goal-domain; examples are not a fixed schema.
   // The brain emits task_closure_audited + zero-or-more lesson_extracted +
   // optional contract_amendment_proposed events before task_committed for
   // the root task of any directive. See prompt_composer.ts WORKFLOW_TEXT

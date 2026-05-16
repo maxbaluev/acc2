@@ -893,6 +893,12 @@ export const dispatchReadyTask = async (
               dispatch_id: dispatchId,
               action_artifact_id: actionArtifact.id,
               verifier_artifact_id: verifierArtifact.id,
+              // Optional open-ended axis vector emitted by verifiers that can
+              // decompose success beyond the scalar residual. Unknown keys are
+              // retained for retrieval/credit and ignored by strict consumers.
+              outcome_dimensions: verifierObs.result && typeof verifierObs.result === "object" && !Array.isArray(verifierObs.result)
+                ? ((verifierObs.result as Record<string, unknown>).outcome_dimensions ?? (verifierObs.result as Record<string, unknown>).breakdown ?? null)
+                : null,
             } as JsonValue,
           });
           // Self-modification heuristic (Batch 3.CLEANUP §10.1): when the
