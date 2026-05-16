@@ -105,6 +105,41 @@ Use Claude Code's native tools as the owner-facing runtime around the substrate,
 
 When signals are sparse, adapt the bootstrap by `observation_count`: 0-turn owners get plain language + one question at a time + first-encounter explanations; growing profiles get shorter explanations on known axes; mature sparse profiles keep defaults only for unknown axes. Questions, HIDL prompts, owner gates, refusals, and error messages are ALL owner-visible rendering surfaces — render them through the same policy filter. Surface autonomous `applied_change_committed` events with commit sha + target + verifier outcome + source proposal id when `code_density` is high; otherwise paraphrase the same audit facts in plain language and keep ids available on request.
 
+## Orchestrator-origin knowledge emission (inline, no brain spawn)
+
+When owner conversation contains a **falsifiable claim about the system itself** (architecture observation, design tradeoff, factual assertion, bug report, structural pattern), emit `knowledge_candidate` INLINE via `substrate.emit` instead of routing to a fresh brain run. The substrate merger (Model D extractor-side) already handles dedup, contradiction-hold, and posterior crediting symmetrically across origins (`brain` / `claude`). Spawning a brain cycle for every owner observation is wasteful — the merger does NOT need brain-stamping to credit Claude-origin knowledge.
+
+The act primitive is universal: orchestrator-origin emissions are just acts where `action_artifact_id` is the conversational surface and `verifier_artifact_id` is the substrate's existing reranker (`cosine × posterior × origin_promotion_view_multiplier`). Origin bias is learned, not declared.
+
+**When to emit `knowledge_candidate` inline** (do this every conversational turn that surfaces one):
+- Owner names a structural pattern (e.g. "we do not need gates, we have verify universal system")
+- Owner reports a bug or anti-pattern (e.g. "system not works")
+- Owner makes a falsifiable design claim (e.g. "brain should be multi-threaded, ant-colony")
+- Owner cites empirical evidence from the codebase
+
+**Emit shape:**
+```ts
+await mcpCall("substrate.emit", {
+  kind: "knowledge_candidate",
+  substrate_origin: "claude",  // explicit origin so merger weighs vs brain symmetrically
+  payload: {
+    claim: "<one-sentence falsifiable assertion derived from owner words>",
+    evidence: ["<owner verbatim>", "<observed file:line if cited>"],
+    applies_to: ["<domain tag>"],
+    confidence_estimate: 0.6,  // moderate — owner observation, not yet verifier-scored
+    source_files: [...],
+    learned_from_owner: "<owner event_id from owner_input_received>"
+  },
+  context_refs: ["<owner_input_received event_id>"]
+});
+```
+
+**Do NOT route to brain for:** factual claims the orchestrator can directly observe (file existence, commit hashes, test results, current architecture). The brain's strength is multi-source synthesis under top-K retrieval; for first-person observations from conversation, brain is overkill.
+
+**DO route to brain for:** strategic synthesis ("audit X for Y"), DAG decomposition, multi-file refactor design, novel pattern proposals. Brain's depth-1 retrieval pulls knowledge the orchestrator doesn't have in context.
+
+**Result:** the merger gets owner-conversation-derived knowledge fast (no minute-long brain cycle), Shapley credit flows symmetrically when the claim is corroborated by future action_scored evidence, and origin posteriors adapt to which side produces better-validated knowledge on which topics. Inline emission is the orchestrator pulling its weight in the two-sided merger — not just consuming brain outputs.
+
 ## The event ledger is the universal language
 
 One SQLite table (`events`), one ordered stream, one source of truth. Every brain emission, runtime observation, owner directive, and Claude milestone is one row. Nothing survives a daemon restart that isn't in the ledger.
