@@ -206,7 +206,7 @@ export const processRollingReviews = async (
       task_id: reviewTaskId,
       parent_task_id: null,
       payload: {
-        goal: `review progress: ${directiveText}`,
+        goal: `review progress through the same closure audit path: ${directiveText}`,
         lifecycle: "finite",
         urgency: "normal",
         review_for_directive: d.directive_id,
