@@ -269,7 +269,34 @@ export const dispatchReadyTask = async (
       } as JsonValue,
     });
 
-    const outcome = await replayRecipe(db, task, match);
+    const replayRunArtifact = deps.runArtifact
+      ? async (replayDb: Database, artifactId: string, inputs: JsonValue) => {
+          const artifact = getArtifact(replayDb, artifactId);
+          if (!artifact) {
+            return { ok: false, result: null, error: "artifact_not_found:" + artifactId };
+          }
+          const observation = await deps.runArtifact!({
+            artifactId: artifact.id,
+            body: artifact.body,
+            declaredSandbox: artifact.declaredSandbox,
+            inputs,
+            emit: (ev) => {
+              emitEvent(replayDb, {
+                ...ev,
+                directive_id: ev.directive_id ?? task.directive_id,
+                task_id: ev.task_id ?? task.id,
+                invoker: ev.invoker ?? "substrate_auto",
+              });
+            },
+          });
+          return {
+            ok: observation.ok,
+            result: (observation.result ?? null) as JsonValue | null,
+            error: observation.error,
+          };
+        }
+      : undefined;
+    const outcome = await replayRecipe(db, task, match, { runArtifact: replayRunArtifact });
     if (outcome.task_committed) {
       emitEvent(db, {
         kind: "brain_dispatch_closed",

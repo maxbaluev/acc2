@@ -99,7 +99,7 @@ describe("formatFollowTerminalSentinel", () => {
       lifecycle_status: "completed",
       terminal_kind: "task_committed",
     });
-    expect(line).toContain("ACC_TASK_TERMINAL");
+    expect(line).toContain("ACC_DISPATCH_RESOLVED");
     expect(line).toContain("status=completed");
     expect(line).toContain("reason=task_committed");
     expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);

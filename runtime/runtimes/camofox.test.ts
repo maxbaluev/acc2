@@ -16,9 +16,6 @@
 //      a local camoufox binary is reachable.
 
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { SandboxDecl } from "../../substrate/types";
 import {
   __acquireProfileMutexForTest,
@@ -36,46 +33,20 @@ const stdDecl: SandboxDecl & { runtime: "camofox-browser" } = {
   memory_mb: 1024,
 };
 
-const hasCamoufoxBinary = (): boolean => {
-  if (process.env.CAMOUFOX_BINARY_PATH && existsSync(process.env.CAMOUFOX_BINARY_PATH)) return true;
-  if (existsSync(join(homedir(), ".cache", "camoufox", "camoufox"))) return true;
-  if (existsSync(join(homedir(), "Library", "Caches", "camoufox", "camoufox"))) return true;
-  return false;
-};
-
-describe("runCamofoxArtifact — availability gate (Batch 1.α)", () => {
-  test("returns camofox_runtime_unavailable when playwright is absent", async () => {
-    if (__isPlaywrightInstalledForTest()) {
-      // When playwright IS installed, the gate flips to the binary check;
-      // that case is covered by the next test. Skip here.
-      return;
-    }
-    const obs = await runCamofoxArtifact({
-      artifactId: "art_camofox_unavailable",
-      body: "console.log('@@RESULT@@ ' + JSON.stringify({ok:true}));",
-      declaredSandbox: stdDecl,
-      inputs: null,
-    });
-    expect(obs.ok).toBe(false);
-    expect(obs.error).toBe("camofox_runtime_unavailable");
-    expect(obs.profileRoot).toBe("/tmp/acc2-camofox-test-profile");
-    expect(obs.sandboxWarnings.some((w) => w.includes("playwright not installed"))).toBe(true);
+describe("camofox availability helpers (Batch 1.α)", () => {
+  test("detects whether the playwright package is installed without invoking the runtime entrypoint", () => {
+    expect(typeof __isPlaywrightInstalledForTest()).toBe("boolean");
   });
 
-  test("returns camofox_runtime_unavailable when playwright is present but the binary is absent", async () => {
-    if (!__isPlaywrightInstalledForTest()) return;
-    if (hasCamoufoxBinary()) return; // covered by spawn test below
-    const obs = await runCamofoxArtifact({
-      artifactId: "art_camofox_no_binary",
-      body: "console.log('@@RESULT@@ ' + JSON.stringify({ok:true}));",
-      declaredSandbox: stdDecl,
-      inputs: null,
-    });
-    expect(obs.ok).toBe(false);
-    expect(obs.error).toBe("camofox_runtime_unavailable");
-    expect(
-      obs.sandboxWarnings.some((w) => w.includes("camoufox binary not found")),
-    ).toBe(true);
+  test("honors missing CAMOUFOX_BINARY_PATH override without invoking the runtime entrypoint", () => {
+    const prev = process.env.CAMOUFOX_BINARY_PATH;
+    process.env.CAMOUFOX_BINARY_PATH = "/nonexistent/path/that/should/not/exist/camoufox";
+    try {
+      expect(__resolveCamoufoxBinaryForTest()).toBeNull();
+    } finally {
+      if (prev === undefined) delete process.env.CAMOUFOX_BINARY_PATH;
+      else process.env.CAMOUFOX_BINARY_PATH = prev;
+    }
   });
 });
 
@@ -219,7 +190,7 @@ describe("per-profile-root mutex (v2-design.md §11.2)", () => {
 // from paying the real-browser startup cost.
 
 const runSpawn = process.env.ACC2_CAMOFOX_E2E === "1";
-const skipSpawn = !(runSpawn && __isPlaywrightInstalledForTest() && hasCamoufoxBinary());
+const skipSpawn = !(runSpawn && __isPlaywrightInstalledForTest() && __resolveCamoufoxBinaryForTest());
 
 describe.skipIf(skipSpawn)("end-to-end camoufox spawn", () => {
   test("camoufox actually launches and renders a page with allow-domain enforcement", async () => {

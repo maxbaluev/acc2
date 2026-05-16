@@ -453,7 +453,7 @@ const resolvedStatusReason = (row: DispatchResolvedLike): string | null =>
 export const formatFollowTerminalSentinel = (row: DispatchResolvedLike): string => {
   const reason = resolvedStatusReason(row);
   const parts = [
-    "ACC_TASK_TERMINAL",
+    "ACC_DISPATCH_RESOLVED",
     `directive=${idPrefix(row.directive_id, 16)}`,
     `root=${idPrefix(row.root_task_id, 16)}`,
     `status=${resolvedLifecycleStatus(row)}`,
