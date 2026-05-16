@@ -1873,7 +1873,7 @@ CREATE VIEW IF NOT EXISTS lesson_apply_candidate_view AS
 // completed, failed, queued_at_cap, zombie, and live.
 const VIEW_DISPATCH_RESOLVED = `
 CREATE VIEW IF NOT EXISTS dispatch_resolved_view AS
-WITH RECURSIVE roots AS (
+WITH RECURSIVE explicit_roots AS (
   SELECT
     e.directive_id,
     e.task_id AS root_task_id,
@@ -1881,6 +1881,35 @@ WITH RECURSIVE roots AS (
   FROM events e
   WHERE e.kind = 'task_node_opened'
     AND (e.parent_task_id IS NULL OR e.parent_task_id = '')
+),
+inferred_roots AS (
+  SELECT
+    e.directive_id,
+    e.task_id AS root_task_id,
+    MIN(e.ts) AS root_opened_ts
+  FROM events e
+  WHERE e.kind IN (
+    'brain_dispatched',
+    'brain_dispatch_closed',
+    'task_committed',
+    'task_failed',
+    'dispatcher_violation',
+    'constitutional_gate_decision'
+  )
+    AND e.task_id IS NOT NULL
+    AND NOT EXISTS (
+      SELECT 1
+      FROM events root
+      WHERE root.kind = 'task_node_opened'
+        AND root.directive_id = e.directive_id
+        AND root.task_id = e.task_id
+    )
+  GROUP BY e.directive_id, e.task_id
+),
+roots AS (
+  SELECT directive_id, root_task_id, root_opened_ts FROM explicit_roots
+  UNION ALL
+  SELECT directive_id, root_task_id, root_opened_ts FROM inferred_roots
 ),
 tree AS (
   SELECT
@@ -2068,7 +2097,7 @@ SELECT
     WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
-         AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) BETWEEN 300001 AND 86400000
+         AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
       THEN 'zombie'
     WHEN cg.latest_cap_gate_at IS NOT NULL
          AND COALESCE(ds.open_dispatch_count, 0) = 0
@@ -2081,7 +2110,7 @@ SELECT
     WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
-         AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) BETWEEN 300001 AND 86400000
+         AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
       THEN 'zombie'
     WHEN cg.latest_cap_gate_at IS NOT NULL
          AND COALESCE(ds.open_dispatch_count, 0) = 0
@@ -2115,7 +2144,7 @@ SELECT
     WHEN term.terminal_kind IS NOT NULL THEN term.terminal_kind
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
-         AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) BETWEEN 300001 AND 86400000
+         AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
       THEN 'open_dispatch_zombie'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0 THEN 'brain_dispatch_open'
     WHEN cg.latest_cap_gate_at IS NOT NULL

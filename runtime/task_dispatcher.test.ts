@@ -129,41 +129,41 @@ describe("task_dispatcher", () => {
     expect(result.violations).toEqual([]);
     expect(result.bridge_result?.ok).toBe(true);
 
-      const actionPredicted = db
-        .query("SELECT COUNT(*) as c FROM events WHERE kind = 'action_predicted' AND task_id = ?")
-        .get(taskId) as { c: number };
-      expect(actionPredicted.c).toBe(1);
+    const actionPredicted = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'action_predicted' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(actionPredicted.c).toBe(1);
 
-      const actionScored = db
-        .query("SELECT residual, payload FROM events WHERE kind = 'action_scored' AND task_id = ?")
-        .get(taskId) as { residual: number; payload: string } | null;
-      expect(actionScored).not.toBeNull();
-      expect(actionScored!.residual).toBe(0);
-      const scoredPayload = JSON.parse(actionScored!.payload) as Record<string, any>;
-      expect(scoredPayload.routing_axes.one_shot_confidence).toBeGreaterThanOrEqual(0);
-      expect(scoredPayload.route_scores.opencode_brain).toBeGreaterThanOrEqual(0);
-      expect(scoredPayload.dispatch_verifier_evidence.target_count).toBeGreaterThanOrEqual(0);
+    const actionScored = db
+      .query("SELECT residual, payload FROM events WHERE kind = 'action_scored' AND task_id = ?")
+      .get(taskId) as { residual: number; payload: string } | null;
+    expect(actionScored).not.toBeNull();
+    expect(actionScored!.residual).toBe(0);
+    const scoredPayload = JSON.parse(actionScored!.payload) as Record<string, any>;
+    expect(scoredPayload.routing_axes.one_shot_confidence).toBeGreaterThanOrEqual(0);
+    expect(scoredPayload.route_scores.opencode_brain).toBeGreaterThanOrEqual(0);
+    expect(scoredPayload.dispatch_verifier_evidence.target_count).toBeGreaterThanOrEqual(0);
 
-      const dispatchDecided = db
-        .query("SELECT payload FROM events WHERE kind = 'dispatch_decided' AND task_id = ?")
-        .get(taskId) as { payload: string } | null;
-      expect(dispatchDecided).not.toBeNull();
-      const dispatchPayload = JSON.parse(dispatchDecided!.payload) as Record<string, any>;
-      expect(dispatchPayload.routing_axes.one_shot_confidence).toBeGreaterThanOrEqual(0);
-      expect(dispatchPayload.routing_axes.information_gap).toBeGreaterThanOrEqual(0);
-      expect(dispatchPayload.routing_axes.reversibility).toBeGreaterThanOrEqual(0);
-      expect(dispatchPayload.routing_axes.owner_control_need).toBeGreaterThanOrEqual(0);
-      expect(dispatchPayload.routing_axes.decomposition_value).toBeGreaterThanOrEqual(0);
-      expect(dispatchPayload.routing_axes.cost_pressure).toBeGreaterThanOrEqual(0);
-      expect(dispatchPayload.routing_axes.time_sensitivity).toBeGreaterThanOrEqual(0);
-      expect(dispatchPayload.route_scores.opencode_brain).toBeGreaterThanOrEqual(0);
-      expect(dispatchPayload.verifier_evidence.target_count).toBeGreaterThanOrEqual(0);
+    const dispatchDecided = db
+      .query("SELECT payload FROM events WHERE kind = 'dispatch_decided' AND task_id = ?")
+      .get(taskId) as { payload: string } | null;
+    expect(dispatchDecided).not.toBeNull();
+    const dispatchPayload = JSON.parse(dispatchDecided!.payload) as Record<string, any>;
+    expect(dispatchPayload.routing_axes.one_shot_confidence).toBeGreaterThanOrEqual(0);
+    expect(dispatchPayload.routing_axes.information_gap).toBeGreaterThanOrEqual(0);
+    expect(dispatchPayload.routing_axes.reversibility).toBeGreaterThanOrEqual(0);
+    expect(dispatchPayload.routing_axes.owner_control_need).toBeGreaterThanOrEqual(0);
+    expect(dispatchPayload.routing_axes.decomposition_value).toBeGreaterThanOrEqual(0);
+    expect(dispatchPayload.routing_axes.cost_pressure).toBeGreaterThanOrEqual(0);
+    expect(dispatchPayload.routing_axes.time_sensitivity).toBeGreaterThanOrEqual(0);
+    expect(dispatchPayload.route_scores.opencode_brain).toBeGreaterThanOrEqual(0);
+    expect(dispatchPayload.verifier_evidence.target_count).toBeGreaterThanOrEqual(0);
 
-      const taskCommitted = db
-        .query("SELECT residual FROM events WHERE kind = 'task_committed' AND task_id = ?")
-        .get(taskId) as { residual: number } | null;
-      expect(taskCommitted).not.toBeNull();
-      expect(taskCommitted!.residual).toBe(0);
+    const taskCommitted = db
+      .query("SELECT residual FROM events WHERE kind = 'task_committed' AND task_id = ?")
+      .get(taskId) as { residual: number } | null;
+    expect(taskCommitted).not.toBeNull();
+    expect(taskCommitted!.residual).toBe(0);
 
     const closed = db
       .query("SELECT COUNT(*) as c FROM events WHERE kind = 'brain_dispatch_closed' AND task_id = ?")
@@ -302,52 +302,46 @@ describe("task_dispatcher", () => {
 
   test("Phase H: action_scored triggers credit pipeline → code_artifact_score_updated events fire", async () => {
     const db = openDb(":memory:");
-    const tempDir = mkdtempSync(join(tmpdir(), "acc2-disp-credit-"));
-    writeFileSync(join(tempDir, "a.txt"), "// TODO one", "utf-8");
+    const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
+    const ready = readyTasks(db, directiveId);
+    const task = ready[0]!;
+    const act = inMemoryAct({ actionResult: { result: { count: 1 } }, verifierResidual: 0 });
 
-    try {
-      const { directiveId, taskId } = await openFixtureDCountTodos(db, tempDir);
-      const ready = readyTasks(db, directiveId);
-      const task = ready[0]!;
+    const result = await dispatchReadyTask(db, task, act);
+    expect(result.violations).toEqual([]);
 
-      const result = await dispatchReadyTask(db, task, { fixtureTargetPath: tempDir });
-      expect(result.violations).toEqual([]);
+    // Credit pipeline emits at least 2 code_artifact_score_updated events
+    // (action artifact + verifier artifact). Each one is keyed to the
+    // scored event id in its payload.
+    const updated = db
+      .query(
+        "SELECT COUNT(*) as c FROM events WHERE kind = 'code_artifact_score_updated' AND task_id = ?",
+      )
+      .get(taskId) as { c: number };
+    expect(updated.c).toBeGreaterThanOrEqual(2);
 
-      // Credit pipeline emits at least 2 code_artifact_score_updated events
-      // (action artifact + verifier artifact). Each one is keyed to the
-      // scored event id in its payload.
-      const updated = db
-        .query(
-          "SELECT COUNT(*) as c FROM events WHERE kind = 'code_artifact_score_updated' AND task_id = ?",
-        )
-        .get(taskId) as { c: number };
-      expect(updated.c).toBeGreaterThanOrEqual(2);
-
-      // The dispatcher routes through distributeCredit — not the legacy
-      // applyResidualOutcome path. We assert the credit-pipeline contract:
-      // for each action_scored on this task, at least one
-      // code_artifact_score_updated cites the scored event id in its
-      // payload.
-      const scored = db
-        .query(
-          "SELECT id FROM events WHERE kind = 'action_scored' AND task_id = ?",
-        )
-        .get(taskId) as { id: string };
-      const updates = db
-        .query(
-          "SELECT payload FROM events WHERE kind = 'code_artifact_score_updated' AND task_id = ?",
-        )
-        .all(taskId) as Array<{ payload: string }>;
-      const linked = updates.find((r) => {
-        try {
-          return (JSON.parse(r.payload) as { scored_event_id?: string }).scored_event_id === scored.id;
-        } catch { return false; }
-      });
-      expect(linked).toBeTruthy();
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  }, 60_000);
+    // The dispatcher routes through distributeCredit — not the legacy
+    // applyResidualOutcome path. We assert the credit-pipeline contract:
+    // for each action_scored on this task, at least one
+    // code_artifact_score_updated cites the scored event id in its
+    // payload.
+    const scored = db
+      .query(
+        "SELECT id FROM events WHERE kind = 'action_scored' AND task_id = ?",
+      )
+      .get(taskId) as { id: string };
+    const updates = db
+      .query(
+        "SELECT payload FROM events WHERE kind = 'code_artifact_score_updated' AND task_id = ?",
+      )
+      .all(taskId) as Array<{ payload: string }>;
+    const linked = updates.find((r) => {
+      try {
+        return (JSON.parse(r.payload) as { scored_event_id?: string }).scored_event_id === scored.id;
+      } catch { return false; }
+    });
+    expect(linked).toBeTruthy();
+  });
 
   test("Phase J: substrate_replay route commits without calling the bridge", async () => {
     const db = openDb(":memory:");
@@ -463,97 +457,22 @@ describe("task_dispatcher", () => {
     // walkthrough into the event stream so the substrate can see when a
     // brain-authored dispatch mutated the v2 source tree itself.
     const db = openDb(":memory:");
-    const { admitArtifact } = await import("./artifact_admission");
     const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
     const ready = readyTasks(db, directiveId);
     const task = ready[0]!;
-
-    // Custom bridge: admit an action whose observation prints
-    // `modified_paths` (a string array containing an acc2-relative path) plus
-    // a permissive verifier (residual=0 always). Both artifacts are bun.
-    const customBridge = async (
-      req: { directiveId: string; taskId: string; prompt: string },
-      bridgeDb: typeof db,
-    ): Promise<{ ok: true; final_response: string; usage: { tokens: number }; emitted_event_ids: string[] }> => {
-      const ACTION_BODY = `
-        const paths = [
-          "/home/maxbaluev/bos2/system/acc2/runtime/task_dispatcher.ts",
-          "/home/maxbaluev/bos2/some/unrelated/file.ts",
-        ];
-        // Use the wrapped convention (matches fixture_d_count_todos shape) so
-        // the dispatcher's heuristic exercises the result.modified_paths path.
-        process.stdout.write("@@RESULT@@ " + JSON.stringify({ result: { modified_paths: paths } }) + "\\n");
-      `;
-      const VERIFIER_BODY = `process.stdout.write("@@RESULT@@ " + JSON.stringify({ residual: 0 }) + "\\n");`;
-      const emit = (ev: { directive_id?: string; task_id?: string; invoker?: string; [k: string]: unknown }) => {
-        emitEvent(bridgeDb, {
-          ...ev as Parameters<typeof emitEvent>[1],
-          directive_id: (ev.directive_id as string) ?? req.directiveId,
-          task_id: (ev.task_id as string) ?? req.taskId,
-          invoker: (ev.invoker as Parameters<typeof emitEvent>[1]["invoker"]) ?? "opencode",
-        });
-      };
-      const sandbox = {
-        runtime: "bun" as const,
-        fs_read: ["**/*"],
-        fs_write: [],
-        net_allow: [],
-        proc_allow: [],
-        substrate_access: "none" as const,
-        cpu_ms: 5000,
-        wall_ms: 5000,
-        memory_mb: 128,
-      };
-      const action = await admitArtifact(
-        bridgeDb,
-        {
-          runtime: "bun",
-          body: ACTION_BODY,
-          declaredSandbox: sandbox,
-          fixtureInput: null,
-          fixtureExpectedResidualBelow: 1.1,
-          name: "self_mod_action_fixture",
+    const act = inMemoryAct({
+      actionResult: {
+        result: {
+          modified_paths: [
+            "/home/maxbaluev/bos2/system/acc2/runtime/task_dispatcher.ts",
+            "/home/maxbaluev/bos2/some/unrelated/file.ts",
+          ],
         },
-        emit,
-      );
-      if (!action.ok) throw new Error("admit failed: " + action.reason);
-      const verifier = await admitArtifact(
-        bridgeDb,
-        {
-          runtime: "bun",
-          body: VERIFIER_BODY,
-          declaredSandbox: sandbox,
-          fixtureInput: { result: { modified_paths: [] } },
-          fixtureExpectedResidualBelow: 1.1,
-          name: "self_mod_verifier_fixture",
-        },
-        emit,
-      );
-      if (!verifier.ok) throw new Error("admit failed: " + verifier.reason);
-      emitEvent(bridgeDb, {
-        kind: "action_predicted",
-        substrate_origin: "opencode",
-        directive_id: req.directiveId,
-        task_id: req.taskId,
-        action_artifact_id: action.artifactId,
-        verifier_artifact_id: verifier.artifactId,
-        predicted_residual: 0.05,
-        payload: { intent: "self-modification fixture" },
-        invoker: "opencode",
-      });
-      return {
-        ok: true,
-        final_response: "self-mod fixture",
-        usage: { tokens: 0 },
-        emitted_event_ids: [],
-      };
-    };
-
-    const result = await dispatchReadyTask(db, task, {
-      bridge: customBridge as Parameters<typeof dispatchReadyTask>[2] extends infer D
-        ? D extends { bridge?: infer B } ? B : never
-        : never,
+      },
+      verifierResidual: 0,
     });
+
+    const result = await dispatchReadyTask(db, task, act);
     expect(result.violations).toEqual([]);
     const committed = db
       .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_committed' AND task_id = ?")
@@ -578,57 +497,15 @@ describe("task_dispatcher", () => {
 
   test("Batch 3.CLEANUP: self_modification_recorded does NOT fire when modified_paths are all outside acc2 root", async () => {
     const db = openDb(":memory:");
-    const { admitArtifact } = await import("./artifact_admission");
     const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
     const ready = readyTasks(db, directiveId);
     const task = ready[0]!;
-
-    const customBridge = async (
-      req: { directiveId: string; taskId: string; prompt: string },
-      bridgeDb: typeof db,
-    ): Promise<{ ok: true; final_response: string; usage: { tokens: number }; emitted_event_ids: string[] }> => {
-      const ACTION_BODY = `
-        process.stdout.write("@@RESULT@@ " + JSON.stringify({ result: { modified_paths: ["/tmp/foo.txt", "/var/log/bar"] } }) + "\\n");
-      `;
-      const VERIFIER_BODY = `process.stdout.write("@@RESULT@@ " + JSON.stringify({ residual: 0 }) + "\\n");`;
-      const emit = (ev: Record<string, unknown>) => {
-        emitEvent(bridgeDb, {
-          ...ev as Parameters<typeof emitEvent>[1],
-          directive_id: (ev.directive_id as string) ?? req.directiveId,
-          task_id: (ev.task_id as string) ?? req.taskId,
-          invoker: (ev.invoker as Parameters<typeof emitEvent>[1]["invoker"]) ?? "opencode",
-        });
-      };
-      const sandbox = {
-        runtime: "bun" as const,
-        fs_read: ["**/*"], fs_write: [], net_allow: [], proc_allow: [],
-        substrate_access: "none" as const,
-        cpu_ms: 5000, wall_ms: 5000, memory_mb: 128,
-      };
-      const action = await admitArtifact(bridgeDb, {
-        runtime: "bun", body: ACTION_BODY, declaredSandbox: sandbox,
-        fixtureInput: null, fixtureExpectedResidualBelow: 1.1,
-        name: "non_self_mod_action_fixture",
-      }, emit);
-      const verifier = await admitArtifact(bridgeDb, {
-        runtime: "bun", body: VERIFIER_BODY, declaredSandbox: sandbox,
-        fixtureInput: { result: {} }, fixtureExpectedResidualBelow: 1.1,
-        name: "non_self_mod_verifier_fixture",
-      }, emit);
-      if (!action.ok || !verifier.ok) throw new Error("admit failed");
-      emitEvent(bridgeDb, {
-        kind: "action_predicted", substrate_origin: "opencode",
-        directive_id: req.directiveId, task_id: req.taskId,
-        action_artifact_id: action.artifactId, verifier_artifact_id: verifier.artifactId,
-        predicted_residual: 0.05, payload: { intent: "non-acc2 modify" }, invoker: "opencode",
-      });
-      return { ok: true, final_response: "x", usage: { tokens: 0 }, emitted_event_ids: [] };
-    };
-    await dispatchReadyTask(db, task, {
-      bridge: customBridge as Parameters<typeof dispatchReadyTask>[2] extends infer D
-        ? D extends { bridge?: infer B } ? B : never
-        : never,
+    const act = inMemoryAct({
+      actionResult: { result: { modified_paths: ["/tmp/foo.txt", "/var/log/bar"] } },
+      verifierResidual: 0,
     });
+
+    await dispatchReadyTask(db, task, act);
     const selfMod = db
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'self_modification_recorded' AND task_id = ?")
       .get(taskId) as { c: number };

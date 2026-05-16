@@ -301,7 +301,7 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     for (const [directive_id, task_id] of [["d_live", "t_live"], ["d_done", "t_done"], ["d_fail", "t_fail"], ["d_cap", "t_cap"], ["d_zombie", "t_zombie"]]) {
       insertEvent(db, { kind: "task_node_opened", directive_id, task_id });
     }
-    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_live", task_id: "t_live", payload: { dispatch_id: "disp_live" } });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_live", task_id: "t_live", ts: nowIso(), payload: { dispatch_id: "disp_live" } });
     insertEvent(db, { kind: "brain_dispatched", directive_id: "d_done", task_id: "t_done", payload: { dispatch_id: "disp_done" } });
     insertEvent(db, { kind: "brain_dispatch_closed", directive_id: "d_done", task_id: "t_done", payload: { dispatch_id: "disp_done" } });
     insertEvent(db, { kind: "task_committed", directive_id: "d_done", task_id: "t_done" });
@@ -333,6 +333,17 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(row?.latest_event_id).toBe(capEventId);
     expect(row?.cap).toBe(5);
     expect(row?.in_flight_brain).toBe(5);
+  });
+
+  test("infers a root row from dispatch signals when task_node_opened is absent", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dispatchEventId = insertEvent(db, { kind: "brain_dispatched", directive_id: "d_inferred", task_id: "t_inferred", ts: nowIso(), payload: { dispatch_id: "disp_inferred" } });
+
+    const [row] = dispatchResolved(db, { directiveId: "d_inferred", rootTaskId: "t_inferred" });
+    expect(row?.lifecycle_status).toBe("live");
+    expect(row?.dispatch_event_id).toBe(dispatchEventId);
+    expect(row?.latest_event_id).toBe(dispatchEventId);
   });
 
   test("groups child dispatch events under the root task id and supports filters", () => {
