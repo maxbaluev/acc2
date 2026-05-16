@@ -25,31 +25,26 @@ export interface ClosureDeliverableResult {
   uncovered_leaves: string[]; // task_ids whose goal verb implied a deliverable but none was emitted
 }
 
-// Same imperative-verb set as runtime/proposal_grounding.ts so the
-// grounding gate (admission) and the closure gate (post-trajectory)
-// use one predicate. Keep these two lists in lockstep.
-const DELIVERABLE_VERBS = [
-  "expose",
-  "add",
-  "wire",
-  "implement",
-  "build",
-  "create",
-  "propose",
-  "emit",
-  "audit",
-  "diagnose",
-  "measure",
-  "rank",
-];
-
 const parsePayload = (raw: string): Record<string, JsonValue> => {
   try { return JSON.parse(raw ?? "{}") as Record<string, JsonValue>; } catch { return {}; }
 };
 
-const isDeliverableGoal = (goal: string): boolean => {
-  const lower = goal.toLowerCase();
-  return DELIVERABLE_VERBS.some((v) => new RegExp(`\\b${v}\\b`).test(lower));
+// Universal-workflow replacement (brain amendment WDENAD6W4X62S53EQNVS2ZB4VR
+// from regex anti-pattern audit, 2026-05-16): a task is "deliverable-shaped"
+// when its task_node_opened payload DECLARES it — not when its English goal
+// text matches a hand-rolled keyword regex. Three structural signals:
+//   - payload.requires_deliverable === true
+//   - payload.deliverable_required === true (alternate spelling for older recipes)
+//   - payload.expected_outputs is a non-empty array
+// Brain-authored task_node_opened payloads now set these explicitly; the
+// closure verifier doesn't have to guess from natural language. (The
+// DELIVERABLE_VERBS English-keyword regex + isDeliverableGoal(goal) function
+// was removed in the same commit.)
+const taskRequiresDeliverable = (payload: Record<string, JsonValue>): boolean => {
+  if (payload.requires_deliverable === true) return true;
+  if (payload.deliverable_required === true) return true;
+  const expected = payload.expected_outputs;
+  return Array.isArray(expected) && expected.length > 0;
 };
 
 // Walk the refines DAG starting from rootTaskId. Mirrors
@@ -119,8 +114,7 @@ export const checkClosureDeliverables = (
     const kids = children.get(n.task_id) ?? [];
     if (kids.length > 0) continue;
 
-    const goal = (n.payload.goal as string) ?? "";
-    if (!isDeliverableGoal(goal)) continue;
+    if (!taskRequiresDeliverable(n.payload)) continue;
 
     const has = artifacts.some((a) => a.task_id === n.task_id)
       || amendments.some((a) => a.task_id === n.task_id)

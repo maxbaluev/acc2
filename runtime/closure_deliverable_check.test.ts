@@ -16,8 +16,23 @@ const D = "d_test", ROOT = "t_root";
 const seedRoot = (db: ReturnType<typeof openDb>, goal = "audit the substrate") =>
   emitEvent(db, { kind: "task_node_opened", directive_id: D, task_id: ROOT, payload: { goal } });
 
-const seedLeaf = (db: ReturnType<typeof openDb>, taskId: string, goal: string, parent: string = ROOT) => {
-  emitEvent(db, { kind: "task_node_opened", directive_id: D, task_id: taskId, payload: { goal } });
+// Universal-workflow signal (brain amendment WDENAD6W, 2026-05-16): the
+// closure verifier now reads `requires_deliverable` from the payload
+// instead of guessing from English verb tokens in `goal`. Tests pass
+// requiresDeliverable=true to signal a deliverable-shaped leaf.
+const seedLeaf = (
+  db: ReturnType<typeof openDb>,
+  taskId: string,
+  goal: string,
+  parent: string = ROOT,
+  requiresDeliverable = false,
+) => {
+  emitEvent(db, {
+    kind: "task_node_opened",
+    directive_id: D,
+    task_id: taskId,
+    payload: requiresDeliverable ? { goal, requires_deliverable: true } : { goal },
+  });
   emitEvent(db, { kind: "task_edge_recorded", directive_id: D, task_id: taskId, payload: { from_task: parent, to_task: taskId, kind: "refines" } });
 };
 
@@ -28,43 +43,41 @@ describe("checkClosureDeliverables", () => {
     expect(checkClosureDeliverables(db, ROOT)).toEqual({ ok: true, uncovered_leaves: [] });
   });
 
-  test("leaf with deliverable verb AND code_artifact_candidate emitted → ok=true", () => {
+  test("deliverable-declared leaf AND code_artifact_candidate emitted → ok=true", () => {
     const db = openDb(":memory:");
     seedRoot(db);
     const leaf = "t_leaf_ok";
-    seedLeaf(db, leaf, "implement the growth-report renderer");
+    seedLeaf(db, leaf, "implement the growth-report renderer", ROOT, true);
     emitEvent(db, { kind: "code_artifact_candidate", directive_id: D, task_id: leaf, payload: { runtime: "bun", body: "/* x */" } });
     expect(checkClosureDeliverables(db, ROOT)).toEqual({ ok: true, uncovered_leaves: [] });
   });
 
-  test("leaf with deliverable verb but NOTHING emitted → ok=false, uncovered=[leaf]", () => {
+  test("deliverable-declared leaf but NOTHING emitted → ok=false, uncovered=[leaf]", () => {
     const db = openDb(":memory:");
     seedRoot(db);
     const leaf = "t_leaf_empty";
-    // Mirrors the B3 symptom from dispatch CBKDWYRN: "expose a concise growth report..."
-    seedLeaf(db, leaf, "expose a concise growth report for the operator");
+    seedLeaf(db, leaf, "expose a concise growth report for the operator", ROOT, true);
     const r = checkClosureDeliverables(db, ROOT);
     expect(r.ok).toBe(false);
     expect(r.uncovered_leaves).toContain(leaf);
   });
 
-  test("leaf with NON-deliverable verb (research) → ok=true (not checked)", () => {
+  test("leaf WITHOUT requires_deliverable → ok=true (not checked)", () => {
     const db = openDb(":memory:");
     seedRoot(db);
     const leaf = "t_leaf_research";
     seedLeaf(db, leaf, "research the failure modes in the embedder backlog");
-    // No artifact emitted, but the verb is non-imperative — closure ignores it.
+    // No artifact emitted; payload doesn't declare requires_deliverable → ignored.
     expect(checkClosureDeliverables(db, ROOT)).toEqual({ ok: true, uncovered_leaves: [] });
   });
 
-  test("structural (non-leaf) deliverable task is exempt — children cover it", () => {
+  test("structural (non-leaf) task with children is exempt — children cover it", () => {
     const db = openDb(":memory:");
     seedRoot(db);
-    // Parent has deliverable verb but children exist — children are the deliverable.
     const parent = "t_parent_struct";
-    seedLeaf(db, parent, "implement the closure verifier surface");
+    seedLeaf(db, parent, "implement the closure verifier surface", ROOT, true);
     const child = "t_child_leaf";
-    seedLeaf(db, child, "implement the residual-blend function", parent);
+    seedLeaf(db, child, "implement the residual-blend function", parent, true);
     emitEvent(db, { kind: "code_artifact_candidate", directive_id: D, task_id: child, payload: { runtime: "bun", body: "/* y */" } });
     // Parent unchecked (has child); child has artifact → ok.
     expect(checkClosureDeliverables(db, ROOT)).toEqual({ ok: true, uncovered_leaves: [] });
@@ -74,7 +87,7 @@ describe("checkClosureDeliverables", () => {
     const db = openDb(":memory:");
     seedRoot(db);
     const leaf = "t_leaf_amend";
-    seedLeaf(db, leaf, "propose a contract drift fix for closure auditing");
+    seedLeaf(db, leaf, "propose a contract drift fix for closure auditing", ROOT, true);
     emitEvent(db, { kind: "contract_amendment_proposed", directive_id: D, task_id: leaf, payload: { proposed_behavior: "x" } });
     expect(checkClosureDeliverables(db, ROOT).ok).toBe(true);
   });
@@ -83,7 +96,7 @@ describe("checkClosureDeliverables", () => {
     const db = openDb(":memory:");
     seedRoot(db);
     const leaf = "t_leaf_lesson";
-    seedLeaf(db, leaf, "emit a sandbox-gap lesson for the worker queue");
+    seedLeaf(db, leaf, "emit a sandbox-gap lesson for the worker queue", ROOT, true);
     emitEvent(db, { kind: "lesson_extracted", directive_id: D, task_id: leaf, payload: { lesson_kind: "sandbox_gap", proposed_action: "loosen pypi allow_packages" } });
     expect(checkClosureDeliverables(db, ROOT).ok).toBe(true);
   });
@@ -92,7 +105,7 @@ describe("checkClosureDeliverables", () => {
     const db = openDb(":memory:");
     seedRoot(db);
     const leaf = "t_leaf_lesson_empty";
-    seedLeaf(db, leaf, "emit a finding about the planner");
+    seedLeaf(db, leaf, "emit a finding about the planner", ROOT, true);
     emitEvent(db, { kind: "lesson_extracted", directive_id: D, task_id: leaf, payload: { lesson_kind: "retrieval_gap" } }); // no proposed_action
     const r = checkClosureDeliverables(db, ROOT);
     expect(r.ok).toBe(false);
