@@ -1659,7 +1659,7 @@ export const maybePromoteOwnerProfile = (
   // avoided_terms, hot_topics, things_to_never_do) are also replace —
   // the producers (vocabulary extractor, brain emit) always send the
   // FULL current list, so replace is correct + cheap.
-  const ADDITIVE_RECORD_FIELDS = new Set(["rendering_signals", "exposed_concepts"]);
+  const ADDITIVE_RECORD_FIELDS = new Set(["rendering_signals", "exposed_concepts", "understood_concepts", "declined_concepts"]);
   const latest = readLatestOwnerProfile(db);
   const merged: Record<string, unknown> = { ...latest };
   if (ADDITIVE_RECORD_FIELDS.has(field) && value && typeof value === "object" && !Array.isArray(value)) {
