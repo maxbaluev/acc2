@@ -18,6 +18,7 @@ import {
   promotedKnowledge,
   readyTasks,
   recipeRegistry,
+  recipesLatestView,
   rollingReviewDue,
   runViews,
   taskGraphFor,
@@ -637,6 +638,106 @@ describe("operator registry views", () => {
     expect(shapeA!.confidence).toBe(0.6);
     expect(shapeA!.status).toBe("inline_post_commit_bump");
   });
+
+  test("recipesLatestView returns an empty array on an empty ledger", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    const rows = recipesLatestView(db);
+    expect(rows).toEqual([]);
+  });
+
+  test("recipesLatestView projects one row per distinct (goal_shape, topology_signature) pair", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    insertEvent(db, {
+      kind: "recipe_extracted",
+      directive_id: "d_a",
+      task_id: "t_a",
+      payload: {
+        goal_shape: "shape_a",
+        topology_signature: "topo_1",
+        confidence: 0.5,
+        trajectory: [],
+      },
+      ts: "2026-01-01T00:00:01.000Z",
+    });
+    insertEvent(db, {
+      kind: "recipe_extracted",
+      directive_id: "d_b",
+      task_id: "t_b",
+      payload: {
+        goal_shape: "shape_b",
+        topology_signature: "topo_2",
+        confidence: 0.6,
+        trajectory: [],
+      },
+      ts: "2026-01-01T00:00:02.000Z",
+    });
+    insertEvent(db, {
+      kind: "recipe_extracted",
+      directive_id: "d_c",
+      task_id: "t_c",
+      payload: {
+        goal_shape: "shape_c",
+        topology_signature: "topo_3",
+        confidence: 0.7,
+        trajectory: [],
+      },
+      ts: "2026-01-01T00:00:03.000Z",
+    });
+
+    const rows = recipesLatestView(db);
+    expect(rows.length).toBe(3);
+    const keys = rows.map((r) => `${r.goal_shape}|${r.topology_signature}`).sort();
+    expect(keys).toEqual([
+      "shape_a|topo_1",
+      "shape_b|topo_2",
+      "shape_c|topo_3",
+    ]);
+    const shapeC = rows.find((r) => r.goal_shape === "shape_c");
+    expect(shapeC!.confidence).toBe(0.7);
+    expect(shapeC!.payload.goal_shape).toBe("shape_c");
+  });
+
+  test("recipesLatestView picks the highest-confidence row per key and drops the rest", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    const lowerConfId = insertEvent(db, {
+      kind: "recipe_extracted",
+      directive_id: "d_x",
+      task_id: "t_x",
+      payload: {
+        goal_shape: "shape_x",
+        topology_signature: "topo_x",
+        confidence: 0.4,
+        trajectory: [],
+      },
+      ts: "2026-01-01T00:00:01.000Z",
+    });
+    const higherConfId = insertEvent(db, {
+      kind: "recipe_extracted",
+      directive_id: "d_x",
+      task_id: "t_x",
+      payload: {
+        goal_shape: "shape_x",
+        topology_signature: "topo_x",
+        confidence: 0.8,
+        trajectory: [{ step_kind: "action_predicted" }],
+      },
+      ts: "2026-01-01T00:00:02.000Z",
+    });
+
+    const rows = recipesLatestView(db);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.id).toBe(higherConfId);
+    expect(rows[0]!.confidence).toBe(0.8);
+    // Lower-confidence row is dropped from the projection — confirm it's
+    // gone, not merely deprioritised.
+    expect(rows.find((r) => r.id === lowerConfId)).toBeUndefined();
+  });
 });
 
 describe("lesson implementer flywheel views", () => {
@@ -775,7 +876,8 @@ describe("lesson implementer flywheel views", () => {
     expect(byDirective.get("d_lesson_runtime")!.apply_candidate).toMatchObject({
       source_kind: "lesson_extracted",
       lesson_kind: "verifier_gap",
-      target: "runtime/verifier.ts",
+      target: "repo:runtime/verifier.ts",
+      target_resource: "repo:runtime/verifier.ts",
       anchor: "gate",
       diff: "@@",
     });

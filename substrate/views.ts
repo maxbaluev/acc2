@@ -122,8 +122,8 @@ CREATE VIEW IF NOT EXISTS failure_view AS
 // score DESC. This is what retrieval and the prompt composer read.
 // Brain dataflow audit bxdhdkm9e #3 (2026-05-15): the registry view now
 // exposes the provenance/intent columns the brain emits on
-// code_artifact_candidate (intent, summary, target_files, source candidate
-// id, owner_gate_verdict). Pre-fix the admission path persisted these
+// code_artifact_candidate (intent, summary, target_files /
+// target_resources, source candidate id, owner_gate_verdict). Pre-fix the admission path persisted these
 // fields on the events ledger but the view dropped them — the operator
 // could not tell WHY an artifact existed or WHICH owner gate (if any)
 // approved it.
@@ -135,7 +135,7 @@ CREATE VIEW IF NOT EXISTS code_artifact_registry_view AS
     posterior_alpha, posterior_beta, score, confidence,
     recent_residual_mean, recent_kill_count, status, name,
     fixture_input, fixture_expected_residual,
-    intent, summary, target_files, source_candidate_id, owner_gate_verdict,
+    intent, summary, target_files, target_resources, source_candidate_id, owner_gate_verdict,
     created_at, updated_at
   FROM code_artifact
   WHERE status IN ('admitted', 'promoted')
@@ -721,6 +721,50 @@ CREATE VIEW IF NOT EXISTS recipe_registry_view AS
   );
 `;
 
+// recipes_latest_view — materialized recipe matcher index keyed by
+// (goal_shape, topology_signature). Where recipe_registry_view picks the
+// freshest row per key, this view picks the HIGHEST-CONFIDENCE row per key
+// (ties broken by ts DESC, rowid DESC). It exists so runtime/recipe_replay.ts
+// can do an O(1) keyed lookup at dispatch time instead of a full linear scan
+// over recipe_extracted history. Closes the fast-axis gap from brain audit
+// QQEHAW97GS0AX7TEQ717Y3P174 (2026-05-15).
+const VIEW_RECIPES_LATEST = `
+CREATE VIEW IF NOT EXISTS recipes_latest_view AS
+  WITH recipes AS (
+    SELECT
+      e.rowid                                                        AS event_rowid,
+      e.id                                                           AS id,
+      e.ts                                                           AS ts,
+      CAST(COALESCE(json_extract(e.payload, '$.confidence'), 0) AS REAL) AS confidence,
+      json_extract(e.payload, '$.goal_shape')                        AS goal_shape,
+      json_extract(e.payload, '$.topology_signature')                AS topology_signature,
+      e.payload                                                      AS payload
+    FROM events e
+    WHERE e.kind = 'recipe_extracted'
+  )
+  SELECT
+    id,
+    ts,
+    confidence,
+    goal_shape,
+    topology_signature,
+    payload
+  FROM recipes r
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM recipes better
+    -- Same NULL-preserving key match as recipe_registry_view: NULL matches
+    -- NULL exactly, '' matches '' exactly, never crosswise.
+    WHERE ((better.goal_shape = r.goal_shape) OR (better.goal_shape IS NULL AND r.goal_shape IS NULL))
+      AND ((better.topology_signature = r.topology_signature) OR (better.topology_signature IS NULL AND r.topology_signature IS NULL))
+      AND (
+        better.confidence > r.confidence
+        OR (better.confidence = r.confidence AND better.ts > r.ts)
+        OR (better.confidence = r.confidence AND better.ts = r.ts AND better.event_rowid > r.event_rowid)
+      )
+  );
+`;
+
 // lesson_implementer_queue_view — derived inbox for the lesson-implementer
 // flywheel. It projects lesson_extracted / contract_amendment_proposed rows
 // that have not reached applied_change_committed. Owner gating is derived
@@ -744,17 +788,29 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       e.context_refs  AS context_refs,
       json_extract(e.payload, '$.lesson_kind')       AS lesson_kind,
       COALESCE(
+        json_extract(e.payload, '$.target_resource'),
+        json_extract(e.payload, '$.resource_uri'),
         json_extract(e.payload, '$.target'),
-        json_extract(e.payload, '$.proposed_behavior.file_path'),
-        json_extract(e.payload, '$.proposed_action.file_path')
+        json_extract(e.payload, '$.proposed_behavior.target_resource'),
+        json_extract(e.payload, '$.proposed_behavior.resource_uri'),
+        json_extract(e.payload, '$.proposed_action.target_resource'),
+        json_extract(e.payload, '$.proposed_action.resource_uri'),
+        CASE WHEN json_extract(e.payload, '$.proposed_behavior.file_path') IS NOT NULL THEN 'repo:' || json_extract(e.payload, '$.proposed_behavior.file_path') END,
+        CASE WHEN json_extract(e.payload, '$.proposed_action.file_path') IS NOT NULL THEN 'repo:' || json_extract(e.payload, '$.proposed_action.file_path') END
       )                                             AS target,
       json_extract(e.payload, '$.anchor')            AS anchor,
       json_extract(e.payload, '$.proposed_behavior') AS proposed_behavior,
       json_extract(e.payload, '$.proposed_action')   AS proposed_action,
       COALESCE(
+        json_extract(e.payload, '$.target_resource'),
+        json_extract(e.payload, '$.resource_uri'),
         json_extract(e.payload, '$.target'),
-        json_extract(e.payload, '$.proposed_behavior.file_path'),
-        json_extract(e.payload, '$.proposed_action.file_path')
+        json_extract(e.payload, '$.proposed_behavior.target_resource'),
+        json_extract(e.payload, '$.proposed_behavior.resource_uri'),
+        json_extract(e.payload, '$.proposed_action.target_resource'),
+        json_extract(e.payload, '$.proposed_action.resource_uri'),
+        CASE WHEN json_extract(e.payload, '$.proposed_behavior.file_path') IS NOT NULL THEN 'repo:' || json_extract(e.payload, '$.proposed_behavior.file_path') END,
+        CASE WHEN json_extract(e.payload, '$.proposed_action.file_path') IS NOT NULL THEN 'repo:' || json_extract(e.payload, '$.proposed_action.file_path') END
       )                                             AS candidate_target,
       COALESCE(
         json_extract(e.payload, '$.anchor'),
@@ -769,10 +825,27 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
         'source_event_id', e.id,
         'source_kind', e.kind,
         'lesson_kind', json_extract(e.payload, '$.lesson_kind'),
-        'target', COALESCE(
+        'target_resource', COALESCE(
+          json_extract(e.payload, '$.target_resource'),
+          json_extract(e.payload, '$.resource_uri'),
           json_extract(e.payload, '$.target'),
-          json_extract(e.payload, '$.proposed_behavior.file_path'),
-          json_extract(e.payload, '$.proposed_action.file_path')
+          json_extract(e.payload, '$.proposed_behavior.target_resource'),
+          json_extract(e.payload, '$.proposed_behavior.resource_uri'),
+          json_extract(e.payload, '$.proposed_action.target_resource'),
+          json_extract(e.payload, '$.proposed_action.resource_uri'),
+          CASE WHEN json_extract(e.payload, '$.proposed_behavior.file_path') IS NOT NULL THEN 'repo:' || json_extract(e.payload, '$.proposed_behavior.file_path') END,
+          CASE WHEN json_extract(e.payload, '$.proposed_action.file_path') IS NOT NULL THEN 'repo:' || json_extract(e.payload, '$.proposed_action.file_path') END
+        ),
+        'target', COALESCE(
+          json_extract(e.payload, '$.target_resource'),
+          json_extract(e.payload, '$.resource_uri'),
+          json_extract(e.payload, '$.target'),
+          json_extract(e.payload, '$.proposed_behavior.target_resource'),
+          json_extract(e.payload, '$.proposed_behavior.resource_uri'),
+          json_extract(e.payload, '$.proposed_action.target_resource'),
+          json_extract(e.payload, '$.proposed_action.resource_uri'),
+          CASE WHEN json_extract(e.payload, '$.proposed_behavior.file_path') IS NOT NULL THEN 'repo:' || json_extract(e.payload, '$.proposed_behavior.file_path') END,
+          CASE WHEN json_extract(e.payload, '$.proposed_action.file_path') IS NOT NULL THEN 'repo:' || json_extract(e.payload, '$.proposed_action.file_path') END
         ),
         'anchor', COALESCE(
           json_extract(e.payload, '$.anchor'),
@@ -792,13 +865,47 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
     FROM proposals
     WHERE target IS NOT NULL AND length(trim(target)) > 0
     UNION
-    SELECT source_event_id, trim(json_extract(payload, '$.proposed_behavior.file_path')) AS target
+    SELECT source_event_id, trim(json_extract(payload, '$.target_resource')) AS target
+    FROM proposals
+    WHERE json_extract(payload, '$.target_resource') IS NOT NULL
+      AND length(trim(json_extract(payload, '$.target_resource'))) > 0
+    UNION
+    SELECT source_event_id, trim(json_extract(payload, '$.resource_uri')) AS target
+    FROM proposals
+    WHERE json_extract(payload, '$.resource_uri') IS NOT NULL
+      AND length(trim(json_extract(payload, '$.resource_uri'))) > 0
+    UNION
+    SELECT source_event_id, trim(json_extract(payload, '$.proposed_behavior.target_resource')) AS target
+    FROM proposals
+    WHERE json_type(payload, '$.proposed_behavior') = 'object'
+      AND json_extract(payload, '$.proposed_behavior.target_resource') IS NOT NULL
+      AND length(trim(json_extract(payload, '$.proposed_behavior.target_resource'))) > 0
+    UNION
+    SELECT source_event_id, trim(json_extract(payload, '$.proposed_behavior.resource_uri')) AS target
+    FROM proposals
+    WHERE json_type(payload, '$.proposed_behavior') = 'object'
+      AND json_extract(payload, '$.proposed_behavior.resource_uri') IS NOT NULL
+      AND length(trim(json_extract(payload, '$.proposed_behavior.resource_uri'))) > 0
+    UNION
+    SELECT source_event_id, trim(json_extract(payload, '$.proposed_action.target_resource')) AS target
+    FROM proposals
+    WHERE json_type(payload, '$.proposed_action') = 'object'
+      AND json_extract(payload, '$.proposed_action.target_resource') IS NOT NULL
+      AND length(trim(json_extract(payload, '$.proposed_action.target_resource'))) > 0
+    UNION
+    SELECT source_event_id, trim(json_extract(payload, '$.proposed_action.resource_uri')) AS target
+    FROM proposals
+    WHERE json_type(payload, '$.proposed_action') = 'object'
+      AND json_extract(payload, '$.proposed_action.resource_uri') IS NOT NULL
+      AND length(trim(json_extract(payload, '$.proposed_action.resource_uri'))) > 0
+    UNION
+    SELECT source_event_id, 'repo:' || trim(json_extract(payload, '$.proposed_behavior.file_path')) AS target
     FROM proposals
     WHERE json_type(payload, '$.proposed_behavior') = 'object'
       AND json_extract(payload, '$.proposed_behavior.file_path') IS NOT NULL
       AND length(trim(json_extract(payload, '$.proposed_behavior.file_path'))) > 0
     UNION
-    SELECT source_event_id, trim(json_extract(payload, '$.proposed_action.file_path')) AS target
+    SELECT source_event_id, 'repo:' || trim(json_extract(payload, '$.proposed_action.file_path')) AS target
     FROM proposals
     WHERE json_type(payload, '$.proposed_action') = 'object'
       AND json_extract(payload, '$.proposed_action.file_path') IS NOT NULL
@@ -877,14 +984,40 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       p.*,
       CASE
         WHEN json_type(p.payload, '$.proposed_behavior') = 'object'
-         AND json_extract(p.payload, '$.proposed_behavior.file_path') = p.target
+         AND (
+           json_extract(p.payload, '$.proposed_behavior.target_resource') = p.target
+           OR json_extract(p.payload, '$.proposed_behavior.resource_uri') = p.target
+           OR json_extract(p.payload, '$.proposed_behavior.target') = p.target
+           OR json_extract(p.payload, '$.proposed_behavior.file_path') = p.target
+           OR 'repo:' || json_extract(p.payload, '$.proposed_behavior.file_path') = p.target
+         )
          AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_behavior.anchor'), ''))) > 0
-         AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_behavior.diff'), ''))) > 0
+         AND (
+           (json_type(p.payload, '$.proposed_behavior.diff') = 'text'
+             AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_behavior.diff'), ''))) > 0)
+           OR (json_type(p.payload, '$.proposed_behavior.diff') = 'object'
+             AND json_extract(p.payload, '$.proposed_behavior.diff.kind') = 'anchored_replace_v1'
+             AND length(COALESCE(json_extract(p.payload, '$.proposed_behavior.diff.before'), '')) > 0
+             AND json_type(p.payload, '$.proposed_behavior.diff.after') = 'text')
+         )
         THEN 1
         WHEN json_type(p.payload, '$.proposed_action') = 'object'
-         AND json_extract(p.payload, '$.proposed_action.file_path') = p.target
+         AND (
+           json_extract(p.payload, '$.proposed_action.target_resource') = p.target
+           OR json_extract(p.payload, '$.proposed_action.resource_uri') = p.target
+           OR json_extract(p.payload, '$.proposed_action.target') = p.target
+           OR json_extract(p.payload, '$.proposed_action.file_path') = p.target
+           OR 'repo:' || json_extract(p.payload, '$.proposed_action.file_path') = p.target
+         )
          AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_action.anchor'), ''))) > 0
-         AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_action.diff'), ''))) > 0
+         AND (
+           (json_type(p.payload, '$.proposed_action.diff') = 'text'
+             AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_action.diff'), ''))) > 0)
+           OR (json_type(p.payload, '$.proposed_action.diff') = 'object'
+             AND json_extract(p.payload, '$.proposed_action.diff.kind') = 'anchored_replace_v1'
+             AND length(COALESCE(json_extract(p.payload, '$.proposed_action.diff.before'), '')) > 0
+             AND json_type(p.payload, '$.proposed_action.diff.after') = 'text')
+         )
         THEN 1
         ELSE 0
       END AS structured_change
@@ -898,8 +1031,8 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
         JOIN target_candidates tc ON tc.source_event_id = s.source_event_id
         WHERE r.effect = 'owner_consent_required'
           AND (
-            (r.match = 'exact' AND tc.target = r.pattern)
-            OR (r.match = 'prefix' AND tc.target LIKE r.pattern || '%')
+            (r.match = 'exact' AND (CASE WHEN tc.target LIKE 'repo:%' THEN substr(tc.target, 6) ELSE tc.target END) = r.pattern)
+            OR (r.match = 'prefix' AND (CASE WHEN tc.target LIKE 'repo:%' THEN substr(tc.target, 6) ELSE tc.target END) LIKE r.pattern || '%')
           )
       ) THEN 1 ELSE 0 END AS owner_gate_required,
       CASE WHEN EXISTS (
@@ -913,8 +1046,8 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
             SELECT 1 FROM apply_target_policy r
             WHERE r.effect = 'safe_auto_apply_candidate'
               AND (
-                (r.match = 'exact' AND tc.target = r.pattern)
-                OR (r.match = 'prefix' AND tc.target LIKE r.pattern || '%')
+                (r.match = 'exact' AND (CASE WHEN tc.target LIKE 'repo:%' THEN substr(tc.target, 6) ELSE tc.target END) = r.pattern)
+                OR (r.match = 'prefix' AND (CASE WHEN tc.target LIKE 'repo:%' THEN substr(tc.target, 6) ELSE tc.target END) LIKE r.pattern || '%')
               )
           )
       )
@@ -923,8 +1056,8 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
         JOIN target_candidates tc ON tc.source_event_id = s.source_event_id
         WHERE r.effect = 'owner_consent_required'
           AND (
-            (r.match = 'exact' AND tc.target = r.pattern)
-            OR (r.match = 'prefix' AND tc.target LIKE r.pattern || '%')
+            (r.match = 'exact' AND (CASE WHEN tc.target LIKE 'repo:%' THEN substr(tc.target, 6) ELSE tc.target END) = r.pattern)
+            OR (r.match = 'prefix' AND (CASE WHEN tc.target LIKE 'repo:%' THEN substr(tc.target, 6) ELSE tc.target END) LIKE r.pattern || '%')
           )
       ) THEN 1 ELSE 0 END AS auto_apply_target
     FROM shaped s
@@ -1033,9 +1166,15 @@ CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
         'source_kind', kind,
         'lesson_kind', json_extract(payload, '$.lesson_kind'),
         'target', COALESCE(
+          json_extract(payload, '$.target_resource'),
+          json_extract(payload, '$.resource_uri'),
           json_extract(payload, '$.target'),
-          json_extract(payload, '$.proposed_behavior.file_path'),
-          json_extract(payload, '$.proposed_action.file_path')
+          json_extract(payload, '$.proposed_behavior.target_resource'),
+          json_extract(payload, '$.proposed_behavior.resource_uri'),
+          json_extract(payload, '$.proposed_action.target_resource'),
+          json_extract(payload, '$.proposed_action.resource_uri'),
+          CASE WHEN json_extract(payload, '$.proposed_behavior.file_path') IS NOT NULL THEN 'repo:' || json_extract(payload, '$.proposed_behavior.file_path') END,
+          CASE WHEN json_extract(payload, '$.proposed_action.file_path') IS NOT NULL THEN 'repo:' || json_extract(payload, '$.proposed_action.file_path') END
         ),
         'anchor', COALESCE(
           json_extract(payload, '$.anchor'),
@@ -1395,9 +1534,15 @@ CREATE VIEW IF NOT EXISTS lesson_apply_candidate_view AS
     s.source_event_id,
     COALESCE(
       q.target,
+      json_extract(s.payload, '$.target_resource'),
+      json_extract(s.payload, '$.resource_uri'),
       json_extract(s.payload, '$.target'),
-      json_extract(s.payload, '$.proposed_behavior.file_path'),
-      json_extract(s.payload, '$.proposed_action.file_path')
+      json_extract(s.payload, '$.proposed_behavior.target_resource'),
+      json_extract(s.payload, '$.proposed_behavior.resource_uri'),
+      json_extract(s.payload, '$.proposed_action.target_resource'),
+      json_extract(s.payload, '$.proposed_action.resource_uri'),
+      CASE WHEN json_extract(s.payload, '$.proposed_behavior.file_path') IS NOT NULL THEN 'repo:' || json_extract(s.payload, '$.proposed_behavior.file_path') END,
+      CASE WHEN json_extract(s.payload, '$.proposed_action.file_path') IS NOT NULL THEN 'repo:' || json_extract(s.payload, '$.proposed_action.file_path') END
     ) AS target,
     COALESCE(
       q.anchor,
@@ -1457,6 +1602,7 @@ const VIEW_NAMES = [
   "applied_lesson_effectiveness_view",
   "lesson_implementation_status_view",
   "lesson_implementer_queue_view",
+  "recipes_latest_view",
   "recipe_registry_view",
   "promoted_knowledge_view",
   "irreversible_effects_view",
@@ -1505,6 +1651,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_LOW_RISK_INLINE_PATTERNS);
   db.exec(VIEW_PROMOTED_KNOWLEDGE);
   db.exec(VIEW_RECIPE_REGISTRY);
+  db.exec(VIEW_RECIPES_LATEST);
   db.exec(VIEW_LESSON_IMPLEMENTER_QUEUE);
   db.exec(VIEW_LESSON_IMPLEMENTATION_STATUS);
   db.exec(VIEW_APPLIED_LESSON_EFFECTIVENESS);
@@ -2387,6 +2534,14 @@ export type RecipeRegistryRow = {
   context_refs: string[];
 };
 
+export type RecipesLatestRow = {
+  id: string;
+  goal_shape: string;
+  topology_signature: string;
+  confidence: number;
+  payload: Record<string, unknown>;
+};
+
 /** Promoted-knowledge rows for `acc admin inspect-knowledge`. The view
  *  itself returns every promotion; filters compose at the query site so a
  *  scoped read stays a single SQL pass.  Rows whose canonical candidate
@@ -2449,5 +2604,30 @@ export const recipeRegistry = (db: Database, limit?: number): RecipeRegistryRow[
     status: (r.status as string | null) ?? "available",
     payload: parseJson<Record<string, unknown>>(r.payload ?? "{}"),
     context_refs: parseJson<string[]>(r.context_refs ?? "[]"),
+  }));
+};
+
+/** Highest-confidence recipe row per (goal_shape, topology_signature) pair.
+ *  Materialized index for runtime/recipe_replay.ts: replaces the dispatch-time
+ *  linear scan over recipe_extracted history with one keyed projection.
+ *  Ties on confidence are broken by ts DESC then rowid DESC (most recent
+ *  wins). Rows whose goal_shape or topology_signature is NULL are dropped —
+ *  the matcher can't key off absent fields. Closes brain audit
+ *  QQEHAW97GS0AX7TEQ717Y3P174 (2026-05-15). */
+export const recipesLatestView = (db: Database): RecipesLatestRow[] => {
+  const rows = db
+    .query(
+      `SELECT id, goal_shape, topology_signature, confidence, payload
+       FROM recipes_latest_view
+       WHERE goal_shape IS NOT NULL AND topology_signature IS NOT NULL
+       ORDER BY goal_shape ASC, topology_signature ASC`,
+    )
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    id: r.id as string,
+    goal_shape: r.goal_shape as string,
+    topology_signature: r.topology_signature as string,
+    confidence: (r.confidence as number) ?? 0,
+    payload: parseJson<Record<string, unknown>>(r.payload ?? "{}"),
   }));
 };
