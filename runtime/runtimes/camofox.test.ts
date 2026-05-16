@@ -11,9 +11,9 @@
 //   3. The per-profile-root mutex serialises concurrent invocations against
 //      the same profile_root (tested via the no-binary fast path so the
 //      mutex queue is observable without spawning firefox).
-//   4. End-to-end spawn — guarded by `test.skipIf` so it only runs when a
-//      camoufox binary is reachable (either CAMOUFOX_BINARY_PATH is set or
-//      the default fetch location exists).
+//   4. End-to-end spawn — guarded by `test.skipIf` plus ACC2_CAMOFOX_E2E=1
+//      so the default bun test path never launches a real browser just because
+//      a local camoufox binary is reachable.
 
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
@@ -213,11 +213,13 @@ describe("per-profile-root mutex (v2-design.md §11.2)", () => {
 // ── End-to-end spawn (skip when no camoufox binary is reachable) ────
 //
 // These tests actually launch the Camoufox firefox binary via playwright.
-// They require BOTH playwright installed AND a reachable binary (either
-// CAMOUFOX_BINARY_PATH or ~/.cache/camoufox/camoufox). Skipped in hermetic
-// CI; lit up locally for the operator-install verification path.
+// They require explicit opt-in plus BOTH playwright installed AND a reachable
+// binary (either CAMOUFOX_BINARY_PATH or ~/.cache/camoufox/camoufox). Keeping
+// them opt-in prevents ordinary bun test runs on configured developer machines
+// from paying the real-browser startup cost.
 
-const skipSpawn = !(__isPlaywrightInstalledForTest() && hasCamoufoxBinary());
+const runSpawn = process.env.ACC2_CAMOFOX_E2E === "1";
+const skipSpawn = !(runSpawn && __isPlaywrightInstalledForTest() && hasCamoufoxBinary());
 
 describe.skipIf(skipSpawn)("end-to-end camoufox spawn", () => {
   test("camoufox actually launches and renders a page with allow-domain enforcement", async () => {
