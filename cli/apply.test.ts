@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
+import { lessonImplementationStatus, lessonImplementerQueue } from "../substrate/views";
 import { handleCredit, handleEmit, handleGetEvent, handleRead } from "../runtime/mcp_server/substrate_tools";
 import { handleRecentEvents } from "../runtime/mcp_server/runtime_tools";
 import type { McpContext } from "../runtime/mcp_server/types";
@@ -45,6 +46,32 @@ const rowPayload = (row: Record<string, unknown>): Record<string, unknown> => {
   return (row.payload ?? {}) as Record<string, unknown>;
 };
 
+const eventRow = (eventId: string): Record<string, unknown> => {
+  const row = db.query("SELECT * FROM events WHERE id = ?").get(eventId) as Record<string, unknown> | null;
+  expect(row).toBeTruthy();
+  return row!;
+};
+
+const implementationStatus = (eventId: string) => {
+  const status = lessonImplementationStatus(db).find((r) => r.source_event_id === eventId);
+  expect(status).toBeTruthy();
+  return status!;
+};
+
+const implementationQueue = (eventId: string) => {
+  const queued = lessonImplementerQueue(db).find((r) => r.source_event_id === eventId);
+  expect(queued).toBeTruthy();
+  return queued!;
+};
+
+const gateScoreFor = (eventId: string): Record<string, unknown> => {
+  const status = implementationStatus(eventId);
+  expect(status.request_event_id).toBeTruthy();
+  const requestPayload = rowPayload(eventRow(status.request_event_id!));
+  expect(requestPayload.gate_scored_event_id).toBeTruthy();
+  return eventRow(requestPayload.gate_scored_event_id as string);
+};
+
 const nextScope = () => {
   directiveSeq++;
   return { directiveId: `d_apply_gate_${directiveSeq}`, taskId: `t_apply_gate_${directiveSeq}` };
@@ -69,17 +96,8 @@ const emitLesson = async (
   return (env.result as { id: string }).id;
 };
 
-const emittedGateReason = async (eventId: string): Promise<string | undefined> => {
-  const statusEnv = await rpc("substrate.read", { view_name: "lesson_implementation_status_view" });
-  expect(statusEnv.ok).toBe(true);
-  const status = (statusEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
-  const requestEnv = await rpc("substrate.get_event", { id: status.request_event_id });
-  expect(requestEnv.ok).toBe(true);
-  const requestPayload = rowPayload(requestEnv.result as Record<string, unknown>);
-  const gateEnv = await rpc("substrate.get_event", { id: requestPayload.gate_scored_event_id });
-  expect(gateEnv.ok).toBe(true);
-  return rowPayload(gateEnv.result as Record<string, unknown>).reason as string | undefined;
-};
+const emittedGateReason = async (eventId: string): Promise<string | undefined> =>
+  rowPayload(gateScoreFor(eventId)).reason as string | undefined;
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "acc2-apply-"));
@@ -104,15 +122,7 @@ describe("runApply gates", () => {
     expect(code).toBe(1);
     expect(cap.err.join("\n")).toContain("owner_consent_missing");
 
-    const statusEnv = await rpc("substrate.read", { view_name: "lesson_implementation_status_view" });
-    expect(statusEnv.ok).toBe(true);
-    const status = (statusEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
-    const requestEnv = await rpc("substrate.get_event", { id: status.request_event_id });
-    expect(requestEnv.ok).toBe(true);
-    const requestPayload = rowPayload(requestEnv.result as Record<string, unknown>);
-    const gateEnv = await rpc("substrate.get_event", { id: requestPayload.gate_scored_event_id });
-    expect(gateEnv.ok).toBe(true);
-    const gateScore = gateEnv.result as Record<string, unknown>;
+    const gateScore = gateScoreFor(eventId);
     expect(Number(gateScore.residual)).toBe(1);
     expect(rowPayload(gateScore).authorization_status).toBe("denied");
   });
@@ -149,15 +159,7 @@ describe("runApply gates", () => {
     expect(cap.out.join("\n")).toContain("AUTO-APPLY GATE");
     expect(cap.out.join("\n")).toContain("proposed_action");
 
-    const statusEnv = await rpc("substrate.read", { view_name: "lesson_implementation_status_view" });
-    expect(statusEnv.ok).toBe(true);
-    const status = (statusEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
-    const requestEnv = await rpc("substrate.get_event", { id: status.request_event_id });
-    expect(requestEnv.ok).toBe(true);
-    const requestPayload = rowPayload(requestEnv.result as Record<string, unknown>);
-    const gateEnv = await rpc("substrate.get_event", { id: requestPayload.gate_scored_event_id });
-    expect(gateEnv.ok).toBe(true);
-    const gateScore = gateEnv.result as Record<string, unknown>;
+    const gateScore = gateScoreFor(eventId);
     expect(Number(gateScore.residual)).toBe(0);
     expect(rowPayload(gateScore).authorization_status).toBe("approved");
   });
@@ -189,15 +191,7 @@ describe("runApply gates", () => {
     expect(cap.out.join("\n")).toContain("AUTO-APPLY GATE");
     expect(cap.out.join("\n")).toContain("cli/apply.ts");
 
-    const statusEnv = await rpc("substrate.read", { view_name: "lesson_implementation_status_view" });
-    expect(statusEnv.ok).toBe(true);
-    const status = (statusEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
-    const requestEnv = await rpc("substrate.get_event", { id: status.request_event_id });
-    expect(requestEnv.ok).toBe(true);
-    const requestPayload = rowPayload(requestEnv.result as Record<string, unknown>);
-    const gateEnv = await rpc("substrate.get_event", { id: requestPayload.gate_scored_event_id });
-    expect(gateEnv.ok).toBe(true);
-    const gateScore = gateEnv.result as Record<string, unknown>;
+    const gateScore = gateScoreFor(eventId);
     expect(Number(gateScore.residual)).toBe(0);
     expect(rowPayload(gateScore).authorization_status).toBe("approved");
   });
@@ -394,9 +388,7 @@ describe("runApply gates", () => {
     expect(cap.out.join("\n")).toContain("verifier_failed");
     expect(cap.out.join("\n")).not.toContain("lesson_applied");
 
-    const statusEnv = await rpc("substrate.read", { view_name: "lesson_implementation_status_view" });
-    expect(statusEnv.ok).toBe(true);
-    const status = (statusEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
+    const status = implementationStatus(eventId);
     expect(status.scored_event_id).toBeTruthy();
     expect(status.verifier_passed).toBe(false);
     // applied_change_committed now ALWAYS emits, but the terminal CTE in
@@ -406,9 +398,7 @@ describe("runApply gates", () => {
     expect(status.committed_event_id).toBeNull();
     expect(status.flywheel_status).toBe("applied");
 
-    const queueEnv = await rpc("substrate.read", { view_name: "lesson_implementer_queue_view" });
-    expect(queueEnv.ok).toBe(true);
-    const queued = (queueEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
+    const queued = implementationQueue(eventId);
     expect(queued.apply_event_id).toBeTruthy();
     expect(queued.apply_status).toBe("applied");
   });
