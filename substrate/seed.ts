@@ -14,7 +14,7 @@
 import type { Database } from "bun:sqlite";
 import { withImmediateTransaction } from "./db";
 import { goalShape } from "../runtime/goal_shape";
-import type { CodeArtifactStatus, Runtime, SandboxDecl } from "./types";
+import type { CodeArtifactStatus, OwnerProfile, Runtime, SandboxDecl } from "./types";
 
 const newId = (): string =>
   crypto.randomUUID().replace(/-/g, "").slice(0, 26).toUpperCase();
@@ -916,6 +916,25 @@ export const DEMO_CAPABILITIES: DemoCapability[] = [
     substrate_capability: ["father_ranked", "owner_profile_grounded"],
   },
 ];
+
+export const composeDemoCapabilityProposal = (
+  cap: DemoCapability,
+  ownerProfile: Pick<OwnerProfile, "rendering_signals" | "preferred_terms" | "detected_language" | "observation_count"> = {},
+  ownerWords = "",
+): string => {
+  const signals = ownerProfile.rendering_signals ?? {};
+  const lowTechnical = (signals.code_density ?? 0) < 0.4 && (signals.ops_vocabulary ?? 0) < 0.4;
+  const oneStep = (signals.one_step_at_a_time_vs_batch ?? 0.5) >= 0.5;
+  const examples = (signals.concrete_examples_appetite ?? 0) >= 0.5;
+  const term = ownerProfile.preferred_terms?.find((t) => ownerWords.toLowerCase().includes(t.toLowerCase())) ?? "this";
+  const firstLine = lowTechnical
+    ? cap.first_demo_prompt
+    : `Proposal: run ${cap.demo_recipe_id} (${cap.lifecycle}) using ${cap.substrate_capability.join(", ")}.`;
+  const frame = ownerWords.trim().length > 0 ? `For what you said ("${ownerWords.trim().slice(0, 120)}"), ` : "";
+  const next = oneStep ? `First step: tell me the smallest useful detail about ${term}.` : "Options: start now, narrow the scope, or skip.";
+  const example = examples ? " Example: give me one goal, person, page, or repeated task to remember." : "";
+  return `${frame}${firstLine} ${next}${example}`.trim();
+};
 
 // META key for the demo-knowledge seed — idempotency marker.
 const META_SEEDED_DEMO_KNOWLEDGE = "seed:demo_knowledge";
