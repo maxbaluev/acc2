@@ -105,7 +105,7 @@ export const verifyCommitTouches = (sha: string, target: string, repoRoot: strin
   return { exists: true, touchesTarget, patchText };
 };
 
-const classifyApply = (
+export const classifyApply = (
   proposalPayload: Record<string, unknown>,
   commitSha: string | undefined,
   repoRoot: string,

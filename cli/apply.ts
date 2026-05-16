@@ -23,6 +23,7 @@
 
 import { mcpCall } from "./rpc";
 import { lessonApplyTargetsPolicy } from "../substrate/lesson_apply_policy";
+import { classifyApply } from "./verify";
 
 type Args = Record<string, string | boolean>;
 
@@ -663,6 +664,25 @@ export const recordApplyOutcome = async (opts: {
   const auth = await authorizeApply(ev, opts.eventId, { ownerApproved: opts.ownerApproved, target: opts.target });
   if (!auth.ok) return { ok: false, reason: "authorization denied", exitCode: auth.code };
   const eventId = opts.eventId;
+
+  // Layer 1 write-time gate (brain-symmetric self-healing, owner-approved 2026-05-16):
+  // when status=applied AND commit_sha was provided AND the source event is a
+  // contract_amendment_proposed with a structured payload, verify the git
+  // commit actually contains the proposed diff before recording the apply.
+  // Refuses with apply_diff_mismatch when drift/missing — prevents lying to
+  // the substrate at write time, complementing the after-the-fact `acc verify`
+  // surface. Legacy plain-string proposed_behavior (no before/after markers)
+  // is accepted on target-touch alone — the classifier handles that case.
+  if (status === "applied" && opts.commitSha && isAmendment) {
+    const verdict = classifyApply(payload, opts.commitSha, process.cwd());
+    if (verdict === "drift" || verdict === "missing") {
+      console.error(`acc apply --record: refusing status=applied — diff verification reports ${verdict} for commit ${opts.commitSha}`);
+      console.error(`  the commit either does not exist, does not touch the proposed target, or its patch text does not contain the proposed before/after markers.`);
+      console.error(`  re-run with --status failed and a clear --reason, or correct the commit + retry.`);
+      return { ok: false, reason: `apply_diff_mismatch:${verdict}`, exitCode: 3 };
+    }
+  }
+
   let ownerDecisionEventId: string | undefined;
   try {
     ownerDecisionEventId = await emitOwnerDecisionIfNeeded(ev, eventId, auth, opts.ownerApproved);
