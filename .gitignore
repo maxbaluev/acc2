@@ -16,6 +16,13 @@ bun.lock
 # Subagent worktrees (per-agent git roots; never tracked)
 .claude/worktrees/
 
+# Orchestrator scheduling lock — local per-checkout state, not source
+.claude/scheduled_tasks.lock
+
+# Brain-bypass recovery quarantine — evidence of bypass mutations, kept
+# locally for forensic review; not source under version control
+.ralph/
+
 # Editor / OS junk
 .DS_Store
 *.swp
