@@ -106,12 +106,13 @@ describe("renderFrame", () => {
   });
 
   test("renders a non-technical wedding-planning directive with the same pane shape", () => {
+    const recent = new Date(Date.now() - 60_000).toISOString();
     const out = renderFrame({
       ...baseState(),
       ownerProfile: { rendering_signals: { code_density: 0.1, ops_vocabulary: 0.1 }, preferred_terms: [], avoided_terms: [] },
-      active: [{ directive_id: "D_WED", opened_ts: "2026-05-13T10:00:00.000Z", text: "plan a wedding for June", lifecycle: "finite", status: "active" }],
+      active: [{ directive_id: "D_WED", opened_ts: recent, text: "plan a wedding for June", lifecycle: "finite", status: "active" }],
       ready: [{ task_id: "T_VENUE", directive_id: "D_WED", goal: "compare venue options", status: "ready" }],
-      events: [{ event_id: "ev_decision", ts: "2026-05-13T10:01:00.000Z", kind: "owner_input_required", directive_id: "D_WED", task_id: "T_VENUE", payload: { question: "choose indoor or outdoor?" } }],
+      events: [{ event_id: "ev_decision", ts: recent, kind: "owner_input_required", directive_id: "D_WED", task_id: "T_VENUE", payload: { question: "choose indoor or outdoor?" } }],
       decisions: [{ event_id: "ev_decision", kind: "owner_input_required", target: "choose indoor or outdoor?", anchor: "venue", age_ms: 60_000 }],
       health: {},
     }, 140, 42);

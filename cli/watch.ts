@@ -142,6 +142,13 @@ export type WatchState = {
   focus?: ViewKey;
   filter?: string;
   showHelp?: boolean;
+  /** Per-pane scroll offset (line index of the top visible line). */
+  cursor?: Partial<Record<ViewKey, number>>;
+  /** When set, the focused pane renders full-screen with all lines + wrapping. */
+  expanded?: boolean;
+  /** When true, Now pane filters active directives to those with activity in
+   *  the last NOW_RECENCY_MS. Toggle with `n`. Default: filter on. */
+  nowShowAll?: boolean;
   selected?: Partial<Record<ViewKey, number>>;
   trust_refreshed_ms?: number;
   decisions_refreshed_ms?: number;
@@ -159,6 +166,7 @@ export type RunWatchOpts = {
 const MAX_EVENTS = 300;
 const MAX_INITIAL_EVENTS = 160;
 const POLL_INTERVAL_MS = 2000;
+const NOW_RECENCY_MS = 60 * 60 * 1000;
 const VIEWS: Array<{ key: ViewKey; label: string; hotkey: string }> = [
   { key: "now", label: "Now", hotkey: "1" },
   { key: "decisions", label: "Decisions", hotkey: "2" },
@@ -513,8 +521,12 @@ export const renderPanelLines = (state: WatchState, view: ViewKey, cols: number)
       lines.push(`intent: ${truncate(brain.intent, w - 8)}`);
       lines.push(`latest: ${truncate(brain.latest, w - 8)}`);
     }
+    const active = filterRecentActive(state);
+    const hidden = state.active.length - active.length;
     if (state.active.length === 0) lines.push("no active directives in active_objectives_view");
-    for (const d of state.active.slice(0, 3)) lines.push(row(tech ? shortId(d.directive_id) : "goal", `${d.status ?? "active"} ${d.lifecycle} ${d.text}`, w));
+    else if (active.length === 0) lines.push(`${DIM}all ${state.active.length} active directives are stale (no event in ${formatAge(NOW_RECENCY_MS)}); press n to show all${RESET}`);
+    for (const d of active) lines.push(row(tech ? shortId(d.directive_id) : "goal", `${d.status ?? "active"} ${d.lifecycle} ${d.text}`, w));
+    if (hidden > 0) lines.push(`${DIM}+${hidden} stale (press n to show all)${RESET}`);
     if (state.ready.length > 0) lines.push("", H("Ready work"));
     for (const t of state.ready.slice(0, 4)) lines.push(row(tech ? shortId(t.task_id) : "ready", `${t.status ?? "ready"} ${t.goal}`, w));
     lines.push("", H("Recent outcomes"));
@@ -584,12 +596,45 @@ const paneTitle = (state: WatchState, view: ViewKey): string => {
   return `${def.hotkey}:${def.label}${state.focus === view ? " *" : ""}`;
 };
 
-const renderBox = (title: string, lines: string[], left: number, top: number, width: number, height: number, focused: boolean): string[] => {
+/** Per-pane scroll offset, clamped to [0, maxLines-visibleRows]. */
+const cursorFor = (state: WatchState, view: ViewKey, visibleRows: number, totalLines: number): number => {
+  const maxOffset = Math.max(0, totalLines - visibleRows);
+  const raw = state.cursor?.[view] ?? 0;
+  return Math.max(0, Math.min(raw, maxOffset));
+};
+
+/** Filter state.active to directives whose latest event landed within
+ *  NOW_RECENCY_MS. Owner toggle `n` flips state.nowShowAll to bypass. */
+const filterRecentActive = (state: WatchState): ActiveDirective[] => {
+  if (state.nowShowAll) return state.active.slice(0, 12);
+  if (state.active.length === 0) return [];
+  const cutoffMs = Date.now() - NOW_RECENCY_MS;
+  const latestByDirective = new Map<string, number>();
+  for (const e of state.events) {
+    if (!e.directive_id) continue;
+    const ts = Date.parse(e.ts);
+    if (!Number.isFinite(ts)) continue;
+    const prev = latestByDirective.get(e.directive_id) ?? 0;
+    if (ts > prev) latestByDirective.set(e.directive_id, ts);
+  }
+  return state.active
+    .filter((d) => (latestByDirective.get(d.directive_id) ?? Date.parse(d.opened_ts) ?? 0) >= cutoffMs)
+    .slice(0, 6);
+};
+
+const renderBox = (title: string, lines: string[], left: number, top: number, width: number, height: number, focused: boolean, cursor = 0): string[] => {
   const out: string[] = [];
-  const head = `${focused ? INVERT : BOLD}${pad(` ${title} `, width)}${RESET}`;
+  const visibleRows = height - 1;
+  const offset = Math.max(0, Math.min(cursor, Math.max(0, lines.length - visibleRows)));
+  const hasScrollDown = lines.length > offset + visibleRows;
+  const hasScrollUp = offset > 0;
+  const scrollHint = (hasScrollUp || hasScrollDown)
+    ? ` ${hasScrollUp ? "↑" : " "}${hasScrollDown ? "↓" : " "} ${offset + 1}-${Math.min(lines.length, offset + visibleRows)}/${lines.length}`
+    : "";
+  const head = `${focused ? INVERT : BOLD}${pad(` ${title}${scrollHint} `, width)}${RESET}`;
   out.push(moveTo(top, left), head);
-  for (let i = 0; i < height - 1; i++) {
-    out.push(moveTo(top + 1 + i, left), pad(lines[i] ?? "", width));
+  for (let i = 0; i < visibleRows; i++) {
+    out.push(moveTo(top + 1 + i, left), pad(lines[offset + i] ?? "", width));
   }
   return out;
 };
@@ -608,7 +653,17 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
     `acc watch | live view of what accint is doing | ${healthLabel(h)}`,
   );
   parts.push(moveTo(1, 1), `${BOLD}${CYAN}${truncate(headline, safeCols)}${RESET}`);
-  parts.push(moveTo(2, 1), `${DIM}1 Now  2 Decisions  3 Work Graph  4 Evidence  5 Health  6 Diagnostics  Tab focus  / filter  r refresh  ? help  q quit${RESET}`);
+  parts.push(moveTo(2, 1), `${DIM}1-6 panes  Tab cycle  j/k scroll  Enter expand  n toggle stale  / filter  r refresh  ? help  q quit${RESET}`);
+
+  // Expanded mode: render the focused pane full-screen with scroll.
+  if (state.expanded) {
+    const lines = renderPanelLines(state, focus, safeCols - 2).filter((line) => matchesFilter(stripAnsi(line), state.filter));
+    const expandedRows = safeRows - 5;
+    const cursor = cursorFor(state, focus, expandedRows, lines.length);
+    parts.push(...renderBox(`${paneTitle(state, focus)} (expanded — Esc back)`, lines, 1, 4, safeCols - 1, expandedRows + 1, true, cursor));
+    parts.push(moveTo(safeRows - 1, 1), `${BOLD}${truncate(`Expanded ${focus} | ${lines.length} lines | j/k scroll | Esc/Enter exit`, safeCols)}${RESET}`);
+    return parts.join("");
+  }
 
   const bodyTop = 4;
   const bodyRows = safeRows - 7;
@@ -625,7 +680,8 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
   ];
   for (const [view, left, top, width, height] of panes) {
     const lines = renderPanelLines(state, view, width).filter((line) => matchesFilter(stripAnsi(line), state.filter));
-    parts.push(...renderBox(paneTitle(state, view), lines, left, top, width, height, focus === view));
+    const cursor = focus === view ? cursorFor(state, view, height - 1, lines.length) : 0;
+    parts.push(...renderBox(paneTitle(state, view), lines, left, top, width, height, focus === view, cursor));
   }
 
   if (state.showHelp) {
@@ -634,7 +690,9 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
       "Same six panes for non-technical and technical work.",
       "Owner profile changes wording density; it does not change the information shape.",
       "SSE fills recent events; MCP views ground tasks, graph, evidence, profile, and health.",
-      "1-6 focus panes, Tab cycles, / filters visible lines, r refreshes snapshots, q quits.",
+      "1-6 focus panes, Tab cycles, j/k or ↓↑ scroll, Enter expand pane full-screen, Esc back, g top.",
+      "n toggles stale-directive filter in Now pane (default hides goals with no event in 1h).",
+      "/ filters visible lines, r refreshes snapshots, q quits.",
     ];
     const w = Math.min(74, safeCols - 4);
     const top = Math.max(5, Math.floor(safeRows / 2) - 3);
@@ -774,12 +832,49 @@ export const runWatch = async (argv: string[], opts: RunWatchOpts = {}): Promise
         renderTick();
         return;
       }
-      if (str === "\x1b") { state.showHelp = false; renderTick(); return; }
+      if (str === "\x1b") {
+        if (state.expanded) { state.expanded = false; renderTick(); return; }
+        if (state.showHelp) { state.showHelp = false; renderTick(); return; }
+        return;
+      }
       if (str === "?") { state.showHelp = !state.showHelp; renderTick(); return; }
       if (str === "/") { filtering = true; state.filter = ""; renderTick(); return; }
       if (str === "\t") { state.focus = nextFocus(state.focus ?? "now"); renderTick(); return; }
-      if (/^[1-6]$/.test(str)) { state.focus = VIEWS[Number(str) - 1]!.key; renderTick(); return; }
+      if (/^[1-6]$/.test(str)) {
+        state.focus = VIEWS[Number(str) - 1]!.key;
+        state.expanded = false;
+        renderTick();
+        return;
+      }
       if (str === "r" || str === "R") { void refreshAll(state).then(renderTick).catch(() => { /* keep stale */ }); return; }
+      if (str === "j" || str === "\x1b[B") {
+        const focus = state.focus ?? "now";
+        const cursor = state.cursor ?? {};
+        cursor[focus] = (cursor[focus] ?? 0) + 1;
+        state.cursor = cursor;
+        renderTick();
+        return;
+      }
+      if (str === "k" || str === "\x1b[A") {
+        const focus = state.focus ?? "now";
+        const cursor = state.cursor ?? {};
+        cursor[focus] = Math.max(0, (cursor[focus] ?? 0) - 1);
+        state.cursor = cursor;
+        renderTick();
+        return;
+      }
+      if (str === "\r" || str === "\n") {
+        state.expanded = !state.expanded;
+        renderTick();
+        return;
+      }
+      if (str === "n" || str === "N") { state.nowShowAll = !state.nowShowAll; renderTick(); return; }
+      if (str === "g") {
+        const focus = state.focus ?? "now";
+        state.cursor = { ...(state.cursor ?? {}), [focus]: 0 };
+        renderTick();
+        return;
+      }
     };
     stdin.on("data", keyHandler);
   }
