@@ -1,194 +1,358 @@
-// acc status — one-screen operator dashboard. Aggregates daemon health,
-// scheduler queue, in-flight dispatch, recent commits, recent failures,
-// supervisor interventions, and quarantined directives into a single
-// printable snapshot. Designed so an operator running ONE command sees the
-// full picture without juggling acc daemon status + acc watch + acc events.
+// acc status - one-screen owner state answer. Uses substrate.read/MCP
+// projections for organism state and keeps daemon health as the only direct
+// auxiliary HTTP read. --json is intentionally shaped for a future Ink TUI.
 
-import { openDb } from "../substrate/db";
-import { resolveDbPath } from "../runtime/state_paths";
-import { readyTasks } from "../runtime/task_topology";
-import { auxBaseUrl, rpcGet } from "./rpc";
-import type { Database } from "bun:sqlite";
+import { auxBaseUrl, mcpCall, rpcGet } from "./rpc";
+import type { OwnerProfileCard } from "./owner_profile_renderer";
 
-type FailureRow = { failure_kind: string; c: number };
-type DirRow = { directive_id: string; payload: string; ts: string };
+type Lifecycle = "live" | "queued_at_cap" | "completed" | "failed" | "zombie";
+type ViewEnvelope = { ok: true; result: any } | { ok: false; error: string };
+type DispatchRow = {
+  directive_id?: string;
+  root_task_id?: string;
+  status?: string;
+  lifecycle_status?: string;
+  status_reason?: string | null;
+  residual?: number | null;
+  queued_reason?: string | null;
+  ready_since?: string | null;
+  latest_signal_at?: string | null;
+};
+type ReadyRow = { directive_id?: string; task_id?: string; payload?: Record<string, unknown>; ts?: string };
+type TimedRow = { ts?: string; created_at?: string; updated_at?: string; committed_at?: string };
+type EffectivenessRow = TimedRow & { compounded?: boolean; tier0_replay_hit?: boolean; residual_delta?: number | null };
+type AppliedChangeEvent = RecentEvent & { payload?: { status?: string; summary?: string; target?: string; [key: string]: unknown } };
+type OwnerProfileRow = { event_id?: string; ts?: string; payload?: OwnerProfileCard | string };
+type RecentEvent = { event_id?: string; ts?: string; kind?: string; directive_id?: string; task_id?: string; payload?: Record<string, unknown> };
 
-const formatBlock = (title: string, rows: string[]): string => {
-  if (rows.length === 0) return `\x1b[1m${title}\x1b[0m\n  (none)\n`;
-  return `\x1b[1m${title}\x1b[0m\n${rows.map((r) => "  " + r).join("\n")}\n`;
+export type StatusReport = {
+  generated_at: string;
+  contract: { name: "acc_status_snapshot"; version: 1; lifecycle_values: Lifecycle[]; sources: Record<string, string[]> };
+  daemon: { running: boolean; status: string; pid?: unknown; uptime_s?: number; events_count?: unknown; stuck_workers: number; error?: string };
+  dispatch_lifecycle: Record<Lifecycle, number> & { total: number };
+  pending_owner_decisions: { count: number; top: Array<Record<string, unknown>> };
+  owner_profile: {
+    autonomy_score: number | null;
+    autonomy_score_floor: number | null;
+    detected_language: string | null;
+    preferred_terms: string[];
+    avoided_terms: string[];
+    things_to_never_do: string[];
+    manual_review_patterns: string[];
+    hot_topics: string[];
+    signal_summary: Record<string, Array<{ key: string; value: number }>>;
+    source_event_id?: string;
+    source_ts?: string;
+  };
+  learning: {
+    knowledge_total: number;
+    knowledge_24h: number;
+    recipe_total: number;
+    recipe_24h: number;
+    artifact_total: number;
+    artifact_24h: number;
+    applied_lessons_total: number;
+    applied_lessons_24h: number;
+    compounded_total: number;
+    tier0_replay_hits: number;
+    avg_residual_delta: number | null;
+    contradictions: number;
+  };
+  actual_changes: { applied_24h: number; failed_24h: number; refused_24h: number; recent: Array<{ event_id: string; ts: string; status: string; target: string | null; summary: string | null }> };
+  active_directives: Array<{ directive_id: string; root_task_id: string; status: Lifecycle; reason: string | null; closure_residual: number | null; latest_signal_at: string | null }>;
+  ready_tasks: { count: number; sample: Array<{ directive_id: string; task_id: string; goal: string }> };
+  blocked: string[];
+  next_action: string;
+  failures: Array<Record<string, unknown>>;
+  view_errors: Record<string, string>;
 };
 
-export const runStatus = async (_argv: string[]): Promise<number> => {
-  const sections: string[] = [];
+const LIFECYCLES: Lifecycle[] = ["live", "queued_at_cap", "completed", "failed", "zombie"];
+const STATUS_SOURCES: StatusReport["contract"]["sources"] = {
+  daemon: ["/health"],
+  dispatch_lifecycle: ["dispatch_resolved_view"],
+  pending_owner_decisions: ["pending_owner_decision_queue_view"],
+  owner_profile: ["owner_profile_view"],
+  learning: ["promoted_knowledge_view", "recipe_registry_view", "code_artifact_registry_view", "applied_lesson_effectiveness_view", "contradictory_candidates_view"],
+  actual_changes: ["runtime.recent_events:applied_change_committed"],
+  active_directives: ["dispatch_resolved_view", "runtime.recent_events:task_closure_audited"],
+  ready_tasks: ["ready_tasks_view"],
+  failures: ["failure_view"],
+  view_errors: ["substrate.read", "runtime.recent_events"],
+};
 
-  // Daemon health
-  const base = auxBaseUrl();
-  if (base) {
-    try {
-      const health = await rpcGet<Record<string, unknown>>(`${base}/health`);
-      const status = health.status ?? "?";
-      const pid = health.pid ?? "?";
-      const uptimeS = Math.round(Number(health.uptime_ms ?? 0) / 1000);
-      const events = health.events_count ?? "?";
-      const stuck = Array.isArray(health.stuck_workers) ? (health.stuck_workers as unknown[]).length : 0;
-      sections.push(
-        formatBlock("daemon", [
-          `status=${status}  pid=${pid}  uptime=${uptimeS}s  events=${events}  stuck_workers=${stuck}`,
-        ]),
-      );
-    } catch (err) {
-      sections.push(formatBlock("daemon", [`unreachable: ${(err as Error).message}`]));
-    }
-  } else {
-    sections.push(formatBlock("daemon", ["not running — run `acc daemon start`"]));
+const isLifecycle = (value: unknown): value is Lifecycle =>
+  typeof value === "string" && (LIFECYCLES as string[]).includes(value);
+
+const asArray = <T>(value: unknown): T[] => Array.isArray(value) ? value as T[] : [];
+
+const parsePayload = (payload: unknown): Record<string, unknown> => {
+  if (!payload) return {};
+  if (typeof payload === "string") {
+    try { return JSON.parse(payload) as Record<string, unknown>; } catch { return {}; }
   }
+  return typeof payload === "object" ? payload as Record<string, unknown> : {};
+};
 
-  // Open the substrate DB read-only for the rest of the snapshot.
-  const dbPath = resolveDbPath();
-  let db: Database;
+const asStringArray = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((v): v is string => typeof v === "string" && v.length > 0) : [];
+
+const countSince = (rows: TimedRow[], sinceIso: string, field: "ts" | "created_at" | "updated_at" | "committed_at" = "ts"): number =>
+  rows.filter((row) => typeof row[field] === "string" && row[field]! >= sinceIso).length;
+
+const topNumberSignals = (value: unknown, limit = 3): Array<{ key: string; value: number }> => {
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value as Record<string, unknown>)
+    .filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1]))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([key, signalValue]) => ({ key, value: signalValue }));
+};
+
+const countTrue = (rows: EffectivenessRow[], field: "compounded" | "tier0_replay_hit"): number =>
+  rows.filter((row) => row[field] === true).length;
+
+const averageNumber = (values: Array<number | null | undefined>): number | null => {
+  const nums = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (nums.length === 0) return null;
+  return nums.reduce((sum, value) => sum + value, 0) / nums.length;
+};
+
+const readView = async (viewName: string, args: Record<string, unknown> = {}): Promise<ViewEnvelope> => {
   try {
-    db = openDb(dbPath);
+    return await mcpCall("substrate.read", { view_name: viewName, args });
   } catch (err) {
-    sections.push(formatBlock("substrate", [`db open failed: ${(err as Error).message}`]));
-    process.stdout.write(sections.join("\n"));
-    return 1;
+    return { ok: false, error: (err as Error).message };
+  }
+};
+
+const recentEvents = async (kinds: string[], k = 200): Promise<ViewEnvelope> => {
+  try {
+    return await mcpCall("runtime.recent_events", { kinds, k });
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+};
+
+const daemonSummary = async (): Promise<StatusReport["daemon"]> => {
+  const base = auxBaseUrl();
+  if (!base) return { running: false, status: "not_running", stuck_workers: 0, error: "run acc daemon start" };
+  const health = await rpcGet<Record<string, unknown>>(base + "/health");
+  if (health && health.ok === false) {
+    return { running: false, status: "unreachable", stuck_workers: 0, error: String(health.error ?? "unknown") };
+  }
+  return {
+    running: true,
+    status: String(health.status ?? "unknown"),
+    pid: health.pid,
+    uptime_s: Math.round(Number(health.uptime_ms ?? 0) / 1000),
+    events_count: health.events_count,
+    stuck_workers: Array.isArray(health.stuck_workers) ? health.stuck_workers.length : 0,
+  };
+};
+
+const latestClosureResiduals = (events: RecentEvent[]): Map<string, number> => {
+  const byDirective = new Map<string, number>();
+  for (const event of events) {
+    const directiveId = event.directive_id;
+    const residual = event.payload?.closure_residual;
+    if (directiveId && typeof residual === "number" && Number.isFinite(residual)) byDirective.set(directiveId, residual);
+  }
+  return byDirective;
+};
+
+export const buildStatusReport = async (): Promise<StatusReport> => {
+  const generatedAt = new Date().toISOString();
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const [daemon, dispatchEnv, pendingEnv, readyEnv, ownerEnv, knowledgeEnv, recipeEnv, artifactEnv, effectivenessEnv, contradictoryEnv, failureEnv, closureEnv, changesEnv] = await Promise.all([
+    daemonSummary(),
+    readView("dispatch_resolved_view"),
+    readView("pending_owner_decision_queue_view"),
+    readView("ready_tasks_view"),
+    readView("owner_profile_view"),
+    readView("promoted_knowledge_view"),
+    readView("recipe_registry_view"),
+    readView("code_artifact_registry_view"),
+    readView("applied_lesson_effectiveness_view"),
+    readView("contradictory_candidates_view"),
+    readView("failure_view"),
+    recentEvents(["task_closure_audited"]),
+    recentEvents(["applied_change_committed"]),
+  ]);
+
+  const viewErrors: Record<string, string> = {};
+  const rows = <T>(name: string, env: ViewEnvelope): T[] => {
+    if (!env.ok) { viewErrors[name] = env.error; return []; }
+    return asArray<T>(env.result);
+  };
+
+  const dispatchRows = rows<DispatchRow>("dispatch_resolved_view", dispatchEnv);
+  const pendingRows = rows<Record<string, unknown>>("pending_owner_decision_queue_view", pendingEnv);
+  const readyRows = rows<ReadyRow>("ready_tasks_view", readyEnv);
+  const ownerRows = rows<OwnerProfileRow>("owner_profile_view", ownerEnv);
+  const knowledgeRows = rows<TimedRow>("promoted_knowledge_view", knowledgeEnv);
+  const recipeRows = rows<TimedRow>("recipe_registry_view", recipeEnv);
+  const artifactRows = rows<TimedRow>("code_artifact_registry_view", artifactEnv);
+  const effectivenessRows = rows<EffectivenessRow>("applied_lesson_effectiveness_view", effectivenessEnv);
+  const contradictionRows = rows<Record<string, unknown>>("contradictory_candidates_view", contradictoryEnv);
+  const failureRows = rows<Record<string, unknown>>("failure_view", failureEnv);
+  const closureEvents = closureEnv.ok ? asArray<RecentEvent>((closureEnv.result as { events?: unknown[] }).events) : [];
+  const changeEvents = changesEnv.ok ? asArray<AppliedChangeEvent>((changesEnv.result as { events?: unknown[] }).events) : [];
+  if (!closureEnv.ok) viewErrors["runtime.recent_events:task_closure_audited"] = closureEnv.error;
+  if (!changesEnv.ok) viewErrors["runtime.recent_events:applied_change_committed"] = changesEnv.error;
+
+  const dispatchLifecycle = { live: 0, queued_at_cap: 0, completed: 0, failed: 0, zombie: 0, total: dispatchRows.length };
+  for (const row of dispatchRows) {
+    const status = isLifecycle(row.lifecycle_status) ? row.lifecycle_status : isLifecycle(row.status) ? row.status : "live";
+    dispatchLifecycle[status] += 1;
   }
 
-  // Ready queue
-  const ready = readyTasks(db);
-  const queueRows: string[] = [];
-  if (ready.length > 0) {
-    const sample = ready.slice(0, 5);
-    queueRows.push(`${ready.length} ready task(s); top ${Math.min(5, ready.length)}:`);
-    for (const t of sample) {
-      queueRows.push(`${t.id.slice(0, 12)} ${t.directive_id.slice(0, 12)} ${t.goal.slice(0, 60)}`);
-    }
-  } else {
-    queueRows.push("0 ready tasks (queue drained)");
+  const profileRow = ownerRows[0];
+  const profile = parsePayload(profileRow?.payload) as OwnerProfileCard;
+  const ownerProfile = {
+    autonomy_score: typeof profile.autonomy_score === "number" ? profile.autonomy_score : null,
+    autonomy_score_floor: typeof profile.autonomy_score_floor === "number" ? profile.autonomy_score_floor : null,
+    detected_language: typeof profile.detected_language === "string" ? profile.detected_language : null,
+    preferred_terms: asStringArray(profile.preferred_terms).slice(0, 8),
+    avoided_terms: asStringArray(profile.avoided_terms).slice(0, 8),
+    things_to_never_do: asStringArray(profile.things_to_never_do).slice(0, 5),
+    manual_review_patterns: asStringArray(profile.manual_review_patterns).slice(0, 5),
+    hot_topics: asStringArray(profile.hot_topics).slice(0, 5),
+    signal_summary: {
+      rendering_signals: topNumberSignals(profile.rendering_signals),
+      autonomy_signals: topNumberSignals(profile.autonomy_signals),
+      control_signals: topNumberSignals(profile.control_signals),
+      risk_signals: topNumberSignals(profile.risk_signals),
+      collaboration_signals: topNumberSignals(profile.collaboration_signals),
+      goal_continuity_signals: topNumberSignals(profile.goal_continuity_signals),
+    },
+    source_event_id: profileRow?.event_id,
+    source_ts: profileRow?.ts,
+  };
+
+  const closureByDirective = latestClosureResiduals(closureEvents);
+  const activeDirectives = dispatchRows
+    .filter((row) => {
+      const status = isLifecycle(row.lifecycle_status) ? row.lifecycle_status : row.status;
+      return status === "live" || status === "queued_at_cap" || status === "zombie";
+    })
+    .slice(0, 10)
+    .map((row) => {
+      const directiveId = String(row.directive_id ?? "");
+      const status = isLifecycle(row.lifecycle_status) ? row.lifecycle_status : isLifecycle(row.status) ? row.status : "live";
+      return {
+        directive_id: directiveId,
+        root_task_id: String(row.root_task_id ?? ""),
+        status,
+        reason: row.status_reason ?? row.queued_reason ?? null,
+        closure_residual: closureByDirective.get(directiveId) ?? (typeof row.residual === "number" ? row.residual : null),
+        latest_signal_at: row.latest_signal_at ?? null,
+      };
+    });
+
+  const readySample = readyRows.slice(0, 5).map((row) => {
+    const payload = parsePayload(row.payload);
+    const goal = typeof payload.goal === "string" ? payload.goal : typeof payload.task_goal === "string" ? payload.task_goal : "";
+    return { directive_id: String(row.directive_id ?? ""), task_id: String(row.task_id ?? ""), goal };
+  });
+
+  const blocked: string[] = [];
+  if (pendingRows.length > 0) blocked.push("owner_decision_required=" + pendingRows.length);
+  if (dispatchLifecycle.queued_at_cap > 0) blocked.push("queued_at_cap=" + dispatchLifecycle.queued_at_cap);
+  if (dispatchLifecycle.zombie > 0) blocked.push("zombie=" + dispatchLifecycle.zombie);
+  if (dispatchLifecycle.failed > 0) blocked.push("failed=" + dispatchLifecycle.failed);
+  if (contradictionRows.length > 0) blocked.push("knowledge_contradictions=" + contradictionRows.length);
+  if (!daemon.running || daemon.stuck_workers > 0) blocked.push("daemon=" + daemon.status);
+
+  const nextAction = pendingRows.length > 0
+    ? "answer_owner_decision"
+    : dispatchLifecycle.zombie > 0
+      ? "inspect_zombie_dispatch"
+      : readyRows.length > 0
+        ? "scheduler_tick_ready"
+        : dispatchLifecycle.queued_at_cap > 0
+          ? "wait_or_raise_dispatch_cap"
+          : dispatchLifecycle.live > 0
+            ? "watch_live_dispatch"
+            : contradictionRows.length > 0
+              ? "resolve_knowledge_contradictions"
+              : "idle_no_owner_action";
+
+  const recentChanges = changeEvents.slice(0, 5).map((event) => ({
+    event_id: String(event.event_id ?? ""),
+    ts: String(event.ts ?? ""),
+    status: typeof event.payload?.status === "string" ? event.payload.status : "unknown",
+    target: typeof event.payload?.target === "string" ? event.payload.target : null,
+    summary: typeof event.payload?.summary === "string" ? event.payload.summary : null,
+  }));
+
+  return {
+    generated_at: generatedAt,
+    contract: { name: "acc_status_snapshot", version: 1, lifecycle_values: [...LIFECYCLES], sources: STATUS_SOURCES },
+    daemon,
+    dispatch_lifecycle: dispatchLifecycle,
+    pending_owner_decisions: { count: pendingRows.length, top: pendingRows.slice(0, 5) },
+    owner_profile: ownerProfile,
+    learning: {
+      knowledge_total: knowledgeRows.length,
+      knowledge_24h: countSince(knowledgeRows, since24h),
+      recipe_total: recipeRows.length,
+      recipe_24h: countSince(recipeRows, since24h),
+      artifact_total: artifactRows.length,
+      artifact_24h: countSince(artifactRows, since24h, "created_at"),
+      applied_lessons_total: effectivenessRows.length,
+      applied_lessons_24h: countSince(effectivenessRows, since24h, "committed_at"),
+      compounded_total: countTrue(effectivenessRows, "compounded"),
+      tier0_replay_hits: countTrue(effectivenessRows, "tier0_replay_hit"),
+      avg_residual_delta: averageNumber(effectivenessRows.map((row) => row.residual_delta)),
+      contradictions: contradictionRows.length,
+    },
+    actual_changes: {
+      applied_24h: changeEvents.filter((event) => event.ts && event.ts >= since24h && event.payload?.status === "applied").length,
+      failed_24h: changeEvents.filter((event) => event.ts && event.ts >= since24h && event.payload?.status === "failed").length,
+      refused_24h: changeEvents.filter((event) => event.ts && event.ts >= since24h && event.payload?.status === "refused").length,
+      recent: recentChanges,
+    },
+    active_directives: activeDirectives,
+    ready_tasks: { count: readyRows.length, sample: readySample },
+    blocked,
+    next_action: nextAction,
+    failures: failureRows.slice(0, 5),
+    view_errors: viewErrors,
+  };
+};
+
+const line = (title: string, rows: string[]): string =>
+  title + "\n" + (rows.length === 0 ? "  (none)" : rows.map((row) => "  " + row).join("\n"));
+
+const fmtNum = (value: number | null | undefined): string =>
+  typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : "unset";
+
+export const renderStatusReport = (report: StatusReport): string => {
+  const sections: string[] = [];
+  sections.push("acc status - owner state @ " + report.generated_at);
+  sections.push(line("answer", ["next_action=" + report.next_action, "blocked=" + (report.blocked.length ? report.blocked.join(", ") : "none")]));
+  sections.push(line("daemon", ["status=" + report.daemon.status + " running=" + report.daemon.running + " pid=" + (report.daemon.pid ?? "?") + " uptime=" + (report.daemon.uptime_s ?? "?") + "s stuck_workers=" + report.daemon.stuck_workers + (report.daemon.error ? " error=" + report.daemon.error : "")]));
+  sections.push(line("dispatch lifecycle", ["live=" + report.dispatch_lifecycle.live + " queued_at_cap=" + report.dispatch_lifecycle.queued_at_cap + " completed=" + report.dispatch_lifecycle.completed + " failed=" + report.dispatch_lifecycle.failed + " zombie=" + report.dispatch_lifecycle.zombie + " total=" + report.dispatch_lifecycle.total]));
+  sections.push(line("owner", ["pending_decisions=" + report.pending_owner_decisions.count + " autonomy_score=" + fmtNum(report.owner_profile.autonomy_score) + " floor=" + fmtNum(report.owner_profile.autonomy_score_floor) + " language=" + (report.owner_profile.detected_language ?? "unset"), "preferred_terms=" + (report.owner_profile.preferred_terms.length ? report.owner_profile.preferred_terms.join(", ") : "none"), "avoided_terms=" + (report.owner_profile.avoided_terms.length ? report.owner_profile.avoided_terms.join(", ") : "none")]));
+  sections.push(line("learning growth", ["knowledge=" + report.learning.knowledge_total + " (+" + report.learning.knowledge_24h + "/24h) recipes=" + report.learning.recipe_total + " (+" + report.learning.recipe_24h + "/24h) artifacts=" + report.learning.artifact_total + " (+" + report.learning.artifact_24h + "/24h) applied_lessons=" + report.learning.applied_lessons_total + " (+" + report.learning.applied_lessons_24h + "/24h) compounded=" + report.learning.compounded_total + " tier0=" + report.learning.tier0_replay_hits + " contradictions=" + report.learning.contradictions]));
+  sections.push(line("actual changes", ["applied_24h=" + report.actual_changes.applied_24h + " failed_24h=" + report.actual_changes.failed_24h + " refused_24h=" + report.actual_changes.refused_24h]));
+  sections.push(line("active directives", report.active_directives.length ? report.active_directives.map((d) => d.directive_id.slice(0, 12) + " root=" + d.root_task_id.slice(0, 8) + " status=" + d.status + " reason=" + (d.reason ?? "?") + " closure_residual=" + fmtNum(d.closure_residual)) : ["none"]));
+  sections.push(line("ready tasks", report.ready_tasks.count > 0 ? [String(report.ready_tasks.count) + " ready", ...report.ready_tasks.sample.map((t) => t.task_id.slice(0, 8) + " " + t.directive_id.slice(0, 12) + " " + t.goal.slice(0, 70))] : ["0 ready tasks"]));
+  sections.push(line("failures", report.failures.length ? report.failures.map((f) => String(f.failure_kind ?? "unknown") + " count=" + String(f.count ?? "?") + " latest=" + String(f.latest_ts ?? "?")) : ["none"]));
+  if (Object.keys(report.view_errors).length > 0) {
+    sections.push(line("view errors", Object.entries(report.view_errors).map(([name, error]) => name + ": " + error)));
   }
-  sections.push(formatBlock("scheduler", queueRows));
+  return sections.join("\n\n") + "\n";
+};
 
-  // In-flight directives (brain_dispatched not yet closed)
-  const inflight = db
-    .query(
-      `SELECT DISTINCT directive_id FROM events e
-       WHERE kind = 'brain_dispatched'
-         AND NOT EXISTS (
-           SELECT 1 FROM events c WHERE c.task_id = e.task_id
-             AND c.kind IN ('brain_dispatch_closed','task_failed','task_committed')
-             AND c.ts >= e.ts
-         )`,
-    )
-    .all() as Array<{ directive_id: string }>;
-  sections.push(
-    formatBlock(
-      "in-flight",
-      inflight.length > 0
-        ? inflight.slice(0, 10).map((r) => r.directive_id.slice(0, 26))
-        : ["none"],
-    ),
-  );
-
-  // Recent successful commits (last hour)
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-  const commits = db
-    .query(
-      `SELECT COUNT(*) AS c FROM events WHERE kind = 'task_committed' AND ts >= ?`,
-    )
-    .get(oneHourAgo) as { c: number };
-  const directivesClosed = db
-    .query(
-      `SELECT COUNT(*) AS c FROM events WHERE kind = 'directive_closed' AND ts >= ?`,
-    )
-    .get(oneHourAgo) as { c: number };
-  sections.push(
-    formatBlock("throughput (last 1h)", [
-      `task_committed=${commits.c}  directive_closed=${directivesClosed.c}`,
-    ]),
-  );
-
-  // Recent failures by kind (last 1h)
-  const fails = db
-    .query(
-      `SELECT failure_kind, COUNT(*) AS c FROM events
-       WHERE kind = 'task_failed' AND ts >= ? AND failure_kind IS NOT NULL
-       GROUP BY failure_kind ORDER BY c DESC`,
-    )
-    .all(oneHourAgo) as FailureRow[];
-  sections.push(
-    formatBlock(
-      "failures (last 1h)",
-      fails.length > 0
-        ? fails.map((f) => `${f.failure_kind.padEnd(28)} ${f.c}`)
-        : ["none"],
-    ),
-  );
-
-  // Supervisor interventions (last 24h)
-  const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const interventions = db
-    .query(
-      `SELECT ts, payload FROM events
-       WHERE kind = 'supervisor_intervention_recorded' AND ts >= ?
-       ORDER BY ts DESC LIMIT 10`,
-    )
-    .all(dayAgo) as Array<{ ts: string; payload: string }>;
-  const intRows: string[] = [];
-  for (const r of interventions) {
-    try {
-      const p = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
-      intRows.push(`${r.ts.slice(11, 19)}  ${String(p.pathology ?? "?").padEnd(24)}  →  ${String(p.corrective_event ?? "?")}`);
-    } catch { /* skip */ }
+export const runStatus = async (argv: string[]): Promise<number> => {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    process.stdout.write("usage: acc status [--json]\n\nOne-screen owner state answer from substrate.read projections.\n");
+    return 0;
   }
-  sections.push(
-    formatBlock("supervisor (last 24h)", intRows.length > 0 ? intRows : ["none — no auto-quarantines"]),
-  );
-
-  // Quarantined directives currently archived (resumable)
-  const quarantined = db
-    .query(
-      `SELECT directive_id, payload, ts FROM events
-       WHERE kind = 'directive_archived_by_operator'
-         AND ts >= ?
-         AND directive_id NOT IN (
-           SELECT directive_id FROM events WHERE kind = 'directive_resumed' AND ts >= events.ts
-         )
-       ORDER BY ts DESC LIMIT 10`,
-    )
-    .all(dayAgo) as DirRow[];
-  const qRows: string[] = [];
-  for (const r of quarantined) {
-    try {
-      const p = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
-      const reason = String(p.reason ?? "unknown");
-      const ntasks = Array.isArray(p.quarantined_tasks) ? (p.quarantined_tasks as unknown[]).length : 0;
-      qRows.push(`${r.directive_id.slice(0, 26)}  ${reason.padEnd(36)}  ${ntasks} task(s)  resume: acc directive resume ${r.directive_id.slice(0, 12)}…`);
-    } catch { /* skip */ }
-  }
-  sections.push(
-    formatBlock("quarantined (resumable, last 24h)", qRows.length > 0 ? qRows : ["none"]),
-  );
-
-  // Bridge health (current state)
-  const bhRow = db
-    .query(
-      `SELECT kind, ts FROM events
-       WHERE kind IN ('bridge_health_degraded', 'bridge_health_recovered')
-       ORDER BY ts DESC, rowid DESC LIMIT 1`,
-    )
-    .get() as { kind: string; ts: string } | null;
-  if (bhRow) {
-    sections.push(
-      formatBlock("bridge", [
-        bhRow.kind === "bridge_health_degraded"
-          ? `\x1b[31mDEGRADED\x1b[0m since ${bhRow.ts.slice(11, 19)}  (opencode_brain dispatches paused; substrate_replay + claude_inline still active)`
-          : `recovered at ${bhRow.ts.slice(11, 19)}`,
-      ]),
-    );
-  } else {
-    sections.push(formatBlock("bridge", ["healthy (no degradation events)"]));
-  }
-
-  process.stdout.write(sections.join("\n"));
-  return 0;
+  const report = await buildStatusReport();
+  if (argv.includes("--json")) process.stdout.write(JSON.stringify(report, null, 2) + "\n");
+  else process.stdout.write(renderStatusReport(report));
+  return Object.keys(report.view_errors).length > 0 && report.dispatch_lifecycle.total === 0 && report.ready_tasks.count === 0 ? 1 : 0;
 };
