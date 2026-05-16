@@ -64,6 +64,12 @@ export type DirectiveEffectivenessRow = {
   dispatch_count: number;
   /** Latest action_scored residual on the root (null if none). */
   latest_residual: number | null;
+  /** Event id of the action_scored row that produced `latest_residual`.
+   *  Surfaced so downstream credit traversal (k_555 four-link: outcome →
+   *  retrieval → posterior mutation → credit) can cite the underlying
+   *  observation rather than the projection row. Null when no
+   *  action_scored has landed on this directive yet. */
+  latest_residual_event_id: string | null;
   /** Time from directive_opened to terminal event (ms); null when
    *  still in flight. */
   time_to_terminal_ms: number | null;
@@ -113,14 +119,16 @@ export const classifyDirective = (
     )
     .get(directiveId) as { c: number }).c;
 
+  // Pull `id` alongside `residual` so context_refs can cite the underlying
+  // action_scored row in any downstream credit emission (k_555 spine).
   const latestResidualRow = db
     .query(
-      `SELECT residual FROM events
+      `SELECT id, residual FROM events
        WHERE kind = 'action_scored' AND directive_id = ?
          AND residual IS NOT NULL
        ORDER BY ts DESC, rowid DESC LIMIT 1`,
     )
-    .get(directiveId) as { residual: number } | null;
+    .get(directiveId) as { id: string; residual: number } | null;
 
   // Terminal event on the ROOT task. We treat the FIRST terminal row for
   // the root as authoritative — cascade-emitted commits land later.
@@ -169,6 +177,7 @@ export const classifyDirective = (
     refinement_edge_count: refinementCount,
     dispatch_count: dispatchCount,
     latest_residual: latestResidualRow?.residual ?? null,
+    latest_residual_event_id: latestResidualRow?.id ?? null,
     time_to_terminal_ms: timeToTerminalMs,
   };
 };
