@@ -11,6 +11,7 @@ import { resolveDbPath } from "../runtime/state_paths";
 import { gatherTrustMetrics, type TrustMetrics } from "./trust";
 import { aggregateVerify } from "./verify";
 import { OWNER_GATED_PATH_PATTERNS } from "../runtime/owner_gate";
+import { EVENT_KINDS } from "../substrate/event_kinds";
 
 const CSI = "\x1b[";
 const CLEAR_SCREEN = `${CSI}2J`;
@@ -182,37 +183,14 @@ const VIEWS: Array<{ key: ViewKey; label: string; hotkey: string }> = [
   { key: "diagnostics", label: "Diagnostics", hotkey: "6" },
 ];
 
-const NARRATIVE_KINDS = new Set([
-  "directive_opened",
-  "directive_amended",
-  "task_node_opened",
-  "task_edge_recorded",
-  "action_predicted",
-  "action_scored",
-  "task_closure_audited",
-  "task_committed",
-  "task_failed",
-  "task_abandoned",
-  "knowledge_candidate",
-  "knowledge_promoted",
-  "knowledge_synthesized",
-  "lesson_extracted",
-  "contract_amendment_proposed",
-  "owner_input_required",
-  "hidl_action_required",
-  "owner_decision_recorded",
-  "dispatcher_violation",
-  "bridge_failed",
-  "auto_apply_signaled",
-  "applied_change_committed",
-  "applied_change_failed",
-  "supervisor_intervention_recorded",
-  "bridge_health_degraded",
-  "bridge_health_recovered",
-  "irreversible_effect_recorded",
-  "pathology_budget_debited",
-  "pathology_budget_exhausted",
-]);
+// Audit #S amendment K03AH142 (owner-approved 2026-05-16): derive NARRATIVE_KINDS
+// from the canonical EVENT_KINDS registry instead of hand-maintaining a parallel
+// Set that drifts. cli/observe.ts already derives its NARRATIVE_KINDS the same
+// way; watch.ts now mirrors that contract. Adding `narrative:true` to a new
+// kind in event_kinds.ts surfaces it here automatically.
+const NARRATIVE_KINDS = new Set(
+  Object.entries(EVENT_KINDS).filter(([, meta]) => meta.narrative).map(([kind]) => kind),
+);
 
 const DIAGNOSTIC_KINDS = [
   "dispatcher_violation",

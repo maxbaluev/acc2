@@ -266,6 +266,11 @@ describe("derived sets match their pre-unification shape", () => {
       "applied_change_failed",
       "dispatcher_violation",
       "bridge_failed",
+      // Auto-share-knowledge directive (f392277, owner-approved 2026-05-16):
+      // cross-terminal observers + orchestrator inline chat see brain-authored
+      // knowledge as it lands — completes the two-sided merger surface.
+      "knowledge_candidate",
+      "knowledge_synthesized",
     ]);
     const derived = new Set(MIRROR_INLINE_EVENT_TYPES);
     expect(derived.size).toBe(expected.size);
