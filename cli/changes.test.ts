@@ -49,7 +49,7 @@ const insertEvent = (db: Database, fields: {
 
 describe("acc changes", () => {
   test("builds a chronological actual-change feed with directive/task context", () => {
-    const db = openDb(`:memory:changes-${Math.random()}`);
+    const db = openDb(":memory:");
     insertEvent(db, { id: "d_open", kind: "directive_opened", ts: ts(55), payload: { directive_text: "ship observability surfaces" } });
     insertEvent(db, { id: "t_open", kind: "task_node_opened", ts: ts(54), payload: { goal: "implement acc changes" } });
     insertEvent(db, { id: "proposal_1", kind: "contract_amendment_proposed", ts: ts(50), payload: { target_resource: "repo:cli/changes.ts" } });
@@ -147,7 +147,7 @@ describe("acc changes", () => {
   });
 
   test("invalid windows return null", () => {
-    const db = openDb(`:memory:changes-invalid-${Math.random()}`);
+    const db = openDb(":memory:");
     expect(buildChangesFeed(db, { window: "soon" })).toBeNull();
   });
 });
