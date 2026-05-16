@@ -11,6 +11,8 @@ import {
   inFlightDirectivesFromSql,
   findCrossDirectiveConflict,
   computeBrainDispatchCap,
+  isSchedulerDraining,
+  setSchedulerDraining,
 } from "./task_scheduler";
 import { FIXTURE_D_DIRECTIVE_TEXT, openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { emitEvent } from "./events";
@@ -133,6 +135,27 @@ describe("task_scheduler", () => {
       expect(tick.dispatched).toContain(childA);
       expect(tick.dispatched).not.toContain(childB);
     } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("scheduler drain fences new admission without failing ready tasks", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-drain-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      const { taskId } = await openFixtureDCountTodos(db, tempDir);
+      setSchedulerDraining(true);
+      expect(isSchedulerDraining()).toBe(true);
+      const tick = await schedulerTick(db, { fixtureTargetPath: tempDir });
+      expect(tick.dispatched).toEqual([]);
+      expect(tick.skipped_draining).toContain(taskId);
+      const terminal = db
+        .query("SELECT COUNT(*) AS c FROM events WHERE task_id = ? AND kind IN ('task_failed','dispatcher_violation','task_committed')")
+        .get(taskId) as { c: number };
+      expect(terminal.c).toBe(0);
+    } finally {
+      setSchedulerDraining(false);
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 60_000);

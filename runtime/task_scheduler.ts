@@ -69,6 +69,8 @@ export type SchedulerTick = {
   skipped_recipe: string[];
   skipped_inline: string[];
   skipped_blocked: string[];
+  /** Tasks not admitted because the daemon is in graceful restart drain. */
+  skipped_draining: string[];
   /** Tasks deferred because a `mutual_exclusion` or `resource_conflict`
    *  interference edge points at an in-flight peer directive. The scheduler
    *  emits `task_deferred_for_interference` for each entry here. */
@@ -196,6 +198,18 @@ const IN_FLIGHT: Map<string, Promise<unknown>> = new Map();
 // concurrency check (`findDeferringConflict`).
 const IN_FLIGHT_DIRECTIVE: Map<string, string> = new Map();
 const IN_FLIGHT_PARENT: Map<string, string | null> = new Map();
+let SCHEDULER_DRAINING = false;
+
+/** Fence scheduler admission during daemon restart drain. Existing dispatches
+ *  keep running; new ready tasks stay ready and are picked up by the next
+ *  daemon generation after boot recovery reconciles any unclosed leases. */
+export const setSchedulerDraining = (draining: boolean): void => {
+  SCHEDULER_DRAINING = draining;
+};
+
+export const isSchedulerDraining = (): boolean => SCHEDULER_DRAINING;
+
+export const inFlightDispatchTaskIds = (): string[] => Array.from(IN_FLIGHT.keys());
 
 const refinementParent = (db: Database, task: TaskNode): string | null => {
   if (task.parent_id) return task.parent_id;
@@ -264,6 +278,19 @@ export const schedulerTick = async (
     ? Number.MAX_SAFE_INTEGER
     : Math.max(1, rawPerDir ?? Math.ceil(maxConcurrent / 2));
   const ready = readyTasks(db, opts.directiveId);
+  if (SCHEDULER_DRAINING) {
+    return {
+      dispatched: [],
+      in_flight: Array.from(IN_FLIGHT.keys()),
+      skipped_concurrency_cap: [],
+      skipped_recipe: [],
+      skipped_inline: [],
+      skipped_blocked: [],
+      skipped_draining: ready.map((task) => task.id),
+      skipped_interference: [],
+      skipped_failure_capped: [],
+    };
+  }
 
   // Branch-competition lane: when sibling refinement branches expose
   // trigger_residual / expected_residual_delta, prefer the branch with the
@@ -566,6 +593,7 @@ export const schedulerTick = async (
     skipped_recipe: skippedRecipe,
     skipped_inline: skippedInline,
     skipped_blocked: skippedBlocked,
+    skipped_draining: [],
     skipped_interference: skippedInterference,
     skipped_failure_capped: skippedFailureCapped,
   };
@@ -639,6 +667,7 @@ export const _resetSchedulerForTests = (): void => {
   // here so the next test's brain dispatch isn't artificially capped.
   IN_FLIGHT_BRAIN.clear();
   GATE_NOTIFIED.clear();
+  SCHEDULER_DRAINING = false;
 };
 
 /** Await every in-flight dispatch tracked in the process-local IN_FLIGHT
@@ -650,11 +679,21 @@ export const _resetSchedulerForTests = (): void => {
  *  the registry shrinks naturally as each dispatch resolves. The function
  *  is safe to call when nothing is in flight (Promise.all on []) and may
  *  be called repeatedly. */
-export const drainInFlightDispatches = async (): Promise<void> => {
+export const drainInFlightDispatches = async (
+  opts: { timeoutMs?: number } = {},
+): Promise<{ completed: boolean; timed_out_task_ids: string[] }> => {
   // Snapshot first — IN_FLIGHT mutates as promises resolve.
-  const snapshot = Array.from(IN_FLIGHT.values());
-  if (snapshot.length === 0) return;
-  await Promise.all(snapshot);
+  const snapshot = Array.from(IN_FLIGHT.entries());
+  if (snapshot.length === 0) return { completed: true, timed_out_task_ids: [] };
+  const allSettled = Promise.allSettled(snapshot.map(([, promise]) => promise));
+  if (opts.timeoutMs === undefined) {
+    await allSettled;
+    return { completed: true, timed_out_task_ids: [] };
+  }
+  const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), opts.timeoutMs));
+  const result = await Promise.race([allSettled, timeout]);
+  if (result !== "timeout") return { completed: true, timed_out_task_ids: [] };
+  return { completed: false, timed_out_task_ids: Array.from(IN_FLIGHT.keys()) };
 };
 
 // ── Multi-process in-flight detection (SQL-backed) ────────────────────

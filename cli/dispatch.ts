@@ -11,6 +11,9 @@ import {
   readAdminToken, readDaemonLock,
 } from "./rpc";
 
+const RESTART_DRAIN_BUDGET_MS = 30_000;
+const RESTART_DRAIN_WAIT_MS = RESTART_DRAIN_BUDGET_MS + 15_000;
+
 const usage = (): string => `acc — v2 thin CLI
 
   acc init [--yes]                Fresh-install bootstrap (state dir, admin token,
@@ -259,16 +262,26 @@ const daemonStart = async (): Promise<number> => {
   return 0;
 };
 
-const daemonStop = async (): Promise<number> => {
+const daemonStop = async (opts: { drainBudgetMs?: number } = {}): Promise<number> => {
   const base = auxBaseUrl();
   if (!base) { console.log("daemon not running"); return 0; }
   const token = readAdminToken();
   if (!token) { console.error("admin token file missing — cannot stop daemon safely"); return 1; }
-  // rpcPostAuth applies SHUTDOWN_TIMEOUT_MS (10s) implicitly via the URL
-  // resolver — a wedged daemon now fails the CLI fast instead of hanging.
-  const reply = await rpcPostAuth<{ ok?: boolean; error?: string }>(`${base}/shutdown`, token, {});
+  const body = typeof opts.drainBudgetMs === "number"
+    ? { drain_budget_ms: opts.drainBudgetMs }
+    : {};
+  const timeoutMs = typeof opts.drainBudgetMs === "number"
+    ? opts.drainBudgetMs + 10_000
+    : undefined;
+  const reply = await rpcPostAuth<{ ok?: boolean; error?: string; drain_budget_ms?: number }>(
+    `${base}/shutdown`,
+    token,
+    body,
+    { timeoutMs },
+  );
   if (!reply.ok) { console.error(`shutdown refused: ${reply.error}`); return 1; }
-  console.log("daemon shutdown requested");
+  const drain = typeof reply.drain_budget_ms === "number" ? ` drain_budget_ms=${reply.drain_budget_ms}` : "";
+  console.log(`daemon shutdown requested${drain}`);
   return 0;
 };
 
@@ -286,13 +299,20 @@ const daemonStatus = async (): Promise<number> => {
 const daemonRestart = async (): Promise<number> => {
   const wasRunning = auxBaseUrl();
   if (wasRunning) {
-    const stopCode = await daemonStop();
+    const stopCode = await daemonStop({ drainBudgetMs: RESTART_DRAIN_BUDGET_MS });
     if (stopCode !== 0) return stopCode;
-    // Poll until the old daemon's lock + port are clear (up to 10s).
-    const stopDeadline = Date.now() + 10_000;
+    // Poll through the daemon's graceful drain budget before considering the
+    // old generation gone. Starting early can split-brain with a still-draining
+    // daemon and lose in-flight opencode subprocesses.
+    const stopDeadline = Date.now() + RESTART_DRAIN_WAIT_MS;
+    let oldCleared = false;
     while (Date.now() < stopDeadline) {
-      if (!auxBaseUrl()) break;
+      if (!auxBaseUrl()) { oldCleared = true; break; }
       await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!oldCleared && auxBaseUrl()) {
+      console.error(`daemon restart timed out waiting for old daemon drain (${RESTART_DRAIN_WAIT_MS}ms)`);
+      return 1;
     }
   }
   // Clean any lingering stale lock from a killed daemon.
