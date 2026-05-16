@@ -623,7 +623,11 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
 
   const feasibleRoutes: DispatchRoute[] = ["opencode_brain"];
   if (recipe && recipeRouteReason) feasibleRoutes.push("substrate_replay");
-  if (matchedInlinePatterns && matchedInlinePatterns.length > 0) feasibleRoutes.push("claude_inline");
+  // Hard-task classifier (brain amendment HVEQA85G, 2026-05-16): even when a
+  // target file matches a low-risk inline pattern, force routing to the brain
+  // when the task itself is hard. Inline lane should never absorb strategic
+  // work just because the file extension is .ts.
+  if (!hardness.is_hard && matchedInlinePatterns && matchedInlinePatterns.length > 0) feasibleRoutes.push("claude_inline");
 
   // Route availability still fails closed (no recipe/no inline knowledge means
   // no such lane), but the selected feasible lane is now the highest-scored
