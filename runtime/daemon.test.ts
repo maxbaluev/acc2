@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import { startDaemon, stopDaemon, type DaemonHandle } from "./daemon";
+import { isSchedulerDraining } from "./task_scheduler";
 
 // Tight daemon-only band, disjoint from sibling test files.
 // mcp ∈ [30000, 31000), aux ∈ [31000, 32000) — keeps both inside 16-bit range
@@ -111,10 +112,14 @@ describe("startDaemon — boot + health + shutdown", () => {
     try { await fetch(`http://127.0.0.1:${auxPort}/health`); } catch { failed = true; }
     expect(failed).toBe(true);
 
-    // Reopen the db (fresh cache slot) and confirm daemon_shutdown landed.
+    // Reopen the db (fresh cache slot) and confirm drain + shutdown landed.
     const db = openDb(tmp.dbPath);
-    const row = db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'daemon_shutdown'").get() as { n: number };
-    expect(row.n).toBeGreaterThanOrEqual(1);
+    const shutdown = db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'daemon_shutdown'").get() as { n: number };
+    const drainStarted = db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'restart_drain_started'").get() as { n: number };
+    const drainCompleted = db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'restart_drain_completed'").get() as { n: number };
+    expect(shutdown.n).toBeGreaterThanOrEqual(1);
+    expect(drainStarted.n).toBeGreaterThanOrEqual(1);
+    expect(drainCompleted.n).toBeGreaterThanOrEqual(1);
   });
 
   test("second-instance attempt under the same socket lock fails fast", async () => {
@@ -154,6 +159,7 @@ describe("startDaemon — boot + health + shutdown", () => {
     const body = (await res.json()) as { ok?: boolean; status?: string };
     expect(body.ok).toBe(true);
     expect(body.status).toBe("shutting_down");
+    expect(isSchedulerDraining()).toBe(true);
 
     // Give the setTimeout a beat to fire.
     await new Promise((r) => setTimeout(r, 200));
@@ -341,4 +347,253 @@ describe("startDaemon — boot + health + shutdown", () => {
       else process.env.ACC2_AMENDMENT_TICK_MS = prevTick;
     }
   }, 5_000);
+});
+
+// ── Amendment 8EAKQCJW5D — bounded graceful drain on shutdown ────────
+//
+// The daemon's stop function now accepts a per-call drain budget; the
+// /shutdown HTTP route accepts that budget from the request body; the
+// `daemon_shutdown` payload carries `drained_count` + `interrupted_count`
+// so operators can see how many in-flight dispatches finished cleanly vs
+// were force-killed. Boot recovery (reconcileOrphanedDispatches) remains
+// the deterministic backstop for any leases left after a force-kill —
+// already wired by amendment HJFTSQ4V2.
+
+const parsePayload = (raw: string): Record<string, unknown> => {
+  try { return JSON.parse(raw) as Record<string, unknown>; } catch { return {}; }
+};
+
+describe("bounded graceful drain (amendment 8EAKQCJW5D)", () => {
+  let handle: DaemonHandle | null = null;
+  let tmp = mkTmp();
+
+  beforeEach(() => { tmp = mkTmp(); });
+  afterEach(async () => { await cleanup(handle, tmp); handle = null; });
+
+  test("default drain budget surfaces in restart_drain_started + daemon_shutdown payloads", async () => {
+    const ports = pickPortPair();
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+    // No in-flight dispatches → drain completes immediately. The payload
+    // shape is what we're proving here; budget honoured = budget echoed.
+    await stopDaemon(handle);
+    handle = null;
+
+    const db = openDb(tmp.dbPath);
+    const started = db
+      .query("SELECT payload FROM events WHERE kind = 'restart_drain_started' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(started).toBeTruthy();
+    const startedPayload = parsePayload(started!.payload);
+    expect(startedPayload.timeout_ms).toBe(30_000); // default RESTART_DRAIN_TIMEOUT_MS
+    expect(startedPayload.in_flight_count).toBe(0);
+    expect(Array.isArray(startedPayload.in_flight_task_ids)).toBe(true);
+
+    const shutdown = db
+      .query("SELECT payload FROM events WHERE kind = 'daemon_shutdown' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(shutdown).toBeTruthy();
+    const shutdownPayload = parsePayload(shutdown!.payload);
+    expect(shutdownPayload.drain_budget_ms).toBe(30_000);
+    expect(shutdownPayload.drained_count).toBe(0);
+    expect(shutdownPayload.interrupted_count).toBe(0);
+    expect(shutdownPayload.in_flight_count_at_start).toBe(0);
+    expect(typeof shutdownPayload.drain_elapsed_ms).toBe("number");
+  });
+
+  test("stopDaemon accepts a per-call drain budget and echoes it", async () => {
+    const ports = pickPortPair();
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+    // Pick a non-default budget so we can prove it threaded through.
+    await stopDaemon(handle, 7_777);
+    handle = null;
+
+    const db = openDb(tmp.dbPath);
+    const started = db
+      .query("SELECT payload FROM events WHERE kind = 'restart_drain_started' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(parsePayload(started!.payload).timeout_ms).toBe(7_777);
+
+    const shutdown = db
+      .query("SELECT payload FROM events WHERE kind = 'daemon_shutdown' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(parsePayload(shutdown!.payload).drain_budget_ms).toBe(7_777);
+  });
+
+  test("budget == 0 takes the immediate-kill path and still emits the drain pair", async () => {
+    const ports = pickPortPair();
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+    const t0 = Date.now();
+    await stopDaemon(handle, 0);
+    const elapsed = Date.now() - t0;
+    handle = null;
+    // With nothing in flight, immediate-kill returns near-instantly.
+    expect(elapsed).toBeLessThan(2_000);
+
+    const db = openDb(tmp.dbPath);
+    const started = db
+      .query("SELECT payload FROM events WHERE kind = 'restart_drain_started' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(parsePayload(started!.payload).timeout_ms).toBe(0);
+    const shutdown = db
+      .query("SELECT payload FROM events WHERE kind = 'daemon_shutdown' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(parsePayload(shutdown!.payload).drain_budget_ms).toBe(0);
+  });
+
+  test("drain finishes early when nothing is in flight (no timed_out event)", async () => {
+    const ports = pickPortPair();
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+    // Generous budget — drain should still return in well under 1s because
+    // IN_FLIGHT is empty (the helper short-circuits on snapshot.length === 0).
+    const t0 = Date.now();
+    await stopDaemon(handle, 60_000);
+    const elapsed = Date.now() - t0;
+    handle = null;
+    expect(elapsed).toBeLessThan(5_000);
+
+    const db = openDb(tmp.dbPath);
+    const completed = db
+      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'restart_drain_completed'")
+      .get() as { n: number };
+    const timedOut = db
+      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'restart_drain_timed_out'")
+      .get() as { n: number };
+    expect(completed.n).toBeGreaterThanOrEqual(1);
+    expect(timedOut.n).toBe(0);
+  });
+
+  test("POST /shutdown accepts drain_budget_ms from the request body and echoes it", async () => {
+    const ports = pickPortPair();
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+    const adminToken = handle.adminToken;
+    const auxPort = handle.auxPort;
+    const dbPath = tmp.dbPath;
+
+    const res = await fetch(`http://127.0.0.1:${auxPort}/shutdown`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${adminToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ drain_budget_ms: 4_242 }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok?: boolean; status?: string; drain_budget_ms?: number };
+    expect(body.ok).toBe(true);
+    expect(body.status).toBe("shutting_down");
+    expect(body.drain_budget_ms).toBe(4_242);
+
+    // Wait for the scheduled stop to fire and emit the events.
+    await new Promise((r) => setTimeout(r, 400));
+    handle = null;
+
+    const db = openDb(dbPath);
+    const started = db
+      .query("SELECT payload FROM events WHERE kind = 'restart_drain_started' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(parsePayload(started!.payload).timeout_ms).toBe(4_242);
+    const shutdown = db
+      .query("SELECT payload FROM events WHERE kind = 'daemon_shutdown' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(parsePayload(shutdown!.payload).drain_budget_ms).toBe(4_242);
+  });
+
+  test("POST /shutdown without drain_budget_ms falls back to the default budget", async () => {
+    const ports = pickPortPair();
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+    const adminToken = handle.adminToken;
+    const auxPort = handle.auxPort;
+    const dbPath = tmp.dbPath;
+
+    const res = await fetch(`http://127.0.0.1:${auxPort}/shutdown`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { drain_budget_ms?: number };
+    expect(body.drain_budget_ms).toBe(30_000);
+
+    await new Promise((r) => setTimeout(r, 400));
+    handle = null;
+
+    const db = openDb(dbPath);
+    const started = db
+      .query("SELECT payload FROM events WHERE kind = 'restart_drain_started' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(parsePayload(started!.payload).timeout_ms).toBe(30_000);
+  });
+});
+
+// ── Drain-budget exceeded: structural assertions ─────────────────────
+//
+// We deliberately do NOT install a `mock.module(...)` stub for
+// task_scheduler / bridge here — Bun's mock.module is process-global and
+// leaks into every test suite that imports either module, silently
+// breaking scheduler + fixture suites. Instead we cover the
+// budget-exceeded path through (a) the integer-math invariant that the
+// daemon emits in every shutdown payload (drained_count +
+// interrupted_count === in_flight_count_at_start), and (b) the symbolic
+// presence of the killed_opencode_procs counter on every daemon_shutdown
+// row regardless of which branch the drain took.
+
+describe("daemon_shutdown carries the full drain accounting (amendment 8EAKQCJW5D)", () => {
+  let handle: DaemonHandle | null = null;
+  let tmp = mkTmp();
+
+  beforeEach(() => { tmp = mkTmp(); });
+  afterEach(async () => { await cleanup(handle, tmp); handle = null; });
+
+  test("payload exposes drained_count + interrupted_count + killed_opencode_procs (force-kill accounting fields)", async () => {
+    const ports = pickPortPair();
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+    await stopDaemon(handle, 12_345);
+    handle = null;
+
+    const db = openDb(tmp.dbPath);
+    const shutdown = db
+      .query("SELECT payload FROM events WHERE kind = 'daemon_shutdown' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(shutdown).toBeTruthy();
+    const payload = parsePayload(shutdown!.payload);
+    // All accounting fields present so operators can read the shutdown
+    // event and tell "how many drained vs how many got force-killed".
+    expect(payload).toHaveProperty("drained_count");
+    expect(payload).toHaveProperty("interrupted_count");
+    expect(payload).toHaveProperty("killed_opencode_procs");
+    expect(payload).toHaveProperty("in_flight_count_at_start");
+    expect(payload).toHaveProperty("drain_budget_ms");
+    expect(payload).toHaveProperty("drain_elapsed_ms");
+    // Integer math invariant: every in-flight dispatch is accounted for
+    // either as drained-cleanly or interrupted-by-budget.
+    expect(
+      (payload.drained_count as number) + (payload.interrupted_count as number),
+    ).toBe(payload.in_flight_count_at_start as number);
+    // Budget threading: the per-call argument is reflected in the
+    // shutdown event so operators see exactly which budget was honoured.
+    expect(payload.drain_budget_ms).toBe(12_345);
+    // killAllLiveOpencodeProcs always runs after the drain (regardless of
+    // completed vs timed_out); on a clean shutdown the counter is 0.
+    expect(payload.killed_opencode_procs).toBe(0);
+  });
 });

@@ -43,7 +43,12 @@ import {
 import { createExternalIngressState, handleExternalPush, type ExternalIngressState } from "./external_ingress";
 import type { FastMCP } from "fastmcp";
 import { applyAmendment, findUnappliedAmendments } from "./amendment_handler";
-import { schedulerLoop } from "./task_scheduler";
+import {
+  drainInFlightDispatches,
+  inFlightDispatchTaskIds,
+  schedulerLoop,
+  setSchedulerDraining,
+} from "./task_scheduler";
 import { rollingReviewerWorkerTick } from "./rolling_reviewer";
 import { fatherIterate } from "./father";
 import { EmbeddingIndex } from "./embedding_index";
@@ -113,7 +118,10 @@ export type DaemonHandle = {
   /** In-memory embedding index rebuilt at boot from embedding_index_view.
    *  Used by substrate.search for cosine × posterior retrieval. */
   index: EmbeddingIndex;
-  stop: () => Promise<void>;
+  /** Stop the daemon. `drainBudgetMs` is the bounded graceful drain budget
+   *  for in-flight brain dispatches (default `RESTART_DRAIN_TIMEOUT_MS`,
+   *  `0` for immediate kill). See `stop` doc comment for full semantics. */
+  stop: (drainBudgetMs?: number) => Promise<void>;
 };
 
 const ensureDir = (path: string): void => {
@@ -283,6 +291,8 @@ const supervisedTick = (
   };
 };
 
+const RESTART_DRAIN_TIMEOUT_MS = 30_000;
+
 const countEvents = (db: Database): number => {
   const row = db.query("SELECT COUNT(*) AS n FROM events").get() as { n: number } | null;
   return row?.n ?? 0;
@@ -305,6 +315,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   const socketFile = opts.socketFile ?? resolveSocketFile();
   const tokenFile = opts.tokenFile ?? resolveTokenFile();
   const host = opts.host ?? "127.0.0.1";
+  setSchedulerDraining(false);
 
   // The bridge spawns opencode subprocesses that need to reach BACK into
   // this daemon's MCP server (substrate.* / runtime.* tool surface). The
@@ -1049,26 +1060,98 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   let auxServer: Server | null = null;
   let mcpServer: FastMCP | null = null;
   let stopped = false;
-  const stop = async (): Promise<void> => {
+  /** Bounded graceful drain on shutdown (amendment 8EAKQCJW5D).
+   *
+   *  `drainBudgetMs` controls the per-call drain budget:
+   *   - `undefined` → default `RESTART_DRAIN_TIMEOUT_MS` graceful drain.
+   *   - `0`         → immediate kill (no drain wait). Backward-compat path
+   *                   for callers that need synchronous teardown (tests, the
+   *                   second-instance recovery path) — still emits the drain
+   *                   started/timed_out pair so observers see the choice.
+   *   - any positive value → bounded graceful drain.
+   *
+   *  The contract: stop accepting new scheduler dispatches → emit
+   *  `restart_drain_started` with the in-flight set + budget → wait for
+   *  every in-flight dispatch to finish OR the budget to expire → kill the
+   *  remaining live opencode procs → emit `daemon_shutdown` with
+   *  `drained_count` + `interrupted_count` so operators can see exactly how
+   *  many dispatches finished cleanly vs were force-killed. Boot recovery
+   *  (reconcileOrphanedDispatches) is the deterministic backstop for any
+   *  unclosed leases left after a force-kill. */
+  const stop = async (drainBudgetMs?: number): Promise<void> => {
     if (stopped) return;
     stopped = true;
-    // Kill any live opencode subprocesses BEFORE tearing down workers so
-    // brain dispatches cannot survive past daemon shutdown as orphans-to-init
-    // (the live evidence pattern that produced stale-MCP-URL handshake
-    // failures on the next daemon boot). SIGTERM first, SIGKILL at +1.5s.
+    const budgetMs = drainBudgetMs ?? RESTART_DRAIN_TIMEOUT_MS;
+    setSchedulerDraining(true);
+    const drainStartedAtMs = Date.now();
+    const inFlightAtStart = inFlightDispatchTaskIds();
+    const inFlightCountAtStart = inFlightAtStart.length;
+    try {
+      emitEvent(db, {
+        kind: "restart_drain_started",
+        substrate_origin: "substrate_auto",
+        payload: {
+          pid: process.pid,
+          timeout_ms: budgetMs,
+          in_flight_task_ids: inFlightAtStart,
+          in_flight_count: inFlightCountAtStart,
+        },
+      });
+    } catch (err) {
+      logger.debug({ where: "daemon.stop.emit_restart_drain_started", err: String(err) }, "db may already be closed");
+    }
+    for (const dispose of workers) dispose();
+    // Budget == 0 means "skip the wait, kill immediately". We still call the
+    // drain helper with timeoutMs=0 so the standard event pair is emitted —
+    // observers see exactly which path the shutdown took.
+    const drain = await drainInFlightDispatches({ timeoutMs: budgetMs });
+    const drainElapsedMs = Date.now() - drainStartedAtMs;
+    const interruptedTaskIds = drain.timed_out_task_ids;
+    const interruptedCount = interruptedTaskIds.length;
+    const drainedCount = Math.max(0, inFlightCountAtStart - interruptedCount);
+    try {
+      emitEvent(db, {
+        kind: drain.completed ? "restart_drain_completed" : "restart_drain_timed_out",
+        substrate_origin: "substrate_auto",
+        payload: {
+          pid: process.pid,
+          timeout_ms: budgetMs,
+          drain_elapsed_ms: drainElapsedMs,
+          in_flight_task_ids_at_start: inFlightAtStart,
+          timed_out_task_ids: interruptedTaskIds,
+          drained_count: drainedCount,
+          interrupted_count: interruptedCount,
+          recovery_action: drain.completed ? "none" : "kill_remaining_live_opencode_then_boot_recovery_repick",
+        },
+      });
+    } catch (err) {
+      logger.debug({ where: "daemon.stop.emit_restart_drain_finished", err: String(err) }, "db may already be closed");
+    }
+    // Only now terminate leftovers. Dispatches that completed during the drain
+    // have already deregistered their live opencode proc; boot recovery re-picks
+    // any killed task whose brain_dispatched lease remains unclosed.
+    let killedOpencodeProcs = 0;
     try {
       const { killAllLiveOpencodeProcs } = await import("./bridge/opencode");
-      const killed = killAllLiveOpencodeProcs();
-      if (killed > 0) logger.info({ killed_opencode_procs: killed }, "daemon shutdown — terminated live brain subprocesses");
+      killedOpencodeProcs = killAllLiveOpencodeProcs();
+      if (killedOpencodeProcs > 0) logger.info({ killed_opencode_procs: killedOpencodeProcs }, "daemon shutdown — terminated remaining brain subprocesses after drain");
     } catch (err) {
       logger.debug({ where: "daemon.stop.kill_opencode_procs", err: String(err) }, "killAllLiveOpencodeProcs import/call failed (best-effort)");
     }
-    for (const dispose of workers) dispose();
     try {
       emitEvent(db, {
         kind: "daemon_shutdown",
         substrate_origin: "substrate_auto",
-        payload: { pid: process.pid, uptime_ms: Date.now() - startedAtMs },
+        payload: {
+          pid: process.pid,
+          uptime_ms: Date.now() - startedAtMs,
+          drain_budget_ms: budgetMs,
+          drain_elapsed_ms: drainElapsedMs,
+          in_flight_count_at_start: inFlightCountAtStart,
+          drained_count: drainedCount,
+          interrupted_count: interruptedCount,
+          killed_opencode_procs: killedOpencodeProcs,
+        },
       });
     } catch (err) {
       logger.debug({ where: "daemon.stop.emit_shutdown", err: String(err) }, "db may already be closed");
@@ -1256,9 +1339,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
 };
 
 /** Programmatic shutdown — equivalent to SIGTERM but synchronous from the
- *  caller's perspective. Tests use this. */
-export const stopDaemon = async (handle: DaemonHandle): Promise<void> => {
-  await handle.stop();
+ *  caller's perspective. Tests use this. `drainBudgetMs` is forwarded to
+ *  `handle.stop` (see amendment 8EAKQCJW5D). */
+export const stopDaemon = async (
+  handle: DaemonHandle,
+  drainBudgetMs?: number,
+): Promise<void> => {
+  await handle.stop(drainBudgetMs);
 };
 
 // ── Auxiliary HTTP routing (non-MCP) ───────────────────────────────
@@ -1268,7 +1355,7 @@ const routeAux = async (
   db: Database,
   ingressState: ExternalIngressState,
   adminToken: string,
-  stop: () => Promise<void>,
+  stop: (drainBudgetMs?: number) => Promise<void>,
   startedAtMs: number,
   stateDbPath: string,
   mcpPort: number,
@@ -1360,8 +1447,35 @@ const routeAux = async (
     if (presented !== adminToken) {
       return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
     }
-    setTimeout(() => { void stop(); }, 50);
-    return Response.json({ ok: true, status: "shutting_down" });
+    // Amendment 8EAKQCJW5D: accept an optional `drain_budget_ms` from the
+    // request body so restart paths can request a longer/shorter graceful
+    // drain than the default. Absent / malformed body → use the default.
+    // Numeric values are clamped to a non-negative integer; 0 means
+    // "immediate kill". Anything else (string, null, missing) falls through
+    // to the default budget.
+    let drainBudgetMs: number | undefined = undefined;
+    try {
+      const ct = req.headers.get("content-type") ?? "";
+      if (ct.includes("application/json")) {
+        const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+        const raw = body?.drain_budget_ms;
+        if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) {
+          drainBudgetMs = Math.floor(raw);
+        }
+      }
+    } catch { /* swallow — fall through to default budget */ }
+    const requested = drainBudgetMs;
+    // Fence scheduler admission synchronously with shutdown acceptance.
+    // Waiting for the delayed stop() call leaves a restart race where a
+    // scheduler tick can admit fresh brain work after the operator already
+    // requested a drain.
+    setSchedulerDraining(true);
+    setTimeout(() => { void stop(requested); }, 50);
+    return Response.json({
+      ok: true,
+      status: "shutting_down",
+      drain_budget_ms: requested ?? RESTART_DRAIN_TIMEOUT_MS,
+    });
   }
 
   if (url.pathname === "/external/push") {
