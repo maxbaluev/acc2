@@ -261,6 +261,18 @@ const truncate = (s: string, max: number): string => {
   return plain.slice(0, Math.max(0, max - 3)) + "...";
 };
 
+/** Wrap a string into width-bounded plain lines (no ANSI). Used by the
+ *  expanded payload renderer so a 1.2KB lesson_extracted body renders as
+ *  multiple readable lines instead of one truncated row. */
+const wrapLine = (s: string, width: number): string[] => {
+  if (width <= 0) return [];
+  const plain = stripAnsi(String(s));
+  if (plain.length === 0) return [""];
+  const out: string[] = [];
+  for (let i = 0; i < plain.length; i += width) out.push(plain.slice(i, i + width));
+  return out;
+};
+
 const pad = (s: string, width: number): string => {
   const clipped = truncate(s, width);
   return clipped + " ".repeat(Math.max(0, width - visibleLength(clipped)));
@@ -595,11 +607,45 @@ export const renderPanelLines = (state: WatchState, view: ViewKey, cols: number)
     return lines;
   }
   if (view === "evidence") {
-    lines.push(`${H("Evidence")} promoted knowledge + artifact registry + lessons`);
-    for (const k of (state.knowledge ?? []).slice(0, 5)) lines.push(`${GREEN}${tech ? shortId(k.id) : "knowledge"}${RESET} score=${k.score.toFixed(2)} ${truncate(k.text, w - 24)}`);
-    for (const a of (state.artifacts ?? []).slice(0, 4)) lines.push(`${CYAN}${tech ? shortId(a.id) : "artifact"}${RESET} ${a.runtime} score=${a.score.toFixed(2)} ${truncate(a.name ?? a.id, w - 24)}`);
-    for (const e of latestNarrative(state).filter((e) => e.kind === "lesson_extracted" || e.kind === "contract_amendment_proposed").slice(0, 4)) lines.push(`${YELLOW}${e.kind}${RESET} ${truncate(payloadText(e.payload, 140), w - 18)}`);
-    if (lines.length === 1) lines.push("no promoted knowledge, artifacts, or lessons visible yet");
+    const knowledge = state.knowledge ?? [];
+    const artifacts = state.artifacts ?? [];
+    const evidenceEvents = latestNarrative(state).filter((e) => e.kind === "lesson_extracted" || e.kind === "contract_amendment_proposed");
+    const expanded = state.expanded === true;
+    lines.push(`${H("Evidence")} ${knowledge.length} knowledge · ${artifacts.length} artifacts · ${evidenceEvents.length} lessons/amendments  (j/k scroll · Enter expand)`);
+    if (knowledge.length > 0) {
+      lines.push("", `${H("Knowledge")} (top-K by posterior)`);
+      for (const k of knowledge) {
+        const head = `${GREEN}${tech ? shortId(k.id) : "knowledge"}${RESET} score=${k.score.toFixed(2)}${k.origin ? ` origin=${k.origin}` : ""}`;
+        if (expanded) {
+          lines.push(head);
+          for (const wrapped of wrapLine(k.text, w - 2)) lines.push(`  ${wrapped}`);
+        } else {
+          lines.push(`${head} ${truncate(k.text, w - 36)}`);
+        }
+      }
+    }
+    if (artifacts.length > 0) {
+      lines.push("", `${H("Code artifacts")} (top-K by posterior)`);
+      for (const a of artifacts) {
+        lines.push(`${CYAN}${tech ? shortId(a.id) : "artifact"}${RESET} ${a.runtime} score=${a.score.toFixed(2)} ${truncate(a.name ?? a.id, w - 28)}`);
+      }
+    }
+    if (evidenceEvents.length > 0) {
+      lines.push("", `${H("Recent lessons + amendments")}`);
+      for (const e of evidenceEvents) {
+        const head = `${YELLOW}${e.kind}${RESET}${tech ? ` ${shortId(e.event_id, 8)}` : ""}`;
+        const body = payloadText(e.payload, expanded ? 1200 : 140);
+        if (expanded) {
+          lines.push(head);
+          for (const wrapped of wrapLine(body, w - 2)) lines.push(`  ${wrapped}`);
+        } else {
+          lines.push(`${head} ${truncate(body, w - 24)}`);
+        }
+      }
+    }
+    if (knowledge.length === 0 && artifacts.length === 0 && evidenceEvents.length === 0) {
+      lines.push("no promoted knowledge, artifacts, or lessons visible yet");
+    }
     return lines;
   }
   if (view === "health") {
