@@ -149,6 +149,20 @@ const dispatchTask = async (
       }
     }
     const cls = classifyOwnerRenderingSignals(words, priorTexts);
+    if (cls.detected_language && cls.detected_language !== "en") {
+      await mcpCall("substrate.emit", {
+        kind: "owner_insight_candidate",
+        substrate_origin: "claude_root",
+        directive_id,
+        payload: {
+          field: "detected_language",
+          value: cls.detected_language,
+          confidence: cls.confidence,
+          claim: `Detected owner directive language '${cls.detected_language}' from dispatch text.`,
+          evidence: cls.evidence,
+        },
+      }).catch(() => null);
+    }
     if (Object.keys(cls.signals).length > 0) {
       // Only emit when at least one signal fired — silent observations
       // pollute the ledger without earning posterior.
