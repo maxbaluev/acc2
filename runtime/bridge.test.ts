@@ -13,7 +13,7 @@ import {
   spawnRealOpencode,
   V2_OPENCODE_MCP_SERVER_NAME,
   V2_MCP_TOOL_SURFACE,
-} from "./bridge";
+} from "./bridge/index";
 import { newId } from "./ids";
 
 afterAll(() => closeDb());

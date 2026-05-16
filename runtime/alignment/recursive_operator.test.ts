@@ -71,8 +71,7 @@ describe("alignment / recursive_operator (Principle 1)", () => {
     // inserts the brain bridge would no longer route through the substrate.
     const { readdirSync } = require("node:fs") as typeof import("node:fs");
     const bridgeDir = join(import.meta.dir, "..", "bridge");
-    const shimPath = join(import.meta.dir, "..", "bridge.ts");
-    const files = [shimPath, ...readdirSync(bridgeDir).map((f) => join(bridgeDir, f))];
+    const files = readdirSync(bridgeDir).map((f) => join(bridgeDir, f));
     let importsEmitEvent = false;
     for (const path of files) {
       if (!path.endsWith(".ts")) continue;

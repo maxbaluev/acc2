@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import { dispatchReadyTask } from "./task_dispatcher";
-import { opencodeQueryAdversarialCycle2, opencodeQueryHighResidual } from "./bridge";
+import { opencodeQueryAdversarialCycle2, opencodeQueryHighResidual } from "./bridge/index";
 import { readyTasks } from "./task_topology";
 import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { emitEvent } from "./events";

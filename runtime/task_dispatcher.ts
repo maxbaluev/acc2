@@ -26,7 +26,7 @@ import { emitEvent } from "./events";
 import { newId } from "./ids";
 import { composePrompt } from "./prompt_composer";
 import { decideDispatch } from "./dispatch_decider";
-import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge";
+import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge/index";
 import type { TaskNode } from "./task_topology";
 import { refinementDepth } from "./task_topology";
 import { getArtifact, applyResidualOutcome, recordArtifactKill, maybeRetire } from "./artifact_store";

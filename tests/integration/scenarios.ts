@@ -35,7 +35,7 @@ import { dispatchReadyTask } from "../../runtime/task_dispatcher";
 import {
   opencodeQueryHighResidual,
   opencodeQueryAdversarialCycle2,
-} from "../../runtime/bridge";
+} from "../../runtime/bridge/index";
 import { readyTasks, readDagForDirective } from "../../runtime/task_topology";
 import { extractSemanticDedup } from "../../substrate/extractors";
 import { distributeCredit } from "../../runtime/credit";
