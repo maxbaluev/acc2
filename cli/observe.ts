@@ -16,6 +16,7 @@
 // Claude-native background-task stdout: every emit becomes a notification.
 
 import { mcpCall, sseConnect } from "./rpc";
+import { EVENT_KINDS, MIRROR_INLINE_EVENT_TYPES } from "../substrate/event_kinds";
 
 // ── one-line formatter per event kind ──────────────────────────────
 
@@ -53,58 +54,16 @@ const FRAME_KINDS = new Set([
  *  Father heartbeats, daemon lifecycle, candidate confirm/contradict, sub-
  *  process spawn lifecycle, gate-decision audit rows, prompt budget) is
  *  noise from the operator's perspective. Bridge handshake / frames /
- *  subprocess detail are diagnostic surfaces, not narrative. */
-export const NARRATIVE_KINDS = new Set([
-  // Owner / directive
-  "directive_opened",
-  "directive_amended",
-  "owner_input_received",
-  "owner_input_required",
-  "owner_decision_recorded",
-  "hidl_action_required",
-  "owner_profile_recorded",
-  "owner_insight_candidate",
-  // DAG structure
-  "task_node_opened",
-  "task_edge_recorded",
-  // Strategic actions
-  "action_predicted",
-  "action_scored",
-  // Terminal states (always shown)
-  "task_committed",
-  "task_failed",
-  "task_abandoned",
-  "dispatcher_violation",
-  "irreversible_effect_recorded",
-  // Knowledge + recipe compounding signals
-  "knowledge_candidate",
-  "knowledge_promoted",
-  "knowledge_synthesized",
-  "recipe_extracted",
-  "code_artifact_promoted",
-  // Closure + learning loop
-  "task_closure_audited",
-  "lesson_extracted",
-  "contract_amendment_proposed",
-  // Application of lessons + amendments (Option D + Claude subagent executor)
-  "lesson_apply_requested",
-  "auto_apply_signaled",
-  "applied_change_committed",
-  "applied_change_failed",
-  "lesson_applied",
-  "contract_amendment_applied",
-  // Bridge failures only — successes are implied by action_predicted /
-  // task_committed downstream. We don't show the handshake fan-out.
-  "bridge_failed",
-  "bridge_stuck",
-  // Crisis + interference — narrative-level
-  "crisis_mode_engaged",
-  "crisis_mode_disengaged",
-  "stakeholder_conflict",
-  "stakeholder_conflict_detected",
-  "directive_interference_edge",
-  "directive_interference_cycle_detected",
-]);
+ *  subprocess detail are diagnostic surfaces, not narrative.
+ *
+ *  Derived from the canonical EVENT_KINDS registry's `narrative: true` flag
+ *  so the operator-stream filter cannot drift from the kind registry. To
+ *  add a kind to the narrative surface, set `narrative: true` on its entry
+ *  in `substrate/event_kinds.ts` — there is no parallel hand-maintained
+ *  list to update. */
+export const NARRATIVE_KINDS = new Set(
+  Object.entries(EVENT_KINDS).filter(([, meta]) => meta.narrative).map(([kind]) => kind),
+);
 
 const trunc = (s: string | undefined, n: number): string => {
   if (!s) return "";
@@ -736,8 +695,8 @@ const parseFlags = (argv: string[]): Record<string, string | boolean> => {
  *  surface to the operator inline per .claude/rules/orchestrator-runtime.md
  *  "Background command observability". `acc notify` is the CLI surface
  *  that subscribes to exactly this set. Sourced from the canonical
- *  registry's `mirror_inline: true` flag so the two cannot drift. */
-import { MIRROR_INLINE_EVENT_TYPES } from "../substrate/event_kinds";
+ *  registry's `mirror_inline: true` flag so the two cannot drift.
+ *  (Imported alongside EVENT_KINDS at the top of this module.) */
 
 /** `acc notify` — Claude Code chat-friendly event stream. Thin alias
  *  over `runTail` with the mirror-inline kind set pre-filled. Defaults

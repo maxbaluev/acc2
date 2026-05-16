@@ -13,6 +13,7 @@ import {
   MIRROR_INLINE_EVENT_TYPES,
   type EventKind,
 } from "./event_kinds";
+import { NARRATIVE_KINDS } from "../cli/observe";
 
 // ── helpers ────────────────────────────────────────────────────────
 
@@ -279,19 +280,43 @@ describe("derived sets match their pre-unification shape", () => {
     }
   });
 
+  test("NARRATIVE_KINDS is the operator-stream filter derived from the registry", () => {
+    // The operator's default `acc tail` / `acc events` narrative surface
+    // is derived from `EVENT_KINDS[k].narrative === true`. Pre-fix the
+    // list was a hand-maintained Set in `cli/observe.ts` that drifted
+    // whenever a new kind landed in the registry. Now there is one source
+    // of truth.
+    expect(NARRATIVE_KINDS.size).toBeGreaterThan(0);
+    // Pin a small load-bearing subset so accidental flag-flips show up.
+    expect(NARRATIVE_KINDS.has("directive_opened")).toBe(true);
+    expect(NARRATIVE_KINDS.has("task_node_opened")).toBe(true);
+    expect(NARRATIVE_KINDS.has("task_committed")).toBe(true);
+    // Bidirectional invariant: every member of NARRATIVE_KINDS is in
+    // EVENT_KINDS with narrative=true, and every entry with narrative=true
+    // is in NARRATIVE_KINDS — no drift possible in either direction.
+    for (const kind of NARRATIVE_KINDS) {
+      expect(kind in EVENT_KINDS).toBe(true);
+      expect(EVENT_KINDS[kind as EventKind].narrative).toBe(true);
+    }
+    for (const [kind, meta] of Object.entries(EVENT_KINDS)) {
+      expect(NARRATIVE_KINDS.has(kind)).toBe(meta.narrative);
+    }
+  });
+
   test("EventKind union is exactly keyof typeof EVENT_KINDS", () => {
     // Compile-time identity is what we actually care about; runtime
     // verification is a smoke test that the derived `EventKind`
     // re-export from `substrate/types.ts` matches the registry's
     // keyspace.
     const keys = Object.keys(EVENT_KINDS);
-    // Each entry has all four flags.
+    // Each entry has all five flags.
     for (const k of keys) {
       const m = EVENT_KINDS[k];
       expect(typeof m.producer).toBe("string");
       expect(typeof m.embeddable).toBe("boolean");
       expect(typeof m.mirror_inline).toBe("boolean");
       expect(typeof m.health_metric).toBe("boolean");
+      expect(typeof m.narrative).toBe("boolean");
     }
     // Sanity: registry has at least the 108 canonical kinds from
     // docs/substrate-entity-map.md plus the two previously-missing
