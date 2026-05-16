@@ -728,7 +728,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     let embedderMarked = false;
     const embedderTick = setInterval(
       supervisedTick(db, "embedder", embedderIntervalMs, async () => {
-        await embedderWorkerTick(db, { batchSize: 20 });
+        const pendingEmbeddings = (db.query("SELECT COUNT(*) AS c FROM events WHERE embedding IS NULL").get() as { c: number }).c;
+        await embedderWorkerTick(db, { batchSize: pendingEmbeddings > 500 ? 200 : pendingEmbeddings > 100 ? 100 : 20 });
         if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
       }),
       embedderIntervalMs,
@@ -737,7 +738,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // waiting 10s.
     void (async () => {
       try {
-        await embedderWorkerTick(db, { batchSize: 20 });
+        const pendingEmbeddings = (db.query("SELECT COUNT(*) AS c FROM events WHERE embedding IS NULL").get() as { c: number }).c;
+        await embedderWorkerTick(db, { batchSize: pendingEmbeddings > 500 ? 200 : pendingEmbeddings > 100 ? 100 : 20 });
         recordWorkerTick("embedder");
       } catch (err) {
         logger.warn(
