@@ -153,7 +153,12 @@ const readDirectiveGoal = (db: Database, directiveId: string): string | null => 
   }
 };
 
-const readKnowledgeTopK = (db: Database, k: number, goalText?: string | null): Array<{ id: string; text: string; score: number }> => {
+const readKnowledgeTopK = (
+  db: Database,
+  k: number,
+  goalText?: string | null,
+  shapeMatchOnly = false,
+): Array<{ id: string; text: string; score: number }> => {
   // Recency fallback for the RETRIEVED KNOWLEDGE section: pulls recent
   // promoted knowledge candidates when the caller did NOT pre-compute a
   // reranker hit list (i.e. the embedding index is empty or the caller chose
@@ -193,10 +198,22 @@ const readKnowledgeTopK = (db: Database, k: number, goalText?: string | null): A
               json_extract(p.context_refs, '$[0]')
             )
        WHERE p.kind = 'knowledge_promoted'
+         AND (
+           ? = 0
+           OR (
+             ? IS NOT NULL AND (
+               json_extract(p.payload, '$.goal_shape') = ?
+               OR EXISTS (
+                 SELECT 1 FROM json_each(p.payload, '$.goal_shapes')
+                 WHERE value = ?
+               )
+             )
+           )
+         )
        ORDER BY shape_match DESC, p.ts DESC
        LIMIT ?`,
     )
-    .all(shape, shape, shape, k) as Array<Record<string, unknown>>;
+    .all(shape, shape, shape, shapeMatchOnly ? 1 : 0, shape, shape, shape, k) as Array<Record<string, unknown>>;
   const out: Array<{ id: string; text: string; score: number }> = [];
   for (const r of rows) {
     try {
@@ -853,16 +870,25 @@ const formatScoreRecord = (prefix: string, scores: Record<string, number> | unde
   return " " + entries.map(([k, v]) => `${prefix}:${k}=${v.toFixed(2)}`).join(" ");
 };
 
-const buildRetrievedKnowledgeSection = (hits: RetrievalHit[]): string => {
-  if (hits.length === 0) return "RETRIEVED KNOWLEDGE: (none)";
-  const lines: string[] = ["RETRIEVED KNOWLEDGE (top-K by embedding × posterior):"];
+const buildRetrievedKnowledgeSection = (
+  hits: RetrievalHit[],
+  goalShapeRows: Array<{ id: string; text: string; score: number }> = [],
+): string => {
+  if (hits.length === 0 && goalShapeRows.length === 0) return "RETRIEVED KNOWLEDGE: (none)";
+  const lines: string[] = ["RETRIEVED KNOWLEDGE (top-K by embedding × posterior plus goal-shape promoted rows):"];
+  const seen = new Set<string>();
   for (const h of hits) {
+    seen.add(h.event_id);
     const snippet = h.snippet.length > 0 ? h.snippet : "(no snippet)";
     const aspectAxes = formatScoreRecord("aspect", h.aspect_scores);
     const domainAxes = formatScoreRecord("domain", h.domain_scores);
     lines.push(
       `  [${h.event_id}] (rerank=${h.rerank_score.toFixed(2)} d=${h.distance.toFixed(3)} p=${h.posterior.toFixed(2)} origin=${h.origin}${aspectAxes}${domainAxes}) ${snippet}`,
     );
+  }
+  for (const r of goalShapeRows) {
+    if (seen.has(r.id)) continue;
+    lines.push(`  [${r.id}] (goal_shape score=${r.score.toFixed(2)}) ${r.text}`);
   }
   return lines.join("\n");
 };
@@ -963,7 +989,10 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   const knowledgeBody = opts.retrievalUnavailable
     ? `RETRIEVED KNOWLEDGE: (unavailable: ${opts.retrievalUnavailable.reason})`
     : opts.retrievedKnowledge && opts.retrievedKnowledge.hits.length > 0
-      ? buildRetrievedKnowledgeSection(opts.retrievedKnowledge.hits)
+      ? buildRetrievedKnowledgeSection(
+          opts.retrievedKnowledge.hits,
+          readKnowledgeTopK(db, 4, directiveText ?? task.goal, true),
+        )
       : buildKnowledgeSection(readKnowledgeTopK(db, 8, directiveText ?? task.goal));
   candidates.push({ name: "retrieved_knowledge", p: 1, body: knowledgeBody });
 

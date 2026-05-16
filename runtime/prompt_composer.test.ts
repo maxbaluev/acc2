@@ -130,11 +130,17 @@ describe("prompt_composer", () => {
   test("when retrievedKnowledge is supplied, RETRIEVED KNOWLEDGE renders the rerank lines instead of recency", () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
-    // Seed a recency stand-in entry; rerank must override it.
+    // Seed a recency stand-in entry; rerank must override it, but
+    // goal-shape promoted knowledge is still appended as contract context.
     emitEvent(db, {
       kind: "knowledge_promoted",
       substrate_origin: "substrate_auto",
       payload: { text: "RECENCY_FALLBACK_STAND_IN", score: 0.7 },
+    });
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      payload: { text: "GOAL_SHAPE_WITH_RERANK", score: 0.6, goal_shape: goalShape("Count files containing TODO substring") },
     });
     const composed = composePrompt(db, {
       taskId,
@@ -159,6 +165,7 @@ describe("prompt_composer", () => {
       },
     });
     expect(composed.text).toContain("RERANK_FROM_INDEX_TOPHIT");
+    expect(composed.text).toContain("GOAL_SHAPE_WITH_RERANK");
     expect(composed.text).toContain("aspect:claim_vector=0.80");
     expect(composed.text).toContain("domain:accint_knowledge_efficiency=1.00");
     expect(composed.text).not.toContain("RECENCY_FALLBACK_STAND_IN");
