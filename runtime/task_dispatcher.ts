@@ -21,7 +21,7 @@
 // is uniform regardless of where the event originated.
 
 import type { Database } from "bun:sqlite";
-import type { Event, JsonValue, SandboxDecl } from "../substrate/types";
+import type { Event, JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
 import { composePrompt } from "./prompt_composer";
@@ -30,7 +30,7 @@ import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge/i
 import type { TaskNode } from "./task_topology";
 import { refinementDepth } from "./task_topology";
 import { getArtifact, applyResidualOutcome, recordArtifactKill, maybeRetire } from "./artifact_store";
-import { runBunArtifact } from "./runtimes/bun";
+import { runArtifactForRuntime } from "./runtimes";
 import { nowIso } from "./ids";
 import { distributeCredit } from "./credit";
 import { findRecipeMatch, replayRecipe } from "./recipe_replay";
@@ -620,10 +620,10 @@ export const dispatchReadyTask = async (
         target_path: ((predictedPayload as Record<string, unknown>).target_path as string) ?? deps.fixtureTargetPath ?? ".",
       } as JsonValue;
 
-      const actionObs = await runBunArtifact({
+      const actionObs = await runArtifactForRuntime({
         artifactId: actionArtifact.id,
         body: actionArtifact.body,
-        declaredSandbox: actionArtifact.declaredSandbox as Extract<SandboxDecl, { runtime: "bun" }>,
+        declaredSandbox: actionArtifact.declaredSandbox,
         inputs: actionInputs,
         emit: (ev) => {
           emitEvent(db, {
@@ -786,10 +786,10 @@ export const dispatchReadyTask = async (
         }
       } else {
         // Run the verifier on the observation.
-        const verifierObs = await runBunArtifact({
+        const verifierObs = await runArtifactForRuntime({
           artifactId: verifierArtifact.id,
           body: verifierArtifact.body,
-          declaredSandbox: verifierArtifact.declaredSandbox as Extract<SandboxDecl, { runtime: "bun" }>,
+          declaredSandbox: verifierArtifact.declaredSandbox,
           inputs: actionObs.result as JsonValue,
           emit: (ev) => {
             emitEvent(db, {
