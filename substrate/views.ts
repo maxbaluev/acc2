@@ -455,6 +455,38 @@ CREATE VIEW IF NOT EXISTS directive_conflicts_view AS
   ORDER BY ts DESC;
 `;
 
+// entity_relationship_view — normalized entity edges projected from existing
+// stakeholder declarations and cross-directive interference rows. Relationship
+// details stay open-ended in payload.relationship / declared_utility; the view
+// only standardizes graph columns so research tasks can query companies,
+// suppliers, customers, regulators, and competitors without a fixed taxonomy.
+const VIEW_ENTITY_RELATIONSHIPS = `
+CREATE VIEW IF NOT EXISTS entity_relationship_view AS
+  SELECT
+    event_id,
+    ts,
+    directive_id,
+    stakeholder_id                                      AS from_entity,
+    json_extract(declared_utility, '$.entity')          AS to_entity,
+    json_extract(declared_utility, '$.relationship')    AS relationship,
+    declared_utility                                    AS relationship_payload,
+    payload,
+    'stakeholder_state_recorded'                        AS source_kind
+  FROM stakeholder_state_view
+  UNION ALL
+  SELECT
+    event_id,
+    ts,
+    directive_id,
+    from_directive                                      AS from_entity,
+    to_directive                                        AS to_entity,
+    interaction                                         AS relationship,
+    payload                                             AS relationship_payload,
+    payload,
+    'directive_interference_edge'                       AS source_kind
+  FROM directive_conflicts_view;
+`;
+
 // stakeholder_state_view — latest stakeholder_state_recorded row per
 // (directive_id, stakeholder_id). Older rows stay in events for audit but
 // the view projects only the freshest declaration. Phase I (§3.3, §4.2).
@@ -1612,6 +1644,7 @@ const VIEW_NAMES = [
   "irreversible_effects_view",
   "low_risk_inline_patterns_view",
   "active_objectives_view",
+  "entity_relationship_view",
   "stakeholder_state_view",
   "directive_conflicts_view",
   "watch_edge_observations_view",
@@ -1650,6 +1683,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_WATCH_EDGE_OBSERVATIONS);
   db.exec(VIEW_DIRECTIVE_CONFLICTS);
   db.exec(VIEW_STAKEHOLDER_STATE);
+  db.exec(VIEW_ENTITY_RELATIONSHIPS);
   db.exec(VIEW_ACTIVE_OBJECTIVES);
   db.exec(VIEW_IRREVERSIBLE_EFFECTS);
   db.exec(VIEW_LOW_RISK_INLINE_PATTERNS);

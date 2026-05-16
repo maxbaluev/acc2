@@ -163,6 +163,7 @@ export const EVENT_KINDS = {
 
   // ── External-source registration ────────────────────────────────────
   external_source_registered:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  external_source_suggested:               { producer: "substrate", embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
 
   // ── Embeddings ──────────────────────────────────────────────────────
   embedding_computed:                      { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
@@ -225,6 +226,8 @@ export const EVENT_KINDS = {
 
   // ── External-service push ───────────────────────────────────────────
   external_event_received:                 { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: false },
+  state_snapshot_recorded:                 { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  state_snapshot_diffed:                   { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   external_source_quarantined:             { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   external_source_rehabilitated:           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 

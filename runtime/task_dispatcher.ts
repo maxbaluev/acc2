@@ -47,6 +47,7 @@ import { extractRecipeFromCommit } from "../substrate/extractors";
 import { validateProposalGrounding } from "./proposal_grounding";
 
 const REFINEMENT_DEPTH_CAP = 5;
+const TREE_SEARCH_FANOUT_THRESHOLD = 5;
 
 // Brain sandbox audit bsfxsvgh9 (2026-05-15): hard fence against
 // dispatching to artifacts that have proven chronically bad. Pre-fix the
@@ -977,6 +978,9 @@ export const dispatchReadyTask = async (
         } else {
           // High-residual path — emit a refinement edge + new task_node_opened
           // for the refinement child, OR cap-fail if we've exhausted depth.
+          // Complex research follow-up: when sibling fanout crosses
+          // TREE_SEARCH_FANOUT_THRESHOLD, route through a substrate-owned
+          // tree-search scorer instead of only extending a linear chain.
           const depth = refinementDepth(db, task.id);
           if (depth >= REFINEMENT_DEPTH_CAP) {
             emitEvent(db, {
