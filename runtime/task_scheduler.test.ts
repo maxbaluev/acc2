@@ -11,7 +11,7 @@ import {
   findCrossDirectiveConflict,
   computeBrainDispatchCap,
 } from "./task_scheduler";
-import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
+import { FIXTURE_D_DIRECTIVE_TEXT, openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
 
@@ -61,6 +61,61 @@ describe("task_scheduler", () => {
         .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_committed'")
         .get() as { c: number };
       expect(committed.c).toBeGreaterThanOrEqual(2);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("same-parent refinement leaves without requires edges bypass the per-directive cap", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-siblings-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      const { directiveId, taskId: root } = await openFixtureDCountTodos(db, tempDir);
+      emitEvent(db, { kind: "task_committed", substrate_origin: "substrate_auto", directive_id: directiveId, task_id: root, residual: 0, payload: { residual: 0 } });
+      const childA = newId();
+      const childB = newId();
+      for (const child of [childA, childB]) {
+        emitEvent(db, { kind: "task_node_opened", substrate_origin: "opencode", directive_id: directiveId, task_id: child, parent_task_id: root, payload: { goal: FIXTURE_D_DIRECTIVE_TEXT, target_path: tempDir } });
+        emitEvent(db, { kind: "task_edge_recorded", substrate_origin: "opencode", directive_id: directiveId, task_id: child, payload: { kind: "refines", from_task: root, to_task: child } });
+      }
+
+      const tick = await schedulerTick(db, {
+        fixtureTargetPath: tempDir,
+        maxConcurrent: 5,
+        maxConcurrentPerDirective: 1,
+      });
+      expect(tick.dispatched).toContain(childA);
+      expect(tick.dispatched).toContain(childB);
+      expect(tick.skipped_concurrency_cap).not.toContain(childA);
+      expect(tick.skipped_concurrency_cap).not.toContain(childB);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("requires edges still serialize same-parent refinement leaves", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-sibling-req-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      const { directiveId, taskId: root } = await openFixtureDCountTodos(db, tempDir);
+      emitEvent(db, { kind: "task_committed", substrate_origin: "substrate_auto", directive_id: directiveId, task_id: root, residual: 0, payload: { residual: 0 } });
+      const childA = newId();
+      const childB = newId();
+      for (const child of [childA, childB]) {
+        emitEvent(db, { kind: "task_node_opened", substrate_origin: "opencode", directive_id: directiveId, task_id: child, parent_task_id: root, payload: { goal: FIXTURE_D_DIRECTIVE_TEXT, target_path: tempDir } });
+        emitEvent(db, { kind: "task_edge_recorded", substrate_origin: "opencode", directive_id: directiveId, task_id: child, payload: { kind: "refines", from_task: root, to_task: child } });
+      }
+      emitEvent(db, { kind: "task_edge_recorded", substrate_origin: "opencode", directive_id: directiveId, task_id: childB, payload: { kind: "requires", from_task: childA, to_task: childB } });
+
+      const tick = await schedulerTick(db, {
+        fixtureTargetPath: tempDir,
+        maxConcurrent: 5,
+        maxConcurrentPerDirective: 1,
+      });
+      expect(tick.dispatched).toContain(childA);
+      expect(tick.dispatched).not.toContain(childB);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

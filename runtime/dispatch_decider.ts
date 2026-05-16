@@ -47,6 +47,151 @@ export type DispatchDecision =
 
 type RecipeMatch = { id: string; confidence: number };
 
+export type HardTaskClassification = {
+  is_hard: boolean;
+  axes: string[];
+  score: number;
+  diagnostics: Record<string, number>;
+};
+
+export const HARD_TASK_VERB_RE = /\b(audit|improve|refactor|design|harden|extend|decompose|parallel|falsif(?:y|iable|iability)?|universal|diagnostic|measure|synthesis)\b/i;
+export const HARD_TASK_WORD_COUNT_THRESHOLD = 20;
+export const HARD_TASK_MULTI_FILE_TARGET_THRESHOLD = 1;
+export const HARD_TASK_RECIPE_OVERRIDE_SAMPLE_SIZE = 3;
+export const HARD_TASK_RECIPE_OVERRIDE_RESIDUAL_THRESHOLD = 0.2;
+
+const safeJson = (raw: string | null | undefined): Record<string, unknown> => {
+  try {
+    return JSON.parse(raw ?? "{}") as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+};
+
+const readDirectivePayload = (db: Database, directiveId: string): Record<string, unknown> => {
+  const row = db
+    .query("SELECT payload FROM events WHERE kind = 'directive_opened' AND directive_id = ? ORDER BY ts DESC, rowid DESC LIMIT 1")
+    .get(directiveId) as { payload: string } | null;
+  return safeJson(row?.payload);
+};
+
+const taskTargetsForHardness = (task: TaskNode): string[] => {
+  const t = task as TaskNode & { target_resources?: string[]; target_files?: string[] };
+  const out: string[] = [];
+  if (Array.isArray(t.target_resources)) out.push(...t.target_resources.filter((x): x is string => typeof x === "string"));
+  // Legacy target_files are NOT accepted for inline routing, but they are
+  // still useful blast-radius evidence for hardness classification.
+  if (Array.isArray(t.target_files)) out.push(...t.target_files.filter((x): x is string => typeof x === "string").map((x) => `repo:${x}`));
+  return Array.from(new Set(out));
+};
+
+const countBudgetNumbers = (value: unknown): number => {
+  if (typeof value === "number" && Number.isFinite(value)) return value > 10_000 ? 1 : 0;
+  if (Array.isArray(value)) return value.reduce((sum, v) => sum + countBudgetNumbers(v), 0);
+  if (value && typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).reduce((sum, v) => sum + countBudgetNumbers(v), 0);
+  }
+  return 0;
+};
+
+export const classifyHardTask = (db: Database, task: TaskNode): HardTaskClassification => {
+  const directivePayload = readDirectivePayload(db, task.directive_id);
+  const directiveText = typeof directivePayload.directive_text === "string" ? directivePayload.directive_text : "";
+  const text = `${directiveText}\n${task.goal}`;
+  const words = text.split(/\s+/).filter(Boolean).length;
+  const targets = taskTargetsForHardness(task);
+  const surfaces = new Set<string>();
+  for (const target of targets) {
+    const normalized = target.startsWith("repo:") ? target.slice("repo:".length) : target;
+    const first = normalized.split("/")[0] ?? "";
+    if (["cli", "runtime", "substrate"].includes(first)) surfaces.add(first);
+  }
+  const stakeholders = Array.isArray(directivePayload.stakeholders) ? directivePayload.stakeholders.length : 0;
+  const budgetAxis = countBudgetNumbers(directivePayload.budget);
+
+  const axes: string[] = [];
+  if (HARD_TASK_VERB_RE.test(text)) axes.push("strategic_verb");
+  if (words > HARD_TASK_WORD_COUNT_THRESHOLD) axes.push("long_goal_text");
+  if (targets.length > HARD_TASK_MULTI_FILE_TARGET_THRESHOLD) axes.push("multi_file_blast_radius");
+  if (surfaces.size >= 2) axes.push("multi_surface_target");
+  if (stakeholders > 1) axes.push("multi_stakeholder");
+  if (budgetAxis > 0) axes.push("declared_budget_high");
+  if (/\b(irreversible|consent|owner-visible|stakeholder)\b/i.test(text)) axes.push("owner_visible_reversibility");
+
+  const diagnostics: Record<string, number> = {
+    word_count: words,
+    target_count: targets.length,
+    surface_count: surfaces.size,
+    stakeholder_count: stakeholders,
+    budget_high_fields: budgetAxis,
+  };
+
+  const isHard = axes.includes("strategic_verb") ||
+    axes.includes("multi_surface_target") ||
+    axes.includes("multi_stakeholder") ||
+    axes.length >= 2;
+
+  return { is_hard: isHard, axes, score: axes.length, diagnostics };
+};
+
+const hardTaskReason = (hardness: HardTaskClassification, suffix: string): string => {
+  const axes = hardness.axes.length > 0 ? hardness.axes.join("|") : "none";
+  const diagnostics = Object.entries(hardness.diagnostics)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(",");
+  return `hard_task_dag_required:axes=${axes};score=${hardness.score};diagnostics=${diagnostics};${suffix}`;
+};
+
+type RecipeReplayHealth = {
+  observed: number;
+  sample_size: number;
+  residual_threshold: number;
+  max_residual: number | null;
+  all_below_threshold: boolean;
+  can_override_hardness: boolean;
+};
+
+const readRecipeReplayHealth = (db: Database, recipeId: string): RecipeReplayHealth => {
+  let rows: Array<{ residual: number | null; payload: string }> = [];
+  try {
+    rows = db
+      .query(
+        `SELECT residual, payload FROM events
+         WHERE kind = 'action_scored'
+           AND json_extract(payload, '$.recipe_id') = ?
+         ORDER BY ts DESC, rowid DESC LIMIT ?`,
+      )
+      .all(recipeId, HARD_TASK_RECIPE_OVERRIDE_SAMPLE_SIZE) as Array<{ residual: number | null; payload: string }>;
+  } catch {
+    rows = db
+      .query(
+        `SELECT residual, payload FROM events
+         WHERE kind = 'action_scored'
+           AND payload LIKE '%' || ? || '%'
+         ORDER BY ts DESC, rowid DESC LIMIT ?`,
+      )
+      .all(recipeId, HARD_TASK_RECIPE_OVERRIDE_SAMPLE_SIZE) as Array<{ residual: number | null; payload: string }>;
+  }
+  const residuals = rows
+    .map((r) => {
+      if (typeof r.residual === "number") return r.residual;
+      const p = safeJson(r.payload);
+      return typeof p.residual === "number" ? p.residual : null;
+    })
+    .filter((r): r is number => typeof r === "number" && Number.isFinite(r));
+  const maxResidual = residuals.length > 0 ? Math.max(...residuals) : null;
+  const allBelow = residuals.length >= HARD_TASK_RECIPE_OVERRIDE_SAMPLE_SIZE &&
+    residuals.every((r) => r < HARD_TASK_RECIPE_OVERRIDE_RESIDUAL_THRESHOLD);
+  return {
+    observed: residuals.length,
+    sample_size: HARD_TASK_RECIPE_OVERRIDE_SAMPLE_SIZE,
+    residual_threshold: HARD_TASK_RECIPE_OVERRIDE_RESIDUAL_THRESHOLD,
+    max_residual: maxResidual,
+    all_below_threshold: allBelow,
+    can_override_hardness: allBelow,
+  };
+};
+
 /** Phase J: delegate to the real matcher in runtime/recipe_replay.ts which
  *  computes goal_shape via runtime/goal_shape.ts and topology_signature off
  *  the task's directive DAG. The wrapper preserves the local RecipeMatch
@@ -277,15 +422,41 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
     };
   }
 
+  const hardness = classifyHardTask(db, task);
+
   // 1. Tier-0 recipe replay. Crisis mode lowers the confidence threshold.
+  // Hard tasks only allow recipe override when recent replay residuals prove
+  // the recipe is genuinely known-shape; thin matches fall through to DAG.
   const mode = readCurrentMode(db, task.directive_id);
   const recipeThreshold = mode.recipe_confidence_threshold;
   const recipe = findRecipeMatch(db, task, recipeThreshold);
   if (recipe) {
+    if (hardness.is_hard) {
+      const replayHealth = readRecipeReplayHealth(db, recipe.id);
+      if (!replayHealth.can_override_hardness) {
+        return {
+          route: "opencode_brain",
+          predicted_complexity: "high",
+          reason: hardTaskReason(hardness, `recipe=${recipe.id};recipe_replay_observed=${replayHealth.observed};recipe_replay_max_residual=${replayHealth.max_residual ?? "none"}`),
+        };
+      }
+      return { route: "substrate_replay", recipe_id: recipe.id, reason: "recipe_match_hard_override_verified" };
+    }
     return { route: "substrate_replay", recipe_id: recipe.id, reason: "recipe_match" };
   }
 
-  // 2. Scored inline lane. Fail-closed: no knowledge → no inline.
+  // 2. Hard-task DAG gate. This sits before the inline lane so a broad
+  // strategic/refactor/audit target cannot be collapsed into a one-shot edit
+  // solely because every target_resource matches a low-risk pattern.
+  if (hardness.is_hard) {
+    return {
+      route: "opencode_brain",
+      predicted_complexity: "high",
+      reason: hardTaskReason(hardness, "no_verified_recipe_override"),
+    };
+  }
+
+  // 3. Scored inline lane. Fail-closed: no knowledge → no inline.
   const inlinePatterns = readLowRiskInlinePatterns(db);
   const matched = inlineMatchingPatterns(task as TaskNode & { target_resources?: string[] }, inlinePatterns);
   if (matched && matched.length > 0) {
@@ -296,7 +467,7 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
     };
   }
 
-  // 3. Default — opencode brain.
+  // 4. Default — opencode brain.
   return {
     route: "opencode_brain",
     predicted_complexity: estimateComplexity(task),

@@ -24,7 +24,7 @@
 
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
-import { readyTasks, type TaskNode } from "./task_topology";
+import { readDagForDirective, readyTasks, type TaskNode } from "./task_topology";
 import { dispatchReadyTask } from "./task_dispatcher";
 import { decideDispatch } from "./dispatch_decider";
 import { emitEvent } from "./events";
@@ -168,6 +168,30 @@ const IN_FLIGHT: Map<string, Promise<unknown>> = new Map();
 // IN_FLIGHT (same insertion / deletion sites). Used for the interference
 // concurrency check (`findDeferringConflict`).
 const IN_FLIGHT_DIRECTIVE: Map<string, string> = new Map();
+const IN_FLIGHT_PARENT: Map<string, string | null> = new Map();
+
+const refinementParent = (db: Database, task: TaskNode): string | null => {
+  if (task.parent_id) return task.parent_id;
+  const { edges } = readDagForDirective(db, task.directive_id);
+  const refine = edges.find((e) => e.kind === "refines" && e.to_task === task.id);
+  return refine?.from_task ?? null;
+};
+
+const hasRequiresEdgeBetween = (db: Database, directiveId: string, a: string, b: string): boolean => {
+  const { edges } = readDagForDirective(db, directiveId);
+  return edges.some((e) => e.kind === "requires" && ((e.from_task === a && e.to_task === b) || (e.from_task === b && e.to_task === a)));
+};
+
+const hasParallelSiblingSlot = (db: Database, task: TaskNode): boolean => {
+  const parent = refinementParent(db, task);
+  if (!parent) return false;
+  for (const [inFlightTaskId, inFlightParent] of IN_FLIGHT_PARENT.entries()) {
+    if (inFlightParent !== parent) continue;
+    if (hasRequiresEdgeBetween(db, task.directive_id, task.id, inFlightTaskId)) continue;
+    return true;
+  }
+  return false;
+};
 
 const emitInlineLaneRouted = (
   db: Database,
@@ -315,7 +339,7 @@ export const schedulerTick = async (
     for (const d of IN_FLIGHT_DIRECTIVE.values()) {
       if (d === task.directive_id) perDirCount++;
     }
-    if (perDirCount >= maxConcurrentPerDirective) {
+    if (perDirCount >= maxConcurrentPerDirective && !hasParallelSiblingSlot(db, task)) {
       skippedConcurrencyCap.push(task.id);
       continue;
     }
@@ -429,6 +453,7 @@ export const schedulerTick = async (
       .finally(() => {
         IN_FLIGHT.delete(task.id);
         IN_FLIGHT_DIRECTIVE.delete(task.id);
+        IN_FLIGHT_PARENT.delete(task.id);
         // Safe to call unconditionally: Set.delete is a no-op when the key
         // is absent, so non-brain routes (substrate_replay, claude_inline,
         // deferred_blocked) cost nothing here. Releases the brain slot so
@@ -443,6 +468,7 @@ export const schedulerTick = async (
     );
     IN_FLIGHT.set(task.id, promise);
     IN_FLIGHT_DIRECTIVE.set(task.id, task.directive_id);
+    IN_FLIGHT_PARENT.set(task.id, refinementParent(db, task));
     pending.push(promise);
     dispatched.push(task.id);
   }
@@ -529,6 +555,7 @@ export const schedulerLoop = async (
 export const _resetSchedulerForTests = (): void => {
   IN_FLIGHT.clear();
   IN_FLIGHT_DIRECTIVE.clear();
+  IN_FLIGHT_PARENT.clear();
 };
 
 // ── Multi-process in-flight detection (SQL-backed) ────────────────────
