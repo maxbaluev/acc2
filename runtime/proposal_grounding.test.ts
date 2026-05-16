@@ -87,4 +87,66 @@ describe("validateProposalGrounding", () => {
     emitEvent(db, { kind: "code_artifact_candidate", directive_id: D, task_id: leaf, payload: { runtime: "bun", body: "/* x */" } });
     expect(validateProposalGrounding(db, ROOT).failed_checks).not.toContain(`deliverable_missing:${leaf}`);
   });
+
+  test("directive scope isolates cross-directive task_ids — deliverable in A is NOT satisfied by artifact in B", () => {
+    // FAST-axis isolation: a deliverable_missing in directive A must NOT
+    // count an artifact emitted under directive B as satisfying it, even
+    // if both share the same imperative-verb goal and the same leaf task_id.
+    const db = openDb(":memory:");
+    const D_A = "d_alpha", D_B = "d_beta";
+    const rootA = "t_root_a", leafA = "t_leaf_a";
+    const rootB = "t_root_b", leafB = "t_leaf_b";
+
+    // Directive A: root + deliverable-shaped leaf with NO satisfying artifact.
+    emitEvent(db, { kind: "task_node_opened", directive_id: D_A, task_id: rootA, payload: { goal: "audit alpha" } });
+    emitEvent(db, { kind: "task_node_opened", directive_id: D_A, task_id: leafA, payload: { goal: "implement the alpha validator" } });
+    emitEvent(db, { kind: "task_edge_recorded", directive_id: D_A, task_id: leafA, payload: { from_task: rootA, to_task: leafA, kind: "refines" } });
+
+    // Directive B: root + deliverable-shaped leaf WITH a satisfying artifact.
+    emitEvent(db, { kind: "task_node_opened", directive_id: D_B, task_id: rootB, payload: { goal: "audit beta" } });
+    emitEvent(db, { kind: "task_node_opened", directive_id: D_B, task_id: leafB, payload: { goal: "implement the beta validator" } });
+    emitEvent(db, { kind: "task_edge_recorded", directive_id: D_B, task_id: leafB, payload: { from_task: rootB, to_task: leafB, kind: "refines" } });
+    emitEvent(db, { kind: "code_artifact_candidate", directive_id: D_B, task_id: leafB, payload: { runtime: "bun", body: "/* b */" } });
+
+    // Scoped to directive A: leafA appears, but its artifact (which lives
+    // under D_B against a DIFFERENT task_id) cannot satisfy it. We further
+    // verify isolation by also planting an artifact in D_B against leafA's
+    // task_id — the directive filter must still reject it.
+    emitEvent(db, { kind: "code_artifact_candidate", directive_id: D_B, task_id: leafA, payload: { runtime: "bun", body: "/* cross */" } });
+
+    const rA = validateProposalGrounding(db, rootA, D_A);
+    expect(rA.failed_checks).toContain(`deliverable_missing:${leafA}`);
+
+    // Sanity: directive B's audit still passes — its artifact under D_B
+    // satisfies its own deliverable.
+    const rB = validateProposalGrounding(db, rootB, D_B);
+    expect(rB.failed_checks).not.toContain(`deliverable_missing:${leafB}`);
+
+    // Cross-pollution control: A's refines edge does NOT walk into B's
+    // graph. Confirm A's subtree did not include leafB by checking that
+    // a deliverable_missing for leafB is absent from A's report.
+    expect(rA.failed_checks).not.toContain(`deliverable_missing:${leafB}`);
+  });
+
+  test("backward compatibility — calling without directiveId scans full ledger", () => {
+    // The optional directiveId parameter is additive; callers (e.g. test
+    // fixtures or older code paths) that omit it must continue to receive
+    // the pre-amendment full-ledger scan semantics.
+    const db = openDb(":memory:");
+    seedRoot(db);
+    const leaf = "t_leaf_bc";
+    emitEvent(db, { kind: "task_node_opened", directive_id: D, task_id: leaf, payload: { goal: "implement the back-compat validator" } });
+    emitEvent(db, { kind: "task_edge_recorded", directive_id: D, task_id: leaf, payload: { from_task: ROOT, to_task: leaf, kind: "refines" } });
+    emitEvent(db, { kind: "code_artifact_candidate", directive_id: D, task_id: leaf, payload: { runtime: "bun", body: "/* y */" } });
+
+    // No directiveId arg — should match scoped behavior because the only
+    // events in the in-memory ledger ARE this directive's events.
+    const unscoped = validateProposalGrounding(db, ROOT);
+    expect(unscoped.ok).toBe(true);
+    expect(unscoped.failed_checks).not.toContain(`deliverable_missing:${leaf}`);
+
+    // Scoped call must agree on this single-directive ledger.
+    const scoped = validateProposalGrounding(db, ROOT, D);
+    expect(scoped).toEqual(unscoped);
+  });
 });

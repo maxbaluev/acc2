@@ -861,7 +861,7 @@ export const dispatchReadyTask = async (
         // structural — prose gates regress under load.
         let proposalGroundingOk = true;
         if (residual < COMMIT_RESIDUAL_THRESHOLD) {
-          const groundingCheck = validateProposalGrounding(db, task.id);
+          const groundingCheck = validateProposalGrounding(db, task.id, task.directive_id);
           if (!groundingCheck.ok) {
             emitEvent(db, {
               kind: "dispatcher_violation",

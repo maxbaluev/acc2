@@ -40,11 +40,20 @@ const parsePayload = (raw: string): Record<string, JsonValue> => {
   try { return JSON.parse(raw ?? "{}") as Record<string, JsonValue>; } catch { return {}; }
 };
 
-const collectSubtreeTaskIds = (db: Database, rootTaskId: string): Set<string> => {
+const collectSubtreeTaskIds = (db: Database, rootTaskId: string, directiveId?: string): Set<string> => {
   const subtree = new Set<string>([rootTaskId]);
-  const edges = db
-    .query("SELECT payload FROM events WHERE kind = 'task_edge_recorded'")
-    .all() as Array<{ payload: string }>;
+  // FAST-axis: when directiveId is provided (the task_dispatcher.ts caller
+  // always has it in scope as task.directive_id), filter the edge scan to
+  // ONE directive's graph. Previously this scanned every task_edge_recorded
+  // row in the ledger — bounded to O(directive_edges) now instead of
+  // O(ledger_edges). Brain audit QQEHAW97GS0AX7TEQ717Y3P174.
+  const edges = directiveId
+    ? db
+        .query("SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND directive_id = ?")
+        .all(directiveId) as Array<{ payload: string }>
+    : db
+        .query("SELECT payload FROM events WHERE kind = 'task_edge_recorded'")
+        .all() as Array<{ payload: string }>;
   const refinesByParent = new Map<string, string[]>();
   for (const e of edges) {
     const p = parsePayload(e.payload);
@@ -68,12 +77,20 @@ const collectSubtreeTaskIds = (db: Database, rootTaskId: string): Set<string> =>
   return subtree;
 };
 
-const eventsForTasks = (db: Database, taskIds: Set<string>, kind: string): Array<{ task_id: string; payload: Record<string, JsonValue> }> => {
+const eventsForTasks = (db: Database, taskIds: Set<string>, kind: string, directiveId?: string): Array<{ task_id: string; payload: Record<string, JsonValue> }> => {
   if (taskIds.size === 0) return [];
   const placeholders = Array.from(taskIds).map(() => "?").join(",");
-  const rows = db
-    .query(`SELECT task_id, payload FROM events WHERE kind = ? AND task_id IN (${placeholders})`)
-    .all(kind, ...Array.from(taskIds)) as Array<{ task_id: string; payload: string }>;
+  // When directiveId is provided, narrow the SELECT to ONE directive's
+  // events so cross-directive task_id collisions cannot pollute the
+  // satisfaction check (a deliverable_missing in directive A must NOT
+  // count an artifact emitted under directive B as satisfying it).
+  const rows = directiveId
+    ? db
+        .query(`SELECT task_id, payload FROM events WHERE kind = ? AND directive_id = ? AND task_id IN (${placeholders})`)
+        .all(kind, directiveId, ...Array.from(taskIds)) as Array<{ task_id: string; payload: string }>
+    : db
+        .query(`SELECT task_id, payload FROM events WHERE kind = ? AND task_id IN (${placeholders})`)
+        .all(kind, ...Array.from(taskIds)) as Array<{ task_id: string; payload: string }>;
   return rows.map((r) => ({ task_id: r.task_id, payload: parsePayload(r.payload) }));
 };
 
@@ -163,14 +180,14 @@ const isDeliverableGoal = (goal: string): boolean => {
   return DELIVERABLE_VERBS.some((v) => new RegExp(`\\b${v}\\b`).test(lower));
 };
 
-export const validateProposalGrounding = (db: Database, taskId: string): ProposalGroundingResult => {
-  const subtree = collectSubtreeTaskIds(db, taskId);
+export const validateProposalGrounding = (db: Database, taskId: string, directiveId?: string): ProposalGroundingResult => {
+  const subtree = collectSubtreeTaskIds(db, taskId, directiveId);
   const failed: string[] = [];
 
-  const amendments = eventsForTasks(db, subtree, "contract_amendment_proposed");
-  const nodes = eventsForTasks(db, subtree, "task_node_opened");
-  const artifacts = eventsForTasks(db, subtree, "code_artifact_candidate");
-  const lessons = eventsForTasks(db, subtree, "lesson_extracted");
+  const amendments = eventsForTasks(db, subtree, "contract_amendment_proposed", directiveId);
+  const nodes = eventsForTasks(db, subtree, "task_node_opened", directiveId);
+  const artifacts = eventsForTasks(db, subtree, "code_artifact_candidate", directiveId);
+  const lessons = eventsForTasks(db, subtree, "lesson_extracted", directiveId);
   const subtreeGoals = nodes.map((n) => (n.payload.goal as string) ?? "");
 
   for (const a of amendments) {
