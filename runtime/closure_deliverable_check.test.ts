@@ -24,7 +24,7 @@ const seedLeaf = (db: ReturnType<typeof openDb>, taskId: string, goal: string, p
 describe("checkClosureDeliverables", () => {
   test("empty subtree (root only, non-deliverable goal) → ok=true, no uncovered", () => {
     const db = openDb(":memory:");
-    seedRoot(db); // goal "audit the substrate" — non-deliverable verb
+    seedRoot(db, "research the substrate"); // non-deliverable verb (audit is now deliverable)
     expect(checkClosureDeliverables(db, ROOT)).toEqual({ ok: true, uncovered_leaves: [] });
   });
 
@@ -48,7 +48,7 @@ describe("checkClosureDeliverables", () => {
     expect(r.uncovered_leaves).toContain(leaf);
   });
 
-  test("leaf with NON-deliverable verb (research / audit) → ok=true (not checked)", () => {
+  test("leaf with NON-deliverable verb (research) → ok=true (not checked)", () => {
     const db = openDb(":memory:");
     seedRoot(db);
     const leaf = "t_leaf_research";

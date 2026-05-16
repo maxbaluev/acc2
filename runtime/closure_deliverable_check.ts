@@ -28,7 +28,20 @@ export interface ClosureDeliverableResult {
 // Same imperative-verb set as runtime/proposal_grounding.ts so the
 // grounding gate (admission) and the closure gate (post-trajectory)
 // use one predicate. Keep these two lists in lockstep.
-const DELIVERABLE_VERBS = ["expose", "add", "wire", "implement", "build", "create", "propose", "emit"];
+const DELIVERABLE_VERBS = [
+  "expose",
+  "add",
+  "wire",
+  "implement",
+  "build",
+  "create",
+  "propose",
+  "emit",
+  "audit",
+  "diagnose",
+  "measure",
+  "rank",
+];
 
 const parsePayload = (raw: string): Record<string, JsonValue> => {
   try { return JSON.parse(raw ?? "{}") as Record<string, JsonValue>; } catch { return {}; }
