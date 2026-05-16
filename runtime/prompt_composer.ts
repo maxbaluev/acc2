@@ -646,6 +646,7 @@ const WORKFLOW_TEXT = [
   "     - every referenced acc CLI command exists or is introduced in this DAG with a requires edge;",
   "     - every deliverable-shaped leaf goal has emitted a code_artifact_candidate,",
   "       contract_amendment_proposed, or lesson_extracted.proposed_action.",
+  "     - complex substrate-audit or intelligence-loop research roots cite a measured diagnostics action covering DAG shape, proposal coverage, closure readiness, budget explicitness, and origin/knowledge promotion before root commit.",
   "     Gate residual ≥ 0.3 → refine, do NOT commit.",
   "  CLOSURE + LEARNING (required before committing a DIRECTIVE's root task):",
   "  7. Run a CLOSURE VERIFIER (a code artifact); emit task_closure_audited.",
