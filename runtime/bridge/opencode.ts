@@ -310,12 +310,14 @@ export const spawnRealOpencode = async (
   // the brain read-only and denies direct source mutation tools.
   let proc: ReturnType<typeof spawn>;
   try {
+    const checkoutRoot = req.checkoutIsolation?.root ?? process.cwd();
     proc = spawn([
       "opencode", "run",
       "--format=json",
       "--model", model,
       req.prompt,
     ], {
+      cwd: checkoutRoot,
       stdout: "pipe",
       stderr: "pipe",
       env: {
@@ -329,6 +331,9 @@ export const spawnRealOpencode = async (
         // OPENCODE_CONFIG file above).
         MCP_SERVER_URL: mcpServerUrl,
         V2_MCP_SERVER_URL: mcpServerUrl,
+        ACC2_CHECKOUT_ISOLATION_ROOT: checkoutRoot,
+        ACC2_CHECKOUT_ISOLATION_REASON: req.checkoutIsolation?.reason ?? "main_checkout_selected",
+        ACC2_CHECKOUT_MERGE_BACK_STRATEGY: req.checkoutIsolation?.mergeBackStrategy ?? "main_checkout",
       },
     });
   } catch (err) {

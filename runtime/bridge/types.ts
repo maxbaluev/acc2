@@ -16,6 +16,13 @@ export type BridgeRequest = {
    *  scan. Real brain would derive this from the prompt; the mock reads it
    *  here so tests can point at a deterministic fixture directory. */
   fixtureTargetPath?: string;
+  /** Optional checkout isolation context: when set, the opencode subprocess
+   *  is spawned with `cwd: root` and exported `ACC2_CHECKOUT_*` env vars so
+   *  the brain operates against an isolated source checkout (worktree or
+   *  main). The dispatcher decides isolation per dispatch; callers pass it
+   *  through verbatim. Optional — when absent the subprocess inherits the
+   *  daemon's cwd. */
+  checkoutIsolation?: { root: string; reason?: string; mergeBackStrategy?: string };
 };
 
 export type BridgeFailureReason =
