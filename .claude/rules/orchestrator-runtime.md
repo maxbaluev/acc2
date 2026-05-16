@@ -15,10 +15,34 @@ observes dispatch state**.
 
 After starting `acc task` with `run_in_background: true`, parse
 `directive_id` and root `task_id` from the `directive_opened` line.
+If either id is missing, say `dispatch ids unavailable` and investigate
+`acc task` output before making any state claim.
 
-The ONLY authoritative status read is `substrate.read` with
-`view_name="dispatch_resolved_view"` and `args = { directive_id,
-root_task_id }`. Poll every 5s while the owner turn is active.
+The ONLY authoritative status read is the MCP call:
+
+```json
+{"tool":"substrate.read","args":{"view_name":"dispatch_resolved_view","args":{"directive_id":"<directive_id>","root_task_id":"<root_task_id>"}}}
+```
+
+Poll this read every 5s while the owner turn is active. Interpret the
+returned `lifecycle_status` exactly:
+
+- `completed`: terminal only when `terminal_kind = 'task_committed'` and
+  `terminal_event_id` is present.
+- `failed`: terminal only when `terminal_kind` is `task_failed` or
+  `dispatcher_violation` and the failure event id is present.
+- `live`: in flight; do not call broken merely because no terminal event
+  exists yet.
+- `queued_at_cap`: waiting behind the scheduler/brain cap; do not call
+  broken or stalled.
+- `zombie`: stale according to the substrate projection; investigate and
+  use `TaskStop` only as UI cleanup after citing the view evidence.
+
+If `substrate.read` returns `view_not_implemented:dispatch_resolved_view`
+or any read error, report `substrate dispatch view unavailable` and
+investigate the MCP read surface (currently `runtime/mcp_server/substrate_tools.ts`).
+Do NOT fall back to stdout files, `ps`, Bash subprocess exit, or the
+Claude Code background-task panel for truth claims.
 
 DO NOT:
 
@@ -40,11 +64,11 @@ Claude Code's Bash background-task panel is **not authoritative**.
 The orchestrator MUST issue `TaskStop` for a Bash background task
 when ALL of these hold:
 
-1. The corresponding `acc task` emits the `ACC_DISPATCH_RESOLVED`
-   stdout sentinel for its root, OR
-2. `dispatch_resolved_view` reports `lifecycle_status` ∈
+1. The corresponding `acc task` emits exactly one `ACC_DISPATCH_RESOLVED`
+   stdout sentinel for its root with `evidence_event_id`, OR
+2. `dispatch_resolved_view` reports `status`/`lifecycle_status` ∈
    {`completed`, `failed`, `zombie`} for the same `(directive_id,
-   root_task_id)` pair, AND
+   root_task_id)` pair and exposes an evidence event, AND
 3. The Claude Code panel still shows the task as `running`.
 
 NEVER issue `TaskStop` as proof of completion. `TaskStop` is a UI
@@ -56,13 +80,21 @@ When ANY `dispatch_resolved_view` row for the current work is in
 status `live`, `queued_at_cap`, `zombie`, or just-transitioned to
 `completed`/`failed` within this turn — OR when the Bash panel and
 substrate disagree — the orchestrator's end-of-turn response MUST end
-with one line of substrate truth:
+with one compact line of substrate truth:
 
 ```
 Substrate dispatch status: status=<lifecycle_status> directive=<id_prefix>
 root=<id_prefix> evidence=<event_ids[:3]> last_event=<kind>@<ts>
 next=<wait|TaskStop|investigate>
 ```
+
+Status rendering:
+
+- `live`: report `next=wait`; never call it broken from zero commits.
+- `queued_at_cap`: report `next=wait`; include the cap gate event as evidence.
+- `completed`: report `next=TaskStop` only if the Bash panel still says running; otherwise no owner action is pending.
+- `failed`: report `next=investigate`; cite the terminal failure or dispatcher_violation event.
+- `zombie`: report `next=TaskStop`; say the parent shell is stale unless later substrate evidence contradicts it.
 
 When substrate truth conflicts with the Bash panel, say so
 explicitly: "Bash panel may lag; substrate is authoritative."
