@@ -1200,6 +1200,43 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   process.once("SIGTERM", onSignal);
   process.once("SIGINT", onSignal);
 
+  // Unhandled rejection / exception handlers. Without these, an async
+  // throw deep inside any third-party module (mcp-proxy, FastMCP, etc.)
+  // becomes an unhandled rejection and Bun's default behavior is to
+  // exit the process — taking down every in-flight brain dispatch with
+  // it. Live ledger evidence today (2026-05-16): 12 daemon restarts in
+  // one session, each one preceded by repeated
+  // `[FastMCP error] Conflict: Only one SSE stream is allowed per
+  // session` exceptions from mcp-proxy's handleGetRequest when an MCP
+  // client reconnects to an existing session ID. Every restart orphans
+  // every live brain dispatch (today: 5 orphans per restart) and forces
+  // a scheduler re-pick that the follow-stream can't reattach to. The
+  // handlers below log every such fault to daemon.log + the event
+  // ledger and let the daemon keep running — third-party transport
+  // faults must not be process-fatal.
+  process.on("unhandledRejection", (reason, _promise) => {
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    const stack = reason instanceof Error ? reason.stack : undefined;
+    logger.error({ where: "daemon.unhandledRejection", reason: msg, stack }, "unhandled rejection — daemon will continue");
+    try {
+      emitEvent(db, {
+        kind: "daemon_unhandled_rejection",
+        substrate_origin: "substrate_auto",
+        payload: { reason: msg, stack: stack?.slice(0, 2000) ?? null, source: "unhandledRejection" },
+      });
+    } catch { /* never let logging crash */ }
+  });
+  process.on("uncaughtException", (err) => {
+    logger.error({ where: "daemon.uncaughtException", err: err.message, stack: err.stack }, "uncaught exception — daemon will continue");
+    try {
+      emitEvent(db, {
+        kind: "daemon_unhandled_rejection",
+        substrate_origin: "substrate_auto",
+        payload: { reason: err.message, stack: err.stack?.slice(0, 2000) ?? null, source: "uncaughtException" },
+      });
+    } catch { /* never let logging crash */ }
+  });
+
   return {
     server: auxServer,
     mcpServer,

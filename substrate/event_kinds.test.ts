@@ -237,6 +237,11 @@ describe("derived sets match their pre-unification shape", () => {
       // failures are a substrate-status signal — the brain's proposal
       // passed structural gates but tests refused it.
       "applied_change_failed",
+      // Daemon unhandled rejection (2026-05-16): top-level handler
+      // registered to prevent FastMCP/mcp-proxy SSE-conflict exceptions
+      // from crashing the daemon. Every firing is a substrate-status
+      // signal so operators can see the underlying transport fault.
+      "daemon_unhandled_rejection",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);
@@ -268,6 +273,10 @@ describe("derived sets match their pre-unification shape", () => {
       // knowledge as it lands — completes the two-sided merger surface.
       "knowledge_candidate",
       "knowledge_synthesized",
+      // Daemon unhandled rejection (2026-05-16): operators must see
+      // mid-flight FastMCP/transport faults inline so they can react
+      // before the next dispatch orphans.
+      "daemon_unhandled_rejection",
     ]);
     const derived = new Set(MIRROR_INLINE_EVENT_TYPES);
     expect(derived.size).toBe(expected.size);

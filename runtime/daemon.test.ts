@@ -233,6 +233,35 @@ describe("startDaemon — boot + health + shutdown", () => {
     expect(body).toContain("# TYPE acc2_daemon_uptime_seconds gauge");
   });
 
+  test("startDaemon registers unhandledRejection + uncaughtException handlers", async () => {
+    // Regression guard for the live-ledger bug observed 2026-05-16: 12 daemon
+    // restarts in one session, each preceded by repeated
+    // `[FastMCP error] Conflict: Only one SSE stream is allowed per session`
+    // from mcp-proxy. Without top-level process.on('unhandledRejection') /
+    // 'uncaughtException' handlers, Bun's default behavior is to exit the
+    // process — orphaning every in-flight brain dispatch.
+    //
+    // We can't fire a synthetic rejection in-process here because Bun's
+    // test harness intercepts unhandled rejections before they reach the
+    // production handler (the harness needs them to fail tests).
+    // Instead we verify the handler is REGISTERED on the process — and
+    // that the event kind is in the registry so the ledger insert won't
+    // be rejected at the boundary when the handler fires for real.
+    const ports = pickPortPair();
+    const before = process.listenerCount("unhandledRejection");
+    const beforeExc = process.listenerCount("uncaughtException");
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+    expect(process.listenerCount("unhandledRejection")).toBe(before + 1);
+    expect(process.listenerCount("uncaughtException")).toBe(beforeExc + 1);
+    // And the registry knows about daemon_unhandled_rejection so the emit
+    // inside the handler won't fail with unknown_event_kind.
+    const { EVENT_KINDS } = await import("../substrate/event_kinds");
+    expect(EVENT_KINDS).toHaveProperty("daemon_unhandled_rejection");
+  });
+
   test("boot reconciles orphaned dispatches from the previous run", async () => {
     // Stage 1: open the db directly and seed an unclosed brain_dispatched
     // row so the next daemon start sees it as an orphan.

@@ -236,6 +236,7 @@ export const EVENT_KINDS = {
   daemon_shutdown:                         { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   daemon_index_rebuilt:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   daemon_ready:                            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  daemon_unhandled_rejection:              { producer: "runtime",   embeddable: false, mirror_inline: true,  health_metric: true,  narrative: true  },
 
   // ── Daemon ops (crash recovery + DB integrity) ──────────────────────
   integrity_check_completed:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
