@@ -644,6 +644,8 @@ const WORKFLOW_TEXT = [
   "  6. Before any task_committed, satisfy the PROPOSAL GROUNDING GATE:",
   "     - every referenced event kind exists in substrate/event_kinds.ts;",
   "     - every repo-targeted amendment has a current anchor + structured diff;",
+  "     - every repo-targeted amendment cites fresh state_snapshot_recorded + state_snapshot_diffed evidence against current master;",
+  "     - proposal freshness is scored: stale_or_unverified_snapshot residual >= 0.3 means refine, do NOT propose anchored amendments;",
   "     - every referenced acc CLI command exists or is introduced in this DAG with a requires edge;",
   "     - every deliverable-shaped leaf goal has emitted a code_artifact_candidate,",
   "       contract_amendment_proposed, or lesson_extracted.proposed_action.",

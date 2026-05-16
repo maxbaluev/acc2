@@ -214,24 +214,31 @@ export const schedulerTick = async (
     : Math.max(1, rawPerDir ?? Math.ceil(maxConcurrent / 2));
   const ready = readyTasks(db, opts.directiveId);
 
-  // Fairness: dispatch the OLDEST ready task first. Pre-fix readyTasks
-  // returned tasks grouped by directive (insertion order of dagDirectiveIds
-  // Set), then by event ts within a directive. A busy directive with many
-  // ready children could iterate first, fill every slot, and STARVE
-  // older-but-newer-directive tasks indefinitely. Live ledger evidence
-  // (2026-05-15) showed a verification directive opened at 01:09:18 sitting
-  // unprocessed for 30+ min while a Father directive's children burned slots.
-  // Sorting by the task_node_opened ts (the topology layer's first row for
-  // the task) puts the oldest waiting work first across all directives.
+  // Branch-competition lane: when sibling refinement branches expose
+  // trigger_residual / expected_residual_delta, prefer the branch with the
+  // best expected residual reduction before falling back to oldest-ready
+  // fairness. This keeps strategic alternatives competing on verifier axes
+  // instead of whichever task_node_opened happened to be oldest.
+  const taskOpenedTs = (taskId: string): string => {
+    const row = db
+      .query("SELECT ts FROM events WHERE kind = 'task_node_opened' AND task_id = ? ORDER BY ts ASC LIMIT 1")
+      .get(taskId) as { ts: string } | null;
+    return row?.ts ?? "";
+  };
+  const branchCompetitionScore = (taskId: string): number => {
+    const row = db
+      .query("SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND json_extract(payload, '$.to_task') = ? ORDER BY ts DESC LIMIT 1")
+      .get(taskId) as { payload: string } | null;
+    if (!row) return 0;
+    try {
+      const p = JSON.parse(row.payload) as { trigger_residual?: number; expected_residual_delta?: number };
+      return Math.max(0, Number(p.trigger_residual ?? 0)) * Math.max(0, Number(p.expected_residual_delta ?? 0));
+    } catch { return 0; }
+  };
   ready.sort((a, b) => {
-    const aRow = db
-      .query("SELECT ts FROM events WHERE kind = 'task_node_opened' AND task_id = ? ORDER BY ts ASC LIMIT 1")
-      .get(a.id) as { ts: string } | null;
-    const bRow = db
-      .query("SELECT ts FROM events WHERE kind = 'task_node_opened' AND task_id = ? ORDER BY ts ASC LIMIT 1")
-      .get(b.id) as { ts: string } | null;
-    if (!aRow || !bRow) return 0;
-    return aRow.ts.localeCompare(bRow.ts);
+    const scoreDelta = branchCompetitionScore(b.id) - branchCompetitionScore(a.id);
+    if (scoreDelta !== 0) return scoreDelta;
+    return taskOpenedTs(a.id).localeCompare(taskOpenedTs(b.id));
   });
 
   const dispatched: string[] = [];

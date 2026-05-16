@@ -825,6 +825,12 @@ export const dispatchReadyTask = async (
             dispatch_id: dispatchId,
             action_result: actionObs.result ?? null,
             verifier_result: verifierObs.result ?? null,
+            outcome_dimensions: verifierObs.result && typeof verifierObs.result === "object" && !Array.isArray(verifierObs.result)
+              ? ((verifierObs.result as Record<string, unknown>).outcome_dimensions ?? (verifierObs.result as Record<string, unknown>).breakdown ?? null)
+              : null,
+            reliability_profile: verifierObs.result && typeof verifierObs.result === "object" && !Array.isArray(verifierObs.result)
+              ? ((verifierObs.result as Record<string, unknown>).reliability_profile ?? null)
+              : null,
           } as JsonValue,
         });
 
