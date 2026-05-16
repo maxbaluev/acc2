@@ -70,6 +70,11 @@ export type RecipeTrajectoryStep = {
   step_kind: "action_predicted" | "task_node_opened" | string;
   artifact_id?: string | null;
   verifier_artifact_id?: string | null;
+  runtime?: "bun" | "uv" | "camofox-browser" | string;
+  input_refs?: string[];
+  output_ref?: string | null;
+  resource_refs?: string[];
+  verifier_class?: string | null;
   payload_template: JsonValue;
   predicted_residual?: number | null;
 };
