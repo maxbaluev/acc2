@@ -417,25 +417,40 @@ const ageOf = (ts: string, now: number): number => {
 };
 
 export const readPendingDecisions = (db: Database, nowMs: number): PendingDecision[] => {
-  type R = { id: string; ts: string; payload: string };
+  type R = { id: string; ts: string; payload: string; directive_id: string | null };
   const out: PendingDecision[] = [];
   const isResolved = (id: string, kinds: string) =>
     !!db.query(`SELECT 1 FROM events WHERE kind IN (${kinds}) AND context_refs LIKE ? LIMIT 1`).get(`%${id}%`);
-  for (const r of db.query("SELECT id, ts, payload FROM events WHERE kind='owner_input_required' ORDER BY ts DESC LIMIT 200").all() as R[]) {
+  // A decision is stale if its directive has reached terminal state — a
+  // closed directive's pending owner_input_required rows will never be
+  // resolved by the owner because the work that needed them is gone.
+  // Filter them out so the Decisions pane reflects ACTIONABLE state, not
+  // archaeological backlog.
+  const closedDirectives = new Set<string>(
+    (db.query(
+      "SELECT DISTINCT directive_id FROM events WHERE kind IN ('directive_closed','directive_archived_by_operator','directive_archived_missed_reviews')",
+    ).all() as Array<{ directive_id: string }>).map((r) => r.directive_id),
+  );
+  const isOnClosedDirective = (directiveId: string | null | undefined): boolean =>
+    !!directiveId && closedDirectives.has(directiveId);
+  for (const r of db.query("SELECT id, ts, payload, directive_id FROM events WHERE kind='owner_input_required' ORDER BY ts DESC LIMIT 200").all() as R[]) {
     if (isResolved(r.id, "'owner_decision_recorded'")) continue;
+    if (isOnClosedDirective(r.directive_id)) continue;
     const p = parseJsonSafe(r.payload);
     out.push({ event_id: r.id, kind: "owner_input_required", target: String(p.target ?? p.question ?? p.summary ?? "-").slice(0, 80), anchor: String(p.anchor ?? p.summary ?? p.question ?? "").slice(0, 50), age_ms: ageOf(r.ts, nowMs) });
   }
-  for (const r of db.query("SELECT id, ts, payload FROM events WHERE kind='hidl_action_required' ORDER BY ts DESC LIMIT 200").all() as R[]) {
+  for (const r of db.query("SELECT id, ts, payload, directive_id FROM events WHERE kind='hidl_action_required' ORDER BY ts DESC LIMIT 200").all() as R[]) {
     if (isResolved(r.id, "'hidl_action_resolved','owner_decision_recorded'")) continue;
+    if (isOnClosedDirective(r.directive_id)) continue;
     const p = parseJsonSafe(r.payload);
     out.push({ event_id: r.id, kind: "hidl_action_required", target: String(p.target ?? p.action ?? p.suggested_action ?? p.summary ?? "-").slice(0, 80), anchor: String(p.anchor ?? p.reason ?? p.summary ?? "").slice(0, 50), age_ms: ageOf(r.ts, nowMs) });
   }
-  for (const r of db.query("SELECT id, ts, payload FROM events WHERE kind='contract_amendment_proposed' ORDER BY ts DESC LIMIT 400").all() as R[]) {
+  for (const r of db.query("SELECT id, ts, payload, directive_id FROM events WHERE kind='contract_amendment_proposed' ORDER BY ts DESC LIMIT 400").all() as R[]) {
     const p = parseJsonSafe(r.payload);
     const target = String(p.target ?? p.target_resource ?? p.resource_uri ?? "");
     if (!target || !OWNER_GATED_PATH_PATTERNS.some(({ regex }) => regex.test(target.replace(/^repo:/, "")))) continue;
     if (db.query("SELECT 1 FROM events WHERE kind='contract_amendment_applied' AND (context_refs LIKE ? OR json_extract(payload,'$.source_event_id')=?) LIMIT 1").get(`%${r.id}%`, r.id)) continue;
+    if (isOnClosedDirective(r.directive_id)) continue;
     out.push({ event_id: r.id, kind: "contract_amendment_proposed", target: target.slice(0, 80), anchor: String(p.anchor ?? "").slice(0, 50), age_ms: ageOf(r.ts, nowMs) });
   }
   out.sort((a, b) => b.age_ms - a.age_ms);
