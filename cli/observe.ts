@@ -18,6 +18,31 @@
 import { mcpCall, sseConnect } from "./rpc";
 import { EVENT_KINDS, MIRROR_INLINE_EVENT_TYPES } from "../substrate/event_kinds";
 
+// ── panel-friendly format invariants ───────────────────────────────
+//
+// The Claude Code background_tasks shell-details panel shows the last ~5
+// lines of stdout. During the first ~minute of an `acc task` dispatch the
+// brain hasn't emitted anything yet, so the panel was eaten by the long
+// directive_opened prompt echo. Three load-bearing constants now govern
+// the panel UX:
+//
+//  - MAX_EVENT_LINE_CHARS — every narrative renderer collapses to ONE line
+//    ≤120 chars. Tail any multi-line payload to `→ id=<event_short>` so
+//    `--verbose` / `acc inspect <id>` can pull the full detail.
+//  - FOLLOW_HEARTBEAT_MS — heartbeat cadence (5s). Fires while no new
+//    narrative event has arrived for ≥5s.
+//  - FOLLOW_HEARTBEAT_WINDOW_MS — drop the heartbeat after this much idle
+//    time (60s). After a minute of silence the brain is likely wedged; the
+//    operator should switch to `acc events --verbose` or `acc doctor`.
+//
+// Crucially, the heartbeat clock starts at DISPATCH START — not at the
+// first event — so the trailing-5-line window has brain-progress signal
+// during the pre-event window. That is the structural fix for the
+// "panel shows stale prompt echo for the entire first minute" bug.
+export const MAX_EVENT_LINE_CHARS = 120;
+export const FOLLOW_HEARTBEAT_MS = 5_000;
+export const FOLLOW_HEARTBEAT_WINDOW_MS = 60_000;
+
 // ── one-line formatter per event kind ──────────────────────────────
 
 type EventLike = {
@@ -67,7 +92,8 @@ export const NARRATIVE_KINDS = new Set(
 
 const trunc = (s: string | undefined, n: number): string => {
   if (!s) return "";
-  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > n ? flat.slice(0, n - 1) + "…" : flat;
 };
 
 const idPrefix = (id: string | undefined, n = 8): string => {
@@ -165,9 +191,13 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
   // Per-kind structured rendering. Returns a "key=value key=value" suffix.
   switch (kind) {
     case "directive_opened": {
-      const text = (p.directive_text as string) ?? (p.text as string) ?? "";
       const lifecycle = p.lifecycle as string | undefined;
-      return `text=${JSON.stringify(trunc(text, 100))}${lifecycle ? ` lifecycle=${lifecycle}` : ""}`;
+      const urgency = p.urgency as string | undefined;
+      return [
+        "opened",
+        lifecycle ? `lifecycle=${lifecycle}` : "",
+        urgency && urgency !== "normal" ? `urgency=${urgency}` : "",
+      ].filter(Boolean).join(" ");
     }
     case "task_node_opened": {
       const goal = p.goal as string | undefined;
@@ -176,7 +206,7 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       return [
         rank !== undefined ? `rank=${rank}` : "",
         urgency && urgency !== "normal" ? `urgency=${urgency}` : "",
-        goal ? `goal=${JSON.stringify(trunc(goal, 140))}` : "",
+        goal ? `goal=${JSON.stringify(trunc(goal, 56))}` : "",
       ].filter(Boolean).join(" ");
     }
     case "task_edge_recorded": {
@@ -207,7 +237,7 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       return [
         `action=${action} verifier=${verifier}`,
         residual !== undefined ? `predicted_residual=${residual}` : "",
-        intent ? `intent=${JSON.stringify(trunc(intent, 80))}` : "",
+        intent ? `intent=${JSON.stringify(trunc(intent, 42))}` : "",
       ].filter(Boolean).join(" ");
     }
     case "artifact_invoked":
@@ -237,7 +267,7 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       const score = p.score;
       const learnedFromOwner = p.learned_from_owner as string | undefined;
       const ownerTag = learnedFromOwner ? ` ← owner: ${JSON.stringify(trunc(learnedFromOwner, 80))}` : "";
-      return `${claim ? `claim=${JSON.stringify(trunc(claim, 100))}` : ""}${score !== undefined ? ` score=${score}` : ""}${ownerTag}`.trim();
+      return `${claim ? `claim=${JSON.stringify(trunc(claim, 54))}` : ""}${score !== undefined ? ` score=${score}` : ""}${ownerTag}`.trim();
     }
     case "recipe_extracted": {
       const confidence = p.confidence;
@@ -305,7 +335,7 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
     case "lesson_extracted": {
       const kind = p.lesson_kind as string | undefined;
       const summary = p.summary as string | undefined;
-      return `lesson_kind=${kind ?? "?"} ${summary ? `summary=${JSON.stringify(trunc(summary, 120))}` : ""}`;
+      return `lesson_kind=${kind ?? "?"} ${summary ? `summary=${JSON.stringify(trunc(summary, 54))}` : ""}`;
     }
     case "contract_amendment_proposed": {
       const target = p.target as string | undefined;
@@ -360,7 +390,39 @@ export const formatEvent = (ev: EventLike, opts: { verbose?: boolean } = {}): st
   const payload = parsePayload(ev.payload);
   const suffix = formatPayload(kind, payload);
   const failureKind = ev.failure_kind ? ` failure_kind=${ev.failure_kind}` : "";
-  return `${ts} ${glyph.padEnd(3)} ${kind.padEnd(28)} task=${task.padEnd(16)} ${suffix}${failureKind}`.trimEnd();
+  const line = `${ts} ${glyph.padEnd(3)} ${kind.padEnd(28)} task=${task.padEnd(16)} ${suffix}${failureKind}`.trimEnd();
+  return trunc(line, MAX_EVENT_LINE_CHARS);
+};
+
+// Heartbeat formatter — produces the panel-friendly "waiting on brain" line.
+// Pre-event window: `[t+<s>s] waiting on brain · cycle <c>/<max> · <e> events · <n> nodes · <p> proposals`.
+// Post-event window: append ` · last <kind> <age>s ago`.
+// Capped at MAX_EVENT_LINE_CHARS so the trailing-5-line background_tasks panel
+// stays readable.
+export type HeartbeatCounters = {
+  events: number;
+  nodes: number;
+  proposals: number;
+  cycle: number;
+  maxCycles: number;
+  lastKind?: string;
+  lastEventAt?: number;
+};
+export const formatFollowHeartbeat = (
+  startedAt: number,
+  counters: HeartbeatCounters,
+  now: number = Date.now(),
+): string => {
+  const ageS = Math.max(0, Math.floor((now - startedAt) / 1000));
+  const cycle = counters.cycle > 0 ? counters.cycle : 1;
+  const max = counters.maxCycles > 0 ? counters.maxCycles : 1;
+  const base = `[t+${ageS}s] waiting on brain · cycle ${cycle}/${max} · ${counters.events} events · ${counters.nodes} nodes · ${counters.proposals} proposals`;
+  let line = base;
+  if (counters.lastKind && counters.lastEventAt) {
+    const lastAgeS = Math.max(0, Math.floor((now - counters.lastEventAt) / 1000));
+    line = `${base} · last ${counters.lastKind} ${lastAgeS}s ago`;
+  }
+  return trunc(line, MAX_EVENT_LINE_CHARS);
 };
 
 // ── acc events ─────────────────────────────────────────────────────
@@ -443,6 +505,12 @@ export type TailOpts = EventsOpts & {
    *  to commit), pass the root task id here. Terminal events for
    *  non-root tasks are still printed but do not end the follow. */
   rootTaskId?: string;
+  /** Emit a `[t+Ns] waiting on brain · …` line every FOLLOW_HEARTBEAT_MS
+   *  starting at t+5s after follow-start (NOT after first event), capped at
+   *  FOLLOW_HEARTBEAT_WINDOW_MS. The flag is opt-in because operators tailing
+   *  for grep / pipelines don't want the synthetic lines; the dispatch
+   *  follow tail (the panel surface that needs them) sets it explicitly. */
+  heartbeat?: boolean;
 };
 
 // SSE-backed live stream — the canonical Claude-native observation path.
@@ -464,6 +532,26 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
     deadlineTimer = setTimeout(() => ac.abort(), ms);
   }
   let sawTerminal = false;
+  const startedAt = Date.now();
+  // Heartbeat counters surfaced into every `[t+Ns] waiting on brain …` line.
+  // `events` = scoped events seen on the SSE stream; `nodes` = task_node_opened
+  // events (so the operator sees DAG growth without verbose); `proposals` =
+  // contract_amendment_proposed / lesson_extracted (so the operator sees what
+  // owner-gated decisions are accumulating). `cycle` / `maxCycles` are pulled
+  // from any brain_dispatched payload that arrives.
+  const counters: HeartbeatCounters = { events: 0, nodes: 0, proposals: 0, cycle: 1, maxCycles: 1 };
+  const heartbeatEnabled = opts.heartbeat ?? Boolean(opts.task || opts.directive || opts.rootTaskId);
+  // First heartbeat fires at t+FOLLOW_HEARTBEAT_MS (i.e. t+5s), NOT
+  // immediately at t+0. That preserves the directive_opened line as the
+  // FIRST visible row in the trailing-5-line panel, and ensures the
+  // heartbeat fires DURING the pre-event window before any brain emit lands.
+  const fireHeartbeat = () => {
+    if (heartbeatEnabled && Date.now() - startedAt <= FOLLOW_HEARTBEAT_WINDOW_MS) {
+      console.log(formatFollowHeartbeat(startedAt, counters));
+    }
+  };
+  const heartbeatTimer = heartbeatEnabled ? setInterval(fireHeartbeat, FOLLOW_HEARTBEAT_MS) : null;
+  heartbeatTimer?.unref?.();
   // Also wire process-signal abort so SIGTERM/SIGINT triggers abort cleanly
   // and the exit-code path below reports an honest "didn't see terminal".
   const onSig = () => ac.abort();
@@ -476,6 +564,16 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
       const e = ev as unknown as EventLike;
       if (opts.task && !(e.task_id ?? "").startsWith(opts.task)) continue;
       if (opts.directive && !(e.directive_id ?? "").startsWith(opts.directive)) continue;
+      counters.events++;
+      counters.lastKind = e.kind;
+      counters.lastEventAt = Date.now();
+      if (e.kind === "task_node_opened") counters.nodes++;
+      if (e.kind === "contract_amendment_proposed" || e.kind === "lesson_extracted") counters.proposals++;
+      if (e.kind === "brain_dispatched") {
+        const p = parsePayload(e.payload);
+        if (typeof p.cycle === "number") counters.cycle = p.cycle as number;
+        if (typeof p.max_cycles === "number") counters.maxCycles = p.max_cycles as number;
+      }
       if (opts.kinds && opts.kinds.length > 0) {
         if (!opts.kinds.includes(e.kind ?? "")) continue;
       } else if (opts.kind && e.kind !== opts.kind) continue;
@@ -514,6 +612,7 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
     console.error(`acc tail: ${(err as Error).message}`);
     return 1;
   } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (deadlineTimer) clearTimeout(deadlineTimer);
     process.off("SIGTERM", onSig);
     process.off("SIGINT", onSig);
@@ -533,8 +632,19 @@ const runTailPoll = async (opts: TailOpts): Promise<number> => {
   const exitOnTerminal = opts.exitOnTerminal ?? Boolean(opts.task || opts.directive);
   const deadlineMs = opts.deadlineMs;
   const seen = new Set<string>();
+  const startedAt = Date.now();
+  const counters: HeartbeatCounters = { events: 0, nodes: 0, proposals: 0, cycle: 1, maxCycles: 1 };
+  // First heartbeat scheduled for t+FOLLOW_HEARTBEAT_MS — NOT t+0. Same
+  // contract as the SSE path: panel sees directive_opened first, then a
+  // running waiting-on-brain line every 5s.
+  let nextHeartbeatAt = startedAt + FOLLOW_HEARTBEAT_MS;
+  const heartbeatEnabled = opts.heartbeat ?? Boolean(opts.task || opts.directive || opts.rootTaskId);
 
   while (true) {
+    if (heartbeatEnabled && Date.now() >= nextHeartbeatAt && Date.now() - startedAt <= FOLLOW_HEARTBEAT_WINDOW_MS) {
+      console.log(formatFollowHeartbeat(startedAt, counters));
+      nextHeartbeatAt = Date.now() + FOLLOW_HEARTBEAT_MS;
+    }
     let env;
     try {
       const args: Record<string, unknown> = { k: Math.min(200, opts.limit ?? 60) };
@@ -557,6 +667,16 @@ const runTailPoll = async (opts: TailOpts): Promise<number> => {
       seen.add(id);
       if (opts.task && !(e.task_id ?? "").startsWith(opts.task)) continue;
       if (opts.directive && !(e.directive_id ?? "").startsWith(opts.directive)) continue;
+      counters.events++;
+      counters.lastKind = e.kind;
+      counters.lastEventAt = Date.now();
+      if (e.kind === "task_node_opened") counters.nodes++;
+      if (e.kind === "contract_amendment_proposed" || e.kind === "lesson_extracted") counters.proposals++;
+      if (e.kind === "brain_dispatched") {
+        const p = parsePayload(e.payload);
+        if (typeof p.cycle === "number") counters.cycle = p.cycle as number;
+        if (typeof p.max_cycles === "number") counters.maxCycles = p.max_cycles as number;
+      }
       if (opts.kinds && opts.kinds.length > 0) {
         if (!opts.kinds.includes(e.kind ?? "")) continue;
       } else if (opts.kind && e.kind !== opts.kind) continue;

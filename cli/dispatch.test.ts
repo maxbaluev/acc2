@@ -36,9 +36,20 @@ describe("runDispatch", () => {
 
     expect(code).toBe(0);
     const joined = cap.lines.join("\n");
+    // Compact panel-friendly form (ux/cli-observe panel-friendly follow tail):
+    // `directive_opened <id> root=<task_short> · awaiting cycle-1` — exactly
+    // ONE line in default mode. The full directive text + text_chars footer
+    // move behind --verbose so the trailing-5-line background_tasks panel
+    // is reserved for brain-progress signal, not stale prompt echo.
     expect(joined).toContain("directive_opened ");
-    expect(joined).toContain("root task=");
-    expect(joined).toContain("fix the broken test");
+    expect(joined).toContain("root=");
+    expect(joined).toContain("· awaiting cycle-1");
+    // No prompt echo by default — full text is in the ledger payload row.
+    expect(joined).not.toContain("fix the broken test");
+    // No text_chars footer by default — moved behind --verbose.
+    expect(joined).not.toContain("text_chars");
+    // Every emitted stdout line stays ≤ 120 chars (MAX_EVENT_LINE_CHARS).
+    for (const ln of cap.lines) expect(ln.length).toBeLessThanOrEqual(120);
 
     // Directive_opened payload carries directive_text (the canonical
     // open_directive shape; the prior `payload.text` shape was a substrate

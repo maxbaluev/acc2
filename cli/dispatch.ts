@@ -145,7 +145,7 @@ const renderAskHelp = (): string => [
 ].join("\n");
 const dispatchTask = async (
   words: string,
-  opts: { follow?: boolean; timeoutSecs?: number } = {},
+  opts: { follow?: boolean; timeoutSecs?: number; verbose?: boolean } = {},
 ): Promise<number> => {
   // Pre-dispatch credential check. Refuses when an env-var-shaped token
   // appears in the directive text without a value in process.env.
@@ -179,8 +179,18 @@ const dispatchTask = async (
     return 1;
   }
   const { directive_id, task_id } = env.result as { directive_id: string; task_id: string };
-  console.log(`directive_opened ${directive_id} (root task=${task_id})`);
-  console.log(`  text: ${words}`);
+  // Compact panel-friendly one-liner by default. The full directive text is
+  // already in the directive_opened payload row in the ledger; echoing it to
+  // stdout during the first minute eats the trailing-5-line window of the
+  // Claude Code background_tasks panel and crowds out brain-progress signal.
+  // --verbose restores the legacy long form (text + footer) for diagnostic
+  // sessions that want the full echo.
+  const taskShort = task_id.slice(0, 8);
+  console.log(`directive_opened ${directive_id} root=${taskShort} · awaiting cycle-1`);
+  if (opts.verbose) {
+    console.log(`  text: ${words}`);
+    console.log(`  text_chars=${words.length}`);
+  }
 
   // Conversation-as-learning-surface (DSGSAZGMF1, universalized per
   // owner feedback "people not 3 types, all of them different"):
@@ -278,7 +288,9 @@ const dispatchTask = async (
   // every brain frame after the first decomposition. The directive_id
   // is stable across the whole subtree, so this captures the full
   // brain trajectory under one follow stream.
-  console.log(`  (following — scoped to directive=${directive_id.slice(0, 16)}…; root-terminal will exit)`);
+  if (opts.verbose) {
+    console.log(`  (following directive=${directive_id.slice(0, 16)}…; waiting for scheduler/brain cycle-1)`);
+  }
   return runTail({
     directive: directive_id,
     rootTaskId: task_id,
@@ -286,6 +298,11 @@ const dispatchTask = async (
     stream: true,
     exitOnTerminal: true,
     deadlineMs: opts.timeoutSecs ? Date.now() + opts.timeoutSecs * 1000 : undefined,
+    // Eager heartbeat fires at t+5s from dispatch start so the trailing-5-
+    // line background_tasks panel always shows brain-progress signal during
+    // the pre-event window, not stale prompt-echo.
+    heartbeat: true,
+    verbose: opts.verbose,
   });
 };
 
@@ -437,6 +454,7 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     // bare directive-open shape (just emit and return).
     const noFollow = rest.includes("--no-follow") || rest.includes("--bare");
     const follow = !noFollow;
+    const verbose = rest.includes("--verbose");
     const timeoutIdx = rest.findIndex((x) => x === "--timeout");
     const timeoutSecs = timeoutIdx >= 0 && rest[timeoutIdx + 1]
       ? Number(rest[timeoutIdx + 1]) : undefined;
@@ -445,12 +463,13 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
         x !== "--follow" &&
         x !== "--no-follow" &&
         x !== "--bare" &&
+        x !== "--verbose" &&
         x !== "--timeout" &&
         rest[i - 1] !== "--timeout"
       )
       .join(" ").trim();
     if (!words) { console.error("acc task: missing directive text"); return 1; }
-    return dispatchTask(words, { follow, timeoutSecs });
+    return dispatchTask(words, { follow, timeoutSecs, verbose });
   }
   if (cmd === "events" || cmd === "tail" || cmd === "graph" || cmd === "inspect") {
     const { runObserve } = await import("./observe");

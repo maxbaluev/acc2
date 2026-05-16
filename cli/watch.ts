@@ -121,7 +121,8 @@ type GraphRow = {
 
 export type ViewKey = "now" | "decisions" | "graph" | "evidence" | "health" | "diagnostics";
 
-export type PendingDecision = { event_id: string; kind: string; target: string; anchor: string; age_ms: number };
+export type PendingDecision = { event_id: string; kind: string; target: string; anchor: string; age_ms: number; count?: number; duplicate_ids?: string[] };
+export type WatchActionStatus = { ts: string; ok: boolean; message: string };
 export type DriftSummary = { directive_id: string; status: string; applied: number; failed: number; refused: number; stranded: number; drift: number; missing: number };
 
 export type WatchState = {
@@ -149,7 +150,12 @@ export type WatchState = {
   /** When true, Now pane filters active directives to those with activity in
    *  the last NOW_RECENCY_MS. Toggle with `n`. Default: filter on. */
   nowShowAll?: boolean;
+  /** Selected row index per pane (row-aware, not line-aware). Drives action
+   *  keys (a/d/A/R) and Enter row expansion. */
   selected?: Partial<Record<ViewKey, number>>;
+  /** Last-action feedback line: shown in place of the duplicate-daemon
+   *  footer when present, cleared on next action. */
+  actionStatus?: WatchActionStatus;
   trust_refreshed_ms?: number;
   decisions_refreshed_ms?: number;
   drift_refreshed_ms?: number;
@@ -433,7 +439,22 @@ export const readPendingDecisions = (db: Database, nowMs: number): PendingDecisi
     out.push({ event_id: r.id, kind: "contract_amendment_proposed", target: target.slice(0, 80), anchor: String(p.anchor ?? "").slice(0, 50), age_ms: ageOf(r.ts, nowMs) });
   }
   out.sort((a, b) => b.age_ms - a.age_ms);
-  return out;
+  // Dedup: collapse rows with the same (kind, target, anchor) signature.
+  // Keeps the OLDEST row (highest age_ms) as the representative because that
+  // is the one the owner has been ignoring longest. duplicate_ids preserves
+  // the buried ones so action keys can resolve all of them at once.
+  const seen = new Map<string, PendingDecision>();
+  for (const r of out) {
+    const key = `${r.kind}|${r.target}|${r.anchor}`;
+    const prev = seen.get(key);
+    if (!prev) {
+      seen.set(key, { ...r, count: 1, duplicate_ids: [] });
+    } else {
+      prev.count = (prev.count ?? 1) + 1;
+      prev.duplicate_ids = [...(prev.duplicate_ids ?? []), r.event_id];
+    }
+  }
+  return [...seen.values()];
 };
 
 export const readDriftSummaries = (db: Database, repoRoot: string, n = 10): DriftSummary[] => {
@@ -535,9 +556,16 @@ export const renderPanelLines = (state: WatchState, view: ViewKey, cols: number)
   }
   if (view === "decisions") {
     const d = state.decisions ?? [];
-    lines.push(`${H("Pending owner decisions")} (${d.length})`);
+    const selected = state.selected?.decisions ?? 0;
+    lines.push(`${H("Pending owner decisions")} (${d.length}) keys: a approve  d decline  A apply  R retry  Enter expand`);
     if (d.length === 0) return [...lines, "no owner_input_required, hidl_action_required, or owner-gated amendment is pending"];
-    for (const r of d.slice(0, 10)) lines.push(`${YELLOW}${tech ? shortId(r.event_id, 8) : "choice"}${RESET} ${r.kind} ${truncate(r.target, w - 35)} age=${formatAge(r.age_ms)}`);
+    for (let i = 0; i < d.length; i++) {
+      const r = d[i]!;
+      const marker = i === selected ? `${INVERT}>${RESET}` : " ";
+      const dup = (r.count ?? 1) > 1 ? ` x${r.count}` : "";
+      const verb = r.kind === "contract_amendment_proposed" ? "approve/apply" : "approve/decline";
+      lines.push(`${marker} ${YELLOW}${tech ? shortId(r.event_id, 8) : "choice"}${RESET}${dup} ${verb} ${truncate(r.target, w - 48)} age=${formatAge(r.age_ms)}`);
+    }
     return lines;
   }
   if (view === "graph") {
@@ -653,7 +681,7 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
     `acc watch | live view of what accint is doing | ${healthLabel(h)}`,
   );
   parts.push(moveTo(1, 1), `${BOLD}${CYAN}${truncate(headline, safeCols)}${RESET}`);
-  parts.push(moveTo(2, 1), `${DIM}1-6 panes  Tab cycle  j/k scroll  Enter expand  n toggle stale  / filter  r refresh  ? help  q quit${RESET}`);
+  parts.push(moveTo(2, 1), `${DIM}1-6 panes  Tab cycle  j/k row  Enter expand  decisions: a approve d decline A apply  n stale  / filter  r refresh  ? help  q quit${RESET}`);
 
   // Expanded mode: render the focused pane full-screen with scroll.
   if (state.expanded) {
@@ -702,9 +730,13 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
 
   const decisionsN = state.decisions?.length ?? 0;
   const driftN = (state.drift ?? []).reduce((acc, r) => acc + r.drift + r.missing, 0);
-  const footer = `Status focus=${focus} filter=${state.filter || "none"} events=${state.events.length} active=${state.active.length} ready=${state.ready.length} decisions=${decisionsN} drift=${driftN} pid=${h.pid ?? "?"}`;
+  const first = decisionsN > 0 ? "2 Decisions" : state.ready.length > 0 ? "3 Work Graph" : driftN > 0 ? "6 Diagnostics" : "1 Now";
+  const footer = `FIRST=${first} focus=${focus} filter=${state.filter || "none"} events=${state.events.length} active=${state.active.length} ready=${state.ready.length} decisions=${decisionsN} drift=${driftN}`;
   parts.push(moveTo(safeRows - 1, 1), `${BOLD}${truncate(footer, safeCols)}${RESET}`);
-  parts.push(moveTo(safeRows, 1), truncate(`Daemon pid=${h.pid ?? "?"} uptime_ms=${h.uptime_ms ?? 0} events_count=${h.events_count ?? state.events.length} mcp=${h.mcp_port ?? "?"} aux=${h.aux_port ?? "?"}`, safeCols));
+  const action = state.actionStatus
+    ? `${state.actionStatus.ok ? GREEN : RED}${state.actionStatus.message}${RESET}`
+    : `daemon pid=${h.pid ?? "?"} uptime_ms=${h.uptime_ms ?? 0} mcp=${h.mcp_port ?? "?"} aux=${h.aux_port ?? "?"}`;
+  parts.push(moveTo(safeRows, 1), truncate(action, safeCols));
   return parts.join("");
 };
 
@@ -782,6 +814,51 @@ const screenDims = (): { cols: number; rows: number } => ({
 
 const nextFocus = (view: ViewKey): ViewKey => VIEWS[(VIEWS.findIndex((v) => v.key === view) + 1) % VIEWS.length]!.key;
 
+/** Action handler for the Decisions pane. Emits the appropriate substrate
+ *  event(s) for approve/decline/apply/retry and stores a one-line status the
+ *  footer surfaces. Resolves every duplicate row in one shot (count > 1). */
+const recordDecisionAction = async (
+  state: WatchState,
+  decision: PendingDecision,
+  key: string,
+): Promise<void> => {
+  const allIds = [decision.event_id, ...(decision.duplicate_ids ?? [])];
+  const ts = new Date().toISOString();
+  const fanout = allIds.length > 1 ? ` x${allIds.length}` : "";
+  if (key === "a" || key === "d") {
+    const verdict = key === "a" ? "approved" : "declined";
+    for (const eventId of allIds) {
+      const env = await mcpCall("substrate.emit", {
+        kind: "owner_decision_recorded",
+        substrate_origin: "claude",
+        directive_id: undefined,
+        context_refs: [eventId],
+        payload: { decision: verdict, source_event_id: eventId, recorded_at: ts },
+      });
+      if (!env.ok) throw new Error(env.error ?? "substrate.emit failed");
+    }
+    state.actionStatus = { ts, ok: true, message: `recorded owner_decision_recorded (${verdict}) for ${decision.kind}${fanout}` };
+  } else if (key === "A") {
+    if (decision.kind !== "contract_amendment_proposed") {
+      state.actionStatus = { ts, ok: false, message: `apply (A) only valid for contract_amendment_proposed; this row is ${decision.kind}` };
+      return;
+    }
+    // First record consent (the flagless-consent flow reads owner_decision_recorded from substrate).
+    for (const eventId of allIds) {
+      const env = await mcpCall("substrate.emit", {
+        kind: "owner_decision_recorded",
+        substrate_origin: "claude",
+        context_refs: [eventId],
+        payload: { decision: "approved", source_event_id: eventId, recorded_at: ts },
+      });
+      if (!env.ok) throw new Error(env.error ?? "substrate.emit failed");
+    }
+    state.actionStatus = { ts, ok: true, message: `consent recorded${fanout}; run \`acc apply ${shortId(decision.event_id, 10)}\` to render the subagent prompt` };
+  } else if (key === "R") {
+    state.actionStatus = { ts, ok: false, message: "R retry is reserved for applied_change_failed rows (next pass)" };
+  }
+};
+
 export const runWatch = async (argv: string[], opts: RunWatchOpts = {}): Promise<number> => {
   void argv;
   const writer = opts.writer ?? ((s: string) => { process.stdout.write(s); });
@@ -846,20 +923,33 @@ export const runWatch = async (argv: string[], opts: RunWatchOpts = {}): Promise
         renderTick();
         return;
       }
-      if (str === "r" || str === "R") { void refreshAll(state).then(renderTick).catch(() => { /* keep stale */ }); return; }
+      if (str === "r") { void refreshAll(state).then(renderTick).catch(() => { /* keep stale */ }); return; }
       if (str === "j" || str === "\x1b[B") {
         const focus = state.focus ?? "now";
-        const cursor = state.cursor ?? {};
-        cursor[focus] = (cursor[focus] ?? 0) + 1;
-        state.cursor = cursor;
+        if (focus === "decisions") {
+          const sel = state.selected ?? {};
+          const total = (state.decisions ?? []).length;
+          sel.decisions = Math.min(total - 1, (sel.decisions ?? 0) + 1);
+          state.selected = sel;
+        } else {
+          const cursor = state.cursor ?? {};
+          cursor[focus] = (cursor[focus] ?? 0) + 1;
+          state.cursor = cursor;
+        }
         renderTick();
         return;
       }
       if (str === "k" || str === "\x1b[A") {
         const focus = state.focus ?? "now";
-        const cursor = state.cursor ?? {};
-        cursor[focus] = Math.max(0, (cursor[focus] ?? 0) - 1);
-        state.cursor = cursor;
+        if (focus === "decisions") {
+          const sel = state.selected ?? {};
+          sel.decisions = Math.max(0, (sel.decisions ?? 0) - 1);
+          state.selected = sel;
+        } else {
+          const cursor = state.cursor ?? {};
+          cursor[focus] = Math.max(0, (cursor[focus] ?? 0) - 1);
+          state.cursor = cursor;
+        }
         renderTick();
         return;
       }
@@ -872,7 +962,20 @@ export const runWatch = async (argv: string[], opts: RunWatchOpts = {}): Promise
       if (str === "g") {
         const focus = state.focus ?? "now";
         state.cursor = { ...(state.cursor ?? {}), [focus]: 0 };
+        if (focus === "decisions") state.selected = { ...(state.selected ?? {}), decisions: 0 };
         renderTick();
+        return;
+      }
+      // Action keys — only fire when Decisions pane is focused and a row is selected.
+      if (state.focus === "decisions" && /^[adAR]$/.test(str)) {
+        const sel = (state.selected?.decisions ?? 0);
+        const decision = (state.decisions ?? [])[sel];
+        if (decision) {
+          void recordDecisionAction(state, decision, str).then(renderTick).catch((err) => {
+            state.actionStatus = { ts: new Date().toISOString(), ok: false, message: `action failed: ${(err as Error).message}` };
+            renderTick();
+          });
+        }
         return;
       }
     };
