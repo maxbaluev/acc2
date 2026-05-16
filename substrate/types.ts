@@ -93,13 +93,19 @@ export type OwnerConceptExposure = {
 export type OwnerProfile = {
   detected_language?: string;
   /** Open-ended map of continuous rendering signals for this specific
-   *  owner. Each key is a signal name (e.g. "code_density",
-   *  "ops_vocabulary", "explanation_appetite", "question_tolerance");
-   *  each value is a learned strength ∈ [0, 1]. The renderer reads
-   *  what it knows; ignores unknown keys. NEW signals can be added by
-   *  any classifier or extractor without a schema migration. There is
-   *  NO fixed persona enum — every owner is unique. */
+   *  owner. Each key is a signal name; each value is a learned strength
+   *  ∈ [0, 1]. Consumers read known keys and ignore unknown keys. */
   rendering_signals?: Record<string, number>;
+  /** Open-ended autonomy preferences beyond the scalar autonomy_score. */
+  autonomy_signals?: Record<string, number>;
+  /** Open-ended owner control/delegation preferences. */
+  control_signals?: Record<string, number>;
+  /** Open-ended risk tolerance and sensitivity dimensions. */
+  risk_signals?: Record<string, number>;
+  /** Open-ended collaboration / cadence / interruption preferences. */
+  collaboration_signals?: Record<string, number>;
+  /** Open-ended continuity signals for recurring goals and long arcs. */
+  goal_continuity_signals?: Record<string, number>;
   /** Words the owner uses for substrate concepts. The renderer mirrors
    *  these back instead of canonical jargon. */
   preferred_terms?: string[];
@@ -155,6 +161,11 @@ export type OwnerProfile = {
 export const OWNER_PROFILE_DEFAULTS = {
   detected_language: "en",
   rendering_signals: {},
+  autonomy_signals: {},
+  control_signals: {},
+  risk_signals: {},
+  collaboration_signals: {},
+  goal_continuity_signals: {},
   preferred_terms: [],
   avoided_terms: [],
   exposed_concepts: {},
@@ -177,11 +188,14 @@ export const OWNER_PROFILE_JSON_SCHEMA = {
     rendering_signals: {
       type: "object",
       // Open-ended: keys are signal names (any string), values are
-      // continuous strengths ∈ [0, 1]. No fixed key enum — universal
-      // adaptation per owner. Out-of-range values are clamped by
-      // consumers, not rejected by the schema.
+      // continuous strengths ∈ [0, 1]. No fixed key enum.
       additionalProperties: { type: "number", minimum: 0, maximum: 1 },
     },
+    autonomy_signals: { type: "object", additionalProperties: { type: "number", minimum: 0, maximum: 1 } },
+    control_signals: { type: "object", additionalProperties: { type: "number", minimum: 0, maximum: 1 } },
+    risk_signals: { type: "object", additionalProperties: { type: "number", minimum: 0, maximum: 1 } },
+    collaboration_signals: { type: "object", additionalProperties: { type: "number", minimum: 0, maximum: 1 } },
+    goal_continuity_signals: { type: "object", additionalProperties: { type: "number", minimum: 0, maximum: 1 } },
     preferred_terms: { type: "array", items: { type: "string", minLength: 1, maxLength: 200 }, default: [] },
     avoided_terms: { type: "array", items: { type: "string", minLength: 1, maxLength: 200 }, default: [] },
     exposed_concepts: {
