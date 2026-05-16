@@ -71,34 +71,6 @@ const usage = (): string => `acc — v2 thin CLI
   acc doctor                      Multi-check readiness report.
 `;
 
-// Pre-dispatch credential preflight (cli-quick first line of defense).
-//
-// Architecture: the BRAIN's artifact declared_sandbox.env_requires is the
-// canonical authority on what env vars an artifact needs (runtime gate in
-// runtime/runtimes/bun.ts). This CLI check is the FAST-LANE belt-and-
-// suspenders: if the owner explicitly names an env-var-shaped identifier
-// in their directive AND that var isn't on the daemon process, refuse to
-// dispatch immediately — no need to round-trip through the brain.
-//
-// Token shape is universal: `<NAME>_KEY` / `_TOKEN` / `_SECRET` /
-// `_PASSWORD`. The runtime gate covers dynamic + library-indirected env
-// access (which a directive-text scan can't see) via the declared_sandbox.
-const ENV_VAR_TOKEN = /\b([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)*(?:_KEY|_TOKEN|_SECRET|_PASSWORD))\b/g;
-const PREFLIGHT_IGNORE = new Set([
-  "ACC2_ADMIN_TOKEN", "ACC2_EXTERNAL_PUSH_TOKEN",
-]);
-
-const preflightCredentials = (words: string): string[] => {
-  const seen = new Set<string>();
-  for (const m of words.matchAll(ENV_VAR_TOKEN)) {
-    const name = m[1]!;
-    if (PREFLIGHT_IGNORE.has(name)) continue;
-    if (process.env[name] && process.env[name]!.length > 0) continue;
-    seen.add(name);
-  }
-  return [...seen];
-};
-
 type AskRoute = "task" | "doctor" | "watch" | "trust" | "help";
 
 export const scoreAskRoutes = (words: string): { route: AskRoute; routing_scores: Record<string, number> } => {
@@ -147,17 +119,7 @@ const dispatchTask = async (
   words: string,
   opts: { follow?: boolean; timeoutSecs?: number; verbose?: boolean } = {},
 ): Promise<number> => {
-  // Pre-dispatch credential check. Refuses when an env-var-shaped token
-  // appears in the directive text without a value in process.env.
-  const missing = preflightCredentials(words);
-  if (missing.length > 0) {
-    console.error(`acc task: missing required env var(s): ${missing.join(", ")}`);
-    console.error(`  the directive references these credentials but they are not set on the daemon process.`);
-    console.error(`  add to .env (or export in your shell) and rerun:`);
-    for (const k of missing) console.error(`    ${k}=...`);
-    console.error(`  refusing to dispatch — would have burned brain tokens probing without the credential.`);
-    return 2;
-  }
+  // Credential availability is enforced by artifact declared_sandbox.env_requires at runtime.
 
   // `substrate.open_directive` is the canonical write surface: it emits
   // `directive_opened` AND the root `task_node_opened` in one transaction
