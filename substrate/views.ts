@@ -159,7 +159,14 @@ CREATE VIEW IF NOT EXISTS artifact_routing_view AS
 // rebuilds its HNSW index from this view at boot.
 const VIEW_EMBEDDING_INDEX = `
 CREATE VIEW IF NOT EXISTS embedding_index_view AS
-  SELECT id, kind, ts, directive_id, task_id, embedding, embedding_version, substrate_origin, payload
+  SELECT
+    id, kind, ts, directive_id, task_id, embedding, embedding_version, substrate_origin, payload,
+    COALESCE(json_extract(payload, '$.retrieval_aspects'), json_extract(payload, '$.aspect_vectors')) AS retrieval_aspects,
+    COALESCE(
+      json_extract(payload, '$.retrieval_domains'),
+      json_extract(payload, '$.domain_vector'),
+      json_extract(payload, '$.domain_weights')
+    ) AS retrieval_domains
   FROM events
   WHERE embedding IS NOT NULL;
 `;
@@ -1755,6 +1762,8 @@ export type EmbeddingIndexRow = {
   embedding_version: string | null;
   substrate_origin: string;
   payload: Record<string, unknown>;
+  retrieval_aspects: Record<string, unknown>;
+  retrieval_domains: Record<string, number>;
 };
 
 export type OriginPromotionRow = {
@@ -1961,6 +1970,8 @@ export const taskGraphFor = (db: Database, directiveId: string): TaskGraphRow[] 
     parent_task_id: (r.parent_task_id as string | null) ?? null,
     row_kind: r.row_kind as "node" | "edge",
     payload: parseJson<Record<string, unknown>>(r.payload),
+    retrieval_aspects: parseJson<Record<string, unknown>>(r.retrieval_aspects ?? "{}"),
+    retrieval_domains: parseJson<Record<string, number>>(r.retrieval_domains ?? "{}"),
   }));
 };
 

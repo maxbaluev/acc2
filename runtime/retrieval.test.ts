@@ -46,11 +46,12 @@ const seedEmbedded = (
   axis: number,
   dims: number,
   version: string = EMBEDDING_VERSION,
+  payloadExtras: Record<string, unknown> = {},
 ): string => {
   const seeded = emitEvent(db, {
     kind: kind as any,
     substrate_origin: "claude_root",
-    payload: { text },
+    payload: { text, ...payloadExtras },
   });
   db.run(
     "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
@@ -335,5 +336,30 @@ describe("per-(origin, goal_shape) bias (Phase H)", () => {
     const query = new Float32Array(makeUnitVec(dims, 0));
     const result = retrieveWithEmbedding(db, idx, query, { k: 1 });
     expect(result.hits.length).toBe(1);
+  });
+});
+
+describe("multi-vector/domain routed retrieval", () => {
+  test("domain hints and aspect weights boost payload-matched knowledge without fixed enums", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dims = 8;
+    const genericId = seedEmbedded(db, "knowledge_candidate", "generic retrieval", 0, dims);
+    const domainId = seedEmbedded(db, "knowledge_candidate", "generic retrieval", 0, dims, EMBEDDING_VERSION, {
+      retrieval_aspects: { any_axis: "knowledge retrieval calibration" },
+      retrieval_domains: { accint_knowledge_efficiency: 1 },
+    });
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    const query = new Float32Array(makeUnitVec(dims, 0));
+    const result = retrieveWithEmbedding(db, idx, query, {
+      k: 2,
+      goalText: "improve knowledge retrieval calibration",
+      aspectWeights: { any_axis: 1 },
+      domainHints: { accint_knowledge_efficiency: 1 },
+    });
+    expect(result.hits.map((h) => h.event_id)).toContain(genericId);
+    expect(result.hits[0].event_id).toBe(domainId);
+    expect(result.hits[0].routing_score_breakdown.domain_boost).toBeGreaterThan(0);
+    expect(result.hits[0].aspect_scores.any_axis).toBeGreaterThan(0);
   });
 });

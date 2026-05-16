@@ -37,6 +37,11 @@ export type IndexEntry = {
   task_id: string;
   substrate_origin: string;
   embedding_version: string;
+  /** Open-ended payload-derived aspect text, e.g. claim/evidence/applies_to.
+   *  Keys are not a schema; emitters may add any domain-specific axis. */
+  retrieval_aspects: Record<string, string>;
+  /** Open-ended domain routing weights. Values are clamped by retrieval.ts. */
+  retrieval_domains: Record<string, number>;
   /** Compact preview pulled from the source event payload — used by the
    *  retrieval surface to render snippets without re-reading the row. */
   snippet: string;
@@ -83,6 +88,58 @@ const parsePayload = (raw: unknown): Record<string, unknown> | null => {
   return null;
 };
 
+const parseOpenRecord = (raw: unknown): Record<string, unknown> => {
+  const parsed = parsePayload(raw);
+  return parsed ?? {};
+};
+
+const asStringRecord = (raw: unknown, payload: Record<string, unknown> | null): Record<string, string> => {
+  const source = parseOpenRecord(raw);
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === "string" && value.trim()) out[key] = value;
+    else if (Array.isArray(value) && value.length > 0) out[key] = value.map(String).join(" ");
+  }
+  if (Object.keys(out).length > 0 || !payload) return out;
+  for (const nested of [payload.retrieval_aspects, payload.aspect_vectors]) {
+    if (!nested || typeof nested !== "object" || Array.isArray(nested)) continue;
+    for (const [key, value] of Object.entries(nested as Record<string, unknown>)) {
+      if (typeof value === "string" && value.trim()) out[key] = value;
+      else if (Array.isArray(value) && value.length > 0) out[key] = value.map(String).join(" ");
+    }
+  }
+  if (Object.keys(out).length > 0) return out;
+  for (const key of ["claim", "text", "summary", "insight", "evidence", "implications", "applies_to"]) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) out[key] = value;
+    else if (Array.isArray(value) && value.length > 0) out[key] = value.map(String).join(" ");
+  }
+  return out;
+};
+
+const asNumberRecord = (raw: unknown, payload: Record<string, unknown> | null): Record<string, number> => {
+  const source = parseOpenRecord(raw);
+  const out: Record<string, number> = {};
+  for (const [key, value] of Object.entries(source)) {
+    const n = typeof value === "number" ? value : Number(value);
+    if (Number.isFinite(n)) out[key] = n;
+  }
+  if (Object.keys(out).length > 0 || !payload) return out;
+  for (const nested of [payload.retrieval_domains, payload.domain_vector, payload.domain_weights]) {
+    if (!nested || typeof nested !== "object" || Array.isArray(nested)) continue;
+    for (const [key, value] of Object.entries(nested as Record<string, unknown>)) {
+      const n = typeof value === "number" ? value : Number(value);
+      if (Number.isFinite(n)) out[key] = n;
+    }
+  }
+  if (Object.keys(out).length > 0) return out;
+  const appliesTo = payload.applies_to;
+  if (Array.isArray(appliesTo)) {
+    for (const key of appliesTo) if (typeof key === "string" && key.trim()) out[key] = 1;
+  }
+  return out;
+};
+
 type Meta = Omit<IndexEntry, "embedding">;
 
 type EventRow = {
@@ -95,6 +152,8 @@ type EventRow = {
   payload: string;
   embedding: Uint8Array | null;
   embedding_version: string | null;
+  retrieval_aspects?: string | null;
+  retrieval_domains?: string | null;
 };
 
 const cosineDistance = (a: Float32Array, b: Float32Array): number => {
@@ -135,8 +194,8 @@ export class EmbeddingIndex {
   static rebuildFromDb(db: Database): EmbeddingIndex {
     const rows = db
       .query(
-        "SELECT id, kind, ts, directive_id, task_id, substrate_origin, payload, embedding, embedding_version " +
-          "FROM events WHERE embedding IS NOT NULL",
+        "SELECT id, kind, ts, directive_id, task_id, substrate_origin, payload, embedding, embedding_version, retrieval_aspects, retrieval_domains " +
+          "FROM embedding_index_view",
       )
       .all() as EventRow[];
     const metadata = new Map<string, Meta>();
@@ -159,6 +218,7 @@ export class EmbeddingIndex {
         jsVectors.set(row.id, decoded);
       }
       if (projectedToVec) inVec.add(row.id);
+      const payload = parsePayload(row.payload);
       metadata.set(row.id, {
         event_id: row.id,
         kind: row.kind,
@@ -167,7 +227,9 @@ export class EmbeddingIndex {
         task_id: row.task_id,
         substrate_origin: row.substrate_origin,
         embedding_version: version,
-        snippet: buildSnippet(parsePayload(row.payload)),
+        retrieval_aspects: asStringRecord(row.retrieval_aspects, payload),
+        retrieval_domains: asNumberRecord(row.retrieval_domains, payload),
+        snippet: buildSnippet(payload),
       });
     }
     return new EmbeddingIndex(db, metadata, inVec, jsVectors);
@@ -208,6 +270,8 @@ export class EmbeddingIndex {
       task_id: entry.task_id,
       substrate_origin: entry.substrate_origin,
       embedding_version: entry.embedding_version,
+      retrieval_aspects: entry.retrieval_aspects ?? {},
+      retrieval_domains: entry.retrieval_domains ?? {},
       snippet: entry.snippet,
     });
   }

@@ -153,7 +153,8 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     description:
       "Search the substrate. Phase F: routes through the cosine × posterior " +
       "reranker when an embedding index is mounted; falls back to recent-events " +
-      "stand-in on fresh / unembedded substrates. Supports kind_filter to scope.",
+      "stand-in on fresh / unembedded substrates. Supports kind_filter, " +
+      "aspect_weights, and domain_hints to scope open-ended routing.",
     parameters: SearchSchema,
     execute: wrap(handleSearch),
   });

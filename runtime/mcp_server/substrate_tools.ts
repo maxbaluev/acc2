@@ -464,6 +464,8 @@ export const handleSearch = async (
       runtime: args.opts?.runtime,
       minScore: args.opts?.min_score,
       kindFilter: args.opts?.kind_filter,
+      aspectWeights: args.opts?.aspect_weights,
+      domainHints: args.opts?.domain_hints,
     });
     if (!result.query_embedding_unavailable) {
       return {

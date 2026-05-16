@@ -41,6 +41,10 @@ export type RetrievalQuery = {
    *  per-(origin, goal_shape) bias map first, falling back to the
    *  global per-origin ratio when no shape-specific data exists. Phase H. */
   goalText?: string;
+  /** Open-ended aspect routing weights. Keys are emitter-defined axes, not enums. */
+  aspectWeights?: Record<string, number>;
+  /** Open-ended domain routing hints. Keys are domain labels discovered from payloads. */
+  domainHints?: Record<string, number>;
 };
 
 export type RetrievalHit = {
@@ -51,6 +55,9 @@ export type RetrievalHit = {
   rerank_score: number;
   origin: string;
   snippet: string;
+  aspect_scores: Record<string, number>;
+  domain_scores: Record<string, number>;
+  routing_score_breakdown: Record<string, number>;
 };
 
 export type RetrievalResult = {
@@ -63,7 +70,57 @@ export type RetrievalResult = {
   query_embedding_unavailable: boolean;
 };
 
+type RoutingQuery = Omit<RetrievalQuery, "text"> & { text?: string };
+
 const clampBias = (r: number): number => (r < 0.5 ? 0.5 : r > 1.5 ? 1.5 : r);
+const clamp01 = (r: number): number => (r < 0 ? 0 : r > 1 ? 1 : r);
+
+const tokenize = (text: string | undefined): Set<string> => {
+  const out = new Set<string>();
+  for (const tok of (text ?? "").toLowerCase().split(/[^a-z0-9_:/.-]+/)) {
+    if (tok.length >= 3) out.add(tok);
+  }
+  return out;
+};
+
+const weightedMean = (values: Record<string, number>, weights?: Record<string, number>): number => {
+  const entries = Object.entries(values);
+  if (entries.length === 0) return 0;
+  let num = 0;
+  let den = 0;
+  for (const [key, value] of entries) {
+    const w = Math.max(0, weights?.[key] ?? 1);
+    num += clamp01(value) * w;
+    den += w;
+  }
+  return den > 0 ? num / den : 0;
+};
+
+const scoreAspectRecord = (entry: IndexEntry, q: RoutingQuery): Record<string, number> => {
+  const queryTokens = tokenize(`${q.text ?? ""} ${q.goalText ?? ""}`);
+  if (queryTokens.size === 0) return {};
+  const out: Record<string, number> = {};
+  for (const [axis, text] of Object.entries(entry.retrieval_aspects ?? {})) {
+    const tokens = tokenize(text);
+    if (tokens.size === 0) continue;
+    let overlap = 0;
+    for (const tok of tokens) if (queryTokens.has(tok)) overlap++;
+    out[axis] = clamp01(overlap / Math.min(tokens.size, Math.max(queryTokens.size, 1)));
+  }
+  return out;
+};
+
+const scoreDomainRecord = (entry: IndexEntry, q: RoutingQuery): Record<string, number> => {
+  const hints = q.domainHints ?? {};
+  const domains = entry.retrieval_domains ?? {};
+  const out: Record<string, number> = {};
+  for (const [domain, raw] of Object.entries(domains)) {
+    const local = clamp01(Number(raw));
+    const hinted = hints[domain] === undefined ? local : clamp01(local * Math.max(0, hints[domain]));
+    if (hinted > 0) out[domain] = hinted;
+  }
+  return out;
+};
 
 /** Build a Map<origin, promotion_ratio> snapshot. Origins absent from the
  *  view default to 1.0 at the lookup site. Rows with NULL promotion_ratio
@@ -148,12 +205,18 @@ const packHit = (
   db: Database,
   hit: KnnHit,
   originBias: Map<string, number>,
+  q: RoutingQuery,
 ): RetrievalHit => {
   const posterior = readPosterior(db, hit.entry.event_id, hit.entry.kind);
   const bias = originBias.get(hit.entry.substrate_origin) ?? 1.0;
   // similarity in [0, 1] — cosine distance maps [0, 2] → [1, 0]
   const similarity = Math.max(0, 1 - hit.distance / 2);
-  const rerank_score = similarity * (1 + posterior) * bias;
+  const aspect_scores = scoreAspectRecord(hit.entry, q);
+  const domain_scores = scoreDomainRecord(hit.entry, q);
+  const aspect_boost = weightedMean(aspect_scores, q.aspectWeights);
+  const domain_boost = weightedMean(domain_scores, q.domainHints);
+  const routing_multiplier = (1 + 0.25 * aspect_boost) * (1 + 0.25 * domain_boost);
+  const rerank_score = similarity * (1 + posterior) * bias * routing_multiplier;
   return {
     event_id: hit.entry.event_id,
     kind: hit.entry.kind,
@@ -162,6 +225,16 @@ const packHit = (
     rerank_score,
     origin: hit.entry.substrate_origin,
     snippet: hit.entry.snippet,
+    aspect_scores,
+    domain_scores,
+    routing_score_breakdown: {
+      similarity,
+      posterior,
+      origin_bias: bias,
+      aspect_boost,
+      domain_boost,
+      routing_multiplier,
+    },
   };
 };
 
@@ -216,7 +289,7 @@ export const retrieve = async (
   const originBias = q.goalText
     ? readOriginBiasForGoalShape(db, computeGoalShape(q.goalText))
     : readOriginBias(db);
-  let packed = knnHits.map((h) => packHit(db, h, originBias));
+  let packed = knnHits.map((h) => packHit(db, h, originBias, q));
   if (typeof q.minScore === "number") {
     packed = packed.filter((h) => h.posterior >= q.minScore!);
   }
@@ -268,7 +341,7 @@ export const retrieveWithEmbedding = (
   const originBias = q.goalText
     ? readOriginBiasForGoalShape(db, computeGoalShape(q.goalText))
     : readOriginBias(db);
-  let packed = knnHits.map((h) => packHit(db, h, originBias));
+  let packed = knnHits.map((h) => packHit(db, h, originBias, q));
   if (typeof q.minScore === "number") {
     packed = packed.filter((h) => h.posterior >= q.minScore!);
   }

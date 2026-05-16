@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { McpMethods } from "./mcp_server";
+import { SearchSchema } from "./mcp_server/types";
 
 const STDIO_ENTRY = join(import.meta.dir, "mcp_server_stdio_entry.ts");
 
@@ -363,6 +364,19 @@ describe("fastmcp substrate tools — stdio transport", () => {
       expect(env.ok).toBe(true);
       expect(Array.isArray(env.result)).toBe(true);
     }
+  });
+
+  test("substrate.search accepts open-ended multi-vector routing records", () => {
+    const parsed = SearchSchema.parse({
+      query: "knowledge retrieval calibration",
+      opts: {
+        k: 5,
+        aspect_weights: { any_axis: 1, claim_vector: 0.5 },
+        domain_hints: { accint_knowledge_efficiency: 1 },
+      },
+    });
+    expect(parsed.opts?.aspect_weights?.any_axis).toBe(1);
+    expect(parsed.opts?.domain_hints?.accint_knowledge_efficiency).toBe(1);
   });
 
   test("substrate.search returns the recent-events stub shape", async () => {
