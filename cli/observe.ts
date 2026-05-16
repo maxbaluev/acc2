@@ -91,8 +91,13 @@ export const NARRATIVE_KINDS = new Set(
 );
 
 const trunc = (s: string | undefined, n: number): string => {
-  if (!s) return "";
-  const flat = s.replace(/\s+/g, " ").trim();
+  if (s === undefined || s === null) return "";
+  // Defensive coerce — brain payloads occasionally carry non-string values
+  // (objects, numbers) under keys we expect strings on (e.g. structured
+  // knowledge_candidate.claim). Without this guard `.replace` blows up the
+  // entire follow tail mid-stream.
+  const raw = typeof s === "string" ? s : JSON.stringify(s);
+  const flat = raw.replace(/\s+/g, " ").trim();
   return flat.length > n ? flat.slice(0, n - 1) + "…" : flat;
 };
 
