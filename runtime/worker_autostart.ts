@@ -66,7 +66,10 @@ export type WorkerName =
   // worker periodically scans for drift contradictions older than the age
   // threshold (default 24h) and auto-opens a corrective directive so the
   // brain designs the fix. Dispatch capped per tick to bound brain spend.
-  | "verify_heal";
+  | "verify_heal"
+  // Primitive #3 (SZG5PQ01): standalone experience compression tick that mines
+  // low-residual closed trajectories into existing recipe/knowledge events.
+  | "experience_compression";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -86,6 +89,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "hotreload",
   "recipe_inertia",
   "verify_heal",
+  "experience_compression",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

@@ -242,6 +242,11 @@ describe("derived sets match their pre-unification shape", () => {
       // from crashing the daemon. Every firing is a substrate-status
       // signal so operators can see the underlying transport fault.
       "daemon_unhandled_rejection",
+      // Restart drain timeout (2026-05-16, YEF00QZM amendment 8EAKQCJW):
+      // graceful shutdown drain budget elapsed before all in-flight
+      // dispatches finished — operator must see this to know dispatches
+      // were force-killed and may have orphaned.
+      "restart_drain_timed_out",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);
@@ -277,6 +282,9 @@ describe("derived sets match their pre-unification shape", () => {
       // mid-flight FastMCP/transport faults inline so they can react
       // before the next dispatch orphans.
       "daemon_unhandled_rejection",
+      // Restart drain timeout (2026-05-16, YEF00QZM amendment 8EAKQCJW):
+      // operator must see when forced kill happened post-drain budget.
+      "restart_drain_timed_out",
     ]);
     const derived = new Set(MIRROR_INLINE_EVENT_TYPES);
     expect(derived.size).toBe(expected.size);
