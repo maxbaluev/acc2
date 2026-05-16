@@ -44,6 +44,19 @@ const applyWalPragmas = (db: Database): void => {
   db.run("PRAGMA foreign_keys = ON");
   db.run("PRAGMA cache_size = 10000");
   db.run("PRAGMA mmap_size = 268435456");
+  // WAL hygiene (foundational fix 2026-05-16). Pre-fix the WAL grew to
+  // 303MB in a single session because the integrity worker (the only
+  // explicit checkpoint caller) fires every 6h AND the daemon was
+  // crashing every 3h (now fixed by e446993). SQLite's default
+  // wal_autocheckpoint is 1000 pages (~4MB) but only fires on COMMIT
+  // boundaries — long-running readers (background workers holding open
+  // queries) can block checkpoint indefinitely. journal_size_limit is
+  // the structural backstop: after any checkpoint, the WAL file is
+  // truncated to at most this many bytes (forcing the next writes to
+  // recycle space rather than grow the file). 64MB is generous for
+  // normal bursts but bounds worst case.
+  db.run("PRAGMA wal_autocheckpoint = 2000");
+  db.run("PRAGMA journal_size_limit = 67108864");
 };
 
 /** Load the sqlite-vec extension into the open connection. Idempotent —

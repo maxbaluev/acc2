@@ -321,17 +321,24 @@ export const spawnRealOpencode = async (
   // JSON event per stdout line. Do NOT pass
   // --dangerously-skip-permissions: the per-dispatch config explicitly keeps
   // the brain read-only and denies direct source mutation tools.
-  // Sandbox the brain's CWD. When `checkoutIsolation` is explicit, honor
-  // it (workflow-isolated dispatches, tests). Otherwise spawn the brain in
-  // a per-dispatch empty tempdir so its built-in filesystem tools (edit /
-  // write / bash) cannot reach the source checkout even if the
+  // Sandbox the brain's CWD AND env. When `checkoutIsolation` is explicit,
+  // honor it (workflow-isolated dispatches, tests). Otherwise spawn the
+  // brain in a per-dispatch empty tempdir so its built-in filesystem tools
+  // (edit / write / bash) cannot reach the source checkout even if the
   // BRAIN_READONLY_PERMISSION policy fails to apply (induced by a newer
   // opencode rev, a config-merge edge case, or a tool name not covered by
-  // the deny patterns). Source paths the brain may need to reason about
-  // are still exposed via ACC2_CHECKOUT_ISOLATION_ROOT so it can read via
-  // `substrate.read` / `substrate.search` instead of native filesystem
-  // tools. This is defense-in-depth A behind the permission policy.
+  // the deny patterns). This is defense-in-depth A behind the permission
+  // policy. The env var ACC2_CHECKOUT_ISOLATION_ROOT used to default to
+  // sourceCheckoutRoot which LEAKED the source path — observed 2026-05-16
+  // (Q2NTPKM + K8YKPXDZXX): brain dispatches wrote files like
+  // cli/lineage.ts, cli/whoami.ts, runtime/experience_compression_worker.ts
+  // DIRECTLY to the source checkout, bypassing applied_change_committed
+  // entirely. The fix below routes the env var to brainWorkspace by
+  // default. If the brain legitimately needs to reason about source code,
+  // it MUST go through substrate.read / substrate.search (which honors the
+  // event ledger and credit chains), not raw filesystem ops.
   const sourceCheckoutRoot = process.cwd();
+  void sourceCheckoutRoot; // retained for future reuse; intentionally unused
   const brainWorkspace = req.checkoutIsolation?.root
     ?? mkdtempSync(join(tmpdir(), "acc2-brain-ws-"));
   const brainWorkspaceIsEphemeral = req.checkoutIsolation === undefined;
@@ -357,7 +364,7 @@ export const spawnRealOpencode = async (
         // OPENCODE_CONFIG file above).
         MCP_SERVER_URL: mcpServerUrl,
         V2_MCP_SERVER_URL: mcpServerUrl,
-        ACC2_CHECKOUT_ISOLATION_ROOT: req.checkoutIsolation?.root ?? sourceCheckoutRoot,
+        ACC2_CHECKOUT_ISOLATION_ROOT: req.checkoutIsolation?.root ?? brainWorkspace,
         ACC2_CHECKOUT_ISOLATION_REASON: req.checkoutIsolation?.reason ?? "main_checkout_selected",
         ACC2_CHECKOUT_MERGE_BACK_STRATEGY: req.checkoutIsolation?.mergeBackStrategy ?? "main_checkout",
         ACC2_BRAIN_WORKSPACE: brainWorkspace,

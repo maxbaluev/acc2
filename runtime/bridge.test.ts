@@ -315,9 +315,14 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       expect(capturedCwd!).toContain("acc2-brain-ws-");
       expect(capturedEnv).not.toBeNull();
       const env = capturedEnv!;
-      // The source checkout path is still surfaced via env so the brain
-      // can ask MCP to read from it; it just cannot write there itself.
-      expect(env.ACC2_CHECKOUT_ISOLATION_ROOT).toBe(process.cwd());
+      // FOUNDATIONAL FIX (2026-05-16): the env var must NOT leak the
+      // source checkout path. When no explicit checkoutIsolation is set,
+      // ACC2_CHECKOUT_ISOLATION_ROOT == the brain workspace (tempdir),
+      // NOT process.cwd(). Pre-fix the brain wrote files like
+      // cli/lineage.ts directly to source via this env var. Source-code
+      // reasoning must flow through substrate.read / substrate.search.
+      expect(env.ACC2_CHECKOUT_ISOLATION_ROOT).toBe(capturedCwd);
+      expect(env.ACC2_CHECKOUT_ISOLATION_ROOT).not.toBe(process.cwd());
       expect(env.ACC2_BRAIN_WORKSPACE).toBe(capturedCwd);
     } finally {
       try { rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* swallow */ }

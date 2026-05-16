@@ -293,6 +293,82 @@ describe("startDaemon — boot + health + shutdown", () => {
     expect(recovered.length).toBe(1);
   });
 
+  test("restart zero-loss recovery accounts for every parallel in-flight brain dispatch", async () => {
+    const ports = pickPortPair();
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+
+    const { emitEvent: emit } = await import("./events");
+    const directiveId = "YEF00QZM2S4T973MTJ3Q8EJ534";
+    const taskIds = Array.from({ length: 15 }, (_, i) => `zero_loss_restart_task_${i}`);
+    for (const taskId of taskIds) {
+      emit(handle.db, {
+        kind: "task_node_opened",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { goal: "parallel brain dispatch interrupted by daemon restart" },
+      });
+      emit(handle.db, {
+        kind: "brain_dispatched",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { dispatch_id: `disp_${taskId}` },
+      });
+    }
+
+    await stopDaemon(handle, 0);
+    handle = null;
+
+    handle = await startDaemon({
+      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+    });
+
+    const recovered = handle.db
+      .query("SELECT task_id, payload FROM events WHERE kind = 'dispatch_recovered_orphan' AND directive_id = ?")
+      .all(directiveId) as Array<{ task_id: string; payload: string }>;
+    expect(recovered.map((r) => r.task_id).sort()).toEqual([...taskIds].sort());
+
+    const closes = handle.db
+      .query("SELECT task_id, payload FROM events WHERE kind = 'brain_dispatch_closed' AND directive_id = ?")
+      .all(directiveId) as Array<{ task_id: string; payload: string }>;
+    const closePayloadByTask = new Map(closes.map((r) => [r.task_id, parsePayload(r.payload)]));
+    for (const taskId of taskIds) {
+      expect(closePayloadByTask.get(taskId)?.reason).toBe("restart_orphan_recovered");
+      expect(closePayloadByTask.get(taskId)?.dispatch_id).toBe(`disp_${taskId}`);
+    }
+
+    const unaccounted = handle.db
+      .query(`
+        SELECT d.task_id
+        FROM events d
+        WHERE d.kind = 'brain_dispatched'
+          AND d.directive_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM events c
+            WHERE c.task_id = d.task_id
+              AND c.kind IN ('brain_dispatch_closed', 'dispatcher_violation', 'task_failed', 'task_committed')
+              AND c.ts >= d.ts
+          )
+        ORDER BY d.task_id ASC
+      `)
+      .all(directiveId) as Array<{ task_id: string }>;
+    expect(unaccounted).toEqual([]);
+
+    const restartInterruptedFailures = handle.db
+      .query(`
+        SELECT task_id
+        FROM events
+        WHERE directive_id = ?
+          AND kind = 'task_failed'
+          AND (failure_kind = 'restart_interrupted' OR json_extract(payload, '$.reason') = 'restart_interrupted')
+      `)
+      .all(directiveId) as Array<{ task_id: string }>;
+    expect(restartInterruptedFailures).toEqual([]);
+  });
+
   test("amendment worker drains unapplied directive_amended events automatically", async () => {
     // Pin the amendment worker to a fast interval for this test (default
     // production interval is 2s; we want the worker to fire within ~50ms so

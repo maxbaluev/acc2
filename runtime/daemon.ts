@@ -446,6 +446,17 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // so candidate→promoted advancement happens on a bounded cadence,
   // not by chance dispatch through Father.
   if (isWorkerEnabled("extractors")) registerWorker("extractors", Number(process.env.ACC2_EXTRACTORS_INTERVAL_MS ?? 5 * 60 * 1000));
+  // Experience compression worker (primitive #3 of SZG5PQ01 design,
+  // owner-approved via amendment GHWARJHT1N26BA1T7HNSJJ5AAG from
+  // Q2NTPKM dispatch). Clusters successful trajectories (low residual +
+  // closure_residual < 0.3 + lesson_extracted) and emits compressed
+  // knowledge_candidate/recipe_extracted, plus retires stale lessons
+  // via applied_change_committed status='refused' reason=
+  // 'compression_supersede'. REUSE-FIRST: no new event kinds.
+  // Default cadence 30min — fast enough to catch new patterns within
+  // an active session, slow enough to keep the SQLite write queue
+  // light.
+  if (isWorkerEnabled("experience_compression")) registerWorker("experience_compression", Number(process.env.ACC2_EXPERIENCE_COMPRESSION_TICK_MS ?? 30 * 60 * 1000));
 
   // Phase E: amendment worker — drain unapplied directive_amended events on
   // a configurable interval (default 2s; tests may pin a shorter value via
@@ -855,6 +866,28 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       inertiaTickMs,
     );
     workers.push(() => clearInterval(inertiaTick));
+  }
+
+  // Experience compression worker (primitive #3 of SZG5PQ01,
+  // owner-approved 2026-05-16 via amendment GHWARJHT). Clusters
+  // successful trajectories by goal_shape + lesson_kind, emits
+  // compressed knowledge_candidate/recipe_extracted, retires stale
+  // lessons. REUSE-FIRST: no new event kinds. Opt-OUT via
+  // `ACC2_DISABLE_WORKERS=experience_compression`. Interval env-
+  // configurable via `ACC2_EXPERIENCE_COMPRESSION_TICK_MS` (default
+  // 30min).
+  if (isWorkerEnabled("experience_compression")) {
+    const compressionTickMs = Number(process.env.ACC2_EXPERIENCE_COMPRESSION_TICK_MS ?? 30 * 60 * 1000);
+    const { experienceCompressionWorkerTick } = await import("./experience_compression_worker");
+    markWorkerReady("experience_compression");
+    recordWorkerTick("experience_compression");
+    const compressionTick = setInterval(
+      supervisedTick(db, "experience_compression", compressionTickMs, async () => {
+        experienceCompressionWorkerTick(db);
+      }),
+      compressionTickMs,
+    );
+    workers.push(() => clearInterval(compressionTick));
   }
 
   // Self-healing chain Layer 3 (owner-approved 2026-05-16, option d):

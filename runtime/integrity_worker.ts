@@ -24,7 +24,7 @@ import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { logger } from "./logger";
 
-const WAL_CHECKPOINT_THRESHOLD_BYTES = 100 * 1024 * 1024; // 100 MB
+const WAL_CHECKPOINT_THRESHOLD_BYTES = 20 * 1024 * 1024; // 20 MB (foundational fix 2026-05-16 — was 100MB; pair with PRAGMA wal_autocheckpoint=2000 + journal_size_limit=64MB in substrate/db.ts).
 
 export type IntegrityReport = {
   ok: boolean;
