@@ -26,7 +26,7 @@ import { emitEvent } from "./events";
 import type { JsonValue, OwnerProfile } from "../substrate/types";
 import { OWNER_PROFILE_DEFAULTS } from "../substrate/types";
 
-export type PromptComposeOptions = {
+type PromptComposeOptions = {
   taskId: string;
   budgetTokens?: number;
   /** Optional embedding-index handle. When provided AND `index.size() > 0`,
@@ -48,13 +48,13 @@ export type PromptComposeOptions = {
   index?: EmbeddingIndex | null;
 };
 
-export type PromptSection = {
+type PromptSection = {
   name: string;
   priorityP: number;
   tokens: number;
 };
 
-export type ComposedPrompt = {
+type ComposedPrompt = {
   text: string;
   sections: PromptSection[];
   truncated: string[];

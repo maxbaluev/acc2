@@ -105,7 +105,7 @@ const assertDispatchableArtifact = (
   return { ok: true };
 };
 
-export type DispatchResult = {
+type DispatchResult = {
   dispatch_id: string;
   task_id: string;
   events: Event[];

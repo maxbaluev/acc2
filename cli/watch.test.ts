@@ -117,7 +117,7 @@ describe("renderFrame", () => {
     };
     const out = renderFrame(state, 120, 40);
     expect(out).toContain("directive_opened");
-    expect(out).toContain("Recent Events");
+    expect(out).toContain("Event Log");
     expect(out).toContain("Daemon");
     expect(out).toContain("pid=12345");
   });
@@ -331,7 +331,7 @@ describe("runWatch programmatic", () => {
     await runWatch([], { durationMs: 500, writer, pollIntervalMs: 10_000 });
 
     const joined = buffer.join("");
-    expect(joined).toContain("Recent Events");
+    expect(joined).toContain("Event Log");
     expect(joined).toContain("watch_test_runwatch");
   }, 15_000);
 

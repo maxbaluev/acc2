@@ -123,9 +123,9 @@ const artifactSeenGoalShape = (db: Database, artifactId: string, goalShapeStr: s
   return row !== null;
 };
 
-// ── Public types ──────────────────────────────────────────────────
+// ── Internal types ─────────────────────────────────────────────────
 
-export type CreditContribution = {
+type CreditContribution = {
   target_id: string;
   target_kind: "knowledge" | "code_artifact";
   weight: number;
@@ -133,7 +133,7 @@ export type CreditContribution = {
   posterior_delta_beta: number;
 };
 
-export type CreditDistribution = {
+type CreditDistribution = {
   action_artifact_id: string;
   verifier_artifact_id: string;
   predicted_residual: number;
@@ -146,7 +146,7 @@ export type CreditDistribution = {
   emitted_events: string[];
 };
 
-export type DistributeCreditParams = {
+type DistributeCreditParams = {
   action_event_id: string;
   observation_event_id: string;
   scored_event_id: string;

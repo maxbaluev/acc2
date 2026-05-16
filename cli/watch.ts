@@ -212,14 +212,14 @@ const MAX_EVENTS = 300;
 const MAX_INITIAL_EVENTS = 120;
 const POLL_INTERVAL_MS = 2000;
 const VIEWS: Array<{ key: ViewKey; label: string }> = [
-  { key: "dag", label: "DAG" },
-  { key: "knowledge", label: "Knowledge" },
+  { key: "dag", label: "Now" },
+  { key: "directives", label: "Goals" },
+  { key: "tasks", label: "Ready" },
   { key: "lessons", label: "Lessons" },
+  { key: "knowledge", label: "Evidence" },
   { key: "recipes", label: "Recipes" },
-  { key: "artifacts", label: "Code Artifacts" },
-  { key: "interventions", label: "Supervisor" },
-  { key: "events", label: "Recent Events" },
-  { key: "directives", label: "Directives" },
+  { key: "interventions", label: "Risks" },
+  { key: "events", label: "Event Log" },
 ];
 // Brain TUI rewrite proposal (btqner8jn axis B, 2026-05-15): treat noisy
 // heartbeat events as semantic folds - keep them in the buffer but
@@ -515,11 +515,12 @@ const SUPERVISOR_EVENT_KINDS = [
   "bridge_health_recovered",
   "dispatcher_violation",
   "irreversible_effect_recorded",
-  "redispatch_storm_detected",
-  "dag_explosion_detected",
-  "dispatch_budget_exceeded",
-  "crisis_postmortem",
+  "pathology_budget_debited",
+  "pathology_budget_exhausted",
+  "bridge_stuck",
+  "applied_change_failed",
   "owner_input_required",
+  "hidl_action_required",
 ];
 
 // Dedicated buffer fetch for low-frequency events. We pull the most recent
@@ -1376,7 +1377,7 @@ export const renderFrame = (state: WatchState, cols: number, rows: number): stri
   const parts: string[] = [CLEAR_SCREEN, HOME];
 
   parts.push(moveTo(1, 1));
-  parts.push(`${BOLD}${CYAN}acc watch${RESET} ${DIM}DAG-first  1 DAG  2-8 overlays  j/k move  Enter expand  Esc back  / filter (kind: directive: task: edge:)  ? help  r refresh  q quit${RESET}`);
+  parts.push(`${BOLD}${CYAN}acc watch${RESET} ${DIM}substrate live: what decided, what is ready, what needs owner input  1-8 tabs  j/k move  Enter detail  / filter  ? keys  r refresh  q quit${RESET}`);
 
   parts.push(moveTo(2, 1));
   let col = 1;
