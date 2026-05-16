@@ -211,6 +211,77 @@ describe("reconcileOrphanedDispatches — emits dispatch_recovered_orphan", () =
     expect(eventsByKind(db, "brain_dispatch_closed").length).toBe(1);
     expect(eventsByKind(db, "dispatch_recovered_orphan").length).toBe(1);
   });
+
+  test("HOT_RELOAD_BRIDGE_ZERO_LOSS_TEST: restart recovery accounts for every parallel in-flight dispatch", () => {
+    const db = openDb(dbPath);
+    const directiveId = "YEF00QZM2S4T973MTJ3Q8EJ534";
+    const taskIds = Array.from({ length: 15 }, (_, i) => `restart_parallel_task_${i}`);
+
+    for (const taskId of taskIds) {
+      emitEvent(db, {
+        kind: "task_node_opened",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { goal: "parallel brain dispatch interrupted by daemon restart" },
+      });
+      emitEvent(db, {
+        kind: "brain_dispatched",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { dispatch_id: `disp_${taskId}` },
+      });
+    }
+
+    const recovered = reconcileOrphanedDispatches(db);
+    expect(recovered.map((r) => r.task_id).sort()).toEqual([...taskIds].sort());
+
+    const unaccounted = db
+      .query(`
+        SELECT d.task_id
+        FROM events d
+        WHERE d.kind = 'brain_dispatched'
+          AND d.directive_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM events c
+            WHERE c.task_id = d.task_id
+              AND c.kind IN ('brain_dispatch_closed', 'dispatcher_violation', 'task_failed', 'task_committed')
+              AND c.ts >= d.ts
+          )
+        ORDER BY d.task_id ASC
+      `)
+      .all(directiveId) as Array<{ task_id: string }>;
+    expect(unaccounted).toEqual([]);
+
+    const restartInterruptedFailures = db
+      .query(`
+        SELECT task_id
+        FROM events
+        WHERE directive_id = ?
+          AND kind = 'task_failed'
+          AND (failure_kind = 'restart_interrupted' OR json_extract(payload, '$.reason') = 'restart_interrupted')
+      `)
+      .all(directiveId) as Array<{ task_id: string }>;
+    expect(restartInterruptedFailures).toEqual([]);
+    const dispatcherViolations = db
+      .query(`
+        SELECT task_id
+        FROM events
+        WHERE directive_id = ?
+          AND kind = 'dispatcher_violation'
+      `)
+      .all(directiveId) as Array<{ task_id: string }>;
+    expect(dispatcherViolations).toEqual([]);
+
+    const closesByTask = new Map(
+      eventsByKind(db, "brain_dispatch_closed").map((row) => [row.task_id, JSON.parse(row.payload as string) as Record<string, unknown>]),
+    );
+    for (const taskId of taskIds) {
+      expect(closesByTask.get(taskId)?.reason).toBe("restart_orphan_recovered");
+      expect(closesByTask.get(taskId)?.dispatch_id).toBe(`disp_${taskId}`);
+    }
+
+    expect(reconcileOrphanedDispatches(db)).toEqual([]);
+  });
 });
 
 describe("reconcileStaleDispatches — mid-session zombie sweep", () => {
