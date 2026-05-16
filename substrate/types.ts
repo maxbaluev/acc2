@@ -112,6 +112,9 @@ export type OwnerProfile = {
    *  id + exposure count so the renderer explains on first encounter
    *  only. */
   exposed_concepts?: Record<string, OwnerConceptExposure>;
+  understood_concepts?: Record<string, { first_evidence_event_id: string; evidence_count: number; confidence?: number }>;
+  declined_concepts?: Record<string, { first_declined_event_id: string; decline_count: number; preferred_term?: string }>;
+  observation_count?: number;
   autonomy_scope?: OwnerAutonomyScope;
   /** Continuous autonomy score ∈ [0, 1]. Universal — every owner has
    *  their own score; no fixed enum of "cautious/normal/high" tiers.
@@ -155,6 +158,9 @@ export const OWNER_PROFILE_DEFAULTS = {
   preferred_terms: [],
   avoided_terms: [],
   exposed_concepts: {},
+  understood_concepts: {},
+  declined_concepts: {},
+  observation_count: 0,
   autonomy_scope: { include: ["cli/**", "runtime/**"], exclude: [] },
   autonomy_score: 0.5,
   manual_review_patterns: [],
@@ -189,6 +195,31 @@ export const OWNER_PROFILE_JSON_SCHEMA = {
         },
       },
     },
+    understood_concepts: {
+      type: "object",
+      additionalProperties: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          first_evidence_event_id: { type: "string", minLength: 1 },
+          evidence_count: { type: "integer", minimum: 0 },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+        },
+      },
+    },
+    declined_concepts: {
+      type: "object",
+      additionalProperties: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          first_declined_event_id: { type: "string", minLength: 1 },
+          decline_count: { type: "integer", minimum: 0 },
+          preferred_term: { type: "string", minLength: 1 },
+        },
+      },
+    },
+    observation_count: { type: "integer", minimum: 0 },
     autonomy_scope: {
       type: "object",
       additionalProperties: false,
