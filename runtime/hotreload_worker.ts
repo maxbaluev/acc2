@@ -25,7 +25,7 @@
 // time, not at boot). The hot-reload event tells the rest of the daemon
 // "next call will see new code"; the cache-bust forces the dynamic import.
 
-import { existsSync, watch as fsWatch } from "node:fs";
+import { existsSync, readdirSync, statSync, watch as fsWatch } from "node:fs";
 import { join, relative, sep } from "node:path";
 import type { Database } from "bun:sqlite";
 import { emitEvent } from "./events";
@@ -63,6 +63,28 @@ const state: HotReloadState = {
 };
 
 export const getHotreloadState = (): HotReloadState => ({ ...state });
+
+/** Linux does not support fs.watch({ recursive:true }). Watch every existing
+ *  directory under the manifest roots so nested files such as
+ *  runtime/bridge/opencode.ts generate events on all supported platforms. */
+export const collectHotreloadWatchDirs = (projectRoot: string): string[] => {
+  const out: string[] = [];
+  const visit = (abs: string): void => {
+    if (!existsSync(abs)) return;
+    let st;
+    try { st = statSync(abs); } catch { return; }
+    if (!st.isDirectory()) return;
+    out.push(abs);
+    let entries;
+    try { entries = readdirSync(abs, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      visit(join(abs, entry.name));
+    }
+  };
+  for (const dir of WATCHED_DIRECTORIES) visit(join(projectRoot, dir));
+  return out;
+};
 
 export type StartHotreloadOpts = {
   projectRoot: string;
@@ -228,18 +250,15 @@ export const startHotreloadWorker = (
     state.pending_quiescent_count = 0;
   }, QUIESCENT_RETRY_MS);
 
-  // Wire one fs.watch per top-level WATCHED_DIRECTORIES with
-  // recursive:true; matchHotReloadEntry filters per-file.
-  for (const dir of WATCHED_DIRECTORIES) {
-    const abs = join(projectRoot, dir);
-    if (!existsSync(abs)) continue;
+  // Linux does not support recursive fs.watch. Watch every existing
+  // directory under the manifest roots and convert each event back to the
+  // project-relative path expected by matchHotReloadEntry.
+  for (const abs of collectHotreloadWatchDirs(projectRoot)) {
     try {
-      const w = fsWatch(abs, { recursive: true }, (eventType, filename) => {
+      const w = fsWatch(abs, (eventType, filename) => {
+        void eventType;
         if (!filename) return;
-        // filename is dir-relative; reconstruct the project-relative path
-        // expected by the manifest globs.
-        const dirRelative = filename.split(sep).join("/");
-        const projectRelative = `${dir}/${dirRelative}`;
+        const projectRelative = toProjectRelative(join(abs, filename.toString()), projectRoot);
         // Debounce per file_path to absorb burst events from editor saves.
         const existing = debounceTimers.get(projectRelative);
         if (existing) clearTimeout(existing);
@@ -254,7 +273,7 @@ export const startHotreloadWorker = (
       });
       watchers.push(w);
     } catch (err) {
-      logger.warn({ where: "hotreload.fs_watch", dir, err: (err as Error).message }, "fs.watch failed for directory");
+      logger.warn({ where: "hotreload.fs_watch", dir: toProjectRelative(abs, projectRoot), err: (err as Error).message }, "fs.watch failed for directory");
     }
   }
 

@@ -117,8 +117,8 @@ export const HOTRELOAD_MANIFEST: readonly HotReloadEntry[] = [
     name: "runtime_bridge",
     globs: ["runtime/bridge.ts", "runtime/bridge/**/*.ts"],
     excludes: ["runtime/bridge/**/*.test.ts"],
-    strategy: "quiescent_only",
-    reason: "Live opencode subprocesses hold pre-reload references; reload waits until in-flight count == 0.",
+    strategy: "full_restart",
+    reason: "Bridge modules are eagerly imported by live dispatches and own subprocess cleanup state; edits require a fresh daemon after boot orphan recovery can re-pick interrupted tasks.",
   },
   {
     name: "runtime_mcp_server",
