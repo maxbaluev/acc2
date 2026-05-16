@@ -670,6 +670,10 @@ CREATE VIEW IF NOT EXISTS promoted_knowledge_view AS
 // recipe_extracted row per (goal_shape, topology_signature). Recipe updates are
 // append-only recipe_extracted rows, so callers need the freshest row for each
 // composite recipe key rather than a raw history scan.
+// Recipe payloads should grow toward explicit preconditions, effects, replay_feedback,
+// and validation fields so Tier-0 replay learns skill boundaries instead of matching
+// only on goal_shape × topology_signature (per SCALAR skill-library SOTA, brain
+// dispatch FNJJPAC55H69379F562DMQK1FM 2026-05-16).
 const VIEW_RECIPE_REGISTRY = `
 CREATE VIEW IF NOT EXISTS recipe_registry_view AS
   WITH recipes AS (
