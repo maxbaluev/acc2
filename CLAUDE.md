@@ -256,7 +256,9 @@ Agent         reads evidence via MCP, makes the SEMANTIC edit,
               runs `bun test --bail`, `git add <file>`, `git commit`,
               returns one JSON line on stdout
 orchestrator  pipes JSON into `acc apply --record <event_id> --status …`
-substrate     emits lesson_applied / contract_amendment_applied citing the source
+substrate     emits applied_change_committed citing the source event
+              (payload.source_kind discriminates lesson vs amendment;
+              payload.status carries applied/failed/refused)
               → four-link credit chain closes (create→retrieve→mutate→credit, k_555)
               → source lesson's posterior updates from outcome
 ```
@@ -277,12 +279,12 @@ substrate     emits lesson_applied / contract_amendment_applied citing the sourc
    })
    ```
 4. **Wait for completion notification when a subagent is used** — subagent returns JSON: `{status, target, commit_sha, summary, reason?}`. If main Claude applied the edit directly, it records the same fields from the local verification/commit result.
-5. **Record the apply** — `acc apply --record <event_id> --status <s> --commit-sha <c> --summary <m>` emits the matching `lesson_applied` / `contract_amendment_applied` event with `context_refs: [<source_event_id>]`. The substrate's four-link credit chain closes; the source proposal's posterior updates from the outcome.
+5. **Record the apply** — `acc apply --record <event_id> --status <s> --commit-sha <c> --summary <m>` emits a single `applied_change_committed` event carrying `payload.source_kind` (lesson_extracted / contract_amendment_proposed) + `payload.status` (applied/failed/refused) + `context_refs: [<source_event_id>]`. The substrate's four-link credit chain closes; the source proposal's posterior updates from the outcome. (The legacy `lesson_applied` + `contract_amendment_applied` kinds were collapsed into `applied_change_committed` at commit `3208a41` — they were duplicates differing only by source_kind, which is now in payload.)
 
 **Anti-patterns specific to this loop:**
 
 - DO NOT let opencode/brain mutate source files or run git directly. The brain proposes through ledger events; Claude-side orchestration applies and commits.
-- DO NOT skip the `--record` step. An applied edit without `lesson_applied` leaves the source proposal uncredited; the substrate cannot learn whether the apply improved anything.
+- DO NOT skip the `--record` step. An applied edit without `applied_change_committed` leaves the source proposal uncredited; the substrate cannot learn whether the apply improved anything.
 - DO NOT auto-apply owner-gated targets without explicit consent. The four protected paths are the contract itself; touching them without owner approval is the canonical "self-modification gone wild" anti-pattern (v2-design.md §6.2).
 
 ## Event-type partition — who writes what (v2-design.md §3.6)
