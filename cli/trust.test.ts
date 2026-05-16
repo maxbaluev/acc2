@@ -64,7 +64,7 @@ describe("acc trust", () => {
     insertEvent(db, "owner_profile_recorded", { autonomy_score: 0.35 });
     insertEvent(db, "recipe_extracted", { goal_shape: "g1" });
     insertEvent(db, "recipe_extracted", { goal_shape: "g2" });
-    insertEvent(db, "recipe_replay_succeeded", { recipe_id: "r1" });
+    insertEvent(db, "task_committed", { recipe_id: "r1", recipe_replayed: true });
     insertEvent(db, "recipe_replay_aborted", { recipe_id: "r2" });
     insertEvent(db, "knowledge_promoted", { knowledge_id: "k1" });
     insertEvent(db, "knowledge_demoted", { knowledge_id: "k2" });

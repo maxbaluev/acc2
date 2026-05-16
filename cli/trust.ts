@@ -35,15 +35,13 @@ const countKind = (db: Database, kind: string, weekly = false): number => {
 };
 
 const recipeSuccess = (db: Database): number => {
-  const direct = countKind(db, "recipe_replay_succeeded");
-  if (direct > 0) return direct;
-  const r = db.query(
-    `SELECT COUNT(*) AS c FROM events r
-      WHERE r.kind = 'recipe_extracted'
-        AND json_extract(r.payload,'$.outcome_event_id') IS NOT NULL
-        AND EXISTS (SELECT 1 FROM events c WHERE c.kind='task_committed' AND c.task_id=r.task_id)`,
+  const committed = db.query(
+    `SELECT COUNT(*) AS c FROM events
+      WHERE kind = 'task_committed'
+        AND (json_extract(payload,'$.recipe_replayed') = 1
+          OR json_extract(payload,'$.recipe_replayed') = 'true')`,
   ).get() as { c: number };
-  return num(r?.c);
+  return num(committed?.c);
 };
 
 export const gatherTrustMetrics = (db: Database): TrustMetrics => {
@@ -104,9 +102,10 @@ const renderText = (m: TrustMetrics): string => {
     `  replayed_success: ${m.recipes_replayed_success}`,
     `  replayed_aborted: ${m.recipes_replayed_aborted}`,
     "",
-    "knowledge (last 7d):",
-    `  promoted: ${m.knowledge_promoted_7d}`,
-    `  demoted:  ${m.knowledge_demoted_7d}`,
+    "learning (last 7d):",
+    `  I promoted ${m.knowledge_promoted_7d} knowledge entries from recent outcomes.`,
+    `  I demoted ${m.knowledge_demoted_7d} entries when evidence disagreed.`,
+    "  If this sounds wrong, say what to correct; the correction becomes owner_insight_candidate evidence.",
     "",
     "recent artifact promotions:",
     ...artifactLines,
