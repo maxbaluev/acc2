@@ -149,6 +149,76 @@ export const classifyHardTask = (db: Database, task: TaskNode): HardTaskClassifi
   return { is_hard: isHard, axes, score: axes.length, diagnostics };
 };
 
+/** Semantic-DAG signals extracted from owner free-text. Per brain lessons
+ *  VZE6Q5PS / EEEF091H / FX6AT1TQ (directive SZG5PQ01A51HX5RNFTS6BG0RX0,
+ *  2026-05-16): owner free-text needs DAG decomposition when text signals
+ *  multiple independently verifiable deliverables, explicit breadth,
+ *  cross-surface changes, evidence/citation demands, or residual-gated
+ *  closure. These signals feed `decomposition_value` directly — they do
+ *  NOT add new axis keys (REUSE-first applied to ourselves: extending the
+ *  existing routing_axes.decomposition_value calculation, not the axis
+ *  vocabulary). */
+export type SemanticDagSignals = {
+  independent_deliverable_count: number;
+  gate_count: number;
+  evidence_modality_count: number;
+  one_shot_answer_fit: number; // 0..1; higher = better fits one-shot answer
+  raw_signals: Record<string, number>;
+};
+
+export const extractSemanticDagSignals = (text: string): SemanticDagSignals => {
+  if (!text || typeof text !== "string") {
+    return { independent_deliverable_count: 0, gate_count: 0, evidence_modality_count: 0, one_shot_answer_fit: 1, raw_signals: {} };
+  }
+  // Structural marker counts — NOT semantic-meaning interpretation. The
+  // markers ARE the structural language. The brain interprets meaning;
+  // this scorer counts markers.
+  const numberedListItems = (text.match(/(?:^|\n)\s*(\d+[.)]\s|[-*]\s+(?=[A-Z]))/gm) ?? []).length;
+  const partMarkers = (text.match(/\bPART\s+[A-Z](?:\s|:|\b)/gi) ?? []).length;
+  const stepMarkers = (text.match(/\b(?:step|phase)\s+\d+\b/gi) ?? []).length;
+  const dagLanguage = (text.match(/\b(?:DAG|refinement edge|task_node_opened|decompose|task_edge_recorded|sub-?task|in parallel|for each)\b/gi) ?? []).length;
+  const explicitMandates = (text.match(/\b(?:must|MUST|mandatory|required)\b/g) ?? []).length;
+  const closureGateLang = (text.match(/\b(?:closure verifier|verifier must|audit that|residual must|closure_residual|gate)\b/gi) ?? []).length;
+  const citationDemand = (text.match(/\b(?:cite|citation|paper|arxiv|venue|references?|evidence|grounded)\b/gi) ?? []).length;
+  const conflictLang = (text.match(/\b(?:reuse-?first|REUSE|DISTINCT|supersede|vs\.?|trade-?off|conflicting)\b/gi) ?? []).length;
+  const oneShotLang = (text.match(/\b(?:one-?shot|quick|simple|status|check|what is|tell me|when did|how many)\b/gi) ?? []).length;
+
+  const independent_deliverable_count = Math.max(numberedListItems, partMarkers, stepMarkers);
+  const gate_count = closureGateLang + Math.floor(explicitMandates / 3);
+  const evidence_modality_count = citationDemand;
+  // one_shot_answer_fit: high when text is short + has one-shot markers; low when complex.
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
+  const complexityScore = independent_deliverable_count + dagLanguage + closureGateLang + Math.floor(wordCount / 100);
+  const oneShotBonus = wordCount < 40 && oneShotLang > 0 ? 0.3 : 0;
+  const one_shot_answer_fit = Math.max(0, Math.min(1, 1 - complexityScore * 0.12 + oneShotBonus));
+
+  return {
+    independent_deliverable_count,
+    gate_count,
+    evidence_modality_count,
+    one_shot_answer_fit,
+    raw_signals: {
+      numberedListItems, partMarkers, stepMarkers, dagLanguage,
+      explicitMandates, closureGateLang, citationDemand, conflictLang,
+      oneShotLang, wordCount,
+    },
+  };
+};
+
+/** Map semantic signals to a decomposition_value boost in [0, 1]. Returns
+ *  the max of: (a) the heuristic baseline, (b) a signal-driven value when
+ *  any signal is strong. The heuristic remains the floor — signals never
+ *  REDUCE decomposition_value, only push it higher when the text plainly
+ *  needs DAG. */
+export const decompositionValueFromSignals = (signals: SemanticDagSignals, heuristicBaseline: number): number => {
+  const sigContribution =
+    Math.min(0.5, signals.independent_deliverable_count * 0.10) +
+    Math.min(0.25, signals.gate_count * 0.05) +
+    Math.min(0.20, signals.evidence_modality_count * 0.03) +
+    Math.max(0, 0.20 - signals.one_shot_answer_fit * 0.20);
+  return clamp01(Math.max(heuristicBaseline, sigContribution));
+};
+
 const hardTaskReason = (hardness: HardTaskClassification, suffix: string): string => {
   const axes = hardness.axes.length > 0 ? hardness.axes.join("|") : "none";
   const diagnostics = Object.entries(hardness.diagnostics)
@@ -289,12 +359,19 @@ const buildDispatchDecisionEvidence = (db: Database, task: TaskNode, hardness: H
   const targets = taskTargetsForHardness(task);
   const urgency = typeof directivePayload.urgency === "string" ? directivePayload.urgency : "normal";
   const learned = readLearnedDispatchAxisEvidence(db);
+  // Semantic-DAG signals: extracted from owner free-text + task goal so
+  // the decomposition_value axis reflects what the owner is actually
+  // asking for (numbered parts, mandatory gates, citation demands, etc.),
+  // not just hardness heuristics. Per brain lessons VZE6Q5PS/EEEF091H/
+  // FX6AT1TQ — REUSE-first: feeds decomposition_value, not new axes.
+  const semantic = extractSemanticDagSignals(text);
+  const heuristicDecomposition = hardness.is_hard ? 0.85 : 0.20 + hardness.axes.length * 0.15;
   const fallbackAxes: Record<string, number> = {
-    one_shot_confidence: hardness.is_hard ? 0.35 : 0.85 - hardness.score * 0.12 - Math.max(0, targets.length - 1) * 0.10,
+    one_shot_confidence: clamp01((hardness.is_hard ? 0.35 : 0.85 - hardness.score * 0.12 - Math.max(0, targets.length - 1) * 0.10) * semantic.one_shot_answer_fit),
     information_gap: hardness.is_hard ? Math.max(0.55, 0.15 + hardness.score * 0.12 + (targets.length === 0 ? 0.10 : 0)) : 0.15 + hardness.score * 0.12 + (targets.length === 0 ? 0.10 : 0),
     reversibility: /\b(irreversible|payment|delete|destructive|external|stakeholder)\b/i.test(text) ? 0.25 : 0.80,
     owner_control_need: /\b(consent|owner|manual|review|approval|stakeholder|irreversible)\b/i.test(text) ? 0.80 : (hardness.is_hard || targets.length > 1 ? 0.55 : 0.25),
-    decomposition_value: hardness.is_hard ? 0.85 : 0.20 + hardness.axes.length * 0.15,
+    decomposition_value: decompositionValueFromSignals(semantic, heuristicDecomposition),
     cost_pressure: urgency === "crisis" ? 0.85 : (hardness.diagnostics.budget_high_fields > 0 ? 0.70 : 0.35),
     time_sensitivity: urgency === "crisis" ? 0.95 : (urgency === "elevated" ? 0.65 : 0.25),
   };
@@ -307,6 +384,11 @@ const buildDispatchDecisionEvidence = (db: Database, task: TaskNode, hardness: H
       ...learned.verifier_evidence,
       hard_axis_count: hardness.axes.length,
       target_count: targets.length,
+      semantic_independent_deliverable_count: semantic.independent_deliverable_count,
+      semantic_gate_count: semantic.gate_count,
+      semantic_evidence_modality_count: semantic.evidence_modality_count,
+      semantic_one_shot_answer_fit: semantic.one_shot_answer_fit,
+      semantic_decomposition_baseline: heuristicDecomposition,
     },
   };
 };

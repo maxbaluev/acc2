@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
-import { classifyHardTask, decideDispatch } from "./dispatch_decider";
+import { classifyHardTask, decideDispatch, extractSemanticDagSignals, decompositionValueFromSignals } from "./dispatch_decider";
 import type { TaskNode } from "./task_topology";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
@@ -350,5 +350,88 @@ describe("dispatch_decider", () => {
     expect(decision.route_scores.opencode_brain).toBeGreaterThan(decision.route_scores.claude_inline);
     expect(decision.verifier_evidence.selected_route_score).toBe(decision.route_scores.opencode_brain);
     expect(decision.verifier_evidence.feasible_route_count).toBe(2);
+  });
+
+  describe("semantic DAG signals", () => {
+    test("trivial one-shot text scores high one_shot_answer_fit and zero independent deliverables", () => {
+      const sig = extractSemanticDagSignals("what is the daemon pid");
+      expect(sig.independent_deliverable_count).toBe(0);
+      expect(sig.gate_count).toBe(0);
+      expect(sig.one_shot_answer_fit).toBeGreaterThan(0.8);
+    });
+
+    test("numbered-list directive with parts + closure verifier scores many deliverables + gates", () => {
+      const sig = extractSemanticDagSignals(`PART A — first thing
+PART B — second thing
+PART C — third thing
+
+The closure verifier must audit X and the residual must be < 0.3.
+Cite real papers (title + arxiv id). Each retained DISTINCT proposal must explicitly name what it cannot absorb.`);
+      expect(sig.independent_deliverable_count).toBeGreaterThanOrEqual(3);
+      expect(sig.gate_count).toBeGreaterThanOrEqual(2);
+      expect(sig.evidence_modality_count).toBeGreaterThanOrEqual(2);
+      expect(sig.one_shot_answer_fit).toBeLessThan(0.5);
+    });
+
+    test("the 12-axis research directive that fooled the decider now scores high decomposition", () => {
+      // Regression: previous dispatch CDK88BVD scored decomposition_value low
+      // for this directive and went one-shot, missing the brain's lesson
+      // VZE6Q5PS / EEEF091H mandate.
+      const directiveText = `Scientific research: dramatically improve acc2 across 12 axes. Cite real papers.
+
+1. UNIVERSAL FOR ANY HUMAN TASK
+2. FAST + EFFICIENT
+3. PROMPT EFFICIENT
+4. TRULY UNIVERSAL
+5. CONTEXT-ROT
+6. SITUATIONAL JUDGMENT
+7. UNIFIED COGNITION
+8. SELF-EVOLVING
+9. CONTINUOUSLY COMPRESS COMPLEXITY
+10. NATURALLY COLLABORATIVE
+11. GROUNDED WORLD MODELS
+12. MINIMIZE GAP
+
+Closure verifier must audit that the proposal cites concrete papers, identifies the minimal substrate-side change for each axis, avoids advisory flags.`;
+      const sig = extractSemanticDagSignals(directiveText);
+      expect(sig.independent_deliverable_count).toBeGreaterThanOrEqual(12);
+      expect(sig.gate_count).toBeGreaterThanOrEqual(1);
+      expect(sig.evidence_modality_count).toBeGreaterThanOrEqual(2);
+      expect(sig.one_shot_answer_fit).toBeLessThan(0.3);
+      // The composite decomposition_value must rise to "obviously needs DAG".
+      const decomposition = decompositionValueFromSignals(sig, 0.20);
+      expect(decomposition).toBeGreaterThan(0.7);
+    });
+
+    test("decompositionValueFromSignals never lowers the heuristic baseline", () => {
+      const trivialSig = extractSemanticDagSignals("hi");
+      // A trivial signal payload — heuristic baseline of 0.85 must still win.
+      expect(decompositionValueFromSignals(trivialSig, 0.85)).toBeGreaterThanOrEqual(0.85);
+    });
+
+    test("buildDispatchDecisionEvidence surfaces semantic signals in verifier_evidence", () => {
+      const db = openDb(":memory:");
+      runViews(db);
+      emitEvent(db, {
+        kind: "directive_opened",
+        substrate_origin: "claude_root",
+        directive_id: "d_sem",
+        payload: {
+          directive_text: `PART A — design X. PART B — design Y. PART C — design Z. Closure verifier must audit each part. Cite arxiv papers.`,
+        },
+      });
+      const decision = decideDispatch(db, sampleTask({
+        directive_id: "d_sem",
+        goal: "research and design multi-axis improvements",
+      }));
+      const ve = decision.verifier_evidence;
+      expect(ve.semantic_independent_deliverable_count).toBeGreaterThanOrEqual(3);
+      expect(ve.semantic_gate_count).toBeGreaterThanOrEqual(1);
+      expect(ve.semantic_evidence_modality_count).toBeGreaterThanOrEqual(1);
+      expect(typeof ve.semantic_one_shot_answer_fit).toBe("number");
+      expect(typeof ve.semantic_decomposition_baseline).toBe("number");
+      // Final decomposition_value should land high.
+      expect(decision.routing_axes.decomposition_value).toBeGreaterThan(0.5);
+    });
   });
 });
