@@ -78,6 +78,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "amendment",
   "metrics_gauge_refresh",
   "auto_apply",
+  "hotreload",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into
