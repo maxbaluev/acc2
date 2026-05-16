@@ -369,6 +369,39 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(row?.status_reason).not.toBe("orphan_root_no_dispatch");
   });
 
+  test("reports live when a refinement child dispatches after the root commits", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_refine", task_id: "t_root" });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_refine", task_id: "t_root", payload: { dispatch_id: "disp_root" } });
+    insertEvent(db, { kind: "brain_dispatch_closed", directive_id: "d_refine", task_id: "t_root", payload: { dispatch_id: "disp_root" } });
+    insertEvent(db, { kind: "task_committed", directive_id: "d_refine", task_id: "t_root" });
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_refine", task_id: "t_child", parent_task_id: "t_root" });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_refine", task_id: "t_child", ts: nowIso(), payload: { dispatch_id: "disp_child" } });
+
+    const [row] = dispatchResolved(db, { directiveId: "d_refine", rootTaskId: "t_root" });
+    expect(row?.lifecycle_status).toBe("live");
+    expect(row?.status_reason).toBe("refinement_dispatch_open");
+    expect(row?.open_dispatch_count).toBe(1);
+    expect(row?.terminal_kind).toBe("task_committed");
+  });
+
+  test("returns to completed once the refinement child also closes", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_done", task_id: "t_root" });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_done", task_id: "t_root", payload: { dispatch_id: "disp_root" } });
+    insertEvent(db, { kind: "brain_dispatch_closed", directive_id: "d_done", task_id: "t_root", payload: { dispatch_id: "disp_root" } });
+    insertEvent(db, { kind: "task_committed", directive_id: "d_done", task_id: "t_root" });
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_done", task_id: "t_child", parent_task_id: "t_root" });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_done", task_id: "t_child", payload: { dispatch_id: "disp_child" } });
+    insertEvent(db, { kind: "task_committed", directive_id: "d_done", task_id: "t_child" });
+
+    const [row] = dispatchResolved(db, { directiveId: "d_done", rootTaskId: "t_root" });
+    expect(row?.lifecycle_status).toBe("completed");
+    expect(row?.open_dispatch_count).toBe(0);
+  });
+
   test("groups child dispatch events under the root task id and supports filters", () => {
     const db = openDb(":memory:");
     runViews(db);
@@ -383,6 +416,20 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(rows[0]!.root_task_id).toBe("t_root");
     expect(rows[0]!.lifecycle_status).toBe("completed");
     expect(dispatchResolved(db, { directiveId: "missing" })).toEqual([]);
+  });
+
+  test("uses the latest terminal event instead of letting an older violation mask a later commit", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_late_commit", task_id: "t_late_commit" });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_late_commit", task_id: "t_late_commit", payload: { dispatch_id: "disp_late_commit" } });
+    insertEvent(db, { kind: "dispatcher_violation", directive_id: "d_late_commit", task_id: "t_late_commit", failure_kind: "cycle_2_started" });
+    insertEvent(db, { kind: "task_committed", directive_id: "d_late_commit", task_id: "t_late_commit" });
+
+    const [row] = dispatchResolved(db, { directiveId: "d_late_commit", rootTaskId: "t_late_commit" });
+    expect(row?.lifecycle_status).toBe("completed");
+    expect(row?.terminal_kind).toBe("task_committed");
+    expect(row?.status_reason).toBe("task_committed");
   });
 });
 

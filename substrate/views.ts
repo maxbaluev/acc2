@@ -1945,6 +1945,7 @@ dispatches AS (
    AND d.kind = 'brain_dispatched'
 ),
 closes AS (
+  -- Explicit brain_dispatch_closed events: matched against a specific dispatch_id.
   SELECT
     t.directive_id,
     t.root_task_id,
@@ -1957,6 +1958,23 @@ closes AS (
     ON c.directive_id = t.directive_id
    AND c.task_id = t.task_id
    AND c.kind = 'brain_dispatch_closed'
+  UNION ALL
+  -- Implicit close: a terminal event on a task closes any open dispatches on
+  -- that same task (the brain may commit/fail without emitting an explicit
+  -- brain_dispatch_closed). dispatch_id IS NULL so the predicate below
+  -- matches against any dispatch on the task.
+  SELECT
+    t.directive_id,
+    t.root_task_id,
+    c.task_id,
+    c.id AS close_event_id,
+    c.ts AS close_ts,
+    NULL AS dispatch_id
+  FROM tree t
+  JOIN events c
+    ON c.directive_id = t.directive_id
+   AND c.task_id = t.task_id
+   AND c.kind IN ('task_committed', 'task_failed', 'dispatcher_violation')
 ),
 dispatch_summary AS (
   SELECT
@@ -1970,7 +1988,7 @@ dispatch_summary AS (
       WHERE c.directive_id = d.directive_id
         AND c.root_task_id = d.root_task_id
         AND c.task_id = d.task_id
-        AND COALESCE(c.dispatch_id, '') = COALESCE(d.dispatch_id, '')
+        AND (c.dispatch_id IS NULL OR COALESCE(c.dispatch_id, '') = COALESCE(d.dispatch_id, ''))
         AND c.close_ts >= d.dispatch_ts
     ) THEN 1 ELSE 0 END) AS open_dispatch_count,
     MAX(d.dispatch_ts) AS latest_dispatched_at,
@@ -1979,7 +1997,7 @@ dispatch_summary AS (
       WHERE c.directive_id = d.directive_id
         AND c.root_task_id = d.root_task_id
         AND c.task_id = d.task_id
-        AND COALESCE(c.dispatch_id, '') = COALESCE(d.dispatch_id, '')
+        AND (c.dispatch_id IS NULL OR COALESCE(c.dispatch_id, '') = COALESCE(d.dispatch_id, ''))
         AND c.close_ts >= d.dispatch_ts
     ) THEN d.dispatch_ts ELSE NULL END) AS oldest_open_dispatched_at
   FROM dispatches d
@@ -2003,7 +2021,7 @@ terminal_ranked AS (
     e.kind AS terminal_kind,
     e.failure_kind,
     e.residual,
-    ROW_NUMBER() OVER (PARTITION BY t.directive_id, t.root_task_id ORDER BY CASE WHEN e.kind IN ('task_failed', 'dispatcher_violation') THEN 0 ELSE 1 END, e.ts DESC) AS rn
+    ROW_NUMBER() OVER (PARTITION BY t.directive_id, t.root_task_id ORDER BY e.ts DESC, CASE WHEN e.kind = 'task_committed' THEN 0 ELSE 1 END, e.id DESC) AS rn
   FROM tree t
   JOIN events e
     ON e.directive_id = t.directive_id
@@ -2093,12 +2111,15 @@ SELECT
   r.directive_id,
   r.root_task_id,
   CASE
-    WHEN term.terminal_kind = 'task_committed' THEN 'completed'
-    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
+    -- In-flight dispatch ANYWHERE under the root wins over a stale terminal:
+    -- a child task may be running a refinement cycle after the root committed.
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
       THEN 'zombie'
+    WHEN COALESCE(ds.open_dispatch_count, 0) > 0 THEN 'live'
+    WHEN term.terminal_kind = 'task_committed' THEN 'completed'
+    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
     WHEN term.terminal_kind IS NULL
          AND COALESCE(ds.dispatched_count, 0) = 0
          AND COALESCE(ds.open_dispatch_count, 0) = 0
@@ -2113,12 +2134,13 @@ SELECT
     ELSE 'live'
   END AS status,
   CASE
-    WHEN term.terminal_kind = 'task_committed' THEN 'completed'
-    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
       THEN 'zombie'
+    WHEN COALESCE(ds.open_dispatch_count, 0) > 0 THEN 'live'
+    WHEN term.terminal_kind = 'task_committed' THEN 'completed'
+    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
     WHEN term.terminal_kind IS NULL
          AND COALESCE(ds.dispatched_count, 0) = 0
          AND COALESCE(ds.open_dispatch_count, 0) = 0
@@ -2155,11 +2177,16 @@ SELECT
   ls.latest_ts,
   CAST((julianday('now') - julianday(ls.latest_ts)) * 86400000 AS INTEGER) AS age_ms,
   CASE
-    WHEN term.terminal_kind IS NOT NULL THEN term.terminal_kind
+    -- In-flight reasons win over a stale terminal: name the running cycle.
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
       THEN 'open_dispatch_zombie'
+    WHEN COALESCE(ds.open_dispatch_count, 0) > 0
+         AND term.terminal_kind IS NOT NULL
+      THEN 'refinement_dispatch_open'
+    WHEN COALESCE(ds.open_dispatch_count, 0) > 0 THEN 'brain_dispatch_open'
+    WHEN term.terminal_kind IS NOT NULL THEN term.terminal_kind
     WHEN term.terminal_kind IS NULL
          AND COALESCE(ds.dispatched_count, 0) = 0
          AND COALESCE(ds.open_dispatch_count, 0) = 0
@@ -2167,7 +2194,6 @@ SELECT
          AND r.root_opened_ts IS NOT NULL
          AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 300000
       THEN 'orphan_root_no_dispatch'
-    WHEN COALESCE(ds.open_dispatch_count, 0) > 0 THEN 'brain_dispatch_open'
     WHEN cg.latest_cap_gate_at IS NOT NULL
          AND COALESCE(ds.open_dispatch_count, 0) = 0
       THEN COALESCE(cg.queued_reason, 'queued_at_cap')

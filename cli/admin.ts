@@ -53,6 +53,7 @@ import { runCleanTempState } from "./admin_clean_temp";
 import { runEmbedAll } from "./admin_embed_all";
 import { runSubstrateStatus } from "./admin_substrate_status";
 import { runDispatchStatus } from "./admin_dispatch_status";
+import { runPendingDecisions } from "./admin_pending_decisions";
 import { runTrust } from "./trust";
 
 const usage = (): string => `acc admin — operator-side maintenance
@@ -100,6 +101,12 @@ const usage = (): string => `acc admin — operator-side maintenance
                               Use INSTEAD of guessing dispatch state from stdout / ps /
                               bash exit. See .claude/rules/orchestrator-runtime.md
                               "Dispatch Observation Protocol".
+    pending-decisions [--json]
+                              Owner-gated proposals waiting on consent from
+                              lesson_implementer_queue_view. The canonical source
+                              for the orchestrator's end-of-turn decision card —
+                              poll this instead of asserting "no pending decisions"
+                              without checking.
     trust [--json]            Owner growth / autonomy snapshot: posterior trends,
                               recipe activity, knowledge movement, closure residual
                               stats, amendment outcomes. (MERGE 2026-05-16 from the
@@ -755,6 +762,7 @@ export const runAdmin = async (argv: string[], envOverride?: AdminEnv): Promise<
   if (sub === "embed-all") return runEmbedAll(argv.slice(1));
   if (sub === "substrate-status") return runSubstrateStatus(argv.slice(1));
   if (sub === "dispatch-status") return runDispatchStatus(argv.slice(1));
+  if (sub === "pending-decisions") return runPendingDecisions(argv.slice(1));
   if (sub === "trust") return runTrust(argv.slice(1));
   env.err(`acc admin: unknown subcommand '${sub}'`);
   env.err(usage());
