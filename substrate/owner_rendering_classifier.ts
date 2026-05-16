@@ -40,6 +40,15 @@ export type OwnerRenderingClassification = {
    *  extractor can later score the classifier itself by outcome
    *  (k_555 four-link credit chain). */
   evidence: string[];
+  /** ISO 639-1 code for the dominant script in the directive text,
+   *  e.g. "en", "ru", "ja", "ar". Absent when no script dominates
+   *  ≥ 30% of alphabetic characters (inconclusive — e.g. pure
+   *  punctuation, empty input, balanced multi-script text). The
+   *  default "en" is still emitted when Latin dominates so callers
+   *  can distinguish "detected English" from "couldn't detect
+   *  anything". Universalizes the rendering vector: non-English
+   *  owners are structurally surfaced at dispatch time. */
+  detected_language?: string;
 };
 
 // Heuristic vocabularies. Each list is short — strong signals only.
@@ -111,6 +120,41 @@ const continuousFromCount = (n: number, saturate: number): number => {
   return Math.min(1, n / saturate);
 };
 
+/** Detect the dominant Unicode script in `text` and return its ISO 639-1
+ *  language code + dominance percentage. A script dominates when ≥ 30%
+ *  of alphabetic characters fall in its block. Returns undefined when
+ *  no script dominates (empty / punctuation-only / balanced multi-script).
+ *  ASCII punctuation, whitespace, and digits are skipped when counting. */
+const detectLanguage = (
+  text: string,
+): { lang: string; pct: number } | undefined => {
+  const c = { cyr: 0, cjk: 0, hir: 0, kat: 0, han: 0, ara: 0, heb: 0, lat: 0 };
+  let alpha = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    if (cp === undefined) continue;
+    if (cp >= 0x0400 && cp <= 0x04ff) c.cyr++;
+    else if (cp >= 0x4e00 && cp <= 0x9fff) c.cjk++;
+    else if (cp >= 0x3040 && cp <= 0x309f) c.hir++;
+    else if (cp >= 0x30a0 && cp <= 0x30ff) c.kat++;
+    else if (cp >= 0xac00 && cp <= 0xd7af) c.han++;
+    else if (cp >= 0x0600 && cp <= 0x06ff) c.ara++;
+    else if (cp >= 0x0590 && cp <= 0x05ff) c.heb++;
+    else if ((cp >= 0x0041 && cp <= 0x005a) || (cp >= 0x0061 && cp <= 0x007a)) c.lat++;
+    else continue;
+    alpha++;
+  }
+  if (alpha === 0) return undefined;
+  const jp = c.hir + c.kat;
+  const cands: Array<[string, number]> = [
+    ["ru", c.cyr], ["ja", jp > 0 ? c.cjk + jp : 0], ["zh", jp > 0 ? 0 : c.cjk],
+    ["ko", c.han], ["ar", c.ara], ["he", c.heb], ["en", c.lat],
+  ];
+  const [lang, count] = cands.reduce((a, b) => (b[1] > a[1] ? b : a));
+  const pct = count / alpha;
+  return pct < 0.3 ? undefined : { lang, pct };
+};
+
 /** Pure classifier — takes the owner's directive text (and optional
  *  prior owner_input_received texts) and returns a continuous signal
  *  vector. Each signal in the output is independent: high `code_density`
@@ -123,6 +167,26 @@ export const classifyOwnerRenderingSignals = (
   const allText = [primaryText, ...priorTexts].join("\n");
   const signals: OwnerRenderingSignals = {};
   const evidence: string[] = [];
+
+  // detected_language: Unicode-script dominance over alphabetic chars
+  // (skipping ASCII punctuation/whitespace/digits). Runs BEFORE the
+  // signal-extraction logic so the renderer can pick a language even
+  // when no other signal fires (e.g. terse non-English directives).
+  let detectedLanguage: string | undefined;
+  const langHit = detectLanguage(allText);
+  if (langHit) {
+    detectedLanguage = langHit.lang;
+    const blockName =
+      langHit.lang === "ru" ? "Cyrillic block" :
+      langHit.lang === "ja" ? "Hiragana/Katakana+CJK" :
+      langHit.lang === "zh" ? "CJK Unified" :
+      langHit.lang === "ko" ? "Hangul Syllables" :
+      langHit.lang === "ar" ? "Arabic block" :
+      langHit.lang === "he" ? "Hebrew block" :
+      "Latin block";
+    const pctStr = Math.round(langHit.pct * 100);
+    evidence.push(`detected_language=${langHit.lang} (${blockName} ${pctStr}%)`);
+  }
 
   // code_density: lights up on file paths, code identifiers, code-related
   // vocabulary. Continuous: more signals → higher value, saturates at 4.
@@ -174,5 +238,7 @@ export const classifyOwnerRenderingSignals = (
   const dimensions = Object.keys(signals).length;
   const confidence = Math.min(0.95, Math.max(0.5, 0.5 + dimensions * 0.15));
 
-  return { signals, confidence, evidence };
+  return detectedLanguage !== undefined
+    ? { signals, confidence, evidence, detected_language: detectedLanguage }
+    : { signals, confidence, evidence };
 };

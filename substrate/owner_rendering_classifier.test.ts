@@ -84,3 +84,77 @@ describe("classifyOwnerRenderingSignals — universal continuous signals", () =>
     }
   });
 });
+
+describe("classifyOwnerRenderingSignals — Unicode-script detected_language", () => {
+  test("pure-English directive detects 'en'", () => {
+    const r = classifyOwnerRenderingSignals("help me migrate the database");
+    expect(r.detected_language).toBe("en");
+    expect(r.evidence.some((e) => e.startsWith("detected_language=en"))).toBe(true);
+  });
+
+  test("pure-Russian directive detects 'ru'", () => {
+    const r = classifyOwnerRenderingSignals("Помоги мне с миграцией базы данных");
+    expect(r.detected_language).toBe("ru");
+    expect(r.evidence.some((e) => e.startsWith("detected_language=ru"))).toBe(true);
+  });
+
+  test("mixed English + code identifiers still detects 'en'", () => {
+    // The existing passing test case from above: code identifiers are
+    // Latin-block characters so detected_language stays "en" even with
+    // file paths and camelCase symbols mixed in.
+    const r = classifyOwnerRenderingSignals(
+      "how do I figure out why getUserById returns null in /src/users/lookup.ts?",
+    );
+    expect(r.detected_language).toBe("en");
+  });
+
+  test("pure-Japanese directive detects 'ja'", () => {
+    // Hiragana + Katakana + CJK → "ja" (because Hiragana/Katakana > 0).
+    const r = classifyOwnerRenderingSignals("データベースの移行を手伝ってください");
+    expect(r.detected_language).toBe("ja");
+    expect(r.evidence.some((e) => e.startsWith("detected_language=ja"))).toBe(true);
+  });
+
+  test("empty text yields no detected_language", () => {
+    const r = classifyOwnerRenderingSignals("");
+    expect(r.detected_language).toBeUndefined();
+  });
+
+  test("pure-punctuation text yields no detected_language", () => {
+    const r = classifyOwnerRenderingSignals("!!! ??? --- ... 12345");
+    expect(r.detected_language).toBeUndefined();
+  });
+
+  test("Korean directive detects 'ko'", () => {
+    const r = classifyOwnerRenderingSignals("데이터베이스 마이그레이션 도와주세요");
+    expect(r.detected_language).toBe("ko");
+  });
+
+  test("Arabic directive detects 'ar'", () => {
+    const r = classifyOwnerRenderingSignals("ساعدني في ترحيل قاعدة البيانات");
+    expect(r.detected_language).toBe("ar");
+  });
+
+  test("Hebrew directive detects 'he'", () => {
+    const r = classifyOwnerRenderingSignals("עזור לי להעביר את מסד הנתונים");
+    expect(r.detected_language).toBe("he");
+  });
+
+  test("Chinese (CJK without kana) detects 'zh'", () => {
+    const r = classifyOwnerRenderingSignals("帮我迁移数据库");
+    expect(r.detected_language).toBe("zh");
+  });
+
+  test("language detection does not regress existing signal extraction", () => {
+    // Sanity: a directive that fires code_density and explanation_appetite
+    // (the existing mixed-case test) should still fire those signals AND
+    // emit detected_language="en" together — adding the language axis
+    // must be purely additive.
+    const r = classifyOwnerRenderingSignals(
+      "how do I figure out why getUserById returns null in /src/users/lookup.ts?",
+    );
+    expect(r.signals.code_density).toBeGreaterThan(0);
+    expect(r.signals.explanation_appetite).toBeGreaterThan(0);
+    expect(r.detected_language).toBe("en");
+  });
+});
