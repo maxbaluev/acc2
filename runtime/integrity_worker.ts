@@ -243,6 +243,24 @@ export const integrityWorkerTick = async (db: Database): Promise<IntegrityReport
  *  killed, every in-flight dispatch is dead). */
 export const STALE_DISPATCH_THRESHOLD_MS = 15 * 60 * 1000;
 
+/** Parse the original brain_dispatched payload to recover its dispatch_id.
+ *  The orphan-recovery path uses this to emit a properly-keyed
+ *  brain_dispatch_closed event (per YEF00QZM lesson HJFTSQ4V2 — closing
+ *  the lease durably is what lets the scheduler deterministically
+ *  redispatch the same task_id). Returns null when the payload is missing
+ *  or malformed; callers should still emit the close (the dispatch_id is
+ *  best-effort enrichment, not load-bearing). */
+const parseOriginalDispatchId = (row: { payload?: string | null }): string | null => {
+  if (!row.payload || typeof row.payload !== "string") return null;
+  try {
+    const parsed = JSON.parse(row.payload) as Record<string, unknown>;
+    const dispatchId = parsed.dispatch_id;
+    return typeof dispatchId === "string" && dispatchId.length > 0 ? dispatchId : null;
+  } catch {
+    return null;
+  }
+};
+
 /** Threshold for declaring a never-dispatched task_node_opened a zombie.
  *  Healthy ready tasks get picked up within seconds by the scheduler tick
  *  (default 10s). 1 hour is a generous margin that flags only truly stuck
@@ -267,7 +285,7 @@ export const reconcileStaleDispatches = (
 
   const rows = db
     .query(
-      `SELECT e.id AS dispatch_event_id, e.task_id, e.directive_id, e.ts
+      `SELECT e.id AS dispatch_event_id, e.task_id, e.directive_id, e.ts, e.payload
        FROM events e
        WHERE e.kind = 'brain_dispatched'
          AND e.ts <= ?
@@ -278,17 +296,42 @@ export const reconcileStaleDispatches = (
              AND c.ts >= e.ts
          )
          AND NOT EXISTS (
+           -- Dedupe: skip if ALREADY recovered AND closed. Per YEF00QZM
+           -- lesson, legacy rows that were recovered before lease-closure
+           -- shipped (no brain_dispatch_closed in tandem) must NOT be
+           -- skipped — they need their close emitted before the scheduler
+           -- can deterministically redispatch. The recovered+closed pair
+           -- is the durable terminal state.
            SELECT 1 FROM events r
            WHERE r.kind = 'dispatch_recovered_orphan'
              AND json_extract(r.payload, '$.original_dispatch_event_id') = e.id
+             AND json_extract(r.payload, '$.recovery_close_event_id') IS NOT NULL
          )`,
     )
-    .all(cutoffIso) as Array<{ dispatch_event_id: string; task_id: string; directive_id: string; ts: string }>;
+    .all(cutoffIso) as Array<{ dispatch_event_id: string; task_id: string; directive_id: string; ts: string; payload: string }>;
 
   const recovered: Array<{ dispatch_event_id: string; task_id: string; age_ms: number }> = [];
   for (const row of rows) {
     const ageMs = nowMs - Date.parse(row.ts);
     try {
+      // Close the lease FIRST (per YEF00QZM lesson: closing interrupted
+      // dispatch leases durably is what lets the scheduler deterministically
+      // redispatch the same task_id; without it, the dispatch_id stays
+      // "in-flight" forever from the perspective of any consumer that joins
+      // brain_dispatched ↔ brain_dispatch_closed).
+      const dispatchId = parseOriginalDispatchId(row as { payload?: string });
+      const closeEvent = emitEvent(db, {
+        kind: "brain_dispatch_closed",
+        substrate_origin: "substrate_auto",
+        directive_id: row.directive_id,
+        task_id: row.task_id,
+        payload: {
+          dispatch_id: dispatchId,
+          reason: "stale_orphan_recovered",
+          original_dispatch_event_id: row.dispatch_event_id,
+          stale_age_ms: ageMs,
+        },
+      });
       emitEvent(db, {
         kind: "dispatch_recovered_orphan",
         substrate_origin: "substrate_auto",
@@ -296,6 +339,7 @@ export const reconcileStaleDispatches = (
         task_id: row.task_id,
         payload: {
           original_dispatch_event_id: row.dispatch_event_id,
+          recovery_close_event_id: closeEvent.id,
           recovery_action: "scheduler_will_repick",
           recovery_path: "mid_session_stale_reconcile",
           stale_age_ms: ageMs,
@@ -422,21 +466,41 @@ export const reconcileOrphanedDispatches = (db: Database): Array<{ dispatch_even
              AND c.ts >= e.ts
          )
          AND NOT EXISTS (
-           -- Dedupe: skip orphans that already had a recovery emitted; the
-           -- scheduler is responsible for re-picking them. Without this, the
-           -- worker tick re-emits dispatch_recovered_orphan every cadence
-           -- for the same orphans, flooding the SQLite write queue (~56
-           -- events / 10min observed 2026-05-16 when 9 orphans persisted).
+           -- Dedupe: skip if ALREADY recovered AND closed. Per YEF00QZM
+           -- lesson HJFTSQ4V2, legacy rows recovered before lease-closure
+           -- shipped (no brain_dispatch_closed in tandem) must NOT be
+           -- skipped — they need their close emitted before the scheduler
+           -- can deterministically redispatch the same task_id. Without
+           -- this, the worker tick re-emits dispatch_recovered_orphan every
+           -- cadence for the same orphans, flooding the SQLite write queue
+           -- (~56 events / 10min observed 2026-05-16 when 9 orphans persisted).
            SELECT 1 FROM events r
            WHERE r.kind = 'dispatch_recovered_orphan'
              AND r.task_id = e.task_id
              AND json_extract(r.payload, '$.original_dispatch_event_id') = e.id
+             AND json_extract(r.payload, '$.recovery_close_event_id') IS NOT NULL
          )`,
     )
     .all() as Array<{ dispatch_event_id: string; task_id: string; directive_id: string; payload: string }>;
   const orphans: Array<{ dispatch_event_id: string; task_id: string }> = [];
   for (const row of rows) {
     try {
+      // Close the lease FIRST (per YEF00QZM lesson). Without an explicit
+      // brain_dispatch_closed, downstream joins that count "open" leases
+      // never reach zero for the old dispatch_id, and the scheduler can't
+      // tell a hard-killed subprocess from an in-flight one.
+      const dispatchId = parseOriginalDispatchId(row);
+      const closeEvent = emitEvent(db, {
+        kind: "brain_dispatch_closed",
+        substrate_origin: "substrate_auto",
+        directive_id: row.directive_id,
+        task_id: row.task_id,
+        payload: {
+          dispatch_id: dispatchId,
+          reason: "restart_orphan_recovered",
+          original_dispatch_event_id: row.dispatch_event_id,
+        },
+      });
       emitEvent(db, {
         kind: "dispatch_recovered_orphan",
         substrate_origin: "substrate_auto",
@@ -444,6 +508,7 @@ export const reconcileOrphanedDispatches = (db: Database): Array<{ dispatch_even
         task_id: row.task_id,
         payload: {
           original_dispatch_event_id: row.dispatch_event_id,
+          recovery_close_event_id: closeEvent.id,
           recovery_action: "scheduler_will_repick",
         },
       });

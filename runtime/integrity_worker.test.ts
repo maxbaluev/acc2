@@ -171,6 +171,46 @@ describe("reconcileOrphanedDispatches — emits dispatch_recovered_orphan", () =
     const recovered = reconcileOrphanedDispatches(db);
     expect(recovered.length).toBe(3);
   });
+
+  test("recovery emits brain_dispatch_closed with dispatch_id + restart_orphan_recovered (YEF00QZM lease closure)", () => {
+    const db = openDb(dbPath);
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      directive_id: "d_lease",
+      task_id: "t_lease",
+      payload: { dispatch_id: "disp_lease_xyz" },
+    });
+    const recovered = reconcileOrphanedDispatches(db);
+    expect(recovered.length).toBe(1);
+    const closes = eventsByKind(db, "brain_dispatch_closed");
+    expect(closes.length).toBe(1);
+    const closePayload = JSON.parse(closes[0]!.payload) as Record<string, unknown>;
+    expect(closePayload.reason).toBe("restart_orphan_recovered");
+    expect(closePayload.dispatch_id).toBe("disp_lease_xyz");
+    expect(typeof closePayload.original_dispatch_event_id).toBe("string");
+    // The dispatch_recovered_orphan now also carries recovery_close_event_id
+    // for traceability.
+    const orphans = eventsByKind(db, "dispatch_recovered_orphan");
+    const orphanPayload = JSON.parse(orphans[0]!.payload) as Record<string, unknown>;
+    expect(orphanPayload.recovery_close_event_id).toBe(closes[0]!.id);
+  });
+
+  test("recovery is idempotent — a SECOND reconcile does NOT emit a duplicate close (lease already closed)", () => {
+    const db = openDb(dbPath);
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      directive_id: "d_idem_close",
+      task_id: "t_idem_close",
+      payload: { dispatch_id: "disp_idem" },
+    });
+    expect(reconcileOrphanedDispatches(db).length).toBe(1);
+    // After the first reconcile the lease has a brain_dispatch_closed event.
+    // The second reconcile's query now finds zero unclosed rows because
+    // the close itself satisfies the "no closing event" predicate.
+    expect(reconcileOrphanedDispatches(db).length).toBe(0);
+    expect(eventsByKind(db, "brain_dispatch_closed").length).toBe(1);
+    expect(eventsByKind(db, "dispatch_recovered_orphan").length).toBe(1);
+  });
 });
 
 describe("reconcileStaleDispatches — mid-session zombie sweep", () => {
@@ -217,6 +257,15 @@ describe("reconcileStaleDispatches — mid-session zombie sweep", () => {
     expect(recovered[0].age_ms).toBeGreaterThanOrEqual(STALE_DISPATCH_THRESHOLD_MS);
     const orphans = eventsByKind(db, "dispatch_recovered_orphan");
     expect(orphans.length).toBe(1);
+    // YEF00QZM lease closure: the stale-reconcile path ALSO emits
+    // brain_dispatch_closed with reason='stale_orphan_recovered'.
+    const closes = eventsByKind(db, "brain_dispatch_closed");
+    expect(closes.length).toBe(1);
+    const closePayload = JSON.parse(closes[0]!.payload) as Record<string, unknown>;
+    expect(closePayload.reason).toBe("stale_orphan_recovered");
+    expect(closePayload.dispatch_id).toBe("disp_stale");
+    const orphanPayload = JSON.parse(orphans[0]!.payload) as Record<string, unknown>;
+    expect(orphanPayload.recovery_close_event_id).toBe(closes[0]!.id);
   });
 
   test("a stale dispatch already recovered is NOT flagged again — idempotent", () => {
