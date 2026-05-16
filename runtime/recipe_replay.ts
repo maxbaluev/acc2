@@ -468,9 +468,11 @@ export const replayRecipe = async (
   // commit row (when emitted) to cite the step that observed the residual.
   let lastActionArtifactId = "";
   let lastVerifierArtifactId: string | undefined;
-  // Pipe each step's `action_result` into the next step's inputs so a
-  // multi-step trajectory can pass data downstream (matches the dispatch
-  // path that runs cycle-by-cycle from a brain refinement).
+  // Pipe each step's observation envelope into the next step's inputs so
+  // multi-runtime trajectories can compose without runtime-specific lanes.
+  // The envelope is ordinary JsonValue but should carry resource_uri,
+  // media_type, producer_runtime, state_ref, summary, claims, tables, and
+  // artifact refs when available; verifiers score the envelope contract.
   let upstreamResult: JsonValue | null = null;
 
   for (let stepIdx = 0; stepIdx < actionSteps.length; stepIdx++) {
