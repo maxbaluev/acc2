@@ -122,6 +122,10 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
     ts,
     directive_id,
     task_id,
+    // Auto-share-knowledge (2026-05-16): propagate payload so subscribers
+    // can act on content mid-flight (knowledge propagation worker, cross-
+    // terminal mirror, in-flight brain dispatches).
+    payload: (input.payload ?? {}) as JsonValue,
   });
   // Batch 3.OPS: Prometheus counter — one increment per kind. Fail-soft
   // so a metrics misconfiguration cannot block emission. The kind is the

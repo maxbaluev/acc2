@@ -88,7 +88,7 @@ export const EVENT_KINDS = {
   irreversible_effect_recorded:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true, narrative: true },
 
   // ── Knowledge (Model D) ─────────────────────────────────────────────
-  knowledge_candidate:                     { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  knowledge_candidate:                     { producer: "brain",     embeddable: true,  mirror_inline: true,  health_metric: false, narrative: true },
   candidate_confirmed:                     { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   candidate_contradicted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // Brain-side negative knowledge (loop-elegance gap #2, 2026-05-15):
@@ -151,7 +151,7 @@ export const EVENT_KINDS = {
   runtime_subprocess_completed:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Knowledge synthesis ─────────────────────────────────────────────
-  knowledge_synthesized:                   { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  knowledge_synthesized:                   { producer: "substrate", embeddable: false, mirror_inline: true,  health_metric: false, narrative: true },
   // Explicit two-model merger protocol rows. Payloads MUST keep
   // merger_quality_axes as Record<string, number>; do not enumerate a fixed
   // quality taxonomy in the schema.

@@ -28,6 +28,7 @@
 //      meta-observers (telemetry, debugging).
 
 import type { EventKind } from "../substrate/event_kinds";
+import type { JsonValue } from "../substrate/types";
 import { logger } from "./logger";
 
 export type ActivationPayload = {
@@ -36,6 +37,11 @@ export type ActivationPayload = {
   kind: EventKind;
   directive_id?: string;
   task_id?: string;
+  // Auto-share-knowledge directive (2026-05-16): payload propagated so
+  // subscribers (knowledge propagation worker, in-flight brain dispatches,
+  // cross-terminal mirror-inline observers) can act on event content
+  // mid-flight without re-fetching via substrate.read.
+  payload?: JsonValue;
 };
 
 export type ActivationListener = (payload: ActivationPayload) => void | Promise<void>;
