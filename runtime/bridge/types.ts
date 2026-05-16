@@ -37,25 +37,6 @@ export type BridgeResult =
   | { ok: true; final_response: string; usage: { tokens: number }; emitted_event_ids: string[] }
   | { ok: false; reason: BridgeFailureReason };
 
-export type McpPreflightInput = {
-  configPath: string;
-  mcpServerUrl: string;
-  serverName: string;
-  timeoutMs: number;
-};
-
-export type McpPreflightResult = {
-  ok: boolean;
-  command: string[];
-  status: number | null;
-  signal?: string | null;
-  stdout_tail?: string;
-  stderr_tail?: string;
-  server_found?: boolean;
-  tool_surface_found?: boolean;
-  error?: string;
-};
-
 /** Options accepted by `spawnRealOpencode` for the real opencode subprocess
  *  path. Tests inject Bun.spawn + override the watchdog/handshake windows
  *  here; production callers leave everything default. */
@@ -96,11 +77,4 @@ export type SpawnOpts = {
    *  bridge treats that as "unknown, proceed" so a transient probe failure
    *  doesn't block legitimate dispatches. */
   authProbe?: () => { credentialCount: number; envProviderCount: number } | null;
-  /** Inject the opencode MCP config/reachability pre-flight. Production runs
-   *  `opencode mcp list` with the materialized OPENCODE_CONFIG before
-   *  spawning `opencode run`; tests inject deterministic pass/fail outcomes.
-   *  Return null to mark the pre-flight skipped/unknown and proceed. */
-  mcpPreflight?: (input: McpPreflightInput) => McpPreflightResult | null;
-  /** Timeout for the MCP pre-flight command. Default 15s. */
-  mcpPreflightTimeoutMs?: number;
 };

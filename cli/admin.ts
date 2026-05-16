@@ -52,6 +52,7 @@ import { rotateAdminToken, rotateExternalToken } from "./admin_rotate";
 import { runCleanTempState } from "./admin_clean_temp";
 import { runEmbedAll } from "./admin_embed_all";
 import { runSubstrateStatus } from "./admin_substrate_status";
+import { runTrust } from "./trust";
 
 const usage = (): string => `acc admin — operator-side maintenance
 
@@ -93,6 +94,10 @@ const usage = (): string => `acc admin — operator-side maintenance
   Substrate liveness:
     embed-all                 Synchronously embed every pending event into vec_events.
     substrate-status          Print a single-screen ALIVE/DEGRADED/DEAD verdict.
+    trust [--json]            Owner growth / autonomy snapshot: posterior trends,
+                              recipe activity, knowledge movement, closure residual
+                              stats, amendment outcomes. (MERGE 2026-05-16 from the
+                              former top-level acc trust.)
 `;
 
 // ── Shared helpers for Batch 3.ADMIN surfaces ───────────────────────
@@ -743,6 +748,7 @@ export const runAdmin = async (argv: string[], envOverride?: AdminEnv): Promise<
   if (sub === "clean-temp-state") return runCleanTempState(argv.slice(1));
   if (sub === "embed-all") return runEmbedAll(argv.slice(1));
   if (sub === "substrate-status") return runSubstrateStatus(argv.slice(1));
+  if (sub === "trust") return runTrust(argv.slice(1));
   env.err(`acc admin: unknown subcommand '${sub}'`);
   env.err(usage());
   return 1;

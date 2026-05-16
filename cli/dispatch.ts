@@ -16,7 +16,7 @@ const usage = (): string => `acc — v2 thin CLI
   acc init [--yes]                Fresh-install bootstrap (state dir, admin token,
                                   optional foundational seed). Run me first.
   acc ask <ordinary words>        Natural-language owner router. Maps plain
-                                  language to task / doctor / watch / trust / help
+                                  language to task / doctor / watch / help
                                   without requiring acc vocabulary.
   acc help me with <words>          Friendly alias for opening a task.
   acc task "<owner words>" [--no-follow] [--timeout SECS]
@@ -71,7 +71,7 @@ const usage = (): string => `acc — v2 thin CLI
   acc doctor                      Multi-check readiness report.
 `;
 
-type AskRoute = "task" | "doctor" | "watch" | "trust" | "help";
+type AskRoute = "task" | "doctor" | "watch" | "help";
 
 export const scoreAskRoutes = (words: string): { route: AskRoute; routing_scores: Record<string, number> } => {
   const text = words.toLowerCase();
@@ -80,19 +80,16 @@ export const scoreAskRoutes = (words: string): { route: AskRoute; routing_scores
     task: 0.45,
     doctor: 0,
     watch: 0,
-    trust: 0,
     help: words.trim().length === 0 ? 1 : 0.05,
   };
 
   if (has(new RegExp("\\b(broken|ready|install|setup|health|doctor|check|diagnos|missing|why.*not.*work)\\b"))) routing_scores.doctor += 0.75;
   if (has(new RegExp("\\b(watch|dashboard|live|progress|stream|what.*happen|show.*work|observe|monitor)\\b"))) routing_scores.watch += 0.75;
-  if (has(new RegExp("\\b(trust|learn|learning|smarter|grow|autonomy|confidence|reliable|improv)\\b"))) routing_scores.trust += 0.75;
   if (has(new RegExp("\\b(help|what can|how do i|commands|explain|possible|guide)\\b"))) routing_scores.help += 0.65;
   if (has(new RegExp("\\b(do|make|build|fix|change|audit|research|find|write|implement|create|improve|redesign)\\b"))) routing_scores.task += 0.55;
 
   if (routing_scores.doctor > 0) routing_scores.task -= 0.15;
   if (routing_scores.watch > 0) routing_scores.task -= 0.1;
-  if (routing_scores.trust > 0) routing_scores.task -= 0.1;
 
   for (const k of Object.keys(routing_scores)) routing_scores[k] = Math.max(0, Math.min(1, routing_scores[k]!));
   const route = Object.entries(routing_scores).sort((a, b) => b[1] - a[1])[0]![0] as AskRoute;
@@ -112,7 +109,10 @@ const renderAskHelp = (): string => [
   "  task    opens real work through the substrate",
   "  doctor  checks readiness / missing setup",
   "  watch   opens the live dashboard",
-  "  trust   shows learning and autonomy signals",
+  "",
+  "Operator-status projections (subcommands, not ask routes):",
+  "  acc admin trust            owner growth + autonomy snapshot",
+  "  acc admin substrate-status one-screen substrate liveness verdict",
   "",
 ].join("\n");
 const dispatchTask = async (
@@ -397,10 +397,6 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
       const { runWatch } = await import("./watch");
       return runWatch([]);
     }
-    if (route === "trust") {
-      const { runTrust } = await import("./trust");
-      return runTrust([]);
-    }
     return dispatchTask(words, { follow: true });
   }
   if (cmd === "init") {
@@ -448,10 +444,6 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
   if (cmd === "owner") {
     const { runOwnerPolicy } = await import("./owner_policy");
     return runOwnerPolicy(argv.slice(1));
-  }
-  if (cmd === "trust") {
-    const { runTrust } = await import("./trust");
-    return runTrust(argv.slice(1));
   }
   if (cmd === "verify") {
     const { runVerify } = await import("./verify");

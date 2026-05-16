@@ -98,7 +98,10 @@ describe("runDispatch", () => {
   test("scoreAskRoutes maps ordinary words without fixed owner enums", () => {
     expect(scoreAskRoutes("is the system ready or missing setup?").route).toBe("doctor");
     expect(scoreAskRoutes("show me live progress").route).toBe("watch");
-    expect(scoreAskRoutes("is accint learning from outcomes?").route).toBe("trust");
+    // "trust" route was removed 2026-05-16 — merged under `acc admin trust`.
+    // Owner-side learning/autonomy phrases now fall through to the `task`
+    // default (substrate decides what the brain does).
+    expect(scoreAskRoutes("is accint learning from outcomes?").route).toBe("task");
     expect(scoreAskRoutes("fix onboarding for normal humans").route).toBe("task");
     expect(scoreAskRoutes("what can I ask you?").route).toBe("help");
   });

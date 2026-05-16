@@ -47,13 +47,20 @@ import { logger } from "./logger";
 
 /** Maximum brain_dispatched events allowed on ONE task within the
  *  redispatch window. Above this, the supervisor force-fails the task as
- *  `redispatch_storm`. 3 is tight — a healthy cycle needs at most 1-2
- *  dispatches per task; 3+ in a window means the scheduler is looping. */
-export const SUPERVISOR_MAX_REDISPATCHES_PER_TASK = 3;
+ *  `redispatch_storm`. Raised from 3 → 6 on 2026-05-16: legitimate brain
+ *  refinement (verdict re-evaluation across 4-5 cycles, k_201
+ *  retrieval-binding scored across multiple acts, closure audit + lesson
+ *  extraction passes) was being killed at cycle 4 even when each cycle
+ *  emitted real knowledge_candidate / lesson_extracted. 6 leaves enough
+ *  ceiling to catch true tight loops while letting iterative brain
+ *  refinement converge. Observed: both health-verification and acc-trust
+ *  audits today emitted 3 successful cycles each, then supervisor killed
+ *  the 4th. */
+export const SUPERVISOR_MAX_REDISPATCHES_PER_TASK = 6;
 
 /** Window over which redispatch counts accumulate. 5 minutes is the
- *  bridge timeout — within one cycle window, more than 3 dispatches on
- *  the same task is a tight loop. */
+ *  bridge timeout — within one cycle window, more than the cap dispatches
+ *  on the same task is a tight loop. */
 export const SUPERVISOR_REDISPATCH_WINDOW_MS = 5 * 60 * 1000;
 
 /** Maximum ready task_node_opened entries under ONE directive before the

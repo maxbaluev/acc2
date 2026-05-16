@@ -219,15 +219,6 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
           spawnFn: fakeSpawn,
           mcpServerUrl: "http://127.0.0.1:45678/mcp",
           configDir: tmpConfigDir,
-          mcpPreflight: () => ({
-            ok: true,
-            command: ["opencode", "mcp", "list"],
-            status: 0,
-            stdout_tail: "acc2-substrate",
-            stderr_tail: "",
-            server_found: true,
-            tool_surface_found: false,
-          }),
           // Short handshake window so the test completes quickly when the
           // watchdog fires (the fake spawn never emits a tool_call).
           mcpHandshakeWindowMs: 200,
@@ -279,65 +270,16 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       if (!result.ok && result.reason.kind === "subprocess_crash") {
         expect(result.reason.stderr_tail).toContain("mcp_handshake_failed");
       }
-
-      const preflight = db
-        .query(
-          "SELECT payload FROM events WHERE kind = 'bridge_mcp_preflight' ORDER BY ts DESC LIMIT 1",
-        )
-        .get() as { payload: string } | null;
-      expect(preflight).not.toBeNull();
-      const preflightPayload = JSON.parse(preflight!.payload) as Record<string, unknown>;
-      expect(preflightPayload.ok).toBe(true);
-      expect(preflightPayload.skipped).toBe(false);
     } finally {
       try { rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* swallow */ }
     }
   }, 10_000);
 
-  test("MCP pre-flight failure is substrate-visible and skips opencode run", async () => {
-    const db = openDb(":memory:");
-    let spawnCalled = 0;
-    const fakeSpawn = (() => {
-      spawnCalled++;
-      throw new Error("spawn should not run after MCP pre-flight failure");
-    }) as unknown as typeof Bun.spawn;
-
-    const result = await spawnRealOpencode(
-      { prompt: "mcp-preflight-fail", taskId: newId(), directiveId: newId() },
-      db,
-      {
-        spawnFn: fakeSpawn,
-        mcpServerUrl: "http://127.0.0.1:1/mcp",
-        mcpPreflight: () => ({
-          ok: false,
-          command: ["opencode", "mcp", "list"],
-          status: 1,
-          stdout_tail: "",
-          stderr_tail: "connect ECONNREFUSED 127.0.0.1:1",
-          server_found: false,
-          tool_surface_found: false,
-        }),
-      },
-    );
-    expect(result.ok).toBe(false);
-    expect(spawnCalled).toBe(0);
-
-    const preflight = db
-      .query("SELECT payload FROM events WHERE kind = 'bridge_mcp_preflight' ORDER BY ts DESC LIMIT 1")
-      .get() as { payload: string } | null;
-    expect(preflight).not.toBeNull();
-    const preflightPayload = JSON.parse(preflight!.payload) as Record<string, unknown>;
-    expect(preflightPayload.ok).toBe(false);
-    expect(preflightPayload.skipped).toBe(false);
-
-    const failed = db
-      .query("SELECT payload FROM events WHERE kind = 'bridge_failed' ORDER BY ts DESC LIMIT 1")
-      .get() as { payload: string } | null;
-    expect(failed).not.toBeNull();
-    const failedPayload = JSON.parse(failed!.payload) as Record<string, unknown>;
-    expect(failedPayload.reason).toBe("mcp_preflight_failed");
-    expect(failedPayload.mcp_handshake_ok).toBe(false);
-  }, 5_000);
+  // The MCP-preflight test that ran `opencode mcp list` before each
+  // dispatch was removed 2026-05-16: it failed for every production
+  // dispatch because the parser's expectations didn't match opencode's
+  // actual mcp-list output shape. The pre-flight code was deleted with the
+  // McpPreflightInput / McpPreflightResult types in the same commit.
 
   test("materializeOpencodeMcpConfig writes a valid opencode.json with v2's MCP server declaration", () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "acc2-materialize-test-"));
