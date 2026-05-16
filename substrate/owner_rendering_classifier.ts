@@ -40,15 +40,14 @@ export type OwnerRenderingClassification = {
    *  extractor can later score the classifier itself by outcome
    *  (k_555 four-link credit chain). */
   evidence: string[];
-  /** ISO 639-1 code for the dominant script in the directive text,
-   *  e.g. "en", "ru", "ja", "ar". Absent when no script dominates
-   *  ≥ 30% of alphabetic characters (inconclusive — e.g. pure
-   *  punctuation, empty input, balanced multi-script text). The
-   *  default "en" is still emitted when Latin dominates so callers
-   *  can distinguish "detected English" from "couldn't detect
-   *  anything". Universalizes the rendering vector: non-English
-   *  owners are structurally surfaced at dispatch time. */
+  /** ISO 639-1 code for the highest-confidence language candidate.
+   *  Absent only when the text has no alphabetic evidence. */
   detected_language?: string;
+  /** Confidence-weighted language candidates. Script evidence keeps non-Latin
+   *  paths broad; lightweight stopword evidence disambiguates common Latin-
+   *  script languages. The substrate can accumulate these observations over
+   *  multiple turns instead of treating one turn as certainty. */
+  language_distribution?: Array<{ lang: string; confidence: number; evidence: string }>;
 };
 
 // Heuristic vocabularies. Each list is short — strong signals only.
@@ -120,39 +119,111 @@ const continuousFromCount = (n: number, saturate: number): number => {
   return Math.min(1, n / saturate);
 };
 
-/** Detect the dominant Unicode script in `text` and return its ISO 639-1
- *  language code + dominance percentage. A script dominates when ≥ 30%
- *  of alphabetic characters fall in its block. Returns undefined when
- *  no script dominates (empty / punctuation-only / balanced multi-script).
- *  ASCII punctuation, whitespace, and digits are skipped when counting. */
-const detectLanguage = (
-  text: string,
-): { lang: string; pct: number } | undefined => {
-  const c = { cyr: 0, cjk: 0, hir: 0, kat: 0, han: 0, ara: 0, heb: 0, lat: 0 };
+type LanguageCandidate = { lang: string; confidence: number; evidence: string };
+
+type ScriptBucket = { key: string; lang: string; label: string; count: number };
+
+const LATIN_STOPWORDS: Record<string, readonly string[]> = {
+  en: ["the", "and", "with", "help", "please", "what", "should", "work"],
+  es: ["el", "la", "los", "las", "que", "con", "para", "por", "ayuda", "sistema"],
+  fr: ["le", "la", "les", "des", "que", "avec", "pour", "aide", "système"],
+  de: ["der", "die", "das", "und", "mit", "für", "hilfe", "system"],
+  pt: ["o", "a", "os", "as", "que", "com", "para", "ajuda", "sistema"],
+  it: ["il", "lo", "la", "gli", "che", "con", "per", "aiuta", "sistema"],
+  vi: ["tôi", "và", "với", "cho", "giúp", "hệ", "thống"],
+  id: ["dan", "yang", "dengan", "untuk", "bantu", "sistem"],
+  tr: ["ve", "ile", "için", "yardım", "sistem", "bana"],
+  sw: ["na", "kwa", "ya", "msaada", "mfumo"],
+  tl: ["ang", "ng", "sa", "para", "tulong", "sistema"],
+};
+
+const latinLanguageCandidates = (text: string, latinPct: number): LanguageCandidate[] => {
+  const words = lowerCase(text).match(/[\p{L}]+/gu) ?? [];
+  const scores = Object.entries(LATIN_STOPWORDS)
+    .map(([lang, stops]) => ({ lang, hits: words.filter((w) => stops.includes(w)).length }))
+    .filter((x) => x.hits > 0)
+    .sort((a, b) => b.hits - a.hits);
+  if (scores.length === 0) return [{ lang: "en", confidence: Math.min(0.8, latinPct), evidence: `Latin script ${Math.round(latinPct * 100)}%` }];
+  const maxHits = scores[0]!.hits;
+  return scores.slice(0, 3).map((s) => ({
+    lang: s.lang,
+    confidence: Math.min(0.95, latinPct * (0.55 + 0.1 * Math.min(s.hits, 4)) * (s.hits / maxHits)),
+    evidence: `Latin script ${Math.round(latinPct * 100)}% + stopwords:${s.hits}`,
+  }));
+};
+
+const detectLanguageDistribution = (text: string): LanguageCandidate[] => {
+  const buckets: ScriptBucket[] = [
+    { key: "cyr", lang: "ru", label: "Cyrillic block", count: 0 },
+    { key: "cjk", lang: "zh", label: "CJK Unified", count: 0 },
+    { key: "hir", lang: "ja", label: "Hiragana", count: 0 },
+    { key: "kat", lang: "ja", label: "Katakana", count: 0 },
+    { key: "han", lang: "ko", label: "Hangul Syllables", count: 0 },
+    { key: "ara", lang: "ar", label: "Arabic block", count: 0 },
+    { key: "heb", lang: "he", label: "Hebrew block", count: 0 },
+    { key: "dev", lang: "hi", label: "Devanagari block", count: 0 },
+    { key: "tam", lang: "ta", label: "Tamil block", count: 0 },
+    { key: "tel", lang: "te", label: "Telugu block", count: 0 },
+    { key: "kan", lang: "kn", label: "Kannada block", count: 0 },
+    { key: "ben", lang: "bn", label: "Bengali block", count: 0 },
+    { key: "tha", lang: "th", label: "Thai block", count: 0 },
+    { key: "lao", lang: "lo", label: "Lao block", count: 0 },
+    { key: "khm", lang: "km", label: "Khmer block", count: 0 },
+    { key: "mya", lang: "my", label: "Burmese block", count: 0 },
+    { key: "geo", lang: "ka", label: "Georgian block", count: 0 },
+    { key: "arm", lang: "hy", label: "Armenian block", count: 0 },
+    { key: "eth", lang: "am", label: "Ethiopic block", count: 0 },
+    { key: "tib", lang: "bo", label: "Tibetan block", count: 0 },
+    { key: "lat", lang: "en", label: "Latin block", count: 0 },
+  ];
+  const byKey = new Map(buckets.map((b) => [b.key, b]));
   let alpha = 0;
   for (const ch of text) {
     const cp = ch.codePointAt(0);
     if (cp === undefined) continue;
-    if (cp >= 0x0400 && cp <= 0x04ff) c.cyr++;
-    else if (cp >= 0x4e00 && cp <= 0x9fff) c.cjk++;
-    else if (cp >= 0x3040 && cp <= 0x309f) c.hir++;
-    else if (cp >= 0x30a0 && cp <= 0x30ff) c.kat++;
-    else if (cp >= 0xac00 && cp <= 0xd7af) c.han++;
-    else if (cp >= 0x0600 && cp <= 0x06ff) c.ara++;
-    else if (cp >= 0x0590 && cp <= 0x05ff) c.heb++;
-    else if ((cp >= 0x0041 && cp <= 0x005a) || (cp >= 0x0061 && cp <= 0x007a)) c.lat++;
-    else continue;
+    let key: string | undefined;
+    if (cp >= 0x0400 && cp <= 0x052f) key = "cyr";
+    else if (cp >= 0x4e00 && cp <= 0x9fff) key = "cjk";
+    else if (cp >= 0x3040 && cp <= 0x309f) key = "hir";
+    else if (cp >= 0x30a0 && cp <= 0x30ff) key = "kat";
+    else if (cp >= 0xac00 && cp <= 0xd7af) key = "han";
+    else if (cp >= 0x0600 && cp <= 0x06ff) key = "ara";
+    else if (cp >= 0x0590 && cp <= 0x05ff) key = "heb";
+    else if (cp >= 0x0900 && cp <= 0x097f) key = "dev";
+    else if (cp >= 0x0b80 && cp <= 0x0bff) key = "tam";
+    else if (cp >= 0x0c00 && cp <= 0x0c7f) key = "tel";
+    else if (cp >= 0x0c80 && cp <= 0x0cff) key = "kan";
+    else if (cp >= 0x0980 && cp <= 0x09ff) key = "ben";
+    else if (cp >= 0x0e00 && cp <= 0x0e7f) key = "tha";
+    else if (cp >= 0x0e80 && cp <= 0x0eff) key = "lao";
+    else if (cp >= 0x1780 && cp <= 0x17ff) key = "khm";
+    else if (cp >= 0x1000 && cp <= 0x109f) key = "mya";
+    else if (cp >= 0x10a0 && cp <= 0x10ff) key = "geo";
+    else if (cp >= 0x0530 && cp <= 0x058f) key = "arm";
+    else if (cp >= 0x1200 && cp <= 0x137f) key = "eth";
+    else if (cp >= 0x0f00 && cp <= 0x0fff) key = "tib";
+    else if ((cp >= 0x0041 && cp <= 0x005a) || (cp >= 0x0061 && cp <= 0x007a) || (cp >= 0x00c0 && cp <= 0x024f)) key = "lat";
+    if (!key) continue;
+    byKey.get(key)!.count++;
     alpha++;
   }
-  if (alpha === 0) return undefined;
-  const jp = c.hir + c.kat;
-  const cands: Array<[string, number]> = [
-    ["ru", c.cyr], ["ja", jp > 0 ? c.cjk + jp : 0], ["zh", jp > 0 ? 0 : c.cjk],
-    ["ko", c.han], ["ar", c.ara], ["he", c.heb], ["en", c.lat],
-  ];
-  const [lang, count] = cands.reduce((a, b) => (b[1] > a[1] ? b : a));
-  const pct = count / alpha;
-  return pct < 0.3 ? undefined : { lang, pct };
+  if (alpha === 0) return [];
+  const jp = (byKey.get("hir")!.count + byKey.get("kat")!.count) / alpha;
+  const merged = new Map<string, LanguageCandidate>();
+  for (const b of buckets) {
+    if (b.count === 0) continue;
+    if (b.lang === "zh" && jp > 0) continue;
+    const confidence = b.count / alpha;
+    const cand = { lang: b.lang, confidence, evidence: `${b.label} ${Math.round(confidence * 100)}%` };
+    const prev = merged.get(cand.lang);
+    merged.set(cand.lang, prev ? { lang: cand.lang, confidence: prev.confidence + cand.confidence, evidence: `${prev.evidence}; ${cand.evidence}` } : cand);
+  }
+  const latin = merged.get("en");
+  if (latin) {
+    merged.delete("en");
+    for (const cand of latinLanguageCandidates(text, latin.confidence)) merged.set(cand.lang, cand);
+  }
+  return Array.from(merged.values()).filter((c) => c.confidence >= 0.3).sort((a, b) => b.confidence - a.confidence);
 };
 
 /** Pure classifier — takes the owner's directive text (and optional
@@ -168,24 +239,14 @@ export const classifyOwnerRenderingSignals = (
   const signals: OwnerRenderingSignals = {};
   const evidence: string[] = [];
 
-  // detected_language: Unicode-script dominance over alphabetic chars
-  // (skipping ASCII punctuation/whitespace/digits). Runs BEFORE the
-  // signal-extraction logic so the renderer can pick a language even
-  // when no other signal fires (e.g. terse non-English directives).
-  let detectedLanguage: string | undefined;
-  const langHit = detectLanguage(allText);
-  if (langHit) {
-    detectedLanguage = langHit.lang;
-    const blockName =
-      langHit.lang === "ru" ? "Cyrillic block" :
-      langHit.lang === "ja" ? "Hiragana/Katakana+CJK" :
-      langHit.lang === "zh" ? "CJK Unified" :
-      langHit.lang === "ko" ? "Hangul Syllables" :
-      langHit.lang === "ar" ? "Arabic block" :
-      langHit.lang === "he" ? "Hebrew block" :
-      "Latin block";
-    const pctStr = Math.round(langHit.pct * 100);
-    evidence.push(`detected_language=${langHit.lang} (${blockName} ${pctStr}%)`);
+  // detected_language: confidence-weighted distribution from script dominance
+  // plus Latin stopwords. Runs BEFORE the signal-extraction logic so the
+  // renderer can pick a language even when no other signal fires.
+  const languageDistribution = detectLanguageDistribution(allText);
+  const detectedLanguage = languageDistribution[0]?.lang;
+  if (languageDistribution.length > 0) {
+    const top = languageDistribution[0]!;
+    evidence.push(`detected_language=${top.lang} (${top.evidence}; confidence=${top.confidence.toFixed(2)})`);
   }
 
   // code_density: lights up on file paths, code identifiers, code-related
@@ -239,6 +300,6 @@ export const classifyOwnerRenderingSignals = (
   const confidence = Math.min(0.95, Math.max(0.5, 0.5 + dimensions * 0.15));
 
   return detectedLanguage !== undefined
-    ? { signals, confidence, evidence, detected_language: detectedLanguage }
+    ? { signals, confidence, evidence, detected_language: detectedLanguage, language_distribution: languageDistribution }
     : { signals, confidence, evidence };
 };

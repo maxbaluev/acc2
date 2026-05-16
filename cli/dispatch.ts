@@ -149,7 +149,8 @@ const dispatchTask = async (
       }
     }
     const cls = classifyOwnerRenderingSignals(words, priorTexts);
-    if (cls.detected_language && cls.detected_language !== "en") {
+    const languageConfidence = cls.language_distribution?.[0]?.confidence ?? cls.confidence;
+    if (cls.detected_language) {
       await mcpCall("substrate.emit", {
         kind: "owner_insight_candidate",
         substrate_origin: "claude_root",
@@ -157,9 +158,10 @@ const dispatchTask = async (
         payload: {
           field: "detected_language",
           value: cls.detected_language,
-          confidence: cls.confidence,
+          confidence: languageConfidence,
           claim: `Detected owner directive language '${cls.detected_language}' from dispatch text.`,
           evidence: cls.evidence,
+          language_distribution: cls.language_distribution ?? [{ lang: cls.detected_language, confidence: cls.confidence, evidence: "legacy_classifier" }],
         },
       }).catch(() => null);
     }

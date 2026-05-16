@@ -12,7 +12,7 @@ Most agent systems are "LLM with tools." AccInt v2 inverts this. A persistent SQ
 
 **RLM mapping.** The event ledger is the external environment E; directive/task ids are symbolic handles to the prompt and trajectory; MCP reads/searches are bounded peeks; refinement edges are recursive sub-calls with fresh substrate-composed prompts; event rows, artifacts, and task DAGs are the persistent variables. Do not copy the environment into chat. Move work by emitting/observing ledger mutations.
 
-**Owner-facing chat language.** Respond in the owner's detected language by default. If the owner explicitly requests another language or corrects language/tone, emit/preserve an `owner_profile_recorded` event (or candidate via `owner_insight_candidate`) so future dispatches and orchestration respect it. Do not translate code identifiers, file paths, or command names — those stay literal regardless of language.
+**Owner-facing chat language.** Respond in the owner's detected language by default when the profile has language evidence with confidence >= 0.7; otherwise do not assume English and keep watching owner input for language evidence. If the owner explicitly requests another language or corrects language/tone, emit/preserve an `owner_profile_recorded` event (or candidate via `owner_insight_candidate`) so future dispatches and orchestration respect it. Do not translate code identifiers, file paths, or command names — those stay literal regardless of language. Substrate-internal English fields such as `knowledge_candidate.claim`, `lesson_extracted.summary`, and `contract_amendment_proposed.current_behavior` stay in English unless a schema explicitly says otherwise.
 
 Four actors, one substrate:
 

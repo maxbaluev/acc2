@@ -201,6 +201,7 @@ describe("prompt_composer", () => {
     const composedDefaults = composePrompt(db, { taskId });
     expect(composedDefaults.text).toContain("## OWNER PROFILE");
     expect(composedDefaults.text).toContain("bootstrap_policy: sparse profile");
+    expect(composedDefaults.text).toContain("do not assume English");
     expect(composedDefaults.text).toContain("autonomy_score:");
 
     // Emit one owner_profile_recorded with non-default fields, then recompose.
@@ -224,6 +225,7 @@ describe("prompt_composer", () => {
     const rendered = buildOwnerProfileSection(profile);
     expect(rendered).toContain("## OWNER PROFILE");
     expect(rendered).toContain("detected_language: ru");
+    expect(rendered).toContain("owner_language_policy: respond to owner-visible summaries in detected_language");
     expect(rendered).toContain("autonomy_score: 0.30");
     expect(rendered).toContain("hot_topics: onboarding, recipes");
     expect(rendered).toContain("things_to_never_do:");

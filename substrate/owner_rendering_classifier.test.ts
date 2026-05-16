@@ -145,6 +145,24 @@ describe("classifyOwnerRenderingSignals — Unicode-script detected_language", (
     expect(r.detected_language).toBe("zh");
   });
 
+  test("Devanagari directive detects 'hi'", () => {
+    const r = classifyOwnerRenderingSignals("कृपया डेटाबेस माइग्रेशन में मेरी मदद करें");
+    expect(r.detected_language).toBe("hi");
+    expect(r.language_distribution?.[0]?.confidence).toBeGreaterThanOrEqual(0.7);
+  });
+
+  test("Thai directive detects 'th'", () => {
+    const r = classifyOwnerRenderingSignals("ช่วยฉันย้ายฐานข้อมูล");
+    expect(r.detected_language).toBe("th");
+    expect(r.language_distribution?.[0]?.evidence).toContain("Thai block");
+  });
+
+  test("Latin-script Spanish directive does not collapse to English", () => {
+    const r = classifyOwnerRenderingSignals("ayuda con el sistema para migrar la base de datos");
+    expect(r.detected_language).toBe("es");
+    expect(r.language_distribution?.some((c) => c.lang === "es")).toBe(true);
+  });
+
   test("language detection does not regress existing signal extraction", () => {
     // Sanity: a directive that fires code_density and explanation_appetite
     // (the existing mixed-case test) should still fire those signals AND

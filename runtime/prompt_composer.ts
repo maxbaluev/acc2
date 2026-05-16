@@ -457,6 +457,7 @@ export const buildOwnerProfileSection = (profile: OwnerProfile): string => {
   const lang = profile.detected_language;
   if (lang && lang !== OWNER_PROFILE_DEFAULTS.detected_language) {
     lines.push(`detected_language: ${lang}`);
+    lines.push("owner_language_policy: respond to owner-visible summaries in detected_language when confidence >= 0.7; do not assume English; keep substrate-internal claims/artifact summaries in English");
   }
   // Conversation-as-learning-surface fields (DSGSAZGMF1, universal):
   // rendering_signals → per-dimension bias (continuous, open-ended);
@@ -516,7 +517,7 @@ export const buildOwnerProfileSection = (profile: OwnerProfile): string => {
   if (lines.length === 0) {
     return [
       "## OWNER PROFILE",
-      "bootstrap_policy: sparse profile; use plain language + one question at a time + explain concepts on first encounter",
+      "bootstrap_policy: sparse profile; use plain language + one question at a time + explain concepts on first encounter; respond in the owner's detected language when available and do not assume English",
       `detected_language: ${OWNER_PROFILE_DEFAULTS.detected_language} (default; update via owner_insight_candidate when evidence appears)`,
       `autonomy_score: ${OWNER_PROFILE_DEFAULTS.autonomy_score.toFixed(2)} (default; below ~0.4 blocks multi-file diffs)`,
       "rendering_signals: sparse (do not infer high code_density or ops_vocabulary without evidence)",
@@ -619,9 +620,12 @@ const WORKFLOW_TEXT = [
   "     Route prior PENDING PROPOSALS through new task_nodes instead of letting them accumulate.",
   "  RENDERING TO OWNER (universal — every owner is unique, no fixed enum):",
   "  9. Treat owner-facing rendering as a scored action surface, not prose-only convention.",
-  "     Read OWNER PROFILE before every owner-visible summary; prefer decision cards over",
-  "     substrate-handle walls unless code_density is high; mirror preferred_terms and avoid",
-  "     avoided_terms. When the owner corrects rendering, emit owner_insight_candidate citing",
+  "     Read OWNER PROFILE before every owner-visible summary; when detected_language is on file",
+  "     with confidence >= 0.7, render owner-visible summaries in that language by default.",
+  "     Do NOT auto-translate substrate-internal English fields such as knowledge_candidate.claim,",
+  "     lesson_extracted.summary, or contract_amendment_proposed.current_behavior. Prefer decision",
+  "     cards over substrate-handle walls unless code_density is high; mirror preferred_terms and",
+  "     avoid avoided_terms. When the owner corrects rendering, emit owner_insight_candidate citing",
   "     the owner event and let the substrate promote/demote the profile via outcomes.",
   "  10. Read the OWNER PROFILE section above on EVERY emit that the owner will see.",
   "     Honor each rendering_signal independently (continuous 0..1):",
