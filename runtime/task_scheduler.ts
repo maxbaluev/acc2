@@ -92,7 +92,22 @@ const DEFAULT_POLL_INTERVAL_MS = 500;
  *  workhorse (cap=10+) WITHOUT operator tuning. No env knob — matches
  *  the "no new env vars" operating rule and the user's directive that
  *  the system should self-determine brain parallelism. */
-const BRAIN_PROCESS_RAM_BYTES = 1_800_000_000; // ~1.8GB conservative per opencode subprocess
+// Per-opencode-subprocess RAM budget. Empirical observation 2026-05-16:
+// 3 live opencode subprocesses doing real brain cycles each held ~340MB RSS
+// (`ps -eo pid,rss,comm | grep opencode` during a parallel-dispatch ant
+// audit). The previous 1.8GB constant was ~6× over-provisioned, which
+// caused brain_in_flight_at_cap saturation cascades (≥130 rejections in
+// 2min) whenever the operator dispatched ≥4 parallel `acc task`
+// directives. 700MB sits comfortably above observed peak with headroom
+// for prompt-context growth + bridge buffers, and lets a 16GB host run
+// ~8 concurrent brains instead of 3. Operators can override per-host via
+// the ACC2_BRAIN_PROCESS_RAM_MB env var (defaults to 700).
+const DEFAULT_BRAIN_PROCESS_RAM_MB = 700;
+const BRAIN_PROCESS_RAM_BYTES = (() => {
+  const override = Number(process.env.ACC2_BRAIN_PROCESS_RAM_MB);
+  const mb = Number.isFinite(override) && override > 0 ? override : DEFAULT_BRAIN_PROCESS_RAM_MB;
+  return mb * 1_000_000;
+})();
 const HOST_RAM_RESERVE_BYTES = 2_000_000_000;  // ~2GB kept for OS + daemon + bun + tests
 
 /** Compute the brain-dispatch cap from live host memory. We use the
