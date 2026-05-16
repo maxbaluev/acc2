@@ -163,19 +163,19 @@ describe("task_scheduler", () => {
   }, 60_000);
 
   test("computeBrainDispatchCap returns a positive integer scaled to host RAM", () => {
-    // Dynamic cap = floor((min(freemem, totalmem - 2GB)) / 1.8GB), floor 1.
+    // Dynamic cap = floor((min(freemem, totalmem - 2GB)) / 700MB), floor 1.
     // We can't assert the exact number (depends on the test host) but we CAN
     // assert the invariants: integer, >= 1, never larger than what total RAM
     // can physically support. This is the OOM defence: opencode subprocesses
-    // run gpt-5.5 at ~1.8GB each, and 4-way parallel on an 8GB host hits the
-    // OOM-killer (exit 137). The cap must scale automatically — no env knob.
+    // run gpt-5.5 at ~340MB observed peak; 700MB per slot leaves headroom.
+    // Cap scales automatically — no env knob.
     const cap = computeBrainDispatchCap();
     expect(Number.isInteger(cap)).toBe(true);
     expect(cap).toBeGreaterThanOrEqual(1);
-    // Total RAM bound (1.8GB per slot, 2GB reserved): cap can never exceed
-    // floor((totalmem - 2GB) / 1.8GB).
+    // Total RAM bound (700MB per slot, 2GB reserved): cap can never exceed
+    // floor((totalmem - 2GB) / 700MB).
     const os = require("node:os") as typeof import("node:os");
-    const ceiling = Math.max(1, Math.floor((os.totalmem() - 2_000_000_000) / 1_800_000_000));
+    const ceiling = Math.max(1, Math.floor((os.totalmem() - 2_000_000_000) / 700_000_000));
     expect(cap).toBeLessThanOrEqual(ceiling);
   });
 

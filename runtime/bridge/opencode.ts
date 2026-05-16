@@ -370,8 +370,16 @@ export const spawnRealOpencode = async (
   }
 
   const mcpPreflightTimeoutMs = spawnOpts.mcpPreflightTimeoutMs ?? DEFAULT_MCP_PREFLIGHT_TIMEOUT_MS;
-  const preflightDefault = spawnOpts.spawnFn ? ((): null => null) : defaultMcpPreflight;
-  const mcpPreflight = spawnOpts.mcpPreflight ?? preflightDefault;
+  // defaultMcpPreflight (runs `opencode mcp list`) is OFF by default in the
+  // universal workflow. In production 2026-05-16 it failed for every
+  // dispatch ("opencode could not see/reach the materialized v2 MCP server
+  // before run") — its expectations didn't match opencode's actual mcp-list
+  // output shape, which killed every brain dispatch before it could start.
+  // The pre-amendment path (skip preflight; let opencode's own handshake
+  // window surface failures via the existing handshakeFailed branch) is
+  // restored as the only path. Tests / future fixes may still pass
+  // `mcpPreflight: defaultMcpPreflight` explicitly to opt back in.
+  const mcpPreflight = spawnOpts.mcpPreflight ?? ((): null => null);
   const preflight = mcpPreflight({
     configPath: materializedConfig.configPath,
     mcpServerUrl,
