@@ -682,8 +682,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // full_restart). The daemon stays alive on syntax errors — the
   // previous module reference is never overwritten.
   //
-  // Opt-out: set ACC2_DISABLE_HOTRELOAD=1.
-  if (process.env.ACC2_DISABLE_HOTRELOAD !== "1") {
+  // Opt-out via the canonical worker taxonomy: ACC2_DISABLE_WORKERS=hotreload.
+  if (isWorkerEnabled("hotreload")) {
     try {
       const { startHotreloadWorker } = await import("./hotreload_worker");
       // Quiescence = no brain dispatch currently in-flight. Cheap SQL
