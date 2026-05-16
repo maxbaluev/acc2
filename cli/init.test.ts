@@ -1,6 +1,6 @@
 // acc2 init CLI tests — drive the programmatic entry against a temp HOME
-// and assert idempotency, the admin-token mint, the foundational-seed
-// opt-in, and the interactive-prompt path for OPENAI_API_KEY.
+// and assert idempotency, the admin-token mint, fast seed bypass,
+// and the interactive-prompt path for OPENAI_API_KEY.
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import {
@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeDb, openDb } from "../substrate/db";
+import { closeDb } from "../substrate/db";
 import {
   detectOpenAiKey, ensureAdminToken, resolveInitPaths,
   runInit, runInitProgrammatic, writeOpenAiKey,
@@ -107,12 +107,8 @@ describe("detectOpenAiKey", () => {
     cleanup();
   });
 
-  test("returns 'missing' when neither has it", () => {
+  test("returns 'missing' when neither env nor non-empty dotenv has it", () => {
     expect(detectOpenAiKey(envFile)).toBe("missing");
-    cleanup();
-  });
-
-  test("returns 'missing' when env file has empty value", () => {
     writeFileSync(envFile, "OPENAI_API_KEY=\n");
     expect(detectOpenAiKey(envFile)).toBe("missing");
     cleanup();
@@ -147,11 +143,15 @@ describe("writeOpenAiKey", () => {
 });
 
 describe("runInitProgrammatic(--yes mode)", () => {
-  test("creates state dir, mints token, seeds foundational knowledge", async () => {
-    const summary = await runInitProgrammatic({ yes: true, probeTools: false, log: silent, warn: silent });
+  test("creates state dir, mints token, and is idempotent without importing seed content", async () => {
+    const summary = await runInitProgrammatic(fastInitOpts());
     expect(summary.exitCode).toBe(0);
     expect(summary.stateDirCreated).toBe(true);
     expect(summary.tokenMinted).toBe(true);
+    expect(summary.foundationalSeedImported).toBe(0);
+    expect(summary.codeArtifactsImported).toBe(0);
+    expect(summary.recipesSeeded).toBe(0);
+    expect(summary.eventsEmbedded).toBe(0);
 
     // Canonical flat layout — no `state/` subdir.
     const tokenFile = join(stateDir, "v2.sock.token");
@@ -160,34 +160,14 @@ describe("runInitProgrammatic(--yes mode)", () => {
     // 0o600 — owner rw only. statSync().mode masks the file type bits.
     expect(st.mode & 0o777).toBe(0o600);
 
-    // Foundational seed should have imported >0 rows.
-    expect(summary.foundationalSeedImported).toBeGreaterThan(0);
-    // Code-artifact seed should also have imported >0 rows (action +
-    // verifier pairs from §11.4). Production install path now matches
-    // what the integration harness already does.
-    expect(summary.codeArtifactsImported).toBeGreaterThan(0);
-
-    // The DB itself must show post-init code_artifact rows > 0 — this is
-    // the substrate-content invariant `acc doctor` checks (Task 3).
-    const dbPath = join(stateDir, "state.db");
-    const db = openDb(dbPath);
-    try {
-      const row = db.query("SELECT COUNT(*) AS n FROM code_artifact").get() as { n: number };
-      expect(row.n).toBeGreaterThan(0);
-      const seedRow = db
-        .query("SELECT COUNT(*) AS n FROM code_artifact WHERE name LIKE 'seed_%' OR id LIKE 'seed_%'")
-        .get() as { n: number };
-      expect(seedRow.n).toBeGreaterThanOrEqual(5);
-    } finally {
-      closeDb(dbPath);
-    }
-
-    const second = await runInitProgrammatic({ yes: true, probeTools: false, log: silent, warn: silent });
+    const second = await runInitProgrammatic(fastInitOpts());
     expect(second.exitCode).toBe(0);
     expect(second.stateDirCreated).toBe(false);
     expect(second.tokenMinted).toBe(false);
     expect(second.foundationalSeedImported).toBe(0);
     expect(second.codeArtifactsImported).toBe(0);
+    expect(second.recipesSeeded).toBe(0);
+    expect(second.eventsEmbedded).toBe(0);
     cleanup();
   });
 

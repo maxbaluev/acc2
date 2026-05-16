@@ -181,16 +181,19 @@ export const __acquireProfileMutexForTest = <T>(
 // the playwright-bundled firefox download (`bunx playwright install firefox`)
 // is NOT needed. Existence of the `playwright` package manifest is sufficient.
 
+let playwrightInstalledCache: boolean | null = null;
 const isPlaywrightInstalled = (): boolean => {
+  if (playwrightInstalledCache !== null) return playwrightInstalledCache;
   try {
     const candidates = [
       join(import.meta.dir, "..", "..", "node_modules", "playwright", "package.json"),
       join(import.meta.dir, "..", "..", "node_modules", "playwright-core", "package.json"),
     ];
-    return candidates.some((p) => existsSync(p));
+    playwrightInstalledCache = candidates.some((p) => existsSync(p));
   } catch {
-    return false;
+    playwrightInstalledCache = false;
   }
+  return playwrightInstalledCache;
 };
 
 // ── Camoufox binary detection ──────────────────────────────────────

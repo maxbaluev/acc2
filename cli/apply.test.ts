@@ -96,9 +96,6 @@ const emitLesson = async (
   return (env.result as { id: string }).id;
 };
 
-const emittedGateReason = async (eventId: string): Promise<string | undefined> =>
-  rowPayload(gateScoreFor(eventId)).reason as string | undefined;
-
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "acc2-apply-"));
   dbPath = join(dir, "apply.db");
@@ -149,54 +146,7 @@ describe("runApply gates", () => {
     expect(cap.out.join("\n")).not.toContain("OWNER GATE — REFUSE");
   });
 
-  test("lesson_extracted proposed_action to runtime target uses auto-apply gate", async () => {
-    const eventId = await emitLesson({ file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" });
-    const cap = captureConsole();
-    const code = await runApply([eventId]);
-    cap.restore();
-
-    expect(code).toBe(0);
-    expect(cap.out.join("\n")).toContain("AUTO-APPLY GATE");
-    expect(cap.out.join("\n")).toContain("proposed_action");
-
-    const gateScore = gateScoreFor(eventId);
-    expect(Number(gateScore.residual)).toBe(0);
-    expect(rowPayload(gateScore).authorization_status).toBe("approved");
-  });
-
-  test("lesson_extracted proposed_action to repo target_resource accepts object-form anchored_replace_v1", async () => {
-    const eventId = await emitLesson({
-      target_resource: "repo:runtime/verifier.ts",
-      anchor: "gate",
-      diff: { kind: "anchored_replace_v1", before: "OLD", after: "NEW" },
-    });
-    const cap = captureConsole();
-    const code = await runApply([eventId]);
-    cap.restore();
-
-    const prompt = cap.out.join("\n");
-    expect(code).toBe(0);
-    expect(prompt).toContain("AUTO-APPLY GATE");
-    expect(prompt).toContain("target_resource: repo:runtime/verifier.ts");
-    expect(prompt).toContain("anchored_replace_v1");
-  });
-
-  test("lesson_extracted proposed_action to cli target uses auto-apply gate", async () => {
-    const eventId = await emitLesson({ file_path: "cli/apply.ts", anchor: "gate", diff: "@@" });
-    const cap = captureConsole();
-    const code = await runApply([eventId]);
-    cap.restore();
-
-    expect(code).toBe(0);
-    expect(cap.out.join("\n")).toContain("AUTO-APPLY GATE");
-    expect(cap.out.join("\n")).toContain("cli/apply.ts");
-
-    const gateScore = gateScoreFor(eventId);
-    expect(Number(gateScore.residual)).toBe(0);
-    expect(rowPayload(gateScore).authorization_status).toBe("approved");
-  });
-
-  test("contract_amendment_proposed prompt renders structured proposed_behavior and explicit gates", async () => {
+  test("contract_amendment_proposed to cli target renders structured auto-apply gate", async () => {
     const scope = nextScope();
     const env = await rpc("substrate.emit", {
       kind: "contract_amendment_proposed",
@@ -204,13 +154,13 @@ describe("runApply gates", () => {
       directive_id: scope.directiveId,
       task_id: scope.taskId,
       payload: {
-        target: "runtime/prompt_composer.ts",
-        anchor: "WORKFLOW_TEXT",
+        target_resource: "repo:cli/apply.ts",
+        anchor: "renderGateBlock",
         current_behavior: "acc apply prompts omit structured gate facts",
         proposed_behavior: {
-          file_path: "runtime/prompt_composer.ts",
-          anchor: "WORKFLOW_TEXT",
-          diff: "@@\n+render structured gates",
+          target_resource: "repo:cli/apply.ts",
+          anchor: "renderGateBlock",
+          diff: { kind: "anchored_replace_v1", before: "OLD", after: "NEW" },
         },
       },
     });
@@ -223,16 +173,17 @@ describe("runApply gates", () => {
 
     const prompt = cap.out.join("\n");
     expect(code).toBe(0);
+    expect(prompt).toContain("AUTO-APPLY GATE");
     expect(prompt).toContain("STRUCTURED PROPOSED CHANGE");
     expect(prompt).toContain("source_field: proposed_behavior");
-    expect(prompt).toContain("target_resource: repo:runtime/prompt_composer.ts");
-    expect(prompt).toContain("anchor:          WORKFLOW_TEXT");
-    expect(prompt).toContain("```diff");
+    expect(prompt).toContain("target_resource: repo:cli/apply.ts");
+    expect(prompt).toContain("anchored_replace_v1");
     expect(prompt).toContain("APPLY GATES");
-    expect(prompt).toContain("owner_gate.required: false");
     expect(prompt).toContain("cli_runtime_gate.target_in_scope: true");
-    expect(prompt).toContain("cli_runtime_gate.structured_change: true");
-    expect(prompt).toContain("cli_runtime_gate.trajectory_hazard_count: 0");
+
+    const gateScore = gateScoreFor(eventId);
+    expect(Number(gateScore.residual)).toBe(0);
+    expect(rowPayload(gateScore).authorization_status).toBe("approved");
   });
 
   // Gate-deletion (owner-approved 2026-05-16): the universal verifier

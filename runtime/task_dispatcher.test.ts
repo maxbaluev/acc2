@@ -8,7 +8,7 @@ import { closeDb, openDb } from "../substrate/db";
 import { dispatchReadyTask } from "./task_dispatcher";
 import { opencodeQueryAdversarialCycle2 } from "./bridge/index";
 import type { BridgeRequest, BridgeResult } from "./bridge/index";
-import { readyTasks } from "./task_topology";
+import { readDagForDirective, readyTasks } from "./task_topology";
 import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
@@ -206,7 +206,7 @@ describe("task_dispatcher", () => {
       .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_committed' AND task_id = ?")
       .get(taskId) as { c: number };
     expect(committed.c).toBe(0);
-  }, 30_000);
+  }, 10_000);
 
   test("high-residual dispatch emits refinement edge + new task_node_opened child", async () => {
     const db = openDb(":memory:");
@@ -257,7 +257,7 @@ describe("task_dispatcher", () => {
     const childPayload = JSON.parse(childOpened!.payload);
     expect(childPayload.refines_task_id).toBe(taskId);
     expect(childPayload.prior_residual).toBe(1);
-  }, 30_000);
+  }, 10_000);
 
   test("at depth 4 (below cap), refinement edge still emits — task_failed must not fire", async () => {
     const db = openDb(":memory:");
@@ -280,7 +280,7 @@ describe("task_dispatcher", () => {
       }
     }
     const deep = ids[4]!; // depth = 4 (1 below cap=5)
-    const { nodes } = (await import("./task_topology")).readDagForDirective(db, directiveId);
+    const { nodes } = readDagForDirective(db, directiveId);
     const node = nodes.find((n) => n.id === deep)!;
 
     const act = inMemoryAct({ actionResult: { result: { value: 1 } }, verifierResidual: 1, predictedResidual: 0.95 });
@@ -298,7 +298,7 @@ describe("task_dispatcher", () => {
       .map((r) => JSON.parse(r.payload) as Record<string, unknown>)
       .find((p) => p.from_task === deep && p.kind === "refines");
     expect(newEdge).not.toBeUndefined();
-  }, 30_000);
+  }, 10_000);
 
   test("Phase H: action_scored triggers credit pipeline → code_artifact_score_updated events fire", async () => {
     const db = openDb(":memory:");
@@ -354,9 +354,10 @@ describe("task_dispatcher", () => {
       // matching recipe so it can assert bridge bypass behavior.
       const { insertArtifact } = await import("./artifact_store");
       const sandbox = { runtime: "bun" as const, fs_read: ["**/*"], fs_write: [], net_allow: [], proc_allow: [], cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 };
+      const actionResult = { result: { count: 1 } };
       const action = insertArtifact(db, {
         runtime: "bun",
-        body: "console.log('@@RESULT@@ ' + JSON.stringify({ result: { count: 1 } }));",
+        body: "dispatcher_replay_test_action",
         declaredSandbox: sandbox,
         stateRoot: null,
         posteriorAlpha: 1,
@@ -377,7 +378,7 @@ describe("task_dispatcher", () => {
       });
       const verifier = insertArtifact(db, {
         runtime: "bun",
-        body: "const observation = JSON.parse(process.env.ACC2_INPUTS ?? 'null') ?? {}; const ok = Number.isInteger(observation?.result?.count); console.log('@@RESULT@@ ' + JSON.stringify({ residual: ok ? 0 : 1 }));",
+        body: "dispatcher_replay_test_verifier",
         declaredSandbox: sandbox,
         stateRoot: null,
         posteriorAlpha: 1,
@@ -396,6 +397,24 @@ describe("task_dispatcher", () => {
         sourceCandidateId: null,
         ownerGateVerdict: null,
       });
+      const runReplayArtifact = async (inv: UnifiedRuntimeInvocation): Promise<UnifiedRuntimeObservation> => {
+        inv.emit?.({
+          kind: "artifact_observed",
+          substrate_origin: "substrate_auto",
+          action_artifact_id: inv.artifactId,
+          payload: { phase: "completed", duration_ms: 0 },
+        });
+        return {
+          ok: true,
+          result: inv.artifactId === verifier.id ? { residual: 0 } : actionResult,
+          irreversibleEffects: [],
+          durationMs: 0,
+          exitCode: 0,
+          stderrTail: "",
+          sandboxWarnings: [],
+        };
+      };
+
       const recipeRow = emitEvent(db, {
         kind: "recipe_extracted",
         substrate_origin: "substrate_auto",
@@ -426,6 +445,7 @@ describe("task_dispatcher", () => {
           bridgeWasCalled = true;
           return { ok: false, reason: { kind: "auth_missing" } };
         },
+        runArtifact: runReplayArtifact,
       });
       expect(bridgeWasCalled).toBe(false);
       expect(result.violations).toEqual([]);
@@ -447,7 +467,7 @@ describe("task_dispatcher", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 90_000);
+  }, 10_000);
 
   test("Batch 3.CLEANUP: self_modification_recorded fires when the action observation declares modified_paths under /system/acc2/", async () => {
     // The dispatcher emits self_modification_recorded immediately after
@@ -493,7 +513,7 @@ describe("task_dispatcher", () => {
     expect(modifiedPaths[0]).toContain("/system/acc2/");
     expect(payload.total_declared_paths).toBe(2);
     expect(payload.detection).toBe("action_observation_modified_paths_acc2_root");
-  }, 60_000);
+  }, 10_000);
 
   test("Batch 3.CLEANUP: self_modification_recorded does NOT fire when modified_paths are all outside acc2 root", async () => {
     const db = openDb(":memory:");
@@ -510,7 +530,7 @@ describe("task_dispatcher", () => {
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'self_modification_recorded' AND task_id = ?")
       .get(taskId) as { c: number };
     expect(selfMod.c).toBe(0);
-  }, 60_000);
+  }, 10_000);
 
   test("refinement depth cap fires task_failed with refinement_depth_exceeded after 5 levels", async () => {
     const db = openDb(":memory:");
@@ -536,7 +556,7 @@ describe("task_dispatcher", () => {
     // The deepest task is at depth=5. Dispatching it through high-residual
     // MUST hit the cap and emit task_failed instead of opening a 6th refine.
     const deepest = ids[5]!;
-    const { nodes } = (await import("./task_topology")).readDagForDirective(db, directiveId);
+    const { nodes } = readDagForDirective(db, directiveId);
     const deepNode = nodes.find((n) => n.id === deepest)!;
     expect(deepNode).toBeTruthy();
 
@@ -563,7 +583,7 @@ describe("task_dispatcher", () => {
       .map((r) => JSON.parse(r.payload) as Record<string, unknown>)
       .filter((p) => p.kind === "refines" && p.from_task === deepest);
     expect(newRefines.length).toBe(0);
-  }, 30_000);
+  }, 10_000);
 
   test("bridge-timeout safety net: auto-commit fires when closure_audited landed cleanly before bridge timeout", async () => {
     // Live-ledger evidence (2026-05-15 01:13:39 / 01:13:48) showed a real
@@ -631,7 +651,7 @@ describe("task_dispatcher", () => {
     const cp = JSON.parse(committed!.payload);
     expect(cp.reason).toBe("auto_commit_on_bridge_timeout_after_clean_closure_audit");
     expect(cp.closure_residual).toBe(0.12);
-  }, 30_000);
+  }, 10_000);
 
   test("bridge-timeout safety net: does NOT auto-commit when closure_residual is too high", async () => {
     const db = openDb(":memory:");
@@ -685,5 +705,5 @@ describe("task_dispatcher", () => {
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_committed' AND task_id = ?")
       .get(taskId) as { c: number };
     expect(committed.c).toBe(0);
-  }, 30_000);
+  }, 10_000);
 });

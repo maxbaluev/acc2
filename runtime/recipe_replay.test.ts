@@ -214,7 +214,7 @@ describe("recipe_replay.findRecipeMatch", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 60_000);
+  });
 
   test("returns null when no recipe row crosses the threshold", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "acc2-recipe-thresh-"));
@@ -240,7 +240,7 @@ describe("recipe_replay.findRecipeMatch", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 60_000);
+  });
 });
 
 describe("recipe_replay.replayRecipe", () => {
@@ -280,7 +280,7 @@ describe("recipe_replay.replayRecipe", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 60_000);
+  });
 
   test("aborts cleanly when a recipe's trajectory has no action_predicted step", async () => {
     const db = openDb(":memory:");
@@ -390,7 +390,7 @@ describe("recipe_replay.replayRecipe", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 60_000);
+  });
 });
 
 describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
@@ -479,7 +479,7 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
     expect(match).not.toBeNull();
     expect(match!.trajectory.length).toBe(2);
 
-    const outcome = await replayRecipe(db, task, match!);
+    const outcome = await replayRecipe(db, task, match!, replayTestOpts);
     expect(outcome.task_committed).toBe(true);
     expect(outcome.residuals.length).toBe(2);
     expect(outcome.residuals.every((r) => r === 0)).toBe(true);
@@ -531,7 +531,7 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
     expect(Array.isArray(commitPayload.residuals)).toBe(true);
 
     void recipeRow;
-  }, 60_000);
+  });
 
   test("a 2-step recipe aborts at the failing step and surfaces the worst residual", async () => {
     const db = openDb(":memory:");
@@ -607,7 +607,7 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
 
     const match = findRecipeMatch(db, task);
     expect(match).not.toBeNull();
-    const outcome = await replayRecipe(db, task, match!);
+    const outcome = await replayRecipe(db, task, match!, replayTestOpts);
     expect(outcome.task_committed).toBe(false);
     expect(outcome.abort_reason).toBe("verifier_residual_above_threshold");
     // Step 0 ran and produced residual 0; step 1 ran and produced residual 1.
@@ -629,7 +629,7 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
     expect(ap.step_count).toBe(2);
     expect(ap.residual).toBe(1);
     expect(ap.worst_residual).toBe(1);
-  }, 60_000);
+  });
 });
 
 // View-integration regression — Improvement 1 from brain audit
@@ -711,7 +711,6 @@ describe("recipe_replay.findRecipeMatch — recipes_latest_view integration", ()
 describe("recipe_replay.updateRecipeConfidence", () => {
   test("successful outcome bumps confidence by +0.05", () => {
     const db = openDb(":memory:");
-    runViews(db);
     const recipeId = newId();
     db.run(
       `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
@@ -734,7 +733,6 @@ describe("recipe_replay.updateRecipeConfidence", () => {
 
   test("failed outcome cuts confidence by -0.10", () => {
     const db = openDb(":memory:");
-    runViews(db);
     const recipeId = newId();
     db.run(
       `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
@@ -757,7 +755,6 @@ describe("recipe_replay.updateRecipeConfidence", () => {
 
   test("confidence is bounded [0, 0.95]", () => {
     const db = openDb(":memory:");
-    runViews(db);
     const recipeId = newId();
     db.run(
       `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
