@@ -429,6 +429,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("scheduler")) registerWorker("scheduler");
   if (isWorkerEnabled("supervisor")) registerWorker("supervisor", Number(process.env.ACC2_SUPERVISOR_INTERVAL_MS ?? 30_000));
   if (isWorkerEnabled("compaction")) registerWorker("compaction", Number(process.env.ACC2_COMPACTION_INTERVAL_MS ?? 60 * 60 * 1000));
+  if (isWorkerEnabled("recipe_inertia")) registerWorker("recipe_inertia", Number(process.env.ACC2_RECIPE_INERTIA_TICK_MS ?? 60 * 60 * 1000));
   // Brain audit B (2026-05-15): register the Model-D extractors worker
   // so candidate→promoted advancement happens on a bounded cadence,
   // not by chance dispatch through Father.
@@ -837,6 +838,28 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       rehabTickMs,
     );
     workers.push(() => clearInterval(rehabTick));
+  }
+
+  // SMART-axis Layer-2 decay (brain audit QQEHAW97 lesson): inert recipes
+  // (never replayed for N days, default 14) get their confidence multiplied
+  // by 0.95 per tick, floored at 0.1. Closes the lesson "Layer-2 intelligence
+  // should decay inert rows, not just promote successful rows." Ticks hourly
+  // by default; idempotent within the same wall-clock second via the
+  // applyRecipeInertiaDecay implementation. Opt-OUT via
+  // `ACC2_DISABLE_WORKERS=recipe_inertia`. Tick interval env-configurable
+  // via `ACC2_RECIPE_INERTIA_TICK_MS`.
+  if (isWorkerEnabled("recipe_inertia")) {
+    const inertiaTickMs = Number(process.env.ACC2_RECIPE_INERTIA_TICK_MS ?? 60 * 60 * 1000);
+    const { applyRecipeInertiaDecay } = await import("./recipe_inertia");
+    markWorkerReady("recipe_inertia");
+    recordWorkerTick("recipe_inertia");
+    const inertiaTick = setInterval(
+      supervisedTick(db, "recipe_inertia", inertiaTickMs, async () => {
+        applyRecipeInertiaDecay(db);
+      }),
+      inertiaTickMs,
+    );
+    workers.push(() => clearInterval(inertiaTick));
   }
 
   // Phase I: rolling-review worker. Default ON — production wants

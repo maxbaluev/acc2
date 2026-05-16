@@ -60,7 +60,13 @@ export type WorkerName =
   | "auto_apply"
   // Axis E alignment: source hotreload is a daemon-started periodic subsystem
   // and should use the same ACC2_DISABLE_WORKERS taxonomy as other workers.
-  | "hotreload";
+  | "hotreload"
+  // Brain audit QQEHAW97 SMART-axis lesson (2026-05-15): Layer-2 intelligence
+  // should decay inert rows, not just promote successful rows. Periodic worker
+  // calls applyRecipeInertiaDecay (runtime/recipe_inertia.ts) to multiply the
+  // confidence of recipes that haven't been replayed in N days by 0.95, with
+  // a 0.1 floor. Ticks hourly; idempotent per-second.
+  | "recipe_inertia";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -79,6 +85,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "metrics_gauge_refresh",
   "auto_apply",
   "hotreload",
+  "recipe_inertia",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into
