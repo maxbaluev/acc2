@@ -699,12 +699,33 @@ export const distributeCredit = async (
       // compatible. The weight lands on candidate_confirmed.payload so the
       // extractor reads the fractional contribution.
       const confidenceEstimate = readCandidateConfidenceEstimate(db, targetId);
+      const citedKnowledgeOrigin = (() => {
+        const row = db.query(`SELECT substrate_origin FROM events WHERE id = ?`).get(targetId) as { substrate_origin?: string } | null;
+        return row?.substrate_origin ?? "unknown";
+      })();
       const knowledgeWeight = baseWeight * confidenceEstimate;
       const kAlpha = alphaDelta * knowledgeWeight;
       const kBeta = betaDelta * knowledgeWeight;
       const r = Math.max(0, Math.min(1, params.observed_residual));
       const knowledgeKind: "candidate_confirmed" | "candidate_contradicted" =
         r >= FAILURE_BAND ? "candidate_contradicted" : "candidate_confirmed";
+      const outcomeProbability = r <= SUCCESS_BAND ? 1 : r >= FAILURE_BAND ? 0 : 0.5;
+      emit({
+        kind: "origin_calibration_recorded",
+        substrate_origin: "substrate_auto",
+        context_refs: [targetId, params.scored_event_id],
+        payload: {
+          origin: citedKnowledgeOrigin,
+          role: "cited_knowledge",
+          predicted_confidence: confidenceEstimate,
+          observed_success_probability: outcomeProbability,
+          calibration_error: Math.abs(confidenceEstimate - outcomeProbability),
+          merger_quality_axes: {
+            confidence_error: Math.abs(confidenceEstimate - outcomeProbability),
+            shapley_weight: baseWeight,
+          },
+        } as JsonValue,
+      });
       const id = emit({
         kind: knowledgeKind,
         substrate_origin: "substrate_auto",

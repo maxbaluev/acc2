@@ -813,6 +813,11 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
               corroborated_origin: cand.substrate_origin,
               cosine: cos,
               reason: "embedding_dedup",
+              fusion_method: prior.substrate_origin === cand.substrate_origin ? "same_origin_dedup" : "cross_origin_beta_evidence",
+              merger_quality_axes: {
+                agreement_similarity: cos,
+                cross_origin: prior.substrate_origin === cand.substrate_origin ? 0 : 1,
+              },
             },
             context_refs: [prior.id, cand.id],
           });
@@ -870,6 +875,29 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
             },
             context_refs: [prior.id, cand.id],
           });
+          if (prior.substrate_origin !== cand.substrate_origin) {
+            insertEvent(db, {
+              kind: "merger_debate_required",
+              directive_id: cand.directive_id,
+              task_id: cand.task_id,
+              loop_id: cand.loop_id,
+              substrate_origin: "substrate_auto",
+              payload: {
+                candidate_a: prior.id,
+                candidate_b: cand.id,
+                origins: [prior.substrate_origin, cand.substrate_origin],
+                cosine: cos,
+                polarity_a: polB,
+                polarity_b: polA,
+                reason: "cross_origin_polarity_disagreement",
+                merger_quality_axes: {
+                  contradiction_similarity: cos,
+                  cross_origin: 1,
+                },
+              },
+              context_refs: [prior.id, cand.id],
+            });
+          }
           contradicted++;
         }
       }

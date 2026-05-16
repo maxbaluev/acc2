@@ -152,6 +152,13 @@ export const EVENT_KINDS = {
 
   // ── Knowledge synthesis ─────────────────────────────────────────────
   knowledge_synthesized:                   { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  // Explicit two-model merger protocol rows. Payloads MUST keep
+  // merger_quality_axes as Record<string, number>; do not enumerate a fixed
+  // quality taxonomy in the schema.
+  merger_debate_required:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  merger_debate_resolved:                  { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  cross_origin_verification_recorded:      { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  origin_calibration_recorded:             { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── External-source registration ────────────────────────────────────
   external_source_registered:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
