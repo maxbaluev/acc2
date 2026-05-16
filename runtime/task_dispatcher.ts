@@ -964,7 +964,70 @@ export const dispatchReadyTask = async (
           // TREE_SEARCH_FANOUT_THRESHOLD, route through a substrate-owned
           // tree-search scorer instead of only extending a linear chain.
           const depth = refinementDepth(db, task.id);
-          if (depth >= REFINEMENT_DEPTH_CAP) {
+          // Plateau early-stop (brain amendment ZH75YT9MV95RNC9DQV6FN1AW0C,
+          // rerun b23eiv4yt → directive HZGZGDPGJ96..., 2026-05-16): when
+          // 3 consecutive refinement cycles in this lineage haven't improved
+          // closure_residual by more than 0.03, stop refining and commit the
+          // current cycle's residual as plateau_early_stop instead of
+          // continuing to the depth cap. Catches "iterating in circles"
+          // earlier than REFINEMENT_DEPTH_CAP=5 would.
+          const plateauCycles = 3;
+          const plateauEpsilon = 0.03;
+          const edgeRows = db
+            .query("SELECT payload FROM events WHERE directive_id = ? AND kind = 'task_edge_recorded' ORDER BY ts ASC")
+            .all(task.directive_id) as Array<{ payload: string }>;
+          const incomingRefines = new Map<string, string>();
+          for (const row of edgeRows) {
+            try {
+              const payload = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
+              if (payload.kind === "refines" && typeof payload.from_task === "string" && typeof payload.to_task === "string") {
+                incomingRefines.set(payload.to_task, payload.from_task);
+              }
+            } catch { /* malformed edge payload: ignore for plateau detection */ }
+          }
+          const lineageTaskIds = new Set<string>([task.id]);
+          for (let cur = task.id; incomingRefines.has(cur);) {
+            cur = incomingRefines.get(cur)!;
+            if (lineageTaskIds.has(cur)) break;
+            lineageTaskIds.add(cur);
+          }
+          const auditRows = db
+            .query("SELECT task_id, payload FROM events WHERE directive_id = ? AND kind = 'task_closure_audited' ORDER BY ts ASC")
+            .all(task.directive_id) as Array<{ task_id: string; payload: string }>;
+          const closureResiduals = auditRows.flatMap((row) => {
+            if (!lineageTaskIds.has(row.task_id)) return [];
+            try {
+              const payload = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
+              return typeof payload.closure_residual === "number" ? [payload.closure_residual] : [];
+            } catch {
+              return [];
+            }
+          });
+          const recentClosureResiduals = closureResiduals.slice(-plateauCycles);
+          const plateauEarlyStop = recentClosureResiduals.length >= plateauCycles &&
+            recentClosureResiduals.slice(1).every((value, index) => recentClosureResiduals[index]! - value <= plateauEpsilon);
+          if (plateauEarlyStop) {
+            const closureResidual = recentClosureResiduals.at(-1)!;
+            emitEvent(db, {
+              kind: "task_committed",
+              substrate_origin: "substrate_auto",
+              directive_id: task.directive_id,
+              task_id: task.id,
+              outcome: "committed",
+              residual: closureResidual,
+              payload: {
+                dispatch_id: dispatchId,
+                reason: "plateau_early_stop",
+                closure_residual: closureResidual,
+                plateau_cycles: plateauCycles,
+                plateau_epsilon: plateauEpsilon,
+                recent_closure_residuals: recentClosureResiduals,
+                refinement_depth: depth,
+                action_artifact_id: actionArtifact.id,
+                verifier_artifact_id: verifierArtifact.id,
+              } as JsonValue,
+            });
+          } else if (depth >= REFINEMENT_DEPTH_CAP) {
             emitEvent(db, {
               kind: "task_failed",
               substrate_origin: "substrate_auto",
