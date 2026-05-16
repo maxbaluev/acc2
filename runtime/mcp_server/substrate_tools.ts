@@ -262,6 +262,21 @@ export const handleEmit = (
     const fromTask = (payload.from_task ?? payload.from) as string | undefined;
     const toTask = (payload.to_task ?? payload.to) as string | undefined;
     if (directiveId && fromTask && toTask) {
+      // Brain audit (2026-05-16, src 442HA2904S1K1FAG0VS1FQVC88,
+      // evidence knowledge 3SX8NAZVJN44K3DY8JQ5V1VTZM): refuse self-loop
+      // edges (from_task == to_task) at the emit layer. Self-loops produce
+      // degenerate DAGs where decomposition leaves logically collapse to
+      // one node — witnessed in meta-audit directive M6495S46GX7XQ73AJ8DH84RGTR
+      // where 7 task_node_opened all shared the root task_id and 7
+      // self-loop edges left only 2 of 7 subtasks producing output. The
+      // task_graph_view and parallel-DAG scheduler both assume an acyclic
+      // refinement graph; self-loops violate that assumption structurally.
+      if (fromTask === toTask) {
+        return {
+          ok: false,
+          error: `task_edge_self_loop:${fromTask}`,
+        };
+      }
       const fromExists = ctx.db
         .query(
           `SELECT 1 FROM events

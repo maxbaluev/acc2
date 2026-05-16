@@ -134,3 +134,82 @@ describe("handleEmit — task_node_opened (directive_id, goal) dedup", () => {
     expect(r2.deduped).toBeUndefined();
   });
 });
+
+describe("handleEmit — task_edge_recorded structural self-loop refusal", () => {
+  test("refuses task_edge_recorded with from_task == to_task", () => {
+    const db = openDb(":memory:");
+    const opened = handleOpenDirective(ctx(db), { directive_text: "self-loop refusal directive" } as never);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
+
+    // Open the node we will try to self-loop on so that the endpoint-existence
+    // gate would otherwise pass — we want to prove the self-loop gate fires
+    // FIRST (before the from_exists / to_exists lookups).
+    const node = handleEmit(ctx(db), {
+      kind: "task_node_opened",
+      directive_id: directiveId,
+      task_id: "t_root",
+      payload: { goal: "root goal" },
+    } as never);
+    expect(node.ok).toBe(true);
+
+    const selfLoop = handleEmit(ctx(db), {
+      kind: "task_edge_recorded",
+      directive_id: directiveId,
+      payload: { from_task: "t_root", to_task: "t_root", kind: "refines" },
+    } as never);
+    expect(selfLoop.ok).toBe(false);
+    if (selfLoop.ok) return;
+    expect(selfLoop.error).toBe("task_edge_self_loop:t_root");
+  });
+
+  test("refuses self-loop even when endpoints do not yet exist", () => {
+    const db = openDb(":memory:");
+    const opened = handleOpenDirective(ctx(db), { directive_text: "early self-loop directive" } as never);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
+
+    // No matching task_node_opened on file — the self-loop refusal must
+    // still fire (it precedes the endpoint-existence gate by design).
+    const selfLoop = handleEmit(ctx(db), {
+      kind: "task_edge_recorded",
+      directive_id: directiveId,
+      payload: { from_task: "t_phantom", to_task: "t_phantom", kind: "refines" },
+    } as never);
+    expect(selfLoop.ok).toBe(false);
+    if (selfLoop.ok) return;
+    expect(selfLoop.error).toBe("task_edge_self_loop:t_phantom");
+  });
+
+  test("accepts task_edge_recorded between two distinct existing endpoints", () => {
+    const db = openDb(":memory:");
+    const opened = handleOpenDirective(ctx(db), { directive_text: "valid-edge directive" } as never);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
+
+    const parent = handleEmit(ctx(db), {
+      kind: "task_node_opened",
+      directive_id: directiveId,
+      task_id: "t_parent",
+      payload: { goal: "parent" },
+    } as never);
+    expect(parent.ok).toBe(true);
+    const child = handleEmit(ctx(db), {
+      kind: "task_node_opened",
+      directive_id: directiveId,
+      task_id: "t_child",
+      payload: { goal: "child" },
+    } as never);
+    expect(child.ok).toBe(true);
+
+    const edge = handleEmit(ctx(db), {
+      kind: "task_edge_recorded",
+      directive_id: directiveId,
+      payload: { from_task: "t_parent", to_task: "t_child", kind: "refines" },
+    } as never);
+    expect(edge.ok).toBe(true);
+  });
+});
