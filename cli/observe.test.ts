@@ -23,6 +23,8 @@ import {
   FOLLOW_HEARTBEAT_WINDOW_MS,
   formatEvent,
   formatFollowHeartbeat,
+  formatFollowTerminalSentinel,
+  formatFollowTerminalSentinel,
   type HeartbeatCounters,
 } from "./observe";
 
@@ -85,6 +87,21 @@ describe("formatEvent — ≤ MAX_EVENT_LINE_CHARS invariant", () => {
         proposed_behavior: "w".repeat(400),
       },
     });
+    expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
+  });
+});
+
+describe("formatFollowTerminalSentinel", () => {
+  test("prints a compact parseable terminal line", () => {
+    const line = formatFollowTerminalSentinel({
+      directive_id: "DIRECTIVE1234567890",
+      root_task_id: "ROOTTASK1234567890",
+      status: "completed",
+      status_reason: "task_committed",
+    });
+    expect(line).toContain("ACC_TASK_TERMINAL");
+    expect(line).toContain("status=completed");
+    expect(line).toContain("reason=task_committed");
     expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
   });
 });

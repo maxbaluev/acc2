@@ -428,6 +428,43 @@ export const formatFollowHeartbeat = (
   return trunc(line, MAX_EVENT_LINE_CHARS);
 };
 
+type DispatchResolvedLike = {
+  directive_id?: string;
+  root_task_id?: string;
+  status?: string;
+  status_reason?: string | null;
+};
+
+export const formatFollowTerminalSentinel = (row: DispatchResolvedLike): string => {
+  const parts = [
+    "ACC_TASK_TERMINAL",
+    `directive=${idPrefix(row.directive_id, 16)}`,
+    `root=${idPrefix(row.root_task_id, 16)}`,
+    `status=${row.status ?? "unknown"}`,
+    row.status_reason ? `reason=${row.status_reason}` : "",
+  ].filter(Boolean);
+  return trunc(parts.join(" "), MAX_EVENT_LINE_CHARS);
+};
+
+const readResolvedTerminalRow = async (opts: TailOpts): Promise<DispatchResolvedLike | null> => {
+  if (!opts.directive || !opts.rootTaskId) return null;
+  const env = await mcpCall("substrate.read", {
+    view_name: "dispatch_resolved_view",
+    args: { directive_id: opts.directive, root_task_id: opts.rootTaskId },
+  }, { timeoutMs: 3_000 }).catch(() => null);
+  if (!env?.ok) return null;
+  const row = ((env.result as DispatchResolvedLike[] | undefined) ?? [])[0];
+  if (!row || !RESOLVED_TERMINAL_STATUSES.has(row.status ?? "")) return null;
+  return row;
+};
+
+const emitResolvedTerminalSentinel = async (opts: TailOpts): Promise<boolean> => {
+  const row = await readResolvedTerminalRow(opts);
+  if (!row) return false;
+  console.log(formatFollowTerminalSentinel(row));
+  return true;
+};
+
 // ── acc events ─────────────────────────────────────────────────────
 
 export type EventsOpts = {
@@ -535,6 +572,8 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
     deadlineTimer = setTimeout(() => ac.abort(), ms);
   }
   let sawTerminal = false;
+  let terminalCheckInFlight = false;
+  let sentinelEmitted = false;
   const startedAt = Date.now();
   // Heartbeat counters surfaced into every `[t+Ns] waiting on brain …` line.
   // `events` = scoped events seen on the SSE stream; `nodes` = task_node_opened
@@ -555,12 +594,31 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
   };
   const heartbeatTimer = heartbeatEnabled ? setInterval(fireHeartbeat, FOLLOW_HEARTBEAT_MS) : null;
   heartbeatTimer?.unref?.();
+  const emitTerminalFromResolvedView = async (): Promise<boolean> => {
+    if (!exitOnTerminal || sentinelEmitted || terminalCheckInFlight) return false;
+    terminalCheckInFlight = true;
+    try {
+      const emitted = await emitResolvedTerminalSentinel(opts);
+      if (!emitted) return false;
+      sentinelEmitted = true;
+      sawTerminal = true;
+      ac.abort();
+      return true;
+    } finally {
+      terminalCheckInFlight = false;
+    }
+  };
+  const resolvedViewTimer = opts.directive && opts.rootTaskId
+    ? setInterval(() => { void emitTerminalFromResolvedView(); }, opts.pollMs ?? 2_000)
+    : null;
+  resolvedViewTimer?.unref?.();
   // Also wire process-signal abort so SIGTERM/SIGINT triggers abort cleanly
   // and the exit-code path below reports an honest "didn't see terminal".
   const onSig = () => ac.abort();
   process.once("SIGTERM", onSig);
   process.once("SIGINT", onSig);
   try {
+    if (await emitTerminalFromResolvedView()) return 0;
     for await (const ev of sseConnect({ signal: ac.signal, reconnect: true })) {
       // SseEvent shape: { event_id, kind, ts, directive_id?, task_id?, substrate_origin?, payload? }
       // matches EventLike directly — no .data unwrap.
@@ -592,6 +650,7 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
         if (isRootTerminal) {
           sawTerminal = true;
           if (exitOnTerminal) {
+            if (!sentinelEmitted) sentinelEmitted = await emitResolvedTerminalSentinel(opts);
             ac.abort();
             return 0;
           }
@@ -616,6 +675,7 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
     return 1;
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (resolvedViewTimer) clearInterval(resolvedViewTimer);
     if (deadlineTimer) clearTimeout(deadlineTimer);
     process.off("SIGTERM", onSig);
     process.off("SIGINT", onSig);
@@ -690,6 +750,7 @@ const runTailPoll = async (opts: TailOpts): Promise<number> => {
         if (isRootTerminal) sawTerminal = e;
       }
     }
+    if (exitOnTerminal && await emitResolvedTerminalSentinel(opts)) return 0;
     if (sawTerminal && exitOnTerminal) return 0;
     if (deadlineMs && Date.now() > deadlineMs) {
       console.error("acc tail: deadline exceeded (no terminal event)");

@@ -9,6 +9,7 @@ import {
   artifactRouting,
   codeArtifactRegistry,
   directiveConflicts,
+  dispatchResolved,
   failureCounts,
   lessonApplyCandidates,
   lessonImplementationStatus,
@@ -288,6 +289,49 @@ describe("ready_tasks_view + readyTasks", () => {
     insertEvent(db, { kind: "task_node_opened", directive_id: "d1", task_id: "t_lonely" });
     const ready = readyTasks(db);
     expect(ready.map((r) => r.task_id)).toContain("t_lonely");
+  });
+});
+
+describe("dispatch_resolved_view + dispatchResolved", () => {
+  test("classifies live, completed, failed, queued_at_cap, and zombie roots", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const oldTs = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+
+    for (const [directive_id, task_id] of [["d_live", "t_live"], ["d_done", "t_done"], ["d_fail", "t_fail"], ["d_cap", "t_cap"], ["d_zombie", "t_zombie"]]) {
+      insertEvent(db, { kind: "task_node_opened", directive_id, task_id });
+    }
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_live", task_id: "t_live", payload: { dispatch_id: "disp_live" } });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_done", task_id: "t_done", payload: { dispatch_id: "disp_done" } });
+    insertEvent(db, { kind: "brain_dispatch_closed", directive_id: "d_done", task_id: "t_done", payload: { dispatch_id: "disp_done" } });
+    insertEvent(db, { kind: "task_committed", directive_id: "d_done", task_id: "t_done" });
+    insertEvent(db, { kind: "task_failed", directive_id: "d_fail", task_id: "t_fail", failure_kind: "bridge_failed" });
+    insertEvent(db, { kind: "constitutional_gate_decision", directive_id: "d_cap", task_id: "t_cap", payload: { gate: "brain_concurrency_cap", reason: "opencode_brain_in_flight_at_cap" } });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_zombie", task_id: "t_zombie", ts: oldTs, payload: { dispatch_id: "disp_zombie" } });
+
+    const byDirective = new Map(dispatchResolved(db).map((r) => [r.directive_id, r]));
+    expect(byDirective.get("d_live")?.status).toBe("live");
+    expect(byDirective.get("d_done")?.status).toBe("completed");
+    expect(byDirective.get("d_done")?.terminal_kind).toBe("task_committed");
+    expect(byDirective.get("d_fail")?.status).toBe("failed");
+    expect(byDirective.get("d_cap")?.status).toBe("queued_at_cap");
+    expect(byDirective.get("d_zombie")?.status).toBe("zombie");
+  });
+
+  test("groups child dispatch events under the root task id and supports filters", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_tree", task_id: "t_root" });
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_tree", task_id: "t_child", parent_task_id: "t_root" });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_tree", task_id: "t_child", payload: { dispatch_id: "disp_child" } });
+    insertEvent(db, { kind: "brain_dispatch_closed", directive_id: "d_tree", task_id: "t_child", payload: { dispatch_id: "disp_child" } });
+    insertEvent(db, { kind: "task_committed", directive_id: "d_tree", task_id: "t_child" });
+
+    const rows = dispatchResolved(db, { directiveId: "d_tree", rootTaskId: "t_root" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.root_task_id).toBe("t_root");
+    expect(rows[0]!.status).toBe("completed");
+    expect(dispatchResolved(db, { directiveId: "missing" })).toEqual([]);
   });
 });
 

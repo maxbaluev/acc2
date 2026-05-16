@@ -363,8 +363,8 @@ describe("fastmcp substrate tools — stdio transport", () => {
     expect(env.error).toContain("view_not_implemented:");
   });
 
-  test("substrate.read exposes operator recipe and knowledge registry views", async () => {
-    for (const view_name of ["recipe_registry_view", "promoted_knowledge_view"]) {
+  test("substrate.read exposes operator recipe, knowledge, and dispatch status views", async () => {
+    for (const view_name of ["recipe_registry_view", "promoted_knowledge_view", "dispatch_resolved_view"]) {
       const env = parseEnvelope(
         (await h!.client.callTool({
           name: "substrate.read",

@@ -28,6 +28,7 @@ import { newId } from "../ids";
 import {
   codeArtifactRegistry,
   readyTasks,
+  dispatchResolved,
   taskGraphFor,
   failureCounts,
   artifactRouting,
@@ -351,6 +352,12 @@ export const handleRead = (
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         return { ok: true, result: readyTasks(db, limit) as unknown as JsonValue };
+      }
+      case "dispatch_resolved_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        const rootTaskId = typeof arg.root_task_id === "string" ? arg.root_task_id : undefined;
+        return { ok: true, result: dispatchResolved(db, { directiveId, rootTaskId }) as unknown as JsonValue };
       }
       case "task_graph_view": {
         const arg = (args.args ?? {}) as Record<string, unknown>;

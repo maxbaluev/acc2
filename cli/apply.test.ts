@@ -1,7 +1,7 @@
 // acc apply tests: prove the owner/auto gates are target/shape based, not
 // special-cased by lesson kind.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +19,7 @@ let handle: DaemonHandle | null = null;
 let dir = "";
 let prevPort: string | undefined;
 let prevAuxPort: string | undefined;
+let directiveSeq = 0;
 
 const captureConsole = (): { out: string[]; err: string[]; restore: () => void } => {
   const out: string[] = [];
@@ -35,12 +36,20 @@ const rowPayload = (row: Record<string, unknown>): Record<string, unknown> => {
   return (row.payload ?? {}) as Record<string, unknown>;
 };
 
-const emitLesson = async (proposedAction: Record<string, unknown>): Promise<string> => {
+const nextScope = () => {
+  directiveSeq++;
+  return { directiveId: `d_apply_gate_${directiveSeq}`, taskId: `t_apply_gate_${directiveSeq}` };
+};
+
+const emitLesson = async (
+  proposedAction: Record<string, unknown>,
+  scope = nextScope(),
+): Promise<string> => {
   const env = await mcpCall("substrate.emit", {
     kind: "lesson_extracted",
     substrate_origin: "opencode",
-    directive_id: "d_apply_gate",
-    task_id: "t_apply_gate",
+    directive_id: scope.directiveId,
+    task_id: scope.taskId,
     payload: {
       lesson_kind: "verifier_gap",
       summary: "apply a structured proposed action",
@@ -63,7 +72,7 @@ const emittedGateReason = async (eventId: string): Promise<string | undefined> =
   return rowPayload(gateEnv.result as Record<string, unknown>).reason as string | undefined;
 };
 
-beforeEach(async () => {
+beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "acc2-apply-"));
   const port = pickMcp();
   const auxPort = pickAux();
@@ -80,7 +89,7 @@ beforeEach(async () => {
   process.env.V2_DAEMON_AUX_PORT = String(auxPort);
 });
 
-afterEach(async () => {
+afterAll(async () => {
   if (handle) await stopDaemon(handle);
   handle = null;
   closeDb();
@@ -115,12 +124,13 @@ describe("runApply gates", () => {
   });
 
   test("prior owner_decision_recorded satisfies protected target gate", async () => {
-    const eventId = await emitLesson({ file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" });
+    const scope = nextScope();
+    const eventId = await emitLesson({ file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" }, scope);
     const decision = await mcpCall("substrate.emit", {
       kind: "owner_decision_recorded",
       substrate_origin: "owner",
-      directive_id: "d_apply_gate",
-      task_id: "t_apply_gate",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
       payload: { source_event_id: eventId, decision: "approved" },
       context_refs: [eventId],
     });
@@ -199,11 +209,12 @@ describe("runApply gates", () => {
   });
 
   test("contract_amendment_proposed prompt renders structured proposed_behavior and explicit gates", async () => {
+    const scope = nextScope();
     const env = await mcpCall("substrate.emit", {
       kind: "contract_amendment_proposed",
       substrate_origin: "opencode",
-      directive_id: "d_apply_gate",
-      task_id: "t_apply_gate",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
       payload: {
         target: "runtime/prompt_composer.ts",
         anchor: "WORKFLOW_TEXT",
@@ -244,11 +255,12 @@ describe("runApply gates", () => {
   // whether the apply was correct.
 
   test("auto-apply target accepts unstructured proposals (universal verifier scores them)", async () => {
+    const scope = nextScope();
     const env = await mcpCall("substrate.emit", {
       kind: "contract_amendment_proposed",
       substrate_origin: "opencode",
-      directive_id: "d_apply_gate",
-      task_id: "t_apply_gate",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
       payload: {
         target: "runtime/prompt_composer.ts",
         anchor: "gate",
@@ -267,12 +279,13 @@ describe("runApply gates", () => {
   });
 
   test("auto-apply target proceeds on hazardous trajectories (residual decides, not the hazard count)", async () => {
-    const eventId = await emitLesson({ file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" });
+    const scope = nextScope();
+    const eventId = await emitLesson({ file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" }, scope);
     const hazard = await mcpCall("substrate.emit", {
       kind: "dispatcher_violation",
       substrate_origin: "substrate",
-      directive_id: "d_apply_gate",
-      task_id: "t_apply_gate",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
       payload: { failure_kind: "cycle_1_only_breach" },
     });
     expect(hazard.ok).toBe(true);
@@ -286,12 +299,13 @@ describe("runApply gates", () => {
   });
 
   test("directive-scoped owner_decision_recorded satisfies protected target gate", async () => {
-    const eventId = await emitLesson({ file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" });
+    const scope = nextScope();
+    const eventId = await emitLesson({ file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" }, scope);
     const decision = await mcpCall("substrate.emit", {
       kind: "owner_decision_recorded",
       substrate_origin: "owner",
-      directive_id: "d_apply_gate",
-      task_id: "t_apply_gate",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
       payload: { outcome: "approved" },
     });
     expect(decision.ok).toBe(true);
@@ -305,11 +319,12 @@ describe("runApply gates", () => {
   });
 
   test("protected structured file_path requires consent even when top-level target is safe", async () => {
+    const scope = nextScope();
     const env = await mcpCall("substrate.emit", {
       kind: "contract_amendment_proposed",
       substrate_origin: "opencode",
-      directive_id: "d_apply_gate",
-      task_id: "t_apply_gate",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
       payload: {
         target: "runtime/prompt_composer.ts",
         anchor: "gate",
@@ -328,11 +343,12 @@ describe("runApply gates", () => {
   });
 
   test("owner_decision_recorded mixed protected target does not fall through to auto-apply shape gate", async () => {
+    const scope = nextScope();
     const env = await mcpCall("substrate.emit", {
       kind: "contract_amendment_proposed",
       substrate_origin: "opencode",
-      directive_id: "d_apply_gate",
-      task_id: "t_apply_gate",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
       payload: {
         target: "runtime/prompt_composer.ts",
         anchor: "gate",
@@ -345,8 +361,8 @@ describe("runApply gates", () => {
     const decision = await mcpCall("substrate.emit", {
       kind: "owner_decision_recorded",
       substrate_origin: "owner",
-      directive_id: "d_apply_gate",
-      task_id: "t_apply_gate",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
       payload: { source_event_id: eventId, decision: "approved" },
       context_refs: [eventId],
     });

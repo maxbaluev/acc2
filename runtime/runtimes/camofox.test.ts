@@ -21,6 +21,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SandboxDecl } from "../../substrate/types";
 import {
+  __acquireProfileMutexForTest,
   __isPlaywrightInstalledForTest,
   __resolveCamoufoxBinaryForTest,
   __wrapBrowserBodyForTest,
@@ -181,43 +182,32 @@ describe("__resolveCamoufoxBinaryForTest", () => {
 });
 
 describe("per-profile-root mutex (v2-design.md §11.2)", () => {
-  test("concurrent runCamofoxArtifact calls against the same profile_root serialise", async () => {
-    // The mutex is internal; we observe it through the no-binary fast
-    // path: every invocation returns quickly with
-    // `camofox_runtime_unavailable` BUT the mutex queue still serialises
-    // them. To force the fast path even when a binary IS installed locally,
-    // we point CAMOUFOX_BINARY_PATH at a known-missing path AND clear it
-    // around the runs (skipping when playwright AND a real binary are
-    // configured — that path is exercised by the spawn integration test).
-    if (__isPlaywrightInstalledForTest() && hasCamoufoxBinary()) {
-      return;
-    }
-    const sameProfile: SandboxDecl & { runtime: "camofox-browser" } = {
-      ...stdDecl,
-      browser_profile_root: "/tmp/acc2-mutex-test",
-    };
-    const runs = await Promise.all([
-      runCamofoxArtifact({ artifactId: "art_mtx_a", body: "// a", declaredSandbox: sameProfile, inputs: null }),
-      runCamofoxArtifact({ artifactId: "art_mtx_b", body: "// b", declaredSandbox: sameProfile, inputs: null }),
-      runCamofoxArtifact({ artifactId: "art_mtx_c", body: "// c", declaredSandbox: sameProfile, inputs: null }),
+  test("concurrent calls against the same profile_root serialise", async () => {
+    const order: string[] = [];
+    await Promise.all([
+      __acquireProfileMutexForTest("/tmp/acc2-mutex-test", async () => { order.push("a:start"); await Promise.resolve(); order.push("a:end"); return "a"; }),
+      __acquireProfileMutexForTest("/tmp/acc2-mutex-test", async () => { order.push("b:start"); await Promise.resolve(); order.push("b:end"); return "b"; }),
+      __acquireProfileMutexForTest("/tmp/acc2-mutex-test", async () => { order.push("c:start"); await Promise.resolve(); order.push("c:end"); return "c"; }),
     ]);
-    // All three returned the same shape; profile_root threaded through.
-    for (const r of runs) {
-      expect(r.error).toBe("camofox_runtime_unavailable");
-      expect(r.profileRoot).toBe("/tmp/acc2-mutex-test");
-    }
+    expect(order).toEqual(["a:start", "a:end", "b:start", "b:end", "c:start", "c:end"]);
   });
 
-  test("invocations against different profile_roots run in parallel (independent queues)", async () => {
-    const declA: SandboxDecl & { runtime: "camofox-browser" } = { ...stdDecl, browser_profile_root: "/tmp/acc2-mtx-A" };
-    const declB: SandboxDecl & { runtime: "camofox-browser" } = { ...stdDecl, browser_profile_root: "/tmp/acc2-mtx-B" };
-    const [resA, resB] = await Promise.all([
-      runCamofoxArtifact({ artifactId: "art_par_a", body: "// a", declaredSandbox: declA, inputs: null }),
-      runCamofoxArtifact({ artifactId: "art_par_b", body: "// b", declaredSandbox: declB, inputs: null }),
-    ]);
-    expect(resA.profileRoot).toBe("/tmp/acc2-mtx-A");
-    expect(resB.profileRoot).toBe("/tmp/acc2-mtx-B");
-  }, 30_000);
+  test("different profile_roots use independent queues", async () => {
+    const releaseA = Promise.withResolvers<void>();
+    let bStarted = false;
+    const runA = __acquireProfileMutexForTest("/tmp/acc2-mtx-A", async () => {
+      await releaseA.promise;
+      return "a";
+    });
+    const runB = __acquireProfileMutexForTest("/tmp/acc2-mtx-B", async () => {
+      bStarted = true;
+      return "b";
+    });
+    await runB;
+    expect(bStarted).toBe(true);
+    releaseA.resolve();
+    await runA;
+  });
 });
 
 // ── End-to-end spawn (skip when no camoufox binary is reachable) ────

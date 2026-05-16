@@ -8,7 +8,7 @@ import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
-import { extractRecipeCandidates } from "../substrate/extractors";
+import { insertArtifact } from "./artifact_store";
 import {
   findRecipeMatch,
   replayRecipe,
@@ -16,23 +16,15 @@ import {
   RECIPE_DEFAULT_MIN_CONFIDENCE,
 } from "./recipe_replay";
 import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
-import { dispatchReadyTask } from "./task_dispatcher";
-import { readyTasks, readDagForDirective, type TaskNode } from "./task_topology";
+import { readDagForDirective, type TaskNode } from "./task_topology";
 import { admitArtifact } from "./artifact_admission";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
 
-const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
-// Build a synthetic three-success recipe by driving the fixture through the
-// dispatcher three times then running the extractor. Returns the recipe id +
-// the directive that the fixture last opened. By default the seed bumps
-// confidence SEVEN times so freshly-extracted recipes (prior 0.5) reach the
-// default match threshold (now 0.85 — was 0.6 pre-fix). The bump count is
-// 7 because (0.85 − 0.5) / 0.05 = 7 successful replays — the new policy is
-// "no Tier-0 lane until seven proven replays" (RECIPE_DEFAULT_MIN_CONFIDENCE
-// in recipe_replay.ts, pinned for false-positive prevention).
+// Build the replay fixture directly instead of driving three full dispatcher
+// cycles. Extractor coverage lives in substrate/extractors.test.ts; these tests
+// only need a matching recipe row plus runnable action/verifier artifacts.
 const seedThreeSuccessRecipe = async (
   tempDir: string,
   opts: { bumpConfidence?: boolean } = {},
@@ -41,38 +33,73 @@ const seedThreeSuccessRecipe = async (
   recipeId: string;
   goalShape: string;
 }> => {
-  const bump = opts.bumpConfidence ?? true;
   const db = openDb(":memory:");
   runViews(db);
-  for (let i = 0; i < 3; i++) {
-    const { directiveId, taskId } = await openFixtureDCountTodos(db, tempDir);
-    const ready = readyTasks(db, directiveId);
-    expect(ready.length).toBeGreaterThan(0);
-    expect(ready[0]!.id).toBe(taskId);
-    await dispatchReadyTask(db, ready[0]!, { fixtureTargetPath: tempDir });
-    // Stagger timestamps so the recipe extractor sees three distinct
-    // committed shapes with the same goal_shape.
-    await sleepMs(5);
-  }
-  // Task 5 inlines extractRecipeFromCommit on every task_committed — the
-  // FIRST commit seeds a confidence=1.0 recipe synchronously, so by the
-  // time the statistical 3-shape extractor runs the composite key is
-  // already deduped. We accept either path: a recipe must EXIST in the
-  // ledger (regardless of whether the inline or statistical path emitted
-  // it). Tests that care about the inline-vs-statistical distinction are
-  // in substrate/extractors.test.ts.
-  extractRecipeCandidates(db);
-  const recipeRows = db
-    .query("SELECT id, payload FROM events WHERE kind = 'recipe_extracted' ORDER BY ts DESC")
-    .all() as Array<{ id: string; payload: string }>;
-  expect(recipeRows.length).toBeGreaterThanOrEqual(1);
-  const row = recipeRows[0]!;
-  const p = JSON.parse(row.payload) as { goal_shape: string };
-  if (bump) {
-    // Bump 7× to cross the new 0.85 default threshold (0.5 + 7·0.05 = 0.85).
-    for (let i = 0; i < 7; i++) updateRecipeConfidence(db, row.id, true);
-  }
-  return { db, recipeId: row.id, goalShape: p.goal_shape };
+  const sandbox = { runtime: "bun" as const, fs_read: ["**/*"], fs_write: [], net_allow: [], proc_allow: [], cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 };
+  const action = insertArtifact(db, {
+    runtime: "bun",
+    body: [
+      "import { readdirSync, readFileSync, statSync } from 'node:fs';",
+      "import { join } from 'node:path';",
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null') ?? {};",
+      "let count = 0;",
+      "const walk = (dir) => { for (const name of readdirSync(dir)) { const full = join(dir, name); const st = statSync(full); if (st.isDirectory()) walk(full); else if (st.isFile() && readFileSync(full, 'utf8').includes('TODO')) count++; } };",
+      "walk(inputs.target_path ?? './');",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ result: { count } }));",
+    ].join("\n"),
+    declaredSandbox: sandbox,
+    stateRoot: null,
+    posteriorAlpha: 1,
+    posteriorBeta: 1,
+    score: 0.5,
+    confidence: 0.3,
+    recentResidualMean: 0,
+    recentKillCount: 0,
+    status: "admitted",
+    name: "recipe_replay_test_action",
+    fixtureInput: null,
+    fixtureExpectedResidual: 0,
+    intent: null,
+    summary: null,
+    targetFiles: null,
+    sourceCandidateId: null,
+    ownerGateVerdict: null,
+  });
+  const verifier = insertArtifact(db, {
+    runtime: "bun",
+    body: "const observation = JSON.parse(process.env.ACC2_INPUTS ?? 'null') ?? {}; const ok = Number.isInteger(observation?.result?.count); console.log('@@RESULT@@ ' + JSON.stringify({ residual: ok ? 0 : 1 }));",
+    declaredSandbox: sandbox,
+    stateRoot: null,
+    posteriorAlpha: 1,
+    posteriorBeta: 1,
+    score: 0.5,
+    confidence: 0.3,
+    recentResidualMean: 0,
+    recentKillCount: 0,
+    status: "admitted",
+    name: "recipe_replay_test_verifier",
+    fixtureInput: null,
+    fixtureExpectedResidual: 0,
+    intent: null,
+    summary: null,
+    targetFiles: null,
+    sourceCandidateId: null,
+    ownerGateVerdict: null,
+  });
+  const confidence = opts.bumpConfidence === false ? 0.5 : 0.9;
+  const recipeId = emitEvent(db, {
+    kind: "recipe_extracted",
+    substrate_origin: "substrate_auto",
+    directive_id: "d_recipe_seed",
+    task_id: "t_recipe_seed",
+    payload: {
+      goal_shape: "count_files_target_directory::n1",
+      topology_signature: "",
+      confidence,
+      trajectory: [{ step_kind: "action_predicted", artifact_id: action.id, verifier_artifact_id: verifier.id, payload_template: { target_path: tempDir }, predicted_residual: 0 }],
+    },
+  }).id;
+  return { db, recipeId, goalShape: "count_files_target_directory::n1" };
 };
 
 describe("recipe_replay.findRecipeMatch", () => {
