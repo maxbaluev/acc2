@@ -1,25 +1,34 @@
 // acc apply tests: prove the owner/auto gates are target/shape based, not
 // special-cased by lesson kind.
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeDb } from "../substrate/db";
-import { startDaemon, stopDaemon, type DaemonHandle } from "../runtime/daemon";
-import { mcpCall } from "./rpc";
-import { runApply } from "./apply";
+import { closeDb, openDb } from "../substrate/db";
+import { handleCredit, handleEmit, handleGetEvent, handleRead } from "../runtime/mcp_server/substrate_tools";
+import { handleRecentEvents } from "../runtime/mcp_server/runtime_tools";
+import type { McpContext } from "../runtime/mcp_server/types";
 
-const MCP_BASE = 13000;
-const AUX_BASE = 18000;
-const pickMcp = () => MCP_BASE + Math.floor(Math.random() * 1000);
-const pickAux = () => AUX_BASE + Math.floor(Math.random() * 1000);
-
-let handle: DaemonHandle | null = null;
+let db: Database;
 let dir = "";
-let prevPort: string | undefined;
-let prevAuxPort: string | undefined;
+let dbPath = "";
 let directiveSeq = 0;
+let runApply: (argv: string[]) => Promise<number>;
+
+const ctx = (): McpContext => ({ db, invoker: "claude_root" } as McpContext);
+
+const rpc = async (toolName: string, args: Record<string, unknown>) => {
+  switch (toolName) {
+    case "substrate.emit": return handleEmit(ctx(), args as never);
+    case "substrate.read": return handleRead(ctx(), args as never);
+    case "substrate.get_event": return handleGetEvent(ctx(), args as never);
+    case "substrate.credit": return handleCredit(ctx(), args as never);
+    case "runtime.recent_events": return handleRecentEvents(ctx(), args as never);
+    default: return { ok: false as const, error: "unknown_test_rpc:" + toolName };
+  }
+};
 
 const captureConsole = (): { out: string[]; err: string[]; restore: () => void } => {
   const out: string[] = [];
@@ -45,7 +54,7 @@ const emitLesson = async (
   proposedAction: Record<string, unknown>,
   scope = nextScope(),
 ): Promise<string> => {
-  const env = await mcpCall("substrate.emit", {
+  const env = await rpc("substrate.emit", {
     kind: "lesson_extracted",
     substrate_origin: "opencode",
     directive_id: scope.directiveId,
@@ -61,43 +70,28 @@ const emitLesson = async (
 };
 
 const emittedGateReason = async (eventId: string): Promise<string | undefined> => {
-  const statusEnv = await mcpCall("substrate.read", { view_name: "lesson_implementation_status_view" });
+  const statusEnv = await rpc("substrate.read", { view_name: "lesson_implementation_status_view" });
   expect(statusEnv.ok).toBe(true);
   const status = (statusEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
-  const requestEnv = await mcpCall("substrate.get_event", { id: status.request_event_id });
+  const requestEnv = await rpc("substrate.get_event", { id: status.request_event_id });
   expect(requestEnv.ok).toBe(true);
   const requestPayload = rowPayload(requestEnv.result as Record<string, unknown>);
-  const gateEnv = await mcpCall("substrate.get_event", { id: requestPayload.gate_scored_event_id });
+  const gateEnv = await rpc("substrate.get_event", { id: requestPayload.gate_scored_event_id });
   expect(gateEnv.ok).toBe(true);
   return rowPayload(gateEnv.result as Record<string, unknown>).reason as string | undefined;
 };
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "acc2-apply-"));
-  const port = pickMcp();
-  const auxPort = pickAux();
-  handle = await startDaemon({
-    port,
-    auxPort,
-    stateDbPath: join(dir, "apply.db"),
-    socketFile: join(dir, "v2.sock"),
-    tokenFile: join(dir, "v2.sock.token"),
-  });
-  prevPort = process.env.V2_DAEMON_PORT;
-  prevAuxPort = process.env.V2_DAEMON_AUX_PORT;
-  process.env.V2_DAEMON_PORT = String(port);
-  process.env.V2_DAEMON_AUX_PORT = String(auxPort);
+  dbPath = join(dir, "apply.db");
+  db = openDb(dbPath);
+  mock.module("./rpc", () => ({ mcpCall: rpc }));
+  ({ runApply } = await import("./apply"));
 });
 
-afterAll(async () => {
-  if (handle) await stopDaemon(handle);
-  handle = null;
-  closeDb();
+afterAll(() => {
+  closeDb(dbPath);
   rmSync(dir, { recursive: true, force: true });
-  if (prevPort === undefined) delete process.env.V2_DAEMON_PORT;
-  else process.env.V2_DAEMON_PORT = prevPort;
-  if (prevAuxPort === undefined) delete process.env.V2_DAEMON_AUX_PORT;
-  else process.env.V2_DAEMON_AUX_PORT = prevAuxPort;
 });
 
 describe("runApply gates", () => {
@@ -110,13 +104,13 @@ describe("runApply gates", () => {
     expect(code).toBe(1);
     expect(cap.err.join("\n")).toContain("owner_consent_missing");
 
-    const statusEnv = await mcpCall("substrate.read", { view_name: "lesson_implementation_status_view" });
+    const statusEnv = await rpc("substrate.read", { view_name: "lesson_implementation_status_view" });
     expect(statusEnv.ok).toBe(true);
     const status = (statusEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
-    const requestEnv = await mcpCall("substrate.get_event", { id: status.request_event_id });
+    const requestEnv = await rpc("substrate.get_event", { id: status.request_event_id });
     expect(requestEnv.ok).toBe(true);
     const requestPayload = rowPayload(requestEnv.result as Record<string, unknown>);
-    const gateEnv = await mcpCall("substrate.get_event", { id: requestPayload.gate_scored_event_id });
+    const gateEnv = await rpc("substrate.get_event", { id: requestPayload.gate_scored_event_id });
     expect(gateEnv.ok).toBe(true);
     const gateScore = gateEnv.result as Record<string, unknown>;
     expect(Number(gateScore.residual)).toBe(1);
@@ -126,7 +120,7 @@ describe("runApply gates", () => {
   test("prior owner_decision_recorded satisfies protected target gate", async () => {
     const scope = nextScope();
     const eventId = await emitLesson({ file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" }, scope);
-    const decision = await mcpCall("substrate.emit", {
+    const decision = await rpc("substrate.emit", {
       kind: "owner_decision_recorded",
       substrate_origin: "owner",
       directive_id: scope.directiveId,
@@ -155,13 +149,13 @@ describe("runApply gates", () => {
     expect(cap.out.join("\n")).toContain("AUTO-APPLY GATE");
     expect(cap.out.join("\n")).toContain("proposed_action");
 
-    const statusEnv = await mcpCall("substrate.read", { view_name: "lesson_implementation_status_view" });
+    const statusEnv = await rpc("substrate.read", { view_name: "lesson_implementation_status_view" });
     expect(statusEnv.ok).toBe(true);
     const status = (statusEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
-    const requestEnv = await mcpCall("substrate.get_event", { id: status.request_event_id });
+    const requestEnv = await rpc("substrate.get_event", { id: status.request_event_id });
     expect(requestEnv.ok).toBe(true);
     const requestPayload = rowPayload(requestEnv.result as Record<string, unknown>);
-    const gateEnv = await mcpCall("substrate.get_event", { id: requestPayload.gate_scored_event_id });
+    const gateEnv = await rpc("substrate.get_event", { id: requestPayload.gate_scored_event_id });
     expect(gateEnv.ok).toBe(true);
     const gateScore = gateEnv.result as Record<string, unknown>;
     expect(Number(gateScore.residual)).toBe(0);
@@ -195,13 +189,13 @@ describe("runApply gates", () => {
     expect(cap.out.join("\n")).toContain("AUTO-APPLY GATE");
     expect(cap.out.join("\n")).toContain("cli/apply.ts");
 
-    const statusEnv = await mcpCall("substrate.read", { view_name: "lesson_implementation_status_view" });
+    const statusEnv = await rpc("substrate.read", { view_name: "lesson_implementation_status_view" });
     expect(statusEnv.ok).toBe(true);
     const status = (statusEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
-    const requestEnv = await mcpCall("substrate.get_event", { id: status.request_event_id });
+    const requestEnv = await rpc("substrate.get_event", { id: status.request_event_id });
     expect(requestEnv.ok).toBe(true);
     const requestPayload = rowPayload(requestEnv.result as Record<string, unknown>);
-    const gateEnv = await mcpCall("substrate.get_event", { id: requestPayload.gate_scored_event_id });
+    const gateEnv = await rpc("substrate.get_event", { id: requestPayload.gate_scored_event_id });
     expect(gateEnv.ok).toBe(true);
     const gateScore = gateEnv.result as Record<string, unknown>;
     expect(Number(gateScore.residual)).toBe(0);
@@ -210,7 +204,7 @@ describe("runApply gates", () => {
 
   test("contract_amendment_proposed prompt renders structured proposed_behavior and explicit gates", async () => {
     const scope = nextScope();
-    const env = await mcpCall("substrate.emit", {
+    const env = await rpc("substrate.emit", {
       kind: "contract_amendment_proposed",
       substrate_origin: "opencode",
       directive_id: scope.directiveId,
@@ -256,7 +250,7 @@ describe("runApply gates", () => {
 
   test("auto-apply target accepts unstructured proposals (universal verifier scores them)", async () => {
     const scope = nextScope();
-    const env = await mcpCall("substrate.emit", {
+    const env = await rpc("substrate.emit", {
       kind: "contract_amendment_proposed",
       substrate_origin: "opencode",
       directive_id: scope.directiveId,
@@ -281,7 +275,7 @@ describe("runApply gates", () => {
   test("auto-apply target proceeds on hazardous trajectories (residual decides, not the hazard count)", async () => {
     const scope = nextScope();
     const eventId = await emitLesson({ file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" }, scope);
-    const hazard = await mcpCall("substrate.emit", {
+    const hazard = await rpc("substrate.emit", {
       kind: "dispatcher_violation",
       substrate_origin: "substrate",
       directive_id: scope.directiveId,
@@ -301,7 +295,7 @@ describe("runApply gates", () => {
   test("directive-scoped owner_decision_recorded satisfies protected target gate", async () => {
     const scope = nextScope();
     const eventId = await emitLesson({ file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" }, scope);
-    const decision = await mcpCall("substrate.emit", {
+    const decision = await rpc("substrate.emit", {
       kind: "owner_decision_recorded",
       substrate_origin: "owner",
       directive_id: scope.directiveId,
@@ -320,7 +314,7 @@ describe("runApply gates", () => {
 
   test("protected structured file_path requires consent even when top-level target is safe", async () => {
     const scope = nextScope();
-    const env = await mcpCall("substrate.emit", {
+    const env = await rpc("substrate.emit", {
       kind: "contract_amendment_proposed",
       substrate_origin: "opencode",
       directive_id: scope.directiveId,
@@ -344,7 +338,7 @@ describe("runApply gates", () => {
 
   test("owner_decision_recorded mixed protected target does not fall through to auto-apply shape gate", async () => {
     const scope = nextScope();
-    const env = await mcpCall("substrate.emit", {
+    const env = await rpc("substrate.emit", {
       kind: "contract_amendment_proposed",
       substrate_origin: "opencode",
       directive_id: scope.directiveId,
@@ -358,7 +352,7 @@ describe("runApply gates", () => {
     expect(env.ok).toBe(true);
     const eventId = (env.result as { id: string }).id;
 
-    const decision = await mcpCall("substrate.emit", {
+    const decision = await rpc("substrate.emit", {
       kind: "owner_decision_recorded",
       substrate_origin: "owner",
       directive_id: scope.directiveId,
@@ -400,7 +394,7 @@ describe("runApply gates", () => {
     expect(cap.out.join("\n")).toContain("verifier_failed");
     expect(cap.out.join("\n")).not.toContain("lesson_applied");
 
-    const statusEnv = await mcpCall("substrate.read", { view_name: "lesson_implementation_status_view" });
+    const statusEnv = await rpc("substrate.read", { view_name: "lesson_implementation_status_view" });
     expect(statusEnv.ok).toBe(true);
     const status = (statusEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
     expect(status.scored_event_id).toBeTruthy();
@@ -412,7 +406,7 @@ describe("runApply gates", () => {
     expect(status.committed_event_id).toBeNull();
     expect(status.flywheel_status).toBe("applied");
 
-    const queueEnv = await mcpCall("substrate.read", { view_name: "lesson_implementer_queue_view" });
+    const queueEnv = await rpc("substrate.read", { view_name: "lesson_implementer_queue_view" });
     expect(queueEnv.ok).toBe(true);
     const queued = (queueEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
     expect(queued.apply_event_id).toBeTruthy();
