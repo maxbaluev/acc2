@@ -655,27 +655,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     workers.push(() => clearInterval(extractorsTickHandle));
   }
 
-  // Auto-apply worker (brain proposal DGT1MKXY, 2026-05-15): scans
-  // lesson_implementer_queue_view for auto_apply_eligible rows and emits
-  // auto_apply_signaled events. Stage-1 only emits signals (orchestrator
-  // picks up the work); stage-2 (future) will do the mechanical apply.
-  // 60s tick is conservative — apply-eligible rows accumulate slowly.
-  const AUTO_APPLY_INTERVAL_MS = Number(process.env.ACC2_AUTO_APPLY_INTERVAL_MS ?? 60 * 1000);
-  if (isWorkerEnabled("auto_apply")) {
-    const { runAutoApplyWorkerTick } = await import("./auto_apply_worker");
-    let autoApplyMarked = false;
-    const autoApplyTickHandle = setInterval(
-      supervisedTick(db, "auto_apply", AUTO_APPLY_INTERVAL_MS, async () => {
-        runAutoApplyWorkerTick(db);
-        if (!autoApplyMarked) { markWorkerReady("auto_apply"); autoApplyMarked = true; }
-      }),
-      AUTO_APPLY_INTERVAL_MS,
-    );
-    markWorkerReady("auto_apply");
-    autoApplyMarked = true;
-    recordWorkerTick("auto_apply");
-    workers.push(() => clearInterval(autoApplyTickHandle));
-  }
+  // auto_apply worker deleted (owner-approved 2026-05-16): the orchestrator
+  // (Claude Code) reads brain proposals directly via MCP and decides inline
+  // vs Agent subagent per the scored low_risk_inline lane. No autonomous
+  // landing path; the operator-driven loop closes credit via cli/apply.ts.
 
   // Brain audit bqlr29psq (2026-05-15): daemon source hot-reload worker.
   // Watches runtime/, substrate/, cli/ via fs.watch (recursive). When a
