@@ -1,10 +1,12 @@
 // acc2 recipe replay tests — Phase J (v2-design.md §15).
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Database } from "bun:sqlite";
 import { closeDb, openDb } from "../substrate/db";
+import type { JsonValue } from "../substrate/types";
 import { runViews } from "../substrate/views";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
@@ -14,10 +16,10 @@ import {
   replayRecipe,
   updateRecipeConfidence,
   RECIPE_DEFAULT_MIN_CONFIDENCE,
+  type RecipeArtifactRunner,
 } from "./recipe_replay";
 import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { readDagForDirective, type TaskNode } from "./task_topology";
-import { admitArtifact } from "./artifact_admission";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -25,6 +27,85 @@ beforeEach(() => closeDb());
 // Build the replay fixture directly instead of driving three full dispatcher
 // cycles. Extractor coverage lives in substrate/extractors.test.ts; these tests
 // only need a matching recipe row plus runnable action/verifier artifacts.
+const TEST_BUN_SANDBOX = { runtime: "bun" as const, fs_read: ["**/*"], fs_write: [], net_allow: [], proc_allow: [], cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 };
+
+const insertRecipeReplayTestArtifact = (db: ReturnType<typeof openDb>, body: string, name: string) => insertArtifact(db, {
+  runtime: "bun",
+  body,
+  declaredSandbox: TEST_BUN_SANDBOX,
+  stateRoot: null,
+  posteriorAlpha: 1,
+  posteriorBeta: 1,
+  score: 0.5,
+  confidence: 0.3,
+  recentResidualMean: 0,
+  recentKillCount: 0,
+  status: "admitted",
+  name,
+  fixtureInput: null,
+  fixtureExpectedResidual: 0,
+  intent: null,
+  summary: null,
+  targetFiles: null,
+  sourceCandidateId: null,
+  ownerGateVerdict: null,
+});
+
+const recordFromJson = (value: JsonValue): Record<string, JsonValue> => (
+  value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, JsonValue>
+    : {}
+);
+
+const countTodos = (dir: string): number => {
+  let count = 0;
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name);
+    const st = statSync(full);
+    if (st.isDirectory()) count += countTodos(full);
+    else if (st.isFile() && readFileSync(full, "utf8").includes("TODO")) count++;
+  }
+  return count;
+};
+
+const runRecipeReplayTestArtifact: RecipeArtifactRunner = async (
+  db: Database,
+  artifactId: string,
+  inputs: JsonValue,
+) => {
+  const row = db.query("SELECT name FROM code_artifact WHERE id = ?").get(artifactId) as { name: string | null } | null;
+  if (!row) return { ok: false, result: null, error: "artifact_not_found" };
+  const name = row.name ?? "";
+  const inputRecord = recordFromJson(inputs);
+
+  if (name.includes("bad_verifier") || name.includes("failing_verifier")) {
+    return { ok: true, result: { residual: 1 } };
+  }
+  if (name === "recipe_replay_test_verifier") {
+    const result = recordFromJson(inputRecord.result ?? null);
+    return { ok: true, result: { residual: Number.isInteger(result.count) ? 0 : 1 } };
+  }
+  if (name.includes("verifier")) {
+    return { ok: true, result: { residual: 0 } };
+  }
+  if (name === "recipe_replay_test_action") {
+    const targetPath = typeof inputRecord.target_path === "string" ? inputRecord.target_path : ".";
+    return { ok: true, result: { result: { count: countTodos(targetPath) } } };
+  }
+  if (name.includes("step_one_action")) {
+    return { ok: true, result: { phase: "step_one_done", echo: inputs } };
+  }
+  if (name.includes("step_two_action")) {
+    return { ok: true, result: { phase: "step_two_done", upstream: inputs } };
+  }
+  if (name.includes("partial_step")) {
+    return { ok: true, result: { phase: "done" } };
+  }
+  return { ok: true, result: {} };
+};
+
+const replayTestOpts = { runArtifact: runRecipeReplayTestArtifact };
+
 const seedThreeSuccessRecipe = async (
   tempDir: string,
   opts: { bumpConfidence?: boolean } = {},
@@ -35,7 +116,6 @@ const seedThreeSuccessRecipe = async (
 }> => {
   const db = openDb(":memory:");
   runViews(db);
-  const sandbox = { runtime: "bun" as const, fs_read: ["**/*"], fs_write: [], net_allow: [], proc_allow: [], cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 };
   const action = insertArtifact(db, {
     runtime: "bun",
     body: [
@@ -47,7 +127,7 @@ const seedThreeSuccessRecipe = async (
       "walk(inputs.target_path ?? './');",
       "console.log('@@RESULT@@ ' + JSON.stringify({ result: { count } }));",
     ].join("\n"),
-    declaredSandbox: sandbox,
+    declaredSandbox: TEST_BUN_SANDBOX,
     stateRoot: null,
     posteriorAlpha: 1,
     posteriorBeta: 1,
@@ -68,7 +148,7 @@ const seedThreeSuccessRecipe = async (
   const verifier = insertArtifact(db, {
     runtime: "bun",
     body: "const observation = JSON.parse(process.env.ACC2_INPUTS ?? 'null') ?? {}; const ok = Number.isInteger(observation?.result?.count); console.log('@@RESULT@@ ' + JSON.stringify({ residual: ok ? 0 : 1 }));",
-    declaredSandbox: sandbox,
+    declaredSandbox: TEST_BUN_SANDBOX,
     stateRoot: null,
     posteriorAlpha: 1,
     posteriorBeta: 1,
@@ -181,7 +261,7 @@ describe("recipe_replay.replayRecipe", () => {
       const match = findRecipeMatch(db, task);
       expect(match).not.toBeNull();
 
-      const outcome = await replayRecipe(db, task, match!);
+      const outcome = await replayRecipe(db, task, match!, replayTestOpts);
       expect(outcome.task_committed).toBe(true);
       expect(outcome.abort_reason).toBeUndefined();
 
@@ -253,27 +333,18 @@ describe("recipe_replay.replayRecipe", () => {
       const { db, recipeId } = await seedThreeSuccessRecipe(tempDir);
       // Replace the recipe's verifier artifact with one that always returns
       // residual = 1. We need a verifier whose body unconditionally outputs
-      // {residual: 1}, admit it, and rewrite the recipe payload.
+      // {residual: 1}, insert it, and rewrite the recipe payload.
       const badVerifierBody = [
         "const result = { residual: 1 };",
         "console.log('@@RESULT@@ ' + JSON.stringify(result));",
       ].join("\n");
 
-      // Admit through the artifact pipeline. The admission fixture passes
-      // because we explicitly set fixtureExpectedResidualBelow=1.1.
-      const admission = await admitArtifact(
+      const badVerifier = insertRecipeReplayTestArtifact(
         db,
-        {
-          runtime: "bun",
-          body: badVerifierBody,
-          declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
-          fixtureInput: {},
-          fixtureExpectedResidualBelow: 1.1,
-        },
-        (ev) => { emitEvent(db, ev); },
+        badVerifierBody,
+        "recipe_replay_test_bad_verifier",
       );
-      expect(admission.ok).toBe(true);
-      const badVerifierId = admission.ok ? admission.artifactId : "";
+      const badVerifierId = badVerifier.id;
 
       // Rewrite EVERY recipe_extracted row's trajectory to point at the bad
       // verifier (the matcher will pick the freshest by ts, which is a
@@ -304,7 +375,7 @@ describe("recipe_replay.replayRecipe", () => {
       const actionStep = match!.trajectory.find((s) => s.step_kind === "action_predicted")!;
       expect(actionStep.verifier_artifact_id).toBe(badVerifierId);
 
-      const outcome = await replayRecipe(db, task, match!);
+      const outcome = await replayRecipe(db, task, match!, replayTestOpts);
       expect(outcome.task_committed).toBe(false);
       expect(outcome.abort_reason).toBe("verifier_residual_above_threshold");
       expect(outcome.residuals[0]).toBe(1);
@@ -332,56 +403,35 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
       "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
       "console.log('@@RESULT@@ ' + JSON.stringify({ phase: 'step_one_done', echo: inputs }));",
     ].join("\n");
-    const action1 = await admitArtifact(
+    const action1 = insertRecipeReplayTestArtifact(
       db,
-      {
-        runtime: "bun",
-        body: action1Body,
-        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
-        fixtureInput: {},
-        fixtureExpectedResidualBelow: 1.1,
-      },
-      (ev) => { emitEvent(db, ev); },
+      action1Body,
+      "recipe_replay_test_step_one_action",
     );
-    expect(action1.ok).toBe(true);
-    const action1Id = action1.ok ? action1.artifactId : "";
+    const action1Id = action1.id;
 
     // Action 2 — its result also goes through a verifier.
     const action2Body = [
       "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
       "console.log('@@RESULT@@ ' + JSON.stringify({ phase: 'step_two_done', upstream: inputs }));",
     ].join("\n");
-    const action2 = await admitArtifact(
+    const action2 = insertRecipeReplayTestArtifact(
       db,
-      {
-        runtime: "bun",
-        body: action2Body,
-        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
-        fixtureInput: {},
-        fixtureExpectedResidualBelow: 1.1,
-      },
-      (ev) => { emitEvent(db, ev); },
+      action2Body,
+      "recipe_replay_test_step_two_action",
     );
-    expect(action2.ok).toBe(true);
-    const action2Id = action2.ok ? action2.artifactId : "";
+    const action2Id = action2.id;
 
     // Shared verifier — always passes (residual = 0).
     const verifierBody = [
       "console.log('@@RESULT@@ ' + JSON.stringify({ residual: 0 }));",
     ].join("\n");
-    const verifier = await admitArtifact(
+    const verifier = insertRecipeReplayTestArtifact(
       db,
-      {
-        runtime: "bun",
-        body: verifierBody,
-        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
-        fixtureInput: {},
-        fixtureExpectedResidualBelow: 1.1,
-      },
-      (ev) => { emitEvent(db, ev); },
+      verifierBody,
+      "recipe_replay_test_passing_verifier",
     );
-    expect(verifier.ok).toBe(true);
-    const verifierId = verifier.ok ? verifier.artifactId : "";
+    const verifierId = verifier.id;
 
     // Hand-roll a recipe_extracted row whose trajectory has TWO action steps.
     const recipeRow = emitEvent(db, {
@@ -434,10 +484,8 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
     expect(outcome.residuals.length).toBe(2);
     expect(outcome.residuals.every((r) => r === 0)).toBe(true);
 
-    // Both action artifacts MUST have been invoked — one artifact_invoked
-    // event per step (artifact_admission already burns one fixture run,
-    // so we count action_predicted rows from substrate_origin='recipe'
-    // for THIS task).
+    // Both action artifacts MUST have been invoked via replay. Count
+    // action_predicted rows from substrate_origin='recipe' for THIS task.
     const recipePredicted = db
       .query(
         "SELECT action_artifact_id, payload FROM events WHERE kind = 'action_predicted' AND substrate_origin = 'recipe' AND task_id = ?",
@@ -493,57 +541,33 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
     const actionBody = [
       "console.log('@@RESULT@@ ' + JSON.stringify({ phase: 'done' }));",
     ].join("\n");
-    const action1 = await admitArtifact(
+    const action1 = insertRecipeReplayTestArtifact(
       db,
-      {
-        runtime: "bun",
-        body: actionBody,
-        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
-        fixtureInput: {},
-        fixtureExpectedResidualBelow: 1.1,
-      },
-      (ev) => { emitEvent(db, ev); },
+      actionBody,
+      "recipe_replay_test_partial_step_one_action",
     );
-    const action2 = await admitArtifact(
+    const action2 = insertRecipeReplayTestArtifact(
       db,
-      {
-        runtime: "bun",
-        body: actionBody,
-        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
-        fixtureInput: {},
-        fixtureExpectedResidualBelow: 1.1,
-      },
-      (ev) => { emitEvent(db, ev); },
+      actionBody,
+      "recipe_replay_test_partial_step_two_action",
     );
 
     const goodVerifierBody = "console.log('@@RESULT@@ ' + JSON.stringify({ residual: 0 }));";
     const badVerifierBody = "console.log('@@RESULT@@ ' + JSON.stringify({ residual: 1 }));";
-    const goodVerifier = await admitArtifact(
+    const goodVerifier = insertRecipeReplayTestArtifact(
       db,
-      {
-        runtime: "bun",
-        body: goodVerifierBody,
-        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
-        fixtureInput: {},
-        fixtureExpectedResidualBelow: 1.1,
-      },
-      (ev) => { emitEvent(db, ev); },
+      goodVerifierBody,
+      "recipe_replay_test_partial_passing_verifier",
     );
-    const badVerifier = await admitArtifact(
+    const badVerifier = insertRecipeReplayTestArtifact(
       db,
-      {
-        runtime: "bun",
-        body: badVerifierBody,
-        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
-        fixtureInput: {},
-        fixtureExpectedResidualBelow: 1.1,
-      },
-      (ev) => { emitEvent(db, ev); },
+      badVerifierBody,
+      "recipe_replay_test_partial_failing_verifier",
     );
-    const action1Id = action1.ok ? action1.artifactId : "";
-    const action2Id = action2.ok ? action2.artifactId : "";
-    const goodVerifierId = goodVerifier.ok ? goodVerifier.artifactId : "";
-    const badVerifierId = badVerifier.ok ? badVerifier.artifactId : "";
+    const action1Id = action1.id;
+    const action2Id = action2.id;
+    const goodVerifierId = goodVerifier.id;
+    const badVerifierId = badVerifier.id;
 
     emitEvent(db, {
       kind: "recipe_extracted",

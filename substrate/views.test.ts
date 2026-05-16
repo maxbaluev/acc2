@@ -306,7 +306,7 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     insertEvent(db, { kind: "brain_dispatch_closed", directive_id: "d_done", task_id: "t_done", payload: { dispatch_id: "disp_done" } });
     insertEvent(db, { kind: "task_committed", directive_id: "d_done", task_id: "t_done" });
     insertEvent(db, { kind: "task_failed", directive_id: "d_fail", task_id: "t_fail", failure_kind: "bridge_failed" });
-    insertEvent(db, { kind: "constitutional_gate_decision", directive_id: "d_cap", task_id: "t_cap", payload: { gate: "brain_concurrency_cap", reason: "opencode_brain_in_flight_at_cap" } });
+    const capEventId = insertEvent(db, { kind: "constitutional_gate_decision", directive_id: "d_cap", task_id: "t_cap", payload: { gate: "brain_concurrency_cap", reason: "opencode_brain_in_flight_at_cap" } });
     insertEvent(db, { kind: "brain_dispatched", directive_id: "d_zombie", task_id: "t_zombie", ts: oldTs, payload: { dispatch_id: "disp_zombie" } });
 
     const byDirective = new Map(dispatchResolved(db).map((r) => [r.directive_id, r]));
@@ -315,7 +315,24 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(byDirective.get("d_done")?.terminal_kind).toBe("task_committed");
     expect(byDirective.get("d_fail")?.lifecycle_status).toBe("failed");
     expect(byDirective.get("d_cap")?.lifecycle_status).toBe("queued_at_cap");
+    expect(byDirective.get("d_cap")?.latest_event_id).toBe(capEventId);
     expect(byDirective.get("d_zombie")?.lifecycle_status).toBe("zombie");
+  });
+
+  test("surfaces queued_at_cap after a prior closed dispatch", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_requeue", task_id: "t_requeue" });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_requeue", task_id: "t_requeue", payload: { dispatch_id: "disp_requeue" } });
+    insertEvent(db, { kind: "brain_dispatch_closed", directive_id: "d_requeue", task_id: "t_requeue", payload: { dispatch_id: "disp_requeue" } });
+    const capEventId = insertEvent(db, { kind: "constitutional_gate_decision", directive_id: "d_requeue", task_id: "t_requeue", payload: { gate: "brain_concurrency_cap", reason: "opencode_brain_in_flight_at_cap", cap: 5, in_flight_brain: 5 } });
+
+    const [row] = dispatchResolved(db, { directiveId: "d_requeue", rootTaskId: "t_requeue" });
+    expect(row?.lifecycle_status).toBe("queued_at_cap");
+    expect(row?.status_reason).toBe("opencode_brain_in_flight_at_cap");
+    expect(row?.latest_event_id).toBe(capEventId);
+    expect(row?.cap).toBe(5);
+    expect(row?.in_flight_brain).toBe(5);
   });
 
   test("groups child dispatch events under the root task id and supports filters", () => {

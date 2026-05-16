@@ -431,17 +431,33 @@ export const formatFollowHeartbeat = (
 type DispatchResolvedLike = {
   directive_id?: string;
   root_task_id?: string;
-  status?: string;
+  lifecycle_status?: string;
   status_reason?: string | null;
+  terminal_kind?: string | null;
+  failure_kind?: string | null;
 };
 
+const RESOLVED_TERMINAL_STATUSES = new Set(["completed", "failed"]);
+
+export const resolveRootTaskIdFlag = (flags: Record<string, string | boolean>): string | undefined => {
+  const explicit = flags["root-task-id"] ?? flags.root;
+  return typeof explicit === "string" && explicit.length > 0 ? explicit : undefined;
+};
+
+const resolvedLifecycleStatus = (row: DispatchResolvedLike): string =>
+  row.lifecycle_status ?? "unknown";
+
+const resolvedStatusReason = (row: DispatchResolvedLike): string | null =>
+  row.status_reason ?? row.terminal_kind ?? row.failure_kind ?? null;
+
 export const formatFollowTerminalSentinel = (row: DispatchResolvedLike): string => {
+  const reason = resolvedStatusReason(row);
   const parts = [
     "ACC_TASK_TERMINAL",
     `directive=${idPrefix(row.directive_id, 16)}`,
     `root=${idPrefix(row.root_task_id, 16)}`,
-    `status=${row.status ?? "unknown"}`,
-    row.status_reason ? `reason=${row.status_reason}` : "",
+    `status=${resolvedLifecycleStatus(row)}`,
+    reason ? `reason=${reason}` : "",
   ].filter(Boolean);
   return trunc(parts.join(" "), MAX_EVENT_LINE_CHARS);
 };
@@ -454,7 +470,7 @@ const readResolvedTerminalRow = async (opts: TailOpts): Promise<DispatchResolved
   }, { timeoutMs: 3_000 }).catch(() => null);
   if (!env?.ok) return null;
   const row = ((env.result as DispatchResolvedLike[] | undefined) ?? [])[0];
-  if (!row || !RESOLVED_TERMINAL_STATUSES.has(row.status ?? "")) return null;
+  if (!row || !RESOLVED_TERMINAL_STATUSES.has(resolvedLifecycleStatus(row))) return null;
   return row;
 };
 
@@ -695,6 +711,7 @@ const runTailPoll = async (opts: TailOpts): Promise<number> => {
   const exitOnTerminal = opts.exitOnTerminal ?? Boolean(opts.task || opts.directive);
   const deadlineMs = opts.deadlineMs;
   const seen = new Set<string>();
+  const canReadResolvedDispatch = Boolean(opts.directive && opts.rootTaskId);
   const startedAt = Date.now();
   const counters: HeartbeatCounters = { events: 0, nodes: 0, proposals: 0, cycle: 1, maxCycles: 1 };
   // First heartbeat scheduled for t+FOLLOW_HEARTBEAT_MS — NOT t+0. Same
@@ -751,7 +768,10 @@ const runTailPoll = async (opts: TailOpts): Promise<number> => {
       }
     }
     if (exitOnTerminal && await emitResolvedTerminalSentinel(opts)) return 0;
-    if (sawTerminal && exitOnTerminal) return 0;
+    // For acc task fallback polling, dispatch_resolved_view is authoritative;
+    // raw terminal events are only sufficient for generic acc tail scopes that
+    // do not carry the directive/root pair needed to query the projection.
+    if (sawTerminal && exitOnTerminal && !canReadResolvedDispatch) return 0;
     if (deadlineMs && Date.now() > deadlineMs) {
       console.error("acc tail: deadline exceeded (no terminal event)");
       return 2;
@@ -946,6 +966,7 @@ export const runObserve = async (cmd: string, argv: string[]): Promise<number> =
         directive: typeof flags.directive === "string" ? flags.directive : undefined,
         kind: typeof flags.kind === "string" ? flags.kind : undefined,
         verbose: Boolean(flags.verbose),
+        rootTaskId: resolveRootTaskIdFlag(flags),
         pollMs: flags["poll-ms"] ? Number(flags["poll-ms"]) : undefined,
         deadlineMs: flags.timeout
           ? Date.now() + Number(flags.timeout) * 1000

@@ -1934,6 +1934,8 @@ dispatch_summary AS (
     d.directive_id,
     d.root_task_id,
     COUNT(*) AS dispatched_count,
+    MAX(d.dispatch_event_id) AS dispatch_event_id,
+    MAX(d.dispatch_id) AS dispatch_id,
     SUM(CASE WHEN NOT EXISTS (
       SELECT 1 FROM closes c
       WHERE c.directive_id = d.directive_id
@@ -1955,7 +1957,11 @@ dispatch_summary AS (
   GROUP BY d.directive_id, d.root_task_id
 ),
 close_summary AS (
-  SELECT directive_id, root_task_id, MAX(close_ts) AS latest_closed_at
+  SELECT
+    directive_id,
+    root_task_id,
+    MAX(close_ts) AS latest_closed_at,
+    MAX(close_event_id) AS close_event_id
   FROM closes
   GROUP BY directive_id, root_task_id
 ),
@@ -1967,7 +1973,8 @@ terminal_ranked AS (
     e.ts AS terminal_at,
     e.kind AS terminal_kind,
     e.failure_kind,
-    ROW_NUMBER() OVER (PARTITION BY t.directive_id, t.root_task_id ORDER BY e.ts DESC) AS rn
+    e.residual,
+    ROW_NUMBER() OVER (PARTITION BY t.directive_id, t.root_task_id ORDER BY CASE WHEN e.kind IN ('task_failed', 'dispatcher_violation') THEN 0 ELSE 1 END, e.ts DESC) AS rn
   FROM tree t
   JOIN events e
     ON e.directive_id = t.directive_id
@@ -1977,29 +1984,81 @@ terminal_ranked AS (
 terminal AS (
   SELECT * FROM terminal_ranked WHERE rn = 1
 ),
-cap_gate AS (
+cap_gate_ranked AS (
   SELECT
     t.directive_id,
     t.root_task_id,
-    MAX(g.ts) AS latest_cap_gate_at
+    g.id AS latest_cap_gate_event_id,
+    g.ts AS latest_cap_gate_at,
+    json_extract(g.payload, '$.reason') AS queued_reason,
+    CAST(json_extract(g.payload, '$.cap') AS INTEGER) AS cap,
+    CAST(json_extract(g.payload, '$.in_flight_brain') AS INTEGER) AS in_flight_brain,
+    ROW_NUMBER() OVER (PARTITION BY t.directive_id, t.root_task_id ORDER BY g.ts DESC) AS rn
   FROM tree t
   JOIN events g
     ON g.directive_id = t.directive_id
    AND g.task_id = t.task_id
    AND g.kind = 'constitutional_gate_decision'
    AND json_extract(g.payload, '$.gate') = 'brain_concurrency_cap'
-  GROUP BY t.directive_id, t.root_task_id
 ),
-ready AS (
+cap_gate AS (
+  SELECT * FROM cap_gate_ranked WHERE rn = 1
+),
+ready_ranked AS (
   SELECT
     t.directive_id,
     t.root_task_id,
-    MIN(r.ts) AS ready_since
+    r.event_id AS ready_event_id,
+    r.ts AS ready_since,
+    ROW_NUMBER() OVER (PARTITION BY t.directive_id, t.root_task_id ORDER BY r.ts ASC) AS rn
   FROM tree t
   JOIN ready_tasks_view r
     ON r.directive_id = t.directive_id
    AND r.task_id = t.task_id
-  GROUP BY t.directive_id, t.root_task_id
+),
+ready AS (
+  SELECT directive_id, root_task_id, ready_event_id, ready_since
+  FROM ready_ranked
+  WHERE rn = 1
+),
+signals AS (
+  SELECT directive_id, root_task_id, NULL AS event_id, root_opened_ts AS ts, 'root_opened' AS reason
+  FROM roots
+  UNION ALL
+  SELECT directive_id, root_task_id, dispatch_event_id, latest_dispatched_at, 'brain_dispatched'
+  FROM dispatch_summary
+  WHERE latest_dispatched_at IS NOT NULL
+  UNION ALL
+  SELECT directive_id, root_task_id, close_event_id, latest_closed_at, 'brain_dispatch_closed'
+  FROM close_summary
+  WHERE latest_closed_at IS NOT NULL
+  UNION ALL
+  SELECT directive_id, root_task_id, terminal_event_id, terminal_at, terminal_kind
+  FROM terminal
+  WHERE terminal_at IS NOT NULL
+  UNION ALL
+  SELECT directive_id, root_task_id, latest_cap_gate_event_id, latest_cap_gate_at, COALESCE(queued_reason, 'queued_at_cap')
+  FROM cap_gate
+  WHERE latest_cap_gate_at IS NOT NULL
+  UNION ALL
+  SELECT directive_id, root_task_id, ready_event_id, ready_since, 'ready'
+  FROM ready
+  WHERE ready_since IS NOT NULL
+),
+signal_ranked AS (
+  SELECT
+    directive_id,
+    root_task_id,
+    event_id,
+    ts,
+    reason,
+    ROW_NUMBER() OVER (PARTITION BY directive_id, root_task_id ORDER BY ts DESC, COALESCE(event_id, '') DESC) AS rn
+  FROM signals
+),
+latest_signal AS (
+  SELECT directive_id, root_task_id, event_id AS latest_event_id, ts AS latest_ts, reason AS latest_signal_reason
+  FROM signal_ranked
+  WHERE rn = 1
 )
 SELECT
   r.directive_id,
@@ -2011,35 +2070,68 @@ SELECT
          AND ds.oldest_open_dispatched_at IS NOT NULL
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) BETWEEN 300001 AND 86400000
       THEN 'zombie'
+    WHEN cg.latest_cap_gate_at IS NOT NULL
+         AND COALESCE(ds.open_dispatch_count, 0) = 0
+      THEN 'queued_at_cap'
     WHEN COALESCE(ds.dispatched_count, 0) > 0 THEN 'live'
-    WHEN cg.latest_cap_gate_at IS NOT NULL THEN 'queued_at_cap'
+    ELSE 'live'
+  END AS status,
+  CASE
+    WHEN term.terminal_kind = 'task_committed' THEN 'completed'
+    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
+    WHEN COALESCE(ds.open_dispatch_count, 0) > 0
+         AND ds.oldest_open_dispatched_at IS NOT NULL
+         AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) BETWEEN 300001 AND 86400000
+      THEN 'zombie'
+    WHEN cg.latest_cap_gate_at IS NOT NULL
+         AND COALESCE(ds.open_dispatch_count, 0) = 0
+      THEN 'queued_at_cap'
+    WHEN COALESCE(ds.dispatched_count, 0) > 0 THEN 'live'
     ELSE 'live'
   END AS lifecycle_status,
   COALESCE(ds.dispatched_count, 0) AS dispatched_count,
   COALESCE(ds.open_dispatch_count, 0) AS open_dispatch_count,
+  ds.dispatch_id,
+  ds.dispatch_event_id,
   ds.latest_dispatched_at,
   ds.oldest_open_dispatched_at,
   cs.latest_closed_at,
+  cs.close_event_id,
   term.terminal_event_id,
   term.terminal_at,
   term.terminal_kind,
   term.failure_kind,
+  term.residual,
   cg.latest_cap_gate_at,
+  cg.latest_cap_gate_event_id,
+  cg.queued_reason,
+  cg.cap,
+  cg.in_flight_brain,
   ready.ready_since,
-  NULLIF(MAX(
-    COALESCE(term.terminal_at, ''),
-    COALESCE(ds.latest_dispatched_at, ''),
-    COALESCE(cs.latest_closed_at, ''),
-    COALESCE(cg.latest_cap_gate_at, ''),
-    COALESCE(ready.ready_since, ''),
-    COALESCE(r.root_opened_ts, '')
-  ), '') AS latest_signal_at
+  ls.latest_ts AS latest_signal_at,
+  ls.latest_ts,
+  CAST((julianday('now') - julianday(ls.latest_ts)) * 86400000 AS INTEGER) AS age_ms,
+  CASE
+    WHEN term.terminal_kind IS NOT NULL THEN term.terminal_kind
+    WHEN COALESCE(ds.open_dispatch_count, 0) > 0
+         AND ds.oldest_open_dispatched_at IS NOT NULL
+         AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) BETWEEN 300001 AND 86400000
+      THEN 'open_dispatch_zombie'
+    WHEN COALESCE(ds.open_dispatch_count, 0) > 0 THEN 'brain_dispatch_open'
+    WHEN cg.latest_cap_gate_at IS NOT NULL
+         AND COALESCE(ds.open_dispatch_count, 0) = 0
+      THEN COALESCE(cg.queued_reason, 'queued_at_cap')
+    WHEN ready.ready_since IS NOT NULL THEN 'ready'
+    ELSE COALESCE(ls.latest_signal_reason, 'root_opened')
+  END AS status_reason,
+  ls.latest_event_id
 FROM roots r
 LEFT JOIN dispatch_summary ds ON ds.directive_id = r.directive_id AND ds.root_task_id = r.root_task_id
 LEFT JOIN close_summary cs ON cs.directive_id = r.directive_id AND cs.root_task_id = r.root_task_id
 LEFT JOIN terminal term ON term.directive_id = r.directive_id AND term.root_task_id = r.root_task_id
 LEFT JOIN cap_gate cg ON cg.directive_id = r.directive_id AND cg.root_task_id = r.root_task_id
-LEFT JOIN ready ON ready.directive_id = r.directive_id AND ready.root_task_id = r.root_task_id;
+LEFT JOIN ready ON ready.directive_id = r.directive_id AND ready.root_task_id = r.root_task_id
+LEFT JOIN latest_signal ls ON ls.directive_id = r.directive_id AND ls.root_task_id = r.root_task_id;
 `;
 
 // ── Public entrypoint ──────────────────────────────────────────────
@@ -2134,7 +2226,20 @@ export type DispatchResolvedStatus = "live" | "completed" | "failed" | "queued_a
 export type DispatchResolvedRow = {
   directive_id: string;
   root_task_id: string;
+  status: DispatchResolvedStatus;
   lifecycle_status: DispatchResolvedStatus;
+  status_reason: string | null;
+  dispatch_id: string | null;
+  dispatch_event_id: string | null;
+  close_event_id: string | null;
+  latest_event_id: string | null;
+  latest_ts: string | null;
+  age_ms: number | null;
+  residual: number | null;
+  queued_reason: string | null;
+  cap: number | null;
+  in_flight_brain: number | null;
+  latest_cap_gate_event_id: string | null;
   dispatched_count: number;
   open_dispatch_count: number;
   latest_dispatched_at: string | null;
@@ -2455,7 +2560,20 @@ export const dispatchResolved = (
   return rows.map((r) => ({
     directive_id: r.directive_id as string,
     root_task_id: r.root_task_id as string,
-    lifecycle_status: r.lifecycle_status as DispatchResolvedStatus,
+    status: (r.status ?? r.lifecycle_status) as DispatchResolvedStatus,
+    lifecycle_status: (r.lifecycle_status ?? r.status) as DispatchResolvedStatus,
+    status_reason: (r.status_reason as string | null) ?? null,
+    dispatch_id: (r.dispatch_id as string | null) ?? null,
+    dispatch_event_id: (r.dispatch_event_id as string | null) ?? null,
+    close_event_id: (r.close_event_id as string | null) ?? null,
+    latest_event_id: (r.latest_event_id as string | null) ?? null,
+    latest_ts: (r.latest_ts as string | null) ?? null,
+    age_ms: r.age_ms == null ? null : Number(r.age_ms),
+    residual: r.residual == null ? null : Number(r.residual),
+    queued_reason: (r.queued_reason as string | null) ?? null,
+    cap: r.cap == null ? null : Number(r.cap),
+    in_flight_brain: r.in_flight_brain == null ? null : Number(r.in_flight_brain),
+    latest_cap_gate_event_id: (r.latest_cap_gate_event_id as string | null) ?? null,
     dispatched_count: Number(r.dispatched_count ?? 0),
     open_dispatch_count: Number(r.open_dispatch_count ?? 0),
     latest_dispatched_at: (r.latest_dispatched_at as string | null) ?? null,

@@ -356,11 +356,17 @@ export type RecipeReplayOutcome = {
   abort_reason?: string;
 };
 
-const runArtifactByRuntime = async (
+export type RecipeArtifactRunner = (
   db: Database,
   artifactId: string,
   inputs: JsonValue,
-): Promise<{ ok: boolean; result: JsonValue | null; error?: string }> => {
+) => Promise<{ ok: boolean; result: JsonValue | null; error?: string }>;
+
+const runArtifactByRuntime: RecipeArtifactRunner = async (
+  db,
+  artifactId,
+  inputs,
+) => {
   const row = getArtifact(db, artifactId);
   if (!row) return { ok: false, result: null, error: "artifact_not_found" };
   // Dispatcher quarantine gate (§11.6): replay MUST NOT execute quarantined
@@ -436,9 +442,11 @@ export const replayRecipe = async (
   db: Database,
   task: TaskNode,
   match: RecipeMatch,
+  opts: { runArtifact?: RecipeArtifactRunner } = {},
 ): Promise<RecipeReplayOutcome> => {
   const emitted: string[] = [];
   const residuals: number[] = [];
+  const runArtifact = opts.runArtifact ?? runArtifactByRuntime;
 
   // Walk every action_predicted step in trajectory order (Batch 4 Hole 4).
   // Phase J recipes were single-step; multi-step recipes are now first
@@ -523,7 +531,7 @@ export const replayRecipe = async (
         } as JsonValue)
       : (upstreamResult ?? ({} as JsonValue));
 
-    const actionObs = await runArtifactByRuntime(db, actionStep.artifact_id, actionInputs);
+    const actionObs = await runArtifact(db, actionStep.artifact_id, actionInputs);
     if (!actionObs.ok) {
       const ev = emitEvent(db, {
         kind: "recipe_replay_aborted",
@@ -554,7 +562,7 @@ export const replayRecipe = async (
     // shape; anything else falls to residual=1.
     let residual = 1;
     if (actionStep.verifier_artifact_id) {
-      const verifierObs = await runArtifactByRuntime(
+      const verifierObs = await runArtifact(
         db,
         actionStep.verifier_artifact_id,
         (actionObs.result ?? null) as JsonValue,

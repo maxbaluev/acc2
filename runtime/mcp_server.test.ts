@@ -376,6 +376,34 @@ describe("fastmcp substrate tools — stdio transport", () => {
     }
   });
 
+  test("substrate.read dispatch_resolved_view returns filtered lifecycle status", async () => {
+    for (const event of [
+      { kind: "task_node_opened", directive_id: "d_resolved", task_id: "t_root" },
+      { kind: "brain_dispatched", directive_id: "d_resolved", task_id: "t_root", payload: { dispatch_id: "disp_1" } },
+      { kind: "brain_dispatch_closed", directive_id: "d_resolved", task_id: "t_root", payload: { dispatch_id: "disp_1" } },
+      { kind: "task_committed", directive_id: "d_resolved", task_id: "t_root" },
+    ]) {
+      const emitted = parseEnvelope(
+        (await h!.client.callTool({ name: "substrate.emit", arguments: event })) as ToolCallResponse,
+      );
+      expect(emitted.ok).toBe(true);
+    }
+
+    const env = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.read",
+        arguments: {
+          view_name: "dispatch_resolved_view",
+          args: { directive_id: "d_resolved", root_task_id: "t_root" },
+        },
+      })) as ToolCallResponse,
+    );
+    expect(env.ok).toBe(true);
+    expect(env.result).toHaveLength(1);
+    expect(env.result[0].root_task_id).toBe("t_root");
+    expect(env.result[0].lifecycle_status).toBe("completed");
+  });
+
   test("substrate.read exposes entity_relationship_view", async () => {
     const dir = parseEnvelope(
       (await h!.client.callTool({

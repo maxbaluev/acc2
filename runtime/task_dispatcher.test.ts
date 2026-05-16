@@ -1,36 +1,133 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { JsonValue, SandboxDecl } from "../substrate/types";
 import { closeDb, openDb } from "../substrate/db";
 import { dispatchReadyTask } from "./task_dispatcher";
-import { opencodeQueryAdversarialCycle2, opencodeQueryHighResidual } from "./bridge/index";
+import { opencodeQueryAdversarialCycle2 } from "./bridge/index";
+import type { BridgeRequest, BridgeResult } from "./bridge/index";
 import { readyTasks } from "./task_topology";
 import { openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
+import { insertArtifact } from "./artifact_store";
+import type { UnifiedRuntimeInvocation, UnifiedRuntimeObservation } from "./runtimes";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
 
+const TEST_SANDBOX: SandboxDecl = {
+  runtime: "bun",
+  fs_read: ["**/*"],
+  fs_write: [],
+  net_allow: [],
+  proc_allow: [],
+  substrate_access: "none",
+  cpu_ms: 100,
+  wall_ms: 100,
+  memory_mb: 64,
+};
+
+const insertTestArtifact = (db: Database, name: string) => insertArtifact(db, {
+  runtime: "bun",
+  body: name,
+  declaredSandbox: TEST_SANDBOX,
+  stateRoot: null,
+  posteriorAlpha: 1,
+  posteriorBeta: 1,
+  score: 0.5,
+  confidence: 0.3,
+  recentResidualMean: 0,
+  recentKillCount: 0,
+  status: "admitted",
+  name,
+  fixtureInput: null,
+  fixtureExpectedResidual: 0,
+  intent: null,
+  summary: null,
+  targetFiles: null,
+  sourceCandidateId: null,
+  ownerGateVerdict: null,
+});
+
+const inMemoryAct = (opts: {
+  actionResult: JsonValue;
+  verifierResidual: number;
+  predictedResidual?: number;
+}) => {
+  const actionResults = new Map<string, JsonValue>();
+  const verifierResiduals = new Map<string, number>();
+  const bridge = async (req: BridgeRequest, db: Database): Promise<BridgeResult> => {
+    emitEvent(db, {
+      kind: "bridge_invoked",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: { fixture: "in_memory_dispatcher_test" },
+      invoker: "opencode",
+    });
+    const action = insertTestArtifact(db, "in_memory_dispatcher_action");
+    const verifier = insertTestArtifact(db, "in_memory_dispatcher_verifier");
+    actionResults.set(action.id, opts.actionResult);
+    verifierResiduals.set(verifier.id, opts.verifierResidual);
+    emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      action_artifact_id: action.id,
+      verifier_artifact_id: verifier.id,
+      predicted_residual: opts.predictedResidual ?? 0.05,
+      payload: { intent: "in-memory dispatcher fixture", target_path: req.fixtureTargetPath ?? "." },
+      invoker: "opencode",
+    });
+    emitEvent(db, {
+      kind: "bridge_completed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: { action_artifact_id: action.id, verifier_artifact_id: verifier.id },
+      invoker: "opencode",
+    });
+    return { ok: true, final_response: "in-memory action_predicted emitted", usage: { tokens: 0 }, emitted_event_ids: [] };
+  };
+  const runArtifact = async (inv: UnifiedRuntimeInvocation): Promise<UnifiedRuntimeObservation> => {
+    inv.emit?.({
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: inv.artifactId,
+      payload: { phase: "completed", duration_ms: 0 },
+    });
+    return {
+      ok: true,
+      result: verifierResiduals.has(inv.artifactId)
+        ? { residual: verifierResiduals.get(inv.artifactId)! }
+        : actionResults.get(inv.artifactId) ?? null,
+      irreversibleEffects: [],
+      durationMs: 0,
+      exitCode: 0,
+      stderrTail: "",
+      sandboxWarnings: [],
+    };
+  };
+  return { bridge, runArtifact };
+};
+
 describe("task_dispatcher", () => {
   test("happy path: action_predicted → action → verifier → action_scored → task_committed", async () => {
     const db = openDb(":memory:");
-    const tempDir = mkdtempSync(join(tmpdir(), "acc2-disp-"));
-    writeFileSync(join(tempDir, "a.txt"), "no marker here", "utf-8");
-    writeFileSync(join(tempDir, "b.txt"), "// TODO fix me", "utf-8");
-    writeFileSync(join(tempDir, "c.txt"), "another TODO line", "utf-8");
+    const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
+    const ready = readyTasks(db, directiveId);
+    expect(ready.length).toBeGreaterThan(0);
+    const task = ready[0]!;
+    expect(task.id).toBe(taskId);
+    const act = inMemoryAct({ actionResult: { result: { count: 2 } }, verifierResidual: 0 });
 
-    try {
-      const { directiveId, taskId } = await openFixtureDCountTodos(db, tempDir);
-      const ready = readyTasks(db, directiveId);
-      expect(ready.length).toBeGreaterThan(0);
-      const task = ready[0]!;
-      expect(task.id).toBe(taskId);
-
-      const result = await dispatchReadyTask(db, task, { fixtureTargetPath: tempDir });
-      expect(result.violations).toEqual([]);
-      expect(result.bridge_result?.ok).toBe(true);
+    const result = await dispatchReadyTask(db, task, act);
+    expect(result.violations).toEqual([]);
+    expect(result.bridge_result?.ok).toBe(true);
 
       const actionPredicted = db
         .query("SELECT COUNT(*) as c FROM events WHERE kind = 'action_predicted' AND task_id = ?")
@@ -68,14 +165,11 @@ describe("task_dispatcher", () => {
       expect(taskCommitted).not.toBeNull();
       expect(taskCommitted!.residual).toBe(0);
 
-      const closed = db
-        .query("SELECT COUNT(*) as c FROM events WHERE kind = 'brain_dispatch_closed' AND task_id = ?")
-        .get(taskId) as { c: number };
-      expect(closed.c).toBe(1);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  }, 60_000);
+    const closed = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'brain_dispatch_closed' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(closed.c).toBe(1);
+  });
 
   test("cycle-1 enforcement: adversarial brain_cycle_2_started → dispatcher_violation + dispatch closes", async () => {
     const db = openDb(":memory:");
@@ -120,9 +214,8 @@ describe("task_dispatcher", () => {
     const ready = readyTasks(db, directiveId);
     const task = ready[0]!;
 
-    const result = await dispatchReadyTask(db, task, {
-      bridge: opencodeQueryHighResidual,
-    });
+    const act = inMemoryAct({ actionResult: { result: { value: 1 } }, verifierResidual: 1, predictedResidual: 0.95 });
+    const result = await dispatchReadyTask(db, task, act);
     expect(result.violations).toEqual([]);
 
     // action_scored landed with residual=1
@@ -190,7 +283,8 @@ describe("task_dispatcher", () => {
     const { nodes } = (await import("./task_topology")).readDagForDirective(db, directiveId);
     const node = nodes.find((n) => n.id === deep)!;
 
-    const result = await dispatchReadyTask(db, node, { bridge: opencodeQueryHighResidual });
+    const act = inMemoryAct({ actionResult: { result: { value: 1 } }, verifierResidual: 1, predictedResidual: 0.95 });
+    const result = await dispatchReadyTask(db, node, act);
     expect(result.violations).toEqual([]);
     // Must emit a refinement edge (depth becomes 5), NOT task_failed.
     const failed = db
@@ -261,36 +355,65 @@ describe("task_dispatcher", () => {
     writeFileSync(join(tempDir, "a.txt"), "// TODO\n");
 
     try {
-      // Build a 3-success history so extractRecipeCandidates emits a recipe.
-      const { extractRecipeCandidates } = await import("../substrate/extractors");
-      const { updateRecipeConfidence } = await import("./recipe_replay");
-
-      for (let i = 0; i < 3; i++) {
-        const { directiveId, taskId } = await openFixtureDCountTodos(db, tempDir);
-        const ready = readyTasks(db, directiveId);
-        await dispatchReadyTask(db, ready[0]!, { fixtureTargetPath: tempDir });
-        await new Promise((r) => setTimeout(r, 5));
-      }
-      // Task 5: extractRecipeFromCommit fires inline on every task_committed,
-      // so the first dispatch already seeded a confidence=1.0 recipe — the
-      // 3-shape statistical extractor's run is a structural fallback that
-      // skips composite keys it already saw. Either path is acceptable here;
-      // the test only needs A recipe to exist before the replay dispatch
-      // below.
-      extractRecipeCandidates(db);
-      const recipeRow = db
-        .query("SELECT id FROM events WHERE kind = 'recipe_extracted' ORDER BY ts DESC LIMIT 1")
-        .get() as { id: string };
-      expect(recipeRow).not.toBeNull();
-      // Inline-seeded recipes land at confidence=0.5; +0.05 per successful
-      // bump. The new replay threshold is 0.85 (= seven proven replays). We
-      // bump 7× here to push the recipe above the floor — this is exactly the
-      // hardening contract from runtime/crisis_mode.ts (see the comment on
-      // recipe_confidence_threshold). Pre-fix the threshold was 0.6 (= one
-      // bump from the 0.5 seed); the loose threshold + loose goal_shape match
-      // caused false-positive replays of unrelated recipes against new
-      // directives. 0.85 = SEVEN proven replays = real evidence.
-      for (let i = 0; i < 7; i++) updateRecipeConfidence(db, recipeRow.id, true);
+      // Seed the replay route directly. Recipe extraction/three-success history
+      // is covered elsewhere; this dispatcher test only needs a confident,
+      // matching recipe so it can assert bridge bypass behavior.
+      const { insertArtifact } = await import("./artifact_store");
+      const sandbox = { runtime: "bun" as const, fs_read: ["**/*"], fs_write: [], net_allow: [], proc_allow: [], cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 };
+      const action = insertArtifact(db, {
+        runtime: "bun",
+        body: "console.log('@@RESULT@@ ' + JSON.stringify({ result: { count: 1 } }));",
+        declaredSandbox: sandbox,
+        stateRoot: null,
+        posteriorAlpha: 1,
+        posteriorBeta: 1,
+        score: 0.5,
+        confidence: 0.3,
+        recentResidualMean: 0,
+        recentKillCount: 0,
+        status: "admitted",
+        name: "dispatcher_replay_test_action",
+        fixtureInput: null,
+        fixtureExpectedResidual: 0,
+        intent: null,
+        summary: null,
+        targetFiles: null,
+        sourceCandidateId: null,
+        ownerGateVerdict: null,
+      });
+      const verifier = insertArtifact(db, {
+        runtime: "bun",
+        body: "const observation = JSON.parse(process.env.ACC2_INPUTS ?? 'null') ?? {}; const ok = Number.isInteger(observation?.result?.count); console.log('@@RESULT@@ ' + JSON.stringify({ residual: ok ? 0 : 1 }));",
+        declaredSandbox: sandbox,
+        stateRoot: null,
+        posteriorAlpha: 1,
+        posteriorBeta: 1,
+        score: 0.5,
+        confidence: 0.3,
+        recentResidualMean: 0,
+        recentKillCount: 0,
+        status: "admitted",
+        name: "dispatcher_replay_test_verifier",
+        fixtureInput: null,
+        fixtureExpectedResidual: 0,
+        intent: null,
+        summary: null,
+        targetFiles: null,
+        sourceCandidateId: null,
+        ownerGateVerdict: null,
+      });
+      const recipeRow = emitEvent(db, {
+        kind: "recipe_extracted",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_dispatcher_replay_seed",
+        task_id: "t_dispatcher_replay_seed",
+        payload: {
+          goal_shape: "count_files_target_directory::n1",
+          topology_signature: "",
+          confidence: 0.9,
+          trajectory: [{ step_kind: "action_predicted", artifact_id: action.id, verifier_artifact_id: verifier.id, payload_template: { target_path: tempDir }, predicted_residual: 0 }],
+        },
+      });
 
       const bridgeBefore = (db
         .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'bridge_invoked'")
@@ -540,9 +663,8 @@ describe("task_dispatcher", () => {
     const deepNode = nodes.find((n) => n.id === deepest)!;
     expect(deepNode).toBeTruthy();
 
-    const result = await dispatchReadyTask(db, deepNode, {
-      bridge: opencodeQueryHighResidual,
-    });
+    const act = inMemoryAct({ actionResult: { result: { value: 1 } }, verifierResidual: 1, predictedResidual: 0.95 });
+    const result = await dispatchReadyTask(db, deepNode, act);
     expect(result.violations).toEqual([]);
 
     const failed = db

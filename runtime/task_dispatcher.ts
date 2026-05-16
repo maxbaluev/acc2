@@ -30,7 +30,7 @@ import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge/i
 import type { TaskNode } from "./task_topology";
 import { refinementDepth } from "./task_topology";
 import { getArtifact, applyResidualOutcome, recordArtifactKill, maybeRetire } from "./artifact_store";
-import { runArtifactForRuntime } from "./runtimes";
+import { runArtifactForRuntime, type UnifiedRuntimeInvocation, type UnifiedRuntimeObservation } from "./runtimes";
 import { nowIso } from "./ids";
 import { distributeCredit } from "./credit";
 import { findRecipeMatch, replayRecipe } from "./recipe_replay";
@@ -100,6 +100,8 @@ type DispatchDeps = {
   /** Override the bridge call — Phase D tests use this to inject the
    *  adversarial cycle-2 mock. Defaults to opencodeQuery. */
   bridge?: (req: BridgeRequest, db: Database) => Promise<BridgeResult>;
+  /** Test seam for dispatcher behavior assertions that should not pay runtime subprocess cost. */
+  runArtifact?: (inv: UnifiedRuntimeInvocation) => Promise<UnifiedRuntimeObservation>;
   /** Optional fixture path threaded into the bridge request. The MVP fixture
    *  reads it to point the bun grep at a deterministic directory. */
   fixtureTargetPath?: string;
@@ -179,6 +181,7 @@ export const dispatchReadyTask = async (
   const dispatchStartMs = Date.now();
   const violations: string[] = [];
   const bridge = deps.bridge ?? opencodeQuery;
+  const runArtifact = deps.runArtifact ?? runArtifactForRuntime;
 
   // 1. brain_dispatched
   emitEvent(db, {
@@ -596,7 +599,7 @@ export const dispatchReadyTask = async (
         target_path: ((predictedPayload as Record<string, unknown>).target_path as string) ?? deps.fixtureTargetPath ?? ".",
       } as JsonValue;
 
-      const actionObs = await runArtifactForRuntime({
+      const actionObs = await runArtifact({
         artifactId: actionArtifact.id,
         body: actionArtifact.body,
         declaredSandbox: actionArtifact.declaredSandbox,
@@ -770,7 +773,7 @@ export const dispatchReadyTask = async (
         }
       } else {
         // Run the verifier on the observation.
-        const verifierObs = await runArtifactForRuntime({
+        const verifierObs = await runArtifact({
           artifactId: verifierArtifact.id,
           body: verifierArtifact.body,
           declaredSandbox: verifierArtifact.declaredSandbox,

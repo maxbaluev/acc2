@@ -24,7 +24,7 @@ import {
   formatEvent,
   formatFollowHeartbeat,
   formatFollowTerminalSentinel,
-  formatFollowTerminalSentinel,
+  resolveRootTaskIdFlag,
   type HeartbeatCounters,
 } from "./observe";
 
@@ -96,13 +96,21 @@ describe("formatFollowTerminalSentinel", () => {
     const line = formatFollowTerminalSentinel({
       directive_id: "DIRECTIVE1234567890",
       root_task_id: "ROOTTASK1234567890",
-      status: "completed",
-      status_reason: "task_committed",
+      lifecycle_status: "completed",
+      terminal_kind: "task_committed",
     });
     expect(line).toContain("ACC_TASK_TERMINAL");
     expect(line).toContain("status=completed");
     expect(line).toContain("reason=task_committed");
     expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
+  });
+});
+
+describe("resolveRootTaskIdFlag", () => {
+  test("accepts --root-task-id and --root aliases for resolved-view polling", () => {
+    expect(resolveRootTaskIdFlag({ "root-task-id": "t_root" })).toBe("t_root");
+    expect(resolveRootTaskIdFlag({ root: "t_alias" })).toBe("t_alias");
+    expect(resolveRootTaskIdFlag({ root: true })).toBeUndefined();
   });
 });
 

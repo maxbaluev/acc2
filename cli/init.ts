@@ -178,6 +178,8 @@ export type InitOptions = {
   yes?: boolean;          // non-interactive mode
   interactive?: boolean;  // guided first-run repair loop; default when TTY and not --yes (UX dispatch b71pfyddv FMX0MZYDK)
   validateKeys?: boolean; // cheap OpenAI/Serper validation before .env persistence (UX dispatch b71pfyddv JNKK2C18 lesson)
+  seedContent?: boolean;  // test seam: production default imports seed content when approved
+  probeTools?: boolean;   // test seam: production default probes external CLIs
   paths?: InitPaths;      // injection for tests
   log?: Logger;           // injection for tests
   warn?: Logger;
@@ -280,9 +282,11 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
     }
   }
 
+  const probeTools = opts.probeTools ?? true;
+
   // 4. opencode CLI + live auth probe (b9e3hr0ar: presence-only checks
   // defer the real failure to first brain dispatch — probe live here).
-  const opencode = await which("opencode");
+  const opencode = probeTools ? await which("opencode") : null;
   summary.opencodePath = opencode;
   if (opencode) {
     log(`[4/8] opencode CLI:    ${opencode}`);
@@ -321,7 +325,7 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
   }
 
   // 5. uv.
-  const uv = await which("uv");
+  const uv = probeTools ? await which("uv") : null;
   summary.uvPath = uv;
   if (uv) {
     log(`[5/8] uv:              ${uv}`);
@@ -331,7 +335,7 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
   }
 
   // 6. Camoufox binary.
-  const camofox = findCamofoxBinary();
+  const camofox = probeTools ? findCamofoxBinary() : null;
   summary.camoufoxPath = camofox;
   if (camofox) {
     log(`[6/8] Camoufox binary: ${camofox}`);
@@ -343,7 +347,7 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
   // 7. Foundational seed.
   let approve = false;
   if (opts.yes) {
-    approve = true;
+    approve = opts.seedContent ?? true;
     log("[7/8] foundational seed: importing (--yes mode)");
   } else if (!isTty()) {
     approve = false;
