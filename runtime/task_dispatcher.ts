@@ -44,6 +44,7 @@ import { readCurrentMode } from "./crisis_mode";
 import { isCycleViolation } from "./cycle_one_gate";
 import { recordDispatch, recordActionResidual } from "./metrics";
 import { extractRecipeFromCommit } from "../substrate/extractors";
+import { validateProposalGrounding } from "./proposal_grounding";
 
 const REFINEMENT_DEPTH_CAP = 5;
 
@@ -849,8 +850,38 @@ export const dispatchReadyTask = async (
           applyResidualOutcome(db, verifierArtifact.id, residual, nowIso());
         }
 
-        // 6. Commit if residual is below the success band.
+        // 6a. PROPOSAL GROUNDING GATE — structural check before commit.
+        // Brain audit CBKDWYRN2N08V9ESTCKCNF210M identified missing
+        // substrate-side validation at the commit boundary as the root
+        // cause of seven session frictions: unregistered event kinds,
+        // stale anchors, vapor CLI commands, deliverable-shaped leaves
+        // without artifacts. The validator (runtime/proposal_grounding.ts)
+        // scans the task subtree's contract_amendment_proposed payloads
+        // and refuses commit on any failure. Per k_252, this is
+        // structural — prose gates regress under load.
+        let proposalGroundingOk = true;
         if (residual < COMMIT_RESIDUAL_THRESHOLD) {
+          const groundingCheck = validateProposalGrounding(db, task.id);
+          if (!groundingCheck.ok) {
+            emitEvent(db, {
+              kind: "dispatcher_violation",
+              substrate_origin: "substrate_auto",
+              directive_id: task.directive_id,
+              task_id: task.id,
+              payload: {
+                dispatch_id: dispatchId,
+                failure_kind: "proposal_grounding_breach",
+                task_id: task.id,
+                failed_checks: groundingCheck.failed_checks,
+              } as JsonValue,
+            });
+            violations.push("proposal_grounding_breach");
+            proposalGroundingOk = false;
+          }
+        }
+
+        // 6. Commit if residual is below the success band AND grounding passed.
+        if (residual < COMMIT_RESIDUAL_THRESHOLD && proposalGroundingOk) {
           emitEvent(db, {
             kind: "task_committed",
             substrate_origin: "substrate_auto",
