@@ -7,6 +7,7 @@ import {
   schedulerTick,
   schedulerLoop,
   _resetSchedulerForTests,
+  drainInFlightDispatches,
   inFlightDirectivesFromSql,
   findCrossDirectiveConflict,
   computeBrainDispatchCap,
@@ -55,6 +56,11 @@ describe("task_scheduler", () => {
       expect(tick.dispatched).toContain(t2);
       expect(tick.dispatched.length).toBeGreaterThanOrEqual(2);
       expect(tick.skipped_concurrency_cap).toEqual([]);
+
+      // Production schedulerTick returns after launching dispatches so
+      // sibling brain leaves run concurrently. Drain the in-flight registry
+      // before asserting downstream ledger state.
+      await drainInFlightDispatches();
 
       // Both tasks should have committed.
       const committed = db
@@ -176,6 +182,9 @@ describe("task_scheduler", () => {
         pollIntervalMs: 10,
         stopAfterTicks: 2,
       });
+      // Production schedulerTick returns after launching dispatches; drain
+      // any still-in-flight promise before asserting committed state.
+      await drainInFlightDispatches();
       const committed = db
         .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_committed'")
         .get() as { c: number };

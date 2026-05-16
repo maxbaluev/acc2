@@ -473,12 +473,13 @@ export const schedulerTick = async (
     dispatched.push(task.id);
   }
 
-  // Await all newly-dispatched promises this tick so tests can assert
-  // post-dispatch substrate state. The IN_FLIGHT registry is still useful
-  // across ticks when the scheduler runs as a loop and a slow dispatch
-  // straddles two ticks; we just don't block on those here.
+  // Production scheduler ticks return after launching dispatches so sibling
+  // brain leaves can run concurrently across poll cycles. Tests that need a
+  // drain point should await the tracked promises (IN_FLIGHT registry) via
+  // `drainInFlightDispatches(db)` instead.
   if (pending.length > 0) {
-    await Promise.all(pending);
+    // Track but DON'T await — sibling leaves dispatch concurrently.
+    // Each promise self-cleans from IN_FLIGHT via its .finally() handler.
   }
 
   return {
@@ -556,6 +557,22 @@ export const _resetSchedulerForTests = (): void => {
   IN_FLIGHT.clear();
   IN_FLIGHT_DIRECTIVE.clear();
   IN_FLIGHT_PARENT.clear();
+};
+
+/** Await every in-flight dispatch tracked in the process-local IN_FLIGHT
+ *  registry. Production schedulerTick returns after launching (so siblings
+ *  run concurrently); callers that need post-dispatch state — tests, the
+ *  schedulerLoop's quiescence detector, and any consumer that wants to
+ *  assert ledger rows synchronously — call this helper to drain. The
+ *  promises self-clean from IN_FLIGHT via their .finally() handlers, so
+ *  the registry shrinks naturally as each dispatch resolves. The function
+ *  is safe to call when nothing is in flight (Promise.all on []) and may
+ *  be called repeatedly. */
+export const drainInFlightDispatches = async (): Promise<void> => {
+  // Snapshot first — IN_FLIGHT mutates as promises resolve.
+  const snapshot = Array.from(IN_FLIGHT.values());
+  if (snapshot.length === 0) return;
+  await Promise.all(snapshot);
 };
 
 // ── Multi-process in-flight detection (SQL-backed) ────────────────────
