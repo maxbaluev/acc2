@@ -42,6 +42,7 @@ import { runCamofoxArtifact } from "./runtimes/camofox";
 import type { TaskNode } from "./task_topology";
 import { distributeCredit } from "./credit";
 import { nowIso } from "./ids";
+import { recipesLatestView, type RecipesLatestRow } from "../substrate/views";
 
 // Tier-0 replay must be STRICTLY conservative — a false-positive match
 // against a new directive replays the wrong recipe, residual=0 fires from
@@ -156,18 +157,82 @@ const currentConfidenceFor = (db: Database, recipeId: string, baseConfidence: nu
   } catch { return baseConfidence; }
 };
 
-/** Find a recipe that matches the supplied task. Returns the highest-
- *  confidence match whose value is ≥ minConfidence, or null when no recipe
- *  matches. Uses goalShape() to compute the task's goal hash. */
-export const findRecipeMatch = (
-  db: Database,
-  task: TaskNode,
-  opts?: { minConfidence?: number },
+/** Filter / shape one candidate row (view-projected OR legacy-scanned) into a
+ *  RecipeMatch when it passes goal_shape + topology + confidence gating. The
+ *  matching rules are identical for both code paths so the view-integrated
+ *  fast path and the legacy linear-scan fallback agree on every decision. */
+const tryMatchCandidate = (
+  candidate: {
+    id: string;
+    goal_shape: string;
+    topology_signature: string;
+    confidence: number;
+    trajectory: RecipeTrajectoryStep[];
+  },
+  taskGoalShape: string,
+  taskGoalLower: string,
+  taskTopology: string,
+  minConfidence: number,
 ): RecipeMatch | null => {
-  const minConfidence = opts?.minConfidence ?? RECIPE_DEFAULT_MIN_CONFIDENCE;
-  const taskGoalShape = goalShape(task.goal ?? "");
-  const taskTopology = taskTopologySignature(db, task);
+  // Two match strategies:
+  //   1. Exact: recipe.goal_shape == task's goalShape() hash.
+  //   2. Token overlap: recipe.goal_shape is the legacy normalized-text
+  //      token (e.g. "count_todos_in_repo::n1"). Treat it as a bag of
+  //      tokens (length ≥ 3); accept ONLY when ≥ RECIPE_TOKEN_OVERLAP_FLOOR
+  //      (1.0) of the recipe's tokens appear in the task goal AND ≥ 2 tokens
+  //      match. Pre-fix this was 0.6 — generic strategic vocabulary
+  //      ("design", "extract", "verifier") was enough to claim a match,
+  //      replaying the wrong recipe against unrelated directives.
+  const exactGoalMatch = candidate.goal_shape === taskGoalShape;
+  const recipeToken = candidate.goal_shape.split("::")[0] ?? "";
+  const recipeTokens = recipeToken.split("_").filter((t) => t.length >= 3);
+  let tokenMatchHits = 0;
+  if (recipeTokens.length > 0) {
+    for (const tk of recipeTokens) {
+      if (taskGoalLower.includes(tk)) tokenMatchHits++;
+    }
+  }
+  const tokenMatchScore = recipeTokens.length > 0
+    ? tokenMatchHits / recipeTokens.length
+    : 0;
+  const legacyTokenMatch =
+    recipeTokens.length >= RECIPE_MIN_TOKEN_COUNT &&  // ≥2 tokens (specificity)
+    tokenMatchScore >= RECIPE_TOKEN_OVERLAP_FLOOR;    // 100% overlap (no false-positive)
+  if (!exactGoalMatch && !legacyTokenMatch) return null;
 
+  // Topology match: STRICTLY exact. The pre-fix `endsWith("::1")` escape
+  // accepted any recipe extracted from a single-task DAG (which is most
+  // of them) against ANY new task — combined with loose goal_shape this
+  // matched anything to anything. The `=""` exact-empty path stays for
+  // recipes seeded without a topology stamp (substrate/seed.ts).
+  const topologyMatch =
+    candidate.topology_signature === taskTopology ||
+    candidate.topology_signature === "";
+  if (!topologyMatch) return null;
+
+  if (candidate.confidence < minConfidence) return null;
+  if (candidate.confidence < RECIPE_AUTO_ARCHIVE_FLOOR) return null;
+
+  return {
+    recipe_id: candidate.id,
+    recipe_extracted_event_id: candidate.id,
+    goal_shape: candidate.goal_shape,
+    topology_signature: candidate.topology_signature,
+    confidence: candidate.confidence,
+    trajectory: candidate.trajectory,
+  };
+};
+
+/** Legacy linear-scan path — kept as a fallback for the rare case where the
+ *  view query throws (malformed payload, missing column, schema drift). The
+ *  dispatch surface MUST stay alive even if the view is misconfigured. */
+const findRecipeMatchLinearScan = (
+  db: Database,
+  taskGoalShape: string,
+  taskGoalLower: string,
+  taskTopology: string,
+  minConfidence: number,
+): RecipeMatch | null => {
   const rows = db
     .query(
       `SELECT id, payload FROM events
@@ -187,56 +252,93 @@ export const findRecipeMatch = (
     if (seenKeys.has(key)) continue;
     seenKeys.add(key);
 
-    // Two match strategies:
-    //   1. Exact: recipe.goal_shape == task's goalShape() hash.
-    //   2. Token overlap: recipe.goal_shape is the legacy normalized-text
-    //      token (e.g. "count_todos_in_repo::n1"). Treat it as a bag of
-    //      tokens (length ≥ 3); accept ONLY when ≥ RECIPE_TOKEN_OVERLAP_FLOOR
-    //      (0.9) of the recipe's tokens appear in the task goal AND ≥ 3 tokens
-    //      match. Pre-fix this was 0.6 — generic strategic vocabulary
-    //      ("design", "extract", "verifier") was enough to claim a match,
-    //      replaying the wrong recipe against unrelated directives.
-    const exactGoalMatch = payload.goal_shape === taskGoalShape;
-    const recipeToken = payload.goal_shape.split("::")[0] ?? "";
-    const taskGoalLower = task.goal.toLowerCase();
-    const recipeTokens = recipeToken.split("_").filter((t) => t.length >= 3);
-    let tokenMatchHits = 0;
-    if (recipeTokens.length > 0) {
-      for (const tk of recipeTokens) {
-        if (taskGoalLower.includes(tk)) tokenMatchHits++;
-      }
-    }
-    const tokenMatchScore = recipeTokens.length > 0
-      ? tokenMatchHits / recipeTokens.length
-      : 0;
-    const legacyTokenMatch =
-      recipeTokens.length >= RECIPE_MIN_TOKEN_COUNT &&  // ≥2 tokens (specificity)
-      tokenMatchScore >= RECIPE_TOKEN_OVERLAP_FLOOR;    // 100% overlap (no false-positive)
-    if (!exactGoalMatch && !legacyTokenMatch) continue;
-
-    // Topology match: STRICTLY exact. The pre-fix `endsWith("::1")` escape
-    // accepted any recipe extracted from a single-task DAG (which is most
-    // of them) against ANY new task — combined with loose goal_shape this
-    // matched anything to anything. The `=""` exact-empty path stays for
-    // recipes seeded without a topology stamp (substrate/seed.ts).
-    const topologyMatch =
-      payload.topology_signature === taskTopology ||
-      payload.topology_signature === "";
-    if (!topologyMatch) continue;
-
     const currentConfidence = currentConfidenceFor(db, r.id, payload.confidence);
-    if (currentConfidence < minConfidence) continue;
-    if (currentConfidence < RECIPE_AUTO_ARCHIVE_FLOOR) continue;
+    const match = tryMatchCandidate(
+      {
+        id: r.id,
+        goal_shape: payload.goal_shape,
+        topology_signature: payload.topology_signature,
+        confidence: currentConfidence,
+        trajectory: payload.trajectory,
+      },
+      taskGoalShape,
+      taskGoalLower,
+      taskTopology,
+      minConfidence,
+    );
+    if (match && (!best || match.confidence > best.confidence)) best = match;
+  }
 
-    const match: RecipeMatch = {
-      recipe_id: r.id,
-      recipe_extracted_event_id: r.id,
-      goal_shape: payload.goal_shape,
-      topology_signature: payload.topology_signature,
-      confidence: currentConfidence,
-      trajectory: payload.trajectory,
-    };
-    if (!best || match.confidence > best.confidence) best = match;
+  return best;
+};
+
+/** Find a recipe that matches the supplied task. Returns the highest-
+ *  confidence match whose value is ≥ minConfidence, or null when no recipe
+ *  matches. Uses goalShape() to compute the task's goal hash.
+ *
+ *  Fast path (default): query `recipes_latest_view` — the substrate's
+ *  materialized index keyed by (goal_shape, topology_signature) that picks
+ *  the highest-confidence row per key. This replaces the dispatch-time
+ *  linear scan over `recipe_extracted` history with one keyed projection
+ *  (brain audit QQEHAW97GS0AX7TEQ717Y3P174, 2026-05-15).
+ *
+ *  Fallback: if the view query throws (malformed payload, missing column,
+ *  schema drift), surface as `error_caught` and fall back to the legacy
+ *  linear-scan path so dispatch stays alive. */
+export const findRecipeMatch = (
+  db: Database,
+  task: TaskNode,
+  opts?: { minConfidence?: number },
+): RecipeMatch | null => {
+  const minConfidence = opts?.minConfidence ?? RECIPE_DEFAULT_MIN_CONFIDENCE;
+  const taskGoalShape = goalShape(task.goal ?? "");
+  const taskTopology = taskTopologySignature(db, task);
+  const taskGoalLower = task.goal.toLowerCase();
+
+  // Fast path — keyed projection from recipes_latest_view.
+  let viewRows: RecipesLatestRow[] | null = null;
+  try {
+    viewRows = recipesLatestView(db);
+  } catch (err) {
+    try {
+      emitEvent(db, {
+        kind: "error_caught",
+        substrate_origin: "substrate_auto",
+        payload: {
+          where: "recipe_replay.findRecipeMatch.recipesLatestView",
+          recoverable: true,
+          message: (err as Error).message,
+          fallback: "linear_scan",
+        } as JsonValue,
+      });
+    } catch { /* db may be closed — fall through to legacy scan */ }
+    return findRecipeMatchLinearScan(
+      db,
+      taskGoalShape,
+      taskGoalLower,
+      taskTopology,
+      minConfidence,
+    );
+  }
+
+  let best: RecipeMatch | null = null;
+  for (const r of viewRows) {
+    const p = r.payload as Record<string, unknown>;
+    const trajectory = Array.isArray(p.trajectory) ? (p.trajectory as RecipeTrajectoryStep[]) : [];
+    const match = tryMatchCandidate(
+      {
+        id: r.id,
+        goal_shape: r.goal_shape,
+        topology_signature: r.topology_signature,
+        confidence: r.confidence,
+        trajectory,
+      },
+      taskGoalShape,
+      taskGoalLower,
+      taskTopology,
+      minConfidence,
+    );
+    if (match && (!best || match.confidence > best.confidence)) best = match;
   }
 
   return best;

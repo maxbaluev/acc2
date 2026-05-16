@@ -109,20 +109,26 @@ describe("recipe_replay.findRecipeMatch", () => {
     }
   }, 60_000);
 
-  test("returns null when confidence falls below threshold", async () => {
+  test("returns null when no recipe row crosses the threshold", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "acc2-recipe-thresh-"));
     writeFileSync(join(tempDir, "a.txt"), "// TODO\n");
     try {
-      // bumpConfidence=false so the recipe stays at the 0.5 prior; one failure
-      // pushes to 0.4 which is below the 0.6 threshold.
+      // bumpConfidence=false so the recipe stays at the 0.5 prior. Hammer
+      // with failures — under the view-integrated matcher (Improvement 1,
+      // brain audit QQEHAW97GS0AX7TEQ717Y3P174 2026-05-15) the view picks
+      // the HIGHEST-confidence row per key, so failure-emitted lower-
+      // confidence rows do NOT supplant the high-water row. Asking for
+      // minConfidence ABOVE every observed row is the canonical way to
+      // assert "nothing crossed the threshold". The fixture's inline
+      // post-commit bumps top out at ≤ 0.6 with bumpConfidence=false,
+      // so a minConfidence of 0.85 yields no match.
       const { db, recipeId } = await seedThreeSuccessRecipe(tempDir, { bumpConfidence: false });
-      // Hammer with failures so the confidence goes below 0.6
       for (let i = 0; i < 5; i++) {
         updateRecipeConfidence(db, recipeId, false);
       }
       const { directiveId } = await openFixtureDCountTodos(db, tempDir);
       const { nodes } = readDagForDirective(db, directiveId);
-      const match = findRecipeMatch(db, nodes[0]!, { minConfidence: 0.6 });
+      const match = findRecipeMatch(db, nodes[0]!, { minConfidence: 0.85 });
       expect(match).toBeNull();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
@@ -573,6 +579,82 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
     expect(ap.residual).toBe(1);
     expect(ap.worst_residual).toBe(1);
   }, 60_000);
+});
+
+// View-integration regression — Improvement 1 from brain audit
+// QQEHAW97GS0AX7TEQ717Y3P174 (2026-05-15). The matcher is wired through
+// recipes_latest_view; this test asserts that path is actually exercised
+// (the matcher finds the recipe via the view, picking the highest-
+// confidence row per (goal_shape, topology_signature) pair).
+describe("recipe_replay.findRecipeMatch — recipes_latest_view integration", () => {
+  test("matcher picks the HIGHEST-confidence row per key (view ordering)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    // Two recipe_extracted rows for the SAME key — the view should
+    // surface the higher-confidence one to the matcher.
+    const lowerId = newId();
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        lowerId,
+        "2026-01-01T00:00:01.000Z",
+        "d_view_int",
+        "t_view_int",
+        "loop_root",
+        "substrate_auto",
+        "recipe_extracted",
+        JSON.stringify({
+          goal_shape: "view_integrated_recipe_one::n1",
+          topology_signature: "",
+          confidence: 0.5,
+          trajectory: [
+            { step_kind: "action_predicted", artifact_id: "a_dummy", payload_template: {} },
+          ],
+        }),
+        "[]",
+      ],
+    );
+    const higherId = newId();
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        higherId,
+        "2026-01-01T00:00:02.000Z",
+        "d_view_int",
+        "t_view_int",
+        "loop_root",
+        "substrate_auto",
+        "recipe_extracted",
+        JSON.stringify({
+          goal_shape: "view_integrated_recipe_one::n1",
+          topology_signature: "",
+          confidence: 0.92,
+          trajectory: [
+            { step_kind: "action_predicted", artifact_id: "a_dummy", payload_template: {} },
+          ],
+        }),
+        "[]",
+      ],
+    );
+
+    const task: TaskNode = {
+      id: "t_match_view",
+      directive_id: "d_match_view",
+      parent_id: null,
+      goal: "view integrated recipe one",
+      status: "pending",
+    } as unknown as TaskNode;
+
+    const match = findRecipeMatch(db, task);
+    expect(match).not.toBeNull();
+    // The view returns the higher-confidence row; the matcher cites its
+    // id, not the older lower-confidence one.
+    expect(match!.recipe_id).toBe(higherId);
+    expect(match!.confidence).toBeCloseTo(0.92, 5);
+  });
 });
 
 describe("recipe_replay.updateRecipeConfidence", () => {
