@@ -341,7 +341,14 @@ const daemonRestart = async (): Promise<number> => {
 export const runDispatch = async (argv: string[]): Promise<number> => {
   const cmd = argv[0];
   const sub = argv[1];
-  if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
+  if (!cmd || cmd === "--help" || cmd === "-h") {
+    console.log(usage());
+    return 0;
+  }
+  if (cmd === "help") {
+    const tail = argv.slice(1).join(" ").trim();
+    const m = tail.match(/^me\s+with\s+(.+)$/i);
+    if (m?.[1]) return dispatchTask(m[1].trim(), { follow: true });
     console.log(usage());
     return 0;
   }

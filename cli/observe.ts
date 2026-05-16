@@ -223,6 +223,11 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
     }
     case "task_failed":
     case "dispatcher_violation": {
+      const ownerSummary = p.owner_summary as string | undefined;
+      const suggested = p.suggested_action as string | undefined;
+      if (ownerSummary) {
+        return `${trunc(ownerSummary, 120)}${suggested ? ` → ${trunc(suggested, 80)}` : ""}`;
+      }
       const reason = (p.reason as string) ?? "?";
       return `reason=${reason}`;
     }
@@ -230,7 +235,9 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
     case "knowledge_promoted": {
       const claim = (p.claim as string) ?? (p.text as string) ?? "";
       const score = p.score;
-      return `${claim ? `claim=${JSON.stringify(trunc(claim, 100))}` : ""}${score !== undefined ? ` score=${score}` : ""}`.trim();
+      const learnedFromOwner = p.learned_from_owner as string | undefined;
+      const ownerTag = learnedFromOwner ? ` ← owner: ${JSON.stringify(trunc(learnedFromOwner, 80))}` : "";
+      return `${claim ? `claim=${JSON.stringify(trunc(claim, 100))}` : ""}${score !== undefined ? ` score=${score}` : ""}${ownerTag}`.trim();
     }
     case "recipe_extracted": {
       const confidence = p.confidence;
