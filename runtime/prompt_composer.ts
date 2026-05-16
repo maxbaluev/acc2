@@ -449,6 +449,13 @@ const isDefaultAutonomyScope = (s: OwnerProfile["autonomy_scope"]): boolean => {
   return arrayEquals(s.include, d.include) && arrayEquals(s.exclude, d.exclude);
 };
 
+const bootstrapPolicyForObservationCount = (count: unknown): string => {
+  const n = typeof count === "number" && Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+  if (n >= 50) return "bootstrap_policy: sparse profile (mature); keep using plain language defaults only for unknown axes, trust repeated observed preferences, ask one adapted question only when blocked";
+  if (n >= 10) return "bootstrap_policy: sparse profile (growing); adapt to observed rendering_signals, keep explanations short, ask one question at a time unless batch preference is known";
+  return "bootstrap_policy: sparse profile (new); use plain language + one question at a time + explain concepts on first encounter; respond in the owner's detected language when available and do not assume English";
+};
+
 export const buildOwnerProfileSection = (profile: OwnerProfile): string => {
   // Render only non-default fields so the prompt stays lean when the
   // owner hasn't expressed any preference. When everything is default,
@@ -489,6 +496,31 @@ export const buildOwnerProfileSection = (profile: OwnerProfile): string => {
       }
     }
   }
+  if (profile.understood_concepts && typeof profile.understood_concepts === "object") {
+    const concepts = Object.keys(profile.understood_concepts).filter((k) => k.length > 0);
+    if (concepts.length > 0) {
+      lines.push("understood_concepts (owner showed comprehension — use directly unless confusion appears):");
+      for (const c of concepts) {
+        const e = profile.understood_concepts[c];
+        const conf = typeof e?.confidence === "number" ? ` confidence=${e.confidence.toFixed(2)}` : "";
+        lines.push(`  - ${c} (evidence ${e?.evidence_count ?? 0}x${conf})`);
+      }
+    }
+  }
+  if (profile.declined_concepts && typeof profile.declined_concepts === "object") {
+    const concepts = Object.keys(profile.declined_concepts).filter((k) => k.length > 0);
+    if (concepts.length > 0) {
+      lines.push("declined_concepts (owner declined learning this — avoid teaching; use preferred term if present):");
+      for (const c of concepts) {
+        const e = profile.declined_concepts[c];
+        lines.push(`  - ${c} (declined ${e?.decline_count ?? 0}x${e?.preferred_term ? `; preferred_term=${e.preferred_term}` : ""})`);
+      }
+    }
+  }
+  if (typeof profile.observation_count === "number" && profile.observation_count > 0) {
+    lines.push(`observation_count: ${profile.observation_count} (calibrate bootstrap strength; 0-turn owner differs from 50-turn owner)`);
+    lines.push(bootstrapPolicyForObservationCount(profile.observation_count));
+  }
   const score = profile.autonomy_score;
   if (typeof score === "number" && score !== OWNER_PROFILE_DEFAULTS.autonomy_score) {
     lines.push(`autonomy_score: ${score.toFixed(2)} (continuous 0..1; below ~0.4 → block multi-file diffs)`);
@@ -517,10 +549,10 @@ export const buildOwnerProfileSection = (profile: OwnerProfile): string => {
   if (lines.length === 0) {
     return [
       "## OWNER PROFILE",
-      "bootstrap_policy: sparse profile; use plain language + one question at a time + explain concepts on first encounter; respond in the owner's detected language when available and do not assume English",
+      bootstrapPolicyForObservationCount(profile.observation_count),
       `detected_language: ${OWNER_PROFILE_DEFAULTS.detected_language} (default; update via owner_insight_candidate when evidence appears)`,
       `autonomy_score: ${OWNER_PROFILE_DEFAULTS.autonomy_score.toFixed(2)} (default; below ~0.4 blocks multi-file diffs)`,
-      "rendering_signals: sparse (do not infer high code_density or ops_vocabulary without evidence)",
+      "rendering_signals: sparse (do not infer code_density, ops_vocabulary, formality, abstraction, redundancy, narrative, or pace without evidence)",
     ].join("\n");
   }
   return ["## OWNER PROFILE", ...lines].join("\n");
