@@ -224,10 +224,11 @@ export const checkOpenAiKey = (env: InstallDepsEnv): DepCheck => {
     return {
       name: "OPENAI_API_KEY",
       status: "pass",
-      detail: `present in env (length=${live.trim().length})`,
+      detail: `present in env (length=${live.trim().length}); validation is performed by acc init --interactive before persistence`,
     };
   }
   const envFile = join(env.cwd(), ".env");
+  const stateEnvFile = join(env.homedir(), ".accint", ".env.accint");
   if (env.fileExists(envFile)) {
     const body = env.readFile(envFile);
     if (body) {
