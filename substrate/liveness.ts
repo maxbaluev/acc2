@@ -29,8 +29,8 @@ import type { Database } from "bun:sqlite";
  *  numbers — change once here, both surfaces pick it up. */
 export const LIVENESS_THRESHOLDS = {
   /** `events.kind = 'knowledge_promoted'` row count floor.
-   *  `seedFoundationalKnowledge` (substrate/seed.ts) imports 10 laws
-   *  under owner-approval; the floor at 5 tolerates rotation but flips
+   *  `seedFoundationalKnowledge` (substrate/seed.ts) imports structural laws
+   *  plus moved contract knowledge under owner-approval; the floor at 5 tolerates rotation but flips
    *  to FAIL on a structurally incomplete db. */
   knowledgePromoted: 5,
   /** `code_artifact` rows where name LIKE 'seed_%' OR id LIKE 'seed_%'

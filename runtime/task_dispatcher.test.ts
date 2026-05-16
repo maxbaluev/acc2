@@ -38,10 +38,29 @@ describe("task_dispatcher", () => {
       expect(actionPredicted.c).toBe(1);
 
       const actionScored = db
-        .query("SELECT residual FROM events WHERE kind = 'action_scored' AND task_id = ?")
-        .get(taskId) as { residual: number } | null;
+        .query("SELECT residual, payload FROM events WHERE kind = 'action_scored' AND task_id = ?")
+        .get(taskId) as { residual: number; payload: string } | null;
       expect(actionScored).not.toBeNull();
       expect(actionScored!.residual).toBe(0);
+      const scoredPayload = JSON.parse(actionScored!.payload) as Record<string, any>;
+      expect(scoredPayload.routing_axes.one_shot_confidence).toBeGreaterThanOrEqual(0);
+      expect(scoredPayload.route_scores.opencode_brain).toBeGreaterThanOrEqual(0);
+      expect(scoredPayload.dispatch_verifier_evidence.target_count).toBeGreaterThanOrEqual(0);
+
+      const dispatchDecided = db
+        .query("SELECT payload FROM events WHERE kind = 'dispatch_decided' AND task_id = ?")
+        .get(taskId) as { payload: string } | null;
+      expect(dispatchDecided).not.toBeNull();
+      const dispatchPayload = JSON.parse(dispatchDecided!.payload) as Record<string, any>;
+      expect(dispatchPayload.routing_axes.one_shot_confidence).toBeGreaterThanOrEqual(0);
+      expect(dispatchPayload.routing_axes.information_gap).toBeGreaterThanOrEqual(0);
+      expect(dispatchPayload.routing_axes.reversibility).toBeGreaterThanOrEqual(0);
+      expect(dispatchPayload.routing_axes.owner_control_need).toBeGreaterThanOrEqual(0);
+      expect(dispatchPayload.routing_axes.decomposition_value).toBeGreaterThanOrEqual(0);
+      expect(dispatchPayload.routing_axes.cost_pressure).toBeGreaterThanOrEqual(0);
+      expect(dispatchPayload.routing_axes.time_sensitivity).toBeGreaterThanOrEqual(0);
+      expect(dispatchPayload.route_scores.opencode_brain).toBeGreaterThanOrEqual(0);
+      expect(dispatchPayload.verifier_evidence.target_count).toBeGreaterThanOrEqual(0);
 
       const taskCommitted = db
         .query("SELECT residual FROM events WHERE kind = 'task_committed' AND task_id = ?")

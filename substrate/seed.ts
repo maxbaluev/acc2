@@ -49,6 +49,7 @@ type FoundationalLaw = {
   tags: string[];
   score: number;
   confidence: number;
+  goalShapeTags?: string[];
 };
 
 const SEED_LAWS: FoundationalLaw[] = [
@@ -111,6 +112,34 @@ const SEED_LAWS: FoundationalLaw[] = [
     tags: ["sandbox", "quarantine", "k_252"],
     score: 0.90,
     confidence: 0.85,
+  },
+  {
+    text: "Moved contract examples, historical rationale, source inventories, removed-rule evidence, and long recipes belong in promoted knowledge rows, tagged for prompt_composer goal-shape retrieval instead of always-loaded CLAUDE.md.",
+    tags: ["contract", "prompt-composer", "moved-knowledge", "goal-shape"],
+    goalShapeTags: ["contract", "claude", "prompt", "composer", "retrieval", "knowledge", "moved", "structural", "amendment"],
+    score: 0.90,
+    confidence: 0.86,
+  },
+  {
+    text: "Contract anti-pattern examples and removed-rule evidence should be retrieved only for matching amendment or audit goals; CLAUDE.md keeps the structural law, not commit-history catalogs.",
+    tags: ["contract", "anti-pattern", "history", "goal-shape"],
+    goalShapeTags: ["contract", "anti", "pattern", "history", "removed", "rule", "audit", "amendment"],
+    score: 0.88,
+    confidence: 0.84,
+  },
+  {
+    text: "Owner modeling examples should use open-ended rendering, autonomy, control, risk, collaboration, and goal-continuity signal maps; do not encode persona enums in prompt or schema surfaces.",
+    tags: ["owner-model", "open-ended", "signals", "contract"],
+    goalShapeTags: ["owner", "model", "autonomy", "control", "risk", "collaboration", "continuity", "signals", "contract"],
+    score: 0.88,
+    confidence: 0.84,
+  },
+  {
+    text: "Universal intent ingress examples collapse to one loop: capture owner words, route through substrate, let dispatch choose one-shot, decomposition, clarification, replay, or deferral by residual evidence and owner-control signals.",
+    tags: ["intent-ingress", "dispatch", "contract", "owner-control"],
+    goalShapeTags: ["intent", "ingress", "dispatch", "decompose", "clarify", "defer", "residual", "owner", "control", "contract"],
+    score: 0.88,
+    confidence: 0.84,
   },
 ];
 
@@ -177,6 +206,7 @@ export const seedFoundationalKnowledge = (
             candidate_id: candidateId,
             score: law.score,
             confidence: law.confidence,
+            goal_shape_tags: law.goalShapeTags,
             skip_corroboration: true,
           }),
           JSON.stringify([candidateId]),

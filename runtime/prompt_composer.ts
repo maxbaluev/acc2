@@ -247,10 +247,15 @@ const readKnowledgeTopK = (
         (cPayload.text as string | undefined) ??
         (cPayload.summary as string | undefined) ??
         (cPayload.insight as string | undefined) ??
+        (pPayload.claim as string | undefined) ??
         (pPayload.synthesized_text as string | undefined) ??
-        (pPayload.text as string | undefined);
-      const evidence = Array.isArray(cPayload.evidence) ? (cPayload.evidence as unknown[]).map(String) : [];
-      const implications = Array.isArray(cPayload.implications) ? (cPayload.implications as unknown[]).map(String) : [];
+        (pPayload.text as string | undefined) ??
+        (pPayload.summary as string | undefined) ??
+        (pPayload.insight as string | undefined);
+      const evidenceSource = Array.isArray(cPayload.evidence) ? cPayload.evidence : pPayload.evidence;
+      const implicationsSource = Array.isArray(cPayload.implications) ? cPayload.implications : pPayload.implications;
+      const evidence = Array.isArray(evidenceSource) ? (evidenceSource as unknown[]).map(String) : [];
+      const implications = Array.isArray(implicationsSource) ? (implicationsSource as unknown[]).map(String) : [];
       const text = claim
         ? [
             claim,
@@ -510,40 +515,95 @@ const bootstrapPolicyForObservationCount = (count: unknown): string => {
   return "bootstrap_policy: sparse profile (new); use plain language + one question at a time + explain concepts on first encounter; respond in the owner's detected language when available and do not assume English";
 };
 
-const ownerPolicyNumber = (n: number): string => Math.max(0, Math.min(1, n)).toFixed(2);
+const clamp01 = (n: number): number => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
+const ownerPolicyNumber = (n: number): string => clamp01(n).toFixed(2);
+
+const numericSignalEntries = (raw: unknown): Array<[string, number]> => {
+  if (!raw || typeof raw !== "object") return [];
+  return Object.entries(raw as Record<string, unknown>)
+    .filter(([, v]) => typeof v === "number" && Number.isFinite(v))
+    .map(([k, v]) => [k, clamp01(v as number)]);
+};
+
+const meanSignal = (raw: unknown): number => {
+  const entries = numericSignalEntries(raw).filter(([, v]) => v > 0);
+  if (entries.length === 0) return 0;
+  return entries.reduce((sum, [, v]) => sum + v, 0) / entries.length;
+};
+
+const topSignalKeys = (raw: unknown, limit = 3): string[] => numericSignalEntries(raw)
+  .filter(([, v]) => v > 0)
+  .sort((a, b) => b[1] - a[1])
+  .slice(0, limit)
+  .map(([k]) => k);
+
+const conceptComprehension = (profile: OwnerProfile): number => {
+  const understood = profile.understood_concepts && typeof profile.understood_concepts === "object" ? Object.values(profile.understood_concepts) : [];
+  if (understood.length === 0) return 0;
+  const confidence = understood.reduce((sum, c) => {
+    const explicit = typeof c?.confidence === "number" ? c.confidence : undefined;
+    const inferred = typeof c?.evidence_count === "number" ? Math.min(1, c.evidence_count / 3) : 0;
+    return sum + clamp01(explicit ?? inferred);
+  }, 0) / understood.length;
+  return clamp01(confidence * Math.min(1, understood.length / 6));
+};
 
 const buildSituationalOwnerPolicyLines = (profile: OwnerProfile, input: OwnerPolicyProjectionInput = {}): string[] => {
   const directiveText = String(input.directive?.text ?? "") + "\n" + String(input.directive?.goal ?? "");
   const recent = input.recentOwnerContext ?? [];
+  const recentText = recent.map((r) => r.text).join("\n");
   const signals = profile.rendering_signals && typeof profile.rendering_signals === "object" ? profile.rendering_signals : {};
-  const understoodCount = profile.understood_concepts && typeof profile.understood_concepts === "object" ? Object.keys(profile.understood_concepts).length : 0;
   const recentDecisions = recent.filter((r) => r.kind === "owner_decision_recorded").length;
-  const recentConsent = recent.some((r) => /\b(consent granted|approved|authorized|apply|implement)\b/i.test(r.text));
-  const directiveRisk = Math.min(1, (/\b(runtime|cli|docs|contract|irreversible|delete|external|stakeholder)\b/i.test(directiveText) ? 0.45 : 0.15) + (/\b(multi-file|parallel|amendments|refactor|audit)\b/i.test(directiveText) ? 0.30 : 0));
-  const taskAmbiguity = Math.min(1, (/\b(audit|understand|improve|design|complex|universal)\b/i.test(directiveText) ? 0.45 : 0.15) + (directiveText.split(/\s+/).filter(Boolean).length > 80 ? 0.30 : 0));
-  const autonomy = typeof profile.autonomy_score === "number" ? profile.autonomy_score : OWNER_PROFILE_DEFAULTS.autonomy_score;
-  const autonomyControl = Math.min(1, (1 - autonomy) * 0.70 + (recentConsent ? -0.10 : 0.10) + (directiveRisk * 0.35));
-  const observedComprehension = Math.min(1, understoodCount * 0.08 + ((signals.code_density ?? 0) * 0.35) + ((signals.ops_vocabulary ?? 0) * 0.30));
+  const recentConsent = /\b(consent granted|approved|authorized|apply|implement)\b/i.test(recentText);
+  const recentControlLanguage = /\b(ask|before applying|confirm|manual|review|do not|don't|stop|wait)\b/i.test(recentText) ? 1 : 0;
+  const recentUncertaintyLanguage = /\b(unclear|confusing|confused|not sure|ambiguous|what does|explain)\b/i.test(recentText) ? 1 : 0;
+  const directiveRisk = clamp01((/\b(runtime|cli|docs|contract|irreversible|delete|external|stakeholder|protected|consent)\b/i.test(directiveText) ? 0.45 : 0.15) + (/\b(multi-file|parallel|amendments|refactor|audit|migration)\b/i.test(directiveText) ? 0.30 : 0));
+  const taskAmbiguity = clamp01((/\b(audit|understand|improve|design|complex|universal|situational|policy)\b/i.test(directiveText) ? 0.45 : 0.15) + (directiveText.split(/\s+/).filter(Boolean).length > 80 ? 0.30 : 0) + (recentUncertaintyLanguage * 0.20));
+  const autonomy = typeof profile.autonomy_score === "number" ? clamp01(profile.autonomy_score) : OWNER_PROFILE_DEFAULTS.autonomy_score;
+  const profileAutonomySignal = meanSignal(profile.autonomy_signals);
+  const profileControlSignal = meanSignal(profile.control_signals);
+  const profileRiskSignal = meanSignal(profile.risk_signals);
+  const renderingComprehension = clamp01(((signals.code_density ?? 0) * 0.35) + ((signals.ops_vocabulary ?? 0) * 0.30));
+  const observedComprehension = clamp01(renderingComprehension + (conceptComprehension(profile) * 0.30) - (recentUncertaintyLanguage * 0.25));
+  const comprehensionGap = clamp01(1 - observedComprehension);
   const urgencyPressure = input.directive?.urgency === "crisis" ? 1 : input.directive?.urgency === "elevated" ? 0.65 : 0.25;
+  const ownerControlNeed = clamp01(((1 - autonomy) * 0.42) + (profileControlSignal * 0.22) + (profileRiskSignal * 0.18) + (directiveRisk * 0.25) + (recentControlLanguage * 0.18) + (comprehensionGap * 0.12) - (recentConsent ? 0.10 : 0));
   const axes: Record<string, number> = {
     directive_risk: directiveRisk,
     task_ambiguity: taskAmbiguity,
-    autonomy_control_need: Math.max(0, autonomyControl),
+    owner_control_need: ownerControlNeed,
+    autonomy_capacity: clamp01((autonomy * 0.70) + (profileAutonomySignal * 0.30)),
     observed_comprehension: observedComprehension,
+    comprehension_gap: comprehensionGap,
     urgency_pressure: urgencyPressure,
     recent_owner_decision_density: Math.min(1, recentDecisions / 4),
+    profile_control_signal: profileControlSignal,
+    profile_risk_signal: profileRiskSignal,
   };
   const axisText = Object.entries(axes).map(([k, v]) => k + "=" + ownerPolicyNumber(v)).join(", ");
   const terms = Array.isArray(profile.preferred_terms) && profile.preferred_terms.length > 0 ? profile.preferred_terms.slice(0, 12).join(", ") : "(none recorded)";
+  const signalSources = [
+    ...topSignalKeys(profile.control_signals).map((k) => "control." + k),
+    ...topSignalKeys(profile.risk_signals).map((k) => "risk." + k),
+    ...topSignalKeys(profile.autonomy_signals).map((k) => "autonomy." + k),
+  ];
+  const actionPolicy = ownerControlNeed >= 0.60 || directiveRisk >= 0.65
+    ? "surface evidence, anchors, residuals, and owner-visible decision points before risky apply; keep repo-internal claims English"
+    : "proceed compactly when verifier evidence is strong; still cite events and surface uncertainty instead of hiding it";
+  const comprehensionPolicy = comprehensionGap >= 0.55
+    ? "explain the next concrete step and ask one narrow question if blocked"
+    : "use substrate/runtime vocabulary directly; avoid re-explaining understood concepts unless confusion appears";
   return [
     "owner_policy (situational projection; open-ended Records, no persona enums):",
     "  axes: " + axisText,
-    "  control_surface: autonomy_score=" + ownerPolicyNumber(autonomy) + " recent_consent=" + (recentConsent ? 1 : 0) + " recent_decisions=" + recentDecisions,
+    "  control_surface: autonomy_score=" + ownerPolicyNumber(autonomy) + " recent_consent=" + (recentConsent ? 1 : 0) + " recent_decisions=" + recentDecisions + " recent_control_language=" + recentControlLanguage,
+    "  action_policy: " + actionPolicy,
+    "  comprehension_policy: " + comprehensionPolicy,
+    "  source_mix: profile_maps=" + (signalSources.length > 0 ? signalSources.join(",") : "none") + " recent_owner_events=" + recent.length + " directive_urgency=" + (input.directive?.urgency ?? "normal") + " directive_lifecycle=" + (input.directive?.lifecycle ?? "finite"),
     "  render_policy: mirror preferred_terms; keep code identifiers literal; use compact evidence/event language when code_density or ops_vocabulary is high",
     "  preferred_terms_sample: " + terms,
   ];
 };
-
 export const buildOwnerProfileSection = (profile: OwnerProfile, input: OwnerPolicyProjectionInput = {}): string => {
   // Render only non-default fields so the prompt stays lean when the
   // owner hasn't expressed any preference. When everything is default,

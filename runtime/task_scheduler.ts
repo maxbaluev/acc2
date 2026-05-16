@@ -354,8 +354,24 @@ export const schedulerTick = async (
     }
 
     const decision = decideDispatch(db, task);
+    const dispatchDecisionEvidence = {
+      route: decision.route,
+      reason: decision.reason,
+      routing_axes: decision.routing_axes,
+      route_scores: decision.route_scores,
+      verifier_evidence: decision.verifier_evidence,
+    };
     if (decision.route === "deferred_blocked") {
       skippedBlocked.push(task.id);
+      emitEvent(db, {
+        kind: "dispatch_decided",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        payload: {
+          ...dispatchDecisionEvidence,
+        } as JsonValue,
+      });
       emitEvent(db, {
         kind: "constitutional_gate_decision",
         substrate_origin: "substrate_auto",
@@ -365,6 +381,9 @@ export const schedulerTick = async (
           gate: "directive_blocked_deferred",
           blockers: decision.blockers,
           reason: decision.reason,
+          routing_axes: decision.routing_axes,
+          route_scores: decision.route_scores,
+          verifier_evidence: decision.verifier_evidence,
         } as JsonValue,
       });
       continue;
@@ -378,6 +397,15 @@ export const schedulerTick = async (
     // task forever). Real Tier-0 replay now runs.
 
     if (decision.route === "claude_inline") {
+      emitEvent(db, {
+        kind: "dispatch_decided",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        payload: {
+          ...dispatchDecisionEvidence,
+        } as JsonValue,
+      });
       skippedInline.push(task.id);
       emitInlineLaneRouted(db, task, decision.reason);
       continue;

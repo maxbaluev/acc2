@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
 import { buildOwnerProfileSection, composePrompt, estimateTokens, readOwnerProfile } from "./prompt_composer";
@@ -29,6 +30,20 @@ const openTask = (db: ReturnType<typeof openDb>): { directiveId: string; taskId:
 };
 
 describe("prompt_composer", () => {
+  test("CLAUDE.md stays slim and points moved context at promoted knowledge", () => {
+    const contract = readFileSync(new URL("../CLAUDE.md", import.meta.url), "utf8");
+    expect(estimateTokens(contract)).toBeLessThan(3000);
+    expect(contract.split("\n").length).toBeLessThan(180);
+    expect(contract).toContain("## Universal Intent Ingress");
+    expect(contract).toContain("Let dispatch choose by residual evidence");
+    expect(contract).toContain("owner-control signals");
+    expect(contract).toContain("rendering_signals, autonomy_signals, control_signals, risk_signals, collaboration_signals, and goal_continuity_signals");
+    expect(contract).toContain("examples, rationale, inventories, historical anti-pattern evidence, and long recipes");
+    expect(contract).toContain("goal-shape tags");
+    expect(contract).not.toContain("First action on every owner directive");
+    expect(contract).not.toContain("commit hashes");
+  });
+
   test("composes under default budget with P0 sections always present", () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
@@ -230,8 +245,8 @@ describe("prompt_composer", () => {
         autonomy_score: 0.3,
         rendering_signals: { code_density: 0.8 },
         autonomy_signals: { parallel_apply: 0.7 },
-        control_signals: { explicit_approval: 0.6 },
-        risk_signals: { multi_file_diff_caution: 0.9 },
+        control_signals: { explicit_approval: 0.6, ask_before_apply: 0.8 },
+        risk_signals: { multi_file_diff_caution: 0.9, protected_target_sensitivity: 0.7 },
         collaboration_signals: { batch_updates: 0.5 },
         goal_continuity_signals: { long_arc_memory: 0.4 },
         hot_topics: ["onboarding", "recipes"],
@@ -246,20 +261,30 @@ describe("prompt_composer", () => {
     expect(profile.autonomy_score).toBe(0.3);
 
     const rendered = buildOwnerProfileSection(profile, {
-      recentOwnerContext: [{ id: "e_owner", ts: "2026-05-16T00:00:00.000Z", kind: "owner_decision_recorded", directive_id: "d", text: "Owner consent granted; apply anchored amendment" }],
+      recentOwnerContext: [
+        { id: "e_owner", ts: "2026-05-16T00:00:00.000Z", kind: "owner_decision_recorded", directive_id: "d", text: "Owner consent granted; apply anchored amendment" },
+        { id: "e_owner_2", ts: "2026-05-16T00:01:00.000Z", kind: "owner_input_received", directive_id: "d", text: "Ask before applying if the runtime diff is ambiguous" },
+      ],
       directive: { text: "Implement runtime amendments against current master", goal: "runtime amendment", urgency: "normal", lifecycle: "finite" },
     });
     expect(rendered).toContain("## OWNER PROFILE");
     expect(rendered).toContain("detected_language: ru");
     expect(rendered).toContain("owner_policy (situational projection; open-ended Records, no persona enums):");
     expect(rendered).toContain("recent_consent=1");
+    expect(rendered).toContain("recent_control_language=1");
     expect(rendered).toContain("directive_risk=");
+    expect(rendered).toContain("owner_control_need=");
+    expect(rendered).toContain("profile_control_signal=");
+    expect(rendered).toContain("profile_risk_signal=");
+    expect(rendered).toContain("action_policy: surface evidence, anchors, residuals");
+    expect(rendered).toContain("comprehension_policy:");
+    expect(rendered).toContain("source_mix: profile_maps=control.ask_before_apply,control.explicit_approval,risk.multi_file_diff_caution");
     expect(rendered).toContain("owner_language_policy: respond to owner-visible summaries in detected_language");
     expect(rendered).toContain("autonomy_score: 0.30");
     expect(rendered).toContain("rendering_signals (continuous, open-ended Record<string,number>): code_density=0.80");
     expect(rendered).toContain("autonomy_signals (continuous, open-ended Record<string,number>): parallel_apply=0.70");
-    expect(rendered).toContain("control_signals (continuous, open-ended Record<string,number>): explicit_approval=0.60");
-    expect(rendered).toContain("risk_signals (continuous, open-ended Record<string,number>): multi_file_diff_caution=0.90");
+    expect(rendered).toContain("control_signals (continuous, open-ended Record<string,number>): ask_before_apply=0.80, explicit_approval=0.60");
+    expect(rendered).toContain("risk_signals (continuous, open-ended Record<string,number>): multi_file_diff_caution=0.90, protected_target_sensitivity=0.70");
     expect(rendered).toContain("collaboration_signals (continuous, open-ended Record<string,number>): batch_updates=0.50");
     expect(rendered).toContain("goal_continuity_signals (continuous, open-ended Record<string,number>): long_arc_memory=0.40");
     expect(rendered).toContain("hot_topics: onboarding, recipes");
@@ -301,5 +326,16 @@ describe("prompt_composer goal-shape knowledge fallback", () => {
     emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "TAG_MATCHED_MOVED_CONTRACT_KNOWLEDGE", score: 0.6, goal_shape_tags: ["todo"] } });
     const composed = composePrompt(db, { taskId, budgetTokens: 1200 });
     expect(composed.text.indexOf("TAG_MATCHED_MOVED_CONTRACT_KNOWLEDGE")).toBeLessThan(composed.text.indexOf("RECENT_BUT_GENERIC_TAG_CASE"));
+  });
+
+  test("direct promoted moved-contract knowledge renders rich payload text without a candidate join", () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { claim: "DIRECT_PROMOTED_CONTRACT_CLAIM", evidence: ["moved from CLAUDE.md"], implications: ["retrieve by goal shape"], score: 0.7, goal_shape_tags: ["todo"] } });
+    const composed = composePrompt(db, { taskId, budgetTokens: 1200 });
+    expect(composed.text).toContain("DIRECT_PROMOTED_CONTRACT_CLAIM");
+    expect(composed.text).toContain("evidence: moved from CLAUDE.md");
+    expect(composed.text).toContain("implications: retrieve by goal shape");
+    expect(composed.text).not.toContain("(no text)");
   });
 });

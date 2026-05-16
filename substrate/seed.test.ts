@@ -217,6 +217,18 @@ describe("seedFoundationalKnowledge", () => {
       expect(refs[0]).toBe(payload.candidate_id);
     }
   });
+
+  test("seeds moved contract knowledge with prompt-composer goal-shape tags on promotion rows", () => {
+    const db = openDb(":memory:");
+    seedFoundationalKnowledge(db, { ownerApproved: true });
+    const rows = db
+      .query("SELECT payload FROM events WHERE kind = 'knowledge_promoted'")
+      .all() as Array<{ payload: string }>;
+    const tagged = rows
+      .map((r) => JSON.parse(r.payload) as { goal_shape_tags?: string[] })
+      .filter((p) => Array.isArray(p.goal_shape_tags) && p.goal_shape_tags.includes("contract") && p.goal_shape_tags.includes("composer"));
+    expect(tagged.length).toBeGreaterThan(0);
+  });
 });
 
 describe("seedRecipes", () => {

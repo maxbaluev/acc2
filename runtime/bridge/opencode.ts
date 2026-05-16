@@ -25,7 +25,7 @@ import type { JsonValue } from "../../substrate/types";
 import { emitEvent } from "../events";
 import { isCycleViolation } from "../cycle_one_gate";
 import { parseOpencodeAuth } from "../../cli/doctor";
-import type { BridgeFailureReason, BridgeRequest, BridgeResult, SpawnOpts } from "./types";
+import type { BridgeFailureReason, BridgeRequest, BridgeResult, McpPreflightInput, McpPreflightResult, SpawnOpts } from "./types";
 import {
   DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS,
   DEFAULT_BRIDGE_STUCK_THRESHOLD_MS,
@@ -33,6 +33,7 @@ import {
   DEFAULT_OPENCODE_MODEL,
   DEFAULT_TIMEOUT_MS,
   V2_OPENCODE_MCP_SERVER_NAME,
+  V2_MCP_TOOL_SURFACE,
   isV2McpToolName,
   materializeOpencodeMcpConfig,
 } from "./config";
@@ -59,6 +60,60 @@ const defaultAuthProbe = (): { credentialCount: number; envProviderCount: number
   if (raw.length === 0) return null;
   const state = parseOpencodeAuth(raw);
   return { credentialCount: state.credentialCount, envProviderCount: state.envProviderCount };
+};
+
+const DEFAULT_MCP_PREFLIGHT_TIMEOUT_MS = 15_000;
+const PREFLIGHT_TAIL_CHARS = 1024;
+
+const tail = (s: string, n = PREFLIGHT_TAIL_CHARS): string => s.length <= n ? s : s.slice(-n);
+
+/** Production MCP config/reachability pre-flight. This validates the exact
+ *  OPENCODE_CONFIG file the run will inherit before spending a full brain
+ *  subprocess. The exit-time no-tool classifier remains in place below for
+ *  model/tool-use failures after a reachable MCP surface was established. */
+const defaultMcpPreflight = (input: McpPreflightInput): McpPreflightResult => {
+  const command = ["opencode", "mcp", "list"];
+  try {
+    const out = spawnSync(command[0]!, command.slice(1), {
+      encoding: "utf8",
+      timeout: input.timeoutMs,
+      env: {
+        ...process.env,
+        OPENCODE_CONFIG: input.configPath,
+        MCP_SERVER_URL: input.mcpServerUrl,
+        V2_MCP_SERVER_URL: input.mcpServerUrl,
+      },
+    });
+    const stdout = typeof out.stdout === "string" ? out.stdout : String(out.stdout ?? "");
+    const stderr = typeof out.stderr === "string" ? out.stderr : String(out.stderr ?? "");
+    const combined = `${stdout}\n${stderr}`;
+    const serverFound = combined.includes(input.serverName);
+    const toolSurfaceFound = V2_MCP_TOOL_SURFACE.some((name) =>
+      combined.includes(name) || combined.includes(`${input.serverName}_${name.replace(/\./g, "_")}`),
+    );
+    const error = out.error ? (out.error as Error).message : undefined;
+    return {
+      ok: out.status === 0 && serverFound && !error,
+      command,
+      status: out.status,
+      signal: out.signal,
+      stdout_tail: tail(stdout),
+      stderr_tail: tail(stderr),
+      server_found: serverFound,
+      tool_surface_found: toolSurfaceFound,
+      ...(error ? { error } : {}),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      command,
+      status: null,
+      stderr_tail: tail((err as Error).message),
+      server_found: false,
+      tool_surface_found: false,
+      error: (err as Error).message,
+    };
+  }
 };
 
 /** Idempotency window for `hidl_action_required` emission. Two failures of
@@ -312,6 +367,57 @@ export const spawnRealOpencode = async (
       invoker: "opencode",
     });
     return { ok: false, reason: { kind: "parse_error", raw: (err as Error).message } };
+  }
+
+  const mcpPreflightTimeoutMs = spawnOpts.mcpPreflightTimeoutMs ?? DEFAULT_MCP_PREFLIGHT_TIMEOUT_MS;
+  const preflightDefault = spawnOpts.spawnFn ? ((): null => null) : defaultMcpPreflight;
+  const mcpPreflight = spawnOpts.mcpPreflight ?? preflightDefault;
+  const preflight = mcpPreflight({
+    configPath: materializedConfig.configPath,
+    mcpServerUrl,
+    serverName: V2_OPENCODE_MCP_SERVER_NAME,
+    timeoutMs: mcpPreflightTimeoutMs,
+  });
+  emitEvent(db, {
+    kind: "bridge_mcp_preflight",
+    substrate_origin: "opencode",
+    directive_id: req.directiveId,
+    task_id: req.taskId,
+    payload: {
+      ok: preflight?.ok ?? null,
+      skipped: preflight === null,
+      mcp_server_url: mcpServerUrl,
+      server_name: V2_OPENCODE_MCP_SERVER_NAME,
+      config_path: materializedConfig.configPath,
+      timeout_ms: mcpPreflightTimeoutMs,
+      ...(preflight ?? { reason: "preflight_skipped_or_unknown" }),
+    } as JsonValue,
+    invoker: "opencode",
+  });
+  if (preflight !== null && !preflight.ok) {
+    try { rmSync(materializedConfig.tempDir, { recursive: true, force: true }); } catch { /* swallow */ }
+    emitEvent(db, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        reason: "mcp_preflight_failed",
+        mcp_handshake_ok: false,
+        mcp_server_url: mcpServerUrl,
+        server_name: V2_OPENCODE_MCP_SERVER_NAME,
+        preflight,
+        hint: "opencode could not see/reach the materialized v2 MCP server before run; inspect OPENCODE_CONFIG, V2_MCP_SERVER_URL, and daemon /mcp reachability",
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    return {
+      ok: false,
+      reason: {
+        kind: "parse_error",
+        raw: `mcp_preflight_failed:${preflight.stderr_tail ?? preflight.stdout_tail ?? preflight.error ?? "unknown"}`,
+      },
+    };
   }
 
   // `opencode run` expects the message as positional args; piping via stdin
