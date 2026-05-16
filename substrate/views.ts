@@ -815,6 +815,49 @@ CREATE VIEW IF NOT EXISTS recipes_latest_view AS
 // until an action_scored auto_apply_gate verifier reports low residual across
 // freshness, duplicate, behavioral novelty, necessity, and adversarial axes.
 // No posterior or queue table is stored; the ledger remains the source.
+//
+// Audit T3AUDVIEWMERGE8K (directive ZCC1T43JQN3CH3PS, 2026-05-16) flagged this
+// view + lesson_implementation_status_view as "overlapping post-3208a41
+// collapse" and proposed merging or deleting one. The claim was REFUSED on
+// inspection. Rationale:
+//   1. FILTER SEMANTICS DIVERGE. This view's terminal WHERE clause excludes
+//      committed proposals (`WHERE c.source_event_id IS NULL`) — it is the
+//      orchestrator's NOT-YET-APPLIED inbox. status_view projects EVERY
+//      proposal including committed ones — it is the AUDIT TIMELINE. Merging
+//      would force one consumer class to filter what the other relies on as
+//      a pre-filter (prompt_composer.ts depends on this exclusion).
+//   2. COLUMN OVERLAP ≈ 27% / 48%. Shared columns are bookkeeping
+//      (source_event_id, ts, directive_id, task_id, payload, context_refs)
+//      plus the latest_apply tuple. queue exposes ~25 gate-decision columns
+//      (owner_gate_required, owner_approved, auto_apply_target, auto_apply_
+//      eligible, 5-axis residual breakdown, apply_gate_status/reason,
+//      trajectory_hazard_count, structured_change, candidate_target/anchor/
+//      diff, proposed_behavior, proposed_action, lesson_kind). status_view
+//      exposes ~15 lifecycle columns (request_event_id, requested_at, action_
+//      event_id, predicted_at, action_artifact_id, verifier_artifact_id,
+//      predicted_residual, scored_event_id, scored_at, verifier_residual,
+//      verifier_passed, commit_sha, applied_at, committed_event_id,
+//      committed_at, flywheel_status). The disjoint columns drive disjoint
+//      consumers — well below the merge threshold.
+//   3. CONSUMERS ARE DISJOINT BY COLUMN.
+//        - cli/apply.ts:166 reads queue-only gate columns.
+//        - prompt_composer.ts:239 reads queue-only columns AND relies on the
+//          NOT-YET-COMMITTED pre-filter.
+//        - cli/apply.test.ts mostly reads status-only lifecycle columns; the
+//          one queue read at line 399 verifies queue exposes post-apply state.
+//        - lesson_apply_candidate_view (views.ts:1822-1824) JOINs both —
+//          needs status's verifier_residual/flywheel_status AND queue's
+//          owner_gate_*/trajectory_hazard_count/apply_gate_status.
+//   4. CTE OVERLAP IS NOT VIEW OVERLAP. Both views compute authorized_requests
+//      + latest_apply because both need to honour the
+//      lesson_apply_requested → action_scored → applied_change_committed
+//      authorization chain. That auth chain is a substrate invariant, not a
+//      duplication. If CTE deduplication becomes worthwhile, the right
+//      refactor is extracting the chain into a shared CTE — not collapsing
+//      semantically-distinct views. Per commit b41cfdd ("DO NOT OVER-ENGINEER")
+//      that refactor is premature with only two consumers.
+// Conclusion: the views are complementary projections of the same proposal
+// stream — orchestrator-gate inbox vs audit-timeline — and stay separate.
 const VIEW_LESSON_IMPLEMENTER_QUEUE = `
 CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
   WITH apply_target_policy AS (
