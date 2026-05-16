@@ -138,25 +138,30 @@ export const MAX_CONSECUTIVE_BRIDGE_FAILURES = 3;
  *  successful frame (`action_predicted`, `bridge_mcp_connected`, or
  *  `task_committed`). Returns the run-length of the most recent failure
  *  streak. */
-const consecutiveBridgeFailures = (db: Database, taskId: string): number => {
+const consecutiveBridgeFailureEvidence = (db: Database, taskId: string): Array<{ id: string; reason: string | null; ts: string }> => {
   const rows = db
     .query(
-      `SELECT kind FROM events
+      `SELECT id, kind, ts, payload FROM events
        WHERE task_id = ?
          AND kind IN ('bridge_failed','action_predicted','bridge_mcp_connected','task_committed')
        ORDER BY ts DESC, rowid DESC LIMIT 50`,
     )
-    .all(taskId) as Array<{ kind: string }>;
-  let streak = 0;
+    .all(taskId) as Array<{ id: string; kind: string; ts: string; payload: string }>;
+  const out: Array<{ id: string; reason: string | null; ts: string }> = [];
   for (const r of rows) {
-    if (r.kind === "bridge_failed") {
-      streak++;
-    } else {
-      break;
-    }
+    if (r.kind !== "bridge_failed") break;
+    let reason: string | null = null;
+    try {
+      const payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
+      reason = typeof payload.reason === "string" ? payload.reason : null;
+    } catch { /* malformed payload: evidence id is still useful */ }
+    out.push({ id: r.id, reason, ts: r.ts });
   }
-  return streak;
+  return out;
 };
+
+const consecutiveBridgeFailures = (db: Database, taskId: string): number =>
+  consecutiveBridgeFailureEvidence(db, taskId).length;
 
 // Process-local in-flight registry. The scheduler is the only writer; the
 // dispatcher promises resolve here. Keys are task_ids; values are the
@@ -287,6 +292,7 @@ export const schedulerTick = async (
     const failureStreak = consecutiveBridgeFailures(db, task.id);
     if (failureStreak >= MAX_CONSECUTIVE_BRIDGE_FAILURES) {
       skippedFailureCapped.push(task.id);
+      const failureEvidence = consecutiveBridgeFailureEvidence(db, task.id);
       emitEvent(db, {
         kind: "task_failed",
         substrate_origin: "substrate_auto",
@@ -297,6 +303,9 @@ export const schedulerTick = async (
           consecutive_failures: failureStreak,
           cap: MAX_CONSECUTIVE_BRIDGE_FAILURES,
           reason: "consecutive_bridge_failures_exceeded_cap",
+          backoff_mode: "terminal_after_consecutive_bridge_failures",
+          retry_evidence_event_ids: failureEvidence.map((e) => e.id),
+          retry_evidence: failureEvidence,
         } as JsonValue,
       });
       continue;

@@ -156,6 +156,7 @@ export const spawnRealOpencode = async (
   db: Database,
   spawnOpts: SpawnOpts = {},
 ): Promise<BridgeResult> => {
+  const bridgeStartedAtMs = Date.now();
   const model = spawnOpts.model ?? process.env.ACC2_OPENCODE_MODEL ?? DEFAULT_OPENCODE_MODEL;
   const timeoutMs = spawnOpts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const spawn = spawnOpts.spawnFn ?? Bun.spawn;
@@ -168,7 +169,17 @@ export const spawnRealOpencode = async (
     substrate_origin: "opencode",
     directive_id: req.directiveId,
     task_id: req.taskId,
-    payload: { prompt_chars: req.prompt.length, model, real: true } as JsonValue,
+    payload: {
+      prompt_chars: req.prompt.length,
+      model,
+      real: true,
+      budget_estimate: {
+        wall_ms: timeoutMs,
+        mcp_handshake_window_ms: handshakeWindowMs,
+        first_frame_threshold_ms: firstFrameThresholdMs,
+        stuck_threshold_ms: stuckThresholdMs,
+      },
+    } as JsonValue,
     invoker: "opencode",
   });
 
@@ -712,6 +723,19 @@ export const spawnRealOpencode = async (
     } catch { /* swallow */ }
   };
 
+  const bridgeElapsedMs = (): number => Math.max(0, Date.now() - bridgeStartedAtMs);
+  const budgetObserved = (terminalReason: string): Record<string, unknown> => ({
+    terminal_reason: terminalReason,
+    wall_ms: bridgeElapsedMs(),
+    timeout_ms: timeoutMs,
+    mcp_handshake_window_ms: handshakeWindowMs,
+    mcp_handshake_timed_out: mcpHandshakeTimedOut,
+    mcp_handshake_ok: mcpHandshakeOk,
+    first_frame_threshold_ms: firstFrameThresholdMs,
+    first_frame_seen: firstFrameSeen,
+    bridge_stuck_fired: bridgeStuckFired,
+  });
+
   // Handshake check: failure means we observed no v2 tool call within the
   // handshake window OR the subprocess exited without ever calling one.
   // Either is a `no_action_predicted`-style gap and the bridge must surface
@@ -740,6 +764,8 @@ export const spawnRealOpencode = async (
         window_ms: handshakeWindowMs,
         mcp_server_url: mcpServerUrl,
         timed_out: mcpHandshakeTimedOut,
+        timeout_mode: "mcp_handshake_observation_window",
+        budget_observed: budgetObserved("mcp_handshake_failed"),
         exit_code: exitCode,
         hint:
           "opencode did not invoke any substrate.*/runtime.* tool before exit; "
@@ -784,6 +810,7 @@ export const spawnRealOpencode = async (
         first_frame_seen: false,
         tier: "first_frame",
         exit_code: exitCode,
+        budget_observed: budgetObserved("subprocess_stuck"),
       } as JsonValue,
       invoker: "opencode",
     });
@@ -824,8 +851,13 @@ export const spawnRealOpencode = async (
       task_id: req.taskId,
       payload: {
         reason: "timeout",
-        ms_elapsed: timeoutMs,
+        timeout_mode: "overall_wall_clock",
+        ms_elapsed: bridgeElapsedMs(),
+        timeout_ms: timeoutMs,
+        killed_by: "overall_timeout_sigterm",
         mcp_handshake_ok: mcpHandshakeOk,
+        mcp_handshake_timed_out: mcpHandshakeTimedOut,
+        budget_observed: budgetObserved("timeout"),
       } as JsonValue,
       invoker: "opencode",
     });
@@ -918,6 +950,7 @@ export const spawnRealOpencode = async (
       model,
       real: true,
       mcp_handshake_ok: mcpHandshakeOk,
+      budget_observed: budgetObserved("completed"),
     } as JsonValue,
     invoker: "opencode",
   });

@@ -483,6 +483,11 @@ export const dispatchReadyTask = async (
     // cycle from scratch, paying tokens for work the verifier had already
     // scored as complete.
     const isTimeout = bridgeResult.reason.kind === "timeout";
+    const bridgeFailureEvents = dispatchEvents.filter((e) => e.kind === "bridge_failed");
+    const bridgeFailureEventIds = bridgeFailureEvents.map((e) => e.id);
+    const lastBridgeFailurePayload = (bridgeFailureEvents.at(-1)?.payload ?? {}) as Record<string, unknown>;
+    const bridgeBudgetObserved = (lastBridgeFailurePayload.budget_observed ?? null) as JsonValue | null;
+    let timeoutRecoveryOutcome: "not_timeout" | "no_closure_audit" | "closure_residual_high" | "already_committed" | "auto_committed" | "error" = isTimeout ? "no_closure_audit" : "not_timeout";
     if (isTimeout) {
       const closureAudit = dispatchEvents.find((e) => e.kind === "task_closure_audited");
       if (closureAudit) {
@@ -493,7 +498,10 @@ export const dispatchReadyTask = async (
             : null;
           if (closureResidual !== null && closureResidual < 0.3) {
             const alreadyCommitted = dispatchEvents.find((e) => e.kind === "task_committed");
-            if (!alreadyCommitted) {
+            if (alreadyCommitted) {
+              timeoutRecoveryOutcome = "already_committed";
+            } else {
+              timeoutRecoveryOutcome = "auto_committed";
               emitEvent(db, {
                 kind: "task_committed",
                 substrate_origin: "substrate_auto",
@@ -504,13 +512,24 @@ export const dispatchReadyTask = async (
                 payload: {
                   dispatch_id: dispatchId,
                   reason: "auto_commit_on_bridge_timeout_after_clean_closure_audit",
+                  bridge_failure_reason: bridgeResult.reason.kind,
+                  bridge_failure_event_ids: bridgeFailureEventIds,
+                  budget_observed: bridgeBudgetObserved,
+                  recovery_evidence: {
+                    mode: "closure_audit_timeout_recovery",
+                    threshold: 0.3,
+                    closure_audit_event_id: closureAudit.id,
+                  },
                   closure_audit_event_id: closureAudit.id,
                   closure_residual: closureResidual,
                 } as JsonValue,
               });
             }
+          } else if (closureResidual !== null) {
+            timeoutRecoveryOutcome = "closure_residual_high";
           }
         } catch (err) {
+          timeoutRecoveryOutcome = "error";
           logger.warn(
             { where: "task_dispatcher.timeout_auto_commit", task_id: task.id, err: (err as Error).message },
             "auto-commit on bridge timeout failed — falling through to normal close path",
@@ -526,6 +545,11 @@ export const dispatchReadyTask = async (
       payload: {
         dispatch_id: dispatchId,
         reason: `bridge_failed:${bridgeResult.reason.kind}`,
+        bridge_failure_reason: bridgeResult.reason.kind,
+        bridge_failure_event_ids: bridgeFailureEventIds,
+        budget_observed: bridgeBudgetObserved,
+        timeout_recovery_attempted: isTimeout,
+        timeout_recovery_outcome: timeoutRecoveryOutcome,
         events_count: dispatchEvents.length,
       } as JsonValue,
     });
