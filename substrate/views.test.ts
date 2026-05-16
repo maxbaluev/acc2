@@ -764,7 +764,33 @@ describe("lesson implementer flywheel views", () => {
       context_refs: [gated],
     });
 
-    insertEvent(db, {
+    const insertAutoApplyGateScore = (
+      source: string,
+      directive_id: string,
+      task_id: string,
+      residual = 0.1,
+      breakdown = {
+        freshness: 0.1,
+        semantic_duplicate: 0.1,
+        behavioral_novelty: 0.1,
+        necessity: 0.1,
+        adversarial: 0.1,
+      },
+    ) => insertEvent(db, {
+      kind: "action_scored",
+      directive_id,
+      task_id,
+      payload: {
+        source_event_id: source,
+        gate_kind: "auto_apply_gate",
+        residual,
+        breakdown,
+      },
+      context_refs: [source],
+      residual,
+    });
+
+    const runtimeProposal = insertEvent(db, {
       kind: "contract_amendment_proposed",
       directive_id: "d_runtime",
       task_id: "t_runtime",
@@ -773,6 +799,25 @@ describe("lesson implementer flywheel views", () => {
         anchor: "WORKFLOW_TEXT",
         proposed_behavior: { file_path: "runtime/prompt_composer.ts", anchor: "WORKFLOW_TEXT", diff: "@@" },
       },
+    });
+    insertAutoApplyGateScore(runtimeProposal, "d_runtime", "t_runtime");
+
+    const duplicateProposal = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_runtime_duplicate",
+      task_id: "t_runtime_duplicate",
+      payload: {
+        target: "runtime/prompt_composer.ts",
+        anchor: "WORKFLOW_TEXT",
+        proposed_behavior: { file_path: "runtime/prompt_composer.ts", anchor: "WORKFLOW_TEXT", diff: "@@" },
+      },
+    });
+    insertAutoApplyGateScore(duplicateProposal, "d_runtime_duplicate", "t_runtime_duplicate", 0.2, {
+      freshness: 0.1,
+      semantic_duplicate: 0.8,
+      behavioral_novelty: 0.1,
+      necessity: 0.1,
+      adversarial: 0.1,
     });
 
     insertEvent(db, {
@@ -814,7 +859,7 @@ describe("lesson implementer flywheel views", () => {
       payload: { failure_kind: "cycle_1_only_breach" },
     });
 
-    insertEvent(db, {
+    const lessonRuntimeProposal = insertEvent(db, {
       kind: "lesson_extracted",
       directive_id: "d_lesson_runtime",
       task_id: "t_lesson_runtime",
@@ -823,6 +868,7 @@ describe("lesson implementer flywheel views", () => {
         proposed_action: { file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" },
       },
     });
+    insertAutoApplyGateScore(lessonRuntimeProposal, "d_lesson_runtime", "t_lesson_runtime");
 
     insertEvent(db, {
       kind: "lesson_extracted",
@@ -856,8 +902,19 @@ describe("lesson implementer flywheel views", () => {
     expect(byDirective.get("d_runtime")!.auto_apply_target).toBe(true);
     expect(byDirective.get("d_runtime")!.structured_change).toBe(true);
     expect(byDirective.get("d_runtime")!.owner_gate_verdict).toBe("owner_consent_not_required");
+    expect(byDirective.get("d_runtime")!.auto_apply_gate_event_id).toBeTruthy();
+    expect(byDirective.get("d_runtime")!.auto_apply_gate_residual).toBe(0.1);
+    expect(byDirective.get("d_runtime")!.freshness_residual).toBe(0.1);
+    expect(byDirective.get("d_runtime")!.semantic_duplicate_residual).toBe(0.1);
+    expect(byDirective.get("d_runtime")!.behavioral_novelty_residual).toBe(0.1);
+    expect(byDirective.get("d_runtime")!.necessity_residual).toBe(0.1);
+    expect(byDirective.get("d_runtime")!.adversarial_residual).toBe(0.1);
     expect(byDirective.get("d_runtime")!.auto_apply_gate_verdict).toBe("auto_apply_eligible");
     expect(byDirective.get("d_runtime")!.apply_gate_status).toBe("authorized_auto");
+    expect(byDirective.get("d_runtime_duplicate")!.auto_apply_eligible).toBe(false);
+    expect(byDirective.get("d_runtime_duplicate")!.auto_apply_gate_verdict).toBe("blocked_auto_apply_gate_axis");
+    expect(byDirective.get("d_runtime_duplicate")!.apply_gate_status).toBe("blocked_auto_apply_gate_residual");
+    expect(byDirective.get("d_runtime_duplicate")!.apply_gate_reason).toBe("semantic_duplicate_residual_high");
     expect(byDirective.get("d_rule")!.owner_gate_required).toBe(true);
     expect(byDirective.get("d_rule")!.owner_gate_verdict).toBe("owner_consent_required");
     expect(byDirective.get("d_rule")!.apply_gate_status).toBe("blocked_owner_consent");
@@ -924,13 +981,9 @@ describe("lesson implementer flywheel views", () => {
       context_refs: [source, requested],
       residual: 0.1,
     });
-    insertEvent(db, {
-      kind: "lesson_applied",
-      directive_id: "d_apply",
-      task_id: "t_apply",
-      payload: { source_event_id: source, status: "applied", commit_sha: "abcdef1234" },
-      context_refs: [source, scored],
-    });
+    // Audit #3 collapse (owner-approved 2026-05-16): applied_change_committed
+    // now subsumes lesson_applied / contract_amendment_applied. ONE emission
+    // carries status + source_kind + residual + commit_sha in payload.
     insertEvent(db, {
       kind: "applied_change_committed",
       directive_id: "d_apply",
@@ -991,7 +1044,19 @@ describe("lesson implementer flywheel views", () => {
       kind: "action_scored",
       directive_id: "d_candidate_amendment",
       task_id: "t_candidate_amendment",
-      payload: { source_event_id: amendmentSource, request_event_id: request, authorization_event_id: request },
+      payload: {
+        source_event_id: amendmentSource,
+        request_event_id: request,
+        authorization_event_id: request,
+        gate_kind: "auto_apply_gate",
+        breakdown: {
+          freshness: 0.1,
+          semantic_duplicate: 0.1,
+          behavioral_novelty: 0.1,
+          necessity: 0.1,
+          adversarial: 0.1,
+        },
+      },
       context_refs: [amendmentSource, request],
       residual: 0.12,
     });
@@ -1059,15 +1124,21 @@ describe("lesson implementer flywheel views", () => {
       kind: "applied_change_committed",
       directive_id: "d_apply_high",
       task_id: "t_apply_high",
-      payload: { source_event_id: source, status: "applied", residual: 0.3 },
-      context_refs: [source],
+      // Auth-gate (post audit #3 collapse): apply event must cite the
+      // request via payload.request_event_id or context_refs to count.
+      payload: { source_event_id: source, status: "applied", residual: 0.3, request_event_id: requested, authorization_event_id: requested },
+      context_refs: [source, requested],
       residual: 0.3,
     });
 
     const row = lessonImplementationStatus(db).find((r) => r.source_event_id === source)!;
     expect(row.verifier_passed).toBe(false);
     expect(row.committed_event_id).toBeNull();
-    expect(row.flywheel_status).toBe("verified");
+    // Audit #3 collapse: applied_change_committed always fires (carrying
+    // payload.status) so apply CTE picks it up; flywheel_status falls to
+    // 'applied' (apply_status branch) instead of 'verified'. Terminal CTE
+    // still requires residual < 0.3, so committed_event_id stays null.
+    expect(row.flywheel_status).toBe("applied");
     expect(lessonImplementerQueue(db).some((r) => r.source_event_id === source)).toBe(true);
   });
 
@@ -1109,8 +1180,10 @@ describe("lesson implementer flywheel views", () => {
       context_refs: [source, requested, predicted],
       residual: 0.7,
     });
+    // Audit #3 collapse: applied_change_committed now carries failure status
+    // in payload (was previously a separate lesson_applied / contract_amendment_applied event).
     insertEvent(db, {
-      kind: "lesson_applied",
+      kind: "applied_change_committed",
       directive_id: "d_executor_high",
       task_id: "t_executor_high",
       payload: {
@@ -1311,6 +1384,25 @@ describe("lesson implementer flywheel views", () => {
         anchor: "WORKFLOW_TEXT",
         proposed_behavior: { file_path: "runtime/prompt_composer.ts", anchor: "WORKFLOW_TEXT", diff: "@@" },
       },
+    });
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_candidate_amendment",
+      task_id: "t_candidate_amendment",
+      payload: {
+        source_event_id: amendment,
+        gate_kind: "auto_apply_gate",
+        residual: 0.1,
+        breakdown: {
+          freshness: 0.1,
+          semantic_duplicate: 0.1,
+          behavioral_novelty: 0.1,
+          necessity: 0.1,
+          adversarial: 0.1,
+        },
+      },
+      context_refs: [amendment],
+      residual: 0.1,
     });
 
     const rows = lessonApplyCandidates(db);

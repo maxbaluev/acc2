@@ -269,19 +269,13 @@ export const EVENT_KINDS = {
   // applier before any semantic edit occurs. The orchestrator (main Claude
   // Code) reads those events, spawns a Claude
   // Agent subagent in background_task that performs the semantic file edit
-  // + runs the verifier (bun test, lint, type-check) + commits via git. Only
-  // a successful, verifier-passing apply emits applied_change_committed citing
-  // the originating lesson/amendment id; failed/refused attempts remain visible
-  // as action_scored + *_applied rows. The optional legacy *_applied rows remain
-  // readable, but applied_change_committed is the normalized flywheel terminal event.
-  // See CLAUDE.md §"Applying lessons via Claude Agent subagents".
-  // 2026-05-15 right-sizing: lesson_apply_requested + applied_change_committed
-  // are routing/commit records. The semantic text lives on the source
-  // lesson_extracted / contract_amendment_proposed events they cite.
+  // + runs the verifier (bun test, lint, type-check) + commits via git.
+  // applied_change_committed fires for EVERY apply attempt (success / failed
+  // / refused) carrying status + source_kind in payload. Audit #3 collapse
+  // (owner-approved 2026-05-16): lesson_applied + contract_amendment_applied
+  // are DELETED — they differed only by source_kind which is now in payload.
   lesson_apply_requested:                  { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   applied_change_committed:                { producer: "claude",    embeddable: false, mirror_inline: true,  health_metric: false, narrative: true },
-  lesson_applied:                          { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
-  contract_amendment_applied:              { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   // Owner profile (UX dispatch b71pfyddv, 2026-05-15, knowledge_candidate
   // 540ZQYN3): stable owner preferences (language, tone, working hours,
   // boundaries) accumulate as substrate-side profile events so they

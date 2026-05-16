@@ -377,14 +377,22 @@ describe("runApply gates", () => {
     cap.restore();
 
     expect(code).toBe(1);
-    expect(cap.out.join("\n")).toContain("applied_change_committed skipped residual=0.7 status=applied");
-    expect(cap.out.join("\n")).toContain("lesson_applied");
+    // Audit #3 collapse (owner-approved 2026-05-16): applied_change_committed
+    // now ALWAYS emits; verifier_passed flag distinguishes high-residual cases.
+    // Legacy lesson_applied / contract_amendment_applied are deleted.
+    expect(cap.out.join("\n")).toContain("applied_change_committed");
+    expect(cap.out.join("\n")).toContain("verifier_failed");
+    expect(cap.out.join("\n")).not.toContain("lesson_applied");
 
     const statusEnv = await mcpCall("substrate.read", { view_name: "lesson_implementation_status_view" });
     expect(statusEnv.ok).toBe(true);
     const status = (statusEnv.result as Array<Record<string, unknown>>).find((r) => r.source_event_id === eventId)!;
     expect(status.scored_event_id).toBeTruthy();
     expect(status.verifier_passed).toBe(false);
+    // applied_change_committed now ALWAYS emits, but the terminal CTE in
+    // lesson_implementation_status_view still filters status='applied' AND
+    // residual<0.3 — high-residual cases set apply_event_id but leave
+    // committed_event_id null. flywheel_status falls back to apply_status.
     expect(status.committed_event_id).toBeNull();
     expect(status.flywheel_status).toBe("applied");
 

@@ -557,6 +557,10 @@ export const _resetSchedulerForTests = (): void => {
   IN_FLIGHT.clear();
   IN_FLIGHT_DIRECTIVE.clear();
   IN_FLIGHT_PARENT.clear();
+  // Parallel-DAG contract (1826363): schedulerTick returns after launch,
+  // so a test that didn't drain leaves IN_FLIGHT_BRAIN populated. Cleared
+  // here so the next test's brain dispatch isn't artificially capped.
+  IN_FLIGHT_BRAIN.clear();
 };
 
 /** Await every in-flight dispatch tracked in the process-local IN_FLIGHT

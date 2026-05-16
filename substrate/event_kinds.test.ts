@@ -168,12 +168,10 @@ describe("derived sets match their pre-unification shape", () => {
       "action_predicted",
       // Tools.
       "code_artifact_candidate",
-      // Structural amendments + their apply outcomes.
+      // Structural amendments.
       "contract_amendment_proposed",
-      "contract_amendment_applied",
-      // Process insights + their apply outcomes.
+      // Process insights.
       "lesson_extracted",
-      "lesson_applied",
       // Owner channel.
       "owner_input_received",
       "owner_decision_recorded",

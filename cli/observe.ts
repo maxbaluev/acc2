@@ -353,9 +353,7 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       const status = (p.status as string) ?? "requested";
       return `${src ? `source=${idPrefix(src, 12)} ` : ""}status=${status}`;
     }
-    case "applied_change_committed":
-    case "lesson_applied":
-    case "contract_amendment_applied": {
+    case "applied_change_committed": {
       const src = p.source_event_id as string | undefined;
       const status = (p.status as string) ?? "applied";
       const commit = p.commit_sha as string | undefined;

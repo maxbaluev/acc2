@@ -811,9 +811,9 @@ CREATE VIEW IF NOT EXISTS recipes_latest_view AS
 // lesson_implementer_queue_view — derived inbox for the lesson-implementer
 // flywheel. It projects lesson_extracted / contract_amendment_proposed rows
 // that have not reached applied_change_committed. Owner gating is derived
-// from target path + owner_decision_recorded rows; auto-apply eligibility is
-// derived from structured proposed_behavior/proposed_action and absence of
-// trajectory hazards. The gates are target/shape based, not lesson-kind based.
+// from target path + owner_decision_recorded rows. Auto-apply remains fail-closed
+// until an action_scored auto_apply_gate verifier reports low residual across
+// freshness, duplicate, behavioral novelty, necessity, and adversarial axes.
 // No posterior or queue table is stored; the ledger remains the source.
 const VIEW_LESSON_IMPLEMENTER_QUEUE = `
 CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
@@ -1005,7 +1005,33 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
         ORDER BY ts DESC, rowid DESC
       ) AS rn
     FROM events
-    WHERE kind IN ('lesson_applied', 'contract_amendment_applied')
+    -- Audit #3 collapse (owner-approved 2026-05-16): applied_change_committed
+    -- now subsumes lesson_applied + contract_amendment_applied; status lives in
+    -- payload.status (applied/failed/refused), source_kind in payload.source_kind.
+    -- Authorization gate (mirrors terminal CTE): only count applied_change_committed
+    -- whose source has a matching lesson_apply_requested + action_scored linkage,
+    -- so "unauthorized" + "unscored" apply rows stay invisible to the flywheel
+    -- view (same invariants as the pre-collapse *_applied path).
+    WHERE kind = 'applied_change_committed'
+      AND EXISTS (
+        SELECT 1 FROM authorized_requests ar
+        JOIN events s
+          ON s.kind = 'action_scored'
+         AND COALESCE(json_extract(s.payload, '$.source_event_id'), json_extract(s.context_refs, '$[0]')) = ar.source_event_id
+         AND s.ts <= events.ts
+         AND (
+           json_extract(s.payload, '$.request_event_id') = ar.request_event_id
+           OR json_extract(s.payload, '$.authorization_event_id') = ar.request_event_id
+           OR EXISTS (SELECT 1 FROM json_each(s.context_refs) WHERE value = ar.request_event_id)
+         )
+        WHERE ar.source_event_id = json_extract(events.payload, '$.source_event_id')
+          AND ar.requested_at <= events.ts
+          AND (
+            json_extract(events.payload, '$.request_event_id') = ar.request_event_id
+            OR json_extract(events.payload, '$.authorization_event_id') = ar.request_event_id
+            OR EXISTS (SELECT 1 FROM json_each(events.context_refs) WHERE value = ar.request_event_id)
+          )
+      )
   ),
   owner_approvals AS (
     SELECT DISTINCT COALESCE(
@@ -1026,6 +1052,77 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
     FROM events
     WHERE kind IN ('dispatcher_violation', 'irreversible_effect_recorded')
     GROUP BY directive_id
+  ),
+  latest_auto_apply_gate_score AS (
+    SELECT * FROM (
+      SELECT
+        COALESCE(
+          json_extract(payload, '$.source_event_id'),
+          json_extract(payload, '$.auto_apply_gate.source_event_id'),
+          json_extract(context_refs, '$[0]')
+        ) AS source_event_id,
+        id AS auto_apply_gate_event_id,
+        CAST(COALESCE(
+          json_extract(payload, '$.auto_apply_gate.residual'),
+          json_extract(payload, '$.residual'),
+          residual,
+          1
+        ) AS REAL) AS auto_apply_gate_residual,
+        CAST(COALESCE(
+          json_extract(payload, '$.auto_apply_gate.breakdown.freshness'),
+          json_extract(payload, '$.auto_apply_gate.breakdown.anchor_freshness'),
+          json_extract(payload, '$.breakdown.freshness'),
+          json_extract(payload, '$.breakdown.anchor_freshness'),
+          1
+        ) AS REAL) AS freshness_residual,
+        CAST(COALESCE(
+          json_extract(payload, '$.auto_apply_gate.breakdown.semantic_duplicate'),
+          json_extract(payload, '$.auto_apply_gate.breakdown.duplicate'),
+          json_extract(payload, '$.breakdown.semantic_duplicate'),
+          json_extract(payload, '$.breakdown.duplicate'),
+          1
+        ) AS REAL) AS semantic_duplicate_residual,
+        CAST(COALESCE(
+          json_extract(payload, '$.auto_apply_gate.breakdown.behavioral_novelty'),
+          json_extract(payload, '$.auto_apply_gate.breakdown.novelty'),
+          json_extract(payload, '$.breakdown.behavioral_novelty'),
+          json_extract(payload, '$.breakdown.novelty'),
+          1
+        ) AS REAL) AS behavioral_novelty_residual,
+        CAST(COALESCE(
+          json_extract(payload, '$.auto_apply_gate.breakdown.necessity'),
+          json_extract(payload, '$.breakdown.necessity'),
+          1
+        ) AS REAL) AS necessity_residual,
+        CAST(COALESCE(
+          json_extract(payload, '$.auto_apply_gate.breakdown.adversarial'),
+          json_extract(payload, '$.auto_apply_gate.breakdown.adversarial_review'),
+          json_extract(payload, '$.breakdown.adversarial'),
+          json_extract(payload, '$.breakdown.adversarial_review'),
+          1
+        ) AS REAL) AS adversarial_residual,
+        COALESCE(
+          json_extract(payload, '$.auto_apply_gate.breakdown'),
+          json_extract(payload, '$.breakdown'),
+          json_object()
+        ) AS auto_apply_gate_breakdown,
+        ROW_NUMBER() OVER (
+          PARTITION BY COALESCE(
+            json_extract(payload, '$.source_event_id'),
+            json_extract(payload, '$.auto_apply_gate.source_event_id'),
+            json_extract(context_refs, '$[0]')
+          )
+          ORDER BY ts DESC, rowid DESC
+        ) AS rn
+      FROM events
+      WHERE kind = 'action_scored'
+        AND (
+          json_extract(payload, '$.gate_kind') = 'auto_apply_gate'
+          OR json_extract(payload, '$.verifier_kind') = 'auto_apply_gate'
+          OR json_type(payload, '$.auto_apply_gate') = 'object'
+        )
+    )
+    WHERE rn = 1
   ),
   shaped AS (
     SELECT
@@ -1137,10 +1234,25 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
     p.auto_apply_target,
     p.structured_change,
     COALESCE(h.hazard_count, 0) AS trajectory_hazard_count,
+    gs.auto_apply_gate_event_id,
+    gs.auto_apply_gate_residual,
+    gs.freshness_residual,
+    gs.semantic_duplicate_residual,
+    gs.behavioral_novelty_residual,
+    gs.necessity_residual,
+    gs.adversarial_residual,
+    gs.auto_apply_gate_breakdown,
     CASE
       WHEN p.auto_apply_target = 1
        AND p.structured_change = 1
        AND COALESCE(h.hazard_count, 0) = 0
+       AND gs.auto_apply_gate_event_id IS NOT NULL
+       AND gs.auto_apply_gate_residual < 0.3
+       AND gs.freshness_residual < 0.3
+       AND gs.semantic_duplicate_residual < 0.3
+       AND gs.behavioral_novelty_residual < 0.3
+       AND gs.necessity_residual < 0.3
+       AND gs.adversarial_residual < 0.3
       THEN 1 ELSE 0
     END AS auto_apply_eligible,
     CASE
@@ -1152,6 +1264,16 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       THEN 'blocked_trajectory_hazard'
       WHEN p.structured_change = 0
       THEN 'blocked_unstructured_proposal'
+      WHEN gs.auto_apply_gate_event_id IS NULL
+      THEN 'blocked_auto_apply_gate_missing'
+      WHEN gs.auto_apply_gate_residual >= 0.3
+      THEN 'blocked_auto_apply_gate_residual'
+      WHEN gs.freshness_residual >= 0.3
+        OR gs.semantic_duplicate_residual >= 0.3
+        OR gs.behavioral_novelty_residual >= 0.3
+        OR gs.necessity_residual >= 0.3
+        OR gs.adversarial_residual >= 0.3
+      THEN 'blocked_auto_apply_gate_axis'
       ELSE 'auto_apply_eligible'
     END AS auto_apply_gate_verdict,
     CASE
@@ -1166,6 +1288,17 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       WHEN p.owner_gate_required = 1
       THEN 'authorized_owner'
       WHEN p.auto_apply_target = 1
+       AND gs.auto_apply_gate_event_id IS NULL
+      THEN 'blocked_auto_apply_gate_missing'
+      WHEN p.auto_apply_target = 1
+       AND (gs.auto_apply_gate_residual >= 0.3
+        OR gs.freshness_residual >= 0.3
+        OR gs.semantic_duplicate_residual >= 0.3
+        OR gs.behavioral_novelty_residual >= 0.3
+        OR gs.necessity_residual >= 0.3
+        OR gs.adversarial_residual >= 0.3)
+      THEN 'blocked_auto_apply_gate_residual'
+      WHEN p.auto_apply_target = 1
       THEN 'authorized_auto'
       ELSE 'manual_review'
     END AS apply_gate_status,
@@ -1178,6 +1311,27 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       WHEN p.auto_apply_target = 1
        AND p.structured_change = 0
       THEN 'structured_proposed_behavior_required'
+      WHEN p.auto_apply_target = 1
+       AND gs.auto_apply_gate_event_id IS NULL
+      THEN 'auto_apply_gate_score_missing'
+      WHEN p.auto_apply_target = 1
+       AND gs.auto_apply_gate_residual >= 0.3
+      THEN 'auto_apply_gate_residual_high'
+      WHEN p.auto_apply_target = 1
+       AND gs.freshness_residual >= 0.3
+      THEN 'freshness_residual_high'
+      WHEN p.auto_apply_target = 1
+       AND gs.semantic_duplicate_residual >= 0.3
+      THEN 'semantic_duplicate_residual_high'
+      WHEN p.auto_apply_target = 1
+       AND gs.behavioral_novelty_residual >= 0.3
+      THEN 'behavioral_novelty_residual_high'
+      WHEN p.auto_apply_target = 1
+       AND gs.necessity_residual >= 0.3
+      THEN 'necessity_residual_high'
+      WHEN p.auto_apply_target = 1
+       AND gs.adversarial_residual >= 0.3
+      THEN 'adversarial_residual_high'
       ELSE NULL
     END AS apply_gate_reason,
      la.apply_event_id,
@@ -1189,6 +1343,7 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
   FROM target_policy p
   LEFT JOIN committed c ON c.source_event_id = p.source_event_id
   LEFT JOIN latest_apply la ON la.source_event_id = p.source_event_id AND la.rn = 1
+  LEFT JOIN latest_auto_apply_gate_score gs ON gs.source_event_id = p.source_event_id
   LEFT JOIN owner_approvals oa ON oa.approval_scope = p.source_event_id OR oa.approval_scope = p.directive_id
   LEFT JOIN hazards h ON h.directive_id = p.directive_id
   WHERE c.source_event_id IS NULL;
@@ -1322,7 +1477,33 @@ CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
         ORDER BY ts DESC, rowid DESC
       ) AS rn
     FROM events
-    WHERE kind IN ('lesson_applied', 'contract_amendment_applied')
+    -- Audit #3 collapse (owner-approved 2026-05-16): applied_change_committed
+    -- now subsumes lesson_applied + contract_amendment_applied; status lives in
+    -- payload.status (applied/failed/refused), source_kind in payload.source_kind.
+    -- Authorization gate (mirrors terminal CTE): only count applied_change_committed
+    -- whose source has a matching lesson_apply_requested + action_scored linkage,
+    -- so "unauthorized" + "unscored" apply rows stay invisible to the flywheel
+    -- view (same invariants as the pre-collapse *_applied path).
+    WHERE kind = 'applied_change_committed'
+      AND EXISTS (
+        SELECT 1 FROM authorized_requests ar
+        JOIN events s
+          ON s.kind = 'action_scored'
+         AND COALESCE(json_extract(s.payload, '$.source_event_id'), json_extract(s.context_refs, '$[0]')) = ar.source_event_id
+         AND s.ts <= events.ts
+         AND (
+           json_extract(s.payload, '$.request_event_id') = ar.request_event_id
+           OR json_extract(s.payload, '$.authorization_event_id') = ar.request_event_id
+           OR EXISTS (SELECT 1 FROM json_each(s.context_refs) WHERE value = ar.request_event_id)
+         )
+        WHERE ar.source_event_id = json_extract(events.payload, '$.source_event_id')
+          AND ar.requested_at <= events.ts
+          AND (
+            json_extract(events.payload, '$.request_event_id') = ar.request_event_id
+            OR json_extract(events.payload, '$.authorization_event_id') = ar.request_event_id
+            OR EXISTS (SELECT 1 FROM json_each(events.context_refs) WHERE value = ar.request_event_id)
+          )
+      )
   ),
   terminal AS (
     SELECT
@@ -1879,6 +2060,14 @@ export type LessonImplementerQueueRow = {
   auto_apply_target: boolean;
   structured_change: boolean;
   trajectory_hazard_count: number;
+  auto_apply_gate_event_id: string | null;
+  auto_apply_gate_residual: number | null;
+  freshness_residual: number | null;
+  semantic_duplicate_residual: number | null;
+  behavioral_novelty_residual: number | null;
+  necessity_residual: number | null;
+  adversarial_residual: number | null;
+  auto_apply_gate_breakdown: Record<string, unknown>;
   auto_apply_eligible: boolean;
   auto_apply_gate_verdict: string;
   apply_gate_status: string;
@@ -2240,6 +2429,14 @@ export const lessonImplementerQueue = (db: Database): LessonImplementerQueueRow[
     auto_apply_target: ((r.auto_apply_target as number) ?? 0) === 1,
     structured_change: ((r.structured_change as number) ?? 0) === 1,
     trajectory_hazard_count: (r.trajectory_hazard_count as number) ?? 0,
+    auto_apply_gate_event_id: (r.auto_apply_gate_event_id as string | null) ?? null,
+    auto_apply_gate_residual: (r.auto_apply_gate_residual as number | null) ?? null,
+    freshness_residual: (r.freshness_residual as number | null) ?? null,
+    semantic_duplicate_residual: (r.semantic_duplicate_residual as number | null) ?? null,
+    behavioral_novelty_residual: (r.behavioral_novelty_residual as number | null) ?? null,
+    necessity_residual: (r.necessity_residual as number | null) ?? null,
+    adversarial_residual: (r.adversarial_residual as number | null) ?? null,
+    auto_apply_gate_breakdown: parseJson<Record<string, unknown>>(r.auto_apply_gate_breakdown ?? '{}'),
     auto_apply_eligible: ((r.auto_apply_eligible as number) ?? 0) === 1,
     auto_apply_gate_verdict: r.auto_apply_gate_verdict as string,
     apply_gate_status: r.apply_gate_status as string,

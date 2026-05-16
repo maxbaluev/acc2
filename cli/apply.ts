@@ -452,7 +452,7 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean; aut
     : policy.ownerGateRequired
       ? `OWNER GATE — APPROVED: owner consent is recorded for this source event.`
     : policy.autoApplyTarget
-        ? `AUTO-APPLY GATE — CLI/RUNTIME: proceed only because acc apply verified a structured proposed change {target_resource|resource_uri, anchor, diff:{kind:\"anchored_replace_v1\", before, after}}, verifier residual must be < 0.3, and this trajectory has no dispatcher_violation or irreversible_effect_recorded rows unless owner_decision_recorded approves this source event or directive.`
+        ? `AUTO-APPLY GATE — CLI/RUNTIME: proceed only if the queue row is auto_apply_eligible, meaning structured target/anchor/diff passed and an action_scored auto_apply_gate residual is < 0.3 across freshness, semantic_duplicate, behavioral_novelty, necessity, and adversarial axes.`
       : `(target outside owner-consent territory — apply directly)`;
 
   return [
@@ -604,7 +604,7 @@ export type ApplyOutcomeResult =
   | { ok: false; reason: string; exitCode: number }
   | {
       ok: true;
-      appliedKind: "contract_amendment_applied" | "lesson_applied";
+      appliedKind: "applied_change_committed";
       appliedEventId: string;
       committedEventId?: string;
       residual: number;
@@ -639,9 +639,6 @@ export const recordApplyOutcome = async (opts: {
     return { ok: false, reason: `source event ${opts.eventId} not found`, exitCode: 1 };
   }
   const isAmendment = ev.kind === "contract_amendment_proposed";
-  const appliedKind = (isAmendment ? "contract_amendment_applied" : "lesson_applied") as
-    | "contract_amendment_applied"
-    | "lesson_applied";
   const status = opts.status || "applied";
   const residual = typeof opts.residual === "number" && Number.isFinite(opts.residual)
     ? Math.min(1, Math.max(0, opts.residual))
@@ -792,81 +789,54 @@ export const recordApplyOutcome = async (opts: {
     } catch { /* swallow — see comment above */ }
   }
 
+  // Universal applied_change_committed (audit #3 collapse, owner-approved
+  // 2026-05-16): applied_change_committed now fires for EVERY apply attempt
+  // (success / failed / refused) carrying status in payload. The two legacy
+  // kinds lesson_applied + contract_amendment_applied are deleted — they
+  // differed only by source_kind, which is already in payload, and they
+  // duplicated the credit closure semantics. Consumers filter on
+  // payload.source_kind to distinguish lesson vs amendment, payload.status
+  // to distinguish success/failed/refused.
   const verifierPassed = status === "applied" && residual < 0.3;
-  let committedEventId: string | undefined;
-  if (verifierPassed) {
-    const committedEnv = await mcpCall("substrate.emit", {
-      kind: "applied_change_committed",
-      substrate_origin: "claude_root",
-      directive_id: ev.directive_id,
-      task_id: ev.task_id,
-      context_refs: [eventId, requestEventId, actionEventId, scoredEventId].filter(Boolean),
-      action_artifact_id: actionArtifactId,
-      verifier_artifact_id: verifierArtifactId,
-      residual,
-      payload: {
-        source_event_id: eventId,
-        source_kind: ev.kind,
-        status,
-        commit_sha: opts.commitSha,
-        subagent_task_id: opts.subagentTaskId,
-        summary: opts.summary,
-        reason: opts.reason,
-        target,
-        residual,
-        request_event_id: requestEventId,
-        authorization_event_id: requestEventId,
-        action_event_id: actionEventId,
-        scored_event_id: scoredEventId,
-        owner_gate_checked: true,
-        owner_gate_required: auth.ownerGateRequired,
-        owner_approved: auth.ownerApproved,
-        authorization_status: "approved",
-      },
-    });
-    if (!committedEnv.ok) {
-      return { ok: false, reason: `applied_change_committed emit failed - ${committedEnv.error}`, exitCode: 1 };
-    }
-    committedEventId = (committedEnv.result as { id?: string })?.id;
-  }
-
-  const appliedPayload: Record<string, unknown> = {
-    source_event_id: eventId,
-    source_kind: ev.kind,
-    status,
-    applied_at: new Date().toISOString(),
-    request_event_id: requestEventId,
-    authorization_event_id: requestEventId,
-    action_event_id: actionEventId,
-    scored_event_id: scoredEventId,
-    residual,
-    owner_gate_checked: true,
-    owner_gate_required: auth.ownerGateRequired,
-    owner_approved: auth.ownerApproved,
-    authorization_status: "approved",
-  };
-  if (committedEventId) appliedPayload.applied_change_event_id = committedEventId;
-  if (opts.commitSha) appliedPayload.commit_sha = opts.commitSha;
-  if (opts.subagentTaskId) appliedPayload.subagent_task_id = opts.subagentTaskId;
-  if (opts.summary) appliedPayload.summary = opts.summary;
-  if (opts.reason) appliedPayload.reason = opts.reason;
-  if (target) appliedPayload.target = target;
-  const env = await mcpCall("substrate.emit", {
-    kind: appliedKind,
+  const committedEnv = await mcpCall("substrate.emit", {
+    kind: "applied_change_committed",
     substrate_origin: "claude_root",
     directive_id: ev.directive_id,
     task_id: ev.task_id,
-    context_refs: [eventId, committedEventId].filter(Boolean),
-    payload: appliedPayload,
+    context_refs: [eventId, requestEventId, actionEventId, scoredEventId].filter(Boolean),
+    action_artifact_id: actionArtifactId,
+    verifier_artifact_id: verifierArtifactId,
+    residual,
+    payload: {
+      source_event_id: eventId,
+      source_kind: ev.kind,
+      status,
+      verifier_passed: verifierPassed,
+      applied_at: new Date().toISOString(),
+      commit_sha: opts.commitSha,
+      subagent_task_id: opts.subagentTaskId,
+      summary: opts.summary,
+      reason: opts.reason,
+      target,
+      residual,
+      request_event_id: requestEventId,
+      authorization_event_id: requestEventId,
+      action_event_id: actionEventId,
+      scored_event_id: scoredEventId,
+      owner_gate_checked: true,
+      owner_gate_required: auth.ownerGateRequired,
+      owner_approved: auth.ownerApproved,
+      authorization_status: "approved",
+    },
   });
-  if (!env.ok) {
-    return { ok: false, reason: `emit failed — ${env.error}`, exitCode: 1 };
+  if (!committedEnv.ok) {
+    return { ok: false, reason: `applied_change_committed emit failed - ${committedEnv.error}`, exitCode: 1 };
   }
-  const result = env.result as { id?: string };
+  const committedEventId = (committedEnv.result as { id?: string })?.id;
   return {
     ok: true,
-    appliedKind,
-    appliedEventId: result.id ?? "?",
+    appliedKind: "applied_change_committed",
+    appliedEventId: committedEventId ?? "?",
     committedEventId,
     residual,
     status,
@@ -896,12 +866,11 @@ const recordApply = async (
     console.error(`acc apply --record: ${result.reason}`);
     return result.exitCode;
   }
-  if (result.committedEventId) {
-    console.log(`applied_change_committed ${result.committedEventId} residual=${result.residual}`);
-  } else {
-    console.log(`applied_change_committed skipped residual=${result.residual} status=${result.status}`);
-  }
-  console.log(`${result.appliedKind} ${result.appliedEventId} (source=${eventId.slice(0, 12)} status=${result.status})`);
+  // Audit #3 collapse: applied_change_committed now ALWAYS emits, carrying
+  // status + verifier_passed in payload. Single CLI line replaces the prior
+  // dual emit (applied_change_committed + lesson_applied/contract_amendment_applied).
+  const verifierTag = result.verifierPassed ? "verifier_passed" : "verifier_failed";
+  console.log(`applied_change_committed ${result.committedEventId} residual=${result.residual} status=${result.status} ${verifierTag} (source=${eventId.slice(0, 12)})`);
   return result.status === "applied" && !result.verifierPassed ? 1 : 0;
 };
 
@@ -914,7 +883,7 @@ export const runApply = async (argv: string[]): Promise<number> => {
     console.log("                  [--commit-sha X] [--subagent-task-id Y]");
     console.log("                  [--summary Z] [--reason W] [--target FILE] [--residual N]");
     console.log("                  [--action-artifact-id A] [--verifier-artifact-id V]");
-    console.log("        Emit action_predicted/action_scored, gated applied_change_committed, and *_applied.");
+    console.log("        Emit action_predicted/action_scored, then applied_change_committed (always, carrying status + source_kind in payload).");
     return positional.length === 0 ? 1 : 0;
   }
   const eventId = (typeof flags.record === "string" ? flags.record : positional[0]) ?? "";
