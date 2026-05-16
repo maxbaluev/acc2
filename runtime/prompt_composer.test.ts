@@ -195,10 +195,13 @@ describe("prompt_composer", () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
     // Before any owner_profile_recorded: section MUST be present with the
-    // "no owner profile recorded yet" stub — the brain learns to look for it.
+    // bootstrap policy block — the brain learns to look for it and apply
+    // the sparse-profile heuristics (plain language, one question at a
+    // time, explain on first encounter).
     const composedDefaults = composePrompt(db, { taskId });
     expect(composedDefaults.text).toContain("## OWNER PROFILE");
-    expect(composedDefaults.text).toContain("(no owner profile recorded yet)");
+    expect(composedDefaults.text).toContain("bootstrap_policy: sparse profile");
+    expect(composedDefaults.text).toContain("autonomy_score:");
 
     // Emit one owner_profile_recorded with non-default fields, then recompose.
     emitEvent(db, {
