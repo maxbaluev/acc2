@@ -2564,6 +2564,78 @@ CREATE VIEW IF NOT EXISTS act_projection_observability_view AS
   FROM src s;
 `;
 
+// claude_inline_ready_leaves_view — Claude's inbox of ready leaves
+// routed to the claude_inline lane.
+//
+// L3 (2026-05-17 brain design 48SN4XF3WN4KBBCHHCANDRDQRW): "Strategy
+// owns topology, not execution authority. It may open children and
+// label leaf_affordances in task_node_opened payload, but
+// ready_tasks_view remains the only claim surface. Claude_inline is
+// still a lane selected by decideDispatch for a ready leaf;
+// scheduler continues to emit dispatch_decided + leaves the task
+// ready/claimable for Claude."
+//
+// Today's dispatcher routes some tasks to claude_inline via
+// scoreRoutesFromAxes (low_risk_inline_patterns gate). The lane
+// signal exists (dispatch_decided.payload.route='claude_inline')
+// but there's no consolidated surface Claude can read to see its
+// inbox. This view joins ready_tasks_view × dispatch_decided so
+// Claude (this terminal) gets a clean list of "tasks the substrate
+// expects me to claim and act on" without polling raw events.
+//
+// Columns:
+//   event_id (the dispatch_decided event)
+//   ts (dispatch_decided ts)
+//   directive_id, task_id, parent_task_id (from ready_tasks_view)
+//   goal (from task_node_opened payload)
+//   cited_artifact_ids (which low-risk-inline-pattern matched)
+//   strategy_shadow_top (top strategy from shadow ranker, if any)
+//   routing_axes (the axes the decider used)
+//
+// Filter: only ROWS THAT ARE STILL READY. A task with a terminal
+// event drops from ready_tasks_view via the L4.1 fix, so this view
+// also drops it. A task already claimed (task_claimed event) stays
+// in the view by design — Claude can see "what's in flight" to
+// avoid double-claiming.
+const VIEW_CLAUDE_INLINE_READY_LEAVES = `
+CREATE VIEW IF NOT EXISTS claude_inline_ready_leaves_view AS
+  WITH inline_dispatches AS (
+    SELECT
+      e.id AS event_id,
+      e.ts,
+      e.directive_id,
+      e.task_id,
+      json_extract(e.payload, '$.cited_artifact_ids') AS cited_artifact_ids,
+      json_extract(e.payload, '$.routing_axes') AS routing_axes,
+      json_extract(e.payload, '$.strategy_shadow_ranks[0].name') AS strategy_shadow_top,
+      json_extract(e.payload, '$.strategy_shadow_ranks[0].shadow_score') AS strategy_shadow_top_score,
+      ROW_NUMBER() OVER (PARTITION BY e.task_id ORDER BY e.ts DESC) AS rn
+    FROM events e
+    WHERE e.kind = 'dispatch_decided'
+      AND json_extract(e.payload, '$.route') = 'claude_inline'
+  ),
+  latest_inline AS (
+    SELECT * FROM inline_dispatches WHERE rn = 1
+  )
+  SELECT
+    li.event_id AS dispatch_event_id,
+    li.ts AS dispatch_ts,
+    li.directive_id,
+    li.task_id,
+    r.parent_task_id,
+    json_extract(r.payload, '$.goal') AS goal,
+    li.cited_artifact_ids,
+    li.routing_axes,
+    li.strategy_shadow_top,
+    li.strategy_shadow_top_score,
+    -- Was the task already claimed by Claude? task_claimed event
+    -- (if it exists) marks acquisition. NULL = still claimable.
+    (SELECT MAX(c.ts) FROM events c WHERE c.task_id = li.task_id AND c.kind = 'task_claimed') AS claimed_at
+  FROM latest_inline li
+  JOIN ready_tasks_view r ON r.task_id = li.task_id AND r.directive_id = li.directive_id
+  ORDER BY li.ts DESC;
+`;
+
 // substrate_narrative_recent_view — the TUI's load-bearing primitive.
 //
 // Brain design D9TBCHADS97DHAMNBC686HE3P0 (residual 0.16, 2026-05-17):
@@ -2737,6 +2809,7 @@ export const VIEW_NAMES = [
   "task_graph_view",
   "dispatch_resolved_view",
   "substrate_narrative_recent_view",
+  "claude_inline_ready_leaves_view",
 ] as const;
 
 /** Create every substrate view. Idempotent — existing views are dropped in
@@ -2775,6 +2848,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_DISPATCH_RESOLVED);
   db.exec(VIEW_PENDING_OWNER_DECISION_QUEUE);
   db.exec(VIEW_SUBSTRATE_NARRATIVE_RECENT);
+  db.exec(VIEW_CLAUDE_INLINE_READY_LEAVES);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────
@@ -3205,6 +3279,72 @@ export const readyTasks = (db: Database, limit?: number): ReadyTaskRow[] => {
     payload: parseJson<Record<string, unknown>>(r.payload),
     incoming_requires_from: parseJson<string[]>(r.incoming_requires_from ?? "[]"),
     incoming_refines_from: parseJson<string[]>(r.incoming_refines_from ?? "[]"),
+  }));
+};
+
+// ── claude_inline_ready_leaves_view helper ─────────────────────────
+
+/** Row shape from claude_inline_ready_leaves_view. L3 inbox surface
+ *  per brain design 48SN4XF3WN4KBBCHHCANDRDQRW. Every row is a task
+ *  the substrate has routed to the claude_inline lane AND is
+ *  currently ready (no blocking upstream). Claude (this terminal)
+ *  reads this view to know what to claim. */
+export type ClaudeInlineReadyLeafRow = {
+  /** dispatch_decided event id — the lane-routing signal. */
+  dispatch_event_id: string;
+  dispatch_ts: string;
+  directive_id: string;
+  task_id: string;
+  parent_task_id: string | null;
+  goal: string | null;
+  /** From dispatch_decided.payload.cited_artifact_ids — which
+   *  low-risk-inline-pattern matched (so Claude knows the recipe
+   *  context for crediting outcome). */
+  cited_artifact_ids: string[];
+  /** From dispatch_decided.payload.routing_axes — the axes the
+   *  decider used. Surfaced so the inbox consumer can debug WHY
+   *  a task was routed inline. */
+  routing_axes: Record<string, number>;
+  /** Top-ranked strategy artifact (if the shadow ranker had any
+   *  data). NULL when no strategy ranking landed. */
+  strategy_shadow_top: string | null;
+  strategy_shadow_top_score: number | null;
+  /** task_claimed event timestamp if Claude has already picked up
+   *  this leaf. NULL = still claimable. Surfaced so the inbox UI
+   *  can distinguish "todo" from "in flight". */
+  claimed_at: string | null;
+};
+
+export const claudeInlineReadyLeaves = (
+  db: Database,
+  filter?: { directive_id?: string; limit?: number; only_unclaimed?: boolean },
+): ClaudeInlineReadyLeafRow[] => {
+  const wheres: string[] = [];
+  const params: Array<string | number> = [];
+  if (filter?.directive_id) {
+    wheres.push("directive_id = ?");
+    params.push(filter.directive_id);
+  }
+  if (filter?.only_unclaimed) {
+    wheres.push("claimed_at IS NULL");
+  }
+  const whereClause = wheres.length > 0 ? `WHERE ${wheres.join(" AND ")}` : "";
+  const limit = typeof filter?.limit === "number" && filter.limit > 0 ? filter.limit : 50;
+  params.push(limit);
+  const sql = `SELECT * FROM claude_inline_ready_leaves_view ${whereClause} LIMIT ?`;
+  const rows = db.query(sql).all(...params) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    dispatch_event_id: r.dispatch_event_id as string,
+    dispatch_ts: r.dispatch_ts as string,
+    directive_id: r.directive_id as string,
+    task_id: r.task_id as string,
+    parent_task_id: (r.parent_task_id as string | null) ?? null,
+    goal: (r.goal as string | null) ?? null,
+    cited_artifact_ids: parseJson<string[]>((r.cited_artifact_ids as string | null) ?? "[]"),
+    routing_axes: parseJson<Record<string, number>>((r.routing_axes as string | null) ?? "{}"),
+    strategy_shadow_top: (r.strategy_shadow_top as string | null) ?? null,
+    strategy_shadow_top_score: r.strategy_shadow_top_score == null ? null : Number(r.strategy_shadow_top_score),
+    claimed_at: (r.claimed_at as string | null) ?? null,
   }));
 };
 

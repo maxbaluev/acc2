@@ -52,6 +52,7 @@ import {
   recipeRegistry,
   actProjectionObservability,
   substrateNarrativeRecent,
+  claudeInlineReadyLeaves,
 } from "../../substrate/views";
 import type {
   AdmitArtifactSchema,
@@ -703,6 +704,18 @@ export const handleRead = (
         return { ok: true, result: lessonImplementerQueue(db) as unknown as JsonValue };
       case "pending_owner_decision_queue_view":
         return { ok: true, result: pendingOwnerDecisionQueue(db) as unknown as JsonValue };
+      case "claude_inline_ready_leaves_view": {
+        // L3 inbox surface — brain design 48SN4XF3WN4KBBCHHCANDRDQRW.
+        // Args: { directive_id?, limit?, only_unclaimed? }.
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        const onlyUnclaimed = arg.only_unclaimed === true;
+        return {
+          ok: true,
+          result: claudeInlineReadyLeaves(db, { directive_id: directiveId, limit, only_unclaimed: onlyUnclaimed }) as unknown as JsonValue,
+        };
+      }
       case "substrate_narrative_recent_view": {
         // Content-first TUI primitive — brain design D9TBCHADS97DHAMNBC686HE3P0.
         // Args: { limit?, directive_id?, importance_in?, kinds_in? }.

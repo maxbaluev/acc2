@@ -21,6 +21,7 @@ import {
   readyTasks,
   recipeRegistry,
   recipesLatestView,
+  claudeInlineReadyLeaves,
   rollingReviewDue,
   runViews,
   substrateNarrativeRecent,
@@ -1955,5 +1956,80 @@ describe("substrate_narrative_recent_view + substrateNarrativeRecent", () => {
     expect(rows[0]?.human_summary).toBe("land L4.1 fix");
     expect(rows[0]?.payload.action).toBe("edit substrate/views.ts");
     expect(rows[0]?.payload.verifier_kind).toBe("deterministic_code");
+  });
+});
+
+// claude_inline_ready_leaves_view — L3 inbox per brain design
+// 48SN4XF3WN4KBBCHHCANDRDQRW. Tests pin the contract: only tasks
+// where (ready AND dispatch_decided.route='claude_inline') surface,
+// and claimed_at distinguishes "todo" from "in flight".
+describe("claude_inline_ready_leaves_view + claudeInlineReadyLeaves", () => {
+  test("surfaces ready tasks routed to claude_inline", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_inb", task_id: "t_inb", payload: { goal: "do a small inline thing" } });
+    insertEvent(db, {
+      kind: "dispatch_decided",
+      directive_id: "d_inb",
+      task_id: "t_inb",
+      payload: { route: "claude_inline", reason: "scored_inline_lane", cited_artifact_ids: ["pat_ts"], routing_axes: { low_risk_inline_pattern_match: 0.8 } },
+    });
+    const rows = claudeInlineReadyLeaves(db);
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.task_id).toBe("t_inb");
+    expect(rows[0]?.goal).toBe("do a small inline thing");
+    expect(rows[0]?.cited_artifact_ids).toEqual(["pat_ts"]);
+    expect(rows[0]?.routing_axes.low_risk_inline_pattern_match).toBe(0.8);
+    expect(rows[0]?.claimed_at).toBeNull();
+  });
+
+  test("tasks routed to opencode_brain do NOT appear", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_brain", task_id: "t_brain", payload: { goal: "brain work" } });
+    insertEvent(db, { kind: "dispatch_decided", directive_id: "d_brain", task_id: "t_brain", payload: { route: "opencode_brain", reason: "hard" } });
+    expect(claudeInlineReadyLeaves(db)).toEqual([]);
+  });
+
+  test("claimed_at populates after task_claimed", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_cl", task_id: "t_cl", payload: { goal: "x" } });
+    insertEvent(db, { kind: "dispatch_decided", directive_id: "d_cl", task_id: "t_cl", payload: { route: "claude_inline" } });
+    insertEvent(db, { kind: "task_claimed", directive_id: "d_cl", task_id: "t_cl", payload: { claimer: "claude_root" } });
+    const rows = claudeInlineReadyLeaves(db);
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.claimed_at).not.toBeNull();
+    // only_unclaimed filter excludes it.
+    expect(claudeInlineReadyLeaves(db, { only_unclaimed: true }).length).toBe(0);
+  });
+
+  test("tasks with a terminal event (committed/failed) drop via ready_tasks_view L4.1 fix", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_done", task_id: "t_done", payload: { goal: "x" } });
+    insertEvent(db, { kind: "dispatch_decided", directive_id: "d_done", task_id: "t_done", payload: { route: "claude_inline" } });
+    insertEvent(db, { kind: "task_committed", directive_id: "d_done", task_id: "t_done", payload: { summary: "ok" } });
+    expect(claudeInlineReadyLeaves(db)).toEqual([]);
+  });
+
+  test("strategy_shadow_top + score surfaces from dispatch_decided.payload.strategy_shadow_ranks", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_s", task_id: "t_s", payload: { goal: "x" } });
+    insertEvent(db, {
+      kind: "dispatch_decided",
+      directive_id: "d_s",
+      task_id: "t_s",
+      payload: {
+        route: "claude_inline",
+        strategy_shadow_ranks: [
+          { artifact_id: "seed_claude_inline", name: "claude_inline_leaf_v1", shadow_score: 0.71, breakdown: {} },
+        ],
+      },
+    });
+    const rows = claudeInlineReadyLeaves(db);
+    expect(rows[0]?.strategy_shadow_top).toBe("claude_inline_leaf_v1");
+    expect(rows[0]?.strategy_shadow_top_score).toBeCloseTo(0.71, 5);
   });
 });
