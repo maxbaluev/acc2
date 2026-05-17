@@ -268,6 +268,41 @@ export const handleEmit = (
         };
       }
     }
+    // PER-DIRECTIVE TASK FANOUT CAP (FOUNDATIONAL FIX 2026-05-17):
+    // Live ledger evidence: 3 owner directives → 100+ task_node_opened rows,
+    // ~30x amplification. The brain decomposes broadly (Q1-Q6 per directive)
+    // then re-dispatches itself on each child, which the dispatch_decider
+    // defaults to opencode_brain, which the brain often silent-exits on
+    // because there's nothing strategic left to add. The downstream result
+    // was the bridge_stuck / silent_dispatch loop the operator has been
+    // chasing for hours.
+    //
+    // The structural fix: cap the total task_node_opened per directive at
+    // PER_DIRECTIVE_TASK_NODE_CAP. The brain must COMMIT existing children
+    // before opening more — forcing the decomposition to actually resolve
+    // rather than fan out indefinitely. 20 is generous (Q1-Q6 plus follow-
+    // ups for each), tight enough to force discipline.
+    //
+    // Owner-opened tasks bypass the cap (substrate_origin === "owner") —
+    // the owner is the trust root and may legitimately ask for many tasks
+    // in one directive. Only brain-emitted (substrate_origin === "opencode"
+    // or "claude_root" coming through MCP) task_node_opened is capped.
+    const PER_DIRECTIVE_TASK_NODE_CAP = 20;
+    if (directiveId && isBrainEmit(src.substrate_origin, ctx.invoker)) {
+      const countRow = ctx.db
+        .query<{ n: number }, [string]>(
+          `SELECT COUNT(*) AS n FROM events
+           WHERE kind = 'task_node_opened' AND directive_id = ?`,
+        )
+        .get(directiveId);
+      const count = countRow?.n ?? 0;
+      if (count >= PER_DIRECTIVE_TASK_NODE_CAP) {
+        return {
+          ok: false,
+          error: `per_directive_task_node_cap_exceeded:cap=${PER_DIRECTIVE_TASK_NODE_CAP};existing=${count};directive=${directiveId};hint=this directive already has ${count} task_node_opened rows — the brain MUST COMMIT existing open children (substrate.emit{kind:"task_committed"}) before opening more. Use substrate.read{view_name:"task_graph_view",args:{directive_id:"${directiveId}"}} to see open children; complete or close them before further decomposition. The cap is structural to prevent silent-dispatch loops when the brain fans out broadly and re-dispatches itself on children it has nothing strategic to add to.`,
+        };
+      }
+    }
   }
   // Brain audit F (2026-05-15): refuse task_edge_recorded events whose
   // from_task/to_task endpoints don't exist as task_node_opened rows

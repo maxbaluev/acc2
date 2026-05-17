@@ -209,6 +209,90 @@ describe("fastmcp substrate tools — stdio transport", () => {
     expect(accepted.ok).toBe(true);
   });
 
+  test("substrate.emit refuses brain task_node_opened past the per-directive fanout cap (foundational fix 2026-05-17)", async () => {
+    // ROOT CAUSE: live ledger evidence showed 3 owner directives producing
+    // 100+ task_node_opened rows because the brain decomposed broadly and
+    // re-dispatched itself on each child. Each silent child consumed 5min
+    // of brain-slot time. Cap = 20 forces the brain to COMMIT existing
+    // children before opening more, breaking the silent-dispatch loop at
+    // its source. Owner-opened tasks bypass the cap.
+    const directiveId = "d_fanout_cap_test";
+    // Open the directive + 20 brain-opened task_nodes (within the cap).
+    await h!.client.callTool({
+      name: "substrate.emit",
+      arguments: {
+        kind: "directive_opened",
+        substrate_origin: "owner",
+        directive_id: directiveId,
+        task_id: directiveId,
+        payload: { directive_text: "fanout-cap test" },
+      },
+    });
+    // 20 brain-opened child tasks — all should succeed (at the cap).
+    for (let i = 0; i < 20; i++) {
+      const env = parseEnvelope(
+        (await h!.client.callTool({
+          name: "substrate.emit",
+          arguments: {
+            kind: "task_node_opened",
+            substrate_origin: "opencode",
+            directive_id: directiveId,
+            task_id: `t_fanout_cap_${i}`,
+            payload: { goal: `fanout test child ${i}` },
+          },
+        })) as ToolCallResponse,
+      );
+      expect(env.ok).toBe(true);
+    }
+    // 21st must be refused.
+    const refused = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.emit",
+        arguments: {
+          kind: "task_node_opened",
+          substrate_origin: "opencode",
+          directive_id: directiveId,
+          task_id: "t_fanout_cap_21",
+          payload: { goal: "fanout overflow child" },
+        },
+      })) as ToolCallResponse,
+    );
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("per_directive_task_node_cap_exceeded");
+    expect(refused.error).toContain("cap=20");
+    expect(refused.error).toContain("MUST COMMIT");
+  });
+
+  test("substrate.emit allows OWNER task_node_opened past the cap (owner is trust root)", async () => {
+    const directiveId = "d_fanout_owner_bypass";
+    await h!.client.callTool({
+      name: "substrate.emit",
+      arguments: {
+        kind: "directive_opened",
+        substrate_origin: "owner",
+        directive_id: directiveId,
+        task_id: directiveId,
+        payload: { directive_text: "owner bypass test" },
+      },
+    });
+    // 25 owner-opened tasks — all must succeed, owner bypasses the cap.
+    for (let i = 0; i < 25; i++) {
+      const env = parseEnvelope(
+        (await h!.client.callTool({
+          name: "substrate.emit",
+          arguments: {
+            kind: "task_node_opened",
+            substrate_origin: "owner",
+            directive_id: directiveId,
+            task_id: `t_owner_bypass_${i}`,
+            payload: { goal: `owner-opened ${i}` },
+          },
+        })) as ToolCallResponse,
+      );
+      expect(env.ok).toBe(true);
+    }
+  });
+
   test("substrate.get_event round-trips the event we just emitted", async () => {
     const emit = parseEnvelope(
       (await h!.client.callTool({
