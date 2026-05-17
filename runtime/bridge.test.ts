@@ -783,6 +783,15 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       "runtime.detect_father_drift",
       "runtime.replay_recipe",
       "runtime.recent_events",
+      // Phase 1 brain-harness rewrite (2026-05-17): four READ-ONLY
+      // self-introspection tools. Brain reads system_map once per new
+      // directive shape, brain_self_audit each cycle (also rendered as
+      // a P2 prompt section), trajectory_replay before refining a
+      // long-running directive, prompt_self_inspect to spot truncation.
+      "runtime.system_map",
+      "runtime.brain_self_audit",
+      "runtime.trajectory_replay",
+      "runtime.prompt_self_inspect",
     ];
     expect([...V2_MCP_TOOL_SURFACE].sort()).toEqual([...expected].sort());
   });

@@ -26,6 +26,7 @@ import type { McpContext, McpResult, McpServerOptions } from "./types";
 import {
   AdmitArtifactSchema,
   AmendDirectiveSchema,
+  BrainSelfAuditSchema,
   CreditSchema,
   DetectFatherDriftSchema,
   DispatchReadyTaskSchema,
@@ -37,6 +38,7 @@ import {
   OpenDirectiveSchema,
   OpenFixtureSchema,
   ProcessRollingReviewsSchema,
+  PromptSelfInspectSchema,
   ReadSchema,
   RecentEventsSchema,
   RecordInterferenceEdgeSchema,
@@ -47,6 +49,8 @@ import {
   RunVerifierSchema,
   SchedulerTickSchema,
   SearchSchema,
+  SystemMapSchema,
+  TrajectoryReplaySchema,
 } from "./types";
 import {
   handleAdmitArtifact,
@@ -68,13 +72,17 @@ import {
   handleSearch,
 } from "./substrate_tools";
 import {
+  handleBrainSelfAudit,
   handleDetectFatherDrift,
   handleDispatchReadyTask,
   handleFatherIterate,
   handleProcessRollingReviews,
+  handlePromptSelfInspect,
   handleRecentEvents,
   handleReplayRecipe,
   handleSchedulerTick,
+  handleSystemMap,
+  handleTrajectoryReplay,
 } from "./runtime_tools";
 
 /** Build a FastMCP server with every substrate tool wired against `ctx.db`.
@@ -358,6 +366,60 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     execute: wrap(handleRecentEvents),
   });
 
+  // ── Brain self-introspection (Phase 1 brain harness rewrite) ────
+  // Glass-box surface the brain reads to understand itself and the
+  // substrate. system_map = catalog of event_kinds/views/tools/runtimes;
+  // brain_self_audit = the brain's own report card (citation/promotion/
+  // proposal-accept rates, residual distribution); trajectory_replay =
+  // full task DAG + lessons for a directive; prompt_self_inspect = what
+  // the composer would put in front of the brain right now for a task.
+
+  server.addTool({
+    name: "runtime.system_map",
+    description:
+      "Canonical catalog of the substrate: event_kinds with producers, " +
+      "views, MCP tools, runtimes, and the top-K admitted artifacts. " +
+      "Brain reads this once per new directive shape to know what it can " +
+      "emit, read, and call. Pure read; safe at any depth.",
+    parameters: SystemMapSchema,
+    execute: wrap(handleSystemMap),
+  });
+
+  server.addTool({
+    name: "runtime.brain_self_audit",
+    description:
+      "Brain's own report card over a time window (default 7d): emission " +
+      "breakdown, citation/promotion rate, proposal accept rate, residual " +
+      "distribution, effectiveness classification, recent brain-caused " +
+      "failures. Brain reads every cycle so improvement proposals are " +
+      "evidence-grounded, not vibes-based. Pure read.",
+    parameters: BrainSelfAuditSchema,
+    execute: wrap(handleBrainSelfAudit),
+  });
+
+  server.addTool({
+    name: "runtime.trajectory_replay",
+    description:
+      "Full projection of one directive: task DAG with per-node status / " +
+      "action_count / latest_residual / knowledge+lesson+amendment counts, " +
+      "plus the lesson + amendment streams. Brain reads when refining so " +
+      "it sees what's already been tried, not just the current task's " +
+      "prompt. Pure read.",
+    parameters: TrajectoryReplaySchema,
+    execute: wrap(handleTrajectoryReplay),
+  });
+
+  server.addTool({
+    name: "runtime.prompt_self_inspect",
+    description:
+      "Re-compose the prompt the brain would see for a task and return " +
+      "section names + priority + token budgets + truncation list. Brain " +
+      "uses to detect 'section X kept dropping under budget' or to spot- " +
+      "check 'was I shown the latest owner_profile?'. Pure read.",
+    parameters: PromptSelfInspectSchema,
+    execute: wrap(handlePromptSelfInspect),
+  });
+
   return server;
 };
 
@@ -393,6 +455,10 @@ const HTTP_DISPATCH: Record<string, (ctx: McpContext, args: any) => McpResult | 
   "runtime.replay_recipe": handleReplayRecipe as any,
   "substrate.register_external_source": handleRegisterExternalSource as any,
   "runtime.recent_events": handleRecentEvents as any,
+  "runtime.system_map": handleSystemMap as any,
+  "runtime.brain_self_audit": handleBrainSelfAudit as any,
+  "runtime.trajectory_replay": handleTrajectoryReplay as any,
+  "runtime.prompt_self_inspect": handlePromptSelfInspect as any,
 };
 
 /** Bun.serve route handler: POST /mcp/<method>. Parses JSON body, validates

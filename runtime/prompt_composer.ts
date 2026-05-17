@@ -24,6 +24,7 @@ import { renderStakeholderBlock } from "./stakeholder_compositor";
 import { renderInterferenceBlock } from "./interference";
 import { emitEvent } from "./events";
 import { goalShape } from "./goal_shape";
+import { buildBrainSelfAudit, renderBrainSelfAuditSection } from "./brain_introspection";
 import type { JsonValue, OwnerProfile } from "../substrate/types";
 import { OWNER_PROFILE_DEFAULTS } from "../substrate/types";
 
@@ -373,7 +374,7 @@ const readKnowledgeTopK = (
   return out;
 };
 
-const REQUIRED_POLICY_SECTION_NAMES = ["exit_invariant", "runtimes_available", "workflow", "do_not", "emission_grammars"] as const;
+const REQUIRED_POLICY_SECTION_NAMES = ["exit_invariant", "runtimes_available", "workflow", "do_not", "emission_grammars", "self_introspection"] as const;
 type PolicyBundleSectionName = typeof REQUIRED_POLICY_SECTION_NAMES[number];
 type PolicyBundleSection = { sectionName: PolicyBundleSectionName; priority: number; body: string };
 
@@ -1059,6 +1060,12 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // artifact provenance. P1 so it drops first under tight-budget pressure
   // (depth-1 tests pin a tiny 800-token budget) but lands in normal flow.
   pushPolicySection("emission_grammars", 1);
+  // Phase 1 brain-harness rewrite (2026-05-17): teach the brain about
+  // runtime.{system_map, brain_self_audit, trajectory_replay,
+  // prompt_self_inspect}. P1 so it ships in normal flow but drops first
+  // along with emission_grammars under tight-budget pressure — the
+  // EXIT INVARIANT + WORKFLOW + DO NOT still win the tightest budgets.
+  pushPolicySection("self_introspection", 1);
 
   // Phase D fixture marker — the mocked bridge keys off this so the
   // fixture_d_count_todos dispatch can be reproduced deterministically.
@@ -1168,6 +1175,28 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
 
   candidates.push({ name: "active_failures", p: 4, body: buildFailuresSection(readRecentFailures(db, 3)) });
   candidates.push({ name: "constitutional_gates", p: 4, body: buildGatesSection(readConstitutionalGates(db)) });
+
+  // Brain self-audit reflexive section (Phase 3 brain harness rewrite,
+  // 2026-05-17). The brain sees its own live report card every cycle —
+  // citation rate, proposal accept rate, residual distribution,
+  // effectiveness classification. P2 so it persists through normal
+  // budgets but drops under the tightest test-pin budget (where the
+  // P0 policy + task_goal must win). Fail-soft: a builder exception
+  // (no events table yet, fresh substrate) emits a stub line.
+  try {
+    const audit = buildBrainSelfAudit(db, { windowHours: 168 });
+    candidates.push({
+      name: "brain_self_audit",
+      p: 2,
+      body: renderBrainSelfAuditSection(audit),
+    });
+  } catch (err) {
+    candidates.push({
+      name: "brain_self_audit",
+      p: 2,
+      body: `BRAIN SELF-AUDIT: (unavailable: ${(err as Error).message})`,
+    });
+  }
 
   // Fill in priority order. Track running tokens; drop bottom-up when over.
   const kept: Candidate[] = [];

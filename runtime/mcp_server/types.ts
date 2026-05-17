@@ -58,6 +58,10 @@ export const McpMethods = [
   "runtime.replay_recipe",
   "substrate.register_external_source",
   "runtime.recent_events",
+  "runtime.system_map",
+  "runtime.brain_self_audit",
+  "runtime.trajectory_replay",
+  "runtime.prompt_self_inspect",
 ] as const;
 export type McpMethodName = (typeof McpMethods)[number];
 
@@ -276,6 +280,29 @@ export const RegisterExternalSourceSchema = z.object({
 export const RecentEventsSchema = z.object({
   k: z.number().optional(),
   kinds: z.array(z.string()).optional(),
+});
+
+// ── Brain self-introspection (Phase 1 brain harness rewrite) ───────
+// One canonical surface for the brain to read what the substrate IS,
+// how the brain itself is performing, what happened on a directive,
+// and what was composed into its prompt. All four are pure reads.
+
+export const SystemMapSchema = z.object({
+  artifact_top_k: z.number().optional(),
+});
+
+export const BrainSelfAuditSchema = z.object({
+  window_hours: z.number().optional(),
+});
+
+export const TrajectoryReplaySchema = z.object({
+  directive_id: z.string(),
+});
+
+export const PromptSelfInspectSchema = z.object({
+  task_id: z.string(),
+  budget_tokens: z.number().optional(),
+  include_preview: z.boolean().optional(),
 });
 
 // ── createMcpServer options ────────────────────────────────────────

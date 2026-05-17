@@ -14,16 +14,30 @@ import { schedulerTick } from "../task_scheduler";
 import { processRollingReviews } from "../rolling_reviewer";
 import { fatherIterate, detectFatherDrift } from "../father";
 import { replayRecipe } from "../recipe_replay";
+import {
+  buildBrainSelfAudit,
+  buildPromptSelfInspect,
+  buildSystemMap,
+  buildTrajectoryReplay,
+  brainSelfAuditToJson,
+  promptSelfInspectToJson,
+  systemMapToJson,
+  trajectoryReplayToJson,
+} from "../brain_introspection";
 import type {
+  BrainSelfAuditSchema,
   DetectFatherDriftSchema,
   DispatchReadyTaskSchema,
   FatherIterateSchema,
   McpContext,
   McpResult,
   ProcessRollingReviewsSchema,
+  PromptSelfInspectSchema,
   RecentEventsSchema,
   ReplayRecipeSchema,
   SchedulerTickSchema,
+  SystemMapSchema,
+  TrajectoryReplaySchema,
 } from "./types";
 
 /** runtime.* control-plane tools the brain (opencode) is NOT allowed to
@@ -274,4 +288,49 @@ export const handleRecentEvents = (
     payload: JSON.parse((r.payload as string) ?? "{}") as JsonValue,
   }));
   return { ok: true, result: { events } as unknown as JsonValue };
+};
+
+// ── Brain self-introspection handlers (Phase 1 brain harness rewrite) ──
+//
+// Four READ-ONLY tools the brain MAY (and is taught to) invoke. Unlike
+// the control-plane handlers above, these expose substrate STRUCTURE
+// and BRAIN PERFORMANCE — no side effects, no mutation, safe at any
+// recursion depth. Each delegates to runtime/brain_introspection.ts so
+// the projection logic stays in one auditable module.
+
+export const handleSystemMap = (
+  ctx: McpContext,
+  args: z.infer<typeof SystemMapSchema>,
+): McpResult => {
+  const map = buildSystemMap(ctx.db, { artifactTopK: args.artifact_top_k });
+  return { ok: true, result: systemMapToJson(map) };
+};
+
+export const handleBrainSelfAudit = (
+  ctx: McpContext,
+  args: z.infer<typeof BrainSelfAuditSchema>,
+): McpResult => {
+  const audit = buildBrainSelfAudit(ctx.db, { windowHours: args.window_hours });
+  return { ok: true, result: brainSelfAuditToJson(audit) };
+};
+
+export const handleTrajectoryReplay = (
+  ctx: McpContext,
+  args: z.infer<typeof TrajectoryReplaySchema>,
+): McpResult => {
+  const replay = buildTrajectoryReplay(ctx.db, args.directive_id);
+  if (!replay) return { ok: false, error: "directive_not_found" };
+  return { ok: true, result: trajectoryReplayToJson(replay) };
+};
+
+export const handlePromptSelfInspect = (
+  ctx: McpContext,
+  args: z.infer<typeof PromptSelfInspectSchema>,
+): McpResult => {
+  const inspect = buildPromptSelfInspect(ctx.db, args.task_id, {
+    budgetTokens: args.budget_tokens,
+    includePreview: args.include_preview,
+  });
+  if (!inspect) return { ok: false, error: "task_not_found" };
+  return { ok: true, result: promptSelfInspectToJson(inspect) };
 };
