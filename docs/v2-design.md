@@ -1491,7 +1491,7 @@ Two principles govern composition:
 | UNIVERSAL ACT CONTRACT | P0 (always) | — | static | Defines `intent + action_artifact_id + verifier_artifact_id + predicted_residual` and scalar residual scoring |
 | CURRENT OWNER POLICY | P0 (always) | 1 | `owner_profile_view` / policy renderer | Controls owner-visible rendering language, terms, and density |
 | RETRIEVED KNOWLEDGE (embedding × posterior evidence handles) | P1 | 8 | `knowledge_view` reranked by embedding distance to task goal × posterior | Supplies citeable evidence ids, not a full memory dump |
-| CODE ARTIFACT REGISTRY (top-K reusable artifacts) | P1 | 6 | `code_artifact_registry_view` reranked the same way, scoped to your runtimes | Supplies reusable action/verifier handles |
+| ACT ARTIFACT REGISTRY (top-K reusable artifacts across any kind) | P1 | 6 | `act_artifact_registry_view` reranked by intent-shape embedding × posterior, with NO `kind` filter | Supplies reusable handles for executors, verifiers, prompt templates, decomposers, askers, researchers, recipes, observation patterns, and goal predicates — all out of the same registry. Runtime, when present, is payload/declaration data, never a retrieval dimension. Adding a kind filter silently recreates the closed enum the open-kind field exists to abolish. |
 | UPSTREAM OUTPUTS (completed-task snapshot) | P2 | all required edges, summarized to 200 chars each | `requires_edge_observations` | Bounded local DAG context |
 | WATCHED OUTPUTS (mid-flight, monotonic) | P2 | all watched, summarized | `watch_edge_observations` | Bounded live dependency context |
 | STAKEHOLDER STATE (multi-stakeholder only) | P3 | all stakeholders, current row each | `stakeholder_state_view` | Bounded social context |
