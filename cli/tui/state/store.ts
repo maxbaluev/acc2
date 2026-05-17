@@ -57,6 +57,14 @@ export type PendingDecisionRow = {
 
 export type ReadyTaskRow = { directive_id: string; task_id: string; goal: string };
 
+// task_graph_view rows: each event is either a 'node' (task_node_opened) or
+// an 'edge' (task_edge_recorded). The store extracts the per-directive
+// topology so DagPanel can render real requires/refines/watches links
+// instead of the placeholder "edge rows required here" text.
+export type DagNode = { task_id: string; goal: string; parent_task_id: string | null };
+export type DagEdge = { from_task: string; to_task: string; kind: "requires" | "refines" | "watches" | string };
+export type DagTopology = { directive_id: string; nodes: DagNode[]; edges: DagEdge[] };
+
 export type LearningSnapshot = {
   knowledge_total: number;
   knowledge_24h: number;
@@ -94,6 +102,7 @@ export type DashboardSnapshot = {
   error: string | null;
   dispatch: DispatchRow[];
   ready_tasks: ReadyTaskRow[];
+  dag: DagTopology | null;
   pending_decisions: PendingDecisionRow[];
   pending_decisions_total: number;
   learning: LearningSnapshot;
@@ -117,6 +126,7 @@ const emptySnapshot = (): DashboardSnapshot => ({
   error: null,
   dispatch: [],
   ready_tasks: [],
+  dag: null,
   pending_decisions: [],
   pending_decisions_total: 0,
   learning: { knowledge_total: 0, knowledge_24h: 0, contradictions: 0, recipes_recent: 0, artifacts_recent: 0 },
@@ -278,6 +288,50 @@ export const fetchDashboardSnapshot = async (client: SubstrateClient): Promise<D
     };
   });
 
+  // DAG topology for the focused directive. task_graph_view returns nodes
+  // and edges across ALL directives — pick the one matching the most-recent
+  // live (or queued) dispatch and project its subgraph. Without this read
+  // DagPanel rendered a permanent placeholder regardless of substrate state.
+  const focusedDirective = dispatchRows.find((r) => r.lifecycle_status === "live")?.directive_id
+    ?? dispatchRows.find((r) => r.lifecycle_status === "queued_at_cap")?.directive_id
+    ?? dispatchRows[0]?.directive_id
+    ?? null;
+  let dag: DagTopology | null = null;
+  if (focusedDirective) {
+    const graphEnv = await client.read<unknown[]>("task_graph_view", { directive_id: focusedDirective });
+    if (graphEnv.ok) {
+      const rows = asArray<Record<string, unknown>>(graphEnv.result);
+      const nodes: DagNode[] = [];
+      const edges: DagEdge[] = [];
+      const seenNodes = new Set<string>();
+      for (const r of rows) {
+        if (r.directive_id !== focusedDirective) continue;
+        const payload = parsePayload(r.payload);
+        if (r.row_kind === "node") {
+          const task_id = String(r.task_id ?? "");
+          if (!task_id || seenNodes.has(task_id)) continue;
+          seenNodes.add(task_id);
+          const goal = typeof payload.goal === "string" ? payload.goal
+            : typeof payload.task_goal === "string" ? payload.task_goal
+            : "";
+          nodes.push({
+            task_id,
+            goal: goal.replace(/\s+/g, " ").trim().slice(0, 80),
+            parent_task_id: typeof r.parent_task_id === "string" ? r.parent_task_id : null,
+          });
+        } else if (r.row_kind === "edge") {
+          const from = (payload.from_task ?? payload.from) as string | undefined;
+          const to = (payload.to_task ?? payload.to) as string | undefined;
+          const kind = typeof payload.kind === "string" ? payload.kind : "requires";
+          if (typeof from === "string" && typeof to === "string") {
+            edges.push({ from_task: from, to_task: to, kind });
+          }
+        }
+      }
+      dag = { directive_id: focusedDirective, nodes, edges };
+    }
+  }
+
   const ownerRowsArr = ownerEnv.ok ? asArray<{ event_id?: string; ts?: string; payload?: unknown }>(ownerEnv.result) : [];
   const ownerRow = ownerRowsArr[0];
   const ownerProfile: DashboardSnapshot["owner_profile"] = {
@@ -338,6 +392,7 @@ export const fetchDashboardSnapshot = async (client: SubstrateClient): Promise<D
     error,
     dispatch: dispatchRows,
     ready_tasks: readyRows,
+    dag,
     pending_decisions: pending,
     pending_decisions_total: pendingRowsRaw.length,
     learning,

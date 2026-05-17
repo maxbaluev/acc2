@@ -36,7 +36,7 @@ const seededSnapshot = () => {
       root_task_id: "TR-ABCDE",
       lifecycle_status: "live",
       status_reason: "in_progress",
-      residual: 0.18,
+      residual: null,
       latest_signal_at: "2026-05-17T00:00:00Z",
       terminal_kind: null,
       evidence_event_id: null,
@@ -52,6 +52,17 @@ const seededSnapshot = () => {
       terminal_kind: null,
       evidence_event_id: null,
       queued_reason: "cap_2_ahead",
+    },
+    {
+      directive_id: "D3DONEABCDE",
+      root_task_id: "TR-DONE1",
+      lifecycle_status: "completed",
+      status_reason: "task_committed",
+      residual: 0.18,
+      latest_signal_at: "2026-05-17T00:00:00Z",
+      terminal_kind: "task_committed",
+      evidence_event_id: "EVT-DONE",
+      queued_reason: null,
     },
   ];
   snap.pending_decisions = [
@@ -101,8 +112,11 @@ describe("acc watch — Ink TUI shell", () => {
     // Lifecycle vocabulary preserved exactly — never relabeled.
     expect(frame).toContain("live");
     expect(frame).toContain("queued_at_cap");
-    // Closure residual printed next to the live dispatch row.
-    expect(frame).toContain("0.18");
+    // Residual shows only on terminal rows (completed/failed); live and
+    // queued rows surface the substrate-owned status_reason instead.
+    expect(frame).toContain("residual=0.18");
+    expect(frame).toContain("reason=in_progress");
+    expect(frame).toContain("reason=scheduler_cap");
     // Refinement edges visually distinct from requires/watches in the DAG legend.
     expect(frame).toContain("requires");
     expect(frame).toContain("refines");

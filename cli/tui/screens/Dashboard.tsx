@@ -23,6 +23,7 @@ import type {
   DispatchRow,
   PendingDecisionRow,
   Lifecycle,
+  DagTopology,
 } from "../state/store";
 import { renderOwnerString, type OwnerRenderProfile } from "../../owner_profile_renderer";
 
@@ -150,32 +151,62 @@ const DispatchTruthPanel = ({
       </Text>
       <Text dimColor>(historical totals: live={live.length} queued={queued.length} completed={completed.length} failed={failed.length} zombie={zombie.length})</Text>
       {shown.length === 0 ? <Text dimColor>(no recent dispatches)</Text> : null}
-      {shown.map((r) => (
-        <Box key={`${r.directive_id}/${r.root_task_id}`} flexDirection="column">
-          <Text>
-            <Text color={lifecycleColor(r.lifecycle_status)}>{lifecycleGlyph(r.lifecycle_status)} {r.lifecycle_status}</Text>
-            <Text dimColor> residual=</Text>
-            <Text>{fmtResidual(r.residual)}</Text>
-          </Text>
-          <Text dimColor>  dir={shortId(r.directive_id, 10)} root={shortId(r.root_task_id, 8)}{r.terminal_kind ? ` terminal=${r.terminal_kind}` : ""}{r.evidence_event_id ? ` evidence=${shortId(r.evidence_event_id, 8)}` : ""}</Text>
-        </Box>
-      ))}
+      {shown.map((r) => {
+        // residual only exists on terminal events (task_committed / task_failed).
+        // For live/queued/zombie rows it is null by construction — rendering
+        // "residual=?" is noise; show the substrate-owned status_reason
+        // instead so the operator sees the actual in-flight signal
+        // (brain_dispatch_open, refinement_dispatch_open, queued_at_cap,
+        // open_dispatch_zombie, etc.).
+        const showResidual = r.terminal_kind === "task_committed" || r.terminal_kind === "task_failed";
+        return (
+          <Box key={`${r.directive_id}/${r.root_task_id}`} flexDirection="column">
+            <Text>
+              <Text color={lifecycleColor(r.lifecycle_status)}>{lifecycleGlyph(r.lifecycle_status)} {r.lifecycle_status}</Text>
+              {showResidual ? (
+                <>
+                  <Text dimColor> residual=</Text>
+                  <Text>{fmtResidual(r.residual)}</Text>
+                </>
+              ) : r.status_reason ? (
+                <>
+                  <Text dimColor> reason=</Text>
+                  <Text>{r.status_reason}</Text>
+                </>
+              ) : null}
+            </Text>
+            <Text dimColor>  dir={shortId(r.directive_id, 10)} root={shortId(r.root_task_id, 8)}{r.terminal_kind ? ` terminal=${r.terminal_kind}` : ""}{r.evidence_event_id ? ` evidence=${shortId(r.evidence_event_id, 8)}` : ""}</Text>
+          </Box>
+        );
+      })}
     </Pane>
   );
 };
 
+const edgeGlyph = (kind: string): { glyph: string; color: string } => {
+  if (kind === "requires") return { glyph: "→", color: "green" };
+  if (kind === "refines") return { glyph: "↻", color: "yellow" };
+  if (kind === "watches") return { glyph: "👁", color: "cyan" };
+  return { glyph: "?", color: "white" };
+};
+
 const DagPanel = ({
   dispatch,
-  readyTasks,
+  dag,
   focused,
 }: {
   dispatch: DispatchRow[];
-  readyTasks: DashboardSnapshot["ready_tasks"];
+  dag: DagTopology | null;
   focused: boolean;
 }): React.ReactElement => {
   const focusDispatch = dispatch.find((r) => r.lifecycle_status === "live")
     ?? dispatch.find((r) => r.lifecycle_status === "queued_at_cap")
     ?? dispatch[0];
+  // Cap render rows so a wide DAG can't overflow the panel.
+  const NODE_LIMIT = 6;
+  const EDGE_LIMIT = 8;
+  const nodes = dag?.nodes ?? [];
+  const edges = dag?.edges ?? [];
   return (
     <Pane title="DAG (current directive)" focused={focused}>
       {!focusDispatch ? (
@@ -195,10 +226,34 @@ const DagPanel = ({
             <Text dimColor> | </Text>
             <Text color="cyan">👁 watches</Text>
           </Text>
-          <Text color="yellow">task_graph_view edge rows required here before rendering requires/refines/watches as topology.</Text>
-          {readyTasks.length === 0 ? (
-            <Text dimColor>(no ready_tasks rows under this directive)</Text>
-          ) : null}
+          {!dag ? (
+            <Text dimColor>(task_graph_view unreachable)</Text>
+          ) : nodes.length === 0 && edges.length === 0 ? (
+            <Text dimColor>(no task_graph_view rows for directive {shortId(focusDispatch.directive_id, 10)})</Text>
+          ) : (
+            <>
+              <Text dimColor>nodes ({nodes.length}):</Text>
+              {nodes.slice(0, NODE_LIMIT).map((n) => (
+                <Text key={`n-${n.task_id}`}>
+                  <Text color="cyan">  {shortId(n.task_id, 8)}</Text>
+                  {n.goal ? <Text dimColor> {n.goal.slice(0, 50)}</Text> : null}
+                </Text>
+              ))}
+              {nodes.length > NODE_LIMIT ? <Text dimColor>  …+{nodes.length - NODE_LIMIT} more</Text> : null}
+              <Text dimColor>edges ({edges.length}):</Text>
+              {edges.slice(0, EDGE_LIMIT).map((e, i) => {
+                const g = edgeGlyph(e.kind);
+                return (
+                  <Text key={`e-${i}-${e.from_task}-${e.to_task}`}>
+                    <Text dimColor>  {shortId(e.from_task, 8)}</Text>
+                    <Text color={g.color}> {g.glyph} </Text>
+                    <Text dimColor>{shortId(e.to_task, 8)}</Text>
+                  </Text>
+                );
+              })}
+              {edges.length > EDGE_LIMIT ? <Text dimColor>  …+{edges.length - EDGE_LIMIT} more</Text> : null}
+            </>
+          )}
         </>
       )}
     </Pane>
@@ -304,7 +359,7 @@ export const Dashboard = ({ snapshot, focus }: DashboardProps): React.ReactEleme
         <DispatchTruthPanel rows={snapshot.dispatch} focused={focus === "dispatch"} />
       </Box>
       <Box flexDirection="row" flexGrow={1}>
-        <DagPanel dispatch={snapshot.dispatch} readyTasks={snapshot.ready_tasks} focused={focus === "dag"} />
+        <DagPanel dispatch={snapshot.dispatch} dag={snapshot.dag} focused={focus === "dag"} />
         <LearningPanel learning={snapshot.learning} focused={focus === "learning"} />
       </Box>
       <Box flexDirection="row" flexGrow={1}>
