@@ -223,12 +223,20 @@ export const handleRecentEvents = (
 ): McpResult => {
   const k = Math.max(1, Math.min(200, args.k ?? 30));
   const kinds = (args.kinds ?? []).filter((s) => typeof s === "string" && s.length > 0);
+  // FOUNDATIONAL FIX 2026-05-17: SELECT all top-level act-loop columns
+  // (action_artifact_id, verifier_artifact_id, predicted_residual, outcome,
+  // residual, failure_kind) — pre-fix only the basic columns + payload were
+  // returned, so downstream consumers (acc tail renderer, acc watch TUI,
+  // alignment tests) read undefined for the act-loop tuple even when the
+  // brain emitted it correctly at top-level. The substrate stores these in
+  // dedicated columns; the API must surface them.
+  const SELECT_COLUMNS = "id, ts, kind, directive_id, task_id, substrate_origin, payload, action_artifact_id, verifier_artifact_id, predicted_residual, outcome, residual, failure_kind, invoker, parent_task_id, loop_id";
   let rows: Array<Record<string, unknown>>;
   if (kinds.length > 0) {
     const placeholders = kinds.map(() => "?").join(",");
     rows = ctx.db
       .query(
-        `SELECT id, ts, kind, directive_id, task_id, substrate_origin, payload
+        `SELECT ${SELECT_COLUMNS}
          FROM events
          WHERE kind IN (${placeholders})
          ORDER BY ts DESC
@@ -238,7 +246,7 @@ export const handleRecentEvents = (
   } else {
     rows = ctx.db
       .query(
-        `SELECT id, ts, kind, directive_id, task_id, substrate_origin, payload
+        `SELECT ${SELECT_COLUMNS}
          FROM events
          ORDER BY ts DESC
          LIMIT ?`,
@@ -253,6 +261,16 @@ export const handleRecentEvents = (
     directive_id: r.directive_id as string,
     task_id: r.task_id as string,
     substrate_origin: r.substrate_origin as string,
+    invoker: r.invoker as string | null,
+    parent_task_id: r.parent_task_id as string | null,
+    loop_id: r.loop_id as string | null,
+    // Top-level act-loop columns (null when not applicable to the kind).
+    action_artifact_id: r.action_artifact_id as string | null,
+    verifier_artifact_id: r.verifier_artifact_id as string | null,
+    predicted_residual: r.predicted_residual as number | null,
+    outcome: r.outcome as string | null,
+    residual: r.residual as number | null,
+    failure_kind: r.failure_kind as string | null,
     payload: JSON.parse((r.payload as string) ?? "{}") as JsonValue,
   }));
   return { ok: true, result: { events } as unknown as JsonValue };
