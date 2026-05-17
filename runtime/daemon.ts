@@ -1229,8 +1229,16 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   });
 
   // 1. Bind the FastMCP HTTP-streaming transport on the primary port.
+  // FOUNDATIONAL FIX 2026-05-17: the only inbound MCP caller in production
+  // is the opencode brain subprocess. Pre-fix this server was tagged
+  // `invoker: "claude_root"` (a historical Claude Code default), which made
+  // every brain emit indistinguishable from a hypothetical orchestrator call
+  // — and the brain-gates (BRAIN_FORBIDDEN_KINDS, act-loop tuple validation)
+  // became dead code in production because isBrainInvoker rejected
+  // "claude_root". The daemon's MCP server now tags inbound as "opencode"
+  // so brain-gates fire structurally on every call.
   try {
-    mcpServer = createMcpServer({ db, invoker: "claude_root", index, ingressState });
+    mcpServer = createMcpServer({ db, invoker: "opencode", index, ingressState });
     await mcpServer.start({
       transportType: "httpStream",
       httpStream: { host, port },
