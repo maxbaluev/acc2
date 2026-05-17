@@ -5,11 +5,13 @@ import { emitEvent } from "./events";
 import { buildOwnerProfileSection, composePrompt, estimateTokens, readOwnerProfile } from "./prompt_composer";
 import { newId } from "./ids";
 import { goalShape } from "./goal_shape";
+import { seedFoundationalKnowledge } from "../substrate/seed";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
 
 const openTask = (db: ReturnType<typeof openDb>): { directiveId: string; taskId: string } => {
+  seedFoundationalKnowledge(db, { ownerApproved: true });
   const directiveId = newId();
   const taskId = newId();
   emitEvent(db, {
@@ -87,6 +89,150 @@ describe("prompt_composer", () => {
     // DO NOT block must also pin the same rule (defense-in-depth — brain
     // reading the DO NOT block alone still sees the prohibition).
     expect(composed.text).toContain("Exit having produced only conversational text");
+  });
+
+  test("renders workflow and do_not from typed policy_bundle rows, not local constants", () => {
+    const source = readFileSync(new URL("./prompt_composer.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("const WORKFLOW_TEXT");
+    expect(source).not.toContain("const NOT_DO_TEXT");
+
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      payload: {
+        type: "policy_bundle",
+        surface: "brain_prompt",
+        section_name: "workflow",
+        priority: 0,
+        version: "test.override",
+        body: "YOUR WORKFLOW (test override):\n  POLICY_BUNDLE_OVERRIDE_WORKFLOW",
+        policy_bundle: {
+          type: "policy_bundle",
+          surface: "brain_prompt",
+          section_name: "workflow",
+          priority: 0,
+          version: "test.override",
+          body: "YOUR WORKFLOW (test override):\n  POLICY_BUNDLE_OVERRIDE_WORKFLOW",
+        },
+      },
+    });
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      payload: {
+        type: "policy_bundle",
+        surface: "brain_prompt",
+        section_name: "do_not",
+        priority: 0,
+        version: "test.override",
+        body: "DO NOT (test override):\n  - POLICY_BUNDLE_OVERRIDE_DO_NOT",
+        policy_bundle: {
+          type: "policy_bundle",
+          surface: "brain_prompt",
+          section_name: "do_not",
+          priority: 0,
+          version: "test.override",
+          body: "DO NOT (test override):\n  - POLICY_BUNDLE_OVERRIDE_DO_NOT",
+        },
+      },
+    });
+
+    const composed = composePrompt(db, { taskId });
+    expect(composed.text).toContain("POLICY_BUNDLE_OVERRIDE_WORKFLOW");
+    expect(composed.text).toContain("POLICY_BUNDLE_OVERRIDE_DO_NOT");
+    expect(composed.sections.find((s) => s.name === "workflow")?.priorityP).toBe(0);
+    expect(composed.sections.find((s) => s.name === "do_not")?.priorityP).toBe(0);
+  });
+
+  test("EXISTING DECOMPOSITION section surfaces same-directive task_node_opened siblings to prevent re-decomposition explosion (audit 2026-05-17)", () => {
+    // FOUNDATIONAL FIX: pre-fix the brain dispatched against the root task
+    // blind to its prior cycles' children. Each re-dispatch on a multi-Q root
+    // produced a fresh batch of Q1-Q6 task_node_opened events. The hot-reload
+    // directive accumulated 62 task_node_opened events for what should have
+    // been 7 (root + 6 questions). This test pins that:
+    //  (a) every same-directive task_node_opened other than the current task
+    //      appears in the EXISTING DECOMPOSITION section,
+    //  (b) committed/failed/open status is rendered per sibling group,
+    //  (c) the section is p=0 so budget pressure cannot drop it,
+    //  (d) the "do NOT open siblings" prohibition is present verbatim.
+    const db = openDb(":memory:");
+    seedFoundationalKnowledge(db, { ownerApproved: true });
+    const directiveId = newId();
+    const rootId = newId();
+    const q1Id = newId();
+    const q2Id = newId();
+
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "Multi-Q root with prior decomposition" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: rootId,
+      payload: { goal: "Root multi-question task" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: q1Id,
+      payload: { goal: "Q1 DETECTION: choose primary mechanism" },
+    });
+    emitEvent(db, {
+      kind: "task_committed",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: q1Id,
+      payload: {},
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: q2Id,
+      payload: { goal: "Q2 RELOAD MECHANISM: choose smallest delta" },
+    });
+
+    const composed = composePrompt(db, { taskId: rootId });
+
+    expect(composed.text).toContain("EXISTING DECOMPOSITION FOR THIS DIRECTIVE");
+    expect(composed.text).toContain("Q1 DETECTION");
+    expect(composed.text).toContain("Q2 RELOAD MECHANISM");
+    expect(composed.text).toContain("committed=1");
+    expect(composed.text).toContain("open=1");
+    expect(composed.text).toContain("do NOT open siblings");
+
+    const section = composed.sections.find((s) => s.name === "existing_decomposition");
+    expect(section).toBeDefined();
+    expect(section?.priorityP).toBe(0);
+
+    // Fresh directive with no siblings: the section must NOT appear.
+    const freshDirectiveId = newId();
+    const freshTaskId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: freshDirectiveId,
+      task_id: freshDirectiveId,
+      payload: { directive_text: "Fresh directive" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: freshDirectiveId,
+      task_id: freshTaskId,
+      payload: { goal: "Fresh root task" },
+    });
+    const freshComposed = composePrompt(db, { taskId: freshTaskId });
+    expect(freshComposed.sections.find((s) => s.name === "existing_decomposition")).toBeUndefined();
+    expect(freshComposed.text).not.toContain("EXISTING DECOMPOSITION FOR THIS DIRECTIVE");
   });
 
   test("returns the fixture marker for fixture_d_count_todos prompts", () => {

@@ -153,6 +153,106 @@ const readDirectiveGoal = (db: Database, directiveId: string): string | null => 
   }
 };
 
+// ── Existing-decomposition surface (REUSE-FIRST against re-decomposition) ──
+// Audit 2026-05-17: the hot-reload directive accumulated 62 task_node_opened
+// events because the brain re-dispatched the root and blindly re-decomposed
+// the same Q1-Q6 questions on each cycle. The fix is structural: surface
+// every task_node_opened that already exists for the same directive so the
+// brain SEES what its prior cycles already produced and refuses to open
+// duplicates. This is the canonical reuse-first principle applied to
+// decomposition itself: existing children with committed answers ARE the
+// answer; the brain should compose the root-closure from them, not re-spawn.
+type ExistingChild = {
+  task_id: string;
+  ts: string;
+  goal_head: string;
+  status: "committed" | "failed" | "open";
+};
+const readExistingDecomposition = (
+  db: Database,
+  directiveId: string,
+  excludeTaskId: string,
+  cap = 30,
+): ExistingChild[] => {
+  if (!directiveId) return [];
+  const rows = db
+    .query<
+      { task_id: string; ts: string; payload: string },
+      [string, string]
+    >(
+      `SELECT task_id, ts, payload FROM events
+       WHERE kind = 'task_node_opened'
+         AND directive_id = ?
+         AND task_id != ?
+       ORDER BY ts ASC`,
+    )
+    .all(directiveId, excludeTaskId);
+  if (rows.length === 0) return [];
+  const committedSet = new Set(
+    db
+      .query<{ task_id: string }, [string]>(
+        `SELECT task_id FROM events WHERE kind = 'task_committed' AND directive_id = ?`,
+      )
+      .all(directiveId)
+      .map((r) => r.task_id),
+  );
+  const failedSet = new Set(
+    db
+      .query<{ task_id: string }, [string]>(
+        `SELECT task_id FROM events WHERE kind = 'task_failed' AND directive_id = ?`,
+      )
+      .all(directiveId)
+      .map((r) => r.task_id),
+  );
+  const out: ExistingChild[] = [];
+  for (const r of rows) {
+    let goal = "";
+    try {
+      const p = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
+      goal = String(p.goal ?? "");
+    } catch { /* skip malformed */ }
+    const status: ExistingChild["status"] = committedSet.has(r.task_id)
+      ? "committed"
+      : failedSet.has(r.task_id)
+        ? "failed"
+        : "open";
+    out.push({ task_id: r.task_id, ts: r.ts, goal_head: goal.slice(0, 80), status });
+    if (out.length >= cap) break;
+  }
+  return out;
+};
+
+const buildExistingDecompositionSection = (rows: ExistingChild[]): string => {
+  if (rows.length === 0) return "";
+  // Dedup by goal-head prefix to collapse repeated decomposition cycles into
+  // a single representative line per question. The brain should see "Q1
+  // already has 4 siblings (2 committed)" not "Q1 1, Q1 2, Q1 3, Q1 4".
+  const groups = new Map<string, ExistingChild[]>();
+  for (const r of rows) {
+    // Group by first ~16 chars of goal (catches "Q1 DETECTION", "Q2 RELOAD",
+    // etc) — short enough that "Q1 DETECTION" and "Q1 — DETECTION" cluster,
+    // long enough that "Q1" and "Q2" don't.
+    const key = r.goal_head.slice(0, 16).replace(/\s+/g, " ").trim().toLowerCase();
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(r);
+  }
+  const lines: string[] = [
+    "EXISTING DECOMPOSITION FOR THIS DIRECTIVE (do NOT open siblings with overlapping goals — that is re-decomposition, the structural anti-pattern named in audit lesson Q2):",
+  ];
+  for (const [, items] of [...groups.entries()].sort()) {
+    const repr = items[0]!;
+    const committed = items.filter((i) => i.status === "committed").length;
+    const failed = items.filter((i) => i.status === "failed").length;
+    const open = items.filter((i) => i.status === "open").length;
+    const status = `committed=${committed} failed=${failed} open=${open}`;
+    lines.push(`  - "${repr.goal_head}" → ${items.length} sibling(s) [${status}]`);
+  }
+  lines.push(
+    "If a question on your decomposition list already has ≥ 1 committed sibling above, COMPOSE THE ANSWER FROM THE COMMITTED CHILD (substrate.read/get_event); do NOT emit another task_node_opened for it. Closure verifier will count duplicates as a decomposition-explosion failure.",
+  );
+  return lines.join("\n");
+};
+
 const goalShapeTags = (goalText?: string | null): string[] => {
   const tokens = String(goalText ?? "")
     .toLowerCase()
@@ -228,7 +328,7 @@ const readKnowledgeTopK = (
              )
            )
          )
-       ORDER BY shape_match DESC, p.ts DESC
+       ORDER BY shape_match DESC, p.ts DESC, p.rowid DESC
        LIMIT ?`,
     )
     .all(shape, shape, shape, shapeTagsJson, shapeMatchOnly ? 1 : 0, shape, shape, shape, shapeTagsJson, k) as Array<Record<string, unknown>>;
@@ -271,6 +371,58 @@ const readKnowledgeTopK = (
     } catch { /* skip malformed */ }
   }
   return out;
+};
+
+const REQUIRED_POLICY_SECTION_NAMES = ["workflow", "do_not"] as const;
+type PolicyBundleSectionName = typeof REQUIRED_POLICY_SECTION_NAMES[number];
+type PolicyBundleSection = { sectionName: PolicyBundleSectionName; priority: number; body: string };
+
+const isPolicyBundleSectionName = (value: string): value is PolicyBundleSectionName => {
+  return (REQUIRED_POLICY_SECTION_NAMES as readonly string[]).includes(value);
+};
+
+const readPolicyBundleSections = (
+  db: Database,
+  surface: string,
+  sectionNames: readonly PolicyBundleSectionName[],
+): PolicyBundleSection[] => {
+  const wanted = new Set(sectionNames);
+  const rows = db
+    .query(
+      `SELECT payload
+         FROM events
+        WHERE kind = 'knowledge_promoted'
+          AND COALESCE(json_extract(payload, '$.policy_bundle.surface'), json_extract(payload, '$.surface')) = ?
+          AND COALESCE(json_extract(payload, '$.type'), json_extract(payload, '$.policy_bundle.type')) = 'policy_bundle'
+        ORDER BY ts DESC, rowid DESC
+        LIMIT 100`,
+    )
+    .all(surface) as Array<{ payload: string }>;
+
+  const latestBySection = new Map<string, PolicyBundleSection>();
+  for (const row of rows) {
+    try {
+      const payload = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
+      const bundle = (payload.policy_bundle && typeof payload.policy_bundle === "object")
+        ? payload.policy_bundle as Record<string, unknown>
+        : payload;
+      const sectionName = (bundle.section_name as string | undefined) ?? (bundle.sectionName as string | undefined);
+      const body = bundle.body as string | undefined;
+      if (!sectionName || !isPolicyBundleSectionName(sectionName) || !wanted.has(sectionName) || typeof body !== "string" || body.length === 0) continue;
+      if (latestBySection.has(sectionName)) continue;
+      latestBySection.set(sectionName, {
+        sectionName,
+        priority: Number(bundle.priority ?? 0),
+        body,
+      });
+    } catch { /* skip malformed policy rows */ }
+  }
+
+  return Array.from(latestBySection.values()).sort((a, b) => {
+    const byPriority = a.priority - b.priority;
+    if (byPriority !== 0) return byPriority;
+    return sectionNames.indexOf(a.sectionName) - sectionNames.indexOf(b.sectionName);
+  });
 };
 
 // Organism-alignment audit b3qc9ryzj finding #5 (2026-05-15): pending
@@ -776,54 +928,6 @@ const RUNTIMES_AVAILABLE_TEXT = [
   "  - camofox-browser — TypeScript against the camofox API; real chromium driven against a profile",
 ].join("\n");
 
-const WORKFLOW_TEXT = [
-  "YOUR WORKFLOW (RLM cycle: prompt is constant metadata; substrate is external state; recurse via DAG edges, not chat history):",
-  "  CONSTANT ACT-LOOP METADATA: every action is intent + runtime artifact + verifier artifact + predicted_residual; residual is the universal score.",
-  "  1. Write/reuse a code artifact for any runtime + a verifier artifact for any runtime; action and verifier runtimes may differ (e.g. camofox action + bun verifier).",
-  "     Verifier residuals are a packet: residual ∈ [0,1] is the universal scalar (substrate uses this for scheduling + credit) plus OPEN-ENDED breakdown:Record<string,number> and reliability_profile:Record<string,number> for domain-specific evidence quality, consent, continuity, stakeholder alignment, uncertainty, and any other signal the verifier wants to surface to retrieval. Both maps are free-form by design — invent the keys your domain needs (e.g. for human tasks: evidence_quality, goal_progress, reversibility_or_consent, continuity, stakeholder_alignment, uncertainty; for research: source_diversity, citation_recency; for browser: dom_stability, captcha_risk). DO NOT propose a fixed enum or string-literal union for these dimensions — that recreates the rejected typed-predicate-lattice; the substrate refuses such enums in any code or schema diff.",
-  "  2. Emit action_predicted with action_artifact_id + verifier_artifact_id + predicted_residual. Include budget_estimate={token_upper_bound,wall_ms,verifier_ms,artifact_invocations} when the action can estimate cost; verifiers/action_scored should report budget_observed on the same open-ended axes when available.",
-  "  3. Choose bounded_peek vs symbolic_recursion deliberately before reading more.",
-  "     BOUNDED PEEK: use substrate.search/read when the missing slice is narrow, already indexed, immediately action-relevant, and can fit this cycle's verifier boundary.",
-  "     SYMBOLIC RECURSION: emit task_node_opened + task_edge_recorded (refines/requires) when the next slice is broad, independently verifiable, multi-source/multi-runtime, owner-gated, or likely to produce reusable knowledge/artifacts.",
-  "     For residual-driven recursion, task_edge_recorded.payload must include open-ended trigger_axis, trigger_residual, expected_residual_delta, and stop_condition when those values are known.",
-  "     Include the choice and reason in emitted task/action payloads so closure verifiers can score recursion-vs-peek quality.",
-  "     UNIVERSAL DEMO GENERATION: the substrate seeds CAPABILITY DESCRIPTIONS as promoted",
-  "     knowledge (rolling_active, knowledge_compounds, owner_profile_grounded, father_ranked,",
-  "     stakeholder_tracked, recipe_compounds). These are NOT fixed demos to surface verbatim —",
-  "     they are your VOCABULARY of what kinds of work the substrate enables. When the owner's",
-  "     intent is unclear or this is their first directive, GENERATE a tailored proposal on the",
-  "     fly: read the matched capability descriptions + the OWNER PROFILE + the directive text;",
-  "     compose a fresh proposal in the owner's language, using their vocabulary, framed around",
-  "     their specific goal. Never echo a seeded capability description verbatim — synthesize.",
-  "  4. Propose knowledge_candidate events for new patterns (substrate promotes via outcome).",
-  "     EMIT MID-CYCLE — don't wait for closure. See EMISSION GRAMMARS for the rich schema.",
-  "     When many same-origin candidates have zero promotions, emit a merger/contradiction diagnostic instead of adding more uncited text.",
-  "  5. For new reusable scripts, emit code_artifact_candidate.",
-  "  6. Before any task_committed, satisfy the PROPOSAL GROUNDING GATE:",
-  "     - every referenced event kind exists in substrate/event_kinds.ts;",
-  "     - every repo-targeted amendment has a current anchor + structured diff;",
-  "     - every repo-targeted amendment cites fresh state_snapshot_recorded + state_snapshot_diffed evidence against current master;",
-  "     - proposal_grounding freshness claims are evidence-derived: do NOT set anchor_verified_against_current_master:true (or equivalent) unless evidence_event_ids/context_refs include an action_scored verifier event with residual < 0.3 against current master;",
-  "     - that verifier must score open-ended axes for anchor_freshness, semantic_duplicate_detection, behavioral_novelty, and necessity; stale_or_unverified_snapshot, duplicate_or_renamed_work, behavioral_non_novel, or unnecessary_change residual >= 0.3 means refine, do NOT propose anchored amendments;",
-  "     - semantic-duplicate detection compares existing exports/symbols plus behavior signatures so renamed duplicates are refused before apply;",
-  "     - auto_apply_gate residual must be verifier-computed from anchor-freshness × semantic-duplicate-detection × behavioral-novelty × necessity, not from brain-authored low-risk assertions;",
-  "     - adversarial second-pass review emits adversarial_review_complete before auto-apply unlocks; missing review evidence keeps repo-targeted amendments prose-only or blocked;",
-  "     - every referenced acc CLI command exists or is introduced in this DAG with a requires edge;",
-  "     - every deliverable-shaped leaf goal has emitted a code_artifact_candidate,",
-  "       contract_amendment_proposed, or lesson_extracted.proposed_action.",
-  "     - complex substrate-audit or intelligence-loop research roots cite a measured diagnostics action covering DAG shape, proposal coverage, closure readiness, budget explicitness, and origin/knowledge promotion before root commit.",
-  "     Gate residual ≥ 0.3 → refine, do NOT commit.",
-  "  CLOSURE + LEARNING (required before committing a DIRECTIVE's root task):",
-  "  7. Run a CLOSURE VERIFIER (a code artifact); emit task_closure_audited.",
-  "     Include reliability_profile as an OPEN-ENDED Record<string,number> when available. Axes are discovered per goal-domain from outcomes, never fixed as a schema. Residual stays the universal scalar; reliability_profile is the discovered axis-vector behind it.",
-  "     closure_residual ≥ 0.3 → refine, do NOT commit root.",
-  "  8. Extract lessons: emit contract_amendment_proposed OR lesson_extracted for every friction.",
-  "     Route prior PENDING PROPOSALS through new task_nodes instead of letting them accumulate.",
-  "  RENDERING + OWNER INPUT (conditional surfaces; no fixed enum):",
-  "  9. For owner-visible output, read OWNER PROFILE and render through open-ended rendering/autonomy/control/risk/collaboration/goal_continuity signals, preferred_terms, avoided_terms, and detected_language confidence.",
-  "     Keep substrate-internal English fields unchanged. If corrected, emit owner_insight_candidate citing the owner event.",
-  "  10. When owner_input_received / owner_decision_recorded changes durable constraints, terms, autonomy bounds, hot topics, or recurring decision patterns, emit owner_insight_candidate with cited source event ids.",
-].join("\n");
 
 // Detailed emission grammar — P1 so it drops first under tight-budget
 // pressure but is present in the standard 8K budget. Brain prompt
@@ -903,7 +1007,7 @@ const EMISSION_GRAMMARS_TEXT = [
   "    For repo-targeted anchored_replace_v1 proposals, diff.before MUST be copied",
   "    from the current source file, not from this rendered prompt, retrieved",
   "    knowledge, or a prior amendment. This matters for prompt_composer.ts itself:",
-  "    WORKFLOW_TEXT and EMISSION_GRAMMARS_TEXT render as prose, but the live file",
+  "    workflow policy bundles and EMISSION_GRAMMARS_TEXT render as prose, but the live file",
   "    stores them as TypeScript string-array entries, so rendered prompt snippets",
   "    are stale/non-matching anchors by construction.",
   "    Structured proposed_behavior is necessary but not sufficient for auto apply.",
@@ -1008,14 +1112,6 @@ const buildGatesSection = (gates: string[]): string => {
   return "CONSTITUTIONAL GATES ACTIVE:\n" + gates.map((g) => `  - ${g}`).join("\n");
 };
 
-const NOT_DO_TEXT = [
-  "DO NOT:",
-  "  - Look for a tool menu — there isn't one. Write code for a runtime.",
-  "  - Author canonical knowledge directly — propose candidates; substrate promotes via outcome correlation.",
-  "  - Iterate within this cycle — emit a refinement edge if more work remains.",
-  "  - Rebuild the environment in-context or summarize it as a substitute for substrate state; use symbolic handles + ledger mutations instead.",
-  "  - Exit having produced only conversational text. Every cycle MUST call at least one substrate.* tool (see EXIT INVARIANT). Text-only exits are scored brain_silent_exit and counted as prompt-compliance failures.",
-].join("\n");
 
 // ── EXIT INVARIANT (load-bearing, structural) ─────────────────────
 // Audit 2026-05-16 (bridge classifier split, commit 59b2872): 87% of
@@ -1072,9 +1168,29 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // brain reads "you MUST call substrate.* before exit" before anything else.
   candidates.push({ name: "exit_invariant", p: 0, body: EXIT_INVARIANT_TEXT });
   candidates.push({ name: "task_goal", p: 0, body: buildTaskGoalSection(task, directiveText) });
+  // Existing decomposition awareness — load-bearing reuse-first signal
+  // against the re-decomposition explosion (audit 2026-05-17: hot-reload
+  // directive accumulated 62 task_node_opened events because the brain
+  // re-decomposed Q1-Q6 nine times). p=0 so it never drops; placed right
+  // after task_goal so the brain reads it before workflow/emission grammar.
+  const existingDecomp = readExistingDecomposition(db, task.directive_id, task.id);
+  const existingDecompBody = buildExistingDecompositionSection(existingDecomp);
+  if (existingDecompBody.length > 0) {
+    candidates.push({ name: "existing_decomposition", p: 0, body: existingDecompBody });
+  }
   candidates.push({ name: "runtimes_available", p: 0, body: RUNTIMES_AVAILABLE_TEXT });
-  candidates.push({ name: "workflow", p: 0, body: WORKFLOW_TEXT });
-  candidates.push({ name: "do_not", p: 0, body: NOT_DO_TEXT });
+  const policySections = readPolicyBundleSections(db, "brain_prompt", REQUIRED_POLICY_SECTION_NAMES);
+  for (const policy of policySections) {
+    candidates.push({ name: policy.sectionName, p: policy.priority, body: policy.body });
+  }
+  for (const required of REQUIRED_POLICY_SECTION_NAMES) {
+    if (policySections.some((policy) => policy.sectionName === required)) continue;
+    candidates.push({
+      name: required,
+      p: 0,
+      body: "BRAIN PROMPT POLICY MISSING: knowledge_promoted policy_bundle surface=brain_prompt section_name=" + required + ". Seed foundational knowledge before dispatch; do not substitute local literal prompt policy.",
+    });
+  }
   // Detailed emission grammars — env_requires + rich knowledge schema +
   // artifact provenance. P1 so it drops first under tight-budget pressure
   // (depth-1 tests pin a tiny 800-token budget) but lands in normal flow.
