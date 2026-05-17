@@ -2622,7 +2622,18 @@ CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
     e.task_id      AS task_id,
     e.substrate_origin AS substrate_origin,
     CASE
-      WHEN e.kind IN ('task_failed','bridge_failed','dispatcher_violation','owner_input_required','hidl_action_required','brain_failed','daemon_hotreload_rejected','daemon_hotreload_failed') THEN 'critical'
+      -- Hot-reload failures are operational, not safety-critical. The
+      -- reason 'full_restart_required' is a NORMAL signal (manifest
+      -- correctly classified the module as needing restart, not a
+      -- failure). Historical evidence: 131 of 153 daemon_hotreload_failed
+      -- rows in production had this reason — they were emitted by the
+      -- pre-2026-05-17 worker before the dedicated restart_pending
+      -- event existed. Classify them as 'medium' so they're discoverable
+      -- but don't dominate the TUI's critical badge.
+      WHEN e.kind = 'daemon_hotreload_failed'
+           AND json_extract(e.payload, '$.reason') = 'full_restart_required' THEN 'medium'
+      WHEN e.kind = 'daemon_hotreload_failed' THEN 'high'
+      WHEN e.kind IN ('task_failed','bridge_failed','dispatcher_violation','owner_input_required','hidl_action_required','brain_failed','daemon_hotreload_rejected') THEN 'critical'
       WHEN e.kind IN ('task_committed','directive_opened','directive_amended','contract_amendment_proposed','pre_apply_adjudication_recorded','owner_observed_outcome_recorded','applied_change_committed','applied_change_failed','task_closure_audited','owner_decision_recorded') THEN 'high'
       WHEN e.kind IN ('knowledge_candidate','lesson_extracted','claude_reasoning_recorded','dispatch_decided','act_tuple_recorded','runtime_self_diagnostic_recorded','owner_insight_candidate','intent_classified','brain_message_emitted','knowledge_promoted','recipe_promoted','code_artifact_promoted') THEN 'medium'
       ELSE 'low'

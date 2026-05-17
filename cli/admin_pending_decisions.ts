@@ -14,6 +14,11 @@
 //   - --target <substr>: filter rows whose normalized_target contains substr.
 //   - --limit N: cap the ranked output (default 10).
 //   - --json: machine-readable for orchestrator polling.
+//   - --auto-decline-malformed [--yes]: bulk-emit owner_decision_recorded
+//     decline=true for every group whose decline_candidate_reason is set
+//     (anchor_missing, diff_missing, empty_after, empty_before). The
+//     operator running this command IS the owner; the gate enforces an
+//     explicit --yes so a typo doesn't drain real decisions.
 //
 // Usage:
 //   acc admin pending-decisions                       # ranked top 10
@@ -22,9 +27,12 @@
 //   acc admin pending-decisions --all                 # raw ungrouped view
 //   acc admin pending-decisions --json                # JSON (ranked by default)
 //   acc admin pending-decisions --all --json          # JSON ungrouped
+//   acc admin pending-decisions --auto-decline-malformed --yes
+//                                                     # bulk-decline malformed shapes
 
 import type { Database } from "bun:sqlite";
 import { openDb } from "../substrate/db";
+import { emitEvent } from "../runtime/events";
 import {
   lessonImplementerQueue,
   pendingOwnerDecisionQueue,
@@ -177,6 +185,76 @@ export const runPendingDecisions = async (
   }
 
   const ranked = pendingOwnerDecisionQueue(db);
+
+  // Auto-decline-malformed mode: drain every group whose
+  // decline_candidate_reason is set. Operator types --auto-decline-malformed
+  // --yes once; the substrate gets owner_decision_recorded decline=true
+  // for every group representative + ungrouped member. Each emission
+  // cites the group_key + reason so a future audit knows why.
+  const wantAutoDecline = argv.includes("--auto-decline-malformed");
+  if (wantAutoDecline) {
+    const wantYes = argv.includes("--yes") || argv.includes("-y");
+    const declinables = ranked.filter((r) => r.group_decline_reason !== null);
+    if (declinables.length === 0) {
+      env.out("acc admin pending-decisions --auto-decline-malformed: no malformed groups to decline (group_decline_reason was null for every ranked row).");
+      return 0;
+    }
+    if (!wantYes) {
+      env.err(
+        `acc admin pending-decisions --auto-decline-malformed: ${declinables.length} groups match (` +
+          `${declinables.reduce((a, r) => a + r.duplicate_count, 0)} total proposals would be declined). Pass --yes to apply.`,
+      );
+      for (const r of declinables.slice(0, 5)) {
+        env.err(`  • ${r.target ?? "?"}  ×${r.duplicate_count}  decline:${r.group_decline_reason}`);
+      }
+      if (declinables.length > 5) env.err(`  • …and ${declinables.length - 5} more.`);
+      return 1;
+    }
+    let declined = 0;
+    let groups = 0;
+    for (const r of declinables) {
+      // Find every member of this group (same group_key) and decline each.
+      type Mem = { id: string; ts: string };
+      const members = db
+        .query(
+          `WITH base AS (
+             SELECT q.source_event_id AS id, q.ts,
+                    CASE WHEN q.target LIKE 'repo:%' THEN substr(q.target, 6) ELSE q.target END AS normalized_target,
+                    q.anchor
+             FROM lesson_implementer_queue_view q
+             WHERE (q.owner_gate_required = 1 OR q.apply_gate_status = 'manual_review')
+               AND q.apply_status IS NULL
+               AND (q.candidate_diff IS NULL OR json_valid(q.candidate_diff) = 1)
+           )
+           SELECT id, ts FROM base
+           WHERE (COALESCE(normalized_target, '?') || '|' || COALESCE(anchor, '')) = ?`,
+        )
+        .all(r.group_key) as Mem[];
+      for (const m of members) {
+        try {
+          emitEvent(db, {
+            kind: "owner_decision_recorded",
+            substrate_origin: "owner",
+            payload: {
+              source_event_id: m.id,
+              decision: "decline",
+              reason: `auto_decline_malformed:${r.group_decline_reason}`,
+              group_key: r.group_key,
+              triggered_by: "acc admin pending-decisions --auto-decline-malformed",
+            },
+            context_refs: [m.id],
+          });
+          declined++;
+        } catch (err) {
+          env.err(`  ! failed to decline ${m.id}: ${(err as Error).message}`);
+        }
+      }
+      groups++;
+    }
+    env.out(`acc admin pending-decisions --auto-decline-malformed: declined ${declined} proposals across ${groups} groups.`);
+    return 0;
+  }
+
   const filtered = targetFilter
     ? ranked.filter((r) => (r.target ?? "").includes(targetFilter))
     : ranked;

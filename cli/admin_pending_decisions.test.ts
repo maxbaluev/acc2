@@ -45,6 +45,93 @@ const insertAmendment = (
   return id;
 };
 
+describe("admin_pending_decisions --auto-decline-malformed (2026-05-17)", () => {
+  test("refuses without --yes (gate)", async () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    // Malformed (anchor missing) — should be a decline candidate
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
+    const errs: string[] = [];
+    const code = await runPendingDecisions(["--auto-decline-malformed"], {
+      out: () => {},
+      err: (s) => errs.push(s),
+      openSubstrate: () => db,
+    });
+    expect(code).toBe(1);
+    expect(errs.join("\n")).toContain("Pass --yes");
+  });
+
+  test("--yes emits owner_decision_recorded decline for every group member", async () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    // Three malformed (anchor missing) → one group with duplicate_count=3
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
+    const code = await runPendingDecisions(["--auto-decline-malformed", "--yes"], {
+      out: () => {},
+      err: () => {},
+      openSubstrate: () => db,
+    });
+    expect(code).toBe(0);
+    const declined = db.query("SELECT count(*) AS c FROM events WHERE kind = 'owner_decision_recorded' AND json_extract(payload, '$.decision') = 'decline'").get() as { c: number };
+    expect(declined.c).toBe(3);
+    // Queue should now be empty
+    const remaining = await runPendingDecisions(["--limit", "10"], {
+      out: () => {},
+      err: () => {},
+      openSubstrate: () => db,
+    });
+    expect(remaining).toBe(0);
+    const queue = db.query("SELECT count(*) AS c FROM pending_owner_decision_queue_view").get() as { c: number };
+    expect(queue.c).toBe(0);
+  });
+
+  test("only declines groups whose decline_candidate_reason is non-null (well-formed proposals untouched)", async () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    // One well-formed, one malformed
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "## Owner Decisions", consent_required: true });
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
+    const code = await runPendingDecisions(["--auto-decline-malformed", "--yes"], {
+      out: () => {},
+      err: () => {},
+      openSubstrate: () => db,
+    });
+    expect(code).toBe(0);
+    const declined = db.query("SELECT count(*) AS c FROM events WHERE kind = 'owner_decision_recorded'").get() as { c: number };
+    expect(declined.c).toBe(1);
+    // Well-formed one should still be in the queue
+    const queue = db.query("SELECT count(*) AS c FROM pending_owner_decision_queue_view").get() as { c: number };
+    expect(queue.c).toBe(1);
+  });
+
+  test("idempotent — declined proposals don't re-decline on second run", async () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
+    await runPendingDecisions(["--auto-decline-malformed", "--yes"], {
+      out: () => {},
+      err: () => {},
+      openSubstrate: () => db,
+    });
+    const after1 = db.query("SELECT count(*) AS c FROM events WHERE kind = 'owner_decision_recorded'").get() as { c: number };
+    expect(after1.c).toBe(1);
+    await runPendingDecisions(["--auto-decline-malformed", "--yes"], {
+      out: () => {},
+      err: () => {},
+      openSubstrate: () => db,
+    });
+    const after2 = db.query("SELECT count(*) AS c FROM events WHERE kind = 'owner_decision_recorded'").get() as { c: number };
+    // Should still be 1 — the view's NOT EXISTS check excludes already-declined rows.
+    expect(after2.c).toBe(1);
+  });
+});
+
 describe("admin_pending_decisions", () => {
   test("selectPendingDecisions keeps owner-gated unapplied rows and drops the rest", () => {
     const rows: LessonImplementerQueueRow[] = [
