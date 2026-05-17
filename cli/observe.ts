@@ -198,6 +198,10 @@ const GLYPHS: Record<string, string> = {
   // below so the tail surface stops conflating "needs restart" with
   // "fault".
   daemon_hotreload_restart_pending: "♻︎↻",
+  // δ-mem follow-up (2026-05-17): substrate emit-time dedup refused
+  // a knowledge_candidate as near-duplicate of a recent prior. Brain
+  // sees the refusal in tail.
+  knowledge_candidate_redundant: "📚⊘",
   // Prompt cache telemetry.
   prompt_composition_cache_hit: "💾✓",
   prompt_composition_cache_miss: "💾·",
@@ -478,6 +482,19 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
         mod ? `module=${mod}` : "",
         fp ? `file=${fp}` : "",
         "hint=run `acc daemon restart` when convenient",
+      ].filter(Boolean).join(" ");
+    }
+    case "knowledge_candidate_redundant": {
+      const matched = p.matched_event_id as string | undefined;
+      const sim = p.similarity as number | undefined;
+      const author = p.refused_author as string | undefined;
+      const preview = p.refused_claim_preview as string | undefined;
+      return [
+        "refused",
+        author ? `author=${author}` : "",
+        matched ? `matched=${matched.slice(0, 12)}` : "",
+        typeof sim === "number" ? `sim=${sim.toFixed(2)}` : "",
+        preview ? `claim=${JSON.stringify(trunc(preview, 80))}` : "",
       ].filter(Boolean).join(" ");
     }
     default:

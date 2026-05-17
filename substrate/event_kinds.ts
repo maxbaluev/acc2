@@ -91,6 +91,17 @@ export const EVENT_KINDS = {
   knowledge_candidate:                     { producer: "brain",     embeddable: true,  mirror_inline: true,  health_metric: false, narrative: true },
   candidate_confirmed:                     { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   candidate_contradicted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // δ-mem follow-up (2026-05-17): substrate-emitted when the emit-time
+  // dedup gate at substrate.emit refuses a knowledge_candidate as too
+  // similar to a recent prior emission on the same (directive, author).
+  // Live ledger evidence (24h window): 770 knowledge_candidate emissions
+  // produced 8807 candidate_confirmed rows — ~11x duplication that
+  // δ-mem flags as "artificial confidence". Brain receives the existing
+  // event_id back from substrate.emit (first-wins idempotent shape, same
+  // pattern as the terminal-event-conflict gate at runtime/events.ts).
+  // Payload: { refused_emit_kind, matched_event_id, similarity,
+  // method ('jaccard'|'cosine'), window_count }.
+  knowledge_candidate_redundant:           { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // Brain-side negative knowledge (loop-elegance gap #2, 2026-05-15):
   // brain can DIRECTLY mutate a knowledge entry's posterior toward
   // contradiction without waiting for an action_scored outcome. Use

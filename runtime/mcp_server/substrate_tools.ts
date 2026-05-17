@@ -24,6 +24,7 @@ import { retrieve } from "../retrieval";
 import { recordStakeholderState, type StakeholderVisibility } from "../stakeholder_compositor";
 import { recordInterferenceEdge, type InterferenceEdgeKind } from "../interference";
 import { findRecipeMatch } from "../recipe_replay";
+import { findSimilarRecentCandidate } from "../knowledge_dedup";
 import { newId } from "../ids";
 import {
   codeArtifactRegistry,
@@ -300,6 +301,78 @@ export const handleEmit = (
         return {
           ok: false,
           error: `per_directive_task_node_cap_exceeded:cap=${PER_DIRECTIVE_TASK_NODE_CAP};existing=${count};directive=${directiveId};hint=this directive already has ${count} task_node_opened rows — the brain MUST COMMIT existing open children (substrate.emit{kind:"task_committed"}) before opening more. Use substrate.read{view_name:"task_graph_view",args:{directive_id:"${directiveId}"}} to see open children; complete or close them before further decomposition. The cap is structural to prevent silent-dispatch loops when the brain fans out broadly and re-dispatches itself on children it has nothing strategic to add to.`,
+        };
+      }
+    }
+  }
+  // δ-mem follow-up (2026-05-17): emit-time dedup gate for
+  // knowledge_candidate. Live ledger evidence over 24h: 770
+  // knowledge_candidate emissions produced 8807 candidate_confirmed
+  // rows — ~11x duplication. Brain analysis (directive Z8JQJB2S,
+  // knowledge_candidate KDX9K3NG): "duplicate clusters become
+  // artificial confidence". The structural fix is to refuse the
+  // duplicate at the emit boundary and return the existing event's id
+  // (first-wins idempotent shape, mirrors the terminal-event-conflict
+  // gate at runtime/events.ts:82-113). Brain gets explicit feedback
+  // "you already said this" instead of the extractor silently
+  // absorbing it post-hoc.
+  //
+  // Bypass in test mode (NODE_ENV=test || ACC2_BRIDGE_MODE=mock) so
+  // existing fixtures that intentionally emit similar candidates
+  // remain green. Production gets the gate.
+  if (kind === "knowledge_candidate") {
+    const directiveId = src.directive_id as string | undefined;
+    const substrateOrigin = (src.substrate_origin as string | undefined) ?? ctx.invoker;
+    const payloadObj = (src.payload && typeof src.payload === "object" && !Array.isArray(src.payload))
+      ? src.payload as Record<string, unknown>
+      : {};
+    const claim = typeof payloadObj.claim === "string" ? payloadObj.claim : undefined;
+    const isTestMode = process.env.ACC2_BRIDGE_MODE === "mock" || process.env.NODE_ENV === "test";
+    if (!isTestMode && directiveId && substrateOrigin && claim) {
+      const match = findSimilarRecentCandidate(ctx.db, {
+        claim,
+        directive_id: directiveId,
+        substrate_origin: substrateOrigin,
+      });
+      if (match) {
+        // Refuse + emit knowledge_candidate_redundant pointing at the
+        // matched prior. Return the existing event's id so the brain's
+        // downstream wiring resolves the same way it would for a
+        // first-wins idempotent emit.
+        try {
+          emitEvent(ctx.db, {
+            kind: "knowledge_candidate_redundant",
+            substrate_origin: "substrate_auto",
+            directive_id: directiveId,
+            task_id: src.task_id,
+            payload: {
+              refused_emit_kind: "knowledge_candidate",
+              refused_author: substrateOrigin,
+              matched_event_id: match.matched_event_id,
+              matched_ts: match.matched_ts,
+              similarity: match.similarity,
+              method: match.method,
+              scanned_count: match.scanned_count,
+              refused_claim_preview: claim.slice(0, 200),
+              hint: "Your new candidate's claim duplicates a recent emission on this directive (Jaccard >= threshold). Returning the existing event_id — your downstream citations/wiring stay consistent. If the new candidate is genuinely novel (contradiction, refinement, new evidence) rephrase the claim to make the residual signal explicit.",
+            } as JsonValue,
+          });
+        } catch { /* swallow — refusal stands even if the dedup audit emit fails */ }
+        // Fetch the matched event's ts to return in the idempotent shape.
+        const tsRow = ctx.db
+          .query<{ ts: string }, [string]>(
+            `SELECT ts FROM events WHERE id = ?`,
+          )
+          .get(match.matched_event_id);
+        return {
+          ok: true,
+          result: {
+            id: match.matched_event_id,
+            ts: tsRow?.ts ?? match.matched_ts,
+            redundant: true,
+            matched_event_id: match.matched_event_id,
+            similarity: match.similarity,
+          } as JsonValue,
         };
       }
     }

@@ -213,3 +213,147 @@ describe("handleEmit — task_edge_recorded structural self-loop refusal", () =>
     expect(edge.ok).toBe(true);
   });
 });
+
+describe("handleEmit — knowledge_candidate emit-time dedup gate (δ-mem follow-up)", () => {
+  // The dedup gate is bypassed in test mode (NODE_ENV=test ||
+  // ACC2_BRIDGE_MODE=mock) so existing fixtures emitting similar
+  // candidates remain green. To exercise the PRODUCTION refusal shape
+  // we temporarily clear both markers, mirroring the pattern in
+  // runtime/events.test.ts terminal-conflict tests.
+  const withProductionMode = (fn: () => void): void => {
+    const prevBridge = process.env.ACC2_BRIDGE_MODE;
+    const prevNode = process.env.NODE_ENV;
+    delete process.env.ACC2_BRIDGE_MODE;
+    delete process.env.NODE_ENV;
+    try { fn(); } finally {
+      if (prevBridge !== undefined) process.env.ACC2_BRIDGE_MODE = prevBridge;
+      if (prevNode !== undefined) process.env.NODE_ENV = prevNode;
+    }
+  };
+
+  test("test-mode bypass: duplicate claims pass through as two distinct events", () => {
+    const db = openDb(":memory:");
+    const dir = "dir_dedup_testmode_bypass";
+    const claim = "Brain self-audit shows promotion_rate near zero over 24 hours";
+    const a = handleEmit(ctx(db), {
+      kind: "knowledge_candidate",
+      directive_id: dir,
+      task_id: "t1",
+      substrate_origin: "opencode",
+      payload: { claim },
+    } as never);
+    const b = handleEmit(ctx(db), {
+      kind: "knowledge_candidate",
+      directive_id: dir,
+      task_id: "t1",
+      substrate_origin: "opencode",
+      payload: { claim },
+    } as never);
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    if (!a.ok || !b.ok) return;
+    const idA = (a.result as Record<string, unknown>).id;
+    const idB = (b.result as Record<string, unknown>).id;
+    expect(idA).not.toBe(idB);
+  });
+
+  test("production mode: duplicate knowledge_candidate refused — returns existing event_id and emits knowledge_candidate_redundant", () => {
+    const db = openDb(":memory:");
+    const dir = "dir_dedup_production_refused";
+    const claim = "Brain self-audit shows promotion_rate near zero over 24 hours";
+    // First emit goes through in test mode (no prior to match against).
+    const first = handleEmit(ctx(db), {
+      kind: "knowledge_candidate",
+      directive_id: dir,
+      task_id: "t1",
+      substrate_origin: "opencode",
+      payload: { claim },
+    } as never);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const firstId = (first.result as Record<string, unknown>).id as string;
+    // Second emit under production mode: gate fires, returns first's id.
+    withProductionMode(() => {
+      const second = handleEmit(ctx(db), {
+        kind: "knowledge_candidate",
+        directive_id: dir,
+        task_id: "t1",
+        substrate_origin: "opencode",
+        payload: { claim },
+      } as never);
+      expect(second.ok).toBe(true);
+      if (!second.ok) return;
+      const r = second.result as Record<string, unknown>;
+      expect(r.id).toBe(firstId);
+      expect(r.redundant).toBe(true);
+      expect(typeof r.similarity).toBe("number");
+      expect(r.similarity as number).toBeGreaterThanOrEqual(0.85);
+      // Audit row landed.
+      const audit = db
+        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate_redundant' AND directive_id = ?")
+        .get(dir) as { c: number };
+      expect(audit.c).toBe(1);
+    });
+  });
+
+  test("production mode: DISTINCT claim under same directive passes through unaffected", () => {
+    const db = openDb(":memory:");
+    const dir = "dir_dedup_distinct_pass";
+    const first = handleEmit(ctx(db), {
+      kind: "knowledge_candidate",
+      directive_id: dir,
+      task_id: "t1",
+      substrate_origin: "opencode",
+      payload: { claim: "Bridge handshake watchdog timeout is too short for cold starts" },
+    } as never);
+    expect(first.ok).toBe(true);
+    withProductionMode(() => {
+      const second = handleEmit(ctx(db), {
+        kind: "knowledge_candidate",
+        directive_id: dir,
+        task_id: "t1",
+        substrate_origin: "opencode",
+        payload: { claim: "Owner profile autonomy floor defaults to 0.4 in fresh substrates" },
+      } as never);
+      expect(second.ok).toBe(true);
+      if (!second.ok) return;
+      const r = second.result as Record<string, unknown>;
+      expect(r.redundant).toBeUndefined();
+      const audit = db
+        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate_redundant'")
+        .get() as { c: number };
+      expect(audit.c).toBe(0);
+    });
+  });
+
+  test("production mode: cross-author candidates with same claim BOTH stand (substrate_origin scope)", () => {
+    const db = openDb(":memory:");
+    const dir = "dir_dedup_cross_author";
+    const claim = "Brain self-audit shows promotion_rate near zero over 24 hours";
+    const brain = handleEmit(ctx(db), {
+      kind: "knowledge_candidate",
+      directive_id: dir,
+      task_id: "t1",
+      substrate_origin: "opencode",
+      payload: { claim },
+    } as never);
+    expect(brain.ok).toBe(true);
+    withProductionMode(() => {
+      const claude = handleEmit(ctx(db), {
+        kind: "knowledge_candidate",
+        directive_id: dir,
+        task_id: "t1",
+        substrate_origin: "claude",
+        payload: { claim },
+      } as never);
+      expect(claude.ok).toBe(true);
+      if (!claude.ok) return;
+      const r = claude.result as Record<string, unknown>;
+      expect(r.redundant).toBeUndefined();
+      const idB = r.id;
+      if (!brain.ok) return;
+      const idA = (brain.result as Record<string, unknown>).id;
+      expect(idA).not.toBe(idB);
+    });
+  });
+});
