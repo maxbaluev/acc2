@@ -276,6 +276,25 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       expect(payload.classifier_class).toBe("prompt_compliance");
       expect(payload.mcp_server_url).toBe("http://127.0.0.1:45678/mcp");
       expect(typeof payload.frames_received_count).toBe("number");
+      // FOUNDATIONAL DIAGNOSTIC FIELDS (audit 2026-05-17 — the operator
+      // needs to see WHY opencode silenced, not just THAT it silenced):
+      expect(payload).toHaveProperty("failure_shape");
+      // No frames in this test → failure_shape === "no_frames"
+      expect(payload.failure_shape).toBe("no_frames");
+      expect(payload).toHaveProperty("frame_shape_counts");
+      const counts = payload.frame_shape_counts as Record<string, number>;
+      expect(counts.text).toBe(0);
+      expect(counts.tool_use).toBe(0);
+      expect(counts.error).toBe(0);
+      // final_response_tail null when no text produced; final_response_length 0
+      expect(payload.final_response_tail).toBeNull();
+      expect(payload.final_response_length).toBe(0);
+      // brain_obs_emit_count 0 when no observable frames
+      expect(payload.brain_obs_emit_count).toBe(0);
+      // hint MUST name the per-shape root cause hypothesis
+      expect(typeof payload.hint).toBe("string");
+      expect((payload.hint as string).length).toBeGreaterThan(50);
+      expect((payload.hint as string)).toContain("auth");  // no_frames hint mentions auth as #1 cause
       if (!result.ok && result.reason.kind === "subprocess_crash") {
         expect(result.reason.stderr_tail).toContain("brain_silent_exit");
       }

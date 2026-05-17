@@ -580,6 +580,27 @@ export const spawnRealOpencode = async (
   const BRAIN_OBS_MAX_EMITS = 20;
   let brainObsEmitCount = 0;
   let brainObsSuppressionFired = false;
+  // Frame-shape counters per opencode 1.4 event type — surfaced in
+  // bridge_failed payloads so the operator can read the REAL reason at
+  // a glance: 5 text frames + 0 tool_use frames + 3 reasoning frames =
+  // brain produced text/reasoning but never called a tool (prompt
+  // compliance failure). 0 text + 0 tool_use + 0 reasoning + exit 0 =
+  // opencode itself never reasoned, probably auth/config failure.
+  // 0 frames + non-zero exit = subprocess crashed before producing output.
+  // FOUNDATIONAL FIX 2026-05-17: pre-fix bridge_failed payload had
+  // `frames_received_count` (total) but no per-shape breakdown, so the
+  // operator couldn't see whether the brain was reasoning silently
+  // vs not reasoning at all. Now we expose it.
+  const frameShapeCounts: Record<string, number> = {
+    text: 0,
+    tool_use: 0,
+    tool_call: 0,
+    tool_result: 0,
+    step_start: 0,
+    step_complete: 0,
+    error: 0,
+    other: 0,
+  };
   const emitBrainObs = (eventKind: "brain_message_emitted" | "brain_reasoning_recorded", frameType: string, text: string, extra?: Record<string, unknown>) => {
     if (brainObsEmitCount >= BRAIN_OBS_MAX_EMITS) {
       if (!brainObsSuppressionFired) {
@@ -623,13 +644,34 @@ export const spawnRealOpencode = async (
       brainObsEmitCount++;
     } catch (err) { void err; }
   };
-  // Diagnostic mirror: when ACC2_OPENCODE_STDOUT_LOG points at a writable
-  // path, every raw stdout line opencode emits is appended there. Operators
-  // use this to inspect the exact JSON event sequence after an
-  // `mcp_handshake_failed` so they can see whether opencode reasoned without
-  // calling any tool, called a non-v2 tool, or errored out.
-  const stdoutLogPath = process.env.ACC2_OPENCODE_STDOUT_LOG;
-  const stdoutLogFh = stdoutLogPath ? Bun.file(stdoutLogPath).writer() : null;
+  // Diagnostic mirror: per-dispatch raw stdout log. Default ON — written
+  // under <state_dir>/logs/bridge/<task_id>.jsonl so every brain dispatch
+  // leaves an audit trail the operator can replay after the fact.
+  // ACC2_OPENCODE_STDOUT_LOG env override stays for callers that want a
+  // specific path (tests). FOUNDATIONAL FIX 2026-05-17: pre-fix the raw
+  // stdout was discarded unless an env var pointed elsewhere, so when the
+  // brain went silent the operator had NO way to read the actual JSON
+  // sequence opencode produced. The new default makes the diagnostic
+  // available without any operator setup — just look at the path surfaced
+  // in the bridge_failed payload.
+  const acc2StateDir = process.env.ACC2_STATE_DIR ?? `${process.env.HOME ?? "/tmp"}/.accint`;
+  const defaultBridgeLogDir = `${acc2StateDir}/logs/bridge`;
+  const defaultBridgeLogPath = `${defaultBridgeLogDir}/${req.taskId}.jsonl`;
+  let stdoutLogPath: string | null = process.env.ACC2_OPENCODE_STDOUT_LOG ?? defaultBridgeLogPath;
+  let stdoutLogFh: ReturnType<typeof Bun.file>["writer"] extends () => infer W ? W | null : null = null;
+  try {
+    // mkdir -p on the bridge log dir so first dispatch on a fresh state
+    // root doesn't throw ENOENT. Bun has no native mkdir; shell out once.
+    const { mkdirSync } = require("node:fs") as typeof import("node:fs");
+    mkdirSync(defaultBridgeLogDir, { recursive: true });
+    stdoutLogFh = Bun.file(stdoutLogPath).writer();
+  } catch (err) {
+    // If we can't open the log file, fall back to nothing rather than
+    // failing the dispatch — the log is a diagnostic, not a hard dep.
+    stdoutLogFh = null;
+    stdoutLogPath = null;
+    void err;
+  }
   // opencode 1.4+ emits a top-level `{type:"error", error:{...}}` event when a
   // model id is invalid / auth fails / a provider call errors. opencode then
   // exits 0 anyway (the operator only gets the JSON), so the bridge must
@@ -661,6 +703,14 @@ export const spawnRealOpencode = async (
     if (!parsed || typeof parsed !== "object") return;
     framesReceivedCount += 1;
     const kind = parsed.type as string | undefined;
+    // Per-shape counter — surfaced in bridge_failed payloads for deep
+    // diagnostics. Brain that produced N text frames + 0 tool_use frames
+    // is a different failure than one that produced 0 frames of any kind.
+    if (kind && kind in frameShapeCounts) {
+      frameShapeCounts[kind]! += 1;
+    } else {
+      frameShapeCounts.other! += 1;
+    }
     // opencode 1.4+ structured error — capture and surface on completion.
     if (kind === "error") {
       const errObj = parsed.error as Record<string, unknown> | undefined;
@@ -927,16 +977,71 @@ export const spawnRealOpencode = async (
     // cleanly. Adds frames_received_count so closure verifiers can see at
     // a glance whether the subprocess produced ANY output at all.
     const brainSilentExit = !mcpHandshakeTimedOut && exitCode === 0;
+    // FOUNDATIONAL: classify the SHAPE of the silence so the operator can
+    // see the REAL reason instead of just "the brain didn't emit". Three
+    // sub-shapes within the brain_silent_exit class:
+    //   (a) `text_only`     — brain produced text frames but no tool_use.
+    //                          Prompt-compliance failure: model chose to
+    //                          answer in prose instead of calling tools.
+    //   (b) `reasoning_only`— brain produced step_start/step_complete or
+    //                          message frames (internal reasoning) but no
+    //                          text and no tool_use. Model "thought" but
+    //                          never committed an externally-visible action.
+    //   (c) `no_frames`     — opencode emitted zero JSON frames at all.
+    //                          opencode itself failed: bad auth, bad config,
+    //                          model API error swallowed, etc.
+    // mcp_handshake_timed_out gets the same sub-classification — the
+    // distinction is whether the watchdog fired before exit (timed_out=true)
+    // or the subprocess exited on its own (timed_out=false).
+    const hasText = frameShapeCounts.text! > 0;
+    const hasReasoning = (frameShapeCounts.step_start! + frameShapeCounts.step_complete!) > 0;
+    const hasAnyFrame = framesReceivedCount > 0;
+    const failureShape = !hasAnyFrame
+      ? "no_frames"
+      : hasText
+        ? "text_only"
+        : hasReasoning
+          ? "reasoning_only"
+          : "other_frames_no_action";
     const classifierReason = brainSilentExit ? "brain_silent_exit" : "mcp_handshake_timed_out";
+    // Per-shape hints — name the LIKELY root cause so the operator doesn't
+    // have to guess. These are HYPOTHESES the operator validates by reading
+    // the surfaced final_response_tail / stderr_tail / opencode_error_event.
+    const shapeHint = (() => {
+      if (failureShape === "no_frames") {
+        return "ZERO stdout frames from opencode. Most likely root causes (in priority): "
+          + "(1) OpenAI/Anthropic auth failed — check `opencode auth` and OPENAI_API_KEY/ANTHROPIC_API_KEY. "
+          + "(2) opencode binary not found / wrong version — check `opencode --version` is >= 1.4.3. "
+          + "(3) Network blocked — opencode couldn't reach the model API. "
+          + "(4) OPENCODE_CONFIG malformed — read materialized config at the path in budget_observed. "
+          + "stderr_tail below is the primary diagnostic; if empty, opencode swallowed the error.";
+      }
+      if (failureShape === "text_only") {
+        return "Brain produced TEXT but ZERO substrate tool calls. Prompt-compliance failure: "
+          + "the brain's policy_bundle teaches MUST-emit but the brain chose to answer in prose. "
+          + "Read final_response_tail to see exactly what the brain said. Most likely root causes: "
+          + "(1) prompt missing a leading TASK GOAL — brain answered the embedded narrative instead. "
+          + "(2) brain decided the task was already done and replied 'no action needed' as text. "
+          + "(3) brain hit token limit mid-reasoning; the model truncated to text instead of tool. "
+          + "If pattern recurs on the same task_id, the task is brain-incompatible — silent_dispatch_quarantine will fire.";
+      }
+      if (failureShape === "reasoning_only") {
+        return "Brain produced INTERNAL REASONING frames (step_start/step_complete) but ZERO tool calls and ZERO text. "
+          + "Model thought through the problem but never committed an externally-visible answer. Most likely root causes: "
+          + "(1) brain ran out of tokens during reasoning before reaching the action step. "
+          + "(2) model returned a tool_use that opencode rejected (look in stderr_tail). "
+          + "(3) brain in an internal loop — reasoning frames count is the symptom.";
+      }
+      return "Brain produced JSON frames but none were tool_use, text, or reasoning. "
+        + "opencode-format drift or model returned unrecognized event shape. Check stderr_tail + raw stdout log.";
+    })();
     const classifierHint = brainSilentExit
-      ? "opencode ran cleanly (exit_code:0) for the full handshake window but invoked ZERO substrate.*/runtime.* tools. "
-        + "This is a prompt-compliance failure, NOT a transport issue. The brain (GPT-5.5) chose conversational/text-only output "
-        + "and skipped the substrate emission entirely. Fix: tighten the brain_prompt workflow policy bundle to demand at "
-        + "least one substrate.emit before exit. Restarting the daemon or verifying /mcp reachability will NOT help — the "
-        + "daemon is fine, the brain just refused to use tools."
-      : "opencode produced no substrate.*/runtime.* tool calls within the handshake observation window AND the window timed out. "
-        + "This is a transport/startup-latency issue (model loading, config materialization, MCP negotiation under contention). "
-        + "Fix: raise ACC2_BRIDGE_HANDSHAKE_WINDOW_MS or reduce concurrent brain dispatches; verify /mcp endpoint reachability.";
+      ? `opencode exited cleanly (exit_code:0) with failure_shape=${failureShape}. ${shapeHint}`
+      : `opencode handshake-window expired with failure_shape=${failureShape}. Either way the brain produced no substrate.* tool calls. ${shapeHint}`;
+    // Brain's actual text output (capped). Pre-fix we discarded this on
+    // failure — operator had no way to see WHAT the brain said. Now it's
+    // the load-bearing diagnostic.
+    const finalResponseTail = finalResponse.length > 0 ? finalResponse.slice(-1024) : null;
     emitEvent(db, {
       kind: "bridge_failed",
       substrate_origin: "opencode",
@@ -945,6 +1050,7 @@ export const spawnRealOpencode = async (
       payload: {
         reason: classifierReason,
         classifier_class: brainSilentExit ? "prompt_compliance" : "transport",
+        failure_shape: failureShape,
         mcp_handshake_ok: false,
         window_ms: handshakeWindowMs,
         mcp_server_url: mcpServerUrl,
@@ -953,9 +1059,21 @@ export const spawnRealOpencode = async (
         budget_observed: budgetObserved(classifierReason),
         exit_code: exitCode,
         frames_received_count: framesReceivedCount,
+        frame_shape_counts: frameShapeCounts as JsonValue,
         first_frame_seen: firstFrameSeen,
         hint: classifierHint,
         stderr_tail: stderrBuf.slice(-512),
+        // FOUNDATIONAL: surface the brain's actual text output so the
+        // operator can see EXACTLY what the brain produced when it
+        // "silently" exited. This is the deepest diagnostic — without it
+        // the operator has to guess.
+        final_response_tail: finalResponseTail,
+        final_response_length: finalResponse.length,
+        opencode_error_event: opencodeErrorEvent as JsonValue,
+        brain_obs_emit_count: brainObsEmitCount,
+        // Diagnostic file path if operator set ACC2_OPENCODE_STDOUT_LOG.
+        // Empty when no log was captured.
+        stdout_log_path: stdoutLogPath ?? null,
       } as JsonValue,
       invoker: "opencode",
     });
@@ -997,6 +1115,15 @@ export const spawnRealOpencode = async (
         tier: "first_frame",
         exit_code: exitCode,
         budget_observed: budgetObserved("subprocess_stuck"),
+        // FOUNDATIONAL: same deep diagnostics on the watchdog-kill path so
+        // operator can see brain's actual output before SIGTERM landed.
+        frame_shape_counts: frameShapeCounts as JsonValue,
+        final_response_tail: finalResponse.length > 0 ? finalResponse.slice(-1024) : null,
+        final_response_length: finalResponse.length,
+        opencode_error_event: opencodeErrorEvent as JsonValue,
+        brain_obs_emit_count: brainObsEmitCount,
+        stderr_tail: stderrBuf.slice(-512),
+        stdout_log_path: stdoutLogPath ?? null,
       } as JsonValue,
       invoker: "opencode",
     });
@@ -1044,6 +1171,18 @@ export const spawnRealOpencode = async (
         mcp_handshake_ok: mcpHandshakeOk,
         mcp_handshake_timed_out: mcpHandshakeTimedOut,
         budget_observed: budgetObserved("timeout"),
+        // FOUNDATIONAL: same deep diagnostics on overall-timeout path.
+        // For the "brain handshook then went silent for 10min" case the
+        // operator can now read frame counts + final text to see what
+        // the brain did during that time.
+        frames_received_count: framesReceivedCount,
+        frame_shape_counts: frameShapeCounts as JsonValue,
+        final_response_tail: finalResponse.length > 0 ? finalResponse.slice(-1024) : null,
+        final_response_length: finalResponse.length,
+        opencode_error_event: opencodeErrorEvent as JsonValue,
+        brain_obs_emit_count: brainObsEmitCount,
+        stderr_tail: stderrBuf.slice(-512),
+        stdout_log_path: stdoutLogPath ?? null,
       } as JsonValue,
       invoker: "opencode",
     });
@@ -1078,6 +1217,16 @@ export const spawnRealOpencode = async (
         exit_code: exitCode,
         stderr_tail: stderrBuf.slice(-512),
         mcp_handshake_ok: mcpHandshakeOk,
+        // FOUNDATIONAL: deep diagnostics on subprocess-crash path. If
+        // opencode crashed mid-reasoning we want to see WHAT it produced
+        // before exit so the operator can correlate crash → text shape.
+        frames_received_count: framesReceivedCount,
+        frame_shape_counts: frameShapeCounts as JsonValue,
+        final_response_tail: finalResponse.length > 0 ? finalResponse.slice(-1024) : null,
+        final_response_length: finalResponse.length,
+        opencode_error_event: opencodeErrorEvent as JsonValue,
+        brain_obs_emit_count: brainObsEmitCount,
+        stdout_log_path: stdoutLogPath ?? null,
       } as JsonValue,
       invoker: "opencode",
     });
