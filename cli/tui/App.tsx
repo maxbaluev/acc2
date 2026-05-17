@@ -21,7 +21,7 @@
 // component is fully testable with ink-testing-library.
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Box, Text, useApp, useInput } from "ink";
+import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { spawn } from "node:child_process";
 import { Dashboard, FOCUS_ORDER, type FocusName } from "./screens/Dashboard";
 import { InboxScreen } from "./screens/Inbox";
@@ -57,6 +57,8 @@ export type AppProps = {
   initial?: DashboardSnapshot;
   /** Open a drawer at mount (tests bypass the keypress dance). */
   initialDrawer?: DrawerName;
+  /** Pre-seeded live events for tests of the overview LIVE strip. */
+  initialLiveEvents?: LiveEvent[];
 };
 
 export type ShellResult = {
@@ -107,7 +109,7 @@ const dispatchShell = (argv: string[]): Promise<ShellResult> => {
   });
 };
 
-export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }: AppProps): React.ReactElement => {
+export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer, initialLiveEvents }: AppProps): React.ReactElement => {
   const { exit } = useApp();
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(initial ?? initialSnapshot());
   const [focus, setFocus] = useState<FocusName>("inbox");
@@ -124,10 +126,31 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
   // triggers a section refresh (brain/dispatch/changes/inbox) so the
   // owner-visible counts update immediately instead of waiting for the
   // 5s poll backstop.
-  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
+  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>(initialLiveEvents ?? []);
   // Event Inspector pinned event_id — when set, the inspector drawer
   // renders that specific event's full content.
   const [inspectorEventId, setInspectorEventId] = useState<string | null>(null);
+  // Inspector vertical scroll offset (number of payload lines to skip).
+  // Reset to 0 whenever inspectorEventId changes. j/k or arrow keys
+  // increment/decrement while the inspector is open so the operator can
+  // see the FULL payload of any event regardless of size.
+  const [inspectorScroll, setInspectorScroll] = useState(0);
+  useEffect(() => { setInspectorScroll(0); }, [inspectorEventId]);
+
+  // Terminal-size detection. Re-reads on every render so a resize
+  // immediately drives responsive layout: panel column count, live-strip
+  // row count, inspector page height all scale to available space.
+  // Fallback: 80x24 (POSIX default) when stdout doesn't expose dimensions.
+  const { stdout } = useStdout();
+  const termWidth = (stdout && typeof stdout.columns === "number" && stdout.columns > 0) ? stdout.columns : 80;
+  const termHeight = (stdout && typeof stdout.rows === "number" && stdout.rows > 0) ? stdout.rows : 24;
+  // The overview eats ~14 rows of chrome (status line + palette + hint
+  // + result line + LIVE strip header). The 6 panel grid takes the
+  // remaining height. Live strip row count scales from 4 (small term)
+  // to 12 (large term).
+  const liveStripRows = Math.max(4, Math.min(12, Math.floor((termHeight - 22) / 3)));
+  // Inspector page height — scrollable payload lines per page.
+  const inspectorPageRows = Math.max(8, termHeight - 12);
 
   const refresh = useCallback(async () => {
     try {
@@ -240,6 +263,16 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
       if (key.escape) { setPaletteActive(false); setPaletteBuffer(""); return; }
       return;
     }
+    // Inspector scroll keys (j/k/page-up/page-down/up/down) — fire ONLY
+    // when the inspector drawer is open, so the same keys remain free
+    // for hotkeys / arrow-navigation in other contexts.
+    if (drawer === "inspector") {
+      if (key.downArrow || input === "j") { setInspectorScroll((n) => n + 1); return; }
+      if (key.upArrow || input === "k") { setInspectorScroll((n) => Math.max(0, n - 1)); return; }
+      if (key.pageDown) { setInspectorScroll((n) => n + inspectorPageRows); return; }
+      if (key.pageUp) { setInspectorScroll((n) => Math.max(0, n - inspectorPageRows)); return; }
+      if (input === "g") { setInspectorScroll(0); return; }
+    }
     if (key.escape && paletteActive) { setPaletteActive(false); return; }
     if (input === ":") { setPaletteActive(true); return; }
     // Single-letter hotkeys ONLY when buffer is empty. Any letter not in
@@ -280,7 +313,7 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
       />
 
       {drawer === null ? (
-        <Dashboard snapshot={snapshot} focus={focus} />
+        <Dashboard snapshot={snapshot} focus={focus} termWidth={termWidth} />
       ) : drawer === "inbox" ? (
         <InboxScreen rows={snapshot.pending_decisions} total={snapshot.pending_decisions_total} />
       ) : drawer === "profile" ? (
@@ -366,42 +399,61 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
         </Box>
       ) : drawer === "tail" ? (
         <Box borderStyle="round" borderColor="green" flexDirection="column" paddingX={1}>
-          <Text bold color="green">LIVE TAIL (t to close) — last {Math.min(liveEvents.length, 24)} of {liveEvents.length} events (push, SSE)</Text>
-          {liveEvents.length === 0 ? (
-            <Text dimColor>(no SSE events received yet — waiting for daemon stream)</Text>
-          ) : (
-            liveEvents.slice(0, 24).map((e) => {
-              const dir = (e.directive_id ?? "-").slice(0, 10);
-              const task = (e.task_id ?? "-").slice(0, 10);
-              const origin = (e.substrate_origin ?? "?").slice(0, 14);
-              return (
-                <Text key={e.event_id}>
-                  <Text dimColor>{e.ts.slice(11, 19)} </Text>
-                  <Text color="yellow">{e.event_id.slice(0, 12)} </Text>
-                  <Text color="cyan">{e.kind.padEnd(30).slice(0, 30)} </Text>
-                  <Text dimColor>dir={dir} task={task} origin={origin}</Text>
-                </Text>
-              );
-            })
-          )}
-          <Box marginTop={1}>
-            <Text dimColor>press </Text>
-            <Text color="yellow">x</Text>
-            <Text dimColor> + type any event_id from this list to open Event Inspector for full payload</Text>
-          </Box>
+          {(() => {
+            // Scale row count to terminal height so the drawer uses
+            // available vertical space instead of a fixed 24.
+            const drawerRows = Math.max(10, termHeight - 8);
+            const visible = liveEvents.slice(0, drawerRows);
+            const tailWidth = Math.max(20, termWidth - 60);
+            return (
+              <>
+                <Text bold color="green">LIVE TAIL (close: type `tail` again) — showing {visible.length} of {liveEvents.length} events ({termWidth}×{termHeight})</Text>
+                {liveEvents.length === 0 ? (
+                  <Text dimColor>(no SSE events received yet — waiting for daemon stream)</Text>
+                ) : (
+                  visible.map((e) => {
+                    const dir = (e.directive_id ?? "-").slice(0, 12);
+                    const task = (e.task_id ?? "-").slice(0, 10);
+                    const origin = (e.substrate_origin ?? "?").slice(0, 14);
+                    const tail = `dir=${dir} task=${task} origin=${origin}`.slice(0, tailWidth);
+                    return (
+                      <Text key={e.event_id}>
+                        <Text dimColor>{e.ts.slice(11, 19)} </Text>
+                        <Text color="yellow">{e.event_id.slice(0, 12)} </Text>
+                        <Text color="cyan">{e.kind.padEnd(30).slice(0, 30)} </Text>
+                        <Text dimColor>{tail}</Text>
+                      </Text>
+                    );
+                  })
+                )}
+                <Box marginTop={1}>
+                  <Text dimColor>type </Text>
+                  <Text color="yellow">inspect ⟨event_id⟩</Text>
+                  <Text dimColor> in the palette to open Event Inspector with full payload (scrollable j/k pgUp/pgDn)</Text>
+                </Box>
+              </>
+            );
+          })()}
         </Box>
       ) : drawer === "inspector" ? (
         <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1}>
-          <Text bold color="cyan">EVENT INSPECTOR (x to close) — id: {inspectorEventId ?? "(none — type 'inspect &lt;id&gt;' in palette)"}</Text>
+          <Text bold color="cyan">EVENT INSPECTOR (x to close, j/k or ↓↑ scroll, pgUp/pgDn page, g top) — id: {inspectorEventId ?? "(none — type 'inspect ⟨id⟩' in palette)"}</Text>
           {(() => {
-            if (!inspectorEventId) return <Text dimColor>(no event pinned — most-recent SSE event will load on next 'x')</Text>;
+            if (!inspectorEventId) return <Text dimColor>(no event pinned — type `inspect ⟨event_id⟩` in palette to pin)</Text>;
             const ev = liveEvents.find((e) => e.event_id === inspectorEventId || e.event_id.startsWith(inspectorEventId));
-            if (!ev) return <Text color="yellow">event id {inspectorEventId} not in live buffer — run `acc inspect {inspectorEventId}` in palette to load via MCP</Text>;
+            if (!ev) return <Text color="yellow">event id {inspectorEventId} not in live buffer ({liveEvents.length} cached) — run `acc inspect {inspectorEventId}` in palette to load via MCP</Text>;
             const payloadText = (() => {
               try { return JSON.stringify(ev.payload, null, 2); }
               catch { return String(ev.payload); }
             })();
-            const lines = payloadText.split("\n").slice(0, 24);
+            const allLines = payloadText.split("\n");
+            const totalLines = allLines.length;
+            // Scrollable page — show inspectorPageRows starting from
+            // inspectorScroll. Line width scales with terminal width so
+            // long lines aren't aggressively truncated on wide terminals.
+            const lineWidth = Math.max(60, termWidth - 6);
+            const startLine = Math.min(inspectorScroll, Math.max(0, totalLines - inspectorPageRows));
+            const visibleLines = allLines.slice(startLine, startLine + inspectorPageRows);
             return (
               <>
                 <Text>
@@ -416,13 +468,17 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
                 {ev.context_refs.length > 0 ? (
                   <Text>
                     <Text dimColor>context_refs ({ev.context_refs.length}): </Text>
-                    <Text color="yellow">{ev.context_refs.slice(0, 4).map((r) => r.slice(0, 12)).join(", ")}</Text>
-                    {ev.context_refs.length > 4 ? <Text dimColor> +{ev.context_refs.length - 4}</Text> : null}
+                    <Text color="yellow">{ev.context_refs.map((r) => r.slice(0, 12)).join(", ")}</Text>
                   </Text>
                 ) : null}
-                <Text dimColor>──── payload ────</Text>
-                {lines.map((l, i) => <Text key={`${ev.event_id}-${i}`}>{l.slice(0, 180)}</Text>)}
-                {payloadText.split("\n").length > 24 ? <Text dimColor>… (+{payloadText.split("\n").length - 24} more lines truncated)</Text> : null}
+                <Text dimColor>──── payload (lines {startLine + 1}-{Math.min(startLine + visibleLines.length, totalLines)}/{totalLines}) ────</Text>
+                {visibleLines.map((l, i) => <Text key={`${ev.event_id}-${startLine + i}`}>{l.slice(0, lineWidth)}</Text>)}
+                {startLine + visibleLines.length < totalLines ? (
+                  <Text dimColor>(j/↓ scroll down — {totalLines - startLine - visibleLines.length} more lines)</Text>
+                ) : null}
+                {startLine > 0 ? (
+                  <Text dimColor>(k/↑ scroll up — {startLine} lines above)</Text>
+                ) : null}
               </>
             );
           })()}
@@ -436,16 +492,42 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
         </Box>
       ) : null}
 
-      {drawer === null && toasts.length > 0 ? (
-        <Box borderStyle="single" borderColor="yellow" flexDirection="column" paddingX={1}>
-          <Text bold color="yellow">mirror-inline:</Text>
-          {toasts.slice(0, 2).map((t) => (
-            <Box key={t.event_id}>
-              <Text color="yellow">{t.kind}</Text>
-              <Text> </Text>
-              <Text>{t.summary}</Text>
-            </Box>
-          ))}
+      {drawer === null ? (
+        <Box borderStyle="single" borderColor="green" flexDirection="column" paddingX={1}>
+          <Text>
+            <Text bold color="green">LIVE</Text>
+            <Text dimColor> (last {Math.min(liveEvents.length, liveStripRows)} of {liveEvents.length} SSE events — always-on tail; type </Text>
+            <Text color="yellow">tail</Text>
+            <Text dimColor> for full drawer, </Text>
+            <Text color="yellow">inspect ⟨id⟩</Text>
+            <Text dimColor> for full payload) {termWidth}×{termHeight}</Text>
+          </Text>
+          {liveEvents.length === 0 ? (
+            <Text dimColor>(waiting for SSE stream — daemon must be up; new events appear here as they land)</Text>
+          ) : (
+            liveEvents.slice(0, liveStripRows).map((e) => {
+              // Summary column scales with terminal width — instead of
+              // a hard 28-char kind truncation, use available width to
+              // show more context per event.
+              const idCol = e.event_id.slice(0, 12);
+              const kindCol = e.kind.padEnd(30).slice(0, 30);
+              // Reserve ~50 chars for ts+id+kind+spacing; the rest is
+              // the dir/task/origin tail.
+              const tailWidth = Math.max(20, termWidth - 60);
+              const dir = (e.directive_id ?? "-").slice(0, 12);
+              const task = (e.task_id ?? "-").slice(0, 10);
+              const origin = (e.substrate_origin ?? "?").slice(0, 14);
+              const tail = `dir=${dir} task=${task} origin=${origin}`.slice(0, tailWidth);
+              return (
+                <Text key={e.event_id}>
+                  <Text dimColor>{e.ts.slice(11, 19)} </Text>
+                  <Text color="yellow">{idCol} </Text>
+                  <Text color="cyan">{kindCol} </Text>
+                  <Text dimColor>{tail}</Text>
+                </Text>
+              );
+            })
+          )}
         </Box>
       ) : null}
 

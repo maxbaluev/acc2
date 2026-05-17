@@ -68,12 +68,19 @@ const InboxPanel = ({
   total,
   focused,
   profile,
+  width = 80,
 }: {
   rows: PendingDecisionRow[];
   total: number;
   focused: boolean;
   profile: OwnerRenderProfile;
-}): React.ReactElement => (
+  width?: number;
+}): React.ReactElement => {
+  // Width budgets — target and anchor scale with the panel width
+  // instead of the prior hardcoded 28/26-char cap that wasted space.
+  const targetWidth = Math.max(28, Math.floor(width * 0.5));
+  const anchorWidth = Math.max(28, Math.floor(width * 0.6));
+  return (
   <Pane title={`INBOX (pending decisions: ${total})`} focused={focused}>
     {rows.length === 0 ? (
       <Text dimColor>{renderOwnerString("no pending owner decisions", profile)}</Text>
@@ -91,11 +98,11 @@ const InboxPanel = ({
               {" "}
               <Text color="yellow">{(r.representative_event_id ?? "-").slice(0, 12)}</Text>
               {" "}
-              <Text>{(r.target ?? "?").slice(0, 28)}</Text>
+              <Text>{(r.target ?? "?").slice(0, targetWidth)}</Text>
             </Text>
             <Text>
               <Text dimColor>  anchor=</Text>
-              <Text dimColor>{(r.anchor ?? "-").slice(0, 26)}</Text>
+              <Text dimColor>{(r.anchor ?? "-").slice(0, anchorWidth)}</Text>
               {" "}
               {r.group_decline_reason ? (
                 <Text color="red">decline:{r.group_decline_reason}</Text>
@@ -108,15 +115,20 @@ const InboxPanel = ({
       </>
     )}
   </Pane>
-);
+  );
+};
 
 const DispatchTruthPanel = ({
   rows,
   focused,
+  width = 80,
 }: {
   rows: DispatchRow[];
   focused: boolean;
+  width?: number;
 }): React.ReactElement => {
+  // Width budgets — id column scales with panel width.
+  const idTruncate = Math.max(10, Math.floor(width * 0.13));
   const live = rows.filter((r) => r.lifecycle_status === "live");
   const queued = rows.filter((r) => r.lifecycle_status === "queued_at_cap");
   const completed = rows.filter((r) => r.lifecycle_status === "completed");
@@ -183,7 +195,7 @@ const DispatchTruthPanel = ({
                 </>
               ) : null}
             </Text>
-            <Text dimColor>  dir={shortId(r.directive_id, 10)} root={shortId(r.root_task_id, 8)}{r.terminal_kind ? ` terminal=${r.terminal_kind}` : ""}{r.evidence_event_id ? ` evidence=${shortId(r.evidence_event_id, 8)}` : ""}</Text>
+            <Text dimColor>  dir={shortId(r.directive_id, idTruncate)} root={shortId(r.root_task_id, idTruncate)}{r.terminal_kind ? ` terminal=${r.terminal_kind}` : ""}{r.evidence_event_id ? ` evidence=${shortId(r.evidence_event_id, idTruncate)}` : ""}</Text>
           </Box>
         );
       })}
@@ -202,10 +214,12 @@ const DagPanel = ({
   dispatch,
   dag,
   focused,
+  width = 80,
 }: {
   dispatch: DispatchRow[];
   dag: DagTopology | null;
   focused: boolean;
+  width?: number;
 }): React.ReactElement => {
   const focusDispatch = dispatch.find((r) => r.lifecycle_status === "live")
     ?? dispatch.find((r) => r.lifecycle_status === "queued_at_cap")
@@ -215,6 +229,12 @@ const DagPanel = ({
   const EDGE_LIMIT = 8;
   const nodes = dag?.nodes ?? [];
   const edges = dag?.edges ?? [];
+  // Width budgets scale with panel width. The previous hardcoded
+  // shortId(task_id, 8) trimmed "ADJ01-SCHEMA-..." to "ADJ01-SC"
+  // even on a 220-col terminal — wasting horizontal space.
+  const taskIdWidth = Math.max(14, Math.floor(width * 0.18));
+  const goalWidth = Math.max(40, width - taskIdWidth - 8);
+  const edgeIdWidth = Math.max(12, Math.floor(width * 0.16));
   return (
     <Pane title="DAG (current directive)" focused={focused}>
       {!focusDispatch ? (
@@ -243,8 +263,8 @@ const DagPanel = ({
               <Text dimColor>nodes ({nodes.length}):</Text>
               {nodes.slice(0, NODE_LIMIT).map((n) => (
                 <Text key={`n-${n.task_id}`}>
-                  <Text color="cyan">  {shortId(n.task_id, 8)}</Text>
-                  {n.goal ? <Text dimColor> {n.goal.slice(0, 50)}</Text> : null}
+                  <Text color="cyan">  {shortId(n.task_id, taskIdWidth)}</Text>
+                  {n.goal ? <Text dimColor> {n.goal.slice(0, goalWidth)}</Text> : null}
                 </Text>
               ))}
               {nodes.length > NODE_LIMIT ? <Text dimColor>  …+{nodes.length - NODE_LIMIT} more</Text> : null}
@@ -253,9 +273,9 @@ const DagPanel = ({
                 const g = edgeGlyph(e.kind);
                 return (
                   <Text key={`e-${i}-${e.from_task}-${e.to_task}`}>
-                    <Text dimColor>  {shortId(e.from_task, 8)}</Text>
+                    <Text dimColor>  {shortId(e.from_task, edgeIdWidth)}</Text>
                     <Text color={g.color}> {g.glyph} </Text>
-                    <Text dimColor>{shortId(e.to_task, 8)}</Text>
+                    <Text dimColor>{shortId(e.to_task, edgeIdWidth)}</Text>
                   </Text>
                 );
               })}
@@ -352,9 +372,17 @@ const ChangesPanel = ({
 export type DashboardProps = {
   snapshot: DashboardSnapshot;
   focus: FocusName;
+  /** Terminal width passed from App via useStdout. Panels compute their
+   *  own truncation budget from this rather than using hardcoded slice
+   *  lengths that wasted space on wide terminals. Fallback 120 keeps
+   *  legacy behavior when termWidth is not passed (e.g. tests). */
+  termWidth?: number;
 };
 
-export const Dashboard = ({ snapshot, focus }: DashboardProps): React.ReactElement => {
+export const Dashboard = ({ snapshot, focus, termWidth = 120 }: DashboardProps): React.ReactElement => {
+  // Each row of the 2-column grid splits the terminal width between two
+  // panels. Subtract ~10 chars for borders/padding per panel.
+  const panelWidth = Math.max(40, Math.floor(termWidth / 2) - 6);
   const profile: OwnerRenderProfile = {
     detected_language: snapshot.owner_profile.detected_language,
     preferred_terms: snapshot.owner_profile.preferred_terms,
@@ -363,11 +391,11 @@ export const Dashboard = ({ snapshot, focus }: DashboardProps): React.ReactEleme
   return (
     <Box flexDirection="column" flexGrow={1}>
       <Box flexDirection="row" flexGrow={1}>
-        <InboxPanel rows={snapshot.pending_decisions} total={snapshot.pending_decisions_total} focused={focus === "inbox"} profile={profile} />
-        <DispatchTruthPanel rows={snapshot.dispatch} focused={focus === "dispatch"} />
+        <InboxPanel rows={snapshot.pending_decisions} total={snapshot.pending_decisions_total} focused={focus === "inbox"} profile={profile} width={panelWidth} />
+        <DispatchTruthPanel rows={snapshot.dispatch} focused={focus === "dispatch"} width={panelWidth} />
       </Box>
       <Box flexDirection="row" flexGrow={1}>
-        <DagPanel dispatch={snapshot.dispatch} dag={snapshot.dag} focused={focus === "dag"} />
+        <DagPanel dispatch={snapshot.dispatch} dag={snapshot.dag} focused={focus === "dag"} width={panelWidth} />
         <LearningPanel learning={snapshot.learning} focused={focus === "learning"} />
       </Box>
       <Box flexDirection="row" flexGrow={1}>
