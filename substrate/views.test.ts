@@ -5,6 +5,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "./db";
 import {
+  actProjectionObservability,
   appliedLessonEffectiveness,
   artifactRouting,
   codeArtifactRegistry,
@@ -95,6 +96,7 @@ describe("runViews", () => {
       .query("SELECT name FROM sqlite_master WHERE type='view' ORDER BY name")
       .all() as Array<{ name: string }>).map((r) => r.name);
     for (const expected of [
+      "act_projection_observability_view",
       "artifact_routing_view",
       "applied_lesson_effectiveness_view",
       "code_artifact_registry_view",
@@ -120,6 +122,79 @@ describe("runViews", () => {
     const db = openDb(":memory:");
     runViews(db);
     expect(() => runViews(db)).not.toThrow();
+  });
+});
+
+
+describe("act_projection_observability_view + actProjectionObservability", () => {
+  test("returns derived lifecycle, retrieval, owner outcome, and credit ids for one source act", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    const actId = insertEvent(db, {
+      kind: "act_tuple_recorded",
+      directive_id: "d_act",
+      task_id: "t_act",
+      payload: { intent: "coherent act" },
+      residual: 0.4,
+    });
+    const predictedId = insertEvent(db, {
+      kind: "action_predicted",
+      directive_id: "d_act",
+      task_id: "t_act",
+      payload: { source_act_id: actId },
+    });
+    const scoredId = insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_act",
+      task_id: "t_act",
+      payload: { projection: { source_act_id: actId } },
+      residual: 0.12,
+    });
+    const appliedId = insertEvent(db, {
+      kind: "applied_change_committed",
+      directive_id: "d_act",
+      task_id: "t_act",
+      payload: { source_act_id: actId, status: "applied" },
+    });
+    const ownerId = insertEvent(db, {
+      kind: "owner_observed_outcome_recorded",
+      directive_id: "d_act",
+      task_id: "t_act",
+      payload: { source_act_id: actId, observation: "works" },
+      residual: 0.02,
+    });
+    const bindingId = insertEvent(db, {
+      kind: "retrieval_binding",
+      directive_id: "d_act",
+      task_id: "t_act",
+      payload: { source_act_id: actId, source_event_id: "k_555" },
+    });
+    const creditId = insertEvent(db, {
+      kind: "candidate_confirmed",
+      directive_id: "d_act",
+      task_id: "t_act",
+      payload: { source_act_id: actId, target_event_id: "k_555" },
+    });
+    const artifactCreditId = insertEvent(db, {
+      kind: "code_artifact_score_updated",
+      directive_id: "d_act",
+      task_id: "t_act",
+      context_refs: [actId],
+      payload: { artifact_id: "artifact_a" },
+    });
+
+    const row = actProjectionObservability(db, actId);
+    expect(row).not.toBeNull();
+    expect(row!.source_act_id).toBe(actId);
+    expect(row!.action_predicted_event_ids).toEqual([predictedId]);
+    expect(row!.action_scored_event_ids).toEqual([scoredId]);
+    expect(row!.applied_change_committed_event_ids).toEqual([appliedId]);
+    expect(row!.owner_observed_outcome_recorded_event_ids).toEqual([ownerId]);
+    expect(row!.retrieval_binding_event_ids).toEqual([bindingId]);
+    expect(row!.credit_projection_event_ids).toEqual([creditId, artifactCreditId]);
+    expect(row!.projection_residual).toBe(0.02);
+    expect(row!.projection_status).toBe("completed");
   });
 });
 
@@ -346,14 +421,14 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(row?.latest_event_id).toBe(dispatchEventId);
   });
 
-  test("classifies an orphan root past the 5min window as zombie", () => {
+  test("classifies an orphan root past the 5min window as orphan_node (not zombie — the scheduler dropped a refinement child, the brain didn't hang)", () => {
     const db = openDb(":memory:");
     runViews(db);
     const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     insertEvent(db, { kind: "task_node_opened", directive_id: "d_orphan", task_id: "t_orphan", ts: tenMinAgo });
 
     const [row] = dispatchResolved(db, { directiveId: "d_orphan", rootTaskId: "t_orphan" });
-    expect(row?.lifecycle_status).toBe("zombie");
+    expect(row?.lifecycle_status).toBe("orphan_node");
     expect(row?.status_reason).toBe("orphan_root_no_dispatch");
     expect(row?.dispatched_count).toBe(0);
     expect(row?.terminal_kind).toBeNull();

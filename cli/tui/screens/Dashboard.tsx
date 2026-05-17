@@ -43,7 +43,8 @@ const lifecycleGlyph = (s: Lifecycle): string => ({
   completed: "✓",
   failed: "✗",
   zombie: "💀",
-}[s]);
+  orphan_node: "○",
+}[s] ?? "?");
 
 const lifecycleColor = (s: Lifecycle): string => ({
   live: "yellow",
@@ -51,7 +52,8 @@ const lifecycleColor = (s: Lifecycle): string => ({
   completed: "green",
   failed: "red",
   zombie: "red",
-}[s]);
+  orphan_node: "gray",
+}[s] ?? "white");
 
 const shortId = (id: string | null | undefined, n = 8): string => {
   if (!id) return "-";
@@ -120,6 +122,7 @@ const DispatchTruthPanel = ({
   const completed = rows.filter((r) => r.lifecycle_status === "completed");
   const failed = rows.filter((r) => r.lifecycle_status === "failed");
   const zombie = rows.filter((r) => r.lifecycle_status === "zombie");
+  const orphan = rows.filter((r) => r.lifecycle_status === "orphan_node");
   // Filter to the last 24h before counting and rendering — dispatch_resolved_view
   // returns the entire historical projection (including hundreds of legacy
   // zombies from prior session generations); the dashboard surfaces
@@ -136,8 +139,9 @@ const DispatchTruthPanel = ({
   const recentQueued = queued.filter(isRecent);
   const recentFailed = failed.filter(isRecent);
   const recentZombie = zombie.filter(isRecent);
+  const recentOrphan = orphan.filter(isRecent);
   const recentCompleted = completed.filter(isRecent);
-  const shown = [...recentLive, ...recentQueued, ...recentFailed.slice(0, 2), ...recentZombie.slice(0, 2), ...recentCompleted.slice(0, 2)].slice(0, 6);
+  const shown = [...recentLive, ...recentQueued, ...recentFailed.slice(0, 2), ...recentZombie.slice(0, 2), ...recentOrphan.slice(0, 2), ...recentCompleted.slice(0, 2)].slice(0, 6);
   return (
     <Pane title="DISPATCH TRUTH (last 24h)" focused={focused}>
       <Text>
@@ -150,8 +154,10 @@ const DispatchTruthPanel = ({
         <Text color="red">failed={recentFailed.length}</Text>
         {" "}
         <Text color="red">zombie={recentZombie.length}</Text>
+        {" "}
+        <Text color="gray">orphan_node={recentOrphan.length}</Text>
       </Text>
-      <Text dimColor>(historical totals: live={live.length} queued={queued.length} completed={completed.length} failed={failed.length} zombie={zombie.length})</Text>
+      <Text dimColor>(historical totals: live={live.length} queued={queued.length} completed={completed.length} failed={failed.length} zombie={zombie.length} orphan_node={orphan.length})</Text>
       {shown.length === 0 ? <Text dimColor>(no recent dispatches)</Text> : null}
       {shown.map((r) => {
         // residual only exists on terminal events (task_committed / task_failed).

@@ -2115,7 +2115,7 @@ SELECT
          AND cg.latest_cap_gate_at IS NULL
          AND r.root_opened_ts IS NOT NULL
          AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 300000
-      THEN 'zombie'
+      THEN 'orphan_node'
     WHEN cg.latest_cap_gate_at IS NOT NULL
          AND COALESCE(ds.open_dispatch_count, 0) = 0
       THEN 'queued_at_cap'
@@ -2136,7 +2136,7 @@ SELECT
          AND cg.latest_cap_gate_at IS NULL
          AND r.root_opened_ts IS NOT NULL
          AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 300000
-      THEN 'zombie'
+      THEN 'orphan_node'
     WHEN cg.latest_cap_gate_at IS NOT NULL
          AND COALESCE(ds.open_dispatch_count, 0) = 0
       THEN 'queued_at_cap'
@@ -2301,6 +2301,67 @@ GROUP BY s.group_key, s.normalized_target, s.anchor
 ORDER BY decision_rank DESC, MAX(s.ts) DESC;
 `;
 
+
+// act_projection_observability_view — compact per-source-act projection over
+// substrate-derived lifecycle, retrieval, owner outcome, and credit rows.
+// Derived rows identify their source act through payload.source_act_id,
+// payload.projection.source_act_id, payload.act_tuple.source_act_id, or a
+// context_refs citation of the source act id so older projection shapes remain
+// observable while idempotency keys converge.
+const VIEW_ACT_PROJECTION_OBSERVABILITY = `
+CREATE VIEW IF NOT EXISTS act_projection_observability_view AS
+  WITH source_ids AS (
+    SELECT id AS source_act_id FROM events WHERE kind = 'act_tuple_recorded'
+    UNION
+    SELECT json_extract(payload, '$.source_act_id') AS source_act_id
+    FROM events
+    WHERE kind IN ('action_predicted', 'action_scored', 'applied_change_committed', 'owner_observed_outcome_recorded', 'retrieval_binding', 'candidate_confirmed', 'candidate_contradicted', 'code_artifact_score_updated')
+      AND json_extract(payload, '$.source_act_id') IS NOT NULL
+    UNION
+    SELECT json_extract(payload, '$.projection.source_act_id') AS source_act_id
+    FROM events
+    WHERE kind IN ('action_predicted', 'action_scored', 'applied_change_committed', 'owner_observed_outcome_recorded', 'retrieval_binding', 'candidate_confirmed', 'candidate_contradicted', 'code_artifact_score_updated')
+      AND json_extract(payload, '$.projection.source_act_id') IS NOT NULL
+    UNION
+    SELECT json_extract(payload, '$.act_tuple.source_act_id') AS source_act_id
+    FROM events
+    WHERE kind IN ('action_predicted', 'action_scored', 'applied_change_committed', 'owner_observed_outcome_recorded', 'retrieval_binding', 'candidate_confirmed', 'candidate_contradicted', 'code_artifact_score_updated')
+      AND json_extract(payload, '$.act_tuple.source_act_id') IS NOT NULL
+  ),
+  src AS (
+    SELECT s.source_act_id, a.id AS source_event_id, a.ts AS source_ts,
+           a.directive_id, a.task_id, a.payload AS source_payload, a.residual AS source_residual
+    FROM source_ids s
+    LEFT JOIN events a ON a.id = s.source_act_id AND a.kind = 'act_tuple_recorded'
+    WHERE s.source_act_id IS NOT NULL
+  )
+  SELECT
+    s.source_act_id,
+    s.source_event_id,
+    s.source_ts,
+    s.directive_id,
+    s.task_id,
+    COALESCE((SELECT json_group_array(id) FROM (SELECT e.id FROM events e WHERE e.kind = 'action_predicted' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts ASC)), '[]') AS action_predicted_event_ids,
+    COALESCE((SELECT json_group_array(id) FROM (SELECT e.id FROM events e WHERE e.kind = 'action_scored' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts ASC)), '[]') AS action_scored_event_ids,
+    COALESCE((SELECT json_group_array(id) FROM (SELECT e.id FROM events e WHERE e.kind = 'applied_change_committed' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts ASC)), '[]') AS applied_change_committed_event_ids,
+    COALESCE((SELECT json_group_array(id) FROM (SELECT e.id FROM events e WHERE e.kind = 'owner_observed_outcome_recorded' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts ASC)), '[]') AS owner_observed_outcome_recorded_event_ids,
+    COALESCE((SELECT json_group_array(id) FROM (SELECT e.id FROM events e WHERE e.kind = 'retrieval_binding' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts ASC)), '[]') AS retrieval_binding_event_ids,
+    COALESCE((SELECT json_group_array(id) FROM (SELECT e.id FROM events e WHERE e.kind IN ('candidate_confirmed', 'candidate_contradicted', 'code_artifact_score_updated') AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts ASC)), '[]') AS credit_projection_event_ids,
+    COALESCE(
+      (SELECT e.residual FROM events e WHERE e.kind = 'owner_observed_outcome_recorded' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts DESC LIMIT 1),
+      (SELECT e.residual FROM events e WHERE e.kind = 'action_scored' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts DESC LIMIT 1),
+      s.source_residual
+    ) AS projection_residual,
+    CASE
+      WHEN s.source_event_id IS NULL THEN 'orphaned'
+      WHEN EXISTS (SELECT 1 FROM events e WHERE e.kind = 'applied_change_committed' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)))
+        AND EXISTS (SELECT 1 FROM events e WHERE e.kind = 'action_scored' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id))) THEN 'completed'
+      WHEN EXISTS (SELECT 1 FROM events e WHERE e.kind IN ('action_predicted', 'action_scored', 'applied_change_committed', 'owner_observed_outcome_recorded', 'retrieval_binding', 'candidate_confirmed', 'candidate_contradicted', 'code_artifact_score_updated') AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id))) THEN 'partial'
+      ELSE 'recorded'
+    END AS projection_status
+  FROM src s;
+`;
+
 // ── Public entrypoint ──────────────────────────────────────────────
 
 export const VIEW_NAMES = [
@@ -2314,6 +2375,7 @@ export const VIEW_NAMES = [
   "promoted_knowledge_view",
   "irreversible_effects_view",
   "low_risk_inline_patterns_view",
+  "act_projection_observability_view",
   "active_objectives_view",
   "entity_relationship_view",
   "stakeholder_state_view",
@@ -2357,6 +2419,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_STAKEHOLDER_STATE);
   db.exec(VIEW_ENTITY_RELATIONSHIPS);
   db.exec(VIEW_ACTIVE_OBJECTIVES);
+  db.exec(VIEW_ACT_PROJECTION_OBSERVABILITY);
   db.exec(VIEW_IRREVERSIBLE_EFFECTS);
   db.exec(VIEW_LOW_RISK_INLINE_PATTERNS);
   db.exec(VIEW_PROMOTED_KNOWLEDGE);
@@ -2390,7 +2453,18 @@ export type ReadyTaskRow = {
   payload: Record<string, unknown>;
 };
 
-export type DispatchResolvedStatus = "live" | "completed" | "failed" | "queued_at_cap" | "zombie";
+// Lifecycle tokens for dispatch_resolved_view.
+//   live           — a brain_dispatched is open and within the 5-min cap.
+//   queued_at_cap  — scheduler cap gate blocked dispatch; root waits.
+//   completed      — terminal task_committed event recorded.
+//   failed         — terminal task_failed or dispatcher_violation event.
+//   zombie         — a brain dispatch IS open but has exceeded the 5-min
+//                    cap with no terminal. (Real zombie.)
+//   orphan_node    — task_node_opened fired but no brain_dispatched ever
+//                    followed; >5min stale, no cap_gate excuse. The
+//                    scheduler dropped a ready refinement-child on the
+//                    floor. NOT a hung brain — a scheduler omission.
+export type DispatchResolvedStatus = "live" | "completed" | "failed" | "queued_at_cap" | "zombie" | "orphan_node";
 
 export type DispatchResolvedRow = {
   directive_id: string;
@@ -2421,6 +2495,23 @@ export type DispatchResolvedRow = {
   latest_cap_gate_at: string | null;
   ready_since: string | null;
   latest_signal_at: string | null;
+};
+
+
+export type ActProjectionObservabilityRow = {
+  source_act_id: string;
+  source_event_id: string | null;
+  source_ts: string | null;
+  directive_id: string | null;
+  task_id: string | null;
+  action_predicted_event_ids: string[];
+  action_scored_event_ids: string[];
+  applied_change_committed_event_ids: string[];
+  owner_observed_outcome_recorded_event_ids: string[];
+  retrieval_binding_event_ids: string[];
+  credit_projection_event_ids: string[];
+  projection_residual: number | null;
+  projection_status: "recorded" | "partial" | "completed" | "orphaned";
 };
 
 export type FailureRow = {
@@ -2693,6 +2784,33 @@ export const taskGraphFor = (db: Database, directiveId: string): TaskGraphRow[] 
     retrieval_aspects: parseJson<Record<string, unknown>>(r.retrieval_aspects ?? "{}"),
     retrieval_domains: parseJson<Record<string, number>>(r.retrieval_domains ?? "{}"),
   }));
+};
+
+
+/** Return act_tuple_recorded projection observability for one source act id. */
+export const actProjectionObservability = (
+  db: Database,
+  sourceActId: string,
+): ActProjectionObservabilityRow | null => {
+  const row = db
+    .query("SELECT * FROM act_projection_observability_view WHERE source_act_id = ?")
+    .get(sourceActId) as Record<string, unknown> | null;
+  if (!row) return null;
+  return {
+    source_act_id: row.source_act_id as string,
+    source_event_id: (row.source_event_id as string | null) ?? null,
+    source_ts: (row.source_ts as string | null) ?? null,
+    directive_id: (row.directive_id as string | null) ?? null,
+    task_id: (row.task_id as string | null) ?? null,
+    action_predicted_event_ids: parseJson<string[]>(row.action_predicted_event_ids ?? "[]"),
+    action_scored_event_ids: parseJson<string[]>(row.action_scored_event_ids ?? "[]"),
+    applied_change_committed_event_ids: parseJson<string[]>(row.applied_change_committed_event_ids ?? "[]"),
+    owner_observed_outcome_recorded_event_ids: parseJson<string[]>(row.owner_observed_outcome_recorded_event_ids ?? "[]"),
+    retrieval_binding_event_ids: parseJson<string[]>(row.retrieval_binding_event_ids ?? "[]"),
+    credit_projection_event_ids: parseJson<string[]>(row.credit_projection_event_ids ?? "[]"),
+    projection_residual: row.projection_residual == null ? null : Number(row.projection_residual),
+    projection_status: row.projection_status as ActProjectionObservabilityRow["projection_status"],
+  };
 };
 
 /** Tasks whose every 'requires' upstream has committed. Optional cap. */
