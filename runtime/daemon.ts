@@ -1229,16 +1229,16 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   });
 
   // 1. Bind the FastMCP HTTP-streaming transport on the primary port.
-  // FOUNDATIONAL FIX 2026-05-17: the only inbound MCP caller in production
-  // is the opencode brain subprocess. Pre-fix this server was tagged
-  // `invoker: "claude_root"` (a historical Claude Code default), which made
-  // every brain emit indistinguishable from a hypothetical orchestrator call
-  // — and the brain-gates (BRAIN_FORBIDDEN_KINDS, act-loop tuple validation)
-  // became dead code in production because isBrainInvoker rejected
-  // "claude_root". The daemon's MCP server now tags inbound as "opencode"
-  // so brain-gates fire structurally on every call.
+  // Inbound MCP callers in production: opencode brain subprocess AND CLI
+  // commands (acc state / acc tail / acc admin_* via cli/rpc.ts). Default
+  // invoker is `claude_root` because the brain emits its identity via
+  // `substrate_origin: "opencode"` in every payload per the prompt grammar
+  // — the invoker default applies to CLI/orchestrator paths that don't set
+  // origin explicitly. Brain-gates use the (origin OR invoker) discriminator
+  // (`isBrainEmit` in substrate_tools.ts) to fire structurally on brain
+  // emits while leaving CLI/orchestrator emits unmolested.
   try {
-    mcpServer = createMcpServer({ db, invoker: "opencode", index, ingressState });
+    mcpServer = createMcpServer({ db, invoker: "claude_root", index, ingressState });
     await mcpServer.start({
       transportType: "httpStream",
       httpStream: { host, port },

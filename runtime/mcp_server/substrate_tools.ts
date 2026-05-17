@@ -354,14 +354,12 @@ export const handleEmit = (
   // opencode 1.4 omitted the artifact tuple, emitting only intent + free-form
   // `verifier_axes` / `budget_estimate`. That breaks the credit chain
   // (action → verifier → outcome → posterior update is impossible without
-  // artifact_ids) and constitutes the same k_252 "advisory pretending to be
-  // hard" violation the audit flagged. Fix: refuse action_predicted from the
-  // brain when the tuple is missing — the brain must either compose real
-  // action+verifier artifacts via substrate.admit_artifact OR use the
-  // appropriate event type (knowledge_candidate for design proposals,
-  // lesson_extracted for reusable patterns, contract_amendment_proposed for
-  // repo changes). The error message names all three escape hatches so the
-  // brain self-corrects on the next cycle.
+  // artifact_ids) and constitutes the k_252 "advisory pretending to be hard"
+  // violation. Fix: refuse brain-emitted action_predicted that omits the
+  // tuple. isBrainEmit gates the validation to brain emits (substrate_origin
+  // = "opencode" OR brain-invoker context) so test fixtures and CLI
+  // orchestrator paths that emit raw action_predicted for setup are
+  // unaffected.
   if (kind === "action_predicted" && isBrainEmit(src.substrate_origin, ctx.invoker)) {
     const missing: string[] = [];
     if (!input.action_artifact_id) missing.push("action_artifact_id");
