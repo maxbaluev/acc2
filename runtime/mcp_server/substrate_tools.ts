@@ -395,6 +395,20 @@ export const handleRead = (
         return { ok: true, result: embeddingIndex(db) as unknown as JsonValue };
       case "origin_promotion_view":
         return { ok: true, result: originPromotion(db) as unknown as JsonValue };
+      case "owner_profile_view": {
+        const rows = db
+          .query("SELECT * FROM owner_profile_view")
+          .all() as Array<Record<string, unknown>>;
+        return {
+          ok: true,
+          result: rows.map((row) => ({
+            event_id: row.event_id as string,
+            ts: row.ts as string,
+            payload: JSON.parse((row.payload as string) ?? "{}") as JsonValue,
+            substrate_origin: row.substrate_origin as string,
+          })) as unknown as JsonValue,
+        };
+      }
       case "owner_conversation_view": {
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;

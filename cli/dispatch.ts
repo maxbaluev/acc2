@@ -26,6 +26,7 @@ const usage = (): string => `acc — v2 thin CLI
                                   brain emit is one Claude notification with no
                                   separate Monitor wiring. --no-follow / --bare
                                   reverts to fire-and-return (just emit + ack).
+  acc whoami [--json]             Inspect owner_profile_view for CLI/TUI rendering.
   acc events [--limit N] [--task PREFIX] [--directive PREFIX] [--kind K] [--verbose]
                                   Recent events, one structured line per event.
                                   Replaces inline 'bun -e mcpCall(...)' boilerplate.
@@ -389,6 +390,10 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
       .join(" ").trim();
     if (!words) { console.error("acc task: missing directive text"); return 1; }
     return dispatchTask(words, { follow, timeoutSecs, verbose });
+  }
+  if (cmd === "whoami") {
+    const { runWhoami } = await import("./whoami");
+    return runWhoami(argv.slice(1));
   }
   if (cmd === "events" || cmd === "tail" || cmd === "graph" || cmd === "inspect") {
     const { runObserve } = await import("./observe");
