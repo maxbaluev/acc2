@@ -343,7 +343,13 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       return `lesson_kind=${kind ?? "?"} ${summary ? `summary=${JSON.stringify(trunc(summary, 54))}` : ""}`;
     }
     case "contract_amendment_proposed": {
-      const target = p.target as string | undefined;
+      // Canonical target grammar (v2): exactly ONE of `target_resource` (single
+      // URI), `target_resources` (array), or `resource_uri` (single URI).
+      // No legacy `target` / `file_path` fallback — clean break per the v2
+      // operating contract ("No legacy/fallback/backward-compatibility code").
+      const target = (p.target_resource as string | undefined)
+        ?? (p.resource_uri as string | undefined)
+        ?? (Array.isArray(p.target_resources) ? (p.target_resources as string[]).join(",") : undefined);
       const anchor = p.anchor as string | undefined;
       const proposed = (p.proposed_behavior as string) ?? (p.summary as string) ?? "";
       return `target=${target ?? "?"}${anchor ? ` anchor=${JSON.stringify(trunc(anchor, 60))}` : ""}${proposed ? ` → ${JSON.stringify(trunc(proposed, 100))}` : ""}`;

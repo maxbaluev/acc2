@@ -373,7 +373,7 @@ const readKnowledgeTopK = (
   return out;
 };
 
-const REQUIRED_POLICY_SECTION_NAMES = ["workflow", "do_not"] as const;
+const REQUIRED_POLICY_SECTION_NAMES = ["exit_invariant", "runtimes_available", "workflow", "do_not", "emission_grammars"] as const;
 type PolicyBundleSectionName = typeof REQUIRED_POLICY_SECTION_NAMES[number];
 type PolicyBundleSection = { sectionName: PolicyBundleSectionName; priority: number; body: string };
 
@@ -921,117 +921,6 @@ const buildTaskGoalSection = (task: TaskRow, directiveText: string | null): stri
   return lines.join("\n");
 };
 
-const RUNTIMES_AVAILABLE_TEXT = [
-  "RUNTIMES AVAILABLE (you write code for these):",
-  "  - bun           — TypeScript, substrate API, HTTP, arithmetic, text composition",
-  "  - uv            — Python, numpy/pandas/PIL/sklearn, image processing, sensor parsing",
-  "  - camofox-browser — TypeScript against the camofox API; real chromium driven against a profile",
-].join("\n");
-
-
-// Detailed emission grammar — P1 so it drops first under tight-budget
-// pressure but is present in the standard 8K budget. Brain prompt
-// teaching for env_requires + rich knowledge schema + provenance fields
-// landed 2026-05-15 (organism-alignment follow-up to b3qc9ryzj).
-const EMISSION_GRAMMARS_TEXT = [
-  "EMISSION GRAMMARS (use these shapes when emitting candidates):",
-  "",
-  "  declared_sandbox (on every code_artifact_candidate):",
-  "    {",
-  "      runtime: \"bun\" | \"uv\" | \"camofox-browser\",",
-  "      fs_read: [\"src/**\"], fs_write: [\"out/**\"],",
-  "      net_allow: [\"api.example.com\"], proc_allow: [\"bun\"],",
-  "      env_requires: [\"SERPER_API_KEY\",...],   // UNIVERSAL credential gate.",
-  "      // Declare every process.env.X your body reads. Runtime fails closed",
-  "      // on missing env and emits owner_input_required so operator sees the gap.",
-  "      cpu_ms: 1000, wall_ms: 5000, memory_mb: 256",
-  "    }",
-  "",
-  "  knowledge_candidate.payload (rich schema):",
-  "    {",
-  "      claim:              \"<one-sentence falsifiable assertion>\",",
-  "      evidence:           [\"<observation>\", ...],",
-  "      implications:       [\"<what follows>\", ...],",
-  "      applies_to:         [\"<domain/context tag>\", ...],",
-  "      confidence_estimate: 0.0-1.0,",
-  "      source_files:       [\"path/to/file.ts:120\", ...],",
-  "      rlm_mechanism?:     \"external_state\" | \"bounded_peek\" | \"symbolic_recursion\"",
-  "                         | \"constant_metadata\" | \"closure_learning\",",
-  "      paper_citation?:    \"arXiv:2512.24601v3 §<section>\"   // RLM-claim grounding",
-  "    }",
-  "    For RLM / design claims, cite the paper section and tag the mechanism;",
-  "    do not invent paper terms — verify literal tokens before quoting them.",
-  "",
-  "  code_artifact_candidate.payload (provenance):",
-  "    {",
-  "      intent:              \"<why this artifact exists>\",",
-  "      summary:             \"<short summary>\",",
-  "      target_resources:    [\"repo:runtime/foo.ts\", \"url:https://example.com/report\",",
-  "                         \"browser_session:research/customer-a\",",
-  "                         \"ledger:directive/<directive_id>\",",
-  "                         \"contact:stakeholder/<id>\",",
-  "                         \"calendar:work/<event_id>\",",
-  "                         \"sensor:habit_tracker/<stream>\"],",
-  "      // URI grammar: <scheme>:<opaque-or-hierarchical-id>. Prefer repo: only",
-  "      // for source files; use url:, browser_session:, ledger:, contact:,",
-  "      // calendar:, and sensor: for non-filesystem provenance.",
-  "      source_candidate_id: \"<originating knowledge_candidate event id>\",",
-  "      declared_sandbox:    { ... }, body: \"<source>\", ...",
-  "    }",
-  "",
-  "  contract_amendment_proposed.payload (STRUCTURED — required for auto-apply):",
-  "    {",
-  "      target_resource:  \"repo:runtime/foo.ts\", // resource URI; repo: is required for auto-apply",
-  "      resource_uri:     \"repo:runtime/foo.ts\", // alias accepted for cross-domain proposals",
-  "      anchor:           \"<unique line/section anchor in current resource>\",",
-  "      current_behavior: \"<exact current text at anchor — for audit + reversibility>\",",
-  "      proposed_behavior: {",
-  "        target_resource: \"repo:runtime/foo.ts\", // MUST equal payload.target_resource/resource_uri",
-  "        resource_uri:    \"repo:runtime/foo.ts\", // same value; use one or both consistently",
-  "        anchor:          \"<same anchor>\",       // mechanical edit locator",
-  "        diff: {                                   // anchored_replace_v1 (preferred)",
-  "          kind: \"anchored_replace_v1\",",
-  "          before: \"<exact existing text near anchor>\",",
-  "          after:  \"<exact replacement text>\",",
-  "          occurrence?: 1                       // 1-based within anchor window, default 1",
-  "        }",
-  "        // OR legacy diff: \"<plain replacement text>\" — accepted only as a",
-  "        // fallback for existing proposals; prefer object-form anchored_replace_v1.",
-  "      },",
-  "      evidence_event_ids: [\"<source_event_id>\", ...]",
-  "    }",
-  "    Only use the structured form when the edit is purely mechanical and can",
-  "    be verified by exact before/after replacement plus bun test --bail. If the",
-  "    edit requires semantic judgment, leave proposed_behavior prose-only so it",
-  "    remains Claude/owner mediated.",
-  "    For repo-targeted anchored_replace_v1 proposals, diff.before MUST be copied",
-  "    from the current source file, not from this rendered prompt, retrieved",
-  "    knowledge, or a prior amendment. This matters for prompt_composer.ts itself:",
-  "    workflow policy bundles and EMISSION_GRAMMARS_TEXT render as prose, but the live file",
-  "    stores them as TypeScript string-array entries, so rendered prompt snippets",
-  "    are stale/non-matching anchors by construction.",
-  "    Structured proposed_behavior is necessary but not sufficient for auto apply.",
-  "    auto_apply_eligible=1 requires an action_scored auto_apply_gate residual < 0.3",
-  "    across freshness, semantic_duplicate, behavioral_novelty, necessity, and adversarial axes.",
-  "    The gate REFUSES unstructured prose for repo:cli/* + repo:runtime/* resources (owner-consent targets",
-  "    like CLAUDE.md require explicit approval regardless).",
-  "    Freeform prose is fine ONLY for lesson_extracted (process insights, not code edits).",
-  "",
-  "  CITATIONS (action_predicted.context_refs[]):",
-  "    Cite every source_event_id you used (knowledge entries, retrieval_binding",
-  "    ids from RETRIEVED KNOWLEDGE above, prior artifacts). Citation = mutation:",
-  "    cited entries get candidate_confirmed/contradicted on outcome.",
-  "    EXPOSURE-ONLY entries (in RETRIEVED KNOWLEDGE but NOT in your context_refs)",
-  "    earn diminished posterior moves — your deliberate citation is the signal.",
-  "",
-  "  knowledge_contradiction_observed (brain-side negative knowledge):",
-  "    Emit { knowledge_id, reason, weight? (0..1, default 0.5) } when you read",
-  "    a retrieved entry and IMMEDIATELY recognize it as wrong / outdated /",
-  "    domain-mismatched, WITHOUT waiting for an action_scored outcome. The",
-  "    extractor counts this as a contradicted observation with the declared",
-  "    weight; the entry's posterior shifts toward demotion on the next pass.",
-].join("\n");
-
 const buildKnowledgeSection = (rows: Array<{ id: string; text: string; score: number }>): string => {
   if (rows.length === 0) return "RETRIEVED KNOWLEDGE: (none)";
   const lines: string[] = ["RETRIEVED KNOWLEDGE (top-K by embedding × posterior):"];
@@ -1112,31 +1001,6 @@ const buildGatesSection = (gates: string[]): string => {
   return "CONSTITUTIONAL GATES ACTIVE:\n" + gates.map((g) => `  - ${g}`).join("\n");
 };
 
-
-// ── EXIT INVARIANT (load-bearing, structural) ─────────────────────
-// Audit 2026-05-16 (bridge classifier split, commit 59b2872): 87% of
-// bridge_failed events were `brain_silent_exit` — opencode ran cleanly
-// to exit_code:0 in the handshake window but invoked ZERO substrate.*
-// tool calls. That is a prompt-compliance failure, not a transport
-// issue, and the root cause is that nothing in the prompt structurally
-// forbade text-only exits. This section is the structural counter:
-// every brain cycle MUST emit at least one substrate.* tool call. Placed
-// at p=0 so the budget never drops it; placed FIRST in the candidate
-// order so the brain reads it before the workflow.
-const EXIT_INVARIANT_TEXT = [
-  "EXIT INVARIANT (read this first — load-bearing):",
-  "  Every brain cycle MUST invoke at least one substrate.* tool call before exit.",
-  "  Producing only conversational text and exiting (exit_code:0 with zero substrate frames) is scored",
-  "  `brain_silent_exit` — a prompt-compliance failure, not a transport issue. The bridge will surface it",
-  "  as bridge_failed{reason=brain_silent_exit, classifier_class=prompt_compliance, frames_received_count=0}.",
-  "  Acceptable shapes that satisfy the invariant:",
-  "    A. EMIT a real ledger event: substrate.emit({kind:'task_committed'|'task_node_opened'|'task_edge_recorded'|'action_predicted'|'knowledge_candidate'|'code_artifact_candidate'|'contract_amendment_proposed'|'lesson_extracted'|...}).",
-  "    B. PEEK substrate state: substrate.read or substrate.search (counts as a tool call, but on its own does not advance the task — pair with an emit when work is real).",
-  "    C. REFINE: emit task_node_opened + task_edge_recorded with reason for why this cycle could not finish in-context.",
-  "    D. EXPLICIT NO-OP: if you truly believe no substrate change is warranted, EMIT a knowledge_candidate.payload.claim explaining WHY this directive needs no further substrate mutation, cite the directive's task_id in evidence_event_ids, and THEN exit.",
-  "  Conversational silence is NOT one of the acceptable shapes. There is no 'I have nothing to add' exit path that bypasses the substrate.",
-].join("\n");
-
 const FIXTURE_D_MARKER = "FIXTURE: fixture_d_count_todos";
 
 /** Compose the brain prompt as a substrate projection. Sections are emitted
@@ -1162,11 +1026,21 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // Build candidate sections in priority order. Each entry is {name, p, body}.
   type Candidate = { name: string; p: number; body: string };
   const candidates: Candidate[] = [];
+  const policySections = readPolicyBundleSections(db, "brain_prompt", REQUIRED_POLICY_SECTION_NAMES);
+  const policyByName = new Map(policySections.map((policy) => [policy.sectionName, policy]));
+  const pushPolicySection = (name: PolicyBundleSectionName, fallbackPriority: number) => {
+    const policy = policyByName.get(name);
+    candidates.push({
+      name,
+      p: policy?.priority ?? fallbackPriority,
+      body: policy?.body ?? "BRAIN PROMPT POLICY MISSING: knowledge_promoted policy_bundle surface=brain_prompt section_name=" + name + ". Seed foundational knowledge before dispatch; do not substitute local literal prompt policy.",
+    });
+  };
 
   // EXIT INVARIANT first — load-bearing structural rule against brain_silent_exit
   // (commit 59b2872 + this fix). p=0 so it never drops; first in order so the
   // brain reads "you MUST call substrate.* before exit" before anything else.
-  candidates.push({ name: "exit_invariant", p: 0, body: EXIT_INVARIANT_TEXT });
+  pushPolicySection("exit_invariant", 0);
   candidates.push({ name: "task_goal", p: 0, body: buildTaskGoalSection(task, directiveText) });
   // Existing decomposition awareness — load-bearing reuse-first signal
   // against the re-decomposition explosion (audit 2026-05-17: hot-reload
@@ -1178,23 +1052,13 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   if (existingDecompBody.length > 0) {
     candidates.push({ name: "existing_decomposition", p: 0, body: existingDecompBody });
   }
-  candidates.push({ name: "runtimes_available", p: 0, body: RUNTIMES_AVAILABLE_TEXT });
-  const policySections = readPolicyBundleSections(db, "brain_prompt", REQUIRED_POLICY_SECTION_NAMES);
-  for (const policy of policySections) {
-    candidates.push({ name: policy.sectionName, p: policy.priority, body: policy.body });
-  }
-  for (const required of REQUIRED_POLICY_SECTION_NAMES) {
-    if (policySections.some((policy) => policy.sectionName === required)) continue;
-    candidates.push({
-      name: required,
-      p: 0,
-      body: "BRAIN PROMPT POLICY MISSING: knowledge_promoted policy_bundle surface=brain_prompt section_name=" + required + ". Seed foundational knowledge before dispatch; do not substitute local literal prompt policy.",
-    });
-  }
+  pushPolicySection("runtimes_available", 0);
+  pushPolicySection("workflow", 0);
+  pushPolicySection("do_not", 0);
   // Detailed emission grammars — env_requires + rich knowledge schema +
   // artifact provenance. P1 so it drops first under tight-budget pressure
   // (depth-1 tests pin a tiny 800-token budget) but lands in normal flow.
-  candidates.push({ name: "emission_grammars", p: 1, body: EMISSION_GRAMMARS_TEXT });
+  pushPolicySection("emission_grammars", 1);
 
   // Phase D fixture marker — the mocked bridge keys off this so the
   // fixture_d_count_todos dispatch can be reproduced deterministically.

@@ -91,10 +91,13 @@ describe("prompt_composer", () => {
     expect(composed.text).toContain("Exit having produced only conversational text");
   });
 
-  test("renders workflow and do_not from typed policy_bundle rows, not local constants", () => {
+  test("renders brain prompt policy from typed policy_bundle rows, not local constants", () => {
     const source = readFileSync(new URL("./prompt_composer.ts", import.meta.url), "utf8");
     expect(source).not.toContain("const WORKFLOW_TEXT");
     expect(source).not.toContain("const NOT_DO_TEXT");
+    expect(source).not.toContain("const EXIT_INVARIANT_TEXT");
+    expect(source).not.toContain("const RUNTIMES_AVAILABLE_TEXT");
+    expect(source).not.toContain("const EMISSION_GRAMMARS_TEXT");
 
     const db = openDb(":memory:");
     const { taskId } = openTask(db);

@@ -225,8 +225,11 @@ describe("seedFoundationalKnowledge", () => {
       .query("SELECT payload FROM events WHERE kind = 'knowledge_promoted' AND json_extract(payload, '$.type') = 'policy_bundle'")
       .all() as Array<{ payload: string }>;
     const sections = rows.map((r) => JSON.parse(r.payload) as { surface?: string; section_name?: string; body?: string });
+    expect(sections.some((p) => p.surface === "brain_prompt" && p.section_name === "exit_invariant" && p.body?.includes("MUST invoke at least one substrate.* tool call before exit"))).toBe(true);
+    expect(sections.some((p) => p.surface === "brain_prompt" && p.section_name === "runtimes_available" && p.body?.includes("camofox-browser"))).toBe(true);
     expect(sections.some((p) => p.surface === "brain_prompt" && p.section_name === "workflow" && p.body?.includes("CONSTANT ACT-LOOP METADATA"))).toBe(true);
     expect(sections.some((p) => p.surface === "brain_prompt" && p.section_name === "do_not" && p.body?.includes("Exit having produced only conversational text"))).toBe(true);
+    expect(sections.some((p) => p.surface === "brain_prompt" && p.section_name === "emission_grammars" && p.body?.includes("declared_sandbox"))).toBe(true);
   });
 
   test("seeds moved contract knowledge with prompt-composer goal-shape tags on promotion rows", () => {
