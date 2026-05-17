@@ -38,6 +38,40 @@ const writeMeta = (db: Database, key: string, value: string): void => {
   );
 };
 
+// Per-row versioned seed-upgrade primitive (2026-05-17, brain design
+// 5JE82MP9TN1ZB3T1DPSYWK614G distribution-readiness). The previous
+// coarse meta keys (seed:foundational_knowledge, seed:policy_bundles:v1)
+// meant ANY existing install would skip the entire batch on upgrade —
+// new laws added to SEED_LAWS post-install never landed. Per-row hash
+// gating fixes that: each law/bundle is stored under a content-hash
+// meta key, so re-running `acc init` after pulling new code admits ONLY
+// the newly-added rows. Existing rows are skipped by their hash match.
+//
+// The hash is intentionally short (16 hex chars = 64-bit truncation)
+// because the meta table is keyed by string + scanned linearly during
+// seed; the collision risk for ~100 seeded rows is negligible.
+const hashSeedRow = (content: string): string => {
+  const buf = new TextEncoder().encode(content);
+  // Bun's crypto.subtle is fine here; we don't need cryptographic
+  // strength, just stable content addressing. Use a simple FNV-1a
+  // 64-bit so the helper stays synchronous (Bun.hash is also an option
+  // but its output isn't guaranteed stable across versions).
+  let h = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  for (const b of buf) {
+    h ^= BigInt(b);
+    h = (h * prime) & 0xffffffffffffffffn;
+  }
+  return h.toString(16).padStart(16, "0");
+};
+
+const seenSeedHash = (db: Database, prefix: string, hash: string): boolean =>
+  readMeta(db, `${prefix}:${hash}`) !== null;
+
+const recordSeedHash = (db: Database, prefix: string, hash: string, label: string): void => {
+  writeMeta(db, `${prefix}:${hash}`, label);
+};
+
 // ── Foundational knowledge — load-bearing principles ────────────────
 //
 // Each entry below carries the canonical text the merger would have
@@ -371,11 +405,23 @@ export const seedFoundationalKnowledge = (
   if (!options?.ownerApproved) {
     return { imported: 0 };
   }
-  const shouldSeedLaws = readMeta(db, META_SEEDED_FOUNDATIONAL) === null;
-  const shouldSeedPolicyBundles = readMeta(db, META_SEEDED_POLICY_BUNDLES) === null;
-  if (!shouldSeedLaws && !shouldSeedPolicyBundles) {
-    return { imported: 0 };
-  }
+  // Per-row hash gating (2026-05-17): both groups now iterate every
+  // canonical row and import only those whose content-hash hasn't yet
+  // been recorded. The legacy batch-level meta keys
+  // (META_SEEDED_FOUNDATIONAL / META_SEEDED_POLICY_BUNDLES) are kept
+  // for backwards-compat — if EITHER is present AND no per-row hashes
+  // are recorded yet, we treat all existing batch members as
+  // already-seeded by retroactively writing their hashes ON THIS FIRST
+  // RUN. After that the batch key is irrelevant: subsequent runs see
+  // recorded hashes and use the pure per-row path, so legitimately
+  // missing hashes (newly-added laws) trigger imports as designed.
+  const hashCount = (db
+    .query("SELECT COUNT(*) AS c FROM meta WHERE key LIKE 'seed:law:%' OR key LIKE 'seed:bundle:%'")
+    .get() as { c: number }).c;
+  const onLegacyMigrationRun = hashCount === 0
+    && (readMeta(db, META_SEEDED_FOUNDATIONAL) !== null || readMeta(db, META_SEEDED_POLICY_BUNDLES) !== null);
+  const legacyFoundationalSeeded = onLegacyMigrationRun && readMeta(db, META_SEEDED_FOUNDATIONAL) !== null;
+  const legacyBundlesSeeded = onLegacyMigrationRun && readMeta(db, META_SEEDED_POLICY_BUNDLES) !== null;
 
   const directiveId = "dir_seed_foundational";
   const loopId = "loop_seed_foundational";
@@ -383,8 +429,16 @@ export const seedFoundationalKnowledge = (
   let imported = 0;
 
   withImmediateTransaction(db, () => {
-    if (shouldSeedLaws) {
-      for (const law of SEED_LAWS) {
+    for (const law of SEED_LAWS) {
+      const hash = hashSeedRow(`law:${law.text}|${(law.tags ?? []).join(",")}`);
+      // Legacy install: pre-existing batch meta means every then-known
+      // law is considered already-imported. Record its hash so future
+      // upgrades that add new SEED_LAWS pick them up correctly.
+      if (legacyFoundationalSeeded && !seenSeedHash(db, "seed:law", hash)) {
+        recordSeedHash(db, "seed:law", hash, law.text.slice(0, 64));
+        continue;
+      }
+      if (seenSeedHash(db, "seed:law", hash)) continue;
       const candidateId = newId();
       db.run(
         `INSERT INTO events (
@@ -434,13 +488,21 @@ export const seedFoundationalKnowledge = (
           JSON.stringify([candidateId]),
         ],
       );
+      recordSeedHash(db, "seed:law", hash, law.text.slice(0, 64));
       imported++;
     }
-      writeMeta(db, META_SEEDED_FOUNDATIONAL, nowIso());
-    }
+    // Keep the legacy batch key in sync so an external observer still
+    // sees the historical "seeded" marker.
+    if (!legacyFoundationalSeeded) writeMeta(db, META_SEEDED_FOUNDATIONAL, nowIso());
 
-    if (shouldSeedPolicyBundles) {
-      for (const bundle of POLICY_BUNDLE_SEEDS) {
+    for (const bundle of POLICY_BUNDLE_SEEDS) {
+      const bundleHash = hashSeedRow(`bundle:${bundle.surface}/${bundle.sectionName}@${bundle.version}|${bundle.body}`);
+      if (legacyBundlesSeeded && !seenSeedHash(db, "seed:bundle", bundleHash)) {
+        recordSeedHash(db, "seed:bundle", bundleHash, `${bundle.surface}/${bundle.sectionName}`);
+        continue;
+      }
+      if (seenSeedHash(db, "seed:bundle", bundleHash)) continue;
+      {
         const candidateId = newId();
         const policyBundle = {
           type: "policy_bundle",
@@ -507,10 +569,11 @@ export const seedFoundationalKnowledge = (
             JSON.stringify([candidateId]),
           ],
         );
+        recordSeedHash(db, "seed:bundle", bundleHash, `${bundle.surface}/${bundle.sectionName}`);
         imported++;
       }
-      writeMeta(db, META_SEEDED_POLICY_BUNDLES, nowIso());
     }
+    if (!legacyBundlesSeeded) writeMeta(db, META_SEEDED_POLICY_BUNDLES, nowIso());
   });
 
   return { imported };

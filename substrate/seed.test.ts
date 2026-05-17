@@ -187,6 +187,50 @@ describe("seedFoundationalKnowledge", () => {
     expect(candidateCount2).toBe(candidateCount);
   });
 
+  test("per-row hash gate (2026-05-17): legacy install with batch-meta key admits NEW laws on second run", () => {
+    const db = openDb(":memory:");
+    // Simulate a legacy install: the batch-level meta key was written
+    // by an older seedFoundationalKnowledge BEFORE per-row hashing
+    // existed. The legacy install would skip every law on the next run
+    // (the bug 5JE82MP9TN1ZB3T1DPSYWK614G names).
+    db.run("INSERT INTO meta(key, value) VALUES(?, ?)", ["seed:foundational_knowledge", "2025-12-01T00:00:00Z"]);
+    db.run("INSERT INTO meta(key, value) VALUES(?, ?)", ["seed:policy_bundles:v1", "2025-12-01T00:00:00Z"]);
+    // First post-fix run: the gate retroactively records every current
+    // law's hash but imports nothing (legacy claim: "you already had
+    // these"). knowledge_candidate count stays at 0 because the legacy
+    // install ALSO didn't have the original candidate rows on disk —
+    // but the hashes ARE recorded so the next-run upgrade flow has a
+    // clean baseline.
+    const first = seedFoundationalKnowledge(db, { ownerApproved: true });
+    expect(first.imported).toBe(0);
+    const hashCount1 = (db.query("SELECT COUNT(*) AS c FROM meta WHERE key LIKE 'seed:law:%' OR key LIKE 'seed:bundle:%'").get() as { c: number }).c;
+    expect(hashCount1).toBeGreaterThan(0);
+
+    // Now simulate a NEW law landing in source: pretend we removed one
+    // of the recorded hashes (= a new law would appear with a new hash
+    // the legacy install hasn't seen). Re-run and confirm at least one
+    // law gets imported.
+    const oneKey = (db.query("SELECT key FROM meta WHERE key LIKE 'seed:law:%' LIMIT 1").get() as { key: string }).key;
+    db.run("DELETE FROM meta WHERE key = ?", [oneKey]);
+    const second = seedFoundationalKnowledge(db, { ownerApproved: true });
+    expect(second.imported).toBe(1);
+
+    // Idempotent re-run after that: nothing new lands.
+    const third = seedFoundationalKnowledge(db, { ownerApproved: true });
+    expect(third.imported).toBe(0);
+  });
+
+  test("per-row hash gate: fresh install imports every current law + bundle on first run, zero on re-run", () => {
+    const db = openDb(":memory:");
+    const first = seedFoundationalKnowledge(db, { ownerApproved: true });
+    expect(first.imported).toBeGreaterThan(0);
+    const hashCount = (db.query("SELECT COUNT(*) AS c FROM meta WHERE key LIKE 'seed:law:%' OR key LIKE 'seed:bundle:%'").get() as { c: number }).c;
+    expect(hashCount).toBe(first.imported);
+    // Second run is a no-op.
+    const second = seedFoundationalKnowledge(db, { ownerApproved: true });
+    expect(second.imported).toBe(0);
+  });
+
   test("every seeded knowledge event carries substrate_origin='substrate_auto'", () => {
     const db = openDb(":memory:");
     seedFoundationalKnowledge(db, { ownerApproved: true });
