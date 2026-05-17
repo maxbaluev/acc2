@@ -2297,6 +2297,20 @@ WITH base AS (
     -- channel (auto-apply success, refusal, apply_record). The view is
     -- meant for waiting-on-decision rows only.
     AND (q.apply_status IS NULL)
+    -- Pre-existing latent bug exposed by the 2026-05-17 widening:
+    -- production substrates accumulate occasional candidate_diff
+    -- columns that are not strict JSON (legacy seeds, truncated
+    -- bridge frames, brain emissions with diff fields containing
+    -- raw code). The shape CTE's json_extract(candidate_diff,...)
+    -- chains throw "malformed JSON" on those rows and the entire
+    -- view errors out — which surfaced in production as the
+    -- defensive fallback in pendingOwnerDecisionQueue() (helper
+    -- line 3486) returning an empty result. Filter at the source
+    -- so the shape CTE never sees a bad candidate_diff. The
+    -- excluded rows fall back to "no diff" semantics for
+    -- decline_candidate_reason classification — safer than a hard
+    -- view failure.
+    AND (q.candidate_diff IS NULL OR json_valid(q.candidate_diff) = 1)
     AND NOT EXISTS (
       SELECT 1 FROM events odr
       WHERE odr.kind = 'owner_decision_recorded'
