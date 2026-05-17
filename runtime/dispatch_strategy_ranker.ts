@@ -121,11 +121,15 @@ export const loadStrategyArtifacts = (db: Database): StrategyDecl[] => {
   type Row = { id: string; body: string; posterior_alpha: number; posterior_beta: number; score: number; confidence: number };
   let rows: Row[];
   try {
+    // L8 (2026-05-17): query by the kind discriminator column
+    // (preferred). Fall back to state_root for installs running before
+    // the kind column landed. Both predicates are wide-OR'd so any one
+    // matching identifier suffices — same row will only appear once.
     rows = db
       .query(
         `SELECT id, body, posterior_alpha, posterior_beta, score, confidence
          FROM code_artifact_registry_view
-         WHERE state_root = 'dispatch/strategy'
+         WHERE (kind = 'dispatch_strategy_v1' OR state_root = 'dispatch/strategy')
            AND status IN ('admitted', 'promoted')`,
       )
       .all() as Row[];

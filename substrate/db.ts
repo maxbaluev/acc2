@@ -90,6 +90,11 @@ const ARTIFACT_METADATA_COLUMNS: Array<{ name: string; ddl: string }> = [
   { name: "target_resources",    ddl: "ALTER TABLE code_artifact ADD COLUMN target_resources TEXT" },
   { name: "source_candidate_id", ddl: "ALTER TABLE code_artifact ADD COLUMN source_candidate_id TEXT" },
   { name: "owner_gate_verdict",  ddl: "ALTER TABLE code_artifact ADD COLUMN owner_gate_verdict TEXT" },
+  // L8 (2026-05-17): free-string kind discriminator. NOT NULL with
+  // default 'code_artifact' so existing rows get the canonical legacy
+  // value. The seedCodeArtifacts code path overwrites for newly-added
+  // typed rows (e.g. 'dispatch_strategy_v1'). Index added in schema.sql.
+  { name: "kind",                ddl: "ALTER TABLE code_artifact ADD COLUMN kind TEXT NOT NULL DEFAULT 'code_artifact'" },
 ];
 
 export const runMigrations = (db: Database): void => {
@@ -102,6 +107,23 @@ export const runMigrations = (db: Database): void => {
       const msg = (err as Error).message ?? "";
       if (!msg.includes("duplicate column name")) throw err;
     }
+  }
+  // L8 backfill: dispatch_strategy seed rows (admitted with
+  // state_root='dispatch/strategy') predate the kind column.
+  // Tag them so the strategy_ranker can use the cleaner kind
+  // discriminator. Idempotent — only updates rows that still carry
+  // the default 'code_artifact' value.
+  try {
+    db.run(
+      `UPDATE code_artifact SET kind = 'dispatch_strategy_v1'
+       WHERE state_root = 'dispatch/strategy' AND kind = 'code_artifact'`,
+    );
+  } catch (err) {
+    // Migration is best-effort; if the kind column doesn't exist yet
+    // (very old install pre-this-migration) we'll swallow the throw
+    // — runMigrations runs first so this path is normally safe.
+    const msg = (err as Error).message ?? "";
+    if (!/no such column/.test(msg)) throw err;
   }
 };
 

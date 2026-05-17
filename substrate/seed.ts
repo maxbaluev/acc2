@@ -592,6 +592,11 @@ type SeedArtifact = {
   fixture_input: unknown;
   fixture_expected_residual: number;
   display_name: string;
+  /** L8 (2026-05-17): free-string discriminator. Defaults to
+   *  'code_artifact' for the legacy seeded runtime artifacts; the
+   *  dispatch_strategy_v1 rows declare 'dispatch_strategy_v1' so the
+   *  strategy ranker can filter on kind alone. */
+  kind?: string;
 };
 
 const SEED_ARTIFACTS: SeedArtifact[] = [
@@ -1054,6 +1059,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   // (L8) lands, payload.kind moves to a first-class column.
   {
     seedName: "dispatch_strategy_one_shot_low_risk_v1",
+    kind: "dispatch_strategy_v1",
     runtime: "bun",
     body: [
       "// dispatch_strategy_v1:one_shot_low_risk_v1 — single-cycle, no decomposition.",
@@ -1078,6 +1084,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   },
   {
     seedName: "dispatch_strategy_shallow_decomposition_v1",
+    kind: "dispatch_strategy_v1",
     runtime: "bun",
     body: [
       "// dispatch_strategy_v1:shallow_decomposition_v1 — 1 layer, 2-3 children.",
@@ -1102,6 +1109,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   },
   {
     seedName: "dispatch_strategy_deep_decomposition_v1",
+    kind: "dispatch_strategy_v1",
     runtime: "bun",
     body: [
       "// dispatch_strategy_v1:deep_decomposition_v1 — multi-layer DAG.",
@@ -1126,6 +1134,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   },
   {
     seedName: "dispatch_strategy_replay_first_v1",
+    kind: "dispatch_strategy_v1",
     runtime: "bun",
     body: [
       "// dispatch_strategy_v1:replay_first_v1 — recipe replay preferred over brain.",
@@ -1150,6 +1159,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   },
   {
     seedName: "dispatch_strategy_claude_inline_leaf_v1",
+    kind: "dispatch_strategy_v1",
     runtime: "bun",
     body: [
       "// dispatch_strategy_v1:claude_inline_leaf_v1 — Claude inline lane for ready leaves.",
@@ -1175,6 +1185,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   },
   {
     seedName: "dispatch_strategy_defer_blocked_v1",
+    kind: "dispatch_strategy_v1",
     runtime: "bun",
     body: [
       "// dispatch_strategy_v1:defer_blocked_v1 — owner-gate / dependency-wait path.",
@@ -1221,18 +1232,19 @@ export const seedCodeArtifacts = (db: Database): CodeArtifactSeedSummary => {
       const beta = 1 + (1 - seed.initial_score) * 4;
       db.run(
         `INSERT INTO code_artifact (
-           id, runtime, body, declared_sandbox, state_root,
+           id, runtime, body, declared_sandbox, state_root, kind,
            posterior_alpha, posterior_beta, score, confidence,
            recent_residual_mean, recent_kill_count, status, name,
            fixture_input, fixture_expected_residual,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           seed.runtime,
           seed.body,
           JSON.stringify(seed.declared_sandbox),
           seed.state_root,
+          seed.kind ?? "code_artifact",
           alpha,
           beta,
           seed.initial_score,

@@ -63,6 +63,16 @@ CREATE TABLE IF NOT EXISTS code_artifact (
   body                        TEXT NOT NULL,
   declared_sandbox            TEXT NOT NULL,
   state_root                  TEXT NOT NULL,
+  -- L8 (2026-05-17, brain design 48SN4XF3WN4KBBCHHCANDRDQRW act_artifact
+  -- registry rename): free-string discriminator for the row's purpose.
+  -- Default 'code_artifact' for legacy rows; new typed rows declare
+  -- their own (e.g. 'dispatch_strategy_v1' for the 6 seed strategy
+  -- priors). The full rename of the TABLE to act_artifact is deferred —
+  -- adding the column first lets consumers transition incrementally
+  -- (dispatch_strategy_ranker queries kind='dispatch_strategy_v1' AND
+  -- state_root='dispatch/strategy' as overlapping discriminators; the
+  -- state_root path can be retired later).
+  kind                        TEXT NOT NULL DEFAULT 'code_artifact',
   posterior_alpha             REAL NOT NULL DEFAULT 1.0,
   posterior_beta              REAL NOT NULL DEFAULT 1.0,
   score                       REAL NOT NULL DEFAULT 0.5,
@@ -93,6 +103,7 @@ CREATE TABLE IF NOT EXISTS code_artifact (
 CREATE INDEX IF NOT EXISTS idx_code_artifact_runtime ON code_artifact(runtime);
 CREATE INDEX IF NOT EXISTS idx_code_artifact_status  ON code_artifact(status);
 CREATE INDEX IF NOT EXISTS idx_code_artifact_score   ON code_artifact(score DESC);
+CREATE INDEX IF NOT EXISTS idx_code_artifact_kind    ON code_artifact(kind);
 
 -- ── sqlite-vec virtual table: canonical embedding index ────────────
 -- Per v2-design.md §3.6.1 Rule 1 (embedding-based candidate dedup) and

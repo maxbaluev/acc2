@@ -167,7 +167,7 @@ const VIEW_CODE_ARTIFACT_REGISTRY = `
 DROP VIEW IF EXISTS code_artifact_registry_view;
 CREATE VIEW IF NOT EXISTS code_artifact_registry_view AS
   SELECT
-    id, runtime, body, declared_sandbox, state_root,
+    id, runtime, body, declared_sandbox, state_root, kind,
     posterior_alpha, posterior_beta, score, confidence,
     recent_residual_mean, recent_kill_count, status, name,
     fixture_input, fixture_expected_residual,

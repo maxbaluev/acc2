@@ -80,6 +80,22 @@ describe("seedCodeArtifacts", () => {
     }
   });
 
+  test("L8 (2026-05-17) kind column: dispatch_strategy seeds carry kind='dispatch_strategy_v1', legacy seeds default to 'code_artifact'", () => {
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    const strategyRows = db
+      .query("SELECT id, kind FROM code_artifact WHERE state_root = 'dispatch/strategy'")
+      .all() as Array<{ id: string; kind: string }>;
+    expect(strategyRows.length).toBe(6);
+    for (const r of strategyRows) expect(r.kind).toBe("dispatch_strategy_v1");
+    // Legacy seeds: every other admitted row should have kind='code_artifact'.
+    const legacyRows = db
+      .query("SELECT kind FROM code_artifact WHERE state_root != 'dispatch/strategy'")
+      .all() as Array<{ kind: string }>;
+    expect(legacyRows.length).toBeGreaterThan(0);
+    for (const r of legacyRows) expect(r.kind).toBe("code_artifact");
+  });
+
   test("includes every runtime named in §11.4", () => {
     const db = openDb(":memory:");
     seedCodeArtifacts(db);
