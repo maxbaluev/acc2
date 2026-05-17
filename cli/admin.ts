@@ -53,6 +53,7 @@ import { runCleanTempState } from "./admin_clean_temp";
 import { runEmbedAll } from "./admin_embed_all";
 import { runSubstrateStatus } from "./admin_substrate_status";
 import { runDispatchStatus } from "./admin_dispatch_status";
+import { runHotreloadStatus } from "./admin_hotreload_status";
 import { runPendingDecisions } from "./admin_pending_decisions";
 import { runTrust } from "./trust";
 
@@ -107,6 +108,15 @@ const usage = (): string => `acc admin — operator-side maintenance
                               for the orchestrator's end-of-turn decision card —
                               poll this instead of asserting "no pending decisions"
                               without checking.
+    hotreload-status [--since <iso>] [--limit N] [--json]
+                              Substrate ledger view of recent daemon_hotreload_*
+                              outcomes. Counts swapped / no_op / rejected /
+                              unmapped / rate_limited / failed and prints the
+                              N most-recent rows with module + reason + slot
+                              version. Use when a hot-reload landed and you
+                              want to confirm it actually swapped (not just
+                              completed-without-swapping). See
+                              runtime/hotreload_worker.ts truth-in-audit.
     trust [--json]            Owner growth / autonomy snapshot: posterior trends,
                               recipe activity, knowledge movement, closure residual
                               stats, amendment outcomes. (MERGE 2026-05-16 from the
@@ -762,6 +772,7 @@ export const runAdmin = async (argv: string[], envOverride?: AdminEnv): Promise<
   if (sub === "embed-all") return runEmbedAll(argv.slice(1));
   if (sub === "substrate-status") return runSubstrateStatus(argv.slice(1));
   if (sub === "dispatch-status") return runDispatchStatus(argv.slice(1));
+  if (sub === "hotreload-status") return runHotreloadStatus(argv.slice(1));
   if (sub === "pending-decisions") return runPendingDecisions(argv.slice(1));
   if (sub === "trust") return runTrust(argv.slice(1));
   env.err(`acc admin: unknown subcommand '${sub}'`);

@@ -73,6 +73,44 @@ describe("buildBrainSelfAudit", () => {
     expect(audit.residuals.p50).toBeNull();
   });
 
+  test("recent_brain_failures catches dispatcher_violation rows tagged substrate_auto by following the task_id chain back to brain emissions", () => {
+    // Pre-fix: brain_self_audit filtered `substrate_origin = 'opencode'
+    // OR invoker = 'opencode'`. dispatcher_violation rows are emitted by
+    // the dispatcher with substrate_origin='substrate_auto' (the
+    // dispatcher worker is the immediate author), so the old filter
+    // never surfaced them. Fix: also include rows whose task_id appears
+    // in at least one brain-emitted event in the same window.
+    const db = openDb(":memory:");
+    runViews(db);
+    const directiveId = "dir_brain_failure";
+    const taskId = "task_brain_failure";
+    // Brain emits action_predicted on the task.
+    emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "a1",
+      verifier_artifact_id: "v1",
+      predicted_residual: 0.4,
+      payload: { intent: "test" },
+    });
+    // Substrate-side dispatcher then emits dispatcher_violation against
+    // the same task_id with substrate_auto origin.
+    emitEvent(db, {
+      kind: "dispatcher_violation",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      failure_kind: "cycle_1_only_breach",
+      payload: { reason: "test breach" },
+    });
+    const audit = buildBrainSelfAudit(db);
+    expect(audit.recent_brain_failures.length).toBe(1);
+    expect(audit.recent_brain_failures[0]?.kind).toBe("dispatcher_violation");
+    expect(audit.recent_brain_failures[0]?.task_id).toBe(taskId);
+  });
+
   test("populated substrate aggregates emissions, citations, residuals, proposals", () => {
     const db = openDb(":memory:");
     runViews(db);

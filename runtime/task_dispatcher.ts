@@ -25,6 +25,26 @@ import type { Event, JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
 import { composePrompt } from "./prompt_composer";
+import { getReloadable } from "./reloadable";
+
+// Hot-reload deep-improvement (2026-05-17): resolve composePrompt through
+// the reloadable registry so a hot-reload of runtime/prompt_composer.ts
+// reaches LIVE dispatches. Pre-fix the dispatcher held the boot-time
+// import via the top-level binding above, so swap events were emitted
+// but no consumer read the new code until restart. Now the dispatcher
+// asks the registry on every call — registry returns the latest
+// validated module. Fail-soft: if the registry isn't initialised (bare
+// test mode) we fall through to the static import.
+const resolveComposePrompt = async (): Promise<typeof composePrompt> => {
+  const slot = getReloadable("prompt_composer");
+  if (!slot) return composePrompt;
+  try {
+    const mod = (await slot.current()) as { composePrompt?: typeof composePrompt };
+    return typeof mod.composePrompt === "function" ? mod.composePrompt : composePrompt;
+  } catch {
+    return composePrompt;
+  }
+};
 import { decideDispatch } from "./dispatch_decider";
 import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge/index";
 import type { TaskNode } from "./task_topology";
@@ -463,7 +483,8 @@ export const dispatchReadyTask = async (
       );
     }
   }
-  const composed = composePrompt(db, { taskId: task.id, retrievedKnowledge, retrievedArtifacts, retrievalUnavailable });
+  const composer = await resolveComposePrompt();
+  const composed = composer(db, { taskId: task.id, retrievedKnowledge, retrievedArtifacts, retrievalUnavailable });
   bridgeResult = await bridge(
     {
       prompt: composed.text,

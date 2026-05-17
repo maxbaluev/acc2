@@ -255,17 +255,30 @@ export const buildBrainSelfAudit = (
   const effectiveness = summarizeEffectiveness(db, { windowMs: windowHours * 60 * 60 * 1000 });
 
   // Recent failures the brain caused — task_failed + dispatcher_violation
-  // chains where the brain was the dispatch invoker.
+  // + bridge_stuck on tasks the brain touched. The substrate-side
+  // emitters tag these with substrate_origin='substrate_auto' (the
+  // dispatcher / bridge worker is the immediate author), so a literal
+  // substrate_origin='opencode' filter would MISS every dispatcher
+  // violation. The right join is "task_id has at least one brain-
+  // authored event" — i.e. the brain dispatched against this task and
+  // the substrate-side bookkeeping emitter recorded a failure on it.
   const failureRows = db
     .query(
       `SELECT ts, kind, failure_kind, task_id FROM events
        WHERE ts >= ?
          AND kind IN ('task_failed', 'dispatcher_violation', 'bridge_stuck')
-         AND (substrate_origin = 'opencode' OR invoker = 'opencode')
+         AND (
+           substrate_origin = 'opencode'
+           OR invoker = 'opencode'
+           OR task_id IN (
+             SELECT DISTINCT task_id FROM events
+             WHERE substrate_origin = 'opencode' AND ts >= ?
+           )
+         )
        ORDER BY ts DESC
        LIMIT 10`,
     )
-    .all(sinceIso) as Array<{ ts: string; kind: string; failure_kind: string | null; task_id: string }>;
+    .all(sinceIso, sinceIso) as Array<{ ts: string; kind: string; failure_kind: string | null; task_id: string }>;
 
   return {
     generated_at: new Date().toISOString(),

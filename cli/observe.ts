@@ -179,6 +179,20 @@ const GLYPHS: Record<string, string> = {
   daemon_hotreload_triggered: "♻︎↑",
   daemon_hotreload_completed: "♻︎✓",
   daemon_hotreload_failed: "♻︎✗",
+  // Hot-reload deep-improvement (2026-05-17): truth-in-audit kinds —
+  // swapped = the reloadable registry accepted the new module and
+  // every consumer reading through getReloadable(...).current() now
+  // sees the new code; no_op = import succeeded but no consumer reads
+  // through an indirection (live behavior unchanged); rejected =
+  // validation refused the new module (missing exports or smoke
+  // probe failed) — previous reference stays active; unmapped =
+  // changed file under a watched directory matched no manifest entry;
+  // rate_limited = save-loop storm protection kicked in.
+  daemon_hotreload_swapped: "♻︎⇆",
+  daemon_hotreload_no_op: "♻︎○",
+  daemon_hotreload_rejected: "♻︎⊘",
+  daemon_hotreload_unmapped: "♻︎?",
+  daemon_hotreload_rate_limited: "♻︎⏸",
   // Prompt cache telemetry.
   prompt_composition_cache_hit: "💾✓",
   prompt_composition_cache_miss: "💾·",
@@ -373,6 +387,82 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
         residual !== undefined ? `residual=${residual}` : "",
         subagentId ? `subagent=${idPrefix(subagentId, 10)}` : "",
         summary ? `summary=${JSON.stringify(trunc(summary, 100))}` : "",
+      ].filter(Boolean).join(" ");
+    }
+    // Hot-reload deep-improvement (2026-05-17): every truth-in-audit
+    // kind gets a renderer so operators see WHAT happened, not just an
+    // emoji. module + outcome + reason fit one panel-friendly line.
+    case "daemon_hotreload_triggered": {
+      const mod = p.module as string | undefined;
+      const fp = p.file_path as string | undefined;
+      const strategy = p.strategy as string | undefined;
+      const slot = p.reloadable_slot as string | null | undefined;
+      return [
+        mod ? `module=${mod}` : "",
+        strategy ? `strategy=${strategy}` : "",
+        slot ? `slot=${slot}` : "slot=(none)",
+        fp ? `file=${fp}` : "",
+      ].filter(Boolean).join(" ");
+    }
+    case "daemon_hotreload_swapped": {
+      const mod = p.module as string | undefined;
+      const slot = p.reloadable_slot as string | undefined;
+      const version = p.registry_version as number | undefined;
+      const caches = p.invalidated_caches as string[] | undefined;
+      return [
+        "swapped",
+        mod ? `module=${mod}` : "",
+        slot ? `slot=${slot}` : "",
+        typeof version === "number" ? `version=${version}` : "",
+        caches && caches.length > 0 ? `invalidated=${caches.join(",")}` : "",
+      ].filter(Boolean).join(" ");
+    }
+    case "daemon_hotreload_no_op": {
+      const mod = p.module as string | undefined;
+      const reason = p.reason as string | undefined;
+      return [
+        "no_op",
+        mod ? `module=${mod}` : "",
+        reason ? `reason=${reason}` : "",
+      ].filter(Boolean).join(" ");
+    }
+    case "daemon_hotreload_rejected": {
+      const mod = p.module as string | undefined;
+      const reason = p.reason as string | undefined;
+      const expected = p.expected_exports as string[] | undefined;
+      return [
+        "rejected",
+        mod ? `module=${mod}` : "",
+        reason ? `reason=${JSON.stringify(trunc(reason, 100))}` : "",
+        expected && expected.length > 0 ? `expected=${expected.join(",")}` : "",
+      ].filter(Boolean).join(" ");
+    }
+    case "daemon_hotreload_unmapped": {
+      const fp = p.file_path as string | undefined;
+      return [
+        "unmapped",
+        fp ? `file=${fp}` : "",
+        "hint=extend HOTRELOAD_MANIFEST",
+      ].filter(Boolean).join(" ");
+    }
+    case "daemon_hotreload_rate_limited": {
+      const mod = p.module as string | undefined;
+      const rl = p.rate_limit as { count?: number; window_ms?: number } | undefined;
+      return [
+        "rate_limited",
+        mod ? `module=${mod}` : "",
+        rl ? `cap=${rl.count}/${rl.window_ms}ms` : "",
+      ].filter(Boolean).join(" ");
+    }
+    case "daemon_hotreload_failed": {
+      const mod = p.module as string | undefined;
+      const reason = p.reason as string | undefined;
+      const strategy = p.strategy as string | undefined;
+      return [
+        "failed",
+        mod ? `module=${mod}` : "",
+        strategy ? `strategy=${strategy}` : "",
+        reason ? `reason=${JSON.stringify(trunc(reason, 100))}` : "",
       ].filter(Boolean).join(" ");
     }
     default:
