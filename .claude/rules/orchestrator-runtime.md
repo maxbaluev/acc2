@@ -11,6 +11,56 @@ operating contract stays the canonical surface for "what the system
 is"; this file is the operational protocol for **how the orchestrator
 observes dispatch state**.
 
+## Daemon lifecycle — use the canonical CLI, never raw nohup
+
+The acc CLI already provides `acc daemon {start,stop,restart,status}` with
+proper double-fork detach (`spawn` with `detached:true` + `child.unref()`).
+The Claude Code Bash tool tracks every command via a wrapping parent
+process; raw `nohup ... & disown` patterns leave that wrapper waiting on
+indefinite `until` loops and produce zombie entries in the Bash
+background-task panel that only `TaskStop` can clear.
+
+**Canonical pattern (foreground, returns within seconds):**
+
+```
+# Start (idempotent — no-op if running)
+bun cli/dispatch.ts daemon start
+
+# Restart (atomic: shutdown + drain + start + health-poll)
+bun cli/dispatch.ts daemon restart
+
+# Health probe (use this, not ps or socket-file checks)
+bun cli/dispatch.ts daemon status
+
+# Stop (graceful drain via /shutdown HTTP route)
+bun cli/dispatch.ts daemon stop
+```
+
+`acc daemon start` writes the daemon lock to `<state_dir>/v2.sock` and
+exits with the child PID. `acc daemon restart` polls the new daemon's
+`/health` until status=ok (up to 30s) before returning — operator knows
+the daemon is ready when the command returns 0.
+
+**Forbidden patterns** (each one produced zombie Bash entries this
+session):
+
+```
+# WRONG — leaves wrapper waiting on the until loop, creates zombie
+nohup bun runtime/daemon.ts > /tmp/log 2>&1 & NEW=$!
+disown $NEW
+until [ -S /home/maxbaluev/.accint/v2.sock ]; do sleep 2; done
+
+# WRONG — Bun.spawn outside the CLI doesn't write daemon.lock with
+# aux_port, so subsequent acc daemon status fails
+
+# WRONG — direct `bun runtime/daemon.ts &` with a wait loop, same shape
+```
+
+If `acc daemon status` returns `fetch_failed:Unable to connect` while
+`v2.sock` exists, the lock is STALE (daemon died, lock not cleaned).
+Recovery: `rm -f /home/maxbaluev/.accint/v2.sock{,.token}` then
+`bun cli/dispatch.ts daemon start`.
+
 ## Dispatch Observation Protocol
 
 After starting `acc task` with `run_in_background: true`, parse
