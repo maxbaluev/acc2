@@ -158,6 +158,11 @@ describe("task_dispatcher", () => {
     expect(dispatchPayload.routing_axes.time_sensitivity).toBeGreaterThanOrEqual(0);
     expect(dispatchPayload.route_scores.opencode_brain).toBeGreaterThanOrEqual(0);
     expect(dispatchPayload.verifier_evidence.target_count).toBeGreaterThanOrEqual(0);
+    // 2026-05-17: dispatch_decided must carry strategy_shadow_ranks so
+    // claude_inline_ready_leaves_view + closure_audited can credit the
+    // top-ranked strategy. The decider attaches the field; this test
+    // pins that the emit path does NOT strip it.
+    expect(Array.isArray(dispatchPayload.strategy_shadow_ranks)).toBe(true);
 
     const taskCommitted = db
       .query("SELECT residual FROM events WHERE kind = 'task_committed' AND task_id = ?")

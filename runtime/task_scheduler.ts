@@ -539,6 +539,7 @@ export const schedulerTick = async (
       routing_axes: decision.routing_axes,
       route_scores: decision.route_scores,
       verifier_evidence: decision.verifier_evidence,
+      strategy_shadow_ranks: decision.strategy_shadow_ranks ?? [],
     };
     if (decision.route === "deferred_blocked") {
       skippedBlocked.push(task.id);

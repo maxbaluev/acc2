@@ -225,6 +225,7 @@ export const dispatchReadyTask = async (
     routing_axes: decision.routing_axes,
     route_scores: decision.route_scores,
     verifier_evidence: decision.verifier_evidence,
+    strategy_shadow_ranks: decision.strategy_shadow_ranks ?? [],
   };
   emitEvent(db, {
     kind: "dispatch_decided",
