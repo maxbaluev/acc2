@@ -1072,6 +1072,11 @@ export const dispatchReadyTask = async (
                 cap: REFINEMENT_DEPTH_CAP,
                 action_artifact_id: actionArtifact.id,
                 verifier_artifact_id: verifierArtifact.id,
+                // FOUNDATIONAL: payload.reason so renderers + classifiers
+                // surface a readable cause instead of "reason=?". Audit
+                // 2026-05-17 — the acc tail renderer reads p.reason; pre-
+                // fix this event landed with no reason field.
+                reason: `refinement_depth_exceeded:depth=${depth} cap=${REFINEMENT_DEPTH_CAP} residual=${residual.toFixed(2)}`,
               } as JsonValue,
             });
           } else {

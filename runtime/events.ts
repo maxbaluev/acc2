@@ -68,6 +68,49 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       );
     }
   }
+  // SINGLE-TERMINAL-PER-TASK GATE (FOUNDATIONAL FIX 2026-05-17):
+  // Live ledger evidence — task A5G7ZPNQV13634WX received BOTH task_committed
+  // (from brain via MCP) at 03:36:51 AND task_failed (from dispatcher
+  // refinement-depth-cap via direct emitEvent) at 03:36:57. Two competing
+  // terminal events for the same task is a substrate-integrity violation:
+  // dispatch_resolved_view classification, closure scoring, credit
+  // distribution, and supervisor logic all assume at most one terminal
+  // per task. The gate refuses the SECOND terminal emit when a first is
+  // already in the ledger. First-wins semantics — whichever code path
+  // reached the substrate first claims the outcome; subsequent emits get
+  // a structured refusal (thrown, since this is a substrate invariant).
+  if (input.kind === "task_committed" || input.kind === "task_failed") {
+    if (input.task_id) {
+      const existing = db
+        .query<{ kind: string; id: string }, [string]>(
+          `SELECT id, kind FROM events
+           WHERE task_id = ? AND kind IN ('task_committed', 'task_failed')
+           ORDER BY ts ASC LIMIT 1`,
+        )
+        .get(input.task_id);
+      if (existing) {
+        // Idempotent re-emit of the SAME terminal kind is allowed (returns
+        // the existing event's id+ts so callers' downstream wiring still
+        // resolves). Conflicting terminal (other kind) is REFUSED to
+        // preserve the substrate invariant.
+        if (existing.kind === input.kind) {
+          const existingTs = db
+            .query<{ ts: string }, [string]>(`SELECT ts FROM events WHERE id = ?`)
+            .get(existing.id);
+          return { id: existing.id, ts: existingTs?.ts ?? "" };
+        }
+        // Test bypass: same env discipline as the kind gate above so
+        // existing test fixtures that intentionally emit conflicting
+        // terminals (testing edge-case classifiers) still work.
+        const isTestMode = process.env.ACC2_BRIDGE_MODE === "mock" || process.env.NODE_ENV === "test";
+        if (!isTestMode) {
+          throw new Error(
+            `terminal_event_conflict:task=${input.task_id};existing=${existing.kind} (id=${existing.id});refused_emit=${input.kind};hint=a task can have at most one terminal event. First-wins semantics — the existing ${existing.kind} stands. If the dispatcher/worker emitting this competing terminal needs to record a non-terminal observation (e.g. refinement-depth concern, late-arriving residual), use a non-terminal kind like dispatcher_violation or knowledge_candidate instead.`,
+          );
+        }
+      }
+    }
+  }
   const id = newId();
   const ts = nowIso();
   const directive_id = input.directive_id ?? id; // self-rooted if not supplied
