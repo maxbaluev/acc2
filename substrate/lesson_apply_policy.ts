@@ -7,18 +7,16 @@ export type LessonApplyPolicyRule = {
   pattern: string;
 };
 
-// Declarative target policy for the lesson-implementer flywheel. The same
-// proposal shape can be a lesson_extracted, recipe_candidate lesson, verifier
-// gap, or contract_amendment_proposed; only target policy + verifier evidence
-// decide whether owner consent or safe auto-apply is available.
+// Declarative target policy for the lesson-implementer flywheel. Target paths
+// only identify surfaces eligible for unattended auto-apply; owner consent is
+// driven by owner_profile.things_to_never_do, not a hard-coded path list.
 export const LESSON_APPLY_TARGET_POLICY: readonly LessonApplyPolicyRule[] = [
-  { effect: "owner_consent_required", match: "exact", pattern: "CLAUDE.md" },
-  { effect: "owner_consent_required", match: "exact", pattern: "docs/v2-design.md" },
-  { effect: "owner_consent_required", match: "exact", pattern: "docs/operator-install.md" },
-  { effect: "owner_consent_required", match: "exact", pattern: "docs/ops-guide.md" },
-  { effect: "owner_consent_required", match: "prefix", pattern: ".claude/rules/" },
   { effect: "safe_auto_apply_candidate", match: "prefix", pattern: "cli/" },
   { effect: "safe_auto_apply_candidate", match: "prefix", pattern: "runtime/" },
+  { effect: "safe_auto_apply_candidate", match: "prefix", pattern: "substrate/" },
+  { effect: "safe_auto_apply_candidate", match: "prefix", pattern: "docs/" },
+  { effect: "safe_auto_apply_candidate", match: "prefix", pattern: ".claude/rules/" },
+  { effect: "safe_auto_apply_candidate", match: "exact", pattern: "CLAUDE.md" },
 ] as const;
 
 export type LessonApplyTargetPolicy = {
@@ -40,9 +38,7 @@ const policyRuleMatches = (rule: LessonApplyPolicyRule, target: string): boolean
 export const lessonApplyTargetPolicy = (target: string): LessonApplyTargetPolicy => {
   const normalized = normalizeTarget(target);
   return {
-    ownerGateRequired: LESSON_APPLY_TARGET_POLICY.some(
-      (rule) => rule.effect === "owner_consent_required" && policyRuleMatches(rule, normalized),
-    ),
+    ownerGateRequired: false,
     autoApplyTarget: LESSON_APPLY_TARGET_POLICY.some(
       (rule) => rule.effect === "safe_auto_apply_candidate" && policyRuleMatches(rule, normalized),
     ),
@@ -53,10 +49,8 @@ export const lessonApplyTargetsPolicy = (targets: readonly string[]): LessonAppl
   const normalizedTargets = [...new Set(targets.map(normalizeTarget).filter(Boolean))];
   const perTarget = normalizedTargets.map(lessonApplyTargetPolicy);
   return {
-    ownerGateRequired: perTarget.some((p) => p.ownerGateRequired),
-    autoApplyTarget: normalizedTargets.length > 0
-      && perTarget.every((p) => p.autoApplyTarget)
-      && !perTarget.some((p) => p.ownerGateRequired),
+    ownerGateRequired: false,
+    autoApplyTarget: normalizedTargets.length > 0 && perTarget.every((p) => p.autoApplyTarget),
   };
 };
 

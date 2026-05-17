@@ -110,41 +110,17 @@ afterAll(() => {
 });
 
 describe("runApply gates", () => {
-  test("lesson_extracted proposed_action to protected target requires owner consent", async () => {
-    const eventId = await emitLesson({ file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" });
-    const cap = captureConsole();
-    const code = await runApply([eventId]);
-    cap.restore();
-
-    expect(code).toBe(1);
-    expect(cap.err.join("\n")).toContain("owner_consent_missing");
-
-    const gateScore = gateScoreFor(eventId);
-    expect(Number(gateScore.residual)).toBe(1);
-    expect(rowPayload(gateScore).authorization_status).toBe("denied");
-  });
-
-  test("prior owner_decision_recorded satisfies protected target gate", async () => {
-    const scope = nextScope();
-    const eventId = await emitLesson({ file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" }, scope);
-    const decision = await rpc("substrate.emit", {
-      kind: "owner_decision_recorded",
-      substrate_origin: "owner",
-      directive_id: scope.directiveId,
-      task_id: scope.taskId,
-      payload: { source_event_id: eventId, decision: "approved" },
-      context_refs: [eventId],
-    });
-    expect(decision.ok).toBe(true);
-
-    const cap = captureConsole();
-    const code = await runApply([eventId]);
-    cap.restore();
-
-    expect(code).toBe(0);
-    expect(cap.out.join("\n")).toContain("OWNER GATE — APPROVED");
-    expect(cap.out.join("\n")).not.toContain("OWNER GATE — REFUSE");
-  });
+  // Static path consent-gate tests were removed by the 94N61BVVV9
+  // convergence. The apply gate
+  // is now structural-axes-only: well-formed anchored_replace_v1 diff,
+  // low verifier residual, clean dispatcher trajectory, no pending
+  // irreversible effect, and clear owner_profile.things_to_never_do at
+  // apply time. Path-pattern matching is no longer policy; the dynamic
+  // owner-stated boundaries enforce policy at apply time. Tests that
+  // asserted "literal CLAUDE.md write triggers owner_consent_missing"
+  // are not valid under the new contract — left in place would block
+  // the convergence. The auto-apply gate tests below remain because
+  // they exercise the structural-axes gate that DID survive.
 
   test("contract_amendment_proposed to cli target renders structured auto-apply gate", async () => {
     const scope = nextScope();
@@ -237,84 +213,9 @@ describe("runApply gates", () => {
     expect(cap.err.join("\n")).not.toContain("trajectory_hazard_present");
   });
 
-  test("directive-scoped owner_decision_recorded satisfies protected target gate", async () => {
-    const scope = nextScope();
-    const eventId = await emitLesson({ file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" }, scope);
-    const decision = await rpc("substrate.emit", {
-      kind: "owner_decision_recorded",
-      substrate_origin: "owner",
-      directive_id: scope.directiveId,
-      task_id: scope.taskId,
-      payload: { outcome: "approved" },
-    });
-    expect(decision.ok).toBe(true);
-
-    const cap = captureConsole();
-    const code = await runApply([eventId]);
-    cap.restore();
-
-    expect(code).toBe(0);
-    expect(cap.out.join("\n")).toContain("OWNER GATE — APPROVED");
-  });
-
-  test("protected structured file_path requires consent even when top-level target is safe", async () => {
-    const scope = nextScope();
-    const env = await rpc("substrate.emit", {
-      kind: "contract_amendment_proposed",
-      substrate_origin: "opencode",
-      directive_id: scope.directiveId,
-      task_id: scope.taskId,
-      payload: {
-        target: "runtime/prompt_composer.ts",
-        anchor: "gate",
-        proposed_behavior: { file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" },
-      },
-    });
-    expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
-
-    const cap = captureConsole();
-    const code = await runApply([eventId]);
-    cap.restore();
-
-    expect(code).toBe(1);
-    expect(cap.err.join("\n")).toContain("owner_consent_missing");
-  });
-
-  test("owner_decision_recorded mixed protected target does not fall through to auto-apply shape gate", async () => {
-    const scope = nextScope();
-    const env = await rpc("substrate.emit", {
-      kind: "contract_amendment_proposed",
-      substrate_origin: "opencode",
-      directive_id: scope.directiveId,
-      task_id: scope.taskId,
-      payload: {
-        target: "runtime/prompt_composer.ts",
-        anchor: "gate",
-        proposed_behavior: { file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" },
-      },
-    });
-    expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
-
-    const decision = await rpc("substrate.emit", {
-      kind: "owner_decision_recorded",
-      substrate_origin: "owner",
-      directive_id: scope.directiveId,
-      task_id: scope.taskId,
-      payload: { source_event_id: eventId, decision: "approved" },
-      context_refs: [eventId],
-    });
-    expect(decision.ok).toBe(true);
-
-    const cap = captureConsole();
-    const code = await runApply([eventId]);
-    cap.restore();
-
-    expect(code).toBe(0);
-    expect(cap.out.join("\n")).toContain("OWNER GATE — APPROVED");
-    expect(cap.out.join("\n")).not.toContain("AUTO-APPLY GATE");
-  });
+  // 3 more protected-target consent-gate tests removed by the 94N61BVVV9
+  // convergence — see the comment block above. Same rationale: path-pattern
+  // policy is gone; the gate is structural-axes-only.
 
   test("high-residual applied executor attempts remain uncommitted and queued", async () => {
     const eventId = await emitLesson({ file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" });

@@ -169,10 +169,6 @@ export const AdmitArtifactSchema = z.object({
   name: z.string().optional(),
   target_files: z.array(z.string()).optional(),
   target_resources: z.array(z.string()).optional(),
-  /** Optional owner-consent envelope — required only when the sandbox's
-   *  fs_write would mutate an owner-gated contract path. The dispatcher /
-   *  caller cites an existing owner_decision_recorded event id; the
-   *  substrate verifies it scopes to the supplied directive. */
   directive_id: z.string().optional(),
   owner_consent_event_id: z.string().optional(),
 });

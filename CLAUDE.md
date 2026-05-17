@@ -40,7 +40,7 @@ Every action is an act four-tuple: intent, action_artifact_id, verifier_artifact
 
 The runtime is the abstraction. The brain writes code for bun, uv, or camofox-browser; the substrate runs it under the declared sandbox; the verifier returns residual in [0,1]. Residual plus open-ended breakdown/reliability_profile is the truth-bearing signal.
 
-Do not add fixed predicate enums, refusal taxonomies, or pre-check gates when a verifier residual + breakdown can score the same thing. Owner consent gates who may change protected targets; verifiers score whether the change worked.
+Do not add fixed predicate enums, refusal taxonomies, or pre-check gates when a verifier residual + breakdown can score the same thing. Owner consent gates only owner-stated dynamic policy; verifiers score whether the change worked.
 
 ## Dispatch And Recursion
 
@@ -68,7 +68,7 @@ When active or recently terminal dispatches exist, surface a compact Dispatch Tr
 
 Surface pending owner decisions last. When unresolved owner_input_required, hidl_action_required, owner-gated contract_amendment_proposed, described-only proposals, or other owner choices remain, end the turn with a concise decision card. When none remain, explicitly close with no pending decisions.
 
-Protected targets require explicit owner consent before apply: CLAUDE.md, docs/v2-design.md, .claude/rules/*.md, docs/operator-install.md, and docs/ops-guide.md.
+Apply gates evaluate structural axes, not fixed file-path lists: well-formed anchored_replace_v1 diffs, low verifier residual, clean dispatcher trajectory, no pending irreversible effect, and clear owner_profile.things_to_never_do. Refusing a malformed proposal is non-destructive and must not require owner consent.
 
 ## Knowledge And Credit
 

@@ -224,7 +224,7 @@ Run this short ritual when supervising a live AccInt v2 install:
 2. `acc doctor` after code updates, daemon restarts, or dependency changes.
 3. `acc trust` to inspect the trust/autonomy surface: `autonomy_score`, recipe extraction and replay success, knowledge promotion/demotion, artifact posterior movement, rolling closure residuals, and amendment-apply outcomes.
 4. `acc events --kind dispatcher_violation --limit 20` when `acc trust` or `acc watch` shows regressions.
-5. Review owner-gated `contract_amendment_proposed` rows before applying changes to `CLAUDE.md`, `docs/v2-design.md`, `.claude/rules/*.md`, `docs/operator-install.md`, or `docs/ops-guide.md`.
+5. Review structural apply evidence for `contract_amendment_proposed` rows: anchored_replace_v1 diff shape, verifier residual, dispatcher trajectory, irreversible-effect state, and owner_profile.things_to_never_do. Refusing malformed proposals records a non-destructive outcome and does not require owner consent.
 
 The ritual is evidence-oriented: trust increases when replay succeeds, closure residuals stay low, posteriors move after scored actions, and amendments apply with verifier-passing `applied_change_committed` rows.
 

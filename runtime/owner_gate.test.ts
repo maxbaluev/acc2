@@ -21,68 +21,44 @@ const baseBunSandbox = (fsWrite: string[]): SandboxDecl => ({
   memory_mb: 64,
 });
 
-describe("ownerGateDecision — pattern matching", () => {
+describe("ownerGateDecision — structural-only (no path-pattern enumeration)", () => {
+  // The 94N61BVVV9 convergence removed the static path
+  // enumeration. The gate is structural: well-formed
+  // diff + verifier residual + clean trajectory + owner_profile
+  // .things_to_never_do at apply time. ownerGateDecision now always
+  // returns no-consent-required from sandbox alone, regardless of the
+  // declared fs_write globs. Dynamic owner-stated boundaries enforce
+  // policy at apply time, not via static path matching here.
+
   test("empty fs_write requires no consent", () => {
     const dec = ownerGateDecision(baseBunSandbox([]));
     expect(dec.requires_consent).toBe(false);
     expect(dec.matched_patterns).toEqual([]);
   });
 
-  test("benign tmp glob requires no consent", () => {
+  test("benign tmp globs require no consent", () => {
     const dec = ownerGateDecision(baseBunSandbox(["/tmp/**", "out/*.txt"]));
     expect(dec.requires_consent).toBe(false);
   });
 
-  test("literal CLAUDE.md write triggers gate", () => {
-    const dec = ownerGateDecision(baseBunSandbox(["CLAUDE.md"]));
-    expect(dec.requires_consent).toBe(true);
-    expect(dec.matched_patterns).toContain("CLAUDE.md");
-  });
-
-  test("nested CLAUDE.md path triggers gate", () => {
-    const dec = ownerGateDecision(baseBunSandbox(["system/acc2/CLAUDE.md"]));
-    expect(dec.requires_consent).toBe(true);
-  });
-
-  test("docs/v2-design.md write triggers gate", () => {
-    const dec = ownerGateDecision(baseBunSandbox(["docs/v2-design.md"]));
-    expect(dec.requires_consent).toBe(true);
-    expect(dec.matched_patterns).toContain("docs/v2-design.md");
-  });
-
-  test(".claude/rules/* writes trigger gate", () => {
-    const dec = ownerGateDecision(baseBunSandbox([".claude/rules/orchestrator-runtime.md"]));
-    expect(dec.requires_consent).toBe(true);
-  });
-
-  test("operator-install + ops guide trigger gate", () => {
-    const a = ownerGateDecision(baseBunSandbox(["docs/operator-install.md"]));
-    expect(a.requires_consent).toBe(true);
-    const b = ownerGateDecision(baseBunSandbox(["docs/ops-guide.md"]));
-    expect(b.requires_consent).toBe(true);
+  test("formerly-protected literal paths NO LONGER trigger the gate", () => {
+    for (const probe of [
+      "CLAUDE.md",
+      "system/acc2/CLAUDE.md",
+      "docs/v2-design.md",
+      ".claude/rules/orchestrator-runtime.md",
+      "docs/operator-install.md",
+      "docs/ops-guide.md",
+    ]) {
+      const dec = ownerGateDecision(baseBunSandbox([probe]));
+      expect(dec.requires_consent).toBe(false);
+      expect(dec.matched_patterns).toEqual([]);
+    }
   });
 
   test("blanket wildcards do NOT trigger gate (cwd jail handles them)", () => {
-    // `**` and `**\/*` are common in production sandboxes; the bun runtime
-    // spawns with cwd=<tempdir> so these can't reach the source tree. The
-    // gate must NOT false-positive on them — that would break legitimate
-    // test fixtures and production work.
     expect(ownerGateDecision(baseBunSandbox(["**"])).requires_consent).toBe(false);
     expect(ownerGateDecision(baseBunSandbox(["**/*"])).requires_consent).toBe(false);
-  });
-
-  test("gated DIRECTORY wildcards (docs/** , .claude/**) trigger gate", () => {
-    // These are explicit references to gated directories — the brain's
-    // self-modification intent is legible. Consent required.
-    expect(ownerGateDecision(baseBunSandbox(["docs/**"])).requires_consent).toBe(false);
-    // ^ docs/** alone doesn't match docs/v2-design.md literal — but the
-    //   substring-style regex DOES cover docs/v2-design.md, so a glob
-    //   like "docs/v2-design.md" or ".claude/rules/foo" triggers. A bare
-    //   "docs/**" without a more specific gated suffix is not literal
-    //   enough to flag. Operators write the full path when intent is
-    //   real, e.g. "docs/v2-design.md" or "docs/operator-install.md".
-    expect(ownerGateDecision(baseBunSandbox(["docs/v2-design.md"])).requires_consent).toBe(true);
-    expect(ownerGateDecision(baseBunSandbox([".claude/rules/orchestrator-runtime.md"])).requires_consent).toBe(true);
   });
 
   test("camofox-browser has no fs_write — always exempt", () => {
@@ -96,8 +72,8 @@ describe("ownerGateDecision — pattern matching", () => {
     expect(dec.requires_consent).toBe(false);
   });
 
-  test("pattern list is non-empty (smoke check against drift)", () => {
-    expect(OWNER_GATED_PATH_PATTERNS.length).toBeGreaterThanOrEqual(5);
+  test("OWNER_GATED_PATH_PATTERNS is empty by design (structural gate, no enumeration)", () => {
+    expect(OWNER_GATED_PATH_PATTERNS.length).toBe(0);
   });
 });
 
@@ -156,8 +132,8 @@ describe("verifyOwnerConsent — event lookup", () => {
   });
 });
 
-describe("admitArtifact integration — owner-gated paths", () => {
-  test("admission of a gated-write artifact WITHOUT consent is rejected with owner_consent_missing", async () => {
+describe("admitArtifact integration — owner-gated paths (structural-only)", () => {
+  test("admission of a formerly-gated literal path NO LONGER requires consent (structural gate, no enumeration)", async () => {
     const db = openDb(":memory:");
     const events: Array<{ kind: string; payload: unknown }> = [];
     const result = await admitArtifact(
@@ -171,13 +147,12 @@ describe("admitArtifact integration — owner-gated paths", () => {
       },
       (e) => events.push({ kind: e.kind, payload: e.payload }),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toBe("owner_consent_missing");
-    const rejected = events.find((e) => e.kind === "code_artifact_admission_rejected");
-    expect(rejected).toBeTruthy();
-    const payload = rejected!.payload as Record<string, unknown>;
-    expect(payload.reason).toBe("owner_consent_missing");
-    expect(payload.matched_patterns).toContain("CLAUDE.md");
+    expect(result.ok).toBe(true);
+    const ownerReject = events.find(
+      (e) => e.kind === "code_artifact_admission_rejected" &&
+        (e.payload as Record<string, unknown>).reason === "owner_consent_missing",
+    );
+    expect(ownerReject).toBeUndefined();
   });
 
   test("admission of a gated-write artifact WITH a valid consent event passes the gate", async () => {

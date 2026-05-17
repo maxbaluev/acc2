@@ -282,7 +282,7 @@ const POLICY_BUNDLE_SEEDS: PolicyBundleSeed[] = [
   "    auto_apply_eligible=1 requires an action_scored auto_apply_gate residual < 0.3",
   "    across freshness, semantic_duplicate, behavioral_novelty, necessity, and adversarial axes.",
   "    The gate REFUSES unstructured prose for repo:cli/* + repo:runtime/* resources (owner-consent targets",
-  "    like CLAUDE.md require explicit approval regardless).",
+  "    owner_profile.things_to_never_do can require explicit approval).",
   "    Freeform prose is fine ONLY for lesson_extracted (process insights, not code edits).",
   "",
   "  CITATIONS (action_predicted.context_refs[]):",

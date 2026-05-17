@@ -7,7 +7,11 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { McpMethods } from "../mcp_server";
+// Import from the leaf types module, not the mcp_server barrel, to avoid
+// the runtime cycle: bridge/config → mcp_server/index → substrate_tools →
+// (fixtures/bun runtime) → bridge → bridge/config. The barrel re-exports
+// McpMethods anyway; types.ts is the canonical leaf source.
+import { McpMethods } from "../mcp_server/types";
 
 // ── Real opencode subprocess defaults (Phase E §12) ───────────────
 

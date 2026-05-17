@@ -811,7 +811,7 @@ CREATE VIEW IF NOT EXISTS recipes_latest_view AS
 // lesson_implementer_queue_view — derived inbox for the lesson-implementer
 // flywheel. It projects lesson_extracted / contract_amendment_proposed rows
 // that have not reached applied_change_committed. Owner gating is derived
-// from target path + owner_decision_recorded rows. Auto-apply remains fail-closed
+// from dynamic owner_profile policy at apply time. Auto-apply remains fail-closed
 // until an action_scored auto_apply_gate verifier reports low residual across
 // freshness, duplicate, behavioral novelty, necessity, and adversarial axes.
 // No posterior or queue table is stored; the ledger remains the source.
@@ -1214,15 +1214,20 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
   target_policy AS (
     SELECT
       s.*,
-      CASE WHEN EXISTS (
-        SELECT 1 FROM apply_target_policy r
-        JOIN target_candidates tc ON tc.source_event_id = s.source_event_id
-        WHERE r.effect = 'owner_consent_required'
-          AND (
-            (r.match = 'exact' AND (CASE WHEN tc.target LIKE 'repo:%' THEN substr(tc.target, 6) ELSE tc.target END) = r.pattern)
-            OR (r.match = 'prefix' AND (CASE WHEN tc.target LIKE 'repo:%' THEN substr(tc.target, 6) ELSE tc.target END) LIKE r.pattern || '%')
-          )
-      ) THEN 1 ELSE 0 END AS owner_gate_required,
+      -- Owner gate is structural: no path-pattern enumeration. The
+      -- payload's explicit owner_consent_required flag is the dynamic
+      -- signal a producer (brain or orchestrator) sets when the proposal
+      -- hits owner_profile.things_to_never_do or any other dynamic policy
+      -- the apply-side decided requires consent. Absent that explicit
+      -- flag the queue treats the proposal as not-owner-gated and lets
+      -- the apply-time structural axes (residual, trajectory, diff
+      -- shape) carry the decision.
+      CASE
+        WHEN json_extract(s.payload, '$.owner_consent_required') = 1
+          OR json_extract(s.payload, '$.owner_consent_required') = 'true'
+        THEN 1
+        ELSE 0
+      END AS owner_gate_required,
       CASE WHEN EXISTS (
         SELECT 1 FROM target_candidates tc
         WHERE tc.source_event_id = s.source_event_id
@@ -1239,15 +1244,7 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
               )
           )
       )
-      AND NOT EXISTS (
-        SELECT 1 FROM apply_target_policy r
-        JOIN target_candidates tc ON tc.source_event_id = s.source_event_id
-        WHERE r.effect = 'owner_consent_required'
-          AND (
-            (r.match = 'exact' AND (CASE WHEN tc.target LIKE 'repo:%' THEN substr(tc.target, 6) ELSE tc.target END) = r.pattern)
-            OR (r.match = 'prefix' AND (CASE WHEN tc.target LIKE 'repo:%' THEN substr(tc.target, 6) ELSE tc.target END) LIKE r.pattern || '%')
-          )
-      ) THEN 1 ELSE 0 END AS auto_apply_target
+      THEN 1 ELSE 0 END AS auto_apply_target
     FROM shaped s
   )
   SELECT
@@ -1299,8 +1296,6 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       THEN 1 ELSE 0
     END AS auto_apply_eligible,
     CASE
-      WHEN p.owner_gate_required = 1
-      THEN 'not_auto_apply_owner_gated'
       WHEN p.auto_apply_target = 0
       THEN 'not_auto_apply_target'
       WHEN COALESCE(h.hazard_count, 0) > 0
@@ -1320,16 +1315,12 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       ELSE 'auto_apply_eligible'
     END AS auto_apply_gate_verdict,
     CASE
-      WHEN p.owner_gate_required = 1 AND oa.approval_scope IS NULL
-      THEN 'blocked_owner_consent'
       WHEN p.auto_apply_target = 1
        AND COALESCE(h.hazard_count, 0) > 0
       THEN 'blocked_trajectory_hazard'
       WHEN p.auto_apply_target = 1
        AND p.structured_change = 0
       THEN 'blocked_unstructured_proposal'
-      WHEN p.owner_gate_required = 1
-      THEN 'authorized_owner'
       WHEN p.auto_apply_target = 1
        AND gs.auto_apply_gate_event_id IS NULL
       THEN 'blocked_auto_apply_gate_missing'
@@ -1346,8 +1337,6 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       ELSE 'manual_review'
     END AS apply_gate_status,
     CASE
-      WHEN p.owner_gate_required = 1 AND oa.approval_scope IS NULL
-      THEN 'owner_consent_missing'
       WHEN p.auto_apply_target = 1
        AND COALESCE(h.hazard_count, 0) > 0
       THEN 'trajectory_hazard_present'

@@ -189,6 +189,29 @@ const resolveOwnerConsentFromSubstrate = async (
   });
 };
 
+const normalizePolicyTarget = (target: string): string => {
+  const trimmed = target.trim();
+  return (trimmed.startsWith("repo:") ? trimmed.slice(5) : trimmed).replace(/^\.\//, "").toLowerCase();
+};
+
+const ownerProfileThingsToNeverDoBlock = async (targets: readonly string[]): Promise<string | null> => {
+  const normalizedTargets = targets.map(normalizePolicyTarget).filter(Boolean);
+  if (normalizedTargets.length === 0) return null;
+  const env = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
+  const row = env.ok && Array.isArray(env.result) ? (env.result[0] as { payload?: unknown } | undefined) : undefined;
+  const payload = parsePayload(row?.payload);
+  const rules = Array.isArray(payload.things_to_never_do) ? payload.things_to_never_do : [];
+  for (const raw of rules) {
+    if (typeof raw !== "string") continue;
+    const rule = raw.toLowerCase();
+    for (const target of normalizedTargets) {
+      const basename = target.split("/").pop() ?? target;
+      if (rule.includes(target) || (basename.length > 0 && rule.includes(basename))) return raw;
+    }
+  }
+  return null;
+};
+
 const structuredChangeProposal = (payload: Record<string, unknown>, target: string): boolean => {
   const proposed = payload.proposed_behavior ?? payload.proposed_action;
   if (!proposed || typeof proposed !== "object") return false;
@@ -258,7 +281,7 @@ const renderGateBlock = (
     `APPLY GATES`,
     `  owner_gate.required: ${auth.ownerGateRequired}`,
     `  owner_gate.approved: ${auth.ownerApproved}`,
-    `  owner_gate.rule: CLAUDE.md, docs/v2-design.md, docs/operator-install.md, docs/ops-guide.md, and .claude/rules/* require explicit owner consent before apply.`,
+    `  owner_gate.rule: dynamic owner_profile.things_to_never_do entries can require explicit owner approval; static path enumeration is not policy.`,
     `  cli_runtime_gate.target_in_scope: ${policy.autoApplyTarget}`,
     `  cli_runtime_gate.rule: repo:cli/* and repo:runtime/* may auto-apply only with structured {target_resource|resource_uri, anchor, diff:{kind:\"anchored_replace_v1\", before, after}}, verifier residual < 0.3, and no dispatcher_violation or irreversible_effect_recorded in the trajectory. Legacy file_path is accepted only as a fallback for existing proposals.`,
     `  cli_runtime_gate.structured_change: ${structured || !policy.autoApplyTarget}`,
@@ -384,7 +407,7 @@ const emitApplyDenied = async (
 const authorizeApply = async (
   ev: EventRow,
   eventId: string,
-  opts: { target?: string },
+  opts: { target?: string; status?: string },
 ): Promise<ApplyAuthorization | { ok: false; code: number }> => {
   const payload = parsePayload(ev.payload);
   const target = opts.target || targetFromPayload(payload);
@@ -399,14 +422,18 @@ const authorizeApply = async (
     return { ok: false, code: 1 };
   }
   const policy = lessonApplyTargetsPolicy(targets);
-  const ownerGateRequired = policy.ownerGateRequired || boolish(queueRow?.owner_gate_required);
   const ownerApproved = await resolveOwnerConsentFromSubstrate(eventId, ev.directive_id, queueRow);
-  if (ownerGateRequired && !ownerApproved) {
-    return { ok: false, code: await emitApplyDenied(ev, eventId, "owner_consent_missing", target, {
-      ownerGateRequired,
-      ownerApproved,
-      autoApplyTarget: policy.autoApplyTarget,
-    }) };
+  let ownerGateRequired = false;
+  if (opts.status !== "refused") {
+    const ownerRule = await ownerProfileThingsToNeverDoBlock(targets);
+    ownerGateRequired = ownerRule !== null;
+    if (ownerRule && !ownerApproved) {
+      return { ok: false, code: await emitApplyDenied(ev, eventId, "owner_policy_things_to_never_do", target, {
+        ownerGateRequired,
+        ownerApproved,
+        autoApplyTarget: policy.autoApplyTarget,
+      }) };
+    }
   }
   // Universal verifier replaces the gate stack (owner-approved 2026-05-16,
   // "we do not need gates, we have verify universal system!"). The two
@@ -418,8 +445,8 @@ const authorizeApply = async (
   //   - structured_proposed_behavior_required refused prose lessons on
   //     repo:runtime/* even when the orchestrator semantically applied the
   //     right edit and a commit existed touching the target.
-  // Owner consent (above) stays — it's orthogonal: it gates WHO can change
-  // CLAUDE.md / docs / .claude/rules, not WHETHER the change is correct.
+  // Owner consent (above) stays only for dynamic owner-stated policy,
+  // not fixed file paths; residuals decide whether the change is correct.
   // Residual + breakdown (v2-design.md §6) decides correctness; posteriors
   // close the loop. Auto_apply_worker.ts retains its own structured-change
   // filter for autonomous landings — this surface is operator-initiated.
@@ -447,13 +474,9 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean; aut
   const lessonKind = (payload.lesson_kind as string | undefined) ?? "";
 
   const policy = lessonApplyTargetsPolicy(targetCandidatesFromPayload(payload));
-  const ownerGateLine = policy.ownerGateRequired && !opts.ownerApproved
-    ? `OWNER GATE — REFUSE: this target is in owner-consent territory and no owner_decision_recorded approval exists for the source event or directive. STOP, emit a clarifying lesson_extracted, and return {"status":"refused","reason":"owner_consent_missing"}.`
-    : policy.ownerGateRequired
-      ? `OWNER GATE — APPROVED: owner consent is recorded for this source event.`
-    : policy.autoApplyTarget
-        ? `AUTO-APPLY GATE — CLI/RUNTIME: proceed only if the queue row is auto_apply_eligible, meaning structured target/anchor/diff passed and an action_scored auto_apply_gate residual is < 0.3 across freshness, semantic_duplicate, behavioral_novelty, necessity, and adversarial axes.`
-      : `(target outside owner-consent territory — apply directly)`;
+  const ownerGateLine = policy.autoApplyTarget
+    ? `AUTO-APPLY GATE — CLI/RUNTIME: proceed only if the queue row is auto_apply_eligible, meaning structured target/anchor/diff passed and an action_scored auto_apply_gate residual is < 0.3 across freshness, semantic_duplicate, behavioral_novelty, necessity, and adversarial axes.`
+      : `(target outside auto-apply surface — apply directly unless owner_profile.things_to_never_do blocks it)`;
 
   return [
     `You are a Claude Code Agent subagent running in run_in_background mode.`,
@@ -658,7 +681,7 @@ export const recordApplyOutcome = async (opts: {
   const actionArtifactId = opts.actionArtifactId || DEFAULT_APPLY_ACTION_ARTIFACT_ID;
   const verifierArtifactId = opts.verifierArtifactId || DEFAULT_APPLY_VERIFIER_ARTIFACT_ID;
   const payload = parsePayload(ev.payload);
-  const auth = await authorizeApply(ev, opts.eventId, { target: opts.target });
+  const auth = await authorizeApply(ev, opts.eventId, { target: opts.target, status });
   if (!auth.ok) return { ok: false, reason: "authorization denied", exitCode: auth.code };
   const eventId = opts.eventId;
 
