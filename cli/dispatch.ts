@@ -411,6 +411,10 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     const { runApply } = await import("./apply");
     return runApply(argv.slice(1));
   }
+  if (cmd === "observe") {
+    const { runObserveOutcome } = await import("./observe_outcome");
+    return runObserveOutcome(argv.slice(1));
+  }
   if (cmd === "owner") {
     const { runOwnerPolicy } = await import("./owner_policy");
     return runOwnerPolicy(argv.slice(1));

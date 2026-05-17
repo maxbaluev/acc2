@@ -205,6 +205,10 @@ describe.skipIf(!DAEMON_OK)("TUI integration harness (real substrate)", () => {
       { argv: ["whoami", "--json"],    rootShape: "object" as const },
       { argv: ["status"],               rootShape: "any" as const },
       { argv: ["changes", "24h", "--json"], rootShape: "array" as const },
+      // observe --help proves the verb is wired (the OWNROBSV05 loop-
+      // closing primitive). The full emit path requires a live event_id
+      // and is covered by manual probe under cli/observe_outcome.ts.
+      { argv: ["observe", "--help"], rootShape: "any" as const },
     ];
     for (const p of probes) {
       const r = spawnSync("bun", ["cli/dispatch.ts", ...p.argv], {

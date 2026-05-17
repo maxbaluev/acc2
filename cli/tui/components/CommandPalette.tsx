@@ -4,15 +4,16 @@
 // `acc <words>` invocation spawned as a Bash subprocess. There is no
 // parallel command vocabulary. Supported (whitelist):
 //
-//   task <words>      → acc task "<words>"
-//   apply <id>        → acc apply <id>
-//   decline <id>      → acc apply <id> --decline
-//   whoami            → acc whoami
-//   status            → acc status
-//   directive <id>    → acc directive <id>
-//   changes [7d|24h]  → acc changes [window]
-//   pending           → acc admin pending-decisions
-//   q | quit | exit   → exit the TUI
+//   task <words>          → acc task "<words>"
+//   apply <id>            → acc apply <id>
+//   decline <id>          → acc apply <id> --decline
+//   observe <id> <v> [r]  → acc observe <id> --verdict <v> --reason <r>
+//   whoami                → acc whoami
+//   status                → acc status
+//   directive <id>        → acc directive <id>
+//   changes [7d|24h]      → acc changes [window]
+//   pending               → acc admin pending-decisions
+//   q | quit | exit       → exit the TUI
 //
 // Anything else is passed through verbatim as `acc <text>`. The output
 // of the spawned process is captured into the toast queue so the
@@ -45,6 +46,15 @@ export const parseCommand = (line: string): CommandIntent => {
   if (head === "apply" || head === "decline") {
     const id = parts[1] ?? "";
     const argv = head === "decline" ? ["apply", id, "--decline"] : ["apply", id];
+    return { kind: "shell", argv, raw: trimmed };
+  }
+  if (head === "observe") {
+    // observe <event_id> <verdict> [reason...]
+    const id = parts[1] ?? "";
+    const verdict = (parts[2] ?? "").toLowerCase();
+    const reason = parts.slice(3).join(" ").trim();
+    const argv = ["observe", id, "--verdict", verdict];
+    if (reason.length > 0) argv.push("--reason", reason);
     return { kind: "shell", argv, raw: trimmed };
   }
   if (head === "whoami") return { kind: "shell", argv: ["whoami"], raw: trimmed };
