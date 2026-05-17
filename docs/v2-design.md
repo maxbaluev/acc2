@@ -900,7 +900,7 @@ This collapses what was previously twelve typed adapters into one universal mech
 
 ## 7. Substrate-Synthesized Knowledge Merger (Model D, U2)
 
-Both LLMs (Claude root, Claude sub, opencode) propose `knowledge_candidate` events. Substrate auto-promotes via outcome correlation.
+Both LLMs (Claude root, Claude sub, opencode) propose `knowledge_candidate` events into one shared posterior space. Candidate clustering is keyed by goal-shape semantic claim + target resource/domain + anchor set, with `substrate_origin` / `llm_source` retained as evidence provenance rather than ownership. When distinct origins agree on the same key, the extractor attaches corroborating evidence and promotes or synthesizes one canonical row with a combined posterior_alpha update. When distinct origins conflict on the same key, the extractor emits `contradictory_candidates` for adjudication instead of silently choosing a source-local winner. Substrate auto-promotes via outcome correlation.
 
 Grounded world-model claims are knowledge candidates unless a later measured need proves otherwise. A candidate may predict what will happen, assert a causal mechanism, estimate hidden state, name a validity horizon, and later cite observations that calibrate it. This keeps world modeling provisional and posterior-scored: the substrate records claims about resources, people, environments, organizations, and software as falsifiable event payloads, then moves their posteriors when `action_scored`, `artifact_observed`, `owner_input_received`, or other evidence confirms or contradicts them.
 

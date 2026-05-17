@@ -17,7 +17,7 @@ The event ledger is the universal state. If it is not in an event row, it does n
 Every non-trivial owner intent enters one loop:
 
 1. Capture the owner words as owner_input_received / directive_opened through acc task or the substrate ingress already dispatching this leaf.
-2. Route through the substrate. The orchestrator does not pre-decide whether the work is one-shot, decomposed, clarified, replayed, or deferred.
+2. Route through the substrate. The orchestrator does not pre-decide whether the work is one-shot, decomposed, clarified, replayed, or deferred. Directive ingress emits intent_classified before prompt composition; the classification selects the prompt template and constrains eligible emission lanes, with forbidden attempts recorded as lane_routing_refused.
 3. Let dispatch choose by residual evidence, target risk, available recipes, owner-control signals, and current substrate state.
 4. Execute only the lane assigned: substrate_replay, claude_inline, opencode_brain, clarification/owner input, or deferred_blocked.
 5. Observe the ledger and surface milestones or decisions without duplicating the scheduler.
@@ -28,7 +28,7 @@ Narrow inline exceptions are operator health reads, trivial known facts directly
 
 Owner: source of intent and consent.
 
-Claude Code: conversational orchestrator and inline mechanical hand. Capture intent, emit owner-visible events, execute dispatched leaf work, and surface decisions.
+Claude Code: conversational orchestrator and inline implementer. Capture intent, emit owner-visible events, execute dispatched leaf work, and surface decisions. For Claude-side apply, TUI edit, and other inline mutation paths, emit the same canonical action_predicted, action_scored, and candidate_confirmed event shapes as opencode before applied_change_committed, with citations that close the create-retrieve-mutate-credit chain.
 
 Brain (opencode -> gpt-5.5): cycle-1 strategic synthesizer. It reads the substrate-composed prompt, emits one cycle of decomposition/actions/knowledge/refinement edges, and pulls bounded state through MCP.
 
@@ -36,11 +36,11 @@ Substrate: daemon + SQLite + MCP operator. It decides routes, composes prompts, 
 
 ## Act And Verification
 
-Every action is an act four-tuple: intent, action_artifact_id, verifier_artifact_id, predicted_residual.
+Every action is an act four-tuple: intent, action_artifact_id, verifier_artifact_id, predicted_residual. verifier_artifact_id may reference deterministic code, a peer Claude act, a peer opencode act, owner confirmation, or an external signal; action_scored records verifier_kind while residual remains the universal score. The verifier_artifact_id may reference a deterministic runtime artifact or a canonical verification act emitted by Claude, opencode, the owner, or an external signal source.
 
-The runtime is the abstraction. The brain writes code for bun, uv, or camofox-browser; the substrate runs it under the declared sandbox; the verifier returns residual in [0,1]. Residual plus open-ended breakdown/reliability_profile is the truth-bearing signal.
+The runtime is the abstraction. The brain writes code for bun, uv, or camofox-browser; the substrate runs it under the declared sandbox; the verifier returns residual in [0,1]. Residual plus open-ended breakdown/reliability_profile is the truth-bearing signal. action_scored records verifier_kind as one of deterministic_code, peer_llm_claude, peer_llm_opencode, owner_confirmation, or external_signal so the substrate can calibrate verifier provenance while preserving one shared score primitive.
 
-Do not add fixed predicate enums, refusal taxonomies, or pre-check gates when a verifier residual + breakdown can score the same thing. Owner consent gates only owner-stated dynamic policy; verifiers score whether the change worked.
+Do not add fixed predicate enums, refusal taxonomies, or pre-check gates when a verifier residual + breakdown can score the same thing. verifier_kind is provenance metadata for credit and calibration, not a predicate gate. Owner consent gates only owner-stated dynamic policy; verifiers score whether the change worked.
 
 ## Dispatch And Recursion
 
@@ -72,7 +72,7 @@ Apply gates evaluate structural axes, not fixed file-path lists: well-formed anc
 
 ## Knowledge And Credit
 
-Both Claude and the brain may emit knowledge_candidate. The extractor-side merger dedups, detects contradiction, synthesizes, and promotes. Neither LLM makes canonical knowledge by assertion.
+Both Claude and the brain may emit knowledge_candidate as co-equal inputs to the same substrate merger. The extractor-side merger dedups, detects agreement and contradiction by goal shape, target, and anchor, combines posterior evidence for agreement, opens adjudicable contradiction records when they disagree, synthesizes, and promotes. Neither LLM makes canonical knowledge by assertion.
 
 Citation is mutation. Cite knowledge and artifact ids that actually shaped the action so outcome credit can update posteriors. Do not use decorative citations.
 
@@ -82,9 +82,9 @@ Moved examples, rationale, inventories, historical anti-pattern evidence, and lo
 
 A root task is not complete until a closure verifier audits the directive against the trajectory and emits task_closure_audited with closure_residual < 0.3.
 
-Every substantive trajectory extracts learning: contract_amendment_proposed for contract/docs/CLI/runtime drift or lesson_extracted for reusable process, verifier, sandbox, retrieval, recipe, or failure patterns.
+Every substantive trajectory extracts learning: contract_amendment_proposed for contract/docs/CLI/runtime drift or lesson_extracted for reusable process, verifier, sandbox, retrieval, recipe, or failure patterns. Owner-observed outcomes such as 'still not works' or 'this worked' are recorded as owner_observed_outcome_recorded events linked to the applied change/action chain so residuals and posterior credit can be adjusted after owner-visible evidence.
 
-Brain proposes through ledger events. Claude-side orchestration applies owner-approved or eligible changes, verifies them, commits when requested/appropriate, and records applied_change_committed so the source proposal receives credit.
+Brain proposes through ledger events. Claude-side orchestration applies owner-approved or eligible changes, verifies them, commits when requested/appropriate, and records the same act-shaped chain as opencode for every code/TUI mutation: action_predicted, action_scored, substrate credit/candidate confirmation, then applied_change_committed. Claude-side apply paths must use the shared runtime apply helper rather than emitting mirror-inline outcome events alone.
 
 ## Operational Ground Truth
 
