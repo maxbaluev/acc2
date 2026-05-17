@@ -52,8 +52,14 @@ export const parseCommand = (line: string): CommandIntent => {
   if (head === "directive") return { kind: "shell", argv: ["directive", parts[1] ?? ""], raw: trimmed };
   if (head === "changes") return { kind: "shell", argv: ["changes", parts[1] ?? "24h"], raw: trimmed };
   if (head === "pending") return { kind: "shell", argv: ["admin", "pending-decisions"], raw: trimmed };
-  // Verbatim passthrough — operator types e.g. `doctor` or `tail`.
-  return { kind: "shell", argv: parts, raw: trimmed };
+  // Unknown commands are intentionally NOT passed through. This palette
+  // is a reviewed wrapper over the documented acc verbs above; widening
+  // into a generic acc subprocess launcher is a bypass-risk surface for
+  // operator commands not audited as part of acc watch (audit 6H587JE69X
+  // — anchored_replace_v1_batch, watch-tui-command-palette-remove-
+  // passthrough). If a new verb belongs in the palette, add it here
+  // explicitly; everything else goes through plain `bun run acc ...`.
+  return { kind: "noop" };
 };
 
 export type CommandPaletteProps = {

@@ -177,13 +177,7 @@ const DagPanel = ({
             <Text dimColor> | </Text>
             <Text color="cyan">👁 watches</Text>
           </Text>
-          {readyTasks.slice(0, 4).map((t) => (
-            <Text key={t.task_id}>
-              <Text color="green">→ requires </Text>
-              <Text>{shortId(t.task_id, 8)} </Text>
-              <Text dimColor>{t.goal.slice(0, 48)}</Text>
-            </Text>
-          ))}
+          <Text color="yellow">task_graph_view edge rows required here before rendering requires/refines/watches as topology.</Text>
           {readyTasks.length === 0 ? (
             <Text dimColor>(no ready_tasks rows under this directive)</Text>
           ) : null}

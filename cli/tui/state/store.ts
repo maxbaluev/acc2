@@ -19,8 +19,15 @@
 import type { SubstrateClient, SseEvent } from "../transport/substrate-client";
 import { MIRROR_INLINE_EVENT_TYPES, type EventKind } from "../../../substrate/event_kinds";
 import type { OwnerProfileCard } from "../../owner_profile_renderer";
+import type { DispatchResolvedStatus } from "../../../substrate/views";
 
-export type Lifecycle = "live" | "queued_at_cap" | "completed" | "failed" | "zombie";
+// Lifecycle vocabulary is substrate-owned (substrate/views.ts exports
+// DispatchResolvedStatus). Do NOT fork the closed enum here — the TUI
+// must surface whatever literal the view returns, including any new
+// status the substrate may add. Unknown values render as themselves;
+// the panel never fabricates "live" from a schema drift it didn't
+// anticipate (audit 6H587JE69X — anchored_replace_v1_batch).
+export type Lifecycle = DispatchResolvedStatus | string;
 
 export type DispatchRow = {
   directive_id: string;
@@ -120,8 +127,10 @@ const emptySnapshot = (): DashboardSnapshot => ({
   toasts: [],
 });
 
-const isLifecycle = (value: unknown): value is Lifecycle =>
-  typeof value === "string" && ["live", "queued_at_cap", "completed", "failed", "zombie"].includes(value);
+const lifecycleFromView = (row: Record<string, unknown>): Lifecycle => {
+  const value = typeof row.lifecycle_status === "string" ? row.lifecycle_status : row.status;
+  return typeof value === "string" ? value : "unknown";
+};
 
 const parsePayload = (payload: unknown): Record<string, unknown> => {
   if (!payload) return {};
@@ -231,11 +240,10 @@ export const fetchDashboardSnapshot = async (client: SubstrateClient): Promise<D
   ]);
 
   const dispatchRows = (dispatchEnv.ok ? asArray<Record<string, unknown>>(dispatchEnv.result) : []).map((r): DispatchRow => {
-    const ls = isLifecycle(r.lifecycle_status) ? r.lifecycle_status : isLifecycle(r.status) ? r.status as Lifecycle : "live";
     return {
       directive_id: String(r.directive_id ?? ""),
       root_task_id: String(r.root_task_id ?? ""),
-      lifecycle_status: ls,
+      lifecycle_status: lifecycleFromView(r),
       status_reason: typeof r.status_reason === "string" ? r.status_reason : null,
       residual: typeof r.residual === "number" ? r.residual : null,
       latest_signal_at: typeof r.latest_signal_at === "string" ? r.latest_signal_at : null,
