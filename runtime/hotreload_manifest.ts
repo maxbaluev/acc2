@@ -93,6 +93,24 @@ export const HOTRELOAD_MANIFEST: readonly HotReloadEntry[] = [
     rate_limit: { count: 5, window_ms: 30_000 },
   },
   {
+    // 2026-05-17 noise reduction: seed.ts only runs at daemon boot via
+    // `acc init` (seedFoundationalKnowledge / seedCodeArtifacts /
+    // seedRecipes / seedDemoKnowledge). Mid-session re-import of this
+    // file is a no-op behaviorally — there's no reloadable_slot to
+    // swap into, and the seed functions aren't called again at
+    // runtime. Without this entry every edit to seed.ts fires a
+    // daemon_hotreload_unmapped event suggesting the operator add a
+    // manifest entry. The entry IS this one — explicitly no-op,
+    // strategy=in_process with no slot means the worker emits
+    // daemon_hotreload_no_op instead of unmapped.
+    name: "substrate_seed",
+    globs: ["substrate/seed.ts"],
+    strategy: "in_process",
+    reason: "Seed functions run only at acc init / daemon boot; mid-session re-import is a no-op. Manifest entry suppresses unmapped noise on every edit.",
+    expected_exports: ["seedCodeArtifacts", "seedFoundationalKnowledge", "seedRecipes"],
+    rate_limit: { count: 5, window_ms: 30_000 },
+  },
+  {
     name: "runtime_supervisor",
     globs: ["runtime/supervisor.ts", "runtime/bridge_health.ts"],
     strategy: "in_process",
