@@ -36,6 +36,29 @@ export type HotReloadEntry = {
    *  Keys are well-known cache names; the worker maps them to
    *  invalidate-callbacks at reload time. */
   invalidates?: ReadonlyArray<"prompt_cache" | "activation_bus_listeners">;
+  /** Hot-reload deep-improvement (2026-05-17): identifiers the reloaded
+   *  module MUST export for the worker to accept the swap. If any is
+   *  missing or not a function/object, the worker emits
+   *  daemon_hotreload_rejected and the previous reference stays active.
+   *  Pre-fix the worker accepted anything that imported without
+   *  throwing — even a file with a removed export silently broke
+   *  callers. */
+  expected_exports?: ReadonlyArray<string>;
+  /** Hot-reload deep-improvement (2026-05-17): rate-limit reloads of the
+   *  same file. When `count` reloads land within `window_ms`, the
+   *  worker drops further reloads and emits daemon_hotreload_rate_limited
+   *  until the window slides. Protects against save-loop storms (CI
+   *  watcher rewriting after every save). */
+  rate_limit?: { count: number; window_ms: number };
+  /** Hot-reload deep-improvement (2026-05-17): name of the registered
+   *  reloadable in runtime/reloadable.ts. When set, the worker calls
+   *  `getReloadable(reloadable_slot)?.refresh(cache_bust_url)` to swap
+   *  the cached module reference, and emits daemon_hotreload_swapped.
+   *  When unset (legacy modules not yet wired through the registry),
+   *  the worker emits daemon_hotreload_no_op — the import succeeded
+   *  but no consumer is reading through an indirection, so the live
+   *  daemon's behavior did not change. */
+  reloadable_slot?: string;
 };
 
 /** Globs are minimatch-style: `**` matches any path segment. Excludes
@@ -49,18 +72,24 @@ export const HOTRELOAD_MANIFEST: readonly HotReloadEntry[] = [
     globs: ["substrate/extractors.ts"],
     strategy: "in_process",
     reason: "Pure functions; daemon re-imports for the next tick.",
+    expected_exports: ["extractKnowledgePromotions"],
+    rate_limit: { count: 5, window_ms: 30_000 },
   },
   {
     name: "substrate_views",
     globs: ["substrate/views.ts"],
     strategy: "in_process",
     reason: "View SQL is read at substrate.read time; re-import refreshes the accessor closure.",
+    expected_exports: ["runViews", "VIEW_NAMES"],
+    rate_limit: { count: 5, window_ms: 30_000 },
   },
   {
     name: "substrate_event_kinds",
     globs: ["substrate/event_kinds.ts"],
     strategy: "in_process",
     reason: "Registry is consulted at emit time; re-import picks up new kinds without restart.",
+    expected_exports: ["EVENT_KINDS", "EMBEDDABLE_KINDS", "HEALTH_METRIC_KINDS"],
+    rate_limit: { count: 5, window_ms: 30_000 },
   },
   {
     name: "runtime_supervisor",
@@ -102,10 +131,13 @@ export const HOTRELOAD_MANIFEST: readonly HotReloadEntry[] = [
     name: "runtime_prompt_composer",
     globs: ["runtime/prompt_composer.ts"],
     strategy: "in_process",
-    reason: "Pure prompt composition; re-import refreshes the section selection logic.",
+    reason: "Pure prompt composition; re-import refreshes the section selection logic. Wired through the reloadable registry — every dispatcher call goes via getReloadable('prompt_composer').current() so the swap reaches live brain dispatches without restart.",
     // Reloading the composer may change the output for identical inputs.
     // Drop the prompt_cache so the next dispatch composes fresh.
     invalidates: ["prompt_cache"],
+    expected_exports: ["composePrompt", "estimateTokens"],
+    rate_limit: { count: 5, window_ms: 30_000 },
+    reloadable_slot: "prompt_composer",
   },
   {
     name: "runtime_scheduler",

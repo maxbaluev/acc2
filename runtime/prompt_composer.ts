@@ -1244,3 +1244,41 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     truncated,
   };
 };
+
+// Hot-reload deep-improvement (2026-05-17): register the composer with
+// the reloadable registry so a hot-reload of runtime/prompt_composer.ts
+// actually swaps the function the daemon calls — not just re-imports a
+// detached copy. Consumers that need hot-reload semantics call
+// `getReloadable("prompt_composer").current()` and get the freshest
+// composePrompt + estimateTokens; consumers that imported statically
+// keep the boot-time copy (acceptable for stable surfaces).
+import { registerReloadable } from "./reloadable";
+registerReloadable<{
+  composePrompt: typeof composePrompt;
+  estimateTokens: typeof estimateTokens;
+}>({
+  name: "prompt_composer",
+  load: async (cacheBustUrl) => {
+    if (cacheBustUrl) return (await import(cacheBustUrl)) as { composePrompt: typeof composePrompt; estimateTokens: typeof estimateTokens };
+    return { composePrompt, estimateTokens };
+  },
+  validate: (mod) => {
+    if (typeof mod.composePrompt !== "function") return "missing composePrompt export";
+    if (typeof mod.estimateTokens !== "function") return "missing estimateTokens export";
+    return true;
+  },
+  smokeProbe: (mod) => {
+    // Tiny pure call: estimateTokens on a known string. Cheap, no DB
+    // dependency. Confirms the new module's basic call path works
+    // before the swap commits.
+    try {
+      const n = mod.estimateTokens("hello world");
+      if (typeof n !== "number" || !Number.isFinite(n) || n < 0) {
+        return { ok: false, error: `estimateTokens returned non-number: ${n}` };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  },
+});

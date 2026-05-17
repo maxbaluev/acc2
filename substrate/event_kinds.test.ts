@@ -247,6 +247,12 @@ describe("derived sets match their pre-unification shape", () => {
       // dispatches finished — operator must see this to know dispatches
       // were force-killed and may have orphaned.
       "restart_drain_timed_out",
+      // Hot-reload deep-improvement (2026-05-17): rejected = validation
+      // refused the new module shape (missing expected_exports / smoke
+      // probe failed). Operator sees recurrent rejections as a substrate
+      // health signal — bad edits aren't silently dropped, they show in
+      // substrate-status.
+      "daemon_hotreload_rejected",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

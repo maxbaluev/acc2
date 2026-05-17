@@ -411,6 +411,43 @@ export const EVENT_KINDS = {
   daemon_hotreload_triggered:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   daemon_hotreload_completed:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   daemon_hotreload_failed:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true, narrative: false },
+  // ── Hot-reload deep-improvement event kinds (2026-05-17) ────────────
+  // Pre-improvement: the worker emitted `completed` whenever a dynamic
+  // import returned without throwing — even when (a) the new module had
+  // the wrong export shape, (b) no consumer was wired to pick up the new
+  // code so the daemon's behavior was unchanged, (c) bursty editor saves
+  // produced reload storms. The five kinds below restore truth to the
+  // hot-reload audit trail.
+  //
+  // daemon_hotreload_rejected — validation refused the new module
+  //   (expected_exports missing, smoke_probe failed). Previous reference
+  //   stays in the reloadable registry; emit_count increments per attempt.
+  //
+  // daemon_hotreload_unmapped — a changed file landed under a watched
+  //   directory but matched NO manifest entry. Operator sees the gap and
+  //   can extend the manifest. Pre-fix these silently dropped.
+  //
+  // daemon_hotreload_rate_limited — the same module exceeded its
+  //   `rate_limit.count` reloads in `rate_limit.window_ms`. Worker drops
+  //   the reload + emits this; protects against save-loop storms (CI
+  //   watcher, formatter rewriting after every save).
+  //
+  // daemon_hotreload_no_op — import returned successfully BUT no
+  //   reloadable registry slot exists for the module. The substrate
+  //   stays honest: the file was re-read but the live daemon's behavior
+  //   did not change because no consumer reads through a reloadable
+  //   accessor. This is the structural-truth fix — pre-fix these emitted
+  //   `completed` and lied.
+  //
+  // daemon_hotreload_swapped — the reloadable registry slot accepted the
+  //   new module; from this moment every consumer that calls .current()
+  //   sees the new code. This is the canonical "the daemon actually
+  //   updated" signal.
+  daemon_hotreload_rejected:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true, narrative: false },
+  daemon_hotreload_unmapped:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  daemon_hotreload_rate_limited:           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  daemon_hotreload_no_op:                  { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  daemon_hotreload_swapped:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   // ── Unified pathology budget (brain elegance bc8je5f3x, 2026-05-15) ─
   // Pre-fix six backpressure mechanisms (bridge_failure_streak,
   // consecutive_bridge_failures, supervisor_redispatch_storm,
