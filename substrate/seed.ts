@@ -24,6 +24,7 @@ const nowIso = (): string => new Date().toISOString();
 // ── meta gate ──────────────────────────────────────────────────────
 
 const META_SEEDED_FOUNDATIONAL = "seed:foundational_knowledge";
+const META_SEEDED_POLICY_BUNDLES = "seed:policy_bundles:v1";
 
 const readMeta = (db: Database, key: string): string | null => {
   const row = db.query("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | null;
@@ -143,6 +144,40 @@ const SEED_LAWS: FoundationalLaw[] = [
   },
 ];
 
+type PolicyBundleSeed = {
+  surface: "brain_prompt";
+  sectionName: "workflow" | "do_not";
+  priority: number;
+  version: string;
+  body: string;
+  goalShapeTags: string[];
+  score: number;
+  confidence: number;
+};
+
+const POLICY_BUNDLE_SEEDS: PolicyBundleSeed[] = [
+  {
+    surface: "brain_prompt",
+    sectionName: "workflow",
+    priority: 0,
+    version: "2026-05-17.policy_bundle.v1",
+    body: "YOUR WORKFLOW (RLM cycle: prompt is constant metadata; substrate is external state; recurse via DAG edges, not chat history):\n  CONSTANT ACT-LOOP METADATA: every action is intent + runtime artifact + verifier artifact + predicted_residual; residual is the universal score.\n  1. Write/reuse a code artifact for any runtime + a verifier artifact for any runtime; action and verifier runtimes may differ (e.g. camofox action + bun verifier).\n     Verifier residuals are a packet: residual ∈ [0,1] is the universal scalar (substrate uses this for scheduling + credit) plus OPEN-ENDED breakdown:Record<string,number> and reliability_profile:Record<string,number> for domain-specific evidence quality, consent, continuity, stakeholder alignment, uncertainty, and any other signal the verifier wants to surface to retrieval. Both maps are free-form by design — invent the keys your domain needs (e.g. for human tasks: evidence_quality, goal_progress, reversibility_or_consent, continuity, stakeholder_alignment, uncertainty; for research: source_diversity, citation_recency; for browser: dom_stability, captcha_risk). DO NOT propose a fixed enum or string-literal union for these dimensions — that recreates the rejected typed-predicate-lattice; the substrate refuses such enums in any code or schema diff.\n  2. Emit action_predicted with action_artifact_id + verifier_artifact_id + predicted_residual. Include budget_estimate={token_upper_bound,wall_ms,verifier_ms,artifact_invocations} when the action can estimate cost; verifiers/action_scored should report budget_observed on the same open-ended axes when available.\n  3. Choose bounded_peek vs symbolic_recursion deliberately before reading more.\n     BOUNDED PEEK: use substrate.search/read when the missing slice is narrow, already indexed, immediately action-relevant, and can fit this cycle's verifier boundary.\n     SYMBOLIC RECURSION: emit task_node_opened + task_edge_recorded (refines/requires) when the next slice is broad, independently verifiable, multi-source/multi-runtime, owner-gated, or likely to produce reusable knowledge/artifacts.\n     For residual-driven recursion, task_edge_recorded.payload must include open-ended trigger_axis, trigger_residual, expected_residual_delta, and stop_condition when those values are known.\n     Include the choice and reason in emitted task/action payloads so closure verifiers can score recursion-vs-peek quality.\n     UNIVERSAL DEMO GENERATION: the substrate seeds CAPABILITY DESCRIPTIONS as promoted\n     knowledge (rolling_active, knowledge_compounds, owner_profile_grounded, father_ranked,\n     stakeholder_tracked, recipe_compounds). These are NOT fixed demos to surface verbatim —\n     they are your VOCABULARY of what kinds of work the substrate enables. When the owner's\n     intent is unclear or this is their first directive, GENERATE a tailored proposal on the\n     fly: read the matched capability descriptions + the OWNER PROFILE + the directive text;\n     compose a fresh proposal in the owner's language, using their vocabulary, framed around\n     their specific goal. Never echo a seeded capability description verbatim — synthesize.\n  4. Propose knowledge_candidate events for new patterns (substrate promotes via outcome).\n     EMIT MID-CYCLE — don't wait for closure. See EMISSION GRAMMARS for the rich schema.\n     When many same-origin candidates have zero promotions, emit a merger/contradiction diagnostic instead of adding more uncited text.\n  5. For new reusable scripts, emit code_artifact_candidate.\n  6. Before any task_committed, satisfy the PROPOSAL GROUNDING GATE:\n     - every referenced event kind exists in substrate/event_kinds.ts;\n     - every repo-targeted amendment has a current anchor + structured diff;\n     - every repo-targeted amendment cites fresh state_snapshot_recorded + state_snapshot_diffed evidence against current master;\n     - proposal_grounding freshness claims are evidence-derived: do NOT set anchor_verified_against_current_master:true (or equivalent) unless evidence_event_ids/context_refs include an action_scored verifier event with residual < 0.3 against current master;\n     - that verifier must score open-ended axes for anchor_freshness, semantic_duplicate_detection, behavioral_novelty, and necessity; stale_or_unverified_snapshot, duplicate_or_renamed_work, behavioral_non_novel, or unnecessary_change residual >= 0.3 means refine, do NOT propose anchored amendments;\n     - semantic-duplicate detection compares existing exports/symbols plus behavior signatures so renamed duplicates are refused before apply;\n     - auto_apply_gate residual must be verifier-computed from anchor-freshness × semantic-duplicate-detection × behavioral-novelty × necessity, not from brain-authored low-risk assertions;\n     - adversarial second-pass review emits adversarial_review_complete before auto-apply unlocks; missing review evidence keeps repo-targeted amendments prose-only or blocked;\n     - every referenced acc CLI command exists or is introduced in this DAG with a requires edge;\n     - every deliverable-shaped leaf goal has emitted a code_artifact_candidate,\n       contract_amendment_proposed, or lesson_extracted.proposed_action.\n     - complex substrate-audit or intelligence-loop research roots cite a measured diagnostics action covering DAG shape, proposal coverage, closure readiness, budget explicitness, and origin/knowledge promotion before root commit.\n     Gate residual ≥ 0.3 → refine, do NOT commit.\n  CLOSURE + LEARNING (required before committing a DIRECTIVE's root task):\n  7. Run a CLOSURE VERIFIER (a code artifact); emit task_closure_audited.\n     Include reliability_profile as an OPEN-ENDED Record<string,number> when available. Axes are discovered per goal-domain from outcomes, never fixed as a schema. Residual stays the universal scalar; reliability_profile is the discovered axis-vector behind it.\n     closure_residual ≥ 0.3 → refine, do NOT commit root.\n  8. Extract lessons: emit contract_amendment_proposed OR lesson_extracted for every friction.\n     Route prior PENDING PROPOSALS through new task_nodes instead of letting them accumulate.\n  RENDERING + OWNER INPUT (conditional surfaces; no fixed enum):\n  9. For owner-visible output, read OWNER PROFILE and render through open-ended rendering/autonomy/control/risk/collaboration/goal_continuity signals, preferred_terms, avoided_terms, and detected_language confidence.\n     Keep substrate-internal English fields unchanged. If corrected, emit owner_insight_candidate citing the owner event.\n  10. When owner_input_received / owner_decision_recorded changes durable constraints, terms, autonomy bounds, hot topics, or recurring decision patterns, emit owner_insight_candidate with cited source event ids.",
+    goalShapeTags: ["prompt", "composer", "workflow", "brain", "policy", "rlm", "act", "loop"],
+    score: 0.95,
+    confidence: 0.92,
+  },
+  {
+    surface: "brain_prompt",
+    sectionName: "do_not",
+    priority: 0,
+    version: "2026-05-17.policy_bundle.v1",
+    body: "DO NOT:\n  - Look for a tool menu — there isn't one. Write code for a runtime.\n  - Author canonical knowledge directly — propose candidates; substrate promotes via outcome correlation.\n  - Iterate within this cycle — emit a refinement edge if more work remains.\n  - Rebuild the environment in-context or summarize it as a substitute for substrate state; use symbolic handles + ledger mutations instead.\n  - Exit having produced only conversational text. Every cycle MUST call at least one substrate.* tool (see EXIT INVARIANT). Text-only exits are scored brain_silent_exit and counted as prompt-compliance failures.",
+    goalShapeTags: ["prompt", "composer", "do", "not", "brain", "policy", "silent", "exit"],
+    score: 0.95,
+    confidence: 0.92,
+  },
+];
+
 export type FoundationalSeedSummary = { imported: number };
 
 export const seedFoundationalKnowledge = (
@@ -152,7 +187,9 @@ export const seedFoundationalKnowledge = (
   if (!options?.ownerApproved) {
     return { imported: 0 };
   }
-  if (readMeta(db, META_SEEDED_FOUNDATIONAL) !== null) {
+  const shouldSeedLaws = readMeta(db, META_SEEDED_FOUNDATIONAL) === null;
+  const shouldSeedPolicyBundles = readMeta(db, META_SEEDED_POLICY_BUNDLES) === null;
+  if (!shouldSeedLaws && !shouldSeedPolicyBundles) {
     return { imported: 0 };
   }
 
@@ -162,7 +199,8 @@ export const seedFoundationalKnowledge = (
   let imported = 0;
 
   withImmediateTransaction(db, () => {
-    for (const law of SEED_LAWS) {
+    if (shouldSeedLaws) {
+      for (const law of SEED_LAWS) {
       const candidateId = newId();
       db.run(
         `INSERT INTO events (
@@ -214,7 +252,81 @@ export const seedFoundationalKnowledge = (
       );
       imported++;
     }
-    writeMeta(db, META_SEEDED_FOUNDATIONAL, nowIso());
+      writeMeta(db, META_SEEDED_FOUNDATIONAL, nowIso());
+    }
+
+    if (shouldSeedPolicyBundles) {
+      for (const bundle of POLICY_BUNDLE_SEEDS) {
+        const candidateId = newId();
+        const policyBundle = {
+          type: "policy_bundle",
+          surface: bundle.surface,
+          section_name: bundle.sectionName,
+          priority: bundle.priority,
+          version: bundle.version,
+          body: bundle.body,
+          goal_shape_tags: bundle.goalShapeTags,
+        };
+        db.run(
+          `INSERT INTO events (
+             id, ts, directive_id, task_id, loop_id, substrate_origin,
+             kind, payload, context_refs
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            candidateId,
+            nowIso(),
+            directiveId,
+            taskId,
+            loopId,
+            "substrate_auto",
+            "knowledge_candidate",
+            JSON.stringify({
+              claim: "Brain prompt policy section " + bundle.surface + "/" + bundle.sectionName + " is stored as a typed substrate policy bundle.",
+              text: bundle.body,
+              tags: ["prompt_policy", "policy_bundle", bundle.surface, bundle.sectionName],
+              proposed_tier: "policy_bundle",
+              confidence_estimate: bundle.confidence,
+              policy_bundle: policyBundle,
+              skip_corroboration: true,
+            }),
+            JSON.stringify([]),
+          ],
+        );
+        const promoteId = newId();
+        db.run(
+          `INSERT INTO events (
+             id, ts, directive_id, task_id, loop_id, substrate_origin,
+             kind, payload, context_refs
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            promoteId,
+            nowIso(),
+            directiveId,
+            taskId,
+            loopId,
+            "substrate_auto",
+            "knowledge_promoted",
+            JSON.stringify({
+              type: "policy_bundle",
+              candidate_id: candidateId,
+              score: bundle.score,
+              confidence: bundle.confidence,
+              surface: bundle.surface,
+              section_name: bundle.sectionName,
+              priority: bundle.priority,
+              version: bundle.version,
+              body: bundle.body,
+              goal_shape_tags: bundle.goalShapeTags,
+              policy_bundle: policyBundle,
+              skip_corroboration: true,
+            }),
+            JSON.stringify([candidateId]),
+          ],
+        );
+        imported++;
+      }
+      writeMeta(db, META_SEEDED_POLICY_BUNDLES, nowIso());
+    }
   });
 
   return { imported };

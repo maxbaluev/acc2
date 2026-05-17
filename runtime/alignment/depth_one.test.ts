@@ -17,6 +17,7 @@ import { closeDb, openDb } from "../../substrate/db";
 import { composePrompt, estimateTokens } from "../prompt_composer";
 import { emitEvent } from "../events";
 import { newId } from "../ids";
+import { seedFoundationalKnowledge } from "../../substrate/seed";
 
 afterAll(() => closeDb());
 
@@ -66,7 +67,7 @@ describe("alignment / depth_one (Principle 5)", () => {
     // into but everything else gets clipped — the goal is to PROVE that
     // truncation is honest and emits the audit row. Budget tuned so the
     // current P0 set (task_goal + runtimes_available + workflow + do_not)
-    // fits; the WORKFLOW_TEXT grew as universal-rendering and learning
+    // fits; the retrieved workflow policy grew as universal-rendering and learning
     // rules landed (commits 2830ce2 / 1f6ab5d / 28c7a2a). Production
     // budget is 8000; this is "still small enough to force truncation".
     const result = composePrompt(db, { taskId, budgetTokens: 2000 });

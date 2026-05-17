@@ -1,5 +1,5 @@
 // acc2 closure deliverable check — substrate-side helper for the
-// WORKFLOW_TEXT step-7 closure verifier. Resolves the verifier_gap lesson
+// brain_prompt workflow policy step-7 closure verifier. Resolves the verifier_gap lesson
 // from brain audit QQEHAW97GS0AX7TEQ717Y3P174: the closure audit previously
 // only verified subtree STRUCTURE (task_node_opened + task_edge_recorded
 // presence). Deliverable-shaped leaves could close without ever emitting

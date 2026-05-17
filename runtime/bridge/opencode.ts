@@ -914,7 +914,7 @@ export const spawnRealOpencode = async (
     //       called a substrate.* / runtime.* tool. This is a prompt-compliance
     //       failure: GPT-5.5 chose conversational/reasoning-only output and
     //       skipped tools entirely. Fix: tighten the prompt's tool-use
-    //       enforcement (runtime/prompt_composer.ts WORKFLOW_TEXT). Reducing
+    //       enforcement (brain_prompt workflow policy bundle). Reducing
     //       brain concurrency does NOT help; restarting the daemon does NOT
     //       help; verifying /mcp reachability does NOT help.
     //   (B) mcp_handshake_timed_out — bridge gave up waiting before opencode
@@ -932,7 +932,7 @@ export const spawnRealOpencode = async (
     const classifierHint = brainSilentExit
       ? "opencode ran cleanly (exit_code:0) for the full handshake window but invoked ZERO substrate.*/runtime.* tools. "
         + "This is a prompt-compliance failure, NOT a transport issue. The brain (GPT-5.5) chose conversational/text-only output "
-        + "and skipped the substrate emission entirely. Fix: tighten WORKFLOW_TEXT in runtime/prompt_composer.ts to demand at "
+        + "and skipped the substrate emission entirely. Fix: tighten the brain_prompt workflow policy bundle to demand at "
         + "least one substrate.emit before exit. Restarting the daemon or verifying /mcp reachability will NOT help — the "
         + "daemon is fine, the brain just refused to use tools."
       : "opencode produced no substrate.*/runtime.* tool calls within the handshake observation window AND the window timed out. "

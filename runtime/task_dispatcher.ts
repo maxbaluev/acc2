@@ -527,7 +527,7 @@ export const dispatchReadyTask = async (
     // threshold) AND the bridge then timed out before the brain could
     // emit task_committed, the substrate auto-commits citing the closure
     // event as evidence. WHY: the closure verifier IS the commit gate
-    // (WORKFLOW_TEXT step 7); the brain emitting task_committed afterward
+    // (brain_prompt workflow policy step 7); the brain emitting task_committed afterward
     // is the "rubber stamp" that a 300-600s bridge window sometimes can't
     // accommodate. Pre-fix the next dispatch would re-run the entire
     // cycle from scratch, paying tokens for work the verifier had already

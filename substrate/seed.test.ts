@@ -218,6 +218,17 @@ describe("seedFoundationalKnowledge", () => {
     }
   });
 
+  test("seeds typed brain prompt policy bundles", () => {
+    const db = openDb(":memory:");
+    seedFoundationalKnowledge(db, { ownerApproved: true });
+    const rows = db
+      .query("SELECT payload FROM events WHERE kind = 'knowledge_promoted' AND json_extract(payload, '$.type') = 'policy_bundle'")
+      .all() as Array<{ payload: string }>;
+    const sections = rows.map((r) => JSON.parse(r.payload) as { surface?: string; section_name?: string; body?: string });
+    expect(sections.some((p) => p.surface === "brain_prompt" && p.section_name === "workflow" && p.body?.includes("CONSTANT ACT-LOOP METADATA"))).toBe(true);
+    expect(sections.some((p) => p.surface === "brain_prompt" && p.section_name === "do_not" && p.body?.includes("Exit having produced only conversational text"))).toBe(true);
+  });
+
   test("seeds moved contract knowledge with prompt-composer goal-shape tags on promotion rows", () => {
     const db = openDb(":memory:");
     seedFoundationalKnowledge(db, { ownerApproved: true });

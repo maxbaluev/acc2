@@ -463,7 +463,7 @@ export const schedulerTick = async (
     // Batch 8.A bridge-health gate (cite brain lesson 5SWP11NZFS3YX68Y95T164HT9W):
     // when ≥ BRIDGE_DEGRADATION_THRESHOLD bridge_failed events fired within
     // BRIDGE_FAILURE_WINDOW_MS, the substrate flips to degraded. The brain
-    // surfaced this pattern in WORKFLOW_TEXT step-8 lesson_extracted:
+    // surfaced this pattern in a workflow-policy lesson_extracted:
     //   "Add a pre-dispatch bridge-health gate or scheduler backoff that
     //    pauses repeated opencode dispatch after bridge_stuck/no-frame
     //    streaks and opens a diagnostic task instead of spawning duplicate

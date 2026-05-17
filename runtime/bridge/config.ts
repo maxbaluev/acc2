@@ -7,6 +7,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { McpMethods } from "../mcp_server";
 
 // ── Real opencode subprocess defaults (Phase E §12) ───────────────
 
@@ -26,7 +27,7 @@ export const DEFAULT_OPENCODE_MODEL = "openai/gpt-5.5";
  *    01:13:39 task_closure_audited (5 min step-7 closure verifier)
  *    01:13:48 bridge_failed:timeout (cut off BEFORE task_committed)
  *    01:13:49 re-dispatched, brain restarts from scratch
- *  The brain's WORKFLOW_TEXT now includes step-7 closure audit + step-8
+ *  The brain prompt workflow policy now includes step-7 closure audit + step-8
  *  lesson extraction (added in the closure+learning batch). These add real
  *  cycle time. 300s was internally inconsistent — the closure verifier
  *  COULD finish but task_committed/refinement-edge couldn't be emitted
@@ -133,38 +134,10 @@ export const isBrainReadonlyToolAllowed = (toolName: string): boolean => {
   return decision === "allow";
 };
 
-/** v2's full MCP tool surface — kept here as a discovery hint for the
- *  brain prompt composer and so future contributors can see at a glance
- *  which tools the daemon advertises. The actual list is owned by
- *  `runtime/mcp_server.ts` (`server.addTool({ name: "substrate.…" })`
- *  calls). When new tools land there, append them here for
- *  prompt-compose visibility. */
-export const V2_MCP_TOOL_SURFACE = [
-  "substrate.emit",
-  "substrate.read",
-  "substrate.get_event",
-  "substrate.get_artifact",
-  "substrate.search",
-  "substrate.embed_text",
-  "substrate.run_artifact",
-  "substrate.run_verifier",
-  "substrate.credit",
-  "substrate.admit_artifact",
-  "substrate.open_fixture",
-  "substrate.amend_directive",
-  "substrate.record_stakeholder_state",
-  "substrate.record_interference_edge",
-  "substrate.open_directive",
-  "substrate.find_recipe",
-  "substrate.register_external_source",
-  "runtime.dispatch_ready_task",
-  "runtime.scheduler_tick",
-  "runtime.process_rolling_reviews",
-  "runtime.father_iterate",
-  "runtime.detect_father_drift",
-  "runtime.replay_recipe",
-  "runtime.recent_events",
-] as const;
+/** v2's full MCP tool surface, derived from the MCP server whitelist.
+ *  The server-facing source of truth is runtime/mcp_server/types.ts
+ *  (McpMethods); the bridge exports this as a discovery hint only. */
+export const V2_MCP_TOOL_SURFACE = McpMethods;
 
 /** Tool-name prefixes that prove an opencode tool_use hit the v2 MCP
  *  wire. opencode 1.4+ mangles MCP tool names by replacing the
