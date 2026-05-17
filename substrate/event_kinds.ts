@@ -448,6 +448,15 @@ export const EVENT_KINDS = {
   daemon_hotreload_rate_limited:           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   daemon_hotreload_no_op:                  { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   daemon_hotreload_swapped:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  // Hot-reload truth-in-audit follow-up (2026-05-17): full_restart
+  // strategy is a NORMAL state, not a failure. Pre-fix every edit to a
+  // full_restart-classed module emitted daemon_hotreload_failed{reason:
+  // full_restart_required}, which counted toward the health_metric
+  // failure budget (126/146 = 86% of "failures" in a 24h window were
+  // this benign signal). The dedicated kind has health_metric=false so
+  // the failure count reflects ACTUAL faults, and narrative=true so
+  // operators still see the "needs restart" hint inline.
+  daemon_hotreload_restart_pending:        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   // ── Unified pathology budget (brain elegance bc8je5f3x, 2026-05-15) ─
   // Pre-fix six backpressure mechanisms (bridge_failure_streak,
   // consecutive_bridge_failures, supervisor_redispatch_storm,

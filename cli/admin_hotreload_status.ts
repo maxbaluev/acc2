@@ -32,6 +32,7 @@ const TRACKED_KINDS = [
   "daemon_hotreload_rejected",
   "daemon_hotreload_unmapped",
   "daemon_hotreload_rate_limited",
+  "daemon_hotreload_restart_pending",
   "daemon_hotreload_failed",
   "daemon_hotreload_completed",
 ] as const;
@@ -90,8 +91,14 @@ const usage = (): string => `acc admin hotreload-status — last N hot-reload ou
                     rate_limit.window_ms. Save-loop storm protection
                     kicked in; reloads will resume when the window
                     slides.
-    failed        — strategy=full_restart (operator must run
-                    \`acc daemon restart\`) OR the dynamic import threw.
+    restart_pending — strategy=full_restart entry was edited. Operator
+                    runs \`acc daemon restart\` when convenient. NORMAL
+                    state, NOT a failure (truth-in-audit, 2026-05-17:
+                    pre-fix this signal was mis-emitted as
+                    daemon_hotreload_failed and bloated health metrics).
+    failed        — the dynamic import threw (syntax error, missing
+                    file, etc). Previous reference stays active in the
+                    registry; daemon keeps running.
     completed     — LEGACY signal emitted alongside swapped/no_op for
                     backwards-compatibility. Decorative; trust the
                     swapped/no_op pair for what actually happened.
@@ -184,14 +191,15 @@ export const runHotreloadStatus = async (argv: string[]): Promise<number> => {
   process.stdout.write("─".repeat(72) + "\n");
   process.stdout.write("counts:\n");
   const order: Array<[string, keyof Counts]> = [
-    ["triggered    ", "daemon_hotreload_triggered"],
-    ["swapped (✓)  ", "daemon_hotreload_swapped"],
-    ["no_op   (○)  ", "daemon_hotreload_no_op"],
-    ["rejected(⊘)  ", "daemon_hotreload_rejected"],
-    ["unmapped(?)  ", "daemon_hotreload_unmapped"],
-    ["rate_limited ", "daemon_hotreload_rate_limited"],
-    ["failed  (✗)  ", "daemon_hotreload_failed"],
-    ["completed*   ", "daemon_hotreload_completed"],
+    ["triggered      ", "daemon_hotreload_triggered"],
+    ["swapped     (✓)", "daemon_hotreload_swapped"],
+    ["no_op       (○)", "daemon_hotreload_no_op"],
+    ["rejected    (⊘)", "daemon_hotreload_rejected"],
+    ["unmapped    (?)", "daemon_hotreload_unmapped"],
+    ["rate_limited   ", "daemon_hotreload_rate_limited"],
+    ["restart_pnd (↻)", "daemon_hotreload_restart_pending"],
+    ["failed      (✗)", "daemon_hotreload_failed"],
+    ["completed*     ", "daemon_hotreload_completed"],
   ];
   for (const [label, key] of order) {
     process.stdout.write(`  ${label}  ${counts[key]}\n`);
@@ -235,6 +243,7 @@ const TAG_BY_KIND: Record<string, string> = {
   daemon_hotreload_rejected: "⊘",
   daemon_hotreload_unmapped: "?",
   daemon_hotreload_rate_limited: "⏸",
+  daemon_hotreload_restart_pending: "↻",
   daemon_hotreload_failed: "✗",
   daemon_hotreload_completed: "✓",
 };

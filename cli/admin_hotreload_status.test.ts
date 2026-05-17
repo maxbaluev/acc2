@@ -49,8 +49,8 @@ describe("acc admin hotreload-status", () => {
       expect(code).toBe(0);
       const text = c.out.join("");
       expect(text).toContain("counts:");
-      expect(text).toContain("swapped (✓)    0");
-      expect(text).toContain("no_op   (○)    0");
+      expect(text).toContain("swapped     (✓)  0");
+      expect(text).toContain("no_op       (○)  0");
       expect(text).toContain("(no rows)");
     } finally {
       c.restore();
@@ -90,11 +90,11 @@ describe("acc admin hotreload-status", () => {
       const code = await runHotreloadStatus([]);
       expect(code).toBe(0);
       const text = c.out.join("");
-      expect(text).toContain("swapped (✓)    1");
-      expect(text).toContain("no_op   (○)    1");
-      expect(text).toContain("rejected(⊘)    1");
-      expect(text).toContain("unmapped(?)    1");
-      expect(text).toContain("rate_limited   1");
+      expect(text).toContain("swapped     (✓)  1");
+      expect(text).toContain("no_op       (○)  1");
+      expect(text).toContain("rejected    (⊘)  1");
+      expect(text).toContain("unmapped    (?)  1");
+      expect(text).toContain("rate_limited     1");
       expect(text).toContain("prompt_composer");
       expect(text).toContain("v=2");
       expect(text).toContain("runtime/some_new_file.ts");

@@ -160,6 +160,29 @@ export type StartHotreloadOpts = {
   isQuiescent: () => boolean;
 };
 
+/** Editor-noise patterns we always skip BEFORE manifest matching.
+ *  Bun.write + atomic-rename, editor swap files, OS metadata, and
+ *  test files (which never need reload) flood `daemon_hotreload_unmapped`
+ *  otherwise. Live evidence 2026-05-17: 17 unmapped events in one hour
+ *  were all `App.test.tsx.tmp.NNN.NNN` editor backups, swamping the
+ *  signal-bearing unmapped surface. Match by filename suffix and the
+ *  `*.tmp.*` infix produced by Bun.write's atomic-rename path. */
+const NOISE_FILE_PATTERNS: RegExp[] = [
+  /\.tmp\.\d+(\.\d+)?$/,        // Bun.write atomic-rename: foo.ts.tmp.PID.MS
+  /\.swp$|\.swx$|\.swo$/,        // vim swap
+  /~$/,                           // emacs backup
+  /^\.#|^#.*#$/,                  // emacs lockfile / autosave
+  /\.bak$/,                       // generic backup
+  /\.DS_Store$/,                  // macOS metadata
+  /\.test\.tsx?$/,                // test files (never need reload)
+  /\.spec\.tsx?$/,                // spec files (test alias)
+];
+
+export const isNoiseFile = (relPath: string): boolean => {
+  for (const re of NOISE_FILE_PATTERNS) if (re.test(relPath)) return true;
+  return false;
+};
+
 /** Validate that the freshly-imported module has every export named in
  *  the manifest's `expected_exports`. Returns null on success, or an
  *  error string describing the first missing/wrong export. Pure check. */
@@ -209,6 +232,12 @@ export const startHotreloadWorker = (
   };
 
   const processChange = (relPath: string): void => {
+    // Filter editor / build / OS noise BEFORE manifest matching so the
+    // `unmapped` surface stays signal-bearing. Pre-fix, Bun.write atomic
+    // renames (`*.tmp.PID.MS`) and vim swap files flooded the unmapped
+    // stream and made it useless for spotting genuine missing-manifest
+    // entries. The noise patterns are pure regex — see NOISE_FILE_PATTERNS.
+    if (isNoiseFile(relPath)) return;
     const entry = matchHotReloadEntry(relPath);
     if (!entry) {
       // Unmapped file under a watched directory — emit so operator can
@@ -281,9 +310,16 @@ export const startHotreloadWorker = (
     }
 
     if (entry.strategy === "full_restart") {
+      // Truth-in-audit (2026-05-17 follow-up): full_restart strategy is
+      // a NORMAL state, not a failure. Pre-fix every edit to a
+      // full_restart-classed module emitted daemon_hotreload_failed,
+      // which counted toward the health_metric failure budget — 86% of
+      // "failures" in a 24h window were benign restart-pending signals.
+      // Use the dedicated daemon_hotreload_restart_pending kind so the
+      // failure counter reflects actual faults.
       try {
         emitEvent(db, {
-          kind: "daemon_hotreload_failed",
+          kind: "daemon_hotreload_restart_pending",
           substrate_origin: "substrate_auto",
           payload: {
             module: entry.name,
@@ -293,16 +329,14 @@ export const startHotreloadWorker = (
             hint: "module requires fresh process (MCP server / DB / daemon entrypoint); run `acc daemon restart` when convenient",
           },
         });
-        state.last_failure = { ts: new Date().toISOString(), module: entry.name, reason: "full_restart_required" };
-        state.failure_total++;
         recordOutcome({
-          ts: state.last_failure.ts,
+          ts: new Date().toISOString(),
           module: entry.name,
           file_path: relPath,
           outcome: "full_restart_required",
         });
       } catch (err) {
-        logger.debug({ where: "hotreload.emit_full_restart", err: String(err) }, "could not emit daemon_hotreload_failed");
+        logger.debug({ where: "hotreload.emit_restart_pending", err: String(err) }, "could not emit daemon_hotreload_restart_pending");
       }
       return;
     }
@@ -624,6 +658,7 @@ export const __testApplyChange = (
   relPath: string,
   isQuiescent: () => boolean = () => true,
 ): void => {
+  if (isNoiseFile(relPath)) return;
   const entry = matchHotReloadEntry(relPath);
   // Mirror the worker's processChange path without the fs-watch setup.
   if (!entry) {
@@ -640,6 +675,30 @@ export const __testApplyChange = (
         module: "(unmapped)",
         file_path: relPath,
         outcome: "unmapped",
+      });
+    } catch { /* swallow */ }
+    return;
+  }
+  // Test parity for the full_restart strategy: emit restart_pending (the
+  // 2026-05-17 truth-in-audit fix) so tests can assert the kind without
+  // booting the fs.watch loop.
+  if (entry.strategy === "full_restart") {
+    try {
+      emitEvent(db, {
+        kind: "daemon_hotreload_restart_pending",
+        substrate_origin: "substrate_auto",
+        payload: {
+          module: entry.name,
+          file_path: relPath,
+          strategy: entry.strategy,
+          reason: "full_restart_required",
+        },
+      });
+      recordOutcome({
+        ts: new Date().toISOString(),
+        module: entry.name,
+        file_path: relPath,
+        outcome: "full_restart_required",
       });
     } catch { /* swallow */ }
     return;

@@ -8,6 +8,7 @@ import {
   __testApplyChange,
   collectHotreloadWatchDirs,
   getHotreloadState,
+  isNoiseFile,
   toProjectRelative,
   validateExpectedExports,
 } from "./hotreload_worker";
@@ -52,6 +53,29 @@ describe("hotreload watcher coverage", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("isNoiseFile (editor / build / OS noise filter)", () => {
+  test("filters Bun.write atomic-rename backups", () => {
+    expect(isNoiseFile("cli/tui/App.test.tsx.tmp.474444.1779020078043")).toBe(true);
+    expect(isNoiseFile("runtime/foo.ts.tmp.123")).toBe(true);
+  });
+  test("filters editor swap and backup files", () => {
+    expect(isNoiseFile("runtime/foo.ts.swp")).toBe(true);
+    expect(isNoiseFile("runtime/foo.ts~")).toBe(true);
+    expect(isNoiseFile(".#bar.ts")).toBe(true);
+    expect(isNoiseFile("#bar.ts#")).toBe(true);
+    expect(isNoiseFile("runtime/foo.bak")).toBe(true);
+  });
+  test("filters .test.tsx / .spec.ts files (never reloadable)", () => {
+    expect(isNoiseFile("cli/tui/App.test.tsx")).toBe(true);
+    expect(isNoiseFile("runtime/foo.spec.ts")).toBe(true);
+  });
+  test("does NOT filter normal source files", () => {
+    expect(isNoiseFile("runtime/prompt_composer.ts")).toBe(false);
+    expect(isNoiseFile("substrate/extractors.ts")).toBe(false);
+    expect(isNoiseFile("cli/observe.ts")).toBe(false);
   });
 });
 
@@ -167,6 +191,50 @@ describe("truth-in-audit: hot reload emits the right event for each outcome", ()
       expect(noOp.c).toBe(0);
       const state = getHotreloadState();
       expect(state.swapped_total).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("noise files (App.test.tsx, *.tmp.NNN, *.swp) skip processChange entirely (no unmapped emission)", async () => {
+    const db = openDb(":memory:");
+    const root = mkdtempSync(join(tmpdir(), "acc2-hotreload-test-"));
+    try {
+      __testApplyChange(db, root, "cli/tui/App.test.tsx");
+      __testApplyChange(db, root, "runtime/prompt_composer.ts.tmp.474444.1779020078043");
+      __testApplyChange(db, root, "runtime/foo.ts.swp");
+      await Bun.sleep(20);
+      const rows = db
+        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'daemon_hotreload_unmapped'")
+        .get() as { c: number };
+      expect(rows.c).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("restart_pending: full_restart-classed edit emits daemon_hotreload_restart_pending (NOT daemon_hotreload_failed)", async () => {
+    // Truth-in-audit follow-up 2026-05-17: full_restart strategy is a
+    // NORMAL state, not a fault. Pre-fix every edit to runtime/bridge,
+    // runtime/mcp_server, substrate/db etc emitted daemon_hotreload_failed
+    // with reason=full_restart_required, polluting the health_metric
+    // failure budget (126/146 = 86% of "failures" in a 24h window were
+    // benign). Use the dedicated kind.
+    const db = openDb(":memory:");
+    const root = mkdtempSync(join(tmpdir(), "acc2-hotreload-test-"));
+    try {
+      // runtime/bridge/opencode.ts matches the runtime_bridge manifest
+      // entry, which has strategy=full_restart.
+      __testApplyChange(db, root, "runtime/bridge/opencode.ts");
+      await Bun.sleep(20);
+      const pending = db
+        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'daemon_hotreload_restart_pending'")
+        .get() as { c: number };
+      expect(pending.c).toBe(1);
+      const failed = db
+        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'daemon_hotreload_failed'")
+        .get() as { c: number };
+      expect(failed.c).toBe(0);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

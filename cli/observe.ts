@@ -193,6 +193,11 @@ const GLYPHS: Record<string, string> = {
   daemon_hotreload_rejected: "♻︎⊘",
   daemon_hotreload_unmapped: "♻︎?",
   daemon_hotreload_rate_limited: "♻︎⏸",
+  // Restart-pending = normal state (operator runs `acc daemon restart`
+  // when convenient); not a failure. Distinct emoji + own renderer
+  // below so the tail surface stops conflating "needs restart" with
+  // "fault".
+  daemon_hotreload_restart_pending: "♻︎↻",
   // Prompt cache telemetry.
   prompt_composition_cache_hit: "💾✓",
   prompt_composition_cache_miss: "💾·",
@@ -463,6 +468,16 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
         mod ? `module=${mod}` : "",
         strategy ? `strategy=${strategy}` : "",
         reason ? `reason=${JSON.stringify(trunc(reason, 100))}` : "",
+      ].filter(Boolean).join(" ");
+    }
+    case "daemon_hotreload_restart_pending": {
+      const mod = p.module as string | undefined;
+      const fp = p.file_path as string | undefined;
+      return [
+        "restart_pending",
+        mod ? `module=${mod}` : "",
+        fp ? `file=${fp}` : "",
+        "hint=run `acc daemon restart` when convenient",
       ].filter(Boolean).join(" ");
     }
     default:

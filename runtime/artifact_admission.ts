@@ -276,15 +276,26 @@ export const admitArtifact = async (
     }
   }
 
-  // Forward sandbox warnings so the audit trail is honest.
+  // Forward sandbox warnings so the audit trail is honest. Use the
+  // canonical sandbox_unenforced_warning kind (matches the shape that
+  // runtime/runtimes/bun.ts emits at fixture-run time). Pre-2026-05-17
+  // these were mis-emitted as sandbox_violation — which implies a
+  // RUNTIME violation occurred — and bloated health metrics with what
+  // are actually honor-system advisories. Live evidence: 206/224
+  // sandbox_violation events in the last 24h had phase=
+  // "admission_unenforced_warning" payloads. Canonical fix: emit as
+  // sandbox_unenforced_warning with the {runtime, warning} payload
+  // shape so admission warnings and runtime warnings are queryable
+  // through one kind.
   for (const warning of observation.sandboxWarnings) {
     emit({
-      kind: "sandbox_violation",
+      kind: "sandbox_unenforced_warning",
       substrate_origin: "substrate_auto",
       action_artifact_id: row.id,
       payload: {
-        phase: "admission_unenforced_warning",
+        runtime: input.runtime,
         warning,
+        phase: "admission",
       } as JsonValue,
     });
   }
