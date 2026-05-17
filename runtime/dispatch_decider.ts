@@ -26,6 +26,7 @@ import { lowRiskInlinePatterns, originPromotionByGoalShape } from "../substrate/
 import { parseResourceRefs, resourceMatchesPattern, type ResourceRef } from "./resource_uri";
 import { betaMean as canonicalBetaMean, betaEvidenceConfidence } from "./posterior";
 import { goalShape as computeGoalShape } from "./goal_shape";
+import { buildRankingContext, rankStrategies, type RankedStrategy } from "./dispatch_strategy_ranker";
 
 /** Default Tier-0 recipe-replay confidence threshold (§15). Recipes seed at
  *  0.5 and accumulate via updateRecipeConfidence; SEVEN successful replays
@@ -49,6 +50,14 @@ export type DispatchDecisionEvidence = {
   routing_axes: Record<string, number>;
   route_scores: DispatchRouteScores;
   verifier_evidence: Record<string, number>;
+  /** Shadow ranking of dispatch_strategy_v1 artifacts (2026-05-17 brain
+   *  design 48SN4XF3WN4KBBCHHCANDRDQRW). Populated by
+   *  dispatch_strategy_ranker — observational only, does NOT change the
+   *  selected route. The closure_audited consumer credits the top
+   *  strategy via its posterior_alpha/beta. When the strategy registry
+   *  is empty or the ranker errors out, this is an empty array (no
+   *  behavioral change). */
+  strategy_shadow_ranks?: RankedStrategy[];
 };
 
 type DispatchDecisionBase = { reason: string } & DispatchDecisionEvidence;
@@ -777,6 +786,20 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
   // per-(goal_shape, substrate_origin) promotion posterior before selecting
   // between claude_inline and opencode_brain.
   const posteriorAdjusted = applyOriginPromotionRouteAdjustment(db, task, baseEvidence.route_scores, feasibleRoutes);
+
+  // Shadow ranker (2026-05-17 brain design 48SN4XF3WN4KBBCHHCANDRDQRW):
+  // compute dispatch_strategy_v1 artifact rankings ALONGSIDE the
+  // existing scoreRoutesFromAxes decision. Observational only — the
+  // chosen route is still determined by chooseHighestScoredRoute below.
+  // The rankings ride along on dispatch_decided.payload for the
+  // closure_audited consumer to credit strategy posteriors against
+  // realised outcomes.
+  let strategyShadowRanks: RankedStrategy[] = [];
+  try {
+    const ctx = buildRankingContext(db, task, baseEvidence.routing_axes, feasibleRoutes);
+    strategyShadowRanks = rankStrategies(db, ctx, 3);
+  } catch { /* shadow ranking is observational — never block dispatch */ }
+
   const routeEvidence = {
     ...baseEvidence,
     route_scores: posteriorAdjusted.route_scores,
@@ -784,6 +807,7 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
       ...baseEvidence.verifier_evidence,
       ...posteriorAdjusted.verifier_evidence,
     },
+    strategy_shadow_ranks: strategyShadowRanks,
   };
   const selectedRoute = chooseHighestScoredRoute(routeEvidence.route_scores, feasibleRoutes);
   const evidence = evidenceForSelectedRoute(routeEvidence, selectedRoute, feasibleRoutes);
