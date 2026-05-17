@@ -6,7 +6,7 @@
 // module exists so the TUI components depend on ONE typed surface and the
 // transport can be swapped in tests by passing a mock SubstrateClient.
 
-import { mcpCall, sseConnect, type SseEvent } from "../../rpc";
+import { mcpCall, sseConnect, auxBaseUrl, rpcGet, type SseEvent } from "../../rpc";
 
 export type ViewEnvelope<T = unknown> =
   | { ok: true; result: T }
@@ -40,10 +40,15 @@ const callRecent = async (kinds: string[], k = 200): Promise<ViewEnvelope<{ even
 };
 
 const callHealth = async (): Promise<{ ok: boolean; status: string; uptime_s?: number; events_count?: unknown; pid?: unknown; stuck_workers?: unknown[] }> => {
+  // Daemon health lives on the aux-port HTTP endpoint (/health), not MCP.
+  // The same surface `acc daemon status` + cli/status.ts use. mcpCall to a
+  // non-existent runtime.health method would silently return ok:false and
+  // the TUI would render uptime=? events=? verdict=DEAD against a live
+  // daemon — which is exactly the symptom the owner caught.
   try {
-    const env = await mcpCall("runtime.health", {});
-    if (!env.ok) return { ok: false, status: "unreachable" };
-    const r = env.result as Record<string, unknown>;
+    const base = auxBaseUrl();
+    if (!base) return { ok: false, status: "not_running" };
+    const r = await rpcGet<Record<string, unknown>>(`${base}/health`);
     return {
       ok: true,
       status: String(r.status ?? "unknown"),

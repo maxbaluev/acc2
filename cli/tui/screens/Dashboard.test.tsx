@@ -71,7 +71,7 @@ describe("Dashboard component", () => {
     );
     const frame = lastFrame() ?? "";
     expect(frame).toContain("INBOX (pending decisions: 1)");
-    expect(frame).toContain("DISPATCH TRUTH (dispatch_resolved_view)");
+    expect(frame).toContain("DISPATCH TRUTH (last 24h)");
     expect(frame).toContain("DAG (current directive)");
     expect(frame).toContain("LEARNING");
     expect(frame).toContain("NEXT (if I do nothing)");

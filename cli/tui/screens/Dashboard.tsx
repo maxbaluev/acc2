@@ -117,26 +117,44 @@ const DispatchTruthPanel = ({
   const completed = rows.filter((r) => r.lifecycle_status === "completed");
   const failed = rows.filter((r) => r.lifecycle_status === "failed");
   const zombie = rows.filter((r) => r.lifecycle_status === "zombie");
-  const shown = [...live, ...queued, ...failed.slice(0, 2), ...zombie.slice(0, 2), ...completed.slice(0, 2)].slice(0, 6);
+  // Filter to the last 24h before counting and rendering — dispatch_resolved_view
+  // returns the entire historical projection (including hundreds of legacy
+  // zombies from prior session generations); the dashboard surfaces
+  // operational state, not the archive. The full archive is reachable via
+  // `acc admin dispatch-status` for forensic queries.
+  const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
+  const recentCutoff = Date.now() - RECENT_WINDOW_MS;
+  const isRecent = (r: DispatchRow): boolean => {
+    if (!r.latest_signal_at) return r.lifecycle_status === "live" || r.lifecycle_status === "queued_at_cap";
+    const ts = Date.parse(r.latest_signal_at);
+    return Number.isFinite(ts) ? ts >= recentCutoff : true;
+  };
+  const recentLive = live.filter(isRecent);
+  const recentQueued = queued.filter(isRecent);
+  const recentFailed = failed.filter(isRecent);
+  const recentZombie = zombie.filter(isRecent);
+  const recentCompleted = completed.filter(isRecent);
+  const shown = [...recentLive, ...recentQueued, ...recentFailed.slice(0, 2), ...recentZombie.slice(0, 2), ...recentCompleted.slice(0, 2)].slice(0, 6);
   return (
-    <Pane title="DISPATCH TRUTH (dispatch_resolved_view)" focused={focused}>
+    <Pane title="DISPATCH TRUTH (last 24h)" focused={focused}>
       <Text>
-        <Text color="yellow">live={live.length}</Text>
+        <Text color="yellow">live={recentLive.length}</Text>
         {" "}
-        <Text color="magenta">queued_at_cap={queued.length}</Text>
+        <Text color="magenta">queued_at_cap={recentQueued.length}</Text>
         {" "}
-        <Text color="green">completed={completed.length}</Text>
+        <Text color="green">completed={recentCompleted.length}</Text>
         {" "}
-        <Text color="red">failed={failed.length}</Text>
+        <Text color="red">failed={recentFailed.length}</Text>
         {" "}
-        <Text color="red">zombie={zombie.length}</Text>
+        <Text color="red">zombie={recentZombie.length}</Text>
       </Text>
-      {shown.length === 0 ? <Text dimColor>(no dispatches yet)</Text> : null}
+      <Text dimColor>(historical totals: live={live.length} queued={queued.length} completed={completed.length} failed={failed.length} zombie={zombie.length})</Text>
+      {shown.length === 0 ? <Text dimColor>(no recent dispatches)</Text> : null}
       {shown.map((r) => (
         <Box key={`${r.directive_id}/${r.root_task_id}`} flexDirection="column">
           <Text>
             <Text color={lifecycleColor(r.lifecycle_status)}>{lifecycleGlyph(r.lifecycle_status)} {r.lifecycle_status}</Text>
-            <Text dimColor> closure=</Text>
+            <Text dimColor> residual=</Text>
             <Text>{fmtResidual(r.residual)}</Text>
           </Text>
           <Text dimColor>  dir={shortId(r.directive_id, 10)} root={shortId(r.root_task_id, 8)}{r.terminal_kind ? ` terminal=${r.terminal_kind}` : ""}{r.evidence_event_id ? ` evidence=${shortId(r.evidence_event_id, 8)}` : ""}</Text>
