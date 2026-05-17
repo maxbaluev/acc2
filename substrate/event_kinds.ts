@@ -86,6 +86,13 @@ export const EVENT_KINDS = {
   // applied_change_committed) with source_act_id context. Only this source
   // kind projects; derived rows never recursively expand themselves.
   act_tuple_recorded:                      { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  // Claude-side reasoning distillation. ONE summary per substantive turn
+  // (commit / multi-file edit / confirmed diagnosis) — NOT per-tool-call.
+  // The per-(substrate_origin, goal_shape) primitive
+  // (substrate/views.ts originPromotionByGoalShape) uses these to compare
+  // Claude's distilled output against opencode emissions for the merger.
+  // Cited in cli/emit.ts CSYMEMIT01 SUPPORTED set; was missing here.
+  claude_reasoning_recorded:                { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   action_predicted:                        { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   artifact_invoked:                        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   artifact_observed:                       { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
