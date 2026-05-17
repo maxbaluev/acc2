@@ -397,7 +397,22 @@ export const formatEvent = (ev: EventLike, opts: { verbose?: boolean } = {}): st
   const glyph = GLYPHS[kind] ?? " ";
   const task = idPrefix(ev.task_id, 16);
   const payload = parsePayload(ev.payload);
-  const suffix = formatPayload(kind, payload);
+  // Merge top-level event columns into the payload view so renderers
+  // (e.g. action_predicted reading action_artifact_id) see canonical
+  // top-level fields without each formatter having to do its own
+  // fallback. Substrate stores act-loop tuple + outcome/residual as
+  // dedicated columns; pre-fix the tail renderer read p.action_artifact_id
+  // and got undefined because the brain (correctly) sets the field at
+  // top-level not inside payload.
+  const merged = {
+    ...payload,
+    action_artifact_id: (payload.action_artifact_id ?? (ev as Record<string, unknown>).action_artifact_id),
+    verifier_artifact_id: (payload.verifier_artifact_id ?? (ev as Record<string, unknown>).verifier_artifact_id),
+    predicted_residual: (payload.predicted_residual ?? (ev as Record<string, unknown>).predicted_residual),
+    outcome: (payload.outcome ?? (ev as Record<string, unknown>).outcome),
+    residual: (payload.residual ?? (ev as Record<string, unknown>).residual),
+  };
+  const suffix = formatPayload(kind, merged);
   const failureKind = ev.failure_kind ? ` failure_kind=${ev.failure_kind}` : "";
   const line = `${ts} ${glyph.padEnd(3)} ${kind.padEnd(28)} task=${task.padEnd(16)} ${suffix}${failureKind}`.trimEnd();
   return trunc(line, MAX_EVENT_LINE_CHARS);
