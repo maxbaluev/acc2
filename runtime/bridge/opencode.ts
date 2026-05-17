@@ -462,6 +462,7 @@ export const spawnRealOpencode = async (
   const stuckStartMs = Date.now();
   let lastFrameMs = stuckStartMs;
   let firstFrameSeen = false;
+  let framesReceivedCount = 0;
   let bridgeStuckFired = false;
   const pollCadenceMs = Math.min(5_000, Math.max(500, Math.floor(firstFrameThresholdMs / 8)));
   const stuckInterval = setInterval(() => {
@@ -595,6 +596,7 @@ export const spawnRealOpencode = async (
       return;
     }
     if (!parsed || typeof parsed !== "object") return;
+    framesReceivedCount += 1;
     const kind = parsed.type as string | undefined;
     // opencode 1.4+ structured error — capture and surface on completion.
     if (kind === "error") {
@@ -780,28 +782,56 @@ export const spawnRealOpencode = async (
     && (mcpHandshakeTimedOut || exitCode === 0);
   if (handshakeFailed) {
     cleanupConfig();
+    // Audit-2026-05-16 (87% of bridge_failed events were mcp_handshake_failed
+    // with exit_code:0 + stderr empty + zero JSON frames). Pre-fix the bridge
+    // collapsed two distinct failures into one reason which made operator
+    // diagnostics actionably wrong:
+    //   (A) brain_silent_exit — opencode ran cleanly to completion but never
+    //       called a substrate.* / runtime.* tool. This is a prompt-compliance
+    //       failure: GPT-5.5 chose conversational/reasoning-only output and
+    //       skipped tools entirely. Fix: tighten the prompt's tool-use
+    //       enforcement (runtime/prompt_composer.ts WORKFLOW_TEXT). Reducing
+    //       brain concurrency does NOT help; restarting the daemon does NOT
+    //       help; verifying /mcp reachability does NOT help.
+    //   (B) mcp_handshake_timed_out — bridge gave up waiting before opencode
+    //       produced its first frame. Hot-path startup contention (model
+    //       loading, config materialization, MCP negotiation). Fix: raise
+    //       handshakeWindowMs, reduce concurrent brain dispatches, or
+    //       investigate /mcp endpoint reachability (the only branch where
+    //       the old hint was actually correct).
+    // The event kind stays `bridge_failed` (REUSE-first); the new classifier
+    // lives in the `reason` payload field so health-metric counts split
+    // cleanly. Adds frames_received_count so closure verifiers can see at
+    // a glance whether the subprocess produced ANY output at all.
+    const brainSilentExit = !mcpHandshakeTimedOut && exitCode === 0;
+    const classifierReason = brainSilentExit ? "brain_silent_exit" : "mcp_handshake_timed_out";
+    const classifierHint = brainSilentExit
+      ? "opencode ran cleanly (exit_code:0) for the full handshake window but invoked ZERO substrate.*/runtime.* tools. "
+        + "This is a prompt-compliance failure, NOT a transport issue. The brain (GPT-5.5) chose conversational/text-only output "
+        + "and skipped the substrate emission entirely. Fix: tighten WORKFLOW_TEXT in runtime/prompt_composer.ts to demand at "
+        + "least one substrate.emit before exit. Restarting the daemon or verifying /mcp reachability will NOT help — the "
+        + "daemon is fine, the brain just refused to use tools."
+      : "opencode produced no substrate.*/runtime.* tool calls within the handshake observation window AND the window timed out. "
+        + "This is a transport/startup-latency issue (model loading, config materialization, MCP negotiation under contention). "
+        + "Fix: raise ACC2_BRIDGE_HANDSHAKE_WINDOW_MS or reduce concurrent brain dispatches; verify /mcp endpoint reachability.";
     emitEvent(db, {
       kind: "bridge_failed",
       substrate_origin: "opencode",
       directive_id: req.directiveId,
       task_id: req.taskId,
       payload: {
-        reason: "mcp_handshake_failed",
-        // Brain audit E (2026-05-15): normalize mcp_handshake_ok on every
-        // bridge terminal event (success AND failure) so the depth-1
-        // retrieval health metric is measurable as a single SQL query
-        // instead of joining two payload shapes.
+        reason: classifierReason,
+        classifier_class: brainSilentExit ? "prompt_compliance" : "transport",
         mcp_handshake_ok: false,
         window_ms: handshakeWindowMs,
         mcp_server_url: mcpServerUrl,
         timed_out: mcpHandshakeTimedOut,
         timeout_mode: "mcp_handshake_observation_window",
-        budget_observed: budgetObserved("mcp_handshake_failed"),
+        budget_observed: budgetObserved(classifierReason),
         exit_code: exitCode,
-        hint:
-          "opencode did not invoke any substrate.*/runtime.* tool before exit; "
-          + "verify the daemon's /mcp endpoint is reachable, that opencode 1.4.3+ is on PATH, "
-          + "and that the materialized OPENCODE_CONFIG declares v2's MCP server",
+        frames_received_count: framesReceivedCount,
+        first_frame_seen: firstFrameSeen,
+        hint: classifierHint,
         stderr_tail: stderrBuf.slice(-512),
       } as JsonValue,
       invoker: "opencode",
@@ -810,7 +840,9 @@ export const spawnRealOpencode = async (
       ok: false,
       reason: {
         kind: "subprocess_crash",
-        stderr_tail: `mcp_handshake_failed:no substrate.* tool call in ${handshakeWindowMs}ms`,
+        stderr_tail: brainSilentExit
+          ? `brain_silent_exit:opencode exited cleanly with zero substrate tool calls in ${handshakeWindowMs}ms`
+          : `mcp_handshake_timed_out:no substrate.* tool call in ${handshakeWindowMs}ms`,
       },
     };
   }

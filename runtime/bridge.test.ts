@@ -265,10 +265,17 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
         .get() as { payload: string } | null;
       expect(failed).not.toBeNull();
       const payload = JSON.parse(failed!.payload) as Record<string, unknown>;
-      expect(payload.reason).toBe("mcp_handshake_failed");
+      // 2026-05-16 split: `mcp_handshake_failed` was lumping two distinct
+      // failure classes (prompt-compliance vs transport). The new reasons:
+      // `brain_silent_exit` (clean exit, zero tool calls, NO timeout) and
+      // `mcp_handshake_timed_out` (handshake window expired). The test
+      // subprocess here exits silently with no frames → brain_silent_exit.
+      expect(payload.reason).toBe("brain_silent_exit");
+      expect(payload.classifier_class).toBe("prompt_compliance");
       expect(payload.mcp_server_url).toBe("http://127.0.0.1:45678/mcp");
+      expect(typeof payload.frames_received_count).toBe("number");
       if (!result.ok && result.reason.kind === "subprocess_crash") {
-        expect(result.reason.stderr_tail).toContain("mcp_handshake_failed");
+        expect(result.reason.stderr_tail).toContain("brain_silent_exit");
       }
     } finally {
       try { rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* swallow */ }
