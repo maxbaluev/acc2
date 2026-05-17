@@ -84,6 +84,12 @@ const NON_EVENT_KIND_LITERALS = new Set([
   "no_action", "mock_bridge_prompt_unrecognized",
   // irreversible_effect payload.kind values (not event kinds themselves)
   "net_outbound", "fs_write",
+  // act_artifact / code_artifact registry sub-payload tag (the body of a
+  // dispatch-strategy seed declares `kind: 'dispatch_strategy_v1'` as its
+  // internal artifact-kind discriminator — NOT an event kind). Per brain
+  // design 48SN4XF3WN4KBBCHHCANDRDQRW, strategy identity lives in the
+  // artifact-registry payload, not in EVENT_KINDS.
+  "dispatch_strategy_v1",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────
