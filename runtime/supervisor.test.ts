@@ -5,10 +5,12 @@ import { newId } from "./ids";
 import {
   detectRedispatchStorm,
   detectDagExplosion,
+  detectRepeatingAction,
   supervisorTick,
   SUPERVISOR_MAX_REDISPATCHES_PER_TASK,
   SUPERVISOR_MAX_READY_TASKS_PER_DIRECTIVE,
   SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS,
+  SUPERVISOR_MAX_REPEATING_ACTIONS,
 } from "./supervisor";
 
 afterAll(() => closeDb());
@@ -146,6 +148,107 @@ describe("supervisor — detectDagExplosion", () => {
   });
 });
 
+describe("supervisor — detectRepeatingAction (2026-05-17 brain-stuck-loop detector)", () => {
+  const insertActionPredicted = (
+    db: ReturnType<typeof openDb>,
+    ts: string,
+    taskId: string,
+    directiveId: string,
+    actionArtifactId: string,
+    substrateOrigin: string = "opencode",
+  ): void => {
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, action_artifact_id, verifier_artifact_id, predicted_residual, payload)
+       VALUES (?, ?, 'action_predicted', ?, ?, ?, '', ?, ?, ?, ?)`,
+    ).run(newId(), ts, substrateOrigin, directiveId, taskId, actionArtifactId, "verifier", 0.2, JSON.stringify({ intent: "Record one coherent opencode brain dispatch exit boundary." }));
+  };
+
+  test("does NOT quarantine when repeats are below threshold", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const directiveId = newId();
+    const taskId = newId();
+    for (let i = 0; i < SUPERVISOR_MAX_REPEATING_ACTIONS - 1; i++) {
+      insertActionPredicted(db, new Date(now - 1000 * i).toISOString(), taskId, directiveId, "opencode_brain_exit_action");
+    }
+    const quarantined = detectRepeatingAction(db, { nowMs: now });
+    expect(quarantined.length).toBe(0);
+  });
+
+  test("quarantines a task with ≥ SUPERVISOR_MAX_REPEATING_ACTIONS same-artifact action_predicted (the live ACTTUPLE03C_CREDIT loop shape)", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const directiveId = newId();
+    const taskId = newId();
+    for (let i = 0; i < SUPERVISOR_MAX_REPEATING_ACTIONS; i++) {
+      insertActionPredicted(db, new Date(now - 60_000 * i).toISOString(), taskId, directiveId, "opencode_brain_exit_action");
+    }
+    const quarantined = detectRepeatingAction(db, { nowMs: now });
+    expect(quarantined.length).toBe(1);
+    expect(quarantined[0]!.task_id).toBe(taskId);
+    expect(quarantined[0]!.action_artifact_id).toBe("opencode_brain_exit_action");
+
+    const failed = db
+      .query("SELECT failure_kind, payload FROM events WHERE kind = 'task_failed' AND task_id = ?")
+      .get(taskId) as { failure_kind: string; payload: string } | null;
+    expect(failed?.failure_kind).toBe("brain_stuck_repeating_action");
+    const fp = JSON.parse(failed!.payload);
+    expect(fp.action_artifact_id).toBe("opencode_brain_exit_action");
+    expect(fp.repeat_count).toBeGreaterThanOrEqual(SUPERVISOR_MAX_REPEATING_ACTIONS);
+
+    const intervention = db
+      .query("SELECT payload FROM events WHERE kind = 'supervisor_intervention_recorded' AND task_id = ?")
+      .get(taskId) as { payload: string } | null;
+    expect(intervention).not.toBeNull();
+    const ip = JSON.parse(intervention!.payload);
+    expect(ip.pathology).toBe("brain_stuck_repeating_action");
+  });
+
+  test("does NOT cross-link tasks: only same (task_id, action_artifact_id) tuples count", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const directiveId = newId();
+    // Two distinct tasks each emit N/2 of the same artifact. Neither should fire alone.
+    const t1 = newId();
+    const t2 = newId();
+    const half = Math.floor(SUPERVISOR_MAX_REPEATING_ACTIONS / 2) + 1;
+    for (let i = 0; i < half; i++) {
+      insertActionPredicted(db, new Date(now - 1000 * i).toISOString(), t1, directiveId, "shared_artifact");
+      insertActionPredicted(db, new Date(now - 1000 * (i + 100)).toISOString(), t2, directiveId, "shared_artifact");
+    }
+    const quarantined = detectRepeatingAction(db, { nowMs: now });
+    expect(quarantined.length).toBe(0);
+  });
+
+  test("ignores non-brain action_predicted (substrate_origin filter)", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const directiveId = newId();
+    const taskId = newId();
+    for (let i = 0; i < SUPERVISOR_MAX_REPEATING_ACTIONS + 2; i++) {
+      insertActionPredicted(db, new Date(now - 1000 * i).toISOString(), taskId, directiveId, "claude_inline_action", "claude_root");
+    }
+    const quarantined = detectRepeatingAction(db, { nowMs: now });
+    expect(quarantined.length).toBe(0);
+  });
+
+  test("is idempotent — second call does NOT re-fail an already-failed task", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const directiveId = newId();
+    const taskId = newId();
+    for (let i = 0; i < SUPERVISOR_MAX_REPEATING_ACTIONS; i++) {
+      insertActionPredicted(db, new Date(now - 60_000 * i).toISOString(), taskId, directiveId, "opencode_brain_exit_action");
+    }
+    expect(detectRepeatingAction(db, { nowMs: now }).length).toBe(1);
+    expect(detectRepeatingAction(db, { nowMs: now }).length).toBe(0);
+    const failedCount = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_failed' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(failedCount.c).toBe(1);
+  });
+});
+
 describe("supervisor — supervisorTick composition", () => {
   test("supervisorTick runs every detector and returns a summary", () => {
     const db = openDb(":memory:");
@@ -156,6 +259,7 @@ describe("supervisor — supervisorTick composition", () => {
       dispatch_budget_exceeded_count: 0,
       ready_starvation_count: 0,
       pathology_budget_exhausted_count: 0,
+      brain_stuck_repeating_action_count: 0,
       bridge_health_degraded: false,
       bridge_health_recovered: false,
     });

@@ -58,7 +58,16 @@ export type PathologyKind =
   | "ready_starvation"
   | "bridge_health_degraded"
   | "verifier_residual_high"
-  | "dag_explosion";
+  | "dag_explosion"
+  // Supervisor stuck-task detector (2026-05-17): brain emits the SAME
+  // (task_id, action_artifact_id) action_predicted N+ times within a
+  // window without the task committing. Live evidence: ACTTUPLE03C_CREDIT
+  // emitted 13 action_predicted with action_artifact_id="opencode_brain
+  // _exit_action" over ~12 minutes — brain stuck restating the same
+  // unimplementable action because it has no checkout-mutation lane.
+  // Weight 3 — same severity as a dag_explosion (both are "brain is
+  // looping without converging" signals).
+  | "brain_stuck_repeating_action";
 
 const DEFAULT_WEIGHTS: Record<PathologyKind, number> = {
   bridge_failure_streak: 3,
@@ -69,6 +78,7 @@ const DEFAULT_WEIGHTS: Record<PathologyKind, number> = {
   bridge_health_degraded: 4,
   verifier_residual_high: 1,
   dag_explosion: 3,
+  brain_stuck_repeating_action: 3,
 };
 
 const envWeight = (kind: PathologyKind): number => {

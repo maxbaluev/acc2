@@ -84,6 +84,22 @@ const SUPERVISOR_DIRECTIVE_AGE_MS = SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS * 60 * 60
  *  cost-burn from any pathology the per-task / per-bridge gates miss. */
 export const SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE = 50;
 
+/** Stuck-task detector (2026-05-17): when the brain emits the SAME
+ *  action_predicted (keyed by `(task_id, action_artifact_id)`) N+ times
+ *  within the window without the task committing, the brain is wedged on
+ *  an unimplementable action. Default threshold catches the typical
+ *  "brain restates the same fake-artifact action every cycle" loop
+ *  (witnessed on ACTTUPLE03C_CREDIT: 13 repeats of
+ *  action_artifact_id="opencode_brain_exit_action" over ~12 minutes).
+ *  Substrate-state only — does NOT depend on whether the artifact id is
+ *  a real handle (we're refactoring the artifact system in parallel). */
+export const SUPERVISOR_MAX_REPEATING_ACTIONS = Number(
+  process.env.ACC2_SUPERVISOR_MAX_REPEATING_ACTIONS ?? 5,
+);
+export const SUPERVISOR_REPEATING_ACTION_WINDOW_MS = Number(
+  process.env.ACC2_SUPERVISOR_REPEATING_ACTION_WINDOW_MS ?? 10 * 60 * 1000,
+);
+
 /** Detect tasks in a redispatch storm and fail them. Returns the list of
  *  task ids that were quarantined this tick. Idempotent — a task that
  *  already has a task_failed event will not be re-failed. */
@@ -153,6 +169,104 @@ export const detectRedispatchStorm = (
       logger.warn(
         { where: "supervisor.redispatch_storm", task_id: r.task_id, err: (err as Error).message },
         "supervisor failed to fail redispatch-storm task",
+      );
+    }
+  }
+  return quarantined;
+};
+
+/** Detect brain stuck-task loops (2026-05-17): the brain keeps emitting
+ *  the SAME action_predicted (keyed by `(task_id, action_artifact_id)`)
+ *  without the task committing. Pre-fix the brain would cycle
+ *  indefinitely on tasks it couldn't actually land — e.g. ACTTUPLE03C
+ *  _CREDIT emitted 13 action_predicted with action_artifact_id=
+ *  "opencode_brain_exit_action" over ~12 minutes because the brain has
+ *  READ-ONLY filesystem permission and no auto-apply path for raw code
+ *  changes. The detector fails the task with failure_kind=
+ *  "brain_stuck_repeating_action" so the scheduler stops re-dispatching
+ *  it and the brain can move on to other work.
+ *
+ *  Purely substrate-state — counts action_predicted rows by
+ *  (task_id, action_artifact_id) over a window. Does NOT validate that
+ *  action_artifact_id resolves to a real code_artifact row (we're
+ *  refactoring the artifact system in parallel; this detector works
+ *  regardless of which artifact table exists). Idempotent — skips
+ *  tasks that already have a terminal event. */
+export const detectRepeatingAction = (
+  db: Database,
+  opts?: { nowMs?: number },
+): Array<{ task_id: string; directive_id: string; action_artifact_id: string; repeat_count: number }> => {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const cutoffIso = new Date(nowMs - SUPERVISOR_REPEATING_ACTION_WINDOW_MS).toISOString();
+  const rows = db
+    .query(
+      `SELECT task_id, directive_id, action_artifact_id, COUNT(*) AS repeat_count
+       FROM events
+       WHERE kind = 'action_predicted'
+         AND ts >= ?
+         AND substrate_origin = 'opencode'
+         AND action_artifact_id IS NOT NULL
+         AND action_artifact_id != ''
+       GROUP BY task_id, action_artifact_id
+       HAVING repeat_count >= ?`,
+    )
+    .all(cutoffIso, SUPERVISOR_MAX_REPEATING_ACTIONS) as Array<{
+      task_id: string;
+      directive_id: string;
+      action_artifact_id: string;
+      repeat_count: number;
+    }>;
+
+  const quarantined: Array<{ task_id: string; directive_id: string; action_artifact_id: string; repeat_count: number }> = [];
+  for (const r of rows) {
+    // Idempotency: skip tasks that already have any terminal event.
+    // The single-terminal-per-task gate at runtime/events.ts would
+    // refuse a second terminal anyway, but the explicit check avoids
+    // a noisy refusal in the audit trail.
+    const terminal = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE task_id = ?
+           AND kind IN ('task_committed', 'task_failed', 'task_abandoned')
+         LIMIT 1`,
+      )
+      .get(r.task_id);
+    if (terminal) continue;
+    try {
+      emitEvent(db, {
+        kind: "task_failed",
+        substrate_origin: "substrate_auto",
+        directive_id: r.directive_id,
+        task_id: r.task_id,
+        failure_kind: "brain_stuck_repeating_action",
+        payload: {
+          reason: "supervisor_brain_stuck_repeating_action",
+          action_artifact_id: r.action_artifact_id,
+          repeat_count: r.repeat_count,
+          window_ms: SUPERVISOR_REPEATING_ACTION_WINDOW_MS,
+          threshold: SUPERVISOR_MAX_REPEATING_ACTIONS,
+          hint: "brain emitted action_predicted with the same action_artifact_id more than threshold times without the task committing — typically a sign the action_artifact_id is a placeholder string (artifact never admitted) or the brain has no implementation lane for this action. Task failed so the scheduler stops re-dispatching it. Brain should emit contract_amendment_proposed (which has an auto-apply path) or knowledge_candidate instead.",
+        } as JsonValue,
+      });
+      emitEvent(db, {
+        kind: "supervisor_intervention_recorded",
+        substrate_origin: "substrate_auto",
+        directive_id: r.directive_id,
+        task_id: r.task_id,
+        payload: {
+          pathology: "brain_stuck_repeating_action",
+          corrective_event: "task_failed",
+          action_artifact_id: r.action_artifact_id,
+          repeat_count: r.repeat_count,
+          threshold: SUPERVISOR_MAX_REPEATING_ACTIONS,
+          window_ms: SUPERVISOR_REPEATING_ACTION_WINDOW_MS,
+        } as JsonValue,
+      });
+      quarantined.push(r);
+    } catch (err) {
+      logger.warn(
+        { where: "supervisor.repeating_action", task_id: r.task_id, err: (err as Error).message },
+        "supervisor failed to fail repeating-action task",
       );
     }
   }
@@ -449,6 +563,7 @@ export type SupervisorTickResult = {
   dispatch_budget_exceeded_count: number;
   ready_starvation_count: number;
   pathology_budget_exhausted_count: number;
+  brain_stuck_repeating_action_count: number;
   bridge_health_degraded: boolean;
   bridge_health_recovered: boolean;
 };
@@ -465,6 +580,7 @@ export const supervisorTick = (
     dispatch_budget_exceeded_count: 0,
     ready_starvation_count: 0,
     pathology_budget_exhausted_count: 0,
+    brain_stuck_repeating_action_count: 0,
     bridge_health_degraded: false,
     bridge_health_recovered: false,
   };
@@ -516,6 +632,13 @@ export const supervisorTick = (
     for (const s of starved) debitOnDirective(s.directive_id, "ready_starvation", "supervisor.ready_starvation");
   } catch (err) {
     logger.warn({ where: "supervisor.tick.ready_starvation", err: (err as Error).message }, "ready-starvation detector failed");
+  }
+  try {
+    const stuck = detectRepeatingAction(db, opts);
+    result.brain_stuck_repeating_action_count = stuck.length;
+    for (const s of stuck) debitOnDirective(s.directive_id, "brain_stuck_repeating_action", "supervisor.repeating_action");
+  } catch (err) {
+    logger.warn({ where: "supervisor.tick.repeating_action", err: (err as Error).message }, "repeating-action detector failed");
   }
   try { result.bridge_health_degraded = maybeMarkDegraded(db, opts); } catch (err) {
     logger.warn({ where: "supervisor.tick.bridge_degraded", err: (err as Error).message }, "bridge_health degraded check failed");
