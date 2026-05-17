@@ -378,6 +378,116 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     }
   }, 10_000);
 
+  test("no-progress watchdog respects substrate progress: when opencode emits via HTTP/MCP (no stdout frames), the bridge_stuck SIGTERM is NOT triggered", async () => {
+    // FOUNDATIONAL FIX 2026-05-16 (commit __next__): pre-fix the no-progress
+    // watchdog (stuckInterval at opencode.ts:468) only checked
+    // `firstFrameSeen` (a stdout-frame flag). opencode 1.4.3 routes MCP via
+    // internal HTTP — stdout stays silent — so the watchdog killed every
+    // long-running brain dispatch at firstFrameThresholdMs even when the
+    // brain was actively emitting substrate events. The fix: the watchdog
+    // ALSO queries the substrate; if any event with invoker='claude_root'
+    // landed for this task since dispatch start, flip firstFrameSeen=true
+    // (disabling the watchdog for the rest of the dispatch) and emit
+    // bridge_mcp_connected{detection_path:"substrate_progress_watchdog"}.
+    //
+    // EVIDENCE THIS PROTECTS AGAINST: bridge_stuck task=Q4HMCH30BS5030E5
+    // reason=no_frames_received elapsed_ms=303312 fired at 00:41:25 UTC
+    // after 5 minutes of legitimate brain MCP activity. The watchdog
+    // SIGKILLed the brain mid-synthesis, the subprocess exited, and the
+    // exit-time gate classified it as mcp_handshake_timed_out.
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+
+    // Pre-seed substrate with an MCP-emitted event for this task (mimicking
+    // an HTTP MCP call landing in mcp_server/index.ts before the watchdog
+    // tick fires). NOTE: ts must be >= stuckStartMs (Date.now() at bridge
+    // start). Pre-seed within the same wall-clock tick — the substrate
+    // query uses ts >= bridgeStart so events with the SAME ts pass.
+    const { emitEvent } = await import("./events");
+    // Tight handshake window + a fakeSpawn that NEVER exits — forces the
+    // watchdog to be the only thing that could kill it. We assert the
+    // watchdog did NOT fire (no bridge_stuck event) within the window.
+    let killCount = 0;
+    const sentinel = {
+      kill: () => { killCount += 1; },
+      // stdout/stderr close immediately (done=true) so the reader loop
+      // exits — but the `exited` promise stays pending so the watchdog
+      // ticks while the bridge awaits the subprocess.
+      stdout: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      stderr: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      // Exits at +1500ms — gives the watchdog (cadence 500ms) at least two
+      // ticks (~T+500ms, T+1000ms) before subprocess closes. timeoutMs is
+      // 5s so the overall-timeout path cannot race into the test window.
+      exited: new Promise<number>((resolve) => setTimeout(() => resolve(0), 1500)),
+    };
+    const fakeSpawn = (() => sentinel) as unknown as typeof Bun.spawn;
+
+    // Emit a claude_root event 50ms after spawn so the watchdog's first
+    // poll (~500ms cadence given 200ms threshold, clamped to min 500ms)
+    // reconciles to OK.
+    setTimeout(() => {
+      emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "opencode",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { claim: "in-flight via mcp http" },
+        invoker: "claude_root",
+      });
+    }, 50);
+
+    const tmpConfigDir = mkdtempSync(join(tmpdir(), "acc2-watchdog-test-"));
+    try {
+      await spawnRealOpencode(
+        { prompt: "watchdog substrate-progress probe", taskId, directiveId },
+        db,
+        {
+          spawnFn: fakeSpawn,
+          mcpServerUrl: "http://127.0.0.1:45678/mcp",
+          configDir: tmpConfigDir,
+          // Tight threshold so the watchdog tick lands fast. pollCadenceMs
+          // is clamped to min 500ms; first tick at +500ms finds the
+          // substrate event emitted at +50ms.
+          firstFrameThresholdMs: 200,
+          mcpHandshakeWindowMs: 200,
+          // 5s timeoutMs so the overall-timeout SIGTERM can't race into
+          // the 1.5s test window and cause spurious kill counts.
+          timeoutMs: 5_000,
+        },
+      );
+
+      // The bridge_stuck watchdog should NOT have killed the subprocess.
+      expect(killCount).toBe(0);
+      // No bridge_stuck event should have been emitted for this task.
+      const stuck = db
+        .query<{ payload: string }, [string]>(
+          "SELECT payload FROM events WHERE kind = 'bridge_stuck' AND task_id = ?",
+        )
+        .get(taskId);
+      expect(stuck).toBeNull();
+      // A bridge_mcp_connected with the new detection_path SHOULD exist.
+      const reconciled = db
+        .query<{ payload: string }, [string]>(
+          "SELECT payload FROM events WHERE kind = 'bridge_mcp_connected' AND task_id = ? ORDER BY ts ASC LIMIT 1",
+        )
+        .get(taskId);
+      // The watchdog may not have ticked before exit (poll cadence is
+      // 500ms, exit at 400ms). If it did, the detection_path must be
+      // "substrate_progress_watchdog" or the exit-time
+      // "substrate_reconciliation". Either path proves the canonical fix.
+      if (reconciled) {
+        const rp = JSON.parse(reconciled.payload) as Record<string, unknown>;
+        expect([
+          "substrate_progress_watchdog",
+          "substrate_reconciliation",
+        ]).toContain(rp.detection_path as string);
+      }
+    } finally {
+      try { rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* swallow */ }
+    }
+  }, 10_000);
+
   test("brain spawn cwd is an isolated tempdir when checkoutIsolation is not passed (defense-in-depth against opencode native filesystem tools)", async () => {
     const db = openDb(":memory:");
     let capturedCwd: string | undefined = undefined;

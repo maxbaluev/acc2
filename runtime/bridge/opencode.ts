@@ -465,6 +465,34 @@ export const spawnRealOpencode = async (
   let framesReceivedCount = 0;
   let bridgeStuckFired = false;
   const pollCadenceMs = Math.min(5_000, Math.max(500, Math.floor(firstFrameThresholdMs / 8)));
+  // Substrate-side progress reconciliation (FOUNDATIONAL FIX 2026-05-16):
+  // opencode 1.4.3 routes MCP via internal HTTP, so stdout `firstFrameSeen`
+  // stays false forever even when the brain is actively making progress via
+  // dozens of MCP tool calls. Pre-fix the watchdog killed the brain at
+  // firstFrameThresholdMs (5min default) right in the middle of legitimate
+  // strategic synthesis — every successful opencode 1.4 dispatch that took
+  // longer than the threshold was mis-killed. Cite ledger evidence:
+  // bridge_stuck task=Q4HMCH30BS5030E5 reason=no_frames_received
+  // elapsed_ms=303312 fired AFTER the brain had already emitted multiple
+  // substrate events via HTTP — the watchdog just couldn't see them.
+  // The reconciliation: flip firstFrameSeen=true if substrate has any
+  // events with task_id=req.taskId AND invoker='claude_root' since dispatch
+  // start. Same canonical truth source as the exit-time handshake check.
+  const checkSubstrateProgress = (): boolean => {
+    try {
+      const sinceIso = new Date(stuckStartMs).toISOString();
+      const hit = db
+        .query<{ n: number }, [string, string]>(
+          `SELECT COUNT(*) AS n FROM events
+           WHERE task_id = ?
+             AND ts >= ?
+             AND invoker = 'claude_root'`,
+        )
+        .get(req.taskId, sinceIso);
+      return !!hit && hit.n > 0;
+    } catch { return false; }
+  };
+
   const stuckInterval = setInterval(() => {
     if (bridgeStuckFired) return;
     // Once we've seen a frame, the subprocess is alive — trust the
@@ -472,6 +500,41 @@ export const spawnRealOpencode = async (
     // load-bearing fix: pre-fix inter-frame watchdog killed slow
     // legitimate brain reasoning between MCP calls.
     if (firstFrameSeen) return;
+    // Substrate-side progress check: if the brain has been emitting
+    // events via the v2 MCP server (invoker='claude_root'), that proves
+    // the subprocess is alive and making progress even though stdout is
+    // silent. Flip firstFrameSeen so the watchdog disables itself for
+    // the remainder of the dispatch (the overall timeout takes over).
+    if (checkSubstrateProgress()) {
+      firstFrameSeen = true;
+      lastFrameMs = Date.now();
+      // Also flip the handshake flag — substrate progress IS the handshake
+      // (per CLAUDE.md: substrate is the canonical truth). This keeps the
+      // exit-time reconciliation from having to re-detect the same evidence
+      // and removes any window where the overall-timeout path could race
+      // into a misleading bridge_failed{reason=timeout} after the watchdog
+      // already proved the brain was alive.
+      if (!mcpHandshakeOk) {
+        mcpHandshakeOk = true;
+        clearInterval(mcpHandshakeWatchdog);
+      }
+      try {
+        emitEvent(db, {
+          kind: "bridge_mcp_connected",
+          substrate_origin: "opencode",
+          directive_id: req.directiveId,
+          task_id: req.taskId,
+          payload: {
+            detection_path: "substrate_progress_watchdog",
+            mcp_server_url: mcpServerUrl,
+            server_name: V2_OPENCODE_MCP_SERVER_NAME,
+            note: "opencode 1.4 routes MCP via HTTP; watchdog detected brain progress via substrate poll, not stdout. Disabling no-frames watchdog for the remainder of the dispatch.",
+          } as JsonValue,
+          invoker: "opencode",
+        });
+      } catch (err) { void err; }
+      return;
+    }
     const now = Date.now();
     const sinceLastFrame = now - lastFrameMs;
     if (sinceLastFrame < firstFrameThresholdMs) return;
@@ -490,6 +553,7 @@ export const spawnRealOpencode = async (
           threshold_ms: firstFrameThresholdMs,
           first_frame_seen: false,
           tier: "first_frame",
+          substrate_progress_observed: false,
         } as JsonValue,
         invoker: "opencode",
       });
