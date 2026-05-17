@@ -479,6 +479,11 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       observed_residual: actTuple.observed_residual,
     })).catch(() => { /* credit retry can be driven from projected rows */ });
   }
+  if (input.kind === "owner_observed_outcome_recorded") {
+    void import("./credit").then(({ distributeOwnerObservedOutcomeCredit }) => distributeOwnerObservedOutcomeCredit(db, id)).catch(() => {
+      /* owner-observed credit retry can be driven from the ledger row */
+    });
+  }
   return { id, ts };
 };
 

@@ -138,6 +138,34 @@ const targetCandidatesFromPayload = (payload: Record<string, unknown>): string[]
   return [...targets];
 };
 
+const repoResourceFromTarget = (target: string): string => {
+  const trimmed = target.trim();
+  if (trimmed.length === 0) return "";
+  if (trimmed.startsWith("repo:")) return trimmed;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return trimmed;
+  return "repo:" + trimmed.replace(/^\.\//, "");
+};
+
+const repoFileFromResource = (resource: string): string | null => {
+  const normalized = repoResourceFromTarget(resource);
+  if (!normalized.startsWith("repo:")) return null;
+  const file = normalized.slice("repo:".length).replace(/^\.\//, "");
+  return file.length > 0 ? file : null;
+};
+
+const affectedTargetsFromPayload = (payload: Record<string, unknown>, target: string | undefined): { affectedResources: string[]; affectedFiles: string[] } => {
+  const resources = new Set<string>();
+  for (const candidate of [...targetCandidatesFromPayload(payload), target].filter((t): t is string => typeof t === "string" && t.trim().length > 0)) {
+    const resource = repoResourceFromTarget(candidate);
+    if (resource.length > 0) resources.add(resource);
+  }
+  const affectedResources = [...resources];
+  const affectedFiles = affectedResources
+    .map(repoFileFromResource)
+    .filter((file): file is string => typeof file === "string" && file.length > 0);
+  return { affectedResources, affectedFiles };
+};
+
 const normalizeTargetForCompare = (target: string): string => target.startsWith("repo:") ? target.slice("repo:".length) : target;
 
 const proposalTargetsPayloadTarget = (proposal: Record<string, unknown>, target: string): boolean => {
@@ -705,6 +733,8 @@ export const recordApplyOutcome = async (opts: {
   }
 
   const target = auth.target || opts.target;
+  const { affectedResources, affectedFiles } = affectedTargetsFromPayload(payload, target);
+  const sourceBrainEventId = eventId;
   let gateActionEventId: string | undefined;
   let gateScoredEventId: string | undefined;
   try {
@@ -854,6 +884,9 @@ export const recordApplyOutcome = async (opts: {
       summary: opts.summary,
       reason: opts.reason,
       target,
+      affected_resources: affectedResources,
+      affected_files: affectedFiles,
+      source_brain_event_id: sourceBrainEventId,
       residual,
       request_event_id: requestEventId,
       authorization_event_id: requestEventId,
@@ -884,7 +917,7 @@ export const recordApplyOutcome = async (opts: {
       outcome: residual < 0.3 ? "succeeded" : "failed",
       actionArtifactId,
       verifierArtifactId,
-      affectedResources: target ? [target] : [],
+      affectedResources,
       citedKnowledgeIds: [eventId],
       citedArtifactIds: [actionArtifactId, verifierArtifactId],
       sourceEventId: eventId,
@@ -892,6 +925,8 @@ export const recordApplyOutcome = async (opts: {
       derivedEventIds: [requestEventId, actionEventId, scoredEventId, committedEventId].filter(Boolean) as string[],
       extra: {
         source_kind: ev.kind,
+        source_brain_event_id: sourceBrainEventId,
+        affected_files: affectedFiles,
         status,
         verifier_passed: verifierPassed,
         commit_sha: opts.commitSha ?? null,

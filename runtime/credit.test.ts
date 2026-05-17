@@ -926,4 +926,56 @@ describe("act_tuple_recorded projected credit", () => {
     expect(payload.source_act_id).toBe(act.id);
     expect(payload.owner_observed_outcome_event_id).toBe(owner.id);
   });
+
+  test("owner negative verdict on applied change demotes cited artifact automatically", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "owner_action", "// action");
+    insertSampleArtifact(db, "owner_verifier", "// verifier");
+    insertSampleArtifact(db, "owner_cited", "// cited", { initialAlpha: 1, initialBeta: 1 });
+    const act = emitEvent(db, {
+      kind: "act_tuple_recorded",
+      substrate_origin: "claude_root",
+      directive_id: "d_owner_auto",
+      task_id: "t_owner_auto",
+      action_artifact_id: "owner_action",
+      verifier_artifact_id: "owner_verifier",
+      predicted_residual: 0.1,
+      residual: 0,
+      payload: {
+        intent: "record applied change with cited artifact",
+        reasoning_summary: "owner may later correct the verifier outcome",
+        effect_summary: "projection rows created",
+        verifier_kind: "deterministic_code",
+        cited_artifact_ids: ["owner_cited"],
+      },
+    });
+    let applied: { id: string } | null = null;
+    for (let i = 0; i < 20; i++) {
+      applied = db.query("SELECT id FROM events WHERE kind = 'applied_change_committed' AND json_extract(payload, '$.source_act_id') = ?").get(act.id) as { id: string } | null;
+      if (applied) break;
+      await Bun.sleep(10);
+    }
+    expect(applied).not.toBeNull();
+
+    const before = getArtifact(db, "owner_cited")!;
+    const owner = emitEvent(db, {
+      kind: "owner_observed_outcome_recorded",
+      substrate_origin: "owner",
+      directive_id: "d_owner_auto",
+      task_id: "t_owner_auto",
+      context_refs: [applied!.id],
+      payload: { verdict: "negative", source_event_id: applied!.id, observation: "still broken" },
+    });
+
+    let after = getArtifact(db, "owner_cited")!;
+    for (let i = 0; i < 20; i++) {
+      after = getArtifact(db, "owner_cited")!;
+      if (after.posteriorBeta > before.posteriorBeta) break;
+      await Bun.sleep(10);
+    }
+    expect(after.posteriorBeta).toBeGreaterThan(before.posteriorBeta);
+    const update = db.query("SELECT payload FROM events WHERE kind = 'code_artifact_score_updated' AND json_extract(payload, '$.artifact_id') = ? AND json_extract(payload, '$.owner_observed_outcome_event_id') = ?").get("owner_cited", owner.id) as { payload: string } | null;
+    expect(update).not.toBeNull();
+    expect(JSON.parse(update!.payload).residual).toBe(1);
+  });
 });

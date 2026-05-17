@@ -488,6 +488,25 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(row?.terminal_kind).toBe("task_committed");
   });
 
+  test("reports queued_at_cap when a ready refinement child has scheduler admission evidence", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_refine_gate", task_id: "t_root" });
+    insertEvent(db, { kind: "task_committed", directive_id: "d_refine_gate", task_id: "t_root" });
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_refine_gate", task_id: "t_child", parent_task_id: "t_root" });
+    const gateEventId = insertEvent(db, {
+      kind: "constitutional_gate_decision",
+      directive_id: "d_refine_gate",
+      task_id: "t_child",
+      payload: { gate: "scheduler_global_concurrency_cap", reason: "scheduler_global_in_flight_at_cap", cap: 1 },
+    });
+
+    const [row] = dispatchResolved(db, { directiveId: "d_refine_gate", rootTaskId: "t_root" });
+    expect(row?.lifecycle_status).toBe("queued_at_cap");
+    expect(row?.status_reason).toBe("scheduler_global_in_flight_at_cap");
+    expect(row?.latest_event_id).toBe(gateEventId);
+  });
+
   test("returns to completed once the refinement child also closes", () => {
     const db = openDb(":memory:");
     runViews(db);

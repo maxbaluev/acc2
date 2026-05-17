@@ -185,6 +185,40 @@ describe("task_scheduler", () => {
     }
   }, 60_000);
 
+  test("ready refinement child skipped by scheduler cap gets durable queued evidence", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-refine-cap-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      const { directiveId, taskId: root } = await openFixtureDCountTodos(db, tempDir);
+      emitEvent(db, { kind: "task_committed", substrate_origin: "substrate_auto", directive_id: directiveId, task_id: root, residual: 0, payload: { residual: 0 } });
+      const childA = newId();
+      const childB = newId();
+      for (const child of [childA, childB]) {
+        emitEvent(db, { kind: "task_node_opened", substrate_origin: "opencode", directive_id: directiveId, task_id: child, parent_task_id: root, payload: { goal: FIXTURE_D_DIRECTIVE_TEXT, target_path: tempDir } });
+        emitEvent(db, { kind: "task_edge_recorded", substrate_origin: "opencode", directive_id: directiveId, task_id: child, payload: { kind: "refines", from_task: root, to_task: child } });
+      }
+
+      const tick = await schedulerTick(db, {
+        fixtureTargetPath: tempDir,
+        maxConcurrent: 1,
+      });
+      expect(tick.dispatched.length).toBe(1);
+      const skipped = [childA, childB].find((id) => tick.skipped_concurrency_cap.includes(id));
+      expect(skipped).toBeDefined();
+
+      const gate = db
+        .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'constitutional_gate_decision' ORDER BY ts DESC LIMIT 1")
+        .get(skipped!) as { payload: string } | null;
+      expect(gate).not.toBeNull();
+      const payload = JSON.parse(gate!.payload) as { gate?: string; reason?: string };
+      expect(payload.gate).toBe("scheduler_global_concurrency_cap");
+      expect(payload.reason).toBe("scheduler_global_in_flight_at_cap");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   test("computeBrainDispatchCap returns a positive integer scaled to host RAM", () => {
     // Dynamic cap = floor((min(freemem, totalmem - 2GB)) / 700MB), floor 1.
     // We can't assert the exact number (depends on the test host) but we CAN

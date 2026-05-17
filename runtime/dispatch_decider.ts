@@ -22,9 +22,10 @@ import type { TaskNode } from "./task_topology";
 import { readCurrentMode } from "./crisis_mode";
 import { blockersOf } from "./interference";
 import { findRecipeMatch as findRealRecipeMatch } from "./recipe_replay";
-import { lowRiskInlinePatterns } from "../substrate/views";
+import { lowRiskInlinePatterns, originPromotionByGoalShape } from "../substrate/views";
 import { parseResourceRefs, resourceMatchesPattern, type ResourceRef } from "./resource_uri";
 import { betaMean as canonicalBetaMean, betaEvidenceConfidence } from "./posterior";
+import { goalShape as computeGoalShape } from "./goal_shape";
 
 /** Default Tier-0 recipe-replay confidence threshold (§15). Recipes seed at
  *  0.5 and accumulate via updateRecipeConfidence; SEVEN successful replays
@@ -338,6 +339,66 @@ const chooseHighestScoredRoute = (routeScores: DispatchRouteScores, feasibleRout
     }
   }
   return best;
+};
+
+const POSTERIOR_ROUTED_ORIGINS: Record<"opencode_brain" | "claude_inline", string[]> = {
+  opencode_brain: ["opencode", "opencode_brain"],
+  claude_inline: ["claude_inline", "claude_root", "claude"],
+};
+
+type OriginPromotionRouteAdjustment = {
+  route_scores: DispatchRouteScores;
+  verifier_evidence: Record<string, number>;
+};
+
+const currentGoalShapeForTask = (db: Database, task: TaskNode): string => {
+  const directivePayload = readDirectivePayload(db, task.directive_id);
+  const directiveText = typeof directivePayload.directive_text === "string" ? directivePayload.directive_text : "";
+  const goal = typeof directivePayload.goal === "string" ? directivePayload.goal : "";
+  const intent = typeof directivePayload.intent === "string" ? directivePayload.intent : "";
+  return computeGoalShape(directiveText || goal || intent || task.goal);
+};
+
+const applyOriginPromotionRouteAdjustment = (
+  db: Database,
+  task: TaskNode,
+  routeScores: DispatchRouteScores,
+  feasibleRoutes: DispatchRoute[],
+): OriginPromotionRouteAdjustment => {
+  const adjusted: DispatchRouteScores = { ...routeScores };
+  const evidence: Record<string, number> = {};
+  if (!feasibleRoutes.includes("opencode_brain") || !feasibleRoutes.includes("claude_inline")) {
+    return { route_scores: adjusted, verifier_evidence: evidence };
+  }
+
+  let rows: ReturnType<typeof originPromotionByGoalShape> = [];
+  const shape = currentGoalShapeForTask(db, task);
+  try {
+    rows = originPromotionByGoalShape(db, computeGoalShape).filter((r) => r.goal_shape === shape);
+  } catch {
+    return { route_scores: adjusted, verifier_evidence: evidence };
+  }
+
+  evidence.origin_promotion_goal_shape_present = rows.length > 0 ? 1 : 0;
+  for (const route of ["opencode_brain", "claude_inline"] as const) {
+    const origins = new Set(POSTERIOR_ROUTED_ORIGINS[route]);
+    let candidates = 0;
+    let promoted = 0;
+    for (const row of rows) {
+      if (!origins.has(row.substrate_origin)) continue;
+      candidates += row.candidate_count;
+      promoted += row.promoted_count;
+    }
+    evidence["origin_promotion_" + route + "_candidates"] = candidates;
+    evidence["origin_promotion_" + route + "_promoted"] = promoted;
+    if (candidates <= 0) continue;
+    const posterior = clamp01(promoted / candidates);
+    evidence["origin_promotion_" + route + "_posterior"] = posterior;
+    adjusted[route] = clamp01((adjusted[route] ?? 0) * 0.5 + posterior * 0.5);
+  }
+
+  evidence.origin_promotion_adjustment_applied = Object.keys(evidence).some((k) => k.endsWith("_posterior")) ? 1 : 0;
+  return { route_scores: adjusted, verifier_evidence: evidence };
 };
 
 const evidenceForSelectedRoute = (
@@ -712,10 +773,20 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
   if (!hardness.is_hard && matchedInlinePatterns && matchedInlinePatterns.length > 0) feasibleRoutes.push("claude_inline");
 
   // Route availability still fails closed (no recipe/no inline knowledge means
-  // no such lane), but the selected feasible lane is now the highest-scored
-  // open-ended axis outcome rather than a fixed task-class branch.
-  const selectedRoute = chooseHighestScoredRoute(baseEvidence.route_scores, feasibleRoutes);
-  const evidence = evidenceForSelectedRoute(baseEvidence, selectedRoute, feasibleRoutes);
+  // no such lane). When both LLM lanes pass risk/owner gates, fold in the
+  // per-(goal_shape, substrate_origin) promotion posterior before selecting
+  // between claude_inline and opencode_brain.
+  const posteriorAdjusted = applyOriginPromotionRouteAdjustment(db, task, baseEvidence.route_scores, feasibleRoutes);
+  const routeEvidence = {
+    ...baseEvidence,
+    route_scores: posteriorAdjusted.route_scores,
+    verifier_evidence: {
+      ...baseEvidence.verifier_evidence,
+      ...posteriorAdjusted.verifier_evidence,
+    },
+  };
+  const selectedRoute = chooseHighestScoredRoute(routeEvidence.route_scores, feasibleRoutes);
+  const evidence = evidenceForSelectedRoute(routeEvidence, selectedRoute, feasibleRoutes);
 
   if (selectedRoute === "substrate_replay" && recipe && recipeRouteReason) {
     return { route: "substrate_replay", recipe_id: recipe.id, reason: recipeRouteReason, ...evidence };
@@ -742,7 +813,7 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
   return {
     route: "opencode_brain",
     predicted_complexity: estimateComplexity(task),
-    reason: "no_recipe_no_inline_match",
+    reason: matchedInlinePatterns && matchedInlinePatterns.length > 0 ? "scored_brain_lane" : "no_recipe_no_inline_match",
     ...evidence,
   };
 };

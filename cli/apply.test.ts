@@ -261,6 +261,9 @@ describe("runApply gates", () => {
     const actPayload = JSON.parse(act!.payload) as Record<string, unknown>;
     expect(actPayload.verifier_kind).toBe("claude_apply_record");
     expect(actPayload.cited_knowledge_ids).toContain(eventId);
+    expect(actPayload.source_brain_event_id).toBe(eventId);
+    expect(actPayload.affected_resources).toContain("repo:runtime/verifier.ts");
+    expect(actPayload.affected_files).toContain("runtime/verifier.ts");
     expect(JSON.parse(act!.context_refs)).toContain(eventId);
   });
 });

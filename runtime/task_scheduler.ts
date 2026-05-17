@@ -303,6 +303,28 @@ const emitInlineLaneRouted = (
   });
 };
 
+const emitSchedulerAdmissionGate = (
+  db: Database,
+  task: TaskNode,
+  gate: string,
+  payload: Record<string, JsonValue>,
+): void => {
+  const key = gateKey(task.id, gate);
+  if (GATE_NOTIFIED.has(key)) return;
+  GATE_NOTIFIED.add(key);
+  emitEvent(db, {
+    kind: "constitutional_gate_decision",
+    substrate_origin: "substrate_auto",
+    directive_id: task.directive_id,
+    task_id: task.id,
+    payload: {
+      gate,
+      task_id: task.id,
+      ...payload,
+    } as JsonValue,
+  });
+};
+
 /** One tick: read ready tasks, fill open dispatch slots, route by lane.
  *  Returns immediately after launching dispatches — the per-task promises
  *  remain tracked in IN_FLIGHT until they resolve. Tests await the
@@ -330,6 +352,12 @@ export const schedulerTick = async (
     : Math.max(1, rawPerDir ?? Math.ceil(maxConcurrent / 2));
   const ready = readyTasks(db, opts.directiveId);
   if (SCHEDULER_DRAINING) {
+    for (const task of ready) {
+      emitSchedulerAdmissionGate(db, task, "scheduler_draining", {
+        reason: "scheduler_admission_paused_for_restart_drain",
+        in_flight: IN_FLIGHT.size,
+      });
+    }
     return {
       dispatched: [],
       in_flight: Array.from(IN_FLIGHT.keys()),
@@ -468,12 +496,22 @@ export const schedulerTick = async (
           reason: "concurrency_conflict_with_in_flight_directive",
         } as JsonValue,
       });
+      emitSchedulerAdmissionGate(db, task, "scheduler_interference_deferred", {
+        reason: "concurrency_conflict_with_in_flight_directive",
+        conflicting_directive: conflict.conflicting_directive,
+        interaction: conflict.kind,
+      });
       continue;
     }
 
     const slotsLeft = maxConcurrent - IN_FLIGHT.size;
     if (slotsLeft <= 0) {
       skippedConcurrencyCap.push(task.id);
+      emitSchedulerAdmissionGate(db, task, "scheduler_global_concurrency_cap", {
+        reason: "scheduler_global_in_flight_at_cap",
+        in_flight: IN_FLIGHT.size,
+        cap: maxConcurrent,
+      });
       continue;
     }
     // Per-directive cap: how many slots is THIS directive already using?
@@ -486,6 +524,11 @@ export const schedulerTick = async (
     }
     if (perDirCount >= maxConcurrentPerDirective && !hasParallelSiblingSlot(db, task)) {
       skippedConcurrencyCap.push(task.id);
+      emitSchedulerAdmissionGate(db, task, "scheduler_per_directive_concurrency_cap", {
+        reason: "scheduler_directive_in_flight_at_cap",
+        directive_in_flight: perDirCount,
+        cap: maxConcurrentPerDirective,
+      });
       continue;
     }
 

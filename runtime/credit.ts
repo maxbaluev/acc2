@@ -216,6 +216,36 @@ const resolveSourceActId = (events: Array<EventLike | null>): string | null => {
   return null;
 };
 
+const clampResidual = (value: number): number => Math.max(0, Math.min(1, value));
+
+const residualFromOwnerObservedOutcome = (ownerEv: EventLike, fallback: number): number => {
+  if (typeof ownerEv.residual === "number" && Number.isFinite(ownerEv.residual)) return clampResidual(ownerEv.residual);
+  const payload = jsonObject(ownerEv.payload);
+  if (typeof payload.residual === "number" && Number.isFinite(payload.residual)) return clampResidual(payload.residual);
+  const observedOutcome = jsonObject(payload.observed_outcome as JsonValue | undefined);
+  const verdict = String(payload.verdict ?? observedOutcome.verdict ?? observedOutcome.outcome ?? "").toLowerCase();
+  if (verdict === "positive" || verdict === "success" || verdict === "succeeded") return 0;
+  if (verdict === "partial" || verdict === "mixed") return 0.5;
+  if (verdict === "negative" || verdict === "failure" || verdict === "failed") return 1;
+  return clampResidual(fallback);
+};
+
+const resolveOwnerObservedSourceActId = (db: Database, ownerEv: EventLike): string | null => {
+  const direct = resolveSourceActId([ownerEv]);
+  if (direct) return direct;
+  const payload = jsonObject(ownerEv.payload);
+  const refs = [payload.source_event_id, ...(ownerEv.context_refs ?? [])]
+    .filter((ref): ref is string => typeof ref === "string" && ref.length > 0);
+  for (const ref of refs) {
+    const refEv = getEventById(db, ref);
+    if (!refEv) continue;
+    if (refEv.kind === "act_tuple_recorded") return refEv.id;
+    const sourceActId = resolveSourceActId([refEv]);
+    if (sourceActId) return sourceActId;
+  }
+  return null;
+};
+
 const resolveBindingTargets = (db: Database, id: string): string[] => {
   const row = db.query("SELECT kind, payload FROM events WHERE id = ?").get(id) as { kind: string; payload: string } | null;
   if (!row || row.kind !== "retrieval_binding") return [id];
@@ -887,7 +917,7 @@ export const distributeOwnerObservedOutcomeCredit = async (
   if (ownerEv.kind !== "owner_observed_outcome_recorded") {
     throw new Error(`owner_observed_outcome_kind_mismatch:${ownerEv.kind}`);
   }
-  const sourceActId = resolveSourceActId([ownerEv]) ?? ownerEv.context_refs.find((ref) => getEventById(db, ref)?.kind === "act_tuple_recorded") ?? null;
+  const sourceActId = resolveOwnerObservedSourceActId(db, ownerEv);
   if (!sourceActId) throw new Error("owner_observed_outcome_missing_source_act_id");
   const actionRow = db
     .query<{ id: string; predicted_residual: number | null }, [string]>(
@@ -906,7 +936,7 @@ export const distributeOwnerObservedOutcomeCredit = async (
     )
     .get(sourceActId, sourceActId);
   if (!actionRow || !scoredRow) throw new Error(`owner_observed_outcome_missing_projected_action:${sourceActId}`);
-  const observedResidual = typeof ownerEv.residual === "number" ? ownerEv.residual : typeof jsonObject(ownerEv.payload).residual === "number" ? jsonObject(ownerEv.payload).residual as number : scoredRow.residual ?? 1;
+  const observedResidual = residualFromOwnerObservedOutcome(ownerEv, scoredRow.residual ?? 1);
   return distributeCredit(db, {
     action_event_id: actionRow.id,
     observation_event_id: ownerEv.id,

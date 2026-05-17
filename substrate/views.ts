@@ -2035,7 +2035,15 @@ cap_gate_ranked AS (
     ON g.directive_id = t.directive_id
    AND g.task_id = t.task_id
    AND g.kind = 'constitutional_gate_decision'
-   AND json_extract(g.payload, '$.gate') = 'brain_concurrency_cap'
+   AND json_extract(g.payload, '$.gate') IN (
+     'brain_concurrency_cap',
+     'bridge_health_degraded',
+     'scheduler_global_concurrency_cap',
+     'scheduler_per_directive_concurrency_cap',
+     'scheduler_draining',
+     'scheduler_interference_deferred',
+     'directive_blocked_deferred'
+   )
 ),
 cap_gate AS (
   SELECT * FROM cap_gate_ranked WHERE rn = 1
@@ -2107,6 +2115,10 @@ SELECT
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
       THEN 'zombie'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0 THEN 'live'
+    WHEN cg.latest_cap_gate_at IS NOT NULL
+         AND COALESCE(ds.open_dispatch_count, 0) = 0
+         AND ready.ready_since IS NOT NULL
+      THEN 'queued_at_cap'
     WHEN term.terminal_kind = 'task_committed' THEN 'completed'
     WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
     WHEN term.terminal_kind IS NULL
@@ -2116,9 +2128,6 @@ SELECT
          AND r.root_opened_ts IS NOT NULL
          AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 300000
       THEN 'orphan_node'
-    WHEN cg.latest_cap_gate_at IS NOT NULL
-         AND COALESCE(ds.open_dispatch_count, 0) = 0
-      THEN 'queued_at_cap'
     WHEN COALESCE(ds.dispatched_count, 0) > 0 THEN 'live'
     ELSE 'live'
   END AS status,
@@ -2128,6 +2137,10 @@ SELECT
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
       THEN 'zombie'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0 THEN 'live'
+    WHEN cg.latest_cap_gate_at IS NOT NULL
+         AND COALESCE(ds.open_dispatch_count, 0) = 0
+         AND ready.ready_since IS NOT NULL
+      THEN 'queued_at_cap'
     WHEN term.terminal_kind = 'task_committed' THEN 'completed'
     WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
     WHEN term.terminal_kind IS NULL
@@ -2137,9 +2150,6 @@ SELECT
          AND r.root_opened_ts IS NOT NULL
          AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 300000
       THEN 'orphan_node'
-    WHEN cg.latest_cap_gate_at IS NOT NULL
-         AND COALESCE(ds.open_dispatch_count, 0) = 0
-      THEN 'queued_at_cap'
     WHEN COALESCE(ds.dispatched_count, 0) > 0 THEN 'live'
     ELSE 'live'
   END AS lifecycle_status,
@@ -2175,6 +2185,10 @@ SELECT
          AND term.terminal_kind IS NOT NULL
       THEN 'refinement_dispatch_open'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0 THEN 'brain_dispatch_open'
+    WHEN cg.latest_cap_gate_at IS NOT NULL
+         AND COALESCE(ds.open_dispatch_count, 0) = 0
+         AND ready.ready_since IS NOT NULL
+      THEN COALESCE(cg.queued_reason, 'queued_at_cap')
     WHEN term.terminal_kind IS NOT NULL THEN term.terminal_kind
     WHEN term.terminal_kind IS NULL
          AND COALESCE(ds.dispatched_count, 0) = 0
@@ -2183,9 +2197,6 @@ SELECT
          AND r.root_opened_ts IS NOT NULL
          AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 300000
       THEN 'orphan_root_no_dispatch'
-    WHEN cg.latest_cap_gate_at IS NOT NULL
-         AND COALESCE(ds.open_dispatch_count, 0) = 0
-      THEN COALESCE(cg.queued_reason, 'queued_at_cap')
     WHEN ready.ready_since IS NOT NULL THEN 'ready'
     ELSE COALESCE(ls.latest_signal_reason, 'root_opened')
   END AS status_reason,
@@ -3396,8 +3407,8 @@ export const originPromotionByGoalShape = (
   for (const d of directives) {
     let goal = "";
     try {
-      const p = JSON.parse(d.payload) as { goal?: unknown; intent?: unknown };
-      goal = String((p.goal ?? p.intent ?? "") as string);
+      const p = JSON.parse(d.payload) as { goal?: unknown; intent?: unknown; directive_text?: unknown };
+      goal = String((p.goal ?? p.intent ?? p.directive_text ?? "") as string);
     } catch { /* malformed payload — empty shape */ }
     directiveToShape.set(d.directive_id, goalShape(goal));
   }

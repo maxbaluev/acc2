@@ -306,6 +306,67 @@ describe("dispatch_decider", () => {
     const decision = decideDispatch(db, task);
     expect(decision.route).toBe("substrate_replay");
   });
+  test("uses originPromotionByGoalShape before choosing between feasible brain and inline lanes", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const directiveText = "fix doc typo posterior routed";
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: "d_shape",
+      task_id: "t_shape",
+      payload: { directive_text: directiveText, lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_inline",
+      task_id: "t_inline",
+      payload: {
+        tags: ["low_risk_inline_pattern"],
+        pattern_kind: "glob",
+        pattern: "repo:docs/*.md",
+        score: 0.9,
+        confidence: 0.8,
+      },
+    });
+    for (let i = 0; i < 4; i++) {
+      emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "opencode",
+        directive_id: "d_shape",
+        task_id: "opencode_candidate_" + i,
+        payload: { claim: "brain candidate " + i },
+      });
+      emitEvent(db, {
+        kind: "knowledge_promoted",
+        substrate_origin: "opencode",
+        directive_id: "d_shape",
+        task_id: "opencode_promoted_" + i,
+        payload: { candidate_id: "brain_candidate_" + i },
+      });
+      emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "claude_inline",
+        directive_id: "d_shape",
+        task_id: "claude_candidate_" + i,
+        payload: { claim: "inline candidate " + i },
+      });
+    }
+
+    const decision = decideDispatch(db, sampleTask({
+      directive_id: "d_shape",
+      goal: directiveText,
+      target_resources: ["repo:docs/README.md"],
+    } as Partial<TaskNode>));
+
+    expect(decision.route).toBe("opencode_brain");
+    expect(decision.route_scores.opencode_brain).toBeGreaterThan(decision.route_scores.claude_inline);
+    expect(decision.verifier_evidence.origin_promotion_adjustment_applied).toBe(1);
+    expect(decision.verifier_evidence.origin_promotion_opencode_brain_posterior).toBe(1);
+    expect(decision.verifier_evidence.origin_promotion_claude_inline_posterior).toBe(0);
+  });
+
   test("uses learned open-ended axes to choose among feasible non-blocked routes", () => {
     const db = openDb(":memory:");
     runViews(db);
