@@ -6,7 +6,7 @@ import { describe, test, expect, afterAll, beforeEach } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openDb, closeDb, withImmediateTransaction } from "./db";
+import { openDb, closeDb, withImmediateTransaction, openDbPool, closeDbPool } from "./db";
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "acc2-db-test-"));
 afterAll(() => {
@@ -256,5 +256,106 @@ describe("closeDb", () => {
     const a2 = openDb(a);
     const b2 = openDb(b);
     expect(a2).not.toBe(b2);
+  });
+});
+
+
+describe("SqliteDbPool", () => {
+  test("serializes writer work in enqueue order", async () => {
+    const path = tmpPath("pool-writer-order");
+    const pool = openDbPool(path, { maxReaders: 2 });
+    const seen: number[] = [];
+    await Promise.all([
+      pool.withWriter(() => { seen.push(1); }),
+      pool.withWriter(() => { seen.push(2); }),
+      pool.withWriter(() => { seen.push(3); }),
+    ]);
+    expect(seen).toEqual([1, 2, 3]);
+    await closeDbPool(path);
+  });
+
+  test("reader connections are query_only", async () => {
+    const path = tmpPath("pool-query-only");
+    const pool = openDbPool(path, { maxReaders: 1 });
+    await expect(pool.withReader((db) => {
+      db.run(`INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [newId(), nowIso(), "d", "t", "l", "owner", "owner_input_received", "{}"]);
+    })).rejects.toThrow();
+    await closeDbPool(path);
+  });
+
+  test("bounds concurrent reader leases", async () => {
+    const path = tmpPath("pool-reader-bound");
+    const pool = openDbPool(path, { maxReaders: 1 });
+    const first = await pool.acquireReader();
+    let secondSettled = false;
+    const secondPromise = pool.acquireReader().then((lease) => {
+      secondSettled = true;
+      return lease;
+    });
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
+    first.release();
+    const second = await secondPromise;
+    expect(secondSettled).toBe(true);
+    second.release();
+    await closeDbPool(path);
+  });
+
+  test("writer stays live while read transactions are active", async () => {
+    const path = tmpPath("pool-writer-live");
+    const pool = openDbPool(path, { maxReaders: 2 });
+    await pool.withWriter((db) => {
+      db.run(`INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [newId(), nowIso(), "d", "seed", "l", "owner", "owner_input_received", "{}"]);
+    });
+
+    const r1 = await pool.acquireReader();
+    const r2 = await pool.acquireReader();
+    r1.db.run("BEGIN");
+    r2.db.run("BEGIN");
+    r1.db.query("SELECT COUNT(*) AS n FROM events").get();
+    r2.db.query("SELECT COUNT(*) AS n FROM events").get();
+
+    try {
+      await Promise.race([
+        pool.withWriter((db) => {
+          db.run(`INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [newId(), nowIso(), "d", "writer", "l", "owner", "owner_input_received", "{}"]);
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("writer_starved")), 1000)),
+      ]);
+    } finally {
+      r1.db.run("ROLLBACK");
+      r2.db.run("ROLLBACK");
+      r1.release();
+      r2.release();
+    }
+
+    const count = await pool.withReader((db) => db.query("SELECT COUNT(*) AS n FROM events").get() as { n: number });
+    expect(count.n).toBe(2);
+    await closeDbPool(path);
+  });
+
+  test("close rejects queued readers and drains accepted writer work", async () => {
+    const path = tmpPath("pool-close-drain");
+    const pool = openDbPool(path, { maxReaders: 1 });
+    const first = await pool.acquireReader();
+    const queued = pool.acquireReader();
+    let releaseWriter!: () => void;
+    const writer = pool.withWriter(async (db) => {
+      await new Promise<void>((resolve) => { releaseWriter = resolve; });
+      db.query("SELECT COUNT(*) AS n FROM events").get();
+    });
+    const closePromise = pool.close();
+    await expect(queued).rejects.toThrow("sqlite_pool_closed");
+    releaseWriter();
+    first.release();
+    await writer;
+    await closePromise;
+    await expect(pool.withWriter(() => undefined)).rejects.toThrow("sqlite_pool_closed");
   });
 });

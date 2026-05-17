@@ -2352,6 +2352,16 @@ CREATE VIEW IF NOT EXISTS act_projection_observability_view AS
       (SELECT e.residual FROM events e WHERE e.kind = 'action_scored' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts DESC LIMIT 1),
       s.source_residual
     ) AS projection_residual,
+    COALESCE(
+      (SELECT e.id FROM events e WHERE e.kind = 'owner_observed_outcome_recorded' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts DESC LIMIT 1),
+      (SELECT e.id FROM events e WHERE e.kind = 'action_scored' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts DESC LIMIT 1),
+      CASE WHEN s.source_residual IS NOT NULL THEN s.source_event_id ELSE NULL END
+    ) AS projection_residual_event_id,
+    COALESCE(
+      (SELECT e.kind FROM events e WHERE e.kind = 'owner_observed_outcome_recorded' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts DESC LIMIT 1),
+      (SELECT e.kind FROM events e WHERE e.kind = 'action_scored' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts DESC LIMIT 1),
+      CASE WHEN s.source_residual IS NOT NULL THEN 'act_tuple_recorded' ELSE NULL END
+    ) AS projection_residual_kind,
     CASE
       WHEN s.source_event_id IS NULL THEN 'orphaned'
       WHEN EXISTS (SELECT 1 FROM events e WHERE e.kind = 'applied_change_committed' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)))
@@ -2511,6 +2521,8 @@ export type ActProjectionObservabilityRow = {
   retrieval_binding_event_ids: string[];
   credit_projection_event_ids: string[];
   projection_residual: number | null;
+  projection_residual_event_id: string | null;
+  projection_residual_kind: string | null;
   projection_status: "recorded" | "partial" | "completed" | "orphaned";
 };
 
@@ -2809,6 +2821,8 @@ export const actProjectionObservability = (
     retrieval_binding_event_ids: parseJson<string[]>(row.retrieval_binding_event_ids ?? "[]"),
     credit_projection_event_ids: parseJson<string[]>(row.credit_projection_event_ids ?? "[]"),
     projection_residual: row.projection_residual == null ? null : Number(row.projection_residual),
+    projection_residual_event_id: (row.projection_residual_event_id as string | null) ?? null,
+    projection_residual_kind: (row.projection_residual_kind as string | null) ?? null,
     projection_status: row.projection_status as ActProjectionObservabilityRow["projection_status"],
   };
 };

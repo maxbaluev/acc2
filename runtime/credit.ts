@@ -154,6 +154,13 @@ type DistributeCreditParams = {
   observed_residual: number;
 };
 
+type EventLike = NonNullable<ReturnType<typeof getEventById>>;
+
+type CreditProjectionMetadata = {
+  sourceActId: string | null;
+  ownerEvidenceEventId: string | null;
+};
+
 // ── Citation extraction ───────────────────────────────────────────
 
 const CITE_RE_SOURCE = "@cite\\s+(k_[a-zA-Z0-9_]+|art_[a-zA-Z0-9_]+|[A-Z0-9]{20,32})";
@@ -187,6 +194,45 @@ const classifyTarget = (db: Database, id: string): "knowledge" | "code_artifact"
     return "knowledge";
   }
   return "unknown";
+};
+
+const jsonObject = (value: JsonValue | undefined): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
+const stringArrayField = (payload: Record<string, unknown>, key: string): string[] =>
+  Array.isArray(payload[key]) ? (payload[key] as unknown[]).filter((item): item is string => typeof item === "string" && item.length > 0) : [];
+
+const resolveSourceActId = (events: Array<EventLike | null>): string | null => {
+  for (const ev of events) {
+    if (!ev) continue;
+    const payload = jsonObject(ev.payload);
+    const direct = payload.source_act_id;
+    if (typeof direct === "string" && direct.length > 0) return direct;
+    const projection = jsonObject(payload.projection as JsonValue | undefined);
+    if (typeof projection.source_act_id === "string" && projection.source_act_id.length > 0) return projection.source_act_id;
+    const actTuple = jsonObject(payload.act_tuple as JsonValue | undefined);
+    if (typeof actTuple.source_act_id === "string" && actTuple.source_act_id.length > 0) return actTuple.source_act_id;
+  }
+  return null;
+};
+
+const resolveBindingTargets = (db: Database, id: string): string[] => {
+  const row = db.query("SELECT kind, payload FROM events WHERE id = ?").get(id) as { kind: string; payload: string } | null;
+  if (!row || row.kind !== "retrieval_binding") return [id];
+  try {
+    const payload = JSON.parse(row.payload) as Record<string, unknown>;
+    return [payload.source_event_id, payload.source_artifact_id].filter((value): value is string => typeof value === "string" && value.length > 0);
+  } catch {
+    return [id];
+  }
+};
+
+const actTupleCitationIds = (db: Database, sourceActId: string | null): string[] => {
+  if (!sourceActId) return [];
+  const act = getEventById(db, sourceActId);
+  if (!act || act.kind !== "act_tuple_recorded") return [];
+  const payload = jsonObject(act.payload);
+  return [...stringArrayField(payload, "cited_knowledge_ids"), ...stringArrayField(payload, "cited_artifact_ids")];
 };
 
 /** Look up the confidence_estimate field from a cited knowledge entry's
@@ -342,9 +388,15 @@ const collectCitations = (
   for (const ev of [actionEv, obsEv, scoredEv]) {
     if (!ev) continue;
     for (const ref of ev.context_refs ?? []) {
-      ordered.push({ id: ref, weightFactor: 1.0 });
-      explicitlyCited.add(ref);
+      for (const resolved of resolveBindingTargets(db, ref)) {
+        ordered.push({ id: resolved, weightFactor: 1.0 });
+        explicitlyCited.add(resolved);
+      }
     }
+  }
+  for (const id of actTupleCitationIds(db, resolveSourceActId([actionEv, obsEv, scoredEv]))) {
+    ordered.push({ id, weightFactor: 1.0 });
+    explicitlyCited.add(id);
   }
   for (const id of actionBodyCitations) {
     ordered.push({ id, weightFactor: 1.0 });
@@ -372,10 +424,11 @@ const collectCitations = (
     for (const b of bindings) {
       try {
         const p = JSON.parse(b.payload) as Record<string, unknown>;
-        const sourceId = p.source_event_id as string | undefined;
-        if (!sourceId) continue;
-        const factor = explicitlyCited.has(sourceId) ? 1.0 : EXPOSURE_ONLY_FACTOR;
-        ordered.push({ id: sourceId, weightFactor: factor });
+        const sourceIds = [p.source_event_id, p.source_artifact_id].filter((value): value is string => typeof value === "string" && value.length > 0);
+        for (const sourceId of sourceIds) {
+          const factor = explicitlyCited.has(sourceId) ? 1.0 : EXPOSURE_ONLY_FACTOR;
+          ordered.push({ id: sourceId, weightFactor: factor });
+        }
       } catch { /* skip malformed */ }
     }
   }
@@ -479,11 +532,36 @@ export const distributeCredit = async (
   const directiveGoalShape = resolveGoalShape(db, inheritDirectiveId);
   const noveltyMultiplier = noveltyBonusMultiplier();
 
+  const observationEv = getEventById(db, params.observation_event_id);
+  const scoredEv = getEventById(db, params.scored_event_id);
+  const creditMetadata: CreditProjectionMetadata = {
+    sourceActId: resolveSourceActId([actionEv, observationEv, scoredEv]),
+    ownerEvidenceEventId: observationEv?.kind === "owner_observed_outcome_recorded" ? observationEv.id : null,
+  };
+
+  const projectionTarget = (event: EmitEventInput, payload: Record<string, unknown>): string => {
+    const target = payload.artifact_id ?? payload.knowledge_id ?? event.action_artifact_id ?? "primary";
+    const role = typeof payload.role === "string" ? ":" + payload.role : "";
+    const evidence = creditMetadata.ownerEvidenceEventId ? ":owner:" + creditMetadata.ownerEvidenceEventId : ":scored:" + params.scored_event_id;
+    return String(target) + role + evidence;
+  };
+
   const emit = (event: EmitEventInput): string => {
+    const payload = jsonObject(event.payload);
+    const shouldStamp = creditMetadata.sourceActId && (event.kind === "candidate_confirmed" || event.kind === "candidate_contradicted" || event.kind === "code_artifact_score_updated");
+    const stampedPayload = shouldStamp
+      ? {
+          ...payload,
+          source_act_id: creditMetadata.sourceActId,
+          ...(creditMetadata.ownerEvidenceEventId ? { owner_observed_outcome_event_id: creditMetadata.ownerEvidenceEventId } : {}),
+          projection_key: creditMetadata.sourceActId + ":" + event.kind + ":" + projectionTarget(event, payload),
+        }
+      : payload;
     const result = emitEvent(db, {
       ...event,
       directive_id: event.directive_id ?? inheritDirectiveId,
       task_id: event.task_id ?? inheritTaskId,
+      payload: stampedPayload as JsonValue,
       invoker: event.invoker ?? "substrate_auto",
     });
     emittedEvents.push(result.id);
@@ -790,14 +868,52 @@ export const distributeCredit = async (
   }
 
   return {
-    action_artifact_id: actionArt.id,
-    verifier_artifact_id: verifierArt.id,
+    action_artifact_id: actionArtifactId,
+    verifier_artifact_id: verifierArtifactId,
     predicted_residual: params.predicted_residual,
     observed_residual: params.observed_residual,
     delta: Math.abs(params.predicted_residual - params.observed_residual),
     contributions,
     emitted_events: emittedEvents,
   };
+};
+
+export const distributeOwnerObservedOutcomeCredit = async (
+  db: Database,
+  ownerObservedOutcomeEventId: string,
+): Promise<CreditDistribution> => {
+  const ownerEv = getEventById(db, ownerObservedOutcomeEventId);
+  if (!ownerEv) throw new Error(`owner_observed_outcome_event_not_found:${ownerObservedOutcomeEventId}`);
+  if (ownerEv.kind !== "owner_observed_outcome_recorded") {
+    throw new Error(`owner_observed_outcome_kind_mismatch:${ownerEv.kind}`);
+  }
+  const sourceActId = resolveSourceActId([ownerEv]) ?? ownerEv.context_refs.find((ref) => getEventById(db, ref)?.kind === "act_tuple_recorded") ?? null;
+  if (!sourceActId) throw new Error("owner_observed_outcome_missing_source_act_id");
+  const actionRow = db
+    .query<{ id: string; predicted_residual: number | null }, [string]>(
+      `SELECT id, predicted_residual FROM events
+       WHERE kind = 'action_predicted'
+         AND (json_extract(payload, '$.source_act_id') = ? OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?))
+       ORDER BY ts ASC LIMIT 1`,
+    )
+    .get(sourceActId, sourceActId);
+  const scoredRow = db
+    .query<{ id: string; predicted_residual: number | null; residual: number | null }, [string]>(
+      `SELECT id, predicted_residual, residual FROM events
+       WHERE kind = 'action_scored'
+         AND (json_extract(payload, '$.source_act_id') = ? OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?))
+       ORDER BY ts ASC LIMIT 1`,
+    )
+    .get(sourceActId, sourceActId);
+  if (!actionRow || !scoredRow) throw new Error(`owner_observed_outcome_missing_projected_action:${sourceActId}`);
+  const observedResidual = typeof ownerEv.residual === "number" ? ownerEv.residual : typeof jsonObject(ownerEv.payload).residual === "number" ? jsonObject(ownerEv.payload).residual as number : scoredRow.residual ?? 1;
+  return distributeCredit(db, {
+    action_event_id: actionRow.id,
+    observation_event_id: ownerEv.id,
+    scored_event_id: scoredRow.id,
+    predicted_residual: actionRow.predicted_residual ?? scoredRow.predicted_residual ?? 0.5,
+    observed_residual: observedResidual,
+  });
 };
 
 // ── Internal exports for tests ────────────────────────────────────

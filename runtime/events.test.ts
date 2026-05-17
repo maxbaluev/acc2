@@ -166,3 +166,173 @@ describe("emitEvent terminal-conflict gate", () => {
     }).not.toThrow();
   });
 });
+
+describe("emitEvent act_tuple_recorded projector", () => {
+  test("validates the source act and projects lifecycle rows exactly once", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const act = emitEvent(db, {
+      kind: "act_tuple_recorded",
+      substrate_origin: "claude_root",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "action_artifact_1",
+      verifier_artifact_id: "verifier_artifact_1",
+      predicted_residual: 0.2,
+      residual: 0.1,
+      payload: {
+        intent: "record one coherent act",
+        reasoning_summary: "single envelope preserves reasoning without per-mutation spam",
+        effect_summary: "patched one source seam",
+        verifier_kind: "deterministic_code",
+        cited_knowledge_ids: ["k_200"],
+        cited_artifact_ids: ["artifact_1"],
+        affected_resources: ["repo:runtime/events.ts"],
+      },
+    });
+
+    const rows = db
+      .query<{ kind: string; payload: string; context_refs: string }, [string]>(
+        "SELECT kind, payload, context_refs FROM events WHERE task_id = ? ORDER BY ts ASC",
+      )
+      .all(taskId);
+    expect(rows.map((row) => row.kind)).toEqual([
+      "act_tuple_recorded",
+      "retrieval_binding",
+      "retrieval_binding",
+      "action_predicted",
+      "action_scored",
+      "candidate_confirmed",
+      "applied_change_committed",
+    ]);
+    for (const row of rows.slice(1)) {
+      expect(JSON.parse(row.payload).source_act_id).toBe(act.id);
+      expect(JSON.parse(row.context_refs)).toContain(act.id);
+    }
+  });
+
+
+  test("projection_key makes derived rows idempotent", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const first = emitEvent(db, {
+      kind: "action_predicted",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "action_artifact_1",
+      verifier_artifact_id: "verifier_artifact_1",
+      predicted_residual: 0.2,
+      payload: { projection_key: "act_1:action_predicted:primary", source_act_id: "act_1" },
+    });
+    const second = emitEvent(db, {
+      kind: "action_predicted",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "action_artifact_1",
+      verifier_artifact_id: "verifier_artifact_1",
+      predicted_residual: 0.2,
+      payload: { projection_key: "act_1:action_predicted:primary", source_act_id: "act_1" },
+    });
+    expect(second.id).toBe(first.id);
+    const count = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM events WHERE kind = 'action_predicted'")
+      .get()!.n;
+    expect(count).toBe(1);
+  });
+
+  test("logical source_act_id makes replayed source acts project only once", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const emitLogicalAct = () => emitEvent(db, {
+      kind: "act_tuple_recorded",
+      substrate_origin: "claude_root",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "action_artifact_1",
+      verifier_artifact_id: "verifier_artifact_1",
+      predicted_residual: 0.2,
+      residual: 0.1,
+      payload: {
+        source_act_id: "logical-act-1",
+        intent: "retry one coherent act",
+        reasoning_summary: "same logical source act retried after transport uncertainty",
+        effect_summary: "same effect should not duplicate projections",
+        verifier_kind: "deterministic_code",
+        cited_knowledge_ids: ["k_200"],
+        cited_artifact_ids: ["artifact_1"],
+      },
+    });
+    const first = emitLogicalAct();
+    const second = emitLogicalAct();
+    expect(second.id).not.toBe(first.id);
+    const projected = db
+      .query<{ kind: string; n: number }, []>(
+        "SELECT kind, COUNT(*) AS n FROM events WHERE kind != 'act_tuple_recorded' GROUP BY kind ORDER BY kind",
+      )
+      .all();
+    expect(Object.fromEntries(projected.map((row) => [row.kind, row.n]))).toEqual({
+      action_predicted: 1,
+      action_scored: 1,
+      applied_change_committed: 1,
+      candidate_confirmed: 1,
+      retrieval_binding: 2,
+    });
+    const predicted = db
+      .query<{ payload: string }, []>("SELECT payload FROM events WHERE kind = 'action_predicted'")
+      .get()!;
+    const payload = JSON.parse(predicted.payload) as { projection_key: string; source_act_id: string; source_act_event_id: string };
+    expect(payload.source_act_id).toBe("logical-act-1");
+    expect(payload.source_act_event_id).toBe(first.id);
+    expect(payload.projection_key).toBe("logical-act-1:action_predicted:primary");
+  });
+
+  test("event projector kicks credit distribution through projected source citations", async () => {
+    const db = openDb(":memory:");
+    const knowledge = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      payload: { claim: "projected source citations receive credit", confidence_estimate: 1 },
+    });
+    const act = emitEvent(db, {
+      kind: "act_tuple_recorded",
+      substrate_origin: "claude_root",
+      action_artifact_id: "synthetic_action",
+      verifier_artifact_id: "synthetic_verifier",
+      predicted_residual: 0.1,
+      residual: 0,
+      payload: {
+        intent: "record and credit one coherent act",
+        reasoning_summary: "act tuple cites knowledge",
+        effect_summary: "projector emits lifecycle rows",
+        verifier_kind: "deterministic_code",
+        cited_knowledge_ids: [knowledge.id],
+      },
+    });
+
+    let confirmed: { payload: string } | null = null;
+    for (let i = 0; i < 20; i++) {
+      confirmed = db.query("SELECT payload FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.knowledge_id') = ?").get(knowledge.id) as { payload: string } | null;
+      if (confirmed) break;
+      await Bun.sleep(10);
+    }
+    expect(confirmed).not.toBeNull();
+    const payload = JSON.parse(confirmed!.payload) as Record<string, unknown>;
+    expect(payload.source_act_id).toBe(act.id);
+  });
+
+  test("invalid act_tuple_recorded is refused before any source row lands", () => {
+    const db = openDb(":memory:");
+    expect(() => {
+      emitEvent(db, {
+        kind: "act_tuple_recorded",
+        substrate_origin: "claude_root",
+        payload: { intent: "missing verifier fields" },
+      });
+    }).toThrow(/invalid_act_tuple_recorded/);
+    const count = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM events").get()!.n;
+    expect(count).toBe(0);
+  });
+});

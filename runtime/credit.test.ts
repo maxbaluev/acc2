@@ -7,6 +7,7 @@ import { emitEvent } from "./events";
 import { insertArtifact, getArtifact } from "./artifact_store";
 import {
   distributeCredit,
+  distributeOwnerObservedOutcomeCredit,
   shapleyWeightsByCorroboration,
   __extractBodyCitationsForTest,
   __collectCitationsForTest,
@@ -820,5 +821,109 @@ describe("collectCitations dedup + ordering (internal helper)", () => {
     // so weightFactor should be 1.0 for all.
     expect(cited.map((c) => c.id)).toEqual(["k_001", "k_002", "k_003", "k_004", "k_005"]);
     expect(cited.every((c) => c.weightFactor === 1.0)).toBe(true);
+  });
+});
+
+
+describe("act_tuple_recorded projected credit", () => {
+  test("resolves retrieval_binding and source_act_id citations and stamps idempotency metadata", async () => {
+    const db = openDb(":memory:");
+    const knowledge = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      directive_id: "d_act_credit",
+      task_id: "t_knowledge",
+      payload: { claim: "projected act citations receive credit", confidence_estimate: 1 },
+    });
+    const act = emitEvent(db, {
+      kind: "act_tuple_recorded",
+      substrate_origin: "claude_root",
+      directive_id: "d_act_credit",
+      task_id: "t_act_credit",
+      action_artifact_id: "synthetic_action",
+      verifier_artifact_id: "synthetic_verifier",
+      predicted_residual: 0.1,
+      residual: 0,
+      payload: {
+        intent: "credit projected act",
+        reasoning_summary: "source act cites knowledge",
+        effect_summary: "projection rows created",
+        verifier_kind: "deterministic_code",
+        cited_knowledge_ids: [knowledge.id],
+      },
+    });
+    const predicted = db.query("SELECT id FROM events WHERE kind = 'action_predicted' AND json_extract(payload, '$.source_act_id') = ?").get(act.id) as { id: string };
+    const scored = db.query("SELECT id FROM events WHERE kind = 'action_scored' AND json_extract(payload, '$.source_act_id') = ?").get(act.id) as { id: string };
+
+    const first = await distributeCredit(db, {
+      action_event_id: predicted.id,
+      observation_event_id: scored.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0.1,
+      observed_residual: 0,
+    });
+    const second = await distributeCredit(db, {
+      action_event_id: predicted.id,
+      observation_event_id: scored.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0.1,
+      observed_residual: 0,
+    });
+
+    expect(first.action_artifact_id).toBe("synthetic_action");
+    expect(second.emitted_events).toContain(first.emitted_events.find((id) => {
+      const row = db.query("SELECT kind FROM events WHERE id = ?").get(id) as { kind: string } | null;
+      return row?.kind === "candidate_confirmed";
+    })!);
+    const confirmations = db.query("SELECT payload FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.knowledge_id') = ?").all(knowledge.id) as Array<{ payload: string }>;
+    expect(confirmations).toHaveLength(1);
+    const payload = JSON.parse(confirmations[0]!.payload) as Record<string, unknown>;
+    expect(payload.source_act_id).toBe(act.id);
+    expect(String(payload.projection_key)).toContain(act.id + ":candidate_confirmed:");
+  });
+
+  test("late owner observed outcome reuses projected action and stamps owner evidence", async () => {
+    const db = openDb(":memory:");
+    const knowledge = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      directive_id: "d_owner_late",
+      task_id: "t_knowledge",
+      payload: { claim: "late owner evidence should update act credit", confidence_estimate: 1 },
+    });
+    const act = emitEvent(db, {
+      kind: "act_tuple_recorded",
+      substrate_origin: "claude_root",
+      directive_id: "d_owner_late",
+      task_id: "t_owner_late",
+      action_artifact_id: "synthetic_action",
+      verifier_artifact_id: "synthetic_verifier",
+      predicted_residual: 0.1,
+      residual: 0.1,
+      payload: {
+        intent: "record initial act",
+        reasoning_summary: "owner outcome arrives later",
+        effect_summary: "projection rows created",
+        verifier_kind: "peer_llm_claude",
+        cited_knowledge_ids: [knowledge.id],
+      },
+    });
+    const owner = emitEvent(db, {
+      kind: "owner_observed_outcome_recorded",
+      substrate_origin: "owner",
+      directive_id: "d_owner_late",
+      task_id: "t_owner_late",
+      residual: 1,
+      context_refs: [act.id],
+      payload: { source_act_id: act.id, observation: "still does not work" },
+    });
+
+    await distributeOwnerObservedOutcomeCredit(db, owner.id);
+
+    const contradiction = db.query("SELECT payload FROM events WHERE kind = 'candidate_contradicted' AND json_extract(payload, '$.knowledge_id') = ?").get(knowledge.id) as { payload: string } | null;
+    expect(contradiction).not.toBeNull();
+    const payload = JSON.parse(contradiction!.payload) as Record<string, unknown>;
+    expect(payload.source_act_id).toBe(act.id);
+    expect(payload.owner_observed_outcome_event_id).toBe(owner.id);
   });
 });

@@ -167,3 +167,157 @@ export const withImmediateTransaction = <T>(db: Database, fn: () => T): T => {
   db.run("COMMIT");
   return result;
 };
+
+
+export type SqliteDbPoolOptions = {
+  maxReaders?: number;
+};
+
+export type ReaderLease = {
+  db: Database;
+  release: () => void;
+};
+
+type ReaderWaiter = {
+  resolve: (lease: ReaderLease) => void;
+  reject: (err: Error) => void;
+};
+
+const DEFAULT_READER_POOL_SIZE = 4;
+
+const applyReaderPragmas = (db: Database): void => {
+  db.run("PRAGMA query_only = ON");
+  db.run("PRAGMA busy_timeout = 2000");
+  db.run("PRAGMA foreign_keys = ON");
+  db.run("PRAGMA cache_size = 2000");
+  db.run("PRAGMA mmap_size = 268435456");
+};
+
+export class SqliteDbPool {
+  readonly dbPath: string;
+  readonly maxReaders: number;
+  private readonly writer: Database;
+  private readonly idleReaders: Database[] = [];
+  private readonly allReaders = new Set<Database>();
+  private readonly readerWaiters: ReaderWaiter[] = [];
+  private writerTail: Promise<unknown> = Promise.resolve();
+  private activeReaders = 0;
+  private closing = false;
+  private closed = false;
+  private readerDrainResolve: (() => void) | null = null;
+
+  constructor(dbPath: string, opts: SqliteDbPoolOptions = {}) {
+    this.dbPath = dbPath;
+    this.maxReaders = Math.max(1, Math.floor(opts.maxReaders ?? DEFAULT_READER_POOL_SIZE));
+    this.writer = new Database(dbPath, { create: true, strict: true });
+    applyWalPragmas(this.writer);
+    loadSqliteVec(this.writer);
+    runSchema(this.writer);
+    runMigrations(this.writer);
+    runViews(this.writer);
+  }
+
+  async withWriter<T>(fn: (db: Database) => T | Promise<T>): Promise<T> {
+    if (this.closing || this.closed) throw new Error("sqlite_pool_closed");
+    const run = this.writerTail.then(async () => {
+      if (this.closed) throw new Error("sqlite_pool_closed");
+      return await fn(this.writer);
+    });
+    this.writerTail = run.catch(() => undefined);
+    return await run;
+  }
+
+  async acquireReader(): Promise<ReaderLease> {
+    if (this.closing || this.closed) throw new Error("sqlite_pool_closed");
+    const idle = this.idleReaders.pop();
+    if (idle) return this.makeLease(idle);
+    if (this.allReaders.size < this.maxReaders) return this.makeLease(this.openReader());
+    return await new Promise<ReaderLease>((resolve, reject) => {
+      this.readerWaiters.push({ resolve, reject });
+    });
+  }
+
+  async withReader<T>(fn: (db: Database) => T | Promise<T>): Promise<T> {
+    const lease = await this.acquireReader();
+    try {
+      return await fn(lease.db);
+    } finally {
+      lease.release();
+    }
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closing = true;
+    for (const waiter of this.readerWaiters.splice(0)) {
+      waiter.reject(new Error("sqlite_pool_closed"));
+    }
+    await this.writerTail.catch(() => undefined);
+    if (this.activeReaders > 0) {
+      await new Promise<void>((resolve) => {
+        this.readerDrainResolve = resolve;
+      });
+    }
+    for (const reader of this.allReaders) {
+      try { reader.close(); } catch { /* already closed */ }
+    }
+    this.allReaders.clear();
+    this.idleReaders.length = 0;
+    try { this.writer.close(); } catch { /* already closed */ }
+    this.closed = true;
+  }
+
+  private openReader(): Database {
+    const db = new Database(this.dbPath, { readonly: true, strict: true });
+    loadSqliteVec(db);
+    applyReaderPragmas(db);
+    this.allReaders.add(db);
+    return db;
+  }
+
+  private makeLease(db: Database): ReaderLease {
+    this.activeReaders += 1;
+    let released = false;
+    return {
+      db,
+      release: () => {
+        if (released) return;
+        released = true;
+        this.activeReaders -= 1;
+        if (this.closing || this.closed) {
+          if (this.activeReaders === 0) this.readerDrainResolve?.();
+          return;
+        }
+        const waiter = this.readerWaiters.shift();
+        if (waiter) {
+          waiter.resolve(this.makeLease(db));
+          return;
+        }
+        this.idleReaders.push(db);
+      },
+    };
+  }
+}
+
+const _poolCache = new Map<string, SqliteDbPool>();
+
+export const openDbPool = (dbPath: string, opts: SqliteDbPoolOptions = {}): SqliteDbPool => {
+  const cached = _poolCache.get(dbPath);
+  if (cached) return cached;
+  const pool = new SqliteDbPool(dbPath, opts);
+  _poolCache.set(dbPath, pool);
+  return pool;
+};
+
+export const closeDbPool = async (dbPath: string): Promise<void> => {
+  const pool = _poolCache.get(dbPath);
+  if (!pool) return;
+  _poolCache.delete(dbPath);
+  await pool.close();
+};
+
+export const closeDbPools = async (): Promise<void> => {
+  const pools = Array.from(_poolCache);
+  _poolCache.clear();
+  await Promise.all(pools.map(([, pool]) => pool.close()));
+};

@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JsonValue } from "../../substrate/types";
 import { emitEvent } from "../events";
+import { emitActTupleDirect } from "../act_tuple";
 import { isCycleViolation } from "../cycle_one_gate";
 import { parseOpencodeAuth } from "../../cli/doctor";
 import type { BridgeFailureReason, BridgeRequest, BridgeResult, SpawnOpts } from "./types";
@@ -1275,7 +1276,7 @@ export const spawnRealOpencode = async (
   }
 
   cleanupConfig();
-  emitEvent(db, {
+  const bridgeCompleted = emitEvent(db, {
     kind: "bridge_completed",
     substrate_origin: "opencode",
     directive_id: req.directiveId,
@@ -1290,10 +1291,39 @@ export const spawnRealOpencode = async (
     invoker: "opencode",
   });
 
+  const actTuple = emitActTupleDirect(db, {
+    substrateOrigin: "opencode",
+    invoker: "opencode",
+    directiveId: req.directiveId,
+    taskId: req.taskId,
+    intent: "Record one coherent opencode brain dispatch exit boundary.",
+    reasoningSummary: finalResponse.slice(0, 4096) || "opencode completed with substrate-observed activity and no final text",
+    actionSummary: "opencode bridge completed one brain cycle",
+    effectSummary: `bridge_completed final_response_chars=${finalResponse.length}`,
+    verifierKind: "opencode_bridge_exit",
+    predictedResidual: 0.2,
+    residual: 0,
+    outcome: "succeeded",
+    actionArtifactId: "opencode_brain_exit_action",
+    verifierArtifactId: "opencode_bridge_exit_verifier",
+    citedKnowledgeIds: [],
+    citedArtifactIds: [],
+    contextRefs: [bridgeCompleted.id],
+    derivedEventIds: [bridgeCompleted.id],
+    extra: {
+      final_response_chars: finalResponse.length,
+      model,
+      real: true,
+      mcp_handshake_ok: mcpHandshakeOk,
+      frame_shape_counts: frameShapeCounts,
+      budget_observed: budgetObserved("completed"),
+    },
+  });
+
   return {
     ok: true,
     final_response: finalResponse,
     usage: { tokens: 0 }, // opencode does not surface usage on stdout reliably
-    emitted_event_ids: [],
+    emitted_event_ids: [bridgeCompleted.id, actTuple.id],
   };
 };

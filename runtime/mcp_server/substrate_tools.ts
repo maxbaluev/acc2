@@ -50,6 +50,7 @@ import {
   lessonApplyCandidates,
   promotedKnowledge,
   recipeRegistry,
+  actProjectionObservability,
 } from "../../substrate/views";
 import type {
   AdmitArtifactSchema,
@@ -607,6 +608,12 @@ export const handleRead = (
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         return { ok: true, result: recipeRegistry(db, limit) as unknown as JsonValue };
+      }
+      case "act_projection_observability_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const sourceActId = typeof arg.source_act_id === "string" ? arg.source_act_id : null;
+        if (!sourceActId) return { ok: false, error: "act_projection_observability_view_requires_source_act_id" };
+        return { ok: true, result: actProjectionObservability(db, sourceActId) as unknown as JsonValue };
       }
       case "brain_effectiveness_view": {
         // Brain elegance bc8je5f3x (2026-05-15): the brain can query its

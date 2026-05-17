@@ -30,6 +30,8 @@ export type EmitEventInput = {
   blob_ref?: string;
   failure_kind?: Event["failure_kind"];
   invoker?: SubstrateOrigin;
+  /** Internal recursion guard for substrate-side source-event projectors. */
+  projectActTuple?: boolean;
   /** Raw float32 little-endian bytes of the embedding vector. The events
    *  table BLOB column accepts this directly. Set ONLY by the embedder
    *  worker — most call sites leave it undefined. */
@@ -41,6 +43,259 @@ export type EmitEventInput = {
 
 export type EmittedEvent = { id: string; ts: string };
 
+type JsonObject = { [k: string]: JsonValue };
+
+type NormalizedActTuple = {
+  intent: string;
+  reasoning_summary: string;
+  effect_summary: string;
+  verifier_kind: string;
+  predicted_residual: number;
+  observed_residual: number;
+  action_artifact_id: string;
+  verifier_artifact_id: string;
+  outcome: Event["outcome"];
+  source_act_id?: string;
+  cited_knowledge_ids: string[];
+  cited_artifact_ids: string[];
+  affected_resources: string[];
+  candidate_event_ids: string[];
+  owner_observed_outcome?: JsonValue;
+};
+
+const isObject = (value: JsonValue | undefined): value is JsonObject =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+
+const projectionKey = (sourceActId: string, projectionKind: string, targetIdOrRole: string): string =>
+  sourceActId + ":" + projectionKind + ":" + targetIdOrRole;
+
+const existingProjection = (db: Database, kind: EventKind, key: string): EmittedEvent | null => {
+  const row = db
+    .query<{ id: string; ts: string }, [string, string]>(
+      "SELECT id, ts FROM events WHERE kind = ? AND json_extract(payload, '$.projection_key') = ? ORDER BY ts ASC LIMIT 1",
+    )
+    .get(kind, key);
+  return row ? { id: row.id, ts: row.ts } : null;
+};
+
+const emitProjectedEvent = (
+  db: Database,
+  sourceActId: string,
+  projectionKind: string,
+  targetIdOrRole: string,
+  input: EmitEventInput,
+): EmittedEvent => {
+  const key = projectionKey(sourceActId, projectionKind, targetIdOrRole);
+  const existing = existingProjection(db, input.kind, key);
+  if (existing) return existing;
+  const payload = isObject(input.payload) ? input.payload : {};
+  return emitEvent(db, {
+    ...input,
+    payload: {
+      ...payload,
+      projection_key: key,
+    },
+  });
+};
+
+const requireString = (payload: JsonObject, key: string): string => {
+  const value = payload[key];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error("invalid_act_tuple_recorded:" + key + "_required");
+  }
+  return value;
+};
+
+const optionalStringArray = (payload: JsonObject, key: string): string[] => {
+  const value = payload[key];
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim().length === 0)) {
+    throw new Error("invalid_act_tuple_recorded:" + key + "_must_be_string_array");
+  }
+  return value;
+};
+
+const requireResidual = (value: unknown, key: string): number => {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error("invalid_act_tuple_recorded:" + key + "_must_be_number_0_1");
+  }
+  return value;
+};
+
+const normalizeActTuple = (input: EmitEventInput): NormalizedActTuple => {
+  if (!isObject(input.payload)) throw new Error("invalid_act_tuple_recorded:payload_object_required");
+  const payload = input.payload;
+  const predicted = requireResidual(input.predicted_residual ?? payload.predicted_residual, "predicted_residual");
+  const observed = requireResidual(input.residual ?? payload.observed_residual ?? payload.residual, "observed_residual");
+  const actionArtifact = input.action_artifact_id ?? (typeof payload.action_artifact_id === "string" ? payload.action_artifact_id : undefined);
+  const verifierArtifact = input.verifier_artifact_id ?? (typeof payload.verifier_artifact_id === "string" ? payload.verifier_artifact_id : undefined);
+  if (!actionArtifact) throw new Error("invalid_act_tuple_recorded:action_artifact_id_required");
+  if (!verifierArtifact) throw new Error("invalid_act_tuple_recorded:verifier_artifact_id_required");
+  const outcome = input.outcome ?? (observed < 0.3 ? "succeeded" : "failed");
+  if (outcome !== "succeeded" && outcome !== "failed" && outcome !== "pending" && outcome !== "abandoned" && outcome !== "rolling_active" && outcome !== "amended") {
+    throw new Error("invalid_act_tuple_recorded:outcome_invalid");
+  }
+  const logicalSourceActId = typeof payload.source_act_id === "string" && payload.source_act_id.trim().length > 0
+    ? payload.source_act_id.trim()
+    : undefined;
+  return {
+    intent: requireString(payload, "intent"),
+    reasoning_summary: requireString(payload, "reasoning_summary"),
+    effect_summary: requireString(payload, "effect_summary"),
+    verifier_kind: requireString(payload, "verifier_kind"),
+    predicted_residual: predicted,
+    observed_residual: observed,
+    action_artifact_id: actionArtifact,
+    verifier_artifact_id: verifierArtifact,
+    outcome,
+    source_act_id: logicalSourceActId,
+    cited_knowledge_ids: optionalStringArray(payload, "cited_knowledge_ids"),
+    cited_artifact_ids: optionalStringArray(payload, "cited_artifact_ids"),
+    affected_resources: optionalStringArray(payload, "affected_resources"),
+    candidate_event_ids: optionalStringArray(payload, "candidate_event_ids"),
+    owner_observed_outcome: payload.owner_observed_outcome,
+  };
+};
+
+const projectActTupleRecorded = (db: Database, source: {
+  id: string;
+  directive_id: string;
+  task_id: string;
+  parent_task_id: string | null;
+  loop_id: string;
+  context_refs: string[];
+  act: NormalizedActTuple;
+}): { predicted: EmittedEvent; scored: EmittedEvent } => {
+  const sourceActId = source.act.source_act_id ?? source.id;
+  const sourceEventId = source.id;
+  const sourceRefs = sourceActId === sourceEventId ? [sourceEventId] : [sourceEventId, sourceActId];
+  const base = {
+    directive_id: source.directive_id,
+    task_id: source.task_id,
+    parent_task_id: source.parent_task_id,
+    loop_id: source.loop_id,
+    substrate_origin: "substrate_auto" as const,
+    projectActTuple: false,
+  };
+  const bindings: EmittedEvent[] = [];
+  for (const [role, ids] of [
+    ["knowledge", source.act.cited_knowledge_ids],
+    ["artifact", source.act.cited_artifact_ids],
+  ] as const) {
+    for (let rank = 0; rank < ids.length; rank++) {
+      const targetId = ids[rank]!;
+      bindings.push(emitProjectedEvent(db, sourceActId, "retrieval_binding", role + ":" + targetId, {
+        ...base,
+        kind: "retrieval_binding",
+        context_refs: [...sourceRefs, targetId],
+        payload: {
+          source_act_id: sourceActId,
+          source_act_event_id: sourceEventId,
+          projected_from: "act_tuple_recorded",
+          ...(role === "knowledge" ? { source_event_id: targetId } : { source_artifact_id: targetId }),
+          rank,
+          binding_surface: "act_tuple_projection",
+          cited_role: role,
+        },
+      }));
+    }
+  }
+  const projectedContext = [...sourceRefs, ...bindings.map((binding) => binding.id), ...source.context_refs];
+  const predicted = emitProjectedEvent(db, sourceActId, "action_predicted", "primary", {
+    ...base,
+    kind: "action_predicted",
+    action_artifact_id: source.act.action_artifact_id,
+    verifier_artifact_id: source.act.verifier_artifact_id,
+    predicted_residual: source.act.predicted_residual,
+    context_refs: projectedContext,
+    payload: {
+      source_act_id: sourceActId,
+      source_act_event_id: sourceEventId,
+      projected_from: "act_tuple_recorded",
+      intent: source.act.intent,
+      reasoning_summary: source.act.reasoning_summary,
+      effect_summary: source.act.effect_summary,
+      verifier_kind: source.act.verifier_kind,
+      cited_knowledge_ids: source.act.cited_knowledge_ids,
+      cited_artifact_ids: source.act.cited_artifact_ids,
+      affected_resources: source.act.affected_resources,
+    },
+  });
+  const scored = emitProjectedEvent(db, sourceActId, "action_scored", "primary", {
+    ...base,
+    kind: "action_scored",
+    action_artifact_id: source.act.action_artifact_id,
+    verifier_artifact_id: source.act.verifier_artifact_id,
+    predicted_residual: source.act.predicted_residual,
+    residual: source.act.observed_residual,
+    outcome: source.act.outcome,
+    context_refs: [...sourceRefs, predicted.id, ...source.context_refs],
+    payload: {
+      source_act_id: sourceActId,
+      source_act_event_id: sourceEventId,
+      action_predicted_event_id: predicted.id,
+      projected_from: "act_tuple_recorded",
+      verifier_kind: source.act.verifier_kind,
+      residual: source.act.observed_residual,
+      outcome: source.act.outcome,
+    },
+  });
+  const confirmationTargets = source.act.candidate_event_ids.length > 0
+    ? source.act.candidate_event_ids.map((candidateId) => ({ candidateId, projectionTarget: candidateId }))
+    : [{ candidateId: sourceEventId, projectionTarget: "source" }];
+  for (const { candidateId, projectionTarget } of confirmationTargets) {
+    emitProjectedEvent(db, sourceActId, "candidate_confirmed", projectionTarget, {
+      ...base,
+      kind: "candidate_confirmed",
+      context_refs: [candidateId, ...sourceRefs, scored.id],
+      payload: {
+        source_act_id: sourceActId,
+        source_act_event_id: sourceEventId,
+        action_scored_event_id: scored.id,
+        projected_from: "act_tuple_recorded",
+        reason: "act_tuple_lifecycle_projection",
+      },
+    });
+  }
+  emitProjectedEvent(db, sourceActId, "applied_change_committed", "primary", {
+    ...base,
+    kind: "applied_change_committed",
+    action_artifact_id: source.act.action_artifact_id,
+    verifier_artifact_id: source.act.verifier_artifact_id,
+    predicted_residual: source.act.predicted_residual,
+    residual: source.act.observed_residual,
+    outcome: source.act.outcome,
+    context_refs: [...sourceRefs, predicted.id, scored.id, ...source.context_refs],
+    payload: {
+      source_act_id: sourceActId,
+      source_act_event_id: sourceEventId,
+      action_predicted_event_id: predicted.id,
+      action_scored_event_id: scored.id,
+      projected_from: "act_tuple_recorded",
+      status: source.act.outcome === "succeeded" ? "applied" : "failed",
+      source_kind: "act_tuple_recorded",
+      summary: source.act.effect_summary,
+      affected_resources: source.act.affected_resources,
+    },
+  });
+  if (source.act.owner_observed_outcome !== undefined) {
+    emitProjectedEvent(db, sourceActId, "owner_observed_outcome_recorded", "primary", {
+      ...base,
+      kind: "owner_observed_outcome_recorded",
+      residual: source.act.observed_residual,
+      outcome: source.act.outcome,
+      context_refs: [...sourceRefs, scored.id],
+      payload: {
+        source_act_id: sourceActId,
+        source_act_event_id: sourceEventId,
+        action_scored_event_id: scored.id,
+        projected_from: "act_tuple_recorded",
+        observed_outcome: source.act.owner_observed_outcome,
+      },
+    });
+  }
+  return { predicted, scored };
+};
 /** Insert a single event row and return its id + timestamp. The caller owns
  *  selecting `substrate_origin` — daemon events use `substrate_auto`, MCP
  *  RPC events tag the actual invoker, external-push tags `owner` etc. */
@@ -79,6 +334,14 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // already in the ledger. First-wins semantics — whichever code path
   // reached the substrate first claims the outcome; subsequent emits get
   // a structured refusal (thrown, since this is a substrate invariant).
+  const actTuple = input.kind === "act_tuple_recorded" ? normalizeActTuple(input) : null;
+
+  const projectionPayload = isObject(input.payload) ? input.payload : null;
+  const inputProjectionKey = typeof projectionPayload?.projection_key === "string" ? projectionPayload.projection_key : null;
+  if (inputProjectionKey) {
+    const existing = existingProjection(db, input.kind, inputProjectionKey);
+    if (existing) return existing;
+  }
   if (input.kind === "task_committed" || input.kind === "task_failed") {
     if (input.task_id) {
       const existing = db
@@ -194,6 +457,27 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   } catch (err) {
     // Lazy-import to keep the hot path free of the logger import cycle.
     void err;
+  }
+  if (actTuple && input.projectActTuple !== false) {
+    const projection = projectActTupleRecorded(db, {
+      id,
+      directive_id,
+      task_id,
+      parent_task_id: input.parent_task_id ?? null,
+      loop_id,
+      context_refs: input.context_refs ?? [],
+      act: actTuple,
+    });
+    // Close the projected act's credit tail through the canonical Shapley
+    // distributor. emitEvent stays synchronous; posterior refresh is
+    // best-effort and idempotent via source_act_id projection keys.
+    void import("./credit").then(({ distributeCredit }) => distributeCredit(db, {
+      action_event_id: projection.predicted.id,
+      observation_event_id: projection.scored.id,
+      scored_event_id: projection.scored.id,
+      predicted_residual: actTuple.predicted_residual,
+      observed_residual: actTuple.observed_residual,
+    })).catch(() => { /* credit retry can be driven from projected rows */ });
   }
   return { id, ts };
 };

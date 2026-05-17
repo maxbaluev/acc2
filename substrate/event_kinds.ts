@@ -79,6 +79,12 @@ export const EVENT_KINDS = {
   task_abandoned:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
 
   // ── Universal action primitive ──────────────────────────────────────
+  // Unified causal envelope emitted once per coherent Claude/opencode act.
+  // The emitEvent write path validates this source row, then projects the
+  // shared lifecycle rows (action_predicted/action_scored/candidate_confirmed/
+  // applied_change_committed) with source_act_id context. Only this source
+  // kind projects; derived rows never recursively expand themselves.
+  act_tuple_recorded:                      { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   action_predicted:                        { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   artifact_invoked:                        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   artifact_observed:                       { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
@@ -201,6 +207,7 @@ export const EVENT_KINDS = {
   // ── Owner channel ───────────────────────────────────────────────────
   owner_input_received:                    { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   owner_decision_recorded:                 { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  owner_observed_outcome_recorded:         { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   owner_input_required:                    { producer: "brain",     embeddable: false, mirror_inline: true,  health_metric: false, narrative: true },
   // ── Human-In-the-Loop (HIDL) action surface ─────────────────────────
   // Substrate-emitted when an in-flight action cannot proceed without an

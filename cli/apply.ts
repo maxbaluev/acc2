@@ -25,6 +25,7 @@
 import { mcpCall } from "./rpc";
 import { lessonApplyTargetsPolicy } from "../substrate/lesson_apply_policy";
 import { classifyApply } from "./verify";
+import { emitActTupleViaMcp } from "../runtime/act_tuple";
 
 type Args = Record<string, string | boolean>;
 
@@ -868,6 +869,40 @@ export const recordApplyOutcome = async (opts: {
     return { ok: false, reason: `applied_change_committed emit failed - ${committedEnv.error}`, exitCode: 1 };
   }
   const committedEventId = (committedEnv.result as { id?: string })?.id;
+  try {
+    await emitActTupleViaMcp(mcpCall, {
+      substrateOrigin: "claude_root",
+      directiveId: ev.directive_id,
+      taskId: ev.task_id,
+      intent: "Record one coherent Claude apply act boundary for a substrate-emitted lesson or contract amendment.",
+      reasoningSummary: opts.reason || opts.summary || "Claude apply recorded the verified outcome for one proposal as a coherent act.",
+      actionSummary: `Apply outcome recorded for ${ev.kind} ${eventId}`,
+      effectSummary: opts.summary || status,
+      verifierKind: "claude_apply_record",
+      predictedResidual: 0.2,
+      residual,
+      outcome: residual < 0.3 ? "succeeded" : "failed",
+      actionArtifactId,
+      verifierArtifactId,
+      affectedResources: target ? [target] : [],
+      citedKnowledgeIds: [eventId],
+      citedArtifactIds: [actionArtifactId, verifierArtifactId],
+      sourceEventId: eventId,
+      contextRefs: [eventId, requestEventId, actionEventId, scoredEventId, committedEventId].filter(Boolean) as string[],
+      derivedEventIds: [requestEventId, actionEventId, scoredEventId, committedEventId].filter(Boolean) as string[],
+      extra: {
+        source_kind: ev.kind,
+        status,
+        verifier_passed: verifierPassed,
+        commit_sha: opts.commitSha ?? null,
+        owner_gate_checked: true,
+        owner_gate_required: auth.ownerGateRequired,
+        owner_approved: auth.ownerApproved,
+      },
+    });
+  } catch (err) {
+    return { ok: false, reason: `act_tuple_recorded emit failed - ${(err as Error).message}`, exitCode: 1 };
+  }
   return {
     ok: true,
     appliedKind: "applied_change_committed",

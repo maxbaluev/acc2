@@ -194,7 +194,34 @@ describe("act_projection_observability_view + actProjectionObservability", () =>
     expect(row!.retrieval_binding_event_ids).toEqual([bindingId]);
     expect(row!.credit_projection_event_ids).toEqual([creditId, artifactCreditId]);
     expect(row!.projection_residual).toBe(0.02);
+    expect(row!.projection_residual_event_id).toBe(ownerId);
+    expect(row!.projection_residual_kind).toBe("owner_observed_outcome_recorded");
     expect(row!.projection_status).toBe("completed");
+  });
+
+  test("falls back to action_scored residual provenance before source act residual", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    const actId = insertEvent(db, {
+      kind: "act_tuple_recorded",
+      directive_id: "d_act",
+      task_id: "t_act",
+      payload: { intent: "coherent act" },
+      residual: 0.7,
+    });
+    const scoredId = insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_act",
+      task_id: "t_act",
+      payload: { source_act_id: actId },
+      residual: 0.23,
+    });
+
+    const row = actProjectionObservability(db, actId);
+    expect(row!.projection_residual).toBe(0.23);
+    expect(row!.projection_residual_event_id).toBe(scoredId);
+    expect(row!.projection_residual_kind).toBe("action_scored");
   });
 });
 

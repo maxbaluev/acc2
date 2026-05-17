@@ -253,5 +253,14 @@ describe("runApply gates", () => {
     const queued = implementationQueue(eventId);
     expect(queued.apply_event_id).toBeTruthy();
     expect(queued.apply_status).toBe("applied");
+
+    const act = db
+      .query("SELECT payload, context_refs FROM events WHERE kind = 'act_tuple_recorded' AND json_extract(payload, '$.source_event_id') = ?")
+      .get(eventId) as { payload: string; context_refs: string } | null;
+    expect(act).not.toBeNull();
+    const actPayload = JSON.parse(act!.payload) as Record<string, unknown>;
+    expect(actPayload.verifier_kind).toBe("claude_apply_record");
+    expect(actPayload.cited_knowledge_ids).toContain(eventId);
+    expect(JSON.parse(act!.context_refs)).toContain(eventId);
   });
 });

@@ -388,12 +388,17 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
         expect(sp.reason).not.toBe("brain_silent_exit");
       }
 
-      // The bridge returns a non-error result when the handshake is OK
-      // (mock subprocess exited 0, no cycle violation, no opencode error).
-      // The exact ok/reason isn't pinned because the no-frames stdout path
-      // can still surface other failure modes — what we lock is the
-      // ABSENCE of the brain_silent_exit misclassification.
-      void result;
+      expect(result.ok).toBe(true);
+      const act = db
+        .query<{ payload: string; context_refs: string }, [string]>(
+          "SELECT payload, context_refs FROM events WHERE kind = 'act_tuple_recorded' AND task_id = ? ORDER BY ts DESC LIMIT 1",
+        )
+        .get(taskId);
+      expect(act).not.toBeNull();
+      const actPayload = JSON.parse(act!.payload) as Record<string, unknown>;
+      expect(actPayload.verifier_kind).toBe("opencode_bridge_exit");
+      expect(actPayload.derived_event_ids).toBeArray();
+      expect(JSON.parse(act!.context_refs).length).toBeGreaterThan(0);
     } finally {
       try { rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* swallow */ }
     }
