@@ -103,7 +103,13 @@ export const App = ({ client, onCommand, pollDisabled, initial }: AppProps): Rea
         for await (const event of client.sseConnect({ signal: controller.signal })) {
           const toast = sseEventToToast(event);
           if (!toast) continue;
-          setToasts((prev) => [toast, ...prev].slice(0, TOAST_MAX));
+          // SSE reconnect can replay the same event_id; React's child-key
+          // uniqueness check throws "Encountered two children with the same
+          // key" if we don't dedupe at insertion. Drop duplicates by id.
+          setToasts((prev) => {
+            if (prev.some((t) => t.event_id === toast.event_id)) return prev;
+            return [toast, ...prev].slice(0, TOAST_MAX);
+          });
         }
       } catch {
         // SSE disconnect is benign; the next poll cycle re-establishes.

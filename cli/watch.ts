@@ -42,6 +42,20 @@ export const runWatch = async (argv: string[]): Promise<number> => {
     return 0;
   }
 
+  // Ink puts stdin into raw mode for keystroke routing; on a non-TTY stdin
+  // (piped invocation, certain wrappers, `timeout … bun … watch`, CI) the
+  // raw-mode toggle throws inside a passive effect and the whole render
+  // tree crashes. Fail loud and early with a clean operator message so the
+  // bug isn't a stack trace from deep inside react-reconciler.
+  if (!process.stdin.isTTY) {
+    process.stderr.write(
+      "acc watch: stdin is not a TTY. The Ink TUI needs an interactive terminal — " +
+      "run it directly (not piped, redirected, or under `timeout`/CI). " +
+      "For headless inspection use `acc state me --json` or `acc admin substrate-status`.\n",
+    );
+    return 1;
+  }
+
   // Confirm the daemon is reachable before tearing down the operator's
   // terminal into raw mode. Failure prints the same shape every other
   // CLI surface uses so the operator sees a single error mode.

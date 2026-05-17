@@ -298,6 +298,49 @@ const countEvents = (db: Database): number => {
   return row?.n ?? 0;
 };
 
+// /health analytical counts cache. SQLite COUNT(*) on the events table runs
+// synchronously under bun:sqlite and blocks the JS event loop; under research-
+// dispatch load (100k+ events, active WAL writers) those four counts add up to
+// >5s of latency and time out the TUI's `callHealth()` probe at the rpc.ts
+// HEALTH_TIMEOUT_MS=5_000 boundary, rendering the dashboard as DEAD even
+// though the daemon is alive. Caching for 5s makes /health near-instant and
+// keeps the observed counts fresh enough for an operator dashboard.
+type HealthCountsCache = {
+  events_count: number;
+  pathology_exhausted: number;
+  pathology_debited: number;
+  brain_failed: number;
+  window_iso: string;
+  computed_at_ms: number;
+};
+const HEALTH_COUNTS_TTL_MS = 5_000;
+let healthCountsCache: HealthCountsCache | null = null;
+const readHealthCounts = (db: Database): HealthCountsCache => {
+  const now = Date.now();
+  if (healthCountsCache && now - healthCountsCache.computed_at_ms < HEALTH_COUNTS_TTL_MS) {
+    return healthCountsCache;
+  }
+  const recentCutoff = new Date(now - 30 * 60 * 1000).toISOString();
+  const recent = (kinds: string[]): number => {
+    try {
+      const placeholders = kinds.map(() => "?").join(",");
+      const row = db
+        .query(`SELECT COUNT(*) AS c FROM events WHERE kind IN (${placeholders}) AND ts >= ?`)
+        .get(...kinds, recentCutoff) as { c: number };
+      return row.c;
+    } catch { return 0; }
+  };
+  healthCountsCache = {
+    events_count: countEvents(db),
+    pathology_exhausted: recent(["pathology_budget_exhausted"]),
+    pathology_debited: recent(["pathology_budget_debited"]),
+    brain_failed: recent(["bridge_failed", "dispatcher_violation"]),
+    window_iso: recentCutoff,
+    computed_at_ms: now,
+  };
+  return healthCountsCache;
+};
+
 const pidAlive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 };
@@ -1423,37 +1466,23 @@ const routeAux = async (
       const mod = await import("./activation_bus");
       activationListenerCount = mod.activationListenerCount();
     } catch { /* tolerate */ }
-    const recentCutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-    const recent = (kinds: string[]): number => {
-      try {
-        const placeholders = kinds.map(() => "?").join(",");
-        const row = db
-          .query(
-            `SELECT COUNT(*) AS c FROM events WHERE kind IN (${placeholders}) AND ts >= ?`,
-          )
-          .get(...kinds, recentCutoff) as { c: number };
-        return row.c;
-      } catch { return 0; }
-    };
-    const pathologyExhaustedRecent = recent(["pathology_budget_exhausted"]);
-    const pathologyDebitedRecent = recent(["pathology_budget_debited"]);
-    const brainFailedRecent = recent(["bridge_failed", "dispatcher_violation"]);
+    const counts = readHealthCounts(db);
     return Response.json({
       status: stuck.length === 0 ? "ok" : "degraded",
       pid: process.pid,
       uptime_ms: Date.now() - startedAtMs,
       db_path: stateDbPath,
-      events_count: countEvents(db),
+      events_count: counts.events_count,
       mcp_port: mcpPort,
       aux_port: auxPort,
       mcp_transport: "fastmcp:httpStream",
       stuck_workers: stuck,
       hotreload: hotreloadState,
       activation_listener_count: activationListenerCount,
-      pathology_budget_exhausted_recent_count: pathologyExhaustedRecent,
-      pathology_budget_debited_recent_count: pathologyDebitedRecent,
-      brain_failed_recent_count: brainFailedRecent,
-      health_window_iso: recentCutoff,
+      pathology_budget_exhausted_recent_count: counts.pathology_exhausted,
+      pathology_budget_debited_recent_count: counts.pathology_debited,
+      brain_failed_recent_count: counts.brain_failed,
+      health_window_iso: counts.window_iso,
     });
   }
 
