@@ -1,0 +1,17 @@
+{
+  "_comment": "Project-level Claude Code settings. The hooks block wires structural retrieval-binding: every owner prompt triggers substrate.search and injects top-K knowledge into Claude's context BEFORE reasoning. Closes k_201 / k_554 (advisory retrieval discipline becomes load-bearing). Per-developer overrides live in .claude/settings.local.json.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /home/maxbaluev/bos2/system/acc2 && bun scripts/retrieval-binding-hook.ts",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
