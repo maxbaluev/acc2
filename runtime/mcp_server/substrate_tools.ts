@@ -417,6 +417,37 @@ export const handleEmit = (
       return { ok: false, error: `pre_apply_adjudication_target_terminal:${targetEventId};terminal_kind=${terminal.kind};terminal_event_id=${terminal.id}` };
     }
   }
+  // SELF01-04 runtime_self_diagnostic_recorded validator. Free-string
+  // runtime + fault_kind (universal-kind principle), optional repair_hint
+  // and auto_repair_action. Per VQA4E2HC3H7X: today only bun preflights;
+  // uv and camofox silently pass — this event_kind closes that gap by
+  // making fault detection ledger-visible across all runtimes.
+  if (kind === "runtime_self_diagnostic_recorded") {
+    const payload = (src.payload && typeof src.payload === "object" && !Array.isArray(src.payload))
+      ? src.payload as Record<string, unknown>
+      : {};
+    const runtime = payload.runtime;
+    const faultKind = payload.fault_kind;
+    if (typeof runtime !== "string" || runtime.length === 0) {
+      return { ok: false, error: "runtime_self_diagnostic_recorded_missing_runtime" };
+    }
+    if (typeof faultKind !== "string" || faultKind.length === 0) {
+      return { ok: false, error: "runtime_self_diagnostic_recorded_missing_fault_kind" };
+    }
+    if (payload.repair_hint !== undefined && typeof payload.repair_hint !== "string") {
+      return { ok: false, error: "runtime_self_diagnostic_recorded_invalid_repair_hint" };
+    }
+    if (payload.auto_repair_action !== undefined && typeof payload.auto_repair_action !== "string") {
+      return { ok: false, error: "runtime_self_diagnostic_recorded_invalid_auto_repair_action" };
+    }
+    if (payload.evidence_event_ids !== undefined) {
+      const refs = payload.evidence_event_ids;
+      if (!Array.isArray(refs) || refs.some((id) => typeof id !== "string" || id.length === 0)) {
+        return { ok: false, error: "runtime_self_diagnostic_recorded_invalid_evidence_event_ids" };
+      }
+    }
+  }
+
   // Brain audit F (2026-05-15): refuse task_edge_recorded events whose
   // from_task/to_task endpoints don't exist as task_node_opened rows
   // under the same directive. Without this gate, refinement edges can

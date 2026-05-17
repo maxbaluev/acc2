@@ -65,6 +65,9 @@ usage: acc emit <kind> [flags]
                               [--predicted-residual N] [--observed-residual N]
                               [--cited-knowledge-ids …]
                               [--cited-artifact-ids …]
+    pre_apply_adjudication_recorded
+                              --verdict "..." --target <event_id>
+                              [--evidence-refs …] [--owner-authority X]
 
   Common flags:
     --directive <id>          attach to a directive (otherwise null)
@@ -93,6 +96,10 @@ const SUPPORTED = new Set([
   // authorizeApply via the brain's diff). Required payload:
   // target_event_id, verdict (free string), adjudicator_origin.
   "pre_apply_adjudication_recorded",
+  // SELF01-04 unified runtime/bridge diagnostic primitive. Required:
+  // runtime (free string), fault_kind (free string). Optional:
+  // repair_hint, auto_repair_action, evidence_event_ids.
+  "runtime_self_diagnostic_recorded",
 ]);
 
 export const runEmit = async (argv: string[]): Promise<number> => {
@@ -176,44 +183,38 @@ export const runEmit = async (argv: string[]): Promise<number> => {
     payload.cited_knowledge_ids = parseRefs(flags["cited-knowledge-ids"]);
     payload.cited_artifact_ids = parseRefs(flags["cited-artifact-ids"]);
   } else if (kind === "pre_apply_adjudication_recorded") {
-    if (typeof flags.verdict !== "string" || flags.verdict.length === 0) {
-      process.stderr.write("acc emit pre_apply_adjudication_recorded: --verdict is required\n");
-      return 1;
-    }
-    if (typeof flags.target !== "string" || flags.target.length === 0) {
-      process.stderr.write("acc emit pre_apply_adjudication_recorded: --target is required\n");
-      return 1;
-    }
-    payload.verdict = flags.verdict;
-    payload.target_event_id = flags.target;
-    payload.adjudicator_origin = substrateOrigin;
-    payload.evidence_event_ids = evidenceRefs;
-    if (typeof flags["owner-authority"] === "string" && flags["owner-authority"].length > 0) {
-      payload.owner_authority_level = flags["owner-authority"];
-    }
-  } else if (kind === "pre_apply_adjudication_recorded") {
     if (typeof flags.target !== "string" || flags.target.length === 0) {
       process.stderr.write("acc emit pre_apply_adjudication_recorded: --target is required (event_id of the proposal being adjudicated)\n");
       return 1;
     }
     if (typeof flags.verdict !== "string" || flags.verdict.length === 0) {
-      process.stderr.write("acc emit pre_apply_adjudication_recorded: --verdict is required (free string: contradicts, corrects, proposes_alternative, peer_approve, gray_zone_review, escalate_to_owner)\n");
+      process.stderr.write("acc emit pre_apply_adjudication_recorded: --verdict is required (free string)\n");
       return 1;
     }
     payload.target_event_id = flags.target;
-    payload.verdict = String(flags.verdict).toLowerCase();
+    payload.verdict = flags.verdict;
     payload.adjudicator_origin = substrateOrigin;
-    payload.evidence_event_ids = parseRefs(flags["evidence-refs"]);
-    if (typeof flags["owner-authority"] === "string") {
+    payload.evidence_event_ids = evidenceRefs;
+    if (typeof flags["owner-authority"] === "string" && flags["owner-authority"].length > 0) {
       payload.owner_authority_level = flags["owner-authority"];
     }
-    if (typeof flags.reason === "string") payload.reason = flags.reason;
-    // The apply-gate consumer looks for target_event_id in
-    // context_refs OR in payload — we set both so the read path
-    // is fail-safe.
-    if (!refs.includes(String(flags.target))) refs.push(String(flags.target));
+    if (typeof flags.reason === "string" && flags.reason.length > 0) payload.reason = flags.reason;
+    if (!refs.includes(flags.target)) refs.push(flags.target);
+  } else if (kind === "runtime_self_diagnostic_recorded") {
+    if (typeof flags.runtime !== "string" || flags.runtime.length === 0) {
+      process.stderr.write("acc emit runtime_self_diagnostic_recorded: --runtime is required (free string, e.g. bun, uv, camofox-browser, opencode_bridge)\n");
+      return 1;
+    }
+    if (typeof flags["fault-kind"] !== "string" || flags["fault-kind"].length === 0) {
+      process.stderr.write("acc emit runtime_self_diagnostic_recorded: --fault-kind is required (free string, e.g. missing_binary, missing_credential, silent_exit, handshake_timeout)\n");
+      return 1;
+    }
+    payload.runtime = flags.runtime;
+    payload.fault_kind = flags["fault-kind"];
+    if (typeof flags["repair-hint"] === "string" && flags["repair-hint"].length > 0) payload.repair_hint = flags["repair-hint"];
+    if (typeof flags["auto-repair-action"] === "string" && flags["auto-repair-action"].length > 0) payload.auto_repair_action = flags["auto-repair-action"];
+    if (evidenceRefs.length > 0) payload.evidence_event_ids = evidenceRefs;
   }
-
   // Tag emitter so the per-(origin, shape) primitive can rank Claude
   // emissions distinctly from opencode emissions.
   payload.emitter = "claude_code";

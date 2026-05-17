@@ -255,6 +255,12 @@ describe("derived sets match their pre-unification shape", () => {
       // health signal — bad edits aren't silently dropped, they show in
       // substrate-status.
       "daemon_hotreload_rejected",
+      // SELF01-04 runtime self-diagnostic (2026-05-17, directive
+      // DNXPNDPBEN0MF8B5S4DTFMNP98): every runtime emits this on fault
+      // detection (missing_binary, missing_credential, silent_exit,
+      // handshake_timeout, ...). Counting them per-window lets operators
+      // see install / bridge degradation at substrate-status surface.
+      "runtime_self_diagnostic_recorded",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

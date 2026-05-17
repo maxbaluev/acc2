@@ -288,16 +288,19 @@ export const EVENT_KINDS = {
   // verdict plus target_event_id, adjudicator_origin, evidence_event_ids,
   // and optional owner_authority_level; verdict is intentionally NOT an enum.
   pre_apply_adjudication_recorded:          { producer: "both",      embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
-  // Pre-apply adjudication — the L6 + adjudication unified primitive
-  // from directive 9NPJEGNWS97QN1FK1RQ3VKP6TR. Fires BEFORE the apply
-  // gate to signal {contradicts, corrects, proposes_alternative,
-  // peer_approve, gray_zone_review, escalate_to_owner}. Free-string
-  // verdict per the universal-kind principle. Required payload fields:
-  // target_event_id, verdict, adjudicator_origin. Optional:
-  // evidence_event_ids, owner_authority_level. cli/apply.ts
-  // authorizeApply() consumes linked adjudications and fails closed on
-  // contradicts/corrects/escalate, accelerates on peer_approve.
-  pre_apply_adjudication_recorded:         { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  // Runtime self-diagnostic (SELF01-04 unified primitive from directive
+  // DNXPNDPBEN0MF8B5S4DTFMNP98). Any runtime — bun, uv, camofox-browser,
+  // opencode_bridge — emits this when it detects a fault. Free-string
+  // `runtime` and `fault_kind` per the universal-kind principle (examples:
+  // missing_binary, missing_credential, sandbox_violation, silent_exit,
+  // handshake_timeout, network_unreachable). Optional `repair_hint`
+  // (human-readable) and `auto_repair_action` (machine-executable shell
+  // command + sandbox decl). A reconciliation worker watches for fault
+  // patterns and either executes auto_repair_action under owner-approval
+  // sandbox or surfaces via owner_input_required for manual action.
+  // Per VQA4E2HC3H7X: today only bun preflights — uv and camofox silently
+  // pass. This event closes that diagnostic gap.
+  runtime_self_diagnostic_recorded:         { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: true,  narrative: true },
 
   // ── Application of lessons + amendments (Option D + Claude subagent executor) ──
   //
