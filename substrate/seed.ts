@@ -860,14 +860,22 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     fixture_expected_residual: 0.0,
     display_name: "py_run",
   },
+  // Distribution-readiness (2026-05-17, brain knowledge
+  // 5JE82MP9TN1ZB3T1DPSYWK614G): the fixture_input.evidence_event_ids
+  // below uses the synthetic handle SEED_SYNTHETIC_EVIDENCE_HANDLE so a
+  // freshly-installed substrate carries no leak of THIS install's real
+  // event ids. The synthetic handle is 26 chars (ULID-shape) but
+  // recognizably non-real ("SEEDSYNTH…") so any consumer that looks
+  // up the id sees a clear non-event placeholder. The lesson origin —
+  // task T_FATHER_GOVERNANCE_06 — is preserved in this comment for
+  // historical attribution but is no longer part of any shipped row.
   {
     // Reusable gap-contract action for strategic-governance decomposition.
-    // The lesson (event 1WH7V4VBHD37968S22VPKD3MEG, task T_FATHER_GOVERNANCE_06)
-    // observed that governance refinement subtasks land more useful when
-    // each gap is packaged as an executable contract (action + scalar
-    // verifier) instead of prose. ONE artifact pair (this body + the
-    // verifier below) validates many ranked gap contracts because the
-    // task-specific metric / gates ride in `inputs`.
+    // The original lesson observed that governance refinement subtasks
+    // land more useful when each gap is packaged as an executable contract
+    // (action + scalar verifier) instead of prose. ONE artifact pair
+    // (this body + the verifier below) validates many ranked gap
+    // contracts because the task-specific metric / gates ride in `inputs`.
     //
     // inputs: { gap_kind, target, current_state, desired_state,
     //           metric_name, evidence_event_ids[] }
@@ -918,7 +926,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
       current_state: "refinement subtasks land as prose",
       desired_state: "refinement subtasks land as executable gap contracts",
       metric_name: "subtasks_with_scalar_verifier_ratio",
-      evidence_event_ids: ["1WH7V4VBHD37968S22VPKD3MEG"],
+      evidence_event_ids: ["SEEDSYNTHGOVGAPCONTRACTV1XX"],
     },
     fixture_expected_residual: 0.0,
     display_name: "governance_gap_contract_action",
@@ -960,7 +968,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
       current_state: "refinement subtasks land as prose",
       desired_state: "refinement subtasks land as executable gap contracts",
       metric_name: "subtasks_with_scalar_verifier_ratio",
-      evidence_event_ids: ["1WH7V4VBHD37968S22VPKD3MEG"],
+      evidence_event_ids: ["SEEDSYNTHGOVGAPCONTRACTV1XX"],
     },
     fixture_expected_residual: 0.0,
     display_name: "governance_gap_contract_verifier",
