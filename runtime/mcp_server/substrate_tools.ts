@@ -395,7 +395,13 @@ export const handleEmit = (
   // = "opencode" OR brain-invoker context) so test fixtures and CLI
   // orchestrator paths that emit raw action_predicted for setup are
   // unaffected.
-  if (kind === "action_predicted" && isBrainEmit(src.substrate_origin, ctx.invoker)) {
+  // FOUNDATIONAL: action_predicted has producer="brain" in event_kinds.ts
+  // — only the brain emits this kind in production. The brain emits via
+  // MCP with substrate_origin sometimes "claude_root" (daemon default),
+  // sometimes "opencode" (when explicit), so isBrainEmit alone misses the
+  // common case. The kind itself proves it's a brain emit; the tuple is
+  // structurally required regardless of the substrate_origin label.
+  if (kind === "action_predicted") {
     const missing: string[] = [];
     if (!input.action_artifact_id) missing.push("action_artifact_id");
     if (!input.verifier_artifact_id) missing.push("verifier_artifact_id");
