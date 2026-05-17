@@ -57,6 +57,29 @@ export type PendingDecisionRow = {
 
 export type ReadyTaskRow = { directive_id: string; task_id: string; goal: string };
 
+// Brain-activity snapshot for the 'a' drawer: surfaces what the brain
+// actually produced in the last hour so the owner doesn't have to query
+// events.kind manually. Each row is a compact projection of one canonical
+// emission (contract_amendment_proposed / knowledge_candidate /
+// lesson_extracted) — same source-of-truth as `acc admin substrate-status`
+// but rendered inline in the TUI.
+export type BrainAmendmentRow = {
+  event_id: string;
+  ts: string;
+  target: string;
+  anchor: string | null;
+  has_diff: boolean;
+  applied: boolean;
+};
+export type BrainKnowledgeRow = { event_id: string; ts: string; claim: string };
+export type BrainLessonRow = { event_id: string; ts: string; summary: string };
+export type BrainActivitySnapshot = {
+  amendments: BrainAmendmentRow[];
+  pending_amendment_count: number;
+  knowledge: BrainKnowledgeRow[];
+  lessons: BrainLessonRow[];
+};
+
 // task_graph_view rows: each event is either a 'node' (task_node_opened) or
 // an 'edge' (task_edge_recorded). The store extracts the per-directive
 // topology so DagPanel can render real requires/refines/watches links
@@ -106,6 +129,7 @@ export type DashboardSnapshot = {
   pending_decisions: PendingDecisionRow[];
   pending_decisions_total: number;
   learning: LearningSnapshot;
+  brain_activity: BrainActivitySnapshot;
   changes: ChangeSnapshot;
   next: NextSnapshot;
   health: HealthSnapshot;
@@ -130,6 +154,7 @@ const emptySnapshot = (): DashboardSnapshot => ({
   pending_decisions: [],
   pending_decisions_total: 0,
   learning: { knowledge_total: 0, knowledge_24h: 0, contradictions: 0, recipes_recent: 0, artifacts_recent: 0 },
+  brain_activity: { amendments: [], pending_amendment_count: 0, knowledge: [], lessons: [] },
   changes: { applied_24h: 0, failed_24h: 0, irreversible_24h: 0, closed_directives: [] },
   next: { ready_count: 0, active_objectives: 0, conflicts: 0, rolling_review_due: 0 },
   health: { daemon_status: "unknown", uptime_s: null, events_count: null, bridge_recent_failures: 0, bridge_recent_completions: 0, verdict: "DEAD" },
@@ -228,6 +253,9 @@ export const fetchDashboardSnapshot = async (client: SubstrateClient): Promise<D
     bridgeCompEnv,
     recipeEnv,
     artifactEnv,
+    amendmentEnv,
+    knowledgeCandEnv,
+    lessonEnv,
     health,
   ] = await Promise.all([
     client.read<unknown[]>("dispatch_resolved_view"),
@@ -246,6 +274,9 @@ export const fetchDashboardSnapshot = async (client: SubstrateClient): Promise<D
     client.recentEvents(["bridge_completed"], 50),
     client.recentEvents(["recipe_extracted"], 30),
     client.recentEvents(["code_artifact_admitted", "code_artifact_promoted"], 50),
+    client.recentEvents(["contract_amendment_proposed"], 30),
+    client.recentEvents(["knowledge_candidate"], 30),
+    client.recentEvents(["lesson_extracted"], 30),
     client.health(),
   ]);
 
@@ -384,6 +415,77 @@ export const fetchDashboardSnapshot = async (client: SubstrateClient): Promise<D
   const eventsLastHour = bridgeFailEvents.filter((e) => e.ts >= since1h).length + bridgeCompEvents.filter((e) => e.ts >= since1h).length;
   const healthSnap = computeHealth(health, bridgeFailEvents, bridgeCompEvents, eventsLastHour, since1h);
 
+  // Brain-activity snapshot for the 'a' drawer. The set of source events
+  // for amendments-pending-apply is the contract_amendment_proposed rows
+  // whose event_id never appears as source_event_id on an
+  // applied_change_committed{status:"applied"}. The applied/declined check
+  // walks recent applied events (we already pulled 100). Lessons and
+  // knowledge candidates are surfaced unfiltered (last 30) — they don't
+  // need an "applied" notion.
+  const amendmentEvents = amendmentEnv.ok ? asArray<SseEvent>(amendmentEnv.result.events) : [];
+  const appliedSourceIds = new Set<string>();
+  for (const e of appliedEvents) {
+    const p = parsePayload(e.payload);
+    if (typeof p.source_event_id === "string") appliedSourceIds.add(p.source_event_id);
+    const ctx = e.context_refs;
+    if (Array.isArray(ctx)) for (const id of ctx) if (typeof id === "string") appliedSourceIds.add(id);
+  }
+  const amendments: BrainAmendmentRow[] = amendmentEvents
+    .slice(-12)
+    .map((e) => {
+      const p = parsePayload(e.payload);
+      const target = String(p.target_resource ?? p.target ?? "?").replace(/^repo:/, "");
+      const anchorRaw = p.candidate_diff && typeof (p.candidate_diff as Record<string, unknown>).anchor !== "undefined"
+        ? (p.candidate_diff as Record<string, unknown>).anchor
+        : null;
+      const anchor = typeof anchorRaw === "string"
+        ? anchorRaw
+        : (anchorRaw && typeof anchorRaw === "object" && "text" in (anchorRaw as Record<string, unknown>))
+        ? String((anchorRaw as Record<string, unknown>).text)
+        : null;
+      const hasDiff = Boolean(
+        p.candidate_diff &&
+        typeof (p.candidate_diff as Record<string, unknown>).before === "string" &&
+        typeof (p.candidate_diff as Record<string, unknown>).after === "string" &&
+        ((p.candidate_diff as Record<string, unknown>).before as string).length > 0 &&
+        ((p.candidate_diff as Record<string, unknown>).after as string).length > 0,
+      );
+      return {
+        event_id: e.event_id,
+        ts: e.ts,
+        target,
+        anchor,
+        has_diff: hasDiff,
+        applied: appliedSourceIds.has(e.event_id),
+      };
+    })
+    .reverse();
+  const pendingAmendmentCount = amendments.filter((a) => !a.applied && a.has_diff).length;
+  const knowledgeCandidateEvents = knowledgeCandEnv.ok ? asArray<SseEvent>(knowledgeCandEnv.result.events) : [];
+  const lessonEvents = lessonEnv.ok ? asArray<SseEvent>(lessonEnv.result.events) : [];
+  const knowledge: BrainKnowledgeRow[] = knowledgeCandidateEvents.slice(-8).map((e) => {
+    const p = parsePayload(e.payload);
+    return {
+      event_id: e.event_id,
+      ts: e.ts,
+      claim: String(p.claim ?? p.summary ?? "(no claim)").replace(/\s+/g, " ").trim().slice(0, 160),
+    };
+  }).reverse();
+  const lessons: BrainLessonRow[] = lessonEvents.slice(-8).map((e) => {
+    const p = parsePayload(e.payload);
+    return {
+      event_id: e.event_id,
+      ts: e.ts,
+      summary: String(p.summary ?? p.claim ?? "(no summary)").replace(/\s+/g, " ").trim().slice(0, 160),
+    };
+  }).reverse();
+  const brainActivity: BrainActivitySnapshot = {
+    amendments,
+    pending_amendment_count: pendingAmendmentCount,
+    knowledge,
+    lessons,
+  };
+
   const error = !dispatchEnv.ok ? `dispatch_resolved_view:${dispatchEnv.error}` : null;
 
   return {
@@ -396,6 +498,7 @@ export const fetchDashboardSnapshot = async (client: SubstrateClient): Promise<D
     pending_decisions: pending,
     pending_decisions_total: pendingRowsRaw.length,
     learning,
+    brain_activity: brainActivity,
     changes,
     next,
     health: healthSnap,

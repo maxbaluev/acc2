@@ -82,6 +82,15 @@ const seededSnapshot = () => {
   ];
   snap.pending_decisions_total = 1;
   snap.learning = { knowledge_total: 12, knowledge_24h: 3, contradictions: 0, recipes_recent: 1, artifacts_recent: 2 };
+  snap.brain_activity = {
+    amendments: [
+      { event_id: "AMENDEV_ABC123", ts: "2026-05-17T00:00:00Z", target: "CLAUDE.md", anchor: "## Act And Verification", has_diff: true, applied: false },
+      { event_id: "AMENDEV_DONE99", ts: "2026-05-17T00:01:00Z", target: "CLAUDE.md", anchor: "## Actors", has_diff: true, applied: true },
+    ],
+    pending_amendment_count: 1,
+    knowledge: [{ event_id: "KEV_42", ts: "2026-05-17T00:02:00Z", claim: "Unified act_tuple_recorded envelope is the elegant primitive." }],
+    lessons: [{ event_id: "LEV_24", ts: "2026-05-17T00:03:00Z", summary: "Per-mutation wrappers bloat the event table." }],
+  };
   snap.changes = { applied_24h: 4, failed_24h: 0, irreversible_24h: 0, closed_directives: [] };
   snap.next = { ready_count: 2, active_objectives: 5, conflicts: 0, rolling_review_due: 1 };
   snap.owner_profile = {
@@ -123,6 +132,29 @@ describe("acc watch — Ink TUI shell", () => {
     expect(frame).toContain("watches");
     // Owner identity surfaced in the status line.
     expect(frame).toContain("autonomy=0.62");
+    unmount();
+  });
+
+  test("brain-activity drawer surfaces recent contract amendments + pending count + event_ids", async () => {
+    const client = stubClient();
+    const { lastFrame, unmount } = render(
+      React.createElement(App, {
+        client,
+        pollDisabled: true,
+        initial: seededSnapshot(),
+        initialDrawer: "brain",
+      }),
+    );
+
+
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("BRAIN ACTIVITY");
+    expect(frame).toContain("pending amendments: 1");
+    expect(frame).toContain("AMENDEV_ABC1");
+    expect(frame).toContain("AMENDEV_DONE");
+    expect(frame).toContain("✓");
+    expect(frame).toContain("act_tuple_recorded envelope");
+    expect(frame).toContain("Per-mutation wrappers");
     unmount();
   });
 

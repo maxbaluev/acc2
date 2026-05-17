@@ -41,7 +41,7 @@ const REFRESH_MS = 5_000;
 const TOAST_MAX = 3;
 const TOAST_TTL_MS = 12_000;
 
-export type DrawerName = "events" | "health" | "lineage" | "profile" | "inbox" | null;
+export type DrawerName = "events" | "health" | "lineage" | "profile" | "inbox" | "brain" | null;
 
 export type AppProps = {
   client: SubstrateClient;
@@ -51,6 +51,8 @@ export type AppProps = {
   pollDisabled?: boolean;
   /** Pre-seeded snapshot (tests). */
   initial?: DashboardSnapshot;
+  /** Open a drawer at mount (tests bypass the keypress dance). */
+  initialDrawer?: DrawerName;
 };
 
 export type ShellResult = {
@@ -101,12 +103,12 @@ const dispatchShell = (argv: string[]): Promise<ShellResult> => {
   });
 };
 
-export const App = ({ client, onCommand, pollDisabled, initial }: AppProps): React.ReactElement => {
+export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }: AppProps): React.ReactElement => {
   const { exit } = useApp();
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(initial ?? initialSnapshot());
   const [focus, setFocus] = useState<FocusName>("inbox");
-  const [drawer, setDrawer] = useState<DrawerName>(null);
-  const [paletteActive, setPaletteActive] = useState(true);
+  const [drawer, setDrawer] = useState<DrawerName>(initialDrawer ?? null);
+  const [paletteActive, setPaletteActive] = useState(initialDrawer ? false : true);
   const [toasts, setToasts] = useState<ToastEvent[]>([]);
   const [lastCommand, setLastCommand] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<ShellResult | null>(null);
@@ -187,6 +189,7 @@ export const App = ({ client, onCommand, pollDisabled, initial }: AppProps): Rea
     if (input === "l") { setDrawer((d) => d === "lineage" ? null : "lineage"); return; }
     if (input === "p") { setDrawer((d) => d === "profile" ? null : "profile"); return; }
     if (input === "i") { setDrawer((d) => d === "inbox" ? null : "inbox"); return; }
+    if (input === "a") { setDrawer((d) => d === "brain" ? null : "brain"); return; }
     if (key.leftArrow || key.upArrow) {
       const idx = FOCUS_ORDER.indexOf(focus);
       setFocus(FOCUS_ORDER[(idx - 1 + FOCUS_ORDER.length) % FOCUS_ORDER.length]!);
@@ -248,6 +251,58 @@ export const App = ({ client, onCommand, pollDisabled, initial }: AppProps): Rea
           <Text>bridge_failures_1h={snapshot.health.bridge_recent_failures}</Text>
           <Text>bridge_completions_1h={snapshot.health.bridge_recent_completions}</Text>
         </Box>
+      ) : drawer === "brain" ? (
+        <Box borderStyle="round" borderColor="magenta" flexDirection="column" paddingX={1}>
+          <Text bold color="magenta">BRAIN ACTIVITY (a to close) — pending amendments: {snapshot.brain_activity.pending_amendment_count}</Text>
+          <Text dimColor>recent contract amendments (newest first, ✓=applied)</Text>
+          {snapshot.brain_activity.amendments.length === 0 ? (
+            <Text dimColor>(none in last 30 events)</Text>
+          ) : (
+            snapshot.brain_activity.amendments.map((a) => (
+              <Box key={a.event_id} flexDirection="column">
+                <Text>
+                  <Text color={a.applied ? "green" : a.has_diff ? "yellow" : "red"}>
+                    {a.applied ? "✓" : a.has_diff ? "·" : "✗"}
+                  </Text>
+                  <Text color="yellow"> {a.event_id.slice(0, 12)}</Text>
+                  <Text dimColor> {a.ts.slice(11, 19)}</Text>
+                  <Text> {a.target.slice(0, 36)}</Text>
+                  {!a.has_diff ? <Text color="red"> (described-only)</Text> : null}
+                </Text>
+                {a.anchor ? <Text dimColor>    anchor={a.anchor.slice(0, 70)}</Text> : null}
+              </Box>
+            ))
+          )}
+          <Text> </Text>
+          <Text dimColor>recent lessons (newest first)</Text>
+          {snapshot.brain_activity.lessons.length === 0 ? (
+            <Text dimColor>(none)</Text>
+          ) : (
+            snapshot.brain_activity.lessons.slice(0, 4).map((l) => (
+              <Text key={l.event_id}>
+                <Text dimColor>{l.ts.slice(11, 19)} </Text>
+                <Text>{l.summary}</Text>
+              </Text>
+            ))
+          )}
+          <Text> </Text>
+          <Text dimColor>recent knowledge candidates (newest first)</Text>
+          {snapshot.brain_activity.knowledge.length === 0 ? (
+            <Text dimColor>(none)</Text>
+          ) : (
+            snapshot.brain_activity.knowledge.slice(0, 4).map((k) => (
+              <Text key={k.event_id}>
+                <Text dimColor>{k.ts.slice(11, 19)} </Text>
+                <Text>{k.claim}</Text>
+              </Text>
+            ))
+          )}
+          <Box marginTop={1}>
+            <Text dimColor>type </Text>
+            <Text color="green">apply ⟨event_id⟩</Text>
+            <Text dimColor> in the command palette to apply an amendment</Text>
+          </Box>
+        </Box>
       ) : drawer === "lineage" ? (
         <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1}>
           <Text bold color="cyan">lineage walker (l to close)</Text>
@@ -288,7 +343,7 @@ export const App = ({ client, onCommand, pollDisabled, initial }: AppProps): Rea
 
       <Box paddingX={1}>
         <Text dimColor>
-          arrows=focus  i=inbox  p=profile  e=events  h=health  l=lineage  :=palette  q=quit
+          arrows=focus  i=inbox  a=brain  p=profile  e=events  h=health  l=lineage  :=palette  q=quit
         </Text>
       </Box>
 
