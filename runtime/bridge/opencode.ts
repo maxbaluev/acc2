@@ -769,6 +769,66 @@ export const spawnRealOpencode = async (
     bridge_stuck_fired: bridgeStuckFired,
   });
 
+  // ── Substrate-side handshake reconciliation (foundational fix 2026-05-16) ──
+  // The stdout-only handshake gate (mcpHandshakeOk above) was designed for an
+  // older opencode rev that emitted MCP tool calls as `{type:"tool_use",...}`
+  // frames on stdout. opencode 1.4.3 (the current rev) handles MCP via the
+  // internal HTTP transport and ONLY emits final `{type:"text",part:{...}}`
+  // frames on stdout — tool calls never appear there. The stdout gate
+  // therefore reports `mcpHandshakeOk=false` even for dispatches where the
+  // brain successfully invoked dozens of MCP tools.
+  //
+  // The canonical truth is the SUBSTRATE (per CLAUDE.md: "Substrate is the
+  // operator"). If ANY event landed during this bridge invocation whose
+  // task_id matches AND whose invoker/origin proves it came through the v2
+  // MCP server (origin='opencode' or invoker='claude_root' — the default
+  // invoker the MCP server stamps on unattributed calls per
+  // runtime/mcp_server/index.ts:87), the brain DID use MCP. Treat that as
+  // a successful handshake even if no stdout frame was parsed.
+  //
+  // This converts the previous false-positive brain_silent_exit (~100% on
+  // opencode 1.4 dispatches) into honest classification: only dispatches
+  // that produced NEITHER stdout frames NOR substrate events are real
+  // prompt-compliance failures.
+  if (!mcpHandshakeOk) {
+    try {
+      const bridgeStartIso = new Date(bridgeStartedAtMs).toISOString();
+      // Filter on invoker='claude_root' SPECIFICALLY because that's the
+      // marker the v2 MCP server stamps on every call from opencode that
+      // doesn't carry an explicit invoker (runtime/mcp_server/index.ts:87
+      // `invoker: opts.invoker ?? "claude_root"`). The bridge's OWN emits
+      // (bridge_invoked, brain_prompt_composed, retrieval_binding, etc.)
+      // use invoker='opencode' — they must NOT count toward the handshake
+      // or the gate becomes a tautology that always passes.
+      const hit = db
+        .query<{ n: number }, [string, string]>(
+          `SELECT COUNT(*) AS n FROM events
+           WHERE task_id = ?
+             AND ts >= ?
+             AND invoker = 'claude_root'`,
+        )
+        .get(req.taskId, bridgeStartIso);
+      if (hit && hit.n > 0) {
+        mcpHandshakeOk = true;
+        clearInterval(mcpHandshakeWatchdog);
+        emitEvent(db, {
+          kind: "bridge_mcp_connected",
+          substrate_origin: "opencode",
+          directive_id: req.directiveId,
+          task_id: req.taskId,
+          payload: {
+            detection_path: "substrate_reconciliation",
+            substrate_events_observed: hit.n,
+            mcp_server_url: mcpServerUrl,
+            server_name: V2_OPENCODE_MCP_SERVER_NAME,
+            note: "opencode 1.4 routes MCP via internal HTTP; stdout frame gate is blind to those calls. Substrate reconciliation is the canonical truth.",
+          } as JsonValue,
+          invoker: "opencode",
+        });
+      }
+    } catch { /* db may be transient — fall through to stdout-based classification */ }
+  }
+
   // Handshake check: failure means we observed no v2 tool call within the
   // handshake window OR the subprocess exited without ever calling one.
   // Either is a `no_action_predicted`-style gap and the bridge must surface

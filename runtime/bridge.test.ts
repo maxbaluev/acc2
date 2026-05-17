@@ -282,6 +282,102 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     }
   }, 10_000);
 
+  test("substrate-side handshake reconciliation: when opencode emits MCP calls via internal HTTP (no stdout frames), the bridge consults the substrate as canonical truth and does NOT mis-classify as brain_silent_exit", async () => {
+    // Foundational fix 2026-05-16 (commit __next__): opencode 1.4.3 routes MCP
+    // tool calls via the internal HTTP transport, NOT via stdout. The stdout
+    // gate (mcpHandshakeOk via {type:"tool_use"} frames) therefore reports
+    // false even when the brain successfully called dozens of MCP tools.
+    // The reconciliation path queries the substrate (canonical truth) for
+    // any events whose task_id matches AND whose invoker/origin proves they
+    // came through the v2 MCP server. If ANY such event exists, the bridge
+    // treats the handshake as successful and emits bridge_mcp_connected
+    // with detection_path:"substrate_reconciliation".
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+
+    // The fake spawn produces ZERO stdout frames (mimicking opencode 1.4.3's
+    // behavior of routing MCP via internal HTTP) but DURING its lifetime it
+    // calls back and emits a substrate event with invoker='claude_root' —
+    // exactly what the v2 MCP server does when opencode's HTTP call lands at
+    // runtime/mcp_server/index.ts:87 with no explicit invoker. The bridge's
+    // reconciliation query filters on ts >= bridgeStartedAtMs, so the event
+    // must be emitted AFTER spawn (not in test setup) to match production.
+    const { emitEvent } = await import("./events");
+    const sentinel = {
+      kill: () => {},
+      stdout: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      stderr: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      exited: new Promise<number>((resolve) => {
+        // Emit the MCP-routed event during the subprocess's lifetime,
+        // then resolve exit_code=0 to mirror opencode 1.4.3's clean exit.
+        setTimeout(() => {
+          emitEvent(db, {
+            kind: "knowledge_candidate",
+            substrate_origin: "opencode",
+            directive_id: directiveId,
+            task_id: taskId,
+            payload: { claim: "test mcp-via-http handshake" },
+            invoker: "claude_root",
+          });
+          resolve(0);
+        }, 30);
+      }),
+    };
+    const fakeSpawn = (() => sentinel) as unknown as typeof Bun.spawn;
+
+    const tmpConfigDir = mkdtempSync(join(tmpdir(), "acc2-bridge-reconcile-test-"));
+    try {
+      const result = await spawnRealOpencode(
+        { prompt: "reconciliation probe", taskId, directiveId },
+        db,
+        {
+          spawnFn: fakeSpawn,
+          mcpServerUrl: "http://127.0.0.1:45678/mcp",
+          configDir: tmpConfigDir,
+          mcpHandshakeWindowMs: 200,
+          timeoutMs: 1_000,
+        },
+      );
+
+      // The substrate reconciliation must have flipped mcpHandshakeOk = true,
+      // so NO bridge_failed{reason=brain_silent_exit} row should exist for
+      // this task. Instead, a bridge_mcp_connected row with the new
+      // detection_path:"substrate_reconciliation" marker must exist.
+      const reconciled = db
+        .query<{ payload: string }, [string]>(
+          "SELECT payload FROM events WHERE kind = 'bridge_mcp_connected' AND task_id = ? ORDER BY ts DESC LIMIT 1",
+        )
+        .get(taskId);
+      expect(reconciled).not.toBeNull();
+      const rp = JSON.parse(reconciled!.payload) as Record<string, unknown>;
+      expect(rp.detection_path).toBe("substrate_reconciliation");
+      expect(typeof rp.substrate_events_observed).toBe("number");
+      expect(rp.substrate_events_observed as number).toBeGreaterThan(0);
+
+      // And no brain_silent_exit bridge_failed row for this task.
+      const silent = db
+        .query<{ payload: string }, [string]>(
+          "SELECT payload FROM events WHERE kind = 'bridge_failed' AND task_id = ?",
+        )
+        .get(taskId);
+      // If a bridge_failed row exists, its reason MUST NOT be brain_silent_exit.
+      if (silent) {
+        const sp = JSON.parse(silent.payload) as Record<string, unknown>;
+        expect(sp.reason).not.toBe("brain_silent_exit");
+      }
+
+      // The bridge returns a non-error result when the handshake is OK
+      // (mock subprocess exited 0, no cycle violation, no opencode error).
+      // The exact ok/reason isn't pinned because the no-frames stdout path
+      // can still surface other failure modes — what we lock is the
+      // ABSENCE of the brain_silent_exit misclassification.
+      void result;
+    } finally {
+      try { rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* swallow */ }
+    }
+  }, 10_000);
+
   test("brain spawn cwd is an isolated tempdir when checkoutIsolation is not passed (defense-in-depth against opencode native filesystem tools)", async () => {
     const db = openDb(":memory:");
     let capturedCwd: string | undefined = undefined;
