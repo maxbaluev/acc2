@@ -1,565 +1,309 @@
-// cli/tui/App.tsx — root Ink component for `acc watch`.
+// acc2 TUI — substrate-content-first realtime view.
 //
-// Responsibilities:
-//   - Poll fetchDashboardSnapshot every REFRESH_MS so the six panels stay live.
-//   - Subscribe to substrate SSE and project MIRROR_INLINE_EVENT_TYPES events
-//     into a rolling toast banner (max 3 visible).
-//   - Route keyboard input:
-//       arrows  cycle focus through the six panels
-//       Enter   no-op (placeholder for "zoom" if focus is on a panel)
-//       e/h/l/p toggle drawers (events / health / lineage / profile)
-//       i       toggle Inbox detail
-//       :       jump cursor into the command palette
-//       q       quit
-//   - Forward palette intents to a Bash spawn that runs `acc <argv>`.
-//     The spawned process inherits the parent shell's stdio so output
-//     prints below the TUI on exit, and the TUI is restored on the next
-//     repaint. (For `task` invocations the spawn is detached so the
-//     brain run can continue across TUI restarts.)
+// Rewrite per brain design D9TBCHADS97DHAMNBC686HE3P0 (2026-05-17),
+// residual=0.16. Owner frustration text (XR3REA7Q7X197AASRH3QXNFF84):
+// "we have complicated CLI where we cant understand substrate and DAG
+//  situation and whats happened. We see a lot of IDs without actual
+//  knowledge what happened, we need dramatically better understanding
+//  of SUBSTRATE in realtime without complexity, we need content and
+//  whats happened and how."
 //
-// All state lives in React state — no module-level singletons — so the
-// component is fully testable with ink-testing-library.
+// One screen. One stream. One drilldown. IDs are never the primary
+// display surface — the substrate_narrative_recent_view projects each
+// event to its human_summary content (claim, summary, intent, goal,
+// reason, etc.) and this component renders that. IDs surface only in
+// the Enter-key drilldown overlay.
+//
+// Layout (terminal width-adaptive):
+//   header (1 line, daemon/in-flight/clock)
+//   ────────────────────────────────────────────────
+//   EVENTS pane (most height, scrollable)  ┃ ACTIVE
+//   ────────────────────────────────────────────────
+//   DECISIONS strip (1-4 lines)
+//   ────────────────────────────────────────────────
+//   footer: daemon health + key hints
+//
+// Keyboard:
+//   j / ↓        next row
+//   k / ↑        previous row
+//   PgDn / PgUp  page
+//   Enter        drilldown overlay for selected row
+//   d            toggle "critical + high" filter (suppress noise)
+//   r            force refresh now
+//   q / Ctrl+C   quit
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { spawn } from "node:child_process";
-import { Dashboard, FOCUS_ORDER, type FocusName } from "./screens/Dashboard";
-import { InboxScreen } from "./screens/Inbox";
-import { ProfileScreen } from "./screens/Profile";
-import { StatusLine } from "./components/StatusLine";
-import { CommandPalette, type CommandIntent } from "./components/CommandPalette";
-import {
-  fetchDashboardSnapshot,
-  initialSnapshot,
-  sseEventToToast,
-  sseEventToLive,
-  reactiveSectionsFor,
-  LIVE_TAIL_CAP,
-  type DashboardSnapshot,
-  type ToastEvent,
-  type LiveEvent,
-} from "./state/store";
 import type { SubstrateClient } from "./transport/substrate-client";
+import type { SubstrateNarrativeRow } from "../../substrate/views";
+import {
+  formatRelativeTs,
+  importanceIcon,
+  importanceColor,
+  formatPayloadLines,
+} from "./format";
 
-const REFRESH_MS = 5_000;
-const TOAST_MAX = 3;
-const TOAST_TTL_MS = 12_000;
-
-export type DrawerName = "events" | "health" | "lineage" | "profile" | "inbox" | "brain" | "tail" | "inspector" | null;
-
-export type AppProps = {
-  client: SubstrateClient;
-  /** When set, replaces `bun run acc ...` with a callback. Useful in tests. */
-  onCommand?: (intent: CommandIntent) => void;
-  /** Disable polling/SSE for tests so the dashboard renders deterministically. */
-  pollDisabled?: boolean;
-  /** Pre-seeded snapshot (tests). */
-  initial?: DashboardSnapshot;
-  /** Open a drawer at mount (tests bypass the keypress dance). */
-  initialDrawer?: DrawerName;
-  /** Pre-seeded live events for tests of the overview LIVE strip. */
-  initialLiveEvents?: LiveEvent[];
+type DispatchSummary = {
+  directive_id: string;
+  root_task_id?: string;
+  lifecycle_status?: string;
+  status?: string;
+  residual?: number | null;
+  latest_ts?: string;
+  terminal_kind?: string | null;
 };
 
-export type ShellResult = {
+type DecisionRow = {
+  event_id?: string;
+  kind: string;
+  ts?: string;
+  payload?: Record<string, unknown>;
+  human_summary?: string | null;
+};
+
+type HealthSnapshot = {
   ok: boolean;
-  argv: string[];
-  exit_code: number | null;
-  summary: string;
+  status: string;
+  pid?: unknown;
+  events_count?: unknown;
+  uptime_s?: number;
 };
 
-// Spawn `bun run acc <argv>`, capturing stdout/stderr so the operator's
-// raw-mode TUI display is never corrupted by inherited writes. Returns a
-// one-line summary the caller pushes into the toast surface.
-//
-// For `task` (long-running brain dispatch) we detach + ignore so the brain
-// keeps running across TUI restarts; the operator polls progress through
-// dispatch_resolved_view, not stdout.
-const dispatchShell = (argv: string[]): Promise<ShellResult> => {
-  return new Promise((resolve) => {
-    if (argv.length === 0) {
-      resolve({ ok: false, argv, exit_code: null, summary: "(empty command)" });
-      return;
-    }
-    const head = argv[0];
-    if (head === "task") {
-      // Detached, fire-and-forget; report dispatched.
-      const child = spawn("bun", ["run", "acc", ...argv], { stdio: "ignore", detached: true });
-      child.unref();
-      resolve({ ok: true, argv, exit_code: null, summary: `task dispatched (background, pid=${child.pid ?? "?"})` });
-      return;
-    }
-    const child = spawn("bun", ["run", "acc", ...argv], { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
-    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
-    child.on("close", (code) => {
-      const ok = code === 0;
-      const out = (stdout + stderr).trim();
-      const firstLine = out.split("\n").find((l) => l.trim().length > 0) ?? "";
-      const summary = firstLine
-        ? firstLine.length > 120 ? firstLine.slice(0, 119) + "…" : firstLine
-        : ok ? `${head} ok (exit=${code})` : `${head} failed (exit=${code})`;
-      resolve({ ok, argv, exit_code: code, summary });
-    });
-    child.on("error", (err) => {
-      resolve({ ok: false, argv, exit_code: null, summary: `${head} spawn error: ${err.message}` });
-    });
-  });
-};
-
-export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer, initialLiveEvents }: AppProps): React.ReactElement => {
+export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
   const { exit } = useApp();
-  const [snapshot, setSnapshot] = useState<DashboardSnapshot>(initial ?? initialSnapshot());
-  const [focus, setFocus] = useState<FocusName>("inbox");
-  const [drawer, setDrawer] = useState<DrawerName>(initialDrawer ?? null);
-  const [paletteActive, setPaletteActive] = useState(initialDrawer ? false : true);
-  const [toasts, setToasts] = useState<ToastEvent[]>([]);
-  const [lastCommand, setLastCommand] = useState<string | null>(null);
-  const [lastResult, setLastResult] = useState<ShellResult | null>(null);
-  const [paletteBuffer, setPaletteBuffer] = useState("");
-  // SSE-pushed live event ring buffer. Every SSE event is appended (cap
-  // LIVE_TAIL_CAP) so the Live Tail drawer ('t') and Event Inspector
-  // ('x') can render without an extra MCP round-trip. Reactivity:
-  // events flow into the buffer in real time, and per-kind classification
-  // triggers a section refresh (brain/dispatch/changes/inbox) so the
-  // owner-visible counts update immediately instead of waiting for the
-  // 5s poll backstop.
-  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>(initialLiveEvents ?? []);
-  // Event Inspector pinned event_id — when set, the inspector drawer
-  // renders that specific event's full content.
-  const [inspectorEventId, setInspectorEventId] = useState<string | null>(null);
-  // Inspector vertical scroll offset (number of payload lines to skip).
-  // Reset to 0 whenever inspectorEventId changes. j/k or arrow keys
-  // increment/decrement while the inspector is open so the operator can
-  // see the FULL payload of any event regardless of size.
-  const [inspectorScroll, setInspectorScroll] = useState(0);
-  useEffect(() => { setInspectorScroll(0); }, [inspectorEventId]);
-
-  // Terminal-size detection. Re-reads on every render so a resize
-  // immediately drives responsive layout: panel column count, live-strip
-  // row count, inspector page height all scale to available space.
-  // Fallback: 80x24 (POSIX default) when stdout doesn't expose dimensions.
   const { stdout } = useStdout();
-  const termWidth = (stdout && typeof stdout.columns === "number" && stdout.columns > 0) ? stdout.columns : 80;
-  const termHeight = (stdout && typeof stdout.rows === "number" && stdout.rows > 0) ? stdout.rows : 24;
-  // The overview eats ~14 rows of chrome (status line + palette + hint
-  // + result line + LIVE strip header). The 6 panel grid takes the
-  // remaining height. Live strip row count scales from 4 (small term)
-  // to 12 (large term).
-  const liveStripRows = Math.max(4, Math.min(12, Math.floor((termHeight - 22) / 3)));
-  // Inspector page height — scrollable payload lines per page.
-  const inspectorPageRows = Math.max(8, termHeight - 12);
+  const [rows, setRows] = useState<SubstrateNarrativeRow[]>([]);
+  const [dispatches, setDispatches] = useState<DispatchSummary[]>([]);
+  const [decisions, setDecisions] = useState<DecisionRow[]>([]);
+  const [health, setHealth] = useState<HealthSnapshot>({ ok: false, status: "loading" });
+  const [selected, setSelected] = useState(0);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [filterImportance, setFilterImportance] = useState<Array<"critical" | "high" | "medium" | "low">>([]);
+  const [drilldown, setDrilldown] = useState<SubstrateNarrativeRow | null>(null);
+  const [nowMs, setNowMs] = useState(Date.now());
+
+  const width = stdout?.columns ?? 100;
+  const height = stdout?.rows ?? 30;
 
   const refresh = useCallback(async () => {
-    try {
-      const next = await fetchDashboardSnapshot(client);
-      setSnapshot(next);
-    } catch (err) {
-      setSnapshot((prev) => ({ ...prev, loading: false, error: (err as Error).message }));
-    }
-  }, [client]);
+    const env = await client.read<SubstrateNarrativeRow[]>("substrate_narrative_recent_view", {
+      limit: 200,
+      importance_in: filterImportance.length > 0 ? filterImportance : undefined,
+    });
+    if (env.ok) setRows(env.result);
+    const dispEnv = await client.read<DispatchSummary[]>("dispatch_resolved_view", { include_recent_terminal: true });
+    if (dispEnv.ok) setDispatches((dispEnv.result ?? []).slice(0, 8));
+    const decEnv = await client.read<DecisionRow[]>("pending_owner_decision_queue_view", { limit: 6 });
+    if (decEnv.ok) setDecisions(decEnv.result ?? []);
+    const h = await client.health();
+    setHealth(h);
+    setNowMs(Date.now());
+  }, [client, filterImportance]);
 
+  // Re-read on a 1.5s cadence + immediately when SSE fires below.
   useEffect(() => {
-    if (pollDisabled) return;
-    let cancelled = false;
-    const tick = async () => {
-      if (cancelled) return;
-      await refresh();
-    };
-    void tick();
-    const id = setInterval(() => { void tick(); }, REFRESH_MS);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [pollDisabled, refresh]);
+    void refresh();
+    const interval = setInterval(() => void refresh(), 1500);
+    return () => clearInterval(interval);
+  }, [refresh]);
 
+  // SSE invalidation — each daemon event triggers an immediate
+  // re-query of the narrative view. Cheaper than tight polling and
+  // keeps the screen visibly reactive.
   useEffect(() => {
-    if (pollDisabled) return;
-    const controller = new AbortController();
+    const ac = new AbortController();
     (async () => {
       try {
-        for await (const event of client.sseConnect({ signal: controller.signal })) {
-          // 1) Mirror-inline events become toast banners (existing behavior).
-          const toast = sseEventToToast(event);
-          if (toast) {
-            setToasts((prev) => {
-              if (prev.some((t) => t.event_id === toast.event_id)) return prev;
-              return [toast, ...prev].slice(0, TOAST_MAX);
-            });
-          }
-          // 2) Every SSE event (any kind) lands in the live ring buffer so
-          //    the Live Tail drawer and Event Inspector can render without
-          //    extra MCP round-trips.
-          const live = sseEventToLive(event);
-          setLiveEvents((prev) => {
-            if (prev.length > 0 && prev[0]?.event_id === live.event_id) return prev;
-            const next = [live, ...prev];
-            return next.length > LIVE_TAIL_CAP ? next.slice(0, LIVE_TAIL_CAP) : next;
-          });
-          // 3) Trigger per-section reactive refresh when the kind affects
-          //    a specific dashboard panel. This is the push-based replacement
-          //    for the 5s poll lag — counts/lists update as events land.
-          const sections = reactiveSectionsFor(String(event.kind));
-          if (sections.size > 0) {
-            void refresh();
-          }
+        for await (const _ev of client.sseConnect({ signal: ac.signal })) {
+          void _ev;
+          void refresh();
         }
-      } catch {
-        // SSE disconnect is benign; the next poll cycle re-establishes.
-      }
+      } catch { /* abort */ }
     })();
-    return () => { controller.abort(); };
-  }, [pollDisabled, client, refresh]);
+    return () => ac.abort();
+  }, [client, refresh]);
 
+  // Tick relative-timestamp display once per second.
   useEffect(() => {
-    if (toasts.length === 0) return;
-    const id = setTimeout(() => { setToasts((prev) => prev.slice(0, -1)); }, TOAST_TTL_MS);
-    return () => { clearTimeout(id); };
-  }, [toasts]);
-
-  const handleCommand = useCallback((intent: CommandIntent) => {
-    if (intent.kind === "exit") { exit(); return; }
-    if (intent.kind === "noop") return;
-    setLastCommand(intent.raw);
-    // Local-only intents — `__tui__` sentinel argv handled WITHOUT
-    // spawning a subprocess. Routes drawer toggles typed in the palette
-    // (e.g. `tail`) directly into App state. Real shells (acc task,
-    // acc apply, etc.) take the spawn path below.
-    if (intent.kind === "shell" && intent.argv[0] === "__tui__") {
-      const sub = intent.argv[1];
-      if (sub === "tail") {
-        setDrawer((d) => d === "tail" ? null : "tail");
-      }
-      return;
-    }
-    // `inspect <id>` short-circuits to pin the inspector drawer to that
-    // event_id without spawning. The owner sees the live-buffer payload
-    // immediately; the subprocess spawn still runs in parallel so MCP-
-    // fetched detail is available if the event isn't in the buffer.
-    if (intent.kind === "shell" && intent.argv[0] === "events" && intent.argv[1] === "--id" && intent.argv[2]) {
-      setInspectorEventId(intent.argv[2]);
-      setDrawer("inspector");
-    }
-    if (onCommand) { onCommand(intent); return; }
-    void (async () => {
-      const result = await dispatchShell(intent.argv);
-      setLastResult(result);
-      await refresh();
-    })();
-  }, [onCommand, exit, refresh]);
+    const t = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   useInput((input, key) => {
-    // Key routing model:
-    //   buffer has content  → palette owns ALL keys (typing into the
-    //                         command line). ESC clears and exits palette.
-    //   buffer is empty     → hotkey letters {i,a,p,e,h,l,q} + arrows +
-    //                         ':' fire App-level handlers. Other letters
-    //                         (typing the start of "task", "apply",
-    //                         "whoami", "changes", "decline", "directive"
-    //                         etc.) fall through so the palette accumulates
-    //                         them — without requiring ESC first.
-    const bufferEmpty = paletteBuffer.length === 0;
-    if (!bufferEmpty) {
-      if (key.escape) { setPaletteActive(false); setPaletteBuffer(""); return; }
+    if (drilldown) {
+      if (key.escape || input === "q") setDrilldown(null);
       return;
     }
-    // Inspector scroll keys (j/k/page-up/page-down/up/down) — fire ONLY
-    // when the inspector drawer is open, so the same keys remain free
-    // for hotkeys / arrow-navigation in other contexts.
-    if (drawer === "inspector") {
-      if (key.downArrow || input === "j") { setInspectorScroll((n) => n + 1); return; }
-      if (key.upArrow || input === "k") { setInspectorScroll((n) => Math.max(0, n - 1)); return; }
-      if (key.pageDown) { setInspectorScroll((n) => n + inspectorPageRows); return; }
-      if (key.pageUp) { setInspectorScroll((n) => Math.max(0, n - inspectorPageRows)); return; }
-      if (input === "g") { setInspectorScroll(0); return; }
-    }
-    if (key.escape && paletteActive) { setPaletteActive(false); return; }
-    if (input === ":") { setPaletteActive(true); return; }
-    // Single-letter hotkeys ONLY when buffer is empty. Any letter not in
-    // this set falls through to the palette's useInput which appends it.
-    if (input === "q") { exit(); return; }
-    if (input === "e") { setDrawer((d) => d === "events" ? null : "events"); return; }
-    if (input === "h") { setDrawer((d) => d === "health" ? null : "health"); return; }
-    if (input === "l") { setDrawer((d) => d === "lineage" ? null : "lineage"); return; }
-    if (input === "p") { setDrawer((d) => d === "profile" ? null : "profile"); return; }
-    if (input === "i") { setDrawer((d) => d === "inbox" ? null : "inbox"); return; }
-    if (input === "a") { setDrawer((d) => d === "brain" ? null : "brain"); return; }
-    if (key.leftArrow || key.upArrow) {
-      const idx = FOCUS_ORDER.indexOf(focus);
-      setFocus(FOCUS_ORDER[(idx - 1 + FOCUS_ORDER.length) % FOCUS_ORDER.length]!);
+    if (input === "q" || (key.ctrl && input === "c")) {
+      exit();
       return;
     }
-    if (key.rightArrow || key.downArrow || key.tab) {
-      const idx = FOCUS_ORDER.indexOf(focus);
-      setFocus(FOCUS_ORDER[(idx + 1) % FOCUS_ORDER.length]!);
+    if (key.downArrow || input === "j") {
+      setSelected((s) => Math.min(Math.max(0, rows.length - 1), s + 1));
+      return;
+    }
+    if (key.upArrow || input === "k") {
+      setSelected((s) => Math.max(0, s - 1));
+      return;
+    }
+    if (key.pageDown) {
+      setSelected((s) => Math.min(Math.max(0, rows.length - 1), s + 10));
+      return;
+    }
+    if (key.pageUp) {
+      setSelected((s) => Math.max(0, s - 10));
+      return;
+    }
+    if (key.return) {
+      if (rows[selected]) setDrilldown(rows[selected]);
+      return;
+    }
+    if (input === "d") {
+      setFilterImportance((f) => (f.length === 0 ? ["critical", "high"] : []));
+      setSelected(0);
+      return;
+    }
+    if (input === "r") {
+      void refresh();
       return;
     }
   });
 
-  const ownerRenderProfile = useMemo(() => ({
-    detected_language: snapshot.owner_profile.detected_language,
-    preferred_terms: snapshot.owner_profile.preferred_terms,
-    avoided_terms: snapshot.owner_profile.avoided_terms,
-  }), [snapshot.owner_profile]);
+  // Events pane height = total height − chrome (header + divider +
+  // decisions + footer ≈ 6 lines).
+  const eventsHeight = Math.max(6, height - 8);
+  useEffect(() => {
+    if (selected < scrollTop) setScrollTop(selected);
+    else if (selected >= scrollTop + eventsHeight) setScrollTop(selected - eventsHeight + 1);
+  }, [selected, scrollTop, eventsHeight]);
+
+  const visibleRows = useMemo(
+    () => rows.slice(scrollTop, scrollTop + eventsHeight),
+    [rows, scrollTop, eventsHeight],
+  );
+
+  // ── Drilldown overlay ─────────────────────────────────────────
+  if (drilldown) {
+    const payloadLines = formatPayloadLines(drilldown.payload, width - 4);
+    return (
+      <Box flexDirection="column" width={width} height={height}>
+        <Box borderStyle="round" borderColor={importanceColor(drilldown.importance)} flexDirection="column" paddingX={1}>
+          <Text bold>
+            <Text color={importanceColor(drilldown.importance)}>{importanceIcon(drilldown.importance)}</Text>
+            {" "}{drilldown.kind}  <Text dimColor>{drilldown.event_id}</Text>
+          </Text>
+          <Text dimColor>
+            {drilldown.ts}  directive={drilldown.directive_id ?? "—"}  task={drilldown.task_id ?? "—"}
+            {drilldown.residual != null ? `  residual=${drilldown.residual.toFixed(3)}` : ""}
+          </Text>
+          <Text> </Text>
+          {drilldown.human_summary ? <Text bold>{drilldown.human_summary}</Text> : null}
+          <Text> </Text>
+          {payloadLines.slice(0, Math.max(2, height - 10)).map((line, i) => (
+            <Text key={i}>{line}</Text>
+          ))}
+          {drilldown.cited_refs.length > 0 ? (
+            <Text dimColor>cited_refs: {drilldown.cited_refs.join(", ")}</Text>
+          ) : null}
+        </Box>
+        <Box paddingX={1}>
+          <Text dimColor>Esc or q to close</Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  // ── Main screen ───────────────────────────────────────────────
+  const liveCount = dispatches.filter((d) => (d.lifecycle_status ?? d.status) === "live").length;
+  const headerLine = `acc2 substrate · ${health.ok ? "ok" : "DOWN"} · ${liveCount} in-flight · ${rows.length} events · ${new Date(nowMs).toISOString().slice(11, 19)}`;
+  const footerLine = health.ok
+    ? `daemon ${health.status} · pid ${String(health.pid ?? "?")} · events ${String(health.events_count ?? "?")} · uptime ${health.uptime_s ?? "?"}s · j/k scroll · Enter drilldown · d filter · r refresh · q quit`
+    : `daemon DOWN: ${health.status} · run \`acc daemon start\``;
+
+  const dispatchPaneWidth = Math.max(24, Math.min(40, Math.floor(width * 0.32)));
+  const eventsPaneWidth = Math.max(40, width - dispatchPaneWidth - 3);
+  const filterLabel = filterImportance.length > 0 ? ` [filter: ${filterImportance.join("+")}]` : "";
 
   return (
-    <Box flexDirection="column">
-      <StatusLine
-        detected_language={snapshot.owner_profile.detected_language ?? null}
-        autonomy_score={snapshot.owner_profile.autonomy_score ?? null}
-        autonomy_floor={snapshot.owner_profile.autonomy_score_floor ?? null}
-        health={snapshot.health}
-        ownerProfile={ownerRenderProfile}
-      />
+    <Box flexDirection="column" width={width} height={height}>
+      {/* Header */}
+      <Box paddingX={1}>
+        <Text bold color={health.ok ? "green" : "red"}>{headerLine}</Text>
+      </Box>
 
-      {drawer === null ? (
-        <Dashboard snapshot={snapshot} focus={focus} termWidth={termWidth} />
-      ) : drawer === "inbox" ? (
-        <InboxScreen rows={snapshot.pending_decisions} total={snapshot.pending_decisions_total} />
-      ) : drawer === "profile" ? (
-        <ProfileScreen profile={snapshot.owner_profile} />
-      ) : drawer === "events" ? (
-        <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1}>
-          <Text bold color="cyan">recent mirror-inline events (e to close)</Text>
-          {toasts.length === 0 ? (
-            <Text dimColor>(no recent mirror-inline events yet)</Text>
+      {/* Main row: events pane + dispatch pane */}
+      <Box flexDirection="row" flexGrow={1}>
+        <Box flexDirection="column" width={eventsPaneWidth} paddingX={1}>
+          <Text bold>EVENTS{filterLabel} ({rows.length})</Text>
+          {visibleRows.length === 0 ? (
+            <Text dimColor>(no events match the current filter — press d to clear)</Text>
           ) : (
-            toasts.map((t) => (
-              <Box key={t.event_id}>
-                <Text color="yellow">{t.kind}</Text>
-                <Text dimColor> </Text>
-                <Text dimColor>{t.ts}</Text>
-                <Text> </Text>
-                <Text>{t.summary}</Text>
-              </Box>
-            ))
-          )}
-        </Box>
-      ) : drawer === "health" ? (
-        <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1}>
-          <Text bold color="cyan">substrate health (h to close)</Text>
-          <Text>daemon_status={snapshot.health.daemon_status}</Text>
-          <Text>verdict={snapshot.health.verdict}</Text>
-          <Text>uptime_s={snapshot.health.uptime_s ?? "?"}</Text>
-          <Text>events_count={snapshot.health.events_count ?? "?"}</Text>
-          <Text>bridge_failures_1h={snapshot.health.bridge_recent_failures}</Text>
-          <Text>bridge_completions_1h={snapshot.health.bridge_recent_completions}</Text>
-        </Box>
-      ) : drawer === "brain" ? (
-        <Box borderStyle="round" borderColor="magenta" flexDirection="column" paddingX={1}>
-          <Text bold color="magenta">BRAIN ACTIVITY (a to close) — pending amendments: {snapshot.brain_activity.pending_amendment_count}</Text>
-          <Text dimColor>recent contract amendments (newest first, ✓=applied)</Text>
-          {snapshot.brain_activity.amendments.length === 0 ? (
-            <Text dimColor>(none in last 30 events)</Text>
-          ) : (
-            snapshot.brain_activity.amendments.map((a) => (
-              <Box key={a.event_id} flexDirection="column">
-                <Text>
-                  <Text color={a.applied ? "green" : a.has_diff ? "yellow" : "red"}>
-                    {a.applied ? "✓" : a.has_diff ? "·" : "✗"}
-                  </Text>
-                  <Text color="yellow"> {a.event_id.slice(0, 12)}</Text>
-                  <Text dimColor> {a.ts.slice(11, 19)}</Text>
-                  <Text> {a.target.slice(0, 36)}</Text>
-                  {!a.has_diff ? <Text color="red"> (described-only)</Text> : null}
-                </Text>
-                {a.anchor ? <Text dimColor>    anchor={a.anchor.slice(0, 70)}</Text> : null}
-              </Box>
-            ))
-          )}
-          <Text> </Text>
-          <Text dimColor>recent lessons (newest first)</Text>
-          {snapshot.brain_activity.lessons.length === 0 ? (
-            <Text dimColor>(none)</Text>
-          ) : (
-            snapshot.brain_activity.lessons.slice(0, 4).map((l) => (
-              <Text key={l.event_id}>
-                <Text dimColor>{l.ts.slice(11, 19)} </Text>
-                <Text>{l.summary}</Text>
-              </Text>
-            ))
-          )}
-          <Text> </Text>
-          <Text dimColor>recent knowledge candidates (newest first)</Text>
-          {snapshot.brain_activity.knowledge.length === 0 ? (
-            <Text dimColor>(none)</Text>
-          ) : (
-            snapshot.brain_activity.knowledge.slice(0, 4).map((k) => (
-              <Text key={k.event_id}>
-                <Text dimColor>{k.ts.slice(11, 19)} </Text>
-                <Text>{k.claim}</Text>
-              </Text>
-            ))
-          )}
-          <Box marginTop={1}>
-            <Text dimColor>type </Text>
-            <Text color="green">apply ⟨event_id⟩</Text>
-            <Text dimColor> in the command palette to apply an amendment</Text>
-          </Box>
-        </Box>
-      ) : drawer === "tail" ? (
-        <Box borderStyle="round" borderColor="green" flexDirection="column" paddingX={1}>
-          {(() => {
-            // Scale row count to terminal height so the drawer uses
-            // available vertical space instead of a fixed 24.
-            const drawerRows = Math.max(10, termHeight - 8);
-            const visible = liveEvents.slice(0, drawerRows);
-            const tailWidth = Math.max(20, termWidth - 60);
-            return (
-              <>
-                <Text bold color="green">LIVE TAIL (close: type `tail` again) — showing {visible.length} of {liveEvents.length} events ({termWidth}×{termHeight})</Text>
-                {liveEvents.length === 0 ? (
-                  <Text dimColor>(no SSE events received yet — waiting for daemon stream)</Text>
-                ) : (
-                  visible.map((e) => {
-                    const dir = (e.directive_id ?? "-").slice(0, 12);
-                    const task = (e.task_id ?? "-").slice(0, 10);
-                    const origin = (e.substrate_origin ?? "?").slice(0, 14);
-                    const tail = `dir=${dir} task=${task} origin=${origin}`.slice(0, tailWidth);
-                    return (
-                      <Text key={e.event_id}>
-                        <Text dimColor>{e.ts.slice(11, 19)} </Text>
-                        <Text color="yellow">{e.event_id.slice(0, 12)} </Text>
-                        <Text color="cyan">{e.kind.padEnd(30).slice(0, 30)} </Text>
-                        <Text dimColor>{tail}</Text>
-                      </Text>
-                    );
-                  })
-                )}
-                <Box marginTop={1}>
-                  <Text dimColor>type </Text>
-                  <Text color="yellow">inspect ⟨event_id⟩</Text>
-                  <Text dimColor> in the palette to open Event Inspector with full payload (scrollable j/k pgUp/pgDn)</Text>
-                </Box>
-              </>
-            );
-          })()}
-        </Box>
-      ) : drawer === "inspector" ? (
-        <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1}>
-          <Text bold color="cyan">EVENT INSPECTOR (x to close, j/k or ↓↑ scroll, pgUp/pgDn page, g top) — id: {inspectorEventId ?? "(none — type 'inspect ⟨id⟩' in palette)"}</Text>
-          {(() => {
-            if (!inspectorEventId) return <Text dimColor>(no event pinned — type `inspect ⟨event_id⟩` in palette to pin)</Text>;
-            const ev = liveEvents.find((e) => e.event_id === inspectorEventId || e.event_id.startsWith(inspectorEventId));
-            if (!ev) return <Text color="yellow">event id {inspectorEventId} not in live buffer ({liveEvents.length} cached) — run `acc inspect {inspectorEventId}` in palette to load via MCP</Text>;
-            const payloadText = (() => {
-              try { return JSON.stringify(ev.payload, null, 2); }
-              catch { return String(ev.payload); }
-            })();
-            const allLines = payloadText.split("\n");
-            const totalLines = allLines.length;
-            // Scrollable page — show inspectorPageRows starting from
-            // inspectorScroll. Line width scales with terminal width so
-            // long lines aren't aggressively truncated on wide terminals.
-            const lineWidth = Math.max(60, termWidth - 6);
-            const startLine = Math.min(inspectorScroll, Math.max(0, totalLines - inspectorPageRows));
-            const visibleLines = allLines.slice(startLine, startLine + inspectorPageRows);
-            return (
-              <>
-                <Text>
-                  <Text dimColor>kind=</Text><Text color="cyan">{ev.kind}</Text>
-                  <Text dimColor> ts=</Text><Text>{ev.ts}</Text>
-                </Text>
-                <Text>
-                  <Text dimColor>directive=</Text><Text>{ev.directive_id ?? "-"}</Text>
-                  <Text dimColor> task=</Text><Text>{ev.task_id ?? "-"}</Text>
-                  <Text dimColor> origin=</Text><Text>{ev.substrate_origin ?? "-"}</Text>
-                </Text>
-                {ev.context_refs.length > 0 ? (
-                  <Text>
-                    <Text dimColor>context_refs ({ev.context_refs.length}): </Text>
-                    <Text color="yellow">{ev.context_refs.map((r) => r.slice(0, 12)).join(", ")}</Text>
-                  </Text>
-                ) : null}
-                <Text dimColor>──── payload (lines {startLine + 1}-{Math.min(startLine + visibleLines.length, totalLines)}/{totalLines}) ────</Text>
-                {visibleLines.map((l, i) => <Text key={`${ev.event_id}-${startLine + i}`}>{l.slice(0, lineWidth)}</Text>)}
-                {startLine + visibleLines.length < totalLines ? (
-                  <Text dimColor>(j/↓ scroll down — {totalLines - startLine - visibleLines.length} more lines)</Text>
-                ) : null}
-                {startLine > 0 ? (
-                  <Text dimColor>(k/↑ scroll up — {startLine} lines above)</Text>
-                ) : null}
-              </>
-            );
-          })()}
-        </Box>
-      ) : drawer === "lineage" ? (
-        <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1}>
-          <Text bold color="cyan">lineage walker (l to close)</Text>
-          <Text dimColor>type</Text>
-          <Text> directive ⟨id⟩</Text>
-          <Text dimColor> in the command palette to walk a directive's task graph</Text>
-        </Box>
-      ) : null}
-
-      {drawer === null ? (
-        <Box borderStyle="single" borderColor="green" flexDirection="column" paddingX={1}>
-          <Text>
-            <Text bold color="green">LIVE</Text>
-            <Text dimColor> (last {Math.min(liveEvents.length, liveStripRows)} of {liveEvents.length} SSE events — always-on tail; type </Text>
-            <Text color="yellow">tail</Text>
-            <Text dimColor> for full drawer, </Text>
-            <Text color="yellow">inspect ⟨id⟩</Text>
-            <Text dimColor> for full payload) {termWidth}×{termHeight}</Text>
-          </Text>
-          {liveEvents.length === 0 ? (
-            <Text dimColor>(waiting for SSE stream — daemon must be up; new events appear here as they land)</Text>
-          ) : (
-            liveEvents.slice(0, liveStripRows).map((e) => {
-              // Summary column scales with terminal width — instead of
-              // a hard 28-char kind truncation, use available width to
-              // show more context per event.
-              const idCol = e.event_id.slice(0, 12);
-              const kindCol = e.kind.padEnd(30).slice(0, 30);
-              // Reserve ~50 chars for ts+id+kind+spacing; the rest is
-              // the dir/task/origin tail.
-              const tailWidth = Math.max(20, termWidth - 60);
-              const dir = (e.directive_id ?? "-").slice(0, 12);
-              const task = (e.task_id ?? "-").slice(0, 10);
-              const origin = (e.substrate_origin ?? "?").slice(0, 14);
-              const tail = `dir=${dir} task=${task} origin=${origin}`.slice(0, tailWidth);
+            visibleRows.map((r, i) => {
+              const absIdx = scrollTop + i;
+              const isSelected = absIdx === selected;
+              const ts = formatRelativeTs(r.ts, nowMs).padStart(4, " ");
+              const icon = importanceIcon(r.importance);
+              const kindShort = r.kind.length > 26 ? r.kind.slice(0, 25) + "…" : r.kind;
+              const summary = r.human_summary ?? `(payload keys: ${Object.keys(r.payload).slice(0, 3).join(",")})`;
+              const remaining = Math.max(20, eventsPaneWidth - ts.length - kindShort.length - 8);
+              const trimmed = summary.replace(/\s+/g, " ").slice(0, remaining);
               return (
-                <Text key={e.event_id}>
-                  <Text dimColor>{e.ts.slice(11, 19)} </Text>
-                  <Text color="yellow">{idCol} </Text>
-                  <Text color="cyan">{kindCol} </Text>
-                  <Text dimColor>{tail}</Text>
+                <Box key={r.event_id} flexDirection="row">
+                  <Text
+                    color={isSelected ? "black" : importanceColor(r.importance)}
+                    backgroundColor={isSelected ? "cyan" : undefined}
+                  >
+                    {ts} {icon} {kindShort.padEnd(26, " ")} {" "}
+                  </Text>
+                  <Text color={isSelected ? "black" : undefined} backgroundColor={isSelected ? "cyan" : undefined}>
+                    {trimmed}
+                  </Text>
+                </Box>
+              );
+            })
+          )}
+        </Box>
+
+        <Box flexDirection="column" width={dispatchPaneWidth} paddingX={1}>
+          <Text bold>ACTIVE ({dispatches.length})</Text>
+          {dispatches.length === 0 ? (
+            <Text dimColor>(none)</Text>
+          ) : (
+            dispatches.map((d) => {
+              const status = d.lifecycle_status ?? d.status ?? "?";
+              const ts = formatRelativeTs(d.latest_ts ?? "", nowMs).padStart(4, " ");
+              const r = d.residual == null ? "  —" : d.residual.toFixed(2);
+              const color =
+                status === "live" ? "yellow"
+                : status === "completed" ? "green"
+                : status === "failed" ? "red"
+                : "gray";
+              return (
+                <Text key={d.directive_id} color={color}>
+                  {ts}  {status.padEnd(10, " ")}  r={r}  {d.directive_id.slice(0, 8)}
                 </Text>
               );
             })
           )}
         </Box>
-      ) : null}
-
-      <CommandPalette
-        active={paletteActive}
-        hint={lastCommand ? `last: ${lastCommand}` : undefined}
-        onSubmit={handleCommand}
-        buffer={paletteBuffer}
-        onBufferChange={setPaletteBuffer}
-      />
-
-      {lastResult ? (
-        <Box paddingX={1}>
-          <Text color={lastResult.ok ? "green" : "red"}>
-            {lastResult.ok ? "✓" : "✗"} {lastResult.argv.join(" ")}:
-          </Text>
-          <Text> </Text>
-          <Text>{lastResult.summary}</Text>
-        </Box>
-      ) : null}
-
-      <Box paddingX={1}>
-        <Text dimColor>
-          arrows=focus  i=inbox  a=brain  p=profile  e=events  h=health  l=lineage  q=quit  •  type `tail` / `inspect ⟨id⟩` for drawers
-        </Text>
       </Box>
 
-      {snapshot.error ? (
-        <Box paddingX={1}>
-          <Text color="red">error: {snapshot.error}</Text>
-        </Box>
-      ) : null}
+      {/* Decisions strip */}
+      <Box paddingX={1} flexDirection="column">
+        <Text bold color={decisions.length > 0 ? "yellow" : undefined}>
+          DECISIONS: {decisions.length === 0 ? "0 pending" : `${decisions.length} pending`}
+        </Text>
+        {decisions.slice(0, 3).map((d, i) => (
+          <Text key={d.event_id ?? i} color="yellow">
+            {"  "}{d.kind}  {d.human_summary ?? "(see drilldown)"}
+          </Text>
+        ))}
+      </Box>
+
+      {/* Footer */}
+      <Box paddingX={1}>
+        <Text dimColor>{footerLine}</Text>
+      </Box>
     </Box>
   );
 };

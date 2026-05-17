@@ -1,25 +1,15 @@
 #!/usr/bin/env bun
-// `acc watch` — Ink-based TUI shell over the seven-question framework.
+// `acc watch` — substrate-content-first realtime TUI.
 //
-// The TUI is intentionally substrate-bound: every panel renders from one
-// canonical view via MCP `substrate.read` (no direct SQLite access). The
-// data sources are stable; this file is the render-and-input layer only.
-//
-// Seven-question wiring (one canonical view per panel):
-//   1. WHAT IS IT DOING RIGHT NOW?    dispatch_resolved_view + ready_tasks_view
-//   2. WHAT DOES IT WANT FROM ME?     pending_owner_decision_queue_view
-//   3. IS IT HEALTHY?                 daemon health + bridge_failed/completed events
-//   4. WHAT IS IT LEARNING?           promoted_knowledge_view + contradictory_candidates_view
-//   5. WHAT DID IT CHANGE FOR ME?     applied_change_committed + irreversible_effects_view
-//   6. HOW WELL DOES IT KNOW ME?      owner_profile_view (rendered via owner_profile_renderer)
-//   7. WHAT HAPPENS NEXT IF I IDLE?   ready_tasks_view + active_objectives_view +
-//                                     directive_conflicts_view + rolling_review_due_view
-//
-// SSE events that match MIRROR_INLINE_EVENT_TYPES (from substrate/event_kinds.ts)
-// surface as toast banners; everything else is silently absorbed.
-//
-// The command palette (bottom bar) is the CLI: typed commands resolve to
-// `bun run acc <argv>` invocations spawned as Bash subprocesses.
+// Rewrite (2026-05-17) per brain design D9TBCHADS97DHAMNBC686HE3P0
+// residual=0.16. The owner critiqued the previous six-panel/seven-
+// question shell as IDs-heavy and complexity-heavy (owner_input_received
+// XR3REA7Q7X197AASRH3QXNFF84). The replacement is ONE screen with the
+// substrate's narrative event stream as the dominant pane, an active-
+// dispatches list, a decisions strip, and an Enter-key drilldown for
+// the full payload. Every row shows CONTENT (claim, summary, intent,
+// reason) projected by substrate_narrative_recent_view; IDs are
+// drilldown-only metadata.
 
 import React from "react";
 import { render } from "ink";
@@ -27,13 +17,22 @@ import { mcpCall } from "./rpc";
 import { App } from "./tui/App";
 import { realSubstrateClient } from "./tui/transport/substrate-client";
 
-const HELP = `acc watch — Ink-based live observation TUI
+const HELP = `acc watch — substrate-content-first realtime TUI
 
 usage: acc watch [--help]
 
-  Six-panel dashboard over the seven canonical substrate views.
-  Press ':' to enter the command palette; 'q' to quit; arrows to move
-  focus; i=inbox, p=profile, e=events, h=health, l=lineage.
+  ONE screen: narrative event stream (left), active dispatches (right),
+  decisions strip (bottom), small daemon-health footer. Each event row
+  is the substrate's human_summary projection — not a hex id.
+
+  Keyboard:
+    j / ↓        next row
+    k / ↑        previous row
+    PgDn / PgUp  page
+    Enter        drilldown: full payload + cited refs
+    Esc / q      close drilldown / quit
+    d            toggle critical+high importance filter
+    r            force refresh
 `;
 
 export const runWatch = async (argv: string[]): Promise<number> => {
