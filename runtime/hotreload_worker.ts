@@ -34,8 +34,9 @@
 //      daemon stays alive because the reloadable registry keeps the
 //      previous reference.
 
-import { existsSync, readdirSync, statSync, watch as fsWatch } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, watch as fsWatch, writeFileSync } from "node:fs";
+import { dirname, basename, join, relative, sep } from "node:path";
+import { randomBytes } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import { emitEvent } from "./events";
 import { logger } from "./logger";
@@ -176,11 +177,63 @@ const NOISE_FILE_PATTERNS: RegExp[] = [
   /\.DS_Store$/,                  // macOS metadata
   /\.test\.tsx?$/,                // test files (never need reload)
   /\.spec\.tsx?$/,                // spec files (test alias)
+  // Hot-reload sibling-temp-copy files written by prepareHotReloadCacheBust.
+  // The watcher MUST ignore these or every reload triggers another reload —
+  // an infinite loop. Pattern matches `.<basename>.hotreload-temp.<hex>.ts`.
+  /\.hotreload-temp\.[0-9a-f]+\.tsx?$/,
 ];
 
 export const isNoiseFile = (relPath: string): boolean => {
   for (const re of NOISE_FILE_PATTERNS) if (re.test(relPath)) return true;
   return false;
+};
+
+/** Prepare a fresh-cache import URL for a source module.
+ *
+ *  Bun's ESM resolver strips query strings — `await import("file://path?hotreload=N")`
+ *  returns the EXACT same module instance as the boot-time
+ *  `import "./path"`. Probe evidence 2026-05-17: `same module ns? true`,
+ *  `same EVENT_KINDS obj? true`. The previous query-bust scheme was a
+ *  structural no-op; the slot.refresh load() ran and did
+ *  `cachedKinds = mod.EVENT_KINDS` against the SAME reference — every
+ *  hot-reload reported `swapped/version=N` but the live consumer saw
+ *  zero behavioral change. Only a full daemon restart picked up new
+ *  kinds.
+ *
+ *  Working fix: write the source as a SIBLING TEMP FILE with a unique
+ *  hex suffix. Bun resolves it as a fresh module (unique path = unique
+ *  cache key). Sibling placement preserves relative-import resolution
+ *  (e.g. `import "../runtime/reloadable"` from
+ *  `substrate/.event_kinds.hotreload-temp.<hex>.ts` resolves the same
+ *  as from the original). The noise filter excludes
+ *  `*.hotreload-temp.<hex>.ts` so the watcher does NOT recurse.
+ *
+ *  Returns the file:// URL of the temp copy + a cleanup callback the
+ *  worker invokes after slot.refresh resolves (success or failure). */
+export const prepareHotReloadCacheBust = (
+  absPath: string,
+): { url: string; tempPath: string; cleanup: () => void } => {
+  const dir = dirname(absPath);
+  const base = basename(absPath);
+  const stem = base.replace(/\.(tsx?|jsx?|mjs|cjs)$/, "");
+  const ext = base.match(/\.(tsx?|jsx?|mjs|cjs)$/)?.[0] ?? ".ts";
+  const tempPath = join(dir, `.${stem}.hotreload-temp.${randomBytes(4).toString("hex")}${ext}`);
+  const text = readFileSync(absPath, "utf8");
+  writeFileSync(tempPath, text);
+  return {
+    url: `file://${tempPath}`,
+    tempPath,
+    cleanup: () => {
+      try {
+        unlinkSync(tempPath);
+      } catch (err) {
+        logger.debug(
+          { where: "hotreload.cleanup_temp", tempPath, err: String(err) },
+          "could not unlink hot-reload temp file (already gone?)",
+        );
+      }
+    },
+  };
 };
 
 /** Validate that the freshly-imported module has every export named in
@@ -358,8 +411,32 @@ export const startHotreloadWorker = (
 
   const applyReload = (relPath: string, entry: HotReloadEntry): void => {
     const absPath = join(projectRoot, relPath);
-    const url = `file://${absPath}?hotreload=${Date.now()}`;
+    // Bun ESM ignores `?hotreload=N` query strings — prepare a unique
+    // sibling temp copy so import returns a fresh module instance. See
+    // prepareHotReloadCacheBust for the structural rationale.
+    let cacheBust: { url: string; tempPath: string; cleanup: () => void };
+    try {
+      cacheBust = prepareHotReloadCacheBust(absPath);
+    } catch (err) {
+      const reason = (err as Error).message ?? String(err);
+      state.last_failure = { ts: new Date().toISOString(), module: entry.name, reason: `temp_copy_failed:${reason}` };
+      state.failure_total++;
+      recordOutcome({
+        ts: state.last_failure.ts,
+        module: entry.name,
+        file_path: relPath,
+        outcome: "failed",
+        reason: `temp_copy_failed:${reason}`,
+      });
+      logger.warn(
+        { where: "hotreload.apply.temp_copy", module: entry.name, file_path: relPath, err: reason },
+        "hot-reload temp copy failed — previous reference retained",
+      );
+      return;
+    }
+    const url = cacheBust.url;
     void (async () => {
+      try {
       // 1) Import the new module.
       let fresh: unknown;
       try {
@@ -587,6 +664,11 @@ export const startHotreloadWorker = (
       } catch (emitErr) {
         logger.debug({ where: "hotreload.emit_completed", err: String(emitErr) }, "could not emit daemon_hotreload_completed");
       }
+      } finally {
+        // Always unlink the sibling temp copy, even on early-return paths
+        // (validation failure, slot rejection, smoke-probe failure).
+        cacheBust.cleanup();
+      }
     })();
   };
 
@@ -707,8 +789,23 @@ export const __testApplyChange = (
   // require the surrounding closure (test mode). Production callers go
   // through startHotreloadWorker.
   const absPath = join(projectRoot, relPath);
-  const url = `file://${absPath}?hotreload=${Date.now()}`;
+  let cacheBust: { url: string; tempPath: string; cleanup: () => void };
+  try {
+    cacheBust = prepareHotReloadCacheBust(absPath);
+  } catch (err) {
+    const reason = `temp_copy_failed:${(err as Error).message ?? String(err)}`;
+    state.last_failure = { ts: new Date().toISOString(), module: entry.name, reason };
+    state.failure_total++;
+    emitEvent(db, {
+      kind: "daemon_hotreload_failed",
+      substrate_origin: "substrate_auto",
+      payload: { module: entry.name, file_path: relPath, strategy: entry.strategy, reason },
+    });
+    return;
+  }
+  const url = cacheBust.url;
   void (async () => {
+    try {
     let fresh: unknown;
     try {
       fresh = await import(url);
@@ -762,6 +859,9 @@ export const __testApplyChange = (
       });
     }
     void isQuiescent; // kept for parity with production startup
+    } finally {
+      cacheBust.cleanup();
+    }
   })();
 };
 

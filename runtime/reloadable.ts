@@ -64,10 +64,28 @@ export type RefreshResult =
 
 const REGISTRY = new Map<string, ReloadableModule<unknown>>();
 
-/** Register a module with the reloadable indirection. Idempotent —
- *  registering the same name twice REPLACES the entry (use when a
- *  hot-reloaded source declares the same name). */
+/** Register a module with the reloadable indirection.
+ *
+ *  Hot-reload safety (2026-05-17, knowledge 9BP8GG3G4550 + KXFD7GXSAH6S):
+ *  every consumer that eagerly imported a swap-aware accessor (e.g.
+ *  runtime/events.ts → getCurrentEventKinds) captured the binding from
+ *  the BOOT-TIME module instance. When a temp-copy re-import triggers
+ *  the new module's top-level, its own `registerReloadable({name})`
+ *  call MUST NOT migrate the registry slot to the new module — the
+ *  worker would then refresh a slot whose load() closure captures
+ *  bindings invisible to the boot-time consumers, and subsequent
+ *  reloads would silently no-op (validator still reading stale
+ *  cachedKinds via the boot module's getCurrentEventKinds).
+ *
+ *  Idempotent semantics: if a name is ALREADY registered, return the
+ *  existing entry verbatim. The new module's top-level still runs
+ *  (its own bindings initialise) but the registry slot stays anchored
+ *  to the boot module's closure — which is the one downstream
+ *  consumers actually read through. The temp module's bindings are
+ *  inert. */
 export const registerReloadable = <M>(opts: ReloadableOptions<M>): ReloadableModule<M> => {
+  const existing = REGISTRY.get(opts.name);
+  if (existing) return existing as ReloadableModule<M>;
   let cached: M | null = null;
   let previous: M | null = null;
   let version = 0;
