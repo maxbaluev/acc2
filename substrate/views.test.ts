@@ -546,6 +546,32 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(row?.residual).toBe(1.0);
   });
 
+  test("Bug B extension: closed-directive stragglers classify as 'abandoned' (not 'orphan_node', not 'live')", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const seventyMinAgo = new Date(Date.now() - 70 * 60 * 1000).toISOString();
+    // Orphan-shape: task_node_opened, no dispatch, > 1h old.
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_closed", task_id: "t_straggler", ts: seventyMinAgo });
+    // Parent directive was archived by operator. Straggler is correctly
+    // abandoned with the DAG — distinct bucket from orphan (which implies
+    // "still expected to complete").
+    insertEvent(db, { kind: "directive_archived_by_operator", directive_id: "d_closed", task_id: "d_closed", payload: { reason: "owner_closed_stale_session" } });
+    const [row] = dispatchResolved(db, { directiveId: "d_closed", rootTaskId: "t_straggler" });
+    expect(row?.lifecycle_status).toBe("abandoned");
+    expect(row?.status_reason).toBe("directive_closed_straggler");
+  });
+
+  test("Bug B baseline: open-directive orphan still classifies (no false negative)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const seventyMinAgo = new Date(Date.now() - 70 * 60 * 1000).toISOString();
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_open_orphan", task_id: "t_lonely", ts: seventyMinAgo });
+    // No directive closure event. The orphan classification should fire.
+    const [row] = dispatchResolved(db, { directiveId: "d_open_orphan", rootTaskId: "t_lonely" });
+    expect(row?.lifecycle_status).toBe("orphan_node");
+    expect(row?.status_reason).toBe("orphan_root_no_dispatch");
+  });
+
   test("Bug A boundary: non-failure terminals (completed, live) keep their actual residual or NULL", () => {
     const db = openDb(":memory:");
     runViews(db);

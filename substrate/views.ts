@@ -2157,6 +2157,20 @@ SELECT
   r.directive_id,
   r.root_task_id,
   CASE
+    -- Closed-directive stragglers (2026-05-17 Bug B extension): when
+    -- the parent directive is closed/archived, undispatched tasks
+    -- under it are correctly abandoned, not orphan. They get their own
+    -- 'abandoned' bucket so the operator surface can group + ignore
+    -- them without false-positive orphan alerts. This must run BEFORE
+    -- every other classification — including 'failed' / 'zombie' —
+    -- because terminal events on a closed-directive task are equally
+    -- "the DAG is over, this task's outcome no longer matters".
+    WHEN term.terminal_kind IS NULL
+         AND r.directive_id IN (
+           SELECT directive_id FROM events
+           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         )
+      THEN 'abandoned'
     -- Bug C fix (2026-05-17): hard-failure terminals (task_failed,
     -- dispatcher_violation) MUST win over any open-dispatch zombie
     -- heuristic. Pre-fix a dispatcher_violation row whose
@@ -2183,19 +2197,35 @@ SELECT
     -- normal operation does NOT immediately bucket a root as orphan.
     -- Past-session roots aged > 2 days still classify; the new
     -- threshold separates "actively-orphaned" from "transient gap".
-    -- Root cause of accumulation (stranded roots from killed sessions)
-    -- is a separate scheduler-reaper concern.
+    -- Bug B extension (2026-05-17): also exclude rows whose directive
+    -- is already closed/archived. Live-substrate evidence: 268 orphan
+    -- rows all had closed parent directives (74 via "all_tasks_terminal",
+    -- 34 via owner archive). Those tasks are correctly-abandoned
+    -- stragglers from a closed DAG; classifying them as 'orphan' is
+    -- a misleading alert. They'll fall through to whatever the
+    -- baseline ELSE branch produces (typically 'live' for the closed
+    -- snapshot — still imperfect but no longer alarming).
     WHEN term.terminal_kind IS NULL
          AND COALESCE(ds.dispatched_count, 0) = 0
          AND COALESCE(ds.open_dispatch_count, 0) = 0
          AND cg.latest_cap_gate_at IS NULL
          AND r.root_opened_ts IS NOT NULL
          AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 3600000
+         AND r.directive_id NOT IN (
+           SELECT directive_id FROM events
+           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         )
       THEN 'orphan_node'
     WHEN COALESCE(ds.dispatched_count, 0) > 0 THEN 'live'
     ELSE 'live'
   END AS status,
   CASE
+    WHEN term.terminal_kind IS NULL
+         AND r.directive_id IN (
+           SELECT directive_id FROM events
+           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         )
+      THEN 'abandoned'
     WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
@@ -2213,6 +2243,10 @@ SELECT
          AND cg.latest_cap_gate_at IS NULL
          AND r.root_opened_ts IS NOT NULL
          AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 3600000
+         AND r.directive_id NOT IN (
+           SELECT directive_id FROM events
+           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         )
       THEN 'orphan_node'
     WHEN COALESCE(ds.dispatched_count, 0) > 0 THEN 'live'
     ELSE 'live'
@@ -2252,6 +2286,13 @@ SELECT
   ls.latest_ts,
   CAST((julianday('now') - julianday(ls.latest_ts)) * 86400000 AS INTEGER) AS age_ms,
   CASE
+    -- Closed-directive straggler parity (2026-05-17 Bug B ext).
+    WHEN term.terminal_kind IS NULL
+         AND r.directive_id IN (
+           SELECT directive_id FROM events
+           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         )
+      THEN 'directive_closed_straggler'
     -- Bug C parity (2026-05-17): hard-failure terminals win — the
     -- status_reason should name the terminal failure, not the
     -- lingering open dispatch. Pre-fix a task_failed row whose
@@ -2273,13 +2314,18 @@ SELECT
          AND ready.ready_since IS NOT NULL
       THEN COALESCE(cg.queued_reason, 'queued_at_cap')
     WHEN term.terminal_kind IS NOT NULL THEN term.terminal_kind
-    -- Bug B parity (2026-05-17): orphan threshold widened to 1h.
+    -- Bug B parity (2026-05-17): orphan threshold widened to 1h +
+    -- closed-directive exclusion (mirrors the status/lifecycle CASEs).
     WHEN term.terminal_kind IS NULL
          AND COALESCE(ds.dispatched_count, 0) = 0
          AND COALESCE(ds.open_dispatch_count, 0) = 0
          AND cg.latest_cap_gate_at IS NULL
          AND r.root_opened_ts IS NOT NULL
          AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 3600000
+         AND r.directive_id NOT IN (
+           SELECT directive_id FROM events
+           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         )
       THEN 'orphan_root_no_dispatch'
     WHEN ready.ready_since IS NOT NULL THEN 'ready'
     ELSE COALESCE(ls.latest_signal_reason, 'root_opened')
@@ -2745,7 +2791,19 @@ export type ReadyTaskRow = {
 //                    followed; >5min stale, no cap_gate excuse. The
 //                    scheduler dropped a ready refinement-child on the
 //                    floor. NOT a hung brain — a scheduler omission.
-export type DispatchResolvedStatus = "live" | "completed" | "failed" | "queued_at_cap" | "zombie" | "orphan_node";
+export type DispatchResolvedStatus =
+  | "live"
+  | "completed"
+  | "failed"
+  | "queued_at_cap"
+  | "zombie"
+  | "orphan_node"
+  // 2026-05-17 Bug B extension: undispatched task under a closed/archived
+  // directive. The DAG is over; the task's outcome no longer matters.
+  // Distinct from 'orphan_node' (open directive, expected to complete) so
+  // the operator surface can group + ignore these without false-positive
+  // alerts. 200+ stragglers from killed past sessions classify here.
+  | "abandoned";
 
 export type DispatchResolvedRow = {
   directive_id: string;
