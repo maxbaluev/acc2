@@ -77,7 +77,7 @@ const InboxPanel = ({
       <Text dimColor>{renderOwnerString("no pending owner decisions", profile)}</Text>
     ) : (
       <>
-        <Text dimColor>rank dup risk target / anchor</Text>
+        <Text dimColor>rank dup risk event_id     target / anchor</Text>
         {rows.map((r) => (
           <Box key={r.group_key} flexDirection="column">
             <Text>
@@ -87,7 +87,9 @@ const InboxPanel = ({
               {" "}
               <Text color={r.target_risk_score >= 0.85 ? "red" : r.target_risk_score >= 0.5 ? "yellow" : "white"}>{r.target_risk_score.toFixed(2)}</Text>
               {" "}
-              <Text>{(r.target ?? "?").slice(0, 36)}</Text>
+              <Text color="yellow">{(r.representative_event_id ?? "-").slice(0, 12)}</Text>
+              {" "}
+              <Text>{(r.target ?? "?").slice(0, 28)}</Text>
             </Text>
             <Text>
               <Text dimColor>  anchor=</Text>

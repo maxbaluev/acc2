@@ -29,39 +29,45 @@ export const InboxScreen = ({ rows, total }: InboxProps): React.ReactElement => 
     ) : (
       <>
         <Box>
-          <Text dimColor>rank  age   dup  risk  shape  target                                              anchor                       reason</Text>
+          <Text dimColor>rank  age   dup  event_id      target                                       reason</Text>
         </Box>
         {rows.map((r) => (
-          <Box key={r.group_key}>
-            <Text color="cyan">{r.decision_rank.toFixed(2)}</Text>
-            <Text>  </Text>
-            <Text>{fmtAge(r.newest_ts).padEnd(5)}</Text>
-            <Text> </Text>
-            <Text>{String(r.duplicate_count).padStart(3)}</Text>
-            <Text>  </Text>
-            <Text color={r.target_risk_score >= 0.85 ? "red" : r.target_risk_score >= 0.5 ? "yellow" : "white"}>
-              {r.target_risk_score.toFixed(2)}
-            </Text>
-            <Text>  </Text>
-            <Text>{r.shape_quality_score.toFixed(2)}</Text>
-            <Text>   </Text>
-            <Text>{(r.target ?? "?").slice(0, 49).padEnd(49)}</Text>
-            <Text> </Text>
-            <Text dimColor>{(r.anchor ?? "-").slice(0, 27).padEnd(27)}</Text>
-            <Text> </Text>
-            {r.group_decline_reason ? (
-              <Text color="red">decline:{r.group_decline_reason}</Text>
-            ) : (
-              <Text color="green">apply-ready</Text>
-            )}
+          <Box key={r.group_key} flexDirection="column">
+            <Box>
+              <Text color="cyan">{r.decision_rank.toFixed(2)}</Text>
+              <Text>  </Text>
+              <Text>{fmtAge(r.newest_ts).padEnd(5)}</Text>
+              <Text> </Text>
+              <Text>{String(r.duplicate_count).padStart(3)}</Text>
+              <Text>  </Text>
+              <Text color="yellow">{(r.representative_event_id ?? "(no_event_id)").slice(0, 12).padEnd(12)}</Text>
+              <Text> </Text>
+              <Text>{(r.target ?? "?").slice(0, 44).padEnd(44)}</Text>
+              <Text> </Text>
+              {r.group_decline_reason ? (
+                <Text color="red">decline:{r.group_decline_reason}</Text>
+              ) : (
+                <Text color="green">apply-ready</Text>
+              )}
+            </Box>
+            <Box paddingLeft={6}>
+              <Text dimColor>anchor=</Text>
+              <Text dimColor>{(r.anchor ?? "-").slice(0, 60)}</Text>
+              <Text dimColor> risk=</Text>
+              <Text color={r.target_risk_score >= 0.85 ? "red" : r.target_risk_score >= 0.5 ? "yellow" : "white"}>
+                {r.target_risk_score.toFixed(2)}
+              </Text>
+              <Text dimColor> shape=</Text>
+              <Text>{r.shape_quality_score.toFixed(2)}</Text>
+            </Box>
           </Box>
         ))}
         <Box marginTop={1}>
-          <Text dimColor>type</Text>
-          <Text> apply ⟨representative_event_id⟩</Text>
+          <Text dimColor>type </Text>
+          <Text color="green">apply ⟨event_id⟩</Text>
           <Text dimColor> or </Text>
-          <Text>decline ⟨representative_event_id⟩</Text>
-          <Text dimColor> in the command palette</Text>
+          <Text color="red">decline ⟨event_id⟩</Text>
+          <Text dimColor> in the command palette (the yellow column is the event_id)</Text>
         </Box>
       </>
     )}

@@ -53,16 +53,52 @@ export type AppProps = {
   initial?: DashboardSnapshot;
 };
 
-const dispatchShell = (argv: string[]): void => {
-  if (argv.length === 0) return;
-  const head = argv[0];
-  const isTask = head === "task";
-  // `bun run acc <argv>` ensures we use the project's CLI binding.
-  const child = spawn("bun", ["run", "acc", ...argv], {
-    stdio: isTask ? "ignore" : "inherit",
-    detached: isTask,
+export type ShellResult = {
+  ok: boolean;
+  argv: string[];
+  exit_code: number | null;
+  summary: string;
+};
+
+// Spawn `bun run acc <argv>`, capturing stdout/stderr so the operator's
+// raw-mode TUI display is never corrupted by inherited writes. Returns a
+// one-line summary the caller pushes into the toast surface.
+//
+// For `task` (long-running brain dispatch) we detach + ignore so the brain
+// keeps running across TUI restarts; the operator polls progress through
+// dispatch_resolved_view, not stdout.
+const dispatchShell = (argv: string[]): Promise<ShellResult> => {
+  return new Promise((resolve) => {
+    if (argv.length === 0) {
+      resolve({ ok: false, argv, exit_code: null, summary: "(empty command)" });
+      return;
+    }
+    const head = argv[0];
+    if (head === "task") {
+      // Detached, fire-and-forget; report dispatched.
+      const child = spawn("bun", ["run", "acc", ...argv], { stdio: "ignore", detached: true });
+      child.unref();
+      resolve({ ok: true, argv, exit_code: null, summary: `task dispatched (background, pid=${child.pid ?? "?"})` });
+      return;
+    }
+    const child = spawn("bun", ["run", "acc", ...argv], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+    child.on("close", (code) => {
+      const ok = code === 0;
+      const out = (stdout + stderr).trim();
+      const firstLine = out.split("\n").find((l) => l.trim().length > 0) ?? "";
+      const summary = firstLine
+        ? firstLine.length > 120 ? firstLine.slice(0, 119) + "…" : firstLine
+        : ok ? `${head} ok (exit=${code})` : `${head} failed (exit=${code})`;
+      resolve({ ok, argv, exit_code: code, summary });
+    });
+    child.on("error", (err) => {
+      resolve({ ok: false, argv, exit_code: null, summary: `${head} spawn error: ${err.message}` });
+    });
   });
-  if (isTask) child.unref();
 };
 
 export const App = ({ client, onCommand, pollDisabled, initial }: AppProps): React.ReactElement => {
@@ -73,6 +109,7 @@ export const App = ({ client, onCommand, pollDisabled, initial }: AppProps): Rea
   const [paletteActive, setPaletteActive] = useState(true);
   const [toasts, setToasts] = useState<ToastEvent[]>([]);
   const [lastCommand, setLastCommand] = useState<string | null>(null);
+  const [lastResult, setLastResult] = useState<ShellResult | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -129,8 +166,11 @@ export const App = ({ client, onCommand, pollDisabled, initial }: AppProps): Rea
     if (intent.kind === "noop") return;
     setLastCommand(intent.raw);
     if (onCommand) { onCommand(intent); return; }
-    dispatchShell(intent.argv);
-    void refresh();
+    void (async () => {
+      const result = await dispatchShell(intent.argv);
+      setLastResult(result);
+      await refresh();
+    })();
   }, [onCommand, exit, refresh]);
 
   useInput((input, key) => {
@@ -235,6 +275,16 @@ export const App = ({ client, onCommand, pollDisabled, initial }: AppProps): Rea
         hint={lastCommand ? `last: ${lastCommand}` : undefined}
         onSubmit={handleCommand}
       />
+
+      {lastResult ? (
+        <Box paddingX={1}>
+          <Text color={lastResult.ok ? "green" : "red"}>
+            {lastResult.ok ? "✓" : "✗"} {lastResult.argv.join(" ")}:
+          </Text>
+          <Text> </Text>
+          <Text>{lastResult.summary}</Text>
+        </Box>
+      ) : null}
 
       <Box paddingX={1}>
         <Text dimColor>
