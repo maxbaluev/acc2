@@ -2045,7 +2045,20 @@ terminal_ranked AS (
     e.ts AS terminal_at,
     e.kind AS terminal_kind,
     e.failure_kind,
-    e.residual,
+    -- 2026-05-17 Bug A extension: brain-emitted task_committed rows
+    -- carry the residual inside payload (e.g. {"summary":"…","residual":0.18}),
+    -- not on the events.residual column. Pre-fix terminal CTE only read
+    -- the column, so 'completed' rows in the TUI showed r=— even when
+    -- the brain explicitly named a closure_residual. COALESCE the
+    -- two surfaces and the payload-shape variants (residual,
+    -- closure_residual, observed_residual) so any documented residual
+    -- semantics surface to the dispatch projection.
+    COALESCE(
+      e.residual,
+      CAST(json_extract(e.payload, '$.residual') AS REAL),
+      CAST(json_extract(e.payload, '$.closure_residual') AS REAL),
+      CAST(json_extract(e.payload, '$.observed_residual') AS REAL)
+    ) AS residual,
     ROW_NUMBER() OVER (PARTITION BY t.directive_id, t.root_task_id ORDER BY e.ts DESC, CASE WHEN e.kind = 'task_committed' THEN 0 ELSE 1 END, e.id DESC) AS rn
   FROM tree t
   JOIN events e
