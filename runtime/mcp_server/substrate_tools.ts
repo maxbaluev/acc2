@@ -51,6 +51,7 @@ import {
   promotedKnowledge,
   recipeRegistry,
   actProjectionObservability,
+  substrateNarrativeRecent,
 } from "../../substrate/views";
 import type {
   AdmitArtifactSchema,
@@ -667,6 +668,30 @@ export const handleRead = (
         return { ok: true, result: lessonImplementerQueue(db) as unknown as JsonValue };
       case "pending_owner_decision_queue_view":
         return { ok: true, result: pendingOwnerDecisionQueue(db) as unknown as JsonValue };
+      case "substrate_narrative_recent_view": {
+        // Content-first TUI primitive — brain design D9TBCHADS97DHAMNBC686HE3P0.
+        // Args: { limit?, directive_id?, importance_in?, kinds_in? }.
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        const importanceIn = Array.isArray(arg.importance_in)
+          ? (arg.importance_in as unknown[]).filter((x): x is "critical" | "high" | "medium" | "low" =>
+              x === "critical" || x === "high" || x === "medium" || x === "low",
+            )
+          : undefined;
+        const kindsIn = Array.isArray(arg.kinds_in)
+          ? (arg.kinds_in as unknown[]).filter((x): x is string => typeof x === "string")
+          : undefined;
+        return {
+          ok: true,
+          result: substrateNarrativeRecent(db, {
+            limit,
+            directive_id: directiveId,
+            importance_in: importanceIn,
+            kinds_in: kindsIn,
+          }) as unknown as JsonValue,
+        };
+      }
       case "lesson_implementation_status_view":
         return { ok: true, result: lessonImplementationStatus(db) as unknown as JsonValue };
       case "applied_lesson_effectiveness_view":

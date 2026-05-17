@@ -23,6 +23,7 @@ import {
   recipesLatestView,
   rollingReviewDue,
   runViews,
+  substrateNarrativeRecent,
   taskGraphFor,
   watchEdgeObservations,
 } from "./views";
@@ -1754,5 +1755,108 @@ describe("lesson implementer flywheel views", () => {
     });
     expect(amendmentRow.patch_or_recipe).toMatchObject({ file_path: "runtime/prompt_composer.ts", diff: "@@" });
     expect(amendmentRow.owner_gate).toMatchObject({ required: 0, status: "authorized_auto" });
+  });
+});
+
+// substrate_narrative_recent_view — brain design D9TBCHADS97DHAMNBC686HE3P0.
+// The load-bearing primitive for the content-first TUI. These tests pin
+// per-kind content extraction so the operator never sees raw IDs again.
+describe("substrate_narrative_recent_view + substrateNarrativeRecent", () => {
+  test("projects knowledge_candidate.claim as human_summary with medium importance", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d1",
+      task_id: "t1",
+      payload: { claim: "Distribution-readiness should ship synthetic evidence handles." },
+    });
+    const rows = substrateNarrativeRecent(db, { kinds_in: ["knowledge_candidate"] });
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.human_summary).toBe("Distribution-readiness should ship synthetic evidence handles.");
+    expect(rows[0]?.importance).toBe("medium");
+    expect(rows[0]?.kind).toBe("knowledge_candidate");
+  });
+
+  test("projects task_failed as critical importance with failure reason", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "task_failed",
+      directive_id: "d1",
+      task_id: "t1",
+      failure_kind: "bridge_killed",
+      payload: { reason: "bridge_killed:opencode_brain_silent_exit" },
+    });
+    const rows = substrateNarrativeRecent(db, { kinds_in: ["task_failed"] });
+    expect(rows[0]?.importance).toBe("critical");
+    expect(rows[0]?.human_summary).toBe("bridge_killed:opencode_brain_silent_exit");
+  });
+
+  test("projects task_committed.summary as high importance", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "task_committed",
+      directive_id: "d1",
+      task_id: "t1",
+      payload: { summary: "Designed the dispatch strategy migration to scored artifact rows.", residual: 0.18 },
+    });
+    const rows = substrateNarrativeRecent(db, { kinds_in: ["task_committed"] });
+    expect(rows[0]?.importance).toBe("high");
+    expect(rows[0]?.human_summary).toContain("Designed the dispatch strategy");
+    // residual surfaces from payload — useful for closure-residual sorting.
+    expect(rows[0]?.residual).toBe(0.18);
+  });
+
+  test("dispatch_decided renders route + reason inline", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "dispatch_decided",
+      directive_id: "d1",
+      task_id: "t1",
+      payload: { route: "opencode_brain", reason: "hard_task_dag_required:axes=strategic_verb" },
+    });
+    const rows = substrateNarrativeRecent(db, { kinds_in: ["dispatch_decided"] });
+    expect(rows[0]?.human_summary).toContain("route=opencode_brain");
+    expect(rows[0]?.human_summary).toContain("hard_task_dag_required");
+    expect(rows[0]?.route).toBe("opencode_brain");
+  });
+
+  test("filter by importance_in returns only matching rows", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "knowledge_candidate", directive_id: "d1", task_id: "t1", payload: { claim: "medium" } });
+    insertEvent(db, { kind: "task_failed", directive_id: "d1", task_id: "t2", payload: { reason: "critical" } });
+    insertEvent(db, { kind: "embedding_recorded", directive_id: "d1", task_id: "t1", payload: {} });
+    const rows = substrateNarrativeRecent(db, { importance_in: ["critical"] });
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.kind).toBe("task_failed");
+  });
+
+  test("returns rows newest-first", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { ts: "2026-01-01T00:00:00Z", kind: "knowledge_candidate", directive_id: "d1", task_id: "t1", payload: { claim: "first" } });
+    insertEvent(db, { ts: "2026-02-01T00:00:00Z", kind: "knowledge_candidate", directive_id: "d1", task_id: "t1", payload: { claim: "second" } });
+    insertEvent(db, { ts: "2026-03-01T00:00:00Z", kind: "knowledge_candidate", directive_id: "d1", task_id: "t1", payload: { claim: "third" } });
+    const rows = substrateNarrativeRecent(db, { kinds_in: ["knowledge_candidate"] });
+    expect(rows.map((r) => r.human_summary)).toEqual(["third", "second", "first"]);
+  });
+
+  test("payload is parsed as a record so drilldown needs no second query", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "act_tuple_recorded",
+      directive_id: "d1",
+      task_id: "t1",
+      payload: { intent: "land L4.1 fix", action: "edit substrate/views.ts", verifier_kind: "deterministic_code" },
+    });
+    const rows = substrateNarrativeRecent(db, { kinds_in: ["act_tuple_recorded"] });
+    expect(rows[0]?.human_summary).toBe("land L4.1 fix");
+    expect(rows[0]?.payload.action).toBe("edit substrate/views.ts");
+    expect(rows[0]?.payload.verifier_kind).toBe("deterministic_code");
   });
 });

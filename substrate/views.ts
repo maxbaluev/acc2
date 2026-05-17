@@ -2419,6 +2419,123 @@ CREATE VIEW IF NOT EXISTS act_projection_observability_view AS
   FROM src s;
 `;
 
+// substrate_narrative_recent_view — the TUI's load-bearing primitive.
+//
+// Brain design D9TBCHADS97DHAMNBC686HE3P0 (residual 0.16, 2026-05-17):
+// "substrate_narrative_recent_view: event_id, ts, kind, directive_id,
+//  task_id, importance, lane, one-line human_summary, detail_text,
+//  primary_content, residual, lifecycle_status, route, cited_refs, raw
+//  payload pointer." Replaces the IDs-only display problem named in the
+//  owner frustration text (XR3REA7Q7X197AASRH3QXNFF84): "we see a lot
+//  of IDs without actual knowledge what happened, we need dramatically
+//  better understanding of SUBSTRATE in realtime without complexity,
+//  we need content and whats happened and how."
+//
+// Per-kind content extraction maps each event to its canonical
+// operator-readable text. The vocabulary IS the EVENT_KINDS registry's
+// content fields:
+//   knowledge_candidate         → payload.claim
+//   lesson_extracted            → payload.summary
+//   claude_reasoning_recorded   → payload.summary
+//   directive_opened            → payload.directive_text
+//   directive_amended           → payload.amendment_text / .summary
+//   owner_input_received        → payload.text
+//   owner_observed_outcome_recorded → payload.text / .observed_residual
+//   task_node_opened            → payload.goal
+//   task_committed              → payload.summary
+//   task_failed                 → payload.reason / failure_kind
+//   act_tuple_recorded          → payload.intent
+//   contract_amendment_proposed → payload.current_behavior → proposed_behavior
+//   pre_apply_adjudication_recorded → payload.verdict + payload.reason
+//   dispatch_decided            → payload.route + payload.reason
+//   bridge_failed               → payload.reason + payload.hint
+//   runtime_self_diagnostic_recorded → payload.runtime + .fault_kind + .repair_hint
+//   brain_message_emitted       → payload.text (truncated)
+//   owner_decision_recorded     → payload.decision + .target_event_id
+//   constitutional_gate_decision → payload.gate + .reason
+//   intent_classified           → payload.classification
+//
+// Anything not in the map gets a fallback shape (kind + a short payload
+// preview). The view ALWAYS returns the raw payload too so the
+// drilldown surface can show the full record without a second query.
+//
+// importance: derived from event_kind metadata + payload signal:
+//   'critical' — task_failed, bridge_failed, dispatcher_violation,
+//                 owner_input_required, hidl_action_required
+//   'high'     — task_committed, directive_opened, contract_amendment_proposed,
+//                 pre_apply_adjudication_recorded, owner_observed_outcome_recorded
+//   'medium'   — knowledge_candidate, lesson_extracted, dispatch_decided,
+//                 act_tuple_recorded, runtime_self_diagnostic_recorded
+//   'low'      — everything else (heartbeats, projections, edges)
+const VIEW_SUBSTRATE_NARRATIVE_RECENT = `
+CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
+  SELECT
+    e.id           AS event_id,
+    e.ts           AS ts,
+    e.kind         AS kind,
+    e.directive_id AS directive_id,
+    e.task_id      AS task_id,
+    e.substrate_origin AS substrate_origin,
+    CASE
+      WHEN e.kind IN ('task_failed','bridge_failed','dispatcher_violation','owner_input_required','hidl_action_required','brain_failed','daemon_hotreload_rejected','daemon_hotreload_failed') THEN 'critical'
+      WHEN e.kind IN ('task_committed','directive_opened','directive_amended','contract_amendment_proposed','pre_apply_adjudication_recorded','owner_observed_outcome_recorded','applied_change_committed','applied_change_failed','task_closure_audited','owner_decision_recorded') THEN 'high'
+      WHEN e.kind IN ('knowledge_candidate','lesson_extracted','claude_reasoning_recorded','dispatch_decided','act_tuple_recorded','runtime_self_diagnostic_recorded','owner_insight_candidate','intent_classified','brain_message_emitted','knowledge_promoted','recipe_promoted','code_artifact_promoted') THEN 'medium'
+      ELSE 'low'
+    END AS importance,
+    -- One-line human-readable summary per kind. The CASE order matters:
+    -- earlier branches take precedence when a kind matches multiple
+    -- content fields (rare; see fallback at the end).
+    CASE
+      WHEN e.kind = 'knowledge_candidate'         THEN json_extract(e.payload, '$.claim')
+      WHEN e.kind = 'lesson_extracted'            THEN json_extract(e.payload, '$.summary')
+      WHEN e.kind = 'claude_reasoning_recorded'   THEN json_extract(e.payload, '$.summary')
+      WHEN e.kind = 'directive_opened'            THEN json_extract(e.payload, '$.directive_text')
+      WHEN e.kind = 'directive_amended'           THEN COALESCE(json_extract(e.payload, '$.amendment_text'), json_extract(e.payload, '$.summary'))
+      WHEN e.kind = 'owner_input_received'        THEN json_extract(e.payload, '$.text')
+      WHEN e.kind = 'owner_observed_outcome_recorded' THEN COALESCE(json_extract(e.payload, '$.text'), json_extract(e.payload, '$.observation'))
+      WHEN e.kind = 'task_node_opened'            THEN json_extract(e.payload, '$.goal')
+      WHEN e.kind = 'task_committed'              THEN json_extract(e.payload, '$.summary')
+      WHEN e.kind = 'task_failed'                 THEN COALESCE(json_extract(e.payload, '$.reason'), e.failure_kind)
+      WHEN e.kind = 'act_tuple_recorded'          THEN json_extract(e.payload, '$.intent')
+      WHEN e.kind = 'contract_amendment_proposed' THEN json_extract(e.payload, '$.current_behavior')
+      WHEN e.kind = 'pre_apply_adjudication_recorded' THEN json_extract(e.payload, '$.verdict')
+      WHEN e.kind = 'dispatch_decided'            THEN ('route=' || json_extract(e.payload, '$.route') || '; ' || COALESCE(json_extract(e.payload, '$.reason'), ''))
+      WHEN e.kind = 'bridge_failed'               THEN ('reason=' || COALESCE(json_extract(e.payload, '$.reason'), '?') || '; ' || COALESCE(json_extract(e.payload, '$.hint'), ''))
+      WHEN e.kind = 'runtime_self_diagnostic_recorded' THEN (json_extract(e.payload, '$.runtime') || ' ' || json_extract(e.payload, '$.fault_kind') || COALESCE('; ' || json_extract(e.payload, '$.repair_hint'), ''))
+      WHEN e.kind = 'brain_message_emitted'       THEN json_extract(e.payload, '$.text')
+      WHEN e.kind = 'owner_decision_recorded'     THEN ('decision=' || COALESCE(json_extract(e.payload, '$.decision'), '?') || ' on ' || COALESCE(json_extract(e.payload, '$.target_event_id'), '?'))
+      WHEN e.kind = 'constitutional_gate_decision' THEN ('gate=' || COALESCE(json_extract(e.payload, '$.gate'), '?') || '; ' || COALESCE(json_extract(e.payload, '$.reason'), ''))
+      WHEN e.kind = 'intent_classified'           THEN COALESCE(json_extract(e.payload, '$.classification'), json_extract(e.payload, '$.intent'))
+      WHEN e.kind = 'task_closure_audited'        THEN ('closure_residual=' || COALESCE(json_extract(e.payload, '$.closure_residual'), '?') || '; ' || COALESCE(json_extract(e.payload, '$.summary'), ''))
+      WHEN e.kind = 'applied_change_committed'    THEN COALESCE(json_extract(e.payload, '$.summary'), 'applied change')
+      WHEN e.kind = 'applied_change_failed'       THEN ('reason=' || COALESCE(json_extract(e.payload, '$.reason'), '?'))
+      WHEN e.kind = 'owner_input_required'        THEN COALESCE(json_extract(e.payload, '$.prompt'), json_extract(e.payload, '$.question'))
+      WHEN e.kind = 'hidl_action_required'        THEN COALESCE(json_extract(e.payload, '$.action'), json_extract(e.payload, '$.prompt'))
+      ELSE NULL
+    END AS human_summary,
+    -- residual is most useful for ranked entries (action_scored,
+    -- task_closure_audited, owner_observed_outcome_recorded). Surface
+    -- both the row's own residual column AND any payload-embedded
+    -- residual; consumers read whichever is non-null.
+    COALESCE(
+      e.residual,
+      CAST(json_extract(e.payload, '$.residual') AS REAL),
+      CAST(json_extract(e.payload, '$.closure_residual') AS REAL),
+      CAST(json_extract(e.payload, '$.observed_residual') AS REAL),
+      CAST(json_extract(e.payload, '$.predicted_residual') AS REAL)
+    ) AS residual,
+    -- Lane (dispatch route) is informational metadata for dispatch_decided rows.
+    json_extract(e.payload, '$.route') AS route,
+    -- Cited refs for the drilldown.
+    e.context_refs AS cited_refs,
+    -- Raw payload pointer so the drilldown surface can render the full
+    -- record without a second query. The TUI should truncate to a
+    -- reasonable display size client-side.
+    e.payload AS payload
+  FROM events e
+  ORDER BY e.ts DESC;
+`;
+
 // ── Public entrypoint ──────────────────────────────────────────────
 
 export const VIEW_NAMES = [
@@ -2451,6 +2568,7 @@ export const VIEW_NAMES = [
   "ready_tasks_view",
   "task_graph_view",
   "dispatch_resolved_view",
+  "substrate_narrative_recent_view",
 ] as const;
 
 /** Create every substrate view. Idempotent — existing views are dropped in
@@ -2488,6 +2606,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_LESSON_APPLY_CANDIDATE);
   db.exec(VIEW_DISPATCH_RESOLVED);
   db.exec(VIEW_PENDING_OWNER_DECISION_QUEUE);
+  db.exec(VIEW_SUBSTRATE_NARRATIVE_RECENT);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────
@@ -2906,6 +3025,97 @@ export const readyTasks = (db: Database, limit?: number): ReadyTaskRow[] => {
     payload: parseJson<Record<string, unknown>>(r.payload),
     incoming_requires_from: parseJson<string[]>(r.incoming_requires_from ?? "[]"),
     incoming_refines_from: parseJson<string[]>(r.incoming_refines_from ?? "[]"),
+  }));
+};
+
+// ── substrate_narrative_recent_view helper ─────────────────────────
+
+/** Row shape from substrate_narrative_recent_view. Brain design
+ *  D9TBCHADS97DHAMNBC686HE3P0 (2026-05-17): the load-bearing primitive
+ *  for the content-first TUI. Every column has been deliberately
+ *  designed so the TUI never needs a second query to render a row
+ *  ("Enter for drilldown" reads `payload` directly). */
+export type SubstrateNarrativeRow = {
+  event_id: string;
+  ts: string;
+  kind: string;
+  directive_id: string | null;
+  task_id: string | null;
+  substrate_origin: string | null;
+  /** 'critical' | 'high' | 'medium' | 'low' — derived from the kind +
+   *  failure metadata. Drives sort + colour in the TUI. */
+  importance: "critical" | "high" | "medium" | "low";
+  /** One-line content the operator reads. NULL when the kind has no
+   *  canonical content field (heartbeat-shaped events); TUI should
+   *  fall back to kind name in that case. */
+  human_summary: string | null;
+  /** From the row's residual column OR a payload-embedded residual
+   *  field. Useful for sorting by failure intensity. */
+  residual: number | null;
+  /** Dispatch route metadata (only set on dispatch_decided rows). */
+  route: string | null;
+  /** Comma-joined context_refs from the events row — the cited
+   *  evidence the drilldown surface chases back through. */
+  cited_refs: string[];
+  /** Raw payload as a record. TUI drilldown renders this verbatim
+   *  (with width-aware truncation) so no second MCP call is needed. */
+  payload: Record<string, unknown>;
+};
+
+export type SubstrateNarrativeFilter = {
+  limit?: number;
+  /** Restrict to a single directive — used by the per-directive view
+   *  the TUI shows when the operator drills into one chain. */
+  directive_id?: string;
+  /** Restrict by importance band (e.g. ['critical','high','medium'] to
+   *  suppress noise). Empty array = no filter. */
+  importance_in?: Array<"critical" | "high" | "medium" | "low">;
+  /** Restrict by kind set — used by the decision strip (filter to
+   *  pending_*_required + contract_amendment_proposed). */
+  kinds_in?: string[];
+};
+
+/** Read the substrate_narrative_recent_view with optional filters.
+ *  Returns rows newest-first. Caller is responsible for any further
+ *  truncation / formatting; this helper just types + parses JSON. */
+export const substrateNarrativeRecent = (
+  db: Database,
+  filter: SubstrateNarrativeFilter = {},
+): SubstrateNarrativeRow[] => {
+  const wheres: string[] = [];
+  const params: Array<string | number> = [];
+  if (filter.directive_id) {
+    wheres.push("directive_id = ?");
+    params.push(filter.directive_id);
+  }
+  if (filter.importance_in && filter.importance_in.length > 0) {
+    const placeholders = filter.importance_in.map(() => "?").join(", ");
+    wheres.push(`importance IN (${placeholders})`);
+    params.push(...filter.importance_in);
+  }
+  if (filter.kinds_in && filter.kinds_in.length > 0) {
+    const placeholders = filter.kinds_in.map(() => "?").join(", ");
+    wheres.push(`kind IN (${placeholders})`);
+    params.push(...filter.kinds_in);
+  }
+  const whereClause = wheres.length > 0 ? `WHERE ${wheres.join(" AND ")}` : "";
+  const limit = typeof filter.limit === "number" && filter.limit > 0 ? filter.limit : 200;
+  params.push(limit);
+  const sql = `SELECT * FROM substrate_narrative_recent_view ${whereClause} LIMIT ?`;
+  const rows = db.query(sql).all(...params) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    event_id: r.event_id as string,
+    ts: r.ts as string,
+    kind: r.kind as string,
+    directive_id: (r.directive_id as string | null) ?? null,
+    task_id: (r.task_id as string | null) ?? null,
+    substrate_origin: (r.substrate_origin as string | null) ?? null,
+    importance: r.importance as SubstrateNarrativeRow["importance"],
+    human_summary: (r.human_summary as string | null) ?? null,
+    residual: r.residual == null ? null : Number(r.residual),
+    route: (r.route as string | null) ?? null,
+    cited_refs: parseJson<string[]>((r.cited_refs as string | null) ?? "[]"),
+    payload: parseJson<Record<string, unknown>>((r.payload as string | null) ?? "{}"),
   }));
 };
 
