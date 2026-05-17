@@ -661,7 +661,7 @@ export const handleRunArtifact = async (
   ctx: McpContext,
   args: z.infer<typeof RunArtifactSchema>,
 ): Promise<McpResult> => {
-  const inputs = (args.inputs ?? args.input ?? null) as JsonValue;
+  const inputs = (args.inputs ?? null) as JsonValue;
   return callArtifactByRuntime(ctx, args.artifact_id, inputs, args.budget as { wall_ms?: number; memory_mb?: number } | undefined);
 };
 

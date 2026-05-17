@@ -140,9 +140,6 @@ export const EmbedTextSchema = z.object({
 export const RunArtifactSchema = z.object({
   artifact_id: z.string(),
   inputs: z.unknown().optional(),
-  // Legacy alias from B3 surface — accepted for backwards compatibility with
-  // any caller that still sends `input` (singular).
-  input: z.unknown().optional(),
   budget: z
     .object({
       wall_ms: z.number().optional(),

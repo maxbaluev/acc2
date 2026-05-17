@@ -240,7 +240,9 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       const env = capturedEnv!;
       expect(env.OPENCODE_CONFIG).toBe(configPath);
       expect(env.V2_MCP_SERVER_URL).toBe("http://127.0.0.1:45678/mcp");
-      expect(env.MCP_SERVER_URL).toBe("http://127.0.0.1:45678/mcp");
+      // No legacy MCP_SERVER_URL alias — clean break (audit Q6, 2026-05-17).
+      // V2_MCP_SERVER_URL is the sole canonical env handle.
+      expect(env.MCP_SERVER_URL).toBeUndefined();
 
       // The argv must NOT include any --mcp-* flag (we wire via env/config).
       expect(capturedArgv).not.toBeNull();

@@ -359,10 +359,9 @@ export const spawnRealOpencode = async (
         // v2's MCP server. Verified: opencode 1.4.3 reads this env var and
         // merges its `mcp` block atop the operator's global config.
         OPENCODE_CONFIG: materializedConfig.configPath,
-        // MCP_SERVER_URL is kept for backward-compat with any consumer in
-        // the opencode env that reads it (the official wiring path is the
-        // OPENCODE_CONFIG file above).
-        MCP_SERVER_URL: mcpServerUrl,
+        // V2_MCP_SERVER_URL is the canonical env handle. No legacy
+        // MCP_SERVER_URL alias — clean break per the v2 operating contract
+        // ("No legacy/fallback/backward-compatibility code").
         V2_MCP_SERVER_URL: mcpServerUrl,
         ACC2_CHECKOUT_ISOLATION_ROOT: req.checkoutIsolation?.root ?? brainWorkspace,
         ACC2_CHECKOUT_ISOLATION_REASON: req.checkoutIsolation?.reason ?? "main_checkout_selected",
