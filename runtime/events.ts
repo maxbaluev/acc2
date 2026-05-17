@@ -104,6 +104,12 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // Phase 1.β: broadcast to the in-process bus so SSE subscribers and tests
   // see the event without polling SQLite. The bus catches subscriber errors
   // so this is fail-soft.
+  // FOUNDATIONAL FIX 2026-05-17: include the top-level act-loop columns
+  // (action_artifact_id, verifier_artifact_id, predicted_residual, outcome,
+  // residual, failure_kind, invoker, parent_task_id, loop_id) so SSE
+  // consumers see the full event shape. Pre-fix the bus omitted these,
+  // and the acc tail renderer showed "action=— verifier=—" for every
+  // action_predicted because the bus frame had no act-loop fields to read.
   publishEvent({
     event_id: id,
     kind: input.kind,
@@ -112,6 +118,15 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
     task_id,
     substrate_origin,
     payload: (input.payload ?? {}) as JsonValue,
+    invoker: input.invoker ?? null,
+    parent_task_id: input.parent_task_id ?? null,
+    loop_id: input.loop_id ?? null,
+    action_artifact_id: input.action_artifact_id ?? null,
+    verifier_artifact_id: input.verifier_artifact_id ?? null,
+    predicted_residual: input.predicted_residual ?? null,
+    outcome: input.outcome ?? null,
+    residual: input.residual ?? null,
+    failure_kind: input.failure_kind ?? null,
   });
   // Brain elegance bc8je5f3x (2026-05-15): also publish to the activation
   // bus so workers awaiting specific event kinds wake immediately

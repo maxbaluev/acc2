@@ -1548,16 +1548,12 @@ const handleEventsStream = (req: Request): Response => {
       try { controller.enqueue(encoder.encode(": connected\n\n")); } catch { /* swallow */ }
       const subscriber = (event: BusEvent) => {
         try {
-          const frame =
-            `data: ${JSON.stringify({
-              event_id: event.event_id,
-              kind: event.kind,
-              ts: event.ts,
-              directive_id: event.directive_id,
-              task_id: event.task_id,
-              substrate_origin: event.substrate_origin,
-              payload: event.payload,
-            })}\n\n`;
+          // FOUNDATIONAL FIX 2026-05-17: forward ALL BusEvent fields
+          // (including the act-loop columns) so SSE consumers see the
+          // same shape as the events table. Pre-fix the frame omitted
+          // action_artifact_id / verifier_artifact_id / predicted_residual
+          // and downstream renderers showed "action=— verifier=—".
+          const frame = `data: ${JSON.stringify(event)}\n\n`;
           controller.enqueue(encoder.encode(frame));
         } catch {
           // Best effort — if the controller is closed the bus will catch

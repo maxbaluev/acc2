@@ -25,7 +25,13 @@ import type { Event, EventKind, JsonValue, SubstrateOrigin } from "../substrate/
 /** A bus payload — the minimum fields an SSE client / TUI needs to render
  *  one event row. Mirrors the event-table shape but is shaped for emission,
  *  not for storage. Callers should NOT re-derive event rows from the bus —
- *  the events table is the source of truth. */
+ *  the events table is the source of truth.
+ *  FOUNDATIONAL FIX 2026-05-17: includes the top-level act-loop columns
+ *  (action_artifact_id, verifier_artifact_id, predicted_residual, outcome,
+ *  residual, failure_kind, invoker, parent_task_id, loop_id) so SSE
+ *  consumers (acc tail, acc watch TUI) see the same shape as the events
+ *  table — pre-fix the renderer rendered "action=— verifier=—" for
+ *  action_predicted because these columns never reached the bus. */
 export type BusEvent = {
   event_id: string;
   kind: EventKind;
@@ -34,6 +40,15 @@ export type BusEvent = {
   task_id: string;
   substrate_origin: SubstrateOrigin;
   payload: JsonValue;
+  invoker?: string | null;
+  parent_task_id?: string | null;
+  loop_id?: string | null;
+  action_artifact_id?: string | null;
+  verifier_artifact_id?: string | null;
+  predicted_residual?: number | null;
+  outcome?: string | null;
+  residual?: number | null;
+  failure_kind?: string | null;
 };
 
 export type BusSubscriber = (event: BusEvent) => void;
@@ -83,6 +98,15 @@ export const toBusEvent = (row: {
   task_id: string;
   substrate_origin: SubstrateOrigin;
   payload: JsonValue;
+  invoker?: string | null;
+  parent_task_id?: string | null;
+  loop_id?: string | null;
+  action_artifact_id?: string | null;
+  verifier_artifact_id?: string | null;
+  predicted_residual?: number | null;
+  outcome?: string | null;
+  residual?: number | null;
+  failure_kind?: string | null;
 }): BusEvent => ({
   event_id: row.id,
   kind: row.kind,
@@ -91,6 +115,15 @@ export const toBusEvent = (row: {
   task_id: row.task_id,
   substrate_origin: row.substrate_origin,
   payload: row.payload,
+  invoker: row.invoker ?? null,
+  parent_task_id: row.parent_task_id ?? null,
+  loop_id: row.loop_id ?? null,
+  action_artifact_id: row.action_artifact_id ?? null,
+  verifier_artifact_id: row.verifier_artifact_id ?? null,
+  predicted_residual: row.predicted_residual ?? null,
+  outcome: row.outcome ?? null,
+  residual: row.residual ?? null,
+  failure_kind: row.failure_kind ?? null,
 });
 
 /** Test convenience — synthesize a Bus event from a fully-shaped Event row
@@ -103,4 +136,13 @@ export const eventToBusEvent = (e: Event): BusEvent => ({
   task_id: e.task_id,
   substrate_origin: e.substrate_origin,
   payload: e.payload,
+  invoker: (e as Event & { invoker?: string | null }).invoker ?? null,
+  parent_task_id: (e as Event & { parent_task_id?: string | null }).parent_task_id ?? null,
+  loop_id: (e as Event & { loop_id?: string | null }).loop_id ?? null,
+  action_artifact_id: (e as Event & { action_artifact_id?: string | null }).action_artifact_id ?? null,
+  verifier_artifact_id: (e as Event & { verifier_artifact_id?: string | null }).verifier_artifact_id ?? null,
+  predicted_residual: (e as Event & { predicted_residual?: number | null }).predicted_residual ?? null,
+  outcome: (e as Event & { outcome?: string | null }).outcome ?? null,
+  residual: (e as Event & { residual?: number | null }).residual ?? null,
+  failure_kind: (e as Event & { failure_kind?: string | null }).failure_kind ?? null,
 });
