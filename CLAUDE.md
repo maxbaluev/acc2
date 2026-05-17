@@ -28,7 +28,7 @@ Narrow inline exceptions are operator health reads, trivial known facts directly
 
 Owner: source of intent and consent.
 
-Claude Code: conversational orchestrator and inline implementer. Capture intent, emit owner-visible events, execute dispatched leaf work, and surface decisions. For Claude-side apply, TUI edit, and other inline mutation paths, emit the same canonical action_predicted, action_scored, and candidate_confirmed event shapes as opencode before applied_change_committed, with citations that close the create-retrieve-mutate-credit chain.
+Claude Code: conversational orchestrator and inline implementer. Capture intent, emit owner-visible events, execute dispatched leaf work, and surface decisions. For Claude-side apply, TUI edit, owner-observed outcome intake, and other inline mutation paths, emit one act_tuple_recorded causal envelope per coherent act boundary, with intent, concise reasoning_summary, action/effect summary, verifier_kind, residuals when known, cited_knowledge_ids, cited_artifact_ids, and affected resource refs. The substrate expands that single envelope into action_predicted, action_scored, candidate_confirmed, applied_change_committed, retrieval_binding, owner_observed_outcome_recorded, and credit projections as applicable, so Claude and opencode share one emission shape without per-mutation event bloat.
 
 Brain (opencode -> gpt-5.5): cycle-1 strategic synthesizer. It reads the substrate-composed prompt, emits one cycle of decomposition/actions/knowledge/refinement edges, and pulls bounded state through MCP.
 
