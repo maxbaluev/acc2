@@ -164,6 +164,20 @@ describe("task_dispatcher", () => {
     // pins that the emit path does NOT strip it.
     expect(Array.isArray(dispatchPayload.strategy_shadow_ranks)).toBe(true);
 
+    // The constitutional_gate_decision audit mirror of the same decision
+    // must carry the SAME shape — historically it diverged from dispatch_decided
+    // because each emit site hand-rebuilt its payload. Pinning the shape here
+    // means new DispatchDecisionEvidence fields propagate to BOTH audit emits
+    // via the shared dispatchEvidencePayload helper.
+    const gateDecision = db
+      .query("SELECT payload FROM events WHERE kind = 'constitutional_gate_decision' AND task_id = ?")
+      .get(taskId) as { payload: string } | null;
+    expect(gateDecision).not.toBeNull();
+    const gatePayload = JSON.parse(gateDecision!.payload) as Record<string, any>;
+    expect(Array.isArray(gatePayload.strategy_shadow_ranks)).toBe(true);
+    expect(gatePayload.routing_axes.one_shot_confidence).toBeGreaterThanOrEqual(0);
+    expect(gatePayload.route_scores.opencode_brain).toBeGreaterThanOrEqual(0);
+
     const taskCommitted = db
       .query("SELECT residual FROM events WHERE kind = 'task_committed' AND task_id = ?")
       .get(taskId) as { residual: number } | null;

@@ -45,7 +45,7 @@ const resolveComposePrompt = async (): Promise<typeof composePrompt> => {
     return composePrompt;
   }
 };
-import { decideDispatch } from "./dispatch_decider";
+import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
 import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge/index";
 import type { TaskNode } from "./task_topology";
 import { refinementDepth } from "./task_topology";
@@ -219,14 +219,7 @@ export const dispatchReadyTask = async (
 
   // 2. decideDispatch
   const decision = decideDispatch(db, task);
-  const dispatchDecisionEvidence = {
-    route: decision.route,
-    reason: decision.reason,
-    routing_axes: decision.routing_axes,
-    route_scores: decision.route_scores,
-    verifier_evidence: decision.verifier_evidence,
-    strategy_shadow_ranks: decision.strategy_shadow_ranks ?? [],
-  };
+  const dispatchDecisionEvidence = dispatchEvidencePayload(decision);
   emitEvent(db, {
     kind: "dispatch_decided",
     substrate_origin: "substrate_auto",
@@ -244,11 +237,7 @@ export const dispatchReadyTask = async (
     task_id: task.id,
     payload: {
       dispatch_id: dispatchId,
-      route: decision.route,
-      reason: decision.reason,
-      routing_axes: decision.routing_axes,
-      route_scores: decision.route_scores,
-      verifier_evidence: decision.verifier_evidence,
+      ...dispatchDecisionEvidence,
     } as JsonValue,
   });
 

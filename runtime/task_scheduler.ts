@@ -26,7 +26,7 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { readDagForDirective, readyTasks, type TaskNode } from "./task_topology";
 import { dispatchReadyTask } from "./task_dispatcher";
-import { decideDispatch } from "./dispatch_decider";
+import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
 import { emitEvent } from "./events";
 import { readCurrentMode, applyModeAdjustments } from "./crisis_mode";
 import { findDeferringConflict } from "./interference";
@@ -533,14 +533,7 @@ export const schedulerTick = async (
     }
 
     const decision = decideDispatch(db, task);
-    const dispatchDecisionEvidence = {
-      route: decision.route,
-      reason: decision.reason,
-      routing_axes: decision.routing_axes,
-      route_scores: decision.route_scores,
-      verifier_evidence: decision.verifier_evidence,
-      strategy_shadow_ranks: decision.strategy_shadow_ranks ?? [],
-    };
+    const dispatchDecisionEvidence = dispatchEvidencePayload(decision);
     if (decision.route === "deferred_blocked") {
       skippedBlocked.push(task.id);
       emitEvent(db, {
@@ -560,10 +553,7 @@ export const schedulerTick = async (
         payload: {
           gate: "directive_blocked_deferred",
           blockers: decision.blockers,
-          reason: decision.reason,
-          routing_axes: decision.routing_axes,
-          route_scores: decision.route_scores,
-          verifier_evidence: decision.verifier_evidence,
+          ...dispatchDecisionEvidence,
         } as JsonValue,
       });
       continue;

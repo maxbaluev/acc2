@@ -423,6 +423,32 @@ const evidenceForSelectedRoute = (
   },
 });
 
+/** Canonical dispatch-decision audit payload — the SHAPE that
+ *  dispatch_decided and its constitutional_gate_decision mirror both
+ *  carry on the wire. Centralising the projection here means a new
+ *  field on DispatchDecisionEvidence (e.g. strategy_shadow_ranks
+ *  2026-05-17) propagates to every audit emitter without each call
+ *  site having to remember to rebuild its hand-curated object.
+ *  Without this, "decider attaches field; emit site rebuilds and
+ *  silently drops field" is a class of bug that recurs (859 historical
+ *  dispatch_decided rows landed in production with `strategy_shadow_ranks`
+ *  stripped because two emit sites diverged from the decider). */
+export const dispatchEvidencePayload = (decision: DispatchDecision): {
+  route: DispatchRoute;
+  reason: string;
+  routing_axes: Record<string, number>;
+  route_scores: DispatchRouteScores;
+  verifier_evidence: Record<string, number>;
+  strategy_shadow_ranks: RankedStrategy[];
+} => ({
+  route: decision.route,
+  reason: decision.reason,
+  routing_axes: decision.routing_axes,
+  route_scores: decision.route_scores,
+  verifier_evidence: decision.verifier_evidence,
+  strategy_shadow_ranks: decision.strategy_shadow_ranks ?? [],
+});
+
 const buildDispatchDecisionEvidence = (db: Database, task: TaskNode, hardness: HardTaskClassification): DispatchDecisionEvidence => {
   const directivePayload = readDirectivePayload(db, task.directive_id);
   const text = String(typeof directivePayload.directive_text === "string" ? directivePayload.directive_text : "") + "\n" + task.goal;
