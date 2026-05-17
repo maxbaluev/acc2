@@ -53,9 +53,23 @@ type DispatchSummary = {
   terminal_kind?: string | null;
 };
 
+// pending_owner_decision_queue_view row shape — see substrate/views.ts
+// PendingOwnerDecisionRow. The TUI shows target + gate_source +
+// duplicate_count inline so the operator sees provenance at a glance.
 type DecisionRow = {
+  group_key?: string;
+  target?: string | null;
+  anchor?: string | null;
+  duplicate_count?: number;
+  gate_source?: "owner_consent_explicit" | "manual_review_implicit";
+  representative_event_id?: string;
+  oldest_ts?: string;
+  newest_ts?: string;
+  decision_rank?: number;
+  group_decline_reason?: string | null;
+  // Fallback fields if the upstream view returns a different shape.
   event_id?: string;
-  kind: string;
+  kind?: string;
   ts?: string;
   payload?: Record<string, unknown>;
   human_summary?: string | null;
@@ -293,11 +307,23 @@ export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
         <Text bold color={decisions.length > 0 ? "yellow" : undefined}>
           DECISIONS: {decisions.length === 0 ? "0 pending" : `${decisions.length} pending`}
         </Text>
-        {decisions.slice(0, 3).map((d, i) => (
-          <Text key={d.event_id ?? i} color="yellow">
-            {"  "}{d.kind}  {d.human_summary ?? "(see drilldown)"}
-          </Text>
-        ))}
+        {decisions.slice(0, 3).map((d, i) => {
+          // Two shapes: the new pending_owner_decision_queue_view row
+          // carries target + gate_source + duplicate_count; legacy
+          // fallback uses kind + human_summary.
+          const isQueueRow = d.target !== undefined || d.gate_source !== undefined;
+          const target = (d.target ?? "(no target)").slice(0, 56);
+          const gateBadge = d.gate_source === "owner_consent_explicit" ? "[OWNER]"
+            : d.gate_source === "manual_review_implicit" ? "[review]"
+            : "";
+          const dup = (d.duplicate_count ?? 1) > 1 ? ` ×${d.duplicate_count}` : "";
+          const declineNote = d.group_decline_reason ? ` decline?:${d.group_decline_reason}` : "";
+          return (
+            <Text key={d.group_key ?? d.event_id ?? i} color="yellow">
+              {"  "}{isQueueRow ? `${gateBadge} ${target}${dup}${declineNote}` : `${d.kind ?? "?"}  ${d.human_summary ?? "(see drilldown)"}`}
+            </Text>
+          );
+        })}
       </Box>
 
       {/* Footer */}

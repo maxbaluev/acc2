@@ -157,6 +157,41 @@ describe("admin_pending_decisions", () => {
     expect(ranked[0]!.representative_event_id).toBe(id2);
   });
 
+  test("widening (k_88ESCTN8XN6J): amendments WITHOUT explicit owner_consent_required also surface when apply_gate_status='manual_review'", () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    // No explicit consent flag — and the target is a conceptual
+    // resource URI (NOT a repo:* path), so auto_apply_target=0 and
+    // apply_gate_status becomes 'manual_review'. Pre-fix this row was
+    // invisible (1909 live-substrate rows / ZERO in the decision
+    // queue). Post-fix it surfaces with gate_source='manual_review_implicit'.
+    // The 975 production manual_review rows mostly take this shape:
+    // contract:.../..., ledger:.../..., worker:.../... etc.
+    insertAmendment(db, {
+      target: "contract:dispatch_decider/routing_axes",
+      anchor: "routing_axes_decision_point",
+      consent_required: false,
+    });
+    const ranked = pendingOwnerDecisionQueue(db);
+    expect(ranked.length).toBe(1);
+    expect(ranked[0]!.gate_source).toBe("manual_review_implicit");
+  });
+
+  test("widening: explicit owner_consent_required still wins gate_source labelling when both signals fire", () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    insertAmendment(db, {
+      target: "CLAUDE.md",
+      anchor: "## Owner Decisions",
+      consent_required: true,
+    });
+    const ranked = pendingOwnerDecisionQueue(db);
+    expect(ranked.length).toBe(1);
+    expect(ranked[0]!.gate_source).toBe("owner_consent_explicit");
+  });
+
   test("--limit caps ranked output and hides the rest", async () => {
     closeDb(":memory:");
     const db = openDb(":memory:");

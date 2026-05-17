@@ -2275,9 +2275,28 @@ WITH base AS (
     q.candidate_diff,
     q.owner_gate_required,
     q.owner_gate_verdict,
+    -- 2026-05-17 (k_88ESCTN8XN6J: amendment flywheel doesn't drain).
+    -- Live evidence: 1909 lesson_implementer_queue rows, ZERO with
+    -- owner_gate_required=1, 975 stuck at apply_gate_status='manual_review'.
+    -- The brain never sets owner_consent_required, so the explicit gate
+    -- always reads 0; meanwhile auto-apply also refuses these rows
+    -- (not_auto_apply_target / blocked_*). They piled up invisible.
+    -- Widening the filter to include manual_review surfaces ~173 dedup'd
+    -- groups for the operator without touching producer code.
+    q.apply_gate_status,
+    q.apply_status,
+    CASE
+      WHEN q.owner_gate_required = 1 THEN 'owner_consent_explicit'
+      WHEN q.apply_gate_status = 'manual_review' THEN 'manual_review_implicit'
+      ELSE NULL
+    END AS gate_source,
     CASE WHEN q.target LIKE 'repo:%' THEN substr(q.target, 6) ELSE q.target END AS normalized_target
   FROM lesson_implementer_queue_view q
-  WHERE q.owner_gate_required = 1
+  WHERE (q.owner_gate_required = 1 OR q.apply_gate_status = 'manual_review')
+    -- Exclude rows that have already produced an apply outcome via any
+    -- channel (auto-apply success, refusal, apply_record). The view is
+    -- meant for waiting-on-decision rows only.
+    AND (q.apply_status IS NULL)
     AND NOT EXISTS (
       SELECT 1 FROM events odr
       WHERE odr.kind = 'owner_decision_recorded'
@@ -2327,6 +2346,15 @@ SELECT
   s.normalized_target AS target,
   s.anchor,
   COUNT(*) AS duplicate_count,
+  -- 2026-05-17 widening: surface which path put the row in the queue
+  -- (explicit owner gate vs. apply-gate-said-manual-review). The TUI
+  -- can render this so the operator sees the provenance at a glance.
+  -- If a group has BOTH, prefer 'owner_consent_explicit' as the
+  -- stronger signal.
+  CASE WHEN SUM(CASE WHEN s.gate_source = 'owner_consent_explicit' THEN 1 ELSE 0 END) > 0
+       THEN 'owner_consent_explicit'
+       ELSE 'manual_review_implicit'
+  END AS gate_source,
   (SELECT s2.source_event_id FROM shape s2
    WHERE s2.group_key = s.group_key
    ORDER BY s2.shape_quality_score DESC, s2.ts DESC
@@ -3422,6 +3450,14 @@ export type PendingOwnerDecisionRow = {
   target: string | null;
   anchor: string | null;
   duplicate_count: number;
+  /** 2026-05-17 (k_88ESCTN8XN6J): provenance signal. Tells the TUI
+   *  whether the brain explicitly demanded owner consent
+   *  ('owner_consent_explicit') or whether the apply-gate classified
+   *  the proposal as needing manual review ('manual_review_implicit').
+   *  The latter is the much larger bucket — patches that match no
+   *  safe-auto-apply policy, are unstructured, or have trajectory
+   *  hazards. */
+  gate_source: "owner_consent_explicit" | "manual_review_implicit";
   representative_event_id: string;
   oldest_ts: string;
   newest_ts: string;
@@ -3464,6 +3500,7 @@ export const pendingOwnerDecisionQueue = (db: Database): PendingOwnerDecisionRow
     target: (r.target as string | null) ?? null,
     anchor: (r.anchor as string | null) ?? null,
     duplicate_count: (r.duplicate_count as number) ?? 0,
+    gate_source: ((r.gate_source as string | null) ?? "manual_review_implicit") as PendingOwnerDecisionRow["gate_source"],
     representative_event_id: r.representative_event_id as string,
     oldest_ts: r.oldest_ts as string,
     newest_ts: r.newest_ts as string,
