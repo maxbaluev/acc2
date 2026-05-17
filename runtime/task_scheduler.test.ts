@@ -363,14 +363,18 @@ describe("task_scheduler", () => {
       task_id: taskId,
       payload: { goal: "test consecutive bridge failures" },
     });
-    // Three back-to-back bridge_failed rows — past the default cap.
+    // Three back-to-back bridge_failed rows with a TRANSPORT-class reason
+    // (NOT one of the silent-class reasons). Silent-class failures (brain_silent_exit,
+    // mcp_handshake_timed_out, subprocess_stuck) are caught by a tighter
+    // MAX_SILENT_DISPATCH_FAILURES=1 gate above this one, so this test uses
+    // mcp_server_url_missing to exercise the transport-cap path specifically.
     for (let i = 0; i < 3; i++) {
       emitEvent(db, {
         kind: "bridge_failed",
         substrate_origin: "opencode",
         directive_id: directiveId,
         task_id: taskId,
-        payload: { reason: "brain_silent_exit" },
+        payload: { reason: "mcp_server_url_missing" },
         invoker: "opencode",
       });
     }
@@ -393,6 +397,100 @@ describe("task_scheduler", () => {
     const tick2 = await schedulerTick(db, { directiveId });
     expect(tick2.skipped_failure_capped).not.toContain(taskId);
     expect(tick2.dispatched).not.toContain(taskId);
+  });
+
+  test("silent-dispatch quarantine: ONE brain_silent_exit / mcp_handshake_timed_out / subprocess_stuck quarantines the task (foundational fix 2026-05-17)", async () => {
+    // FOUNDATIONAL: silent-class bridge failures are DETERMINISTIC. The brain
+    // will fail the same way on the same task again — re-dispatch wastes 5+
+    // min of brain-slot per attempt and never accumulates 3 consecutive
+    // generic failures because other tasks land in between. Live ledger
+    // evidence: CHRZM6VX4H7YVF7D silent-failed 5 times across multiple
+    // dispatches with no quarantine because the generic-cap path required 3
+    // CONSECUTIVE. This tighter cap (1) is the structural fix.
+    const reasons = ["brain_silent_exit", "mcp_handshake_timed_out", "subprocess_stuck"];
+    for (const reason of reasons) {
+      const db = openDb(":memory:");
+      const directiveId = newId();
+      const taskId = newId();
+      emitEvent(db, {
+        kind: "directive_opened",
+        substrate_origin: "owner",
+        directive_id: directiveId,
+        payload: { directive_text: `silent dispatch quarantine ${reason}` },
+      });
+      emitEvent(db, {
+        kind: "task_node_opened",
+        substrate_origin: "owner",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { goal: `quarantine on ${reason}` },
+      });
+      // Exactly ONE silent-class failure — must be enough to quarantine.
+      emitEvent(db, {
+        kind: "bridge_failed",
+        substrate_origin: "opencode",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { reason },
+        invoker: "opencode",
+      });
+      const tick = await schedulerTick(db, { directiveId });
+      expect(tick.skipped_failure_capped).toContain(taskId);
+      expect(tick.dispatched).not.toContain(taskId);
+
+      const failed = db
+        .query("SELECT failure_kind, payload FROM events WHERE task_id = ? AND kind = 'task_failed'")
+        .get(taskId) as { failure_kind: string; payload: string } | null;
+      expect(failed).not.toBeNull();
+      expect(failed!.failure_kind).toBe("silent_dispatch_quarantine");
+      const fp = JSON.parse(failed!.payload) as {
+        silent_failures: number;
+        cap: number;
+        reasons_observed: string[];
+        backoff_mode: string;
+        hint: string;
+      };
+      expect(fp.silent_failures).toBe(1);
+      expect(fp.cap).toBe(1);
+      expect(fp.reasons_observed).toContain(reason);
+      expect(fp.backoff_mode).toBe("terminal_after_silent_class_failure");
+      expect(fp.hint).toContain("deterministic");
+    }
+  });
+
+  test("silent-dispatch quarantine does NOT fire on non-silent transport reasons", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      payload: { directive_text: "non-silent reasons should not silent-quarantine" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { goal: "transport hiccup" },
+    });
+    // ONE transport-class failure — must NOT quarantine.
+    emitEvent(db, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { reason: "mcp_server_url_missing" },
+      invoker: "opencode",
+    });
+    const tick = await schedulerTick(db, { directiveId });
+    expect(tick.skipped_failure_capped).not.toContain(taskId);
+    // No task_failed row should have landed.
+    const failed = db
+      .query("SELECT failure_kind FROM events WHERE task_id = ? AND kind = 'task_failed'")
+      .get(taskId);
+    expect(failed).toBeNull();
   });
 
   test("an interleaving successful event resets the consecutive-failure streak", async () => {

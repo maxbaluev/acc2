@@ -187,6 +187,57 @@ const consecutiveBridgeFailureEvidence = (db: Database, taskId: string): Array<{
 const consecutiveBridgeFailures = (db: Database, taskId: string): number =>
   consecutiveBridgeFailureEvidence(db, taskId).length;
 
+/** Bridge-failure reasons that indicate the BRAIN itself failed to make
+ *  progress (vs a transient transport issue). These failures are
+ *  DETERMINISTIC: the brain will fail the same way on the same task again.
+ *  Re-dispatching wastes 5+ minutes of brain-slot time per attempt.
+ *  Foundational audit 2026-05-17: ledger evidence showed CHRZM6VX4H7YVF7D
+ *  silent-failing 5 times in a row (each a 5-min watchdog kill) while
+ *  never accumulating 3 CONSECUTIVE generic failures (other tasks landed
+ *  in between). The generic cap (3) is right for transport hiccups; this
+ *  tighter cap (1) is right for silent failures which are deterministic.
+ *  After ONE silent-class failure, the task is quarantined with
+ *  `failure_kind: "silent_dispatch_quarantine"` — operator may re-open via
+ *  a fresh task_id once the underlying compatibility issue is resolved. */
+const SILENT_DISPATCH_REASONS: ReadonlySet<string> = new Set([
+  "brain_silent_exit",
+  "mcp_handshake_timed_out",
+  "subprocess_stuck",
+]);
+
+const MAX_SILENT_DISPATCH_FAILURES = 1;
+
+/** Count silent-class bridge_failed events for a task (irrespective of
+ *  whether they're consecutive). A task that silent-failed even ONCE has
+ *  proven brain-incompatible for this dispatch shape; further attempts on
+ *  the same task waste compute. Use the entire task history (not just the
+ *  recent streak) because silent-class is deterministic and persists. */
+const silentDispatchFailureEvidence = (
+  db: Database,
+  taskId: string,
+): Array<{ id: string; reason: string; ts: string }> => {
+  const rows = db
+    .query(
+      `SELECT id, ts, payload FROM events
+       WHERE task_id = ?
+         AND kind = 'bridge_failed'
+       ORDER BY ts ASC`,
+    )
+    .all(taskId) as Array<{ id: string; ts: string; payload: string }>;
+  const out: Array<{ id: string; reason: string; ts: string }> = [];
+  for (const r of rows) {
+    let reason: string | null = null;
+    try {
+      const payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
+      reason = typeof payload.reason === "string" ? payload.reason : null;
+    } catch { /* skip malformed */ }
+    if (reason && SILENT_DISPATCH_REASONS.has(reason)) {
+      out.push({ id: r.id, reason, ts: r.ts });
+    }
+  }
+  return out;
+};
+
 // Process-local in-flight registry. The scheduler is the only writer; the
 // dispatcher promises resolve here. Keys are task_ids; values are the
 // underlying promise so the loop can await any completion when needed.
@@ -331,11 +382,47 @@ export const schedulerTick = async (
   for (const task of ready) {
     if (IN_FLIGHT.has(task.id)) continue; // already dispatched in a prior tick.
 
+    // SILENT-DISPATCH QUARANTINE (FOUNDATIONAL FIX 2026-05-17):
+    // Brain failures classified as `brain_silent_exit`, `mcp_handshake_timed_out`,
+    // or `subprocess_stuck` are DETERMINISTIC — the brain will fail the same
+    // way on the same task again. Live ledger evidence: CHRZM6VX4H7YVF7D
+    // silent-failed 5 times in a row across multiple dispatches, each
+    // consuming 5 min of brain-slot time, never accumulating 3 CONSECUTIVE
+    // generic failures (the consecutive cap below) because other tasks
+    // landed in between. The generic cap protects against transport flaps;
+    // this tighter silent-class cap (1) prevents wasted compute on
+    // structurally-incompatible tasks. Operator may re-open via a fresh
+    // task_id once the prompt/grammar issue is fixed.
+    const silentFailures = silentDispatchFailureEvidence(db, task.id);
+    if (silentFailures.length >= MAX_SILENT_DISPATCH_FAILURES) {
+      skippedFailureCapped.push(task.id);
+      emitEvent(db, {
+        kind: "task_failed",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        failure_kind: "silent_dispatch_quarantine",
+        payload: {
+          silent_failures: silentFailures.length,
+          cap: MAX_SILENT_DISPATCH_FAILURES,
+          reason: "silent_dispatch_quarantine",
+          reasons_observed: Array.from(new Set(silentFailures.map((f) => f.reason))),
+          backoff_mode: "terminal_after_silent_class_failure",
+          retry_evidence_event_ids: silentFailures.map((f) => f.id),
+          retry_evidence: silentFailures,
+          hint: "brain produced zero substrate emits for this task (deterministic). Re-dispatch on the same task_id will repeat the failure. Operator should investigate prompt shape OR re-open via a fresh task_id once the brain-incompatible pattern is resolved.",
+        } as JsonValue,
+      });
+      continue;
+    }
+
     // Consecutive-failure backoff (no retry storm). If the task's most-recent
     // bridge_failed streak hit the cap, emit `task_failed` so it drops out of
     // `readyTasks` on the next call — the cap prevents the scheduler from
     // hot-looping a structurally broken dispatch (mcp_server_url_missing,
-    // brain_silent_exit, mcp_handshake_timed_out, auth_missing). Operators see the failure verbatim
+    // auth_missing, etc.). Silent-class failures are caught above by the
+    // tighter MAX_SILENT_DISPATCH_FAILURES gate; this generic cap is for
+    // transient transport failures. Operators see the failure verbatim
     // in the substrate and can re-open the task once the underlying gap is
     // fixed (the next `acc task` call gets a fresh task_id).
     const failureStreak = consecutiveBridgeFailures(db, task.id);
