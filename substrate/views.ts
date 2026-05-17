@@ -2144,6 +2144,15 @@ SELECT
   r.directive_id,
   r.root_task_id,
   CASE
+    -- Bug C fix (2026-05-17): hard-failure terminals (task_failed,
+    -- dispatcher_violation) MUST win over any open-dispatch zombie
+    -- heuristic. Pre-fix a dispatcher_violation row whose
+    -- brain_dispatched lacked a matching brain_dispatch_closed (common
+    -- when the brain crashes mid-flight) was projected as 'zombie'
+    -- instead of 'failed' — wrong classification, masks the failure.
+    -- 'completed' still allows post-commit refinement to render as
+    -- 'live' or 'zombie' (child task may be running after root commit).
+    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
     -- In-flight dispatch ANYWHERE under the root wins over a stale terminal:
     -- a child task may be running a refinement cycle after the root committed.
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
@@ -2156,18 +2165,25 @@ SELECT
          AND ready.ready_since IS NOT NULL
       THEN 'queued_at_cap'
     WHEN term.terminal_kind = 'task_committed' THEN 'completed'
-    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
+    -- Bug B partial fix (2026-05-17): widen the orphan_node threshold
+    -- from 5 min to 1 hour so a brief scheduler/restart gap during
+    -- normal operation does NOT immediately bucket a root as orphan.
+    -- Past-session roots aged > 2 days still classify; the new
+    -- threshold separates "actively-orphaned" from "transient gap".
+    -- Root cause of accumulation (stranded roots from killed sessions)
+    -- is a separate scheduler-reaper concern.
     WHEN term.terminal_kind IS NULL
          AND COALESCE(ds.dispatched_count, 0) = 0
          AND COALESCE(ds.open_dispatch_count, 0) = 0
          AND cg.latest_cap_gate_at IS NULL
          AND r.root_opened_ts IS NOT NULL
-         AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 300000
+         AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 3600000
       THEN 'orphan_node'
     WHEN COALESCE(ds.dispatched_count, 0) > 0 THEN 'live'
     ELSE 'live'
   END AS status,
   CASE
+    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
@@ -2178,13 +2194,12 @@ SELECT
          AND ready.ready_since IS NOT NULL
       THEN 'queued_at_cap'
     WHEN term.terminal_kind = 'task_committed' THEN 'completed'
-    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
     WHEN term.terminal_kind IS NULL
          AND COALESCE(ds.dispatched_count, 0) = 0
          AND COALESCE(ds.open_dispatch_count, 0) = 0
          AND cg.latest_cap_gate_at IS NULL
          AND r.root_opened_ts IS NOT NULL
-         AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 300000
+         AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 3600000
       THEN 'orphan_node'
     WHEN COALESCE(ds.dispatched_count, 0) > 0 THEN 'live'
     ELSE 'live'
@@ -2201,7 +2216,19 @@ SELECT
   term.terminal_at,
   term.terminal_kind,
   term.failure_kind,
-  term.residual,
+  -- Bug A fix (2026-05-17): hard-failure terminals carry residual=NULL
+  -- because task_failed emitters (e.g. silent_dispatch_quarantine) don't
+  -- score a residual; payload.residual is also NULL. Substrate convention
+  -- (foundational law from seed.ts: "Verifier code artifacts return a
+  -- scalar residual in [0,1]. 0 = goal met; 1 = goal missed.") says a
+  -- failed terminal IS residual=1.0. COALESCE so the TUI never shows '?'
+  -- for a row whose failure semantics already imply maximal residual.
+  -- Soft signals (live/queued/orphan with no terminal) still surface
+  -- NULL — the verifier hasn't scored them yet, and 1.0 would be wrong.
+  COALESCE(
+    term.residual,
+    CASE WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 1.0 ELSE NULL END
+  ) AS residual,
   cg.latest_cap_gate_at,
   cg.latest_cap_gate_event_id,
   cg.queued_reason,
@@ -2212,6 +2239,13 @@ SELECT
   ls.latest_ts,
   CAST((julianday('now') - julianday(ls.latest_ts)) * 86400000 AS INTEGER) AS age_ms,
   CASE
+    -- Bug C parity (2026-05-17): hard-failure terminals win — the
+    -- status_reason should name the terminal failure, not the
+    -- lingering open dispatch. Pre-fix a task_failed row whose
+    -- brain_dispatched lacked a matching close emitted
+    -- 'open_dispatch_zombie' as status_reason while lifecycle_status
+    -- was 'failed' — internally inconsistent.
+    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN term.terminal_kind
     -- In-flight reasons win over a stale terminal: name the running cycle.
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
@@ -2226,12 +2260,13 @@ SELECT
          AND ready.ready_since IS NOT NULL
       THEN COALESCE(cg.queued_reason, 'queued_at_cap')
     WHEN term.terminal_kind IS NOT NULL THEN term.terminal_kind
+    -- Bug B parity (2026-05-17): orphan threshold widened to 1h.
     WHEN term.terminal_kind IS NULL
          AND COALESCE(ds.dispatched_count, 0) = 0
          AND COALESCE(ds.open_dispatch_count, 0) = 0
          AND cg.latest_cap_gate_at IS NULL
          AND r.root_opened_ts IS NOT NULL
-         AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 300000
+         AND CAST((julianday('now') - julianday(r.root_opened_ts)) * 86400000 AS INTEGER) > 3600000
       THEN 'orphan_root_no_dispatch'
     WHEN ready.ready_since IS NOT NULL THEN 'ready'
     ELSE COALESCE(ls.latest_signal_reason, 'root_opened')

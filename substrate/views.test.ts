@@ -499,17 +499,70 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(row?.latest_event_id).toBe(dispatchEventId);
   });
 
-  test("classifies an orphan root past the 5min window as orphan_node (not zombie — the scheduler dropped a refinement child, the brain didn't hang)", () => {
+  test("classifies an orphan root past the 1h window as orphan_node (Bug B widened from 5min to 1h on 2026-05-17 — brief scheduler/restart gaps should NOT immediately bucket as orphan)", () => {
     const db = openDb(":memory:");
     runViews(db);
-    const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-    insertEvent(db, { kind: "task_node_opened", directive_id: "d_orphan", task_id: "t_orphan", ts: tenMinAgo });
+    const seventyMinAgo = new Date(Date.now() - 70 * 60 * 1000).toISOString();
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_orphan", task_id: "t_orphan", ts: seventyMinAgo });
 
     const [row] = dispatchResolved(db, { directiveId: "d_orphan", rootTaskId: "t_orphan" });
     expect(row?.lifecycle_status).toBe("orphan_node");
     expect(row?.status_reason).toBe("orphan_root_no_dispatch");
     expect(row?.dispatched_count).toBe(0);
     expect(row?.terminal_kind).toBeNull();
+  });
+
+  test("Bug C fix: terminal_kind=dispatcher_violation classifies as 'failed' even when an open dispatch lingers past 5min (hard failure must win over zombie heuristic)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_hv", task_id: "t_hv", ts: tenMinAgo });
+    // brain_dispatched WITHOUT a brain_dispatch_closed — leaves open_dispatch_count=1 and oldest_open age > 5min
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_hv", task_id: "t_hv", ts: tenMinAgo, payload: { dispatch_id: "disp_hv" } });
+    // Terminal: dispatcher_violation (e.g. cycle_1_only_breach). Pre-fix this row was classified 'zombie' because
+    // the open-dispatch+stale-age check ran first. Post-fix terminal hard-failure wins.
+    insertEvent(db, { kind: "dispatcher_violation", directive_id: "d_hv", task_id: "t_hv", ts: nowIso(), failure_kind: "cycle_1_only_breach" });
+
+    const [row] = dispatchResolved(db, { directiveId: "d_hv", rootTaskId: "t_hv" });
+    expect(row?.lifecycle_status).toBe("failed");
+    expect(row?.terminal_kind).toBe("dispatcher_violation");
+  });
+
+  test("Bug A fix: failed terminals with no scored residual default to 1.0 per substrate convention ('1.0 = goal missed')", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_resfail", task_id: "t_resfail" });
+    // task_failed with no residual on event row and no residual in payload — exactly the
+    // silent_dispatch_quarantine shape that hits 23/24 production failed rows.
+    insertEvent(db, {
+      kind: "task_failed",
+      directive_id: "d_resfail",
+      task_id: "t_resfail",
+      failure_kind: "silent_dispatch_quarantine",
+      payload: { reason: "silent_dispatch_quarantine" },
+    });
+    const [row] = dispatchResolved(db, { directiveId: "d_resfail", rootTaskId: "t_resfail" });
+    expect(row?.lifecycle_status).toBe("failed");
+    expect(row?.residual).toBe(1.0);
+  });
+
+  test("Bug A boundary: non-failure terminals (completed, live) keep their actual residual or NULL", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_ok", task_id: "t_ok" });
+    insertEvent(db, { kind: "task_committed", directive_id: "d_ok", task_id: "t_ok", residual: 0.12 });
+    const [row] = dispatchResolved(db, { directiveId: "d_ok", rootTaskId: "t_ok" });
+    expect(row?.lifecycle_status).toBe("completed");
+    expect(row?.residual).toBe(0.12);
+    // Live row with no terminal — residual stays NULL (verifier hasn't scored).
+    // Use nowIso() so the open-dispatch age is < 5min and the row classifies
+    // as 'live' not 'zombie' (the default tickTs() fixture returns 2026-01-01
+    // which is past the stale-dispatch threshold).
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_live", task_id: "t_live", ts: nowIso() });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_live", task_id: "t_live", ts: nowIso(), payload: { dispatch_id: "disp_live" } });
+    const [live] = dispatchResolved(db, { directiveId: "d_live", rootTaskId: "t_live" });
+    expect(live?.lifecycle_status).toBe("live");
+    expect(live?.residual).toBeNull();
   });
 
   test("keeps a fresh orphan root classified as live inside the 5min window", () => {
