@@ -1078,6 +1078,36 @@ export const spawnRealOpencode = async (
       } as JsonValue,
       invoker: "opencode",
     });
+    // SELF04 wiring (2026-05-17, knowledge 1ANS3VQJVX0XQ1650ZKSKW5TJM /
+    // 70YW6V3WV56AKEDWJA3GB692H8 / 7MWPZWRA0S4VX2AVH4ZR80ZWCC — five
+    // converging brain emissions). Persist the same failure as a
+    // runtime_self_diagnostic_recorded row so health metrics + lane
+    // gates can read it as a substrate primitive distinct from the
+    // bridge_failed lane-routing event. Separating fault detection
+    // from lane scheduling means a future dispatch_health_degraded
+    // gate can reconcile these diagnostics into a 5-minute window
+    // pause without overloading bridge_failed.
+    //
+    // fault_kind is a free string per substrate/event_kinds.ts metadata
+    // (producer=runtime, embeddable=true, health_metric=true,
+    // narrative=true). The vocabulary discovered through use, not enum.
+    emitEvent(db, {
+      kind: "runtime_self_diagnostic_recorded",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        runtime: "opencode_bridge",
+        fault_kind: classifierReason,
+        repair_hint: classifierHint,
+        evidence_event_ids: [],
+        failure_shape: failureShape,
+        frames_received_count: framesReceivedCount,
+        exit_code: exitCode,
+        window_ms: handshakeWindowMs,
+      } as JsonValue,
+      invoker: "opencode",
+    });
     return {
       ok: false,
       reason: {
