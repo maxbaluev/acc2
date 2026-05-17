@@ -561,6 +561,24 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(row?.status_reason).toBe("directive_closed_straggler");
   });
 
+  test("Bug B inferred_roots fix: constitutional_gate_decision alone does NOT count as a root", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    // Synthetic owner-profile flow: gate decision fires on a task_id that
+    // never had task_node_opened. Pre-fix this created a phantom orphan
+    // row in dispatch_resolved_view (195 such rows in production).
+    insertEvent(db, {
+      kind: "constitutional_gate_decision",
+      directive_id: "d_synthetic",
+      task_id: "t_synth",
+      payload: { gate: "brain_concurrency_cap", reason: "irrelevant" },
+    });
+    // No task_node_opened. No brain_dispatched. No terminal.
+    const all = dispatchResolved(db);
+    const synthetic = all.find((r) => r.directive_id === "d_synthetic");
+    expect(synthetic).toBeUndefined();
+  });
+
   test("Bug B baseline: open-directive orphan still classifies (no false negative)", () => {
     const db = openDb(":memory:");
     runViews(db);

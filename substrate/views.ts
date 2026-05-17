@@ -1908,6 +1908,16 @@ WITH RECURSIVE explicit_roots AS (
     AND (e.parent_task_id IS NULL OR e.parent_task_id = '')
 ),
 inferred_roots AS (
+  -- 2026-05-17 Bug fix: constitutional_gate_decision alone is NOT a
+  -- task — it's a gate signal that can fire on synthetic owner-profile
+  -- flows (owner_insight_candidate / action_scored / owner_profile_recorded
+  -- chains) without a task_node ever opening. Pre-fix 62 production
+  -- task_ids appeared in dispatch_resolved_view as orphan_node solely
+  -- because they had a constitutional_gate_decision row; the reaper
+  -- correctly skipped them (no task_node_opened) but the operator
+  -- surface flagged them as orphans. Require at least one DISPATCH or
+  -- TERMINAL kind for inferred-root status; constitutional_gate_decision
+  -- on its own is informational only.
   SELECT
     e.directive_id,
     e.task_id AS root_task_id,
@@ -1918,8 +1928,7 @@ inferred_roots AS (
     'brain_dispatch_closed',
     'task_committed',
     'task_failed',
-    'dispatcher_violation',
-    'constitutional_gate_decision'
+    'dispatcher_violation'
   )
     AND e.task_id IS NOT NULL
     AND NOT EXISTS (
