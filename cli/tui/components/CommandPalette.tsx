@@ -48,6 +48,19 @@ export const parseCommand = (line: string): CommandIntent => {
     const argv = head === "decline" ? ["apply", id, "--decline"] : ["apply", id];
     return { kind: "shell", argv, raw: trimmed };
   }
+  if (head === "tail") {
+    // Open the Live Tail drawer; the App handler watches for this argv
+    // shape and toggles the drawer without spawning a subprocess.
+    return { kind: "shell", argv: ["__tui__", "tail"], raw: trimmed };
+  }
+  if (head === "inspect") {
+    const id = parts[1] ?? "";
+    // Inspector pin: surfaces the event in the inspector drawer (handled
+    // App-side via the intent's argv[0] === "inspect"). We still spawn an
+    // `acc events --id <id>` subprocess so the operator gets stdout
+    // detail as well (useful when the event isn't in the live ring buffer).
+    return { kind: "shell", argv: ["events", "--id", id], raw: trimmed };
+  }
   if (head === "observe") {
     // observe <event_id> <verdict> [reason...]
     const id = parts[1] ?? "";

@@ -144,6 +144,23 @@ export type ToastEvent = {
   summary: string;
 };
 
+// LiveEvent — minimal projection of any SSE-delivered event, kept in a
+// ring buffer for the Live Tail drawer. We hold the FULL payload for
+// inspector navigation (`x` hotkey) so the drawer can render content
+// without an extra mcpCall round-trip.
+export type LiveEvent = {
+  event_id: string;
+  kind: string;
+  ts: string;
+  directive_id: string | null;
+  task_id: string | null;
+  substrate_origin: string | null;
+  payload: unknown;
+  context_refs: string[];
+};
+
+export const LIVE_TAIL_CAP = 200;
+
 const emptySnapshot = (): DashboardSnapshot => ({
   generated_at: new Date(0).toISOString(),
   loading: true,
@@ -518,6 +535,58 @@ export const sseEventToToast = (event: SseEvent): ToastEvent | null => {
     ts: event.ts,
     summary: toastSummary(event),
   };
+};
+
+/** Project ANY SSE event into a LiveEvent ring-buffer row. Unlike
+ *  sseEventToToast (mirror-inline only), this accepts every kind so the
+ *  Live Tail drawer can show full traffic and the Event Inspector can
+ *  drill into any event the operator types by id. The full payload is
+ *  preserved — the inspector renders without an extra MCP call. */
+export const sseEventToLive = (event: SseEvent): LiveEvent => ({
+  event_id: event.event_id,
+  kind: String(event.kind),
+  ts: event.ts,
+  directive_id: typeof event.directive_id === "string" ? event.directive_id : null,
+  task_id: typeof event.task_id === "string" ? event.task_id : null,
+  substrate_origin: typeof (event as Record<string, unknown>).substrate_origin === "string"
+    ? String((event as Record<string, unknown>).substrate_origin)
+    : null,
+  payload: event.payload,
+  context_refs: Array.isArray(event.context_refs)
+    ? event.context_refs.filter((x): x is string => typeof x === "string")
+    : [],
+});
+
+// Event-kind sets that justify a specific dashboard-section refresh on
+// SSE arrival. Each entry is one section that becomes reactive
+// (poll-independent). The App-level dispatcher reads these sets to
+// decide whether a fresh fetchDashboardSnapshot() is warranted.
+export const REACTIVE_DISPATCH_KINDS = new Set([
+  "brain_dispatched", "brain_dispatch_closed",
+  "task_node_opened", "task_committed", "task_failed",
+  "dispatcher_violation", "cap_gate_evaluated",
+]);
+export const REACTIVE_BRAIN_KINDS = new Set([
+  "knowledge_candidate", "lesson_extracted", "contract_amendment_proposed",
+  "knowledge_promoted", "owner_observed_outcome_recorded",
+]);
+export const REACTIVE_CHANGES_KINDS = new Set([
+  "applied_change_committed", "task_closure_audited", "directive_closed",
+]);
+export const REACTIVE_INBOX_KINDS = new Set([
+  "owner_decision_recorded", "lesson_implementer_queue_changed",
+]);
+
+/** Classify an event into the dashboard sections that should refresh.
+ *  Returns an empty set when no section is interested. The set is
+ *  string-typed so an unknown kind doesn't trigger anything. */
+export const reactiveSectionsFor = (kind: string): Set<"dispatch" | "brain" | "changes" | "inbox"> => {
+  const out = new Set<"dispatch" | "brain" | "changes" | "inbox">();
+  if (REACTIVE_DISPATCH_KINDS.has(kind)) out.add("dispatch");
+  if (REACTIVE_BRAIN_KINDS.has(kind)) out.add("brain");
+  if (REACTIVE_CHANGES_KINDS.has(kind)) out.add("changes");
+  if (REACTIVE_INBOX_KINDS.has(kind)) out.add("inbox");
+  return out;
 };
 
 export const initialSnapshot = emptySnapshot;

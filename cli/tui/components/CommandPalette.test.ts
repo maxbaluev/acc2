@@ -28,6 +28,14 @@ describe("parseCommand", () => {
     expect(shellArgv("decline RPDJGRQPW57T")).toEqual(["apply", "RPDJGRQPW57T", "--decline"]);
   });
 
+  test("tail — local TUI drawer toggle (no spawn)", () => {
+    expect(shellArgv("tail")).toEqual(["__tui__", "tail"]);
+  });
+
+  test("inspect <event_id> — pins Event Inspector drawer to the id", () => {
+    expect(shellArgv("inspect AMENDEV_ABC123")).toEqual(["events", "--id", "AMENDEV_ABC123"]);
+  });
+
   test("observe — pipes verdict + reason as flags (operator-feedback loop)", () => {
     expect(shellArgv("observe EVT_ABC negative TUI hotkeys still broken")).toEqual([
       "observe",

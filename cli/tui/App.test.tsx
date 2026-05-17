@@ -172,6 +172,49 @@ describe("acc watch — Ink TUI shell", () => {
     unmount();
   });
 
+  test("SSE-pushed events appear in Live Tail drawer reactively (no poll required)", async () => {
+    // Build a controllable SSE generator the test can drive event-by-event.
+    let pushNext: ((ev: unknown) => void) | null = null;
+    let closeStream: (() => void) | null = null;
+    const client: SubstrateClient = {
+      read: async () => ({ ok: true, result: [] }),
+      recentEvents: async () => ({ ok: true, result: { events: [] } }),
+      health: async () => ({ ok: true, status: "ok", uptime_s: 3600, events_count: 100, stuck_workers: [] }),
+      sseConnect: async function* () {
+        while (true) {
+          const ev = await new Promise<unknown>((resolve, reject) => {
+            pushNext = resolve;
+            closeStream = () => reject(new Error("closed"));
+          });
+          yield ev as never;
+        }
+      },
+    };
+    const { lastFrame, unmount } = render(
+      React.createElement(App, {
+        client,
+        pollDisabled: false,
+        initial: { ...seededSnapshot(), error: null },
+        initialDrawer: "tail",
+      }),
+    );
+    // Push two SSE events. Each MUST appear in the tail drawer.
+    await new Promise((r) => setTimeout(r, 30));
+    pushNext?.({ event_id: "EVT_LIVE_A", kind: "knowledge_candidate", ts: "2026-05-17T15:00:00Z", directive_id: "DLIVE", task_id: null, payload: { claim: "live-test-A" }, context_refs: [] });
+    await new Promise((r) => setTimeout(r, 30));
+    pushNext?.({ event_id: "EVT_LIVE_B", kind: "lesson_extracted", ts: "2026-05-17T15:00:01Z", directive_id: "DLIVE", task_id: null, payload: { summary: "live-test-B" }, context_refs: [] });
+    await new Promise((r) => setTimeout(r, 60));
+
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("LIVE TAIL");
+    expect(frame).toContain("EVT_LIVE_A");
+    expect(frame).toContain("EVT_LIVE_B");
+    expect(frame).toContain("knowledge_candidate");
+    expect(frame).toContain("lesson_extracted");
+    closeStream?.();
+    unmount();
+  });
+
   test("command palette emits a canonical `acc task ...` argv when the operator types into it", async () => {
     const intents: CommandIntent[] = [];
     const client = stubClient();

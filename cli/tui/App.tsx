@@ -32,8 +32,12 @@ import {
   fetchDashboardSnapshot,
   initialSnapshot,
   sseEventToToast,
+  sseEventToLive,
+  reactiveSectionsFor,
+  LIVE_TAIL_CAP,
   type DashboardSnapshot,
   type ToastEvent,
+  type LiveEvent,
 } from "./state/store";
 import type { SubstrateClient } from "./transport/substrate-client";
 
@@ -41,7 +45,7 @@ const REFRESH_MS = 5_000;
 const TOAST_MAX = 3;
 const TOAST_TTL_MS = 12_000;
 
-export type DrawerName = "events" | "health" | "lineage" | "profile" | "inbox" | "brain" | null;
+export type DrawerName = "events" | "health" | "lineage" | "profile" | "inbox" | "brain" | "tail" | "inspector" | null;
 
 export type AppProps = {
   client: SubstrateClient;
@@ -113,6 +117,17 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
   const [lastCommand, setLastCommand] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<ShellResult | null>(null);
   const [paletteBuffer, setPaletteBuffer] = useState("");
+  // SSE-pushed live event ring buffer. Every SSE event is appended (cap
+  // LIVE_TAIL_CAP) so the Live Tail drawer ('t') and Event Inspector
+  // ('x') can render without an extra MCP round-trip. Reactivity:
+  // events flow into the buffer in real time, and per-kind classification
+  // triggers a section refresh (brain/dispatch/changes/inbox) so the
+  // owner-visible counts update immediately instead of waiting for the
+  // 5s poll backstop.
+  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
+  // Event Inspector pinned event_id — when set, the inspector drawer
+  // renders that specific event's full content.
+  const [inspectorEventId, setInspectorEventId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -141,22 +156,37 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
     (async () => {
       try {
         for await (const event of client.sseConnect({ signal: controller.signal })) {
+          // 1) Mirror-inline events become toast banners (existing behavior).
           const toast = sseEventToToast(event);
-          if (!toast) continue;
-          // SSE reconnect can replay the same event_id; React's child-key
-          // uniqueness check throws "Encountered two children with the same
-          // key" if we don't dedupe at insertion. Drop duplicates by id.
-          setToasts((prev) => {
-            if (prev.some((t) => t.event_id === toast.event_id)) return prev;
-            return [toast, ...prev].slice(0, TOAST_MAX);
+          if (toast) {
+            setToasts((prev) => {
+              if (prev.some((t) => t.event_id === toast.event_id)) return prev;
+              return [toast, ...prev].slice(0, TOAST_MAX);
+            });
+          }
+          // 2) Every SSE event (any kind) lands in the live ring buffer so
+          //    the Live Tail drawer and Event Inspector can render without
+          //    extra MCP round-trips.
+          const live = sseEventToLive(event);
+          setLiveEvents((prev) => {
+            if (prev.length > 0 && prev[0]?.event_id === live.event_id) return prev;
+            const next = [live, ...prev];
+            return next.length > LIVE_TAIL_CAP ? next.slice(0, LIVE_TAIL_CAP) : next;
           });
+          // 3) Trigger per-section reactive refresh when the kind affects
+          //    a specific dashboard panel. This is the push-based replacement
+          //    for the 5s poll lag — counts/lists update as events land.
+          const sections = reactiveSectionsFor(String(event.kind));
+          if (sections.size > 0) {
+            void refresh();
+          }
         }
       } catch {
         // SSE disconnect is benign; the next poll cycle re-establishes.
       }
     })();
     return () => { controller.abort(); };
-  }, [pollDisabled, client]);
+  }, [pollDisabled, client, refresh]);
 
   useEffect(() => {
     if (toasts.length === 0) return;
@@ -168,6 +198,25 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
     if (intent.kind === "exit") { exit(); return; }
     if (intent.kind === "noop") return;
     setLastCommand(intent.raw);
+    // Local-only intents — `__tui__` sentinel argv handled WITHOUT
+    // spawning a subprocess. Routes drawer toggles typed in the palette
+    // (e.g. `tail`) directly into App state. Real shells (acc task,
+    // acc apply, etc.) take the spawn path below.
+    if (intent.kind === "shell" && intent.argv[0] === "__tui__") {
+      const sub = intent.argv[1];
+      if (sub === "tail") {
+        setDrawer((d) => d === "tail" ? null : "tail");
+      }
+      return;
+    }
+    // `inspect <id>` short-circuits to pin the inspector drawer to that
+    // event_id without spawning. The owner sees the live-buffer payload
+    // immediately; the subprocess spawn still runs in parallel so MCP-
+    // fetched detail is available if the event isn't in the buffer.
+    if (intent.kind === "shell" && intent.argv[0] === "events" && intent.argv[1] === "--id" && intent.argv[2]) {
+      setInspectorEventId(intent.argv[2]);
+      setDrawer("inspector");
+    }
     if (onCommand) { onCommand(intent); return; }
     void (async () => {
       const result = await dispatchShell(intent.argv);
@@ -315,6 +364,69 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
             <Text dimColor> in the command palette to apply an amendment</Text>
           </Box>
         </Box>
+      ) : drawer === "tail" ? (
+        <Box borderStyle="round" borderColor="green" flexDirection="column" paddingX={1}>
+          <Text bold color="green">LIVE TAIL (t to close) — last {Math.min(liveEvents.length, 24)} of {liveEvents.length} events (push, SSE)</Text>
+          {liveEvents.length === 0 ? (
+            <Text dimColor>(no SSE events received yet — waiting for daemon stream)</Text>
+          ) : (
+            liveEvents.slice(0, 24).map((e) => {
+              const dir = (e.directive_id ?? "-").slice(0, 10);
+              const task = (e.task_id ?? "-").slice(0, 10);
+              const origin = (e.substrate_origin ?? "?").slice(0, 14);
+              return (
+                <Text key={e.event_id}>
+                  <Text dimColor>{e.ts.slice(11, 19)} </Text>
+                  <Text color="yellow">{e.event_id.slice(0, 12)} </Text>
+                  <Text color="cyan">{e.kind.padEnd(30).slice(0, 30)} </Text>
+                  <Text dimColor>dir={dir} task={task} origin={origin}</Text>
+                </Text>
+              );
+            })
+          )}
+          <Box marginTop={1}>
+            <Text dimColor>press </Text>
+            <Text color="yellow">x</Text>
+            <Text dimColor> + type any event_id from this list to open Event Inspector for full payload</Text>
+          </Box>
+        </Box>
+      ) : drawer === "inspector" ? (
+        <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1}>
+          <Text bold color="cyan">EVENT INSPECTOR (x to close) — id: {inspectorEventId ?? "(none — type 'inspect &lt;id&gt;' in palette)"}</Text>
+          {(() => {
+            if (!inspectorEventId) return <Text dimColor>(no event pinned — most-recent SSE event will load on next 'x')</Text>;
+            const ev = liveEvents.find((e) => e.event_id === inspectorEventId || e.event_id.startsWith(inspectorEventId));
+            if (!ev) return <Text color="yellow">event id {inspectorEventId} not in live buffer — run `acc inspect {inspectorEventId}` in palette to load via MCP</Text>;
+            const payloadText = (() => {
+              try { return JSON.stringify(ev.payload, null, 2); }
+              catch { return String(ev.payload); }
+            })();
+            const lines = payloadText.split("\n").slice(0, 24);
+            return (
+              <>
+                <Text>
+                  <Text dimColor>kind=</Text><Text color="cyan">{ev.kind}</Text>
+                  <Text dimColor> ts=</Text><Text>{ev.ts}</Text>
+                </Text>
+                <Text>
+                  <Text dimColor>directive=</Text><Text>{ev.directive_id ?? "-"}</Text>
+                  <Text dimColor> task=</Text><Text>{ev.task_id ?? "-"}</Text>
+                  <Text dimColor> origin=</Text><Text>{ev.substrate_origin ?? "-"}</Text>
+                </Text>
+                {ev.context_refs.length > 0 ? (
+                  <Text>
+                    <Text dimColor>context_refs ({ev.context_refs.length}): </Text>
+                    <Text color="yellow">{ev.context_refs.slice(0, 4).map((r) => r.slice(0, 12)).join(", ")}</Text>
+                    {ev.context_refs.length > 4 ? <Text dimColor> +{ev.context_refs.length - 4}</Text> : null}
+                  </Text>
+                ) : null}
+                <Text dimColor>──── payload ────</Text>
+                {lines.map((l, i) => <Text key={`${ev.event_id}-${i}`}>{l.slice(0, 180)}</Text>)}
+                {payloadText.split("\n").length > 24 ? <Text dimColor>… (+{payloadText.split("\n").length - 24} more lines truncated)</Text> : null}
+              </>
+            );
+          })()}
+        </Box>
       ) : drawer === "lineage" ? (
         <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1}>
           <Text bold color="cyan">lineage walker (l to close)</Text>
@@ -357,7 +469,7 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
 
       <Box paddingX={1}>
         <Text dimColor>
-          arrows=focus  i=inbox  a=brain  p=profile  e=events  h=health  l=lineage  :=palette  q=quit
+          arrows=focus  i=inbox  a=brain  p=profile  e=events  h=health  l=lineage  q=quit  •  type `tail` / `inspect ⟨id⟩` for drawers
         </Text>
       </Box>
 
