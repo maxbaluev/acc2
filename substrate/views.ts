@@ -2671,7 +2671,7 @@ CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
       WHEN e.kind = 'daemon_hotreload_rejected' THEN ('module=' || COALESCE(json_extract(e.payload, '$.module'), '?') || '; reason=' || COALESCE(json_extract(e.payload, '$.reason'), '?'))
       WHEN e.kind = 'daemon_hotreload_unmapped' THEN ('file=' || COALESCE(json_extract(e.payload, '$.file_path'), '?') || '; ' || COALESCE(json_extract(e.payload, '$.hint'), 'add manifest entry'))
       WHEN e.kind = 'brain_message_emitted'       THEN json_extract(e.payload, '$.text')
-      WHEN e.kind = 'owner_decision_recorded'     THEN ('decision=' || COALESCE(json_extract(e.payload, '$.decision'), '?') || ' on ' || COALESCE(json_extract(e.payload, '$.target_event_id'), '?'))
+      WHEN e.kind = 'owner_decision_recorded'     THEN ('decision=' || COALESCE(json_extract(e.payload, '$.decision'), '?') || ' on ' || COALESCE(json_extract(e.payload, '$.target_event_id'), json_extract(e.payload, '$.source_event_id'), '?') || COALESCE(' [' || json_extract(e.payload, '$.reason') || ']', ''))
       WHEN e.kind = 'constitutional_gate_decision' THEN ('gate=' || COALESCE(json_extract(e.payload, '$.gate'), '?') || '; ' || COALESCE(json_extract(e.payload, '$.reason'), ''))
       WHEN e.kind = 'intent_classified'           THEN COALESCE(json_extract(e.payload, '$.classification'), json_extract(e.payload, '$.intent'))
       WHEN e.kind = 'task_closure_audited'        THEN ('closure_residual=' || COALESCE(json_extract(e.payload, '$.closure_residual'), '?') || '; ' || COALESCE(json_extract(e.payload, '$.summary'), ''))
