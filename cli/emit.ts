@@ -88,6 +88,11 @@ const SUPPORTED = new Set([
   "lesson_extracted",
   "claude_reasoning_recorded",
   "act_tuple_recorded",
+  // L6 + adjudication unified primitive (registered as event_kind in
+  // substrate/event_kinds.ts; consumer wired in cli/apply.ts
+  // authorizeApply via the brain's diff). Required payload:
+  // target_event_id, verdict (free string), adjudicator_origin.
+  "pre_apply_adjudication_recorded",
 ]);
 
 export const runEmit = async (argv: string[]): Promise<number> => {
@@ -169,6 +174,27 @@ export const runEmit = async (argv: string[]): Promise<number> => {
     }
     payload.cited_knowledge_ids = parseRefs(flags["cited-knowledge-ids"]);
     payload.cited_artifact_ids = parseRefs(flags["cited-artifact-ids"]);
+  } else if (kind === "pre_apply_adjudication_recorded") {
+    if (typeof flags.target !== "string" || flags.target.length === 0) {
+      process.stderr.write("acc emit pre_apply_adjudication_recorded: --target is required (event_id of the proposal being adjudicated)\n");
+      return 1;
+    }
+    if (typeof flags.verdict !== "string" || flags.verdict.length === 0) {
+      process.stderr.write("acc emit pre_apply_adjudication_recorded: --verdict is required (free string: contradicts, corrects, proposes_alternative, peer_approve, gray_zone_review, escalate_to_owner)\n");
+      return 1;
+    }
+    payload.target_event_id = flags.target;
+    payload.verdict = String(flags.verdict).toLowerCase();
+    payload.adjudicator_origin = substrateOrigin;
+    payload.evidence_event_ids = parseRefs(flags["evidence-refs"]);
+    if (typeof flags["owner-authority"] === "string") {
+      payload.owner_authority_level = flags["owner-authority"];
+    }
+    if (typeof flags.reason === "string") payload.reason = flags.reason;
+    // The apply-gate consumer looks for target_event_id in
+    // context_refs OR in payload — we set both so the read path
+    // is fail-safe.
+    if (!refs.includes(String(flags.target))) refs.push(String(flags.target));
   }
 
   // Tag emitter so the per-(origin, shape) primitive can rank Claude

@@ -464,21 +464,60 @@ const authorizeApply = async (
       }) };
     }
   }
-  // Universal verifier replaces the gate stack (owner-approved 2026-05-16,
-  // "we do not need gates, we have verify universal system!"). The two
-  // refusals that used to live here — trajectory_hazard_present and
-  // structured_proposed_behavior_required — both fought the verifier residual
-  // instead of trusting it. Concrete failure modes (witnessed this session):
-  //   - trajectory_hazard refused credit when the only "hazard" was a CLI
-  //     follower process exit (observability layer), not a substrate fault.
-  //   - structured_proposed_behavior_required refused prose lessons on
-  //     repo:runtime/* even when the orchestrator semantically applied the
-  //     right edit and a commit existed touching the target.
-  // Owner consent (above) stays only for dynamic owner-stated policy,
-  // not fixed file paths; residuals decide whether the change is correct.
-  // Residual + breakdown (v2-design.md §6) decides correctness; posteriors
-  // close the loop. Auto_apply_worker.ts retains its own structured-change
-  // filter for autonomous landings — this surface is operator-initiated.
+  if (kind === "contract_amendment_proposed") {
+    const adjudicationEnv = await mcpCall("substrate.search", {
+      query: `pre_apply_adjudication_recorded target_event_id:${eventId}`,
+      opts: { kind_filter: ["pre_apply_adjudication_recorded"], k: 50 },
+    });
+    const rawRows = adjudicationEnv.ok && Array.isArray(adjudicationEnv.result)
+      ? adjudicationEnv.result
+      : adjudicationEnv.ok && Array.isArray((adjudicationEnv.result as { events?: unknown[] } | null)?.events)
+        ? ((adjudicationEnv.result as { events: unknown[] }).events)
+        : [];
+    const adjudications = rawRows
+      .map((row) => parsePayload((row as EventRow).payload))
+      .filter((row) => row.target_event_id === eventId);
+    const hasVerdict = (verdict: string): boolean => adjudications.some((row) => row.verdict === verdict);
+
+    if (hasVerdict("contradicts")) {
+      return { ok: false, code: await emitApplyDenied(ev, eventId, "drift_detected", target, {
+        ownerGateRequired,
+        ownerApproved,
+        autoApplyTarget: policy.autoApplyTarget,
+      }) };
+    }
+    if (hasVerdict("corrects")) {
+      return { ok: false, code: await emitApplyDenied(ev, eventId, "corrected_payload_required", target, {
+        ownerGateRequired,
+        ownerApproved,
+        autoApplyTarget: policy.autoApplyTarget,
+      }) };
+    }
+    if (hasVerdict("proposes_alternative")) {
+      return { ok: false, code: await emitApplyDenied(ev, eventId, "adversarial_cycle_required", target, {
+        ownerGateRequired,
+        ownerApproved,
+        autoApplyTarget: policy.autoApplyTarget,
+      }) };
+    }
+    if (hasVerdict("escalate_to_owner")) {
+      return { ok: false, code: await emitApplyDenied(ev, eventId, "owner_decision_required", target, {
+        ownerGateRequired,
+        ownerApproved,
+        autoApplyTarget: policy.autoApplyTarget,
+      }) };
+    }
+    if (hasVerdict("gray_zone_review")) {
+      console.error("acc apply: pre-apply adjudication marked this apply tentative; record a follow-up scoring round after the subagent verifier returns");
+    }
+    // verdict=peer_approve and unknown open-kind verdicts do not block here;
+    // unknown verdicts remain ledger evidence for future calibrated consumers.
+  }
+
+  // Universal verifier remains the correctness scorer. Pre-apply adjudication is
+  // a narrow fast-path correction surface for authoritative contradictions,
+  // corrected payloads, adversarial alternatives, owner escalation, peer approval,
+  // and gray-zone review before the standard apply handoff.
   return { ok: true, target, ownerGateRequired, ownerApproved, queueRow };
 };
 

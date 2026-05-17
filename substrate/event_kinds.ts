@@ -283,6 +283,16 @@ export const EVENT_KINDS = {
   task_closure_audited:                    { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   lesson_extracted:                        { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   contract_amendment_proposed:             { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  // Pre-apply adjudication — the L6 + adjudication unified primitive
+  // from directive 9NPJEGNWS97QN1FK1RQ3VKP6TR. Fires BEFORE the apply
+  // gate to signal {contradicts, corrects, proposes_alternative,
+  // peer_approve, gray_zone_review, escalate_to_owner}. Free-string
+  // verdict per the universal-kind principle. Required payload fields:
+  // target_event_id, verdict, adjudicator_origin. Optional:
+  // evidence_event_ids, owner_authority_level. cli/apply.ts
+  // authorizeApply() consumes linked adjudications and fails closed on
+  // contradicts/corrects/escalate, accelerates on peer_approve.
+  pre_apply_adjudication_recorded:         { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
 
   // ── Application of lessons + amendments (Option D + Claude subagent executor) ──
   //
