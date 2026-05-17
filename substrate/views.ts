@@ -2652,6 +2652,15 @@ CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
       WHEN e.kind = 'task_node_opened'            THEN json_extract(e.payload, '$.goal')
       WHEN e.kind = 'task_committed'              THEN json_extract(e.payload, '$.summary')
       WHEN e.kind = 'task_failed'                 THEN COALESCE(json_extract(e.payload, '$.reason'), e.failure_kind)
+      -- dispatcher_violation events carry their content under
+      -- 'failure_kind' + 'failed_checks' (not 'reason'). Pre-fix the
+      -- narrative line was blank for the 13 production rows.
+      WHEN e.kind = 'dispatcher_violation' THEN COALESCE(
+        json_extract(e.payload, '$.failure_kind'),
+        json_extract(e.payload, '$.reason'),
+        e.failure_kind,
+        'dispatcher_violation'
+      )
       WHEN e.kind = 'act_tuple_recorded'          THEN json_extract(e.payload, '$.intent')
       WHEN e.kind = 'contract_amendment_proposed' THEN json_extract(e.payload, '$.current_behavior')
       WHEN e.kind = 'pre_apply_adjudication_recorded' THEN json_extract(e.payload, '$.verdict')
