@@ -164,6 +164,7 @@ const GLYPHS: Record<string, string> = {
   task_closure_audited: "🎓",
   lesson_extracted: "💡",
   contract_amendment_proposed: "📝",
+  pre_apply_adjudication_recorded: "⚖?",
   lesson_apply_requested: "Δ?",
   applied_change_committed: "Δ✓",
   // Brain convergence axis D (2026-05-15): brain observability glyphs.
@@ -364,6 +365,12 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       const kind = p.lesson_kind as string | undefined;
       const summary = p.summary as string | undefined;
       return `lesson_kind=${kind ?? "?"} ${summary ? `summary=${JSON.stringify(trunc(summary, 54))}` : ""}`;
+    }
+    case "pre_apply_adjudication_recorded": {
+      const verdict = (p.verdict as string) ?? "?";
+      const target = p.target_event_id as string | undefined;
+      const authority = p.owner_authority_level as string | undefined;
+      return `verdict=${verdict}${target ? ` target=${idPrefix(target, 12)}` : ""}${authority ? ` authority=${authority}` : ""}`;
     }
     case "contract_amendment_proposed": {
       // Canonical target grammar (v2): exactly ONE of `target_resource` (single

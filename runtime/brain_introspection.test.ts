@@ -28,7 +28,7 @@ describe("buildSystemMap", () => {
       expect.arrayContaining(["brain", "claude", "runtime", "substrate"]),
     );
     expect(map.event_kinds.brain_emissible.length).toBeGreaterThan(0);
-    expect(map.event_kinds.brain_emissible.every((k) => k.producer === "brain")).toBe(true);
+    expect(map.event_kinds.brain_emissible.every((k) => k.producer === "brain" || k.producer === "both")).toBe(true);
     expect(map.views.total).toBeGreaterThan(20);
     expect(map.views.names).toContain("dispatch_resolved_view");
     expect(map.tools.substrate_methods).toContain("substrate.emit");

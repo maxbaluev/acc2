@@ -24,6 +24,7 @@ export type EventKindProducer =
   | "brain"       // opencode bridge frames
   | "claude"      // Claude Code orchestrator (owner channel + inline lane)
   | "runtime"     // runtime/* modules observing scheduled work
+  | "both"        // brain + Claude/orchestrator correction surfaces
   | "seed"        // substrate/seed.ts only
   | "test";       // test fixtures only (never emitted by production)
 
@@ -283,6 +284,10 @@ export const EVENT_KINDS = {
   task_closure_audited:                    { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   lesson_extracted:                        { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   contract_amendment_proposed:             { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  // Pre-apply correction/adversarial primitive. Payload carries free-string
+  // verdict plus target_event_id, adjudicator_origin, evidence_event_ids,
+  // and optional owner_authority_level; verdict is intentionally NOT an enum.
+  pre_apply_adjudication_recorded:          { producer: "both",      embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   // Pre-apply adjudication — the L6 + adjudication unified primitive
   // from directive 9NPJEGNWS97QN1FK1RQ3VKP6TR. Fires BEFORE the apply
   // gate to signal {contradicts, corrects, proposes_alternative,

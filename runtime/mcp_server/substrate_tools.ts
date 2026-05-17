@@ -378,6 +378,45 @@ export const handleEmit = (
       }
     }
   }
+  if (kind === "pre_apply_adjudication_recorded") {
+    const payload = (src.payload && typeof src.payload === "object" && !Array.isArray(src.payload))
+      ? src.payload as Record<string, unknown>
+      : {};
+    const verdict = payload.verdict;
+    const targetEventId = payload.target_event_id;
+    const evidenceEventIds = payload.evidence_event_ids;
+    if (typeof verdict !== "string" || verdict.length === 0) {
+      return { ok: false, error: "pre_apply_adjudication_recorded_missing_verdict" };
+    }
+    if (typeof targetEventId !== "string" || targetEventId.length === 0) {
+      return { ok: false, error: "pre_apply_adjudication_recorded_missing_target_event_id" };
+    }
+    if (evidenceEventIds !== undefined && (!Array.isArray(evidenceEventIds) || evidenceEventIds.some((id) => typeof id !== "string" || id.length === 0))) {
+      return { ok: false, error: "pre_apply_adjudication_recorded_invalid_evidence_event_ids" };
+    }
+    if (payload.owner_authority_level !== undefined && typeof payload.owner_authority_level !== "string") {
+      return { ok: false, error: "pre_apply_adjudication_recorded_invalid_owner_authority_level" };
+    }
+    const target = getEventById(ctx.db, targetEventId);
+    if (!target) {
+      return { ok: false, error: `pre_apply_adjudication_target_not_found:${targetEventId}` };
+    }
+    const allowedTargetKinds = new Set(["contract_amendment_proposed", "act_tuple_recorded", "knowledge_candidate"]);
+    if (!allowedTargetKinds.has(target.kind)) {
+      return { ok: false, error: `pre_apply_adjudication_target_not_proposal:${targetEventId};kind=${target.kind}` };
+    }
+    const terminal = ctx.db
+      .query(`SELECT id, kind FROM events
+              WHERE kind IN ('applied_change_committed','applied_change_failed','candidate_confirmed','candidate_contradicted','knowledge_promoted','knowledge_demoted','action_scored')
+                AND (json_extract(payload, '$.source_event_id') = ?
+                  OR json_extract(payload, '$.target_event_id') = ?
+                  OR EXISTS (SELECT 1 FROM json_each(events.context_refs) WHERE value = ?))
+              ORDER BY ts ASC LIMIT 1`)
+      .get(targetEventId, targetEventId, targetEventId) as { id: string; kind: string } | null;
+    if (terminal) {
+      return { ok: false, error: `pre_apply_adjudication_target_terminal:${targetEventId};terminal_kind=${terminal.kind};terminal_event_id=${terminal.id}` };
+    }
+  }
   // Brain audit F (2026-05-15): refuse task_edge_recorded events whose
   // from_task/to_task endpoints don't exist as task_node_opened rows
   // under the same directive. Without this gate, refinement edges can

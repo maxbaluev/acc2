@@ -79,7 +79,7 @@ export const buildSystemMap = (db: Database, opts: { artifactTopK?: number } = {
   }));
   const byProducer: Record<string, number> = {};
   for (const k of allKinds) byProducer[k.producer] = (byProducer[k.producer] ?? 0) + 1;
-  const brainEmissible = allKinds.filter((k) => k.producer === "brain");
+  const brainEmissible = allKinds.filter((k) => k.producer === "brain" || k.producer === "both");
 
   const substrateMethods = McpMethods.filter((m) => m.startsWith("substrate."));
   const runtimeMethods = McpMethods.filter((m) => m.startsWith("runtime."));
