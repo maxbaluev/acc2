@@ -119,6 +119,7 @@ export const runEmit = async (argv: string[]): Promise<number> => {
   };
 
   const refs = parseRefs(flags.refs);
+  const evidenceRefs = parseRefs(flags["evidence-refs"]);
   const substrateOrigin = typeof flags["substrate-origin"] === "string"
     ? String(flags["substrate-origin"])
     : "claude_inline";
@@ -175,6 +176,22 @@ export const runEmit = async (argv: string[]): Promise<number> => {
     payload.cited_knowledge_ids = parseRefs(flags["cited-knowledge-ids"]);
     payload.cited_artifact_ids = parseRefs(flags["cited-artifact-ids"]);
   } else if (kind === "pre_apply_adjudication_recorded") {
+    if (typeof flags.verdict !== "string" || flags.verdict.length === 0) {
+      process.stderr.write("acc emit pre_apply_adjudication_recorded: --verdict is required\n");
+      return 1;
+    }
+    if (typeof flags.target !== "string" || flags.target.length === 0) {
+      process.stderr.write("acc emit pre_apply_adjudication_recorded: --target is required\n");
+      return 1;
+    }
+    payload.verdict = flags.verdict;
+    payload.target_event_id = flags.target;
+    payload.adjudicator_origin = substrateOrigin;
+    payload.evidence_event_ids = evidenceRefs;
+    if (typeof flags["owner-authority"] === "string" && flags["owner-authority"].length > 0) {
+      payload.owner_authority_level = flags["owner-authority"];
+    }
+  } else if (kind === "pre_apply_adjudication_recorded") {
     if (typeof flags.target !== "string" || flags.target.length === 0) {
       process.stderr.write("acc emit pre_apply_adjudication_recorded: --target is required (event_id of the proposal being adjudicated)\n");
       return 1;
@@ -207,7 +224,7 @@ export const runEmit = async (argv: string[]): Promise<number> => {
   const emitArgs: Record<string, unknown> = {
     kind,
     payload,
-    context_refs: refs,
+    context_refs: [...new Set([...refs, ...evidenceRefs, ...(typeof payload.target_event_id === "string" ? [payload.target_event_id] : [])])],
     substrate_origin: substrateOrigin,
   };
   if (typeof flags.directive === "string") emitArgs.directive_id = flags.directive;
@@ -222,6 +239,7 @@ export const runEmit = async (argv: string[]): Promise<number> => {
   const summary = (typeof payload.claim === "string" ? payload.claim
     : typeof payload.summary === "string" ? payload.summary
     : typeof payload.intent === "string" ? payload.intent
+    : typeof payload.verdict === "string" ? String(payload.verdict) + " -> " + String(payload.target_event_id ?? "?")
     : "").replace(/\s+/g, " ").slice(0, 80);
   process.stdout.write(`${kind} ${newId} origin=${substrateOrigin} ${summary}\n`);
   return 0;
