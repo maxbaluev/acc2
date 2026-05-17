@@ -52,6 +52,7 @@ import { rotateAdminToken, rotateExternalToken } from "./admin_rotate";
 import { runCleanTempState } from "./admin_clean_temp";
 import { runEmbedAll } from "./admin_embed_all";
 import { runSubstrateStatus } from "./admin_substrate_status";
+import { runExportKnowledge } from "./admin_export_knowledge";
 import { runDispatchStatus } from "./admin_dispatch_status";
 import { runHotreloadStatus } from "./admin_hotreload_status";
 import { runPendingDecisions } from "./admin_pending_decisions";
@@ -73,6 +74,15 @@ const usage = (): string => `acc admin — operator-side maintenance
     export <path> [--cold] [--include-logs]
                               Snapshot the substrate state dir into a tar.gz.
     import <path> [--force]   Restore from an archive produced by export.
+
+  Cross-install sharing:
+    export-knowledge <path> [--yes]
+                              Anonymised JSON export — promoted laws /
+                              knowledge / policy bundles / recipes only.
+                              owner_input / owner_decision / owner_observed
+                              rows NEVER ship. recipe goal_text hashed.
+                              Distinct from \`export\` (which is the full
+                              state.db); --yes is the owner-approval gate.
 
   Secrets:
     rotate-admin-token        Mint a fresh admin token (write 0600 to token file).
@@ -762,6 +772,13 @@ export const runAdmin = async (argv: string[], envOverride?: AdminEnv): Promise<
   if (sub === "install-deps") return runInstallDeps(argv.slice(1));
   // Batch 3.ADMIN surfaces.
   if (sub === "export") return runExportCmd(argv.slice(1), env);
+  // 2026-05-17 (brain 5JE82MP9TN1ZB3T1DPSYWK614G distribution-readiness):
+  // anonymised cross-install knowledge export — distinct from the full
+  // state.db export above. Owner-approved (--yes); never ships
+  // owner_input/owner_decision/owner_observed rows.
+  if (sub === "export-knowledge") return runExportKnowledge(argv.slice(1), {
+    out: env.out, err: env.err, yes: env.yes,
+  });
   if (sub === "import") return runImportCmd(argv.slice(1), env);
   if (sub === "rotate-admin-token") return runRotateAdminTokenCmd(argv.slice(1), env);
   if (sub === "rotate-external-token") return runRotateExternalTokenCmd(argv.slice(1), env);
