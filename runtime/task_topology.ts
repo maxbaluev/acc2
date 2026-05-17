@@ -66,6 +66,15 @@ const computeStatus = (taskId: string, eventsByTask: Map<string, EventRow[]>): T
     else if (e.kind === "task_committed") status = "committed";
     else if (e.kind === "task_failed") status = "failed";
     else if (e.kind === "task_abandoned") status = "failed";
+    // L4.1 mirror (2026-05-17): ready_tasks_view SQL terminal CTE now
+    // suppresses both kinds; the runtime helper has to agree so
+    // schedulers / verifiers reading either surface see the same
+    // monotonic terminal vocabulary. task_committed_superseded is a
+    // committed-equivalent (the prior task's result no longer applies
+    // but it is not a failure); task_blocked is a failure-equivalent
+    // for status purposes — the task did not complete on this path.
+    else if (e.kind === "task_committed_superseded") status = "committed";
+    else if (e.kind === "task_blocked") status = "failed";
   }
   return status;
 };

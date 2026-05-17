@@ -49,10 +49,23 @@ CREATE VIEW IF NOT EXISTS task_graph_view AS
 // edge has a corresponding task_committed event on the from-task. Tasks
 // with NO incoming edges are also ready. Refinement edges ('refines') do
 // not block readiness (the new refinement target is its own ready node).
+//
+// L4.1 (2026-05-17, 7+ converging brain emissions including
+// 75RZN1N5D13CHABTT172KQGKF4, FX95XAGQ2S6B50Y4SX2E60H6C0,
+// MKVAS1YKSX58VEE1NCMRBHXH18, FZDM3PT70N6HF70QYQ601PQS5W): the terminal
+// CTE used to only suppress task_committed/task_failed/task_abandoned,
+// missing task_committed_superseded (emitted by amendment_handler when
+// an amendment supersedes a prior task) and task_blocked (registered
+// runtime kind). Without those, the scheduler re-dispatched superseded
+// or blocked work as if it were still ready. Ready rows also exposed
+// only event_id/ts/directive_id/task_id/payload — no parent_task_id,
+// no incoming-edge metadata — so Claude-side claim logic could not
+// reason about which lane (claude_inline, brain, replay) fit a given
+// leaf without a separate query. Both gaps now closed in one SQL change.
 const VIEW_READY_TASKS = `
 CREATE VIEW IF NOT EXISTS ready_tasks_view AS
   WITH nodes AS (
-    SELECT id AS event_id, ts, directive_id, task_id, payload
+    SELECT id AS event_id, ts, directive_id, task_id, parent_task_id, payload
     FROM events
     WHERE kind = 'task_node_opened'
   ),
@@ -73,12 +86,20 @@ CREATE VIEW IF NOT EXISTS ready_tasks_view AS
   committed AS (
     SELECT task_id FROM events WHERE kind = 'task_committed' GROUP BY task_id
   ),
-  -- Terminal task events that should ALSO suppress re-dispatch. Pre-Batch-2
-  -- this was committed-only; we widened to task_failed / task_abandoned to
-  -- match the Batch-1 monotone terminal-state contract in computeStatus.
+  -- L4.1 fix (2026-05-17): the terminal vocabulary now includes
+  -- task_committed_superseded (amendment_handler.ts:85 emits this when a
+  -- contract amendment replaces a prior task; pre-fix the superseded
+  -- task could re-appear in ready_tasks_view and be re-dispatched as if
+  -- still live) and task_blocked (registered in event_kinds.ts:74; once
+  -- emitted, the task should be suppressed from readiness regardless of
+  -- its requires-edge state). runtime/task_topology.ts computeStatus()
+  -- mirrors this same vocabulary so SQL view and runtime helper agree.
   terminal AS (
     SELECT task_id FROM events
-    WHERE kind IN ('task_committed', 'task_failed', 'task_abandoned')
+    WHERE kind IN (
+      'task_committed', 'task_failed', 'task_abandoned',
+      'task_committed_superseded', 'task_blocked'
+    )
     GROUP BY task_id
   ),
   -- Closed/archived directives: Batch-2 directive_closed event + the
@@ -96,7 +117,22 @@ CREATE VIEW IF NOT EXISTS ready_tasks_view AS
     WHERE e.edge_kind = 'requires'
       AND e.from_task NOT IN (SELECT task_id FROM committed)
   )
-  SELECT n.event_id, n.ts, n.directive_id, n.task_id, n.payload
+  SELECT
+    n.event_id, n.ts, n.directive_id, n.task_id, n.parent_task_id, n.payload,
+    -- L4.1 fix: surface incoming-edge provenance so scheduler + claim
+    -- logic can decide which dispatch lane / strategy fits the leaf
+    -- without re-querying. Empty JSON arrays when no incoming edges of
+    -- that kind exist on this task.
+    (
+      SELECT COALESCE(json_group_array(from_task), '[]')
+      FROM edges
+      WHERE to_task = n.task_id AND edge_kind = 'requires'
+    ) AS incoming_requires_from,
+    (
+      SELECT COALESCE(json_group_array(from_task), '[]')
+      FROM edges
+      WHERE to_task = n.task_id AND edge_kind = 'refines'
+    ) AS incoming_refines_from
   FROM nodes n
   WHERE n.task_id NOT IN (SELECT task_id FROM blocked)
     AND n.task_id NOT IN (SELECT task_id FROM terminal)
@@ -2471,7 +2507,22 @@ export type ReadyTaskRow = {
   ts: string;
   directive_id: string;
   task_id: string;
+  /** L4.1 (2026-05-17): parent in the DAG (null for roots / fresh
+   *  refinement subtrees opened with no explicit parent_task_id on the
+   *  event row). Surfaced so scheduler + claim logic can group ready
+   *  leaves by their refinement chain without an extra query. */
+  parent_task_id: string | null;
   payload: Record<string, unknown>;
+  /** L4.1 (2026-05-17): from_task ids of incoming 'requires' edges on
+   *  this task. Empty when the task has no requires-edges. The view
+   *  already enforces that every from_task in this list has committed
+   *  (otherwise the task would be in the blocked set), so consumers
+   *  can treat this purely as provenance metadata. */
+  incoming_requires_from: string[];
+  /** L4.1 (2026-05-17): from_task ids of incoming 'refines' edges on
+   *  this task. Refines edges do NOT block readiness — they document
+   *  the refinement chain — so this list is informational. */
+  incoming_refines_from: string[];
 };
 
 // Lifecycle tokens for dispatch_resolved_view.
@@ -2851,7 +2902,10 @@ export const readyTasks = (db: Database, limit?: number): ReadyTaskRow[] => {
     ts: r.ts as string,
     directive_id: r.directive_id as string,
     task_id: r.task_id as string,
+    parent_task_id: (r.parent_task_id as string | null) ?? null,
     payload: parseJson<Record<string, unknown>>(r.payload),
+    incoming_requires_from: parseJson<string[]>(r.incoming_requires_from ?? "[]"),
+    incoming_refines_from: parseJson<string[]>(r.incoming_refines_from ?? "[]"),
   }));
 };
 

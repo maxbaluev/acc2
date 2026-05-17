@@ -392,6 +392,56 @@ describe("ready_tasks_view + readyTasks", () => {
     const ready = readyTasks(db);
     expect(ready.map((r) => r.task_id)).toContain("t_lonely");
   });
+
+  // L4.1 fix verification (2026-05-17). Each test exercises one of the
+  // axes the 7+ converging knowledge candidates named:
+  //   inclusion       — ready refinement child appears
+  //   exclusion       — superseded / blocked rows are suppressed
+  //   provenance      — parent_task_id + incoming-edge metadata exposed
+  test("suppresses task_committed_superseded rows (L4.1 exclusion axis)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d1", task_id: "t_sup" });
+    insertEvent(db, { kind: "task_committed_superseded", directive_id: "d1", task_id: "t_sup" });
+    const ready = readyTasks(db);
+    expect(ready.find((r) => r.task_id === "t_sup")).toBeUndefined();
+  });
+
+  test("suppresses task_blocked rows (L4.1 exclusion axis)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d1", task_id: "t_blk" });
+    insertEvent(db, { kind: "task_blocked", directive_id: "d1", task_id: "t_blk" });
+    const ready = readyTasks(db);
+    expect(ready.find((r) => r.task_id === "t_blk")).toBeUndefined();
+  });
+
+  test("exposes parent_task_id + incoming-edge metadata (L4.1 provenance axis)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d1", task_id: "t_parent" });
+    insertEvent(db, {
+      kind: "task_node_opened",
+      directive_id: "d1",
+      task_id: "t_child",
+      parent_task_id: "t_parent",
+    });
+    insertEvent(db, { kind: "task_committed", directive_id: "d1", task_id: "t_parent" });
+    // Refines edge from parent → child documents the refinement chain.
+    insertEvent(db, {
+      kind: "task_edge_recorded",
+      directive_id: "d1",
+      task_id: "t_child",
+      payload: { from_task: "t_parent", to_task: "t_child", kind: "refines" },
+    });
+    const ready = readyTasks(db);
+    const childRow = ready.find((r) => r.task_id === "t_child");
+    expect(childRow).toBeDefined();
+    if (!childRow) return;
+    expect(childRow.parent_task_id).toBe("t_parent");
+    expect(childRow.incoming_refines_from).toEqual(["t_parent"]);
+    expect(childRow.incoming_requires_from).toEqual([]);
+  });
 });
 
 describe("dispatch_resolved_view + dispatchResolved", () => {
