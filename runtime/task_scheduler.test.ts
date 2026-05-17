@@ -370,7 +370,7 @@ describe("task_scheduler", () => {
         substrate_origin: "opencode",
         directive_id: directiveId,
         task_id: taskId,
-        payload: { reason: "mcp_handshake_failed" },
+        payload: { reason: "brain_silent_exit" },
         invoker: "opencode",
       });
     }

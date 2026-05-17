@@ -150,7 +150,7 @@ const gateKey = (taskId: string, gate: string): string => `${taskId}:${gate}`;
 /** Max consecutive `bridge_failed` events for a single task before the
  *  scheduler quarantines it with `task_failed { failure_kind:
  *  "consecutive_bridge_failures" }`. Without this cap, a structural issue
- *  (mcp_server_url_missing, mcp_handshake_failed, auth_missing) causes the
+ *  (mcp_server_url_missing, brain_silent_exit, mcp_handshake_timed_out, auth_missing) causes the
  *  scheduler to hot-loop the same task forever — every 500ms tick re-picks
  *  the same task because `readyTasks` only filters by committed/failed and
  *  no `task_failed` is ever emitted for bridge-level failures. The cap is
@@ -335,7 +335,7 @@ export const schedulerTick = async (
     // bridge_failed streak hit the cap, emit `task_failed` so it drops out of
     // `readyTasks` on the next call — the cap prevents the scheduler from
     // hot-looping a structurally broken dispatch (mcp_server_url_missing,
-    // mcp_handshake_failed, auth_missing). Operators see the failure verbatim
+    // brain_silent_exit, mcp_handshake_timed_out, auth_missing). Operators see the failure verbatim
     // in the substrate and can re-open the task once the underlying gap is
     // fixed (the next `acc task` call gets a fresh task_id).
     const failureStreak = consecutiveBridgeFailures(db, task.id);

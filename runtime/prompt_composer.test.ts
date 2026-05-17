@@ -51,10 +51,42 @@ describe("prompt_composer", () => {
     expect(composed.text.length).toBeGreaterThan(0);
     expect(estimateTokens(composed.text)).toBeLessThan(8000);
     const sectionNames = composed.sections.map((s) => s.name);
+    expect(sectionNames).toContain("exit_invariant");
     expect(sectionNames).toContain("task_goal");
     expect(sectionNames).toContain("runtimes_available");
     expect(sectionNames).toContain("workflow");
     expect(sectionNames).toContain("do_not");
+  });
+
+  test("EXIT INVARIANT is structurally pinned (load-bearing fix for brain_silent_exit, audit 2026-05-16)", () => {
+    // Foundational fix: the bridge classifier split (commit 59b2872) revealed
+    // 87% of bridge_failed events were `brain_silent_exit` — opencode running
+    // cleanly to exit_code:0 in the handshake window without invoking ANY
+    // substrate.* tool. The classifier split was step 1 (better diagnostics);
+    // this prompt-side enforcement is step 2 (prevent the failure mode at the
+    // root). The clause MUST appear, MUST be at p=0, and MUST land FIRST in
+    // section order so the brain reads "you MUST call substrate.* before exit"
+    // before anything else.
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    const composed = composePrompt(db, { taskId });
+
+    // Structural marker — must appear verbatim in rendered text.
+    expect(composed.text).toContain("EXIT INVARIANT");
+    expect(composed.text).toContain("MUST invoke at least one substrate.* tool call before exit");
+    expect(composed.text).toContain("brain_silent_exit");
+
+    // Must be p=0 (never dropped under budget pressure).
+    const exitInvariant = composed.sections.find((s) => s.name === "exit_invariant");
+    expect(exitInvariant).toBeDefined();
+    expect(exitInvariant?.priorityP).toBe(0);
+
+    // Must land FIRST in section order so the brain reads it first.
+    expect(composed.sections[0]?.name).toBe("exit_invariant");
+
+    // DO NOT block must also pin the same rule (defense-in-depth — brain
+    // reading the DO NOT block alone still sees the prohibition).
+    expect(composed.text).toContain("Exit having produced only conversational text");
   });
 
   test("returns the fixture marker for fixture_d_count_todos prompts", () => {

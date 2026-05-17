@@ -1014,6 +1014,31 @@ const NOT_DO_TEXT = [
   "  - Author canonical knowledge directly — propose candidates; substrate promotes via outcome correlation.",
   "  - Iterate within this cycle — emit a refinement edge if more work remains.",
   "  - Rebuild the environment in-context or summarize it as a substitute for substrate state; use symbolic handles + ledger mutations instead.",
+  "  - Exit having produced only conversational text. Every cycle MUST call at least one substrate.* tool (see EXIT INVARIANT). Text-only exits are scored brain_silent_exit and counted as prompt-compliance failures.",
+].join("\n");
+
+// ── EXIT INVARIANT (load-bearing, structural) ─────────────────────
+// Audit 2026-05-16 (bridge classifier split, commit 59b2872): 87% of
+// bridge_failed events were `brain_silent_exit` — opencode ran cleanly
+// to exit_code:0 in the handshake window but invoked ZERO substrate.*
+// tool calls. That is a prompt-compliance failure, not a transport
+// issue, and the root cause is that nothing in the prompt structurally
+// forbade text-only exits. This section is the structural counter:
+// every brain cycle MUST emit at least one substrate.* tool call. Placed
+// at p=0 so the budget never drops it; placed FIRST in the candidate
+// order so the brain reads it before the workflow.
+const EXIT_INVARIANT_TEXT = [
+  "EXIT INVARIANT (read this first — load-bearing):",
+  "  Every brain cycle MUST invoke at least one substrate.* tool call before exit.",
+  "  Producing only conversational text and exiting (exit_code:0 with zero substrate frames) is scored",
+  "  `brain_silent_exit` — a prompt-compliance failure, not a transport issue. The bridge will surface it",
+  "  as bridge_failed{reason=brain_silent_exit, classifier_class=prompt_compliance, frames_received_count=0}.",
+  "  Acceptable shapes that satisfy the invariant:",
+  "    A. EMIT a real ledger event: substrate.emit({kind:'task_committed'|'task_node_opened'|'task_edge_recorded'|'action_predicted'|'knowledge_candidate'|'code_artifact_candidate'|'contract_amendment_proposed'|'lesson_extracted'|...}).",
+  "    B. PEEK substrate state: substrate.read or substrate.search (counts as a tool call, but on its own does not advance the task — pair with an emit when work is real).",
+  "    C. REFINE: emit task_node_opened + task_edge_recorded with reason for why this cycle could not finish in-context.",
+  "    D. EXPLICIT NO-OP: if you truly believe no substrate change is warranted, EMIT a knowledge_candidate.payload.claim explaining WHY this directive needs no further substrate mutation, cite the directive's task_id in evidence_event_ids, and THEN exit.",
+  "  Conversational silence is NOT one of the acceptable shapes. There is no 'I have nothing to add' exit path that bypasses the substrate.",
 ].join("\n");
 
 const FIXTURE_D_MARKER = "FIXTURE: fixture_d_count_todos";
@@ -1042,6 +1067,10 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   type Candidate = { name: string; p: number; body: string };
   const candidates: Candidate[] = [];
 
+  // EXIT INVARIANT first — load-bearing structural rule against brain_silent_exit
+  // (commit 59b2872 + this fix). p=0 so it never drops; first in order so the
+  // brain reads "you MUST call substrate.* before exit" before anything else.
+  candidates.push({ name: "exit_invariant", p: 0, body: EXIT_INVARIANT_TEXT });
   candidates.push({ name: "task_goal", p: 0, body: buildTaskGoalSection(task, directiveText) });
   candidates.push({ name: "runtimes_available", p: 0, body: RUNTIMES_AVAILABLE_TEXT });
   candidates.push({ name: "workflow", p: 0, body: WORKFLOW_TEXT });
