@@ -93,6 +93,22 @@ const isBrainInvoker = (invoker: string | undefined): boolean => {
   return invoker === "opencode" || invoker === "recipe";
 };
 
+/** Detect "this emit call originated from the brain subprocess" using the
+ *  emit's declared substrate_origin OR the MCP context invoker. opencode 1.4
+ *  calls land at the daemon MCP with ctx.invoker='claude_root' (the server's
+ *  default per runtime/mcp_server/index.ts:87) — so ctx.invoker alone cannot
+ *  distinguish a brain call from an orchestrator call. The brain DOES set
+ *  `substrate_origin: 'opencode'` explicitly on every emit per the v2 prompt
+ *  grammar. Combining both signals is the canonical "is this brain?" check.
+ *  Audit 2026-05-17. */
+const isBrainEmit = (substrateOrigin: unknown, invoker: string | undefined): boolean => {
+  if (isBrainInvoker(invoker)) return true;
+  if (typeof substrateOrigin === "string" && (substrateOrigin === "opencode" || substrateOrigin === "recipe")) {
+    return true;
+  }
+  return false;
+};
+
 /** Detect directive_text that looks like a leaked prompt-composer
  *  template — the brain's prompt fed BACK as a new directive's content.
  *  Live ledger 2026-05-15 02:00-03:07 showed recursive openings whose
@@ -321,11 +337,43 @@ export const handleEmit = (
   // surfacing the tool to the brain, so flat is the dominant calling shape.
   // The wrapper shape stays for callers using the explicit `event` envelope.
   const e = args.event ?? args;
-  input.predicted_residual = e.predicted_residual;
-  input.action_artifact_id = e.action_artifact_id;
-  input.verifier_artifact_id = e.verifier_artifact_id;
+  // Brain may put act-loop fields top-level OR inside payload. Accept both.
+  const payloadObj = (input.payload && typeof input.payload === "object" && !Array.isArray(input.payload))
+    ? input.payload as Record<string, unknown>
+    : {};
+  input.predicted_residual = e.predicted_residual ?? (payloadObj.predicted_residual as number | undefined);
+  input.action_artifact_id = e.action_artifact_id ?? (payloadObj.action_artifact_id as string | undefined);
+  input.verifier_artifact_id = e.verifier_artifact_id ?? (payloadObj.verifier_artifact_id as string | undefined);
   input.outcome = e.outcome as EmitEventInput["outcome"];
   input.residual = e.residual;
+
+  // ACT-LOOP TUPLE VALIDATION (FOUNDATIONAL FIX 2026-05-17):
+  // v2-design.md §3 + §10 mandate that every action_predicted carries
+  // `intent + action_artifact_id + verifier_artifact_id + predicted_residual`.
+  // Observed brain behavior: 28 of 30 recent action_predicted events from
+  // opencode 1.4 omitted the artifact tuple, emitting only intent + free-form
+  // `verifier_axes` / `budget_estimate`. That breaks the credit chain
+  // (action → verifier → outcome → posterior update is impossible without
+  // artifact_ids) and constitutes the same k_252 "advisory pretending to be
+  // hard" violation the audit flagged. Fix: refuse action_predicted from the
+  // brain when the tuple is missing — the brain must either compose real
+  // action+verifier artifacts via substrate.admit_artifact OR use the
+  // appropriate event type (knowledge_candidate for design proposals,
+  // lesson_extracted for reusable patterns, contract_amendment_proposed for
+  // repo changes). The error message names all three escape hatches so the
+  // brain self-corrects on the next cycle.
+  if (kind === "action_predicted" && isBrainEmit(src.substrate_origin, ctx.invoker)) {
+    const missing: string[] = [];
+    if (!input.action_artifact_id) missing.push("action_artifact_id");
+    if (!input.verifier_artifact_id) missing.push("verifier_artifact_id");
+    if (typeof input.predicted_residual !== "number") missing.push("predicted_residual");
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        error: `action_predicted_missing_act_loop_tuple:${missing.join(",")};hint=action_predicted MUST carry action_artifact_id+verifier_artifact_id+predicted_residual (v2-design.md §3). For design work without a runtime artifact, emit knowledge_candidate (recommendation) or lesson_extracted (reusable pattern) instead. For repo changes, emit contract_amendment_proposed. To execute an action, first substrate.admit_artifact for BOTH the action artifact and the verifier artifact, then emit action_predicted with both IDs.`,
+      };
+    }
+  }
   const emitted = emitEvent(ctx.db, input);
   return { ok: true, result: { id: emitted.id, ts: emitted.ts } };
 };

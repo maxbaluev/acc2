@@ -151,6 +151,64 @@ describe("fastmcp substrate tools — stdio transport", () => {
     expect(got.result.predicted_residual).toBe(0.05);
   });
 
+  test("substrate.emit REFUSES brain action_predicted missing action_artifact_id / verifier_artifact_id / predicted_residual (foundational fix 2026-05-17)", async () => {
+    // ROOT CAUSE: observed 28 of 30 recent action_predicted events from the
+    // brain omitted the act-loop tuple, emitting only `intent + recommendation
+    // + verifier_axes + budget_estimate`. That breaks the credit chain (no
+    // posterior update is possible without artifact_ids) and constitutes a
+    // k_252 "advisory pretending to be hard" violation. The fix: emit gate
+    // refuses brain-invoker action_predicted that omits the canonical tuple.
+    // Brain must either compose real artifacts (substrate.admit_artifact) OR
+    // use the right event type (knowledge_candidate / lesson_extracted /
+    // contract_amendment_proposed) for design work.
+    const refused = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.emit",
+        arguments: {
+          kind: "action_predicted",
+          substrate_origin: "opencode",
+          directive_id: "d_no_tuple",
+          task_id: "t_no_tuple",
+          // NO action_artifact_id, NO verifier_artifact_id, NO predicted_residual
+          payload: { intent: "design-quality recommendation with no runtime artifact" },
+        },
+      })) as ToolCallResponse,
+    );
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("action_predicted_missing_act_loop_tuple");
+    expect(refused.error).toContain("action_artifact_id");
+    expect(refused.error).toContain("verifier_artifact_id");
+    expect(refused.error).toContain("predicted_residual");
+    // Hint must name all escape hatches so the brain self-corrects.
+    expect(refused.error).toContain("knowledge_candidate");
+    expect(refused.error).toContain("lesson_extracted");
+    expect(refused.error).toContain("contract_amendment_proposed");
+  });
+
+  test("substrate.emit accepts brain action_predicted when act-loop tuple is in payload (not top-level)", async () => {
+    // The brain often emits the tuple inside `payload.*` rather than at the
+    // top level. The validator must accept both shapes — only refuse when
+    // BOTH locations are empty.
+    const accepted = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.emit",
+        arguments: {
+          kind: "action_predicted",
+          substrate_origin: "opencode",
+          directive_id: "d_payload_tuple",
+          task_id: "t_payload_tuple",
+          payload: {
+            intent: "runtime artifact invocation",
+            action_artifact_id: "ca_in_payload",
+            verifier_artifact_id: "cv_in_payload",
+            predicted_residual: 0.2,
+          },
+        },
+      })) as ToolCallResponse,
+    );
+    expect(accepted.ok).toBe(true);
+  });
+
   test("substrate.get_event round-trips the event we just emitted", async () => {
     const emit = parseEnvelope(
       (await h!.client.callTool({
