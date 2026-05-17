@@ -158,6 +158,20 @@ describe("acc watch — Ink TUI shell", () => {
     unmount();
   });
 
+  test("hotkey 'i' opens INBOX drawer with empty buffer — no Esc required", async () => {
+    const client = stubClient();
+    const { stdin, lastFrame, unmount } = render(
+      React.createElement(App, { client, pollDisabled: true, initial: seededSnapshot() }),
+    );
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+    stdin.write("i");
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("pending_owner_decision_queue_view");
+    unmount();
+  });
+
   test("command palette emits a canonical `acc task ...` argv when the operator types into it", async () => {
     const intents: CommandIntent[] = [];
     const client = stubClient();

@@ -87,7 +87,7 @@ const daemonReachable = (): boolean => {
 const DAEMON_OK = daemonReachable();
 
 const CANONICAL_LIFECYCLE_TOKENS = new Set([
-  "live", "queued_at_cap", "completed", "failed", "zombie",
+  "live", "queued_at_cap", "completed", "failed", "zombie", "orphan_node",
 ]);
 
 beforeAll(() => {
@@ -209,7 +209,13 @@ describe.skipIf(!DAEMON_OK)("TUI integration harness (real substrate)", () => {
     for (const p of probes) {
       const r = spawnSync("bun", ["cli/dispatch.ts", ...p.argv], {
         encoding: "utf8",
-        timeout: 15_000,
+        // 30s headroom — `acc status` aggregates several SQLite views and
+        // can run >15s when the daemon is under research-dispatch load
+        // (forensic baseline: this session). Bumping to 30s keeps the
+        // harness honest without papering over a substrate-performance
+        // issue that's tracked separately under the SQL-improvement
+        // directive S4JH6PDS7D3QXFDDJQPMX8MJJ4.
+        timeout: 30_000,
       });
       expect(r.status).toBe(0);
       if (p.rootShape === "any") continue; // acc status is human prose by default

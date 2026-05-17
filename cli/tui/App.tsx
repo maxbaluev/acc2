@@ -112,6 +112,7 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
   const [toasts, setToasts] = useState<ToastEvent[]>([]);
   const [lastCommand, setLastCommand] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<ShellResult | null>(null);
+  const [paletteBuffer, setPaletteBuffer] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -176,13 +177,24 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
   }, [onCommand, exit, refresh]);
 
   useInput((input, key) => {
-    if (paletteActive) {
-      // Allow ESC to leave the palette and accept hotkeys; otherwise
-      // CommandPalette consumes the keys.
-      if (key.escape) { setPaletteActive(false); return; }
+    // Key routing model:
+    //   buffer has content  → palette owns ALL keys (typing into the
+    //                         command line). ESC clears and exits palette.
+    //   buffer is empty     → hotkey letters {i,a,p,e,h,l,q} + arrows +
+    //                         ':' fire App-level handlers. Other letters
+    //                         (typing the start of "task", "apply",
+    //                         "whoami", "changes", "decline", "directive"
+    //                         etc.) fall through so the palette accumulates
+    //                         them — without requiring ESC first.
+    const bufferEmpty = paletteBuffer.length === 0;
+    if (!bufferEmpty) {
+      if (key.escape) { setPaletteActive(false); setPaletteBuffer(""); return; }
       return;
     }
+    if (key.escape && paletteActive) { setPaletteActive(false); return; }
     if (input === ":") { setPaletteActive(true); return; }
+    // Single-letter hotkeys ONLY when buffer is empty. Any letter not in
+    // this set falls through to the palette's useInput which appends it.
     if (input === "q") { exit(); return; }
     if (input === "e") { setDrawer((d) => d === "events" ? null : "events"); return; }
     if (input === "h") { setDrawer((d) => d === "health" ? null : "health"); return; }
@@ -329,6 +341,8 @@ export const App = ({ client, onCommand, pollDisabled, initial, initialDrawer }:
         active={paletteActive}
         hint={lastCommand ? `last: ${lastCommand}` : undefined}
         onSubmit={handleCommand}
+        buffer={paletteBuffer}
+        onBufferChange={setPaletteBuffer}
       />
 
       {lastResult ? (

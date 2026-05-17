@@ -66,34 +66,49 @@ export type CommandPaletteProps = {
   active: boolean;
   hint?: string;
   onSubmit: (intent: CommandIntent) => void;
+  /** Controlled buffer so the App-level useInput can decide whether a
+   *  keystroke is a hotkey (buffer empty) or palette input (buffer
+   *  has content). The unkeyed default (buffer="") makes single-key
+   *  hotkeys reachable even while the palette has focus. */
+  buffer: string;
+  onBufferChange: (next: string) => void;
 };
 
-export const CommandPalette = ({ active, hint, onSubmit }: CommandPaletteProps): React.ReactElement => {
-  const [buffer, setBuffer] = useState("");
-
+export const CommandPalette = ({ active, hint, onSubmit, buffer, onBufferChange }: CommandPaletteProps): React.ReactElement => {
   useInput((input, key) => {
     if (!active) return;
     if (key.return) {
       const intent = parseCommand(buffer);
       onSubmit(intent);
-      setBuffer("");
+      onBufferChange("");
       return;
     }
     if (key.backspace || key.delete) {
-      setBuffer((b) => b.slice(0, -1));
+      onBufferChange(buffer.slice(0, -1));
       return;
     }
     if (key.escape) {
-      setBuffer("");
+      onBufferChange("");
       return;
     }
     if (input && !key.ctrl && !key.meta) {
-      // Accept single characters AND larger pastes (ink-testing-library
-      // delivers stdin writes as a single useInput event).
-      // Strip embedded \r so the buffer doesn't accumulate the submit
-      // newline before the key.return branch above handles it.
+      // Key-routing convention (mirrored in App.tsx):
+      //   buffer empty + input is a single-char hotkey {i,a,p,e,h,l,q,:}
+      //     → App.useInput handles; CommandPalette ignores so we don't
+      //       both append AND trigger a drawer.
+      //   buffer empty + input is anything else (start of "task",
+      //     "apply", etc.) → CommandPalette accumulates so the operator
+      //     can type a command without first pressing ESC.
+      //   buffer has content → CommandPalette accumulates everything
+      //     (any character including hotkey letters becomes part of the
+      //     command line). App.useInput defers in that branch.
       const sanitized = input.replace(/[\r\n]/g, "");
-      if (sanitized.length > 0) setBuffer((b) => b + sanitized);
+      if (sanitized.length === 0) return;
+      const HOTKEY_LETTERS = new Set(["i", "a", "p", "e", "h", "l", "q", ":"]);
+      if (buffer.length === 0 && sanitized.length === 1 && HOTKEY_LETTERS.has(sanitized)) {
+        return;
+      }
+      onBufferChange(buffer + sanitized);
     }
   }, { isActive: active });
 
