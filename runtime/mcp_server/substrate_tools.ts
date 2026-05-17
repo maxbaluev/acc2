@@ -216,6 +216,41 @@ export const handleEmit = (
     const parentTaskId = src.parent_task_id as string | null | undefined;
     const goalRaw = ((src.payload as Record<string, unknown> | undefined)?.goal) ?? undefined;
     const goal = typeof goalRaw === "string" ? goalRaw : undefined;
+    // Closed-directive emission gate (2026-05-17): refuse new
+    // task_node_opened emissions under a directive that's already
+    // closed/archived. Live evidence: 74 production directives had
+    // directive_closed reason=all_tasks_terminal AND undispatched
+    // task_nodes — the brain (or some emitter) opened new tasks AFTER
+    // closure, creating stragglers that never run. The view-side fix
+    // in dbd8f69 reclassifies the existing 216 stragglers as
+    // 'abandoned'; this producer-side gate prevents NEW ones.
+    if (directiveId) {
+      // Determine whether the directive's LATEST lifecycle event is a
+      // closure or a resume. Use (ts, rowid) ordering so two events
+      // inserted in the same millisecond still compare deterministically
+      // (matches the closedDirectiveIds semantics in
+      // runtime/directive_closure.ts:54-72 which iterates by ts then
+      // rowid implicitly via SQLite insertion order).
+      const latest = ctx.db
+        .query(
+          `SELECT kind FROM events
+           WHERE directive_id = ?
+             AND kind IN (
+               'directive_closed',
+               'directive_archived_by_operator',
+               'directive_archived_missed_reviews',
+               'directive_resumed'
+             )
+           ORDER BY ts DESC, rowid DESC LIMIT 1`,
+        )
+        .get(directiveId) as { kind: string } | null;
+      if (latest && latest.kind !== "directive_resumed") {
+        return {
+          ok: false,
+          error: `closed_directive_emit_refused:${directiveId};closure_kind=${latest.kind};hint=open a new directive (acc task) or emit directive_resumed first if the work was prematurely closed — the substrate refuses new task_node_opened emissions under a closed/archived DAG to prevent straggler accumulation`,
+        };
+      }
+    }
     // Audit-#8 (2026-05-15): the brain has been observed reusing the root
     // task_id when opening refinement CHILDREN — directive 97DNBDA4P93N
     // had 4 task_node_opened rows all carrying the same task_id but

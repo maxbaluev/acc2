@@ -357,3 +357,59 @@ describe("handleEmit — knowledge_candidate emit-time dedup gate (δ-mem follow
     });
   });
 });
+
+describe("handleEmit — closed-directive emit gate (2026-05-17, straggler prevention)", () => {
+  test("refuses task_node_opened on a directive_closed directive", () => {
+    const db = openDb(":memory:");
+    const opened = handleOpenDirective(ctx(db), { directive_text: "host" } as never);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
+    // Close it.
+    const close = handleEmit(ctx(db), { kind: "directive_closed", directive_id: directiveId, payload: { reason: "test_close" } } as never);
+    expect(close.ok).toBe(true);
+    // Now try to open a new task under the closed directive.
+    const t = handleEmit(ctx(db), {
+      kind: "task_node_opened",
+      directive_id: directiveId,
+      task_id: "t_late",
+      payload: { goal: "should-be-rejected" },
+    } as never);
+    expect(t.ok).toBe(false);
+    if (!t.ok) expect(t.error).toContain("closed_directive_emit_refused");
+  });
+
+  test("refuses task_node_opened on a directive_archived_by_operator directive", () => {
+    const db = openDb(":memory:");
+    const opened = handleOpenDirective(ctx(db), { directive_text: "host2" } as never);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
+    handleEmit(ctx(db), { kind: "directive_archived_by_operator", directive_id: directiveId, payload: { reason: "owner_close" } } as never);
+    const t = handleEmit(ctx(db), {
+      kind: "task_node_opened",
+      directive_id: directiveId,
+      task_id: "t_late_owner",
+      payload: { goal: "blocked-by-owner-archive" },
+    } as never);
+    expect(t.ok).toBe(false);
+    if (!t.ok) expect(t.error).toContain("closed_directive_emit_refused");
+  });
+
+  test("accepts task_node_opened after a directive_resumed revives the directive", () => {
+    const db = openDb(":memory:");
+    const opened = handleOpenDirective(ctx(db), { directive_text: "host3" } as never);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
+    handleEmit(ctx(db), { kind: "directive_closed", directive_id: directiveId, payload: { reason: "premature" } } as never);
+    handleEmit(ctx(db), { kind: "directive_resumed", directive_id: directiveId, payload: { reason: "owner_resumed" } } as never);
+    const t = handleEmit(ctx(db), {
+      kind: "task_node_opened",
+      directive_id: directiveId,
+      task_id: "t_revived",
+      payload: { goal: "after-resume" },
+    } as never);
+    expect(t.ok).toBe(true);
+  });
+});
