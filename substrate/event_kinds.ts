@@ -568,3 +568,98 @@ export const MIRROR_INLINE_EVENT_TYPES: ReadonlySet<EventKind> = new Set(
     .filter(([, m]) => m.mirror_inline)
     .map(([k]) => k),
 );
+
+// ────────────────────────────────────────────────────────────────────
+//  HOT-RELOAD INDIRECTION (2026-05-17, owner directive)
+//
+//  Pre-this-commit the daemon hot-reloaded substrate/event_kinds.ts
+//  successfully but no consumer noticed: runtime/events.ts and
+//  runtime/mcp_server/substrate_tools.ts both did
+//  `import { EVENT_KINDS }` at module load and captured the OLD
+//  reference. Every reload was a daemon_hotreload_no_op semantically
+//  per the truth-in-audit principle (lesson PBY1A4BTK93QVF +
+//  knowledge KXFD7GXSAH6S18: "extend hotreload_manifest strategies
+//  and call-site indirection before proposing supervisor/process
+//  work").
+//
+//  Fix: a synchronous indirection backed by a module-level mutable
+//  ref + a registered reloadable that updates the ref on successful
+//  reload. Validators call getCurrentEventKinds() and always see the
+//  freshest accepted map. Cost is one extra function call per emit
+//  validation — orders of magnitude cheaper than the daemon restart
+//  that was previously required to teach the substrate a new kind.
+//
+//  Self-registration mirrors the prompt_composer.ts pattern. The
+//  hot-reload worker's reloadable_slot lookup wires
+//  manifest:substrate_event_kinds → this self-register entry → the
+//  cache-busted import → validate() (shape) → swap → cached_kinds
+//  is the new reference → every validator on the next emit sees it.
+//
+//  Truth-in-audit: the manifest now declares reloadable_slot:
+//  "substrate_event_kinds" so a successful reload swaps the slot
+//  AND surfaces version on the next daemon_hotreload_completed
+//  event. Failed reloads (e.g. malformed registry) keep the
+//  previous cached_kinds via reloadable.ts rollback semantics.
+
+let cachedKinds: typeof EVENT_KINDS = EVENT_KINDS;
+
+/** Synchronous accessor — every validator must read EVENT_KINDS
+ *  through this function instead of capturing the import-time
+ *  reference. Hot-reload swaps the underlying map; the next call
+ *  sees the new kind without a daemon restart. */
+export const getCurrentEventKinds = (): typeof EVENT_KINDS => cachedKinds;
+
+/** Hot-reload swap point. The reloadable registry calls this after a
+ *  successful load + validate so subsequent getCurrentEventKinds()
+ *  calls return the new map. Exposed for tests + the registry only. */
+export const __setEventKindsForReload = (fresh: typeof EVENT_KINDS): void => {
+  cachedKinds = fresh;
+};
+
+// Self-register with the reloadable registry. Mirror of the
+// prompt_composer.ts pattern. The smokeProbe asserts the loaded
+// module exposes the three expected exports + at least one kind that
+// existed at boot (sanity check the dynamic import didn't return an
+// empty / unrelated object).
+import { registerReloadable } from "../runtime/reloadable";
+registerReloadable<{
+  EVENT_KINDS: typeof EVENT_KINDS;
+  EMBEDDABLE_KINDS: typeof EMBEDDABLE_KINDS;
+  HEALTH_METRIC_KINDS: typeof HEALTH_METRIC_KINDS;
+}>({
+  name: "substrate_event_kinds",
+  load: async (cacheBustUrl) => {
+    if (cacheBustUrl) {
+      const mod = await import(cacheBustUrl);
+      // After import, update the local cache so consumers see
+      // the new kinds on the next validation call.
+      if (mod.EVENT_KINDS && typeof mod.EVENT_KINDS === "object") {
+        cachedKinds = mod.EVENT_KINDS as typeof EVENT_KINDS;
+      }
+      return mod as {
+        EVENT_KINDS: typeof EVENT_KINDS;
+        EMBEDDABLE_KINDS: typeof EMBEDDABLE_KINDS;
+        HEALTH_METRIC_KINDS: typeof HEALTH_METRIC_KINDS;
+      };
+    }
+    return { EVENT_KINDS, EMBEDDABLE_KINDS, HEALTH_METRIC_KINDS };
+  },
+  validate: (mod) => {
+    if (!mod.EVENT_KINDS || typeof mod.EVENT_KINDS !== "object") return "missing EVENT_KINDS export";
+    if (!Array.isArray(mod.EMBEDDABLE_KINDS)) return "missing EMBEDDABLE_KINDS export";
+    if (!Array.isArray(mod.HEALTH_METRIC_KINDS)) return "missing HEALTH_METRIC_KINDS export";
+    // Sanity: at least one kind that existed at boot must still be
+    // present (catches a dynamic import returning the wrong object).
+    if (!("directive_opened" in mod.EVENT_KINDS)) return "EVENT_KINDS missing 'directive_opened' — wrong module?";
+    return true;
+  },
+  smokeProbe: (mod) => {
+    try {
+      const kinds = Object.keys(mod.EVENT_KINDS);
+      if (kinds.length < 50) return { ok: false, error: `EVENT_KINDS suspiciously small (${kinds.length} entries)` };
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  },
+});

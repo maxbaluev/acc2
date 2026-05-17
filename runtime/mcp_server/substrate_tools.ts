@@ -8,7 +8,7 @@
 
 import type { z } from "zod";
 import type { JsonValue, Runtime, SandboxDecl, SubstrateOrigin } from "../../substrate/types";
-import { EVENT_KINDS } from "../../substrate/event_kinds";
+import { EVENT_KINDS, getCurrentEventKinds } from "../../substrate/event_kinds";
 import { emitEvent, getEventById, type EmitEventInput } from "../events";
 import { summarizeEffectiveness } from "../brain_effectiveness";
 import { runBunArtifact } from "../runtimes/bun";
@@ -183,7 +183,13 @@ export const handleEmit = (
   // string and bypass the embedding filter, health-metric tagging,
   // mirror-inline classification, and downstream view filters. The
   // registry is the only safe vocabulary.
-  if (!(kind in EVENT_KINDS)) {
+  // Hot-reload (2026-05-17): read through getCurrentEventKinds() so kinds
+  // registered after a hot-reload of substrate/event_kinds.ts become
+  // emittable via MCP without a daemon restart. The captured EVENT_KINDS
+  // binding is import-time-frozen and would reject kinds added after
+  // boot otherwise — proven blocker for the just-added
+  // pre_apply_adjudication_recorded + runtime_self_diagnostic_recorded.
+  if (!(kind in getCurrentEventKinds())) {
     return {
       ok: false,
       error: `unknown_event_kind:${kind}; register it in substrate/event_kinds.ts EVENT_KINDS before emitting`,

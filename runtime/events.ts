@@ -6,7 +6,7 @@
 
 import type { Database } from "bun:sqlite";
 import type { Event, EventKind, JsonValue, SubstrateOrigin } from "../substrate/types";
-import { EVENT_KINDS } from "../substrate/event_kinds";
+import { EVENT_KINDS, getCurrentEventKinds } from "../substrate/event_kinds";
 import { newId, nowIso } from "./ids";
 import { publishEvent } from "./event_bus";
 import { publishActivation } from "./activation_bus";
@@ -314,7 +314,13 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // under the convention plus the explicit ACC2_BRIDGE_MODE=mock env that
   // tests/preload.ts pins. Production daemon (no env, no `*_test_*` kind)
   // gets the strict gate.
-  if (!(input.kind in EVENT_KINDS)) {
+  // Hot-reload (2026-05-17): consult the live cachedKinds map through
+  // getCurrentEventKinds() so kinds registered after a substrate/event_kinds.ts
+  // swap (via runtime/reloadable.ts) become valid without a daemon restart.
+  // Importing EVENT_KINDS captures the value at module-load time; that
+  // binding cannot be updated, but getCurrentEventKinds() reads the
+  // mutable cache the reloadable slot swaps.
+  if (!(input.kind in getCurrentEventKinds())) {
     const isTestKind = typeof input.kind === "string" && input.kind.includes("_test_");
     const isTestMode = process.env.ACC2_BRIDGE_MODE === "mock" || process.env.NODE_ENV === "test";
     if (!isTestKind && !isTestMode) {
