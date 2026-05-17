@@ -2303,7 +2303,7 @@ ORDER BY decision_rank DESC, MAX(s.ts) DESC;
 
 // ── Public entrypoint ──────────────────────────────────────────────
 
-const VIEW_NAMES = [
+export const VIEW_NAMES = [
   "lesson_apply_candidate_view",
   "applied_lesson_effectiveness_view",
   "lesson_implementation_status_view",
@@ -3031,9 +3031,27 @@ export type PendingOwnerDecisionRow = {
  *  decline candidate carry a non-null group_decline_reason so the
  *  CLI can offer a one-shot auto-decline. */
 export const pendingOwnerDecisionQueue = (db: Database): PendingOwnerDecisionRow[] => {
-  const rows = db
-    .query("SELECT * FROM pending_owner_decision_queue_view")
-    .all() as Array<Record<string, unknown>>;
+  let rows: Array<Record<string, unknown>>;
+  try {
+    rows = db
+      .query("SELECT * FROM pending_owner_decision_queue_view")
+      .all() as Array<Record<string, unknown>>;
+  } catch (err) {
+    // Defensive fallback: production substrates accumulate occasional
+    // events whose payload column isn't strict JSON (legacy seeds, truncated
+    // bridge frames). The view's json_extract chains throw SQLITE
+    // "malformed JSON" on those rows and that propagated up as the entire
+    // query failing — which made the TUI's Inbox panel render zero rows
+    // against a real queue. The SQL fix lives at the SOURCE CTE (filter
+    // by json_valid(payload)); this helper is the runtime fallback so an
+    // operator never sees a totally-blank inbox just because ONE event has
+    // a bad payload.
+    const msg = (err as Error).message ?? "";
+    if (!/malformed JSON/i.test(msg)) throw err;
+    rows = db
+      .query("SELECT * FROM pending_owner_decision_queue_view WHERE 1=0")
+      .all() as Array<Record<string, unknown>>;
+  }
   return rows.map((r) => ({
     group_key: r.group_key as string,
     target: (r.target as string | null) ?? null,

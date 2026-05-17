@@ -395,6 +395,10 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     const { runWhoami } = await import("./whoami");
     return runWhoami(argv.slice(1));
   }
+  if (cmd === "changes") {
+    const { runChanges } = await import("./changes");
+    return runChanges(argv.slice(1));
+  }
   if (cmd === "events" || cmd === "tail" || cmd === "graph" || cmd === "inspect") {
     const { runObserve } = await import("./observe");
     return runObserve(cmd, argv.slice(1));
