@@ -22,6 +22,7 @@ import {
   ownerRenderingPolicy,
   ownerAlignmentActionPolicy,
   ownerStateBelief,
+  retrievalCredit,
   promotedKnowledge,
   readyTasks,
   recipeRegistry,
@@ -2351,6 +2352,90 @@ describe("owner_plain_status_view + ownerPlainStatus", () => {
     expect(b.recent_avg_prediction_error).toBeCloseTo(0.5, 5);
   });
 
+  test("retrieval_credit_view classifies bindings by effectiveness_band (Phase I1)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    // 1. unused binding (emitted, never cited)
+    const unusedBinding = insertEvent(db, {
+      kind: "retrieval_binding",
+      directive_id: "d_rc",
+      task_id: "t_rc",
+      ts: nowIso(),
+      payload: { query: "noop", source_event_id: "SRC1", binding_surface: "prompt", rank: 1 },
+    });
+    // 2. rejected binding (emitted, LM rejected)
+    const rejectedBinding = insertEvent(db, {
+      kind: "retrieval_binding",
+      directive_id: "d_rc",
+      task_id: "t_rc",
+      ts: nowIso(),
+      payload: { query: "off_task", source_event_id: "SRC2", binding_surface: "prompt", rank: 2 },
+    });
+    insertEvent(db, {
+      kind: "retrieval_rejected",
+      directive_id: "d_rc",
+      task_id: "t_rc",
+      ts: nowIso(),
+      payload: { retrieval_binding_event_id: rejectedBinding, reason: "off_task", rejected_by: "brain" },
+    });
+    // 3. positive binding (cited by a low-residual action_scored)
+    const positiveBinding = insertEvent(db, {
+      kind: "retrieval_binding",
+      directive_id: "d_rc",
+      task_id: "t_rc",
+      ts: nowIso(),
+      payload: { query: "useful", source_event_id: "SRC3", binding_surface: "prompt", rank: 1 },
+    });
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_rc",
+      task_id: "t_rc",
+      ts: nowIso(),
+      payload: { gate_kind: "auto_apply_gate" },
+      context_refs: [positiveBinding, "SRC3"],
+      residual: 0.05,
+    });
+    // 4. negative binding (cited by high-residual scores)
+    const negativeBinding = insertEvent(db, {
+      kind: "retrieval_binding",
+      directive_id: "d_rc",
+      task_id: "t_rc",
+      ts: nowIso(),
+      payload: { query: "misleading", source_event_id: "SRC4", binding_surface: "prompt", rank: 1 },
+    });
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_rc",
+      task_id: "t_rc",
+      ts: nowIso(),
+      payload: {},
+      context_refs: [negativeBinding],
+      residual: 0.7,
+    });
+    const rows = retrievalCredit(db, { directive_id: "d_rc" });
+    const byId = Object.fromEntries(rows.map((r) => [r.retrieval_binding_event_id, r]));
+    expect(byId[unusedBinding]?.effectiveness_band).toBe("unused");
+    expect(byId[rejectedBinding]?.effectiveness_band).toBe("rejected");
+    expect(byId[rejectedBinding]?.times_rejected).toBe(1);
+    expect(byId[positiveBinding]?.effectiveness_band).toBe("positive");
+    expect(byId[positiveBinding]?.times_cited).toBe(1);
+    expect(byId[positiveBinding]?.avg_cited_residual).toBeCloseTo(0.05, 5);
+    expect(byId[negativeBinding]?.effectiveness_band).toBe("negative");
+    expect(byId[negativeBinding]?.avg_cited_residual).toBeCloseTo(0.7, 5);
+  });
+
+  test("retrieval_credit_view filter by effectiveness_band returns only the requested band", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const b1 = insertEvent(db, { kind: "retrieval_binding", directive_id: "d_rcf", task_id: "t_rcf", ts: nowIso(), payload: { query: "a", source_event_id: "SRCA" } });
+    insertEvent(db, { kind: "action_scored", directive_id: "d_rcf", task_id: "t_rcf", ts: nowIso(), payload: {}, context_refs: [b1], residual: 0.1 });
+    insertEvent(db, { kind: "retrieval_binding", directive_id: "d_rcf", task_id: "t_rcf", ts: nowIso(), payload: { query: "b", source_event_id: "SRCB" } });
+    const positive = retrievalCredit(db, { directive_id: "d_rcf", band: "positive" });
+    const unused = retrievalCredit(db, { directive_id: "d_rcf", band: "unused" });
+    expect(positive.length).toBe(1);
+    expect(unused.length).toBe(1);
+  });
+
   test("owner_alignment_action_policy_view joins alignment_action × prediction_error × belief (Phase H5)", () => {
     const db = openDb(":memory:");
     runViews(db);
@@ -2523,6 +2608,53 @@ describe("owner_plain_status_view + ownerPlainStatus", () => {
     });
     const b = ownerStateBelief(db)!;
     expect(b.is_stale).toBe(true);
+  });
+
+  test("owner_state_belief_view synthesizes evidence refs and uncertainty before explicit hypothesis", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const input = insertEvent(db, {
+      kind: "owner_input_received",
+      directive_id: "d_evidence",
+      task_id: "t_evidence",
+      ts: nowIso(),
+      payload: { text: "This is too much; just show the decision." },
+    });
+    const decision = insertEvent(db, {
+      kind: "owner_decision_recorded",
+      directive_id: "d_evidence",
+      task_id: "t_evidence",
+      ts: nowIso(),
+      payload: { decision: "approved" },
+    });
+    const correction = insertEvent(db, {
+      kind: "owner_rendering_feedback_recorded",
+      directive_id: "d_evidence",
+      task_id: "t_evidence",
+      ts: nowIso(),
+      payload: { feedback_kind: "correction", evidence: "owner rephrased" },
+    });
+    insertEvent(db, {
+      kind: "task_deferred_for_interference",
+      directive_id: "d_evidence",
+      task_id: "t_evidence",
+      ts: nowIso(),
+      payload: { reason: "blocked by other directive" },
+    });
+    const b = ownerStateBelief(db)!;
+    expect(b).not.toBeNull();
+    expect(b.hypothesis_event_id).toBeNull();
+    expect(b.belief_source).toBe("evidence_synthesized");
+    expect(b.observation_refs).toContain(input);
+    expect(b.evidence_refs).toContain(decision);
+    expect(b.evidence_refs).toContain(correction);
+    expect(b.evidence_counts.owner_input).toBe(1);
+    expect(b.evidence_counts.decision).toBe(1);
+    expect(b.evidence_counts.correction).toBe(1);
+    expect(b.evidence_counts.task_delay).toBe(1);
+    expect(b.uncertainty).toBeGreaterThanOrEqual(0.75);
+    expect(b.decayed_uncertainty).toBeGreaterThanOrEqual(b.uncertainty);
+    expect(b.temporal_decay_factor).toBeGreaterThan(0.9);
   });
 
   test("primary surfaces NEVER include event_ids — IDs surface only via detail_refs for drilldown", () => {

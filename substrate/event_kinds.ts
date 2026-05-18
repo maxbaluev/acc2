@@ -137,6 +137,37 @@ export const EVENT_KINDS = {
   // binding id, credit resolves binding → source_event_id, posterior
   // updates on the cited candidate/promoted row.
   retrieval_binding:                       { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // ── RLM credit loop (brain knowledge_candidate KZE8EXYFWH7C, task_node
+  //    FX9PZDQ3W932 — RLM_RETRIEVAL_ACTS_MIN_LEAP, 2026-05-18). The
+  //    contraction-first slice: make retrieval credit observable so the
+  //    substrate can DETECT which retrievals actually changed outcomes
+  //    vs which were decorative. Two new event kinds:
+  //
+  //    retrieval_credit_attributed (substrate-emitted) — fires when an
+  //    action_scored row carries low residual AND cites one-or-more
+  //    retrieval_bindings via context_refs. Attributes credit per
+  //    binding by Shapley-style equal-weight division (1/N per cited
+  //    binding when N bindings were cited) modulated by polarity
+  //    (negative residual → debit; positive → credit). Payload:
+  //      { retrieval_binding_event_id, action_scored_event_id,
+  //        contribution_score, polarity, residual_at_score,
+  //        knowledge_source_event_id, projection_key }
+  //    Idempotency: projection_key = retrieval_binding_event_id +
+  //                 ":credit:" + action_scored_event_id ensures one
+  //                 credit row per (binding, score) pair even on replay.
+  //
+  //    retrieval_rejected (brain or claude-emitted) — when a renderer
+  //    or brain reads a retrieval_binding and decides it does NOT
+  //    contribute (low relevance, contradicts task, owner-declined
+  //    concept), it emits this event so the rejection is visible.
+  //    Without rejection events, retrievals show "binding exists" but
+  //    the substrate can't tell "was the LM forced to ignore it?"
+  //    Payload:
+  //      { retrieval_binding_event_id, reason, rejected_by, evidence_ref? }
+  //    reason is open-ended (k_201): low_similarity, off_task,
+  //    declined_concept, contradicts_belief, etc.
+  retrieval_credit_attributed:             { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  retrieval_rejected:                      { producer: "both",      embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   // Substrate-authored when a retrieval_binding injects knowledge from one
   // directive into another directive's prompt/search surface. This makes
   // implicit cross-directive transfer auditable and creditable without

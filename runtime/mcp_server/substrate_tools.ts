@@ -47,6 +47,7 @@ import {
   ownerPlainStatus,
   ownerStateBelief,
   ownerAlignmentActionPolicy,
+  retrievalCredit,
   lowRiskInlinePatterns,
   lessonImplementerQueue,
   pendingOwnerDecisionQueue,
@@ -716,6 +717,19 @@ export const handleRead = (
         // CY7E62DSNX1DZ1BTD56845D994. Returns null when no
         // owner_state_hypothesis_recorded row exists yet.
         return { ok: true, result: ownerStateBelief(db) as unknown as JsonValue };
+      }
+      case "retrieval_credit_view": {
+        // Phase I1: RLM retrieval credit observability. Args:
+        // { directive_id?, band?, limit? }. band ∈ {unused, rejected,
+        // positive, mixed, negative}.
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        const band = typeof arg.band === "string" ? arg.band as "unused" | "rejected" | "positive" | "mixed" | "negative" : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return {
+          ok: true,
+          result: retrievalCredit(db, { directive_id: directiveId, band, limit }) as unknown as JsonValue,
+        };
       }
       case "owner_alignment_action_policy_view": {
         // Phase H5: recent alignment_action_selected × paired

@@ -525,6 +525,51 @@ CREATE VIEW IF NOT EXISTS owner_state_belief_view AS
     ORDER BY ts DESC
     LIMIT 1
   ),
+  recent_evidence AS (
+    SELECT
+      id,
+      ts,
+      kind,
+      CASE
+        WHEN kind = 'owner_input_received' THEN 'owner_input'
+        WHEN kind = 'owner_decision_recorded' THEN 'decision'
+        WHEN kind = 'owner_observed_outcome_recorded' THEN 'observed_outcome'
+        WHEN kind = 'owner_rendering_feedback_recorded'
+          AND json_extract(payload, '$.feedback_kind') IN ('correction','correction_explicit','correction_implicit') THEN 'correction'
+        WHEN kind = 'owner_rendering_feedback_recorded'
+          AND json_extract(payload, '$.feedback_kind') IN ('decline','declined','rejected','refusal','manual_override') THEN 'refusal'
+        WHEN kind = 'owner_rendering_feedback_recorded' THEN 'rendering_feedback'
+        WHEN kind IN ('task_deferred_for_interference','task_blocked') THEN 'task_delay'
+        WHEN kind IN ('owner_input_required','hidl_action_required') THEN 'clarification_or_gate'
+        WHEN kind IN ('task_failed','dispatcher_violation')
+          AND (failure_kind LIKE '%refus%' OR json_extract(payload, '$.reason') LIKE '%refus%') THEN 'refusal'
+        ELSE 'other'
+      END AS evidence_class
+    FROM events
+    WHERE kind IN (
+      'owner_input_received','owner_decision_recorded','owner_observed_outcome_recorded',
+      'owner_rendering_feedback_recorded','task_deferred_for_interference','task_blocked',
+      'owner_input_required','hidl_action_required','task_failed','dispatcher_violation'
+    )
+      AND ts > datetime('now', '-30 days')
+  ),
+  evidence_agg AS (
+    SELECT
+      COUNT(*) AS evidence_count,
+      MAX(ts) AS latest_evidence_ts,
+      COALESCE((SELECT json_group_array(id) FROM (SELECT id FROM recent_evidence ORDER BY ts DESC LIMIT 24)), '[]') AS evidence_refs,
+      json_object(
+        'owner_input', COALESCE(SUM(CASE WHEN evidence_class = 'owner_input' THEN 1 ELSE 0 END), 0),
+        'decision', COALESCE(SUM(CASE WHEN evidence_class = 'decision' THEN 1 ELSE 0 END), 0),
+        'observed_outcome', COALESCE(SUM(CASE WHEN evidence_class = 'observed_outcome' THEN 1 ELSE 0 END), 0),
+        'rendering_feedback', COALESCE(SUM(CASE WHEN evidence_class = 'rendering_feedback' THEN 1 ELSE 0 END), 0),
+        'correction', COALESCE(SUM(CASE WHEN evidence_class = 'correction' THEN 1 ELSE 0 END), 0),
+        'task_delay', COALESCE(SUM(CASE WHEN evidence_class = 'task_delay' THEN 1 ELSE 0 END), 0),
+        'refusal', COALESCE(SUM(CASE WHEN evidence_class = 'refusal' THEN 1 ELSE 0 END), 0),
+        'clarification_or_gate', COALESCE(SUM(CASE WHEN evidence_class = 'clarification_or_gate' THEN 1 ELSE 0 END), 0)
+      ) AS evidence_counts
+    FROM recent_evidence
+  ),
   recent_err AS (
     SELECT
       COUNT(*) AS recent_prediction_error_count,
@@ -536,30 +581,56 @@ CREATE VIEW IF NOT EXISTS owner_state_belief_view AS
     FROM events
     WHERE kind = 'owner_state_prediction_error_recorded'
       AND ts > datetime('now', '-14 days')
+  ),
+  base AS (
+    SELECT
+      h.*,
+      a.evidence_count,
+      a.latest_evidence_ts,
+      a.evidence_refs,
+      a.evidence_counts,
+      COALESCE(h.hypothesis_ts, a.latest_evidence_ts) AS belief_ts,
+      CASE WHEN h.hypothesis_event_id IS NULL THEN 'evidence_synthesized' ELSE 'explicit_hypothesis' END AS belief_source
+    FROM evidence_agg a
+    LEFT JOIN latest_hyp h ON 1 = 1
   )
   SELECT
-    h.hypothesis_event_id,
-    h.hypothesis_ts,
-    h.hypothesis_origin,
-    json_extract(h.hypothesis_payload, '$.latent_state') AS latent_state_payload,
-    json_extract(h.hypothesis_payload, '$.confidence')   AS confidence,
-    json_extract(h.hypothesis_payload, '$.observation_refs') AS observation_refs,
-    json_extract(h.hypothesis_payload, '$.decay_after_iso')  AS decay_after_iso,
-    CAST(COALESCE(json_extract(h.hypothesis_payload, '$.uncertainty'), 0.5) AS REAL) AS uncertainty,
+    b.hypothesis_event_id,
+    b.hypothesis_ts,
+    b.hypothesis_origin,
+    b.belief_source,
+    CASE
+      WHEN b.hypothesis_payload IS NOT NULL THEN json_extract(b.hypothesis_payload, '$.latent_state')
+      WHEN b.evidence_count > 0 THEN json_object('evidence_summary', 'recent owner evidence present; explicit latent-state hypothesis not recorded yet')
+      ELSE NULL
+    END AS latent_state_payload,
+    CASE
+      WHEN b.hypothesis_payload IS NOT NULL THEN json_extract(b.hypothesis_payload, '$.confidence')
+      WHEN b.evidence_count > 0 THEN json_object('evidence_summary', MIN(0.6, 0.2 + (b.evidence_count * 0.05)))
+      ELSE NULL
+    END AS confidence,
+    COALESCE(json_extract(b.hypothesis_payload, '$.observation_refs'), b.evidence_refs, '[]') AS observation_refs,
+    b.evidence_refs,
+    b.evidence_counts,
+    b.evidence_count,
+    json_extract(b.hypothesis_payload, '$.decay_after_iso') AS decay_after_iso,
+    CAST(COALESCE(json_extract(b.hypothesis_payload, '$.uncertainty'), CASE WHEN b.evidence_count > 0 THEN 0.75 ELSE 0.5 END) AS REAL) AS uncertainty,
     e.recent_prediction_error_count,
     e.recent_avg_prediction_error,
-    -- belief_age_ms: cast(now - hypothesis_ts) into ms via julianday.
-    CAST(
-      (julianday('now') - julianday(h.hypothesis_ts)) * 86400.0 * 1000.0
-      AS INTEGER
-    ) AS belief_age_ms,
+    CAST((julianday('now') - julianday(b.belief_ts)) * 86400.0 * 1000.0 AS INTEGER) AS belief_age_ms,
+    MAX(0.0, MIN(1.0, 1.0 - ((julianday('now') - julianday(b.belief_ts)) / 14.0))) AS temporal_decay_factor,
+    MIN(1.0, CAST(COALESCE(json_extract(b.hypothesis_payload, '$.uncertainty'), CASE WHEN b.evidence_count > 0 THEN 0.75 ELSE 0.5 END) AS REAL) + ((1.0 - MAX(0.0, MIN(1.0, 1.0 - ((julianday('now') - julianday(b.belief_ts)) / 14.0)))) * 0.5)) AS decayed_uncertainty,
     CASE
-      WHEN json_extract(h.hypothesis_payload, '$.decay_after_iso') IS NOT NULL
-        AND datetime(json_extract(h.hypothesis_payload, '$.decay_after_iso')) < datetime('now')
-      THEN 1 ELSE 0
+      WHEN json_extract(b.hypothesis_payload, '$.decay_after_iso') IS NOT NULL
+        AND datetime(json_extract(b.hypothesis_payload, '$.decay_after_iso')) < datetime('now')
+      THEN 1
+      WHEN b.belief_ts IS NOT NULL AND datetime(b.belief_ts) < datetime('now', '-14 days')
+      THEN 1
+      ELSE 0
     END AS is_stale
-  FROM latest_hyp h
-  LEFT JOIN recent_err e;
+  FROM base b
+  LEFT JOIN recent_err e
+  WHERE b.hypothesis_event_id IS NOT NULL OR b.evidence_count > 0;
 `;
 
 // owner_alignment_action_policy_view — recent alignment_action_selected
@@ -657,6 +728,125 @@ CREATE VIEW IF NOT EXISTS owner_alignment_action_policy_view AS
 //                                detail-drawer field; primary surfaces hide)
 //   - detail_refs               (event ids the operator can open if asked)
 //   - last_event_ts             (for sorting)
+// retrieval_credit_view — for each retrieval_binding emitted in the
+// last 14 days, surface how many action_scored rows cited it and the
+// average residual of those scores. Brain task FX9PZDQ3W932
+// (RLM_RETRIEVAL_ACTS_MIN_LEAP, 2026-05-18). This is the contraction-
+// first observability layer for retrieval credit; learned retrieval +
+// rejection policy can build on top of it once the data exists.
+//
+// Shape (one row per retrieval_binding):
+//   - retrieval_binding_event_id
+//   - retrieval_ts, source_event_id, knowledge_source_kind
+//   - query, binding_surface, rank
+//   - times_cited                   — count of action_scored rows that
+//                                     reference this binding via context_refs
+//   - avg_cited_residual            — mean residual across those scores
+//                                     (NULL if 0 cites)
+//   - times_rejected                — count of retrieval_rejected rows
+//   - effectiveness_band            — open-ended classification:
+//       'unused'    (0 cites, no rejection)
+//       'rejected'  (0 cites + 1+ rejections — LM read but declined)
+//       'positive'  (1+ cites, avg residual < 0.2)
+//       'mixed'     (1+ cites, avg residual 0.2..0.4)
+//       'negative'  (1+ cites, avg residual >= 0.4)
+//   - credit_attributed_count       — count of retrieval_credit_attributed
+//                                     rows for this binding (substrate's
+//                                     own attributions for closure)
+const VIEW_RETRIEVAL_CREDIT = `
+CREATE VIEW IF NOT EXISTS retrieval_credit_view AS
+  WITH bindings AS (
+    SELECT
+      id AS retrieval_binding_event_id,
+      ts AS retrieval_ts,
+      directive_id,
+      task_id,
+      json_extract(payload, '$.query')              AS query,
+      json_extract(payload, '$.source_event_id')    AS source_event_id,
+      json_extract(payload, '$.binding_surface')    AS binding_surface,
+      json_extract(payload, '$.rank')               AS rank,
+      json_extract(payload, '$.rerank_score')       AS rerank_score
+    FROM events
+    WHERE kind = 'retrieval_binding'
+      AND ts > datetime('now', '-14 days')
+  ),
+  scored_cites AS (
+    SELECT
+      b.retrieval_binding_event_id AS retrieval_binding_event_id,
+      s.id AS action_scored_event_id,
+      s.residual,
+      s.ts AS scored_ts
+    FROM bindings b
+    JOIN events s
+      ON s.kind = 'action_scored'
+     AND s.context_refs IS NOT NULL
+     AND json_valid(s.context_refs) = 1
+     AND EXISTS (
+       SELECT 1 FROM json_each(s.context_refs)
+       WHERE value = b.retrieval_binding_event_id
+     )
+  ),
+  cite_agg AS (
+    SELECT
+      retrieval_binding_event_id,
+      COUNT(*) AS times_cited,
+      AVG(residual) AS avg_cited_residual
+    FROM scored_cites
+    GROUP BY retrieval_binding_event_id
+  ),
+  reject_agg AS (
+    SELECT
+      json_extract(payload, '$.retrieval_binding_event_id') AS retrieval_binding_event_id,
+      COUNT(*) AS times_rejected
+    FROM events
+    WHERE kind = 'retrieval_rejected'
+    GROUP BY json_extract(payload, '$.retrieval_binding_event_id')
+  ),
+  credit_agg AS (
+    SELECT
+      json_extract(payload, '$.retrieval_binding_event_id') AS retrieval_binding_event_id,
+      COUNT(*) AS credit_attributed_count
+    FROM events
+    WHERE kind = 'retrieval_credit_attributed'
+    GROUP BY json_extract(payload, '$.retrieval_binding_event_id')
+  ),
+  source_kind AS (
+    SELECT
+      b.retrieval_binding_event_id,
+      src.kind AS knowledge_source_kind
+    FROM bindings b
+    LEFT JOIN events src ON src.id = b.source_event_id
+  )
+  SELECT
+    b.retrieval_binding_event_id,
+    b.retrieval_ts,
+    b.directive_id,
+    b.task_id,
+    b.source_event_id,
+    sk.knowledge_source_kind,
+    b.query,
+    b.binding_surface,
+    b.rank,
+    b.rerank_score,
+    COALESCE(c.times_cited, 0)             AS times_cited,
+    c.avg_cited_residual,
+    COALESCE(r.times_rejected, 0)          AS times_rejected,
+    COALESCE(cr.credit_attributed_count, 0) AS credit_attributed_count,
+    CASE
+      WHEN COALESCE(c.times_cited, 0) = 0 AND COALESCE(r.times_rejected, 0) = 0 THEN 'unused'
+      WHEN COALESCE(c.times_cited, 0) = 0 AND COALESCE(r.times_rejected, 0) > 0 THEN 'rejected'
+      WHEN c.avg_cited_residual < 0.2 THEN 'positive'
+      WHEN c.avg_cited_residual < 0.4 THEN 'mixed'
+      ELSE 'negative'
+    END AS effectiveness_band
+  FROM bindings b
+  LEFT JOIN cite_agg c    ON c.retrieval_binding_event_id    = b.retrieval_binding_event_id
+  LEFT JOIN reject_agg r  ON r.retrieval_binding_event_id    = b.retrieval_binding_event_id
+  LEFT JOIN credit_agg cr ON cr.retrieval_binding_event_id   = b.retrieval_binding_event_id
+  LEFT JOIN source_kind sk ON sk.retrieval_binding_event_id  = b.retrieval_binding_event_id
+  ORDER BY b.retrieval_ts DESC;
+`;
+
 const VIEW_OWNER_PLAIN_STATUS = `
 CREATE VIEW IF NOT EXISTS owner_plain_status_view AS
   WITH directives AS (
@@ -3298,6 +3488,7 @@ export const VIEW_NAMES = [
   "owner_state_belief_view",
   "owner_alignment_action_policy_view",
   "owner_plain_status_view",
+  "retrieval_credit_view",
   "contradictory_candidates_view",
   "origin_promotion_by_directive_view",
   "origin_promotion_view",
@@ -3334,6 +3525,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_OWNER_STATE_BELIEF);
   db.exec(VIEW_OWNER_ALIGNMENT_ACTION_POLICY);
   db.exec(VIEW_OWNER_PLAIN_STATUS);
+  db.exec(VIEW_RETRIEVAL_CREDIT);
   db.exec(VIEW_ROLLING_REVIEW_DUE);
   db.exec(VIEW_WATCH_EDGE_OBSERVATIONS);
   db.exec(VIEW_DIRECTIVE_CONFLICTS);
@@ -4119,6 +4311,7 @@ export type OwnerStateBeliefRow = {
   hypothesis_event_id: string | null;
   hypothesis_ts: string | null;
   hypothesis_origin: string | null;
+  belief_source: "explicit_hypothesis" | "evidence_synthesized";
   /** Open-ended latent_state record; renderer/policy read whichever keys
    *  apply. Common keys: goal_intent, attention_budget, energy_budget,
    *  emotional_register, recent_disappointments, recent_satisfactions,
@@ -4127,9 +4320,16 @@ export type OwnerStateBeliefRow = {
   latent_state: Record<string, unknown>;
   confidence: Record<string, number>;
   observation_refs: string[];
+  evidence_refs: string[];
+  evidence_counts: Record<string, number>;
+  evidence_count: number;
   decay_after_iso: string | null;
   /** Aggregate uncertainty ∈ [0,1]. 0.5 default when not specified. */
   uncertainty: number;
+  /** [0,1] freshness multiplier: 1.0 fresh, approaching 0 after 14 days. */
+  temporal_decay_factor: number;
+  /** Uncertainty after temporal decay is applied. */
+  decayed_uncertainty: number;
   recent_prediction_error_count: number;
   recent_avg_prediction_error: number | null;
   belief_age_ms: number;
@@ -4137,23 +4337,28 @@ export type OwnerStateBeliefRow = {
 };
 
 /** Read the substrate's current best guess about the owner's latent
- *  state. Returns null when no owner_state_hypothesis_recorded row
- *  exists yet (cold install — substrate hasn't observed the owner
- *  enough to form a hypothesis). */
+ *  state. Returns null only when neither an explicit hypothesis nor
+ *  recent owner-world-model evidence exists. */
 export const ownerStateBelief = (db: Database): OwnerStateBeliefRow | null => {
   const row = db
     .query("SELECT * FROM owner_state_belief_view")
     .get() as Record<string, unknown> | null;
-  if (!row || row.hypothesis_event_id == null) return null;
+  if (!row || (row.hypothesis_event_id == null && Number(row.evidence_count ?? 0) === 0)) return null;
   return {
     hypothesis_event_id: (row.hypothesis_event_id as string | null) ?? null,
     hypothesis_ts: (row.hypothesis_ts as string | null) ?? null,
     hypothesis_origin: (row.hypothesis_origin as string | null) ?? null,
+    belief_source: ((row.belief_source as string | null) ?? "explicit_hypothesis") as OwnerStateBeliefRow["belief_source"],
     latent_state: parseJson<Record<string, unknown>>((row.latent_state_payload as string | null) ?? "{}"),
     confidence: parseJson<Record<string, number>>((row.confidence as string | null) ?? "{}"),
     observation_refs: ensureArray<string>(row.observation_refs as string | null),
+    evidence_refs: ensureArray<string>(row.evidence_refs as string | null),
+    evidence_counts: parseJson<Record<string, number>>((row.evidence_counts as string | null) ?? "{}"),
+    evidence_count: Number(row.evidence_count ?? 0),
     decay_after_iso: (row.decay_after_iso as string | null) ?? null,
     uncertainty: Number(row.uncertainty ?? 0.5),
+    temporal_decay_factor: Number(row.temporal_decay_factor ?? 1),
+    decayed_uncertainty: Number(row.decayed_uncertainty ?? row.uncertainty ?? 0.5),
     recent_prediction_error_count: Number(row.recent_prediction_error_count ?? 0),
     recent_avg_prediction_error: row.recent_avg_prediction_error == null ? null : Number(row.recent_avg_prediction_error),
     belief_age_ms: Number(row.belief_age_ms ?? 0),
@@ -4210,6 +4415,60 @@ export const ownerAlignmentActionPolicy = (
     prediction_error_event_id: (r.prediction_error_event_id as string | null) ?? null,
     prediction_error_aggregate: r.prediction_error_aggregate == null ? null : Number(r.prediction_error_aggregate),
     effectiveness_band: (r.effectiveness_band as OwnerAlignmentActionPolicyRow["effectiveness_band"]) ?? "pending",
+  }));
+};
+
+// ── RLM credit loop accessor (brain task FX9PZDQ3W932, 2026-05-18) ──
+
+export type RetrievalCreditRow = {
+  retrieval_binding_event_id: string;
+  retrieval_ts: string;
+  directive_id: string | null;
+  task_id: string | null;
+  source_event_id: string | null;
+  knowledge_source_kind: string | null;
+  query: string | null;
+  binding_surface: string | null;
+  rank: number | null;
+  rerank_score: number | null;
+  times_cited: number;
+  avg_cited_residual: number | null;
+  times_rejected: number;
+  credit_attributed_count: number;
+  effectiveness_band: "unused" | "rejected" | "positive" | "mixed" | "negative";
+};
+
+/** Read retrieval_credit_view rows. Filter by directive_id or
+ *  effectiveness_band; default returns the 100 newest rows. */
+export const retrievalCredit = (
+  db: Database,
+  filter: { directive_id?: string; band?: RetrievalCreditRow["effectiveness_band"]; limit?: number } = {},
+): RetrievalCreditRow[] => {
+  const wheres: string[] = [];
+  const params: Array<string | number> = [];
+  if (filter.directive_id) { wheres.push("directive_id = ?"); params.push(filter.directive_id); }
+  if (filter.band) { wheres.push("effectiveness_band = ?"); params.push(filter.band); }
+  const whereClause = wheres.length > 0 ? `WHERE ${wheres.join(" AND ")}` : "";
+  const limit = typeof filter.limit === "number" && filter.limit > 0 ? filter.limit : 100;
+  params.push(limit);
+  const sql = `SELECT * FROM retrieval_credit_view ${whereClause} LIMIT ?`;
+  const rows = db.query(sql).all(...params) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    retrieval_binding_event_id: r.retrieval_binding_event_id as string,
+    retrieval_ts: r.retrieval_ts as string,
+    directive_id: (r.directive_id as string | null) ?? null,
+    task_id: (r.task_id as string | null) ?? null,
+    source_event_id: (r.source_event_id as string | null) ?? null,
+    knowledge_source_kind: (r.knowledge_source_kind as string | null) ?? null,
+    query: (r.query as string | null) ?? null,
+    binding_surface: (r.binding_surface as string | null) ?? null,
+    rank: r.rank == null ? null : Number(r.rank),
+    rerank_score: r.rerank_score == null ? null : Number(r.rerank_score),
+    times_cited: Number(r.times_cited ?? 0),
+    avg_cited_residual: r.avg_cited_residual == null ? null : Number(r.avg_cited_residual),
+    times_rejected: Number(r.times_rejected ?? 0),
+    credit_attributed_count: Number(r.credit_attributed_count ?? 0),
+    effectiveness_band: (r.effectiveness_band as RetrievalCreditRow["effectiveness_band"]) ?? "unused",
   }));
 };
 
