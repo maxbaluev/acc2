@@ -201,32 +201,52 @@ const supervisedTick = (
   workerName: string,
   intervalMs: number,
   body: () => Promise<void>,
+  opts?: { overrunThresholdMs?: number },
 ): (() => void) => {
   let running = false;
   let runningSinceMs = 0;
+  // Per-worker overrun-emit threshold. Default to `intervalMs` (one
+  // missed tick = one signal — old behavior). The embedder + similar
+  // adaptive-batch workers legitimately take many seconds during heavy
+  // drain (batchSize scales 20→100→200 based on backlog; OpenAI
+  // embedding round-trips for the largest batches run ~30s). Pre-fix
+  // those normal-drain ticks emitted worker_tick_overrun every tick,
+  // spamming the health metric with no actionable signal (38 events in
+  // 3 days, all on `embedder`, ALL during legitimate drain). Pass
+  // `overrunThresholdMs: intervalMs * 6` (or similar) for workers that
+  // legitimately exceed a single tick; signal still fires when the
+  // worker is structurally stuck (multi-tick wedge) instead of just
+  // doing slow but real work.
+  const overrunThresholdMs = opts?.overrunThresholdMs ?? intervalMs;
   return () => {
     const now = Date.now();
     if (running) {
       const observedMs = now - runningSinceMs;
+      // skip-fire is unconditional (the supervisor invariant); the
+      // overrun EVENT only fires when the wedge is structurally bad
+      // (observedMs > overrunThresholdMs). Log line stays for debug.
       logger.warn(
-        { worker: workerName, expected_ms: intervalMs, observed_ms: observedMs },
+        { worker: workerName, expected_ms: intervalMs, observed_ms: observedMs, threshold_ms: overrunThresholdMs },
         "worker tick overrun — previous tick still running, skipping this fire",
       );
-      try {
-        emitEvent(db, {
-          kind: "worker_tick_overrun",
-          substrate_origin: "substrate_auto",
-          payload: {
-            worker: workerName,
-            expected_ms: intervalMs,
-            observed_ms: observedMs,
-          },
-        });
-      } catch (err) {
-        logger.debug(
-          { where: "supervisedTick.emit_overrun", err: String(err) },
-          "could not emit worker_tick_overrun (db likely closed)",
-        );
+      if (observedMs > overrunThresholdMs) {
+        try {
+          emitEvent(db, {
+            kind: "worker_tick_overrun",
+            substrate_origin: "substrate_auto",
+            payload: {
+              worker: workerName,
+              expected_ms: intervalMs,
+              observed_ms: observedMs,
+              overrun_threshold_ms: overrunThresholdMs,
+            },
+          });
+        } catch (err) {
+          logger.debug(
+            { where: "supervisedTick.emit_overrun", err: String(err) },
+            "could not emit worker_tick_overrun (db likely closed)",
+          );
+        }
       }
       return;
     }
@@ -866,6 +886,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
         const pendingEmbeddings = (db.query("SELECT COUNT(*) AS c FROM events WHERE embedding IS NULL").get() as { c: number }).c;
         await embedderWorkerTick(db, { batchSize: pendingEmbeddings > 500 ? 200 : pendingEmbeddings > 100 ? 100 : 20 });
         if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
+      }, {
+        // Embedder ticks legitimately take 15-35s during heavy backlog
+        // drain (OpenAI roundtrip × adaptive batchSize 200). Only flag
+        // overrun when the wedge is structural — ≥ 6× the interval. The
+        // skip-fire still happens every tick (correct); we just stop
+        // alarming the operator on normal drain work.
+        overrunThresholdMs: embedderIntervalMs * 6,
       }),
       embedderIntervalMs,
     );
