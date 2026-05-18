@@ -281,6 +281,114 @@ describe("emitEvent act_tuple_recorded projector", () => {
     }
   });
 
+  test("bridge-exit act_tuple does NOT project applied_change_committed (phantom-apply gate)", () => {
+    // Pre-fix: every opencode brain cycle ended with an
+    // act_tuple_recorded carrying (opencode_brain_exit_action,
+    // opencode_bridge_exit_verifier) — the substrate projected an
+    // applied_change_committed row with summary="bridge_completed
+    // final_response_chars=N" and affected_resources=[]. Operator
+    // dashboards rendered "Δ✓ applied" on every brain cycle even
+    // though nothing on disk moved. Cite KC H3PXSDV32X47.
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "act_tuple_recorded",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "opencode_brain_exit_action",
+      verifier_artifact_id: "opencode_bridge_exit_verifier",
+      predicted_residual: 0.2,
+      residual: 0,
+      payload: {
+        intent: "Record one coherent opencode brain dispatch exit boundary.",
+        reasoning_summary: "bridge_completed",
+        effect_summary: "bridge_completed final_response_chars=884",
+        verifier_kind: "opencode_bridge_exit",
+      },
+    });
+    const rows = db
+      .query<{ kind: string }, [string]>(
+        "SELECT kind FROM events WHERE task_id = ? ORDER BY ts ASC",
+      )
+      .all(taskId);
+    const kinds = rows.map((r) => r.kind);
+    // Lifecycle projections still fire (predicted/scored). Bridge
+    // exit is a real scored act — just not an applied change.
+    expect(kinds).toContain("action_predicted");
+    expect(kinds).toContain("action_scored");
+    // The phantom event is GONE.
+    expect(kinds).not.toContain("applied_change_committed");
+  });
+
+  test("task_closure_audited without numeric residual gets a classification_source marker", () => {
+    // Pre-fix: brain emitting task_closure_audited without a numeric
+    // closure_residual rendered as "closure_residual=undefined" in
+    // observe.ts and coerced to NaN in downstream credit. Now the
+    // substrate emit boundary injects a classification_source so
+    // operators/consumers can detect <unset> vs <measured zero>.
+    const db = openDb(":memory:");
+    const event = emitEvent(db, {
+      kind: "task_closure_audited",
+      substrate_origin: "opencode",
+      directive_id: newId(),
+      task_id: newId(),
+      payload: { covered_sub_tasks: [], uncovered_aspects: [] },
+    });
+    const row = db
+      .query<{ payload: string }, [string]>("SELECT payload FROM events WHERE id = ?")
+      .get(event.id);
+    const payload = JSON.parse(row!.payload);
+    expect(payload.classification_source).toEqual({
+      source: "runtime.emitEvent",
+      basis: "task_closure_audited_without_numeric_residual",
+      note: "Emitter did not provide a numeric closure_residual; the closure verifier should refine this. Renderers should treat residual as <unset>.",
+    });
+  });
+
+  test("task_closure_audited WITH numeric residual preserves it and skips the marker", () => {
+    const db = openDb(":memory:");
+    const event = emitEvent(db, {
+      kind: "task_closure_audited",
+      substrate_origin: "opencode",
+      directive_id: newId(),
+      task_id: newId(),
+      payload: { closure_residual: 0.12, covered_sub_tasks: [], uncovered_aspects: [] },
+    });
+    const row = db
+      .query<{ payload: string }, [string]>("SELECT payload FROM events WHERE id = ?")
+      .get(event.id);
+    const payload = JSON.parse(row!.payload);
+    expect(payload.closure_residual).toBe(0.12);
+    expect(payload.classification_source).toBeUndefined();
+  });
+
+  test("lesson_extracted without lesson_kind gets a classification_source marker", () => {
+    // Same pattern as task_failed/task_closure_audited — emitter
+    // omitted the open-ended classifier. Substrate retains the
+    // provenance instead of leaking "?" through the tail renderer.
+    const db = openDb(":memory:");
+    const event = emitEvent(db, {
+      kind: "lesson_extracted",
+      substrate_origin: "opencode",
+      directive_id: newId(),
+      task_id: newId(),
+      payload: { summary: "when rewriting cofounder docs ..." },
+    });
+    const row = db
+      .query<{ payload: string }, [string]>("SELECT payload FROM events WHERE id = ?")
+      .get(event.id);
+    const payload = JSON.parse(row!.payload);
+    expect(payload.classification_source).toEqual({
+      source: "runtime.emitEvent",
+      basis: "lesson_extracted_without_lesson_kind",
+      note: "Emitter did not provide a lesson_kind; classification remains open-ended and should be refined by the producing runtime.",
+    });
+    // Summary is preserved alongside the marker.
+    expect(payload.summary).toBe("when rewriting cofounder docs ...");
+  });
+
 
   test("projection_key makes derived rows idempotent", () => {
     const db = openDb(":memory:");

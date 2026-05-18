@@ -325,7 +325,15 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       return `${runtime ? `runtime=${runtime} ` : ""}${trunc(warning, 100)}`;
     }
     case "task_closure_audited": {
-      const residual = p.closure_residual;
+      // Defensive render: closure_residual may be missing (the emitter
+      // skipped it) — surface that explicitly instead of leaking
+      // "undefined" through the template. The substrate-side normalizer
+      // in runtime/events.ts injects a classification_source marker
+      // when this happens so audit trails still capture the provenance.
+      const residualRaw = p.closure_residual;
+      const residual = typeof residualRaw === "number" && Number.isFinite(residualRaw)
+        ? residualRaw.toFixed(2)
+        : "<unset>";
       const uncovered = (p.uncovered_aspects as unknown[] | undefined)?.length ?? 0;
       const covered = (p.covered_sub_tasks as unknown[] | undefined)?.length ?? 0;
       return `closure_residual=${residual} covered=${covered} uncovered=${uncovered}`;
@@ -362,9 +370,16 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       return `${src ? `source=${idPrefix(src, 12)} ` : ""}${target ? `target=${target} ` : ""}reason=${JSON.stringify(trunc(reason, 80))}`.trim();
     }
     case "lesson_extracted": {
+      // When lesson_kind is missing the substrate emit-boundary
+      // normalizer (runtime/events.ts normalizeLessonExtractedPayload)
+      // injects a classification_source marker. Surface that here
+      // instead of the meaningless "?" so the operator knows the
+      // emitter didn't classify (vs. the kind being unknown).
       const kind = p.lesson_kind as string | undefined;
+      const classification = (p.classification_source as { basis?: string } | undefined);
       const summary = p.summary as string | undefined;
-      return `lesson_kind=${kind ?? "?"} ${summary ? `summary=${JSON.stringify(trunc(summary, 54))}` : ""}`;
+      const kindLabel = kind ?? (classification?.basis ? `<unclassified:${classification.basis}>` : "<unclassified>");
+      return `lesson_kind=${kindLabel} ${summary ? `summary=${JSON.stringify(trunc(summary, 54))}` : ""}`;
     }
     case "pre_apply_adjudication_recorded": {
       const verdict = (p.verdict as string) ?? "?";

@@ -93,6 +93,50 @@ const normalizeTaskFailedPayload = (input: EmitEventInput): { payload: JsonValue
   };
 };
 
+/** Closure-audit normalization (parallel to task_failed). When the brain
+ *  emits task_closure_audited without a numeric closure_residual, the
+ *  TUI renders `closure_residual=undefined` which is meaningless — and
+ *  downstream credit/scoring code coerces undefined→NaN. Inject a
+ *  classification_source marker so the substrate retains the provenance
+ *  while the renderer + downstream consumers can detect "unmeasured"
+ *  vs "measured zero". */
+const normalizeClosureAuditPayload = (input: EmitEventInput): JsonValue => {
+  const payload = isObject(input.payload) ? input.payload : {};
+  const residual = payload.closure_residual;
+  const hasNumericResidual = typeof residual === "number" && Number.isFinite(residual);
+  const hasSource = !!payload.classification_source && typeof payload.classification_source === "object";
+  if (hasNumericResidual || hasSource) return payload;
+  return {
+    ...payload,
+    classification_source: {
+      source: "runtime.emitEvent",
+      basis: "task_closure_audited_without_numeric_residual",
+      note: "Emitter did not provide a numeric closure_residual; the closure verifier should refine this. Renderers should treat residual as <unset>.",
+    },
+  };
+};
+
+/** Lesson-extracted normalization. Same shape as task_failed: when
+ *  lesson_kind is missing, surface it as a classification_source so the
+ *  tail/observability layer doesn't render `lesson_kind=?` (which the
+ *  operator reads as "the substrate doesn't know what kind of lesson
+ *  this is"). The producing brain or worker should refine. */
+const normalizeLessonExtractedPayload = (input: EmitEventInput): JsonValue => {
+  const payload = isObject(input.payload) ? input.payload : {};
+  const lessonKind = payload.lesson_kind;
+  const hasKind = typeof lessonKind === "string" && lessonKind.trim().length > 0;
+  const hasSource = !!payload.classification_source && typeof payload.classification_source === "object";
+  if (hasKind || hasSource) return payload;
+  return {
+    ...payload,
+    classification_source: {
+      source: "runtime.emitEvent",
+      basis: "lesson_extracted_without_lesson_kind",
+      note: "Emitter did not provide a lesson_kind; classification remains open-ended and should be refined by the producing runtime.",
+    },
+  };
+};
+
 const projectionKey = (sourceActId: string, projectionKind: string, targetIdOrRole: string): string =>
   sourceActId + ":" + projectionKind + ":" + targetIdOrRole;
 
@@ -284,7 +328,23 @@ const projectActTupleRecorded = (db: Database, source: {
       },
     });
   }
-  emitProjectedEvent(db, sourceActId, "applied_change_committed", "primary", {
+  // Phantom-apply gate: skip applied_change_committed projection when
+  // the source act is the bridge-cycle EXIT boundary, not a real
+  // mutation. Pre-fix every opencode brain cycle wrote an
+  // applied_change_committed event with summary="bridge_completed
+  // final_response_chars=N" and affected_resources=[] — operator
+  // dashboards saw "Δ✓ applied" on every brain cycle while working
+  // tree never moved, and substrate audit envelopes were vacuous (cite
+  // KC H3PXSDV32X47: auto_apply worker writes phantom rows; this is
+  // the substrate-side closure). The discriminator is precise:
+  // bridge-exit acts use the fixed artifact-id pair
+  // (opencode_brain_exit_action, opencode_bridge_exit_verifier).
+  // Legitimate non-mutation acts (owner-credit, observation, research)
+  // with empty affected_resources still project — they aren't bridge
+  // closures.
+  const isBridgeExitAct = source.act.action_artifact_id === "opencode_brain_exit_action"
+    && source.act.verifier_artifact_id === "opencode_bridge_exit_verifier";
+  if (!isBridgeExitAct) emitProjectedEvent(db, sourceActId, "applied_change_committed", "primary", {
     ...base,
     kind: "applied_change_committed",
     action_artifact_id: source.act.action_artifact_id,
@@ -414,7 +474,17 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   const loop_id = input.loop_id ?? "loop_root";
   const substrate_origin = input.substrate_origin ?? "substrate_auto";
   const taskFailure = input.kind === "task_failed" ? normalizeTaskFailedPayload(input) : null;
-  const eventPayload = taskFailure?.payload ?? input.payload ?? {};
+  // Closure-audit + lesson-extracted normalization run at the same
+  // emit boundary so missing classifier fields surface as a structured
+  // classification_source (NOT as renderer "undefined" / "?" — see
+  // cli/observe.ts task_closure_audited + lesson_extracted renderers).
+  const closurePayload = input.kind === "task_closure_audited" ? normalizeClosureAuditPayload(input) : null;
+  const lessonPayload = input.kind === "lesson_extracted" ? normalizeLessonExtractedPayload(input) : null;
+  const eventPayload = taskFailure?.payload
+    ?? closurePayload
+    ?? lessonPayload
+    ?? input.payload
+    ?? {};
   const eventFailureKind = taskFailure?.failure_kind ?? input.failure_kind;
   const payload = JSON.stringify(eventPayload);
   const context_refs = JSON.stringify(input.context_refs ?? []);
