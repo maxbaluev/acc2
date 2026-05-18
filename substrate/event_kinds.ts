@@ -357,6 +357,58 @@ export const EVENT_KINDS = {
   //    through use, NOT a fixed persona enum.
   rendered_owner_message_recorded:         { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   owner_rendering_feedback_recorded:       { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  // ── Owner world-model evidence layer (brain contract CY7E62DSNX1DZ1BTD56845D994,
+  //    2026-05-18). The owner_profile is a static signal vector; this layer
+  //    adds dynamic latent-state belief + prediction-error update so the
+  //    substrate maintains a true owner world model (per 2026 alignment
+  //    literature — user as stochastic process with latent goals/skills/
+  //    constraints, updated by observation).
+  //
+  //    All payload fields are OPEN-ENDED (free strings + numbers + arrays):
+  //    no closed persona enums, no fixed register/skill taxonomy. The
+  //    extractor merger discovers vocabulary from real owner traces.
+  //
+  //    owner_state_hypothesis_recorded payload shape:
+  //      {
+  //        latent_state: {
+  //          goal_intent: string,                  // free-string + confidence
+  //          attention_budget: string,             // e.g. "low" | "medium" | "high" (free)
+  //          energy_budget: string,                // free
+  //          emotional_register: string,           // free (frustrated/satisfied/etc.)
+  //          recent_disappointments: string[],
+  //          recent_satisfactions: string[],
+  //          working_memory_horizon: string,       // short | session | multi_day (free)
+  //          decision_style: string,               // direct_confirm | options_first | etc.
+  //          skill_calibration: { domain: string, estimated_skill: string, confidence: number },
+  //          latent_larger_goal: string,
+  //        },
+  //        confidence: Record<string, number>,     // per-axis confidence ∈ [0,1]
+  //        observation_refs: string[],             // event ids that ground the hypothesis
+  //        decay_after_iso?: string,               // hypothesis stale after this ts
+  //        uncertainty: number,                    // ∈ [0,1] aggregate
+  //      }
+  //
+  //    owner_state_prediction_error_recorded payload shape:
+  //      {
+  //        hypothesis_event_id: string,
+  //        interaction_event_id: string,           // the action/event being scored
+  //        observed_signal: string,                // free description
+  //        prediction_error: Record<string, number>, // per-axis residual ∈ [0,1]
+  //        evidence_refs: string[],
+  //      }
+  //
+  //    alignment_action_selected payload shape:
+  //      {
+  //        hypothesis_event_id: string,            // belief that informed the choice
+  //        action_kind: string,                    // free: ask_clarification, defer,
+  //                                                //   render_plain, render_technical,
+  //                                                //   propose_alternative, etc.
+  //        rationale: string,
+  //        cited_artifact_ids?: string[],
+  //      }
+  owner_state_hypothesis_recorded:         { producer: "both",      embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  owner_state_prediction_error_recorded:   { producer: "substrate", embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  alignment_action_selected:               { producer: "both",      embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   // Onboarding demo router (brain dispatch bp93s80hn): records the
   // classifier decision before the demo action runs so outcomes train which
   // demo family fits which owner sentence.

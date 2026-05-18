@@ -45,6 +45,7 @@ import {
   ownerRenderingPolicy,
   ownerRenderingEffectiveness,
   ownerPlainStatus,
+  ownerStateBelief,
   lowRiskInlinePatterns,
   lessonImplementerQueue,
   pendingOwnerDecisionQueue,
@@ -708,6 +709,12 @@ export const handleRead = (
           ok: true,
           result: ownerRenderingEffectiveness(db, { audience, surface, limit }) as unknown as JsonValue,
         };
+      }
+      case "owner_state_belief_view": {
+        // Owner world-model evidence layer — brain contract
+        // CY7E62DSNX1DZ1BTD56845D994. Returns null when no
+        // owner_state_hypothesis_recorded row exists yet.
+        return { ok: true, result: ownerStateBelief(db) as unknown as JsonValue };
       }
       case "owner_plain_status_view": {
         // Args: { directive_id?, limit? } — TUI primary surface reads

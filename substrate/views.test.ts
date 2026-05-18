@@ -20,6 +20,7 @@ import {
   ownerPlainStatus,
   ownerRenderingEffectiveness,
   ownerRenderingPolicy,
+  ownerStateBelief,
   promotedKnowledge,
   readyTasks,
   recipeRegistry,
@@ -2264,6 +2265,103 @@ describe("owner_plain_status_view + ownerPlainStatus", () => {
     const rows = ownerPlainStatus(db, { directive_id: "d_closed" });
     expect(rows[0]?.latest_state_kind).toBe("completed");
     expect(rows[0]?.latest_state).toBe("Completed and closed.");
+  });
+
+  test("owner_state_belief_view returns null when no hypothesis exists", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    expect(ownerStateBelief(db)).toBeNull();
+  });
+
+  test("owner_state_belief_view surfaces latest hypothesis latent_state + confidence + observation_refs", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const obs = insertEvent(db, {
+      kind: "owner_input_received",
+      directive_id: "d_belief",
+      task_id: "t_belief",
+      payload: { text: "I'm tired, just give me the headline" },
+    });
+    insertEvent(db, {
+      kind: "owner_state_hypothesis_recorded",
+      directive_id: "d_belief",
+      task_id: "t_belief",
+      ts: nowIso(),
+      payload: {
+        latent_state: {
+          emotional_register: "tired",
+          attention_budget: "low",
+          decision_style: "direct_confirm",
+          latent_larger_goal: "fast iteration",
+        },
+        confidence: { emotional_register: 0.7, attention_budget: 0.6 },
+        observation_refs: [obs],
+        uncertainty: 0.35,
+      },
+    });
+    const b = ownerStateBelief(db)!;
+    expect(b).not.toBeNull();
+    expect(b.latent_state.emotional_register).toBe("tired");
+    expect(b.latent_state.attention_budget).toBe("low");
+    expect(b.confidence.emotional_register).toBeCloseTo(0.7, 5);
+    expect(b.observation_refs).toEqual([obs]);
+    expect(b.uncertainty).toBeCloseTo(0.35, 5);
+    expect(b.is_stale).toBe(false);
+    expect(b.recent_prediction_error_count).toBe(0);
+  });
+
+  test("owner_state_belief_view aggregates 14-day prediction errors", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const hyp = insertEvent(db, {
+      kind: "owner_state_hypothesis_recorded",
+      directive_id: "d_pe",
+      task_id: "t_pe",
+      ts: nowIso(),
+      payload: {
+        latent_state: { emotional_register: "neutral" },
+        confidence: { emotional_register: 0.5 },
+        uncertainty: 0.5,
+      },
+    });
+    insertEvent(db, {
+      kind: "owner_state_prediction_error_recorded",
+      directive_id: "d_pe",
+      task_id: "t_pe",
+      ts: nowIso(),
+      payload: { hypothesis_event_id: hyp, prediction_error: { aggregate: 0.4 } },
+      residual: 0.4,
+    });
+    insertEvent(db, {
+      kind: "owner_state_prediction_error_recorded",
+      directive_id: "d_pe",
+      task_id: "t_pe",
+      ts: nowIso(),
+      payload: { hypothesis_event_id: hyp, prediction_error: { aggregate: 0.6 } },
+      residual: 0.6,
+    });
+    const b = ownerStateBelief(db)!;
+    expect(b.recent_prediction_error_count).toBe(2);
+    expect(b.recent_avg_prediction_error).toBeCloseTo(0.5, 5);
+  });
+
+  test("owner_state_belief_view marks is_stale when decay_after_iso < now", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "owner_state_hypothesis_recorded",
+      directive_id: "d_stale",
+      task_id: "t_stale",
+      ts: nowIso(),
+      payload: {
+        latent_state: { emotional_register: "neutral" },
+        confidence: {},
+        decay_after_iso: "2020-01-01T00:00:00Z",
+        uncertainty: 0.5,
+      },
+    });
+    const b = ownerStateBelief(db)!;
+    expect(b.is_stale).toBe(true);
   });
 
   test("primary surfaces NEVER include event_ids — IDs surface only via detail_refs for drilldown", () => {

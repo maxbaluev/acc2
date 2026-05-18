@@ -488,6 +488,80 @@ CREATE VIEW IF NOT EXISTS owner_rendering_effectiveness_view AS
   ORDER BY r.rendered_ts DESC;
 `;
 
+// owner_state_belief_view — the substrate's current best guess about
+// the owner's latent state. Brain contract CY7E62DSNX1DZ1BTD56845D994
+// (2026-05-18): acc2 was retrieval-augmented Bayesian event memory but
+// had NO dynamic owner-state estimator. This view aggregates the latest
+// owner_state_hypothesis_recorded row (current belief) with the
+// 14-day rolling prediction-error per axis (how wrong recent
+// hypotheses have been).
+//
+// Shape: one row (latest belief). Fields:
+//   - hypothesis_event_id, hypothesis_ts            (provenance)
+//   - latent_state_payload                          (the full latent_state JSON
+//                                                    from the hypothesis — open-ended)
+//   - confidence                                    (Record<string,number> JSON)
+//   - decay_after_iso, uncertainty
+//   - observation_refs                              (the event ids that grounded the belief)
+//   - recent_prediction_error_count                 (14-day window)
+//   - recent_avg_prediction_error                   (mean of payload prediction_error
+//                                                    aggregate score; falls back to
+//                                                    the row's residual column)
+//   - belief_age_ms                                 (now - hypothesis_ts)
+//   - is_stale                                      (1 if decay_after_iso < now)
+//
+// Consumers: prompt_composer (OWNER STATE BELIEF section in next layer),
+// TUI plain-status drilldown, the brain when proposing alignment actions.
+const VIEW_OWNER_STATE_BELIEF = `
+CREATE VIEW IF NOT EXISTS owner_state_belief_view AS
+  WITH latest_hyp AS (
+    SELECT
+      id           AS hypothesis_event_id,
+      ts           AS hypothesis_ts,
+      payload      AS hypothesis_payload,
+      substrate_origin AS hypothesis_origin
+    FROM events
+    WHERE kind = 'owner_state_hypothesis_recorded'
+    ORDER BY ts DESC
+    LIMIT 1
+  ),
+  recent_err AS (
+    SELECT
+      COUNT(*) AS recent_prediction_error_count,
+      AVG(COALESCE(
+        residual,
+        json_extract(payload, '$.prediction_error.aggregate'),
+        json_extract(payload, '$.prediction_error_aggregate')
+      )) AS recent_avg_prediction_error
+    FROM events
+    WHERE kind = 'owner_state_prediction_error_recorded'
+      AND ts > datetime('now', '-14 days')
+  )
+  SELECT
+    h.hypothesis_event_id,
+    h.hypothesis_ts,
+    h.hypothesis_origin,
+    json_extract(h.hypothesis_payload, '$.latent_state') AS latent_state_payload,
+    json_extract(h.hypothesis_payload, '$.confidence')   AS confidence,
+    json_extract(h.hypothesis_payload, '$.observation_refs') AS observation_refs,
+    json_extract(h.hypothesis_payload, '$.decay_after_iso')  AS decay_after_iso,
+    CAST(COALESCE(json_extract(h.hypothesis_payload, '$.uncertainty'), 0.5) AS REAL) AS uncertainty,
+    e.recent_prediction_error_count,
+    e.recent_avg_prediction_error,
+    -- belief_age_ms: cast(now - hypothesis_ts) into ms via julianday.
+    CAST(
+      (julianday('now') - julianday(h.hypothesis_ts)) * 86400.0 * 1000.0
+      AS INTEGER
+    ) AS belief_age_ms,
+    CASE
+      WHEN json_extract(h.hypothesis_payload, '$.decay_after_iso') IS NOT NULL
+        AND datetime(json_extract(h.hypothesis_payload, '$.decay_after_iso')) < datetime('now')
+      THEN 1 ELSE 0
+    END AS is_stale
+  FROM latest_hyp h
+  LEFT JOIN recent_err e;
+`;
+
 // owner_plain_status_view — projects directive/task state into PLAIN
 // language cards for non-technical owners. The TUI primary surface reads
 // from this view directly so it never has to assemble {ids, residuals,
@@ -3055,6 +3129,26 @@ CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
         || COALESCE(' — ' || json_extract(e.payload, '$.observed_behavior'), '')
         || COALESCE(' (' || json_extract(e.payload, '$.evidence') || ')', '')
       )
+      -- 2026-05-18 owner world-model evidence layer (brain contract
+      -- CY7E62DSNX1DZ1BTD56845D994). Surface the most decision-relevant
+      -- axes (emotional register + attention + larger goal) inline; the
+      -- full latent_state is in the drilldown payload.
+      WHEN e.kind = 'owner_state_hypothesis_recorded' THEN (
+        'belief: '
+        || COALESCE(json_extract(e.payload, '$.latent_state.emotional_register'), '?reg')
+        || ' / '
+        || COALESCE(json_extract(e.payload, '$.latent_state.attention_budget'), '?att')
+        || COALESCE(' / goal=' || json_extract(e.payload, '$.latent_state.latent_larger_goal'), '')
+        || COALESCE(' (uncertainty=' || json_extract(e.payload, '$.uncertainty') || ')', '')
+      )
+      WHEN e.kind = 'owner_state_prediction_error_recorded' THEN (
+        'prediction_error on hypothesis=' || COALESCE(json_extract(e.payload, '$.hypothesis_event_id'), '?')
+        || COALESCE(': ' || json_extract(e.payload, '$.observed_signal'), '')
+      )
+      WHEN e.kind = 'alignment_action_selected' THEN (
+        'action=' || COALESCE(json_extract(e.payload, '$.action_kind'), '?')
+        || COALESCE(' — ' || json_extract(e.payload, '$.rationale'), '')
+      )
       ELSE NULL
     END AS human_summary,
     -- residual is most useful for ranked entries (action_scored,
@@ -3104,6 +3198,7 @@ export const VIEW_NAMES = [
   "owner_profile_view",
   "owner_rendering_policy_view",
   "owner_rendering_effectiveness_view",
+  "owner_state_belief_view",
   "owner_plain_status_view",
   "contradictory_candidates_view",
   "origin_promotion_by_directive_view",
@@ -3138,6 +3233,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_OWNER_PROFILE);
   db.exec(VIEW_OWNER_RENDERING_POLICY);
   db.exec(VIEW_OWNER_RENDERING_EFFECTIVENESS);
+  db.exec(VIEW_OWNER_STATE_BELIEF);
   db.exec(VIEW_OWNER_PLAIN_STATUS);
   db.exec(VIEW_ROLLING_REVIEW_DUE);
   db.exec(VIEW_WATCH_EDGE_OBSERVATIONS);
@@ -3909,6 +4005,54 @@ export const ownerPlainStatus = (
     detail_refs: ensureArray<string>(r.detail_refs as string | null).filter((s) => s != null),
     last_event_ts: r.last_event_ts as string,
   }));
+};
+
+// ── owner world-model evidence layer (brain contract CY7E62DSNX1DZ1BTD56845D994, 2026-05-18) ──
+
+export type OwnerStateBeliefRow = {
+  hypothesis_event_id: string | null;
+  hypothesis_ts: string | null;
+  hypothesis_origin: string | null;
+  /** Open-ended latent_state record; renderer/policy read whichever keys
+   *  apply. Common keys: goal_intent, attention_budget, energy_budget,
+   *  emotional_register, recent_disappointments, recent_satisfactions,
+   *  working_memory_horizon, decision_style, skill_calibration,
+   *  latent_larger_goal. */
+  latent_state: Record<string, unknown>;
+  confidence: Record<string, number>;
+  observation_refs: string[];
+  decay_after_iso: string | null;
+  /** Aggregate uncertainty ∈ [0,1]. 0.5 default when not specified. */
+  uncertainty: number;
+  recent_prediction_error_count: number;
+  recent_avg_prediction_error: number | null;
+  belief_age_ms: number;
+  is_stale: boolean;
+};
+
+/** Read the substrate's current best guess about the owner's latent
+ *  state. Returns null when no owner_state_hypothesis_recorded row
+ *  exists yet (cold install — substrate hasn't observed the owner
+ *  enough to form a hypothesis). */
+export const ownerStateBelief = (db: Database): OwnerStateBeliefRow | null => {
+  const row = db
+    .query("SELECT * FROM owner_state_belief_view")
+    .get() as Record<string, unknown> | null;
+  if (!row || row.hypothesis_event_id == null) return null;
+  return {
+    hypothesis_event_id: (row.hypothesis_event_id as string | null) ?? null,
+    hypothesis_ts: (row.hypothesis_ts as string | null) ?? null,
+    hypothesis_origin: (row.hypothesis_origin as string | null) ?? null,
+    latent_state: parseJson<Record<string, unknown>>((row.latent_state_payload as string | null) ?? "{}"),
+    confidence: parseJson<Record<string, number>>((row.confidence as string | null) ?? "{}"),
+    observation_refs: ensureArray<string>(row.observation_refs as string | null),
+    decay_after_iso: (row.decay_after_iso as string | null) ?? null,
+    uncertainty: Number(row.uncertainty ?? 0.5),
+    recent_prediction_error_count: Number(row.recent_prediction_error_count ?? 0),
+    recent_avg_prediction_error: row.recent_avg_prediction_error == null ? null : Number(row.recent_avg_prediction_error),
+    belief_age_ms: Number(row.belief_age_ms ?? 0),
+    is_stale: Number(row.is_stale ?? 0) === 1,
+  };
 };
 
 /** Authoritative lifecycle projection per (directive_id, root_task_id). */
