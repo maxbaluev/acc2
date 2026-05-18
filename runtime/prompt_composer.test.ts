@@ -3,14 +3,17 @@ import { readFileSync } from "node:fs";
 import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
 import {
+  buildAlignmentActionPolicySection,
   buildOwnerFeedbackSummarySection,
   buildOwnerProfileSection,
   buildOwnerRenderingPolicySection,
+  buildOwnerStateBeliefSection,
+  buildOwnerStateFeedbackSummarySection,
   composePrompt,
   estimateTokens,
   readOwnerProfile,
 } from "./prompt_composer";
-import type { OwnerRenderingPolicyRow } from "../substrate/views";
+import type { OwnerRenderingPolicyRow, OwnerStateBeliefRow } from "../substrate/views";
 import { newId } from "./ids";
 import { goalShape } from "./goal_shape";
 import { seedFoundationalKnowledge } from "../substrate/seed";
@@ -606,5 +609,80 @@ describe("prompt_composer goal-shape knowledge fallback", () => {
     expect(composed.text).toContain("evidence: moved from CLAUDE.md");
     expect(composed.text).toContain("implications: retrieve by goal shape");
     expect(composed.text).not.toContain("(no text)");
+  });
+});
+
+// ── owner world-model belief sections (Phase H2 of CY7E62DSNX1DZ1BTD56845D994) ──
+describe("buildOwnerStateBeliefSection + buildAlignmentActionPolicySection + buildOwnerStateFeedbackSummarySection", () => {
+  const belief = (overrides: Partial<OwnerStateBeliefRow> = {}): OwnerStateBeliefRow => ({
+    hypothesis_event_id: "HYPO_1",
+    hypothesis_ts: "2026-05-18T00:00:00Z",
+    hypothesis_origin: "claude_inline",
+    latent_state: {},
+    confidence: {},
+    observation_refs: [],
+    decay_after_iso: null,
+    uncertainty: 0.5,
+    recent_prediction_error_count: 0,
+    recent_avg_prediction_error: null,
+    belief_age_ms: 60_000,
+    is_stale: false,
+    ...overrides,
+  });
+
+  test("null belief renders the cold-install hint", () => {
+    const text = buildOwnerStateBeliefSection(null);
+    expect(text).toContain("## OWNER STATE BELIEF");
+    expect(text).toContain("no owner_state_hypothesis_recorded row yet");
+  });
+
+  test("belief with latent_state surfaces axes inline + cites hypothesis_event_id", () => {
+    const text = buildOwnerStateBeliefSection(belief({
+      latent_state: {
+        emotional_register: "tired",
+        attention_budget: "low",
+        decision_style: "direct_confirm",
+        latent_larger_goal: "fast iteration",
+        recent_disappointments: ["broken hot-reload"],
+      },
+      confidence: { emotional_register: 0.7, attention_budget: 0.6 },
+      observation_refs: ["OBS1", "OBS2"],
+      uncertainty: 0.3,
+    }));
+    expect(text).toContain("hypothesis_event_id: HYPO_1");
+    expect(text).toContain("emotional_register: tired (conf 0.70)");
+    expect(text).toContain("attention_budget: low");
+    expect(text).toContain("decision_style: direct_confirm");
+    expect(text).toContain("latent_larger_goal: fast iteration");
+    expect(text).toContain("recent_disappointments: broken hot-reload");
+    expect(text).toContain("grounded_in (event_ids): OBS1, OBS2");
+  });
+
+  test("belief with prediction_error >= 0.5 surfaces high-error WARNING", () => {
+    const text = buildOwnerStateFeedbackSummarySection(belief({
+      recent_prediction_error_count: 3,
+      recent_avg_prediction_error: 0.6,
+    }));
+    expect(text).toContain("prediction_error_count: 3");
+    expect(text).toContain("avg_prediction_error: 0.600");
+    expect(text).toContain("WARNING");
+  });
+
+  test("belief is_stale=true is surfaced inline so the brain refreshes the hypothesis", () => {
+    const text = buildOwnerStateBeliefSection(belief({ is_stale: true }));
+    expect(text).toContain("STALE");
+  });
+
+  test("alignment_action_policy renders all 8 decision rules when belief is present", () => {
+    const text = buildAlignmentActionPolicySection(belief());
+    expect(text).toContain("## ALIGNMENT ACTION POLICY");
+    expect(text).toContain("things_to_never_do");
+    expect(text).toContain("alignment_action_selected");
+    expect(text).toContain("uncertainty > 0.6");
+  });
+
+  test("alignment_action_policy short-circuits on null belief", () => {
+    const text = buildAlignmentActionPolicySection(null);
+    expect(text).toContain("no owner_state_belief");
   });
 });

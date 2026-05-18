@@ -883,7 +883,12 @@ export const buildOwnerProfileSection = (profile: OwnerProfile, input: OwnerPoli
 // 14-day feedback aggregates); the section is always emitted, even on a
 // cold install, so the brain knows the rendering contract exists.
 
-import { ownerRenderingPolicy, type OwnerRenderingPolicyRow } from "../substrate/views";
+import {
+  ownerRenderingPolicy,
+  ownerStateBelief,
+  type OwnerRenderingPolicyRow,
+  type OwnerStateBeliefRow,
+} from "../substrate/views";
 
 const RENDERING_INVARIANT_LINES: readonly string[] = [
   "1. Primary owner-visible text MUST NOT contain event_ids, task_ids, directive_ids, view names, residual numbers, or substrate vocabulary.",
@@ -935,6 +940,119 @@ export const buildOwnerRenderingPolicySection = (policy: OwnerRenderingPolicyRow
   lines.push("");
   lines.push("Rendering invariants (ALWAYS apply; the rendering_verifier scores adherence):");
   for (const inv of RENDERING_INVARIANT_LINES) lines.push(inv);
+  return lines.join("\n");
+};
+
+// ── OWNER STATE BELIEF + ALIGNMENT ACTION POLICY + STATE FEEDBACK SUMMARY
+//    (brain contract CY7E62DSNX1DZ1BTD56845D994 Phase H2, 2026-05-18)
+//
+// The substrate maintains a dynamic owner world model in
+// owner_state_belief_view: latest latent-state hypothesis + 14-day
+// prediction-error aggregate. These three sections expose the belief to
+// every brain cycle so action selection becomes belief-conditioned, not
+// just task-conditioned. The brain reads OWNER STATE BELIEF to know
+// what it currently thinks about the owner, ALIGNMENT ACTION POLICY to
+// know which actions fit the belief, and STATE FEEDBACK SUMMARY to know
+// how wrong the substrate has been recently (calibration signal).
+
+const ALIGNMENT_ACTION_POLICY_LINES: readonly string[] = [
+  "When emotional_register is 'frustrated' or 'tired' (high confidence): contract output, lead with status + next concrete action, skip explanation unless asked.",
+  "When attention_budget is 'low': defer non-critical clarifications; batch related asks; do not request approval for reversible inline work.",
+  "When attention_budget is 'high' and decision_style includes 'evidence_first': surface evidence + posteriors + the artifact id behind any change.",
+  "When skill_calibration shows 'novice' in the current domain: define unfamiliar terms once at first use; never assume.",
+  "When latent_larger_goal is set and the current task diverges from it (high uncertainty about fit): emit owner_input_required asking 'does this serve <larger_goal>?'.",
+  "Before any action that hits things_to_never_do: refuse, explain why, propose an alternative. Do NOT proceed silently.",
+  "When uncertainty > 0.6 or is_stale=true: ask one short clarifying question before acting; the belief is too weak to act on.",
+  "After every owner-visible interaction: emit alignment_action_selected referencing the hypothesis_event_id you read from this section. That closes the loop — the rendering_audit worker + closure_audited credit the policy posterior.",
+] as const;
+
+const formatLatentState = (latent: Record<string, unknown>, confidence: Record<string, number>): string[] => {
+  const out: string[] = [];
+  const fmt = (key: string, label?: string): void => {
+    const v = latent[key];
+    if (v == null || v === "") return;
+    const c = confidence[key];
+    const cStr = typeof c === "number" ? ` (conf ${c.toFixed(2)})` : "";
+    if (Array.isArray(v)) {
+      if (v.length > 0) out.push(`  ${label ?? key}: ${v.slice(0, 6).join(", ")}${cStr}`);
+    } else if (typeof v === "object") {
+      out.push(`  ${label ?? key}: ${JSON.stringify(v)}${cStr}`);
+    } else {
+      out.push(`  ${label ?? key}: ${String(v)}${cStr}`);
+    }
+  };
+  fmt("emotional_register", "emotional_register");
+  fmt("attention_budget", "attention_budget");
+  fmt("energy_budget", "energy_budget");
+  fmt("decision_style", "decision_style");
+  fmt("working_memory_horizon", "working_memory_horizon");
+  fmt("skill_calibration", "skill_calibration");
+  fmt("latent_larger_goal", "latent_larger_goal");
+  fmt("goal_intent", "goal_intent");
+  fmt("recent_disappointments", "recent_disappointments");
+  fmt("recent_satisfactions", "recent_satisfactions");
+  return out;
+};
+
+export const buildOwnerStateBeliefSection = (belief: OwnerStateBeliefRow | null): string => {
+  const lines: string[] = ["## OWNER STATE BELIEF"];
+  if (!belief) {
+    lines.push("(no owner_state_hypothesis_recorded row yet — substrate has not formed a latent-state belief)");
+    lines.push("Hint: when you have enough owner_input_received / owner_observed_outcome_recorded evidence to form a hypothesis, emit owner_state_hypothesis_recorded with latent_state, per-axis confidence, observation_refs, and uncertainty.");
+    return lines.join("\n");
+  }
+  lines.push(`hypothesis_event_id: ${belief.hypothesis_event_id ?? "?"} (cite when emitting alignment_action_selected so the loop credits posteriors)`);
+  lines.push(`hypothesis_ts: ${belief.hypothesis_ts ?? "?"}  age_ms=${belief.belief_age_ms}  uncertainty=${belief.uncertainty.toFixed(2)}${belief.is_stale ? "  STALE (decay_after_iso < now — refresh before relying on this)" : ""}`);
+  lines.push("latent_state:");
+  const formatted = formatLatentState(belief.latent_state, belief.confidence);
+  if (formatted.length === 0) {
+    lines.push("  (latent_state payload was empty or unparseable)");
+  } else {
+    for (const l of formatted) lines.push(l);
+  }
+  if (belief.observation_refs.length > 0) {
+    lines.push(`grounded_in (event_ids): ${belief.observation_refs.slice(0, 8).join(", ")}${belief.observation_refs.length > 8 ? ", …" : ""}`);
+  }
+  if (belief.recent_prediction_error_count > 0) {
+    const avg = belief.recent_avg_prediction_error;
+    lines.push(`recent_prediction_errors (14d): ${belief.recent_prediction_error_count}${avg != null ? `  avg=${avg.toFixed(3)}` : ""} — substrate has been wrong about the belief; route to careful-render mode if avg > 0.3`);
+  }
+  return lines.join("\n");
+};
+
+export const buildAlignmentActionPolicySection = (belief: OwnerStateBeliefRow | null): string => {
+  const lines: string[] = ["## ALIGNMENT ACTION POLICY"];
+  if (!belief) {
+    lines.push("(no owner_state_belief — emit alignment_action_selected only when you have a hypothesis_event_id to cite; otherwise act per OWNER PROFILE defaults)");
+    return lines.join("\n");
+  }
+  lines.push("Decision rules (consult OWNER STATE BELIEF above for current axis values):");
+  for (const rule of ALIGNMENT_ACTION_POLICY_LINES) lines.push(`- ${rule}`);
+  return lines.join("\n");
+};
+
+export const buildOwnerStateFeedbackSummarySection = (belief: OwnerStateBeliefRow | null): string => {
+  const lines: string[] = ["## OWNER STATE FEEDBACK SUMMARY (14-day calibration window)"];
+  if (!belief) {
+    lines.push("(no belief yet — no prediction-error window to aggregate)");
+    return lines.join("\n");
+  }
+  if (belief.recent_prediction_error_count === 0) {
+    lines.push("(no owner_state_prediction_error_recorded rows in window — belief is uncalibrated; emit prediction-error rows after owner-visible interactions so the substrate learns where the hypothesis was wrong)");
+    return lines.join("\n");
+  }
+  const avg = belief.recent_avg_prediction_error;
+  lines.push(`prediction_error_count: ${belief.recent_prediction_error_count}`);
+  if (avg != null) {
+    lines.push(`avg_prediction_error: ${avg.toFixed(3)} (0 = always right; ≥0.3 = substrate is systematically wrong, refresh the hypothesis)`);
+    if (avg >= 0.5) {
+      lines.push("WARNING: prediction error is high. Treat the belief as a weak prior; ask one plain-words question before acting on a belief axis you are about to use.");
+    } else if (avg >= 0.3) {
+      lines.push("Route to careful-render mode: prediction error is elevated. Cite the belief but also surface the alternative interpretation when uncertainty matters.");
+    } else {
+      lines.push("Belief is well-calibrated in window — safe to act on high-confidence axes inline.");
+    }
+  }
   return lines.join("\n");
 };
 
@@ -1247,6 +1365,17 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   const renderingPolicyRow = ownerRenderingPolicy(db);
   candidates.push({ name: "owner_rendering_policy", p: 1, body: buildOwnerRenderingPolicySection(renderingPolicyRow) });
   candidates.push({ name: "owner_feedback_summary", p: 1, body: buildOwnerFeedbackSummarySection(renderingPolicyRow) });
+  // Brain contract CY7E62DSNX1DZ1BTD56845D994 Phase H2 (2026-05-18):
+  // owner world-model evidence layer exposed to the brain. The belief
+  // section answers "what does the substrate currently think about
+  // the owner?", the policy section answers "which actions fit?", and
+  // the calibration section answers "how wrong has the substrate been?".
+  // Together they make action selection belief-conditioned, not just
+  // task-conditioned.
+  const beliefRow = ownerStateBelief(db);
+  candidates.push({ name: "owner_state_belief", p: 1, body: buildOwnerStateBeliefSection(beliefRow) });
+  candidates.push({ name: "alignment_action_policy", p: 1, body: buildAlignmentActionPolicySection(beliefRow) });
+  candidates.push({ name: "owner_state_feedback_summary", p: 1, body: buildOwnerStateFeedbackSummarySection(beliefRow) });
   const ownerContextBody = buildOwnerContextSection(ownerContextRows);
   candidates.push({ name: "owner_context", p: 1, body: ownerContextBody });
   const stakeholderBody = renderStakeholderBlock(db, task.directive_id);
