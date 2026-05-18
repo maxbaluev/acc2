@@ -57,6 +57,7 @@ import { runDispatchStatus } from "./admin_dispatch_status";
 import { runHotreloadStatus } from "./admin_hotreload_status";
 import { runPendingDecisions } from "./admin_pending_decisions";
 import { runRenderingAudit } from "./admin_rendering_audit";
+import { runTopLaws } from "./admin_top_laws";
 import { runTrust } from "./trust";
 
 const usage = (): string => `acc admin — operator-side maintenance
@@ -127,6 +128,13 @@ const usage = (): string => `acc admin — operator-side maintenance
                               the current owner_rendering_policy snapshot
                               (policy_health, 14-day feedback aggregates).
                               Brain contract Q471RAN88X0H513V8BC3BTW0AW.
+    top-laws [--json|--raw] [--min-score N] [--limit N]
+                              Auto-compiled Top Laws — the substrate's
+                              highest-scoring promoted_knowledge rows
+                              ranked by Beta posterior (default floor
+                              score >= 0.75). Default format is markdown
+                              suitable for splicing into CLAUDE.md or a
+                              prompt. Brain dispatch 3NWCD7PW315W.
     hotreload-status [--since <iso>] [--limit N] [--json]
                               Substrate ledger view of recent daemon_hotreload_*
                               outcomes. Counts swapped / no_op / rejected /
@@ -801,6 +809,7 @@ export const runAdmin = async (argv: string[], envOverride?: AdminEnv): Promise<
   if (sub === "hotreload-status") return runHotreloadStatus(argv.slice(1));
   if (sub === "pending-decisions") return runPendingDecisions(argv.slice(1));
   if (sub === "rendering-audit") return runRenderingAudit(argv.slice(1));
+  if (sub === "top-laws") return runTopLaws(argv.slice(1));
   if (sub === "trust") return runTrust(argv.slice(1));
   env.err(`acc admin: unknown subcommand '${sub}'`);
   env.err(usage());

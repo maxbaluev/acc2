@@ -728,6 +728,48 @@ CREATE VIEW IF NOT EXISTS owner_alignment_action_policy_view AS
 //                                detail-drawer field; primary surfaces hide)
 //   - detail_refs               (event ids the operator can open if asked)
 //   - last_event_ts             (for sorting)
+// top_laws_view — auto-compiled list of the substrate's highest-scoring
+// promoted knowledge. Brain contract from dispatch 3NWCD7PW315W
+// (CLAUDE.md auto-compiled Top Laws piece): the legacy system/CLAUDE.md
+// has 'Top Laws (auto-compiled from scored knowledge)' as a section
+// header but acc2's CLAUDE.md never had the mechanism. This view IS
+// that mechanism — it surfaces the top promoted-knowledge rows by
+// posterior score, so the orchestrator and brain can read the
+// organism's current ranked principles at session start without
+// hard-coding them into text-on-disk.
+//
+// Shape (newest-first within score bucket; tie-break by ts):
+//   - event_id, ts, substrate_origin, candidate_id, directive_id
+//   - score, confidence              (the Beta posterior at promotion)
+//   - text                           (the claim itself; never NULL —
+//                                     '(no text)' fallback applied)
+//   - tags                           (open-ended classifier tags)
+//   - law_rank                       (1-indexed by score DESC)
+//
+// View returns ALL promoted_knowledge rows ranked by Beta posterior;
+// the canonical Top Laws threshold (score >= 0.75) is applied at the
+// accessor (substrate/views.ts topLaws) so callers can both narrow
+// (higher floor) AND widen (lower floor for debugging) without
+// re-issuing different SQL.
+const VIEW_TOP_LAWS = `
+CREATE VIEW IF NOT EXISTS top_laws_view AS
+  SELECT
+    event_id,
+    ts,
+    substrate_origin,
+    candidate_id,
+    directive_id,
+    score,
+    confidence,
+    COALESCE(text, '(no text)') AS text,
+    tags,
+    context_refs,
+    ROW_NUMBER() OVER (ORDER BY score DESC, confidence DESC, ts DESC) AS law_rank
+  FROM promoted_knowledge_view
+  WHERE score IS NOT NULL
+  ORDER BY score DESC, confidence DESC, ts DESC;
+`;
+
 // retrieval_credit_view — for each retrieval_binding emitted in the
 // last 14 days, surface how many action_scored rows cited it and the
 // average residual of those scores. Brain task FX9PZDQ3W932
@@ -3489,6 +3531,7 @@ export const VIEW_NAMES = [
   "owner_alignment_action_policy_view",
   "owner_plain_status_view",
   "retrieval_credit_view",
+  "top_laws_view",
   "contradictory_candidates_view",
   "origin_promotion_by_directive_view",
   "origin_promotion_view",
@@ -3536,6 +3579,8 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_IRREVERSIBLE_EFFECTS);
   db.exec(VIEW_LOW_RISK_INLINE_PATTERNS);
   db.exec(VIEW_PROMOTED_KNOWLEDGE);
+  // top_laws_view depends on promoted_knowledge_view.
+  db.exec(VIEW_TOP_LAWS);
   db.exec(VIEW_RECIPE_REGISTRY);
   db.exec(VIEW_RECIPES_LATEST);
   db.exec(VIEW_LESSON_IMPLEMENTER_QUEUE);
@@ -4415,6 +4460,51 @@ export const ownerAlignmentActionPolicy = (
     prediction_error_event_id: (r.prediction_error_event_id as string | null) ?? null,
     prediction_error_aggregate: r.prediction_error_aggregate == null ? null : Number(r.prediction_error_aggregate),
     effectiveness_band: (r.effectiveness_band as OwnerAlignmentActionPolicyRow["effectiveness_band"]) ?? "pending",
+  }));
+};
+
+// ── auto-compiled Top Laws (brain dispatch 3NWCD7PW315W, 2026-05-18) ──
+
+export type TopLawRow = {
+  event_id: string;
+  ts: string;
+  substrate_origin: string | null;
+  candidate_id: string | null;
+  directive_id: string | null;
+  score: number;
+  confidence: number | null;
+  text: string;
+  tags: string[];
+  context_refs: string[];
+  law_rank: number;
+};
+
+/** Read the substrate's current Top Laws — promoted knowledge rows
+ *  scoring >= min_score, ranked by score DESC. Default min_score = 0.75
+ *  (same bar as the legacy system/CLAUDE.md auto-compiled section). */
+export const topLaws = (
+  db: Database,
+  filter: { min_score?: number; limit?: number } = {},
+): TopLawRow[] => {
+  const minScore = typeof filter.min_score === "number" && filter.min_score >= 0 ? filter.min_score : 0.75;
+  const limit = typeof filter.limit === "number" && filter.limit > 0 ? filter.limit : 25;
+  const rows = db
+    .query(
+      `SELECT * FROM top_laws_view WHERE score >= ? ORDER BY law_rank ASC LIMIT ?`,
+    )
+    .all(minScore, limit) as Array<Record<string, unknown>>;
+  return rows.map((r, idx) => ({
+    event_id: r.event_id as string,
+    ts: r.ts as string,
+    substrate_origin: (r.substrate_origin as string | null) ?? null,
+    candidate_id: (r.candidate_id as string | null) ?? null,
+    directive_id: (r.directive_id as string | null) ?? null,
+    score: Number(r.score),
+    confidence: r.confidence == null ? null : Number(r.confidence),
+    text: (r.text as string) ?? "(no text)",
+    tags: ensureArray<string>(r.tags as string | null),
+    context_refs: ensureArray<string>(r.context_refs as string | null),
+    law_rank: Number(r.law_rank ?? idx + 1),
   }));
 };
 

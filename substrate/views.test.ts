@@ -23,6 +23,7 @@ import {
   ownerAlignmentActionPolicy,
   ownerStateBelief,
   retrievalCredit,
+  topLaws,
   promotedKnowledge,
   readyTasks,
   recipeRegistry,
@@ -2350,6 +2351,82 @@ describe("owner_plain_status_view + ownerPlainStatus", () => {
     const b = ownerStateBelief(db)!;
     expect(b.recent_prediction_error_count).toBe(2);
     expect(b.recent_avg_prediction_error).toBeCloseTo(0.5, 5);
+  });
+
+  test("top_laws_view ranks promoted knowledge by Beta posterior + filters score >= 0.75 (Phase I3)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    // Three candidates → three promotions with different scores.
+    const cand1 = insertEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d_law",
+      task_id: "t_law",
+      payload: { claim: "Citation is mutation (k_554)" },
+    });
+    const cand2 = insertEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d_law",
+      task_id: "t_law",
+      payload: { claim: "Lower-bar claim worth seeing" },
+    });
+    const cand3 = insertEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d_law",
+      task_id: "t_law",
+      payload: { claim: "Top law — retrieval binding (k_201)" },
+    });
+    insertEvent(db, {
+      kind: "knowledge_promoted",
+      directive_id: "d_law",
+      task_id: "t_law",
+      payload: { candidate_id: cand1, score: 0.92, confidence: 0.88 },
+      context_refs: [cand1],
+    });
+    insertEvent(db, {
+      kind: "knowledge_promoted",
+      directive_id: "d_law",
+      task_id: "t_law",
+      payload: { candidate_id: cand2, score: 0.55, confidence: 0.6 },
+      context_refs: [cand2],
+    });
+    insertEvent(db, {
+      kind: "knowledge_promoted",
+      directive_id: "d_law",
+      task_id: "t_law",
+      payload: { candidate_id: cand3, score: 0.96, confidence: 0.91 },
+      context_refs: [cand3],
+    });
+    const laws = topLaws(db);
+    // Only score >= 0.75 should appear (cand2 excluded).
+    expect(laws.length).toBe(2);
+    // Highest score first.
+    expect(laws[0]?.text).toContain("retrieval binding");
+    expect(laws[0]?.law_rank).toBe(1);
+    expect(laws[0]?.score).toBeCloseTo(0.96, 5);
+    expect(laws[1]?.text).toContain("Citation is mutation");
+    expect(laws[1]?.law_rank).toBe(2);
+  });
+
+  test("top_laws_view min_score widens the floor when caller asks", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const cand = insertEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d_widen",
+      task_id: "t_widen",
+      payload: { claim: "Mid-tier claim" },
+    });
+    insertEvent(db, {
+      kind: "knowledge_promoted",
+      directive_id: "d_widen",
+      task_id: "t_widen",
+      payload: { candidate_id: cand, score: 0.55, confidence: 0.6 },
+      context_refs: [cand],
+    });
+    // Default floor 0.75 → excluded.
+    expect(topLaws(db).length).toBe(0);
+    // Lower floor → included.
+    expect(topLaws(db, { min_score: 0.5 }).length).toBe(1);
   });
 
   test("retrieval_credit_view classifies bindings by effectiveness_band (Phase I1)", () => {

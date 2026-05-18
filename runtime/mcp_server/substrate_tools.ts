@@ -48,6 +48,7 @@ import {
   ownerStateBelief,
   ownerAlignmentActionPolicy,
   retrievalCredit,
+  topLaws,
   lowRiskInlinePatterns,
   lessonImplementerQueue,
   pendingOwnerDecisionQueue,
@@ -717,6 +718,18 @@ export const handleRead = (
         // CY7E62DSNX1DZ1BTD56845D994. Returns null when no
         // owner_state_hypothesis_recorded row exists yet.
         return { ok: true, result: ownerStateBelief(db) as unknown as JsonValue };
+      }
+      case "top_laws_view": {
+        // Phase I3: auto-compiled Top Laws — the substrate's highest-
+        // scoring promoted knowledge, ranked by Beta posterior. The
+        // orchestrator reads this at session-start (and on demand) so
+        // the operating contract self-updates from evidence rather
+        // than being hard-coded as text-on-disk.
+        // Args: { min_score?, limit? }
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const minScore = typeof arg.min_score === "number" ? arg.min_score : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return { ok: true, result: topLaws(db, { min_score: minScore, limit }) as unknown as JsonValue };
       }
       case "retrieval_credit_view": {
         // Phase I1: RLM retrieval credit observability. Args:
