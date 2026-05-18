@@ -80,7 +80,7 @@ describe("seedCodeArtifacts", () => {
     }
   });
 
-  test("L8 (2026-05-17) kind column: dispatch_strategy seeds carry kind='dispatch_strategy_v1', legacy seeds default to 'code_artifact'", () => {
+  test("L8 (2026-05-17) kind column: dispatch_strategy seeds carry kind='dispatch_strategy_v1', recipe seeds carry kind='recipe', legacy seeds default to 'code_artifact'", () => {
     const db = openDb(":memory:");
     seedCodeArtifacts(db);
     const strategyRows = db
@@ -88,12 +88,48 @@ describe("seedCodeArtifacts", () => {
       .all() as Array<{ id: string; kind: string }>;
     expect(strategyRows.length).toBe(6);
     for (const r of strategyRows) expect(r.kind).toBe("dispatch_strategy_v1");
+    // C3 (2026-05-18): recipe seeds (master_report_generation_orchestrator)
+    // declare kind='recipe' so the registry can filter brain-facing
+    // orchestrator recipes from raw code artifacts. Legacy seeds remain
+    // kind='code_artifact'.
+    const recipeRows = db
+      .query("SELECT id, kind FROM code_artifact WHERE state_root LIKE 'recipes/%'")
+      .all() as Array<{ id: string; kind: string }>;
+    expect(recipeRows.length).toBeGreaterThanOrEqual(1);
+    for (const r of recipeRows) expect(r.kind).toBe("recipe");
     // Legacy seeds: every other admitted row should have kind='code_artifact'.
     const legacyRows = db
-      .query("SELECT kind FROM code_artifact WHERE state_root != 'dispatch/strategy'")
+      .query("SELECT kind FROM code_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%'")
       .all() as Array<{ kind: string }>;
     expect(legacyRows.length).toBeGreaterThan(0);
     for (const r of legacyRows) expect(r.kind).toBe("code_artifact");
+  });
+
+  test("C3 (2026-05-18) master_report_generation_orchestrator recipe is seeded with strategy-first DAG body anchors", () => {
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    const row = db
+      .query("SELECT id, kind, body, name FROM code_artifact WHERE id = ?")
+      .get("seed_master_report_generation_orchestrator") as {
+        id: string; kind: string; body: string; name: string | null;
+      } | null;
+    expect(row).not.toBeNull();
+    if (!row) return;
+    expect(row.kind).toBe("recipe");
+    // Recipe text MUST mention the binding suffix and the 15-node floor
+    // so a prompt_composer retrieval surfaces the structural rule, not
+    // generic prose. Closure verifier + admission gate read the same
+    // anchors.
+    expect(row.body).toContain("_strategic_direction_chosen");
+    expect(row.body).toContain("atms_report_v");
+    expect(row.body).toContain("15 task_node_opened");
+    // DAG layer shape must be named explicitly so the brain composer
+    // serialises the S/T/U/V/W shape into the directive prompt.
+    expect(row.body).toContain("S-layer");
+    expect(row.body).toContain("T-layer");
+    expect(row.body).toContain("U-layer");
+    expect(row.body).toContain("V-layer");
+    expect(row.body).toContain("W-layer");
   });
 
   test("includes every runtime named in §11.4", () => {

@@ -1420,6 +1420,90 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     fixture_expected_residual: 0.1,
     display_name: "Predicate Gate: CEO/External Executive Audience",
   },
+  {
+    // C3 (2026-05-18, directive QHTRBV6PFX2JVBMHDNDA4B03GC):
+    // master_report_generation_orchestrator — recipe row that documents
+    // the strategy-first S/T/U/V/W DAG shape the prompt composer
+    // surfaces to the brain when an owner asks for an ATMS-style
+    // strategic report. The substrate-side strategy-first admission gate
+    // (runtime/artifact_admission.ts) + closure predicate
+    // (runtime/strategy_first_closure_check.ts) make the rule structural;
+    // this artifact carries the brain-facing recipe text. Reference:
+    // directive G8XGZN79SX43KCDMVKP35RGE84 (the v6 strategic DAG cycle)
+    // was the only earlier cycle that derived initiatives from a chosen
+    // strategic direction; v1-v3 picked from substrate priors and
+    // bolted on strategy afterward. Lesson 4JGQAN7NFH1XH9M4VARB4RNJ8M
+    // (`strategic_first_then_initiatives_lesson`) admitted that
+    // discipline; this artifact promotes it to a retrievable recipe.
+    seedName: "master_report_generation_orchestrator",
+    kind: "recipe",
+    runtime: "bun",
+    body: [
+      "// master_report_generation_orchestrator — strategy-first ATMS",
+      "// report DAG recipe. The substrate's admission gate refuses any",
+      "// code_artifact_candidate whose name starts with `atms_report_v`",
+      "// when `cited_knowledge_ids` lacks a knowledge_candidate whose",
+      "// payload.claim ends with `_strategic_direction_chosen`. The",
+      "// closure predicate raises closure_residual to >= 0.3 when the",
+      "// directive emitted any atms_report_v* candidate but either (a)",
+      "// fewer than 15 task_node_opened events were emitted, or (b)",
+      "// any atms_report_v* candidate skipped the strategy citation.",
+      "//",
+      "// Required DAG shape for any ATMS report directive (binding,",
+      "// not advisory — substrate-enforced at admission AND closure):",
+      "//",
+      "//   S-layer (situation deep-dives): one task_node_opened per",
+      "//     situation slice the brain wants to ground the strategy in.",
+      "//     Typically 6-10 nodes (S1-S8 plus optional S9/S10) covering",
+      "//     market, regulatory, customer, competition, internal capability,",
+      "//     supply, risk, and recent-evidence shapes. Emit a",
+      "//     knowledge_candidate per situation finding.",
+      "//   T-layer (strategy synthesis): typically 2-3 task_node_opened",
+      "//     rows (T1-T2 or T1-T3) where the brain SYNTHESISES a strategic",
+      "//     direction from the S-layer findings and emits a",
+      "//     knowledge_candidate whose payload.claim ends with",
+      "//     `_strategic_direction_chosen` (e.g.",
+      "//     `vertical_concentration_on_industrial_safety_strategic_direction_chosen`).",
+      "//     This KC is the LOAD-BEARING anchor for admission + closure.",
+      "//   U-layer (initiative selection FROM strategy): 2-4 task_node_opened",
+      "//     rows where each candidate initiative is filtered against the",
+      "//     chosen strategic direction — never picked from substrate",
+      "//     priors first.",
+      "//   V-layer (report composition): the task that emits the",
+      "//     code_artifact_candidate whose name starts with",
+      "//     `atms_report_v` MUST include the T-layer's",
+      "//     `_strategic_direction_chosen` KC id in its",
+      "//     `cited_knowledge_ids`. Admission rejects otherwise.",
+      "//   W-layer (meta-leakage scan): one task_node_opened that runs",
+      "//     a substrate audit on the directive's own DAG shape and emits",
+      "//     a lesson_extracted if the strategy-first discipline slipped.",
+      "//",
+      "// Floor: 15 task_node_opened events under the directive. The",
+      "// substrate's strategy_first_closure_check counts these and",
+      "// blocks closure (closure_residual >= 0.3) if the floor is",
+      "// missed, regardless of citation.",
+      "//",
+      "// Failure mode this closes: report v1-v3 under earlier directives",
+      "// picked initiatives from NFPA traceability + demand forecasting",
+      "// + visual QC priors and bolted on strategy text afterward — the",
+      "// initiative set was structurally locked before any strategic",
+      "// direction was chosen. v6 (directive G8XGZN79SX43KCDMVKP35RGE84)",
+      "// reversed the order and is the reference shape.",
+      "//",
+      "// This artifact is a recipe row — it has no runtime behavior",
+      "// beyond a no-op @@RESULT@@ marker; the prompt composer retrieves",
+      "// its body when an ATMS-style report directive is in flight.",
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null') ?? {};",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, residual: 0, recipe: 'master_report_generation_orchestrator', dag_shape: 'S/T/U/V/W', min_task_node_opened: 15, strategic_direction_chosen_suffix: '_strategic_direction_chosen' }));",
+    ].join("\n"),
+    declared_sandbox: { runtime: "bun", cpu_ms: 500, wall_ms: 1000, memory_mb: 64 },
+    state_root: "recipes/master_report_generation_orchestrator",
+    initial_score: 0.85,
+    initial_confidence: 0.7,
+    fixture_input: {},
+    fixture_expected_residual: 0.05,
+    display_name: "Master Report Generation Orchestrator (strategy-first ATMS DAG)",
+  },
 ];
 
 export type CodeArtifactSeedSummary = { inserted: number; skipped: number; upgraded?: number };

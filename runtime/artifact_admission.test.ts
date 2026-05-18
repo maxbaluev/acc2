@@ -285,4 +285,125 @@ describe("admitArtifact — rejections", () => {
     if (result.ok) return;
     expect(result.reason).toBe("fixture_residual_too_high");
   });
+
+  // C3 (2026-05-18, directive QHTRBV6PFX2JVBMHDNDA4B03GC).
+  test("strategy-first gate admits atms_report_v* when a cited knowledge_candidate ends with _strategic_direction_chosen", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    // Emit the strategic-direction KC the report cites.
+    const kc = emitEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d_strategy_fixture",
+      task_id: "t_strategy_fixture",
+      payload: {
+        claim: "vertical_concentration_on_industrial_safety_strategic_direction_chosen",
+        evidence: ["S1", "S2", "T1"],
+      },
+    });
+    const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, report: 'v6' }));`;
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        name: "atms_report_v6",
+        citedKnowledgeIds: [kc.id],
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(events.some((e) => e.kind === "atms_strategy_first_violation")).toBe(false);
+    expect(events.some((e) => e.kind === "code_artifact_admitted")).toBe(true);
+  });
+
+  test("strategy-first gate refuses atms_report_v* when cited_knowledge_ids is empty (no row inserted)", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const before = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, report: 'v1_initiative_first' }));`;
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        name: "atms_report_v1",
+        citedKnowledgeIds: [],
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("strategy_first_violation_missing_strategic_direction_chosen");
+    // Gate runs BEFORE insert — no row landed.
+    const after = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    expect(after).toBe(before);
+    const violations = events.filter((e) => e.kind === "atms_strategy_first_violation");
+    expect(violations.length).toBe(1);
+    const payload = violations[0]!.payload as Record<string, unknown>;
+    expect(payload.artifact_name).toBe("atms_report_v1");
+    expect(payload.missing_claim_suffix).toBe("_strategic_direction_chosen");
+  });
+
+  test("strategy-first gate refuses atms_report_v* when cited KCs exist but none end with the strategic suffix", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    // A KC that does NOT match the suffix — e.g. an initiative-side
+    // finding picked from substrate priors.
+    const kc = emitEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d_initiative_first",
+      task_id: "t_initiative_first",
+      payload: { claim: "nfpa_traceability_initiative_selected", evidence: ["prior_a"] },
+    });
+    const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, report: 'v3_initiative_first' }));`;
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        name: "atms_report_v3",
+        citedKnowledgeIds: [kc.id],
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("strategy_first_violation_missing_strategic_direction_chosen");
+    const violations = events.filter((e) => e.kind === "atms_strategy_first_violation");
+    expect(violations.length).toBe(1);
+    const payload = violations[0]!.payload as Record<string, unknown>;
+    const inspected = payload.inspected_ids as string[];
+    expect(inspected).toContain(kc.id);
+  });
+
+  test("strategy-first gate does NOT apply when name is not atms_report_v* (vanilla artifact admits fine)", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        name: "some_other_recipe_v2",
+        citedKnowledgeIds: [],
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(true);
+    expect(events.some((e) => e.kind === "atms_strategy_first_violation")).toBe(false);
+  });
 });

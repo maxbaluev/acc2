@@ -90,6 +90,11 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // design 48SN4XF3WN4KBBCHHCANDRDQRW, strategy identity lives in the
   // artifact-registry payload, not in EVENT_KINDS.
   "dispatch_strategy_v1",
+  // C3 (2026-05-18): master_report_generation_orchestrator seed declares
+  // `kind: 'recipe'` as its registry-row discriminator (recipe row vs.
+  // raw code_artifact). NOT an event kind — recipe content lives in the
+  // code_artifact registry, surfaced into prompts via retrieval.
+  "recipe",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────
