@@ -1144,9 +1144,20 @@ export const dispatchReadyTask = async (
 
   // Batch 3.OPS: record dispatch metric. Outcome is derived from terminal
   // events on this task during the dispatch window.
+  //
+  // FOUNDATIONAL FIX 2026-05-18: closedEvents was previously declared
+  // inside the metrics try-block, so the cascade block below threw
+  // ReferenceError ('closedEvents is not defined') every time
+  // dispatchHadTerminal was true. The thrown error was caught by the
+  // surrounding warn-logger but the cascade never ran — every committed
+  // root left its refinement children in ready_tasks_view, the scheduler
+  // re-dispatched them on the next tick, and the daemon climbed to
+  // 99% CPU + 3.4GB RSS over ~2 hours. Hoisting the declaration outside
+  // the try block fixes both the cascade AND the runaway resource use.
   let dispatchHadTerminal = false;
+  let closedEvents: ReturnType<typeof readEventsSinceTs> = [];
   try {
-    const closedEvents = readEventsSinceTs(db, dispatchStartedTs, task.id);
+    closedEvents = readEventsSinceTs(db, dispatchStartedTs, task.id);
     const hasCommit = closedEvents.some((e) => e.kind === "task_committed");
     const hasFail = closedEvents.some((e) => e.kind === "task_failed");
     dispatchHadTerminal = hasCommit || hasFail;
@@ -1160,7 +1171,7 @@ export const dispatchReadyTask = async (
         recordActionResidual("bun", e.residual);
       }
     }
-  } catch { /* swallow — metrics are best-effort */ }
+  } catch { /* swallow — metrics are best-effort; closedEvents stays [] if the read failed */ }
 
   // Batch-2 directive closure: if a terminal event fired on this task,
   // check whether the whole directive is now done and emit
