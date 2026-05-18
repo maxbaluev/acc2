@@ -490,6 +490,28 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       /* owner-observed credit retry can be driven from the ledger row */
     });
   }
+  // RLM retrieval credit attribution (brain task FX9PZDQ3W932,
+  // 2026-05-18). Every action_scored event walks its context_refs for
+  // retrieval_binding rows and emits retrieval_credit_attributed per
+  // binding so retrieval_credit_view.credit_attributed_count is
+  // non-zero in production. Closes the 88ESCTN8XN6J always-on-consumer
+  // gap for the new credit loop without a 5-min worker delay —
+  // attribution is deterministic given the inputs, so we fire at the
+  // write boundary (same pattern as distributeCredit for
+  // act_tuple_recorded). Synchronous, idempotent via projection_key.
+  if (input.kind === "action_scored") {
+    try {
+      void import("./retrieval_credit").then(({ attributeRetrievalCredit }) => {
+        attributeRetrievalCredit(db, {
+          scored_event_id: id,
+          context_refs: input.context_refs ?? [],
+          residual: input.residual,
+          directive_id: input.directive_id,
+          task_id: input.task_id,
+        });
+      }).catch(() => { /* swallow; can be re-driven from the action_scored row */ });
+    } catch { /* defensive */ }
+  }
   return { id, ts };
 };
 
