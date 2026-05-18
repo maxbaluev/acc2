@@ -592,6 +592,84 @@ describe("task_scheduler", () => {
     }
   });
 
+  test("operator-dispatch fairness floor: aged root task beats fresh high-score refinement child (foundational fix 2026-05-18)", async () => {
+    // Live evidence: operator-initiated `acc task` for RLM/merger
+    // research landed in orphan_node after 4 hours because prior brain
+    // dispatch's children (carrying trigger_residual × expected_residual
+    // _delta edges) kept winning the branchCompetitionScore race.
+    // Pre-fix the scheduler ordering was:
+    //   1. branchCompetitionScore desc  (refinement edges win)
+    //   2. task_opened_ts asc            (then oldest first)
+    // Operator dispatches have score=0 (no edge to them), so they
+    // perpetually lost to any tiny-residual refinement.
+    // Post-fix: age_bonus(ageMs > 5min) is added to the effective score
+    // so a long-waiting root cannot be starved indefinitely.
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-fair2-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO line", "utf-8");
+    try {
+      // 1. Operator root task, aged > 30 min (no refinement edge).
+      const operatorDir = newId();
+      const operatorTask = newId();
+      emitEvent(db, {
+        kind: "directive_opened",
+        substrate_origin: "owner",
+        directive_id: operatorDir,
+        task_id: operatorDir,
+        payload: { directive_text: "operator wants this", lifecycle: "finite" },
+      });
+      const operatorOpenedTs = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+      db.query(
+        `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+         VALUES (?, ?, 'task_node_opened', 'owner', ?, ?, '', ?)`,
+      ).run(newId(), operatorOpenedTs, operatorDir, operatorTask, JSON.stringify({ goal: "operator goal" }));
+
+      // 2. Fresh refinement child with HIGH branchCompetitionScore via
+      //    task_edge_recorded (trigger_residual=1.0, expected_delta=1.0 → score=1.0).
+      const refineDir = newId();
+      const refineRoot = newId();
+      const refineChild = newId();
+      emitEvent(db, {
+        kind: "directive_opened",
+        substrate_origin: "owner",
+        directive_id: refineDir,
+        task_id: refineDir,
+        payload: { directive_text: "brain refinement", lifecycle: "finite" },
+      });
+      emitEvent(db, {
+        kind: "task_node_opened",
+        substrate_origin: "substrate_auto",
+        directive_id: refineDir,
+        task_id: refineRoot,
+        payload: { goal: "refine root" },
+      });
+      emitEvent(db, {
+        kind: "task_node_opened",
+        substrate_origin: "substrate_auto",
+        directive_id: refineDir,
+        task_id: refineChild,
+        parent_task_id: refineRoot,
+        payload: { goal: "refinement child" },
+      });
+      emitEvent(db, {
+        kind: "task_edge_recorded",
+        substrate_origin: "substrate_auto",
+        directive_id: refineDir,
+        task_id: refineRoot,
+        payload: { from_task: refineRoot, to_task: refineChild, kind: "refines", trigger_residual: 1.0, expected_residual_delta: 1.0 },
+      });
+
+      // Tick with maxConcurrent=1 — only the highest-priority task dispatches.
+      const tick = await schedulerTick(db, { maxConcurrent: 1, fixtureTargetPath: tempDir });
+      // The aged operator task (age=31min → bonus≈5.2) MUST beat the
+      // fresh refinement child (score=1.0, bonus=0).
+      expect(tick.dispatched).toContain(operatorTask);
+      expect(tick.dispatched).not.toContain(refineChild);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("fairness: older ready tasks dispatch BEFORE younger ones across directives (anti-starvation)", async () => {
     // Live ledger evidence (2026-05-15) showed a verification directive
     // opened at 01:09:18 sitting unprocessed for 30+ min while a Father

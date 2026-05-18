@@ -392,8 +392,34 @@ export const schedulerTick = async (
       return Math.max(0, Number(p.trigger_residual ?? 0)) * Math.max(0, Number(p.expected_residual_delta ?? 0));
     } catch { return 0; }
   };
+  // Operator-dispatch fairness floor (foundational fix 2026-05-18):
+  // pre-fix the scheduler ordered by branchCompetitionScore first (refinement
+  // edges with trigger_residual × expected_residual_delta), then by
+  // task_opened_ts oldest-first. Operator-initiated root tasks have NO
+  // refinement edge pointing to them → branchCompetitionScore = 0 → they
+  // perpetually lose to any brain-emitted child carrying even a tiny
+  // residual hint. Observed: a 4-hour-old operator `acc task` landed in
+  // orphan_node while 43 brain_dispatched fired in 10 min — pure
+  // starvation by branch competition.
+  //
+  // Fix: add an age bonus to the effective score. Below 5 min waiting,
+  // bonus is 0 (branch competition wins, the intended fast path). Over
+  // 5 min, bonus grows linearly (+1.0 per 5 min). After 30 min waiting,
+  // bonus = 5.0 which beats almost any branchCompetitionScore (residual
+  // × delta is bounded ∈ [0,1]). This guarantees an operator dispatch
+  // can never be starved indefinitely, while letting fresh refinement
+  // edges still take precedence in normal operation.
+  const ageBonusFor = (taskId: string): number => {
+    const ts = taskOpenedTs(taskId);
+    if (!ts) return 0;
+    const ageMs = Math.max(0, Date.now() - Date.parse(ts));
+    const FAIRNESS_AGE_THRESHOLD_MS = 5 * 60 * 1000;
+    const FAIRNESS_AGE_BONUS_PER_MS = 1 / FAIRNESS_AGE_THRESHOLD_MS;
+    return Math.max(0, (ageMs - FAIRNESS_AGE_THRESHOLD_MS) * FAIRNESS_AGE_BONUS_PER_MS);
+  };
+  const effectiveScore = (taskId: string): number => branchCompetitionScore(taskId) + ageBonusFor(taskId);
   ready.sort((a, b) => {
-    const scoreDelta = branchCompetitionScore(b.id) - branchCompetitionScore(a.id);
+    const scoreDelta = effectiveScore(b.id) - effectiveScore(a.id);
     if (scoreDelta !== 0) return scoreDelta;
     return taskOpenedTs(a.id).localeCompare(taskOpenedTs(b.id));
   });
