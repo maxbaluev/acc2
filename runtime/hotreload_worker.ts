@@ -861,7 +861,6 @@ export const __testApplyChange = (
         payload: { module: entry.name, file_path: relPath, reason: "no_reloadable_slot" },
       });
     }
-    void isQuiescent; // kept for parity with production startup
     } finally {
       cacheBust.cleanup();
     }
