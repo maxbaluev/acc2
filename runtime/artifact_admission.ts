@@ -123,7 +123,7 @@ export type AdmissionRejectionReason =
   | "published_drive_doc_invalid_inputs";
 
 export type AdmissionResult =
-  | { ok: true; artifactId: string }
+  | { ok: true; artifactId: string; supersedes_dropped?: boolean }
   | { ok: false; reason: AdmissionRejectionReason; detail?: string };
 
 // Canonical admission priors per v2-design.md §11.5.
@@ -352,6 +352,63 @@ export const admitArtifact = async (
     }
   }
 
+  // 1.95 Intent-classification supersedes gate (contract TJGFQC72,
+  //      2026-05-18). Before storing input.supersedes for any artifact
+  //      whose name starts with `atms_report_v`, look up the directive's
+  //      most recent intent_classified row:
+  //        - If the row exists and intent_class !== atms_report_composition,
+  //          drop the supersedes pointer and emit lane_routing_refused so
+  //          the chain stays under the strategy-first lane only.
+  //        - If no intent_classified row exists (historical / back-population),
+  //          admit supersedes unchanged so the existing provenance chain stays
+  //          intact.
+  //        - If intent_class === atms_report_composition, admit supersedes
+  //          normally.
+  //      Returns supersedes_dropped: true on the result so callers can
+  //      observe the gate firing without parsing the event stream.
+  let effectiveSupersedes: string | null | undefined = input.supersedes;
+  let supersedesDropped = false;
+  if (
+    typeof input.name === "string" &&
+    input.name.startsWith("atms_report_v") &&
+    typeof effectiveSupersedes === "string" &&
+    effectiveSupersedes.length > 0
+  ) {
+    const sourceDirectiveId = input.governance?.directiveId;
+    if (sourceDirectiveId) {
+      const latestIntent = db
+        .query<{ payload: string }, [string]>(
+          `SELECT payload FROM events
+            WHERE kind = 'intent_classified' AND directive_id = ?
+            ORDER BY ts DESC LIMIT 1`,
+        )
+        .get(sourceDirectiveId);
+      if (latestIntent) {
+        let observedIntentClass: string | null = null;
+        try {
+          const p = JSON.parse(latestIntent.payload ?? "{}") as Record<string, unknown>;
+          observedIntentClass = typeof p.intent_class === "string" ? p.intent_class : null;
+        } catch { /* swallow — observedIntentClass stays null and the gate refuses */ }
+        if (observedIntentClass && observedIntentClass !== "atms_report_composition") {
+          effectiveSupersedes = null;
+          supersedesDropped = true;
+          emit({
+            kind: "lane_routing_refused",
+            substrate_origin: "substrate_auto",
+            directive_id: sourceDirectiveId,
+            payload: {
+              reason: "intent_class_mismatch",
+              refused_kind: "atms_report_v_supersedes",
+              directive_id: sourceDirectiveId,
+              observed_intent_class: observedIntentClass,
+            } as JsonValue,
+          });
+        }
+      }
+      // No latest intent row → back-population path; admit unchanged.
+    }
+  }
+
   // 2. Insert at admit priors. We do this BEFORE running the fixture so the
   //    artifact_id is stable across the artifact_invoked / artifact_observed
   //    events; if the fixture fails we DELETE the row in the rejection branch.
@@ -379,7 +436,7 @@ export const admitArtifact = async (
     // owner_gate_verdict is "auto" when no owner gate fired, else "owner_approved"
     // (we already passed the gate check above for the require_consent branch).
     ownerGateVerdict: gate.requires_consent ? "owner_approved" : "auto",
-    supersedes: input.supersedes ?? null,
+    supersedes: effectiveSupersedes ?? null,
     id: input.artifactId,
   });
 
@@ -525,8 +582,8 @@ export const admitArtifact = async (
   // chain. `markSuperseded` is idempotent on repeat calls with the same
   // pair, so retrying admission for any reason does not duplicate the
   // event row.
-  if (input.kind === "published_drive_doc" && input.supersedes) {
-    markSuperseded(db, input.supersedes, row.id, emit);
+  if (input.kind === "published_drive_doc" && effectiveSupersedes) {
+    markSuperseded(db, effectiveSupersedes, row.id, emit);
   }
 
   // Re-read in case downstream stamped any field; mostly defensive.
@@ -544,7 +601,9 @@ export const admitArtifact = async (
       target_resources: final?.targetResources?.map((r) => r.uri) ?? null,
     } as JsonValue,
   });
-  return { ok: true, artifactId: row.id };
+  return supersedesDropped
+    ? { ok: true, artifactId: row.id, supersedes_dropped: true }
+    : { ok: true, artifactId: row.id };
 };
 
 /** C3 strategy-first citation lookup. Returns ok:true when at least one

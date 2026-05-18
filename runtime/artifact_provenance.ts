@@ -116,14 +116,37 @@ export const getProvenanceChain = (
 /** Flip the prior row's `superseded_by` to point at the new artifact and
  *  emit `code_artifact_superseded`. Idempotent: if the prior row already
  *  points to the new artifact this is a no-op (no duplicate event).
- *  Returns true on transition, false on no-op or missing prior row. */
+ *  Returns true on transition, false on no-op or missing prior row.
+ *
+ *  Contract TJGFQC72 (2026-05-18): when `predicateResult` is supplied
+ *  with residual ≥ 0.3, refuse the chain extension, emit
+ *  `lane_routing_refused`, and return false. Existing callers that do
+ *  not pass the parameter are unchanged. */
 export const markSuperseded = (
   db: Database,
   supersededId: string,
   newId: string,
   emit: (event: EmitEventInput) => void,
+  predicateResult?: { residual: number },
 ): boolean => {
   if (!supersededId || !newId || supersededId === newId) return false;
+  if (predicateResult && predicateResult.residual >= 0.3) {
+    emit({
+      kind: "lane_routing_refused",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: supersededId,
+      payload: {
+        reason: "predicate_residual_too_high",
+        refused_kind: "supersedes_chain_extension",
+        directive_id: "",
+        observed_intent_class: null,
+        residual: predicateResult.residual,
+        prior_artifact_id: supersededId,
+        new_artifact_id: newId,
+      } as JsonValue,
+    });
+    return false;
+  }
   const prior = getArtifact(db, supersededId);
   if (!prior) return false;
   if (prior.supersededBy === newId) return false;     // idempotent no-op

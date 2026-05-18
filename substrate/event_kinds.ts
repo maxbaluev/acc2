@@ -691,6 +691,41 @@ export const EVENT_KINDS = {
   // ── Previously-missing kinds (emitted at runtime, now registered) ───
   embedding_skipped_missing_api_key:       { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   cli_layout_migrated:                     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+
+  // ── Intent classification + dark-gate observability (contract TJGFQC72,
+  //    2026-05-18). Live ledger evidence: knowledge_candidate
+  //    RWWDJDPEFH3ESEN8TRS5DG52J4 showed zero intent_classified events ever
+  //    emitted while views.ts and the rendering verifier already referenced
+  //    the kind by name. The four kinds below close the documented-but-dark
+  //    gates so the substrate self-extends through use rather than through
+  //    enum extension.
+  //
+  //    intent_classified — substrate-emitted at directive ingress
+  //    (handleOpenDirective). Payload:
+  //      { intent_class, confidence, evidence: string[],
+  //        classifier_version, directive_text_hash,
+  //        allowed_artifact_kinds: string[] }
+  //    intent_class is an open string; vocabulary discovered through use.
+  //    embeddable so retrieval over classifier outputs surfaces patterns,
+  //    health_metric so dashboards count the gate firing.
+  //
+  //    lane_routing_refused — substrate-emitted when a downstream gate
+  //    refuses to admit a payload whose route conflicts with the
+  //    directive's intent_class. Payload:
+  //      { reason, refused_kind, directive_id, observed_intent_class }
+  //    Free-string fields preserve the open vocabulary.
+  //
+  //    refinement_depth_exceeded — explicit event kind (was previously a
+  //    failure_kind enum value only). Payload: { depth, cap }. Marked
+  //    health_metric so the rate of cap-hits is countable.
+  //
+  //    verifier_residual_high — explicit event kind paired with the
+  //    pathology budget weight. Payload: { residual, verifier_kind }.
+  //    verifier_kind is intentionally a free string.
+  intent_classified:                       { producer: "substrate", embeddable: true,  mirror_inline: false, health_metric: true,  narrative: true },
+  lane_routing_refused:                    { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+  refinement_depth_exceeded:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+  verifier_residual_high:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
 } as const satisfies Record<string, EventKindMetadata>;
 
 /** The canonical union — derived from the registry. */

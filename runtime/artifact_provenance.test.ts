@@ -118,6 +118,38 @@ describe("markSuperseded — idempotency + edge maintenance", () => {
     expect(markSuperseded(db, "missing_prior", "successor", captureEmit(events))).toBe(false);
     expect(events.length).toBe(0);
   });
+
+  // Contract TJGFQC72 (2026-05-18): markSuperseded gains an optional
+  // predicateResult parameter. Residual < 0.3 admits the chain extension
+  // as before; residual ≥ 0.3 refuses and emits lane_routing_refused.
+  test("predicateResult residual < 0.3 admits the chain (back-compat)", () => {
+    const db = openDb(":memory:");
+    insertStub(db, "prior_low", "published_drive_doc", "p_low");
+    insertStub(db, "succ_low", "published_drive_doc", "s_low");
+    const events: EmitEventInput[] = [];
+    const ok = markSuperseded(db, "prior_low", "succ_low", captureEmit(events), { residual: 0.1 });
+    expect(ok).toBe(true);
+    expect(getArtifact(db, "prior_low")?.supersededBy).toBe("succ_low");
+    expect(events.filter((e) => e.kind === "code_artifact_superseded").length).toBe(1);
+    expect(events.filter((e) => e.kind === "lane_routing_refused").length).toBe(0);
+  });
+
+  test("predicateResult residual >= 0.3 refuses + emits lane_routing_refused", () => {
+    const db = openDb(":memory:");
+    insertStub(db, "prior_high", "published_drive_doc", "p_high");
+    insertStub(db, "succ_high", "published_drive_doc", "s_high");
+    const events: EmitEventInput[] = [];
+    const ok = markSuperseded(db, "prior_high", "succ_high", captureEmit(events), { residual: 0.42 });
+    expect(ok).toBe(false);
+    expect(getArtifact(db, "prior_high")?.supersededBy).toBeNull();
+    expect(events.filter((e) => e.kind === "code_artifact_superseded").length).toBe(0);
+    const refusals = events.filter((e) => e.kind === "lane_routing_refused");
+    expect(refusals.length).toBe(1);
+    const payload = refusals[0]!.payload as Record<string, unknown>;
+    expect(payload.reason).toBe("predicate_residual_too_high");
+    expect(payload.refused_kind).toBe("supersedes_chain_extension");
+    expect(payload.residual).toBe(0.42);
+  });
 });
 
 describe("Lakeland Drive backfill", () => {

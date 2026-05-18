@@ -299,6 +299,15 @@ describe("derived sets match their pre-unification shape", () => {
       // forbidden in Alex path).
       "rendered_docx_invalid_inputs",
       "published_drive_doc_invalid_inputs",
+      // Contract TJGFQC72 (2026-05-18): intent classification + dark-kind
+      // observability. Counting these per-window lets operators see
+      // classifier coverage, lane-routing refusals, refinement-depth
+      // exhaustion, and high-residual verifier outcomes from a single
+      // surface.
+      "intent_classified",
+      "lane_routing_refused",
+      "refinement_depth_exceeded",
+      "verifier_residual_high",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

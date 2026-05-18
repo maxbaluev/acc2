@@ -26,6 +26,8 @@ import { recordInterferenceEdge, type InterferenceEdgeKind } from "../interferen
 import { findRecipeMatch } from "../recipe_replay";
 import { findSimilarRecentCandidate } from "../knowledge_dedup";
 import { newId } from "../ids";
+import { createHash } from "node:crypto";
+import { classifyIntent, allowedArtifactKindsFor, INTENT_CLASSIFIER_VERSION } from "../intent_classifier";
 import {
   codeArtifactRegistry,
   readyTasks,
@@ -1286,6 +1288,33 @@ export const handleOpenDirective = (
     directive_id: directiveId,
     task_id: directiveId,
     payload: lifecyclePayload as JsonValue,
+  });
+
+  // Contract TJGFQC72 (2026-05-18): every directive ingress runs the
+  // deterministic intent classifier and emits intent_classified BEFORE
+  // any downstream gate (owner_input_received, task_node_opened,
+  // artifact admission). Open-string vocabulary — ad_hoc is the
+  // permissive fallback so historical paths still admit. Downstream
+  // gates read this row to decide lane routing; absence is treated as
+  // "back-population" and admits superseded chains unchanged.
+  const classification = classifyIntent(args.directive_text);
+  const directiveTextHash = createHash("sha256")
+    .update(args.directive_text)
+    .digest("hex")
+    .slice(0, 16);
+  emitEvent(ctx.db, {
+    kind: "intent_classified",
+    substrate_origin: "substrate_auto",
+    directive_id: directiveId,
+    task_id: directiveId,
+    payload: {
+      intent_class: classification.intent_class,
+      confidence: classification.confidence,
+      evidence: classification.evidence,
+      classifier_version: INTENT_CLASSIFIER_VERSION,
+      directive_text_hash: directiveTextHash,
+      allowed_artifact_kinds: allowedArtifactKindsFor(classification.intent_class),
+    } as JsonValue,
   });
 
   // Owner input is, by definition, the directive text. Emitting
