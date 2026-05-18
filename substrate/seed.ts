@@ -722,32 +722,73 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   {
     seedName: "web_search",
     runtime: "bun",
-    // Honest minimal serper.dev wrapper — when SERPER_API_KEY isn't set we
-    // return ok:false with the canonical error rather than emitting a fake
-    // success. The substrate's verifier scores the residual; an unconfigured
-    // key looks like a configuration drift, not a successful answer.
+    // Multi-endpoint serper.dev wrapper (extended 2026-05-18 per
+    // knowledge_candidate PNBQJR8T1N5R reusable pattern + 0R6EPM4AX54J
+    // honest credential health check):
+    //
+    //   inputs = { query: string, endpoint?: "search"|"scholar"|"maps", limit?: number }
+    //
+    // /search   → organic[] → { title, url, snippet }                    (default)
+    // /scholar  → organic[] → { title, url, snippet, publicationInfo, year, cited_by }
+    // /maps     → places[]  → { title, address, rating, ratings_count, category, url }
+    //
+    // The result envelope carries `endpoint` so callers know which shape
+    // they got back. Missing/invalid endpoint defaults to /search; an
+    // unconfigured SERPER_API_KEY returns ok:false with
+    // 'serper_api_key_missing' so the substrate verifier scores
+    // configuration drift as residual=1, never as a fake success.
     body: [
-      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null') ?? {};",
       "const apiKey = process.env.SERPER_API_KEY;",
       "if (!apiKey) {",
-      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'serper_api_key_missing' }));",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'serper_api_key_missing', key_source: 'env' }));",
+      "  process.exit(0);",
+      "}",
+      "const VALID_ENDPOINTS = new Set(['search', 'scholar', 'maps']);",
+      "const endpoint = typeof inputs.endpoint === 'string' && VALID_ENDPOINTS.has(inputs.endpoint) ? inputs.endpoint : 'search';",
+      "const limit = typeof inputs.limit === 'number' && inputs.limit > 0 ? Math.min(20, inputs.limit) : 10;",
+      "const query = String(inputs.query ?? '');",
+      "if (!query) {",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'serper_query_missing', endpoint }));",
       "  process.exit(0);",
       "}",
       "try {",
-      "  const resp = await fetch('https://google.serper.dev/search', {",
+      "  const resp = await fetch('https://google.serper.dev/' + endpoint, {",
       "    method: 'POST',",
       "    headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },",
-      "    body: JSON.stringify({ q: inputs.query }),",
+      "    body: JSON.stringify({ q: query }),",
       "  });",
       "  if (!resp.ok) {",
-      "    console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'serper_http_' + resp.status }));",
+      "    console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'serper_http_' + resp.status, endpoint, query }));",
       "    process.exit(0);",
       "  }",
       "  const data = await resp.json();",
-      "  const hits = (data.organic ?? []).slice(0, 10).map((h) => ({ title: h.title, url: h.link, snippet: h.snippet }));",
-      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, query: inputs.query, hits }));",
+      "  let hits = [];",
+      "  if (endpoint === 'search') {",
+      "    hits = (data.organic ?? []).slice(0, limit).map((h) => ({ title: h.title, url: h.link, snippet: h.snippet }));",
+      "  } else if (endpoint === 'scholar') {",
+      "    hits = (data.organic ?? []).slice(0, limit).map((h) => ({",
+      "      title: h.title,",
+      "      url: h.link,",
+      "      snippet: h.snippet,",
+      "      publication_info: h.publicationInfo,",
+      "      year: h.year,",
+      "      cited_by: h.citedBy?.total ?? h.cited_by ?? null,",
+      "      authors: h.authors ?? null,",
+      "    }));",
+      "  } else if (endpoint === 'maps') {",
+      "    hits = (data.places ?? []).slice(0, limit).map((p) => ({",
+      "      title: p.title,",
+      "      address: p.address,",
+      "      rating: p.rating,",
+      "      ratings_count: p.ratingCount ?? p.ratings_count ?? null,",
+      "      category: p.category,",
+      "      url: p.website ?? p.url ?? null,",
+      "    }));",
+      "  }",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, endpoint, query, hits }));",
       "} catch (err) {",
-      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'serper_fetch_failed:' + String(err) }));",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'serper_fetch_failed:' + String(err), endpoint, query }));",
       "}",
     ].join("\n"),
     declared_sandbox: {
@@ -760,9 +801,131 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     state_root: "substrate/web_search",
     initial_score: 0.80,
     initial_confidence: 0.70,
-    fixture_input: { query: "OpenAI text-embedding-3-small" },
+    fixture_input: { query: "OpenAI text-embedding-3-small", endpoint: "search" },
     fixture_expected_residual: 0.0,
     display_name: "web_search",
+  },
+  {
+    seedName: "deep_research",
+    runtime: "bun",
+    // Plan/explore/learn loop over external sources (2026-05-18 per
+    // knowledge_candidates AMW36P80MD4T + ZQQA8YXQX56E). The brain
+    // emits action_predicted with this artifact when a directive needs
+    // real evidence from outside the substrate (citation validation,
+    // SOTA literature survey, market check).
+    //
+    // Inputs:
+    //   { query: string,
+    //     endpoints?: Array<"search"|"scholar"|"maps">,  // default: ["search","scholar"]
+    //     per_endpoint_limit?: number,                    // default: 8
+    //     min_distinct_domains?: number }                 // default: 3
+    //
+    // Output envelope:
+    //   { ok: bool,
+    //     query,
+    //     plan: { endpoints, per_endpoint_limit },
+    //     explore: { per_endpoint_hit_counts, total_unique_hits, distinct_domains },
+    //     learn: { top_hits: [{title,url,snippet,endpoint,source_band}],
+    //              gaps: string[] },     // open-ended; e.g. "no_scholar_results"
+    //     errors: Array<{endpoint, error}> }
+    //
+    // The verifier scores residual on: did we hit min_distinct_domains?
+    // did /scholar return non-empty when asked? did total_unique_hits
+    // beat a minimum? Open-ended axes so the brain can extend.
+    body: [
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null') ?? {};",
+      "const apiKey = process.env.SERPER_API_KEY;",
+      "if (!apiKey) {",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'serper_api_key_missing', key_source: 'env' }));",
+      "  process.exit(0);",
+      "}",
+      "const VALID = new Set(['search', 'scholar', 'maps']);",
+      "const query = String(inputs.query ?? '');",
+      "if (!query) {",
+      "  console.log('@@RESULT@@ ' + JSON.stringify({ ok: false, error: 'deep_research_query_missing' }));",
+      "  process.exit(0);",
+      "}",
+      "const endpoints = (Array.isArray(inputs.endpoints) ? inputs.endpoints : ['search', 'scholar']).filter((e) => VALID.has(e));",
+      "if (endpoints.length === 0) endpoints.push('search');",
+      "const perLimit = typeof inputs.per_endpoint_limit === 'number' && inputs.per_endpoint_limit > 0 ? Math.min(20, inputs.per_endpoint_limit) : 8;",
+      "const minDomains = typeof inputs.min_distinct_domains === 'number' && inputs.min_distinct_domains > 0 ? inputs.min_distinct_domains : 3;",
+      "const errors = [];",
+      "const perEndpointHits = {};",
+      "const allHits = [];",
+      "const seenUrls = new Set();",
+      "const domainOf = (url) => { try { return new URL(url).hostname.replace(/^www\\./, ''); } catch { return null; } };",
+      "// EXPLORE: parallel POST per endpoint via Promise.allSettled.",
+      "const tasks = endpoints.map(async (ep) => {",
+      "  try {",
+      "    const resp = await fetch('https://google.serper.dev/' + ep, {",
+      "      method: 'POST',",
+      "      headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },",
+      "      body: JSON.stringify({ q: query }),",
+      "    });",
+      "    if (!resp.ok) { errors.push({ endpoint: ep, error: 'serper_http_' + resp.status }); return; }",
+      "    const data = await resp.json();",
+      "    const raw = ep === 'maps' ? (data.places ?? []) : (data.organic ?? []);",
+      "    const hits = raw.slice(0, perLimit).map((h) => ({",
+      "      title: h.title,",
+      "      url: h.link ?? h.website ?? h.url ?? null,",
+      "      snippet: h.snippet,",
+      "      endpoint: ep,",
+      "      source_band: ep === 'scholar' ? (Number(h.year ?? 0) >= 2024 ? 'recent_scholar' : 'older_scholar') : ep,",
+      "      ...(ep === 'scholar' ? { publication_info: h.publicationInfo, year: h.year, cited_by: h.citedBy?.total ?? null } : {}),",
+      "      ...(ep === 'maps' ? { address: h.address, rating: h.rating, category: h.category } : {}),",
+      "    }));",
+      "    perEndpointHits[ep] = hits.length;",
+      "    for (const h of hits) {",
+      "      if (!h.url || seenUrls.has(h.url)) continue;",
+      "      seenUrls.add(h.url);",
+      "      allHits.push(h);",
+      "    }",
+      "  } catch (err) {",
+      "    errors.push({ endpoint: ep, error: 'serper_fetch_failed:' + String(err) });",
+      "  }",
+      "});",
+      "await Promise.allSettled(tasks);",
+      "// LEARN: rank, gap-detect, project plain summary.",
+      "const domains = new Set();",
+      "for (const h of allHits) { const d = domainOf(h.url ?? ''); if (d) domains.add(d); }",
+      "const topHits = allHits.slice(0, Math.max(perLimit, 12));",
+      "const gaps = [];",
+      "if (domains.size < minDomains) gaps.push('insufficient_distinct_domains:' + domains.size + '<' + minDomains);",
+      "if (endpoints.includes('scholar') && (perEndpointHits.scholar ?? 0) === 0) gaps.push('no_scholar_results');",
+      "if (allHits.length === 0) gaps.push('zero_total_hits');",
+      "if (errors.length === endpoints.length) gaps.push('all_endpoints_failed');",
+      "const ok = allHits.length > 0 && errors.length < endpoints.length;",
+      "console.log('@@RESULT@@ ' + JSON.stringify({",
+      "  ok,",
+      "  query,",
+      "  plan: { endpoints, per_endpoint_limit: perLimit },",
+      "  explore: {",
+      "    per_endpoint_hit_counts: perEndpointHits,",
+      "    total_unique_hits: allHits.length,",
+      "    distinct_domains: domains.size,",
+      "  },",
+      "  learn: { top_hits: topHits, gaps },",
+      "  errors,",
+      "}));",
+    ].join("\n"),
+    declared_sandbox: {
+      runtime: "bun",
+      net_allow: ["google.serper.dev"],
+      cpu_ms: 15000,
+      wall_ms: 45000,
+      memory_mb: 256,
+    },
+    state_root: "substrate/deep_research",
+    initial_score: 0.75,
+    initial_confidence: 0.60,
+    fixture_input: {
+      query: "JEPA joint-embedding predictive architecture 2025",
+      endpoints: ["search", "scholar"],
+      per_endpoint_limit: 6,
+      min_distinct_domains: 2,
+    },
+    fixture_expected_residual: 0.0,
+    display_name: "deep_research",
   },
   {
     seedName: "web_fetch_and_parse",
@@ -1210,21 +1373,70 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   },
 ];
 
-export type CodeArtifactSeedSummary = { inserted: number; skipped: number };
+export type CodeArtifactSeedSummary = { inserted: number; skipped: number; upgraded?: number };
 
 const seedIdFor = (seedName: string): string => `seed_${seedName}`;
 
 export const seedCodeArtifacts = (db: Database): CodeArtifactSeedSummary => {
   let inserted = 0;
   let skipped = 0;
+  let upgraded = 0;
   const initialStatus: CodeArtifactStatus = "admitted";
 
   withImmediateTransaction(db, () => {
     for (const seed of SEED_ARTIFACTS) {
       const id = seedIdFor(seed.seedName);
-      const existing = db.query("SELECT id FROM code_artifact WHERE id = ?").get(id);
+      const sandboxJson = JSON.stringify(seed.declared_sandbox);
+      const fixtureJson = JSON.stringify(seed.fixture_input);
+      // Content hash gates upgrades: when a seed artifact's body,
+      // sandbox, or fixture has been improved (as happened 2026-05-18
+      // when web_search gained /scholar + /maps endpoints), existing
+      // installs should pick the new version up WITHOUT resetting the
+      // learned posterior. Same gate-pattern as seedFoundationalKnowledge
+      // (commit 7cab996 for laws/bundles). Hash covers behavior-bearing
+      // fields; posterior_alpha/beta/score/confidence are preserved.
+      const contentHash = hashSeedRow(
+        `artifact:${id}|runtime:${seed.runtime}|body:${seed.body}|sandbox:${sandboxJson}|fixture:${fixtureJson}|state_root:${seed.state_root}|kind:${seed.kind ?? "code_artifact"}`,
+      );
+      const existing = db
+        .query("SELECT id FROM code_artifact WHERE id = ?")
+        .get(id) as { id: string } | null;
       if (existing) {
-        skipped++;
+        if (seenSeedHash(db, "seed:code_artifact", contentHash)) {
+          skipped++;
+          continue;
+        }
+        // Body / sandbox / fixture changed since last seed — UPGRADE in
+        // place. Preserve posterior_alpha/beta/score/confidence/
+        // recent_residual_mean/recent_kill_count so live calibration is
+        // not wiped.
+        db.run(
+          `UPDATE code_artifact SET
+             runtime = ?,
+             body = ?,
+             declared_sandbox = ?,
+             state_root = ?,
+             kind = ?,
+             name = ?,
+             fixture_input = ?,
+             fixture_expected_residual = ?,
+             updated_at = ?
+           WHERE id = ?`,
+          [
+            seed.runtime,
+            seed.body,
+            sandboxJson,
+            seed.state_root,
+            seed.kind ?? "code_artifact",
+            seed.display_name,
+            fixtureJson,
+            seed.fixture_expected_residual,
+            nowIso(),
+            id,
+          ],
+        );
+        recordSeedHash(db, "seed:code_artifact", contentHash, seed.seedName.slice(0, 64));
+        upgraded++;
         continue;
       }
       const ts = nowIso();
@@ -1242,7 +1454,7 @@ export const seedCodeArtifacts = (db: Database): CodeArtifactSeedSummary => {
           id,
           seed.runtime,
           seed.body,
-          JSON.stringify(seed.declared_sandbox),
+          sandboxJson,
           seed.state_root,
           seed.kind ?? "code_artifact",
           alpha,
@@ -1253,17 +1465,18 @@ export const seedCodeArtifacts = (db: Database): CodeArtifactSeedSummary => {
           0,
           initialStatus,
           seed.display_name,
-          JSON.stringify(seed.fixture_input),
+          fixtureJson,
           seed.fixture_expected_residual,
           ts,
           ts,
         ],
       );
+      recordSeedHash(db, "seed:code_artifact", contentHash, seed.seedName.slice(0, 64));
       inserted++;
     }
   });
 
-  return { inserted, skipped };
+  return { inserted, skipped, upgraded };
 };
 
 /** Convenience helper — primarily for tests / the daemon boot path.

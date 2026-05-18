@@ -107,6 +107,124 @@ describe("seedCodeArtifacts", () => {
     expect(runtimes.has("camofox-browser")).toBe(true);
   });
 
+  test("seed_web_search body supports /search, /scholar, /maps endpoints (2026-05-18 extension)", () => {
+    // Pre-extension the artifact hard-coded https://google.serper.dev/search.
+    // Cite PNBQJR8T1N5R reusable pattern + 0R6EPM4AX54J credential health
+    // check: one artifact, endpoint parameter ∈ {search, scholar, maps},
+    // honest serper_api_key_missing when key absent.
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    const row = db
+      .query("SELECT body, fixture_input FROM code_artifact WHERE id = ?")
+      .get("seed_web_search") as { body: string; fixture_input: string } | null;
+    expect(row).not.toBeNull();
+    if (!row) return;
+    // Honest credential health check stays.
+    expect(row.body).toContain("serper_api_key_missing");
+    // Endpoint validation set.
+    expect(row.body).toContain("VALID_ENDPOINTS");
+    expect(row.body).toContain("'search'");
+    expect(row.body).toContain("'scholar'");
+    expect(row.body).toContain("'maps'");
+    // Per-endpoint result shaping.
+    expect(row.body).toContain("publication_info");
+    expect(row.body).toContain("cited_by");
+    expect(row.body).toContain("places");
+    expect(row.body).toContain("rating");
+    // Endpoint param flows into the URL.
+    expect(row.body).toContain("'https://google.serper.dev/' + endpoint");
+    // Result envelope carries the endpoint so callers know which shape they got.
+    expect(row.body).toContain("endpoint, query, hits");
+    // Fixture updated to include endpoint:'search' so the existing
+    // verifier path keeps working.
+    const fx = JSON.parse(row.fixture_input ?? "{}");
+    expect(fx.query).toBeDefined();
+    expect(fx.endpoint).toBe("search");
+  });
+
+  test("seedCodeArtifacts content-hash upgrade: body change replaces row in-place, preserves posterior (Phase I3+ distribution)", () => {
+    // Pre-fix the seed function used a simple existence check — when an
+    // operator pulled a new acc2 release with an improved artifact body
+    // (e.g. web_search gaining /scholar + /maps endpoints), the existing
+    // row was skipped forever and the install stayed on the old body.
+    // This test pins the content-hash upgrade gate: when body changes,
+    // the row is UPDATED in place while posterior_alpha/beta/score/
+    // confidence are PRESERVED.
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db); // initial admit
+    // Simulate live calibration: bump posterior on a known artifact.
+    db.run(
+      `UPDATE code_artifact SET posterior_alpha = 12.0, posterior_beta = 3.0, score = 0.8, confidence = 0.85
+        WHERE id = 'seed_web_search'`,
+    );
+    const before = db
+      .query("SELECT body, posterior_alpha, posterior_beta, score, confidence FROM code_artifact WHERE id = 'seed_web_search'")
+      .get() as { body: string; posterior_alpha: number; posterior_beta: number; score: number; confidence: number };
+    expect(before.posterior_alpha).toBeCloseTo(12.0, 5);
+    expect(before.body).toContain("VALID_ENDPOINTS"); // new body shipped
+    // Mutate body in-place to simulate a downgrade then re-seed (the
+    // upgrade path mirrors any future body improvement).
+    db.run(`UPDATE code_artifact SET body = 'OLD STUB BODY' WHERE id = 'seed_web_search'`);
+    // Clear the recorded hash so the gate sees content drift.
+    // (Hash records live in the generic `meta` k/v table under prefix
+    // `seed:code_artifact:` — there is no dedicated seed_hash_registry.)
+    db.run(`DELETE FROM meta WHERE key LIKE 'seed:code_artifact:%'`);
+    const summary = seedCodeArtifacts(db);
+    // Upgrade fired on every artifact with no matching hash (a fresh
+    // table). At minimum web_search must have been updated.
+    expect((summary.upgraded ?? 0) + (summary.inserted ?? 0)).toBeGreaterThan(0);
+    const after = db
+      .query("SELECT body, posterior_alpha, posterior_beta, score, confidence FROM code_artifact WHERE id = 'seed_web_search'")
+      .get() as { body: string; posterior_alpha: number; posterior_beta: number; score: number; confidence: number };
+    expect(after.body).toContain("VALID_ENDPOINTS"); // body restored to seed
+    expect(after.body).not.toBe("OLD STUB BODY");
+    // Posterior preserved end-to-end across the upgrade.
+    expect(after.posterior_alpha).toBeCloseTo(12.0, 5);
+    expect(after.posterior_beta).toBeCloseTo(3.0, 5);
+    expect(after.score).toBeCloseTo(0.8, 5);
+    expect(after.confidence).toBeCloseTo(0.85, 5);
+  });
+
+  test("seed_deep_research body wires the plan/explore/learn loop with parallel endpoints + gap detection (Phase I3+ deep research)", () => {
+    // Cite knowledge_candidates AMW36P80MD4T (pipeline of retrieval/
+    // filter/synthesis/verification) + ZQQA8YXQX56E (explicit plan/
+    // explore/learn loops over external sources) + PNBQJR8T1N5R (single
+    // bun artifact, Promise.allSettled for parallel endpoints).
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    const row = db
+      .query("SELECT body, fixture_input, declared_sandbox FROM code_artifact WHERE id = ?")
+      .get("seed_deep_research") as { body: string; fixture_input: string; declared_sandbox: string } | null;
+    expect(row).not.toBeNull();
+    if (!row) return;
+    // Honest credential health check (mirrors web_search per 0R6EPM4AX54J).
+    expect(row.body).toContain("serper_api_key_missing");
+    // Plan layer: explicit endpoint validation + default-from-inputs.
+    expect(row.body).toContain("VALID");
+    expect(row.body).toContain("endpoints");
+    // Explore layer: parallel POST via Promise.allSettled.
+    expect(row.body).toContain("Promise.allSettled");
+    // Learn layer: distinct-domain accounting + gap detection (open-ended).
+    expect(row.body).toContain("distinct_domains");
+    expect(row.body).toContain("no_scholar_results");
+    expect(row.body).toContain("insufficient_distinct_domains");
+    expect(row.body).toContain("zero_total_hits");
+    expect(row.body).toContain("all_endpoints_failed");
+    // Result envelope shape: plan + explore + learn + errors.
+    expect(row.body).toContain("plan: { endpoints");
+    expect(row.body).toContain("explore: {");
+    expect(row.body).toContain("learn: { top_hits");
+    // Sandbox: only serper.dev allowed; larger wall budget than web_search
+    // because multi-endpoint runs are slower.
+    const sandbox = JSON.parse(row.declared_sandbox);
+    expect(sandbox.net_allow).toEqual(["google.serper.dev"]);
+    expect(sandbox.wall_ms).toBeGreaterThan(15000);
+    // Fixture: a realistic deep-research query.
+    const fx = JSON.parse(row.fixture_input);
+    expect(Array.isArray(fx.endpoints)).toBe(true);
+    expect(fx.endpoints).toContain("scholar");
+  });
+
   test("seed_web_fetch_and_parse body carries the missing-url fast-fail guard", () => {
     // Repro for the historical brittleness: when the brain admits a refinement
     // step that drops `url` from inputs, the seed used to call Bun.fetch(undefined)
