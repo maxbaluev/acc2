@@ -151,19 +151,14 @@ describe("EVENT_KINDS registry coverage", () => {
     expect(missingFromRegistry).toEqual([]);
   });
 
-  test("the two previously-missing kinds are now registered", () => {
+  test("the missing embedding-skip kind is registered", () => {
     // Per R's audit in docs/substrate-entity-map.md §"Non-union event
-    // kinds emitted by live producers" — both were emitted at runtime
-    // but absent from the union. Registering them is the unification
-    // pass's load-bearing acceptance criterion.
+    // kinds emitted by live producers" — runtime-emitted kinds belong in
+    // the union when the producer still exists.
     expect("embedding_skipped_missing_api_key" in EVENT_KINDS).toBe(true);
-    expect("cli_layout_migrated" in EVENT_KINDS).toBe(true);
     const skipMeta = EVENT_KINDS.embedding_skipped_missing_api_key as
       typeof EVENT_KINDS[keyof typeof EVENT_KINDS];
-    const migrMeta = EVENT_KINDS.cli_layout_migrated as
-      typeof EVENT_KINDS[keyof typeof EVENT_KINDS];
     expect(skipMeta.producer).toBe("runtime");
-    expect(migrMeta.producer).toBe("runtime");
   });
 
   test("emitEvent accepts the intent gate observability kinds", () => {

@@ -12,8 +12,8 @@
 //   ${stateDir}/logs/                ← daemon log files
 //   ${stateDir}/tmp/                 ← scratch space
 //
-// NO `state/` subdirectory. The old `${stateDir}/state/v2.sock.token` path
-// is migrated forward on first sight (see migrateLegacyLayout).
+// NO `state/` subdirectory. Canonical state files live directly under
+// `${stateDir}/`.
 //
 // Env-var precedence (each independent):
 //
@@ -35,11 +35,8 @@
 // `ACC2_STATE_DIR` is honoured now. Operators upgrading from a pre-removal
 // install should rename the export.
 
-import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Database } from "bun:sqlite";
-import { emitEvent } from "./events";
 
 // ── State-dir resolver (single source of truth) ──────────────────────
 
@@ -91,91 +88,4 @@ export const resolveDbPath = (): string => {
   const explicit = process.env.ACC2_DB_PATH;
   if (explicit && explicit.length > 0) return explicit;
   return join(resolveStateDir(), "state.db");
-};
-
-// ── Layout migration ──────────────────────────────────────────────────
-
-/** One-time migration from the legacy `${stateDir}/state/<file>` layout
- *  to the canonical `${stateDir}/<file>` layout. Idempotent: if no
- *  legacy files exist, returns `{ migrated: false }`. If both legacy and
- *  canonical files exist, the canonical file wins (operator already
- *  migrated by hand) and we leave the legacy file alone.
- *
- *  The set of recognized legacy files is fixed: `v2.sock`, `v2.sock.token`,
- *  `accint.db` (+ `-wal` / `-shm` sidecars). Anything else that lived
- *  under `${stateDir}/state/` (logs, profiles, …) is NOT moved — the
- *  caller is expected to deal with those out-of-band.
- *
- *  Emits a `cli_layout_migrated` event into `db` per renamed file when
- *  `db` is non-null so the operator sees the migration in the ledger. */
-export type MigrationResult = {
-  migrated: boolean;
-  renamed: Array<{ from: string; to: string }>;
-};
-
-const LEGACY_FILE_NAMES = [
-  "v2.sock",
-  "v2.sock.token",
-  "state.db",
-  "state.db-wal",
-  "state.db-shm",
-  // Historical: init.ts used to write `accint.db` under the `state/`
-  // subdir. We treat it as a legacy artifact and rename to `state.db`
-  // under the canonical flat layout so daemon resolves can find it.
-  "accint.db",
-  "accint.db-wal",
-  "accint.db-shm",
-] as const;
-
-/** Map legacy filename → canonical filename. Most names pass through
- *  unchanged; the `accint.db*` family is renamed to `state.db*` so the
- *  canonical resolver finds them. */
-const canonicalName = (legacy: string): string => {
-  if (legacy === "accint.db") return "state.db";
-  if (legacy === "accint.db-wal") return "state.db-wal";
-  if (legacy === "accint.db-shm") return "state.db-shm";
-  return legacy;
-};
-
-export const migrateLegacyLayout = (
-  stateDir: string,
-  db: Database | null = null,
-): MigrationResult => {
-  const legacyRoot = join(stateDir, "state");
-  if (!existsSync(legacyRoot)) return { migrated: false, renamed: [] };
-  const renamed: Array<{ from: string; to: string }> = [];
-  // Ensure the canonical root exists — mkdir is idempotent.
-  if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true });
-  for (const name of LEGACY_FILE_NAMES) {
-    const legacyPath = join(legacyRoot, name);
-    if (!existsSync(legacyPath)) continue;
-    const canonicalPath = join(stateDir, canonicalName(name));
-    if (existsSync(canonicalPath)) {
-      // Canonical already populated — don't clobber. Operator can clean
-      // up the legacy copy manually.
-      continue;
-    }
-    try {
-      renameSync(legacyPath, canonicalPath);
-      renamed.push({ from: legacyPath, to: canonicalPath });
-    } catch {
-      // Best-effort: a single rename failure should not abort the others.
-      continue;
-    }
-  }
-  if (renamed.length > 0 && db) {
-    try {
-      emitEvent(db, {
-        kind: "cli_layout_migrated",
-        substrate_origin: "substrate_auto",
-        payload: {
-          state_dir: stateDir,
-          renamed,
-          canonical_layout: "flat",
-          note: "moved legacy `${stateDir}/state/<file>` into `${stateDir}/<file>` per canonical layout",
-        },
-      });
-    } catch { /* swallow — audit-event failure is non-fatal */ }
-  }
-  return { migrated: renamed.length > 0, renamed };
 };

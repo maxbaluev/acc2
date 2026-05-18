@@ -706,6 +706,48 @@ describe("recipe_replay.findRecipeMatch — recipes_latest_view integration", ()
     expect(match!.recipe_id).toBe(higherId);
     expect(match!.confidence).toBeCloseTo(0.92, 5);
   });
+
+  test("surfaces recipes_latest_view failures instead of scanning recipe history", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        newId(),
+        "2026-01-01T00:00:03.000Z",
+        "d_view_fail",
+        "t_view_fail",
+        "loop_root",
+        "substrate_auto",
+        "recipe_extracted",
+        JSON.stringify({
+          goal_shape: "view_failure_recipe::n1",
+          topology_signature: "",
+          confidence: 0.95,
+          trajectory: [
+            { step_kind: "action_predicted", artifact_id: "a_dummy", payload_template: {} },
+          ],
+        }),
+        "[]",
+      ],
+    );
+    db.run("DROP VIEW recipes_latest_view");
+
+    const task: TaskNode = {
+      id: "t_match_view_fail",
+      directive_id: "d_match_view_fail",
+      parent_id: null,
+      goal: "view failure recipe",
+      status: "pending",
+    } as unknown as TaskNode;
+
+    expect(() => findRecipeMatch(db, task)).toThrow(/recipes_latest_view/);
+    const caught = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'error_caught'")
+      .get() as { c: number };
+    expect(caught.c).toBe(0);
+  });
 });
 
 describe("recipe_replay.updateRecipeConfidence", () => {

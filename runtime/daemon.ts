@@ -37,8 +37,7 @@ import { subscribe, resetBus, type BusEvent } from "./event_bus";
 import { newAdminToken } from "./ids";
 import { createMcpServer } from "./mcp_server";
 import {
-  migrateLegacyLayout,
-  resolveDbPath, resolveSocketFile, resolveStateDir, resolveTokenFile,
+  resolveDbPath, resolveSocketFile, resolveTokenFile,
 } from "./state_paths";
 import { createExternalIngressState, handleExternalPush, type ExternalIngressState } from "./external_ingress";
 import type { FastMCP } from "fastmcp";
@@ -429,17 +428,6 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     process.env.V2_MCP_SERVER_URL = `http://${host}:${port}/mcp`;
   }
 
-  // Layout migration runs BEFORE the daemon touches the socket / token /
-  // db files so a legacy `${stateDir}/state/<file>` install is pulled
-  // forward in one boot. We pass `null` for the DB handle here because
-  // the DB has not been opened yet; once openDb succeeds below we
-  // re-fire the helper with the live handle so the audit event lands.
-  // When the caller passes explicit overrides (tests pin a tmp dir),
-  // we skip the migration entirely — the override paths are scoped to
-  // the test's tmp dir, not the operator's real state dir.
-  if (opts.stateDbPath === undefined && opts.socketFile === undefined && opts.tokenFile === undefined) {
-    migrateLegacyLayout(resolveStateDir(), null);
-  }
 
   // Single-instance guard: if the lock file exists AND names a live pid,
   // refuse to start. A stale lock (pid not alive) gets reaped.
@@ -1477,16 +1465,6 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       transport: "fastmcp:httpStream",
     },
   });
-  // Layout-migration audit. We fire the helper with the live DB so the
-  // ledger carries the canonical `cli_layout_migrated` audit row when a
-  // rename happened. The helper is a no-op when the trigger condition is
-  // absent.
-  if (opts.stateDbPath === undefined && opts.socketFile === undefined && opts.tokenFile === undefined) {
-    // Re-fire migrateLegacyLayout with the live DB so a migration that
-    // happened above now lands the `cli_layout_migrated` event in the
-    // ledger. Idempotent: if no legacy files remain, returns immediately.
-    migrateLegacyLayout(resolveStateDir(), db);
-  }
   // Per v2-design.md §5.1 the canonical embedding index is sqlite-vec
   // (substrate/schema.sql `vec_events` virtual table). The "rebuild"
   // step is now effectively instant — we backfill vec_events from the

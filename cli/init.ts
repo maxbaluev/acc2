@@ -30,7 +30,6 @@ import { openDb, closeDb } from "../substrate/db";
 import { seedCodeArtifacts, seedDemoKnowledge, seedFoundationalKnowledge, seedLakelandDriveProvenance, seedRecipes } from "../substrate/seed";
 import { embedPendingEvents } from "../runtime/embedder";
 import {
-  migrateLegacyLayout,
   resolveDbPath, resolveSocketFile, resolveStateDir,
   resolveTokenFile,
 } from "../runtime/state_paths";
@@ -233,18 +232,6 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
   ensureDir(paths.logsDir);
   ensureDir(paths.tmpDir);
   summary.stateDirCreated = state.created;
-  // One-time migration: pull the legacy `${stateDir}/state/<file>` layout
-  // forward into the canonical flat layout BEFORE the rest of init looks
-  // at tokenFile / dbPath. We pass `null` for the DB handle because the
-  // db is not open yet; the rename still happens, and the audit event
-  // will be re-emitted at daemon-start time when the same call is made
-  // with a live DB handle. (The migration helper is idempotent: a second
-  // call with no legacy files left is a no-op.)
-  const migration = migrateLegacyLayout(paths.stateDir, null);
-  if (migration.migrated) {
-    log(`[1/8] state directory: migrated ${migration.renamed.length} legacy file(s) into the canonical flat layout`);
-    for (const r of migration.renamed) log(`       ${r.from} → ${r.to}`);
-  }
   log(`[1/8] state directory: ${paths.stateDir}` + (summary.stateDirCreated ? "  (created)" : "  (existing)"));
 
   // 2. Admin token.
@@ -361,11 +348,6 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
   if (approve) {
     const db = openDb(paths.dbPath);
     try {
-      // Re-run the migration helper with the live DB handle so the
-      // `cli_layout_migrated` event lands in the ledger when a migration
-      // happened on this run. The helper is idempotent — calling it
-      // again after the rename is a cheap dir-exists check.
-      migrateLegacyLayout(paths.stateDir, db);
       const result = seedFoundationalKnowledge(db, { ownerApproved: true });
       summary.foundationalSeedImported = result.imported;
       if (result.imported > 0) log(`       imported ${result.imported} foundational knowledge entries`);

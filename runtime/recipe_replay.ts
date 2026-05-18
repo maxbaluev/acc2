@@ -119,53 +119,8 @@ const taskTopologySignature = (db: Database, task: TaskNode): string => {
   return `topo_${(h >>> 0).toString(16).padStart(8, "0")}::${rows.length}`;
 };
 
-const parseRecipePayload = (raw: string): {
-  goal_shape: string;
-  topology_signature: string;
-  confidence: number;
-  trajectory: RecipeTrajectoryStep[];
-} | null => {
-  try {
-    const p = JSON.parse(raw ?? "{}") as Record<string, unknown>;
-    const goal = (p.goal_shape as string | undefined) ?? "";
-    const topology = (p.topology_signature as string | undefined) ?? "";
-    const confidence = typeof p.confidence === "number" ? p.confidence : 0;
-    const trajectory = Array.isArray(p.trajectory) ? (p.trajectory as RecipeTrajectoryStep[]) : [];
-    if (!goal) return null;
-    return { goal_shape: goal, topology_signature: topology, confidence, trajectory };
-  } catch {
-    return null;
-  }
-};
-
-/** Look up the freshest confidence value for a recipe — recipes accumulate
- *  outcome updates via `recipe_confidence_updated` payloads. We project the
- *  latest update; the original recipe_extracted's value is the seed. */
-const currentConfidenceFor = (db: Database, recipeId: string, baseConfidence: number): number => {
-  const row = db
-    .query(
-      `SELECT payload FROM events
-       WHERE kind = 'recipe_extracted' AND id = ?
-       ORDER BY ts DESC LIMIT 1`,
-    )
-    .get(recipeId) as { payload: string } | null;
-  if (!row) return baseConfidence;
-  // updateRecipeConfidence rewrites the original event's payload via
-  // applyConfidenceUpdate (no append-only violation — we re-emit a fresh
-  // recipe_extracted with the new value when needed). For Phase J we keep
-  // the appended-row contract: read the LATEST recipe_extracted row for the
-  // same goal_shape+topology to find the current confidence.
-  try {
-    const p = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
-    const c = typeof p.confidence === "number" ? p.confidence : baseConfidence;
-    return c;
-  } catch { return baseConfidence; }
-};
-
-/** Filter / shape one candidate row (view-projected OR legacy-scanned) into a
- *  RecipeMatch when it passes goal_shape + topology + confidence gating. The
- *  matching rules are identical for both code paths so the view-integrated
- *  fast path and the legacy linear-scan fallback agree on every decision. */
+/** Filter / shape one recipes_latest_view row into a RecipeMatch when it
+ *  passes goal_shape + topology + confidence gating. */
 const tryMatchCandidate = (
   candidate: {
     id: string;
@@ -228,68 +183,15 @@ const tryMatchCandidate = (
   };
 };
 
-/** Legacy linear-scan path — kept as a fallback for the rare case where the
- *  view query throws (malformed payload, missing column, schema drift). The
- *  dispatch surface MUST stay alive even if the view is misconfigured. */
-const findRecipeMatchLinearScan = (
-  db: Database,
-  taskGoalShape: string,
-  taskGoalLower: string,
-  taskTopology: string,
-  minConfidence: number,
-): RecipeMatch | null => {
-  const rows = db
-    .query(
-      `SELECT id, payload FROM events
-       WHERE kind = 'recipe_extracted'
-       ORDER BY ts DESC, rowid DESC`,
-    )
-    .all() as Array<{ id: string; payload: string }>;
-
-  // Track per-(goal,topology) the freshest recipe row (latest ts wins).
-  const seenKeys = new Set<string>();
-  let best: RecipeMatch | null = null;
-
-  for (const r of rows) {
-    const payload = parseRecipePayload(r.payload);
-    if (!payload) continue;
-    const key = `${payload.goal_shape}||${payload.topology_signature}`;
-    if (seenKeys.has(key)) continue;
-    seenKeys.add(key);
-
-    const currentConfidence = currentConfidenceFor(db, r.id, payload.confidence);
-    const match = tryMatchCandidate(
-      {
-        id: r.id,
-        goal_shape: payload.goal_shape,
-        topology_signature: payload.topology_signature,
-        confidence: currentConfidence,
-        trajectory: payload.trajectory,
-      },
-      taskGoalShape,
-      taskGoalLower,
-      taskTopology,
-      minConfidence,
-    );
-    if (match && (!best || match.confidence > best.confidence)) best = match;
-  }
-
-  return best;
-};
-
 /** Find a recipe that matches the supplied task. Returns the highest-
  *  confidence match whose value is ≥ minConfidence, or null when no recipe
  *  matches. Uses goalShape() to compute the task's goal hash.
  *
- *  Fast path (default): query `recipes_latest_view` — the substrate's
- *  materialized index keyed by (goal_shape, topology_signature) that picks
- *  the highest-confidence row per key. This replaces the dispatch-time
- *  linear scan over `recipe_extracted` history with one keyed projection
- *  (brain audit QQEHAW97GS0AX7TEQ717Y3P174, 2026-05-15).
- *
- *  Fallback: if the view query throws (malformed payload, missing column,
- *  schema drift), surface as `error_caught` and fall back to the legacy
- *  linear-scan path so dispatch stays alive. */
+ *  Queries `recipes_latest_view` — the substrate's materialized index keyed
+ *  by (goal_shape, topology_signature) that picks the highest-confidence row
+ *  per key. View errors intentionally surface to the dispatcher diagnostics
+ *  path instead of falling back to a dispatch-time scan over
+ *  `recipe_extracted` history. */
 export const findRecipeMatch = (
   db: Database,
   task: TaskNode,
@@ -300,31 +202,7 @@ export const findRecipeMatch = (
   const taskTopology = taskTopologySignature(db, task);
   const taskGoalLower = task.goal.toLowerCase();
 
-  // Fast path — keyed projection from recipes_latest_view.
-  let viewRows: RecipesLatestRow[] | null = null;
-  try {
-    viewRows = recipesLatestView(db);
-  } catch (err) {
-    try {
-      emitEvent(db, {
-        kind: "error_caught",
-        substrate_origin: "substrate_auto",
-        payload: {
-          where: "recipe_replay.findRecipeMatch.recipesLatestView",
-          recoverable: true,
-          message: (err as Error).message,
-          fallback: "linear_scan",
-        } as JsonValue,
-      });
-    } catch { /* db may be closed — fall through to legacy scan */ }
-    return findRecipeMatchLinearScan(
-      db,
-      taskGoalShape,
-      taskGoalLower,
-      taskTopology,
-      minConfidence,
-    );
-  }
+  const viewRows: RecipesLatestRow[] = recipesLatestView(db);
 
   let best: RecipeMatch | null = null;
   for (const r of viewRows) {

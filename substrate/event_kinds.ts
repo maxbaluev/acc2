@@ -690,7 +690,6 @@ export const EVENT_KINDS = {
 
   // ── Previously-missing kinds (emitted at runtime, now registered) ───
   embedding_skipped_missing_api_key:       { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  cli_layout_migrated:                     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Intent classification + dark-gate observability (contract TJGFQC72,
   //    2026-05-18). Live ledger evidence: knowledge_candidate
