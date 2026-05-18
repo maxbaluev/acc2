@@ -406,6 +406,39 @@ describe("admitArtifact — rejections", () => {
     expect(result.ok).toBe(true);
     expect(events.some((e) => e.kind === "atms_strategy_first_violation")).toBe(false);
   });
+
+  test("F1: strategy-first gate fires on input.kind atms_report_v* even when name does not match (name-OR-kind)", async () => {
+    // Pre-F1 the admission gate only checked input.name; the v9
+    // Lakeland candidates set name="lakeland_industries_ai_..."
+    // while kind="atms_report_v9", so the name-only check missed them
+    // and the gate never fired. The name-OR-kind closure refuses the
+    // admission when the kind matches even though the name does not.
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        kind: "atms_report_v9",
+        name: "lakeland_industries_ai_transformation_report_v9",
+        citedKnowledgeIds: [],
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("strategy_first_violation_missing_strategic_direction_chosen");
+    const violations = events.filter((e) => e.kind === "atms_strategy_first_violation");
+    expect(violations.length).toBe(1);
+    const payload = violations[0]!.payload as Record<string, unknown>;
+    expect(payload.artifact_kind).toBe("atms_report_v9");
+    expect(payload.artifact_name).toBe("lakeland_industries_ai_transformation_report_v9");
+  });
 });
 
 // C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14).

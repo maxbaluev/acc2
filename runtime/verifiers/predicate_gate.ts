@@ -20,12 +20,37 @@
 
 import type { Database } from "bun:sqlite";
 
-/** Audiences for which the gate is structurally active. Other
- *  audiences (or undefined) skip the gate entirely. */
-const GATED_AUDIENCES: ReadonlySet<string> = new Set([
-  "ceo_buyer",
-  "external_executive",
+/** F2 (2026-05-18): the gate previously skipped EVERYTHING outside
+ *  {ceo_buyer, external_executive}. Letter v3 shipped through with
+ *  audience="cofounder_technical_reviewer" → zero predicate matches
+ *  even though "the system" appeared three times. The gate now runs
+ *  by default for every audience (and for audience=null/undefined);
+ *  per-predicate `audience_allowlist` / `audience_denylist` provides
+ *  the fine-grained carve-out so the substrate signing its own
+ *  cofounder letters with "the system" is not refused while CEO-buyer
+ *  documents stay strict. EXEMPT_AUDIENCES is the explicit skip set
+ *  for known-internal contexts where no gate should fire. */
+const EXEMPT_AUDIENCES: ReadonlySet<string> = new Set([
+  "internal_diagnostic",
 ]);
+
+/** Returns true when a predicate's audience filter says the predicate
+ *  applies to the given audience. Default (no allowlist + no denylist)
+ *  → applies. Allowlist hit → SKIP (audience exempt). Denylist set →
+ *  applies ONLY if audience is in denylist. */
+const predicateAppliesToAudience = (
+  entry: { audience_allowlist?: readonly string[]; audience_denylist?: readonly string[] },
+  audience: string | null,
+): boolean => {
+  if (entry.audience_allowlist && entry.audience_allowlist.length > 0) {
+    if (audience !== null && entry.audience_allowlist.includes(audience)) return false;
+  }
+  if (entry.audience_denylist && entry.audience_denylist.length > 0) {
+    if (audience === null) return false;
+    return entry.audience_denylist.includes(audience);
+  }
+  return true;
+};
 
 export type PredicateMatch = {
   kc_id: string;
@@ -46,46 +71,91 @@ export type PredicateGateResult = {
  *  patterns active 2026-05-18 whose KC payload does NOT carry a
  *  `predicate_pattern` field. When a future KC declares
  *  predicate_pattern in payload, the DB-loaded entry supersedes the
- *  matching catalog entry by kc_id. */
+ *  matching catalog entry by kc_id.
+ *
+ *  F2 audience-conditional (2026-05-18): each entry MAY declare
+ *  `audience_allowlist` and/or `audience_denylist` so a predicate can
+ *  carve out audiences where the pattern is appropriate self-reference
+ *  (substrate signing its own cofounder letters) without disabling the
+ *  pattern for the rest of the gated set. When BOTH lists are absent
+ *  the predicate applies universally (preserves backward-compat for
+ *  CEO-buyer documents). */
 type CatalogEntry = {
   kc_id: string;
   predicate_claim: string;
   pattern: RegExp;
+  audience_allowlist?: readonly string[];
+  audience_denylist?: readonly string[];
 };
+
+// F2 (2026-05-18): the audiences for which content-quality predicates
+// fire by default. The buyer-class predicates use denylist scoping so
+// the gate runs ONLY for these audiences; audience=null falls through.
+// The system_meta predicate behaves differently — it uses an explicit
+// allowlist (only the substrate-self-identification audiences are
+// exempt) AND a buyer-class denylist so internal code bodies with
+// comments like "the brain decides" don't trip the gate.
+const BUYER_FACING_AUDIENCES = [
+  "ceo_buyer",
+  "external_executive",
+  "cofounder_technical_reviewer",
+  "cofounder_technical_reviewer_unfamiliar_with_implementation",
+] as const;
 
 const CATALOG: CatalogEntry[] = [
   {
     kc_id: "alex_predicate_xkc5n4a66s13_no_friction",
     predicate_claim: "alex_predicate_no_friction",
     pattern: /\bfriction\b/gi,
+    audience_denylist: [...BUYER_FACING_AUDIENCES],
   },
   {
     kc_id: "alex_predicate_9z4jfrs3m5_no_vague_magnitude",
     predicate_claim: "alex_predicate_no_vague_magnitude",
     pattern: /\b(modest|significant|substantial|several|small set|small number)\b/gi,
+    audience_denylist: [...BUYER_FACING_AUDIENCES],
   },
   {
     kc_id: "alex_predicate_system_meta_v2_no_internal_substrate_language",
     predicate_claim: "alex_predicate_no_internal_substrate_language",
-    // "the system" added 2026-05-18 (dark-gate sweep): the v9 Lakeland
-    // body NA9XCQ41YH1013MSTK1DVE9H9W carried 7 hits of "the system"
-    // that the manual scan flagged and the operator scrubbed before
-    // delivery. The pre-existing pattern matched "the substrate" /
-    // "the brain" but not "the system" — an oversight rather than a
-    // deliberate carve-out. Adding it closes the gap.
+    // F2 (2026-05-18): "the system" is appropriate self-reference when
+    // the substrate signs its own cofounder letters or technical
+    // postmortems. The audience_allowlist below exempts the three
+    // self-identification audiences. NO denylist — the predicate
+    // applies to every audience EXCEPT the allowlisted ones, including
+    // audience=null (F2 spec: default applies). Internal code-artifact
+    // admissions (no audience declared) skip this entire gate via
+    // artifact_admission.ts:195 (admission only runs predicates when
+    // input.audience is explicitly set). Letter v3 (artifact
+    // XZ5WPBJ9AH3EQ684EWHF0MJJB4) shipped to the cofounder reviewer
+    // audience with 3 "the system" hits and zero predicate_gate_rejected
+    // events — the gate had no audience discrimination. This allowlist
+    // closes that gap without enabling the phrase for buyer-facing copy.
     pattern:
       /\b(first cycle|next cycle|the substrate|the system|the brain|learning advantage|the moat|Why This Order|honesty signal)\b/gi,
+    audience_allowlist: [
+      "cofounder_technical_reviewer_unfamiliar_with_implementation",
+      "cofounder_technical_reviewer",
+      "substrate_self_identification",
+    ],
   },
   {
     kc_id: "alex_predicate_no_hyphen_jargon",
     predicate_claim: "alex_predicate_no_hyphen_jargon",
     pattern:
       /\b(China-plus-one|cut-and-sew|tender-driven|AI-heavy|data spine|design sprint)\b/gi,
+    audience_denylist: [...BUYER_FACING_AUDIENCES],
   },
   {
     kc_id: "alex_predicate_no_version_markers_in_title",
     predicate_claim: "alex_predicate_no_version_markers_in_title",
+    // F2 (2026-05-18): version markers like "v6" / "v9" are noise to
+    // buyer-facing copy but appear constantly inside test fixtures and
+    // internal artifact bodies (e.g. a JSON envelope `{report: 'v6'}`).
+    // Scope this predicate to the buyer-facing audiences via denylist;
+    // the gate skips it for every other audience (including undefined).
     pattern: /\bv[1-9][0-9]*\b/g,
+    audience_denylist: ["ceo_buyer", "external_executive"],
   },
 ];
 
@@ -162,11 +232,17 @@ const buildContext = (body: string, matchOffset: number, matchLen: number): stri
 
 export const runPredicateGate = (
   db: Database,
-  args: { audience?: string; body: string; sourceCandidateId?: string },
+  args: { audience?: string | null; body: string; sourceCandidateId?: string },
 ): PredicateGateResult => {
-  const audience = args.audience;
-  // Skip when audience is unset or not in the gated set.
-  if (!audience || !GATED_AUDIENCES.has(audience)) {
+  // F2 (2026-05-18): treat null/undefined identically — "default
+  // applies" — and only short-circuit when the audience is explicitly
+  // exempt (internal_diagnostic). All other audiences (including null)
+  // run the gate; per-predicate allowlist/denylist decides which
+  // predicates actually match.
+  const audience: string | null = typeof args.audience === "string" && args.audience.length > 0
+    ? args.audience
+    : null;
+  if (audience !== null && EXEMPT_AUDIENCES.has(audience)) {
     return { residual: 0, rejected: false, matches: [], citedKnowledgeIds: [] };
   }
 
@@ -177,8 +253,12 @@ export const runPredicateGate = (
 
   // Merge: DB-declared predicates (when present) supersede catalog
   // entries with the same kc_id; remaining catalog entries fill in
-  // the implicit predicates.
-  const dbEntries = loadPredicatesFromKnowledge(db, audience);
+  // the implicit predicates. The DB loader still uses `audience` for
+  // its KC-level audience_tags filter; pass empty string when null so
+  // the existing audience_tags filter is a no-op (which is the right
+  // semantics — a KC that scopes itself by audience_tags should not
+  // fire on audience=null until its tags explicitly include it).
+  const dbEntries = loadPredicatesFromKnowledge(db, audience ?? "");
   const dbKcIds = new Set(dbEntries.map((e) => e.kc_id));
   const effective: CatalogEntry[] = [
     ...dbEntries,
@@ -188,6 +268,11 @@ export const runPredicateGate = (
   const matches: PredicateMatch[] = [];
   const cited = new Set<string>();
   for (const entry of effective) {
+    // F2: per-predicate audience filter decides whether this predicate
+    // applies to the current audience. Skip predicates whose allowlist
+    // exempts the audience (substrate signing its own letters) or whose
+    // denylist excludes it.
+    if (!predicateAppliesToAudience(entry, audience)) continue;
     // Reset regex lastIndex defensively when the regex is /g.
     const re = new RegExp(
       entry.pattern.source,

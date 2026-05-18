@@ -34,7 +34,7 @@ if (process.env.ACC2_BRIDGE_MODE !== "mock") {
 // need integrity off for that subprocess (e.g. tests/integration/
 // crash_recovery.ts) override per-spawn.
 process.env.ACC2_DISABLE_WORKERS ??=
-  "embedder,scheduler,father,rolling_reviewer,rehabilitation,supervisor,compaction,extractors,metrics_gauge_refresh,hotreload,recipe_inertia,verify_heal,rendering_audit";
+  "embedder,scheduler,father,rolling_reviewer,rehabilitation,supervisor,compaction,extractors,metrics_gauge_refresh,hotreload,recipe_inertia,verify_heal,rendering_audit,lifecycle_closure_sweep";
 
 // Tests must NEVER read or write the operator's live ~/.accint/state.db.
 // Pin a per-suite hermetic state dir so admin / CLI tests that open the

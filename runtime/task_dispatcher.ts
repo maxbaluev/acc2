@@ -64,6 +64,7 @@ import { readCurrentMode } from "./crisis_mode";
 import { isCycleViolation } from "./cycle_one_gate";
 import { recordDispatch, recordActionResidual } from "./metrics";
 import { extractRecipeFromCommit } from "../substrate/extractors";
+import { runBypassPostflight } from "./bypass_postflight";
 
 const REFINEMENT_DEPTH_CAP = 5;
 const TREE_SEARCH_FANOUT_THRESHOLD = 5;
@@ -133,6 +134,16 @@ type DispatchDeps = {
    *  (2026-05-15): without this wiring depth-1 retrieval is dead — the
    *  prompt section always fell back to readKnowledgeTopK's recency scan. */
   index?: import("./embedding_index").EmbeddingIndex;
+  /** F2 (2026-05-18): root of the source checkout against which the
+   *  bypass postflight runs `git diff HEAD`. Defaults to process.cwd().
+   *  Tests pin a synthetic tempdir to exercise the bypass path
+   *  hermetically. */
+  sourceCheckoutRoot?: string;
+  /** F2 (2026-05-18): when true the dispatch ran under an isolated
+   *  workspace (worktree / test tempdir); defense A covered the
+   *  filesystem, so the postflight skips. Production callers leave
+   *  this false (the default); test fixtures + mock bridge set true. */
+  bypassPostflightSkip?: boolean;
 };
 
 const readEventsForDispatch = (db: Database, dispatchId: string): Event[] => {
@@ -615,6 +626,36 @@ export const dispatchReadyTask = async (
       } as JsonValue,
     });
     return { dispatch_id: dispatchId, task_id: task.id, events: dispatchEvents, violations, bridge_result: bridgeResult };
+  }
+
+  // 4.5 F2 bypass postflight (2026-05-18). Defense A (CWD isolation in
+  //     runtime/bridge/opencode.ts) is the primary guard. Defenses B
+  //     (post-dispatch git diff) and C (revert + dispatcher_violation
+  //     emission) live here. The check is skipped for the mock bridge
+  //     (ACC2_BRIDGE_MODE=mock — tests + isolated dev) because there is
+  //     no production source-checkout state to inspect; the mock bridge
+  //     writes synthetic events through emitEvent and never touches the
+  //     filesystem.
+  const postflightSkipReason = deps.bypassPostflightSkip
+    ? "deps_skip"
+    : (process.env.ACC2_BRIDGE_MODE ?? "real") === "mock"
+      ? "mock_bridge"
+      : null;
+  if (postflightSkipReason === null) {
+    try {
+      runBypassPostflight(db, {
+        dispatchId: dispatchId,
+        taskId: task.id,
+        directiveId: task.directive_id,
+        sourceCheckoutRoot: deps.sourceCheckoutRoot ?? process.cwd(),
+        isolated: false,
+      });
+    } catch (err) {
+      logger.warn(
+        { where: "task_dispatcher.bypass_postflight", task_id: task.id, err: (err as Error).message },
+        "bypass postflight threw — continuing dispatch close path",
+      );
+    }
   }
 
   // 5. action_predicted detection + execution

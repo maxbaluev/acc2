@@ -31,6 +31,79 @@ export type CandidateRefusal = {
   payload: JsonValue;
 };
 
+/** F1 decorative-citation refusal helper. Resolves a cited entry that is
+ *  NOT a valid events.id by searching the events ledger for a
+ *  knowledge_candidate / knowledge_synthesized whose payload.claim or
+ *  payload.text matches the label. Used by callers that want to
+ *  rehabilitate a label citation into a real event_id before refusal
+ *  fires. Returns null when no match is found. The lookup is exact
+ *  (label === claim or label === text); fuzzy matching is intentionally
+ *  not attempted — labels that drift get refused, the brain retries
+ *  with a real id. */
+export const resolveCitedByClaim = (
+  db: Database,
+  label: string,
+): string | null => {
+  if (typeof label !== "string" || label.length === 0) return null;
+  const trimmed = label.trim();
+  if (trimmed.length === 0) return null;
+  // Two passes: first try claim, then text. Order is stable so a label
+  // that matches both surfaces resolves to the claim-matched event id.
+  try {
+    const row = db
+      .query<{ id: string }, [string]>(
+        `SELECT id FROM events
+          WHERE kind IN ('knowledge_candidate','knowledge_synthesized','knowledge_promoted')
+            AND (json_extract(payload, '$.claim') = ?
+                 OR json_extract(payload, '$.text') = ?
+                 OR json_extract(payload, '$.title') = ?)
+          ORDER BY ts DESC LIMIT 1`,
+      )
+      .get(trimmed, trimmed, trimmed);
+    return row?.id ?? null;
+  } catch {
+    return null;
+  }
+};
+
+/** Resolves an id to events.id when present, otherwise null. */
+const resolveEventId = (db: Database, id: string): string | null => {
+  if (typeof id !== "string" || id.length === 0) return null;
+  try {
+    const row = db
+      .query<{ id: string }, [string]>(
+        "SELECT id FROM events WHERE id = ? LIMIT 1",
+      )
+      .get(id);
+    return row?.id ?? null;
+  } catch {
+    return null;
+  }
+};
+
+/** F1: partition cited_knowledge_ids into resolved (real events.id) and
+ *  unresolved (free-text labels). The screen treats unresolved entries
+ *  as decorative citations (k_555 four-link chain broken) and emits a
+ *  lane_routing_refused with the unresolved list. The admitted artifact
+ *  retains ONLY the resolved entries as its effective citation set. */
+export const partitionCitedKnowledge = (
+  db: Database,
+  citedIds: readonly string[],
+): { resolved: string[]; unresolved: string[] } => {
+  const resolved: string[] = [];
+  const unresolved: string[] = [];
+  for (const id of citedIds) {
+    if (typeof id !== "string" || id.length === 0) continue;
+    const eventId = resolveEventId(db, id);
+    if (eventId) {
+      resolved.push(eventId);
+    } else {
+      unresolved.push(id);
+    }
+  }
+  return { resolved, unresolved };
+};
+
 /** Per-artifact-kind minimum body length. Bodies below the threshold
  *  emit `lane_routing_refused` with reason `empty_body_below_threshold`.
  *  Open-string lookup — unknown kinds fall through to DEFAULT_MIN. The
@@ -167,8 +240,8 @@ export const screenCodeArtifactCandidate = (
   const looksLikeAtmsReport =
     (typeof declaredName === "string" && declaredName.startsWith("atms_report_v")) ||
     (typeof declaredKind === "string" && declaredKind.startsWith("atms_report_v"));
+  const citedIds = asStringArray(payload.cited_knowledge_ids);
   if (looksLikeAtmsReport) {
-    const citedIds = asStringArray(payload.cited_knowledge_ids);
     const check = findStrategicDirectionCitation(db, citedIds);
     if (!check.ok) {
       refusals.push({
@@ -181,6 +254,65 @@ export const screenCodeArtifactCandidate = (
           source_candidate_id: sourceCandidateId ?? null,
           missing_claim_suffix: "_strategic_direction_chosen",
           inspected_ids: check.inspectedIds as unknown as JsonValue,
+          directive_id: input.directive_id ?? null,
+          task_id: input.task_id ?? null,
+        } as JsonValue,
+      });
+    }
+  }
+
+  // 4. F1 decorative-citation refusal — every cited_knowledge_ids entry
+  //    on a substantive candidate (audience set OR body length > 200)
+  //    must resolve to a real events.id. Pre-fix 310 / 323 recent
+  //    code_artifact_candidates cited NOTHING; 60% of those that DID
+  //    cite supplied string labels (e.g. "decorative_proof_of_alex") not
+  //    real event ids — so k_555 four-link credit was broken at the
+  //    binding step.
+  //
+  //    Two refusal shapes:
+  //      (a) substantive candidate cites zero knowledge ids →
+  //          lane_routing_refused reason=artifact_citation_underrooted
+  //      (b) substantive candidate cites ≥1 id but some are unresolvable
+  //          labels → lane_routing_refused reason=decorative_citation
+  //          with payload.unresolved_labels (the admitted artifact still
+  //          retains the RESOLVED subset as its effective citations).
+  //
+  //    "Substantive" = audience is set OR body length exceeds 200 chars.
+  //    Pure placeholder-kind rows (rendered_docx / published_drive_doc /
+  //    markdown_body) are exempt from (a) because their body is
+  //    structural-placeholder text; if they happen to cite labels (b)
+  //    still applies.
+  const bodyText = typeof payload.body === "string" ? payload.body : "";
+  const isPlaceholderKind = typeof declaredKind === "string" && PLACEHOLDER_BODY_KINDS.has(declaredKind);
+  const isSubstantive =
+    (typeof payload.audience === "string" && payload.audience.length > 0) ||
+    bodyText.length > 200;
+  if (isSubstantive) {
+    const { resolved, unresolved } = partitionCitedKnowledge(db, citedIds);
+    if (citedIds.length === 0 && !isPlaceholderKind) {
+      refusals.push({
+        kind: "lane_routing_refused",
+        payload: {
+          reason: "artifact_citation_underrooted",
+          refused_kind: "code_artifact_candidate",
+          artifact_kind: declaredKind ?? null,
+          artifact_name: declaredName ?? null,
+          audience: typeof payload.audience === "string" ? payload.audience : null,
+          body_length: bodyText.length,
+          directive_id: input.directive_id ?? null,
+          task_id: input.task_id ?? null,
+        } as JsonValue,
+      });
+    } else if (unresolved.length > 0) {
+      refusals.push({
+        kind: "lane_routing_refused",
+        payload: {
+          reason: "decorative_citation",
+          refused_kind: "code_artifact_candidate",
+          artifact_kind: declaredKind ?? null,
+          artifact_name: declaredName ?? null,
+          unresolved_labels: unresolved as unknown as JsonValue,
+          resolved_ids: resolved as unknown as JsonValue,
           directive_id: input.directive_id ?? null,
           task_id: input.task_id ?? null,
         } as JsonValue,

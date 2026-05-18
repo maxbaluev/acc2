@@ -568,6 +568,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // an active session, slow enough to keep the SQLite write queue
   // light.
   if (isWorkerEnabled("experience_compression")) registerWorker("experience_compression", Number(process.env.ACC2_EXPERIENCE_COMPRESSION_TICK_MS ?? 30 * 60 * 1000));
+  // F3 (2026-05-18): lifecycle closure sweep. Default 6h cadence;
+  // overridable via ACC2_LIFECYCLE_SWEEP_INTERVAL_MS. Opt-out via
+  // ACC2_DISABLE_WORKERS=lifecycle_closure_sweep.
+  if (isWorkerEnabled("lifecycle_closure_sweep")) registerWorker("lifecycle_closure_sweep", Number(process.env.ACC2_LIFECYCLE_SWEEP_INTERVAL_MS ?? 6 * 60 * 60 * 1000));
 
   // Phase E: amendment worker — drain unapplied directive_amended events on
   // a configurable interval (default 2s; tests may pin a shorter value via
@@ -1031,6 +1035,26 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       compressionTickMs,
     );
     workers.push(() => clearInterval(compressionTick));
+  }
+
+  // F3 (2026-05-18): lifecycle closure sweep. Periodic terminator
+  // emission for open contract_amendment_proposed / owner_input_required
+  // / task_node_opened rows that never received a downstream resolution
+  // event. Opt-OUT via `ACC2_DISABLE_WORKERS=lifecycle_closure_sweep`.
+  // Interval env-configurable via `ACC2_LIFECYCLE_SWEEP_INTERVAL_MS`
+  // (default 6h).
+  if (isWorkerEnabled("lifecycle_closure_sweep")) {
+    const sweepTickMs = Number(process.env.ACC2_LIFECYCLE_SWEEP_INTERVAL_MS ?? 6 * 60 * 60 * 1000);
+    const { runLifecycleClosureSweep } = await import("./lifecycle_closure_sweep");
+    markWorkerReady("lifecycle_closure_sweep");
+    recordWorkerTick("lifecycle_closure_sweep");
+    const sweepTick = setInterval(
+      supervisedTick(db, "lifecycle_closure_sweep", sweepTickMs, async () => {
+        runLifecycleClosureSweep(db);
+      }),
+      sweepTickMs,
+    );
+    workers.push(() => clearInterval(sweepTick));
   }
 
   // Self-healing chain Layer 3 (owner-approved 2026-05-16, option d):

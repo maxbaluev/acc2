@@ -78,7 +78,14 @@ export type WorkerName =
   // and emits owner_rendering_feedback_recorded with feedback_kind=
   // auto_verifier|auto_verifier_clean so the policy posterior moves
   // on machine evidence before any owner reacts.
-  | "rendering_audit";
+  | "rendering_audit"
+  // F3 (2026-05-18): periodic sweep that closes open lifecycles.
+  // contract_amendment_proposed / owner_input_required /
+  // task_node_opened rows that never received a terminator pile up
+  // forever; the sweep emits closure_complete / closure_obsolete /
+  // closure_owner_required so read-models stop returning them.
+  // Default interval 6h.
+  | "lifecycle_closure_sweep";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -100,6 +107,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "verify_heal",
   "experience_compression",
   "rendering_audit",
+  "lifecycle_closure_sweep",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

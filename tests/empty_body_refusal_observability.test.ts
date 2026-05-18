@@ -15,12 +15,23 @@ import { emitEvent } from "../runtime/events";
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
 
-const refusalsFor = (db: ReturnType<typeof openDb>, eventId: string) =>
-  db
+// Filters lane_routing_refused rows whose reason matches the empty-body
+// floor predicate; F1 introduced sibling reasons
+// (artifact_citation_underrooted / decorative_citation) so a bare
+// kind-filter would catch unrelated F1 events.
+const refusalsFor = (db: ReturnType<typeof openDb>, eventId: string) => {
+  const all = db
     .query<{ payload: string }, [string]>(
       `SELECT payload FROM events WHERE kind = 'lane_routing_refused' AND context_refs LIKE ?`,
     )
     .all(`%${eventId}%`);
+  return all.filter((r) => {
+    try {
+      const p = JSON.parse(r.payload) as Record<string, unknown>;
+      return p.reason === "empty_body_below_threshold";
+    } catch { return false; }
+  });
+};
 
 describe("empty_body_refusal — emit-side screen on code_artifact_candidate", () => {
   test("refuses an atms_report_v* candidate with body below the 500-char floor", () => {

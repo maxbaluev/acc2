@@ -355,6 +355,12 @@ describe("derived sets match their pre-unification shape", () => {
       "lane_routing_refused",
       "refinement_depth_exceeded",
       "verifier_residual_high",
+      // F3 (2026-05-18): lifecycle closure terminators. closure_obsolete
+      // and closure_owner_required count as health metrics because their
+      // rate signals stuck-contract pile-ups and expired owner asks.
+      // closure_complete is healthy traffic, not a metric.
+      "closure_obsolete",
+      "closure_owner_required",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);
@@ -393,6 +399,10 @@ describe("derived sets match their pre-unification shape", () => {
       // Restart drain timeout (2026-05-16, YEF00QZM amendment 8EAKQCJW):
       // operator must see when forced kill happened post-drain budget.
       "restart_drain_timed_out",
+      // F3 (2026-05-18): owner-required closure terminators must surface
+      // inline so the owner sees the expired ask in chat without
+      // opening logs.
+      "closure_owner_required",
     ]);
     const derived = new Set(MIRROR_INLINE_EVENT_TYPES);
     expect(derived.size).toBe(expected.size);

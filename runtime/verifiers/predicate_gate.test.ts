@@ -74,18 +74,24 @@ describe("runPredicateGate — gated audience", () => {
 });
 
 describe("runPredicateGate — skip paths", () => {
-  test("audience=undefined skips the gate regardless of body content", () => {
+  test("audience=undefined now applies the system_meta predicate by default (F2 inversion)", () => {
+    // Pre-F2 the gate skipped when audience was unset; that meant
+    // letter v3 shipped through with "the system" hits. Post-F2 the
+    // system_meta predicate runs by default; the buyer-class
+    // predicates (friction, modest, hyphen-jargon, version-markers)
+    // still use denylist scoping, so this test asserts via the
+    // system_meta phrase that fires on audience=null.
     const db = openDb(":memory:");
     const result = runPredicateGate(db, {
       audience: undefined,
-      body: "This text mentions friction modest substantial repeatedly.",
+      body: "the system handled this trivially.",
     });
-    expect(result.residual).toBe(0);
-    expect(result.rejected).toBe(false);
-    expect(result.matches.length).toBe(0);
+    expect(result.residual).toBe(1.0);
+    expect(result.rejected).toBe(true);
+    expect(result.matches.some((m) => m.matched_text.toLowerCase() === "the system")).toBe(true);
   });
 
-  test("audience=internal_diagnostic skips the gate", () => {
+  test("audience=internal_diagnostic remains explicitly exempt", () => {
     const db = openDb(":memory:");
     const result = runPredicateGate(db, {
       audience: "internal_diagnostic",
@@ -93,5 +99,58 @@ describe("runPredicateGate — skip paths", () => {
     });
     expect(result.residual).toBe(0);
     expect(result.rejected).toBe(false);
+  });
+});
+
+describe("runPredicateGate — F2 audience-conditional predicates", () => {
+  test("(a) ceo_buyer + 'the system' body → reject (default predicate applies)", () => {
+    const db = openDb(":memory:");
+    const result = runPredicateGate(db, {
+      audience: "ceo_buyer",
+      body: "the system handled the order end-to-end without manual touch.",
+    });
+    expect(result.rejected).toBe(true);
+    expect(result.residual).toBe(1.0);
+    const matched = result.matches.map((m) => m.matched_text.toLowerCase());
+    expect(matched).toContain("the system");
+  });
+
+  test("(b) cofounder_technical_reviewer + 'the system' body → pass (allowlist exempt)", () => {
+    const db = openDb(":memory:");
+    const result = runPredicateGate(db, {
+      audience: "cofounder_technical_reviewer",
+      body: "the system handled the order end-to-end without manual touch.",
+    });
+    // The "the system" predicate is allowlisted for this audience; no
+    // other predicate matches this body, so the gate passes.
+    const systemHits = result.matches.filter(
+      (m) => m.matched_text.toLowerCase() === "the system",
+    );
+    expect(systemHits.length).toBe(0);
+    expect(result.rejected).toBe(false);
+  });
+
+  test("(c) audience=null + 'the system' body → reject (default applies)", () => {
+    const db = openDb(":memory:");
+    const result = runPredicateGate(db, {
+      audience: null,
+      body: "the system handled the order end-to-end without manual touch.",
+    });
+    expect(result.rejected).toBe(true);
+    expect(result.residual).toBe(1.0);
+    const matched = result.matches.map((m) => m.matched_text.toLowerCase());
+    expect(matched).toContain("the system");
+  });
+
+  test("substrate_self_identification audience is also in the allowlist for 'the system'", () => {
+    const db = openDb(":memory:");
+    const result = runPredicateGate(db, {
+      audience: "substrate_self_identification",
+      body: "the system signed this letter.",
+    });
+    const systemHits = result.matches.filter(
+      (m) => m.matched_text.toLowerCase() === "the system",
+    );
+    expect(systemHits.length).toBe(0);
   });
 });

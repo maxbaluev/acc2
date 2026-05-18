@@ -192,11 +192,19 @@ export const admitArtifact = async (
   //     mode (k_252) where brain self-scan reported "zero hits" while
   //     banned phrases remained. The gate is BEFORE the row insert so
   //     a rejected candidate never gets an artifact row to roll back.
-  const predicateGate = runPredicateGate(db, {
-    audience: input.audience,
-    body: input.body,
-    sourceCandidateId: input.sourceCandidateId,
-  });
+  //
+  //     F2 (2026-05-18): admission only runs the gate when an audience
+  //     is explicitly declared. The emit-side screen for
+  //     code_artifact_candidate handles its own audience inference;
+  //     admission of action / verifier code (no audience field) is
+  //     internal substrate plumbing and skips the buyer-facing gate.
+  const predicateGate = input.audience
+    ? runPredicateGate(db, {
+        audience: input.audience,
+        body: input.body,
+        sourceCandidateId: input.sourceCandidateId,
+      })
+    : { rejected: false as const, residual: 0, matches: [] as Array<{ kc_id: string; predicate_claim: string; matched_text: string; offset: number; surrounding_context: string }>, citedKnowledgeIds: [] as string[] };
   if (predicateGate.rejected) {
     emit({
       kind: "predicate_gate_rejected",
@@ -231,7 +239,16 @@ export const admitArtifact = async (
   //     uses event ledger lookup, not hand-rolled English keyword regex —
   //     the substrate is the source of truth for what counts as a
   //     strategic direction.
-  if (typeof input.name === "string" && input.name.startsWith("atms_report_v")) {
+  // F1 (2026-05-18): the gate now ORs `input.name` and `input.kind`. Pre-fix
+  // the v9 Lakeland candidates set name="lakeland_industries_ai_..." while
+  // kind="atms_report_v9"; the name-only check missed them entirely and the
+  // strategy-first gate ran zero times. Mirroring the OR predicate from the
+  // emit-side screen closes the name-vs-kind gap on the admission path too
+  // (callers that bypass emitEvent: MCP substrate.admit_artifact, the mock
+  // bridge sites, cli/render_preview.ts).
+  const isAtmsByName = typeof input.name === "string" && input.name.startsWith("atms_report_v");
+  const isAtmsByKind = typeof input.kind === "string" && input.kind.startsWith("atms_report_v");
+  if (isAtmsByName || isAtmsByKind) {
     const strategicCitation = findStrategicDirectionCitation(
       db,
       input.citedKnowledgeIds ?? [],
@@ -242,7 +259,8 @@ export const admitArtifact = async (
         substrate_origin: "substrate_auto",
         payload: {
           reason: "strategy_first_violation_missing_strategic_direction_chosen",
-          artifact_name: input.name,
+          artifact_name: input.name ?? null,
+          artifact_kind: input.kind ?? null,
           cited_knowledge_ids: (input.citedKnowledgeIds ?? []) as unknown as JsonValue,
           source_candidate_id: input.sourceCandidateId ?? null,
           missing_claim_suffix: "_strategic_direction_chosen",
@@ -254,6 +272,64 @@ export const admitArtifact = async (
         reason: "strategy_first_violation_missing_strategic_direction_chosen",
         detail: `atms_report_v* admission requires a cited knowledge_candidate with claim ending _strategic_direction_chosen; cited_count=${(input.citedKnowledgeIds ?? []).length}`,
       };
+    }
+  }
+
+  // F1 decorative-citation refusal mirror (admission path, 2026-05-18).
+  // Substantive candidates (audience set OR body > 200 chars) must cite
+  // ≥1 knowledge id that resolves to a real events.id; label-only
+  // citations break the k_555 four-link chain at the binding step.
+  // Pure placeholder-kind admissions (rendered_docx / published_drive_doc
+  // / markdown_body) are exempt from the underrooted refusal because
+  // their bodies are structural placeholders, but unresolvable labels
+  // still fire decorative_citation.
+  const PLACEHOLDER_BODY_KINDS = new Set([
+    "published_drive_doc",
+    "rendered_docx",
+    "markdown_body",
+  ]);
+  const admissionIsSubstantive =
+    (typeof input.audience === "string" && input.audience.length > 0) ||
+    (typeof input.body === "string" && input.body.length > 200);
+  const admissionIsPlaceholder = typeof input.kind === "string" && PLACEHOLDER_BODY_KINDS.has(input.kind);
+  if (admissionIsSubstantive) {
+    const cited = input.citedKnowledgeIds ?? [];
+    const resolvedAtAdmit: string[] = [];
+    const unresolvedAtAdmit: string[] = [];
+    for (const id of cited) {
+      if (typeof id !== "string" || id.length === 0) continue;
+      const row = db
+        .query<{ id: string }, [string]>("SELECT id FROM events WHERE id = ? LIMIT 1")
+        .get(id);
+      if (row) resolvedAtAdmit.push(row.id);
+      else unresolvedAtAdmit.push(id);
+    }
+    if (cited.length === 0 && !admissionIsPlaceholder) {
+      emit({
+        kind: "lane_routing_refused",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: "artifact_citation_underrooted",
+          refused_kind: "code_artifact_admission",
+          artifact_kind: input.kind ?? null,
+          artifact_name: input.name ?? null,
+          audience: input.audience ?? null,
+          body_length: typeof input.body === "string" ? input.body.length : 0,
+        } as JsonValue,
+      });
+    } else if (unresolvedAtAdmit.length > 0) {
+      emit({
+        kind: "lane_routing_refused",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: "decorative_citation",
+          refused_kind: "code_artifact_admission",
+          artifact_kind: input.kind ?? null,
+          artifact_name: input.name ?? null,
+          unresolved_labels: unresolvedAtAdmit as unknown as JsonValue,
+          resolved_ids: resolvedAtAdmit as unknown as JsonValue,
+        } as JsonValue,
+      });
     }
   }
 

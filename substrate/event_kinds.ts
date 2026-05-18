@@ -725,6 +725,32 @@ export const EVENT_KINDS = {
   lane_routing_refused:                    { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
   refinement_depth_exceeded:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
   verifier_residual_high:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+
+  // ── F3 lifecycle closure sweep (2026-05-18). Open contract amendments,
+  //    stale owner_input_required prompts, and abandoned task_node_opened
+  //    rows pile up forever otherwise — substrate audit found 987 stuck
+  //    contract_amendment_proposed rows ≥24h old with no
+  //    applied_change_committed citing them. The closure worker emits ONE
+  //    of these three terminators per open lifecycle so the read-models
+  //    can stop returning the stale row.
+  //
+  //    closure_complete — a downstream event (applied_change_committed,
+  //      task_committed, owner_decision_recorded) already satisfied the
+  //      open lifecycle but no terminator fired; the worker emits the
+  //      terminator citing the resolving event.
+  //
+  //    closure_obsolete — the anchor (target file / target_resource)
+  //      named by the proposal no longer exists in the current source
+  //      checkout, so the proposal can never apply. Carries the missing
+  //      anchor in payload.
+  //
+  //    closure_owner_required — the open lifecycle has been waiting on
+  //      the owner for ≥ 7 days without resolution; the worker emits
+  //      this terminator to record that the request expired without
+  //      owner action so the brain stops re-asking.
+  closure_complete:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  closure_obsolete:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+  closure_owner_required:                  { producer: "runtime",   embeddable: false, mirror_inline: true,  health_metric: true,  narrative: true },
 } as const satisfies Record<string, EventKindMetadata>;
 
 /** The canonical union — derived from the registry. */
