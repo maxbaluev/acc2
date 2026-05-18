@@ -39,6 +39,7 @@ import type { OwnerPlainStatusRow, OwnerStateBeliefRow, SubstrateNarrativeRow } 
 import {
   formatRelativeTs,
   importanceColor,
+  importanceIcon,
   formatPayloadLines,
   formatNarrativeLine,
 } from "./format";
