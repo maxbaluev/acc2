@@ -33,8 +33,17 @@ export const getDefaultTokenFile = (): string => resolveTokenFile();
 /** Per-endpoint fetch timeout taxonomy. Fail-fast: any of these expiring
  *  raises AbortError; the helper rewrites it into a clean ok:false envelope.
  *  Numbers chosen to bound operator-visible latency while leaving enough
- *  headroom for the daemon to do real work behind the route. */
-export const HEALTH_TIMEOUT_MS = 5_000;
+ *  headroom for the daemon to do real work behind the route.
+ *
+ *  HEALTH_TIMEOUT_MS bumped from 5s to 30s after observing the daemon
+ *  legitimately take 4-15s to serve /health under load: bun:sqlite runs
+ *  synchronously on the JS event loop, and any heavy worker tick
+ *  (amendment processor, extractors, candidate merger over a 130k-event
+ *  ledger) can monopolize the main thread for 10+ seconds. A 5s
+ *  client-side deadline declared the daemon DEAD even though it was
+ *  alive and would respond in 8s. Matches MCP_CALL_TIMEOUT_MS — both
+ *  probes share the same underlying event-loop constraints. */
+export const HEALTH_TIMEOUT_MS = 30_000;
 export const SHUTDOWN_TIMEOUT_MS = 10_000;
 export const EXTERNAL_PUSH_TIMEOUT_MS = 10_000;
 export const MCP_CALL_TIMEOUT_MS = 30_000;

@@ -236,10 +236,32 @@ const dispatchTask = async (
 };
 
 const daemonStart = async (): Promise<number> => {
-  if (auxBaseUrl()) {
-    const lock = readDaemonLock();
-    console.log(`daemon already running pid=${lock?.pid ?? "?"} mcp=${lock?.port ?? "?"} aux=${lock?.aux_port ?? "?"}`);
-    return 0;
+  // Role-scoped lock probe (foundational fix: server+worker daemons
+  // coexist as two processes with separate lock files). When
+  // ACC2_DAEMON_ROLE=worker the lock lives at v2.sock.worker; when
+  // =server or =all (default) it lives at v2.sock. Probing the role-
+  // appropriate lock prevents the CLI from short-circuiting when the
+  // OTHER role's daemon is already running.
+  const role = (process.env.ACC2_DAEMON_ROLE ?? "all").toLowerCase();
+  const fsCheck = await import("node:fs");
+  const lockPath = role === "worker"
+    ? `${process.env.HOME ?? ""}/.accint/v2.sock.worker`
+    : `${process.env.HOME ?? ""}/.accint/v2.sock`;
+  if (fsCheck.existsSync(lockPath)) {
+    try {
+      const lockRaw = fsCheck.readFileSync(lockPath, "utf8");
+      const lock = JSON.parse(lockRaw) as { pid?: number; port?: number; aux_port?: number; role?: string };
+      // Verify pid is still alive; if not, the lock is stale and we
+      // should fall through to spawn a fresh one (daemon.ts's startup
+      // also reaps stale locks).
+      if (lock.pid) {
+        try {
+          process.kill(lock.pid, 0);
+          console.log(`daemon already running pid=${lock.pid} role=${lock.role ?? "all"} mcp=${lock.port ?? "?"} aux=${lock.aux_port ?? "?"}`);
+          return 0;
+        } catch { /* stale lock; fall through */ }
+      }
+    } catch { /* malformed lock; fall through */ }
   }
   const entry = resolve(import.meta.dirname ?? ".", "..", "runtime", "daemon.ts");
   // PRIOR 2 (never silently fail): pre-fix the daemon spawned with

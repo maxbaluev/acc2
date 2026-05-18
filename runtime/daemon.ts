@@ -301,10 +301,14 @@ const countEvents = (db: Database): number => {
 // /health analytical counts cache. SQLite COUNT(*) on the events table runs
 // synchronously under bun:sqlite and blocks the JS event loop; under research-
 // dispatch load (100k+ events, active WAL writers) those four counts add up to
-// >5s of latency and time out the TUI's `callHealth()` probe at the rpc.ts
-// HEALTH_TIMEOUT_MS=5_000 boundary, rendering the dashboard as DEAD even
-// though the daemon is alive. Caching for 5s makes /health near-instant and
-// keeps the observed counts fresh enough for an operator dashboard.
+// >5s of latency. Previously the cache was a 5s TTL refreshed *inside* the
+// /health handler — every miss blocked the request and on every probe race
+// the TUI's HEALTH_TIMEOUT_MS=5_000 fired before COUNT(*) returned, marking
+// the daemon DEAD even when it was alive. Foundational fix: the cache is
+// initialized at boot with placeholder zeros, refreshed by a dedicated
+// background interval (refreshHealthCountsTick), and `/health` ONLY reads the
+// cache. The request path never touches SQL. Worst case under load is stale
+// counts (operator observability), not a stuck /health endpoint.
 type HealthCountsCache = {
   events_count: number;
   pathology_exhausted: number;
@@ -313,13 +317,16 @@ type HealthCountsCache = {
   window_iso: string;
   computed_at_ms: number;
 };
-const HEALTH_COUNTS_TTL_MS = 5_000;
-let healthCountsCache: HealthCountsCache | null = null;
-const readHealthCounts = (db: Database): HealthCountsCache => {
+let healthCountsCache: HealthCountsCache = {
+  events_count: 0,
+  pathology_exhausted: 0,
+  pathology_debited: 0,
+  brain_failed: 0,
+  window_iso: new Date(0).toISOString(),
+  computed_at_ms: 0,
+};
+const refreshHealthCounts = (db: Database): void => {
   const now = Date.now();
-  if (healthCountsCache && now - healthCountsCache.computed_at_ms < HEALTH_COUNTS_TTL_MS) {
-    return healthCountsCache;
-  }
   const recentCutoff = new Date(now - 30 * 60 * 1000).toISOString();
   const recent = (kinds: string[]): number => {
     try {
@@ -330,16 +337,18 @@ const readHealthCounts = (db: Database): HealthCountsCache => {
       return row.c;
     } catch { return 0; }
   };
-  healthCountsCache = {
-    events_count: countEvents(db),
-    pathology_exhausted: recent(["pathology_budget_exhausted"]),
-    pathology_debited: recent(["pathology_budget_debited"]),
-    brain_failed: recent(["bridge_failed", "dispatcher_violation"]),
-    window_iso: recentCutoff,
-    computed_at_ms: now,
-  };
-  return healthCountsCache;
+  try {
+    healthCountsCache = {
+      events_count: countEvents(db),
+      pathology_exhausted: recent(["pathology_budget_exhausted"]),
+      pathology_debited: recent(["pathology_budget_debited"]),
+      brain_failed: recent(["bridge_failed", "dispatcher_violation"]),
+      window_iso: recentCutoff,
+      computed_at_ms: now,
+    };
+  } catch { /* keep prior cache on transient SQL error */ }
 };
+const readHealthCounts = (_db: Database): HealthCountsCache => healthCountsCache;
 
 const pidAlive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true; } catch { return false; }
@@ -349,13 +358,41 @@ const pidAlive = (pid: number): boolean => {
  *  alive (second-instance guard). On boot emits daemon_started +
  *  daemon_index_rebuilt; on graceful stop emits daemon_shutdown. */
 export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> => {
+  // Fundamental architectural separation (foundational fix for /health
+  // request-path starvation): the daemon can run in three roles, gated by
+  // ACC2_DAEMON_ROLE.
+  //   "all"    — single-process: bind HTTP/MCP ports AND run worker
+  //              setIntervals. Default. The legacy / back-compat mode.
+  //   "server" — bind HTTP/MCP ports; SKIP worker setIntervals. The main
+  //              JS event loop stays free for /health and MCP request
+  //              handlers, never blocked by synchronous bun:sqlite work
+  //              from worker ticks.
+  //   "worker" — run worker setIntervals; SKIP HTTP/MCP port bind. Opens
+  //              its own bun:sqlite handle to the same state.db; SQLite
+  //              WAL mode handles concurrent writers across processes
+  //              (server daemon writes ingress events; worker daemon
+  //              writes derived events; both safe).
+  // Operators wanting the architectural separation start TWO daemons:
+  //   ACC2_DAEMON_ROLE=server  acc daemon start
+  //   ACC2_DAEMON_ROLE=worker  acc daemon start
+  // Each uses a role-specific lock file (v2.sock vs v2.sock.worker) so
+  // they don't fight the single-instance guard.
+  const role = (process.env.ACC2_DAEMON_ROLE ?? "all").toLowerCase();
+  if (role !== "all" && role !== "server" && role !== "worker") {
+    throw new Error(`ACC2_DAEMON_ROLE must be one of: all | server | worker (got ${role})`);
+  }
+  const skipWorkers = role === "server";
+  const skipPorts = role === "worker";
+
   const port = opts.port ?? Number(process.env.V2_DAEMON_PORT ?? DEFAULT_DAEMON_PORT);
   const auxPort = opts.auxPort ?? Number(process.env.V2_DAEMON_AUX_PORT ?? port + DEFAULT_AUX_PORT_OFFSET);
   // Resolve paths LAZILY through the shared resolver so an env var set
   // between module-load and startDaemon (common in tests that pin paths
   // per-case) is honoured. Constants above are cached at module-load only.
   const stateDbPath = opts.stateDbPath ?? resolveDbPath();
-  const socketFile = opts.socketFile ?? resolveSocketFile();
+  // Role-scoped lock so server+worker can coexist as two processes.
+  const baseSocketFile = opts.socketFile ?? resolveSocketFile();
+  const socketFile = skipPorts ? `${baseSocketFile}.worker` : baseSocketFile;
   const tokenFile = opts.tokenFile ?? resolveTokenFile();
   const host = opts.host ?? "127.0.0.1";
   setSchedulerDraining(false);
@@ -450,6 +487,22 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   const heartbeat = setInterval(() => { /* phase F: embedder catch-up, posterior updater, … */ }, 5000);
   workers.push(() => clearInterval(heartbeat));
 
+  // Health counts refresher. Pushes the four COUNT(*) queries OFF the /health
+  // request path entirely. The COUNT(*) on a 100k+ events table under active
+  // WAL-writer load takes several seconds and blocks the bun:sqlite main
+  // thread; running it every 5s starved the JS event loop and prevented
+  // /health from responding within its 5s rpc timeout. With a 60s refresh
+  // cadence and 3-5s worst-case tick blocking, /health probes outside the
+  // blocking window (~92%+ of the time) return immediately from the cache.
+  // First refresh is scheduled via setTimeout so daemon boot is not blocked
+  // on the initial COUNT(*); /health returns cached zeros for the first ~1s
+  // until the first refresh completes.
+  setTimeout(() => { try { refreshHealthCounts(db); } catch { /* swallow */ } }, 250);
+  const healthCountsTick = setInterval(() => {
+    try { refreshHealthCounts(db); } catch { /* keep stale cache */ }
+  }, 60_000);
+  workers.push(() => clearInterval(healthCountsTick));
+
   // Worker tick intervals — declared here so /health can compute the
   // "stuck after 3× interval" threshold without reading env vars twice.
   const amendmentTickMs = Number(process.env.ACC2_AMENDMENT_TICK_MS ?? 2000);
@@ -473,6 +526,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // OpenAI or alter long-lived state). The single canonical opt-out lever
   // is `ACC2_DISABLE_WORKERS` — comma-separated list of worker names
   // (see runtime/worker_autostart.ts).
+  //
+  // ROLE=server skip: the daemon registers no workers in server-only role
+  // so the main event loop stays free for HTTP/MCP requests. Worker setup
+  // also runs early before port binding; a "register only, no setInterval"
+  // pre-step would still call expensive readiness paths, so the entire
+  // block — registration plus setIntervals — is gated.
+  if (!skipWorkers) {
   registerWorker("amendment", amendmentTickMs);
   registerWorker("metrics_gauge_refresh", gaugeTickMs);
   if (isWorkerEnabled("integrity")) registerWorker("integrity", integrityIntervalMs);
@@ -1155,6 +1215,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     })();
     workers.push(() => schedulerAbort?.abort());
   }
+  } // end if (!skipWorkers)
 
   // Declare `stop` BEFORE Bun.serve so the fetch closure can capture it; the
   // handles are filled in after binding succeeds.
@@ -1296,6 +1357,12 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     }
   });
 
+  // ROLE=worker skips port bind: a worker-only daemon does not serve
+  // HTTP or MCP — its sole responsibility is running setIntervals against
+  // the shared SQLite db. The server daemon (role=server) handles all
+  // request traffic; this process never accepts inbound connections.
+  if (!skipPorts) {
+
   // 1. Bind the FastMCP HTTP-streaming transport on the primary port.
   // Inbound MCP callers in production: opencode brain subprocess AND CLI
   // commands (acc state / acc tail / acc admin_* via cli/rpc.ts). Default
@@ -1327,21 +1394,27 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     });
   } catch (err) {
     for (const dispose of workers) dispose();
-    try { await mcpServer.stop(); } catch (stopErr) {
+    try { await mcpServer?.stop(); } catch (stopErr) {
       logger.debug({ where: "daemon.boot.aux_bind_recovery", err: String(stopErr) }, "mcp stop during aux-bind failure");
     }
     closeDb(stateDbPath);
     throw new Error(`failed to bind aux port ${auxPort}: ${(err as Error).message}`);
   }
 
+  } // end if (!skipPorts)
+
   writeLockFile(socketFile, {
     pid: process.pid,
-    port,
-    aux_port: auxPort,
+    port: skipPorts ? -1 : port,
+    aux_port: skipPorts ? -1 : auxPort,
     started_at_ms: startedAtMs,
     db_path: stateDbPath,
+    role,
   });
-  writeLockFile(tokenFile, { admin_token: adminToken });
+  // ROLE=worker writes a separate token file too so server+worker don't
+  // clobber each other's admin token.
+  const tokenFileForRole = skipPorts ? `${tokenFile}.worker` : tokenFile;
+  writeLockFile(tokenFileForRole, { admin_token: adminToken });
 
   emitEvent(db, {
     kind: "daemon_started",
