@@ -965,7 +965,7 @@ export const recordApplyOutcome = async (opts: {
       contextRefs: [eventId, requestEventId, actionEventId, scoredEventId, committedEventId].filter(Boolean) as string[],
       derivedEventIds: [requestEventId, actionEventId, scoredEventId, committedEventId].filter(Boolean) as string[],
       extra: {
-        source_kind: ev.kind,
+        source_kind: ev.kind ?? null,
         source_brain_event_id: sourceBrainEventId,
         affected_files: affectedFiles,
         status,
