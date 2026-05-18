@@ -89,6 +89,51 @@ describe("dark-gate observability — kind registration", () => {
 });
 
 describe("dark-gate observability — live emission paths", () => {
+  test("predicate gate emits predicate_gate_rejected when its body predicate fails", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body: `console.log('@@RESULT@@ ' + JSON.stringify({ headline: "Friction-free onboarding", ok: true }));`,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        audience: "ceo_buyer",
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("predicate_gate_failed");
+    const rejections = events.filter((e) => e.kind === "predicate_gate_rejected");
+    expect(rejections.length).toBe(1);
+  });
+
+  test("strategy gate emits atms_strategy_first_violation when report strategy evidence is missing", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body: `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, report: 'missing_strategy' }));`,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        name: "atms_report_v_missing_strategy",
+        citedKnowledgeIds: [],
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("strategy_first_violation_missing_strategic_direction_chosen");
+    const violations = events.filter((e) => e.kind === "atms_strategy_first_violation");
+    expect(violations.length).toBe(1);
+  });
+
   test("opening a directive fires intent_classified for the new directive_id", () => {
     const db = openDb(":memory:");
     const opened = handleOpenDirective(ctx(db), {

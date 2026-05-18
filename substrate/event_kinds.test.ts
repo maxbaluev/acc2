@@ -165,6 +165,53 @@ describe("EVENT_KINDS registry coverage", () => {
     expect(skipMeta.producer).toBe("runtime");
     expect(migrMeta.producer).toBe("runtime");
   });
+
+  test("emitEvent accepts the intent gate observability kinds", () => {
+    const db = openDb(":memory:");
+    expect(() =>
+      emitEvent(db, {
+        kind: "intent_classified",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_event_kind_intent",
+        task_id: "d_event_kind_intent",
+        payload: {
+          intent_class: "ad_hoc",
+          confidence: 0.3,
+          evidence: [],
+          classifier_version: "test",
+          directive_text_hash: "abc",
+          allowed_artifact_kinds: [],
+        },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      emitEvent(db, {
+        kind: "lane_routing_refused",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_event_kind_intent",
+        payload: {
+          reason: "test_seed",
+          refused_kind: "atms_report_v_supersedes",
+        },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      emitEvent(db, {
+        kind: "refinement_depth_exceeded",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_event_kind_intent",
+        payload: { depth: 6, cap: 5 },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      emitEvent(db, {
+        kind: "verifier_residual_high",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_event_kind_intent",
+        payload: { residual: 0.9, verifier_kind: "deterministic_code" },
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe("derived sets match their pre-unification shape", () => {
