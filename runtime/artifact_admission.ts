@@ -366,11 +366,11 @@ export const admitArtifact = async (
   //          normally.
   //      Returns supersedes_dropped: true on the result so callers can
   //      observe the gate firing without parsing the event stream.
+  const isAtmsReportArtifact = typeof input.name === "string" && input.name.startsWith("atms_report_v");
   let effectiveSupersedes: string | null | undefined = input.supersedes;
   let supersedesDropped = false;
   if (
-    typeof input.name === "string" &&
-    input.name.startsWith("atms_report_v") &&
+    isAtmsReportArtifact &&
     typeof effectiveSupersedes === "string" &&
     effectiveSupersedes.length > 0
   ) {
@@ -389,7 +389,7 @@ export const admitArtifact = async (
           const p = JSON.parse(latestIntent.payload ?? "{}") as Record<string, unknown>;
           observedIntentClass = typeof p.intent_class === "string" ? p.intent_class : null;
         } catch { /* swallow — observedIntentClass stays null and the gate refuses */ }
-        if (observedIntentClass && observedIntentClass !== "atms_report_composition") {
+        if (observedIntentClass !== "atms_report_composition") {
           effectiveSupersedes = null;
           supersedesDropped = true;
           emit({
@@ -583,7 +583,13 @@ export const admitArtifact = async (
   // pair, so retrying admission for any reason does not duplicate the
   // event row.
   if (input.kind === "published_drive_doc" && effectiveSupersedes) {
-    markSuperseded(db, effectiveSupersedes, row.id, emit);
+    markSuperseded(
+      db,
+      effectiveSupersedes,
+      row.id,
+      emit,
+      isAtmsReportArtifact ? { residual: 0 } : undefined,
+    );
   }
 
   // Re-read in case downstream stamped any field; mostly defensive.

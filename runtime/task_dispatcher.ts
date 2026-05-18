@@ -863,6 +863,24 @@ export const dispatchReadyTask = async (
           } as JsonValue,
         });
 
+        if (residual >= COMMIT_RESIDUAL_THRESHOLD) {
+          emitEvent(db, {
+            kind: "verifier_residual_high",
+            substrate_origin: "substrate_auto",
+            directive_id: task.directive_id,
+            task_id: task.id,
+            action_artifact_id: actionArtifact.id,
+            verifier_artifact_id: verifierArtifact.id,
+            residual,
+            payload: {
+              residual,
+              verifier_kind: verifierArtifact.kind ?? verifierArtifact.name ?? "artifact_verifier",
+              threshold: COMMIT_RESIDUAL_THRESHOLD,
+              action_scored_event_id: scored.id,
+            } as JsonValue,
+          });
+        }
+
         // Phase H: credit pipeline distributes the residual across the
         // action + verifier + every cited knowledge/artifact via Shapley
         // decomposition (§3.6.1 Rule 3). The pipeline calls
@@ -1069,6 +1087,19 @@ export const dispatchReadyTask = async (
               } as JsonValue,
             });
           } else if (depth >= REFINEMENT_DEPTH_CAP) {
+            emitEvent(db, {
+              kind: "refinement_depth_exceeded",
+              substrate_origin: "substrate_auto",
+              directive_id: task.directive_id,
+              task_id: task.id,
+              residual,
+              payload: {
+                depth,
+                cap: REFINEMENT_DEPTH_CAP,
+                residual,
+                dispatch_id: dispatchId,
+              } as JsonValue,
+            });
             emitEvent(db, {
               kind: "task_failed",
               substrate_origin: "substrate_auto",

@@ -3,9 +3,11 @@
 // `MIRROR_INLINE_EVENT_TYPES`) cannot silently drift from
 // `EVENT_KINDS` again.
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { closeDb, openDb } from "./db";
+import { emitEvent } from "../runtime/events";
 import {
   EMBEDDABLE_KINDS,
   EVENT_KINDS,
@@ -14,6 +16,9 @@ import {
   type EventKind,
 } from "./event_kinds";
 import { NARRATIVE_KINDS } from "../cli/observe";
+
+afterAll(() => closeDb());
+beforeEach(() => closeDb());
 
 // ── helpers ────────────────────────────────────────────────────────
 
