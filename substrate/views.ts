@@ -562,6 +562,82 @@ CREATE VIEW IF NOT EXISTS owner_state_belief_view AS
   LEFT JOIN recent_err e;
 `;
 
+// owner_alignment_action_policy_view — recent alignment_action_selected
+// rows × paired owner_state_prediction_error_recorded × the action's
+// origin belief snapshot. Brain contract CY7E62DSNX1DZ1BTD56845D994
+// Phase H5 (2026-05-18). The brain reads this to answer "given current
+// belief, which actions tend to work?" without re-querying three views.
+//
+// Shape: newest-first rows of recent alignment actions. Fields:
+//   - action_event_id, action_ts, directive_id, task_id
+//   - action_kind, rationale, hypothesis_event_id, cited_artifact_ids
+//   - belief_emotional_register, belief_attention_budget,
+//     belief_decision_style  (3 most-decision-relevant axes inline)
+//   - prediction_error_event_id, prediction_error_aggregate
+//   - effectiveness_band  ('positive' | 'negative' | 'mixed' | 'pending')
+const VIEW_OWNER_ALIGNMENT_ACTION_POLICY = `
+CREATE VIEW IF NOT EXISTS owner_alignment_action_policy_view AS
+  WITH actions AS (
+    SELECT
+      a.id AS action_event_id,
+      a.ts AS action_ts,
+      a.directive_id,
+      a.task_id,
+      json_extract(a.payload, '$.action_kind')        AS action_kind,
+      json_extract(a.payload, '$.rationale')          AS rationale,
+      json_extract(a.payload, '$.hypothesis_event_id') AS hypothesis_event_id,
+      json_extract(a.payload, '$.cited_artifact_ids') AS cited_artifact_ids
+    FROM events a
+    WHERE a.kind = 'alignment_action_selected'
+  ),
+  paired_errors AS (
+    SELECT
+      json_extract(p.payload, '$.hypothesis_event_id') AS hypothesis_event_id,
+      json_extract(p.payload, '$.interaction_event_id') AS action_event_id,
+      p.id AS prediction_error_event_id,
+      p.ts AS prediction_error_ts,
+      COALESCE(
+        p.residual,
+        json_extract(p.payload, '$.prediction_error.aggregate'),
+        json_extract(p.payload, '$.prediction_error_aggregate')
+      ) AS prediction_error_aggregate,
+      ROW_NUMBER() OVER (
+        PARTITION BY json_extract(p.payload, '$.interaction_event_id')
+        ORDER BY p.ts DESC
+      ) AS rn
+    FROM events p
+    WHERE p.kind = 'owner_state_prediction_error_recorded'
+  ),
+  latest_err AS (
+    SELECT * FROM paired_errors WHERE rn = 1
+  )
+  SELECT
+    a.action_event_id,
+    a.action_ts,
+    a.directive_id,
+    a.task_id,
+    a.action_kind,
+    a.rationale,
+    a.hypothesis_event_id,
+    a.cited_artifact_ids,
+    json_extract(h.payload, '$.latent_state.emotional_register') AS belief_emotional_register,
+    json_extract(h.payload, '$.latent_state.attention_budget')   AS belief_attention_budget,
+    json_extract(h.payload, '$.latent_state.decision_style')     AS belief_decision_style,
+    json_extract(h.payload, '$.uncertainty')                     AS belief_uncertainty,
+    err.prediction_error_event_id,
+    err.prediction_error_aggregate,
+    CASE
+      WHEN err.prediction_error_aggregate IS NULL THEN 'pending'
+      WHEN err.prediction_error_aggregate < 0.15 THEN 'positive'
+      WHEN err.prediction_error_aggregate < 0.30 THEN 'mixed'
+      ELSE 'negative'
+    END AS effectiveness_band
+  FROM actions a
+  LEFT JOIN events h ON h.id = a.hypothesis_event_id AND h.kind = 'owner_state_hypothesis_recorded'
+  LEFT JOIN latest_err err ON err.action_event_id = a.action_event_id
+  ORDER BY a.action_ts DESC;
+`;
+
 // owner_plain_status_view — projects directive/task state into PLAIN
 // language cards for non-technical owners. The TUI primary surface reads
 // from this view directly so it never has to assemble {ids, residuals,
@@ -3220,6 +3296,7 @@ export const VIEW_NAMES = [
   "owner_rendering_policy_view",
   "owner_rendering_effectiveness_view",
   "owner_state_belief_view",
+  "owner_alignment_action_policy_view",
   "owner_plain_status_view",
   "contradictory_candidates_view",
   "origin_promotion_by_directive_view",
@@ -3255,6 +3332,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_OWNER_RENDERING_POLICY);
   db.exec(VIEW_OWNER_RENDERING_EFFECTIVENESS);
   db.exec(VIEW_OWNER_STATE_BELIEF);
+  db.exec(VIEW_OWNER_ALIGNMENT_ACTION_POLICY);
   db.exec(VIEW_OWNER_PLAIN_STATUS);
   db.exec(VIEW_ROLLING_REVIEW_DUE);
   db.exec(VIEW_WATCH_EDGE_OBSERVATIONS);
@@ -4081,6 +4159,58 @@ export const ownerStateBelief = (db: Database): OwnerStateBeliefRow | null => {
     belief_age_ms: Number(row.belief_age_ms ?? 0),
     is_stale: Number(row.is_stale ?? 0) === 1,
   };
+};
+
+export type OwnerAlignmentActionPolicyRow = {
+  action_event_id: string;
+  action_ts: string;
+  directive_id: string | null;
+  task_id: string | null;
+  action_kind: string | null;
+  rationale: string | null;
+  hypothesis_event_id: string | null;
+  cited_artifact_ids: string[];
+  belief_emotional_register: string | null;
+  belief_attention_budget: string | null;
+  belief_decision_style: string | null;
+  belief_uncertainty: number | null;
+  prediction_error_event_id: string | null;
+  prediction_error_aggregate: number | null;
+  effectiveness_band: "positive" | "negative" | "mixed" | "pending";
+};
+
+/** Read recent alignment_action_selected rows joined with their paired
+ *  prediction error + belief axes. Returns newest first. */
+export const ownerAlignmentActionPolicy = (
+  db: Database,
+  filter: { directive_id?: string; limit?: number; action_kind?: string } = {},
+): OwnerAlignmentActionPolicyRow[] => {
+  const wheres: string[] = [];
+  const params: Array<string | number> = [];
+  if (filter.directive_id) { wheres.push("directive_id = ?"); params.push(filter.directive_id); }
+  if (filter.action_kind) { wheres.push("action_kind = ?"); params.push(filter.action_kind); }
+  const whereClause = wheres.length > 0 ? `WHERE ${wheres.join(" AND ")}` : "";
+  const limit = typeof filter.limit === "number" && filter.limit > 0 ? filter.limit : 50;
+  params.push(limit);
+  const sql = `SELECT * FROM owner_alignment_action_policy_view ${whereClause} LIMIT ?`;
+  const rows = db.query(sql).all(...params) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    action_event_id: r.action_event_id as string,
+    action_ts: r.action_ts as string,
+    directive_id: (r.directive_id as string | null) ?? null,
+    task_id: (r.task_id as string | null) ?? null,
+    action_kind: (r.action_kind as string | null) ?? null,
+    rationale: (r.rationale as string | null) ?? null,
+    hypothesis_event_id: (r.hypothesis_event_id as string | null) ?? null,
+    cited_artifact_ids: ensureArray<string>(r.cited_artifact_ids as string | null),
+    belief_emotional_register: (r.belief_emotional_register as string | null) ?? null,
+    belief_attention_budget: (r.belief_attention_budget as string | null) ?? null,
+    belief_decision_style: (r.belief_decision_style as string | null) ?? null,
+    belief_uncertainty: r.belief_uncertainty == null ? null : Number(r.belief_uncertainty),
+    prediction_error_event_id: (r.prediction_error_event_id as string | null) ?? null,
+    prediction_error_aggregate: r.prediction_error_aggregate == null ? null : Number(r.prediction_error_aggregate),
+    effectiveness_band: (r.effectiveness_band as OwnerAlignmentActionPolicyRow["effectiveness_band"]) ?? "pending",
+  }));
 };
 
 /** Authoritative lifecycle projection per (directive_id, root_task_id). */

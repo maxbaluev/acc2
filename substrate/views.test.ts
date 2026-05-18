@@ -20,6 +20,7 @@ import {
   ownerPlainStatus,
   ownerRenderingEffectiveness,
   ownerRenderingPolicy,
+  ownerAlignmentActionPolicy,
   ownerStateBelief,
   promotedKnowledge,
   readyTasks,
@@ -2348,6 +2349,86 @@ describe("owner_plain_status_view + ownerPlainStatus", () => {
     const b = ownerStateBelief(db)!;
     expect(b.recent_prediction_error_count).toBe(2);
     expect(b.recent_avg_prediction_error).toBeCloseTo(0.5, 5);
+  });
+
+  test("owner_alignment_action_policy_view joins alignment_action × prediction_error × belief (Phase H5)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const hyp = insertEvent(db, {
+      kind: "owner_state_hypothesis_recorded",
+      directive_id: "d_pol",
+      task_id: "t_pol",
+      ts: nowIso(),
+      payload: {
+        latent_state: { emotional_register: "tired", attention_budget: "low", decision_style: "direct_confirm" },
+        confidence: { emotional_register: 0.8 },
+        uncertainty: 0.4,
+      },
+    });
+    const act = insertEvent(db, {
+      kind: "alignment_action_selected",
+      directive_id: "d_pol",
+      task_id: "t_pol",
+      ts: nowIso(),
+      payload: { hypothesis_event_id: hyp, action_kind: "render_plain", rationale: "owner is tired" },
+    });
+    insertEvent(db, {
+      kind: "owner_state_prediction_error_recorded",
+      directive_id: "d_pol",
+      task_id: "t_pol",
+      ts: nowIso(),
+      payload: { hypothesis_event_id: hyp, interaction_event_id: act, prediction_error: { aggregate: 0.08 } },
+      residual: 0.08,
+    });
+    const rows = ownerAlignmentActionPolicy(db, { directive_id: "d_pol" });
+    expect(rows.length).toBe(1);
+    const r = rows[0]!;
+    expect(r.action_kind).toBe("render_plain");
+    expect(r.hypothesis_event_id).toBe(hyp);
+    expect(r.belief_emotional_register).toBe("tired");
+    expect(r.belief_attention_budget).toBe("low");
+    expect(r.effectiveness_band).toBe("positive");
+    expect(r.prediction_error_aggregate).toBeCloseTo(0.08, 5);
+  });
+
+  test("owner_alignment_action_policy_view classifies effectiveness_band by aggregate residual", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const hyp = insertEvent(db, {
+      kind: "owner_state_hypothesis_recorded",
+      directive_id: "d_band",
+      task_id: "t_band",
+      ts: nowIso(),
+      payload: { latent_state: {}, confidence: {}, uncertainty: 0.5 },
+    });
+    const cases = [
+      { residual: 0.05, expected: "positive" },
+      { residual: 0.20, expected: "mixed" },
+      { residual: 0.55, expected: "negative" },
+    ];
+    for (const c of cases) {
+      const act = insertEvent(db, {
+        kind: "alignment_action_selected",
+        directive_id: "d_band",
+        task_id: "t_band",
+        ts: nowIso(),
+        payload: { hypothesis_event_id: hyp, action_kind: "ask_clarification" },
+      });
+      insertEvent(db, {
+        kind: "owner_state_prediction_error_recorded",
+        directive_id: "d_band",
+        task_id: "t_band",
+        ts: nowIso(),
+        payload: { hypothesis_event_id: hyp, interaction_event_id: act, prediction_error: { aggregate: c.residual } },
+        residual: c.residual,
+      });
+    }
+    const rows = ownerAlignmentActionPolicy(db, { directive_id: "d_band" });
+    expect(rows.length).toBe(3);
+    const bands = new Set(rows.map((r) => r.effectiveness_band));
+    expect(bands.has("positive")).toBe(true);
+    expect(bands.has("mixed")).toBe(true);
+    expect(bands.has("negative")).toBe(true);
   });
 
   test("dispatch_resolved_view classifies 'live_amended' when root committed AND directive_amended opened new dispatching children (foundational fix 2026-05-18)", () => {
