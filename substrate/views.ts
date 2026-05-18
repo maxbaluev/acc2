@@ -477,9 +477,9 @@ CREATE VIEW IF NOT EXISTS owner_rendering_effectiveness_view AS
     -- silent_ignore by filtering r.rendered_ts < now - cutoff and
     -- f.feedback_kind IS NULL.
     CASE
-      WHEN f.feedback_kind IN ('correction','correction_explicit','correction_implicit','decline','declined','rejected') THEN 'negative'
-      WHEN f.feedback_kind IN ('confirmation','approved','satisfaction','positive') THEN 'positive'
-      WHEN f.feedback_kind IN ('manual_override','operator_override','override','ignored_ask','ignored','silent','repeated_clarification','clarification_loop') THEN 'mixed'
+      WHEN f.feedback_kind IN ('correction','correction_explicit','correction_implicit','decline','declined','rejected','auto_verifier') THEN 'negative'
+      WHEN f.feedback_kind IN ('confirmation','approved','satisfaction','positive','auto_verifier_clean') THEN 'positive'
+      WHEN f.feedback_kind IN ('manual_override','operator_override','override','ignored_ask','ignored','silent','repeated_clarification','clarification_loop','auto_verifier_skipped') THEN 'mixed'
       WHEN f.feedback_kind IS NULL THEN 'pending'
       ELSE 'other'
     END AS effectiveness_band
