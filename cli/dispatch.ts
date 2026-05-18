@@ -46,6 +46,13 @@ const usage = (): string => `acc — v2 thin CLI
                                   matching rows and exits.
   acc graph <directive_id>        Render the task DAG (nodes ranked, edges).
   acc inspect <task_id_prefix>    Per-task report: event histogram + chronology.
+  acc artifact provenance <artifact_id> [--json] [--no-color]
+                                  Graph-walk a code_artifact's supersedes
+                                  chain (ancestors + descendants) and render
+                                  the lineage. Non-destructive supersede
+                                  semantics for published_drive_doc — the
+                                  external Drive doc stays until an
+                                  explicit owner trash action.
   acc dispatch <directive_id> [--json] [--no-color]
                                   Canonical substrate-truth inspection of one
                                   directive's full dispatch trajectory: task
@@ -489,6 +496,11 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
   if (cmd === "directive") {
     const { runDirective } = await import("./directive");
     return runDirective(argv.slice(1));
+  }
+  if (cmd === "artifact") {
+    // `acc artifact provenance <artifact_id>` — C5 chain inspector.
+    const { runArtifact } = await import("./artifact");
+    return runArtifact(argv.slice(1));
   }
   if (cmd === "dispatch") {
     // `acc dispatch <directive_id_or_prefix> [--json]` — canonical

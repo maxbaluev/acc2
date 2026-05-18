@@ -407,3 +407,81 @@ describe("admitArtifact — rejections", () => {
     expect(events.some((e) => e.kind === "atms_strategy_first_violation")).toBe(false);
   });
 });
+
+// C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14).
+describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
+  test("admitting published_drive_doc with supersedes flips prior.superseded_by and emits code_artifact_superseded", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    // Pre-seed a prior published_drive_doc row representing v_prior.
+    const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
+    const prior = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        name: "lakeland_drive_doc_prior",
+        kind: "published_drive_doc",
+        targetResources: ["drive://document/PRIORDOCID12345abc"],
+      },
+      captureEmit(events, db),
+    );
+    expect(prior.ok).toBe(true);
+    if (!prior.ok) return;
+    // Admit the successor, declaring supersedes against the prior id.
+    const successor = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        name: "lakeland_drive_doc_successor",
+        kind: "published_drive_doc",
+        targetResources: ["drive://document/SUCCESSORDOCID987zyx"],
+        supersedes: prior.artifactId,
+      },
+      captureEmit(events, db),
+    );
+    expect(successor.ok).toBe(true);
+    if (!successor.ok) return;
+    const priorRow = getArtifact(db, prior.artifactId)!;
+    expect(priorRow.supersededBy).toBe(successor.artifactId);
+    const successorRow = getArtifact(db, successor.artifactId)!;
+    expect(successorRow.supersedes).toBe(prior.artifactId);
+    const supersededEvents = events.filter((e) => e.kind === "code_artifact_superseded");
+    expect(supersededEvents.length).toBe(1);
+    expect((supersededEvents[0]!.payload as Record<string, unknown>).prior_artifact_id).toBe(prior.artifactId);
+    expect((supersededEvents[0]!.payload as Record<string, unknown>).new_artifact_id).toBe(successor.artifactId);
+  });
+
+  test("published_drive_doc admission refuses when target_resources lacks a drive:// URI", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
+    const before = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        name: "lakeland_drive_doc_missing_uri",
+        kind: "published_drive_doc",
+        targetResources: ["repo:docs/somewhere.md"],
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("published_drive_doc_missing_drive_uri");
+    const after = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    expect(after).toBe(before);
+  });
+});

@@ -35,6 +35,8 @@ import { runCamofoxArtifact } from "./runtimes/camofox";
 import { getArtifact, insertArtifact } from "./artifact_store";
 import { ownerGateDecision } from "./owner_gate";
 import { runPredicateGate } from "./verifiers/predicate_gate";
+import { markSuperseded } from "./artifact_provenance";
+import { parseResourceUri } from "./resource_uri";
 import type { EmitEventInput } from "./events";
 
 export type AdmissionInput = {
@@ -78,6 +80,15 @@ export type AdmissionInput = {
    *  brain emits these ids on `code_artifact_candidate.cited_knowledge_ids`
    *  and the admission caller (bridge/runtime) threads them through. */
   citedKnowledgeIds?: string[];
+  /** C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14): provenance
+   *  chain. `kind` discriminates the artifact (e.g. `published_drive_doc`);
+   *  `supersedes` is the prior artifact_id that this admission replaces.
+   *  When both are set and kind === `published_drive_doc`, the admission
+   *  emits `code_artifact_superseded` against the prior row AFTER
+   *  successful row insert. Non-destructive: the external Drive doc is
+   *  not trashed — only the substrate marks the prior superseded. */
+  kind?: string;
+  supersedes?: string;
 };
 
 export type AdmissionRejectionReason =
@@ -86,7 +97,8 @@ export type AdmissionRejectionReason =
   | "runtime_error"
   | "runtime_unavailable"
   | "predicate_gate_failed"
-  | "strategy_first_violation_missing_strategic_direction_chosen";
+  | "strategy_first_violation_missing_strategic_direction_chosen"
+  | "published_drive_doc_missing_drive_uri";
 
 export type AdmissionResult =
   | { ok: true; artifactId: string }
@@ -223,11 +235,42 @@ export const admitArtifact = async (
     }
   }
 
+  // 1.7 published_drive_doc gate (C5, 2026-05-18, contract
+  //     HJJS1665H961B2SRYHC5J85D14). When kind === `published_drive_doc`
+  //     the target_resources MUST carry at least one canonical Drive doc
+  //     URI (`drive://document/<doc_id>`). Refusing here keeps the chain
+  //     authoritative — every published_drive_doc row reliably names the
+  //     external resource it represents.
+  if (input.kind === "published_drive_doc") {
+    const driveUri = (input.targetResources ?? []).find((uri) => {
+      const parsed = parseResourceUri(uri);
+      return parsed?.scheme === "drive";
+    });
+    if (!driveUri) {
+      emit({
+        kind: "code_artifact_admission_rejected",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: "published_drive_doc_missing_drive_uri",
+          detail: "published_drive_doc admission requires target_resources to include a drive://document/<doc_id> URI",
+          target_resources: (input.targetResources ?? []) as unknown as JsonValue,
+          runtime: input.runtime,
+        } as JsonValue,
+      });
+      return {
+        ok: false,
+        reason: "published_drive_doc_missing_drive_uri",
+        detail: "target_resources missing drive://document/<doc_id>",
+      };
+    }
+  }
+
   // 2. Insert at admit priors. We do this BEFORE running the fixture so the
   //    artifact_id is stable across the artifact_invoked / artifact_observed
   //    events; if the fixture fails we DELETE the row in the rejection branch.
   const row = insertArtifact(db, {
     runtime: input.runtime,
+    kind: input.kind,
     body: input.body,
     declaredSandbox: input.declaredSandbox,
     stateRoot: input.stateRoot ?? null,
@@ -249,6 +292,7 @@ export const admitArtifact = async (
     // owner_gate_verdict is "auto" when no owner gate fired, else "owner_approved"
     // (we already passed the gate check above for the require_consent branch).
     ownerGateVerdict: gate.requires_consent ? "owner_approved" : "auto",
+    supersedes: input.supersedes ?? null,
     id: input.artifactId,
   });
 
@@ -385,6 +429,17 @@ export const admitArtifact = async (
         phase: "admission",
       } as JsonValue,
     });
+  }
+
+  // C5 (2026-05-18) provenance hook: when a published_drive_doc admission
+  // succeeds AND the caller declared `supersedes`, flip the prior row's
+  // `superseded_by` to point at this new artifact. Non-destructive — the
+  // external Drive doc is not trashed, only the substrate marks the
+  // chain. `markSuperseded` is idempotent on repeat calls with the same
+  // pair, so retrying admission for any reason does not duplicate the
+  // event row.
+  if (input.kind === "published_drive_doc" && input.supersedes) {
+    markSuperseded(db, input.supersedes, row.id, emit);
   }
 
   // Re-read in case downstream stamped any field; mostly defensive.

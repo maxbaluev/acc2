@@ -200,6 +200,14 @@ export const EVENT_KINDS = {
   // `strategic_first_then_initiatives_lesson`). Health-metric so
   // dashboards can show how often the gate fires.
   atms_strategy_first_violation:           { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14): emitted when
+  // a published_drive_doc admission (or explicit operator action) marks
+  // a prior artifact superseded by a newer one. Carries
+  // {prior_artifact_id, new_artifact_id, kind, target_resources}.
+  // Non-destructive — the substrate flips the prior row's
+  // superseded_by field; trashing the external Drive doc remains an
+  // explicit owner action.
+  code_artifact_superseded:                { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   code_artifact_promoted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   code_artifact_quarantined:               { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // Terminal retirement (sandbox audit bsfxsvgh9, 2026-05-15): unlike

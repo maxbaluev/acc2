@@ -1616,6 +1616,148 @@ export const seedCodeArtifacts = (db: Database): CodeArtifactSeedSummary => {
  *  Returns the canonical seed ids so callers can join against them. */
 export const seedArtifactIds = (): string[] => SEED_ARTIFACTS.map((s) => seedIdFor(s.seedName));
 
+// ── C5 Lakeland Drive provenance backfill (2026-05-18) ────────────────
+//
+// Contract HJJS1665H961B2SRYHC5J85D14: three Lakeland Drive doc versions
+// were destructively trashed in-session before the substrate could
+// record a supersedes chain. The backfill seeds four partial-provenance
+// placeholder rows linked in order:
+//   v4 (trashed) → v5 (trashed) → v6 (trashed) → v7 (surviving HEAD)
+// Each trashed row carries lost_version_count=1 so the chain walk
+// reports lost_version_count=3 for the head's provenance.
+
+export type LakelandProvenanceSeedSummary = { inserted: number; linked: number };
+
+type LakelandSeedEntry = {
+  artifactId: string;
+  driveDocId: string;
+  name: string;
+  trashed: boolean;
+  predecessorOf: number;  // index of the artifact this version supersedes; -1 if root
+};
+
+const LAKELAND_PROVENANCE_SEEDS: LakelandSeedEntry[] = [
+  {
+    artifactId: "seed_lakeland_drive_doc_v4_trashed",
+    driveDocId: "12-3Mv4u0RF8x1w6MGjDd8Vp1KTfZgH3W27tLDKmgWJk",
+    name: "Lakeland ATMS report v4 (trashed)",
+    trashed: true,
+    predecessorOf: -1,
+  },
+  {
+    artifactId: "seed_lakeland_drive_doc_v5_trashed",
+    driveDocId: "1dzcacsEVA9LFytGu91Q_OLRGE0YGLhyvDySjCwanAqw",
+    name: "Lakeland ATMS report v5 (trashed)",
+    trashed: true,
+    predecessorOf: 0,
+  },
+  {
+    artifactId: "seed_lakeland_drive_doc_v6_trashed",
+    driveDocId: "11nw_4-28eoab0JM5a7Mk_1-y6Mrz_rrN5waEsaYYHhI",
+    name: "Lakeland ATMS report v6 (trashed)",
+    trashed: true,
+    predecessorOf: 1,
+  },
+  {
+    artifactId: "seed_lakeland_drive_doc_v7_current",
+    driveDocId: "15eF5ACjcP8oVaZC5t8PtRw1_CtT4diK0sn5d9IPgfxU",
+    name: "Lakeland ATMS report v7 (current)",
+    trashed: false,
+    predecessorOf: 2,
+  },
+];
+
+/** Backfill the Lakeland Drive doc provenance chain so the
+ *  surviving v7 head reports lost_version_count=3 with three trashed
+ *  ancestors. Idempotent — INSERT OR IGNORE skips rows that already
+ *  exist; the supersede edge is only flipped when not already set
+ *  to the canonical successor. Used by acc init / acc admin seed and
+ *  the C5 migration tests. */
+export const seedLakelandDriveProvenance = (
+  db: Database,
+): LakelandProvenanceSeedSummary => {
+  let inserted = 0;
+  let linked = 0;
+  withImmediateTransaction(db, () => {
+    const ts = nowIso();
+    // First pass: insert every row with its supersedes pointer set.
+    for (const entry of LAKELAND_PROVENANCE_SEEDS) {
+      const supersedes = entry.predecessorOf >= 0
+        ? LAKELAND_PROVENANCE_SEEDS[entry.predecessorOf]!.artifactId
+        : null;
+      const driveUri = `drive://document/${entry.driveDocId}`;
+      const targetResources = JSON.stringify([driveUri]);
+      const declaredSandbox = JSON.stringify({
+        runtime: "bun",
+        cpu_ms: 1000,
+        wall_ms: 5000,
+        memory_mb: 64,
+      });
+      const body =
+        `// C5 provenance backfill placeholder for ${driveUri}\n` +
+        `// Original artifact body lost (external doc trashed=${entry.trashed}).\n` +
+        `// Contract HJJS1665H961B2SRYHC5J85D14 (2026-05-18).`;
+      const result = db.run(
+        `INSERT OR IGNORE INTO code_artifact (
+           id, runtime, kind, body, declared_sandbox, state_root,
+           posterior_alpha, posterior_beta, score, confidence,
+           recent_residual_mean, recent_kill_count, status, name,
+           fixture_input, fixture_expected_residual,
+           intent, summary, target_files, target_resources, source_candidate_id, owner_gate_verdict,
+           supersedes, superseded_by, lost_version_count,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          entry.artifactId,
+          "bun",
+          "published_drive_doc",
+          body,
+          declaredSandbox,
+          "drive/provenance",
+          1.0, 1.0, 0.5, 0.3,
+          0, 0,
+          "admitted",
+          entry.name,
+          JSON.stringify(null),
+          0.2,
+          "c5_backfill_placeholder",
+          `Backfill placeholder for Drive doc ${entry.driveDocId}; chain reconstructed post-hoc.`,
+          null,
+          targetResources,
+          null,
+          "auto",
+          supersedes,
+          null,
+          entry.trashed ? 1 : 0,
+          ts, ts,
+        ],
+      );
+      if ((result as { changes?: number }).changes && (result as { changes: number }).changes > 0) {
+        inserted++;
+      }
+    }
+    // Second pass: wire each predecessor's superseded_by to point at the
+    // canonical successor. INSERT OR IGNORE on the first pass leaves the
+    // successor pointer NULL (we don't know the successor at insert
+    // time); the second pass flips it once.
+    for (const entry of LAKELAND_PROVENANCE_SEEDS) {
+      if (entry.predecessorOf < 0) continue;
+      const priorId = LAKELAND_PROVENANCE_SEEDS[entry.predecessorOf]!.artifactId;
+      const result = db.run(
+        "UPDATE code_artifact SET superseded_by = ?, updated_at = ? WHERE id = ? AND (superseded_by IS NULL OR superseded_by = ?)",
+        [entry.artifactId, ts, priorId, entry.artifactId],
+      );
+      if ((result as { changes?: number }).changes && (result as { changes: number }).changes > 0) {
+        linked++;
+      }
+    }
+  });
+  return { inserted, linked };
+};
+
+export const LAKELAND_PROVENANCE_HEAD_ID = "seed_lakeland_drive_doc_v7_current";
+export const LAKELAND_PROVENANCE_SEED_IDS = LAKELAND_PROVENANCE_SEEDS.map((s) => s.artifactId);
+
 // ── Seed recipes (§15 Tier-0 priors) ─────────────────────────────────
 //
 // Recipes are normally extracted from real `task_committed` traces via
