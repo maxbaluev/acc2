@@ -436,27 +436,38 @@ const collectCitations = (
     explicitlyCited.add(id);
   }
 
-  // Second pass: retrieval_binding source ids — but only as EXPOSURE-ONLY
-  // when not already in the explicit set. The dispatch's k_554 four-link
-  // chain still closes (every binding feeds credit) but the magnitude
-  // tracks whether the brain ACTUALLY cited the entry vs merely saw it.
+  // Second pass: retrieval_binding source ids. Per the policy documented
+  // at the top of this file ("exposed but not cited are recorded as
+  // retrieval_rejected and excluded from Shapley credit"), bindings whose
+  // source id is NOT in the explicit-citation set get NO credit weight —
+  // exposure alone is not evidence the entry drove the action. The
+  // pre-V08SXCG9 implementation gave them a small EXPOSURE_ONLY_FACTOR
+  // (≈0.1) but the brain's behavioral-binding amendment removed that
+  // const without updating this loop, leaving a dangling reference.
+  // The honest implementation: skip uncited bindings entirely (so they
+  // never enter Shapley) and, when a rejection emitter is provided,
+  // surface them as retrieval_rejected so credit history retains the
+  // provenance. Bindings whose source is ALREADY in explicitlyCited
+  // are also skipped (the explicit pass above already pushed them with
+  // factor 1.0 — double-pushing would double-count).
   if (actionEv && actionEv.task_id && scoredEv) {
     const bindings = db
       .query(
-        `SELECT payload FROM events
+        `SELECT id, payload FROM events
          WHERE kind = 'retrieval_binding'
            AND task_id = ?
            AND ts <= ?
          ORDER BY ts ASC`,
       )
-      .all(actionEv.task_id, scoredEv.ts) as Array<{ payload: string }>;
+      .all(actionEv.task_id, scoredEv.ts) as Array<{ id: string; payload: string }>;
     for (const b of bindings) {
       try {
         const p = JSON.parse(b.payload) as Record<string, unknown>;
-        const sourceIds = [p.source_event_id, p.source_artifact_id].filter((value): value is string => typeof value === "string" && value.length > 0);
-        for (const sourceId of sourceIds) {
-          const factor = explicitlyCited.has(sourceId) ? 1.0 : EXPOSURE_ONLY_FACTOR;
-          ordered.push({ id: sourceId, weightFactor: factor });
+        const sourceIds = [p.source_event_id, p.source_artifact_id]
+          .filter((value): value is string => typeof value === "string" && value.length > 0);
+        const uncited = sourceIds.filter((sourceId) => !explicitlyCited.has(sourceId));
+        if (uncited.length > 0 && rejectRetrievalBinding) {
+          rejectRetrievalBinding(b.id, uncited);
         }
       } catch { /* skip malformed */ }
     }
@@ -919,7 +930,7 @@ export const distributeOwnerObservedOutcomeCredit = async (
   const sourceActId = resolveOwnerObservedSourceActId(db, ownerEv);
   if (!sourceActId) throw new Error("owner_observed_outcome_missing_source_act_id");
   const actionRow = db
-    .query<{ id: string; predicted_residual: number | null }, [string]>(
+    .query<{ id: string; predicted_residual: number | null }, [string, string]>(
       `SELECT id, predicted_residual FROM events
        WHERE kind = 'action_predicted'
          AND (json_extract(payload, '$.source_act_id') = ? OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?))
@@ -927,7 +938,7 @@ export const distributeOwnerObservedOutcomeCredit = async (
     )
     .get(sourceActId, sourceActId);
   const scoredRow = db
-    .query<{ id: string; predicted_residual: number | null; residual: number | null }, [string]>(
+    .query<{ id: string; predicted_residual: number | null; residual: number | null }, [string, string]>(
       `SELECT id, predicted_residual, residual FROM events
        WHERE kind = 'action_scored'
          AND (json_extract(payload, '$.source_act_id') = ? OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?))
