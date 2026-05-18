@@ -5,6 +5,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
 import {
+  containment,
   findSimilarRecentCandidate,
   jaccard,
   tokenize,
@@ -47,6 +48,83 @@ describe("jaccard", () => {
     const a = new Set(["a", "b", "c"]);
     const b = new Set(["b", "c", "d"]);
     expect(jaccard(a, b)).toBeCloseTo(2 / 4, 5);
+  });
+});
+
+describe("containment", () => {
+  test("subset of larger returns 1.0", () => {
+    const shorter = new Set(["a", "b", "c"]);
+    const longer = new Set(["a", "b", "c", "d", "e", "f"]);
+    expect(containment(shorter, longer)).toBeCloseTo(1.0, 5);
+  });
+  test("argument order doesn't matter (symmetric on shorter)", () => {
+    const a = new Set(["a", "b", "c", "d"]);
+    const b = new Set(["a", "b"]);
+    expect(containment(a, b)).toBeCloseTo(1.0, 5);
+    expect(containment(b, a)).toBeCloseTo(1.0, 5);
+  });
+  test("empty shorter returns 0", () => {
+    expect(containment(new Set(), new Set(["a", "b"]))).toBe(0);
+  });
+  test("partial overlap returns intersect / shorter", () => {
+    const a = new Set(["a", "b", "c"]);
+    const b = new Set(["b", "x"]);
+    // shorter is b (size 2); intersect with a is {b} = 1; 1/2 = 0.5
+    expect(containment(a, b)).toBeCloseTo(0.5, 5);
+  });
+});
+
+describe("findSimilarRecentCandidate — containment_prefix path", () => {
+  test("catches truncated brain re-emission that jaccard would miss (CP3QH88V repro)", () => {
+    // Pre-fix repro: brain emitted
+    //   claim 1: "cofounder_review_predicate_scan_result: C2 is blocked
+    //             because the predicate gate refused admission"
+    //   claim 2 (2s later): "cofounder_review_predicate_scan_result"
+    // Jaccard ~ 0.27 (well below 0.85 threshold) so dedup missed it.
+    // Containment-prefix path: shorter (claim 2 = 4 tokens) ⊂ longer
+    // (claim 1) → 1.0 → caught.
+    const db = openDb(":memory:");
+    const directiveId = "dir_dedup_containment";
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: "t_cont1",
+      payload: {
+        claim:
+          "cofounder_review_predicate_scan_result: C2 is blocked because the predicate gate refused admission",
+      },
+    });
+    const match = findSimilarRecentCandidate(db, {
+      claim: "cofounder_review_predicate_scan_result",
+      directive_id: directiveId,
+      substrate_origin: "opencode",
+    });
+    expect(match).not.toBeNull();
+    expect(match!.method).toBe("containment_prefix");
+    expect(match!.similarity).toBeCloseTo(1.0, 5);
+  });
+
+  test("does NOT containment-match on trivial 1-2 token fragments", () => {
+    // Containment with shorter < 3 tokens would false-positive on
+    // single shared words. Floor at 3 tokens.
+    const db = openDb(":memory:");
+    const directiveId = "dir_dedup_short";
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: "t_short1",
+      payload: {
+        claim: "Predicate gate rejected the candidate body content",
+      },
+    });
+    const match = findSimilarRecentCandidate(db, {
+      claim: "predicate gate", // only 2 meaningful tokens after stop-word drop
+      directive_id: directiveId,
+      substrate_origin: "opencode",
+    });
+    expect(match).toBeNull();
   });
 });
 

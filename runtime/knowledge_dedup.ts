@@ -85,11 +85,28 @@ export const jaccard = (a: Set<string>, b: Set<string>): number => {
   return union === 0 ? 0 : intersect / union;
 };
 
+/** Containment = |shorter ∩ longer| / |shorter|. Catches asymmetric
+ *  near-duplicates that Jaccard misses — e.g. a brain re-emission
+ *  truncated to a claim PREFIX. Live evidence (CP3QH88V 2026-05-18):
+ *  brain emitted claim "cofounder_review_predicate_scan_result: C2 is
+ *  blocked..." then 2s later claim "cofounder_review_predicate_scan_result"
+ *  (truncated). Jaccard for the pair is ~0.5 (below 0.85 threshold) so
+ *  dedup missed it; containment for shorter-into-longer is 1.0.
+ *
+ *  Returns 0 when the shorter set is empty. */
+export const containment = (a: Set<string>, b: Set<string>): number => {
+  const [shorter, longer] = a.size <= b.size ? [a, b] : [b, a];
+  if (shorter.size === 0) return 0;
+  let intersect = 0;
+  for (const t of shorter) if (longer.has(t)) intersect++;
+  return intersect / shorter.size;
+};
+
 export type DedupMatch = {
   matched_event_id: string;
   matched_ts: string;
   similarity: number;
-  method: "jaccard";
+  method: "jaccard" | "containment_prefix";
   scanned_count: number;
 };
 
@@ -154,6 +171,7 @@ export const findSimilarRecentCandidate = (
   let bestId: string | null = null;
   let bestTs: string | null = null;
   let bestSim = 0;
+  let bestMethod: "jaccard" | "containment_prefix" = "jaccard";
   for (const row of rows) {
     let claim: string | undefined;
     try {
@@ -167,15 +185,34 @@ export const findSimilarRecentCandidate = (
       bestSim = sim;
       bestId = row.id;
       bestTs = row.ts;
+      bestMethod = "jaccard";
+    }
+    // Containment catch: shorter ⊂ longer at ratio 1.0 with shorter
+    // ≥ 3 tokens (avoids false positives on trivial fragments). Only
+    // promotes when Jaccard didn't already match — the outer guard
+    // (bestMethod === "jaccard" && bestSim < threshold) ensures
+    // Jaccard wins when it's already above threshold.
+    if (bestMethod === "jaccard" && bestSim < threshold) {
+      const contain = containment(newTokens, tokens);
+      const minSize = Math.min(newTokens.size, tokens.size);
+      if (contain >= 1.0 && minSize >= 3) {
+        bestSim = contain;
+        bestId = row.id;
+        bestTs = row.ts;
+        bestMethod = "containment_prefix";
+      }
     }
   }
 
-  if (bestSim < threshold || bestId === null || bestTs === null) return null;
+  if (bestId === null || bestTs === null) return null;
+  // Jaccard path uses the configured threshold. Containment path uses
+  // a fixed 1.0 floor (already enforced above).
+  if (bestMethod === "jaccard" && bestSim < threshold) return null;
   return {
     matched_event_id: bestId,
     matched_ts: bestTs,
     similarity: bestSim,
-    method: "jaccard",
+    method: bestMethod,
     scanned_count: rows.length,
   };
 };
