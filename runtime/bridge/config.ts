@@ -35,12 +35,17 @@ export const DEFAULT_OPENCODE_MODEL = "openai/gpt-5.5";
  *  lesson extraction (added in the closure+learning batch). These add real
  *  cycle time. 300s was internally inconsistent — the closure verifier
  *  COULD finish but task_committed/refinement-edge couldn't be emitted
- *  before the watchdog fired. 600s gives the brain a comfortable margin
- *  AFTER closure-audit lands to decide commit-vs-refine. The Batch-3
- *  STALE_DISPATCH_THRESHOLD_MS (15min) still catches genuinely hung
- *  dispatches above this. Override via `ACC2_OPENCODE_TIMEOUT_MS` or
- *  `SpawnOpts.timeoutMs`. */
-export const DEFAULT_TIMEOUT_MS = 600_000;
+ *  before the watchdog fired. 600s gave a comfortable margin for SINGLE-
+ *  cycle dispatches but was too tight for multi-branch DAG dispatches
+ *  (8+ axes, refinement cycles, 100+ frames). Live ledger evidence
+ *  (2026-05-18T22:07): a legitimate 10-axis universality+legacy
+ *  directive took 718s (12 minutes) of real work — 5 brain cycles,
+ *  4 complete act_tuple projections, 19 messages, 53 reasoning steps,
+ *  130 bridge frames — and got SIGTERMed at the 600s overall budget.
+ *  900s (15min) matches the existing STALE_DISPATCH_THRESHOLD_MS so the
+ *  bridge timeout and stale-detection align. Override via
+ *  `ACC2_OPENCODE_TIMEOUT_MS` or `SpawnOpts.timeoutMs`. */
+export const DEFAULT_TIMEOUT_MS = 900_000;
 /** Default MCP-handshake window — the time opencode has between connecting
  *  to v2's MCP server and invoking its first `substrate.*` / `runtime.*`
  *  tool. The pre-gpt-5 default was 30s, which was tight even for the 5.4-mini
