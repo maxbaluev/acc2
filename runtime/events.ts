@@ -66,6 +66,33 @@ type NormalizedActTuple = {
 const isObject = (value: JsonValue | undefined): value is JsonObject =>
   !!value && typeof value === "object" && !Array.isArray(value);
 
+const hasStructuredFailureClassification = (payload: JsonObject | null): boolean => {
+  if (!payload) return false;
+  if (typeof payload.failure_kind === "string" && payload.failure_kind.trim().length > 0) return true;
+  const source = payload.classification_source;
+  return !!source && typeof source === "object" && !Array.isArray(source);
+};
+
+const normalizeTaskFailedPayload = (input: EmitEventInput): { payload: JsonValue; failure_kind?: string } => {
+  const payload = isObject(input.payload) ? input.payload : {};
+  const explicitFailureKind = input.failure_kind ?? (typeof payload.failure_kind === "string" && payload.failure_kind.trim().length > 0
+    ? payload.failure_kind.trim()
+    : undefined);
+  if (explicitFailureKind || hasStructuredFailureClassification(payload)) {
+    return { payload, failure_kind: explicitFailureKind };
+  }
+  return {
+    payload: {
+      ...payload,
+      classification_source: {
+        source: "runtime.emitEvent",
+        basis: "task_failed_without_emitter_failure_kind",
+        note: "Emitter did not provide a failure_kind; classification remains open-ended and should be refined by the producing runtime.",
+      },
+    },
+  };
+};
+
 const projectionKey = (sourceActId: string, projectionKind: string, targetIdOrRole: string): string =>
   sourceActId + ":" + projectionKind + ":" + targetIdOrRole;
 
@@ -386,7 +413,10 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   const task_id = input.task_id ?? id;
   const loop_id = input.loop_id ?? "loop_root";
   const substrate_origin = input.substrate_origin ?? "substrate_auto";
-  const payload = JSON.stringify(input.payload ?? {});
+  const taskFailure = input.kind === "task_failed" ? normalizeTaskFailedPayload(input) : null;
+  const eventPayload = taskFailure?.payload ?? input.payload ?? {};
+  const eventFailureKind = taskFailure?.failure_kind ?? input.failure_kind;
+  const payload = JSON.stringify(eventPayload);
   const context_refs = JSON.stringify(input.context_refs ?? []);
 
   db.run(
@@ -409,7 +439,7 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       input.embedding_version ?? null,
       input.payload_hash ?? null,
       input.blob_ref ?? null,
-      input.failure_kind ?? null,
+      eventFailureKind ?? null,
       input.invoker ?? null,
     ],
   );
@@ -429,7 +459,7 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
     directive_id,
     task_id,
     substrate_origin,
-    payload: (input.payload ?? {}) as JsonValue,
+    payload: eventPayload as JsonValue,
     invoker: input.invoker ?? null,
     parent_task_id: input.parent_task_id ?? null,
     loop_id: input.loop_id ?? null,
@@ -438,7 +468,7 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
     predicted_residual: input.predicted_residual ?? null,
     outcome: input.outcome ?? null,
     residual: input.residual ?? null,
-    failure_kind: input.failure_kind ?? null,
+    failure_kind: eventFailureKind ?? null,
   });
   // Brain elegance bc8je5f3x (2026-05-15): also publish to the activation
   // bus so workers awaiting specific event kinds wake immediately
@@ -452,7 +482,7 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
     // Auto-share-knowledge (2026-05-16): propagate payload so subscribers
     // can act on content mid-flight (knowledge propagation worker, cross-
     // terminal mirror, in-flight brain dispatches).
-    payload: (input.payload ?? {}) as JsonValue,
+    payload: eventPayload as JsonValue,
   });
   // Batch 3.OPS: Prometheus counter — one increment per kind. Fail-soft
   // so a metrics misconfiguration cannot block emission. The kind is the

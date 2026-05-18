@@ -14,7 +14,7 @@
 //                     re-import. Used for modules whose process-local
 //                     state would fork on naive re-import (e.g.
 //                     runtime/task_scheduler.ts holds IN_FLIGHT maps).
-//   full_restart    — emit daemon_hotreload_failed with a hint to
+//   full_restart    — emit daemon_hotreload_restart_pending with a hint to
 //                     `acc daemon restart`. Used for surfaces that
 //                     require a fresh MCP server / DB connection
 //                     (e.g. runtime/mcp_server/*, substrate/db.ts,

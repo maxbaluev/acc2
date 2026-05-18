@@ -280,42 +280,9 @@ export type OutcomeStatus =
   | "rolling_active"
   | "amended";
 
-export type FailureKind =
-  | "verification_high_residual"
-  | "artifact_runtime_error"
-  | "bridge_auth"
-  | "bridge_rate_limit"
-  | "bridge_timeout"
-  | "bridge_killed"
-  | "budget_exhausted"
-  | "prediction_miss"
-  | "sandbox_violation"
-  | "dag_cycle_detected"
-  | "upstream_failure"
-  | "concurrency_conflict"
-  | "governance_block"
-  | "stakeholder_conflict"
-  | "amendment_invalidates_prediction"
-  | "cycle_1_only_breach"
-  | "refinement_depth_exceeded"
-  | "directive_interference_cycle"
-  | "rolling_directive_archived"
-  /** Scheduler quarantined the task after MAX_CONSECUTIVE_BRIDGE_FAILURES
-   *  in a row with no successful interleaving event. Prevents the retry
-   *  storm a structurally broken dispatch would otherwise produce. */
-  | "consecutive_bridge_failures"
-  /** Integrity worker reaped a task_node_opened row that lingered past
-   *  ZOMBIE_TASK_NODE_THRESHOLD_MS without ever being dispatched. Drops
-   *  the task out of readyTasks / ready_tasks_view; operators can
-   *  re-open via a fresh task_id. */
-  | "abandoned_no_dispatch"
-  /** Supervisor detected > SUPERVISOR_MAX_REDISPATCHES_PER_TASK
-   *  brain_dispatched events on the same task within
-   *  SUPERVISOR_REDISPATCH_WINDOW_MS. The scheduler was looping despite
-   *  the per-task consecutive_bridge_failures cap (which can be bypassed
-   *  by interleaved non-bridge_failed events). Force-fails the task to
-   *  drop it from readyTasks. */
-  | "redispatch_storm";
+// Free string, deliberately not a closed taxonomy. New failure modes
+// emerge by being emitted and scored, not by editing this type.
+export type FailureKind = string;
 
 export type TaskEdgeKind = "requires" | "refines" | "watches";
 

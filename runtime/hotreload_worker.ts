@@ -26,7 +26,7 @@
 //        quiescent_only — defers the reload until quiescenceCheck() returns
 //                         true (no open brain dispatch). The deferred queue
 //                         retries on every subsequent reload tick.
-//        full_restart   — emits daemon_hotreload_failed with reason
+//        full_restart   — emits daemon_hotreload_restart_pending with reason
 //                         "full_restart_required" so the operator sees a
 //                         clear hint to run `acc daemon restart`.
 //   6. On any thrown error (syntax error in the new file, missing expected

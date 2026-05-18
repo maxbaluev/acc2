@@ -19,6 +19,65 @@ import { newId } from "./ids";
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
 
+describe("emitEvent task_failed classification", () => {
+  test("accepts open-ended failure_kind strings without editing a taxonomy", () => {
+    const db = openDb(":memory:");
+    const event = emitEvent(db, {
+      kind: "task_failed",
+      substrate_origin: "substrate_auto",
+      directive_id: newId(),
+      task_id: newId(),
+      failure_kind: "new_runtime_failure_shape_from_live_evidence",
+      payload: { reason: "custom classifier" },
+    });
+
+    const row = db
+      .query<{ failure_kind: string | null }, [string]>("SELECT failure_kind FROM events WHERE id = ?")
+      .get(event.id);
+    expect(row?.failure_kind).toBe("new_runtime_failure_shape_from_live_evidence");
+  });
+
+  test("adds structured classification_source when task_failed lacks failure_kind", () => {
+    const db = openDb(":memory:");
+    const event = emitEvent(db, {
+      kind: "task_failed",
+      substrate_origin: "substrate_auto",
+      directive_id: newId(),
+      task_id: newId(),
+      payload: { reason: "legacy emitter" },
+    });
+
+    const row = db
+      .query<{ payload: string; failure_kind: string | null }, [string]>("SELECT payload, failure_kind FROM events WHERE id = ?")
+      .get(event.id);
+    const payload = JSON.parse(row!.payload);
+    expect(row?.failure_kind).toBeNull();
+    expect(payload.classification_source).toEqual({
+      source: "runtime.emitEvent",
+      basis: "task_failed_without_emitter_failure_kind",
+      note: "Emitter did not provide a failure_kind; classification remains open-ended and should be refined by the producing runtime.",
+    });
+  });
+
+  test("preserves caller-provided structured classification_source", () => {
+    const db = openDb(":memory:");
+    const classification_source = { source: "worker", signal: "bridge stderr" };
+    const event = emitEvent(db, {
+      kind: "task_failed",
+      substrate_origin: "substrate_auto",
+      directive_id: newId(),
+      task_id: newId(),
+      payload: { classification_source },
+    });
+
+    const row = db
+      .query<{ payload: string; failure_kind: string | null }, [string]>("SELECT payload, failure_kind FROM events WHERE id = ?")
+      .get(event.id);
+    expect(row?.failure_kind).toBeNull();
+    expect(JSON.parse(row!.payload).classification_source).toEqual(classification_source);
+  });
+});
+
 describe("emitEvent terminal-conflict gate", () => {
   test("idempotent re-emit of same terminal kind returns the existing event (first-wins)", () => {
     const db = openDb(":memory:");
