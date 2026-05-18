@@ -580,6 +580,16 @@ export const spawnRealOpencode = async (
   const BRAIN_OBS_MAX_CHARS = 4096;
   const BRAIN_OBS_MAX_EMITS = 20;
   let brainObsEmitCount = 0;
+  // Brain contract Q471RAN88X0H513V8BC3BTW0AW Phase G (2026-05-17 follow-up):
+  // brain text frames are owner-visible during a `acc task` follow stream
+  // / TUI watch — they must flow through the rendering loop so the
+  // rendering_audit worker can score them. We cap render-wrap emits
+  // separately from brain-obs emits to bound storage (large reasoning
+  // cycles can emit dozens of brain_message_emitted text frames; we
+  // only need the first few wrapped for the policy posterior to learn).
+  const BRAIN_RENDER_WRAP_MAX_EMITS = 5;
+  const BRAIN_RENDER_WRAP_MIN_TEXT_LENGTH = 16;
+  let brainRenderWrapEmitCount = 0;
   let brainObsSuppressionFired = false;
   // Frame-shape counters per opencode 1.4 event type — surfaced in
   // bridge_failed payloads so the operator can read the REAL reason at
@@ -626,8 +636,9 @@ export const spawnRealOpencode = async (
     }
     const truncated = text.length > BRAIN_OBS_MAX_CHARS;
     const capped = truncated ? text.slice(0, BRAIN_OBS_MAX_CHARS) : text;
+    let brainObsEventId: string | undefined;
     try {
-      emitEvent(db, {
+      const ev = emitEvent(db, {
         kind: eventKind,
         substrate_origin: "opencode",
         directive_id: req.directiveId,
@@ -643,7 +654,43 @@ export const spawnRealOpencode = async (
         invoker: "opencode",
       });
       brainObsEmitCount++;
+      brainObsEventId = ev?.id;
     } catch (err) { void err; }
+
+    // Phase G — auto-wrap brain final-answer text frames (frameType==='text')
+    // in rendered_owner_message_recorded so the rendering_audit worker
+    // scores them against the current policy. Skip 'message' frames
+    // (mid-cycle reasoning), 'step_*' frames (handled by
+    // brain_reasoning_recorded, not user-visible), 'suppressed' rows.
+    // Cap at BRAIN_RENDER_WRAP_MAX_EMITS per dispatch.
+    if (
+      eventKind === "brain_message_emitted"
+      && frameType === "text"
+      && brainObsEventId !== undefined
+      && capped.length >= BRAIN_RENDER_WRAP_MIN_TEXT_LENGTH
+      && brainRenderWrapEmitCount < BRAIN_RENDER_WRAP_MAX_EMITS
+    ) {
+      try {
+        emitEvent(db, {
+          kind: "rendered_owner_message_recorded",
+          substrate_origin: "opencode",
+          directive_id: req.directiveId,
+          task_id: req.taskId,
+          payload: {
+            rendered_text: capped,
+            audience: "primary",
+            surface: "chat",
+            renderer: "brain_opencode",
+            source_brain_event_id: brainObsEventId,
+            chars_original: text.length,
+            truncated,
+          } as JsonValue,
+          context_refs: [brainObsEventId],
+          invoker: "opencode",
+        });
+        brainRenderWrapEmitCount++;
+      } catch (err) { void err; }
+    }
   };
   // Diagnostic mirror: per-dispatch raw stdout log. Default ON — written
   // under <state_dir>/logs/bridge/<task_id>.jsonl so every brain dispatch
