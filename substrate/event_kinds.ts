@@ -190,6 +190,16 @@ export const EVENT_KINDS = {
   // surface how often the gate fires (k_252 advisory→structural
   // conversion evidence).
   predicate_gate_rejected:                 { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // C3 (2026-05-18, directive QHTRBV6PFX2JVBMHDNDA4B03GC): substrate-side
+  // structural strategy-first gate. Rejects any code_artifact_candidate
+  // whose `name` starts with `atms_report_v` when `cited_knowledge_ids`
+  // lacks at least one knowledge_candidate with claim ending
+  // `_strategic_direction_chosen`. Closes the failure mode where report
+  // v1-v3 picked initiatives from substrate priors WITHOUT first
+  // synthesising a strategic direction (lesson 4JGQAN7NFH1XH9M4VARB4RNJ8M
+  // `strategic_first_then_initiatives_lesson`). Health-metric so
+  // dashboards can show how often the gate fires.
+  atms_strategy_first_violation:           { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   code_artifact_promoted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   code_artifact_quarantined:               { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // Terminal retirement (sandbox audit bsfxsvgh9, 2026-05-15): unlike

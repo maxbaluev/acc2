@@ -273,6 +273,12 @@ describe("derived sets match their pre-unification shape", () => {
       // count lets operators see how often the gate fires (k_252
       // advisory→structural conversion evidence).
       "predicate_gate_rejected",
+      // C3 (2026-05-18, directive QHTRBV6PFX2JVBMHDNDA4B03GC):
+      // strategy-first gate refused an `atms_report_v*` candidate
+      // because no cited knowledge_candidate ended with
+      // `_strategic_direction_chosen`. Health-metric so dashboards can
+      // show how often report admissions skip the strategy step.
+      "atms_strategy_first_violation",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

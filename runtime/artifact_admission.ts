@@ -71,6 +71,13 @@ export type AdmissionInput = {
    *  inserting the row; any match emits `predicate_gate_rejected` and
    *  refuses admission. Other audiences (or undefined) skip the gate. */
   audience?: string;
+  /** Strategy-first gate input (C3, 2026-05-18, directive
+   *  QHTRBV6PFX2JVBMHDNDA4B03GC). When `name` starts with `atms_report_v`,
+   *  the substrate requires at least one cited knowledge_candidate event
+   *  whose payload.claim ends with `_strategic_direction_chosen`. The
+   *  brain emits these ids on `code_artifact_candidate.cited_knowledge_ids`
+   *  and the admission caller (bridge/runtime) threads them through. */
+  citedKnowledgeIds?: string[];
 };
 
 export type AdmissionRejectionReason =
@@ -78,7 +85,8 @@ export type AdmissionRejectionReason =
   | "fixture_residual_too_high"
   | "runtime_error"
   | "runtime_unavailable"
-  | "predicate_gate_failed";
+  | "predicate_gate_failed"
+  | "strategy_first_violation_missing_strategic_direction_chosen";
 
 export type AdmissionResult =
   | { ok: true; artifactId: string }
@@ -174,6 +182,45 @@ export const admitArtifact = async (
       reason: "predicate_gate_failed",
       detail: `predicate_gate_matches=${predicateGate.matches.length}`,
     };
+  }
+
+  // 1.6 Strategy-first gate (C3, 2026-05-18, directive QHTRBV6PFX2JVBMHDNDA4B03GC).
+  //     Any artifact whose name starts with `atms_report_v` MUST cite at
+  //     least one knowledge_candidate event whose payload.claim ends
+  //     `_strategic_direction_chosen`. Closes the failure mode where
+  //     report v1-v3 picked initiatives from substrate priors (NFPA
+  //     traceability + demand forecasting + visual QC) without first
+  //     synthesising a strategic direction (lesson
+  //     4JGQAN7NFH1XH9M4VARB4RNJ8M `strategic_first_then_initiatives_lesson`).
+  //     The gate is BEFORE the row insert so a rejected candidate never
+  //     gets an artifact row to roll back. The strategy-citation discovery
+  //     uses event ledger lookup, not hand-rolled English keyword regex —
+  //     the substrate is the source of truth for what counts as a
+  //     strategic direction.
+  if (typeof input.name === "string" && input.name.startsWith("atms_report_v")) {
+    const strategicCitation = findStrategicDirectionCitation(
+      db,
+      input.citedKnowledgeIds ?? [],
+    );
+    if (!strategicCitation.ok) {
+      emit({
+        kind: "atms_strategy_first_violation",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: "strategy_first_violation_missing_strategic_direction_chosen",
+          artifact_name: input.name,
+          cited_knowledge_ids: (input.citedKnowledgeIds ?? []) as unknown as JsonValue,
+          source_candidate_id: input.sourceCandidateId ?? null,
+          missing_claim_suffix: "_strategic_direction_chosen",
+          inspected_ids: strategicCitation.inspectedIds as unknown as JsonValue,
+        } as JsonValue,
+      });
+      return {
+        ok: false,
+        reason: "strategy_first_violation_missing_strategic_direction_chosen",
+        detail: `atms_report_v* admission requires a cited knowledge_candidate with claim ending _strategic_direction_chosen; cited_count=${(input.citedKnowledgeIds ?? []).length}`,
+      };
+    }
   }
 
   // 2. Insert at admit priors. We do this BEFORE running the fixture so the
@@ -356,4 +403,41 @@ export const admitArtifact = async (
     } as JsonValue,
   });
   return { ok: true, artifactId: row.id };
+};
+
+/** C3 strategy-first citation lookup. Returns ok:true when at least one
+ *  cited_knowledge_id resolves to a knowledge_candidate event whose
+ *  payload.claim ends with `_strategic_direction_chosen`. Exported for
+ *  reuse by the closure-audit predicate so admission and closure agree
+ *  on what "strategic direction chosen" means. */
+export const STRATEGIC_DIRECTION_CHOSEN_SUFFIX = "_strategic_direction_chosen";
+
+export const findStrategicDirectionCitation = (
+  db: Database,
+  citedKnowledgeIds: readonly string[],
+): { ok: boolean; matchedId?: string; inspectedIds: string[] } => {
+  const inspected: string[] = [];
+  if (citedKnowledgeIds.length === 0) return { ok: false, inspectedIds: inspected };
+  // Resolve each cited id to its knowledge_candidate event and inspect
+  // payload.claim. Pre-2026-05-18: nothing enforced this — admission
+  // happily accepted reports that cited zero knowledge events.
+  for (const id of citedKnowledgeIds) {
+    if (typeof id !== "string" || id.length === 0) continue;
+    inspected.push(id);
+    const row = db
+      .query<{ payload: string; kind: string }, [string]>(
+        "SELECT kind, payload FROM events WHERE id = ? LIMIT 1",
+      )
+      .get(id);
+    if (!row) continue;
+    if (row.kind !== "knowledge_candidate" && row.kind !== "knowledge_synthesized") continue;
+    let payload: { claim?: unknown };
+    try { payload = JSON.parse(row.payload ?? "{}"); }
+    catch { continue; }
+    if (typeof payload.claim !== "string") continue;
+    if (payload.claim.trim().endsWith(STRATEGIC_DIRECTION_CHOSEN_SUFFIX)) {
+      return { ok: true, matchedId: id, inspectedIds: inspected };
+    }
+  }
+  return { ok: false, inspectedIds: inspected };
 };
