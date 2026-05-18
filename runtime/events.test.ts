@@ -256,8 +256,18 @@ describe("emitEvent act_tuple_recorded projector", () => {
         "SELECT kind, payload, context_refs FROM events WHERE task_id = ? ORDER BY ts ASC",
       )
       .all(taskId);
-    expect(rows.map((row) => row.kind)).toEqual([
-      "act_tuple_recorded",
+    // Order-insensitive structural assertion: the projection emits exactly
+    // the right multiset of derived rows. Exact emission ORDER is
+    // non-deterministic when multiple rows share a millisecond timestamp
+    // (SQLite ORDER BY ts is unstable on ties), so pinning the sequence
+    // makes the test flake under concurrent load. We pin the multiset and
+    // the structural invariants that matter:
+    //   (a) act_tuple_recorded comes first
+    //   (b) every derived row carries source_act_id = the act event's id
+    //   (c) every derived row's context_refs includes the act id
+    const kinds = rows.map((r) => r.kind);
+    expect(kinds[0]).toBe("act_tuple_recorded");
+    expect(kinds.slice(1).sort()).toEqual([
       "action_predicted",
       "action_scored",
       "applied_change_committed",
