@@ -42,6 +42,9 @@ import {
   embeddingIndex,
   originPromotion,
   ownerConversation,
+  ownerRenderingPolicy,
+  ownerRenderingEffectiveness,
+  ownerPlainStatus,
   lowRiskInlinePatterns,
   lessonImplementerQueue,
   pendingOwnerDecisionQueue,
@@ -687,6 +690,36 @@ export const handleRead = (
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
         return { ok: true, result: ownerConversation(db, directiveId) as unknown as JsonValue };
+      }
+      case "owner_rendering_policy_view": {
+        // Owner-visible rendering loop — brain contract Q471RAN88X0H513V8BC3BTW0AW.
+        // Returns null if no owner_profile_recorded row exists yet (cold install).
+        // Args: none (single-row latest policy).
+        return { ok: true, result: ownerRenderingPolicy(db) as unknown as JsonValue };
+      }
+      case "owner_rendering_effectiveness_view": {
+        // Args: { audience?, surface?, limit? } — caller filters by primary
+        // vs detail_drawer, by tui vs chat vs export, or just reads recent.
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const audience = typeof arg.audience === "string" ? arg.audience : undefined;
+        const surface = typeof arg.surface === "string" ? arg.surface : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return {
+          ok: true,
+          result: ownerRenderingEffectiveness(db, { audience, surface, limit }) as unknown as JsonValue,
+        };
+      }
+      case "owner_plain_status_view": {
+        // Args: { directive_id?, limit? } — TUI primary surface reads
+        // this view to render plain-language status cards. By default
+        // returns the 20 most recently-active directives newest-first.
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return {
+          ok: true,
+          result: ownerPlainStatus(db, { directive_id: directiveId, limit }) as unknown as JsonValue,
+        };
       }
       case "contradictory_candidates_view": {
         const rows = db

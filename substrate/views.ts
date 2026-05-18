@@ -354,6 +354,295 @@ CREATE VIEW IF NOT EXISTS owner_profile_view AS
   LIMIT 1;
 `;
 
+// owner_rendering_policy_view — the runtime input every owner-facing
+// renderer reads BEFORE emitting a primary surface string (brain contract
+// Q471RAN88X0H513V8BC3BTW0AW, 2026-05-17). One row, latest profile +
+// recent feedback summary. Producers ask "what language / abstraction /
+// initiative / review behavior do I owe the owner right now?" — the view
+// answers without each producer having to assemble owner_profile_view +
+// recent owner_rendering_feedback_recorded rows on its own. Open-ended
+// fields (preferred_terms, avoided_terms, declined_concepts,
+// understood_concepts, manual_review_patterns, things_to_never_do) flow
+// through from the profile payload verbatim; the view adds aggregated
+// feedback signal (recent_correction_count, recent_decline_count,
+// recent_satisfaction_count) over the last 14 days.
+const VIEW_OWNER_RENDERING_POLICY = `
+CREATE VIEW IF NOT EXISTS owner_rendering_policy_view AS
+  WITH profile AS (
+    SELECT id AS profile_event_id, ts AS profile_ts, payload AS profile_payload
+    FROM events
+    WHERE kind = 'owner_profile_recorded'
+    ORDER BY ts DESC
+    LIMIT 1
+  ),
+  feedback_window AS (
+    SELECT
+      json_extract(payload, '$.feedback_kind') AS feedback_kind,
+      COUNT(*) AS n
+    FROM events
+    WHERE kind = 'owner_rendering_feedback_recorded'
+      AND ts > datetime('now', '-14 days')
+    GROUP BY feedback_kind
+  )
+  SELECT
+    (SELECT profile_event_id FROM profile) AS profile_event_id,
+    (SELECT profile_ts FROM profile) AS profile_ts,
+    (SELECT profile_payload FROM profile) AS profile_payload,
+    -- Preferred / avoided language pulled out for fast access; full
+    -- payload preserved for renderers that need arbitrary keys.
+    (SELECT json_extract(profile_payload, '$.preferred_terms') FROM profile) AS preferred_terms,
+    (SELECT json_extract(profile_payload, '$.avoided_terms') FROM profile) AS avoided_terms,
+    (SELECT json_extract(profile_payload, '$.declined_concepts') FROM profile) AS declined_concepts,
+    (SELECT json_extract(profile_payload, '$.understood_concepts') FROM profile) AS understood_concepts,
+    (SELECT json_extract(profile_payload, '$.exposed_concepts') FROM profile) AS exposed_concepts,
+    (SELECT json_extract(profile_payload, '$.things_to_never_do') FROM profile) AS things_to_never_do,
+    (SELECT json_extract(profile_payload, '$.manual_review_patterns') FROM profile) AS manual_review_patterns,
+    (SELECT json_extract(profile_payload, '$.autonomy_score') FROM profile) AS autonomy_score,
+    (SELECT json_extract(profile_payload, '$.autonomy_scope') FROM profile) AS autonomy_scope,
+    (SELECT json_extract(profile_payload, '$.detected_language') FROM profile) AS detected_language,
+    -- Feedback window aggregates: correction-class counts as a quick read
+    -- for "is the current policy working?" — full breakdown comes from
+    -- owner_rendering_effectiveness_view.
+    (SELECT COALESCE(SUM(n), 0) FROM feedback_window WHERE feedback_kind IN ('correction','correction_explicit','correction_implicit')) AS recent_correction_count,
+    (SELECT COALESCE(SUM(n), 0) FROM feedback_window WHERE feedback_kind IN ('decline','declined','rejected')) AS recent_decline_count,
+    (SELECT COALESCE(SUM(n), 0) FROM feedback_window WHERE feedback_kind IN ('ignored_ask','ignored','silent')) AS recent_ignored_count,
+    (SELECT COALESCE(SUM(n), 0) FROM feedback_window WHERE feedback_kind IN ('confirmation','approved','satisfaction','positive')) AS recent_satisfaction_count,
+    (SELECT COALESCE(SUM(n), 0) FROM feedback_window WHERE feedback_kind IN ('repeated_clarification','clarification_loop')) AS recent_clarification_count,
+    (SELECT COALESCE(SUM(n), 0) FROM feedback_window WHERE feedback_kind IN ('manual_override','operator_override','override')) AS recent_override_count,
+    -- Aggregate "did something go wrong recently?" signal — any non-zero
+    -- correction/decline/ignored/override count surfaces as policy_health
+    -- below 1.0 so consumers can route to a more careful render mode
+    -- without computing it themselves.
+    MAX(0.0, MIN(1.0,
+      1.0 - 0.15 * (
+        (SELECT COALESCE(SUM(n), 0) FROM feedback_window WHERE feedback_kind IN ('correction','correction_explicit','correction_implicit'))
+        + (SELECT COALESCE(SUM(n), 0) FROM feedback_window WHERE feedback_kind IN ('decline','declined','rejected'))
+        + (SELECT COALESCE(SUM(n), 0) FROM feedback_window WHERE feedback_kind IN ('ignored_ask','ignored','silent'))
+        + (SELECT COALESCE(SUM(n), 0) FROM feedback_window WHERE feedback_kind IN ('manual_override','operator_override','override'))
+      )
+    )) AS policy_health;
+`;
+
+// owner_rendering_effectiveness_view — per-policy-snapshot aggregation.
+// Joins rendered_owner_message_recorded × owner_rendering_feedback_recorded
+// (the feedback row's source_rendered_event_id points back at the render)
+// and groups by owner_profile_hash so the substrate can ask "which profile
+// snapshots produced corrections vs satisfactions?" This is the scoring
+// surface the brain reads when proposing policy refinements.
+const VIEW_OWNER_RENDERING_EFFECTIVENESS = `
+CREATE VIEW IF NOT EXISTS owner_rendering_effectiveness_view AS
+  WITH renders AS (
+    SELECT
+      id AS rendered_event_id,
+      ts AS rendered_ts,
+      directive_id,
+      task_id,
+      json_extract(payload, '$.owner_profile_hash') AS owner_profile_hash,
+      json_extract(payload, '$.audience') AS audience,
+      json_extract(payload, '$.surface') AS surface,
+      json_extract(payload, '$.renderer') AS renderer,
+      json_extract(payload, '$.intended_owner_action') AS intended_owner_action,
+      json_extract(payload, '$.est_attention_cost') AS est_attention_cost,
+      payload AS rendered_payload
+    FROM events
+    WHERE kind = 'rendered_owner_message_recorded'
+  ),
+  feedbacks AS (
+    SELECT
+      json_extract(payload, '$.source_rendered_event_id') AS rendered_event_id,
+      json_extract(payload, '$.feedback_kind') AS feedback_kind,
+      residual AS feedback_residual,
+      payload AS feedback_payload,
+      ts AS feedback_ts
+    FROM events
+    WHERE kind = 'owner_rendering_feedback_recorded'
+  )
+  SELECT
+    r.rendered_event_id,
+    r.rendered_ts,
+    r.directive_id,
+    r.task_id,
+    r.owner_profile_hash,
+    r.audience,
+    r.surface,
+    r.renderer,
+    r.intended_owner_action,
+    r.est_attention_cost,
+    f.feedback_kind,
+    f.feedback_residual,
+    f.feedback_ts,
+    -- A render with no feedback row yet shows feedback_kind=NULL; that's
+    -- itself a learnable signal (silent_ignore distinct from explicit
+    -- ignored_ask) once a freshness window passes. Consumers project
+    -- silent_ignore by filtering r.rendered_ts < now - cutoff and
+    -- f.feedback_kind IS NULL.
+    CASE
+      WHEN f.feedback_kind IN ('correction','correction_explicit','correction_implicit','decline','declined','rejected') THEN 'negative'
+      WHEN f.feedback_kind IN ('confirmation','approved','satisfaction','positive') THEN 'positive'
+      WHEN f.feedback_kind IN ('manual_override','operator_override','override','ignored_ask','ignored','silent','repeated_clarification','clarification_loop') THEN 'mixed'
+      WHEN f.feedback_kind IS NULL THEN 'pending'
+      ELSE 'other'
+    END AS effectiveness_band
+  FROM renders r
+  LEFT JOIN feedbacks f ON f.rendered_event_id = r.rendered_event_id
+  ORDER BY r.rendered_ts DESC;
+`;
+
+// owner_plain_status_view — projects directive/task state into PLAIN
+// language cards for non-technical owners. The TUI primary surface reads
+// from this view directly so it never has to assemble {ids, residuals,
+// view names} into English itself.
+//
+// One row per ACTIVE directive (lifecycle != closed/archived). Fields:
+//   - directive_id              (hidden in primary; carried for drilldown)
+//   - opened_text               ("what the owner asked")
+//   - latest_state              ("what's happening now" plain words)
+//   - latest_state_kind         (one of: in_progress, awaiting_owner,
+//                                completed, failed, paused, idle)
+//   - next_owner_action         ("what the owner could do next", null when
+//                                nothing is pending from the owner)
+//   - risk_note                 (plain explanation when an irreversible
+//                                effect or owner_input_required is in play)
+//   - residual_optional         (numeric; consumers MAY surface it as a
+//                                detail-drawer field; primary surfaces hide)
+//   - detail_refs               (event ids the operator can open if asked)
+//   - last_event_ts             (for sorting)
+const VIEW_OWNER_PLAIN_STATUS = `
+CREATE VIEW IF NOT EXISTS owner_plain_status_view AS
+  WITH directives AS (
+    SELECT
+      directive_id,
+      MAX(ts) AS latest_ts
+    FROM events
+    WHERE directive_id IS NOT NULL
+      AND kind IN ('directive_opened','directive_amended','owner_input_received','task_node_opened','task_committed','task_failed','dispatcher_violation','owner_input_required','hidl_action_required','task_closure_audited','directive_closed','directive_archived_by_operator','directive_archived_missed_reviews')
+    GROUP BY directive_id
+  ),
+  opened AS (
+    SELECT
+      e.directive_id,
+      json_extract(e.payload, '$.directive_text') AS opened_text,
+      e.ts AS opened_ts
+    FROM events e
+    WHERE e.kind = 'directive_opened'
+  ),
+  closed AS (
+    SELECT directive_id, MIN(ts) AS closed_ts
+    FROM events
+    WHERE kind IN ('directive_closed','directive_archived_by_operator','directive_archived_missed_reviews')
+    GROUP BY directive_id
+  ),
+  awaiting AS (
+    SELECT
+      e.directive_id,
+      e.id AS req_event_id,
+      json_extract(e.payload, '$.summary') AS summary,
+      json_extract(e.payload, '$.suggested_action') AS suggested_action,
+      json_extract(e.payload, '$.reason') AS reason,
+      e.kind AS req_kind,
+      e.ts AS req_ts,
+      ROW_NUMBER() OVER (PARTITION BY e.directive_id ORDER BY e.ts DESC) AS rn
+    FROM events e
+    WHERE e.kind IN ('owner_input_required','hidl_action_required')
+  ),
+  awaiting_latest AS (
+    SELECT directive_id, req_event_id, summary, suggested_action, reason, req_kind, req_ts
+    FROM awaiting WHERE rn = 1
+  ),
+  last_terminal AS (
+    SELECT
+      e.directive_id,
+      e.id AS terminal_event_id,
+      e.kind AS terminal_kind,
+      e.ts AS terminal_ts,
+      e.residual AS terminal_residual,
+      json_extract(e.payload, '$.summary') AS terminal_summary,
+      json_extract(e.payload, '$.failure_kind') AS terminal_failure_kind,
+      ROW_NUMBER() OVER (PARTITION BY e.directive_id ORDER BY e.ts DESC) AS rn
+    FROM events e
+    WHERE e.kind IN ('task_committed','task_failed','task_closure_audited')
+  ),
+  last_terminal_latest AS (
+    SELECT * FROM last_terminal WHERE rn = 1
+  ),
+  open_tasks AS (
+    SELECT
+      e.directive_id,
+      COUNT(*) AS n
+    FROM events e
+    WHERE e.kind = 'task_node_opened'
+      AND NOT EXISTS (
+        SELECT 1 FROM events x
+        WHERE x.task_id = e.task_id
+          AND x.kind IN ('task_committed','task_failed')
+      )
+    GROUP BY e.directive_id
+  ),
+  irreversible AS (
+    SELECT
+      e.directive_id,
+      json_extract(e.payload, '$.description') AS description,
+      ROW_NUMBER() OVER (PARTITION BY e.directive_id ORDER BY e.ts DESC) AS rn
+    FROM events e
+    WHERE e.kind = 'irreversible_effect_recorded'
+  ),
+  irreversible_latest AS (
+    SELECT directive_id, description FROM irreversible WHERE rn = 1
+  )
+  SELECT
+    d.directive_id,
+    o.opened_text,
+    o.opened_ts,
+    -- latest_state: a single plain-words string. Precedence:
+    --   (1) closed -> "Completed and closed."
+    --   (2) awaiting_owner -> the request summary
+    --   (3) last failed -> "Something went wrong while working on this."
+    --   (4) last committed + no open tasks -> "Completed for this cycle."
+    --   (5) open tasks -> "Working on it now."
+    --   (6) fallback -> "Idle — waiting for the next signal."
+    CASE
+      WHEN c.directive_id IS NOT NULL THEN 'Completed and closed.'
+      WHEN aw.req_event_id IS NOT NULL THEN
+        COALESCE(aw.summary, aw.reason, 'Waiting for your input.')
+      WHEN ltl.terminal_kind = 'task_failed' THEN
+        COALESCE('Something did not work — ' || ltl.terminal_failure_kind, 'Something did not work.')
+      WHEN ltl.terminal_kind IN ('task_committed','task_closure_audited') AND COALESCE(ot.n, 0) = 0 THEN
+        COALESCE(ltl.terminal_summary, 'Completed for this cycle.')
+      WHEN COALESCE(ot.n, 0) > 0 THEN 'Working on it now.'
+      ELSE 'Idle — waiting for the next signal.'
+    END AS latest_state,
+    CASE
+      WHEN c.directive_id IS NOT NULL THEN 'completed'
+      WHEN aw.req_event_id IS NOT NULL THEN 'awaiting_owner'
+      WHEN ltl.terminal_kind = 'task_failed' THEN 'failed'
+      WHEN ltl.terminal_kind IN ('task_committed','task_closure_audited') AND COALESCE(ot.n, 0) = 0 THEN 'completed'
+      WHEN COALESCE(ot.n, 0) > 0 THEN 'in_progress'
+      ELSE 'idle'
+    END AS latest_state_kind,
+    CASE
+      WHEN aw.req_event_id IS NOT NULL THEN COALESCE(aw.suggested_action, 'Reply when ready.')
+      ELSE NULL
+    END AS next_owner_action,
+    irr.description AS risk_note,
+    ltl.terminal_residual AS residual_optional,
+    -- detail_refs: small JSON array of the most useful drilldown event_ids
+    -- (directive_opened, latest awaiting request, latest terminal).
+    json_array(
+      (SELECT id FROM events WHERE directive_id = d.directive_id AND kind = 'directive_opened' ORDER BY ts ASC LIMIT 1),
+      aw.req_event_id,
+      ltl.terminal_event_id
+    ) AS detail_refs,
+    d.latest_ts AS last_event_ts
+  FROM directives d
+  LEFT JOIN opened o                ON o.directive_id = d.directive_id
+  LEFT JOIN closed c                ON c.directive_id = d.directive_id
+  LEFT JOIN awaiting_latest aw      ON aw.directive_id = d.directive_id
+  LEFT JOIN last_terminal_latest ltl ON ltl.directive_id = d.directive_id
+  LEFT JOIN open_tasks ot           ON ot.directive_id = d.directive_id
+  LEFT JOIN irreversible_latest irr  ON irr.directive_id = d.directive_id
+  ORDER BY d.latest_ts DESC;
+`;
+
 // rolling_review_due_view — every rolling_active directive with its latest
 // next_review_due, plus a past_due boolean. We project from the LATEST
 // directive_opened (or directive_amended) event per directive_id, reading
@@ -2751,6 +3040,21 @@ CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
       WHEN e.kind = 'applied_change_failed'       THEN ('reason=' || COALESCE(json_extract(e.payload, '$.reason'), '?'))
       WHEN e.kind = 'owner_input_required'        THEN COALESCE(json_extract(e.payload, '$.prompt'), json_extract(e.payload, '$.question'))
       WHEN e.kind = 'hidl_action_required'        THEN COALESCE(json_extract(e.payload, '$.action'), json_extract(e.payload, '$.prompt'))
+      -- 2026-05-17 owner-visible rendering loop (brain contract
+      -- Q471RAN88X0H513V8BC3BTW0AW). Show the actual rendered owner-visible
+      -- text in the narrative stream; feedback rows display the feedback_kind
+      -- + observed_behavior so the operator can audit whether the policy is
+      -- learning the right signals.
+      WHEN e.kind = 'rendered_owner_message_recorded' THEN COALESCE(
+        '[' || COALESCE(json_extract(e.payload, '$.audience'), 'primary') || '/' || COALESCE(json_extract(e.payload, '$.surface'), '?') || '] ' || json_extract(e.payload, '$.rendered_text'),
+        json_extract(e.payload, '$.rendered_text')
+      )
+      WHEN e.kind = 'owner_rendering_feedback_recorded' THEN (
+        'feedback=' || COALESCE(json_extract(e.payload, '$.feedback_kind'), '?')
+        || COALESCE(' on=' || json_extract(e.payload, '$.source_rendered_event_id'), '')
+        || COALESCE(' — ' || json_extract(e.payload, '$.observed_behavior'), '')
+        || COALESCE(' (' || json_extract(e.payload, '$.evidence') || ')', '')
+      )
       ELSE NULL
     END AS human_summary,
     -- residual is most useful for ranked entries (action_scored,
@@ -2798,6 +3102,9 @@ export const VIEW_NAMES = [
   "rolling_review_due_view",
   "owner_conversation_view",
   "owner_profile_view",
+  "owner_rendering_policy_view",
+  "owner_rendering_effectiveness_view",
+  "owner_plain_status_view",
   "contradictory_candidates_view",
   "origin_promotion_by_directive_view",
   "origin_promotion_view",
@@ -2829,6 +3136,9 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_CONTRADICTORY);
   db.exec(VIEW_OWNER_CONVERSATION);
   db.exec(VIEW_OWNER_PROFILE);
+  db.exec(VIEW_OWNER_RENDERING_POLICY);
+  db.exec(VIEW_OWNER_RENDERING_EFFECTIVENESS);
+  db.exec(VIEW_OWNER_PLAIN_STATUS);
   db.exec(VIEW_ROLLING_REVIEW_DUE);
   db.exec(VIEW_WATCH_EDGE_OBSERVATIONS);
   db.exec(VIEW_DIRECTIVE_CONFLICTS);
@@ -3436,6 +3746,168 @@ export const substrateNarrativeRecent = (
     route: (r.route as string | null) ?? null,
     cited_refs: parseJson<string[]>((r.cited_refs as string | null) ?? "[]"),
     payload: parseJson<Record<string, unknown>>((r.payload as string | null) ?? "{}"),
+  }));
+};
+
+// ── owner-rendering primitives (brain contract Q471RAN88X0H513V8BC3BTW0AW, 2026-05-17) ──
+
+/** Row from owner_rendering_policy_view — the policy any renderer reads
+ *  before emitting an owner-visible string. One row (latest profile + recent
+ *  feedback window aggregates). */
+export type OwnerRenderingPolicyRow = {
+  profile_event_id: string | null;
+  profile_ts: string | null;
+  profile_payload: Record<string, unknown>;
+  preferred_terms: string[];
+  avoided_terms: string[];
+  declined_concepts: string[];
+  understood_concepts: string[];
+  exposed_concepts: string[];
+  things_to_never_do: string[];
+  manual_review_patterns: string[];
+  autonomy_score: number | null;
+  autonomy_scope: string[];
+  detected_language: string | null;
+  recent_correction_count: number;
+  recent_decline_count: number;
+  recent_ignored_count: number;
+  recent_satisfaction_count: number;
+  recent_clarification_count: number;
+  recent_override_count: number;
+  /** Heuristic [0,1]: 1.0 = no recent negative feedback; falls as
+   *  corrections/declines/ignored/overrides accumulate. Consumers
+   *  may route to a more careful render mode when policy_health < 0.7. */
+  policy_health: number;
+};
+
+const ensureArray = <T = unknown>(raw: string | null | undefined): T[] => {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch { return []; }
+};
+
+/** Read the latest owner rendering policy. Returns null when no
+ *  owner_profile_recorded row exists yet (cold install) — callers MUST
+ *  handle that case (default render mode). */
+export const ownerRenderingPolicy = (db: Database): OwnerRenderingPolicyRow | null => {
+  const row = db
+    .query("SELECT * FROM owner_rendering_policy_view")
+    .get() as Record<string, unknown> | null;
+  if (!row || row.profile_event_id == null) return null;
+  return {
+    profile_event_id: (row.profile_event_id as string | null) ?? null,
+    profile_ts: (row.profile_ts as string | null) ?? null,
+    profile_payload: parseJson<Record<string, unknown>>((row.profile_payload as string | null) ?? "{}"),
+    preferred_terms: ensureArray<string>(row.preferred_terms as string | null),
+    avoided_terms: ensureArray<string>(row.avoided_terms as string | null),
+    declined_concepts: ensureArray<string>(row.declined_concepts as string | null),
+    understood_concepts: ensureArray<string>(row.understood_concepts as string | null),
+    exposed_concepts: ensureArray<string>(row.exposed_concepts as string | null),
+    things_to_never_do: ensureArray<string>(row.things_to_never_do as string | null),
+    manual_review_patterns: ensureArray<string>(row.manual_review_patterns as string | null),
+    autonomy_score: row.autonomy_score == null ? null : Number(row.autonomy_score),
+    autonomy_scope: ensureArray<string>(row.autonomy_scope as string | null),
+    detected_language: (row.detected_language as string | null) ?? null,
+    recent_correction_count: Number(row.recent_correction_count ?? 0),
+    recent_decline_count: Number(row.recent_decline_count ?? 0),
+    recent_ignored_count: Number(row.recent_ignored_count ?? 0),
+    recent_satisfaction_count: Number(row.recent_satisfaction_count ?? 0),
+    recent_clarification_count: Number(row.recent_clarification_count ?? 0),
+    recent_override_count: Number(row.recent_override_count ?? 0),
+    policy_health: Number(row.policy_health ?? 1.0),
+  };
+};
+
+export type OwnerRenderingEffectivenessRow = {
+  rendered_event_id: string;
+  rendered_ts: string;
+  directive_id: string | null;
+  task_id: string | null;
+  owner_profile_hash: string | null;
+  audience: string | null;
+  surface: string | null;
+  renderer: string | null;
+  intended_owner_action: string | null;
+  est_attention_cost: number | null;
+  feedback_kind: string | null;
+  feedback_residual: number | null;
+  feedback_ts: string | null;
+  effectiveness_band: "positive" | "negative" | "mixed" | "pending" | "other";
+};
+
+/** Read effectiveness rows — newest first. Caller filters by audience or
+ *  surface as needed. */
+export const ownerRenderingEffectiveness = (
+  db: Database,
+  filter: { audience?: string; surface?: string; limit?: number } = {},
+): OwnerRenderingEffectivenessRow[] => {
+  const wheres: string[] = [];
+  const params: Array<string | number> = [];
+  if (filter.audience) { wheres.push("audience = ?"); params.push(filter.audience); }
+  if (filter.surface) { wheres.push("surface = ?"); params.push(filter.surface); }
+  const whereClause = wheres.length > 0 ? `WHERE ${wheres.join(" AND ")}` : "";
+  const limit = typeof filter.limit === "number" && filter.limit > 0 ? filter.limit : 100;
+  params.push(limit);
+  const sql = `SELECT * FROM owner_rendering_effectiveness_view ${whereClause} LIMIT ?`;
+  const rows = db.query(sql).all(...params) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    rendered_event_id: r.rendered_event_id as string,
+    rendered_ts: r.rendered_ts as string,
+    directive_id: (r.directive_id as string | null) ?? null,
+    task_id: (r.task_id as string | null) ?? null,
+    owner_profile_hash: (r.owner_profile_hash as string | null) ?? null,
+    audience: (r.audience as string | null) ?? null,
+    surface: (r.surface as string | null) ?? null,
+    renderer: (r.renderer as string | null) ?? null,
+    intended_owner_action: (r.intended_owner_action as string | null) ?? null,
+    est_attention_cost: r.est_attention_cost == null ? null : Number(r.est_attention_cost),
+    feedback_kind: (r.feedback_kind as string | null) ?? null,
+    feedback_residual: r.feedback_residual == null ? null : Number(r.feedback_residual),
+    feedback_ts: (r.feedback_ts as string | null) ?? null,
+    effectiveness_band: (r.effectiveness_band as OwnerRenderingEffectivenessRow["effectiveness_band"]) ?? "other",
+  }));
+};
+
+export type OwnerPlainStatusRow = {
+  directive_id: string;
+  opened_text: string | null;
+  opened_ts: string | null;
+  latest_state: string;
+  latest_state_kind: "completed" | "awaiting_owner" | "failed" | "in_progress" | "idle";
+  next_owner_action: string | null;
+  risk_note: string | null;
+  residual_optional: number | null;
+  detail_refs: string[];
+  last_event_ts: string;
+};
+
+/** Read the owner-plain status cards. By default returns the 20 most
+ *  recently-active directives newest-first. */
+export const ownerPlainStatus = (
+  db: Database,
+  filter: { limit?: number; directive_id?: string } = {},
+): OwnerPlainStatusRow[] => {
+  const wheres: string[] = [];
+  const params: Array<string | number> = [];
+  if (filter.directive_id) { wheres.push("directive_id = ?"); params.push(filter.directive_id); }
+  const whereClause = wheres.length > 0 ? `WHERE ${wheres.join(" AND ")}` : "";
+  const limit = typeof filter.limit === "number" && filter.limit > 0 ? filter.limit : 20;
+  params.push(limit);
+  const sql = `SELECT * FROM owner_plain_status_view ${whereClause} LIMIT ?`;
+  const rows = db.query(sql).all(...params) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    directive_id: r.directive_id as string,
+    opened_text: (r.opened_text as string | null) ?? null,
+    opened_ts: (r.opened_ts as string | null) ?? null,
+    latest_state: (r.latest_state as string) ?? "Idle — waiting for the next signal.",
+    latest_state_kind: (r.latest_state_kind as OwnerPlainStatusRow["latest_state_kind"]) ?? "idle",
+    next_owner_action: (r.next_owner_action as string | null) ?? null,
+    risk_note: (r.risk_note as string | null) ?? null,
+    residual_optional: r.residual_optional == null ? null : Number(r.residual_optional),
+    detail_refs: ensureArray<string>(r.detail_refs as string | null).filter((s) => s != null),
+    last_event_ts: r.last_event_ts as string,
   }));
 };
 

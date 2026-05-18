@@ -332,6 +332,31 @@ export const EVENT_KINDS = {
   // canonical owner_profile_recorded row.
   owner_profile_recorded:                  { producer: "substrate", embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   owner_insight_candidate:                 { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  // ── Owner-visible rendering loop (brain contract Q471RAN88X0H513V8BC3BTW0AW,
+  //    2026-05-17). The substrate is the operator; owner-facing primary
+  //    surfaces must hide IDs/jargon and render in the owner's language.
+  //    These two events close the four-link chain (k_555): rendering policy
+  //    is composed from owner_profile_view → renderer emits the message →
+  //    rendered_owner_message_recorded captures what was shown → owner's
+  //    next behavior (correction / decline / approval / ignored) →
+  //    owner_rendering_feedback_recorded credits the policy.
+  //
+  //    Payload shape (rendered_owner_message_recorded):
+  //      { rendered_text, audience: "primary"|"detail_drawer", policy_snapshot,
+  //        owner_profile_hash, suppressed_refs: string[],
+  //        intended_owner_action: string, est_attention_cost: number,
+  //        renderer: string, surface: "tui"|"chat"|"export"|... }
+  //
+  //    Payload shape (owner_rendering_feedback_recorded):
+  //      { source_rendered_event_id, feedback_kind: string,  // open-ended
+  //        evidence: string, residual?: number,
+  //        observed_behavior: string, policy_snapshot_hash? }
+  //    feedback_kind is intentionally free-string — examples include
+  //    correction, decline, ignored_ask, repeated_clarification,
+  //    confirmation, satisfaction, manual_override. Vocabulary discovered
+  //    through use, NOT a fixed persona enum.
+  rendered_owner_message_recorded:         { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  owner_rendering_feedback_recorded:       { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   // Onboarding demo router (brain dispatch bp93s80hn): records the
   // classifier decision before the demo action runs so outcomes train which
   // demo family fits which owner sentence.

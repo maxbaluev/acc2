@@ -17,6 +17,9 @@ import {
   lessonImplementerQueue,
   originPromotionRanking,
   ownerConversation,
+  ownerPlainStatus,
+  ownerRenderingEffectiveness,
+  ownerRenderingPolicy,
   promotedKnowledge,
   readyTasks,
   recipeRegistry,
@@ -2031,5 +2034,253 @@ describe("claude_inline_ready_leaves_view + claudeInlineReadyLeaves", () => {
     const rows = claudeInlineReadyLeaves(db);
     expect(rows[0]?.strategy_shadow_top).toBe("claude_inline_leaf_v1");
     expect(rows[0]?.strategy_shadow_top_score).toBeCloseTo(0.71, 5);
+  });
+});
+
+// ── owner-rendering primitives (brain contract Q471RAN88X0H513V8BC3BTW0AW, 2026-05-17) ──
+describe("owner_rendering_policy_view + ownerRenderingPolicy", () => {
+  test("returns null when no owner_profile_recorded row exists", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    expect(ownerRenderingPolicy(db)).toBeNull();
+  });
+
+  test("projects preferred_terms / avoided_terms / things_to_never_do from latest profile", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "owner_profile_recorded",
+      directive_id: "d_p",
+      task_id: "t_p",
+      payload: {
+        preferred_terms: ["plain", "simple"],
+        avoided_terms: ["dispatch", "residual"],
+        understood_concepts: ["substrate"],
+        declined_concepts: ["telemetry"],
+        things_to_never_do: ["push without review"],
+        autonomy_score: 0.6,
+        autonomy_scope: ["docs", "tests"],
+        detected_language: "en",
+      },
+    });
+    const p = ownerRenderingPolicy(db)!;
+    expect(p.preferred_terms).toEqual(["plain", "simple"]);
+    expect(p.avoided_terms).toEqual(["dispatch", "residual"]);
+    expect(p.things_to_never_do).toEqual(["push without review"]);
+    expect(p.understood_concepts).toEqual(["substrate"]);
+    expect(p.declined_concepts).toEqual(["telemetry"]);
+    expect(p.autonomy_score).toBeCloseTo(0.6, 5);
+    expect(p.detected_language).toBe("en");
+    expect(p.policy_health).toBeCloseTo(1.0, 5);
+  });
+
+  test("aggregates recent feedback counts and lowers policy_health on negative feedback", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "owner_profile_recorded",
+      directive_id: "d_p",
+      task_id: "t_p",
+      payload: { preferred_terms: [], avoided_terms: [] },
+    });
+    // 2 corrections + 1 decline + 1 satisfaction in the 14-day window.
+    // Fresh `nowIso()` so the SQL window (ts > datetime('now', '-14 days'))
+    // includes these rows; tickTs() lives in 2026-01 which falls outside.
+    insertEvent(db, {
+      kind: "owner_rendering_feedback_recorded",
+      directive_id: "d_p",
+      task_id: "t_p",
+      ts: nowIso(),
+      payload: { feedback_kind: "correction", evidence: "owner rephrased" },
+    });
+    insertEvent(db, {
+      kind: "owner_rendering_feedback_recorded",
+      directive_id: "d_p",
+      task_id: "t_p",
+      ts: nowIso(),
+      payload: { feedback_kind: "correction_explicit", evidence: "owner explicitly corrected" },
+    });
+    insertEvent(db, {
+      kind: "owner_rendering_feedback_recorded",
+      directive_id: "d_p",
+      task_id: "t_p",
+      ts: nowIso(),
+      payload: { feedback_kind: "decline", evidence: "owner declined" },
+    });
+    insertEvent(db, {
+      kind: "owner_rendering_feedback_recorded",
+      directive_id: "d_p",
+      task_id: "t_p",
+      ts: nowIso(),
+      payload: { feedback_kind: "confirmation", evidence: "owner approved" },
+    });
+    const p = ownerRenderingPolicy(db)!;
+    expect(p.recent_correction_count).toBe(2);
+    expect(p.recent_decline_count).toBe(1);
+    expect(p.recent_satisfaction_count).toBe(1);
+    // 3 negative signals * 0.15 = 0.45 → health = 0.55
+    expect(p.policy_health).toBeCloseTo(0.55, 5);
+  });
+});
+
+describe("owner_rendering_effectiveness_view + ownerRenderingEffectiveness", () => {
+  test("classifies rendered/feedback pairs into bands; renders without feedback show pending", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const renderA = insertEvent(db, {
+      kind: "rendered_owner_message_recorded",
+      directive_id: "d_e",
+      task_id: "t_e",
+      payload: {
+        rendered_text: "Working on it.",
+        audience: "primary",
+        surface: "tui",
+        owner_profile_hash: "h1",
+        intended_owner_action: "wait",
+        est_attention_cost: 0.1,
+      },
+    });
+    insertEvent(db, {
+      kind: "owner_rendering_feedback_recorded",
+      directive_id: "d_e",
+      task_id: "t_e",
+      payload: { source_rendered_event_id: renderA, feedback_kind: "confirmation", evidence: "owner approved" },
+    });
+    const renderB = insertEvent(db, {
+      kind: "rendered_owner_message_recorded",
+      directive_id: "d_e",
+      task_id: "t_e",
+      payload: { rendered_text: "Stuck.", audience: "primary", surface: "tui", owner_profile_hash: "h1" },
+    });
+    insertEvent(db, {
+      kind: "owner_rendering_feedback_recorded",
+      directive_id: "d_e",
+      task_id: "t_e",
+      payload: { source_rendered_event_id: renderB, feedback_kind: "correction", evidence: "owner rephrased" },
+    });
+    // Third render with no feedback yet → pending band.
+    insertEvent(db, {
+      kind: "rendered_owner_message_recorded",
+      directive_id: "d_e",
+      task_id: "t_e",
+      payload: { rendered_text: "Idle.", audience: "primary", surface: "tui", owner_profile_hash: "h1" },
+    });
+    const rows = ownerRenderingEffectiveness(db, { surface: "tui" });
+    const bands = rows.map((r) => r.effectiveness_band).sort();
+    expect(bands).toEqual(["negative", "pending", "positive"]);
+  });
+});
+
+describe("owner_plain_status_view + ownerPlainStatus", () => {
+  test("renders 'Working on it now.' when a task is open and no terminal exists", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: "d_status",
+      task_id: "t_status",
+      payload: { directive_text: "Fix the slow dashboard" },
+    });
+    insertEvent(db, {
+      kind: "task_node_opened",
+      directive_id: "d_status",
+      task_id: "t_status",
+      payload: { goal: "Profile and optimise" },
+    });
+    const rows = ownerPlainStatus(db, { directive_id: "d_status" });
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.opened_text).toBe("Fix the slow dashboard");
+    expect(rows[0]?.latest_state_kind).toBe("in_progress");
+    expect(rows[0]?.latest_state).toBe("Working on it now.");
+    expect(rows[0]?.next_owner_action).toBeNull();
+  });
+
+  test("renders 'Waiting for your input.' suggested_action when owner_input_required is in flight", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: "d_await",
+      task_id: "t_await",
+      payload: { directive_text: "Onboard a stakeholder" },
+    });
+    insertEvent(db, {
+      kind: "owner_input_required",
+      directive_id: "d_await",
+      task_id: "t_await",
+      payload: {
+        summary: "Which Slack channel should I post the welcome message to?",
+        suggested_action: "Reply with the channel name.",
+      },
+    });
+    const rows = ownerPlainStatus(db, { directive_id: "d_await" });
+    expect(rows[0]?.latest_state_kind).toBe("awaiting_owner");
+    expect(rows[0]?.latest_state).toContain("Slack channel");
+    expect(rows[0]?.next_owner_action).toBe("Reply with the channel name.");
+  });
+
+  test("renders 'Completed for this cycle.' when task_committed lands with no open children", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: "d_done",
+      task_id: "t_done",
+      payload: { directive_text: "Run the demo" },
+    });
+    insertEvent(db, {
+      kind: "task_node_opened",
+      directive_id: "d_done",
+      task_id: "t_done",
+      payload: { goal: "Demo" },
+    });
+    insertEvent(db, {
+      kind: "task_committed",
+      directive_id: "d_done",
+      task_id: "t_done",
+      payload: { summary: "Demo finished cleanly." },
+      residual: 0.1,
+    });
+    const rows = ownerPlainStatus(db, { directive_id: "d_done" });
+    expect(rows[0]?.latest_state_kind).toBe("completed");
+    expect(rows[0]?.latest_state).toBe("Demo finished cleanly.");
+  });
+
+  test("renders 'Completed and closed.' when directive_closed lands, regardless of prior task state", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: "d_closed",
+      task_id: "t_closed",
+      payload: { directive_text: "Run the demo" },
+    });
+    insertEvent(db, {
+      kind: "directive_closed",
+      directive_id: "d_closed",
+      task_id: "t_closed",
+      payload: { reason: "owner_closed" },
+    });
+    const rows = ownerPlainStatus(db, { directive_id: "d_closed" });
+    expect(rows[0]?.latest_state_kind).toBe("completed");
+    expect(rows[0]?.latest_state).toBe("Completed and closed.");
+  });
+
+  test("primary surfaces NEVER include event_ids — IDs surface only via detail_refs for drilldown", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: "d_no_ids",
+      task_id: "t_no_ids",
+      payload: { directive_text: "Plain test" },
+    });
+    const rows = ownerPlainStatus(db, { directive_id: "d_no_ids" });
+    const row = rows[0]!;
+    // Primary owner-visible strings must not leak ULIDs (26-char base32).
+    expect(row.latest_state).not.toMatch(/[0-9A-Z]{26}/);
+    expect(row.opened_text ?? "").not.toMatch(/[0-9A-Z]{26}/);
+    // But detail_refs MAY contain ids for drilldown — that's the contract.
+    expect(Array.isArray(row.detail_refs)).toBe(true);
   });
 });
