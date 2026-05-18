@@ -2552,6 +2552,12 @@ SELECT
     -- 'completed' still allows post-commit refinement to render as
     -- 'live' or 'zombie' (child task may be running after root commit).
     WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
+    -- 2026-05-18 foundational fix (matches lifecycle_status logic below):
+    -- root committed + open children = 'live_amended', honestly distinct
+    -- from a fresh 'live' (no terminal yet).
+    WHEN term.terminal_kind = 'task_committed'
+         AND COALESCE(ds.open_dispatch_count, 0) > 0
+      THEN 'live_amended'
     -- In-flight dispatch ANYWHERE under the root wins over a stale terminal:
     -- a child task may be running a refinement cycle after the root committed.
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
@@ -2599,6 +2605,21 @@ SELECT
          )
       THEN 'abandoned'
     WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
+    -- 2026-05-18 foundational fix: when the brain emits task_committed AND
+    -- subsequently directive_amended that opens new child task_node_opened
+    -- rows, the substrate had open_dispatch_count > 0 on the SAME directive
+    -- while terminal_kind was already task_committed. The view returned
+    -- live (or zombie once the oldest child crossed 5min) — both lie
+    -- about the directive state. The operator TUI showed
+    -- task_committed 5m ago plus live r=0.27 simultaneously, which is
+    -- contradictory and erodes trust in the substrate.
+    -- New band 'live_amended': root committed, more work in flight under
+    -- the same directive_id. Renderers can choose to show
+    -- "continuing" vs "fresh start"; consumers reading for closure can
+    -- still detect it via terminal_kind='task_committed'.
+    WHEN term.terminal_kind = 'task_committed'
+         AND COALESCE(ds.open_dispatch_count, 0) > 0
+      THEN 'live_amended'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
@@ -3294,8 +3315,14 @@ export type ReadyTaskRow = {
 
 // Lifecycle tokens for dispatch_resolved_view.
 //   live           — a brain_dispatched is open and within the 5-min cap.
+//   live_amended   — root committed, brain subsequently amended the directive
+//                    via directive_amended (or refinement task_node_opened)
+//                    and the new children are still dispatching. Honestly
+//                    distinct from 'live' (no terminal yet) so the operator
+//                    surface can render "continuing" vs "fresh start".
 //   queued_at_cap  — scheduler cap gate blocked dispatch; root waits.
-//   completed      — terminal task_committed event recorded.
+//   completed      — terminal task_committed event recorded AND no open
+//                    children (clean exit).
 //   failed         — terminal task_failed or dispatcher_violation event.
 //   zombie         — a brain dispatch IS open but has exceeded the 5-min
 //                    cap with no terminal. (Real zombie.)
@@ -3305,6 +3332,7 @@ export type ReadyTaskRow = {
 //                    floor. NOT a hung brain — a scheduler omission.
 export type DispatchResolvedStatus =
   | "live"
+  | "live_amended"
   | "completed"
   | "failed"
   | "queued_at_cap"

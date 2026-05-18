@@ -624,7 +624,11 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(row?.status_reason).not.toBe("orphan_root_no_dispatch");
   });
 
-  test("reports live when a refinement child dispatches after the root commits", () => {
+  test("reports live_amended when a refinement child dispatches after the root commits (foundational fix 2026-05-18)", () => {
+    // Pre-fix this returned 'live', but the TUI then showed "task_committed
+    // 5m ago" alongside "live r=0.27" simultaneously — a contradiction
+    // that eroded operator trust. The new 'live_amended' band honestly
+    // says: root committed, more work in flight under the same directive.
     const db = openDb(":memory:");
     runViews(db);
     insertEvent(db, { kind: "task_node_opened", directive_id: "d_refine", task_id: "t_root" });
@@ -635,7 +639,8 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     insertEvent(db, { kind: "brain_dispatched", directive_id: "d_refine", task_id: "t_child", ts: nowIso(), payload: { dispatch_id: "disp_child" } });
 
     const [row] = dispatchResolved(db, { directiveId: "d_refine", rootTaskId: "t_root" });
-    expect(row?.lifecycle_status).toBe("live");
+    expect(row?.lifecycle_status).toBe("live_amended");
+    expect(row?.status).toBe("live_amended");
     expect(row?.status_reason).toBe("refinement_dispatch_open");
     expect(row?.open_dispatch_count).toBe(1);
     expect(row?.terminal_kind).toBe("task_committed");
@@ -2343,6 +2348,81 @@ describe("owner_plain_status_view + ownerPlainStatus", () => {
     const b = ownerStateBelief(db)!;
     expect(b.recent_prediction_error_count).toBe(2);
     expect(b.recent_avg_prediction_error).toBeCloseTo(0.5, 5);
+  });
+
+  test("dispatch_resolved_view classifies 'live_amended' when root committed AND directive_amended opened new dispatching children (foundational fix 2026-05-18)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dirId = "d_amended";
+    const rootTaskId = "t_root";
+    const childTaskId = "t_child";
+    const now = nowIso();
+    // 1. Root opens + commits.
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: dirId,
+      task_id: rootTaskId,
+      ts: now,
+      payload: { directive_text: "the directive" },
+    });
+    insertEvent(db, {
+      kind: "task_node_opened",
+      directive_id: dirId,
+      task_id: rootTaskId,
+      ts: now,
+      payload: { goal: "root goal" },
+    });
+    insertEvent(db, {
+      kind: "brain_dispatched",
+      directive_id: dirId,
+      task_id: rootTaskId,
+      ts: now,
+      payload: { dispatch_id: "disp_root" },
+    });
+    insertEvent(db, {
+      kind: "task_committed",
+      directive_id: dirId,
+      task_id: rootTaskId,
+      ts: now,
+      payload: { summary: "root done" },
+      residual: 0.2,
+    });
+    insertEvent(db, {
+      kind: "brain_dispatch_closed",
+      directive_id: dirId,
+      task_id: rootTaskId,
+      ts: now,
+      payload: { dispatch_id: "disp_root" },
+    });
+    // 2. Brain amends — opens a child task that gets dispatched.
+    insertEvent(db, {
+      kind: "directive_amended",
+      directive_id: dirId,
+      task_id: rootTaskId,
+      ts: now,
+      payload: { new_task_goals: ["child goal"] },
+    });
+    insertEvent(db, {
+      kind: "task_node_opened",
+      directive_id: dirId,
+      task_id: childTaskId,
+      parent_task_id: rootTaskId,
+      ts: now,
+      payload: { goal: "child goal", source: "directive_amended" },
+    });
+    insertEvent(db, {
+      kind: "brain_dispatched",
+      directive_id: dirId,
+      task_id: childTaskId,
+      ts: now,
+      payload: { dispatch_id: "disp_child" },
+    });
+    // No brain_dispatch_closed for child → open_dispatch_count > 0.
+    const row = dispatchResolved(db, { directiveId: dirId })[0]!;
+    expect(row.lifecycle_status).toBe("live_amended");
+    expect(row.status).toBe("live_amended");
+    expect(row.terminal_kind).toBe("task_committed");
+    expect(row.open_dispatch_count).toBeGreaterThan(0);
   });
 
   test("owner_state_belief_view marks is_stale when decay_after_iso < now", () => {

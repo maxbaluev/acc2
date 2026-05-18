@@ -385,6 +385,7 @@ export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
               const r = d.residual == null ? "  —" : d.residual.toFixed(2);
               const color =
                 status === "live" ? "yellow"
+                : status === "live_amended" ? "cyan"
                 : status === "completed" ? "green"
                 : status === "failed" ? "red"
                 : "gray";
