@@ -60,6 +60,18 @@ usage: acc emit <kind> [flags]
   Supported kinds (CSYMEMIT01 symmetric-emission set):
     knowledge_candidate       --claim "..." [--confidence N] [--refs …]
     lesson_extracted          --summary "..." [--refs …]
+    rendered_owner_message_recorded
+                              --rendered "<exact owner-visible string>"
+                              [--audience primary|detail_drawer]
+                              [--surface tui|chat|export]
+                              [--renderer <name>] [--intended-owner-action "..."]
+                              [--est-attention-cost N] [--suppressed-refs id1,id2]
+                              [--owner-profile-hash X]
+    owner_rendering_feedback_recorded
+                              --source <rendered_event_id>
+                              --feedback-kind <free string>
+                              [--evidence "..."] [--observed-behavior "..."]
+                              [--feedback-residual N]
     claude_reasoning_recorded --summary "..." [--refs …]
     act_tuple_recorded        --intent "..." --action "..." --verifier-kind X
                               [--predicted-residual N] [--observed-residual N]
@@ -100,6 +112,18 @@ const SUPPORTED = new Set([
   // runtime (free string), fault_kind (free string). Optional:
   // repair_hint, auto_repair_action, evidence_event_ids.
   "runtime_self_diagnostic_recorded",
+  // Owner-visible rendering loop (brain contract Q471RAN88X0H513V8BC3BTW0AW,
+  // 2026-05-17). Required for rendered_owner_message_recorded:
+  //   --rendered "<exact string shown to owner>" --audience primary|detail_drawer
+  // Optional: --surface tui|chat|export, --renderer <name>,
+  //   --owner-profile-hash X, --intended-owner-action "<plain words>",
+  //   --est-attention-cost N, --suppressed-refs id1,id2.
+  // Required for owner_rendering_feedback_recorded:
+  //   --source <rendered_event_id> --feedback-kind <free string>
+  // Optional: --evidence "<observed signal>", --observed-behavior "<words>",
+  //   --feedback-residual N.
+  "rendered_owner_message_recorded",
+  "owner_rendering_feedback_recorded",
 ]);
 
 export const runEmit = async (argv: string[]): Promise<number> => {
@@ -200,6 +224,46 @@ export const runEmit = async (argv: string[]): Promise<number> => {
     }
     if (typeof flags.reason === "string" && flags.reason.length > 0) payload.reason = flags.reason;
     if (!refs.includes(flags.target)) refs.push(flags.target);
+  } else if (kind === "rendered_owner_message_recorded") {
+    if (typeof flags.rendered !== "string" || flags.rendered.length === 0) {
+      process.stderr.write("acc emit rendered_owner_message_recorded: --rendered \"<exact owner-visible string>\" is required\n");
+      return 1;
+    }
+    const audience = typeof flags.audience === "string" ? flags.audience : "primary";
+    if (audience !== "primary" && audience !== "detail_drawer") {
+      process.stderr.write(`acc emit rendered_owner_message_recorded: --audience must be 'primary' or 'detail_drawer' (got '${audience}')\n`);
+      return 1;
+    }
+    payload.rendered_text = flags.rendered;
+    payload.audience = audience;
+    if (typeof flags.surface === "string" && flags.surface.length > 0) payload.surface = flags.surface;
+    if (typeof flags.renderer === "string" && flags.renderer.length > 0) payload.renderer = flags.renderer;
+    if (typeof flags["owner-profile-hash"] === "string") payload.owner_profile_hash = flags["owner-profile-hash"];
+    if (typeof flags["intended-owner-action"] === "string") payload.intended_owner_action = flags["intended-owner-action"];
+    if (flags["est-attention-cost"] !== undefined) {
+      const n = Number(flags["est-attention-cost"]);
+      if (Number.isFinite(n) && n >= 0 && n <= 1) payload.est_attention_cost = n;
+    }
+    const suppressed = parseRefs(flags["suppressed-refs"]);
+    if (suppressed.length > 0) payload.suppressed_refs = suppressed;
+  } else if (kind === "owner_rendering_feedback_recorded") {
+    if (typeof flags.source !== "string" || flags.source.length === 0) {
+      process.stderr.write("acc emit owner_rendering_feedback_recorded: --source <rendered_event_id> is required\n");
+      return 1;
+    }
+    if (typeof flags["feedback-kind"] !== "string" || flags["feedback-kind"].length === 0) {
+      process.stderr.write("acc emit owner_rendering_feedback_recorded: --feedback-kind <free string> is required (e.g. correction, decline, ignored_ask, confirmation, manual_override)\n");
+      return 1;
+    }
+    payload.source_rendered_event_id = flags.source;
+    payload.feedback_kind = flags["feedback-kind"];
+    if (typeof flags.evidence === "string" && flags.evidence.length > 0) payload.evidence = flags.evidence;
+    if (typeof flags["observed-behavior"] === "string" && flags["observed-behavior"].length > 0) payload.observed_behavior = flags["observed-behavior"];
+    if (flags["feedback-residual"] !== undefined) {
+      const n = Number(flags["feedback-residual"]);
+      if (Number.isFinite(n) && n >= 0 && n <= 1) payload.feedback_residual = n;
+    }
+    if (!refs.includes(flags.source)) refs.push(flags.source);
   } else if (kind === "runtime_self_diagnostic_recorded") {
     if (typeof flags.runtime !== "string" || flags.runtime.length === 0) {
       process.stderr.write("acc emit runtime_self_diagnostic_recorded: --runtime is required (free string, e.g. bun, uv, camofox-browser, opencode_bridge)\n");

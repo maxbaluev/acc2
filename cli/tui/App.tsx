@@ -35,7 +35,7 @@
 import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import type { SubstrateClient } from "./transport/substrate-client";
-import type { SubstrateNarrativeRow } from "../../substrate/views";
+import type { OwnerPlainStatusRow, SubstrateNarrativeRow } from "../../substrate/views";
 import {
   formatRelativeTs,
   importanceIcon,
@@ -95,6 +95,14 @@ export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
   const [filterImportance, setFilterImportance] = useState<Array<"critical" | "high" | "medium" | "low">>([]);
   const [drilldown, setDrilldown] = useState<SubstrateNarrativeRow | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
+  // Plain-language mode (brain contract Q471RAN88X0H513V8BC3BTW0AW):
+  // press `p` to swap the primary surface from substrate vocabulary
+  // (event kinds, IDs, residuals) to owner_plain_status_view cards —
+  // "Working on it now." / "Waiting for your input." / "Completed and
+  // closed." rather than `task_committed 4FYERR1Y…`. Detail drawer
+  // (Enter) stays technical so engineers can still drilldown.
+  const [plainMode, setPlainMode] = useState(false);
+  const [plainStatus, setPlainStatus] = useState<OwnerPlainStatusRow[]>([]);
 
   const width = stdout?.columns ?? 100;
   const height = stdout?.rows ?? 30;
@@ -109,6 +117,11 @@ export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
     if (dispEnv.ok) setDispatches((dispEnv.result ?? []).slice(0, 8));
     const decEnv = await client.read<DecisionRow[]>("pending_owner_decision_queue_view", { limit: 6 });
     if (decEnv.ok) setDecisions(decEnv.result ?? []);
+    // Plain-language status cards (brain contract Q471RAN88X0H513V8BC3BTW0AW)
+    // — populated unconditionally so the `p` toggle is instant. Cheap one-row-
+    // per-active-directive read.
+    const plainEnv = await client.read<OwnerPlainStatusRow[]>("owner_plain_status_view", { limit: 20 });
+    if (plainEnv.ok) setPlainStatus(plainEnv.result ?? []);
     const h = await client.health();
     setHealth(h);
     setNowMs(Date.now());
@@ -181,6 +194,15 @@ export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
       void refresh();
       return;
     }
+    if (input === "p") {
+      // Plain-language toggle — primary surface swaps between technical
+      // (substrate kinds, IDs, residuals) and owner-plain (per
+      // owner_plain_status_view: "Working on it now." / "Waiting for
+      // your input." / etc.).
+      setPlainMode((prev) => !prev);
+      setSelected(0);
+      return;
+    }
   });
 
   // Events pane height = total height − chrome (header + divider +
@@ -229,14 +251,88 @@ export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
 
   // ── Main screen ───────────────────────────────────────────────
   const liveCount = dispatches.filter((d) => (d.lifecycle_status ?? d.status) === "live").length;
-  const headerLine = `acc2 substrate · ${health.ok ? "ok" : "DOWN"} · ${liveCount} in-flight · ${rows.length} events · ${new Date(nowMs).toISOString().slice(11, 19)}`;
-  const footerLine = health.ok
-    ? `daemon ${health.status} · pid ${String(health.pid ?? "?")} · events ${String(health.events_count ?? "?")} · uptime ${health.uptime_s ?? "?"}s · j/k scroll · Enter drilldown · d filter · r refresh · q quit`
-    : `daemon DOWN: ${health.status} · run \`acc daemon start\``;
+  const inProgressCount = plainStatus.filter((s) => s.latest_state_kind === "in_progress").length;
+  const awaitingCount = plainStatus.filter((s) => s.latest_state_kind === "awaiting_owner").length;
+  // Plain-mode header speaks the owner's vocabulary; technical mode
+  // shows substrate counts. The toggle is intentionally a single letter
+  // so the operator can flip mid-debug without leaving the keyboard.
+  const headerLine = plainMode
+    ? `Your work · ${plainStatus.length} active · ${inProgressCount} in progress${awaitingCount > 0 ? ` · ${awaitingCount} waiting on you` : ""} · ${health.ok ? "system ok" : "system down"} · ${new Date(nowMs).toISOString().slice(11, 16)}`
+    : `acc2 substrate · ${health.ok ? "ok" : "DOWN"} · ${liveCount} in-flight · ${rows.length} events · ${new Date(nowMs).toISOString().slice(11, 19)}`;
+  const footerLine = !health.ok
+    ? (plainMode ? "Something is wrong with the system. Type `q` to quit, then run `acc daemon start`." : `daemon DOWN: ${health.status} · run \`acc daemon start\``)
+    : plainMode
+      ? `Plain view · j/k to move · Enter for technical details · p back to technical view · q quit`
+      : `daemon ${health.status} · pid ${String(health.pid ?? "?")} · events ${String(health.events_count ?? "?")} · uptime ${health.uptime_s ?? "?"}s · j/k scroll · Enter drilldown · p plain view · d filter · r refresh · q quit`;
 
   const dispatchPaneWidth = Math.max(24, Math.min(40, Math.floor(width * 0.32)));
   const eventsPaneWidth = Math.max(40, width - dispatchPaneWidth - 3);
   const filterLabel = filterImportance.length > 0 ? ` [filter: ${filterImportance.join("+")}]` : "";
+
+  // ── Plain-language primary surface (brain contract Q471RAN88X0H513V8BC3BTW0AW) ──
+  // Renders owner_plain_status_view cards instead of substrate event rows.
+  // Press `p` to flip back to technical mode. Enter still drilldowns into
+  // raw payloads for engineers — drawer audience, not primary.
+  if (plainMode) {
+    const cardHeight = Math.max(4, height - 6);
+    return (
+      <Box flexDirection="column" width={width} height={height}>
+        {/* Header */}
+        <Box paddingX={1}>
+          <Text bold color={health.ok ? "green" : "red"}>{headerLine}</Text>
+        </Box>
+
+        {/* Main body: plain status cards (one per active directive) */}
+        <Box flexDirection="column" flexGrow={1} paddingX={1}>
+          {plainStatus.length === 0 ? (
+            <Text dimColor>(nothing active right now — when you ask for something, it will appear here)</Text>
+          ) : (
+            plainStatus.slice(0, cardHeight).map((card) => {
+              const stateColor =
+                card.latest_state_kind === "awaiting_owner" ? "yellow"
+                : card.latest_state_kind === "failed" ? "red"
+                : card.latest_state_kind === "completed" ? "green"
+                : card.latest_state_kind === "in_progress" ? "cyan"
+                : "gray";
+              const titleText = card.opened_text
+                ? card.opened_text.length > width - 12
+                  ? card.opened_text.slice(0, width - 13) + "…"
+                  : card.opened_text
+                : "(no description on file)";
+              return (
+                <Box key={card.directive_id} flexDirection="column" paddingBottom={1}>
+                  <Text bold color={stateColor}>• {titleText}</Text>
+                  <Text>   {card.latest_state}</Text>
+                  {card.next_owner_action ? (
+                    <Text color="yellow" bold>   → {card.next_owner_action}</Text>
+                  ) : null}
+                  {card.risk_note ? (
+                    <Text color="red">   ⚠ {card.risk_note}</Text>
+                  ) : null}
+                </Box>
+              );
+            })
+          )}
+        </Box>
+
+        {/* Owner-decision strip (plain-mode framing) */}
+        {decisions.length > 0 ? (
+          <Box paddingX={1}>
+            <Text color="yellow">
+              {decisions.length === 1
+                ? "There is 1 thing waiting for your decision (press Enter for details)."
+                : `There are ${decisions.length} things waiting for your decision (press Enter for details).`}
+            </Text>
+          </Box>
+        ) : null}
+
+        {/* Footer */}
+        <Box paddingX={1}>
+          <Text dimColor>{footerLine}</Text>
+        </Box>
+      </Box>
+    );
+  }
 
   return (
     <Box flexDirection="column" width={width} height={height}>

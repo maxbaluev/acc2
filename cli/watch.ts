@@ -31,6 +31,8 @@ usage: acc watch [--help]
     PgDn / PgUp  page
     Enter        drilldown: full payload + cited refs
     Esc / q      close drilldown / quit
+    p            plain-language view (hides substrate IDs/vocabulary;
+                 renders owner_plain_status_view cards instead)
     d            toggle critical+high importance filter
     r            force refresh
 `;
