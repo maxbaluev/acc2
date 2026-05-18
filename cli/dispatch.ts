@@ -46,6 +46,14 @@ const usage = (): string => `acc — v2 thin CLI
                                   matching rows and exits.
   acc graph <directive_id>        Render the task DAG (nodes ranked, edges).
   acc inspect <task_id_prefix>    Per-task report: event histogram + chronology.
+  acc dispatch <directive_id> [--json] [--no-color]
+                                  Canonical substrate-truth inspection of one
+                                  directive's full dispatch trajectory: task
+                                  DAG (with per-task status badges), KCs and
+                                  code_artifact_candidate emissions grouped by
+                                  task, refinement edges, contract amendments,
+                                  and closure_audit residuals. Replaces the
+                                  ad-hoc /tmp/check_*.ts scripts.
   acc apply <event_id>
                                   Render the Claude Agent subagent prompt for a
                                   lesson_extracted / contract_amendment_proposed
@@ -481,6 +489,15 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
   if (cmd === "directive") {
     const { runDirective } = await import("./directive");
     return runDirective(argv.slice(1));
+  }
+  if (cmd === "dispatch") {
+    // `acc dispatch <directive_id_or_prefix> [--json]` — canonical
+    // substrate-truth dispatch inspector. Replaces the ad-hoc
+    // /tmp/check_*.ts scripts the orchestrator used to author this
+    // session. Cites .claude/rules/orchestrator-runtime.md "Dispatch
+    // Observation Protocol".
+    const { runDispatchInspect } = await import("./dispatch_inspect");
+    return runDispatchInspect(argv.slice(1));
   }
   console.error(`acc: unknown command '${cmd}'`);
   console.error(usage());

@@ -228,6 +228,34 @@ Run this short ritual when supervising a live AccInt v2 install:
 
 The ritual is evidence-oriented: trust increases when replay succeeds, closure residuals stay low, posteriors move after scored actions, and amendments apply with verifier-passing `applied_change_committed` rows.
 
+### 7a. Inspecting one dispatch — `acc dispatch <id>`
+
+The canonical substrate-truth view for "what happened on this dispatch?" is
+`acc dispatch <directive_id_or_prefix>`. It reads the event ledger
+directly (not the Bash background-task panel) and surfaces, in one report,
+the directive metadata + task DAG with per-task status badges, KCs and
+`code_artifact_candidate` emissions grouped by task, refinement edges,
+`contract_amendment_proposed` rows, and `task_closure_audited` residuals.
+
+This is the command the orchestrator now reaches for instead of authoring
+ad-hoc `/tmp/check_*.ts` SQLite scripts. Per
+[.claude/rules/orchestrator-runtime.md](../.claude/rules/orchestrator-runtime.md)
+the Claude Code Bash panel is non-authoritative; the substrate ledger is.
+
+```bash
+# Pretty terminal output (ANSI status badges)
+acc dispatch QHTRBV6P
+
+# JSON output for orchestrator / scripting consumption
+acc dispatch QHTRBV6PFX2JVBMHDNDA4B03GC --json
+
+# Disable ANSI colors (e.g. piping through `less`)
+acc dispatch QHTRBV6P --no-color
+```
+
+Prefix resolution: any prefix `>= 6` chars is accepted. Ambiguous prefixes
+exit 1 with the candidate directive_ids listed on stderr.
+
 ---
 
 ## 8. Troubleshooting
