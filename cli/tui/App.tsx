@@ -35,7 +35,7 @@
 import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import type { SubstrateClient } from "./transport/substrate-client";
-import type { OwnerPlainStatusRow, SubstrateNarrativeRow } from "../../substrate/views";
+import type { OwnerPlainStatusRow, OwnerStateBeliefRow, SubstrateNarrativeRow } from "../../substrate/views";
 import {
   formatRelativeTs,
   importanceIcon,
@@ -103,6 +103,12 @@ export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
   // (Enter) stays technical so engineers can still drilldown.
   const [plainMode, setPlainMode] = useState(false);
   const [plainStatus, setPlainStatus] = useState<OwnerPlainStatusRow[]>([]);
+  // Phase H4 (brain contract CY7E62DSNX1DZ1BTD56845D994 2026-05-18):
+  // surface the substrate's current owner-state belief inline so the
+  // operator sees "what does the substrate currently think about me?".
+  // One plain sentence in primary surface; full latent_state stays in
+  // the drilldown (audience=detail_drawer per rendering invariants).
+  const [belief, setBelief] = useState<OwnerStateBeliefRow | null>(null);
 
   const width = stdout?.columns ?? 100;
   const height = stdout?.rows ?? 30;
@@ -122,6 +128,9 @@ export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
     // per-active-directive read.
     const plainEnv = await client.read<OwnerPlainStatusRow[]>("owner_plain_status_view", { limit: 20 });
     if (plainEnv.ok) setPlainStatus(plainEnv.result ?? []);
+    // Phase H4: read owner_state_belief_view for the plain-mode header.
+    const beliefEnv = await client.read<OwnerStateBeliefRow | null>("owner_state_belief_view", {});
+    if (beliefEnv.ok) setBelief(beliefEnv.result ?? null);
     const h = await client.health();
     setHealth(h);
     setNowMs(Date.now());
@@ -281,6 +290,38 @@ export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
         <Box paddingX={1}>
           <Text bold color={health.ok ? "green" : "red"}>{headerLine}</Text>
         </Box>
+
+        {/* Phase H4 belief banner (brain contract CY7E62DSNX1DZ1BTD56845D994):
+            one plain sentence about the substrate's current owner-state
+            belief. Hidden when no hypothesis exists. Full state in drilldown. */}
+        {belief && belief.hypothesis_event_id ? (
+          <Box paddingX={1} flexDirection="column">
+            {(() => {
+              const ls = belief.latent_state ?? {};
+              const reg = typeof ls.emotional_register === "string" ? ls.emotional_register : null;
+              const att = typeof ls.attention_budget === "string" ? ls.attention_budget : null;
+              const goal = typeof ls.latent_larger_goal === "string" ? ls.latent_larger_goal : null;
+              const parts: string[] = [];
+              if (reg) parts.push(reg);
+              if (att) parts.push(`${att} attention`);
+              let sentence = "";
+              if (parts.length > 0) sentence = `The system thinks you are ${parts.join(", ")}.`;
+              else sentence = "The system has a belief about you but no register/attention axes set.";
+              const goalPart = goal ? `  Larger goal it thinks you have: ${goal}.` : "";
+              const conf = belief.uncertainty;
+              const staleHint = belief.is_stale ? "  (belief is stale — system will refresh)" : "";
+              const errHint = belief.recent_avg_prediction_error != null && belief.recent_avg_prediction_error >= 0.3
+                ? `  (system has been wrong ~${(belief.recent_avg_prediction_error * 100).toFixed(0)}% recently)`
+                : "";
+              return (
+                <>
+                  <Text bold color="magenta">{sentence}{goalPart}</Text>
+                  <Text dimColor>  confidence ≈ {(1 - conf).toFixed(2)}{staleHint}{errHint}</Text>
+                </>
+              );
+            })()}
+          </Box>
+        ) : null}
 
         {/* Main body: plain status cards (one per active directive) */}
         <Box flexDirection="column" flexGrow={1} paddingX={1}>
