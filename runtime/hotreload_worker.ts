@@ -329,7 +329,7 @@ export const startHotreloadWorker = (
           payload: {
             module: entry.name,
             file_path: relPath,
-            rate_limit: entry.rate_limit,
+            rate_limit: entry.rate_limit ?? null,
             hint: "the same file exceeded its rate_limit.count reloads in rate_limit.window_ms; the watcher backed off to protect the daemon from save-loop storms",
           },
         });
@@ -489,7 +489,9 @@ export const startHotreloadWorker = (
               file_path: relPath,
               strategy: entry.strategy,
               reason: validationError,
-              expected_exports: entry.expected_exports,
+              // readonly string[] | undefined → mutable string[] via spread.
+              // JsonValue forbids both undefined and readonly arrays.
+              expected_exports: entry.expected_exports ? [...entry.expected_exports] : [],
               cache_bust_url: url,
               hint: "the new module imported successfully but is missing one or more declared exports; previous reference stays active",
             },
@@ -607,7 +609,8 @@ export const startHotreloadWorker = (
               reloadable_slot: entry.reloadable_slot,
               registry_version: swappedVersion,
               invalidated_caches: invalidatedCaches,
-              expected_exports: entry.expected_exports ?? [],
+              // readonly string[] → mutable via spread; JsonValue forbids readonly.
+              expected_exports: entry.expected_exports ? [...entry.expected_exports] : [],
             },
           });
         } catch (emitErr) {

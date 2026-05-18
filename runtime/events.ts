@@ -183,7 +183,10 @@ const optionalStringArray = (payload: JsonObject, key: string): string[] => {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim().length === 0)) {
     throw new Error("invalid_act_tuple_recorded:" + key + "_must_be_string_array");
   }
-  return value;
+  // Runtime check above narrows every element to a non-empty string,
+  // but TypeScript can't carry the narrowing through Array's structural
+  // type. Cast is safe — every escape path throws.
+  return value as string[];
 };
 
 const requireResidual = (value: unknown, key: string): number => {
@@ -308,7 +311,10 @@ const projectActTupleRecorded = (db: Database, source: {
       projected_from: "act_tuple_recorded",
       verifier_kind: source.act.verifier_kind,
       residual: source.act.observed_residual,
-      outcome: source.act.outcome,
+      // OutcomeStatus | undefined → coerce to null. JsonValue forbids
+      // undefined; passing it through would silently omit the field
+      // from JSON.stringify and break audit-trail completeness.
+      outcome: source.act.outcome ?? null,
     },
   });
   const confirmationTargets = source.act.candidate_event_ids.length > 0
