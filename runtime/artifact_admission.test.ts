@@ -413,8 +413,34 @@ describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
   test("admitting published_drive_doc with supersedes flips prior.superseded_by and emits code_artifact_superseded", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
-    // Pre-seed a prior published_drive_doc row representing v_prior.
     const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
+    // C2 preview-first prerequisite: every published_drive_doc admission
+    // must name a rendered_docx ancestor. Seed the lineage chain
+    // (markdown_body → docx_reference_style → rendered_docx) so the
+    // supersede-chain test can satisfy the C2 gate.
+    const md = await admitArtifact(db, {
+      runtime: "bun", body,
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null, fixtureExpectedResidualBelow: 0.2,
+      name: "md_for_c5_test", kind: "markdown_body",
+    }, captureEmit(events, db));
+    expect(md.ok).toBe(true); if (!md.ok) return;
+    const ref = await admitArtifact(db, {
+      runtime: "bun", body,
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null, fixtureExpectedResidualBelow: 0.2,
+      name: "ref_for_c5_test", kind: "docx_reference_style",
+    }, captureEmit(events, db));
+    expect(ref.ok).toBe(true); if (!ref.ok) return;
+    const rd = await admitArtifact(db, {
+      runtime: "bun", body,
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null, fixtureExpectedResidualBelow: 0.2,
+      name: "rd_for_c5_test", kind: "rendered_docx",
+      markdownBodyId: md.artifactId, referenceDocxArtifactId: ref.artifactId,
+    }, captureEmit(events, db));
+    expect(rd.ok).toBe(true); if (!rd.ok) return;
+    // Pre-seed a prior published_drive_doc row representing v_prior.
     const prior = await admitArtifact(
       db,
       {
@@ -426,6 +452,7 @@ describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
         name: "lakeland_drive_doc_prior",
         kind: "published_drive_doc",
         targetResources: ["drive://document/PRIORDOCID12345abc"],
+        renderedDocxId: rd.artifactId,
       },
       captureEmit(events, db),
     );
@@ -444,6 +471,7 @@ describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
         kind: "published_drive_doc",
         targetResources: ["drive://document/SUCCESSORDOCID987zyx"],
         supersedes: prior.artifactId,
+        renderedDocxId: rd.artifactId,
       },
       captureEmit(events, db),
     );
@@ -457,6 +485,152 @@ describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
     expect(supersededEvents.length).toBe(1);
     expect((supersededEvents[0]!.payload as Record<string, unknown>).prior_artifact_id).toBe(prior.artifactId);
     expect((supersededEvents[0]!.payload as Record<string, unknown>).new_artifact_id).toBe(successor.artifactId);
+  });
+
+  // C2 (2026-05-18, contract V32YTK7HKN6MS38KWJY1SKTXAW): render
+  // pipeline admission gates — rendered_docx requires markdown_body_id
+  // + reference_docx_artifact_id that resolve to admitted artifacts
+  // of the correct kinds; published_drive_doc requires renderedDocxId
+  // (preview-first rule) and refuses PDF target_resources.
+  test("rendered_docx admission refuses when markdown_body_id is missing", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const before = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        name: "rendered_docx_orphan",
+        kind: "rendered_docx",
+        referenceDocxArtifactId: "ghost_ref",
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("rendered_docx_invalid_inputs");
+    expect(result.detail).toMatch(/rendered_docx_missing_markdown_body_id|rendered_docx_unknown_markdown_body_id|rendered_docx_unknown_reference_docx_id/);
+    const after = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    expect(after).toBe(before);
+    expect(events.some((e) => e.kind === "rendered_docx_invalid_inputs")).toBe(true);
+  });
+
+  test("rendered_docx admission admits when both inputs resolve to correct kinds", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const stubBody = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
+    // Seed an admitted markdown_body + docx_reference_style.
+    const md = await admitArtifact(db, {
+      runtime: "bun",
+      body: stubBody,
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null,
+      fixtureExpectedResidualBelow: 0.2,
+      name: "md_for_rendered",
+      kind: "markdown_body",
+    }, captureEmit(events, db));
+    expect(md.ok).toBe(true);
+    if (!md.ok) return;
+    const ref = await admitArtifact(db, {
+      runtime: "bun",
+      body: stubBody,
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null,
+      fixtureExpectedResidualBelow: 0.2,
+      name: "ref_for_rendered",
+      kind: "docx_reference_style",
+    }, captureEmit(events, db));
+    expect(ref.ok).toBe(true);
+    if (!ref.ok) return;
+    const result = await admitArtifact(db, {
+      runtime: "bun",
+      body: stubBody,
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null,
+      fixtureExpectedResidualBelow: 0.2,
+      name: "rendered_docx_admit",
+      kind: "rendered_docx",
+      markdownBodyId: md.artifactId,
+      referenceDocxArtifactId: ref.artifactId,
+    }, captureEmit(events, db));
+    expect(result.ok).toBe(true);
+  });
+
+  test("published_drive_doc admission refuses without renderedDocxId (preview-first rule)", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const before = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        name: "published_no_preview",
+        kind: "published_drive_doc",
+        targetResources: ["drive://document/SOMEDOCID"],
+        // renderedDocxId intentionally omitted.
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("published_drive_doc_invalid_inputs");
+    expect(result.detail).toContain("published_drive_doc_missing_rendered_docx_id");
+    const after = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    expect(after).toBe(before);
+    expect(events.some((e) => e.kind === "published_drive_doc_invalid_inputs")).toBe(true);
+  });
+
+  test("published_drive_doc admission refuses application/pdf target_resources", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const stubBody = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
+    // Seed an admitted rendered_docx so the preview-first check passes.
+    // First seed its markdown_body + reference inputs.
+    const md = await admitArtifact(db, {
+      runtime: "bun", body: stubBody,
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null, fixtureExpectedResidualBelow: 0.2,
+      name: "md_for_pdf_test", kind: "markdown_body",
+    }, captureEmit(events, db));
+    expect(md.ok).toBe(true); if (!md.ok) return;
+    const ref = await admitArtifact(db, {
+      runtime: "bun", body: stubBody,
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null, fixtureExpectedResidualBelow: 0.2,
+      name: "ref_for_pdf_test", kind: "docx_reference_style",
+    }, captureEmit(events, db));
+    expect(ref.ok).toBe(true); if (!ref.ok) return;
+    const rd = await admitArtifact(db, {
+      runtime: "bun", body: stubBody,
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null, fixtureExpectedResidualBelow: 0.2,
+      name: "rd_for_pdf_test", kind: "rendered_docx",
+      markdownBodyId: md.artifactId, referenceDocxArtifactId: ref.artifactId,
+    }, captureEmit(events, db));
+    expect(rd.ok).toBe(true); if (!rd.ok) return;
+    // Now attempt published_drive_doc admission with a PDF target_resource.
+    const result = await admitArtifact(db, {
+      runtime: "bun", body: stubBody,
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null, fixtureExpectedResidualBelow: 0.2,
+      name: "published_pdf_attempt", kind: "published_drive_doc",
+      targetResources: ["drive://document/OKDOCID", "drive://file/badpdf?mime=application/pdf"],
+      renderedDocxId: rd.artifactId,
+    }, captureEmit(events, db));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("published_drive_doc_invalid_inputs");
+    expect(result.detail).toContain("published_drive_doc_pdf_forbidden_in_alex_path");
   });
 
   test("published_drive_doc admission refuses when target_resources lacks a drive:// URI", async () => {

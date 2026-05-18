@@ -15,6 +15,10 @@ import type { Database } from "bun:sqlite";
 import { withImmediateTransaction } from "./db";
 import { goalShape } from "../runtime/goal_shape";
 import type { CodeArtifactStatus, OwnerProfile, Runtime, SandboxDecl } from "./types";
+import {
+  REF_NEUTRAL_CLASSIC_DOCX_B64,
+  REF_NEUTRAL_CLASSIC_DISPLAY_NAME,
+} from "./ref_neutral_classic_docx";
 
 const newId = (): string =>
   crypto.randomUUID().replace(/-/g, "").slice(0, 26).toUpperCase();
@@ -1503,6 +1507,76 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     fixture_input: {},
     fixture_expected_residual: 0.05,
     display_name: "Master Report Generation Orchestrator (strategy-first ATMS DAG)",
+  },
+  {
+    // C2 (2026-05-18, contract V32YTK7HKN6MS38KWJY1SKTXAW): canonical
+    // reference docx for the render pipeline. The body is the base64-
+    // encoded bytes of /tmp/ref-neutral.docx (Times New Roman body,
+    // black headings, neutral grey theme, visible Table style with
+    // header-row formatting + cell padding 80/120 dxa). Promoted to a
+    // substrate-addressable artifact so renderMarkdownToDocx can
+    // resolve it by id instead of reading from /tmp/.
+    //
+    // The seed kind is `docx_reference_style` (free-string discriminator
+    // on code_artifact.kind) — NOT a typed enum. The hashSeedRow gate
+    // in seedCodeArtifacts is content-addressed by body, so editing
+    // the reference docx + re-running `acc init` upgrades the seed
+    // row in place (preserves learned posterior).
+    seedName: "docx_reference_accint_neutral_classic_business_v1",
+    kind: "docx_reference_style",
+    runtime: "bun",
+    body: REF_NEUTRAL_CLASSIC_DOCX_B64,
+    declared_sandbox: { runtime: "bun", cpu_ms: 100, wall_ms: 500, memory_mb: 32 },
+    state_root: "render/docx_reference_style",
+    initial_score: 0.90,
+    initial_confidence: 0.85,
+    fixture_input: { format: "base64-encoded-docx" },
+    fixture_expected_residual: 0.05,
+    display_name: REF_NEUTRAL_CLASSIC_DISPLAY_NAME,
+  },
+  {
+    // C2 (2026-05-18, contract V32YTK7HKN6MS38KWJY1SKTXAW): a fixture
+    // markdown_body for pipeline testing. The body is a tiny self-
+    // contained markdown sample exercising headings, paragraphs, a
+    // bullet list, and a table — enough surface area to validate
+    // that pandoc + the theme/bookmark post-process pipeline runs
+    // end-to-end on this seed without a real owner report. Pairs
+    // with the seed_docx_reference_* row above to give the brain a
+    // ready-to-go (markdown_body × docx_reference_style) admission
+    // pair on day one.
+    seedName: "markdown_body_render_pipeline_smoke_v1",
+    kind: "markdown_body",
+    runtime: "bun",
+    body: [
+      "# Render Pipeline Smoke Test",
+      "",
+      "This is the canonical fixture markdown body the substrate uses to",
+      "exercise the markdown_body × docx_reference_style → rendered_docx",
+      "pipeline end-to-end. See contract C2 (V32YTK7HKN6MS38KWJY1SKTXAW).",
+      "",
+      "## Section",
+      "",
+      "Body paragraph in Times New Roman after the neutral-classic",
+      "reference-docx template lands.",
+      "",
+      "- Bullet one",
+      "- Bullet two",
+      "- Bullet three",
+      "",
+      "| Column A | Column B |",
+      "|----------|----------|",
+      "| row 1 a  | row 1 b  |",
+      "| row 2 a  | row 2 b  |",
+      "",
+      "End of fixture.",
+    ].join("\n"),
+    declared_sandbox: { runtime: "bun", cpu_ms: 100, wall_ms: 500, memory_mb: 32 },
+    state_root: "render/markdown_body",
+    initial_score: 0.70,
+    initial_confidence: 0.60,
+    fixture_input: { format: "utf8-markdown" },
+    fixture_expected_residual: 0.05,
+    display_name: "Markdown Body — render pipeline smoke fixture (v1)",
   },
 ];
 

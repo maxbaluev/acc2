@@ -95,6 +95,14 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // raw code_artifact). NOT an event kind — recipe content lives in the
   // code_artifact registry, surfaced into prompts via retrieval.
   "recipe",
+  // C2 (2026-05-18, contract V32YTK7HKN6MS38KWJY1SKTXAW): render-pipeline
+  // artifact kinds (free-string discriminators on code_artifact.kind), NOT
+  // event kinds. Per the same act_artifact registry pattern as
+  // dispatch_strategy_v1 and recipe above.
+  "markdown_body",
+  "docx_reference_style",
+  "rendered_docx",
+  "published_drive_doc",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────
@@ -284,6 +292,13 @@ describe("derived sets match their pre-unification shape", () => {
       // `_strategic_direction_chosen`. Health-metric so dashboards can
       // show how often report admissions skip the strategy step.
       "atms_strategy_first_violation",
+      // C2 (2026-05-18, contract V32YTK7HKN6MS38KWJY1SKTXAW): render
+      // pipeline admission gates rejected payload metadata. Counting
+      // per-window lets operators see how often render lineage breaks
+      // (missing markdown_body_id, wrong kind on resolved id, PDF
+      // forbidden in Alex path).
+      "rendered_docx_invalid_inputs",
+      "published_drive_doc_invalid_inputs",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

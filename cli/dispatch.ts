@@ -53,6 +53,14 @@ const usage = (): string => `acc — v2 thin CLI
                                   semantics for published_drive_doc — the
                                   external Drive doc stays until an
                                   explicit owner trash action.
+  acc render-preview <markdown_body_id> [--reference <id>] [--publish]
+                                  Local markdown → docx render via the substrate
+                                  pipeline. Without --publish stays read-only and
+                                  prints the rendered docx sha256 + preview path.
+                                  With --publish admits a rendered_docx artifact
+                                  (preview-first rule) plus a follow-up
+                                  contract_amendment_proposed for the missing
+                                  Drive upload integration (C2).
   acc dispatch <directive_id> [--json] [--no-color]
                                   Canonical substrate-truth inspection of one
                                   directive's full dispatch trajectory: task
@@ -501,6 +509,15 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     // `acc artifact provenance <artifact_id>` — C5 chain inspector.
     const { runArtifact } = await import("./artifact");
     return runArtifact(argv.slice(1));
+  }
+  if (cmd === "render-preview") {
+    // C2 (2026-05-18, contract V32YTK7HKN6MS38KWJY1SKTXAW): local
+    // markdown → docx render via the substrate render pipeline.
+    // Without --publish stays read-only; with --publish admits a
+    // `rendered_docx` row plus a contract_amendment_proposed
+    // pointing at the missing Drive upload integration.
+    const { runRenderPreview } = await import("./render_preview");
+    return runRenderPreview(argv.slice(1));
   }
   if (cmd === "dispatch") {
     // `acc dispatch <directive_id_or_prefix> [--json]` — canonical

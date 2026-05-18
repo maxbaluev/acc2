@@ -97,12 +97,55 @@ describe("seedCodeArtifacts", () => {
       .all() as Array<{ id: string; kind: string }>;
     expect(recipeRows.length).toBeGreaterThanOrEqual(1);
     for (const r of recipeRows) expect(r.kind).toBe("recipe");
+    // C2 (2026-05-18): render-pipeline seeds declare their own kinds
+    // (`docx_reference_style`, `markdown_body`) so the registry can
+    // filter render inputs from raw code artifacts. Asserted separately
+    // here so the legacy 'code_artifact' default check below is
+    // narrowed to genuine legacy state_roots.
+    const renderRows = db
+      .query("SELECT id, kind FROM code_artifact WHERE state_root LIKE 'render/%' ORDER BY id")
+      .all() as Array<{ id: string; kind: string }>;
+    expect(renderRows.length).toBeGreaterThanOrEqual(2);
+    const renderKinds = new Set(renderRows.map((r) => r.kind));
+    expect(renderKinds.has("docx_reference_style")).toBe(true);
+    expect(renderKinds.has("markdown_body")).toBe(true);
     // Legacy seeds: every other admitted row should have kind='code_artifact'.
     const legacyRows = db
-      .query("SELECT kind FROM code_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%'")
+      .query(
+        "SELECT kind FROM code_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%' AND state_root NOT LIKE 'render/%'",
+      )
       .all() as Array<{ kind: string }>;
     expect(legacyRows.length).toBeGreaterThan(0);
     for (const r of legacyRows) expect(r.kind).toBe("code_artifact");
+  });
+
+  test("C2 (2026-05-18) canonical reference docx artifact + markdown_body fixture are seeded", () => {
+    const db = openDb(":memory:");
+    seedCodeArtifacts(db);
+    const ref = db
+      .query("SELECT id, kind, body, name FROM code_artifact WHERE id = ?")
+      .get("seed_docx_reference_accint_neutral_classic_business_v1") as {
+        id: string; kind: string; body: string; name: string | null;
+      } | null;
+    expect(ref).not.toBeNull();
+    if (!ref) return;
+    expect(ref.kind).toBe("docx_reference_style");
+    // The body is a base64-encoded docx → starts with the standard zip
+    // header `UEs...` (PK\x03\x04 → "UEsDBA..." in base64). Decoding
+    // round-trip should yield a non-empty buffer.
+    expect(ref.body.startsWith("UEsDB")).toBe(true);
+    const decoded = Buffer.from(ref.body, "base64");
+    expect(decoded.length).toBeGreaterThan(5000);
+    // Fixture markdown_body for pipeline smoke tests.
+    const md = db
+      .query("SELECT id, kind, body FROM code_artifact WHERE id = ?")
+      .get("seed_markdown_body_render_pipeline_smoke_v1") as {
+        id: string; kind: string; body: string;
+      } | null;
+    expect(md).not.toBeNull();
+    if (!md) return;
+    expect(md.kind).toBe("markdown_body");
+    expect(md.body).toContain("# Render Pipeline Smoke Test");
   });
 
   test("C3 (2026-05-18) master_report_generation_orchestrator recipe is seeded with strategy-first DAG body anchors", () => {

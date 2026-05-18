@@ -208,6 +208,16 @@ export const EVENT_KINDS = {
   // superseded_by field; trashing the external Drive doc remains an
   // explicit owner action.
   code_artifact_superseded:                { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  // C2 (2026-05-18, contract V32YTK7HKN6MS38KWJY1SKTXAW): substrate-side
+  // admission gates for the render pipeline (markdown_body ×
+  // docx_reference_style → rendered_docx → published_drive_doc). Each
+  // kind below carries the reason string emitted by the gate when
+  // payload metadata fails the structural check (missing input
+  // artifact id, wrong kind on resolved id, PDF target in the
+  // Alex-facing path). Health-metric so dashboards can surface how
+  // often the gate fires.
+  rendered_docx_invalid_inputs:            { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  published_drive_doc_invalid_inputs:      { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   code_artifact_promoted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   code_artifact_quarantined:               { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // Terminal retirement (sandbox audit bsfxsvgh9, 2026-05-15): unlike

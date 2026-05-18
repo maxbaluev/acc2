@@ -38,6 +38,12 @@ import { runPredicateGate } from "./verifiers/predicate_gate";
 import { markSuperseded } from "./artifact_provenance";
 import { parseResourceUri } from "./resource_uri";
 import type { EmitEventInput } from "./events";
+import {
+  validateRenderedDocxAdmission,
+  validatePublishedDriveDocAdmission,
+  RENDERED_DOCX_KIND,
+  PUBLISHED_DRIVE_DOC_KIND,
+} from "./render_pipeline";
 
 export type AdmissionInput = {
   runtime: Runtime;
@@ -89,6 +95,16 @@ export type AdmissionInput = {
    *  not trashed — only the substrate marks the prior superseded. */
   kind?: string;
   supersedes?: string;
+  /** C2 (2026-05-18, contract V32YTK7HKN6MS38KWJY1SKTXAW): render
+   *  pipeline lineage. When `kind === 'rendered_docx'` BOTH fields are
+   *  required and must resolve to admitted artifacts of the correct
+   *  kinds (markdown_body + docx_reference_style). When
+   *  `kind === 'published_drive_doc'` `renderedDocxId` is required and
+   *  must resolve to an admitted `rendered_docx` row (preview-first
+   *  rule, lesson NA80J19NTD4Y). */
+  markdownBodyId?: string;
+  referenceDocxArtifactId?: string;
+  renderedDocxId?: string;
 };
 
 export type AdmissionRejectionReason =
@@ -98,7 +114,13 @@ export type AdmissionRejectionReason =
   | "runtime_unavailable"
   | "predicate_gate_failed"
   | "strategy_first_violation_missing_strategic_direction_chosen"
-  | "published_drive_doc_missing_drive_uri";
+  | "published_drive_doc_missing_drive_uri"
+  // C2 (2026-05-18, contract V32YTK7HKN6MS38KWJY1SKTXAW): render
+  // pipeline admission rejections. The free-string reason field below
+  // mirrors the reasons returned by render_pipeline.ts validators so
+  // the substrate event payload + AdmissionResult.reason agree.
+  | "rendered_docx_invalid_inputs"
+  | "published_drive_doc_invalid_inputs";
 
 export type AdmissionResult =
   | { ok: true; artifactId: string }
@@ -261,6 +283,71 @@ export const admitArtifact = async (
         ok: false,
         reason: "published_drive_doc_missing_drive_uri",
         detail: "target_resources missing drive://document/<doc_id>",
+      };
+    }
+  }
+
+  // 1.8 rendered_docx gate (C2, 2026-05-18, contract
+  //     V32YTK7HKN6MS38KWJY1SKTXAW). When kind === `rendered_docx` BOTH
+  //     `markdownBodyId` and `referenceDocxArtifactId` must point at
+  //     admitted artifacts of the correct kinds. The render pipeline
+  //     refuses to admit a rendered_docx whose lineage cannot be
+  //     resolved — preserves the same-substrate invariant (k_200) that
+  //     every transform's inputs are addressable.
+  if (input.kind === RENDERED_DOCX_KIND) {
+    const renderedCheck = validateRenderedDocxAdmission(db, {
+      markdownBodyId: input.markdownBodyId,
+      referenceDocxArtifactId: input.referenceDocxArtifactId,
+    });
+    if (!renderedCheck.ok) {
+      emit({
+        kind: "rendered_docx_invalid_inputs",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: renderedCheck.reason,
+          detail: renderedCheck.detail,
+          markdown_body_id: input.markdownBodyId ?? null,
+          reference_docx_artifact_id: input.referenceDocxArtifactId ?? null,
+          runtime: input.runtime,
+        } as JsonValue,
+      });
+      return {
+        ok: false,
+        reason: "rendered_docx_invalid_inputs",
+        detail: `${renderedCheck.reason}: ${renderedCheck.detail}`,
+      };
+    }
+  }
+
+  // 1.9 published_drive_doc preview-first gate (C2, 2026-05-18,
+  //     contract V32YTK7HKN6MS38KWJY1SKTXAW). Layered on top of the C5
+  //     drive:// URI gate above. Refuses admission when the payload
+  //     does not name a rendered_docx ancestor (preview-first rule,
+  //     lesson NA80J19NTD4Y) OR when any target_resources entry
+  //     advertises application/pdf in the Alex-facing path
+  //     (k_FMAFQVA0DH no-PDF rule).
+  if (input.kind === PUBLISHED_DRIVE_DOC_KIND) {
+    const publishCheck = validatePublishedDriveDocAdmission(
+      db,
+      { renderedDocxId: input.renderedDocxId },
+      input.targetResources ?? null,
+    );
+    if (!publishCheck.ok) {
+      emit({
+        kind: "published_drive_doc_invalid_inputs",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: publishCheck.reason,
+          detail: publishCheck.detail,
+          rendered_docx_id: input.renderedDocxId ?? null,
+          target_resources: (input.targetResources ?? []) as unknown as JsonValue,
+          runtime: input.runtime,
+        } as JsonValue,
+      });
+      return {
+        ok: false,
+        reason: "published_drive_doc_invalid_inputs",
+        detail: `${publishCheck.reason}: ${publishCheck.detail}`,
       };
     }
   }
