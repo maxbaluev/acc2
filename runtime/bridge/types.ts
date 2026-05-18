@@ -55,13 +55,6 @@ export type SpawnOpts = {
    *  tool call must land for the MCP handshake to be considered successful.
    *  Default 30s. */
   mcpHandshakeWindowMs?: number;
-  /** Override the inter-frame no-progress watchdog window (ms). Once at
-   *  least one `bridge_frame_received` has landed, if no further frame
-   *  arrives within this window the bridge SIGTERMs the subprocess and
-   *  emits `bridge_stuck` with `reason="no_frames_received"` and
-   *  `first_frame_seen=true`. Default 90s; env override
-   *  `ACC2_BRIDGE_STUCK_THRESHOLD_MS`. */
-  stuckThresholdMs?: number;
   /** Override the first-frame budget (ms). Window the subprocess gets
    *  between spawn and its FIRST `bridge_frame_received`. Default 300s;
    *  env override `ACC2_BRIDGE_FIRST_FRAME_THRESHOLD_MS`. Allows slow

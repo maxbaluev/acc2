@@ -54,21 +54,6 @@ export const DEFAULT_TIMEOUT_MS = 600_000;
  *  Override via `ACC2_OPENCODE_MCP_HANDSHAKE_MS` or `SpawnOpts.mcpHandshakeWindowMs`. */
 export const DEFAULT_MCP_HANDSHAKE_WINDOW_MS = 120_000;
 
-/** Inter-frame no-progress threshold — RESERVED, currently unused.
- *  After live ledger evidence (2026-05-15 10:34-10:40) proved that any
- *  sub-overall inter-frame watchdog (90s, 240s) kills the brain mid
- *  strategic synthesis (the brain reasons silently for 4+ min between
- *  MCP calls; opencode built-ins like web_search take 30-60s; complex
- *  bash sequences chain), we DISABLED the inter-frame watchdog
- *  entirely. Once `firstFrameSeen=true` the watchdog yields to the
- *  overall `timeoutMs` budget (default 600s) as the sole upper bound.
- *  This constant is retained so the bridge module surface stays
- *  backwards-compatible with any caller that still passes
- *  `stuckThresholdMs` (tests, programmatic callers); the value has no
- *  observable effect in production. Override via
- *  `ACC2_BRIDGE_STUCK_THRESHOLD_MS` (kept for future re-enable). */
-export const DEFAULT_BRIDGE_STUCK_THRESHOLD_MS = 240_000;
-
 /** First-frame budget — the budget the subprocess gets between SPAWN
  *  and its FIRST `bridge_frame_received` event. The brain's strategic
  *  synthesis on a fresh dispatch often spends 2-4 minutes reasoning

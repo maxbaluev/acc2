@@ -31,7 +31,6 @@ import { parseOpencodeAuth } from "../../cli/doctor";
 import type { BridgeFailureReason, BridgeRequest, BridgeResult, SpawnOpts } from "./types";
 import {
   DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS,
-  DEFAULT_BRIDGE_STUCK_THRESHOLD_MS,
   DEFAULT_MCP_HANDSHAKE_WINDOW_MS,
   DEFAULT_OPENCODE_MODEL,
   DEFAULT_TIMEOUT_MS,
@@ -164,7 +163,6 @@ export const spawnRealOpencode = async (
   const timeoutMs = spawnOpts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const spawn = spawnOpts.spawnFn ?? Bun.spawn;
   const handshakeWindowMs = spawnOpts.mcpHandshakeWindowMs ?? DEFAULT_MCP_HANDSHAKE_WINDOW_MS;
-  const stuckThresholdMs = spawnOpts.stuckThresholdMs ?? DEFAULT_BRIDGE_STUCK_THRESHOLD_MS;
   const firstFrameThresholdMs = spawnOpts.firstFrameThresholdMs ?? DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS;
 
   emitEvent(db, {
@@ -180,7 +178,6 @@ export const spawnRealOpencode = async (
         wall_ms: timeoutMs,
         mcp_handshake_window_ms: handshakeWindowMs,
         first_frame_threshold_ms: firstFrameThresholdMs,
-        stuck_threshold_ms: stuckThresholdMs,
       },
     } as JsonValue,
     invoker: "opencode",

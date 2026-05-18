@@ -65,7 +65,7 @@ describe("inspectDispatch — projection shape", () => {
     insertEvent(db, { id: "E02", kind: "task_node_opened", directive_id: DIRA, task_id: "T_ROOT", payload: { goal: "root goal" } });
     insertEvent(db, { id: "E03", kind: "task_node_opened", directive_id: DIRA, task_id: "T_CHILD1", parent_task_id: "T_ROOT", payload: { goal: "child 1" } });
     insertEvent(db, { id: "E04", kind: "task_node_opened", directive_id: DIRA, task_id: "T_CHILD2", parent_task_id: "T_ROOT", payload: { goal: "child 2" } });
-    insertEvent(db, { id: "E05", kind: "task_edge_recorded", directive_id: DIRA, task_id: "T_CHILD1", parent_task_id: "T_ROOT", payload: { kind: "refines", from_task: "T_ROOT", to_task: "T_CHILD1" } });
+    insertEvent(db, { id: "E05", kind: "task_edge_recorded", directive_id: DIRA, task_id: "T_CHILD1", parent_task_id: "T_ROOT", payload: { edge_kind: "refines", from_task_id: "T_ROOT", to_task_id: "T_CHILD1" } });
     insertEvent(db, { id: "E06", kind: "knowledge_candidate", directive_id: DIRA, task_id: "T_ROOT", payload: { claim: "use depth-1 retrieval" } });
     insertEvent(db, { id: "E07", kind: "knowledge_candidate", directive_id: DIRA, task_id: "T_CHILD1", payload: { claim: "verifier residual is truth-bearing" } });
     insertEvent(db, { id: "E08", kind: "code_artifact_candidate", directive_id: DIRA, task_id: "T_CHILD1", payload: { kind: "verifier", name: "alex_predicate_v1", body: "// 42 bytes of body content here please." } });

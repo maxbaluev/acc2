@@ -669,7 +669,7 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     expect(isBrainReadonlyToolAllowed("unknown_future_write_tool")).toBe(false);
   });
 
-  test("no-progress watchdog fires bridge_stuck when subprocess emits zero frames within stuckThresholdMs", async () => {
+  test("first-frame watchdog fires bridge_stuck when subprocess emits zero frames within firstFrameThresholdMs", async () => {
     const db = openDb(":memory:");
     // Build a fake subprocess that stays alive (`exited` resolves only after
     // we signal it) and emits NO stdout. This simulates the wedge symptom the
@@ -714,11 +714,9 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       {
         spawnFn: fakeSpawn,
         mcpServerUrl: "http://127.0.0.1:1/mcp",
-        // Short stuck thresholds so the test runs fast. The first-frame
-        // budget governs the pre-handshake wedge path; without a frame
+        // Short first-frame budget so the test runs fast. Without a frame
         // ever landing, the watchdog must use this budget. 200ms is well
         // under the 10s timeoutMs ceiling.
-        stuckThresholdMs: 200,
         firstFrameThresholdMs: 200,
         // Long handshake + dispatch watchdogs so they don't fire first; the
         // stuck path must be the one that surfaces.

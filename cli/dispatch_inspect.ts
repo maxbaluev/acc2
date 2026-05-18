@@ -301,7 +301,7 @@ export const inspectDispatch = (db: Database, directiveIdOrPrefix: string): Disp
     });
   }
 
-  // refinement_edges (task_edge_recorded rows with kind=refines).
+  // refinement_edges (task_edge_recorded rows with edge_kind=refines).
   const edgeRows = db.query(
     `SELECT id, ts, task_id, payload FROM events
      WHERE directive_id=? AND kind='task_edge_recorded'
@@ -313,14 +313,9 @@ export const inspectDispatch = (db: Database, directiveIdOrPrefix: string): Disp
       event_id: r.id,
       ts: r.ts,
       task_id: r.task_id,
-      // Live ledger emits `edge_kind` (see brain emit + extractors); the
-      // older `kind` payload alias is kept as a fallback for events
-      // produced before the rename. `from_task_id`/`to_task_id` is the
-      // canonical schema; `from_task`/`to_task` aliases survive in older
-      // refinement edge payloads.
-      edge_kind: String(p.edge_kind ?? p.kind ?? "?"),
-      from_task: String(p.from_task_id ?? p.from_task ?? p.from ?? ""),
-      to_task: String(p.to_task_id ?? p.to_task ?? p.to ?? ""),
+      edge_kind: String(p.edge_kind ?? "?"),
+      from_task: String(p.from_task_id ?? ""),
+      to_task: String(p.to_task_id ?? ""),
     };
   });
 
