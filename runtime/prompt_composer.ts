@@ -869,6 +869,103 @@ export const buildOwnerProfileSection = (profile: OwnerProfile, input: OwnerPoli
   return ["## OWNER PROFILE", ...lines].join("\n");
 };
 
+// ── OWNER RENDERING POLICY (brain contract Q471RAN88X0H513V8BC3BTW0AW, 2026-05-17) ──
+//
+// Two prompt sections — OWNER RENDERING POLICY and OWNER FEEDBACK SUMMARY —
+// teach every cycle that produces owner-visible language to:
+//   1) hide substrate IDs/jargon from primary surfaces,
+//   2) match the owner's preferred_terms / avoided_terms,
+//   3) ask ONE plain-words question when blocked,
+//   4) request confirmation before irreversible/owner-sensitive steps,
+//   5) hold detail behind an explicit drilldown surface.
+//
+// The policy comes from `owner_rendering_policy_view` (latest profile +
+// 14-day feedback aggregates); the section is always emitted, even on a
+// cold install, so the brain knows the rendering contract exists.
+
+import { ownerRenderingPolicy, type OwnerRenderingPolicyRow } from "../substrate/views";
+
+const RENDERING_INVARIANT_LINES: readonly string[] = [
+  "1. Primary owner-visible text MUST NOT contain event_ids, task_ids, directive_ids, view names, residual numbers, or substrate vocabulary.",
+  "2. When primary surface implies action (verify/dispatch/abort/etc.), end with ONE plain-words ask: 'reply when ready', 'do you want me to...', 'please confirm'.",
+  "3. Detail surfaces (drilldown / drawer / --json) MAY surface IDs and substrate vocabulary; that is the explicit technical-detail audience.",
+  "4. Before irreversible / owner-sensitive steps, emit owner_input_required (brain) or hidl_action_required (substrate) with a plain-words summary + suggested_action.",
+  "5. Render owner-visible language in detected_language when policy.detected_language is set with confidence ≥ 0.7; otherwise default to English.",
+  "6. After emitting an owner-visible string, emit rendered_owner_message_recorded so owner_rendering_feedback_recorded can credit the policy posterior.",
+] as const;
+
+const formatStringArray = (xs: readonly string[]): string => {
+  if (!xs || xs.length === 0) return "(none)";
+  return xs.slice(0, 12).join(", ");
+};
+
+export const buildOwnerRenderingPolicySection = (policy: OwnerRenderingPolicyRow | null): string => {
+  const lines: string[] = ["## OWNER RENDERING POLICY"];
+  if (!policy) {
+    lines.push("(no owner_profile_recorded row yet — default invariants apply; do not assume preferences)");
+  } else {
+    if (policy.detected_language) {
+      lines.push(`detected_language: ${policy.detected_language} (render owner-visible language in this when confidence ≥ 0.7)`);
+    }
+    if (typeof policy.autonomy_score === "number") {
+      lines.push(`autonomy_score: ${policy.autonomy_score.toFixed(2)} (below ~0.4 → block multi-file diffs and require explicit owner confirmation before action)`);
+    }
+    if (policy.preferred_terms.length > 0) {
+      lines.push(`preferred_terms (use these in primary surfaces): ${formatStringArray(policy.preferred_terms)}`);
+    }
+    if (policy.avoided_terms.length > 0) {
+      lines.push(`avoided_terms (do not use in primary surfaces): ${formatStringArray(policy.avoided_terms)}`);
+    }
+    if (policy.declined_concepts.length > 0) {
+      lines.push(`declined_concepts (owner declined this concept; use preferred_term mapping if present): ${formatStringArray(policy.declined_concepts)}`);
+    }
+    if (policy.understood_concepts.length > 0) {
+      lines.push(`understood_concepts (owner has demonstrated comprehension; safe to reference without re-explaining): ${formatStringArray(policy.understood_concepts)}`);
+    }
+    if (policy.things_to_never_do.length > 0) {
+      lines.push("things_to_never_do (owner-set hard constraints; refuse + explain + ask for alternative):");
+      for (const t of policy.things_to_never_do) lines.push(`  - ${t}`);
+    }
+    if (policy.manual_review_patterns.length > 0) {
+      lines.push("manual_review_patterns (route via owner_input_required before action):");
+      for (const p of policy.manual_review_patterns) lines.push(`  - ${p}`);
+    }
+    lines.push(`policy_health: ${policy.policy_health.toFixed(2)} (1.0 = clean recent feedback; below ~0.7 → route to careful-render mode)`);
+  }
+  lines.push("");
+  lines.push("Rendering invariants (ALWAYS apply; the rendering_verifier scores adherence):");
+  for (const inv of RENDERING_INVARIANT_LINES) lines.push(inv);
+  return lines.join("\n");
+};
+
+export const buildOwnerFeedbackSummarySection = (policy: OwnerRenderingPolicyRow | null): string => {
+  const lines: string[] = ["## OWNER FEEDBACK SUMMARY (14-day window)"];
+  if (!policy) {
+    lines.push("(no owner_profile_recorded row yet — no rendering feedback aggregated)");
+    return lines.join("\n");
+  }
+  const total =
+    policy.recent_correction_count
+    + policy.recent_decline_count
+    + policy.recent_ignored_count
+    + policy.recent_satisfaction_count
+    + policy.recent_clarification_count
+    + policy.recent_override_count;
+  if (total === 0) {
+    lines.push("(no rendering feedback yet — render carefully; the substrate is still learning the owner's signal vocabulary)");
+    return lines.join("\n");
+  }
+  lines.push(`corrections: ${policy.recent_correction_count} (raise: owner rephrased/explicitly corrected the substrate)`);
+  lines.push(`declines: ${policy.recent_decline_count} (raise: owner declined an action or option)`);
+  lines.push(`ignored: ${policy.recent_ignored_count} (raise: owner did not respond when expected)`);
+  lines.push(`satisfaction: ${policy.recent_satisfaction_count} (raise: owner approved / confirmed / signalled positive)`);
+  lines.push(`clarification_loops: ${policy.recent_clarification_count} (raise: owner asked us to re-explain — usually a jargon leak)`);
+  lines.push(`manual_overrides: ${policy.recent_override_count} (raise: owner manually overrode our action — major rendering signal)`);
+  lines.push("");
+  lines.push("Use these aggregates to choose the careful-render mode (when corrections+declines+ignored+overrides ≥ 2) or the trusting-render mode (when satisfaction outweighs negative signal).");
+  return lines.join("\n");
+};
+
 const readArtifactRegistryTopK = (db: Database, k: number): Array<{ id: string; runtime: string; name: string; score: number }> => {
   const rows = db
     .query(
@@ -1141,6 +1238,15 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     },
   });
   candidates.push({ name: "owner_profile", p: 1, body: ownerProfileBody });
+  // Brain contract Q471RAN88X0H513V8BC3BTW0AW (2026-05-17): the rendering
+  // invariant + feedback summary teach every brain cycle that produces
+  // owner-visible language to hide IDs/jargon and use the owner's words.
+  // We pull policy + 14-day feedback aggregates from one view and split
+  // them into two sections so the brain can tune one without re-reading
+  // the other.
+  const renderingPolicyRow = ownerRenderingPolicy(db);
+  candidates.push({ name: "owner_rendering_policy", p: 1, body: buildOwnerRenderingPolicySection(renderingPolicyRow) });
+  candidates.push({ name: "owner_feedback_summary", p: 1, body: buildOwnerFeedbackSummarySection(renderingPolicyRow) });
   const ownerContextBody = buildOwnerContextSection(ownerContextRows);
   candidates.push({ name: "owner_context", p: 1, body: ownerContextBody });
   const stakeholderBody = renderStakeholderBlock(db, task.directive_id);

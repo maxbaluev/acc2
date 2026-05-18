@@ -2,7 +2,15 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
-import { buildOwnerProfileSection, composePrompt, estimateTokens, readOwnerProfile } from "./prompt_composer";
+import {
+  buildOwnerFeedbackSummarySection,
+  buildOwnerProfileSection,
+  buildOwnerRenderingPolicySection,
+  composePrompt,
+  estimateTokens,
+  readOwnerProfile,
+} from "./prompt_composer";
+import type { OwnerRenderingPolicyRow } from "../substrate/views";
 import { newId } from "./ids";
 import { goalShape } from "./goal_shape";
 import { seedFoundationalKnowledge } from "../substrate/seed";
@@ -499,6 +507,73 @@ describe("prompt_composer", () => {
     const contextIdx = composed.text.indexOf("OWNER CONTEXT");
     expect(profileIdx).toBeGreaterThan(-1);
     expect(contextIdx).toBeGreaterThan(profileIdx);
+  });
+
+});
+
+// ── owner-rendering policy + feedback summary section ────────────────
+describe("buildOwnerRenderingPolicySection + buildOwnerFeedbackSummarySection", () => {
+  const policy = (overrides: Partial<OwnerRenderingPolicyRow> = {}): OwnerRenderingPolicyRow => ({
+    profile_event_id: "PROF1",
+    profile_ts: "2026-05-17T00:00:00Z",
+    profile_payload: {},
+    preferred_terms: [],
+    avoided_terms: [],
+    declined_concepts: [],
+    understood_concepts: [],
+    exposed_concepts: [],
+    things_to_never_do: [],
+    manual_review_patterns: [],
+    autonomy_score: 1.0,
+    autonomy_scope: [],
+    detected_language: "en",
+    recent_correction_count: 0,
+    recent_decline_count: 0,
+    recent_ignored_count: 0,
+    recent_satisfaction_count: 0,
+    recent_clarification_count: 0,
+    recent_override_count: 0,
+    policy_health: 1.0,
+    ...overrides,
+  });
+
+  test("null policy renders default invariants only", () => {
+    const text = buildOwnerRenderingPolicySection(null);
+    expect(text).toContain("## OWNER RENDERING POLICY");
+    expect(text).toContain("no owner_profile_recorded row yet");
+    expect(text).toContain("Primary owner-visible text MUST NOT contain event_ids");
+  });
+
+  test("policy with preferred / avoided / declined / things_to_never_do renders them inline", () => {
+    const text = buildOwnerRenderingPolicySection(policy({
+      preferred_terms: ["plain", "simple"],
+      avoided_terms: ["dispatch", "residual"],
+      declined_concepts: ["telemetry"],
+      things_to_never_do: ["force-push to main"],
+      manual_review_patterns: ["release tags"],
+      autonomy_score: 0.3,
+    }));
+    expect(text).toContain("preferred_terms (use these in primary surfaces): plain, simple");
+    expect(text).toContain("avoided_terms (do not use in primary surfaces): dispatch, residual");
+    expect(text).toContain("declined_concepts");
+    expect(text).toContain("things_to_never_do");
+    expect(text).toContain("- force-push to main");
+    expect(text).toContain("manual_review_patterns");
+    expect(text).toContain("autonomy_score: 0.30");
+  });
+
+  test("feedback summary renders aggregates when present, default copy when window is empty", () => {
+    const empty = buildOwnerFeedbackSummarySection(policy());
+    expect(empty).toContain("no rendering feedback yet");
+
+    const nonEmpty = buildOwnerFeedbackSummarySection(policy({
+      recent_correction_count: 2,
+      recent_decline_count: 1,
+      recent_satisfaction_count: 1,
+    }));
+    expect(nonEmpty).toContain("corrections: 2");
+    expect(nonEmpty).toContain("declines: 1");
+    expect(nonEmpty).toContain("satisfaction: 1");
   });
 });
 
