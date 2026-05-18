@@ -71,12 +71,18 @@ describe("importance icon + colour", () => {
 });
 
 describe("formatNarrativeLine", () => {
-  test("includes ts + icon + kind + content", () => {
+  test("leads with content and trails metadata", () => {
     const line = formatNarrativeLine(row({ human_summary: "Designed the migration." }), 100, baseNow);
+    expect(line.startsWith("Designed the migration.")).toBe(true);
     expect(line).toContain("5s");
     expect(line).toContain("·");
     expect(line).toContain("knowledge_candidate");
-    expect(line).toContain("Designed the migration.");
+  });
+
+  test("first token is human-readable content, not an event kind", () => {
+    const line = formatNarrativeLine(row({ human_summary: "Designed the migration." }), 100, baseNow);
+    expect(line.split(/\s+/)[0]).toBe("Designed");
+    expect(line.split(/\s+/)[0]).not.toBe("knowledge_candidate");
   });
 
   test("truncates summary to width, never IDs", () => {

@@ -45,19 +45,14 @@ export const importanceColor = (importance: SubstrateNarrativeRow["importance"])
 };
 
 /** Format one narrative row into a width-bounded line.
- *  Layout: "<rel-ts>  <icon> <kind-short>  <human_summary>"
- *  human_summary takes whatever width remains; kind is truncated to
- *  ~28 chars (long kinds like runtime_self_diagnostic_recorded are
- *  common). */
+ *  Layout: "<human_summary>  <rel-ts> <icon> <kind>". Content leads;
+ *  kind/icon are trailing metadata, and IDs stay in drilldown only. */
 export const formatNarrativeLine = (row: SubstrateNarrativeRow, width: number, nowMs: number = Date.now()): string => {
-  const ts = formatRelativeTs(row.ts, nowMs).padStart(4, " ");
-  const icon = importanceIcon(row.importance);
-  const kind = row.kind.length > 28 ? row.kind.slice(0, 27) + "…" : row.kind.padEnd(28, " ");
-  const summary = row.human_summary ?? `(no content — payload keys: ${Object.keys(row.payload).slice(0, 4).join(",")})`;
-  const prefix = `${ts}  ${icon} ${kind}  `;
-  const remaining = Math.max(20, width - prefix.length);
-  const trimmed = summary.replace(/\s+/g, " ").slice(0, remaining);
-  return prefix + trimmed;
+  const summary = (row.human_summary ?? `No content (payload keys: ${Object.keys(row.payload).slice(0, 4).join(",")})`)
+    .replace(/\s+/g, " ")
+    .trim();
+  const meta = `  ${formatRelativeTs(row.ts, nowMs)} ${importanceIcon(row.importance)} ${row.kind}`;
+  return `${summary}${meta}`.slice(0, Math.max(0, width));
 };
 
 /** Format the active-task list row (from dispatch_resolved_view). */

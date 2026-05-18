@@ -108,18 +108,18 @@ describe("events table round-trip", () => {
     expect(JSON.parse(row.context_refs as string)).toEqual(contextRefs);
   });
 
-  test("indexes on events(kind, directive_id, task_id, ts, action_artifact_id) exist", () => {
+  test("composite + expression indexes on events table exist (hot query shapes per KC RSHFVCPM)", () => {
     const db = openDb(":memory:");
     const idx = db
       .query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events'")
       .all() as Array<{ name: string }>;
     const names = idx.map((r) => r.name);
     for (const expected of [
-      "idx_events_kind",
-      "idx_events_directive_id",
-      "idx_events_task_id",
-      "idx_events_ts",
-      "idx_events_action_aid",
+      "idx_events_kind_ts",
+      "idx_events_task_kind_ts",
+      "idx_events_directive_kind_ts",
+      "idx_events_action_artifact_kind_ts",
+      "idx_events_projection_key",
     ]) {
       expect(names).toContain(expected);
     }

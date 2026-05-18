@@ -38,9 +38,9 @@ import type { SubstrateClient } from "./transport/substrate-client";
 import type { OwnerPlainStatusRow, OwnerStateBeliefRow, SubstrateNarrativeRow } from "../../substrate/views";
 import {
   formatRelativeTs,
-  importanceIcon,
   importanceColor,
   formatPayloadLines,
+  formatNarrativeLine,
 } from "./format";
 
 type DispatchSummary = {
@@ -119,33 +119,36 @@ export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
       importance_in: filterImportance.length > 0 ? filterImportance : undefined,
     });
     if (env.ok) setRows(env.result);
-    const dispEnv = await client.read<DispatchSummary[]>("dispatch_resolved_view", { include_recent_terminal: true });
-    if (dispEnv.ok) setDispatches((dispEnv.result ?? []).slice(0, 8));
-    const decEnv = await client.read<DecisionRow[]>("pending_owner_decision_queue_view", { limit: 6 });
-    if (decEnv.ok) setDecisions(decEnv.result ?? []);
-    // Plain-language status cards (brain contract Q471RAN88X0H513V8BC3BTW0AW)
-    // — populated unconditionally so the `p` toggle is instant. Cheap one-row-
-    // per-active-directive read.
-    const plainEnv = await client.read<OwnerPlainStatusRow[]>("owner_plain_status_view", { limit: 20 });
-    if (plainEnv.ok) setPlainStatus(plainEnv.result ?? []);
-    // Phase H4: read owner_state_belief_view for the plain-mode header.
-    const beliefEnv = await client.read<OwnerStateBeliefRow | null>("owner_state_belief_view", {});
-    if (beliefEnv.ok) setBelief(beliefEnv.result ?? null);
     const h = await client.health();
     setHealth(h);
     setNowMs(Date.now());
   }, [client, filterImportance]);
 
-  // Re-read on a 1.5s cadence + immediately when SSE fires below.
+  const loadDrilldownViews = useCallback(async () => {
+    const [dispEnv, decEnv, plainEnv, beliefEnv] = await Promise.all([
+      client.read<DispatchSummary[]>("dispatch_resolved_view", { include_recent_terminal: true }),
+      client.read<DecisionRow[]>("pending_owner_decision_queue_view", { limit: 6 }),
+      client.read<OwnerPlainStatusRow[]>("owner_plain_status_view", { limit: 20 }),
+      client.read<OwnerStateBeliefRow | null>("owner_state_belief_view", {}),
+    ]);
+    if (dispEnv.ok) setDispatches((dispEnv.result ?? []).slice(0, 8));
+    if (decEnv.ok) setDecisions(decEnv.result ?? []);
+    if (plainEnv.ok) setPlainStatus(plainEnv.result ?? []);
+    if (beliefEnv.ok) setBelief(beliefEnv.result ?? null);
+  }, [client]);
+
+  const openDrilldown = useCallback((row: SubstrateNarrativeRow) => {
+    setDrilldown(row);
+    void loadDrilldownViews();
+  }, [loadDrilldownViews]);
+
+  // Initial load and filter changes read only the narrative projection.
   useEffect(() => {
     void refresh();
-    const interval = setInterval(() => void refresh(), 1500);
-    return () => clearInterval(interval);
   }, [refresh]);
 
-  // SSE invalidation — each daemon event triggers an immediate
-  // re-query of the narrative view. Cheaper than tight polling and
-  // keeps the screen visibly reactive.
+  // SSE invalidation — daemon events invalidate the primary projection;
+  // the refresh reads only substrate_narrative_recent_view.
   useEffect(() => {
     const ac = new AbortController();
     (async () => {
@@ -191,7 +194,7 @@ export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
       return;
     }
     if (key.return) {
-      if (rows[selected]) setDrilldown(rows[selected]);
+      if (rows[selected]) openDrilldown(rows[selected]);
       return;
     }
     if (input === "d") {
@@ -392,22 +395,17 @@ export const App: React.FC<{ client: SubstrateClient }> = ({ client }) => {
             visibleRows.map((r, i) => {
               const absIdx = scrollTop + i;
               const isSelected = absIdx === selected;
-              const ts = formatRelativeTs(r.ts, nowMs).padStart(4, " ");
-              const icon = importanceIcon(r.importance);
-              const kindShort = r.kind.length > 26 ? r.kind.slice(0, 25) + "…" : r.kind;
-              const summary = r.human_summary ?? `(payload keys: ${Object.keys(r.payload).slice(0, 3).join(",")})`;
-              const remaining = Math.max(20, eventsPaneWidth - ts.length - kindShort.length - 8);
-              const trimmed = summary.replace(/\s+/g, " ").slice(0, remaining);
+              const line = formatNarrativeLine(r, eventsPaneWidth, nowMs);
               return (
                 <Box key={r.event_id} flexDirection="row">
                   <Text
                     color={isSelected ? "black" : importanceColor(r.importance)}
                     backgroundColor={isSelected ? "cyan" : undefined}
                   >
-                    {ts} {icon} {kindShort.padEnd(26, " ")} {" "}
+                    {line}
                   </Text>
                   <Text color={isSelected ? "black" : undefined} backgroundColor={isSelected ? "cyan" : undefined}>
-                    {trimmed}
+                    {""}
                   </Text>
                 </Box>
               );

@@ -44,12 +44,13 @@ CREATE TABLE IF NOT EXISTS events (
   invoker               TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_kind         ON events(kind);
-CREATE INDEX IF NOT EXISTS idx_events_directive_id ON events(directive_id);
-CREATE INDEX IF NOT EXISTS idx_events_task_id      ON events(task_id);
-CREATE INDEX IF NOT EXISTS idx_events_ts           ON events(ts);
-CREATE INDEX IF NOT EXISTS idx_events_action_aid   ON events(action_artifact_id);
-CREATE INDEX IF NOT EXISTS idx_events_embedding_version ON events(embedding_version);
+CREATE INDEX IF NOT EXISTS idx_events_kind_ts                 ON events(kind, ts);
+CREATE INDEX IF NOT EXISTS idx_events_task_kind_ts            ON events(task_id, kind, ts);
+CREATE INDEX IF NOT EXISTS idx_events_directive_kind_ts       ON events(directive_id, kind, ts);
+CREATE INDEX IF NOT EXISTS idx_events_action_artifact_kind_ts ON events(action_artifact_id, kind, ts);
+CREATE INDEX IF NOT EXISTS idx_events_projection_key          ON events(json_extract(payload, '$.projection_key'))
+  WHERE json_extract(payload, '$.projection_key') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_embedding_version       ON events(embedding_version);
 
 -- ── code_artifact ──────────────────────────────────────────────────
 -- Registry row per LATM/Voyager artifact. declared_sandbox + fixture_input

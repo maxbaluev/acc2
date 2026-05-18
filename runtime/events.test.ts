@@ -199,12 +199,12 @@ describe("emitEvent act_tuple_recorded projector", () => {
       .all(taskId);
     expect(rows.map((row) => row.kind)).toEqual([
       "act_tuple_recorded",
-      "retrieval_binding",
-      "retrieval_binding",
       "action_predicted",
       "action_scored",
-      "candidate_confirmed",
       "applied_change_committed",
+      "candidate_confirmed",
+      "retrieval_binding",
+      "retrieval_binding",
     ]);
     for (const row of rows.slice(1)) {
       expect(JSON.parse(row.payload).source_act_id).toBe(act.id);

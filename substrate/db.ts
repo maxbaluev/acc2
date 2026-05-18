@@ -97,7 +97,17 @@ const ARTIFACT_METADATA_COLUMNS: Array<{ name: string; ddl: string }> = [
   { name: "kind",                ddl: "ALTER TABLE code_artifact ADD COLUMN kind TEXT NOT NULL DEFAULT 'code_artifact'" },
 ];
 
+const EVENT_HOT_PATH_INDEXES = [
+  "CREATE INDEX IF NOT EXISTS idx_events_kind_ts ON events(kind, ts)",
+  "CREATE INDEX IF NOT EXISTS idx_events_task_kind_ts ON events(task_id, kind, ts)",
+  "CREATE INDEX IF NOT EXISTS idx_events_directive_kind_ts ON events(directive_id, kind, ts)",
+  "CREATE INDEX IF NOT EXISTS idx_events_action_artifact_kind_ts ON events(action_artifact_id, kind, ts)",
+  "CREATE INDEX IF NOT EXISTS idx_events_projection_key ON events(json_extract(payload, '$.projection_key')) WHERE json_extract(payload, '$.projection_key') IS NOT NULL",
+];
+
 export const runMigrations = (db: Database): void => {
+  for (const ddl of EVENT_HOT_PATH_INDEXES) db.run(ddl);
+
   for (const col of ARTIFACT_METADATA_COLUMNS) {
     try {
       db.run(col.ddl);
