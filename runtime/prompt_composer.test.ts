@@ -9,11 +9,12 @@ import {
   buildOwnerRenderingPolicySection,
   buildOwnerStateBeliefSection,
   buildOwnerStateFeedbackSummarySection,
+  buildTopLawsSection,
   composePrompt,
   estimateTokens,
   readOwnerProfile,
 } from "./prompt_composer";
-import type { OwnerRenderingPolicyRow, OwnerStateBeliefRow } from "../substrate/views";
+import type { OwnerRenderingPolicyRow, OwnerStateBeliefRow, TopLawRow } from "../substrate/views";
 import { newId } from "./ids";
 import { goalShape } from "./goal_shape";
 import { seedFoundationalKnowledge } from "../substrate/seed";
@@ -684,5 +685,24 @@ describe("buildOwnerStateBeliefSection + buildAlignmentActionPolicySection + bui
   test("alignment_action_policy short-circuits on null belief", () => {
     const text = buildAlignmentActionPolicySection(null);
     expect(text).toContain("no owner_state_belief");
+  });
+
+  test("buildTopLawsSection renders ranked laws with event_id citation hint (Phase I3+)", () => {
+    const laws: TopLawRow[] = [
+      { event_id: "LAW1", ts: "2026-05-18", substrate_origin: "brain", candidate_id: null, directive_id: null, score: 0.95, confidence: 0.9, text: "Citation is mutation (k_554)", tags: [], context_refs: [], law_rank: 1 },
+      { event_id: "LAW2", ts: "2026-05-18", substrate_origin: "brain", candidate_id: null, directive_id: null, score: 0.92, confidence: 0.88, text: "Retrieval binding (k_201) — knowledge compounds only when retrieval is behaviorally binding", tags: [], context_refs: [], law_rank: 2 },
+    ];
+    const text = buildTopLawsSection(laws);
+    expect(text).toContain("## TOP LAWS");
+    expect(text).toContain("1. LAW1 (score 0.95)");
+    expect(text).toContain("Citation is mutation");
+    expect(text).toContain("2. LAW2 (score 0.92)");
+    expect(text).toContain("citation is mutation (k_554)");
+  });
+
+  test("buildTopLawsSection renders empty hint when no laws", () => {
+    const text = buildTopLawsSection([]);
+    expect(text).toContain("## TOP LAWS");
+    expect(text).toContain("substrate is still learning");
   });
 });

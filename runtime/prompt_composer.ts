@@ -886,8 +886,10 @@ export const buildOwnerProfileSection = (profile: OwnerProfile, input: OwnerPoli
 import {
   ownerRenderingPolicy,
   ownerStateBelief,
+  topLaws,
   type OwnerRenderingPolicyRow,
   type OwnerStateBeliefRow,
+  type TopLawRow,
 } from "../substrate/views";
 
 const RENDERING_INVARIANT_LINES: readonly string[] = [
@@ -1028,6 +1030,31 @@ export const buildAlignmentActionPolicySection = (belief: OwnerStateBeliefRow | 
   }
   lines.push("Decision rules (consult OWNER STATE BELIEF above for current axis values):");
   for (const rule of ALIGNMENT_ACTION_POLICY_LINES) lines.push(`- ${rule}`);
+  return lines.join("\n");
+};
+
+// ── TOP LAWS section (brain dispatch 3NWCD7PW315W Phase I3+, 2026-05-18) ──
+// Surfaces the substrate's highest-scoring promoted_knowledge rows
+// (top_laws_view, score >= 0.75 by default) so the brain sees its own
+// current principles at compose time. Same pattern as the legacy
+// system/CLAUDE.md auto-compiled Top Laws section — but driven from
+// live Beta posterior, refreshed every cycle. The brain emits with
+// fewer prompt-compliance failures (k_201 retrieval binding becomes
+// literal: cite the law id when the law shaped the action).
+export const buildTopLawsSection = (laws: TopLawRow[]): string => {
+  const lines: string[] = ["## TOP LAWS (auto-compiled from scored knowledge — score >= 0.75)"];
+  if (laws.length === 0) {
+    lines.push("(no promoted_knowledge rows above the floor yet — substrate is still learning its principles)");
+    return lines.join("\n");
+  }
+  lines.push("");
+  lines.push("These are the organism's current highest-scored principles by Beta posterior. They govern brain emission. Cite the relevant law's event_id in any action_predicted.context_refs when a law shaped the action — citation is mutation (k_554).");
+  lines.push("");
+  for (const law of laws) {
+    const shortText = law.text.replace(/\s+/g, " ").trim();
+    const truncated = shortText.length > 320 ? shortText.slice(0, 317) + "…" : shortText;
+    lines.push(`${law.law_rank}. ${law.event_id} (score ${law.score.toFixed(2)}): ${truncated}`);
+  }
   return lines.join("\n");
 };
 
@@ -1376,6 +1403,14 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   candidates.push({ name: "owner_state_belief", p: 1, body: buildOwnerStateBeliefSection(beliefRow) });
   candidates.push({ name: "alignment_action_policy", p: 1, body: buildAlignmentActionPolicySection(beliefRow) });
   candidates.push({ name: "owner_state_feedback_summary", p: 1, body: buildOwnerStateFeedbackSummarySection(beliefRow) });
+  // Phase I3+ consumer (brain dispatch 3NWCD7PW315W): surface the
+  // substrate's auto-compiled Top Laws so the brain sees its own
+  // principles at compose time. Closes the 88ESCTN8XN6J flywheel for
+  // top_laws_view — without this section the view exists but nothing
+  // reads it during dispatch. Limit 10 keeps the section compact
+  // (default token budget); operator can widen via owner_profile.
+  const liveTopLaws = topLaws(db, { min_score: 0.75, limit: 10 });
+  candidates.push({ name: "top_laws", p: 1, body: buildTopLawsSection(liveTopLaws) });
   const ownerContextBody = buildOwnerContextSection(ownerContextRows);
   candidates.push({ name: "owner_context", p: 1, body: ownerContextBody });
   const stakeholderBody = renderStakeholderBlock(db, task.directive_id);
