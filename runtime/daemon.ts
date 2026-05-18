@@ -604,6 +604,31 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     workers.push(() => clearInterval(supervisorTickHandle));
   }
 
+  // Brain contract Q471RAN88X0H513V8BC3BTW0AW Phase F (2026-05-17):
+  // rendering-audit worker. Scans recent rendered_owner_message_recorded
+  // rows that lack feedback, runs the rendering verifier, and emits
+  // owner_rendering_feedback_recorded with feedback_kind=auto_verifier|
+  // auto_verifier_clean so the policy posterior moves on machine
+  // evidence. Closes the 88ESCTN8XN6J gap ("flywheel persisted but
+  // unconsumed by any always-on worker"). Default tick 5 min;
+  // configurable via ACC2_RENDERING_AUDIT_INTERVAL_MS.
+  const RENDERING_AUDIT_INTERVAL_MS = Number(process.env.ACC2_RENDERING_AUDIT_INTERVAL_MS ?? 5 * 60 * 1000);
+  if (isWorkerEnabled("rendering_audit")) {
+    const { renderingAuditWorkerTick } = await import("./rendering_audit_worker");
+    let renderingAuditMarked = false;
+    const renderingAuditTickHandle = setInterval(
+      supervisedTick(db, "rendering_audit", RENDERING_AUDIT_INTERVAL_MS, async () => {
+        renderingAuditWorkerTick(db);
+        if (!renderingAuditMarked) { markWorkerReady("rendering_audit"); renderingAuditMarked = true; }
+      }),
+      RENDERING_AUDIT_INTERVAL_MS,
+    );
+    markWorkerReady("rendering_audit");
+    renderingAuditMarked = true;
+    recordWorkerTick("rendering_audit");
+    workers.push(() => clearInterval(renderingAuditTickHandle));
+  }
+
   // Batch 10: substrate compactor — periodic pruning of bridge_frame_received
   // rows older than COMPACTION_FRAME_RETENTION_MS (24h default). The
   // canonical events (brain_dispatched, action_predicted, action_scored,
