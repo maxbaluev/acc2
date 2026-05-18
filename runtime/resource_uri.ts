@@ -8,6 +8,12 @@ export const RESOURCE_URI_SCHEMES = [
   "browser_session",
   "ledger",
   "contact",
+  // C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14): external Drive
+  // doc handle. Canonical form is `drive://document/<doc_id>` so the
+  // scheme separator is `:` (split at the first `:`) and the resource
+  // `id` becomes `//document/<doc_id>`. Validation requires that prefix
+  // — a bare `drive:foo` is refused so provenance URIs are unambiguous.
+  "drive",
 ] as const;
 
 export type ResourceUriScheme = typeof RESOURCE_URI_SCHEMES[number];
@@ -49,6 +55,14 @@ export const parseResourceUri = (raw: unknown): ResourceUri | null => {
       if (u.protocol !== "http:" && u.protocol !== "https:") return null;
       id = u.href;
     } catch { return null; }
+  }
+  if (scheme === "drive") {
+    // Canonical Drive document handle: `drive://document/<doc_id>`. After
+    // splitting at the first `:` the remainder is `//document/<doc_id>`.
+    // Refuse anything else so provenance citations are unambiguous.
+    if (!id.startsWith("//document/")) return null;
+    const docId = id.slice("//document/".length);
+    if (docId.length === 0 || /\s|\//.test(docId)) return null;
   }
   return { uri: `${scheme}:${id}`, scheme: scheme as ResourceUriScheme, id };
 };

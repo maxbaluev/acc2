@@ -97,6 +97,18 @@ CREATE TABLE IF NOT EXISTS code_artifact (
   target_resources            TEXT,          -- JSON array of ResourceUri strings
   source_candidate_id         TEXT,
   owner_gate_verdict          TEXT,          -- 'auto' | 'owner_approved' | 'owner_rejected' | NULL
+  -- C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14):
+  -- artifact provenance chain. supersedes / superseded_by point to a
+  -- prior / successor artifact_id (both nullable). lost_version_count
+  -- annotates artifacts whose external resource (e.g. Drive doc) was
+  -- destructively trashed before the substrate could record a chain —
+  -- partial provenance backfill placeholders. Non-destructive by
+  -- default: new published_drive_doc admission only flips the prior
+  -- artifact's superseded_by; trashing the external Drive doc remains
+  -- an explicit owner action.
+  supersedes                  TEXT,
+  superseded_by               TEXT,
+  lost_version_count          INTEGER NOT NULL DEFAULT 0,
   created_at                  TEXT NOT NULL,
   updated_at                  TEXT NOT NULL
 );
@@ -105,6 +117,14 @@ CREATE INDEX IF NOT EXISTS idx_code_artifact_runtime ON code_artifact(runtime);
 CREATE INDEX IF NOT EXISTS idx_code_artifact_status  ON code_artifact(status);
 CREATE INDEX IF NOT EXISTS idx_code_artifact_score   ON code_artifact(score DESC);
 CREATE INDEX IF NOT EXISTS idx_code_artifact_kind    ON code_artifact(kind);
+-- C5 provenance indexes (idx_code_artifact_supersedes /
+-- idx_code_artifact_superseded_by) live in db.ts EVENT_HOT_PATH_INDEXES,
+-- which runs AFTER runMigrations adds the supersedes / superseded_by
+-- columns to pre-C5 tables via ALTER TABLE. Keeping the indexes in
+-- schema.sql would break openDb() on any DB that predates C5:
+-- runSchema() executes BEFORE runMigrations(), so CREATE INDEX would
+-- reference a column that doesn't exist yet. db.ts is the single
+-- source of truth for these indexes — see substrate/db.ts:113-114.
 
 -- ── sqlite-vec virtual table: canonical embedding index ────────────
 -- Per v2-design.md §3.6.1 Rule 1 (embedding-based candidate dedup) and

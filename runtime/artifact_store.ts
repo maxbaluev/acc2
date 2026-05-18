@@ -40,6 +40,11 @@ import { betaMean, betaStreamConfidence } from "./posterior";
 export type CodeArtifactRow = {
   id: string;
   runtime: Runtime;
+  /** Free-string discriminator for the row's purpose. Default
+   *  `code_artifact` for legacy rows; typed rows declare their own
+   *  (e.g. `dispatch_strategy_v1`, `published_drive_doc`). See
+   *  schema.sql:76. */
+  kind: string;
   body: string;
   declaredSandbox: SandboxDecl;
   stateRoot: string | null;
@@ -63,13 +68,27 @@ export type CodeArtifactRow = {
   targetResources: ResourceRef[] | null;
   sourceCandidateId: string | null;
   ownerGateVerdict: "auto" | "owner_approved" | "owner_rejected" | null;
+  // C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14): provenance
+  // chain. supersedes / supersededBy reference prior/successor
+  // artifact_ids (both nullable). lostVersionCount annotates partial
+  // backfill placeholders for artifacts whose external resource was
+  // destructively trashed without a substrate chain.
+  supersedes: string | null;
+  supersededBy: string | null;
+  lostVersionCount: number;
   createdAt: string;
   updatedAt: string;
 };
 
-export type InsertArtifactInput = Omit<CodeArtifactRow, "createdAt" | "updatedAt" | "id" | "targetResources"> & {
+export type InsertArtifactInput = Omit<CodeArtifactRow, "createdAt" | "updatedAt" | "id" | "targetResources" | "supersedes" | "supersededBy" | "lostVersionCount" | "kind"> & {
   id?: string;
+  /** Optional kind discriminator. Defaults to `code_artifact` on the row
+   *  if omitted (matches the schema default). */
+  kind?: string;
   targetResources?: ResourceRef[] | string[] | null;
+  supersedes?: string | null;
+  supersededBy?: string | null;
+  lostVersionCount?: number | null;
 };
 
 // ── EMA / scoring helpers ──────────────────────────────────────────
@@ -140,6 +159,7 @@ const parseStringArray = (raw: unknown): string[] | null => {
 const mapRow = (raw: Record<string, unknown>): CodeArtifactRow => ({
   id: raw.id as string,
   runtime: raw.runtime as Runtime,
+  kind: ((raw.kind as string | null) ?? "code_artifact"),
   body: raw.body as string,
   declaredSandbox: JSON.parse(raw.declared_sandbox as string) as SandboxDecl,
   stateRoot: (raw.state_root as string | null) ?? null,
@@ -159,6 +179,9 @@ const mapRow = (raw: Record<string, unknown>): CodeArtifactRow => ({
   targetResources: parseResourceRefs(raw.target_resources) ?? resourcesFromTargetFiles(parseStringArray(raw.target_files)),
   sourceCandidateId: (raw.source_candidate_id as string | null) ?? null,
   ownerGateVerdict: (raw.owner_gate_verdict as CodeArtifactRow["ownerGateVerdict"]) ?? null,
+  supersedes: (raw.supersedes as string | null) ?? null,
+  supersededBy: (raw.superseded_by as string | null) ?? null,
+  lostVersionCount: ((raw.lost_version_count as number | null) ?? 0),
   createdAt: raw.created_at as string,
   updatedAt: raw.updated_at as string,
 });
@@ -176,16 +199,18 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): CodeAr
   const targetFiles = input.targetFiles ?? repoTargetFilesFromResources(targetResources);
   db.run(
     `INSERT INTO code_artifact (
-       id, runtime, body, declared_sandbox, state_root,
+       id, runtime, kind, body, declared_sandbox, state_root,
        posterior_alpha, posterior_beta, score, confidence,
        recent_residual_mean, recent_kill_count, status, name,
        fixture_input, fixture_expected_residual,
        intent, summary, target_files, target_resources, source_candidate_id, owner_gate_verdict,
+       supersedes, superseded_by, lost_version_count,
        created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.runtime,
+      input.kind ?? "code_artifact",
       input.body,
       JSON.stringify(input.declaredSandbox),
       stateRoot,
@@ -205,6 +230,9 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): CodeAr
       targetResources ? JSON.stringify(targetResources.map((r) => r.uri)) : null,
       input.sourceCandidateId,
       input.ownerGateVerdict,
+      input.supersedes ?? null,
+      input.supersededBy ?? null,
+      input.lostVersionCount ?? 0,
       ts,
       ts,
     ],

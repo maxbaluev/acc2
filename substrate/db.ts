@@ -95,6 +95,13 @@ const ARTIFACT_METADATA_COLUMNS: Array<{ name: string; ddl: string }> = [
   // value. The seedCodeArtifacts code path overwrites for newly-added
   // typed rows (e.g. 'dispatch_strategy_v1'). Index added in schema.sql.
   { name: "kind",                ddl: "ALTER TABLE code_artifact ADD COLUMN kind TEXT NOT NULL DEFAULT 'code_artifact'" },
+  // C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14): artifact
+  // provenance chain. Three columns sit directly on code_artifact so
+  // graph walks are pure SQL — no side table needed, matching the
+  // additive-column pattern the contract picked.
+  { name: "supersedes",          ddl: "ALTER TABLE code_artifact ADD COLUMN supersedes TEXT" },
+  { name: "superseded_by",       ddl: "ALTER TABLE code_artifact ADD COLUMN superseded_by TEXT" },
+  { name: "lost_version_count",  ddl: "ALTER TABLE code_artifact ADD COLUMN lost_version_count INTEGER NOT NULL DEFAULT 0" },
 ];
 
 const EVENT_HOT_PATH_INDEXES = [
@@ -103,11 +110,17 @@ const EVENT_HOT_PATH_INDEXES = [
   "CREATE INDEX IF NOT EXISTS idx_events_directive_kind_ts ON events(directive_id, kind, ts)",
   "CREATE INDEX IF NOT EXISTS idx_events_action_artifact_kind_ts ON events(action_artifact_id, kind, ts)",
   "CREATE INDEX IF NOT EXISTS idx_events_projection_key ON events(json_extract(payload, '$.projection_key')) WHERE json_extract(payload, '$.projection_key') IS NOT NULL",
+  // C5 (2026-05-18) provenance indexes — mirrors schema.sql so older DBs
+  // upgraded via runMigrations() get the same lookup shape.
+  "CREATE INDEX IF NOT EXISTS idx_code_artifact_supersedes    ON code_artifact(supersedes)    WHERE supersedes IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_code_artifact_superseded_by ON code_artifact(superseded_by) WHERE superseded_by IS NOT NULL",
 ];
 
 export const runMigrations = (db: Database): void => {
-  for (const ddl of EVENT_HOT_PATH_INDEXES) db.run(ddl);
-
+  // Order matters: ALTER TABLE columns FIRST, then CREATE INDEX. The
+  // C5 (supersedes / superseded_by) indexes reference columns added
+  // by the migration below; running them in reverse order fails on
+  // any pre-C5 DB with `no such column: supersedes`.
   for (const col of ARTIFACT_METADATA_COLUMNS) {
     try {
       db.run(col.ddl);
@@ -118,6 +131,9 @@ export const runMigrations = (db: Database): void => {
       if (!msg.includes("duplicate column name")) throw err;
     }
   }
+
+  for (const ddl of EVENT_HOT_PATH_INDEXES) db.run(ddl);
+
   // L8 backfill: dispatch_strategy seed rows (admitted with
   // state_root='dispatch/strategy') predate the kind column.
   // Tag them so the strategy_ranker can use the cleaner kind
