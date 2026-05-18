@@ -492,6 +492,10 @@ export const dispatchReadyTask = async (
       taskId: task.id,
       directiveId: task.directive_id,
       fixtureTargetPath: deps.fixtureTargetPath,
+      // F8: thread the dispatch_id through so the bridge's spawn-time
+      // brain_dispatched + brain_dispatch_closed pair joins to the same
+      // dispatch row the task_dispatcher just emitted.
+      dispatchId,
     },
     db,
   );

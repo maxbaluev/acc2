@@ -27,6 +27,8 @@ import type { JsonValue } from "../../substrate/types";
 import { emitEvent } from "../events";
 import { emitActTupleDirect } from "../act_tuple";
 import { isCycleViolation } from "../cycle_one_gate";
+import { getBootSessionToken } from "../brain_dispatch_reconciler";
+import { newId } from "../ids";
 import { parseOpencodeAuth } from "../../cli/doctor";
 import type { BridgeFailureReason, BridgeRequest, BridgeResult, SpawnOpts } from "./types";
 import {
@@ -397,6 +399,59 @@ export const spawnRealOpencode = async (
   };
   LIVE_OPENCODE_PROCS.add(liveEntry);
   proc.exited.finally(() => { LIVE_OPENCODE_PROCS.delete(liveEntry); });
+
+  // F8: bracket the subprocess lifecycle with spawn-time
+  // brain_dispatched + brain_dispatch_closed rows. The task_dispatcher
+  // already emitted an upstream brain_dispatched audit row for this
+  // dispatch_id; the row below ENRICHES the audit trail with the real
+  // subprocess pid + spawn timestamp + boot session token so a later
+  // restart reconciler can prove which daemon process owned the dispatch.
+  // The matching close fires deterministically on proc.exited.finally.
+  const dispatchId = req.dispatchId ?? newId();
+  const spawnSessionToken = getBootSessionToken();
+  const spawnedAtMs = Date.now();
+  const spawnSubprocessPid = proc.pid ?? null;
+  emitEvent(db, {
+    kind: "brain_dispatched",
+    substrate_origin: "opencode",
+    directive_id: req.directiveId,
+    task_id: req.taskId,
+    payload: {
+      dispatch_id: dispatchId,
+      session_token: spawnSessionToken,
+      started_at_ms: spawnedAtMs,
+      subprocess_pid: spawnSubprocessPid,
+      directive_id: req.directiveId,
+      emission_origin: "bridge_spawn",
+    } as JsonValue,
+    invoker: "opencode",
+  });
+  let dispatchClosureEmitted = false;
+  const closeBrainDispatch = (closureReason: string): void => {
+    if (dispatchClosureEmitted) return;
+    dispatchClosureEmitted = true;
+    try {
+      emitEvent(db, {
+        kind: "brain_dispatch_closed",
+        substrate_origin: "opencode",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        payload: {
+          dispatch_id: dispatchId,
+          closure_reason: closureReason,
+          closed_at_ms: Date.now(),
+          session_token: spawnSessionToken,
+          subprocess_pid: spawnSubprocessPid,
+          original_started_at_ms: spawnedAtMs,
+          emission_origin: "bridge_spawn",
+        } as JsonValue,
+        invoker: "opencode",
+      });
+    } catch { /* best-effort — boot reconciler will close any miss */ }
+  };
+  // Defense-in-depth: when the subprocess exits, fire the close
+  // deterministically. Idempotent — second call no-ops via the flag above.
+  proc.exited.finally(() => closeBrainDispatch("brain_subprocess_exited"));
 
   // Watchdog: SIGTERM at timeoutMs, SIGKILL at timeoutMs * 1.5.
   let killed = false;

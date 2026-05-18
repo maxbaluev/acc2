@@ -3,6 +3,20 @@
 // the events + code_artifact tables. Schema is applied on first open
 // per path; connections are cached so re-opens reuse the same handle.
 //
+// Migration policy (F9, SQLPOOLARCH01, cites 3P7NAMR63901):
+//   Two parallel public surfaces:
+//     - `openDb(path)` / `closeDb(path)`           — single Database
+//       handle, synchronous, the original API. Use for boot, tests,
+//       and any path that already holds a synchronous bun:sqlite handle.
+//     - `openDbPool(path, opts)` / `closeDbPool(path)` — async pool
+//       wrapper. Use for any new code path that could run concurrently
+//       with another terminal or brain subprocess. The pool serializes
+//       writes through a single writer slot (SQLite WAL allows one
+//       writer at a time) and shares N reader connections round-robin.
+//   The contract is compatibility-preserving: no call site migration
+//   in this commit. Existing callers continue to use openDb/closeDb;
+//   new multi-terminal-aware callers adopt openDbPool/closeDbPool.
+//
 // sqlite-vec extension:
 //   Loaded once per connection right before schema application so the
 //   vec0 virtual table in schema.sql can be created. The extension is
@@ -241,6 +255,36 @@ const applyReaderPragmas = (db: Database): void => {
   db.run("PRAGMA mmap_size = 268435456");
 };
 
+/** F9 writer pool pragmas: tuned for multi-terminal contention.
+ *  Cites 3P7NAMR63901. Five settings are load-bearing per the
+ *  67MB-WAL incident — document inline so a future refactor does not
+ *  strip them:
+ *    - `journal_mode = wal`          one writer + many readers, no blocking
+ *    - `synchronous = NORMAL`        durable enough for WAL, much faster than FULL
+ *    - `wal_autocheckpoint = 1000`   auto-checkpoint every 1000 pages
+ *    - `busy_timeout = 5000`         wait up to 5s on writer contention
+ *    - `mmap_size = 268435456`       256MB memory-mapped reads
+ *  applyWalPragmas sets four of these on the writer; this helper
+ *  re-applies `wal_autocheckpoint = 1000` (the writer pragmas default
+ *  to 2000) so the pool path matches the documented contract value of
+ *  1000 pages (~4MB checkpoint cadence). */
+const applyPoolWriterPragmas = (db: Database): void => {
+  db.run("PRAGMA wal_autocheckpoint = 1000");
+  db.run("PRAGMA busy_timeout = 5000");
+};
+
+export type SqliteDbPoolStats = {
+  connections_total: number;
+  connections_idle: number;
+  connections_busy: number;
+  write_queue_depth: number;
+  total_reads: number;
+  total_writes: number;
+  last_checkpoint_ms_ago: number;
+  db_path: string;
+  closed: boolean;
+};
+
 export class SqliteDbPool {
   readonly dbPath: string;
   readonly maxReaders: number;
@@ -253,12 +297,18 @@ export class SqliteDbPool {
   private closing = false;
   private closed = false;
   private readerDrainResolve: (() => void) | null = null;
+  // F9 stats counters (lifetime, per-pool).
+  private totalReads = 0;
+  private totalWrites = 0;
+  private writeQueueDepth = 0;
+  private lastCheckpointAtMs = -1;
 
   constructor(dbPath: string, opts: SqliteDbPoolOptions = {}) {
     this.dbPath = dbPath;
     this.maxReaders = Math.max(1, Math.floor(opts.maxReaders ?? DEFAULT_READER_POOL_SIZE));
     this.writer = new Database(dbPath, { create: true, strict: true });
     applyWalPragmas(this.writer);
+    applyPoolWriterPragmas(this.writer);
     loadSqliteVec(this.writer);
     runSchema(this.writer);
     runMigrations(this.writer);
@@ -267,22 +317,51 @@ export class SqliteDbPool {
 
   async withWriter<T>(fn: (db: Database) => T | Promise<T>): Promise<T> {
     if (this.closing || this.closed) throw new Error("sqlite_pool_closed");
+    this.writeQueueDepth += 1;
     const run = this.writerTail.then(async () => {
       if (this.closed) throw new Error("sqlite_pool_closed");
       return await fn(this.writer);
     });
     this.writerTail = run.catch(() => undefined);
-    return await run;
+    try {
+      const result = await run;
+      this.totalWrites += 1;
+      return result;
+    } finally {
+      this.writeQueueDepth = Math.max(0, this.writeQueueDepth - 1);
+    }
   }
 
   async acquireReader(): Promise<ReaderLease> {
     if (this.closing || this.closed) throw new Error("sqlite_pool_closed");
+    this.totalReads += 1;
     const idle = this.idleReaders.pop();
     if (idle) return this.makeLease(idle);
     if (this.allReaders.size < this.maxReaders) return this.makeLease(this.openReader());
     return await new Promise<ReaderLease>((resolve, reject) => {
       this.readerWaiters.push({ resolve, reject });
     });
+  }
+
+  /** F9 snapshot stats helper. Returns a synchronous projection of pool state.
+   *  Wired into the daemon /health endpoint so `acc daemon status` can surface
+   *  reader/writer utilisation, write-queue depth, and lifetime counters. */
+  stats(): SqliteDbPoolStats {
+    const idle = this.idleReaders.length;
+    const busy = this.activeReaders;
+    const total = this.allReaders.size + 1; // +1 for writer
+    const lastCheckpointMsAgo = this.lastCheckpointAtMs < 0 ? -1 : Date.now() - this.lastCheckpointAtMs;
+    return {
+      connections_total: total,
+      connections_idle: idle,
+      connections_busy: busy,
+      write_queue_depth: this.writeQueueDepth,
+      total_reads: this.totalReads,
+      total_writes: this.totalWrites,
+      last_checkpoint_ms_ago: lastCheckpointMsAgo,
+      db_path: this.dbPath,
+      closed: this.closed,
+    };
   }
 
   async withReader<T>(fn: (db: Database) => T | Promise<T>): Promise<T> {
@@ -362,6 +441,21 @@ export const closeDbPool = async (dbPath: string): Promise<void> => {
   if (!pool) return;
   _poolCache.delete(dbPath);
   await pool.close();
+};
+
+/** F9 standalone stats helper. Public surface for callers that hold a
+ *  pool reference (e.g. daemon /health, ops diagnostics). Equivalent to
+ *  calling `pool.stats()`. */
+export const getPoolStats = (pool: SqliteDbPool): SqliteDbPoolStats => pool.stats();
+
+/** F9 multi-pool view: emit a stats row per cached pool. Used by the
+ *  daemon /health endpoint when multiple pools may be open. Returns an
+ *  array so the caller can render every row without knowing the pool
+ *  paths up front. */
+export const getAllPoolStats = (): SqliteDbPoolStats[] => {
+  const out: SqliteDbPoolStats[] = [];
+  for (const [, pool] of _poolCache) out.push(pool.stats());
+  return out;
 };
 
 export const closeDbPools = async (): Promise<void> => {

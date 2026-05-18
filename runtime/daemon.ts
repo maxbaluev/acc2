@@ -30,7 +30,7 @@ import type { Server } from "bun";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Database } from "bun:sqlite";
-import { closeDb, openDb } from "../substrate/db";
+import { closeDb, openDb, getAllPoolStats } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { emitEvent } from "./events";
 import { subscribe, resetBus, type BusEvent } from "./event_bus";
@@ -60,6 +60,8 @@ import type { SandboxDecl } from "../substrate/types";
 import { logger } from "./logger";
 import { metricsHandler, refreshGauges } from "./metrics";
 import { integrityWorkerTick, runIntegrityCheck, reconcileOrphanedDispatches } from "./integrity_worker";
+import { reconcileBrainDispatchesAtBoot, getOpenBrainDispatches, setBootSessionToken } from "./brain_dispatch_reconciler";
+import { waitForBrainQuiescence } from "./restart_quiescence";
 import { isWorkerEnabled } from "./worker_autostart";
 import {
   isReady,
@@ -472,6 +474,22 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   const orphans = reconcileOrphanedDispatches(db);
   if (orphans.length > 0) {
     logger.info({ orphan_count: orphans.length }, "reconciled orphan dispatches at boot");
+  }
+  // F8 boot reconciler: mint a session token for this daemon process and
+  // close every `brain_dispatched` row still lacking a matching
+  // `brain_dispatch_closed`. Runs BEFORE the `daemon_started` event so
+  // the ledger is honest about prior-restart state before any new
+  // dispatch fires. The token is also stamped on every fresh
+  // `brain_dispatched` payload via getBootSessionToken so a later audit
+  // can correlate dispatches to the daemon process that owned them.
+  const bootSessionToken = `daemon-${process.pid}-${Date.now()}`;
+  setBootSessionToken(bootSessionToken);
+  const reconcileSummary = reconcileBrainDispatchesAtBoot(db, bootSessionToken);
+  if (reconcileSummary.reconciled_count > 0) {
+    logger.info(
+      { reconciled_count: reconcileSummary.reconciled_count, boot_session_token: bootSessionToken },
+      "reconciled live brain dispatches at boot (restart_reconciled)",
+    );
   }
 
   // Phase F: rebuild the in-memory embedding index from substrate. On fresh
@@ -1306,6 +1324,31 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // drain helper with timeoutMs=0 so the standard event pair is emitted —
     // observers see exactly which path the shutdown took.
     const drain = await drainInFlightDispatches({ timeoutMs: budgetMs });
+    // F8 quiescence: after the process-local IN_FLIGHT map drains, wait
+    // for ledger-visible brain dispatches (matching `brain_dispatched`
+    // rows without a `brain_dispatch_closed`) to close. This covers
+    // cross-process dispatches the local map cannot see (multi-terminal
+    // multi-brain). The remaining budget is the leftover from
+    // drainInFlightDispatches; if it returned early we still give the
+    // ledger up to that remainder.
+    const quiescenceBudgetMs = Math.max(0, budgetMs - (Date.now() - drainStartedAtMs));
+    if (quiescenceBudgetMs > 0) {
+      const quiescence = await waitForBrainQuiescence(db, { budgetMs: quiescenceBudgetMs });
+      if (quiescence.status === "timeout" && quiescence.open_count_final > 0) {
+        logger.warn(
+          { open_count: quiescence.open_count_final, waited_ms: quiescence.waited_ms },
+          "shutdown quiescence timeout — open brain dispatches will be reconciled on next boot",
+        );
+      }
+    } else {
+      const stillOpen = getOpenBrainDispatches(db);
+      if (stillOpen.length > 0) {
+        logger.warn(
+          { open_count: stillOpen.length },
+          "shutdown budget exhausted before quiescence — open dispatches will be reconciled on next boot",
+        );
+      }
+    }
     const drainElapsedMs = Date.now() - drainStartedAtMs;
     const interruptedTaskIds = drain.timed_out_task_ids;
     const interruptedCount = interruptedTaskIds.length;
@@ -1616,6 +1659,10 @@ const routeAux = async (
       activationListenerCount = mod.activationListenerCount();
     } catch { /* tolerate */ }
     const counts = readHealthCounts(db);
+    // F9: surface SQL pool stats so `acc daemon status` can see
+    // reader/writer utilisation, write-queue depth, and lifetime counters
+    // across every cached pool. Empty array when no pool is open.
+    const poolStats = getAllPoolStats();
     return Response.json({
       status: stuck.length === 0 ? "ok" : "degraded",
       pid: process.pid,
@@ -1632,6 +1679,7 @@ const routeAux = async (
       pathology_budget_debited_recent_count: counts.pathology_debited,
       brain_failed_recent_count: counts.brain_failed,
       health_window_iso: counts.window_iso,
+      sql_pool_stats: poolStats,
     });
   }
 

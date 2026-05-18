@@ -23,6 +23,14 @@ export type BridgeRequest = {
    *  through verbatim. Optional — when absent the subprocess inherits the
    *  daemon's cwd. */
   checkoutIsolation?: { root: string; reason?: string; mergeBackStrategy?: string };
+  /** F8 dispatch correlation key. The task_dispatcher mints this id when
+   *  it emits the upstream `brain_dispatched` audit row; the bridge
+   *  stamps it on the spawn-time `brain_dispatched` + matching
+   *  `brain_dispatch_closed` it emits so the substrate can join the
+   *  upstream audit row to the actual subprocess lifecycle by the same
+   *  `dispatch_id`. Optional — legacy callers (tests) may omit it; the
+   *  bridge then mints its own per-spawn id. */
+  dispatchId?: string;
 };
 
 export type BridgeFailureReason =
