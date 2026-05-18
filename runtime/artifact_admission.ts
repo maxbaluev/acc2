@@ -34,6 +34,7 @@ import { runUvArtifact } from "./runtimes/uv";
 import { runCamofoxArtifact } from "./runtimes/camofox";
 import { getArtifact, insertArtifact } from "./artifact_store";
 import { ownerGateDecision } from "./owner_gate";
+import { runPredicateGate } from "./verifiers/predicate_gate";
 import type { EmitEventInput } from "./events";
 
 export type AdmissionInput = {
@@ -64,13 +65,20 @@ export type AdmissionInput = {
     directiveId?: string;
     ownerConsentEventId?: string;
   };
+  /** Predicate-gate audience tag (C1, 2026-05-18). When set to
+   *  `ceo_buyer` or `external_executive`, the substrate runs
+   *  alex_predicate_* knowledge_candidates against `body` BEFORE
+   *  inserting the row; any match emits `predicate_gate_rejected` and
+   *  refuses admission. Other audiences (or undefined) skip the gate. */
+  audience?: string;
 };
 
 export type AdmissionRejectionReason =
   | "sandbox_decl_invalid"
   | "fixture_residual_too_high"
   | "runtime_error"
-  | "runtime_unavailable";
+  | "runtime_unavailable"
+  | "predicate_gate_failed";
 
 export type AdmissionResult =
   | { ok: true; artifactId: string }
@@ -134,6 +142,38 @@ export const admitArtifact = async (
       } as JsonValue,
     });
     return { ok: false, reason: "runtime_error", detail: "dynamic_owner_policy_unavailable_at_admission" };
+  }
+
+  // 1.5 Predicate gate (C1, 2026-05-18). Runs alex_predicate_*
+  //     knowledge_candidates against `body` when audience is
+  //     ceo_buyer or external_executive. Closes the advisory failure
+  //     mode (k_252) where brain self-scan reported "zero hits" while
+  //     banned phrases remained. The gate is BEFORE the row insert so
+  //     a rejected candidate never gets an artifact row to roll back.
+  const predicateGate = runPredicateGate(db, {
+    audience: input.audience,
+    body: input.body,
+    sourceCandidateId: input.sourceCandidateId,
+  });
+  if (predicateGate.rejected) {
+    emit({
+      kind: "predicate_gate_rejected",
+      substrate_origin: "substrate_auto",
+      payload: {
+        reason: "predicate_gate_failed",
+        audience: input.audience,
+        source_candidate_id: input.sourceCandidateId ?? null,
+        match_count: predicateGate.matches.length,
+        matches: predicateGate.matches as unknown as JsonValue,
+        cited_knowledge_ids: predicateGate.citedKnowledgeIds as unknown as JsonValue,
+        residual: predicateGate.residual,
+      } as JsonValue,
+    });
+    return {
+      ok: false,
+      reason: "predicate_gate_failed",
+      detail: `predicate_gate_matches=${predicateGate.matches.length}`,
+    };
   }
 
   // 2. Insert at admit priors. We do this BEFORE running the fixture so the

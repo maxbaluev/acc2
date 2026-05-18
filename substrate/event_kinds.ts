@@ -183,6 +183,13 @@ export const EVENT_KINDS = {
   // returned 0% text-hit on 342 events.
   code_artifact_admitted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   code_artifact_admission_rejected:        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // C1 (2026-05-18): substrate-side structural admission gate that
+  // runs alex_predicate_* knowledge_candidates against
+  // code_artifact_candidate bodies whose audience tag is
+  // ceo_buyer / external_executive. Health-metric so dashboards can
+  // surface how often the gate fires (k_252 advisory→structural
+  // conversion evidence).
+  predicate_gate_rejected:                 { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   code_artifact_promoted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   code_artifact_quarantined:               { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // Terminal retirement (sandbox audit bsfxsvgh9, 2026-05-15): unlike

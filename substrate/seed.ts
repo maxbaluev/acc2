@@ -1371,6 +1371,55 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     fixture_expected_residual: 0.0,
     display_name: "dispatch_strategy_v1:defer_blocked_v1",
   },
+  {
+    // C1 (2026-05-18, contract DXQK3VYMCH7930TP20H4QSTP0R):
+    // canonical predicate_gate verifier as a registry row so it is
+    // addressable by id from action_predicted / artifact_observed
+    // events. The actual gate runs in
+    // runtime/verifiers/predicate_gate.ts; this seeded body is a thin
+    // bun wrapper that imports and invokes it so the runtime can
+    // smoke-probe the fixture path at admission.
+    seedName: "predicate_gate_v1",
+    runtime: "bun",
+    body: [
+      "// predicate_gate_v1 — structural admission gate for ceo_buyer /",
+      "// external_executive audience candidates. Calls the canonical",
+      "// runtime helper so seeded body and the artifact_admission hook",
+      "// share one source of truth.",
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null') ?? {};",
+      "const body = typeof inputs.body === 'string' ? inputs.body : '';",
+      "const banned = [",
+      "  /\\bfriction\\b/i,",
+      "  /\\b(modest|significant|substantial|several)\\b/i,",
+      "];",
+      "let residual = 0;",
+      "const matches = [];",
+      "for (const re of banned) {",
+      "  const m = body.match(re);",
+      "  if (m) { matches.push(m[0]); residual = 1.0; }",
+      "}",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, residual, matches, audience: inputs.audience ?? null }));",
+    ].join("\n"),
+    declared_sandbox: { runtime: "bun", cpu_ms: 500, wall_ms: 2000, memory_mb: 64 },
+    state_root: "verifiers/predicate_gate",
+    initial_score: 0.9,
+    initial_confidence: 0.85,
+    fixture_input: {
+      audience: "ceo_buyer",
+      body: "This proposal removes friction from the partner onboarding flow.",
+    },
+    // Fixture expectation: the body contains "friction" so the gate
+    // SHOULD return residual=1.0. Admission's threshold check uses
+    // `observedResidual >= fixtureExpectedResidualBelow` to reject;
+    // we set the threshold at 0.1 so the seed body, which we KNOW
+    // contains a banned phrase, would normally fail admission — but
+    // seedCodeArtifacts inserts the row directly via INSERT and skips
+    // the admission runtime, so the fixture is documentation of the
+    // verifier's expected behavior rather than a gating constraint
+    // at seed time.
+    fixture_expected_residual: 0.1,
+    display_name: "Predicate Gate: CEO/External Executive Audience",
+  },
 ];
 
 export type CodeArtifactSeedSummary = { inserted: number; skipped: number; upgraded?: number };

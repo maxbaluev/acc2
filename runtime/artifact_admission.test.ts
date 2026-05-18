@@ -206,6 +206,67 @@ describe("admitArtifact — rejections", () => {
     expect(result.detail ?? "").toContain("runtime_mismatch");
   });
 
+  test("predicate gate refuses ceo_buyer body containing 'friction' (C1, no row inserted)", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const before = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const body = `console.log('@@RESULT@@ ' + JSON.stringify({ headline: "Friction-free onboarding", ok: true }));`;
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+        audience: "ceo_buyer",
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("predicate_gate_failed");
+    // No code_artifact row inserted — the gate runs BEFORE insert.
+    const after = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    expect(after).toBe(before);
+    // Exactly one predicate_gate_rejected event was emitted.
+    const rejections = events.filter((e) => e.kind === "predicate_gate_rejected");
+    expect(rejections.length).toBe(1);
+    const payload = rejections[0]!.payload as Record<string, unknown>;
+    expect(payload.audience).toBe("ceo_buyer");
+    expect(payload.match_count).toBeGreaterThan(0);
+  });
+
+  test("predicate gate admits ceo_buyer body when no banned phrases present", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const body = [
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, plan: 'roll out to ten partners next quarter' }));",
+    ].join("\n");
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: { audience: "ceo_buyer" },
+        fixtureExpectedResidualBelow: 0.2,
+        audience: "ceo_buyer",
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // No predicate_gate_rejected event surfaced; admission proceeded
+    // through the canonical path and the row landed.
+    expect(events.some((e) => e.kind === "predicate_gate_rejected")).toBe(false);
+    expect(events.some((e) => e.kind === "code_artifact_admitted")).toBe(true);
+    const row = getArtifact(db, result.artifactId);
+    expect(row).not.toBeNull();
+    expect(row!.status).toBe("admitted");
+  });
+
   test("rejects when the body returns an explicit residual >= threshold", async () => {
     const db = openDb(":memory:");
     const body = `console.log('@@RESULT@@ ' + JSON.stringify({ residual: 0.95 }));`;

@@ -267,6 +267,12 @@ describe("derived sets match their pre-unification shape", () => {
       // handshake_timeout, ...). Counting them per-window lets operators
       // see install / bridge degradation at substrate-status surface.
       "runtime_self_diagnostic_recorded",
+      // C1 (2026-05-18, contract DXQK3VYMCH7930TP20H4QSTP0R):
+      // structural predicate gate refused a code_artifact_candidate
+      // body destined for ceo_buyer / external_executive. Per-window
+      // count lets operators see how often the gate fires (k_252
+      // advisory→structural conversion evidence).
+      "predicate_gate_rejected",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);
