@@ -1443,6 +1443,28 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   const tokenFileForRole = skipPorts ? `${tokenFile}.worker` : tokenFile;
   writeLockFile(tokenFileForRole, { admin_token: adminToken });
 
+  // OPENAI_API_KEY presence check (dark-gate audit 2026-05-18). The
+  // retrieval-binding hook (scripts/retrieval-binding-hook.ts) and the
+  // embedder use OPENAI_API_KEY to compute query embeddings + ranking
+  // signal for substrate.search. Absent key → empty retrieval, empty
+  // depth_1_retrieval, query_embedding_unavailable owner_input_required
+  // surfacing. Three independent observations on 2026-05-18 (19:14,
+  // 19:36, 19:52) all traced back to the daemon process not seeing the
+  // env var. Do NOT crash — the daemon can run for closure audits,
+  // worker ticks, and ledger reads without retrieval. Log loudly so
+  // operator and docs surface the consequence at boot.
+  if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY.trim().length === 0) {
+    process.stderr.write(
+      "[daemon] WARNING: OPENAI_API_KEY is not set in the daemon process environment.\n" +
+        "[daemon]   Consequence: retrieval-binding hook returns empty, query_embedding_unavailable\n" +
+        "[daemon]   owner_input_required signals will fire on every search-anchored task, and the k_201\n" +
+        "[daemon]   retrieval-credit closure breaks (no embedded query → no rank signal → no binding).\n" +
+        "[daemon]   Set OPENAI_API_KEY in the environment that starts `acc daemon start` (e.g. via .env)\n" +
+        "[daemon]   and restart the daemon. Daemon continues without the key for closure/worker paths\n" +
+        "[daemon]   that don't depend on it.\n",
+    );
+  }
+
   emitEvent(db, {
     kind: "daemon_started",
     substrate_origin: "substrate_auto",

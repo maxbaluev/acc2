@@ -175,6 +175,21 @@ export const AdmitArtifactSchema = z.object({
   target_resources: z.array(z.string()).optional(),
   directive_id: z.string().optional(),
   owner_consent_event_id: z.string().optional(),
+  // Dark-gate observability (2026-05-18). The brain emits these
+  // provenance / lineage fields on code_artifact_candidate and they
+  // feed the predicate gate, strategy-first gate, supersedes lane gate,
+  // and render-pipeline lineage gate downstream. Pre-2026-05-18 the
+  // MCP schema dropped them, so admission ran with the gates blind.
+  audience: z.string().optional(),
+  cited_knowledge_ids: z.array(z.string()).optional(),
+  source_candidate_id: z.string().optional(),
+  intent: z.string().optional(),
+  summary: z.string().optional(),
+  kind: z.string().optional(),
+  supersedes: z.string().optional(),
+  rendered_docx_id: z.string().optional(),
+  markdown_body_id: z.string().optional(),
+  reference_docx_artifact_id: z.string().optional(),
 });
 
 export const CreditSchema = z.object({

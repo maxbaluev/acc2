@@ -11,6 +11,7 @@ import { newId, nowIso } from "./ids";
 import { publishEvent } from "./event_bus";
 import { publishActivation } from "./activation_bus";
 import { recordEventEmission } from "./metrics";
+import { screenCodeArtifactCandidate } from "./artifact_candidate_screen";
 
 export type EmitEventInput = {
   kind: EventKind;
@@ -617,6 +618,37 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
         });
       }).catch(() => { /* swallow; can be re-driven from the action_scored row */ });
     } catch { /* defensive */ }
+  }
+  // Code-artifact-candidate emit-side screen (dark-gate observability,
+  // 2026-05-18). The candidate row lands first so its id is stable; the
+  // screen returns sibling refusal events (predicate_gate_rejected,
+  // atms_strategy_first_violation, lane_routing_refused) that we then
+  // emit synchronously with the candidate id in context_refs. The
+  // candidate stays in the ledger so audit/replay see what was attempted;
+  // the refusal events explain why downstream gates blocked it.
+  if (input.kind === "code_artifact_candidate") {
+    try {
+      const { refusals } = screenCodeArtifactCandidate(db, {
+        payload: input.payload,
+        directive_id: input.directive_id,
+        task_id: input.task_id,
+      });
+      for (const refusal of refusals) {
+        emitEvent(db, {
+          kind: refusal.kind,
+          substrate_origin: "substrate_auto",
+          directive_id: input.directive_id,
+          task_id: input.task_id,
+          context_refs: [id],
+          payload: refusal.payload,
+        });
+      }
+    } catch (err) {
+      // Screen failures must not poison the candidate emission. The
+      // candidate row already landed; a dead screen is observable as
+      // missing refusal rows on the next audit, not as a thrown emit.
+      void err;
+    }
   }
   return { id, ts };
 };

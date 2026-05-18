@@ -67,8 +67,14 @@ const CATALOG: CatalogEntry[] = [
   {
     kc_id: "alex_predicate_system_meta_v2_no_internal_substrate_language",
     predicate_claim: "alex_predicate_no_internal_substrate_language",
+    // "the system" added 2026-05-18 (dark-gate sweep): the v9 Lakeland
+    // body NA9XCQ41YH1013MSTK1DVE9H9W carried 7 hits of "the system"
+    // that the manual scan flagged and the operator scrubbed before
+    // delivery. The pre-existing pattern matched "the substrate" /
+    // "the brain" but not "the system" — an oversight rather than a
+    // deliberate carve-out. Adding it closes the gap.
     pattern:
-      /\b(first cycle|next cycle|the substrate|the brain|learning advantage|the moat|Why This Order|honesty signal)\b/gi,
+      /\b(first cycle|next cycle|the substrate|the system|the brain|learning advantage|the moat|Why This Order|honesty signal)\b/gi,
   },
   {
     kc_id: "alex_predicate_no_hyphen_jargon",

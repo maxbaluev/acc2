@@ -1094,6 +1094,21 @@ export const handleAdmitArtifact = async (
         directiveId: args.directive_id,
         ownerConsentEventId: args.owner_consent_event_id,
       } : undefined,
+      // Dark-gate plumbing (2026-05-18). Pre-2026-05-18 the MCP schema
+      // dropped these fields so admission ran with the predicate +
+      // strategy-first + render-pipeline gates blind. The brain emits
+      // them on code_artifact_candidate; the wire now carries them
+      // through to admitArtifact unchanged.
+      audience: args.audience,
+      citedKnowledgeIds: args.cited_knowledge_ids,
+      sourceCandidateId: args.source_candidate_id,
+      intent: args.intent,
+      summary: args.summary,
+      kind: args.kind,
+      supersedes: args.supersedes,
+      renderedDocxId: args.rendered_docx_id,
+      markdownBodyId: args.markdown_body_id,
+      referenceDocxArtifactId: args.reference_docx_artifact_id,
     },
     (event) => {
       try {
