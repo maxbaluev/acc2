@@ -51,6 +51,23 @@ describe("bridge_health gate", () => {
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'bridge_health_degraded'")
       .get() as { c: number };
     expect(rows.c).toBe(1);
+    const degraded = db
+      .query("SELECT payload FROM events WHERE kind = 'bridge_health_degraded' ORDER BY rowid DESC LIMIT 1")
+      .get() as { payload: string };
+    const payload = JSON.parse(degraded.payload) as Record<string, unknown>;
+    expect(payload.distinct_task_count).toBe(BRIDGE_DEGRADATION_THRESHOLD);
+    expect(payload.failure_event_count).toBe(BRIDGE_DEGRADATION_THRESHOLD);
+    expect(payload).not.toHaveProperty("event_count");
+  });
+
+  test("maybeMarkDegraded counts distinct failing task identities, not repeated rows for one task", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    for (let i = 0; i < BRIDGE_DEGRADATION_THRESHOLD + 2; i++) {
+      seedBridgeFailed(db, new Date(now - 1000 * i).toISOString(), "t_repeated");
+    }
+    expect(maybeMarkDegraded(db, { nowMs: now })).toBe(false);
+    expect(isBridgeHealthDegraded(db)).toBe(false);
   });
 
   test("maybeMarkDegraded does NOT re-emit when already degraded (idempotent)", () => {

@@ -22,6 +22,8 @@
 //       (closes the four-link chain:
 //       create -> retrieve -> mutate -> credit, k_555).
 
+import { readFileSync } from "node:fs";
+import { relative, resolve } from "node:path";
 import { mcpCall } from "./rpc";
 import { lessonApplyTargetsPolicy } from "../substrate/lesson_apply_policy";
 import { classifyApply } from "./verify";

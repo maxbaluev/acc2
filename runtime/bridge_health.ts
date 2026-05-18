@@ -111,14 +111,25 @@ export const isBridgeHealthDegraded = (db: Database): boolean => {
 /** Count bridge_failed events within the last BRIDGE_FAILURE_WINDOW_MS.
  *  Used by maybeMarkDegraded and surfaced in the degraded event payload
  *  so the operator can see the trigger condition. */
-const recentBridgeFailures = (db: Database, nowMs: number): { count: number; cutoff_iso: string } => {
+const recentBridgeFailures = (
+  db: Database,
+  nowMs: number,
+): { distinct_task_count: number; failure_event_count: number; cutoff_iso: string } => {
   const cutoffIso = new Date(nowMs - BRIDGE_FAILURE_WINDOW_MS).toISOString();
   const row = db
     .query(
-      `SELECT COUNT(*) AS c FROM events WHERE kind = 'bridge_failed' AND ts >= ?`,
+      `SELECT
+         COUNT(*) AS failure_event_count,
+         COUNT(DISTINCT COALESCE(NULLIF(task_id, ''), id)) AS distinct_task_count
+       FROM events
+       WHERE kind = 'bridge_failed' AND ts >= ?`,
     )
-    .get(cutoffIso) as { c: number };
-  return { count: row.c, cutoff_iso: cutoffIso };
+    .get(cutoffIso) as { failure_event_count: number; distinct_task_count: number };
+  return {
+    distinct_task_count: row.distinct_task_count,
+    failure_event_count: row.failure_event_count,
+    cutoff_iso: cutoffIso,
+  };
 };
 
 /** Emit `bridge_health_degraded` once when:
@@ -135,8 +146,8 @@ export const maybeMarkDegraded = (
 ): boolean => {
   if (isBridgeHealthDegraded(db)) return false;
   const nowMs = opts?.nowMs ?? Date.now();
-  const { count, cutoff_iso } = recentBridgeFailures(db, nowMs);
-  if (count < BRIDGE_DEGRADATION_THRESHOLD) return false;
+  const { distinct_task_count, failure_event_count, cutoff_iso } = recentBridgeFailures(db, nowMs);
+  if (distinct_task_count < BRIDGE_DEGRADATION_THRESHOLD) return false;
   // Count THIS degrade as the next one in the backoff streak — the
   // cooldown we publish is what the upcoming recovery check will use.
   const projectedDegrades = recentDegradeCount(db, nowMs) + 1;
@@ -149,7 +160,8 @@ export const maybeMarkDegraded = (
     substrate_origin: "substrate_auto",
     payload: {
       reason: "bridge_failure_streak_exceeded",
-      failure_count: count,
+      distinct_task_count,
+      failure_event_count,
       window_ms: BRIDGE_FAILURE_WINDOW_MS,
       threshold: BRIDGE_DEGRADATION_THRESHOLD,
       window_cutoff_iso: cutoff_iso,

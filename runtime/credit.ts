@@ -380,22 +380,20 @@ const applyWeightedResidualOutcome = (
 
 // ── Citation collection from the three driving events + bodies ─────
 
-// Differential weighting (2026-05-15 — loop-elegance gap #1):
-//   The brain saw K entries in the RETRIEVED KNOWLEDGE prompt section
-//   but typically only cites 2-3 of them in action_predicted.context_refs.
-//   Pre-fix every prompt-exposed entry got the same Shapley share as
-//   an explicitly-cited one — noise drowned signal. Now:
-//     - explicit citations (action/obs/scored.context_refs + body @cite)
-//       get FULL Shapley weight (factor 1.0).
-//     - exposure-only entries (retrieval_binding emitted, NOT cited)
-//       get the EXPOSURE_ONLY_FACTOR. Smaller share — they were in the
-//       prompt but didn't drive the action, so they earn / lose less.
-//   This implements precise attribution without requiring the brain to
-//   actively exclude prompt entries; absence-of-citation is the signal.
-const EXPOSURE_ONLY_FACTOR = 0.2;
+// Citation weighting:
+//   - explicit citations (action/obs/scored.context_refs + body @cite)
+//     get FULL Shapley weight (factor 1.0). A cited retrieval_binding id is
+//     resolved to its source_event_id/source_artifact_id before credit.
+//   - prompt-level retrieval_binding rows that were exposed but not cited are
+//     recorded as retrieval_rejected and excluded from Shapley credit. Prompt
+//     exposure alone is not evidence that the entry drove the action.
+//   - knowledge_propagated remains a weaker explicit transfer signal because
+//     propagation is a substrate-authored cross-directive act, not mere prompt
+//     exposure.
 const PROPAGATION_ONLY_FACTOR = 0.35;
 
 type CitationEntry = { id: string; weightFactor: number };
+type RetrievalRejectionEmitter = (bindingEventId: string, sourceIds: string[]) => void;
 
 const collectCitations = (
   db: Database,
@@ -404,6 +402,7 @@ const collectCitations = (
   verifierBodyCitations: string[],
   actionArtifactId: string,
   verifierArtifactId: string,
+  rejectRetrievalBinding?: RetrievalRejectionEmitter,
 ): CitationEntry[] => {
   const seen = new Set<string>();
   const out: CitationEntry[] = [];
