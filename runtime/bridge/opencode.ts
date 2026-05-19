@@ -320,15 +320,14 @@ export const spawnRealOpencode = async (
   // `opencode run` expects the message as positional args; piping via stdin
   // is not the documented path. We pass --format=json so opencode emits one
   // JSON event per stdout line. Do NOT pass
-  // --dangerously-skip-permissions: the per-dispatch config explicitly keeps
-  // the brain read-only and denies direct source mutation tools.
+  // --dangerously-skip-permissions: the per-dispatch config keeps the brain
+  // on the positive read-only tool surface.
   // Sandbox the brain's CWD AND env. When `checkoutIsolation` is explicit,
   // honor it (workflow-isolated dispatches, tests). Otherwise spawn the
   // brain in a per-dispatch empty tempdir so its built-in filesystem tools
-  // (edit / write / bash) cannot reach the source checkout even if the
-  // BRAIN_READONLY_PERMISSION policy fails to apply (induced by a newer
-  // opencode rev, a config-merge edge case, or a tool name not covered by
-  // the deny patterns). This is defense-in-depth A behind the permission
+  // (edit / write / bash) cannot reach the source checkout even if a future
+  // opencode rev or config-merge edge exposes an unexpected tool. This is
+  // defense-in-depth A behind the permission
   // policy. The env var ACC2_CHECKOUT_ISOLATION_ROOT used to default to
   // sourceCheckoutRoot which LEAKED the source path — observed 2026-05-16
   // (Q2NTPKM + K8YKPXDZXX): brain dispatches wrote files like
