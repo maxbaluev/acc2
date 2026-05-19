@@ -1332,6 +1332,25 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
       : buildKnowledgeSection(readKnowledgeTopK(db, 8, directiveText ?? task.goal));
   candidates.push({ name: "retrieved_knowledge", p: 1, body: knowledgeBody });
 
+  // F6 completion (decision 12) — citation choice wrap. The composer
+  // just SELECTED a set of event ids to surface as cited knowledge; that
+  // choice itself is a scored decision (retrieval_binding rows credit
+  // outcomes per-citation, but the SELECTOR's reliability was invisible
+  // until this hook). One act per non-empty selection; idempotent via
+  // the sorted-id projection key so retrying the same selection collapses.
+  if (opts.retrievedKnowledge && opts.retrievedKnowledge.hits.length > 0) {
+    try {
+      const { recordCitationChoiceAct } = require("./citation_choice") as typeof import("./citation_choice");
+      recordCitationChoiceAct(db, {
+        candidateEventIds: opts.retrievedKnowledge.hits.map((h) => h.event_id),
+        directiveId: task.directive_id,
+        taskId: task.id,
+        selectionPoint: "retrieved_knowledge",
+        candidatePoolSize: opts.retrievedKnowledge.hits.length,
+      });
+    } catch { /* fail-soft: composer must not fail on side-effect emit */ }
+  }
+
   const artifactBody = opts.retrievedArtifacts && opts.retrievedArtifacts.hits.length > 0
     ? buildRetrievedArtifactSection(opts.retrievedArtifacts.hits)
     : buildArtifactSection(readArtifactRegistryTopK(db, 6));

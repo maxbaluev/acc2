@@ -633,3 +633,243 @@ describe("F6 extension — recipe replay selection (decision 13)", () => {
     expect(scored.n).toBe(1);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// F6 completion — entity / owner profile / verifier meta / citation
+// choice wraps (decisions 9, 10, 11, 12). Each wrap follows the
+// established recordInternalAct pattern; the emit-boundary projector
+// expands every act_tuple_recorded row into action_predicted +
+// action_scored rows automatically.
+// ─────────────────────────────────────────────────────────────────────
+
+import { recordEntityAttributeAct, recordOwnerProfileAttributeAct } from "../runtime/owner_entity_acts";
+import { invokeVerifierWithMeta } from "../runtime/verifier_invocation";
+import { recordCitationChoiceAct } from "../runtime/citation_choice";
+
+describe("F6 completion — entity attribute write (decision 9)", () => {
+  test("recordEntityAttributeAct emits entity_attribute_writer_v1 act_tuple with subsequent_evidence_agreement verifier", () => {
+    const db = fresh();
+    const directiveId = newId();
+    const taskId = newId();
+    recordEntityAttributeAct(db, {
+      entityId: "stakeholder_owner_acme",
+      attributeName: "declared_utility",
+      attributeValue: { goal: "ship by Q3", priority: 0.8 },
+      directiveId,
+      taskId,
+    });
+    const actRow = db
+      .query("SELECT payload, verifier_artifact_id, predicted_residual FROM events WHERE kind = 'act_tuple_recorded' AND action_artifact_id = 'entity_attribute_writer_v1' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string; verifier_artifact_id: string; predicted_residual: number } | null;
+    expect(actRow).not.toBeNull();
+    expect(actRow!.verifier_artifact_id).toBe("subsequent_evidence_agreement");
+    expect(actRow!.predicted_residual).toBeCloseTo(0.3, 5);
+    const payload = JSON.parse(actRow!.payload) as Record<string, unknown>;
+    expect(payload.action_handle).toBe("entity_attribute_writer_v1");
+    expect(payload.verifier_handle).toBe("subsequent_evidence_agreement");
+    expect(payload.entity_id).toBe("stakeholder_owner_acme");
+    expect(payload.attribute_name).toBe("declared_utility");
+    const scored = db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'action_scored' AND action_artifact_id = 'entity_attribute_writer_v1'",
+      )
+      .get()!;
+    expect(scored.n).toBeGreaterThanOrEqual(1);
+  });
+
+  test("stakeholder_state_recorded emission triggers entity_attribute_writer_v1 wrap at the emit boundary", () => {
+    const db = fresh();
+    const directiveId = newId();
+    emitEvent(db, {
+      kind: "stakeholder_state_recorded",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      payload: {
+        stakeholder_id: "stakeholder_supplier_widgets",
+        declared_utility: { revenue_target: 100000 },
+        inferred_constraints: ["delivery_window_2026Q4"],
+        information_visibility: "full",
+      },
+    });
+    const actRow = db
+      .query("SELECT payload FROM events WHERE kind = 'act_tuple_recorded' AND action_artifact_id = 'entity_attribute_writer_v1' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(actRow).not.toBeNull();
+    const payload = JSON.parse(actRow!.payload) as Record<string, unknown>;
+    expect(payload.entity_id).toBe("stakeholder_supplier_widgets");
+    expect(payload.attribute_name).toBe("declared_utility");
+  });
+
+  test("re-writing the same entity attribute does not double-project", () => {
+    const db = fresh();
+    const params = {
+      entityId: "stakeholder_idempotent_test",
+      attributeName: "information_visibility",
+      attributeValue: "redacted" as unknown as JsonValue,
+    };
+    recordEntityAttributeAct(db, params);
+    recordEntityAttributeAct(db, params);
+    const scored = db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'action_scored' AND action_artifact_id = 'entity_attribute_writer_v1'",
+      )
+      .get()!;
+    expect(scored.n).toBe(1);
+  });
+});
+
+describe("F6 completion — owner profile attribute write (decision 10)", () => {
+  test("recordOwnerProfileAttributeAct emits owner_profile_writer_v1 act_tuple with drift_detection_signal verifier", () => {
+    const db = fresh();
+    recordOwnerProfileAttributeAct(db, {
+      field: "preferred_terms",
+      value: ["candidates", "outreach"] as unknown as JsonValue,
+      source: "vocabulary_extractor",
+    });
+    const actRow = db
+      .query("SELECT payload, verifier_artifact_id, predicted_residual FROM events WHERE kind = 'act_tuple_recorded' AND action_artifact_id = 'owner_profile_writer_v1' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string; verifier_artifact_id: string; predicted_residual: number } | null;
+    expect(actRow).not.toBeNull();
+    expect(actRow!.verifier_artifact_id).toBe("drift_detection_signal");
+    expect(actRow!.predicted_residual).toBeCloseTo(0.3, 5);
+    const payload = JSON.parse(actRow!.payload) as Record<string, unknown>;
+    expect(payload.action_handle).toBe("owner_profile_writer_v1");
+    expect(payload.verifier_handle).toBe("drift_detection_signal");
+    expect(payload.field).toBe("preferred_terms");
+    expect(payload.source).toBe("vocabulary_extractor");
+    const scored = db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'action_scored' AND action_artifact_id = 'owner_profile_writer_v1'",
+      )
+      .get()!;
+    expect(scored.n).toBeGreaterThanOrEqual(1);
+  });
+
+  test("owner_profile_recorded emission triggers owner_profile_writer_v1 wrap at the emit boundary", () => {
+    const db = fresh();
+    emitEvent(db, {
+      kind: "owner_profile_recorded",
+      substrate_origin: "substrate_auto",
+      payload: {
+        autonomy_score: 0.55,
+        promotion_route: "confidence",
+        promoted_from: "candidate_alpha",
+      },
+    });
+    const actRow = db
+      .query("SELECT payload FROM events WHERE kind = 'act_tuple_recorded' AND action_artifact_id = 'owner_profile_writer_v1' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(actRow).not.toBeNull();
+    const payload = JSON.parse(actRow!.payload) as Record<string, unknown>;
+    expect(payload.field).toBe("*");
+    expect(payload.source).toBe("promoter:confidence");
+  });
+
+  test("re-writing the same owner profile field+value+source collapses to one projection", () => {
+    const db = fresh();
+    const params = {
+      field: "things_to_never_do",
+      value: ["send to legal without review"] as unknown as JsonValue,
+      source: "owner_decision_recorded",
+    };
+    recordOwnerProfileAttributeAct(db, params);
+    recordOwnerProfileAttributeAct(db, params);
+    const scored = db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'action_scored' AND action_artifact_id = 'owner_profile_writer_v1'",
+      )
+      .get()!;
+    expect(scored.n).toBe(1);
+  });
+});
+
+describe("F6 completion — verifier meta wrap (decision 11)", () => {
+  test("invokeVerifierWithMeta emits a meta-act with verifier_reliability_meta verifier and returns the invocation result verbatim", async () => {
+    const db = fresh();
+    const verifierResult = { residual: 0.1, breakdown: { coverage: 0.9 } };
+    const observed = await invokeVerifierWithMeta(db, {
+      verifierHandle: "deterministic_code_verifier_v1",
+      inputs: { artifact_id: "test", target: "/tmp/x" },
+      invoke: async () => verifierResult,
+    });
+    expect(observed).toEqual(verifierResult);
+    const actRow = db
+      .query("SELECT payload, action_artifact_id, verifier_artifact_id, predicted_residual FROM events WHERE kind = 'act_tuple_recorded' AND verifier_artifact_id = 'verifier_reliability_meta' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string; action_artifact_id: string; verifier_artifact_id: string; predicted_residual: number } | null;
+    expect(actRow).not.toBeNull();
+    expect(actRow!.action_artifact_id).toBe("deterministic_code_verifier_v1");
+    expect(actRow!.verifier_artifact_id).toBe("verifier_reliability_meta");
+    expect(actRow!.predicted_residual).toBeCloseTo(0.3, 5);
+    const payload = JSON.parse(actRow!.payload) as Record<string, unknown>;
+    expect(payload.action_handle).toBe("deterministic_code_verifier_v1");
+    expect(payload.verifier_handle).toBe("verifier_reliability_meta");
+  });
+
+  test("re-invoking the same verifier with identical inputs collapses meta-act projection", async () => {
+    const db = fresh();
+    const inputs = { residual_target: 0.2 };
+    await invokeVerifierWithMeta(db, {
+      verifierHandle: "peer_llm_verifier",
+      inputs,
+      invoke: async () => ({ residual: 0.2 }),
+    });
+    await invokeVerifierWithMeta(db, {
+      verifierHandle: "peer_llm_verifier",
+      inputs,
+      invoke: async () => ({ residual: 0.2 }),
+    });
+    const scored = db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'action_scored' AND action_artifact_id = 'peer_llm_verifier' AND verifier_artifact_id = 'verifier_reliability_meta'",
+      )
+      .get()!;
+    expect(scored.n).toBe(1);
+  });
+});
+
+describe("F6 completion — citation choice wrap (decision 12)", () => {
+  test("recordCitationChoiceAct emits citation_chooser_v1 act_tuple with retrieval_binding_credit_closure verifier", () => {
+    const db = fresh();
+    const ids = ["evt_alpha", "evt_beta", "evt_gamma"];
+    recordCitationChoiceAct(db, {
+      candidateEventIds: ids,
+      selectionPoint: "retrieved_knowledge",
+      candidatePoolSize: 8,
+    });
+    const actRow = db
+      .query("SELECT payload, verifier_artifact_id, predicted_residual FROM events WHERE kind = 'act_tuple_recorded' AND action_artifact_id = 'citation_chooser_v1' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string; verifier_artifact_id: string; predicted_residual: number } | null;
+    expect(actRow).not.toBeNull();
+    expect(actRow!.verifier_artifact_id).toBe("retrieval_binding_credit_closure");
+    expect(actRow!.predicted_residual).toBeCloseTo(0.2, 5);
+    const payload = JSON.parse(actRow!.payload) as Record<string, unknown>;
+    expect(payload.action_handle).toBe("citation_chooser_v1");
+    expect(payload.verifier_handle).toBe("retrieval_binding_credit_closure");
+    expect(payload.selection_point).toBe("retrieved_knowledge");
+    expect(payload.cited_count).toBe(3);
+    const scored = db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'action_scored' AND action_artifact_id = 'citation_chooser_v1'",
+      )
+      .get()!;
+    expect(scored.n).toBeGreaterThanOrEqual(1);
+  });
+
+  test("identical citation set at the same selection point collapses to one projection (order-insensitive key)", () => {
+    const db = fresh();
+    recordCitationChoiceAct(db, {
+      candidateEventIds: ["a", "b", "c"],
+      selectionPoint: "retrieved_knowledge",
+    });
+    recordCitationChoiceAct(db, {
+      candidateEventIds: ["c", "a", "b"],
+      selectionPoint: "retrieved_knowledge",
+    });
+    const scored = db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'action_scored' AND action_artifact_id = 'citation_chooser_v1'",
+      )
+      .get()!;
+    expect(scored.n).toBe(1);
+  });
+});

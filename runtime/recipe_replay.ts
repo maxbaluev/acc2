@@ -42,6 +42,7 @@ import { runCamofoxArtifact } from "./runtimes/camofox";
 import type { TaskNode } from "./task_topology";
 import { distributeCredit } from "./credit";
 import { nowIso } from "./ids";
+import { invokeVerifierWithMeta } from "./verifier_invocation";
 import { recipesLatestView, type RecipesLatestRow } from "../substrate/views";
 
 // Tier-0 replay must be STRICTLY conservative — a false-positive match
@@ -440,11 +441,22 @@ export const replayRecipe = async (
     // shape; anything else falls to residual=1.
     let residual = 1;
     if (actionStep.verifier_artifact_id) {
-      const verifierObs = await runArtifact(
-        db,
-        actionStep.verifier_artifact_id,
-        (actionObs.result ?? null) as JsonValue,
-      );
+      // F6 completion (decision 11) — wrap verifier invocation so the
+      // verifier_handle earns or loses posterior via the meta verifier.
+      const verifierStepId = actionStep.verifier_artifact_id;
+      const verifierObs = await invokeVerifierWithMeta(db, {
+        verifierHandle: verifierStepId,
+        inputs: (actionObs.result ?? null) as JsonValue,
+        directiveId: task.directive_id,
+        taskId: task.id,
+        sourceEventId: predictedEv.id,
+        citedArtifactIds: [verifierStepId],
+        invoke: () => runArtifact(
+          db,
+          verifierStepId,
+          (actionObs.result ?? null) as JsonValue,
+        ),
+      });
       if (
         verifierObs.ok &&
         verifierObs.result &&

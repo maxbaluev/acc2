@@ -674,6 +674,67 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       });
     } catch { /* fail-soft: lesson_extracted already landed */ }
   }
+  // F6 completion (decision 9) — entity model attribute write. Every
+  // stakeholder_state_recorded row commits one declared_utility +
+  // inferred_constraints + visibility tuple to the entity model; that
+  // commitment is a substrate decision whose accuracy later evidence
+  // either confirms or contradicts. recordEntityAttributeAct projects
+  // the write as an act so subsequent_evidence_agreement closes the
+  // credit chain when downstream observations either match or refute
+  // the recorded value.
+  if (input.kind === "stakeholder_state_recorded") {
+    try {
+      const payload = isObject(input.payload) ? input.payload : {};
+      const entityId = typeof payload.stakeholder_id === "string" ? payload.stakeholder_id : (input.task_id ?? id);
+      const { recordEntityAttributeAct } = require("./owner_entity_acts") as typeof import("./owner_entity_acts");
+      recordEntityAttributeAct(db, {
+        entityId,
+        attributeName: "declared_utility",
+        attributeValue: (payload.declared_utility ?? null) as JsonValue,
+        sourceEventId: id,
+        directiveId: input.directive_id,
+        taskId: input.task_id,
+        extra: {
+          inferred_constraints: (payload.inferred_constraints ?? null) as JsonValue,
+          information_visibility: (payload.information_visibility ?? null) as JsonValue,
+        },
+      });
+    } catch { /* fail-soft: stakeholder row already landed */ }
+  }
+  // F6 completion (decision 10) — owner profile attribute write. The
+  // adjudicator emits two related kinds: owner_insight_candidate
+  // proposes a single field/value, owner_profile_recorded commits a
+  // merged snapshot. We wire ONLY the snapshot here — the commit is
+  // the actual attribute write. Candidates are intermediate proposals
+  // whose own credit closes when the promoter either merges them into a
+  // snapshot or rejects them; wiring the candidate kind at this boundary
+  // would cascade act_tuple_recorded → applied_change_committed
+  // projections back into the autonomy_adjuster's outcome window and
+  // create a feedback loop (the adjuster reads applied_change_committed
+  // to compute its delta, and a synthetic projection makes the loop
+  // self-feeding). Direct call sites that propose a candidate from
+  // owner-stated intent can still invoke recordOwnerProfileAttributeAct
+  // explicitly; the emit boundary stays scoped to commits.
+  if (input.kind === "owner_profile_recorded") {
+    try {
+      const payload = isObject(input.payload) ? input.payload : {};
+      const source = typeof payload.promotion_route === "string"
+        ? `promoter:${payload.promotion_route}`
+        : "promoter";
+      const { recordOwnerProfileAttributeAct } = require("./owner_entity_acts") as typeof import("./owner_entity_acts");
+      recordOwnerProfileAttributeAct(db, {
+        field: "*",
+        value: payload as JsonValue,
+        source,
+        sourceEventId: id,
+        directiveId: input.directive_id,
+        taskId: input.task_id,
+        extra: {
+          owner_event_kind: input.kind,
+        },
+      });
+    } catch { /* fail-soft: owner profile row already landed */ }
+  }
   // RLM retrieval credit attribution (brain task FX9PZDQ3W932,
   // 2026-05-18). Every action_scored event walks its context_refs for
   // retrieval_binding rows and emits retrieval_credit_attributed per

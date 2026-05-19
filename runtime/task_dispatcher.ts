@@ -47,6 +47,7 @@ const resolveComposePrompt = async (): Promise<typeof composePrompt> => {
 };
 import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
 import { recordInternalAct } from "./internal_act_projection";
+import { invokeVerifierWithMeta } from "./verifier_invocation";
 import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge/index";
 import type { TaskNode } from "./task_topology";
 import { refinementDepth } from "./task_topology";
@@ -922,20 +923,30 @@ export const dispatchReadyTask = async (
           applyResidualOutcome(db, actionArtifact.id, 1, nowIso());
         }
       } else {
-        // Run the verifier on the observation.
-        const verifierObs = await runArtifact({
-          artifactId: verifierArtifact.id,
-          body: verifierArtifact.body,
-          declaredSandbox: verifierArtifact.declaredSandbox,
+        // Run the verifier on the observation. F6 completion (decision 11):
+        // wrap the invocation in invokeVerifierWithMeta so the verifier_handle
+        // itself earns or loses posterior independently of the action it scored.
+        const verifierObs = await invokeVerifierWithMeta(db, {
+          verifierHandle: verifierArtifact.id,
           inputs: actionObs.result as JsonValue,
-          emit: (ev) => {
-            emitEvent(db, {
-              ...ev,
-              directive_id: ev.directive_id ?? task.directive_id,
-              task_id: ev.task_id ?? task.id,
-              invoker: ev.invoker ?? "substrate_auto",
-            });
-          },
+          directiveId: task.directive_id,
+          taskId: task.id,
+          sourceEventId: actionPredicted.id,
+          citedArtifactIds: [verifierArtifact.id],
+          invoke: () => runArtifact({
+            artifactId: verifierArtifact.id,
+            body: verifierArtifact.body,
+            declaredSandbox: verifierArtifact.declaredSandbox,
+            inputs: actionObs.result as JsonValue,
+            emit: (ev) => {
+              emitEvent(db, {
+                ...ev,
+                directive_id: ev.directive_id ?? task.directive_id,
+                task_id: ev.task_id ?? task.id,
+                invoker: ev.invoker ?? "substrate_auto",
+              });
+            },
+          }),
         });
 
         let residual = 1;
