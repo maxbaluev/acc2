@@ -91,7 +91,7 @@ export type FatherDirectiveTemplate = {
  *  extractor-pass templates (recipe / knowledge / act_artifact)
  *  were removed because the extractors worker (runtime/daemon.ts)
  *  now runs `extractRecipeCandidates`, `extractKnowledgePromotions`,
- *  `extractCodeArtifactScores`, and `extractSemanticDedup` on a
+ *  `extractActArtifactScores`, and `extractSemanticDedup` on a
  *  bounded 5-minute cadence as substrate liveness functions. Father
  *  templating the same work duplicated the cadence and forked credit:
  *  promotions emitted by Father got tagged `substrate_origin=father`

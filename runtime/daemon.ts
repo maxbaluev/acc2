@@ -882,7 +882,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // other objectives.
     const {
       extractKnowledgePromotions,
-      extractCodeArtifactScores,
+      extractActArtifactScores,
       extractRecipeCandidates,
       extractSemanticDedup,
       extractDirectiveInterference,
@@ -894,8 +894,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       try { extractKnowledgePromotions(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.knowledge", err: (err as Error).message }, "knowledge extractor tick failed");
       }
-      try { extractCodeArtifactScores(db); } catch (err) {
-        logger.warn({ where: "daemon.extractors.act_artifact", err: (err as Error).message }, "code artifact extractor tick failed");
+      try { extractActArtifactScores(db); } catch (err) {
+        logger.warn({ where: "daemon.extractors.act_artifact", err: (err as Error).message }, "act artifact extractor tick failed");
       }
       try { extractRecipeCandidates(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.recipes", err: (err as Error).message }, "recipe extractor tick failed");

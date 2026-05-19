@@ -9,7 +9,7 @@
 // missing strategic-direction citations slipped through.
 //
 // Hook point: `runtime/events.ts emitEvent` calls
-// `screenCodeArtifactCandidate` whenever input.kind ===
+// `screenActArtifactCandidate` whenever input.kind ===
 // "act_artifact_candidate". The screen returns the list of refusal
 // events to emit alongside the candidate. emitEvent inserts the
 // candidate row first, then drives the refusal emissions back
@@ -158,7 +158,7 @@ const asStringArray = (value: unknown): string[] => {
 /** Screen one act_artifact_candidate payload. The returned refusals
  *  are emitted by the caller AFTER the candidate row is inserted so
  *  each refusal references the candidate's id in context_refs. */
-export const screenCodeArtifactCandidate = (
+export const screenActArtifactCandidate = (
   db: Database,
   input: { payload?: JsonValue; directive_id?: string; task_id?: string },
 ): { refusals: CandidateRefusal[] } => {

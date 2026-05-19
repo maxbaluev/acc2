@@ -11,7 +11,7 @@ import { newId, nowIso } from "./ids";
 import { publishEvent } from "./event_bus";
 import { publishActivation } from "./activation_bus";
 import { recordEventEmission } from "./metrics";
-import { screenCodeArtifactCandidate } from "./artifact_candidate_screen";
+import { screenActArtifactCandidate } from "./artifact_candidate_screen";
 
 export type EmitEventInput = {
   kind: EventKind;
@@ -805,7 +805,7 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // the refusal events explain why downstream gates blocked it.
   if (input.kind === "act_artifact_candidate") {
     try {
-      const { refusals } = screenCodeArtifactCandidate(db, {
+      const { refusals } = screenActArtifactCandidate(db, {
         payload: input.payload,
         directive_id: input.directive_id,
         task_id: input.task_id,

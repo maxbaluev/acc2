@@ -647,9 +647,6 @@ export const extractActArtifactScores = (db: Database): ActArtifactScoreSummary 
   return { updated, promoted };
 };
 
-/** F4a deprecated alias — pre-rename name. Resolves to extractActArtifactScores. */
-export const extractCodeArtifactScores = extractActArtifactScores;
-
 // ── 3. Semantic dedup extractor (§3.6.1 Rules 1+2) ─────────────────
 //
 // Phase B2: gracefully no-op when no embeddings are present. Phase F
