@@ -66,7 +66,7 @@ describe("computeSubstrateStatus", () => {
     const r = computeSubstrateStatus(db, "/tmp/x.db");
     expect(r.verdict).toBe("DEAD");
     expect(r.events).toBe(0);
-    expect(r.codeArtifacts).toBe(0);
+    expect(r.actArtifacts).toBe(0);
     expect(r.vecEvents).toBe(0);
   });
 
@@ -78,7 +78,7 @@ describe("computeSubstrateStatus", () => {
     const r = computeSubstrateStatus(db, "/tmp/x.db");
     expect(r.verdict).toBe("DEGRADED");
     expect(r.events).toBeGreaterThan(0);
-    expect(r.codeArtifacts).toBeGreaterThan(0);
+    expect(r.actArtifacts).toBeGreaterThan(0);
     expect(r.vecEvents).toBe(0);
     expect(r.recipeRows).toBeGreaterThan(0);
   });
@@ -99,8 +99,8 @@ describe("computeSubstrateStatus", () => {
     expect(r.verdict).toBe("ALIVE");
     expect(r.vecEvents).toBeGreaterThan(0);
     expect(r.embeddableTotal).toBeGreaterThan(0);
-    expect(r.codeArtifactsSeed).toBeGreaterThan(0);
-    expect(r.codeArtifactsBrain).toBe(0);
+    expect(r.actArtifactsSeed).toBeGreaterThan(0);
+    expect(r.actArtifactsBrain).toBe(0);
   });
 
   test("counts seed vs brain-authored artifacts separately", () => {
@@ -125,8 +125,8 @@ describe("computeSubstrateStatus", () => {
       ],
     );
     const r = computeSubstrateStatus(db, "/tmp/x.db");
-    expect(r.codeArtifactsBrain).toBe(1);
-    expect(r.codeArtifactsSeed).toBeGreaterThan(0);
+    expect(r.actArtifactsBrain).toBe(1);
+    expect(r.actArtifactsSeed).toBeGreaterThan(0);
   });
 });
 
@@ -137,9 +137,9 @@ describe("renderSubstrateStatus", () => {
       {
         dbPath: "/tmp/x.db",
         events: 10,
-        codeArtifacts: 8,
-        codeArtifactsSeed: 8,
-        codeArtifactsBrain: 0,
+        actArtifacts: 8,
+        actArtifactsSeed: 8,
+        actArtifactsBrain: 0,
         vecEvents: 5,
         embeddableTotal: 5,
         recipeRows: 2,

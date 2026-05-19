@@ -67,9 +67,9 @@ const safeScalar = <T = unknown>(db: Database, sql: string, params: unknown[] = 
 export type SubstrateStatusReport = {
   dbPath: string;
   events: number;
-  codeArtifacts: number;
-  codeArtifactsSeed: number;
-  codeArtifactsBrain: number;
+  actArtifacts: number;
+  actArtifactsSeed: number;
+  actArtifactsBrain: number;
   vecEvents: number;
   embeddableTotal: number;
   recipeRows: number;
@@ -107,12 +107,12 @@ export const computeSubstrateStatus = (
   try { runViews(db); } catch { /* tolerable for read-only diagnostics */ }
 
   const events = safeCount(db, "SELECT COUNT(*) AS c FROM events");
-  const codeArtifacts = safeCount(db, "SELECT COUNT(*) AS c FROM act_artifact");
-  const codeArtifactsSeed = safeCount(
+  const actArtifacts = safeCount(db, "SELECT COUNT(*) AS c FROM act_artifact");
+  const actArtifactsSeed = safeCount(
     db,
     "SELECT COUNT(*) AS c FROM act_artifact WHERE id LIKE 'seed_%'",
   );
-  const codeArtifactsBrain = Math.max(0, codeArtifacts - codeArtifactsSeed);
+  const actArtifactsBrain = Math.max(0, actArtifacts - actArtifactsSeed);
   const vecEvents = safeCount(db, "SELECT COUNT(*) AS c FROM vec_events");
 
   const placeholders = EMBEDDABLE_KINDS.map(() => "?").join(", ");
@@ -188,9 +188,9 @@ export const computeSubstrateStatus = (
   return {
     dbPath,
     events,
-    codeArtifacts,
-    codeArtifactsSeed,
-    codeArtifactsBrain,
+    actArtifacts,
+    actArtifactsSeed,
+    actArtifactsBrain,
     vecEvents,
     embeddableTotal,
     recipeRows,
@@ -221,8 +221,8 @@ export const renderSubstrateStatus = (
   out("─".repeat(50));
   out(`events:                     ${fmt(report.events)}`);
   out(
-    `act_artifact:               ${fmt(report.codeArtifacts)}   ` +
-      `(${report.codeArtifactsSeed} seed, ${report.codeArtifactsBrain} brain-authored)`,
+    `act_artifact:               ${fmt(report.actArtifacts)}   ` +
+      `(${report.actArtifactsSeed} seed, ${report.actArtifactsBrain} brain-authored)`,
   );
   out(
     `vec_events:                 ${fmt(report.vecEvents)}   ` +

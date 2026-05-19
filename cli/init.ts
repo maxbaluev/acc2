@@ -193,9 +193,9 @@ export type InitSummary = {
   uvPath: string | null;
   camoufoxPath: string | null;
   foundationalSeedImported: number;
-  /** Number of canonical seed_* code artifacts inserted on this run.
+  /** Number of canonical seed_* act_artifact rows inserted on this run.
    *  0 means "already seeded" (idempotent re-run) — see seedActArtifacts. */
-  codeArtifactsImported: number;
+  actArtifactsImported: number;
   /** Number of canonical Tier-0 recipe templates seeded on this run.
    *  0 means "already seeded" (idempotent). See seedRecipes. */
   recipesSeeded: number;
@@ -219,7 +219,7 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
     uvPath: null,
     camoufoxPath: null,
     foundationalSeedImported: 0,
-    codeArtifactsImported: 0,
+    actArtifactsImported: 0,
     recipesSeeded: 0,
     eventsEmbedded: 0,
     warnings: [],
@@ -379,7 +379,7 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
       // scenarioAdHocTask / scenarioRealBrainEndToEnd. Production and
       // harness now hit the SAME seed path.
       const artifactSummary = seedActArtifacts(db);
-      summary.codeArtifactsImported = artifactSummary.inserted;
+      summary.actArtifactsImported = artifactSummary.inserted;
       log(
         `[7b/8] code artifacts: imported ${artifactSummary.inserted} canonical artifacts (action + verifier pairs)` +
           (artifactSummary.skipped > 0 ? `  (${artifactSummary.skipped} already present)` : ""),

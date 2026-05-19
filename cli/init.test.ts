@@ -149,7 +149,7 @@ describe("runInitProgrammatic(--yes mode)", () => {
     expect(summary.stateDirCreated).toBe(true);
     expect(summary.tokenMinted).toBe(true);
     expect(summary.foundationalSeedImported).toBe(0);
-    expect(summary.codeArtifactsImported).toBe(0);
+    expect(summary.actArtifactsImported).toBe(0);
     expect(summary.recipesSeeded).toBe(0);
     expect(summary.eventsEmbedded).toBe(0);
 
@@ -165,7 +165,7 @@ describe("runInitProgrammatic(--yes mode)", () => {
     expect(second.stateDirCreated).toBe(false);
     expect(second.tokenMinted).toBe(false);
     expect(second.foundationalSeedImported).toBe(0);
-    expect(second.codeArtifactsImported).toBe(0);
+    expect(second.actArtifactsImported).toBe(0);
     expect(second.recipesSeeded).toBe(0);
     expect(second.eventsEmbedded).toBe(0);
     cleanup();
