@@ -635,6 +635,12 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
 
   // Worker tick intervals — declared here so /health can compute the
   // "stuck after 3× interval" threshold without reading env vars twice.
+  // For REACTIVE workers (markWorkerReactive in registerReactiveWorker)
+  // these intervals are observational metadata only — the reactive
+  // safety net (30 min) is the genuine deadline. Universal defaults
+  // chosen so an operator who never tunes anything still gets sane
+  // behavior; per the f13 frontier inventory, these will be replaced
+  // by adaptive scoring in a later cohort, not by env knobs.
   const amendmentTickMs = Number(process.env.ACC2_AMENDMENT_TICK_MS ?? 2000);
   const gaugeTickMs = 30_000;
   const integrityIntervalMs = Number(
@@ -642,8 +648,16 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   );
   const embedderIntervalMs = 10_000;
   const rehabIntervalMs = 6 * 60 * 60 * 1000;
+  // Supervisor cadence — reactive worker, so 30s is observational.
+  // Defined here so the readiness registerWorker call below can use it
+  // without forward-referencing the value defined later in the file.
+  const SUPERVISOR_INTERVAL_MS = 30_000;
   const rollingIntervalMs = 60_000;
-  const fatherIntervalMs = Number(process.env.ACC2_FATHER_INTERVAL_MS ?? 5 * 60 * 1000);
+  // Father is fully reactive (onEvent("*") subscription at line ~1296);
+  // this constant is purely the observability label for readiness — the
+  // "expected" cadence between journal entries. The reactive_safety_net
+  // (30 min) is the genuine deadline. Universal value — no env knob.
+  const fatherIntervalMs = 5 * 60 * 1000;
 
   // Batch 3.OPS readiness: always-on workers must be registered up-front
   // so /ready can refuse traffic until each has completed its first tick.
@@ -671,7 +685,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("rolling_reviewer")) registerWorker("rolling_reviewer", rollingIntervalMs);
   if (isWorkerEnabled("father")) registerWorker("father", fatherIntervalMs);
   if (isWorkerEnabled("scheduler")) registerWorker("scheduler");
-  if (isWorkerEnabled("supervisor")) registerWorker("supervisor", Number(process.env.ACC2_SUPERVISOR_INTERVAL_MS ?? 30_000));
+  if (isWorkerEnabled("supervisor")) registerWorker("supervisor", SUPERVISOR_INTERVAL_MS);
   if (isWorkerEnabled("compaction")) registerWorker("compaction", Number(process.env.ACC2_COMPACTION_INTERVAL_MS ?? 60 * 60 * 1000));
   if (isWorkerEnabled("recipe_inertia")) registerWorker("recipe_inertia", Number(process.env.ACC2_RECIPE_INERTIA_TICK_MS ?? 60 * 60 * 1000));
   if (isWorkerEnabled("verify_heal")) registerWorker("verify_heal", Number(process.env.ACC2_VERIFY_HEAL_TICK_MS ?? 60 * 60 * 1000));
@@ -787,8 +801,9 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // (redispatch storm / DAG explosion / bridge health) on a tight 30s
   // interval. Default ON unless ACC2_DISABLE_WORKERS=supervisor.
   // Decoupled from the integrity worker (whose default tick is 6h, far
-  // too slow to catch tight loops live).
-  const SUPERVISOR_INTERVAL_MS = Number(process.env.ACC2_SUPERVISOR_INTERVAL_MS ?? 30_000);
+  // too slow to catch tight loops live). SUPERVISOR_INTERVAL_MS is
+  // declared up at the worker-tick-intervals block — 30 s is the
+  // universal cadence for reactive supervisor checks.
   if (isWorkerEnabled("supervisor")) {
     const { supervisorTick } = await import("./supervisor");
     let supervisorMarked = false;
