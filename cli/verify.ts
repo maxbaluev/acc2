@@ -88,11 +88,6 @@ const diffField = (payload: Record<string, unknown>, key: "before" | "after"): s
   return typeof v === "string" && v.length > 0 ? v : null;
 };
 
-const isLegacyStringProposal = (payload: Record<string, unknown>): boolean => {
-  const proposed = payload.proposed_behavior ?? payload.proposed_action;
-  return typeof proposed === "string";
-};
-
 type VerifyResult = "verified" | "drift" | "missing";
 
 export const verifyCommitTouches = (sha: string, target: string, repoRoot: string): { exists: boolean; touchesTarget: boolean; patchText: string } => {
@@ -117,7 +112,6 @@ export const classifyApply = (
   const g = verifyCommitTouches(commitSha, target, repoRoot);
   if (!g.exists) return "missing";
   if (!g.touchesTarget) return "drift";
-  if (isLegacyStringProposal(proposalPayload)) return "verified"; // legacy: target-touch suffices
   // Patch should mention the `after` text (additive) or `before` text
   // (`-` line). Either marker corroborates a semantic apply; neither = drift.
   const after = diffField(proposalPayload, "after");

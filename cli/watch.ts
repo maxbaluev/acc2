@@ -76,10 +76,3 @@ export const runWatch = async (argv: string[]): Promise<number> => {
   await instance.waitUntilExit();
   return 0;
 };
-
-// Compile-time bridges for any stale import paths (none currently — kept
-// as inert stubs so a future caller fails fast at the import site instead
-// of getting a runtime undefined).
-export const renderFrame = (): string => "";
-export const renderPanelLines = (): string[] => [];
-export const readDriftSummaries = (): never[] => [];

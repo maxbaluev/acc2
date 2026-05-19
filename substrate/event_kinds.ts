@@ -526,25 +526,6 @@ export const EVENT_KINDS = {
   // posterior should demote on this signal — the brain's proposed shape
   // was wrong even though it passed structural gates.
   applied_change_failed:                   { producer: "substrate", embeddable: false, mirror_inline: true,  health_metric: true, narrative: true },
-  // ── Lesson-apply flywheel intermediates (audit-#7, 2026-05-15) ───────
-  // Pre-fix these kinds were emitted by the lesson-apply subsystem but
-  // absent from EVENT_KINDS — they bypassed embedding eligibility, the
-  // health-metric tag filter, and the type system. Registering them
-  // properly closes the kind-registry drift gap and ensures the surfaces
-  // (TUI Lessons panel, embedding worker, mirror-inline rule) see them.
-  // 2026-05-15 right-sizing: pipeline intermediates with structured payloads
-  // (no retrievable semantic text).
-  apply_candidate_selected:                { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  apply_owner_gate_evaluated:              { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  apply_executor_action_predicted:         { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  apply_change_verified:                   { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  applied_change_compounding_measured:     { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  lesson_apply_candidate_opened:           { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  lesson_apply_gate_evaluated:             { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  lesson_apply_plan_verified:              { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  lesson_apply_planned:                    { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  lesson_apply_verifier_scored:            { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  lesson_compounding_measured:             { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Substrate self-events ───────────────────────────────────────────
   projection_checkpointed:                 { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },

@@ -271,10 +271,6 @@ describe("derived sets match their pre-unification shape", () => {
       "task_closure_audited",
       "applied_change_committed",
       "lesson_apply_requested",
-      "apply_candidate_selected",
-      "apply_executor_action_predicted",
-      "lesson_apply_candidate_opened",
-      "lesson_apply_planned",
       "brain_message_emitted",
       "brain_reasoning_recorded",
     ]);
