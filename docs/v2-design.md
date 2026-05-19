@@ -1644,6 +1644,44 @@ diagnostic visibility. No fixed observation count is required —
 N=1 with a strong positive owner outcome crosses for a high-autonomy
 owner, while N=10 with mixed signal does not.
 
+#### 15.x One-time goal promotion (non-replayable goals)
+
+Many human goals are not replayable — writing one's mother's eulogy,
+deciding whether to take a job offer, reconciling with a sibling,
+recovering from a depressive episode. The substrate must still
+compound learning from these one-shot trajectories. F7 (roadmap
+`WW7W1NZ8A10R52PB4E7EJE9YBW`, 2026-05-18) wires the path:
+
+1. **Verifier vocabulary.** `verifier_kind` remains an open string
+   (`open_verifier_residual_packet` lesson). The substrate seeds 10
+   example strings as `knowledge_candidate` rows with
+   `lesson_class = substrate_verifier_seed` so the brain can retrieve
+   and cite emotional / relational / life-outcome / health / growth /
+   meaning / self-relationship / creative / spiritual signals when
+   composing acts. Operators discover their own verifier_kinds; the
+   seed set is starting vocabulary, not an enum.
+
+2. **Feedback window.** `predicted_residual` accepts an optional
+   `feedback_window` packet ({duration_ms, classification}) that
+   encodes when the substrate should expect the owner-observed
+   outcome to land. Classifications: immediate (< 1 min), short
+   (< 1 hr), medium (< 1 day), long (< 1 mo), very_long (1 mo+).
+   The lifecycle closure sweep
+   (`runtime/lifecycle_closure_sweep.ts`) refuses to retire
+   long-window and very_long lifecycles as stale, reporting them in
+   `summary.feedback_window_respected_count` instead.
+
+3. **N=1 promotion math.** The F5 Beta lower-bound posterior already
+   admits N=1 when the lift is strong and owner autonomy is high
+   (`runtime/posterior_promotion.ts`). One strong-positive owner
+   outcome stamped with a non-technical verifier_kind such as
+   `owner_emotional_signal` produces `posterior_alpha = 2`,
+   `posterior_beta = 1`, mean ≈ 0.667, lower bound ≈ 0.46. For an
+   owner with `autonomy_signals.emotional_work >= 0.8` the threshold
+   is the high-autonomy floor (0.4), and the recipe promotes. A
+   cautious owner on the same domain stays at the conservative
+   threshold and the same evidence is held until more signal lands.
+
 In crisis mode (§3.5), recipe threshold lowered to 0.6 (prefer cached over fresh).
 
 ## 16. Starting Fresh from v1 — No Migration

@@ -727,6 +727,181 @@ export const seedUniversalLessons = (db: Database): UniversalLessonsSummary => {
  *  against the exact set without re-encoding the list. */
 export const UNIVERSAL_LESSON_NAMES = UNIVERSAL_LESSONS.map((l) => l.name);
 
+// ── F7 verifier_kind examples (non-technical goal extensions) ──────
+//
+// F7 (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW). verifier_kind
+// is an open string (CLAUDE.md "verifier_kind is an open-string
+// discovered through use, NOT a fixed enum"). The substrate ships
+// example verifier_kind strings as `knowledge_candidate` rows so the
+// brain can retrieve and cite them when designing acts for
+// non-technical goals (eulogies, life decisions, relationships,
+// growth, meaning). Operators and the brain discover their own
+// verifier_kind strings as they go — these seeds are starting
+// vocabulary, not enums.
+//
+// Each row lands as a `knowledge_candidate` event with
+// `claim = "verifier_kind_example"` and
+// `lesson_class = "substrate_verifier_seed"` so consumers can filter
+// the seed set without scanning every knowledge row. `feedback_window_hint`
+// names the typical observation window for that signal class
+// (immediate / short / medium / long / very_long).
+
+type VerifierKindExample = {
+  /** The verifier_kind string the brain would stamp on action_scored. */
+  name: string;
+  /** Short prose: what this verifier kind observes. */
+  description: string;
+  /** Typical owner-observation window — immediate / short / medium /
+   *  long / very_long. Used by emitters to populate
+   *  predicted_residual.feedback_window when designing acts. */
+  feedback_window_hint:
+    | "immediate"
+    | "short"
+    | "medium"
+    | "long"
+    | "very_long";
+};
+
+const VERIFIER_KIND_EXAMPLES: VerifierKindExample[] = [
+  {
+    name: "owner_emotional_signal",
+    description:
+      "Owner reports an emotional reaction (clarity, anxiety, relief, dread) " +
+      "after observing the action's effect. Scored from owner words, not " +
+      "deterministic code.",
+    feedback_window_hint: "short",
+  },
+  {
+    name: "owner_clarity_signal",
+    description:
+      "Owner reports the decision space feels clearer or less clear after " +
+      "the act. Used for deliberation, framing, and decision-support goals.",
+    feedback_window_hint: "immediate",
+  },
+  {
+    name: "owner_relationship_signal",
+    description:
+      "Owner reports a relationship strengthened, strained, or repaired " +
+      "after the action chain. Window spans weeks to months.",
+    feedback_window_hint: "long",
+  },
+  {
+    name: "owner_life_outcome_signal",
+    description:
+      "Long-window observation (months or years) of how a major decision " +
+      "played out — job change, move, partnership. The substrate scores " +
+      "outcome rather than output.",
+    feedback_window_hint: "very_long",
+  },
+  {
+    name: "owner_health_signal",
+    description:
+      "Owner reports physical or mental health movement (sleep, energy, " +
+      "anxiety load, mood). Window typically medium to long.",
+    feedback_window_hint: "medium",
+  },
+  {
+    name: "owner_growth_signal",
+    description:
+      "Owner reports learning, capability gain, or confidence movement " +
+      "after a practice / study / coaching loop. Window weeks to months.",
+    feedback_window_hint: "long",
+  },
+  {
+    name: "owner_meaning_signal",
+    description:
+      "Owner reports an increased or decreased sense of meaning or " +
+      "purpose. Window spans months to years.",
+    feedback_window_hint: "very_long",
+  },
+  {
+    name: "owner_relationship_with_self_signal",
+    description:
+      "Owner reports movement in self-acceptance, self-criticism, or " +
+      "self-trust. Often correlated with therapy, journaling, or " +
+      "creative-practice loops.",
+    feedback_window_hint: "long",
+  },
+  {
+    name: "owner_creative_signal",
+    description:
+      "Owner reports creative output quality or quantity moved after the " +
+      "action chain (writing, music, design). Window short to medium.",
+    feedback_window_hint: "medium",
+  },
+  {
+    name: "owner_spiritual_signal",
+    description:
+      "Owner reports spiritual or contemplative state movement (practice " +
+      "consistency, sense of presence, equanimity). Window months and up.",
+    feedback_window_hint: "very_long",
+  },
+];
+
+export type VerifierKindSeedSummary = { imported: number };
+
+/** Install the 10 example verifier_kind strings as knowledge_candidate
+ *  events. Idempotent: re-running on a populated DB skips entries whose
+ *  content hash was already recorded. The strings are open-ended —
+ *  operators coin their own verifier_kinds; these seeds are starting
+ *  vocabulary, not enums. */
+export const seedVerifierKindExamples = (
+  db: Database,
+): VerifierKindSeedSummary => {
+  let imported = 0;
+  const directiveId = "dir_seed_verifier_kind_examples";
+  const loopId = "loop_seed_verifier_kind_examples";
+  const taskId = "task_seed_verifier_kind_examples";
+
+  withImmediateTransaction(db, () => {
+    for (const example of VERIFIER_KIND_EXAMPLES) {
+      const hash = hashSeedRow(
+        `verifier_kind_example:${example.name}|${example.description}|${example.feedback_window_hint}`,
+      );
+      if (seenSeedHash(db, "seed:verifier_kind_example", hash)) continue;
+      const id = newId();
+      db.run(
+        `INSERT INTO events (
+           id, ts, directive_id, task_id, loop_id, substrate_origin,
+           kind, payload, context_refs
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          nowIso(),
+          directiveId,
+          taskId,
+          loopId,
+          "substrate_auto",
+          "knowledge_candidate",
+          JSON.stringify({
+            claim: "verifier_kind_example",
+            lesson_class: "substrate_verifier_seed",
+            verifier_kind_example_name: example.name,
+            description: example.description,
+            feedback_window_hint: example.feedback_window_hint,
+            skip_corroboration: true,
+          }),
+          JSON.stringify([]),
+        ],
+      );
+      recordSeedHash(
+        db,
+        "seed:verifier_kind_example",
+        hash,
+        example.name.slice(0, 64),
+      );
+      imported++;
+    }
+  });
+  return { imported };
+};
+
+/** Names of the 10 seeded verifier_kind examples — exposed so tests
+ *  and the prompt composer can assert against the exact starting set. */
+export const VERIFIER_KIND_EXAMPLE_NAMES = VERIFIER_KIND_EXAMPLES.map(
+  (e) => e.name,
+);
+
 // ── Seed code artifacts (§11.4) ────────────────────────────────────
 
 type SeedArtifact = {

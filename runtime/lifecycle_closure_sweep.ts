@@ -40,6 +40,14 @@ export type SweepSummary = {
   closure_complete_count: number;
   closure_obsolete_count: number;
   closure_owner_required_count: number;
+  /** F7 (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW): number of
+   *  lifecycles whose payload declared a long / very_long
+   *  feedback_window and were therefore exempted from this sweep's
+   *  obsolete / owner-required emission paths. The lifecycle stays
+   *  open because the owner-observed outcome is expected on a
+   *  weeks-to-years timescale rather than within the default 7-day
+   *  expiry. */
+  feedback_window_respected_count: number;
   errors: string[];
 };
 
@@ -63,6 +71,45 @@ export type SweepOptions = {
 const STUCK_PROPOSAL_AGE_MS = 24 * 60 * 60 * 1000; // 24h
 const OWNER_REQUEST_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7d
 const STUCK_TASK_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+
+// F7: classifications whose lifecycles are EXPECTED to remain open
+// beyond the default 7-day expiry. The owner-observed outcome lands on
+// a weeks-to-years timescale (relationship signal, life outcome,
+// growth, meaning), so the sweep must not call them stale.
+const LONG_FEEDBACK_CLASSIFICATIONS = new Set<string>(["long", "very_long"]);
+
+type FeedbackWindowShape = {
+  classification?: unknown;
+  duration_ms?: unknown;
+};
+
+/** Extract the feedback_window field from a row payload. Looks at
+ *  `payload.feedback_window` and at the packet form
+ *  `payload.predicted_residual_packet.feedback_window` so emitters can
+ *  use either shape without disagreement. */
+const extractFeedbackWindow = (
+  payload: Record<string, unknown>,
+): FeedbackWindowShape | null => {
+  const direct = payload.feedback_window;
+  if (direct && typeof direct === "object") return direct as FeedbackWindowShape;
+  const packet = payload.predicted_residual_packet;
+  if (packet && typeof packet === "object") {
+    const fw = (packet as Record<string, unknown>).feedback_window;
+    if (fw && typeof fw === "object") return fw as FeedbackWindowShape;
+  }
+  return null;
+};
+
+/** Returns true when the supplied payload declares a feedback_window
+ *  whose classification is in the long-window set. */
+const hasLongFeedbackWindow = (
+  payload: Record<string, unknown>,
+): boolean => {
+  const fw = extractFeedbackWindow(payload);
+  if (!fw) return false;
+  if (typeof fw.classification !== "string") return false;
+  return LONG_FEEDBACK_CLASSIFICATIONS.has(fw.classification);
+};
 
 const isoToMs = (iso: string): number => new Date(iso).getTime();
 
@@ -169,6 +216,7 @@ export const runLifecycleClosureSweep = (
     closure_complete_count: 0,
     closure_obsolete_count: 0,
     closure_owner_required_count: 0,
+    feedback_window_respected_count: 0,
     errors: [],
   };
 
@@ -236,6 +284,14 @@ export const runLifecycleClosureSweep = (
       if (ageMs < STUCK_PROPOSAL_AGE_MS) continue;
       let payload: Record<string, unknown> = {};
       try { payload = JSON.parse(row.payload ?? "{}") as Record<string, unknown>; } catch { /* ok */ }
+      // F7: long-window lifecycles stay open. Owner-observed outcomes
+      // for non-technical goals (relationship, life outcome, growth,
+      // meaning) land weeks-to-months later; the sweep must not call
+      // them stale.
+      if (hasLongFeedbackWindow(payload)) {
+        summary.feedback_window_respected_count++;
+        continue;
+      }
       const anchors = extractAnchors(payload);
       const obsoleteAnchors = anchors.filter((a) => !anchorResolves(root, a));
       if (anchors.length > 0 && obsoleteAnchors.length === anchors.length) {
@@ -310,6 +366,16 @@ export const runLifecycleClosureSweep = (
         continue;
       }
       if (ageMs >= OWNER_REQUEST_EXPIRY_MS) {
+        // F7: respect long-window feedback. A non-technical owner ask
+        // (eulogy review, decision deliberation, growth practice) can
+        // legitimately sit open for months; the sweep must not retire
+        // it as expired.
+        let payload: Record<string, unknown> = {};
+        try { payload = JSON.parse(row.payload ?? "{}") as Record<string, unknown>; } catch { /* ok */ }
+        if (hasLongFeedbackWindow(payload)) {
+          summary.feedback_window_respected_count++;
+          continue;
+        }
         emitTerminator(
           "closure_owner_required",
           row.directive_id,
@@ -336,8 +402,9 @@ export const runLifecycleClosureSweep = (
         ts: string;
         directive_id: string | null;
         task_id: string | null;
+        payload: string;
       }, [number]>(
-        `SELECT id, ts, directive_id, task_id FROM events
+        `SELECT id, ts, directive_id, task_id, payload FROM events
           WHERE kind = 'task_node_opened'
           ORDER BY ts ASC
           LIMIT ?`,
@@ -365,6 +432,16 @@ export const runLifecycleClosureSweep = (
         continue;
       }
       if (ageMs < STUCK_TASK_AGE_MS) continue;
+      // F7: respect long-window feedback. A task whose act tuple
+      // declared feedback_window.classification in {long, very_long}
+      // (life decision, growth practice, relationship work) is
+      // expected to outlive the default 24h / 7d expiry.
+      let payload: Record<string, unknown> = {};
+      try { payload = JSON.parse(row.payload ?? "{}") as Record<string, unknown>; } catch { /* ok */ }
+      if (hasLongFeedbackWindow(payload)) {
+        summary.feedback_window_respected_count++;
+        continue;
+      }
       if (row.directive_id && directiveIsClosed(db, row.directive_id)) {
         emitTerminator(
           "closure_obsolete",

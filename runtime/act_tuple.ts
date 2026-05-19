@@ -4,6 +4,57 @@ import { emitEvent, type EmittedEvent } from "./events";
 
 type JsonObject = { [k: string]: JsonValue };
 
+// F7 (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW). Non-technical
+// goals (eulogies, job decisions, relationship reconciliation, growth,
+// meaning) settle on owner-observed timescales that span days to years.
+// `FeedbackWindow` encodes how long the substrate should wait before
+// scoring the act. The classification is open-ended in spirit
+// (operators can coin new strings) but five canonical buckets are
+// recognised by the lifecycle closure sweep:
+//   immediate (< 1 min)  — deterministic test, code-residual check
+//   short     (< 1 hr)   — owner review of an artifact / draft
+//   medium    (< 1 day)  — research outcome, draft acceptance
+//   long      (< 1 mo)   — decision quality, relationship signal
+//   very_long (1 mo+)    — life outcome, growth, meaning
+//
+// Lifecycles whose feedback_window.classification is `long` or
+// `very_long` are EXPECTED to stay open for weeks-to-months; the
+// closure sweep exempts them from premature auto-closure so the owner
+// can return with the eventual signal and the substrate can credit
+// the originating act chain.
+export type FeedbackWindowClassification =
+  | "immediate"
+  | "short"
+  | "medium"
+  | "long"
+  | "very_long"
+  | string;
+
+export type FeedbackWindow = {
+  /** Typical wait time in milliseconds before owner outcome is
+   *  expected. Emitters set this from the verifier_kind hint or from
+   *  prior posterior evidence; closure sweeps may consult it. */
+  duration_ms: number;
+  classification: FeedbackWindowClassification;
+};
+
+/** Canonical packet shape for predicted_residual when the emitter wants
+ *  to carry feedback_window alongside the scalar prediction. The Event
+ *  row column remains a bare number for backward compatibility; the
+ *  packet form is used inside act_tuple_recorded payloads, recipe
+ *  trajectories, and lifecycle-source rows that the closure sweep
+ *  inspects.
+ *
+ *  At call sites that currently pass a bare number, the helpers
+ *  continue to accept `number` and the packet form is opt-in. */
+export type PredictedResidual = {
+  /** Scalar residual prediction in [0,1]. */
+  value: number;
+  /** Optional observation window. Required only when the act settles
+   *  on a non-immediate timescale. */
+  feedback_window?: FeedbackWindow;
+};
+
 export type ActTupleInput = {
   directiveId?: string;
   taskId?: string;
@@ -15,6 +66,10 @@ export type ActTupleInput = {
   effectSummary: string;
   verifierKind: string;
   predictedResidual: number;
+  /** F7: optional observation window for the predicted residual. When
+   *  set, the lifecycle closure sweep treats long / very_long lifecycles
+   *  as expected-to-remain-open rather than stale. */
+  feedbackWindow?: FeedbackWindow;
   residual: number;
   outcome: OutcomeStatus;
   actionArtifactId: string;
@@ -60,9 +115,20 @@ const optionalJsonStringArray = (xs: string[] | undefined, key: string): JsonVal
   return asJsonStringArray(xs, key);
 };
 
+const validateFeedbackWindow = (fw: FeedbackWindow): FeedbackWindow => {
+  if (typeof fw.duration_ms !== "number" || !Number.isFinite(fw.duration_ms) || fw.duration_ms < 0) {
+    throw new Error("act_tuple_invalid_feedback_window_duration_ms");
+  }
+  if (typeof fw.classification !== "string" || fw.classification.trim().length === 0) {
+    throw new Error("act_tuple_invalid_feedback_window_classification");
+  }
+  return { duration_ms: fw.duration_ms, classification: fw.classification };
+};
+
 export const buildActTuplePayload = (act: ActTupleInput): JsonObject => {
   const actionArtifactId = requireNonEmptyString(act.actionArtifactId, "action_artifact_id");
   const verifierArtifactId = requireNonEmptyString(act.verifierArtifactId, "verifier_artifact_id");
+  const fw = act.feedbackWindow ? validateFeedbackWindow(act.feedbackWindow) : undefined;
   return {
     intent: requireNonEmptyString(act.intent, "intent"),
     reasoning_summary: requireNonEmptyString(act.reasoningSummary, "reasoning_summary"),
@@ -80,6 +146,19 @@ export const buildActTuplePayload = (act: ActTupleInput): JsonObject => {
     cited_knowledge_ids: asJsonStringArray(act.citedKnowledgeIds, "cited_knowledge_ids"),
     cited_artifact_ids: asJsonStringArray(act.citedArtifactIds, "cited_artifact_ids"),
     derived_event_ids: optionalJsonStringArray(act.derivedEventIds, "derived_event_ids"),
+    // F7: include the packet form of predicted_residual when an
+    // observation window was declared. Consumers that want the bare
+    // scalar still read `predicted_residual` directly; consumers that
+    // care about the window read `predicted_residual_packet`.
+    ...(fw
+      ? {
+          predicted_residual_packet: {
+            value: act.predictedResidual,
+            feedback_window: fw,
+          },
+          feedback_window: fw,
+        }
+      : {}),
     ...(act.extra ?? {}),
   };
 };

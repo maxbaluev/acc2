@@ -27,7 +27,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { newAdminToken } from "../runtime/ids";
 import { openDb, closeDb } from "../substrate/db";
-import { seedCodeArtifacts, seedDemoKnowledge, seedFoundationalKnowledge, seedLakelandDriveProvenance, seedRecipes, seedUniversalLessons } from "../substrate/seed";
+import { seedCodeArtifacts, seedDemoKnowledge, seedFoundationalKnowledge, seedLakelandDriveProvenance, seedRecipes, seedUniversalLessons, seedVerifierKindExamples } from "../substrate/seed";
 import { embedPendingEvents } from "../runtime/embedder";
 import {
   resolveDbPath, resolveSocketFile, resolveStateDir,
@@ -362,6 +362,15 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
       const universalLessons = seedUniversalLessons(db);
       if (universalLessons.imported > 0) {
         log(`       imported ${universalLessons.imported} universal substrate lessons`);
+      }
+      // F7 (2026-05-18, same roadmap row): seed 10 example verifier_kind
+      // strings as knowledge_candidate rows so the brain can retrieve and
+      // cite them when designing acts for non-technical goals (eulogies,
+      // life decisions, growth, meaning). verifier_kind is an open string —
+      // these are starting vocabulary, not enums.
+      const verifierKindExamples = seedVerifierKindExamples(db);
+      if (verifierKindExamples.imported > 0) {
+        log(`       imported ${verifierKindExamples.imported} verifier_kind examples`);
       }
       // Step 7b — canonical seed code artifacts (§11.4). Idempotent: a
       // re-run reports inserted=0 / skipped=N. Operators getting their
