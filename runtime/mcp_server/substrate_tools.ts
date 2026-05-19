@@ -28,6 +28,7 @@ import { findSimilarRecentCandidate } from "../knowledge_dedup";
 import { newId } from "../ids";
 import { createHash } from "node:crypto";
 import { classifyIntent, allowedArtifactKindsFor, INTENT_CLASSIFIER_VERSION } from "../intent_classifier";
+import { recordInternalAct } from "../internal_act_projection";
 import {
   codeArtifactRegistry,
   readyTasks,
@@ -1320,7 +1321,7 @@ export const handleOpenDirective = (
     .update(args.directive_text)
     .digest("hex")
     .slice(0, 16);
-  emitEvent(ctx.db, {
+  const intentEvent = emitEvent(ctx.db, {
     kind: "intent_classified",
     substrate_origin: "substrate_auto",
     directive_id: directiveId,
@@ -1333,6 +1334,34 @@ export const handleOpenDirective = (
       directive_text_hash: directiveTextHash,
       allowed_artifact_kinds: allowedArtifactKindsFor(classification.intent_class),
     } as JsonValue,
+  });
+
+  // F6 — universal internal Act scoring: the substrate just made an
+  // internal decision (which intent class this directive belongs to).
+  // Record it as an act_tuple so the downstream lane outcome can
+  // score the classifier through the same posterior credit loop that
+  // scores outward work. The verifier is conceptual at emit time —
+  // when the lane outcome (task_committed / task_failed) arrives,
+  // credit distribution updates the intent_classifier_v1 handle.
+  recordInternalAct(ctx.db, {
+    intent: "classify directive intent",
+    actionHandle: "intent_classifier_v1",
+    verifierHandle: "lane_match_verifier",
+    verifierKind: "deterministic_code",
+    predictedResidual: 1 - classification.confidence,
+    reasoningSummary: `classifier matched ${classification.evidence.length} markers for class ${classification.intent_class}`,
+    actionSummary: `classified directive as ${classification.intent_class}`,
+    effectSummary: `intent_classified emitted with confidence ${classification.confidence.toFixed(2)}`,
+    directiveId,
+    taskId: directiveId,
+    sourceEventId: intentEvent.id,
+    sourceActId: "intent_classifier_v1:" + directiveTextHash,
+    extra: {
+      intent_class: classification.intent_class,
+      confidence: classification.confidence,
+      classifier_version: INTENT_CLASSIFIER_VERSION,
+      directive_text_hash: directiveTextHash,
+    },
   });
 
   // Owner input is, by definition, the directive text. Emitting

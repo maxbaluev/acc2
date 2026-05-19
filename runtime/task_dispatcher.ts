@@ -46,6 +46,7 @@ const resolveComposePrompt = async (): Promise<typeof composePrompt> => {
   }
 };
 import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
+import { recordInternalAct } from "./internal_act_projection";
 import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge/index";
 import type { TaskNode } from "./task_topology";
 import { refinementDepth } from "./task_topology";
@@ -231,7 +232,7 @@ export const dispatchReadyTask = async (
   // 2. decideDispatch
   const decision = decideDispatch(db, task);
   const dispatchDecisionEvidence = dispatchEvidencePayload(decision);
-  emitEvent(db, {
+  const dispatchDecidedEvent = emitEvent(db, {
     kind: "dispatch_decided",
     substrate_origin: "substrate_auto",
     directive_id: task.directive_id,
@@ -250,6 +251,35 @@ export const dispatchReadyTask = async (
       dispatch_id: dispatchId,
       ...dispatchDecisionEvidence,
     } as JsonValue,
+  });
+
+  // F6 — universal internal Act scoring. The dispatcher just selected
+  // a lane (substrate_replay | claude_inline | opencode_brain |
+  // deferred_blocked). Record the decision as an act_tuple so the
+  // downstream lane outcome (task_committed / task_failed) can credit
+  // dispatch_decider_v1's posterior. predicted_residual mirrors the
+  // selected route's score: a high-scored route predicts a low
+  // residual; a defensive-fallback route predicts a higher residual.
+  const selectedRouteScore = dispatchDecisionEvidence.route_scores[decision.route] ?? 0.5;
+  recordInternalAct(db, {
+    intent: "select dispatch lane",
+    actionHandle: "dispatch_decider_v1",
+    verifierHandle: "lane_outcome_residual",
+    verifierKind: "deterministic_code",
+    predictedResidual: 1 - selectedRouteScore,
+    reasoningSummary: `selected route=${decision.route} score=${selectedRouteScore.toFixed(2)} reason=${decision.reason}`,
+    actionSummary: `dispatch_decided route=${decision.route}`,
+    effectSummary: `dispatch_decided emitted dispatch_id=${dispatchId}`,
+    directiveId: task.directive_id,
+    taskId: task.id,
+    sourceEventId: dispatchDecidedEvent.id,
+    sourceActId: "dispatch_decider_v1:" + dispatchId,
+    extra: {
+      route: decision.route,
+      reason: decision.reason,
+      selected_route_score: selectedRouteScore,
+      dispatch_id: dispatchId,
+    },
   });
 
   let bridgeResult: BridgeResult | undefined;
@@ -1190,7 +1220,7 @@ export const dispatchReadyTask = async (
                 prior_residual: residual,
               } as JsonValue,
             });
-            emitEvent(db, {
+            const refinementEdge = emitEvent(db, {
               kind: "task_edge_recorded",
               substrate_origin: "substrate_auto",
               directive_id: task.directive_id,
@@ -1201,6 +1231,31 @@ export const dispatchReadyTask = async (
                 to_task: refinedTaskId,
                 kind: "refines",
               } as JsonValue,
+            });
+            // F6 — universal internal Act scoring. The dispatcher just
+            // decided to open a refinement edge instead of failing or
+            // committing. The residual delta after the refined task
+            // closes will score whether opening the edge was the right
+            // choice (low delta means refinement helped).
+            recordInternalAct(db, {
+              intent: "open refinement edge",
+              actionHandle: "refinement_edge_opener_v1",
+              verifierHandle: "residual_delta_after_refine",
+              verifierKind: "deterministic_code",
+              predictedResidual: residual,
+              reasoningSummary: `prior residual ${residual.toFixed(2)} >= threshold; opened depth ${depth + 1} refinement`,
+              actionSummary: `task_edge_recorded refines -> ${refinedTaskId}`,
+              effectSummary: `scheduler now has a refined task to run`,
+              directiveId: task.directive_id,
+              taskId: refinedTaskId,
+              sourceEventId: refinementEdge.id,
+              sourceActId: "refinement_edge_opener_v1:" + task.id + ":" + (depth + 1),
+              extra: {
+                from_task: task.id,
+                to_task: refinedTaskId,
+                refinement_depth: depth + 1,
+                prior_residual: residual,
+              },
             });
           }
         }

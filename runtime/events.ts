@@ -597,6 +597,40 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       /* owner-observed credit retry can be driven from the ledger row */
     });
   }
+  // F6 — universal internal Act scoring for closure audit verdicts.
+  // task_closure_audited is a substrate-internal verdict (the closure
+  // verifier judged whether the directive met its goal). Record it
+  // as an act_tuple so the owner-observed completeness signal that
+  // arrives later (or the contradicting failure that arrives if the
+  // verdict was wrong) credits the closure verifier posterior.
+  if (input.kind === "task_closure_audited") {
+    try {
+      const payload = isObject(input.payload) ? input.payload : {};
+      const closureResidual = typeof payload.closure_residual === "number" && Number.isFinite(payload.closure_residual)
+        ? payload.closure_residual
+        : 0.5;
+      const verdict = typeof payload.verdict === "string" ? payload.verdict : "audited";
+      const { recordInternalAct } = require("./internal_act_projection") as typeof import("./internal_act_projection");
+      recordInternalAct(db, {
+        intent: "score closure verdict",
+        actionHandle: "closure_verifier_v1",
+        verifierHandle: "owner_observed_completeness",
+        verifierKind: "deterministic_code",
+        predictedResidual: closureResidual,
+        reasoningSummary: `closure verdict=${verdict} residual=${closureResidual.toFixed(2)}`,
+        actionSummary: `task_closure_audited emitted for task ${input.task_id ?? id}`,
+        effectSummary: `closure verdict landed; commit-gate threshold reads residual`,
+        directiveId: input.directive_id,
+        taskId: input.task_id,
+        sourceEventId: id,
+        sourceActId: "closure_verifier_v1:" + (input.task_id ?? id),
+        extra: {
+          verdict,
+          closure_residual: closureResidual,
+        },
+      });
+    } catch { /* fail-soft: closure audit already landed */ }
+  }
   // RLM retrieval credit attribution (brain task FX9PZDQ3W932,
   // 2026-05-18). Every action_scored event walks its context_refs for
   // retrieval_binding rows and emits retrieval_credit_attributed per
@@ -634,7 +668,7 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
         task_id: input.task_id,
       });
       for (const refusal of refusals) {
-        emitEvent(db, {
+        const refusalEvent = emitEvent(db, {
           kind: refusal.kind,
           substrate_origin: "substrate_auto",
           directive_id: input.directive_id,
@@ -642,6 +676,37 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
           context_refs: [id],
           payload: refusal.payload,
         });
+        // F6 — universal internal Act scoring. Each refusal is an
+        // internal substrate decision (the gate fired and refused
+        // the candidate). Record it as an act_tuple so an owner
+        // confirmation that the refusal was correct later credits
+        // the gate's posterior. Verifier handle stays conceptual
+        // until the downstream confirmation lands. Lazy-import to
+        // avoid the events ↔ internal_act_projection cycle.
+        try {
+          const { recordInternalAct } = require("./internal_act_projection") as typeof import("./internal_act_projection");
+          recordInternalAct(db, {
+            intent: "trigger predicate gate refusal",
+            actionHandle: "predicate_gate_v1",
+            verifierHandle: "owner_refusal_confirmation",
+            verifierKind: "deterministic_code",
+            // Refusals are high-confidence by construction: the gate
+            // matched a structural rule. Predicted residual stays
+            // low until owner evidence contradicts the refusal.
+            predictedResidual: 0.1,
+            reasoningSummary: `gate refused candidate via ${refusal.kind}`,
+            actionSummary: `emitted ${refusal.kind} citing candidate ${id}`,
+            effectSummary: `gate refusal blocks candidate from downstream admission`,
+            directiveId: input.directive_id,
+            taskId: input.task_id,
+            sourceEventId: refusalEvent.id,
+            sourceActId: "predicate_gate_v1:" + id + ":" + refusal.kind,
+            extra: {
+              refusal_kind: refusal.kind,
+              candidate_event_id: id,
+            },
+          });
+        } catch { /* fail-soft: screen refusal already landed */ }
       }
     } catch (err) {
       // Screen failures must not poison the candidate emission. The
