@@ -9,12 +9,16 @@ import {
   appliedLessonEffectiveness,
   artifactRouting,
   actArtifactRegistry,
+  activeInference,
+  artifactWarnings,
+  directives,
   directiveConflicts,
   dispatchResolved,
   failureCounts,
   lessonApplyCandidates,
   lessonImplementationStatus,
   lessonImplementerQueue,
+  modelRouting,
   originPromotionRanking,
   ownerConversation,
   ownerPlainStatus,
@@ -33,6 +37,7 @@ import {
   runViews,
   substrateNarrativeRecent,
   taskGraphFor,
+  taskCriticalPaths,
   watchEdgeObservations,
 } from "./views";
 
@@ -122,6 +127,11 @@ describe("runViews", () => {
       "rolling_review_due_view",
       "task_graph_view",
       "watch_edge_observations_view",
+      "directive_view",
+      "task_critical_path_view",
+      "active_inference_view",
+      "artifact_warning_view",
+      "model_routing_view",
     ]) {
       expect(views).toContain(expected);
     }
@@ -2753,5 +2763,244 @@ describe("owner_plain_status_view + ownerPlainStatus", () => {
     expect(row.opened_text ?? "").not.toMatch(/[0-9A-Z]{26}/);
     // But detail_refs MAY contain ids for drilldown — that's the contract.
     expect(Array.isArray(row.detail_refs)).toBe(true);
+  });
+});
+
+// ── v2-design §4.2 named-view restoration tests ───────────────────
+
+describe("directive_view + directives", () => {
+  test("live directive: status NULL when root task has no terminal", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: "d_live_1",
+      task_id: "t_live_1_root",
+      payload: { directive_text: "go run X", lifecycle: "finite", urgency: "high" },
+    });
+    insertEvent(db, {
+      kind: "task_node_opened",
+      directive_id: "d_live_1",
+      task_id: "t_live_1_root",
+      parent_task_id: null,
+    });
+    const rows = directives(db, "d_live_1");
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.status).toBeNull();
+    expect(rows[0]!.lifecycle).toBe("finite");
+    expect(rows[0]!.urgency).toBe("high");
+    expect(rows[0]!.root_task_id).toBe("t_live_1_root");
+  });
+
+  test("completed directive: status = task_committed when root commits", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "directive_opened",
+      directive_id: "d_done_1",
+      task_id: "t_done_1_root",
+      payload: { directive_text: "finish" },
+    });
+    insertEvent(db, {
+      kind: "task_node_opened",
+      directive_id: "d_done_1",
+      task_id: "t_done_1_root",
+      parent_task_id: null,
+    });
+    insertEvent(db, {
+      kind: "task_committed",
+      directive_id: "d_done_1",
+      task_id: "t_done_1_root",
+    });
+    const rows = directives(db, "d_done_1");
+    expect(rows[0]!.status).toBe("task_committed");
+    expect(rows[0]!.lifecycle).toBe("finite");  // default when absent
+    expect(rows[0]!.urgency).toBe("normal");    // default when absent
+  });
+});
+
+describe("task_critical_path_view + taskCriticalPaths", () => {
+  test("3-deep requires chain: depth=2 with arrow path", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dId = "d_cp_1";
+    // Three task nodes: leaf -> mid -> root via requires edges.
+    insertEvent(db, { kind: "task_node_opened", directive_id: dId, task_id: "t_root" });
+    insertEvent(db, { kind: "task_node_opened", directive_id: dId, task_id: "t_mid" });
+    insertEvent(db, { kind: "task_node_opened", directive_id: dId, task_id: "t_leaf" });
+    insertEvent(db, {
+      kind: "task_edge_recorded",
+      directive_id: dId,
+      task_id: "t_mid",
+      payload: { from_task: "t_mid", to_task: "t_root", kind: "requires" },
+    });
+    insertEvent(db, {
+      kind: "task_edge_recorded",
+      directive_id: dId,
+      task_id: "t_leaf",
+      payload: { from_task: "t_leaf", to_task: "t_mid", kind: "requires" },
+    });
+    const rows = taskCriticalPaths(db, dId);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.critical_path_length).toBe(2);
+    expect(rows[0]!.path).toBe("t_leaf->t_mid->t_root");
+  });
+
+  test("refinement edges do NOT extend the critical path", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dId = "d_cp_2";
+    insertEvent(db, { kind: "task_node_opened", directive_id: dId, task_id: "t_a" });
+    insertEvent(db, { kind: "task_node_opened", directive_id: dId, task_id: "t_b" });
+    insertEvent(db, {
+      kind: "task_edge_recorded",
+      directive_id: dId,
+      task_id: "t_b",
+      payload: { from_task: "t_b", to_task: "t_a", kind: "refines" },
+    });
+    const rows = taskCriticalPaths(db, dId);
+    // Two leaf nodes (no requires edge connects them), so each is its
+    // own length-0 chain. The first rank stays at depth 0.
+    expect(rows[0]!.critical_path_length).toBe(0);
+  });
+});
+
+describe("active_inference_view + activeInference", () => {
+  test("aggregates residual by (substrate_origin, action_artifact_id)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_ai_1",
+      task_id: "t_ai_1",
+      substrate_origin: "opencode",
+      action_artifact_id: "art_a",
+      payload: { residual: 0.1 },
+    });
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_ai_1",
+      task_id: "t_ai_2",
+      substrate_origin: "opencode",
+      action_artifact_id: "art_a",
+      payload: { residual: 0.3 },
+    });
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_ai_1",
+      task_id: "t_ai_3",
+      substrate_origin: "claude_root",
+      action_artifact_id: "art_b",
+      payload: { residual: 0.5 },
+    });
+    const rows = activeInference(db);
+    const opencodeRow = rows.find((r) => r.substrate_origin === "opencode" && r.action_artifact_id === "art_a");
+    expect(opencodeRow).toBeDefined();
+    expect(opencodeRow!.scored_count).toBe(2);
+    expect(opencodeRow!.avg_residual).toBeCloseTo(0.2, 5);
+    expect(opencodeRow!.min_residual).toBeCloseTo(0.1, 5);
+    expect(opencodeRow!.max_residual).toBeCloseTo(0.3, 5);
+  });
+});
+
+describe("artifact_warning_view + artifactWarnings", () => {
+  test("quarantined artifact lands in cooldown when updated_at is recent", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const recentTs = new Date().toISOString();
+    db.run(
+      `INSERT INTO act_artifact (
+         id, runtime, kind, body, declared_sandbox, state_root,
+         posterior_alpha, posterior_beta, score, confidence,
+         recent_residual_mean, recent_kill_count, status, name,
+         fixture_input, fixture_expected_residual,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "art_quar_1", "bun", "act_artifact", "noop", "{}", "test/quar",
+        1, 1, 0.1, 0.2, 0.8, 4, "quarantined", "quar_1",
+        "null", 0.0, recentTs, recentTs,
+      ],
+    );
+    const rows = artifactWarnings(db);
+    const row = rows.find((r) => r.artifact_id === "art_quar_1");
+    expect(row).toBeDefined();
+    expect(row!.status).toBe("quarantined");
+    expect(row!.eligibility_status).toBe("cooldown");
+    expect(row!.rehabilitation_eligible_at).not.toBeNull();
+  });
+
+  test("retired artifact lands as retired_terminal (no rehab path)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const ts = new Date().toISOString();
+    db.run(
+      `INSERT INTO act_artifact (
+         id, runtime, kind, body, declared_sandbox, state_root,
+         posterior_alpha, posterior_beta, score, confidence,
+         recent_residual_mean, recent_kill_count, status, name,
+         fixture_input, fixture_expected_residual,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "art_ret_1", "bun", "act_artifact", "noop", "{}", "test/ret",
+        1, 1, 0.05, 0.1, 0.95, 12, "retired", "ret_1",
+        "null", 0.0, ts, ts,
+      ],
+    );
+    const rows = artifactWarnings(db);
+    const row = rows.find((r) => r.artifact_id === "art_ret_1");
+    expect(row!.eligibility_status).toBe("retired_terminal");
+    expect(row!.rehabilitation_eligible_at).toBeNull();
+  });
+});
+
+describe("model_routing_view + modelRouting", () => {
+  test("groups brain_dispatched outcomes by (model, terminal_kind)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "brain_dispatched",
+      directive_id: "d_mr_1",
+      task_id: "t_mr_1",
+      payload: { model: "openai/gpt-5.5", dispatch_id: "disp1" },
+    });
+    insertEvent(db, {
+      kind: "task_committed",
+      directive_id: "d_mr_1",
+      task_id: "t_mr_1",
+      payload: { dispatch_id: "disp1" },
+    });
+    insertEvent(db, {
+      kind: "brain_dispatched",
+      directive_id: "d_mr_2",
+      task_id: "t_mr_2",
+      payload: { model: "openai/gpt-5.5", dispatch_id: "disp2" },
+    });
+    insertEvent(db, {
+      kind: "task_failed",
+      directive_id: "d_mr_2",
+      task_id: "t_mr_2",
+      payload: { dispatch_id: "disp2", reason: "test" },
+    });
+    const rows = modelRouting(db);
+    const committed = rows.find((r) => r.model === "openai/gpt-5.5" && r.terminal_kind === "task_committed");
+    const failed = rows.find((r) => r.model === "openai/gpt-5.5" && r.terminal_kind === "task_failed");
+    expect(committed?.n).toBe(1);
+    expect(failed?.n).toBe(1);
+  });
+
+  test("dispatches without a terminal land as <open>", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, {
+      kind: "brain_dispatched",
+      directive_id: "d_mr_open",
+      task_id: "t_mr_open",
+      payload: { model: "openai/gpt-5.5", dispatch_id: "openD" },
+    });
+    const rows = modelRouting(db);
+    const open = rows.find((r) => r.model === "openai/gpt-5.5" && r.terminal_kind === "<open>");
+    expect(open?.n).toBe(1);
   });
 });

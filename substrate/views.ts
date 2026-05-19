@@ -3748,6 +3748,224 @@ CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
   ORDER BY e.ts DESC;
 `;
 
+// directive_view — per-directive top-level synthesis per v2-design.md §4.2
+// line 589: "root + status + lifecycle + urgency." One row per
+// `directive_opened` event, joined with the root task's terminal event
+// (task_committed / task_failed / task_abandoned) to expose status.
+// `status` is NULL when the directive is still live; otherwise the
+// terminal kind. Lifecycle + urgency are read from the opening payload
+// (defaults: lifecycle='finite', urgency='normal').
+const VIEW_DIRECTIVE = `
+CREATE VIEW IF NOT EXISTS directive_view AS
+  WITH directive_opens AS (
+    SELECT
+      directive_id,
+      id                                                              AS directive_event_id,
+      ts                                                              AS opened_ts,
+      json_extract(payload, '$.directive_text')                       AS directive_text,
+      COALESCE(json_extract(payload, '$.lifecycle'),       'finite')  AS lifecycle,
+      COALESCE(json_extract(payload, '$.urgency'),         'normal')  AS urgency
+    FROM events
+    WHERE kind = 'directive_opened'
+  ),
+  roots AS (
+    SELECT
+      directive_id,
+      task_id                                                         AS root_task_id,
+      MIN(ts)                                                         AS root_opened_ts
+    FROM events
+    WHERE kind = 'task_node_opened'
+      AND (parent_task_id IS NULL OR parent_task_id = '')
+    GROUP BY directive_id, task_id
+  ),
+  root_terminals AS (
+    SELECT
+      directive_id,
+      task_id,
+      kind                                                            AS terminal_kind,
+      ts                                                              AS terminal_ts
+    FROM events
+    WHERE kind IN ('task_committed', 'task_failed', 'task_abandoned')
+  )
+  SELECT
+    d.directive_id,
+    d.directive_event_id,
+    d.opened_ts,
+    d.directive_text,
+    d.lifecycle,
+    d.urgency,
+    r.root_task_id,
+    r.root_opened_ts,
+    t.terminal_kind                                                   AS status,
+    t.terminal_ts                                                     AS status_ts
+  FROM directive_opens d
+  LEFT JOIN roots r          ON r.directive_id = d.directive_id
+  LEFT JOIN root_terminals t ON t.directive_id = d.directive_id AND t.task_id = r.root_task_id;
+`;
+
+// task_critical_path_view — per-directive longest dependency chain
+// through `requires` edges per v2-design.md §4.2 line 592. The chain is
+// computed by walking edges backward from each task_node_opened (depth
+// 0 = task with no outgoing 'requires' edge depending on it). Returns
+// one row per directive carrying the max depth and the path string
+// `taskA->taskB->...->root`. Refinement edges (kind='refines') are NOT
+// part of the critical path — they represent re-decomposition, not
+// causal dependency.
+const VIEW_TASK_CRITICAL_PATH = `
+CREATE VIEW IF NOT EXISTS task_critical_path_view AS
+  WITH RECURSIVE edges AS (
+    SELECT
+      directive_id,
+      COALESCE(json_extract(payload, '$.from_task'), json_extract(payload, '$.from')) AS from_task,
+      COALESCE(json_extract(payload, '$.to_task'),   json_extract(payload, '$.to'))   AS to_task,
+      json_extract(payload, '$.kind')                                                  AS edge_kind
+    FROM events
+    WHERE kind = 'task_edge_recorded'
+  ),
+  -- Leaf tasks: opened tasks that are NOT the from_task of any
+  -- requires edge (i.e., nothing depends on them).
+  leaves AS (
+    SELECT n.directive_id, n.task_id
+    FROM events n
+    WHERE n.kind = 'task_node_opened'
+      AND NOT EXISTS (
+        SELECT 1 FROM edges e
+        WHERE e.edge_kind = 'requires'
+          AND e.from_task = n.task_id
+          AND e.directive_id = n.directive_id
+      )
+  ),
+  chain(directive_id, task_id, depth, path) AS (
+    SELECT directive_id, task_id, 0, task_id FROM leaves
+    UNION ALL
+    SELECT
+      e.directive_id,
+      e.from_task                       AS task_id,
+      c.depth + 1                       AS depth,
+      e.from_task || '->' || c.path     AS path
+    FROM edges e
+    JOIN chain c ON e.to_task = c.task_id AND e.edge_kind = 'requires' AND e.directive_id = c.directive_id
+    WHERE c.depth < 50  -- defensive cycle/runaway guard
+  ),
+  ranked AS (
+    SELECT directive_id, depth, path,
+           ROW_NUMBER() OVER (PARTITION BY directive_id ORDER BY depth DESC, length(path) DESC) AS rk
+    FROM chain
+  )
+  SELECT directive_id, depth AS critical_path_length, path
+  FROM ranked
+  WHERE rk = 1;
+`;
+
+// active_inference_view — residual statistics per substrate_origin and
+// action_artifact_id per v2-design.md §4.2 line 595 ("residual stats
+// per task-kind, substrate_origin"). Pulls residual from action_scored
+// payloads; action_artifact_id stands in for "task-kind" (the
+// open-vocabulary discriminator of what the act DID). The view is
+// idempotent — repeated reads yield the same shape; no state mutation.
+const VIEW_ACTIVE_INFERENCE = `
+CREATE VIEW IF NOT EXISTS active_inference_view AS
+  WITH scored AS (
+    SELECT
+      substrate_origin,
+      COALESCE(action_artifact_id, json_extract(payload, '$.action_artifact_id')) AS action_artifact_id,
+      CAST(COALESCE(json_extract(payload, '$.residual'), json_extract(payload, '$.observed_residual')) AS REAL) AS residual,
+      ts
+    FROM events
+    WHERE kind = 'action_scored'
+  )
+  SELECT
+    substrate_origin,
+    action_artifact_id,
+    COUNT(*)                                                          AS scored_count,
+    AVG(residual)                                                      AS avg_residual,
+    MIN(residual)                                                      AS min_residual,
+    MAX(residual)                                                      AS max_residual,
+    MAX(ts)                                                            AS latest_ts
+  FROM scored
+  WHERE residual IS NOT NULL
+  GROUP BY substrate_origin, action_artifact_id;
+`;
+
+// artifact_warning_view — quarantined / retired act_artifact rows with
+// rehabilitation eligibility per v2-design.md §4.2 line 597. The 14-day
+// cooldown mirrors `runtime/recipe_inertia.ts` (RECIPE_INERTIA_DECAY_DAYS
+// = 14); a quarantined artifact whose updated_at sits inside the cooldown
+// is `cooldown` (rehab worker will skip it); past cooldown it becomes
+// `eligible` (rehab worker may probe). Retired artifacts are
+// permanently `retired_terminal` — no rehabilitation path exists for
+// retired status (substrate-truth: retired is the only terminal status
+// for chronically-failing artifacts).
+const VIEW_ARTIFACT_WARNING = `
+CREATE VIEW IF NOT EXISTS artifact_warning_view AS
+  SELECT
+    a.id                                                                AS artifact_id,
+    a.runtime,
+    a.kind                                                              AS artifact_kind,
+    a.name,
+    a.status,
+    a.recent_kill_count,
+    a.recent_residual_mean,
+    a.score,
+    a.confidence,
+    a.updated_at                                                        AS status_at_ts,
+    CASE
+      WHEN a.status = 'quarantined' THEN datetime(a.updated_at, '+14 days')
+      ELSE NULL
+    END                                                                 AS rehabilitation_eligible_at,
+    CASE
+      WHEN a.status = 'retired'                                        THEN 'retired_terminal'
+      WHEN a.status = 'quarantined'
+        AND datetime('now') >= datetime(a.updated_at, '+14 days')      THEN 'eligible'
+      WHEN a.status = 'quarantined'                                    THEN 'cooldown'
+      ELSE                                                                  'na'
+    END                                                                 AS eligibility_status
+  FROM act_artifact a
+  WHERE a.status IN ('quarantined', 'retired')
+  ORDER BY a.updated_at DESC;
+`;
+
+// model_routing_view — brain-model dispatch outcome counts per
+// (model, terminal_kind) per v2-design.md §4.2 line 598 ("{sub_task_kind,
+// model} success rates"). The "sub_task_kind" axis here is the brain
+// dispatch's terminal_kind (task_committed / task_failed / dispatcher_violation);
+// "model" is read from brain_dispatched.payload.model (e.g., "openai/gpt-5.5").
+// Rows where brain_dispatched fired but no terminal landed yet are
+// summarised with terminal_kind = NULL so callers can compute open-rate
+// vs success-rate separately.
+const VIEW_MODEL_ROUTING = `
+CREATE VIEW IF NOT EXISTS model_routing_view AS
+  WITH dispatches AS (
+    SELECT
+      COALESCE(json_extract(payload, '$.model'), '<unknown>') AS model,
+      directive_id,
+      task_id,
+      ts                                                       AS dispatched_ts
+    FROM events
+    WHERE kind = 'brain_dispatched'
+      AND task_id IS NOT NULL
+  ),
+  outcomes AS (
+    SELECT
+      directive_id,
+      task_id,
+      kind                                                     AS terminal_kind,
+      MIN(ts)                                                  AS terminal_ts
+    FROM events
+    WHERE kind IN ('task_committed', 'task_failed', 'task_abandoned', 'dispatcher_violation')
+    GROUP BY directive_id, task_id, kind
+  )
+  SELECT
+    d.model,
+    COALESCE(o.terminal_kind, '<open>')                        AS terminal_kind,
+    COUNT(*)                                                    AS n,
+    MAX(d.dispatched_ts)                                        AS latest_dispatched_ts,
+    MAX(o.terminal_ts)                                          AS latest_terminal_ts
+  FROM dispatches d
+  LEFT JOIN outcomes o ON o.directive_id = d.directive_id AND o.task_id = d.task_id
+  GROUP BY d.model, COALESCE(o.terminal_kind, '<open>');
+`;
+
 // ── Public entrypoint ──────────────────────────────────────────────
 
 // recipes_latest_view and recipe_registry_view now project from
@@ -3795,6 +4013,11 @@ export const VIEW_NAMES = [
   "substrate_narrative_recent_view",
   "claude_inline_ready_leaves_view",
   "pending_contract_amendments_view",
+  "directive_view",
+  "task_critical_path_view",
+  "active_inference_view",
+  "artifact_warning_view",
+  "model_routing_view",
 ] as const;
 
 /** Create every substrate view. Idempotent — existing views are dropped in
@@ -3843,6 +4066,11 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_SUBSTRATE_NARRATIVE_RECENT);
   db.exec(VIEW_CLAUDE_INLINE_READY_LEAVES);
   db.exec(VIEW_PENDING_CONTRACT_AMENDMENTS);
+  db.exec(VIEW_DIRECTIVE);
+  db.exec(VIEW_TASK_CRITICAL_PATH);
+  db.exec(VIEW_ACTIVE_INFERENCE);
+  db.exec(VIEW_ARTIFACT_WARNING);
+  db.exec(VIEW_MODEL_ROUTING);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────
@@ -5743,4 +5971,154 @@ export const pendingContractAmendments = (
           : null),
     };
   });
+};
+
+// ── directive_view accessor (v2-design §4.2 line 589) ─────────────
+
+export type DirectiveRow = {
+  directive_id: string;
+  directive_event_id: string;
+  opened_ts: string;
+  directive_text: string | null;
+  lifecycle: string;
+  urgency: string;
+  root_task_id: string | null;
+  root_opened_ts: string | null;
+  /** task_committed | task_failed | task_abandoned, or null while the
+   *  root task is still live. */
+  status: string | null;
+  status_ts: string | null;
+};
+
+/** Read directive_view. When `directiveId` is supplied, returns at
+ *  most one row for that directive; otherwise returns every directive
+ *  ordered newest-first by opened_ts. */
+export const directives = (db: Database, directiveId?: string): DirectiveRow[] => {
+  const rows = (directiveId
+    ? db.query("SELECT * FROM directive_view WHERE directive_id = ?").all(directiveId)
+    : db.query("SELECT * FROM directive_view ORDER BY opened_ts DESC").all()
+  ) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    directive_id: r.directive_id as string,
+    directive_event_id: r.directive_event_id as string,
+    opened_ts: r.opened_ts as string,
+    directive_text: (r.directive_text as string | null) ?? null,
+    lifecycle: (r.lifecycle as string) ?? "finite",
+    urgency: (r.urgency as string) ?? "normal",
+    root_task_id: (r.root_task_id as string | null) ?? null,
+    root_opened_ts: (r.root_opened_ts as string | null) ?? null,
+    status: (r.status as string | null) ?? null,
+    status_ts: (r.status_ts as string | null) ?? null,
+  }));
+};
+
+// ── task_critical_path_view accessor (v2-design §4.2 line 592) ────
+
+export type TaskCriticalPathRow = {
+  directive_id: string;
+  critical_path_length: number;
+  /** Arrow-joined task_id chain from longest-leaf back to root,
+   *  e.g. `taskA->taskB->taskRoot`. */
+  path: string;
+};
+
+export const taskCriticalPaths = (db: Database, directiveId?: string): TaskCriticalPathRow[] => {
+  const rows = (directiveId
+    ? db.query("SELECT * FROM task_critical_path_view WHERE directive_id = ?").all(directiveId)
+    : db.query("SELECT * FROM task_critical_path_view ORDER BY critical_path_length DESC").all()
+  ) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    directive_id: r.directive_id as string,
+    critical_path_length: Number(r.critical_path_length ?? 0),
+    path: (r.path as string) ?? "",
+  }));
+};
+
+// ── active_inference_view accessor (v2-design §4.2 line 595) ──────
+
+export type ActiveInferenceRow = {
+  substrate_origin: string;
+  action_artifact_id: string | null;
+  scored_count: number;
+  avg_residual: number | null;
+  min_residual: number | null;
+  max_residual: number | null;
+  latest_ts: string | null;
+};
+
+export const activeInference = (db: Database): ActiveInferenceRow[] => {
+  const rows = db
+    .query("SELECT * FROM active_inference_view ORDER BY scored_count DESC")
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    substrate_origin: r.substrate_origin as string,
+    action_artifact_id: (r.action_artifact_id as string | null) ?? null,
+    scored_count: Number(r.scored_count ?? 0),
+    avg_residual: r.avg_residual == null ? null : Number(r.avg_residual),
+    min_residual: r.min_residual == null ? null : Number(r.min_residual),
+    max_residual: r.max_residual == null ? null : Number(r.max_residual),
+    latest_ts: (r.latest_ts as string | null) ?? null,
+  }));
+};
+
+// ── artifact_warning_view accessor (v2-design §4.2 line 597) ──────
+
+export type ArtifactWarningRow = {
+  artifact_id: string;
+  runtime: string;
+  artifact_kind: string;
+  name: string | null;
+  status: string;
+  recent_kill_count: number;
+  recent_residual_mean: number;
+  score: number;
+  confidence: number;
+  status_at_ts: string;
+  rehabilitation_eligible_at: string | null;
+  /** retired_terminal | eligible | cooldown | na */
+  eligibility_status: string;
+};
+
+export const artifactWarnings = (db: Database): ArtifactWarningRow[] => {
+  const rows = db
+    .query("SELECT * FROM artifact_warning_view")
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    artifact_id: r.artifact_id as string,
+    runtime: r.runtime as string,
+    artifact_kind: (r.artifact_kind as string) ?? "act_artifact",
+    name: (r.name as string | null) ?? null,
+    status: r.status as string,
+    recent_kill_count: Number(r.recent_kill_count ?? 0),
+    recent_residual_mean: Number(r.recent_residual_mean ?? 0),
+    score: Number(r.score ?? 0),
+    confidence: Number(r.confidence ?? 0),
+    status_at_ts: r.status_at_ts as string,
+    rehabilitation_eligible_at: (r.rehabilitation_eligible_at as string | null) ?? null,
+    eligibility_status: (r.eligibility_status as string) ?? "na",
+  }));
+};
+
+// ── model_routing_view accessor (v2-design §4.2 line 598) ─────────
+
+export type ModelRoutingRow = {
+  model: string;
+  /** task_committed | task_failed | task_abandoned | dispatcher_violation | <open> */
+  terminal_kind: string;
+  n: number;
+  latest_dispatched_ts: string | null;
+  latest_terminal_ts: string | null;
+};
+
+export const modelRouting = (db: Database): ModelRoutingRow[] => {
+  const rows = db
+    .query("SELECT * FROM model_routing_view ORDER BY model, n DESC")
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    model: r.model as string,
+    terminal_kind: r.terminal_kind as string,
+    n: Number(r.n ?? 0),
+    latest_dispatched_ts: (r.latest_dispatched_ts as string | null) ?? null,
+    latest_terminal_ts: (r.latest_terminal_ts as string | null) ?? null,
+  }));
 };

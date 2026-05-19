@@ -64,6 +64,11 @@ import {
   substrateNarrativeRecent,
   claudeInlineReadyLeaves,
   pendingContractAmendments,
+  directives,
+  taskCriticalPaths,
+  activeInference,
+  artifactWarnings,
+  modelRouting,
 } from "../../substrate/views";
 import type {
   AdmitArtifactSchema,
@@ -892,6 +897,25 @@ export const handleRead = (
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const windowMs = typeof arg.window_ms === "number" ? arg.window_ms : undefined;
         return { ok: true, result: summarizeEffectiveness(db, { windowMs }) as unknown as JsonValue };
+      }
+      case "directive_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        return { ok: true, result: directives(db, directiveId) as unknown as JsonValue };
+      }
+      case "task_critical_path_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        return { ok: true, result: taskCriticalPaths(db, directiveId) as unknown as JsonValue };
+      }
+      case "active_inference_view": {
+        return { ok: true, result: activeInference(db) as unknown as JsonValue };
+      }
+      case "artifact_warning_view": {
+        return { ok: true, result: artifactWarnings(db) as unknown as JsonValue };
+      }
+      case "model_routing_view": {
+        return { ok: true, result: modelRouting(db) as unknown as JsonValue };
       }
       default:
         return { ok: false, error: `view_not_implemented:${view}` };
