@@ -384,7 +384,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // request-path starvation): the daemon can run in three roles, gated by
   // ACC2_DAEMON_ROLE.
   //   "all"    — single-process: bind HTTP/MCP ports AND run worker
-  //              setIntervals. Default. The legacy / back-compat mode.
+  //              setIntervals. Default. Good for development and small
+  //              installs; production benefits from the two-process split.
   //   "server" — bind HTTP/MCP ports; SKIP worker setIntervals. The main
   //              JS event loop stays free for /health and MCP request
   //              handlers, never blocked by synchronous bun:sqlite work
