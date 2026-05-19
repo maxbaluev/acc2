@@ -603,6 +603,7 @@ describe("audit A.4.2: substrate.read routes named views (not view_not_implement
       "contradictory_candidates_view",
       "low_risk_inline_patterns_view",
       "rolling_review_due_view",
+      "pending_contract_amendments_view",
     ]) {
       const res = await post(v);
       const body = (await res.json()) as { ok: boolean; error?: string };
