@@ -46,7 +46,18 @@ export const getDefaultTokenFile = (): string => resolveTokenFile();
 export const HEALTH_TIMEOUT_MS = 30_000;
 export const SHUTDOWN_TIMEOUT_MS = 10_000;
 export const EXTERNAL_PUSH_TIMEOUT_MS = 10_000;
-export const MCP_CALL_TIMEOUT_MS = 30_000;
+// Default 60s for routine MCP reads (substrate.read on light views, get_event,
+// search). Write-class calls (substrate.open_directive, substrate.emit on
+// dense projection paths) pass an explicit longer timeout — see
+// MCP_WRITE_TIMEOUT_MS. 30s was insufficient on warm substrates because
+// emitEvent cascades fan out to many activation listeners synchronously
+// (687 listeners observed 2026-05-19) and the projection chain can dwarf
+// the 30s budget without the dispatch actually being broken.
+export const MCP_CALL_TIMEOUT_MS = 60_000;
+// 120s for write-class MCP calls — directive ingress runs intent_classifier,
+// emit_event × ~5 with projection cascades, and stakeholder/conflict gates
+// in one atomic handler. 2× the read budget covers the cascade tail.
+export const MCP_WRITE_TIMEOUT_MS = 120_000;
 export const DEFAULT_RPC_TIMEOUT_MS = 10_000;
 
 export type DaemonLock = {

@@ -9,6 +9,7 @@ import { resolve } from "node:path";
 import {
   auxBaseUrl, mcpCall, rpcGet, rpcPostAuth, requireAux,
   readAdminToken, readDaemonLock,
+  MCP_WRITE_TIMEOUT_MS,
   type DaemonLock,
 } from "./rpc";
 
@@ -129,9 +130,13 @@ const dispatchTask = async (
   // brain was never invoked.
   let env;
   try {
+    // Write-class MCP call — directive ingress runs intent_classifier +
+    // emit_event × ~5 with full projection cascades under the activation
+    // bus fan-out. 60s default was tripping false-positive timeouts on
+    // warm substrates with 600+ listeners; bumped to MCP_WRITE_TIMEOUT_MS.
     env = await mcpCall("substrate.open_directive", {
       directive_text: words,
-    });
+    }, { timeoutMs: MCP_WRITE_TIMEOUT_MS });
   } catch (err) {
     console.error(`acc task failed: ${(err as Error).message}`);
     return 1;
