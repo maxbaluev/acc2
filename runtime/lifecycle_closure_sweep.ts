@@ -33,6 +33,7 @@ import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { JsonValue } from "../substrate/types";
+import { withImmediateTransaction } from "../substrate/db";
 import { emitEvent } from "./events";
 
 export type SweepSummary = {
@@ -48,6 +49,16 @@ export type SweepSummary = {
    *  weeks-to-years timescale rather than within the default 7-day
    *  expiry. */
   feedback_window_respected_count: number;
+  /** F-resilience (2026-05-18, contract C33Q10NV557DDEMMHH4TD42MVR):
+   *  number of transactional flush batches committed during this sweep.
+   *  Pre-batching a single huge sweep fired all terminator INSERTs in
+   *  one implicit transaction, growing the WAL by hundreds of megabytes
+   *  before autocheckpoint fired and starving the /health endpoint. The
+   *  sweep now flushes in bounded batches (default 100 rows per
+   *  transaction) so autocheckpoint and the WAL pressure worker have
+   *  opportunities to interleave. Cites design KC
+   *  TVQ3TEJAQ53DVFMS4R35M2EN44. */
+  batches_committed: number;
   errors: string[];
 };
 
@@ -66,6 +77,12 @@ export type SweepOptions = {
    *  summary still counts terminators that would have fired. Used by
    *  the operator dry-run before pointing the worker at production. */
   dryRun?: boolean;
+  /** F-resilience: number of terminator emissions per transactional
+   *  flush. Smaller batches give SQLite's autocheckpoint + the WAL
+   *  pressure worker more opportunities to interleave; larger batches
+   *  cut commit overhead. Default 100, configurable for tests that
+   *  want to assert the multi-batch path. */
+  batchSize?: number;
 };
 
 const STUCK_PROPOSAL_AGE_MS = 24 * 60 * 60 * 1000; // 24h
@@ -202,6 +219,14 @@ const directiveIsClosed = (db: Database, directiveId: string): boolean => {
   return (row?.c ?? 0) > 0;
 };
 
+type PendingTerminator = {
+  kind: "closure_complete" | "closure_obsolete" | "closure_owner_required";
+  directiveId: string | null;
+  taskId: string | null;
+  sourceEventId: string;
+  payload: JsonValue;
+};
+
 export const runLifecycleClosureSweep = (
   db: Database,
   options: SweepOptions = {},
@@ -211,15 +236,26 @@ export const runLifecycleClosureSweep = (
   const root = options.sourceCheckoutRoot ?? process.cwd();
   const maxRows = options.maxRows ?? 5000;
   const dryRun = options.dryRun ?? false;
+  const batchSize = Math.max(1, options.batchSize ?? 100);
   const summary: SweepSummary = {
     swept_count: 0,
     closure_complete_count: 0,
     closure_obsolete_count: 0,
     closure_owner_required_count: 0,
     feedback_window_respected_count: 0,
+    batches_committed: 0,
     errors: [],
   };
 
+  const pending: PendingTerminator[] = [];
+
+  // queueTerminator records the count immediately (so dryRun reports
+  // accurate totals without touching the ledger) and defers the actual
+  // emitEvent to flushBatch. Each flushBatch call wraps a batchSize-row
+  // slice in BEGIN IMMEDIATE / COMMIT — releasing the writer lock
+  // between batches gives SQLite's autocheckpoint and the WAL pressure
+  // worker (runtime/wal_pressure_worker.ts) opportunities to advance
+  // the checkpoint pointer mid-sweep.
   const emitTerminator = (
     kind: "closure_complete" | "closure_obsolete" | "closure_owner_required",
     directiveId: string | null,
@@ -231,17 +267,33 @@ export const runLifecycleClosureSweep = (
     if (kind === "closure_obsolete") summary.closure_obsolete_count++;
     if (kind === "closure_owner_required") summary.closure_owner_required_count++;
     if (dryRun) return;
+    pending.push({ kind, directiveId, taskId, sourceEventId, payload });
+    if (pending.length >= batchSize) flushBatch();
+  };
+
+  const flushBatch = (): void => {
+    if (pending.length === 0) return;
+    const batch = pending.splice(0, batchSize);
     try {
-      emitEvent(db, {
-        kind,
-        substrate_origin: "substrate_auto",
-        directive_id: directiveId ?? undefined,
-        task_id: taskId ?? undefined,
-        context_refs: [sourceEventId],
-        payload,
+      withImmediateTransaction(db, () => {
+        for (const item of batch) {
+          try {
+            emitEvent(db, {
+              kind: item.kind,
+              substrate_origin: "substrate_auto",
+              directive_id: item.directiveId ?? undefined,
+              task_id: item.taskId ?? undefined,
+              context_refs: [item.sourceEventId],
+              payload: item.payload,
+            });
+          } catch (err) {
+            summary.errors.push(`emit_${item.kind}_failed:${(err as Error).message}`);
+          }
+        }
       });
+      summary.batches_committed++;
     } catch (err) {
-      summary.errors.push(`emit_${kind}_failed:${(err as Error).message}`);
+      summary.errors.push(`flush_batch_failed:${(err as Error).message}`);
     }
   };
 
@@ -473,6 +525,9 @@ export const runLifecycleClosureSweep = (
   } catch (err) {
     summary.errors.push(`scan_tasks_failed:${(err as Error).message}`);
   }
+
+  // Drain any residual queued terminators (< batchSize remainder).
+  if (pending.length > 0) flushBatch();
 
   return summary;
 };

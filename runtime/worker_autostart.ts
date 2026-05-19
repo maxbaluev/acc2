@@ -85,7 +85,14 @@ export type WorkerName =
   // forever; the sweep emits closure_complete / closure_obsolete /
   // closure_owner_required so read-models stop returning them.
   // Default interval 6h.
-  | "lifecycle_closure_sweep";
+  | "lifecycle_closure_sweep"
+  // F-resilience (2026-05-18, contract C33Q10NV557DDEMMHH4TD42MVR):
+  // opportunistic WAL pressure observation. Stats the WAL sidecar
+  // size every 30s and runs PRAGMA wal_checkpoint(PASSIVE) when the
+  // size crosses a configurable threshold (default 100MB, override
+  // via ACC2_WAL_PRESSURE_THRESHOLD_MB). PASSIVE never blocks
+  // writers — purely opportunistic checkpoint advancement.
+  | "wal_pressure_check";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -108,6 +115,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "experience_compression",
   "rendering_audit",
   "lifecycle_closure_sweep",
+  "wal_pressure_check",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

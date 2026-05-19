@@ -590,6 +590,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // overridable via ACC2_LIFECYCLE_SWEEP_INTERVAL_MS. Opt-out via
   // ACC2_DISABLE_WORKERS=lifecycle_closure_sweep.
   if (isWorkerEnabled("lifecycle_closure_sweep")) registerWorker("lifecycle_closure_sweep", Number(process.env.ACC2_LIFECYCLE_SWEEP_INTERVAL_MS ?? 6 * 60 * 60 * 1000));
+  // F-resilience: opportunistic WAL pressure check (default 30s).
+  // Much shorter than the 6h lifecycle sweep — WAL pressure can develop
+  // within seconds under a burst write storm; the worker has to be
+  // ticking on a sub-minute cadence to catch it before /health stalls.
+  if (isWorkerEnabled("wal_pressure_check")) registerWorker("wal_pressure_check", Number(process.env.ACC2_WAL_PRESSURE_TICK_MS ?? 30 * 1000));
 
   // Phase E: amendment worker — drain unapplied directive_amended events on
   // a configurable interval (default 2s; tests may pin a shorter value via
@@ -1073,6 +1078,30 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       sweepTickMs,
     );
     workers.push(() => clearInterval(sweepTick));
+  }
+
+  // F-resilience (2026-05-18, contract C33Q10NV557DDEMMHH4TD42MVR):
+  // WAL pressure observation. Stats the `state.db-wal` sidecar every
+  // 30s and runs PRAGMA wal_checkpoint(PASSIVE) when size > threshold
+  // (default 100MB, override via ACC2_WAL_PRESSURE_THRESHOLD_MB). The
+  // last successful summary is parked in the worker module so /health
+  // can surface wal_stats — the diagnostic we lacked when the daemon
+  // hung during the 2917-row burst sweep this session. Opt-OUT via
+  // ACC2_DISABLE_WORKERS=wal_pressure_check. Interval env-configurable
+  // via ACC2_WAL_PRESSURE_TICK_MS (default 30s).
+  if (isWorkerEnabled("wal_pressure_check")) {
+    const walTickMs = Number(process.env.ACC2_WAL_PRESSURE_TICK_MS ?? 30 * 1000);
+    const { runWalPressureCheck, setLastWalPressureSummary } = await import("./wal_pressure_worker");
+    markWorkerReady("wal_pressure_check");
+    recordWorkerTick("wal_pressure_check");
+    const walTick = setInterval(
+      supervisedTick(db, "wal_pressure_check", walTickMs, async () => {
+        const summary = runWalPressureCheck(db, { dbPath: stateDbPath });
+        setLastWalPressureSummary(summary);
+      }),
+      walTickMs,
+    );
+    workers.push(() => clearInterval(walTick));
   }
 
   // Self-healing chain Layer 3 (owner-approved 2026-05-16, option d):
@@ -1663,6 +1692,41 @@ const routeAux = async (
     // reader/writer utilisation, write-queue depth, and lifetime counters
     // across every cached pool. Empty array when no pool is open.
     const poolStats = getAllPoolStats();
+    // F-resilience: surface WAL pressure stats so operators can see
+    // pressure building between probes. The shape is set by the
+    // wal_pressure_check worker (runtime/wal_pressure_worker.ts) and
+    // would have surfaced the 206MB WAL growth that caused the daemon
+    // hang this session.
+    let walStats: unknown = {
+      size_bytes: 0,
+      threshold_bytes: 0,
+      last_checkpoint_ts: null,
+      last_checkpoint_result: null,
+    };
+    try {
+      const mod = await import("./wal_pressure_worker");
+      const last = mod.getLastWalPressureSummary();
+      if (last) {
+        walStats = {
+          size_bytes: last.wal_size_bytes,
+          threshold_bytes: last.threshold_bytes,
+          last_checkpoint_ts: last.checkpoint_ran ? last.ts : null,
+          last_checkpoint_result: last.checkpoint_result,
+        };
+      } else {
+        // Worker has not ticked yet (boot race or test mode with the
+        // worker pinned off). Report the configured threshold so
+        // operators still see what would trigger a checkpoint.
+        const envMb = Number(process.env.ACC2_WAL_PRESSURE_THRESHOLD_MB);
+        const thresholdMb = Number.isFinite(envMb) && envMb > 0 ? envMb : 100;
+        walStats = {
+          size_bytes: 0,
+          threshold_bytes: Math.floor(thresholdMb * 1024 * 1024),
+          last_checkpoint_ts: null,
+          last_checkpoint_result: null,
+        };
+      }
+    } catch { /* worker module not present; tolerate */ }
     return Response.json({
       status: stuck.length === 0 ? "ok" : "degraded",
       pid: process.pid,
@@ -1680,6 +1744,7 @@ const routeAux = async (
       brain_failed_recent_count: counts.brain_failed,
       health_window_iso: counts.window_iso,
       sql_pool_stats: poolStats,
+      wal_stats: walStats,
     });
   }
 
