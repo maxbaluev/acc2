@@ -48,6 +48,52 @@ type PromptComposeOptions = {
    *  don't pass either field (tests + fresh-empty substrates). */
   retrievalUnavailable?: { reason: string } | null;
   index?: EmbeddingIndex | null;
+  /** Q2 (brain amendment MDBZV4YVRH7D172BW40W1J5ASM, 2026-05-19): per-
+   *  section pre-retrieved policy bundles. The dispatcher queries
+   *  act_artifact for kind ∈ {prompt_policy_bundle, composer_policy_
+   *  predicate} matching the directive goal_shape before composePrompt
+   *  and passes the result here. pushRetrievedPolicyArtifactSection
+   *  prefers the highest-score bundle; falls back to policyByName; then
+   *  to the literal warning string. Retrieval stays OUT of composePrompt
+   *  so composePrompt remains synchronous. */
+  retrievedPolicyArtifacts?: Partial<Record<PolicyBundleSectionName, RetrievedPolicyArtifactBundle[]>>;
+};
+
+/** A pre-retrieved policy artifact bundle (Q2). Carries enough metadata
+ *  for the composer to pick the highest-score row per section and emit a
+ *  prompt_policy_section_selected audit row. The `artifactKind` field
+ *  is an artifact-registry discriminator (NOT an event kind), so it is
+ *  named `artifactKind` rather than `kind` to keep the substrate's
+ *  event-kind literal-scan happy. */
+export type RetrievedPolicyArtifactBundle = {
+  artifactId: string;
+  artifactKind: "prompt_policy_bundle" | "emission_grammar" | "self_introspection";
+  surface: string;
+  sectionName: PolicyBundleSectionName;
+  body: string;
+  priority?: number;
+  floor?: boolean;
+  score?: number;
+  goalShape?: string;
+  evidence_event_ids?: string[];
+};
+
+/** Q3 (brain amendment 945GW64HN91JBD8YYTAR0S4P0W, 2026-05-19): an
+ *  admitted prompt_section_content_variant act_artifact, ranked by
+ *  score × goal_shape_match × owner_profile_alignment. When the variant
+ *  posterior STRICTLY exceeds the retrieved bundle / promoted policy
+ *  bundle posterior, the variant body replaces it. Ties favor the
+ *  policy bundle to keep cold-start stable. */
+export type PromptSectionVariant = {
+  variantId: string;
+  sectionName: PolicyBundleSectionName;
+  body: string;
+  priority?: number;
+  score: number;
+  confidence?: number;
+  goalShapeMatch: number;
+  ownerProfileAlignment: number;
+  evidence_event_ids?: string[];
 };
 
 type PromptSection = {
@@ -434,6 +480,195 @@ const readPolicyBundleSections = (
     if (byPriority !== 0) return byPriority;
     return sectionNames.indexOf(a.sectionName) - sectionNames.indexOf(b.sectionName);
   });
+};
+
+// ── Q2 (on-demand grammar retrieval) + Q3 (variant body selection) ────
+// Brain amendments MDBZV4YVRH7D172BW40W1J5ASM + 945GW64HN91JBD8YYTAR0S4P0W
+// (2026-05-19). Pre-fix the composer hard-coded section bodies through
+// pushPolicySection(name, fallback) — the dispatcher could not feed
+// scored, retrieved policy bundles or admitted variant rows into the
+// emission_grammars / self_introspection slots. The two amendments
+// rewire body selection precedence:
+//
+//   variant (strict-higher posterior than bundle)
+//     > retrieved prompt_policy_bundle (from opts.retrievedPolicyArtifacts)
+//     > promoted policyByName bundle
+//     > literal "BRAIN PROMPT POLICY MISSING …" warning
+//
+// On exact tie the policy_bundle wins (cold-start stability — never let a
+// brand-new variant displace a battle-tested bundle without evidence).
+
+const LITERAL_POLICY_MISSING_WARNING = (name: string): string =>
+  "BRAIN PROMPT POLICY MISSING: knowledge_promoted policy_bundle surface=brain_prompt section_name=" +
+  name +
+  ". Seed foundational knowledge before dispatch; do not substitute local literal prompt policy.";
+
+const pickHighestScorePolicyBundle = (
+  bundles: RetrievedPolicyArtifactBundle[] | undefined,
+  sectionName: PolicyBundleSectionName,
+): RetrievedPolicyArtifactBundle | null => {
+  if (!bundles || bundles.length === 0) return null;
+  let best: RetrievedPolicyArtifactBundle | null = null;
+  for (const b of bundles) {
+    if (b.sectionName !== sectionName) continue;
+    if (typeof b.body !== "string" || b.body.length === 0) continue;
+    const bScore = typeof b.score === "number" && Number.isFinite(b.score) ? b.score : 0;
+    const bestScore = best && typeof best.score === "number" && Number.isFinite(best.score) ? best.score : -Infinity;
+    if (!best || bScore > bestScore) best = b;
+  }
+  return best;
+};
+
+// Q3: read latest owner_profile_recorded payload (or null on failure)
+// for variant ranking. Re-uses the export below (`readOwnerProfile`)
+// when called from selectPromptSectionVariant; defaults applied there.
+const readOwnerProfileForVariantSelection = (db: Database): OwnerProfile | null => {
+  try {
+    return readOwnerProfile(db);
+  } catch {
+    return null;
+  }
+};
+
+// Q3: compute open-ended owner_profile alignment between a variant's
+// payload.owner_profile_alignment map and the live OwnerProfile signal
+// vectors. Normalised dot product over shared axes ∈ [0, 1]. When the
+// profile is null OR the variant declares no alignment map, return 1.0
+// (no penalty) so cold-start variants are not punished for the absence
+// of profile data. See "owner_profile_alignment heuristic" in the
+// originating brain dispatch for the formal recipe.
+const computeOwnerProfileAlignment = (
+  variantAlignment: unknown,
+  profile: OwnerProfile | null,
+): number => {
+  if (!profile) return 1;
+  if (!variantAlignment || typeof variantAlignment !== "object") return 1;
+  const alignment = variantAlignment as Record<string, unknown>;
+  const keys = Object.keys(alignment);
+  if (keys.length === 0) return 1;
+  // Concatenate every numeric signal-map on the profile into a single
+  // signal vector. Open-ended Record<string, number> per substrate/
+  // types.ts:OwnerProfile. We do not restrict to any named axis set —
+  // every key the variant cites against the open-ended owner-profile
+  // map can score.
+  const signalVector: Record<string, number> = {};
+  const mapsToScan: Array<unknown> = [
+    profile.rendering_signals,
+    profile.autonomy_signals,
+    profile.control_signals,
+    profile.risk_signals,
+    profile.collaboration_signals,
+    profile.goal_continuity_signals,
+  ];
+  for (const map of mapsToScan) {
+    if (!map || typeof map !== "object") continue;
+    for (const [k, v] of Object.entries(map as Record<string, unknown>)) {
+      if (typeof v === "number" && Number.isFinite(v)) {
+        const prev = signalVector[k] ?? 0;
+        signalVector[k] = Math.max(prev, clamp01(v));
+      }
+    }
+  }
+  let dot = 0;
+  let variantNorm = 0;
+  let profileNorm = 0;
+  for (const k of keys) {
+    const vRaw = alignment[k];
+    if (typeof vRaw !== "number" || !Number.isFinite(vRaw)) continue;
+    const v = clamp01(vRaw);
+    const p = signalVector[k] ?? 0;
+    dot += v * p;
+    variantNorm += v * v;
+    profileNorm += p * p;
+  }
+  if (variantNorm === 0) return 1;
+  // Normalize against the variant's own L2 magnitude — preserves the
+  // open-ended axis vocabulary while keeping the result in [0, 1].
+  const denom = Math.sqrt(variantNorm) * Math.max(Math.sqrt(profileNorm), Math.sqrt(variantNorm));
+  if (denom === 0) return 1;
+  return clamp01(dot / denom);
+};
+
+// Q3: compute goal_shape_match. Simple substring match between the
+// directive goal_shape (or raw goal text tokens) and any string in
+// payload.goal_shape_tags returns 1.0; otherwise 0.0. Embedding-based
+// match is out of scope (defer to later contract per brain plan).
+const computeGoalShapeMatch = (variantGoalShapeTags: unknown, goalText: string): number => {
+  if (!Array.isArray(variantGoalShapeTags) || variantGoalShapeTags.length === 0) return 0;
+  const shape = goalShape(goalText || "").toLowerCase();
+  const shapeTokens = new Set(goalShapeTags(goalText));
+  for (const raw of variantGoalShapeTags) {
+    if (typeof raw !== "string" || raw.length === 0) continue;
+    const tag = raw.toLowerCase();
+    if (shape && (shape.includes(tag) || tag.includes(shape))) return 1;
+    if (shapeTokens.has(tag)) return 1;
+  }
+  return 0;
+};
+
+// Q3: select the best admitted prompt_section_content_variant for the
+// given section. Returns null when no variant scores positive.
+const selectPromptSectionVariant = (
+  db: Database,
+  opts: {
+    sectionName: PolicyBundleSectionName;
+    goalText: string;
+    ownerProfile: OwnerProfile | null;
+    fallbackBody: string;
+    policyBundleArtifactId?: string | null;
+  },
+): PromptSectionVariant | null => {
+  const rows = db
+    .query(
+      `SELECT id, body, score, confidence, name
+         FROM act_artifact
+        WHERE kind = 'prompt_section_content_variant'
+          AND status = 'admitted'
+          AND (name = ? OR name IS NULL)
+        ORDER BY score DESC, confidence DESC
+        LIMIT 50`,
+    )
+    .all(opts.sectionName) as Array<Record<string, unknown>>;
+  let best: PromptSectionVariant | null = null;
+  let bestRanked = -Infinity;
+  for (const r of rows) {
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(String(r.body ?? "{}")) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (!parsed) continue;
+    const payload = (parsed.payload && typeof parsed.payload === "object")
+      ? parsed.payload as Record<string, unknown>
+      : parsed;
+    const sectionName = (payload.section_name as string | undefined) ?? (parsed.name as string | undefined);
+    if (sectionName !== opts.sectionName) continue;
+    const body = payload.body;
+    if (typeof body !== "string" || body.length === 0) continue;
+    const score = typeof r.score === "number" && Number.isFinite(r.score) ? (r.score as number) : 0;
+    if (score <= 0) continue;
+    const goalShapeMatch = computeGoalShapeMatch(payload.goal_shape_tags, opts.goalText);
+    const ownerProfileAlignment = computeOwnerProfileAlignment(payload.owner_profile_alignment, opts.ownerProfile);
+    const ranked = score * goalShapeMatch * ownerProfileAlignment;
+    if (ranked <= 0) continue;
+    if (ranked > bestRanked) {
+      bestRanked = ranked;
+      const evidenceRaw = payload.evidence_event_ids;
+      best = {
+        variantId: String(r.id),
+        sectionName: opts.sectionName,
+        body,
+        priority: typeof payload.priority === "number" ? (payload.priority as number) : undefined,
+        score,
+        confidence: typeof r.confidence === "number" && Number.isFinite(r.confidence) ? (r.confidence as number) : undefined,
+        goalShapeMatch,
+        ownerProfileAlignment,
+        evidence_event_ids: Array.isArray(evidenceRaw) ? (evidenceRaw as unknown[]).map(String) : undefined,
+      };
+    }
+  }
+  return best;
 };
 
 // Organism-alignment audit b3qc9ryzj finding #5 (2026-05-15): pending
@@ -1348,14 +1583,194 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   const candidates: Candidate[] = [];
   const policySections = readPolicyBundleSections(db, "brain_prompt", REQUIRED_POLICY_SECTION_NAMES);
   const policyByName = new Map(policySections.map((policy) => [policy.sectionName, policy]));
+  // Q3 owner-profile snapshot for variant ranking. Read once per
+  // composePrompt — variant queries below reuse this. Failure returns
+  // null (do NOT abort composition).
+  const ownerProfileForVariants = readOwnerProfileForVariantSelection(db);
+  const goalTextForVariants = directiveText ?? task.goal;
+
+  // Q2 + Q3 (brain amendments MDBZV4YVRH7D172BW40W1J5ASM +
+  // 945GW64HN91JBD8YYTAR0S4P0W, 2026-05-19). pushPolicySection body
+  // selection precedence (top-most wins):
+  //   1. variant — selectPromptSectionVariant returns a posterior-ranked
+  //      prompt_section_content_variant row; chosen ONLY when its score
+  //      STRICTLY beats the policy_bundle score (cold-start safety).
+  //   2. retrieved policy artifact bundle — opts.retrievedPolicyArtifacts
+  //      delivers pre-retrieved prompt_policy_bundle rows per section;
+  //      highest-score wins.
+  //   3. promoted policyByName bundle — surface=brain_prompt knowledge_
+  //      promoted rows readPolicyBundleSections found.
+  //   4. literal warning — fail-loud "BRAIN PROMPT POLICY MISSING …"
+  //      string so the brain sees that no policy exists.
+  // Every choice emits prompt_policy_section_selected so the audit trail
+  // records WHICH precedence rung fired. Variant wins additionally emit
+  // prompt_section_variant_selected + a retrieval_binding so credit can
+  // flow to the variant artifact on outcome.
   const pushPolicySection = (name: PolicyBundleSectionName, fallbackPriority: number, floor = false) => {
     const policy = policyByName.get(name);
-    candidates.push({
-      name,
-      p: policy?.priority ?? fallbackPriority,
-      floor: floor || policy?.floor === true,
-      body: policy?.body ?? "BRAIN PROMPT POLICY MISSING: knowledge_promoted policy_bundle surface=brain_prompt section_name=" + name + ". Seed foundational knowledge before dispatch; do not substitute local literal prompt policy.",
+    const bundleScore = policy ? 1 : 0; // promoted policy_bundle posterior; promoted rows are admitted = 1, missing = 0.
+    const retrievedBundle = pickHighestScorePolicyBundle(opts.retrievedPolicyArtifacts?.[name], name);
+    const retrievedScore = retrievedBundle && typeof retrievedBundle.score === "number" && Number.isFinite(retrievedBundle.score)
+      ? retrievedBundle.score
+      : 0;
+    const variant = selectPromptSectionVariant(db, {
+      sectionName: name,
+      goalText: goalTextForVariants,
+      ownerProfile: ownerProfileForVariants,
+      fallbackBody: policy?.body ?? "",
+      policyBundleArtifactId: null,
     });
+
+    let chosenBody: string;
+    let chosenPriority: number;
+    let chosenFloor: boolean;
+    let source: "variant" | "retrieved_artifact" | "policy_bundle" | "literal_missing_warning";
+    let chosenArtifactId: string | null = null;
+    let chosenScore: number | null = null;
+    let fallbackReason: string | null = null;
+    let variantWon = false;
+    let policyTiePreserved = false;
+    const variantScore = variant ? variant.score * variant.goalShapeMatch * variant.ownerProfileAlignment : 0;
+    // Variant must STRICTLY beat the strongest non-variant body. If the
+    // retrieved bundle posterior is the higher of bundle/retrieved, use
+    // that as the bar; otherwise use the promoted bundle (bundleScore).
+    const competitorScore = Math.max(retrievedScore, bundleScore);
+    if (variant && variantScore > competitorScore) {
+      chosenBody = variant.body;
+      chosenPriority = variant.priority ?? policy?.priority ?? fallbackPriority;
+      chosenFloor = floor || policy?.floor === true;
+      source = "variant";
+      chosenArtifactId = variant.variantId;
+      chosenScore = variant.score;
+      variantWon = true;
+    } else if (retrievedBundle && retrievedScore >= bundleScore && retrievedBundle.body) {
+      // Tie between retrieved bundle and policy_bundle: retrieved wins
+      // (the dispatcher targeted it; treat as fresher evidence). Tie
+      // between variant and bundle still favors bundle (handled above).
+      if (variant && variantScore === competitorScore) policyTiePreserved = true;
+      chosenBody = retrievedBundle.body;
+      chosenPriority = retrievedBundle.priority ?? policy?.priority ?? fallbackPriority;
+      chosenFloor = floor || retrievedBundle.floor === true || policy?.floor === true;
+      source = "retrieved_artifact";
+      chosenArtifactId = retrievedBundle.artifactId;
+      chosenScore = retrievedScore;
+    } else if (policy) {
+      if (variant && variantScore === bundleScore) policyTiePreserved = true;
+      chosenBody = policy.body;
+      chosenPriority = policy.priority ?? fallbackPriority;
+      chosenFloor = floor || policy.floor === true;
+      source = "policy_bundle";
+      chosenScore = bundleScore;
+    } else {
+      chosenBody = LITERAL_POLICY_MISSING_WARNING(name);
+      chosenPriority = fallbackPriority;
+      chosenFloor = floor;
+      source = "literal_missing_warning";
+      fallbackReason = "no_policy_bundle_no_retrieved_artifact_no_variant";
+    }
+
+    candidates.push({ name, p: chosenPriority, floor: chosenFloor, body: chosenBody });
+
+    // Audit emission: one prompt_policy_section_selected per pushPolicy
+    // call so the operator can see which rung fired per section per
+    // dispatch. Fail-soft.
+    try {
+      emitEvent(db, {
+        kind: "prompt_policy_section_selected",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        payload: {
+          section_name: name,
+          source,
+          artifact_id: chosenArtifactId,
+          score: chosenScore,
+          fallback_reason: fallbackReason,
+          variant_score_observed: variant ? variantScore : null,
+          competitor_score_observed: competitorScore,
+        } as JsonValue,
+      });
+    } catch { /* fail-soft: composer must not fail on side-effect emit */ }
+
+    if (variantWon && variant) {
+      try {
+        const variantEvent = emitEvent(db, {
+          kind: "prompt_section_variant_selected",
+          substrate_origin: "substrate_auto",
+          directive_id: task.directive_id,
+          task_id: task.id,
+          payload: {
+            section_name: name,
+            variant_id: variant.variantId,
+            score: variant.score,
+            goal_shape_match: variant.goalShapeMatch,
+            owner_profile_alignment: variant.ownerProfileAlignment,
+            policy_bundle_tie_preserved: false,
+            evidence_event_ids: variant.evidence_event_ids,
+          } as JsonValue,
+        });
+        // Q3 step 5: retrieval_binding so artifact credit flows back to
+        // the variant when the action eventually scores. Cite both the
+        // variant artifact id (target of credit) and the section
+        // selection event id (provenance of the binding).
+        emitEvent(db, {
+          kind: "retrieval_binding",
+          substrate_origin: "substrate_auto",
+          directive_id: task.directive_id,
+          task_id: task.id,
+          context_refs: [variantEvent.id, variant.variantId],
+          payload: {
+            query: goalTextForVariants,
+            source_event_id: variant.variantId,
+            rendered_snippet: variant.body.slice(0, 200),
+            rank: 0,
+            rerank_score: variantScore,
+            posterior: variant.score,
+            binding_surface: "prompt_section_variant",
+            section_name: name,
+          } as JsonValue,
+        });
+      } catch { /* fail-soft */ }
+    } else if (variant && variantScore === competitorScore && (policy || retrievedBundle)) {
+      // Variant tied but did not win — emit the tie-preservation audit
+      // so the operator can see that cold-start stability fired (k_252
+      // closure: scored variant existed, was tied, policy_bundle won).
+      try {
+        emitEvent(db, {
+          kind: "prompt_section_variant_selected",
+          substrate_origin: "substrate_auto",
+          directive_id: task.directive_id,
+          task_id: task.id,
+          payload: {
+            section_name: name,
+            variant_id: variant.variantId,
+            score: variant.score,
+            goal_shape_match: variant.goalShapeMatch,
+            owner_profile_alignment: variant.ownerProfileAlignment,
+            policy_bundle_tie_preserved: true,
+            winning_source: source,
+          } as JsonValue,
+        });
+        // Compiler hint: keep the var read so TS/linter does not warn
+        // about unused state.
+        void policyTiePreserved;
+      } catch { /* fail-soft */ }
+    }
+  };
+
+  // Q2 step 4: alias used at the emission_grammars + self_introspection
+  // call sites so the brain-design vocabulary stays explicit. The helper
+  // is functionally identical to pushPolicySection — every call site
+  // already consults opts.retrievedPolicyArtifacts via pushPolicySection
+  // — but the dedicated name makes the on-demand-retrieval intent
+  // legible at the call site (the brain amendment named these two slots
+  // specifically).
+  const pushRetrievedPolicyArtifactSection = (
+    name: PolicyBundleSectionName,
+    fallbackPriority: number,
+    floor = false,
+  ): void => {
+    pushPolicySection(name, fallbackPriority, floor);
   };
 
   // EXIT INVARIANT first — load-bearing structural rule against brain_silent_exit
@@ -1379,13 +1794,16 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // Detailed emission grammars — env_requires + rich knowledge schema +
   // artifact provenance. P1 so it drops first under tight-budget pressure
   // (depth-1 tests pin a tiny 800-token budget) but lands in normal flow.
-  pushPolicySection("emission_grammars", 1);
+  // Q2 (brain amendment MDBZV4YVRH7D172BW40W1J5ASM): routed through
+  // pushRetrievedPolicyArtifactSection so the dispatcher's on-demand
+  // act_artifact retrieval feeds the body selection.
+  pushRetrievedPolicyArtifactSection("emission_grammars", 1);
   // Phase 1 brain-harness rewrite (2026-05-17): teach the brain about
   // runtime.{system_map, brain_self_audit, trajectory_replay,
   // prompt_self_inspect}. P1 so it ships in normal flow but drops first
   // along with emission_grammars under tight-budget pressure — the
   // EXIT INVARIANT + WORKFLOW + DO NOT still win the tightest budgets.
-  pushPolicySection("self_introspection", 1);
+  pushRetrievedPolicyArtifactSection("self_introspection", 1);
 
   // Phase D fixture marker — the mocked bridge keys off this so the
   // fixture_d_count_todos dispatch can be reproduced deterministically.

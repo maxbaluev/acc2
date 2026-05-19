@@ -549,6 +549,21 @@ export const EVENT_KINDS = {
   // selector artifact handles) under universality proposal
   // A12CR1QCDN0SS51CM95K39T45M, owner approval 7S0FQ8REES1XDEGQW7VVVEWSYW.
   prompt_truncated:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // Q2 (brain amendment MDBZV4YVRH7D172BW40W1J5ASM, 2026-05-19):
+  // composer-side audit row recording WHICH precedence rung supplied a
+  // policy section body (variant > retrieved_artifact > policy_bundle >
+  // literal_missing_warning). One emit per pushPolicySection call;
+  // payload carries section_name, source, artifact_id (when present),
+  // score, fallback_reason (when literal).
+  prompt_policy_section_selected:          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // Q3 (brain amendment 945GW64HN91JBD8YYTAR0S4P0W, 2026-05-19): emitted
+  // when an admitted prompt_section_content_variant beats the
+  // policy_bundle posterior (or ties it — tie row carries
+  // policy_bundle_tie_preserved=true so the credit chain still credits
+  // the tied variant when the outcome lands). Paired with one
+  // retrieval_binding so artifact credit flows back to the variant_id
+  // on action scoring.
+  prompt_section_variant_selected:         { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Father ──────────────────────────────────────────────────────────
   father_cycle_recorded:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },

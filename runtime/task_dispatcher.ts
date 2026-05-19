@@ -559,8 +559,104 @@ export const dispatchReadyTask = async (
       );
     }
   }
+  // Q2 (brain amendment MDBZV4YVRH7D172BW40W1J5ASM, 2026-05-19): on-
+  // demand policy retrieval. Query act_artifact for admitted rows
+  // whose kind is prompt_policy_bundle or composer_policy_predicate
+  // and whose body declares a section_name matching one of the
+  // REQUIRED_POLICY_SECTION_NAMES the composer is about to push. Take
+  // top K (K=3) per section by score. Pass via opts.retrievedPolicy
+  // Artifacts so composePrompt stays synchronous. Wrapped in try/catch
+  // because a stale/migrating substrate may not have admitted rows;
+  // composePrompt falls back to policyByName + literal warnings.
+  let retrievedPolicyArtifacts:
+    | Partial<Record<string, Array<import("./prompt_composer").RetrievedPolicyArtifactBundle>>>
+    | undefined = undefined;
+  try {
+    const goalText = task.goal ?? task.directive_id ?? "";
+    const policyArtifactRows = db
+      .query(
+        `SELECT id, body, score, name
+           FROM act_artifact
+          WHERE kind IN ('prompt_policy_bundle', 'composer_policy_predicate')
+            AND status = 'admitted'
+          ORDER BY score DESC, confidence DESC
+          LIMIT 100`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    if (policyArtifactRows.length > 0) {
+      const perSection: Record<string, Array<import("./prompt_composer").RetrievedPolicyArtifactBundle>> = {};
+      for (const r of policyArtifactRows) {
+        let parsed: Record<string, unknown> | null = null;
+        try {
+          parsed = JSON.parse(String(r.body ?? "{}")) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (!parsed) continue;
+        const payload = (parsed.payload && typeof parsed.payload === "object")
+          ? parsed.payload as Record<string, unknown>
+          : parsed;
+        const sectionName = (payload.section_name as string | undefined) ?? (parsed.name as string | undefined);
+        if (!sectionName) continue;
+        const surface = (payload.surface as string | undefined) ?? "brain_prompt";
+        if (surface !== "brain_prompt") continue;
+        const body = payload.body;
+        if (typeof body !== "string" || body.length === 0) continue;
+        // goal_shape pre-filter: when the row declares goal_shape_tags
+        // require a substring match against the directive's goal_shape;
+        // when it doesn't declare any, accept (legacy/cold-start rows).
+        const tags = Array.isArray(payload.goal_shape_tags) ? payload.goal_shape_tags : [];
+        if (tags.length > 0) {
+          const lower = goalText.toLowerCase();
+          let matched = false;
+          for (const t of tags) {
+            if (typeof t === "string" && t.length > 0 && lower.includes(t.toLowerCase())) {
+              matched = true;
+              break;
+            }
+          }
+          if (!matched) continue;
+        }
+        const kindRaw = (parsed.kind as string | undefined) ?? "prompt_policy_bundle";
+        const bundleArtifactKind: "prompt_policy_bundle" | "emission_grammar" | "self_introspection" =
+          (kindRaw === "emission_grammar" || kindRaw === "self_introspection")
+            ? kindRaw
+            : "prompt_policy_bundle";
+        const bucket = perSection[sectionName] ?? (perSection[sectionName] = []);
+        if (bucket.length >= 3) continue; // K=3 per section
+        bucket.push({
+          artifactId: String(r.id),
+          artifactKind: bundleArtifactKind,
+          surface,
+          sectionName: sectionName as never,
+          body,
+          priority: typeof payload.priority === "number" ? (payload.priority as number) : undefined,
+          floor: payload.floor === true,
+          score: typeof r.score === "number" && Number.isFinite(r.score) ? (r.score as number) : 0,
+          goalShape: typeof payload.goal_shape === "string" ? (payload.goal_shape as string) : undefined,
+          evidence_event_ids: Array.isArray(payload.evidence_event_ids)
+            ? (payload.evidence_event_ids as unknown[]).map(String)
+            : undefined,
+        });
+      }
+      if (Object.keys(perSection).length > 0) {
+        retrievedPolicyArtifacts = perSection;
+      }
+    }
+  } catch (err) {
+    logger.warn(
+      { where: "dispatcher.retrievedPolicyArtifacts", err: (err as Error).message, task_id: task.id },
+      "policy-artifact retrieval threw — composing prompt with default policy_bundle fallback chain",
+    );
+  }
   const composer = await resolveComposePrompt();
-  const composed = composer(db, { taskId: task.id, retrievedKnowledge, retrievedArtifacts, retrievalUnavailable });
+  const composed = composer(db, {
+    taskId: task.id,
+    retrievedKnowledge,
+    retrievedArtifacts,
+    retrievalUnavailable,
+    retrievedPolicyArtifacts: retrievedPolicyArtifacts as never,
+  });
   bridgeResult = await bridge(
     {
       prompt: composed.text,
