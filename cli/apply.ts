@@ -875,6 +875,28 @@ export const recordApplyOutcome = async (opts: {
     return { ok: false, reason: `action_scored emit failed - ${scoredEnv.error}`, exitCode: 1 };
   }
   const scoredEventId = (scoredEnv.result as { id?: string })?.id;
+  if (status === "refused" && isAmendment && scoredEventId) {
+    const contradictionEnv = await mcpCall("substrate.emit", {
+      kind: "candidate_contradicted",
+      substrate_origin: "claude_root",
+      directive_id: ev.directive_id,
+      task_id: ev.task_id,
+      context_refs: [eventId, requestEventId, actionEventId, scoredEventId].filter(Boolean),
+      payload: {
+        candidate_event_id: eventId,
+        amendment_id: eventId,
+        action_scored_event_id: scoredEventId,
+        reason: opts.reason || "claude_apply_refused",
+        contradicted_by: "claude_root",
+        source_kind: ev.kind,
+        status,
+        target,
+      },
+    });
+    if (!contradictionEnv.ok) {
+      return { ok: false, reason: `candidate_contradicted emit failed - ${contradictionEnv.error}`, exitCode: 1 };
+    }
+  }
   // k_555 four-link spine: distribute credit so context_refs cites mutate
   // posterior state. Without this call the candidate_confirmed / artifact
   // posterior updates never happen — audit b7kjyk2k1 / WTF8EZSFAD measured
@@ -964,6 +986,11 @@ export const recordApplyOutcome = async (opts: {
       contextRefs: [eventId, requestEventId, actionEventId, scoredEventId, committedEventId].filter(Boolean) as string[],
       derivedEventIds: [requestEventId, actionEventId, scoredEventId, committedEventId].filter(Boolean) as string[],
       extra: {
+        co_actors: [
+          "claude_root",
+          opts.subagentTaskId ? `claude_subagent:${opts.subagentTaskId}` : "claude_inline",
+          sourceBrainEventId ? "opencode_brain" : null,
+        ].filter((actor): actor is string => typeof actor === "string" && actor.length > 0),
         source_kind: ev.kind ?? null,
         source_brain_event_id: sourceBrainEventId,
         affected_files: affectedFiles,

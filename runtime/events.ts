@@ -61,6 +61,7 @@ type NormalizedActTuple = {
   cited_artifact_ids: string[];
   affected_resources: string[];
   candidate_event_ids: string[];
+  co_actors: string[];
   owner_observed_outcome?: JsonValue;
 };
 
@@ -228,6 +229,7 @@ const normalizeActTuple = (input: EmitEventInput): NormalizedActTuple => {
     cited_artifact_ids: optionalStringArray(payload, "cited_artifact_ids"),
     affected_resources: optionalStringArray(payload, "affected_resources"),
     candidate_event_ids: optionalStringArray(payload, "candidate_event_ids"),
+    co_actors: optionalStringArray(payload, "co_actors"),
     owner_observed_outcome: payload.owner_observed_outcome,
   };
 };
@@ -270,6 +272,7 @@ const projectActTupleRecorded = (db: Database, source: {
           ...(role === "knowledge" ? { source_event_id: targetId } : { source_artifact_id: targetId }),
           rank,
           binding_surface: "act_tuple_projection",
+          co_actors: source.act.co_actors,
           cited_role: role,
         },
       }));
@@ -293,6 +296,7 @@ const projectActTupleRecorded = (db: Database, source: {
       verifier_kind: source.act.verifier_kind,
       cited_knowledge_ids: source.act.cited_knowledge_ids,
       cited_artifact_ids: source.act.cited_artifact_ids,
+      co_actors: source.act.co_actors,
       affected_resources: source.act.affected_resources,
     },
   });
@@ -311,6 +315,7 @@ const projectActTupleRecorded = (db: Database, source: {
       action_predicted_event_id: predicted.id,
       projected_from: "act_tuple_recorded",
       verifier_kind: source.act.verifier_kind,
+      co_actors: source.act.co_actors,
       residual: source.act.observed_residual,
       // OutcomeStatus | undefined → coerce to null. JsonValue forbids
       // undefined; passing it through would silently omit the field
@@ -369,6 +374,7 @@ const projectActTupleRecorded = (db: Database, source: {
       status: source.act.outcome === "succeeded" ? "applied" : "failed",
       source_kind: "act_tuple_recorded",
       summary: source.act.effect_summary,
+      co_actors: source.act.co_actors,
       affected_resources: source.act.affected_resources,
     },
   });

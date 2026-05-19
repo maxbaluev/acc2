@@ -81,13 +81,35 @@ const main = async (): Promise<void> => {
   const filtered = hits.filter((h) => INTERESTING_KINDS.has(h.kind ?? ""));
   if (filtered.length === 0) return;
 
+  const surfaced = filtered.slice(0, 8);
+  for (let rank = 0; rank < surfaced.length; rank++) {
+    const h = surfaced[rank]!;
+    if (!h.event_id) continue;
+    await mcpCall("substrate.emit", {
+      kind: "retrieval_binding",
+      substrate_origin: "claude_root",
+      context_refs: [h.event_id],
+      payload: {
+        query,
+        source_event_id: h.event_id,
+        rendered_snippet: h.snippet,
+        rank,
+        rerank_score: h.rerank_score,
+        posterior: h.posterior,
+        binding_surface: "claude_user_prompt_hook",
+        source_actor: "claude_root",
+        hook_event_name: input.hook_event_name ?? "UserPromptSubmit",
+      },
+    }, { timeoutMs: 10_000 });
+  }
+
   // Compact format — Claude already has the prompt; just surface the
   // retrieved evidence handles + snippets so reasoning binds to them.
   const lines: string[] = [];
   lines.push("<retrieval-binding>");
   lines.push("Top substrate retrievals for this prompt (auto-injected by retrieval-binding-hook to close the k_201 advisory loop on the orchestrator side). Cite event_ids when they shape your response; citation without using is decorative memory (k_554).");
   lines.push("");
-  for (const h of filtered.slice(0, 8)) {
+  for (const h of surfaced) {
     const snip = (h.snippet ?? "").replace(/\s+/g, " ").slice(0, 200);
     const score = typeof h.rerank_score === "number" ? h.rerank_score.toFixed(2)
       : typeof h.distance === "number" ? `d=${h.distance.toFixed(3)}` : "?";
