@@ -42,6 +42,8 @@ The runtime is the abstraction. The brain writes code for bun, uv, or camofox-br
 
 The registry row is the abstraction on the artifact side, symmetrically. act_artifact (the renamed code_artifact) is the one substrate vocabulary registry: a free-string kind and polymorphic payload. Executor handles, verifier handles, prompt templates, decomposition handles, asker patterns, research patterns, action recipes, observation patterns, and goal predicates are all rows in the same registry when they need posterior-ranked reuse. New capability vocabulary arrives as rows, not as schema dimensions, task-class enums, or parallel definition tables — adding a definition table for "research workflows" or "outreach kinds" alongside act_artifact silently recreates the enum the open-kind field exists to abolish. Self-extension occurs by admitting rows and crediting them through act_tuple_recorded.cited_artifact_ids; the same merger/promotion/Beta-posterior machinery that ranks knowledge entries ranks act_artifacts. Bootstrap rows live in substrate/seed.ts as the explicit grounding layer; the registry self-extends from there. Runtime, if present at all, is payload/declaration data — never a retrieval dimension.
 
+Read scored primitives by act_artifact kind: *_predicate rows are decision boundaries, prompt_section_content_variant rows are content variants, and prompt_policy_bundle rows are composer content.
+
 Do not add fixed predicate enums, refusal taxonomies, or pre-check gates when a verifier residual + breakdown can score the same thing. verifier_kind is provenance metadata for credit and calibration, not a predicate gate. Owner consent gates only owner-stated dynamic policy; verifiers score whether the change worked.
 
 ## Dispatch And Recursion
@@ -55,6 +57,8 @@ Refinement edges are observable, inspectable, bounded, and composable. Use bound
 ## Owner Model
 
 Owners are not persona enums. The owner profile is a learned, open-ended vector.
+
+For routing/rendering uncertainty, consult owner_state_estimator_predicate, owner_forecast_predicate, and theory_of_mind_predicate outputs; do not hard-code owner-state categories.
 
 The profile may contain rendering_signals, autonomy_signals, control_signals, risk_signals, collaboration_signals, and goal_continuity_signals, all as Record<string, number>. Treat every key as discovered evidence, not a fixed schema of meanings.
 
@@ -70,13 +74,15 @@ When active or recently terminal dispatches exist, surface a compact Dispatch Tr
 
 Surface pending owner decisions last. When unresolved owner_input_required, hidl_action_required, owner-gated contract_amendment_proposed, described-only proposals, or other owner choices remain, end the turn with a concise decision card. When none remain, explicitly close with no pending decisions.
 
-Apply gates evaluate structural axes, not fixed file-path lists: well-formed anchored_replace_v1 diffs, low verifier residual, clean dispatcher trajectory, no pending irreversible effect, and clear owner_profile.things_to_never_do. Refusing a malformed proposal is non-destructive and must not require owner consent.
+Apply gates evaluate structural axes, not fixed file-path lists: well-formed anchored_replace_v1 diffs, low verifier residual, clean dispatcher trajectory, no pending irreversible effect, and clear owner_profile.things_to_never_do. STRUCTURALLY_PROTECTED_SURFACES are a surface-existence scoring carve-out, not owner consent. Refusing a malformed proposal is non-destructive and must not require owner consent.
 
 ## Knowledge And Credit
 
 Both Claude and the brain may emit knowledge_candidate as co-equal inputs to the same substrate merger. The extractor-side merger dedups, detects agreement and contradiction by goal shape, target, and anchor, combines posterior evidence for agreement, opens adjudicable contradiction records when they disagree, synthesizes, and promotes. Neither LLM makes canonical knowledge by assertion.
 
 Citation is mutation. Cite knowledge and artifact ids that actually shaped the action so outcome credit can update posteriors. Do not use decorative citations.
+
+Treat retrieval_rejected as negative credit evidence, and keep citation binding honest; closure-audit outcomes feed composer_policy_predicate posterior updates.
 
 Moved examples, rationale, inventories, historical anti-pattern evidence, and long recipes should be emitted as retrievable knowledge with goal-shape tags rather than kept in the always-loaded contract.
 
