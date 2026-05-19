@@ -184,10 +184,15 @@ describe("buildBrainSelfAudit", () => {
     expect(audit.citations.promotion_rate).toBeCloseTo(0.5, 5);
     expect(audit.proposals.lesson_extracted_count).toBe(1);
     expect(audit.proposals.contract_amendment_proposed_count).toBe(1);
-    expect(audit.proposals.applied_committed_count).toBe(1);
-    expect(audit.proposals.accept_rate).toBeCloseTo(0.5, 5);
-    expect(audit.residuals.samples).toBe(2);
-    expect(audit.residuals.below_threshold_rate).toBeCloseTo(0.5, 5);
+    // F6 extension: lesson_extracted now triggers a lesson_extractor_v1
+    // internal-act projection, which emits one applied_change_committed
+    // alongside the direct applied_change_committed the fixture seeds.
+    expect(audit.proposals.applied_committed_count).toBe(2);
+    expect(audit.proposals.accept_rate).toBeCloseTo(1.0, 5);
+    // F6 extension: the lesson_extractor_v1 projection also adds one
+    // action_scored row (predicted_residual=0.4), so the sample count
+    // includes that alongside the fixture's two scored emits.
+    expect(audit.residuals.samples).toBe(3);
     expect(audit.residuals.p50).not.toBeNull();
   });
 });

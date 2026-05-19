@@ -631,6 +631,49 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       });
     } catch { /* fail-soft: closure audit already landed */ }
   }
+  // F6 extension — universal internal Act scoring for lesson
+  // extraction. Each lesson_extracted row IS a bet: the substrate (or
+  // brain, when it emits) is asserting "this pattern will help
+  // prevent future failures of the same shape". The verifier
+  // (future_failure_prevention_rate) closes the credit chain when
+  // later closure audits / owner-observed outcomes either confirm or
+  // contradict the prediction. One act per lesson emit is the right
+  // scoping: lessons are individually retrievable and individually
+  // citeable, so each one earns or loses posterior independently.
+  if (input.kind === "lesson_extracted") {
+    try {
+      const payload = isObject(input.payload) ? input.payload : {};
+      const summary = typeof payload.summary === "string" ? payload.summary : "lesson extracted";
+      const lessonKind = typeof payload.kind === "string"
+        ? payload.kind
+        : (typeof payload.lesson_kind === "string" ? payload.lesson_kind : "general");
+      const { recordInternalAct } = require("./internal_act_projection") as typeof import("./internal_act_projection");
+      recordInternalAct(db, {
+        intent: "extract reusable lesson",
+        actionHandle: "lesson_extractor_v1",
+        verifierHandle: "future_failure_prevention_rate",
+        verifierKind: "deterministic_code",
+        // Lessons are moderate-confidence bets — they generalize from
+        // one trajectory and may not transfer cleanly. 0.4 mirrors the
+        // F6 brief's predicted_residual for this decision class.
+        predictedResidual: 0.4,
+        reasoningSummary: `lesson_extracted kind=${lessonKind}`,
+        actionSummary: `lesson_extracted emitted for task ${input.task_id ?? id}`,
+        effectSummary: summary.length > 0 ? summary.slice(0, 200) : "lesson row landed on ledger",
+        directiveId: input.directive_id,
+        taskId: input.task_id,
+        sourceEventId: id,
+        // One act per lesson emit — projection key derives from the
+        // lesson event id so re-emitting the same row collapses to
+        // the same projection.
+        sourceActId: "lesson_extractor_v1:" + id,
+        extra: {
+          lesson_kind: lessonKind,
+          lesson_event_id: id,
+        },
+      });
+    } catch { /* fail-soft: lesson_extracted already landed */ }
+  }
   // RLM retrieval credit attribution (brain task FX9PZDQ3W932,
   // 2026-05-18). Every action_scored event walks its context_refs for
   // retrieval_binding rows and emits retrieval_credit_attributed per

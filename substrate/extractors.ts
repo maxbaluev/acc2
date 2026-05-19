@@ -824,6 +824,46 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
             },
             context_refs: [prior.id, cand.id],
           });
+          // F6 extension — universal internal Act scoring for merger
+          // agreement. The substrate just decided to combine evidence
+          // from two candidates rather than open a contradiction. The
+          // future_citation_utility verifier closes the credit chain
+          // when downstream events cite the merged knowledge (high
+          // citation rate → low residual → merger was the right
+          // call). Lazy-require avoids the extractors ↔ runtime cycle.
+          //
+          // Pair key is sorted lexicographically: when two candidates
+          // share a ms-level timestamp the outer loop can fire in
+          // either direction (prior=A,cand=B then prior=B,cand=A).
+          // Both directions describe the SAME merger decision, so the
+          // projection key must collapse to one row regardless of
+          // iteration order.
+          try {
+            const pairKey = prior.id < cand.id
+              ? prior.id + ":" + cand.id
+              : cand.id + ":" + prior.id;
+            const { recordInternalAct } = require("../runtime/internal_act_projection") as typeof import("../runtime/internal_act_projection");
+            recordInternalAct(db, {
+              intent: "merge knowledge candidates (agreement)",
+              actionHandle: "knowledge_merger_v1",
+              verifierHandle: "future_citation_utility",
+              verifierKind: "deterministic_code",
+              predictedResidual: 0.2,
+              reasoningSummary: `cosine=${cos.toFixed(3)} polarity=${polA} agreed prior=${prior.id}`,
+              actionSummary: `candidate_confirmed emitted citing prior ${prior.id}`,
+              effectSummary: `merger fused new candidate ${cand.id} as corroborating evidence`,
+              directiveId: cand.directive_id,
+              taskId: cand.task_id,
+              sourceActId: "knowledge_merger_v1:agreement:" + pairKey,
+              extra: {
+                branch: "agreement",
+                cosine: cos,
+                prior_candidate_id: prior.id,
+                new_candidate_id: cand.id,
+                cross_origin: prior.substrate_origin !== cand.substrate_origin,
+              },
+            });
+          } catch { /* fail-soft: merger row already landed */ }
           merged++;
           // Rule 3: synthesis when ≥ N corroborations from ≥ 2 distinct origins.
           if (!synthesisedFor.has(prior.id)) {
@@ -878,6 +918,46 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
             },
             context_refs: [prior.id, cand.id],
           });
+          // F6 extension — universal internal Act scoring for merger
+          // contradiction. The substrate is explicitly admitting
+          // uncertainty: two candidates with high cosine similarity
+          // disagree on polarity. The adjudication_outcome verifier
+          // closes credit when the contradiction is later resolved
+          // (an owner-confirmed winner, a stronger third candidate
+          // breaking the tie). Higher predicted_residual (0.5)
+          // mirrors the increased risk per the F6 brief.
+          //
+          // Pair key is sorted lexicographically so iteration-order
+          // duplicates (prior=A,cand=B then prior=B,cand=A on tied
+          // timestamps) collapse to one projection row.
+          try {
+            const pairKey = prior.id < cand.id
+              ? prior.id + ":" + cand.id
+              : cand.id + ":" + prior.id;
+            const { recordInternalAct } = require("../runtime/internal_act_projection") as typeof import("../runtime/internal_act_projection");
+            recordInternalAct(db, {
+              intent: "open knowledge merger contradiction",
+              actionHandle: "knowledge_merger_v1",
+              verifierHandle: "adjudication_outcome",
+              verifierKind: "deterministic_code",
+              predictedResidual: 0.5,
+              reasoningSummary: `cosine=${cos.toFixed(3)} polarity disagreement prior=${polB} new=${polA}`,
+              actionSummary: `contradictory_candidates emitted citing ${prior.id} vs ${cand.id}`,
+              effectSummary: `adjudication pending; downstream owner or stronger evidence resolves`,
+              directiveId: cand.directive_id,
+              taskId: cand.task_id,
+              sourceActId: "knowledge_merger_v1:contradiction:" + pairKey,
+              extra: {
+                branch: "contradiction",
+                cosine: cos,
+                prior_candidate_id: prior.id,
+                new_candidate_id: cand.id,
+                polarity_prior: polB,
+                polarity_new: polA,
+                cross_origin: prior.substrate_origin !== cand.substrate_origin,
+              },
+            });
+          } catch { /* fail-soft: contradiction row already landed */ }
           if (prior.substrate_origin !== cand.substrate_origin) {
             insertEvent(db, {
               kind: "merger_debate_required",

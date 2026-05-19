@@ -321,9 +321,13 @@ describe("audit A.3.6.1: semantic merger rules 1/2/3 actually execute", () => {
     const summary = extractSemanticDedup(db);
     expect(summary.merged).toBeGreaterThanOrEqual(1);
 
+    // Filter by reason so the F6 internal-act projection's
+    // candidate_confirmed (reason='act_tuple_lifecycle_projection')
+    // does not inflate the count we care about here: the merger's
+    // direct dedup emission carries reason='embedding_dedup'.
     const confirmed = db
       .query(
-        "SELECT COUNT(*) AS c FROM events WHERE kind = 'candidate_confirmed' AND substrate_origin = 'substrate_auto'",
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'candidate_confirmed' AND substrate_origin = 'substrate_auto' AND json_extract(payload, '$.reason') = 'embedding_dedup'",
       )
       .get() as { c: number };
     expect(confirmed.c).toBe(1);

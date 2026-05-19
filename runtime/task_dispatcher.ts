@@ -306,7 +306,7 @@ export const dispatchReadyTask = async (
       return { dispatch_id: dispatchId, task_id: task.id, events: [], violations: [] };
     }
 
-    emitEvent(db, {
+    const recipeInvokedEvent = emitEvent(db, {
       kind: "recipe_invoked",
       substrate_origin: "recipe",
       directive_id: task.directive_id,
@@ -318,6 +318,38 @@ export const dispatchReadyTask = async (
         topology_signature: match.topology_signature,
         confidence: match.confidence,
       } as JsonValue,
+    });
+
+    // F6 extension — universal internal Act scoring. The substrate
+    // just selected this matched recipe for replay instead of routing
+    // to opencode_brain. The selection itself is the decision; the
+    // replay outcome (recipe_replayed vs recipe_replay_aborted) and
+    // its residual_delta vs a fresh dispatch close the credit chain.
+    // Verifier is replay_vs_fresh_residual_delta — a downstream
+    // process scores whether the recipe saved a brain call.
+    // predicted_residual = 1 - match.confidence so a high-confidence
+    // recipe predicts near-zero residual at selection time.
+    recordInternalAct(db, {
+      intent: "select recipe for replay",
+      actionHandle: "recipe_replay_selector_v1",
+      verifierHandle: "replay_vs_fresh_residual_delta",
+      verifierKind: "deterministic_code",
+      predictedResidual: 1 - match.confidence,
+      reasoningSummary: `matched recipe ${match.recipe_id} goal_shape=${match.goal_shape} confidence=${match.confidence.toFixed(2)}`,
+      actionSummary: `recipe_invoked dispatch_id=${dispatchId} recipe_id=${match.recipe_id}`,
+      effectSummary: `dispatcher will replay the cached trajectory; no brain call`,
+      directiveId: task.directive_id,
+      taskId: task.id,
+      sourceEventId: recipeInvokedEvent.id,
+      sourceActId: "recipe_replay_selector_v1:" + dispatchId + ":" + match.recipe_id,
+      citedArtifactIds: [match.recipe_id],
+      extra: {
+        recipe_id: match.recipe_id,
+        goal_shape: match.goal_shape,
+        topology_signature: match.topology_signature,
+        confidence: match.confidence,
+        dispatch_id: dispatchId,
+      },
     });
 
     const replayRunArtifact = deps.runArtifact
