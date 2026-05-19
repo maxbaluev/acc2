@@ -281,6 +281,70 @@ describe("emitEvent act_tuple_recorded projector", () => {
     }
   });
 
+  test("applied_change_committed status is decoupled from residual midband", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "act_tuple_recorded",
+      substrate_origin: "claude_root",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "action_artifact_1",
+      verifier_artifact_id: "verifier_artifact_1",
+      predicted_residual: 0.4,
+      residual: 0.4,
+      payload: {
+        intent: "record a landed substrate mutation with midband residual",
+        reasoning_summary: "residual measures uncertainty, not whether the emit landed",
+        effect_summary: "dispatch_decided emitted dispatch_id=example",
+        verifier_kind: "deterministic_code",
+      },
+    });
+    const row = db
+      .query<{ payload: string; residual: number | null; outcome: string | null }, []>("SELECT payload, residual, outcome FROM events WHERE kind = 'applied_change_committed' LIMIT 1")
+      .get()!;
+    const payload = JSON.parse(row.payload);
+    expect(payload.status).toBe("applied");
+    expect(row.residual).toBe(0.4);
+    expect(row.outcome).toBe("failed");
+  });
+
+  test("correlated failure evidence keeps applied_change_committed status failed", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "dispatcher_violation",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      context_refs: ["logical-failed-act"],
+      payload: { reason: "correlated failure before projection" },
+    });
+    emitEvent(db, {
+      kind: "act_tuple_recorded",
+      substrate_origin: "claude_root",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "action_artifact_1",
+      verifier_artifact_id: "verifier_artifact_1",
+      predicted_residual: 0.1,
+      residual: 0.1,
+      payload: {
+        source_act_id: "logical-failed-act",
+        intent: "record a failed coherent act",
+        reasoning_summary: "dispatcher violation is correlated to the source act",
+        effect_summary: "mutation did not land cleanly",
+        verifier_kind: "deterministic_code",
+      },
+    });
+    const row = db
+      .query<{ payload: string }, []>("SELECT payload FROM events WHERE kind = 'applied_change_committed' LIMIT 1")
+      .get()!;
+    expect(JSON.parse(row.payload).status).toBe("failed");
+  });
+
   test("bridge-exit act_tuple does NOT project applied_change_committed (phantom-apply gate)", () => {
     // Pre-fix: every opencode brain cycle ended with an
     // act_tuple_recorded carrying (opencode_brain_exit_action,
@@ -383,10 +447,15 @@ describe("emitEvent act_tuple_recorded projector", () => {
     expect(payload.classification_source).toEqual({
       source: "runtime.emitEvent",
       basis: "lesson_extracted_without_lesson_kind",
-      note: "Emitter did not provide a lesson_kind; classification remains open-ended and should be refined by the producing runtime.",
+      note: "Emitter did not provide a lesson_kind; defaulted to unclassified and should be refined by the producing runtime.",
     });
-    // Summary is preserved alongside the marker.
+    // Summary is preserved alongside the marker and the row stores a classifier.
     expect(payload.summary).toBe("when rewriting cofounder docs ...");
+    expect(payload.lesson_kind).toBe("unclassified");
+    const uncertainty = db
+      .query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM events WHERE kind = 'knowledge_uncertainty_observed' AND json_extract(payload, '$.lesson_event_id') = ?")
+      .get(event.id);
+    expect(uncertainty?.n).toBe(1);
   });
 
 

@@ -128,14 +128,17 @@ const normalizeLessonExtractedPayload = (input: EmitEventInput): JsonValue => {
   const lessonKind = payload.lesson_kind;
   const hasKind = typeof lessonKind === "string" && lessonKind.trim().length > 0;
   const hasSource = !!payload.classification_source && typeof payload.classification_source === "object";
-  if (hasKind || hasSource) return payload;
+  if (hasKind) return payload;
   return {
     ...payload,
-    classification_source: {
-      source: "runtime.emitEvent",
-      basis: "lesson_extracted_without_lesson_kind",
-      note: "Emitter did not provide a lesson_kind; classification remains open-ended and should be refined by the producing runtime.",
-    },
+    lesson_kind: "unclassified",
+    ...(hasSource ? {} : {
+      classification_source: {
+        source: "runtime.emitEvent",
+        basis: "lesson_extracted_without_lesson_kind",
+        note: "Emitter did not provide a lesson_kind; defaulted to unclassified and should be refined by the producing runtime.",
+      },
+    }),
   };
 };
 
@@ -356,6 +359,17 @@ const projectActTupleRecorded = (db: Database, source: {
   // closures.
   const isBridgeExitAct = source.act.action_artifact_id === "opencode_brain_exit_action"
     && source.act.verifier_artifact_id === "opencode_bridge_exit_verifier";
+  const correlatedFailure = db
+    .query<{ c: number }, [string, string, string, string]>(
+      `SELECT COUNT(*) AS c FROM events
+       WHERE kind IN ('dispatcher_violation', 'error_caught', 'task_failed')
+         AND (json_extract(payload, '$.source_act_id') = ?
+           OR json_extract(payload, '$.source_act_event_id') = ?
+           OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?)
+           OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?))`,
+    )
+    .get(sourceActId, sourceEventId, sourceActId, sourceEventId);
+  const appliedStatus = (correlatedFailure?.c ?? 0) > 0 ? "failed" : "applied";
   if (!isBridgeExitAct) emitProjectedEvent(db, sourceActId, "applied_change_committed", "primary", {
     ...base,
     kind: "applied_change_committed",
@@ -371,7 +385,7 @@ const projectActTupleRecorded = (db: Database, source: {
       action_predicted_event_id: predicted.id,
       action_scored_event_id: scored.id,
       projected_from: "act_tuple_recorded",
-      status: source.act.outcome === "succeeded" ? "applied" : "failed",
+      status: appliedStatus,
       source_kind: "act_tuple_recorded",
       summary: source.act.effect_summary,
       co_actors: source.act.co_actors,
@@ -648,11 +662,30 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // citeable, so each one earns or loses posterior independently.
   if (input.kind === "lesson_extracted") {
     try {
-      const payload = isObject(input.payload) ? input.payload : {};
+      const payload = isObject(eventPayload) ? eventPayload : {};
       const summary = typeof payload.summary === "string" ? payload.summary : "lesson extracted";
       const lessonKind = typeof payload.kind === "string"
         ? payload.kind
         : (typeof payload.lesson_kind === "string" ? payload.lesson_kind : "general");
+      const defaultedLessonKind = isObject(payload.classification_source)
+        && payload.classification_source.basis === "lesson_extracted_without_lesson_kind";
+      if (defaultedLessonKind) {
+        emitEvent(db, {
+          kind: "knowledge_uncertainty_observed",
+          substrate_origin: "substrate_auto",
+          directive_id,
+          task_id,
+          parent_task_id: input.parent_task_id ?? null,
+          loop_id,
+          context_refs: [id, ...(input.context_refs ?? [])],
+          payload: {
+            lesson_event_id: id,
+            uncertainty_kind: "lesson_extracted_without_lesson_kind",
+            normalized_lesson_kind: lessonKind,
+            note: "runtime.emitEvent filled lesson_kind=unclassified; emitter should provide a more specific open-ended lesson_kind.",
+          },
+        });
+      }
       const { recordInternalAct } = require("./internal_act_projection") as typeof import("./internal_act_projection");
       recordInternalAct(db, {
         intent: "extract reusable lesson",
