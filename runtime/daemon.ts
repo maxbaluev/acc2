@@ -692,11 +692,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("supervisor")) registerWorker("supervisor", SUPERVISOR_INTERVAL_MS);
   if (isWorkerEnabled("compaction")) registerWorker("compaction", Number(process.env.ACC2_COMPACTION_INTERVAL_MS ?? 60 * 60 * 1000));
   if (isWorkerEnabled("recipe_inertia")) registerWorker("recipe_inertia", Number(process.env.ACC2_RECIPE_INERTIA_TICK_MS ?? 60 * 60 * 1000));
-  if (isWorkerEnabled("verify_heal")) registerWorker("verify_heal", Number(process.env.ACC2_VERIFY_HEAL_TICK_MS ?? 60 * 60 * 1000));
+  if (isWorkerEnabled("verify_heal")) registerWorker("verify_heal", 60 * 60 * 1000);
   // Brain audit B (2026-05-15): register the Model-D extractors worker
   // so candidate→promoted advancement happens on a bounded cadence,
   // not by chance dispatch through Father.
-  if (isWorkerEnabled("extractors")) registerWorker("extractors", Number(process.env.ACC2_EXTRACTORS_INTERVAL_MS ?? 5 * 60 * 1000));
+  if (isWorkerEnabled("extractors")) registerWorker("extractors", 5 * 60 * 1000);
   // Experience compression worker (primitive #3 of SZG5PQ01 design,
   // owner-approved via amendment GHWARJHT1N26BA1T7HNSJJ5AAG from
   // Q2NTPKM dispatch). Clusters successful trajectories (low residual +
@@ -707,21 +707,21 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // Default cadence 30min — fast enough to catch new patterns within
   // an active session, slow enough to keep the SQLite write queue
   // light.
-  if (isWorkerEnabled("experience_compression")) registerWorker("experience_compression", Number(process.env.ACC2_EXPERIENCE_COMPRESSION_TICK_MS ?? 30 * 60 * 1000));
+  if (isWorkerEnabled("experience_compression")) registerWorker("experience_compression", 30 * 60 * 1000);
   // F3 (2026-05-18): lifecycle closure sweep. Default 6h cadence;
-  // overridable via ACC2_LIFECYCLE_SWEEP_INTERVAL_MS. Opt-out via
+  // 6 h cadence (universal — reactive). Opt-out via
   // ACC2_DISABLE_WORKERS=lifecycle_closure_sweep.
-  if (isWorkerEnabled("lifecycle_closure_sweep")) registerWorker("lifecycle_closure_sweep", Number(process.env.ACC2_LIFECYCLE_SWEEP_INTERVAL_MS ?? 6 * 60 * 60 * 1000));
+  if (isWorkerEnabled("lifecycle_closure_sweep")) registerWorker("lifecycle_closure_sweep", 6 * 60 * 60 * 1000);
   // F11 (2026-05-18, contract 2AMJKN0GTX32790173EPYH6YT4): contract
   // amendment flywheel consumer. Default 5min cadence; overridable via
-  // ACC2_FLYWHEEL_CONSUMER_TICK_MS. Opt-out via
+  // 5-min cadence (universal — reactive). Opt-out via
   // ACC2_DISABLE_WORKERS=contract_amendment_consumer.
-  if (isWorkerEnabled("contract_amendment_consumer")) registerWorker("contract_amendment_consumer", Number(process.env.ACC2_FLYWHEEL_CONSUMER_TICK_MS ?? 5 * 60 * 1000));
+  if (isWorkerEnabled("contract_amendment_consumer")) registerWorker("contract_amendment_consumer", 5 * 60 * 1000);
   // F-resilience: opportunistic WAL pressure check (default 30s).
   // Much shorter than the 6h lifecycle sweep — WAL pressure can develop
   // within seconds under a burst write storm; the worker has to be
   // ticking on a sub-minute cadence to catch it before /health stalls.
-  if (isWorkerEnabled("wal_pressure_check")) registerWorker("wal_pressure_check", Number(process.env.ACC2_WAL_PRESSURE_TICK_MS ?? 30 * 1000));
+  if (isWorkerEnabled("wal_pressure_check")) registerWorker("wal_pressure_check", 30 * 1000);
 
   // Phase E: amendment worker — drain unapplied directive_amended events when
   // directive amendments arrive. The shared reactive safety net is the fallback
@@ -828,9 +828,9 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // owner_rendering_feedback_recorded with feedback_kind=auto_verifier|
   // auto_verifier_clean so the policy posterior moves on machine
   // evidence. Closes the 88ESCTN8XN6J gap ("flywheel persisted but
-  // unconsumed by any always-on worker"). Default tick 5 min;
-  // configurable via ACC2_RENDERING_AUDIT_INTERVAL_MS.
-  const RENDERING_AUDIT_INTERVAL_MS = Number(process.env.ACC2_RENDERING_AUDIT_INTERVAL_MS ?? 5 * 60 * 1000);
+  // unconsumed by any always-on worker"). 5-min reactive cadence;
+  // reactive_safety_net is the genuine deadline.
+  const RENDERING_AUDIT_INTERVAL_MS = 5 * 60 * 1000;
   if (isWorkerEnabled("rendering_audit")) {
     const { renderingAuditWorkerTick } = await import("./rendering_audit_worker");
     let renderingAuditMarked = false;
@@ -874,7 +874,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // chance dispatch through Father; substrate counts showed 0/53
   // act_artifact_promoted and 0/70 recipe_promoted. Running on a
   // bounded 5-min cadence makes promotion a substrate liveness function.
-  const EXTRACTORS_INTERVAL_MS = Number(process.env.ACC2_EXTRACTORS_INTERVAL_MS ?? 5 * 60 * 1000);
+  const EXTRACTORS_INTERVAL_MS = 5 * 60 * 1000;
   if (isWorkerEnabled("extractors")) {
     // Brain convergence axis F (2026-05-15): the extractors worker now
     // also runs extractRecipeCandidates and extractSemanticDedup so
@@ -1163,11 +1163,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // successful trajectories by goal_shape + lesson_kind, emits
   // compressed knowledge_candidate/recipe_extracted, retires stale
   // lessons. REUSE-FIRST: no new event kinds. Opt-OUT via
-  // `ACC2_DISABLE_WORKERS=experience_compression`. Interval env-
-  // configurable via `ACC2_EXPERIENCE_COMPRESSION_TICK_MS` (default
-  // 30min).
+  // `ACC2_DISABLE_WORKERS=experience_compression`. 30-min reactive
+  // cadence; reactive_safety_net is the genuine deadline.
   if (isWorkerEnabled("experience_compression")) {
-    const compressionTickMs = Number(process.env.ACC2_EXPERIENCE_COMPRESSION_TICK_MS ?? 30 * 60 * 1000);
+    const compressionTickMs = 30 * 60 * 1000;
     const { experienceCompressionWorkerTick } = await import("./experience_compression_worker");
     markWorkerReady("experience_compression");
     recordWorkerTick("experience_compression");
@@ -1182,10 +1181,9 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // emission for open contract_amendment_proposed / owner_input_required
   // / task_node_opened rows that never received a downstream resolution
   // event. Opt-OUT via `ACC2_DISABLE_WORKERS=lifecycle_closure_sweep`.
-  // Interval env-configurable via `ACC2_LIFECYCLE_SWEEP_INTERVAL_MS`
-  // (default 6h).
+  // 6-h reactive cadence; reactive_safety_net is the genuine deadline.
   if (isWorkerEnabled("lifecycle_closure_sweep")) {
-    const sweepTickMs = Number(process.env.ACC2_LIFECYCLE_SWEEP_INTERVAL_MS ?? 6 * 60 * 60 * 1000);
+    const sweepTickMs = 6 * 60 * 60 * 1000;
     const { runLifecycleClosureSweep } = await import("./lifecycle_closure_sweep");
     markWorkerReady("lifecycle_closure_sweep");
     recordWorkerTick("lifecycle_closure_sweep");
@@ -1204,10 +1202,9 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // dependencies closed), route_to_clarification (missing fields),
   // closure_obsolete (supersession), closure_complete (redundancy).
   // Opt-OUT via `ACC2_DISABLE_WORKERS=contract_amendment_consumer`.
-  // Interval env-configurable via `ACC2_FLYWHEEL_CONSUMER_TICK_MS`
-  // (default 5min).
+  // 5-min reactive cadence; reactive_safety_net is the genuine deadline.
   if (isWorkerEnabled("contract_amendment_consumer")) {
-    const consumerTickMs = Number(process.env.ACC2_FLYWHEEL_CONSUMER_TICK_MS ?? 5 * 60 * 1000);
+    const consumerTickMs = 5 * 60 * 1000;
     const consumerBatchSize = Number(process.env.ACC2_FLYWHEEL_CONSUMER_BATCH ?? 100);
     const { runContractAmendmentConsumer } = await import("./contract_amendment_consumer");
     markWorkerReady("contract_amendment_consumer");
@@ -1226,10 +1223,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // last successful summary is parked in the worker module so /health
   // can surface wal_stats — the diagnostic we lacked when the daemon
   // hung during the 2917-row burst sweep this session. Opt-OUT via
-  // ACC2_DISABLE_WORKERS=wal_pressure_check. Interval env-configurable
-  // via ACC2_WAL_PRESSURE_TICK_MS (default 30s).
+  // ACC2_DISABLE_WORKERS=wal_pressure_check. 30-s reactive cadence;
+  // reactive_safety_net is the genuine deadline.
   if (isWorkerEnabled("wal_pressure_check")) {
-    const walTickMs = Number(process.env.ACC2_WAL_PRESSURE_TICK_MS ?? 30 * 1000);
+    const walTickMs = 30 * 1000;
     const { runWalPressureCheck, setLastWalPressureSummary } = await import("./wal_pressure_worker");
     markWorkerReady("wal_pressure_check");
     recordWorkerTick("wal_pressure_check");
@@ -1245,10 +1242,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // periodically scans for old knowledge_contradiction_observed events
   // (Layer 2 drift signal) and opens corrective directives so the brain
   // designs a fix. Caps per-tick dispatch to bound brain spend. Opt-OUT
-  // via `ACC2_DISABLE_WORKERS=verify_heal`. Interval env-configurable
-  // via `ACC2_VERIFY_HEAL_TICK_MS` (default 1h).
+  // via `ACC2_DISABLE_WORKERS=verify_heal`. 1-h reactive cadence;
+  // reactive_safety_net is the genuine deadline.
   if (isWorkerEnabled("verify_heal")) {
-    const healTickMs = Number(process.env.ACC2_VERIFY_HEAL_TICK_MS ?? 60 * 60 * 1000);
+    const healTickMs = 60 * 60 * 1000;
     const { verifyHealWorkerTick } = await import("./verify_heal");
     markWorkerReady("verify_heal");
     recordWorkerTick("verify_heal");
