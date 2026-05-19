@@ -39,7 +39,6 @@ describe("dark-gate observability — kind registration", () => {
           evidence: [],
           classifier_version: "test",
           directive_text_hash: "abc",
-          allowed_artifact_kinds: [],
         },
       }),
     ).not.toThrow();
@@ -171,7 +170,6 @@ describe("dark-gate observability — live emission paths", () => {
         evidence: ["how_the_system_works"],
         classifier_version: "test",
         directive_text_hash: "feedface",
-        allowed_artifact_kinds: ["system_internals_doc"],
       },
     });
     // Prior artifact_id the new admission would chain into.

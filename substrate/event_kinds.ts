@@ -736,8 +736,7 @@ export const EVENT_KINDS = {
   //    intent_classified — substrate-emitted at directive ingress
   //    (handleOpenDirective). Payload:
   //      { intent_class, confidence, evidence: string[],
-  //        classifier_version, directive_text_hash,
-  //        allowed_artifact_kinds: string[] }
+  //        classifier_version, directive_text_hash }
   //    intent_class is an open string; vocabulary discovered through use.
   //    embeddable so retrieval over classifier outputs surfaces patterns,
   //    health_metric so dashboards count the gate firing.

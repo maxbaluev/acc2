@@ -27,7 +27,7 @@ import { findRecipeMatch } from "../recipe_replay";
 import { findSimilarRecentCandidate } from "../knowledge_dedup";
 import { newId } from "../ids";
 import { createHash } from "node:crypto";
-import { classifyIntent, allowedArtifactKindsFor, INTENT_CLASSIFIER_VERSION } from "../intent_classifier";
+import { classifyIntent, INTENT_CLASSIFIER_VERSION } from "../intent_classifier";
 import { recordInternalAct } from "../internal_act_projection";
 import {
   codeArtifactRegistry,
@@ -1368,7 +1368,6 @@ export const handleOpenDirective = (
       evidence: classification.evidence,
       classifier_version: INTENT_CLASSIFIER_VERSION,
       directive_text_hash: directiveTextHash,
-      allowed_artifact_kinds: allowedArtifactKindsFor(classification.intent_class),
     } as JsonValue,
   });
 

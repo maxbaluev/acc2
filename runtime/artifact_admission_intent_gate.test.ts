@@ -69,7 +69,6 @@ const seedIntentClassified = (
       evidence: ["fixture_seed"],
       classifier_version: "test",
       directive_text_hash: "deadbeef",
-      allowed_artifact_kinds: [],
     },
   });
 };

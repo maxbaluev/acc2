@@ -175,7 +175,6 @@ describe("EVENT_KINDS registry coverage", () => {
           evidence: [],
           classifier_version: "test",
           directive_text_hash: "abc",
-          allowed_artifact_kinds: [],
         },
       }),
     ).not.toThrow();

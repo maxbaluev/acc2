@@ -90,6 +90,5 @@ describe("handleOpenDirective — emits intent_classified at ingress", () => {
     expect(Array.isArray(payload.evidence)).toBe(true);
     expect(typeof payload.classifier_version).toBe("string");
     expect(typeof payload.directive_text_hash).toBe("string");
-    expect(Array.isArray(payload.allowed_artifact_kinds)).toBe(true);
   });
 });

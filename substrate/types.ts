@@ -270,15 +270,10 @@ export const OWNER_PROFILE_JSON_SCHEMA = {
 
 // ── Origin / outcome / failure / edge kinds (§4.1) ──────────────────
 
-export type SubstrateOrigin =
-  | "claude_root"
-  | "claude_sub"
-  | "opencode"
-  | "recipe"
-  | "scheduler"
-  | "father"
-  | "substrate_auto"
-  | "owner";
+// Open string: emission origin is event-row data, not a closed actor taxonomy.
+// Renderers and dashboards should group observed values instead of requiring
+// a type edit for every new runtime/source_actor.
+export type SubstrateOrigin = string;
 
 export type OutcomeStatus =
   | "pending"

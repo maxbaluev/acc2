@@ -181,23 +181,3 @@ export const classifyIntent = (
   }
   return best;
 };
-
-// Maps an intent_class to the artifact kinds the substrate will allow
-// downstream gates to admit. Open-ended: ad_hoc errs toward letting
-// historical paths through so existing automations are not broken.
-export const allowedArtifactKindsFor = (intent_class: string): string[] => {
-  switch (intent_class) {
-    case "atms_report_composition":
-      return ["atms_report_v_any"];
-    case "system_internals_doc":
-      return ["system_internals_doc", "markdown_body"];
-    case "cofounder_review":
-      return ["cofounder_review_note", "markdown_body"];
-    case "contract_implementation":
-      return ["act_artifact_candidate"];
-    case "research_dispatch":
-      return ["research_note", "markdown_body"];
-    default:
-      return [];
-  }
-};
