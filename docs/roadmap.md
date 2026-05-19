@@ -172,6 +172,36 @@ Scheduled-export cron primitive that emits `state_exported` on a cadence the own
 
 ---
 
+## Tier 4 — Brain-emitted frontier (deep-inspection dispatch `C5TVG369R11C9DAD9HVH8Q562G`)
+
+The 2026-05-19 deep-inspection dispatch produced two contracts that complement Tier 1-2 and were not in my prior list. They land here because they extend §15 meta-principle and the closure-rate work.
+
+### T4.1 — F-Dispatch-Decider-As-Posterior-Predicate (brain-proposed)
+
+**Brain claim:** "Dispatch should be optimized as a learned residual-calibrated primitive before adding more strategic prompt policy, because `dispatch_decider_v1` is high-volume and currently averages above the closure_residual threshold." Cites measurement `T1G2F63H4H18VF7E5SDQ03R0HM`.
+
+**Contract:** The dispatch_decider's per-route scoring (currently a hardcoded weighted sum of `routing_axes`) becomes an `act_artifact{kind: "dispatch_route_predicate"}` row per route. Each row carries a Beta posterior tracking "did selecting this route at this score level prove correct downstream?" The decider reads the posterior at decision time and falls back to the hardcoded weights only when the posterior is uninformative (low evidence count). Closes the gap where dispatch quality is high-volume but not learned.
+
+**Why Tier 4:** depends on T2.1 (threshold registry) for the underlying machinery, and benefits from T2.4 (counterfactual credit) for fast convergence.
+
+### T4.2 — F-Proposal-Digest-Scheduler (brain-proposed)
+
+**Brain claim:** "Pending proposal digestion should be scheduled as a substrate primitive because live inspection shows outstanding amendments/lessons coexisting with new architecture directives, creating compounding decision-debt." Cites measurement `T1G2F63H4H18VF7E5SDQ03R0HM`.
+
+**Contract:** New worker `proposal_digest_scheduler`. Reads `pending_contract_amendments_view` and unresolved `lesson_extracted` rows. Scores each by age + dependency pressure + owner-profile alignment + posterior of similar past landed amendments. Opens bounded apply/refine/reject tasks with `residual_stop_condition` so the worker doesn't fire-hose the dispatcher. Operates within the contract_amendment_consumer's existing dispatch budget.
+
+**Closure predicate:** `closure_complete(worker_registered AND pending_amendments_age_distribution_shifts_younger AND no_dispatcher_overrun)`.
+
+### T4.3 — F-Artifact-Warning-Calibration (brain-proposed insight)
+
+**Brain claim:** "Artifact warning quietness should be treated as an evidence gap, not proof of health, because `artifact_warning_view` returned zero rows while `active_inference_view` still shows high-residual artifact patterns." Cites measurement `T1G2F63H4H18VF7E5SDQ03R0HM`.
+
+**Contract:** Cross-reference `artifact_warning_view` against `active_inference_view`: when an artifact has high-residual scoring history (avg_residual ≥ 0.5, scored_count ≥ 5) but does NOT appear in artifact_warning_view (because its status hasn't flipped to quarantined), emit a new `artifact_warning_gap_detected` event so the operator sees the silent-degradation signal. This calibrates the gauge against ground truth instead of trusting absence of warnings.
+
+**Closure predicate:** `closure_complete(cross_reference_query_lands AND gap_events_emitted_proportional_to_high_residual_unwarned_artifacts AND test_pins_the_invariant)`.
+
+---
+
 ## Dispatch order rationale
 
 ```
