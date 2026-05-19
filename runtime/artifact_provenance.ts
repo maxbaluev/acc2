@@ -23,7 +23,7 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import type { EmitEventInput } from "./events";
-import { getArtifact, type CodeArtifactRow } from "./artifact_store";
+import { getArtifact, type ActArtifactRow } from "./artifact_store";
 import { nowIso } from "./ids";
 
 /** A single hop in the provenance chain — projection of act_artifact for
@@ -50,7 +50,7 @@ export type ProvenanceChain = {
   lost_version_count: number;    // sum across head + ancestors + descendants
 };
 
-const rowToProvenanceNode = (row: CodeArtifactRow, depth: number): ProvenanceNode => ({
+const rowToProvenanceNode = (row: ActArtifactRow, depth: number): ProvenanceNode => ({
   artifact_id: row.id,
   name: row.name,
   kind: (row as unknown as { kind?: string }).kind ?? "code_artifact",

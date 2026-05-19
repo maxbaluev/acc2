@@ -37,7 +37,7 @@ import type { EmitEventInput } from "./events";
 import { parseResourceRefs, repoTargetFilesFromResources, resourcesFromTargetFiles, type ResourceRef } from "./resource_uri";
 import { betaMean, betaStreamConfidence } from "./posterior";
 
-export type CodeArtifactRow = {
+export type ActArtifactRow = {
   id: string;
   runtime: Runtime;
   /** Free-string discriminator for the row's purpose. Schema default is
@@ -81,7 +81,7 @@ export type CodeArtifactRow = {
   updatedAt: string;
 };
 
-export type InsertArtifactInput = Omit<CodeArtifactRow, "createdAt" | "updatedAt" | "id" | "targetResources" | "supersedes" | "supersededBy" | "lostVersionCount" | "kind"> & {
+export type InsertArtifactInput = Omit<ActArtifactRow, "createdAt" | "updatedAt" | "id" | "targetResources" | "supersedes" | "supersededBy" | "lostVersionCount" | "kind"> & {
   id?: string;
   /** Optional kind discriminator. Defaults to `runtime_action` on
    *  insert when omitted (matches the schema default). */
@@ -141,7 +141,7 @@ const parseStringArray = (raw: unknown): string[] | null => {
   } catch { return null; }
 };
 
-const mapRow = (raw: Record<string, unknown>): CodeArtifactRow => ({
+const mapRow = (raw: Record<string, unknown>): ActArtifactRow => ({
   id: raw.id as string,
   runtime: raw.runtime as Runtime,
   kind: ((raw.kind as string | null) ?? "code_artifact"),
@@ -163,7 +163,7 @@ const mapRow = (raw: Record<string, unknown>): CodeArtifactRow => ({
   targetFiles: parseStringArray(raw.target_files),
   targetResources: parseResourceRefs(raw.target_resources) ?? resourcesFromTargetFiles(parseStringArray(raw.target_files)),
   sourceCandidateId: (raw.source_candidate_id as string | null) ?? null,
-  ownerGateVerdict: (raw.owner_gate_verdict as CodeArtifactRow["ownerGateVerdict"]) ?? null,
+  ownerGateVerdict: (raw.owner_gate_verdict as ActArtifactRow["ownerGateVerdict"]) ?? null,
   supersedes: (raw.supersedes as string | null) ?? null,
   supersededBy: (raw.superseded_by as string | null) ?? null,
   lostVersionCount: ((raw.lost_version_count as number | null) ?? 0),
@@ -176,7 +176,7 @@ const mapRow = (raw: Record<string, unknown>): CodeArtifactRow => ({
 /** Insert a new act_artifact row. The caller supplies the posterior priors
  *  (alpha/beta) directly so admission can seed (0.5, 0.3) — the store does
  *  not back-compute them. id is generated unless caller passes one. */
-export const insertArtifact = (db: Database, input: InsertArtifactInput): CodeArtifactRow => {
+export const insertArtifact = (db: Database, input: InsertArtifactInput): ActArtifactRow => {
   const id = input.id ?? newId();
   const ts = nowIso();
   const stateRoot = input.stateRoot ?? "";
@@ -222,10 +222,10 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): CodeAr
       ts,
     ],
   );
-  return getArtifact(db, id) as CodeArtifactRow;
+  return getArtifact(db, id) as ActArtifactRow;
 };
 
-export const getArtifact = (db: Database, id: string): CodeArtifactRow | null => {
+export const getArtifact = (db: Database, id: string): ActArtifactRow | null => {
   const row = db.query("SELECT * FROM act_artifact WHERE id = ?").get(id) as Record<string, unknown> | null;
   if (!row) return null;
   return mapRow(row);
@@ -235,7 +235,7 @@ export const listArtifactsByRuntime = (
   db: Database,
   runtime: Runtime,
   limit = 100,
-): CodeArtifactRow[] => {
+): ActArtifactRow[] => {
   const rows = db
     .query(
       "SELECT * FROM act_artifact WHERE runtime = ? ORDER BY score DESC, updated_at DESC LIMIT ?",
@@ -277,7 +277,7 @@ export const applyResidualOutcome = (
   artifactId: string,
   residual: number,
   ts: string,
-): CodeArtifactRow => {
+): ActArtifactRow => {
   const row = getArtifact(db, artifactId);
   if (!row) throw new Error(`act_artifact_not_found:${artifactId}`);
   const r = clamp01(residual);
@@ -319,12 +319,12 @@ export const applyResidualOutcome = (
      WHERE id = ?`,
     [newAlpha, newBeta, newScore, newConfidence, newEma, ts, artifactId],
   );
-  return getArtifact(db, artifactId) as CodeArtifactRow;
+  return getArtifact(db, artifactId) as ActArtifactRow;
 };
 
 // ── Promotion / quarantine ─────────────────────────────────────────
 
-const synthesizeName = (row: CodeArtifactRow): string => {
+const synthesizeName = (row: ActArtifactRow): string => {
   // First-comment heuristic: look for `//` or `#` on the first non-empty line.
   const lines = row.body.split(/\r?\n/);
   for (const ln of lines) {
@@ -339,7 +339,7 @@ const synthesizeName = (row: CodeArtifactRow): string => {
   return `auto_${row.id.slice(-8)}`;
 };
 
-const countInvocations = (row: CodeArtifactRow): number => row.posteriorAlpha + row.posteriorBeta - 2;
+const countInvocations = (row: ActArtifactRow): number => row.posteriorAlpha + row.posteriorBeta - 2;
 
 /** Promote an admitted artifact whose posterior crossed the threshold.
  *  Emits a `act_artifact_promoted` event via `emit` and stamps a name on
@@ -717,7 +717,7 @@ export const maybeRehabilitate = async (
 /** List quarantined artifacts whose latest quarantine event is older than
  *  the cooldown window. The daemon's rehabilitation worker tick consumes
  *  this. */
-export const listRehabilitationCandidates = (db: Database, nowMs?: number): CodeArtifactRow[] => {
+export const listRehabilitationCandidates = (db: Database, nowMs?: number): ActArtifactRow[] => {
   const ts = new Date((nowMs ?? Date.now()) - REHABILITATION_COOLDOWN_MS).toISOString();
   const rows = db
     .query(
