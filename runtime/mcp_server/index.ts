@@ -135,8 +135,8 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
   server.addTool({
     name: "substrate.read",
     description:
-      "Read a named substrate view. (B3: every view returns " +
-      "view_not_implemented; Phase B2/F lights up real dispatch.)",
+      "Read a named substrate view. Unknown view_name returns " +
+      "view_not_implemented:<name> so callers can detect typos.",
     parameters: ReadSchema,
     execute: wrap(handleRead),
   });

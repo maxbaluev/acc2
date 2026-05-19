@@ -619,12 +619,10 @@ export const handleRead = (
   ctx: McpContext,
   args: z.infer<typeof ReadSchema>,
 ): McpResult => {
-  // Phase Audit: route `view_name` to the substrate/views.ts accessor.
-  // Views not yet implemented return `view_not_implemented:<name>` so
-  // callers see a clear signal instead of a silent empty. The set below
-  // mirrors §4.2 of v2-design.md; views computed in TS (knowledge_view,
-  // judgment_packet_view) still return view_not_implemented until their
-  // accessors land.
+  // Route `view_name` to the substrate/views.ts accessor.
+  // Unknown views return `view_not_implemented:<name>` so callers see a
+  // clear signal instead of a silent empty. The set below mirrors §4.2
+  // of v2-design.md.
   const db = ctx.db;
   const view = args.view_name;
   try {
