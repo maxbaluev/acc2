@@ -127,17 +127,44 @@ export const BRAIN_OPENCODE_TOOL_SURFACE: readonly string[] = Object.freeze([
 const BRAIN_OPENCODE_TOOL_SURFACE_SET = new Set<string>(BRAIN_OPENCODE_TOOL_SURFACE);
 
 /**
- * Permission object derived from BRAIN_OPENCODE_TOOL_SURFACE for the
- * top-level `permission` key in OPENCODE_CONFIG. Only the positively
- * enumerated tools receive an explicit `allow`; there is no wildcard
- * deny pattern because the agent block's `tools` array is the
- * structural gate. Defense-in-depth: even if a future opencode rev
- * ignores the agent-block enumeration, the top-level permission map
- * still names exactly the read-only surface and nothing else.
+ * Built-in tool names opencode 1.14.50 ships that can mutate the source
+ * checkout (file writes, shell commands, patches, task spawning, repo
+ * operations). The positive enumeration via `tools` was insufficient in
+ * production: opencode treated `tools: {<name>: true, …}` as ADDITIVE to
+ * its default set, leaving `bash` / `apply_patch` / `edit` / `write`
+ * implicitly available. Brain dispatch QTD1PX04 (2026-05-19) was caught
+ * using bash (18×) + apply_patch (1×) inside the source checkout.
+ *
+ * Fix: explicit `deny` for every known filesystem-write tool. Belt and
+ * braces: even if `tools` whitelist behavior changes in a future rev,
+ * `permission` deny takes precedence over allow.
  */
-export const BRAIN_READONLY_PERMISSION: Readonly<Record<string, "allow">> = Object.freeze(
-  Object.fromEntries(BRAIN_OPENCODE_TOOL_SURFACE.map((tool) => [tool, "allow" as const])),
-);
+const BRAIN_FORBIDDEN_TOOLS: readonly string[] = Object.freeze([
+  "bash",
+  "edit",
+  "write",
+  "apply_patch",
+  "task",
+  "external_directory",
+  "repo_clone",
+  "repo_overview",
+  "patch",
+  "multiedit",
+  "shell",
+]);
+
+/**
+ * Permission object derived from BRAIN_OPENCODE_TOOL_SURFACE for the
+ * top-level `permission` key in OPENCODE_CONFIG. Positive enumeration
+ * for the read-only surface PLUS explicit `deny` for every built-in
+ * filesystem-write tool. The deny set is the load-bearing gate against
+ * brain_native_filesystem_bypass when opencode treats `tools` as
+ * additive instead of whitelist.
+ */
+export const BRAIN_READONLY_PERMISSION: Readonly<Record<string, "allow" | "deny">> = Object.freeze({
+  ...Object.fromEntries(BRAIN_OPENCODE_TOOL_SURFACE.map((tool) => [tool, "allow" as const])),
+  ...Object.fromEntries(BRAIN_FORBIDDEN_TOOLS.map((tool) => [tool, "deny" as const])),
+});
 
 /**
  * Mangled-name prefixes for the same tool surface. opencode 1.4+ rewrites

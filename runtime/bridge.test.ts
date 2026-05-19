@@ -669,6 +669,21 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     expect(isBrainReadonlyToolAllowed("unknown_future_write_tool")).toBe(false);
   });
 
+  test("BRAIN_READONLY_PERMISSION emits explicit deny for every filesystem-write tool (caught in QTD1PX04 dispatch)", () => {
+    // Production data: brain dispatch QTD1PX04 (2026-05-19) bypassed the
+    // positive-enumeration agent block and used bash 18× + apply_patch 1×
+    // inside the source checkout. opencode 1.14.50 treats `tools` as
+    // additive; only `permission: <name>: "deny"` actually denies.
+    const perm = BRAIN_READONLY_PERMISSION as Record<string, "allow" | "deny">;
+    for (const tool of ["bash", "edit", "write", "apply_patch", "task", "external_directory", "repo_clone", "repo_overview", "patch", "multiedit", "shell"]) {
+      expect(perm[tool]).toBe("deny");
+    }
+    // And the read-only surface remains allow.
+    expect(perm.read).toBe("allow");
+    expect(perm["substrate.search"]).toBe("allow");
+    expect(perm["runtime.dispatch_ready_task"]).toBe("allow");
+  });
+
   test("first-frame watchdog fires bridge_stuck when subprocess emits zero frames within firstFrameThresholdMs", async () => {
     const db = openDb(":memory:");
     // Build a fake subprocess that stays alive (`exited` resolves only after
