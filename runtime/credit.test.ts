@@ -659,29 +659,9 @@ describe("LATM novelty bonus (§11.5)", () => {
     expect(bonusedAlpha).toBeGreaterThan(noBonusAlpha);
   });
 
-  test("ACC2_LATM_NOVELTY_BONUS env overrides the default multiplier", async () => {
-    const prior = process.env.ACC2_LATM_NOVELTY_BONUS;
-    process.env.ACC2_LATM_NOVELTY_BONUS = "2.5";
-    try {
-      const db = openDb(":memory:");
-      insertSampleArtifact(db, "art_action", "// a");
-      insertSampleArtifact(db, "art_verifier", "// v");
-      openDirective(db, "d_env", "env-tuned multiplier directive");
-      const ap = emitEvent(db, { kind: "action_predicted", substrate_origin: "opencode", directive_id: "d_env", task_id: "t_env", action_artifact_id: "art_action", verifier_artifact_id: "art_verifier", payload: {} });
-      const obs = emitEvent(db, { kind: "artifact_observed", substrate_origin: "substrate_auto", directive_id: "d_env", task_id: "t_env", action_artifact_id: "art_action", payload: {} });
-      const scored = emitEvent(db, { kind: "action_scored", substrate_origin: "substrate_auto", directive_id: "d_env", task_id: "t_env", action_artifact_id: "art_action", verifier_artifact_id: "art_verifier", residual: 0, payload: {} });
-      await distributeCredit(db, { action_event_id: ap.id, observation_event_id: obs.id, scored_event_id: scored.id, predicted_residual: 0, observed_residual: 0 });
-      const novelty = db
-        .query("SELECT payload FROM events WHERE kind = 'latm_novelty_bonus_applied' LIMIT 1")
-        .get() as { payload: string } | null;
-      expect(novelty).not.toBeNull();
-      const p = JSON.parse(novelty!.payload) as { multiplier: number };
-      expect(p.multiplier).toBeCloseTo(2.5, 6);
-    } finally {
-      if (prior === undefined) delete process.env.ACC2_LATM_NOVELTY_BONUS;
-      else process.env.ACC2_LATM_NOVELTY_BONUS = prior;
-    }
-  });
+  // Test "ACC2_LATM_NOVELTY_BONUS env overrides the default multiplier"
+  // deleted — env override removed in the universality cleanup (the
+  // 1.5× multiplier is the universal value pending f13 adaptive scoring).
 
   test("novelty bonus is a no-op when the directive has no directive_opened row", async () => {
     const db = openDb(":memory:");

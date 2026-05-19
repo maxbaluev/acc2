@@ -44,12 +44,13 @@ export type BrainDispatchClassification =
   | "stalled"
   | "in_flight";
 
-/** Threshold for the `stalled` bucket. Two hours by default mirrors
- *  the supervisor's ready-starvation threshold so a stalled directive
- *  flagged here is also debit-able to the pathology budget. */
-export const STALLED_THRESHOLD_MS = Number(
-  process.env.ACC2_BRAIN_EFFECTIVENESS_STALLED_MS ?? 2 * 60 * 60 * 1000,
-);
+/** Threshold for the `stalled` bucket. Two hours mirrors
+ *  SUPERVISOR_READY_STARVATION_MS so a directive flagged stalled here
+ *  is also debit-able to the pathology budget. Universal value pending
+ *  f13 adaptive-scoring contract (GEZ955QDYN3R): the threshold should
+ *  learn from outcomes (false-positive rate on flagged stalls vs.
+ *  real wedge detection) rather than be env-tuned. */
+export const STALLED_THRESHOLD_MS = 2 * 60 * 60 * 1000;
 
 export type DirectiveEffectivenessRow = {
   directive_id: string;

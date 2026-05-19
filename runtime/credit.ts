@@ -72,15 +72,13 @@ import { maybePromoteKnowledge } from "../substrate/extractors";
 // posterior delta computation; on later credits for the same shape the
 // weight is left untouched.
 
-const DEFAULT_NOVELTY_BONUS_MULTIPLIER = 1.5;
+// Universal value — 1.5× first-credit bonus per novel goal_shape token.
+// Pending f13 adaptive-scoring contract (GEZ955QDYN3R): the right
+// multiplier should be learned from observed novelty/promotion correlation,
+// not env-tuned. No operator has ever set this in practice.
+const NOVELTY_BONUS_MULTIPLIER = 1.5;
 
-const noveltyBonusMultiplier = (): number => {
-  const raw = process.env.ACC2_LATM_NOVELTY_BONUS;
-  if (raw === undefined || raw === "") return DEFAULT_NOVELTY_BONUS_MULTIPLIER;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_NOVELTY_BONUS_MULTIPLIER;
-  return parsed;
-};
+const noveltyBonusMultiplier = (): number => NOVELTY_BONUS_MULTIPLIER;
 
 /** Resolve the goal_shape hash for a directive by reading its latest
  *  directive_opened payload and feeding `goal`/`intent`/`directive_text`
