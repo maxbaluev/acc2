@@ -392,6 +392,10 @@ describe("derived sets match their pre-unification shape", () => {
       // while no contract_amendment_proposed rows matched its declared
       // target_files — the canonical k_252 advisory-gate-fake signal.
       "closure_blocked_no_amendments",
+      // 2026-05-19 (pending_decision_retire_worker): auto-prune of stale /
+      // test-file-target / anchor-missing pending_owner_decision rows
+      // emits this so dashboards can count retire rate per stale-class.
+      "pending_decision_retired",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

@@ -21,14 +21,22 @@
 //     explicit --yes so a typo doesn't drain real decisions.
 //
 // Usage:
-//   acc admin pending-decisions                       # ranked top 10
+//   acc admin pending-decisions                       # ranked top 10 (LIVE)
 //   acc admin pending-decisions --limit 20            # top 20 groups
 //   acc admin pending-decisions --target rules        # filter by substring
 //   acc admin pending-decisions --all                 # raw ungrouped view
 //   acc admin pending-decisions --json                # JSON (ranked by default)
 //   acc admin pending-decisions --all --json          # JSON ungrouped
+//   acc admin pending-decisions --include-retired     # include pending_decision_retired rows (audit)
 //   acc admin pending-decisions --auto-decline-malformed --yes
 //                                                     # bulk-decline malformed shapes
+//
+// LIVE vs. historical (2026-05-19):
+//   The default surface projects through pending_owner_decision_queue_live_view,
+//   which EXCLUDES rows the pending_decision_retire_worker auto-pruned
+//   (anchor_missing / test_file_target / age > 7d). Pass --include-retired
+//   to fall back to the historical pending_owner_decision_queue_view that
+//   includes every retired row too (audit / replay).
 
 import type { Database } from "bun:sqlite";
 import { openDb } from "../substrate/db";
@@ -36,6 +44,7 @@ import { emitEvent } from "../runtime/events";
 import {
   lessonImplementerQueue,
   pendingOwnerDecisionQueue,
+  pendingOwnerDecisionQueueLive,
   runViews,
   type LessonImplementerQueueRow,
   type PendingOwnerDecisionRow,
@@ -83,12 +92,13 @@ const pad = (s: string | null, n: number): string =>
 const renderRanked = (
   rows: PendingOwnerDecisionRow[],
   out: (s: string) => void,
+  viewLabel: string = "pending_owner_decision_queue_live_view",
 ): void => {
   if (rows.length === 0) {
-    out("pending owner decisions: none (pending_owner_decision_queue_view is empty)");
+    out(`pending owner decisions: none (${viewLabel} is empty)`);
     return;
   }
-  out("acc admin pending-decisions — ranked groups from pending_owner_decision_queue_view");
+  out(`acc admin pending-decisions — ranked groups from ${viewLabel}`);
   out("");
   out("  rank  age    dup risk shape target                                          anchor                                  representative");
   out("  ──── ────── ─── ──── ───── ─────────────────────────────────────────────── ─────────────────────────────────────── ──────────────────────────");
@@ -184,7 +194,17 @@ export const runPendingDecisions = async (
     return 0;
   }
 
-  const ranked = pendingOwnerDecisionQueue(db);
+  // 2026-05-19 (KCs YKJYRGVJJX21XAMQS042PMK7JG +
+  // G3CBVAGY2S5QN5XDC1GR7GJP0G): default surface is the LIVE view that
+  // excludes pending_decision_retire_worker retires (anchor_missing /
+  // test_file_target / stale > 7d). --include-retired opts back into the
+  // historical projection that includes every retired row too, useful for
+  // audit. Auto-decline-malformed must always work on the LIVE rows so
+  // the operator doesn't re-decline already-retired ones.
+  const wantIncludeRetired = argv.includes("--include-retired");
+  const ranked = wantIncludeRetired
+    ? pendingOwnerDecisionQueue(db)
+    : pendingOwnerDecisionQueueLive(db);
 
   // Auto-decline-malformed mode: drain every group whose
   // decline_candidate_reason is set. Operator types --auto-decline-malformed
@@ -263,7 +283,13 @@ export const runPendingDecisions = async (
   if (wantJson) {
     env.out(JSON.stringify(limited, null, 2));
   } else {
-    renderRanked(limited, env.out);
+    renderRanked(
+      limited,
+      env.out,
+      wantIncludeRetired
+        ? "pending_owner_decision_queue_view (--include-retired)"
+        : "pending_owner_decision_queue_live_view",
+    );
     if (filtered.length > limit) {
       env.out("");
       env.out(`(${filtered.length - limit} more rows hidden; pass --limit ${filtered.length} to show all.)`);

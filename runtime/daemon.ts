@@ -750,6 +750,14 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // within seconds under a burst write storm; the worker has to be
   // ticking on a sub-minute cadence to catch it before /health stalls.
   if (isWorkerEnabled("wal_pressure_check")) registerWorker("wal_pressure_check", 30 * 1000);
+  // 2026-05-19 (KCs YKJYRGVJJX21XAMQS042PMK7JG +
+  // G3CBVAGY2S5QN5XDC1GR7GJP0G): pending_decision_retire_worker.
+  // Auto-prunes stale / test-file-target / anchor-missing rows from
+  // the pending_owner_decision_queue surface so the operator never
+  // sees 40+ rows of brain-routing noise. Default 1h cadence; the
+  // queue grows slowly so reactive activation is unnecessary.
+  // Opt-OUT via ACC2_DISABLE_WORKERS=pending_decision_retire.
+  if (isWorkerEnabled("pending_decision_retire")) registerWorker("pending_decision_retire", 60 * 60 * 1000);
 
   // Phase E: amendment worker — drain unapplied directive_amended events when
   // directive amendments arrive. The shared reactive safety net is the fallback
@@ -1183,6 +1191,30 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       inertiaTickMs,
     );
     workers.push(() => clearInterval(inertiaTick));
+  }
+
+  // 2026-05-19 (KCs YKJYRGVJJX21XAMQS042PMK7JG +
+  // G3CBVAGY2S5QN5XDC1GR7GJP0G): pending_decision_retire_worker tick.
+  // Scans the pending_owner_decision_queue_view source rows on a 1h
+  // cadence, emits pending_decision_retired for stale (age > 7d) /
+  // test-file-target / anchor-missing rows. Idempotent: re-running the
+  // tick on a row that already has a pending_decision_retired event
+  // is a no-op. The companion pending_owner_decision_queue_live_view
+  // filters retired rows out of the operator-facing
+  // `acc admin pending-decisions` surface. Opt-OUT via
+  // `ACC2_DISABLE_WORKERS=pending_decision_retire`.
+  if (isWorkerEnabled("pending_decision_retire")) {
+    const retireTickMs = 60 * 60 * 1000;
+    const { runPendingDecisionRetireWorker } = await import("./pending_decision_retire_worker");
+    markWorkerReady("pending_decision_retire");
+    recordWorkerTick("pending_decision_retire");
+    const retireTick = setInterval(
+      supervisedTick(db, "pending_decision_retire", retireTickMs, async () => {
+        runPendingDecisionRetireWorker(db);
+      }),
+      retireTickMs,
+    );
+    workers.push(() => clearInterval(retireTick));
   }
 
   // Experience compression worker (primitive #3 of SZG5PQ01,

@@ -82,7 +82,17 @@ export type WorkerName =
   // size crosses a configurable threshold (default 100MB, override
   // via ACC2_WAL_PRESSURE_THRESHOLD_MB). PASSIVE never blocks
   // writers — purely opportunistic checkpoint advancement.
-  | "wal_pressure_check";
+  | "wal_pressure_check"
+  // 2026-05-19 (KCs YKJYRGVJJX21XAMQS042PMK7JG +
+  // G3CBVAGY2S5QN5XDC1GR7GJP0G): auto-retire stale / test-file /
+  // anchor-missing rows in the pending_owner_decision_queue_view.
+  // The view kept piling up noise (40+ rows including test-file
+  // targets the brain should never have routed for owner review)
+  // while the operator-visibility surface stayed valuable. The
+  // worker scans, emits pending_decision_retired per retire, and
+  // the new pending_owner_decision_queue_live_view filters them
+  // out. Historical view stays for audit. Default 1h cadence.
+  | "pending_decision_retire";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -107,6 +117,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "lifecycle_closure_sweep",
   "contract_amendment_consumer",
   "wal_pressure_check",
+  "pending_decision_retire",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

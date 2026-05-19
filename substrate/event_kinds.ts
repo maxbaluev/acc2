@@ -833,6 +833,19 @@ export const EVENT_KINDS = {
   closure_complete:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   closure_obsolete:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
   closure_owner_required:                  { producer: "runtime",   embeddable: false, mirror_inline: true,  health_metric: true,  narrative: true },
+
+  // ── pending_decision_retire_worker (2026-05-19). Brain validation
+  //    dispatch REFUSED full removal of the pending-owner-decision queue
+  //    (the audit trail for failed amendments matters), and recommended
+  //    Option B+: auto-retire stale + test-file + anchor-missing
+  //    candidates while preserving the operator-visibility surface. The
+  //    worker emits ONE pending_decision_retired event per retire so the
+  //    historical audit captures WHICH stale-class triggered the retire.
+  //    Payload: { amendment_event_id, reason: "stale" | "test_file_target"
+  //    | "anchor_missing", retired_at: iso, ... }. substrate-internal,
+  //    NOT narrative (operator already sees the count drop on the live
+  //    view; no need to surface every retire in the owner narrative).
+  pending_decision_retired:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
 } as const satisfies Record<string, EventKindMetadata>;
 
 /** The canonical union — derived from the registry. */
