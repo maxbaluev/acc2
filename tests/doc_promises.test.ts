@@ -29,7 +29,7 @@ const ACC2_ROOT = join(import.meta.dir, "..");
 const DOC_PATHS = [
   join(ACC2_ROOT, "CLAUDE.md"),
   join(ACC2_ROOT, ".claude/rules/orchestrator-runtime.md"),
-  join(ACC2_ROOT, "docs/v2-design.md"),
+  join(ACC2_ROOT, "docs/Architecture.md"),
 ];
 
 /** Extract candidate event_kind tokens from documentation prose.
