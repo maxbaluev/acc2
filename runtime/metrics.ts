@@ -125,21 +125,21 @@ export const substrateEventsTotal = new Gauge({
   registers: [register],
 });
 
-export const codeArtifactsAdmittedTotal = new Gauge({
+export const actArtifactsAdmittedTotal = new Gauge({
   name: "acc2_act_artifacts_admitted_total",
-  help: "Code artifacts with status='admitted' (sampled).",
+  help: "Act artifacts with status='admitted' (sampled).",
   registers: [register],
 });
 
-export const codeArtifactsPromotedTotal = new Gauge({
+export const actArtifactsPromotedTotal = new Gauge({
   name: "acc2_act_artifacts_promoted_total",
-  help: "Code artifacts with status='promoted' (sampled).",
+  help: "Act artifacts with status='promoted' (sampled).",
   registers: [register],
 });
 
-export const codeArtifactsQuarantinedTotal = new Gauge({
+export const actArtifactsQuarantinedTotal = new Gauge({
   name: "acc2_act_artifacts_quarantined_total",
-  help: "Code artifacts with status='quarantined' (sampled).",
+  help: "Act artifacts with status='quarantined' (sampled).",
   registers: [register],
 });
 
@@ -197,15 +197,15 @@ export const refreshGauges = (db: Database, startedAtMs: number): void => {
     const admittedRow = db
       .query("SELECT COUNT(*) AS n FROM act_artifact WHERE status = 'admitted'")
       .get() as { n: number } | null;
-    codeArtifactsAdmittedTotal.set(admittedRow?.n ?? 0);
+    actArtifactsAdmittedTotal.set(admittedRow?.n ?? 0);
     const promotedRow = db
       .query("SELECT COUNT(*) AS n FROM act_artifact WHERE status = 'promoted'")
       .get() as { n: number } | null;
-    codeArtifactsPromotedTotal.set(promotedRow?.n ?? 0);
+    actArtifactsPromotedTotal.set(promotedRow?.n ?? 0);
     const quarantinedRow = db
       .query("SELECT COUNT(*) AS n FROM act_artifact WHERE status = 'quarantined'")
       .get() as { n: number } | null;
-    codeArtifactsQuarantinedTotal.set(quarantinedRow?.n ?? 0);
+    actArtifactsQuarantinedTotal.set(quarantinedRow?.n ?? 0);
   } catch {
     // Gauge sampling is best-effort. A transient SQL error must not crash
     // the daemon.
