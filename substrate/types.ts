@@ -27,16 +27,24 @@ export type JsonValue =
 
 export type OwnerProfileTimeWindow = {
   timezone?: string;
-  days?: Array<"mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun">;
+  /** Open-ended day labels: typically weekday names but also any
+   *  domain-specific label the owner uses ("therapy_days",
+   *  "kids_with_me", "on_call_rotation_b"). The substrate refuses any
+   *  schema that constrains this to a fixed weekday enum — a universal
+   *  organism must accept whatever timing vocabulary the owner brings. */
+  days?: string[];
   start_hour?: number;
   end_hour?: number;
 };
 
 export type OwnerAutonomyScope = {
-  /** Glob patterns to include. Defaults to ["cli/**", "runtime/**"] —
-   *  the same as Layer 1's safe-auto-apply policy. Owner can NARROW
-   *  (exclude *.test.ts, exclude WIP files) but cannot widen beyond
-   *  the cli/runtime floor. */
+  /** Open-ended resource-URI patterns the owner has authorized for
+   *  autonomous action. Patterns are glob-shaped strings (`repo:cli/**`,
+   *  `calendar:work/*`, `contact:close_friends/*`, `ledger:retro/*`).
+   *  Defaults to empty — a universal organism makes NO scope assumption
+   *  on first contact; the owner narrows or widens through observed
+   *  consent. There is no `cli/`+`runtime/` floor; this is not a
+   *  source-tree policy, it is the owner's consent surface. */
   include?: string[];
   /** Glob patterns to exclude. Layered on top of `include`. */
   exclude?: string[];
@@ -172,7 +180,7 @@ export const OWNER_PROFILE_DEFAULTS = {
   understood_concepts: {},
   declined_concepts: {},
   observation_count: 0,
-  autonomy_scope: { include: ["cli/**", "runtime/**"], exclude: [] },
+  autonomy_scope: { include: [], exclude: [] },
   autonomy_score: 0.5,
   manual_review_patterns: [],
   time_window: null,
@@ -238,7 +246,7 @@ export const OWNER_PROFILE_JSON_SCHEMA = {
       type: "object",
       additionalProperties: false,
       properties: {
-        include: { type: "array", items: { type: "string", minLength: 1 }, default: ["cli/**", "runtime/**"] },
+        include: { type: "array", items: { type: "string", minLength: 1 }, default: [] },
         exclude: { type: "array", items: { type: "string", minLength: 1 }, default: [] },
       },
     },

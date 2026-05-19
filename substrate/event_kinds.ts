@@ -331,8 +331,19 @@ export const EVENT_KINDS = {
   // Payload shape:
   //   {
   //     summary: string;            // one-line human-readable reason
-  //     reason: "auth_expired" | "quota_exhausted" | "env_missing"
-  //           | "irreversible_about_to_fire" | "owner_decision_needed";
+  //     reason: string;             // OPEN-ENDED — vocabulary discovered from use,
+  //                                 //   not a closed enum. The substrate refuses
+  //                                 //   any schema that constrains this to a fixed
+  //                                 //   union. Examples that exist today AND
+  //                                 //   tomorrow span the full goal space:
+  //                                 //   auth_expired, quota_exhausted, env_missing,
+  //                                 //   irreversible_about_to_fire,
+  //                                 //   owner_decision_needed (devops blockers);
+  //                                 //   emotional_readiness, stakeholder_boundary,
+  //                                 //   fatigue, consent_unclear, grief_timing,
+  //                                 //   social_risk, calendar_conflict, energy_low,
+  //                                 //   relational_repair_pending (human blockers);
+  //                                 //   plus any reason that emerges from future use.
   //     blocked_task_id: string;    // the task pausing on this HIDL
   //     suggested_action: string;   // what the owner should DO next
   //     evidence_event_ids: string[]; // upstream rows the operator can audit
