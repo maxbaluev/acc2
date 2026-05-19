@@ -2077,10 +2077,10 @@ type SeedRecipe = {
 // As the owner accumulates their own owner_input_received history +
 // owner_profile signals, real conversational evidence outranks these
 // seed demos naturally. No suppression logic needed; the substrate's
-// posterior loop handles it. The categorial DemoRecipeId names below
-// are RETRIEVAL TAGS, not categories — they let the brain reference a
-// specific capability by id when proposing it, but the seed is the
-// authoritative source of truth (every demo is a row in the ledger).
+// posterior loop handles it. The goal_shape_tags on each capability are
+// OPEN RETRIEVAL TAGS, not a fixed menu — they let the brain reference a
+// specific capability by goal shape when proposing it, but the seed is
+// the authoritative source of truth (every example is a row in the ledger).
 //
 // Each demo is wired to exercise ONE substrate capability that NO
 // chat-based LLM can replicate:
@@ -2096,136 +2096,116 @@ type SeedRecipe = {
 //   - `recipe_compounds` → workflow observed once becomes a callable
 //     trajectory the substrate can replay
 //
-// Given one owner sentence, `tokens_any` routes to the most-confident
-// demo; the orchestrator (Claude Code) reads back the matched
-// `first_demo_prompt` in the owner's language and offers the next
-// concrete step. Confidence ordering is intentional — universal demos
-// (learn_topic_deeply, finish_my_goal) score higher than narrow vertical
-// matches.
-
-export type DemoRecipeId =
-  | "learn_topic_deeply"
-  | "keep_an_eye_on"
-  | "finish_my_goal"
-  | "make_my_decision"
-  | "remember_my_life"
-  | "negotiate_for_me"
-  | "kill_my_recurring_friction"
-  | "find_my_next_move";
-
-/** The substrate capability each demo exercises — used by docs/UX to
- *  explain WHY the owner should care, not to filter routing. */
-export type DemoSubstrateCapability =
-  | "rolling_active"
-  | "knowledge_compounds"
-  | "owner_profile_grounded"
-  | "father_ranked"
-  | "stakeholder_tracked"
-  | "recipe_compounds";
+// Given one owner sentence, semantic retrieval ranks the most-confident
+// capability example; the orchestrator (Claude Code) synthesizes a fresh
+// owner-profile-aware proposal at render time (no canned echo) and offers
+// the next concrete step. Confidence ordering is intentional — universal
+// examples (learn_topic_deeply, finish_my_goal) score higher than narrow
+// vertical matches.
 
 export type DemoCapability = {
   id: string;
-  demo_recipe_id: DemoRecipeId;
-  /** Auth the demo NEEDS to actually fire. Empty means it works with
+  /** Open goal-shape tags used by retrieval and posterior credit. These are
+   *  learned vocabulary, not a fixed menu of demonstrations. */
+  goal_shape_tags: string[];
+  /** Auth the example NEEDS to actually fire. Empty means it works with
    *  zero external services — just the brain + the substrate. */
-  requires_auth: Array<"OPENAI_API_KEY" | "SERPER_API_KEY" | "opencode">;
-  /** Confidence the demo is universally valuable (seed-time prior).
+  requires_auth: string[];
+  /** Confidence the example is universally valuable (seed-time prior).
    *  Embedded into the knowledge_promoted payload; the substrate's
    *  posterior loop adjusts from real owner outcomes over time. */
   confidence: number;
   /** "finite" closes on terminal; "rolling_active" stays open and the
    *  Father reopens the review subtask on cadence. */
   lifecycle: "finite" | "rolling_active";
-  /** One short sentence the orchestrator reads to the owner in their
-   *  language. No developer words. No service names. This is the
-   *  TEXT EMBEDDED into the substrate — the embedder vectorizes it
-   *  and substrate.search ranks it against owner directives semantically. */
-  first_demo_prompt: string;
-  /** Why this demo can't be replicated by a fresh chat session. Used as
-   *  evidence on the seeded knowledge_candidate so the brain can cite
-   *  the differentiator when proposing the demo. */
-  substrate_capability: DemoSubstrateCapability[];
+  /** One concise capability description. It is embedded for retrieval but
+   *  never surfaced verbatim as a canned demo; renderers synthesize a fresh
+   *  owner-profile-aware proposal around the owner's actual goal. */
+  capability_description: string;
+  /** Why this example can't be replicated by a fresh chat session. Open
+   *  strings keep capability discovery in promoted knowledge rows. */
+  substrate_capability: string[];
 };
 
 export const DEMO_CAPABILITIES: DemoCapability[] = [
   {
     id: "learn_topic_deeply_rolling",
-    demo_recipe_id: "learn_topic_deeply",
+    goal_shape_tags: ["learn_topic_deeply", "rolling_active", "knowledge_compounds"],
     requires_auth: [],
     confidence: 0.88,
     lifecycle: "rolling_active",
-    first_demo_prompt:
-      "Pick a topic you wish you understood better. I'll learn it for you a little more every week — every time we talk, I'll know more about it than last time. A chat would start over.",
+    capability_description:
+      "The substrate can keep learning a topic over time, preserve what changed between sessions, and use promoted knowledge evidence to make each later answer sharper than a fresh chat.",
     substrate_capability: ["rolling_active", "knowledge_compounds"],
   },
   {
     id: "keep_an_eye_on_anything",
-    demo_recipe_id: "keep_an_eye_on",
+    goal_shape_tags: ["keep_an_eye_on", "rolling_active", "knowledge_compounds"],
     requires_auth: [],
     confidence: 0.86,
     lifecycle: "rolling_active",
-    first_demo_prompt:
-      "Tell me anything you'd like me to keep an eye on — a website, a person, a price, a topic. I'll only ping you when something actually changes. Want to point me at it?",
+    capability_description:
+      "The substrate can hold a watch target across sessions, detect genuine state changes, and only surface owner-relevant deltas instead of repeating noise.",
     substrate_capability: ["rolling_active", "knowledge_compounds"],
   },
   {
     id: "finish_my_goal_weekly",
-    demo_recipe_id: "finish_my_goal",
+    goal_shape_tags: ["finish_my_goal", "rolling_active", "father_ranked"],
     requires_auth: [],
     confidence: 0.85,
     lifecycle: "rolling_active",
-    first_demo_prompt:
-      "Tell me a goal you've been putting off. I'll break it into the smallest first step, keep one ready for you every week, and check in on what worked. The plan won't disappear.",
+    capability_description:
+      "The substrate can decompose a long-running goal into ready next steps, surface them at the right cadence, and credit what actually moved progress.",
     substrate_capability: ["rolling_active", "father_ranked"],
   },
   {
     id: "make_my_decision_grounded",
-    demo_recipe_id: "make_my_decision",
+    goal_shape_tags: ["make_my_decision", "owner_profile_grounded", "knowledge_compounds"],
     requires_auth: [],
     confidence: 0.83,
     lifecycle: "finite",
-    first_demo_prompt:
-      "Tell me a decision you're stuck on. I'll weigh it against what you've already told me about yourself, ask about the gaps, and lay out the trade-offs. Next time, I'll already know your context.",
+    capability_description:
+      "The substrate can weigh a decision against persistent owner facts and promoted knowledge, ask only about the real gaps, and carry the context forward to future decisions.",
     substrate_capability: ["owner_profile_grounded", "knowledge_compounds"],
   },
   {
     id: "remember_my_life",
-    demo_recipe_id: "remember_my_life",
+    goal_shape_tags: ["remember_my_life", "owner_profile_grounded"],
     requires_auth: [],
     confidence: 0.92,
     lifecycle: "rolling_active",
-    first_demo_prompt:
-      "Tell me anything you want me to remember about you — how you work, what you care about, what's off-limits, who matters to you. I'll keep it forever and use it the next time we talk.",
+    capability_description:
+      "The substrate can hold durable facts about the owner — how they work, what they avoid, who matters — and ground every later answer on that profile instead of starting blind.",
     substrate_capability: ["owner_profile_grounded"],
   },
   {
     id: "negotiate_for_me",
-    demo_recipe_id: "negotiate_for_me",
+    goal_shape_tags: ["negotiate_for_me", "stakeholder_tracked", "owner_profile_grounded"],
     requires_auth: [],
     confidence: 0.81,
     lifecycle: "rolling_active",
-    first_demo_prompt:
-      "Tell me who you're talking to and what you need from them. I'll remember them — their history with you, what they responded to before — every time you come back about them. A chat forgets the moment you close the tab.",
+    capability_description:
+      "The substrate can track counterparties across conversations, remember what each responded to, and ground a negotiation in real history instead of a fresh blank.",
     substrate_capability: ["stakeholder_tracked", "owner_profile_grounded"],
   },
   {
     id: "kill_my_recurring_friction",
-    demo_recipe_id: "kill_my_recurring_friction",
+    goal_shape_tags: ["kill_my_recurring_friction", "recipe_compounds", "knowledge_compounds"],
     requires_auth: [],
     confidence: 0.79,
     lifecycle: "rolling_active",
-    first_demo_prompt:
-      "Tell me one thing you redo every week. I'll watch you do it once, turn it into a routine I can run for you, and only ask you when something genuinely needs your judgment. It'll get faster every time.",
+    capability_description:
+      "The substrate can observe a repeated task once, promote it to a callable trajectory, and reuse the trajectory automatically while only escalating genuine judgment calls.",
     substrate_capability: ["recipe_compounds", "knowledge_compounds"],
   },
   {
     id: "find_my_next_move",
-    demo_recipe_id: "find_my_next_move",
+    goal_shape_tags: ["find_my_next_move", "father_ranked", "owner_profile_grounded"],
     requires_auth: [],
     confidence: 0.77,
     lifecycle: "finite",
-    first_demo_prompt:
-      "List the things you've been meaning to do. I'll pick the one most likely to actually move the needle for you right now — using what I know about your goals, energy, and what's already in flight.",
+    capability_description:
+      "The substrate can rank pending owner intents by likely impact using the owner profile and what is already in flight, so the next move is chosen on evidence not memory.",
     substrate_capability: ["father_ranked", "owner_profile_grounded"],
   },
 ];
@@ -2236,17 +2216,16 @@ export const composeDemoCapabilityProposal = (
   ownerWords = "",
 ): string => {
   const signals = ownerProfile.rendering_signals ?? {};
-  const lowTechnical = (signals.code_density ?? 0) < 0.4 && (signals.ops_vocabulary ?? 0) < 0.4;
   const oneStep = (signals.one_step_at_a_time_vs_batch ?? 0.5) >= 0.5;
   const examples = (signals.concrete_examples_appetite ?? 0) >= 0.5;
-  const term = ownerProfile.preferred_terms?.find((t) => ownerWords.toLowerCase().includes(t.toLowerCase())) ?? "this";
-  const firstLine = lowTechnical
-    ? cap.first_demo_prompt
-    : `Proposal: run ${cap.demo_recipe_id} (${cap.lifecycle}) using ${cap.substrate_capability.join(", ")}.`;
-  const frame = ownerWords.trim().length > 0 ? `For what you said ("${ownerWords.trim().slice(0, 120)}"), ` : "";
-  const next = oneStep ? `First step: tell me the smallest useful detail about ${term}.` : "Options: start now, narrow the scope, or skip.";
-  const example = examples ? " Example: give me one goal, person, page, or repeated task to remember." : "";
-  return `${frame}${firstLine} ${next}${example}`.trim();
+  const ownerGoal = ownerWords.trim();
+  const term = ownerProfile.preferred_terms?.find((t) => ownerGoal.toLowerCase().includes(t.toLowerCase())) ?? "this goal";
+  const capability = cap.substrate_capability.join(", ");
+  const frame = ownerGoal.length > 0 ? `For what you said ("${ownerGoal.slice(0, 120)}"), ` : "";
+  const proposal = `${frame}I can shape a persistent operating-model loop around ${term}: keep the relevant context, score progress with verifier evidence, and reuse what works instead of picking from a fixed menu.`;
+  const next = oneStep ? ` First step: tell me the smallest useful detail about ${term}.` : " Options: start now, narrow the scope, or skip.";
+  const example = examples ? ` Example capability evidence retrieved: ${capability}.` : "";
+  return `${proposal}${next}${example}`.trim();
 };
 
 // META key for the demo-knowledge seed — idempotency marker.
@@ -2274,9 +2253,10 @@ export const seedDemoKnowledge = (
   withImmediateTransaction(db, () => {
     for (const cap of DEMO_CAPABILITIES) {
       const candidateId = newId();
-      // The `claim` is the first_demo_prompt — that's what gets
-      // embedded and searched. Tags + applies_to let the brain filter
-      // these knowledge rows when explicitly looking for demos.
+      // The `claim` is the capability_description — that's what gets
+      // embedded and searched. Tags + applies_to carry open goal-shape
+      // tags so retrieval ranks by goal shape rather than a fixed
+      // recipe-id menu.
       db.run(
         `INSERT INTO events (
            id, ts, directive_id, task_id, loop_id, substrate_origin,
@@ -2291,7 +2271,7 @@ export const seedDemoKnowledge = (
           "substrate_auto",
           "knowledge_candidate",
           JSON.stringify({
-            claim: cap.first_demo_prompt,
+            claim: cap.capability_description,
             evidence: [
               `substrate capability: ${cap.substrate_capability.join(", ")}`,
               `lifecycle: ${cap.lifecycle}`,
@@ -2299,11 +2279,12 @@ export const seedDemoKnowledge = (
                 ? [`requires: ${cap.requires_auth.join(", ")}`]
                 : ["requires no external services"]),
             ],
-            applies_to: ["demo", "onboarding", cap.demo_recipe_id, ...cap.substrate_capability],
-            tags: ["demo", "onboarding", "first_run"],
-            proposed_tier: "demo_capability",
+            applies_to: ["demo", "onboarding", ...cap.goal_shape_tags, ...cap.substrate_capability],
+            tags: ["demo", "onboarding", "first_run", ...cap.goal_shape_tags],
+            proposed_tier: "capability_example",
             confidence_estimate: cap.confidence,
-            demo_recipe_id: cap.demo_recipe_id,
+            goal_shape_tags: cap.goal_shape_tags,
+            render_policy: "synthesize_owner_profile_grounded_proposal_at_runtime",
             skip_corroboration: true,
           }),
           JSON.stringify([]),
@@ -2328,7 +2309,7 @@ export const seedDemoKnowledge = (
             score: cap.confidence,
             confidence: cap.confidence,
             skip_corroboration: true,
-            demo_recipe_id: cap.demo_recipe_id,
+            goal_shape_tags: cap.goal_shape_tags,
           }),
           JSON.stringify([candidateId]),
         ],

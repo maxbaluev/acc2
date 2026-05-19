@@ -635,7 +635,7 @@ describe("seedDemoKnowledge", () => {
     expect(r2.imported).toBe(0);
   });
 
-  test("each candidate's claim equals its first_demo_prompt — the text that gets embedded", () => {
+  test("each candidate embeds a capability description with open goal-shape tags", () => {
     const { seedDemoKnowledge, DEMO_CAPABILITIES } = require("./seed");
     const db = openDb(":memory:");
     seedDemoKnowledge(db, { ownerApproved: true });
@@ -645,9 +645,10 @@ describe("seedDemoKnowledge", () => {
     expect(rows.length).toBe(DEMO_CAPABILITIES.length);
     for (let i = 0; i < rows.length; i++) {
       const payload = JSON.parse(rows[i]!.payload) as Record<string, unknown>;
-      expect(payload.claim).toBe(DEMO_CAPABILITIES[i]!.first_demo_prompt);
+      expect(payload.claim).toBe(DEMO_CAPABILITIES[i]!.capability_description);
       expect((payload.tags as string[]).includes("demo")).toBe(true);
-      expect(payload.demo_recipe_id).toBe(DEMO_CAPABILITIES[i]!.demo_recipe_id);
+      expect(Array.isArray(payload.goal_shape_tags)).toBe(true);
+      expect(payload).not.toHaveProperty("demo_recipe_id");
     }
   });
 

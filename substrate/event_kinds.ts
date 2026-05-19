@@ -522,7 +522,7 @@ export const EVENT_KINDS = {
   // Onboarding demo router (brain dispatch bp93s80hn): records the
   // classifier decision before the demo action runs so outcomes train which
   // demo family fits which owner sentence.
-  // Payload: {demo_recipe_id, matcher_id, confidence, owner_sentence, required_auth?: string[]}.
+  // Payload: {goal_shape_tags, matcher_id, confidence, owner_sentence, required_auth?: string[]}.
   demo_dispatched:                         { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: false },
 
   // Auto-apply worker (DGT1MKXY proposal, 2026-05-15): daemon-side scanner
