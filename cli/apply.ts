@@ -642,8 +642,8 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean; aut
     ``,
     `When done, return the JSON summary on stdout. The orchestrator will pipe it`,
     `into \`acc apply --record ${evId} --status <status> --commit-sha <sha> --summary <text> --residual <n>\``,
-    `to emit action_predicted -> action_scored -> applied_change_committed plus the`,
-    `corresponding ${isAmendment ? "contract_amendment_applied" : "lesson_applied"} event and close the four-link credit chain.`,
+    `to emit action_predicted -> action_scored -> applied_change_committed`,
+    `and an act_tuple_recorded envelope that closes the shared credit chain.`,
   ].join("\n");
 };
 
@@ -777,6 +777,7 @@ export const recordApplyOutcome = async (opts: {
   const target = auth.target || opts.target;
   const { affectedResources, affectedFiles } = affectedTargetsFromPayload(payload, target);
   const sourceBrainEventId = eventId;
+  const applyActorOrigin = opts.subagentTaskId ? "claude_subagent" : "claude_root";
   let gateActionEventId: string | undefined;
   let gateScoredEventId: string | undefined;
   try {
@@ -822,7 +823,7 @@ export const recordApplyOutcome = async (opts: {
 
   const actionEnv = await mcpCall("substrate.emit", {
     kind: "action_predicted",
-    substrate_origin: "claude_root",
+    substrate_origin: applyActorOrigin,
     directive_id: ev.directive_id,
     task_id: ev.task_id,
     context_refs: [eventId, requestEventId].filter(Boolean),
@@ -850,7 +851,7 @@ export const recordApplyOutcome = async (opts: {
 
   const scoredEnv = await mcpCall("substrate.emit", {
     kind: "action_scored",
-    substrate_origin: "claude_root",
+    substrate_origin: applyActorOrigin,
     directive_id: ev.directive_id,
     task_id: ev.task_id,
     context_refs: [eventId, requestEventId, actionEventId].filter(Boolean),
@@ -930,7 +931,7 @@ export const recordApplyOutcome = async (opts: {
   const verifierPassed = status === "applied" && residual < 0.3;
   const committedEnv = await mcpCall("substrate.emit", {
     kind: "applied_change_committed",
-    substrate_origin: "claude_root",
+    substrate_origin: applyActorOrigin,
     directive_id: ev.directive_id,
     task_id: ev.task_id,
     context_refs: [eventId, requestEventId, actionEventId, scoredEventId].filter(Boolean),
@@ -968,7 +969,7 @@ export const recordApplyOutcome = async (opts: {
   const committedEventId = (committedEnv.result as { id?: string })?.id;
   try {
     await emitActTupleViaMcp(mcpCall, {
-      substrateOrigin: "claude_root",
+      substrateOrigin: applyActorOrigin,
       directiveId: ev.directive_id,
       taskId: ev.task_id,
       intent: "Record one coherent Claude apply act boundary for a substrate-emitted lesson or contract amendment.",

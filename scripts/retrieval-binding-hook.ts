@@ -81,11 +81,12 @@ const main = async (): Promise<void> => {
   const filtered = hits.filter((h) => INTERESTING_KINDS.has(h.kind ?? ""));
   if (filtered.length === 0) return;
 
-  const surfaced = filtered.slice(0, 8);
-  for (let rank = 0; rank < surfaced.length; rank++) {
-    const h = surfaced[rank]!;
+  const candidates = filtered.slice(0, 8);
+  const surfaced: SearchHit[] = [];
+  for (let rank = 0; rank < candidates.length; rank++) {
+    const h = candidates[rank]!;
     if (!h.event_id) continue;
-    await mcpCall("substrate.emit", {
+    const bindingEnv = await mcpCall("substrate.emit", {
       kind: "retrieval_binding",
       substrate_origin: "claude_root",
       context_refs: [h.event_id],
@@ -101,7 +102,9 @@ const main = async (): Promise<void> => {
         hook_event_name: input.hook_event_name ?? "UserPromptSubmit",
       },
     }, { timeoutMs: 10_000 });
+    if (bindingEnv.ok) surfaced.push(h);
   }
+  if (surfaced.length === 0) return;
 
   // Compact format — Claude already has the prompt; just surface the
   // retrieved evidence handles + snippets so reasoning binds to them.
