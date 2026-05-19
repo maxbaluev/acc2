@@ -7,10 +7,6 @@
 //   - ./config.ts    — materializeOpencodeMcpConfig, V2_OPENCODE_MCP_SERVER_NAME,
 //                      V2_MCP_TOOL_SURFACE
 //
-// `runtime/bridge.ts` re-exports this index for backward compatibility so
-// every existing `from "./bridge"` / `from "../runtime/bridge"` import
-// resolves identically (v2-design.md §12).
-//
 // Decision flow: `opencodeQuery` reads `ACC2_BRIDGE_MODE`. **Default is
 // `real`** (production dispatch via the real `opencode run` subprocess).
 // Tests opt into `mock` explicitly by setting `ACC2_BRIDGE_MODE=mock` —
@@ -36,7 +32,7 @@ export const opencodeQuery = async (
   return spawnRealOpencode(req, db);
 };
 
-// ── Public surface (backward-compatible re-exports) ───────────────
+// ── Public surface re-exports ─────────────────────────────────────
 
 export type {
   BridgeRequest,

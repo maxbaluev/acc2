@@ -543,11 +543,9 @@ export const formatEvent = (ev: EventLike, opts: { verbose?: boolean } = {}): st
   const payload = parsePayload(ev.payload);
   // Merge top-level event columns into the payload view so renderers
   // (e.g. action_predicted reading action_artifact_id) see canonical
-  // top-level fields without each formatter having to do its own
-  // fallback. Substrate stores act-loop tuple + outcome/residual as
-  // dedicated columns; pre-fix the tail renderer read p.action_artifact_id
-  // and got undefined because the brain (correctly) sets the field at
-  // top-level not inside payload.
+  // top-level fields directly. Substrate stores the act-loop tuple +
+  // outcome/residual as dedicated columns; brain emitters set them at
+  // top-level, not inside payload.
   const merged = {
     ...payload,
     action_artifact_id: (payload.action_artifact_id ?? (ev as Record<string, unknown>).action_artifact_id),

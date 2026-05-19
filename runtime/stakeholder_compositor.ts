@@ -19,9 +19,8 @@
 //     adjudication back to the owner — per §19 risk 18, the substrate does NOT
 //     silently choose a side.
 //
-// The view function reads stakeholder_state_view (substrate/views.ts). The
-// fallback path reads events directly so this module works in tests where the
-// caller hasn't called runViews.
+// The view function reads stakeholder_state_recorded events directly so the
+// same path runs in tests and production without depending on runViews.
 
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
@@ -62,8 +61,8 @@ const normaliseVisibility = (raw: unknown): StakeholderVisibility => {
 
 /** Fold every stakeholder_state_recorded event for `directiveId` into the
  *  current per-stakeholder state (latest-wins). Reads events directly so the
- *  function works whether or not the SQL view is materialised in the caller's
- *  test db. */
+ *  function reads the events table directly, so it works in tests and
+ *  production identically without depending on runViews. */
 export const stakeholderStateView = (
   db: Database,
   directiveId: string,

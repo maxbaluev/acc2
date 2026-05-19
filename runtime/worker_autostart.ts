@@ -1,34 +1,16 @@
 // Canonical worker autostart resolver — one env var, all workers.
 //
-// Background. The daemon starts six always-on workers (embedder, scheduler,
-// father, rolling-reviewer, rehabilitation, integrity). Each used to carry
-// its OWN opt-OUT env var (`ACC2_EMBEDDER_AUTOSTART`, `ACC2_FATHER_AUTOSTART`,
-// `ACC2_AUTOSCHEDULER`, ...). Operators had to remember six exact names and
-// every new worker added a seventh — per-worker env-var drift waiting to
-// happen. Per the CLAUDE.md "No legacy/fallback/backward-compatibility code"
-// rule, the legacy per-worker env vars are REMOVED — clean break, no
-// back-compat.
-//
 // The canonical shape is ONE env var, comma-separated, listing workers to
 // DISABLE. Empty / unset = all workers run (the production default). Tests
-// pin every worker off via `tests/preload.ts` so the unit suite stays
-// hermetic.
+// pin every worker off via `tests/preload.ts` so the unit suite stays hermetic.
 //
-//   ACC2_DISABLE_WORKERS=                            # all six on (default)
-//   ACC2_DISABLE_WORKERS=embedder                    # disable embedder only
-//   ACC2_DISABLE_WORKERS=embedder,father             # disable two
+//   ACC2_DISABLE_WORKERS=                            # all on (default)
+//   ACC2_DISABLE_WORKERS=embedder                    # disable one
 //   ACC2_DISABLE_WORKERS=embedder, father, scheduler # whitespace tolerated
 //
-// Unknown worker names in the list are accepted silently (no crash). They
-// simply have no effect because `isWorkerEnabled` only consults the set for
-// the canonical names. This keeps the helper forward-compatible if an
-// operator's env-var still references a deprecated worker spelling — it
-// becomes a no-op rather than a hard failure.
-//
-// The legacy per-worker env vars (`ACC2_EMBEDDER_AUTOSTART`,
-// `ACC2_FATHER_AUTOSTART`, `ACC2_ROLLING_AUTOSTART`, `ACC2_REHAB_AUTOSTART`,
-// `ACC2_INTEGRITY_AUTOSTART`, `ACC2_AUTOSCHEDULER`) are NO LONGER read by
-// the daemon. Use `ACC2_DISABLE_WORKERS` instead.
+// Unknown worker names in the list are accepted silently. `isWorkerEnabled`
+// only consults the set for canonical names, so a misspelled entry is a no-op
+// rather than a hard failure.
 
 /** Canonical worker names gated by `ACC2_DISABLE_WORKERS`. */
 export type WorkerName =

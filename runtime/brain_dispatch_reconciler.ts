@@ -141,7 +141,7 @@ export const reconcileBrainDispatchesAtBoot = (
   let latest: string | null = null;
   const closedAtMs = Date.now();
   for (const row of open) {
-    if (!row.dispatch_id) continue; // legacy rows without dispatch_id are unrecoverable; skip
+    if (!row.dispatch_id) continue; // historical rows without dispatch_id are unrecoverable; skip
     if (earliest === null || row.opened_at_iso < earliest) earliest = row.opened_at_iso;
     if (latest === null || row.opened_at_iso > latest) latest = row.opened_at_iso;
     emitEvent(db, {
