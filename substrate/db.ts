@@ -31,6 +31,7 @@ import { Database } from "bun:sqlite";
 import * as sqliteVec from "sqlite-vec";
 import schemaSql from "./schema.sql" with { type: "text" };
 import { runViews } from "./views";
+import { ensureArtifactKindMetadataTable } from "./artifact_kind_metadata";
 
 // ── Per-path connection cache ──────────────────────────────────────
 // One live `Database` per path. closeDb(path) flushes + removes the entry
@@ -274,6 +275,12 @@ export const runMigrations = (db: Database): void => {
   }
 
   for (const ddl of EVENT_HOT_PATH_INDEXES) db.run(ddl);
+
+  // F4c (2026-05-18, contract 897XTN2GF11XB9D4N45N2R9W58): ensure the
+  // artifact_kind_metadata table exists AND is seeded with the legacy
+  // `atms_report_v*` prefix kinds. Both steps are idempotent (CREATE
+  // TABLE IF NOT EXISTS + INSERT … ON CONFLICT DO NOTHING).
+  ensureArtifactKindMetadataTable(db);
 
   // L8 backfill: dispatch_strategy seed rows (admitted with
   // state_root='dispatch/strategy') predate the kind column.

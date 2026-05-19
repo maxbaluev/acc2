@@ -339,6 +339,12 @@ describe("derived sets match their pre-unification shape", () => {
       // `_strategic_direction_chosen`. Health-metric so dashboards can
       // show how often report admissions skip the strategy step.
       "atms_strategy_first_violation",
+      // F4c (2026-05-18, contract 897XTN2GF11XB9D4N45N2R9W58):
+      // posterior-scored artifact-kind metadata. The seed and
+      // posterior-update events count as health metrics so dashboards
+      // can audit how the catalog grows.
+      "artifact_kind_metadata_seeded",
+      "artifact_kind_strategic_grounding_updated",
       // C2 (2026-05-18, contract V32YTK7HKN6MS38KWJY1SKTXAW): render
       // pipeline admission gates rejected payload metadata. Counting
       // per-window lets operators see how often render lineage breaks

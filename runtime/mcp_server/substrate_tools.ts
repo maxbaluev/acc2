@@ -1316,7 +1316,7 @@ export const handleOpenDirective = (
   // permissive fallback so historical paths still admit. Downstream
   // gates read this row to decide lane routing; absence is treated as
   // "back-population" and admits superseded chains unchanged.
-  const classification = classifyIntent(args.directive_text);
+  const classification = classifyIntent(args.directive_text, ctx.db);
   const directiveTextHash = createHash("sha256")
     .update(args.directive_text)
     .digest("hex")

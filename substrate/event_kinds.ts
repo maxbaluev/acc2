@@ -205,6 +205,17 @@ export const EVENT_KINDS = {
   // `strategic_first_then_initiatives_lesson`). Health-metric so
   // dashboards can show how often the gate fires.
   atms_strategy_first_violation:           { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // F4c (2026-05-18, contract 897XTN2GF11XB9D4N45N2R9W58): emitted by
+  // seedArtifactKindMetadata once per fresh install / migration so the
+  // event ledger records which kinds the substrate is born believing
+  // need strategic grounding. Health-metric so the catalog's growth is
+  // auditable.
+  artifact_kind_metadata_seeded:           { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // F4c (2026-05-18): emitted whenever the posterior on a kind's
+  // `needs_strategic_grounding` shifts (owner-rejection feedback path,
+  // future verifier-outcome paths). Carries the previous/new score and
+  // the posterior counts so credit attribution can replay the change.
+  artifact_kind_strategic_grounding_updated: { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   // C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14): emitted when
   // a published_drive_doc admission (or explicit operator action) marks
   // a prior artifact superseded by a newer one. Carries

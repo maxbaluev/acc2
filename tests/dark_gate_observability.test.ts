@@ -122,7 +122,11 @@ describe("dark-gate observability — live emission paths", () => {
         declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
         fixtureInput: null,
         fixtureExpectedResidualBelow: 0.2,
-        name: "atms_report_v_missing_strategy",
+        // F4c (2026-05-18): the strategy-first gate now keys on the
+        // `artifact_kind_metadata` table. Use `name: "atms_report_v11"` —
+        // a seeded grounding-required kind — so the gate fires under
+        // the new posterior-scored abstraction.
+        name: "atms_report_v11",
         citedKnowledgeIds: [],
       },
       captureEmit(events, db),

@@ -25,6 +25,7 @@ import type { Database } from "bun:sqlite";
 import type { EventKind, JsonValue } from "../substrate/types";
 import { runPredicateGate } from "./verifiers/predicate_gate";
 import { findStrategicDirectionCitation } from "./artifact_admission";
+import { requiresStrategicGrounding } from "../substrate/artifact_kind_metadata";
 
 export type CandidateRefusal = {
   kind: EventKind;
@@ -227,21 +228,22 @@ export const screenCodeArtifactCandidate = (
     }
   }
 
-  // 3. Strategy-first gate — any candidate whose declared NAME OR
-  //    KIND starts with atms_report_v MUST cite at least one
+  // 3. Strategy-first gate — F4c posterior-keyed (contract
+  //    897XTN2GF11XB9D4N45N2R9W58). Any candidate whose declared kind
+  //    or name resolves to an `artifact_kind_metadata` row with
+  //    `needs_strategic_grounding > threshold` MUST cite at least one
   //    knowledge_candidate / knowledge_synthesized event whose
-  //    payload.claim ends with `_strategic_direction_chosen`. The
-  //    lookup uses the same helper as the admission-path gate so
-  //    admit + emit-side stay consistent. Pre-dark-gate-sweep the
-  //    admission gate only checked input.name; the v9 Lakeland
-  //    candidates set name="lakeland_industries_ai_transformation_report_v9"
-  //    while kind="atms_report_v9" — so the name-only check missed
-  //    them entirely. Checking both surfaces closes the gap.
-  const looksLikeAtmsReport =
-    (typeof declaredName === "string" && declaredName.startsWith("atms_report_v")) ||
-    (typeof declaredKind === "string" && declaredKind.startsWith("atms_report_v"));
+  //    payload.claim ends with `_strategic_direction_chosen`. The lookup
+  //    uses the same helper as the admission-path gate so admit + emit-
+  //    side stay consistent. Pre-F4c the substrate hard-coded the
+  //    `atms_report_v` prefix here; now those kinds are seeded into the
+  //    metadata table and the gate self-extends through use.
   const citedIds = asStringArray(payload.cited_knowledge_ids);
-  if (looksLikeAtmsReport) {
+  const groundingHit = requiresStrategicGrounding(db, {
+    kind: declaredKind ?? null,
+    name: declaredName ?? null,
+  });
+  if (groundingHit.required) {
     const check = findStrategicDirectionCitation(db, citedIds);
     if (!check.ok) {
       refusals.push({
@@ -250,6 +252,8 @@ export const screenCodeArtifactCandidate = (
           reason: "strategy_first_violation_missing_strategic_direction_chosen",
           artifact_name: declaredName ?? null,
           artifact_kind: declaredKind ?? null,
+          matched_kind: groundingHit.matched_kind,
+          needs_strategic_grounding: groundingHit.needs_strategic_grounding,
           cited_knowledge_ids: citedIds as unknown as JsonValue,
           source_candidate_id: sourceCandidateId ?? null,
           missing_claim_suffix: "_strategic_direction_chosen",

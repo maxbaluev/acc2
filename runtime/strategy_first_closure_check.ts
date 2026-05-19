@@ -1,10 +1,13 @@
 // acc2 strategy-first closure predicate (C3, 2026-05-18, directive
-// QHTRBV6PFX2JVBMHDNDA4B03GC).
+// QHTRBV6PFX2JVBMHDNDA4B03GC; F4c posterior-keyed 2026-05-18 under
+// contract 897XTN2GF11XB9D4N45N2R9W58).
 //
 // Substrate-side helper that mirrors the artifact-admission strategy-first
 // gate at closure-audit time. When a directive emits any
-// `act_artifact_candidate` whose payload.name (or payload.purpose)
-// starts with `atms_report_v`, the closure verifier MUST observe:
+// `act_artifact_candidate` whose payload.kind / payload.name /
+// payload.purpose resolves to an `artifact_kind_metadata` row whose
+// `needs_strategic_grounding` posterior exceeds the threshold, the
+// closure verifier MUST observe:
 //
 //   1. ≥ 15 `task_node_opened` events under the directive — proxy for a
 //      multi-layer S/T/U/V DAG (situation deep-dives → strategy
@@ -26,6 +29,7 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { STRATEGIC_DIRECTION_CHOSEN_SUFFIX, findStrategicDirectionCitation } from "./artifact_admission";
+import { requiresStrategicGrounding } from "../substrate/artifact_kind_metadata";
 
 const MIN_TASK_NODE_OPENED_FOR_ATMS_REPORT = 15;
 const FLOOR_CLOSURE_RESIDUAL_ON_VIOLATION = 0.3;
@@ -68,10 +72,12 @@ export const checkStrategyFirstClosure = (
   directiveId: string,
   currentResidual: number,
 ): StrategyFirstClosureResult => {
-  // 1. Collect every atms_report_v* act_artifact_candidate under the
-  //    directive. The artifact "kind" lives in payload.name OR
-  //    payload.purpose — both are how the bridge tags the candidate
-  //    today; we accept either to stay schema-tolerant.
+  // 1. Collect every grounding-required act_artifact_candidate under the
+  //    directive. Pre-F4c this matched the `atms_report_v` prefix on
+  //    payload.name; now it queries the posterior-scored
+  //    artifact_kind_metadata table via requiresStrategicGrounding so
+  //    new kinds enter the gate by admitting metadata rows, not by
+  //    string-matching a prefix.
   const candidateRows = db
     .query<{ id: string; payload: string }, [string]>(
       "SELECT id, payload FROM events WHERE directive_id = ? AND kind IN ('act_artifact_candidate', 'code_artifact_candidate')",
@@ -87,7 +93,10 @@ export const checkStrategyFirstClosure = (
     const name = typeof payload.name === "string"
       ? payload.name
       : (typeof payload.purpose === "string" ? payload.purpose : null);
-    if (!name || !name.startsWith("atms_report_v")) continue;
+    const kind = typeof payload.kind === "string" ? payload.kind : null;
+    const hit = requiresStrategicGrounding(db, { kind, name });
+    if (!hit.required) continue;
+    if (!name) continue;
     atmsReportCandidates.push({
       id: row.id,
       name,
@@ -95,10 +104,12 @@ export const checkStrategyFirstClosure = (
     });
   }
 
-  // If no atms_report_v* candidate appears, the predicate is N/A and
-  // the helper is a no-op pass-through. Callers can pre-filter by
-  // checking `atms_report_event_ids.length === 0` before consulting the
-  // diagnostics array.
+  // If no grounding-required candidate appears, the predicate is N/A
+  // and the helper is a no-op pass-through. Callers can pre-filter by
+  // checking `atms_report_event_ids.length === 0` before consulting
+  // the diagnostics array. (The field name is retained for caller
+  // compatibility — it generalises to "every grounding-required
+  // candidate id" under the new abstraction.)
   const nodeOpenedCount = (
     db
       .query<{ c: number }, [string]>(

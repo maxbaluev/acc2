@@ -27,7 +27,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { newAdminToken } from "../runtime/ids";
 import { openDb, closeDb } from "../substrate/db";
-import { seedCodeArtifacts, seedDemoKnowledge, seedFoundationalKnowledge, seedRecipes, seedUniversalLessons, seedVerifierKindExamples } from "../substrate/seed";
+import { seedArtifactKindMetadata, seedCodeArtifacts, seedDemoKnowledge, seedFoundationalKnowledge, seedRecipes, seedUniversalLessons, seedVerifierKindExamples } from "../substrate/seed";
 import { embedPendingEvents } from "../runtime/embedder";
 import {
   resolveDbPath, resolveSocketFile, resolveStateDir,
@@ -384,6 +384,15 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
         `[7b/8] code artifacts: imported ${artifactSummary.inserted} canonical artifacts (action + verifier pairs)` +
           (artifactSummary.skipped > 0 ? `  (${artifactSummary.skipped} already present)` : ""),
       );
+      // F4c (2026-05-18, contract 897XTN2GF11XB9D4N45N2R9W58): emit the
+      // artifact_kind_metadata seed audit event. The actual table rows
+      // are inserted at openDb time by ensureArtifactKindMetadataTable;
+      // this wrapper writes the ledger row so the catalog's birth is
+      // retrievable. Idempotent via meta gate.
+      const kindMetadataSummary = seedArtifactKindMetadata(db);
+      if (kindMetadataSummary.inserted > 0) {
+        log(`       artifact_kind_metadata: catalog seeded with ${kindMetadataSummary.inserted} legacy grounding-required kinds`);
+      }
       // Step 7c — canonical Tier-0 recipe templates so substrate_replay has
       // something to match on day 1 (otherwise every first dispatch routes
       // through opencode_brain even for shapes we've already solved).

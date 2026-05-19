@@ -38,6 +38,7 @@ import { runPredicateGate } from "./verifiers/predicate_gate";
 import { markSuperseded } from "./artifact_provenance";
 import { parseResourceUri } from "./resource_uri";
 import type { EmitEventInput } from "./events";
+import { requiresStrategicGrounding } from "../substrate/artifact_kind_metadata";
 import {
   validateRenderedDocxAdmission,
   validatePublishedDriveDocAdmission,
@@ -226,29 +227,24 @@ export const admitArtifact = async (
     };
   }
 
-  // 1.6 Strategy-first gate (C3, 2026-05-18, directive QHTRBV6PFX2JVBMHDNDA4B03GC).
-  //     Any artifact whose name starts with `atms_report_v` MUST cite at
-  //     least one knowledge_candidate event whose payload.claim ends
-  //     `_strategic_direction_chosen`. Closes the failure mode where
-  //     report v1-v3 picked initiatives from substrate priors (NFPA
-  //     traceability + demand forecasting + visual QC) without first
-  //     synthesising a strategic direction (lesson
-  //     4JGQAN7NFH1XH9M4VARB4RNJ8M `strategic_first_then_initiatives_lesson`).
-  //     The gate is BEFORE the row insert so a rejected candidate never
-  //     gets an artifact row to roll back. The strategy-citation discovery
-  //     uses event ledger lookup, not hand-rolled English keyword regex —
-  //     the substrate is the source of truth for what counts as a
-  //     strategic direction.
-  // F1 (2026-05-18): the gate now ORs `input.name` and `input.kind`. Pre-fix
-  // the v9 Lakeland candidates set name="lakeland_industries_ai_..." while
-  // kind="atms_report_v9"; the name-only check missed them entirely and the
-  // strategy-first gate ran zero times. Mirroring the OR predicate from the
-  // emit-side screen closes the name-vs-kind gap on the admission path too
-  // (callers that bypass emitEvent: MCP substrate.admit_artifact, the mock
-  // bridge sites, cli/render_preview.ts).
-  const isAtmsByName = typeof input.name === "string" && input.name.startsWith("atms_report_v");
-  const isAtmsByKind = typeof input.kind === "string" && input.kind.startsWith("atms_report_v");
-  if (isAtmsByName || isAtmsByKind) {
+  // 1.6 Strategy-first gate. Originally hard-coded to the `atms_report_v*`
+  //     prefix (C3, directive QHTRBV6PFX2JVBMHDNDA4B03GC); F4c
+  //     (contract 897XTN2GF11XB9D4N45N2R9W58) generalised it. The gate
+  //     now keys on the posterior-scored `artifact_kind_metadata` row
+  //     for input.kind / input.name. When the matched row's
+  //     `needs_strategic_grounding` exceeds the threshold the substrate
+  //     requires at least one cited knowledge_candidate event whose
+  //     payload.claim ends `_strategic_direction_chosen`. The fail-closed
+  //     default — no metadata row → no enforcement — keeps brand-new
+  //     artifact kinds out of the gate until owner-rejection feedback
+  //     (or another posterior path) teaches the substrate they need it.
+  //     The gate runs BEFORE the row insert so a rejected candidate never
+  //     gets an artifact row to roll back.
+  const strategicGroundingHit = requiresStrategicGrounding(db, {
+    kind: input.kind ?? null,
+    name: input.name ?? null,
+  });
+  if (strategicGroundingHit.required) {
     const strategicCitation = findStrategicDirectionCitation(
       db,
       input.citedKnowledgeIds ?? [],
@@ -261,6 +257,8 @@ export const admitArtifact = async (
           reason: "strategy_first_violation_missing_strategic_direction_chosen",
           artifact_name: input.name ?? null,
           artifact_kind: input.kind ?? null,
+          matched_kind: strategicGroundingHit.matched_kind,
+          needs_strategic_grounding: strategicGroundingHit.needs_strategic_grounding,
           cited_knowledge_ids: (input.citedKnowledgeIds ?? []) as unknown as JsonValue,
           source_candidate_id: input.sourceCandidateId ?? null,
           missing_claim_suffix: "_strategic_direction_chosen",
@@ -270,7 +268,7 @@ export const admitArtifact = async (
       return {
         ok: false,
         reason: "strategy_first_violation_missing_strategic_direction_chosen",
-        detail: `atms_report_v* admission requires a cited knowledge_candidate with claim ending _strategic_direction_chosen; cited_count=${(input.citedKnowledgeIds ?? []).length}`,
+        detail: `kind=${strategicGroundingHit.matched_kind} requires a cited knowledge_candidate with claim ending _strategic_direction_chosen; cited_count=${(input.citedKnowledgeIds ?? []).length}`,
       };
     }
   }
@@ -429,9 +427,11 @@ export const admitArtifact = async (
   }
 
   // 1.95 Intent-classification supersedes gate (contract TJGFQC72,
-  //      2026-05-18). Before storing input.supersedes for any artifact
-  //      whose name starts with `atms_report_v`, look up the directive's
-  //      most recent intent_classified row:
+  //      2026-05-18; F4c posterior-keyed 2026-05-18). Before storing
+  //      input.supersedes for any strategically-grounded artifact (kind
+  //      whose `needs_strategic_grounding` posterior exceeds the
+  //      threshold), look up the directive's most recent intent_classified
+  //      row:
   //        - If the row exists and intent_class !== atms_report_composition,
   //          drop the supersedes pointer and emit lane_routing_refused so
   //          the chain stays under the strategy-first lane only.
@@ -442,11 +442,10 @@ export const admitArtifact = async (
   //          normally.
   //      Returns supersedes_dropped: true on the result so callers can
   //      observe the gate firing without parsing the event stream.
-  const isAtmsReportArtifact = typeof input.name === "string" && input.name.startsWith("atms_report_v");
   let effectiveSupersedes: string | null | undefined = input.supersedes;
   let supersedesDropped = false;
   if (
-    isAtmsReportArtifact &&
+    strategicGroundingHit.required &&
     typeof effectiveSupersedes === "string" &&
     effectiveSupersedes.length > 0
   ) {
@@ -664,7 +663,7 @@ export const admitArtifact = async (
       effectiveSupersedes,
       row.id,
       emit,
-      isAtmsReportArtifact ? { residual: 0 } : undefined,
+      strategicGroundingHit.required ? { residual: 0 } : undefined,
     );
   }
 

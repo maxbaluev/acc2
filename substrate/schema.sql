@@ -127,6 +127,26 @@ CREATE INDEX IF NOT EXISTS idx_act_artifact_runtime ON act_artifact(runtime);
 CREATE INDEX IF NOT EXISTS idx_act_artifact_status  ON act_artifact(status);
 CREATE INDEX IF NOT EXISTS idx_act_artifact_score   ON act_artifact(score DESC);
 CREATE INDEX IF NOT EXISTS idx_act_artifact_kind    ON act_artifact(kind);
+
+-- ── artifact_kind_metadata ─────────────────────────────────────────
+-- F4c (2026-05-18, contract 897XTN2GF11XB9D4N45N2R9W58). Posterior-
+-- scored grounding gates per artifact kind. needs_strategic_grounding
+-- > 0.5 forces the substrate to require a `_strategic_direction_chosen`
+-- citation before admitting a candidate of this kind. Seeded with the
+-- legacy `atms_report_v*` prefix kinds at high prior; everything else
+-- starts absent and learns through owner-rejection feedback.
+-- ensureArtifactKindMetadataTable in artifact_kind_metadata.ts also
+-- creates and seeds this table at openDb time so DBs predating this
+-- schema row get the same shape.
+CREATE TABLE IF NOT EXISTS artifact_kind_metadata (
+  artifact_kind             TEXT PRIMARY KEY,
+  needs_strategic_grounding REAL NOT NULL DEFAULT 0.0,
+  posterior_alpha           REAL NOT NULL DEFAULT 1.0,
+  posterior_beta            REAL NOT NULL DEFAULT 1.0,
+  last_updated_ts           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_kind_metadata_needs_strategic
+  ON artifact_kind_metadata(needs_strategic_grounding);
 -- C5 provenance indexes (idx_act_artifact_supersedes /
 -- idx_act_artifact_superseded_by) live in db.ts EVENT_HOT_PATH_INDEXES,
 -- which runs AFTER runMigrations adds the supersedes / superseded_by

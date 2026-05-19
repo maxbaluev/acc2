@@ -2450,3 +2450,69 @@ export const seedRecipes = (db: Database): RecipeSeedSummary => {
  *  goal texts seeded by `seedRecipes` so tests can assert on them
  *  without re-hashing. */
 export const seedRecipeGoalTexts = (): string[] => SEED_RECIPES.map((r) => r.goalText);
+
+// ── artifact_kind_metadata seed audit (F4c) ───────────────────────────
+// The actual seed rows are inserted by ensureArtifactKindMetadataTable in
+// substrate/artifact_kind_metadata.ts (run from db.ts runMigrations).
+// This wrapper emits the ledger audit event so the catalog's birth is
+// retrievable. Idempotent via meta gate.
+
+const META_SEEDED_ARTIFACT_KIND_METADATA = "seed:artifact_kind_metadata:v1";
+
+export type ArtifactKindMetadataSeedSummary = { inserted: number };
+
+export const seedArtifactKindMetadata = (
+  db: Database,
+): ArtifactKindMetadataSeedSummary => {
+  if (readMeta(db, META_SEEDED_ARTIFACT_KIND_METADATA)) return { inserted: 0 };
+
+  // Lazy import keeps the module-load DAG acyclic: db.ts imports
+  // artifact_kind_metadata.ts for the migration helper, and seed.ts
+  // imports db.ts for the transaction helper.
+  const { getSeedKindList } = require("./artifact_kind_metadata") as
+    typeof import("./artifact_kind_metadata");
+  const kinds = getSeedKindList();
+
+  let inserted = 0;
+  withImmediateTransaction(db, () => {
+    const ts = nowIso();
+    // ensureArtifactKindMetadataTable already inserted these idempotently
+    // at openDb time; we re-run the upsert here so this surface can
+    // report the seed catalog size symmetric with seedRecipes /
+    // seedActArtifacts. Count is the catalog size, not net new rows.
+    for (const row of kinds) {
+      db.run(
+        `INSERT INTO artifact_kind_metadata
+           (artifact_kind, needs_strategic_grounding, posterior_alpha, posterior_beta, last_updated_ts)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(artifact_kind) DO NOTHING`,
+        [row.artifact_kind, row.needs_strategic_grounding, row.posterior_alpha, row.posterior_beta, ts],
+      );
+      inserted++;
+    }
+    writeMeta(db, META_SEEDED_ARTIFACT_KIND_METADATA, ts);
+
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        newId(),
+        ts,
+        "system",
+        "system",
+        "system",
+        "substrate_auto",
+        "artifact_kind_metadata_seeded",
+        JSON.stringify({
+          seed_version: "v1",
+          inserted_count: inserted,
+          kinds: kinds.map((r) => r.artifact_kind),
+          source_contract: "897XTN2GF11XB9D4N45N2R9W58",
+        }),
+        "[]",
+      ],
+    );
+  });
+
+  return { inserted };
+};
