@@ -172,6 +172,38 @@ Scheduled-export cron primitive that emits `state_exported` on a cadence the own
 
 ---
 
+### T3.8 — F-SQL-Worker-Thread-Pool (event-loop starvation, evidence-backed)
+
+**Problem (cited `6ZW4GQEEWN4J` knowledge_candidate, score=0.70):** acc2 has multiple Bun event-loop SQL starvation paths beyond `/health` — health counts, metrics-style recent counts, integrity counts, brain self-audit aggregates, trajectory replay per-node counts, prometheus exporters. Each is a CPU-bound aggregate query that monopolizes the JS event loop for tens to hundreds of milliseconds, blocking `/health`, MCP request handlers, SSE pushes, and the activation bus during that window.
+
+**False solution rejected:** Bun.SQL (the unified Promise-based driver, `sqlite://...`) is **NOT truly async**. Measured 2026-05-19 with a heavy CROSS JOIN query on identical 5 000-row tables:
+
+| API | elapsed | event-loop ticks during query |
+|---|---|---|
+| `bun:sqlite` (sync) | 23.67 ms | **0** |
+| `Bun.SQL` (promise) | 28.34 ms | **0** |
+
+Both block the event loop equally; Bun.SQL adds Promise overhead without giving up the thread. 100 parallel "async" small reads ran serially in 20 ms total with 0 ticks during. This confirms Bun maintainer Jarred-Sumner's design statement (Bun issue #978, open since 2022-08-04): "async will ~always be slower outside of this usecase." Bun.SQL is an API-surface unification, not a thread-pool offload.
+
+**Correct contract (tlonny pattern from Bun issue #978, 2025-10-27):**
+
+1. Spin up N worker threads (`worker_threads`-equivalent under Bun; one per CPU core minus 1).
+2. Each worker holds its own `Database` connection and an LRU cache of prepared statements.
+3. Main thread sends `{ sql, params, txn_id }` over `postMessage`; workers reply with `{ rows, error }`.
+4. Round-robin or load-balance dispatch on the main thread.
+
+Migration shape: introduce a `runtime/sql_worker_pool.ts` accessor that returns a Promise of rows. Migrate ONLY the known starvation paths (per `6ZW4GQEEWN4J`) — health counts, integrity counts, brain self-audit aggregates, trajectory replay aggregates. Hot single-row reads (event_kind lookups, ULID prefix resolution) stay on `bun:sqlite` synchronous because their wall-time is microseconds and the worker IPC overhead would dominate.
+
+**Trade-off:** SQLite is single-writer; the pool helps READ concurrency only. Writes still serialize through the canonical daemon connection. WAL mode (already enabled, `substrate/db.ts`) allows concurrent reads against an active writer, so multiple worker threads can read in parallel without contending on the writer.
+
+**Cold-start defense:** the worker pool must boot lazily on first heavy query so the daemon startup time is not impacted. Health probes hitting the pool before it's warm fall back to the sync path with a logged `pool_cold` event.
+
+**Closure predicate:** `closure_complete(pool_module_lands AND known_starvation_paths_migrated AND benchmark_proves_event_loop_freed_during_heavy_aggregate AND sync_writes_still_serialize_correctly)`.
+
+**Why Tier 3:** depends on T0/T1 trust-and-credit fixes; benefits from but does not require T2 posterior-scoring. This is a runtime substrate primitive, not a learning surface.
+
+---
+
 ## Tier 4 — Brain-emitted frontier (deep-inspection dispatch `C5TVG369R11C9DAD9HVH8Q562G`)
 
 The 2026-05-19 deep-inspection dispatch produced two contracts that complement Tier 1-2 and were not in my prior list. They land here because they extend §15 meta-principle and the closure-rate work.

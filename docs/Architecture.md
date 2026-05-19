@@ -352,6 +352,12 @@ Today the substrate has the primitive (`act_artifact` is open-kind; any decision
 
 **6. Knowledge-binding-as-mutation enforcement.** k_554 says citation without state mutation is decorative. Today `retrieval_binding` rows record what was surfaced; they don't always record what was used in the action. Add a deterministic check: every `act_tuple_recorded.cited_knowledge_ids` must appear in `action_predicted.reasoning_summary` or similar bound field, OR the citation is auto-stripped at the emit boundary. Forces real binding. Same shape as the deterministic preconditions in `apply_route_predicate` (commit `15863c5`).
 
+### Footnote — Bun SQLite async is fake-async; the real fix is worker threads
+
+The substrate currently uses `bun:sqlite` (synchronous). The Promise-based `Bun.SQL` driver (with `sqlite://...` URLs) exists but is NOT a true thread-pool offload — it is a Promise wrapper around the same synchronous calls. Measured 2026-05-19: a heavy CROSS JOIN took 23.67 ms with bun:sqlite (0 event-loop ticks during) vs 28.34 ms with Bun.SQL (also 0 ticks during). Both block the JS event loop for the full duration; Bun.SQL adds Promise overhead without giving up the thread.
+
+This is consistent with Bun issue #978 (open since 2022-08-04): SQLite async is "probably necessary eventually but always slower outside of this use case." For our event-loop starvation paths (health counts, integrity counts, brain self-audit aggregates, trajectory replay per-node counts, prometheus exporters — cited `6ZW4GQEEWN4J`), the canonical fix is a worker-thread pool with one Database connection per worker, not a driver swap. See roadmap.md T3.8 for the contract.
+
 ### Why this is the universality collapse
 
 Today the organism has TWO classes of decisions:
