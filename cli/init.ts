@@ -27,7 +27,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { newAdminToken } from "../runtime/ids";
 import { openDb, closeDb } from "../substrate/db";
-import { seedCodeArtifacts, seedDemoKnowledge, seedFoundationalKnowledge, seedLakelandDriveProvenance, seedRecipes } from "../substrate/seed";
+import { seedCodeArtifacts, seedDemoKnowledge, seedFoundationalKnowledge, seedLakelandDriveProvenance, seedRecipes, seedUniversalLessons } from "../substrate/seed";
 import { embedPendingEvents } from "../runtime/embedder";
 import {
   resolveDbPath, resolveSocketFile, resolveStateDir,
@@ -352,6 +352,17 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
       summary.foundationalSeedImported = result.imported;
       if (result.imported > 0) log(`       imported ${result.imported} foundational knowledge entries`);
       else log("       already seeded (skipped)");
+      // F4b (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW): install
+      // the 10 substrate-self-knowledge lessons (act-loop invariant,
+      // ledger-state invariant, open verifier residual packet,
+      // retrieval-binding, total-mediation, output-vs-outcome, posterior
+      // credit, zero-domain seed leakage, owner-profile-as-learned-vector,
+      // and feedback-window). Idempotent — re-running on a populated DB
+      // skips lessons whose content hash was already recorded.
+      const universalLessons = seedUniversalLessons(db);
+      if (universalLessons.imported > 0) {
+        log(`       imported ${universalLessons.imported} universal substrate lessons`);
+      }
       // Step 7b — canonical seed code artifacts (§11.4). Idempotent: a
       // re-run reports inserted=0 / skipped=N. Operators getting their
       // first install end up with N action+verifier seed rows in

@@ -583,6 +583,150 @@ export const seedFoundationalKnowledge = (
   return { imported };
 };
 
+// ── F4b universal lessons (substrate-self-knowledge only) ──────────
+//
+// F4b (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW). The substrate
+// ships with EXACTLY the operating-principle lessons that describe how
+// the substrate itself runs. Domain knowledge (entity models, predicate
+// catalogs, voice profiles, recipe libraries) is LEARNED from owner
+// usage, not seeded. Each lesson lands as a `lesson_extracted` event
+// with `lesson_class: substrate_operating_principle` and a stable id
+// derived from the lesson name (so re-running `acc init` is
+// idempotent: the second pass sees the recorded hash and skips).
+
+type UniversalLesson = {
+  /** Stable slug; used as the lesson id and the seed-hash key. */
+  name: string;
+  /** One-paragraph substrate-self-knowledge statement. */
+  summary: string;
+};
+
+const UNIVERSAL_LESSONS: UniversalLesson[] = [
+  {
+    name: "act_loop_invariant",
+    summary:
+      "Every cognitive step is recorded as an act tuple " +
+      "(intent, action_handle, verifier_handle, predicted_residual). " +
+      "Single emit boundary, deterministic projection keys.",
+  },
+  {
+    name: "ledger_state_invariant",
+    summary:
+      "The append-only events table IS the substrate's primary state. " +
+      "If it is not in an event row, it does not survive restart.",
+  },
+  {
+    name: "open_verifier_residual_packet",
+    summary:
+      "verifier_kind is an open-string discovered through use. New " +
+      "verifier categories appear by being used and credited, not by " +
+      "enum extension.",
+  },
+  {
+    name: "retrieval_binding_and_citation_credit_rule",
+    summary:
+      "Citation IS mutation. cited_knowledge_ids without resolvable " +
+      "event_ids is decorative memory (k_554). The four-link chain " +
+      "(create → retrieve → mutate retrieval state → credit outcome) " +
+      "is structurally enforced (k_555).",
+  },
+  {
+    name: "total_mediation_rule",
+    summary:
+      "Every privileged effect (artifact emission, supersedes " +
+      "mutation, source-tree write, external publish) must pass " +
+      "through ONE choke-point function. No bypass routes.",
+  },
+  {
+    name: "closure_output_versus_outcome_rule",
+    summary:
+      "Output is what was produced (an artifact, a message). Outcome " +
+      "is whether it actually worked (owner-observed signal, " +
+      "downstream residual). The substrate scores outcome, not output.",
+  },
+  {
+    name: "posterior_credit_rule",
+    summary:
+      "Every cited handle (knowledge, artifact, recipe, verifier) " +
+      "updates posterior_alpha/posterior_beta when scored. Compounding " +
+      "evidence, not magic numbers.",
+  },
+  {
+    name: "zero_domain_seed_leakage_rule",
+    summary:
+      "The universal seed contains substrate-self-knowledge ONLY. " +
+      "Domain knowledge (entity models, predicate catalogs, voice " +
+      "profiles, recipe libraries) is LEARNED from owner usage, not " +
+      "seeded.",
+  },
+  {
+    name: "owner_profile_as_learned_vector_rule",
+    summary:
+      "Owner profile attributes (autonomy_score, rendering_signals, " +
+      "things_to_never_do, preferred_terms) are LEARNED open-ended " +
+      "vectors. Not enums, not personas. Each attribute is a " +
+      "posterior over owner-observed evidence.",
+  },
+  {
+    name: "feedback_window_rule",
+    summary:
+      "predicted_residual.feedback_window encodes how long the " +
+      "substrate should wait for owner_observed_outcome before " +
+      "scoring the act. For non-technical goals (job decisions, life " +
+      "choices), windows are months.",
+  },
+];
+
+export type UniversalLessonsSummary = { imported: number };
+
+/** Install the 10 substrate-self-knowledge lessons as lesson_extracted
+ *  events. Idempotent: re-running on a populated DB skips lessons whose
+ *  content-hash was already recorded. */
+export const seedUniversalLessons = (db: Database): UniversalLessonsSummary => {
+  let imported = 0;
+  const directiveId = "dir_seed_universal_lessons";
+  const loopId = "loop_seed_universal_lessons";
+  const taskId = "task_seed_universal_lessons";
+
+  withImmediateTransaction(db, () => {
+    for (const lesson of UNIVERSAL_LESSONS) {
+      const hash = hashSeedRow(`universal_lesson:${lesson.name}|${lesson.summary}`);
+      if (seenSeedHash(db, "seed:universal_lesson", hash)) continue;
+      const id = newId();
+      db.run(
+        `INSERT INTO events (
+           id, ts, directive_id, task_id, loop_id, substrate_origin,
+           kind, payload, context_refs
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          nowIso(),
+          directiveId,
+          taskId,
+          loopId,
+          "substrate_auto",
+          "lesson_extracted",
+          JSON.stringify({
+            lesson_id: `universal_${lesson.name}`,
+            lesson_class: "substrate_operating_principle",
+            name: lesson.name,
+            summary: lesson.summary,
+            skip_corroboration: true,
+          }),
+          JSON.stringify([]),
+        ],
+      );
+      recordSeedHash(db, "seed:universal_lesson", hash, lesson.name.slice(0, 64));
+      imported++;
+    }
+  });
+  return { imported };
+};
+
+/** Names of the 10 universal lessons — exposed so tests can assert
+ *  against the exact set without re-encoding the list. */
+export const UNIVERSAL_LESSON_NAMES = UNIVERSAL_LESSONS.map((l) => l.name);
+
 // ── Seed code artifacts (§11.4) ────────────────────────────────────
 
 type SeedArtifact = {
