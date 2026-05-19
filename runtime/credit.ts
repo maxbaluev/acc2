@@ -220,7 +220,7 @@ const residualFromOwnerObservedOutcome = (ownerEv: EventLike, fallback: number):
   if (typeof ownerEv.residual === "number" && Number.isFinite(ownerEv.residual)) return clampResidual(ownerEv.residual);
   const payload = jsonObject(ownerEv.payload);
   if (typeof payload.residual === "number" && Number.isFinite(payload.residual)) return clampResidual(payload.residual);
-  // F5 (2026-05-18): signal_class is an open string carrying the owner's
+  // signal_class is an open string carrying the owner's
   // qualitative verdict (positive_strong, positive_weak, negative_weak,
   // negative_strong, neutral, …). Map known classes onto residual; unknown
   // strings fall through to the verdict-text path. The vocabulary is
@@ -824,8 +824,8 @@ export const distributeCredit = async (
       // a confidence_estimate on rich-schema knowledge_candidates. Scale
       // the Shapley share by that confidence so the brain's self-assessed
       // strong claims get more weight than tentative ones. Flat candidates
-      // (without confidence_estimate) default to weight=1.0 — backward
-      // compatible. The weight lands on candidate_confirmed.payload so the
+      // (without confidence_estimate) default to weight=1.0.
+      // The weight lands on candidate_confirmed.payload so the
       // extractor reads the fractional contribution.
       const confidenceEstimate = readCandidateConfidenceEstimate(db, targetId);
       const citedKnowledgeOrigin = (() => {

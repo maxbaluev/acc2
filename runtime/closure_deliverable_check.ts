@@ -103,7 +103,7 @@ export const checkClosureDeliverables = (
   const { subtree, children } = collectSubtree(db, rootTaskId);
 
   const nodes = eventsForTasks(db, subtree, "task_node_opened");
-  // F4a: act_artifact_candidate is canonical; code_artifact_candidate is the
+  // act_artifact_candidate is canonical; code_artifact_candidate is the
   // pre-rename alias retained for historical events on this directive.
   const artifacts = [
     ...eventsForTasks(db, subtree, "act_artifact_candidate"),

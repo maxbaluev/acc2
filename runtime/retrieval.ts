@@ -162,8 +162,8 @@ const readOriginBiasForGoalShape = (db: Database, goalShape: string): Map<string
 /** Cheap posterior lookup for an event. For Phase F we read the source
  *  event's `residual` (when present — lower residual = better) and convert
  *  to a posterior-shaped score in [0, 1]. Act-artifact-* event kinds get
- *  the artifact's stored `score` from the act_artifact table. F4a: matches
- *  both canonical and legacy kind strings so historical events still
+ *  the artifact's stored `score` from the act_artifact table. Matches
+ *  both canonical and pre-rename kind strings so historical events still
  *  resolve.
  *
  *  Returns 0.5 (neutral) when no signal is available — Beta(1,1) prior. */

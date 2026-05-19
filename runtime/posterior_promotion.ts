@@ -1,4 +1,4 @@
-// acc2 posterior-driven recipe promotion (F5, 2026-05-18).
+// acc2 posterior-driven recipe promotion.
 //
 // Replaces the fixed-count threshold (≥3 successful replays) that previously
 // gated recipe promotion. A Beta posterior over (goal_shape × topology ×

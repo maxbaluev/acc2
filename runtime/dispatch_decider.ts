@@ -606,9 +606,8 @@ const estimateComplexity = (task: TaskNode): "low" | "mid" | "high" => {
 };
 
 /** Route a ready task to its execution lane. Returns one of four decisions.
- *  Phase D effectively always returns `opencode_brain` because no recipes or
- *  inline patterns exist — that's the expected behavior. Phase I adds two
- *  modulators on top of the original three lanes:
+ *  Without recipes or inline patterns, this typically returns
+ *  `opencode_brain`. Two modulators apply on top of the base lanes:
  *    - If the directive is the target of a `blocks` interference edge from
  *      an unresolved source directive, we down-rank to `deferred_blocked`.
  *    - In crisis mode (urgency='crisis' on the directive) we lower the
