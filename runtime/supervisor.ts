@@ -93,12 +93,11 @@ export const SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE = 50;
  *  action_artifact_id="opencode_brain_exit_action" over ~12 minutes).
  *  Substrate-state only — does NOT depend on whether the artifact id is
  *  a real handle (we're refactoring the artifact system in parallel). */
-export const SUPERVISOR_MAX_REPEATING_ACTIONS = Number(
-  process.env.ACC2_SUPERVISOR_MAX_REPEATING_ACTIONS ?? 5,
-);
-export const SUPERVISOR_REPEATING_ACTION_WINDOW_MS = Number(
-  process.env.ACC2_SUPERVISOR_REPEATING_ACTION_WINDOW_MS ?? 10 * 60 * 1000,
-);
+// Universal value pending f13 adaptive-scoring contract (GEZ955QDYN3R):
+// these thresholds should learn from outcomes (false-positive rate on
+// flagged storms vs. real wedge detection) rather than be env-tuned.
+export const SUPERVISOR_MAX_REPEATING_ACTIONS = 5;
+export const SUPERVISOR_REPEATING_ACTION_WINDOW_MS = 10 * 60 * 1000;
 
 /** Detect tasks in a redispatch storm and fail them. Returns the list of
  *  task ids that were quarantined this tick. Idempotent — a task that
@@ -471,11 +470,10 @@ export const detectDispatchBudgetExceeded = (
  *  sits in ready_tasks_view for longer than this without any
  *  dispatch_decided / brain_dispatched / action_predicted /
  *  terminal event is slow-drift starvation — neither a tight redispatch
- *  storm nor a DAG explosion. 2 hours default; override via
- *  ACC2_SUPERVISOR_READY_STARVATION_MS. */
-export const SUPERVISOR_READY_STARVATION_MS = Number(
-  process.env.ACC2_SUPERVISOR_READY_STARVATION_MS ?? 2 * 60 * 60 * 1000,
-);
+ *  storm nor a DAG explosion. 2 hours hardcoded; pending f13 adaptive
+ *  scoring (false-positive rate on flagged starvations vs. real stuck
+ *  tasks should drive the threshold). */
+export const SUPERVISOR_READY_STARVATION_MS = 2 * 60 * 60 * 1000;
 
 /** Scan ready_tasks_view for rows opened more than
  *  SUPERVISOR_READY_STARVATION_MS ago whose task has no
