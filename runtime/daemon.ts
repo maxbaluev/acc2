@@ -1549,6 +1549,24 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     );
   }
 
+  // SERPER_API_KEY presence check (lesson 0R6EPM4AX54J — Serper-dependent
+  // artifacts should surface key_source/missing-key status before live
+  // Scholar/Search work). Daemon subprocesses inherit env from the shell
+  // that spawned them; a missing key here silently degrades any live
+  // research dispatch that calls Serper for web search or patent
+  // enumeration. Same fail-loud-but-not-crash shape as the OPENAI warning.
+  if (!process.env.SERPER_API_KEY || process.env.SERPER_API_KEY.trim().length === 0) {
+    process.stderr.write(
+      "[daemon] WARNING: SERPER_API_KEY is not set in the daemon process environment.\n" +
+        "[daemon]   Consequence: any live-research brain dispatch that calls Serper for web search will\n" +
+        "[daemon]   silently return empty results. Dispatches relying on patent enumeration, paper search,\n" +
+        "[daemon]   or public web evidence will produce thin or empty deep-research KCs.\n" +
+        "[daemon]   Set SERPER_API_KEY in the environment that starts `acc daemon start` (e.g. via .env)\n" +
+        "[daemon]   and restart the daemon. Daemon continues without the key for closure/worker paths\n" +
+        "[daemon]   that don't depend on it.\n",
+    );
+  }
+
   emitEvent(db, {
     kind: "daemon_started",
     substrate_origin: "substrate_auto",
@@ -1727,6 +1745,18 @@ const routeAux = async (
         };
       }
     } catch { /* worker module not present; tolerate */ }
+    // Credential presence flags (lesson 0R6EPM4AX54J). Operators reading
+    // /health see whether the keys live-research and embedding paths
+    // depend on are present in the daemon process env. Values report
+    // presence only — the keys themselves are never exposed on the wire.
+    const credPresent = (name: string): "present" | "missing" => {
+      const value = process.env[name];
+      return value && value.trim().length > 0 ? "present" : "missing";
+    };
+    const credentials = {
+      openai: credPresent("OPENAI_API_KEY"),
+      serper: credPresent("SERPER_API_KEY"),
+    };
     return Response.json({
       status: stuck.length === 0 ? "ok" : "degraded",
       pid: process.pid,
@@ -1745,6 +1775,7 @@ const routeAux = async (
       health_window_iso: counts.window_iso,
       sql_pool_stats: poolStats,
       wal_stats: walStats,
+      credentials,
     });
   }
 
