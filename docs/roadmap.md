@@ -1,316 +1,291 @@
 # AccInt — Roadmap
 
-The path from current organism (ALIVE, posterior-scored at the leaves) to the **most universal, elegant, effective, adaptive, fast, efficient self-improving organism on the planet**.
+The roadmap is ordered by structural leverage and dependency. Tier 0 makes posterior evidence trustworthy; later tiers make more boundaries posterior-scored and reusable (`SAF9AVJ8HD7W5DK847W72ETXHR`, `6DZ417CCK57P90B7B2FTAV024M`, `FE8DF6H1KN1590MGP6JHFPTWYW`).
 
-This is not a forward speculation document. Every contract below is grounded in live substrate measurement and the open frontier in `docs/Architecture.md` §11 + §15. Each is sized to be a single brain dispatch with a closure predicate testable against the events ledger.
+Each entry names the problem, contract shape, tier rationale, and metric direction. Detailed proofs stay in substrate events and knowledge, not this file (`433DGRZ27547KESBFYR4FZ10WC`).
 
-Ordering principle: dependency + leverage. Earlier contracts unlock the verification surface that later contracts depend on. Per `6H3ZQFZMXN7V` (narrow safe scope), dispatch one at a time; never bundle.
+## Tier S0 — OWNER ALIGNMENT
 
----
+Owner truth calibrates every other posterior; owner-observed outcomes are currently sparse relative to candidate confirmations, so the five `owner_*_predicate` primitives — `owner_state_estimator_predicate`, `owner_state_transition_predicate`, `owner_forecast_predicate`, `renderer_predicate`, and `theory_of_mind_predicate` — are prioritized before structural posterior boundaries. Each is an `act_artifact` row scored by owner-observed outcomes through the shared Beta posterior, retrieval, merger, and credit machinery; `owner_forecast_predicate` answers the missing-forecast question (`VVD2T4QAAH19`).
 
-## Tier 0 — Foundation (close the trust gaps)
+## Tier 0 — TRUST
 
-These contracts harden the substrate's self-validation so subsequent contracts can be trusted to land what they claim.
+### T0.1 — Closure-audit substrate-truth gate
 
-### T0.1 — F-Substrate-Closure-Validation
+Problem: closure can claim row-level delivery without ledger-backed amendments, so later posteriors can trust a false success (`SAF9AVJ8HD7W5DK847W72ETXHR`).
 
-**Problem:** Brain dispatch `MY0FWYBSKX5PBCVWJBHSQX4GT4` (2026-05-19) emitted `task_closure_audited` claiming `each_row_has_commit_evidence: true` for `contract_amendment_proposed` rows that were never emitted. k_252 advisory-gate fake: the closure audit checked the brain's claim, not the substrate's ledger.
+Contract: `runtime/closure_audit.ts` must query the ledger for declared target files and refuse low residual when matching deliverable events are absent; closure predicate is `declared_targets_have_events OR no_declared_targets` (`SAF9AVJ8HD7W5DK847W72ETXHR`).
 
-**Contract:** `runtime/closure_audit.ts` gains a hard preconditions block. When `target_files` is declared in the predicate AND `closure_residual < 0.3` is asserted, the verifier MUST query the events table for `contract_amendment_proposed` rows whose `target_resource` matches any declared `target_file` AND that share `directive_id`. Zero matching rows = closure refused; emit `closure_blocked_no_amendments` (new event kind) and bump residual to 1.0.
+Why this tier: all subsequent contracts depend on honest closure evidence (`YB2C2QCKC10BNBDVF22CX1Y5V8`).
 
-**Closure predicate:** `closure_complete(target_file_declared_amendments_present OR target_files_empty)`. Tests: pin the "no amendments emitted but closure claimed" failure shape AND its corrected refusal.
+Metric direction: refused false closures rise first, then closure residual distribution becomes more honest (`SAF9AVJ8HD7W5DK847W72ETXHR`).
 
-**Why first:** every subsequent contract needs trustworthy closure semantics. Without this, brain dispatches can keep claiming work they didn't do.
+### T0.2 — Artifact auto-binding and credit revival
 
----
+Problem: artifact promotion is dormant; live evidence reports 0 promoted/quarantined artifacts, 20 artifact-score updates vs 3980 scored actions, only 18 acts citing artifacts, and 95% legacy artifact kinds (`SAF9AVJ8HD7W5DK847W72ETXHR`, `A4V81PN9E960S02MWSM4HSM5G4`).
 
-### T0.2 — F-Knowledge-Binding-As-Mutation-Enforcement (meta-move #6)
+Contract: `runtime/events.ts:normalizeActTuple` auto-binds selected action and verifier artifacts into `cited_artifact_ids`, then credit updates artifact posteriors; closure predicate is artifact-score updates proportional to action-scored rows and selected artifacts visible in retrieval/credit projections (`17WRSQT7015DFDPQN5SXGM25FG`, `4VERR5ZBH57QQ0KC1ZD50TAAT0`).
 
-**Problem:** k_554 says citation without state mutation is decorative. Today `retrieval_binding` rows record what was surfaced, but the brain frequently emits `act_tuple_recorded.cited_knowledge_ids` containing IDs that don't appear in the action's `reasoning_summary` or `effect_summary`. The k_555 four-link chain breaks at the BINDING step on roughly half of recent acts.
+Why this tier: artifacts are the reusable composition primitives, so frontier predicates cannot compound while selected artifacts remain invisible (`6DZ417CCK57P90B7B2FTAV024M`).
 
-**Contract:** Deterministic check at the `emitEvent` boundary in `runtime/events.ts`. For every `act_tuple_recorded`, validate that every entry in `cited_knowledge_ids` appears as a substring in `reasoning_summary` OR `effect_summary` (or one of the bound-field aliases). Unbound citations get auto-stripped AND emit one `decorative_citation_stripped` event per stripped id. Force real binding; substrate-truth gate, not advisory.
+Metric direction: `act_artifact_score_updated` rises sharply; artifact promotion/quarantine becomes nonzero (`SAF9AVJ8HD7W5DK847W72ETXHR`).
 
-**Closure predicate:** `closure_complete(unbound_citations_stripped AND emit_event_per_strip)`. Pin tests on a fixture with mixed bound+unbound citations.
+### T0.3 — Knowledge citation binding enforcement
 
-**Why first:** the credit chain's binding step must be honest before counterfactual credit (T2) means anything.
+Problem: citation without substring binding breaks the k_555 chain and creates decorative credit (`YB2C2QCKC10BNBDVF22CX1Y5V8`).
 
----
+Contract: emit-boundary validation strips unbound `cited_knowledge_ids` and records a rejection event; closure predicate is mixed bound/unbound fixture strips only unbound IDs (`YB2C2QCKC10BNBDVF22CX1Y5V8`).
 
-## Tier 1 — Outcome Channels (close the credit loops)
+Why this tier: retrieval, merger, and counterfactual credit need honest source bindings (`AT2T17VAP159Z385DCM7GBTN4G`).
 
-The organism currently emits 30 953 candidate verdicts but only 2 `owner_observed_outcome_recorded` events. The owner-truth signal — the load-bearing one for non-technical universality — is starving. These contracts feed it.
+Metric direction: decorative strips rise first, then fall as emitters learn binding (`YB2C2QCKC10BNBDVF22CX1Y5V8`).
 
-### T1.1 — F-Owner-Outcome-Channel
+### T0.4 — Artifact-kind backfill
 
-**Problem:** Only 2 `owner_observed_outcome_recorded` events in 260 K. The substrate accumulates owner insights (708 `owner_insight_candidate`) but rarely gets the verdict that closes the credit chain. Every applied change should ask, "did this work for you?" — substrate doesn't.
+Problem: most artifact rows carry legacy `kind=code_artifact`, so the open-kind discriminator exists but cannot guide extractors (`SAF9AVJ8HD7W5DK847W72ETXHR`, `SDP3E1V50973X1AZ4V2FSERCEC`).
 
-**Contract:** New worker `owner_outcome_channel_worker` (registered through `ACC2_DISABLE_WORKERS=owner_outcome_channel_worker`). For every `applied_change_committed` whose `verifier_kind ∈ {owner_confirmation, owner_emotional_signal, owner_relational_signal, …}` (open vocabulary, read from `top_laws_view`), AND the directive has been quiet for the predicted `feedback_window.duration_ms`, emit `hidl_action_required` with a question shape ("did <effect_summary> work for you? positive | partial | negative | irrelevant"). Owner answer in chat → maps to `owner_observed_outcome_recorded` → credit flows back.
+Contract: a one-time inferred-kind sweep uses body signatures, sandbox declarations, target resources, and citation/dispatch patterns; ambiguous rows get review tasks; closure predicate is inferred metadata events plus low ambiguous residual (`SDP3E1V50973X1AZ4V2FSERCEC`).
 
-**Closure predicate:** `closure_complete(worker_registered AND hidl_emitted_per_eligible_applied_change AND owner_answer_persisted_as_outcome_recorded)`.
+Why this tier: kind-aware scorers need populated kind data before they can learn (`SDP3E1V50973X1AZ4V2FSERCEC`).
 
-**Why critical:** this is the load-bearing primitive for ALL non-technical universality (life decisions, relationships, embodied work, research outcomes). Without owner-truth feedback at scale, the substrate is technical-domain-only.
+Metric direction: legacy-kind share falls; kind-specific posterior divergence becomes measurable (`SDP3E1V50973X1AZ4V2FSERCEC`).
 
----
+## Tier 1 — OUTCOME CHANNELS
 
-### T1.2 — F-Retrieval-Rejection-Emitter
+### T1.1 — Owner-outcome channel
 
-**Problem:** Zero `retrieval_rejected` events ever, vs 6 943 `retrieval_binding` events. The brain receives N retrieval hits and we never learn which ones it ignored. Free improvement signal left on the table; the reranker can't learn to surface less dead-weight per cycle.
+Problem: non-technical goals need owner truth, but owner-observed outcomes are sparse compared with candidate and action volume (`SAF9AVJ8HD7W5DK847W72ETXHR`).
 
-**Contract:** Post-act-tuple sweep worker `retrieval_rejection_emitter`. On every `act_tuple_recorded` for a brain dispatch, diff (retrieval_binding rows for this dispatch's task_id) against (cited_knowledge_ids in this act). Every binding NOT cited = one `retrieval_rejected` event with `rejection_kind: not_bound_in_act`. Posterior penalty: candidate's `posterior_beta += rejection_weight` (smaller than confirmation but nonzero — silence is a weak negative signal).
+Contract: worker opens owner follow-up actions after feedback windows for eligible applied changes; closure predicate is owner answers persisted as `owner_observed_outcome_recorded` and credited (`B13YVJDAJD5E1928KG3Q97P7RW`).
 
-**Closure predicate:** `closure_complete(worker_registered AND retrieval_rejected_count_proportional_to_unbound_bindings AND posterior_beta_increment_visible_in_extractor_pass)`.
+Why this tier: universal goals need lived outcome evidence, not just deterministic code tests (`5F21YF13Z13W5FNJ6DR2YJ04M0`).
 
-**Why second:** trains the reranker passively. No new owner work required.
+Metric direction: owner outcome count rises and non-code closure residuals calibrate (`B13YVJDAJD5E1928KG3Q97P7RW`).
 
----
+### T1.2 — Retrieval-rejection emitter
 
-### T1.3 — F-Knowledge-Promotion-Rate (cross-candidate corroboration)
+Problem: retrieval exposure exists, but unused hits are not credited as weak negative evidence (`AT2T17VAP159Z385DCM7GBTN4G`).
 
-**Problem:** 3 309 candidates → 304 promoted (9.2 %). The cold-start path landed (`maybePromoteKnowledge` synchronous refresh in `runtime/credit.ts`). What remains: candidates that never get directly cited because no act intentionally bound them, but whose CLAIM semantically corroborates other promoted entries. They sit forever.
+Contract: `runtime/credit.ts` emits `retrieval_rejected` for exposed bindings not cited by the act; closure predicate is rejected count proportional to unbound bindings and posterior beta movement (`XZBAVD6YR53894C4TECXRC6440`).
 
-**Contract:** New extractor in `substrate/extractors.ts` — `extractCrossCandidateCorroboration`. 5-min reactive worker. Pair unverified candidates against promoted ones by embedding similarity (cosine ≥ 0.88) AND `goal_shape` overlap; if the paired promoted entry has `score ≥ 0.85` AND same polarity, emit `candidate_confirmed` on the unverified candidate with `confirmation_source: semantic_corroboration` AND credit weight 0.3 (smaller than direct-credit at 1.0 but nonzero — bootstrap weight).
+Why this tier: improves retrieval without owner effort and extends section-level retrieval credit (`AT2T17VAP159Z385DCM7GBTN4G`).
 
-**Closure predicate:** `closure_complete(extractor_registered AND new_event_kind_semantic_corroboration_recorded AND promotion_rate_observed_above_baseline_in_followup_audit_window)`.
+Metric direction: rejection events rise, retrieval dead weight falls (`AT2T17VAP159Z385DCM7GBTN4G`).
 
-**Why third:** 3 000+ stranded candidates start moving. Promotion volume rises; the recipe-shape population grows; Tier-0 replay activates.
+### T1.3 — Cross-candidate knowledge-promotion corroboration
 
----
+Problem: candidates can corroborate promoted knowledge without being directly cited, leaving useful claims stranded (`FE8DF6H1KN1590MGP6JHFPTWYW`).
 
-## Tier 2 — Posterior-Scored Boundaries (meta-principle, §15)
+Contract: extractor pairs unverified candidates with promoted neighbors by embedding and goal-shape overlap; closure predicate is semantic-corroboration confirmations and promotion-rate lift without false-promotion lift (`FE8DF6H1KN1590MGP6JHFPTWYW`).
 
-Now the closed-vocabulary code constants migrate to open-vocabulary substrate rows. Each contract picks one boundary class.
+Why this tier: raises knowledge throughput after trust and retrieval signals are honest (`YB2C2QCKC10BNBDVF22CX1Y5V8`).
 
-### T2.1 — F-Universal-Threshold-Registry (meta-move #1)
+Metric direction: promoted knowledge rises while contradiction rate stays bounded (`FE8DF6H1KN1590MGP6JHFPTWYW`).
 
-**Problem:** Every literal constant in the runtime (`RECIPE_REPLAY_THRESHOLD`, `INLINE_PATTERN_SCORE_THRESHOLD`, `RECIPE_INERTIA_DECAY_DAYS`, `DEFAULT_BUDGET_TOKENS`, `NOVELTY_BONUS_MULTIPLIER`, supervisor `redispatch_storm threshold=6`, worker tick intervals, `closure_residual < 0.3`) is a code-side guess pending F13 adaptive scoring. The organism is adaptive at the leaves but rigid at the trunk.
+## Tier 2 — RLM-EFFICIENCY AT THE SUBSTRATE
 
-**Contract:** Introduce `act_artifact{kind: "threshold_predicate", name: "<canonical_constant_name>"}` for every literal constant in the runtime's `// pending F13 adaptive scoring` comment set. Seed with the current hardcoded value as the artifact's body + `fixture_input + fixture_expected_residual` derived from observed production data. Add `runtime/threshold_registry.ts` accessor: `getThreshold(name: string): number` reads the highest-posterior row matching `name`; falls back to a compile-time default if no row exists. Migrate consumers (`runtime/credit.ts`, `runtime/dispatch_decider.ts`, `runtime/prompt_composer.ts`, `runtime/supervisor.ts`, `runtime/recipe_inertia.ts`) to read through `getThreshold()`.
+### T2.1 — On-demand policy bundles
 
-**Closure predicate:** `closure_complete(threshold_predicate_artifacts_seeded AND getThreshold_accessor_lands AND every_consumer_migrated AND test_suite_green AND posterior_visible_in_act_artifact_registry_view)`.
+Problem: long policy grammars consume default prompt mass (`433DGRZ27547KESBFYR4FZ10WC`).
 
-**Why fourth:** the moment this lands, every threshold becomes adaptive on outcome correlation. F13 closes by definition.
+Contract: emission grammars, examples, gates, and runbooks become retrieved `act_artifact` policy rows; closure predicate is task-relevant bundles selected with lower prompt mass (`S1PCZEFEDD4BS04RVPQF2JNBY8`).
 
----
+Why this tier: keeps the operating prompt small without weakening load-bearing rules (`433DGRZ27547KESBFYR4FZ10WC`).
 
-### T2.2 — F-Posterior-Scored-Prompt-Composer (meta-move #2)
+Metric direction: prompt tokens fall; missed-policy residual does not rise (`S1PCZEFEDD4BS04RVPQF2JNBY8`).
 
-**Problem:** The composer (`runtime/prompt_composer.ts`) hardcodes which sections go in, their priorities, and which are floor. Sections that don't earn their token cost still consume budget.
+### T2.2 — Prompt section content variants
 
-**Contract:** Each section becomes an `act_artifact{kind: "prompt_section_predicate", name: "<section_name>"}`. Posterior measures "does including this section in the brain prompt correlate with low `closure_residual` for this `goal_class`?" Composer ranks `posterior × inverse_token_cost` under budget. Floor protection (commit `15863c5`) remains for load-bearing sections; the floor itself becomes a posterior-scored attribute (`floor: boolean` predicate, learned from outcome correlation).
+Problem: section inclusion can be scored, but section wording is still hardcoded (`HW5CRSMF8S1NDF4HGT2E2PFKZM`).
 
-**Closure predicate:** `closure_complete(every_section_is_an_act_artifact AND composer_reads_through_posterior_rank AND floor_flag_is_posterior_attribute_not_code_constant AND test_suite_green AND brain_prompt_budget_utilization_observed)`.
+Contract: `prompt_section_content_variant` rows are selected by goal and owner profile; closure predicate is selected variant binding and posterior movement (`MZ7VJ4GCT12YB9STJEHEQV1EEW`, `QZ528KXXP161Q8FBJKWZP8A03M`).
 
-**Why fifth:** the brain prompt becomes self-tuning. Budget waste falls; brain quality rises asymmetrically.
+Why this tier: content quality becomes adaptive without adding doc prose (`HW5CRSMF8S1NDF4HGT2E2PFKZM`).
 
----
+Metric direction: variant posteriors diverge and token-adjusted closure improves (`QZ528KXXP161Q8FBJKWZP8A03M`).
 
-### T2.3 — F-Posterior-Scored-Supervisor (meta-move #3)
+### T2.3 — CLAUDE.md prose-rule variants
 
-**Problem:** `supervisor_redispatch_storm threshold=6` is one global rule. Different goal classes have different healthy dispatch counts; the global rule fires on legitimate work.
+Problem: prose rules are natural-language constants unless represented as scored rows (`V6M5EMAPQD2G32HNCDH3PAE0G8`).
 
-**Contract:** Per-(goal_class, signal_shape) supervisor thresholds. `act_artifact{kind: "supervisor_threshold_predicate", name: "<signal>_<goal_class>"}`. Each carries its own posterior calibrated by "did kill at threshold T prove correct, or did the kill abort productive work?" Cold-start: every unknown bucket falls back to the global default; mature buckets self-calibrate.
+Contract: `prose_rule_variant` rows compete only within invariant-equivalent scopes; closure predicate is variant selection, binding, and no protected-rule weakening (`V6M5EMAPQD2G32HNCDH3PAE0G8`).
 
-**Closure predicate:** `closure_complete(per_bucket_thresholds_emitted AND supervisor_reads_through_bucket AND cold_start_fallback_works AND test_suite_green)`.
+Why this tier: wording adapts while structural invariants stay protected (`V6M5EMAPQD2G32HNCDH3PAE0G8`).
 
-**Why sixth:** pathology detection stops killing legitimate work. Trust in the supervisor rises; fewer false-positive aborts.
+Metric direction: rule-variant posteriors diverge by goal class and owner profile (`V6M5EMAPQD2G32HNCDH3PAE0G8`).
 
----
+### T2.4 — Section-level retrieval credit
 
-### T2.4 — F-Counterfactual-Credit (meta-move #4)
+Problem: item-level retrieval credit does not tell whether a whole prompt section earned its tokens (`AT2T17VAP159Z385DCM7GBTN4G`).
 
-**Problem:** Credit flows only along chosen-and-succeeded paths. The selector is calibrated by positive evidence only. Slow convergence.
+Contract: emit used/unused judgments per section after action scoring; closure predicate is section posterior movement and composer budget shifts (`AT2T17VAP159Z385DCM7GBTN4G`).
 
-**Contract:** Every `action_scored` event includes `top_k_alternatives_at_dispatch_time` (already in `artifact_routing_view`). The credit pipeline emits one `counterfactual_credit_recorded` per top-K alternative not selected: `would_have_done_same | would_have_done_worse | would_have_done_better` (open vocabulary). Posterior debit/credit per shape. Same machinery as `candidate_confirmed`, applied to selection-time rankings.
+Why this tier: it is the smallest high-leverage prompt-quality signal once T1.2 exists (`AT2T17VAP159Z385DCM7GBTN4G`).
 
-**Closure predicate:** `closure_complete(counterfactual_credit_recorded_emitted_per_dispatch AND top_k_alternatives_persisted AND artifact_posterior_visible_in_act_artifact_registry_view)`.
+Metric direction: section token allocation follows outcome evidence (`AT2T17VAP159Z385DCM7GBTN4G`).
 
-**Why seventh:** the selector calibrates exponentially faster. Convergence on "which artifact for which goal_class" accelerates 5-10×.
+### T2.5 — Surface-existence posterior with security carve-out
 
----
+Problem: registered surfaces lack usage-by-outcome scoring, but security/schema gates must not be retired for low frequency (`HBQ8FM8HED2AX2R7EDCVY15R8W`).
 
-### T2.5 — F-Meta-Credit-Formula (meta-move #5)
+Contract: `surface_existence_predicate` scores event kinds, tools, workers, views, and CLI verbs; admin_token, deny-lists, owner_gate `things_to_never_do`, FK, NOT NULL, and single-writer SQLite are protected by absence-of-violation evidence; closure predicate is scored surfaces plus protected reasons (`RPB5W9PRPS6S3EPTYAE33JD4MW`, `5EKBX6PTDS6XS1XAZXAZD0NMX4`).
 
-**Problem:** Credit formula choice (Shapley vs linear vs degenerate fallback, `runtime/credit.ts:822-830`) is hardcoded. Whether Shapley is the right shape for this organism's load is itself a hypothesis.
+Why this tier: trims dead surfaces without cutting safety gates (`HBQ8FM8HED2AX2R7EDCVY15R8W`).
 
-**Contract:** `act_artifact{kind: "credit_distribution_predicate"}` rows for each formula candidate. Posterior calibrated by "did calibration improve after this choice on this directive class?" The credit pipeline reads the highest-posterior formula per directive (or global if no class-specific row exists). One level of recursion, no infinite tower.
+Metric direction: retirement candidates appear for low-value surfaces while protected gates remain (`5EKBX6PTDS6XS1XAZXAZD0NMX4`).
 
-**Closure predicate:** `closure_complete(formula_candidates_seeded AND credit_path_dispatches_through_predicate AND posterior_visible AND no_infinite_recursion)`.
+## Tier 3 — STRUCTURAL POSTERIOR BOUNDARIES
 
-**Why eighth (last of Tier 2):** this is meta-recursion. The substrate scores its own scoring. Once this lands, every decision boundary in the organism is posterior-scored — INCLUDING the boundaries that score other boundaries.
+Tier S order is S2, S4, S5, S3, S1 (`G3PR7X6TCD4T57D7T6GXCDY9AW`).
 
----
+### T3.1 — Universal threshold registry
 
-## Tier 3 — Universality & Operations (the long tail)
+Problem: hardcoded thresholds keep trunk behavior rigid (`FE8DF6H1KN1590MGP6JHFPTWYW`).
 
-### T3.1 — F-Sandbox-Parity (Phase G remainder, Architecture.md §11)
+Contract: threshold predicates live as artifact rows read through a runtime accessor; closure predicate is all named constants migrated with fallback defaults (`FE8DF6H1KN1590MGP6JHFPTWYW`).
 
-uv + camofox preflight + credential parity with bun. nsjail enforcement is honor-system when absent; camofox profile-mutex doesn't enforce resource limits.
+Why this tier: later boundary predicates need the same registry pattern (`G3PR7X6TCD4T57D7T6GXCDY9AW`).
 
-### T3.2 — F-Father-v2 (Phase K remainder)
+Metric direction: threshold rows gain posterior movement (`FE8DF6H1KN1590MGP6JHFPTWYW`).
 
-Drop planner-era responsibilities. Keep drift detection + self-suspend. Add event-reactive maintenance template (quarterly retro, weekly status digest).
+### T3.2 — S2 causal-edge posterior
 
-### T3.3 — F-Owner-Freeze-State (Phase L remainder)
+Problem: nodes have scores but citation/refinement/supersession edges do not (`G3PR7X6TCD4T57D7T6GXCDY9AW`).
 
-`acc admin freeze-state` CLI + freeze-state audit event for reversible operational gating.
+Contract: `causal_edge_predicate` scores edge kinds by closure improvement; closure predicate is edge posterior used by retrieval and credit (`3F2FK5J04144D9MCRKDXHH5CA8`).
 
-### T3.4 — F-Token-Rotation
+Why this tier: every later scorer depends on reliable edges (`G3PR7X6TCD4T57D7T6GXCDY9AW`).
 
-`acc admin rotate-token` CLI + atomic file replacement + grace-period for existing CLI sessions.
+Metric direction: edge weights diverge by goal shape (`3F2FK5J04144D9MCRKDXHH5CA8`).
 
-### T3.5 — F-Substrate-Migration-Sweep
+### T3.3 — S4 merger-rule predicates
 
-One-time row rewriter that scans the events table for legacy `code_artifact_*` kind strings and rewrites them to canonical `act_artifact_*`. After zero remaining legacy rows on every shipped DB, the reader OR-clauses become dead code and can be stripped.
+Problem: merger thresholds and weights are still fixed rules (`D2NCDZ76RD11K3PEA4D5CCZRA8`).
 
-### T3.6 — F-Recipe-Replay-Gate
+Contract: `merger_rule_predicate` rows score dedup, corroboration, synthesis, and origin-bias settings; closure predicate is faster promotion without false-promotion lift (`D2NCDZ76RD11K3PEA4D5CCZRA8`).
 
-`findRecipeMatch` falls back from exact `goal_shape` to top-K embedding match (cosine ≥ 0.85) when no exact match exists, AND treats recipe topology as ≥-coverage rather than exact match. Once T2.1 lands, the threshold itself becomes posterior-scored.
+Why this tier: merger wisdom controls knowledge quality for all later learning (`G3PR7X6TCD4T57D7T6GXCDY9AW`).
 
-### T3.7 — F-Backup-Export-Restore-Cadence
+Metric direction: promotion speed rises with bounded contradiction rate (`D2NCDZ76RD11K3PEA4D5CCZRA8`).
 
-Scheduled-export cron primitive that emits `state_exported` on a cadence the owner profile picks. Operator-facing docs on the export/import workflow.
+### T3.4 — S5 goal-shape extraction strategy
 
----
+Problem: atomic goal shapes can poison per-class posteriors when split or merged poorly (`3517MGZAEH6856BRDSCT1HXJM8`).
 
-### T3.8 — F-SQL-Worker-Thread-Pool (event-loop starvation, evidence-backed)
+Contract: `goal_shape_strategy_predicate` scores extractors by within-group residual variance; closure predicate is lower variance and better transfer (`3517MGZAEH6856BRDSCT1HXJM8`).
 
-**Problem (cited `6ZW4GQEEWN4J` knowledge_candidate, score=0.70):** acc2 has multiple Bun event-loop SQL starvation paths beyond `/health` — health counts, metrics-style recent counts, integrity counts, brain self-audit aggregates, trajectory replay per-node counts, prometheus exporters. Each is a CPU-bound aggregate query that monopolizes the JS event loop for tens to hundreds of milliseconds, blocking `/health`, MCP request handlers, SSE pushes, and the activation bus during that window.
+Why this tier: class-local thresholds depend on reliable classes (`G3PR7X6TCD4T57D7T6GXCDY9AW`).
 
-**False solution rejected:** Bun.SQL (the unified Promise-based driver, `sqlite://...`) is **NOT truly async**. Measured 2026-05-19 with a heavy CROSS JOIN query on identical 5 000-row tables:
+Metric direction: within-class residual variance falls (`3517MGZAEH6856BRDSCT1HXJM8`).
 
-| API | elapsed | event-loop ticks during query |
+### T3.5 — S3 trajectory-motif extractor
+
+Problem: repeated event sequences are not promoted into reusable motifs at scale (`NWZSMV8F5N33N6FG4XKW9ZDHEC`).
+
+Contract: `trajectory_motif_extractor_predicate` scores sequence motifs by replay usefulness; closure predicate is motif rows that improve replay or dispatch (`NWZSMV8F5N33N6FG4XKW9ZDHEC`).
+
+Why this tier: motifs need edge and goal-shape semantics first (`G3PR7X6TCD4T57D7T6GXCDY9AW`).
+
+Metric direction: recipe/motif reuse rises (`NWZSMV8F5N33N6FG4XKW9ZDHEC`).
+
+### T3.6 — S1 DAG decomposition strategy
+
+Problem: fan-out, depth, sibling order, and edge selection are not scored as reusable strategy (`MQQCK9FQ452H1FYA4H72Z9RJPR`).
+
+Contract: `decomposition_strategy_predicate` scores DAG structure by goal class; closure predicate is lower duplicate work and lower residual (`MQQCK9FQ452H1FYA4H72Z9RJPR`).
+
+Why this tier: fair scoring needs the prior edge, merger, shape, and motif signals (`G3PR7X6TCD4T57D7T6GXCDY9AW`).
+
+Metric direction: duplicate siblings and redispatch storms fall (`MQQCK9FQ452H1FYA4H72Z9RJPR`).
+
+### T3.7 — Pedagogical RL contracts
+
+Pedagogical RL primitives are scored boundaries that route closure-audit and owner-outcome evidence back into composition. Order by leverage: `composer_policy_predicate` first (subsumes prior section-credit work by making the prompt composer pedagogically self-guided through closure and owner-outcome evidence), then `pedagogical_reward_predicate`, `citation_spike_auditor`, and `surprisal_gate_predicate`. Each lands as an `act_artifact` row with closure predicate "posterior movement tied to closure/owner outcomes."
+
+## Tier 4 — META-CREDIT + COUNTERFACTUAL
+
+### T4.1 — Counterfactual credit
+
+Problem: chosen artifacts get evidence while near-miss alternatives do not (`FE8DF6H1KN1590MGP6JHFPTWYW`).
+
+Contract: persist top-K alternatives at dispatch and score unchosen alternatives after action scoring; closure predicate is counterfactual credit rows and selector calibration (`FE8DF6H1KN1590MGP6JHFPTWYW`).
+
+Why this tier: needs artifact credit and edge evidence first (`6DZ417CCK57P90B7B2FTAV024M`).
+
+Metric direction: selector convergence accelerates (`FE8DF6H1KN1590MGP6JHFPTWYW`).
+
+### T4.2 — Meta-credit formula
+
+Problem: the credit formula is itself an unscored choice (`FE8DF6H1KN1590MGP6JHFPTWYW`).
+
+Contract: credit-distribution predicate rows compete by calibration improvement; closure predicate is bounded one-level recursion (`FE8DF6H1KN1590MGP6JHFPTWYW`).
+
+Why this tier: scores the scorer only after base credit is trustworthy (`YB2C2QCKC10BNBDVF22CX1Y5V8`).
+
+Metric direction: formula posterior diverges by directive class (`FE8DF6H1KN1590MGP6JHFPTWYW`).
+
+### T4.3 — Brain prediction-accuracy posterior
+
+Problem: predicted residual quality is high-value routing evidence but not separately calibrated (`A24CCF6C2C2C4E85A91A529DFB`).
+
+Contract: score predicted-vs-observed residual per goal class and route; closure predicate is prediction accuracy visible to dispatch (`A24CCF6C2C2C4E85A91A529DFB`).
+
+Why this tier: routing can trust forecasts only after closure truth and credit paths stabilize (`SAF9AVJ8HD7W5DK847W72ETXHR`).
+
+Metric direction: prediction error falls by class (`A24CCF6C2C2C4E85A91A529DFB`).
+
+### T4.4 — Coalition / joint-citation posterior
+
+Problem: individual nodes get credit, but recurring coalitions of artifacts, knowledge, sections, and edges are not scored as combinations (`YB2C2QCKC10BNBDVF22CX1Y5V8`).
+
+Contract: emit coalition posterior rows for repeated bound sets; closure predicate is coalition predictions beating independent-node baselines (`YB2C2QCKC10BNBDVF22CX1Y5V8`).
+
+Why this tier: true composition growth is combination reuse, not only node reuse (`6DZ417CCK57P90B7B2FTAV024M`).
+
+Metric direction: successful coalition reuse rises (`YB2C2QCKC10BNBDVF22CX1Y5V8`).
+
+## Tier 5 — UNIVERSALITY + OPERATIONS
+
+Sandbox parity, freeze-state, token rotation, backup/export cadence, migration sweep, worker-thread pool for heavy aggregates, and runtime-runner registry land here because they improve operational universality after the trust and posterior boundaries are in place (`A4V81PN9E960S02MWSM4HSM5G4`, `HBQ8FM8HED2AX2R7EDCVY15R8W`).
+
+Worker-thread pool contract: keep embedded SQLite for microsecond hot paths and offload known heavy aggregate reads only; closure predicate is event-loop freed during heavy queries while writes remain serialized (`A4V81PN9E960S02MWSM4HSM5G4`).
+
+## Rejected Alternatives
+
+### rqlite
+
+Rejected because HTTP roundtrips are the wrong tradeoff for AccInt's embedded SQLite hot path; the heavy-query problem is solved by a worker-thread pool, not a network database layer (`A4V81PN9E960S02MWSM4HSM5G4`).
+
+### Opening runtime type to string as a one-line change
+
+Deferred because SandboxDecl and runner dispatch are structurally coupled to runtime-specific declarations; the correct contract is a runner registry plus SandboxDecl redesign (`A4V81PN9E960S02MWSM4HSM5G4`).
+
+### Multiple-brain operation
+
+Rejected: the organism uses opencode gpt-5.5 as the brain; adding alternate model arbitration would add routing complexity before the artifact-credit, binding, and closure-truth gaps are closed (`SAF9AVJ8HD7W5DK847W72ETXHR`, `6DZ417CCK57P90B7B2FTAV024M`).
+
+## Cross-cutting Principles
+
+- Open vocabulary at boundaries; new strings appear as rows and events, not closed enums (`HBQ8FM8HED2AX2R7EDCVY15R8W`).
+- Security and schema gates are protected by absence-of-violation evidence, not usage-frequency posterior (`RPB5W9PRPS6S3EPTYAE33JD4MW`).
+- Every contract must cite live substrate evidence and define a closure predicate (`SAF9AVJ8HD7W5DK847W72ETXHR`).
+- Brain proposes; substrate and orchestrator apply through ledger-visible gates (`4EAFA894A8194C4CA74F08430C`).
+- Docs stay small; detailed inventories and historical proofs stay retrievable (`433DGRZ27547KESBFYR4FZ10WC`).
+
+## Live Metrics To Watch
+
+| Area | Metric | Expected direction |
 |---|---|---|
-| `bun:sqlite` (sync) | 23.67 ms | **0** |
-| `Bun.SQL` (promise) | 28.34 ms | **0** |
+| T0.1 | false-closure refusals | Up first, then stable |
+| T0.2 | `act_artifact_score_updated` / `action_scored` | Up sharply |
+| T0.3 | stripped decorative citations | Up first, then down |
+| T0.4 | legacy artifact-kind share | Down |
+| T1.1 | owner outcome events | Up |
+| T1.2 | retrieval rejections | Up proportional to unused exposure |
+| T1.3 | promoted knowledge with bounded contradictions | Up |
+| T2 | prompt tokens per successful dispatch | Down without residual rise |
+| T3 | boundary predicate rows with moving posteriors | Up |
+| T4 | selector and credit calibration error | Down |
+| T5 | health latency under heavy aggregate load | Down |
 
-Both block the event loop equally; Bun.SQL adds Promise overhead without giving up the thread. 100 parallel "async" small reads ran serially in 20 ms total with 0 ticks during. This confirms Bun maintainer Jarred-Sumner's design statement (Bun issue #978, open since 2022-08-04): "async will ~always be slower outside of this usecase." Bun.SQL is an API-surface unification, not a thread-pool offload.
-
-**Correct contract (tlonny pattern from Bun issue #978, 2025-10-27):**
-
-1. Spin up N worker threads (`worker_threads`-equivalent under Bun; one per CPU core minus 1).
-2. Each worker holds its own `Database` connection and an LRU cache of prepared statements.
-3. Main thread sends `{ sql, params, txn_id }` over `postMessage`; workers reply with `{ rows, error }`.
-4. Round-robin or load-balance dispatch on the main thread.
-
-Migration shape: introduce a `runtime/sql_worker_pool.ts` accessor that returns a Promise of rows. Migrate ONLY the known starvation paths (per `6ZW4GQEEWN4J`) — health counts, integrity counts, brain self-audit aggregates, trajectory replay aggregates. Hot single-row reads (event_kind lookups, ULID prefix resolution) stay on `bun:sqlite` synchronous because their wall-time is microseconds and the worker IPC overhead would dominate.
-
-**Trade-off:** SQLite is single-writer; the pool helps READ concurrency only. Writes still serialize through the canonical daemon connection. WAL mode (already enabled, `substrate/db.ts`) allows concurrent reads against an active writer, so multiple worker threads can read in parallel without contending on the writer.
-
-**Cold-start defense:** the worker pool must boot lazily on first heavy query so the daemon startup time is not impacted. Health probes hitting the pool before it's warm fall back to the sync path with a logged `pool_cold` event.
-
-**Closure predicate:** `closure_complete(pool_module_lands AND known_starvation_paths_migrated AND benchmark_proves_event_loop_freed_during_heavy_aggregate AND sync_writes_still_serialize_correctly)`.
-
-**Why Tier 3:** depends on T0/T1 trust-and-credit fixes; benefits from but does not require T2 posterior-scoring. This is a runtime substrate primitive, not a learning surface.
-
----
-
-## Tier 4 — Brain-emitted frontier (deep-inspection dispatch `C5TVG369R11C9DAD9HVH8Q562G`)
-
-The 2026-05-19 deep-inspection dispatch produced two contracts that complement Tier 1-2 and were not in my prior list. They land here because they extend §15 meta-principle and the closure-rate work.
-
-### T4.1 — F-Dispatch-Decider-As-Posterior-Predicate (brain-proposed)
-
-**Brain claim:** "Dispatch should be optimized as a learned residual-calibrated primitive before adding more strategic prompt policy, because `dispatch_decider_v1` is high-volume and currently averages above the closure_residual threshold." Cites measurement `T1G2F63H4H18VF7E5SDQ03R0HM`.
-
-**Contract:** The dispatch_decider's per-route scoring (currently a hardcoded weighted sum of `routing_axes`) becomes an `act_artifact{kind: "dispatch_route_predicate"}` row per route. Each row carries a Beta posterior tracking "did selecting this route at this score level prove correct downstream?" The decider reads the posterior at decision time and falls back to the hardcoded weights only when the posterior is uninformative (low evidence count). Closes the gap where dispatch quality is high-volume but not learned.
-
-**Why Tier 4:** depends on T2.1 (threshold registry) for the underlying machinery, and benefits from T2.4 (counterfactual credit) for fast convergence.
-
-### T4.2 — F-Proposal-Digest-Scheduler (brain-proposed)
-
-**Brain claim:** "Pending proposal digestion should be scheduled as a substrate primitive because live inspection shows outstanding amendments/lessons coexisting with new architecture directives, creating compounding decision-debt." Cites measurement `T1G2F63H4H18VF7E5SDQ03R0HM`.
-
-**Contract:** New worker `proposal_digest_scheduler`. Reads `pending_contract_amendments_view` and unresolved `lesson_extracted` rows. Scores each by age + dependency pressure + owner-profile alignment + posterior of similar past landed amendments. Opens bounded apply/refine/reject tasks with `residual_stop_condition` so the worker doesn't fire-hose the dispatcher. Operates within the contract_amendment_consumer's existing dispatch budget.
-
-**Closure predicate:** `closure_complete(worker_registered AND pending_amendments_age_distribution_shifts_younger AND no_dispatcher_overrun)`.
-
-### T4.3 — F-Artifact-Warning-Calibration (brain-proposed insight)
-
-**Brain claim:** "Artifact warning quietness should be treated as an evidence gap, not proof of health, because `artifact_warning_view` returned zero rows while `active_inference_view` still shows high-residual artifact patterns." Cites measurement `T1G2F63H4H18VF7E5SDQ03R0HM`.
-
-**Contract:** Cross-reference `artifact_warning_view` against `active_inference_view`: when an artifact has high-residual scoring history (avg_residual ≥ 0.5, scored_count ≥ 5) but does NOT appear in artifact_warning_view (because its status hasn't flipped to quarantined), emit a new `artifact_warning_gap_detected` event so the operator sees the silent-degradation signal. This calibrates the gauge against ground truth instead of trusting absence of warnings.
-
-**Closure predicate:** `closure_complete(cross_reference_query_lands AND gap_events_emitted_proportional_to_high_residual_unwarned_artifacts AND test_pins_the_invariant)`.
-
----
-
-## Dispatch order rationale
-
-```
-T0.1 (closure validation) →
-T0.2 (binding enforcement) →
-T1.2 (retrieval rejection, no owner cost) →
-T1.1 (owner outcome channel, biggest leverage) →
-T1.3 (knowledge promotion) →
-T2.1 (threshold registry — F13 closes here) →
-T2.2 (prompt composer) →
-T2.3 (supervisor) →
-T2.4 (counterfactual credit) →
-T2.5 (meta-credit formula — meta-principle complete) →
-T3.x (long tail, parallelizable after T2)
-```
-
-**Tier 0 first** because every Tier 1+ contract claims to "close the chain" and the closure audit must be honest about that. **T1.2 before T1.1** because retrieval-rejection emits without owner work (zero owner-friction); the owner-channel work begins once the substrate has visibly improved retrieval quality. **T2.5 last in Tier 2** because it's recursive and benefits from every prior boundary already being posterior-scored.
-
-After T2.5: the organism has no closed-vocabulary boundaries. Every decision, including how decisions are credited, is a row with a posterior. **The act-loop runs over its own configuration.** This is the final universality collapse.
-
----
-
-## Rejected alternatives (decisions worth keeping)
-
-### rqlite (https://rqlite.io/) — WRONG TRADEOFF for acc2
-
-**Rejected 2026-05-19.** rqlite wraps SQLite in a Raft-consensus HTTP API, giving HA + horizontal read scaling at the cost of per-query HTTP roundtrips (~5 ms localhost, more across nodes). acc2 is a single-operator local agent whose hot path is microsecond-latency single-row reads (`event_kind` lookup, ULID prefix resolution, `top_laws_view`). At 1 µs vs 5 ms, the HTTP roundtrip would dominate query cost by ~5000× per call — a structural regression, not an improvement.
-
-Concrete failure shapes if adopted:
-1. MCP `substrate.read` latency floor jumps from ~100 µs to ~5 ms; agent feedback loop slows visibly.
-2. Workers and the daemon currently share an in-process `Database` handle with WAL — replacing with a network client breaks the activation bus + hot-reload contract that depends on shared connection state.
-3. rqlite enforces single-writer through the leader; acc2 already has single-writer via the daemon's canonical connection. No new property gained; significant property lost.
-
-**The actual problem rqlite seems to address** is event-loop starvation during heavy aggregate queries. The correct fix lives in **T3.8 — F-SQL-Worker-Thread-Pool** above: keep `bun:sqlite` embedded for the hot path; offload only known-heavy aggregates to worker threads. This gives parallel-read concurrency without the HTTP tax.
-
-If acc2 ever grows beyond single-operator (multi-region, multi-tenant), revisit rqlite or LiteFS for replication. Not before.
-
-### Opening `Runtime` type to `string` (bottleneck `WT9M8BW95X0F`) — DEFERRED, needs SandboxDecl redesign
-
-**Status: deferred 2026-05-19.** The bottleneck lesson correctly identifies `substrate/types.ts:330 export type Runtime = "bun" | "uv" | "camofox-browser"` as a closed enum that violates the universal-open-vocabulary principle. But:
-
-1. `SandboxDecl` is a *discriminated union* keyed on `runtime`. Each variant carries fundamentally different fields (`bun` has `cpu_ms` + `memory_mb`; `camofox-browser` has `browser_allow_domains` + `fingerprint_locale`). Opening `Runtime` to `string` orphans the discriminator and breaks compile-time narrowing in `runtime/runtimes/index.ts:runArtifactForRuntime`.
-2. `runtime/artifact_admission.ts:524`, `runtime/recipe_replay.ts:292`, `runtime/mcp_server/substrate_tools.ts:1077`, and `runtime/daemon.ts:1091` all switch on the closed three to dispatch to the right runner. Each needs a structural redesign — pluggable runner registry indexed by string — not a one-line type relax.
-
-**Correct contract shape (folded into Tier 3 when prioritized):** Introduce a runtime-runner registry (rows in `act_artifact` with `kind=runtime_runner`) keyed by runtime string. The dispatcher in `runtime/runtimes/index.ts` becomes a lookup over the registry, and `SandboxDecl` accepts an open-kind variant `{ runtime: string; fields: JsonValue }` for runtimes whose schema is declared in the registry row, not in TypeScript. The three concrete variants stay as fast-path narrowing for the existing runners.
-
-This is a real contract worth doing, but it is NOT a pure mechanical rename and is NOT the unblocker for cross-terminal parallelism. The `CodeArtifactRow → ActArtifactRow` rename (shipped 2026-05-19) was. Lesson `WT9M8BW95X0F`'s mechanical-rename pieces are now closed; the structural-redesign piece is a separate T3-tier contract.
-
----
-
-## Cross-cutting principles (apply to every contract)
-
-1. **Open vocabulary always.** No closed enums. New strings appear in events, not in type unions.
-2. **Cite live measurement.** Every claim grounds in an events.id from the substrate snapshot.
-3. **Single canonical name.** No `seedCodeArtifacts` style aliases. F4a-style migrations are one-shot row sweeps, not perpetual reader OR-clauses.
-4. **Fail-closed at substrate boundaries.** Deny is the load-bearing gate (per bridge config commit `1570521`); positive allow-lists need explicit deny to be safe against additive defaults.
-5. **Fixture + expected_residual on every threshold-artifact.** Cold-start defaults are testable, not magic.
-6. **Substrate is the operator.** Brain proposes events; orchestrator applies. No brain filesystem-write.
-7. **Narrow safe scope.** One contract at a time. Never bundle. Verify each closure-residual against the live ledger before dispatching the next.
-
----
-
-## Live metrics to watch as contracts land
-
-After each contract, the operator should observe:
-
-| Contract | Metric | Expected direction |
-|---|---|---|
-| T0.1 | `closure_blocked_no_amendments` count | Rises (now caught); brain dispatch closure_residual distribution shifts honest |
-| T0.2 | `decorative_citation_stripped` count | Rises initially, falls as brain learns to bind |
-| T1.1 | `owner_observed_outcome_recorded` count | Rises from ~2 to dozens per week |
-| T1.2 | `retrieval_rejected` count | Rises proportional to bindings; reranker per-origin posterior shifts |
-| T1.3 | `knowledge_promoted` count | Rises from 304 → 600+ as corroboration extracts kick in |
-| T2.1 | `threshold_predicate` artifacts in `act_artifact_registry_view` | Count = N hardcoded constants migrated |
-| T2.2 | `prompt_section_predicate` posteriors | Diverge across goal_class; floor flag earns its scoring |
-| T2.3 | `supervisor_redispatch_storm` false-positive rate | Falls |
-| T2.4 | `counterfactual_credit_recorded` count | Rises proportional to brain dispatches |
-| T2.5 | Credit-formula posterior divergence | Visible per directive class |
-
-**Final state:** every metric in `failure_view` falls toward zero or stabilizes at a known-healthy baseline. Every promoted_knowledge entry has visible credit flow. Every threshold has a posterior that moves on outcomes. The organism becomes the most adaptive, most universal, most compounding learning system on the planet — not by any single architectural insight, but by ensuring **every boundary is in the registry** and **every credit closes the chain**.
+Final state: every reusable boundary is a scored row, every credit path closes, protected security gates stay protected, and the substrate compounds across code, work, research, relationships, and embodied goals through the same residual-scored loop (`5F21YF13Z13W5FNJ6DR2YJ04M0`, `YB2C2QCKC10BNBDVF22CX1Y5V8`, `HBQ8FM8HED2AX2R7EDCVY15R8W`).

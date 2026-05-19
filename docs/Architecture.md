@@ -1,371 +1,111 @@
 # AccInt — Architecture
 
-A universal, self-extending, posterior-scored organism. One SQLite events ledger is the canonical state. LLMs (Claude, opencode/gpt-5.5) are subroutines the substrate calls; they do not own the loop. Every action is a four-tuple (intent + action artifact + verifier artifact + predicted_residual); every verifier returns a scalar residual ∈ [0,1]; every cited knowledge or artifact id earns posterior credit on outcome. The system compounds by accumulating events, promoting knowledge through outcome correlation, and ranking artifacts by Beta posterior.
+AccInt is a universal, self-extending organism: one event ledger, one act primitive, one credit machinery, one retrieval surface, and one merger pipeline. LLMs are subroutines; the substrate is the operator. Current live evidence reports ALIVE state plus artifact-credit trust gaps that make Tier 0 the path to compounding (`SAF9AVJ8HD7W5DK847W72ETXHR`, `A4V81PN9E960S02MWSM4HSM5G4`, `6DZ417CCK57P90B7B2FTAV024M`).
 
-This document is **current state + path to final state**. Section 1 is the operating contract. Sections 2–10 are shipped architecture, each row cited to module + tests + live substrate evidence. Section 11 is the open frontier — what is PARTIAL today and the contracts that close it.
+This file is intentionally small. Inventories, migration history, long proofs, and test counts belong in substrate knowledge and roadmap contracts, not in the always-loaded architecture (`433DGRZ27547KESBFYR4FZ10WC`, `HW5CRSMF8S1NDF4HGT2E2PFKZM`).
 
-This replaces the prior `docs/v2-design.md` (v2 design plan). The plan's `§17 Phased Cutover` shipped; the design intent migrated here and the prose-heavy speculation was archived. Where a prior section number is still useful for tracing, it is named inline.
+## 1. Top Laws
 
-Live substrate snapshot (2026-05-19 18:26 UTC): **260 839 events** · **1 490 act_artifacts** (27 seed, 1 463 brain-authored) · **304 promoted_knowledge** · **598 recipe-shape knowledge** rows · **15 251 vec_events** embedded · **0 stuck workers** · `verdict: ALIVE`.
+Top laws are the substrate's posterior-scored operating truths; the live prompt surface already compiles them from scored knowledge (`4EAFA894A8194C4CA74F08430C`, `6FDAD5FFB0954E3094D24808CE`).
 
----
-
-## 1. Top Laws (auto-compiled from scored knowledge ≥ 0.95)
-
-The substrate's highest-scored principles by Beta posterior. They govern every decision in the organism. Citing a law's event_id in an action's `cited_knowledge_ids` is how credit flows back when the law shapes an outcome (k_201, k_554, k_555).
-
-| # | Law | Citation |
-|---|-----|----------|
-| 1 | Cycle-1-only is structural. The dispatcher rejects self-iteration; refinement edges replace cycle 2+. | `206B19C06C2E461A8E8C3720C6` |
-| 2 | Verifier code artifacts return a scalar residual in [0,1]. 0 = goal met; 1 = goal missed. | `01EFDC6E614E47E4B9F4FE73FF` |
-| 3 | v2 does not migrate from v1. The substrate launches empty; v1 is archived read-only. | `5480522523764A4AB6E0BCCAC7` |
-| 4 | Owner channel is Claude Code chat only. No telegram, no email, no licensed-expert routing. | `0E53D8E6241B47B989CDA6B5DA` |
-| 5 | Exit invariant — every brain cycle MUST invoke at least one `substrate.*` tool call before exit. Producing only conversational text is `brain_silent_exit`, not a transport issue. | `4EAFA894A8194C4CA74F08430C` |
-| 6 | Self-extension occurs by admitting rows and crediting them through `act_tuple_recorded.cited_artifact_ids`. The same machinery that ranks knowledge ranks act_artifacts. | `T8A83QFGHX72996DCVPQV8K93G` |
-| 7 | Same substrate at two timescales — judgment and knowledge are the same primitive. | k_200 |
-| 8 | Citation = mutation. Citation without state mutation is decorative memory. | k_554 |
-| 9 | Four links — create → retrieve → mutate retrieval state → credit outcome. | k_555 |
-| 10 | Advisory = fake. Advisory gates that don't change behavior are k_252 violations. | k_252 |
-
-`acc state search "<topic>"` returns the current top-K laws ranked by score. The composer in `runtime/prompt_composer.ts` surfaces the live top laws on every brain dispatch (floor section; never truncated).
-
----
+- The substrate is the operator; brain and Claude are invoked tools (`5F21YF13Z13W5FNJ6DR2YJ04M0`).
+- Cycle-1-only is structural; recursion is a new task edge, not in-context continuation (`206B19C06C2E461A8E8C3720C6`).
+- Verifier residual in [0,1] is the universal score (`01EFDC6E614E47E4B9F4FE73FF`).
+- Citation is mutation; honest binding is required for compounding (`YB2C2QCKC10BNBDVF22CX1Y5V8`).
+- Self-extension occurs by admitting rows and crediting them through outcomes (`6DZ417CCK57P90B7B2FTAV024M`, `4VERR5ZBH57QQ0KC1ZD50TAAT0`).
 
 ## 2. Universal Workflow
 
-The organism runs one loop for every goal — business outreach, research, code change, embodied work, life decisions, self-improvement. The only thing that differs across goals is which action/verifier artifacts are composed.
+One loop handles code, research, enterprise transformation work, outreach, embodied tasks, creative work, and decisions; only the action/verifier artifact changes (`5F21YF13Z13W5FNJ6DR2YJ04M0`).
 
 ```
-owner words → directive_opened (acc task "...")
-            ↓
-substrate routes (substrate_replay | claude_inline | opencode_brain | deferred_blocked)
-            ↓
-brain or replay emits act tuple (intent + action + verifier + predicted_residual)
-            ↓
-runtime executes action artifact → action_predicted event
-            ↓
-runtime executes verifier artifact → action_scored event with residual ∈ [0,1]
-            ↓
-substrate distributes Shapley credit across cited knowledge + artifacts
-            ↓
-posterior updates → promotions / quarantine / retirement
-            ↓
-closure_audit verifies directive intent met; emits lesson_extracted on friction
+owner words
+  -> directive_opened / owner_input_received
+  -> intent_classified
+  -> dispatch_decided
+  -> act_tuple_recorded
+  -> action artifact observation
+  -> verifier residual
+  -> Shapley credit
+  -> knowledge/artifact posterior update
+  -> closure_audit
 ```
 
-Cycle-1-only is structural. Refinement edges (`task_edge_recorded.kind = 'refines'`) replace iteration; the dispatcher kills any cycle-2 attempt and emits `dispatcher_violation`.
+The loop is universal because residual is universal and breakdown axes are open vocabulary (`A24CCF6C2C2C4E85A91A529DFB`, `879407FA824B4B94A96CE7ADBC`).
 
-**Reference:** `runtime/task_scheduler.ts`, `runtime/task_dispatcher.ts`, `runtime/task_topology.ts`. Verifier residual is the universal score — same primitive for code correctness, research quality, owner emotional outcome.
+## 3. Substrate Daemon
 
----
+The daemon owns the append-only SQLite ledger, MCP surface, worker registry, external ingress, hot reload, restart drain, and health/readiness projections (`SAF9AVJ8HD7W5DK847W72ETXHR`). Fast hot paths stay embedded and local; heavy aggregate reads move to worker-thread contracts rather than network SQL (`A4V81PN9E960S02MWSM4HSM5G4`).
 
-## 3. Substrate — One Events Table, Many Views
+State is projected through views, not direct SQLite reads by agents (`D2624218B9C64BF29A2D203A2D`). Workers are always-on operators with opt-out controls, not strategic planners (`runtime.system_map`, `SAF9AVJ8HD7W5DK847W72ETXHR`).
 
-`substrate/schema.sql` declares one append-only `events` table. Every domain primitive is an event kind in `substrate/event_kinds.ts` (open-vocabulary registry, currently ~120 entries). Schema invariants:
+## 4. The Act Primitive
 
-- `events(id, ts, directive_id, task_id, parent_task_id, loop_id, substrate_origin, kind, payload, context_refs, failure_kind, residual, predicted_residual, action_artifact_id, verifier_artifact_id, embedding, embedding_version)`
-- `act_artifact(id, runtime, kind, body, declared_sandbox, score, confidence, posterior_alpha, posterior_beta, status, recent_residual_mean, recent_kill_count, supersedes, superseded_by, …)`
-- `vec_events` virtual table (sqlite-vec) — disk-resident embedding index over `events.embedding`.
+Every action is an act tuple: intent, action_artifact_id, verifier_artifact_id, predicted_residual, reasoning/effect summaries, cited knowledge/artifacts, and affected resources (`A24CCF6C2C2C4E85A91A529DFB`). The substrate projects one envelope into action prediction, scoring, retrieval binding, candidate confirmation/contradiction, applied-change rows, owner-observed outcomes, and credit rows (`17WRSQT7015DFDPQN5SXGM25FG`).
 
-**Views (computed projections, `substrate/views.ts`, ~6 000 LOC):** 38 named views including `task_graph_view`, `ready_tasks_view`, `dispatch_resolved_view`, `act_artifact_registry_view`, `embedding_index_view`, `promoted_knowledge_view`, `top_laws_view`, `owner_profile_view`, `owner_rendering_policy_view`, `directive_view`, `task_critical_path_view`, `active_inference_view`, `artifact_warning_view`, `model_routing_view` (the last five landed `f92b652` 2026-05-19, closing the §4.2 named-views gap).
+The artifact-credit gap is the current rate limiter: only a tiny share of scored actions credit artifacts, so selected action/verifier artifacts must be auto-bound before frontier predicates can compound (`SAF9AVJ8HD7W5DK847W72ETXHR`, `A4V81PN9E960S02MWSM4HSM5G4`, `4VERR5ZBH57QQ0KC1ZD50TAAT0`).
 
-**Workers (`runtime/daemon.ts`):** every always-on subsystem registers via `runtime/worker_autostart.ts`. Canonical opt-out: `ACC2_DISABLE_WORKERS=<csv>`. Reactive workers wake on event publication (`runtime/activation_bus.ts`); the shared 30-min `reactive_safety_net` guarantees deadline coverage. Timer-only workers handle elapsed-time decay (recipe_inertia 1h, rehabilitation 30min, integrity 6h, compaction 1h, lifecycle_closure_sweep 6h).
+## 5. Runtimes & Sandboxes
 
-**Tests:** `substrate/views.test.ts` (92 tests, all 38 views projected), `runtime/daemon.test.ts`, `tests/wal_burst_resilience.test.ts`, `tests/restart_quiescence.test.ts`.
+Artifacts can target bun, uv, or camofox-browser; runtime is execution metadata, while artifact kind stays open vocabulary in the registry (`879407FA824B4B94A96CE7ADBC`). Sandbox declarations must state reads, writes, network, processes, env, CPU, wall, and memory budgets (`6FDAD5FFB0954E3094D24808CE`).
 
----
+When nsjail or equivalent enforcement is absent, the runtime must emit warnings rather than pretending the sandbox is hard (`5EKBX6PTDS6XS1XAZXAZD0NMX4`). Opening runtime type vocabulary remains deferred until SandboxDecl and runner registry are redesigned (`A4V81PN9E960S02MWSM4HSM5G4`).
 
-## 4. The Substrate Daemon — Always-On, Externally-Reachable
+## 6. Brain Bridge & Depth-1 RLM
 
-The daemon IS the operator. `runtime/daemon.ts` (~2 200 LOC) owns:
+The brain is opencode gpt-5.5, pinned rather than scored as a model marketplace. The bridge denies filesystem-write tools and treats zero-substrate-frame success as `brain_silent_exit` prompt-compliance failure (`4EAFA894A8194C4CA74F08430C`, `SAF9AVJ8HD7W5DK847W72ETXHR`).
 
-- The WAL-backed SQLite connection (single writer per process; multi-process WAL coexistence is safe — `ACC2_DAEMON_ROLE=server|worker|all` allows split deployment).
-- The MCP server (`runtime/mcp_server/index.ts`, fastmcp Streamable-HTTP at `/mcp`) — brain and CLI consume the same substrate surface.
-- External ingress (`runtime/external_ingress.ts`) — webhook POST → `external_event_received`, per-source bearer tokens registered via `substrate.register_external_source`.
-- Worker supervision (`runtime/supervisor.ts`) — redispatch-storm / DAG-explosion / bridge-health detection on a 30s reactive tick.
-- Health + readiness (`runtime/readiness.ts`) — every always-on worker registers its tick deadline; `/health` flags stuck workers.
-- Hot reload (`runtime/hotreload_manifest.ts`, `runtime/hotreload_worker.ts`) — declared module manifest with in-process / quiescent / full-restart strategies. The composer reload is via reloadable slot so live brain dispatches see new logic without restart.
-- Restart drain (`runtime/daemon_supervisor.ts`) — graceful shutdown with bounded drain budget.
+Depth-1 RLM means small invariant prompt metadata plus retrieval from substrate state; detailed emission grammars, examples, gates, and runbooks are substrate-level policy artifacts, named here but not re-explained (`433DGRZ27547KESBFYR4FZ10WC`, `S1PCZEFEDD4BS04RVPQF2JNBY8`). Cycle-1-only is enforced by dispatch and refinement edges (`206B19C06C2E461A8E8C3720C6`).
 
-State paths (`runtime/state_paths.ts`): single canonical layout under `${ACC2_STATE_DIR ?? ~/.accint}`. No `state/` subdir, no v1 alias.
+## 7. Knowledge Merger
 
-**Tests:** `runtime/daemon.test.ts`, `runtime/external_ingress.test.ts`, `runtime/mcp_server.test.ts`, `tests/restart_quiescence.test.ts`, `tests/wal_burst_resilience.test.ts`, `runtime/daemon_supervisor.test.ts`.
+Knowledge candidates from brain, Claude, owner-derived signals, and substrate automation enter one merger: semantic dedup, contradiction holding, synthesis, origin calibration, and Beta promotion (`FE8DF6H1KN1590MGP6JHFPTWYW`). Neither LLM canonizes knowledge by assertion (`A24CCF6C2C2C4E85A91A529DFB`).
 
----
+The next frontier makes merger rules themselves scored artifacts, so dedup thresholds, synthesis thresholds, and corroboration weights earn posterior evidence by outcome (`D2NCDZ76RD11K3PEA4D5CCZRA8`).
 
-## 5. The Universal Act Primitive
+## 8. Dispatch & Routing
 
-Every action is an `act_tuple_recorded` event with shape:
+Routes are open vocabulary: replay, Claude inline, opencode brain, owner clarification, or blocked/deferred; route axes are evidence-bearing strings, not enum limits (`5F21YF13Z13W5FNJ6DR2YJ04M0`). Fairness floors protect operator work from starvation when refinement branches are busy (`SAF9AVJ8HD7W5DK847W72ETXHR`).
 
-```typescript
-{
-  intent: string,              // free-text statement of what the action is for
-  action_artifact_id: string,  // open-vocabulary id; registry row in act_artifact
-  verifier_artifact_id: string,
-  predicted_residual: number | { value: number, feedback_window: { duration_ms, classification } },
-  reasoning_summary: string,
-  effect_summary: string,
-  verifier_kind: string,       // open-string vocabulary: deterministic_code, peer_llm_claude,
-                                //   owner_confirmation, external_signal, owner_emotional_signal, …
-  cited_knowledge_ids: string[],
-  cited_artifact_ids: string[],
-  affected_resource_refs: ResourceRef[],
-}
-```
+Dispatch quality becomes a posterior boundary after Tier 0 trust and Tier 3 structural scorers close (`G3PR7X6TCD4T57D7T6GXCDY9AW`).
 
-The substrate's `projectActTupleRecorded` (`runtime/events.ts`) expands one envelope into derived rows: `action_predicted`, `action_scored`, `applied_change_committed`, `retrieval_binding`, `candidate_confirmed` / `candidate_contradicted`, `owner_observed_outcome_recorded`. Idempotency keys = `source_act_id + projection_kind + role/target`.
+## 9. Credit, Retrieval, Owner, Closure
 
-The runtime is the abstraction on one side; the act_artifact registry row is the abstraction on the other. **There is no closed enum for verifier_kind or artifact kind** — vocabulary is discovered through use (k_252-closure proof: a closed enum is a typed-predicate-lattice the substrate refuses).
+Credit distributes verifier outcomes across cited knowledge and artifacts; artifact auto-binding revives the selected action/verifier path (`17WRSQT7015DFDPQN5SXGM25FG`). Retrieval uses exposure bindings plus accepted/rejected use signals; the rejection emitter extends item-level and section-level credit (`AT2T17VAP159Z385DCM7GBTN4G`, `XZBAVD6YR53894C4TECXRC6440`).
 
-**Reference:** `runtime/act_tuple.ts`, `runtime/events.ts`, `runtime/internal_act_projection.ts`. Tests: `runtime/act_tuple.test.ts`, `runtime/events.test.ts`, `runtime/internal_act_projection.test.ts`.
+Owner profile is open-ended evidence, not a persona enum; owner outcomes close non-technical loops (`B13YVJDAJD5E1928KG3Q97P7RW`). Closure audit is substrate truth and must refuse claims not supported by ledger rows (`SAF9AVJ8HD7W5DK847W72ETXHR`).
 
----
+Owner alignment is the same posterior-scored loop as knowledge and artifacts. `owner_state_estimator_predicate`, `owner_state_transition_predicate`, `owner_forecast_predicate`, `renderer_predicate`, and `theory_of_mind_predicate` are `act_artifact` rows calibrated by owner-observed outcomes through the shared Beta posterior, retrieval, merger, and credit machinery — the owner is another actor scored in the same substrate, not a persona enum.
 
-## 6. Runtimes — Three Sandboxes, One Registry
+## 10. Universal Posterior Boundary
 
-Action and verifier artifacts run in one of three sandboxed runtimes. Each declares a sandbox via `declared_sandbox` in the artifact registry row; admission runs the fixture once and refuses if residual >= 0.2.
+Every decision boundary that can be scored should become a row with posterior evidence (`FE8DF6H1KN1590MGP6JHFPTWYW`). The eight moves are: 0 artifact-credit revival, 1 universal threshold registry, 2a section inclusion, 2b prompt-content and prose-rule variants, 3 supervisor predicates, 4 counterfactual credit, 5 meta-credit, and 6 binding-as-mutation (`4VERR5ZBH57QQ0KC1ZD50TAAT0`, `HW5CRSMF8S1NDF4HGT2E2PFKZM`, `V6M5EMAPQD2G32HNCDH3PAE0G8`).
 
-| Runtime | Module | Purpose | Sandbox shape |
-|---|---|---|---|
-| **bun** | `runtime/runtimes/bun.ts` | TypeScript code: substrate API, HTTP, arithmetic, text | `cpu_ms`, `wall_ms`, `memory_mb`, `fs_read[]`, `fs_write[]`, `net_allow[]`, `proc_allow[]`, `env_requires[]`, `substrate_access: ro|rw` |
-| **uv** | `runtime/runtimes/uv.ts` | Python: numpy/pandas/PIL/scrapy/etc., nsjail-isolated when present | Same shape; `env_requires` for credentials |
-| **camofox-browser** | `runtime/runtimes/camofox.ts` | Playwright + Camoufox: browser-driven workflows under stateful per-profile mutex | `CAMOUFOX_OS / LOCALE / HEADLESS` env, per-profile-root mutex |
+Tier S frontiers land in this order: S2 causal-edge posterior, S4 merger-rule predicates, S5 goal-shape extraction strategy, S3 trajectory-motif extractor, S1 DAG decomposition strategy (`G3PR7X6TCD4T57D7T6GXCDY9AW`, `3F2FK5J04144D9MCRKDXHH5CA8`, `D2NCDZ76RD11K3PEA4D5CCZRA8`, `3517MGZAEH6856BRDSCT1HXJM8`, `NWZSMV8F5N33N6FG4XKW9ZDHEC`, `MQQCK9FQ452H1FYA4H72Z9RJPR`).
 
-Sandbox enforcement state (PARTIAL — frontier): bun has full nsjail enforcement on Linux when nsjail is installed; uv and camofox have parity gaps tracked under the §11 frontier. Honor-system warnings emit `sandbox_unenforced_warning` so audit catches what wasn't structurally enforced.
+Pedagogical RL moves fold into the same universal posterior list: `citation_spike_auditor`, `pedagogical_reward_predicate`, `surprisal_gate_predicate`, and `composer_policy_predicate`. `composer_policy_predicate` is the deepest move because it routes closure-audit and owner-outcome evidence into future prompt composition, making the substrate's depth-1 RLM pedagogically self-guided rather than fixed.
 
-**Subprocess supervision (`runtime/subprocess_lifecycle.ts`):** every runtime emits the canonical lifecycle: `runtime_subprocess_started → runtime_subprocess_resource_warning? → runtime_subprocess_soft_terminated | runtime_subprocess_hard_killed | runtime_subprocess_orphaned`. Health metrics surface in `dispatch_resolved_view`.
+## 11. Failure Modes
 
-**Tests:** `runtime/runtimes/bun.test.ts`, `runtime/runtimes/uv.test.ts`, `runtime/runtimes/camofox.test.ts`, `runtime/sandbox.test.ts`.
+The repair pattern is observability event, tightened deny or verifier rule, then closed alarm. The bridge already classifies silent exits; the deny-list closed source-checkout mutation risk after the observed bypass (`4EAFA894A8194C4CA74F08430C`, `SAF9AVJ8HD7W5DK847W72ETXHR`).
 
----
+Failure counts belong in `failure_view`; this file keeps only the invariant pattern (`D2624218B9C64BF29A2D203A2D`).
 
-## 7. Brain Bridge — opencode Subprocess (Strict Read-Only Surface)
+## 12. Open Frontier
 
-`runtime/bridge/opencode.ts` (~1 500 LOC) spawns `opencode run --format=json --agent acc2-brain --model <model> <prompt>` and streams its NDJSON frames into `bridge_frame_received` events. Frame shapes: `step_start`, `tool_use`, `tool_result`, `text`, `error`.
+PARTIAL items are contracts, not prose promises:
 
-The brain is **read-only against the source checkout** (k_201 proof of provenance):
+- Trust gaps: closure audit ledger truth, artifact auto-binding, knowledge binding enforcement, and artifact-kind backfill (`SAF9AVJ8HD7W5DK847W72ETXHR`, `4VERR5ZBH57QQ0KC1ZD50TAAT0`, `SDP3E1V50973X1AZ4V2FSERCEC`).
+- Outcome channels: owner outcome, retrieval rejection, and cross-candidate corroboration (`AT2T17VAP159Z385DCM7GBTN4G`, `XZBAVD6YR53894C4TECXRC6440`).
+- RLM-efficiency substrate contracts: on-demand policy bundles, prompt content variants, prose-rule variants, section retrieval credit, and surface-existence scoring (`433DGRZ27547KESBFYR4FZ10WC`, `HW5CRSMF8S1NDF4HGT2E2PFKZM`, `V6M5EMAPQD2G32HNCDH3PAE0G8`, `HBQ8FM8HED2AX2R7EDCVY15R8W`).
+- Operations: sandbox parity, freeze-state, token rotation, backup/export cadence, migration sweep, and SQL worker-thread pool (`A4V81PN9E960S02MWSM4HSM5G4`).
 
-1. The agent block in OPENCODE_CONFIG enumerates positive tools only (`runtime/bridge/config.ts:BRAIN_OPENCODE_TOOL_SURFACE`): `read`, `glob`, `grep`, `list`, `lsp`, and every `substrate.*` / `runtime.*` MCP method.
-2. The top-level `permission` map stamps explicit `deny` for every filesystem-write tool: `bash`, `edit`, `write`, `apply_patch`, `task`, `external_directory`, `repo_clone`, `repo_overview`, `patch`, `multiedit`, `shell`. (Commit `1570521`, 2026-05-19 — earlier positive enumeration alone was insufficient: opencode 1.14.50 treats `tools` as additive, so the deny gate is the load-bearing structural fix.)
-3. The brain cwd is an isolated tempdir per dispatch.
-
-Brain side effects flow only through the substrate event ledger: `brain_dispatched`, `bridge_frame_received`, `brain_reasoning_recorded`, `brain_message_emitted`, `act_tuple_recorded`, `knowledge_candidate`, `act_artifact_candidate`, `contract_amendment_proposed`, `lesson_extracted`, `task_committed`, `bridge_completed | bridge_failed`. Claude-side `cli/apply.ts` applies brain-proposed amendments under the ApplyRoute predicate (`AUTO_APPLY | OWNER_GATE | AUTO_DEFER_DEPENDENCY | AUTO_DECLINE_*`).
-
-Failure-mode hardening: `bridge_stuck` watchdog (first-frame deadline), `brain_silent_exit` classifier (zero substrate frames + exit_code 0), overall wall-clock timeout, mcp-handshake window.
-
-**Tests:** `runtime/bridge.test.ts` (19 tests), `runtime/bridge_health.test.ts`, `runtime/alignment/*.test.ts`.
-
----
-
-## 8. Knowledge Merger (Model D)
-
-`substrate/extractors.ts` (~1 800 LOC) is the substrate's brain. It runs reactively on every new candidate emission and on a 5-min safety-net tick. Pipelines:
-
-- **Semantic dedup (§3.6.1 Rule 1):** cosine-similarity over `vec_events`; ≥ 0.92 collapses into one row with corroborating evidence.
-- **Contradiction holding (Rule 2):** opposing candidates at the same goal/anchor produce `contradictory_candidates` rows; neither promotes until owner adjudication or counter-evidence.
-- **Synthesis (Rule 3):** sufficiently corroborated candidates emit `knowledge_synthesized` whose citation chain points to BOTH source events.
-- **Per-origin posterior bias (Rule 4):** `origin_promotion_view` + `origin_promotion_by_directive_view` learn that some origins (`claude_root` vs `opencode`) promote at different rates per goal_shape; reranker uses both global and per-shape signals.
-- **Posterior promotion (`maybePromoteKnowledge`):** Beta posterior lower bound vs per-owner-per-goal-class threshold (`runtime/posterior_promotion.ts`).
-
-Both Claude and the brain emit `knowledge_candidate` and `act_artifact_candidate` as co-equal inputs to the same merger. **Neither LLM makes canonical knowledge by assertion.**
-
-**Recipe-shape knowledge** (`payload.recipe_shape.enabled = 1`) replaces the former first-class `recipe_extracted` event family (universality proposal #2, commits `2c6ef8f` + `67c430a` + `5567e90`). 598 recipe-shape rows live; `recipes_latest_view` and `recipe_registry_view` project them.
-
-**Tests:** `substrate/extractors.test.ts`, `runtime/knowledge_dedup.test.ts`, `tests/non_technical_n1_promotion.test.ts`.
-
----
-
-## 9. Dispatch & Routing
-
-`runtime/task_scheduler.ts` + `runtime/task_dispatcher.ts` + `runtime/dispatch_decider.ts`. Routes (open-string, current vocabulary):
-
-- **`substrate_replay`** — recipe match confidence >= `RECIPE_REPLAY_THRESHOLD` (0.85). Brain-free dispatch; substrate replays the action/verifier trajectory.
-- **`claude_inline`** — low-risk leaves identified by `low_risk_inline_patterns_view` (scored knowledge with `pattern_kind` ∈ `extension|prefix|exact|glob`). Main Claude instance executes; no opencode subprocess.
-- **`opencode_brain`** — full brain dispatch.
-- **`deferred_blocked`** — preconditions failed (target file in another terminal's claim, irreversible effect pending owner consent, etc.).
-
-`dispatch_decided` event records the route, open-ended `routing_axes` (one_shot_confidence, information_gap, reversibility, owner_control_need, decomposition_value, cost_pressure, time_sensitivity), and per-route `route_scores`. **Routing axes are open-vocabulary; new axes emerge by appearing in events, not by enum extension** (universality proposal #6, commit `f7e2836`).
-
-**Fairness floor (commit `b305719`):** age bonus prevents operator-dispatch starvation when brain refinement edges saturate the scheduler. Beyond 5 min of waiting, age bonus grows linearly; after 30 min it beats any branchCompetitionScore. Operator dispatches never starve indefinitely.
-
-**Multi-stakeholder + interference + crisis mode:** `runtime/stakeholder_compositor.ts`, `runtime/interference.ts`, `runtime/crisis_mode.ts`. Each surface has a passing fixture in `runtime/fixtures/d_*.ts`.
-
-**Tests:** `runtime/task_scheduler.test.ts`, `runtime/task_dispatcher.test.ts`, `runtime/dispatch_decider.test.ts`, `runtime/fixtures/*.test.ts` (8 universal-goal pilots).
-
----
-
-## 10. Credit, Retrieval, Owner, Closure
-
-### Credit (`runtime/credit.ts`)
-
-Shapley distribution across cited knowledge + artifacts. One outcome (`action_scored.residual`) flows to:
-- The action artifact (Beta posterior update).
-- The verifier artifact (verifiers accrue their own posterior).
-- Every cited knowledge_id (emits `candidate_confirmed | candidate_contradicted`; the extractor recomputes the candidate's Beta posterior synchronously after each credit emit — Audit `b7kjyk2k1` cold-start fix).
-- Every cited act_artifact (via `act_artifact_score_updated`).
-
-Weights = `raw_i / Σ raw` where `raw_i = 1 / 2^(i+1)` in first-seen order. LATM novelty bonus (1.5×) on first credit for an artifact's novel goal_shape (`runtime/goal_shape.ts`).
-
-### Retrieval (`runtime/retrieval.ts`, `runtime/embedding_index.ts`, `runtime/embedder.ts`)
-
-Disk-resident `sqlite-vec` `vec_events`. Query path: embed query → SQL KNN against `vec_events` → cosine-distance hits → rerank by `score × (1 + posterior bias)` × per-section K-cap. The composer slot in `runtime/prompt_composer.ts` carries open-ended `aspect_weights` and `domain_hints` so callers steer retrieval. Embeddings are `text-embedding-3-small` (1536 dims).
-
-Brain prompt budget default 32 000 tokens (`runtime/prompt_composer.ts:DEFAULT_BUDGET_TOKENS`, commit `25eb1e9`). Floor sections (top_laws, owner_profile, owner_rendering_policy, retrieved_knowledge) resist truncation; budget overruns emit `dispatcher_violation{kind: floor_section_missing}` observational events but do not refuse the compose.
-
-### Owner Model (`runtime/owner_profile.ts`, `runtime/owner_gate.ts`)
-
-Open-ended learned profile (not a persona enum). Fields the substrate observes and re-derives from outcomes:
-- `rendering_signals`, `autonomy_signals`, `control_signals`, `risk_signals`, `collaboration_signals`, `goal_continuity_signals` — each `Record<string, number>`, all keys discovered through evidence.
-- `preferred_terms`, `avoided_terms`, `exposed_concepts`, `understood_concepts`, `declined_concepts`, `detected_language`, `autonomy_score`, `autonomy_scope`, `manual_review_patterns`, `time_window`, `hot_topics`, `things_to_never_do`.
-
-`owner_observed_outcome_recorded` events feed back to credit; `owner_insight_candidate` / `owner_profile_recorded` updates durable preferences.
-
-### Closure & Learning (`runtime/lifecycle_closure_sweep.ts`, `runtime/closure_audit.ts`)
-
-A root task is not complete until a closure verifier emits `task_closure_audited` with `closure_residual < 0.3`. Every substantive trajectory extracts either:
-- `contract_amendment_proposed` — repo/docs/CLI drift, anchored_replace_v1 diff with `target_resource` + `anchor` + `before` + `after`.
-- `lesson_extracted` — reusable process/recipe/verifier/failure pattern.
-
-`feedback_window` semantics on `predicted_residual`: long-horizon outcomes (`long`, `very_long` classifications) keep their lifecycle open through the closure sweep instead of getting retired as stale (commit `99b5a30`, F7 non-technical goal extensions).
-
-**Tests:** `runtime/credit.test.ts`, `runtime/retrieval.test.ts`, `runtime/owner_gate.test.ts`, `runtime/owner_profile.test.ts`, `runtime/lifecycle_closure_sweep.test.ts`, `runtime/closure_audit.test.ts`.
-
----
-
-## 11. Open Frontier — Path to Final State
-
-What's PARTIAL today, classified by why it's not closed and what closes it. Each entry names the contract shape to ship.
-
-### F-Sandbox-Parity (Phase G remainder)
-
-uv and camofox runtime lanes work in tests but live evidence (`SDT7PDPYX13J3BMAMANZHG58F4`, `VQA4E2HC3H7X16M56JB3PJ2YXW`) shows preflight/credential parity gaps with bun. nsjail enforcement is honor-system on uv when nsjail is absent; camofox profile-mutex doesn't enforce resource limits.
-
-**Closes by:** structural sandbox enforcement test fixtures that REFUSE to admit a uv/camofox artifact when nsjail/firejail isn't proven present AND the declared sandbox would otherwise be ignored. Contract should land `runtime/runtimes/{uv,camofox}.ts` parity events + `sandbox_unenforced_warning → admission_rejected` upgrade.
-
-### F-Father-v2 (Phase K remainder)
-
-Father is shipped for the original constrained recurring-task contract but is being re-scoped toward event-reactive journaling/pacing rather than planner-era objective selection (evidence `V9AG24HSX53A51BEXM17EQPP84`, `MYBBGQ9N0D0DVCYX49FN1HGCEC`).
-
-**Closes by:** drop planner-era responsibilities (`6XBE0M3NJ91EK1HW7D95272G7M`), keep drift detection + self-suspend, add event-reactive maintenance template (e.g., quarterly retro, weekly status digest) so Father becomes a substrate scheduler not a strategist.
-
-### F-Owner-Freeze-State (Phase L remainder)
-
-v1 is archive-only in practice and `722f928` deleted the migration code. The operational owner-freeze/drain/archive state is now gated by owner consent + narrow-safe-scope apply gates rather than a one-time switch.
-
-**Closes by:** `acc admin freeze-state` CLI + a freeze-state audit event (kind to be designed in-contract; not yet registered) so the operational state is auditable and reversible per `9F9QH3BHX12KQ1YPX0K7WP33NC` safe-additive-contract evidence.
-
-### F-Adaptive-Scoring (the F13 frontier, GEZ955QDYN3R)
-
-Many timers and threshold constants are hardcoded universals pending learned adaptive scoring: `NOVELTY_BONUS_MULTIPLIER = 1.5`, `RECIPE_REPLAY_THRESHOLD = 0.85`, `INLINE_PATTERN_SCORE_THRESHOLD = 0.7`, `RECIPE_INERTIA_DECAY_DAYS = 14`, `DEFAULT_BUDGET_TOKENS = 32000`, embedder/compaction/rehab tick intervals.
-
-**Closes by:** one `adaptive_scoring` worker that consumes outcome correlations and emits `threshold_recalibrated` events; the runtime reads through a single accessor that returns either the learned value or the universal default. Same machinery as Beta posterior promotion — substrate self-extends.
-
-### F-Knowledge-Cold-Start (audit `b7kjyk2k1`)
-
-Recent data: only 8.2 % of candidates ever get a `candidate_confirmed | candidate_contradicted` verdict. The substrate accumulates candidates faster than it credits them.
-
-**Closes by:** the credit-time synchronous refresh ALREADY shipped (`runtime/credit.ts:maybePromoteKnowledge` import). What remains is the upstream: cross-origin auto-credit when one candidate's claim semantically corroborates another's outcome (rather than waiting for both to be cited together). Contract should land a per-origin × per-goal-shape extractor that pairs structurally-similar candidates and emits cross-credit events.
-
-### F-Substrate-Closure-Validation
-
-Brain dispatch `MY0FWYBSKX5PBCVWJBHSQX4GT4` (2026-05-19) demonstrated that `task_closure_audited.checks` reported `each_row_has_commit_evidence: true` for amendments that were NEVER emitted as events. The audit is checking the brain's claim, not the substrate's ledger.
-
-**Closes by:** the closure-audit verifier MUST query the events table directly and refuse `closure_residual < 0.3` when `target_files` was declared but `contract_amendment_proposed` count for those targets is zero. Substrate-truth gate, not advisory.
-
-### F-Substrate-Migration-Sweep (`code_artifact_*` aliases)
-
-Historical event rows physically carry `kind` strings in the legacy `code_artifact_*` set. Reader paths in 6 modules (artifact_store, retrieval, task_dispatcher, extractors, closure_deliverable_check, brain_dispatch_reconciler) do `IN ('act_artifact_*', 'code_artifact_*')` OR-clauses. The aliases stay registered in `substrate/event_kinds.ts` because production DBs would otherwise refuse them.
-
-**Closes by:** one-time substrate-row rewriter worker that scans the events table for legacy `kind` strings and rewrites them to canonical equivalents. After the worker reports zero remaining legacy rows on every shipped DB, the OR-clauses and registry aliases become dead code.
-
-### F-Backup-Export-Restore (Top-10 #10 in legacy production-readiness audit)
-
-`acc admin export` exists (`cli/admin_export.ts`); a `acc admin import` symmetrical exists (`cli/admin_import.ts`). Both are tested. The remaining gap is the operational story — owner-facing docs on when/how to use them, and a scheduled-export cron primitive that emits `state_exported` on a cadence the owner profile picks.
-
-### F-Token-Rotation
-
-Admin token + external-push token are minted once at first run, written to `${stateDir}/v2.sock.token`, plaintext, no rotation path. (Legacy production-readiness Top-10 #5.)
-
-**Closes by:** `acc admin rotate-token` CLI that mints a new token, atomically replaces the file, emits `admin_token_rotated`, and gives existing CLI sessions a deadline to re-authenticate.
-
----
-
-## 12. Failure Modes — Observed, Classified, Tested
-
-`failure_view` projects `task_failed.failure_kind` counts; `supervisor.ts` watches for redispatch storms, DAG explosions, bridge health. Observed in production (event counts live):
-
-- `dispatcher_violation`: 97 historical; now 0/hour after the 32k budget + floor-section fix (commit `25eb1e9`).
-- `lane_routing_refused: decorative_citation`: 95 historical; now 0/hour after the unique-prefix citation resolver landed (commit `2a33f46`).
-- `worker_tick_overrun`: 266 historical, all on embedder under OpenAI-backlog drain; threshold raised 6×→10× (commit `8df5b56`) so the alarm only fires on structural hangs.
-- `bridge_failed: timeout`: 33 historical; the bridge wall-clock kill is now firing reliably; pre-fix one dispatch ran 60 min vs 15 min limit.
-- `supervisor_redispatch_storm`: 22 historical; gate triggers at 7 dispatches in 5 min window per task.
-- `closure_obsolete`: 1 957 historical — these are the lifecycle sweep correctly retiring stuck `contract_amendment_proposed` / `owner_input_required` / `task_node_opened` rows whose terminator never arrived.
-- `brain_silent_exit`: classifier in `runtime/bridge/opencode.ts` catches the worst-frame-shape pattern (zero substrate frames + exit_code 0).
-- `brain_native_filesystem_bypass`: 1 observed (the §17 rewrite). Caught by post-hoc audit; structural fix shipped commit `1570521` (explicit `deny` for filesystem-write tools).
-
-The pattern: **observability event → tightened deny rule → closed-out alarm**. The substrate accumulates failure-mode shapes the way it accumulates knowledge.
-
----
+Security and schema surfaces have a carve-out: admin_token, deny-lists, owner_gate `things_to_never_do`, foreign keys, NOT NULL, and single-writer SQLite earn keep decisions by absence of violation, not by usage frequency (`HBQ8FM8HED2AX2R7EDCVY15R8W`, `RPB5W9PRPS6S3EPTYAE33JD4MW`, `5EKBX6PTDS6XS1XAZXAZD0NMX4`).
 
 ## 13. Operating Contract
 
-The orchestrator's live operating manual is `system/acc2/CLAUDE.md`. Recovery recipes live in `system/acc2/.claude/rules/orchestrator-runtime.md`. Top invariants enforced there:
-
-1. **Substrate is the operator.** Read state via MCP/views, not direct SQLite.
-2. **Depth-1 retrieval is load-bearing.** Brain receives a thin composed prompt; broader context comes from refinement edges, not from copying state into chat.
-3. **Cycle-1-only is structural.** Refinement, not iteration.
-4. **Citation = mutation.** Cite ids that shape an action; decorative citations break the k_555 chain at the binding step.
-5. **No two-way paths.** Open vocabulary is fine; closed enums that re-create the typed-predicate-lattice are refused.
-6. **Universal intent ingress.** Every non-trivial owner intent enters through `acc task`. No pre-routing; substrate decides the lane.
-
-This document and CLAUDE.md are the two doors into the organism. This one tells you what is; CLAUDE.md tells you what to do.
-
----
+`CLAUDE.md` is the live operator contract; `.claude/rules/orchestrator-runtime.md` holds recovery and runtime operating procedures (`D2624218B9C64BF29A2D203A2D`). This document states what the organism is; those files state what the orchestrator must do (`A24CCF6C2C2C4E85A91A529DFB`).
 
 ## 14. Universal Intent
 
-The thesis: a substrate that compounds intelligence by accumulating events, ranking by Beta posterior, and routing through learned policies works the same way whether the goal is writing code, sending a partner outreach email, researching a vendor, deciding whether to take a job offer, or processing grief. Verifier residual is the universal score; cited knowledge IDs are the universal currency; refinement edges are the universal recursion.
-
-Most universal, elegant, effective, adaptive, fast, efficient — proven only by the path: every shipped capability is in the registry, every credit closes the chain, every failure mode lands in `failure_view`, every threshold falls under adaptive scoring once F13 closes. The organism is the substrate; the substrate is the operator; the LLMs are subroutines.
-
-**Live verdict (`acc admin substrate-status`): ALIVE.**
-
----
-
-## 15. Meta-Principle — Every Boundary Is a Posterior-Scored Row
-
-The deepest universality move (cited `KR6061MKMD30` + `2A6K5S2RJD3K`): **every decision boundary — including the boundaries that score other boundaries — is a row in the open registry with a posterior, not a code constant.** The act-loop runs over its own configuration. The system becomes self-improving in a single recursive level: artifacts score artifacts; weights score weights; thresholds tune thresholds.
-
-Today the substrate has the primitive (`act_artifact` is open-kind; any decision can be encoded as one) but only a fraction of decision boundaries are rows. The rest are hardcoded constants. Closing this is the **F-Universal-Posterior-Boundary** frontier — the meta-contract that subsumes F13 adaptive-scoring (§11) and turns the organism from "adaptive at the leaves" into "adaptive end-to-end."
-
-### Six high-leverage moves toward the meta-principle
-
-**1. Universal threshold registry.** Every literal constant (`closure_residual < 0.3`, supervisor `redispatch_storm threshold=6`, `RECIPE_REPLAY_THRESHOLD=0.85`, `INLINE_PATTERN_SCORE_THRESHOLD=0.7`, `RECIPE_INERTIA_DECAY_DAYS=14`, `DEFAULT_BUDGET_TOKENS=32000`, `NOVELTY_BONUS_MULTIPLIER=1.5`, redispatch-storm window) becomes an `act_artifact{kind: "threshold_predicate"}` row with its own Beta posterior. The threshold updates from outcome credit: did committing at residual=0.28 prove correct downstream? Posterior shifts. `closure_predicate` already demonstrates the shape; extending to all literal constants is the universal collapse.
-
-**2. Posterior-scored prompt composer.** Each prompt section (`top_laws`, `retrieved_knowledge`, `owner_profile`, `owner_rendering_policy`, `directive_text`, `task_goal`, `runtimes_available`) gets its own posterior measuring "does including this section correlate with low `closure_residual` for this goal class?" The composer ranks sections by `posterior × inverse_token_cost` under budget — `top_laws` may sometimes lose to `retrieved_knowledge` depending on goal class (per `21YN6ZG30S6X` brain_prompt_goal_class_adaptive_design retrieval). Sections that don't earn their tokens drift down; the floor mechanism (commit `15863c5`) protects load-bearing rules from being dropped entirely.
-
-**3. Posterior-scored supervisor.** The `supervisor_redispatch_storm threshold=6` killed two dispatches this session. If 5 dispatches converges 80 % of the time on goal-class=substrate-side-registration, the threshold rises for that class. Pathology detection becomes per-(goal_class, signal_shape) instead of one global rule. Same machinery as the ApplyRoute predicate, applied to supervisor invocations.
-
-**4. Counterfactual credit.** Currently credit flows only along the chosen-and-succeeded path. Add counterfactual: when a dispatch succeeds, also credit/debit the artifacts that ranked top-K but weren't selected — would they have done the same, worse, or better? This calibrates the selector exponentially faster than positive-only credit. The runtime artifact registry already has the rankings (`artifact_routing_view`); the data is there, just not consumed.
-
-**5. Meta-credit on credit formulas.** Credit weights (Shapley vs linear vs degenerate fallback in `runtime/credit.ts:822-830`) are themselves a choice. Make the credit-formula choice an `act_artifact{kind: "credit_distribution_predicate"}` row with posterior calibrated by "did calibration improve after this choice?" The credit of credit calibration. Recursive but bounded — meta-level is one level, not infinite.
-
-**6. Knowledge-binding-as-mutation enforcement.** k_554 says citation without state mutation is decorative. Today `retrieval_binding` rows record what was surfaced; they don't always record what was used in the action. Add a deterministic check: every `act_tuple_recorded.cited_knowledge_ids` must appear in `action_predicted.reasoning_summary` or similar bound field, OR the citation is auto-stripped at the emit boundary. Forces real binding. Same shape as the deterministic preconditions in `apply_route_predicate` (commit `15863c5`).
-
-### Footnote — Bun SQLite async is fake-async; the real fix is worker threads
-
-The substrate currently uses `bun:sqlite` (synchronous). The Promise-based `Bun.SQL` driver (with `sqlite://...` URLs) exists but is NOT a true thread-pool offload — it is a Promise wrapper around the same synchronous calls. Measured 2026-05-19: a heavy CROSS JOIN took 23.67 ms with bun:sqlite (0 event-loop ticks during) vs 28.34 ms with Bun.SQL (also 0 ticks during). Both block the JS event loop for the full duration; Bun.SQL adds Promise overhead without giving up the thread.
-
-This is consistent with Bun issue #978 (open since 2022-08-04): SQLite async is "probably necessary eventually but always slower outside of this use case." For our event-loop starvation paths (health counts, integrity counts, brain self-audit aggregates, trajectory replay per-node counts, prometheus exporters — cited `6ZW4GQEEWN4J`), the canonical fix is a worker-thread pool with one Database connection per worker, not a driver swap. See roadmap.md T3.8 for the contract.
-
-### Why this is the universality collapse
-
-Today the organism has TWO classes of decisions:
-- **Open-vocabulary**, posterior-scored: artifacts, knowledge, recipes, owner profile, routing axes.
-- **Closed-vocabulary**, code-constant: thresholds, composer rules, supervisor gates, credit weights, citation binding.
-
-The meta-principle ELIMINATES the closed class. Every boundary moves to row + posterior. The cold-start tradeoff (a fresh threshold-artifact has no evidence; system must boot from sane defaults) is mitigated by the existing `fixture_input + fixture_expected_residual` pattern (`legacy_sweep_predicate_v2` already demonstrates this): cold-start defaults are themselves testable rather than magic.
-
-**Once §15 lands, F13 closes by definition** — every constant the organism ever encoded becomes posterior-scored at admission. The organism is no longer "compound knowledge with hardcoded gates" — it's "compound knowledge AND compound gates." The act-loop is self-applied; the substrate scores its own configuration; the meta-level is the same primitive as the base level.
-
-This is the final universality. The organism becomes adaptive end-to-end.
+AccInt is alive when all goals enter one residual-scored loop, selected artifacts and cited knowledge receive honest credit, failures tighten the substrate, and open-vocabulary rows replace hardcoded boundaries. The current verdict is ALIVE but not done: artifact-credit revival is the immediate compounding unlock, and Tier S follows only after trust gaps close (`SAF9AVJ8HD7W5DK847W72ETXHR`, `A4V81PN9E960S02MWSM4HSM5G4`, `6DZ417CCK57P90B7B2FTAV024M`, `G3PR7X6TCD4T57D7T6GXCDY9AW`).
