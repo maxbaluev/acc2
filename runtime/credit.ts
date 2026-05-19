@@ -526,9 +526,11 @@ const collectCitations = (
  *  via Shapley decomposition by corroboration order (§3.6.1 Rule 3).
  *
  *  Workflow:
- *    1. Resolve the action_predicted event → action + verifier artifact ids.
- *    2. Apply full-weight residual outcome to action + verifier (primary
- *       observers — not third-party citations).
+ *    1. Resolve the action_predicted event -> action + verifier artifact ids.
+ *    2. Apply full-weight residual outcome to action + verifier as primary
+ *       act participants. Do not mutate action_predicted.context_refs or
+ *       act_tuple_recorded.cited_artifact_ids to represent these structural
+ *       roles; cited_artifact_ids remains emitter-declared citation intent.
  *    3. Extract third-party citations from context_refs + body @cite markers.
  *    4. Compute Shapley weights by corroboration position.
  *    5. Apply the WEIGHTED Beta posterior delta to each cited act_artifact;
