@@ -329,3 +329,37 @@ The thesis: a substrate that compounds intelligence by accumulating events, rank
 Most universal, elegant, effective, adaptive, fast, efficient — proven only by the path: every shipped capability is in the registry, every credit closes the chain, every failure mode lands in `failure_view`, every threshold falls under adaptive scoring once F13 closes. The organism is the substrate; the substrate is the operator; the LLMs are subroutines.
 
 **Live verdict (`acc admin substrate-status`): ALIVE.**
+
+---
+
+## 15. Meta-Principle — Every Boundary Is a Posterior-Scored Row
+
+The deepest universality move (cited `KR6061MKMD30` + `2A6K5S2RJD3K`): **every decision boundary — including the boundaries that score other boundaries — is a row in the open registry with a posterior, not a code constant.** The act-loop runs over its own configuration. The system becomes self-improving in a single recursive level: artifacts score artifacts; weights score weights; thresholds tune thresholds.
+
+Today the substrate has the primitive (`act_artifact` is open-kind; any decision can be encoded as one) but only a fraction of decision boundaries are rows. The rest are hardcoded constants. Closing this is the **F-Universal-Posterior-Boundary** frontier — the meta-contract that subsumes F13 adaptive-scoring (§11) and turns the organism from "adaptive at the leaves" into "adaptive end-to-end."
+
+### Six high-leverage moves toward the meta-principle
+
+**1. Universal threshold registry.** Every literal constant (`closure_residual < 0.3`, supervisor `redispatch_storm threshold=6`, `RECIPE_REPLAY_THRESHOLD=0.85`, `INLINE_PATTERN_SCORE_THRESHOLD=0.7`, `RECIPE_INERTIA_DECAY_DAYS=14`, `DEFAULT_BUDGET_TOKENS=32000`, `NOVELTY_BONUS_MULTIPLIER=1.5`, redispatch-storm window) becomes an `act_artifact{kind: "threshold_predicate"}` row with its own Beta posterior. The threshold updates from outcome credit: did committing at residual=0.28 prove correct downstream? Posterior shifts. `closure_predicate` already demonstrates the shape; extending to all literal constants is the universal collapse.
+
+**2. Posterior-scored prompt composer.** Each prompt section (`top_laws`, `retrieved_knowledge`, `owner_profile`, `owner_rendering_policy`, `directive_text`, `task_goal`, `runtimes_available`) gets its own posterior measuring "does including this section correlate with low `closure_residual` for this goal class?" The composer ranks sections by `posterior × inverse_token_cost` under budget — `top_laws` may sometimes lose to `retrieved_knowledge` depending on goal class (per `21YN6ZG30S6X` brain_prompt_goal_class_adaptive_design retrieval). Sections that don't earn their tokens drift down; the floor mechanism (commit `15863c5`) protects load-bearing rules from being dropped entirely.
+
+**3. Posterior-scored supervisor.** The `supervisor_redispatch_storm threshold=6` killed two dispatches this session. If 5 dispatches converges 80 % of the time on goal-class=substrate-side-registration, the threshold rises for that class. Pathology detection becomes per-(goal_class, signal_shape) instead of one global rule. Same machinery as the ApplyRoute predicate, applied to supervisor invocations.
+
+**4. Counterfactual credit.** Currently credit flows only along the chosen-and-succeeded path. Add counterfactual: when a dispatch succeeds, also credit/debit the artifacts that ranked top-K but weren't selected — would they have done the same, worse, or better? This calibrates the selector exponentially faster than positive-only credit. The runtime artifact registry already has the rankings (`artifact_routing_view`); the data is there, just not consumed.
+
+**5. Meta-credit on credit formulas.** Credit weights (Shapley vs linear vs degenerate fallback in `runtime/credit.ts:822-830`) are themselves a choice. Make the credit-formula choice an `act_artifact{kind: "credit_distribution_predicate"}` row with posterior calibrated by "did calibration improve after this choice?" The credit of credit calibration. Recursive but bounded — meta-level is one level, not infinite.
+
+**6. Knowledge-binding-as-mutation enforcement.** k_554 says citation without state mutation is decorative. Today `retrieval_binding` rows record what was surfaced; they don't always record what was used in the action. Add a deterministic check: every `act_tuple_recorded.cited_knowledge_ids` must appear in `action_predicted.reasoning_summary` or similar bound field, OR the citation is auto-stripped at the emit boundary. Forces real binding. Same shape as the deterministic preconditions in `apply_route_predicate` (commit `15863c5`).
+
+### Why this is the universality collapse
+
+Today the organism has TWO classes of decisions:
+- **Open-vocabulary**, posterior-scored: artifacts, knowledge, recipes, owner profile, routing axes.
+- **Closed-vocabulary**, code-constant: thresholds, composer rules, supervisor gates, credit weights, citation binding.
+
+The meta-principle ELIMINATES the closed class. Every boundary moves to row + posterior. The cold-start tradeoff (a fresh threshold-artifact has no evidence; system must boot from sane defaults) is mitigated by the existing `fixture_input + fixture_expected_residual` pattern (`legacy_sweep_predicate_v2` already demonstrates this): cold-start defaults are themselves testable rather than magic.
+
+**Once §15 lands, F13 closes by definition** — every constant the organism ever encoded becomes posterior-scored at admission. The organism is no longer "compound knowledge with hardcoded gates" — it's "compound knowledge AND compound gates." The act-loop is self-applied; the substrate scores its own configuration; the meta-level is the same primitive as the base level.
+
+This is the final universality. The organism becomes adaptive end-to-end.
