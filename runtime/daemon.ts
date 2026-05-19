@@ -62,6 +62,12 @@ import { metricsHandler, refreshGauges } from "./metrics";
 import { integrityWorkerTick, runIntegrityCheck, reconcileOrphanedDispatches } from "./integrity_worker";
 import { reconcileBrainDispatchesAtBoot, getOpenBrainDispatches, setBootSessionToken } from "./brain_dispatch_reconciler";
 import { waitForBrainQuiescence } from "./restart_quiescence";
+import {
+  getCurrentGitHead,
+  writeChildGitHead,
+  removeChildGitHead,
+  resolveChildGitHeadPath,
+} from "./daemon_supervisor";
 import { isWorkerEnabled } from "./worker_autostart";
 import {
   isReady,
@@ -1443,6 +1449,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     closeDb(stateDbPath);
     tryRemove(socketFile);
     tryRemove(tokenFile);
+    // F10 canonical hot-reload: reap the child git HEAD sibling state
+    // file so a stale value cannot mislead a supervisor that probes
+    // before the next child writes its own HEAD.
+    removeChildGitHead();
   };
 
   // Batch 3.OPS: register the daemon_ready emitter. Fires exactly once,
@@ -1522,6 +1532,24 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     db_path: stateDbPath,
     role,
   });
+
+  // F10 canonical hot-reload (cite EJFZER4SBH3C51WF1J6KWX2V6G): write
+  // the current git HEAD to a sibling state file so the outer
+  // supervisor (a separate process) can compare against repo HEAD at
+  // bounded detector ticks. Best-effort — a non-git checkout or a
+  // missing git binary leaves no file, the supervisor degrades to
+  // child_head_unavailable instead of swapping blindly.
+  const loadedGitHead = getCurrentGitHead();
+  if (loadedGitHead) {
+    try {
+      writeChildGitHead(loadedGitHead);
+    } catch (err) {
+      logger.debug(
+        { where: "daemon.boot.write_loaded_git_head", err: String(err) },
+        "could not persist loaded git HEAD (supervisor will see child_head_unavailable)",
+      );
+    }
+  }
   // ROLE=worker writes a separate token file too so server+worker don't
   // clobber each other's admin token.
   const tokenFileForRole = skipPorts ? `${tokenFile}.worker` : tokenFile;
@@ -1757,6 +1785,19 @@ const routeAux = async (
       openai: credPresent("OPENAI_API_KEY"),
       serper: credPresent("SERPER_API_KEY"),
     };
+    // F10 canonical hot-reload: surface the child's loaded git HEAD so
+    // the outer supervisor (and operators running `acc daemon status`)
+    // can verify which commit the daemon is currently serving. The
+    // helper re-reads the sibling state file each probe — cheap, and
+    // a missing file is silently null (not a /health failure).
+    let loadedGitHead: string | null = null;
+    try {
+      const fs = await import("node:fs");
+      const path = resolveChildGitHeadPath();
+      if (fs.existsSync(path)) {
+        loadedGitHead = fs.readFileSync(path, "utf8").trim() || null;
+      }
+    } catch { /* tolerate */ }
     return Response.json({
       status: stuck.length === 0 ? "ok" : "degraded",
       pid: process.pid,
@@ -1776,6 +1817,7 @@ const routeAux = async (
       sql_pool_stats: poolStats,
       wal_stats: walStats,
       credentials,
+      loaded_git_head: loadedGitHead,
     });
   }
 
