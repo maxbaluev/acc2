@@ -7,6 +7,20 @@ import type { SandboxDecl } from "../substrate/types";
 
 export const OWNER_GATED_PATH_PATTERNS: ReadonlyArray<{ pattern: string; regex: RegExp }> = Object.freeze([]);
 
+export const STRUCTURALLY_PROTECTED_SURFACES = Object.freeze([
+  "admin_token",
+  "deny_list",
+  "owner_gate.things_to_never_do",
+  "sqlite.foreign_keys",
+  "sqlite.not_null",
+  "sqlite.single_writer",
+]);
+
+export const protectedSurfaceReason = (surfaceId: string): string | null => {
+  if (STRUCTURALLY_PROTECTED_SURFACES.includes(surfaceId)) return "structural_security_or_schema_invariant";
+  return null;
+};
+
 export type OwnerGateDecision = {
   requires_consent: boolean;
   matched_patterns: string[];
