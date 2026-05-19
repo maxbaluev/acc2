@@ -30,10 +30,7 @@
 // Resolvers read process.env LAZILY on every call so the daemon (or tests)
 // can change the env mid-process and pick up the new value on the next
 // resolution.
-//
-// The v1-era `ACCINT_HOME` alias was deprecated and then removed; only
-// `ACC2_STATE_DIR` is honoured now. Operators upgrading from a pre-removal
-// install should rename the export.
+
 
 import { homedir } from "node:os";
 import { join } from "node:path";

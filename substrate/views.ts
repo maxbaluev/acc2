@@ -4939,11 +4939,9 @@ export const ownerConversation = (db: Database, directiveId?: string): OwnerConv
 };
 
 /** Every rolling_active directive with its latest next_review_due and a
- *  `past_due` boolean (true when next_review_due ≤ now-at-query-time). The
- *  pre-Phase-DAG shape filtered the view to only past-due rows; the new
- *  shape projects every rolling_active row so operators can inspect future
- *  reviews and TS-side callers (rolling_reviewer.ts) still filter on
- *  next_review_due as they did before. */
+ *  `past_due` boolean (true when next_review_due ≤ now-at-query-time).
+ *  Projects every rolling_active row so operators can inspect future
+ *  reviews; TS-side callers (rolling_reviewer.ts) filter on next_review_due. */
 export const rollingReviewDue = (db: Database): RollingReviewDueRow[] => {
   const rows = db
     .query("SELECT * FROM rolling_review_due_view")
@@ -4994,9 +4992,8 @@ export const watchEdgeObservations = (
 /** directive_interference_edge events projected to
  *  (from_directive, to_directive, interaction). When `directiveId` is
  *  supplied, only edges where it appears on either side are returned. The
- *  pre-Phase-DAG shape returned just (event_id, ts, directive_id, payload);
- *  callers that read `payload.from_directive` etc. continue to work via the
- *  retained `payload` field. */
+ *  full event `payload` is retained so callers reading payload-shape fields
+ *  (`from_directive`, etc.) work without extra projection plumbing. */
 export const directiveConflicts = (
   db: Database,
   directiveId?: string,
