@@ -248,12 +248,8 @@ describe("recipe_inertia.applyRecipeInertiaDecay", () => {
     expect(count).toBe(1);
   });
 
-  test("decay configurable via ACC2_RECIPE_INERTIA_DAYS env (default 14)", () => {
-    // Sanity that the constant defaults to 14 unless the env was set by
-    // the harness — the test runner doesn't pin this, so default applies.
-    expect(RECIPE_INERTIA_DECAY_DAYS).toBe(
-      Number(process.env.ACC2_RECIPE_INERTIA_DAYS ?? "14"),
-    );
+  test("decay constant pinned at 14 days (universal default)", () => {
+    expect(RECIPE_INERTIA_DECAY_DAYS).toBe(14);
   });
 
   test("scans recipes_latest_view (handles multiple distinct keys per pass)", () => {

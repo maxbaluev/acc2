@@ -414,8 +414,7 @@ const SUPERVISE_HELP = `acc daemon supervise — F10 hot-reload supervisor (fore
   daemon_hotreload_{triggered,swapped,completed,failed,rejected} chain.
 
   Options:
-    --tick-ms N            Detector tick interval (default 60000,
-                           env ACC2_HOT_RELOAD_TICK_MS).
+    --tick-ms N            Detector tick interval (default 60000).
     --drain-budget-ms N    Graceful drain budget passed to /shutdown
                            (default 300000).
     --min-age-ms N         Minimum child age before a swap is considered

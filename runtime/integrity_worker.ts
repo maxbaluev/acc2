@@ -209,8 +209,8 @@ export const integrityWorkerTick = async (db: Database): Promise<IntegrityReport
 
   // Supervisor runs on its OWN worker now (60s tick, see runtime/daemon.ts).
   // It WAS piggybacked here, but the integrity worker ticks every 6 HOURS
-  // by default (ACC2_INTEGRITY_INTERVAL_MS) — far too slow to catch
-  // redispatch storms or DAG explosions. Decoupled 2026-05-15.
+  // — far too slow to catch redispatch storms or DAG explosions.
+  // Decoupled 2026-05-15.
 
   // After emit, opportunistically truncate WAL if it's grown past
   // threshold. (We do this AFTER the check emission so the audit log

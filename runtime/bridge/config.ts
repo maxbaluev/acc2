@@ -91,10 +91,6 @@ export const V2_OPENCODE_MCP_SERVER_NAME = "acc2-substrate";
  * the tools we name. Built-in filesystem mutators (edit/write/bash/
  * apply_patch) are NOT listed and therefore NOT registered with the
  * subprocess at all — there is no deny pattern to bypass.
- *
- * This is the structural fix for the brain_native_filesystem_bypass
- * failure class: positive enumeration at spawn time, not wildcard-deny
- * post-flight.
  */
 export const BRAIN_OPENCODE_AGENT_NAME = "acc2-brain";
 

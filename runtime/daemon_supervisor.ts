@@ -37,8 +37,8 @@
 //      replacement reports `ok`, and returns the swap result.
 //   5. `runDaemonSupervisor(opts)` — the foreground supervisor loop.
 //      Spawns the first child, records the loaded HEAD, ticks the
-//      detector at `ACC2_HOT_RELOAD_TICK_MS` (default 60s), gates
-//      swaps on `ACC2_HOT_RELOAD_MIN_AGE_MS` (default 5min) and on
+//      detector at the canonical 60s cadence, gates swaps on
+//      `ACC2_HOT_RELOAD_MIN_AGE_MS` (default 5min) and on
 //      `isReloadEligible`. SIGHUP forces an immediate detector check;
 //      it does NOT bypass eligibility.
 //
@@ -680,9 +680,7 @@ export const runSupervisorLoop = async (
   opts: SupervisorLoopOptions = {},
   deps: SupervisorLoopDeps = {},
 ): Promise<SupervisorTickOutcome[]> => {
-  const envTick = Number(process.env.ACC2_HOT_RELOAD_TICK_MS ?? "");
-  const tickIntervalMs = opts.tickIntervalMs
-    ?? (Number.isFinite(envTick) && envTick > 0 ? envTick : DEFAULT_TICK_INTERVAL_MS);
+  const tickIntervalMs = opts.tickIntervalMs ?? DEFAULT_TICK_INTERVAL_MS;
   const stateDir = opts.stateDir ?? resolveStateDir();
   const now = deps.nowMs ?? (() => Date.now());
   const sleep = deps.sleep ?? realSleep;

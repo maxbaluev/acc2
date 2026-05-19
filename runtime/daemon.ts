@@ -647,9 +647,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // safety net as upper bound. Universal value; no env knob.
   const amendmentTickMs = 2000;
   const gaugeTickMs = 30_000;
-  const integrityIntervalMs = Number(
-    process.env.ACC2_INTEGRITY_INTERVAL_MS ?? 6 * 60 * 60 * 1000,
-  );
+  const integrityIntervalMs = 6 * 60 * 60 * 1000;
   const embedderIntervalMs = 10_000;
   const rehabIntervalMs = 6 * 60 * 60 * 1000;
   // Supervisor cadence — reactive worker, so 30s is observational.
@@ -690,8 +688,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("father")) registerWorker("father", fatherIntervalMs);
   if (isWorkerEnabled("scheduler")) registerWorker("scheduler");
   if (isWorkerEnabled("supervisor")) registerWorker("supervisor", SUPERVISOR_INTERVAL_MS);
-  if (isWorkerEnabled("compaction")) registerWorker("compaction", Number(process.env.ACC2_COMPACTION_INTERVAL_MS ?? 60 * 60 * 1000));
-  if (isWorkerEnabled("recipe_inertia")) registerWorker("recipe_inertia", Number(process.env.ACC2_RECIPE_INERTIA_TICK_MS ?? 60 * 60 * 1000));
+  if (isWorkerEnabled("compaction")) registerWorker("compaction", 60 * 60 * 1000);
+  if (isWorkerEnabled("recipe_inertia")) registerWorker("recipe_inertia", 60 * 60 * 1000);
   if (isWorkerEnabled("verify_heal")) registerWorker("verify_heal", 60 * 60 * 1000);
   // Brain audit B (2026-05-15): register the Model-D extractors worker
   // so candidate→promoted advancement happens on a bounded cadence,
@@ -783,8 +781,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   workers.push(() => clearInterval(gaugeTick));
 
   // Batch 3.OPS: DB integrity worker. Default ON unless explicitly
-  // disabled (`ACC2_DISABLE_WORKERS=integrity` for tests). Tick interval
-  // is 6h by default; configurable via ACC2_INTEGRITY_INTERVAL_MS.
+  // disabled (`ACC2_DISABLE_WORKERS=integrity` for tests). 6h cadence
+  // is universal — replaced by adaptive scoring in a later cohort.
   if (isWorkerEnabled("integrity")) {
     let integrityMarked = false;
     const integrityTick = supervisedTick(db, "integrity", integrityIntervalMs, async () => {
@@ -851,7 +849,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // task_committed) STAY forever; only the per-frame mirror is pruned.
   // Runs hourly so steady-state growth never exceeds one day of frames.
   // Hard timer: retention expiry is elapsed-time based, not event-arrival control flow.
-  const COMPACTION_INTERVAL_MS = Number(process.env.ACC2_COMPACTION_INTERVAL_MS ?? 60 * 60 * 1000);
+  const COMPACTION_INTERVAL_MS = 60 * 60 * 1000;
   if (isWorkerEnabled("compaction")) {
     const { compactionWorkerTick } = await import("./compaction");
     let compactionMarked = false;
@@ -1067,15 +1065,15 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // quarantined artifacts to get a recovery chance on the canonical
   // cadence. Opt-OUT via `ACC2_DISABLE_WORKERS=rehabilitation`
   // (tests/preload.ts pins the full set so unit tests don't spawn
-  // fixture subprocesses). Tick interval defaults to 30 minutes
-  // (ACC2_REHAB_TICK_MS, 1_800_000ms); the 14-day cooldown still gates
-  // each candidate so checking more often only matters when many
-  // artifacts crossed the cooldown simultaneously. Worker respects the
-  // canonical deadline pattern: a `runningTick` boolean swallows
-  // overlapping ticks so a slow fixture cannot stack worker invocations.
+  // fixture subprocesses). 30-minute cadence is universal — the 14-day
+  // quarantine cooldown still gates each candidate, so checking more
+  // often only matters when many artifacts crossed the cooldown
+  // simultaneously. Worker respects the canonical deadline pattern: a
+  // `runningTick` boolean swallows overlapping ticks so a slow fixture
+  // cannot stack worker invocations.
   // Hard timer: the 14-day quarantine cooldown becomes eligible by elapsed time.
   if (isWorkerEnabled("rehabilitation")) {
-    const rehabTickMs = Number(process.env.ACC2_REHAB_TICK_MS ?? 30 * 60 * 1000);
+    const rehabTickMs = 30 * 60 * 1000;
     // Rehab readiness flips on registration; we do NOT run a synchronous
     // initial tick because rehab can spawn subprocess fixtures.
     markWorkerReady("rehabilitation");
@@ -1139,13 +1137,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // (never replayed for N days, default 14) get their confidence multiplied
   // by 0.95 per tick, floored at 0.1. Closes the lesson "Layer-2 intelligence
   // should decay inert rows, not just promote successful rows." Ticks hourly
-  // by default; idempotent within the same wall-clock second via the
-  // applyRecipeInertiaDecay implementation. Opt-OUT via
-  // `ACC2_DISABLE_WORKERS=recipe_inertia`. Tick interval env-configurable
-  // via `ACC2_RECIPE_INERTIA_TICK_MS`.
+  // (universal cadence); idempotent within the same wall-clock second via
+  // applyRecipeInertiaDecay. Opt-OUT via `ACC2_DISABLE_WORKERS=recipe_inertia`.
   // Hard timer: inactivity decay measures elapsed time since replay.
   if (isWorkerEnabled("recipe_inertia")) {
-    const inertiaTickMs = Number(process.env.ACC2_RECIPE_INERTIA_TICK_MS ?? 60 * 60 * 1000);
+    const inertiaTickMs = 60 * 60 * 1000;
     const { applyRecipeInertiaDecay } = await import("./recipe_inertia");
     markWorkerReady("recipe_inertia");
     recordWorkerTick("recipe_inertia");
@@ -1205,7 +1201,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // 5-min reactive cadence; reactive_safety_net is the genuine deadline.
   if (isWorkerEnabled("contract_amendment_consumer")) {
     const consumerTickMs = 5 * 60 * 1000;
-    const consumerBatchSize = Number(process.env.ACC2_FLYWHEEL_CONSUMER_BATCH ?? 100);
+    const consumerBatchSize = 100;
     const { runContractAmendmentConsumer } = await import("./contract_amendment_consumer");
     markWorkerReady("contract_amendment_consumer");
     recordWorkerTick("contract_amendment_consumer");
