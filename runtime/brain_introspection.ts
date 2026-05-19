@@ -567,7 +567,7 @@ export const buildPromptSelfInspect = (
     task_id: taskId,
     directive_id: row.directive_id,
     total_tokens: totalTokens,
-    budget_tokens: opts.budgetTokens ?? 8000,
+    budget_tokens: opts.budgetTokens ?? 32000,
     sections: composed.sections.map((s) => ({ name: s.name, priority: s.priorityP, tokens: s.tokens })),
     truncated_sections: composed.truncated,
     preview: opts.includePreview

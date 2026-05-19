@@ -63,7 +63,15 @@ type ComposedPrompt = {
   truncated: string[];
 };
 
-const DEFAULT_BUDGET_TOKENS = 8000;
+// 32k matches the realistic floor-section needs (top_laws +
+// owner_profile + owner_rendering_policy + retrieved_knowledge run
+// 10–15k tokens once the substrate accumulates ~300+ promoted_knowledge
+// rows). Below this floor, dispatcher_violation{kind:floor_section_missing}
+// fires on every brain dispatch — alarm noise on a structural undersize,
+// not a structural fault. Modern brain models (gpt-5.5, opus 4.7) have
+// 128K-1M context windows; 32k is a comfortable headroom over the
+// load-bearing sections while staying well under any model's cap.
+const DEFAULT_BUDGET_TOKENS = 32000;
 
 // Phase F: real tokenizer via js-tiktoken's cl100k_base (the BPE that
 // text-embedding-3-small uses). One encoder is initialised lazily on first
