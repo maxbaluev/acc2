@@ -256,6 +256,34 @@ After T2.5: the organism has no closed-vocabulary boundaries. Every decision, in
 
 ---
 
+## Rejected alternatives (decisions worth keeping)
+
+### rqlite (https://rqlite.io/) — WRONG TRADEOFF for acc2
+
+**Rejected 2026-05-19.** rqlite wraps SQLite in a Raft-consensus HTTP API, giving HA + horizontal read scaling at the cost of per-query HTTP roundtrips (~5 ms localhost, more across nodes). acc2 is a single-operator local agent whose hot path is microsecond-latency single-row reads (`event_kind` lookup, ULID prefix resolution, `top_laws_view`). At 1 µs vs 5 ms, the HTTP roundtrip would dominate query cost by ~5000× per call — a structural regression, not an improvement.
+
+Concrete failure shapes if adopted:
+1. MCP `substrate.read` latency floor jumps from ~100 µs to ~5 ms; agent feedback loop slows visibly.
+2. Workers and the daemon currently share an in-process `Database` handle with WAL — replacing with a network client breaks the activation bus + hot-reload contract that depends on shared connection state.
+3. rqlite enforces single-writer through the leader; acc2 already has single-writer via the daemon's canonical connection. No new property gained; significant property lost.
+
+**The actual problem rqlite seems to address** is event-loop starvation during heavy aggregate queries. The correct fix lives in **T3.8 — F-SQL-Worker-Thread-Pool** above: keep `bun:sqlite` embedded for the hot path; offload only known-heavy aggregates to worker threads. This gives parallel-read concurrency without the HTTP tax.
+
+If acc2 ever grows beyond single-operator (multi-region, multi-tenant), revisit rqlite or LiteFS for replication. Not before.
+
+### Opening `Runtime` type to `string` (bottleneck `WT9M8BW95X0F`) — DEFERRED, needs SandboxDecl redesign
+
+**Status: deferred 2026-05-19.** The bottleneck lesson correctly identifies `substrate/types.ts:330 export type Runtime = "bun" | "uv" | "camofox-browser"` as a closed enum that violates the universal-open-vocabulary principle. But:
+
+1. `SandboxDecl` is a *discriminated union* keyed on `runtime`. Each variant carries fundamentally different fields (`bun` has `cpu_ms` + `memory_mb`; `camofox-browser` has `browser_allow_domains` + `fingerprint_locale`). Opening `Runtime` to `string` orphans the discriminator and breaks compile-time narrowing in `runtime/runtimes/index.ts:runArtifactForRuntime`.
+2. `runtime/artifact_admission.ts:524`, `runtime/recipe_replay.ts:292`, `runtime/mcp_server/substrate_tools.ts:1077`, and `runtime/daemon.ts:1091` all switch on the closed three to dispatch to the right runner. Each needs a structural redesign — pluggable runner registry indexed by string — not a one-line type relax.
+
+**Correct contract shape (folded into Tier 3 when prioritized):** Introduce a runtime-runner registry (rows in `act_artifact` with `kind=runtime_runner`) keyed by runtime string. The dispatcher in `runtime/runtimes/index.ts` becomes a lookup over the registry, and `SandboxDecl` accepts an open-kind variant `{ runtime: string; fields: JsonValue }` for runtimes whose schema is declared in the registry row, not in TypeScript. The three concrete variants stay as fast-path narrowing for the existing runners.
+
+This is a real contract worth doing, but it is NOT a pure mechanical rename and is NOT the unblocker for cross-terminal parallelism. The `CodeArtifactRow → ActArtifactRow` rename (shipped 2026-05-19) was. Lesson `WT9M8BW95X0F`'s mechanical-rename pieces are now closed; the structural-redesign piece is a separate T3-tier contract.
+
+---
+
 ## Cross-cutting principles (apply to every contract)
 
 1. **Open vocabulary always.** No closed enums. New strings appear in events, not in type unions.
