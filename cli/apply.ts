@@ -83,6 +83,7 @@ type LessonQueueRow = {
 
 type ApplyRoute =
   | "AUTO_APPLY"
+  | "AUTO_APPLY_TEST_LANE"
   | "OWNER_GATE"
   | "AUTO_DEFER_DEPENDENCY"
   | "AUTO_DECLINE_ALREADY_APPLIED"
@@ -180,6 +181,20 @@ const repoFileFromResource = (resource: string): string | null => {
   return file.length > 0 ? file : null;
 };
 
+// isRepoTestFile — Candidate E (brain dispatch be0p341w8). Test-file
+// targets bypass owner-decision queueing entirely so brain-emitted
+// test amendments do not accumulate as "pending decisions" the
+// operator never reviews. Closes the upstream leak above the
+// pending_decision_retire_worker auto-prune (commit 19c2402).
+//
+// Matches `(^|/)<name>.(test|spec).ts(x)?` only. The `__tests__/`
+// convention is NOT used anywhere in the current codebase (no
+// directory matches `find -type d -name __tests__`), so we omit it;
+// adding it later if a producer adopts the convention is a one-line
+// extension.
+const TEST_FILE_PATTERN = /(^|\/)[^/]+\.(test|spec)\.tsx?$/;
+const isRepoTestFile = (file: string): boolean => TEST_FILE_PATTERN.test(file);
+
 const affectedTargetsFromPayload = (payload: Record<string, unknown>, target: string | undefined): { affectedResources: string[]; affectedFiles: string[] } => {
   const resources = new Set<string>();
   for (const candidate of [...targetCandidatesFromPayload(payload), target].filter((t): t is string => typeof t === "string" && t.trim().length > 0)) {
@@ -220,6 +235,7 @@ const applyRouteFromUnknown = (value: unknown): ApplyRoute | null => {
   if (typeof value !== "string") return null;
   switch (value) {
     case "AUTO_APPLY":
+    case "AUTO_APPLY_TEST_LANE":
     case "OWNER_GATE":
     case "AUTO_DEFER_DEPENDENCY":
     case "AUTO_DECLINE_ALREADY_APPLIED":
@@ -317,6 +333,24 @@ const deterministicApplyRoute = async (
 
   if (ownerGateRequired) {
     return { route: "OWNER_GATE", score: 1, confidence: 1, deterministic: true, reason: "owner_policy_requires_gate", preconditions: { owner_gate_required: true } };
+  }
+
+  // Candidate E (brain dispatch be0p341w8): if EVERY repo target on this
+  // proposal resolves to a test file, emit a deterministic test_lane
+  // route that bypasses owner-decision queueing. Mixed targets (one
+  // test + one non-test) fall through to the existing routing.
+  const repoTargetFiles = targets
+    .map(repoFileFromResource)
+    .filter((f): f is string => typeof f === "string" && f.length > 0);
+  if (repoTargetFiles.length > 0 && repoTargetFiles.length === targets.length && repoTargetFiles.every(isRepoTestFile)) {
+    return {
+      route: "AUTO_APPLY_TEST_LANE",
+      score: 1,
+      confidence: 1,
+      deterministic: true,
+      reason: "test_lane_target",
+      preconditions: { test_lane: true, repo_target: true, target_files: repoTargetFiles },
+    };
   }
 
   const manualPattern = await ownerProfileManualReviewMatch(targets);
@@ -718,7 +752,7 @@ const authorizeApply = async (
       autoApplyTarget: policy.autoApplyTarget,
     }, routeDecision) };
   }
-  if (routeDecision.route !== "AUTO_APPLY" && routeDecision.route !== "OWNER_GATE") {
+  if (routeDecision.route !== "AUTO_APPLY" && routeDecision.route !== "AUTO_APPLY_TEST_LANE" && routeDecision.route !== "OWNER_GATE") {
     return { ok: false, code: await emitApplyDenied(ev, eventId, routeDecision.reason, target, {
       ownerGateRequired,
       ownerApproved,

@@ -219,6 +219,147 @@ describe("runApply gates", () => {
   // convergence — see the comment block above. Same rationale: path-pattern
   // policy is gone; the gate is structural-axes-only.
 
+  // Candidate E (brain dispatch be0p341w8): test-file targets bypass
+  // owner-decision queueing entirely. When EVERY repo target resolves
+  // to a test file (.test.ts / .spec.ts / .test.tsx / .spec.tsx), the
+  // route is deterministic AUTO_APPLY_TEST_LANE with reason
+  // test_lane_target — no manual_review and no entry into
+  // pending_owner_decision_queue_view.
+
+  test("test-file target (.test.ts) selects AUTO_APPLY_TEST_LANE route", async () => {
+    const scope = nextScope();
+    const env = await rpc("substrate.emit", {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
+      payload: {
+        target_resource: "repo:runtime/foo.test.ts",
+        anchor: "describe",
+        proposed_behavior: {
+          target_resource: "repo:runtime/foo.test.ts",
+          anchor: "describe",
+          diff: { kind: "anchored_replace_v1", before: "describe(", after: "describe(" },
+        },
+      },
+    });
+    expect(env.ok).toBe(true);
+    const eventId = (env.result as { id: string }).id;
+
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+
+    expect(code).toBe(0);
+    const gateScore = gateScoreFor(eventId);
+    const payload = rowPayload(gateScore);
+    expect(payload.apply_route).toBe("AUTO_APPLY_TEST_LANE");
+    expect(payload.apply_route_reason).toBe("test_lane_target");
+    expect(payload.apply_route_deterministic).toBe(true);
+    const preconditions = payload.apply_route_preconditions as Record<string, unknown>;
+    expect(preconditions.test_lane).toBe(true);
+    expect(preconditions.repo_target).toBe(true);
+  });
+
+  test("test-file target (.spec.tsx) selects AUTO_APPLY_TEST_LANE route", async () => {
+    const scope = nextScope();
+    const env = await rpc("substrate.emit", {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
+      payload: {
+        target_resource: "repo:cli/foo.spec.tsx",
+        anchor: "render",
+        proposed_behavior: {
+          target_resource: "repo:cli/foo.spec.tsx",
+          anchor: "render",
+          diff: { kind: "anchored_replace_v1", before: "render(", after: "render(" },
+        },
+      },
+    });
+    expect(env.ok).toBe(true);
+    const eventId = (env.result as { id: string }).id;
+
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+
+    expect(code).toBe(0);
+    const gateScore = gateScoreFor(eventId);
+    const payload = rowPayload(gateScore);
+    expect(payload.apply_route).toBe("AUTO_APPLY_TEST_LANE");
+    expect(payload.apply_route_reason).toBe("test_lane_target");
+  });
+
+  test("non-test target preserves existing routing (not test_lane)", async () => {
+    const scope = nextScope();
+    const env = await rpc("substrate.emit", {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
+      payload: {
+        target_resource: "repo:runtime/foo.ts",
+        anchor: "export",
+        proposed_behavior: {
+          target_resource: "repo:runtime/foo.ts",
+          anchor: "export",
+          diff: { kind: "anchored_replace_v1", before: "export", after: "export" },
+        },
+      },
+    });
+    expect(env.ok).toBe(true);
+    const eventId = (env.result as { id: string }).id;
+
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+
+    // Existing routing flows through — non-test path. We assert the
+    // route is NOT AUTO_APPLY_TEST_LANE. The actual route may be
+    // AUTO_DECLINE_TARGET_MISSING (file does not exist in the test
+    // sandbox cwd) or AUTO_APPLY (in a real checkout) — either way the
+    // test_lane bypass is NOT chosen for a non-test target.
+    const gateScore = gateScoreFor(eventId);
+    const payload = rowPayload(gateScore);
+    expect(payload.apply_route).not.toBe("AUTO_APPLY_TEST_LANE");
+    expect(payload.apply_route_reason).not.toBe("test_lane_target");
+  });
+
+  test("mixed targets (test + non-test) preserve existing routing — test_lane requires ALL targets to be test files", async () => {
+    const scope = nextScope();
+    const env = await rpc("substrate.emit", {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
+      payload: {
+        // proposed_behavior.target_resource is one target; payload.target
+        // is another. targetCandidatesFromPayload aggregates both — one
+        // test file + one non-test file = mixed, NOT test_lane.
+        target: "repo:runtime/foo.ts",
+        anchor: "export",
+        proposed_behavior: {
+          target_resource: "repo:runtime/foo.test.ts",
+          anchor: "describe",
+          diff: { kind: "anchored_replace_v1", before: "describe(", after: "describe(" },
+        },
+      },
+    });
+    expect(env.ok).toBe(true);
+    const eventId = (env.result as { id: string }).id;
+
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+
+    const gateScore = gateScoreFor(eventId);
+    const payload = rowPayload(gateScore);
+    expect(payload.apply_route).not.toBe("AUTO_APPLY_TEST_LANE");
+    expect(payload.apply_route_reason).not.toBe("test_lane_target");
+  });
+
   test("high-residual applied executor attempts remain uncommitted and queued", async () => {
     const eventId = await emitLesson({
       target_resource: "repo:cli/apply.ts",
