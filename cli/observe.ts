@@ -538,6 +538,87 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
         preview ? `claim=${JSON.stringify(trunc(preview, 80))}` : "",
       ].filter(Boolean).join(" ");
     }
+    // ── Hole 1: renderers for 10 high-volume kinds that previously fell
+    // through to the default renderer. Each renderer is defensive against
+    // missing payload fields and stays ≤ MAX_EVENT_LINE_CHARS via the
+    // outer `trunc(line, MAX_EVENT_LINE_CHARS)` failsafe. Kinds below
+    // are sorted alphabetically.
+    case "brain_message_emitted": {
+      const text = p.text as string | undefined;
+      return text ? `text=${JSON.stringify(trunc(text, 80))}` : "text=<unset>";
+    }
+    case "brain_reasoning_recorded": {
+      const summary = p.summary as string | undefined;
+      return summary ? `summary=${JSON.stringify(trunc(summary, 80))}` : "summary=<unset>";
+    }
+    case "bridge_frame_received": {
+      const frame = (p.frame_type as string) ?? "<unset>";
+      const tool = p.tool_name as string | undefined;
+      return `frame=${frame}${tool ? ` tool=${trunc(tool, 40)}` : ""}`;
+    }
+    case "candidate_confirmed": {
+      const candidate = idPrefix(p.candidate_id as string, 12);
+      const delta = p.confidence_delta;
+      const knowledge = p.knowledge_id as string | undefined;
+      return [
+        `candidate=${candidate}`,
+        typeof delta === "number" ? `conf+=${delta}` : "",
+        knowledge ? `knowledge=${idPrefix(knowledge, 12)}` : "",
+      ].filter(Boolean).join(" ");
+    }
+    case "embedding_computed": {
+      const subject = idPrefix(p.subject_event_id as string, 12);
+      const model = (p.model as string) ?? "default";
+      const dims = p.dims as number | undefined;
+      return `subject=${subject} model=${model}${typeof dims === "number" ? ` dims=${dims}` : ""}`;
+    }
+    case "knowledge_propagated": {
+      const candidate = idPrefix(p.candidate_id as string, 12);
+      const fanoutRaw = p.fanout;
+      const targets = p.target_directives as unknown[] | undefined;
+      const fanout = typeof fanoutRaw === "number"
+        ? fanoutRaw
+        : (Array.isArray(targets) ? targets.length : undefined);
+      return `candidate=${candidate}${fanout !== undefined ? ` fanout=${fanout}` : ""}`;
+    }
+    case "origin_calibration_recorded": {
+      const origin = (p.origin as string) ?? "<unset>";
+      const shape = idPrefix(p.goal_shape as string, 10);
+      const alpha = p.alpha_delta;
+      const beta = p.beta_delta;
+      return [
+        `origin=${origin}`,
+        shape !== "—" ? `shape=${shape}` : "",
+        typeof alpha === "number" ? `Δα=${alpha}` : "",
+        typeof beta === "number" ? `Δβ=${beta}` : "",
+      ].filter(Boolean).join(" ");
+    }
+    case "recipe_promotion_deferred": {
+      const recipe = idPrefix(p.recipe_id as string, 12);
+      const reason = p.reason as string | undefined;
+      return `recipe=${recipe}${reason ? ` reason=${trunc(reason, 60)}` : ""}`;
+    }
+    case "retrieval_binding": {
+      const source = idPrefix(p.source_event_id as string, 12);
+      const retrieved = p.retrieved_event_ids as unknown[] | undefined;
+      const hits = Array.isArray(retrieved) ? retrieved.length : 0;
+      const score = p.score;
+      return [
+        `source=${source}`,
+        `hits=${hits}`,
+        typeof score === "number" ? `top_score=${score}` : "",
+      ].filter(Boolean).join(" ");
+    }
+    case "worker_tick_completed": {
+      const worker = (p.worker_name as string) ?? "<unset>";
+      const elapsed = p.elapsed_ms ?? p.tick_ms;
+      const status = p.status as string | undefined;
+      return [
+        `worker=${worker}`,
+        typeof elapsed === "number" ? `elapsed=${elapsed}ms` : "",
+        status ? `status=${status}` : "ok",
+      ].filter(Boolean).join(" ");
+    }
     default:
       return "";
   }
