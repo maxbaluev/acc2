@@ -553,9 +553,6 @@ const synthesizeName = (id: string, body: string): string => {
 
 export type ActArtifactScoreSummary = { updated: number; promoted: number };
 
-/** F4a deprecated alias — pre-rename name. Resolves to ActArtifactScoreSummary. */
-export type CodeArtifactScoreSummary = ActArtifactScoreSummary;
-
 export const extractActArtifactScores = (db: Database): ActArtifactScoreSummary => {
   const artifacts = db
     .query("SELECT id, body, status, name FROM act_artifact")
