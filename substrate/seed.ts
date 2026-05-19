@@ -749,15 +749,13 @@ type VerifierKindExample = {
   name: string;
   /** Short prose: what this verifier kind observes. */
   description: string;
-  /** Typical owner-observation window — immediate / short / medium /
-   *  long / very_long. Used by emitters to populate
-   *  predicted_residual.feedback_window when designing acts. */
-  feedback_window_hint:
-    | "immediate"
-    | "short"
-    | "medium"
-    | "long"
-    | "very_long";
+  /** Typical owner-observation window. Suggested baseline vocabulary —
+   *  immediate / short / medium / long / very_long — but the column is
+   *  open-string so new classifications can emerge per
+   *  `FeedbackWindowClassification` in runtime/act_tuple.ts. Used by
+   *  emitters to populate predicted_residual.feedback_window when
+   *  designing acts. */
+  feedback_window_hint: string;
 };
 
 const VERIFIER_KIND_EXAMPLES: VerifierKindExample[] = [
