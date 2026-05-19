@@ -14,53 +14,45 @@ beforeEach(() => closeDb());
 const ctx = (db: ReturnType<typeof openDb>): McpContext =>
   ({ db, invoker: "claude_root" } as McpContext);
 
-describe("classifyIntent — six observed classes", () => {
-  test("atms_report_composition", () => {
+describe("classifyIntent — retrieval-scored patterns", () => {
+  const seedClassifierKnowledge = (db: ReturnType<typeof openDb>) => {
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs) VALUES ('kc_intent_atms', datetime('now'), 'dir_seed_classifier', 'task_seed_classifier', 'loop_seed_classifier', 'substrate_auto', 'knowledge_candidate', ?, '[]')`,
+      JSON.stringify({
+        claim: "ATMS report composition classifier prior",
+        intent_class: "atms_report_composition",
+        classifier: { intent_classifier_version: "test", strong_markers: ["\\batms[_ ]?report\\b", "\\bAI\\s+Transformation\\s+Roadmap\\b"], soft_markers: ["roadmap", "transformation"] },
+        confidence_estimate: 0.9,
+      }),
+    );
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs) VALUES ('kp_intent_atms', datetime('now'), 'dir_seed_classifier', 'task_seed_classifier', 'loop_seed_classifier', 'substrate_auto', 'knowledge_promoted', ?, '["kc_intent_atms"]')`,
+      JSON.stringify({ candidate_id: "kc_intent_atms", confidence: 0.9 }),
+    );
+  };
+
+  test("retrieved classifier prior", () => {
+    const db = openDb(":memory:");
+    seedClassifierKnowledge(db);
     const r = classifyIntent(
       "Compose the Lakeland AI Transformation Roadmap atms_report_v7 with strategic direction first",
+      db,
     );
     expect(r.intent_class).toBe("atms_report_composition");
     expect(r.confidence).toBeGreaterThanOrEqual(0.5);
     expect(r.evidence.length).toBeGreaterThan(0);
   });
 
-  test("system_internals_doc", () => {
-    const r = classifyIntent(
-      "Explanation of how the system works — show how DAG dataflow moves through the substrate",
-    );
-    expect(r.intent_class).toBe("system_internals_doc");
-    expect(r.confidence).toBeGreaterThanOrEqual(0.5);
-    expect(r.evidence.length).toBeGreaterThan(0);
-  });
-
-  test("cofounder_review", () => {
-    const r = classifyIntent(
-      "Need Alex cofounder review of the proposed plan and Tony reviewer notes",
-    );
-    expect(r.intent_class).toBe("cofounder_review");
-    expect(r.confidence).toBeGreaterThanOrEqual(0.5);
-  });
-
-  test("contract_implementation", () => {
-    const r = classifyIntent(
-      "IMPLEMENT contract amendment whose target_files list runtime/intent_classifier.ts",
-    );
-    expect(r.intent_class).toBe("contract_implementation");
-    expect(r.confidence).toBeGreaterThanOrEqual(0.5);
-  });
-
-  test("research_dispatch", () => {
-    const r = classifyIntent(
-      "DEEP-RESEARCH the Acme Corp deal with multi-source live data from web and SEC filings",
-    );
-    expect(r.intent_class).toBe("research_dispatch");
-    expect(r.confidence).toBeGreaterThanOrEqual(0.5);
+  test("DB-less classifier uses universal fallback instead of hardcoded classes", () => {
+    const r = classifyIntent("Compose the Lakeland AI Transformation Roadmap atms_report_v7");
+    expect(r.intent_class).toBe("ad_hoc");
   });
 
   test("ad_hoc — fallback for unmatched directives", () => {
-    const r = classifyIntent("count files in /tmp containing the word foo");
+    const db = openDb(":memory:");
+    seedClassifierKnowledge(db);
+    const r = classifyIntent("count files in /tmp containing the word foo", db);
     expect(r.intent_class).toBe("ad_hoc");
-    // ad_hoc confidence may be < 0.5 by design (it is the fallback).
   });
 });
 

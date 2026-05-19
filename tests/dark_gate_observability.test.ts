@@ -139,6 +139,37 @@ describe("dark-gate observability — live emission paths", () => {
 
   test("opening a directive fires intent_classified for the new directive_id", () => {
     const db = openDb(":memory:");
+    // Universal classifier is retrieval-scored — seed the atms_report
+    // classifier knowledge first so retrieval can rank the directive
+    // (no hardcoded PATTERNS array post-proposal-#6, 2026-05-19).
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_seed_classifier",
+      task_id: "t_seed_classifier",
+      payload: {
+        claim: "ATMS report composition classifier prior",
+        intent_class: "atms_report_composition",
+        classifier: {
+          intent_classifier_version: "test",
+          strong_markers: ["\\batms[_ ]?report\\b", "\\bAI\\s+Transformation\\s+Roadmap\\b"],
+          soft_markers: ["roadmap", "transformation"],
+        },
+        confidence_estimate: 0.9,
+      },
+    });
+    const candidate = db.query<{ id: string }, []>(
+      `SELECT id FROM events WHERE kind = 'knowledge_candidate' ORDER BY ts DESC LIMIT 1`,
+    ).get();
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_seed_classifier",
+      task_id: "t_seed_classifier",
+      context_refs: [candidate!.id],
+      payload: { candidate_id: candidate!.id, confidence: 0.9 },
+    });
+
     const opened = handleOpenDirective(ctx(db), {
       directive_text: "Compose atms_report_v11 — Lakeland AI Transformation Roadmap",
     } as never);

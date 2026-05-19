@@ -49,65 +49,52 @@ const buildGroundingKindRegex = (kinds: readonly string[]): RegExp | null => {
   return new RegExp(`\\b(?:${escaped.join("|")})\\b`, "i");
 };
 
-// The static baseline pattern set. The atms_report_composition entry
-// keeps a small intrinsic seed regex set so the DB-less overload of
-// classifyIntent remains useful in tests and historical callers; the
-// DB-aware overload appends kind-derived regexes from the metadata table.
-const PATTERNS: Pattern[] = [
-  {
-    intent_class: "atms_report_composition",
-    strong: [
-      /\batms[_ ]?report\b/i,
-      /\bAI\s+Transformation\s+Roadmap\b/i,
-      /\bcode[_ ]?artifact[_ ]?candidate\s+kind\s*=\s*atms[_ ]?report\b/i,
-      /\bLakeland\s+AI\s+Transformation\b/i,
-      /\batms[_ ]?report[_ ]?v\d+/i,
-    ],
-    soft: ["roadmap", "lakeland", "transformation"],
-  },
-  {
-    intent_class: "system_internals_doc",
-    strong: [
-      /\bhow\s+the\s+system\s+works\b/i,
-      /\bshow\s+how\s+DAG\s+dataflow\b/i,
-      /\bDAG\s+dataflow\b/i,
-      /\bcofounder\s+report\b/i,
-      /\binternal\s+review\b/i,
-      /\bexplanation\s+of\s+how\s+the\s+system\b/i,
-      /\bhow\s+does\s+the\s+system\s+work\b/i,
-    ],
-    soft: ["substrate", "dataflow", "internals", "explain"],
-  },
-  {
-    intent_class: "cofounder_review",
-    strong: [
-      /\bcofounder\b/i,
-      /\b(Alex|Tony|Scott)\b.*\breview\b/i,
-      /\breview\b.*\b(Alex|Tony|Scott)\b/i,
-      /\b(Alex|Tony|Scott)\s+(reviewer|review\s+context)\b/i,
-    ],
-    soft: ["reviewer", "alex", "tony", "scott"],
-  },
-  {
-    intent_class: "contract_implementation",
-    strong: [
-      /\bIMPLEMENT\b.*\bcontract\b/i,
-      /\bcontract\b.*\btarget_files\b/i,
-      /\bcontract_amendment_proposed\b\s+\w+/i,
-    ],
-    soft: ["implement", "target_files", "contract"],
-  },
-  {
-    intent_class: "research_dispatch",
-    strong: [
-      /\bDEEP[-_ ]RESEARCH\b/i,
-      /\bRESEARCH\b.*\b(live|web|multi[-_ ]?source)\b/i,
-      /\bresearch\s+dispatch\b/i,
-      /\bmulti[-_ ]?source\s+live\s+data\b/i,
-    ],
-    soft: ["research", "sources", "web", "investigate"],
-  },
-];
+// Retrieval-grounded pattern loader. The classifier no longer carries a
+// hardcoded `PATTERNS` array — every intent class is sourced from promoted
+// knowledge rows whose payload carries a `classifier.strong_markers` +
+// `classifier.soft_markers` shape. The substrate self-extends through use:
+// new intent vocabulary arrives as new promoted rows, not by editing this
+// file. DB-less callers (tests + historical paths) get an empty pattern
+// set and fall through to `ad_hoc` — that is the universality test.
+
+type RetrievedPatternRow = {
+  intent_class: string;
+  strong_markers: unknown;
+  soft_markers: unknown;
+  confidence?: number;
+};
+
+const parseStringArray = (value: unknown): string[] => {
+  const parsed = typeof value === "string" ? JSON.parse(value) as unknown : value;
+  return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string" && x.trim().length > 0) : [];
+};
+
+const patternFromEvidence = (row: RetrievedPatternRow): Pattern | null => {
+  const strong = parseStringArray(row.strong_markers).map((marker) => new RegExp(marker, "i"));
+  const soft = parseStringArray(row.soft_markers);
+  if (strong.length === 0 && soft.length === 0) return null;
+  return { intent_class: row.intent_class, strong, soft };
+};
+
+const loadRetrievedPatterns = (db: Database): Pattern[] => {
+  const rows = db.query<RetrievedPatternRow, []>(`
+    SELECT
+      json_extract(c.payload, '$.intent_class') AS intent_class,
+      json_extract(c.payload, '$.classifier.strong_markers') AS strong_markers,
+      json_extract(c.payload, '$.classifier.soft_markers') AS soft_markers,
+      COALESCE(json_extract(p.payload, '$.confidence'), json_extract(c.payload, '$.confidence_estimate'), 0) AS confidence
+    FROM events p
+    JOIN events c ON c.id = json_extract(p.payload, '$.candidate_id')
+    WHERE p.kind = 'knowledge_promoted'
+      AND c.kind = 'knowledge_candidate'
+      AND json_extract(c.payload, '$.classifier.intent_classifier_version') IS NOT NULL
+    ORDER BY confidence DESC, p.ts DESC
+  `).all();
+  return rows
+    .filter((row) => typeof row.intent_class === "string" && row.intent_class.length > 0)
+    .map(patternFromEvidence)
+    .filter((row): row is Pattern => row !== null);
+};
 
 const matchPattern = (text: string, pattern: Pattern): { strongHits: string[]; softHits: string[] } => {
   const strongHits: string[] = [];
@@ -135,20 +122,22 @@ const scoreHits = (strongHits: number, softHits: number): number => {
   return 0.3;
 };
 
-// Compose the active pattern set. When a DB is supplied, the
-// atms_report_composition entry is augmented with regex tokens drawn
-// from `artifact_kind_metadata` so every kind whose
-// `needs_strategic_grounding` exceeds the threshold contributes a
-// strong-match marker.
+// Compose the active pattern set from substrate evidence. No fixed intent
+// classes live in code; DB-less callers get the universal fallback only.
 const composePatterns = (db?: Database): Pattern[] => {
-  if (!db) return PATTERNS;
+  if (!db) return [];
+  const retrieved = loadRetrievedPatterns(db);
   const groundingKinds = listStrategicallyGroundedKinds(db);
   const dynamic = buildGroundingKindRegex(groundingKinds);
-  if (!dynamic) return PATTERNS;
-  return PATTERNS.map((p) => {
-    if (p.intent_class !== "atms_report_composition") return p;
-    return { ...p, strong: [...p.strong, dynamic] };
-  });
+  if (!dynamic) return retrieved;
+  return [
+    ...retrieved,
+    {
+      intent_class: "artifact_needs_strategic_grounding",
+      strong: [dynamic],
+      soft: groundingKinds,
+    },
+  ];
 };
 
 export const classifyIntent = (
