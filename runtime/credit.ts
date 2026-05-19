@@ -736,6 +736,20 @@ export const distributeCredit = async (
     verifierBodyCites,
     actionArtifactId,
     verifierArtifactId,
+    (bindingEventId, sourceIds) => {
+      emit({
+        kind: "retrieval_rejected",
+        substrate_origin: "substrate_auto",
+        context_refs: [bindingEventId, ...sourceIds, params.scored_event_id],
+        payload: {
+          retrieval_binding_id: bindingEventId,
+          source_ids: sourceIds,
+          action_scored_event_id: params.scored_event_id,
+          reason: "exposed_but_not_cited_by_act",
+          selection_point: "credit.collectCitations",
+        } as JsonValue,
+      });
+    },
   );
   const weights = shapleyWeightsByCorroboration(cited.length);
   const { alphaDelta, betaDelta } = residualToBetaDeltas(params.observed_residual);
