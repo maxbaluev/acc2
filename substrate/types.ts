@@ -388,9 +388,6 @@ export type SandboxDecl =
 // kills, or ≥ 3 irreversible_effect_recorded rows without owner consent.
 export type ActArtifactStatus = "admitted" | "quarantined" | "promoted" | "retired";
 
-/** F4a deprecated alias — pre-rename name. */
-export type CodeArtifactStatus = ActArtifactStatus;
-
 export type ActArtifact = {
   id: Ulid;
   runtime: Runtime;
@@ -412,5 +409,3 @@ export type ActArtifact = {
   updated_at: string;
 };
 
-/** F4a deprecated alias — pre-rename name. */
-export type CodeArtifact = ActArtifact;

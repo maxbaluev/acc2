@@ -3989,10 +3989,6 @@ export type ActArtifactRow = {
   updated_at: string;
 };
 
-/** F4a deprecated alias — pre-rename name. Resolves to ActArtifactRow.
- *  New callers should reference ActArtifactRow directly. */
-export type CodeArtifactRow = ActArtifactRow;
-
 export type ArtifactRoutingRow = ActArtifactRow & { routing_score: number };
 
 export type EmbeddingIndexRow = {
@@ -4902,9 +4898,6 @@ export const actArtifactRegistry = (db: Database, runtime?: string): ActArtifact
     : db.query("SELECT * FROM act_artifact_registry_view").all()) as Array<Record<string, unknown>>;
   return rows.map(rowToActArtifact);
 };
-
-/** F4a deprecated alias — pre-rename name. Resolves to actArtifactRegistry. */
-export const codeArtifactRegistry = actArtifactRegistry;
 
 /** Routing ranking — score × (1 - residual_mean). Phase B+ adds cosine. */
 export const artifactRouting = (db: Database, runtime?: string): ArtifactRoutingRow[] => {

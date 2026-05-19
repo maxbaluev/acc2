@@ -36,7 +36,7 @@ import { emitEvent } from "../../runtime/events";
 import { newId } from "../../runtime/ids";
 import { composePrompt } from "../../runtime/prompt_composer";
 import { schedulerTick, drainInFlightDispatches } from "../../runtime/task_scheduler";
-import { seedFoundationalKnowledge, seedCodeArtifacts } from "../../substrate/seed";
+import { seedFoundationalKnowledge, seedActArtifacts } from "../../substrate/seed";
 import { getArtifact } from "../../runtime/artifact_store";
 import type { JsonValue } from "../../substrate/types";
 
@@ -284,7 +284,7 @@ export const runRealBrainSmoke = async (opts: SmokeOpts = {}): Promise<number> =
 
     // Seed the substrate.
     const seedKnow = seedFoundationalKnowledge(handle.db, { ownerApproved: true });
-    const seedArt = seedCodeArtifacts(handle.db);
+    const seedArt = seedActArtifacts(handle.db);
     process.stdout.write(
       `seed: knowledge=${seedKnow.imported}, act_artifacts=${seedArt.inserted} (skipped=${seedArt.skipped})\n\n`,
     );

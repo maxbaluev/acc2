@@ -8,7 +8,7 @@ import { Database } from "bun:sqlite";
 import * as sqliteVec from "sqlite-vec";
 import { closeDb, openDb } from "../substrate/db";
 import { insertArtifact, getArtifact } from "../runtime/artifact_store";
-import { VIEW_NAMES, actArtifactRegistry, codeArtifactRegistry } from "../substrate/views";
+import { VIEW_NAMES, actArtifactRegistry } from "../substrate/views";
 
 beforeEach(() => closeDb());
 
@@ -65,15 +65,6 @@ describe("F4a act_artifact rename", () => {
     const found = rows.find((r) => r.id === id);
     expect(found).toBeDefined();
     expect(found!.runtime).toBe("bun");
-  });
-
-  test("codeArtifactRegistry (pre-rename helper name) still resolves through the deprecated alias", () => {
-    const db = openDb(":memory:");
-    // codeArtifactRegistry is the pre-rename alias; it must continue to
-    // return the same rows actArtifactRegistry does.
-    const acts = actArtifactRegistry(db);
-    const codes = codeArtifactRegistry(db);
-    expect(codes.length).toBe(acts.length);
   });
 
   test("legacy code_artifact table migrates to act_artifact via runMigrations (RENAME path)", () => {

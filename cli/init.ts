@@ -27,7 +27,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { newAdminToken } from "../runtime/ids";
 import { openDb, closeDb } from "../substrate/db";
-import { seedArtifactKindMetadata, seedCodeArtifacts, seedDemoKnowledge, seedFoundationalKnowledge, seedRecipes, seedUniversalLessons, seedVerifierKindExamples } from "../substrate/seed";
+import { seedArtifactKindMetadata, seedActArtifacts, seedDemoKnowledge, seedFoundationalKnowledge, seedRecipes, seedUniversalLessons, seedVerifierKindExamples } from "../substrate/seed";
 import { embedPendingEvents } from "../runtime/embedder";
 import {
   resolveDbPath, resolveSocketFile, resolveStateDir,
@@ -194,7 +194,7 @@ export type InitSummary = {
   camoufoxPath: string | null;
   foundationalSeedImported: number;
   /** Number of canonical seed_* code artifacts inserted on this run.
-   *  0 means "already seeded" (idempotent re-run) — see seedCodeArtifacts. */
+   *  0 means "already seeded" (idempotent re-run) — see seedActArtifacts. */
   codeArtifactsImported: number;
   /** Number of canonical Tier-0 recipe templates seeded on this run.
    *  0 means "already seeded" (idempotent). See seedRecipes. */
@@ -378,7 +378,7 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
       // act_artifact, matching what the harness already pre-loads for
       // scenarioAdHocTask / scenarioRealBrainEndToEnd. Production and
       // harness now hit the SAME seed path.
-      const artifactSummary = seedCodeArtifacts(db);
+      const artifactSummary = seedActArtifacts(db);
       summary.codeArtifactsImported = artifactSummary.inserted;
       log(
         `[7b/8] code artifacts: imported ${artifactSummary.inserted} canonical artifacts (action + verifier pairs)` +

@@ -30,7 +30,7 @@ import { createHash } from "node:crypto";
 import { classifyIntent, INTENT_CLASSIFIER_VERSION } from "../intent_classifier";
 import { recordInternalAct } from "../internal_act_projection";
 import {
-  codeArtifactRegistry,
+  actArtifactRegistry,
   readyTasks,
   dispatchResolved,
   taskGraphFor,
@@ -630,12 +630,11 @@ export const handleRead = (
   try {
     switch (view) {
       case "act_artifact_registry_view":
-      // F4a deprecated alias — accept the pre-rename view name so brain
-      // dispatches authored before the rename still resolve.
+      // Pre-rename view name accepted so historical brain dispatches resolve.
       case "code_artifact_registry_view": {
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const runtime = typeof arg.runtime === "string" ? arg.runtime : undefined;
-        return { ok: true, result: codeArtifactRegistry(db, runtime) as unknown as JsonValue };
+        return { ok: true, result: actArtifactRegistry(db, runtime) as unknown as JsonValue };
       }
       case "ready_tasks_view": {
         const arg = (args.args ?? {}) as Record<string, unknown>;

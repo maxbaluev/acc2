@@ -31,7 +31,7 @@
 // is Phase H.
 
 import type { Database } from "bun:sqlite";
-import type { CodeArtifactStatus, JsonValue, Runtime, SandboxDecl } from "../substrate/types";
+import type { ActArtifactStatus, JsonValue, Runtime, SandboxDecl } from "../substrate/types";
 import { newId, nowIso } from "./ids";
 import type { EmitEventInput } from "./events";
 import { parseResourceRefs, repoTargetFilesFromResources, resourcesFromTargetFiles, type ResourceRef } from "./resource_uri";
@@ -54,7 +54,7 @@ export type CodeArtifactRow = {
   confidence: number;
   recentResidualMean: number;
   recentKillCount: number;
-  status: CodeArtifactStatus;
+  status: ActArtifactStatus;
   name: string | null;
   fixtureInput: JsonValue | null;
   fixtureExpectedResidual: number | null;
@@ -153,7 +153,7 @@ const mapRow = (raw: Record<string, unknown>): CodeArtifactRow => ({
   confidence: raw.confidence as number,
   recentResidualMean: raw.recent_residual_mean as number,
   recentKillCount: raw.recent_kill_count as number,
-  status: raw.status as CodeArtifactStatus,
+  status: raw.status as ActArtifactStatus,
   name: (raw.name as string | null) ?? null,
   fixtureInput: JSON.parse((raw.fixture_input as string) ?? "null") as JsonValue | null,
   fixtureExpectedResidual: (raw.fixture_expected_residual as number | null) ?? null,

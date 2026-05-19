@@ -94,7 +94,7 @@ export const HOTRELOAD_MANIFEST: readonly HotReloadEntry[] = [
   },
   {
     // 2026-05-17 noise reduction: seed.ts only runs at daemon boot via
-    // `acc init` (seedFoundationalKnowledge / seedCodeArtifacts /
+    // `acc init` (seedFoundationalKnowledge / seedActArtifacts /
     // seedRecipes / seedDemoKnowledge). Mid-session re-import of this
     // file is a no-op behaviorally — there's no reloadable_slot to
     // swap into, and the seed functions aren't called again at
@@ -107,7 +107,7 @@ export const HOTRELOAD_MANIFEST: readonly HotReloadEntry[] = [
     globs: ["substrate/seed.ts"],
     strategy: "in_process",
     reason: "Seed functions run only at acc init / daemon boot; mid-session re-import is a no-op. Manifest entry suppresses unmapped noise on every edit.",
-    expected_exports: ["seedCodeArtifacts", "seedFoundationalKnowledge", "seedRecipes"],
+    expected_exports: ["seedActArtifacts", "seedFoundationalKnowledge", "seedRecipes"],
     rate_limit: { count: 5, window_ms: 30_000 },
   },
   {

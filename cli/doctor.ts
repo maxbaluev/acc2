@@ -432,7 +432,7 @@ export const checkBunVersion = (env: DoctorEnv): Check => {
 };
 
 // Seed minimums. `seedFoundationalKnowledge` (substrate/seed.ts) imports
-// structural laws plus moved contract knowledge under owner-approval; `seedCodeArtifacts` admits 8 canonical
+// structural laws plus moved contract knowledge under owner-approval; `seedActArtifacts` admits 8 canonical
 // rows; `seedRecipes` lays down 2 canonical Tier-0 trajectories. The
 // floors below set the levels doctor flips to FAIL on — some operators
 // may have evicted or rotated entries, but a DB below the floor is

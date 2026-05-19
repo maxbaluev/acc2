@@ -1816,7 +1816,7 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
   // PRODUCTION BOOT PATH. The harness's --task mode MUST exercise the
   // same code paths an operator gets from `acc init && acc daemon start`.
   // No more bootDaemon(...) side door + manual seedFoundationalKnowledge /
-  // seedCodeArtifacts call — bootDaemonProduction below sets
+  // seedActArtifacts call — bootDaemonProduction below sets
   // ACC2_STATE_DIR + ports, runs `runInitProgrammatic({yes:true})` (the
   // SAME function `bun cli/dispatch.ts init --yes` invokes — seeds both
   // knowledge and act_artifacts via Task 1 wiring), then calls

@@ -1734,7 +1734,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     // `observedResidual >= fixtureExpectedResidualBelow` to reject;
     // we set the threshold at 0.1 so the seed body, which we KNOW
     // contains a banned phrase, would normally fail admission — but
-    // seedCodeArtifacts inserts the row directly via INSERT and skips
+    // seedActArtifacts inserts the row directly via INSERT and skips
     // the admission runtime, so the fixture is documentation of the
     // verifier's expected behavior rather than a gating constraint
     // at seed time.
@@ -1836,7 +1836,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     //
     // The seed kind is `docx_reference_style` (free-string discriminator
     // on code_artifact.kind) — NOT a typed enum. The hashSeedRow gate
-    // in seedCodeArtifacts is content-addressed by body, so editing
+    // in seedActArtifacts is content-addressed by body, so editing
     // the reference docx + re-running `acc init` upgrades the seed
     // row in place (preserves learned posterior).
     seedName: "docx_reference_accint_neutral_classic_business_v1",
@@ -1898,9 +1898,6 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
 ];
 
 export type ActArtifactSeedSummary = { inserted: number; skipped: number; upgraded?: number };
-
-/** F4a deprecated alias — pre-rename name. */
-export type CodeArtifactSeedSummary = ActArtifactSeedSummary;
 
 const seedIdFor = (seedName: string): string => `seed_${seedName}`;
 
@@ -2005,9 +2002,6 @@ export const seedActArtifacts = (db: Database): ActArtifactSeedSummary => {
 
   return { inserted, skipped, upgraded };
 };
-
-/** F4a deprecated alias — pre-rename name. Resolves to seedActArtifacts. */
-export const seedCodeArtifacts = seedActArtifacts;
 
 /** Convenience helper — primarily for tests / the daemon boot path.
  *  Returns the canonical seed ids so callers can join against them. */
