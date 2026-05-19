@@ -283,12 +283,14 @@ describe("emitEvent act_tuple_recorded projector", () => {
       "verifier_kind_auto_admitted",
     ]);
     for (const row of rows.slice(1)) {
-      // The auto-admit row is a sibling — its source_act_id is the
-      // action_scored event id, NOT the act_tuple_recorded id. Skip the
-      // act-projection invariant for that one row.
+      // The auto-admit row is a sibling — source_act_id is the
+      // action_scored event id, NOT the act_tuple_recorded id. ONE event
+      // per logical first-observation; payload.admissions lists every
+      // act_artifact row created (category + handle, when distinct).
       if (row.kind === "verifier_kind_auto_admitted") {
         const audit = JSON.parse(row.payload);
         expect(audit.verifier_kind).toBe("deterministic_code");
+        expect(Array.isArray(audit.admissions)).toBe(true);
         continue;
       }
       expect(JSON.parse(row.payload).source_act_id).toBe(act.id);

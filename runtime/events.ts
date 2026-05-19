@@ -290,47 +290,76 @@ const maybeAutoAdmitVerifierKind = (
     rollup = true;
   }
   const ts = nowIso();
-  const body = `Auto-admitted verifier — first observed in action_scored event ${sourceEventId}. Created by runtime/events.ts auto-admit gate${parentKind ? `; parent_kind=${parentKind}, variant_tag=${variantTag}` : ""}.`;
-  const fixtureInput = JSON.stringify({
-    admission_source: "action_scored_projection",
-    first_observed_action_scored_event_id: sourceEventId,
-    parent_kind: parentKind,
-    variant_tag: variantTag,
-    rollup,
-  });
-  db.run(
-    `INSERT INTO act_artifact (
-       id, runtime, body, declared_sandbox, state_root, kind,
-       posterior_alpha, posterior_beta, score, confidence,
-       recent_residual_mean, recent_kill_count, status, name,
-       fixture_input, fixture_expected_residual,
-       created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      verifierKind,
-      "bun",
-      body,
-      VERIFIER_AUTO_ADMIT_SANDBOX,
-      `substrate/auto_admit/verifier/${verifierKind}`,
-      "verifier",
-      1.0,
-      1.0,
-      0.5,
-      0.5,
-      0.0,
-      0,
-      "admitted",
-      verifierKind,
-      fixtureInput,
-      0.5,
-      ts,
-      ts,
-    ],
-  );
-  // Emit verifier_kind_auto_admitted for operator audit. Substrate-origin
-  // because the runtime is the actor; loop_id/directive_id/task_id mirror
-  // the source action_scored so the audit row joins under the same
-  // dispatch lineage.
+  // Decide which admissions are needed in this first-observation. Two
+  // distinct ids can become registered from one action_scored event:
+  //   (a) the verifier_kind category (e.g., "peer_llm_opencode")
+  //   (b) the specific verifier_artifact_id handle (e.g.,
+  //       "future_citation_utility", "opencode_inline_a1_audit_check")
+  // Both are admitted as separate act_artifact rows (so credit can flow
+  // to either id), but ONE audit event consolidates the admissions so
+  // the operator sees a single first-observation row, not duplicates.
+  const verifierArtifactId = typeof input.verifier_artifact_id === "string" && input.verifier_artifact_id.trim().length > 0
+    ? input.verifier_artifact_id.trim()
+    : null;
+  const handleNeedsAdmit = verifierArtifactId !== null && verifierArtifactId !== verifierKind && !db
+    .query<{ id: string }, [string]>("SELECT id FROM act_artifact WHERE id = ? LIMIT 1")
+    .get(verifierArtifactId);
+
+  const insertVerifier = (
+    id: string,
+    role: "category" | "specific_verifier_handle",
+    extraFixture: Record<string, unknown>,
+  ): void => {
+    const body = `Auto-admitted verifier (${role}) — first observed in action_scored event ${sourceEventId}. Created by runtime/events.ts auto-admit gate${role === "category" && parentKind ? `; parent_kind=${parentKind}, variant_tag=${variantTag}` : ""}.`;
+    const fixtureInput = JSON.stringify({
+      admission_source: role === "category" ? "action_scored_projection" : "action_scored_projection_verifier_handle",
+      first_observed_action_scored_event_id: sourceEventId,
+      role,
+      ...extraFixture,
+    });
+    db.run(
+      `INSERT INTO act_artifact (
+         id, runtime, body, declared_sandbox, state_root, kind,
+         posterior_alpha, posterior_beta, score, confidence,
+         recent_residual_mean, recent_kill_count, status, name,
+         fixture_input, fixture_expected_residual,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        "bun",
+        body,
+        VERIFIER_AUTO_ADMIT_SANDBOX,
+        `substrate/auto_admit/${role === "category" ? "verifier" : "verifier_handle"}/${id}`,
+        "verifier",
+        1.0,
+        1.0,
+        0.5,
+        0.5,
+        0.0,
+        0,
+        "admitted",
+        id,
+        fixtureInput,
+        0.5,
+        ts,
+        ts,
+      ],
+    );
+  };
+
+  const admissions: Array<{ act_artifact_id: string; role: "category" | "specific_verifier_handle" }> = [];
+
+  insertVerifier(verifierKind, "category", { parent_kind: parentKind, variant_tag: variantTag, rollup });
+  admissions.push({ act_artifact_id: verifierKind, role: "category" });
+
+  if (handleNeedsAdmit) {
+    insertVerifier(verifierArtifactId!, "specific_verifier_handle", { verifier_kind: verifierKind });
+    admissions.push({ act_artifact_id: verifierArtifactId!, role: "specific_verifier_handle" });
+  }
+
+  // ONE audit event per logical first-observation. Payload describes all
+  // admissions in this gate-firing, not one event per admitted row.
   emitEvent(db, {
     kind: "verifier_kind_auto_admitted",
     substrate_origin: "substrate_auto",
@@ -341,7 +370,10 @@ const maybeAutoAdmitVerifierKind = (
     context_refs: [sourceEventId, ...(input.context_refs ?? [])],
     payload: {
       verifier_kind: verifierKind,
+      // For backwards-compat audits: top-level act_artifact_id mirrors the
+      // category admission. The full list is in `admissions`.
       act_artifact_id: verifierKind,
+      admissions,
       source_action_scored_event_id: sourceEventId,
       parent_kind: parentKind,
       variant_tag: variantTag,
