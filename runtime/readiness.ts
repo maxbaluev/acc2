@@ -36,6 +36,13 @@ export type ReadinessState = {
    *  the stuck threshold (3× interval) can be computed without consulting
    *  daemon-side env defaults from outside. */
   tickIntervalMs: Map<string, number>;
+  /** Workers that are activation-driven (reactive: tick when subscribed
+   *  events fire, with the shared safety-net as upper-bound). Reactive
+   *  workers are NOT subject to the heartbeat-deadline stuck check on an
+   *  idle substrate — their "no ticks for N×interval" is HEALTHY idle, not
+   *  a fault. The shared reactive safety net is the only true deadline
+   *  (and it covers them collectively rather than per-worker). */
+  reactive: Set<string>;
 };
 
 const createState = (): ReadinessState => ({
@@ -45,6 +52,7 @@ const createState = (): ReadinessState => ({
   onReady: null,
   lastTickMs: new Map(),
   tickIntervalMs: new Map(),
+  reactive: new Set(),
 });
 
 let state: ReadinessState = createState();
@@ -58,12 +66,33 @@ export const resetReadiness = (): void => {
 /** Register a worker name. Idempotent. Must be called BEFORE the worker
  *  starts ticking (otherwise the first markReady would arrive against
  *  an unregistered slot). Optionally records the worker's tick interval
- *  so /health can compute the "stuck after 3× interval" threshold. */
+ *  so /health can compute the "stuck after 3× interval" threshold.
+ *
+ *  Timer-driven workers (genuine heartbeat: each tick MUST fire on its
+ *  declared interval) should call this without `markReactive`.
+ *  Activation-driven (reactive) workers should call `markWorkerReactive`
+ *  AFTER subscribing — they tick when events fire, not on a heartbeat,
+ *  so the per-worker stuck threshold no longer applies; the shared
+ *  reactive safety net is the deadline that DOES apply (and is reported
+ *  separately as the `reactive_safety_net` worker). */
 export const registerWorker = (name: string, tickIntervalMs?: number): void => {
   state.registered.add(name);
   if (typeof tickIntervalMs === "number" && tickIntervalMs > 0) {
     state.tickIntervalMs.set(name, tickIntervalMs);
   }
+};
+
+/** Mark a worker as activation-driven (reactive). After this call the
+ *  per-worker heartbeat-deadline stuck check is skipped for this worker:
+ *  no events firing on an idle substrate is HEALTHY for a reactive
+ *  worker, not stuck. The shared reactive safety net (registered as the
+ *  `reactive_safety_net` worker) is the deadline that DOES apply across
+ *  reactive workers collectively.
+ *
+ *  Idempotent. Calling for an unregistered worker is a no-op (the timer
+ *  registration order in daemon.ts pairs registerWorker + this call). */
+export const markWorkerReactive = (name: string): void => {
+  state.reactive.add(name);
 };
 
 /** Record a successful tick for the given worker — drives /health degraded
@@ -83,6 +112,12 @@ export const stuckWorkers = (
 ): Array<{ worker: string; last_tick_ms_ago: number | null; tick_interval_ms: number }> => {
   const out: Array<{ worker: string; last_tick_ms_ago: number | null; tick_interval_ms: number }> = [];
   for (const name of state.registered) {
+    // Reactive workers tick on event activation, not on a heartbeat — the
+    // shared reactive safety net is their only true deadline (and is
+    // reported as the `reactive_safety_net` worker when it stalls). Skip
+    // per-worker stuck reporting for them; "no ticks on idle substrate"
+    // is HEALTHY for reactive subscriptions.
+    if (state.reactive.has(name)) continue;
     const interval = state.tickIntervalMs.get(name);
     if (!interval) continue;
     const last = state.lastTickMs.get(name);

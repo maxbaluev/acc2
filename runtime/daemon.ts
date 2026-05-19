@@ -75,6 +75,7 @@ import {
   isReady,
   pendingWorkers,
   registerWorker,
+  markWorkerReactive,
   markWorkerReady,
   setOnReady,
   resetReadiness,
@@ -567,11 +568,25 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       lastReactiveFireMs: 0,
     };
     reactiveWorkers.push(entry);
+    // Tell readiness this worker is activation-driven so the per-worker
+    // heartbeat-deadline stuck check skips it. The shared reactive safety
+    // net is the only true deadline that applies across reactive workers
+    // (reported as `reactive_safety_net` when it stalls).
+    markWorkerReactive(worker);
     for (const kind of triggerKinds) {
       activationDisposers.push(onEvent(kind, (payload) => fireReactiveWorker(entry, "event", payload)));
     }
   };
-  const safetyNetTickMs = Number(process.env.ACC2_REACTIVE_SAFETY_NET_TICK_MS ?? 30 * 60 * 1000);
+  // The reactive safety net is the ONLY genuine heartbeat for the
+  // activation-driven worker pool: it fires every safetyNetTickMs and
+  // unconditionally ticks every reactive worker. Reactive workers do not
+  // each have their own heartbeat (subscription firing IS their tick).
+  // So readiness/health monitors this one timer — if IT stalls, every
+  // reactive worker is dark. Registering it as a real readiness worker
+  // makes that the canonical observable signal.
+  const safetyNetTickMs = 30 * 60 * 1000;
+  registerWorker("reactive_safety_net", safetyNetTickMs);
+  let safetyNetReady = false;
   const reactiveSafetyNet = setInterval(() => {
     let missedWorkCount = 0;
     for (const entry of reactiveWorkers) {
@@ -579,6 +594,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       entry.skippedReactiveFires = 0;
       fireReactiveWorker(entry, "safety_net");
     }
+    recordWorkerTick("reactive_safety_net");
+    if (!safetyNetReady) { markWorkerReady("reactive_safety_net"); safetyNetReady = true; }
     try {
       emitEvent(db, {
         kind: "worker_tick_completed",
@@ -587,6 +604,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       });
     } catch { /* db may already be closed */ }
   }, safetyNetTickMs);
+  // Mark reactive_safety_net ready immediately on first invocation: the
+  // setInterval registration is the tick semantics, so the daemon can
+  // be considered "ready" without waiting 30 minutes for the first
+  // safety-net firing.
+  recordWorkerTick("reactive_safety_net");
+  markWorkerReady("reactive_safety_net");
+  safetyNetReady = true;
   workers.push(() => {
     clearInterval(reactiveSafetyNet);
     for (const dispose of activationDisposers.splice(0)) dispose();
@@ -1266,6 +1290,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // events. Rolling reviews, scheduling, dispatch, refinement, and retrieval
   // are owned by their dedicated substrate workers.
   if (isWorkerEnabled("father")) {
+    // Father is activation-driven (onEvent("*") subscription) — it does
+    // not heartbeat on fatherIntervalMs. Mark it reactive so readiness
+    // skips its per-worker stuck check on idle substrate; the shared
+    // reactive_safety_net is the genuine deadline that applies.
+    markWorkerReactive("father");
     markWorkerReady("father");
     recordWorkerTick("father");
     const disposeFatherJournal = onEvent("*", (event) => {
