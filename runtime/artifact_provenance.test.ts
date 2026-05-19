@@ -1,16 +1,15 @@
 // acc2 artifact provenance tests — graph walk + markSuperseded
-// idempotency + Lakeland backfill verification (C5,
-// HJJS1665H961B2SRYHC5J85D14, 2026-05-18).
+// idempotency + drive-doc fixture chain verification.
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { getProvenanceChain, markSuperseded } from "./artifact_provenance";
 import { insertArtifact, getArtifact } from "./artifact_store";
 import {
-  seedLakelandDriveProvenance,
-  LAKELAND_PROVENANCE_HEAD_ID,
-  LAKELAND_PROVENANCE_SEED_IDS,
-} from "../substrate/seed";
+  seedDriveDocProvenanceFixture,
+  FIXTURE_DRIVE_DOC_PROVENANCE_HEAD_ID,
+  FIXTURE_DRIVE_DOC_PROVENANCE_SEED_IDS,
+} from "../tests/fixtures/drive_doc_provenance";
 import type { EmitEventInput } from "./events";
 
 afterAll(() => closeDb());
@@ -152,21 +151,21 @@ describe("markSuperseded — idempotency + edge maintenance", () => {
   });
 });
 
-describe("Lakeland Drive backfill", () => {
+describe("drive-doc provenance fixture", () => {
   test("inserts 4 rows linked in a chain with lost_version_count=3 on head", () => {
     const db = openDb(":memory:");
-    const summary = seedLakelandDriveProvenance(db);
+    const summary = seedDriveDocProvenanceFixture(db);
     expect(summary.inserted).toBe(4);
     // All four ids present.
-    for (const id of LAKELAND_PROVENANCE_SEED_IDS) {
+    for (const id of FIXTURE_DRIVE_DOC_PROVENANCE_SEED_IDS) {
       expect(getArtifact(db, id)).not.toBeNull();
     }
-    const chain = getProvenanceChain(db, LAKELAND_PROVENANCE_HEAD_ID)!;
-    expect(chain.head.artifact_id).toBe(LAKELAND_PROVENANCE_HEAD_ID);
+    const chain = getProvenanceChain(db, FIXTURE_DRIVE_DOC_PROVENANCE_HEAD_ID)!;
+    expect(chain.head.artifact_id).toBe(FIXTURE_DRIVE_DOC_PROVENANCE_HEAD_ID);
     expect(chain.ancestors.map((a) => a.artifact_id)).toEqual([
-      "seed_lakeland_drive_doc_v4_trashed",
-      "seed_lakeland_drive_doc_v5_trashed",
-      "seed_lakeland_drive_doc_v6_trashed",
+      "fixture_drive_doc_v1_trashed",
+      "fixture_drive_doc_v2_trashed",
+      "fixture_drive_doc_v3_trashed",
     ]);
     expect(chain.lost_version_count).toBe(3);
     // Head is the surviving artifact (lost_version_count=0); each trashed
@@ -177,18 +176,18 @@ describe("Lakeland Drive backfill", () => {
 
   test("is idempotent — re-running does not duplicate rows", () => {
     const db = openDb(":memory:");
-    const first = seedLakelandDriveProvenance(db);
-    const second = seedLakelandDriveProvenance(db);
+    const first = seedDriveDocProvenanceFixture(db);
+    const second = seedDriveDocProvenanceFixture(db);
     expect(first.inserted).toBe(4);
     expect(second.inserted).toBe(0);
-    const count = (db.query("SELECT COUNT(*) AS n FROM act_artifact WHERE id LIKE 'seed_lakeland_drive_doc_%'").get() as { n: number }).n;
+    const count = (db.query("SELECT COUNT(*) AS n FROM act_artifact WHERE id LIKE 'fixture_drive_doc_%'").get() as { n: number }).n;
     expect(count).toBe(4);
   });
 
-  test("each backfill row stores the Drive doc id in target_resources as drive:// URI", () => {
+  test("each fixture row stores the Drive doc id in target_resources as drive:// URI", () => {
     const db = openDb(":memory:");
-    seedLakelandDriveProvenance(db);
-    const head = getArtifact(db, LAKELAND_PROVENANCE_HEAD_ID)!;
+    seedDriveDocProvenanceFixture(db);
+    const head = getArtifact(db, FIXTURE_DRIVE_DOC_PROVENANCE_HEAD_ID)!;
     expect(head.targetResources?.length).toBe(1);
     expect(head.targetResources?.[0]!.scheme).toBe("drive");
     expect(head.targetResources?.[0]!.uri).toBe(

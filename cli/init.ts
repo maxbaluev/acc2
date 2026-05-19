@@ -27,7 +27,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { newAdminToken } from "../runtime/ids";
 import { openDb, closeDb } from "../substrate/db";
-import { seedCodeArtifacts, seedDemoKnowledge, seedFoundationalKnowledge, seedLakelandDriveProvenance, seedRecipes, seedUniversalLessons, seedVerifierKindExamples } from "../substrate/seed";
+import { seedCodeArtifacts, seedDemoKnowledge, seedFoundationalKnowledge, seedRecipes, seedUniversalLessons, seedVerifierKindExamples } from "../substrate/seed";
 import { embedPendingEvents } from "../runtime/embedder";
 import {
   resolveDbPath, resolveSocketFile, resolveStateDir,
@@ -384,16 +384,6 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
         `[7b/8] code artifacts: imported ${artifactSummary.inserted} canonical artifacts (action + verifier pairs)` +
           (artifactSummary.skipped > 0 ? `  (${artifactSummary.skipped} already present)` : ""),
       );
-      // C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14): backfill
-      // four partial-provenance placeholders for the Lakeland Drive doc
-      // chain (v4/v5/v6 trashed + v7 surviving HEAD). Idempotent —
-      // INSERT OR IGNORE on every row.
-      const lakelandSummary = seedLakelandDriveProvenance(db);
-      if (lakelandSummary.inserted > 0 || lakelandSummary.linked > 0) {
-        log(
-          `       lakeland provenance backfill: inserted=${lakelandSummary.inserted} linked=${lakelandSummary.linked}`,
-        );
-      }
       // Step 7c — canonical Tier-0 recipe templates so substrate_replay has
       // something to match on day 1 (otherwise every first dispatch routes
       // through opencode_brain even for shapes we've already solved).
