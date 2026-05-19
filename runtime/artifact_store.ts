@@ -34,6 +34,7 @@ import type { Database } from "bun:sqlite";
 import type { ActArtifactStatus, JsonValue, Runtime, SandboxDecl } from "../substrate/types";
 import { newId, nowIso } from "./ids";
 import type { EmitEventInput } from "./events";
+import { emitEvent } from "./events";
 import { parseResourceRefs, repoTargetFilesFromResources, resourcesFromTargetFiles, type ResourceRef } from "./resource_uri";
 import { betaMean, betaStreamConfidence } from "./posterior";
 
@@ -271,12 +272,29 @@ const decayedEvidence = (currentEvidence: number, dtMs: number): number => {
  *  Time-decay (2026-05-15): the accumulated alpha-1 + beta-1 evidence is
  *  exponentially decayed by the elapsed wall time since the last update
  *  (default half-life: 30 days) before the new delta lands. This stops
- *  ancient corroborations from outweighing fresh contradictions. */
+ *  ancient corroborations from outweighing fresh contradictions.
+ *
+ *  Hole 7 fix (2026-05-19): after the EMA / posterior write lands,
+ *  `maybeQuarantine` runs automatically so every EMA mutation is
+ *  paired with its demotion check. Before this change, the four
+ *  `task_dispatcher.ts` fallback paths and the two `recipe_replay.ts`
+ *  branches drove `recent_residual_mean` upward without ever calling
+ *  `maybeQuarantine` — only `credit.distributeCredit` did. Result:
+ *  `act_artifact_quarantined` events were structurally impossible to
+ *  emit from the dispatcher fallbacks or recipe replay, even when
+ *  artifacts crossed the residual + invocation thresholds. The fix
+ *  binds the demotion gate to the same primitive that touches the
+ *  EMA, restoring LATM cycle symmetry: every score-up can promote;
+ *  every score-down can quarantine. Callers may pass a custom `emit`
+ *  closure when they need event metadata (directive_id, task_id,
+ *  …); omitted, the default emitter writes via `emitEvent(db, …)`
+ *  directly so existing call sites get the wiring for free. */
 export const applyResidualOutcome = (
   db: Database,
   artifactId: string,
   residual: number,
   ts: string,
+  emit?: (event: EmitEventInput) => void,
 ): ActArtifactRow => {
   const row = getArtifact(db, artifactId);
   if (!row) throw new Error(`act_artifact_not_found:${artifactId}`);
@@ -319,6 +337,14 @@ export const applyResidualOutcome = (
      WHERE id = ?`,
     [newAlpha, newBeta, newScore, newConfidence, newEma, ts, artifactId],
   );
+
+  // Hole 7 fix: pair every EMA mutation with the demotion check. The
+  // default emitter writes through `emitEvent(db, …)` so callers that
+  // don't supply one still get quarantine wiring (closing the LATM
+  // cycle for the dispatcher fallbacks and recipe replay).
+  const quarantineEmit = emit ?? ((event: EmitEventInput) => { emitEvent(db, event); });
+  maybeQuarantine(db, artifactId, quarantineEmit);
+
   return getArtifact(db, artifactId) as ActArtifactRow;
 };
 

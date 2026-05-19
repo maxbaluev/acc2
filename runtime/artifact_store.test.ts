@@ -136,6 +136,140 @@ describe("applyResidualOutcome", () => {
     const db = openDb(":memory:");
     expect(() => applyResidualOutcome(db, "missing", 0.5, nowIso())).toThrow(/act_artifact_not_found/);
   });
+
+  // Hole 7 regression guard (2026-05-19). Before the fix, the four
+  // task_dispatcher fallback paths and the two recipe_replay branches
+  // mutated `recent_residual_mean` via applyResidualOutcome without
+  // pairing it with maybeQuarantine — only `credit.distributeCredit`
+  // ran the quarantine check. Across 263K production events the
+  // `act_artifact_quarantined` count was 0 despite at least two
+  // artifacts meeting the criteria (recent_residual_mean > 0.7 AND
+  // total_invocations ≥ 5). The fix binds the demotion check to the
+  // same primitive that touches the EMA so the LATM cycle is
+  // symmetric: every EMA write is paired with the quarantine gate.
+  test("Hole 7 regression — applyResidualOutcome on the GM7Y shape (α=1, β=8, ema=1.0) auto-quarantines and emits the ledger event", () => {
+    const db = openDb(":memory:");
+    // Mirror the live GM7YV8C0AX1ZBCXJB5XFCD2TDC row exactly: 7
+    // invocations all failing, EMA pinned at 1.0, status=admitted.
+    insertArtifact(db, {
+      runtime: "bun",
+      body: "// production-shape artifact",
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      stateRoot: null,
+      posteriorAlpha: 1, posteriorBeta: 8,
+      score: 1 / 9, confidence: 0.5,
+      recentResidualMean: 1.0, recentKillCount: 0,
+      status: "admitted", name: null, fixtureInput: null,
+      fixtureExpectedResidual: 0.2,
+      id: "gm7y_shape",
+    });
+    const updated = applyResidualOutcome(db, "gm7y_shape", 0.95, nowIso());
+    // Demotion fired without any explicit maybeQuarantine call.
+    expect(updated.status).toBe("quarantined");
+    // The act_artifact_quarantined event landed in the ledger via the
+    // default emitter (emitEvent(db, …)) — that's the structural
+    // guarantee, because the fallback paths in task_dispatcher.ts and
+    // recipe_replay.ts call applyResidualOutcome with no emit closure.
+    const events = db
+      .query(
+        `SELECT kind FROM events
+         WHERE action_artifact_id = ? AND kind = 'act_artifact_quarantined'`,
+      )
+      .all("gm7y_shape") as Array<{ kind: string }>;
+    expect(events.length).toBe(1);
+  });
+
+  test("Hole 7 regression — refinement_edge_opener shape (α=1, β=6, ema≈0.79) auto-quarantines after a failing residual", () => {
+    const db = openDb(":memory:");
+    insertArtifact(db, {
+      runtime: "bun",
+      body: "// refinement edge opener shape",
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      stateRoot: null,
+      posteriorAlpha: 1, posteriorBeta: 6,
+      score: 1 / 7, confidence: 0.5,
+      recentResidualMean: 0.79, recentKillCount: 0,
+      status: "admitted", name: null, fixtureInput: null,
+      fixtureExpectedResidual: 0.2,
+      id: "refinement_shape",
+    });
+    const updated = applyResidualOutcome(db, "refinement_shape", 0.9, nowIso());
+    expect(updated.status).toBe("quarantined");
+    expect(updated.recentResidualMean).toBeGreaterThan(0.7);
+  });
+
+  test("applyResidualOutcome is a no-op for quarantine when below thresholds (idempotency preserved)", () => {
+    const db = openDb(":memory:");
+    insertSampleBunArtifact(db, "art_safe");
+    // A single failing residual on a fresh artifact (invocations=0) must
+    // not flip status — the invocation floor (≥5) is preserved.
+    const updated = applyResidualOutcome(db, "art_safe", 0.95, nowIso());
+    expect(updated.status).toBe("admitted");
+    const events = db
+      .query(
+        `SELECT kind FROM events
+         WHERE action_artifact_id = ? AND kind = 'act_artifact_quarantined'`,
+      )
+      .all("art_safe") as Array<{ kind: string }>;
+    expect(events.length).toBe(0);
+  });
+
+  test("applyResidualOutcome quarantine emit is idempotent across repeated calls", () => {
+    const db = openDb(":memory:");
+    insertArtifact(db, {
+      runtime: "bun",
+      body: "// repeat",
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      stateRoot: null,
+      posteriorAlpha: 1, posteriorBeta: 8,
+      score: 1 / 9, confidence: 0.5,
+      recentResidualMean: 1.0, recentKillCount: 0,
+      status: "admitted", name: null, fixtureInput: null,
+      fixtureExpectedResidual: 0.2,
+      id: "repeat_q",
+    });
+    applyResidualOutcome(db, "repeat_q", 0.95, nowIso());
+    applyResidualOutcome(db, "repeat_q", 0.95, nowIso());
+    applyResidualOutcome(db, "repeat_q", 0.95, nowIso());
+    const events = db
+      .query(
+        `SELECT kind FROM events
+         WHERE action_artifact_id = ? AND kind = 'act_artifact_quarantined'`,
+      )
+      .all("repeat_q") as Array<{ kind: string }>;
+    // Exactly one transition event despite multiple calls — the
+    // function checks status === "quarantined" up front.
+    expect(events.length).toBe(1);
+  });
+
+  test("applyResidualOutcome honors a caller-supplied emit closure (used by credit.ts to stamp directive/task ids)", () => {
+    const db = openDb(":memory:");
+    insertArtifact(db, {
+      runtime: "bun",
+      body: "// custom emit",
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      stateRoot: null,
+      posteriorAlpha: 1, posteriorBeta: 8,
+      score: 1 / 9, confidence: 0.5,
+      recentResidualMean: 1.0, recentKillCount: 0,
+      status: "admitted", name: null, fixtureInput: null,
+      fixtureExpectedResidual: 0.2,
+      id: "custom_emit",
+    });
+    const captured: EmitEventInput[] = [];
+    applyResidualOutcome(db, "custom_emit", 0.95, nowIso(), (e) => captured.push(e));
+    expect(captured.length).toBe(1);
+    expect(captured[0]!.kind).toBe("act_artifact_quarantined");
+    // The custom emit closure stops the default ledger write, so the
+    // events table has no row unless the caller forwards it.
+    const rows = db
+      .query(
+        `SELECT kind FROM events
+         WHERE action_artifact_id = ? AND kind = 'act_artifact_quarantined'`,
+      )
+      .all("custom_emit") as Array<{ kind: string }>;
+    expect(rows.length).toBe(0);
+  });
 });
 
 describe("maybePromote", () => {
@@ -195,21 +329,35 @@ describe("maybeQuarantine", () => {
     // and the EMA threshold (>0.7) by sending repeated near-1 residuals. The
     // EMA half-life is 20 events, so ~60 events at residual=0.95 drives the
     // EMA into the high-0.8s — well clear of the 0.7 threshold.
+    //
+    // Hole 7 fix (2026-05-19): applyResidualOutcome now auto-runs
+    // maybeQuarantine after the EMA write and emits the ledger event
+    // through its default emitter. The artifact transitions inside
+    // the loop on the iteration that first satisfies the gate; the
+    // explicit maybeQuarantine call below is now the idempotent
+    // no-op path.
     let row = getArtifact(db, "art_q")!;
     for (let i = 0; i < 60; i++) {
       row = applyResidualOutcome(db, "art_q", 0.95, nowIso());
     }
     expect(row.recentResidualMean).toBeGreaterThan(0.7);
+    expect(getArtifact(db, "art_q")!.status).toBe("quarantined");
+    // The default emitter wrote the canonical event into the ledger
+    // exactly once — the demotion is observable from the events table
+    // even though no caller passed an emit closure.
+    const ledger = db
+      .query(
+        `SELECT kind FROM events
+         WHERE action_artifact_id = ? AND kind = 'act_artifact_quarantined'`,
+      )
+      .all("art_q") as Array<{ kind: string }>;
+    expect(ledger.length).toBe(1);
+    // Explicit maybeQuarantine call after the loop must be a no-op
+    // (status === "quarantined" short-circuit).
     const events: EmitEventInput[] = [];
     const transitioned = maybeQuarantine(db, "art_q", (e) => events.push(e));
-    expect(transitioned).toBe(true);
-    expect(getArtifact(db, "art_q")!.status).toBe("quarantined");
-    expect(events.length).toBe(1);
-    expect(events[0]!.kind).toBe("act_artifact_quarantined");
-    // Idempotent.
-    const again = maybeQuarantine(db, "art_q", (e) => events.push(e));
-    expect(again).toBe(false);
-    expect(events.length).toBe(1);
+    expect(transitioned).toBe(false);
+    expect(events.length).toBe(0);
   });
 
   test("quarantines on recent_kill_count >= 3 (column-backed)", () => {
@@ -433,11 +581,15 @@ describe("maybeRehabilitate (Phase H)", () => {
     }
     expect(row.recentResidualMean).toBeGreaterThan(0.7);
 
-    // 2. maybeQuarantine fires on the next observation → status flips,
-    //    act_artifact_quarantined event lands in the ledger.
-    const phase1Events: EmitEventInput[] = [];
-    expect(maybeQuarantine(db, "art_cycle", (e) => phase1Events.push(e))).toBe(true);
+    // 2. Hole 7 fix: applyResidualOutcome auto-quarantined inside the
+    //    loop. The status flip already happened, the ledger already
+    //    holds the canonical `act_artifact_quarantined` event. An
+    //    explicit maybeQuarantine call after the loop is now the
+    //    idempotent no-op path.
     expect(getArtifact(db, "art_cycle")!.status).toBe("quarantined");
+    const phase1Events: EmitEventInput[] = [];
+    expect(maybeQuarantine(db, "art_cycle", (e) => phase1Events.push(e))).toBe(false);
+    expect(phase1Events.length).toBe(0);
     // Substitute the live `act_artifact_quarantined` event for the
     // back-dated one the rehab worker expects to see; this models the same
     // row written 15 days ago.
