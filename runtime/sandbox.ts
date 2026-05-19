@@ -255,8 +255,7 @@ export const buildUvPermissionArgs = (
  *      code that calls `firefox.launchPersistentContext` (CAMOUFOX_OS picks
  *      the fingerprint family the camoufox binary emulates; CAMOUFOX_LOCALE
  *      and CAMOUFOX_HEADLESS thread directly into the launch options).
- *      Defaults: linux / en-US / true. All are optional on the decl so
- *      pre-Batch-1.α decls remain valid (backward-compatible).
+ *      Defaults: linux / en-US / true. All three are optional on the decl.
  *
  *  No argv prefix — firefox is spawned by playwright inside the wrapper,
  *  so the sandbox here only shapes the env passed to the wrapper.

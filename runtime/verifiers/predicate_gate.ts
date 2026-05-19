@@ -78,8 +78,7 @@ export type PredicateGateResult = {
  *  carve out audiences where the pattern is appropriate self-reference
  *  (substrate signing its own cofounder letters) without disabling the
  *  pattern for the rest of the gated set. When BOTH lists are absent
- *  the predicate applies universally (preserves backward-compat for
- *  CEO-buyer documents). */
+ *  the predicate applies universally. */
 type CatalogEntry = {
   kc_id: string;
   predicate_claim: string;

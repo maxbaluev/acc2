@@ -40,13 +40,12 @@ export type FeedbackWindow = {
 
 /** Canonical packet shape for predicted_residual when the emitter wants
  *  to carry feedback_window alongside the scalar prediction. The Event
- *  row column remains a bare number for backward compatibility; the
- *  packet form is used inside act_tuple_recorded payloads, recipe
- *  trajectories, and lifecycle-source rows that the closure sweep
- *  inspects.
+ *  row column stays a bare number — JsonValue does not allow nested
+ *  objects in that slot; the packet form is used inside
+ *  act_tuple_recorded payloads, recipe trajectories, and lifecycle-source
+ *  rows that the closure sweep inspects.
  *
- *  At call sites that currently pass a bare number, the helpers
- *  continue to accept `number` and the packet form is opt-in. */
+ *  The helpers accept `number` everywhere; the packet form is opt-in. */
 export type PredictedResidual = {
   /** Scalar residual prediction in [0,1]. */
   value: number;

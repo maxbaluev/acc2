@@ -278,8 +278,8 @@ const actTupleCitationIds = (db: Database, sourceActId: string | null): string[]
  *  source candidate. When the target id is itself a knowledge_candidate,
  *  read its own payload; when it's a knowledge_promoted, traverse to the
  *  originating candidate via payload.candidate_id. Returns 1.0 (full
- *  weight) when the field is absent or out of [0,1] — backward compatible
- *  with flat-text candidates that don't carry the rich schema. */
+ *  weight) when the field is absent or out of [0,1] — flat-text
+ *  candidates that don't carry the rich schema land at neutral weight. */
 const readCandidateConfidenceEstimate = (db: Database, knowledgeId: string): number => {
   const ev = db.query("SELECT kind, payload FROM events WHERE id = ?").get(knowledgeId) as
     | { kind: string; payload: string }
