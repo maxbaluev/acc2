@@ -138,7 +138,7 @@ const categoryFor = (kind: ChangeKind): ChangeFeedItem["category"] => {
 const summarize = (kind: ChangeKind, payload: Record<string, unknown>, sourceKind: string | null, effectCount: number | null): string => {
   if (kind === "applied_change_committed") {
     const status = stringField(payload, ["status"]) ?? "applied";
-    const target = stringField(payload, ["target", "target_resource", "resource_uri"]);
+    const target = stringField(payload, ["target", "target_resource"]);
     const commit = stringField(payload, ["commit_sha"]);
     const residual = numField(payload, ["residual"]);
     const summary = stringField(payload, ["summary", "reason"]);
@@ -220,7 +220,7 @@ export const buildChangesFeed = (db: Database, opts: { window?: string; now?: Da
       source_event_id: row.source_event_id ?? stringField(payload, ["source_event_id"]),
       source_kind: sourceKind,
       status: stringField(payload, ["status"]),
-      target: stringField(payload, ["target", "target_resource", "resource_uri", "file_path"]) ?? stringField(sourcePayload, ["target", "target_resource", "resource_uri", "file_path"]),
+      target: stringField(payload, ["target", "target_resource"]) ?? stringField(sourcePayload, ["target", "target_resource"]),
       commit_sha: stringField(payload, ["commit_sha"]),
       residual,
       closure_residual: closureResidual,

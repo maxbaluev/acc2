@@ -106,7 +106,10 @@ const parsePayload = (p: unknown): Record<string, unknown> => {
 };
 
 const proposalResource = (proposal: Record<string, unknown>): string => {
-  for (const key of ["target_resource", "resource_uri", "target", "file_path"] as const) {
+  // target_resource is canonical; "target" is kept as a transitional
+  // alias for historical rows. resource_uri / file_path were dropped
+  // (universality cleanup proposal #8, T104FY8YRX389165P4BKYAF2M4).
+  for (const key of ["target_resource", "target"] as const) {
     const value = proposal[key];
     if (typeof value === "string" && value.trim().length > 0) return value.trim();
   }
@@ -114,7 +117,7 @@ const proposalResource = (proposal: Record<string, unknown>): string => {
 };
 
 const targetFromPayload = (payload: Record<string, unknown>): string => {
-  for (const key of ["target_resource", "resource_uri", "target"] as const) {
+  for (const key of ["target_resource", "target"] as const) {
     const value = payload[key];
     if (typeof value === "string" && value.trim().length > 0) return value.trim();
   }
@@ -128,13 +131,12 @@ const targetCandidatesFromPayload = (payload: Record<string, unknown>): string[]
   const add = (value: unknown) => {
     if (typeof value === "string" && value.trim().length > 0) targets.add(value.trim());
   };
-  for (const key of ["target_resource", "resource_uri", "target"] as const) add(payload[key]);
+  for (const key of ["target_resource", "target"] as const) add(payload[key]);
   for (const key of ["proposed_behavior", "proposed_action"] as const) {
     const proposed = payload[key];
     if (proposed && typeof proposed === "object") {
       const p = proposed as Record<string, unknown>;
-      for (const field of ["target_resource", "resource_uri", "target", "file_path"] as const) add(p[field]);
-      if (typeof p.file_path === "string" && p.file_path.trim().length > 0) add("repo:" + p.file_path.trim());
+      for (const field of ["target_resource", "target"] as const) add(p[field]);
     }
   }
   return [...targets];
@@ -172,7 +174,7 @@ const normalizeTargetForCompare = (target: string): string => target.startsWith(
 
 const proposalTargetsPayloadTarget = (proposal: Record<string, unknown>, target: string): boolean => {
   const normalizedTarget = normalizeTargetForCompare(target);
-  for (const field of ["target_resource", "resource_uri", "target", "file_path"] as const) {
+  for (const field of ["target_resource", "target"] as const) {
     const value = proposal[field];
     if (typeof value !== "string") continue;
     const trimmed = value.trim();

@@ -195,7 +195,7 @@ describe("runApply gates", () => {
 
   test("auto-apply target proceeds on hazardous trajectories (residual decides, not the hazard count)", async () => {
     const scope = nextScope();
-    const eventId = await emitLesson({ file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" }, scope);
+    const eventId = await emitLesson({ target_resource: "repo:runtime/verifier.ts", anchor: "gate", diff: "@@" }, scope);
     const hazard = await rpc("substrate.emit", {
       kind: "dispatcher_violation",
       substrate_origin: "substrate",
@@ -218,7 +218,7 @@ describe("runApply gates", () => {
   // policy is gone; the gate is structural-axes-only.
 
   test("high-residual applied executor attempts remain uncommitted and queued", async () => {
-    const eventId = await emitLesson({ file_path: "runtime/verifier.ts", anchor: "gate", diff: "@@" });
+    const eventId = await emitLesson({ target_resource: "repo:runtime/verifier.ts", anchor: "gate", diff: "@@" });
     const cap = captureConsole();
     const code = await runApply([
       "--record",

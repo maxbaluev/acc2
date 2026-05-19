@@ -64,13 +64,13 @@ const rootStatus = (db: Database, directiveId: string): "task_committed" | "task
 };
 
 const proposalTarget = (payload: Record<string, unknown>): string => {
-  for (const key of ["target_resource", "resource_uri", "target", "file_path"] as const) {
+  for (const key of ["target_resource", "target"] as const) {
     const v = payload[key]; if (typeof v === "string" && v.trim().length > 0) return v.trim();
   }
   const proposed = payload.proposed_behavior ?? payload.proposed_action;
   if (proposed && typeof proposed === "object") {
     const p = proposed as Record<string, unknown>;
-    for (const key of ["target_resource", "resource_uri", "target", "file_path"] as const) {
+    for (const key of ["target_resource", "target"] as const) {
       const v = p[key]; if (typeof v === "string" && v.trim().length > 0) return v.trim();
     }
   }
