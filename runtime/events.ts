@@ -214,6 +214,147 @@ const emitActionScoredWithLift = (
   return scored;
 };
 
+/** Auto-admit unseen verifier_kinds at the action_scored projection
+ *  boundary (brain EH5A37DPHX0GSCJKBSRNZDX700, 2026-05-19).
+ *
+ *  Companion to commit d84618d's lift gate (which sets
+ *  action_artifact_id = verifier_kind verbatim). When an action_scored
+ *  carries a verifier_kind whose canonical name has NO matching
+ *  act_artifact row, the substrate creates a kind="verifier" row with a
+ *  neutral Beta(1,1) prior (score=0.5, confidence=0.5) so credit accrues
+ *  on every subsequent action_scored. Emits verifier_kind_auto_admitted
+ *  for operator audit.
+ *
+ *  Idempotency: this runs INSIDE emitEvent. The recursive lift path calls
+ *  emitEvent twice for one logical action_scored — once with
+ *  action_artifact_id=null (which falls into the lift branch and never
+ *  reaches the INSERT) and once with the lifted handle (which DOES reach
+ *  the INSERT). We anchor auto-admit on the action_artifact_id-populated
+ *  pass so it fires exactly once per logical event. SELECT-before-INSERT
+ *  also makes repeated emissions of the same verifier_kind no-op the
+ *  second time onward.
+ *
+ *  peer_llm_opencode_* collapse rule: variants store
+ *  parent_kind=peer_llm_opencode, variant_tag, rollup=true as METADATA.
+ *  Credit pipeline still routes to payload.verifier_kind directly; a
+ *  follow-up verifier_rollup_evaluator worker will route variants to the
+ *  parent until promotion criteria are met (≥3 obs, ≥2 directives, OR
+ *  residual diverges by ≥ 0.20). */
+const VERIFIER_AUTO_ADMIT_SANDBOX = JSON.stringify({
+  runtime: "bun",
+  substrate_access: "rw",
+  cpu_ms: 5000,
+  wall_ms: 10000,
+  memory_mb: 64,
+  fs_read: [],
+  fs_write: [],
+  net_allow: [],
+  proc_allow: [],
+});
+
+const maybeAutoAdmitVerifierKind = (
+  db: Database,
+  input: EmitEventInput,
+  sourceEventId: string,
+): void => {
+  if (input.kind !== "action_scored") return;
+  const payload = isObject(input.payload) ? input.payload : null;
+  if (!payload) return;
+  const verifierKind = typeof payload.verifier_kind === "string" && payload.verifier_kind.trim().length > 0
+    ? payload.verifier_kind.trim()
+    : null;
+  if (!verifierKind) return;
+  // Auto-admit hooks on the INSERT pass — the action_artifact_id column
+  // is populated (either originally or post-lift). Skip pre-lift passes
+  // where the column is still null; they will recurse with the lifted
+  // handle.
+  const resolvedActionId = typeof input.action_artifact_id === "string" && input.action_artifact_id.trim().length > 0
+    ? input.action_artifact_id.trim()
+    : (typeof payload.action_artifact_id === "string" && payload.action_artifact_id.trim().length > 0
+      ? payload.action_artifact_id.trim()
+      : null);
+  if (!resolvedActionId) return;
+  // Idempotent: do nothing when the canonical row already exists.
+  const existing = db
+    .query<{ id: string }, [string]>("SELECT id FROM act_artifact WHERE id = ? LIMIT 1")
+    .get(verifierKind);
+  if (existing) return;
+  // peer_llm_opencode_* variant detection (metadata-only collapse rule).
+  let parentKind: string | null = null;
+  let variantTag: string | null = null;
+  let rollup = false;
+  const PEER_PREFIX = "peer_llm_opencode_";
+  if (verifierKind.startsWith(PEER_PREFIX) && verifierKind !== "peer_llm_opencode") {
+    parentKind = "peer_llm_opencode";
+    variantTag = verifierKind.slice(PEER_PREFIX.length);
+    rollup = true;
+  }
+  const ts = nowIso();
+  const body = `Auto-admitted verifier — first observed in action_scored event ${sourceEventId}. Created by runtime/events.ts auto-admit gate${parentKind ? `; parent_kind=${parentKind}, variant_tag=${variantTag}` : ""}.`;
+  const fixtureInput = JSON.stringify({
+    admission_source: "action_scored_projection",
+    first_observed_action_scored_event_id: sourceEventId,
+    parent_kind: parentKind,
+    variant_tag: variantTag,
+    rollup,
+  });
+  db.run(
+    `INSERT INTO act_artifact (
+       id, runtime, body, declared_sandbox, state_root, kind,
+       posterior_alpha, posterior_beta, score, confidence,
+       recent_residual_mean, recent_kill_count, status, name,
+       fixture_input, fixture_expected_residual,
+       created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      verifierKind,
+      "bun",
+      body,
+      VERIFIER_AUTO_ADMIT_SANDBOX,
+      `substrate/auto_admit/verifier/${verifierKind}`,
+      "verifier",
+      1.0,
+      1.0,
+      0.5,
+      0.5,
+      0.0,
+      0,
+      "admitted",
+      verifierKind,
+      fixtureInput,
+      0.5,
+      ts,
+      ts,
+    ],
+  );
+  // Emit verifier_kind_auto_admitted for operator audit. Substrate-origin
+  // because the runtime is the actor; loop_id/directive_id/task_id mirror
+  // the source action_scored so the audit row joins under the same
+  // dispatch lineage.
+  emitEvent(db, {
+    kind: "verifier_kind_auto_admitted",
+    substrate_origin: "substrate_auto",
+    directive_id: input.directive_id,
+    task_id: input.task_id,
+    parent_task_id: input.parent_task_id ?? null,
+    loop_id: input.loop_id,
+    context_refs: [sourceEventId, ...(input.context_refs ?? [])],
+    payload: {
+      verifier_kind: verifierKind,
+      act_artifact_id: verifierKind,
+      source_action_scored_event_id: sourceEventId,
+      parent_kind: parentKind,
+      variant_tag: variantTag,
+      rollup,
+      promotion_criteria: {
+        min_observations: 3,
+        min_directives: 2,
+        residual_delta_from_parent: 0.20,
+      },
+    },
+  });
+};
+
 /** Lesson-extracted normalization. Same shape as task_failed: when
  *  lesson_kind is missing, surface it as a classification_source so the
  *  tail/observability layer doesn't render `lesson_kind=?` (which the
@@ -996,6 +1137,22 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       // Screen failures must not poison the candidate emission. The
       // candidate row already landed; a dead screen is observable as
       // missing refusal rows on the next audit, not as a thrown emit.
+      void err;
+    }
+  }
+  // Auto-admit unseen verifier_kinds (brain EH5A37DPHX0GSCJKBSRNZDX700).
+  // Runs AFTER the source action_scored row has landed so the audit
+  // event's context_refs can reference the source id. Idempotent SELECT-
+  // before-INSERT inside the helper; safe to call on every action_scored.
+  // The lift path's first pass (action_artifact_id=null) is skipped
+  // because resolvedActionId is null; the recursive call with the lifted
+  // handle is the one that fires the admit.
+  if (input.kind === "action_scored") {
+    try {
+      maybeAutoAdmitVerifierKind(db, input, id);
+    } catch (err) {
+      // Fail-soft: auto-admit must not poison the action_scored emit.
+      // Missing rows surface as orphaned credit (visible to audits).
       void err;
     }
   }

@@ -2164,6 +2164,100 @@ const SUBSTRATE_PRIMITIVE_ARTIFACTS: SeedArtifact[] = [
     display_name: "Refinement edge opener — depth/fanout task expansion",
     kind: "action",
   },
+  // ── Canonical verifier_kind seeds (brain ZNYFGRV8NS33B1EZR3S8T80DZR) ──
+  //
+  // Six canonical verifier_kinds receive admitted act_artifact rows so
+  // verifier-side credit can flow at observation time. Stable_id is the
+  // BARE canonical name (NOT prefixed) — consistent with commit d84618d's
+  // lift gate which sets action_artifact_id = verifier_kind verbatim, and
+  // with the 16 substrate-primitive rows above (knowledge_merger_v1 etc.)
+  // whose ids are also bare. Auto-admit gate in runtime/events.ts
+  // (verifier_kind_auto_admitted) handles variants on first observation;
+  // these rows are the named provenance handle for credit.
+  {
+    stable_id: "deterministic_code",
+    seedName: "deterministic_code",
+    runtime: "bun",
+    body: "Canonical verifier — deterministic code/runtime invariant check. Auto-admit gate (runtime/events.ts) registers variants on first observation; this row is the named provenance handle for credit.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/verifier_deterministic_code",
+    initial_score: 0.7,
+    initial_confidence: 0.7,
+    fixture_input: { evidence_window_hours: 168, live_inventory_count: 13, fixture_expected_residual: 0.30 },
+    fixture_expected_residual: 0.30,
+    display_name: "Deterministic code verifier — substrate/runtime invariant check",
+    kind: "verifier",
+  },
+  {
+    stable_id: "peer_llm_opencode",
+    seedName: "peer_llm_opencode",
+    runtime: "bun",
+    body: "Canonical verifier — peer LLM critique / brain self-review. Auto-admit gate (runtime/events.ts) registers variants on first observation; this row is the named provenance handle for credit. peer_llm_opencode_* variants collapse to this parent until promotion criteria met (≥3 obs, ≥2 directives, OR residual diverges by ≥ 0.20).",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/verifier_peer_llm_opencode",
+    initial_score: 0.6,
+    initial_confidence: 0.6,
+    fixture_input: { evidence_window_hours: 168, live_inventory_count: 5, fixture_expected_residual: 0.40 },
+    fixture_expected_residual: 0.40,
+    display_name: "Peer LLM critique verifier — brain self-review",
+    kind: "verifier",
+  },
+  {
+    stable_id: "auto_apply_gate",
+    seedName: "auto_apply_gate",
+    runtime: "bun",
+    body: "Canonical verifier — auto-apply eligibility (freshness × duplicate × novelty × necessity × review axes). Auto-admit gate (runtime/events.ts) registers variants on first observation; this row is the named provenance handle for credit.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/verifier_auto_apply_gate",
+    initial_score: 0.7,
+    initial_confidence: 0.65,
+    fixture_input: { evidence_window_hours: 168, live_inventory_count: 2, fixture_expected_residual: 0.30 },
+    fixture_expected_residual: 0.30,
+    display_name: "Auto-apply eligibility verifier — freshness × duplicate × novelty × necessity × review axes",
+    kind: "verifier",
+  },
+  {
+    stable_id: "brain_self_audit_checklist",
+    seedName: "brain_self_audit_checklist",
+    runtime: "bun",
+    body: "Canonical verifier — brain self-audit checklist (closure_audit named-check evaluator). Auto-admit gate (runtime/events.ts) registers variants on first observation; this row is the named provenance handle for credit.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/verifier_brain_self_audit_checklist",
+    initial_score: 0.65,
+    initial_confidence: 0.6,
+    fixture_input: { evidence_window_hours: 168, live_inventory_count: 0, fixture_expected_residual: 0.35 },
+    fixture_expected_residual: 0.35,
+    display_name: "Brain self-audit checklist verifier — closure_audit named-check evaluator",
+    kind: "verifier",
+  },
+  {
+    stable_id: "owner_confirmation",
+    seedName: "owner_confirmation",
+    runtime: "bun",
+    body: "Canonical verifier — owner-observed confirmation (owner-truth provenance). Auto-admit gate (runtime/events.ts) registers variants on first observation; this row is the named provenance handle for credit.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/verifier_owner_confirmation",
+    initial_score: 0.8,
+    initial_confidence: 0.7,
+    fixture_input: { evidence_window_hours: 168, live_inventory_count: 0, fixture_expected_residual: 0.20 },
+    fixture_expected_residual: 0.20,
+    display_name: "Owner-observed confirmation verifier — owner-truth provenance",
+    kind: "verifier",
+  },
+  {
+    stable_id: "external_signal",
+    seedName: "external_signal",
+    runtime: "bun",
+    body: "Canonical verifier — external signal (webhook / system event provenance). Auto-admit gate (runtime/events.ts) registers variants on first observation; this row is the named provenance handle for credit.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/verifier_external_signal",
+    initial_score: 0.6,
+    initial_confidence: 0.55,
+    fixture_input: { evidence_window_hours: 168, live_inventory_count: 0, fixture_expected_residual: 0.40 },
+    fixture_expected_residual: 0.40,
+    display_name: "External signal verifier — webhook/system event provenance",
+    kind: "verifier",
+  },
 ];
 
 export type ActArtifactSeedSummary = { inserted: number; skipped: number; upgraded?: number };

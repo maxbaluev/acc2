@@ -188,6 +188,17 @@ export const EVENT_KINDS = {
   // returned 0% text-hit on 342 events.
   act_artifact_admitted:                   { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   act_artifact_admission_rejected:         { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // 2026-05-19 (brain EH5A37DPHX0GSCJKBSRNZDX700): substrate auto-admits
+  // unseen verifier_kinds as kind="verifier" act_artifact rows at the
+  // action_scored projection boundary (runtime/events.ts), with neutral
+  // Beta(1,1) prior so credit accrues on every subsequent action_scored.
+  // For peer_llm_opencode_* variants the row carries
+  // parent_kind=peer_llm_opencode, variant_tag, rollup=true as METADATA
+  // — a follow-up verifier_rollup_evaluator worker will route credit to
+  // the parent until promotion criteria (≥3 obs, ≥2 directives, OR
+  // residual diverges ≥ 0.20) are met. Narrative-only: surfaces in the
+  // default tail so operators see new verifier_kinds enter the registry.
+  verifier_kind_auto_admitted:             { producer: "runtime",    embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   // C1 (2026-05-18): substrate-side structural admission gate that
   // runs alex_predicate_* knowledge_candidates against
   // act_artifact_candidate bodies whose audience tag is

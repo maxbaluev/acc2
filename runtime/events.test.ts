@@ -267,6 +267,12 @@ describe("emitEvent act_tuple_recorded projector", () => {
     //   (c) every derived row's context_refs includes the act id
     const kinds = rows.map((r) => r.kind);
     expect(kinds[0]).toBe("act_tuple_recorded");
+    // 2026-05-19 (brain EH5A37DPHX0GSCJKBSRNZDX700): action_scored
+    // projection now auto-admits unseen verifier_kinds and emits
+    // verifier_kind_auto_admitted for operator audit. The audit row's
+    // context_refs reference the source action_scored, not the
+    // act_tuple_recorded; it sits at task scope as a sibling to the
+    // projection set.
     expect(kinds.slice(1).sort()).toEqual([
       "action_predicted",
       "action_scored",
@@ -274,8 +280,17 @@ describe("emitEvent act_tuple_recorded projector", () => {
       "candidate_confirmed",
       "retrieval_binding",
       "retrieval_binding",
+      "verifier_kind_auto_admitted",
     ]);
     for (const row of rows.slice(1)) {
+      // The auto-admit row is a sibling — its source_act_id is the
+      // action_scored event id, NOT the act_tuple_recorded id. Skip the
+      // act-projection invariant for that one row.
+      if (row.kind === "verifier_kind_auto_admitted") {
+        const audit = JSON.parse(row.payload);
+        expect(audit.verifier_kind).toBe("deterministic_code");
+        continue;
+      }
       expect(JSON.parse(row.payload).source_act_id).toBe(act.id);
       expect(JSON.parse(row.context_refs)).toContain(act.id);
     }
@@ -519,12 +534,19 @@ describe("emitEvent act_tuple_recorded projector", () => {
         "SELECT kind, COUNT(*) AS n FROM events WHERE kind != 'act_tuple_recorded' GROUP BY kind ORDER BY kind",
       )
       .all();
+    // 2026-05-19 (brain EH5A37DPHX0GSCJKBSRNZDX700): action_scored
+    // projection auto-admits unseen verifier_kinds once. The replayed
+    // logical act fires the same auto-admit path twice but the SELECT-
+    // before-INSERT idempotency keeps the registry row count at 1 —
+    // and the audit event fires only on the FIRST observation because
+    // the helper short-circuits when the row already exists.
     expect(Object.fromEntries(projected.map((row) => [row.kind, row.n]))).toEqual({
       action_predicted: 1,
       action_scored: 1,
       applied_change_committed: 1,
       candidate_confirmed: 1,
       retrieval_binding: 2,
+      verifier_kind_auto_admitted: 1,
     });
     const predicted = db
       .query<{ payload: string }, []>("SELECT payload FROM events WHERE kind = 'action_predicted'")
@@ -718,5 +740,169 @@ describe("emitEvent action_scored null-id lift gate (brain lesson TA4X4Q36XH3878
       )
       .get()!.n;
     expect(violations).toBe(0);
+  });
+});
+
+describe("emitEvent action_scored verifier_kind auto-admit gate (brain EH5A37DPHX0GSCJKBSRNZDX700)", () => {
+  // Companion to the lift gate above. When an action_scored carries a
+  // verifier_kind whose canonical name has no matching act_artifact row,
+  // the substrate auto-creates a kind="verifier" row with neutral
+  // Beta(1,1) prior so credit accrues on every subsequent action_scored.
+  // Emits verifier_kind_auto_admitted for operator audit. Idempotent:
+  // second observation of the same verifier_kind is a no-op.
+
+  test("first observation of a new verifier_kind -> act_artifact row auto-admitted + verifier_kind_auto_admitted event emitted", () => {
+    const db = openDb(":memory:");
+    const before = db
+      .query<{ id: string }, [string]>("SELECT id FROM act_artifact WHERE id = ? LIMIT 1")
+      .get("brand_new_verifier_kind_xyz");
+    expect(before).toBeNull();
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "opencode",
+      directive_id: newId(),
+      task_id: newId(),
+      action_artifact_id: "brand_new_verifier_kind_xyz",
+      verifier_artifact_id: "brand_new_verifier_kind_xyz",
+      residual: 0.4,
+      payload: { verifier_kind: "brand_new_verifier_kind_xyz" },
+    });
+    // act_artifact row landed with kind="verifier" + neutral prior.
+    const row = db
+      .query<{
+        id: string;
+        kind: string;
+        status: string;
+        runtime: string;
+        posterior_alpha: number;
+        posterior_beta: number;
+        score: number;
+        confidence: number;
+        fixture_input: string;
+        body: string;
+      }, [string]>(
+        "SELECT id, kind, status, runtime, posterior_alpha, posterior_beta, score, confidence, fixture_input, body FROM act_artifact WHERE id = ? LIMIT 1",
+      )
+      .get("brand_new_verifier_kind_xyz");
+    expect(row).not.toBeNull();
+    expect(row!.kind).toBe("verifier");
+    expect(row!.status).toBe("admitted");
+    expect(row!.runtime).toBe("bun");
+    expect(row!.posterior_alpha).toBe(1.0);
+    expect(row!.posterior_beta).toBe(1.0);
+    expect(row!.score).toBe(0.5);
+    expect(row!.confidence).toBe(0.5);
+    const fixture = JSON.parse(row!.fixture_input);
+    expect(fixture.admission_source).toBe("action_scored_projection");
+    expect(fixture.first_observed_action_scored_event_id).toBe(scored.id);
+    expect(fixture.parent_kind).toBeNull();
+    expect(fixture.variant_tag).toBeNull();
+    expect(fixture.rollup).toBe(false);
+    expect(row!.body).toContain("Auto-admitted verifier");
+    // verifier_kind_auto_admitted audit event fired.
+    const audits = db
+      .query<{ id: string; payload: string; context_refs: string }, [string]>(
+        "SELECT id, payload, context_refs FROM events WHERE kind = 'verifier_kind_auto_admitted' AND json_extract(payload, '$.verifier_kind') = ?",
+      )
+      .all("brand_new_verifier_kind_xyz");
+    expect(audits.length).toBe(1);
+    const auditPayload = JSON.parse(audits[0]!.payload);
+    expect(auditPayload.verifier_kind).toBe("brand_new_verifier_kind_xyz");
+    expect(auditPayload.act_artifact_id).toBe("brand_new_verifier_kind_xyz");
+    expect(auditPayload.source_action_scored_event_id).toBe(scored.id);
+    expect(auditPayload.parent_kind).toBeNull();
+    expect(auditPayload.variant_tag).toBeNull();
+    expect(auditPayload.rollup).toBe(false);
+    expect(auditPayload.promotion_criteria.min_observations).toBe(3);
+    expect(auditPayload.promotion_criteria.min_directives).toBe(2);
+    expect(auditPayload.promotion_criteria.residual_delta_from_parent).toBe(0.20);
+    expect(JSON.parse(audits[0]!.context_refs)).toContain(scored.id);
+  });
+
+  test("second observation of the same verifier_kind -> no re-admit (idempotent), no second audit event", () => {
+    const db = openDb(":memory:");
+    // First observation.
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "opencode",
+      directive_id: newId(),
+      task_id: newId(),
+      action_artifact_id: "idempotent_verifier_zzz",
+      verifier_artifact_id: "idempotent_verifier_zzz",
+      residual: 0.3,
+      payload: { verifier_kind: "idempotent_verifier_zzz" },
+    });
+    // Capture the row's created_at so we can confirm it doesn't change.
+    const first = db
+      .query<{ id: string; created_at: string }, [string]>(
+        "SELECT id, created_at FROM act_artifact WHERE id = ? LIMIT 1",
+      )
+      .get("idempotent_verifier_zzz");
+    expect(first).not.toBeNull();
+    // Second observation — same verifier_kind, different directive/task.
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "opencode",
+      directive_id: newId(),
+      task_id: newId(),
+      action_artifact_id: "idempotent_verifier_zzz",
+      verifier_artifact_id: "idempotent_verifier_zzz",
+      residual: 0.2,
+      payload: { verifier_kind: "idempotent_verifier_zzz" },
+    });
+    // Still exactly one act_artifact row, with unchanged created_at.
+    const rows = db
+      .query<{ id: string; created_at: string }, [string]>(
+        "SELECT id, created_at FROM act_artifact WHERE id = ?",
+      )
+      .all("idempotent_verifier_zzz");
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.created_at).toBe(first!.created_at);
+    // Only ONE verifier_kind_auto_admitted event fired (the first).
+    const audits = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'verifier_kind_auto_admitted' AND json_extract(payload, '$.verifier_kind') = ?",
+      )
+      .get("idempotent_verifier_zzz");
+    expect(audits!.n).toBe(1);
+  });
+
+  test("peer_llm_opencode_<variant> observation -> row created with parent_kind=peer_llm_opencode, variant_tag, rollup=true", () => {
+    const db = openDb(":memory:");
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "opencode",
+      directive_id: newId(),
+      task_id: newId(),
+      action_artifact_id: "peer_llm_opencode_diagnostic",
+      verifier_artifact_id: "peer_llm_opencode_diagnostic",
+      residual: 0.25,
+      payload: { verifier_kind: "peer_llm_opencode_diagnostic" },
+    });
+    const row = db
+      .query<{ id: string; kind: string; fixture_input: string; body: string }, [string]>(
+        "SELECT id, kind, fixture_input, body FROM act_artifact WHERE id = ? LIMIT 1",
+      )
+      .get("peer_llm_opencode_diagnostic");
+    expect(row).not.toBeNull();
+    expect(row!.kind).toBe("verifier");
+    const fixture = JSON.parse(row!.fixture_input);
+    expect(fixture.parent_kind).toBe("peer_llm_opencode");
+    expect(fixture.variant_tag).toBe("diagnostic");
+    expect(fixture.rollup).toBe(true);
+    expect(row!.body).toContain("parent_kind=peer_llm_opencode");
+    expect(row!.body).toContain("variant_tag=diagnostic");
+    // Audit event payload carries the same collapse metadata.
+    const audits = db
+      .query<{ payload: string }, [string]>(
+        "SELECT payload FROM events WHERE kind = 'verifier_kind_auto_admitted' AND json_extract(payload, '$.verifier_kind') = ?",
+      )
+      .all("peer_llm_opencode_diagnostic");
+    expect(audits.length).toBe(1);
+    const auditPayload = JSON.parse(audits[0]!.payload);
+    expect(auditPayload.parent_kind).toBe("peer_llm_opencode");
+    expect(auditPayload.variant_tag).toBe("diagnostic");
+    expect(auditPayload.rollup).toBe(true);
+    expect(auditPayload.source_action_scored_event_id).toBe(scored.id);
   });
 });

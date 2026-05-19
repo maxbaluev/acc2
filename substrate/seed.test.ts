@@ -73,6 +73,15 @@ describe("seedActArtifacts", () => {
       "predicate_gate_v1",
       "auto_apply_worker_stage2_action",
       "refinement_edge_opener_v1",
+      // Canonical verifier_kind seeds (brain ZNYFGRV8NS33B1EZR3S8T80DZR).
+      // Bare canonical names — consistent with d84618d's lift gate which
+      // sets action_artifact_id = verifier_kind verbatim.
+      "deterministic_code",
+      "peer_llm_opencode",
+      "auto_apply_gate",
+      "brain_self_audit_checklist",
+      "owner_confirmation",
+      "external_signal",
     ]);
     for (const id of ids) {
       if (SUBSTRATE_PRIMITIVE_IDS.has(id)) continue;
