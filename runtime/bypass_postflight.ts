@@ -116,24 +116,19 @@ const savePatch = (sourceCheckoutRoot: string, dispatchId: string): string | nul
   return path;
 };
 
-/** Revert dirty files in the source checkout to match HEAD. Returns the
- *  list of files actually reverted. */
-const revertFiles = (sourceCheckoutRoot: string, files: readonly string[]): string[] => {
-  const reverted: string[] = [];
-  for (const f of files) {
-    const res = spawnSync("git", ["checkout", "HEAD", "--", f], {
-      cwd: sourceCheckoutRoot,
-      encoding: "utf8",
-    });
-    if (res.status === 0) reverted.push(f);
-  }
-  return reverted;
-};
-
 /** Inspect the source checkout for unexplained mutations after a brain
  *  dispatch returned. When dirty files exist that no
  *  applied_change_committed row from this dispatch claims, emit a
- *  dispatcher_violation and revert. */
+ *  dispatcher_violation as a learnable signal. The postflight does NOT
+ *  revert: in a single-checkout multi-actor world (orchestrator inline,
+ *  Agent subagents, peer brain dispatches, operator editor), the
+ *  reverter cannot know which of those owns the dirty state, so
+ *  auto-revert silently clobbered legitimate concurrent work.
+ *  Detection + dispatcher_violation (a health_metric + mirror_inline
+ *  event) is the universal substrate response; the orchestrator or
+ *  owner decides reversibility from the violation event. The
+ *  `reverted_files` field on PostflightResult is now always empty and
+ *  retained only for back-compat with callers reading the shape. */
 export const runBypassPostflight = (
   db: Database,
   args: {
@@ -165,24 +160,10 @@ export const runBypassPostflight = (
     };
   }
 
-  // F5-companion scope (2026-05-18): escape hatch for orchestrator-driven
-  // implementation cycles where the operator and Agent subagent share one
-  // checkout. Production daemon should leave the flag unset.
-  if (process.env.ACC2_BYPASS_POSTFLIGHT_DISABLED === "1") {
-    return {
-      ran: false,
-      bypass_detected: false,
-      touched_files: [],
-      reverted_files: [],
-      patch_path: null,
-      skip_reason: "env_disabled",
-    };
-  }
-
   // Scope to dispatches that actually spawned a brain subprocess. Without
   // brain_dispatched evidence, the working tree state belongs to another
   // actor (the operator's own edits, an Agent subagent on the same
-  // checkout, a CI process) and reverting it would clobber legitimate work.
+  // checkout, a CI process) and the detection is moot.
   if (!hasBrainDispatchedRow(db, args.dispatchId)) {
     return {
       ran: false,
@@ -196,7 +177,6 @@ export const runBypassPostflight = (
 
   let touched: string[] | null;
   let patchPath: string | null = null;
-  let revertedFiles: string[] = [];
   if (args.testOverride) {
     touched = args.testOverride.dirtyFiles;
     if (touched.length > 0) {
@@ -205,7 +185,6 @@ export const runBypassPostflight = (
       } catch { /* ok */ }
       patchPath = join(PATCH_ROOT, `${args.dispatchId}.patch`);
       writeFileSync(patchPath, args.testOverride.patchText, "utf8");
-      revertedFiles = touched.slice();
     }
   } else {
     touched = collectDirtyFiles(args.sourceCheckoutRoot);
@@ -229,7 +208,6 @@ export const runBypassPostflight = (
       };
     }
     patchPath = savePatch(args.sourceCheckoutRoot, args.dispatchId);
-    revertedFiles = revertFiles(args.sourceCheckoutRoot, touched);
   }
 
   if (!touched || touched.length === 0) {
@@ -290,7 +268,6 @@ export const runBypassPostflight = (
       undeclared_files: undeclared as unknown as JsonValue,
       touched_files: touched as unknown as JsonValue,
       declared_files: Array.from(declared) as unknown as JsonValue,
-      reverted_files: revertedFiles as unknown as JsonValue,
       patch_path: patchPath ?? null,
       source_checkout_root: args.sourceCheckoutRoot,
     } as JsonValue,
@@ -300,7 +277,7 @@ export const runBypassPostflight = (
     ran: true,
     bypass_detected: true,
     touched_files: touched,
-    reverted_files: revertedFiles,
+    reverted_files: [],
     patch_path: patchPath,
   };
 };

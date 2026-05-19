@@ -1,10 +1,16 @@
-// acc2 F2 — bypass postflight tests (2026-05-18).
+// acc2 F2 — bypass postflight tests (2026-05-18; revert dropped 2026-05-19
+// per universal-substrate principle).
 //
-// Validates defenses B (post-dispatch git diff) and C (revert +
-// dispatcher_violation) from lesson 20MSGR2A253TN0T60C90AH9Z4G.
+// Validates defense B (post-dispatch git diff) and dispatcher_violation
+// emission from lesson 20MSGR2A253TN0T60C90AH9Z4G. The auto-revert path
+// was removed in a follow-up commit: in a single-checkout multi-actor
+// world the reverter cannot know which actor owns the dirty state, so
+// detection + dispatcher_violation (a health_metric + mirror_inline
+// event) is the universal response, and reversibility is the
+// orchestrator/owner's call.
 // The synthetic test uses a tempdir-as-source-checkout fixture + the
-// testOverride seam so the runtime path is exercised without
-// shelling out to git.
+// testOverride seam so the runtime path is exercised without shelling
+// out to git.
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
@@ -38,8 +44,8 @@ const seedBrainDispatched = (
   });
 };
 
-describe("runBypassPostflight — F2 defenses B+C", () => {
-  test("dirty source files with NO applied_change_committed → dispatcher_violation + patch saved + revert recorded", () => {
+describe("runBypassPostflight — F2 defense B (detection-only)", () => {
+  test("dirty source files with NO applied_change_committed → dispatcher_violation + patch saved (no revert)", () => {
     const db = openDb(":memory:");
     const dispatchId = newId();
     const taskId = newId();
@@ -59,7 +65,10 @@ describe("runBypassPostflight — F2 defenses B+C", () => {
     expect(result.ran).toBe(true);
     expect(result.bypass_detected).toBe(true);
     expect(result.touched_files).toEqual(["cli/lineage.ts", "cli/whoami.ts"]);
-    expect(result.reverted_files).toEqual(["cli/lineage.ts", "cli/whoami.ts"]);
+    // The postflight no longer reverts (multi-actor checkout safety) —
+    // dispatcher_violation is the universal signal; the orchestrator
+    // decides reversibility from there.
+    expect(result.reverted_files).toEqual([]);
     expect(result.patch_path).toContain(dispatchId);
     // Patch file was actually saved to /tmp/.acc2/bypass-recovery/.
     expect(existsSync(result.patch_path!)).toBe(true);
@@ -244,39 +253,9 @@ describe("runBypassPostflight — F2 defenses B+C", () => {
     expect(violations?.c).toBe(0);
   });
 
-  test("Case F: ACC2_BYPASS_POSTFLIGHT_DISABLED=1 → postflight skips entirely", () => {
-    const db = openDb(":memory:");
-    const dispatchId = newId();
-    const taskId = newId();
-    const directiveId = newId();
-    seedBrainDispatched(db, dispatchId, directiveId, taskId);
-    const prior = process.env.ACC2_BYPASS_POSTFLIGHT_DISABLED;
-    process.env.ACC2_BYPASS_POSTFLIGHT_DISABLED = "1";
-    try {
-      const result = runBypassPostflight(db, {
-        dispatchId,
-        taskId,
-        directiveId,
-        sourceCheckoutRoot: "/synthetic/source",
-        isolated: false,
-        testOverride: {
-          dirtyFiles: ["cli/lineage.ts"],
-          patchText: "diff ... bypass forced off",
-        },
-      });
-      expect(result.ran).toBe(false);
-      expect(result.bypass_detected).toBe(false);
-      expect(result.reverted_files).toEqual([]);
-      expect(result.skip_reason).toBe("env_disabled");
-      const violations = db
-        .query<{ c: number }, []>(
-          "SELECT COUNT(*) AS c FROM events WHERE kind = 'dispatcher_violation'",
-        )
-        .get();
-      expect(violations?.c).toBe(0);
-    } finally {
-      if (prior === undefined) delete process.env.ACC2_BYPASS_POSTFLIGHT_DISABLED;
-      else process.env.ACC2_BYPASS_POSTFLIGHT_DISABLED = prior;
-    }
-  });
+  // Case F (ACC2_BYPASS_POSTFLIGHT_DISABLED escape hatch) DELETED:
+  // the env hatch existed because the postflight reverted files, and
+  // orchestrator-driven implementation cycles needed a way to suppress
+  // the destructive action. With the revert dropped (detection-only),
+  // there is no destructive action to suppress; the env var is gone.
 });
