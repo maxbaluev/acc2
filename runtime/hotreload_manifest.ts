@@ -140,6 +140,15 @@ export const HOTRELOAD_MANIFEST: readonly HotReloadEntry[] = [
     reason: "Pure helpers (budget aggregation, pub/sub, classifier, Shapley credit). Re-import refreshes the math without daemon restart.",
   },
   {
+    name: "runtime_artifact_admission_screen",
+    globs: [
+      "runtime/artifact_candidate_screen.ts",
+      "runtime/artifact_admission.ts",
+    ],
+    strategy: "in_process",
+    reason: "Citation resolution + admission gate. Pure SQL reads + emit lane_routing_refused; re-import refreshes the prefix-matching and decorative-citation logic without restart. The citation gate fires on every brain candidate, so out-of-date logic here causes wide upstream noise.",
+  },
+  {
     name: "runtime_prompt_cache",
     globs: ["runtime/prompt_cache.ts"],
     strategy: "in_process",
