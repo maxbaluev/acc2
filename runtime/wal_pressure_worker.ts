@@ -61,19 +61,20 @@ export type WalPressureOptions = {
   /** Explicit DB path. Defaults to resolveDbPath() so the worker
    *  follows ACC2_DB_PATH / ACC2_STATE_DIR. */
   dbPath?: string;
-  /** Threshold in MB. Defaults to ACC2_WAL_PRESSURE_THRESHOLD_MB env
-   *  var or 100. */
+  /** Threshold in MB. Caller can override per-invocation (used by tests
+   *  to drive the checkpointing path under low-volume conditions);
+   *  production uses the universal 100 MB default below. No env knob —
+   *  pending f13 adaptive scoring on observed checkpoint-success rate
+   *  vs. WAL growth velocity. */
   thresholdMb?: number;
 };
 
 const DEFAULT_THRESHOLD_MB = 100;
 
 const resolveThresholdBytes = (opts: WalPressureOptions): number => {
-  if (typeof opts.thresholdMb === "number" && opts.thresholdMb > 0) {
-    return Math.floor(opts.thresholdMb * 1024 * 1024);
-  }
-  const env = Number(process.env.ACC2_WAL_PRESSURE_THRESHOLD_MB);
-  const mb = Number.isFinite(env) && env > 0 ? env : DEFAULT_THRESHOLD_MB;
+  const mb = (typeof opts.thresholdMb === "number" && opts.thresholdMb > 0)
+    ? opts.thresholdMb
+    : DEFAULT_THRESHOLD_MB;
   return Math.floor(mb * 1024 * 1024);
 };
 

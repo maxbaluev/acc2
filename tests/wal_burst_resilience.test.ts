@@ -198,19 +198,15 @@ describe("F-resilience cases B/C/D — WAL pressure observation worker", () => {
     expect(summary.wal_size_bytes).toBeGreaterThanOrEqual(5 * 1024 * 1024);
   });
 
-  test("case D — ACC2_WAL_PRESSURE_THRESHOLD_MB env var overrides the default", () => {
-    const previous = process.env.ACC2_WAL_PRESSURE_THRESHOLD_MB;
-    process.env.ACC2_WAL_PRESSURE_THRESHOLD_MB = "50";
-    try {
-      inflateWal(60 * 1024 * 1024); // 60MB > 50MB threshold, < 100MB default
-      const db = openDb(dbPath);
-      const summary = runWalPressureCheck(db, { dbPath });
-      expect(summary.threshold_bytes).toBe(50 * 1024 * 1024);
-      expect(summary.checkpoint_ran).toBe(true);
-    } finally {
-      if (previous === undefined) delete process.env.ACC2_WAL_PRESSURE_THRESHOLD_MB;
-      else process.env.ACC2_WAL_PRESSURE_THRESHOLD_MB = previous;
-    }
+  test("case D — caller-supplied thresholdMb overrides the universal 100 MB default", () => {
+    // ACC2_WAL_PRESSURE_THRESHOLD_MB env override removed in the
+    // universality cleanup. Per-call thresholdMb stays as the canonical
+    // override surface for tests (and future per-call adaptive callers).
+    inflateWal(60 * 1024 * 1024); // 60 MB > 50 MB threshold, < 100 MB default
+    const db = openDb(dbPath);
+    const summary = runWalPressureCheck(db, { dbPath, thresholdMb: 50 });
+    expect(summary.threshold_bytes).toBe(50 * 1024 * 1024);
+    expect(summary.checkpoint_ran).toBe(true);
   });
 
   test("missing WAL sidecar reports size 0 without erroring", () => {

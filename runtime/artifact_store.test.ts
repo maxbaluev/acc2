@@ -228,25 +228,9 @@ describe("maybeQuarantine", () => {
     expect(payload.recent_kill_count).toBe(3);
   });
 
-  test("ACC2_QUARANTINE_KILL_COUNT_THRESHOLD env overrides the default", () => {
-    const prior = process.env.ACC2_QUARANTINE_KILL_COUNT_THRESHOLD;
-    process.env.ACC2_QUARANTINE_KILL_COUNT_THRESHOLD = "5";
-    try {
-      const db = openDb(":memory:");
-      insertSampleBunArtifact(db, "art_killed_env");
-      db.run("UPDATE act_artifact SET recent_kill_count = ? WHERE id = ?", [3, "art_killed_env"]);
-      const events: EmitEventInput[] = [];
-      // Threshold is now 5; 3 kills is below the bar.
-      const stillAdmitted = maybeQuarantine(db, "art_killed_env", (e) => events.push(e));
-      expect(stillAdmitted).toBe(false);
-      db.run("UPDATE act_artifact SET recent_kill_count = ? WHERE id = ?", [5, "art_killed_env"]);
-      const transitioned = maybeQuarantine(db, "art_killed_env", (e) => events.push(e));
-      expect(transitioned).toBe(true);
-    } finally {
-      if (prior === undefined) delete process.env.ACC2_QUARANTINE_KILL_COUNT_THRESHOLD;
-      else process.env.ACC2_QUARANTINE_KILL_COUNT_THRESHOLD = prior;
-    }
-  });
+  // Test "ACC2_QUARANTINE_KILL_COUNT_THRESHOLD env overrides the default"
+  // deleted — env override removed in universality cleanup (universal
+  // 3-kill threshold pending f13 adaptive scoring).
 
   test("quarantine transitions are idempotent across all three reasons", () => {
     const db = openDb(":memory:");

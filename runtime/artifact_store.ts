@@ -103,34 +103,18 @@ const PROMOTION_INVOCATION_THRESHOLD = 20;
 // Quarantine thresholds (v2-design.md §11.6). Defaults are tuned for fast
 // detection of regressions; the env knobs let operators dial in per-deploy
 // sensitivity without code edits.
-const DEFAULT_QUARANTINE_RESIDUAL_THRESHOLD = 0.7;
-const DEFAULT_QUARANTINE_MIN_OBSERVATIONS = 5;
-const DEFAULT_QUARANTINE_KILL_COUNT_THRESHOLD = 3;
+// Universal threshold values — pending f13 adaptive-scoring contract
+// (GEZ955QDYN3R): each of these should learn from observed
+// false-quarantine vs. true-kill correlation, not be env-tuned. No
+// production operator ever overrode them.
+const QUARANTINE_RESIDUAL_THRESHOLD = 0.7;
+const QUARANTINE_MIN_OBSERVATIONS = 5;
+const QUARANTINE_KILL_COUNT_THRESHOLD = 3;
 const QUARANTINE_VIOLATION_THRESHOLD = 5;
 
-const quarantineResidualThreshold = (): number => {
-  const raw = process.env.ACC2_QUARANTINE_RESIDUAL_THRESHOLD;
-  if (raw === undefined || raw === "") return DEFAULT_QUARANTINE_RESIDUAL_THRESHOLD;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) return DEFAULT_QUARANTINE_RESIDUAL_THRESHOLD;
-  return parsed;
-};
-
-const quarantineMinObservations = (): number => {
-  const raw = process.env.ACC2_QUARANTINE_MIN_OBSERVATIONS;
-  if (raw === undefined || raw === "") return DEFAULT_QUARANTINE_MIN_OBSERVATIONS;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_QUARANTINE_MIN_OBSERVATIONS;
-  return Math.floor(parsed);
-};
-
-const quarantineKillCountThreshold = (): number => {
-  const raw = process.env.ACC2_QUARANTINE_KILL_COUNT_THRESHOLD;
-  if (raw === undefined || raw === "") return DEFAULT_QUARANTINE_KILL_COUNT_THRESHOLD;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_QUARANTINE_KILL_COUNT_THRESHOLD;
-  return Math.floor(parsed);
-};
+const quarantineResidualThreshold = (): number => QUARANTINE_RESIDUAL_THRESHOLD;
+const quarantineMinObservations = (): number => QUARANTINE_MIN_OBSERVATIONS;
+const quarantineKillCountThreshold = (): number => QUARANTINE_KILL_COUNT_THRESHOLD;
 
 const SUCCESS_BAND = 0.3;
 const FAILURE_BAND = 0.7;

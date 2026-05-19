@@ -1850,10 +1850,9 @@ const routeAux = async (
         };
       } else {
         // Worker has not ticked yet (boot race or test mode with the
-        // worker pinned off). Report the configured threshold so
+        // worker pinned off). Report the universal 100 MB threshold so
         // operators still see what would trigger a checkpoint.
-        const envMb = Number(process.env.ACC2_WAL_PRESSURE_THRESHOLD_MB);
-        const thresholdMb = Number.isFinite(envMb) && envMb > 0 ? envMb : 100;
+        const thresholdMb = 100;
         walStats = {
           size_bytes: 0,
           threshold_bytes: Math.floor(thresholdMb * 1024 * 1024),

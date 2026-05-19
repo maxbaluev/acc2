@@ -34,18 +34,15 @@ import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 
 /** Window over which pathology debits accumulate toward exhaustion. 30
- *  minutes lets transient blips age out while keeping repeated
- *  pathologies visible to the gate. */
-export const PATHOLOGY_BUDGET_WINDOW_MS = Number(
-  process.env.ACC2_PATHOLOGY_BUDGET_WINDOW_MS ?? 30 * 60 * 1000,
-);
+ *  min lets transient blips age out while keeping repeated pathologies
+ *  visible to the gate. Universal value pending f13 adaptive scoring. */
+export const PATHOLOGY_BUDGET_WINDOW_MS = 30 * 60 * 1000;
 
 /** Accumulated weight in PATHOLOGY_BUDGET_WINDOW_MS that fires
  *  pathology_budget_exhausted. 10 with default weights = roughly 5 single
- *  symptoms or 2-3 substrate-wide blockers. */
-export const PATHOLOGY_BUDGET_THRESHOLD = Number(
-  process.env.ACC2_PATHOLOGY_BUDGET_THRESHOLD ?? 10,
-);
+ *  symptoms or 2-3 substrate-wide blockers. Universal value pending f13
+ *  adaptive scoring on observed pathology-debit/recovery correlation. */
+export const PATHOLOGY_BUDGET_THRESHOLD = 10;
 
 /** Canonical pathology kind taxonomy. Each kind maps to a default weight
  *  reflecting "how much scheduler attention is this directive consuming

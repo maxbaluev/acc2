@@ -32,12 +32,11 @@ import { emitEvent } from "./events";
 import { logger } from "./logger";
 
 /** Retention window. Frames older than this are eligible for pruning.
- *  24 hours gives operators a full day to inspect a closed dispatch via
- *  `acc events` before the frames vanish. Override via
- *  ACC2_COMPACTION_RETENTION_MS. */
-export const COMPACTION_FRAME_RETENTION_MS = Number(
-  process.env.ACC2_COMPACTION_RETENTION_MS ?? 24 * 60 * 60 * 1000,
-);
+ *  24 h gives operators a full day to inspect a closed dispatch via
+ *  `acc events` before the frames vanish. Universal value pending f13
+ *  adaptive-scoring contract (observed audit-window vs. frame-volume
+ *  pressure should drive the threshold). */
+export const COMPACTION_FRAME_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 /** Cap on rows pruned per tick. Keeps the compaction worker bounded so it
  *  never holds the DB write lock for long. 5000/tick × hourly = 120k/day
