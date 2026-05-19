@@ -108,6 +108,11 @@ const NON_EVENT_KIND_LITERALS = new Set([
   "docx_reference_style",
   "rendered_docx",
   "published_drive_doc",
+  // Floor-section enforcement payload discriminator (sub-kind on
+  // dispatcher_violation when prompt_composer drops a load-bearing floor
+  // section under pathological budget). Not an event kind — the parent
+  // event is dispatcher_violation.
+  "floor_section_missing",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────

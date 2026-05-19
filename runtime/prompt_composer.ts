@@ -54,6 +54,7 @@ type PromptSection = {
   name: string;
   priorityP: number;
   tokens: number;
+  floor?: boolean;
 };
 
 type ComposedPrompt = {
@@ -376,7 +377,7 @@ const readKnowledgeTopK = (
 
 const REQUIRED_POLICY_SECTION_NAMES = ["exit_invariant", "runtimes_available", "workflow", "do_not", "emission_grammars", "self_introspection"] as const;
 type PolicyBundleSectionName = typeof REQUIRED_POLICY_SECTION_NAMES[number];
-type PolicyBundleSection = { sectionName: PolicyBundleSectionName; priority: number; body: string };
+type PolicyBundleSection = { sectionName: PolicyBundleSectionName; priority: number; body: string; floor?: boolean };
 
 const isPolicyBundleSectionName = (value: string): value is PolicyBundleSectionName => {
   return (REQUIRED_POLICY_SECTION_NAMES as readonly string[]).includes(value);
@@ -414,6 +415,7 @@ const readPolicyBundleSections = (
       latestBySection.set(sectionName, {
         sectionName,
         priority: Number(bundle.priority ?? 0),
+        floor: bundle.floor === true,
         body,
       });
     } catch { /* skip malformed policy rows */ }
@@ -1334,15 +1336,16 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   const directiveText = readDirectiveGoal(db, task.directive_id);
 
   // Build candidate sections in priority order. Each entry is {name, p, body}.
-  type Candidate = { name: string; p: number; body: string };
+  type Candidate = { name: string; p: number; body: string; floor?: boolean };
   const candidates: Candidate[] = [];
   const policySections = readPolicyBundleSections(db, "brain_prompt", REQUIRED_POLICY_SECTION_NAMES);
   const policyByName = new Map(policySections.map((policy) => [policy.sectionName, policy]));
-  const pushPolicySection = (name: PolicyBundleSectionName, fallbackPriority: number) => {
+  const pushPolicySection = (name: PolicyBundleSectionName, fallbackPriority: number, floor = false) => {
     const policy = policyByName.get(name);
     candidates.push({
       name,
       p: policy?.priority ?? fallbackPriority,
+      floor: floor || policy?.floor === true,
       body: policy?.body ?? "BRAIN PROMPT POLICY MISSING: knowledge_promoted policy_bundle surface=brain_prompt section_name=" + name + ". Seed foundational knowledge before dispatch; do not substitute local literal prompt policy.",
     });
   };
@@ -1350,8 +1353,8 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // EXIT INVARIANT first — load-bearing structural rule against brain_silent_exit
   // (commit 59b2872 + this fix). p=0 so it never drops; first in order so the
   // brain reads "you MUST call substrate.* before exit" before anything else.
-  pushPolicySection("exit_invariant", 0);
-  candidates.push({ name: "task_goal", p: 0, body: buildTaskGoalSection(task, directiveText) });
+  pushPolicySection("exit_invariant", 0, true);
+  candidates.push({ name: "task_goal", p: 0, floor: true, body: buildTaskGoalSection(task, directiveText) });
   // Existing decomposition awareness — load-bearing reuse-first signal
   // against the re-decomposition explosion (audit 2026-05-17: hot-reload
   // directive accumulated 62 task_node_opened events because the brain
@@ -1360,11 +1363,11 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   const existingDecomp = readExistingDecomposition(db, task.directive_id, task.id);
   const existingDecompBody = buildExistingDecompositionSection(existingDecomp);
   if (existingDecompBody.length > 0) {
-    candidates.push({ name: "existing_decomposition", p: 0, body: existingDecompBody });
+    candidates.push({ name: "existing_decomposition", p: 0, floor: true, body: existingDecompBody });
   }
-  pushPolicySection("runtimes_available", 0);
-  pushPolicySection("workflow", 0);
-  pushPolicySection("do_not", 0);
+  pushPolicySection("runtimes_available", 0, true);
+  pushPolicySection("workflow", 0, true);
+  pushPolicySection("do_not", 0, true);
   // Detailed emission grammars — env_requires + rich knowledge schema +
   // artifact provenance. P1 so it drops first under tight-budget pressure
   // (depth-1 tests pin a tiny 800-token budget) but lands in normal flow.
@@ -1397,7 +1400,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
           readKnowledgeTopK(db, 4, directiveText ?? task.goal, true),
         )
       : buildKnowledgeSection(readKnowledgeTopK(db, 8, directiveText ?? task.goal));
-  candidates.push({ name: "retrieved_knowledge", p: 1, body: knowledgeBody });
+  candidates.push({ name: "retrieved_knowledge", p: 1, floor: true, body: knowledgeBody });
 
   // F6 completion (decision 12) — citation choice wrap. The composer
   // just SELECTED a set of event ids to surface as cited knowledge; that
@@ -1468,7 +1471,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
       urgency: task.urgency,
     },
   });
-  candidates.push({ name: "owner_profile", p: 1, body: ownerProfileBody });
+  candidates.push({ name: "owner_profile", p: 1, floor: true, body: ownerProfileBody });
   // Brain contract Q471RAN88X0H513V8BC3BTW0AW (2026-05-17): the rendering
   // invariant + feedback summary teach every brain cycle that produces
   // owner-visible language to hide IDs/jargon and use the owner's words.
@@ -1476,7 +1479,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // them into two sections so the brain can tune one without re-reading
   // the other.
   const renderingPolicyRow = ownerRenderingPolicy(db);
-  candidates.push({ name: "owner_rendering_policy", p: 1, body: buildOwnerRenderingPolicySection(renderingPolicyRow) });
+  candidates.push({ name: "owner_rendering_policy", p: 1, floor: true, body: buildOwnerRenderingPolicySection(renderingPolicyRow) });
   candidates.push({ name: "owner_feedback_summary", p: 1, body: buildOwnerFeedbackSummarySection(renderingPolicyRow) });
   // Brain contract CY7E62DSNX1DZ1BTD56845D994 Phase H2 (2026-05-18):
   // owner world-model evidence layer exposed to the brain. The belief
@@ -1496,7 +1499,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // reads it during dispatch. Limit 10 keeps the section compact
   // (default token budget); operator can widen via owner_profile.
   const liveTopLaws = topLaws(db, { min_score: 0.75, limit: 10 });
-  candidates.push({ name: "top_laws", p: 1, body: buildTopLawsSection(liveTopLaws) });
+  candidates.push({ name: "top_laws", p: 1, floor: true, body: buildTopLawsSection(liveTopLaws) });
   const ownerContextBody = buildOwnerContextSection(ownerContextRows);
   candidates.push({ name: "owner_context", p: 1, body: ownerContextBody });
   const stakeholderBody = renderStakeholderBlock(db, task.directive_id);
@@ -1570,6 +1573,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // Fill in priority order. Track running tokens; drop bottom-up when over.
   const kept: Candidate[] = [];
   const truncated: string[] = [];
+  const floorOverBudget: string[] = [];
   let totalTokens = 0;
 
   // Sort by p ascending so P0 fills first.
@@ -1577,6 +1581,12 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   for (const c of sorted) {
     const sectionTokens = estimateTokens(c.body) + 2; // +2 for separator overhead
     if (totalTokens + sectionTokens > budget) {
+      if (c.floor) {
+        kept.push(c);
+        totalTokens += sectionTokens;
+        floorOverBudget.push(c.name);
+        continue;
+      }
       truncated.push(c.name);
       continue;
     }
@@ -1607,9 +1617,28 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     });
   }
 
+  const keptFloor = new Set(kept.filter((c) => c.floor).map((c) => c.name));
+  const missingFloor = candidates.filter((c) => c.floor && !keptFloor.has(c.name)).map((c) => c.name);
+  if (missingFloor.length > 0 || floorOverBudget.length > 0) {
+    emitEvent(db, {
+      kind: "dispatcher_violation",
+      substrate_origin: "substrate_auto",
+      directive_id: task.directive_id,
+      task_id: task.id,
+      payload: {
+        kind: "floor_section_missing",
+        missing_floor_sections: missingFloor,
+        floor_sections_over_budget: floorOverBudget,
+        budget_tokens: budget,
+        total_tokens: totalTokens,
+        refused_compose: missingFloor.length > 0,
+      } as JsonValue,
+    });
+  }
+
   return {
     text,
-    sections: kept.map((c) => ({ name: c.name, priorityP: c.p, tokens: estimateTokens(c.body) })),
+    sections: kept.map((c) => ({ name: c.name, priorityP: c.p, tokens: estimateTokens(c.body), floor: c.floor === true })),
     truncated,
   };
 };

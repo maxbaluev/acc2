@@ -122,7 +122,7 @@ describe("runApply gates", () => {
   // the convergence. The auto-apply gate tests below remain because
   // they exercise the structural-axes gate that DID survive.
 
-  test("contract_amendment_proposed to cli target renders structured auto-apply gate", async () => {
+  test("contract_amendment_proposed to cli target renders structured apply-route predicate", async () => {
     const scope = nextScope();
     const env = await rpc("substrate.emit", {
       kind: "contract_amendment_proposed",
@@ -136,7 +136,7 @@ describe("runApply gates", () => {
         proposed_behavior: {
           target_resource: "repo:cli/apply.ts",
           anchor: "renderGateBlock",
-          diff: { kind: "anchored_replace_v1", before: "OLD", after: "NEW" },
+          diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
         },
       },
     });
@@ -149,7 +149,7 @@ describe("runApply gates", () => {
 
     const prompt = cap.out.join("\n");
     expect(code).toBe(0);
-    expect(prompt).toContain("AUTO-APPLY GATE");
+    expect(prompt).toContain("APPLY ROUTE PREDICATE");
     expect(prompt).toContain("STRUCTURED PROPOSED CHANGE");
     expect(prompt).toContain("source_field: proposed_behavior");
     expect(prompt).toContain("target_resource: repo:cli/apply.ts");
@@ -160,6 +160,8 @@ describe("runApply gates", () => {
     const gateScore = gateScoreFor(eventId);
     expect(Number(gateScore.residual)).toBe(0);
     expect(rowPayload(gateScore).authorization_status).toBe("approved");
+    expect(rowPayload(gateScore).apply_route).toBe("AUTO_APPLY");
+    expect(rowPayload(gateScore).apply_route_reason).toBe("preconditions_passed_local_predicate_above_threshold");
   });
 
   // Gate-deletion (owner-approved 2026-05-16): the universal verifier
@@ -169,7 +171,7 @@ describe("runApply gates", () => {
   // proposals and hazardous trajectories proceed; the residual decides
   // whether the apply was correct.
 
-  test("auto-apply target accepts unstructured proposals (universal verifier scores them)", async () => {
+  test("auto-apply target declines unstructured proposals before posterior scoring", async () => {
     const scope = nextScope();
     const env = await rpc("substrate.emit", {
       kind: "contract_amendment_proposed",
@@ -189,13 +191,13 @@ describe("runApply gates", () => {
     const code = await runApply([eventId]);
     cap.restore();
 
-    expect(code).toBe(0);
-    expect(cap.err.join("\n")).not.toContain("structured_proposed_behavior_required");
+    expect(code).toBe(1);
+    expect(cap.err.join("\n")).toContain("anchored_replace_v1_required");
   });
 
-  test("auto-apply target proceeds on hazardous trajectories (residual decides, not the hazard count)", async () => {
+  test("auto-apply target declines legacy string diffs before posterior scoring", async () => {
     const scope = nextScope();
-    const eventId = await emitLesson({ target_resource: "repo:runtime/verifier.ts", anchor: "gate", diff: "@@" }, scope);
+    const eventId = await emitLesson({ target_resource: "repo:cli/apply.ts", anchor: "gate", diff: "@@" }, scope);
     const hazard = await rpc("substrate.emit", {
       kind: "dispatcher_violation",
       substrate_origin: "substrate",
@@ -209,8 +211,8 @@ describe("runApply gates", () => {
     const code = await runApply([eventId]);
     cap.restore();
 
-    expect(code).toBe(0);
-    expect(cap.err.join("\n")).not.toContain("trajectory_hazard_present");
+    expect(code).toBe(1);
+    expect(cap.err.join("\n")).toContain("anchored_replace_v1_required");
   });
 
   // 3 more protected-target consent-gate tests removed by the 94N61BVVV9
@@ -218,7 +220,11 @@ describe("runApply gates", () => {
   // policy is gone; the gate is structural-axes-only.
 
   test("high-residual applied executor attempts remain uncommitted and queued", async () => {
-    const eventId = await emitLesson({ target_resource: "repo:runtime/verifier.ts", anchor: "gate", diff: "@@" });
+    const eventId = await emitLesson({
+      target_resource: "repo:cli/apply.ts",
+      anchor: "renderGateBlock",
+      diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+    });
     const cap = captureConsole();
     const code = await runApply([
       "--record",
@@ -265,8 +271,8 @@ describe("runApply gates", () => {
     expect(actPayload.verifier_kind).toBe("claude_apply_record");
     expect(actPayload.cited_knowledge_ids).toContain(eventId);
     expect(actPayload.source_brain_event_id).toBe(eventId);
-    expect(actPayload.affected_resources).toContain("repo:runtime/verifier.ts");
-    expect(actPayload.affected_files).toContain("runtime/verifier.ts");
+    expect(actPayload.affected_resources).toContain("repo:cli/apply.ts");
+    expect(actPayload.affected_files).toContain("cli/apply.ts");
     expect(JSON.parse(act!.context_refs)).toContain(eventId);
   });
 });

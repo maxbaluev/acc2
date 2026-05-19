@@ -22,7 +22,7 @@
 //       (closes the four-link chain:
 //       create -> retrieve -> mutate -> credit, k_555).
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { mcpCall } from "./rpc";
 import { lessonApplyTargetsPolicy } from "../substrate/lesson_apply_policy";
@@ -75,6 +75,28 @@ type LessonQueueRow = {
   owner_approved?: boolean | number;
   trajectory_hazard_count?: number;
   auto_apply_eligible?: boolean | number;
+  apply_route?: string | null;
+  apply_gate_status?: string | null;
+  auto_apply_gate_verdict?: string | null;
+  auto_apply_gate_residual?: number | null;
+};
+
+type ApplyRoute =
+  | "AUTO_APPLY"
+  | "OWNER_GATE"
+  | "AUTO_DEFER_DEPENDENCY"
+  | "AUTO_DECLINE_ALREADY_APPLIED"
+  | "AUTO_DECLINE_TARGET_MISSING"
+  | "AUTO_DECLINE_PROSE_ONLY"
+  | "NEEDS_BRAIN_RECYCLE";
+
+type ApplyRouteDecision = {
+  route: ApplyRoute;
+  score: number;
+  confidence: number;
+  deterministic: boolean;
+  reason: string;
+  preconditions: Record<string, unknown>;
 };
 
 type ApplyAuthorization = {
@@ -83,12 +105,13 @@ type ApplyAuthorization = {
   ownerGateRequired: boolean;
   ownerApproved: boolean;
   queueRow: LessonQueueRow | null;
+  routeDecision: ApplyRouteDecision;
 };
 
 const DEFAULT_APPLY_ACTION_ARTIFACT_ID = "claude_agent_apply_change_action";
 const DEFAULT_APPLY_VERIFIER_ARTIFACT_ID = "claude_agent_apply_change_verifier";
-const DEFAULT_APPLY_GATE_ACTION_ARTIFACT_ID = "lesson_apply_gate_action";
-const DEFAULT_APPLY_GATE_VERIFIER_ARTIFACT_ID = "lesson_apply_gate_verifier";
+const DEFAULT_APPLY_GATE_ACTION_ARTIFACT_ID = "apply_route_predicate_action";
+const DEFAULT_APPLY_GATE_VERIFIER_ARTIFACT_ID = "apply_route_predicate_verifier";
 
 const fetchEvent = async (eventId: string): Promise<EventRow | null> => {
   const env = await mcpCall("substrate.get_event", { id: eventId });
@@ -191,6 +214,157 @@ const structuredDiff = (diff: unknown): boolean => {
     && typeof d.before === "string"
     && d.before.length > 0
     && typeof d.after === "string";
+};
+
+const applyRouteFromUnknown = (value: unknown): ApplyRoute | null => {
+  if (typeof value !== "string") return null;
+  switch (value) {
+    case "AUTO_APPLY":
+    case "OWNER_GATE":
+    case "AUTO_DEFER_DEPENDENCY":
+    case "AUTO_DECLINE_ALREADY_APPLIED":
+    case "AUTO_DECLINE_TARGET_MISSING":
+    case "AUTO_DECLINE_PROSE_ONLY":
+    case "NEEDS_BRAIN_RECYCLE":
+      return value;
+    case "BLOCKED_ON_DEPENDENCY":
+      return "AUTO_DEFER_DEPENDENCY";
+    default:
+      return null;
+  }
+};
+
+const routeFromQueue = (row: LessonQueueRow | null): ApplyRoute | null => {
+  const direct = applyRouteFromUnknown(row?.apply_route);
+  if (direct) return direct;
+  switch (row?.apply_gate_status) {
+    case "authorized_auto": return "AUTO_APPLY";
+    case "manual_review": return "OWNER_GATE";
+    case "blocked_trajectory_hazard": return "AUTO_DEFER_DEPENDENCY";
+    case "blocked_unstructured_proposal": return "AUTO_DECLINE_PROSE_ONLY";
+    case "blocked_auto_apply_gate_missing": return null;
+    case "blocked_auto_apply_gate_residual": return "NEEDS_BRAIN_RECYCLE";
+    default:
+      return null;
+  }
+};
+
+const anchoredReplaceDiff = (payload: Record<string, unknown>): { before: string; after: string; occurrence: number } | null => {
+  const structured = proposedChangeFields(payload);
+  const diff = structured?.proposal.diff;
+  if (!diff || typeof diff !== "object" || Array.isArray(diff)) return null;
+  const d = diff as Record<string, unknown>;
+  if (d.kind !== "anchored_replace_v1" || typeof d.before !== "string" || d.before.length === 0 || typeof d.after !== "string") return null;
+  const occurrence = typeof d.occurrence === "number" && Number.isInteger(d.occurrence) && d.occurrence > 0 ? d.occurrence : 1;
+  return { before: d.before, after: d.after, occurrence };
+};
+
+const countOccurrences = (haystack: string, needle: string): number => {
+  if (needle.length === 0) return 0;
+  let count = 0;
+  let pos = 0;
+  while (true) {
+    const next = haystack.indexOf(needle, pos);
+    if (next === -1) return count;
+    count++;
+    pos = next + needle.length;
+  }
+};
+
+const globLikeMatch = (pattern: string, value: string): boolean => {
+  const normalizedPattern = normalizePolicyTarget(pattern).replace(/^repo:/, "");
+  const normalizedValue = normalizePolicyTarget(value);
+  if (normalizedPattern.length === 0) return false;
+  if (!normalizedPattern.includes("*")) return normalizedValue.includes(normalizedPattern);
+  const escaped = normalizedPattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*");
+  return new RegExp(`^${escaped}$`).test(normalizedValue);
+};
+
+const ownerProfileManualReviewMatch = async (targets: readonly string[]): Promise<string | null> => {
+  const env = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
+  const row = env.ok && Array.isArray(env.result) ? (env.result[0] as { payload?: unknown } | undefined) : undefined;
+  const payload = parsePayload(row?.payload);
+  const patterns = Array.isArray(payload.manual_review_patterns) ? payload.manual_review_patterns : [];
+  for (const raw of patterns) {
+    if (typeof raw !== "string") continue;
+    for (const target of targets) {
+      if (globLikeMatch(raw, target)) return raw;
+    }
+  }
+  return null;
+};
+
+const ownerAutonomyThreshold = async (): Promise<number> => {
+  const env = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
+  const row = env.ok && Array.isArray(env.result) ? (env.result[0] as { payload?: unknown } | undefined) : undefined;
+  const payload = parsePayload(row?.payload);
+  const signals = payload.autonomy_signals && typeof payload.autonomy_signals === "object" ? payload.autonomy_signals as Record<string, unknown> : {};
+  const threshold = signals.autonomy_threshold;
+  return typeof threshold === "number" && Number.isFinite(threshold) ? Math.min(1, Math.max(0, threshold)) : 0.5;
+};
+
+const deterministicApplyRoute = async (
+  payload: Record<string, unknown>,
+  target: string,
+  targets: readonly string[],
+  queueRow: LessonQueueRow | null,
+  ownerGateRequired: boolean,
+): Promise<ApplyRouteDecision> => {
+  const explicitClassification = applyRouteFromUnknown(payload.classification) ?? applyRouteFromUnknown(payload.route) ?? applyRouteFromUnknown(payload.apply_route);
+  if (explicitClassification === "AUTO_DEFER_DEPENDENCY") {
+    return { route: "AUTO_DEFER_DEPENDENCY", score: 1, confidence: 1, deterministic: true, reason: "blocked_on_dependency", preconditions: { explicit_classification: payload.classification ?? payload.route ?? payload.apply_route } };
+  }
+
+  if (ownerGateRequired) {
+    return { route: "OWNER_GATE", score: 1, confidence: 1, deterministic: true, reason: "owner_policy_requires_gate", preconditions: { owner_gate_required: true } };
+  }
+
+  const manualPattern = await ownerProfileManualReviewMatch(targets);
+  if (manualPattern) {
+    return { route: "OWNER_GATE", score: 1, confidence: 1, deterministic: true, reason: "owner_manual_review_pattern", preconditions: { manual_review_pattern: manualPattern } };
+  }
+
+  const file = repoFileFromResource(target);
+  if (!file) {
+    return { route: "NEEDS_BRAIN_RECYCLE", score: 0, confidence: 0.7, deterministic: true, reason: "non_repo_target", preconditions: { repo_target: false } };
+  }
+  const abs = resolve(process.cwd(), file);
+  if (!existsSync(abs)) {
+    return { route: "AUTO_DECLINE_TARGET_MISSING", score: 1, confidence: 1, deterministic: true, reason: "target_file_missing", preconditions: { target_file_exists: false, file } };
+  }
+
+  const diff = anchoredReplaceDiff(payload);
+  if (!diff) {
+    return { route: "AUTO_DECLINE_PROSE_ONLY", score: 1, confidence: 1, deterministic: true, reason: "anchored_replace_v1_required", preconditions: { diff_well_formed: false, target_file_exists: true } };
+  }
+
+  const body = readFileSync(abs, "utf8");
+  const beforeCount = countOccurrences(body, diff.before);
+  const afterCount = diff.after.length > 0 ? countOccurrences(body, diff.after) : 0;
+  if (beforeCount === 0 && afterCount > 0) {
+    return { route: "AUTO_DECLINE_ALREADY_APPLIED", score: 1, confidence: 0.95, deterministic: true, reason: "before_absent_after_present", preconditions: { anchor_found_exactly_once: false, before_count: beforeCount, after_count: afterCount } };
+  }
+  if (beforeCount === 0) {
+    return { route: "AUTO_DECLINE_TARGET_MISSING", score: 1, confidence: 0.9, deterministic: true, reason: "before_anchor_missing", preconditions: { anchor_found_exactly_once: false, before_count: beforeCount } };
+  }
+  if (beforeCount !== 1) {
+    return { route: "NEEDS_BRAIN_RECYCLE", score: 0.2, confidence: 0.8, deterministic: true, reason: "before_anchor_not_unique", preconditions: { anchor_found_exactly_once: false, before_count: beforeCount } };
+  }
+
+  const queuedRoute = routeFromQueue(queueRow);
+  const gateResidual = typeof queueRow?.auto_apply_gate_residual === "number" ? queueRow.auto_apply_gate_residual : null;
+  const posteriorScore = gateResidual == null ? 0.95 : Math.max(0, 1 - gateResidual);
+  const threshold = await ownerAutonomyThreshold();
+  if (queuedRoute === "AUTO_APPLY" && posteriorScore >= threshold) {
+    return { route: "AUTO_APPLY", score: posteriorScore, confidence: 0.8, deterministic: false, reason: "preconditions_passed_posterior_above_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } };
+  }
+  if (queuedRoute === "OWNER_GATE") {
+    return { route: "OWNER_GATE", score: posteriorScore, confidence: 0.7, deterministic: false, reason: "queue_route_owner_gate", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true } };
+  }
+  if (queuedRoute === null && posteriorScore >= threshold) {
+    return { route: "AUTO_APPLY", score: posteriorScore, confidence: 0.65, deterministic: false, reason: "preconditions_passed_local_predicate_above_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } };
+  }
+  return { route: "NEEDS_BRAIN_RECYCLE", score: posteriorScore, confidence: 0.6, deterministic: false, reason: "posterior_missing_or_below_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } };
 };
 
 const boolish = (v: unknown): boolean => v === true || v === 1 || v === "1" || v === "true";
@@ -331,6 +505,7 @@ const emitApplyGateEvaluation = async (
     ownerGateRequired: boolean;
     ownerApproved: boolean;
     autoApplyTarget: boolean;
+    routeDecision?: ApplyRouteDecision;
   },
 ): Promise<{ actionEventId?: string; scoredEventId?: string; residual: number }> => {
   const residual = args.status === "approved" ? 0 : 1;
@@ -353,6 +528,12 @@ const emitApplyGateEvaluation = async (
       owner_gate_required: args.ownerGateRequired,
       owner_approved: args.ownerApproved,
       auto_apply_target: args.autoApplyTarget,
+      apply_route: args.routeDecision?.route,
+      apply_route_score: args.routeDecision?.score,
+      apply_route_confidence: args.routeDecision?.confidence,
+      apply_route_deterministic: args.routeDecision?.deterministic,
+      apply_route_reason: args.routeDecision?.reason,
+      apply_route_preconditions: args.routeDecision?.preconditions,
       design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
     },
   });
@@ -379,6 +560,12 @@ const emitApplyGateEvaluation = async (
       owner_gate_required: args.ownerGateRequired,
       owner_approved: args.ownerApproved,
       auto_apply_target: args.autoApplyTarget,
+      apply_route: args.routeDecision?.route,
+      apply_route_score: args.routeDecision?.score,
+      apply_route_confidence: args.routeDecision?.confidence,
+      apply_route_deterministic: args.routeDecision?.deterministic,
+      apply_route_reason: args.routeDecision?.reason,
+      apply_route_preconditions: args.routeDecision?.preconditions,
     },
   });
   if (!scoredEnv.ok) throw new Error(`gate action_scored emit failed - ${scoredEnv.error}`);
@@ -391,6 +578,7 @@ const emitApplyDenied = async (
   reason: string,
   target: string,
   gate: { ownerGateRequired: boolean; ownerApproved: boolean; autoApplyTarget: boolean },
+  routeDecision?: ApplyRouteDecision,
 ): Promise<number> => {
   let gateActionEventId: string | undefined;
   let gateScoredEventId: string | undefined;
@@ -400,6 +588,7 @@ const emitApplyDenied = async (
       status: "denied",
       reason,
       ...gate,
+      routeDecision,
     });
     gateActionEventId = gateEval.actionEventId;
     gateScoredEventId = gateEval.scoredEventId;
@@ -425,6 +614,10 @@ const emitApplyDenied = async (
       owner_gate_required: gate.ownerGateRequired,
       owner_approved: gate.ownerApproved,
       auto_apply_target: gate.autoApplyTarget,
+      apply_route: routeDecision?.route,
+      apply_route_score: routeDecision?.score,
+      apply_route_confidence: routeDecision?.confidence,
+      apply_route_reason: routeDecision?.reason,
       design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
     },
   });
@@ -517,11 +710,27 @@ const authorizeApply = async (
     // unknown verdicts remain ledger evidence for future calibrated consumers.
   }
 
+  const routeDecision = await deterministicApplyRoute(payload, target, targets, queueRow, ownerGateRequired);
+  if (routeDecision.route === "OWNER_GATE" && !ownerApproved) {
+    return { ok: false, code: await emitApplyDenied(ev, eventId, routeDecision.reason, target, {
+      ownerGateRequired: true,
+      ownerApproved,
+      autoApplyTarget: policy.autoApplyTarget,
+    }, routeDecision) };
+  }
+  if (routeDecision.route !== "AUTO_APPLY" && routeDecision.route !== "OWNER_GATE") {
+    return { ok: false, code: await emitApplyDenied(ev, eventId, routeDecision.reason, target, {
+      ownerGateRequired,
+      ownerApproved,
+      autoApplyTarget: policy.autoApplyTarget,
+    }, routeDecision) };
+  }
+
   // Universal verifier remains the correctness scorer. Pre-apply adjudication is
   // a narrow fast-path correction surface for authoritative contradictions,
   // corrected payloads, adversarial alternatives, owner escalation, peer approval,
   // and gray-zone review before the standard apply handoff.
-  return { ok: true, target, ownerGateRequired, ownerApproved, queueRow };
+  return { ok: true, target, ownerGateRequired, ownerApproved, queueRow, routeDecision };
 };
 
 /** Construct the Agent subagent prompt for a lesson_extracted /
@@ -546,7 +755,7 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean; aut
 
   const policy = lessonApplyTargetsPolicy(targetCandidatesFromPayload(payload));
   const ownerGateLine = policy.autoApplyTarget
-    ? `AUTO-APPLY GATE — CLI/RUNTIME: proceed only if the queue row is auto_apply_eligible, meaning structured target/anchor/diff passed and an action_scored auto_apply_gate residual is < 0.3 across freshness, semantic_duplicate, behavioral_novelty, necessity, and adversarial axes.`
+    ? `APPLY ROUTE PREDICATE — CLI/RUNTIME: proceed according to apply_route, not a brain-authored boolean. Hard preconditions run first: anchored_replace_v1 well-formed, target exists, before text appears exactly once, no owner manual-review match; posterior scoring is consulted only after those pass.`
       : `(target outside auto-apply surface — apply directly unless owner_profile.things_to_never_do blocks it)`;
 
   return [
@@ -670,6 +879,7 @@ const renderPromptCommand = async (eventId: string): Promise<number> => {
       ownerGateRequired: auth.ownerGateRequired,
       ownerApproved: auth.ownerApproved,
       autoApplyTarget: gatePolicy.autoApplyTarget,
+      routeDecision: auth.routeDecision,
     });
     gateActionEventId = gateEval.actionEventId;
     gateScoredEventId = gateEval.scoredEventId;
@@ -692,6 +902,10 @@ const renderPromptCommand = async (eventId: string): Promise<number> => {
       gate_scored_event_id: gateScoredEventId,
       gate_residual: 0,
       authorization_status: "approved",
+      apply_route: auth.routeDecision.route,
+      apply_route_score: auth.routeDecision.score,
+      apply_route_confidence: auth.routeDecision.confidence,
+      apply_route_reason: auth.routeDecision.reason,
       target: auth.target || payload.target,
       design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
     },
@@ -788,6 +1002,7 @@ export const recordApplyOutcome = async (opts: {
       ownerGateRequired: auth.ownerGateRequired,
       ownerApproved: auth.ownerApproved,
       autoApplyTarget: gatePolicy.autoApplyTarget,
+      routeDecision: auth.routeDecision,
     });
     gateActionEventId = gateEval.actionEventId;
     gateScoredEventId = gateEval.scoredEventId;

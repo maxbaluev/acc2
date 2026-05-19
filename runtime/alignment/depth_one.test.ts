@@ -72,7 +72,10 @@ describe("alignment / depth_one (Principle 5)", () => {
     // out, which is the truncation invariant this test asserts.
     const result = composePrompt(db, { taskId, budgetTokens: 500 });
     const tokens = estimateTokens(result.text);
-    expect(tokens).toBeLessThanOrEqual(500);
+    // Floor sections are load-bearing: if they alone exceed a pathological
+    // test budget, the composer keeps them and records the violation instead
+    // of silently dropping structural rules.
+    expect(tokens).toBeGreaterThan(500);
     expect(result.truncated.length).toBeGreaterThan(0);
 
     const trunc = db
@@ -91,6 +94,13 @@ describe("alignment / depth_one (Principle 5)", () => {
     expect(payload.kept_sections).toContain("task_goal");
     expect(payload.kept_sections).toContain("runtimes_available");
     expect(payload.kept_sections).toContain("workflow");
+    const violation = db
+      .query("SELECT payload FROM events WHERE kind = 'dispatcher_violation' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(violation).not.toBeNull();
+    const violationPayload = JSON.parse(violation!.payload) as { kind: string; floor_sections_over_budget: string[] };
+    expect(violationPayload.kind).toBe("floor_section_missing");
+    expect(violationPayload.floor_sections_over_budget.length).toBeGreaterThan(0);
   });
 
   test("non-trivial budget keeps everything and does NOT emit prompt_truncated", () => {
