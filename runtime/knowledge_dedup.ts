@@ -28,27 +28,27 @@ import type { Database } from "bun:sqlite";
 /** Recency window for the dedup scan. Candidates older than this are
  *  not considered as "you already said this" matches. Brain emissions
  *  on the SAME directive within an hour are the dominant duplication
- *  pattern in the live ledger. */
-export const KNOWLEDGE_DEDUP_WINDOW_MS = Number(
-  process.env.ACC2_KNOWLEDGE_DEDUP_WINDOW_MS ?? 60 * 60 * 1000,
-);
+ *  pattern in the live ledger. Universal value — per the f13 frontier
+ *  inventory (GEZ955QDYN3R), this threshold should eventually be scored
+ *  by outcomes rather than env-tuned; until that adaptive contract
+ *  lands, the operator-tunable env var is replaced with the canonical
+ *  hardcoded default (no operator ever overrode it in practice). */
+export const KNOWLEDGE_DEDUP_WINDOW_MS = 60 * 60 * 1000;
 
 /** Token-set Jaccard threshold above which a new claim is refused.
  *  0.85 is intentionally strict — Jaccard tends to be more sensitive
  *  than cosine over short text, so the threshold needs to be high to
  *  avoid false positives on legitimately-distinct claims that share
- *  vocabulary (e.g. two claims about the same subsystem). */
-export const KNOWLEDGE_DEDUP_JACCARD_THRESHOLD = Number(
-  process.env.ACC2_KNOWLEDGE_DEDUP_JACCARD_THRESHOLD ?? 0.85,
-);
+ *  vocabulary (e.g. two claims about the same subsystem). Universal
+ *  value pending f13 adaptive-scoring contract. */
+export const KNOWLEDGE_DEDUP_JACCARD_THRESHOLD = 0.85;
 
 /** Cap on the number of recent candidates we scan per emit. Bounded so
  *  a directive with hundreds of prior candidates doesn't stall the
  *  emit hot path. The dominant case (brain restating in the same
- *  cycle) is caught with N=20. */
-export const KNOWLEDGE_DEDUP_SCAN_LIMIT = Number(
-  process.env.ACC2_KNOWLEDGE_DEDUP_SCAN_LIMIT ?? 20,
-);
+ *  cycle) is caught with N=20. Universal value pending f13 adaptive-
+ *  scoring contract. */
+export const KNOWLEDGE_DEDUP_SCAN_LIMIT = 20;
 
 const STOP_WORDS = new Set([
   "the", "and", "for", "with", "that", "this", "from", "into", "than",

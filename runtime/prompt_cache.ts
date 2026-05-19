@@ -44,17 +44,14 @@ type CacheEntry<T> = {
 };
 
 /** Maximum cache age (ms) regardless of event freshness. Bounds staleness
- *  for the corner case where composePrompt's substrate inputs change in a
- *  way that doesn't insert an event (e.g. a act_artifact row status
- *  flips). Default 60s; override via ACC2_PROMPT_CACHE_TTL_MS. */
-export const PROMPT_CACHE_TTL_MS = Number(
-  process.env.ACC2_PROMPT_CACHE_TTL_MS ?? 60_000,
-);
+ *  for the corner case where composePrompt's substrate inputs change in
+ *  a way that doesn't insert an event (e.g. a act_artifact row status
+ *  flips). Universal value — pending f13 adaptive-scoring contract
+ *  (GEZ955QDYN3R: prompt cache freshness should be scored, not tuned). */
+export const PROMPT_CACHE_TTL_MS = 60_000;
 
-/** Max in-memory entries before LRU eviction. */
-export const PROMPT_CACHE_MAX_ENTRIES = Number(
-  process.env.ACC2_PROMPT_CACHE_MAX_ENTRIES ?? 200,
-);
+/** Max in-memory entries before LRU eviction. Universal value. */
+export const PROMPT_CACHE_MAX_ENTRIES = 200;
 
 const cache = new Map<string, CacheEntry<unknown>>();
 let hitCount = 0;
