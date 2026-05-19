@@ -265,7 +265,8 @@ describe("prompt_composer", () => {
     expect(composed.text).toContain("target_resources:");
     expect(composed.text).toContain("repo:runtime/foo.ts");
     expect(composed.text).toContain("target_resource:");
-    expect(composed.text).toContain("resource_uri:");
+    // resource_uri alias no longer taught (Q3 deletion batch 3) — target_resource is canonical
+    expect(composed.text).not.toContain("resource_uri:");
     expect(composed.text).toContain("anchored_replace_v1");
     expect(composed.text).toContain("browser_session:research/customer-a");
     expect(composed.text).toContain("sensor:habit_tracker/<stream>");

@@ -313,7 +313,7 @@ const renderGateBlock = (
     `  owner_gate.approved: ${auth.ownerApproved}`,
     `  owner_gate.rule: dynamic owner_profile.things_to_never_do entries can require explicit owner approval; static path enumeration is not policy.`,
     `  cli_runtime_gate.target_in_scope: ${policy.autoApplyTarget}`,
-    `  cli_runtime_gate.rule: repo:cli/* and repo:runtime/* may auto-apply only with structured {target_resource|resource_uri, anchor, diff:{kind:\"anchored_replace_v1\", before, after}}, verifier residual < 0.3, and no dispatcher_violation or irreversible_effect_recorded in the trajectory. Legacy file_path is accepted only as a fallback for existing proposals.`,
+    `  cli_runtime_gate.rule: repo:cli/* and repo:runtime/* may auto-apply only with structured {target_resource, anchor, diff:{kind:\"anchored_replace_v1\", before, after}}, verifier residual < 0.3, and no dispatcher_violation or irreversible_effect_recorded in the trajectory.`,
     `  cli_runtime_gate.structured_change: ${structured || !policy.autoApplyTarget}`,
     `  cli_runtime_gate.trajectory_hazard_count: ${hazardCount}`,
   ].join("\n");
