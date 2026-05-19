@@ -67,7 +67,7 @@ import { readCurrentMode } from "./crisis_mode";
 import { isCycleViolation } from "./cycle_one_gate";
 import { recordDispatch, recordActionResidual } from "./metrics";
 import { extractRecipeFromCommit } from "../substrate/extractors";
-import { runBypassPostflight } from "./bypass_postflight";
+import { runBypassPostflight, collectDirtyFiles } from "./bypass_postflight";
 
 const REFINEMENT_DEPTH_CAP = 5;
 const TREE_SEARCH_FANOUT_THRESHOLD = 5;
@@ -230,6 +230,15 @@ export const dispatchReadyTask = async (
   // emitted on this task during the dispatch (the bridge mock writes through
   // emitEvent, the runtime writes through emitEvent — one path, one audit).
   const dispatchStartedTs = nowIso();
+
+  // Capture the working tree's pre-existing dirty file set so the post-dispatch
+  // bypass check can subtract it. Without this baseline, files modified by the
+  // operator or a peer terminal BEFORE the brain spawned look identical to
+  // files the brain mutated DURING the dispatch — the diff is the same. The
+  // brain's tool surface (post-f2d0d3f) forbids edit/write/bash/apply_patch,
+  // so any post-spawn additions to the dirty set are real bypass attempts;
+  // everything in the baseline belongs to a non-brain actor.
+  const bypassBaseline = collectDirtyFiles(deps.sourceCheckoutRoot ?? process.cwd()) ?? [];
 
   // 2. decideDispatch
   const decision = decideDispatch(db, task);
@@ -739,6 +748,7 @@ export const dispatchReadyTask = async (
         directiveId: task.directive_id,
         sourceCheckoutRoot: deps.sourceCheckoutRoot ?? process.cwd(),
         isolated: false,
+        baselineDirtyFiles: bypassBaseline,
       });
     } catch (err) {
       logger.warn(

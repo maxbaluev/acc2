@@ -86,8 +86,14 @@ const PATCH_ROOT = "/tmp/.acc2/bypass-recovery";
 
 /** Run `git diff HEAD --name-only` against the supplied source checkout
  *  root. Returns the list of files reported by git, or null when git is
- *  not available / the cwd is not a git checkout. */
-const collectDirtyFiles = (sourceCheckoutRoot: string): string[] | null => {
+ *  not available / the cwd is not a git checkout.
+ *
+ *  Exported so callers (task_dispatcher) can capture a baseline dirty
+ *  set BEFORE spawning the brain subprocess. The postflight subtracts
+ *  the baseline from the end-state diff to distinguish brain-caused
+ *  mutations from pre-existing other-actor WIP (operator hand-edits,
+ *  peer-terminal refactors, concurrent Agent subagent commits). */
+export const collectDirtyFiles = (sourceCheckoutRoot: string): string[] | null => {
   if (!existsSync(join(sourceCheckoutRoot, ".git"))) return null;
   const res = spawnSync("git", ["diff", "HEAD", "--name-only"], {
     cwd: sourceCheckoutRoot,
@@ -140,6 +146,12 @@ export const runBypassPostflight = (
      *  (worktree or test tempdir); defense A already covered the
      *  filesystem path, so the postflight short-circuits. */
     isolated: boolean;
+    /** Files that were already dirty against HEAD when the dispatch
+     *  STARTED. The postflight subtracts these from the end-state diff
+     *  so concurrent operator/peer-terminal/subagent edits do not
+     *  false-positive as brain bypass. Pass [] if no baseline was
+     *  captured (legacy behavior — every dirty file gets flagged). */
+    baselineDirtyFiles?: string[];
     /** Test-suite hook: when set, the postflight skips the real git
      *  shellouts and reads the dirty file list + patch text from these
      *  fields. The revert call is also bypassed in that mode. */
@@ -218,6 +230,27 @@ export const runBypassPostflight = (
       reverted_files: [],
       patch_path: null,
     };
+  }
+
+  // Baseline subtraction: files that were already dirty when the dispatch
+  // STARTED belong to another actor (operator hand-edits, peer-terminal
+  // refactors, Agent subagents on the same checkout). The brain cannot
+  // have caused them because they existed before the brain spawned. Drop
+  // them from the touched set so the undeclared check only sees files
+  // that newly appeared in the diff during the dispatch.
+  const baseline = new Set(args.baselineDirtyFiles ?? []);
+  if (baseline.size > 0) {
+    touched = touched.filter((f) => !baseline.has(f));
+    if (touched.length === 0) {
+      return {
+        ran: true,
+        bypass_detected: false,
+        touched_files: [],
+        reverted_files: [],
+        patch_path: patchPath,
+        skip_reason: "baseline_matched_all_dirty_files",
+      };
+    }
   }
 
   // Cross-check against applied_change_committed rows for this dispatch:
