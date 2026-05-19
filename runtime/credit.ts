@@ -222,6 +222,17 @@ const residualFromOwnerObservedOutcome = (ownerEv: EventLike, fallback: number):
   if (typeof ownerEv.residual === "number" && Number.isFinite(ownerEv.residual)) return clampResidual(ownerEv.residual);
   const payload = jsonObject(ownerEv.payload);
   if (typeof payload.residual === "number" && Number.isFinite(payload.residual)) return clampResidual(payload.residual);
+  // F5 (2026-05-18): signal_class is an open string carrying the owner's
+  // qualitative verdict (positive_strong, positive_weak, negative_weak,
+  // negative_strong, neutral, …). Map known classes onto residual; unknown
+  // strings fall through to the verdict-text path. The vocabulary is
+  // discovered through use — emitters may leave the field unset.
+  const signalClass = typeof payload.signal_class === "string" ? payload.signal_class : "";
+  if (signalClass === "positive_strong") return 0;
+  if (signalClass === "positive_weak") return 0.2;
+  if (signalClass === "neutral") return 0.5;
+  if (signalClass === "negative_weak") return 0.8;
+  if (signalClass === "negative_strong") return 1;
   const observedOutcome = jsonObject(payload.observed_outcome as JsonValue | undefined);
   const verdict = String(payload.verdict ?? observedOutcome.verdict ?? observedOutcome.outcome ?? "").toLowerCase();
   if (verdict === "positive" || verdict === "success" || verdict === "succeeded") return 0;

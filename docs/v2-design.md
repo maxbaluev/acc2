@@ -1630,7 +1630,19 @@ async function dispatchTask(task: ReadyTask): Promise<TaskResult> {
 }
 ```
 
-Recipes accrete via `recipes_view` extractor: ≥3 similar task graph shapes with similar parameters → emit `recipe_extracted` with confidence prior 0.5.
+Recipes accrete via the `recipes_view` extractor and a posterior-driven
+promotion gate (F5, see `runtime/posterior_promotion.ts`). Each
+(goal_shape × topology × outcome_class) carries a Beta posterior. The
+extractor scores the cluster by summing owner-observed outcomes (weight
+1.0) and substrate closure verdicts (weight 0.5) and evaluates a lower
+bound on the Beta confidence (`mean − k · std`). The threshold is
+per-owner per-goal-class, drawn from `owner_profile.autonomy_signals`
+or the global `autonomy_score`; missing signal falls back to 0.65.
+Promotion emits a `recipe_promoted` row paired with `recipe_extracted`;
+clusters that fail the gate emit `recipe_promotion_deferred` for
+diagnostic visibility. No fixed observation count is required —
+N=1 with a strong positive owner outcome crosses for a high-autonomy
+owner, while N=10 with mixed signal does not.
 
 In crisis mode (§3.5), recipe threshold lowered to 0.6 (prefer cached over fresh).
 

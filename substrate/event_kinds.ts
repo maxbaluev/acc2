@@ -541,6 +541,8 @@ export const EVENT_KINDS = {
   dispatch_decided:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   self_modification_recorded:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   recipe_extracted:                        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  recipe_promoted:                         { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  recipe_promotion_deferred:               { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   recipe_invoked:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   recipe_replay_aborted:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   prompt_truncated:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },

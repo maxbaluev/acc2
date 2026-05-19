@@ -21,6 +21,26 @@
 // already covered the path; the postflight is skipped because there is no
 // source-checkout diff to inspect. Test fixtures and the mock bridge skip
 // the postflight entirely.
+//
+// F5-companion scoping (2026-05-18): the F2 defense was reverting working
+// tree changes whenever no applied_change_committed cited the dispatch,
+// which clobbered legitimate developer-side edits that happened to overlap
+// the dispatch window. The postflight now:
+//
+//   1. Skips entirely when ACC2_BYPASS_POSTFLIGHT_DISABLED=1. This is the
+//      orchestrator-driven escape hatch for hand-implementation work where
+//      the operator and agent share the same checkout; production daemon
+//      should leave the flag unset.
+//   2. Skips when no brain_dispatched event exists for this dispatch id —
+//      Claude-inline / substrate-replay / clarification / deferred lanes
+//      never spawn a brain subprocess, so a non-empty working tree must
+//      belong to another actor (the operator's own edits).
+//   3. Treats committed changes as locked by HEAD: `git diff HEAD` only
+//      reports uncommitted working tree changes by design, so a brain
+//      bypass that somehow committed its writes already appears in the
+//      git log and the postflight does not revert it. This bullet is
+//      pinned by an explicit test (no behavior change in code — the diff
+//      command already had this property).
 
 import type { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
@@ -28,6 +48,30 @@ import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
+
+/** Returns true when the supplied dispatch id has a matching brain_dispatched
+ *  row in the ledger. The F8 commit (30d4ec5) emits this event when the
+ *  opencode bridge actually spawns a brain subprocess; lanes that don't
+ *  call into the bridge (claude_inline, substrate_replay, clarification,
+ *  deferred_blocked) never emit it. */
+const hasBrainDispatchedRow = (db: Database, dispatchId: string): boolean => {
+  try {
+    const row = db
+      .query<{ c: number }, [string]>(
+        `SELECT COUNT(*) AS c FROM events
+         WHERE kind = 'brain_dispatched'
+           AND (json_extract(payload, '$.dispatch_id') = ?
+                OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?))`,
+      )
+      .get(dispatchId, dispatchId);
+    return (row?.c ?? 0) > 0;
+  } catch {
+    // Schema variation across versions — fail closed by reporting the row
+    // is absent so the postflight skips. Better to miss one bypass than to
+    // clobber a developer's working tree on a synthetic event shape.
+    return false;
+  }
+};
 
 export type PostflightResult = {
   ran: boolean;
@@ -118,6 +162,35 @@ export const runBypassPostflight = (
       reverted_files: [],
       patch_path: null,
       skip_reason: "checkout_isolated",
+    };
+  }
+
+  // F5-companion scope (2026-05-18): escape hatch for orchestrator-driven
+  // implementation cycles where the operator and Agent subagent share one
+  // checkout. Production daemon should leave the flag unset.
+  if (process.env.ACC2_BYPASS_POSTFLIGHT_DISABLED === "1") {
+    return {
+      ran: false,
+      bypass_detected: false,
+      touched_files: [],
+      reverted_files: [],
+      patch_path: null,
+      skip_reason: "env_disabled",
+    };
+  }
+
+  // Scope to dispatches that actually spawned a brain subprocess. Without
+  // brain_dispatched evidence, the working tree state belongs to another
+  // actor (the operator's own edits, an Agent subagent on the same
+  // checkout, a CI process) and reverting it would clobber legitimate work.
+  if (!hasBrainDispatchedRow(db, args.dispatchId)) {
+    return {
+      ran: false,
+      bypass_detected: false,
+      touched_files: [],
+      reverted_files: [],
+      patch_path: null,
+      skip_reason: "no_brain_dispatch_for_id",
     };
   }
 

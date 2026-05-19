@@ -19,12 +19,32 @@ import { newId } from "../runtime/ids";
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
 
+/** Seed a brain_dispatched row for the supplied dispatch id so the
+ *  postflight's F5-companion scope filter does not short-circuit the
+ *  test. The runtime path requires a matching ledger row before it will
+ *  run the diff check. */
+const seedBrainDispatched = (
+  db: ReturnType<typeof openDb>,
+  dispatchId: string,
+  directiveId: string,
+  taskId: string,
+) => {
+  emitEvent(db, {
+    kind: "brain_dispatched",
+    substrate_origin: "substrate_auto",
+    directive_id: directiveId,
+    task_id: taskId,
+    payload: { dispatch_id: dispatchId },
+  });
+};
+
 describe("runBypassPostflight — F2 defenses B+C", () => {
   test("dirty source files with NO applied_change_committed → dispatcher_violation + patch saved + revert recorded", () => {
     const db = openDb(":memory:");
     const dispatchId = newId();
     const taskId = newId();
     const directiveId = newId();
+    seedBrainDispatched(db, dispatchId, directiveId, taskId);
     const result = runBypassPostflight(db, {
       dispatchId,
       taskId,
@@ -83,6 +103,8 @@ describe("runBypassPostflight — F2 defenses B+C", () => {
     const db = openDb(":memory:");
     const taskId = newId();
     const directiveId = newId();
+    const dispatchId = newId();
+    seedBrainDispatched(db, dispatchId, directiveId, taskId);
     // Seed an applied_change_committed declaring the file as a
     // sanctioned mutation. The postflight must recognize it as
     // declared and skip the violation.
@@ -98,7 +120,7 @@ describe("runBypassPostflight — F2 defenses B+C", () => {
       },
     });
     const result = runBypassPostflight(db, {
-      dispatchId: newId(),
+      dispatchId,
       taskId,
       directiveId,
       sourceCheckoutRoot: "/synthetic/source",
@@ -125,12 +147,14 @@ describe("runBypassPostflight — F2 defenses B+C", () => {
 
   test("real source checkout with clean working tree → ran=true, bypass_detected=false", () => {
     const db = openDb(":memory:");
+    const dispatchId = newId();
+    seedBrainDispatched(db, dispatchId, newId(), newId());
     // Build a synthetic empty git repo so collectDirtyFiles returns [].
     const tmp = mkdtempSync(join(tmpdir(), "acc2-bypass-clean-"));
     mkdirSync(join(tmp, ".git"), { recursive: true });
     try {
       const result = runBypassPostflight(db, {
-        dispatchId: newId(),
+        dispatchId,
         taskId: newId(),
         directiveId: newId(),
         sourceCheckoutRoot: tmp,
@@ -145,6 +169,114 @@ describe("runBypassPostflight — F2 defenses B+C", () => {
       }
     } finally {
       try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+  });
+
+  // ── F5-companion scoping (2026-05-18) ───────────────────────────────
+  // The original F2 defense was reverting working-tree changes whenever
+  // no applied_change_committed cited the dispatch — which clobbered
+  // legitimate developer-side edits during agent subagent implementation
+  // work. The postflight is now scoped to dispatches that actually
+  // spawned a brain subprocess (matched via brain_dispatched event from
+  // F8 commit 30d4ec5). The three cases below pin that behavior.
+
+  test("Case D: dispatch with NO brain_dispatched row → postflight skips, no revert", () => {
+    const db = openDb(":memory:");
+    const dispatchId = newId();
+    const taskId = newId();
+    const directiveId = newId();
+    // Deliberately NO brain_dispatched seed — claude_inline / replay /
+    // clarification lanes never emit it, and the working-tree state
+    // belongs to the operator or an Agent subagent.
+    const result = runBypassPostflight(db, {
+      dispatchId,
+      taskId,
+      directiveId,
+      sourceCheckoutRoot: "/synthetic/source",
+      isolated: false,
+      testOverride: {
+        dirtyFiles: ["cli/lineage.ts"],
+        patchText: "diff ... operator edit",
+      },
+    });
+    expect(result.ran).toBe(false);
+    expect(result.bypass_detected).toBe(false);
+    expect(result.reverted_files).toEqual([]);
+    expect(result.skip_reason).toBe("no_brain_dispatch_for_id");
+    const violations = db
+      .query<{ c: number }, []>(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'dispatcher_violation'",
+      )
+      .get();
+    expect(violations?.c).toBe(0);
+  });
+
+  test("Case E: committed working-tree changes during dispatch window → postflight does NOT revert", () => {
+    // The contract: `git diff HEAD` only reports UNCOMMITTED changes
+    // by design — committed changes are part of HEAD and don't appear
+    // in the dirty-file list. This test pins that property by feeding
+    // an empty dirtyFiles list (a real `git diff HEAD` against a
+    // freshly-committed tree returns the same) and asserting no
+    // revert / violation occurs even with a matching brain_dispatched.
+    const db = openDb(":memory:");
+    const dispatchId = newId();
+    const taskId = newId();
+    const directiveId = newId();
+    seedBrainDispatched(db, dispatchId, directiveId, taskId);
+    const result = runBypassPostflight(db, {
+      dispatchId,
+      taskId,
+      directiveId,
+      sourceCheckoutRoot: "/synthetic/source",
+      isolated: false,
+      testOverride: {
+        dirtyFiles: [],
+        patchText: "",
+      },
+    });
+    expect(result.bypass_detected).toBe(false);
+    expect(result.reverted_files).toEqual([]);
+    const violations = db
+      .query<{ c: number }, []>(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'dispatcher_violation'",
+      )
+      .get();
+    expect(violations?.c).toBe(0);
+  });
+
+  test("Case F: ACC2_BYPASS_POSTFLIGHT_DISABLED=1 → postflight skips entirely", () => {
+    const db = openDb(":memory:");
+    const dispatchId = newId();
+    const taskId = newId();
+    const directiveId = newId();
+    seedBrainDispatched(db, dispatchId, directiveId, taskId);
+    const prior = process.env.ACC2_BYPASS_POSTFLIGHT_DISABLED;
+    process.env.ACC2_BYPASS_POSTFLIGHT_DISABLED = "1";
+    try {
+      const result = runBypassPostflight(db, {
+        dispatchId,
+        taskId,
+        directiveId,
+        sourceCheckoutRoot: "/synthetic/source",
+        isolated: false,
+        testOverride: {
+          dirtyFiles: ["cli/lineage.ts"],
+          patchText: "diff ... bypass forced off",
+        },
+      });
+      expect(result.ran).toBe(false);
+      expect(result.bypass_detected).toBe(false);
+      expect(result.reverted_files).toEqual([]);
+      expect(result.skip_reason).toBe("env_disabled");
+      const violations = db
+        .query<{ c: number }, []>(
+          "SELECT COUNT(*) AS c FROM events WHERE kind = 'dispatcher_violation'",
+        )
+        .get();
+      expect(violations?.c).toBe(0);
+    } finally {
+      if (prior === undefined) delete process.env.ACC2_BYPASS_POSTFLIGHT_DISABLED;
+      else process.env.ACC2_BYPASS_POSTFLIGHT_DISABLED = prior;
     }
   });
 });

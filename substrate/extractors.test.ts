@@ -210,10 +210,23 @@ describe("extractSemanticDedup", () => {
   });
 });
 
-describe("extractRecipeCandidates", () => {
-  test("emits a recipe_extracted event after 3 similar committed shapes", () => {
+describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
+  // Seed a high-autonomy owner profile so the threshold = HIGH_AUTONOMY_THRESHOLD
+  // (0.4) — letting a modest evidence accumulation cross the gate. Without
+  // this seed, the default profile (autonomy_score=0.5) yields the MID
+  // threshold (0.6) and most synthetic clusters defer.
+  const seedHighAutonomyOwner = (db: ReturnType<typeof openDb>) => {
+    insertEvent(db, {
+      kind: "owner_profile_recorded",
+      directive_id: "d_owner_seed",
+      task_id: "t_owner_seed",
+      payload: { autonomy_score: 0.9 },
+    });
+  };
+
+  test("3 committed shapes + positive owner outcomes → recipe_promoted + recipe_extracted", () => {
     const db = openDb(":memory:");
-    // Three directives with same normalized goal + same task_node count.
+    seedHighAutonomyOwner(db);
     for (let i = 0; i < 3; i++) {
       const did = `d_${i}`;
       insertEvent(db, {
@@ -232,6 +245,14 @@ describe("extractRecipeCandidates", () => {
         directive_id: did,
         task_id: `t_${i}_root`,
       });
+      // Strong positive owner outcome on each directive — pushes the Beta
+      // posterior above the high-autonomy threshold.
+      insertEvent(db, {
+        kind: "owner_observed_outcome_recorded",
+        directive_id: did,
+        task_id: `t_${i}_root`,
+        payload: { signal_class: "positive_strong" },
+      });
     }
     const summary = extractRecipeCandidates(db);
     expect(summary.extracted).toBe(1);
@@ -243,15 +264,56 @@ describe("extractRecipeCandidates", () => {
     const payload = JSON.parse(recipes[0]!.payload) as Record<string, unknown>;
     expect(payload.goal_shape).toContain("count_todos");
     expect(payload.success_count).toBe(3);
+
+    // F5: a paired recipe_promoted row carries the posterior evidence.
+    const promoted = db
+      .query("SELECT payload FROM events WHERE kind = 'recipe_promoted'")
+      .all() as Array<{ payload: string }>;
+    expect(promoted.length).toBe(1);
+    const promotedPayload = JSON.parse(promoted[0]!.payload) as Record<string, unknown>;
+    expect(typeof promotedPayload.confidence).toBe("number");
+    expect(typeof promotedPayload.threshold).toBe("number");
+    expect(promotedPayload.confidence as number).toBeGreaterThanOrEqual(promotedPayload.threshold as number);
+  });
+
+  test("3 commits with NO owner outcomes → recipe_promotion_deferred (not promoted)", () => {
+    const db = openDb(":memory:");
+    // Default owner profile (autonomy_score=0.5 → MID threshold 0.6).
+    // Three plain commits give alpha=2.5, beta=1 → mean=0.71, lower≈0.50.
+    // Below 0.6 → defer.
+    for (let i = 0; i < 3; i++) {
+      const did = `d_${i}`;
+      insertEvent(db, {
+        kind: "directive_opened",
+        directive_id: did,
+        task_id: `t_${i}`,
+        payload: { goal: "shape with no owner signal" },
+      });
+      insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: `t_${i}` });
+      insertEvent(db, { kind: "task_committed", directive_id: did, task_id: `t_${i}` });
+    }
+    const summary = extractRecipeCandidates(db);
+    expect(summary.extracted).toBe(0);
+    expect(summary.deferred).toBe(1);
+    const deferredRows = db
+      .query("SELECT payload FROM events WHERE kind = 'recipe_promotion_deferred'")
+      .all() as Array<{ payload: string }>;
+    expect(deferredRows.length).toBe(1);
+    const d = JSON.parse(deferredRows[0]!.payload) as Record<string, unknown>;
+    expect(typeof d.confidence).toBe("number");
+    expect(typeof d.threshold).toBe("number");
+    expect(d.reason).toBe("confidence_below_threshold");
   });
 
   test("idempotent — running twice does not double-emit for the same shape", () => {
     const db = openDb(":memory:");
+    seedHighAutonomyOwner(db);
     for (let i = 0; i < 3; i++) {
       const did = `d_${i}`;
       insertEvent(db, { kind: "directive_opened", directive_id: did, task_id: "t", payload: { goal: "shared shape" } });
       insertEvent(db, { kind: "task_node_opened",  directive_id: did, task_id: `t_${i}` });
       insertEvent(db, { kind: "task_committed",    directive_id: did, task_id: `t_${i}` });
+      insertEvent(db, { kind: "owner_observed_outcome_recorded", directive_id: did, task_id: `t_${i}`, payload: { signal_class: "positive_strong" } });
     }
     extractRecipeCandidates(db);
     const second = extractRecipeCandidates(db);
@@ -262,20 +324,9 @@ describe("extractRecipeCandidates", () => {
     expect(c).toBe(1);
   });
 
-  test("does NOT emit below the 3-shape threshold", () => {
-    const db = openDb(":memory:");
-    for (let i = 0; i < 2; i++) {
-      const did = `d_${i}`;
-      insertEvent(db, { kind: "directive_opened", directive_id: did, task_id: "t", payload: { goal: "low shape" } });
-      insertEvent(db, { kind: "task_node_opened",  directive_id: did, task_id: `t_${i}` });
-      insertEvent(db, { kind: "task_committed",    directive_id: did, task_id: `t_${i}` });
-    }
-    const summary = extractRecipeCandidates(db);
-    expect(summary.extracted).toBe(0);
-  });
-
   test("Phase J: payload includes topology_signature + trajectory + directive_text fallback", () => {
     const db = openDb(":memory:");
+    seedHighAutonomyOwner(db);
     for (let i = 0; i < 3; i++) {
       const did = `d_${i}`;
       // Use directive_text (production shape) — Phase J extractor falls back
@@ -288,6 +339,7 @@ describe("extractRecipeCandidates", () => {
       });
       insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: `t_${i}` });
       insertEvent(db, { kind: "task_committed", directive_id: did, task_id: `t_${i}` });
+      insertEvent(db, { kind: "owner_observed_outcome_recorded", directive_id: did, task_id: `t_${i}`, payload: { signal_class: "positive_strong" } });
     }
     const summary = extractRecipeCandidates(db);
     expect(summary.extracted).toBe(1);
@@ -306,12 +358,14 @@ describe("extractRecipeCandidates", () => {
 
   test("Phase J: distinct topology signatures DO NOT collapse into one recipe", () => {
     const db = openDb(":memory:");
+    seedHighAutonomyOwner(db);
     // Group 1: 3 directives with a single root task (topology n=1)
     for (let i = 0; i < 3; i++) {
       const did = `d_solo_${i}`;
       insertEvent(db, { kind: "directive_opened", directive_id: did, task_id: did, payload: { goal: "solo" } });
       insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: `t_solo_${i}` });
       insertEvent(db, { kind: "task_committed", directive_id: did, task_id: `t_solo_${i}` });
+      insertEvent(db, { kind: "owner_observed_outcome_recorded", directive_id: did, task_id: `t_solo_${i}`, payload: { signal_class: "positive_strong" } });
     }
     // Group 2: 3 directives with a two-task DAG (topology n=2)
     for (let i = 0; i < 3; i++) {
@@ -322,6 +376,7 @@ describe("extractRecipeCandidates", () => {
       insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: root });
       insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: child });
       insertEvent(db, { kind: "task_committed", directive_id: did, task_id: child });
+      insertEvent(db, { kind: "owner_observed_outcome_recorded", directive_id: did, task_id: child, payload: { signal_class: "positive_strong" } });
     }
     const summary = extractRecipeCandidates(db);
     // The goal_shape token is the same ("solo") but the topology differs

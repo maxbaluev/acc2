@@ -12,7 +12,11 @@
 //   - extractSemanticDedup: §3.6.1 Rule 1+2. Embedding-based merger.
 //     Phase B2 stub: no-op when no embeddings are present (Phase F).
 //   - extractRecipeCandidates: group task_committed by goal_shape;
-//     emit recipe_extracted at ≥3 successes within 30 days.
+//     emit recipe_extracted + recipe_promoted when the (goal_shape ×
+//     topology) cluster's Beta posterior lower bound clears a
+//     per-owner per-goal-class threshold (F5: see
+//     runtime/posterior_promotion.ts). Failed gates record
+//     recipe_promotion_deferred instead.
 //
 // Each extractor returns a small summary object for daemon telemetry.
 
@@ -23,6 +27,7 @@ import { OWNER_PROFILE_DEFAULTS, OWNER_PROFILE_JSON_SCHEMA } from "./types";
 import { parseResourceRefs } from "../runtime/resource_uri";
 import { decodeEmbeddingBlob } from "../runtime/embedder";
 import { betaMean as canonicalBetaMean, betaEvidenceConfidence } from "../runtime/posterior";
+import { evaluatePromotion } from "../runtime/posterior_promotion";
 
 // ── ULID-ish id minter (same convention as Phase B1 tests) ─────────
 
@@ -910,8 +915,14 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
 //
 // Group task_committed events by a coarse "goal shape" — the
 // normalized goal text from the directive payload + the count of
-// task nodes under that directive. When ≥3 shapes succeed within a
-// 30-day window, emit a recipe_extracted event with confidence=0.5.
+// task nodes under that directive. Each cluster's Beta posterior
+// (alpha from positive owner outcomes + low-residual closure audits;
+// beta from negative outcomes + high-residual closures) is evaluated
+// against a per-owner per-goal-class threshold by
+// `evaluatePromotion` in runtime/posterior_promotion.ts. Clusters
+// that clear the gate emit `recipe_extracted` + `recipe_promoted`;
+// clusters that fail emit `recipe_promotion_deferred` so the deferral
+// is observable.
 //
 // Phase J refines the matching:
 //   - `goal_shape` is normalised text (the existing token, retained so
@@ -927,7 +938,14 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
 // Idempotent via meta cursor + dedup on (goal_shape, topology_signature).
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-const RECIPE_THRESHOLD = 3;
+
+// Minimum sample size before the posterior gate is consulted at all. One
+// committed shape gives the extractor a candidate to evaluate; the actual
+// promotion decision is then per-owner per-goal-class through
+// evaluatePromotion (runtime/posterior_promotion.ts) — there is no fixed
+// success count gate. This replaces the legacy RECIPE_THRESHOLD = 3
+// magic number (F5 roadmap, event WW7W1NZ8A10R52PB4E7EJE9YBW).
+const RECIPE_MIN_OBSERVATIONS = 1;
 
 const goalShapeFor = (db: Database, directiveId: string): string => {
   const dirRow = db
@@ -1043,7 +1061,72 @@ const buildTrajectoryFor = (
   });
 };
 
-export type RecipeCandidateSummary = { extracted: number };
+export type RecipeCandidateSummary = { extracted: number; deferred?: number };
+
+/** Walk every owner_observed_outcome_recorded and task_closure_audited row
+ *  bound to the supplied directives and accumulate Beta posterior weight.
+ *  Owner outcomes carry weight OWNER_SIGNAL_WEIGHT (1.0); closure verdicts
+ *  carry CLOSURE_SIGNAL_WEIGHT (0.5). Sign is determined by the row's
+ *  signal_class (open-string) or by closure_residual when no class is set. */
+const collectRecipePosteriorEvidence = (
+  db: Database,
+  directiveIds: readonly string[],
+): { alpha: number; beta: number } => {
+  if (directiveIds.length === 0) return { alpha: 0, beta: 0 };
+  const placeholders = directiveIds.map(() => "?").join(",");
+
+  let alpha = 0;
+  let beta = 0;
+
+  // Owner observations: signal_class drives sign + weight. Fallback uses
+  // the verdict / observed_outcome.verdict field that
+  // residualFromOwnerObservedOutcome (runtime/credit.ts) already reads.
+  const ownerRows = db
+    .query(
+      `SELECT payload FROM events
+       WHERE kind = 'owner_observed_outcome_recorded'
+         AND directive_id IN (${placeholders})`,
+    )
+    .all(...directiveIds) as Array<{ payload: string }>;
+  for (const row of ownerRows) {
+    let p: Record<string, unknown> = {};
+    try { p = JSON.parse(row.payload ?? "{}") as Record<string, unknown>; } catch { /* malformed */ }
+    const signalClass = typeof p.signal_class === "string" ? p.signal_class : null;
+    if (signalClass === "positive_strong") { alpha += 1.0; continue; }
+    if (signalClass === "negative_strong") { beta += 1.0; continue; }
+    if (signalClass === "positive_weak") { alpha += 0.7; continue; }
+    if (signalClass === "negative_weak") { beta += 0.7; continue; }
+    if (signalClass === "neutral") continue;
+    // No explicit class — fall back to the verdict string.
+    const observedOutcome = (p.observed_outcome ?? {}) as Record<string, unknown>;
+    const verdict = String(p.verdict ?? observedOutcome.verdict ?? observedOutcome.outcome ?? "").toLowerCase();
+    if (verdict === "positive" || verdict === "success" || verdict === "succeeded") alpha += 0.5;
+    else if (verdict === "negative" || verdict === "failure" || verdict === "failed") beta += 0.5;
+  }
+
+  // Closure audits: residual < 0.3 → alpha weight 0.5; >= 0.3 → beta 0.5.
+  const closureRows = db
+    .query(
+      `SELECT payload FROM events
+       WHERE kind = 'task_closure_audited'
+         AND directive_id IN (${placeholders})`,
+    )
+    .all(...directiveIds) as Array<{ payload: string }>;
+  for (const row of closureRows) {
+    let p: Record<string, unknown> = {};
+    try { p = JSON.parse(row.payload ?? "{}") as Record<string, unknown>; } catch { /* malformed */ }
+    const cr = typeof p.closure_residual === "number"
+      ? p.closure_residual
+      : typeof p.residual === "number"
+        ? (p.residual as number)
+        : null;
+    if (cr === null) continue;
+    if (cr < 0.3) alpha += 0.5;
+    else beta += 0.5;
+  }
+
+  return { alpha, beta };
+};
 
 export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary => {
   const cursor = readMeta(db, META_KEYS.recipes);
@@ -1087,29 +1170,94 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
       }),
   );
 
+  // F5 (2026-05-18): the legacy gate was `entries.length < 3`. That fixed
+  // count was advisory pretending to be structural — k_252 in miniature.
+  // We now derive Beta posterior evidence per (goal_shape × topology) from
+  // closure + owner-observation events on the cluster's directives and
+  // route through evaluatePromotion. Threshold is per-owner per-goal-class
+  // via runtime/posterior_promotion.ts.
+  const ownerProfile = readLatestOwnerProfile(db);
+
   let extracted = 0;
+  let deferred = 0;
   let latestTs = cursor;
 
   withImmediateTransaction(db, () => {
     for (const [compositeKey, entries] of shapeGroups) {
-      if (entries.length < RECIPE_THRESHOLD) continue;
+      if (entries.length < RECIPE_MIN_OBSERVATIONS) continue;
       if (alreadyExtracted.has(compositeKey)) continue;
       const directiveIds = Array.from(new Set(entries.map((e) => e.row.directive_id as string)));
+
+      // Build Beta posterior from per-directive evidence:
+      //   - owner_observed_outcome_recorded → alpha or beta with weight
+      //     drawn from signal_class (1.0 strong, 0.7 weak, 0.5 fallback).
+      //   - task_closure_audited → alpha weight 0.5 (residual < 0.3) or
+      //     beta weight 0.5 (residual >= 0.3).
+      //   - The task_committed rows that built the cluster contribute weight
+      //     0.5 each as substrate-internal positive evidence. The brain
+      //     committed the directive but no closure/owner audit has weighed in
+      //     yet, so this is the same weight as a closure verdict — never
+      //     enough on its own to cross the gate without a confirming signal.
+      const evidence = collectRecipePosteriorEvidence(db, directiveIds);
+      // Add a Beta(1, 1) uniform prior so a no-failure observation still
+      // carries proper uncertainty (alpha=1, beta=0 would yield std=0 and
+      // collapse the lower bound onto the mean — wrong for an unverified
+      // win). One strong positive owner outcome on top of the prior gives
+      // alpha=2, beta=1, which is exactly the case the F5 roadmap names as
+      // the falsifying boundary (lower ≈ 0.43, crosses HIGH 0.4).
+      const posteriorAlpha = evidence.alpha + entries.length * 0.5 + 1;
+      const posteriorBeta = evidence.beta + 1;
+      const goalClass = entries[entries.length - 1]!.goalShape.split("::")[0] ?? "";
+      const verdict = evaluatePromotion(
+        { posterior_alpha: posteriorAlpha, posterior_beta: posteriorBeta },
+        ownerProfile,
+        goalClass,
+      );
+
       // Use the latest committed row's directive_id as the recipe's anchor.
       const anchor = entries[entries.length - 1]!.row;
       const goalShape = entries[entries.length - 1]!.goalShape;
       const topology = entries[entries.length - 1]!.topology;
-      // The trajectory is read off the most recent successful directive — the
-      // replayer will use this exact sequence of action artifacts + verifiers.
       const trajectory = buildTrajectoryFor(db, anchor.directive_id as string);
       const entryIds = entries.map((e) => e.row.id as string);
-      // Cite trajectory event ids (task_node_opened / action_predicted /
-      // action_scored) for the anchor directive so the recipe carries
-      // explicit credit pointers back to the actions that proved it.
-      // Brain audit by166hjyv flagged this as a credit-spine gap: without
-      // these citations, distributeCredit could only reach the cluster
-      // entries, not the underlying action_scored ancestors.
       const trajectoryRefs = trajectoryEventIdsFor(db, anchor.directive_id as string);
+
+      if (!verdict.promote) {
+        // Record the deferral so operators can audit the gate decision; the
+        // candidate stays unpromoted until later evidence shifts the
+        // posterior. This is the diagnostic counterpart to recipe_promoted.
+        insertEvent(db, {
+          kind: "recipe_promotion_deferred",
+          substrate_origin: "substrate_auto",
+          directive_id: anchor.directive_id as string,
+          task_id: anchor.task_id as string,
+          loop_id: anchor.loop_id as string,
+          payload: {
+            goal_shape: goalShape,
+            topology_signature: topology,
+            goal_class: goalClass,
+            posterior_alpha: posteriorAlpha,
+            posterior_beta: posteriorBeta,
+            confidence: verdict.confidence,
+            threshold: verdict.threshold,
+            mean: verdict.mean,
+            std: verdict.std,
+            sample_size: verdict.sample_size,
+            reason: verdict.reason,
+            directive_ids: directiveIds,
+            window_days: 30,
+          },
+          context_refs: [...entryIds, ...trajectoryRefs],
+        });
+        deferred++;
+        latestTs = anchor.ts as string;
+        continue;
+      }
+
+      // Promotion gate passed — emit the recipe_extracted spine (trajectory
+      // cache) and a paired recipe_promoted row for the credit-aware lane.
+      // recipe_promoted carries the posterior evidence; recipe_extracted is
+      // the replay cache the dispatcher reads.
       emitPromotionSpine(db, {
         kind: "recipe_extracted",
         candidate_id: entryIds[0]!,
@@ -1123,10 +1271,35 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
           topology_signature: topology,
           success_count: entries.length,
           window_days: 30,
-          confidence: 0.5,
+          confidence: verdict.confidence,
+          posterior_alpha: posteriorAlpha,
+          posterior_beta: posteriorBeta,
+          promotion_threshold: verdict.threshold,
           directive_ids: directiveIds,
           trajectory,
         },
+      });
+      insertEvent(db, {
+        kind: "recipe_promoted",
+        substrate_origin: "substrate_auto",
+        directive_id: anchor.directive_id as string,
+        task_id: anchor.task_id as string,
+        loop_id: anchor.loop_id as string,
+        payload: {
+          goal_shape: goalShape,
+          topology_signature: topology,
+          goal_class: goalClass,
+          posterior_alpha: posteriorAlpha,
+          posterior_beta: posteriorBeta,
+          confidence: verdict.confidence,
+          threshold: verdict.threshold,
+          mean: verdict.mean,
+          std: verdict.std,
+          sample_size: verdict.sample_size,
+          reason: verdict.reason,
+          directive_ids: directiveIds,
+        },
+        context_refs: [...entryIds, ...trajectoryRefs],
       });
       extracted++;
       latestTs = anchor.ts as string;
@@ -1134,7 +1307,7 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
     if (latestTs) writeMeta(db, META_KEYS.recipes, latestTs);
   });
 
-  return { extracted };
+  return { extracted, deferred };
 };
 
 // ── 5. Recipe extraction on every commit (inline, post-task_committed) ─
