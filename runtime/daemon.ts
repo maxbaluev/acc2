@@ -641,7 +641,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // chosen so an operator who never tunes anything still gets sane
   // behavior; per the f13 frontier inventory, these will be replaced
   // by adaptive scoring in a later cohort, not by env knobs.
-  const amendmentTickMs = Number(process.env.ACC2_AMENDMENT_TICK_MS ?? 2000);
+  // Amendment worker is reactive (subscription on directive_amended).
+  // 2s is the observational label only — the actual cadence is
+  // event-driven (instant on directive_amended) with the reactive
+  // safety net as upper bound. Universal value; no env knob.
+  const amendmentTickMs = 2000;
   const gaugeTickMs = 30_000;
   const integrityIntervalMs = Number(
     process.env.ACC2_INTEGRITY_INTERVAL_MS ?? 6 * 60 * 60 * 1000,

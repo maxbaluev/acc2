@@ -370,11 +370,12 @@ describe("startDaemon — boot + health + shutdown", () => {
   });
 
   test("amendment worker drains unapplied directive_amended events automatically", async () => {
-    // Pin the amendment worker to a fast interval for this test (default
-    // production interval is 2s; we want the worker to fire within ~50ms so
-    // the test doesn't sleep for seconds).
-    const prevTick = process.env.ACC2_AMENDMENT_TICK_MS;
-    process.env.ACC2_AMENDMENT_TICK_MS = "50";
+    // Amendment worker is reactive: it subscribes to directive_amended
+    // events and fires immediately on emission (with a minReactiveGapMs
+    // safety floor). The ACC2_AMENDMENT_TICK_MS env knob (and the env
+    // override this test used to set) is gone — the polling-based test
+    // shape still works because the reactive worker drains the row
+    // within milliseconds of the directive_amended emit below.
     try {
       const ports = pickPortPair();
       handle = await startDaemon({
@@ -419,8 +420,8 @@ describe("startDaemon — boot + health + shutdown", () => {
       }
       expect(supersededCount).toBeGreaterThanOrEqual(1);
     } finally {
-      if (prevTick === undefined) delete process.env.ACC2_AMENDMENT_TICK_MS;
-      else process.env.ACC2_AMENDMENT_TICK_MS = prevTick;
+      // No env restoration needed — ACC2_AMENDMENT_TICK_MS is no longer
+      // read by the daemon (reactive worker, env knob deleted).
     }
   }, 5_000);
 });
