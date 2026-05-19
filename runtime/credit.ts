@@ -556,16 +556,16 @@ export const distributeCredit = async (
   }
   const actionArt = getArtifact(db, actionArtifactId);
   const verifierArt = getArtifact(db, verifierArtifactId);
-  // Synthetic substrate actuators — owner_profile_promoter,
-  // knowledge_promotion, act_artifact_promotion, recipe_*,
-  // auto_apply_worker_stage2, etc — emit action_predicted +
-  // action_scored events but are NOT registered act_artifact rows
-  // (they're substrate-side primitives, not brain-authored scripts).
-  // For these paths, skip the primary artifact posterior updates
-  // (there's no row to update) but CONTINUE through collectCitations
-  // so cited candidates/knowledge still receive
-  // candidate_confirmed/candidate_contradicted evidence. Throwing
-  // here would leave every substrate-side spine without credit flow.
+  // Named substrate primitives are expected to be registered act_artifact
+  // rows under their canonical action_artifact_id (for example
+  // knowledge_merger_v1, dispatch_decider_v1, and
+  // owner_profile_promoter_action). Those rows receive the same primary
+  // posterior updates as any other action/verifier artifact. This fallback
+  // is only for truly synthetic or malformed handles with no registry row
+  // (for example ad-hoc random ids, deleted test fixtures, or null/legacy
+  // emissions that cannot be resolved). Continue through collectCitations
+  // so cited candidates/knowledge still receive evidence even when the
+  // primary artifact handle is not updateable.
   const primaryArtifactsRegistered = Boolean(actionArt && verifierArt);
 
   const ts = nowIso();

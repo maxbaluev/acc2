@@ -901,7 +901,7 @@ export const VERIFIER_KIND_EXAMPLE_NAMES = VERIFIER_KIND_EXAMPLES.map(
 // ── Seed code artifacts (§11.4) ────────────────────────────────────
 
 type SeedArtifact = {
-  seedName: string;        // stable: id = `seed_<seedName>`
+  seedName: string;        // stable: id = `seed_<seedName>` when stable_id absent
   runtime: Runtime;
   body: string;
   declared_sandbox: SandboxDecl;
@@ -916,6 +916,15 @@ type SeedArtifact = {
    *  dispatch_strategy_v1 rows declare 'dispatch_strategy_v1' so the
    *  strategy ranker can filter on kind alone. */
   kind?: string;
+  /** 2026-05-19 (brain 198YWW39K94KH2ZQ1A7XHP2T8R): canonical row id when
+   *  the act_artifact must collide with a substrate-emitted
+   *  action_artifact_id that does NOT carry the seed_ prefix. Used to
+   *  register the 17 named substrate primitives (knowledge_merger_v1,
+   *  dispatch_decider_v1, owner_profile_promoter_action, etc) whose
+   *  events already exist in the wild and must be credited rather than
+   *  skipped as synthetic actuators. When unset, id falls back to
+   *  `seed_<seedName>` so legacy seeds keep their stable prefix. */
+  stable_id?: string;
 };
 
 const SEED_ARTIFACTS: SeedArtifact[] = [
@@ -1895,6 +1904,268 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   },
 ];
 
+// ── Substrate-primitive act_artifact rows (2026-05-19) ──────────────
+//
+// Brain proposal 198YWW39K94KH2ZQ1A7XHP2T8R closes the artifact-credit
+// trunk leak. Sixteen named substrate primitives emit `action_scored`
+// events against canonical artifact ids (`knowledge_merger_v1`,
+// `dispatch_decider_v1`, `owner_profile_promoter_action`, etc) that are
+// NOT registered in `act_artifact`. Credit pipeline correctly skipped
+// them as "synthetic actuators" (runtime/credit.ts:558-568), leaving
+// ~3 100 weekly scored events with 0 posterior update.
+//
+// These rows REGISTER each primitive at its canonical name. After
+// admission the same action_scored path that today flows through
+// credit's fallback branch will hit the registered row's Beta posterior
+// (`updateActionPosterior` / `updateVerifierPosterior`) and update it
+// against the 7-day empirical residuals captured below.
+//
+// Status: admitted. We skip the cold-start verifier because each
+// primitive already has thousands of successful production runs;
+// initial_score is grounded in the avg residual observed over the last
+// 168 hours.
+//
+// Idempotency: same hash-gated upgrade path as the legacy seeds —
+// re-running the seeder neither duplicates rows nor wipes posteriors.
+const SUBSTRATE_PRIMITIVE_SANDBOX: SandboxDecl = {
+  runtime: "bun",
+  substrate_access: "rw",
+  cpu_ms: 5000,
+  wall_ms: 10000,
+  memory_mb: 64,
+  fs_read: [],
+  fs_write: [],
+  net_allow: [],
+  proc_allow: [],
+};
+
+const SUBSTRATE_PRIMITIVE_ARTIFACTS: SeedArtifact[] = [
+  {
+    stable_id: "knowledge_merger_v1",
+    seedName: "knowledge_merger_v1",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/knowledge_merger.ts; semantic dedup + posterior promotion of knowledge candidates emitted by Claude and the brain (Model D merger).",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/knowledge_merger",
+    initial_score: 0.8,
+    initial_confidence: 0.7,
+    fixture_input: { evidence_window_hours: 168, scored_count: 964, expected_residual: 0.2 },
+    fixture_expected_residual: 0.2,
+    display_name: "Knowledge merger — semantic dedup + posterior promotion",
+    kind: "merger",
+  },
+  {
+    stable_id: "opencode_brain_exit_action",
+    seedName: "opencode_brain_exit_action",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/opencode_bridge.ts; bridge exit classification (clean/dispatcher_violation/refinement_depth_exceeded/verifier_residual_high) for opencode brain runs.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/opencode_brain_exit",
+    initial_score: 1.0,
+    initial_confidence: 0.85,
+    fixture_input: { evidence_window_hours: 168, scored_count: 727, expected_residual: 0.0 },
+    fixture_expected_residual: 0.0,
+    display_name: "OpenCode brain exit action — bridge exit classification",
+    kind: "exit_classifier",
+  },
+  {
+    stable_id: "owner_profile_promoter_action",
+    seedName: "owner_profile_promoter_action",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/owner_profile_promoter.ts; schema-validated merge of owner_insight_candidate → owner_profile_recorded.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/owner_profile_promoter",
+    initial_score: 1.0,
+    initial_confidence: 0.85,
+    fixture_input: { evidence_window_hours: 168, scored_count: 326, expected_residual: 0.0 },
+    fixture_expected_residual: 0.0,
+    display_name: "Owner profile promoter — schema-validated profile merge",
+    kind: "promoter",
+  },
+  {
+    stable_id: "recipe_cluster_extraction_action",
+    seedName: "recipe_cluster_extraction_action",
+    runtime: "bun",
+    body: "Substrate primitive — substrate/extractors.ts; successful-trajectory compression into reusable recipe rows (goal_shape × topology clustering).",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/recipe_cluster_extraction",
+    initial_score: 0.9,
+    initial_confidence: 0.8,
+    fixture_input: { evidence_window_hours: 168, scored_count: 209, expected_residual: 0.1 },
+    fixture_expected_residual: 0.1,
+    display_name: "Recipe cluster extractor — successful trajectory compression",
+    kind: "extractor",
+  },
+  {
+    stable_id: "knowledge_promotion_action",
+    seedName: "knowledge_promotion_action",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/knowledge_promotion.ts; candidate → promoted_knowledge transition (Beta posterior threshold + corroboration evidence).",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/knowledge_promotion",
+    initial_score: 0.9,
+    initial_confidence: 0.8,
+    fixture_input: { evidence_window_hours: 168, scored_count: 176, expected_residual: 0.1 },
+    fixture_expected_residual: 0.1,
+    display_name: "Knowledge promotion — candidate to promoted knowledge",
+    kind: "promoter",
+  },
+  {
+    stable_id: "dispatch_decider_v1",
+    seedName: "dispatch_decider_v1",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/dispatch_decider.ts; route selection (substrate_replay / claude_inline / opencode_brain / clarification / deferred_blocked) by residual evidence and owner-control signals.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/dispatch_decider",
+    initial_score: 0.67,
+    initial_confidence: 0.7,
+    fixture_input: { evidence_window_hours: 168, scored_count: 172, expected_residual: 0.33 },
+    fixture_expected_residual: 0.33,
+    display_name: "Dispatch decider — route selection by residual evidence",
+    kind: "decider",
+  },
+  {
+    stable_id: "lesson_apply_gate_action",
+    seedName: "lesson_apply_gate_action",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/lesson_apply_gate.ts; implementation readiness check for lesson_extracted → contract_amendment_proposed / auto_apply pipeline.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/lesson_apply_gate",
+    initial_score: 0.9,
+    initial_confidence: 0.8,
+    fixture_input: { evidence_window_hours: 168, scored_count: 133, expected_residual: 0.1 },
+    fixture_expected_residual: 0.1,
+    display_name: "Lesson apply gate — implementation readiness check",
+    kind: "action",
+  },
+  {
+    stable_id: "claude_agent_apply_change_action",
+    seedName: "claude_agent_apply_change_action",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/claude_agent_apply.ts; repository mutation wrapper for Claude-side apply of owner-approved or eligible contract amendments.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/claude_agent_apply_change",
+    initial_score: 0.9,
+    initial_confidence: 0.8,
+    fixture_input: { evidence_window_hours: 168, scored_count: 96, expected_residual: 0.1 },
+    fixture_expected_residual: 0.1,
+    display_name: "Claude agent apply change — repository mutation wrapper",
+    kind: "action",
+  },
+  {
+    stable_id: "lesson_extractor_v1",
+    seedName: "lesson_extractor_v1",
+    runtime: "bun",
+    body: "Substrate primitive — substrate/extractors.ts; future-failure prevention signal extracted from substantive trajectories (verifier/sandbox/retrieval/recipe failure patterns).",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/lesson_extractor",
+    initial_score: 0.6,
+    initial_confidence: 0.6,
+    fixture_input: { evidence_window_hours: 168, scored_count: 72, expected_residual: 0.4 },
+    fixture_expected_residual: 0.4,
+    display_name: "Lesson extractor — future failure prevention signal",
+    kind: "extractor",
+  },
+  {
+    stable_id: "closure_verifier_v1",
+    seedName: "closure_verifier_v1",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/closure_verifier.ts; audits the directive against trajectory and emits task_closure_audited with closure_residual; root task gated until closure_residual < 0.3.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/closure_verifier",
+    initial_score: 0.82,
+    initial_confidence: 0.75,
+    fixture_input: { evidence_window_hours: 168, scored_count: 58, expected_residual: 0.18 },
+    fixture_expected_residual: 0.18,
+    display_name: "Closure verifier — task completion audit",
+    kind: "verifier",
+  },
+  {
+    stable_id: "intent_classifier_v1",
+    seedName: "intent_classifier_v1",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/intent_classifier.ts; directive ingress classification (intent_classified event) that selects the prompt template and constrains eligible emission lanes.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/intent_classifier",
+    initial_score: 0.46,
+    initial_confidence: 0.55,
+    fixture_input: { evidence_window_hours: 168, scored_count: 46, expected_residual: 0.54 },
+    fixture_expected_residual: 0.54,
+    display_name: "Intent classifier — directive ingress route constraint",
+    kind: "decider",
+  },
+  {
+    stable_id: "citation_chooser_v1",
+    seedName: "citation_chooser_v1",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/citation_chooser.ts; retrieval-binding citation selector that closes the k_554 mutation-on-citation loop.",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/citation_chooser",
+    initial_score: 0.8,
+    initial_confidence: 0.7,
+    fixture_input: { evidence_window_hours: 168, scored_count: 41, expected_residual: 0.2 },
+    fixture_expected_residual: 0.2,
+    display_name: "Citation chooser — retrieval binding credit closure",
+    kind: "decider",
+  },
+  {
+    stable_id: "recipe_confidence_bump_action",
+    seedName: "recipe_confidence_bump_action",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/recipe_posterior.ts; posterior updater for recipe rows after a successful replay (Beta evidence accrual against the recipe's canonical_id).",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/recipe_confidence_bump",
+    initial_score: 0.9,
+    initial_confidence: 0.8,
+    fixture_input: { evidence_window_hours: 168, scored_count: 39, expected_residual: 0.1 },
+    fixture_expected_residual: 0.1,
+    display_name: "Recipe confidence bump — replay posterior updater",
+    kind: "action",
+  },
+  {
+    stable_id: "predicate_gate_v1",
+    seedName: "predicate_gate_v1",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/predicate_gate.ts; structural admission/refusal scorer applied to contract amendments and apply proposals (well-formed diff, low residual, clean trajectory).",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/predicate_gate",
+    initial_score: 0.9,
+    initial_confidence: 0.8,
+    fixture_input: { evidence_window_hours: 168, scored_count: 27, expected_residual: 0.1 },
+    fixture_expected_residual: 0.1,
+    display_name: "Predicate gate — structural admission/refusal scorer",
+    kind: "predicate",
+  },
+  {
+    stable_id: "auto_apply_worker_stage2_action",
+    seedName: "auto_apply_worker_stage2_action",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/workers/auto_apply.ts; stage-2 amendment application worker (post-predicate-gate apply for owner-eligible contract_amendment_proposed rows).",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/auto_apply_worker_stage2",
+    initial_score: 0.9,
+    initial_confidence: 0.8,
+    fixture_input: { evidence_window_hours: 168, scored_count: 9, expected_residual: 0.1 },
+    fixture_expected_residual: 0.1,
+    display_name: "Auto-apply worker stage 2 — amendment application stage",
+    kind: "action",
+  },
+  {
+    stable_id: "refinement_edge_opener_v1",
+    seedName: "refinement_edge_opener_v1",
+    runtime: "bun",
+    body: "Substrate primitive — runtime/task_topology.ts; depth/fanout task expansion via refinement_edge_recorded + task_node_opened (bounded_peek + symbolic_recursion edges).",
+    declared_sandbox: SUBSTRATE_PRIMITIVE_SANDBOX,
+    state_root: "substrate/primitive/refinement_edge_opener",
+    initial_score: 0.21,
+    initial_confidence: 0.4,
+    fixture_input: { evidence_window_hours: 168, scored_count: 5, expected_residual: 0.79 },
+    fixture_expected_residual: 0.79,
+    display_name: "Refinement edge opener — depth/fanout task expansion",
+    kind: "action",
+  },
+];
+
 export type ActArtifactSeedSummary = { inserted: number; skipped: number; upgraded?: number };
 
 const seedIdFor = (seedName: string): string => `seed_${seedName}`;
@@ -1906,8 +2177,13 @@ export const seedActArtifacts = (db: Database): ActArtifactSeedSummary => {
   const initialStatus: ActArtifactStatus = "admitted";
 
   withImmediateTransaction(db, () => {
-    for (const seed of SEED_ARTIFACTS) {
-      const id = seedIdFor(seed.seedName);
+    for (const seed of [...SEED_ARTIFACTS, ...SUBSTRATE_PRIMITIVE_ARTIFACTS]) {
+      // 2026-05-19: stable_id takes precedence so substrate-primitive rows
+      // collide with the canonical action_artifact_id their events already
+      // carry (e.g. knowledge_merger_v1). Legacy seeds without stable_id
+      // keep the `seed_<seedName>` form so their content-hash meta keys
+      // remain stable across upgrade.
+      const id = seed.stable_id ?? seedIdFor(seed.seedName);
       const sandboxJson = JSON.stringify(seed.declared_sandbox);
       const fixtureJson = JSON.stringify(seed.fixture_input);
       // Content hash gates upgrades: when a seed artifact's body,
@@ -1917,8 +2193,11 @@ export const seedActArtifacts = (db: Database): ActArtifactSeedSummary => {
       // learned posterior. Same gate-pattern as seedFoundationalKnowledge
       // (commit 7cab996 for laws/bundles). Hash covers behavior-bearing
       // fields; posterior_alpha/beta/score/confidence are preserved.
+      // stable_id is mixed into the hash so a row that flips from
+      // legacy `seed_<seedName>` to a canonical primitive id (or
+      // vice-versa) is detected as content drift and upgraded in place.
       const contentHash = hashSeedRow(
-        `artifact:${id}|runtime:${seed.runtime}|body:${seed.body}|sandbox:${sandboxJson}|fixture:${fixtureJson}|state_root:${seed.state_root}|kind:${seed.kind ?? "code_artifact"}`,
+        `artifact:${id}|stable_id:${seed.stable_id ?? ""}|runtime:${seed.runtime}|body:${seed.body}|sandbox:${sandboxJson}|fixture:${fixtureJson}|state_root:${seed.state_root}|kind:${seed.kind ?? "code_artifact"}`,
       );
       const existing = db
         .query("SELECT id FROM act_artifact WHERE id = ?")
@@ -2002,8 +2281,14 @@ export const seedActArtifacts = (db: Database): ActArtifactSeedSummary => {
 };
 
 /** Convenience helper — primarily for tests / the daemon boot path.
- *  Returns the canonical seed ids so callers can join against them. */
-export const seedArtifactIds = (): string[] => SEED_ARTIFACTS.map((s) => seedIdFor(s.seedName));
+ *  Returns the canonical seed ids so callers can join against them.
+ *  Substrate primitives use their `stable_id` (matches the
+ *  action_artifact_id their events already carry); legacy seeds fall
+ *  back to `seed_<seedName>`. */
+export const seedArtifactIds = (): string[] => [
+  ...SEED_ARTIFACTS.map((s) => s.stable_id ?? seedIdFor(s.seedName)),
+  ...SUBSTRATE_PRIMITIVE_ARTIFACTS.map((s) => s.stable_id ?? seedIdFor(s.seedName)),
+];
 
 // ── Seed recipes (§15 Tier-0 priors) ─────────────────────────────────
 //

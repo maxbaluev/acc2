@@ -113,6 +113,21 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // section under pathological budget). Not an event kind — the parent
   // event is dispatcher_violation.
   "floor_section_missing",
+  // 2026-05-19 (brain 198YWW39K94KH2ZQ1A7XHP2T8R): substrate-primitive
+  // act_artifact rows declare open-vocabulary `kind:` discriminators
+  // (merger, decider, extractor, promoter, verifier, action, predicate,
+  // exit_classifier) on the registry-row payload. NOT event kinds — the
+  // primitive's runtime emission is action_predicted / action_scored,
+  // and the `kind` field is the registry-row classifier the credit
+  // pipeline reads to update the right Beta posterior.
+  "merger",
+  "decider",
+  "extractor",
+  "promoter",
+  "verifier",
+  "action",
+  "predicate",
+  "exit_classifier",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────

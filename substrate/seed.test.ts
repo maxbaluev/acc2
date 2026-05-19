@@ -47,11 +47,35 @@ describe("seedActArtifacts", () => {
     expect(count).toBe(first.inserted);
   });
 
-  test("seed ids use the stable seed_<name> prefix", () => {
+  test("seed ids use the stable seed_<name> prefix (legacy seeds) or a canonical stable_id (substrate primitives, 2026-05-19)", () => {
     const db = openDb(":memory:");
     seedActArtifacts(db);
     const ids = (db.query("SELECT id FROM act_artifact").all() as Array<{ id: string }>).map((r) => r.id);
+    // Substrate-primitive rows (brain 198YWW39K94KH2ZQ1A7XHP2T8R) register
+    // at their canonical action_artifact_id (e.g. knowledge_merger_v1)
+    // because thousands of pre-existing action_scored events already
+    // carry that id; forcing a seed_ prefix would orphan the credit
+    // pipeline. Legacy seeds keep the stable seed_ prefix.
+    const SUBSTRATE_PRIMITIVE_IDS = new Set([
+      "knowledge_merger_v1",
+      "opencode_brain_exit_action",
+      "owner_profile_promoter_action",
+      "recipe_cluster_extraction_action",
+      "knowledge_promotion_action",
+      "dispatch_decider_v1",
+      "lesson_apply_gate_action",
+      "claude_agent_apply_change_action",
+      "lesson_extractor_v1",
+      "closure_verifier_v1",
+      "intent_classifier_v1",
+      "citation_chooser_v1",
+      "recipe_confidence_bump_action",
+      "predicate_gate_v1",
+      "auto_apply_worker_stage2_action",
+      "refinement_edge_opener_v1",
+    ]);
     for (const id of ids) {
+      if (SUBSTRATE_PRIMITIVE_IDS.has(id)) continue;
       expect(id.startsWith("seed_")).toBe(true);
     }
   });
@@ -110,13 +134,27 @@ describe("seedActArtifacts", () => {
     expect(renderKinds.has("docx_reference_style")).toBe(true);
     expect(renderKinds.has("markdown_body")).toBe(true);
     // Legacy seeds: every other admitted row should have kind='code_artifact'.
+    // Substrate-primitive rows (brain 198YWW39K94KH2ZQ1A7XHP2T8R) live
+    // under state_root LIKE 'substrate/primitive/%' and declare their own
+    // kinds (merger / decider / extractor / promoter / verifier / action /
+    // predicate / exit_classifier) — excluded from the legacy default-
+    // kind check.
     const legacyRows = db
       .query(
-        "SELECT kind FROM act_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%' AND state_root NOT LIKE 'render/%'",
+        "SELECT kind FROM act_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%' AND state_root NOT LIKE 'render/%' AND state_root NOT LIKE 'substrate/primitive/%'",
       )
       .all() as Array<{ kind: string }>;
     expect(legacyRows.length).toBeGreaterThan(0);
     for (const r of legacyRows) expect(r.kind).toBe("code_artifact");
+    // Substrate primitives carry kind values from the open vocabulary
+    // {merger, decider, extractor, promoter, verifier, action, predicate,
+    // exit_classifier}. Assert the set is non-empty and that none of the
+    // rows accidentally fall back to 'code_artifact'.
+    const primitiveRows = db
+      .query("SELECT id, kind FROM act_artifact WHERE state_root LIKE 'substrate/primitive/%'")
+      .all() as Array<{ id: string; kind: string }>;
+    expect(primitiveRows.length).toBeGreaterThanOrEqual(16);
+    for (const r of primitiveRows) expect(r.kind).not.toBe("code_artifact");
   });
 
   test("C2 (2026-05-18) canonical reference docx artifact + markdown_body fixture are seeded", () => {

@@ -108,9 +108,15 @@ export const computeSubstrateStatus = (
 
   const events = safeCount(db, "SELECT COUNT(*) AS c FROM events");
   const actArtifacts = safeCount(db, "SELECT COUNT(*) AS c FROM act_artifact");
+  // 2026-05-19 (brain 198YWW39K94KH2ZQ1A7XHP2T8R): substrate-primitive
+  // rows live under state_root LIKE 'substrate/primitive/%' and register
+  // at their canonical action_artifact_id (NOT the legacy seed_ prefix)
+  // so the credit pipeline can update their Beta posterior. They are
+  // substrate-seeded, not brain-authored, and must count toward the
+  // 'seed' bucket.
   const actArtifactsSeed = safeCount(
     db,
-    "SELECT COUNT(*) AS c FROM act_artifact WHERE id LIKE 'seed_%'",
+    "SELECT COUNT(*) AS c FROM act_artifact WHERE id LIKE 'seed_%' OR state_root LIKE 'substrate/primitive/%'",
   );
   const actArtifactsBrain = Math.max(0, actArtifacts - actArtifactsSeed);
   const vecEvents = safeCount(db, "SELECT COUNT(*) AS c FROM vec_events");

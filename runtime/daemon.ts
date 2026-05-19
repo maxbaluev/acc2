@@ -32,6 +32,7 @@ import { dirname } from "node:path";
 import type { Database } from "bun:sqlite";
 import { closeDb, openDb, getAllPoolStats } from "../substrate/db";
 import { runViews } from "../substrate/views";
+import { seedActArtifacts } from "../substrate/seed";
 import { emitEvent } from "./events";
 import { subscribe, resetBus, type BusEvent } from "./event_bus";
 import { onEvent, type ActivationPayload } from "./activation_bus";
@@ -453,6 +454,34 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   ensureDir(stateDbPath);
   const db = openDb(stateDbPath);
   runViews(db);
+
+  // 2026-05-19 (brain 198YWW39K94KH2ZQ1A7XHP2T8R): seed act_artifact rows
+  // on every daemon boot. Idempotent via per-row content-hash meta keys
+  // (substrate/seed.ts:hashSeedRow) — re-running the seeder neither
+  // duplicates rows nor wipes posterior_alpha/beta/score/confidence on
+  // already-live calibration. Closes the artifact-credit trunk leak by
+  // ensuring substrate-primitive ids (knowledge_merger_v1,
+  // dispatch_decider_v1, owner_profile_promoter_action, etc) are
+  // registered BEFORE the credit pipeline starts processing
+  // action_scored events. Without this, fresh production daemons that
+  // never ran `acc init` would have every substrate-primitive
+  // action_scored event fall through to the synthetic-actuator
+  // fallback in credit.ts and lose the primary posterior update.
+  try {
+    const seedSummary = seedActArtifacts(db);
+    if (seedSummary.inserted > 0 || (seedSummary.upgraded ?? 0) > 0) {
+      logger.info(
+        { inserted: seedSummary.inserted, upgraded: seedSummary.upgraded ?? 0, skipped: seedSummary.skipped },
+        "seedActArtifacts at daemon boot",
+      );
+    }
+  } catch (err) {
+    // Seeding is best-effort at boot. If the seed path throws (schema
+    // drift, partial migration), log and continue — the brain can still
+    // operate on whatever rows exist; missing rows fall back to the
+    // synthetic-actuator branch in credit.ts which is non-destructive.
+    logger.warn({ err: String(err) }, "seedActArtifacts at daemon boot failed");
+  }
 
   // Batch 3.OPS: pre-traffic boot checks.
   //   1. Run PRAGMA integrity_check. On non-"ok" result, stderr diagnostic
