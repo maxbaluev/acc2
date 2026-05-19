@@ -86,6 +86,13 @@ export type WorkerName =
   // closure_owner_required so read-models stop returning them.
   // Default interval 6h.
   | "lifecycle_closure_sweep"
+  // F11 (2026-05-18): proactive contract amendment flywheel consumer.
+  // Triages live contract_amendment_proposed rows BEFORE
+  // lifecycle_closure_sweep retires them as stuck. Per-proposal
+  // verdicts: route_to_implementation, route_to_clarification,
+  // supersession (closure_obsolete on older proposal), redundancy
+  // (closure_complete when already applied). Default interval 5min.
+  | "contract_amendment_consumer"
   // F-resilience (2026-05-18, contract C33Q10NV557DDEMMHH4TD42MVR):
   // opportunistic WAL pressure observation. Stats the WAL sidecar
   // size every 30s and runs PRAGMA wal_checkpoint(PASSIVE) when the
@@ -115,6 +122,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "experience_compression",
   "rendering_audit",
   "lifecycle_closure_sweep",
+  "contract_amendment_consumer",
   "wal_pressure_check",
 ] as const;
 

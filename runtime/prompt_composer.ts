@@ -491,6 +491,71 @@ const buildPendingProposalsSection = (rows: ReturnType<typeof readPendingProposa
   return lines.join("\n");
 };
 
+// F11 (2026-05-18, contract 2AMJKN0GTX32790173EPYH6YT4): OUTSTANDING
+// CONTRACT AMENDMENTS section sourced from pending_contract_amendments_view
+// so the brain sees live unsettled proposals at compose time and can
+// cite, supersede, clarify, decline, or route them within the same
+// cycle. The view filters to proposals with no closure verdict and no
+// applied_change_committed; this section additionally prefers the
+// current directive's own proposals (k slots from the current
+// directive) before others (k slots from peer directives), capped by
+// a hard byte budget so a backlog spike can't bloat the prompt.
+const OUTSTANDING_AMENDMENT_BYTE_BUDGET = 2000;
+const OUTSTANDING_AMENDMENT_ROW_CAP = 10;
+
+const formatAge = (ageMs: number): string => {
+  if (ageMs < 60_000) return `${Math.max(0, Math.floor(ageMs / 1000))}s`;
+  if (ageMs < 3_600_000) return `${Math.floor(ageMs / 60_000)}m`;
+  if (ageMs < 86_400_000) return `${Math.floor(ageMs / 3_600_000)}h`;
+  return `${Math.floor(ageMs / 86_400_000)}d`;
+};
+
+const readOutstandingContractAmendments = (
+  db: Database,
+  currentDirectiveId: string,
+  rowCap: number = OUTSTANDING_AMENDMENT_ROW_CAP,
+): PendingContractAmendmentRow[] => {
+  // Pull a generous slice so we can prefer the current directive's own
+  // rows before falling back to peers. The view already orders by ts
+  // ASC, so re-sort here keeps deterministic ordering.
+  const all = pendingContractAmendments(db, { limit: rowCap * 4 });
+  const own: PendingContractAmendmentRow[] = [];
+  const others: PendingContractAmendmentRow[] = [];
+  for (const r of all) {
+    if (r.directive_id === currentDirectiveId) own.push(r);
+    else others.push(r);
+  }
+  // Within each bucket prefer newest first — the brain should see the
+  // freshest design context first; older proposals are likely already
+  // covered by the lifecycle sweep's stuck-row path.
+  own.sort((a, b) => b.ts.localeCompare(a.ts));
+  others.sort((a, b) => b.ts.localeCompare(a.ts));
+  return [...own, ...others].slice(0, rowCap);
+};
+
+const buildOutstandingContractAmendmentsSection = (rows: PendingContractAmendmentRow[]): string => {
+  if (rows.length === 0) return "OUTSTANDING CONTRACT AMENDMENTS: (none)";
+  const lines = ["OUTSTANDING CONTRACT AMENDMENTS:"];
+  let totalBytes = lines[0].length;
+  let truncated = 0;
+  for (const r of rows) {
+    const target = r.target_resource ?? "(no target_resource)";
+    const predicate = r.predicate ? r.predicate.slice(0, 80) : "(no predicate)";
+    const supSuffix = r.supersession_state === "superseded_by" && r.newer_proposal_id
+      ? ` superseded_by=${r.newer_proposal_id.slice(0, 12)}`
+      : "";
+    const line = `  [${r.proposal_id.slice(0, 12)}] target=${target} predicate=${predicate} age=${formatAge(r.age_ms)}${supSuffix}`;
+    if (totalBytes + line.length + 1 > OUTSTANDING_AMENDMENT_BYTE_BUDGET) {
+      truncated++;
+      continue;
+    }
+    lines.push(line);
+    totalBytes += line.length + 1;
+  }
+  if (truncated > 0) lines.push(`  … (${truncated} more elided by byte budget)`);
+  return lines.join("\n");
+};
+
 // Cross-goal context (multi-directive parallelism): list OTHER active
 // directives so the brain knows what concurrent work is in flight and
 // can avoid duplication / cite peer work / propose interference edges.
@@ -887,8 +952,10 @@ import {
   ownerRenderingPolicy,
   ownerStateBelief,
   topLaws,
+  pendingContractAmendments,
   type OwnerRenderingPolicyRow,
   type OwnerStateBeliefRow,
+  type PendingContractAmendmentRow,
   type TopLawRow,
 } from "../substrate/views";
 
@@ -1453,6 +1520,19 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     readPendingProposals(db, 6, task.directive_id),
   );
   candidates.push({ name: "pending_proposals", p: 3, body: proposalsBody });
+  // F11 (2026-05-18, contract 2AMJKN0GTX32790173EPYH6YT4): OUTSTANDING
+  // CONTRACT AMENDMENTS section sourced from
+  // pending_contract_amendments_view. The brain can cite the proposal
+  // id when it proposes a supersession, supplies a missing predicate /
+  // target_files, declines a stale proposal, or routes work into a
+  // task_node_opened that closes the proposal via
+  // applied_change_committed. P3 so it ships with PENDING PROPOSALS /
+  // OTHER ACTIVE GOALS under normal budgets and drops cleanly under
+  // depth-1 tight-budget tests.
+  const outstandingAmendmentsBody = buildOutstandingContractAmendmentsSection(
+    readOutstandingContractAmendments(db, task.directive_id),
+  );
+  candidates.push({ name: "outstanding_contract_amendments", p: 3, body: outstandingAmendmentsBody });
   // Multi-goal cross-pollination: surface OTHER active directives so the
   // brain knows what concurrent work is in flight and can defer / cite
   // / coordinate. Pre-fix the brain saw only its own directive in the

@@ -596,6 +596,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // overridable via ACC2_LIFECYCLE_SWEEP_INTERVAL_MS. Opt-out via
   // ACC2_DISABLE_WORKERS=lifecycle_closure_sweep.
   if (isWorkerEnabled("lifecycle_closure_sweep")) registerWorker("lifecycle_closure_sweep", Number(process.env.ACC2_LIFECYCLE_SWEEP_INTERVAL_MS ?? 6 * 60 * 60 * 1000));
+  // F11 (2026-05-18, contract 2AMJKN0GTX32790173EPYH6YT4): contract
+  // amendment flywheel consumer. Default 5min cadence; overridable via
+  // ACC2_FLYWHEEL_CONSUMER_TICK_MS. Opt-out via
+  // ACC2_DISABLE_WORKERS=contract_amendment_consumer.
+  if (isWorkerEnabled("contract_amendment_consumer")) registerWorker("contract_amendment_consumer", Number(process.env.ACC2_FLYWHEEL_CONSUMER_TICK_MS ?? 5 * 60 * 1000));
   // F-resilience: opportunistic WAL pressure check (default 30s).
   // Much shorter than the 6h lifecycle sweep — WAL pressure can develop
   // within seconds under a burst write storm; the worker has to be
@@ -1084,6 +1089,31 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       sweepTickMs,
     );
     workers.push(() => clearInterval(sweepTick));
+  }
+
+  // F11 (2026-05-18, contract 2AMJKN0GTX32790173EPYH6YT4): contract
+  // amendment flywheel consumer. Triages unsettled
+  // contract_amendment_proposed rows on a 5-minute cadence BEFORE
+  // lifecycle_closure_sweep sees them as stuck. Per-proposal verdicts:
+  // route_to_implementation (predicate + target_files concrete +
+  // dependencies closed), route_to_clarification (missing fields),
+  // closure_obsolete (supersession), closure_complete (redundancy).
+  // Opt-OUT via `ACC2_DISABLE_WORKERS=contract_amendment_consumer`.
+  // Interval env-configurable via `ACC2_FLYWHEEL_CONSUMER_TICK_MS`
+  // (default 5min).
+  if (isWorkerEnabled("contract_amendment_consumer")) {
+    const consumerTickMs = Number(process.env.ACC2_FLYWHEEL_CONSUMER_TICK_MS ?? 5 * 60 * 1000);
+    const consumerBatchSize = Number(process.env.ACC2_FLYWHEEL_CONSUMER_BATCH ?? 100);
+    const { runContractAmendmentConsumer } = await import("./contract_amendment_consumer");
+    markWorkerReady("contract_amendment_consumer");
+    recordWorkerTick("contract_amendment_consumer");
+    const consumerTick = setInterval(
+      supervisedTick(db, "contract_amendment_consumer", consumerTickMs, async () => {
+        runContractAmendmentConsumer(db, { maxRows: consumerBatchSize });
+      }),
+      consumerTickMs,
+    );
+    workers.push(() => clearInterval(consumerTick));
   }
 
   // F-resilience (2026-05-18, contract C33Q10NV557DDEMMHH4TD42MVR):

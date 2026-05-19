@@ -3329,6 +3329,111 @@ CREATE VIEW IF NOT EXISTS claude_inline_ready_leaves_view AS
   ORDER BY li.ts DESC;
 `;
 
+// F11 (2026-05-18, contract 2AMJKN0GTX32790173EPYH6YT4): pending contract
+// amendment projection consumed by runtime/contract_amendment_consumer.ts
+// and prompt_composer's OUTSTANDING CONTRACT AMENDMENTS section.
+//
+// A proposal is UNSETTLED when no terminator event cites it. Terminator
+// kinds: closure_complete, closure_obsolete, closure_owner_required (the
+// lifecycle_closure_sweep verdicts) and applied_change_committed (the
+// flywheel completion signal). The view exposes the columns the consumer
+// uses to decide route_to_implementation / route_to_clarification /
+// supersession / redundancy, plus the latest closure verdict that the
+// consumer or brain may already have emitted in a prior tick.
+//
+// supersession_state values:
+//   'live'         — no newer contract_amendment_proposed on the same
+//                    target_resource exists.
+//   'superseded_by'— a newer proposal exists for the same
+//                    target_resource (newer_proposal_id is set).
+const VIEW_PENDING_CONTRACT_AMENDMENTS = `
+CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
+  WITH proposals AS (
+    SELECT
+      e.id            AS proposal_id,
+      e.ts            AS ts,
+      e.directive_id  AS directive_id,
+      e.task_id       AS task_id,
+      e.payload       AS payload,
+      e.context_refs  AS context_refs,
+      COALESCE(
+        json_extract(e.payload, '$.target_resource'),
+        json_extract(e.payload, '$.resource_uri'),
+        json_extract(e.payload, '$.proposed_behavior.target_resource'),
+        json_extract(e.payload, '$.proposed_behavior.resource_uri')
+      ) AS target_resource,
+      json_extract(e.payload, '$.proposed_behavior.predicate')   AS predicate,
+      json_extract(e.payload, '$.proposed_behavior.target_files') AS target_files,
+      json_extract(e.payload, '$.proposed_behavior.dependencies') AS dependencies
+    FROM events e
+    WHERE e.kind = 'contract_amendment_proposed'
+  ),
+  supersession AS (
+    SELECT
+      p.proposal_id,
+      (
+        SELECT q.proposal_id FROM proposals q
+        WHERE q.target_resource = p.target_resource
+          AND q.target_resource IS NOT NULL
+          AND length(trim(q.target_resource)) > 0
+          AND q.ts > p.ts
+        ORDER BY q.ts ASC
+        LIMIT 1
+      ) AS newer_proposal_id
+    FROM proposals p
+  ),
+  latest_verdict AS (
+    SELECT
+      p.proposal_id,
+      (
+        SELECT t.kind FROM events t
+        WHERE t.kind IN ('closure_complete', 'closure_obsolete', 'closure_owner_required')
+          AND t.context_refs LIKE '%' || p.proposal_id || '%'
+        ORDER BY t.ts DESC
+        LIMIT 1
+      ) AS latest_closure_verdict,
+      (
+        SELECT t.id FROM events t
+        WHERE t.kind IN ('closure_complete', 'closure_obsolete', 'closure_owner_required')
+          AND t.context_refs LIKE '%' || p.proposal_id || '%'
+        ORDER BY t.ts DESC
+        LIMIT 1
+      ) AS latest_closure_event_id,
+      EXISTS (
+        SELECT 1 FROM events a
+        WHERE a.kind = 'applied_change_committed'
+          AND a.context_refs LIKE '%' || p.proposal_id || '%'
+      ) AS has_applied_change
+    FROM proposals p
+  )
+  SELECT
+    p.proposal_id,
+    p.ts,
+    p.directive_id,
+    p.task_id,
+    p.target_resource,
+    p.predicate,
+    p.target_files,
+    p.dependencies,
+    p.payload,
+    p.context_refs,
+    CAST((julianday('now') - julianday(p.ts)) * 86400000 AS INTEGER) AS age_ms,
+    CASE
+      WHEN s.newer_proposal_id IS NOT NULL THEN 'superseded_by'
+      ELSE 'live'
+    END AS supersession_state,
+    s.newer_proposal_id,
+    lv.latest_closure_verdict,
+    lv.latest_closure_event_id,
+    lv.has_applied_change
+  FROM proposals p
+  JOIN supersession s ON s.proposal_id = p.proposal_id
+  JOIN latest_verdict lv ON lv.proposal_id = p.proposal_id
+  WHERE lv.latest_closure_verdict IS NULL
+    AND lv.has_applied_change = 0
+  ORDER BY p.ts ASC;
+`;
+
 // substrate_narrative_recent_view — the TUI's load-bearing primitive.
 //
 // Brain design D9TBCHADS97DHAMNBC686HE3P0 (residual 0.16, 2026-05-17):
@@ -3545,6 +3650,7 @@ export const VIEW_NAMES = [
   "dispatch_resolved_view",
   "substrate_narrative_recent_view",
   "claude_inline_ready_leaves_view",
+  "pending_contract_amendments_view",
 ] as const;
 
 /** Create every substrate view. Idempotent — existing views are dropped in
@@ -3592,6 +3698,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_PENDING_OWNER_DECISION_QUEUE);
   db.exec(VIEW_SUBSTRATE_NARRATIVE_RECENT);
   db.exec(VIEW_CLAUDE_INLINE_READY_LEAVES);
+  db.exec(VIEW_PENDING_CONTRACT_AMENDMENTS);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────
@@ -5396,4 +5503,83 @@ export const recipesLatestView = (db: Database): RecipesLatestRow[] => {
     confidence: (r.confidence as number) ?? 0,
     payload: parseJson<Record<string, unknown>>(r.payload ?? "{}"),
   }));
+};
+
+// F11 (2026-05-18, contract 2AMJKN0GTX32790173EPYH6YT4): row shape returned
+// by pending_contract_amendments_view. Consumed by
+// runtime/contract_amendment_consumer.ts and the OUTSTANDING CONTRACT
+// AMENDMENTS prompt_composer section.
+export type PendingContractAmendmentRow = {
+  proposal_id: string;
+  ts: string;
+  directive_id: string | null;
+  task_id: string | null;
+  target_resource: string | null;
+  predicate: string | null;
+  /** Parsed JSON array of target file paths. NULL when the proposal
+   *  omitted proposed_behavior.target_files. */
+  target_files: string[] | null;
+  /** Parsed JSON array of dependency strings. NULL when omitted. */
+  dependencies: unknown[] | null;
+  payload: Record<string, unknown>;
+  context_refs: string[];
+  age_ms: number;
+  supersession_state: "live" | "superseded_by";
+  newer_proposal_id: string | null;
+  latest_closure_verdict: string | null;
+  latest_closure_event_id: string | null;
+  has_applied_change: boolean;
+};
+
+export const pendingContractAmendments = (
+  db: Database,
+  opts?: { limit?: number; directiveId?: string },
+): PendingContractAmendmentRow[] => {
+  const limit = opts?.limit ?? 200;
+  const directiveId = opts?.directiveId;
+  const rows = directiveId
+    ? db
+        .query(
+          "SELECT * FROM pending_contract_amendments_view WHERE directive_id = ? ORDER BY ts ASC LIMIT ?",
+        )
+        .all(directiveId, limit) as Array<Record<string, unknown>>
+    : db
+        .query("SELECT * FROM pending_contract_amendments_view ORDER BY ts ASC LIMIT ?")
+        .all(limit) as Array<Record<string, unknown>>;
+  return rows.map((r) => {
+    let targetFiles: string[] | null = null;
+    const rawTf = r.target_files;
+    if (typeof rawTf === "string" && rawTf.length > 0) {
+      try {
+        const parsed = JSON.parse(rawTf) as unknown;
+        if (Array.isArray(parsed)) targetFiles = parsed.filter((x): x is string => typeof x === "string");
+      } catch { /* malformed JSON → null */ }
+    }
+    let dependencies: unknown[] | null = null;
+    const rawDeps = r.dependencies;
+    if (typeof rawDeps === "string" && rawDeps.length > 0) {
+      try {
+        const parsed = JSON.parse(rawDeps) as unknown;
+        if (Array.isArray(parsed)) dependencies = parsed;
+      } catch { /* malformed JSON → null */ }
+    }
+    return {
+      proposal_id: r.proposal_id as string,
+      ts: r.ts as string,
+      directive_id: (r.directive_id as string | null) ?? null,
+      task_id: (r.task_id as string | null) ?? null,
+      target_resource: (r.target_resource as string | null) ?? null,
+      predicate: (r.predicate as string | null) ?? null,
+      target_files: targetFiles,
+      dependencies,
+      payload: parseJson<Record<string, unknown>>(r.payload ?? "{}"),
+      context_refs: parseJson<string[]>(r.context_refs ?? "[]"),
+      age_ms: (r.age_ms as number) ?? 0,
+      supersession_state: (r.supersession_state as "live" | "superseded_by") ?? "live",
+      newer_proposal_id: (r.newer_proposal_id as string | null) ?? null,
+      latest_closure_verdict: (r.latest_closure_verdict as string | null) ?? null,
+      latest_closure_event_id: (r.latest_closure_event_id as string | null) ?? null,
+      has_applied_change: ((r.has_applied_change as number) ?? 0) === 1,
+    };
+  });
 };

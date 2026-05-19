@@ -62,6 +62,7 @@ import {
   cascadeUpwardWhenChildrenTerminal,
   maybeCloseFinishedDirective,
 } from "./directive_closure";
+import { closureResidualsForLineage } from "./closure_audit";
 import { readCurrentMode } from "./crisis_mode";
 import { isCycleViolation } from "./cycle_one_gate";
 import { recordDispatch, recordActionResidual } from "./metrics";
@@ -1173,18 +1174,18 @@ export const dispatchReadyTask = async (
             if (lineageTaskIds.has(cur)) break;
             lineageTaskIds.add(cur);
           }
-          const auditRows = db
-            .query("SELECT task_id, payload FROM events WHERE directive_id = ? AND kind = 'task_closure_audited' ORDER BY ts ASC")
-            .all(task.directive_id) as Array<{ task_id: string; payload: string }>;
-          const closureResiduals = auditRows.flatMap((row) => {
-            if (!lineageTaskIds.has(row.task_id)) return [];
-            try {
-              const payload = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
-              return typeof payload.closure_residual === "number" ? [payload.closure_residual] : [];
-            } catch {
-              return [];
-            }
-          });
+          // F11 (2026-05-18, contract 2AMJKN0GTX32790173EPYH6YT4): the
+          // plateau detector now uses the current-root-scoped closure
+          // selector. Pre-F11 it scanned EVERY task_closure_audited row
+          // on the directive (ORDER BY ts ASC) and filtered by lineage —
+          // which silently included audits emitted before the most
+          // recent directive_amended / root supersession. Lesson
+          // 7JE565S6016T showed those stale residuals could flatten the
+          // delta and trigger plateau_early_stop on a fresh trajectory.
+          // closureResidualsForLineage applies the
+          // latest_root_supersession_ts cutoff so only audits emitted
+          // under the CURRENT root window participate.
+          const closureResiduals = closureResidualsForLineage(db, task.directive_id, lineageTaskIds);
           const recentClosureResiduals = closureResiduals.slice(-plateauCycles);
           const plateauEarlyStop = recentClosureResiduals.length >= plateauCycles &&
             recentClosureResiduals.slice(1).every((value, index) => recentClosureResiduals[index]! - value <= plateauEpsilon);
