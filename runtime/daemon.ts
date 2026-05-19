@@ -1020,12 +1020,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       await embedderWorkerTick(db, { batchSize: pendingEmbeddings > 500 ? 200 : pendingEmbeddings > 100 ? 100 : 20 });
       if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
     }, {
-      // Embedder ticks legitimately take 15-35s during heavy backlog
-      // drain (OpenAI roundtrip × adaptive batchSize 200). Only flag
-      // overrun when the wedge is structural — ≥ 6× the interval. The
-      // skip-fire still happens every tick (correct); we just stop
-      // alarming the operator on normal drain work.
-      overrunThresholdMs: embedderIntervalMs * 6,
+      // Embedder ticks legitimately take 30-90s during heavy backlog
+      // drain (OpenAI roundtrip × adaptive batchSize 200; the API gets
+      // slower under per-org RPM pressure). Only flag overrun when the
+      // wedge is structural — ≥ 10× the interval. The skip-fire still
+      // happens every tick (correct); we just stop alarming the
+      // operator on normal drain work.
+      overrunThresholdMs: embedderIntervalMs * 10,
     });
     registerReactiveWorker("embedder", embedderIntervalMs, ["*"], embedderTick, { minReactiveGapMs: embedderIntervalMs });
     // Run one tick synchronously at boot so /ready can flip without
