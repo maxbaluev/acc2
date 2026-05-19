@@ -150,9 +150,13 @@ describe("formatFollowHeartbeat — panel pre-event signal", () => {
 
   test("the constants the dispatch follow contract depends on", () => {
     // Compile-time + numeric pin — `acc task` follow surface relies on
-    // these exact knobs to satisfy the panel UX predicate.
+    // these exact knobs to satisfy the panel UX predicate. Heartbeat
+    // cadence constants pinned at 0 (2026-05-19): heartbeat lines were
+    // removed in favor of SSE-transport keepalive; the synthetic lines
+    // created panel noise without adding signal beyond what real event
+    // emission already conveys.
     expect(MAX_EVENT_LINE_CHARS).toBe(120);
-    expect(FOLLOW_HEARTBEAT_MS).toBe(5_000);
-    expect(FOLLOW_HEARTBEAT_WINDOW_MS).toBe(60_000);
+    expect(FOLLOW_HEARTBEAT_MS).toBe(0);
+    expect(FOLLOW_HEARTBEAT_WINDOW_MS).toBe(0);
   });
 });

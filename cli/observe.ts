@@ -40,8 +40,16 @@ import { EVENT_KINDS, MIRROR_INLINE_EVENT_TYPES } from "../substrate/event_kinds
 // during the pre-event window. That is the structural fix for the
 // "panel shows stale prompt echo for the entire first minute" bug.
 export const MAX_EVENT_LINE_CHARS = 120;
-export const FOLLOW_HEARTBEAT_MS = 5_000;
-export const FOLLOW_HEARTBEAT_WINDOW_MS = 60_000;
+// 2026-05-19: heartbeat lines removed entirely. The SSE event push is
+// already real-time AND the transport carries `: keepalive\n\n` comments
+// every 15s, so the "system is alive" signal is at the transport layer,
+// not the synthetic line layer. Pre-fix the 5s heartbeat lines crowded
+// the panel and created a "waiting" feel even when real events were
+// arriving every ~500ms. Constants kept (= 0) so any caller that still
+// reads them by name gets a no-op cadence; the heartbeatEnabled flag in
+// runTailStream short-circuits emission unconditionally.
+export const FOLLOW_HEARTBEAT_MS = 0;
+export const FOLLOW_HEARTBEAT_WINDOW_MS = 0;
 
 // ── one-line formatter per event kind ──────────────────────────────
 
@@ -761,18 +769,13 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
   // owner-gated decisions are accumulating). `cycle` / `maxCycles` are pulled
   // from any brain_dispatched payload that arrives.
   const counters: HeartbeatCounters = { events: 0, nodes: 0, proposals: 0, cycle: 1, maxCycles: 1 };
-  const heartbeatEnabled = opts.heartbeat ?? Boolean(opts.task || opts.directive || opts.rootTaskId);
-  // First heartbeat fires at t+FOLLOW_HEARTBEAT_MS (i.e. t+5s), NOT
-  // immediately at t+0. That preserves the directive_opened line as the
-  // FIRST visible row in the trailing-5-line panel, and ensures the
-  // heartbeat fires DURING the pre-event window before any brain emit lands.
-  const fireHeartbeat = () => {
-    if (heartbeatEnabled && Date.now() - startedAt <= FOLLOW_HEARTBEAT_WINDOW_MS) {
-      console.log(formatFollowHeartbeat(startedAt, counters));
-    }
-  };
-  const heartbeatTimer = heartbeatEnabled ? setInterval(fireHeartbeat, FOLLOW_HEARTBEAT_MS) : null;
-  heartbeatTimer?.unref?.();
+  // Heartbeat removed (2026-05-19) — SSE transport keepalive (`: keepalive`
+  // every 15s) carries the "system alive" signal; the synthetic
+  // `[t+Ns] waiting on brain` lines created panel noise and a misleading
+  // "stuck" feel when real events were arriving on the stream below the
+  // narrative filter. The `heartbeat?` flag stays in TailOpts for API
+  // compatibility but is effectively a no-op.
+  const heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   const emitTerminalFromResolvedView = async (): Promise<boolean> => {
     if (!exitOnTerminal || sentinelEmitted || terminalCheckInFlight) return false;
     terminalCheckInFlight = true;
@@ -788,7 +791,7 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
     }
   };
   const resolvedViewTimer = opts.directive && opts.rootTaskId
-    ? setInterval(() => { void emitTerminalFromResolvedView(); }, opts.pollMs ?? 2_000)
+    ? setInterval(() => { void emitTerminalFromResolvedView(); }, opts.pollMs ?? 500)
     : null;
   resolvedViewTimer?.unref?.();
   // Also wire process-signal abort so SIGTERM/SIGINT triggers abort cleanly
@@ -876,18 +879,14 @@ const runTailPoll = async (opts: TailOpts): Promise<number> => {
   const seen = new Set<string>();
   const canReadResolvedDispatch = Boolean(opts.directive && opts.rootTaskId);
   const startedAt = Date.now();
+  void startedAt;
   const counters: HeartbeatCounters = { events: 0, nodes: 0, proposals: 0, cycle: 1, maxCycles: 1 };
-  // First heartbeat scheduled for t+FOLLOW_HEARTBEAT_MS — NOT t+0. Same
-  // contract as the SSE path: panel sees directive_opened first, then a
-  // running waiting-on-brain line every 5s.
-  let nextHeartbeatAt = startedAt + FOLLOW_HEARTBEAT_MS;
-  const heartbeatEnabled = opts.heartbeat ?? Boolean(opts.task || opts.directive || opts.rootTaskId);
+  void counters;
+  // Heartbeat removed (2026-05-19) — see runTailStream rationale; the poll
+  // path inherits the same decision. Real events on `runtime.recent_events`
+  // poll output are the only operator-visible signal.
 
   while (true) {
-    if (heartbeatEnabled && Date.now() >= nextHeartbeatAt && Date.now() - startedAt <= FOLLOW_HEARTBEAT_WINDOW_MS) {
-      console.log(formatFollowHeartbeat(startedAt, counters));
-      nextHeartbeatAt = Date.now() + FOLLOW_HEARTBEAT_MS;
-    }
     let env;
     try {
       const args: Record<string, unknown> = { k: Math.min(200, opts.limit ?? 60) };
