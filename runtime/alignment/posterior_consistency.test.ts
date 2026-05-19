@@ -56,10 +56,21 @@ describe("alignment / posterior_consistency (Principle 9)", () => {
       join(import.meta.dir, "..", "credit.ts"),
       "utf-8",
     );
+    // credit.ts still names the band constants locally because it reads
+    // them in candidate_confirmed / candidate_contradicted polarity
+    // routing (residual ≤ SUCCESS_BAND → assert; ≥ FAILURE_BAND → deny).
     expect(credit).toContain("const SUCCESS_BAND = 0.3");
     expect(credit).toContain("const FAILURE_BAND = 0.7");
-    // EMA half-life inside the weighted-delta path: same 20 events.
-    expect(credit).toContain("Math.pow(0.5, 1 / 20)");
+    // EMA + Beta-delta algebra now lives ONCE in artifact_store —
+    // credit.ts delegates to applyResidualOutcome rather than
+    // re-implementing the EMA decay literal (cleanup audit batch 1,
+    // KC 81VSHW67Q51XZC683B2XTR79FR). The "no drift" invariant the
+    // earlier `Math.pow(0.5, 1 / 20)` text-pin guarded against is now
+    // enforced structurally: credit.ts imports the primitive instead
+    // of duplicating it. Pin the delegation, not the literal.
+    expect(credit).toContain("applyResidualOutcome");
+    expect(credit).toContain("residualToBetaDeltas");
+    expect(credit).not.toContain("Math.pow(0.5, 1 / 20)");
   });
 
   test("recipe confidence uses a DIFFERENT coarse formula and documents why", () => {

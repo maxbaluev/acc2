@@ -267,6 +267,30 @@ const decayedEvidence = (currentEvidence: number, dtMs: number): number => {
   return currentEvidence * decayFactor;
 };
 
+/** Compute the (unweighted) Beta posterior deltas for a single residual
+ *  observation, using the standard success/failure bands. Exported so
+ *  `runtime/credit.ts` can scale these deltas by a Shapley weight when
+ *  distributing per-citation credit without re-implementing the band
+ *  algebra. residual is clamped to [0,1] defensively. */
+export const residualToBetaDeltas = (
+  residual: number,
+): { alphaDelta: number; betaDelta: number } => {
+  const r = clamp01(residual);
+  let alphaDelta = 0;
+  let betaDelta = 0;
+  if (r <= SUCCESS_BAND) {
+    alphaDelta = 1 - r / SUCCESS_BAND;
+  } else if (r >= FAILURE_BAND) {
+    betaDelta = (r - FAILURE_BAND) / (1 - FAILURE_BAND);
+  } else {
+    // Linear interpolation across the mid-band.
+    const t = (r - SUCCESS_BAND) / (FAILURE_BAND - SUCCESS_BAND);
+    alphaDelta = (1 - t) * 0.5; // taper from 0.5 → 0 across mid-band
+    betaDelta = t * 0.5;        // taper from 0 → 0.5 across mid-band
+  }
+  return { alphaDelta, betaDelta };
+};
+
 /** Apply a single action_scored outcome to an artifact's posterior + EMA.
  *  Returns the refreshed row. residual is clamped to [0,1] defensively.
  *  Time-decay (2026-05-15): the accumulated alpha-1 + beta-1 evidence is
@@ -288,33 +312,33 @@ const decayedEvidence = (currentEvidence: number, dtMs: number): number => {
  *  every score-down can quarantine. Callers may pass a custom `emit`
  *  closure when they need event metadata (directive_id, task_id,
  *  …); omitted, the default emitter writes via `emitEvent(db, …)`
- *  directly so existing call sites get the wiring for free. */
+ *  directly so existing call sites get the wiring for free.
+ *
+ *  Weighted variant consolidation (per KC 81VSHW67Q51XZC683B2XTR79FR,
+ *  cleanup audit batch 1): `opts.weight` scales the Beta posterior
+ *  deltas. weight=1.0 (default) is the canonical unweighted path.
+ *  weight>1.0 is the Shapley/LATM novelty-bonus credit path that used
+ *  to live in `credit.ts:applyWeightedResidualOutcome`. When weight!==1.0
+ *  the EMA blends the weighted residual with a neutral 0.5 background
+ *  so a bonused observation cannot drive the EMA outside [0,1] and
+ *  stays monotonic in evidence regardless of N. weight=1.0 preserves
+ *  the raw-residual EMA update bit-for-bit. */
 export const applyResidualOutcome = (
   db: Database,
   artifactId: string,
   residual: number,
   ts: string,
   emit?: (event: EmitEventInput) => void,
+  opts?: { weight?: number },
 ): ActArtifactRow => {
   const row = getArtifact(db, artifactId);
   if (!row) throw new Error(`act_artifact_not_found:${artifactId}`);
   const r = clamp01(residual);
+  const weight = opts?.weight ?? 1.0;
 
-  // Discretise into success/failure bands plus a mid-band that contributes
-  // proportionally to both. The bands meet at 0.3 and 0.7 so the algebra is
-  // continuous; outside the bands one side dominates.
-  let alphaDelta = 0;
-  let betaDelta = 0;
-  if (r <= SUCCESS_BAND) {
-    alphaDelta = 1 - r / SUCCESS_BAND;
-  } else if (r >= FAILURE_BAND) {
-    betaDelta = (r - FAILURE_BAND) / (1 - FAILURE_BAND);
-  } else {
-    // Linear interpolation across the mid-band.
-    const t = (r - SUCCESS_BAND) / (FAILURE_BAND - SUCCESS_BAND);
-    alphaDelta = (1 - t) * 0.5; // taper from 0.5 → 0 across mid-band
-    betaDelta = t * 0.5;        // taper from 0 → 0.5 across mid-band
-  }
+  const { alphaDelta: rawAlphaDelta, betaDelta: rawBetaDelta } = residualToBetaDeltas(r);
+  const alphaDelta = rawAlphaDelta * weight;
+  const betaDelta  = rawBetaDelta  * weight;
 
   // Decay accumulated evidence (alpha-1, beta-1 — the prior stays fixed).
   const prevTs = Date.parse(row.updatedAt);
@@ -326,7 +350,14 @@ export const applyResidualOutcome = (
   const newBeta  = 1 + decayedBetaEvidence  + betaDelta;
   const newScore = recomputeScore(newAlpha, newBeta);
   const newConfidence = recomputeConfidence(newAlpha, newBeta);
-  const newEma = EMA_DECAY * row.recentResidualMean + (1 - EMA_DECAY) * r;
+  // EMA: weight=1.0 → raw residual (canonical). weight!==1.0 → blend the
+  // weighted contribution with a neutral 0.5 background so a bonused
+  // observation stays bounded and monotonic in evidence. weight is capped
+  // at 1.0 inside the mix so values >1 produce a 100%-residual blend
+  // (matching the prior credit.ts behavior).
+  const wForEma = Math.min(1, weight);
+  const emaContribution = weight === 1.0 ? r : r * wForEma + 0.5 * (1 - wForEma);
+  const newEma = EMA_DECAY * row.recentResidualMean + (1 - EMA_DECAY) * emaContribution;
 
   db.run(
     `UPDATE act_artifact SET

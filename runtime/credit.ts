@@ -49,10 +49,14 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { getEventById, type EmitEventInput, emitEvent } from "./events";
-import { getArtifact, maybePromote, maybeQuarantine } from "./artifact_store";
+import {
+  applyResidualOutcome,
+  getArtifact,
+  maybePromote,
+  residualToBetaDeltas,
+} from "./artifact_store";
 import { goalShape } from "./goal_shape";
 import { nowIso } from "./ids";
-import { betaMean, betaStreamConfidence } from "./posterior";
 // Audit b7kjyk2k1 / Z9MXJ8YHXN1ZH knowledge cold-start (8.2% candidates ever
 // get a verdict). Brain proposal TNY4XZY0GD1W: after each candidate_confirmed
 // / candidate_contradicted credit emit, refresh the candidate's posterior
@@ -320,72 +324,25 @@ export const shapleyWeightsByCorroboration = (n: number): number[] => {
   return raw.map((w) => w / sum);
 };
 
-// ── Posterior-delta computation (mirrors artifact_store internals) ─
-
-const SUCCESS_BAND = 0.3;
+// ── Posterior-delta computation ────────────────────────────────────
+//
+// The Beta-delta + EMA + posterior-recompute algebra lives ONCE in
+// artifact_store.applyResidualOutcome (extended with an optional
+// `opts.weight` per KC 81VSHW67Q51XZC683B2XTR79FR, cleanup audit
+// batch 1). credit.ts used to carry a parallel implementation
+// (`applyWeightedResidualOutcome` + a local `residualToBetaDeltas`)
+// plus an inline UPDATE block in the cited-artifact loop, which
+// made score semantics fragile — any evolution to the algebra
+// required parallel edits. Both surfaces now delegate to the
+// shared primitive; `residualToBetaDeltas` is imported from
+// artifact_store so the band thresholds are sourced from a single
+// place. Auto-quarantine wiring (Hole 7, commit a65ea22) fires
+// once via the centralized primitive — no caller-side maybeQuarantine
+// is required after the call.
 const MIDBAND_UNCERTAINTY_LOW = 0.4;
 const MIDBAND_UNCERTAINTY_HIGH = 0.6;
+const SUCCESS_BAND = 0.3;
 const FAILURE_BAND = 0.7;
-
-/** Compute the alpha/beta deltas for a single residual observation —
- *  matches the algebra in artifact_store.applyResidualOutcome. We need
- *  this here too because credit weighting multiplies the deltas, not the
- *  residual itself (weighting the residual would corrupt the audit row). */
-const residualToBetaDeltas = (residual: number): { alphaDelta: number; betaDelta: number } => {
-  const r = Math.max(0, Math.min(1, residual));
-  let alphaDelta = 0;
-  let betaDelta = 0;
-  if (r <= SUCCESS_BAND) {
-    alphaDelta = 1 - r / SUCCESS_BAND;
-  } else if (r >= FAILURE_BAND) {
-    betaDelta = (r - FAILURE_BAND) / (1 - FAILURE_BAND);
-  } else {
-    const t = (r - SUCCESS_BAND) / (FAILURE_BAND - SUCCESS_BAND);
-    alphaDelta = (1 - t) * 0.5;
-    betaDelta = t * 0.5;
-  }
-  return { alphaDelta, betaDelta };
-};
-
-/** Apply a residual outcome to an artifact's posterior + EMA, scaling the
- *  Beta posterior delta by `weight`. weight=1.0 is identical to the
- *  unweighted applyResidualOutcome from artifact_store.ts; weight>1.0 is
- *  the LATM novelty-bonus path. The EMA itself blends the weighted residual
- *  contribution with a neutral 0.5 background — the same algebra used for
- *  cited-artifact updates downstream — so the EMA stays monotonic in
- *  evidence regardless of N. */
-const applyWeightedResidualOutcome = (
-  db: Database,
-  artifactId: string,
-  residual: number,
-  weight: number,
-  ts: string,
-): void => {
-  const row = getArtifact(db, artifactId);
-  if (!row) throw new Error(`act_artifact_not_found:${artifactId}`);
-  const r = Math.max(0, Math.min(1, residual));
-  const { alphaDelta, betaDelta } = residualToBetaDeltas(r);
-  const newAlpha = row.posteriorAlpha + alphaDelta * weight;
-  const newBeta = row.posteriorBeta + betaDelta * weight;
-  const newScore = betaMean(newAlpha, newBeta);
-  const newConfidence = betaStreamConfidence(newAlpha, newBeta);
-  const decay = Math.pow(0.5, 1 / 20);
-  // When weight=1.0 this collapses to the unweighted EMA from artifact_store.
-  // When weight>1.0 the residual contribution is capped to [0,1] before
-  // blending so a bonused observation cannot drive the EMA outside the unit
-  // interval.
-  const weightedR = weight === 1.0 ? r : Math.min(1, r * weight + 0.5 * (1 - Math.min(1, weight)));
-  const newEma = decay * row.recentResidualMean + (1 - decay) * weightedR;
-  db.run(
-    `UPDATE act_artifact SET
-       posterior_alpha = ?, posterior_beta = ?,
-       score = ?, confidence = ?,
-       recent_residual_mean = ?,
-       updated_at = ?
-     WHERE id = ?`,
-    [newAlpha, newBeta, newScore, newConfidence, newEma, ts, artifactId],
-  );
-};
 
 // ── Citation collection from the three driving events + bodies ─────
 
@@ -663,8 +620,27 @@ export const distributeCredit = async (
   if (primaryArtifactsRegistered) {
     computedActionWeight = applyNoveltyBonus(actionArt!.id, 1.0);
     computedVerifierWeight = applyNoveltyBonus(verifierArt!.id, 1.0);
-    applyWeightedResidualOutcome(db, actionArt!.id, params.observed_residual, computedActionWeight, ts);
-    applyWeightedResidualOutcome(db, verifierArt!.id, params.observed_residual, computedVerifierWeight, ts);
+    // Delegating to the canonical primitive (cleanup audit batch 1):
+    // weight=1.0 reproduces the prior unweighted path; weight>1.0 is
+    // the LATM novelty-bonus path. Auto-quarantine fires inside the
+    // primitive so the explicit maybeQuarantine below is now structural
+    // backup, not a separate driver.
+    applyResidualOutcome(
+      db,
+      actionArt!.id,
+      params.observed_residual,
+      ts,
+      (e) => emit(e),
+      { weight: computedActionWeight },
+    );
+    applyResidualOutcome(
+      db,
+      verifierArt!.id,
+      params.observed_residual,
+      ts,
+      (e) => emit(e),
+      { weight: computedVerifierWeight },
+    );
   } else {
     // Synthetic actuator path: record the skip so observers can see the
     // credit chain ran but skipped primary artifact updates. Cited
@@ -720,11 +696,12 @@ export const distributeCredit = async (
       } as JsonValue,
     });
 
-    // 2. Promotion / quarantine checks on action + verifier.
+    // 2. Promotion checks on action + verifier. Quarantine already
+    // fired inside applyResidualOutcome (canonical Hole-7 wiring +
+    // cleanup audit batch 1); calling it again would be an idempotent
+    // no-op but the explicit driver is no longer needed.
     maybePromote(db, actionArt!.id, (e) => emit(e));
-    maybeQuarantine(db, actionArt!.id, (e) => emit(e));
     maybePromote(db, verifierArt!.id, (e) => emit(e));
-    maybeQuarantine(db, verifierArt!.id, (e) => emit(e));
   }
 
   // 3. Third-party citations — Shapley distribute. Body citations only
@@ -774,37 +751,21 @@ export const distributeCredit = async (
       const weight = applyNoveltyBonus(targetId, baseWeight);
       const wAlpha = alphaDelta * weight;
       const wBeta = betaDelta * weight;
-      // Apply the weighted Beta posterior delta directly. We hand-roll the
-      // update instead of calling applyResidualOutcome because we need a
-      // per-entity weighted DELTA, not a single residual the function
-      // would interpret unweighted.
+      // Delegate the per-entity weighted update to the canonical
+      // primitive (cleanup audit batch 1). Auto-quarantine fires
+      // inside; we still call maybePromote explicitly because the
+      // primitive owns demotion (Hole 7) but not promotion.
       const row = getArtifact(db, targetId);
       if (row) {
-        const newAlpha = row.posteriorAlpha + wAlpha;
-        const newBeta = row.posteriorBeta + wBeta;
-        const newScore = betaMean(newAlpha, newBeta);
-        const newConfidence = betaStreamConfidence(newAlpha, newBeta);
-        // EMA blends the WEIGHTED residual contribution with a neutral 0.5
-        // background: the entity owns `weight` of the responsibility and
-        // shares the rest with the substrate average. This keeps the EMA
-        // monotonic in evidence regardless of N. Cap the weight inside the
-        // mix-formula at 1.0 to keep the EMA bounded when the novelty bonus
-        // would otherwise overshoot.
-        const r = Math.max(0, Math.min(1, params.observed_residual));
-        const decay = Math.pow(0.5, 1 / 20);
-        const wForEma = Math.min(1, weight);
-        const newEma = decay * row.recentResidualMean + (1 - decay) * (r * wForEma + 0.5 * (1 - wForEma));
-        db.run(
-          `UPDATE act_artifact SET
-             posterior_alpha = ?, posterior_beta = ?,
-             score = ?, confidence = ?,
-             recent_residual_mean = ?,
-             updated_at = ?
-           WHERE id = ?`,
-          [newAlpha, newBeta, newScore, newConfidence, newEma, ts, targetId],
+        const updated = applyResidualOutcome(
+          db,
+          targetId,
+          params.observed_residual,
+          ts,
+          (e) => emit(e),
+          { weight },
         );
         maybePromote(db, targetId, (e) => emit(e));
-        maybeQuarantine(db, targetId, (e) => emit(e));
         emit({
           kind: "act_artifact_score_updated",
           substrate_origin: "substrate_auto",
@@ -814,8 +775,8 @@ export const distributeCredit = async (
             role: "cited",
             weight,
             residual: params.observed_residual,
-            score: newScore,
-            confidence: newConfidence,
+            score: updated.score,
+            confidence: updated.confidence,
             scored_event_id: params.scored_event_id,
             goal_shape: directiveGoalShape,
           } as JsonValue,
