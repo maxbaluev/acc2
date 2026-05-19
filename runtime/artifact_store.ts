@@ -40,10 +40,11 @@ import { betaMean, betaStreamConfidence } from "./posterior";
 export type CodeArtifactRow = {
   id: string;
   runtime: Runtime;
-  /** Free-string discriminator for the row's purpose. Default
-   *  `code_artifact` for legacy rows (act_artifact post-F4a rename); typed rows declare their own
-   *  (e.g. `dispatch_strategy_v1`, `published_drive_doc`). See
-   *  schema.sql:76. */
+  /** Free-string discriminator for the row's purpose. Schema default is
+   *  `runtime_action`; typed rows declare their own (e.g.
+   *  `dispatch_strategy_v1`, `published_drive_doc`). Historical rows
+   *  authored before the L8 rename may carry `code_artifact`; mapRow
+   *  preserves whatever is stored. See schema.sql:86. */
   kind: string;
   body: string;
   declaredSandbox: SandboxDecl;
@@ -82,8 +83,8 @@ export type CodeArtifactRow = {
 
 export type InsertArtifactInput = Omit<CodeArtifactRow, "createdAt" | "updatedAt" | "id" | "targetResources" | "supersedes" | "supersededBy" | "lostVersionCount" | "kind"> & {
   id?: string;
-  /** Optional kind discriminator. Defaults to `code_artifact` on the row (act_artifact post-F4a)
-   *  if omitted (matches the schema default). */
+  /** Optional kind discriminator. Defaults to `runtime_action` on
+   *  insert when omitted (matches the schema default). */
   kind?: string;
   targetResources?: ResourceRef[] | string[] | null;
   supersedes?: string | null;
@@ -194,7 +195,7 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): CodeAr
     [
       id,
       input.runtime,
-      input.kind ?? "code_artifact",
+      input.kind ?? "runtime_action",
       input.body,
       JSON.stringify(input.declaredSandbox),
       stateRoot,
