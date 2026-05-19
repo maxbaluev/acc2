@@ -342,6 +342,32 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       const residual = typeof residualRaw === "number" && Number.isFinite(residualRaw)
         ? residualRaw.toFixed(2)
         : "<unset>";
+      // T0.1 (brain dispatch TFZ6AJXNPS6655QMFWT6KPB3QM): augmented
+      // payload shape now carries `brain_claims` + `substrate_verifications`.
+      // Substrate-truth gate wins — show claims=N/M (brain advisory) vs
+      // verified=K/M (substrate truth) + discrepancies count. Renderer
+      // branches on presence of substrate_verifications so legacy rows
+      // without the field still hit the checks=/covered= paths below.
+      const substrateVerifications = p.substrate_verifications as
+        | Record<string, { verified?: unknown }>
+        | undefined;
+      const brainClaims = p.brain_claims as Record<string, unknown> | undefined;
+      if (substrateVerifications && typeof substrateVerifications === "object") {
+        const claimEntries = brainClaims && typeof brainClaims === "object"
+          ? Object.values(brainClaims)
+          : [];
+        const verifyEntries = Object.values(substrateVerifications);
+        const totalClaims = claimEntries.length;
+        const passedClaims = claimEntries.filter((v) => v === true).length;
+        const totalVerified = verifyEntries.length;
+        const passedVerified = verifyEntries.filter(
+          (v) => v && typeof v === "object" && (v as { verified?: unknown }).verified === true,
+        ).length;
+        const discrepancyCount = Array.isArray(p.discrepancies)
+          ? (p.discrepancies as unknown[]).length
+          : 0;
+        return `closure_residual=${residual} claims=${passedClaims}/${totalClaims} verified=${passedVerified}/${totalVerified} discrepancies=${discrepancyCount}`;
+      }
       // Live payload shape is { checks: Record<string, boolean>, breakdown: Record<string, number> }.
       // Older payloads used { covered_sub_tasks[], uncovered_aspects[] }. Prefer checks when present;
       // fall back to the legacy arrays so historical events still render meaningfully.

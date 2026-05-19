@@ -386,6 +386,12 @@ describe("derived sets match their pre-unification shape", () => {
       // worker_safety_net_fired counts as health metric because non-zero
       // missed_work_count signals reactive activation gaps.
       "worker_safety_net_fired",
+      // T0.1 (brain dispatch TFZ6AJXNPS6655QMFWT6KPB3QM): substrate-truth
+      // gate at the closure-audit boundary. Counts as a health metric so
+      // dashboards can surface how often the brain claimed a clean closure
+      // while no contract_amendment_proposed rows matched its declared
+      // target_files — the canonical k_252 advisory-gate-fake signal.
+      "closure_blocked_no_amendments",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

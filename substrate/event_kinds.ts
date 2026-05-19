@@ -410,6 +410,29 @@ export const EVENT_KINDS = {
   // not retrievable text. The semantic content (what the goal was, what was
   // missed) lives on the directive/task nodes themselves.
   task_closure_audited:                    { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  // T0.1 substrate-truth gate (brain dispatch TFZ6AJXNPS6655QMFWT6KPB3QM,
+  // amendment R8GNSJ63DH7AZE16E05GSJD5Y4). Emitted by runtime/closure_audit.ts
+  // when a closure attempt declares target_files AND the asserted residual is
+  // below the 0.3 commit gate AND the substrate has zero
+  // contract_amendment_proposed rows matching those files on the same
+  // directive. The closure is refused — task_closure_audited is rewritten
+  // with residual=1.0 + substrate_verifications.target_files_have_amendments
+  // = false. Operators MUST see these (narrative + health_metric) so the
+  // k_252 advisory-gate fake at the closure boundary surfaces in real time.
+  // Not embeddable: payload is structural (file list + query) with no
+  // retrievable semantic text.
+  // Payload contract:
+  //   {
+  //     directive_id: string,
+  //     task_id?: string,
+  //     target_files: string[],          // normalized to repo:<path>
+  //     query: string,                   // the SQL the substrate ran
+  //     asserted_residual: number,       // what the brain claimed
+  //     residual: 1.0,                   // what substrate verified to
+  //     evidence_event_ids: string[],    // matching amendments (empty here)
+  //     reason: "no_contract_amendment_for_declared_target_files"
+  //   }
+  closure_blocked_no_amendments:           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
   lesson_extracted:                        { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   contract_amendment_proposed:             { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   // Pre-apply correction/adversarial primitive. Payload carries free-string

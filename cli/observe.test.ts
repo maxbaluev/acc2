@@ -147,6 +147,65 @@ describe("formatEvent — task_closure_audited rendering (live + legacy payloads
     expect(line).toContain("uncovered=1");
     expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
   });
+
+  test("T0.1 augmented payload (substrate_verifications) renders claims=/verified=/discrepancies=", () => {
+    const line = formatEvent({
+      id: "ev_audit_t01",
+      kind: "task_closure_audited",
+      ts: "2026-05-19T21:16:10.687Z",
+      task_id: "t_root",
+      payload: {
+        closure_residual: 1.0,
+        asserted_residual: 0.08,
+        brain_claims: {
+          target_files_have_amendments: true,
+          all_tests_pass: true,
+        },
+        substrate_verifications: {
+          target_files_have_amendments: {
+            verified: false,
+            evidence_event_ids: [],
+            query: "SELECT id FROM events WHERE ...",
+          },
+          all_tests_pass: { verified: false, evidence_event_ids: [], query: "" },
+        },
+        discrepancies: ["target_files_have_amendments", "all_tests_pass"],
+      },
+    });
+    expect(line).toContain("closure_residual=1.00");
+    expect(line).toContain("claims=2/2");
+    expect(line).toContain("verified=0/2");
+    expect(line).toContain("discrepancies=2");
+    // Legacy renderer fallback paths must NOT fire when the augmented
+    // shape is present.
+    expect(line).not.toContain("checks=");
+    expect(line).not.toContain("covered=");
+    expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
+  });
+
+  test("T0.1 mixed verifications surface partial verified count", () => {
+    const line = formatEvent({
+      id: "ev_audit_t01_mixed",
+      kind: "task_closure_audited",
+      ts: "2026-05-19T21:16:10.687Z",
+      task_id: "t_root",
+      payload: {
+        closure_residual: 0.0,
+        asserted_residual: 0.05,
+        brain_claims: { a: true, b: true, c: true },
+        substrate_verifications: {
+          a: { verified: true, evidence_event_ids: ["e1"], query: "..." },
+          b: { verified: true, evidence_event_ids: ["e2"], query: "..." },
+          c: { verified: false, evidence_event_ids: [], query: "..." },
+        },
+        discrepancies: ["c"],
+      },
+    });
+    expect(line).toContain("claims=3/3");
+    expect(line).toContain("verified=2/3");
+    expect(line).toContain("discrepancies=1");
+    expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
+  });
 });
 
 describe("formatFollowTerminalSentinel", () => {
