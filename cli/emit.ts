@@ -19,7 +19,10 @@
 //             [--confidence 0.7] [--refs evt1,evt2] [--directive D...]
 //
 //   acc emit lesson_extracted --summary "<the lesson>" \
-//             [--refs evt1,evt2] [--directive D...]
+//             [--lesson-kind <classifier>] [--refs evt1,evt2] [--directive D...]
+//             Omitting --lesson-kind defaults to "unclassified" and emits a
+//             paired knowledge_uncertainty_observed event so the substrate
+//             can refine the open-vocabulary lesson taxonomy.
 //
 //   acc emit claude_reasoning_recorded --summary "<one-line distillation>" \
 //             [--refs evt1,evt2]
@@ -59,7 +62,7 @@ usage: acc emit <kind> [flags]
 
   Supported kinds (CSYMEMIT01 symmetric-emission set):
     knowledge_candidate       --claim "..." [--confidence N] [--refs …]
-    lesson_extracted          --summary "..." [--refs …]
+    lesson_extracted          --summary "..." [--lesson-kind X] [--refs …]
     rendered_owner_message_recorded
                               --rendered "<exact owner-visible string>"
                               [--audience primary|detail_drawer]
@@ -174,6 +177,9 @@ export const runEmit = async (argv: string[]): Promise<number> => {
       return 1;
     }
     payload.summary = flags.summary;
+    if (typeof flags["lesson-kind"] === "string" && flags["lesson-kind"].length > 0) {
+      payload.lesson_kind = flags["lesson-kind"];
+    }
   } else if (kind === "claude_reasoning_recorded") {
     if (typeof flags.summary !== "string" || flags.summary.length === 0) {
       process.stderr.write("acc emit claude_reasoning_recorded: --summary is required\n");
