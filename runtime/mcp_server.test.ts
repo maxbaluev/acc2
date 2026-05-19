@@ -900,7 +900,10 @@ describe("fastmcp substrate tools — stdio transport", () => {
     const env = parseEnvelope(res);
     expect(env.ok).toBe(true);
     expect(typeof env.result.cycle_id).toBe("string");
-    expect(["compile_directive_from_template", "yield"]).toContain(env.result.action);
+    // Father v2 redesign (a439fb2) collapsed the action vocabulary to
+    // journal_cycle — the iterator no longer emits compile_directive_from_template
+    // or yield as discrete actions; the journal record is the cycle outcome.
+    expect(env.result.action).toBe("journal_cycle");
   });
 
   test("Phase K: runtime.detect_father_drift returns a structured report", async () => {

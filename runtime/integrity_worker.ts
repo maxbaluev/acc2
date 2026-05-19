@@ -20,7 +20,6 @@
 // daemon decides whether to exit.
 
 import type { Database } from "bun:sqlite";
-import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { logger } from "./logger";
 
@@ -208,21 +207,6 @@ export const integrityWorkerTick = async (db: Database): Promise<IntegrityReport
     );
   }
 
-  // Zombie task_node sweep: task_node_opened rows older than
-  // ZOMBIE_TASK_NODE_THRESHOLD_MS (1 hour) that were NEVER dispatched and
-  // whose directive is still open. These are the "task opened then forgotten"
-  // pattern — e.g. opened during a dead-daemon window. We emit task_failed
-  // { failure_kind: "abandoned_no_dispatch" } so the task drops out of
-  // readyTasks.
-  try {
-    reapZombieTaskNodes(db);
-  } catch (err) {
-    logger.warn(
-      { where: "integrity.reap_zombie_task_nodes", err: (err as Error).message },
-      "zombie task_node reap failed — will retry next tick",
-    );
-  }
-
   // Supervisor runs on its OWN worker now (60s tick, see runtime/daemon.ts).
   // It WAS piggybacked here, but the integrity worker ticks every 6 HOURS
   // by default (ACC2_INTEGRITY_INTERVAL_MS) — far too slow to catch
@@ -261,12 +245,6 @@ const parseOriginalDispatchId = (row: { payload?: string | null }): string | nul
   }
 };
 
-/** Threshold for declaring a never-dispatched task_node_opened a zombie.
- *  Healthy ready tasks get picked up within seconds by the scheduler tick
- *  (default 10s). 1 hour is a generous margin that flags only truly stuck
- *  tasks — e.g. opened during a dead-daemon window, then no scheduler tick
- *  ever picked them up. reapZombieTaskNodes uses this. */
-export const ZOMBIE_TASK_NODE_THRESHOLD_MS = 60 * 60 * 1000;
 
 /** Age-aware version of reconcileOrphanedDispatches, safe to call from any
  *  worker tick (not just boot). Two extra guards relative to the boot
@@ -369,89 +347,6 @@ export const reconcileStaleDispatches = (
     );
   }
   return recovered;
-};
-
-/** Reap task_node_opened rows that have lingered without ever being
- *  dispatched. A task is a zombie when:
- *    1. It was opened > `minAgeMs` ago (default 1 hour).
- *    2. Its directive is NOT closed/archived (handled by Batch-2
- *       directive_closure — those tasks already drop out of readyTasks).
- *    3. It has no terminal event (committed / failed / abandoned).
- *    4. It has never seen a `brain_dispatched` row.
- *
- *  Condition 4 distinguishes zombies (never picked up) from stuck
- *  in-flight dispatches (handled by reconcileStaleDispatches). We emit
- *  `task_failed { failure_kind: "abandoned_no_dispatch" }` so the task
- *  drops out of readyTasks / ready_tasks_view; operators can re-open the
- *  work via a fresh task_id if needed. Safe to call repeatedly — once a
- *  task has its task_failed row it no longer satisfies condition 3.
- */
-export const reapZombieTaskNodes = (
-  db: Database,
-  opts?: { minAgeMs?: number; nowMs?: number },
-): Array<{ task_id: string; directive_id: string; age_ms: number }> => {
-  const minAgeMs = opts?.minAgeMs ?? ZOMBIE_TASK_NODE_THRESHOLD_MS;
-  const nowMs = opts?.nowMs ?? Date.now();
-  const cutoffIso = new Date(nowMs - minAgeMs).toISOString();
-
-  const rows = db
-    .query(
-      `SELECT n.id AS open_event_id, n.task_id, n.directive_id, n.ts
-       FROM events n
-       WHERE n.kind = 'task_node_opened'
-         AND n.ts <= ?
-         AND NOT EXISTS (
-           SELECT 1 FROM events t
-           WHERE t.task_id = n.task_id
-             AND t.kind IN (
-               'task_committed', 'task_failed', 'task_abandoned',
-               'task_blocked', 'task_committed_superseded'
-             )
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM events d
-           WHERE d.task_id = n.task_id
-             AND d.kind = 'brain_dispatched'
-         )
-         AND n.directive_id NOT IN (
-           SELECT DISTINCT directive_id FROM events
-           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
-         )`,
-    )
-    .all(cutoffIso) as Array<{ open_event_id: string; task_id: string; directive_id: string; ts: string }>;
-
-  const reaped: Array<{ task_id: string; directive_id: string; age_ms: number }> = [];
-  for (const row of rows) {
-    const ageMs = nowMs - Date.parse(row.ts);
-    try {
-      emitEvent(db, {
-        kind: "task_failed",
-        substrate_origin: "substrate_auto",
-        directive_id: row.directive_id,
-        task_id: row.task_id,
-        failure_kind: "abandoned_no_dispatch",
-        payload: {
-          reason: "task_node_opened_never_dispatched",
-          open_event_id: row.open_event_id,
-          age_ms: ageMs,
-          min_age_ms: minAgeMs,
-        } as JsonValue,
-      });
-      reaped.push({ task_id: row.task_id, directive_id: row.directive_id, age_ms: ageMs });
-    } catch (err) {
-      logger.warn(
-        { where: "integrity.reap_zombie_task", task_id: row.task_id, err: (err as Error).message },
-        "could not emit task_failed for zombie task_node",
-      );
-    }
-  }
-  if (reaped.length > 0) {
-    logger.warn(
-      { count: reaped.length, min_age_ms: minAgeMs },
-      "reaped zombie task_node_opened rows — tasks dropped from readyTasks",
-    );
-  }
-  return reaped;
 };
 
 /** Reconcile in-flight dispatches at boot. Each `brain_dispatched` row
