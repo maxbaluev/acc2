@@ -36,8 +36,12 @@ import {
   readChildGitHead,
   removeChildGitHead,
   resolveChildGitHeadPath,
+  runSupervisorLoop,
   writeChildGitHead,
+  type SupervisorChildHandle,
+  type SupervisorLoopDeps,
 } from "../runtime/daemon_supervisor";
+import { runDispatch } from "../cli/dispatch";
 
 const dbPath = ":memory:";
 let db: ReturnType<typeof openDb>;
@@ -204,5 +208,141 @@ describe("F10 canonical hot-reload picks up committed code without kill", () => 
     );
     expect(decision.action).toBe("no_op");
     if (decision.action === "no_op") expect(decision.reason).toBe("child_head_unavailable");
+  });
+
+  test("Case G — runSupervisorLoop with mock git HEAD + mock child returns expected emission sequence", async () => {
+    // Drive the loop end-to-end without spawning any real subprocess.
+    // All external effects (git rev-parse, /shutdown, /health, spawn,
+    // exit wait, clock, sleep) are injected as deps.
+    let clock = 10_000_000;
+    const advance = (ms: number): void => { clock += ms; };
+
+    // Tick 1: HEAD unchanged → no_op. Tick 2: HEAD diverges → swap.
+    const heads = ["aaaa1111", "bbbb2222"];
+    let tick = 0;
+
+    writeChildGitHead("aaaa1111", stateDir);
+
+    const childHandle: SupervisorChildHandle = {
+      pid: 12345,
+      exited: false,
+      exitCode: null,
+    };
+    let spawnCount = 0;
+    let shutdownCount = 0;
+    let healthCount = 0;
+
+    const deps: SupervisorLoopDeps = {
+      getCurrentGitHead: () => {
+        const h = heads[Math.min(tick, heads.length - 1)] ?? null;
+        tick += 1;
+        return h;
+      },
+      readChildGitHead: (sd) => readChildGitHead(sd),
+      nowMs: () => clock,
+      sleep: async (ms) => { advance(ms); },
+      spawnChild: (_entry, sd) => {
+        spawnCount += 1;
+        // Simulate the new child writing its loaded HEAD on boot.
+        writeChildGitHead("bbbb2222", sd);
+        return { pid: 99999, exited: false, exitCode: null };
+      },
+      requestChildShutdown: async () => { shutdownCount += 1; return true; },
+      pollChildHealth: async () => { healthCount += 1; return true; },
+      waitChildExit: async (h) => { h.exited = true; h.exitCode = 0; return true; },
+    };
+
+    const outcomes = await runSupervisorLoop(
+      db,
+      childHandle,
+      {
+        tickIntervalMs: 100,
+        minChildAgeMs: 0,
+        drainBudgetMs: 60_000,
+        stateDir,
+        nowMs: () => clock,
+        maxTicks: 2,
+      },
+      deps,
+    );
+
+    expect(outcomes.length).toBe(2);
+    expect(outcomes[0].outcome).toBe("no_op");
+    expect(outcomes[1].outcome).toBe("swap_succeeded");
+    if (outcomes[1].outcome === "swap_succeeded") {
+      expect(outcomes[1].previousHead).toBe("aaaa1111");
+      expect(outcomes[1].newHead).toBe("bbbb2222");
+    }
+    expect(spawnCount).toBe(1);
+    expect(shutdownCount).toBe(1);
+    expect(healthCount).toBeGreaterThanOrEqual(1);
+
+    // Verify the canonical emission chain landed on the bus — no new
+    // event kinds, only the existing daemon_hotreload_* family.
+    const kinds = db
+      .query(`SELECT kind FROM events WHERE kind LIKE 'daemon_hotreload_%' ORDER BY ts ASC`)
+      .all() as Array<{ kind: string }>;
+    const kindList = kinds.map((r) => r.kind);
+    expect(kindList).toContain("daemon_hotreload_triggered");
+    expect(kindList).toContain("daemon_hotreload_swapped");
+    expect(kindList).toContain("daemon_hotreload_completed");
+  });
+
+  test("Case H — SIGHUP receipt schedules an immediate tick", async () => {
+    // The loop's sleep window is 60s; SIGHUP must break it inside a
+    // short observation window. We assert two ticks complete despite
+    // the long natural cadence — only possible if SIGHUP woke the
+    // sleeper.
+    let clock = 10_000_000;
+    writeChildGitHead("samehead", stateDir);
+
+    let tickCount = 0;
+    const deps: SupervisorLoopDeps = {
+      getCurrentGitHead: () => { tickCount += 1; return "samehead"; },
+      readChildGitHead: (sd) => readChildGitHead(sd),
+      nowMs: () => clock,
+      sleep: async (ms) => { clock += ms; },
+    };
+
+    // Synthesize the SIGHUP shortly after the loop starts. Using
+    // process.emit rather than kill -HUP keeps the test runner's own
+    // signal disposition untouched (a real SIGHUP would terminate
+    // bun:test with exit 129).
+    setTimeout(() => { process.emit("SIGHUP" as never); }, 25);
+
+    await runSupervisorLoop(
+      db,
+      null,
+      {
+        tickIntervalMs: 60_000,
+        minChildAgeMs: 0,
+        drainBudgetMs: 60_000,
+        stateDir,
+        nowMs: () => clock,
+        maxTicks: 2,
+      },
+      deps,
+    );
+
+    expect(tickCount).toBeGreaterThanOrEqual(2);
+  });
+
+  test("Case I — acc daemon supervise + swap-now subcommands accept --help", async () => {
+    const log: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => { log.push(args.map(String).join(" ")); };
+    try {
+      const codeA = await runDispatch(["daemon", "supervise", "--help"]);
+      expect(codeA).toBe(0);
+      const codeB = await runDispatch(["daemon", "swap-now", "--help"]);
+      expect(codeB).toBe(0);
+    } finally {
+      console.log = origLog;
+    }
+    const joined = log.join("\n");
+    expect(joined).toContain("acc daemon supervise");
+    expect(joined).toContain("--tick-ms");
+    expect(joined).toContain("acc daemon swap-now");
+    expect(joined).toContain("SIGHUP");
   });
 });

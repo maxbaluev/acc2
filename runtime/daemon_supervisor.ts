@@ -49,8 +49,8 @@
 
 import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { dirname, join, resolve as resolvePath } from "node:path";
+import { spawnSync, spawn, type ChildProcess } from "node:child_process";
 import { emitEvent } from "./events";
 import {
   getOpenBrainDispatches,
@@ -441,4 +441,327 @@ export const emitSwapFailed = (
       "could not emit daemon_hotreload_failed (db likely closed)",
     );
   }
+};
+
+// ── Runtime supervisor loop ────────────────────────────────────────────
+//
+// The pure decision function above is the falsifiability surface; the
+// loop below is the procedural wiring around it. Every external effect
+// (git rev-parse, /shutdown POST, child spawn, /health poll, clock,
+// sleep) is overridable via SupervisorLoopDeps so tests can exercise
+// the swap protocol without spawning a real daemon subprocess.
+// Production callers pass nothing and get the canonical implementations.
+
+/** Pluggable effect surface for the supervisor loop. */
+export type SupervisorLoopDeps = {
+  getCurrentGitHead?: () => string | null;
+  readChildGitHead?: (stateDir: string) => string | null;
+  nowMs?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  spawnChild?: (entry: string, stateDir: string) => SupervisorChildHandle;
+  requestChildShutdown?: (stateDir: string, drainBudgetMs: number) => Promise<boolean>;
+  pollChildHealth?: (stateDir: string, deadlineMs: number) => Promise<boolean>;
+  waitChildExit?: (handle: SupervisorChildHandle, budgetMs: number) => Promise<boolean>;
+};
+
+/** Minimal child handle the loop tracks. */
+export type SupervisorChildHandle = {
+  pid: number | null;
+  exited: boolean;
+  exitCode: number | null;
+  raw?: ChildProcess;
+};
+
+export type SupervisorLoopOptions = SupervisorOptions & {
+  /** Cap on the number of ticks the loop runs before returning. */
+  maxTicks?: number;
+  /** Abort signal — the loop exits on receipt. */
+  abortSignal?: AbortSignal;
+};
+
+// The discriminant is named `outcome`, not `kind`. The event-kind
+// registry coverage test in substrate/event_kinds.test.ts scans every
+// `kind: "<literal>"` occurrence in production code and treats each
+// literal as a candidate event kind. Supervisor outcomes are in-process
+// control values, not ledger event kinds; using `outcome` keeps them
+// out of that scan.
+export type SupervisorTickOutcome =
+  | { outcome: "no_op"; reason: string }
+  | { outcome: "defer"; reason: string; eligibility: ReloadEligibilityResult }
+  | { outcome: "swap_succeeded"; previousHead: string; newHead: string; durationMs: number; leasesDrained: number }
+  | { outcome: "swap_failed"; previousHead: string; newHead: string; reason: string };
+
+const DEFAULT_TICK_INTERVAL_MS = 60_000;
+const DEFAULT_DAEMON_ENTRY_RELATIVE = "daemon.ts";
+
+const resolveDaemonEntry = (override?: string): string => {
+  if (override) return override;
+  const here = import.meta?.dirname ?? process.cwd();
+  return resolvePath(here, DEFAULT_DAEMON_ENTRY_RELATIVE);
+};
+
+const realSleep = (ms: number): Promise<void> =>
+  new Promise((r) => { setTimeout(r, ms); });
+
+const realSpawnChild = (entry: string, _stateDir: string): SupervisorChildHandle => {
+  const child = spawn("bun", [entry], {
+    detached: false,
+    stdio: ["ignore", "ignore", "ignore"],
+    env: { ...process.env },
+  });
+  const handle: SupervisorChildHandle = {
+    pid: child.pid ?? null,
+    exited: false,
+    exitCode: null,
+    raw: child,
+  };
+  child.on("exit", (code) => {
+    handle.exited = true;
+    handle.exitCode = code;
+  });
+  return handle;
+};
+
+const realWaitChildExit = async (
+  handle: SupervisorChildHandle,
+  budgetMs: number,
+): Promise<boolean> => {
+  if (handle.exited) return true;
+  return await new Promise<boolean>((resolveExit) => {
+    if (!handle.raw) {
+      const start = Date.now();
+      const poll = setInterval(() => {
+        if (handle.exited) { clearInterval(poll); resolveExit(true); return; }
+        if (Date.now() - start >= budgetMs) { clearInterval(poll); resolveExit(false); }
+      }, 50);
+      return;
+    }
+    const timer = setTimeout(() => resolveExit(false), budgetMs);
+    handle.raw.on("exit", () => { clearTimeout(timer); resolveExit(true); });
+  });
+};
+
+const realRequestChildShutdown = async (
+  _stateDir: string,
+  drainBudgetMs: number,
+): Promise<boolean> => {
+  try {
+    // Lazy import keeps the cli/* dependency edge optional in test
+    // contexts that only drive the pure decision function.
+    const { auxBaseUrl, readAdminToken, rpcPostAuth } = await import("../cli/rpc");
+    const base = auxBaseUrl();
+    if (!base) return false;
+    const token = readAdminToken();
+    if (!token) return false;
+    const reply = await rpcPostAuth<{ ok?: boolean; error?: string }>(
+      `${base}/shutdown`,
+      token,
+      { drain_budget_ms: drainBudgetMs },
+      { timeoutMs: drainBudgetMs + 10_000 },
+    );
+    return reply.ok === true;
+  } catch (err) {
+    logger.debug(
+      { where: "daemon_supervisor.requestChildShutdown", err: String(err) },
+      "shutdown request failed",
+    );
+    return false;
+  }
+};
+
+const realPollChildHealth = async (
+  _stateDir: string,
+  deadlineMs: number,
+): Promise<boolean> => {
+  try {
+    const { auxBaseUrl, rpcGet } = await import("../cli/rpc");
+    while (Date.now() < deadlineMs) {
+      const base = auxBaseUrl();
+      if (base) {
+        const reply = await rpcGet<{ status?: string }>(`${base}/health`).catch(() => null);
+        if (reply && reply.status === "ok") return true;
+      }
+      await realSleep(500);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+/** Side-channel handoff for the freshly spawned child. There is at
+ *  most one outer supervisor per process and the value is read
+ *  synchronously after swapChild resolves, so a module-scoped holder
+ *  is sufficient and avoids changing the public swap return shape. */
+const lastSpawnedHandle: { current: SupervisorChildHandle | null } = { current: null };
+
+/** Execute the canonical quiescent swap protocol. */
+export const swapChild = async (
+  db: Database,
+  prevHandle: SupervisorChildHandle | null,
+  previousHead: string,
+  newHead: string,
+  eligibility: ReloadEligibilityResult,
+  opts: SupervisorOptions,
+  deps: SupervisorLoopDeps,
+): Promise<SupervisorTickOutcome> => {
+  const drainBudgetMs = opts.drainBudgetMs ?? 5 * 60 * 1000;
+  const stateDir = opts.stateDir ?? resolveStateDir();
+  const entry = resolveDaemonEntry(opts.daemonEntry);
+  const now = deps.nowMs ?? (() => Date.now());
+  const startedAt = now();
+
+  emitSwapTriggered(db, previousHead, newHead, {
+    drain_budget_ms: drainBudgetMs,
+    open_brain_dispatch_count: eligibility.open_brain_dispatch_count,
+  });
+
+  const requestShutdown = deps.requestChildShutdown ?? realRequestChildShutdown;
+  const waitExit = deps.waitChildExit ?? realWaitChildExit;
+  const spawnNew = deps.spawnChild ?? realSpawnChild;
+  const pollHealth = deps.pollChildHealth ?? realPollChildHealth;
+
+  const shutdownAccepted = await requestShutdown(stateDir, drainBudgetMs);
+  if (!shutdownAccepted) {
+    const reason = "shutdown_request_refused";
+    emitSwapFailed(db, previousHead, newHead, reason, { drain_budget_ms: drainBudgetMs });
+    return { outcome: "swap_failed", previousHead, newHead, reason };
+  }
+
+  if (prevHandle) {
+    const exited = await waitExit(prevHandle, drainBudgetMs);
+    if (!exited) {
+      const reason = "drain_exceeded_budget";
+      emitSwapFailed(db, previousHead, newHead, reason, {
+        drain_budget_ms: drainBudgetMs,
+      });
+      return { outcome: "swap_failed", previousHead, newHead, reason };
+    }
+  }
+
+  removeChildGitHead(stateDir);
+
+  const newHandle = spawnNew(entry, stateDir);
+  lastSpawnedHandle.current = newHandle;
+
+  const healthDeadline = now() + 30_000;
+  const healthy = await pollHealth(stateDir, healthDeadline);
+  if (!healthy) {
+    const reason = "new_child_health_check_failed";
+    emitSwapFailed(db, previousHead, newHead, reason, {
+      new_child_pid: newHandle.pid,
+    });
+    return { outcome: "swap_failed", previousHead, newHead, reason };
+  }
+
+  const durationMs = now() - startedAt;
+  emitSwapCompleted(
+    db,
+    previousHead,
+    newHead,
+    durationMs,
+    eligibility.open_brain_dispatch_count,
+  );
+  return {
+    outcome: "swap_succeeded",
+    previousHead,
+    newHead,
+    durationMs,
+    leasesDrained: eligibility.open_brain_dispatch_count,
+  };
+};
+
+/** Foreground supervisor loop. SIGHUP accelerates the next tick but
+ *  does NOT bypass eligibility. Returns when `opts.maxTicks` is hit,
+ *  `opts.abortSignal` aborts, or the process exits. */
+export const runSupervisorLoop = async (
+  db: Database,
+  initialChildHandle: SupervisorChildHandle | null,
+  opts: SupervisorLoopOptions = {},
+  deps: SupervisorLoopDeps = {},
+): Promise<SupervisorTickOutcome[]> => {
+  const envTick = Number(process.env.ACC2_HOT_RELOAD_TICK_MS ?? "");
+  const tickIntervalMs = opts.tickIntervalMs
+    ?? (Number.isFinite(envTick) && envTick > 0 ? envTick : DEFAULT_TICK_INTERVAL_MS);
+  const stateDir = opts.stateDir ?? resolveStateDir();
+  const now = deps.nowMs ?? (() => Date.now());
+  const sleep = deps.sleep ?? realSleep;
+  const readHead = deps.readChildGitHead ?? readChildGitHead;
+  const currentHead = deps.getCurrentGitHead ?? (() => getCurrentGitHead());
+
+  let activeChild: SupervisorChildHandle | null = initialChildHandle;
+  let childBootAtMs = now();
+
+  let sighupTriggered = false;
+  let abortRequested = false;
+  const sighupHandler = (): void => { sighupTriggered = true; };
+  const abortHandler = (): void => { abortRequested = true; };
+  process.on("SIGHUP", sighupHandler);
+  opts.abortSignal?.addEventListener("abort", abortHandler);
+
+  const outcomes: SupervisorTickOutcome[] = [];
+  let ticks = 0;
+
+  try {
+    while (true) {
+      if (abortRequested || opts.abortSignal?.aborted) break;
+      if (typeof opts.maxTicks === "number" && ticks >= opts.maxTicks) break;
+
+      const ctx: SupervisorTickContext = {
+        currentGitHead: currentHead(),
+        childGitHead: readHead(stateDir),
+        childBootAtMs,
+      };
+      const decision = decideSupervisorAction(db, ctx, opts);
+      if (decision.action === "no_op") {
+        outcomes.push({ outcome: "no_op", reason: decision.reason });
+      } else if (decision.action === "defer") {
+        emitReloadDeferred(db, decision.eligibility, {
+          previous_git_head: ctx.childGitHead,
+          new_git_head: ctx.currentGitHead,
+        });
+        outcomes.push({
+          outcome: "defer",
+          reason: decision.reason,
+          eligibility: decision.eligibility,
+        });
+      } else {
+        const swapResult = await swapChild(
+          db,
+          activeChild,
+          decision.previous_git_head,
+          decision.new_git_head,
+          decision.eligibility,
+          opts,
+          deps,
+        );
+        if (swapResult.outcome === "swap_succeeded") {
+          activeChild = lastSpawnedHandle.current;
+          lastSpawnedHandle.current = null;
+          childBootAtMs = now();
+        }
+        outcomes.push(swapResult);
+      }
+
+      ticks += 1;
+      if (typeof opts.maxTicks === "number" && ticks >= opts.maxTicks) break;
+
+      // Sleep until next tick OR SIGHUP/abort. Polling cadence is
+      // intentionally short so a SIGHUP delivered mid-wait accelerates
+      // the next iteration without bypassing eligibility.
+      const wakeAt = now() + tickIntervalMs;
+      while (now() < wakeAt) {
+        if (sighupTriggered) { sighupTriggered = false; break; }
+        if (abortRequested || opts.abortSignal?.aborted) break;
+        const remaining = Math.min(250, wakeAt - now());
+        if (remaining <= 0) break;
+        await sleep(remaining);
+      }
+    }
+  } finally {
+    process.removeListener("SIGHUP", sighupHandler);
+    opts.abortSignal?.removeEventListener("abort", abortHandler);
+  }
+
+  return outcomes;
 };

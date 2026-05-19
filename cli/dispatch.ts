@@ -9,6 +9,7 @@ import { resolve } from "node:path";
 import {
   auxBaseUrl, mcpCall, rpcGet, rpcPostAuth, requireAux,
   readAdminToken, readDaemonLock,
+  type DaemonLock,
 } from "./rpc";
 
 const RESTART_DRAIN_BUDGET_MS = 30_000;
@@ -88,6 +89,15 @@ const usage = (): string => `acc — v2 thin CLI
   acc daemon start                Spawn the daemon detached if not running.
   acc daemon stop                 Auth-gated shutdown via admin token.
   acc daemon status               GET /health on the running daemon.
+  acc daemon supervise [--tick-ms N] [--drain-budget-ms N] [--min-age-ms N]
+                                  Foreground hot-reload supervisor (F10).
+                                  Detects git HEAD changes, drains active
+                                  brain dispatches within the budget, then
+                                  swaps the child generation. Intended as
+                                  the systemd/launchd entrypoint.
+  acc daemon swap-now             Send SIGHUP to the running supervisor so
+                                  the next eligibility check runs immediately
+                                  (does not bypass eligibility).
   acc daemon install-service      Write systemd unit (Linux) / launchd plist (macOS).
   acc watch                       Substrate-content-first realtime TUI (narrative stream +
                                   active DAG + pending decisions + Enter drilldown).
@@ -394,6 +404,115 @@ const daemonRestart = async (): Promise<number> => {
   return 1;
 };
 
+const SUPERVISE_HELP = `acc daemon supervise — F10 hot-reload supervisor (foreground)
+
+  Runs the outer supervisor loop. Detects git HEAD changes against the
+  child daemon's loaded HEAD on every tick. When HEADs diverge AND the
+  open brain dispatch queue can drain within the budget, the supervisor
+  requests a graceful child shutdown, waits for quiescence, spawns the
+  replacement, polls /health until ready, and emits the canonical
+  daemon_hotreload_{triggered,swapped,completed,failed,rejected} chain.
+
+  Options:
+    --tick-ms N            Detector tick interval (default 60000,
+                           env ACC2_HOT_RELOAD_TICK_MS).
+    --drain-budget-ms N    Graceful drain budget passed to /shutdown
+                           (default 300000).
+    --min-age-ms N         Minimum child age before a swap is considered
+                           (default 300000).
+    --help, -h             Show this help.
+
+  Signal handling:
+    SIGHUP                 Accelerate the next tick (does NOT bypass
+                           eligibility).
+`;
+
+const SWAP_NOW_HELP = `acc daemon swap-now — request an immediate supervisor eligibility check
+
+  Reads the supervisor's pid from the daemon lock and sends SIGHUP. The
+  supervisor wakes early and re-runs decideSupervisorAction; if the
+  eligibility predicate refuses, the supervisor logs the refusal and
+  resumes its normal tick cadence.
+
+  Options:
+    --help, -h     Show this help.
+`;
+
+const parseIntFlag = (argv: string[], flag: string): number | null => {
+  const idx = argv.indexOf(flag);
+  if (idx === -1 || idx + 1 >= argv.length) return null;
+  const v = Number(argv[idx + 1]);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : null;
+};
+
+const daemonSupervise = async (argv: string[]): Promise<number> => {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log(SUPERVISE_HELP);
+    return 0;
+  }
+  const tickIntervalMs = parseIntFlag(argv, "--tick-ms") ?? undefined;
+  const drainBudgetMs = parseIntFlag(argv, "--drain-budget-ms") ?? undefined;
+  const minChildAgeMs = parseIntFlag(argv, "--min-age-ms") ?? undefined;
+
+  const { resolveDbPath } = await import("../runtime/state_paths");
+  const { openDb } = await import("../substrate/db");
+  const { runSupervisorLoop } = await import("../runtime/daemon_supervisor");
+  const dbPath = resolveDbPath();
+  const db = openDb(dbPath);
+
+  console.log(`acc daemon supervise — starting (db=${dbPath})`);
+  console.log(`  tick_ms=${tickIntervalMs ?? "default"} drain_budget_ms=${drainBudgetMs ?? "default"} min_age_ms=${minChildAgeMs ?? "default"}`);
+
+  const abortCtl = new AbortController();
+  const sigint = (): void => { abortCtl.abort(); };
+  process.on("SIGINT", sigint);
+  process.on("SIGTERM", sigint);
+
+  try {
+    await runSupervisorLoop(
+      db,
+      null,
+      {
+        tickIntervalMs,
+        drainBudgetMs,
+        minChildAgeMs,
+        abortSignal: abortCtl.signal,
+      },
+    );
+    return 0;
+  } catch (err) {
+    console.error(`supervisor loop failed: ${(err as Error).message}`);
+    return 1;
+  } finally {
+    process.removeListener("SIGINT", sigint);
+    process.removeListener("SIGTERM", sigint);
+  }
+};
+
+const daemonSwapNow = async (argv: string[]): Promise<number> => {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log(SWAP_NOW_HELP);
+    return 0;
+  }
+  // The supervisor pid lives in the daemon lock under supervisor_pid
+  // when an outer supervisor manages the daemon; otherwise the daemon
+  // itself owns the SIGHUP slot. Fall back to the daemon pid when the
+  // supervisor field is absent.
+  const lock = readDaemonLock();
+  if (!lock) { console.error("daemon not running"); return 1; }
+  const lockExt = lock as DaemonLock & { supervisor_pid?: number };
+  const target = lockExt.supervisor_pid ?? lock.pid;
+  if (!target) { console.error("no pid available to signal"); return 1; }
+  try {
+    process.kill(target, "SIGHUP");
+    console.log(`SIGHUP sent to pid=${target}`);
+    return 0;
+  } catch (err) {
+    console.error(`kill -HUP ${target} failed: ${(err as Error).message}`);
+    return 1;
+  }
+};
+
 /** Programmatic entry — exported so dispatch.test.ts can drive it without
  *  shelling out. Returns the process exit code. */
 export const runDispatch = async (argv: string[]): Promise<number> => {
@@ -478,11 +597,13 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     if (sub === "stop")           return daemonStop();
     if (sub === "restart" || sub === "reload") return daemonRestart();
     if (sub === "status")         return daemonStatus();
+    if (sub === "supervise")      return daemonSupervise(argv.slice(2));
+    if (sub === "swap-now")       return daemonSwapNow(argv.slice(2));
     if (sub === "install-service") {
       const { runServiceInstall } = await import("./service-install");
       return runServiceInstall(argv.slice(2));
     }
-    console.error(`acc daemon: unknown subcommand '${sub ?? ""}'. expected: start|stop|status|install-service`);
+    console.error(`acc daemon: unknown subcommand '${sub ?? ""}'. expected: start|stop|status|supervise|swap-now|install-service`);
     return 1;
   }
   if (cmd === "watch") {
