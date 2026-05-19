@@ -118,6 +118,41 @@ const normalizeClosureAuditPayload = (input: EmitEventInput): JsonValue => {
   };
 };
 
+/** Dispatcher-violation classification gate (Hole 6 — 2026-05-19).
+ *
+ *  Pre-fix evidence: 21 production dispatcher_violation events had
+ *  failure_kind=NULL — silent failures the substrate could not classify.
+ *  Operator-side audits joining by failure_kind lost ~4% of failures to
+ *  NULL. The gate at the emit boundary defaults a missing classification
+ *  to "unclassified_emit_bug" AND stamps payload.classification_source =
+ *  "default_unclassified" so audits surface the gap rather than silently
+ *  accepting NULL. The default must NEVER replace an emitter-provided
+ *  classification — when failure_kind is set on the input column OR
+ *  inside payload.failure_kind, that classification stands.
+ *
+ *  Idempotency: when an emitter already classified the violation (via
+ *  input.failure_kind or payload.failure_kind), the function returns the
+ *  payload untouched. Re-emits with the same shape are no-ops. */
+const normalizeDispatcherViolationPayload = (input: EmitEventInput): { payload: JsonValue; failure_kind: string } => {
+  const payload = isObject(input.payload) ? input.payload : {};
+  const explicitFailureKind = typeof input.failure_kind === "string" && input.failure_kind.trim().length > 0
+    ? input.failure_kind.trim()
+    : (typeof payload.failure_kind === "string" && payload.failure_kind.trim().length > 0
+      ? payload.failure_kind.trim()
+      : null);
+  if (explicitFailureKind) {
+    return { payload, failure_kind: explicitFailureKind };
+  }
+  return {
+    payload: {
+      ...payload,
+      classification_source: "default_unclassified",
+      classification_default_note: "emitter did not provide failure_kind; substrate defaulted to unclassified_emit_bug at the emit boundary so audits surface the gap. Cite Hole 6 (2026-05-19) — 21 historical NULL rows.",
+    },
+    failure_kind: "unclassified_emit_bug",
+  };
+};
+
 /** action_scored normalization (null-action_artifact_id lift gate).
  *
  *  Brain lesson TA4X4Q36XH38789BWQMV2AYB3W identified 102 historical
@@ -821,12 +856,20 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // cli/observe.ts task_closure_audited + lesson_extracted renderers).
   const closurePayload = input.kind === "task_closure_audited" ? normalizeClosureAuditPayload(input) : null;
   const lessonPayload = input.kind === "lesson_extracted" ? normalizeLessonExtractedPayload(input) : null;
+  // Dispatcher-violation classification gate (Hole 6 — 2026-05-19). Default
+  // missing failure_kind to "unclassified_emit_bug" + stamp payload
+  // classification_source so audits joining by failure_kind never silently
+  // skip NULL rows. Emitter-provided classifications stand untouched.
+  const dispatcherViolation = input.kind === "dispatcher_violation" ? normalizeDispatcherViolationPayload(input) : null;
   const eventPayload = taskFailure?.payload
     ?? closurePayload
     ?? lessonPayload
+    ?? dispatcherViolation?.payload
     ?? input.payload
     ?? {};
-  const eventFailureKind = taskFailure?.failure_kind ?? input.failure_kind;
+  const eventFailureKind = taskFailure?.failure_kind
+    ?? dispatcherViolation?.failure_kind
+    ?? input.failure_kind;
   const payload = JSON.stringify(eventPayload);
   const context_refs = JSON.stringify(input.context_refs ?? []);
 

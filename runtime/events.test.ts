@@ -908,3 +908,84 @@ describe("emitEvent action_scored verifier_kind auto-admit gate (brain EH5A37DPH
     expect(auditPayload.source_action_scored_event_id).toBe(scored.id);
   });
 });
+
+describe("emitEvent dispatcher_violation classification gate (Hole 6 — 2026-05-19)", () => {
+  // Pre-fix evidence: 21 production dispatcher_violation rows had
+  // failure_kind=NULL — silent failures the substrate could not classify
+  // (operator audits joining by failure_kind lost ~4% of failures). The
+  // emit-boundary gate defaults missing classifications to
+  // "unclassified_emit_bug" and stamps payload.classification_source =
+  // "default_unclassified" so audits surface the gap rather than silently
+  // accepting NULL.
+
+  test("dispatcher_violation without failure_kind defaults to unclassified_emit_bug + classification_source marker", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const event = emitEvent(db, {
+      kind: "dispatcher_violation",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { reason: "emitter forgot to classify" },
+    });
+    const row = db
+      .query<{ failure_kind: string | null; payload: string }, [string]>(
+        "SELECT failure_kind, payload FROM events WHERE id = ?",
+      )
+      .get(event.id);
+    expect(row?.failure_kind).toBe("unclassified_emit_bug");
+    const payload = JSON.parse(row!.payload);
+    expect(payload.classification_source).toBe("default_unclassified");
+    expect(typeof payload.classification_default_note).toBe("string");
+    // Original payload fields are preserved.
+    expect(payload.reason).toBe("emitter forgot to classify");
+  });
+
+  test("dispatcher_violation with explicit failure_kind preserves emitter classification (no default override)", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const event = emitEvent(db, {
+      kind: "dispatcher_violation",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      failure_kind: "floor_section_missing",
+      payload: { kind: "floor_section_missing", missing_floor_sections: ["task_goal"] },
+    });
+    const row = db
+      .query<{ failure_kind: string | null; payload: string }, [string]>(
+        "SELECT failure_kind, payload FROM events WHERE id = ?",
+      )
+      .get(event.id);
+    expect(row?.failure_kind).toBe("floor_section_missing");
+    const payload = JSON.parse(row!.payload);
+    // No default marker because emitter classified explicitly.
+    expect(payload.classification_source).toBeUndefined();
+    expect(payload.classification_default_note).toBeUndefined();
+    expect(payload.kind).toBe("floor_section_missing");
+  });
+
+  test("dispatcher_violation with failure_kind nested in payload only is honoured (no default override)", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const event = emitEvent(db, {
+      kind: "dispatcher_violation",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { failure_kind: "out_of_scope_target", file: "runtime/foo.ts" },
+    });
+    const row = db
+      .query<{ failure_kind: string | null; payload: string }, [string]>(
+        "SELECT failure_kind, payload FROM events WHERE id = ?",
+      )
+      .get(event.id);
+    expect(row?.failure_kind).toBe("out_of_scope_target");
+    const payload = JSON.parse(row!.payload);
+    expect(payload.classification_source).toBeUndefined();
+    expect(payload.failure_kind).toBe("out_of_scope_target");
+  });
+});

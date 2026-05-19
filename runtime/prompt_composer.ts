@@ -2051,6 +2051,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
       substrate_origin: "substrate_auto",
       directive_id: task.directive_id,
       task_id: task.id,
+      failure_kind: "floor_section_missing",
       payload: {
         kind: "floor_section_missing",
         missing_floor_sections: missingFloor,
