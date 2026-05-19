@@ -149,7 +149,7 @@ describe("admitArtifact integration — owner-gated paths (structural-only)", ()
     );
     expect(result.ok).toBe(true);
     const ownerReject = events.find(
-      (e) => e.kind === "code_artifact_admission_rejected" &&
+      (e) => e.kind === "act_artifact_admission_rejected" &&
         (e.payload as Record<string, unknown>).reason === "owner_consent_missing",
     );
     expect(ownerReject).toBeUndefined();
@@ -184,7 +184,7 @@ describe("admitArtifact integration — owner-gated paths (structural-only)", ()
     // owner-gate stage — verified by the absence of an owner_consent_missing
     // rejection event.
     const ownerReject = events.find(
-      (e) => e.kind === "code_artifact_admission_rejected" &&
+      (e) => e.kind === "act_artifact_admission_rejected" &&
         (e.payload as Record<string, unknown>).reason === "owner_consent_missing",
     );
     expect(ownerReject).toBeUndefined();

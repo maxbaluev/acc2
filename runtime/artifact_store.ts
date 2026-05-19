@@ -1,5 +1,5 @@
 // acc2 artifact store — CRUD + posterior update + LATM promotion / quarantine
-// thresholds for the `code_artifact` table (v2-design.md §11.4, §11.5, §11.6).
+// thresholds for the `act_artifact` table (v2-design.md §11.4, §11.5, §11.6).
 //
 // Posterior model:
 //   - Beta(α, β) with α + β = total observations.
@@ -41,7 +41,7 @@ export type CodeArtifactRow = {
   id: string;
   runtime: Runtime;
   /** Free-string discriminator for the row's purpose. Default
-   *  `code_artifact` for legacy rows; typed rows declare their own
+   *  `code_artifact` for legacy rows (act_artifact post-F4a rename); typed rows declare their own
    *  (e.g. `dispatch_strategy_v1`, `published_drive_doc`). See
    *  schema.sql:76. */
   kind: string;
@@ -82,7 +82,7 @@ export type CodeArtifactRow = {
 
 export type InsertArtifactInput = Omit<CodeArtifactRow, "createdAt" | "updatedAt" | "id" | "targetResources" | "supersedes" | "supersededBy" | "lostVersionCount" | "kind"> & {
   id?: string;
-  /** Optional kind discriminator. Defaults to `code_artifact` on the row
+  /** Optional kind discriminator. Defaults to `code_artifact` on the row (act_artifact post-F4a)
    *  if omitted (matches the schema default). */
   kind?: string;
   targetResources?: ResourceRef[] | string[] | null;
@@ -188,7 +188,7 @@ const mapRow = (raw: Record<string, unknown>): CodeArtifactRow => ({
 
 // ── CRUD ────────────────────────────────────────────────────────────
 
-/** Insert a new code_artifact row. The caller supplies the posterior priors
+/** Insert a new act_artifact row. The caller supplies the posterior priors
  *  (alpha/beta) directly so admission can seed (0.5, 0.3) — the store does
  *  not back-compute them. id is generated unless caller passes one. */
 export const insertArtifact = (db: Database, input: InsertArtifactInput): CodeArtifactRow => {
@@ -198,7 +198,7 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): CodeAr
   const targetResources = parseResourceRefs(input.targetResources) ?? resourcesFromTargetFiles(input.targetFiles ?? null);
   const targetFiles = input.targetFiles ?? repoTargetFilesFromResources(targetResources);
   db.run(
-    `INSERT INTO code_artifact (
+    `INSERT INTO act_artifact (
        id, runtime, kind, body, declared_sandbox, state_root,
        posterior_alpha, posterior_beta, score, confidence,
        recent_residual_mean, recent_kill_count, status, name,
@@ -241,7 +241,7 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): CodeAr
 };
 
 export const getArtifact = (db: Database, id: string): CodeArtifactRow | null => {
-  const row = db.query("SELECT * FROM code_artifact WHERE id = ?").get(id) as Record<string, unknown> | null;
+  const row = db.query("SELECT * FROM act_artifact WHERE id = ?").get(id) as Record<string, unknown> | null;
   if (!row) return null;
   return mapRow(row);
 };
@@ -253,7 +253,7 @@ export const listArtifactsByRuntime = (
 ): CodeArtifactRow[] => {
   const rows = db
     .query(
-      "SELECT * FROM code_artifact WHERE runtime = ? ORDER BY score DESC, updated_at DESC LIMIT ?",
+      "SELECT * FROM act_artifact WHERE runtime = ? ORDER BY score DESC, updated_at DESC LIMIT ?",
     )
     .all(runtime, limit) as Array<Record<string, unknown>>;
   return rows.map(mapRow);
@@ -294,7 +294,7 @@ export const applyResidualOutcome = (
   ts: string,
 ): CodeArtifactRow => {
   const row = getArtifact(db, artifactId);
-  if (!row) throw new Error(`code_artifact_not_found:${artifactId}`);
+  if (!row) throw new Error(`act_artifact_not_found:${artifactId}`);
   const r = clamp01(residual);
 
   // Discretise into success/failure bands plus a mid-band that contributes
@@ -326,7 +326,7 @@ export const applyResidualOutcome = (
   const newEma = EMA_DECAY * row.recentResidualMean + (1 - EMA_DECAY) * r;
 
   db.run(
-    `UPDATE code_artifact SET
+    `UPDATE act_artifact SET
        posterior_alpha = ?, posterior_beta = ?,
        score = ?, confidence = ?,
        recent_residual_mean = ?,
@@ -357,7 +357,7 @@ const synthesizeName = (row: CodeArtifactRow): string => {
 const countInvocations = (row: CodeArtifactRow): number => row.posteriorAlpha + row.posteriorBeta - 2;
 
 /** Promote an admitted artifact whose posterior crossed the threshold.
- *  Emits a `code_artifact_promoted` event via `emit` and stamps a name on
+ *  Emits a `act_artifact_promoted` event via `emit` and stamps a name on
  *  the row if it didn't have one. Returns `true` if the row transitioned
  *  from 'admitted' to 'promoted'; `false` otherwise. */
 export const maybePromote = (
@@ -381,11 +381,11 @@ export const maybePromote = (
   const name = row.name ?? synthesizeName(row);
   const ts = nowIso();
   db.run(
-    "UPDATE code_artifact SET status = ?, name = ?, updated_at = ? WHERE id = ?",
+    "UPDATE act_artifact SET status = ?, name = ?, updated_at = ? WHERE id = ?",
     ["promoted", name, ts, artifactId],
   );
   emit({
-    kind: "code_artifact_promoted",
+    kind: "act_artifact_promoted",
     substrate_origin: "substrate_auto",
     action_artifact_id: artifactId,
     payload: {
@@ -425,7 +425,7 @@ const consecutiveViolations = (db: Database, artifactId: string): number => {
  *  recent_kill_count crossed the kill-count threshold, OR which has
  *  emitted ≥ 5 consecutive `sandbox_violation` events. Idempotent — calling
  *  on an already-quarantined artifact is a no-op. Emits
- *  `code_artifact_quarantined` on transition with the triggering reason. */
+ *  `act_artifact_quarantined` on transition with the triggering reason. */
 export const maybeQuarantine = (
   db: Database,
   artifactId: string,
@@ -455,11 +455,11 @@ export const maybeQuarantine = (
 
   const ts = nowIso();
   db.run(
-    "UPDATE code_artifact SET status = ?, updated_at = ? WHERE id = ?",
+    "UPDATE act_artifact SET status = ?, updated_at = ? WHERE id = ?",
     ["quarantined", ts, artifactId],
   );
   emit({
-    kind: "code_artifact_quarantined",
+    kind: "act_artifact_quarantined",
     substrate_origin: "substrate_auto",
     action_artifact_id: artifactId,
     payload: {
@@ -480,7 +480,7 @@ export const maybeQuarantine = (
 // ── Hard-kill counter + terminal retirement (brain sandbox audit
 //    bsfxsvgh9, 2026-05-15) ────────────────────────────────────────
 //
-// Pre-fix: recent_kill_count was a column on code_artifact but NO
+// Pre-fix: recent_kill_count was a column on act_artifact but NO
 // production code path incremented it on runtime_subprocess_hard_killed
 // / artifact_observed hard_kill events. The kill-count quarantine gate
 // (>= 3 kills triggers quarantine) was therefore dead — the artifact
@@ -496,7 +496,7 @@ export const maybeQuarantine = (
 // maybeRetire: terminal state. Unlike quarantine (rehabilitatable),
 // retired artifacts are NEVER re-admitted. Triggers:
 //   - recent_kill_count >= 10
-//   - >= 3 prior code_artifact_quarantined events
+//   - >= 3 prior act_artifact_quarantined events
 //   - >= 3 irreversible_effect_recorded events without
 //     owner_consent_event_id (in the last 24h)
 
@@ -506,10 +506,12 @@ const RETIRE_IRREVERSIBLE_COUNT_THRESHOLD = 3;
 const RETIRE_IRREVERSIBLE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 const countPriorQuarantines = (db: Database, artifactId: string): number => {
+  // F4a: match both canonical and legacy kind strings so historical
+  // events authored before the act_artifact rename still count.
   const row = db
     .query(
       `SELECT COUNT(*) AS n FROM events
-       WHERE kind = 'code_artifact_quarantined'
+       WHERE kind IN ('act_artifact_quarantined', 'code_artifact_quarantined')
          AND action_artifact_id = ?`,
     )
     .get(artifactId) as { n: number } | null;
@@ -552,7 +554,7 @@ export const recordArtifactKill = (
   const newCount = row.recentKillCount + 1;
   const ts = nowIso();
   db.run(
-    "UPDATE code_artifact SET recent_kill_count = ?, updated_at = ? WHERE id = ?",
+    "UPDATE act_artifact SET recent_kill_count = ?, updated_at = ? WHERE id = ?",
     [newCount, ts, artifactId],
   );
   emit({
@@ -597,11 +599,11 @@ export const maybeRetire = (
 
   const ts = nowIso();
   db.run(
-    "UPDATE code_artifact SET status = ?, updated_at = ? WHERE id = ?",
+    "UPDATE act_artifact SET status = ?, updated_at = ? WHERE id = ?",
     ["retired", ts, artifactId],
   );
   emit({
-    kind: "code_artifact_retired",
+    kind: "act_artifact_retired",
     substrate_origin: "substrate_auto",
     action_artifact_id: artifactId,
     payload: {
@@ -618,7 +620,7 @@ export const maybeRetire = (
 // ── Rehabilitation (Phase H — v2-design.md §11.6) ──────────────────
 //
 // Quarantined artifacts can re-enter `admitted` status after:
-//   (a) 14-day cooldown elapsed since the latest `code_artifact_quarantined` event,
+//   (a) 14-day cooldown elapsed since the latest `act_artifact_quarantined` event,
 //   (b) the admission fixture re-passes,
 //   (c) ≥ 10 controlled fixture invocations succeed in sequence.
 //
@@ -636,12 +638,15 @@ export type RehabResult =
   | { rehabilitated: true; controlledRuns: number }
   | { rehabilitated: false; reason: "not_quarantined" | "cooldown_pending" | "fixture_run_failed" | "fixture_residual_too_high"; detail?: string };
 
-/** Read the latest `code_artifact_quarantined` event ts for an artifact. */
+/** Read the latest `act_artifact_quarantined` event ts for an artifact.
+ *  F4a: matches both canonical and legacy kind strings so historical
+ *  events authored before the act_artifact rename still resolve. */
 const latestQuarantineTs = (db: Database, artifactId: string): string | null => {
   const row = db
     .query(
       `SELECT ts FROM events
-       WHERE action_artifact_id = ? AND kind = 'code_artifact_quarantined'
+       WHERE action_artifact_id = ?
+         AND kind IN ('act_artifact_quarantined', 'code_artifact_quarantined')
        ORDER BY ts DESC LIMIT 1`,
     )
     .get(artifactId) as { ts: string } | null;
@@ -653,7 +658,7 @@ const latestQuarantineTs = (db: Database, artifactId: string): string | null => 
  *  re-passes, and 10 controlled fixture invocations all return residual
  *  below the artifact's admission threshold. The runner closure is
  *  injected so callers wire it to the appropriate runtime; tests pass a
- *  deterministic stub. Emits `code_artifact_rehabilitated` on transition. */
+ *  deterministic stub. Emits `act_artifact_rehabilitated` on transition. */
 export const maybeRehabilitate = async (
   db: Database,
   artifactId: string,
@@ -707,11 +712,11 @@ export const maybeRehabilitate = async (
 
   const ts = nowIso();
   db.run(
-    "UPDATE code_artifact SET status = ?, updated_at = ? WHERE id = ?",
+    "UPDATE act_artifact SET status = ?, updated_at = ? WHERE id = ?",
     ["admitted", ts, artifactId],
   );
   emit({
-    kind: "code_artifact_rehabilitated",
+    kind: "act_artifact_rehabilitated",
     substrate_origin: "substrate_auto",
     action_artifact_id: artifactId,
     payload: {
@@ -731,12 +736,12 @@ export const listRehabilitationCandidates = (db: Database, nowMs?: number): Code
   const ts = new Date((nowMs ?? Date.now()) - REHABILITATION_COOLDOWN_MS).toISOString();
   const rows = db
     .query(
-      `SELECT ca.* FROM code_artifact ca
+      `SELECT ca.* FROM act_artifact ca
        WHERE ca.status = 'quarantined'
          AND EXISTS (
            SELECT 1 FROM events e
            WHERE e.action_artifact_id = ca.id
-             AND e.kind = 'code_artifact_quarantined'
+             AND e.kind IN ('act_artifact_quarantined', 'code_artifact_quarantined')
              AND e.ts <= ?
          )`,
     )

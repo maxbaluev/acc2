@@ -34,13 +34,13 @@ if (process.env.ACC2_TEST_MODE === "1") {
   server.addTool({
     name: "runtime.test_reset",
     description:
-      "Test-only: truncate events, code_artifact, vec_events, meta. " +
+      "Test-only: truncate events, act_artifact, vec_events, meta. " +
       "Registered exclusively when ACC2_TEST_MODE=1 in the stdio entry.",
     parameters: z.object({}),
     execute: async (): Promise<string> => {
       try {
         db.exec("DELETE FROM events");
-        db.exec("DELETE FROM code_artifact");
+        db.exec("DELETE FROM act_artifact");
         try { db.exec("DELETE FROM vec_events"); } catch { /* virtual table may refuse if not loaded */ }
         db.exec("DELETE FROM meta");
         return JSON.stringify({ ok: true, result: { reset: true } });

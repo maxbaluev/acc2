@@ -88,7 +88,7 @@ export type FatherDirectiveTemplate = {
  *  Adding a template here is a code change subject to review.
  *
  *  Brain legacy-cleanup audit byaeuflif #2 (2026-05-15): the three
- *  extractor-pass templates (recipe / knowledge / code_artifact)
+ *  extractor-pass templates (recipe / knowledge / act_artifact)
  *  were removed because the extractors worker (runtime/daemon.ts)
  *  now runs `extractRecipeCandidates`, `extractKnowledgePromotions`,
  *  `extractCodeArtifactScores`, and `extractSemanticDedup` on a

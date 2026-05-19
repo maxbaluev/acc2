@@ -647,11 +647,11 @@ export const runOverrideQuarantineCmd = async (
   }
   const ts = new Date().toISOString();
   db.run(
-    "UPDATE code_artifact SET status = 'admitted', updated_at = ? WHERE id = ?",
+    "UPDATE act_artifact SET status = 'admitted', updated_at = ? WHERE id = ?",
     [ts, artifactId],
   );
   emitEvent(db, {
-    kind: "code_artifact_quarantine_overridden",
+    kind: "act_artifact_quarantine_overridden",
     substrate_origin: "owner",
     action_artifact_id: artifactId,
     payload: {

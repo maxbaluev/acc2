@@ -234,7 +234,7 @@ The canonical substrate-truth view for "what happened on this dispatch?" is
 `acc dispatch <directive_id_or_prefix>`. It reads the event ledger
 directly (not the Bash background-task panel) and surfaces, in one report,
 the directive metadata + task DAG with per-task status badges, KCs and
-`code_artifact_candidate` emissions grouped by task, refinement edges,
+`act_artifact_candidate` emissions grouped by task, refinement edges,
 `contract_amendment_proposed` rows, and `task_closure_audited` residuals.
 
 This is the command the orchestrator now reaches for instead of authoring

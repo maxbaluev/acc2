@@ -71,7 +71,7 @@ What each step does:
    checks (daemon /health, opencode on PATH, OPENAI_API_KEY in env), it
    now also asserts:
    - ≥ 5 `knowledge_promoted` events in the ledger,
-   - ≥ 5 canonical `seed_*` rows in `code_artifact`,
+   - ≥ 5 canonical `seed_*` rows in `act_artifact`,
    - `sqlite-vec` extension loads + `vec0(...)` virtual table works.
    The bottom line reports `[PASS] ready for real-brain dispatch` when
    every must-have is green.
@@ -360,7 +360,7 @@ install is complete.
   runtimes unaffected)
 - ACC2_BRIDGE_MODE (production default = real)
 - **seed knowledge** — ≥ 5 `knowledge_promoted` events (Task 3)
-- **seed artifacts** — ≥ 5 canonical `seed_*` rows in `code_artifact` (Task 3)
+- **seed artifacts** — ≥ 5 canonical `seed_*` rows in `act_artifact` (Task 3)
 - **sqlite-vec extension** — vec0 loads + virtual-table constructor works (Task 3)
 
 When every must-have line is `[ ok ]` and the composite reports `[PASS]`,

@@ -174,24 +174,29 @@ export const EVENT_KINDS = {
   // requiring the brain to explicitly cite the source directive.
   knowledge_propagated:                     { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
-  // ── Code artifacts (LATM / Voyager) ─────────────────────────────────
-  code_artifact_candidate:                 { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: false },
-  // 2026-05-15 right-sizing: code_artifact_admitted payload carries only
+  // ── Act artifacts (polymorphic handle registry, F4a 2026-05-18) ────
+  // F4a (roadmap WW7W1NZ8A10R52PB4E7EJE9YBW): kinds were code_artifact_*
+  // before the rename. Historical events in the ledger retain the old
+  // kind strings; the legacy aliases below are kept so existing-row
+  // queries continue to resolve. New emissions use the canonical
+  // act_artifact_* names.
+  act_artifact_candidate:                  { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: false },
+  // 2026-05-15 right-sizing: act_artifact_admitted payload carries only
   // {artifact_id, runtime, score, confidence} — the BODY lives in
-  // code_artifact.body, never in the event. Retrieval over artifacts goes
-  // through code_artifact_registry_view; embedding the admission record
+  // act_artifact.body, never in the event. Retrieval over artifacts goes
+  // through act_artifact_registry_view; embedding the admission record
   // returned 0% text-hit on 342 events.
-  code_artifact_admitted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  code_artifact_admission_rejected:        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  act_artifact_admitted:                   { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  act_artifact_admission_rejected:         { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // C1 (2026-05-18): substrate-side structural admission gate that
   // runs alex_predicate_* knowledge_candidates against
-  // code_artifact_candidate bodies whose audience tag is
+  // act_artifact_candidate bodies whose audience tag is
   // ceo_buyer / external_executive. Health-metric so dashboards can
   // surface how often the gate fires (k_252 advisory→structural
   // conversion evidence).
   predicate_gate_rejected:                 { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   // C3 (2026-05-18, directive QHTRBV6PFX2JVBMHDNDA4B03GC): substrate-side
-  // structural strategy-first gate. Rejects any code_artifact_candidate
+  // structural strategy-first gate. Rejects any act_artifact_candidate
   // whose `name` starts with `atms_report_v` when `cited_knowledge_ids`
   // lacks at least one knowledge_candidate with claim ending
   // `_strategic_direction_chosen`. Closes the failure mode where report
@@ -207,7 +212,7 @@ export const EVENT_KINDS = {
   // Non-destructive — the substrate flips the prior row's
   // superseded_by field; trashing the external Drive doc remains an
   // explicit owner action.
-  code_artifact_superseded:                { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  act_artifact_superseded:                 { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   // C2 (2026-05-18, contract V32YTK7HKN6MS38KWJY1SKTXAW): substrate-side
   // admission gates for the render pipeline (markdown_body ×
   // docx_reference_style → rendered_docx → published_drive_doc). Each
@@ -218,15 +223,32 @@ export const EVENT_KINDS = {
   // often the gate fires.
   rendered_docx_invalid_inputs:            { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   published_drive_doc_invalid_inputs:      { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
-  code_artifact_promoted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
-  code_artifact_quarantined:               { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  act_artifact_promoted:                   { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  act_artifact_quarantined:                { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // Terminal retirement (sandbox audit bsfxsvgh9, 2026-05-15): unlike
   // quarantine, retired artifacts are NEVER re-admitted. Triggered by
   // accumulated hard kills / repeat quarantines / unconsented irreversibles.
-  code_artifact_retired:                   { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true, narrative: false },
+  act_artifact_retired:                    { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: true, narrative: false },
   // Per-counter audit emitted by recordArtifactKill so the substrate
   // shows WHY recent_kill_count climbed (and from which event).
   artifact_health_counter_updated:         { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  act_artifact_rehabilitated:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  act_artifact_score_updated:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // F4a deprecated aliases — historical event rows wrote these kind
+  // strings before the rename. Registered here so existing queries that
+  // SELECT WHERE kind = 'code_artifact_admitted' still match. The
+  // substrate emits the new act_artifact_* names going forward; only
+  // historical rows carry the legacy strings. Surface flags are deliberately
+  // false so the legacy strings do not count twice in derived sets
+  // (HEALTH_METRIC_KINDS / EMBEDDABLE_KINDS) — the canonical
+  // act_artifact_* entries above carry the live truth.
+  code_artifact_candidate:                 { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  code_artifact_admitted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  code_artifact_admission_rejected:        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  code_artifact_superseded:                { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  code_artifact_promoted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  code_artifact_quarantined:               { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  code_artifact_retired:                   { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   code_artifact_rehabilitated:             { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   code_artifact_score_updated:             { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   latm_novelty_bonus_applied:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
@@ -546,6 +568,8 @@ export const EVENT_KINDS = {
   // ── Admin maintenance ───────────────────────────────────────────────
   admin_token_rotated:                     { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   external_source_token_rotated:           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  act_artifact_quarantine_overridden:      { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // F4a deprecated alias — see act_artifact_* block above.
   code_artifact_quarantine_overridden:     { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   directive_archived_by_operator:          { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   state_exported:                          { producer: "claude",    embeddable: false, mirror_inline: false, health_metric: false, narrative: false },

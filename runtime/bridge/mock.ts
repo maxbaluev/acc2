@@ -799,7 +799,7 @@ const runBatch5FixtureMock = async (
   const emittedEventIds: string[] = [];
 
   emitEvent(db, {
-    kind: "code_artifact_candidate",
+    kind: "act_artifact_candidate",
     substrate_origin: "opencode",
     directive_id: req.directiveId,
     task_id: req.taskId,
@@ -840,7 +840,7 @@ const runBatch5FixtureMock = async (
   }
 
   emitEvent(db, {
-    kind: "code_artifact_candidate",
+    kind: "act_artifact_candidate",
     substrate_origin: "opencode",
     directive_id: req.directiveId,
     task_id: req.taskId,
@@ -981,7 +981,7 @@ export const opencodeQueryMock = async (
     const emittedEventIds: string[] = [];
 
     emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       directive_id: req.directiveId,
       task_id: req.taskId,
@@ -1039,7 +1039,7 @@ export const opencodeQueryMock = async (
     }
 
     emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       directive_id: req.directiveId,
       task_id: req.taskId,
@@ -1136,10 +1136,10 @@ export const opencodeQueryMock = async (
   const emittedEventIds: string[] = [];
 
   // 1. Admit the action artifact via the admission pipeline (so the audit
-  //    trail matches real brain flow: code_artifact_candidate → admission
+  //    trail matches real brain flow: act_artifact_candidate → admission
   //    → admitted/rejected).
   emitEvent(db, {
-    kind: "code_artifact_candidate",
+    kind: "act_artifact_candidate",
     substrate_origin: "opencode",
     directive_id: req.directiveId,
     task_id: req.taskId,
@@ -1192,7 +1192,7 @@ export const opencodeQueryMock = async (
 
   // 2. Admit the verifier artifact — same pipeline.
   emitEvent(db, {
-    kind: "code_artifact_candidate",
+    kind: "act_artifact_candidate",
     substrate_origin: "opencode",
     directive_id: req.directiveId,
     task_id: req.taskId,

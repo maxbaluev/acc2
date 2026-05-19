@@ -91,11 +91,11 @@ describe("EmbeddingIndex.add + knn", () => {
     runViews(db);
     const dims = 8;
     seedEmbeddedEvent(db, "knowledge_candidate", "candidate axis-0", 0, dims);
-    seedEmbeddedEvent(db, "code_artifact_admitted", "artifact axis-1", 1, dims);
+    seedEmbeddedEvent(db, "act_artifact_admitted", "artifact axis-1", 1, dims);
 
     const idx = EmbeddingIndex.rebuildFromDb(db);
     const query = makeUnitVec(dims, 0);
-    const hits = idx.knn(query, 5, (e) => e.kind === "code_artifact_admitted");
+    const hits = idx.knn(query, 5, (e) => e.kind === "act_artifact_admitted");
     expect(hits.length).toBe(1);
     expect(hits[0].entry.snippet).toBe("artifact axis-1");
   });

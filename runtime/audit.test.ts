@@ -408,7 +408,7 @@ describe("audit A.3.6.1: semantic merger rules 1/2/3 actually execute", () => {
 
 // ── A.7 knowledge promotion — single-row API ───────────────────────
 
-describe("audit A.7: maybePromoteKnowledge mirrors maybePromote for code_artifact", () => {
+describe("audit A.7: maybePromoteKnowledge mirrors maybePromote for act_artifact", () => {
   test("emits knowledge_promoted when wins ≥ 5 AND beta-mean ≥ 0.85", () => {
     const db = openDb(":memory:");
     runViews(db);
@@ -571,7 +571,7 @@ describe("audit A.4.1: design-named event kinds exist as EventKind union members
 // ── A.4.2 substrate.read view dispatch lights named views ──────────
 
 describe("audit A.4.2: substrate.read routes named views (not view_not_implemented)", () => {
-  test("ready_tasks_view, code_artifact_registry_view, etc. resolve", async () => {
+  test("ready_tasks_view, act_artifact_registry_view, etc. resolve", async () => {
     // Use the in-process dispatcher (handleMcpRequest) so the test does not
     // need an MCP transport.
     const { handleMcpRequest } = await import("./mcp_server");
@@ -587,7 +587,7 @@ describe("audit A.4.2: substrate.read routes named views (not view_not_implement
         }),
       );
     for (const v of [
-      "code_artifact_registry_view",
+      "act_artifact_registry_view",
       "ready_tasks_view",
       "failure_view",
       "active_objectives_view",

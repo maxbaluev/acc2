@@ -1,6 +1,6 @@
 // acc2 strategy-first closure-check tests (C3, 2026-05-18,
 // directive QHTRBV6PFX2JVBMHDNDA4B03GC). Pin the structural rule:
-// any directive that emits a `code_artifact_candidate` whose
+// any directive that emits a `act_artifact_candidate` whose
 // payload.name starts with `atms_report_v` must (a) have ≥ 15
 // `task_node_opened` rows under the directive AND (b) cite at least
 // one knowledge_candidate whose payload.claim ends with
@@ -63,7 +63,7 @@ describe("checkStrategyFirstClosure", () => {
 
     // V-layer emits the atms_report_v* candidate citing the T-layer KC.
     emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       directive_id: D_OK,
       task_id: "V1",
       payload: {
@@ -91,7 +91,7 @@ describe("checkStrategyFirstClosure", () => {
     openTask(db, D_INITIATIVE_FIRST, "V1", "V1: compose ATMS report v1");
 
     emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       directive_id: D_INITIATIVE_FIRST,
       task_id: "V1",
       payload: {
@@ -118,7 +118,7 @@ describe("checkStrategyFirstClosure", () => {
       openTask(db, "d_enough_nodes_no_strategy", `n_${i}`, `node ${i}`);
     }
     emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       directive_id: "d_enough_nodes_no_strategy",
       task_id: "n_16",
       payload: { runtime: "bun", name: "atms_report_v4", cited_knowledge_ids: [] },
@@ -134,7 +134,7 @@ describe("checkStrategyFirstClosure", () => {
     const db = openDb(":memory:");
     openTask(db, "d_no_atms_report", "x1", "some other work");
     emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       directive_id: "d_no_atms_report",
       task_id: "x1",
       payload: { runtime: "bun", name: "other_recipe_v1", cited_knowledge_ids: [] },
@@ -148,7 +148,7 @@ describe("checkStrategyFirstClosure", () => {
   test("currentResidual already above floor is preserved on violation (max not min)", () => {
     const db = openDb(":memory:");
     emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       directive_id: "d_high_residual",
       task_id: "v1",
       payload: { runtime: "bun", name: "atms_report_v2", cited_knowledge_ids: [] },

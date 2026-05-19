@@ -278,17 +278,17 @@ export const inspectDispatch = (db: Database, directiveIdOrPrefix: string): Disp
     });
   }
 
-  // code_artifact_candidate grouped by task.
+  // act_artifact_candidate grouped by task.
   const artifactRows = db.query(
     `SELECT id, ts, task_id, payload FROM events
-     WHERE directive_id=? AND kind='code_artifact_candidate'
+     WHERE directive_id=? AND kind='act_artifact_candidate'
      ORDER BY ts ASC`,
   ).all(directiveId) as Array<{ id: string; ts: string; task_id: string; payload: string }>;
   const artifacts_by_task: Record<string, ArtifactSummary[]> = {};
   for (const r of artifactRows) {
     const payload = parseJson<Record<string, unknown>>(r.payload, {});
     const body = String(payload.body ?? payload.code ?? "");
-    const kind = String(payload.kind ?? payload.runtime ?? "code_artifact");
+    const kind = String(payload.kind ?? payload.runtime ?? "act_artifact");
     const name = String(payload.name ?? payload.id ?? payload.artifact_id ?? "");
     const bucket = artifacts_by_task[r.task_id] ?? (artifacts_by_task[r.task_id] = []);
     bucket.push({
@@ -461,7 +461,7 @@ const renderPretty = (
 
   // ── Artifacts ────────────────────────────────────────────────────
   const artCount = Object.values(inspection.artifacts_by_task).reduce((a, b) => a + b.length, 0);
-  out(bold(`code_artifact_candidate (${artCount}):`));
+  out(bold(`act_artifact_candidate (${artCount}):`));
   if (artCount === 0) out(dim("  (none)"));
   for (const t of inspection.tasks) {
     const arts = inspection.artifacts_by_task[t.task_id];
@@ -515,7 +515,7 @@ const usage = (): string => [
   "  acc dispatch <directive_id_or_prefix> [--json] [--no-color]",
   "",
   "Surfaces directive metadata, the task DAG, terminal status per task,",
-  "knowledge_candidate + code_artifact_candidate emissions grouped by task,",
+  "knowledge_candidate + act_artifact_candidate emissions grouped by task,",
   "refinement edges, contract amendments, and closure audit residuals.",
   "Replaces the ad-hoc /tmp/check_*.ts inspection scripts the orchestrator",
   "used to write — one canonical substrate-truth surface per",

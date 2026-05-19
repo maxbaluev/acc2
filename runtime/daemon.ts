@@ -639,7 +639,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   workers.push(() => clearInterval(amendmentTick));
 
   // Batch 3.OPS: gauge refresh (every 30s) keeps the SQLite-backed gauges
-  // (substrate_events_total, code_artifacts_*) live for /metrics scrapes.
+  // (substrate_events_total, act_artifacts_*) live for /metrics scrapes.
   const gaugeTick = setInterval(
     supervisedTick(db, "metrics_gauge_refresh", gaugeTickMs, async () => {
       refreshGauges(db, startedAtMs);
@@ -742,10 +742,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   }
 
   // Brain audit B (2026-05-15): extractors worker — periodic scan of
-  // open knowledge_candidate and code_artifact rows that have crossed
+  // open knowledge_candidate and act_artifact rows that have crossed
   // the promotion thresholds. Pre-fix the only way these advanced was
   // chance dispatch through Father; substrate counts showed 0/53
-  // code_artifact_promoted and 0/70 recipe_promoted. Running on a
+  // act_artifact_promoted and 0/70 recipe_promoted. Running on a
   // bounded 5-min cadence makes promotion a substrate liveness function.
   const EXTRACTORS_INTERVAL_MS = Number(process.env.ACC2_EXTRACTORS_INTERVAL_MS ?? 5 * 60 * 1000);
   if (isWorkerEnabled("extractors")) {
@@ -770,7 +770,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
         logger.warn({ where: "daemon.extractors.knowledge", err: (err as Error).message }, "knowledge extractor tick failed");
       }
       try { extractCodeArtifactScores(db); } catch (err) {
-        logger.warn({ where: "daemon.extractors.code_artifact", err: (err as Error).message }, "code artifact extractor tick failed");
+        logger.warn({ where: "daemon.extractors.act_artifact", err: (err as Error).message }, "code artifact extractor tick failed");
       }
       try { extractRecipeCandidates(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.recipes", err: (err as Error).message }, "recipe extractor tick failed");
@@ -779,7 +779,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
         logger.warn({ where: "daemon.extractors.semantic_dedup", err: (err as Error).message }, "semantic-dedup extractor tick failed");
       }
       // Auto cross-directive interference (organism-alignment Track C,
-      // 2026-05-15): scan code_artifact.target_resources/target_files for cross-directive
+      // 2026-05-15): scan act_artifact.target_resources/target_files for cross-directive
       // overlap and emit resource_conflict edges so the scheduler defers
       // racing dispatches. Idempotent — re-runs dedupe against existing
       // edges.

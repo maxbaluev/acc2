@@ -27,14 +27,14 @@ const newId = (): string => crypto.randomUUID().replace(/-/g, "").slice(0, 26).t
 const nowIso = (): string => new Date().toISOString();
 
 describe("openDb", () => {
-  test(":memory: opens and applies schema (events + code_artifact exist)", () => {
+  test(":memory: opens and applies schema (events + act_artifact exist)", () => {
     const db = openDb(":memory:");
     const tables = db
       .query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all() as Array<{ name: string }>;
     const names = tables.map((t) => t.name);
     expect(names).toContain("events");
-    expect(names).toContain("code_artifact");
+    expect(names).toContain("act_artifact");
     expect(names).toContain("meta");
   });
 
@@ -126,8 +126,8 @@ describe("events table round-trip", () => {
   });
 });
 
-describe("code_artifact table round-trip", () => {
-  test("insert a code_artifact row with every column set, read it back", () => {
+describe("act_artifact table round-trip", () => {
+  test("insert an act_artifact row with every column set, read it back", () => {
     const db = openDb(":memory:");
     const id = newId();
     const sandbox = {
@@ -145,7 +145,7 @@ describe("code_artifact table round-trip", () => {
     const ts = nowIso();
 
     db.run(
-      `INSERT INTO code_artifact (
+      `INSERT INTO act_artifact (
          id, runtime, body, declared_sandbox, state_root,
          posterior_alpha, posterior_beta, score, confidence,
          recent_residual_mean, recent_kill_count, status, name,
@@ -160,7 +160,7 @@ describe("code_artifact table round-trip", () => {
       ],
     );
 
-    const row = db.query("SELECT * FROM code_artifact WHERE id = ?").get(id) as Record<string, unknown>;
+    const row = db.query("SELECT * FROM act_artifact WHERE id = ?").get(id) as Record<string, unknown>;
     expect(row.id).toBe(id);
     expect(row.runtime).toBe("bun");
     expect(row.status).toBe("admitted");
@@ -174,15 +174,15 @@ describe("code_artifact table round-trip", () => {
     expect(JSON.parse(row.fixture_input as string)).toEqual(fixtureInput);
   });
 
-  test("code_artifact indexes (runtime, status, score DESC) exist", () => {
+  test("act_artifact indexes (runtime, status, score DESC) exist", () => {
     const db = openDb(":memory:");
     const idx = db
-      .query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='code_artifact'")
+      .query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='act_artifact'")
       .all() as Array<{ name: string }>;
     const names = idx.map((r) => r.name);
-    expect(names).toContain("idx_code_artifact_runtime");
-    expect(names).toContain("idx_code_artifact_status");
-    expect(names).toContain("idx_code_artifact_score");
+    expect(names).toContain("idx_act_artifact_runtime");
+    expect(names).toContain("idx_act_artifact_status");
+    expect(names).toContain("idx_act_artifact_score");
   });
 });
 

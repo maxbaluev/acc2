@@ -1,5 +1,5 @@
 // acc2 strategy-first emit-side observability test (dark-gate sweep
-// 2026-05-18). The structural claim: when a code_artifact_candidate
+// 2026-05-18). The structural claim: when a act_artifact_candidate
 // whose name starts with `atms_report_v` is emitted without a cited
 // knowledge_candidate whose payload.claim ends with
 // `_strategic_direction_chosen`, the emit-side screen fires
@@ -14,12 +14,12 @@ import { emitEvent } from "../runtime/events";
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
 
-describe("atms_strategy_first_violation — emit-side screen on code_artifact_candidate", () => {
+describe("atms_strategy_first_violation — emit-side screen on act_artifact_candidate", () => {
   test("fires when an atms_report_v* candidate has no strategic-direction citation", () => {
     const db = openDb(":memory:");
     const body = "# Lakeland AI Transformation Roadmap v12\n\n".padEnd(800, "a");
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       directive_id: "d_strategy_emit_test",
       task_id: "d_strategy_emit_test",
@@ -54,7 +54,7 @@ describe("atms_strategy_first_violation — emit-side screen on code_artifact_ca
     });
     const body = "# Lakeland AI Transformation Roadmap v13\n\n".padEnd(800, "a");
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         kind: "atms_report_v13",
@@ -75,7 +75,7 @@ describe("atms_strategy_first_violation — emit-side screen on code_artifact_ca
     const db = openDb(":memory:");
     const body = "# Some other report\n\n".padEnd(800, "z");
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         kind: "system_internals_doc",
@@ -100,7 +100,7 @@ describe("atms_strategy_first_violation — emit-side screen on code_artifact_ca
     // only checked name and missed these entirely.
     const body = "# Lakeland AI Transformation v9\n\n".padEnd(900, "b");
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         kind: "atms_report_v9",

@@ -1,16 +1,16 @@
 // acc2 artifact-candidate screen — emit-side gates that scan
-// `code_artifact_candidate` event payloads BEFORE the candidate row
+// `act_artifact_candidate` event payloads BEFORE the candidate row
 // flows into downstream admission/closure paths. Closes the
 // dark-gate gap (substrate audit 2026-05-18): the predicate gate and
 // strategy-first gate were only wired into `admitArtifact`, but the
-// brain emits `code_artifact_candidate` events directly via
+// brain emits `act_artifact_candidate` events directly via
 // `substrate.emit` carrying the body in payload.body. Those events
 // never reached the gates, so banned phrases, empty bodies, and
 // missing strategic-direction citations slipped through.
 //
 // Hook point: `runtime/events.ts emitEvent` calls
 // `screenCodeArtifactCandidate` whenever input.kind ===
-// "code_artifact_candidate". The screen returns the list of refusal
+// "act_artifact_candidate". The screen returns the list of refusal
 // events to emit alongside the candidate. emitEvent inserts the
 // candidate row first, then drives the refusal emissions back
 // through itself so each one lands as a normal ledger row referencing
@@ -154,7 +154,7 @@ const asStringArray = (value: unknown): string[] => {
   return value.filter((v): v is string => typeof v === "string" && v.length > 0);
 };
 
-/** Screen one code_artifact_candidate payload. The returned refusals
+/** Screen one act_artifact_candidate payload. The returned refusals
  *  are emitted by the caller AFTER the candidate row is inserted so
  *  each refusal references the candidate's id in context_refs. */
 export const screenCodeArtifactCandidate = (
@@ -181,7 +181,7 @@ export const screenCodeArtifactCandidate = (
         kind: "lane_routing_refused",
         payload: {
           reason: "empty_body_below_threshold",
-          refused_kind: "code_artifact_candidate",
+          refused_kind: "act_artifact_candidate",
           body_length: bodyLen,
           threshold: t.threshold,
           classification: t.classification,
@@ -264,7 +264,7 @@ export const screenCodeArtifactCandidate = (
   // 4. F1 decorative-citation refusal — every cited_knowledge_ids entry
   //    on a substantive candidate (audience set OR body length > 200)
   //    must resolve to a real events.id. Pre-fix 310 / 323 recent
-  //    code_artifact_candidates cited NOTHING; 60% of those that DID
+  //    act_artifact_candidates cited NOTHING; 60% of those that DID
   //    cite supplied string labels (e.g. "decorative_proof_of_alex") not
   //    real event ids — so k_555 four-link credit was broken at the
   //    binding step.
@@ -294,7 +294,7 @@ export const screenCodeArtifactCandidate = (
         kind: "lane_routing_refused",
         payload: {
           reason: "artifact_citation_underrooted",
-          refused_kind: "code_artifact_candidate",
+          refused_kind: "act_artifact_candidate",
           artifact_kind: declaredKind ?? null,
           artifact_name: declaredName ?? null,
           audience: typeof payload.audience === "string" ? payload.audience : null,
@@ -308,7 +308,7 @@ export const screenCodeArtifactCandidate = (
         kind: "lane_routing_refused",
         payload: {
           reason: "decorative_citation",
-          refused_kind: "code_artifact_candidate",
+          refused_kind: "act_artifact_candidate",
           artifact_kind: declaredKind ?? null,
           artifact_name: declaredName ?? null,
           unresolved_labels: unresolved as unknown as JsonValue,

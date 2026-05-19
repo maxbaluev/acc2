@@ -5,7 +5,7 @@
 // currentGoalShapeForTask, residual_band from latest task/directive
 // residual or unknown, owner_profile_signal projection from
 // owner_profile_view/routing_axes, then retrieve candidates from
-// code_artifact_registry_view OR substrate.search query=
+// act_artifact_registry_view OR substrate.search query=
 // 'dispatch_strategy_v1 <goal_shape> <residual_band> <owner signals>'.
 // Filter only for structural validity and status admitted/promoted;
 // score as posterior_mean/confidence × semantic match(goal_shape_tags),
@@ -33,7 +33,7 @@ import type { TaskNode } from "../substrate/types";
 const STRATEGY_KIND_TAG = "dispatch_strategy_v1";
 
 type StrategyDecl = {
-  /** Substrate id of the source code_artifact row. */
+  /** Substrate id of the source act_artifact row. */
   artifact_id: string;
   /** payload.name from the strategy declaration (one of one_shot_low_risk_v1,
    *  shallow_decomposition_v1, deep_decomposition_v1, replay_first_v1,
@@ -128,7 +128,7 @@ export const loadStrategyArtifacts = (db: Database): StrategyDecl[] => {
     rows = db
       .query(
         `SELECT id, body, posterior_alpha, posterior_beta, score, confidence
-         FROM code_artifact_registry_view
+         FROM act_artifact_registry_view
          WHERE (kind = 'dispatch_strategy_v1' OR state_root = 'dispatch/strategy')
            AND status IN ('admitted', 'promoted')`,
       )

@@ -110,7 +110,7 @@ Adding a new forbidden kind now requires editing one line in `cycle_one_gate.ts`
 
 ### Statement
 
-`§3.4, §6, §11`: every action is a code artifact resolved from `code_artifact` via `getArtifact()` and executed inside a per-runtime sandbox built by `runtime/sandbox.ts`. No "hardcoded helper" path bypasses lookup or permission args.
+`§3.4, §6, §11`: every action is a code artifact resolved from `act_artifact` via `getArtifact()` and executed inside a per-runtime sandbox built by `runtime/sandbox.ts`. No "hardcoded helper" path bypasses lookup or permission args.
 
 ### Test
 
@@ -192,7 +192,7 @@ The dispatcher path was untouched — it was already correctly closing the chain
 - Admit deterministic action + verifier artifacts (action returns `{value:1}`, verifier returns `{residual:0}`).
 - Construct a `RecipeMatch` hand-stamped with the artifact ids.
 - Run `replayRecipe(db, task, match)`. Assert `task_committed === true`.
-- For every `action_scored` row on the task, count `code_artifact_score_updated` rows whose payload references the scored event id. Each scored event must have ≥ 1 corresponding `code_artifact_score_updated` (the canonical "credit was distributed" marker that `distributeCredit` emits for the action and verifier artifacts).
+- For every `action_scored` row on the task, count `act_artifact_score_updated` rows whose payload references the scored event id. Each scored event must have ≥ 1 corresponding `act_artifact_score_updated` (the canonical "credit was distributed" marker that `distributeCredit` emits for the action and verifier artifacts).
 
 ---
 
@@ -254,7 +254,7 @@ The dispatcher path was untouched — it was already correctly closing the chain
 
 ### Statement
 
-`§3.6.1, §7.2, §11.5`: code_artifact and knowledge_candidate share the same Beta posterior + EMA half-life. Recipe confidence uses a DIFFERENT (coarser, qualitative) formula on purpose — recipes do not have a residual-driven posterior; they have a single "did the trajectory replay successfully" bit.
+`§3.6.1, §7.2, §11.5`: act_artifact and knowledge_candidate share the same Beta posterior + EMA half-life. Recipe confidence uses a DIFFERENT (coarser, qualitative) formula on purpose — recipes do not have a residual-driven posterior; they have a single "did the trajectory replay successfully" bit.
 
 ### Test
 
@@ -264,7 +264,7 @@ The dispatcher path was untouched — it was already correctly closing the chain
 
 **aligned (with explicit documentation).** Constants:
 
-| Constant            | code_artifact (artifact_store) | knowledge (extractors) | credit pipeline (credit.ts) | recipe (recipe_replay)     |
+| Constant            | act_artifact (artifact_store) | knowledge (extractors) | credit pipeline (credit.ts) | recipe (recipe_replay)     |
 |---------------------|--------------------------------|------------------------|-----------------------------|----------------------------|
 | Success band        | `SUCCESS_BAND = 0.3`           | `RESIDUAL_SUCCESS_THRESHOLD = 0.3` | `SUCCESS_BAND = 0.3`        | n/a (binary outcome)       |
 | Failure band        | `FAILURE_BAND = 0.7`           | (symmetric posterior)  | `FAILURE_BAND = 0.7`        | n/a                        |

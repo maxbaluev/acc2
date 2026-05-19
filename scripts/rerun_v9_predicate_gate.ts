@@ -65,12 +65,12 @@ for (const m of gateResult.matches.slice(0, 12)) {
 }
 
 // Now feed the body back through emitEvent so the new screen on the
-// code_artifact_candidate emit path actually emits a fresh
+// act_artifact_candidate emit path actually emits a fresh
 // predicate_gate_rejected row referencing the new candidate's id.
 // The rerun directive isolates the new event from any live directive.
 const directiveId = "d_rerun_v9_predicate_" + Date.now();
 const emitted = emitEvent(db, {
-  kind: "code_artifact_candidate",
+  kind: "act_artifact_candidate",
   substrate_origin: "substrate_auto",
   directive_id: directiveId,
   task_id: directiveId,

@@ -1,5 +1,5 @@
 // acc2 predicate_gate verifier — structural admission gate for
-// code_artifact_candidate bodies destined for high-stakes audiences
+// act_artifact_candidate bodies destined for high-stakes audiences
 // (ceo_buyer, external_executive). Closes the advisory-vs-structural
 // failure mode (k_252) demonstrated 2026-05-18 by brain w2 self-scan:
 // the scan emitted "lake_v7_predicate_scan_zero_hits" while the body

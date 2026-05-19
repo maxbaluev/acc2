@@ -6,7 +6,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "./db";
 import {
-  seedCodeArtifacts,
+  seedActArtifacts,
   seedFoundationalKnowledge,
   seedRecipes,
 } from "./seed";
@@ -49,7 +49,7 @@ describe("LIVENESS_THRESHOLDS", () => {
     // derive from these; changing them in one place and not the other
     // is what this contract exists to prevent.
     expect(LIVENESS_THRESHOLDS.knowledgePromoted).toBe(5);
-    expect(LIVENESS_THRESHOLDS.codeArtifactsSeed).toBe(5);
+    expect(LIVENESS_THRESHOLDS.actArtifactsSeed).toBe(5);
     expect(LIVENESS_THRESHOLDS.recipesSeed).toBe(1);
     expect(LIVENESS_THRESHOLDS.vecExtensionLoadable).toBe(1);
   });
@@ -63,7 +63,7 @@ describe("computeLivenessReport", () => {
     // Every signal still surfaces so the renderer can show the gap.
     const names = r.signals.map((s) => s.name).sort();
     expect(names).toEqual([
-      "codeArtifactsSeed",
+      "actArtifactsSeed",
       "knowledgePromoted",
       "recipesSeed",
       "vecExtensionLoadable",
@@ -75,7 +75,7 @@ describe("computeLivenessReport", () => {
     const db = openDb(":memory:");
     // Seed artifacts + recipes but skip foundational knowledge so
     // knowledgePromoted stays at 0 (below LIVENESS_THRESHOLDS.knowledgePromoted=5).
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     seedRecipes(db);
     const r = computeLivenessReport(db);
     expect(r.verdict).toBe("DEGRADED");
@@ -87,7 +87,7 @@ describe("computeLivenessReport", () => {
   test("DEGRADED when seeds landed but no embeddings exist (vec_events == 0)", () => {
     const db = openDb(":memory:");
     seedFoundationalKnowledge(db, { ownerApproved: true });
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     seedRecipes(db);
     const r = computeLivenessReport(db);
     expect(r.verdict).toBe("DEGRADED");
@@ -96,7 +96,7 @@ describe("computeLivenessReport", () => {
     expect(vec.observed).toBe(0);
     // Other seed signals should pass (the seeds populate them).
     expect(r.signals.find((s) => s.name === "knowledgePromoted")!.pass).toBe(true);
-    expect(r.signals.find((s) => s.name === "codeArtifactsSeed")!.pass).toBe(true);
+    expect(r.signals.find((s) => s.name === "actArtifactsSeed")!.pass).toBe(true);
     expect(r.signals.find((s) => s.name === "recipesSeed")!.pass).toBe(true);
   });
 
@@ -109,7 +109,7 @@ describe("computeLivenessReport", () => {
     });
     const db = openDb(":memory:");
     seedFoundationalKnowledge(db, { ownerApproved: true });
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     seedRecipes(db);
     await embedPendingEvents(db);
     const r = computeLivenessReport(db);

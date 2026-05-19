@@ -47,7 +47,7 @@ const usage = (): string => `acc — v2 thin CLI
   acc graph <directive_id>        Render the task DAG (nodes ranked, edges).
   acc inspect <task_id_prefix>    Per-task report: event histogram + chronology.
   acc artifact provenance <artifact_id> [--json] [--no-color]
-                                  Graph-walk a code_artifact's supersedes
+                                  Graph-walk an act_artifact's supersedes
                                   chain (ancestors + descendants) and render
                                   the lineage. Non-destructive supersede
                                   semantics for published_drive_doc — the
@@ -65,7 +65,7 @@ const usage = (): string => `acc — v2 thin CLI
                                   Canonical substrate-truth inspection of one
                                   directive's full dispatch trajectory: task
                                   DAG (with per-task status badges), KCs and
-                                  code_artifact_candidate emissions grouped by
+                                  act_artifact_candidate emissions grouped by
                                   task, refinement edges, contract amendments,
                                   and closure_audit residuals. Replaces the
                                   ad-hoc /tmp/check_*.ts scripts.

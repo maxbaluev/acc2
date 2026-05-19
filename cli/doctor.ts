@@ -50,7 +50,7 @@ export type DoctorEnv = {
 export type SubstrateCounts = {
   /** kind='knowledge_promoted' row count, or NaN on probe error. */
   knowledgePromoted: number;
-  /** code_artifact rows where name LIKE 'seed_%' OR id LIKE 'seed_%',
+  /** act_artifact rows where name LIKE 'seed_%' OR id LIKE 'seed_%',
    *  or NaN on probe error. */
   seedArtifacts: number;
   /** kind='recipe_extracted' row count, or NaN on probe error. Recipes
@@ -139,7 +139,7 @@ const realSubstrateCounts = (): SubstrateCounts => {
       .get() as { n: number };
     const a = db
       .query(
-        "SELECT COUNT(*) AS n FROM code_artifact WHERE name LIKE 'seed_%' OR id LIKE 'seed_%'",
+        "SELECT COUNT(*) AS n FROM act_artifact WHERE name LIKE 'seed_%' OR id LIKE 'seed_%'",
       )
       .get() as { n: number };
     const r = db
@@ -434,7 +434,7 @@ export const checkBunVersion = (env: DoctorEnv): Check => {
 // what "seeded" means. Re-exported here for back-compat with tests that
 // import the names directly.
 export const SEED_KNOWLEDGE_MIN = LIVENESS_THRESHOLDS.knowledgePromoted;
-export const SEED_ARTIFACT_MIN = LIVENESS_THRESHOLDS.codeArtifactsSeed;
+export const SEED_ARTIFACT_MIN = LIVENESS_THRESHOLDS.actArtifactsSeed;
 export const SEED_RECIPE_MIN = LIVENESS_THRESHOLDS.recipesSeed;
 
 /** Substrate-content check: at least SEED_KNOWLEDGE_MIN
@@ -472,7 +472,7 @@ export const checkSeedArtifacts = (env: DoctorEnv): Check => {
   }
   if (!Number.isFinite(counts.seedArtifacts)) {
     return { name: "seed artifacts", verdict: "fail",
-      detail: "could not read code_artifact count" };
+      detail: "could not read act_artifact count" };
   }
   if (counts.seedArtifacts < SEED_ARTIFACT_MIN) {
     return { name: "seed artifacts", verdict: "fail",

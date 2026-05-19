@@ -118,12 +118,12 @@ describe("retrieve (full async path with mocked query embed)", () => {
     const db = openDb(":memory:");
     runViews(db);
     seedEmbedded(db, "knowledge_candidate", "k-c near", 0, dims);
-    const artId = seedEmbedded(db, "code_artifact_admitted", "art near", 0, dims);
+    const artId = seedEmbedded(db, "act_artifact_admitted", "art near", 0, dims);
     const idx = EmbeddingIndex.rebuildFromDb(db);
     const result = await retrieve(db, idx, {
       text: "anything",
       k: 5,
-      kindFilter: ["code_artifact_admitted", "code_artifact_promoted"],
+      kindFilter: ["act_artifact_admitted", "act_artifact_promoted"],
     });
     expect(result.hits.length).toBe(1);
     expect(result.hits[0].event_id).toBe(artId);

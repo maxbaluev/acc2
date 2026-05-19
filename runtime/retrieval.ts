@@ -8,7 +8,7 @@
 //      can branch cleanly.
 //   2. KNN on the in-memory index, optionally filtered by event kind.
 //   3. For each hit, look up the source event's `posterior` (artifact score
-//      for code_artifact_* events; promotion-derived score otherwise) and
+//      for act_artifact_* events; promotion-derived score otherwise) and
 //      the per-origin promotion bias.
 //   4. Final rerank score = (1 − cosine_distance) × (1 + posterior) × bias.
 //      Sort descending. Cap at `k`.
@@ -161,12 +161,17 @@ const readOriginBiasForGoalShape = (db: Database, goalShape: string): Map<string
 
 /** Cheap posterior lookup for an event. For Phase F we read the source
  *  event's `residual` (when present — lower residual = better) and convert
- *  to a posterior-shaped score in [0, 1]. Code-artifact-* event kinds get
- *  the artifact's stored `score` from the code_artifact table.
+ *  to a posterior-shaped score in [0, 1]. Act-artifact-* event kinds get
+ *  the artifact's stored `score` from the act_artifact table. F4a: matches
+ *  both canonical and legacy kind strings so historical events still
+ *  resolve.
  *
  *  Returns 0.5 (neutral) when no signal is available — Beta(1,1) prior. */
 const readPosterior = (db: Database, eventId: string, kind: string): number => {
-  if (kind === "code_artifact_admitted" || kind === "code_artifact_promoted" || kind === "code_artifact_candidate") {
+  if (
+    kind === "act_artifact_admitted" || kind === "act_artifact_promoted" || kind === "act_artifact_candidate" ||
+    kind === "code_artifact_admitted" || kind === "code_artifact_promoted" || kind === "code_artifact_candidate"
+  ) {
     // Pull the score from the registry by looking up via context_refs or
     // payload.artifact_id. We use a shape-tolerant fallback: scan the event,
     // look for an artifact_id reference, otherwise return neutral.
@@ -179,7 +184,7 @@ const readPosterior = (db: Database, eventId: string, kind: string): number => {
         const aid = (p.artifact_id as string | undefined) ?? (p.id as string | undefined);
         if (aid) {
           const ca = db
-            .query("SELECT score FROM code_artifact WHERE id = ?")
+            .query("SELECT score FROM act_artifact WHERE id = ?")
             .get(aid) as { score: number } | null;
           if (ca && typeof ca.score === "number") return ca.score;
         }

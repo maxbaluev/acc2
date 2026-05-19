@@ -45,7 +45,7 @@ type CacheEntry<T> = {
 
 /** Maximum cache age (ms) regardless of event freshness. Bounds staleness
  *  for the corner case where composePrompt's substrate inputs change in a
- *  way that doesn't insert an event (e.g. a code_artifact row status
+ *  way that doesn't insert an event (e.g. a act_artifact row status
  *  flips). Default 60s; override via ACC2_PROMPT_CACHE_TTL_MS. */
 export const PROMPT_CACHE_TTL_MS = Number(
   process.env.ACC2_PROMPT_CACHE_TTL_MS ?? 60_000,

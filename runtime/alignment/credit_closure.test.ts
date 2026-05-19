@@ -2,7 +2,7 @@
 //
 // v2-design.md §3.6.1 Rule 3 + §17 Phase H: every `action_scored` event
 // MUST produce at least one credit-distribution side-effect — concretely a
-// `code_artifact_score_updated` event linked to the same scoring row. The
+// `act_artifact_score_updated` event linked to the same scoring row. The
 // four-link chain is `create → retrieve → mutate retrieval state → credit
 // outcome` (k_555); the substrate enforces it structurally.
 //
@@ -15,7 +15,7 @@
 //
 // This test exercises path 2 (the one this pass tightened): admit a recipe,
 // replay it, count `action_scored` rows and assert at least one
-// `code_artifact_score_updated` cites the scored event for every score row.
+// `act_artifact_score_updated` cites the scored event for every score row.
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../../substrate/db";
@@ -28,7 +28,7 @@ import type { TaskNode } from "../task_topology";
 afterAll(() => closeDb());
 
 describe("alignment / credit_closure (Principle 6)", () => {
-  test("recipe replay's action_scored produces code_artifact_score_updated rows", async () => {
+  test("recipe replay's action_scored produces act_artifact_score_updated rows", async () => {
     closeDb();
     const db = openDb(":memory:");
 
@@ -123,7 +123,7 @@ describe("alignment / credit_closure (Principle 6)", () => {
     expect(out.task_committed).toBe(true);
 
     // For every action_scored row on this task, there must be at least one
-    // code_artifact_score_updated row referencing the scored event id (the
+    // act_artifact_score_updated row referencing the scored event id (the
     // distributeCredit pipeline writes scored_event_id into payload).
     const scoredRows = db
       .query(
@@ -136,7 +136,7 @@ describe("alignment / credit_closure (Principle 6)", () => {
       const credited = db
         .query(
           `SELECT COUNT(*) AS c FROM events
-           WHERE kind = 'code_artifact_score_updated'
+           WHERE kind = 'act_artifact_score_updated'
              AND payload LIKE '%' || ? || '%'`,
         )
         .get(s.id) as { c: number };

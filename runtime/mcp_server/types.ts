@@ -176,7 +176,7 @@ export const AdmitArtifactSchema = z.object({
   directive_id: z.string().optional(),
   owner_consent_event_id: z.string().optional(),
   // Dark-gate observability (2026-05-18). The brain emits these
-  // provenance / lineage fields on code_artifact_candidate and they
+  // provenance / lineage fields on act_artifact_candidate and they
   // feed the predicate gate, strategy-first gate, supersedes lane gate,
   // and render-pipeline lineage gate downstream. Pre-2026-05-18 the
   // MCP schema dropped them, so admission ran with the gates blind.

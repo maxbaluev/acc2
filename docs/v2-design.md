@@ -103,7 +103,7 @@ Decomposition: brain reads the directive + analogous past task graphs →
 │   │     4. verifier artifact returns scalar residual ∈ [0,1]    │
 │   │     5. records irreversible_effect if artifact declared one │
 │   │     6. saves events + may propose knowledge_candidate(s) +  │
-│   │        code_artifact_candidate(s) for future reuse          │
+│   │        act_artifact_candidate(s) for future reuse          │
 │   │     7. if more work remains, emits a refinement edge        │
 │   │        (replaces multi-cycle iteration; cycle-1-only)       │
 │   │     8. commits the task with outcome status                 │
@@ -119,7 +119,7 @@ Decomposition: brain reads the directive + analogous past task graphs →
    ▼
 Substrate computes (via SQL views):
   - knowledge candidates promoted/demoted via outcome correlation
-  - code_artifact posteriors updated (LATM/Voyager promotion)
+  - act_artifact posteriors updated (LATM/Voyager promotion)
   - active_inference_view residuals tracked
   - recipe candidates extracted from successful task graphs
   - stakeholder utility deltas tracked per directive
@@ -297,16 +297,16 @@ function decideDispatch(directive: Directive, substrate: Substrate): DispatchDec
 | `artifact_invoked` / `artifact_observed` | — | — | ✓ (substrate runs the artifact) |
 | `action_scored` | — | — | ✓ (substrate runs verifier, records residual) |
 | `knowledge_candidate` | from chat observation | ✓ default author | — |
-| `code_artifact_candidate` | rare (low-risk only) | ✓ default author | — |
-| `knowledge_promoted` / `code_artifact_promoted` | — | — | ✓ (outcome correlation extractor) |
+| `act_artifact_candidate` | rare (low-risk only) | ✓ default author | — |
+| `knowledge_promoted` / `act_artifact_promoted` | — | — | ✓ (outcome correlation extractor) |
 | `owner_input_received` | ✓ every chat turn | — | — |
 | `owner_decision_recorded` | ✓ when owner answers | — | — |
 | `directive_amended` | ✓ (owner speaks amendment via chat) | — | — |
 | `task_committed` / `task_failed` | ✓ (inline) | ✓ (brain) | — |
 
-Hard invariant: opencode brain dispatches are read-only against the source checkout. The bridge must not launch the brain with blanket permission approval; its per-dispatch config allows read/list/glob/grep plus acc2 MCP tools and denies direct edit/write/bash/git/source-mutation surfaces. The brain proposes source changes only through substrate events (`code_artifact_candidate`, `lesson_extracted`, `contract_amendment_proposed`). Claude-side orchestration applies accepted proposals and owns any resulting git commit.
+Hard invariant: opencode brain dispatches are read-only against the source checkout. The bridge must not launch the brain with blanket permission approval; its per-dispatch config allows read/list/glob/grep plus acc2 MCP tools and denies direct edit/write/bash/git/source-mutation surfaces. The brain proposes source changes only through substrate events (`act_artifact_candidate`, `lesson_extracted`, `contract_amendment_proposed`). Claude-side orchestration applies accepted proposals and owns any resulting git commit.
 
-The merger HAPPENS at posterior-update time. When `action_scored` lands, the substrate credits every knowledge_id and code_artifact_id cited by either the action artifact or the verifier artifact, regardless of who wrote them. There is no "Claude's posterior" vs "opencode's posterior" — there is one substrate posterior per cited artifact, and both substrates' contributions accumulate against it. That is what makes the merger genuinely symmetric (k_3566-k_3572).
+The merger HAPPENS at posterior-update time. When `action_scored` lands, the substrate credits every knowledge_id and act_artifact_id cited by either the action artifact or the verifier artifact, regardless of who wrote them. There is no "Claude's posterior" vs "opencode's posterior" — there is one substrate posterior per cited artifact, and both substrates' contributions accumulate against it. That is what makes the merger genuinely symmetric (k_3566-k_3572).
 
 Opencode runs **one cycle per dispatch** (the cycle-1-only constraint, §3.7). Claude is conversational and does not run "cycles" — it observes chat turns, decides per turn whether to dispatch, and otherwise stays idle. Father (§14) is a recurring scheduler that may also trigger dispatches on cadence (rolling reviews, queued backlog) without an owner turn.
 
@@ -455,8 +455,8 @@ type Event = {
   payload: JsonValue;
   context_refs: string[];               // citation chain
   predicted_residual?: number;          // brain's prior in [0,1] before the verifier ran
-  action_artifact_id?: string;          // ref to code_artifact that produced the observation
-  verifier_artifact_id?: string;        // ref to code_artifact that scored the residual
+  action_artifact_id?: string;          // ref to act_artifact that produced the observation
+  verifier_artifact_id?: string;        // ref to act_artifact that scored the residual
   outcome?: OutcomeStatus;
   residual?: number;                    // verifier's scalar return
   embedding?: number[];                 // dense vector for text-bearing payloads
@@ -501,12 +501,12 @@ type EventKind =
   | 'contradictory_candidates'
 
   // Code artifacts (LATM/Voyager — code-as-capability)
-  | 'code_artifact_candidate'           // brain proposed a new code artifact
-  | 'code_artifact_admitted'            // fixture passed, artifact entered registry
-  | 'code_artifact_admission_rejected'
-  | 'code_artifact_promoted'            // posterior crossed naming threshold → blessed capability
-  | 'code_artifact_quarantined'
-  | 'code_artifact_rehabilitated'
+  | 'act_artifact_candidate'           // brain proposed a new code artifact
+  | 'act_artifact_admitted'            // fixture passed, artifact entered registry
+  | 'act_artifact_admission_rejected'
+  | 'act_artifact_promoted'            // posterior crossed naming threshold → blessed capability
+  | 'act_artifact_quarantined'
+  | 'act_artifact_rehabilitated'
   | 'sandbox_violation'                 // declared ≠ actual at runtime
 
   // Embeddings (substrate-managed)
@@ -597,7 +597,7 @@ One table. Twelve event-kind groups. Everything else is a view.
 - `rolling_review_due_view` — directives whose next_review_due ≤ now (§3.1)
 - `irreversible_effects_view(directive_id)` — physical-world side effects to date
 - `embedding_index_view` — text-bearing events keyed by vector for nearest-K retrieval
-- `code_artifact_registry_view` — current admitted artifacts ranked by posterior, sandbox shape, runtime
+- `act_artifact_registry_view` — current admitted artifacts ranked by posterior, sandbox shape, runtime
 - `owner_conversation_view` — Claude Code chat turns indexed by directive
 
 **Typed-extractor views (parser/indexer stages):**
@@ -614,10 +614,10 @@ The system IS the RLM because the substrate (not any LLM) owns each step:
 
 | Link | Who | Event kind |
 |---|---|---|
-| **create** | Any substrate_origin proposes | `knowledge_candidate` (with origin field) OR `code_artifact_candidate` |
+| **create** | Any substrate_origin proposes | `knowledge_candidate` (with origin field) OR `act_artifact_candidate` |
 | **retrieve** | Brain reads via judgment_packet_view at decision time | `context_refs` field on next `action_predicted` |
 | **mutate** | Outcome event references | `candidate_confirmed` / `candidate_contradicted` / `action_scored` |
-| **credit** | Substrate auto-promotes/demotes via extractor | `knowledge_promoted` / `knowledge_demoted` / `code_artifact_score_updated` (emitted by substrate, no LLM in loop) |
+| **credit** | Substrate auto-promotes/demotes via extractor | `knowledge_promoted` / `knowledge_demoted` / `act_artifact_score_updated` (emitted by substrate, no LLM in loop) |
 
 V1 falsifiability test: **swap the scheduler or either LLM substrate**, and credit emission still happens from substrate extractors. Posterior promotion is not in the model or the scheduler; it is in the substrate.
 
@@ -731,7 +731,7 @@ SQLite WAL guarantees durability up to the last fsync. On daemon restart:
 1. Acquire the port lock + Unix socket.
 2. Open the WAL connection; verify integrity.
 3. The embedding index is the **sqlite-vec `vec_events` virtual table** (substrate/schema.sql) — persistent on disk alongside the WAL. There is NO in-memory rebuild step; the index is queryable the moment the WAL connection is open. The legacy `events.embedding` BLOB column is kept transitionally for parity testing during the cutover window (see substrate/schema.sql header comment) and the `EmbeddingIndex` wrapper backfills `vec_events` from it at first open.
-4. Re-arm the background workers (embedder catches up on any payloads emitted after the last `embedding_computed` for them; posterior updater catches up on any `action_scored` events emitted after the last `code_artifact_score_updated`).
+4. Re-arm the background workers (embedder catches up on any payloads emitted after the last `embedding_computed` for them; posterior updater catches up on any `action_scored` events emitted after the last `act_artifact_score_updated`).
 5. Resume MCP server + external-push endpoint.
 
 The CLI's RPC client retries against the new socket transparently. In-flight brain dispatches (opencode subprocesses) are unaffected by daemon restart since they emit through their own SQLite connection; the daemon only owns the in-memory caches.
@@ -742,7 +742,7 @@ The daemon's retrieval behavior still depends on substrate maturity:
 
 | Mode | When | Behavior |
 |---|---|---|
-| **empty** | Fresh substrate, zero events | `judgment_packet_view` returns `[]`; `code_artifact_registry_view` returns seed artifacts; recipes disabled until ≥ N successes; brain prompt falls back to runtime descriptions only |
+| **empty** | Fresh substrate, zero events | `judgment_packet_view` returns `[]`; `act_artifact_registry_view` returns seed artifacts; recipes disabled until ≥ N successes; brain prompt falls back to runtime descriptions only |
 | **seeded** | Foundational seed import done (optional, curated) | Promoted laws + score ≥ 0.85 entries imported as `knowledge_candidate` + `knowledge_promoted` with `substrate_origin = substrate_auto`; artifacts still seed-only; recipes still disabled |
 | **warm** | ≥ 100 successful task commits across ≥ 5 distinct goal shapes | Full retrieval; recipes enabled; brain-emitted code-artifact candidates accepted; artifact routing posteriors trusted |
 
@@ -779,19 +779,19 @@ A fresh `acc init` followed by `acc daemon start` must produce a **LIVE** substr
 
 1. **After `acc init`** — every canonical table/view has at least one row:
    - `events` ≥ 10 (foundational knowledge seed, owner-approved at install time)
-   - `code_artifact` ≥ 8 (seed code artifacts: bun / uv / camofox-browser runtime entries)
+   - `act_artifact` ≥ 8 (seed code artifacts: bun / uv / camofox-browser runtime entries)
    - `events` (recipe_extracted) ≥ 2 (canonical priors for repeated goal shapes: "fetch URL title" + "arithmetic")
    - `vec_events` > 0 (synchronous embedder pass over the seeded events)
 2. **After `acc daemon start`** — the embedder worker ticks within 10s and produces `embedding_computed` events. Any embeddable event written after the synchronous boot pass (owner directives, brain candidates) lands in `vec_events` on the next tick.
-3. **`acc doctor` PASS implies substrate is ALIVE.** The composite check now includes the substrate-content verdict surfaced by `acc admin substrate-status`. A PASS means events > 0 AND code_artifact > 0 AND vec_events > 0.
+3. **`acc doctor` PASS implies substrate is ALIVE.** The composite check now includes the substrate-content verdict surfaced by `acc admin substrate-status`. A PASS means events > 0 AND act_artifact > 0 AND vec_events > 0.
 4. **The harness `--task` mode inherits the same liveness invariant** via the shared init + startDaemon path. A scenario that boots a substrate for an integration test sees the same seeded baseline a real operator install sees.
 
 **Verdict taxonomy (`acc admin substrate-status`):**
 
 | Verdict | Meaning | Recovery |
 |---|---|---|
-| **ALIVE** | events > 0 AND code_artifact > 0 AND vec_events > 0 | Substrate is ready; RLM surface populated |
-| **DEGRADED** | events > 0 but vec_events == 0 or code_artifact == 0 | Run `acc admin embed-all` (closes vec_events gap) or re-run `acc init` to re-seed artifacts |
+| **ALIVE** | events > 0 AND act_artifact > 0 AND vec_events > 0 | Substrate is ready; RLM surface populated |
+| **DEGRADED** | events > 0 but vec_events == 0 or act_artifact == 0 | Run `acc admin embed-all` (closes vec_events gap) or re-run `acc init` to re-seed artifacts |
 | **DEAD** | events == 0 | Substrate has never been seeded; run `acc init` |
 
 **Operator-facing surfaces:**
@@ -1013,7 +1013,7 @@ async function dispatchClaudeCodeSession(task: ReadyTask): Promise<TaskResult> {
     upstream_outputs: await substrate.read_upstream_observations(task.id, task.requires),
     watched_outputs: await substrate.read_watch_observations(task.id, task.watches),
     judgment_packet: await substrate.judgment_packet_view(task.payload.goal),
-    code_artifact_registry: await substrate.code_artifact_registry_view(task.payload.goal),
+    act_artifact_registry: await substrate.act_artifact_registry_view(task.payload.goal),
     stakeholder_state: task.directive.is_multi_stakeholder
       ? await substrate.stakeholder_state_view(task.directive_id) : null,
     constitutional_state: await substrate.constitutional_state_view(),
@@ -1064,7 +1064,7 @@ DAG decomposition (brain dispatches once, emits this DAG):
   t_propose_change (requires: t_research_index_alternatives)
     action_artifact: bun script that writes a candidate v2/runtime/embedding_index.ts
                      under a feature flag (parallel batch load + HNSW.M tuning); emits
-                     code_artifact_candidate for the new module.
+                     act_artifact_candidate for the new module.
     verifier_artifact: bun script — residual = 0 iff
                        (a) the file compiles under bun --check
                        AND (b) all existing v2/tests/embedding_index.test.ts pass.
@@ -1101,7 +1101,7 @@ What this walkthrough demonstrates concretely:
 
 - **No typed verification labels.** Every node has an action code artifact and a verifier code artifact; verification is whatever code the brain wrote. Residual is a scalar.
 - **Refinement edges replace iteration.** If the A/B test doesn't show improvement, t_ab_test emits a refines edge back to t_research_index_alternatives — the next single-cycle dispatch on that node picks up with the explored-set excluded, not by re-prompting the same brain.
-- **Code artifacts compound.** When this run succeeds, the substrate accumulates `code_artifact_candidate` rows for the new bun scripts (the index variant, the A/B harness, the boot-measurement script). Future self-improvement directives on similar shapes will retrieve these artifacts via embedding × posterior and reuse them — no fresh authoring needed.
+- **Code artifacts compound.** When this run succeeds, the substrate accumulates `act_artifact_candidate` rows for the new bun scripts (the index variant, the A/B harness, the boot-measurement script). Future self-improvement directives on similar shapes will retrieve these artifacts via embedding × posterior and reuse them — no fresh authoring needed.
 - **Knowledge feeds back.** The brain's research findings emit `knowledge_candidate` rows tying "parallel batch HNSW rebuild improves boot speed by N%" to the citation chain. On the NEXT self-improvement directive that touches embedding-index code, these knowledge entries surface in retrieval and shorten the research step.
 - **Self-modification is observable.** The `self_modification_recorded` event ties before/after metrics + the new artifact id + the owner's decision into one row, audited by `provenance_view`.
 
@@ -1236,7 +1236,7 @@ The substrate hosts THREE code runtimes — **bun**, **uv**, **camofox-browser**
             │  ─ camofox.ts   (browser scripts)   │
             │                                     │
             │  ─ sandbox.ts   (per-runtime perms) │
-            │  ─ artifact_store.ts (code_artifact │
+            │  ─ artifact_store.ts (act_artifact │
             │     table; posterior per artifact)  │
             └─────────────────────────────────────┘
                             ▲
@@ -1266,7 +1266,7 @@ One MCP server. Two native MCP clients. Symmetric invocation. The posterior on a
 type Runtime = 'bun' | 'uv' | 'camofox-browser';
 
 type RuntimeInvocation = {
-  artifact_id: string;          // code_artifact row to execute
+  artifact_id: string;          // act_artifact row to execute
   runtime: Runtime;             // must match artifact's declared runtime
   inputs: JsonValue;            // arguments handed to the script
   invoker: 'claude_root' | 'claude_sub' | 'opencode' | 'recipe' | 'father';
@@ -1276,7 +1276,7 @@ type RuntimeInvocation = {
 };
 
 async function substrate.run_artifact(inv: RuntimeInvocation): Promise<Observation> {
-  const artifact = substrate.get_code_artifact(inv.artifact_id);
+  const artifact = substrate.get_act_artifact(inv.artifact_id);
   if (!artifact) throw new ArtifactNotFound(inv.artifact_id);
   if (artifact.runtime !== inv.runtime) throw new RuntimeMismatch();
 
@@ -1352,9 +1352,9 @@ Bun runs under Deno-style permissions (--allow-read, --allow-net, --allow-run). 
 
 Internal runtime libraries (`v2/runtime/env`, `v2/runtime/state`) are imported as modules, not registered as artifacts. Pywebflow is gone — the camofox-browser runtime supersedes it.
 
-### 11.5 Authoring loop (LATM / Voyager via code_artifact promotion)
+### 11.5 Authoring loop (LATM / Voyager via act_artifact promotion)
 
-The substrate does not gate authoring with a special admission protocol. New code artifacts enter the substrate just like any knowledge candidate: the brain emits a `code_artifact_candidate` event with the script body, declared sandbox, runtime, and a small fixture (input + expected residual). The substrate runs the fixture once at admission time; if the verifier returns residual < 0.2, the candidate is admitted at `score = 0.5, confidence = 0.3` and begins accumulating posterior over real invocations.
+The substrate does not gate authoring with a special admission protocol. New code artifacts enter the substrate just like any knowledge candidate: the brain emits a `act_artifact_candidate` event with the script body, declared sandbox, runtime, and a small fixture (input + expected residual). The substrate runs the fixture once at admission time; if the verifier returns residual < 0.2, the candidate is admitted at `score = 0.5, confidence = 0.3` and begins accumulating posterior over real invocations.
 
 Repeated successful use is the only path to "blessed reusable capability" — the substrate auto-names an artifact once its posterior crosses `score ≥ 0.85 ∧ confidence ≥ 0.7 ∧ ≥ 20 invocations`. Naming is purely a label for retrieval; the artifact's score, sandbox, and embedding are unchanged. This is the LATM/Voyager promotion path expressed in the same merger machinery that promotes knowledge candidates (§7).
 
@@ -1516,7 +1516,7 @@ substrate.read_view(view_name: string, args?: JsonValue): Row[]
 substrate.emit_action_predicted({ intent, action_artifact_id, verifier_artifact_id, predicted_residual })
 substrate.emit_task_node_opened({ parent_task_id, goal, edge_kind })  // edge_kind ∈ requires|refines|watches
 substrate.emit_knowledge_candidate({ claim, evidence, applies_to, confidence_estimate, ...open_world_model_fields })
-substrate.emit_code_artifact_candidate({ runtime, body, declared_sandbox, fixture })
+substrate.emit_act_artifact_candidate({ runtime, body, declared_sandbox, fixture })
 substrate.emit_directive_amended({ original_directive_id, amendment_text, ... })  // owner-only by default
 ```
 
@@ -1551,7 +1551,7 @@ RETRIEVED KNOWLEDGE (top-K evidence handles by embedding × posterior):
 {knowledge_entries — ids, claims/summaries, scores; cite used ids or dismiss stale ids}
 
 CODE ARTIFACT REGISTRY (top-K by posterior, scoped to your runtimes):
-{code_artifact_entries — id, runtime, declared_sandbox, score, confidence, recent_residual_mean}
+{act_artifact_entries — id, runtime, declared_sandbox, score, confidence, recent_residual_mean}
 
 UPSTREAM OUTPUTS / WATCHED OUTPUTS / STAKEHOLDER STATE / INTERFERENCE / FAILURES:
 {bounded handles and summaries only when present}
@@ -1703,7 +1703,7 @@ Most phases are single-file new-file contracts (closure-clean). Multi-file contr
 10. **Concurrency:** sustained 10 parallel tasks for 1h with no concurrency_conflict events.
 11. **Constitutional integrity:** gates audit themselves; zero unrecovered violations.
 12. **Zero stale rows:** no equivalent of v1's brain_flights/emit_claims rot.
-13. **V1 falsifiability:** swap scheduler with stub; recursive control (knowledge_promoted/demoted, recipe_extracted, code_artifact_score_updated) still emits from substrate extractors.
+13. **V1 falsifiability:** swap scheduler with stub; recursive control (knowledge_promoted/demoted, recipe_extracted, act_artifact_score_updated) still emits from substrate extractors.
 14. **Universality pilot:** at least 1 successful directive each from embodied (physical-observation verifier), long-horizon (rolling-active), multi-stakeholder, and self-as-target.
 15. **Refinement-edge convergence:** ≥3 directives that required ≥3 refinement edges each, all closing within budget, demonstrating cycle-1-only is sufficient.
 16. **Amendment integrity:** ≥3 directives amended mid-flight without prediction-residual corruption.
@@ -1759,9 +1759,9 @@ Only items that remain genuinely empirical after the daemon (§5) + cycle-1-only
 v2/
 ├── substrate/
 │   ├── types.ts                 ~280 LOC — Event, EventKind, FailureKind, OutcomeStatus, edge kinds, DirectiveLifecycle, Runtime, SandboxDecl
-│   ├── schema.sql                ~80 LOC — events table + indexes + embedding column + code_artifact table
-│   ├── extractors.ts            ~600 LOC — knowledge/entities/recipes/provenance extractors + code_artifact_score_updated extractor
-│   ├── views.ts                 ~500 LOC — pure SQL views (task_graph, ready_tasks, contradictory_candidates, stakeholder_state, directive_conflicts, rolling_review_due, code_artifact_registry, embedding_index, owner_conversation, etc.)
+│   ├── schema.sql                ~80 LOC — events table + indexes + embedding column + act_artifact table
+│   ├── extractors.ts            ~600 LOC — knowledge/entities/recipes/provenance extractors + act_artifact_score_updated extractor
+│   ├── views.ts                 ~500 LOC — pure SQL views (task_graph, ready_tasks, contradictory_candidates, stakeholder_state, directive_conflicts, rolling_review_due, act_artifact_registry, embedding_index, owner_conversation, etc.)
 │   └── seed.ts                  ~180 LOC — seed code artifacts + optional foundational knowledge import
 ├── runtime/
 │   ├── daemon.ts                ~320 LOC — persistent process; port-lock + Unix socket; supervises workers; bootstraps WAL + in-memory index; serves MCP + external-push endpoints
@@ -1770,7 +1770,7 @@ v2/
 │   │   ├── bun.ts               ~180 LOC — TS runner under Deno permissions
 │   │   ├── uv.ts                ~180 LOC — Python runner under nsjail with locked pypi mirror
 │   │   └── camofox.ts           ~220 LOC — long-lived chromium under substrate-owned profile root
-│   ├── artifact_store.ts        ~250 LOC — code_artifact CRUD + posterior update + LATM promotion threshold
+│   ├── artifact_store.ts        ~250 LOC — act_artifact CRUD + posterior update + LATM promotion threshold
 │   ├── artifact_admission.ts    ~180 LOC — admission fixture runner + sandbox-decl-vs-actual check
 │   ├── embedder.ts              ~150 LOC — text → vector via OpenAI text-embedding-3-small (OPENAI_API_KEY); version-stamps embeddings
 │   ├── embedding_index.ts       ~140 LOC — thin wrapper over sqlite-vec `vec_events` virtual table; SQL knn for 1536-dim production embeddings, JS-fallback for test-dim vectors; no in-memory rebuild
@@ -1926,7 +1926,7 @@ Tests are categorized by what they assert. Tests of a v1 surface that v2 drops d
 | **Closure validator + predicate evaluator** | `closure-validator.test.ts`, `closure-keyed-fast-path.test.ts`, `predicate-evaluator-*.test.ts`, `contract-closure-*.test.ts` | drop | Validator and per-contract closure invariant are dropped (§22). The IDEA tests of verifier evaluation move to `artifact_admission` tests under v2. |
 | **Contract lifecycle** | `contract-*.test.ts` (~50 files) | drop | Contract machinery dropped; no port. |
 | **Verify orchestrator** | `verify-*.test.ts` | drop | v2 verification is whatever code the brain wrote; no shared orchestrator. |
-| **Capability / tool admission** | `capability-compiler.test.ts`, `capability-manifest.test.ts`, `acc-task-rlm-surface-spec.test.ts` | rewrite | Re-authored as `code_artifact_admission` tests under v2. |
+| **Capability / tool admission** | `capability-compiler.test.ts`, `capability-manifest.test.ts`, `acc-task-rlm-surface-spec.test.ts` | rewrite | Re-authored as `act_artifact_admission` tests under v2. |
 | **Embeddings & retrieval** | `acc-save-embedding-freshness-*.test.ts`, `acc-state-retrieval-bandit.test.ts`, `acc-state-search-lexical-rescue.test.ts` | rewrite | Re-authored against v2's embedder + retrieval modules. |
 | **Recipe & replay** | `recipe-*.test.ts`, `acc-task-preseeds-cycle-prompts.test.ts` | lift | Recipe-shape tests carry across with minimal change. |
 | **Father drift** | `father-*.test.ts`, `father-core.test.ts`, `father-tui.test.ts` | rewrite | Adversarial drift tests preserved against v2's in-process Father tick. |

@@ -1,6 +1,6 @@
 // acc2 F1 — decorative citation refusal tests (2026-05-18).
 //
-// Validates the emit-side screen for code_artifact_candidate:
+// Validates the emit-side screen for act_artifact_candidate:
 //   (a) all citations resolve to real events.id → no lane_routing_refused.
 //   (b) some citations are unresolvable string labels → admit + emit
 //       lane_routing_refused reason="decorative_citation" with the
@@ -11,7 +11,7 @@
 //       reason="artifact_citation_underrooted".
 //
 // Cites substrate audit evidence: 60% of recent
-// code_artifact_candidate citations were string labels not real
+// act_artifact_candidate citations were string labels not real
 // events.id; 310/323 substantive candidates cited NOTHING at all.
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
@@ -29,7 +29,7 @@ const refusalsFor = (db: ReturnType<typeof openDb>, eventId: string) =>
     )
     .all(`%${eventId}%`);
 
-describe("decorative_citation_refusal — code_artifact_candidate", () => {
+describe("decorative_citation_refusal — act_artifact_candidate", () => {
   test("(a) all citations resolve to real events.id → no decorative refusal", () => {
     const db = openDb(":memory:");
     // Seed a real knowledge_candidate whose id we can cite.
@@ -39,7 +39,7 @@ describe("decorative_citation_refusal — code_artifact_candidate", () => {
       payload: { claim: "real_grounded_claim_alpha" },
     });
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         kind: "research_note",
@@ -64,7 +64,7 @@ describe("decorative_citation_refusal — code_artifact_candidate", () => {
       payload: { claim: "real_grounded_claim_beta" },
     });
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         kind: "research_note",
@@ -101,7 +101,7 @@ describe("decorative_citation_refusal — code_artifact_candidate", () => {
   test("(c) substantive candidate with zero citations → artifact_citation_underrooted", () => {
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         kind: "research_note",
@@ -119,7 +119,7 @@ describe("decorative_citation_refusal — code_artifact_candidate", () => {
     expect(underrooted).toBeDefined();
     const payload = JSON.parse(underrooted!.payload) as Record<string, unknown>;
     expect(payload.audience).toBe("cofounder_technical_reviewer");
-    expect(payload.refused_kind).toBe("code_artifact_candidate");
+    expect(payload.refused_kind).toBe("act_artifact_candidate");
   });
 
   test("short body without audience → not substantive → no underrooted refusal", () => {
@@ -127,7 +127,7 @@ describe("decorative_citation_refusal — code_artifact_candidate", () => {
     // candidates only so internal worker stubs aren't refused.
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         runtime: "bun",
@@ -148,7 +148,7 @@ describe("decorative_citation_refusal — code_artifact_candidate", () => {
     // labels they MUST still trip decorative_citation.
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         kind: "published_drive_doc",

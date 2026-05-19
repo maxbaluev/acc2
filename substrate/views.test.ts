@@ -8,7 +8,7 @@ import {
   actProjectionObservability,
   appliedLessonEffectiveness,
   artifactRouting,
-  codeArtifactRegistry,
+  actArtifactRegistry,
   directiveConflicts,
   dispatchResolved,
   failureCounts,
@@ -108,7 +108,7 @@ describe("runViews", () => {
       "act_projection_observability_view",
       "artifact_routing_view",
       "applied_lesson_effectiveness_view",
-      "code_artifact_registry_view",
+      "act_artifact_registry_view",
       "contradictory_candidates_view",
       "directive_conflicts_view",
       "embedding_index_view",
@@ -186,7 +186,7 @@ describe("act_projection_observability_view + actProjectionObservability", () =>
       payload: { source_act_id: actId, target_event_id: "k_555" },
     });
     const artifactCreditId = insertEvent(db, {
-      kind: "code_artifact_score_updated",
+      kind: "act_artifact_score_updated",
       directive_id: "d_act",
       task_id: "t_act",
       context_refs: [actId],
@@ -715,7 +715,7 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
   });
 });
 
-describe("code_artifact_registry_view + codeArtifactRegistry", () => {
+describe("act_artifact_registry_view + actArtifactRegistry", () => {
   test("orders by score DESC, only admitted + promoted", () => {
     const db = openDb(":memory:");
     runViews(db);
@@ -723,7 +723,7 @@ describe("code_artifact_registry_view + codeArtifactRegistry", () => {
     const insertArtifact = (id: string, score: number, status: string) => {
       const ts = nowIso();
       db.run(
-        `INSERT INTO code_artifact (
+        `INSERT INTO act_artifact (
            id, runtime, body, declared_sandbox, state_root,
            posterior_alpha, posterior_beta, score, confidence,
            recent_residual_mean, recent_kill_count, status, name,
@@ -757,15 +757,15 @@ describe("code_artifact_registry_view + codeArtifactRegistry", () => {
     insertArtifact("a_mid", 0.55, "admitted");
     insertArtifact("a_quarantined", 0.99, "quarantined"); // must NOT appear
 
-    const reg = codeArtifactRegistry(db);
+    const reg = actArtifactRegistry(db);
     const ids = reg.map((r) => r.id);
     expect(ids).toEqual(["a_high", "a_mid", "a_low"]);
     expect(ids).not.toContain("a_quarantined");
 
     // Runtime filter exercise.
-    const filtered = codeArtifactRegistry(db, "bun");
+    const filtered = actArtifactRegistry(db, "bun");
     expect(filtered.length).toBe(3);
-    expect(codeArtifactRegistry(db, "uv").length).toBe(0);
+    expect(actArtifactRegistry(db, "uv").length).toBe(0);
   });
 });
 
@@ -776,7 +776,7 @@ describe("artifact_routing_view + artifactRouting", () => {
     const ts = nowIso();
     const insert = (id: string, score: number, residualMean: number) =>
       db.run(
-        `INSERT INTO code_artifact (
+        `INSERT INTO act_artifact (
            id, runtime, body, declared_sandbox, state_root,
            posterior_alpha, posterior_beta, score, confidence,
            recent_residual_mean, recent_kill_count, status, name,

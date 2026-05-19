@@ -627,6 +627,9 @@ export const handleRead = (
   const view = args.view_name;
   try {
     switch (view) {
+      case "act_artifact_registry_view":
+      // F4a deprecated alias — accept the pre-rename view name so brain
+      // dispatches authored before the rename still resolve.
       case "code_artifact_registry_view": {
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const runtime = typeof arg.runtime === "string" ? arg.runtime : undefined;
@@ -878,7 +881,7 @@ export const handleGetArtifact = (
   args: z.infer<typeof IdSchema>,
 ): McpResult => {
   const row = ctx.db
-    .query("SELECT * FROM code_artifact WHERE id = ?")
+    .query("SELECT * FROM act_artifact WHERE id = ?")
     .get(args.id) as Record<string, unknown> | null;
   if (!row) return { ok: false, error: "artifact_not_found" };
   return {
@@ -1097,7 +1100,7 @@ export const handleAdmitArtifact = async (
       // Dark-gate plumbing (2026-05-18). Pre-2026-05-18 the MCP schema
       // dropped these fields so admission ran with the predicate +
       // strategy-first + render-pipeline gates blind. The brain emits
-      // them on code_artifact_candidate; the wire now carries them
+      // them on act_artifact_candidate; the wire now carries them
       // through to admitArtifact unchanged.
       audience: args.audience,
       citedKnowledgeIds: args.cited_knowledge_ids,

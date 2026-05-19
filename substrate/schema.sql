@@ -1,5 +1,16 @@
--- acc2 substrate schema — one events table, one code_artifact registry,
+-- acc2 substrate schema — one events table, one act_artifact registry,
 -- one meta key/value. Views and extractors are out of scope for Phase B1.
+--
+-- F4a (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW): the polymorphic
+-- handle registry was historically named `code_artifact` because the first
+-- inhabitants were bun/uv/camofox runtime scripts. The registry now holds
+-- letters, prompts, verifiers, decompositions, asker patterns, research
+-- patterns, recipes, observation patterns, goal predicates, and dispatch
+-- strategies — every reusable scored handle. The table is therefore
+-- `act_artifact`; CLAUDE.md design intent ("act_artifact (the renamed
+-- code_artifact)") materializes here. Production DBs migrate via
+-- runMigrations() in db.ts: ALTER TABLE code_artifact RENAME TO act_artifact
+-- plus index/view rebuilds. Fresh installs land here directly.
 
 -- ── meta ────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS meta (
@@ -52,13 +63,13 @@ CREATE INDEX IF NOT EXISTS idx_events_projection_key          ON events(json_ext
   WHERE json_extract(payload, '$.projection_key') IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_embedding_version       ON events(embedding_version);
 
--- ── code_artifact ──────────────────────────────────────────────────
--- Registry row per LATM/Voyager artifact. declared_sandbox + fixture_input
--- are JSON-encoded TEXT (shape mirrors SandboxDecl / JsonValue from
--- substrate/types.ts). embedding is a raw float32 BLOB. status starts at
--- 'admitted' once the fixture passes; transitions to 'quarantined' or
--- 'promoted' via posterior thresholds (§11.5, §11.6).
-CREATE TABLE IF NOT EXISTS code_artifact (
+-- ── act_artifact ───────────────────────────────────────────────────
+-- Registry row per polymorphic artifact handle. declared_sandbox +
+-- fixture_input are JSON-encoded TEXT (shape mirrors SandboxDecl /
+-- JsonValue from substrate/types.ts). embedding is a raw float32 BLOB.
+-- status starts at 'admitted' once the fixture passes; transitions to
+-- 'quarantined' or 'promoted' via posterior thresholds (§11.5, §11.6).
+CREATE TABLE IF NOT EXISTS act_artifact (
   id                          TEXT PRIMARY KEY,
   runtime                     TEXT NOT NULL,
   body                        TEXT NOT NULL,
@@ -66,14 +77,13 @@ CREATE TABLE IF NOT EXISTS code_artifact (
   state_root                  TEXT NOT NULL,
   -- L8 (2026-05-17, brain design 48SN4XF3WN4KBBCHHCANDRDQRW act_artifact
   -- registry rename): free-string discriminator for the row's purpose.
-  -- Default 'code_artifact' for legacy rows; new typed rows declare
+  -- Default 'runtime_action' for generic actions; typed rows declare
   -- their own (e.g. 'dispatch_strategy_v1' for the 6 seed strategy
-  -- priors). The full rename of the TABLE to act_artifact is deferred —
-  -- adding the column first lets consumers transition incrementally
-  -- (dispatch_strategy_ranker queries kind='dispatch_strategy_v1' AND
-  -- state_root='dispatch/strategy' as overlapping discriminators; the
-  -- state_root path can be retired later).
-  kind                        TEXT NOT NULL DEFAULT 'code_artifact',
+  -- priors, 'published_drive_doc' for owner-visible artifacts).
+  -- Historical rows admitted before F4a may carry the legacy
+  -- 'code_artifact' default; the kind column is a string, not an enum,
+  -- so both values coexist without migration of row data.
+  kind                        TEXT NOT NULL DEFAULT 'runtime_action',
   posterior_alpha             REAL NOT NULL DEFAULT 1.0,
   posterior_beta              REAL NOT NULL DEFAULT 1.0,
   score                       REAL NOT NULL DEFAULT 0.5,
@@ -87,7 +97,7 @@ CREATE TABLE IF NOT EXISTS code_artifact (
   fixture_expected_residual   REAL NOT NULL,
   -- Brain dataflow audit bxdhdkm9e #3 (2026-05-15): per-artifact
   -- provenance + intent metadata that the brain emits on
-  -- code_artifact_candidate but the admission path used to drop.
+  -- act_artifact_candidate but the admission path used to drop.
   -- Operators can now see WHY an artifact exists, WHAT it touches,
   -- and WHICH owner gate (if any) approved it. NULL-allowed because
   -- legacy seeded artifacts pre-date these fields.
@@ -113,12 +123,12 @@ CREATE TABLE IF NOT EXISTS code_artifact (
   updated_at                  TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_code_artifact_runtime ON code_artifact(runtime);
-CREATE INDEX IF NOT EXISTS idx_code_artifact_status  ON code_artifact(status);
-CREATE INDEX IF NOT EXISTS idx_code_artifact_score   ON code_artifact(score DESC);
-CREATE INDEX IF NOT EXISTS idx_code_artifact_kind    ON code_artifact(kind);
--- C5 provenance indexes (idx_code_artifact_supersedes /
--- idx_code_artifact_superseded_by) live in db.ts EVENT_HOT_PATH_INDEXES,
+CREATE INDEX IF NOT EXISTS idx_act_artifact_runtime ON act_artifact(runtime);
+CREATE INDEX IF NOT EXISTS idx_act_artifact_status  ON act_artifact(status);
+CREATE INDEX IF NOT EXISTS idx_act_artifact_score   ON act_artifact(score DESC);
+CREATE INDEX IF NOT EXISTS idx_act_artifact_kind    ON act_artifact(kind);
+-- C5 provenance indexes (idx_act_artifact_supersedes /
+-- idx_act_artifact_superseded_by) live in db.ts EVENT_HOT_PATH_INDEXES,
 -- which runs AFTER runMigrations adds the supersedes / superseded_by
 -- columns to pre-C5 tables via ALTER TABLE. Keeping the indexes in
 -- schema.sql would break openDb() on any DB that predates C5:

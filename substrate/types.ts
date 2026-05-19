@@ -383,9 +383,12 @@ export type SandboxDecl =
 // re-admit a retired artifact (only quarantined → admitted is allowed).
 // Used when an artifact has accumulated ≥ 3 quarantines, ≥ 10 hard
 // kills, or ≥ 3 irreversible_effect_recorded rows without owner consent.
-export type CodeArtifactStatus = "admitted" | "quarantined" | "promoted" | "retired";
+export type ActArtifactStatus = "admitted" | "quarantined" | "promoted" | "retired";
 
-export type CodeArtifact = {
+/** F4a deprecated alias — pre-rename name. */
+export type CodeArtifactStatus = ActArtifactStatus;
+
+export type ActArtifact = {
   id: Ulid;
   runtime: Runtime;
   body: string;
@@ -398,10 +401,13 @@ export type CodeArtifact = {
   embedding?: number[];
   recent_residual_mean: number;
   recent_kill_count: number;
-  status: CodeArtifactStatus;
+  status: ActArtifactStatus;
   name: string | null;
   fixture_input: JsonValue;
   fixture_expected_residual: number;
   created_at: string;
   updated_at: string;
 };
+
+/** F4a deprecated alias — pre-rename name. */
+export type CodeArtifact = ActArtifact;

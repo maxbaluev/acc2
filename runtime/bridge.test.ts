@@ -42,7 +42,7 @@ describe("bridge (Phase D mock, default mode)", () => {
       expect(result.emitted_event_ids.length).toBeGreaterThan(0);
     }
     const admitted = db
-      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'code_artifact_admitted'")
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'act_artifact_admitted'")
       .get() as { c: number };
     expect(admitted.c).toBe(2);
     const predicted = db
@@ -68,7 +68,7 @@ describe("bridge (Phase D mock, default mode)", () => {
     expect(result.ok).toBe(true);
 
     const admitted = db
-      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'code_artifact_admitted'")
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'act_artifact_admitted'")
       .get() as { c: number };
     expect(admitted.c).toBe(2);
 

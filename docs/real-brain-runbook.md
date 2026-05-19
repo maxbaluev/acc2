@@ -39,7 +39,7 @@ mode: real
 preflight: PASS
 [FastMCP info] server is running on HTTP Stream at http://127.0.0.1:46480/mcp
 boot: daemon up on mcp=46480 aux=48602 (0.04s)
-seed: knowledge=10, code_artifacts=10 (skipped=0)
+seed: knowledge=10, act_artifacts=10 (skipped=0)
 
 dispatch: launching scheduler tick (target mode=real)…
 [FastMCP info] HTTP Stream session established
@@ -95,7 +95,7 @@ opencode emitted a `brain_cycle_2_started` or `continue_cycle_requested` event m
 
 ### `verifier_residual_high`
 The brain authored an action whose verifier rejected the observation (residual ≥ 0.3). For this title-fetching directive that almost never happens (example.com's `<title>` is stable). When it does:
-1. Paste the action artifact body via `bun -e 'const {openDb}=require("./substrate/db"); const db=openDb("<path-to-state.db>"); console.log(db.query("SELECT body FROM code_artifact WHERE id=?").get("<action-id>").body)'`.
+1. Paste the action artifact body via `bun -e 'const {openDb}=require("./substrate/db"); const db=openDb("<path-to-state.db>"); console.log(db.query("SELECT body FROM act_artifact WHERE id=?").get("<action-id>").body)'`.
 2. Inspect the verifier output for the residual reasoning.
 3. The smoke does NOT fail on residual≥0.3 — it accepts the refinement-edge path. A real-world directive would emit `task_edge_recorded` kind=refines, and the next scheduler tick would pick up the refined task. The smoke runs ONE tick, so it stops there.
 

@@ -83,7 +83,7 @@ describe("sqlite-vec extension + vec_events virtual table", () => {
     );
     db.run(
       "INSERT INTO vec_events(event_id, embedding, kind, ts, embedding_version) VALUES (?, ?, ?, ?, ?)",
-      ["k_aa", JSON.stringify(makeUnitVec(1536, 0)), "code_artifact_admitted", "2026-01-02", "v1"],
+      ["k_aa", JSON.stringify(makeUnitVec(1536, 0)), "act_artifact_admitted", "2026-01-02", "v1"],
     );
     const queryVec = JSON.stringify(makeUnitVec(1536, 0));
     const rows = db
@@ -91,7 +91,7 @@ describe("sqlite-vec extension + vec_events virtual table", () => {
         "SELECT event_id FROM vec_events " +
           "WHERE embedding MATCH ? AND k = 5 AND kind = ? ORDER BY distance",
       )
-      .all(queryVec, "code_artifact_admitted") as Array<{ event_id: string }>;
+      .all(queryVec, "act_artifact_admitted") as Array<{ event_id: string }>;
     expect(rows.length).toBe(1);
     expect(rows[0].event_id).toBe("k_aa");
   });

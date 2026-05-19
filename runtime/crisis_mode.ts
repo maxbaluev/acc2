@@ -90,7 +90,7 @@ export const applyModeAdjustments = (
   maxConcurrent: mode.max_concurrent,
 });
 
-/** Check if LATM authoring (code_artifact_candidate emission) is currently
+/** Check if LATM authoring (act_artifact_candidate emission) is currently
  *  suspended for the supplied directive. dispatch_decider and
  *  task_dispatcher consult this to suppress candidate emission in crisis
  *  mode (emitting a `latm_suspended_in_crisis` event instead). */

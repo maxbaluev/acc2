@@ -9,12 +9,12 @@
 // Seed code artifacts enter at `admitted` with prior scores per the
 // design table; the substrate IS the merger, so we never seed them
 // directly into `promoted` — only repeated successful invocation
-// (extractCodeArtifactScores §11.5 promotion path) earns that status.
+// (extractActArtifactScores §11.5 promotion path) earns that status.
 
 import type { Database } from "bun:sqlite";
 import { withImmediateTransaction } from "./db";
 import { goalShape } from "../runtime/goal_shape";
-import type { CodeArtifactStatus, OwnerProfile, Runtime, SandboxDecl } from "./types";
+import type { ActArtifactStatus, OwnerProfile, Runtime, SandboxDecl } from "./types";
 import {
   REF_NEUTRAL_CLASSIC_DOCX_B64,
   REF_NEUTRAL_CLASSIC_DISPLAY_NAME,
@@ -1580,15 +1580,18 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   },
 ];
 
-export type CodeArtifactSeedSummary = { inserted: number; skipped: number; upgraded?: number };
+export type ActArtifactSeedSummary = { inserted: number; skipped: number; upgraded?: number };
+
+/** F4a deprecated alias — pre-rename name. */
+export type CodeArtifactSeedSummary = ActArtifactSeedSummary;
 
 const seedIdFor = (seedName: string): string => `seed_${seedName}`;
 
-export const seedCodeArtifacts = (db: Database): CodeArtifactSeedSummary => {
+export const seedActArtifacts = (db: Database): ActArtifactSeedSummary => {
   let inserted = 0;
   let skipped = 0;
   let upgraded = 0;
-  const initialStatus: CodeArtifactStatus = "admitted";
+  const initialStatus: ActArtifactStatus = "admitted";
 
   withImmediateTransaction(db, () => {
     for (const seed of SEED_ARTIFACTS) {
@@ -1606,7 +1609,7 @@ export const seedCodeArtifacts = (db: Database): CodeArtifactSeedSummary => {
         `artifact:${id}|runtime:${seed.runtime}|body:${seed.body}|sandbox:${sandboxJson}|fixture:${fixtureJson}|state_root:${seed.state_root}|kind:${seed.kind ?? "code_artifact"}`,
       );
       const existing = db
-        .query("SELECT id FROM code_artifact WHERE id = ?")
+        .query("SELECT id FROM act_artifact WHERE id = ?")
         .get(id) as { id: string } | null;
       if (existing) {
         if (seenSeedHash(db, "seed:code_artifact", contentHash)) {
@@ -1618,7 +1621,7 @@ export const seedCodeArtifacts = (db: Database): CodeArtifactSeedSummary => {
         // recent_residual_mean/recent_kill_count so live calibration is
         // not wiped.
         db.run(
-          `UPDATE code_artifact SET
+          `UPDATE act_artifact SET
              runtime = ?,
              body = ?,
              declared_sandbox = ?,
@@ -1650,7 +1653,7 @@ export const seedCodeArtifacts = (db: Database): CodeArtifactSeedSummary => {
       const alpha = 1 + seed.initial_score * 4;
       const beta = 1 + (1 - seed.initial_score) * 4;
       db.run(
-        `INSERT INTO code_artifact (
+        `INSERT INTO act_artifact (
            id, runtime, body, declared_sandbox, state_root, kind,
            posterior_alpha, posterior_beta, score, confidence,
            recent_residual_mean, recent_kill_count, status, name,
@@ -1685,6 +1688,9 @@ export const seedCodeArtifacts = (db: Database): CodeArtifactSeedSummary => {
 
   return { inserted, skipped, upgraded };
 };
+
+/** F4a deprecated alias — pre-rename name. Resolves to seedActArtifacts. */
+export const seedCodeArtifacts = seedActArtifacts;
 
 /** Convenience helper — primarily for tests / the daemon boot path.
  *  Returns the canonical seed ids so callers can join against them. */
@@ -1772,7 +1778,7 @@ export const seedLakelandDriveProvenance = (
         `// Original artifact body lost (external doc trashed=${entry.trashed}).\n` +
         `// Contract HJJS1665H961B2SRYHC5J85D14 (2026-05-18).`;
       const result = db.run(
-        `INSERT OR IGNORE INTO code_artifact (
+        `INSERT OR IGNORE INTO act_artifact (
            id, runtime, kind, body, declared_sandbox, state_root,
            posterior_alpha, posterior_beta, score, confidence,
            recent_residual_mean, recent_kill_count, status, name,
@@ -1818,7 +1824,7 @@ export const seedLakelandDriveProvenance = (
       if (entry.predecessorOf < 0) continue;
       const priorId = LAKELAND_PROVENANCE_SEEDS[entry.predecessorOf]!.artifactId;
       const result = db.run(
-        "UPDATE code_artifact SET superseded_by = ?, updated_at = ? WHERE id = ? AND (superseded_by IS NULL OR superseded_by = ?)",
+        "UPDATE act_artifact SET superseded_by = ?, updated_at = ? WHERE id = ? AND (superseded_by IS NULL OR superseded_by = ?)",
         [entry.artifactId, ts, priorId, entry.artifactId],
       );
       if ((result as { changes?: number }).changes && (result as { changes: number }).changes > 0) {

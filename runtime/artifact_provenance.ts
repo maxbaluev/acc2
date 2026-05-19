@@ -6,7 +6,7 @@
 // Pre-fix: three Lakeland v4/v5/v6 Drive docs were trashed in-session
 // with no substrate-level supersedes chain.
 //
-// Schema: three additive columns on `code_artifact`:
+// Schema: three additive columns on `act_artifact`:
 //   - supersedes         TEXT NULL    — prior artifact_id this row replaces
 //   - superseded_by      TEXT NULL    — successor artifact_id (mutated when a
 //                                       new artifact admits with supersedes=this)
@@ -17,7 +17,7 @@
 // Public surface:
 //   - getProvenanceChain(db, artifactId) → ancestors[] + descendants[] + lost_version_count
 //   - markSuperseded(db, supersededId, newId, emit) → flips prior row's
-//     superseded_by + emits `code_artifact_superseded`. Idempotent: a
+//     superseded_by + emits `act_artifact_superseded`. Idempotent: a
 //     second call with the same pair is a no-op (no duplicate event).
 
 import type { Database } from "bun:sqlite";
@@ -26,7 +26,7 @@ import type { EmitEventInput } from "./events";
 import { getArtifact, type CodeArtifactRow } from "./artifact_store";
 import { nowIso } from "./ids";
 
-/** A single hop in the provenance chain — projection of code_artifact for
+/** A single hop in the provenance chain — projection of act_artifact for
  *  the graph-walk surface. The CLI render and JSON output both consume
  *  this shape. */
 export type ProvenanceNode = {
@@ -114,7 +114,7 @@ export const getProvenanceChain = (
 };
 
 /** Flip the prior row's `superseded_by` to point at the new artifact and
- *  emit `code_artifact_superseded`. Idempotent: if the prior row already
+ *  emit `act_artifact_superseded`. Idempotent: if the prior row already
  *  points to the new artifact this is a no-op (no duplicate event).
  *  Returns true on transition, false on no-op or missing prior row.
  *
@@ -152,12 +152,12 @@ export const markSuperseded = (
   if (prior.supersededBy === newId) return false;     // idempotent no-op
   const ts = nowIso();
   db.run(
-    "UPDATE code_artifact SET superseded_by = ?, updated_at = ? WHERE id = ?",
+    "UPDATE act_artifact SET superseded_by = ?, updated_at = ? WHERE id = ?",
     [newId, ts, supersededId],
   );
   const next = getArtifact(db, newId);
   emit({
-    kind: "code_artifact_superseded",
+    kind: "act_artifact_superseded",
     substrate_origin: "substrate_auto",
     action_artifact_id: supersededId,
     payload: {
@@ -205,7 +205,7 @@ export const backfillProvenancePlaceholder = (
   // constraints; the body is a self-documenting comment so the
   // placeholder is honest about its synthetic provenance.
   db.run(
-    `INSERT OR IGNORE INTO code_artifact (
+    `INSERT OR IGNORE INTO act_artifact (
        id, runtime, body, declared_sandbox, state_root,
        posterior_alpha, posterior_beta, score, confidence,
        recent_residual_mean, recent_kill_count, status, name,
@@ -244,7 +244,7 @@ export const backfillProvenancePlaceholder = (
   // (idempotent — only updates rows that don't already point here).
   if (input.supersedes) {
     db.run(
-      "UPDATE code_artifact SET superseded_by = ?, updated_at = ? WHERE id = ? AND (superseded_by IS NULL OR superseded_by = ?)",
+      "UPDATE act_artifact SET superseded_by = ?, updated_at = ? WHERE id = ? AND (superseded_by IS NULL OR superseded_by = ?)",
       [input.artifactId, ts, input.supersedes, input.artifactId],
     );
   }

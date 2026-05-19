@@ -3,7 +3,7 @@
 //
 // Substrate-side helper that mirrors the artifact-admission strategy-first
 // gate at closure-audit time. When a directive emits any
-// `code_artifact_candidate` whose payload.name (or payload.purpose)
+// `act_artifact_candidate` whose payload.name (or payload.purpose)
 // starts with `atms_report_v`, the closure verifier MUST observe:
 //
 //   1. ≥ 15 `task_node_opened` events under the directive — proxy for a
@@ -68,13 +68,13 @@ export const checkStrategyFirstClosure = (
   directiveId: string,
   currentResidual: number,
 ): StrategyFirstClosureResult => {
-  // 1. Collect every atms_report_v* code_artifact_candidate under the
+  // 1. Collect every atms_report_v* act_artifact_candidate under the
   //    directive. The artifact "kind" lives in payload.name OR
   //    payload.purpose — both are how the bridge tags the candidate
   //    today; we accept either to stay schema-tolerant.
   const candidateRows = db
     .query<{ id: string; payload: string }, [string]>(
-      "SELECT id, payload FROM events WHERE directive_id = ? AND kind = 'code_artifact_candidate'",
+      "SELECT id, payload FROM events WHERE directive_id = ? AND kind IN ('act_artifact_candidate', 'code_artifact_candidate')",
     )
     .all(directiveId);
   const atmsReportCandidates: Array<{

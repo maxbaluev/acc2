@@ -1,5 +1,5 @@
 // acc2 empty-body refusal test (dark-gate sweep 2026-05-18). The
-// structural claim: when a code_artifact_candidate event is emitted
+// structural claim: when a act_artifact_candidate event is emitted
 // with payload.body shorter than the kind-specific threshold, the
 // emit-side screen fires lane_routing_refused with
 // reason="empty_body_below_threshold". The threshold is 500 chars for
@@ -33,11 +33,11 @@ const refusalsFor = (db: ReturnType<typeof openDb>, eventId: string) => {
   });
 };
 
-describe("empty_body_refusal — emit-side screen on code_artifact_candidate", () => {
+describe("empty_body_refusal — emit-side screen on act_artifact_candidate", () => {
   test("refuses an atms_report_v* candidate with body below the 500-char floor", () => {
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         kind: "atms_report_v9",
@@ -58,7 +58,7 @@ describe("empty_body_refusal — emit-side screen on code_artifact_candidate", (
   test("refuses a generic-kind candidate with body below the 200-char floor", () => {
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         kind: "research_note",
@@ -77,7 +77,7 @@ describe("empty_body_refusal — emit-side screen on code_artifact_candidate", (
   test("admits a published_drive_doc candidate with a synthetic short body (placeholder exemption)", () => {
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         kind: "published_drive_doc",
@@ -95,7 +95,7 @@ describe("empty_body_refusal — emit-side screen on code_artifact_candidate", (
     const body = "padding ".repeat(40);
     expect(body.length).toBeGreaterThanOrEqual(200);
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         kind: "research_note",
@@ -110,7 +110,7 @@ describe("empty_body_refusal — emit-side screen on code_artifact_candidate", (
   test("does NOT fire when payload.body is absent (legacy worker stubs are exempt)", () => {
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         runtime: "bun",

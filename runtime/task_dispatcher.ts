@@ -398,7 +398,12 @@ export const dispatchReadyTask = async (
         retrievedArtifacts = await retrieve(db, deps.index, {
           text: task.goal ?? task.directive_id,
           k: 6,
-          kindFilter: ["code_artifact_candidate", "code_artifact_admitted", "code_artifact_promoted"],
+          kindFilter: [
+            "act_artifact_candidate", "act_artifact_admitted", "act_artifact_promoted",
+            // F4a legacy aliases — historical rows authored before the
+            // act_artifact rename still need to match through retrieval.
+            "code_artifact_candidate", "code_artifact_admitted", "code_artifact_promoted",
+          ],
           goalText: task.goal,
         });
         if (retrievedArtifacts.query_embedding_unavailable) retrievedArtifacts = null;

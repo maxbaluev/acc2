@@ -43,8 +43,8 @@ describe("admitArtifact — happy path", () => {
     expect(row!.status).toBe("admitted");
     expect(row!.score).toBeCloseTo(0.5, 6);
     expect(row!.confidence).toBeCloseTo(0.3, 6);
-    // Emitted exactly one code_artifact_admitted event at the end.
-    const admitted = events.filter((e) => e.kind === "code_artifact_admitted");
+    // Emitted exactly one act_artifact_admitted event at the end.
+    const admitted = events.filter((e) => e.kind === "act_artifact_admitted");
     expect(admitted.length).toBe(1);
   });
 
@@ -71,7 +71,7 @@ describe("admitArtifact — rejections", () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
     const body = `throw new Error("admission boom");`;
-    const before = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const before = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     const result = await admitArtifact(
       db,
       {
@@ -86,9 +86,9 @@ describe("admitArtifact — rejections", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toBe("runtime_error");
-    const after = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const after = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     expect(after).toBe(before);
-    expect(events.some((e) => e.kind === "code_artifact_admission_rejected")).toBe(true);
+    expect(events.some((e) => e.kind === "act_artifact_admission_rejected")).toBe(true);
   });
 
   test("admits a uv artifact end-to-end OR rejects cleanly when uv is absent", async () => {
@@ -114,11 +114,11 @@ describe("admitArtifact — rejections", () => {
     if (!result.ok) {
       expect(["runtime_unavailable", "runtime_error"]).toContain(result.reason);
       // Row must be deleted on rejection.
-      const c = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+      const c = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
       expect(c).toBe(0);
     } else {
       // Admission succeeded — the row is present at admit priors.
-      const row = (db.query("SELECT runtime FROM code_artifact WHERE id = ?").get(result.artifactId) as { runtime: string });
+      const row = (db.query("SELECT runtime FROM act_artifact WHERE id = ?").get(result.artifactId) as { runtime: string });
       expect(row.runtime).toBe("uv");
     }
   });
@@ -181,7 +181,7 @@ describe("admitArtifact — rejections", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toBe("sandbox_decl_invalid");
-    expect(events.some((e) => e.kind === "code_artifact_admission_rejected")).toBe(true);
+    expect(events.some((e) => e.kind === "act_artifact_admission_rejected")).toBe(true);
   });
 
   test("rejects when runtime field disagrees with declared_sandbox.runtime", async () => {
@@ -209,7 +209,7 @@ describe("admitArtifact — rejections", () => {
   test("predicate gate refuses ceo_buyer body containing 'friction' (C1, no row inserted)", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
-    const before = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const before = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     const body = `console.log('@@RESULT@@ ' + JSON.stringify({ headline: "Friction-free onboarding", ok: true }));`;
     const result = await admitArtifact(
       db,
@@ -227,7 +227,7 @@ describe("admitArtifact — rejections", () => {
     if (result.ok) return;
     expect(result.reason).toBe("predicate_gate_failed");
     // No code_artifact row inserted — the gate runs BEFORE insert.
-    const after = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const after = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     expect(after).toBe(before);
     // Exactly one predicate_gate_rejected event was emitted.
     const rejections = events.filter((e) => e.kind === "predicate_gate_rejected");
@@ -261,7 +261,7 @@ describe("admitArtifact — rejections", () => {
     // No predicate_gate_rejected event surfaced; admission proceeded
     // through the canonical path and the row landed.
     expect(events.some((e) => e.kind === "predicate_gate_rejected")).toBe(false);
-    expect(events.some((e) => e.kind === "code_artifact_admitted")).toBe(true);
+    expect(events.some((e) => e.kind === "act_artifact_admitted")).toBe(true);
     const row = getArtifact(db, result.artifactId);
     expect(row).not.toBeNull();
     expect(row!.status).toBe("admitted");
@@ -317,13 +317,13 @@ describe("admitArtifact — rejections", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(events.some((e) => e.kind === "atms_strategy_first_violation")).toBe(false);
-    expect(events.some((e) => e.kind === "code_artifact_admitted")).toBe(true);
+    expect(events.some((e) => e.kind === "act_artifact_admitted")).toBe(true);
   });
 
   test("strategy-first gate refuses atms_report_v* when cited_knowledge_ids is empty (no row inserted)", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
-    const before = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const before = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, report: 'v1_initiative_first' }));`;
     const result = await admitArtifact(
       db,
@@ -342,7 +342,7 @@ describe("admitArtifact — rejections", () => {
     if (result.ok) return;
     expect(result.reason).toBe("strategy_first_violation_missing_strategic_direction_chosen");
     // Gate runs BEFORE insert — no row landed.
-    const after = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const after = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     expect(after).toBe(before);
     const violations = events.filter((e) => e.kind === "atms_strategy_first_violation");
     expect(violations.length).toBe(1);
@@ -443,7 +443,7 @@ describe("admitArtifact — rejections", () => {
 
 // C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14).
 describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
-  test("admitting published_drive_doc with supersedes flips prior.superseded_by and emits code_artifact_superseded", async () => {
+  test("admitting published_drive_doc with supersedes flips prior.superseded_by and emits act_artifact_superseded", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
     const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
@@ -514,7 +514,7 @@ describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
     expect(priorRow.supersededBy).toBe(successor.artifactId);
     const successorRow = getArtifact(db, successor.artifactId)!;
     expect(successorRow.supersedes).toBe(prior.artifactId);
-    const supersededEvents = events.filter((e) => e.kind === "code_artifact_superseded");
+    const supersededEvents = events.filter((e) => e.kind === "act_artifact_superseded");
     expect(supersededEvents.length).toBe(1);
     expect((supersededEvents[0]!.payload as Record<string, unknown>).prior_artifact_id).toBe(prior.artifactId);
     expect((supersededEvents[0]!.payload as Record<string, unknown>).new_artifact_id).toBe(successor.artifactId);
@@ -528,7 +528,7 @@ describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
   test("rendered_docx admission refuses when markdown_body_id is missing", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
-    const before = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const before = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
     const result = await admitArtifact(
       db,
@@ -548,7 +548,7 @@ describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
     if (result.ok) return;
     expect(result.reason).toBe("rendered_docx_invalid_inputs");
     expect(result.detail).toMatch(/rendered_docx_missing_markdown_body_id|rendered_docx_unknown_markdown_body_id|rendered_docx_unknown_reference_docx_id/);
-    const after = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const after = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     expect(after).toBe(before);
     expect(events.some((e) => e.kind === "rendered_docx_invalid_inputs")).toBe(true);
   });
@@ -597,7 +597,7 @@ describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
   test("published_drive_doc admission refuses without renderedDocxId (preview-first rule)", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
-    const before = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const before = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
     const result = await admitArtifact(
       db,
@@ -618,7 +618,7 @@ describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
     if (result.ok) return;
     expect(result.reason).toBe("published_drive_doc_invalid_inputs");
     expect(result.detail).toContain("published_drive_doc_missing_rendered_docx_id");
-    const after = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const after = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     expect(after).toBe(before);
     expect(events.some((e) => e.kind === "published_drive_doc_invalid_inputs")).toBe(true);
   });
@@ -670,7 +670,7 @@ describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
     const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: true }));`;
-    const before = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const before = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     const result = await admitArtifact(
       db,
       {
@@ -688,7 +688,7 @@ describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toBe("published_drive_doc_missing_drive_uri");
-    const after = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const after = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     expect(after).toBe(before);
   });
 });

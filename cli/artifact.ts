@@ -1,10 +1,10 @@
-// `acc artifact provenance <artifact_id>` — graph-walk a code_artifact
+// `acc artifact provenance <artifact_id>` — graph-walk an act_artifact
 // supersedes chain and render the result as a tree.
 //
 // Contract C5 (HJJS1665H961B2SRYHC5J85D14, directive
 // QHTRBV6PFX2JVBMHDNDA4B03GC, 2026-05-18). Surfaces the same chain that
 // the substrate maintains via the `supersedes` / `superseded_by` columns
-// on code_artifact, including lost_version_count annotations on
+// on act_artifact, including lost_version_count annotations on
 // backfill placeholders.
 //
 // Surface:
@@ -71,11 +71,11 @@ export class ArtifactNotFoundError extends Error {
  *  artifact_id. Mirrors resolveDirectivePrefix from dispatch_inspect. */
 export const resolveArtifactPrefix = (db: Database, prefix: string): string => {
   if (!prefix) throw new ArtifactNotFoundError(prefix);
-  const exact = db.query("SELECT id FROM code_artifact WHERE id = ? LIMIT 1").get(prefix) as { id: string } | null;
+  const exact = db.query("SELECT id FROM act_artifact WHERE id = ? LIMIT 1").get(prefix) as { id: string } | null;
   if (exact) return exact.id;
   if (prefix.length < 6) throw new ArtifactNotFoundError(prefix);
   const rows = db
-    .query("SELECT id FROM code_artifact WHERE id LIKE ? ORDER BY id LIMIT 10")
+    .query("SELECT id FROM act_artifact WHERE id LIKE ? ORDER BY id LIMIT 10")
     .all(`${prefix}%`) as Array<{ id: string }>;
   if (rows.length === 0) throw new ArtifactNotFoundError(prefix);
   if (rows.length > 1) throw new AmbiguousArtifactPrefixError(prefix, rows.map((r) => r.id));
@@ -136,7 +136,7 @@ const renderPretty = (
 };
 
 const usage = (): string => [
-  "acc artifact — inspect a code_artifact's provenance / supersedes chain",
+  "acc artifact — inspect an act_artifact's provenance / supersedes chain",
   "",
   "Usage:",
   "  acc artifact provenance <artifact_id_or_prefix> [--json] [--no-color]",

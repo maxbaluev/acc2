@@ -14,7 +14,7 @@
 //   - Failed replay     → −0.10 (floored at 0.0; auto-archive at < 0.2).
 //
 // Why this is a DIFFERENT formula than the Beta posterior used for
-// code_artifact + knowledge_candidate (see artifact_store.ts / extractors.ts):
+// act_artifact + knowledge_candidate (see artifact_store.ts / extractors.ts):
 // recipes do not carry a residual-driven posterior — they have a single
 // "did the cached trajectory replay successfully" bit. The Beta model
 // (alpha/beta + EMA half-life 20) is designed for noisy residual signals

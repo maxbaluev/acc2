@@ -626,7 +626,7 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // emit synchronously with the candidate id in context_refs. The
   // candidate stays in the ledger so audit/replay see what was attempted;
   // the refusal events explain why downstream gates blocked it.
-  if (input.kind === "code_artifact_candidate") {
+  if (input.kind === "act_artifact_candidate") {
     try {
       const { refusals } = screenCodeArtifactCandidate(db, {
         payload: input.payload,

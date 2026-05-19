@@ -1,6 +1,6 @@
 // acc2 substrate connection layer — bun:sqlite in WAL mode.
 // Single source of truth for opening / closing / transacting against
-// the events + code_artifact tables. Schema is applied on first open
+// the events + act_artifact tables. Schema is applied on first open
 // per path; connections are cached so re-opens reuse the same handle.
 //
 // Migration policy (F9, SQLPOOLARCH01, cites 3P7NAMR63901):
@@ -89,33 +89,40 @@ export const runSchema = (db: Database): void => {
   db.exec(schemaSql);
 };
 
-/** Brain dataflow audit bxdhdkm9e #3 (2026-05-15): code_artifact gained
+/** Brain dataflow audit bxdhdkm9e #3 (2026-05-15): act_artifact gained
  *  six provenance/intent columns (intent, summary, target_files,
  *  target_resources, source_candidate_id, owner_gate_verdict). Fresh installs get them via
  *  schema.sql's CREATE TABLE; existing DBs need ALTER TABLE here. Each
  *  ALTER is wrapped in a try/catch so re-running this on an already-
  *  migrated DB is a no-op (SQLite raises "duplicate column name" which
  *  we swallow). No other patterns of fallback — the column either
- *  exists or it doesn't. */
+ *  exists or it doesn't.
+ *
+ *  F4a (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW): the table was
+ *  renamed code_artifact → act_artifact. ALTER TABLE statements target
+ *  the new name; the rename step in runMigrations runs before column
+ *  ALTERs so production DBs holding `code_artifact` rows transition
+ *  cleanly. */
 const ARTIFACT_METADATA_COLUMNS: Array<{ name: string; ddl: string }> = [
-  { name: "intent",              ddl: "ALTER TABLE code_artifact ADD COLUMN intent TEXT" },
-  { name: "summary",             ddl: "ALTER TABLE code_artifact ADD COLUMN summary TEXT" },
-  { name: "target_files",        ddl: "ALTER TABLE code_artifact ADD COLUMN target_files TEXT" },
-  { name: "target_resources",    ddl: "ALTER TABLE code_artifact ADD COLUMN target_resources TEXT" },
-  { name: "source_candidate_id", ddl: "ALTER TABLE code_artifact ADD COLUMN source_candidate_id TEXT" },
-  { name: "owner_gate_verdict",  ddl: "ALTER TABLE code_artifact ADD COLUMN owner_gate_verdict TEXT" },
+  { name: "intent",              ddl: "ALTER TABLE act_artifact ADD COLUMN intent TEXT" },
+  { name: "summary",             ddl: "ALTER TABLE act_artifact ADD COLUMN summary TEXT" },
+  { name: "target_files",        ddl: "ALTER TABLE act_artifact ADD COLUMN target_files TEXT" },
+  { name: "target_resources",    ddl: "ALTER TABLE act_artifact ADD COLUMN target_resources TEXT" },
+  { name: "source_candidate_id", ddl: "ALTER TABLE act_artifact ADD COLUMN source_candidate_id TEXT" },
+  { name: "owner_gate_verdict",  ddl: "ALTER TABLE act_artifact ADD COLUMN owner_gate_verdict TEXT" },
   // L8 (2026-05-17): free-string kind discriminator. NOT NULL with
-  // default 'code_artifact' so existing rows get the canonical legacy
-  // value. The seedCodeArtifacts code path overwrites for newly-added
-  // typed rows (e.g. 'dispatch_strategy_v1'). Index added in schema.sql.
-  { name: "kind",                ddl: "ALTER TABLE code_artifact ADD COLUMN kind TEXT NOT NULL DEFAULT 'code_artifact'" },
+  // default 'runtime_action' post-F4a; historical rows carry legacy
+  // 'code_artifact' values which coexist (kind is an open string, not
+  // an enum). The seed path overwrites for newly-added typed rows
+  // (e.g. 'dispatch_strategy_v1'). Index added in schema.sql.
+  { name: "kind",                ddl: "ALTER TABLE act_artifact ADD COLUMN kind TEXT NOT NULL DEFAULT 'runtime_action'" },
   // C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14): artifact
-  // provenance chain. Three columns sit directly on code_artifact so
+  // provenance chain. Three columns sit directly on act_artifact so
   // graph walks are pure SQL — no side table needed, matching the
   // additive-column pattern the contract picked.
-  { name: "supersedes",          ddl: "ALTER TABLE code_artifact ADD COLUMN supersedes TEXT" },
-  { name: "superseded_by",       ddl: "ALTER TABLE code_artifact ADD COLUMN superseded_by TEXT" },
-  { name: "lost_version_count",  ddl: "ALTER TABLE code_artifact ADD COLUMN lost_version_count INTEGER NOT NULL DEFAULT 0" },
+  { name: "supersedes",          ddl: "ALTER TABLE act_artifact ADD COLUMN supersedes TEXT" },
+  { name: "superseded_by",       ddl: "ALTER TABLE act_artifact ADD COLUMN superseded_by TEXT" },
+  { name: "lost_version_count",  ddl: "ALTER TABLE act_artifact ADD COLUMN lost_version_count INTEGER NOT NULL DEFAULT 0" },
 ];
 
 const EVENT_HOT_PATH_INDEXES = [
@@ -126,15 +133,124 @@ const EVENT_HOT_PATH_INDEXES = [
   "CREATE INDEX IF NOT EXISTS idx_events_projection_key ON events(json_extract(payload, '$.projection_key')) WHERE json_extract(payload, '$.projection_key') IS NOT NULL",
   // C5 (2026-05-18) provenance indexes — mirrors schema.sql so older DBs
   // upgraded via runMigrations() get the same lookup shape.
-  "CREATE INDEX IF NOT EXISTS idx_code_artifact_supersedes    ON code_artifact(supersedes)    WHERE supersedes IS NOT NULL",
-  "CREATE INDEX IF NOT EXISTS idx_code_artifact_superseded_by ON code_artifact(superseded_by) WHERE superseded_by IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_act_artifact_supersedes    ON act_artifact(supersedes)    WHERE supersedes IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_act_artifact_superseded_by ON act_artifact(superseded_by) WHERE superseded_by IS NOT NULL",
 ];
 
+/** F4a table rename (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW):
+ *  code_artifact → act_artifact. Three production states are handled:
+ *
+ *    1. Fresh install: schema.sql CREATE TABLE IF NOT EXISTS already
+ *       created `act_artifact`; no `code_artifact` exists. The rename
+ *       block is a no-op.
+ *    2. Legacy install: only `code_artifact` exists. The schema.sql
+ *       CREATE TABLE IF NOT EXISTS act_artifact runs FIRST and creates
+ *       an empty act_artifact. We detect this (empty act_artifact +
+ *       non-empty code_artifact) and: drop the empty act_artifact,
+ *       RENAME TABLE code_artifact TO act_artifact, then drop the
+ *       legacy code_artifact_registry_view alias.
+ *    3. Mid-migration install: both tables exist with rows (cannot
+ *       happen on a healthy substrate but production DBs may have
+ *       drifted via prior partial migrations). We refuse to merge — a
+ *       human must resolve the divergence. The check is: if both
+ *       tables exist AND both have >0 rows, throw with a clear message.
+ *
+ *  Idempotent: re-running on a post-migration DB walks the "fresh
+ *  install" branch and exits cleanly. */
+const runActArtifactRename = (db: Database): void => {
+  const tablesExist = (name: string): boolean => {
+    const row = db.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+    ).get(name) as { name?: string } | null;
+    return !!row?.name;
+  };
+  const rowCount = (name: string): number => {
+    try {
+      const r = db.query(`SELECT count(*) AS n FROM ${name}`).get() as { n: number } | null;
+      return r?.n ?? 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  const hasLegacy = tablesExist("code_artifact");
+  const hasCanonical = tablesExist("act_artifact");
+  if (!hasLegacy) return;
+
+  const legacyRows = rowCount("code_artifact");
+  const canonicalRows = hasCanonical ? rowCount("act_artifact") : 0;
+
+  if (hasCanonical && canonicalRows > 0 && legacyRows > 0) {
+    throw new Error(
+      `act_artifact_rename_conflict: both code_artifact (${legacyRows} rows) ` +
+      `and act_artifact (${canonicalRows} rows) carry data. Manual reconciliation ` +
+      `required — pick the authoritative table and DROP the other before re-opening.`,
+    );
+  }
+
+  if (hasCanonical && canonicalRows === 0) {
+    // Empty stub act_artifact created by schema.sql's CREATE TABLE IF
+    // NOT EXISTS. Drop it so RENAME can take over. Drop dependent
+    // views/indexes first — SQLite refuses to drop a table referenced
+    // by a view, and SQLite stores view-text as plain text so an
+    // orphan act_artifact_registry_view will block the next operation.
+    try { db.run("DROP VIEW IF EXISTS act_artifact_registry_view"); } catch { /* swallow */ }
+    try { db.run("DROP VIEW IF EXISTS artifact_routing_view"); } catch { /* swallow */ }
+    for (const idx of [
+      "idx_act_artifact_runtime",
+      "idx_act_artifact_status",
+      "idx_act_artifact_score",
+      "idx_act_artifact_kind",
+      "idx_act_artifact_supersedes",
+      "idx_act_artifact_superseded_by",
+    ]) {
+      try { db.run(`DROP INDEX IF EXISTS ${idx}`); } catch { /* swallow */ }
+    }
+    db.run("DROP TABLE act_artifact");
+  }
+
+  if (legacyRows === 0 && !hasCanonical) {
+    // Legacy table exists but is empty AND no canonical table.
+    // schema.sql's CREATE TABLE IF NOT EXISTS act_artifact already ran
+    // before this function (runSchema runs first), so this branch is
+    // unreachable in practice. Defensive: drop the empty legacy table.
+    db.run("DROP TABLE code_artifact");
+    return;
+  }
+
+  db.run("ALTER TABLE code_artifact RENAME TO act_artifact");
+
+  // The legacy view code_artifact_registry_view (created by older runs
+  // of substrate/views.ts on this DB) still points to the now-renamed
+  // table. Drop it so views.ts can recreate the canonical
+  // act_artifact_registry_view alone.
+  try { db.run("DROP VIEW IF EXISTS code_artifact_registry_view"); } catch { /* swallow */ }
+
+  // Legacy indexes carry the old name. SQLite RENAME TABLE leaves them
+  // attached to the renamed table; drop them so the new index names
+  // (idx_act_artifact_*) can be created by schema.sql / migrations
+  // without collision.
+  for (const legacyIdx of [
+    "idx_code_artifact_runtime",
+    "idx_code_artifact_status",
+    "idx_code_artifact_score",
+    "idx_code_artifact_kind",
+    "idx_code_artifact_supersedes",
+    "idx_code_artifact_superseded_by",
+  ]) {
+    try { db.run(`DROP INDEX IF EXISTS ${legacyIdx}`); } catch { /* swallow */ }
+  }
+};
+
 export const runMigrations = (db: Database): void => {
-  // Order matters: ALTER TABLE columns FIRST, then CREATE INDEX. The
-  // C5 (supersedes / superseded_by) indexes reference columns added
-  // by the migration below; running them in reverse order fails on
-  // any pre-C5 DB with `no such column: supersedes`.
+  // Order matters:
+  //   1. RENAME code_artifact → act_artifact (if needed) so later ALTERs
+  //      target the canonical name on every DB.
+  //   2. ALTER TABLE columns (idempotent: swallow duplicate-column).
+  //   3. CREATE INDEX on the renamed table.
+  //   4. Backfill kind discriminator for typed seed rows.
+  runActArtifactRename(db);
+
   for (const col of ARTIFACT_METADATA_COLUMNS) {
     try {
       db.run(col.ddl);
@@ -146,17 +262,28 @@ export const runMigrations = (db: Database): void => {
     }
   }
 
+  // Recreate the canonical indexes on the (possibly renamed) table.
+  // Idempotent via CREATE INDEX IF NOT EXISTS.
+  for (const ddl of [
+    "CREATE INDEX IF NOT EXISTS idx_act_artifact_runtime ON act_artifact(runtime)",
+    "CREATE INDEX IF NOT EXISTS idx_act_artifact_status  ON act_artifact(status)",
+    "CREATE INDEX IF NOT EXISTS idx_act_artifact_score   ON act_artifact(score DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_act_artifact_kind    ON act_artifact(kind)",
+  ]) {
+    db.run(ddl);
+  }
+
   for (const ddl of EVENT_HOT_PATH_INDEXES) db.run(ddl);
 
   // L8 backfill: dispatch_strategy seed rows (admitted with
   // state_root='dispatch/strategy') predate the kind column.
   // Tag them so the strategy_ranker can use the cleaner kind
   // discriminator. Idempotent — only updates rows that still carry
-  // the default 'code_artifact' value.
+  // the legacy 'code_artifact' default.
   try {
     db.run(
-      `UPDATE code_artifact SET kind = 'dispatch_strategy_v1'
-       WHERE state_root = 'dispatch/strategy' AND kind = 'code_artifact'`,
+      `UPDATE act_artifact SET kind = 'dispatch_strategy_v1'
+       WHERE state_root = 'dispatch/strategy' AND kind IN ('code_artifact', 'runtime_action')`,
     );
   } catch (err) {
     // Migration is best-effort; if the kind column doesn't exist yet

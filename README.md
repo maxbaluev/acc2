@@ -55,7 +55,7 @@ What you get when the loop is ready:
 - `acc init --yes` seeds the foundational knowledge laws AND the canonical
   `seed_*` code-artifact pairs. Both surfaces are non-empty post-init.
 - `acc doctor` checks file existence AND state-content correctness:
-  knowledge_promoted ≥ 5, code_artifact seed rows ≥ 5, sqlite-vec
+  knowledge_promoted ≥ 5, act_artifact seed rows ≥ 5, sqlite-vec
   extension loads. A FAIL on any of those flips the composite verdict.
 
 For per-component manual install paths, see

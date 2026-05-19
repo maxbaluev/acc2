@@ -188,7 +188,7 @@ export const detectRedispatchStorm = (
  *
  *  Purely substrate-state — counts action_predicted rows by
  *  (task_id, action_artifact_id) over a window. Does NOT validate that
- *  action_artifact_id resolves to a real code_artifact row (we're
+ *  action_artifact_id resolves to a real act_artifact row (we're
  *  refactoring the artifact system in parallel; this detector works
  *  regardless of which artifact table exists). Idempotent — skips
  *  tasks that already have a terminal event. */

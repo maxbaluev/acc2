@@ -3,7 +3,7 @@
 // from brain audit QQEHAW97GS0AX7TEQ717Y3P174: the closure audit previously
 // only verified subtree STRUCTURE (task_node_opened + task_edge_recorded
 // presence). Deliverable-shaped leaves could close without ever emitting
-// concrete artifacts (code_artifact_candidate / contract_amendment_proposed
+// concrete artifacts (act_artifact_candidate / contract_amendment_proposed
 // / lesson_extracted{proposed_action}). Symptom: dispatch CBKDWYRN
 // closure_residual=0.05 while B3-style leaves "expose a concise growth
 // report..." committed empty.
@@ -103,7 +103,12 @@ export const checkClosureDeliverables = (
   const { subtree, children } = collectSubtree(db, rootTaskId);
 
   const nodes = eventsForTasks(db, subtree, "task_node_opened");
-  const artifacts = eventsForTasks(db, subtree, "code_artifact_candidate");
+  // F4a: act_artifact_candidate is canonical; code_artifact_candidate is the
+  // pre-rename alias retained for historical events on this directive.
+  const artifacts = [
+    ...eventsForTasks(db, subtree, "act_artifact_candidate"),
+    ...eventsForTasks(db, subtree, "code_artifact_candidate"),
+  ];
   const amendments = eventsForTasks(db, subtree, "contract_amendment_proposed");
   const lessons = eventsForTasks(db, subtree, "lesson_extracted");
 

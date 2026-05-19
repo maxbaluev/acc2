@@ -5,7 +5,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "./db";
 import {
-  extractCodeArtifactScores,
+  extractActArtifactScores,
   extractKnowledgePromotions,
   extractOwnerProfilePromotions,
   extractRecipeCandidates,
@@ -77,7 +77,7 @@ const insertArtifact = (
 ): void => {
   const ts = nowIso();
   db.run(
-    `INSERT INTO code_artifact (
+    `INSERT INTO act_artifact (
        id, runtime, body, declared_sandbox, state_root,
        posterior_alpha, posterior_beta, score, confidence,
        recent_residual_mean, recent_kill_count, status, name,
@@ -93,7 +93,7 @@ const insertArtifact = (
   );
 };
 
-describe("extractCodeArtifactScores", () => {
+describe("extractActArtifactScores", () => {
   test("recomputes posterior + recent_residual_mean from action_scored events", () => {
     const db = openDb(":memory:");
     insertArtifact(db, "art_x");
@@ -103,10 +103,10 @@ describe("extractCodeArtifactScores", () => {
     insertEvent(db, { kind: "action_scored", action_artifact_id: "art_x", residual: 0.15 });
     insertEvent(db, { kind: "action_scored", action_artifact_id: "art_x", residual: 0.20 });
 
-    const summary = extractCodeArtifactScores(db);
+    const summary = extractActArtifactScores(db);
     expect(summary.updated).toBe(1);
 
-    const row = db.query("SELECT * FROM code_artifact WHERE id = 'art_x'").get() as Record<string, unknown>;
+    const row = db.query("SELECT * FROM act_artifact WHERE id = 'art_x'").get() as Record<string, unknown>;
     // alpha = 1+3 = 4, beta = 1+0 = 1, score = 4/5 = 0.8.
     expect(row.posterior_alpha).toBe(4);
     expect(row.posterior_beta).toBe(1);
@@ -123,9 +123,9 @@ describe("extractCodeArtifactScores", () => {
     for (let i = 0; i < 25; i++) {
       insertEvent(db, { kind: "action_scored", action_artifact_id: "art_p", residual: 0.05 });
     }
-    const summary = extractCodeArtifactScores(db);
+    const summary = extractActArtifactScores(db);
     expect(summary.promoted).toBe(1);
-    const row = db.query("SELECT status, name FROM code_artifact WHERE id = 'art_p'").get() as Record<string, unknown>;
+    const row = db.query("SELECT status, name FROM act_artifact WHERE id = 'art_p'").get() as Record<string, unknown>;
     expect(row.status).toBe("promoted");
     expect(row.name as string).toBe("promote_me");
   });

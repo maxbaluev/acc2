@@ -33,10 +33,10 @@ export const LIVENESS_THRESHOLDS = {
    *  plus moved contract knowledge under owner-approval; the floor at 5 tolerates rotation but flips
    *  to FAIL on a structurally incomplete db. */
   knowledgePromoted: 5,
-  /** `code_artifact` rows where name LIKE 'seed_%' OR id LIKE 'seed_%'
-   *  floor. `seedCodeArtifacts` admits 8 canonical rows; floor at 5
+  /** `act_artifact` rows where name LIKE 'seed_%' OR id LIKE 'seed_%'
+   *  floor. `seedActArtifacts` admits 8 canonical rows; floor at 5
    *  tolerates eviction. */
-  codeArtifactsSeed: 5,
+  actArtifactsSeed: 5,
   /** `events.kind = 'recipe_extracted'` row count floor. `seedRecipes`
    *  lays down 2 canonical Tier-0 trajectories; floor at 1 tolerates
    *  one eviction without flipping to FAIL. */
@@ -80,9 +80,9 @@ export const computeLivenessReport = (db: Database): LivenessReport => {
     db,
     "SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_promoted'",
   );
-  const codeArtifactsSeed = safeCount(
+  const actArtifactsSeed = safeCount(
     db,
-    "SELECT COUNT(*) AS c FROM code_artifact WHERE id LIKE 'seed_%' OR name LIKE 'seed_%'",
+    "SELECT COUNT(*) AS c FROM act_artifact WHERE id LIKE 'seed_%' OR name LIKE 'seed_%'",
   );
   const recipesSeed = safeCount(
     db,
@@ -98,10 +98,10 @@ export const computeLivenessReport = (db: Database): LivenessReport => {
       pass: knowledgePromoted >= LIVENESS_THRESHOLDS.knowledgePromoted,
     },
     {
-      name: "codeArtifactsSeed",
-      observed: codeArtifactsSeed,
-      required: LIVENESS_THRESHOLDS.codeArtifactsSeed,
-      pass: codeArtifactsSeed >= LIVENESS_THRESHOLDS.codeArtifactsSeed,
+      name: "actArtifactsSeed",
+      observed: actArtifactsSeed,
+      required: LIVENESS_THRESHOLDS.actArtifactsSeed,
+      pass: actArtifactsSeed >= LIVENESS_THRESHOLDS.actArtifactsSeed,
     },
     {
       name: "recipesSeed",

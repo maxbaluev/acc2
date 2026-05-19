@@ -68,7 +68,7 @@ describe("inspectDispatch — projection shape", () => {
     insertEvent(db, { id: "E05", kind: "task_edge_recorded", directive_id: DIRA, task_id: "T_CHILD1", parent_task_id: "T_ROOT", payload: { edge_kind: "refines", from_task_id: "T_ROOT", to_task_id: "T_CHILD1" } });
     insertEvent(db, { id: "E06", kind: "knowledge_candidate", directive_id: DIRA, task_id: "T_ROOT", payload: { claim: "use depth-1 retrieval" } });
     insertEvent(db, { id: "E07", kind: "knowledge_candidate", directive_id: DIRA, task_id: "T_CHILD1", payload: { claim: "verifier residual is truth-bearing" } });
-    insertEvent(db, { id: "E08", kind: "code_artifact_candidate", directive_id: DIRA, task_id: "T_CHILD1", payload: { kind: "verifier", name: "alex_predicate_v1", body: "// 42 bytes of body content here please." } });
+    insertEvent(db, { id: "E08", kind: "act_artifact_candidate", directive_id: DIRA, task_id: "T_CHILD1", payload: { kind: "verifier", name: "alex_predicate_v1", body: "// 42 bytes of body content here please." } });
     insertEvent(db, { id: "E09", kind: "contract_amendment_proposed", directive_id: DIRA, task_id: "T_ROOT", payload: { current_behavior: "manually inspect events", proposed_behavior: "acc dispatch CLI" } });
     insertEvent(db, { id: "E10", kind: "brain_dispatched", directive_id: DIRA, task_id: "T_ROOT", payload: { dispatch_id: "B1" } });
     insertEvent(db, { id: "E11", kind: "task_closure_audited", directive_id: DIRA, task_id: "T_ROOT", payload: { closure_residual: 0.08, status: "ok", verdict: "audited" } });
@@ -240,7 +240,7 @@ describe("runDispatchInspect — command surface", () => {
     expect(text).toContain(`directive_id : ${DIRA}`);
     expect(text).toContain("task DAG (1 node");
     expect(text).toContain("knowledge_candidate (0)");
-    expect(text).toContain("code_artifact_candidate (0)");
+    expect(text).toContain("act_artifact_candidate (0)");
     expect(text).toContain("refinement_edges (0)");
     expect(text).toContain("contract_amendment_proposed (0)");
     expect(text).toContain("task_closure_audited (0)");

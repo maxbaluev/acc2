@@ -8,9 +8,9 @@
 // pulls nothing useful. This command surfaces that gap directly.
 //
 // Verdict semantics:
-//   - ALIVE     — events > 0 AND code_artifact > 0 AND vec_events > 0
+//   - ALIVE     — events > 0 AND act_artifact > 0 AND vec_events > 0
 //                 (foundational seed + artifact seed + embedder ran)
-//   - DEGRADED  — events > 0 but at least one of (code_artifact, vec_events) == 0
+//   - DEGRADED  — events > 0 but at least one of (act_artifact, vec_events) == 0
 //                 (something seeded; embedder didn't run, or artifacts not seeded)
 //   - DEAD      — events == 0 (fresh install, or substrate dropped)
 //
@@ -107,10 +107,10 @@ export const computeSubstrateStatus = (
   try { runViews(db); } catch { /* tolerable for read-only diagnostics */ }
 
   const events = safeCount(db, "SELECT COUNT(*) AS c FROM events");
-  const codeArtifacts = safeCount(db, "SELECT COUNT(*) AS c FROM code_artifact");
+  const codeArtifacts = safeCount(db, "SELECT COUNT(*) AS c FROM act_artifact");
   const codeArtifactsSeed = safeCount(
     db,
-    "SELECT COUNT(*) AS c FROM code_artifact WHERE id LIKE 'seed_%'",
+    "SELECT COUNT(*) AS c FROM act_artifact WHERE id LIKE 'seed_%'",
   );
   const codeArtifactsBrain = Math.max(0, codeArtifacts - codeArtifactsSeed);
   const vecEvents = safeCount(db, "SELECT COUNT(*) AS c FROM vec_events");
@@ -161,7 +161,7 @@ export const computeSubstrateStatus = (
   );
   const latestArtifact = safeScalar<{ ts: string }>(
     db,
-    "SELECT updated_at AS ts FROM code_artifact ORDER BY updated_at DESC LIMIT 1",
+    "SELECT updated_at AS ts FROM act_artifact ORDER BY updated_at DESC LIMIT 1",
   );
   const oldestUnembedded = safeScalar<{ ts: string }>(
     db,
@@ -214,7 +214,7 @@ export const renderSubstrateStatus = (
   out("─".repeat(50));
   out(`events:                     ${fmt(report.events)}`);
   out(
-    `code_artifact:              ${fmt(report.codeArtifacts)}   ` +
+    `act_artifact:               ${fmt(report.codeArtifacts)}   ` +
       `(${report.codeArtifactsSeed} seed, ${report.codeArtifactsBrain} brain-authored)`,
   );
   out(

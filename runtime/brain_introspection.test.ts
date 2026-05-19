@@ -46,12 +46,12 @@ describe("buildSystemMap", () => {
     // Two artifacts; one quarantined. Only the admitted one should
     // appear in top_by_score.
     db.run(
-      `INSERT INTO code_artifact (id, runtime, body, declared_sandbox, state_root, name, fixture_input, fixture_expected_residual, status, score, confidence, created_at, updated_at)
+      `INSERT INTO act_artifact (id, runtime, body, declared_sandbox, state_root, name, fixture_input, fixture_expected_residual, status, score, confidence, created_at, updated_at)
        VALUES (?, 'bun', 'export const x=1', '{"runtime":"bun"}', '/tmp', 'visible', '{}', 0.0, 'admitted', 0.8, 0.6, ?, ?)`,
       ["art_visible", now, now],
     );
     db.run(
-      `INSERT INTO code_artifact (id, runtime, body, declared_sandbox, state_root, name, fixture_input, fixture_expected_residual, status, score, confidence, created_at, updated_at)
+      `INSERT INTO act_artifact (id, runtime, body, declared_sandbox, state_root, name, fixture_input, fixture_expected_residual, status, score, confidence, created_at, updated_at)
        VALUES (?, 'bun', 'export const y=2', '{"runtime":"bun"}', '/tmp', 'hidden', '{}', 0.0, 'quarantined', 0.9, 0.7, ?, ?)`,
       ["art_hidden", now, now],
     );

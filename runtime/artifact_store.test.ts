@@ -134,7 +134,7 @@ describe("applyResidualOutcome", () => {
 
   test("throws on unknown artifact id", () => {
     const db = openDb(":memory:");
-    expect(() => applyResidualOutcome(db, "missing", 0.5, nowIso())).toThrow(/code_artifact_not_found/);
+    expect(() => applyResidualOutcome(db, "missing", 0.5, nowIso())).toThrow(/act_artifact_not_found/);
   });
 });
 
@@ -151,7 +151,7 @@ describe("maybePromote", () => {
     const row = getArtifact(db, "art_promo")!;
     expect(row.status).toBe("promoted");
     expect(events.length).toBe(1);
-    expect(events[0]!.kind).toBe("code_artifact_promoted");
+    expect(events[0]!.kind).toBe("act_artifact_promoted");
     // Idempotent: calling again is a no-op.
     const again = maybePromote(db, "art_promo", (e) => events.push(e));
     expect(again).toBe(false);
@@ -205,7 +205,7 @@ describe("maybeQuarantine", () => {
     expect(transitioned).toBe(true);
     expect(getArtifact(db, "art_q")!.status).toBe("quarantined");
     expect(events.length).toBe(1);
-    expect(events[0]!.kind).toBe("code_artifact_quarantined");
+    expect(events[0]!.kind).toBe("act_artifact_quarantined");
     // Idempotent.
     const again = maybeQuarantine(db, "art_q", (e) => events.push(e));
     expect(again).toBe(false);
@@ -217,7 +217,7 @@ describe("maybeQuarantine", () => {
     insertSampleBunArtifact(db, "art_killed");
     // Synthetically bump the kill counter — the runtime supervisor would
     // normally do this when a subprocess is hard-killed / orphaned.
-    db.run("UPDATE code_artifact SET recent_kill_count = ? WHERE id = ?", [3, "art_killed"]);
+    db.run("UPDATE act_artifact SET recent_kill_count = ? WHERE id = ?", [3, "art_killed"]);
     const events: EmitEventInput[] = [];
     const transitioned = maybeQuarantine(db, "art_killed", (e) => events.push(e));
     expect(transitioned).toBe(true);
@@ -234,12 +234,12 @@ describe("maybeQuarantine", () => {
     try {
       const db = openDb(":memory:");
       insertSampleBunArtifact(db, "art_killed_env");
-      db.run("UPDATE code_artifact SET recent_kill_count = ? WHERE id = ?", [3, "art_killed_env"]);
+      db.run("UPDATE act_artifact SET recent_kill_count = ? WHERE id = ?", [3, "art_killed_env"]);
       const events: EmitEventInput[] = [];
       // Threshold is now 5; 3 kills is below the bar.
       const stillAdmitted = maybeQuarantine(db, "art_killed_env", (e) => events.push(e));
       expect(stillAdmitted).toBe(false);
-      db.run("UPDATE code_artifact SET recent_kill_count = ? WHERE id = ?", [5, "art_killed_env"]);
+      db.run("UPDATE act_artifact SET recent_kill_count = ? WHERE id = ?", [5, "art_killed_env"]);
       const transitioned = maybeQuarantine(db, "art_killed_env", (e) => events.push(e));
       expect(transitioned).toBe(true);
     } finally {
@@ -251,12 +251,12 @@ describe("maybeQuarantine", () => {
   test("quarantine transitions are idempotent across all three reasons", () => {
     const db = openDb(":memory:");
     insertSampleBunArtifact(db, "art_idem");
-    db.run("UPDATE code_artifact SET recent_kill_count = ? WHERE id = ?", [3, "art_idem"]);
+    db.run("UPDATE act_artifact SET recent_kill_count = ? WHERE id = ?", [3, "art_idem"]);
     const events: EmitEventInput[] = [];
     expect(maybeQuarantine(db, "art_idem", (e) => events.push(e))).toBe(true);
     // Bump residual + kill_count both — re-call must remain a no-op.
     db.run(
-      "UPDATE code_artifact SET recent_residual_mean = ?, recent_kill_count = ? WHERE id = ?",
+      "UPDATE act_artifact SET recent_residual_mean = ?, recent_kill_count = ? WHERE id = ?",
       [0.95, 10, "art_idem"],
     );
     expect(maybeQuarantine(db, "art_idem", (e) => events.push(e))).toBe(false);
@@ -286,7 +286,7 @@ describe("maybeQuarantine", () => {
     // Synthetically poke the EMA high without enough invocations.
     const db2 = db;
     db2.run(
-      "UPDATE code_artifact SET recent_residual_mean = ?, posterior_alpha = ?, posterior_beta = ? WHERE id = ?",
+      "UPDATE act_artifact SET recent_residual_mean = ?, posterior_alpha = ?, posterior_beta = ? WHERE id = ?",
       [0.9, 2, 1, "art_calm"],
     );
     const events: EmitEventInput[] = [];
@@ -298,8 +298,8 @@ describe("maybeQuarantine", () => {
 
 describe("maybeRehabilitate (Phase H)", () => {
   const quarantine = (db: Database, id: string, tsIso?: string): void => {
-    db.run("UPDATE code_artifact SET status = ? WHERE id = ?", ["quarantined", id]);
-    // Insert a code_artifact_quarantined event with a backdated ts if supplied.
+    db.run("UPDATE act_artifact SET status = ? WHERE id = ?", ["quarantined", id]);
+    // Insert a act_artifact_quarantined event with a backdated ts if supplied.
     const eventTs = tsIso ?? new Date().toISOString();
     db.run(
       `INSERT INTO events (
@@ -315,7 +315,7 @@ describe("maybeRehabilitate (Phase H)", () => {
         null,
         "loop_root",
         "substrate_auto",
-        "code_artifact_quarantined",
+        "act_artifact_quarantined",
         JSON.stringify({ reason: "test" }),
         JSON.stringify([]),
         null,
@@ -373,7 +373,7 @@ describe("maybeRehabilitate (Phase H)", () => {
     expect(runCount).toBe(REHABILITATION_CONTROLLED_INVOCATIONS_FOR_TEST);
     expect(getArtifact(db, "art_rehab")!.status).toBe("admitted");
     expect(events.length).toBe(1);
-    expect(events[0]!.kind).toBe("code_artifact_rehabilitated");
+    expect(events[0]!.kind).toBe("act_artifact_rehabilitated");
   });
 
   test("fails rehabilitation when a controlled run returns high residual", async () => {
@@ -450,15 +450,15 @@ describe("maybeRehabilitate (Phase H)", () => {
     expect(row.recentResidualMean).toBeGreaterThan(0.7);
 
     // 2. maybeQuarantine fires on the next observation → status flips,
-    //    code_artifact_quarantined event lands in the ledger.
+    //    act_artifact_quarantined event lands in the ledger.
     const phase1Events: EmitEventInput[] = [];
     expect(maybeQuarantine(db, "art_cycle", (e) => phase1Events.push(e))).toBe(true);
     expect(getArtifact(db, "art_cycle")!.status).toBe("quarantined");
-    // Substitute the live `code_artifact_quarantined` event for the
+    // Substitute the live `act_artifact_quarantined` event for the
     // back-dated one the rehab worker expects to see; this models the same
     // row written 15 days ago.
     db.run(
-      "DELETE FROM events WHERE kind = 'code_artifact_quarantined' AND action_artifact_id = ?",
+      "DELETE FROM events WHERE kind = 'act_artifact_quarantined' AND action_artifact_id = ?",
       ["art_cycle"],
     );
     quarantine(db, "art_cycle", new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString());
@@ -484,7 +484,7 @@ describe("maybeRehabilitate (Phase H)", () => {
     const cycleResult = results.find((r) => r.artifact_id === "art_cycle");
     expect(cycleResult).toBeDefined();
     expect(cycleResult!.result.rehabilitated).toBe(true);
-    expect(rehabEvents.some((e) => e.kind === "code_artifact_rehabilitated")).toBe(true);
+    expect(rehabEvents.some((e) => e.kind === "act_artifact_rehabilitated")).toBe(true);
 
     // 5. After rehabilitation, the dispatcher gate accepts the artifact
     //    again.

@@ -7,7 +7,7 @@
 // Phase B2 scope (per task brief):
 //   - extractKnowledgePromotions: Beta-posterior promote/demote on
 //     knowledge_candidate corroboration counts.
-//   - extractCodeArtifactScores: recompute code_artifact posteriors
+//   - extractActArtifactScores: recompute act_artifact posteriors
 //     from recent action_scored events; auto-promote on threshold.
 //   - extractSemanticDedup: §3.6.1 Rule 1+2. Embedding-based merger.
 //     Phase B2 stub: no-op when no embeddings are present (Phase F).
@@ -35,7 +35,7 @@ const nowIso = (): string => new Date().toISOString();
 
 const META_KEYS = {
   promotions: "extractor:knowledge_promotions:last_ts",
-  scores:     "extractor:code_artifact_scores:last_ts",
+  scores:     "extractor:act_artifact_scores:last_ts",
   dedup:      "extractor:semantic_dedup:last_ts",
   recipes:    "extractor:recipe_candidates:last_ts",
 } as const;
@@ -117,14 +117,14 @@ const insertEvent = (db: Database, ev: InsertEventInput): string => {
 // their ids so the caller can wire context_refs through. The
 // artifactPrefix names a stable pseudo-artifact pair
 // (`<prefix>_action` + `<prefix>_verifier`); it doesn't have to
-// correspond to a real registered code_artifact row, but it must
+// correspond to a real registered act_artifact row, but it must
 // be stable so substrate.search-by-artifact-id can group the action
 // chains for posterior aggregation.
 
 type PromotionResultKind =
   | "knowledge_promoted"
   | "knowledge_demoted"
-  | "code_artifact_promoted"
+  | "act_artifact_promoted"
   | "recipe_extracted"
   | "owner_profile_recorded";
 
@@ -517,7 +517,7 @@ export const maybePromoteKnowledge = (db: Database, candidateId: string): Knowle
 
 // ── 2. Code artifact score extractor ───────────────────────────────
 //
-// For each code_artifact, walk recent action_scored events that cite
+// For each act_artifact, walk recent action_scored events that cite
 // it via action_artifact_id. Each scored event carries a residual ∈
 // [0,1]. Residual ≤ 0.3 → success (alpha++), else failure (beta++).
 // Recompute score = alpha/(alpha+beta), confidence per §11.5,
@@ -546,11 +546,14 @@ const synthesizeName = (id: string, body: string): string => {
   return `auto_${id.slice(-6).toLowerCase()}`;
 };
 
-export type CodeArtifactScoreSummary = { updated: number; promoted: number };
+export type ActArtifactScoreSummary = { updated: number; promoted: number };
 
-export const extractCodeArtifactScores = (db: Database): CodeArtifactScoreSummary => {
+/** F4a deprecated alias — pre-rename name. Resolves to ActArtifactScoreSummary. */
+export type CodeArtifactScoreSummary = ActArtifactScoreSummary;
+
+export const extractActArtifactScores = (db: Database): ActArtifactScoreSummary => {
   const artifacts = db
-    .query("SELECT id, body, status, name FROM code_artifact")
+    .query("SELECT id, body, status, name FROM act_artifact")
     .all() as Array<{ id: string; body: string; status: string; name: string | null }>;
 
   let updated = 0;
@@ -591,7 +594,7 @@ export const extractCodeArtifactScores = (db: Database): CodeArtifactScoreSummar
       const newName = shouldPromote && !art.name ? synthesizeName(art.id, art.body) : art.name;
 
       db.run(
-        `UPDATE code_artifact
+        `UPDATE act_artifact
            SET posterior_alpha = ?,
                posterior_beta = ?,
                score = ?,
@@ -606,9 +609,9 @@ export const extractCodeArtifactScores = (db: Database): CodeArtifactScoreSummar
       updated++;
       if (shouldPromote) {
         promoted++;
-        // Brain audit B (2026-05-15): pre-fix extractCodeArtifactScores
+        // Brain audit B (2026-05-15): pre-fix extractActArtifactScores
         // updated the row's status but never emitted the canonical
-        // code_artifact_promoted event. Operator surfaces (TUI artifact
+        // act_artifact_promoted event. Operator surfaces (TUI artifact
         // panel, promotion telemetry) showed zero promotions even though
         // many artifacts crossed the bar. Emit at promotion time so the
         // event ledger is the source of truth. We attribute the row to
@@ -616,12 +619,12 @@ export const extractCodeArtifactScores = (db: Database): CodeArtifactScoreSummar
         // directive/task lineage stays intact.
         const lastDriver = events[events.length - 1]!;
         emitPromotionSpine(db, {
-          kind: "code_artifact_promoted",
+          kind: "act_artifact_promoted",
           candidate_id: art.id,
           directive_id: lastDriver.directive_id,
           task_id: lastDriver.task_id,
           loop_id: lastDriver.loop_id,
-          artifact_prefix: "code_artifact_promotion",
+          artifact_prefix: "act_artifact_promotion",
           payload: {
             artifact_id: art.id,
             score,
@@ -638,6 +641,9 @@ export const extractCodeArtifactScores = (db: Database): CodeArtifactScoreSummar
 
   return { updated, promoted };
 };
+
+/** F4a deprecated alias — pre-rename name. Resolves to extractActArtifactScores. */
+export const extractCodeArtifactScores = extractActArtifactScores;
 
 // ── 3. Semantic dedup extractor (§3.6.1 Rules 1+2) ─────────────────
 //
@@ -1294,7 +1300,7 @@ export const extractRecipeFromCommit = (
 
 // ──────────────────────────────────────────────────────────────────────
 // Auto cross-directive interference detection (organism-alignment Track C,
-// 2026-05-15). Scans code_artifact rows for overlapping normalized
+// 2026-05-15). Scans act_artifact rows for overlapping normalized
 // target_resources across directives. Artifacts without valid target_resources
 // fail closed; target_files are display compatibility only, not matching input.
 // When two distinct directives admit artifacts that touch the same resource, that's a structural `resource_conflict` —
@@ -1316,20 +1322,22 @@ const collectArtifactDirectives = (
   // Two distinct directives sharing a resource -> resource_conflict.
   const byResource = new Map<string, Map<string, Set<string>>>();
 
-  // code_artifact.source_candidate_id points back to the originating
-  // code_artifact_candidate event; that event's directive_id is the
+  // act_artifact.source_candidate_id points back to the originating
+  // act_artifact_candidate event; that event's directive_id is the
   // artifact's owning goal. Old artifacts without source_candidate_id
   // are skipped — they pre-date the schema and we don't synthesize
-  // ownership from heuristics (PRIOR 2: never silently fallback).
+  // ownership from heuristics (PRIOR 2: never silently fallback). The
+  // candidate event lookup matches both the canonical kind string and
+  // the F4a legacy alias so historical rows still resolve.
   const rows = db
     .query(
       `SELECT
          a.id                 AS artifact_id,
          a.target_resources   AS target_resources,
          e.directive_id       AS directive_id
-       FROM code_artifact a
+       FROM act_artifact a
        LEFT JOIN events e
-         ON e.kind = 'code_artifact_candidate'
+         ON e.kind IN ('act_artifact_candidate', 'code_artifact_candidate')
         AND e.id = a.source_candidate_id
        WHERE a.target_resources IS NOT NULL
          AND a.source_candidate_id IS NOT NULL
@@ -1772,7 +1780,7 @@ export const maybePromoteOwnerProfile = (
   // gets candidate_confirmed evidence and its Beta posterior updates.
   // The synthetic-actuator path in runtime/credit.ts skips primary
   // artifact updates (owner_profile_promoter_action isn't a registered
-  // code_artifact) and continues with citation credit. Best-effort:
+  // act_artifact) and continues with citation credit. Best-effort:
   // distributor failures don't roll back the promotion.
   void import("../runtime/credit")
     .then(({ distributeCredit }) => distributeCredit(db, {

@@ -28,7 +28,7 @@ Producers:
   lifecycle).
 - `brain` — written by the opencode bridge from the brain's emitted
   frames (`task_node_opened`, `action_predicted`, `knowledge_candidate`,
-  `code_artifact_candidate`, …).
+  `act_artifact_candidate`, …).
 - `claude` — written by Claude Code (this orchestrator) on owner
   channel turns and the scored low-risk inline lane.
 - `runtime` — written by `runtime/*` modules that observe substrate-
@@ -42,17 +42,17 @@ Producers:
 |-------------------|----------|---------------------|------|--------|--------|------|-----|
 | `meta`            | table    | substrate / seed    | yes  | n/a    | n/a    | n/a  | —   |
 | `events`          | table    | all four            | yes  | yes (knowledge_promoted floor) | yes (event count) | n/a | — |
-| `code_artifact`   | table    | seed + brain        | yes  | yes (seed_* floor)             | yes (seed + brain split) | yes (`code_artifact_registry_view`, `artifact_routing_view`) | — |
+| `act_artifact`   | table    | seed + brain        | yes  | yes (seed_* floor)             | yes (seed + brain split) | yes (`act_artifact_registry_view`, `artifact_routing_view`) | — |
 | `vec_events`      | virtual  | substrate (embedder) | n/a | yes (vec0 loadable)            | yes (count)            | n/a | — |
 
 `meta` is k/v metadata (`schema_version`, seed-completion markers).
-`events` carries every observable fact. `code_artifact` is the LATM /
+`events` carries every observable fact. `act_artifact` is the LATM /
 Voyager registry. `vec_events` is the canonical embedding index
 (sqlite-vec, 1536-dim, text-embedding-3-small).
 
 ## Views (substrate/views.ts)
 
-All views are CREATE VIEW IF NOT EXISTS over `events` ± `code_artifact`.
+All views are CREATE VIEW IF NOT EXISTS over `events` ± `act_artifact`.
 `runViews(db)` is idempotent; the daemon runs it at boot.
 
 | View                                       | Reads kinds / tables                                                            | Used by                                  | seed-evidence at boot |
@@ -60,8 +60,8 @@ All views are CREATE VIEW IF NOT EXISTS over `events` ± `code_artifact`.
 | `task_graph_view`                          | `task_node_opened`, `task_edge_recorded`                                         | retrieval, prompt composer, scheduler    | empty until first directive |
 | `ready_tasks_view`                         | `task_node_opened`, `task_edge_recorded`, `task_committed`                       | scheduler                                | empty until first directive |
 | `failure_view`                             | `task_failed`                                                                    | brain (failure landscape)                | empty                 |
-| `code_artifact_registry_view`              | `code_artifact` (status in admitted/promoted)                                    | retrieval, prompt composer               | yes — 8 seed artifacts |
-| `artifact_routing_view`                    | `code_artifact`                                                                  | dispatch decider                         | yes                   |
+| `act_artifact_registry_view`              | `act_artifact` (status in admitted/promoted)                                    | retrieval, prompt composer               | yes — 8 seed artifacts |
+| `artifact_routing_view`                    | `act_artifact`                                                                  | dispatch decider                         | yes                   |
 | `embedding_index_view`                     | `events` (embedding NOT NULL)                                                    | embedder, retrieval                      | yes after `embedPendingEvents` |
 | `origin_promotion_view`                    | `knowledge_promoted` × `substrate_origin`                                        | reranker                                 | yes — 10 promoted seed rows |
 | `origin_promotion_by_directive_view`       | `knowledge_promoted` × `directive_id`                                            | reranker (per-directive bias)            | yes (seed directive)  |
@@ -82,7 +82,7 @@ All views are CREATE VIEW IF NOT EXISTS over `events` ± `code_artifact`.
 
 Every view is covered by `substrate/views.test.ts`. None requires a
 separate seed-population path: views read whatever `events` /
-`code_artifact` contain.
+`act_artifact` contain.
 
 ## Event kinds (canonical union — substrate/types.ts `EventKind`)
 
@@ -144,13 +144,13 @@ check in `cli/doctor.ts`; `seed` means rows of this kind are emitted by
 
 | Kind                                       | Producer       | seed | doctor | status | GAP |
 |--------------------------------------------|----------------|------|--------|--------|-----|
-| `code_artifact_candidate`                  | brain          | —    | —      | embeddable | — |
-| `code_artifact_admitted`                   | substrate (admission) | yes (8 seed rows) | yes (seed_* ≥ 5) | yes (count + seed/brain split) | — |
-| `code_artifact_admission_rejected`         | substrate (admission) | — | — | — | — |
-| `code_artifact_promoted`                   | substrate      | —    | —      | — | — |
-| `code_artifact_quarantined`                | substrate      | —    | —      | — | — |
-| `code_artifact_rehabilitated`              | substrate      | —    | —      | — | — |
-| `code_artifact_score_updated`              | substrate      | —    | —      | — | — |
+| `act_artifact_candidate`                  | brain          | —    | —      | embeddable | — |
+| `act_artifact_admitted`                   | substrate (admission) | yes (8 seed rows) | yes (seed_* ≥ 5) | yes (count + seed/brain split) | — |
+| `act_artifact_admission_rejected`         | substrate (admission) | — | — | — | — |
+| `act_artifact_promoted`                   | substrate      | —    | —      | — | — |
+| `act_artifact_quarantined`                | substrate      | —    | —      | — | — |
+| `act_artifact_rehabilitated`              | substrate      | —    | —      | — | — |
+| `act_artifact_score_updated`              | substrate      | —    | —      | — | — |
 | `latm_novelty_bonus_applied`               | substrate      | —    | —      | — | — |
 | `sandbox_violation`                        | runtime (sandbox) | — | — | — | — |
 | `sandbox_unenforced_warning`               | runtime (sandbox) | — | — | — | — |
@@ -320,7 +320,7 @@ Irreducible data-structure contract:
 | Kind                                       | Producer       | seed | doctor | status | GAP |
 |--------------------------------------------|----------------|------|--------|--------|-----|
 | `admin_token_rotated`                      | cli (admin)    | —    | —      | — | — |
-| `code_artifact_quarantine_overridden`      | cli (admin)    | —    | —      | — | — |
+| `act_artifact_quarantine_overridden`      | cli (admin)    | —    | —      | — | — |
 | `directive_archived_by_operator`           | cli (admin)    | —    | —      | — | — |
 | `state_exported`                           | cli (admin)    | —    | —      | — | — |
 | `state_imported`                           | cli (admin)    | —    | —      | — | — |
@@ -374,7 +374,7 @@ here so future audits do not mistake them for event kinds.
   `verification_high_residual`, `bridge_killed`, `bridge_timeout`,
   `artifact_runtime_error`, `rolling_directive_archived`.
 - Credit `target_kind` values (`runtime/credit.ts:123`): `knowledge`,
-  `code_artifact`.
+  `act_artifact`.
 - View `row_kind` discriminators: `node`, `extension`.
 - Lifecycle / cadence enum strings: `rolling_active`, `rolling_review`,
   `normal_objective`, `promoted`, `demoted`.
@@ -388,7 +388,7 @@ here so future audits do not mistake them for event kinds.
 ## Coverage summary
 
 - 3 base tables + 1 virtual table — all four surfaced in
-  `acc admin substrate-status` (events, code_artifact, vec_events) or
+  `acc admin substrate-status` (events, act_artifact, vec_events) or
   doctor (vec_events extension load probe). `meta` is intentionally
   unsurfaced (schema bookkeeping only).
 - 18 views — all covered by `substrate/views.test.ts`. Eight depend
@@ -398,7 +398,7 @@ here so future audits do not mistake them for event kinds.
   producer. Health-metric kinds (`dispatcher_violation`,
   `irreversible_effect_recorded`, `worker_tick_overrun`) are now
   counted in `substrate-status`. Seed-required kinds
-  (`knowledge_promoted`, `code_artifact_admitted`, `recipe_extracted`)
+  (`knowledge_promoted`, `act_artifact_admitted`, `recipe_extracted`)
   are gated by doctor.
 - 2 non-union emitted kinds flagged for follow-up
   (`embedding_skipped_missing_api_key`, `cli_layout_migrated`).

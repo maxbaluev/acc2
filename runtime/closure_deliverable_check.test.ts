@@ -1,7 +1,7 @@
 // acc2 closure deliverable check tests — closes the verifier_gap lesson
 // (brain audit QQEHAW97GS0AX7TEQ717Y3P174). The closure-side helper flags
 // deliverable-shaped LEAVES (no refines children) whose subtree emitted
-// no concrete artifact (code_artifact_candidate / contract_amendment_proposed
+// no concrete artifact (act_artifact_candidate / contract_amendment_proposed
 // / lesson_extracted{proposed_action}).
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
@@ -43,12 +43,12 @@ describe("checkClosureDeliverables", () => {
     expect(checkClosureDeliverables(db, ROOT)).toEqual({ ok: true, uncovered_leaves: [] });
   });
 
-  test("deliverable-declared leaf AND code_artifact_candidate emitted → ok=true", () => {
+  test("deliverable-declared leaf AND act_artifact_candidate emitted → ok=true", () => {
     const db = openDb(":memory:");
     seedRoot(db);
     const leaf = "t_leaf_ok";
     seedLeaf(db, leaf, "implement the growth-report renderer", ROOT, true);
-    emitEvent(db, { kind: "code_artifact_candidate", directive_id: D, task_id: leaf, payload: { runtime: "bun", body: "/* x */" } });
+    emitEvent(db, { kind: "act_artifact_candidate", directive_id: D, task_id: leaf, payload: { runtime: "bun", body: "/* x */" } });
     expect(checkClosureDeliverables(db, ROOT)).toEqual({ ok: true, uncovered_leaves: [] });
   });
 
@@ -78,7 +78,7 @@ describe("checkClosureDeliverables", () => {
     seedLeaf(db, parent, "implement the closure verifier surface", ROOT, true);
     const child = "t_child_leaf";
     seedLeaf(db, child, "implement the residual-blend function", parent, true);
-    emitEvent(db, { kind: "code_artifact_candidate", directive_id: D, task_id: child, payload: { runtime: "bun", body: "/* y */" } });
+    emitEvent(db, { kind: "act_artifact_candidate", directive_id: D, task_id: child, payload: { runtime: "bun", body: "/* y */" } });
     // Parent unchecked (has child); child has artifact → ok.
     expect(checkClosureDeliverables(db, ROOT)).toEqual({ ok: true, uncovered_leaves: [] });
   });

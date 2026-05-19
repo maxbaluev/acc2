@@ -117,7 +117,7 @@ describe("residual → beta deltas", () => {
 });
 
 describe("distributeCredit — primary + cited entities", () => {
-  test("primary action + verifier posteriors move; code_artifact_score_updated emitted", async () => {
+  test("primary action + verifier posteriors move; act_artifact_score_updated emitted", async () => {
     const db = openDb(":memory:");
     insertSampleArtifact(db, "art_action", "// action body\nconsole.log('@@RESULT@@ 1');");
     insertSampleArtifact(db, "art_verifier", "// verifier body\nconsole.log('@@RESULT@@ {\"residual\":0}');");
@@ -163,9 +163,9 @@ describe("distributeCredit — primary + cited entities", () => {
     expect(action.posteriorAlpha).toBeGreaterThan(1);
     expect(verifier.posteriorAlpha).toBeGreaterThan(1);
 
-    // code_artifact_score_updated events fired for action + verifier.
+    // act_artifact_score_updated events fired for action + verifier.
     const updated = db
-      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'code_artifact_score_updated'")
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated'")
       .get() as { c: number };
     expect(updated.c).toBeGreaterThanOrEqual(2);
   });
@@ -210,7 +210,7 @@ describe("distributeCredit — primary + cited entities", () => {
       observed_residual: 0,
     });
 
-    const cited = result.contributions.filter((c) => c.target_kind === "code_artifact");
+    const cited = result.contributions.filter((c) => c.target_kind === "act_artifact");
     expect(cited.length).toBe(3);
     // Ordering follows context_refs order — first-discoverer has largest weight.
     expect(cited[0]!.target_id).toBe("art_cited_a");
@@ -634,7 +634,7 @@ describe("LATM novelty bonus (§11.5)", () => {
     const { goalShape } = require("./goal_shape") as typeof import("./goal_shape");
     const gs = goalShape("novel directive goal A");
     emitEvent(dbB, {
-      kind: "code_artifact_score_updated",
+      kind: "act_artifact_score_updated",
       substrate_origin: "substrate_auto",
       directive_id: "d_prior",
       task_id: "t_prior",
@@ -642,7 +642,7 @@ describe("LATM novelty bonus (§11.5)", () => {
       payload: { artifact_id: "art_action", role: "action", goal_shape: gs },
     });
     emitEvent(dbB, {
-      kind: "code_artifact_score_updated",
+      kind: "act_artifact_score_updated",
       substrate_origin: "substrate_auto",
       directive_id: "d_prior",
       task_id: "t_prior",
@@ -974,7 +974,7 @@ describe("act_tuple_recorded projected credit", () => {
       await Bun.sleep(10);
     }
     expect(after.posteriorBeta).toBeGreaterThan(before.posteriorBeta);
-    const update = db.query("SELECT payload FROM events WHERE kind = 'code_artifact_score_updated' AND json_extract(payload, '$.artifact_id') = ? AND json_extract(payload, '$.owner_observed_outcome_event_id') = ?").get("owner_cited", owner.id) as { payload: string } | null;
+    const update = db.query("SELECT payload FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.artifact_id') = ? AND json_extract(payload, '$.owner_observed_outcome_event_id') = ?").get("owner_cited", owner.id) as { payload: string } | null;
     expect(update).not.toBeNull();
     expect(JSON.parse(update!.payload).residual).toBe(1);
   });

@@ -73,7 +73,7 @@ const runRecipeReplayTestArtifact: RecipeArtifactRunner = async (
   artifactId: string,
   inputs: JsonValue,
 ) => {
-  const row = db.query("SELECT name FROM code_artifact WHERE id = ?").get(artifactId) as { name: string | null } | null;
+  const row = db.query("SELECT name FROM act_artifact WHERE id = ?").get(artifactId) as { name: string | null } | null;
   if (!row) return { ok: false, result: null, error: "artifact_not_found" };
   const name = row.name ?? "";
   const inputRecord = recordFromJson(inputs);

@@ -1,5 +1,5 @@
 // acc2 predicate-gate emit-side observability test (dark-gate sweep
-// 2026-05-18). The structural claim: when a code_artifact_candidate
+// 2026-05-18). The structural claim: when a act_artifact_candidate
 // event is emitted directly via emitEvent (no admitArtifact in the
 // path) with audience=ceo_buyer and a body that contains banned
 // phrases, the emit-side screen fires predicate_gate_rejected against
@@ -14,7 +14,7 @@ import { emitEvent } from "../runtime/events";
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
 
-describe("predicate_gate_rejected — emit-side screen on code_artifact_candidate", () => {
+describe("predicate_gate_rejected — emit-side screen on act_artifact_candidate", () => {
   test("fires when a ceo_buyer candidate body contains banned 'the system' and 'modest' phrases", () => {
     const db = openDb(":memory:");
     // Body deliberately includes two CATALOG predicates: 'the system'
@@ -26,7 +26,7 @@ describe("predicate_gate_rejected — emit-side screen on code_artifact_candidat
     const body = `Headline: Industrial safety partner playbook.\n${padding}\nThe system enables a modest pilot for the first cycle.\n${padding}`;
     expect(body.length).toBeGreaterThan(500);
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       directive_id: "d_predicate_emit_test",
       task_id: "d_predicate_emit_test",
@@ -55,7 +55,7 @@ describe("predicate_gate_rejected — emit-side screen on code_artifact_candidat
     const db = openDb(":memory:");
     const padding = "x ".repeat(200);
     const candidate = emitEvent(db, {
-      kind: "code_artifact_candidate",
+      kind: "act_artifact_candidate",
       substrate_origin: "opencode",
       payload: {
         kind: "research_note",

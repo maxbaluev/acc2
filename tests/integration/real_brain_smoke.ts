@@ -286,7 +286,7 @@ export const runRealBrainSmoke = async (opts: SmokeOpts = {}): Promise<number> =
     const seedKnow = seedFoundationalKnowledge(handle.db, { ownerApproved: true });
     const seedArt = seedCodeArtifacts(handle.db);
     process.stdout.write(
-      `seed: knowledge=${seedKnow.imported}, code_artifacts=${seedArt.inserted} (skipped=${seedArt.skipped})\n\n`,
+      `seed: knowledge=${seedKnow.imported}, act_artifacts=${seedArt.inserted} (skipped=${seedArt.skipped})\n\n`,
     );
 
     // 3. Open the directive. Both modes use the same REAL directive — the
@@ -465,7 +465,7 @@ export const runRealBrainSmoke = async (opts: SmokeOpts = {}): Promise<number> =
     // (that's the runtime-observed payload the dispatcher captured). The
     // `artifact_observed` rows only carry phase + duration; the actual result
     // envelope is hoisted into action_scored.payload.action_result. We also
-    // scan code_artifact_admission_accepted payloads as a fallback because
+    // scan act_artifact_admission_accepted payloads as a fallback because
     // the bridge mock's admission path also captures the observation.
     const isLegacyMock = opts.mockBridge && process.env.ACC2_SMOKE_LEGACY_MOCK === "1";
     if (!isLegacyMock) {

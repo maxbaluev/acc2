@@ -1114,7 +1114,7 @@ export const buildOwnerFeedbackSummarySection = (policy: OwnerRenderingPolicyRow
 const readArtifactRegistryTopK = (db: Database, k: number): Array<{ id: string; runtime: string; name: string; score: number }> => {
   const rows = db
     .query(
-      "SELECT id, runtime, name, score, confidence FROM code_artifact WHERE status IN ('admitted','promoted') ORDER BY score DESC, confidence DESC LIMIT ?",
+      "SELECT id, runtime, name, score, confidence FROM act_artifact WHERE status IN ('admitted','promoted') ORDER BY score DESC, confidence DESC LIMIT ?",
     )
     .all(k) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
@@ -1335,7 +1335,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   const artifactBody = opts.retrievedArtifacts && opts.retrievedArtifacts.hits.length > 0
     ? buildRetrievedArtifactSection(opts.retrievedArtifacts.hits)
     : buildArtifactSection(readArtifactRegistryTopK(db, 6));
-  candidates.push({ name: "code_artifact_registry", p: 1, body: artifactBody });
+  candidates.push({ name: "act_artifact_registry", p: 1, body: artifactBody });
 
   // P2/P3 sections. Upstream-task outputs land via the watch_edges walk just
   // below (Phase E `watch_edges.ts`); stakeholder + cross-directive interference

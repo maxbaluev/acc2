@@ -401,7 +401,7 @@ describe("prompt_composer", () => {
         hits: [
           {
             event_id: "evt_artifact_top",
-            kind: "code_artifact_admitted",
+            kind: "act_artifact_admitted",
             distance: 0.2,
             posterior: 0.8,
             rerank_score: 1.4,

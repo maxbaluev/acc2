@@ -355,7 +355,7 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
       // Step 7b — canonical seed code artifacts (§11.4). Idempotent: a
       // re-run reports inserted=0 / skipped=N. Operators getting their
       // first install end up with N action+verifier seed rows in
-      // code_artifact, matching what the harness already pre-loads for
+      // act_artifact, matching what the harness already pre-loads for
       // scenarioAdHocTask / scenarioRealBrainEndToEnd. Production and
       // harness now hit the SAME seed path.
       const artifactSummary = seedCodeArtifacts(db);

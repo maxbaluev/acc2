@@ -73,7 +73,7 @@ const STATUS_SOURCES: StatusReport["contract"]["sources"] = {
   dispatch_lifecycle: ["dispatch_resolved_view"],
   pending_owner_decisions: ["pending_owner_decision_queue_view"],
   owner_profile: ["owner_profile_view"],
-  learning: ["promoted_knowledge_view", "recipe_registry_view", "code_artifact_registry_view", "applied_lesson_effectiveness_view", "contradictory_candidates_view"],
+  learning: ["promoted_knowledge_view", "recipe_registry_view", "act_artifact_registry_view", "applied_lesson_effectiveness_view", "contradictory_candidates_view"],
   actual_changes: ["runtime.recent_events:applied_change_committed"],
   active_directives: ["dispatch_resolved_view", "runtime.recent_events:task_closure_audited"],
   ready_tasks: ["ready_tasks_view"],
@@ -172,7 +172,7 @@ export const buildStatusReport = async (): Promise<StatusReport> => {
     readView("owner_profile_view"),
     readView("promoted_knowledge_view"),
     readView("recipe_registry_view"),
-    readView("code_artifact_registry_view"),
+    readView("act_artifact_registry_view"),
     readView("applied_lesson_effectiveness_view"),
     readView("contradictory_candidates_view"),
     readView("failure_view"),
@@ -192,7 +192,7 @@ export const buildStatusReport = async (): Promise<StatusReport> => {
   const ownerRows = rows<OwnerProfileRow>("owner_profile_view", ownerEnv);
   const knowledgeRows = rows<TimedRow>("promoted_knowledge_view", knowledgeEnv);
   const recipeRows = rows<TimedRow>("recipe_registry_view", recipeEnv);
-  const artifactRows = rows<TimedRow>("code_artifact_registry_view", artifactEnv);
+  const artifactRows = rows<TimedRow>("act_artifact_registry_view", artifactEnv);
   const effectivenessRows = rows<EffectivenessRow>("applied_lesson_effectiveness_view", effectivenessEnv);
   const contradictionRows = rows<Record<string, unknown>>("contradictory_candidates_view", contradictoryEnv);
   const failureRows = rows<Record<string, unknown>>("failure_view", failureEnv);

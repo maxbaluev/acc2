@@ -69,7 +69,7 @@ describe("alignment / code_as_capability (Principle 4)", () => {
     expect(offenders).toEqual([]);
   });
 
-  test("every action_predicted resolves to a real code_artifact row", async () => {
+  test("every action_predicted resolves to a real act_artifact row", async () => {
     closeDb();
     const db = openDb(":memory:");
     // Admit one real action + verifier artifact pair (the Phase D fixture

@@ -6,8 +6,8 @@
 //     external_pushes.
 //   - Histograms: dispatch_duration, action_residual, artifact_duration,
 //     embedding_duration.
-//   - Gauges: daemon_uptime, substrate_events, code_artifacts_admitted,
-//     code_artifacts_promoted, code_artifacts_quarantined.
+//   - Gauges: daemon_uptime, substrate_events, act_artifacts_admitted,
+//     act_artifacts_promoted, act_artifacts_quarantined.
 //
 // Wire scheme:
 //   - Recording helpers (recordDispatch, recordEvent, …) are the only
@@ -126,19 +126,19 @@ export const substrateEventsTotal = new Gauge({
 });
 
 export const codeArtifactsAdmittedTotal = new Gauge({
-  name: "acc2_code_artifacts_admitted_total",
+  name: "acc2_act_artifacts_admitted_total",
   help: "Code artifacts with status='admitted' (sampled).",
   registers: [register],
 });
 
 export const codeArtifactsPromotedTotal = new Gauge({
-  name: "acc2_code_artifacts_promoted_total",
+  name: "acc2_act_artifacts_promoted_total",
   help: "Code artifacts with status='promoted' (sampled).",
   registers: [register],
 });
 
 export const codeArtifactsQuarantinedTotal = new Gauge({
-  name: "acc2_code_artifacts_quarantined_total",
+  name: "acc2_act_artifacts_quarantined_total",
   help: "Code artifacts with status='quarantined' (sampled).",
   registers: [register],
 });
@@ -195,15 +195,15 @@ export const refreshGauges = (db: Database, startedAtMs: number): void => {
     const eventsRow = db.query("SELECT COUNT(*) AS n FROM events").get() as { n: number } | null;
     substrateEventsTotal.set(eventsRow?.n ?? 0);
     const admittedRow = db
-      .query("SELECT COUNT(*) AS n FROM code_artifacts WHERE status = 'admitted'")
+      .query("SELECT COUNT(*) AS n FROM act_artifact WHERE status = 'admitted'")
       .get() as { n: number } | null;
     codeArtifactsAdmittedTotal.set(admittedRow?.n ?? 0);
     const promotedRow = db
-      .query("SELECT COUNT(*) AS n FROM code_artifacts WHERE status = 'promoted'")
+      .query("SELECT COUNT(*) AS n FROM act_artifact WHERE status = 'promoted'")
       .get() as { n: number } | null;
     codeArtifactsPromotedTotal.set(promotedRow?.n ?? 0);
     const quarantinedRow = db
-      .query("SELECT COUNT(*) AS n FROM code_artifacts WHERE status = 'quarantined'")
+      .query("SELECT COUNT(*) AS n FROM act_artifact WHERE status = 'quarantined'")
       .get() as { n: number } | null;
     codeArtifactsQuarantinedTotal.set(quarantinedRow?.n ?? 0);
   } catch {

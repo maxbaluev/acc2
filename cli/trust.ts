@@ -47,7 +47,7 @@ const recipeSuccess = (db: Database): number => {
 export const gatherTrustMetrics = (db: Database): TrustMetrics => {
   const profile = db.query(`SELECT payload FROM events WHERE kind='owner_profile_recorded' ORDER BY ts DESC, rowid DESC LIMIT 1`).get() as { payload: string } | null;
   const autonomy_score = profile ? num(parsePayload(profile.payload).autonomy_score) : 0;
-  const artifactRows = db.query(`SELECT ts, payload FROM events WHERE kind='code_artifact_promoted' ORDER BY ts DESC, rowid DESC LIMIT 5`).all() as Array<{ ts: string; payload: string }>;
+  const artifactRows = db.query(`SELECT ts, payload FROM events WHERE kind='act_artifact_promoted' ORDER BY ts DESC, rowid DESC LIMIT 5`).all() as Array<{ ts: string; payload: string }>;
   const artifacts_promoted_recent = artifactRows.map((r) => {
     const p = parsePayload(r.payload);
     return { artifact_id: String(p.artifact_id ?? p.id ?? "?"), ts: r.ts, summary: String(p.summary ?? p.intent ?? "") };

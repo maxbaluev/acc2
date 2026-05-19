@@ -1,5 +1,5 @@
 // acc2 substrate views — pure SQL view definitions per docs/v2-design.md §4.2.
-// Each view is a CREATE VIEW over the events + code_artifact
+// Each view is a CREATE VIEW over the events + act_artifact
 // tables already declared in schema.sql. Accessor functions are thin: one
 // query, parse JSON columns, return rows. Heavier projections (semantic
 // merger, recipe extraction) live in extractors.ts because they emit new
@@ -154,18 +154,19 @@ CREATE VIEW IF NOT EXISTS failure_view AS
   GROUP BY failure_kind;
 `;
 
-// code_artifact_registry_view — admitted or promoted artifacts ordered by
+// act_artifact_registry_view — admitted or promoted artifacts ordered by
 // score DESC. This is what retrieval and the prompt composer read.
 // Brain dataflow audit bxdhdkm9e #3 (2026-05-15): the registry view now
 // exposes the provenance/intent columns the brain emits on
-// code_artifact_candidate (intent, summary, target_files /
+// act_artifact_candidate (intent, summary, target_files /
 // target_resources, source candidate id, owner_gate_verdict). Pre-fix the admission path persisted these
 // fields on the events ledger but the view dropped them — the operator
 // could not tell WHY an artifact existed or WHICH owner gate (if any)
 // approved it.
-const VIEW_CODE_ARTIFACT_REGISTRY = `
+const VIEW_ACT_ARTIFACT_REGISTRY = `
 DROP VIEW IF EXISTS code_artifact_registry_view;
-CREATE VIEW IF NOT EXISTS code_artifact_registry_view AS
+DROP VIEW IF EXISTS act_artifact_registry_view;
+CREATE VIEW IF NOT EXISTS act_artifact_registry_view AS
   SELECT
     id, runtime, body, declared_sandbox, state_root, kind,
     posterior_alpha, posterior_beta, score, confidence,
@@ -173,7 +174,7 @@ CREATE VIEW IF NOT EXISTS code_artifact_registry_view AS
     fixture_input, fixture_expected_residual,
     intent, summary, target_files, target_resources, source_candidate_id, owner_gate_verdict,
     created_at, updated_at
-  FROM code_artifact
+  FROM act_artifact
   WHERE status IN ('admitted', 'promoted')
   ORDER BY score DESC, confidence DESC;
 `;
@@ -186,7 +187,7 @@ CREATE VIEW IF NOT EXISTS artifact_routing_view AS
     id, runtime, body, declared_sandbox, score, confidence,
     recent_residual_mean, status, name,
     (score * (1.0 - recent_residual_mean)) AS routing_score
-  FROM code_artifact
+  FROM act_artifact
   WHERE status IN ('admitted', 'promoted')
   ORDER BY routing_score DESC;
 `;
@@ -3199,17 +3200,17 @@ CREATE VIEW IF NOT EXISTS act_projection_observability_view AS
     UNION
     SELECT json_extract(payload, '$.source_act_id') AS source_act_id
     FROM events
-    WHERE kind IN ('action_predicted', 'action_scored', 'applied_change_committed', 'owner_observed_outcome_recorded', 'retrieval_binding', 'candidate_confirmed', 'candidate_contradicted', 'code_artifact_score_updated')
+    WHERE kind IN ('action_predicted', 'action_scored', 'applied_change_committed', 'owner_observed_outcome_recorded', 'retrieval_binding', 'candidate_confirmed', 'candidate_contradicted', 'act_artifact_score_updated', 'code_artifact_score_updated')
       AND json_extract(payload, '$.source_act_id') IS NOT NULL
     UNION
     SELECT json_extract(payload, '$.projection.source_act_id') AS source_act_id
     FROM events
-    WHERE kind IN ('action_predicted', 'action_scored', 'applied_change_committed', 'owner_observed_outcome_recorded', 'retrieval_binding', 'candidate_confirmed', 'candidate_contradicted', 'code_artifact_score_updated')
+    WHERE kind IN ('action_predicted', 'action_scored', 'applied_change_committed', 'owner_observed_outcome_recorded', 'retrieval_binding', 'candidate_confirmed', 'candidate_contradicted', 'act_artifact_score_updated', 'code_artifact_score_updated')
       AND json_extract(payload, '$.projection.source_act_id') IS NOT NULL
     UNION
     SELECT json_extract(payload, '$.act_tuple.source_act_id') AS source_act_id
     FROM events
-    WHERE kind IN ('action_predicted', 'action_scored', 'applied_change_committed', 'owner_observed_outcome_recorded', 'retrieval_binding', 'candidate_confirmed', 'candidate_contradicted', 'code_artifact_score_updated')
+    WHERE kind IN ('action_predicted', 'action_scored', 'applied_change_committed', 'owner_observed_outcome_recorded', 'retrieval_binding', 'candidate_confirmed', 'candidate_contradicted', 'act_artifact_score_updated', 'code_artifact_score_updated')
       AND json_extract(payload, '$.act_tuple.source_act_id') IS NOT NULL
   ),
   src AS (
@@ -3230,7 +3231,7 @@ CREATE VIEW IF NOT EXISTS act_projection_observability_view AS
     COALESCE((SELECT json_group_array(id) FROM (SELECT e.id FROM events e WHERE e.kind = 'applied_change_committed' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts ASC)), '[]') AS applied_change_committed_event_ids,
     COALESCE((SELECT json_group_array(id) FROM (SELECT e.id FROM events e WHERE e.kind = 'owner_observed_outcome_recorded' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts ASC)), '[]') AS owner_observed_outcome_recorded_event_ids,
     COALESCE((SELECT json_group_array(id) FROM (SELECT e.id FROM events e WHERE e.kind = 'retrieval_binding' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts ASC)), '[]') AS retrieval_binding_event_ids,
-    COALESCE((SELECT json_group_array(id) FROM (SELECT e.id FROM events e WHERE e.kind IN ('candidate_confirmed', 'candidate_contradicted', 'code_artifact_score_updated') AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts ASC)), '[]') AS credit_projection_event_ids,
+    COALESCE((SELECT json_group_array(id) FROM (SELECT e.id FROM events e WHERE e.kind IN ('candidate_confirmed', 'candidate_contradicted', 'act_artifact_score_updated', 'code_artifact_score_updated') AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts ASC)), '[]') AS credit_projection_event_ids,
     COALESCE(
       (SELECT e.residual FROM events e WHERE e.kind = 'owner_observed_outcome_recorded' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts DESC LIMIT 1),
       (SELECT e.residual FROM events e WHERE e.kind = 'action_scored' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)) ORDER BY e.ts DESC LIMIT 1),
@@ -3250,7 +3251,7 @@ CREATE VIEW IF NOT EXISTS act_projection_observability_view AS
       WHEN s.source_event_id IS NULL THEN 'orphaned'
       WHEN EXISTS (SELECT 1 FROM events e WHERE e.kind = 'applied_change_committed' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id)))
         AND EXISTS (SELECT 1 FROM events e WHERE e.kind = 'action_scored' AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id))) THEN 'completed'
-      WHEN EXISTS (SELECT 1 FROM events e WHERE e.kind IN ('action_predicted', 'action_scored', 'applied_change_committed', 'owner_observed_outcome_recorded', 'retrieval_binding', 'candidate_confirmed', 'candidate_contradicted', 'code_artifact_score_updated') AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id))) THEN 'partial'
+      WHEN EXISTS (SELECT 1 FROM events e WHERE e.kind IN ('action_predicted', 'action_scored', 'applied_change_committed', 'owner_observed_outcome_recorded', 'retrieval_binding', 'candidate_confirmed', 'candidate_contradicted', 'act_artifact_score_updated', 'code_artifact_score_updated') AND (json_extract(e.payload, '$.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.projection.source_act_id') = s.source_act_id OR json_extract(e.payload, '$.act_tuple.source_act_id') = s.source_act_id OR EXISTS (SELECT 1 FROM json_each(e.context_refs) WHERE value = s.source_act_id))) THEN 'partial'
       ELSE 'recorded'
     END AS projection_status
   FROM src s;
@@ -3399,7 +3400,7 @@ CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
       WHEN e.kind = 'daemon_hotreload_failed' THEN 'high'
       WHEN e.kind IN ('task_failed','bridge_failed','dispatcher_violation','owner_input_required','hidl_action_required','brain_failed','daemon_hotreload_rejected') THEN 'critical'
       WHEN e.kind IN ('task_committed','directive_opened','directive_amended','contract_amendment_proposed','pre_apply_adjudication_recorded','owner_observed_outcome_recorded','applied_change_committed','applied_change_failed','task_closure_audited','owner_decision_recorded') THEN 'high'
-      WHEN e.kind IN ('knowledge_candidate','lesson_extracted','claude_reasoning_recorded','dispatch_decided','act_tuple_recorded','runtime_self_diagnostic_recorded','owner_insight_candidate','intent_classified','brain_message_emitted','knowledge_promoted','recipe_promoted','code_artifact_promoted') THEN 'medium'
+      WHEN e.kind IN ('knowledge_candidate','lesson_extracted','claude_reasoning_recorded','dispatch_decided','act_tuple_recorded','runtime_self_diagnostic_recorded','owner_insight_candidate','intent_classified','brain_message_emitted','knowledge_promoted','recipe_promoted','act_artifact_promoted', 'code_artifact_promoted') THEN 'medium'
       ELSE 'low'
     END AS importance,
     -- One-line human-readable summary per kind. The CASE order matters:
@@ -3537,7 +3538,7 @@ export const VIEW_NAMES = [
   "origin_promotion_view",
   "embedding_index_view",
   "artifact_routing_view",
-  "code_artifact_registry_view",
+  "act_artifact_registry_view",
   "failure_view",
   "ready_tasks_view",
   "task_graph_view",
@@ -3555,7 +3556,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_TASK_GRAPH);
   db.exec(VIEW_READY_TASKS);
   db.exec(VIEW_FAILURE);
-  db.exec(VIEW_CODE_ARTIFACT_REGISTRY);
+  db.exec(VIEW_ACT_ARTIFACT_REGISTRY);
   db.exec(VIEW_ARTIFACT_ROUTING);
   db.exec(VIEW_EMBEDDING_INDEX);
   db.exec(VIEW_ORIGIN_PROMOTION);
@@ -3717,7 +3718,7 @@ export type FailureRow = {
   earliest_ts: string;
 };
 
-export type CodeArtifactRow = {
+export type ActArtifactRow = {
   id: string;
   runtime: string;
   body: string;
@@ -3737,7 +3738,11 @@ export type CodeArtifactRow = {
   updated_at: string;
 };
 
-export type ArtifactRoutingRow = CodeArtifactRow & { routing_score: number };
+/** F4a deprecated alias — pre-rename name. Resolves to ActArtifactRow.
+ *  New callers should reference ActArtifactRow directly. */
+export type CodeArtifactRow = ActArtifactRow;
+
+export type ArtifactRoutingRow = ActArtifactRow & { routing_score: number };
 
 export type EmbeddingIndexRow = {
   id: string;
@@ -4619,7 +4624,7 @@ export const failureCounts = (db: Database): FailureRow[] => {
   }));
 };
 
-const rowToCodeArtifact = (r: Record<string, unknown>): CodeArtifactRow => ({
+const rowToActArtifact = (r: Record<string, unknown>): ActArtifactRow => ({
   id: r.id as string,
   runtime: r.runtime as string,
   body: r.body as string,
@@ -4639,28 +4644,31 @@ const rowToCodeArtifact = (r: Record<string, unknown>): CodeArtifactRow => ({
   updated_at: r.updated_at as string,
 });
 
-/** Admitted + promoted code artifacts ordered by score DESC. Optional runtime filter. */
-export const codeArtifactRegistry = (db: Database, runtime?: string): CodeArtifactRow[] => {
+/** Admitted + promoted act artifacts ordered by score DESC. Optional runtime filter. */
+export const actArtifactRegistry = (db: Database, runtime?: string): ActArtifactRow[] => {
   const rows = (runtime
-    ? db.query("SELECT * FROM code_artifact_registry_view WHERE runtime = ?").all(runtime)
-    : db.query("SELECT * FROM code_artifact_registry_view").all()) as Array<Record<string, unknown>>;
-  return rows.map(rowToCodeArtifact);
+    ? db.query("SELECT * FROM act_artifact_registry_view WHERE runtime = ?").all(runtime)
+    : db.query("SELECT * FROM act_artifact_registry_view").all()) as Array<Record<string, unknown>>;
+  return rows.map(rowToActArtifact);
 };
+
+/** F4a deprecated alias — pre-rename name. Resolves to actArtifactRegistry. */
+export const codeArtifactRegistry = actArtifactRegistry;
 
 /** Routing ranking — score × (1 - residual_mean). Phase B+ adds cosine. */
 export const artifactRouting = (db: Database, runtime?: string): ArtifactRoutingRow[] => {
   const rows = (runtime
     ? db
         .query(
-          "SELECT ca.*, ar.routing_score FROM artifact_routing_view ar JOIN code_artifact ca ON ar.id = ca.id WHERE ca.runtime = ? ORDER BY ar.routing_score DESC",
+          "SELECT ca.*, ar.routing_score FROM artifact_routing_view ar JOIN act_artifact ca ON ar.id = ca.id WHERE ca.runtime = ? ORDER BY ar.routing_score DESC",
         )
         .all(runtime)
     : db
         .query(
-          "SELECT ca.*, ar.routing_score FROM artifact_routing_view ar JOIN code_artifact ca ON ar.id = ca.id ORDER BY ar.routing_score DESC",
+          "SELECT ca.*, ar.routing_score FROM artifact_routing_view ar JOIN act_artifact ca ON ar.id = ca.id ORDER BY ar.routing_score DESC",
         )
         .all()) as Array<Record<string, unknown>>;
-  return rows.map((r) => ({ ...rowToCodeArtifact(r), routing_score: r.routing_score as number }));
+  return rows.map((r) => ({ ...rowToActArtifact(r), routing_score: r.routing_score as number }));
 };
 
 /** Owner-channel events in ts order. */

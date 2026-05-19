@@ -6,7 +6,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "./db";
 import {
   seedArtifactIds,
-  seedCodeArtifacts,
+  seedActArtifacts,
   seedFoundationalKnowledge,
   seedRecipeGoalTexts,
   seedRecipes,
@@ -16,14 +16,14 @@ import { goalShape } from "../runtime/goal_shape";
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
 
-describe("seedCodeArtifacts", () => {
+describe("seedActArtifacts", () => {
   test("inserts every seed artifact on first run", () => {
     const db = openDb(":memory:");
-    const summary = seedCodeArtifacts(db);
+    const summary = seedActArtifacts(db);
     expect(summary.inserted).toBeGreaterThanOrEqual(8);
     expect(summary.skipped).toBe(0);
 
-    const rows = db.query("SELECT id, runtime, status, name FROM code_artifact ORDER BY id").all() as Array<{
+    const rows = db.query("SELECT id, runtime, status, name FROM act_artifact ORDER BY id").all() as Array<{
       id: string;
       runtime: string;
       status: string;
@@ -39,18 +39,18 @@ describe("seedCodeArtifacts", () => {
 
   test("idempotent — running twice does not duplicate", () => {
     const db = openDb(":memory:");
-    const first = seedCodeArtifacts(db);
-    const second = seedCodeArtifacts(db);
+    const first = seedActArtifacts(db);
+    const second = seedActArtifacts(db);
     expect(second.inserted).toBe(0);
     expect(second.skipped).toBe(first.inserted);
-    const count = (db.query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+    const count = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     expect(count).toBe(first.inserted);
   });
 
   test("seed ids use the stable seed_<name> prefix", () => {
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
-    const ids = (db.query("SELECT id FROM code_artifact").all() as Array<{ id: string }>).map((r) => r.id);
+    seedActArtifacts(db);
+    const ids = (db.query("SELECT id FROM act_artifact").all() as Array<{ id: string }>).map((r) => r.id);
     for (const id of ids) {
       expect(id.startsWith("seed_")).toBe(true);
     }
@@ -65,8 +65,8 @@ describe("seedCodeArtifacts", () => {
     // overlap with v2's MCP tool surface (substrate.search) / opencode-only
     // dispatch model (no sub-agent invocation).
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
-    const rows = db.query("SELECT id, body FROM code_artifact").all() as Array<{
+    seedActArtifacts(db);
+    const rows = db.query("SELECT id, body FROM act_artifact").all() as Array<{
       id: string;
       body: string;
     }>;
@@ -82,9 +82,9 @@ describe("seedCodeArtifacts", () => {
 
   test("L8 (2026-05-17) kind column: dispatch_strategy seeds carry kind='dispatch_strategy_v1', recipe seeds carry kind='recipe', legacy seeds default to 'code_artifact'", () => {
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const strategyRows = db
-      .query("SELECT id, kind FROM code_artifact WHERE state_root = 'dispatch/strategy'")
+      .query("SELECT id, kind FROM act_artifact WHERE state_root = 'dispatch/strategy'")
       .all() as Array<{ id: string; kind: string }>;
     expect(strategyRows.length).toBe(6);
     for (const r of strategyRows) expect(r.kind).toBe("dispatch_strategy_v1");
@@ -93,7 +93,7 @@ describe("seedCodeArtifacts", () => {
     // orchestrator recipes from raw code artifacts. Legacy seeds remain
     // kind='code_artifact'.
     const recipeRows = db
-      .query("SELECT id, kind FROM code_artifact WHERE state_root LIKE 'recipes/%'")
+      .query("SELECT id, kind FROM act_artifact WHERE state_root LIKE 'recipes/%'")
       .all() as Array<{ id: string; kind: string }>;
     expect(recipeRows.length).toBeGreaterThanOrEqual(1);
     for (const r of recipeRows) expect(r.kind).toBe("recipe");
@@ -103,7 +103,7 @@ describe("seedCodeArtifacts", () => {
     // here so the legacy 'code_artifact' default check below is
     // narrowed to genuine legacy state_roots.
     const renderRows = db
-      .query("SELECT id, kind FROM code_artifact WHERE state_root LIKE 'render/%' ORDER BY id")
+      .query("SELECT id, kind FROM act_artifact WHERE state_root LIKE 'render/%' ORDER BY id")
       .all() as Array<{ id: string; kind: string }>;
     expect(renderRows.length).toBeGreaterThanOrEqual(2);
     const renderKinds = new Set(renderRows.map((r) => r.kind));
@@ -112,7 +112,7 @@ describe("seedCodeArtifacts", () => {
     // Legacy seeds: every other admitted row should have kind='code_artifact'.
     const legacyRows = db
       .query(
-        "SELECT kind FROM code_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%' AND state_root NOT LIKE 'render/%'",
+        "SELECT kind FROM act_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%' AND state_root NOT LIKE 'render/%'",
       )
       .all() as Array<{ kind: string }>;
     expect(legacyRows.length).toBeGreaterThan(0);
@@ -121,9 +121,9 @@ describe("seedCodeArtifacts", () => {
 
   test("C2 (2026-05-18) canonical reference docx artifact + markdown_body fixture are seeded", () => {
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const ref = db
-      .query("SELECT id, kind, body, name FROM code_artifact WHERE id = ?")
+      .query("SELECT id, kind, body, name FROM act_artifact WHERE id = ?")
       .get("seed_docx_reference_accint_neutral_classic_business_v1") as {
         id: string; kind: string; body: string; name: string | null;
       } | null;
@@ -138,7 +138,7 @@ describe("seedCodeArtifacts", () => {
     expect(decoded.length).toBeGreaterThan(5000);
     // Fixture markdown_body for pipeline smoke tests.
     const md = db
-      .query("SELECT id, kind, body FROM code_artifact WHERE id = ?")
+      .query("SELECT id, kind, body FROM act_artifact WHERE id = ?")
       .get("seed_markdown_body_render_pipeline_smoke_v1") as {
         id: string; kind: string; body: string;
       } | null;
@@ -150,9 +150,9 @@ describe("seedCodeArtifacts", () => {
 
   test("C3 (2026-05-18) master_report_generation_orchestrator recipe is seeded with strategy-first DAG body anchors", () => {
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const row = db
-      .query("SELECT id, kind, body, name FROM code_artifact WHERE id = ?")
+      .query("SELECT id, kind, body, name FROM act_artifact WHERE id = ?")
       .get("seed_master_report_generation_orchestrator") as {
         id: string; kind: string; body: string; name: string | null;
       } | null;
@@ -177,9 +177,9 @@ describe("seedCodeArtifacts", () => {
 
   test("includes every runtime named in §11.4", () => {
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const runtimes = new Set(
-      (db.query("SELECT DISTINCT runtime FROM code_artifact").all() as Array<{ runtime: string }>).map((r) => r.runtime),
+      (db.query("SELECT DISTINCT runtime FROM act_artifact").all() as Array<{ runtime: string }>).map((r) => r.runtime),
     );
     expect(runtimes.has("bun")).toBe(true);
     expect(runtimes.has("uv")).toBe(true);
@@ -192,9 +192,9 @@ describe("seedCodeArtifacts", () => {
     // check: one artifact, endpoint parameter ∈ {search, scholar, maps},
     // honest serper_api_key_missing when key absent.
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const row = db
-      .query("SELECT body, fixture_input FROM code_artifact WHERE id = ?")
+      .query("SELECT body, fixture_input FROM act_artifact WHERE id = ?")
       .get("seed_web_search") as { body: string; fixture_input: string } | null;
     expect(row).not.toBeNull();
     if (!row) return;
@@ -221,7 +221,7 @@ describe("seedCodeArtifacts", () => {
     expect(fx.endpoint).toBe("search");
   });
 
-  test("seedCodeArtifacts content-hash upgrade: body change replaces row in-place, preserves posterior (Phase I3+ distribution)", () => {
+  test("seedActArtifacts content-hash upgrade: body change replaces row in-place, preserves posterior (Phase I3+ distribution)", () => {
     // Pre-fix the seed function used a simple existence check — when an
     // operator pulled a new acc2 release with an improved artifact body
     // (e.g. web_search gaining /scholar + /maps endpoints), the existing
@@ -230,30 +230,30 @@ describe("seedCodeArtifacts", () => {
     // the row is UPDATED in place while posterior_alpha/beta/score/
     // confidence are PRESERVED.
     const db = openDb(":memory:");
-    seedCodeArtifacts(db); // initial admit
+    seedActArtifacts(db); // initial admit
     // Simulate live calibration: bump posterior on a known artifact.
     db.run(
-      `UPDATE code_artifact SET posterior_alpha = 12.0, posterior_beta = 3.0, score = 0.8, confidence = 0.85
+      `UPDATE act_artifact SET posterior_alpha = 12.0, posterior_beta = 3.0, score = 0.8, confidence = 0.85
         WHERE id = 'seed_web_search'`,
     );
     const before = db
-      .query("SELECT body, posterior_alpha, posterior_beta, score, confidence FROM code_artifact WHERE id = 'seed_web_search'")
+      .query("SELECT body, posterior_alpha, posterior_beta, score, confidence FROM act_artifact WHERE id = 'seed_web_search'")
       .get() as { body: string; posterior_alpha: number; posterior_beta: number; score: number; confidence: number };
     expect(before.posterior_alpha).toBeCloseTo(12.0, 5);
     expect(before.body).toContain("VALID_ENDPOINTS"); // new body shipped
     // Mutate body in-place to simulate a downgrade then re-seed (the
     // upgrade path mirrors any future body improvement).
-    db.run(`UPDATE code_artifact SET body = 'OLD STUB BODY' WHERE id = 'seed_web_search'`);
+    db.run(`UPDATE act_artifact SET body = 'OLD STUB BODY' WHERE id = 'seed_web_search'`);
     // Clear the recorded hash so the gate sees content drift.
     // (Hash records live in the generic `meta` k/v table under prefix
     // `seed:code_artifact:` — there is no dedicated seed_hash_registry.)
     db.run(`DELETE FROM meta WHERE key LIKE 'seed:code_artifact:%'`);
-    const summary = seedCodeArtifacts(db);
+    const summary = seedActArtifacts(db);
     // Upgrade fired on every artifact with no matching hash (a fresh
     // table). At minimum web_search must have been updated.
     expect((summary.upgraded ?? 0) + (summary.inserted ?? 0)).toBeGreaterThan(0);
     const after = db
-      .query("SELECT body, posterior_alpha, posterior_beta, score, confidence FROM code_artifact WHERE id = 'seed_web_search'")
+      .query("SELECT body, posterior_alpha, posterior_beta, score, confidence FROM act_artifact WHERE id = 'seed_web_search'")
       .get() as { body: string; posterior_alpha: number; posterior_beta: number; score: number; confidence: number };
     expect(after.body).toContain("VALID_ENDPOINTS"); // body restored to seed
     expect(after.body).not.toBe("OLD STUB BODY");
@@ -270,9 +270,9 @@ describe("seedCodeArtifacts", () => {
     // explore/learn loops over external sources) + PNBQJR8T1N5R (single
     // bun artifact, Promise.allSettled for parallel endpoints).
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const row = db
-      .query("SELECT body, fixture_input, declared_sandbox FROM code_artifact WHERE id = ?")
+      .query("SELECT body, fixture_input, declared_sandbox FROM act_artifact WHERE id = ?")
       .get("seed_deep_research") as { body: string; fixture_input: string; declared_sandbox: string } | null;
     expect(row).not.toBeNull();
     if (!row) return;
@@ -315,9 +315,9 @@ describe("seedCodeArtifacts", () => {
     // the unit suite stays parallel-safe — the spawn-side execution path is
     // already covered by runBunArtifact tests.
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const row = db
-      .query("SELECT body FROM code_artifact WHERE id = ?")
+      .query("SELECT body FROM act_artifact WHERE id = ?")
       .get("seed_web_fetch_and_parse") as { body: string } | null;
     expect(row).not.toBeNull();
     if (!row) return;
@@ -338,9 +338,9 @@ describe("seedCodeArtifacts", () => {
 
   test("seed_browser_session_act drives the new session.* facade (Batch 1.α)", () => {
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const row = db
-      .query("SELECT body, declared_sandbox FROM code_artifact WHERE id = ?")
+      .query("SELECT body, declared_sandbox FROM act_artifact WHERE id = ?")
       .get("seed_browser_session_act") as { body: string; declared_sandbox: string } | null;
     expect(row).not.toBeNull();
     if (!row) return;
@@ -505,7 +505,7 @@ describe("seedFoundationalKnowledge", () => {
 describe("seedRecipes", () => {
   test("inserts one recipe_extracted row per canonical goal shape", () => {
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const summary = seedRecipes(db);
     expect(summary.count).toBeGreaterThan(0);
     expect(summary.count).toBe(seedRecipeGoalTexts().length);
@@ -526,7 +526,7 @@ describe("seedRecipes", () => {
 
   test("idempotent — re-running does not duplicate rows", () => {
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const first = seedRecipes(db);
     const second = seedRecipes(db);
     expect(second.count).toBe(0);
@@ -538,7 +538,7 @@ describe("seedRecipes", () => {
 
   test("each recipe references real seed artifact ids", () => {
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     seedRecipes(db);
     const validIds = new Set(seedArtifactIds());
     const rows = db
@@ -557,7 +557,7 @@ describe("seedRecipes", () => {
 
   test("recipes seed at confidence=0.7 (above replay threshold, below promoted)", () => {
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     seedRecipes(db);
     const rows = db
       .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
@@ -569,10 +569,10 @@ describe("seedRecipes", () => {
     }
   });
 
-  test("after seedFoundationalKnowledge + seedCodeArtifacts + seedRecipes the substrate is populated", () => {
+  test("after seedFoundationalKnowledge + seedActArtifacts + seedRecipes the substrate is populated", () => {
     const db = openDb(":memory:");
     seedFoundationalKnowledge(db, { ownerApproved: true });
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const recipeSummary = seedRecipes(db);
 
     const knowledgeCandidates = (db
@@ -581,7 +581,7 @@ describe("seedRecipes", () => {
     expect(knowledgeCandidates).toBeGreaterThan(0);
 
     const artifactCount = (db
-      .query("SELECT COUNT(*) AS c FROM code_artifact").get() as { c: number }).c;
+      .query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     expect(artifactCount).toBeGreaterThan(0);
 
     const recipeRows = db

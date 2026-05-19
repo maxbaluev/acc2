@@ -87,14 +87,14 @@ export const buildSystemMap = (db: Database, opts: { artifactTopK?: number } = {
   const artifactRows = db
     .query(
       `SELECT id, runtime, name, score, confidence
-       FROM code_artifact
+       FROM act_artifact
        WHERE status != 'quarantined'
        ORDER BY score DESC, confidence DESC
        LIMIT ?`,
     )
     .all(k) as Array<{ id: string; runtime: string; name: string; score: number; confidence: number }>;
   const artifactTotal = (db
-    .query(`SELECT COUNT(*) AS c FROM code_artifact WHERE status != 'quarantined'`)
+    .query(`SELECT COUNT(*) AS c FROM act_artifact WHERE status != 'quarantined'`)
     .get() as { c: number }).c;
 
   return {

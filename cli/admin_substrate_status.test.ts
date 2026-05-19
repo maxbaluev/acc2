@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "../runtime/events";
 import {
-  seedCodeArtifacts,
+  seedActArtifacts,
   seedFoundationalKnowledge,
   seedRecipes,
 } from "../substrate/seed";
@@ -73,7 +73,7 @@ describe("computeSubstrateStatus", () => {
   test("DEGRADED verdict when seeds landed but no embeddings exist", () => {
     const db = openDb(":memory:");
     seedFoundationalKnowledge(db, { ownerApproved: true });
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     seedRecipes(db);
     const r = computeSubstrateStatus(db, "/tmp/x.db");
     expect(r.verdict).toBe("DEGRADED");
@@ -92,7 +92,7 @@ describe("computeSubstrateStatus", () => {
     });
     const db = openDb(":memory:");
     seedFoundationalKnowledge(db, { ownerApproved: true });
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     seedRecipes(db);
     await embedPendingEvents(db);
     const r = computeSubstrateStatus(db, "/tmp/x.db");
@@ -105,9 +105,9 @@ describe("computeSubstrateStatus", () => {
 
   test("counts seed vs brain-authored artifacts separately", () => {
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     db.run(
-      `INSERT INTO code_artifact (id, runtime, body, declared_sandbox, state_root,
+      `INSERT INTO act_artifact (id, runtime, body, declared_sandbox, state_root,
          posterior_alpha, posterior_beta, score, confidence,
          recent_residual_mean, recent_kill_count, status, name,
          fixture_input, fixture_expected_residual, created_at, updated_at
@@ -164,7 +164,7 @@ describe("renderSubstrateStatus", () => {
     const joined = lines.join("\n");
     expect(joined).toContain("verdict: ALIVE");
     expect(joined).toContain("events:");
-    expect(joined).toContain("code_artifact:");
+    expect(joined).toContain("act_artifact:");
     expect(joined).toContain("vec_events:");
     expect(joined).toContain("(8 seed, 0 brain-authored)");
     expect(joined).toContain("all embedded");
@@ -178,7 +178,7 @@ describe("renderSubstrateStatus", () => {
 
   test("counts health-metric event kinds (dispatcher_violation, irreversible_effect_recorded, worker_tick_overrun)", () => {
     const db = openDb(":memory:");
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     emitEvent(db, {
       kind: "dispatcher_violation" as never,
       substrate_origin: "substrate_auto",
@@ -226,7 +226,7 @@ describe("runSubstrateStatus end-to-end", () => {
     });
     const db = openDb(":memory:");
     seedFoundationalKnowledge(db, { ownerApproved: true });
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     seedRecipes(db);
     await embedPendingEvents(db);
     const { env, out } = makeEnv(db);

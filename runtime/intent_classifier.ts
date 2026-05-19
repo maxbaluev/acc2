@@ -144,7 +144,7 @@ export const allowedArtifactKindsFor = (intent_class: string): string[] => {
     case "cofounder_review":
       return ["cofounder_review_note", "markdown_body"];
     case "contract_implementation":
-      return ["code_artifact_candidate"];
+      return ["act_artifact_candidate"];
     case "research_dispatch":
       return ["research_note", "markdown_body"];
     default:

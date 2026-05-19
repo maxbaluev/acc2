@@ -6,7 +6,7 @@
 //   - The action artifact itself.
 //   - The verifier artifact (verifier accrues its own posterior — §11.5,
 //     §3.6.1 Rule 3 treats verifiers identically to action artifacts).
-//   - Every knowledge_id and code_artifact_id cited by either artifact —
+//   - Every knowledge_id and act_artifact_id cited by either artifact —
 //     pulled from (a) the action_predicted / artifact_observed / action_scored
 //     events' context_refs and (b) `@cite k_NNN` or `@cite art_NNN` comments
 //     scanned out of the action / verifier bodies.
@@ -66,7 +66,7 @@ import { maybePromoteKnowledge } from "../substrate/extractors";
 // directive's hashed goal token), its first-time weight is multiplied by
 // NOVELTY_BONUS_MULTIPLIER to surface newly-useful artifacts faster. Prior
 // credits for the SAME (artifact, goal_shape) pair are detected by scanning
-// past `code_artifact_score_updated` events whose payload carries the same
+// past `act_artifact_score_updated` events whose payload carries the same
 // goal_shape token. The bonus is ADDITIVE to the existing Shapley weight —
 // it multiplies the weight only on the first credit, not the residual or the
 // posterior delta computation; on later credits for the same shape the
@@ -106,7 +106,7 @@ const resolveGoalShape = (db: Database, directiveId: string): string => {
 };
 
 /** Check whether `artifactId` has already received credit on `goalShapeStr`.
- *  Scans past `code_artifact_score_updated` events that carry the goal_shape
+ *  Scans past `act_artifact_score_updated` events that carry the goal_shape
  *  token in their payload (LIKE match avoids JSON1 dependency). Empty shape
  *  → returns true (no novelty path). */
 const artifactSeenGoalShape = (db: Database, artifactId: string, goalShapeStr: string): boolean => {
@@ -114,7 +114,7 @@ const artifactSeenGoalShape = (db: Database, artifactId: string, goalShapeStr: s
   const row = db
     .query(
       `SELECT 1 AS x FROM events
-       WHERE kind = 'code_artifact_score_updated'
+       WHERE kind = 'act_artifact_score_updated'
          AND action_artifact_id = ?
          AND payload LIKE ?
        LIMIT 1`,
@@ -127,7 +127,7 @@ const artifactSeenGoalShape = (db: Database, artifactId: string, goalShapeStr: s
 
 type CreditContribution = {
   target_id: string;
-  target_kind: "knowledge" | "code_artifact";
+  target_kind: "knowledge" | "act_artifact";
   weight: number;
   posterior_delta_alpha: number;
   posterior_delta_beta: number;
@@ -141,8 +141,8 @@ type CreditDistribution = {
   /** |predicted − observed| — closer to 0 means better calibration. */
   delta: number;
   contributions: CreditContribution[];
-  /** IDs of every event we emitted (code_artifact_score_updated,
-   *  candidate_confirmed/contradicted, code_artifact_promoted, …). */
+  /** IDs of every event we emitted (act_artifact_score_updated,
+   *  candidate_confirmed/contradicted, act_artifact_promoted, …). */
   emitted_events: string[];
 };
 
@@ -182,13 +182,13 @@ const extractBodyCitations = (body: string): string[] => {
 };
 
 /** Classify an id as `knowledge` (event id of a candidate / promoted row)
- *  or `code_artifact` (row in code_artifact). Returns `unknown` when the
+ *  or `act_artifact` (row in act_artifact). Returns `unknown` when the
  *  id resolves to neither — callers default unknown to knowledge so a
  *  citation that names a row we haven't ingested yet still receives
  *  credit when its event lands later. */
-const classifyTarget = (db: Database, id: string): "knowledge" | "code_artifact" | "unknown" => {
-  const art = db.query("SELECT 1 AS x FROM code_artifact WHERE id = ?").get(id) as { x: number } | null;
-  if (art) return "code_artifact";
+const classifyTarget = (db: Database, id: string): "knowledge" | "act_artifact" | "unknown" => {
+  const art = db.query("SELECT 1 AS x FROM act_artifact WHERE id = ?").get(id) as { x: number } | null;
+  if (art) return "act_artifact";
   const ev = db.query("SELECT kind FROM events WHERE id = ?").get(id) as { kind: string } | null;
   if (ev && (ev.kind === "knowledge_candidate" || ev.kind === "knowledge_promoted")) {
     return "knowledge";
@@ -353,7 +353,7 @@ const applyWeightedResidualOutcome = (
   ts: string,
 ): void => {
   const row = getArtifact(db, artifactId);
-  if (!row) throw new Error(`code_artifact_not_found:${artifactId}`);
+  if (!row) throw new Error(`act_artifact_not_found:${artifactId}`);
   const r = Math.max(0, Math.min(1, residual));
   const { alphaDelta, betaDelta } = residualToBetaDeltas(r);
   const newAlpha = row.posteriorAlpha + alphaDelta * weight;
@@ -368,7 +368,7 @@ const applyWeightedResidualOutcome = (
   const weightedR = weight === 1.0 ? r : Math.min(1, r * weight + 0.5 * (1 - Math.min(1, weight)));
   const newEma = decay * row.recentResidualMean + (1 - decay) * weightedR;
   db.run(
-    `UPDATE code_artifact SET
+    `UPDATE act_artifact SET
        posterior_alpha = ?, posterior_beta = ?,
        score = ?, confidence = ?,
        recent_residual_mean = ?,
@@ -522,10 +522,10 @@ const collectCitations = (
  *       observers — not third-party citations).
  *    3. Extract third-party citations from context_refs + body @cite markers.
  *    4. Compute Shapley weights by corroboration position.
- *    5. Apply the WEIGHTED Beta posterior delta to each cited code_artifact;
+ *    5. Apply the WEIGHTED Beta posterior delta to each cited act_artifact;
  *       emit candidate_confirmed/contradicted for each cited knowledge id.
  *    6. After every posterior update, fire maybePromote / maybeQuarantine.
- *    7. Emit `code_artifact_score_updated` for every artifact touched.
+ *    7. Emit `act_artifact_score_updated` for every artifact touched.
  *
  *  Returns a summary suitable for the substrate.credit MCP response.
  */
@@ -546,9 +546,9 @@ export const distributeCredit = async (
   const actionArt = getArtifact(db, actionArtifactId);
   const verifierArt = getArtifact(db, verifierArtifactId);
   // Synthetic substrate actuators — owner_profile_promoter,
-  // knowledge_promotion, code_artifact_promotion, recipe_*,
+  // knowledge_promotion, act_artifact_promotion, recipe_*,
   // auto_apply_worker_stage2, etc — emit action_predicted +
-  // action_scored events but are NOT registered code_artifact rows
+  // action_scored events but are NOT registered act_artifact rows
   // (they're substrate-side primitives, not brain-authored scripts).
   // For these paths, skip the primary artifact posterior updates
   // (there's no row to update) but CONTINUE through collectCitations
@@ -588,7 +588,7 @@ export const distributeCredit = async (
 
   const emit = (event: EmitEventInput): string => {
     const payload = jsonObject(event.payload);
-    const shouldStamp = creditMetadata.sourceActId && (event.kind === "candidate_confirmed" || event.kind === "candidate_contradicted" || event.kind === "code_artifact_score_updated");
+    const shouldStamp = creditMetadata.sourceActId && (event.kind === "candidate_confirmed" || event.kind === "candidate_contradicted" || event.kind === "act_artifact_score_updated");
     const stampedPayload = shouldStamp
       ? {
           ...payload,
@@ -611,7 +611,7 @@ export const distributeCredit = async (
   /** Apply the LATM novelty bonus when an artifact earns credit on a
    *  previously-unseen goal_shape. Returns the (possibly-boosted) weight.
    *  Emits a `latm_novelty_bonus_applied` event so the bonus is auditable.
-   *  The check runs BEFORE the matching `code_artifact_score_updated` event
+   *  The check runs BEFORE the matching `act_artifact_score_updated` event
    *  for this credit is emitted — that's important because the post-credit
    *  score update is the row that "claims" this goal_shape for future calls. */
   const applyNoveltyBonus = (artifactId: string, baseWeight: number): number => {
@@ -644,7 +644,7 @@ export const distributeCredit = async (
   //    surface stays honest.
   //
   //    Important ordering: we must check novelty BEFORE emitting the
-  //    `code_artifact_score_updated` row that stamps this goal_shape onto
+  //    `act_artifact_score_updated` row that stamps this goal_shape onto
   //    the artifact's history; otherwise the verifier's check would observe
   //    the action's stamp and miss its own novelty.
   let computedActionWeight = 1.0;
@@ -678,7 +678,7 @@ export const distributeCredit = async (
   if (primaryArtifactsRegistered) {
     const actionRowPost = getArtifact(db, actionArt!.id)!;
     emit({
-      kind: "code_artifact_score_updated",
+      kind: "act_artifact_score_updated",
       substrate_origin: "substrate_auto",
       action_artifact_id: actionArt!.id,
       payload: {
@@ -694,7 +694,7 @@ export const distributeCredit = async (
     });
     const verifierRowPost = getArtifact(db, verifierArt!.id)!;
     emit({
-      kind: "code_artifact_score_updated",
+      kind: "act_artifact_score_updated",
       substrate_origin: "substrate_auto",
       action_artifact_id: verifierArt!.id,
       payload: {
@@ -741,7 +741,7 @@ export const distributeCredit = async (
     const baseWeight = weights[i]! * cited[i]!.weightFactor;
     const kind = classifyTarget(db, targetId);
 
-    if (kind === "code_artifact") {
+    if (kind === "act_artifact") {
       // Apply the LATM novelty bonus on the Shapley share — first-time
       // goal_shape credit on this cited artifact gets a multiplier on its
       // weight so a newly-useful artifact rises faster. Idempotent on
@@ -770,7 +770,7 @@ export const distributeCredit = async (
         const wForEma = Math.min(1, weight);
         const newEma = decay * row.recentResidualMean + (1 - decay) * (r * wForEma + 0.5 * (1 - wForEma));
         db.run(
-          `UPDATE code_artifact SET
+          `UPDATE act_artifact SET
              posterior_alpha = ?, posterior_beta = ?,
              score = ?, confidence = ?,
              recent_residual_mean = ?,
@@ -781,7 +781,7 @@ export const distributeCredit = async (
         maybePromote(db, targetId, (e) => emit(e));
         maybeQuarantine(db, targetId, (e) => emit(e));
         emit({
-          kind: "code_artifact_score_updated",
+          kind: "act_artifact_score_updated",
           substrate_origin: "substrate_auto",
           action_artifact_id: targetId,
           payload: {
@@ -798,7 +798,7 @@ export const distributeCredit = async (
       }
       contributions.push({
         target_id: targetId,
-        target_kind: "code_artifact",
+        target_kind: "act_artifact",
         weight,
         posterior_delta_alpha: wAlpha,
         posterior_delta_beta: wBeta,

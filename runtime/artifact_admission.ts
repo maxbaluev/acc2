@@ -2,7 +2,7 @@
 //
 // Admission protocol:
 //   1. Validate the sandbox declaration shape. Bad shape → admission rejected.
-//   2. Materialize a fresh code_artifact row in `admitted` state with priors
+//   2. Materialize a fresh act_artifact row in `admitted` state with priors
 //      (alpha=1, beta=1, score=0.5, confidence=0.3) — these are the canonical
 //      §11.5 admit values. We allocate the id BEFORE running the fixture so
 //      the runtime invocation has a stable artifact_id to tag the events.
@@ -12,7 +12,7 @@
 //   4. If the fixture run is `ok: true` and the observed residual (computed
 //      from the artifact's `fixtureExpectedResidual` predicate — see below)
 //      falls below `fixtureExpectedResidualBelow`, admit. Otherwise emit
-//      `code_artifact_admission_rejected` + remove the row.
+//      `act_artifact_admission_rejected` + remove the row.
 //
 // Residual derivation at admission:
 //   The admission caller declares `fixtureExpectedResidualBelow` (typically
@@ -59,10 +59,10 @@ export type AdmissionInput = {
   stateRoot?: string;
   name?: string;
   /** Brain dataflow audit bxdhdkm9e #3 (2026-05-15): provenance metadata
-   *  the brain emits on code_artifact_candidate but the admission path
+   *  the brain emits on act_artifact_candidate but the admission path
    *  previously dropped. The fields are all OPTIONAL — legacy seed
    *  admissions that don't supply them remain valid. When supplied,
-   *  they land on the code_artifact row and become readable via the
+   *  they land on the act_artifact row and become readable via the
    *  registry view + TUI artifact detail pane. */
   intent?: string;
   summary?: string;
@@ -83,14 +83,14 @@ export type AdmissionInput = {
    *  QHTRBV6PFX2JVBMHDNDA4B03GC). When `name` starts with `atms_report_v`,
    *  the substrate requires at least one cited knowledge_candidate event
    *  whose payload.claim ends with `_strategic_direction_chosen`. The
-   *  brain emits these ids on `code_artifact_candidate.cited_knowledge_ids`
+   *  brain emits these ids on `act_artifact_candidate.cited_knowledge_ids`
    *  and the admission caller (bridge/runtime) threads them through. */
   citedKnowledgeIds?: string[];
   /** C5 (2026-05-18, contract HJJS1665H961B2SRYHC5J85D14): provenance
    *  chain. `kind` discriminates the artifact (e.g. `published_drive_doc`);
    *  `supersedes` is the prior artifact_id that this admission replaces.
    *  When both are set and kind === `published_drive_doc`, the admission
-   *  emits `code_artifact_superseded` against the prior row AFTER
+   *  emits `act_artifact_superseded` against the prior row AFTER
    *  successful row insert. Non-destructive: the external Drive doc is
    *  not trashed — only the substrate marks the prior superseded. */
   kind?: string;
@@ -134,8 +134,8 @@ const ADMIT_CONFIDENCE = 0.3;
 
 /** Run admission for a new code artifact. Inserts the row at admit priors,
  *  runs the fixture, and either confirms admission (emitting
- *  `code_artifact_admitted`) or rolls back + emits
- *  `code_artifact_admission_rejected`. */
+ *  `act_artifact_admitted`) or rolls back + emits
+ *  `act_artifact_admission_rejected`. */
 export const admitArtifact = async (
   db: Database,
   input: AdmissionInput,
@@ -145,7 +145,7 @@ export const admitArtifact = async (
   const v = validateSandboxDecl(input.declaredSandbox);
   if (!v.ok) {
     emit({
-      kind: "code_artifact_admission_rejected",
+      kind: "act_artifact_admission_rejected",
       substrate_origin: "substrate_auto",
       payload: {
         reason: "sandbox_decl_invalid",
@@ -157,7 +157,7 @@ export const admitArtifact = async (
   }
   if (input.declaredSandbox.runtime !== input.runtime) {
     emit({
-      kind: "code_artifact_admission_rejected",
+      kind: "act_artifact_admission_rejected",
       substrate_origin: "substrate_auto",
       payload: {
         reason: "sandbox_decl_invalid",
@@ -174,7 +174,7 @@ export const admitArtifact = async (
   const gate = ownerGateDecision(input.declaredSandbox);
   if (gate.requires_consent) {
     emit({
-      kind: "code_artifact_admission_rejected",
+      kind: "act_artifact_admission_rejected",
       substrate_origin: "substrate_auto",
       payload: {
         reason: "owner_consent_missing",
@@ -195,7 +195,7 @@ export const admitArtifact = async (
   //
   //     F2 (2026-05-18): admission only runs the gate when an audience
   //     is explicitly declared. The emit-side screen for
-  //     code_artifact_candidate handles its own audience inference;
+  //     act_artifact_candidate handles its own audience inference;
   //     admission of action / verifier code (no audience field) is
   //     internal substrate plumbing and skips the buyer-facing gate.
   const predicateGate = input.audience
@@ -310,7 +310,7 @@ export const admitArtifact = async (
         substrate_origin: "substrate_auto",
         payload: {
           reason: "artifact_citation_underrooted",
-          refused_kind: "code_artifact_admission",
+          refused_kind: "act_artifact_admission",
           artifact_kind: input.kind ?? null,
           artifact_name: input.name ?? null,
           audience: input.audience ?? null,
@@ -323,7 +323,7 @@ export const admitArtifact = async (
         substrate_origin: "substrate_auto",
         payload: {
           reason: "decorative_citation",
-          refused_kind: "code_artifact_admission",
+          refused_kind: "act_artifact_admission",
           artifact_kind: input.kind ?? null,
           artifact_name: input.name ?? null,
           unresolved_labels: unresolvedAtAdmit as unknown as JsonValue,
@@ -346,7 +346,7 @@ export const admitArtifact = async (
     });
     if (!driveUri) {
       emit({
-        kind: "code_artifact_admission_rejected",
+        kind: "act_artifact_admission_rejected",
         substrate_origin: "substrate_auto",
         payload: {
           reason: "published_drive_doc_missing_drive_uri",
@@ -564,9 +564,9 @@ export const admitArtifact = async (
     observation.error === "uv_runtime_unavailable" ||
     observation.error === "camofox_runtime_unavailable"
   )) {
-    db.run("DELETE FROM code_artifact WHERE id = ?", [row.id]);
+    db.run("DELETE FROM act_artifact WHERE id = ?", [row.id]);
     emit({
-      kind: "code_artifact_admission_rejected",
+      kind: "act_artifact_admission_rejected",
       substrate_origin: "substrate_auto",
       action_artifact_id: row.id,
       payload: {
@@ -580,9 +580,9 @@ export const admitArtifact = async (
   }
 
   if (!observation.ok) {
-    db.run("DELETE FROM code_artifact WHERE id = ?", [row.id]);
+    db.run("DELETE FROM act_artifact WHERE id = ?", [row.id]);
     emit({
-      kind: "code_artifact_admission_rejected",
+      kind: "act_artifact_admission_rejected",
       substrate_origin: "substrate_auto",
       action_artifact_id: row.id,
       payload: {
@@ -608,9 +608,9 @@ export const admitArtifact = async (
   ) {
     const observedResidual = (result as { residual: number }).residual;
     if (observedResidual >= input.fixtureExpectedResidualBelow) {
-      db.run("DELETE FROM code_artifact WHERE id = ?", [row.id]);
+      db.run("DELETE FROM act_artifact WHERE id = ?", [row.id]);
       emit({
-        kind: "code_artifact_admission_rejected",
+        kind: "act_artifact_admission_rejected",
         substrate_origin: "substrate_auto",
         action_artifact_id: row.id,
         payload: {
@@ -671,7 +671,7 @@ export const admitArtifact = async (
   // Re-read in case downstream stamped any field; mostly defensive.
   const final = getArtifact(db, row.id);
   emit({
-    kind: "code_artifact_admitted",
+    kind: "act_artifact_admitted",
     substrate_origin: "substrate_auto",
     action_artifact_id: row.id,
     payload: {

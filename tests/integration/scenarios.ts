@@ -156,7 +156,7 @@ export const bootDaemon = async (
 //      lands at this isolated location.
 //   2. Calls `runInitProgrammatic({ yes: true })` — the SAME function
 //      `bun cli/dispatch.ts init --yes` invokes. This seeds foundational
-//      knowledge + the canonical code_artifact rows via the production
+//      knowledge + the canonical act_artifact rows via the production
 //      init path (Task 1 wiring).
 //   3. Calls `startDaemon({})` with NO opts — env-var-driven, same as the
 //      operator's `acc daemon start`. Default externalPushToken (null)
@@ -540,12 +540,12 @@ export const scenarioDistributionMerger = async (handle: DaemonHandle): Promise<
   // scenario 2). Find the most recent fixture_d action artifact.
   const actionArt = handle.db
     .query(
-      "SELECT id FROM code_artifact WHERE name = 'fixture_d_count_todos_action' ORDER BY created_at DESC LIMIT 1",
+      "SELECT id FROM act_artifact WHERE name = 'fixture_d_count_todos_action' ORDER BY created_at DESC LIMIT 1",
     )
     .get() as { id: string } | null;
   const verifierArt = handle.db
     .query(
-      "SELECT id FROM code_artifact WHERE name = 'fixture_d_count_todos_verifier' ORDER BY created_at DESC LIMIT 1",
+      "SELECT id FROM act_artifact WHERE name = 'fixture_d_count_todos_verifier' ORDER BY created_at DESC LIMIT 1",
     )
     .get() as { id: string } | null;
   assert(actionArt !== null && verifierArt !== null, "MVP artifacts must already exist");
@@ -631,14 +631,14 @@ export const scenarioCreditChainClosure = async (handle: DaemonHandle): Promise<
       "action + verifier artifact ids must be resolvable",
     );
 
-    // code_artifact_score_updated fires for BOTH action and verifier (Phase
+    // act_artifact_score_updated fires for BOTH action and verifier (Phase
     // H, distributeCredit primary credit emissions).
     const updated = handle.db
       .query(
-        "SELECT COUNT(*) AS n FROM events WHERE kind = 'code_artifact_score_updated' AND task_id = ?",
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'act_artifact_score_updated' AND task_id = ?",
       )
       .get(taskId) as { n: number };
-    assert(updated.n >= 2, `at least 2 code_artifact_score_updated events expected (got ${updated.n})`);
+    assert(updated.n >= 2, `at least 2 act_artifact_score_updated events expected (got ${updated.n})`);
 
     const preScore = getArtifact(handle.db, predicted.action_artifact_id);
     assert(preScore !== null, "action artifact row must exist");
@@ -671,13 +671,13 @@ export const scenarioCreditChainClosure = async (handle: DaemonHandle): Promise<
       `action artifact score must have changed (pre=${preScore!.score} post=${postScore!.score})`,
     );
 
-    // At least one code_artifact_promoted event fired.
+    // At least one act_artifact_promoted event fired.
     const promoted = handle.db
-      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'code_artifact_promoted'")
+      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'act_artifact_promoted'")
       .get() as { n: number };
     assert(
       promotedFired || promoted.n >= 1,
-      `code_artifact_promoted must fire at least once (count=${promoted.n})`,
+      `act_artifact_promoted must fire at least once (count=${promoted.n})`,
     );
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
@@ -1574,7 +1574,7 @@ export const scenarioRealBrainEndToEnd = async (): Promise<void> => {
   // an operator gets from `acc init && acc daemon start`. We no longer
   // call `bootDaemon(...)` with custom opts and seed via a privileged
   // side door — instead `bootDaemonProduction()` runs `runInitProgrammatic`
-  // (which seeds knowledge + code_artifacts via Task 1 wiring) and then
+  // (which seeds knowledge + act_artifacts via Task 1 wiring) and then
   // `startDaemon()` with NO opts. Real-brain proof of the loop now also
   // proves the operator-install seed surface.
   let prod: ProductionBootResult | null = null;
@@ -1819,7 +1819,7 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
   // seedCodeArtifacts call — bootDaemonProduction below sets
   // ACC2_STATE_DIR + ports, runs `runInitProgrammatic({yes:true})` (the
   // SAME function `bun cli/dispatch.ts init --yes` invokes — seeds both
-  // knowledge and code_artifacts via Task 1 wiring), then calls
+  // knowledge and act_artifacts via Task 1 wiring), then calls
   // `startDaemon()` with NO opts. If today's flow skipped any seed step,
   // it surfaces explicitly: the production init path is now the only
   // surface that decides what the substrate contains at boot.
@@ -1848,14 +1848,14 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
     write(`boot: production code path — acc init + acc daemon start (no privileged side door)\n`);
 
     // Knowledge lives as `events` rows (kind=knowledge_promoted) — one substrate,
-    // one ledger (k_2367). code_artifact is the only materialized projection.
+    // one ledger (k_2367). act_artifact is the only materialized projection.
     // We probe the seeded counts after init+start so the operator can see
     // the substrate contents WITHOUT the harness directly calling seed code.
     const seededK = handle.db.query(
       "SELECT COUNT(*) AS n FROM events WHERE kind = 'knowledge_promoted'",
     ).get() as { n: number };
-    const seededA = handle.db.query("SELECT COUNT(*) AS n FROM code_artifact").get() as { n: number };
-    write(`seed: knowledge_promoted=${seededK.n}, code_artifacts=${seededA.n}\n`);
+    const seededA = handle.db.query("SELECT COUNT(*) AS n FROM act_artifact").get() as { n: number };
+    write(`seed: knowledge_promoted=${seededK.n}, act_artifacts=${seededA.n}\n`);
 
     emitEvent(handle.db, {
       kind: "directive_opened",
@@ -1904,7 +1904,7 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
     // Snapshot the artifact baseline so the post-run count reflects only
     // what the brain admitted during THIS dispatch (the seed already loaded N).
     const artifactsBaseline = (
-      handle.db.query("SELECT COUNT(*) AS n FROM code_artifact").get() as { n: number }
+      handle.db.query("SELECT COUNT(*) AS n FROM act_artifact").get() as { n: number }
     ).n;
     // Snapshot vec_events row count so the post-run delta isolates THIS run's
     // embedder activity (the seed indexes its own knowledge_promoted rows).
@@ -1922,7 +1922,7 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
 
     // Stream EVERY event for this directive as it lands — the brain's MCP
     // tool calls land here as event rows (substrate.admit_artifact emits
-    // code_artifact_admitted, etc.), so this surfaces brain activity that
+    // act_artifact_admitted, etc.), so this surfaces brain activity that
     // would otherwise be invisible during the ~2 min opencode window.
     // Plus a heartbeat every 15s of silence so the operator can tell
     // "thinking" from "hung".
@@ -2000,7 +2000,7 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
     // Tally final state.
     const totals = handle.db.query("SELECT COUNT(*) AS n FROM events WHERE directive_id = ?").get(directiveId) as { n: number };
     const artifactsAfter = (
-      handle.db.query("SELECT COUNT(*) AS n FROM code_artifact").get() as { n: number }
+      handle.db.query("SELECT COUNT(*) AS n FROM act_artifact").get() as { n: number }
     ).n;
     const artifacts = { n: artifactsAfter - artifactsBaseline };
     const violations = handle.db.query(
@@ -2223,11 +2223,11 @@ const summarizeEventForCli = (r: EventRow): string => {
     case "constitutional_gate_decision":
       return `${origin} route=${p.route ?? "?"}  reason=${p.reason ?? "?"}`;
 
-    case "code_artifact_admitted":
+    case "act_artifact_admitted":
       return `${origin} artifact=${short(p.artifact_id as string)}  runtime=${p.runtime ?? "?"}  ${p.role ? "role=" + p.role : ""}`;
-    case "code_artifact_admission_failed":
+    case "act_artifact_admission_failed":
       return `${origin} reason=${String(p.reason ?? "?")}  ⚠`;
-    case "code_artifact_candidate":
+    case "act_artifact_candidate":
       return `${origin} runtime=${p.runtime ?? "?"}`;
     case "knowledge_candidate":
       return `${origin} text="${String(p.text ?? "").slice(0, 60)}"`;

@@ -49,10 +49,10 @@ describe("getProvenanceChain — graph walk", () => {
     insertStub(db, "art_v2", "published_drive_doc", "doc2");
     insertStub(db, "art_v3", "published_drive_doc", "doc3");
     // Wire chain: v1 ← v2 ← v3.
-    db.run("UPDATE code_artifact SET supersedes = ? WHERE id = ?", ["art_v1", "art_v2"]);
-    db.run("UPDATE code_artifact SET supersedes = ?, superseded_by = NULL WHERE id = ?", ["art_v2", "art_v3"]);
-    db.run("UPDATE code_artifact SET superseded_by = ? WHERE id = ?", ["art_v2", "art_v1"]);
-    db.run("UPDATE code_artifact SET superseded_by = ? WHERE id = ?", ["art_v3", "art_v2"]);
+    db.run("UPDATE act_artifact SET supersedes = ? WHERE id = ?", ["art_v1", "art_v2"]);
+    db.run("UPDATE act_artifact SET supersedes = ?, superseded_by = NULL WHERE id = ?", ["art_v2", "art_v3"]);
+    db.run("UPDATE act_artifact SET superseded_by = ? WHERE id = ?", ["art_v2", "art_v1"]);
+    db.run("UPDATE act_artifact SET superseded_by = ? WHERE id = ?", ["art_v3", "art_v2"]);
 
     const fromHead = getProvenanceChain(db, "art_v3")!;
     expect(fromHead.head.artifact_id).toBe("art_v3");
@@ -78,8 +78,8 @@ describe("getProvenanceChain — graph walk", () => {
     insertStub(db, "cyc_a", "published_drive_doc", "doc_a");
     insertStub(db, "cyc_b", "published_drive_doc", "doc_b");
     // Author a cycle on purpose (substrate has no integrity gate yet).
-    db.run("UPDATE code_artifact SET supersedes = ?, superseded_by = ? WHERE id = ?", ["cyc_b", "cyc_b", "cyc_a"]);
-    db.run("UPDATE code_artifact SET supersedes = ?, superseded_by = ? WHERE id = ?", ["cyc_a", "cyc_a", "cyc_b"]);
+    db.run("UPDATE act_artifact SET supersedes = ?, superseded_by = ? WHERE id = ?", ["cyc_b", "cyc_b", "cyc_a"]);
+    db.run("UPDATE act_artifact SET supersedes = ?, superseded_by = ? WHERE id = ?", ["cyc_a", "cyc_a", "cyc_b"]);
     const chain = getProvenanceChain(db, "cyc_a")!;
     // Walk stops at first repeated id; the cycle isn't surfaced as
     // infinite recursion.
@@ -89,7 +89,7 @@ describe("getProvenanceChain — graph walk", () => {
 });
 
 describe("markSuperseded — idempotency + edge maintenance", () => {
-  test("first call flips prior.superseded_by and emits code_artifact_superseded", () => {
+  test("first call flips prior.superseded_by and emits act_artifact_superseded", () => {
     const db = openDb(":memory:");
     insertStub(db, "prior", "published_drive_doc", "p");
     insertStub(db, "successor", "published_drive_doc", "s");
@@ -97,7 +97,7 @@ describe("markSuperseded — idempotency + edge maintenance", () => {
     const ok = markSuperseded(db, "prior", "successor", captureEmit(events));
     expect(ok).toBe(true);
     expect(getArtifact(db, "prior")?.supersededBy).toBe("successor");
-    expect(events.filter((e) => e.kind === "code_artifact_superseded").length).toBe(1);
+    expect(events.filter((e) => e.kind === "act_artifact_superseded").length).toBe(1);
   });
 
   test("second call with same pair is a no-op (no duplicate event)", () => {
@@ -108,7 +108,7 @@ describe("markSuperseded — idempotency + edge maintenance", () => {
     markSuperseded(db, "prior", "successor", captureEmit(events));
     const second = markSuperseded(db, "prior", "successor", captureEmit(events));
     expect(second).toBe(false);
-    expect(events.filter((e) => e.kind === "code_artifact_superseded").length).toBe(1);
+    expect(events.filter((e) => e.kind === "act_artifact_superseded").length).toBe(1);
   });
 
   test("returns false if prior artifact missing", () => {
@@ -130,7 +130,7 @@ describe("markSuperseded — idempotency + edge maintenance", () => {
     const ok = markSuperseded(db, "prior_low", "succ_low", captureEmit(events), { residual: 0.1 });
     expect(ok).toBe(true);
     expect(getArtifact(db, "prior_low")?.supersededBy).toBe("succ_low");
-    expect(events.filter((e) => e.kind === "code_artifact_superseded").length).toBe(1);
+    expect(events.filter((e) => e.kind === "act_artifact_superseded").length).toBe(1);
     expect(events.filter((e) => e.kind === "lane_routing_refused").length).toBe(0);
   });
 
@@ -142,7 +142,7 @@ describe("markSuperseded — idempotency + edge maintenance", () => {
     const ok = markSuperseded(db, "prior_high", "succ_high", captureEmit(events), { residual: 0.42 });
     expect(ok).toBe(false);
     expect(getArtifact(db, "prior_high")?.supersededBy).toBeNull();
-    expect(events.filter((e) => e.kind === "code_artifact_superseded").length).toBe(0);
+    expect(events.filter((e) => e.kind === "act_artifact_superseded").length).toBe(0);
     const refusals = events.filter((e) => e.kind === "lane_routing_refused");
     expect(refusals.length).toBe(1);
     const payload = refusals[0]!.payload as Record<string, unknown>;
@@ -181,7 +181,7 @@ describe("Lakeland Drive backfill", () => {
     const second = seedLakelandDriveProvenance(db);
     expect(first.inserted).toBe(4);
     expect(second.inserted).toBe(0);
-    const count = (db.query("SELECT COUNT(*) AS n FROM code_artifact WHERE id LIKE 'seed_lakeland_drive_doc_%'").get() as { n: number }).n;
+    const count = (db.query("SELECT COUNT(*) AS n FROM act_artifact WHERE id LIKE 'seed_lakeland_drive_doc_%'").get() as { n: number }).n;
     expect(count).toBe(4);
   });
 

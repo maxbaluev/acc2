@@ -10,7 +10,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
-import { seedCodeArtifacts } from "../substrate/seed";
+import { seedActArtifacts } from "../substrate/seed";
 import {
   buildRankingContext,
   loadStrategyArtifacts,
@@ -34,7 +34,7 @@ describe("dispatch_strategy_ranker — loadStrategyArtifacts", () => {
     closeDb(":memory:");
     const db = openDb(":memory:");
     runViews(db);
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const strategies = loadStrategyArtifacts(db);
     // Each seed artifact has a name like dispatch_strategy_v1:<X>; the
     // loader filters to state_root='dispatch/strategy'.
@@ -52,7 +52,7 @@ describe("dispatch_strategy_ranker — loadStrategyArtifacts", () => {
     closeDb(":memory:");
     const db = openDb(":memory:");
     runViews(db);
-    // No seedCodeArtifacts call.
+    // No seedActArtifacts call.
     expect(loadStrategyArtifacts(db)).toEqual([]);
   });
 });
@@ -62,7 +62,7 @@ describe("dispatch_strategy_ranker — rankStrategies", () => {
     closeDb(":memory:");
     const db = openDb(":memory:");
     runViews(db);
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     // deep_decomposition_v1 matches 'strategic_verb' + 'long_goal_text'.
     // one_shot_low_risk_v1 matches 'narrow' + 'single_obligation'.
     const ctx = baseContext({ goal_shape_tags: ["strategic_verb", "long_goal_text"], feasible_routes: ["opencode_brain", "claude_inline"] });
@@ -79,7 +79,7 @@ describe("dispatch_strategy_ranker — rankStrategies", () => {
     closeDb(":memory:");
     const db = openDb(":memory:");
     runViews(db);
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     // claude_inline_leaf_v1 prefers claude_inline; if that's not feasible,
     // its lane_feasibility should be 0 (only opencode_brain at 0.2 remains).
     const noClaudeInline = baseContext({ feasible_routes: ["opencode_brain"], goal_shape_tags: ["inline_eligible"] });
@@ -101,7 +101,7 @@ describe("dispatch_strategy_ranker — rankStrategies", () => {
     closeDb(":memory:");
     const db = openDb(":memory:");
     runViews(db);
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     // one_shot_low_risk_v1 matches residual_band='low'.
     const lowCtx = baseContext({ residual_band: "low" });
     const highCtx = baseContext({ residual_band: "high" });
@@ -118,7 +118,7 @@ describe("dispatch_strategy_ranker — rankStrategies", () => {
     closeDb(":memory:");
     const db = openDb(":memory:");
     runViews(db);
-    seedCodeArtifacts(db);
+    seedActArtifacts(db);
     const ranked = rankStrategies(db, baseContext(), 2);
     expect(ranked.length).toBe(2);
   });

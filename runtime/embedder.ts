@@ -379,7 +379,7 @@ export const embedderWorkerTick = async (
   // the sentinel takes them out of the queue without polluting `vec_events`
   // (vec0 only receives rows with real vectors). Without this the embedder
   // gets stuck on the oldest events of kinds whose payloads carry no
-  // embeddable text (e.g. code_artifact_admitted, action_scored — they're
+  // embeddable text (e.g. act_artifact_admitted, action_scored — they're
   // registered embeddable historically but the runtime emitter writes only
   // structured fields, so extractTextFromEvent returns null forever).
   if (noTextIds.length > 0) {

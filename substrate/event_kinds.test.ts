@@ -215,7 +215,7 @@ describe("derived sets match their pre-unification shape", () => {
     // 12 kinds carry retrievable semantic text 50-100% of the time and
     // are kept. Kinds that historically had embeddable:true but in
     // practice yielded 0-20% text hits (structured-only payloads:
-    // action_scored, code_artifact_admitted, task_closure_audited,
+    // action_scored, act_artifact_admitted, task_closure_audited,
     // applied_change_committed, lesson_apply_*, brain_message_emitted,
     // brain_reasoning_recorded) were flipped off — they polluted
     // retrieval with structured noise + brain self-talk.
@@ -230,7 +230,7 @@ describe("derived sets match their pre-unification shape", () => {
       // Brain action surface (intent text, 100% hit).
       "action_predicted",
       // Tools.
-      "code_artifact_candidate",
+      "act_artifact_candidate",
       // Structural amendments.
       "contract_amendment_proposed",
       // Pre-apply correction/adversarial judgments.
@@ -267,7 +267,7 @@ describe("derived sets match their pre-unification shape", () => {
     // The flipped-off kinds must NOT appear in the embeddable set.
     const removed = new Set([
       "action_scored",
-      "code_artifact_admitted",
+      "act_artifact_admitted",
       "task_closure_audited",
       "applied_change_committed",
       "lesson_apply_requested",
@@ -300,7 +300,7 @@ describe("derived sets match their pre-unification shape", () => {
       "pathology_budget_exhausted",
       // Brain sandbox audit bsfxsvgh9 (2026-05-15): terminal retirement
       // of chronically-failing artifacts is a substrate-status metric.
-      "code_artifact_retired",
+      "act_artifact_retired",
       // Stage-2 auto-apply worker (2026-05-15): mechanical apply
       // failures are a substrate-status signal — the brain's proposal
       // passed structural gates but tests refused it.
@@ -328,7 +328,7 @@ describe("derived sets match their pre-unification shape", () => {
       // see install / bridge degradation at substrate-status surface.
       "runtime_self_diagnostic_recorded",
       // C1 (2026-05-18, contract DXQK3VYMCH7930TP20H4QSTP0R):
-      // structural predicate gate refused a code_artifact_candidate
+      // structural predicate gate refused a act_artifact_candidate
       // body destined for ceo_buyer / external_executive. Per-window
       // count lets operators see how often the gate fires (k_252
       // advisory→structural conversion evidence).

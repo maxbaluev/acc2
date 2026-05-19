@@ -7,7 +7,7 @@
 //
 //   markdown_body × docx_reference_style → rendered_docx
 //
-// Each kind is a free-string `code_artifact.kind` value (no enum
+// Each kind is a free-string `act_artifact.kind` value (no enum
 // extension). Lineage:
 //   - markdown_body.body            = markdown text (UTF-8)
 //   - docx_reference_style.body     = base64-encoded reference docx bytes
@@ -191,7 +191,7 @@ export const renderMarkdownToDocx = async (
       ok: false,
       residual: 1,
       error: "markdown_body_missing",
-      detail: `no code_artifact row for markdown_body_id=${input.markdownBodyId}`,
+      detail: `no act_artifact row for markdown_body_id=${input.markdownBodyId}`,
     };
   }
   if (md.kind !== MARKDOWN_BODY_KIND) {
@@ -208,7 +208,7 @@ export const renderMarkdownToDocx = async (
       ok: false,
       residual: 1,
       error: "reference_docx_missing",
-      detail: `no code_artifact row for reference_docx_artifact_id=${input.referenceDocxArtifactId}`,
+      detail: `no act_artifact row for reference_docx_artifact_id=${input.referenceDocxArtifactId}`,
     };
   }
   if (ref.kind !== DOCX_REFERENCE_STYLE_KIND) {

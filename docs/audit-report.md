@@ -158,10 +158,10 @@ The audit walked v2-design.md section by section against the live code, then enu
 
 ## Section B — Inconsistencies between design and code
 
-### B.1 — `code_artifact_registry_view` vs `artifact_registry_view`
+### B.1 — `act_artifact_registry_view` vs `artifact_registry_view`
 
 - **Severity:** minor.
-- **Design (line 590):** `code_artifact_registry_view`.
+- **Design (line 590):** `act_artifact_registry_view`.
 - **Code:** `substrate/views.ts:VIEW_CODE_ARTIFACT_REGISTRY` matches the design name. Good.
 - **Action taken:** *no-action-design-correct*.
 
@@ -268,7 +268,7 @@ The audit walked v2-design.md section by section against the live code, then enu
 ### D.4 — Father drift detector with synthetic non-FatherAction event
 
 - **Severity:** minor.
-- **Code:** `runtime/father.test.ts:detect_father_drift` (already existed pre-audit) emits a `code_artifact_admitted` event under `substrate_origin='father'` and asserts the detector emits `father_drift_detected`.
+- **Code:** `runtime/father.test.ts:detect_father_drift` (already existed pre-audit) emits a `act_artifact_admitted` event under `substrate_origin='father'` and asserts the detector emits `father_drift_detected`.
 - **Action taken:** *no-action-design-correct*.
 
 ### D.5 — Cycle-1 in real bridge path (ACC2_BRIDGE_MODE=real with stub spawnFn)

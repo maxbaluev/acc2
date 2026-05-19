@@ -495,10 +495,10 @@ describe("acc admin override-quarantine", () => {
     expect(code).toBe(0);
     expect(out.join("\n")).toContain("quarantined → admitted");
     expect(out.join("\n")).toContain("manual_test");
-    const after = db.query("SELECT status FROM code_artifact WHERE id=?").get(a.id) as { status: string };
+    const after = db.query("SELECT status FROM act_artifact WHERE id=?").get(a.id) as { status: string };
     expect(after.status).toBe("admitted");
     const ev = db
-      .query("SELECT id FROM events WHERE kind = 'code_artifact_quarantine_overridden'")
+      .query("SELECT id FROM events WHERE kind = 'act_artifact_quarantine_overridden'")
       .all() as Array<{ id: string }>;
     expect(ev.length).toBe(1);
     closeDb();

@@ -68,7 +68,7 @@ describe("acc trust", () => {
     insertEvent(db, "recipe_replay_aborted", { recipe_id: "r2" });
     insertEvent(db, "knowledge_promoted", { knowledge_id: "k1" });
     insertEvent(db, "knowledge_demoted", { knowledge_id: "k2" });
-    insertEvent(db, "code_artifact_promoted", { artifact_id: "art_xyz", summary: "useful" });
+    insertEvent(db, "act_artifact_promoted", { artifact_id: "art_xyz", summary: "useful" });
     insertEvent(db, "task_closure_audited", { closure_residual: 0.4 });
     insertEvent(db, "task_closure_audited", { closure_residual: 0.6 });
 

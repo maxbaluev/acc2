@@ -145,9 +145,9 @@ const GLYPHS: Record<string, string> = {
   candidate_confirmed: "📚✓",
   candidate_contradicted: "📚✗",
   recipe_extracted: "🔁",
-  code_artifact_admitted: "📦+",
-  code_artifact_promoted: "📦⬆",
-  code_artifact_admission_rejected: "📦✗",
+  act_artifact_admitted: "📦+",
+  act_artifact_promoted: "📦⬆",
+  act_artifact_admission_rejected: "📦✗",
   embedding_computed: "Ε",
   external_event_received: "🌐",
   daemon_started: "🟢",
@@ -303,7 +303,7 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       const goalShape = (p.goal_shape as string) ?? "";
       return `confidence=${confidence} goal_shape=${trunc(goalShape, 60)}`;
     }
-    case "code_artifact_admitted": {
+    case "act_artifact_admitted": {
       const runtime = (p.runtime as string) ?? "?";
       const intent = (p.intent as string) ?? (p.slug as string) ?? "";
       return `runtime=${runtime}${intent ? ` intent=${JSON.stringify(trunc(intent, 80))}` : ""}`;

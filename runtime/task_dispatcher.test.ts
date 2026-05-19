@@ -378,7 +378,7 @@ describe("task_dispatcher", () => {
     expect(newEdge).not.toBeUndefined();
   }, 10_000);
 
-  test("Phase H: action_scored triggers credit pipeline → code_artifact_score_updated events fire", async () => {
+  test("Phase H: action_scored triggers credit pipeline → act_artifact_score_updated events fire", async () => {
     const db = openDb(":memory:");
     const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
     const ready = readyTasks(db, directiveId);
@@ -388,12 +388,12 @@ describe("task_dispatcher", () => {
     const result = await dispatchReadyTask(db, task, act);
     expect(result.violations).toEqual([]);
 
-    // Credit pipeline emits at least 2 code_artifact_score_updated events
+    // Credit pipeline emits at least 2 act_artifact_score_updated events
     // (action artifact + verifier artifact). Each one is keyed to the
     // scored event id in its payload.
     const updated = db
       .query(
-        "SELECT COUNT(*) as c FROM events WHERE kind = 'code_artifact_score_updated' AND task_id = ?",
+        "SELECT COUNT(*) as c FROM events WHERE kind = 'act_artifact_score_updated' AND task_id = ?",
       )
       .get(taskId) as { c: number };
     expect(updated.c).toBeGreaterThanOrEqual(2);
@@ -401,7 +401,7 @@ describe("task_dispatcher", () => {
     // The dispatcher routes through distributeCredit — not the legacy
     // applyResidualOutcome path. We assert the credit-pipeline contract:
     // for each action_scored on this task, at least one
-    // code_artifact_score_updated cites the scored event id in its
+    // act_artifact_score_updated cites the scored event id in its
     // payload.
     const scored = db
       .query(
@@ -410,7 +410,7 @@ describe("task_dispatcher", () => {
       .get(taskId) as { id: string };
     const updates = db
       .query(
-        "SELECT payload FROM events WHERE kind = 'code_artifact_score_updated' AND task_id = ?",
+        "SELECT payload FROM events WHERE kind = 'act_artifact_score_updated' AND task_id = ?",
       )
       .all(taskId) as Array<{ payload: string }>;
     const linked = updates.find((r) => {

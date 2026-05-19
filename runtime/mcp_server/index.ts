@@ -151,7 +151,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
   server.addTool({
     name: "substrate.get_artifact",
     description:
-      "Fetch one code_artifact row by id. JSON columns are pre-parsed.",
+      "Fetch one act_artifact row by id. JSON columns are pre-parsed.",
     parameters: IdSchema,
     execute: wrap(handleGetArtifact),
   });
