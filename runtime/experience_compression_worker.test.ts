@@ -116,7 +116,7 @@ describe("experienceCompressionWorkerTick", () => {
     expect(outcome.knowledge_candidates).toBe(1);
 
     const recipe = db
-      .query("SELECT id, payload, context_refs FROM events WHERE kind = 'recipe_extracted' LIMIT 1")
+      .query("SELECT id, payload, context_refs FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true') LIMIT 1")
       .get() as { id: string; payload: string; context_refs: string } | null;
     expect(recipe).not.toBeNull();
     const payload = JSON.parse(recipe!.payload) as Record<string, unknown>;
@@ -125,10 +125,18 @@ describe("experienceCompressionWorkerTick", () => {
     expect(payload.source_action_scored_ids).toEqual([first.scoredId, second.scoredId]);
     expect(Array.isArray(payload.trajectory)).toBe(true);
 
+    // After recipe-family absorption, the worker emits ONE recipe-shape row
+    // (the trajectory cache) AND ONE plain knowledge_candidate row (the claim
+    // pair). Both are knowledge_candidate; recipe_shape.enabled distinguishes
+    // the cache row.
     const knowledgeCount = (db
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate'")
       .get() as { c: number }).c;
-    expect(knowledgeCount).toBe(1);
+    expect(knowledgeCount).toBe(2);
+    const recipeShapeCount = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
+      .get() as { c: number }).c;
+    expect(recipeShapeCount).toBe(1);
 
     const emittedKinds = (db
       .query(
@@ -137,7 +145,7 @@ describe("experienceCompressionWorkerTick", () => {
          ORDER BY kind ASC`,
       )
       .all() as Array<{ kind: string }>).map((row) => row.kind);
-    expect(emittedKinds).toEqual(["knowledge_candidate", "recipe_extracted"]);
+    expect(emittedKinds).toEqual(["knowledge_candidate"]);
     for (const kind of emittedKinds) expect(kind in EVENT_KINDS).toBe(true);
   });
 
@@ -153,7 +161,7 @@ describe("experienceCompressionWorkerTick", () => {
     expect(second.skipped_existing_compression).toBe(1);
 
     const recipeCount = (db
-      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_extracted'")
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .get() as { c: number }).c;
     expect(recipeCount).toBe(1);
   });
@@ -192,7 +200,7 @@ describe("experienceCompressionWorkerTick", () => {
       .query(
         `SELECT COUNT(*) AS c FROM events
          WHERE substrate_origin = 'substrate_auto'
-           AND kind IN ('recipe_extracted', 'knowledge_candidate')`,
+           AND kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')`,
       )
       .get() as { c: number };
     expect(emitted.c).toBe(0);

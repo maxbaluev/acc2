@@ -37,7 +37,8 @@ export const LIVENESS_THRESHOLDS = {
    *  floor. `seedActArtifacts` admits 8 canonical rows; floor at 5
    *  tolerates eviction. */
   actArtifactsSeed: 5,
-  /** `events.kind = 'recipe_extracted'` row count floor. `seedRecipes`
+  /** Recipe-shape knowledge row floor (knowledge_candidate /
+   *  knowledge_promoted carrying recipe_shape.enabled). `seedRecipes`
    *  lays down 2 canonical Tier-0 trajectories; floor at 1 tolerates
    *  one eviction without flipping to FAIL. */
   recipesSeed: 1,
@@ -86,7 +87,14 @@ export const computeLivenessReport = (db: Database): LivenessReport => {
   );
   const recipesSeed = safeCount(
     db,
-    "SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_extracted'",
+    `SELECT COUNT(*) AS c FROM events
+     WHERE kind IN ('knowledge_candidate', 'knowledge_promoted')
+       AND COALESCE(
+         json_extract(payload, '$.recipe_shape.enabled'),
+         json_extract(payload, '$.recipe.enabled'),
+         json_extract(payload, '$.is_recipe'),
+         0
+       ) IN (1, 'true')`,
   );
   const vecEvents = safeCount(db, "SELECT COUNT(*) AS c FROM vec_events");
 

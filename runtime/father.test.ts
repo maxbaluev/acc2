@@ -550,14 +550,14 @@ describe("Father Tier-0 replay preference", () => {
     const template = DIRECTIVE_TEMPLATES[0]!;
 
     emitEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       substrate_origin: "substrate_auto",
       payload: {
         goal_shape: goalShape(template.initial_task_goal ?? template.directive_text),
         topology_signature: "",
         confidence: 0.9,
         trajectory: [],
-      },
+       recipe_shape: { enabled: true } },
     });
 
     const backed = recipeBackedFatherTemplateIds(db);
@@ -570,14 +570,14 @@ describe("Father Tier-0 replay preference", () => {
     const recipeBackedTemplate = DIRECTIVE_TEMPLATES[0]!;
 
     emitEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       substrate_origin: "substrate_auto",
       payload: {
         goal_shape: goalShape(recipeBackedTemplate.initial_task_goal ?? recipeBackedTemplate.directive_text),
         topology_signature: "",
         confidence: 0.9,
         trajectory: [],
-      },
+       recipe_shape: { enabled: true } },
     });
 
     const result = await fatherIterate(db, { now: "2026-05-13T12:00:00.000Z" });

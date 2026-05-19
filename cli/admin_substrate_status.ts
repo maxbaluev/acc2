@@ -124,7 +124,14 @@ export const computeSubstrateStatus = (
 
   const recipeRows = safeCount(
     db,
-    "SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_extracted'",
+    `SELECT COUNT(*) AS c FROM events
+     WHERE kind IN ('knowledge_candidate', 'knowledge_promoted')
+       AND COALESCE(
+         json_extract(payload, '$.recipe_shape.enabled'),
+         json_extract(payload, '$.recipe.enabled'),
+         json_extract(payload, '$.is_recipe'),
+         0
+       ) IN (1, 'true')`,
   );
   const knowledgePromoted = safeCount(
     db,

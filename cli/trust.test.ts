@@ -62,10 +62,13 @@ describe("acc trust", () => {
   test("seeded recipe + closure data yields non-zero counts", async () => {
     const db = openDb(dbPath);
     insertEvent(db, "owner_profile_recorded", { autonomy_score: 0.35 });
-    insertEvent(db, "recipe_extracted", { goal_shape: "g1" });
-    insertEvent(db, "recipe_extracted", { goal_shape: "g2" });
+    // Recipe-shape knowledge rows replace the recipe_extracted event family
+    // (universality proposal A12CR1QCDN0SS51CM95K39T45M); recipe_shape.enabled
+    // makes them visible to the recipe-shape filter the trust metric counts.
+    insertEvent(db, "knowledge_candidate", { goal_shape: "g1", recipe_shape: { enabled: true } });
+    insertEvent(db, "knowledge_candidate", { goal_shape: "g2", recipe_shape: { enabled: true } });
     insertEvent(db, "task_committed", { recipe_id: "r1", recipe_replayed: true });
-    insertEvent(db, "recipe_replay_aborted", { recipe_id: "r2" });
+    insertEvent(db, "action_scored", { recipe_id: "r2", replay_aborted: true });
     insertEvent(db, "knowledge_promoted", { knowledge_id: "k1" });
     insertEvent(db, "knowledge_demoted", { knowledge_id: "k2" });
     insertEvent(db, "act_artifact_promoted", { artifact_id: "art_xyz", summary: "useful" });
@@ -96,7 +99,7 @@ describe("acc trust", () => {
   test("--json prints parseable JSON with expected keys", async () => {
     const db = openDb(dbPath);
     insertEvent(db, "owner_profile_recorded", { autonomy_score: 0.5 });
-    insertEvent(db, "recipe_extracted", {});
+    insertEvent(db, "knowledge_candidate", { recipe_shape: { enabled: true } });
 
     const cap = captureStdout();
     const code = await runTrust(["--json"]);

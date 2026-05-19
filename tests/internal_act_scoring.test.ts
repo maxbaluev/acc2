@@ -550,7 +550,7 @@ describe("F6 extension — recipe replay selection (decision 13)", () => {
     // Simulate the dispatcher's recipe_invoked emit so the source event
     // exists on the ledger before recordInternalAct is called.
     const invoked = emitEvent(db, {
-      kind: "recipe_invoked",
+      kind: "dispatch_decided",
       substrate_origin: "recipe",
       directive_id: directiveId,
       task_id: taskId,
@@ -560,7 +560,7 @@ describe("F6 extension — recipe replay selection (decision 13)", () => {
         goal_shape: "count_test_files::n1",
         topology_signature: "topo_test::1",
         confidence: 0.9,
-      },
+       recipe_shape: { enabled: true } },
     });
     recordInternalAct(db, {
       intent: "select recipe for replay",

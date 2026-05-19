@@ -294,7 +294,7 @@ describe("task_scheduler", () => {
     const directiveId = newId();
     const taskId = newId();
     emitEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       directive_id: directiveId,
       payload: { confidence: 0.95, goal_shape: "audit-shape-x" },
     });
@@ -567,7 +567,7 @@ describe("task_scheduler", () => {
     const directiveId = newId();
     const taskId = newId();
     emitEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       directive_id: directiveId,
       payload: { confidence: 0.9, goal_shape: "phase-j-recipe-shape" },
     });

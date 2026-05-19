@@ -390,7 +390,7 @@ describe("checkSeedRecipes (final substrate-content check)", () => {
       }),
     }));
     expect(c.verdict).toBe("ok");
-    expect(c.detail).toContain("recipe_extracted");
+    expect(c.detail).toContain("recipe-shape knowledge");
   });
   test("fail when no recipes seeded", () => {
     const c = checkSeedRecipes(makeEnv({

@@ -257,17 +257,19 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     const summary = extractRecipeCandidates(db);
     expect(summary.extracted).toBe(1);
 
+    // Recipe-shape cache row (formerly recipe_extracted) is now a
+    // knowledge_candidate carrying recipe_shape.enabled.
     const recipes = db
-      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .query("SELECT payload FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .all() as Array<{ payload: string }>;
     expect(recipes).toHaveLength(1);
     const payload = JSON.parse(recipes[0]!.payload) as Record<string, unknown>;
     expect(payload.goal_shape).toContain("count_todos");
     expect(payload.success_count).toBe(3);
 
-    // F5: a paired recipe_promoted row carries the posterior evidence.
+    // Paired promoted row (formerly recipe_promoted) carries the posterior evidence.
     const promoted = db
-      .query("SELECT payload FROM events WHERE kind = 'recipe_promoted'")
+      .query("SELECT payload FROM events WHERE kind = 'knowledge_promoted' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .all() as Array<{ payload: string }>;
     expect(promoted.length).toBe(1);
     const promotedPayload = JSON.parse(promoted[0]!.payload) as Record<string, unknown>;
@@ -296,7 +298,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     expect(summary.extracted).toBe(0);
     expect(summary.deferred).toBe(1);
     const deferredRows = db
-      .query("SELECT payload FROM events WHERE kind = 'recipe_promotion_deferred'")
+      .query("SELECT payload FROM events WHERE kind = 'knowledge_candidate' AND json_extract(payload, '$.recipe_shape.promotion_state') = 'deferred'")
       .all() as Array<{ payload: string }>;
     expect(deferredRows.length).toBe(1);
     const d = JSON.parse(deferredRows[0]!.payload) as Record<string, unknown>;
@@ -319,7 +321,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     const second = extractRecipeCandidates(db);
     expect(second.extracted).toBe(0);
     const c = (db
-      .query("SELECT COUNT(*) AS c FROM events WHERE kind='recipe_extracted'")
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .get() as { c: number }).c;
     expect(c).toBe(1);
   });
@@ -345,7 +347,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     expect(summary.extracted).toBe(1);
 
     const recipes = db
-      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .query("SELECT payload FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .all() as Array<{ payload: string }>;
     expect(recipes.length).toBe(1);
     const p = JSON.parse(recipes[0]!.payload) as Record<string, unknown>;
@@ -399,7 +401,7 @@ describe("extractRecipeFromCommit (inline post-commit path)", () => {
     expect(summary.recipe_id).not.toBeNull();
 
     const recipes = db
-      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .query("SELECT payload FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .all() as Array<{ payload: string }>;
     expect(recipes.length).toBe(1);
     const p = JSON.parse(recipes[0]!.payload) as Record<string, unknown>;
@@ -438,7 +440,7 @@ describe("extractRecipeFromCommit (inline post-commit path)", () => {
     // exactly 1 row in this 2-call scenario (seed + zero bumps because
     // the test sets up one task that doesn't trigger bump path).
     const count = (db
-      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_extracted'")
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .get() as { c: number }).c;
     expect(count).toBe(1);
   });
@@ -459,7 +461,7 @@ describe("extractRecipeFromCommit (inline post-commit path)", () => {
     const summary = extractRecipeCandidates(db);
     expect(summary.extracted).toBe(0);
     const count = (db
-      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_extracted'")
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .get() as { c: number }).c;
     expect(count).toBe(1);
   });
@@ -500,7 +502,7 @@ describe("task_dispatcher inline recipe seeding (Task 5)", () => {
       expect(committed.c).toBe(1);
 
       const recipeRows = db
-        .query("SELECT payload FROM events WHERE kind = 'recipe_extracted' AND directive_id = ?")
+        .query("SELECT payload FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true') AND directive_id = ?")
         .all(directiveId) as Array<{ payload: string }>;
       expect(recipeRows.length).toBe(1);
       const p = JSON.parse(recipeRows[0]!.payload) as Record<string, unknown>;

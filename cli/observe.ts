@@ -144,7 +144,9 @@ const GLYPHS: Record<string, string> = {
   knowledge_promoted: "📚+",
   candidate_confirmed: "📚✓",
   candidate_contradicted: "📚✗",
-  recipe_extracted: "🔁",
+  // recipe-shape knowledge rows render through the knowledge_candidate /
+  // knowledge_promoted icons; recipe_shape.enabled distinguishes them in
+  // the detailed render case below.
   act_artifact_admitted: "📦+",
   act_artifact_promoted: "📦⬆",
   act_artifact_admission_rejected: "📦✗",
@@ -298,11 +300,9 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       const ownerTag = learnedFromOwner ? ` ← owner: ${JSON.stringify(trunc(learnedFromOwner, 80))}` : "";
       return `${claim ? `claim=${JSON.stringify(trunc(claim, 54))}` : ""}${score !== undefined ? ` score=${score}` : ""}${ownerTag}`.trim();
     }
-    case "recipe_extracted": {
-      const confidence = p.confidence;
-      const goalShape = (p.goal_shape as string) ?? "";
-      return `confidence=${confidence} goal_shape=${trunc(goalShape, 60)}`;
-    }
+    // recipe_extracted absorbed into knowledge_candidate / knowledge_promoted
+    // carrying payload.recipe_shape.enabled; render is handled inline by
+    // the knowledge_* cases above.
     case "act_artifact_admitted": {
       const runtime = (p.runtime as string) ?? "?";
       const intent = (p.intent as string) ?? (p.slug as string) ?? "";

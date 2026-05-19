@@ -1173,7 +1173,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const compressionTick = supervisedTick(db, "experience_compression", compressionTickMs, async () => {
       experienceCompressionWorkerTick(db);
     });
-    registerReactiveWorker("experience_compression", compressionTickMs, ["task_closure_audited", "lesson_extracted", "task_committed", "action_scored", "recipe_extracted", "applied_change_committed"], compressionTick, { minReactiveGapMs: compressionTickMs });
+    registerReactiveWorker("experience_compression", compressionTickMs, ["task_closure_audited", "lesson_extracted", "task_committed", "action_scored", "knowledge_candidate", "knowledge_promoted", "applied_change_committed"], compressionTick, { minReactiveGapMs: compressionTickMs });
     // experience_compression is activation-driven; activationDisposers are cleared on shutdown.
   }
 

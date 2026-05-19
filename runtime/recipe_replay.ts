@@ -81,13 +81,22 @@ export type RecipeTrajectoryStep = {
 };
 
 export type RecipeMatch = {
-  /** The recipe_extracted event id. */
+  /** The knowledge_candidate / knowledge_promoted event id carrying recipe_shape. */
   recipe_id: string;
+  /** Alias of recipe_id naming the new substrate (knowledge event) — held as a
+   *  field on the match for callers that prefer the explicit name. */
+  recipe_knowledge_event_id: string;
+  /** Backwards-compat alias retained for callers still on the previous shape. */
   recipe_extracted_event_id: string;
+  /** Knowledge-shape name preferred by the new substrate vocabulary. */
+  knowledge_id: string;
   goal_shape: string;
   topology_signature: string;
   confidence: number;
   trajectory: RecipeTrajectoryStep[];
+  /** Cited act_artifact handles harvested from the trajectory steps; surfaces
+   *  for credit attribution and substrate retrieval. */
+  cited_act_artifact_ids: string[];
 };
 
 /** Compute a topology signature for a task. Today this is a degenerate "single
@@ -174,13 +183,21 @@ const tryMatchCandidate = (
   if (candidate.confidence < minConfidence) return null;
   if (candidate.confidence < RECIPE_AUTO_ARCHIVE_FLOOR) return null;
 
+  const cited: string[] = [];
+  for (const step of candidate.trajectory) {
+    if (step.artifact_id) cited.push(step.artifact_id);
+    if (step.verifier_artifact_id) cited.push(step.verifier_artifact_id);
+  }
   return {
     recipe_id: candidate.id,
+    recipe_knowledge_event_id: candidate.id,
     recipe_extracted_event_id: candidate.id,
+    knowledge_id: candidate.id,
     goal_shape: candidate.goal_shape,
     topology_signature: candidate.topology_signature,
     confidence: candidate.confidence,
     trajectory: candidate.trajectory,
+    cited_act_artifact_ids: Array.from(new Set(cited)),
   };
 };
 
@@ -335,15 +352,31 @@ export const replayRecipe = async (
     (s) => s.step_kind === "action_predicted" && !!s.artifact_id,
   );
   if (actionSteps.length === 0) {
+    // recipe_replay_aborted absorbed into action_scored (universality proposal
+    // A12CR1QCDN0SS51CM95K39T45M). residual=1 + replay_aborted=true on the
+    // payload renders the abort on the same scoring substrate.
     const ev = emitEvent(db, {
-      kind: "recipe_replay_aborted",
+      kind: "action_scored",
       substrate_origin: "recipe",
       directive_id: task.directive_id,
       task_id: task.id,
+      action_artifact_id: "recipe_replay_selector_v1",
+      verifier_artifact_id: "reusable_trajectory_replay_verifier",
+      predicted_residual: 1 - match.confidence,
+      residual: 1,
+      outcome: "failed",
+      failure_kind: "trajectory_missing_action_step",
       payload: {
+        recipe_replayed: true,
+        replay_aborted: true,
         recipe_id: match.recipe_id,
+        knowledge_id: match.recipe_id,
+        reusable_trajectory_knowledge_id: match.recipe_id,
+        abort_reason: "trajectory_missing_action_step",
         reason: "trajectory_missing_action_step",
+        breakdown: { replay_abort: 1, trajectory_completeness: 1 },
       } as JsonValue,
+      context_refs: [match.recipe_id],
     });
     emitted.push(ev.id);
     updateRecipeConfidence(db, match.recipe_id, false);
@@ -413,17 +446,29 @@ export const replayRecipe = async (
     const actionObs = await runArtifact(db, actionStep.artifact_id, actionInputs);
     if (!actionObs.ok) {
       const ev = emitEvent(db, {
-        kind: "recipe_replay_aborted",
+        kind: "action_scored",
         substrate_origin: "recipe",
         directive_id: task.directive_id,
         task_id: task.id,
+        action_artifact_id: actionStep.artifact_id,
+        verifier_artifact_id: actionStep.verifier_artifact_id ?? undefined,
+        predicted_residual: actionStep.predicted_residual ?? 0,
+        residual: 1,
+        outcome: "failed",
         failure_kind: "artifact_runtime_error",
         payload: {
+          recipe_replayed: true,
+          replay_aborted: true,
           recipe_id: match.recipe_id,
+          knowledge_id: match.recipe_id,
+          reusable_trajectory_knowledge_id: match.recipe_id,
           step_index: stepIdx,
           step_count: actionSteps.length,
           reason: `action_runtime_failed:${actionObs.error ?? "unknown"}`,
+          abort_reason: `action_runtime_failed:${actionObs.error ?? "unknown"}`,
+          breakdown: { replay_abort: 1, runtime_error: 1 },
         } as JsonValue,
+        context_refs: [match.recipe_id],
       });
       emitted.push(ev.id);
       updateRecipeConfidence(db, match.recipe_id, false);
@@ -516,20 +561,31 @@ export const replayRecipe = async (
     // first to fail).
     if (residual >= RECIPE_VERIFIER_ABORT_THRESHOLD) {
       const ev = emitEvent(db, {
-        kind: "recipe_replay_aborted",
+        kind: "action_scored",
         substrate_origin: "recipe",
         directive_id: task.directive_id,
         task_id: task.id,
+        action_artifact_id: actionStep.artifact_id,
+        verifier_artifact_id: actionStep.verifier_artifact_id ?? undefined,
+        predicted_residual: actionStep.predicted_residual ?? 0,
+        residual,
+        outcome: "failed",
         failure_kind: "verification_high_residual",
         payload: {
+          recipe_replayed: true,
+          replay_aborted: true,
           recipe_id: match.recipe_id,
+          knowledge_id: match.recipe_id,
+          reusable_trajectory_knowledge_id: match.recipe_id,
           step_index: stepIdx,
           step_count: actionSteps.length,
-          residual,
           worst_residual: residuals.reduce((a, b) => Math.max(a, b), 0),
           threshold: RECIPE_VERIFIER_ABORT_THRESHOLD,
           reason: "verifier_residual_above_threshold",
+          abort_reason: "verifier_residual_above_threshold",
+          breakdown: { replay_abort: 1, verifier_residual: residual },
         } as JsonValue,
+        context_refs: [match.recipe_id],
       });
       emitted.push(ev.id);
       updateRecipeConfidence(db, match.recipe_id, false);
@@ -594,13 +650,19 @@ export const updateRecipeConfidence = (
   const goalShape = (seedPayload.goal_shape as string | undefined) ?? "";
   const topology = (seedPayload.topology_signature as string | undefined) ?? "";
 
-  // Read the LATEST recipe_extracted row for this (goal_shape, topology)
+  // Read the LATEST recipe-shaped knowledge row for this (goal_shape, topology)
   // pair — that's where the current confidence lives. Successive updates
   // then compound on the previous result.
   const latest = db
     .query(
       `SELECT payload FROM events
-       WHERE kind = 'recipe_extracted'
+       WHERE kind IN ('knowledge_candidate', 'knowledge_promoted')
+         AND COALESCE(
+           json_extract(payload, '$.recipe_shape.enabled'),
+           json_extract(payload, '$.recipe.enabled'),
+           json_extract(payload, '$.is_recipe'),
+           0
+         ) IN (1, 'true')
        ORDER BY ts DESC, rowid DESC`,
     )
     .all() as Array<{ payload: string }>;
@@ -620,18 +682,41 @@ export const updateRecipeConfidence = (
   const delta = success ? 0.05 : -0.10;
   const newConfidence = Math.max(0.0, Math.min(RECIPE_MAX_CONFIDENCE, currentConfidence + delta));
 
+  // Append-only confidence-update row in the same recipe-shape knowledge
+  // substrate. The matcher reads the LATEST row for the (goal_shape, topology)
+  // key, so this row becomes the new confidence-of-record.
+  const prevRecipeShape =
+    (seedPayload.recipe_shape && typeof seedPayload.recipe_shape === "object")
+      ? (seedPayload.recipe_shape as Record<string, unknown>)
+      : seedPayload;
   emitEvent(db, {
-    kind: "recipe_extracted",
+    kind: "knowledge_candidate",
     substrate_origin: "substrate_auto",
     directive_id: seed.directive_id,
     task_id: seed.task_id,
     loop_id: seed.loop_id,
     payload: {
+      claim: `Reusable trajectory ${recipeId} replay confidence updated to ${newConfidence.toFixed(2)}.`,
+      evidence: [success ? "replay succeeded" : "replay failed", `previous_confidence=${currentConfidence}`],
+      implications: ["Replay confidence remains ordinary promotable knowledge rather than a recipe event family."],
+      applies_to: ["reusable_trajectory", goalShape, topology],
+      confidence_estimate: newConfidence,
+      // Top-level mirrors for legacy readers.
       ...seedPayload,
       confidence: newConfidence,
       previous_confidence: currentConfidence,
       confidence_update: success ? "success" : "failure",
       derived_from_recipe_id: recipeId,
+      derived_from_knowledge_id: recipeId,
+      recipe_shape: {
+        ...prevRecipeShape,
+        enabled: true,
+        confidence: newConfidence,
+        previous_confidence: currentConfidence,
+        confidence_update: success ? "success" : "failure",
+        derived_from_recipe_id: recipeId,
+        derived_from_knowledge_id: recipeId,
+      },
     } as JsonValue,
     context_refs: [recipeId],
   });

@@ -1414,9 +1414,12 @@ CREATE VIEW IF NOT EXISTS promoted_knowledge_view AS
 `;
 
 // recipe_registry_view — operator-facing projection of the latest
-// recipe_extracted row per (goal_shape, topology_signature). Recipe updates are
-// append-only recipe_extracted rows, so callers need the freshest row for each
-// composite recipe key rather than a raw history scan.
+// recipe-shape knowledge row per (goal_shape, topology_signature). The recipe
+// event family was absorbed into knowledge_* under universality proposal
+// A12CR1QCDN0SS51CM95K39T45M; recipe_shape.enabled distinguishes recipe-shape
+// knowledge rows from regular knowledge rows. Updates are append-only
+// knowledge_candidate / knowledge_promoted rows, so callers need the freshest
+// row for each composite recipe key rather than a raw history scan.
 // Recipe payloads should grow toward explicit preconditions, effects, replay_feedback,
 // and validation fields so Tier-0 replay learns skill boundaries instead of matching
 // only on goal_shape × topology_signature (per SCALAR skill-library SOTA, brain
@@ -1443,7 +1446,13 @@ CREATE VIEW IF NOT EXISTS recipe_registry_view AS
       e.payload                                                      AS payload,
       e.context_refs                                                 AS context_refs
     FROM events e
-    WHERE e.kind = 'recipe_extracted'
+    WHERE e.kind IN ('knowledge_candidate', 'knowledge_promoted')
+      AND COALESCE(
+        json_extract(e.payload, '$.recipe_shape.enabled'),
+        json_extract(e.payload, '$.recipe.enabled'),
+        json_extract(e.payload, '$.is_recipe'),
+        0
+      ) IN (1, 'true')
   )
   SELECT
     recipe_id,
@@ -1477,8 +1486,10 @@ CREATE VIEW IF NOT EXISTS recipe_registry_view AS
 // freshest row per key, this view picks the HIGHEST-CONFIDENCE row per key
 // (ties broken by ts DESC, rowid DESC). It exists so runtime/recipe_replay.ts
 // can do an O(1) keyed lookup at dispatch time instead of a full linear scan
-// over recipe_extracted history. Closes the fast-axis gap from brain audit
-// QQEHAW97GS0AX7TEQ717Y3P174 (2026-05-15).
+// over recipe-shape knowledge history. Closes the fast-axis gap from brain
+// audit QQEHAW97GS0AX7TEQ717Y3P174 (2026-05-15). After universality proposal
+// A12CR1QCDN0SS51CM95K39T45M the source rows are knowledge_candidate /
+// knowledge_promoted carrying recipe_shape.enabled.
 const VIEW_RECIPES_LATEST = `
 CREATE VIEW IF NOT EXISTS recipes_latest_view AS
   WITH recipes AS (
@@ -1491,7 +1502,13 @@ CREATE VIEW IF NOT EXISTS recipes_latest_view AS
       json_extract(e.payload, '$.topology_signature')                AS topology_signature,
       e.payload                                                      AS payload
     FROM events e
-    WHERE e.kind = 'recipe_extracted'
+    WHERE e.kind IN ('knowledge_candidate', 'knowledge_promoted')
+      AND COALESCE(
+        json_extract(e.payload, '$.recipe_shape.enabled'),
+        json_extract(e.payload, '$.recipe.enabled'),
+        json_extract(e.payload, '$.is_recipe'),
+        0
+      ) IN (1, 'true')
   )
   SELECT
     id,
@@ -2434,12 +2451,13 @@ CREATE VIEW IF NOT EXISTS applied_lesson_effectiveness_view AS
     FROM committed c
     JOIN events r
       ON r.ts > c.committed_at
-     AND r.kind IN ('recipe_invoked', 'action_predicted', 'action_scored', 'task_committed')
+     AND r.kind IN ('dispatch_decided', 'action_predicted', 'action_scored', 'task_committed')
      AND (
        json_extract(r.payload, '$.recipe_replayed') = 1
        OR json_extract(r.payload, '$.recipe_replayed') = 'true'
        OR json_extract(r.payload, '$.route') = 'substrate_replay'
-       OR r.kind = 'recipe_invoked'
+       OR json_extract(r.payload, '$.reusable_trajectory_replay_selected') = 1
+       OR json_extract(r.payload, '$.reusable_trajectory_replay_selected') = 'true'
      )
      AND (
        json_extract(r.payload, '$.source_event_id') = c.source_event_id
@@ -3611,7 +3629,7 @@ CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
       WHEN e.kind = 'daemon_hotreload_failed' THEN 'high'
       WHEN e.kind IN ('task_failed','bridge_failed','dispatcher_violation','owner_input_required','hidl_action_required','brain_failed','daemon_hotreload_rejected') THEN 'critical'
       WHEN e.kind IN ('task_committed','directive_opened','directive_amended','contract_amendment_proposed','pre_apply_adjudication_recorded','owner_observed_outcome_recorded','applied_change_committed','applied_change_failed','task_closure_audited','owner_decision_recorded') THEN 'high'
-      WHEN e.kind IN ('knowledge_candidate','lesson_extracted','claude_reasoning_recorded','dispatch_decided','act_tuple_recorded','runtime_self_diagnostic_recorded','owner_insight_candidate','intent_classified','brain_message_emitted','knowledge_promoted','recipe_promoted','act_artifact_promoted', 'code_artifact_promoted') THEN 'medium'
+      WHEN e.kind IN ('knowledge_candidate','lesson_extracted','claude_reasoning_recorded','dispatch_decided','act_tuple_recorded','runtime_self_diagnostic_recorded','owner_insight_candidate','intent_classified','brain_message_emitted','knowledge_promoted','act_artifact_promoted', 'code_artifact_promoted') THEN 'medium'
       ELSE 'low'
     END AS importance,
     -- One-line human-readable summary per kind. The CASE order matters:
@@ -5559,7 +5577,8 @@ export const promotedKnowledge = (
   }));
 };
 
-/** Latest recipe_extracted row per recipe key, ordered newest first. */
+/** Latest recipe-shape knowledge row (knowledge_candidate / knowledge_promoted
+ *  carrying recipe_shape.enabled) per recipe key, ordered newest first. */
 export const recipeRegistry = (db: Database, limit?: number): RecipeRegistryRow[] => {
   const limitSql = limit && limit > 0 ? `LIMIT ${Math.floor(limit)}` : "";
   const rows = db
@@ -5586,12 +5605,13 @@ export const recipeRegistry = (db: Database, limit?: number): RecipeRegistryRow[
   }));
 };
 
-/** Highest-confidence recipe row per (goal_shape, topology_signature) pair.
- *  Materialized index for runtime/recipe_replay.ts: replaces the dispatch-time
- *  linear scan over recipe_extracted history with one keyed projection.
- *  Ties on confidence are broken by ts DESC then rowid DESC (most recent
- *  wins). Rows whose goal_shape or topology_signature is NULL are dropped —
- *  the matcher can't key off absent fields. Closes brain audit
+/** Highest-confidence recipe-shape knowledge row per
+ *  (goal_shape, topology_signature) pair. Materialized index for
+ *  runtime/recipe_replay.ts: replaces the dispatch-time linear scan over
+ *  recipe-shape knowledge history with one keyed projection. Ties on
+ *  confidence are broken by ts DESC then rowid DESC (most recent wins).
+ *  Rows whose goal_shape or topology_signature is NULL are dropped — the
+ *  matcher can't key off absent fields. Closes brain audit
  *  QQEHAW97GS0AX7TEQ717Y3P174 (2026-05-15). */
 export const recipesLatestView = (db: Database): RecipesLatestRow[] => {
   const rows = db

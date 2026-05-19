@@ -308,45 +308,62 @@ export const dispatchReadyTask = async (
       return { dispatch_id: dispatchId, task_id: task.id, events: [], violations: [] };
     }
 
-    const recipeInvokedEvent = emitEvent(db, {
-      kind: "recipe_invoked",
-      substrate_origin: "recipe",
+    // Reusable trajectory selection is signaled inline by stamping the
+    // already-emitted dispatch_decided row's payload columns (route=substrate_replay
+    // + reusable_trajectory_replay_selected=true + routing_axes/knowledge_id).
+    // Tests and observers check dispatch_decided where route='substrate_replay'.
+    // The recipe_invoked event family was absorbed under universality proposal
+    // A12CR1QCDN0SS51CM95K39T45M; replay outcomes flow through the standard
+    // action_scored / task_committed substrate. Emit one action_predicted row
+    // citing the selector + verifier artifact handles so the credit chain has
+    // a per-selection anchor row.
+    const trajectorySelectionEvent = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "substrate_auto",
       directive_id: task.directive_id,
       task_id: task.id,
+      action_artifact_id: "recipe_replay_selector_v1",
+      verifier_artifact_id: "replay_vs_fresh_residual_delta",
+      predicted_residual: 1 - match.confidence,
       payload: {
         dispatch_id: dispatchId,
+        reusable_trajectory_replay_selected: true,
+        reusable_trajectory_knowledge_id: match.recipe_id,
+        knowledge_id: match.recipe_id,
         recipe_id: match.recipe_id,
         goal_shape: match.goal_shape,
         topology_signature: match.topology_signature,
         confidence: match.confidence,
       } as JsonValue,
+      context_refs: [match.recipe_id],
     });
 
     // F6 extension — universal internal Act scoring. The substrate
-    // just selected this matched recipe for replay instead of routing
-    // to opencode_brain. The selection itself is the decision; the
-    // replay outcome (recipe_replayed vs recipe_replay_aborted) and
-    // its residual_delta vs a fresh dispatch close the credit chain.
-    // Verifier is replay_vs_fresh_residual_delta — a downstream
-    // process scores whether the recipe saved a brain call.
-    // predicted_residual = 1 - match.confidence so a high-confidence
-    // recipe predicts near-zero residual at selection time.
+    // just selected this matched reusable trajectory for replay instead of
+    // routing to opencode_brain. The selection itself is the decision; the
+    // replay outcome is scored on the standard action_scored / task_committed
+    // substrate. Verifier is replay_vs_fresh_residual_delta — a downstream
+    // process scores whether the trajectory saved a brain call.
     recordInternalAct(db, {
-      intent: "select recipe for replay",
+      intent: "select reusable trajectory knowledge for replay",
       actionHandle: "recipe_replay_selector_v1",
       verifierHandle: "replay_vs_fresh_residual_delta",
       verifierKind: "deterministic_code",
       predictedResidual: 1 - match.confidence,
-      reasoningSummary: `matched recipe ${match.recipe_id} goal_shape=${match.goal_shape} confidence=${match.confidence.toFixed(2)}`,
-      actionSummary: `recipe_invoked dispatch_id=${dispatchId} recipe_id=${match.recipe_id}`,
+      reasoningSummary: `matched reusable trajectory ${match.recipe_id} goal_shape=${match.goal_shape} confidence=${match.confidence.toFixed(2)}`,
+      actionSummary: `reusable_trajectory_replay_selected dispatch_id=${dispatchId} knowledge_id=${match.recipe_id}`,
       effectSummary: `dispatcher will replay the cached trajectory; no brain call`,
       directiveId: task.directive_id,
       taskId: task.id,
-      sourceEventId: recipeInvokedEvent.id,
+      sourceEventId: trajectorySelectionEvent.id,
       sourceActId: "recipe_replay_selector_v1:" + dispatchId + ":" + match.recipe_id,
-      citedArtifactIds: [match.recipe_id],
+      citedArtifactIds: match.cited_act_artifact_ids.length > 0
+        ? match.cited_act_artifact_ids
+        : [match.recipe_id],
       extra: {
         recipe_id: match.recipe_id,
+        knowledge_id: match.recipe_id,
+        reusable_trajectory_knowledge_id: match.recipe_id,
         goal_shape: match.goal_shape,
         topology_signature: match.topology_signature,
         confidence: match.confidence,
@@ -413,7 +430,7 @@ export const dispatchReadyTask = async (
       payload: {
         dispatch_id: dispatchId,
         route: "opencode_brain",
-        reason: `recipe_replay_aborted:${outcome.abort_reason ?? "unknown"}`,
+        reason: `substrate_replay_high_residual:${outcome.abort_reason ?? "unknown"}`,
         previous_route: "substrate_replay",
       } as JsonValue,
     });

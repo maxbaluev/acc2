@@ -511,7 +511,7 @@ describe("seedRecipes", () => {
     expect(summary.count).toBe(seedRecipeGoalTexts().length);
 
     const rows = db
-      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .query("SELECT payload FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .all() as Array<{ payload: string }>;
     expect(rows.length).toBe(summary.count);
 
@@ -531,7 +531,7 @@ describe("seedRecipes", () => {
     const second = seedRecipes(db);
     expect(second.count).toBe(0);
     const total = (db
-      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_extracted'")
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .get() as { c: number }).c;
     expect(total).toBe(first.count);
   });
@@ -542,7 +542,7 @@ describe("seedRecipes", () => {
     seedRecipes(db);
     const validIds = new Set(seedArtifactIds());
     const rows = db
-      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .query("SELECT payload FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .all() as Array<{ payload: string }>;
     for (const row of rows) {
       const payload = JSON.parse(row.payload) as {
@@ -560,7 +560,7 @@ describe("seedRecipes", () => {
     seedActArtifacts(db);
     seedRecipes(db);
     const rows = db
-      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .query("SELECT payload FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .all() as Array<{ payload: string }>;
     for (const row of rows) {
       const payload = JSON.parse(row.payload) as { confidence: number; seeded: boolean };
@@ -585,7 +585,7 @@ describe("seedRecipes", () => {
     expect(artifactCount).toBeGreaterThan(0);
 
     const recipeRows = db
-      .query("SELECT payload FROM events WHERE kind = 'recipe_extracted'")
+      .query("SELECT payload FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .all() as Array<{ payload: string }>;
     expect(recipeRows.length).toBe(recipeSummary.count);
     // Every recipe row's trajectory must point at a real artifact id.

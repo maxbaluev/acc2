@@ -71,11 +71,36 @@ export const gatherTrustMetrics = (db: Database): TrustMetrics => {
     else if (r.status === "failed") amendments_7d.failed += num(r.c);
     else if (r.status === "refused") amendments_7d.refused += num(r.c);
   }
+  // recipe_extracted / recipe_replay_aborted were absorbed into the
+  // knowledge_* + action_scored substrate (universality proposal
+  // A12CR1QCDN0SS51CM95K39T45M). Recipe-shape knowledge rows carry
+  // payload.recipe_shape.enabled; replay aborts surface as action_scored rows
+  // tagged with replay_aborted=true.
+  const recipesExtracted = num(
+    (db.query(
+      `SELECT COUNT(*) AS c FROM events
+       WHERE kind IN ('knowledge_candidate', 'knowledge_promoted')
+         AND COALESCE(
+           json_extract(payload, '$.recipe_shape.enabled'),
+           json_extract(payload, '$.recipe.enabled'),
+           json_extract(payload, '$.is_recipe'),
+           0
+         ) IN (1, 'true')`,
+    ).get() as { c: number })?.c,
+  );
+  const recipesReplayAborted = num(
+    (db.query(
+      `SELECT COUNT(*) AS c FROM events
+       WHERE kind = 'action_scored'
+         AND (json_extract(payload, '$.replay_aborted') = 1
+              OR json_extract(payload, '$.replay_aborted') = 'true')`,
+    ).get() as { c: number })?.c,
+  );
   const base = {
     autonomy_score,
-    recipes_extracted: countKind(db, "recipe_extracted"),
+    recipes_extracted: recipesExtracted,
     recipes_replayed_success: recipeSuccess(db),
-    recipes_replayed_aborted: countKind(db, "recipe_replay_aborted"),
+    recipes_replayed_aborted: recipesReplayAborted,
     knowledge_promoted_7d: countKind(db, "knowledge_promoted", true),
     knowledge_demoted_7d: countKind(db, "knowledge_demoted", true),
     artifacts_promoted_recent, closure_residual_7d, amendments_7d,

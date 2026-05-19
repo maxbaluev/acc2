@@ -130,7 +130,7 @@ type PromotionResultKind =
   | "knowledge_promoted"
   | "knowledge_demoted"
   | "act_artifact_promoted"
-  | "recipe_extracted"
+  | "knowledge_candidate"
   | "owner_profile_recorded";
 
 const emitPromotionSpine = (
@@ -1236,10 +1236,21 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
   }
 
   // Already-extracted shapes — dedup by composite key (goal_shape, topology).
+  // Recipe-shaped knowledge rows replaced the recipe_extracted event family
+  // (universality proposal A12CR1QCDN0SS51CM95K39T45M). The payload still
+  // carries goal_shape / topology_signature at top level for internal readers;
+  // recipe_shape.enabled distinguishes recipe-shaped knowledge from regular
+  // knowledge rows.
   const alreadyExtracted = new Set(
     (db
       .query(
-        `SELECT payload FROM events WHERE kind = 'recipe_extracted'`,
+        `SELECT payload FROM events WHERE kind IN ('knowledge_candidate', 'knowledge_promoted')
+           AND COALESCE(
+             json_extract(payload, '$.recipe_shape.enabled'),
+             json_extract(payload, '$.recipe.enabled'),
+             json_extract(payload, '$.is_recipe'),
+             0
+           ) IN (1, 'true')`,
       )
       .all() as Array<{ payload: string }>)
       .map((r) => {
@@ -1305,14 +1316,23 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
       if (!verdict.promote) {
         // Record the deferral so operators can audit the gate decision; the
         // candidate stays unpromoted until later evidence shifts the
-        // posterior. This is the diagnostic counterpart to recipe_promoted.
+        // posterior. Recipe-shape knowledge rows replaced recipe_promotion_deferred
+        // (universality proposal A12CR1QCDN0SS51CM95K39T45M); promotion_state
+        // tracks the deferral verdict on the same substrate.
         insertEvent(db, {
-          kind: "recipe_promotion_deferred",
+          kind: "knowledge_candidate",
           substrate_origin: "substrate_auto",
           directive_id: anchor.directive_id as string,
           task_id: anchor.task_id as string,
           loop_id: anchor.loop_id as string,
           payload: {
+            claim: `Reusable trajectory candidate for ${goalClass} lacks enough posterior support for promotion.`,
+            evidence: [`confidence=${verdict.confidence}`, `threshold=${verdict.threshold}`, verdict.reason],
+            implications: ["Keep the trajectory retrievable as candidate knowledge, but do not route it as promoted reusable knowledge yet."],
+            applies_to: ["reusable_trajectory", goalClass],
+            confidence_estimate: verdict.confidence,
+            // Top-level mirrors for legacy readers (kept until all readers
+            // switch to recipe_shape.* projections).
             goal_shape: goalShape,
             topology_signature: topology,
             goal_class: goalClass,
@@ -1326,6 +1346,24 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
             reason: verdict.reason,
             directive_ids: directiveIds,
             window_days: 30,
+            recipe_shape: {
+              enabled: true,
+              promotion_state: "deferred",
+              goal_shape: goalShape,
+              topology_signature: topology,
+              goal_class: goalClass,
+              posterior_alpha: posteriorAlpha,
+              posterior_beta: posteriorBeta,
+              confidence: verdict.confidence,
+              threshold: verdict.threshold,
+              mean: verdict.mean,
+              std: verdict.std,
+              sample_size: verdict.sample_size,
+              reason: verdict.reason,
+              directive_ids: directiveIds,
+              window_days: 30,
+              trajectory,
+            },
           },
           context_refs: [...entryIds, ...trajectoryRefs],
         });
@@ -1334,12 +1372,14 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
         continue;
       }
 
-      // Promotion gate passed — emit the recipe_extracted spine (trajectory
-      // cache) and a paired recipe_promoted row for the credit-aware lane.
-      // recipe_promoted carries the posterior evidence; recipe_extracted is
-      // the replay cache the dispatcher reads.
+      // Promotion gate passed — emit a recipe-shaped knowledge_candidate row
+      // (trajectory cache) AND a paired knowledge_promoted row carrying the
+      // posterior evidence. The recipe_extracted/recipe_promoted event family
+      // was absorbed into knowledge_* under universality proposal
+      // A12CR1QCDN0SS51CM95K39T45M; recipe_shape.enabled distinguishes
+      // recipe-shaped knowledge from regular knowledge rows.
       emitPromotionSpine(db, {
-        kind: "recipe_extracted",
+        kind: "knowledge_candidate",
         candidate_id: entryIds[0]!,
         extra_context_refs: [...entryIds.slice(1), ...trajectoryRefs],
         directive_id: anchor.directive_id as string,
@@ -1347,6 +1387,12 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
         loop_id: anchor.loop_id as string,
         artifact_prefix: "recipe_cluster_extraction",
         payload: {
+          claim: `Reusable trajectory for ${goalClass} is supported by repeated low-residual outcomes.`,
+          evidence: [`success_count=${entries.length}`, `confidence=${verdict.confidence}`, `threshold=${verdict.threshold}`],
+          implications: ["Retrieval may surface this trajectory as reusable knowledge; dispatch credit remains on dispatch_decided and action_scored outcomes."],
+          applies_to: ["reusable_trajectory", goalClass],
+          confidence_estimate: verdict.confidence,
+          // Top-level mirrors for legacy readers.
           goal_shape: goalShape,
           topology_signature: topology,
           success_count: entries.length,
@@ -1357,15 +1403,39 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
           promotion_threshold: verdict.threshold,
           directive_ids: directiveIds,
           trajectory,
+          recipe_shape: {
+            enabled: true,
+            promotion_state: "candidate_ready",
+            goal_shape: goalShape,
+            topology_signature: topology,
+            success_count: entries.length,
+            window_days: 30,
+            confidence: verdict.confidence,
+            posterior_alpha: posteriorAlpha,
+            posterior_beta: posteriorBeta,
+            promotion_threshold: verdict.threshold,
+            threshold: verdict.threshold,
+            mean: verdict.mean,
+            std: verdict.std,
+            sample_size: verdict.sample_size,
+            reason: verdict.reason,
+            directive_ids: directiveIds,
+            trajectory,
+          },
         },
       });
       insertEvent(db, {
-        kind: "recipe_promoted",
+        kind: "knowledge_promoted",
         substrate_origin: "substrate_auto",
         directive_id: anchor.directive_id as string,
         task_id: anchor.task_id as string,
         loop_id: anchor.loop_id as string,
         payload: {
+          claim: `Reusable trajectory for ${goalClass} promoted with posterior confidence ${verdict.confidence.toFixed(2)}.`,
+          evidence: [`posterior_alpha=${posteriorAlpha}`, `posterior_beta=${posteriorBeta}`, verdict.reason],
+          implications: ["Dispatcher may route through substrate_replay when this knowledge matches a task's goal_shape/topology pair."],
+          applies_to: ["reusable_trajectory", goalClass],
+          confidence_estimate: verdict.confidence,
           goal_shape: goalShape,
           topology_signature: topology,
           goal_class: goalClass,
@@ -1378,6 +1448,22 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
           sample_size: verdict.sample_size,
           reason: verdict.reason,
           directive_ids: directiveIds,
+          recipe_shape: {
+            enabled: true,
+            promotion_state: "promoted",
+            goal_shape: goalShape,
+            topology_signature: topology,
+            goal_class: goalClass,
+            posterior_alpha: posteriorAlpha,
+            posterior_beta: posteriorBeta,
+            confidence: verdict.confidence,
+            threshold: verdict.threshold,
+            mean: verdict.mean,
+            std: verdict.std,
+            sample_size: verdict.sample_size,
+            reason: verdict.reason,
+            directive_ids: directiveIds,
+          },
         },
         context_refs: [...entryIds, ...trajectoryRefs],
       });
@@ -1446,7 +1532,14 @@ export const extractRecipeFromCommit = (
   // the recipe toward Tier-0 eligibility (~7 brain successes = 0.85).
   const existingRows = db
     .query(
-      `SELECT id, payload FROM events WHERE kind = 'recipe_extracted' ORDER BY ts DESC`,
+      `SELECT id, payload FROM events WHERE kind IN ('knowledge_candidate', 'knowledge_promoted')
+         AND COALESCE(
+           json_extract(payload, '$.recipe_shape.enabled'),
+           json_extract(payload, '$.recipe.enabled'),
+           json_extract(payload, '$.is_recipe'),
+           0
+         ) IN (1, 'true')
+       ORDER BY ts DESC`,
     )
     .all() as Array<{ id: string; payload: string }>;
   for (const r of existingRows) {
@@ -1474,7 +1567,13 @@ export const extractRecipeFromCommit = (
         const alreadyBumped = db
           .query(
             `SELECT 1 FROM events
-             WHERE kind = 'recipe_extracted'
+             WHERE kind IN ('knowledge_candidate', 'knowledge_promoted')
+               AND COALESCE(
+                 json_extract(payload, '$.recipe_shape.enabled'),
+                 json_extract(payload, '$.recipe.enabled'),
+                 json_extract(payload, '$.is_recipe'),
+                 0
+               ) IN (1, 'true')
                AND context_refs LIKE ?
                AND substrate_origin = 'substrate_auto'
                AND task_id = ?
@@ -1495,7 +1594,7 @@ export const extractRecipeFromCommit = (
           } catch { /* leave empty array */ }
           try {
             emitPromotionSpine(db, {
-              kind: "recipe_extracted",
+              kind: "knowledge_candidate",
               candidate_id: r.id,                       // the seed recipe being bumped
               extra_context_refs: [committed.id],       // the successful commit driving the bump
               directive_id: committed.directive_id,
@@ -1503,6 +1602,11 @@ export const extractRecipeFromCommit = (
               loop_id: committed.loop_id ?? "",
               artifact_prefix: "recipe_confidence_bump",
               payload: {
+                claim: `Reusable trajectory ${r.id} replay-success bumped confidence to ${bumped.toFixed(2)}.`,
+                evidence: ["brain commit on matching goal_shape+topology", `previous_confidence=${latestConfidence}`],
+                implications: ["Recipe-shape knowledge ratchets toward Tier-0 replay eligibility on repeat brain success."],
+                applies_to: ["reusable_trajectory", goalShape],
+                confidence_estimate: bumped,
                 goal_shape: goalShape,
                 topology_signature: topology,
                 confidence: bumped,
@@ -1511,6 +1615,18 @@ export const extractRecipeFromCommit = (
                 derived_from_recipe_id: r.id,
                 seeded_by: "inline_post_commit_bump",
                 trajectory: seedTrajectory,
+                recipe_shape: {
+                  enabled: true,
+                  promotion_state: "confidence_bump",
+                  goal_shape: goalShape,
+                  topology_signature: topology,
+                  confidence: bumped,
+                  previous_confidence: latestConfidence,
+                  confidence_update: "brain_replay_success",
+                  derived_from_recipe_id: r.id,
+                  seeded_by: "inline_post_commit_bump",
+                  trajectory: seedTrajectory,
+                },
               },
             });
           } catch { /* failure to write a bump row is non-fatal — recipe still matches */ }
@@ -1524,12 +1640,17 @@ export const extractRecipeFromCommit = (
   let recipeId = "";
   withImmediateTransaction(db, () => {
     recipeId = insertEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       directive_id: committed.directive_id,
       task_id: committed.task_id,
       loop_id: committed.loop_id ?? "",
       substrate_origin: "substrate_auto",
       payload: {
+        claim: `Reusable trajectory seeded inline from successful task_committed for goal_shape ${goalShape}.`,
+        evidence: ["inline_post_commit seed", `topology=${topology}`],
+        implications: ["Substrate retains a low-confidence reusable trajectory the dispatcher may replay once posterior support catches up."],
+        applies_to: ["reusable_trajectory", goalShape],
+        confidence_estimate: 0.5,
         goal_shape: goalShape,
         topology_signature: topology,
         success_count: 1,
@@ -1544,6 +1665,18 @@ export const extractRecipeFromCommit = (
         directive_ids: [committed.directive_id],
         trajectory,
         seeded_by: "inline_post_commit",
+        recipe_shape: {
+          enabled: true,
+          promotion_state: "inline_seed",
+          goal_shape: goalShape,
+          topology_signature: topology,
+          confidence: 0.5,
+          success_count: 1,
+          window_days: 30,
+          directive_ids: [committed.directive_id],
+          trajectory,
+          seeded_by: "inline_post_commit",
+        },
       },
       context_refs: [committed.id],
     });

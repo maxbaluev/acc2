@@ -494,11 +494,12 @@ describe("task_dispatcher", () => {
       };
 
       const recipeRow = emitEvent(db, {
-        kind: "recipe_extracted",
+        kind: "knowledge_candidate",
         substrate_origin: "substrate_auto",
         directive_id: "d_dispatcher_replay_seed",
         task_id: "t_dispatcher_replay_seed",
         payload: {
+          recipe_shape: { enabled: true },
           goal_shape: "count_files_target_directory::n1",
           topology_signature: "",
           confidence: 0.9,
@@ -529,7 +530,7 @@ describe("task_dispatcher", () => {
       expect(result.violations).toEqual([]);
 
       const invoked = db
-        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_invoked' AND task_id = ?")
+        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'dispatch_decided' AND json_extract(payload, '$.route') = 'substrate_replay' AND task_id = ?")
         .get(taskId) as { c: number };
       expect(invoked.c).toBe(1);
 

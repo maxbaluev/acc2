@@ -2032,7 +2032,7 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
       "SELECT COUNT(*) AS n FROM events WHERE kind = 'bridge_invoked' AND directive_id = ?",
     ).get(directiveId) as { n: number };
     const recipeRow = handle.db.query(
-      "SELECT COUNT(*) AS n FROM events WHERE kind = 'recipe_extracted' AND directive_id = ?",
+      "SELECT COUNT(*) AS n FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true') AND directive_id = ?",
     ).get(directiveId) as { n: number };
     const artifactInvokedRow = handle.db.query(
       "SELECT COUNT(*) AS n FROM events WHERE kind = 'artifact_invoked' AND directive_id = ?",

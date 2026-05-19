@@ -53,12 +53,13 @@ export type SubstrateCounts = {
   /** act_artifact rows where name LIKE 'seed_%' OR id LIKE 'seed_%',
    *  or NaN on probe error. */
   seedArtifacts: number;
-  /** kind='recipe_extracted' row count, or NaN on probe error. Recipes
-   *  are seeded by `seedRecipes` (substrate/seed.ts) so the substrate-
-   *  replay lane has Tier-0 cached trajectories to match against on
-   *  first-run dispatches. A db with zero recipes silently falls back
-   *  to brain dispatch for every directive — recipe replay never fires
-   *  until the brain authors recipes from scratch. */
+  /** Count of recipe-shape knowledge rows (knowledge_candidate /
+   *  knowledge_promoted carrying recipe_shape.enabled). Seeded by
+   *  `seedRecipes` (substrate/seed.ts) so the substrate-replay lane has
+   *  Tier-0 cached trajectories to match against on first-run dispatches.
+   *  A db with zero recipe-shape rows silently falls back to brain dispatch
+   *  for every directive — recipe replay never fires until the brain
+   *  authors trajectories from scratch. */
   recipeRows: number;
   /** Error message when the probe could not run (DB missing, sealed,
    *  etc). null when the probe ran cleanly even if counts are 0. */
@@ -143,7 +144,16 @@ const realSubstrateCounts = (): SubstrateCounts => {
       )
       .get() as { n: number };
     const r = db
-      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'recipe_extracted'")
+      .query(
+        `SELECT COUNT(*) AS n FROM events
+         WHERE kind IN ('knowledge_candidate', 'knowledge_promoted')
+           AND COALESCE(
+             json_extract(payload, '$.recipe_shape.enabled'),
+             json_extract(payload, '$.recipe.enabled'),
+             json_extract(payload, '$.is_recipe'),
+             0
+           ) IN (1, 'true')`,
+      )
       .get() as { n: number };
     return {
       knowledgePromoted: k.n,
@@ -482,11 +492,11 @@ export const checkSeedArtifacts = (env: DoctorEnv): Check => {
     detail: `${counts.seedArtifacts} canonical seed_* code artifacts present` };
 };
 
-/** Substrate-content check: at least SEED_RECIPE_MIN `recipe_extracted`
- *  rows must exist. `seedRecipes` (substrate/seed.ts) lays down 2
+/** Substrate-content check: at least SEED_RECIPE_MIN recipe-shape
+ *  knowledge rows must exist. `seedRecipes` (substrate/seed.ts) lays down 2
  *  canonical Tier-0 trajectories. With zero recipes the substrate-replay
  *  lane never fires — every directive falls through to brain dispatch
- *  until the brain authors recipes from scratch. A db with no recipes
+ *  until the brain authors trajectories from scratch. A db with no recipes
  *  is structurally incomplete and silently slow on cached goal shapes. */
 export const checkSeedRecipes = (env: DoctorEnv): Check => {
   const counts = env.substrateCounts();
@@ -495,14 +505,14 @@ export const checkSeedRecipes = (env: DoctorEnv): Check => {
   }
   if (!Number.isFinite(counts.recipeRows)) {
     return { name: "seed recipes", verdict: "fail",
-      detail: "could not read recipe_extracted count" };
+      detail: "could not read recipe-shape knowledge count" };
   }
   if (counts.recipeRows < SEED_RECIPE_MIN) {
     return { name: "seed recipes", verdict: "fail",
-      detail: `${counts.recipeRows} recipe_extracted rows (need ≥ ${SEED_RECIPE_MIN}) — run \`acc init --yes\`` };
+      detail: `${counts.recipeRows} recipe-shape knowledge rows (need ≥ ${SEED_RECIPE_MIN}) — run \`acc init --yes\`` };
   }
   return { name: "seed recipes", verdict: "ok",
-    detail: `${counts.recipeRows} recipe_extracted rows` };
+    detail: `${counts.recipeRows} recipe-shape knowledge rows` };
 };
 
 /** Vec extension load probe: opens a fresh :memory: DB and proves

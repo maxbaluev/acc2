@@ -168,11 +168,12 @@ const seedThreeSuccessRecipe = async (
   });
   const confidence = opts.bumpConfidence === false ? 0.5 : 0.9;
   const recipeId = emitEvent(db, {
-    kind: "recipe_extracted",
+    kind: "knowledge_candidate",
     substrate_origin: "substrate_auto",
     directive_id: "d_recipe_seed",
     task_id: "t_recipe_seed",
     payload: {
+      recipe_shape: { enabled: true },
       goal_shape: "count_files_target_directory::n1",
       topology_signature: "",
       confidence,
@@ -287,7 +288,7 @@ describe("recipe_replay.replayRecipe", () => {
     runViews(db);
     // Synthetically insert a recipe with no trajectory.
     emitEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       substrate_origin: "substrate_auto",
       directive_id: "d_x",
       task_id: "t_x",
@@ -296,10 +297,10 @@ describe("recipe_replay.replayRecipe", () => {
         topology_signature: "topo_00000000::1",
         confidence: 0.9,
         trajectory: [],
-      },
+       recipe_shape: { enabled: true } },
     });
     const recipeId = (db
-      .query("SELECT id FROM events WHERE kind = 'recipe_extracted' LIMIT 1")
+      .query("SELECT id FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true') LIMIT 1")
       .get() as { id: string }).id;
     const task = {
       id: "t_x",
@@ -321,7 +322,7 @@ describe("recipe_replay.replayRecipe", () => {
     expect(outcome.abort_reason).toBe("trajectory_missing_action_step");
 
     const aborted = db
-      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'recipe_replay_aborted'")
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'action_scored' AND (json_extract(payload, '$.replay_aborted') = 1 OR json_extract(payload, '$.replay_aborted') = 'true')")
       .get() as { c: number };
     expect(aborted.c).toBe(1);
   });
@@ -351,7 +352,7 @@ describe("recipe_replay.replayRecipe", () => {
       // confidence-bump row — we have to mutate that one too).
       const allRecipeRows = db
         .query(
-          "SELECT id, payload FROM events WHERE kind = 'recipe_extracted'",
+          "SELECT id, payload FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')",
         )
         .all() as Array<{ id: string; payload: string }>;
       for (const r of allRecipeRows) {
@@ -382,7 +383,7 @@ describe("recipe_replay.replayRecipe", () => {
 
       const aborted = db
         .query(
-          "SELECT failure_kind FROM events WHERE kind = 'recipe_replay_aborted' AND task_id = ?",
+          "SELECT failure_kind FROM events WHERE kind = 'action_scored' AND (json_extract(payload, '$.replay_aborted') = 1 OR json_extract(payload, '$.replay_aborted') = 'true') AND task_id = ?",
         )
         .get(taskId) as { failure_kind: string } | null;
       expect(aborted).not.toBeNull();
@@ -435,11 +436,12 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
 
     // Hand-roll a recipe_extracted row whose trajectory has TWO action steps.
     const recipeRow = emitEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       substrate_origin: "substrate_auto",
       directive_id: "d_two_step",
       task_id: "t_two_step",
       payload: {
+        recipe_shape: { enabled: true },
         // Hardened matcher requires ≥3 underscore-separated tokens of length ≥3
         // with ≥0.9 overlap, so the recipe's goal_shape uses the production
         // shape `<token>_<token>_<token>::nN`. Topology "" is the legacy seed
@@ -570,11 +572,12 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
     const badVerifierId = badVerifier.id;
 
     emitEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       substrate_origin: "substrate_auto",
       directive_id: "d_partial",
       task_id: "t_partial",
       payload: {
+        recipe_shape: { enabled: true },
         goal_shape: "two_step_partial::n1",
         topology_signature: "",
         confidence: 0.9,
@@ -619,15 +622,15 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
       .get(task.id) as { c: number }).c;
     expect(committedCount).toBe(0);
 
-    // The abort payload carries the step index + worst residual seen.
+    // The abort row carries the step index + worst residual seen.
     const aborted = db
-      .query("SELECT payload FROM events WHERE kind = 'recipe_replay_aborted' AND task_id = ?")
-      .get(task.id) as { payload: string } | null;
+      .query("SELECT residual, payload FROM events WHERE kind = 'action_scored' AND (json_extract(payload, '$.replay_aborted') = 1 OR json_extract(payload, '$.replay_aborted') = 'true') AND task_id = ?")
+      .get(task.id) as { residual: number | null; payload: string } | null;
     expect(aborted).not.toBeNull();
     const ap = JSON.parse(aborted!.payload) as Record<string, number>;
     expect(ap.step_index).toBe(1);
     expect(ap.step_count).toBe(2);
-    expect(ap.residual).toBe(1);
+    expect(aborted!.residual).toBe(1);
     expect(ap.worst_residual).toBe(1);
   });
 });
@@ -655,8 +658,9 @@ describe("recipe_replay.findRecipeMatch — recipes_latest_view integration", ()
         "t_view_int",
         "loop_root",
         "substrate_auto",
-        "recipe_extracted",
+        "knowledge_candidate",
         JSON.stringify({
+          recipe_shape: { enabled: true },
           goal_shape: "view_integrated_recipe_one::n1",
           topology_signature: "",
           confidence: 0.5,
@@ -678,8 +682,9 @@ describe("recipe_replay.findRecipeMatch — recipes_latest_view integration", ()
         "t_view_int",
         "loop_root",
         "substrate_auto",
-        "recipe_extracted",
+        "knowledge_candidate",
         JSON.stringify({
+          recipe_shape: { enabled: true },
           goal_shape: "view_integrated_recipe_one::n1",
           topology_signature: "",
           confidence: 0.92,
@@ -720,8 +725,9 @@ describe("recipe_replay.findRecipeMatch — recipes_latest_view integration", ()
         "t_view_fail",
         "loop_root",
         "substrate_auto",
-        "recipe_extracted",
+        "knowledge_candidate",
         JSON.stringify({
+          recipe_shape: { enabled: true },
           goal_shape: "view_failure_recipe::n1",
           topology_signature: "",
           confidence: 0.95,
@@ -764,8 +770,8 @@ describe("recipe_replay.updateRecipeConfidence", () => {
         "t_recipe",
         "loop_root",
         "substrate_auto",
-        "recipe_extracted",
-        JSON.stringify({ goal_shape: "x", topology_signature: "y", confidence: 0.5, trajectory: [] }),
+        "knowledge_candidate",
+        JSON.stringify({ recipe_shape: { enabled: true }, goal_shape: "x", topology_signature: "y", confidence: 0.5, trajectory: [] }),
         "[]",
       ],
     );
@@ -786,8 +792,8 @@ describe("recipe_replay.updateRecipeConfidence", () => {
         "t_recipe",
         "loop_root",
         "substrate_auto",
-        "recipe_extracted",
-        JSON.stringify({ goal_shape: "x", topology_signature: "y", confidence: 0.5, trajectory: [] }),
+        "knowledge_candidate",
+        JSON.stringify({ recipe_shape: { enabled: true }, goal_shape: "x", topology_signature: "y", confidence: 0.5, trajectory: [] }),
         "[]",
       ],
     );
@@ -808,8 +814,8 @@ describe("recipe_replay.updateRecipeConfidence", () => {
         "t_recipe",
         "loop_root",
         "substrate_auto",
-        "recipe_extracted",
-        JSON.stringify({ goal_shape: "x", topology_signature: "y", confidence: 0.92, trajectory: [] }),
+        "knowledge_candidate",
+        JSON.stringify({ recipe_shape: { enabled: true }, goal_shape: "x", topology_signature: "y", confidence: 0.92, trajectory: [] }),
         "[]",
       ],
     );
@@ -820,7 +826,7 @@ describe("recipe_replay.updateRecipeConfidence", () => {
     // Re-read freshest confidence
     const latest = db
       .query(
-        "SELECT payload FROM events WHERE kind = 'recipe_extracted' ORDER BY ts DESC LIMIT 1",
+        "SELECT payload FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true') ORDER BY ts DESC LIMIT 1",
       )
       .get() as { payload: string };
     const p = JSON.parse(latest.payload);

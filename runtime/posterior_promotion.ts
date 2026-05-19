@@ -124,10 +124,11 @@ export type PromotionEvaluation = {
   sample_size: number;
 };
 
-/** Evaluate whether a recipe's Beta posterior crosses the per-owner per-goal
- *  promotion threshold. Returns the decision plus diagnostic fields so
- *  emitters can stamp `recipe_promoted` / `recipe_promotion_deferred`
- *  payloads with the exact numbers that produced the verdict. */
+/** Evaluate whether a reusable-trajectory candidate's Beta posterior crosses
+ *  the per-owner per-goal promotion threshold. Returns the decision plus
+ *  diagnostic fields so emitters can stamp `knowledge_promoted` /
+ *  `knowledge_candidate` (recipe_shape) payloads with the exact numbers that
+ *  produced the verdict. */
 export const evaluatePromotion = (
   recipe: RecipePosterior,
   ownerProfile: OwnerProfile | null | undefined,

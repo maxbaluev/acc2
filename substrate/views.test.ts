@@ -1018,7 +1018,7 @@ describe("operator registry views", () => {
     runViews(db);
 
     const oldId = insertEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       directive_id: "d_r",
       task_id: "t_r",
       payload: {
@@ -1026,14 +1026,15 @@ describe("operator registry views", () => {
         topology_signature: "topo_1",
         confidence: 0.5,
         trajectory: [],
-      },
+       recipe_shape: { enabled: true } },
       ts: "2026-01-01T00:00:01.000Z",
     });
     const latestId = insertEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       directive_id: "d_r",
       task_id: "t_r",
       payload: {
+        recipe_shape: { enabled: true },
         goal_shape: "shape_a",
         topology_signature: "topo_1",
         confidence: 0.6,
@@ -1044,7 +1045,7 @@ describe("operator registry views", () => {
       ts: "2026-01-01T00:00:02.000Z",
     });
     insertEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       directive_id: "d_other",
       task_id: "t_other",
       payload: {
@@ -1052,7 +1053,7 @@ describe("operator registry views", () => {
         topology_signature: "topo_2",
         confidence: 0.55,
         trajectory: [],
-      },
+       recipe_shape: { enabled: true } },
       ts: "2026-01-01T00:00:03.000Z",
     });
 
@@ -1077,7 +1078,7 @@ describe("operator registry views", () => {
     runViews(db);
 
     insertEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       directive_id: "d_a",
       task_id: "t_a",
       payload: {
@@ -1085,11 +1086,11 @@ describe("operator registry views", () => {
         topology_signature: "topo_1",
         confidence: 0.5,
         trajectory: [],
-      },
+       recipe_shape: { enabled: true } },
       ts: "2026-01-01T00:00:01.000Z",
     });
     insertEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       directive_id: "d_b",
       task_id: "t_b",
       payload: {
@@ -1097,11 +1098,11 @@ describe("operator registry views", () => {
         topology_signature: "topo_2",
         confidence: 0.6,
         trajectory: [],
-      },
+       recipe_shape: { enabled: true } },
       ts: "2026-01-01T00:00:02.000Z",
     });
     insertEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       directive_id: "d_c",
       task_id: "t_c",
       payload: {
@@ -1109,7 +1110,7 @@ describe("operator registry views", () => {
         topology_signature: "topo_3",
         confidence: 0.7,
         trajectory: [],
-      },
+       recipe_shape: { enabled: true } },
       ts: "2026-01-01T00:00:03.000Z",
     });
 
@@ -1131,7 +1132,7 @@ describe("operator registry views", () => {
     runViews(db);
 
     const lowerConfId = insertEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       directive_id: "d_x",
       task_id: "t_x",
       payload: {
@@ -1139,14 +1140,15 @@ describe("operator registry views", () => {
         topology_signature: "topo_x",
         confidence: 0.4,
         trajectory: [],
-      },
+       recipe_shape: { enabled: true } },
       ts: "2026-01-01T00:00:01.000Z",
     });
     const higherConfId = insertEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       directive_id: "d_x",
       task_id: "t_x",
       payload: {
+        recipe_shape: { enabled: true },
         goal_shape: "shape_x",
         topology_signature: "topo_x",
         confidence: 0.8,
@@ -1456,6 +1458,7 @@ describe("lesson implementer flywheel views", () => {
       directive_id: "d_candidate_recipe",
       task_id: "t_candidate_recipe",
       payload: {
+        recipe_shape: { enabled: true },
         lesson_kind: "recipe_candidate",
         proposed_action: { recipe: { goal_shape: "apply_lesson", topology_signature: "one_step" } },
       },

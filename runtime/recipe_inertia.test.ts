@@ -41,9 +41,10 @@ const insertRecipeRow = (
       "t_inertia",
       "loop_root",
       "substrate_auto",
-      "recipe_extracted",
+      "knowledge_candidate",
       JSON.stringify({
-        goal_shape: opts.goalShape,
+        recipe_shape: { enabled: true },
+          goal_shape: opts.goalShape,
         topology_signature: opts.topology,
         confidence: opts.confidence,
         trajectory: opts.trajectory ?? [],
@@ -100,7 +101,7 @@ describe("recipe_inertia.applyRecipeInertiaDecay", () => {
     const decayRow = db
       .query(
         `SELECT payload, context_refs FROM events
-         WHERE kind = 'recipe_extracted'
+         WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')
            AND json_extract(payload, '$.confidence_update') = 'inertia_decayed'
          ORDER BY ts DESC LIMIT 1`,
       )
@@ -139,7 +140,7 @@ describe("recipe_inertia.applyRecipeInertiaDecay", () => {
     const decayRows = db
       .query(
         `SELECT id FROM events
-         WHERE kind = 'recipe_extracted'
+         WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')
            AND json_extract(payload, '$.confidence_update') = 'inertia_decayed'`,
       )
       .all();
@@ -184,7 +185,7 @@ describe("recipe_inertia.applyRecipeInertiaDecay", () => {
     const decayRow = db
       .query(
         `SELECT payload FROM events
-         WHERE kind = 'recipe_extracted'
+         WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')
            AND json_extract(payload, '$.confidence_update') = 'inertia_decayed'
          ORDER BY ts DESC LIMIT 1`,
       )
@@ -239,7 +240,7 @@ describe("recipe_inertia.applyRecipeInertiaDecay", () => {
     const count = (db
       .query(
         `SELECT COUNT(*) AS c FROM events
-         WHERE kind = 'recipe_extracted'
+         WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')
            AND json_extract(payload, '$.confidence_update') = 'inertia_decayed'
            AND json_extract(payload, '$.goal_shape') = 'idempotent_recipe_one::n1'`,
       )
@@ -307,7 +308,7 @@ describe("recipe_inertia.applyRecipeInertiaDecay", () => {
     const decayRow = db
       .query(
         `SELECT payload FROM events
-         WHERE kind = 'recipe_extracted'
+         WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')
            AND json_extract(payload, '$.confidence_update') = 'inertia_decayed'
          ORDER BY ts DESC LIMIT 1`,
       )

@@ -43,8 +43,9 @@ export type WorkerName =
   // Brain audit B (2026-05-15): Model-D promotion pipeline was relying on
   // Father opening maintenance directives to scan candidates — chance
   // dispatch only. A first-class extractors tick scans candidates on a
-  // bounded cadence and emits knowledge_promoted / act_artifact_promoted /
-  // recipe_promoted when posteriors cross promotion thresholds.
+  // bounded cadence and emits knowledge_promoted / act_artifact_promoted
+  // (including recipe-shape knowledge rows) when posteriors cross promotion
+  // thresholds.
   | "extractors"
   // Brain audit D (2026-05-15): amendment + metrics_gauge_refresh workers
   // were registered + ticked in daemon.ts but absent from

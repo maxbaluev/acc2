@@ -195,7 +195,13 @@ const existingCompressions = (db: Database, clusterKey: string): Array<{ id: str
   const rows = db
     .query(
       `SELECT id, payload FROM events
-       WHERE kind = 'recipe_extracted'
+       WHERE kind IN ('knowledge_candidate', 'knowledge_promoted')
+         AND COALESCE(
+           json_extract(payload, '$.recipe_shape.enabled'),
+           json_extract(payload, '$.recipe.enabled'),
+           json_extract(payload, '$.is_recipe'),
+           0
+         ) IN (1, 'true')
        ORDER BY ts ASC, rowid ASC`,
     )
     .all() as Array<{ id: string; payload: string }>;
@@ -233,7 +239,8 @@ const emitSupersedeRefusals = (db: Database, previous: Array<{ id: string; sourc
       context_refs: [row.id, nextRecipeId],
       payload: {
         source_event_id: row.id,
-        source_kind: "recipe_extracted",
+        source_kind: "knowledge_candidate",
+        recipe_shape: { enabled: true },
         status: "refused",
         reason: "compression_supersede",
         superseded_by_recipe_id: nextRecipeId,
@@ -256,21 +263,39 @@ const emitCompression = (db: Database, clusterKey: string, cluster: SuccessfulTr
     trajectory.lessonEventId,
   ])));
   const heldOutResidual = heldOut.length === 0 ? 0.5 : average(heldOut.map((trajectory) => Math.max(trajectory.scoredResidual, trajectory.closureResidual)));
+  const recipeConfidence = Math.max(0.55, Math.min(0.95, 1 - heldOutResidual));
+  const trajectory = [{
+    step_kind: "action_predicted",
+    artifact_id: first.actionArtifactId,
+    verifier_artifact_id: first.verifierArtifactId,
+    predicted_residual: first.predictedResidual,
+    payload_template: { goal_shape: first.goalShape },
+  }];
+  // Experience-compression now writes recipe-shaped knowledge_candidate rows
+  // (universality proposal A12CR1QCDN0SS51CM95K39T45M absorbed the recipe_*
+  // event family). recipe_shape.enabled lets the views project the row as a
+  // reusable trajectory while keeping it a normal knowledge candidate.
   const recipe = emitEvent(db, {
-    kind: "recipe_extracted",
+    kind: "knowledge_candidate",
     substrate_origin: "substrate_auto",
     directive_id: first.directiveId,
     task_id: first.taskId,
     loop_id: first.loopId,
     context_refs: contextRefs,
     payload: {
+      claim: `Repeated successful ${first.lessonKind} trajectories for ${first.goalShape} can be compressed into a reusable trajectory knowledge row.`,
+      evidence: [`cluster_size=${sorted.length}`, `held_out_residual=${heldOutResidual}`],
+      implications: ["Dispatcher may replay this trajectory through substrate_replay once posterior support catches up."],
+      applies_to: ["reusable_trajectory", first.goalShape, first.lessonKind],
+      confidence_estimate: recipeConfidence,
+      // Top-level mirrors for legacy substrate readers.
       extraction_kind: "experience_compression_loop_v1",
       source_kind: "experience_compression",
       cluster_key: clusterKey,
       goal_shape: first.goalShape,
       topology_signature: clusterKey,
       lesson_kind: first.lessonKind,
-      confidence: Math.max(0.55, Math.min(0.95, 1 - heldOutResidual)),
+      confidence: recipeConfidence,
       source_action_scored_ids: ids,
       source_lesson_ids: sorted.map((trajectory) => trajectory.lessonEventId),
       held_out_task_ids: heldOut.map((trajectory) => trajectory.taskId),
@@ -285,13 +310,33 @@ const emitCompression = (db: Database, clusterKey: string, cluster: SuccessfulTr
         reuse_first_compliance: 1,
         new_event_kind_count: 0,
       },
-      trajectory: [{
-        step_kind: "action_predicted",
-        artifact_id: first.actionArtifactId,
-        verifier_artifact_id: first.verifierArtifactId,
-        predicted_residual: first.predictedResidual,
-        payload_template: { goal_shape: first.goalShape },
-      }],
+      trajectory,
+      recipe_shape: {
+        enabled: true,
+        promotion_state: "experience_compression",
+        extraction_kind: "experience_compression_loop_v1",
+        source_kind: "experience_compression",
+        cluster_key: clusterKey,
+        goal_shape: first.goalShape,
+        topology_signature: clusterKey,
+        lesson_kind: first.lessonKind,
+        confidence: recipeConfidence,
+        source_action_scored_ids: ids,
+        source_lesson_ids: sorted.map((trajectory) => trajectory.lessonEventId),
+        held_out_task_ids: heldOut.map((trajectory) => trajectory.taskId),
+        held_out_evaluation: {
+          residual: heldOutResidual,
+          status: heldOut.length === 0 ? "pending_future_task" : "tested_against_future_tasks",
+          sample_size: heldOut.length,
+        },
+        reliability_profile: {
+          successful_trajectory_count: sorted.length,
+          held_out_coverage: heldOut.length / sorted.length,
+          reuse_first_compliance: 1,
+          new_event_kind_count: 0,
+        },
+        trajectory,
+      },
     } as JsonValue,
   });
   emitEvent(db, {

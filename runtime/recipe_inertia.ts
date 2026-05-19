@@ -119,7 +119,13 @@ const decayedThisSecond = (
   const rows = db
     .query(
       `SELECT ts, payload FROM events
-       WHERE kind = 'recipe_extracted'
+       WHERE kind IN ('knowledge_candidate', 'knowledge_promoted')
+         AND COALESCE(
+           json_extract(payload, '$.recipe_shape.enabled'),
+           json_extract(payload, '$.recipe.enabled'),
+           json_extract(payload, '$.is_recipe'),
+           0
+         ) IN (1, 'true')
          AND json_extract(payload, '$.confidence_update') = 'inertia_decayed'
          AND json_extract(payload, '$.goal_shape') = ?
          AND json_extract(payload, '$.topology_signature') = ?
@@ -211,20 +217,41 @@ export const applyRecipeInertiaDecay = (
     // prior canonical row so the four-link credit chain stays whole even
     // for substrate-self-correction events.
     const priorPayload = r.payload ?? {};
+    const priorRecipeShape =
+      (priorPayload.recipe_shape && typeof priorPayload.recipe_shape === "object")
+        ? (priorPayload.recipe_shape as Record<string, unknown>)
+        : priorPayload;
     const newPayload: Record<string, unknown> = {
       ...priorPayload,
+      claim: `Reusable trajectory ${r.id} confidence decayed by inertia.`,
+      evidence: [`previous_confidence=${r.confidence}`, "no replay within inertia window"],
+      implications: ["Stale recipe-shape knowledge decays toward floor until a fresh success refreshes it."],
+      applies_to: ["reusable_trajectory", r.goal_shape],
+      confidence_estimate: decayed,
       goal_shape: r.goal_shape,
       topology_signature: r.topology_signature,
       confidence: decayed,
       previous_confidence: r.confidence,
       confidence_update: "inertia_decayed",
       derived_from_recipe_id: r.id,
+      derived_from_knowledge_id: r.id,
       inertia_decay_days: RECIPE_INERTIA_DECAY_DAYS,
       inertia_decay_step: RECIPE_INERTIA_DECAY,
+      recipe_shape: {
+        ...priorRecipeShape,
+        enabled: true,
+        confidence: decayed,
+        previous_confidence: r.confidence,
+        confidence_update: "inertia_decayed",
+        derived_from_recipe_id: r.id,
+        derived_from_knowledge_id: r.id,
+        inertia_decay_days: RECIPE_INERTIA_DECAY_DAYS,
+        inertia_decay_step: RECIPE_INERTIA_DECAY,
+      },
     };
 
     emitEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       substrate_origin: "substrate_auto",
       payload: newPayload as JsonValue,
       context_refs: [r.id],

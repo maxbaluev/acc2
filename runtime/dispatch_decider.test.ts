@@ -90,11 +90,12 @@ describe("dispatch_decider", () => {
     // hand-seeded recipes from substrate/seed.ts that have no topology
     // stamp). confidence 0.9 is comfortably above the new 0.85 floor.
     emitEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       substrate_origin: "substrate_auto",
       directive_id: "d_recipe",
       task_id: "t_recipe",
       payload: {
+        recipe_shape: { enabled: true },
         goal_shape: "count_todos_in_scripts::n1",
         topology_signature: "",
         confidence: 0.9,
@@ -115,11 +116,12 @@ describe("dispatch_decider", () => {
     const db = openDb(":memory:");
     runViews(db);
     emitEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       substrate_origin: "substrate_auto",
       directive_id: "d_recipe",
       task_id: "t_recipe",
       payload: {
+        recipe_shape: { enabled: true },
         goal_shape: goalShape("audit runtime design"),
         topology_signature: "",
         confidence: 0.95,
@@ -176,11 +178,12 @@ describe("dispatch_decider", () => {
     const db = openDb(":memory:");
     runViews(db);
     const recipe = emitEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       substrate_origin: "substrate_auto",
       directive_id: "d_recipe",
       task_id: "t_recipe",
       payload: {
+        recipe_shape: { enabled: true },
         goal_shape: goalShape("audit runtime design"),
         topology_signature: "",
         confidence: 0.95,
@@ -286,11 +289,12 @@ describe("dispatch_decider", () => {
     // Recipe seeded at 0.75 — above the 0.7 crisis threshold but below the
     // 0.85 normal threshold, so it ONLY routes when crisis mode is active.
     emitEvent(db, {
-      kind: "recipe_extracted",
+      kind: "knowledge_candidate",
       substrate_origin: "substrate_auto",
       directive_id: directiveId,
       task_id: directiveId,
       payload: {
+        recipe_shape: { enabled: true },
         goal_shape: "scrape_inventory::n1",
         topology_signature: "",
         confidence: 0.75,
