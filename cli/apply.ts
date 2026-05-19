@@ -292,7 +292,6 @@ const renderStructuredProposalBlock = (payload: Record<string, unknown>): string
     `STRUCTURED PROPOSED CHANGE`,
     `  source_field: ${sourceField}`,
     `  target_resource: ${formatPromptValue(proposal.target_resource ?? proposal.resource_uri ?? proposal.target ?? (typeof proposal.file_path === "string" ? "repo:" + proposal.file_path : undefined))}`,
-    `  file_path:       ${formatPromptValue(proposal.file_path)} (legacy fallback)`,
     `  anchor:          ${formatPromptValue(proposal.anchor)}`,
     `  diff:`,
     `\`\`\`diff`,

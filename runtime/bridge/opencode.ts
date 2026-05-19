@@ -905,11 +905,6 @@ export const spawnRealOpencode = async (
       cycleViolation = kind ?? null;
       try { proc.kill("SIGTERM"); } catch { /* swallow */ }
     }
-    // Legacy final-response marker (opencode pre-1.4 emitted these). Kept for
-    // forward-compat with future format revisions.
-    if (kind === "final_response" || kind === "completed") {
-      finalResponse = (parsed.text as string) ?? (parsed.final_response as string) ?? finalResponse;
-    }
   };
 
   try {

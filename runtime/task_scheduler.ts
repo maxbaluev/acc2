@@ -57,8 +57,7 @@ export type SchedulerOpts = {
   /** Multi-goal alignment (2026-05-15): per-directive in-flight cap so
    *  one runaway goal cannot consume every scheduler slot and starve
    *  parallel goals. Defaults to ceil(maxConcurrent / 2) — at most half
-   *  of the global slots can belong to a single directive at any time.
-   *  Explicit 0 disables (legacy behaviour). */
+   *  of the global slots can belong to a single directive at any time. */
   maxConcurrentPerDirective?: number;
 };
 
@@ -355,11 +354,9 @@ export const schedulerTick = async (
   const maxConcurrent = Math.max(1, effectiveOpts.maxConcurrent ?? opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
   // Multi-goal alignment (2026-05-15): per-directive cap so one
   // runaway goal can't starve concurrent goals. Default to half the
-  // global cap; explicit 0 disables.
+  // global cap.
   const rawPerDir = effectiveOpts.maxConcurrentPerDirective ?? opts.maxConcurrentPerDirective;
-  const maxConcurrentPerDirective = rawPerDir === 0
-    ? Number.MAX_SAFE_INTEGER
-    : Math.max(1, rawPerDir ?? Math.ceil(maxConcurrent / 2));
+  const maxConcurrentPerDirective = Math.max(1, rawPerDir ?? Math.ceil(maxConcurrent / 2));
   const ready = readyTasks(db, opts.directiveId);
   if (SCHEDULER_DRAINING) {
     for (const task of ready) {

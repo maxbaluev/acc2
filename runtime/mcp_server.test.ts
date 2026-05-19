@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { McpMethods } from "./mcp_server";
+import { McpMethods } from "./mcp_server/index";
 import { SearchSchema } from "./mcp_server/types";
 import { __isPlaywrightInstalledForTest } from "./runtimes/camofox";
 

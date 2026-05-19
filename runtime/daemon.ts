@@ -35,7 +35,7 @@ import { runViews } from "../substrate/views";
 import { emitEvent } from "./events";
 import { subscribe, resetBus, type BusEvent } from "./event_bus";
 import { newAdminToken } from "./ids";
-import { createMcpServer } from "./mcp_server";
+import { createMcpServer } from "./mcp_server/index";
 import {
   resolveDbPath, resolveSocketFile, resolveTokenFile,
 } from "./state_paths";
@@ -83,14 +83,6 @@ import {
 
 export const DEFAULT_DAEMON_PORT = 9387;
 export const DEFAULT_AUX_PORT_OFFSET = 1;
-
-/** Default socket/token/db paths are computed on demand from the shared
- *  resolver. The exported constants below preserve the legacy module API
- *  but evaluate at first import — DO NOT cache them anywhere downstream;
- *  the daemon itself always re-reads via the resolvers below. */
-export const DEFAULT_SOCKET_FILE = resolveSocketFile();
-export const DEFAULT_TOKEN_FILE = resolveTokenFile();
-export const DEFAULT_STATE_DB = resolveDbPath();
 
 export type DaemonOpts = {
   /** MCP (fastmcp) port. Defaults to V2_DAEMON_PORT env, then 9387. */

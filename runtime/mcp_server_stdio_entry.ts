@@ -17,7 +17,7 @@
 import { z } from "zod";
 import { openDb, runSchema } from "../substrate/db";
 import { runViews } from "../substrate/views";
-import { createMcpServer } from "./mcp_server";
+import { createMcpServer } from "./mcp_server/index";
 
 const dbPath = process.env.ACC2_TEST_DB_PATH ?? ":memory:";
 const db = openDb(dbPath);
