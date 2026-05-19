@@ -66,9 +66,8 @@ const RESULT_PREFIX = "@@RESULT@@ ";
 const IRREVERSIBLE_PREFIX = "@@IRREVERSIBLE@@ ";
 const STDERR_TAIL_BYTES = 1024;
 /** Robustness: SIGKILL fires this many ms AFTER SIGTERM if the subprocess
- *  has not exited. Python unwinding is slower than bun, so we keep a 2s
- *  grace by default but allow operator override via
- *  ACC2_UV_SIGKILL_ESCALATION_MS (e.g. 3000 for slower interpreters). */
+ *  has not exited. Python unwinding is slower than bun but 2s is the
+ *  universal grace floor; no env knob (operators never tuned it). */
 const SIGTERM_SIGKILL_ESCALATION_MS = 2_000;
 
 /** See runtimes/bun.ts for the convention — same parser, same semantics. */
@@ -439,8 +438,7 @@ export const runUvArtifact = async (
     });
 
     // SIGTERM at wall_ms; SIGKILL escalation 2s later (independent of wall_ms).
-    const envEsc = Number(process.env.ACC2_UV_SIGKILL_ESCALATION_MS ?? "");
-    const escMs = Number.isFinite(envEsc) && envEsc > 0 ? envEsc : SIGTERM_SIGKILL_ESCALATION_MS;
+    const escMs = SIGTERM_SIGKILL_ESCALATION_MS;
     softTimer = setTimeout(() => {
       softFired = true;
       try { proc?.kill("SIGTERM"); } catch (killErr) { void killErr; }

@@ -67,7 +67,9 @@ const STDERR_TAIL_BYTES = 1024;
  *  has not exited. Matches the camofox `SIGTERM_SIGKILL_ESCALATION_MS`
  *  constant — escalation is decoupled from wall_ms so a long-wall artifact
  *  that hangs at wall_ms still hard-kills 2s later, not wall_ms × 1.25.
- *  Override via ACC2_BUN_SIGKILL_ESCALATION_MS (rarely needed). */
+ *  Universal value — no env knob. Operators almost never tuned this;
+ *  if a runtime needs different timing it lives as a constant in its
+ *  own file (camofox = 1s, uv/bun = 2s). */
 const SIGTERM_SIGKILL_ESCALATION_MS = 2_000;
 
 /** Scan stdout for `@@IRREVERSIBLE@@ <kind>:<description>` lines. The
@@ -249,8 +251,7 @@ export const runBunArtifact = async (
     // within a bounded window. This was previously scaled with wall_ms — long-
     // wall artifacts that hung at wall_ms had to wait wall_ms × 0.25 for the
     // hard kill, which hides the wedge behind the long timeout.
-    const envEsc = Number(process.env.ACC2_BUN_SIGKILL_ESCALATION_MS ?? "");
-    const escMs = Number.isFinite(envEsc) && envEsc > 0 ? envEsc : SIGTERM_SIGKILL_ESCALATION_MS;
+    const escMs = SIGTERM_SIGKILL_ESCALATION_MS;
     softTimer = setTimeout(() => {
       softFired = true;
       try { proc?.kill("SIGTERM"); } catch (killErr) {

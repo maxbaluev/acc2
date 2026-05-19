@@ -100,9 +100,8 @@ const RESULT_PREFIX = "@@RESULT@@ ";
 const IRREVERSIBLE_PREFIX = "@@IRREVERSIBLE@@ ";
 const STDERR_TAIL_BYTES = 1024;
 /** Robustness: SIGKILL fires this many ms AFTER SIGTERM if the subprocess
- *  has not exited. Firefox hung-page recovery is slow — we keep the
- *  established 1s grace as default but allow operators to widen via
- *  ACC2_CAMOFOX_SIGKILL_ESCALATION_MS when running on resource-starved hosts. */
+ *  has not exited. Firefox hung-page recovery is slow — 1 s grace is the
+ *  universal value; no env knob (operators never tuned it). */
 const SIGTERM_SIGKILL_ESCALATION_MS = 1_000;
 
 /** See runtimes/bun.ts for the convention — same parser, same semantics.
@@ -506,8 +505,7 @@ const runCamofoxArtifactInner = async (
     // SIGTERM at wall_ms; SIGKILL escalation a fixed window later (independent
     // of wall_ms — firefox hung pages should hard-kill within a bounded
     // window, not after wall_ms × 2 + 1s).
-    const envEsc = Number(process.env.ACC2_CAMOFOX_SIGKILL_ESCALATION_MS ?? "");
-    const escMs = Number.isFinite(envEsc) && envEsc > 0 ? envEsc : SIGTERM_SIGKILL_ESCALATION_MS;
+    const escMs = SIGTERM_SIGKILL_ESCALATION_MS;
     softTimer = setTimeout(() => {
       softFired = true;
       try { proc?.kill("SIGTERM"); } catch (killErr) { void killErr; }
