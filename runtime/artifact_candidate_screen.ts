@@ -67,16 +67,37 @@ export const resolveCitedByClaim = (
   }
 };
 
-/** Resolves an id to events.id when present, otherwise null. */
+/** Minimum prefix length to consider for unique-prefix citation resolution.
+ *  12 chars of ULID base32 = 60 bits — collision probability at 1M events is
+ *  ~1 in 1e6, well below the truncation surface area the brain emits. */
+const MIN_CITATION_PREFIX_LEN = 12;
+
+/** Resolves an id to events.id when present. Tries exact match first (the
+ *  canonical brain emission shape), then unique-prefix match: when the
+ *  caller passed a ULID prefix of at least MIN_CITATION_PREFIX_LEN chars
+ *  AND exactly one events.id starts with it, that row resolves. This
+ *  closes the citation-truncation gap where the brain emits 12-26 char
+ *  prefixes of valid ULIDs and the gate refused them as decorative
+ *  because the exact-match query missed. Ambiguous prefixes (>=2 matches)
+ *  return null — the brain must disambiguate. */
 const resolveEventId = (db: Database, id: string): string | null => {
   if (typeof id !== "string" || id.length === 0) return null;
   try {
-    const row = db
+    const exact = db
       .query<{ id: string }, [string]>(
         "SELECT id FROM events WHERE id = ? LIMIT 1",
       )
       .get(id);
-    return row?.id ?? null;
+    if (exact) return exact.id;
+    if (id.length < MIN_CITATION_PREFIX_LEN) return null;
+    // LIMIT 2 lets us detect ambiguity in one query (≥2 matches = reject).
+    const matches = db
+      .query<{ id: string }, [string]>(
+        "SELECT id FROM events WHERE id LIKE ? LIMIT 2",
+      )
+      .all(`${id}%`);
+    if (matches.length === 1) return matches[0]!.id;
+    return null;
   } catch {
     return null;
   }

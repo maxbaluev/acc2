@@ -98,6 +98,61 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
     expect(resolved).toContain(real.id);
   });
 
+  test("unique ULID-prefix (>=12 chars) resolves to the full id → no decorative refusal", () => {
+    const db = openDb(":memory:");
+    // Seed a real lesson_extracted whose 12-char prefix the brain might cite.
+    const real = emitEvent(db, {
+      kind: "lesson_extracted",
+      substrate_origin: "opencode",
+      payload: { summary: "ulid_prefix_resolution_proof", lesson_kind: "general" },
+    });
+    expect(real.id.length).toBeGreaterThanOrEqual(20);  // canonical ULID size
+    const prefix = real.id.slice(0, 12);
+    const candidate = emitEvent(db, {
+      kind: "act_artifact_candidate",
+      substrate_origin: "opencode",
+      payload: {
+        kind: "research_note",
+        name: "research_note_prefix_cite",
+        body: "padding ".repeat(40),
+        audience: "cofounder_technical_reviewer",
+        cited_knowledge_ids: [prefix],
+      },
+    });
+    const refusals = refusalsFor(db, candidate.id);
+    const decorative = refusals.find((r) => {
+      const p = JSON.parse(r.payload) as Record<string, unknown>;
+      return p.reason === "decorative_citation" || p.reason === "artifact_citation_underrooted";
+    });
+    expect(decorative).toBeUndefined();
+  });
+
+  test("short prefix (<12 chars) does NOT resolve — falls to decorative_citation", () => {
+    const db = openDb(":memory:");
+    const real = emitEvent(db, {
+      kind: "lesson_extracted",
+      substrate_origin: "opencode",
+      payload: { summary: "short_prefix_collision_guard", lesson_kind: "general" },
+    });
+    const shortPrefix = real.id.slice(0, 8);  // below MIN_CITATION_PREFIX_LEN
+    const candidate = emitEvent(db, {
+      kind: "act_artifact_candidate",
+      substrate_origin: "opencode",
+      payload: {
+        kind: "research_note",
+        name: "research_note_short_prefix",
+        body: "padding ".repeat(40),
+        audience: "cofounder_technical_reviewer",
+        cited_knowledge_ids: [shortPrefix],
+      },
+    });
+    const decorative = refusalsFor(db, candidate.id).find((r) => {
+      const p = JSON.parse(r.payload) as Record<string, unknown>;
+      return p.reason === "decorative_citation";
+    });
+    expect(decorative).toBeDefined();
+  });
+
   test("(c) substantive candidate with zero citations → artifact_citation_underrooted", () => {
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {

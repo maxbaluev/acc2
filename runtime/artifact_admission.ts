@@ -36,6 +36,7 @@ import { getArtifact, insertArtifact } from "./artifact_store";
 import { ownerGateDecision } from "./owner_gate";
 import { runPredicateGate } from "./verifiers/predicate_gate";
 import { markSuperseded } from "./artifact_provenance";
+import { partitionCitedKnowledge } from "./artifact_candidate_screen";
 import { parseResourceUri } from "./resource_uri";
 import type { EmitEventInput } from "./events";
 import { requiresStrategicGrounding } from "../substrate/artifact_kind_metadata";
@@ -292,16 +293,8 @@ export const admitArtifact = async (
   const admissionIsPlaceholder = typeof input.kind === "string" && PLACEHOLDER_BODY_KINDS.has(input.kind);
   if (admissionIsSubstantive) {
     const cited = input.citedKnowledgeIds ?? [];
-    const resolvedAtAdmit: string[] = [];
-    const unresolvedAtAdmit: string[] = [];
-    for (const id of cited) {
-      if (typeof id !== "string" || id.length === 0) continue;
-      const row = db
-        .query<{ id: string }, [string]>("SELECT id FROM events WHERE id = ? LIMIT 1")
-        .get(id);
-      if (row) resolvedAtAdmit.push(row.id);
-      else unresolvedAtAdmit.push(id);
-    }
+    const { resolved: resolvedAtAdmit, unresolved: unresolvedAtAdmit } =
+      partitionCitedKnowledge(db, cited);
     if (cited.length === 0 && !admissionIsPlaceholder) {
       emit({
         kind: "lane_routing_refused",
