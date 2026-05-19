@@ -56,6 +56,16 @@ describe("F11 — contract amendment flywheel consumer", () => {
         },
       },
     });
+    // Score the proposal with a low verifier residual so the universal
+    // implementation gate (residual < 0.3) admits it.
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate",
+      directive_id: "DIR_A",
+      task_id: "T_A",
+      context_refs: [proposal.id],
+      payload: { residual: 0.1, breakdown: { implementation_readiness: 0.1 } },
+    });
     setTs(db, proposal.id, ago(60_000));
 
     const summary = runContractAmendmentConsumer(db);
@@ -83,7 +93,7 @@ describe("F11 — contract amendment flywheel consumer", () => {
     expect(second.noop_count).toBeGreaterThanOrEqual(1);
   });
 
-  test("(B) null predicate → owner_input_required (clarification)", () => {
+  test("(B) proposal without verifier residual is unscored, not missing repo clarification", () => {
     const db = openDb(":memory:");
     const proposal = emitEvent(db, {
       kind: "contract_amendment_proposed",
@@ -91,33 +101,23 @@ describe("F11 — contract amendment flywheel consumer", () => {
       directive_id: "DIR_B",
       task_id: "T_B",
       payload: {
-        target_resource: "repo:acc2/missing_predicate",
+        target_resource: "owner_policy:language",
         proposed_behavior: {
-          target_resource: "repo:acc2/missing_predicate",
-          // no predicate set
-          target_files: ["runtime/something.ts"],
+          target_resource: "owner_policy:language",
+          summary: "Prefer owner language policy evidence over repo field completeness.",
         },
       },
     });
     setTs(db, proposal.id, ago(60_000));
 
     const summary = runContractAmendmentConsumer(db);
-    expect(summary.route_to_clarification_count).toBe(1);
+    expect(summary.route_to_clarification_count).toBe(0);
     const verdict = summary.verdicts.find((v) => v.proposal_id === proposal.id);
-    expect(verdict?.verdict).toBe("route_to_clarification");
-    expect(verdict?.emitted_event_ids.length).toBe(1);
-
-    const ev = db
-      .query<{ kind: string; payload: string }, [string]>(
-        "SELECT kind, payload FROM events WHERE id = ?",
-      )
-      .get(verdict!.emitted_event_ids[0]!);
-    expect(ev?.kind).toBe("owner_input_required");
-    const payload = JSON.parse(ev?.payload ?? "{}") as Record<string, unknown>;
-    expect(payload.missing_fields as string[]).toContain("predicate");
+    expect(verdict?.verdict).toBe("noop_unscored");
+    expect(verdict?.emitted_event_ids.length).toBe(0);
   });
 
-  test("(B2) missing target_files also routes to clarification", () => {
+  test("(B2) low verifier residual routes to implementation without predicate or target_files", () => {
     const db = openDb(":memory:");
     const proposal = emitEvent(db, {
       kind: "contract_amendment_proposed",
@@ -125,24 +125,23 @@ describe("F11 — contract amendment flywheel consumer", () => {
       directive_id: "DIR_B2",
       task_id: "T_B2",
       payload: {
-        target_resource: "repo:acc2/missing_target_files",
-        proposed_behavior: {
-          target_resource: "repo:acc2/missing_target_files",
-          predicate: "closure_complete(x)",
-          // no target_files
-        },
+        target_resource: "calendar:weekly_review",
+        proposed_behavior: { target_resource: "calendar:weekly_review", summary: "Add weekly review ritual." },
       },
+    });
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate",
+      directive_id: "DIR_B2",
+      task_id: "T_B2",
+      context_refs: [proposal.id],
+      payload: { residual: 0.12, breakdown: { implementation_readiness: 0.12 } },
     });
     setTs(db, proposal.id, ago(60_000));
 
     const summary = runContractAmendmentConsumer(db);
     const verdict = summary.verdicts.find((v) => v.proposal_id === proposal.id);
-    expect(verdict?.verdict).toBe("route_to_clarification");
-    const ev = db
-      .query<{ payload: string }, [string]>("SELECT payload FROM events WHERE id = ?")
-      .get(verdict!.emitted_event_ids[0]!);
-    const payload = JSON.parse(ev?.payload ?? "{}") as Record<string, unknown>;
-    expect(payload.missing_fields as string[]).toContain("target_files");
+    expect(verdict?.verdict).toBe("route_to_implementation");
   });
 
   test("(C) supersession emits closure_obsolete on prior proposal", () => {
@@ -175,6 +174,16 @@ describe("F11 — contract amendment flywheel consumer", () => {
           target_files: ["runtime/new.ts"],
         },
       },
+    });
+    // Score the newer proposal so it routes to implementation under the
+    // residual-gated universal triage.
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate",
+      directive_id: "DIR_C",
+      task_id: "T_NEW",
+      context_refs: [newer.id],
+      payload: { residual: 0.1, breakdown: { implementation_readiness: 0.1 } },
     });
     setTs(db, newer.id, ago(60_000));
 
@@ -288,6 +297,16 @@ describe("F11 — contract amendment flywheel consumer", () => {
         },
       },
     });
+    // Score dependency so it shows as ready_for_implementation under the
+    // residual-based universal triage gate.
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate",
+      directive_id: "DIR_D2",
+      task_id: "T_D2_DEP",
+      context_refs: [dependency.id],
+      payload: { residual: 0.1 },
+    });
     setTs(db, dependency.id, ago(4_000_000));
 
     const blocked = emitEvent(db, {
@@ -307,17 +326,17 @@ describe("F11 — contract amendment flywheel consumer", () => {
     });
     setTs(db, blocked.id, ago(3_000_000));
 
-    const clarify = emitEvent(db, {
+    const unscored = emitEvent(db, {
       kind: "contract_amendment_proposed",
       substrate_origin: "opencode",
       directive_id: "DIR_D2",
-      task_id: "T_D2_CLARIFY",
+      task_id: "T_D2_UNSCORED",
       payload: {
-        target_resource: "repo:acc2/clarify",
-        proposed_behavior: { target_resource: "repo:acc2/clarify" },
+        target_resource: "repo:acc2/unscored",
+        proposed_behavior: { target_resource: "repo:acc2/unscored" },
       },
     });
-    setTs(db, clarify.id, ago(2_000_000));
+    setTs(db, unscored.id, ago(2_000_000));
 
     const ready = emitEvent(db, {
       kind: "contract_amendment_proposed",
@@ -334,6 +353,14 @@ describe("F11 — contract amendment flywheel consumer", () => {
         },
       },
     });
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate",
+      directive_id: "DIR_D2",
+      task_id: "T_D2_READY",
+      context_refs: [ready.id],
+      payload: { residual: 0.1 },
+    });
     setTs(db, ready.id, ago(1_000_000));
 
     const rows = pendingContractAmendments(db, { directiveId: "DIR_D2" });
@@ -342,7 +369,12 @@ describe("F11 — contract amendment flywheel consumer", () => {
     expect(rows[0]?.selection_rank).toBe(1);
     expect(rows.find((r) => r.proposal_id === blocked.id)?.triage_state).toBe("blocked_by_dependencies");
     expect(rows.find((r) => r.proposal_id === blocked.id)?.open_dependency_count).toBe(1);
-    expect(rows.find((r) => r.proposal_id === clarify.id)?.missing_fields).toEqual(["predicate", "target_files"]);
+    // Under the universal residual gate, a proposal with no action_scored
+    // residual is `unscored` (not `needs_clarification`); missing_fields is
+    // always `[]` because predicate/target_files completeness is no longer
+    // an owner-clarification signal.
+    expect(rows.find((r) => r.proposal_id === unscored.id)?.triage_state).toBe("unscored");
+    expect(rows.find((r) => r.proposal_id === unscored.id)?.missing_fields).toEqual([]);
 
     const verified = evaluatePendingAmendmentBacklogSelection({ rows, selected_proposal_id: rows[0]!.proposal_id });
     expect(verified.residual).toBe(0);

@@ -3491,7 +3491,23 @@ CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
       END AS missing_target_files,
       lv.latest_closure_verdict,
       lv.latest_closure_event_id,
-      lv.has_applied_change
+      lv.has_applied_change,
+      (
+        SELECT s.id FROM events s
+        WHERE s.kind = 'action_scored'
+          AND s.context_refs LIKE '%' || p.proposal_id || '%'
+          AND json_extract(s.payload, '$.residual') IS NOT NULL
+        ORDER BY s.ts DESC
+        LIMIT 1
+      ) AS latest_action_scored_event_id,
+      (
+        SELECT CAST(json_extract(s.payload, '$.residual') AS REAL) FROM events s
+        WHERE s.kind = 'action_scored'
+          AND s.context_refs LIKE '%' || p.proposal_id || '%'
+          AND json_extract(s.payload, '$.residual') IS NOT NULL
+        ORDER BY s.ts DESC
+        LIMIT 1
+      ) AS latest_action_residual
     FROM proposals p
     JOIN supersession s ON s.proposal_id = p.proposal_id
     JOIN dependency_status ds ON ds.proposal_id = p.proposal_id
@@ -3502,30 +3518,27 @@ CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
   triaged AS (
     SELECT
       e.*,
-      CASE
-        WHEN e.missing_predicate = 1 AND e.missing_target_files = 1 THEN '["predicate","target_files"]'
-        WHEN e.missing_predicate = 1 THEN '["predicate"]'
-        WHEN e.missing_target_files = 1 THEN '["target_files"]'
-        ELSE '[]'
-      END AS missing_fields,
+      '[]' AS missing_fields,
       CASE
         WHEN e.supersession_state = 'superseded_by' THEN 'closure_obsolete_supersession'
-        WHEN e.missing_predicate = 1 OR e.missing_target_files = 1 THEN 'needs_clarification'
         WHEN e.open_dependency_count > 0 THEN 'blocked_by_dependencies'
-        ELSE 'ready_for_implementation'
+        WHEN e.latest_action_residual IS NULL THEN 'unscored'
+        WHEN e.latest_action_residual < 0.3 THEN 'ready_for_implementation'
+        ELSE 'blocked_by_residual'
       END AS triage_state,
       CASE
         WHEN e.supersession_state = 'superseded_by' THEN 'newer proposal exists for same target_resource'
-        WHEN e.missing_predicate = 1 OR e.missing_target_files = 1 THEN 'proposal lacks predicate or target_files'
         WHEN e.open_dependency_count > 0 THEN 'declared dependencies are not yet closed'
-        ELSE 'predicate, target_files, and dependencies are implementation-ready'
+        WHEN e.latest_action_residual IS NULL THEN 'proposal has not yet been scored by action_scored residual evidence'
+        WHEN e.latest_action_residual < 0.3 THEN 'latest verifier residual is below implementation threshold'
+        ELSE 'latest verifier residual is too high for implementation'
       END AS triage_reason,
       CASE
         WHEN e.supersession_state = 'superseded_by' THEN 90
-        WHEN e.missing_predicate = 0 AND e.missing_target_files = 0 AND e.open_dependency_count = 0 THEN 100
-        WHEN e.missing_predicate = 1 OR e.missing_target_files = 1 THEN 60
+        WHEN e.open_dependency_count = 0 AND e.latest_action_residual IS NOT NULL AND e.latest_action_residual < 0.3 THEN 100
+        WHEN e.latest_action_residual IS NULL THEN 55
         WHEN e.open_dependency_count > 0 THEN 40
-        ELSE 10
+        ELSE 30
       END AS selection_priority
     FROM enriched e
   )
@@ -3553,7 +3566,9 @@ CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
     ROW_NUMBER() OVER (ORDER BY t.selection_priority DESC, t.ts ASC, t.proposal_id ASC) AS selection_rank,
     t.latest_closure_verdict,
     t.latest_closure_event_id,
-    t.has_applied_change
+    t.has_applied_change,
+    t.latest_action_scored_event_id,
+    t.latest_action_residual
   FROM triaged t
   ORDER BY selection_rank ASC;
 `;
@@ -5664,10 +5679,12 @@ export type PendingContractAmendmentRow = {
   open_dependency_count: number;
   dependencies_closed: boolean;
   missing_fields: string[];
-  triage_state: "ready_for_implementation" | "needs_clarification" | "blocked_by_dependencies" | "closure_obsolete_supersession" | string;
+  triage_state: "ready_for_implementation" | "unscored" | "blocked_by_dependencies" | "blocked_by_residual" | "closure_obsolete_supersession" | string;
   triage_reason: string;
   selection_priority: number;
   selection_rank: number;
+  latest_action_scored_event_id: string | null;
+  latest_action_residual: number | null;
 };
 
 export const pendingContractAmendments = (
@@ -5724,10 +5741,16 @@ export const pendingContractAmendments = (
       open_dependency_count: (r.open_dependency_count as number) ?? 0,
       dependencies_closed: ((r.dependencies_closed as number) ?? 0) === 1,
       missing_fields: Array.isArray(missingFields) ? missingFields.filter((x): x is string => typeof x === "string") : [],
-      triage_state: (r.triage_state as PendingContractAmendmentRow["triage_state"]) ?? "ready_for_implementation",
+      triage_state: (r.triage_state as PendingContractAmendmentRow["triage_state"]) ?? "unscored",
       triage_reason: (r.triage_reason as string | null) ?? "",
       selection_priority: (r.selection_priority as number) ?? 0,
       selection_rank: (r.selection_rank as number) ?? 0,
+      latest_action_scored_event_id: (r.latest_action_scored_event_id as string | null) ?? null,
+      latest_action_residual: typeof r.latest_action_residual === "number"
+        ? (r.latest_action_residual as number)
+        : (typeof r.latest_action_residual === "string" && r.latest_action_residual.length > 0
+          ? Number.parseFloat(r.latest_action_residual)
+          : null),
     };
   });
 };

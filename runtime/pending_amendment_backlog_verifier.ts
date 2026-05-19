@@ -60,12 +60,16 @@ export const evaluatePendingAmendmentBacklogSelection = (
   const deterministicOrderBreaks = rows.filter((row, index) => row.proposal_id !== ordered[index]?.proposal_id).length;
   const expectedTop = ordered[0] ?? null;
   const selectedTopMismatch = selectedProposalId === null || selectedProposalId === expectedTop?.proposal_id ? 0 : 1;
-  const implementationGate = expectedTop?.triage_state === "ready_for_implementation" ? 0 : 1;
+  const latestResidual = typeof (expectedTop as unknown as { latest_action_residual?: unknown } | null)?.latest_action_residual === "number"
+    ? ((expectedTop as unknown as { latest_action_residual: number }).latest_action_residual)
+    : null;
+  const implementationGate = expectedTop?.triage_state === "ready_for_implementation" && latestResidual !== null && latestResidual < 0.3 ? 0 : 1;
+  const unscoredGate = expectedTop?.triage_state === "unscored" || latestResidual === null ? 1 : 0;
 
   const metadataResidual = clamp01(metadataMissing / rows.length);
   const settledResidual = clamp01(settledRows / rows.length);
   const orderResidual = clamp01(deterministicOrderBreaks / rows.length);
-  const residual = clamp01(Math.max(metadataResidual, settledResidual, orderResidual, selectedTopMismatch, implementationGate * 0.5));
+  const residual = clamp01(Math.max(metadataResidual, settledResidual, orderResidual, selectedTopMismatch, implementationGate * 0.5, unscoredGate * 0.4));
   const readyCount = rows.filter((row) => row.triage_state === "ready_for_implementation").length;
 
   return {
@@ -86,7 +90,7 @@ export const evaluatePendingAmendmentBacklogSelection = (
     expected_top_proposal_id: expectedTop?.proposal_id ?? null,
     selected_proposal_id: selectedProposalId,
     expected_triage_state: expectedTop?.triage_state ?? null,
-    eligible_for_f16_f18_implementation: residual < 0.3 && expectedTop?.triage_state === "ready_for_implementation",
+    eligible_for_f16_f18_implementation: residual < 0.3 && expectedTop?.triage_state === "ready_for_implementation" && latestResidual !== null && latestResidual < 0.3,
     reason: expectedTop
       ? `top backlog proposal ${expectedTop.proposal_id} is ${expectedTop.triage_state}`
       : "empty backlog",

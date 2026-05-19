@@ -45,6 +45,7 @@ export type ConsumerVerdictKind =
   | "route_to_clarification"
   | "closure_obsolete_supersession"
   | "closure_complete_redundancy"
+  | "noop_unscored"
   | "noop_dependencies_open"
   | "noop_already_settled";
 
@@ -192,17 +193,6 @@ const buildImplementationTaskPayload = (row: PendingContractAmendmentRow): JsonV
   } as JsonValue;
 };
 
-const buildClarificationPayload = (row: PendingContractAmendmentRow, missing: string[]): JsonValue => {
-  return {
-    question: `Contract amendment proposal ${row.proposal_id.slice(0, 12)} for ${row.target_resource ?? "unspecified resource"} is missing ${missing.join(", ")}. Please supply or decline.`,
-    missing_fields: missing,
-    source_proposal_id: row.proposal_id,
-    target_resource: row.target_resource,
-    [VERDICT_KEY_PREFIX]: projectionKey(row.proposal_id, "route_to_clarification"),
-    reason: "f11_consumer_route_to_clarification",
-  } as JsonValue;
-};
-
 const buildObsoletePayload = (row: PendingContractAmendmentRow): JsonValue => {
   return {
     source_kind: "contract_amendment_proposed",
@@ -280,33 +270,21 @@ const triage = (
     };
   }
 
-  // Missing-field clarification: predicate or target_files absent.
-  const missing: string[] = [];
-  if (!row.predicate || (typeof row.predicate === "string" && row.predicate.trim().length === 0)) {
-    missing.push("predicate");
-  }
-  if (!row.target_files || row.target_files.length === 0) {
-    missing.push("target_files");
-  }
-  if (missing.length > 0) {
-    if (hasPriorEmission(db, row.proposal_id, "route_to_clarification")) {
-      return { verdict: "noop_already_settled", reason: "clarification verdict already emitted" };
-    }
-    return {
-      verdict: "route_to_clarification",
-      payload: buildClarificationPayload(row, missing),
-      emitKind: "owner_input_required",
-      contextRefs: [row.proposal_id],
-      reason: `missing ${missing.join(", ")}`,
-    };
-  }
-
   // Dependencies still open: hold off, neither implement nor close.
   if (!allDependenciesClosed(db, row.dependencies)) {
     return { verdict: "noop_dependencies_open", reason: "one or more dependencies still open" };
   }
 
-  // Well-defined → route to implementation.
+  // Universal implementation gate: the proposal is implementable only when
+  // its latest action_scored evidence says residual < 0.3. Missing score is
+  // an unscored backlog item, not an owner clarification about repo fields.
+  if (row.triage_state === "unscored") {
+    return { verdict: "noop_unscored", reason: "proposal has no action_scored residual yet" };
+  }
+  if (row.triage_state !== "ready_for_implementation") {
+    return { verdict: "noop_dependencies_open", reason: row.triage_reason || "proposal is not implementation-ready" };
+  }
+
   if (hasPriorEmission(db, row.proposal_id, "route_to_implementation")) {
     return { verdict: "noop_already_settled", reason: "implementation route already emitted" };
   }
@@ -315,7 +293,7 @@ const triage = (
     payload: buildImplementationTaskPayload(row),
     emitKind: "task_node_opened",
     contextRefs: [row.proposal_id],
-    reason: "predicate + target_files present, dependencies closed",
+    reason: "latest verifier residual is below implementation threshold and dependencies are closed",
   };
 };
 

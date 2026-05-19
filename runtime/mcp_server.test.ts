@@ -558,7 +558,10 @@ describe("fastmcp substrate tools — stdio transport", () => {
       proposal_event_id: emitted.result.id,
       proposal_id: emitted.result.id,
       status: "unsettled",
-      triage_state: "ready_for_implementation",
+      // Under the universal residual gate (proposal #1, 2026-05-19),
+      // a proposal with predicate+target_files but no action_scored
+      // residual is `unscored`, not `ready_for_implementation`.
+      triage_state: "unscored",
       evidence_event_ids: expect.arrayContaining([emitted.result.id, "ctx_1", "evidence_1"]),
       selection_gate: expect.objectContaining({
         requires_anchor_freshness: true,
