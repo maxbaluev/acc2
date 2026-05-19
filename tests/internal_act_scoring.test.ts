@@ -536,7 +536,7 @@ describe("F6 extension — lesson extraction (decision 8)", () => {
 });
 
 describe("F6 extension — recipe replay selection (decision 13)", () => {
-  // The wiring sits at the recipe_invoked emission in task_dispatcher.ts.
+  // The wiring sits at the reusable-trajectory selection emission in task_dispatcher.ts.
   // The dispatcher path is exercised by runtime/task_dispatcher.test.ts;
   // here we drive the recordInternalAct contract directly with the same
   // shape the dispatcher uses, so the projection chain is falsifiable in
@@ -547,7 +547,7 @@ describe("F6 extension — recipe replay selection (decision 13)", () => {
     const dispatchId = "dispatch_test_42";
     const directiveId = newId();
     const taskId = newId();
-    // Simulate the dispatcher's recipe_invoked emit so the source event
+    // Simulate the dispatcher's reusable-trajectory selection emit so the source event
     // exists on the ledger before recordInternalAct is called.
     const invoked = emitEvent(db, {
       kind: "dispatch_decided",
@@ -569,7 +569,7 @@ describe("F6 extension — recipe replay selection (decision 13)", () => {
       verifierKind: "deterministic_code",
       predictedResidual: 0.1,
       reasoningSummary: `matched recipe ${recipeId} confidence=0.90`,
-      actionSummary: `recipe_invoked dispatch_id=${dispatchId} recipe_id=${recipeId}`,
+      actionSummary: `reusable-trajectory selection dispatch_id=${dispatchId} recipe_id=${recipeId}`,
       effectSummary: "dispatcher will replay the cached trajectory; no brain call",
       directiveId,
       taskId,
@@ -614,7 +614,7 @@ describe("F6 extension — recipe replay selection (decision 13)", () => {
       verifierKind: "deterministic_code" as const,
       predictedResidual: 0.1,
       reasoningSummary: `matched recipe ${recipeId} confidence=0.90`,
-      actionSummary: `recipe_invoked dispatch_id=${dispatchId} recipe_id=${recipeId}`,
+      actionSummary: `reusable-trajectory selection dispatch_id=${dispatchId} recipe_id=${recipeId}`,
       effectSummary: "dispatcher will replay",
       directiveId,
       taskId,

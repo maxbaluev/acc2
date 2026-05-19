@@ -351,7 +351,7 @@ export const replayRecipe = async (
     (s) => s.step_kind === "action_predicted" && !!s.artifact_id,
   );
   if (actionSteps.length === 0) {
-    // recipe_replay_aborted absorbed into action_scored (universality proposal
+    // recipe-replay-abort action_scored absorbed into action_scored (universality proposal
     // A12CR1QCDN0SS51CM95K39T45M). residual=1 + replay_aborted=true on the
     // payload renders the abort on the same scoring substrate.
     const ev = emitEvent(db, {

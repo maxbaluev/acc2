@@ -380,7 +380,7 @@ describe("checkSeedArtifacts (Task 3 substrate-content check)", () => {
 });
 
 describe("checkSeedRecipes (final substrate-content check)", () => {
-  test("ok when recipe_extracted >= SEED_RECIPE_MIN", () => {
+  test("ok when recipe-shape knowledge >= SEED_RECIPE_MIN", () => {
     const c = checkSeedRecipes(makeEnv({
       substrateCounts: () => ({
         knowledgePromoted: SEED_KNOWLEDGE_MIN,

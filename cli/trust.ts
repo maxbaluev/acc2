@@ -71,7 +71,7 @@ export const gatherTrustMetrics = (db: Database): TrustMetrics => {
     else if (r.status === "failed") amendments_7d.failed += num(r.c);
     else if (r.status === "refused") amendments_7d.refused += num(r.c);
   }
-  // recipe_extracted / recipe_replay_aborted were absorbed into the
+  // recipe-shape knowledge / recipe-replay-abort action_scored were absorbed into the
   // knowledge_* + action_scored substrate (universality proposal
   // A12CR1QCDN0SS51CM95K39T45M). Recipe-shape knowledge rows carry
   // payload.recipe_shape.enabled; replay aborts surface as action_scored rows

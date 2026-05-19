@@ -312,7 +312,7 @@ export const dispatchReadyTask = async (
     // already-emitted dispatch_decided row's payload columns (route=substrate_replay
     // + reusable_trajectory_replay_selected=true + routing_axes/knowledge_id).
     // Tests and observers check dispatch_decided where route='substrate_replay'.
-    // The recipe_invoked event family was absorbed under universality proposal
+    // The reusable-trajectory selection event family was absorbed under universality proposal
     // A12CR1QCDN0SS51CM95K39T45M; replay outcomes flow through the standard
     // action_scored / task_committed substrate. Emit one action_predicted row
     // citing the selector + verifier artifact handles so the credit chain has

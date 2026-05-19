@@ -29,7 +29,7 @@
 //     for "this recipe was replayed". If no replay ever happened AND the
 //     seed was extracted > N days ago, the recipe is decayed.
 //
-// All decay rows are emitted as `recipe_extracted` events tagged with
+// All decay rows are emitted as `recipe-shape knowledge` events tagged with
 // payload.confidence_update = "inertia_decayed" + context_refs pointing
 // back to the prior canonical recipe row. The view picks the
 // HIGHEST-confidence row per (goal_shape, topology_signature) pair, so

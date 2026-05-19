@@ -12,11 +12,11 @@
 //   - extractSemanticDedup: §3.6.1 Rule 1+2. Embedding-based merger.
 //     Phase B2 stub: no-op when no embeddings are present (Phase F).
 //   - extractRecipeCandidates: group task_committed by goal_shape;
-//     emit recipe_extracted + recipe_promoted when the (goal_shape ×
+//     emit recipe-shape knowledge + promoted recipe-shape knowledge when the (goal_shape ×
 //     topology) cluster's Beta posterior lower bound clears a
 //     per-owner per-goal-class threshold (F5: see
 //     runtime/posterior_promotion.ts). Failed gates record
-//     recipe_promotion_deferred instead.
+//     deferred recipe-shape knowledge instead.
 //
 // Each extractor returns a small summary object for daemon telemetry.
 
@@ -1000,8 +1000,8 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
 // beta from negative outcomes + high-residual closures) is evaluated
 // against a per-owner per-goal-class threshold by
 // `evaluatePromotion` in runtime/posterior_promotion.ts. Clusters
-// that clear the gate emit `recipe_extracted` + `recipe_promoted`;
-// clusters that fail emit `recipe_promotion_deferred` so the deferral
+// that clear the gate emit `recipe-shape knowledge` + `promoted recipe-shape knowledge`;
+// clusters that fail emit `deferred recipe-shape knowledge` so the deferral
 // is observable.
 //
 // Phase J refines the matching:
@@ -1088,7 +1088,7 @@ const topologySignatureFor = (db: Database, directiveId: string): string => {
 
 /** Read the event ids that actually drove the trajectory for a
  *  directive — task_node_opened + action_predicted + action_scored
- *  rows in chronological order. recipe_extracted then cites these
+ *  rows in chronological order. recipe-shape knowledge then cites these
  *  via context_refs so the credit chain has explicit pointers from
  *  every recipe back to the actions that proved it. Without these
  *  citations, recipe → action posterior credit had no path; brain
@@ -1236,7 +1236,7 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
   }
 
   // Already-extracted shapes — dedup by composite key (goal_shape, topology).
-  // Recipe-shaped knowledge rows replaced the recipe_extracted event family
+  // Recipe-shaped knowledge rows replaced the recipe-shape knowledge event family
   // (universality proposal A12CR1QCDN0SS51CM95K39T45M). The payload still
   // carries goal_shape / topology_signature at top level for internal readers;
   // recipe_shape.enabled distinguishes recipe-shaped knowledge from regular
@@ -1316,7 +1316,7 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
       if (!verdict.promote) {
         // Record the deferral so operators can audit the gate decision; the
         // candidate stays unpromoted until later evidence shifts the
-        // posterior. Recipe-shape knowledge rows replaced recipe_promotion_deferred
+        // posterior. Recipe-shape knowledge rows replaced deferred recipe-shape knowledge
         // (universality proposal A12CR1QCDN0SS51CM95K39T45M); promotion_state
         // tracks the deferral verdict on the same substrate.
         insertEvent(db, {
@@ -1374,7 +1374,7 @@ export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary =>
 
       // Promotion gate passed — emit a recipe-shaped knowledge_candidate row
       // (trajectory cache) AND a paired knowledge_promoted row carrying the
-      // posterior evidence. The recipe_extracted/recipe_promoted event family
+      // posterior evidence. The recipe-shape knowledge/promoted recipe-shape knowledge event family
       // was absorbed into knowledge_* under universality proposal
       // A12CR1QCDN0SS51CM95K39T45M; recipe_shape.enabled distinguishes
       // recipe-shaped knowledge from regular knowledge rows.

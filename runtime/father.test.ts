@@ -541,7 +541,7 @@ describe("selectByPriorityAndFreshnessAndConflicts", () => {
 });
 
 describe("Father Tier-0 replay preference", () => {
-  test("detects templates with matching recipe_extracted rows", () => {
+  test("detects templates with matching recipe-shape knowledge rows", () => {
     const db = openDb(":memory:");
     runViews(db);
     // Brain audit byaeuflif #2 (2026-05-15) shrank DIRECTIVE_TEMPLATES

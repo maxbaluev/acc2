@@ -224,7 +224,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     });
   };
 
-  test("3 committed shapes + positive owner outcomes → recipe_promoted + recipe_extracted", () => {
+  test("3 committed shapes + positive owner outcomes → promoted recipe-shape knowledge + recipe-shape knowledge", () => {
     const db = openDb(":memory:");
     seedHighAutonomyOwner(db);
     for (let i = 0; i < 3; i++) {
@@ -257,7 +257,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     const summary = extractRecipeCandidates(db);
     expect(summary.extracted).toBe(1);
 
-    // Recipe-shape cache row (formerly recipe_extracted) is now a
+    // Recipe-shape cache row (formerly recipe-shape knowledge) is now a
     // knowledge_candidate carrying recipe_shape.enabled.
     const recipes = db
       .query("SELECT payload FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
@@ -267,7 +267,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     expect(payload.goal_shape).toContain("count_todos");
     expect(payload.success_count).toBe(3);
 
-    // Paired promoted row (formerly recipe_promoted) carries the posterior evidence.
+    // Paired promoted row (formerly promoted recipe-shape knowledge) carries the posterior evidence.
     const promoted = db
       .query("SELECT payload FROM events WHERE kind = 'knowledge_promoted' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
       .all() as Array<{ payload: string }>;
@@ -278,7 +278,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     expect(promotedPayload.confidence as number).toBeGreaterThanOrEqual(promotedPayload.threshold as number);
   });
 
-  test("3 commits with NO owner outcomes → recipe_promotion_deferred (not promoted)", () => {
+  test("3 commits with NO owner outcomes → deferred recipe-shape knowledge (not promoted)", () => {
     const db = openDb(":memory:");
     // Default owner profile (autonomy_score=0.5 → MID threshold 0.6).
     // Three plain commits give alpha=2.5, beta=1 → mean=0.71, lower≈0.50.
@@ -474,7 +474,7 @@ describe("extractRecipeFromCommit (inline post-commit path)", () => {
 });
 
 describe("task_dispatcher inline recipe seeding (Task 5)", () => {
-  test("a successful dispatch emits recipe_extracted within the same call", async () => {
+  test("a successful dispatch emits recipe-shape knowledge within the same call", async () => {
     // End-to-end check that the dispatcher wires extractRecipeFromCommit on
     // the task_committed branch (k_555: create → retrieve → mutate → credit).
     // Uses the canonical d_count_todos fixture under the mock bridge so the

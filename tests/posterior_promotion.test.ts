@@ -14,7 +14,7 @@
 //     low-autonomy owner (high confidence overrides cautious threshold).
 //   - Missing owner profile falls back to the 0.65 threshold.
 //   - Diagnostic payload exposes confidence + threshold so emitters can
-//     record both on `recipe_promoted` / `recipe_promotion_deferred`.
+//     record both on `promoted recipe-shape knowledge` / `deferred recipe-shape knowledge`.
 
 import { describe, expect, test } from "bun:test";
 import {
@@ -156,7 +156,7 @@ describe("posterior_N1_and_mixed_signal_gate (falsifying test from roadmap)", ()
       "design",
     );
     // Both fields must be present and in [0, 1] so emitters can stamp them
-    // onto recipe_promotion_deferred for diagnostic visibility.
+    // onto deferred recipe-shape knowledge for diagnostic visibility.
     expect(typeof e.confidence).toBe("number");
     expect(typeof e.threshold).toBe("number");
     expect(e.confidence).toBeGreaterThanOrEqual(0);

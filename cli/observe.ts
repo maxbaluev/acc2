@@ -300,7 +300,7 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       const ownerTag = learnedFromOwner ? ` ← owner: ${JSON.stringify(trunc(learnedFromOwner, 80))}` : "";
       return `${claim ? `claim=${JSON.stringify(trunc(claim, 54))}` : ""}${score !== undefined ? ` score=${score}` : ""}${ownerTag}`.trim();
     }
-    // recipe_extracted absorbed into knowledge_candidate / knowledge_promoted
+    // recipe-shape knowledge absorbed into knowledge_candidate / knowledge_promoted
     // carrying payload.recipe_shape.enabled; render is handled inline by
     // the knowledge_* cases above.
     case "act_artifact_admitted": {

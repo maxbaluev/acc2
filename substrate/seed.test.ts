@@ -503,7 +503,7 @@ describe("seedFoundationalKnowledge", () => {
 });
 
 describe("seedRecipes", () => {
-  test("inserts one recipe_extracted row per canonical goal shape", () => {
+  test("inserts one recipe-shape knowledge row per canonical goal shape", () => {
     const db = openDb(":memory:");
     seedActArtifacts(db);
     const summary = seedRecipes(db);

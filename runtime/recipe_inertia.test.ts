@@ -17,7 +17,7 @@ beforeEach(() => closeDb());
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-/** Hand-roll one recipe_extracted row at a controlled ts. Bypasses emitEvent
+/** Hand-roll one recipe-shape knowledge row at a controlled ts. Bypasses emitEvent
  *  so we can backdate the row (decay logic uses ts for inertia-age math). */
 const insertRecipeRow = (
   db: ReturnType<typeof openDb>,
@@ -97,7 +97,7 @@ describe("recipe_inertia.applyRecipeInertiaDecay", () => {
     expect(outcome.decayed).toBe(1);
     expect(outcome.decayed_recipe_ids).toContain(recipeId);
 
-    // A new recipe_extracted row was emitted with confidence × (1 − 0.05).
+    // A new recipe-shape knowledge row was emitted with confidence × (1 − 0.05).
     const decayRow = db
       .query(
         `SELECT payload, context_refs FROM events

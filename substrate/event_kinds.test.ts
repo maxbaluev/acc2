@@ -137,7 +137,7 @@ describe("EVENT_KINDS registry coverage", () => {
       let m: RegExpExecArray | null;
       while ((m = re.exec(text)) !== null) literals.add(m[1]);
     }
-    // The grep also catches strings like `"kind: 'recipe_extracted'"`
+    // The grep also catches strings like `"kind: 'recipe-shape knowledge'"`
     // inside SQL queries (which DO carry real event kinds) and false
     // positives like `kind: "fs_write"` (an irreversible_effect payload
     // discriminator) — we filter the false-positive set explicitly via

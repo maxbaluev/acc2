@@ -3735,20 +3735,19 @@ CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
 
 // ── Public entrypoint ──────────────────────────────────────────────
 
+// recipes_latest_view and recipe_registry_view now project from
+// knowledge_candidate/knowledge_promoted rows filtered by
+// payload.recipe_shape.enabled (universality proposal
+// A12CR1QCDN0SS51CM95K39T45M absorbed the recipe_* event family). They are
+// still created by runViews() (the SQL is unchanged on the read side) but
+// removed from the canonical VIEW_NAMES enumeration so the public surface
+// reflects the post-absorption substrate.
 export const VIEW_NAMES = [
   "lesson_apply_candidate_view",
   "applied_lesson_effectiveness_view",
   "lesson_implementation_status_view",
   "lesson_implementer_queue_view",
   "pending_owner_decision_queue_view",
-  // recipes_latest_view and recipe_registry_view now project from
-  // knowledge_candidate/knowledge_promoted rows filtered by
-  // payload.recipe_shape.enabled (universality proposal
-  // A12CR1QCDN0SS51CM95K39T45M absorbed the recipe_* event family). The view
-  // names are retained as the fast-index surfaces consumed by
-  // runtime/recipe_replay.ts and runtime/recipe_inertia.ts.
-  "recipes_latest_view",
-  "recipe_registry_view",
   "promoted_knowledge_view",
   "irreversible_effects_view",
   "low_risk_inline_patterns_view",

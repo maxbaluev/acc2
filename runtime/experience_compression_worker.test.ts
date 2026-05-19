@@ -103,7 +103,7 @@ const insertSuccessfulTrajectory = (
 };
 
 describe("experienceCompressionWorkerTick", () => {
-  test("compresses repeated successful trajectories into recipe_extracted plus knowledge_candidate", () => {
+  test("compresses repeated successful trajectories into recipe-shape knowledge plus knowledge_candidate", () => {
     const db = openDb(":memory:");
     runViews(db);
     const first = insertSuccessfulTrajectory(db, 1);

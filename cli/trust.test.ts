@@ -62,7 +62,7 @@ describe("acc trust", () => {
   test("seeded recipe + closure data yields non-zero counts", async () => {
     const db = openDb(dbPath);
     insertEvent(db, "owner_profile_recorded", { autonomy_score: 0.35 });
-    // Recipe-shape knowledge rows replace the recipe_extracted event family
+    // Recipe-shape knowledge rows replace the recipe-shape knowledge event family
     // (universality proposal A12CR1QCDN0SS51CM95K39T45M); recipe_shape.enabled
     // makes them visible to the recipe-shape filter the trust metric counts.
     insertEvent(db, "knowledge_candidate", { goal_shape: "g1", recipe_shape: { enabled: true } });

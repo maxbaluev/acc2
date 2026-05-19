@@ -701,7 +701,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // owner-approved via amendment GHWARJHT1N26BA1T7HNSJJ5AAG from
   // Q2NTPKM dispatch). Clusters successful trajectories (low residual +
   // closure_residual < 0.3 + lesson_extracted) and emits compressed
-  // knowledge_candidate/recipe_extracted, plus retires stale lessons
+  // knowledge_candidate/recipe-shape knowledge, plus retires stale lessons
   // via applied_change_committed status='refused' reason=
   // 'compression_supersede'. REUSE-FIRST: no new event kinds.
   // Default cadence 30min — fast enough to catch new patterns within
@@ -872,7 +872,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // open knowledge_candidate and act_artifact rows that have crossed
   // the promotion thresholds. Pre-fix the only way these advanced was
   // chance dispatch through Father; substrate counts showed 0/53
-  // act_artifact_promoted and 0/70 recipe_promoted. Running on a
+  // act_artifact_promoted and 0/70 promoted recipe-shape knowledge. Running on a
   // bounded 5-min cadence makes promotion a substrate liveness function.
   const EXTRACTORS_INTERVAL_MS = 5 * 60 * 1000;
   if (isWorkerEnabled("extractors")) {
@@ -1161,7 +1161,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // Experience compression worker (primitive #3 of SZG5PQ01,
   // owner-approved 2026-05-16 via amendment GHWARJHT). Clusters
   // successful trajectories by goal_shape + lesson_kind, emits
-  // compressed knowledge_candidate/recipe_extracted, retires stale
+  // compressed knowledge_candidate/recipe-shape knowledge, retires stale
   // lessons. REUSE-FIRST: no new event kinds. Opt-OUT via
   // `ACC2_DISABLE_WORKERS=experience_compression`. 30-min reactive
   // cadence; reactive_safety_net is the genuine deadline.

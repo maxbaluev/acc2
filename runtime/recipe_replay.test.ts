@@ -349,7 +349,7 @@ describe("recipe_replay.replayRecipe", () => {
       );
       const badVerifierId = badVerifier.id;
 
-      // Rewrite EVERY recipe_extracted row's trajectory to point at the bad
+      // Rewrite EVERY recipe-shape knowledge row's trajectory to point at the bad
       // verifier (the matcher will pick the freshest by ts, which is a
       // confidence-bump row — we have to mutate that one too).
       const allRecipeRows = db
@@ -436,7 +436,7 @@ describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {
     );
     const verifierId = verifier.id;
 
-    // Hand-roll a recipe_extracted row whose trajectory has TWO action steps.
+    // Hand-roll a recipe-shape knowledge row whose trajectory has TWO action steps.
     const recipeRow = emitEvent(db, {
       kind: "knowledge_candidate",
       substrate_origin: "substrate_auto",
@@ -647,7 +647,7 @@ describe("recipe_replay.findRecipeMatch — recipes_latest_view integration", ()
     const db = openDb(":memory:");
     runViews(db);
 
-    // Two recipe_extracted rows for the SAME key — the view should
+    // Two recipe-shape knowledge rows for the SAME key — the view should
     // surface the higher-confidence one to the matcher.
     const lowerId = newId();
     db.run(

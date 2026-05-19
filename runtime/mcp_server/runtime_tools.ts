@@ -191,7 +191,7 @@ export const handleReplayRecipe = async (
     goal = (p.goal as string | undefined) ?? "";
   } catch { /* swallow */ }
 
-  // recipe_extracted absorbed into knowledge_candidate / knowledge_promoted
+  // recipe-shape knowledge absorbed into knowledge_candidate / knowledge_promoted
   // carrying recipe_shape (universality proposal A12CR1QCDN0SS51CM95K39T45M).
   const recipeRow = ctx.db
     .query("SELECT payload FROM events WHERE id = ? AND kind IN ('knowledge_candidate', 'knowledge_promoted')")
