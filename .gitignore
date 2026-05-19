@@ -31,3 +31,6 @@ bun.lock
 # Build output / scratch
 /.dist/
 /logs/
+
+# Telegram MCP download artifacts (external tool output, not source)
+/downloads/
