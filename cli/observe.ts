@@ -342,6 +342,17 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       const residual = typeof residualRaw === "number" && Number.isFinite(residualRaw)
         ? residualRaw.toFixed(2)
         : "<unset>";
+      // Live payload shape is { checks: Record<string, boolean>, breakdown: Record<string, number> }.
+      // Older payloads used { covered_sub_tasks[], uncovered_aspects[] }. Prefer checks when present;
+      // fall back to the legacy arrays so historical events still render meaningfully.
+      const checks = p.checks as Record<string, unknown> | undefined;
+      if (checks && typeof checks === "object") {
+        const entries = Object.values(checks);
+        const total = entries.length;
+        const passed = entries.filter((v) => v === true).length;
+        const failed = total - passed;
+        return `closure_residual=${residual} checks=${passed}/${total}${failed > 0 ? ` failed=${failed}` : ""}`;
+      }
       const uncovered = (p.uncovered_aspects as unknown[] | undefined)?.length ?? 0;
       const covered = (p.covered_sub_tasks as unknown[] | undefined)?.length ?? 0;
       return `closure_residual=${residual} covered=${covered} uncovered=${uncovered}`;

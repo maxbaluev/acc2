@@ -91,6 +91,64 @@ describe("formatEvent — ≤ MAX_EVENT_LINE_CHARS invariant", () => {
   });
 });
 
+describe("formatEvent — task_closure_audited rendering (live + legacy payloads)", () => {
+  test("live payload with checks object: renders checks=passed/total", () => {
+    const line = formatEvent({
+      id: "ev_audit",
+      kind: "task_closure_audited",
+      ts: "2026-05-19T21:16:10.687Z",
+      task_id: "t_root",
+      payload: {
+        closure_residual: 0.08,
+        checks: {
+          one_amendment_per_open_question: true,
+          cited_event_ids_resolve: true,
+          no_multi_brain_mention: true,
+          claude_md_byte_delta_le_600: true,
+        },
+      },
+    });
+    expect(line).toContain("closure_residual=0.08");
+    expect(line).toContain("checks=4/4");
+    expect(line).not.toContain("covered=");
+    expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
+  });
+
+  test("live payload with mixed pass/fail checks: surfaces failed count", () => {
+    const line = formatEvent({
+      id: "ev_audit_partial",
+      kind: "task_closure_audited",
+      ts: "2026-05-19T21:16:10.687Z",
+      task_id: "t_root",
+      payload: {
+        closure_residual: 0.42,
+        checks: { a: true, b: true, c: false, d: false, e: true },
+      },
+    });
+    expect(line).toContain("checks=3/5");
+    expect(line).toContain("failed=2");
+    expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
+  });
+
+  test("legacy payload with covered_sub_tasks/uncovered_aspects: preserves old rendering", () => {
+    const line = formatEvent({
+      id: "ev_legacy",
+      kind: "task_closure_audited",
+      ts: "2026-05-19T21:16:10.687Z",
+      task_id: "t_root",
+      payload: {
+        closure_residual: 0.18,
+        covered_sub_tasks: ["a", "b", "c"],
+        uncovered_aspects: ["d"],
+      },
+    });
+    expect(line).toContain("closure_residual=0.18");
+    expect(line).toContain("covered=3");
+    expect(line).toContain("uncovered=1");
+    expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
+  });
+});
+
 describe("formatFollowTerminalSentinel", () => {
   test("prints a compact parseable terminal line", () => {
     const line = formatFollowTerminalSentinel({
