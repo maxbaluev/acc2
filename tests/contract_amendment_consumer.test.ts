@@ -64,7 +64,7 @@ describe("F11 — contract amendment flywheel consumer", () => {
       directive_id: "DIR_A",
       task_id: "T_A",
       context_refs: [proposal.id],
-      payload: { residual: 0.1, breakdown: { implementation_readiness: 0.1 } },
+      payload: { residual: 0.1, breakdown: { implementation_readiness: 0.1 }, verifier_kind: "deterministic_code" },
     });
     setTs(db, proposal.id, ago(60_000));
 
@@ -135,7 +135,7 @@ describe("F11 — contract amendment flywheel consumer", () => {
       directive_id: "DIR_B2",
       task_id: "T_B2",
       context_refs: [proposal.id],
-      payload: { residual: 0.12, breakdown: { implementation_readiness: 0.12 } },
+      payload: { residual: 0.12, breakdown: { implementation_readiness: 0.12 }, verifier_kind: "deterministic_code" },
     });
     setTs(db, proposal.id, ago(60_000));
 
@@ -183,7 +183,7 @@ describe("F11 — contract amendment flywheel consumer", () => {
       directive_id: "DIR_C",
       task_id: "T_NEW",
       context_refs: [newer.id],
-      payload: { residual: 0.1, breakdown: { implementation_readiness: 0.1 } },
+      payload: { residual: 0.1, breakdown: { implementation_readiness: 0.1 }, verifier_kind: "deterministic_code" },
     });
     setTs(db, newer.id, ago(60_000));
 
@@ -305,7 +305,7 @@ describe("F11 — contract amendment flywheel consumer", () => {
       directive_id: "DIR_D2",
       task_id: "T_D2_DEP",
       context_refs: [dependency.id],
-      payload: { residual: 0.1 },
+      payload: { residual: 0.1, verifier_kind: "deterministic_code" },
     });
     setTs(db, dependency.id, ago(4_000_000));
 
@@ -359,7 +359,7 @@ describe("F11 — contract amendment flywheel consumer", () => {
       directive_id: "DIR_D2",
       task_id: "T_D2_READY",
       context_refs: [ready.id],
-      payload: { residual: 0.1 },
+      payload: { residual: 0.1, verifier_kind: "deterministic_code" },
     });
     setTs(db, ready.id, ago(1_000_000));
 

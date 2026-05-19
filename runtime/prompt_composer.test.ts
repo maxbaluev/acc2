@@ -335,7 +335,9 @@ describe("prompt_composer", () => {
       kind: "action_scored",
       directive_id: directiveId,
       task_id: upstream,
-      payload: { observed_value: "PROBE_WATCH_TOKEN" },
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
+      payload: { observed_value: "PROBE_WATCH_TOKEN", verifier_kind: "deterministic_code" },
     });
     const composed = composePrompt(db, { taskId });
     expect(composed.text).toContain("WATCHED OUTPUTS");

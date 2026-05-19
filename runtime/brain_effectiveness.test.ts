@@ -66,7 +66,9 @@ describe("brain_effectiveness", () => {
       substrate_origin: "substrate_auto",
       directive_id: directiveId,
       task_id: rootTaskId,
-      payload: { residual: 0.12 },
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
+      payload: { residual: 0.12, verifier_kind: "deterministic_code" },
       residual: 0.12,
     });
     emitEvent(db, {

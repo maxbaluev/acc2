@@ -41,15 +41,19 @@ describe("watch_edges", () => {
       kind: "action_scored",
       directive_id: directiveId,
       task_id: upstream,
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
       residual: 0.5,
-      payload: { iter: 1 },
+      payload: { iter: 1, verifier_kind: "deterministic_code" },
     });
     emitEvent(db, {
       kind: "action_scored",
       directive_id: directiveId,
       task_id: upstream,
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
       residual: 0.2,
-      payload: { iter: 2 },
+      payload: { iter: 2, verifier_kind: "deterministic_code" },
     });
 
     const observations = snapshotWatchedOutputs(db, downstream);
@@ -73,19 +77,25 @@ describe("watch_edges", () => {
       kind: "action_scored",
       directive_id: directiveId,
       task_id: upstream,
-      payload: { iter: 1 },
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
+      payload: { iter: 1, verifier_kind: "deterministic_code" },
     });
     emitEvent(db, {
       kind: "action_scored",
       directive_id: directiveId,
       task_id: upstream,
-      payload: { iter: 2 },
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
+      payload: { iter: 2, verifier_kind: "deterministic_code" },
     });
     emitEvent(db, {
       kind: "action_scored",
       directive_id: directiveId,
       task_id: upstream,
-      payload: { iter: 3 },
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
+      payload: { iter: 3, verifier_kind: "deterministic_code" },
     });
 
     const observations = snapshotWatchedOutputs(db, downstream);
@@ -132,14 +142,18 @@ describe("watch_edges", () => {
       kind: "action_scored",
       directive_id: directiveId,
       task_id: upstream,
-      payload: { count: 5 },
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
+      payload: { count: 5, verifier_kind: "deterministic_code" },
     });
     // Upstream revokes — synthetic kind via payload.revocation=true
     emitEvent(db, {
       kind: "action_scored",
       directive_id: directiveId,
       task_id: upstream,
-      payload: { count: 3, revocation: true },
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
+      payload: { count: 3, revocation: true, verifier_kind: "deterministic_code" },
     });
 
     const violations = detectRevocationViolations(db, directiveId);
@@ -153,7 +167,9 @@ describe("watch_edges", () => {
       kind: "action_scored",
       directive_id: directiveId,
       task_id: upstream,
-      payload: { count: 5, revocation: true },
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
+      payload: { count: 5, revocation: true, verifier_kind: "deterministic_code" },
     });
     const violations = detectRevocationViolations(db, directiveId);
     expect(violations.length).toBe(0);
@@ -216,13 +232,17 @@ describe("watch_edges", () => {
       kind: "action_scored",
       directive_id: directiveId,
       task_id: upstream1,
-      payload: { src: "u1" },
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
+      payload: { src: "u1", verifier_kind: "deterministic_code" },
     });
     emitEvent(db, {
       kind: "action_scored",
       directive_id: directiveId,
       task_id: upstream2,
-      payload: { src: "u2" },
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
+      payload: { src: "u2", verifier_kind: "deterministic_code" },
     });
     const observations = snapshotWatchedOutputs(db, downstream);
     const upstreamIds = observations.map((o) => o.upstream_task_id);

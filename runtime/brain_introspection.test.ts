@@ -157,21 +157,29 @@ describe("buildBrainSelfAudit", () => {
       payload: { source_kind: "contract_amendment_proposed", status: "success" },
     });
     // Two action_scored residuals — one passing, one over threshold.
+    // Pass action_artifact_id so the action_scored null-id lift gate
+    // (runtime/events.ts brain lesson TA4X4Q36XH38789BWQMV2AYB3W) sees
+    // a registered handle and projects normally without emitting a
+    // sibling dispatcher_violation.
     emitEvent(db, {
       kind: "action_scored",
       substrate_origin: "substrate_auto",
       directive_id: directiveId,
       task_id: taskId,
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
       residual: 0.1,
-      payload: { residual: 0.1 },
+      payload: { residual: 0.1, verifier_kind: "deterministic_code" },
     });
     emitEvent(db, {
       kind: "action_scored",
       substrate_origin: "substrate_auto",
       directive_id: directiveId,
       task_id: taskId,
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
       residual: 0.6,
-      payload: { residual: 0.6 },
+      payload: { residual: 0.6, verifier_kind: "deterministic_code" },
     });
 
     const audit = buildBrainSelfAudit(db);

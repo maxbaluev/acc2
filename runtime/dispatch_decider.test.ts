@@ -35,8 +35,11 @@ describe("dispatch_decider", () => {
     emitEvent(db, {
       kind: "action_scored",
       substrate_origin: "substrate_auto",
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
       residual: 0.1,
       payload: {
+        verifier_kind: "deterministic_code",
         outcome_dimensions: { one_shot_confidence: 0.9, information_gap: 0.2 },
         reliability_profile: { reversibility: 0.8, owner_control_need: 0.3 },
         verifier_result: { breakdown: { decomposition_value: 0.4, cost_pressure: 0.7, time_sensitivity: 0.6 } },
@@ -198,8 +201,10 @@ describe("dispatch_decider", () => {
         substrate_origin: "recipe",
         directive_id: "d_prior",
         task_id: newId(),
+        action_artifact_id: "test_action_handle",
+        verifier_artifact_id: "test_verifier_handle",
         residual,
-        payload: { recipe_replayed: true, recipe_id: recipe.id, residual },
+        payload: { recipe_replayed: true, recipe_id: recipe.id, residual, verifier_kind: "deterministic_code" },
       });
     }
     emitEvent(db, {
@@ -207,8 +212,11 @@ describe("dispatch_decider", () => {
       substrate_origin: "substrate_auto",
       directive_id: "d_prior",
       task_id: newId(),
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
       residual: 0.03,
       payload: {
+        verifier_kind: "deterministic_code",
         dispatch_axes: {
           one_shot_confidence: 1,
           information_gap: 0,
@@ -390,8 +398,11 @@ describe("dispatch_decider", () => {
     emitEvent(db, {
       kind: "action_scored",
       substrate_origin: "substrate_auto",
+      action_artifact_id: "test_action_handle",
+      verifier_artifact_id: "test_verifier_handle",
       residual: 0.2,
       payload: {
+        verifier_kind: "deterministic_code",
         verifier_result: {
           breakdown: {
             one_shot_confidence: 0.1,

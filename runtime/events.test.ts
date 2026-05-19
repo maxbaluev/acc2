@@ -582,3 +582,141 @@ describe("emitEvent act_tuple_recorded projector", () => {
     expect(count).toBe(0);
   });
 });
+
+describe("emitEvent action_scored null-id lift gate (brain lesson TA4X4Q36XH38789BWQMV2AYB3W)", () => {
+  // Pre-fix: 102 historical action_scored events had action_artifact_id IS NULL —
+  // dominantly peer-LLM reviews emitted by the brain to score other actors'
+  // work without a registered action handle. These bypass artifact-credit
+  // because the canonical column is null. The substrate-truth fix at the
+  // projection boundary: lift verifier_kind as the action_artifact_id when
+  // present; refuse when neither is set.
+
+  test("null action_artifact_id + verifier_kind set -> row created with lifted id + dispatcher_violation emitted", () => {
+    const db = openDb(":memory:");
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "opencode",
+      directive_id: newId(),
+      task_id: newId(),
+      verifier_artifact_id: "peer_llm_opencode_verifier",
+      residual: 0.15,
+      payload: {
+        verifier_kind: "peer_llm_opencode_diagnostic",
+        target_event_id: "some_other_actor_event",
+      },
+    });
+    // The scored row exists with action_artifact_id lifted from verifier_kind.
+    const scoredRow = db
+      .query<{ action_artifact_id: string | null; payload: string }, [string]>("SELECT action_artifact_id, payload FROM events WHERE id = ?")
+      .get(scored.id);
+    expect(scoredRow?.action_artifact_id).toBe("peer_llm_opencode_diagnostic");
+    const scoredPayload = JSON.parse(scoredRow!.payload);
+    expect(scoredPayload.action_artifact_id).toBe("peer_llm_opencode_diagnostic");
+    expect(scoredPayload.action_artifact_id_lifted_from_verifier_kind).toBe(true);
+    expect(scoredPayload.verifier_kind).toBe("peer_llm_opencode_diagnostic");
+    // Exactly one dispatcher_violation with failure_kind=null_action_artifact_id_lifted
+    // referencing the scored event id.
+    const violations = db
+      .query<{ id: string; payload: string; failure_kind: string | null; context_refs: string }, []>(
+        "SELECT id, payload, failure_kind, context_refs FROM events WHERE kind = 'dispatcher_violation' AND failure_kind = 'null_action_artifact_id_lifted'",
+      )
+      .all();
+    expect(violations.length).toBe(1);
+    const violationPayload = JSON.parse(violations[0]!.payload);
+    expect(violationPayload.source_kind).toBe("action_scored");
+    expect(violationPayload.source_event_id).toBe(scored.id);
+    expect(violationPayload.original_action_artifact_id).toBeNull();
+    expect(violationPayload.lifted_to).toBe("peer_llm_opencode_diagnostic");
+    expect(violationPayload.verifier_kind).toBe("peer_llm_opencode_diagnostic");
+    expect(violationPayload.substrate_origin).toBe("opencode");
+    expect(JSON.parse(violations[0]!.context_refs)).toContain(scored.id);
+  });
+
+  test("null action_artifact_id + null verifier_kind -> NO action_scored row + unresolvable dispatcher_violation emitted", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const result = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "claude_inline",
+      directive_id: directiveId,
+      task_id: taskId,
+      residual: 0.4,
+      payload: { note: "emitter forgot both handles" },
+    });
+    // No action_scored row landed.
+    const scoredCount = db
+      .query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM events WHERE kind = 'action_scored' AND task_id = ?")
+      .get(taskId)!.n;
+    expect(scoredCount).toBe(0);
+    // The returned EmittedEvent points at the dispatcher_violation row.
+    const violationRow = db
+      .query<{ id: string; kind: string; payload: string; failure_kind: string | null }, [string]>(
+        "SELECT id, kind, payload, failure_kind FROM events WHERE id = ?",
+      )
+      .get(result.id);
+    expect(violationRow?.kind).toBe("dispatcher_violation");
+    expect(violationRow?.failure_kind).toBe("null_action_artifact_id_unresolvable");
+    const payload = JSON.parse(violationRow!.payload);
+    expect(payload.source_kind).toBe("action_scored");
+    expect(payload.original_action_artifact_id).toBeNull();
+    expect(payload.verifier_kind).toBeNull();
+    expect(payload.substrate_origin).toBe("claude_inline");
+  });
+
+  test("non-null action_artifact_id -> existing behavior preserved (no lift, no violation)", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "claude_root",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "registered_handle_v1",
+      verifier_artifact_id: "registered_verifier_v1",
+      residual: 0.1,
+      payload: { verifier_kind: "deterministic_code", note: "well-formed emit" },
+    });
+    const row = db
+      .query<{ action_artifact_id: string | null; payload: string }, [string]>("SELECT action_artifact_id, payload FROM events WHERE id = ?")
+      .get(scored.id);
+    // Column preserves the caller's handle; the lift marker is NOT
+    // present on the payload because no lift happened.
+    expect(row?.action_artifact_id).toBe("registered_handle_v1");
+    const payload = JSON.parse(row!.payload);
+    expect(payload.action_artifact_id_lifted_from_verifier_kind).toBeUndefined();
+    // No dispatcher_violation fired for this emit.
+    const violations = db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'dispatcher_violation' AND failure_kind IN ('null_action_artifact_id_lifted', 'null_action_artifact_id_unresolvable')",
+      )
+      .get()!.n;
+    expect(violations).toBe(0);
+  });
+
+  test("lift is idempotent: re-emit with the lifted id as action_artifact_id does NOT fire a second violation", () => {
+    // The act-tuple projection path already passes a concrete
+    // action_artifact_id; only the buggy direct-emit path needs the lift.
+    // Confirm that once the upstream emitter is fixed to pass the lifted
+    // handle directly, no violation fires (the gate is structural, not
+    // hysterical).
+    const db = openDb(":memory:");
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "opencode",
+      directive_id: newId(),
+      task_id: newId(),
+      action_artifact_id: "peer_llm_opencode_diagnostic",
+      verifier_artifact_id: "peer_llm_opencode_verifier",
+      residual: 0.2,
+      payload: { verifier_kind: "peer_llm_opencode_diagnostic" },
+    });
+    const violations = db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'dispatcher_violation' AND failure_kind IN ('null_action_artifact_id_lifted', 'null_action_artifact_id_unresolvable')",
+      )
+      .get()!.n;
+    expect(violations).toBe(0);
+  });
+});

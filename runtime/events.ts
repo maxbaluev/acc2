@@ -118,6 +118,102 @@ const normalizeClosureAuditPayload = (input: EmitEventInput): JsonValue => {
   };
 };
 
+/** action_scored normalization (null-action_artifact_id lift gate).
+ *
+ *  Brain lesson TA4X4Q36XH38789BWQMV2AYB3W identified 102 historical
+ *  action_scored events with action_artifact_id IS NULL — the dominant
+ *  pattern was peer-LLM reviews (verifier_kind ∈ {peer_llm_opencode,
+ *  peer_llm_opencode_diagnostic, peer_llm_opencode_adversarial_review,
+ *  peer_llm_opencode_inline_catalog_completeness_check,
+ *  peer_llm_opencode_manual_requirement_check,
+ *  peer_llm_opencode_structural_check, ...}) emitted by the brain to
+ *  score OTHER actors' work without a registered action artifact. These
+ *  bypass artifact-credit because the canonical action_artifact_id is
+ *  null.
+ *
+ *  The substrate-truth gate at the projection boundary:
+ *    1) action_artifact_id present  → preserve (no lift, no violation).
+ *    2) action_artifact_id null AND verifier_kind set
+ *       → lift verifier_kind as action_artifact_id, AND emit a sibling
+ *         dispatcher_violation kind "null_action_artifact_id_lifted" so
+ *         the upstream emit-site bug stays visible for follow-up.
+ *    3) BOTH null
+ *       → emit dispatcher_violation kind "null_action_artifact_id_unresolvable"
+ *         and REFUSE the projection (no action_scored row created).
+ *
+ *  Idempotency: if verifier_kind already equals input.action_artifact_id,
+ *  no lift happens and no violation fires (case 1 above). */
+type ActionScoredLiftResult =
+  | { verdict: "preserved"; action_artifact_id: string | undefined }
+  | { verdict: "lifted"; action_artifact_id: string; lifted_to: string; original_action_artifact_id: null }
+  | { verdict: "unresolvable" };
+
+const normalizeActionScoredPayload = (input: EmitEventInput): ActionScoredLiftResult => {
+  const payload = isObject(input.payload) ? input.payload : null;
+  const inputActionId = typeof input.action_artifact_id === "string" && input.action_artifact_id.trim().length > 0
+    ? input.action_artifact_id.trim()
+    : null;
+  // Fall back to payload.action_artifact_id only when the input column
+  // is null — direct emits sometimes carry it nested in payload.
+  const payloadActionId = payload && typeof payload.action_artifact_id === "string" && payload.action_artifact_id.trim().length > 0
+    ? payload.action_artifact_id.trim()
+    : null;
+  const resolvedActionId = inputActionId ?? payloadActionId;
+  if (resolvedActionId) {
+    return { verdict: "preserved", action_artifact_id: resolvedActionId };
+  }
+  const verifierKind = payload && typeof payload.verifier_kind === "string" && payload.verifier_kind.trim().length > 0
+    ? payload.verifier_kind.trim()
+    : null;
+  if (verifierKind) {
+    return {
+      verdict: "lifted",
+      action_artifact_id: verifierKind,
+      lifted_to: verifierKind,
+      original_action_artifact_id: null,
+    };
+  }
+  return { verdict: "unresolvable" };
+};
+
+/** Emit a lifted action_scored row plus a sibling dispatcher_violation.
+ *  The action_scored row is emitted via emitEvent recursion — because the
+ *  caller has already populated input.action_artifact_id, the lift gate
+ *  inside emitEvent classifies the recursive call as "preserved" and
+ *  falls through to the normal INSERT path. The sibling violation
+ *  references the scored id in context_refs so audits can correlate the
+ *  lift back to its source row. */
+const emitActionScoredWithLift = (
+  db: Database,
+  liftedInput: EmitEventInput,
+  liftedTo: string,
+): EmittedEvent => {
+  // Recursive emitEvent — because liftedInput.action_artifact_id is now
+  // populated, normalizeActionScoredPayload returns "preserved" on this
+  // pass and the call falls through to the normal INSERT path.
+  const scored = emitEvent(db, liftedInput);
+  emitEvent(db, {
+    kind: "dispatcher_violation",
+    substrate_origin: "substrate_auto",
+    directive_id: liftedInput.directive_id,
+    task_id: liftedInput.task_id,
+    parent_task_id: liftedInput.parent_task_id ?? null,
+    loop_id: liftedInput.loop_id,
+    context_refs: [scored.id, ...(liftedInput.context_refs ?? [])],
+    failure_kind: "null_action_artifact_id_lifted",
+    payload: {
+      source_kind: "action_scored",
+      source_event_id: scored.id,
+      original_action_artifact_id: null,
+      lifted_to: liftedTo,
+      verifier_kind: liftedTo,
+      substrate_origin: liftedInput.substrate_origin ?? "substrate_auto",
+      note: "action_scored emitted with action_artifact_id=null; substrate lifted payload.verifier_kind as the canonical action_artifact_id at the projection boundary. Upstream emitter should pass a registered handle. Cite brain lesson TA4X4Q36XH38789BWQMV2AYB3W.",
+    },
+  });
+  return scored;
+};
+
 /** Lesson-extracted normalization. Same shape as task_failed: when
  *  lesson_kind is missing, surface it as a classification_source so the
  *  tail/observability layer doesn't render `lesson_kind=?` (which the
@@ -494,6 +590,51 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       }
     }
   }
+  // action_scored null-id lift gate (brain lesson TA4X4Q36XH38789BWQMV2AYB3W).
+  // Runs BEFORE id minting + INSERT so the unresolvable refusal short-
+  // circuits without leaving a half-formed row. The gate is idempotent:
+  // when input.action_artifact_id is already populated, lift returns
+  // "preserved" and no sibling dispatcher_violation fires.
+  if (input.kind === "action_scored") {
+    const lift = normalizeActionScoredPayload(input);
+    if (lift.verdict === "unresolvable") {
+      const violation = emitEvent(db, {
+        kind: "dispatcher_violation",
+        substrate_origin: "substrate_auto",
+        directive_id: input.directive_id,
+        task_id: input.task_id,
+        parent_task_id: input.parent_task_id ?? null,
+        loop_id: input.loop_id,
+        context_refs: input.context_refs ?? [],
+        failure_kind: "null_action_artifact_id_unresolvable",
+        payload: {
+          source_kind: "action_scored",
+          original_action_artifact_id: null,
+          verifier_kind: null,
+          substrate_origin: input.substrate_origin ?? "substrate_auto",
+          note: "action_scored refused at projection boundary: both action_artifact_id and payload.verifier_kind are null/empty — no canonical handle to lift. Cite brain lesson TA4X4Q36XH38789BWQMV2AYB3W.",
+        },
+      });
+      return violation;
+    }
+    if (lift.verdict === "lifted") {
+      // Mutate the input so the rest of emitEvent (INSERT, bus publish,
+      // downstream credit hooks) sees the lifted handle uniformly.
+      // Sibling dispatcher_violation is emitted AFTER the action_scored
+      // row so its context_refs can point at the scored id; emitted
+      // pre-insert here as a deferred call after we have the id.
+      const liftedInput = { ...input, action_artifact_id: lift.action_artifact_id };
+      // Lifted handle also lands in payload so downstream readers that
+      // walk payload.action_artifact_id (not just the column) see it.
+      const liftedPayload: JsonObject = isObject(input.payload) ? { ...input.payload } : {};
+      liftedPayload.action_artifact_id = lift.action_artifact_id;
+      liftedPayload.action_artifact_id_lifted_from_verifier_kind = true;
+      liftedInput.payload = liftedPayload;
+      const result = emitActionScoredWithLift(db, liftedInput, lift.lifted_to);
+      return result;
+    }
+  }
+
   const id = newId();
   const ts = nowIso();
   const directive_id = input.directive_id ?? id; // self-rooted if not supplied
