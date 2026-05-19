@@ -441,8 +441,8 @@ export const checkBunVersion = (env: DoctorEnv): Check => {
 //
 // The floor numbers themselves live in `substrate/liveness.ts` so that
 // `acc admin substrate-status` and `acc doctor` cannot disagree about
-// what "seeded" means. Re-exported here for back-compat with tests that
-// import the names directly.
+// what "seeded" means. Re-exported here so tests can import the names
+// directly and assert against the same thresholds.
 export const SEED_KNOWLEDGE_MIN = LIVENESS_THRESHOLDS.knowledgePromoted;
 export const SEED_ARTIFACT_MIN = LIVENESS_THRESHOLDS.actArtifactsSeed;
 export const SEED_RECIPE_MIN = LIVENESS_THRESHOLDS.recipesSeed;

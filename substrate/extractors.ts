@@ -386,7 +386,7 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
         // fields, propagate them onto the promotion event so downstream
         // consumers (retrieval reranker, prompt composer, TUI) can filter
         // / rank by domain. Flat candidates carry no annotation and the
-        // promotion stays domain-global (backward compatible).
+        // promotion stays domain-global.
         let appliesTo: string[] | undefined;
         let candConfidenceEstimate: number | undefined;
         let claimSnippet: string | undefined;

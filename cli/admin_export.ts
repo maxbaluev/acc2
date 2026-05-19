@@ -156,9 +156,9 @@ export const runExport = async (opts: ExportOptions): Promise<ExportResult> => {
       result.errors.push(`source_db_missing:${sourceDb}`);
       return result;
     }
-    // The archive always carries `state/accint.db` for backward-compat
-    // with importers; the import side maps it back to whatever the
-    // running daemon's canonical name is.
+    // The archive carries `state/accint.db` as the canonical export
+    // filename; the import side maps it back to whatever the running
+    // daemon's canonical name is (state.db today).
     const targetDb = join(stageStateDir, "accint.db");
 
     if (mode === "live") {
