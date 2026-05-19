@@ -292,7 +292,11 @@ export const reconcileStaleDispatches = (
          AND NOT EXISTS (
            SELECT 1 FROM events c
            WHERE c.task_id = e.task_id
-             AND c.kind IN ('brain_dispatch_closed', 'dispatcher_violation', 'task_failed', 'task_committed')
+             AND c.kind IN (
+               'brain_dispatch_closed', 'dispatcher_violation',
+               'task_committed', 'task_failed', 'task_abandoned',
+               'task_blocked', 'task_committed_superseded'
+             )
              AND c.ts >= e.ts
          )
          AND NOT EXISTS (
@@ -399,7 +403,10 @@ export const reapZombieTaskNodes = (
          AND NOT EXISTS (
            SELECT 1 FROM events t
            WHERE t.task_id = n.task_id
-             AND t.kind IN ('task_committed', 'task_failed', 'task_abandoned')
+             AND t.kind IN (
+               'task_committed', 'task_failed', 'task_abandoned',
+               'task_blocked', 'task_committed_superseded'
+             )
          )
          AND NOT EXISTS (
            SELECT 1 FROM events d
@@ -462,7 +469,11 @@ export const reconcileOrphanedDispatches = (db: Database): Array<{ dispatch_even
          AND NOT EXISTS (
            SELECT 1 FROM events c
            WHERE c.task_id = e.task_id
-             AND c.kind IN ('brain_dispatch_closed', 'dispatcher_violation', 'task_failed', 'task_committed')
+             AND c.kind IN (
+               'brain_dispatch_closed', 'dispatcher_violation',
+               'task_committed', 'task_failed', 'task_abandoned',
+               'task_blocked', 'task_committed_superseded'
+             )
              AND c.ts >= e.ts
          )
          AND NOT EXISTS (

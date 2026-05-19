@@ -147,6 +147,16 @@ const IN_FLIGHT_BRAIN: Set<string> = new Set();
 const GATE_NOTIFIED: Set<string> = new Set();
 const gateKey = (taskId: string, gate: string): string => `${taskId}:${gate}`;
 
+const clearInFlightTask = (taskId: string): void => {
+  IN_FLIGHT.delete(taskId);
+  IN_FLIGHT_DIRECTIVE.delete(taskId);
+  IN_FLIGHT_PARENT.delete(taskId);
+  IN_FLIGHT_BRAIN.delete(taskId);
+  GATE_NOTIFIED.delete(gateKey(taskId, "brain_concurrency_cap"));
+  GATE_NOTIFIED.delete(gateKey(taskId, "bridge_health_degraded"));
+  if (IN_FLIGHT_BRAIN.size === 0) GATE_NOTIFIED.clear();
+};
+
 /** Max consecutive `bridge_failed` events for a single task before the
  *  scheduler quarantines it with `task_failed { failure_kind:
  *  "consecutive_bridge_failures" }`. Without this cap, a structural issue
@@ -695,21 +705,7 @@ export const schedulerTick = async (
         } catch { /* swallow */ }
       })
       .finally(() => {
-        IN_FLIGHT.delete(task.id);
-        IN_FLIGHT_DIRECTIVE.delete(task.id);
-        IN_FLIGHT_PARENT.delete(task.id);
-        // Safe to call unconditionally: Set.delete is a no-op when the key
-        // is absent, so non-brain routes (substrate_replay, claude_inline,
-        // deferred_blocked) cost nothing here. Releases the brain slot so
-        // the next tick can dispatch a queued opencode_brain task.
-        IN_FLIGHT_BRAIN.delete(task.id);
-        // Clear gate notification flags for this task — gives the next
-        // saturation cycle a fresh observability signal. When ALL brain
-        // slots open we clear the whole GATE_NOTIFIED set so every queued
-        // task gets a clean signal on the next pass.
-        GATE_NOTIFIED.delete(gateKey(task.id, "brain_concurrency_cap"));
-        GATE_NOTIFIED.delete(gateKey(task.id, "bridge_health_degraded"));
-        if (IN_FLIGHT_BRAIN.size === 0) GATE_NOTIFIED.clear();
+        clearInFlightTask(task.id);
       });
     // Mark settled-flag accessor lazily — best-effort cleanup helper.
     (promise as Promise<unknown> & { _settled?: boolean })._settled = false;
@@ -768,7 +764,7 @@ export const schedulerLoop = async (
   // ready-task signal lands on the activation bus instead of waiting
   // for the next poll tick. Polling stays as the safety-net max-timeout
   // so a missed publish (cross-process / subscriber crash) still drains.
-  const { waitForActivation } = await import("./activation_bus");
+  const { waitForActivation, onEvent } = await import("./activation_bus");
   const WAKE_KINDS = [
     "directive_opened",
     "task_node_opened",
@@ -776,7 +772,21 @@ export const schedulerLoop = async (
     "task_failed",
     "directive_resumed",
   ] as const;
+  const clearOnEventKinds = [
+    "brain_dispatch_closed",
+    "dispatch_recovered_orphan",
+    "dispatcher_violation",
+    "task_committed",
+    "task_failed",
+    "task_abandoned",
+    "task_blocked",
+    "task_committed_superseded",
+  ] as const;
+  const clearDisposers = clearOnEventKinds.map((kind) => onEvent(kind, (payload) => {
+    if (payload.task_id) clearInFlightTask(payload.task_id);
+  }));
 
+  try {
   while (ticks < stopAfterTicks) {
     if (opts.abort?.aborted) return;
     const tick = await schedulerTick(db, opts);
@@ -801,6 +811,9 @@ export const schedulerLoop = async (
       new Promise((r) => setTimeout(r, pollIntervalMs)),
       waitForActivation(WAKE_KINDS, opts.abort),
     ]);
+  }
+  } finally {
+    for (const dispose of clearDisposers) dispose();
   }
 };
 
