@@ -384,6 +384,74 @@ const openTemplatedDirective = (
 export type FatherIterateOpts = {
   now?: string;
   ownerActiveWindowMs?: number;
+  /** Optional reactive trigger context — populated when fatherIterate is
+   *  invoked via the activation-bus path (fatherJournalOnEvent) so the
+   *  journal_cycle payload can cite WHICH event triggered the cycle. */
+  trigger?: { kind: string; event_id: string };
+};
+
+export type FatherJournalEvent = {
+  kind: string;
+  event_id: string;
+  /** When known, the event's substrate_origin. The reactive entry point
+   *  short-circuits when origin === "father" so self-emitted cycles
+   *  cannot recursively re-trigger the journal. When omitted (e.g. the
+   *  activation bus does not propagate origin), the helper looks the row
+   *  up by event_id before deciding. */
+  substrate_origin?: string | null;
+};
+
+export type FatherJournalOpts = {
+  now?: string;
+  journalEveryEvents?: number;
+};
+
+/** Count events since the last `father_cycle_recorded`. Used by the reactive
+ *  entry point to throttle journal cycles to once per N events instead of
+ *  once per cadence interval. */
+const countEventsSinceLastFatherJournal = (db: Database): number => {
+  const lastJournal = db
+    .query<{ ts: string }, []>(
+      "SELECT ts FROM events WHERE kind = 'father_cycle_recorded' ORDER BY ts DESC LIMIT 1",
+    )
+    .get();
+  if (!lastJournal) {
+    return db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM events")
+      .get()?.n ?? 0;
+  }
+  return db
+    .query<{ n: number }, [string]>(
+      "SELECT COUNT(*) AS n FROM events WHERE ts > ?",
+    )
+    .get(lastJournal.ts)?.n ?? 0;
+};
+
+/** Reactive entry point: wraps fatherIterate behind an event-driven gate so
+ *  Father runs once per N events instead of on a fixed cadence. Returns null
+ *  when the event is self-emitted (substrate_origin=father) or the throttle
+ *  threshold has not been reached. */
+export const fatherJournalOnEvent = async (
+  db: Database,
+  event: FatherJournalEvent,
+  opts: FatherJournalOpts = {},
+): Promise<FatherCycleResult | null> => {
+  let origin = event.substrate_origin;
+  if (origin === undefined) {
+    const row = db
+      .query<{ substrate_origin: string | null }, [string]>(
+        "SELECT substrate_origin FROM events WHERE id = ?",
+      )
+      .get(event.event_id);
+    origin = row?.substrate_origin ?? null;
+  }
+  if (origin === "father") return null;
+  const threshold = opts.journalEveryEvents ?? 100;
+  if (countEventsSinceLastFatherJournal(db) < threshold) return null;
+  return fatherIterate(db, {
+    now: opts.now,
+    trigger: { kind: event.kind, event_id: event.event_id },
+  });
 };
 
 /** Check whether Father is currently suspended due to a drift detection.

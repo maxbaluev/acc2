@@ -367,6 +367,10 @@ describe("derived sets match their pre-unification shape", () => {
       // closure_complete is healthy traffic, not a metric.
       "closure_obsolete",
       "closure_owner_required",
+      // Timer-reactive redesign (directive 7AS6BPTNSS2YZD5M2ZS3V3S1GG):
+      // worker_safety_net_fired counts as health metric because non-zero
+      // missed_work_count signals reactive activation gaps.
+      "worker_safety_net_fired",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

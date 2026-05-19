@@ -34,6 +34,8 @@ import { closeDb, openDb, getAllPoolStats } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { emitEvent } from "./events";
 import { subscribe, resetBus, type BusEvent } from "./event_bus";
+import { onEvent, type ActivationPayload } from "./activation_bus";
+import type { EventKind } from "../substrate/event_kinds";
 import { newAdminToken } from "./ids";
 import { createMcpServer } from "./mcp_server/index";
 import {
@@ -49,14 +51,14 @@ import {
   setSchedulerDraining,
 } from "./task_scheduler";
 import { rollingReviewerWorkerTick } from "./rolling_reviewer";
-import { fatherIterate } from "./father";
+import { fatherJournalOnEvent } from "./father";
 import { EmbeddingIndex } from "./embedding_index";
 import { embedderWorkerTick } from "./embedder";
 import { rehabilitationWorkerTick, getArtifact } from "./artifact_store";
 import { runBunArtifact } from "./runtimes/bun";
 import { runUvArtifact } from "./runtimes/uv";
 import { runCamofoxArtifact } from "./runtimes/camofox";
-import type { SandboxDecl } from "../substrate/types";
+import type { JsonValue, SandboxDecl } from "../substrate/types";
 import { logger } from "./logger";
 import { metricsHandler, refreshGauges } from "./metrics";
 import { integrityWorkerTick, runIntegrityCheck, reconcileOrphanedDispatches } from "./integrity_worker";
@@ -505,11 +507,87 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   });
   const startedAtMs = Date.now();
 
-  // Background workers — for B3 just a heartbeat tick (no-op closure, but
-  // proves the supervisor loop is structurally present and stoppable).
+  // Background workers. Phase-B workers use activation_bus events as the
+  // primary path. One daemon-owned low-frequency safety net remains as the
+  // bounded fallback for missed in-process activation, matching the
+  // task_scheduler Promise.race pattern and the restart-quiescence rule:
+  // refuse time-based action until substrate evidence makes work eligible.
   const workers: Array<() => void> = [];
-  const heartbeat = setInterval(() => { /* phase F: embedder catch-up, posterior updater, … */ }, 5000);
-  workers.push(() => clearInterval(heartbeat));
+  const activationDisposers: Array<() => void> = [];
+  type ReactiveTriggerKind = EventKind | "*";
+  type ReactiveWorkerEntry = {
+    worker: string;
+    expectedIntervalMs: number;
+    minReactiveGapMs: number;
+    run: () => void;
+    skippedReactiveFires: number;
+    lastReactiveFireMs: number;
+  };
+  const reactiveWorkers: ReactiveWorkerEntry[] = [];
+  const emitReactiveFire = (entry: ReactiveWorkerEntry, source: "event" | "safety_net", trigger?: ActivationPayload): void => {
+    try {
+      const payload: { [k: string]: JsonValue } = {
+        worker: entry.worker,
+        activation_source: source,
+        skipped_reactive_fires: entry.skippedReactiveFires,
+        expected_interval_ms: entry.expectedIntervalMs,
+      };
+      if (trigger?.kind) payload.trigger_kind = trigger.kind;
+      if (trigger?.event_id) payload.trigger_event_id = trigger.event_id;
+      emitEvent(db, {
+        kind: "worker_tick_completed",
+        substrate_origin: "substrate_auto",
+        payload,
+      });
+    } catch { /* telemetry must not break activation or shutdown */ }
+  };
+  const fireReactiveWorker = (entry: ReactiveWorkerEntry, source: "event" | "safety_net", trigger?: ActivationPayload): void => {
+    const now = Date.now();
+    if (source === "event" && entry.minReactiveGapMs > 0 && now - entry.lastReactiveFireMs < entry.minReactiveGapMs) {
+      entry.skippedReactiveFires++;
+      return;
+    }
+    entry.lastReactiveFireMs = now;
+    emitReactiveFire(entry, source, trigger);
+    entry.run();
+  };
+  const registerReactiveWorker = (
+    worker: string,
+    expectedIntervalMs: number,
+    triggerKinds: ReadonlyArray<ReactiveTriggerKind>,
+    run: () => void,
+    opts: { minReactiveGapMs?: number } = {},
+  ): void => {
+    const entry: ReactiveWorkerEntry = {
+      worker,
+      expectedIntervalMs,
+      minReactiveGapMs: opts.minReactiveGapMs ?? 0,
+      run,
+      skippedReactiveFires: 0,
+      lastReactiveFireMs: 0,
+    };
+    reactiveWorkers.push(entry);
+    for (const kind of triggerKinds) {
+      activationDisposers.push(onEvent(kind, (payload) => fireReactiveWorker(entry, "event", payload)));
+    }
+  };
+  const safetyNetTickMs = Number(process.env.ACC2_REACTIVE_SAFETY_NET_TICK_MS ?? 30 * 60 * 1000);
+  const reactiveSafetyNet = setInterval(() => {
+    let missedWorkCount = 0;
+    for (const entry of reactiveWorkers) {
+      missedWorkCount += entry.skippedReactiveFires;
+      entry.skippedReactiveFires = 0;
+      fireReactiveWorker(entry, "safety_net");
+    }
+    try {
+      emitEvent(db, {
+        kind: "worker_tick_completed",
+        substrate_origin: "substrate_auto",
+        payload: { worker: "reactive_safety_net", activation_source: "safety_net", missed_work_count: missedWorkCount, expected_interval_ms: safetyNetTickMs },
+      });
+    } catch { /* db may already be closed */ }
+  }, safetyNetTickMs);
+  workers.push(() => clearInterval(reactiveSafetyNet));
 
   // Health counts refresher. Pushes the four COUNT(*) queries OFF the /health
   // request path entirely. The COUNT(*) on a 100k+ events table under active
@@ -714,17 +792,15 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("rendering_audit")) {
     const { renderingAuditWorkerTick } = await import("./rendering_audit_worker");
     let renderingAuditMarked = false;
-    const renderingAuditTickHandle = setInterval(
-      supervisedTick(db, "rendering_audit", RENDERING_AUDIT_INTERVAL_MS, async () => {
-        renderingAuditWorkerTick(db);
-        if (!renderingAuditMarked) { markWorkerReady("rendering_audit"); renderingAuditMarked = true; }
-      }),
-      RENDERING_AUDIT_INTERVAL_MS,
-    );
+    const renderingAuditTickHandle = supervisedTick(db, "rendering_audit", RENDERING_AUDIT_INTERVAL_MS, async () => {
+      renderingAuditWorkerTick(db);
+      if (!renderingAuditMarked) { markWorkerReady("rendering_audit"); renderingAuditMarked = true; }
+    });
+    registerReactiveWorker("rendering_audit", RENDERING_AUDIT_INTERVAL_MS, ["rendered_owner_message_recorded", "owner_rendering_feedback_recorded", "owner_observed_outcome_recorded"], renderingAuditTickHandle, { minReactiveGapMs: 60_000 });
     markWorkerReady("rendering_audit");
     renderingAuditMarked = true;
     recordWorkerTick("rendering_audit");
-    workers.push(() => clearInterval(renderingAuditTickHandle));
+    // rendering_audit is activation-driven; activationDisposers are cleared on shutdown.
   }
 
   // Batch 10: substrate compactor — periodic pruning of bridge_frame_received
@@ -1143,13 +1219,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const { verifyHealWorkerTick } = await import("./verify_heal");
     markWorkerReady("verify_heal");
     recordWorkerTick("verify_heal");
-    const healTick = setInterval(
-      supervisedTick(db, "verify_heal", healTickMs, async () => {
-        verifyHealWorkerTick(db);
-      }),
-      healTickMs,
-    );
-    workers.push(() => clearInterval(healTick));
+    const healTick = supervisedTick(db, "verify_heal", healTickMs, async () => {
+      verifyHealWorkerTick(db);
+    });
+    registerReactiveWorker("verify_heal", healTickMs, ["knowledge_contradiction_observed", "knowledge_candidate", "action_scored", "task_closure_audited"], healTick, { minReactiveGapMs: 5 * 60 * 1000 });
+    // verify_heal is activation-driven; activationDisposers are cleared on shutdown.
   }
 
   // Phase I: rolling-review worker. Default ON — production wants
@@ -1199,75 +1273,35 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     workers.push(() => clearInterval(rollingTick));
   }
 
-  // Phase K: Father worker. Default ON — production wants the
-  // long-horizon orchestrator driving objective re-ranking and rolling
-  // reviews on the canonical 5-min cadence (§14). Opt-OUT via
-  // `ACC2_DISABLE_WORKERS=father` (tests/preload.ts pins the full set).
-  // Tests that want Father deterministically can also pin
-  // ACC2_FATHER_INTERVAL_MS to a smaller value. When Father is enabled
-  // it ALSO processes rolling reviews on its own tick (simplification:
-  // one autostart flag for the whole orchestration — owner-controlled,
-  // per task brief K.4). Father has zero LLM-call capability; it only
-  // opens directives compiled from templates and records its cycle.
+  // Phase K: Father worker. Father is no longer a cadence-bound planner.
+  // It observes the activation bus and emits a compact journal every N ledger
+  // events. Rolling reviews, scheduling, dispatch, refinement, and retrieval
+  // are owned by their dedicated substrate workers.
   if (isWorkerEnabled("father")) {
-    let fatherMarked = false;
-    const fatherTick = setInterval(
-      supervisedTick(db, "father", fatherIntervalMs, async () => {
-        // Drive rolling reviews here so Father owns the whole long-horizon
-        // orchestration when enabled (§K.4). Failures in EITHER step are
-        // surfaced individually as error_caught — neither aborts the tick.
-        try {
-          await rollingReviewerWorkerTick(db);
-        } catch (err) {
-          logger.warn(
-            { err: (err as Error).message },
-            "father.rollingReview failed — surfaced as error_caught",
-          );
-          try {
-            emitEvent(db, {
-              kind: "error_caught",
-              substrate_origin: "substrate_auto",
-              payload: {
-                where: "daemon.father.rolling_reviewer_step",
-                recoverable: true,
-                message: (err as Error).message,
-              },
-            });
-          } catch (emitErr) {
-            logger.debug({ err: String(emitErr) }, "could not emit error_caught (db closed)");
-          }
-        }
-        try {
-          await fatherIterate(db);
-        } catch (err) {
-          logger.warn(
-            { err: (err as Error).message },
-            "father.iterate failed — surfaced as error_caught",
-          );
-          try {
-            emitEvent(db, {
-              kind: "error_caught",
-              substrate_origin: "substrate_auto",
-              payload: {
-                where: "daemon.father.iterate_step",
-                recoverable: true,
-                message: (err as Error).message,
-              },
-            });
-          } catch (emitErr) {
-            logger.debug({ err: String(emitErr) }, "could not emit error_caught (db closed)");
-          }
-        }
-        if (!fatherMarked) { markWorkerReady("father"); fatherMarked = true; }
-      }),
-      fatherIntervalMs,
-    );
-    // Father is registered as ready immediately — its 5-min cadence is
-    // too long to gate /ready behind.
     markWorkerReady("father");
-    fatherMarked = true;
     recordWorkerTick("father");
-    workers.push(() => clearInterval(fatherTick));
+    const disposeFatherJournal = onEvent("*", (event) => {
+      void fatherJournalOnEvent(db, event).catch((err) => {
+        logger.warn(
+          { err: (err as Error).message },
+          "father.journal failed — surfaced as error_caught",
+        );
+        try {
+          emitEvent(db, {
+            kind: "error_caught",
+            substrate_origin: "substrate_auto",
+            payload: {
+              where: "daemon.father.journal_step",
+              recoverable: true,
+              message: (err as Error).message,
+            },
+          });
+        } catch (emitErr) {
+          logger.debug({ err: String(emitErr) }, "could not emit error_caught (db closed)");
+        }
+      });
+    });
+    workers.push(disposeFatherJournal);
   }
 
   // Phase E: autoscheduler. Default ON — production wants the

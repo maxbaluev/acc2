@@ -591,6 +591,11 @@ export const EVENT_KINDS = {
   // ── Robustness telemetry (fail-fast taxonomy) ───────────────────────
   error_caught:                            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   worker_tick_overrun:                     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true, narrative: false },
+  // Shared low-frequency safety net for reactive-primary workers. Emitted
+  // by the daemon-owned safety-net sweep when it detects work that should
+  // have been caught by activation_bus.onEvent but was not. Non-zero
+  // missed_work_count is observability evidence for reactive misses.
+  worker_safety_net_fired:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true, narrative: false },
   // Substrate-side proof of worker liveness (audit-#5, 2026-05-15). Emitted
   // by supervisedTick AFTER each successful body() with per-worker dampening
   // (WORKER_TICK_EVENT_DAMPEN_MS = 60s) so the scheduler's 500ms cadence

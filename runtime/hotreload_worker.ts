@@ -38,6 +38,7 @@ import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, watch as f
 import { dirname, basename, join, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Database } from "bun:sqlite";
+import { onEvent } from "./activation_bus";
 import { emitEvent } from "./events";
 import { logger } from "./logger";
 import {
@@ -675,9 +676,9 @@ export const startHotreloadWorker = (
     })();
   };
 
-  // Drain the pending-quiescent queue every QUIESCENT_RETRY_MS so deferred
-  // reloads land as soon as the bridge goes idle.
-  const quiescentDrain = setInterval(() => {
+  // Drain deferred quiescent reloads when ledger evidence says brain work is closed.
+  // This follows XA3ABKERHD4H: refuse the reload until substrate events prove it is safe.
+  const drainPendingQuiescent = (): void => {
     if (disposed) return;
     if (pendingQuiescent.size === 0) return;
     if (!isQuiescent()) return;
@@ -686,7 +687,14 @@ export const startHotreloadWorker = (
     }
     pendingQuiescent.clear();
     state.pending_quiescent_count = 0;
-  }, QUIESCENT_RETRY_MS);
+  };
+  const quiescentDrainDisposers = [
+    onEvent("brain_dispatch_closed", drainPendingQuiescent),
+    onEvent("task_committed", drainPendingQuiescent),
+    onEvent("task_failed", drainPendingQuiescent),
+    onEvent("dispatcher_violation", drainPendingQuiescent),
+    onEvent("dispatch_recovered_orphan", drainPendingQuiescent),
+  ];
 
   // Linux does not support recursive fs.watch. Watch every existing
   // directory under the manifest roots and convert each event back to the
@@ -722,7 +730,7 @@ export const startHotreloadWorker = (
 
   return () => {
     disposed = true;
-    clearInterval(quiescentDrain);
+    for (const dispose of quiescentDrainDisposers) dispose();
     for (const w of watchers) {
       try { w.close(); } catch { /* swallow */ }
     }
