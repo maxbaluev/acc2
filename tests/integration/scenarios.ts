@@ -1771,7 +1771,7 @@ export type AdHocTaskResult = {
   crisisModeEngaged: boolean;
   /** Count of bridge_invoked events for this directive — how many opencode cycles fired. */
   bridgeInvokedCount: number;
-  /** Count of recipe_extracted events for this directive — did the task contribute to Tier-0 recipes? */
+  /** Count of recipe-shape knowledge rows for this directive — did the task contribute to Tier-0 recipes? */
   recipeExtractedCount: number;
   /** vec_events row count delta from before/after this run (synchronous embedder indexes events). */
   vecEventsIndexed: number;
@@ -2084,7 +2084,7 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
     write(`  dispatcher_violation: ${result.violations}${result.violations === 0 ? "" : "  ⚠"}\n`);
     write(`  refinement edges: ${result.refinementEdges}\n`);
     write(`  bridge_invoked: ${result.bridgeInvokedCount}\n`);
-    write(`  recipe_extracted: ${result.recipeExtractedCount}\n`);
+    write(`  recipe-shape rows: ${result.recipeExtractedCount}\n`);
     write(`  vec_events indexed: ${result.vecEventsIndexed}\n`);
     write(`  runtimes: ${result.runtimesInvoked.length > 0 ? result.runtimesInvoked.join(",") : "(none)"}\n`);
     write(`  artifact_invoked: ${result.artifactInvokedCount}\n`);

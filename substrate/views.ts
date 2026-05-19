@@ -3741,6 +3741,12 @@ export const VIEW_NAMES = [
   "lesson_implementation_status_view",
   "lesson_implementer_queue_view",
   "pending_owner_decision_queue_view",
+  // recipes_latest_view and recipe_registry_view now project from
+  // knowledge_candidate/knowledge_promoted rows filtered by
+  // payload.recipe_shape.enabled (universality proposal
+  // A12CR1QCDN0SS51CM95K39T45M absorbed the recipe_* event family). The view
+  // names are retained as the fast-index surfaces consumed by
+  // runtime/recipe_replay.ts and runtime/recipe_inertia.ts.
   "recipes_latest_view",
   "recipe_registry_view",
   "promoted_knowledge_view",

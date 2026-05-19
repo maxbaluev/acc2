@@ -228,7 +228,7 @@ export const renderSubstrateStatus = (
     `vec_events:                 ${fmt(report.vecEvents)}   ` +
       `(embedded / ${report.embeddableTotal} total embeddable)`,
   );
-  out(`recipe_extracted (events):  ${fmt(report.recipeRows)}`);
+  out(`recipe-shape knowledge:     ${fmt(report.recipeRows)}`);
   out(`knowledge_promoted:         ${fmt(report.knowledgePromoted)}`);
   out(`stakeholder_state:          ${fmt(report.stakeholderState)}`);
   out(`directive_interference:     ${fmt(report.directiveInterference)}`);

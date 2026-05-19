@@ -543,11 +543,10 @@ export const EVENT_KINDS = {
   constitutional_gate_decision:            { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   dispatch_decided:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   self_modification_recorded:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  recipe_extracted:                        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
-  recipe_promoted:                         { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
-  recipe_promotion_deferred:               { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  recipe_invoked:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  recipe_replay_aborted:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // recipe_extracted / recipe_promoted / recipe_promotion_deferred / recipe_invoked /
+  // recipe_replay_aborted absorbed into knowledge_candidate / knowledge_promoted /
+  // dispatch_decided / action_predicted / action_scored (universality proposal
+  // A12CR1QCDN0SS51CM95K39T45M, owner approval 7S0FQ8REES1XDEGQW7VVVEWSYW).
   prompt_truncated:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Father ──────────────────────────────────────────────────────────

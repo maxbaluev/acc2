@@ -191,25 +191,49 @@ export const handleReplayRecipe = async (
     goal = (p.goal as string | undefined) ?? "";
   } catch { /* swallow */ }
 
+  // recipe_extracted absorbed into knowledge_candidate / knowledge_promoted
+  // carrying recipe_shape (universality proposal A12CR1QCDN0SS51CM95K39T45M).
   const recipeRow = ctx.db
-    .query("SELECT payload FROM events WHERE id = ? AND kind = 'recipe_extracted'")
+    .query("SELECT payload FROM events WHERE id = ? AND kind IN ('knowledge_candidate', 'knowledge_promoted')")
     .get(args.recipe_id) as { payload: string } | null;
-  if (!recipeRow) return { ok: false, error: "recipe_not_found" };
+  if (!recipeRow) return { ok: false, error: "reusable_trajectory_not_found" };
   let recipePayload: Record<string, unknown> = {};
   try { recipePayload = JSON.parse(recipeRow.payload ?? "{}") as Record<string, unknown>; } catch { /* swallow */ }
+  // Prefer top-level mirrors; fall back to recipe_shape nested if present.
+  const recipeShape = (recipePayload.recipe_shape && typeof recipePayload.recipe_shape === "object")
+    ? recipePayload.recipe_shape as Record<string, unknown>
+    : {};
+  const trajectoryRaw =
+    (recipePayload.trajectory as unknown[]) ??
+    (recipeShape.trajectory as unknown[]) ??
+    [];
+  const trajectory = trajectoryRaw as Array<{
+    step_kind: string;
+    artifact_id?: string | null;
+    verifier_artifact_id?: string | null;
+    payload_template: JsonValue;
+    predicted_residual?: number | null;
+  }>;
+  const cited: string[] = [];
+  for (const step of trajectory) {
+    if (step.artifact_id) cited.push(step.artifact_id);
+    if (step.verifier_artifact_id) cited.push(step.verifier_artifact_id);
+  }
   const match = {
     recipe_id: args.recipe_id,
-    recipe_extracted_event_id: args.recipe_id,
-    goal_shape: (recipePayload.goal_shape as string | undefined) ?? "",
-    topology_signature: (recipePayload.topology_signature as string | undefined) ?? "",
-    confidence: (recipePayload.confidence as number | undefined) ?? 0,
-    trajectory: ((recipePayload.trajectory as unknown[]) ?? []) as Array<{
-      step_kind: string;
-      artifact_id?: string | null;
-      verifier_artifact_id?: string | null;
-      payload_template: JsonValue;
-      predicted_residual?: number | null;
-    }>,
+    recipe_knowledge_event_id: args.recipe_id,
+    knowledge_id: args.recipe_id,
+    goal_shape: (recipePayload.goal_shape as string | undefined)
+      ?? (recipeShape.goal_shape as string | undefined)
+      ?? "",
+    topology_signature: (recipePayload.topology_signature as string | undefined)
+      ?? (recipeShape.topology_signature as string | undefined)
+      ?? "",
+    confidence: (recipePayload.confidence as number | undefined)
+      ?? (recipeShape.confidence as number | undefined)
+      ?? 0,
+    trajectory,
+    cited_act_artifact_ids: Array.from(new Set(cited)),
   };
   const task = { id: args.task_id, directive_id: taskRow.directive_id, parent_id: null, goal, status: "pending" as const };
   const outcome = await replayRecipe(ctx.db, task, match);

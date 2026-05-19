@@ -222,7 +222,7 @@ const runMatrix = async (): Promise<number> => {
   process.stdout.write(`  total bridge cycles:   ${totalBridge}  (avg ${avgBridge} per task)\n`);
   process.stdout.write(`  total artifacts admitted: ${totalArtifacts}\n`);
   process.stdout.write(`  total refinement edges: ${totalRefines}\n`);
-  process.stdout.write(`  total recipe_extracted: ${totalRecipes}\n`);
+  process.stdout.write(`  total recipe-shape rows: ${totalRecipes}\n`);
   process.stdout.write(`  total vec_events indexed: ${totalVec}\n`);
   process.stdout.write(`  total artifact_invoked: ${totalArtInvoked}\n`);
   process.stdout.write(

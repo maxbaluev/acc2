@@ -335,11 +335,12 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
   server.addTool({
     name: "runtime.replay_recipe",
     description:
-      "Replay a matched recipe against a task — execute its trajectory's " +
-      "action + verifier artifacts WITHOUT calling the brain (Phase J, §15). " +
+      "Replay a matched reusable trajectory against a task — execute its " +
+      "action + verifier artifact handles WITHOUT calling the brain (Phase J, §15). " +
       "On success emits action_predicted/scored/task_committed with " +
-      "recipe_replayed=true; on residual ≥ threshold emits " +
-      "recipe_replay_aborted and the dispatcher routes back to opencode_brain.",
+      "recipe_replayed=true; on residual ≥ threshold records the high residual " +
+      "on standard action_scored rows (replay_aborted=true) and the dispatcher " +
+      "routes back to opencode_brain.",
     parameters: ReplayRecipeSchema,
     execute: wrap(handleReplayRecipe),
   });

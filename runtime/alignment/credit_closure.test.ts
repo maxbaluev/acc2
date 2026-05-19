@@ -94,9 +94,11 @@ describe("alignment / credit_closure (Principle 6)", () => {
     });
 
     // Hand-craft a RecipeMatch with one action_predicted step.
+    const recipeId = newId();
     const match: RecipeMatch = {
-      recipe_id: newId(),
-      recipe_extracted_event_id: newId(),
+      recipe_id: recipeId,
+      recipe_knowledge_event_id: recipeId,
+      knowledge_id: recipeId,
       goal_shape: "credit_closure_replay_fixture::n1",
       topology_signature: "topo_00000000::1",
       confidence: 0.9,
@@ -109,6 +111,7 @@ describe("alignment / credit_closure (Principle 6)", () => {
           predicted_residual: 0.05,
         },
       ],
+      cited_act_artifact_ids: [action.artifactId, verifier.artifactId],
     };
 
     const task: TaskNode = {

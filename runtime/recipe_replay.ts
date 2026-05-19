@@ -86,8 +86,6 @@ export type RecipeMatch = {
   /** Alias of recipe_id naming the new substrate (knowledge event) — held as a
    *  field on the match for callers that prefer the explicit name. */
   recipe_knowledge_event_id: string;
-  /** Backwards-compat alias retained for callers still on the previous shape. */
-  recipe_extracted_event_id: string;
   /** Knowledge-shape name preferred by the new substrate vocabulary. */
   knowledge_id: string;
   goal_shape: string;
@@ -191,7 +189,6 @@ const tryMatchCandidate = (
   return {
     recipe_id: candidate.id,
     recipe_knowledge_event_id: candidate.id,
-    recipe_extracted_event_id: candidate.id,
     knowledge_id: candidate.id,
     goal_shape: candidate.goal_shape,
     topology_signature: candidate.topology_signature,
@@ -207,9 +204,11 @@ const tryMatchCandidate = (
  *
  *  Queries `recipes_latest_view` — the substrate's materialized index keyed
  *  by (goal_shape, topology_signature) that picks the highest-confidence row
- *  per key. View errors intentionally surface to the dispatcher diagnostics
- *  path instead of falling back to a dispatch-time scan over
- *  `recipe_extracted` history. */
+ *  per key. The view now projects from knowledge_candidate / knowledge_promoted
+ *  rows carrying recipe_shape.enabled (universality proposal
+ *  A12CR1QCDN0SS51CM95K39T45M). View errors intentionally surface to the
+ *  dispatcher diagnostics path instead of falling back to a dispatch-time scan
+ *  over recipe-shape knowledge history. */
 export const findRecipeMatch = (
   db: Database,
   task: TaskNode,
@@ -631,10 +630,11 @@ export const replayRecipe = async (
 
 /** Update a recipe's confidence based on an outcome. Success → +0.05, failure
  *  → −0.10. Floored at 0.0 (auto-archive at < 0.2). Ceiling at 0.95. The
- *  update is recorded by appending a fresh recipe_extracted row carrying the
- *  same (goal_shape, topology_signature) and the new confidence — the
- *  matcher always reads the LATEST row for a given key. We read the LATEST
- *  matching row's confidence (not the seed's) so successive updates compound. */
+ *  update is recorded by appending a fresh recipe-shape knowledge_candidate
+ *  row carrying the same (goal_shape, topology_signature) and the new
+ *  confidence — the matcher always reads the LATEST row for a given key. We
+ *  read the LATEST matching row's confidence (not the seed's) so successive
+ *  updates compound. */
 export const updateRecipeConfidence = (
   db: Database,
   recipeId: string,

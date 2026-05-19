@@ -311,11 +311,13 @@ describe("recipe_replay.replayRecipe", () => {
     };
     const match = {
       recipe_id: recipeId,
-      recipe_extracted_event_id: recipeId,
+      recipe_knowledge_event_id: recipeId,
+      knowledge_id: recipeId,
       goal_shape: "missing trajectory recipe",
       topology_signature: "topo_00000000::1",
       confidence: 0.9,
       trajectory: [],
+      cited_act_artifact_ids: [],
     };
     const outcome = await replayRecipe(db, task, match);
     expect(outcome.task_committed).toBe(false);
