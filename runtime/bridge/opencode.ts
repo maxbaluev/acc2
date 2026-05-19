@@ -32,6 +32,7 @@ import { newId } from "../ids";
 import { parseOpencodeAuth } from "../../cli/doctor";
 import type { BridgeFailureReason, BridgeRequest, BridgeResult, SpawnOpts } from "./types";
 import {
+  BRAIN_OPENCODE_AGENT_NAME,
   DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS,
   DEFAULT_MCP_HANDSHAKE_WINDOW_MS,
   DEFAULT_OPENCODE_MODEL,
@@ -348,6 +349,7 @@ export const spawnRealOpencode = async (
       "opencode", "run",
       "--format=json",
       "--model", model,
+      "--agent", BRAIN_OPENCODE_AGENT_NAME,
       req.prompt,
     ], {
       cwd: brainWorkspace,

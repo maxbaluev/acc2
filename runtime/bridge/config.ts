@@ -84,48 +84,90 @@ export const DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS = 300_000;
 export const V2_OPENCODE_MCP_SERVER_NAME = "acc2-substrate";
 
 /**
- * Hard policy for the opencode brain subprocess. The brain may inspect source
- * and call acc2's MCP tools, but it must never mutate the checkout directly;
- * source edits flow brain -> event -> Claude orchestrator.
+ * Canonical opencode agent name for the brain subprocess. opencode 1.14.50
+ * exposes `--agent <name>`, which constrains the subprocess to the named
+ * agent block declared in OPENCODE_CONFIG. The agent block carries a
+ * positive `tools` enumeration (no wildcards) so the brain can ONLY invoke
+ * the tools we name. Built-in filesystem mutators (edit/write/bash/
+ * apply_patch) are NOT listed and therefore NOT registered with the
+ * subprocess at all — there is no deny pattern to bypass.
+ *
+ * This is the structural fix for the brain_native_filesystem_bypass
+ * failure class: positive enumeration at spawn time, not wildcard-deny
+ * post-flight.
  */
-export const BRAIN_READONLY_PERMISSION = {
-  "*": "deny",
-  read: "allow",
-  glob: "allow",
-  grep: "allow",
-  list: "allow",
-  edit: "deny",
-  write: "deny",
-  apply_patch: "deny",
-  bash: "deny",
-  task: "deny",
-  external_directory: "deny",
-  repo_clone: "deny",
-  repo_overview: "deny",
-  lsp: "allow",
-  ["substrate.*"]: "allow",
-  ["runtime.*"]: "allow",
-  [`${V2_OPENCODE_MCP_SERVER_NAME}_substrate_*`]: "allow",
-  [`${V2_OPENCODE_MCP_SERVER_NAME}_runtime_*`]: "allow",
-} as const;
+export const BRAIN_OPENCODE_AGENT_NAME = "acc2-brain";
 
-const permissionPatternMatches = (pattern: string, toolName: string): boolean => {
-  if (pattern === "*") return true;
-  if (!pattern.includes("*")) return pattern === toolName;
-  const escaped = pattern
-    .split("*")
-    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    .join(".*");
-  return new RegExp(`^${escaped}$`).test(toolName);
-};
+/**
+ * Positive enumeration of the tool surface the brain subprocess is allowed
+ * to invoke. opencode 1.14.50 has no positive CLI tool-list flag, but the
+ * agent block in OPENCODE_CONFIG accepts a `tools` array — only the names
+ * listed here are registered with the subprocess.
+ *
+ * Members:
+ *   - read / glob / grep / list — read-only filesystem inspection
+ *   - lsp — language-server queries (read-only)
+ *   - substrate.* — every method in McpMethods that starts with `substrate.`
+ *   - runtime.*   — every method in McpMethods that starts with `runtime.`
+ *
+ * Built-in filesystem mutators (edit/write/bash/apply_patch/task/
+ * external_directory/repo_clone/repo_overview) are deliberately absent so
+ * the brain CANNOT write to the source checkout directly. Source edits
+ * flow brain -> event -> Claude orchestrator.
+ */
+export const BRAIN_OPENCODE_TOOL_SURFACE: readonly string[] = Object.freeze([
+  "read",
+  "glob",
+  "grep",
+  "list",
+  "lsp",
+  ...McpMethods,
+]);
 
-/** Test/verifier helper mirroring the top-level opencode permission shape. */
+/**
+ * Set form of BRAIN_OPENCODE_TOOL_SURFACE for O(1) positive-enumeration
+ * lookup. Built once at module load.
+ */
+const BRAIN_OPENCODE_TOOL_SURFACE_SET = new Set<string>(BRAIN_OPENCODE_TOOL_SURFACE);
+
+/**
+ * Permission object derived from BRAIN_OPENCODE_TOOL_SURFACE for the
+ * top-level `permission` key in OPENCODE_CONFIG. Only the positively
+ * enumerated tools receive an explicit `allow`; there is no wildcard
+ * deny pattern because the agent block's `tools` array is the
+ * structural gate. Defense-in-depth: even if a future opencode rev
+ * ignores the agent-block enumeration, the top-level permission map
+ * still names exactly the read-only surface and nothing else.
+ */
+export const BRAIN_READONLY_PERMISSION: Readonly<Record<string, "allow">> = Object.freeze(
+  Object.fromEntries(BRAIN_OPENCODE_TOOL_SURFACE.map((tool) => [tool, "allow" as const])),
+);
+
+/**
+ * Mangled-name prefixes for the same tool surface. opencode 1.4+ rewrites
+ * MCP tool names by joining the server name and the `.` separator with
+ * underscores: `substrate.admit_artifact` becomes
+ * `acc2-substrate_substrate_admit_artifact`. Positive enumeration must
+ * accept both shapes so a future opencode rev that drops the mangling
+ * still works.
+ */
+const BRAIN_OPENCODE_MANGLED_PREFIXES = [
+  `${V2_OPENCODE_MCP_SERVER_NAME}_substrate_`,
+  `${V2_OPENCODE_MCP_SERVER_NAME}_runtime_`,
+] as const;
+
+/**
+ * Test/verifier helper that mirrors the structural decision the opencode
+ * agent registration makes: a tool is allowed iff it is positively
+ * enumerated in BRAIN_OPENCODE_TOOL_SURFACE (native shape) OR matches the
+ * canonical mangled prefix (opencode 1.4+ MCP-name mangling). There is no
+ * wildcard, no deny pattern, no fallthrough — unknown tools are denied by
+ * positive enumeration alone.
+ */
 export const isBrainReadonlyToolAllowed = (toolName: string): boolean => {
-  let decision: "allow" | "ask" | "deny" = "allow";
-  for (const [pattern, action] of Object.entries(BRAIN_READONLY_PERMISSION)) {
-    if (permissionPatternMatches(pattern, toolName)) decision = action;
-  }
-  return decision === "allow";
+  if (!toolName) return false;
+  if (BRAIN_OPENCODE_TOOL_SURFACE_SET.has(toolName)) return true;
+  return BRAIN_OPENCODE_MANGLED_PREFIXES.some((prefix) => toolName.startsWith(prefix));
 };
 
 /** v2's full MCP tool surface, derived from the MCP server whitelist.
@@ -183,9 +225,32 @@ export const materializeOpencodeMcpConfig = (opts: {
   // active. type=remote → opencode connects as an HTTP client to
   // fastmcp's Streamable-HTTP transport at `/mcp` (the daemon's primary
   // port).
+  // Positive enumeration at the agent boundary. opencode 1.14.50 exposes
+  // `--agent <name>` which constrains the subprocess to the named agent
+  // block. Listing tools positively in `agent.<name>.tools` means built-in
+  // filesystem mutators (edit/write/bash/apply_patch) are NEVER registered
+  // with the subprocess — there is no deny pattern to bypass.
+  //
+  // `default_agent` is a belt-and-braces declaration in case the spawn
+  // omits `--agent`. `tools` at the top level is defense-in-depth for
+  // opencode revs that honor a top-level tool restriction.
+  const positiveTools: Record<string, boolean> = Object.fromEntries(
+    BRAIN_OPENCODE_TOOL_SURFACE.map((tool) => [tool, true]),
+  );
   const cfg = {
     $schema: "https://opencode.ai/config.json",
     permission: BRAIN_READONLY_PERMISSION,
+    default_agent: BRAIN_OPENCODE_AGENT_NAME,
+    tools: positiveTools,
+    agent: {
+      [BRAIN_OPENCODE_AGENT_NAME]: {
+        description:
+          "acc2 brain (read-only): substrate.*/runtime.* MCP tools plus "
+          + "read/glob/grep/list/lsp. No filesystem-write tools registered.",
+        tools: positiveTools,
+        permission: BRAIN_READONLY_PERMISSION,
+      },
+    },
     mcp: {
       [serverName]: {
         type: "remote",

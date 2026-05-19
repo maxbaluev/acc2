@@ -654,7 +654,7 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     expect(isBrainReadonlyToolAllowed("grep")).toBe(true);
     expect(isBrainReadonlyToolAllowed("list")).toBe(true);
     expect(isBrainReadonlyToolAllowed("substrate.search")).toBe(true);
-    expect(isBrainReadonlyToolAllowed("runtime.run_artifact")).toBe(true);
+    expect(isBrainReadonlyToolAllowed("runtime.dispatch_ready_task")).toBe(true);
     expect(isBrainReadonlyToolAllowed("acc2-substrate_substrate_emit")).toBe(true);
     expect(isBrainReadonlyToolAllowed("acc2-substrate_runtime_dispatch_ready_task")).toBe(true);
 
