@@ -21,6 +21,7 @@ import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "../runtime/events";
 import { runContractAmendmentConsumer } from "../runtime/contract_amendment_consumer";
 import { pendingContractAmendments } from "../substrate/views";
+import { evaluatePendingAmendmentBacklogSelection } from "../runtime/pending_amendment_backlog_verifier";
 import {
   selectCurrentRootClosureAudit,
   closureResidualsForLineage,
@@ -269,6 +270,88 @@ describe("F11 — contract amendment flywheel consumer", () => {
     const payload = JSON.parse(ev?.payload ?? "{}") as Record<string, unknown>;
     expect(payload.resolving_event_id).toBe(applied.id);
     expect(payload.source_event_id).toBe(propA.id);
+  });
+
+  test("(D2) pending_contract_amendments_view exposes deterministic triage metadata", () => {
+    const db = openDb(":memory:");
+    const dependency = emitEvent(db, {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: "DIR_D2",
+      task_id: "T_D2_DEP",
+      payload: {
+        target_resource: "repo:acc2/dependency",
+        proposed_behavior: {
+          target_resource: "repo:acc2/dependency",
+          predicate: "closure_complete(dep)",
+          target_files: ["runtime/dep.ts"],
+        },
+      },
+    });
+    setTs(db, dependency.id, ago(4_000_000));
+
+    const blocked = emitEvent(db, {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: "DIR_D2",
+      task_id: "T_D2_BLOCKED",
+      payload: {
+        target_resource: "repo:acc2/blocked",
+        proposed_behavior: {
+          target_resource: "repo:acc2/blocked",
+          predicate: "closure_complete(blocked)",
+          target_files: ["runtime/blocked.ts"],
+          dependencies: [dependency.id],
+        },
+      },
+    });
+    setTs(db, blocked.id, ago(3_000_000));
+
+    const clarify = emitEvent(db, {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: "DIR_D2",
+      task_id: "T_D2_CLARIFY",
+      payload: {
+        target_resource: "repo:acc2/clarify",
+        proposed_behavior: { target_resource: "repo:acc2/clarify" },
+      },
+    });
+    setTs(db, clarify.id, ago(2_000_000));
+
+    const ready = emitEvent(db, {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: "DIR_D2",
+      task_id: "T_D2_READY",
+      payload: {
+        target_resource: "repo:acc2/ready",
+        proposed_behavior: {
+          target_resource: "repo:acc2/ready",
+          predicate: "closure_complete(ready)",
+          target_files: ["runtime/ready.ts"],
+          dependencies: [],
+        },
+      },
+    });
+    setTs(db, ready.id, ago(1_000_000));
+
+    const rows = pendingContractAmendments(db, { directiveId: "DIR_D2" });
+    expect(rows[0]?.proposal_id).toBe(dependency.id);
+    expect(rows[0]?.triage_state).toBe("ready_for_implementation");
+    expect(rows[0]?.selection_rank).toBe(1);
+    expect(rows.find((r) => r.proposal_id === blocked.id)?.triage_state).toBe("blocked_by_dependencies");
+    expect(rows.find((r) => r.proposal_id === blocked.id)?.open_dependency_count).toBe(1);
+    expect(rows.find((r) => r.proposal_id === clarify.id)?.missing_fields).toEqual(["predicate", "target_files"]);
+
+    const verified = evaluatePendingAmendmentBacklogSelection({ rows, selected_proposal_id: rows[0]!.proposal_id });
+    expect(verified.residual).toBe(0);
+    expect(verified.eligible_for_f16_f18_implementation).toBe(true);
+    expect(verified.expected_top_proposal_id).toBe(rows[0]!.proposal_id);
+
+    const wrong = evaluatePendingAmendmentBacklogSelection({ rows, selected_proposal_id: blocked.id });
+    expect(wrong.breakdown.selected_top_match).toBe(1);
+    expect(wrong.residual).toBeGreaterThanOrEqual(0.3);
   });
 
   test("(E) prompt_composer outstanding_contract_amendments section honours row cap and byte budget", async () => {

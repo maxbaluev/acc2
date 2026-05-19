@@ -63,6 +63,7 @@ import {
   actProjectionObservability,
   substrateNarrativeRecent,
   claudeInlineReadyLeaves,
+  pendingContractAmendments,
 } from "../../substrate/views";
 import type {
   AdmitArtifactSchema,
@@ -791,6 +792,41 @@ export const handleRead = (
         return { ok: true, result: lessonImplementerQueue(db) as unknown as JsonValue };
       case "pending_owner_decision_queue_view":
         return { ok: true, result: pendingOwnerDecisionQueue(db) as unknown as JsonValue };
+      case "pending_contract_amendments_view": {
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        const rows = pendingContractAmendments(db, { directiveId, limit });
+        return {
+          ok: true,
+          result: rows.map((row) => {
+            const payloadEvidence = Array.isArray(row.payload.evidence_event_ids)
+              ? row.payload.evidence_event_ids.filter((x) => typeof x === "string") as string[]
+              : [];
+            const evidenceEventIds = Array.from(new Set([row.proposal_id, ...row.context_refs, ...payloadEvidence]));
+            return {
+              ...row,
+              proposal_event_id: row.proposal_id,
+              status: "unsettled",
+              evidence_event_ids: evidenceEventIds,
+              triage: {
+                predicate_specificity: row.predicate ? 1 : 0,
+                target_concreteness: row.target_resource && row.target_files && row.target_files.length > 0 ? 1 : 0,
+                dependency_state: row.dependencies_closed ? 1 : 0,
+                supersession_state: row.supersession_state === "live" ? 1 : 0,
+                already_applied_evidence: row.has_applied_change ? 0 : 1,
+                priority_score: Math.max(0, Math.min(1, row.selection_priority / 100)),
+              },
+              selection_gate: {
+                requires_anchor_freshness: true,
+                requires_semantic_duplicate_detection: true,
+                requires_behavioral_novelty: true,
+                requires_necessity: true,
+              },
+            };
+          }) as unknown as JsonValue,
+        };
+      }
       case "claude_inline_ready_leaves_view": {
         // L3 inbox surface — brain design 48SN4XF3WN4KBBCHHCANDRDQRW.
         // Args: { directive_id?, limit?, only_unclaimed? }.

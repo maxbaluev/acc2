@@ -587,7 +587,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       });
     } catch { /* db may already be closed */ }
   }, safetyNetTickMs);
-  workers.push(() => clearInterval(reactiveSafetyNet));
+  workers.push(() => {
+    clearInterval(reactiveSafetyNet);
+    for (const dispose of activationDisposers.splice(0)) dispose();
+  });
 
   // Health counts refresher. Pushes the four COUNT(*) queries OFF the /health
   // request path entirely. The COUNT(*) on a 100k+ events table under active
@@ -600,6 +603,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // on the initial COUNT(*); /health returns cached zeros for the first ~1s
   // until the first refresh completes.
   setTimeout(() => { try { refreshHealthCounts(db); } catch { /* swallow */ } }, 250);
+  // Hard timer: /health cache freshness degrades with elapsed time even if no ledger event arrives.
   const healthCountsTick = setInterval(() => {
     try { refreshHealthCounts(db); } catch { /* keep stale cache */ }
   }, 60_000);
@@ -677,55 +681,54 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // ticking on a sub-minute cadence to catch it before /health stalls.
   if (isWorkerEnabled("wal_pressure_check")) registerWorker("wal_pressure_check", Number(process.env.ACC2_WAL_PRESSURE_TICK_MS ?? 30 * 1000));
 
-  // Phase E: amendment worker — drain unapplied directive_amended events on
-  // a configurable interval (default 2s; tests may pin a shorter value via
-  // ACC2_AMENDMENT_TICK_MS). Errors are surfaced as error_caught events
-  // (one per amendment) so a malformed amendment can't kill the daemon AND
-  // never vanishes silently.
+  // Phase E: amendment worker — drain unapplied directive_amended events when
+  // directive amendments arrive. The shared reactive safety net is the fallback
+  // for missed in-process notifications. Errors are surfaced as error_caught
+  // events (one per amendment) so a malformed amendment can't kill the daemon
+  // AND never vanishes silently.
   let amendmentMarked = false;
-  const amendmentTick = setInterval(
-    supervisedTick(db, "amendment", amendmentTickMs, async () => {
-      const unapplied = findUnappliedAmendments(db);
-      for (const id of unapplied) {
+  const amendmentTick = supervisedTick(db, "amendment", amendmentTickMs, async () => {
+    const unapplied = findUnappliedAmendments(db);
+    for (const id of unapplied) {
+      try {
+        await applyAmendment(db, id);
+      } catch (err) {
+        logger.warn(
+          { amendment_id: id, err: (err as Error).message },
+          "applyAmendment failed — surfaced as error_caught, continuing",
+        );
         try {
-          await applyAmendment(db, id);
-        } catch (err) {
-          logger.warn(
-            { amendment_id: id, err: (err as Error).message },
-            "applyAmendment failed — surfaced as error_caught, continuing",
+          emitEvent(db, {
+            kind: "error_caught",
+            substrate_origin: "substrate_auto",
+            payload: {
+              where: "daemon.amendment.apply",
+              recoverable: true,
+              amendment_id: id,
+              message: (err as Error).message,
+            },
+          });
+        } catch (emitErr) {
+          logger.debug(
+            { where: "daemon.amendment.emit", err: String(emitErr) },
+            "could not emit error_caught (db likely closed)",
           );
-          try {
-            emitEvent(db, {
-              kind: "error_caught",
-              substrate_origin: "substrate_auto",
-              payload: {
-                where: "daemon.amendment.apply",
-                recoverable: true,
-                amendment_id: id,
-                message: (err as Error).message,
-              },
-            });
-          } catch (emitErr) {
-            logger.debug(
-              { where: "daemon.amendment.emit", err: String(emitErr) },
-              "could not emit error_caught (db likely closed)",
-            );
-          }
         }
       }
-      if (!amendmentMarked) { markWorkerReady("amendment"); amendmentMarked = true; }
-    }),
-    amendmentTickMs,
-  );
+    }
+    if (!amendmentMarked) { markWorkerReady("amendment"); amendmentMarked = true; }
+  });
+  registerReactiveWorker("amendment", amendmentTickMs, ["directive_amended"], amendmentTick, { minReactiveGapMs: amendmentTickMs });
   // Fire one synchronous mark right away so amendment readiness does
   // not block /ready for 2s on a quiet daemon.
   markWorkerReady("amendment");
   amendmentMarked = true;
   recordWorkerTick("amendment");
-  workers.push(() => clearInterval(amendmentTick));
+  // amendment is activation-driven; activationDisposers are cleared on shutdown.
 
   // Batch 3.OPS: gauge refresh (every 30s) keeps the SQLite-backed gauges
   // (substrate_events_total, act_artifacts_*) live for /metrics scrapes.
+  // Hard timer: scrape freshness is elapsed-time based, not ledger-arrival control flow.
   const gaugeTick = setInterval(
     supervisedTick(db, "metrics_gauge_refresh", gaugeTickMs, async () => {
       refreshGauges(db, startedAtMs);
@@ -742,20 +745,18 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // is 6h by default; configurable via ACC2_INTEGRITY_INTERVAL_MS.
   if (isWorkerEnabled("integrity")) {
     let integrityMarked = false;
-    const integrityTick = setInterval(
-      supervisedTick(db, "integrity", integrityIntervalMs, async () => {
-        await integrityWorkerTick(db);
-        if (!integrityMarked) { markWorkerReady("integrity"); integrityMarked = true; }
-      }),
-      integrityIntervalMs,
-    );
+    const integrityTick = supervisedTick(db, "integrity", integrityIntervalMs, async () => {
+      await integrityWorkerTick(db);
+      if (!integrityMarked) { markWorkerReady("integrity"); integrityMarked = true; }
+    });
+    registerReactiveWorker("integrity", integrityIntervalMs, ["brain_dispatched", "brain_dispatch_closed", "bridge_failed", "task_node_opened", "task_committed", "task_failed", "task_abandoned"], integrityTick, { minReactiveGapMs: integrityIntervalMs });
     // Mark ready immediately — the boot-time runIntegrityCheck already
-    // proved the substrate is healthy. The interval tick repeats every
-    // 6h thereafter.
+    // proved the substrate is healthy. Reactive event wakes handle new rows;
+    // the shared safety net still covers stale dispatch/task scans.
     markWorkerReady("integrity");
     integrityMarked = true;
     recordWorkerTick("integrity");
-    workers.push(() => clearInterval(integrityTick));
+    // integrity is activation-driven; activationDisposers are cleared on shutdown.
   }
 
   // Batch 8.B: supervisor worker — runs the three stuck/loop detectors
@@ -767,17 +768,15 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("supervisor")) {
     const { supervisorTick } = await import("./supervisor");
     let supervisorMarked = false;
-    const supervisorTickHandle = setInterval(
-      supervisedTick(db, "supervisor", SUPERVISOR_INTERVAL_MS, async () => {
-        supervisorTick(db);
-        if (!supervisorMarked) { markWorkerReady("supervisor"); supervisorMarked = true; }
-      }),
-      SUPERVISOR_INTERVAL_MS,
-    );
+    const supervisorTickHandle = supervisedTick(db, "supervisor", SUPERVISOR_INTERVAL_MS, async () => {
+      supervisorTick(db);
+      if (!supervisorMarked) { markWorkerReady("supervisor"); supervisorMarked = true; }
+    });
+    registerReactiveWorker("supervisor", SUPERVISOR_INTERVAL_MS, ["brain_dispatched", "action_predicted", "task_node_opened", "task_committed", "task_failed", "task_abandoned", "bridge_failed", "bridge_completed"], supervisorTickHandle, { minReactiveGapMs: SUPERVISOR_INTERVAL_MS });
     markWorkerReady("supervisor");
     supervisorMarked = true;
     recordWorkerTick("supervisor");
-    workers.push(() => clearInterval(supervisorTickHandle));
+    // supervisor is activation-driven; activationDisposers are cleared on shutdown.
   }
 
   // Brain contract Q471RAN88X0H513V8BC3BTW0AW Phase F (2026-05-17):
@@ -808,6 +807,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // canonical events (brain_dispatched, action_predicted, action_scored,
   // task_committed) STAY forever; only the per-frame mirror is pruned.
   // Runs hourly so steady-state growth never exceeds one day of frames.
+  // Hard timer: retention expiry is elapsed-time based, not event-arrival control flow.
   const COMPACTION_INTERVAL_MS = Number(process.env.ACC2_COMPACTION_INTERVAL_MS ?? 60 * 60 * 1000);
   if (isWorkerEnabled("compaction")) {
     const { compactionWorkerTick } = await import("./compaction");
@@ -896,13 +896,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       }
     };
     let extractorsMarked = false;
-    const extractorsTickHandle = setInterval(
-      supervisedTick(db, "extractors", EXTRACTORS_INTERVAL_MS, async () => {
-        await runExtractorsOnce();
-        if (!extractorsMarked) { markWorkerReady("extractors"); extractorsMarked = true; }
-      }),
-      EXTRACTORS_INTERVAL_MS,
-    );
+    const extractorsTickHandle = supervisedTick(db, "extractors", EXTRACTORS_INTERVAL_MS, async () => {
+      await runExtractorsOnce();
+      if (!extractorsMarked) { markWorkerReady("extractors"); extractorsMarked = true; }
+    });
+    registerReactiveWorker("extractors", EXTRACTORS_INTERVAL_MS, ["knowledge_candidate", "act_artifact_candidate", "code_artifact_candidate", "action_scored", "task_committed", "lesson_extracted", "owner_insight_candidate", "owner_input_received", "owner_observed_outcome_recorded", "applied_change_committed", "applied_change_failed", "irreversible_effect_recorded"], extractorsTickHandle, { minReactiveGapMs: EXTRACTORS_INTERVAL_MS });
     // Round-2 audit (2026-05-15): run ONE extractor pass synchronously at
     // boot so candidates accumulated while the daemon was off don't have
     // to wait the full 5-min cadence before being promoted. Marks ready
@@ -916,7 +914,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
         recordWorkerTick("extractors");
       }
     })();
-    workers.push(() => clearInterval(extractorsTickHandle));
+    // extractors is activation-driven; activationDisposers are cleared on shutdown.
   }
 
   // auto_apply worker deleted (owner-approved 2026-05-16): the orchestrator
@@ -975,21 +973,19 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // row can't kill the daemon and never vanishes silently.
   if (isWorkerEnabled("embedder")) {
     let embedderMarked = false;
-    const embedderTick = setInterval(
-      supervisedTick(db, "embedder", embedderIntervalMs, async () => {
-        const pendingEmbeddings = (db.query("SELECT COUNT(*) AS c FROM events WHERE embedding IS NULL").get() as { c: number }).c;
-        await embedderWorkerTick(db, { batchSize: pendingEmbeddings > 500 ? 200 : pendingEmbeddings > 100 ? 100 : 20 });
-        if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
-      }, {
-        // Embedder ticks legitimately take 15-35s during heavy backlog
-        // drain (OpenAI roundtrip × adaptive batchSize 200). Only flag
-        // overrun when the wedge is structural — ≥ 6× the interval. The
-        // skip-fire still happens every tick (correct); we just stop
-        // alarming the operator on normal drain work.
-        overrunThresholdMs: embedderIntervalMs * 6,
-      }),
-      embedderIntervalMs,
-    );
+    const embedderTick = supervisedTick(db, "embedder", embedderIntervalMs, async () => {
+      const pendingEmbeddings = (db.query("SELECT COUNT(*) AS c FROM events WHERE embedding IS NULL").get() as { c: number }).c;
+      await embedderWorkerTick(db, { batchSize: pendingEmbeddings > 500 ? 200 : pendingEmbeddings > 100 ? 100 : 20 });
+      if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
+    }, {
+      // Embedder ticks legitimately take 15-35s during heavy backlog
+      // drain (OpenAI roundtrip × adaptive batchSize 200). Only flag
+      // overrun when the wedge is structural — ≥ 6× the interval. The
+      // skip-fire still happens every tick (correct); we just stop
+      // alarming the operator on normal drain work.
+      overrunThresholdMs: embedderIntervalMs * 6,
+    });
+    registerReactiveWorker("embedder", embedderIntervalMs, ["*"], embedderTick, { minReactiveGapMs: embedderIntervalMs });
     // Run one tick synchronously at boot so /ready can flip without
     // waiting 10s.
     void (async () => {
@@ -1021,7 +1017,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       }
       if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
     })();
-    workers.push(() => clearInterval(embedderTick));
+    // embedder is activation-driven; activationDisposers are cleared on shutdown.
   }
 
   // Phase H: rehabilitation worker. Default ON — production wants
@@ -1034,6 +1030,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // artifacts crossed the cooldown simultaneously. Worker respects the
   // canonical deadline pattern: a `runningTick` boolean swallows
   // overlapping ticks so a slow fixture cannot stack worker invocations.
+  // Hard timer: the 14-day quarantine cooldown becomes eligible by elapsed time.
   if (isWorkerEnabled("rehabilitation")) {
     const rehabTickMs = Number(process.env.ACC2_REHAB_TICK_MS ?? 30 * 60 * 1000);
     // Rehab readiness flips on registration; we do NOT run a synchronous
@@ -1103,6 +1100,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // applyRecipeInertiaDecay implementation. Opt-OUT via
   // `ACC2_DISABLE_WORKERS=recipe_inertia`. Tick interval env-configurable
   // via `ACC2_RECIPE_INERTIA_TICK_MS`.
+  // Hard timer: inactivity decay measures elapsed time since replay.
   if (isWorkerEnabled("recipe_inertia")) {
     const inertiaTickMs = Number(process.env.ACC2_RECIPE_INERTIA_TICK_MS ?? 60 * 60 * 1000);
     const { applyRecipeInertiaDecay } = await import("./recipe_inertia");
@@ -1130,13 +1128,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const { experienceCompressionWorkerTick } = await import("./experience_compression_worker");
     markWorkerReady("experience_compression");
     recordWorkerTick("experience_compression");
-    const compressionTick = setInterval(
-      supervisedTick(db, "experience_compression", compressionTickMs, async () => {
-        experienceCompressionWorkerTick(db);
-      }),
-      compressionTickMs,
-    );
-    workers.push(() => clearInterval(compressionTick));
+    const compressionTick = supervisedTick(db, "experience_compression", compressionTickMs, async () => {
+      experienceCompressionWorkerTick(db);
+    });
+    registerReactiveWorker("experience_compression", compressionTickMs, ["task_closure_audited", "lesson_extracted", "task_committed", "action_scored", "recipe_extracted", "applied_change_committed"], compressionTick, { minReactiveGapMs: compressionTickMs });
+    // experience_compression is activation-driven; activationDisposers are cleared on shutdown.
   }
 
   // F3 (2026-05-18): lifecycle closure sweep. Periodic terminator
@@ -1150,13 +1146,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const { runLifecycleClosureSweep } = await import("./lifecycle_closure_sweep");
     markWorkerReady("lifecycle_closure_sweep");
     recordWorkerTick("lifecycle_closure_sweep");
-    const sweepTick = setInterval(
-      supervisedTick(db, "lifecycle_closure_sweep", sweepTickMs, async () => {
-        runLifecycleClosureSweep(db);
-      }),
-      sweepTickMs,
-    );
-    workers.push(() => clearInterval(sweepTick));
+    const sweepTick = supervisedTick(db, "lifecycle_closure_sweep", sweepTickMs, async () => {
+      runLifecycleClosureSweep(db);
+    });
+    registerReactiveWorker("lifecycle_closure_sweep", sweepTickMs, ["contract_amendment_proposed", "owner_input_required", "task_node_opened", "applied_change_committed", "owner_decision_recorded", "owner_input_received", "task_committed", "task_failed", "task_abandoned", "closure_complete", "closure_obsolete", "closure_owner_required"], sweepTick, { minReactiveGapMs: sweepTickMs });
+    // lifecycle_closure_sweep is activation-driven; safety net covers age-threshold scans.
   }
 
   // F11 (2026-05-18, contract 2AMJKN0GTX32790173EPYH6YT4): contract
@@ -1175,13 +1169,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const { runContractAmendmentConsumer } = await import("./contract_amendment_consumer");
     markWorkerReady("contract_amendment_consumer");
     recordWorkerTick("contract_amendment_consumer");
-    const consumerTick = setInterval(
-      supervisedTick(db, "contract_amendment_consumer", consumerTickMs, async () => {
-        runContractAmendmentConsumer(db, { maxRows: consumerBatchSize });
-      }),
-      consumerTickMs,
-    );
-    workers.push(() => clearInterval(consumerTick));
+    const consumerTick = supervisedTick(db, "contract_amendment_consumer", consumerTickMs, async () => {
+      runContractAmendmentConsumer(db, { maxRows: consumerBatchSize });
+    });
+    registerReactiveWorker("contract_amendment_consumer", consumerTickMs, ["contract_amendment_proposed", "applied_change_committed", "closure_complete", "closure_obsolete", "closure_owner_required"], consumerTick, { minReactiveGapMs: consumerTickMs });
+    // contract_amendment_consumer is activation-driven; bursts are debounced by minReactiveGapMs.
   }
 
   // F-resilience (2026-05-18, contract C33Q10NV557DDEMMHH4TD42MVR):
@@ -1198,14 +1190,12 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const { runWalPressureCheck, setLastWalPressureSummary } = await import("./wal_pressure_worker");
     markWorkerReady("wal_pressure_check");
     recordWorkerTick("wal_pressure_check");
-    const walTick = setInterval(
-      supervisedTick(db, "wal_pressure_check", walTickMs, async () => {
-        const summary = runWalPressureCheck(db, { dbPath: stateDbPath });
-        setLastWalPressureSummary(summary);
-      }),
-      walTickMs,
-    );
-    workers.push(() => clearInterval(walTick));
+    const walTick = supervisedTick(db, "wal_pressure_check", walTickMs, async () => {
+      const summary = runWalPressureCheck(db, { dbPath: stateDbPath });
+      setLastWalPressureSummary(summary);
+    });
+    registerReactiveWorker("wal_pressure_check", walTickMs, ["bridge_frame_received", "action_scored", "task_committed", "task_node_opened", "contract_amendment_proposed", "closure_complete", "closure_obsolete", "closure_owner_required"], walTick, { minReactiveGapMs: walTickMs });
+    // wal_pressure_check is activation-driven; safety net covers filesystem WAL growth without a ledger event.
   }
 
   // Self-healing chain Layer 3 (owner-approved 2026-05-16, option d):
@@ -1235,13 +1225,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // are on.
   if (isWorkerEnabled("rolling_reviewer")) {
     let rollingMarked = false;
-    const rollingTick = setInterval(
-      supervisedTick(db, "rolling_reviewer", rollingIntervalMs, async () => {
-        await rollingReviewerWorkerTick(db);
-        if (!rollingMarked) { markWorkerReady("rolling_reviewer"); rollingMarked = true; }
-      }),
-      rollingIntervalMs,
-    );
+    const rollingTick = supervisedTick(db, "rolling_reviewer", rollingIntervalMs, async () => {
+      await rollingReviewerWorkerTick(db);
+      if (!rollingMarked) { markWorkerReady("rolling_reviewer"); rollingMarked = true; }
+    });
+    registerReactiveWorker("rolling_reviewer", rollingIntervalMs, ["directive_opened", "directive_amended", "owner_decision_recorded", "owner_input_received", "task_committed"], rollingTick, { minReactiveGapMs: rollingIntervalMs });
     void (async () => {
       try {
         await rollingReviewerWorkerTick(db);
@@ -1270,7 +1258,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       }
       if (!rollingMarked) { markWorkerReady("rolling_reviewer"); rollingMarked = true; }
     })();
-    workers.push(() => clearInterval(rollingTick));
+    // rolling_reviewer is activation-driven; safety net covers due-time arrival.
   }
 
   // Phase K: Father worker. Father is no longer a cadence-bound planner.
@@ -1982,6 +1970,7 @@ const handleEventsStream = (req: Request): Response => {
         }
       };
       const unsubscribe = subscribe(subscriber);
+      // Hard timer: SSE keepalive measures connection idleness, not substrate work arrival.
       const heartbeat = setInterval(() => {
         try { controller.enqueue(encoder.encode(": keepalive\n\n")); } catch { /* swallow */ }
       }, 15_000);

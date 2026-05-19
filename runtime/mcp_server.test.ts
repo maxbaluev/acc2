@@ -518,6 +518,59 @@ describe("fastmcp substrate tools — stdio transport", () => {
     }
   });
 
+  test("substrate.read pending_contract_amendments_view returns unsettled rows with selector metadata", async () => {
+    const emitted = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.emit",
+        arguments: {
+          kind: "contract_amendment_proposed",
+          directive_id: "d_pending_amendments",
+          task_id: "t_pending_amendments",
+          payload: {
+            target_resource: "repo:runtime/example.ts",
+            evidence_event_ids: ["evidence_1"],
+            proposed_behavior: {
+              target_resource: "repo:runtime/example.ts",
+              predicate: "wire pending view",
+              target_files: ["runtime/example.ts"],
+              dependencies: [],
+            },
+          },
+          context_refs: ["ctx_1"],
+        },
+      })) as ToolCallResponse,
+    );
+    expect(emitted.ok).toBe(true);
+
+    const env = parseEnvelope(
+      (await h!.client.callTool({
+        name: "substrate.read",
+        arguments: {
+          view_name: "pending_contract_amendments_view",
+          args: { directive_id: "d_pending_amendments" },
+        },
+      })) as ToolCallResponse,
+    );
+
+    expect(env.ok).toBe(true);
+    expect(env.result).toHaveLength(1);
+    expect(env.result[0]).toEqual(expect.objectContaining({
+      proposal_event_id: emitted.result.id,
+      proposal_id: emitted.result.id,
+      status: "unsettled",
+      triage_state: "ready_for_implementation",
+      evidence_event_ids: expect.arrayContaining([emitted.result.id, "ctx_1", "evidence_1"]),
+      selection_gate: expect.objectContaining({
+        requires_anchor_freshness: true,
+        requires_semantic_duplicate_detection: true,
+        requires_behavioral_novelty: true,
+        requires_necessity: true,
+      }),
+    }));
+    expect(typeof env.result[0].triage.priority_score).toBe("number");
+    expect(typeof env.result[0].triage.predicate_specificity).toBe("number");
+  });
+
   test("substrate.read dispatch_resolved_view returns filtered lifecycle status", async () => {
     for (const event of [
       { kind: "task_node_opened", directive_id: "d_resolved", task_id: "t_root" },

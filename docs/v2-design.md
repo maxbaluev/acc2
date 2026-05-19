@@ -176,6 +176,10 @@ substrate.emit({
 
 Amendment lineage preserves the causal chain: superseded events stay in substrate (audit), but `task_graph_view` excludes them from active topology. Predictions written before amendment are scored against the AMENDED goal where applicable, or marked `superseded_by_amendment` and excluded from residual aggregation.
 
+#### 3.2.1 Pending Contract-Amendment Backlog Selector
+
+`pending_contract_amendments_view` is the canonical selector input for unsettled `contract_amendment_proposed` rows. It filters out proposals already cited by terminal closure or apply events, then adds triage metadata: missing fields, dependency counts, dependency closure, supersession state, triage state/reason, selection priority, and deterministic rank. Later F16-F18 implementation selection is gated by the deterministic backlog-selection verifier: a candidate implementation may proceed only when the verifier residual is below 0.3, the selected proposal matches rank 1, and the selected row is `ready_for_implementation`. Rows in clarification, dependency-blocked, or supersession triage remain closure/owner-input work, not implementation work.
+
 ### 3.3 Multi-stakeholder directives (closes `k_3613`, `k_3621`, `U6`)
 
 Negotiation, hiring/firing, partnership decisions involve multiple agents with distinct utilities. The substrate represents stakeholders explicitly:

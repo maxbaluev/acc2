@@ -3382,6 +3382,43 @@ CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
       ) AS newer_proposal_id
     FROM proposals p
   ),
+  dependency_items AS (
+    SELECT
+      p.proposal_id,
+      d.key AS dependency_key,
+      CASE
+        WHEN d.type = 'text' THEN d.value
+        WHEN d.type = 'object' THEN json_extract(d.value, '$.event_id')
+        ELSE NULL
+      END AS dependency_event_id
+    FROM proposals p
+    LEFT JOIN json_each(
+      CASE
+        WHEN p.dependencies IS NOT NULL AND json_valid(p.dependencies) THEN p.dependencies
+        ELSE '[]'
+      END
+    ) d
+  ),
+  dependency_status AS (
+    SELECT
+      p.proposal_id,
+      COALESCE(COUNT(di.dependency_key), 0) AS dependency_count,
+      COALESCE(SUM(
+        CASE
+          WHEN di.dependency_key IS NULL THEN 0
+          WHEN di.dependency_event_id IS NULL THEN 1
+          WHEN EXISTS (
+            SELECT 1 FROM events c
+            WHERE c.kind IN ('closure_complete', 'applied_change_committed')
+              AND (c.id = di.dependency_event_id OR c.context_refs LIKE '%' || di.dependency_event_id || '%')
+          ) THEN 0
+          ELSE 1
+        END
+      ), 0) AS open_dependency_count
+    FROM proposals p
+    LEFT JOIN dependency_items di ON di.proposal_id = p.proposal_id
+    GROUP BY p.proposal_id
+  ),
   latest_verdict AS (
     SELECT
       p.proposal_id,
@@ -3405,33 +3442,102 @@ CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
           AND a.context_refs LIKE '%' || p.proposal_id || '%'
       ) AS has_applied_change
     FROM proposals p
+  ),
+  enriched AS (
+    SELECT
+      p.proposal_id,
+      p.ts,
+      p.directive_id,
+      p.task_id,
+      p.target_resource,
+      p.predicate,
+      p.target_files,
+      p.dependencies,
+      p.payload,
+      p.context_refs,
+      CAST((julianday('now') - julianday(p.ts)) * 86400000 AS INTEGER) AS age_ms,
+      CASE
+        WHEN s.newer_proposal_id IS NOT NULL THEN 'superseded_by'
+        ELSE 'live'
+      END AS supersession_state,
+      s.newer_proposal_id,
+      ds.dependency_count,
+      ds.open_dependency_count,
+      CASE
+        WHEN p.predicate IS NULL OR length(trim(p.predicate)) = 0 THEN 1
+        ELSE 0
+      END AS missing_predicate,
+      CASE
+        WHEN p.target_files IS NULL OR NOT json_valid(p.target_files) OR json_array_length(p.target_files) = 0 THEN 1
+        ELSE 0
+      END AS missing_target_files,
+      lv.latest_closure_verdict,
+      lv.latest_closure_event_id,
+      lv.has_applied_change
+    FROM proposals p
+    JOIN supersession s ON s.proposal_id = p.proposal_id
+    JOIN dependency_status ds ON ds.proposal_id = p.proposal_id
+    JOIN latest_verdict lv ON lv.proposal_id = p.proposal_id
+    WHERE lv.latest_closure_verdict IS NULL
+      AND lv.has_applied_change = 0
+  ),
+  triaged AS (
+    SELECT
+      e.*,
+      CASE
+        WHEN e.missing_predicate = 1 AND e.missing_target_files = 1 THEN '["predicate","target_files"]'
+        WHEN e.missing_predicate = 1 THEN '["predicate"]'
+        WHEN e.missing_target_files = 1 THEN '["target_files"]'
+        ELSE '[]'
+      END AS missing_fields,
+      CASE
+        WHEN e.supersession_state = 'superseded_by' THEN 'closure_obsolete_supersession'
+        WHEN e.missing_predicate = 1 OR e.missing_target_files = 1 THEN 'needs_clarification'
+        WHEN e.open_dependency_count > 0 THEN 'blocked_by_dependencies'
+        ELSE 'ready_for_implementation'
+      END AS triage_state,
+      CASE
+        WHEN e.supersession_state = 'superseded_by' THEN 'newer proposal exists for same target_resource'
+        WHEN e.missing_predicate = 1 OR e.missing_target_files = 1 THEN 'proposal lacks predicate or target_files'
+        WHEN e.open_dependency_count > 0 THEN 'declared dependencies are not yet closed'
+        ELSE 'predicate, target_files, and dependencies are implementation-ready'
+      END AS triage_reason,
+      CASE
+        WHEN e.supersession_state = 'superseded_by' THEN 90
+        WHEN e.missing_predicate = 0 AND e.missing_target_files = 0 AND e.open_dependency_count = 0 THEN 100
+        WHEN e.missing_predicate = 1 OR e.missing_target_files = 1 THEN 60
+        WHEN e.open_dependency_count > 0 THEN 40
+        ELSE 10
+      END AS selection_priority
+    FROM enriched e
   )
   SELECT
-    p.proposal_id,
-    p.ts,
-    p.directive_id,
-    p.task_id,
-    p.target_resource,
-    p.predicate,
-    p.target_files,
-    p.dependencies,
-    p.payload,
-    p.context_refs,
-    CAST((julianday('now') - julianday(p.ts)) * 86400000 AS INTEGER) AS age_ms,
-    CASE
-      WHEN s.newer_proposal_id IS NOT NULL THEN 'superseded_by'
-      ELSE 'live'
-    END AS supersession_state,
-    s.newer_proposal_id,
-    lv.latest_closure_verdict,
-    lv.latest_closure_event_id,
-    lv.has_applied_change
-  FROM proposals p
-  JOIN supersession s ON s.proposal_id = p.proposal_id
-  JOIN latest_verdict lv ON lv.proposal_id = p.proposal_id
-  WHERE lv.latest_closure_verdict IS NULL
-    AND lv.has_applied_change = 0
-  ORDER BY p.ts ASC;
+    t.proposal_id,
+    t.ts,
+    t.directive_id,
+    t.task_id,
+    t.target_resource,
+    t.predicate,
+    t.target_files,
+    t.dependencies,
+    t.payload,
+    t.context_refs,
+    t.age_ms,
+    t.supersession_state,
+    t.newer_proposal_id,
+    t.dependency_count,
+    t.open_dependency_count,
+    CASE WHEN t.open_dependency_count = 0 THEN 1 ELSE 0 END AS dependencies_closed,
+    t.missing_fields,
+    t.triage_state,
+    t.triage_reason,
+    t.selection_priority,
+    ROW_NUMBER() OVER (ORDER BY t.selection_priority DESC, t.ts ASC, t.proposal_id ASC) AS selection_rank,
+    t.latest_closure_verdict,
+    t.latest_closure_event_id,
+    t.has_applied_change
+  FROM triaged t
+  ORDER BY selection_rank ASC;
 `;
 
 // substrate_narrative_recent_view — the TUI's load-bearing primitive.
@@ -5529,6 +5635,14 @@ export type PendingContractAmendmentRow = {
   latest_closure_verdict: string | null;
   latest_closure_event_id: string | null;
   has_applied_change: boolean;
+  dependency_count: number;
+  open_dependency_count: number;
+  dependencies_closed: boolean;
+  missing_fields: string[];
+  triage_state: "ready_for_implementation" | "needs_clarification" | "blocked_by_dependencies" | "closure_obsolete_supersession" | string;
+  triage_reason: string;
+  selection_priority: number;
+  selection_rank: number;
 };
 
 export const pendingContractAmendments = (
@@ -5540,11 +5654,11 @@ export const pendingContractAmendments = (
   const rows = directiveId
     ? db
         .query(
-          "SELECT * FROM pending_contract_amendments_view WHERE directive_id = ? ORDER BY ts ASC LIMIT ?",
+          "SELECT * FROM pending_contract_amendments_view WHERE directive_id = ? ORDER BY selection_rank ASC LIMIT ?",
         )
         .all(directiveId, limit) as Array<Record<string, unknown>>
     : db
-        .query("SELECT * FROM pending_contract_amendments_view ORDER BY ts ASC LIMIT ?")
+        .query("SELECT * FROM pending_contract_amendments_view ORDER BY selection_rank ASC LIMIT ?")
         .all(limit) as Array<Record<string, unknown>>;
   return rows.map((r) => {
     let targetFiles: string[] | null = null;
@@ -5563,6 +5677,7 @@ export const pendingContractAmendments = (
         if (Array.isArray(parsed)) dependencies = parsed;
       } catch { /* malformed JSON → null */ }
     }
+    const missingFields = parseMaybeJson(r.missing_fields ?? "[]");
     return {
       proposal_id: r.proposal_id as string,
       ts: r.ts as string,
@@ -5580,6 +5695,14 @@ export const pendingContractAmendments = (
       latest_closure_verdict: (r.latest_closure_verdict as string | null) ?? null,
       latest_closure_event_id: (r.latest_closure_event_id as string | null) ?? null,
       has_applied_change: ((r.has_applied_change as number) ?? 0) === 1,
+      dependency_count: (r.dependency_count as number) ?? 0,
+      open_dependency_count: (r.open_dependency_count as number) ?? 0,
+      dependencies_closed: ((r.dependencies_closed as number) ?? 0) === 1,
+      missing_fields: Array.isArray(missingFields) ? missingFields.filter((x): x is string => typeof x === "string") : [],
+      triage_state: (r.triage_state as PendingContractAmendmentRow["triage_state"]) ?? "ready_for_implementation",
+      triage_reason: (r.triage_reason as string | null) ?? "",
+      selection_priority: (r.selection_priority as number) ?? 0,
+      selection_rank: (r.selection_rank as number) ?? 0,
     };
   });
 };
