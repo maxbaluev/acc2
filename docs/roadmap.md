@@ -1,12 +1,24 @@
 # AccInt — Roadmap
 
-The roadmap is ordered by structural leverage and dependency. Tier 0 makes posterior evidence trustworthy; later tiers make more boundaries posterior-scored and reusable (`SAF9AVJ8HD7W5DK847W72ETXHR`, `6DZ417CCK57P90B7B2FTAV024M`, `FE8DF6H1KN1590MGP6JHFPTWYW`).
+**Thesis.** Ordered by structural leverage and causal dependency: Tier S0 calibrates the owner channel that grounds every other posterior; Tier 0 makes posterior evidence trustworthy by closing artifact-credit, citation-binding, and closure-truth gaps; later tiers convert more decision boundaries into posterior-scored, reusable rows. Each entry names the problem, contract shape, tier rationale, closure predicate, and metric direction — detailed proofs stay in substrate events and knowledge, not this file (`SAF9AVJ8HD7W5DK847W72ETXHR`, `6DZ417CCK57P90B7B2FTAV024M`, `FE8DF6H1KN1590MGP6JHFPTWYW`, `433DGRZ27547KESBFYR4FZ10WC`).
 
-Each entry names the problem, contract shape, tier rationale, and metric direction. Detailed proofs stay in substrate events and knowledge, not this file (`433DGRZ27547KESBFYR4FZ10WC`).
+Cross-references: architecture surfaces live in `docs/Architecture.md` — §9 (owner alignment) grounds Tier S0; §10 (universal posterior boundary) maps tiers to scored-row moves; §12 (open frontier) enumerates the same tier clusters; §14 (universal intent) cites the live numbers that motivate sequencing.
 
 ## Tier S0 — OWNER ALIGNMENT
 
-Owner truth calibrates every other posterior; owner-observed outcomes are currently sparse relative to candidate confirmations, so the five `owner_*_predicate` primitives — `owner_state_estimator_predicate`, `owner_state_transition_predicate`, `owner_forecast_predicate`, `renderer_predicate`, and `theory_of_mind_predicate` — are prioritized before structural posterior boundaries. Each is an `act_artifact` row scored by owner-observed outcomes through the shared Beta posterior, retrieval, merger, and credit machinery; `owner_forecast_predicate` answers the missing-forecast question (`VVD2T4QAAH19`).
+Owner truth calibrates every other posterior. Live evidence (2 `owner_observed_outcome_recorded` events against 2,197 act tuples and 4,027 scored actions) shows owner outcomes are too sparse to ground other posteriors today, so the five owner-alignment primitives land before structural posterior boundaries. Each is an `act_artifact` row scored by owner-observed outcomes through the shared Beta posterior, retrieval, merger, and credit machinery — the owner is another actor in the substrate, not a persona enum (`VVD2T4QAAH19`; see Architecture.md §9).
+
+The five primitives and their grounding in the 2026 alignment literature:
+
+- `owner_state_estimator_predicate` — infers latent owner state from observable signals; grounds in VARS variance-aware reward shaping (arXiv 2603.20939) and POPI personalized-objective inference (arXiv 2510.17881).
+- `owner_state_transition_predicate` — models how owner state shifts under interaction; grounds in Causal Preference Learning (arXiv 2506.05967) and Adaptive Alignment MORL (arXiv 2410.23630).
+- `owner_forecast_predicate` — predicts owner-observed outcome before commit; grounds in PAHF predictive alignment from human feedback (arXiv 2602.16173) and COPR cumulative online preference reward (arXiv 2402.14228).
+- `renderer_predicate` — selects owner-visible rendering by profile; grounds in Adaptive Querying with AI Persona Priors (arXiv 2605.00696).
+- `theory_of_mind_predicate` — models the owner's belief about the substrate; grounds in Theory of Mind LLM Agents (arXiv 2509.22887) and the ICLR 2026 RSI Workshop's recursive-self-improvement agenda.
+
+**Closure predicate (S0).** Each `owner_*_predicate` row reaches > 30 `owner_observed_outcome_recorded` bindings AND posterior movement (alpha+beta growth) AND non-degenerate Beta variance, while contradiction rate stays bounded.
+
+**Metric direction.** `owner_observed_outcome_recorded` count rises from 2 toward the calibration floor; non-code closure residuals calibrate against owner truth rather than deterministic-test residual alone.
 
 ## Tier 0 — TRUST
 
@@ -22,7 +34,7 @@ Metric direction: refused false closures rise first, then closure residual distr
 
 ### T0.2 — Artifact auto-binding and credit revival
 
-Problem: artifact promotion is dormant; live evidence reports 0 promoted/quarantined artifacts, 20 artifact-score updates vs 3980 scored actions, only 18 acts citing artifacts, and 95% legacy artifact kinds (`SAF9AVJ8HD7W5DK847W72ETXHR`, `A4V81PN9E960S02MWSM4HSM5G4`).
+Problem: artifact promotion is dormant. Live state.db evidence: **20 `act_artifact_score_updated` events against 4,027 `action_scored` events (~0.5%)**, **1,419 of 1,496 act_artifact rows still carry the legacy `kind=code_artifact` discriminator (94.9%)**, and only a small minority of `act_tuple_recorded` envelopes populate `cited_artifact_ids` at all (`SAF9AVJ8HD7W5DK847W72ETXHR`, `A4V81PN9E960S02MWSM4HSM5G4`).
 
 Contract: `runtime/events.ts:normalizeActTuple` auto-binds selected action and verifier artifacts into `cited_artifact_ids`, then credit updates artifact posteriors; closure predicate is artifact-score updates proportional to action-scored rows and selected artifacts visible in retrieval/credit projections (`17WRSQT7015DFDPQN5SXGM25FG`, `4VERR5ZBH57QQ0KC1ZD50TAAT0`).
 
@@ -200,7 +212,16 @@ Metric direction: duplicate siblings and redispatch storms fall (`MQQCK9FQ452H1F
 
 ### T3.7 — Pedagogical RL contracts
 
-Pedagogical RL primitives are scored boundaries that route closure-audit and owner-outcome evidence back into composition. Order by leverage: `composer_policy_predicate` first (subsumes prior section-credit work by making the prompt composer pedagogically self-guided through closure and owner-outcome evidence), then `pedagogical_reward_predicate`, `citation_spike_auditor`, and `surprisal_gate_predicate`. Each lands as an `act_artifact` row with closure predicate "posterior movement tied to closure/owner outcomes."
+Pedagogical RL primitives are scored boundaries that route closure-audit and owner-outcome evidence back into composition. Source: <https://noahziems.com/pedagogical-rl> (with LADDER 2503.00735, Gödel Agent 2410.04444, ICLR 2026 RSI Workshop). Order by leverage:
+
+1. `composer_policy_predicate` — first, subsumes prior section-credit work (T2.4) by making the prompt composer pedagogically self-guided through closure-audit and owner-outcome evidence.
+2. `pedagogical_reward_predicate` — second, scores synthetic curriculum signals against downstream closure/owner outcomes.
+3. `citation_spike_auditor` — third, flags retrieval citations whose binding correlates with closure-residual spikes (positive or negative) for credit weighting.
+4. `surprisal_gate_predicate` — fourth, gates emission on surprise-vs-residual ratio so high-surprise low-residual paths cannot dominate.
+
+Each lands as an `act_artifact` row. **Closure predicate (T3.7).** Posterior alpha/beta movement on each predicate row tied to `task_closure_audited` and `owner_observed_outcome_recorded` events within the same trajectory, with composer-policy posterior outperforming the prior fixed-section baseline by a measurable closure-residual margin.
+
+**Metric direction.** Composer-policy variants diverge by goal class; section-token allocation shifts toward closure-correlated sections; high-surprise low-residual emissions decline.
 
 ## Tier 4 — META-CREDIT + COUNTERFACTUAL
 
@@ -246,7 +267,7 @@ Metric direction: successful coalition reuse rises (`YB2C2QCKC10BNBDVF22CX1Y5V8`
 
 ## Tier 5 — UNIVERSALITY + OPERATIONS
 
-Sandbox parity, freeze-state, token rotation, backup/export cadence, migration sweep, worker-thread pool for heavy aggregates, and runtime-runner registry land here because they improve operational universality after the trust and posterior boundaries are in place (`A4V81PN9E960S02MWSM4HSM5G4`, `HBQ8FM8HED2AX2R7EDCVY15R8W`).
+Sandbox parity, freeze-state, token rotation, backup/export cadence, migration sweep, worker-thread pool for heavy aggregates, and runtime-runner registry land here because they improve operational universality after the trust and posterior boundaries are in place. Closure predicate for the cluster: each operational surface ships with declared SLOs, observable health signals, and recovery procedures cited from substrate knowledge — no operational change earns "done" without measurable absence-of-violation evidence (`A4V81PN9E960S02MWSM4HSM5G4`, `HBQ8FM8HED2AX2R7EDCVY15R8W`).
 
 Worker-thread pool contract: keep embedded SQLite for microsecond hot paths and offload known heavy aggregate reads only; closure predicate is event-loop freed during heavy queries while writes remain serialized (`A4V81PN9E960S02MWSM4HSM5G4`).
 
@@ -262,7 +283,7 @@ Deferred because SandboxDecl and runner dispatch are structurally coupled to run
 
 ### Multiple-brain operation
 
-Rejected: the organism uses opencode gpt-5.5 as the brain; adding alternate model arbitration would add routing complexity before the artifact-credit, binding, and closure-truth gaps are closed (`SAF9AVJ8HD7W5DK847W72ETXHR`, `6DZ417CCK57P90B7B2FTAV024M`).
+Rejected. The organism pins opencode gpt-5.5 as the brain. Alternate-model arbitration would add routing complexity and selector noise before the artifact-credit, citation-binding, and closure-truth gaps (Tier 0) are closed. Once those gaps close and `T4.3` (brain prediction-accuracy posterior) calibrates, model choice could in principle become another scored row — but the current substrate has no signal that would benefit from arbitration (`SAF9AVJ8HD7W5DK847W72ETXHR`, `6DZ417CCK57P90B7B2FTAV024M`).
 
 ## Cross-cutting Principles
 
@@ -274,18 +295,21 @@ Rejected: the organism uses opencode gpt-5.5 as the brain; adding alternate mode
 
 ## Live Metrics To Watch
 
-| Area | Metric | Expected direction |
-|---|---|---|
-| T0.1 | false-closure refusals | Up first, then stable |
-| T0.2 | `act_artifact_score_updated` / `action_scored` | Up sharply |
-| T0.3 | stripped decorative citations | Up first, then down |
-| T0.4 | legacy artifact-kind share | Down |
-| T1.1 | owner outcome events | Up |
-| T1.2 | retrieval rejections | Up proportional to unused exposure |
-| T1.3 | promoted knowledge with bounded contradictions | Up |
-| T2 | prompt tokens per successful dispatch | Down without residual rise |
-| T3 | boundary predicate rows with moving posteriors | Up |
-| T4 | selector and credit calibration error | Down |
-| T5 | health latency under heavy aggregate load | Down |
+| Area | Metric | Live baseline | Expected direction |
+|---|---|---|---|
+| S0 | `owner_observed_outcome_recorded` count | 2 | Up toward calibration floor (>30 per predicate) |
+| T0.1 | false-closure refusals | n/a | Up first, then stable |
+| T0.2 | `act_artifact_score_updated` / `action_scored` | 20 / 4,027 (~0.5%) | Up sharply |
+| T0.3 | stripped decorative citations | n/a | Up first, then down |
+| T0.4 | legacy artifact-kind share | 1,419 / 1,496 (94.9%) | Down |
+| T1.1 | owner outcome events | 2 | Up |
+| T1.2 | retrieval rejections | n/a | Up proportional to unused exposure |
+| T1.3 | promoted knowledge with bounded contradictions | 305 promoted | Up |
+| T2 | prompt tokens per successful dispatch | n/a | Down without residual rise |
+| T3 | boundary-predicate rows with moving posteriors | n/a | Up |
+| T4 | selector and credit calibration error | n/a | Down |
+| T5 | health latency under heavy aggregate load | n/a | Down |
 
-Final state: every reusable boundary is a scored row, every credit path closes, protected security gates stay protected, and the substrate compounds across code, work, research, relationships, and embodied goals through the same residual-scored loop (`5F21YF13Z13W5FNJ6DR2YJ04M0`, `YB2C2QCKC10BNBDVF22CX1Y5V8`, `HBQ8FM8HED2AX2R7EDCVY15R8W`).
+Baseline numbers are from the live substrate (`/home/maxbaluev/.accint/state.db`) at the time of this revision; the same numbers appear in Architecture.md §1 and §14.
+
+**Final state.** Every reusable boundary is a scored row, every credit path closes, protected security gates stay protected by absence-of-violation evidence, and the substrate compounds across code, research, work, relationships, and embodied goals through one residual-scored loop. The roadmap is done when (a) Tier S0/T0/T1 metrics calibrate, (b) Tier 2/3 predicates show posterior divergence, and (c) Tier 4 selector error trends down — see Architecture.md §14 for the live ALIVE verdict (`5F21YF13Z13W5FNJ6DR2YJ04M0`, `YB2C2QCKC10BNBDVF22CX1Y5V8`, `HBQ8FM8HED2AX2R7EDCVY15R8W`).
