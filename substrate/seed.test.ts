@@ -5,6 +5,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "./db";
 import {
+  PREDICATE_SEED_NAMES,
   seedArtifactIds,
   seedActArtifacts,
   seedFoundationalKnowledge,
@@ -85,6 +86,12 @@ describe("seedActArtifacts", () => {
     ]);
     for (const id of ids) {
       if (SUBSTRATE_PRIMITIVE_IDS.has(id)) continue;
+      // 2026-05-20: Tier-1 + Tier S0 + Tier 6 scoreable predicates use
+      // the `predicate_<name>_v1` id form so the registry can filter
+      // predicate rows from raw code artifacts without an out-of-band
+      // lookup. Predicate ids are canonical stable handles — not
+      // `seed_` prefixed — same shape as the substrate-primitive ids.
+      if (id.startsWith("predicate_") && id.endsWith("_v1")) continue;
       expect(id.startsWith("seed_")).toBe(true);
     }
   });
@@ -403,6 +410,149 @@ describe("seedActArtifacts", () => {
     expect(decl.fingerprint_os).toBe("linux");
     expect(decl.fingerprint_locale).toBe("en-US");
     expect(decl.headless).toBe(true);
+  });
+
+  test("Tier -1 + Tier S0 + Tier 6 scoreable predicates (2026-05-20) admit as act_artifact rows with verbatim roadmap payload", () => {
+    // Per docs/roadmap.md the substrate documents 30 scoreable predicates
+    // (5 Tier-1 floor + 5 Tier S0 owner alignment + 20 Tier 6 scoreable
+    // assumptions). Until admitted as act_artifact rows the universal
+    // projector (action_scored → updateActionPosterior) had nothing to
+    // credit; this test pins the admission set so the gap cannot
+    // silently regress.
+    const db = openDb(":memory:");
+    seedActArtifacts(db);
+
+    // Expected: at least the 30 documented predicates by name. The
+    // canonical list lives in PREDICATE_SEED_NAMES so future additions
+    // flow through the same export.
+    expect(PREDICATE_SEED_NAMES.length).toBeGreaterThanOrEqual(30);
+
+    const rows = db
+      .query(
+        `SELECT id, kind, name, body, runtime, status,
+                posterior_alpha, posterior_beta, score, confidence, state_root
+         FROM act_artifact
+         WHERE state_root LIKE 'substrate/primitive/predicate/%'
+         ORDER BY id`,
+      )
+      .all() as Array<{
+        id: string;
+        kind: string;
+        name: string | null;
+        body: string;
+        runtime: string;
+        status: string;
+        posterior_alpha: number;
+        posterior_beta: number;
+        score: number;
+        confidence: number;
+        state_root: string;
+      }>;
+
+    // 1. The 30 predicates are all present, each as exactly one row.
+    expect(rows.length).toBe(PREDICATE_SEED_NAMES.length);
+    const byKind = new Map(rows.map((r) => [r.kind, r]));
+    for (const name of PREDICATE_SEED_NAMES) {
+      const row = byKind.get(name);
+      expect(row).toBeDefined();
+      if (!row) continue;
+      // 2. Stable id form is `predicate_<name>_v1` (NOT seed_ prefixed).
+      expect(row.id).toBe(`predicate_${name}_v1`);
+      // 3. Kind equals the predicate name verbatim (open vocabulary —
+      //    matches threshold_predicate naming convention).
+      expect(row.kind).toBe(name);
+      // 4. Runtime is bun (verifier/scorer is a bun fn).
+      expect(row.runtime).toBe("bun");
+      // 5. Status is admitted (cold-start; learns from cited
+      //    action_scored events).
+      expect(row.status).toBe("admitted");
+      // 6. Uninformative Beta(1,1) prior: alpha=beta=1, score=0.5,
+      //    confidence=0.3. They learn — no synthetic evidence weight.
+      expect(row.posterior_alpha).toBe(1);
+      expect(row.posterior_beta).toBe(1);
+      expect(row.score).toBe(0.5);
+      expect(row.confidence).toBeCloseTo(0.3, 5);
+      // 7. State root partitions by predicate name under primitive.
+      expect(row.state_root).toBe(`substrate/primitive/predicate/${name}`);
+      // 8. body is JSON-encoded predicate payload — non-empty
+      //    problem / contract / why / closure_predicate / metric_direction
+      //    + tier.
+      const payload = JSON.parse(row.body) as {
+        tier?: string;
+        problem?: string;
+        contract?: string;
+        why?: string;
+        closure_predicate?: string;
+        metric_direction?: string;
+      };
+      expect(typeof payload.tier).toBe("string");
+      expect(payload.tier && payload.tier.length).toBeGreaterThan(0);
+      expect(typeof payload.problem).toBe("string");
+      expect(payload.problem && payload.problem.length).toBeGreaterThan(0);
+      expect(typeof payload.contract).toBe("string");
+      expect(payload.contract && payload.contract.length).toBeGreaterThan(0);
+      expect(typeof payload.why).toBe("string");
+      expect(payload.why && payload.why.length).toBeGreaterThan(0);
+      expect(typeof payload.closure_predicate).toBe("string");
+      expect(payload.closure_predicate && payload.closure_predicate.length).toBeGreaterThan(0);
+      expect(typeof payload.metric_direction).toBe("string");
+      expect(payload.metric_direction && payload.metric_direction.length).toBeGreaterThan(0);
+    }
+
+    // 9. Tier distribution: the 5/5/20 split is part of the contract.
+    const byTier = new Map<string, number>();
+    for (const r of rows) {
+      const tier = (JSON.parse(r.body) as { tier?: string }).tier ?? "unknown";
+      byTier.set(tier, (byTier.get(tier) ?? 0) + 1);
+    }
+    expect(byTier.get("tier_minus_1_floor")).toBe(5);
+    expect(byTier.get("tier_s0_owner_alignment")).toBe(5);
+    expect(byTier.get("tier_6_scoreable_assumption")).toBe(20);
+  });
+
+  test("Tier -1 + Tier S0 + Tier 6 predicate admission is idempotent (same-ID upserts preserve posterior history, k_555 four-link chain)", () => {
+    const db = openDb(":memory:");
+    seedActArtifacts(db);
+
+    // Simulate calibration: bump alpha on one predicate to look as if
+    // the universal projector has credited it from action_scored events.
+    const target = `predicate_${PREDICATE_SEED_NAMES[0]}_v1`;
+    db.run(
+      "UPDATE act_artifact SET posterior_alpha = 5.0, posterior_beta = 2.0, score = 0.71, confidence = 0.62 WHERE id = ?",
+      [target],
+    );
+
+    // Re-run the seed loop. The expectation is "same-ID upsert preserves
+    // posterior history" — content-hash gate means body/sandbox stays
+    // identical so the row is skipped; the bumped posterior remains.
+    seedActArtifacts(db);
+
+    const after = db
+      .query(
+        "SELECT posterior_alpha, posterior_beta, score, confidence FROM act_artifact WHERE id = ?",
+      )
+      .get(target) as {
+        posterior_alpha: number;
+        posterior_beta: number;
+        score: number;
+        confidence: number;
+      } | null;
+    expect(after).not.toBeNull();
+    if (!after) return;
+    expect(after.posterior_alpha).toBe(5.0);
+    expect(after.posterior_beta).toBe(2.0);
+    expect(after.score).toBeCloseTo(0.71, 5);
+    expect(after.confidence).toBeCloseTo(0.62, 5);
+
+    // No duplicate rows.
+    const count = (
+      db
+        .query(
+          "SELECT COUNT(*) AS c FROM act_artifact WHERE state_root LIKE 'substrate/primitive/predicate/%'",
+        )
+        .get() as { c: number }
+    ).c;
+    expect(count).toBe(PREDICATE_SEED_NAMES.length);
   });
 });
 

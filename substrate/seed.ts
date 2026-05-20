@@ -925,6 +925,15 @@ type SeedArtifact = {
    *  skipped as synthetic actuators. When unset, id falls back to
    *  `seed_<seedName>` so legacy seeds keep their stable prefix. */
   stable_id?: string;
+  /** 2026-05-20 (Tier-1 + Tier S0 + Tier 6 predicate admission): when
+   *  set, overrides the default `alpha = 1 + initial_score * 4` formula
+   *  used to derive Beta posterior from `initial_score`. Lets predicate
+   *  seeds declare an uninformative Beta(1,1) prior — they learn from
+   *  cited action_scored events rather than starting with synthetic
+   *  evidence weight. Unset for legacy seeds preserves existing
+   *  behavior. */
+  posterior_alpha_override?: number;
+  posterior_beta_override?: number;
 };
 
 const SEED_ARTIFACTS: SeedArtifact[] = [
@@ -2260,6 +2269,386 @@ const SUBSTRATE_PRIMITIVE_ARTIFACTS: SeedArtifact[] = [
   },
 ];
 
+// ── Tier -1 + Tier S0 + Tier 6 scoreable predicates (2026-05-20) ─────
+//
+// Per docs/roadmap.md: 30 documented predicates (5 Tier-1 recursion-
+// stop floors, 5 Tier S0 owner-alignment, 20 Tier 6 scoreable
+// assumptions) had no act_artifact rows. The substrate's posterior +
+// credit machinery scores predicates only when they exist as rows;
+// every roadmap-documented predicate was dead code until admission.
+//
+// Each row carries the verbatim problem / contract / why /
+// closure_predicate / metric_direction from roadmap.md (encoded as
+// JSON in `body`) plus an uninformative Beta posterior (alpha=beta=1,
+// score=0.5, confidence=0.3). Calibration accrues from
+// action_scored events that cite these predicate ids — the same
+// universal-projector path d8baa7e shipped.
+//
+// Same-ID upserts preserve posterior history (k_555 four-link chain).
+// State root prefix `substrate/primitive/predicate/<name>` keeps the
+// rows inside the existing primitive partition so the kind-column
+// test continues to assert primitive rows carry non-'code_artifact'
+// kinds without further test surgery.
+
+type PredicateSeed = {
+  name: string;
+  tier: "tier_minus_1_floor" | "tier_s0_owner_alignment" | "tier_6_scoreable_assumption";
+  problem: string;
+  contract: string;
+  why: string;
+  closure_predicate: string;
+  metric_direction: string;
+  display_name: string;
+};
+
+const PREDICATE_SEEDS: PredicateSeed[] = [
+  // ── Tier -1 (5 recursion-stop floor predicates) ───────────────────
+  {
+    name: "event_authenticity_predicate",
+    tier: "tier_minus_1_floor",
+    problem: "forged events can make every downstream score self-confirming.",
+    contract: "accept ledger evidence only through authenticated append paths.",
+    why: "causal, credit, and retrieval evidence depends on event origin.",
+    closure_predicate: "no unauthenticated event accepted; violation forces quarantine.",
+    metric_direction: "authenticity violations stay zero.",
+    display_name: "Event authenticity floor — authenticated ledger append path",
+  },
+  {
+    name: "storage_integrity_predicate",
+    tier: "tier_minus_1_floor",
+    problem: "SQLite/WAL or filesystem corruption can rewrite memory.",
+    contract: "integrity checks, checkpoint evidence, and backup/export recovery preserve ledger bytes.",
+    why: "retrieval and time reasoning are meaningless over corrupt state.",
+    closure_predicate: "no failed integrity check without quarantine.",
+    metric_direction: "integrity failures stay zero and recovery evidence remains fresh.",
+    display_name: "Storage integrity floor — SQLite/WAL integrity + recovery evidence",
+  },
+  {
+    name: "kernel_sandbox_integrity_predicate",
+    tier: "tier_minus_1_floor",
+    problem: "a compromised kernel or unenforced sandbox can fake observations.",
+    contract: "sandbox enforcement/degradation is explicit and resource claims are not trusted when the floor fails.",
+    why: "artifact observations are only useful if runtime boundaries hold.",
+    closure_predicate: "sandbox violations/degradations are surfaced and never scored as clean success.",
+    metric_direction: "silent sandbox bypass stays zero.",
+    display_name: "Kernel sandbox integrity floor — explicit enforcement/degradation",
+  },
+  {
+    name: "deterministic_computation_sanity_predicate",
+    tier: "tier_minus_1_floor",
+    problem: "arithmetic or deterministic recomputation faults can invalidate residuals.",
+    contract: "verifier computation is repeatable within declared tolerance.",
+    why: "residual is the universal score.",
+    closure_predicate: "deterministic fixtures agree or the scorer quarantines its result.",
+    metric_direction: "recomputation mismatches stay zero.",
+    display_name: "Deterministic computation sanity floor — verifier repeatability",
+  },
+  {
+    name: "owner_identity_continuity_predicate",
+    tier: "tier_minus_1_floor",
+    problem: "spoofed or discontinuous owner authority can optimize the wrong goal.",
+    contract: "owner input remains bound to the same authority channel before irreversible or high-control actions.",
+    why: "every posterior is subordinate to owner intent.",
+    closure_predicate: "identity discontinuity triggers owner-input-required rather than autonomous commit.",
+    metric_direction: "unresolved identity discontinuities stay zero.",
+    display_name: "Owner identity continuity floor — authority channel binding",
+  },
+  // ── Tier S0 owner alignment (5 owner-state predicates) ────────────
+  {
+    name: "owner_state_estimator_predicate",
+    tier: "tier_s0_owner_alignment",
+    problem: "latent owner state must be inferred from observable signals before the substrate can route or render.",
+    contract: "infer owner state from observable signals; ground in VARS variance-aware reward shaping (arXiv 2603.20939) and POPI personalized-objective inference (arXiv 2510.17881).",
+    why: "owner-state evidence drives rendering, routing, and consent gating.",
+    closure_predicate: "estimator outputs match owner-observed outcome on a calibration window.",
+    metric_direction: "owner-state estimation error falls.",
+    display_name: "Owner state estimator — latent-state inference from observable signals",
+  },
+  {
+    name: "owner_state_transition_predicate",
+    tier: "tier_s0_owner_alignment",
+    problem: "owner state shifts under interaction; static profiles miss the dynamic.",
+    contract: "model how owner state shifts under interaction; ground in Causal Preference Learning (arXiv 2506.05967) and Adaptive Alignment MORL (arXiv 2410.23630).",
+    why: "transition modeling lets the substrate anticipate owner shifts rather than react after the fact.",
+    closure_predicate: "predicted transitions agree with later owner_state_estimator deltas.",
+    metric_direction: "transition forecast error falls.",
+    display_name: "Owner state transition — interaction-driven owner-state dynamics",
+  },
+  {
+    name: "owner_forecast_predicate",
+    tier: "tier_s0_owner_alignment",
+    problem: "owner-observed outcome must be predicted before commit so reversible decisions can be re-checked.",
+    contract: "predict owner-observed outcome before commit; ground in PAHF predictive alignment from human feedback (arXiv 2602.16173) and COPR cumulative online preference reward (arXiv 2402.14228).",
+    why: "owner satisfaction is the dominant outcome signal; pre-commit forecasting closes the loop earlier than owner_observed_outcome_recorded alone.",
+    closure_predicate: "forecast residual converges to observed owner residual.",
+    metric_direction: "owner-forecast residual falls.",
+    display_name: "Owner forecast — pre-commit owner-observed outcome prediction",
+  },
+  {
+    name: "renderer_predicate",
+    tier: "tier_s0_owner_alignment",
+    problem: "owner-visible rendering must select profile-conditioned variants without hard-coded persona enums.",
+    contract: "select owner-visible rendering by profile; ground in Adaptive Querying with AI Persona Priors (arXiv 2605.00696).",
+    why: "owner trust is evidence-bearing; rendering misses degrade the consent gate.",
+    closure_predicate: "rendering audits + owner feedback agree on chosen variant.",
+    metric_direction: "rendering misses fall.",
+    display_name: "Renderer — profile-conditioned rendering variant selection",
+  },
+  {
+    name: "theory_of_mind_predicate",
+    tier: "tier_s0_owner_alignment",
+    problem: "the owner holds a belief about the substrate; ignoring that belief leads to misaligned outputs.",
+    contract: "model the owner's belief about the substrate; ground in Theory of Mind LLM Agents (arXiv 2509.22887) and the ICLR 2026 RSI Workshop's recursive-self-improvement agenda.",
+    why: "anticipating owner beliefs about substrate capability improves transparency and consent.",
+    closure_predicate: "ToM-derived expectations match later owner_input_received corrections.",
+    metric_direction: "ToM expectation error falls.",
+    display_name: "Theory of mind — owner-belief-about-substrate model",
+  },
+  // ── Tier 6 scoreable assumption predicates (20) ───────────────────
+  {
+    name: "causal_edge_reliability_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "graph edges can be decorative.",
+    contract: "score whether edges predict closure improvement.",
+    why: "later routing trusts edges.",
+    closure_predicate: "edge weights move with outcomes.",
+    metric_direction: "edge-residual error falls.",
+    display_name: "Causal edge reliability — edge-weight outcome correlation",
+  },
+  {
+    name: "intervention_effect_estimation_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "actions may precede rather than cause improvement.",
+    contract: "compare chosen acts to observed residual deltas.",
+    why: "credit needs causal evidence.",
+    closure_predicate: "intervention forecasts calibrate.",
+    metric_direction: "attribution error falls.",
+    display_name: "Intervention effect estimation — chosen-act vs residual-delta",
+  },
+  {
+    name: "counterfactual_comparison_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "rejected alternatives lack fair evidence.",
+    contract: "persist near-miss alternatives for after-action scoring.",
+    why: "selectors learn from unchosen options.",
+    closure_predicate: "counterfactual rows affect routing.",
+    metric_direction: "regret falls.",
+    display_name: "Counterfactual comparison — near-miss alternative scoring",
+  },
+  {
+    name: "credit_assignment_fidelity_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "outcome credit can land on uninfluential bindings.",
+    contract: "score whether cited knowledge/artifacts actually shaped success.",
+    why: "posterior compounding depends on honest credit.",
+    closure_predicate: "decorative credit beta rises.",
+    metric_direction: "miscredit falls.",
+    display_name: "Credit assignment fidelity — citation-shaped-success scoring",
+  },
+  {
+    name: "cost_model_accuracy_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "token, wall, verifier, and invocation budgets drift.",
+    contract: "compare estimates to observations.",
+    why: "economics guide dispatch.",
+    closure_predicate: "budget residuals calibrate.",
+    metric_direction: "forecast error falls.",
+    display_name: "Cost model accuracy — budget estimate vs observed",
+  },
+  {
+    name: "opportunity_cost_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "selected work may delay higher-value objectives.",
+    contract: "score expected residual delta against active alternatives.",
+    why: "scheduling is economic choice.",
+    closure_predicate: "delayed-work regret is measurable.",
+    metric_direction: "missed-value residual falls.",
+    display_name: "Opportunity cost — residual-delta vs active alternatives",
+  },
+  {
+    name: "artifact_reuse_value_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "reuse can be cargo cult.",
+    contract: "compare reused artifacts/recipes to fresh authoring cost and residual.",
+    why: "self-extension needs reusable value.",
+    closure_predicate: "reuse posteriors diverge.",
+    metric_direction: "residual per cost improves.",
+    display_name: "Artifact reuse value — reuse vs fresh-authoring cost/residual",
+  },
+  {
+    name: "marginal_information_value_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "extra retrieval/review can waste cycles.",
+    contract: "score residual reduction per added evidence step.",
+    why: "bounded peeks need a stopping rule.",
+    closure_predicate: "low-yield peeks decline.",
+    metric_direction: "information ROI rises.",
+    display_name: "Marginal information value — residual reduction per evidence step",
+  },
+  {
+    name: "source_provenance_reliability_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "source quality varies after floor authenticity holds.",
+    contract: "score provenance against later outcomes.",
+    why: "not all authentic sources are reliable.",
+    closure_predicate: "provenance posteriors diverge.",
+    metric_direction: "source-calibration error falls.",
+    display_name: "Source provenance reliability — outcome-vs-provenance calibration",
+  },
+  {
+    name: "retrieval_binding_honesty_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "citations can be decorative.",
+    contract: "bind cited claims to actual action influence.",
+    why: "citation is mutation.",
+    closure_predicate: "unbound citation rejection works.",
+    metric_direction: "decorative citations fall.",
+    display_name: "Retrieval binding honesty — citation-influence binding",
+  },
+  {
+    name: "review_cadence_sufficiency_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "review intervals can miss drift.",
+    contract: "score cadence against drift/high-residual incidence.",
+    why: "continuity needs timed review.",
+    closure_predicate: "cadence adjusts by outcome.",
+    metric_direction: "stale-review residual falls.",
+    display_name: "Review cadence sufficiency — interval vs drift/residual incidence",
+  },
+  {
+    name: "epistemic_convergence_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "independent-looking evidence can share one compromised source.",
+    contract: "score corroboration independence.",
+    why: "merger quality depends on non-circular evidence.",
+    closure_predicate: "circular corroboration is contradicted.",
+    metric_direction: "false convergence falls.",
+    display_name: "Epistemic convergence — corroboration-independence scoring",
+  },
+  {
+    name: "contradiction_resolution_quality_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "contradictions can be suppressed or duplicated.",
+    contract: "score adjudication quality.",
+    why: "knowledge improves by resolving conflict.",
+    closure_predicate: "resolved contradictions improve closure.",
+    metric_direction: "unresolved contradiction age falls.",
+    display_name: "Contradiction resolution quality — adjudication scoring",
+  },
+  {
+    name: "calibration_transfer_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "evidence may over-transfer across goal shapes.",
+    contract: "score transfer by class-local outcome.",
+    why: "generalization must be earned.",
+    closure_predicate: "transferred rules beat local baseline.",
+    metric_direction: "transfer regret falls.",
+    display_name: "Calibration transfer — class-local-outcome scoring",
+  },
+  {
+    name: "uncertainty_expression_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "residual packets can hide unknowns.",
+    contract: "score whether uncertainty/reliability axes predict later surprises.",
+    why: "low residual without uncertainty is overconfidence.",
+    closure_predicate: "surprise residual calibrates.",
+    metric_direction: "overconfidence falls.",
+    display_name: "Uncertainty expression — uncertainty-vs-surprise calibration",
+  },
+  {
+    name: "language_grounding_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "natural-language referents can drift through execution.",
+    contract: "score referent preservation from directive to closure.",
+    why: "contracts are linguistic handles.",
+    closure_predicate: "drifted referents raise residual.",
+    metric_direction: "referent drift falls.",
+    display_name: "Language grounding — referent preservation directive-to-closure",
+  },
+  {
+    name: "owner_term_alignment_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "owner-visible language can violate preferred/avoided terms.",
+    contract: "score rendering against owner profile and feedback.",
+    why: "owner trust is evidence-bearing.",
+    closure_predicate: "feedback and rendering audits calibrate.",
+    metric_direction: "rendering misses fall.",
+    display_name: "Owner term alignment — preferred/avoided term enforcement",
+  },
+  {
+    name: "semantic_anchor_stability_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "doc anchors can match text while meaning changes.",
+    contract: "score anchor meaning across concurrent edits.",
+    why: "auto-apply needs semantic locality.",
+    closure_predicate: "stale anchors are refused.",
+    metric_direction: "anchor-collision residual falls.",
+    display_name: "Semantic anchor stability — anchor-meaning consistency",
+  },
+  {
+    name: "goal_continuity_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "refinements can optimize a different goal.",
+    contract: "score objective preservation across DAG edges.",
+    why: "recursion must serve the originating intent.",
+    closure_predicate: "goal drift is detected before commit.",
+    metric_direction: "drift residual falls.",
+    display_name: "Goal continuity — objective preservation across DAG edges",
+  },
+  {
+    name: "ledger_time_consistency_predicate",
+    tier: "tier_6_scoreable_assumption",
+    problem: "event ordering and due dates can mislead reasoning.",
+    contract: "score timestamp/order consistency.",
+    why: "causality and review cadence depend on time.",
+    closure_predicate: "inconsistent temporal claims raise residual.",
+    metric_direction: "temporal inconsistency falls.",
+    display_name: "Ledger time consistency — timestamp/order coherence",
+  },
+];
+
+const PREDICATE_SANDBOX: SandboxDecl = {
+  runtime: "bun",
+  substrate_access: "ro",
+  cpu_ms: 100,
+  wall_ms: 1000,
+  memory_mb: 8,
+  fs_read: [],
+  fs_write: [],
+  net_allow: [],
+  proc_allow: [],
+};
+
+const PREDICATE_ARTIFACTS: SeedArtifact[] = PREDICATE_SEEDS.map((p) => ({
+  stable_id: `predicate_${p.name}_v1`,
+  seedName: `predicate_${p.name}_v1`,
+  runtime: "bun" as Runtime,
+  // body is the JSON-encoded predicate payload; the substrate's open
+  // vocabulary stores the verbatim roadmap.md description so callers
+  // (closure verifier, prompt composer, MCP reads) can hydrate the
+  // contract from the row without an out-of-band lookup.
+  body: JSON.stringify({
+    tier: p.tier,
+    problem: p.problem,
+    contract: p.contract,
+    why: p.why,
+    closure_predicate: p.closure_predicate,
+    metric_direction: p.metric_direction,
+  }),
+  declared_sandbox: PREDICATE_SANDBOX,
+  state_root: `substrate/primitive/predicate/${p.name}`,
+  // Uninformative prior — they LEARN from observed action_scored
+  // residuals citing them. Beta(1,1) ↔ score 0.5, confidence 0.3.
+  initial_score: 0.5,
+  initial_confidence: 0.3,
+  fixture_input: { tier: p.tier, predicate: p.name },
+  fixture_expected_residual: 0.5,
+  display_name: p.display_name,
+  kind: p.name,
+  posterior_alpha_override: 1,
+  posterior_beta_override: 1,
+}));
+
 export type ActArtifactSeedSummary = { inserted: number; skipped: number; upgraded?: number };
 
 const seedIdFor = (seedName: string): string => `seed_${seedName}`;
@@ -2271,7 +2660,11 @@ export const seedActArtifacts = (db: Database): ActArtifactSeedSummary => {
   const initialStatus: ActArtifactStatus = "admitted";
 
   withImmediateTransaction(db, () => {
-    for (const seed of [...SEED_ARTIFACTS, ...SUBSTRATE_PRIMITIVE_ARTIFACTS]) {
+    for (const seed of [
+      ...SEED_ARTIFACTS,
+      ...SUBSTRATE_PRIMITIVE_ARTIFACTS,
+      ...PREDICATE_ARTIFACTS,
+    ]) {
       // 2026-05-19: stable_id takes precedence so substrate-primitive rows
       // collide with the canonical action_artifact_id their events already
       // carry (e.g. knowledge_merger_v1). Legacy seeds without stable_id
@@ -2335,8 +2728,8 @@ export const seedActArtifacts = (db: Database): ActArtifactSeedSummary => {
         continue;
       }
       const ts = nowIso();
-      const alpha = 1 + seed.initial_score * 4;
-      const beta = 1 + (1 - seed.initial_score) * 4;
+      const alpha = seed.posterior_alpha_override ?? (1 + seed.initial_score * 4);
+      const beta = seed.posterior_beta_override ?? (1 + (1 - seed.initial_score) * 4);
       db.run(
         `INSERT INTO act_artifact (
            id, runtime, body, declared_sandbox, state_root, kind,
@@ -2382,7 +2775,14 @@ export const seedActArtifacts = (db: Database): ActArtifactSeedSummary => {
 export const seedArtifactIds = (): string[] => [
   ...SEED_ARTIFACTS.map((s) => s.stable_id ?? seedIdFor(s.seedName)),
   ...SUBSTRATE_PRIMITIVE_ARTIFACTS.map((s) => s.stable_id ?? seedIdFor(s.seedName)),
+  ...PREDICATE_ARTIFACTS.map((s) => s.stable_id ?? seedIdFor(s.seedName)),
 ];
+
+/** Names of the 30 seeded scoreable predicates (Tier -1 floor +
+ *  Tier S0 owner alignment + Tier 6 scoreable assumptions). Exposed
+ *  so tests, prompt composer, and closure verifier can join against
+ *  the canonical set. Cite docs/roadmap.md for problem/contract text. */
+export const PREDICATE_SEED_NAMES = PREDICATE_SEEDS.map((p) => p.name);
 
 // ── Seed recipes (§15 Tier-0 priors) ─────────────────────────────────
 //
