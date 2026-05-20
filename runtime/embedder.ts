@@ -321,6 +321,19 @@ export const upsertVecEventRow = (
  *  into the canonical vec_events virtual table. The post-update emission
  *  of `embedding_computed` keeps the four-link chain auditable: the
  *  source event id appears in context_refs. */
+/** Persist a single embedding row WITHOUT emitting embedding_computed.
+ *  Callers MUST emit the per-batch summary event after the persist loop
+ *  completes (and after the surrounding transaction commits) — see
+ *  embedderWorkerTick + embedPendingEvents below. Per-row emission of
+ *  embedding_computed was the structural wedge: 50-row batches emitted
+ *  50 events, each publishing through the activation bus to every
+ *  subscriber on `["*"]` (the embedder itself, hotreload, extractors,
+ *  …). Wall time per tick was 13-14s for actual OpenAI + 50 publish
+ *  cascades. After this change, one summary event per batch — the audit
+ *  trail still captures every successful embedding via source_event_ids
+ *  array — and the embedder reactive worker only re-fires once instead
+ *  of 50 times (which is then skipped by the running-tick gate anyway,
+ *  but the publish itself was the cost). */
 const persistEmbedding = (
   db: Database,
   sourceEventId: string,
@@ -344,16 +357,27 @@ const persistEmbedding = (
       "vec_events upsert failed",
     );
   }
+};
+
+/** Emit ONE summary embedding_computed event for an entire batch.
+ *  Replaces the per-row emit storm — see persistEmbedding for rationale. */
+const emitBatchEmbeddingAudit = (
+  db: Database,
+  sourceEventIds: string[],
+  version: string,
+): void => {
+  if (sourceEventIds.length === 0) return;
   emitEvent(db, {
     kind: "embedding_computed",
     substrate_origin: "substrate_auto",
     payload: {
-      source_event_id: sourceEventId,
+      source_event_ids: sourceEventIds,
+      count: sourceEventIds.length,
       version,
       dims: EMBEDDING_DIMS,
       model: EMBEDDING_MODEL,
     },
-    context_refs: [sourceEventId],
+    context_refs: sourceEventIds.slice(0, 20),
   });
 };
 
@@ -417,18 +441,42 @@ export const embedderWorkerTick = async (
   const batchDurMs = Date.now() - batchStartMs;
   let embedded = 0;
   let failed = 0;
-  for (const item of items) {
-    const vec = embeddings.get(item.id);
-    if (!vec) { failed++; continue; }
-    try {
-      persistEmbedding(db, item.id, vec, EMBEDDING_VERSION);
-      embedded++;
-      // Amortize the batch duration evenly across successful embeddings.
-      try { recordEmbedding(batchDurMs / Math.max(1, embeddings.size) / 1000); } catch { /* swallow */ }
-    } catch {
-      failed++;
+  // Wrap all per-row persist work in ONE transaction. Pre-fix, each
+  // persistEmbedding ran UPDATE events + vec_events upsert + an
+  // embedding_computed event emit (which itself writes to events AND
+  // publishes through the activation bus, hitting every subscriber).
+  // For batchSize=50 that was 150 SQL writes + 50 activation publishes
+  // per tick, each fsyncing — wall time was 54s for 50 events. Wrapping
+  // in BEGIN/COMMIT collapses fsync to once and lets WAL fast-path.
+  // Failures inside the txn fall through to the catch and rollback the
+  // whole batch — surviving rows are picked up by the next tick.
+  const persistedIds: string[] = [];
+  db.run("BEGIN");
+  try {
+    for (const item of items) {
+      const vec = embeddings.get(item.id);
+      if (!vec) { failed++; continue; }
+      try {
+        persistEmbedding(db, item.id, vec, EMBEDDING_VERSION);
+        persistedIds.push(item.id);
+        embedded++;
+        try { recordEmbedding(batchDurMs / Math.max(1, embeddings.size) / 1000); } catch { /* swallow */ }
+      } catch {
+        failed++;
+      }
     }
+    db.run("COMMIT");
+  } catch (err) {
+    try { db.run("ROLLBACK"); } catch { /* best-effort */ }
+    logger.warn(
+      { err: (err as Error).message },
+      "embedder batch persist rolled back — surviving rows will retry next tick",
+    );
+    return { embedded: 0, skipped_no_text, failed: items.length };
   }
+  // ONE audit emit per batch, AFTER the transaction commits. Replaces the
+  // per-row emit storm that was the structural wedge.
+  emitBatchEmbeddingAudit(db, persistedIds, EMBEDDING_VERSION);
   return { embedded, skipped_no_text, failed };
 };
 
@@ -560,16 +608,28 @@ export const embedPendingEvents = async (
       continue;
     }
     const embeddings = await batchComputeEmbeddings(items);
-    for (const item of items) {
-      const vec = embeddings.get(item.id);
-      if (!vec) { failed++; continue; }
-      try {
-        persistEmbedding(db, item.id, vec, EMBEDDING_VERSION);
-        embedded++;
-      } catch {
-        failed++;
+    const persistedIds: string[] = [];
+    db.run("BEGIN");
+    try {
+      for (const item of items) {
+        const vec = embeddings.get(item.id);
+        if (!vec) { failed++; continue; }
+        try {
+          persistEmbedding(db, item.id, vec, EMBEDDING_VERSION);
+          persistedIds.push(item.id);
+          embedded++;
+        } catch {
+          failed++;
+        }
       }
+      db.run("COMMIT");
+    } catch (err) {
+      try { db.run("ROLLBACK"); } catch { /* best-effort */ }
+      logger.warn({ err: (err as Error).message }, "embedPendingEvents batch persist rolled back");
+      failed += items.length - persistedIds.length;
     }
+    // ONE audit emit per batch — replaces the per-row storm.
+    emitBatchEmbeddingAudit(db, persistedIds, EMBEDDING_VERSION);
     // Defensive cap: if a slice came back with EVERY item failing (no
     // network, bad key, etc) we'd loop forever — bail out so the caller
     // sees the failed count without hanging.

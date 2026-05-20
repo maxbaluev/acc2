@@ -593,10 +593,16 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       ].filter(Boolean).join(" ");
     }
     case "embedding_computed": {
-      const subject = idPrefix(p.subject_event_id as string, 12);
+      // New shape (2026-05-19): batch summary. payload.source_event_ids
+      // is an array; payload.count is its length. Legacy shape carried
+      // subject_event_id (singular). Render gracefully for both.
+      const ids = p.source_event_ids as string[] | undefined;
+      const count = p.count as number | undefined;
+      const subject = idPrefix((p.subject_event_id as string) ?? (Array.isArray(ids) ? ids[0] : undefined), 12);
       const model = (p.model as string) ?? "default";
       const dims = p.dims as number | undefined;
-      return `subject=${subject} model=${model}${typeof dims === "number" ? ` dims=${dims}` : ""}`;
+      const batchSize = typeof count === "number" ? count : (Array.isArray(ids) ? ids.length : 1);
+      return `subject=${subject}${batchSize > 1 ? ` batch=${batchSize}` : ""} model=${model}${typeof dims === "number" ? ` dims=${dims}` : ""}`;
     }
     case "knowledge_propagated": {
       const candidate = idPrefix(p.candidate_id as string, 12);

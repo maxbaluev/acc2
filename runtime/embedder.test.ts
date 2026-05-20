@@ -200,12 +200,20 @@ describe("embedderWorkerTick", () => {
     expect(row.embedding_version).toBe(EMBEDDING_VERSION);
 
     // A subsequent embedding_computed event landed and references the source.
+    // New shape (2026-05-19): batch-summary emit — payload.source_event_ids is
+    // an array, payload.count is its length. context_refs carries up to 20
+    // source ids. Previous per-row payload.source_event_id is gone (replaced
+    // by the array). This collapses the per-row activation-bus storm that
+    // was the embedder wedge on a 1543-event backlog (50 events/batch ×
+    // ~16 publish cascades = 800 publishes that took ~12s).
     const ev = db
       .query("SELECT id, payload, context_refs FROM events WHERE kind = 'embedding_computed' LIMIT 1")
       .get() as { id: string; payload: string; context_refs: string };
     expect(ev).toBeTruthy();
-    const payload = JSON.parse(ev.payload) as { source_event_id: string; version: string };
-    expect(payload.source_event_id).toBe(seeded.id);
+    const payload = JSON.parse(ev.payload) as { source_event_ids: string[]; count: number; version: string };
+    expect(Array.isArray(payload.source_event_ids)).toBe(true);
+    expect(payload.source_event_ids).toContain(seeded.id);
+    expect(payload.count).toBeGreaterThanOrEqual(1);
     expect(payload.version).toBe(EMBEDDING_VERSION);
     const refs = JSON.parse(ev.context_refs) as string[];
     expect(refs).toContain(seeded.id);
