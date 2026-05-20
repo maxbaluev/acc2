@@ -484,6 +484,36 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     }
   }
 
+  // 2026-05-20 (brain VJDMME8JD961SE6F amendment 4AV2NPJW2H1HV0XQ3MR2ZV78KC):
+  // run versioned schema migrations BEFORE seedActArtifacts so any
+  // schema changes are in place before the seeder admits rows.
+  // substrate/migrations is the ONLY path for state.db schema changes
+  // going forward (docs/Architecture.md §16). Per-migration application
+  // is idempotent (versioned via schema_migration_applied event).
+  try {
+    const { runMigrations } = await import("../substrate/migration_runner");
+    const migrationSummary = runMigrations(db);
+    if (migrationSummary.applied > 0 || migrationSummary.failed > 0) {
+      logger.info(
+        {
+          applied: migrationSummary.applied,
+          skipped: migrationSummary.skipped_already_applied,
+          failed: migrationSummary.failed,
+          versions: migrationSummary.versions_applied,
+        },
+        "substrate/migrations applied at daemon boot",
+      );
+    }
+    if (migrationSummary.failed > 0) {
+      logger.warn(
+        { errors: migrationSummary.errors },
+        "substrate/migrations had failures — boot continues (fail-soft); see schema_migration_failed events",
+      );
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "runMigrations at daemon boot failed");
+  }
+
   // 2026-05-19 (brain 198YWW39K94KH2ZQ1A7XHP2T8R): seed act_artifact rows
   // on every daemon boot. Idempotent via per-row content-hash meta keys
   // (substrate/seed.ts:hashSeedRow) — re-running the seeder neither

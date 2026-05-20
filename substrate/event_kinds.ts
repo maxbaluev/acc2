@@ -976,6 +976,25 @@ export const EVENT_KINDS = {
   // multi-verifier-consensus path.
   constitutional_ratification_recorded:    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   constitutional_ratification_refused:     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // ── Distribution / Upgrade primitives (2026-05-20) ──────────────
+  // Per brain VJDMME8JD961SE6F amendment 4AV2NPJW2H1HV0XQ3MR2ZV78KC +
+  // KCs R6BS0FP17S6375 + ZM4HZPQFMS2D7E. Canonical-vs-learned boundary
+  // is separate-canonical.db (choice C); aliasing is generic
+  // act_artifact_aliased event (choice E); update mechanism is
+  // acc upgrade CLI (choice H). See docs/Architecture.md §16.
+  //
+  // act_artifact_aliased: emitted when a release renames a handle
+  // (predicate/artifact/etc). Alias chains are append-only, cycle-
+  // refused, and credit resolution updates the new_id when prior
+  // action_scored events cite the old_id. Open vocabulary — same
+  // event kind covers every renamed handle. Embeddable so prompt
+  // composition + retrieval surface rename evidence to the brain.
+  act_artifact_aliased:                    { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: false },
+  // schema_migration_applied: substrate/migrations registry emits one
+  // row per applied migration. Idempotent — version is the canonical
+  // dedup key. Health metric so dashboards plot migration history.
+  schema_migration_applied:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  schema_migration_failed:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   // ── Unified pathology budget (brain elegance bc8je5f3x, 2026-05-15) ─
   // Pre-fix six backpressure mechanisms (bridge_failure_streak,
   // consecutive_bridge_failures, supervisor_redispatch_storm,

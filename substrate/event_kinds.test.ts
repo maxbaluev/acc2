@@ -544,6 +544,13 @@ describe("derived sets match their pre-unification shape", () => {
       "sahoo_diagnostics_recorded",
       "constitutional_ratification_recorded",
       "constitutional_ratification_refused",
+      // Distribution / Upgrade primitives (2026-05-20, brain
+      // VJDMME8JD961SE6F amendment 4AV2NPJW2H1HV0XQ3MR2ZV78KC).
+      // schema_migration_applied/_failed track migration registry
+      // application; act_artifact_aliased is embeddable (not health
+      // metric — separate role).
+      "schema_migration_applied",
+      "schema_migration_failed",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);
