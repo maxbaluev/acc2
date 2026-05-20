@@ -94,7 +94,7 @@ const insertArtifact = (
 };
 
 describe("extractActArtifactScores", () => {
-  test("recomputes posterior + recent_residual_mean from action_scored events", () => {
+  test("recomputes posterior + recent_residual_mean from action_scored events", async () => {
     const db = openDb(":memory:");
     insertArtifact(db, "art_x");
 
@@ -103,7 +103,7 @@ describe("extractActArtifactScores", () => {
     insertEvent(db, { kind: "action_scored", action_artifact_id: "art_x", residual: 0.15 });
     insertEvent(db, { kind: "action_scored", action_artifact_id: "art_x", residual: 0.20 });
 
-    const summary = extractActArtifactScores(db);
+    const summary = await extractActArtifactScores(db);
     expect(summary.updated).toBe(1);
 
     const row = db.query("SELECT * FROM act_artifact WHERE id = 'art_x'").get() as Record<string, unknown>;
@@ -117,13 +117,13 @@ describe("extractActArtifactScores", () => {
     expect(row.status).toBe("admitted");
   });
 
-  test("promotes when score ≥ 0.85 AND confidence ≥ 0.7 AND count ≥ 20", () => {
+  test("promotes when score ≥ 0.85 AND confidence ≥ 0.7 AND count ≥ 20", async () => {
     const db = openDb(":memory:");
     insertArtifact(db, "art_p", "// promote_me\nexport default async () => 0;");
     for (let i = 0; i < 25; i++) {
       insertEvent(db, { kind: "action_scored", action_artifact_id: "art_p", residual: 0.05 });
     }
-    const summary = extractActArtifactScores(db);
+    const summary = await extractActArtifactScores(db);
     expect(summary.promoted).toBe(1);
     const row = db.query("SELECT status, name FROM act_artifact WHERE id = 'art_p'").get() as Record<string, unknown>;
     expect(row.status).toBe("promoted");
@@ -132,7 +132,7 @@ describe("extractActArtifactScores", () => {
 });
 
 describe("extractKnowledgePromotions", () => {
-  test("promotes a candidate with ≥ 5 corroborations and score ≥ 0.85", () => {
+  test("promotes a candidate with ≥ 5 corroborations and score ≥ 0.85", async () => {
     const db = openDb(":memory:");
     const candidateId = insertEvent(db, {
       kind: "knowledge_candidate",
@@ -145,7 +145,7 @@ describe("extractKnowledgePromotions", () => {
         payload: { idx: i },
       });
     }
-    const summary = extractKnowledgePromotions(db);
+    const summary = await extractKnowledgePromotions(db);
     expect(summary.promoted).toBe(1);
     expect(summary.demoted).toBe(0);
 
@@ -158,24 +158,24 @@ describe("extractKnowledgePromotions", () => {
     expect(refs).toContain(candidateId);
   });
 
-  test("does NOT promote when corroborations are below threshold", () => {
+  test("does NOT promote when corroborations are below threshold", async () => {
     const db = openDb(":memory:");
     const candidateId = insertEvent(db, { kind: "knowledge_candidate", payload: { text: "x" } });
     for (let i = 0; i < 2; i++) {
       insertEvent(db, { kind: "candidate_confirmed", context_refs: [candidateId] });
     }
-    const summary = extractKnowledgePromotions(db);
+    const summary = await extractKnowledgePromotions(db);
     expect(summary.promoted).toBe(0);
   });
 
-  test("idempotent — running twice does not re-promote", () => {
+  test("idempotent — running twice does not re-promote", async () => {
     const db = openDb(":memory:");
     const candidateId = insertEvent(db, { kind: "knowledge_candidate", payload: { text: "y" } });
     for (let i = 0; i < 6; i++) {
       insertEvent(db, { kind: "candidate_confirmed", context_refs: [candidateId] });
     }
-    extractKnowledgePromotions(db);
-    const second = extractKnowledgePromotions(db);
+    await extractKnowledgePromotions(db);
+    const second = await extractKnowledgePromotions(db);
     expect(second.promoted).toBe(0);
     const count = (db
       .query("SELECT COUNT(*) AS c FROM events WHERE kind='knowledge_promoted'")
@@ -185,27 +185,27 @@ describe("extractKnowledgePromotions", () => {
 });
 
 describe("extractSemanticDedup", () => {
-  test("returns {merged:0, contradicted:0} when no embeddings present (Phase F gates the real path)", () => {
+  test("returns {merged:0, contradicted:0} when no embeddings present (Phase F gates the real path)", async () => {
     const db = openDb(":memory:");
     insertEvent(db, { kind: "knowledge_candidate", payload: { text: "no embeddings" } });
     insertEvent(db, { kind: "knowledge_candidate", payload: { text: "still no embeddings" } });
-    const summary = extractSemanticDedup(db);
+    const summary = await extractSemanticDedup(db);
     expect(summary).toEqual({ merged: 0, contradicted: 0 });
   });
 
-  test("idempotent — running twice does not double-merge or advance state", () => {
+  test("idempotent — running twice does not double-merge or advance state", async () => {
     const db = openDb(":memory:");
     insertEvent(db, { kind: "knowledge_candidate", payload: { text: "candidate A" } });
     insertEvent(db, { kind: "knowledge_candidate", payload: { text: "candidate B" } });
-    const first = extractSemanticDedup(db);
-    const second = extractSemanticDedup(db);
+    const first = await extractSemanticDedup(db);
+    const second = await extractSemanticDedup(db);
     expect(first).toEqual({ merged: 0, contradicted: 0 });
     expect(second).toEqual({ merged: 0, contradicted: 0 });
   });
 
-  test("no-op when there are zero new candidates since last run", () => {
+  test("no-op when there are zero new candidates since last run", async () => {
     const db = openDb(":memory:");
-    const summary = extractSemanticDedup(db);
+    const summary = await extractSemanticDedup(db);
     expect(summary).toEqual({ merged: 0, contradicted: 0 });
   });
 });
@@ -224,7 +224,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     });
   };
 
-  test("3 committed shapes + positive owner outcomes → promoted recipe-shape knowledge + recipe-shape knowledge", () => {
+  test("3 committed shapes + positive owner outcomes → promoted recipe-shape knowledge + recipe-shape knowledge", async () => {
     const db = openDb(":memory:");
     seedHighAutonomyOwner(db);
     for (let i = 0; i < 3; i++) {
@@ -254,7 +254,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
         payload: { signal_class: "positive_strong" },
       });
     }
-    const summary = extractRecipeCandidates(db);
+    const summary = await extractRecipeCandidates(db);
     expect(summary.extracted).toBe(1);
 
     // Recipe-shape cache row (formerly recipe-shape knowledge) is now a
@@ -278,7 +278,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     expect(promotedPayload.confidence as number).toBeGreaterThanOrEqual(promotedPayload.threshold as number);
   });
 
-  test("3 commits with NO owner outcomes → deferred recipe-shape knowledge (not promoted)", () => {
+  test("3 commits with NO owner outcomes → deferred recipe-shape knowledge (not promoted)", async () => {
     const db = openDb(":memory:");
     // Default owner profile (autonomy_score=0.5 → MID threshold 0.6).
     // Three plain commits give alpha=2.5, beta=1 → mean=0.71, lower≈0.50.
@@ -294,7 +294,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
       insertEvent(db, { kind: "task_node_opened", directive_id: did, task_id: `t_${i}` });
       insertEvent(db, { kind: "task_committed", directive_id: did, task_id: `t_${i}` });
     }
-    const summary = extractRecipeCandidates(db);
+    const summary = await extractRecipeCandidates(db);
     expect(summary.extracted).toBe(0);
     expect(summary.deferred).toBe(1);
     const deferredRows = db
@@ -307,7 +307,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     expect(d.reason).toBe("confidence_below_threshold");
   });
 
-  test("idempotent — running twice does not double-emit for the same shape", () => {
+  test("idempotent — running twice does not double-emit for the same shape", async () => {
     const db = openDb(":memory:");
     seedHighAutonomyOwner(db);
     for (let i = 0; i < 3; i++) {
@@ -317,8 +317,8 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
       insertEvent(db, { kind: "task_committed",    directive_id: did, task_id: `t_${i}` });
       insertEvent(db, { kind: "owner_observed_outcome_recorded", directive_id: did, task_id: `t_${i}`, payload: { signal_class: "positive_strong" } });
     }
-    extractRecipeCandidates(db);
-    const second = extractRecipeCandidates(db);
+    await extractRecipeCandidates(db);
+    const second = await extractRecipeCandidates(db);
     expect(second.extracted).toBe(0);
     const c = (db
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
@@ -326,7 +326,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     expect(c).toBe(1);
   });
 
-  test("Phase J: payload includes topology_signature + trajectory + directive_text fallback", () => {
+  test("Phase J: payload includes topology_signature + trajectory + directive_text fallback", async () => {
     const db = openDb(":memory:");
     seedHighAutonomyOwner(db);
     for (let i = 0; i < 3; i++) {
@@ -343,7 +343,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
       insertEvent(db, { kind: "task_committed", directive_id: did, task_id: `t_${i}` });
       insertEvent(db, { kind: "owner_observed_outcome_recorded", directive_id: did, task_id: `t_${i}`, payload: { signal_class: "positive_strong" } });
     }
-    const summary = extractRecipeCandidates(db);
+    const summary = await extractRecipeCandidates(db);
     expect(summary.extracted).toBe(1);
 
     const recipes = db
@@ -358,7 +358,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
     expect(p.success_count).toBe(3);
   });
 
-  test("Phase J: distinct topology signatures DO NOT collapse into one recipe", () => {
+  test("Phase J: distinct topology signatures DO NOT collapse into one recipe", async () => {
     const db = openDb(":memory:");
     seedHighAutonomyOwner(db);
     // Group 1: 3 directives with a single root task (topology n=1)
@@ -380,7 +380,7 @@ describe("extractRecipeCandidates (posterior-driven promotion, F5)", () => {
       insertEvent(db, { kind: "task_committed", directive_id: did, task_id: child });
       insertEvent(db, { kind: "owner_observed_outcome_recorded", directive_id: did, task_id: child, payload: { signal_class: "positive_strong" } });
     }
-    const summary = extractRecipeCandidates(db);
+    const summary = await extractRecipeCandidates(db);
     // The goal_shape token is the same ("solo") but the topology differs
     // (n1 vs n2), so two recipes should emit.
     expect(summary.extracted).toBe(2);
@@ -445,7 +445,7 @@ describe("extractRecipeFromCommit (inline post-commit path)", () => {
     expect(count).toBe(1);
   });
 
-  test("dedup composes with extractRecipeCandidates — the 3-shape statistical path skips an already-seeded composite key", () => {
+  test("dedup composes with extractRecipeCandidates — the 3-shape statistical path skips an already-seeded composite key", async () => {
     const db = openDb(":memory:");
     // Three directives with the same (goal_shape, topology). Seed the recipe
     // inline from the FIRST commit, then run the 3-shape extractor and
@@ -458,7 +458,7 @@ describe("extractRecipeFromCommit (inline post-commit path)", () => {
       insertEvent(db, { kind: "task_committed", directive_id: did, task_id: t });
       if (i === 0) extractRecipeFromCommit(db, t);
     }
-    const summary = extractRecipeCandidates(db);
+    const summary = await extractRecipeCandidates(db);
     expect(summary.extracted).toBe(0);
     const count = (db
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate' AND COALESCE(json_extract(payload, '$.recipe_shape.enabled'), 0) IN (1, 'true')")
@@ -777,7 +777,7 @@ describe("maybePromoteOwnerProfile (Layer-2 owner autonomy)", () => {
     expect(payload.polarity).toBe("assert");  // residual=0 → success-band
   });
 
-  test("extractOwnerProfilePromotions bulk path promotes every eligible candidate exactly once", () => {
+  test("extractOwnerProfilePromotions bulk path promotes every eligible candidate exactly once", async () => {
     const db = openDb(":memory:");
     const c1 = insertEvent(db, {
       kind: "owner_insight_candidate",
@@ -791,11 +791,11 @@ describe("maybePromoteOwnerProfile (Layer-2 owner autonomy)", () => {
       kind: "owner_insight_candidate",
       payload: { field: "detected_language", value: "fr", confidence: 0.2, claim: "low confidence" },
     });
-    const summary = extractOwnerProfilePromotions(db);
+    const summary = await extractOwnerProfilePromotions(db);
     expect(summary.promoted).toBe(2);
     expect(summary.skipped).toBe(1);
     // Idempotent on rerun.
-    const again = extractOwnerProfilePromotions(db);
+    const again = await extractOwnerProfilePromotions(db);
     expect(again.promoted).toBe(0);
     void c1; void c2; void c3;
   });

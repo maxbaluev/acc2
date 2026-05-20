@@ -310,7 +310,7 @@ const sameEmbeddingBlob = (): Uint8Array => {
 };
 
 describe("F6 extension — knowledge merger agreement branch (decision 4)", () => {
-  test("two-candidate merger emits knowledge_merger_v1 act_tuple with future_citation_utility verifier", () => {
+  test("two-candidate merger emits knowledge_merger_v1 act_tuple with future_citation_utility verifier", async () => {
     const db = fresh();
     const blob = sameEmbeddingBlob();
     const directiveId = newId();
@@ -334,7 +334,7 @@ describe("F6 extension — knowledge merger agreement branch (decision 4)", () =
       embedding: blob,
       embedding_version: "v1",
     });
-    const summary = extractSemanticDedup(db);
+    const summary = await extractSemanticDedup(db);
     expect(summary.merged).toBeGreaterThanOrEqual(1);
 
     const actRow = db
@@ -354,7 +354,7 @@ describe("F6 extension — knowledge merger agreement branch (decision 4)", () =
     expect(scored.n).toBeGreaterThanOrEqual(1);
   });
 
-  test("re-running the merger with the same candidate pair does not double-project the agreement decision", () => {
+  test("re-running the merger with the same candidate pair does not double-project the agreement decision", async () => {
     const db = fresh();
     const blob = sameEmbeddingBlob();
     const directiveId = newId();
@@ -377,11 +377,11 @@ describe("F6 extension — knowledge merger agreement branch (decision 4)", () =
       embedding: blob,
       embedding_version: "v1",
     });
-    extractSemanticDedup(db);
+    await extractSemanticDedup(db);
     // Second pass: cursor advanced; no new candidates → no new merger
     // decisions. The projection key is keyed on (prior.id, cand.id) so
     // re-running with the same pair would also collapse to ONE row.
-    extractSemanticDedup(db);
+    await extractSemanticDedup(db);
     const scored = db
       .query<{ n: number }, []>(
         "SELECT COUNT(*) AS n FROM events WHERE kind = 'action_scored' AND action_artifact_id = 'knowledge_merger_v1' AND verifier_artifact_id = 'future_citation_utility'",
@@ -392,7 +392,7 @@ describe("F6 extension — knowledge merger agreement branch (decision 4)", () =
 });
 
 describe("F6 extension — knowledge merger contradiction branch (decision 5)", () => {
-  test("two opposite-polarity candidates emit knowledge_merger_v1 act_tuple with adjudication_outcome verifier", () => {
+  test("two opposite-polarity candidates emit knowledge_merger_v1 act_tuple with adjudication_outcome verifier", async () => {
     const db = fresh();
     const blob = sameEmbeddingBlob();
     const directiveId = newId();
@@ -417,7 +417,7 @@ describe("F6 extension — knowledge merger contradiction branch (decision 5)", 
       embedding: blob,
       embedding_version: "v1",
     });
-    const summary = extractSemanticDedup(db);
+    const summary = await extractSemanticDedup(db);
     expect(summary.contradicted).toBeGreaterThanOrEqual(1);
 
     const actRow = db
@@ -438,7 +438,7 @@ describe("F6 extension — knowledge merger contradiction branch (decision 5)", 
     expect(scored.n).toBeGreaterThanOrEqual(1);
   });
 
-  test("re-running the merger with the same contradicting pair does not double-project", () => {
+  test("re-running the merger with the same contradicting pair does not double-project", async () => {
     const db = fresh();
     const blob = sameEmbeddingBlob();
     const directiveId = newId();
@@ -461,8 +461,8 @@ describe("F6 extension — knowledge merger contradiction branch (decision 5)", 
       embedding: blob,
       embedding_version: "v1",
     });
-    extractSemanticDedup(db);
-    extractSemanticDedup(db);
+    await extractSemanticDedup(db);
+    await extractSemanticDedup(db);
     const scored = db
       .query<{ n: number }, []>(
         "SELECT COUNT(*) AS n FROM events WHERE kind = 'action_scored' AND action_artifact_id = 'knowledge_merger_v1' AND verifier_artifact_id = 'adjudication_outcome'",

@@ -81,7 +81,7 @@ describe("alignment / merger (Principle 2)", () => {
     expect(offenders).toEqual([]);
   });
 
-  test("extractor merges two semantically-equivalent candidates into ONE merged row", () => {
+  test("extractor merges two semantically-equivalent candidates into ONE merged row", async () => {
     closeDb();
     const db = openDb(":memory:");
 
@@ -113,7 +113,7 @@ describe("alignment / merger (Principle 2)", () => {
       embedding_version: "v1",
     });
 
-    const summary = extractSemanticDedup(db);
+    const summary = await extractSemanticDedup(db);
     expect(summary.merged).toBeGreaterThanOrEqual(1);
     expect(summary.contradicted).toBe(0);
 

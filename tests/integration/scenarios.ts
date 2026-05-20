@@ -511,7 +511,7 @@ export const scenarioDistributionMerger = async (handle: DaemonHandle): Promise<
   );
 
   // Trigger the dedup extractor.
-  const dedupResult = extractSemanticDedup(handle.db);
+  const dedupResult = await extractSemanticDedup(handle.db);
   assert(dedupResult.merged >= 1, `dedup must produce at least one merged row (got ${dedupResult.merged})`);
 
   // Both original candidate rows still exist (they're never deleted).

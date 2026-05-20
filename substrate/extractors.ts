@@ -45,6 +45,33 @@ const META_KEYS = {
   recipes:    "extractor:recipe_candidates:last_ts",
 } as const;
 
+// ── Event-loop fairness (KC GJ2KN1J3KD1Z) ──────────────────────────
+//
+// Pre-fix: the extractor passes ran tight sync loops scanning the full
+// events / act_artifact tables on a 280K-event ledger. Combined with
+// per-row sub-queries (verdict counts, prior-emission LIKE scans,
+// per-artifact action_scored fetches) the pass blocked the Bun event
+// loop for many seconds, contributing to the role=all daemon wedge.
+//
+// Each extractor function is now async and yields every
+// EXTRACTOR_YIELD_INTERVAL rows in its main per-row loop. Time-bounded
+// scans (last EXTRACTOR_RECENT_DAYS days) cap the per-tick worst-case
+// size; idempotency means earlier-credited rows are skipped on the
+// next tick regardless of window.
+
+const yieldToEventLoop = (): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, 0));
+
+const EXTRACTOR_YIELD_INTERVAL = 25;
+/** Hard ceiling on the candidate / verdict / artifact rows pulled per
+ *  pass. 5000 is generous (every extractor will normally see far fewer
+ *  on a healthy substrate) but caps the worst-case catch-up cycle
+ *  after a long daemon outage. Cursor-based extractors (knowledge
+ *  promotions, semantic dedup) pair this with their existing meta
+ *  cursor so re-runs are bounded; non-cursor extractors rely on the
+ *  LIMIT alone plus the per-row idempotency check. */
+const EXTRACTOR_SCAN_LIMIT = 5000;
+
 const readMeta = (db: Database, key: string): string | null => {
   const row = db.query("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | null;
   return row?.value ?? null;
@@ -245,31 +272,42 @@ const betaConfidence = betaEvidenceConfidence;
 
 export type KnowledgePromotionSummary = { promoted: number; demoted: number };
 
-export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSummary => {
+export const extractKnowledgePromotions = async (db: Database): Promise<KnowledgePromotionSummary> => {
   const cursor = readMeta(db, META_KEYS.promotions);
 
   // Open candidates: no prior promoted/demoted row points to them.
+  // Bounded scan per KC GJ2KN1J3KD1Z: the promoted/demoted lookup
+  // historically walked the full events table. Cap at the most-recent
+  // EXTRACTOR_SCAN_LIMIT rows (idempotent — older verdicts are
+  // already credited).
   const promotedIds = new Set(
     (db
       .query(
         `SELECT context_refs FROM events
-         WHERE kind IN ('knowledge_promoted', 'knowledge_demoted')`,
+         WHERE kind IN ('knowledge_promoted', 'knowledge_demoted')
+         ORDER BY ts DESC
+         LIMIT ?`,
       )
-      .all() as Array<{ context_refs: string }>)
+      .all(EXTRACTOR_SCAN_LIMIT) as Array<{ context_refs: string }>)
       .flatMap((r) => {
         try { return JSON.parse(r.context_refs) as string[]; } catch { return []; }
       }),
   );
 
+  // Cursor-bounded scan per KC GJ2KN1J3KD1Z: cursor advances on each
+  // tick so we never rescan already-credited candidates. EXTRACTOR_SCAN_LIMIT
+  // caps the worst-case catch-up cycle after a long daemon outage. No
+  // separate time floor — cursor + LIMIT together bound the work.
   const candidates = db
     .query(
       `SELECT id, ts, directive_id, task_id, loop_id, substrate_origin, payload
        FROM events
        WHERE kind = 'knowledge_candidate'
          AND (? IS NULL OR ts > ?)
-       ORDER BY ts ASC`,
+       ORDER BY ts ASC
+       LIMIT ?`,
     )
-    .all(cursor, cursor) as Array<Record<string, unknown>>;
+    .all(cursor, cursor, EXTRACTOR_SCAN_LIMIT) as Array<Record<string, unknown>>;
 
   // Pull every confirmation/contradiction event once; partition by cited id.
   // Track substrate_origin per win so the multi-origin promotion gate can
@@ -286,12 +324,19 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
   // via knowledge_contradiction_observed. Treated identically to
   // candidate_contradicted for the count, but with a single citation
   // path (payload.knowledge_id → context_refs[0] effective).
+  // Bounded scan per KC GJ2KN1J3KD1Z: verdict events accumulate
+  // monotonically. Cap at EXTRACTOR_SCAN_LIMIT * 4 most-recent
+  // (4x multiplier since verdicts are typically several per
+  // candidate). Idempotency on cited candidate id ensures stale
+  // verdicts that fell out of the window are already credited.
   const verdicts = db
     .query(
       `SELECT kind, substrate_origin, ts, context_refs, payload FROM events
-       WHERE kind IN ('candidate_confirmed', 'candidate_contradicted', 'knowledge_contradiction_observed')`,
+       WHERE kind IN ('candidate_confirmed', 'candidate_contradicted', 'knowledge_contradiction_observed')
+       ORDER BY ts DESC
+       LIMIT ?`,
     )
-    .all() as Array<{ kind: string; substrate_origin: string; ts: string; context_refs: string; payload: string }>;
+    .all(EXTRACTOR_SCAN_LIMIT * 4) as Array<{ kind: string; substrate_origin: string; ts: string; context_refs: string; payload: string }>;
 
   const halfLifeMs = 30 * 24 * 60 * 60 * 1000;
   const nowMs = Date.now();
@@ -306,7 +351,12 @@ export const extractKnowledgePromotions = (db: Database): KnowledgePromotionSumm
   const winsByCandidate = new Map<string, number>();
   const lossesByCandidate = new Map<string, number>();
   const winOriginsByCandidate = new Map<string, Set<string>>();
+  let verdictsProcessed = 0;
   for (const v of verdicts) {
+    if (verdictsProcessed > 0 && verdictsProcessed % EXTRACTOR_YIELD_INTERVAL === 0) {
+      await yieldToEventLoop();
+    }
+    verdictsProcessed += 1;
     let refs: string[];
     try { refs = JSON.parse(v.context_refs); } catch { refs = []; }
     // knowledge_contradiction_observed carries the knowledge_id in
@@ -553,13 +603,30 @@ const synthesizeName = (id: string, body: string): string => {
 
 export type ActArtifactScoreSummary = { updated: number; promoted: number };
 
-export const extractActArtifactScores = (db: Database): ActArtifactScoreSummary => {
+export const extractActArtifactScores = async (db: Database): Promise<ActArtifactScoreSummary> => {
+  // Bounded scan per KC GJ2KN1J3KD1Z: cap act_artifact rows scanned
+  // per tick. Ordering by updated_at (newest first) means rows updated
+  // most recently (i.e. with recent scored evidence) get re-scored
+  // each cycle; older artifacts still re-score as their action_scored
+  // children arrive. Idempotent: the UPDATE is a recompute and emits
+  // act_artifact_promoted only when threshold-crossing.
   const artifacts = db
-    .query("SELECT id, body, status, name FROM act_artifact")
-    .all() as Array<{ id: string; body: string; status: string; name: string | null }>;
+    .query(
+      `SELECT id, body, status, name FROM act_artifact
+       ORDER BY updated_at DESC
+       LIMIT ?`,
+    )
+    .all(EXTRACTOR_SCAN_LIMIT) as Array<{ id: string; body: string; status: string; name: string | null }>;
 
   let updated = 0;
   let promoted = 0;
+
+  // Yield BEFORE the transaction (the scan loop holds the write lock
+  // inside withImmediateTransaction; yielding inside would stall
+  // every other writer). For the artifacts loop we accept the
+  // transaction-bounded duration and rely on the LIMIT cap + the
+  // per-artifact sub-query already being indexed on action_artifact_id.
+  await yieldToEventLoop();
 
   withImmediateTransaction(db, () => {
     for (const art of artifacts) {
@@ -692,10 +759,12 @@ const candidateText = (payload: unknown): string => {
   return ((p.text as string | undefined) ?? (p.claim as string | undefined) ?? "").toString();
 };
 
-export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
+export const extractSemanticDedup = async (db: Database): Promise<SemanticDedupSummary> => {
   const cursor = readMeta(db, META_KEYS.dedup);
 
   // New candidates since last run (with their embeddings + text).
+  // Cursor-bounded scan per KC GJ2KN1J3KD1Z: cursor + LIMIT cap the
+  // per-tick work without a separate time floor.
   const candidates = db
     .query(
       `SELECT id, ts, directive_id, task_id, loop_id, substrate_origin,
@@ -703,9 +772,10 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
        FROM events
        WHERE kind = 'knowledge_candidate'
          AND (? IS NULL OR ts > ?)
-       ORDER BY ts ASC`,
+       ORDER BY ts ASC
+       LIMIT ?`,
     )
-    .all(cursor, cursor) as Array<{
+    .all(cursor, cursor, EXTRACTOR_SCAN_LIMIT) as Array<{
       id: string;
       ts: string;
       directive_id: string;
@@ -741,6 +811,10 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
   // Existing open candidates (every candidate, including pre-cursor rows —
   // the new candidate must compare against ALL prior open candidates, not
   // only the new ones, so the merge is correct).
+  // Bounded scan per KC GJ2KN1J3KD1Z: cap at EXTRACTOR_SCAN_LIMIT.
+  // Ordered DESC by ts so the most-recent (most-likely match)
+  // candidates come first. Older candidates that drop out of the
+  // window had ample opportunity to be merged in prior ticks.
   const openCandidates = db
     .query(
       `SELECT id, ts, directive_id, task_id, loop_id, substrate_origin,
@@ -748,9 +822,10 @@ export const extractSemanticDedup = (db: Database): SemanticDedupSummary => {
        FROM events
        WHERE kind = 'knowledge_candidate'
          AND embedding IS NOT NULL
-       ORDER BY ts ASC`,
+       ORDER BY ts DESC
+       LIMIT ?`,
     )
-    .all() as Array<{
+    .all(EXTRACTOR_SCAN_LIMIT) as Array<{
       id: string;
       ts: string;
       directive_id: string;
@@ -1202,19 +1277,25 @@ const collectRecipePosteriorEvidence = (
   return { alpha, beta };
 };
 
-export const extractRecipeCandidates = (db: Database): RecipeCandidateSummary => {
+export const extractRecipeCandidates = async (db: Database): Promise<RecipeCandidateSummary> => {
   const cursor = readMeta(db, META_KEYS.recipes);
 
   // Pull every recent task_committed event in the 30-day window.
+  // Bounded by EXTRACTOR_SCAN_LIMIT per KC GJ2KN1J3KD1Z.
   const cutoff = new Date(Date.now() - THIRTY_DAYS_MS).toISOString();
   const committed = db
     .query(
       `SELECT id, ts, directive_id, task_id, loop_id, substrate_origin, payload
        FROM events
        WHERE kind = 'task_committed' AND ts >= ?
-       ORDER BY ts ASC`,
+       ORDER BY ts ASC
+       LIMIT ?`,
     )
-    .all(cutoff) as Array<Record<string, unknown>>;
+    .all(cutoff, EXTRACTOR_SCAN_LIMIT) as Array<Record<string, unknown>>;
+  // Yield once after the big read so the daemon /health route and
+  // peer workers can advance before we walk the per-directive
+  // sub-queries.
+  await yieldToEventLoop();
 
   // Group by (goal_shape, topology_signature) — both must match to count as
   // similar. The composite key is what dedup operates on.
@@ -1766,13 +1847,17 @@ const readExistingInterferencePairs = (db: Database): Set<string> => {
   return out;
 };
 
-export const extractDirectiveInterference = (
+export const extractDirectiveInterference = async (
   db: Database,
-): DirectiveInterferenceSummary => {
+): Promise<DirectiveInterferenceSummary> => {
   const byResource = collectArtifactDirectives(db);
   const existing = readExistingInterferencePairs(db);
   let proposed = 0;
   let deduped = 0;
+  // Yield once before the pairwise emit loop — collectArtifactDirectives
+  // can scan a large act_artifact table and we want the daemon /health
+  // route to advance between the read and the emit phase.
+  await yieldToEventLoop();
 
   // For each resource with > 1 owning directive, emit pairwise edges. The
   // owning-artifact ids land in the payload as evidence so an operator
@@ -2179,19 +2264,29 @@ export type OwnerProfilePromotionSummary = { promoted: number; skipped: number }
 /** Bulk extractor — scans every owner_insight_candidate that hasn't been
  *  promoted yet and runs `maybePromoteOwnerProfile` on each. Idempotent
  *  via the per-candidate skip in `candidateAlreadyPromoted`. */
-export const extractOwnerProfilePromotions = (
+export const extractOwnerProfilePromotions = async (
   db: Database,
-): OwnerProfilePromotionSummary => {
+): Promise<OwnerProfilePromotionSummary> => {
+  // Bounded scan per KC GJ2KN1J3KD1Z: cap at EXTRACTOR_SCAN_LIMIT
+  // owner_insight_candidate rows. Ordered ASC so older candidates
+  // (more likely to have accumulated sibling cosine evidence) come
+  // first; idempotency in maybePromoteOwnerProfile makes re-runs safe.
   const rows = db
     .query(
       `SELECT id FROM events
        WHERE kind = 'owner_insight_candidate'
-       ORDER BY ts ASC`,
+       ORDER BY ts ASC
+       LIMIT ?`,
     )
-    .all() as Array<{ id: string }>;
+    .all(EXTRACTOR_SCAN_LIMIT) as Array<{ id: string }>;
   let promoted = 0;
   let skipped = 0;
+  let processed = 0;
   for (const r of rows) {
+    if (processed > 0 && processed % EXTRACTOR_YIELD_INTERVAL === 0) {
+      await yieldToEventLoop();
+    }
+    processed += 1;
     const verdict = maybePromoteOwnerProfile(db, r.id);
     if (verdict.kind === "promoted") promoted++;
     else skipped++;

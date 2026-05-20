@@ -295,7 +295,7 @@ describe("audit A.3.6: low_risk_inline_patterns_view drives the scored inline la
 // ── A.3.6.1 semantic merger — Rules 1/2/3 ──────────────────────────
 
 describe("audit A.3.6.1: semantic merger rules 1/2/3 actually execute", () => {
-  test("Rule 1 — embedding dedup attaches corroborating evidence", () => {
+  test("Rule 1 — embedding dedup attaches corroborating evidence", async () => {
     const db = openDb(":memory:");
     runViews(db);
     const dirId = newId();
@@ -318,7 +318,7 @@ describe("audit A.3.6.1: semantic merger rules 1/2/3 actually execute", () => {
       ts: "2026-01-01T00:00:01.000Z",
       directiveId: dirId,
     });
-    const summary = extractSemanticDedup(db);
+    const summary = await extractSemanticDedup(db);
     expect(summary.merged).toBeGreaterThanOrEqual(1);
 
     // Filter by reason so the F6 internal-act projection's
@@ -333,7 +333,7 @@ describe("audit A.3.6.1: semantic merger rules 1/2/3 actually execute", () => {
     expect(confirmed.c).toBe(1);
   });
 
-  test("Rule 2 — opposite polarity at high cosine emits contradictory_candidates", () => {
+  test("Rule 2 — opposite polarity at high cosine emits contradictory_candidates", async () => {
     const db = openDb(":memory:");
     runViews(db);
     const dirId = newId();
@@ -356,7 +356,7 @@ describe("audit A.3.6.1: semantic merger rules 1/2/3 actually execute", () => {
       ts: "2026-01-01T00:00:01.000Z",
       directiveId: dirId,
     });
-    const summary = extractSemanticDedup(db);
+    const summary = await extractSemanticDedup(db);
     expect(summary.contradicted).toBeGreaterThanOrEqual(1);
     const row = db
       .query(
@@ -366,7 +366,7 @@ describe("audit A.3.6.1: semantic merger rules 1/2/3 actually execute", () => {
     expect(row.c).toBeGreaterThanOrEqual(1);
   });
 
-  test("Rule 3 — multi-origin corroboration emits knowledge_synthesized with both origins", () => {
+  test("Rule 3 — multi-origin corroboration emits knowledge_synthesized with both origins", async () => {
     const db = openDb(":memory:");
     runViews(db);
     const dirId = newId();
@@ -397,7 +397,7 @@ describe("audit A.3.6.1: semantic merger rules 1/2/3 actually execute", () => {
       ts: "2026-01-01T00:00:02.000Z",
       directiveId: dirId,
     });
-    const summary = extractSemanticDedup(db);
+    const summary = await extractSemanticDedup(db);
     expect(summary.merged).toBeGreaterThanOrEqual(2);
     const synth = db
       .query(

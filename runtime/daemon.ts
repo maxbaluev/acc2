@@ -930,16 +930,16 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const { runOwnerVocabularyExtractorTick } = await import("../substrate/owner_vocabulary_extractor");
     const { runOwnerAutonomyAdjusterTick } = await import("../substrate/owner_autonomy_adjuster");
     const runExtractorsOnce = async (): Promise<void> => {
-      try { extractKnowledgePromotions(db); } catch (err) {
+      try { await extractKnowledgePromotions(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.knowledge", err: (err as Error).message }, "knowledge extractor tick failed");
       }
-      try { extractActArtifactScores(db); } catch (err) {
+      try { await extractActArtifactScores(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.act_artifact", err: (err as Error).message }, "act artifact extractor tick failed");
       }
-      try { extractRecipeCandidates(db); } catch (err) {
+      try { await extractRecipeCandidates(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.recipes", err: (err as Error).message }, "recipe extractor tick failed");
       }
-      try { extractSemanticDedup(db); } catch (err) {
+      try { await extractSemanticDedup(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.semantic_dedup", err: (err as Error).message }, "semantic-dedup extractor tick failed");
       }
       // Auto cross-directive interference (organism-alignment Track C,
@@ -947,13 +947,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       // overlap and emit resource_conflict edges so the scheduler defers
       // racing dispatches. Idempotent — re-runs dedupe against existing
       // edges.
-      try { extractDirectiveInterference(db); } catch (err) {
+      try { await extractDirectiveInterference(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.directive_interference", err: (err as Error).message }, "directive-interference extractor tick failed");
       }
       // Owner profile promotions (Layer-2 conversation-as-learning-surface,
       // DSGSAZGMF1): owner_insight_candidate → owner_profile_recorded via
       // confidence ≥ 0.85 / owner-approval bypass / sibling cosine.
-      try { extractOwnerProfilePromotions(db); } catch (err) {
+      try { await extractOwnerProfilePromotions(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.owner_profile", err: (err as Error).message }, "owner-profile extractor tick failed");
       }
       // Owner vocabulary mining (DSGSAZGMF1, universal): scan owner_input_received
