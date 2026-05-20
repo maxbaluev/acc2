@@ -1423,10 +1423,10 @@ export const buildOwnerFeedbackSummarySection = (policy: OwnerRenderingPolicyRow
   return lines.join("\n");
 };
 
-const readArtifactRegistryTopK = (db: Database, k: number): Array<{ id: string; runtime: string; name: string; score: number }> => {
+const readArtifactRegistryTopK = (db: Database, k: number): Array<{ id: string; runtime: string; name: string; score: number; kind?: string }> => {
   const rows = db
     .query(
-      "SELECT id, runtime, name, score, confidence FROM act_artifact WHERE status IN ('admitted','promoted') ORDER BY score DESC, confidence DESC LIMIT ?",
+      "SELECT id, runtime, name, score, confidence, kind FROM act_artifact WHERE status IN ('admitted','promoted') ORDER BY score DESC, confidence DESC LIMIT ?",
     )
     .all(k) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
@@ -1434,7 +1434,58 @@ const readArtifactRegistryTopK = (db: Database, k: number): Array<{ id: string; 
     runtime: r.runtime as string,
     name: ((r.name as string | null) ?? "(unnamed)"),
     score: r.score as number,
+    kind: r.kind as string | undefined,
   }));
+};
+
+/** T4.1 counterfactual credit boundary — read the next K artifact-registry
+ *  rows that LOST the top-K cut. The counterfactual_credit_worker scores
+ *  these against the chosen path's residual after window_seconds. */
+const readArtifactRegistryRejected = (
+  db: Database,
+  chosenK: number,
+  rejectedK: number,
+): Array<{ id: string; score: number; kind?: string }> => {
+  const rows = db
+    .query(
+      "SELECT id, score, kind FROM act_artifact WHERE status IN ('admitted','promoted') ORDER BY score DESC, confidence DESC LIMIT ? OFFSET ?",
+    )
+    .all(rejectedK, chosenK) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    id: r.id as string,
+    score: r.score as number,
+    kind: r.kind as string | undefined,
+  }));
+};
+
+/** T4.1 counterfactual credit boundary — read the next K knowledge_promoted
+ *  rows that LOST the top-K cut (the K+1, K+2 near-misses). Simpler than
+ *  readKnowledgeTopK (no rich-payload extraction needed — the worker only
+ *  needs id + score for the counterfactual emission). */
+const readKnowledgeRejected = (
+  db: Database,
+  chosenK: number,
+  rejectedK: number,
+): Array<{ id: string; score: number }> => {
+  const rows = db
+    .query(
+      `SELECT p.id AS id, p.payload AS payload
+         FROM events p
+        WHERE p.kind = 'knowledge_promoted'
+        ORDER BY p.ts DESC, p.rowid DESC
+        LIMIT ? OFFSET ?`,
+    )
+    .all(rejectedK, chosenK) as Array<Record<string, unknown>>;
+  const out: Array<{ id: string; score: number }> = [];
+  for (const r of rows) {
+    let score = 0;
+    try {
+      const p = JSON.parse((r.payload as string) ?? "{}") as Record<string, unknown>;
+      if (typeof p.score === "number") score = p.score;
+    } catch { /* skip */ }
+    out.push({ id: r.id as string, score });
+  }
+  return out;
 };
 
 const readRecentFailures = (db: Database, k: number): Array<{ kind: string; ts: string }> => {
@@ -1847,10 +1898,81 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     } catch { /* fail-soft: composer must not fail on side-effect emit */ }
   }
 
+  // T4.1 counterfactual credit — knowledge top-K boundary. The composer
+  // just selected which knowledge_promoted rows enter the prompt; rows
+  // at K+1..K+rejectedK lost the cut. Persist them so the credit worker
+  // can score them against the chosen path's residual after the window.
+  // Wrapped in try/catch — emission failure must never block compose.
+  try {
+    const chosenIds: string[] = opts.retrievedKnowledge && opts.retrievedKnowledge.hits.length > 0
+      ? opts.retrievedKnowledge.hits.map((h) => h.event_id)
+      : readKnowledgeTopK(db, 8, directiveText ?? task.goal).map((r) => r.id);
+    if (chosenIds.length > 0) {
+      const rejected = readKnowledgeRejected(db, chosenIds.length, 6);
+      if (rejected.length > 0) {
+        emitEvent(db, {
+          kind: "counterfactual_alternative_recorded",
+          substrate_origin: "substrate_auto",
+          directive_id: task.directive_id,
+          task_id: task.id,
+          context_refs: chosenIds.slice(0, 4),
+          payload: {
+            selection_kind: "retrieval_topk_filter",
+            selection_subkind: "knowledge_topk",
+            chosen_id: chosenIds[0],
+            chosen_ids: chosenIds,
+            rejected_candidates: rejected.map((r) => ({
+              id: r.id,
+              score: r.score,
+              reason: "knowledge_topk_offset_loss",
+            })),
+            window_seconds: 600,
+          } as JsonValue,
+        });
+      }
+    }
+  } catch { /* fail-soft */ }
+
+  const chosenArtifactsTopK = readArtifactRegistryTopK(db, 6);
   const artifactBody = opts.retrievedArtifacts && opts.retrievedArtifacts.hits.length > 0
     ? buildRetrievedArtifactSection(opts.retrievedArtifacts.hits)
-    : buildArtifactSection(readArtifactRegistryTopK(db, 6));
+    : buildArtifactSection(chosenArtifactsTopK);
   candidates.push({ name: "act_artifact_registry", p: 1, body: artifactBody });
+
+  // T4.1 counterfactual credit — artifact registry top-K boundary. The
+  // composer just selected the top K=6 act_artifact rows by score; the
+  // next 6 rows lost the cut. Persist them as counterfactual alternatives
+  // so the worker can credit them against the chosen path's residual.
+  try {
+    const chosenArtifactIds = opts.retrievedArtifacts && opts.retrievedArtifacts.hits.length > 0
+      ? opts.retrievedArtifacts.hits.map((h) => h.event_id)
+      : chosenArtifactsTopK.map((r) => r.id);
+    if (chosenArtifactIds.length > 0) {
+      const rejected = readArtifactRegistryRejected(db, chosenArtifactIds.length, 6);
+      if (rejected.length > 0) {
+        emitEvent(db, {
+          kind: "counterfactual_alternative_recorded",
+          substrate_origin: "substrate_auto",
+          directive_id: task.directive_id,
+          task_id: task.id,
+          context_refs: chosenArtifactIds.slice(0, 4),
+          payload: {
+            selection_kind: "artifact_selection",
+            selection_subkind: "artifact_registry_topk",
+            chosen_id: chosenArtifactIds[0],
+            chosen_ids: chosenArtifactIds,
+            rejected_candidates: rejected.map((r) => ({
+              id: r.id,
+              score: r.score,
+              artifact_kind: r.kind,
+              reason: "artifact_registry_topk_offset_loss",
+            })),
+            window_seconds: 600,
+          } as JsonValue,
+        });
+      }
+    }
+  } catch { /* fail-soft */ }
 
   // P2/P3 sections. Upstream-task outputs land via the watch_edges walk just
   // below (Phase E `watch_edges.ts`); stakeholder + cross-directive interference

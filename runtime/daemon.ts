@@ -769,6 +769,16 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // change asking the owner whether the change worked. Default 30min
   // cadence. Opt-out via ACC2_DISABLE_WORKERS=owner_outcome_followup.
   if (isWorkerEnabled("owner_outcome_followup")) registerWorker("owner_outcome_followup", 30 * 60 * 1000);
+  // 2026-05-20 (T4.1 counterfactual credit, docs/roadmap.md Tier 6):
+  // every selection boundary (artifact pick, route choice, retrieval
+  // top-K filter) emits counterfactual_alternative_recorded with the
+  // rejected candidate set + window_seconds. This worker scans rows
+  // older than their window, looks up the chosen path's action_scored
+  // residual, and emits act_artifact_score_updated against each
+  // rejected candidate so selector posteriors learn from outcomes the
+  // chosen path produced. Default 5-minute cadence.
+  // Opt-out via ACC2_DISABLE_WORKERS=counterfactual_credit.
+  if (isWorkerEnabled("counterfactual_credit")) registerWorker("counterfactual_credit", 5 * 60 * 1000);
   // Tier -1 floors (docs/roadmap.md): absence-of-violation evidence
   // emitters. Each predicate (event_authenticity_predicate,
   // storage_integrity_predicate, deterministic_computation_sanity_predicate,
@@ -1408,6 +1418,30 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     markWorkerReady("owner_outcome_followup");
     recordWorkerTick("owner_outcome_followup");
     workers.push(() => clearInterval(outcomeTimer));
+  }
+
+  // 2026-05-20 (T4.1 counterfactual credit, docs/roadmap.md Tier 6):
+  // counterfactual credit scorer worker tick. Scans
+  // counterfactual_alternative_recorded events older than their
+  // window_seconds, looks up the chosen path's action_scored residual,
+  // and emits act_artifact_score_updated against each rejected
+  // candidate so selector posteriors learn from outcomes the chosen
+  // path produced. Idempotent via
+  // projection_key=counterfactual_credit:{ev_id}:{rejected_id}.
+  // Default 5min cadence.
+  // Opt-OUT via `ACC2_DISABLE_WORKERS=counterfactual_credit`.
+  if (isWorkerEnabled("counterfactual_credit")) {
+    const counterfactualTickMs = 5 * 60 * 1000;
+    const { runCounterfactualCreditWorker } = await import("./counterfactual_credit_worker");
+    let counterfactualMarked = false;
+    const counterfactualTick = supervisedTick(db, "counterfactual_credit", counterfactualTickMs, async () => {
+      await runCounterfactualCreditWorker(db);
+      if (!counterfactualMarked) { markWorkerReady("counterfactual_credit"); counterfactualMarked = true; }
+    });
+    const counterfactualTimer = setInterval(counterfactualTick, counterfactualTickMs);
+    markWorkerReady("counterfactual_credit");
+    recordWorkerTick("counterfactual_credit");
+    workers.push(() => clearInterval(counterfactualTimer));
   }
 
   // 2026-05-19 (brain dispatch J4HP5SYT3N4GK45S Candidate A): one-shot

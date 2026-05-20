@@ -114,6 +114,14 @@ export type WorkerName =
   // flows through the act-tuple chain. Default 30min cadence.
   // Opt-out via ACC2_DISABLE_WORKERS=owner_outcome_followup.
   | "owner_outcome_followup"
+  // 2026-05-20 (T4.1 counterfactual credit, docs/roadmap.md Tier 6):
+  // counterfactual credit scorer worker. Scans
+  // counterfactual_alternative_recorded events older than their
+  // window_seconds and emits act_artifact_score_updated against each
+  // rejected candidate. Selectors learn from the chosen path's
+  // outcome. Default 5min cadence. Opt-out via
+  // ACC2_DISABLE_WORKERS=counterfactual_credit.
+  | "counterfactual_credit"
   // Tier -1 floor enforcement workers (docs/roadmap.md). Each emits
   // absence-of-violation evidence on its predicate's behalf:
   //   - event_authenticity        — 60s tick (sample last-hour events)
@@ -155,6 +163,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "pending_decision_retire",
   "artifact_kind_backfill",
   "owner_outcome_followup",
+  "counterfactual_credit",
   "event_authenticity",
   "storage_integrity_floor",
   "deterministic_computation",

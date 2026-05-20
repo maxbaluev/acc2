@@ -273,6 +273,42 @@ export const dispatchReadyTask = async (
     },
   });
 
+  // T4.1 counterfactual credit — route selection boundary. The decider
+  // just picked one route from a candidate set; the non-chosen routes
+  // are counterfactual alternatives. Their posteriors should learn
+  // from the chosen path's residual once action_scored arrives. Each
+  // rejected route is identified by its bare route string. Fail-soft:
+  // emission failure must never block dispatch.
+  try {
+    const allRoutes: Array<"substrate_replay" | "claude_inline" | "opencode_brain" | "deferred_blocked"> =
+      ["substrate_replay", "claude_inline", "opencode_brain", "deferred_blocked"];
+    const rejectedRoutes = allRoutes.filter((r) => r !== decision.route);
+    const rejectedCandidates = rejectedRoutes
+      .map((r) => ({
+        id: `route:${r}`,
+        score: dispatchDecisionEvidence.route_scores[r] ?? 0,
+        reason: "route_not_selected",
+      }))
+      .filter((c) => c.score > 0); // skip routes with zero score (not in feasible set)
+    if (rejectedCandidates.length > 0) {
+      emitEvent(db, {
+        kind: "counterfactual_alternative_recorded",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        context_refs: [dispatchDecidedEvent.id],
+        payload: {
+          selection_kind: "route_selection",
+          selection_event_id: dispatchDecidedEvent.id,
+          chosen_id: `route:${decision.route}`,
+          rejected_candidates: rejectedCandidates,
+          window_seconds: 600,
+          dispatch_id: dispatchId,
+        } as JsonValue,
+      });
+    }
+  } catch { /* fail-soft */ }
+
   let bridgeResult: BridgeResult | undefined;
   // The effective route may change mid-dispatch (substrate_replay → fallback
   // opencode_brain on abort). We track it in a local so we can rewrite cleanly.
