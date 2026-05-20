@@ -63,6 +63,7 @@ import { nowIso } from "./ids";
 // synchronously so promotion happens at credit time, not at the 5-min
 // extractor cadence. Bulk cadence remains the fallback if this refresh fails.
 import { maybePromoteKnowledge } from "../substrate/extractors";
+import { getThreshold } from "./threshold_registry";
 
 // ── LATM novelty bonus (v2-design.md §11.5) ───────────────────────
 //
@@ -77,12 +78,16 @@ import { maybePromoteKnowledge } from "../substrate/extractors";
 // weight is left untouched.
 
 // Universal value — 1.5× first-credit bonus per novel goal_shape token.
-// Pending f13 adaptive-scoring contract (GEZ955QDYN3R): the right
-// multiplier should be learned from observed novelty/promotion correlation,
-// not env-tuned. No operator has ever set this in practice.
+// T2.1 F-Universal-Threshold-Registry: the cold-start default is the
+// hardcoded 1.5, but the runtime now reads from
+// act_artifact{kind:"threshold_predicate", name:"novelty_bonus_multiplier"}
+// when a posterior-ranked row exists, so the multiplier calibrates from
+// observed novelty/promotion correlation through the standard
+// maybePromote/maybeQuarantine machinery rather than staying frozen.
 const NOVELTY_BONUS_MULTIPLIER = 1.5;
 
-const noveltyBonusMultiplier = (): number => NOVELTY_BONUS_MULTIPLIER;
+const noveltyBonusMultiplier = (db: Database): number =>
+  getThreshold(db, "novelty_bonus_multiplier", NOVELTY_BONUS_MULTIPLIER);
 
 /** Resolve the goal_shape hash for a directive by reading its latest
  *  directive_opened payload and feeding `goal`/`intent`/`directive_text`
@@ -538,7 +543,7 @@ export const distributeCredit = async (
   // every credit destination. Empty shape disables the novelty path (e.g.
   // synthetic test events that never opened a directive).
   const directiveGoalShape = resolveGoalShape(db, inheritDirectiveId);
-  const noveltyMultiplier = noveltyBonusMultiplier();
+  const noveltyMultiplier = noveltyBonusMultiplier(db);
 
   const observationEv = getEventById(db, params.observation_event_id);
   const scoredEv = getEventById(db, params.scored_event_id);

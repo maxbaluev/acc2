@@ -128,6 +128,13 @@ const NON_EVENT_KIND_LITERALS = new Set([
   "action",
   "predicate",
   "exit_classifier",
+  // T2.1 (2026-05-19, F-Universal-Threshold-Registry meta-move #1):
+  // runtime/threshold_registry.ts admits act_artifact rows with
+  // `kind: 'threshold_predicate'` so every runtime literal threshold
+  // becomes a posterior-ranked row. NOT an event kind — the registry
+  // row carries this discriminator; emissions still use action_scored /
+  // act_artifact_score_updated under the standard machinery.
+  "threshold_predicate",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────
