@@ -85,6 +85,42 @@ The preferred new-user channel is **`claude plugins install accint`**, installin
 
 **Repo clone (`git clone bos2 && bun run acc init`) and single-binary distribution remain developer / operator fallbacks**, but the product contract optimizes for Claude-native installation because the owner-facing runtime IS Claude Code.
 
+## Data-flow Contract
+
+Per brain dispatch `HPVV58GT9H4XDCJCT6ES6VKW90` amendment `ZYG7410YND0S9E` (KC `E5SRH60RG93EFD`). This section answers HOW data moves between Claude Code and the substrate after the Q4/R3/S2/T4 integration boundary decides WHEN the substrate engages.
+
+### U4 — File ingress: explicit MCP ingest, filesystem fallback
+
+Canonical path: Claude calls `substrate.ingest_file({ path, kind, scope? })` when the owner asks the substrate to use a local file. The substrate copies or hardlinks the file into `~/.accint/inflow/<topic>-<date>/`, admits an `act_artifact` with free-string kind `ingested_file`, records provenance to the source path/hash, and returns the artifact id. Subsequent directives reference the artifact id, not Claude memory text or ad-hoc path strings.
+
+Fallback path: the daemon may watch `~/.accint/inflow/` for owner-initiated drops. Watcher discoveries should reuse existing artifact admission and owner-decision surfaces (`act_artifact_admitted`, `owner_input_required` when the drop is orphaned or ambiguous) rather than adding a `file_ingested_observed` event kind unless a verifier shows the existing ledger cannot represent the observation.
+
+Rejected alternatives: U1 alone is too ad-hoc and leaves paths as transient prompt text; U2 alone misses owner-direct file drops; U3 alone makes daemon observation too implicit for Claude-mediated owner work.
+
+### V4 — Substrate output: pull status by default, persist substantive summaries
+
+Canonical path: Claude renders substrate outcomes by reading MCP views such as `dispatch_resolved_view` and `owner_plain_status_view`. The substrate remains the authority; Claude is an owner-facing renderer, not a push subscriber or second planner.
+
+For substantive outputs worth keeping, the substrate should also write owner-readable markdown to `~/.accint/outflow/<task_id>.md` and link it from the relevant ledger event/artifact. Claude may read that file and render a concise summary in chat. This gives the owner a durable artifact without requiring websocket or long-poll complexity.
+
+Rejected alternatives: V2 adds stream complexity before evidence demands it; V3 alone hides live task truth unless Claude also reads substrate state.
+
+### W4 — Authoritative shared state: substrate owns durable profile, Claude owns only chat-local context
+
+Durable owner concepts are substrate-owned: owner profile, preferred terms, avoided terms, autonomy/risk/control/collaboration signals, `things_to_never_do`, and any learned long-term operating model live in substrate events and promoted knowledge. Claude must not treat its own memory as authoritative for those concepts.
+
+Claude may keep transient chat-local context needed to render the current turn, but durable updates become substrate observations or candidates. Legacy Claude memory import remains one-time S2-style evidence ingestion into substrate candidates; it is not continuous bidirectional sync and not a competing authority.
+
+Rejected alternatives: W1 is directionally right but underspecifies legitimate chat-local context; W2 creates two durable authorities; W3 is an implementation cleanup, not the full boundary.
+
+### X2 — Progress observation: Claude pulls status at turn boundaries
+
+Canonical path: for long-flight substrate work, Claude reads substrate status through MCP and renders a compact status line at turn boundaries. The default owner-facing progress source is the existing substrate task/dispatch views, not terminal output and not a new progress event stream.
+
+Operator fallback: `acc tail` or equivalent terminal watching remains available for developers/operators, but it is not the owner-facing contract. A separate Web UI/TUI can be added later as another renderer over the same substrate state, not as a replacement authority.
+
+Rejected alternatives: X1 is operator-only; X3 proposes a new event kind before existing views fail; X4 is a future surface, not the Claude Code integration contract.
+
 ## What this design is NOT
 
 - Not a consent ledger (rejected by owner directive 2026-05-20 commit `4b6af58`).
