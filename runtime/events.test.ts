@@ -445,6 +445,129 @@ describe("emitEvent act_tuple_recorded projector", () => {
     expect(payload.classification_source).toBeUndefined();
   });
 
+  // T0.1 substrate-truth gate — wired at the emit boundary so every
+  // task_closure_audited row with a declared predicate is independently
+  // verified BEFORE landing on the ledger. Commit 177b4e7 landed
+  // verifyClosureAudit as a callable gate; this wave wires it into
+  // emitEvent's normalization chain.
+  describe("T0.1 substrate-truth gate (emit-boundary wiring)", () => {
+    test("target_files declared, residual<0.3, no matching amendments → residual=1.0 + closure_blocked_no_amendments sibling", () => {
+      const db = openDb(":memory:");
+      const directiveId = newId();
+      const taskId = newId();
+      const event = emitEvent(db, {
+        kind: "task_closure_audited",
+        substrate_origin: "opencode",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: {
+          closure_residual: 0.1,
+          closure_predicate: { target_files: ["runtime/foo.ts"] },
+          checks: { all_tests_pass: true },
+          verdict: "audited",
+        },
+      });
+      const row = db
+        .query<{ payload: string }, [string]>("SELECT payload FROM events WHERE id = ?")
+        .get(event.id);
+      const payload = JSON.parse(row!.payload) as Record<string, unknown>;
+      // Substrate-derived residual overrode the brain's 0.1.
+      expect(payload.closure_residual).toBe(1.0);
+      expect(payload.asserted_residual).toBe(0.1);
+      const verifications = payload.substrate_verifications as Record<string, { verified: boolean }>;
+      expect(verifications.target_files_have_amendments.verified).toBe(false);
+      // Sibling closure_blocked_no_amendments landed.
+      const sibling = db
+        .query<{ payload: string; id: string }, [string]>(
+          "SELECT id, payload FROM events WHERE kind = 'closure_blocked_no_amendments' AND directive_id = ?",
+        )
+        .get(directiveId);
+      expect(sibling).toBeTruthy();
+      const siblingPayload = JSON.parse(sibling!.payload) as Record<string, unknown>;
+      expect(siblingPayload.reason).toBe("no_contract_amendment_for_declared_target_files");
+      expect(siblingPayload.target_files).toEqual(["repo:runtime/foo.ts"]);
+      // Legacy fields preserved on the augmented payload (k_204).
+      expect(payload.verdict).toBe("audited");
+      // brain_claims + discrepancies stamped.
+      expect(payload.brain_claims).toEqual({ all_tests_pass: true });
+      expect(payload.discrepancies).toContain("all_tests_pass");
+      // checks mirror preserved for legacy readers.
+      expect(payload.checks).toEqual({ all_tests_pass: true });
+    });
+
+    test("target_files declared with matching amendment → augmented payload, no sibling", () => {
+      const db = openDb(":memory:");
+      const directiveId = newId();
+      const taskId = newId();
+      // Seed a contract_amendment_proposed for the declared target file.
+      emitEvent(db, {
+        kind: "contract_amendment_proposed",
+        substrate_origin: "brain",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: {
+          target_resource: "repo:runtime/bar.ts",
+          proposed_behavior: "wire something",
+        },
+      });
+      const event = emitEvent(db, {
+        kind: "task_closure_audited",
+        substrate_origin: "opencode",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: {
+          closure_residual: 0.05,
+          closure_predicate: { target_files: ["runtime/bar.ts"] },
+        },
+      });
+      const row = db
+        .query<{ payload: string }, [string]>("SELECT payload FROM events WHERE id = ?")
+        .get(event.id);
+      const payload = JSON.parse(row!.payload) as Record<string, unknown>;
+      const verifications = payload.substrate_verifications as Record<string, { verified: boolean; evidence_event_ids: string[] }>;
+      expect(verifications.target_files_have_amendments.verified).toBe(true);
+      expect(verifications.target_files_have_amendments.evidence_event_ids).toHaveLength(1);
+      // No sibling refusal was emitted.
+      const siblingCount = db
+        .query<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM events WHERE kind = 'closure_blocked_no_amendments' AND directive_id = ?",
+        )
+        .get(directiveId);
+      expect(siblingCount?.n).toBe(0);
+      // The closure_residual is substrate-derived: only the
+      // target_files_have_amendments check ran and it passed, so
+      // residual drops to 0.
+      expect(payload.closure_residual).toBe(0);
+      expect(payload.asserted_residual).toBe(0.05);
+    });
+
+    test("legacy payload (no closure_predicate, no checks) preserves the pre-T0.1 emit path", () => {
+      const db = openDb(":memory:");
+      const event = emitEvent(db, {
+        kind: "task_closure_audited",
+        substrate_origin: "opencode",
+        directive_id: newId(),
+        task_id: newId(),
+        // Pre-T0.1 brain emit shape: closure_residual + verdict, no
+        // predicate, no checks. The gate must skip and let the legacy
+        // normalizer pass the payload through unchanged.
+        payload: { closure_residual: 0.18, verdict: "audited", covered_sub_tasks: ["s1"] },
+      });
+      const row = db
+        .query<{ payload: string }, [string]>("SELECT payload FROM events WHERE id = ?")
+        .get(event.id);
+      const payload = JSON.parse(row!.payload) as Record<string, unknown>;
+      expect(payload.closure_residual).toBe(0.18);
+      expect(payload.verdict).toBe("audited");
+      expect(payload.covered_sub_tasks).toEqual(["s1"]);
+      // No T0.1-shape fields stamped on a legacy payload.
+      expect(payload.substrate_verifications).toBeUndefined();
+      expect(payload.brain_claims).toBeUndefined();
+      expect(payload.discrepancies).toBeUndefined();
+      expect(payload.asserted_residual).toBeUndefined();
+    });
+  });
+
   test("lesson_extracted without lesson_kind gets a classification_source marker", () => {
     // Same pattern as task_failed/task_closure_audited — emitter
     // omitted the open-ended classifier. Substrate retains the

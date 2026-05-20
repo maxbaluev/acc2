@@ -118,6 +118,112 @@ const normalizeClosureAuditPayload = (input: EmitEventInput): JsonValue => {
   };
 };
 
+/** T0.1 substrate-truth gate at the closure-audit emit boundary.
+ *
+ *  Brain dispatch TFZ6AJXNPS6655QMFWT6KPB3QM, amendment
+ *  ZC7HF4Y3HN1BK91FXVQE77S4GC. Commit 177b4e7 landed verifyClosureAudit
+ *  as a callable gate but did NOT wire it at the emit boundary —
+ *  brain-emitted task_closure_audited rows still slipped through the
+ *  substrate without independent verification. This hook closes that
+ *  trust gap.
+ *
+ *  Trigger shape (T0.1 payload): a task_closure_audited input carries
+ *  either `closure_predicate` (with optional `target_files`) OR a `checks`
+ *  Record<string,boolean> in payload. Detection is presence-based so
+ *  that legacy emit shapes (covered_sub_tasks/uncovered_aspects only)
+ *  preserve their pre-T0.1 path unchanged — substrate-truth verification
+ *  applies only to rows that declare what they are closing against.
+ *
+ *  When triggered:
+ *   - Call verifyClosureAudit(db, …) with the brain-declared predicate,
+ *     checks, and asserted residual.
+ *   - Replace the eventPayload with the augmented shape (brain_claims,
+ *     substrate_verifications, discrepancies, asserted_residual,
+ *     substrate-derived closure_residual).
+ *   - When the hard precondition refuses (target_files declared +
+ *     asserted_residual < 0.3 + zero matching contract_amendment_proposed),
+ *     verifyClosureAudit emits closure_blocked_no_amendments as a sibling
+ *     event AND bumps the augmented payload's closure_residual to 1.0.
+ *
+ *  Returns null when the input is NOT a T0.1-shape payload — the caller
+ *  falls back to normalizeClosureAuditPayload's legacy path. */
+const runClosureAuditTruthGate = (db: Database, input: EmitEventInput): JsonValue | null => {
+  const payload = isObject(input.payload) ? input.payload : null;
+  if (!payload) return null;
+  const closurePredicate = isObject(payload.closure_predicate) ? payload.closure_predicate : null;
+  const checks = isObject(payload.checks) ? payload.checks : null;
+  // T0.1 shape requires at least one of: closure_predicate or checks.
+  // Legacy rows (covered_sub_tasks/uncovered_aspects only, OR plain
+  // closure_residual without predicate) fall through unchanged.
+  if (!closurePredicate && !checks) return null;
+  // verifyClosureAudit needs a directive_id — without it the substrate
+  // cannot scope the contract_amendment_proposed SELECT. Skip the gate
+  // when missing; the legacy normalizer still adds the classification
+  // marker for unmeasured-residual rows.
+  if (!input.directive_id) return null;
+
+  const assertedResidualRaw = payload.closure_residual;
+  const assertedResidual = typeof assertedResidualRaw === "number" && Number.isFinite(assertedResidualRaw)
+    ? assertedResidualRaw
+    : 0.5; // open-ended fallback when the brain emits checks without a number
+
+  // Brain-claim coercion: payload.checks may carry non-boolean values
+  // (the brain's own enum strings). The gate accepts booleans only;
+  // non-boolean entries land in discrepancies via the fail-closed path
+  // inside verifyClosureAudit. We project here so the type narrows.
+  const brainClaims: Record<string, boolean> = {};
+  if (checks) {
+    for (const [name, value] of Object.entries(checks)) {
+      if (typeof value === "boolean") brainClaims[name] = value;
+    }
+  }
+
+  // Predicate target_files extraction (the only field the gate's hard
+  // precondition reads). Other predicate fields ride along on the
+  // augmented payload via verifyClosureAudit's `closure_predicate`
+  // passthrough.
+  const targetFilesRaw = closurePredicate && Array.isArray(closurePredicate.target_files)
+    ? closurePredicate.target_files
+    : [];
+  const targetFiles = targetFilesRaw.filter((s): s is string => typeof s === "string");
+
+  // Preserve every payload field the gate does not own so historical
+  // readers see the same shape (k_204 save richness). closure_predicate,
+  // brain_claims, substrate_verifications, asserted_residual,
+  // closure_residual, and discrepancies are stamped by verifyClosureAudit.
+  const legacyFields: Record<string, unknown> = { ...payload };
+  delete legacyFields.closure_residual;
+  delete legacyFields.closure_predicate;
+  delete legacyFields.brain_claims;
+  delete legacyFields.substrate_verifications;
+  delete legacyFields.discrepancies;
+  delete legacyFields.asserted_residual;
+  delete legacyFields.checks;
+
+  // Lazy import to avoid the cyclic-import edge case at module load:
+  // closure_audit.ts already imports emitEvent from events.ts; the
+  // reverse-direction static import resolves under Bun but lazy keeps
+  // the boundary explicit.
+  const { verifyClosureAudit } = require("./closure_audit") as typeof import("./closure_audit");
+  const result = verifyClosureAudit(db, {
+    directive_id: input.directive_id,
+    task_id: input.task_id,
+    closure_predicate: closurePredicate
+      ? { ...closurePredicate, target_files: targetFiles }
+      : (targetFiles.length > 0 ? { target_files: targetFiles } : undefined),
+    brain_claims: brainClaims,
+    asserted_residual: assertedResidual,
+    legacy_fields: legacyFields,
+  });
+  // Project brain_claims back onto `checks` for legacy renderers that
+  // branch on payload.checks (cli/observe.ts, experience compression).
+  // verifyClosureAudit returns brain_claims under the new key — we add
+  // a checks mirror so the row remains backward-readable.
+  const augmented: Record<string, unknown> = { ...result.payload };
+  if (Object.keys(brainClaims).length > 0) augmented.checks = brainClaims;
+  return augmented as JsonValue;
+};
+
 /** Dispatcher-violation classification gate (Hole 6 — 2026-05-19).
  *
  *  Pre-fix evidence: 21 production dispatcher_violation events had
@@ -854,7 +960,16 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // emit boundary so missing classifier fields surface as a structured
   // classification_source (NOT as renderer "undefined" / "?" — see
   // cli/observe.ts task_closure_audited + lesson_extracted renderers).
-  const closurePayload = input.kind === "task_closure_audited" ? normalizeClosureAuditPayload(input) : null;
+  // Closure-audit emit path runs the T0.1 substrate-truth gate FIRST
+  // (when the payload declares a closure_predicate or checks map), then
+  // falls back to the legacy classification_source normalizer when the
+  // T0.1 shape is absent. The gate may emit a sibling
+  // closure_blocked_no_amendments event before this row's INSERT so the
+  // refusal lands on the timeline ahead of the augmented closure_audited
+  // row it modifies.
+  const closurePayload = input.kind === "task_closure_audited"
+    ? (runClosureAuditTruthGate(db, input) ?? normalizeClosureAuditPayload(input))
+    : null;
   const lessonPayload = input.kind === "lesson_extracted" ? normalizeLessonExtractedPayload(input) : null;
   // Dispatcher-violation classification gate (Hole 6 — 2026-05-19). Default
   // missing failure_kind to "unclassified_emit_bug" + stamp payload
