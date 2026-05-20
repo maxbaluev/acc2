@@ -343,9 +343,18 @@ export const spawnRealOpencode = async (
   const brainWorkspace = req.checkoutIsolation?.root
     ?? mkdtempSync(join(tmpdir(), "acc2-brain-ws-"));
   const brainWorkspaceIsEphemeral = req.checkoutIsolation === undefined;
-  const promptPath = join(brainWorkspace, "brain-prompt.md");
+  // The prompt file lives at the workspace root and is referenced by RELATIVE
+  // path in the boot instruction because opencode's tool permission policy
+  // denies absolute paths outside the agent workspace (CWD = brainWorkspace).
+  // Observed 2026-05-20T23:36 (directive 2RYTVWYXWH2BBDHZVDDENEG8DW): brain
+  // refused `Read /tmp/acc2-brain-ws-<X>/brain-prompt.md` saying "tool
+  // permission policy denies access to external directories". The file is
+  // technically inside the workspace because CWD is set to brainWorkspace,
+  // but the absolute path triggers the deny rule. Relative reference works.
+  const PROMPT_FILENAME = "brain-prompt.md";
+  const promptPath = join(brainWorkspace, PROMPT_FILENAME);
   await Bun.write(promptPath, req.prompt);
-  const bootPrompt = `Read ${promptPath} first, then follow it exactly. Your first externally meaningful action must satisfy the prompt's substrate tool-use invariant.`;
+  const bootPrompt = `Read ./${PROMPT_FILENAME} (in your current working directory) first, then follow it exactly. Your first externally meaningful action must satisfy the prompt's substrate tool-use invariant.`;
   let proc: ReturnType<typeof spawn>;
   try {
     proc = spawn([
