@@ -243,6 +243,37 @@ const runActArtifactRename = (db: Database): void => {
   }
 };
 
+// Phase 2 distribution: attach the packaged canonical.db (Lin et al.
+// 2026 mnemonic-sovereignty + brain 4YBZ1E7MAX49Q4Z0 K1+L1+M3+N1).
+// `canonical.db` lives in the package at `substrate/canonical.db` and
+// contains release-owned read-only seeds. Runtime reads union with
+// main; main precedence on id conflict (organism rows shadow canonical).
+// Missing file is non-fatal — pre-Phase-2 organisms and fresh installs
+// before canonical.db packaging both work without it.
+const attachCanonicalDbIfPresent = (db: Database): void => {
+  try {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    // canonical.db lives in substrate/ alongside seed.ts; the runtime
+    // resolves relative to the substrate module dir to survive both
+    // dev and packaged-install layouts.
+    const canonicalPath = path.join(import.meta.dir, "canonical.db");
+    if (!fs.existsSync(canonicalPath)) return;
+    // ATTACH in read-only mode using URI form so the read-only flag is
+    // honored on every SQLite build (mode=ro requires uri=1).
+    const escaped = canonicalPath.replace(/'/g, "''");
+    db.exec(`ATTACH DATABASE 'file:${escaped}?mode=ro' AS canonical`);
+  } catch (err) {
+    // Fail-soft: canonical.db is additive — pre-Phase-2 installs
+    // operate without it. The attach is best-effort; runtime queries
+    // that union canonical.X with main.X must tolerate the canonical
+    // schema being absent (via try/catch or pragma table_info probe).
+    if (typeof console !== "undefined") {
+      console.warn("[substrate/db] attachCanonicalDbIfPresent skipped:", String(err).slice(0, 200));
+    }
+  }
+};
+
 export const runMigrations = (db: Database): void => {
   // Order matters:
   //   1. RENAME code_artifact → act_artifact (if needed) so later ALTERs
@@ -319,6 +350,13 @@ export const openDb = (dbPath: string): Database => {
   loadSqliteVec(db);
   runSchema(db);
   runMigrations(db);
+  // Phase 2 distribution (docs/Architecture.md §16, brain
+  // 4YBZ1E7MAX49Q4Z0 K1+L1+M3+N1): attach packaged canonical.db
+  // read-only when present. Runtime read paths can union
+  // canonical.act_artifact with main.act_artifact (main precedence
+  // on id conflict). Missing canonical.db is non-fatal — fresh
+  // installs and pre-Phase-2 organisms both work.
+  attachCanonicalDbIfPresent(db);
   // Organism-alignment (2026-05-15): runViews was previously called
   // separately by daemon.ts + a handful of tests, leaving prompt_composer
   // tests / unit-level callers with a half-built substrate where queries

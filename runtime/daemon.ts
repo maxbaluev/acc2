@@ -491,8 +491,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // going forward (docs/Architecture.md §16). Per-migration application
   // is idempotent (versioned via schema_migration_applied event).
   try {
-    const { runMigrations } = await import("../substrate/migration_runner");
-    const migrationSummary = runMigrations(db);
+    const { runVersionedMigrations } = await import("../substrate/migration_runner");
+    const migrationSummary = runVersionedMigrations(db);
     if (migrationSummary.applied > 0 || migrationSummary.failed > 0) {
       logger.info(
         {

@@ -78,7 +78,7 @@ const extractVersion = (filename: string): string => {
   return m ? m[1] : filename;
 };
 
-export const runMigrations = (db: Database): MigrationSummary => {
+export const runVersionedMigrations = (db: Database): MigrationSummary => {
   const summary: MigrationSummary = {
     applied: 0,
     skipped_already_applied: 0,

@@ -3,15 +3,15 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "./db";
 import { emitEvent } from "../runtime/events";
-import { runMigrations, resolveAliasChain } from "./migration_runner";
+import { runVersionedMigrations, resolveAliasChain } from "./migration_runner";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
 
 describe("migration_runner", () => {
-  test("runMigrations applies the v001 baseline + emits schema_migration_applied", () => {
+  test("runVersionedMigrations applies the v001 baseline + emits schema_migration_applied", () => {
     const db = openDb(":memory:");
-    const summary = runMigrations(db);
+    const summary = runVersionedMigrations(db);
     expect(summary.failed).toBe(0);
     expect(summary.applied + summary.skipped_already_applied).toBeGreaterThanOrEqual(1);
     if (summary.applied > 0) {
@@ -25,10 +25,10 @@ describe("migration_runner", () => {
     }
   });
 
-  test("runMigrations is idempotent — re-run skips already-applied migrations", () => {
+  test("runVersionedMigrations is idempotent — re-run skips already-applied migrations", () => {
     const db = openDb(":memory:");
-    const first = runMigrations(db);
-    const second = runMigrations(db);
+    const first = runVersionedMigrations(db);
+    const second = runVersionedMigrations(db);
     expect(second.applied).toBe(0);
     expect(second.skipped_already_applied).toBeGreaterThanOrEqual(first.applied);
     expect(second.failed).toBe(0);
