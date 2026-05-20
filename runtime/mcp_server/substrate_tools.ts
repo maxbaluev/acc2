@@ -779,6 +779,161 @@ export const handleRead = (
           result: ownerPlainStatus(db, { directive_id: directiveId, limit }) as unknown as JsonValue,
         };
       }
+      case "event_kind_occurrence_view": {
+        // Closes the dead-event_kinds hole-audit gap (brain KCs
+        // 80MCT8D0S17W + CZS8VBKGAD4K): catalog which registered
+        // kinds have actually been emitted vs. registered-but-dead.
+        // Args: { window_hours?, dead_only? }. When dead_only=true,
+        // LEFT-JOIN against the EVENT_KINDS registry and return rows
+        // whose occurrence_count = 0 (registered but never emitted).
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const windowHours = typeof arg.window_hours === "number" ? arg.window_hours : undefined;
+        const deadOnly = arg.dead_only === true;
+        if (deadOnly) {
+          // Build a values list from EVENT_KINDS and LEFT JOIN events
+          // (optionally restricted to window). Surfaces zero-count
+          // registered kinds. Parameterized: window placeholder only
+          // (kind names come from a trusted source — the local enum).
+          const kinds = Object.keys(EVENT_KINDS);
+          if (kinds.length === 0) {
+            return {
+              ok: true,
+              result: { rows: [], view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
+            };
+          }
+          // SQLite's VALUES-with-column-alias syntax is dialect-restricted;
+          // use a UNION ALL of `SELECT ? AS kind` rows for the registry CTE
+          // so the LEFT JOIN against events works portably under bun:sqlite.
+          const registryCte = kinds.map(() => "SELECT ? AS kind").join(" UNION ALL ");
+          const eventsScope = windowHours !== undefined
+            ? `(SELECT kind, ts, substrate_origin FROM events WHERE ts > datetime('now', '-' || ? || ' hours'))`
+            : `events`;
+          const sql = `
+            WITH registry AS (${registryCte})
+            SELECT
+              registry.kind AS kind,
+              COUNT(e.kind) AS occurrence_count,
+              MIN(e.ts) AS first_emit_ts,
+              MAX(e.ts) AS last_emit_ts,
+              COUNT(DISTINCT e.substrate_origin) AS distinct_origins
+            FROM registry
+            LEFT JOIN ${eventsScope} AS e ON e.kind = registry.kind
+            GROUP BY registry.kind
+            HAVING COUNT(e.kind) = 0
+            ORDER BY registry.kind ASC
+          `;
+          const bindings: Array<string | number> = [...kinds];
+          if (windowHours !== undefined) bindings.push(windowHours);
+          const rows = db.query(sql).all(...bindings) as Array<Record<string, unknown>>;
+          return {
+            ok: true,
+            result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
+          };
+        }
+        const sql = windowHours !== undefined
+          ? `
+            SELECT
+              kind,
+              COUNT(*) AS occurrence_count,
+              MIN(ts) AS first_emit_ts,
+              MAX(ts) AS last_emit_ts,
+              COUNT(DISTINCT substrate_origin) AS distinct_origins
+            FROM events
+            WHERE ts > datetime('now', '-' || ? || ' hours')
+            GROUP BY kind
+            ORDER BY last_emit_ts DESC
+          `
+          : `
+            SELECT
+              kind,
+              COUNT(*) AS occurrence_count,
+              MIN(ts) AS first_emit_ts,
+              MAX(ts) AS last_emit_ts,
+              COUNT(DISTINCT substrate_origin) AS distinct_origins
+            FROM events
+            GROUP BY kind
+            ORDER BY last_emit_ts DESC
+          `;
+        const rows = windowHours !== undefined
+          ? db.query(sql).all(windowHours) as Array<Record<string, unknown>>
+          : db.query(sql).all() as Array<Record<string, unknown>>;
+        return {
+          ok: true,
+          result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
+        };
+      }
+      case "worker_liveness_view": {
+        // Closes brain KC CZS8VBKGAD4K: dead workers — registered
+        // but never tick in window. Aggregates worker_tick_completed
+        // events by worker_name and exposes seconds_since_last_tick.
+        // Args: { window_hours? } (default 24). No registry-sweep
+        // dead_only branch yet — there is no canonical ALL_WORKER_NAMES
+        // export; that follow-up is a separate contract.
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const windowHours = typeof arg.window_hours === "number" ? arg.window_hours : 24;
+        const sql = `
+          SELECT
+            json_extract(payload, '$.worker_name') AS worker_name,
+            COUNT(*) AS tick_count,
+            MIN(ts) AS first_tick_ts,
+            MAX(ts) AS last_tick_ts,
+            CAST((julianday('now') - julianday(MAX(ts))) * 86400 AS INTEGER) AS seconds_since_last_tick
+          FROM events
+          WHERE kind = 'worker_tick_completed'
+            AND ts > datetime('now', '-' || ? || ' hours')
+          GROUP BY worker_name
+          ORDER BY last_tick_ts DESC
+        `;
+        const rows = db.query(sql).all(windowHours) as Array<Record<string, unknown>>;
+        return {
+          ok: true,
+          result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
+        };
+      }
+      case "stale_zero_score_knowledge_view": {
+        // Closes brain KC KRG33K7VT14M: promoted knowledge with no
+        // posterior activity (never cited, never confirmed/contradicted)
+        // older than minimum_hours_stale (default 168 = 1 week).
+        // Surfaces decorative promotions that didn't bind to any
+        // action — the complement of promoted_knowledge_view.
+        // Args: { minimum_hours_stale? }.
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const minHours = typeof arg.minimum_hours_stale === "number" ? arg.minimum_hours_stale : 168;
+        const sql = `
+          SELECT
+            k.id AS knowledge_id,
+            json_extract(k.payload, '$.claim') AS claim,
+            k.ts AS promoted_ts,
+            CAST((julianday('now') - julianday(k.ts)) * 86400 / 3600 AS INTEGER) AS hours_since_promotion,
+            COALESCE(c.confirm_count, 0) AS confirm_count,
+            COALESCE(x.contradict_count, 0) AS contradict_count,
+            COALESCE(rb.retrieval_count, 0) AS retrieval_count
+          FROM events k
+          LEFT JOIN (
+            SELECT json_extract(payload, '$.knowledge_id') AS kid, COUNT(*) AS confirm_count
+            FROM events WHERE kind = 'candidate_confirmed' GROUP BY kid
+          ) c ON c.kid = k.id
+          LEFT JOIN (
+            SELECT json_extract(payload, '$.knowledge_id') AS kid, COUNT(*) AS contradict_count
+            FROM events WHERE kind = 'candidate_contradicted' GROUP BY kid
+          ) x ON x.kid = k.id
+          LEFT JOIN (
+            SELECT json_extract(payload, '$.knowledge_id') AS kid, COUNT(*) AS retrieval_count
+            FROM events WHERE kind = 'retrieval_binding' GROUP BY kid
+          ) rb ON rb.kid = k.id
+          WHERE k.kind = 'knowledge_promoted'
+            AND COALESCE(c.confirm_count, 0) = 0
+            AND COALESCE(x.contradict_count, 0) = 0
+            AND CAST((julianday('now') - julianday(k.ts)) * 86400 / 3600 AS INTEGER) > ?
+          ORDER BY hours_since_promotion DESC
+          LIMIT 100
+        `;
+        const rows = db.query(sql).all(minHours) as Array<Record<string, unknown>>;
+        return {
+          ok: true,
+          result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
+        };
+      }
       case "contradictory_candidates_view": {
         const rows = db
           .query("SELECT * FROM contradictory_candidates_view ORDER BY ts DESC")
