@@ -26,20 +26,53 @@ This avoids relying on CLAUDE.md obedience, slash-command use, or prompt heurist
 
 Repository `CLAUDE.md` and optional skills may improve ergonomics, but **MCP registration is the durable readiness boundary**. Do not require a new `claude_session_opened` event kind for the first version; use existing daemon/session/owner events plus MCP availability checks.
 
-## S2 — one-time legacy memory import
+## S2 — fully-automatic legacy memory import (owner amendment 2026-05-20)
 
-`acc init` detects `~/.claude/memory/` and prior Claude project transcripts (`~/.claude/projects/*/conversation.jsonl`) and offers a reviewed import that:
+**Owner directive supersedes brain's review-gate framing**: import is fully automatic — no blocking prompt, no `owner_input_required` gate at init time, no multi-step setup. The brain's review-gate concern (false-memory risk) is structurally handled by the existing merger + posterior pipeline: imported entries enter as `knowledge_candidate` (NOT `knowledge_promoted`), earn weight via outcome credit, demote naturally if decorative.
 
-- Emits `knowledge_candidate` entries tagged `origin=claude_legacy_memory`
-- Routes owner review through existing `owner_input_required` / `owner_decision_recorded` events
-- Treats imported memories as evidence candidates, NOT canonical truth
+`acc init` automatically:
+
+- Detects `~/.claude/memory/` and prior Claude project transcripts (`~/.claude/projects/*/conversation.jsonl`)
+- Admits each durable entry as `knowledge_candidate` tagged `origin=claude_legacy_memory`
+- No owner prompt; no review gate; the substrate's normal merger pipeline scores them like any other candidate
+
+Imported entries:
+- Are evidence candidates, NOT canonical truth (default `score=0.5, confidence=0.3`)
+- Cite their source via `evidence_event_ids` pointing at the source transcript path/hash
+- Compete with other knowledge through normal Beta posterior compounding
+- Demote naturally if not cited in subsequent action_predicted chains (no decorative-memory promotion path)
 
 **Rejected alternatives** and why:
-- S1 (reject entirely) — too weak for fully-ready expectation; loses provably-useful prior context.
-- S3 (continuous mirror) — expands privacy, provenance, and false-memory risk.
-- S4 (manual-only `acc memory link`) — too weak for owner's fully-ready expectation.
+- S1 (reject entirely) — loses provably-useful prior context.
+- S3 (continuous mirror) — privacy/provenance/false-memory risk; one-time-at-init is sufficient for "fully ready."
+- S4 (manual-only `acc memory link`) — violates "fully automatic" directive.
+- ~~S2-with-review-gate (original brain framing)~~ — superseded by owner directive: the merger pipeline IS the review layer; no upfront prompt needed.
 
-Imported entries flow through the same merger + posterior pipeline as any other knowledge candidate; they earn weight by contributing to outcomes, not by import provenance.
+## The one-elegant-workflow contract
+
+Per owner directive 2026-05-20: **everything works automatically in one elegant workflow.** Concretely, the operator's actual sequence after a fresh install:
+
+1. `claude plugins install accint` (T4 channel) OR `bun run acc init` (developer channel)
+2. **One command. Everything happens.** The init flow:
+   - Spawns the daemon (if not running)
+   - Creates ~/.accint state dir + state.db
+   - Runs schema migrations (substrate/migrations/v0NN_*.sql)
+   - Bootstraps seeds (41 predicates + primitives + threshold seeds)
+   - **Auto-imports legacy Claude memory** as knowledge_candidate rows (S2 auto)
+   - Registers the substrate MCP server in Claude (R3)
+   - Starts the Claude chat observer worker (Q4)
+   - Returns a one-line "ready" signal to the operator
+
+3. Owner opens a fresh Claude chat and just talks. The chat observer captures their free text as `owner_input_received` / `directive_opened`; the substrate dispatches; results render through the MCP read path; legacy Claude memory is already searchable as substrate knowledge.
+
+**No multi-step setup. No prompts to review imported memory. No CLI verbs to learn beyond the optional `/acc` override slash command.** The substrate's own posterior machinery + merger pipeline + closure verifiers handle the safety-style concerns the brain raised about S3, but at the right architectural layer (posterior demotion, not init-time blocking).
+
+Failure modes that DO surface to the owner:
+- Daemon spawn failure (no substrate available — hard error, ops issue)
+- MCP registration write conflict (owner has existing global config — surface diff, owner picks)
+- Legacy memory directory unreadable (skip with warning, init continues)
+
+Everything else flows through the substrate's normal posterior machinery without explicit owner gating.
 
 ## T4 — Claude marketplace plugin (distribution channel)
 
