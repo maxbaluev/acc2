@@ -144,7 +144,17 @@ export type WorkerName =
   // this floor, aggregate-scan cost grows linearly with production
   // rate (live: 301K events / 5.5d → 50 GB/year projection).
   // Opt-out via ACC2_DISABLE_WORKERS=archival.
-  | "archival";
+  | "archival"
+  // 2026-05-20 (substrate-side brain dispatch primitive, per brain
+  // HCWM88JN0H6NDB8V amendment GMZ08ASMTD7W): any substrate component
+  // can emit a brain_invocation_request event when a verifier/view
+  // detects design ambiguity, structural fault, repeated silent exits,
+  // or insufficient synthesis. This worker (30s tick) reads the queue,
+  // applies per-emitter loop prevention (COSMIC SSA pattern), dedups
+  // by topic+triggering_event_ids, composes a directive, and
+  // dispatches through the existing acc task path. Opt-out via
+  // ACC2_DISABLE_WORKERS=brain_invocation.
+  | "brain_invocation";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -179,6 +189,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "kernel_sandbox",
   "owner_identity",
   "archival",
+  "brain_invocation",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

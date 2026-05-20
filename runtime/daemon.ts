@@ -1889,6 +1889,27 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const timer = setInterval(tick, tickMs);
     workers.push(() => clearInterval(timer));
   }
+
+  // brain_invocation_worker — 30s tick. Substrate-side brain dispatch
+  // primitive (per brain HCWM88JN0H6NDB8V amendment GMZ08ASMTD7W, cites
+  // prior meta-verdict MYMQZFM2XX7732AQ conf=0.86). Any substrate
+  // component emits brain_invocation_request when its verifier/view
+  // detects design ambiguity, structural fault, repeated silent exits,
+  // or insufficient synthesis. This worker dequeues, applies COSMIC
+  // SSA loop prevention, dedups by (topic_keywords, triggering_event_ids),
+  // and dispatches through the existing acc task path.
+  // Opt-OUT via ACC2_DISABLE_WORKERS=brain_invocation.
+  if (isWorkerEnabled("brain_invocation")) {
+    const tickMs = 30 * 1000;
+    const { runBrainInvocationTick } = await import("./brain_invocation_worker");
+    markWorkerReady("brain_invocation");
+    recordWorkerTick("brain_invocation");
+    const tick = supervisedTick(db, "brain_invocation", tickMs, async () => {
+      await runBrainInvocationTick(db);
+    });
+    const timer = setInterval(tick, tickMs);
+    workers.push(() => clearInterval(timer));
+  }
   } // end if (!skipWorkers)
 
   // Declare `stop` BEFORE Bun.serve so the fetch closure can capture it; the

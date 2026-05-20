@@ -940,6 +940,21 @@ export const EVENT_KINDS = {
   // reconcileBrainDispatchesAtBoot / reconcileOrphanedDispatches is the
   // deterministic backstop so deferrals can't wedge forever.
   hotreload_deferred:                      { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // ── Brain invocation as substrate-side primitive (2026-05-20) ───────
+  // Per brain HCWM88JN0H6NDB8V amendment GMZ08ASMTD7W (cites prior
+  // meta-verdict MYMQZFM2XX7732AQ conf=0.86 on subagent-spawning being
+  // an unledgered execution lane). Any substrate component can emit
+  // brain_invocation_request when its verifier/view detects design
+  // ambiguity, structural fault, repeated silent exits, or insufficient
+  // synthesis. The daemon's brain_invocation_worker (30s tick) reads
+  // the queue, applies COSMIC SSA loop prevention (3 requests / 5min /
+  // emitter_identity → throttle), dedups by topic_keywords +
+  // triggering_event_ids (1h window), composes a directive, and
+  // dispatches through the existing acc task entry point.
+  brain_invocation_request:                { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: false },
+  brain_invocation_dispatched:             { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  brain_invocation_throttled:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  brain_invocation_failed:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   // ── Unified pathology budget (brain elegance bc8je5f3x, 2026-05-15) ─
   // Pre-fix six backpressure mechanisms (bridge_failure_streak,
   // consecutive_bridge_failures, supervisor_redispatch_storm,

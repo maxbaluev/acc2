@@ -513,6 +513,28 @@ describe("derived sets match their pre-unification shape", () => {
       // T3.8/T5: SQL worker-thread pool metrics. Health-metric so
       // /metrics + dashboards can plot the event-loop unblock progress.
       "sql_worker_pool_metrics",
+      // Hot/cold archival (2026-05-20, docs/Architecture.md commit
+      // 6b8ebea + brain KC TE6P3958). archival_sweep_completed fires
+      // per 6h tick with bytes-archived telemetry;
+      // archival_integrity_failed fires on copy/verify mismatch +
+      // rollback. Both health-metrics so dashboards can show retention
+      // lag + corruption rate.
+      "archival_sweep_completed",
+      "archival_integrity_failed",
+      // Closure gate hardening (commit 68df8bb, 2026-05-20). The gate
+      // refuses task_committed at closure_residual >= threshold,
+      // emitting closure_blocked_high_residual instead. Owner consent
+      // override emits closure_override_acknowledged for audit trail.
+      // Both are health_metric so dashboards can plot gate-refusal rate.
+      "closure_blocked_high_residual",
+      "closure_override_acknowledged",
+      // Brain invocation primitive (2026-05-20, brain HCWM88JN0H6N
+      // amendment GMZ08ASMTD7W). Per-emitter throttle + dispatch +
+      // failure counters so dashboards show SSA loop-prevention rate
+      // and brain-dispatch funnel health.
+      "brain_invocation_dispatched",
+      "brain_invocation_throttled",
+      "brain_invocation_failed",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);
