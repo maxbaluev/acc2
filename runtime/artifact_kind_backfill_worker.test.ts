@@ -279,6 +279,42 @@ describe("runArtifactKindBackfill — end-to-end", () => {
     expect(countEvents(db, "artifact_kind_backfilled", "i1")).toBe(1);
   });
 
+  test("idempotency: rerunning the sweep on an uncertain row skips re-emit", async () => {
+    // Regression test for live incident: 9536 emissions in 10 minutes
+    // (~16/sec) from the worker re-processing the same ~2K uncertain
+    // rows on every sweep. The uncertain path does NOT mutate
+    // act_artifact.kind, so without an event-based idempotency probe
+    // the rows stay in `WHERE kind='code_artifact'` and the worker
+    // re-emits artifact_kind_inferred + artifact_kind_inference_uncertain
+    // forever, saturating the event loop and starving the MCP server.
+    const db = openDb(":memory:");
+    insertRow(db, "uidem1", {
+      // No name, opaque body → low-confidence → uncertain path.
+      name: null,
+      body: "noop",
+      runtime: "bun",
+      stateRoot: "test/legacy_default",
+    });
+    const first = await runArtifactKindBackfill(db, { sweepId: "uidem_sweep_1" });
+    expect(first.scanned).toBe(1);
+    expect(first.uncertain).toBe(1);
+    expect(first.skipped_idempotent).toBe(0);
+    expect(readKind(db, "uidem1")).toBe("code_artifact");
+    expect(countEvents(db, "artifact_kind_inferred", "uidem1")).toBe(1);
+    expect(countEvents(db, "artifact_kind_inference_uncertain", "uidem1")).toBe(1);
+
+    // Second sweep: row.kind is still 'code_artifact' so it IS in the
+    // scan set, but hasExistingInference must skip it before any emit.
+    const second = await runArtifactKindBackfill(db, { sweepId: "uidem_sweep_2" });
+    expect(second.scanned).toBe(1);
+    expect(second.skipped_idempotent).toBe(1);
+    expect(second.uncertain).toBe(0);
+    expect(second.backfilled).toBe(0);
+    // Crucially, NO new audit events on the second sweep.
+    expect(countEvents(db, "artifact_kind_inferred", "uidem1")).toBe(1);
+    expect(countEvents(db, "artifact_kind_inference_uncertain", "uidem1")).toBe(1);
+  });
+
   test("dry-run mode does not mutate or emit", async () => {
     const db = openDb(":memory:");
     insertRow(db, "d1", {

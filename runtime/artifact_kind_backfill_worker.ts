@@ -373,6 +373,25 @@ const hasExistingBackfill = (db: Database, artifactId: string): boolean => {
   return (row?.c ?? 0) > 0;
 };
 
+/** Returns true when the row already has a prior `artifact_kind_inferred`
+ *  event. The high-confidence path UPDATEs `act_artifact.kind` so the row
+ *  naturally leaves the `WHERE kind = 'code_artifact'` selector; the
+ *  uncertain path does NOT mutate kind, so without this probe the worker
+ *  re-emits artifact_kind_inferred + artifact_kind_inference_uncertain on
+ *  EVERY sweep for the same row. Live evidence: 9536 emissions in 10
+ *  minutes saturated the event loop and starved the MCP server, killing a
+ *  brain dispatch with mcp_call_failed:Request timed out. */
+const hasExistingInference = (db: Database, artifactId: string): boolean => {
+  const row = db
+    .query<{ c: number }, [string, string]>(
+      `SELECT COUNT(*) AS c FROM events
+        WHERE kind = ?
+          AND json_extract(payload, '$.artifact_id') = ?`,
+    )
+    .get("artifact_kind_inferred", artifactId);
+  return (row?.c ?? 0) > 0;
+};
+
 // ── Worker tick ───────────────────────────────────────────────────────
 
 /** Single sweep run. Scans every row with kind='code_artifact', composes
@@ -439,7 +458,11 @@ export const runArtifactKindBackfill = async (
       processedSinceYield = 0;
     }
     processedSinceYield++;
-    if (hasExistingBackfill(db, row.id)) {
+    // Skip rows we've already inferred against (high-confidence backfilled
+    // path UPDATEs the kind column so the row leaves the WHERE clause; the
+    // uncertain path does not, so we need a separate event-based check to
+    // prevent re-emitting on every sweep).
+    if (hasExistingBackfill(db, row.id) || hasExistingInference(db, row.id)) {
       summary.skipped_idempotent++;
       continue;
     }
