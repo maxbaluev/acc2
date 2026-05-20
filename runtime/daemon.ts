@@ -759,6 +759,15 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // queue grows slowly so reactive activation is unnecessary.
   // Opt-OUT via ACC2_DISABLE_WORKERS=pending_decision_retire.
   if (isWorkerEnabled("pending_decision_retire")) registerWorker("pending_decision_retire", 60 * 60 * 1000);
+  // 2026-05-19 (brain amendment 1Z3PMEYE7X44343E7K8ARCDY20, T1.1):
+  // owner-outcome follow-up worker. Closes the owner-truth feedback
+  // loop — substrate had 287K events but only 2
+  // owner_observed_outcome_recorded rows. The worker scans
+  // applied_change_committed events older than the feedback window
+  // (default 24h) and emits one hidl_action_required per eligible
+  // change asking the owner whether the change worked. Default 30min
+  // cadence. Opt-out via ACC2_DISABLE_WORKERS=owner_outcome_followup.
+  if (isWorkerEnabled("owner_outcome_followup")) registerWorker("owner_outcome_followup", 30 * 60 * 1000);
 
   // Phase E: amendment worker — drain unapplied directive_amended events when
   // directive amendments arrive. The shared reactive safety net is the fallback
@@ -1276,6 +1285,29 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       retireTickMs,
     );
     workers.push(() => clearInterval(retireTick));
+  }
+
+  // 2026-05-19 (brain amendment 1Z3PMEYE7X44343E7K8ARCDY20, T1.1):
+  // owner-outcome follow-up worker tick. Scans applied_change_committed
+  // events older than the feedback window (default 24h) with
+  // affected_resources, emits one hidl_action_required per eligible
+  // change asking the owner whether it worked. Owner's reply becomes
+  // owner_observed_outcome_recorded (existing CLI path); credit flows
+  // through the act-tuple chain. Idempotent — re-running the worker
+  // doesn't double-fire on the same row. Default 30min cadence.
+  // Opt-OUT via `ACC2_DISABLE_WORKERS=owner_outcome_followup`.
+  if (isWorkerEnabled("owner_outcome_followup")) {
+    const outcomeTickMs = 30 * 60 * 1000;
+    const { runOwnerOutcomeFollowupWorker } = await import("./owner_outcome_followup_worker");
+    let outcomeMarked = false;
+    const outcomeTick = supervisedTick(db, "owner_outcome_followup", outcomeTickMs, async () => {
+      await runOwnerOutcomeFollowupWorker(db);
+      if (!outcomeMarked) { markWorkerReady("owner_outcome_followup"); outcomeMarked = true; }
+    });
+    const outcomeTimer = setInterval(outcomeTick, outcomeTickMs);
+    markWorkerReady("owner_outcome_followup");
+    recordWorkerTick("owner_outcome_followup");
+    workers.push(() => clearInterval(outcomeTimer));
   }
 
   // 2026-05-19 (brain dispatch J4HP5SYT3N4GK45S Candidate A): one-shot

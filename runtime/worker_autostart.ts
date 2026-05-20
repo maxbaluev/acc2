@@ -92,7 +92,28 @@ export type WorkerName =
   // worker scans, emits pending_decision_retired per retire, and
   // the new pending_owner_decision_queue_live_view filters them
   // out. Historical view stays for audit. Default 1h cadence.
-  | "pending_decision_retire";
+  | "pending_decision_retire"
+  // 2026-05-19 (brain dispatch J4HP5SYT3N4GK45S Candidate A):
+  // one-shot substrate-wide sweep that backfills concrete `kind`
+  // values onto act_artifact rows still carrying the legacy
+  // `code_artifact` default. Single-sweep semantics: the daemon
+  // kicks the worker once after boot, NOT on a periodic cadence.
+  // Opt-out via ACC2_DISABLE_WORKERS=artifact_kind_backfill. See
+  // runtime/artifact_kind_backfill_worker.ts for the inference
+  // evidence ladder.
+  | "artifact_kind_backfill"
+  // 2026-05-19 (brain amendment 1Z3PMEYE7X44343E7K8ARCDY20, T1.1):
+  // owner-outcome follow-up worker. Substrate had 287K events but
+  // only 2 owner_observed_outcome_recorded rows — the load-bearing
+  // primitive for non-technical universality was structurally
+  // starved. The worker scans applied_change_committed events older
+  // than the feedback window (default 24h) with affected_resources,
+  // emits one hidl_action_required per eligible change asking the
+  // owner whether the change worked. Owner's reply becomes
+  // owner_observed_outcome_recorded (existing CLI path), credit
+  // flows through the act-tuple chain. Default 30min cadence.
+  // Opt-out via ACC2_DISABLE_WORKERS=owner_outcome_followup.
+  | "owner_outcome_followup";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -118,6 +139,8 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "contract_amendment_consumer",
   "wal_pressure_check",
   "pending_decision_retire",
+  "artifact_kind_backfill",
+  "owner_outcome_followup",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into
