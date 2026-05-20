@@ -208,19 +208,40 @@ const consecutiveBridgeFailures = (db: Database, taskId: string): number =>
  *  After ONE silent-class failure, the task is quarantined with
  *  `failure_kind: "silent_dispatch_quarantine"` — operator may re-open via
  *  a fresh task_id once the underlying compatibility issue is resolved. */
-const SILENT_DISPATCH_REASONS: ReadonlySet<string> = new Set([
+// Silent-class failure reasons split by determinism (2026-05-20 Cause 2 fix):
+// - DETERMINISTIC: same task + same brain → same failure. Tight cap protects
+//   compute. brain_silent_exit means brain reasoned but emitted zero MCP
+//   calls; subprocess_stuck means the subprocess wedged. Both reproduce.
+// - TRANSIENT: handshake timeouts under concurrent opencode spawns or slow
+//   boot are observably transient — fresh task_ids succeed, the same task_id
+//   may also succeed after the concurrent contention clears. Wider cap lets
+//   the substrate retry without permanent quarantine.
+const DETERMINISTIC_SILENT_REASONS: ReadonlySet<string> = new Set([
   "brain_silent_exit",
-  "mcp_handshake_timed_out",
   "subprocess_stuck",
 ]);
 
-const MAX_SILENT_DISPATCH_FAILURES = 1;
+const TRANSIENT_SILENT_REASONS: ReadonlySet<string> = new Set([
+  "mcp_handshake_timed_out",
+]);
+
+const SILENT_DISPATCH_REASONS: ReadonlySet<string> = new Set([
+  ...DETERMINISTIC_SILENT_REASONS,
+  ...TRANSIENT_SILENT_REASONS,
+]);
+
+const MAX_DETERMINISTIC_SILENT_FAILURES = 1;
+const MAX_TRANSIENT_SILENT_FAILURES = 3;
+// Back-compat alias: legacy emit sites still reference MAX_SILENT_DISPATCH_FAILURES.
+// Points at deterministic cap (the original semantic).
+const MAX_SILENT_DISPATCH_FAILURES = MAX_DETERMINISTIC_SILENT_FAILURES;
 
 /** Count silent-class bridge_failed events for a task (irrespective of
- *  whether they're consecutive). A task that silent-failed even ONCE has
- *  proven brain-incompatible for this dispatch shape; further attempts on
- *  the same task waste compute. Use the entire task history (not just the
- *  recent streak) because silent-class is deterministic and persists. */
+ *  whether they're consecutive). A task that silent-failed even ONCE in
+ *  the deterministic class has proven brain-incompatible for this dispatch
+ *  shape; further attempts on the same task waste compute. Transient-class
+ *  failures (mcp_handshake_timed_out from concurrent boot races) tolerate
+ *  more retries since fresh attempts may succeed when contention clears. */
 const silentDispatchFailureEvidence = (
   db: Database,
   taskId: string,
@@ -455,8 +476,18 @@ export const schedulerTick = async (
     // structurally-incompatible tasks. Operator may re-open via a fresh
     // task_id once the prompt/grammar issue is fixed.
     const silentFailures = silentDispatchFailureEvidence(db, task.id);
-    if (silentFailures.length >= MAX_SILENT_DISPATCH_FAILURES) {
+    // Split by determinism class. Deterministic failures quarantine after 1
+    // failure; transient failures (handshake timeouts) get up to 3 retries
+    // since fresh attempts may succeed once concurrent contention clears.
+    const deterministicFailures = silentFailures.filter((f) => DETERMINISTIC_SILENT_REASONS.has(f.reason));
+    const transientFailures = silentFailures.filter((f) => TRANSIENT_SILENT_REASONS.has(f.reason));
+    const overDeterministicCap = deterministicFailures.length >= MAX_DETERMINISTIC_SILENT_FAILURES;
+    const overTransientCap = transientFailures.length >= MAX_TRANSIENT_SILENT_FAILURES;
+    if (overDeterministicCap || overTransientCap) {
       skippedFailureCapped.push(task.id);
+      const quarantineClass = overDeterministicCap ? "deterministic" : "transient";
+      const cap = overDeterministicCap ? MAX_DETERMINISTIC_SILENT_FAILURES : MAX_TRANSIENT_SILENT_FAILURES;
+      const reasonsObserved = Array.from(new Set(silentFailures.map((f) => f.reason)));
       emitEvent(db, {
         kind: "task_failed",
         substrate_origin: "substrate_auto",
@@ -465,13 +496,18 @@ export const schedulerTick = async (
         failure_kind: "silent_dispatch_quarantine",
         payload: {
           silent_failures: silentFailures.length,
-          cap: MAX_SILENT_DISPATCH_FAILURES,
+          deterministic_failures: deterministicFailures.length,
+          transient_failures: transientFailures.length,
+          cap,
+          quarantine_class: quarantineClass,
           reason: "silent_dispatch_quarantine",
-          reasons_observed: Array.from(new Set(silentFailures.map((f) => f.reason))),
+          reasons_observed: reasonsObserved,
           backoff_mode: "terminal_after_silent_class_failure",
           retry_evidence_event_ids: silentFailures.map((f) => f.id),
           retry_evidence: silentFailures,
-          hint: "brain produced zero substrate emits for this task (deterministic). Re-dispatch on the same task_id will repeat the failure. Operator should investigate prompt shape OR re-open via a fresh task_id once the brain-incompatible pattern is resolved.",
+          hint: overDeterministicCap
+            ? "brain produced zero substrate emits for this task (deterministic). Re-dispatch on the same task_id will repeat the failure. Operator should investigate prompt shape OR re-open via a fresh task_id once the brain-incompatible pattern is resolved."
+            : "task failed handshake repeatedly (transient class). Concurrent opencode boot contention is the usual cause; if the substrate is otherwise quiet a fresh task_id is likely to succeed.",
         } as JsonValue,
       });
       continue;
