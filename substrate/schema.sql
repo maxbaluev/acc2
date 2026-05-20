@@ -62,6 +62,16 @@ CREATE INDEX IF NOT EXISTS idx_events_action_artifact_kind_ts ON events(action_a
 CREATE INDEX IF NOT EXISTS idx_events_projection_key          ON events(json_extract(payload, '$.projection_key'))
   WHERE json_extract(payload, '$.projection_key') IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_embedding_version       ON events(embedding_version);
+-- Composite partial index for the embedder's "find next unembedded
+-- embeddable rows" query (runtime/embedder.ts:readUnembedded). Without
+-- this index, WHERE embedding IS NULL AND kind IN (10 kinds) ORDER BY ts
+-- scans the full events table to find ~1543 matches in a 280K-row DB.
+-- The partial index (only rows where embedding IS NULL) keeps it tiny:
+-- once a row is embedded, it leaves the index. Cite FAWT1B3BT56S +
+-- T6EQS07X6X0V (phantom-backlog diagnosis).
+CREATE INDEX IF NOT EXISTS idx_events_unembedded_by_ts
+  ON events(kind, ts)
+  WHERE embedding IS NULL;
 
 -- ── act_artifact ───────────────────────────────────────────────────
 -- Registry row per polymorphic artifact handle. declared_sandbox +

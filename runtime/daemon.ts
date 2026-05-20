@@ -54,7 +54,7 @@ import {
 import { rollingReviewerWorkerTick } from "./rolling_reviewer";
 import { fatherJournalOnEvent } from "./father";
 import { EmbeddingIndex } from "./embedding_index";
-import { embedderWorkerTick } from "./embedder";
+import { embedderWorkerTick, pendingEmbeddableCount } from "./embedder";
 import { rehabilitationWorkerTick, getArtifact } from "./artifact_store";
 import { runBunArtifact } from "./runtimes/bun";
 import { runUvArtifact } from "./runtimes/uv";
@@ -1054,8 +1054,23 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("embedder")) {
     let embedderMarked = false;
     const embedderTick = supervisedTick(db, "embedder", embedderIntervalMs, async () => {
-      const pendingEmbeddings = (db.query("SELECT COUNT(*) AS c FROM events WHERE embedding IS NULL").get() as { c: number }).c;
-      await embedderWorkerTick(db, { batchSize: pendingEmbeddings > 500 ? 200 : pendingEmbeddings > 100 ? 100 : 20 });
+      // Embeddable-only count (per FAWT1B3BT56S + T6EQS07X6X0V + VEC3MX7RD15F):
+      // raw COUNT(*) WHERE embedding IS NULL over-counts massively because
+      // substrate-internal chatter (worker_tick_completed, candidate_confirmed,
+      // origin_calibration_recorded, bridge_frame_received, retrieval_binding,
+      // embedding_computed, ...) is intentionally NEVER embedded. The daemon
+      // saw 252K-event "backlog" on a DB whose actual embeddable backlog was
+      // 1,543. The raw count then drove batchSize up to 200, which made the
+      // per-tick SQL scan (WHERE kind IN (10 kinds) AND embedding IS NULL
+      // ORDER BY ts LIMIT 200) sweep the whole event table to find a few
+      // hundred matches — that scan was the wedge, not the OpenAI roundtrip.
+      //
+      // The embeddable-only count makes batch sizing honest. Cap batchSize
+      // at 50 (well below OpenAI's 100-item per-request chunk) so worst-case
+      // tick wall time stays bounded even on rare large backlogs.
+      const pendingEmbeddings = pendingEmbeddableCount(db);
+      const batchSize = pendingEmbeddings > 100 ? 50 : pendingEmbeddings > 20 ? 20 : Math.max(1, pendingEmbeddings);
+      if (batchSize > 0) await embedderWorkerTick(db, { batchSize });
       if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
     }, {
       // Embedder ticks legitimately take 30-90s during heavy backlog

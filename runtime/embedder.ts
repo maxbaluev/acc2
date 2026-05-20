@@ -263,6 +263,23 @@ const readUnembedded = (db: Database, batchSize: number): UnembeddedRow[] => {
   return rows;
 };
 
+/** Count unembedded rows USING THE EMBEDDABLE-KIND FILTER. Daemon-side
+ *  batch sizing must use this, not a raw COUNT(*) WHERE embedding IS NULL,
+ *  because the substrate accumulates massive non-narrative chatter
+ *  (worker_tick_completed, candidate_confirmed, origin_calibration_recorded,
+ *  bridge_frame_received, embedding_computed, retrieval_binding, ...) that
+ *  is intentionally NEVER embedded. Per `FAWT1B3BT56S` + `T6EQS07X6X0V` +
+ *  `VEC3MX7RD15F`, the raw-COUNT approach made the daemon think a 280K-event
+ *  DB had a 252K-event backlog when the actual embeddable backlog was 1543. */
+export const pendingEmbeddableCount = (db: Database): number => {
+  const placeholders = Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ");
+  const sql =
+    `SELECT COUNT(*) AS c FROM events ` +
+    `WHERE embedding IS NULL AND kind IN (${placeholders})`;
+  const row = db.query(sql).get(...Array.from(EMBEDDABLE_KINDS)) as { c: number } | null;
+  return row?.c ?? 0;
+};
+
 /** Insert (or replace) the matching row in the vec0 virtual table.
  *  Idempotent — we DELETE-by-PK first then INSERT, since vec0 does not
  *  reliably support UPSERT semantics across versions. We READ kind + ts
