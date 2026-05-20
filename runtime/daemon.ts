@@ -1371,7 +1371,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     markWorkerReady("contract_amendment_consumer");
     recordWorkerTick("contract_amendment_consumer");
     const consumerTick = supervisedTick(db, "contract_amendment_consumer", consumerTickMs, async () => {
-      runContractAmendmentConsumer(db, { maxRows: consumerBatchSize });
+      await runContractAmendmentConsumer(db, { maxRows: consumerBatchSize });
     });
     registerReactiveWorker("contract_amendment_consumer", consumerTickMs, ["contract_amendment_proposed", "applied_change_committed", "closure_complete", "closure_obsolete", "closure_owner_required"], consumerTick, { minReactiveGapMs: consumerTickMs });
     // contract_amendment_consumer is activation-driven; bursts are debounced by minReactiveGapMs.

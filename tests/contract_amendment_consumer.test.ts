@@ -38,7 +38,7 @@ const NOW = new Date("2026-05-18T12:00:00.000Z");
 const ago = (ms: number): Date => new Date(NOW.getTime() - ms);
 
 describe("F11 — contract amendment flywheel consumer", () => {
-  test("(A) brain_emitted_contract_routed_through_consumer_within_one_tick", () => {
+  test("(A) brain_emitted_contract_routed_through_consumer_within_one_tick", async () => {
     const db = openDb(":memory:");
     const proposal = emitEvent(db, {
       kind: "contract_amendment_proposed",
@@ -68,7 +68,7 @@ describe("F11 — contract amendment flywheel consumer", () => {
     });
     setTs(db, proposal.id, ago(60_000));
 
-    const summary = runContractAmendmentConsumer(db);
+    const summary = await runContractAmendmentConsumer(db);
     expect(summary.scanned).toBeGreaterThanOrEqual(1);
     expect(summary.route_to_implementation_count).toBe(1);
     const verdict = summary.verdicts.find((v) => v.proposal_id === proposal.id);
@@ -88,12 +88,12 @@ describe("F11 — contract amendment flywheel consumer", () => {
     );
 
     // Idempotency: a second tick must NOT emit another task_node_opened.
-    const second = runContractAmendmentConsumer(db);
+    const second = await runContractAmendmentConsumer(db);
     expect(second.route_to_implementation_count).toBe(0);
     expect(second.noop_count).toBeGreaterThanOrEqual(1);
   });
 
-  test("(B) proposal without verifier residual is unscored, not missing repo clarification", () => {
+  test("(B) proposal without verifier residual is unscored, not missing repo clarification", async () => {
     const db = openDb(":memory:");
     const proposal = emitEvent(db, {
       kind: "contract_amendment_proposed",
@@ -110,14 +110,14 @@ describe("F11 — contract amendment flywheel consumer", () => {
     });
     setTs(db, proposal.id, ago(60_000));
 
-    const summary = runContractAmendmentConsumer(db);
+    const summary = await runContractAmendmentConsumer(db);
     expect(summary.route_to_clarification_count).toBe(0);
     const verdict = summary.verdicts.find((v) => v.proposal_id === proposal.id);
     expect(verdict?.verdict).toBe("noop_unscored");
     expect(verdict?.emitted_event_ids.length).toBe(0);
   });
 
-  test("(B2) low verifier residual routes to implementation without predicate or target_files", () => {
+  test("(B2) low verifier residual routes to implementation without predicate or target_files", async () => {
     const db = openDb(":memory:");
     const proposal = emitEvent(db, {
       kind: "contract_amendment_proposed",
@@ -139,12 +139,12 @@ describe("F11 — contract amendment flywheel consumer", () => {
     });
     setTs(db, proposal.id, ago(60_000));
 
-    const summary = runContractAmendmentConsumer(db);
+    const summary = await runContractAmendmentConsumer(db);
     const verdict = summary.verdicts.find((v) => v.proposal_id === proposal.id);
     expect(verdict?.verdict).toBe("route_to_implementation");
   });
 
-  test("(C) supersession emits closure_obsolete on prior proposal", () => {
+  test("(C) supersession emits closure_obsolete on prior proposal", async () => {
     const db = openDb(":memory:");
     const older = emitEvent(db, {
       kind: "contract_amendment_proposed",
@@ -187,7 +187,7 @@ describe("F11 — contract amendment flywheel consumer", () => {
     });
     setTs(db, newer.id, ago(60_000));
 
-    const summary = runContractAmendmentConsumer(db);
+    const summary = await runContractAmendmentConsumer(db);
     expect(summary.closure_obsolete_count).toBe(1);
     const verdictOld = summary.verdicts.find((v) => v.proposal_id === older.id);
     expect(verdictOld?.verdict).toBe("closure_obsolete_supersession");
@@ -210,11 +210,11 @@ describe("F11 — contract amendment flywheel consumer", () => {
     expect(payload.source_event_id).toBe(older.id);
 
     // Re-running must NOT double-emit.
-    const second = runContractAmendmentConsumer(db);
+    const second = await runContractAmendmentConsumer(db);
     expect(second.closure_obsolete_count).toBe(0);
   });
 
-  test("(D) redundancy via applied_change_committed → closure_complete", () => {
+  test("(D) redundancy via applied_change_committed → closure_complete", async () => {
     const db = openDb(":memory:");
     // Proposal A (the one we're testing): emitted first.
     const propA = emitEvent(db, {
@@ -266,7 +266,7 @@ describe("F11 — contract amendment flywheel consumer", () => {
     });
     setTs(db, applied.id, ago(60_000));
 
-    const summary = runContractAmendmentConsumer(db);
+    const summary = await runContractAmendmentConsumer(db);
     const verdict = summary.verdicts.find((v) => v.proposal_id === propA.id);
     expect(verdict?.verdict).toBe("closure_complete_redundancy");
 

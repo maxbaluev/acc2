@@ -134,7 +134,18 @@ const allDependenciesClosed = (db: Database, dependencies: unknown[] | null): bo
 /** Look for an applied_change_committed row that targets the same
  *  resource as the proposal AND was emitted AFTER the proposal ts
  *  AND cites a DIFFERENT proposal id. Returns the citing event id when
- *  redundancy is detected, null otherwise. */
+ *  redundancy is detected, null otherwise.
+ *
+ *  Bounded scan per KC GJ2KN1J3KD1Z (bounded amendments per worker —
+ *  prevent event-loop starvation): the `applied_change_committed` table
+ *  grows monotonically. A 280K-event ledger has thousands of apply rows;
+ *  walking them all for every proposal in the triage loop blocked the
+ *  Bun event loop. Cap at REDUNDANCY_SCAN_LIMIT=500 most-recent applies —
+ *  the redundancy signal is most-relevant immediately after the proposal,
+ *  and old applies that haven't been picked up by prior triage runs are
+ *  already credited (idempotency via projection_key catches the rest). */
+const REDUNDANCY_SCAN_LIMIT = 500;
+
 const findRedundancyApply = (
   db: Database,
   proposalId: string,
@@ -147,13 +158,14 @@ const findRedundancyApply = (
   // are rare) that an in-memory filter is cheaper than a json_extract
   // index lookup at this scale.
   const rows = db
-    .query<{ id: string; payload: string }, [string]>(
+    .query<{ id: string; payload: string }, [string, number]>(
       `SELECT id, payload FROM events
         WHERE kind = 'applied_change_committed'
           AND ts > ?
-        ORDER BY ts ASC`,
+        ORDER BY ts ASC
+        LIMIT ?`,
     )
-    .all(proposalTs);
+    .all(proposalTs, REDUNDANCY_SCAN_LIMIT);
   for (const row of rows) {
     try {
       const payload = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
@@ -297,14 +309,33 @@ const triage = (
   };
 };
 
+/** Cooperative yield helper — releases the event loop so the daemon's
+ *  /health route, the bridge SSE pumps, and other workers can run while
+ *  this consumer walks a proposal backlog on a 280K-event ledger.
+ *  Per substrate KC GJ2KN1J3KD1Z (bounded amendments per worker —
+ *  event-loop starvation surfaced as wedged daemon in role=all). */
+const yieldToEventLoop = (): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, 0));
+
+/** Yield every 25 proposals matches the bounded-amendments cadence
+ *  used by embedder / artifact_kind_backfill_worker. Each iteration
+ *  runs hasPriorEmission (LIKE scan), findRedundancyApply (bounded to
+ *  500 most-recent applies), and 0-2 emitEvent calls — non-trivial
+ *  but bounded; yielding every 25 keeps the daemon /health sub-second
+ *  even when the proposal backlog spans the full maxRows cap. */
+const YIELD_INTERVAL_ROWS = 25;
+
 /** Run the consumer once. The daemon's supervisedTick wrapper calls
  *  this on each interval. Idempotent: re-running on the same ledger
  *  state emits zero events.
+ *
+ *  Async per KC GJ2KN1J3KD1Z — yields the event loop every
+ *  YIELD_INTERVAL_ROWS proposals.
  */
-export const runContractAmendmentConsumer = (
+export const runContractAmendmentConsumer = async (
   db: Database,
   options: ConsumerOptions = {},
-): ConsumerSummary => {
+): Promise<ConsumerSummary> => {
   const maxRows = options.maxRows ?? 100;
   const dryRun = options.dryRun ?? false;
   const summary: ConsumerSummary = {
@@ -327,7 +358,12 @@ export const runContractAmendmentConsumer = (
     return summary;
   }
 
+  let processed = 0;
   for (const row of rows) {
+    if (processed > 0 && processed % YIELD_INTERVAL_ROWS === 0) {
+      await yieldToEventLoop();
+    }
+    processed += 1;
     summary.scanned++;
     let decision: ReturnType<typeof triage>;
     try {
