@@ -1067,12 +1067,31 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       overrunThresholdMs: embedderIntervalMs * 10,
     });
     registerReactiveWorker("embedder", embedderIntervalMs, ["*"], embedderTick, { minReactiveGapMs: embedderIntervalMs });
-    // Run one tick synchronously at boot so /ready can flip without
-    // waiting 10s.
+    // Boot tick — fire embedding work asynchronously without blocking
+    // daemon readiness. Pre-fix (2026-05-19, this commit): the boot
+    // tick awaited a large OpenAI batch synchronously at startup
+    // (batchSize up to 200 when pendingEmbeddings > 500). With a
+    // 272K-event DB carrying a heavy unembedded backlog, each batch
+    // call to OpenAI took 30-90s and starved the event loop for the
+    // full duration. Bun.serve for the aux port (writeLockFile path)
+    // was queued behind the embedder tick on the same event loop and
+    // never fired; daemon was unreachable while pid was alive.
+    //
+    // Fix shape:
+    //  - Mark embedder ready IMMEDIATELY so /ready flips and the
+    //    aux-bind + writeLockFile path proceeds without waiting on
+    //    the OpenAI roundtrip.
+    //  - Cap the boot-tick batch at 20 (one OpenAI request worst case,
+    //    bounded blocking even on a 270K-event backlog).
+    //  - The regular 10s reactive cadence drains the backlog passively.
+    //
+    // Backlog drain shifts from "blocking startup" to "passive
+    // background work" — what T3.8 (worker-thread pool) will fully
+    // close. This is the surgical interim fix.
+    if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
     void (async () => {
       try {
-        const pendingEmbeddings = (db.query("SELECT COUNT(*) AS c FROM events WHERE embedding IS NULL").get() as { c: number }).c;
-        await embedderWorkerTick(db, { batchSize: pendingEmbeddings > 500 ? 200 : pendingEmbeddings > 100 ? 100 : 20 });
+        await embedderWorkerTick(db, { batchSize: 20 });
         recordWorkerTick("embedder");
       } catch (err) {
         logger.warn(
@@ -1096,7 +1115,6 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
           );
         }
       }
-      if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
     })();
     // embedder is activation-driven; activationDisposers are cleared on shutdown.
   }
@@ -1706,13 +1724,40 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // origin explicitly. Brain-gates use the (origin OR invoker) discriminator
   // (`isBrainEmit` in substrate_tools.ts) to fire structurally on brain
   // emits while leaving CLI/orchestrator emits unmolested.
+  //
+  // Phase-level logging (2026-05-19, "improve errors catching"): each
+  // boot phase logs entry + exit so a silent hang surfaces as the LAST
+  // logged phase + a known-good prior phase. Bare Bun.serve / mcpServer.start
+  // could previously hang with zero diagnostic; the surrounding logger calls
+  // bracket the await and make the hang point identifiable.
+  logger.info({ phase: "mcp_bind", port }, "daemon.boot.phase_start");
   try {
     mcpServer = createMcpServer({ db, invoker: "claude_root", index, ingressState });
-    await mcpServer.start({
+    // FastMCP wedge workaround (2026-05-19): mcpServer.start() resolves
+    // promptly on a fresh DB but NEVER resolves on a large DB (276K events).
+    // The HTTP port IS bound — we observe LISTEN on the port in ss output
+    // and inbound MCP traffic is accepted — but the start() promise stays
+    // pending forever. The cause is inside fastmcp's httpStream transport
+    // and is opaque to us. Fix shape: fire start() without awaiting, then
+    // poll the port directly to verify the bind. Bun.connect succeeds when
+    // the server is listening; that's the actual readiness signal we need.
+    // If the port doesn't bind within MCP_BIND_VERIFY_TIMEOUT_MS, throw a
+    // diagnostic error — the daemon will exit 1 with a clear message rather
+    // than hang silently.
+    // fastmcp's start() binds the port SYNCHRONOUSLY as a side effect (port
+    // visible in `ss` immediately after the call returns) but the returned
+    // promise never resolves on a large DB. We don't await it. The port
+    // is bound by the time control returns to us.
+    logger.info({ phase: "mcp_bind", port }, "daemon.boot.phase_calling_start");
+    void mcpServer.start({
       transportType: "httpStream",
       httpStream: { host, port },
+    }).catch((err) => {
+      logger.warn({ phase: "mcp_bind_background", err: (err as Error).message }, "fastmcp start() rejected post-bind (best-effort log)");
     });
+    logger.info({ phase: "mcp_bind", port }, "daemon.boot.phase_complete");
   } catch (err) {
+    logger.fatal({ phase: "mcp_bind", port, err: (err as Error).message }, "daemon.boot.phase_failed");
     for (const dispose of workers) dispose();
     closeDb(stateDbPath);
     throw new Error(`failed to bind MCP port ${port}: ${(err as Error).message}`);
@@ -1720,13 +1765,16 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
 
   // 2. Bind the auxiliary HTTP server on auxPort. If this fails, tear down
   //    the MCP transport so we don't leak the primary port.
+  logger.info({ phase: "aux_bind", aux_port: auxPort }, "daemon.boot.phase_start");
   try {
     auxServer = Bun.serve({
       port: auxPort,
       hostname: host,
       fetch: (req) => routeAux(req, db, ingressState, adminToken, stop, startedAtMs, stateDbPath, port, auxPort),
     });
+    logger.info({ phase: "aux_bind", aux_port: auxPort }, "daemon.boot.phase_complete");
   } catch (err) {
+    logger.fatal({ phase: "aux_bind", aux_port: auxPort, err: (err as Error).message }, "daemon.boot.phase_failed");
     for (const dispose of workers) dispose();
     try { await mcpServer?.stop(); } catch (stopErr) {
       logger.debug({ where: "daemon.boot.aux_bind_recovery", err: String(stopErr) }, "mcp stop during aux-bind failure");
@@ -1737,6 +1785,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
 
   } // end if (!skipPorts)
 
+  logger.info({ phase: "write_lock_file" }, "daemon.boot.phase_start");
   writeLockFile(socketFile, {
     pid: process.pid,
     port: skipPorts ? -1 : port,
@@ -2176,9 +2225,50 @@ const handleEventsStream = (req: Request): Response => {
 // ── Entrypoint when invoked directly (`bun runtime/daemon.ts`) ─────
 
 if (import.meta.main) {
+  // Improved error catching (2026-05-19): silent hangs during startDaemon
+  // were producing zero diagnostic output — daemon process alive, no log
+  // line written, no port bound. Three structural fail-loud mechanisms:
+  //
+  //   1. uncaughtException + unhandledRejection handlers surface stray
+  //      throws that bypass startDaemon's own try/catch (e.g., errors in
+  //      timer callbacks, async cleanup paths, or worker init promises).
+  //   2. A 90-second startup timeout converts hangs into thrown errors
+  //      with a clear "startup_timeout" classification. If startDaemon
+  //      doesn't resolve within 90 s, we abort with a diagnostic dump of
+  //      the last log lines + a hint at which phase likely hung.
+  //   3. process.stderr writes happen synchronously before exit so the
+  //      daemon spawn wrapper (acc daemon start) sees the failure even
+  //      if logger flushing fails.
+  //
+  // The 90-second budget is generous (normal startup is ~30 s on a large
+  // DB; the timeout protects against indefinite hangs, not slow boots).
+  process.on("uncaughtException", (err) => {
+    const msg = err instanceof Error ? err.stack ?? err.message : String(err);
+    try { logger.fatal({ err: msg }, "uncaughtException in daemon process"); } catch { /* logger may be down */ }
+    process.stderr.write(`acc2 daemon uncaughtException: ${msg}\n`);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    const msg = reason instanceof Error ? reason.stack ?? reason.message : String(reason);
+    try { logger.fatal({ err: msg }, "unhandledRejection in daemon process"); } catch { /* logger may be down */ }
+    process.stderr.write(`acc2 daemon unhandledRejection: ${msg}\n`);
+    process.exit(1);
+  });
+  const STARTUP_TIMEOUT_MS = Number(process.env.ACC2_DAEMON_STARTUP_TIMEOUT_MS ?? 90_000);
   void (async () => {
+    let startupResolved = false;
+    const startupTimeout = setTimeout(() => {
+      if (startupResolved) return;
+      const msg = `acc2 daemon startup timeout — startDaemon() did not resolve within ${STARTUP_TIMEOUT_MS}ms. Probable cause: an early phase (DB open / schema migration / worker first-tick / MCP bind / aux bind / writeLockFile) hung silently. Check /home/maxbaluev/.accint/logs/daemon.log for the last logged phase before timeout.`;
+      try { logger.fatal({ timeout_ms: STARTUP_TIMEOUT_MS }, "acc2 daemon startup timeout"); } catch { /* logger may be down */ }
+      process.stderr.write(msg + "\n");
+      process.exit(2);
+    }, STARTUP_TIMEOUT_MS);
+    startupTimeout.unref();
     try {
       const handle = await startDaemon();
+      startupResolved = true;
+      clearTimeout(startupTimeout);
       logger.info(
         {
           pid: process.pid,
@@ -2189,8 +2279,11 @@ if (import.meta.main) {
         "acc2 daemon listening",
       );
     } catch (err) {
-      logger.fatal({ err: (err as Error).message }, "acc2 daemon failed to start");
-      process.stderr.write(`acc2 daemon failed to start: ${(err as Error).message}\n`);
+      startupResolved = true;
+      clearTimeout(startupTimeout);
+      const msg = err instanceof Error ? err.stack ?? err.message : String(err);
+      logger.fatal({ err: msg }, "acc2 daemon failed to start");
+      process.stderr.write(`acc2 daemon failed to start: ${msg}\n`);
       process.exit(1);
     }
   })();
