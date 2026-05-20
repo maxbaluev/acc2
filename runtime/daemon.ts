@@ -66,6 +66,7 @@ import { metricsHandler, refreshGauges } from "./metrics";
 import { integrityWorkerTick, runIntegrityCheck, reconcileOrphanedDispatches } from "./integrity_worker";
 import { reconcileBrainDispatchesAtBoot, getOpenBrainDispatches, setBootSessionToken } from "./brain_dispatch_reconciler";
 import { waitForBrainQuiescence } from "./restart_quiescence";
+import { noActiveBrainDispatches } from "./dispatch_survival";
 import {
   getCurrentGitHead,
   writeChildGitHead,
@@ -1000,6 +1001,22 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       } catch (err) {
         logger.warn({ where: "daemon.extractors.trajectory_motifs", err: (err as Error).message }, "trajectory-motif extractor tick failed");
       }
+      // Tier-S1 DAG decomposition strategy (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
+      // 2026-05-19): scan completed directives (those with
+      // task_closure_audited) in a 30-day window, build per-directive
+      // DAG fingerprints (fan_out, max_depth, total_nodes), bucket by
+      // deterministic shape category (wide_shallow / deep_narrow /
+      // balanced / tree_heavy / minimal / other), and admit/refresh one
+      // act_artifact{kind:decomposition_strategy_predicate} row per
+      // shape that meets the 5-sample threshold. Closes the Tier-S
+      // sequence: substrate now learns whether a SHAPE predicts
+      // closure_residual, not just whether a leaf does.
+      try {
+        const { extractDecompositionStrategy } = await import("./decomposition_strategy_extractor");
+        await extractDecompositionStrategy(db);
+      } catch (err) {
+        logger.warn({ where: "daemon.extractors.decomposition_strategy", err: (err as Error).message }, "decomposition-strategy extractor tick failed");
+      }
       // Auto cross-directive interference (organism-alignment Track C,
       // 2026-05-15): scan act_artifact.target_resources/target_files for cross-directive
       // overlap and emit resource_conflict edges so the scheduler defers
@@ -1071,25 +1088,48 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("hotreload")) {
     try {
       const { startHotreloadWorker } = await import("./hotreload_worker");
-      // Quiescence = no brain dispatch currently in-flight. Cheap SQL
-      // probe: count brain_dispatched events that have no matching
-      // brain_dispatch_closed after the same ts.
+      // Brain-dispatch survival gate (XA3ABKERHD4H, 77N73035F97Z):
+      // quiescence is defined by the canonical recency-bounded predicate
+      // `noActiveBrainDispatches` in runtime/dispatch_survival.ts — a
+      // brain_dispatched row within the 1-hour recency window without a
+      // matching brain_dispatch_closed counts as live. The recency window
+      // excludes legacy orphans (boot reconciliation owns those) so the
+      // quiescence gate doesn't wedge forever on a wedged historic row.
+      //
+      // When the predicate refuses, emit one `hotreload_deferred` audit
+      // event per refusal so persistent deferrals show up as a
+      // health_metric signal (operator's substrate-status should see
+      // "reload deferred N times waiting on brain close"). The
+      // hotreload_worker still owns the actual deferral semantics (it
+      // calls isQuiescent during processChange and again from
+      // drainPendingQuiescent when a close event lands) — we just add
+      // the observability leg.
+      let lastDeferredEmissionMs = 0;
+      const DEFERRED_EMISSION_MIN_GAP_MS = 1_000; // dedupe rapid bursts
       const isQuiescent = (): boolean => {
-        try {
-          const row = db
-            .query(
-              `SELECT COUNT(*) AS c FROM events b
-               WHERE b.kind = 'brain_dispatched'
-                 AND NOT EXISTS (
-                   SELECT 1 FROM events c
-                   WHERE c.kind = 'brain_dispatch_closed'
-                     AND c.task_id = b.task_id
-                     AND c.ts >= b.ts
-                 )`,
-            )
-            .get() as { c: number };
-          return row.c === 0;
-        } catch { return true; }
+        const quiescent = noActiveBrainDispatches(db);
+        if (!quiescent) {
+          const now = Date.now();
+          if (now - lastDeferredEmissionMs >= DEFERRED_EMISSION_MIN_GAP_MS) {
+            lastDeferredEmissionMs = now;
+            try {
+              emitEvent(db, {
+                kind: "hotreload_deferred",
+                substrate_origin: "substrate_auto",
+                payload: {
+                  reason: "brain_dispatched_without_close",
+                  waiting_for_close: true,
+                },
+              });
+            } catch (err) {
+              logger.debug(
+                { where: "daemon.hotreload.deferred_emit", err: String(err) },
+                "could not emit hotreload_deferred (db may be closing)",
+              );
+            }
+          }
+        }
+        return quiescent;
       };
       const projectRoot = process.env.ACC2_PROJECT_ROOT ?? process.cwd();
       const disposer = startHotreloadWorker(db, { projectRoot, isQuiescent });

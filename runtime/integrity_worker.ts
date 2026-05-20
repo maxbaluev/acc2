@@ -403,7 +403,15 @@ export const reconcileOrphanedDispatches = (db: Database): Array<{ dispatch_even
         task_id: row.task_id,
         payload: {
           dispatch_id: dispatchId,
+          // Canonical reason for the boot-side orphan-close path
+          // (XA3ABKERHD4H survival spec). `restart_orphan_recovered`
+          // is retained for any pinned reader; the survival-spec
+          // `daemon_restart_during_dispatch` is alongside it and
+          // `recovered: true` marks the synthetic terminal so the
+          // ledger is explicit that no clean close ever happened.
           reason: "restart_orphan_recovered",
+          closure_reason: "daemon_restart_during_dispatch",
+          recovered: true,
           original_dispatch_event_id: row.dispatch_event_id,
         },
       });

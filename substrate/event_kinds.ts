@@ -136,6 +136,19 @@ export const EVENT_KINDS = {
   // trajectory similarity (low variance of residual = good shape) —
   // the signal downstream T2.2/T2.3/T4.1 posteriors read.
   goal_shape_strategy_observed:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // Tier-S1 DAG decomposition strategy (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
+  // 2026-05-19): substrate-emitted when the bounded decomposition-
+  // strategy extractor (runtime/decomposition_strategy_extractor.ts)
+  // buckets completed directives by DAG shape category and admits or
+  // refreshes an act_artifact{kind:decomposition_strategy_predicate}
+  // row. Carries { shape_category, predicate_act_artifact_id,
+  // sample_count, mean_residual, std_residual, effective_score,
+  // avg_fan_out, avg_max_depth, avg_total_nodes, last_observed_ts,
+  // created }. The predicate row scores whether a given decomposition
+  // SHAPE (wide_shallow / deep_narrow / balanced / tree_heavy /
+  // minimal / other) PREDICTS closure_residual — the structural
+  // primitive S1 closes the Tier-S sequence with.
+  decomposition_strategy_observed:         { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Knowledge (Model D) ─────────────────────────────────────────────
   knowledge_candidate:                     { producer: "brain",     embeddable: true,  mirror_inline: true,  health_metric: false, narrative: true },
@@ -788,6 +801,16 @@ export const EVENT_KINDS = {
   // the failure count reflects ACTUAL faults, and narrative=true so
   // operators still see the "needs restart" hint inline.
   daemon_hotreload_restart_pending:        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  // Brain-dispatch-survival gate (XA3ABKERHD4H + 77N73035F97Z, 2026-05-19):
+  // emitted by the hot-reload quiescence callback in runtime/daemon.ts
+  // when noActiveBrainDispatches(db) returns false — a recent
+  // brain_dispatched row lacks brain_dispatch_closed within the 1-hour
+  // recency window. health_metric=true so persistent deferrals surface
+  // as a substrate-status signal (operator sees "reload deferred N times
+  // waiting on brain close"); the orphan-close path emitted by
+  // reconcileBrainDispatchesAtBoot / reconcileOrphanedDispatches is the
+  // deterministic backstop so deferrals can't wedge forever.
+  hotreload_deferred:                      { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   // ── Unified pathology budget (brain elegance bc8je5f3x, 2026-05-15) ─
   // Pre-fix six backpressure mechanisms (bridge_failure_streak,
   // consecutive_bridge_failures, supervisor_redispatch_storm,

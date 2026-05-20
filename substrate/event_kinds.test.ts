@@ -155,6 +155,15 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // NOT an event kind — the registry row carries this discriminator;
   // emissions use goal_shape_strategy_observed.
   "goal_shape_strategy_predicate",
+  // Tier-S1 (2026-05-19, brain KC G3PR7X6TCD4T57D7T6GXCDY9AW):
+  // runtime/decomposition_strategy_extractor.ts admits act_artifact
+  // rows with `kind: 'decomposition_strategy_predicate'` per DAG
+  // shape category (wide_shallow / deep_narrow / balanced /
+  // tree_heavy / minimal / other) so each shape becomes a
+  // posterior-ranked row scored by whether the SHAPE predicts
+  // closure_residual. NOT an event kind — the registry row carries
+  // this discriminator; emissions use decomposition_strategy_observed.
+  "decomposition_strategy_predicate",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────
@@ -434,6 +443,13 @@ describe("derived sets match their pre-unification shape", () => {
       // trail — NOT health metric (every scanned row emits one).
       "artifact_kind_backfilled",
       "artifact_kind_inference_uncertain",
+      // Brain-dispatch-survival gate (XA3ABKERHD4H + 77N73035F97Z,
+      // 2026-05-19): hot-reload quiescence callback emits one per
+      // refusal when a brain_dispatched row lacks brain_dispatch_closed
+      // within the 1-hour recency window. Counted as health metric so
+      // dashboards can show how often the gate fires; orphan-close at
+      // boot is the deterministic backstop so deferrals can't wedge.
+      "hotreload_deferred",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);
