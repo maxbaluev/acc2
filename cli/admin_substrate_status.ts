@@ -114,9 +114,13 @@ export const computeSubstrateStatus = (
   // so the credit pipeline can update their Beta posterior. They are
   // substrate-seeded, not brain-authored, and must count toward the
   // 'seed' bucket.
+  // 2026-05-20: threshold-registry seeds (commit ae6d869) and 2026-research
+  // integration predicates (commit a750bbb) admit under state_root LIKE
+  // 'substrate/threshold/%' (canonical threshold id form
+  // `threshold_<name>`). They are substrate-seeded too — same rationale.
   const actArtifactsSeed = safeCount(
     db,
-    "SELECT COUNT(*) AS c FROM act_artifact WHERE id LIKE 'seed_%' OR state_root LIKE 'substrate/primitive/%'",
+    "SELECT COUNT(*) AS c FROM act_artifact WHERE id LIKE 'seed_%' OR state_root LIKE 'substrate/primitive/%' OR state_root LIKE 'substrate/threshold/%'",
   );
   const actArtifactsBrain = Math.max(0, actArtifacts - actArtifactsSeed);
   const vecEvents = safeCount(db, "SELECT COUNT(*) AS c FROM vec_events");

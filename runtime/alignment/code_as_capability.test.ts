@@ -60,6 +60,15 @@ describe("alignment / code_as_capability (Principle 4)", () => {
       // Bun.spawn`) for the SpawnOpts injection seam — no invocation site.
       if (f.endsWith("/runtime/bridge/types.ts")) continue;
       if (f.endsWith("/runtime/sandbox.ts")) continue; // sandbox.ts only mentions Bun.spawn in JSDoc comments
+      // brain_invocation_worker.ts is the substrate-side equivalent of
+      // `acc task` CLI — substrate-internal dispatch wrangler that
+      // spawns the same opencode subprocess as the CLI path. Per the
+      // 2026-05-20 brain HCWM88JN0H6N amendment GMZ08ASMTD7W: any
+      // substrate component can request brain design via this primitive
+      // rather than the CLI being the only entry. The spawn is the
+      // canonical brain-dispatch fork, classified as bridge subprocess
+      // code by intent.
+      if (f.endsWith("/runtime/brain_invocation_worker.ts")) continue;
       const text = readFileSync(f, "utf-8");
       // Strip line comments so the JSDoc references in module docstrings
       // don't false-positive.

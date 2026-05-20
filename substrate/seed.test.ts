@@ -92,6 +92,11 @@ describe("seedActArtifacts", () => {
       // lookup. Predicate ids are canonical stable handles — not
       // `seed_` prefixed — same shape as the substrate-primitive ids.
       if (id.startsWith("predicate_") && id.endsWith("_v1")) continue;
+      // Threshold registry seeds (commit ae6d869) admit as `threshold_<name>`
+      // act_artifact rows with kind='threshold_predicate'. Stable canonical
+      // ids — same rationale as primitive ids: forced `seed_` prefix would
+      // orphan getThreshold callers that lookup by name.
+      if (id.startsWith("threshold_")) continue;
       expect(id.startsWith("seed_")).toBe(true);
     }
   });
@@ -155,9 +160,13 @@ describe("seedActArtifacts", () => {
     // kinds (merger / decider / extractor / promoter / verifier / action /
     // predicate / exit_classifier) — excluded from the legacy default-
     // kind check.
+    // Threshold registry seeds (commit ae6d869) live under
+    // state_root='substrate/threshold/<name>' and declare
+    // kind='threshold_predicate'. Excluded from the legacy default-
+    // kind check below.
     const legacyRows = db
       .query(
-        "SELECT kind FROM act_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%' AND state_root NOT LIKE 'render/%' AND state_root NOT LIKE 'substrate/primitive/%'",
+        "SELECT kind FROM act_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%' AND state_root NOT LIKE 'render/%' AND state_root NOT LIKE 'substrate/primitive/%' AND state_root NOT LIKE 'substrate/threshold/%'",
       )
       .all() as Array<{ kind: string }>;
     expect(legacyRows.length).toBeGreaterThan(0);
@@ -499,14 +508,23 @@ describe("seedActArtifacts", () => {
       expect(payload.metric_direction && payload.metric_direction.length).toBeGreaterThan(0);
     }
 
-    // 9. Tier distribution: the 5/5/20 split is part of the contract.
+    // 9. Tier distribution. Original split was 5/5/20; 2026-research
+    // integration (commit a750bbb) added 2 Tier -1 predicates
+    // (memory_reconciliation + recursive_self_improvement_safeguard
+    // per SSGM arXiv:2603.11768 + SAHOO arXiv:2603.06333). The S0
+    // replan (commit 776007c) restructured the flat 5 into 8 tiered
+    // boundaries (preservation + policy + safety + state + forecast
+    // + rendering + belief + orchestration) per brain 70XT4ZKMBH5CQ3A3
+    // grounded in Kriger/HILA/SBD/COSMIC/Adaptive ToM/MetaMind.
+    // Commit a750bbb added constitutional_amendment_ratification per
+    // AgentCity arXiv:2604.07007. Current split: 7/9/20.
     const byTier = new Map<string, number>();
     for (const r of rows) {
       const tier = (JSON.parse(r.body) as { tier?: string }).tier ?? "unknown";
       byTier.set(tier, (byTier.get(tier) ?? 0) + 1);
     }
-    expect(byTier.get("tier_minus_1_floor")).toBe(5);
-    expect(byTier.get("tier_s0_owner_alignment")).toBe(5);
+    expect(byTier.get("tier_minus_1_floor")).toBe(7);
+    expect(byTier.get("tier_s0_owner_alignment")).toBe(9);
     expect(byTier.get("tier_6_scoreable_assumption")).toBe(20);
   });
 
