@@ -164,6 +164,17 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // closure_residual. NOT an event kind — the registry row carries
   // this discriminator; emissions use decomposition_strategy_observed.
   "decomposition_strategy_predicate",
+  // Tier-S1 redesign (2026-05-20, brain dispatch J2VKGW0HW97CQ2TR /
+  // event WCV6ZQNZW94V767W822R5P9T3R): the converged ShapeCategory
+  // redesign adds a scored should-decompose predicate artifact —
+  // runtime/decomposition_strategy_extractor.ts exports
+  // SHOULD_DECOMPOSE_PREDICATE_ARTIFACT with `kind:
+  // 'should_decompose_predicate'`. Per YH1XK1F5BS0T / QK929BNT4N5Y the
+  // substrate must see WHY a decomposition was chosen (leverage_score
+  // minus overhead_score > 0). NOT an event kind — the registry row
+  // carries this discriminator; emissions remain action_scored /
+  // act_artifact_score_updated under the standard machinery.
+  "should_decompose_predicate",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────
