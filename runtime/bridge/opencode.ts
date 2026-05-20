@@ -26,6 +26,7 @@ import { join } from "node:path";
 import type { JsonValue } from "../../substrate/types";
 import { emitEvent } from "../events";
 import { emitActTupleDirect } from "../act_tuple";
+import { classifyBridgeExit, emitPartialEmitDispatchClosed } from "../opencode_bridge_exit_action";
 import { isCycleViolation } from "../cycle_one_gate";
 import { getBootSessionToken } from "../brain_dispatch_reconciler";
 import { newId } from "../ids";
@@ -1037,6 +1038,138 @@ export const spawnRealOpencode = async (
       }
     } catch { /* db may be transient — fall through to stdout-based classification */ }
   }
+
+  // ── Substrate-truth-first exit classification (foundational fix per
+  // dispatch 81DJZCEJXS5H9E64 / KC V3CED593BH5M / amendment
+  // RX14FT7CFX3X51CMD8FH1V1ZXR, 2026-05-20). Before applying any
+  // subprocess heuristic (handshake gate, exit-code gate), ask the
+  // substrate whether terminal evidence exists. The classifier may
+  // return:
+  //   success / failed / partial_success — substrate decided; emit
+  //     bridge_completed/bridge_failed accordingly and skip the
+  //     subprocess taxonomy below entirely.
+  //   partial_emit — brain emitted observations but never committed.
+  //     Emit brain_dispatch_closed with closure_reason so the survival
+  //     gate (commit 2915d2d) stops accruing orphan rows for partial-
+  //     but-real work, and return ok=true without the act_tuple shell
+  //     (the brain's own emits already carry the causal chain).
+  //   brain_silent_exit — ONLY when EVERY positive signal is absent
+  //     (no frames, no observations, clean exit). Falls into the
+  //     handshakeFailed path below.
+  //   pass_through — driver's existing taxonomy applies unchanged.
+  const bridgeStartIso = new Date(bridgeStartedAtMs).toISOString();
+  const exitClassification = classifyBridgeExit(db, {
+    taskId: req.taskId,
+    dispatchWindowStartIso: bridgeStartIso,
+    exitCode,
+    firstFrameSeen,
+    brainObsEmitCount,
+    framesReceivedCount,
+    killedByOverallTimeout: killed,
+    mcpHandshakeTimedOut,
+  });
+  if (exitClassification.verdict === "success") {
+    cleanupConfig();
+    const bridgeCompleted = emitEvent(db, {
+      kind: "bridge_completed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        final_response_chars: finalResponse.length,
+        model,
+        real: true,
+        mcp_handshake_ok: mcpHandshakeOk,
+        budget_observed: budgetObserved("completed"),
+        classifier_verdict: "success",
+        classifier_rationale: exitClassification.rationale,
+        terminal_evidence_event_id: exitClassification.terminal_evidence?.event_id ?? null,
+        terminal_evidence_kind: exitClassification.terminal_evidence?.kind ?? null,
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    return {
+      ok: true,
+      final_response: finalResponse,
+      usage: { tokens: 0 },
+      emitted_event_ids: [bridgeCompleted.id],
+    };
+  }
+  if (exitClassification.verdict === "failed") {
+    cleanupConfig();
+    emitEvent(db, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        reason: exitClassification.terminal_evidence?.failure_kind ?? "task_failed",
+        classifier_class: "substrate_terminal",
+        classifier_verdict: "failed",
+        classifier_rationale: exitClassification.rationale,
+        terminal_evidence_event_id: exitClassification.terminal_evidence?.event_id ?? null,
+        failure_kind: exitClassification.terminal_evidence?.failure_kind ?? null,
+        mcp_handshake_ok: mcpHandshakeOk,
+        exit_code: exitCode,
+        frames_received_count: framesReceivedCount,
+        brain_obs_emit_count: brainObsEmitCount,
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    return {
+      ok: false,
+      reason: {
+        kind: "subprocess_crash",
+        stderr_tail: `task_failed: ${exitClassification.terminal_evidence?.failure_kind ?? "unknown"}`,
+      },
+    };
+  }
+  if (exitClassification.verdict === "partial_success") {
+    cleanupConfig();
+    const bridgeCompleted = emitEvent(db, {
+      kind: "bridge_completed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        final_response_chars: finalResponse.length,
+        model,
+        real: true,
+        mcp_handshake_ok: mcpHandshakeOk,
+        budget_observed: budgetObserved("partial_success"),
+        classifier_verdict: "partial_success",
+        classifier_rationale: exitClassification.rationale,
+        terminal_evidence_event_id: exitClassification.terminal_evidence?.event_id ?? null,
+        terminal_evidence_residual: exitClassification.terminal_evidence?.residual ?? null,
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    return {
+      ok: true,
+      final_response: finalResponse,
+      usage: { tokens: 0 },
+      emitted_event_ids: [bridgeCompleted.id],
+    };
+  }
+  if (exitClassification.verdict === "partial_emit") {
+    cleanupConfig();
+    const closedId = emitPartialEmitDispatchClosed(db, {
+      directiveId: req.directiveId,
+      taskId: req.taskId,
+      brainObsEmitCount,
+      framesReceivedCount,
+      exitCode,
+      rationale: exitClassification.rationale,
+    });
+    return {
+      ok: true,
+      final_response: finalResponse,
+      usage: { tokens: 0 },
+      emitted_event_ids: [closedId],
+    };
+  }
+  // verdict ∈ {brain_silent_exit, pass_through} — fall through to the
+  // driver's existing classification.
 
   // Handshake check: failure means we observed no v2 tool call within the
   // handshake window OR the subprocess exited without ever calling one.
