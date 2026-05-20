@@ -113,7 +113,17 @@ export type WorkerName =
   // owner_observed_outcome_recorded (existing CLI path), credit
   // flows through the act-tuple chain. Default 30min cadence.
   // Opt-out via ACC2_DISABLE_WORKERS=owner_outcome_followup.
-  | "owner_outcome_followup";
+  | "owner_outcome_followup"
+  // Tier -1 floor enforcement workers (docs/roadmap.md). Each emits
+  // absence-of-violation evidence on its predicate's behalf:
+  //   - event_authenticity        — 60s tick (sample last-hour events)
+  //   - storage_integrity_floor   — 5min tick (PRAGMA integrity_check + wal_checkpoint(TRUNCATE))
+  //   - deterministic_computation — 10min tick (verifier residual agreement)
+  // Predicate rows admitted in substrate/seed.ts. Workers fail-soft —
+  // SQL/emit errors are logged but never crash the daemon.
+  | "event_authenticity"
+  | "storage_integrity_floor"
+  | "deterministic_computation";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -141,6 +151,9 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "pending_decision_retire",
   "artifact_kind_backfill",
   "owner_outcome_followup",
+  "event_authenticity",
+  "storage_integrity_floor",
+  "deterministic_computation",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

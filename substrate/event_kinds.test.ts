@@ -461,6 +461,15 @@ describe("derived sets match their pre-unification shape", () => {
       // dashboards can show how often the gate fires; orphan-close at
       // boot is the deterministic backstop so deferrals can't wedge.
       "hotreload_deferred",
+      // Tier -1 floor enforcement (docs/roadmap.md, 2026-05-20).
+      // Absence-of-violation evidence emitters — counted as health
+      // metrics so operator dashboards can surface tick liveness
+      // (rate-of-emit per worker) and quickly distinguish a quiescent
+      // floor from a dead one. integrity_check_failed already covers
+      // the violation path and is shared across all Tier -1 workers.
+      "event_authenticity_check",
+      "storage_integrity_check",
+      "deterministic_computation_check",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

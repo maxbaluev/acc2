@@ -692,6 +692,20 @@ export const EVENT_KINDS = {
   sandbox_enforced:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   sandbox_degraded:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
+  // ── Tier -1 floor enforcement (absence-of-violation evidence) ───────
+  // Per docs/roadmap.md Tier -1: floors precede posterior scoring.
+  // Each predicate (event_authenticity_predicate, storage_integrity_predicate,
+  // deterministic_computation_sanity_predicate; rows admitted in seed.ts)
+  // receives periodic evidence events that score residual=0 on clean
+  // pass and route through integrity_check_failed on violation.
+  // Workers:
+  //   - runtime/event_authenticity_worker.ts (60s)
+  //   - runtime/storage_integrity_worker.ts (5min) — also emits wal_checkpointed
+  //   - runtime/deterministic_computation_worker.ts (10min)
+  event_authenticity_check:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  storage_integrity_check:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  deterministic_computation_check:         { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+
   // ── Lifecycle ───────────────────────────────────────────────────────
   goal_committed:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   goal_abandoned:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },

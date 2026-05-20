@@ -769,6 +769,14 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // change asking the owner whether the change worked. Default 30min
   // cadence. Opt-out via ACC2_DISABLE_WORKERS=owner_outcome_followup.
   if (isWorkerEnabled("owner_outcome_followup")) registerWorker("owner_outcome_followup", 30 * 60 * 1000);
+  // Tier -1 floors (docs/roadmap.md): absence-of-violation evidence
+  // emitters. Each predicate (event_authenticity_predicate,
+  // storage_integrity_predicate, deterministic_computation_sanity_predicate)
+  // is admitted in substrate/seed.ts. Workers tick periodically and
+  // emit *_check rows on clean pass, integrity_check_failed on violation.
+  if (isWorkerEnabled("event_authenticity")) registerWorker("event_authenticity", 60 * 1000);
+  if (isWorkerEnabled("storage_integrity_floor")) registerWorker("storage_integrity_floor", 5 * 60 * 1000);
+  if (isWorkerEnabled("deterministic_computation")) registerWorker("deterministic_computation", 10 * 60 * 1000);
 
   // Phase E: amendment worker — drain unapplied directive_amended events when
   // directive amendments arrive. The shared reactive safety net is the fallback
@@ -1677,6 +1685,56 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       }
     })();
     workers.push(() => schedulerAbort?.abort());
+  }
+
+  // ── Tier -1 floor enforcement workers ────────────────────────────────
+  // Per docs/roadmap.md: floors precede posterior scoring. Each worker
+  // emits absence-of-violation evidence on its predicate's behalf.
+  // Predicate rows admitted in substrate/seed.ts.
+
+  // event_authenticity_worker — 60s tick. Samples last-hour events,
+  // verifies canonical substrate_origin + required fields.
+  // Opt-OUT via ACC2_DISABLE_WORKERS=event_authenticity.
+  if (isWorkerEnabled("event_authenticity")) {
+    const tickMs = 60 * 1000;
+    const { eventAuthenticityWorkerTick } = await import("./event_authenticity_worker");
+    markWorkerReady("event_authenticity");
+    recordWorkerTick("event_authenticity");
+    const tick = supervisedTick(db, "event_authenticity", tickMs, async () => {
+      eventAuthenticityWorkerTick(db);
+    });
+    const timer = setInterval(tick, tickMs);
+    workers.push(() => clearInterval(timer));
+  }
+
+  // storage_integrity_worker — 5min tick. PRAGMA integrity_check +
+  // wal_checkpoint(TRUNCATE). Emits wal_checkpointed per-run.
+  // Opt-OUT via ACC2_DISABLE_WORKERS=storage_integrity_floor.
+  if (isWorkerEnabled("storage_integrity_floor")) {
+    const tickMs = 5 * 60 * 1000;
+    const { storageIntegrityWorkerTick } = await import("./storage_integrity_worker");
+    markWorkerReady("storage_integrity_floor");
+    recordWorkerTick("storage_integrity_floor");
+    const tick = supervisedTick(db, "storage_integrity_floor", tickMs, async () => {
+      storageIntegrityWorkerTick(db);
+    });
+    const timer = setInterval(tick, tickMs);
+    workers.push(() => clearInterval(timer));
+  }
+
+  // deterministic_computation_worker — 10min tick. Audits deterministic
+  // verifier residual agreement; quarantines on mismatch.
+  // Opt-OUT via ACC2_DISABLE_WORKERS=deterministic_computation.
+  if (isWorkerEnabled("deterministic_computation")) {
+    const tickMs = 10 * 60 * 1000;
+    const { deterministicComputationWorkerTick } = await import("./deterministic_computation_worker");
+    markWorkerReady("deterministic_computation");
+    recordWorkerTick("deterministic_computation");
+    const tick = supervisedTick(db, "deterministic_computation", tickMs, async () => {
+      deterministicComputationWorkerTick(db);
+    });
+    const timer = setInterval(tick, tickMs);
+    workers.push(() => clearInterval(timer));
   }
   } // end if (!skipWorkers)
 
