@@ -119,11 +119,15 @@ export type WorkerName =
   //   - event_authenticity        — 60s tick (sample last-hour events)
   //   - storage_integrity_floor   — 5min tick (PRAGMA integrity_check + wal_checkpoint(TRUNCATE))
   //   - deterministic_computation — 10min tick (verifier residual agreement)
+  //   - kernel_sandbox            — 5min tick (artifact_invoked ↔ sandbox_enforced parity)
+  //   - owner_identity            — 5min tick (actor-token sha continuity vs. admin_token_rotated)
   // Predicate rows admitted in substrate/seed.ts. Workers fail-soft —
   // SQL/emit errors are logged but never crash the daemon.
   | "event_authenticity"
   | "storage_integrity_floor"
-  | "deterministic_computation";
+  | "deterministic_computation"
+  | "kernel_sandbox"
+  | "owner_identity";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -154,6 +158,8 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "event_authenticity",
   "storage_integrity_floor",
   "deterministic_computation",
+  "kernel_sandbox",
+  "owner_identity",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

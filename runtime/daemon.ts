@@ -771,12 +771,15 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("owner_outcome_followup")) registerWorker("owner_outcome_followup", 30 * 60 * 1000);
   // Tier -1 floors (docs/roadmap.md): absence-of-violation evidence
   // emitters. Each predicate (event_authenticity_predicate,
-  // storage_integrity_predicate, deterministic_computation_sanity_predicate)
+  // storage_integrity_predicate, deterministic_computation_sanity_predicate,
+  // kernel_sandbox_integrity_predicate, owner_identity_continuity_predicate)
   // is admitted in substrate/seed.ts. Workers tick periodically and
   // emit *_check rows on clean pass, integrity_check_failed on violation.
   if (isWorkerEnabled("event_authenticity")) registerWorker("event_authenticity", 60 * 1000);
   if (isWorkerEnabled("storage_integrity_floor")) registerWorker("storage_integrity_floor", 5 * 60 * 1000);
   if (isWorkerEnabled("deterministic_computation")) registerWorker("deterministic_computation", 10 * 60 * 1000);
+  if (isWorkerEnabled("kernel_sandbox")) registerWorker("kernel_sandbox", 5 * 60 * 1000);
+  if (isWorkerEnabled("owner_identity")) registerWorker("owner_identity", 5 * 60 * 1000);
 
   // Phase E: amendment worker — drain unapplied directive_amended events when
   // directive amendments arrive. The shared reactive safety net is the fallback
@@ -1732,6 +1735,39 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     recordWorkerTick("deterministic_computation");
     const tick = supervisedTick(db, "deterministic_computation", tickMs, async () => {
       deterministicComputationWorkerTick(db);
+    });
+    const timer = setInterval(tick, tickMs);
+    workers.push(() => clearInterval(timer));
+  }
+
+  // kernel_sandbox_worker — 5min tick. Samples recent artifact_invoked
+  // events; verifies each has matching sandbox_enforced (or _degraded)
+  // evidence. On 5+ gap, emits sandbox_degraded + quarantines offenders.
+  // Opt-OUT via ACC2_DISABLE_WORKERS=kernel_sandbox.
+  if (isWorkerEnabled("kernel_sandbox")) {
+    const tickMs = 5 * 60 * 1000;
+    const { kernelSandboxWorkerTick } = await import("./kernel_sandbox_worker");
+    markWorkerReady("kernel_sandbox");
+    recordWorkerTick("kernel_sandbox");
+    const tick = supervisedTick(db, "kernel_sandbox", tickMs, async () => {
+      kernelSandboxWorkerTick(db);
+    });
+    const timer = setInterval(tick, tickMs);
+    workers.push(() => clearInterval(timer));
+  }
+
+  // owner_identity_worker — 5min tick. Hashes canonical actor identity
+  // files (v2.sock.token + minted .ralph/.session-token); flags
+  // owner_identity_discontinuity + owner_input_required on mid-flight
+  // rotation without admin_token_rotated event.
+  // Opt-OUT via ACC2_DISABLE_WORKERS=owner_identity.
+  if (isWorkerEnabled("owner_identity")) {
+    const tickMs = 5 * 60 * 1000;
+    const { ownerIdentityWorkerTick } = await import("./owner_identity_worker");
+    markWorkerReady("owner_identity");
+    recordWorkerTick("owner_identity");
+    const tick = supervisedTick(db, "owner_identity", tickMs, async () => {
+      ownerIdentityWorkerTick(db);
     });
     const timer = setInterval(tick, tickMs);
     workers.push(() => clearInterval(timer));
