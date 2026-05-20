@@ -1640,71 +1640,163 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   const ownerProfileForVariants = readOwnerProfileForVariantSelection(db);
   const goalTextForVariants = directiveText ?? task.goal;
 
-  // Q2 + Q3 (brain amendments MDBZV4YVRH7D172BW40W1J5ASM +
-  // 945GW64HN91JBD8YYTAR0S4P0W, 2026-05-19). pushPolicySection body
-  // selection precedence (top-most wins):
-  //   1. variant — selectPromptSectionVariant returns a posterior-ranked
-  //      prompt_section_content_variant row; chosen ONLY when its score
-  //      STRICTLY beats the policy_bundle score (cold-start safety).
-  //   2. retrieved policy artifact bundle — opts.retrievedPolicyArtifacts
-  //      delivers pre-retrieved prompt_policy_bundle rows per section;
-  //      highest-score wins.
-  //   3. promoted policyByName bundle — surface=brain_prompt knowledge_
-  //      promoted rows readPolicyBundleSections found.
-  //   4. literal warning — fail-loud "BRAIN PROMPT POLICY MISSING …"
-  //      string so the brain sees that no policy exists.
-  // Every choice emits prompt_policy_section_selected so the audit trail
-  // records WHICH precedence rung fired. Variant wins additionally emit
-  // prompt_section_variant_selected + a retrieval_binding so credit can
-  // flow to the variant artifact on outcome.
+  type PosteriorPolicyBundle = {
+    artifactId: string;
+    eventId: string | null;
+    body: string;
+    priority?: number;
+    floor?: boolean;
+    posteriorScore: number;
+    confidence: number;
+    goalShape?: string;
+    taskClass?: string;
+    evidence_event_ids?: string[];
+  };
+
+  const betaPosteriorScore = (alpha: unknown, beta: unknown, fallback: unknown): number => {
+    const a = typeof alpha === "number" && Number.isFinite(alpha) ? alpha : 0;
+    const b = typeof beta === "number" && Number.isFinite(beta) ? beta : 0;
+    if (a + b > 0) return a / (a + b);
+    return typeof fallback === "number" && Number.isFinite(fallback) ? fallback : 0;
+  };
+
+  const selectPolicyBundleByPosterior = (
+    db: Database,
+    goal_shape: string,
+    task_class: string,
+  ): PosteriorPolicyBundle | null => {
+    const rows = db.query(
+      `SELECT id, body, posterior_alpha, posterior_beta, score, confidence, name,
+              intent, summary, target_files, target_resources, source_candidate_id
+         FROM act_artifact
+        WHERE kind = 'prompt_policy_bundle'
+          AND status IN ('admitted', 'promoted')
+        ORDER BY score DESC, confidence DESC, updated_at DESC
+        LIMIT 200`,
+    ).all() as Array<Record<string, unknown>>;
+
+    const matches: PosteriorPolicyBundle[] = [];
+    for (const row of rows) {
+      const rawBody = typeof row.body === "string" ? row.body : "";
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        const candidate = JSON.parse(rawBody) as unknown;
+        if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) parsed = candidate as Record<string, unknown>;
+      } catch { /* body can be plain policy prose */ }
+      const bundle = parsed && parsed.policy_bundle && typeof parsed.policy_bundle === "object"
+        ? parsed.policy_bundle as Record<string, unknown>
+        : parsed;
+      const body = typeof bundle?.body === "string" && bundle.body.length > 0 ? bundle.body : rawBody;
+      if (body.length === 0) continue;
+      const metadataText = JSON.stringify({
+        id: row.id,
+        name: row.name,
+        intent: row.intent,
+        summary: row.summary,
+        target_files: row.target_files,
+        target_resources: row.target_resources,
+        source_candidate_id: row.source_candidate_id,
+        body: rawBody,
+        parsed,
+      }).toLowerCase();
+      const goalShapeMatch = goal_shape.length === 0
+        || metadataText.includes(goal_shape.toLowerCase())
+        || metadataText.includes("all_goal_shapes")
+        || metadataText.includes("goal_shape:any");
+      const taskClassMatch = task_class.length === 0
+        || metadataText.includes(task_class.toLowerCase())
+        || metadataText.includes(("brain_prompt/" + task_class).toLowerCase())
+        || metadataText.includes("task_class:any");
+      if (!goalShapeMatch || !taskClassMatch) continue;
+      const evidenceIds = Array.isArray(bundle?.evidence_event_ids)
+        ? bundle.evidence_event_ids.map(String)
+        : (typeof row.source_candidate_id === "string" && row.source_candidate_id.length > 0 ? [row.source_candidate_id] : []);
+      matches.push({
+        artifactId: String(row.id),
+        eventId: evidenceIds[0] ?? null,
+        body,
+        priority: typeof bundle?.priority === "number" ? bundle.priority : undefined,
+        floor: bundle?.floor === true,
+        posteriorScore: betaPosteriorScore(row.posterior_alpha, row.posterior_beta, row.score),
+        confidence: typeof row.confidence === "number" && Number.isFinite(row.confidence) ? row.confidence : 0,
+        goalShape: goal_shape,
+        taskClass: task_class,
+        evidence_event_ids: evidenceIds,
+      });
+    }
+
+    matches.sort((a, b) => {
+      const byPosterior = b.posteriorScore - a.posteriorScore;
+      if (byPosterior !== 0) return byPosterior;
+      return b.confidence - a.confidence;
+    });
+    return matches[0] ?? null;
+  };
+
+  // T3.7 (pedagogical RL composer policy): prompt_policy_bundle rows are
+  // act_artifacts, so section bodies should be selected by their Beta
+  // posterior for this directive's goal_shape + section task_class. If no
+  // scored registry bundle matches, fall back to the Q2/Q3 heuristic path.
+  const composerGoalShape = goalShape(directiveText ?? task.goal);
+
   const pushPolicySection = (name: PolicyBundleSectionName, fallbackPriority: number, floor = false) => {
     const policy = policyByName.get(name);
-    const bundleScore = policy ? 1 : 0; // promoted policy_bundle posterior; promoted rows are admitted = 1, missing = 0.
+    const bundleScore = policy ? 1 : 0; // fallback heuristic: promoted policy_bundle rows are admitted = 1, missing = 0.
     const retrievedBundle = pickHighestScorePolicyBundle(opts.retrievedPolicyArtifacts?.[name], name);
     const retrievedScore = retrievedBundle && typeof retrievedBundle.score === "number" && Number.isFinite(retrievedBundle.score)
       ? retrievedBundle.score
       : 0;
+    const posteriorBundle = selectPolicyBundleByPosterior(db, composerGoalShape, name);
+    const posteriorScore = posteriorBundle?.posteriorScore ?? 0;
     const variant = selectPromptSectionVariant(db, {
       sectionName: name,
       goalText: goalTextForVariants,
       ownerProfile: ownerProfileForVariants,
-      fallbackBody: policy?.body ?? "",
-      policyBundleArtifactId: null,
+      fallbackBody: posteriorBundle?.body ?? policy?.body ?? "",
+      policyBundleArtifactId: posteriorBundle?.artifactId ?? null,
     });
 
     let chosenBody: string;
     let chosenPriority: number;
     let chosenFloor: boolean;
-    let source: "variant" | "retrieved_artifact" | "policy_bundle" | "literal_missing_warning";
+    let source: "variant" | "posterior_policy_bundle" | "retrieved_artifact" | "policy_bundle" | "literal_missing_warning";
     let chosenArtifactId: string | null = null;
+    let chosenEventId: string | null = null;
     let chosenScore: number | null = null;
     let fallbackReason: string | null = null;
     let variantWon = false;
     let policyTiePreserved = false;
     const variantScore = variant ? variant.score * variant.goalShapeMatch * variant.ownerProfileAlignment : 0;
-    // Variant must STRICTLY beat the strongest non-variant body. If the
-    // retrieved bundle posterior is the higher of bundle/retrieved, use
-    // that as the bar; otherwise use the promoted bundle (bundleScore).
-    const competitorScore = Math.max(retrievedScore, bundleScore);
+    const competitorScore = Math.max(posteriorScore, retrievedScore, bundleScore);
     if (variant && variantScore > competitorScore) {
       chosenBody = variant.body;
-      chosenPriority = variant.priority ?? policy?.priority ?? fallbackPriority;
-      chosenFloor = floor || policy?.floor === true;
+      chosenPriority = variant.priority ?? posteriorBundle?.priority ?? policy?.priority ?? fallbackPriority;
+      chosenFloor = floor || posteriorBundle?.floor === true || policy?.floor === true;
       source = "variant";
       chosenArtifactId = variant.variantId;
       chosenScore = variant.score;
       variantWon = true;
+    } else if (posteriorBundle) {
+      if (variant && variantScore === competitorScore) policyTiePreserved = true;
+      chosenBody = posteriorBundle.body;
+      chosenPriority = posteriorBundle.priority ?? policy?.priority ?? fallbackPriority;
+      chosenFloor = floor || posteriorBundle.floor === true || policy?.floor === true;
+      source = "posterior_policy_bundle";
+      chosenArtifactId = posteriorBundle.artifactId;
+      chosenEventId = posteriorBundle.eventId;
+      chosenScore = posteriorScore;
     } else if (retrievedBundle && retrievedScore >= bundleScore && retrievedBundle.body) {
-      // Tie between retrieved bundle and policy_bundle: retrieved wins
-      // (the dispatcher targeted it; treat as fresher evidence). Tie
-      // between variant and bundle still favors bundle (handled above).
+      // Fallback to the existing heuristic when no scored registry bundle
+      // matches this goal_shape/task_class.
       if (variant && variantScore === competitorScore) policyTiePreserved = true;
       chosenBody = retrievedBundle.body;
       chosenPriority = retrievedBundle.priority ?? policy?.priority ?? fallbackPriority;
       chosenFloor = floor || retrievedBundle.floor === true || policy?.floor === true;
       source = "retrieved_artifact";
       chosenArtifactId = retrievedBundle.artifactId;
+      chosenEventId = retrievedBundle.evidence_event_ids?.[0] ?? null;
       chosenScore = retrievedScore;
+      fallbackReason = "no_scored_prompt_policy_bundle_match";
     } else if (policy) {
       if (variant && variantScore === bundleScore) policyTiePreserved = true;
       chosenBody = policy.body;
@@ -1712,6 +1804,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
       chosenFloor = floor || policy.floor === true;
       source = "policy_bundle";
       chosenScore = bundleScore;
+      fallbackReason = "no_scored_prompt_policy_bundle_match";
     } else {
       chosenBody = LITERAL_POLICY_MISSING_WARNING(name);
       chosenPriority = fallbackPriority;
@@ -1723,19 +1816,23 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     candidates.push({ name, p: chosenPriority, floor: chosenFloor, body: chosenBody });
 
     // Audit emission: one prompt_policy_section_selected per pushPolicy
-    // call so the operator can see which rung fired per section per
-    // dispatch. Fail-soft.
+    // call so T4.2 meta-credit can associate action outcomes with the
+    // prompt_policy_bundle act_artifact selected for this section.
     try {
       emitEvent(db, {
         kind: "prompt_policy_section_selected",
         substrate_origin: "substrate_auto",
         directive_id: task.directive_id,
         task_id: task.id,
+        context_refs: chosenEventId ? [chosenEventId] : (chosenArtifactId ? [chosenArtifactId] : []),
         payload: {
           section_name: name,
           source,
           artifact_id: chosenArtifactId,
+          event_id: chosenEventId,
           score: chosenScore,
+          goal_shape: composerGoalShape,
+          task_class: name,
           fallback_reason: fallbackReason,
           variant_score_observed: variant ? variantScore : null,
           competitor_score_observed: competitorScore,
@@ -1782,7 +1879,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
           } as JsonValue,
         });
       } catch { /* fail-soft */ }
-    } else if (variant && variantScore === competitorScore && (policy || retrievedBundle)) {
+    } else if (variant && variantScore === competitorScore && (policy || retrievedBundle || posteriorBundle)) {
       // Variant tied but did not win — emit the tie-preservation audit
       // so the operator can see that cold-start stability fired (k_252
       // closure: scored variant existed, was tied, policy_bundle won).
