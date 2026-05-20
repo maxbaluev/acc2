@@ -3907,13 +3907,21 @@ CREATE VIEW IF NOT EXISTS directive_view AS
     GROUP BY directive_id, task_id
   ),
   root_terminals AS (
+    -- Terminal kinds match the canonical ready_tasks_view list (line ~100):
+    -- task_committed_superseded fires when amendment_handler supersedes a
+    -- task; task_blocked fires when the brain emits a hard-block. Both
+    -- must be treated as terminal so directive_view doesn't show
+    -- effectively-terminal roots as still-live. Per KC TPRM3KAH8H57.
     SELECT
       directive_id,
       task_id,
       kind                                                            AS terminal_kind,
       ts                                                              AS terminal_ts
     FROM events
-    WHERE kind IN ('task_committed', 'task_failed', 'task_abandoned')
+    WHERE kind IN (
+      'task_committed', 'task_failed', 'task_abandoned',
+      'task_committed_superseded', 'task_blocked'
+    )
   )
   SELECT
     d.directive_id,
@@ -4074,13 +4082,19 @@ CREATE VIEW IF NOT EXISTS model_routing_view AS
       AND task_id IS NOT NULL
   ),
   outcomes AS (
+    -- Brain-dispatch outcome view: include superseded+blocked terminal
+    -- kinds (per KC TPRM3KAH8H57) so dashboards don't count
+    -- effectively-terminal dispatches as "<open>" forever.
     SELECT
       directive_id,
       task_id,
       kind                                                     AS terminal_kind,
       MIN(ts)                                                  AS terminal_ts
     FROM events
-    WHERE kind IN ('task_committed', 'task_failed', 'task_abandoned', 'dispatcher_violation')
+    WHERE kind IN (
+      'task_committed', 'task_failed', 'task_abandoned', 'dispatcher_violation',
+      'task_committed_superseded', 'task_blocked'
+    )
     GROUP BY directive_id, task_id, kind
   )
   SELECT
