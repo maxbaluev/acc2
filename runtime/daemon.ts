@@ -59,7 +59,8 @@ import { rehabilitationWorkerTick, getArtifact } from "./artifact_store";
 import { runBunArtifact } from "./runtimes/bun";
 import { runUvArtifact } from "./runtimes/uv";
 import { runCamofoxArtifact } from "./runtimes/camofox";
-import type { JsonValue, SandboxDecl } from "../substrate/types";
+import { lookupRunnerInRegistry, runArtifactForRuntime } from "./runtimes/index";
+import type { BunSandboxDecl, CamofoxSandboxDecl, JsonValue, SandboxDecl, UvSandboxDecl } from "../substrate/types";
 import { logger } from "./logger";
 import { metricsHandler, refreshGauges } from "./metrics";
 import { integrityWorkerTick, runIntegrityCheck, reconcileOrphanedDispatches } from "./integrity_worker";
@@ -1125,26 +1126,53 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
             const row = getArtifact(db, artifactId);
             if (!row) return { ok: false, residual: 1 };
             const fixtureInput = row.fixtureInput ?? null;
-            const observation = row.runtime === "bun"
-              ? await runBunArtifact({
-                  artifactId: row.id,
-                  body: row.body,
-                  declaredSandbox: row.declaredSandbox as Extract<SandboxDecl, { runtime: "bun" }>,
-                  inputs: fixtureInput,
-                })
-              : row.runtime === "uv"
-                ? await runUvArtifact({
-                    artifactId: row.id,
-                    body: row.body,
-                    declaredSandbox: row.declaredSandbox as Extract<SandboxDecl, { runtime: "uv" }>,
-                    inputs: fixtureInput,
-                  })
-                : await runCamofoxArtifact({
-                    artifactId: row.id,
-                    body: row.body,
-                    declaredSandbox: row.declaredSandbox as Extract<SandboxDecl, { runtime: "camofox-browser" }>,
-                    inputs: fixtureInput,
-                  });
+            // Candidate B (brain dispatch SW94JRKNFD36Q7G9, 2026-05-19):
+            // open Runtime in the rehab worker. Concrete fast-paths
+            // stay hardcoded; unknown runtimes route through the
+            // runtime_runner registry. Missing runner → skip the rehab
+            // tick for this artifact with residual=1 + ok=false (the
+            // worker treats this as a probe failure so a known-bad
+            // runtime doesn't unblock quarantine).
+            let observation: { ok: boolean; result?: JsonValue | null; error?: string };
+            if (row.runtime === "bun") {
+              observation = await runBunArtifact({
+                artifactId: row.id,
+                body: row.body,
+                declaredSandbox: row.declaredSandbox as BunSandboxDecl,
+                inputs: fixtureInput,
+              });
+            } else if (row.runtime === "uv") {
+              observation = await runUvArtifact({
+                artifactId: row.id,
+                body: row.body,
+                declaredSandbox: row.declaredSandbox as UvSandboxDecl,
+                inputs: fixtureInput,
+              });
+            } else if (row.runtime === "camofox-browser") {
+              observation = await runCamofoxArtifact({
+                artifactId: row.id,
+                body: row.body,
+                declaredSandbox: row.declaredSandbox as CamofoxSandboxDecl,
+                inputs: fixtureInput,
+              });
+            } else {
+              const runner = lookupRunnerInRegistry(db, row.runtime);
+              if (!runner) {
+                logger.warn(
+                  { artifactId: row.id, runtime: row.runtime },
+                  "rehab tick skipped — unknown_runtime, no runtime_runner registry row",
+                );
+                return { ok: false, residual: 1 };
+              }
+              const obs = await runArtifactForRuntime({
+                artifactId: row.id,
+                body: row.body,
+                declaredSandbox: row.declaredSandbox,
+                inputs: fixtureInput,
+                db,
+              });
+              observation = { ok: obs.ok, result: obs.result ?? null, error: obs.error };
+            }
             const residual =
               observation.ok &&
               observation.result &&
@@ -1215,6 +1243,43 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       retireTickMs,
     );
     workers.push(() => clearInterval(retireTick));
+  }
+
+  // 2026-05-19 (brain dispatch J4HP5SYT3N4GK45S Candidate A): one-shot
+  // substrate-wide alias-removal sweep that backfills concrete `kind`
+  // values onto act_artifact rows still carrying the legacy
+  // `code_artifact` default. Idempotent — every row with an existing
+  // artifact_kind_backfilled event is skipped, so reruns are no-ops.
+  // Single-sweep semantics: kicked once on boot (NOT a periodic tick).
+  // Opt-out via ACC2_DISABLE_WORKERS=artifact_kind_backfill.
+  if (isWorkerEnabled("artifact_kind_backfill")) {
+    registerWorker("artifact_kind_backfill");
+    const { runArtifactKindBackfill } = await import("./artifact_kind_backfill_worker");
+    markWorkerReady("artifact_kind_backfill");
+    recordWorkerTick("artifact_kind_backfill");
+    // Fire the sweep on the next tick so daemon boot stays non-blocking.
+    const backfillTimer = setTimeout(() => {
+      try {
+        const summary = runArtifactKindBackfill(db);
+        logger.info(
+          {
+            scanned: summary.scanned,
+            backfilled: summary.backfilled,
+            uncertain: summary.uncertain,
+            skipped: summary.skipped_idempotent,
+            errors: summary.errors.length,
+            sweep_id: summary.sweep_id,
+          },
+          "artifact_kind_backfill sweep complete",
+        );
+      } catch (err) {
+        logger.warn(
+          { err: (err as Error).message },
+          "artifact_kind_backfill sweep failed",
+        );
+      }
+    }, 1000);
+    workers.push(() => clearTimeout(backfillTimer));
   }
 
   // Experience compression worker (primitive #3 of SZG5PQ01,

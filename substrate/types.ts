@@ -327,7 +327,17 @@ export type Event = {
 
 // ── Runtime + sandbox declarations (§6.1, §11.3) ────────────────────
 
-export type Runtime = "bun" | "uv" | "camofox-browser";
+// Brain dispatch SW94JRKNFD36Q7G9 (Candidate B, 2026-05-19): Runtime is an
+// open string, not a fixed three-literal enum. The three concrete runtimes
+// (bun/uv/camofox-browser) remain hardcoded fast-paths inside the runtime
+// dispatchers; any other runtime string is resolved through the
+// `runtime_runner` registry (act_artifact rows whose `kind='runtime_runner'`
+// and whose `name` matches the runtime string). Validity is enforced at
+// runner-lookup time, not at the type system level — admitting a new
+// runtime is admitting a new row, not a schema migration. Existing
+// bun/uv/camofox-browser rows continue to narrow into their concrete
+// SandboxDecl variants via the four typed variants below.
+export type Runtime = string;
 
 // Brain sandbox audit bsfxsvgh9 + dataflow audit bxdhdkm9e (2026-05-15):
 // `env_requires` declares which environment variables an artifact needs
@@ -337,47 +347,82 @@ export type Runtime = "bun" | "uv" | "camofox-browser";
 // BEFORE spawning the subprocess. Missing → emit owner_input_required
 // (flows to the operator via SSE → Claude shell), refuse to invoke.
 // One source of truth replacing the previous body-scan heuristic.
+//
+// Candidate B (brain dispatch SW94JRKNFD36Q7G9, 2026-05-19): each
+// concrete variant is a named type export so callers can narrow with
+// `BunSandboxDecl` / `UvSandboxDecl` / `CamofoxSandboxDecl` instead of
+// the structural `Extract<SandboxDecl, { runtime: "bun" }>` pattern
+// (which now collides with the catch-all variant's `runtime: string`).
+// The four named variants compose into `SandboxDecl` so the union shape
+// is identical to before.
+
+export type BunSandboxDecl = {
+  runtime: "bun";
+  fs_read?: string[];
+  fs_write?: string[];
+  net_allow?: string[];
+  proc_allow?: string[];
+  substrate_access?: "ro" | "rw" | "none";
+  env_requires?: string[];
+  cpu_ms: number;
+  wall_ms: number;
+  memory_mb: number;
+};
+
+export type UvSandboxDecl = {
+  runtime: "uv";
+  fs_read?: string[];
+  fs_write?: string[];
+  net_allow?: string[];
+  pypi_allow?: string[];
+  env_requires?: string[];
+  cpu_ms: number;
+  wall_ms: number;
+  memory_mb: number;
+};
+
+export type CamofoxSandboxDecl = {
+  runtime: "camofox-browser";
+  browser_allow_domains: string[];
+  browser_profile_root: string;
+  browser_allow_downloads_to?: string;
+  // Camoufox fingerprint hints (Batch 1.α). All optional; defaults are
+  // applied in the sandbox builder so old decls remain valid.
+  //   fingerprint_os      — "linux" | "macos" | "windows" (default linux)
+  //   fingerprint_locale  — BCP 47 string, e.g. "en-US" (default en-US)
+  //   headless            — boolean (default true)
+  fingerprint_os?: "linux" | "macos" | "windows";
+  fingerprint_locale?: string;
+  headless?: boolean;
+  env_requires?: string[];
+  wall_ms: number;
+  memory_mb: number;
+};
+
+/** Unknown-runtime catch-all (Candidate B). `runtime` is any string
+ *  resolved through the `runtime_runner` registry rather than one of the
+ *  three concrete fast-path runtimes. The `fields` payload carries the
+ *  runner-specific declaration (the registry row's payload schema is
+ *  the authority — the type system does not constrain it). Optional
+ *  resource-budget + permission fields are structural hints the
+ *  dispatcher may surface to the runner. */
+export type RegistryRuntimeSandboxDecl = {
+  runtime: string;
+  fields: JsonValue;
+  cpu_ms?: number;
+  wall_ms?: number;
+  memory_mb?: number;
+  env_requires?: string[];
+  fs_read?: string[];
+  fs_write?: string[];
+  net_allow?: string[];
+};
+
 export type SandboxDecl =
-  | {
-      runtime: "bun";
-      fs_read?: string[];
-      fs_write?: string[];
-      net_allow?: string[];
-      proc_allow?: string[];
-      substrate_access?: "ro" | "rw" | "none";
-      env_requires?: string[];
-      cpu_ms: number;
-      wall_ms: number;
-      memory_mb: number;
-    }
-  | {
-      runtime: "uv";
-      fs_read?: string[];
-      fs_write?: string[];
-      net_allow?: string[];
-      pypi_allow?: string[];
-      env_requires?: string[];
-      cpu_ms: number;
-      wall_ms: number;
-      memory_mb: number;
-    }
-  | {
-      runtime: "camofox-browser";
-      browser_allow_domains: string[];
-      browser_profile_root: string;
-      browser_allow_downloads_to?: string;
-      // Camoufox fingerprint hints (Batch 1.α). All optional; defaults are
-      // applied in the sandbox builder so old decls remain valid.
-      //   fingerprint_os      — "linux" | "macos" | "windows" (default linux)
-      //   fingerprint_locale  — BCP 47 string, e.g. "en-US" (default en-US)
-      //   headless            — boolean (default true)
-      fingerprint_os?: "linux" | "macos" | "windows";
-      fingerprint_locale?: string;
-      headless?: boolean;
-      env_requires?: string[];
-      wall_ms: number;
-      memory_mb: number;
-    };
+  | BunSandboxDecl
+  | UvSandboxDecl
+  | CamofoxSandboxDecl
+  | RegistryRuntimeSandboxDecl;
 
 // ── Code artifact registry row (§11) ────────────────────────────────
 

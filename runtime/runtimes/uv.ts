@@ -38,14 +38,14 @@ import type { Subprocess } from "bun";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { JsonValue, SandboxDecl } from "../../substrate/types";
+import type { JsonValue, UvSandboxDecl } from "../../substrate/types";
 import { buildUvPermissionArgs } from "../sandbox";
 import type { EmitEventInput } from "../events";
 
 export type UvRuntimeInvocation = {
   artifactId: string;
   body: string;
-  declaredSandbox: SandboxDecl & { runtime: "uv" };
+  declaredSandbox: UvSandboxDecl;
   inputs: JsonValue;
   budget?: { wallMs?: number; memoryMb?: number };
   emit?: (event: EmitEventInput) => void;
@@ -168,7 +168,7 @@ export const buildNsjailArgv = (
   nsjailPath: string,
   uvPath: string,
   uvArgs: string[],
-  sandbox: SandboxDecl & { runtime: "uv" },
+  sandbox: UvSandboxDecl,
   cwd: string,
   wallMs: number,
   memoryMb: number,

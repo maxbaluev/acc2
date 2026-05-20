@@ -32,13 +32,14 @@
 // from 0.7 → 0.4 (§I crisis_mode.ts already exposes that constant).
 
 import type { Database } from "bun:sqlite";
-import type { JsonValue, SandboxDecl } from "../substrate/types";
+import type { BunSandboxDecl, CamofoxSandboxDecl, JsonValue, UvSandboxDecl } from "../substrate/types";
 import { emitEvent } from "./events";
 import { goalShape } from "./goal_shape";
 import { getArtifact, applyResidualOutcome } from "./artifact_store";
 import { runBunArtifact } from "./runtimes/bun";
 import { runUvArtifact } from "./runtimes/uv";
 import { runCamofoxArtifact } from "./runtimes/camofox";
+import { lookupRunnerInRegistry, runArtifactForRuntime } from "./runtimes/index";
 import type { TaskNode } from "./task_topology";
 import { distributeCredit } from "./credit";
 import { nowIso } from "./ids";
@@ -293,23 +294,40 @@ const runArtifactByRuntime: RecipeArtifactRunner = async (
     observation = await runBunArtifact({
       artifactId: row.id,
       body: row.body,
-      declaredSandbox: decl as Extract<SandboxDecl, { runtime: "bun" }>,
+      declaredSandbox: decl as BunSandboxDecl,
       inputs,
     });
   } else if (row.runtime === "uv") {
     observation = await runUvArtifact({
       artifactId: row.id,
       body: row.body,
-      declaredSandbox: decl as Extract<SandboxDecl, { runtime: "uv" }>,
+      declaredSandbox: decl as UvSandboxDecl,
       inputs,
     });
-  } else {
+  } else if (row.runtime === "camofox-browser") {
     observation = await runCamofoxArtifact({
       artifactId: row.id,
       body: row.body,
-      declaredSandbox: decl as Extract<SandboxDecl, { runtime: "camofox-browser" }>,
+      declaredSandbox: decl as CamofoxSandboxDecl,
       inputs,
     });
+  } else {
+    // Candidate B (brain dispatch SW94JRKNFD36Q7G9, 2026-05-19): open
+    // Runtime via runtime_runner registry. Replay defers when there is
+    // no registered runner — the dispatcher falls through to brain
+    // refinement so a missing runner doesn't poison a recipe trajectory.
+    const runner = lookupRunnerInRegistry(db, row.runtime);
+    if (!runner) {
+      return { ok: false, result: null, error: `unknown_runtime:${row.runtime}` };
+    }
+    const obs = await runArtifactForRuntime({
+      artifactId: row.id,
+      body: row.body,
+      declaredSandbox: decl,
+      inputs,
+      db,
+    });
+    observation = { ok: obs.ok, result: obs.result ?? null, error: obs.error };
   }
   return {
     ok: observation.ok,

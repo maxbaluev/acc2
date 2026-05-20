@@ -27,11 +27,12 @@
 //   the body cleanly, not that the verifier is perfect.
 
 import type { Database } from "bun:sqlite";
-import type { JsonValue, Runtime, SandboxDecl } from "../substrate/types";
+import type { BunSandboxDecl, CamofoxSandboxDecl, JsonValue, Runtime, SandboxDecl, UvSandboxDecl } from "../substrate/types";
 import { validateSandboxDecl } from "./sandbox";
 import { runBunArtifact } from "./runtimes/bun";
 import { runUvArtifact } from "./runtimes/uv";
 import { runCamofoxArtifact } from "./runtimes/camofox";
+import { lookupRunnerInRegistry, runArtifactForRuntime } from "./runtimes/index";
 import { getArtifact, insertArtifact } from "./artifact_store";
 import { ownerGateDecision } from "./owner_gate";
 import { runPredicateGate } from "./verifiers/predicate_gate";
@@ -122,7 +123,12 @@ export type AdmissionRejectionReason =
   // mirrors the reasons returned by render_pipeline.ts validators so
   // the substrate event payload + AdmissionResult.reason agree.
   | "rendered_docx_invalid_inputs"
-  | "published_drive_doc_invalid_inputs";
+  | "published_drive_doc_invalid_inputs"
+  // Candidate B (brain dispatch SW94JRKNFD36Q7G9, 2026-05-19): an
+  // unknown runtime (not bun/uv/camofox-browser) with no matching
+  // runtime_runner registry row → refuse admission rather than try to
+  // run the fixture in a runner that does not exist.
+  | "unknown_runtime";
 
 export type AdmissionResult =
   | { ok: true; artifactId: string; supersedes_dropped?: boolean }
@@ -525,7 +531,7 @@ export const admitArtifact = async (
     observation = await runBunArtifact({
       artifactId: row.id,
       body: input.body,
-      declaredSandbox: input.declaredSandbox as Extract<SandboxDecl, { runtime: "bun" }>,
+      declaredSandbox: input.declaredSandbox as BunSandboxDecl,
       inputs: input.fixtureInput,
       emit,
     });
@@ -533,18 +539,58 @@ export const admitArtifact = async (
     observation = await runUvArtifact({
       artifactId: row.id,
       body: input.body,
-      declaredSandbox: input.declaredSandbox as Extract<SandboxDecl, { runtime: "uv" }>,
+      declaredSandbox: input.declaredSandbox as UvSandboxDecl,
+      inputs: input.fixtureInput,
+      emit,
+    });
+  } else if (input.runtime === "camofox-browser") {
+    observation = await runCamofoxArtifact({
+      artifactId: row.id,
+      body: input.body,
+      declaredSandbox: input.declaredSandbox as CamofoxSandboxDecl,
       inputs: input.fixtureInput,
       emit,
     });
   } else {
-    observation = await runCamofoxArtifact({
+    // Candidate B (brain dispatch SW94JRKNFD36Q7G9, 2026-05-19): open
+    // Runtime path. Concrete fast-paths handled above; this branch
+    // consults the runtime_runner registry. Missing row → admission
+    // refuses with `unknown_runtime` (no fixture invocation possible).
+    const runner = lookupRunnerInRegistry(db, input.runtime);
+    if (!runner) {
+      db.run("DELETE FROM act_artifact WHERE id = ?", [row.id]);
+      emit({
+        kind: "act_artifact_admission_rejected",
+        substrate_origin: "substrate_auto",
+        action_artifact_id: row.id,
+        payload: {
+          reason: "unknown_runtime",
+          detail: `no runtime_runner registry row for runtime=${input.runtime}`,
+          runtime: input.runtime,
+        } as JsonValue,
+      });
+      return { ok: false, reason: "unknown_runtime", detail: input.runtime };
+    }
+    // Registry-resolved runner: dispatch through the unified surface so
+    // the same observation envelope is consumed everywhere.
+    const obs = await runArtifactForRuntime({
       artifactId: row.id,
       body: input.body,
-      declaredSandbox: input.declaredSandbox as Extract<SandboxDecl, { runtime: "camofox-browser" }>,
+      declaredSandbox: input.declaredSandbox,
       inputs: input.fixtureInput,
       emit,
+      db,
     });
+    observation = {
+      ok: obs.ok,
+      result: obs.result,
+      error: obs.error,
+      durationMs: obs.durationMs,
+      exitCode: obs.exitCode,
+      stderrTail: obs.stderrTail,
+      sandboxWarnings: obs.sandboxWarnings,
+      irreversibleEffects: obs.irreversibleEffects,
+    };
   }
 
   // Surface "runtime not installed" cleanly as `runtime_unavailable` so the

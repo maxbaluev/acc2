@@ -7,13 +7,14 @@
 // the wire shape is uniform.
 
 import type { z } from "zod";
-import type { JsonValue, Runtime, SandboxDecl, SubstrateOrigin } from "../../substrate/types";
+import type { BunSandboxDecl, CamofoxSandboxDecl, JsonValue, Runtime, SandboxDecl, SubstrateOrigin, UvSandboxDecl } from "../../substrate/types";
 import { EVENT_KINDS, getCurrentEventKinds } from "../../substrate/event_kinds";
 import { emitEvent, getEventById, type EmitEventInput } from "../events";
 import { summarizeEffectiveness } from "../brain_effectiveness";
 import { runBunArtifact } from "../runtimes/bun";
 import { runUvArtifact } from "../runtimes/uv";
 import { runCamofoxArtifact } from "../runtimes/camofox";
+import { lookupRunnerInRegistry, runArtifactForRuntime } from "../runtimes/index";
 import { getArtifact } from "../artifact_store";
 import { admitArtifact } from "../artifact_admission";
 import { distributeCredit } from "../credit";
@@ -1078,7 +1079,7 @@ const callArtifactByRuntime = async (
     observation = await runBunArtifact({
       artifactId: row.id,
       body: row.body,
-      declaredSandbox: decl as Extract<SandboxDecl, { runtime: "bun" }>,
+      declaredSandbox: decl as BunSandboxDecl,
       inputs,
       budget: { wallMs: budget?.wall_ms, memoryMb: budget?.memory_mb },
       emit,
@@ -1087,20 +1088,47 @@ const callArtifactByRuntime = async (
     observation = await runUvArtifact({
       artifactId: row.id,
       body: row.body,
-      declaredSandbox: decl as Extract<SandboxDecl, { runtime: "uv" }>,
+      declaredSandbox: decl as UvSandboxDecl,
+      inputs,
+      budget: { wallMs: budget?.wall_ms, memoryMb: budget?.memory_mb },
+      emit,
+    });
+  } else if (row.runtime === "camofox-browser") {
+    observation = await runCamofoxArtifact({
+      artifactId: row.id,
+      body: row.body,
+      declaredSandbox: decl as CamofoxSandboxDecl,
       inputs,
       budget: { wallMs: budget?.wall_ms, memoryMb: budget?.memory_mb },
       emit,
     });
   } else {
-    observation = await runCamofoxArtifact({
+    // Candidate B (brain dispatch SW94JRKNFD36Q7G9, 2026-05-19): open
+    // Runtime via runtime_runner registry. MCP returns an error result
+    // when the runtime is unknown so the brain caller can recover.
+    const runner = lookupRunnerInRegistry(ctx.db, row.runtime);
+    if (!runner) {
+      return { ok: false, error: `unknown_runtime:${row.runtime}` };
+    }
+    const obs = await runArtifactForRuntime({
       artifactId: row.id,
       body: row.body,
-      declaredSandbox: decl as Extract<SandboxDecl, { runtime: "camofox-browser" }>,
+      declaredSandbox: decl,
       inputs,
       budget: { wallMs: budget?.wall_ms, memoryMb: budget?.memory_mb },
       emit,
+      db: ctx.db,
     });
+    observation = {
+      ok: obs.ok,
+      result: obs.result,
+      error: obs.error,
+      durationMs: obs.durationMs,
+      exitCode: obs.exitCode,
+      stderrTail: obs.stderrTail,
+      sandboxWarnings: obs.sandboxWarnings,
+      irreversibleEffects: obs.irreversibleEffects,
+    };
   }
   return {
     ok: true,

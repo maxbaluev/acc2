@@ -29,7 +29,7 @@
 // first time a real artifact runs and someone wonders why the network call
 // succeeded despite `net_allow: []`.
 
-import type { SandboxDecl } from "../substrate/types";
+import type { BunSandboxDecl, CamofoxSandboxDecl, SandboxDecl, UvSandboxDecl } from "../substrate/types";
 
 export type SandboxResult = { ok: true } | { ok: false; reason: string };
 
@@ -55,12 +55,47 @@ export const validateSandboxDecl = (decl: SandboxDecl): SandboxResult => {
     return { ok: false, reason: "decl_not_object" };
   }
   const runtime = (decl as { runtime?: unknown }).runtime;
-  if (runtime !== "bun" && runtime !== "uv" && runtime !== "camofox-browser") {
+  if (typeof runtime !== "string" || runtime.length === 0) {
     return { ok: false, reason: `unknown_runtime:${String(runtime)}` };
+  }
+  // Candidate B (2026-05-19): unknown-runtime catch-all variant. The
+  // three concrete runtimes fall through to their explicit shape checks
+  // below; any other runtime string MUST be a catch-all decl declaring
+  // `fields` (the runner's payload). The runner-registry resolves shape
+  // semantics at invocation time — validation only enforces that the
+  // catch-all envelope is well-formed. Optional resource-budget hints
+  // (cpu_ms/wall_ms/memory_mb) are typed-checked when present.
+  if (runtime !== "bun" && runtime !== "uv" && runtime !== "camofox-browser") {
+    const d = decl as { fields?: unknown; cpu_ms?: unknown; wall_ms?: unknown; memory_mb?: unknown; env_requires?: unknown; fs_read?: unknown; fs_write?: unknown; net_allow?: unknown };
+    if (!("fields" in d) || d.fields === undefined) {
+      return { ok: false, reason: "unknown_runtime_missing_fields" };
+    }
+    if (d.cpu_ms !== undefined && (typeof d.cpu_ms !== "number" || d.cpu_ms <= 0)) {
+      return { ok: false, reason: "bad_cpu_ms" };
+    }
+    if (d.wall_ms !== undefined && (typeof d.wall_ms !== "number" || d.wall_ms <= 0)) {
+      return { ok: false, reason: "bad_wall_ms" };
+    }
+    if (d.memory_mb !== undefined && (typeof d.memory_mb !== "number" || d.memory_mb <= 0)) {
+      return { ok: false, reason: "bad_memory_mb" };
+    }
+    if (d.env_requires !== undefined && !isStringArray(d.env_requires)) {
+      return { ok: false, reason: "env_requires_not_string_array" };
+    }
+    if (d.fs_read !== undefined && !isStringArray(d.fs_read)) {
+      return { ok: false, reason: "fs_read_not_string_array" };
+    }
+    if (d.fs_write !== undefined && !isStringArray(d.fs_write)) {
+      return { ok: false, reason: "fs_write_not_string_array" };
+    }
+    if (d.net_allow !== undefined && !isStringArray(d.net_allow)) {
+      return { ok: false, reason: "net_allow_not_string_array" };
+    }
+    return { ok: true };
   }
 
   if (runtime === "bun") {
-    const d = decl as Extract<SandboxDecl, { runtime: "bun" }>;
+    const d = decl as BunSandboxDecl;
     if (typeof d.cpu_ms !== "number" || d.cpu_ms <= 0) return { ok: false, reason: "missing_cpu_ms" };
     if (typeof d.wall_ms !== "number" || d.wall_ms <= 0) return { ok: false, reason: "missing_wall_ms" };
     if (typeof d.memory_mb !== "number" || d.memory_mb <= 0) return { ok: false, reason: "missing_memory_mb" };
@@ -76,7 +111,7 @@ export const validateSandboxDecl = (decl: SandboxDecl): SandboxResult => {
   }
 
   if (runtime === "uv") {
-    const d = decl as Extract<SandboxDecl, { runtime: "uv" }>;
+    const d = decl as UvSandboxDecl;
     if (typeof d.cpu_ms !== "number" || d.cpu_ms <= 0) return { ok: false, reason: "missing_cpu_ms" };
     if (typeof d.wall_ms !== "number" || d.wall_ms <= 0) return { ok: false, reason: "missing_wall_ms" };
     if (typeof d.memory_mb !== "number" || d.memory_mb <= 0) return { ok: false, reason: "missing_memory_mb" };
@@ -88,7 +123,7 @@ export const validateSandboxDecl = (decl: SandboxDecl): SandboxResult => {
   }
 
   // camofox-browser
-  const d = decl as Extract<SandboxDecl, { runtime: "camofox-browser" }>;
+  const d = decl as CamofoxSandboxDecl;
   if (typeof d.wall_ms !== "number" || d.wall_ms <= 0) return { ok: false, reason: "missing_wall_ms" };
   if (typeof d.memory_mb !== "number" || d.memory_mb <= 0) return { ok: false, reason: "missing_memory_mb" };
   if (!isStringArray(d.browser_allow_domains)) return { ok: false, reason: "browser_allow_domains_missing" };
@@ -135,7 +170,7 @@ export const validateSandboxDecl = (decl: SandboxDecl): SandboxResult => {
  *  cooperating script can introspect what it was told it can do.
  */
 export const buildBunPermissionArgs = (
-  decl: SandboxDecl & { runtime: "bun" },
+  decl: BunSandboxDecl,
 ): BunPermissionArgs => {
   const v = validateSandboxDecl(decl);
   if (!v.ok) {
@@ -206,7 +241,7 @@ export type CamofoxPermissionArgs = {
  *  policy via env + warnings; the runtime composes the actual argv.
  */
 export const buildUvPermissionArgs = (
-  decl: SandboxDecl & { runtime: "uv" },
+  decl: UvSandboxDecl,
 ): UvPermissionArgs => {
   const v = validateSandboxDecl(decl);
   if (!v.ok) {
@@ -261,7 +296,7 @@ export const buildUvPermissionArgs = (
  *  so the sandbox here only shapes the env passed to the wrapper.
  */
 export const buildCamofoxPermissionArgs = (
-  decl: SandboxDecl & { runtime: "camofox-browser" },
+  decl: CamofoxSandboxDecl,
 ): CamofoxPermissionArgs => {
   const v = validateSandboxDecl(decl);
   if (!v.ok) {

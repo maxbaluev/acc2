@@ -71,14 +71,14 @@ import type { Subprocess } from "bun";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { JsonValue, SandboxDecl } from "../../substrate/types";
+import type { CamofoxSandboxDecl, JsonValue } from "../../substrate/types";
 import { buildCamofoxPermissionArgs } from "../sandbox";
 import type { EmitEventInput } from "../events";
 
 export type CamofoxRuntimeInvocation = {
   artifactId: string;
   body: string;
-  declaredSandbox: SandboxDecl & { runtime: "camofox-browser" };
+  declaredSandbox: CamofoxSandboxDecl;
   inputs: JsonValue;
   budget?: { wallMs?: number; memoryMb?: number };
   emit?: (event: EmitEventInput) => void;

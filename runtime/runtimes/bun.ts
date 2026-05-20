@@ -31,14 +31,14 @@ import type { Subprocess } from "bun";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { JsonValue, SandboxDecl } from "../../substrate/types";
+import type { BunSandboxDecl, JsonValue } from "../../substrate/types";
 import { buildBunPermissionArgs } from "../sandbox";
 import type { EmitEventInput } from "../events";
 
 export type BunRuntimeInvocation = {
   artifactId: string;
   body: string;
-  declaredSandbox: SandboxDecl & { runtime: "bun" };
+  declaredSandbox: BunSandboxDecl;
   inputs: JsonValue;
   budget?: { wallMs?: number; memoryMb?: number };
   /** Optional callback so the runtime can fire runtime_subprocess_* events.
