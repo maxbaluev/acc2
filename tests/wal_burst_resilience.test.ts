@@ -38,7 +38,7 @@ const DAYS_AGO = (n: number): Date => new Date(NOW.getTime() - n * 24 * 60 * 60 
 describe("F-resilience case A — lifecycle sweep batches burst writes", () => {
   afterAll(() => closeDb());
   beforeEach(() => closeDb());
-  test("synthetic burst of 500 terminators commits in ceil(500 / batchSize) batches", () => {
+  test("synthetic burst of 500 terminators commits in ceil(500 / batchSize) batches", async () => {
     const db = openDb(":memory:");
     // Seed 500 owner_input_required rows older than 7 days. Each one
     // becomes a closure_owner_required terminator in the sweep.
@@ -53,7 +53,7 @@ describe("F-resilience case A — lifecycle sweep batches burst writes", () => {
       db.run("UPDATE events SET ts = ? WHERE id = ?", [DAYS_AGO(8).toISOString(), row.id]);
     }
 
-    const summary = runLifecycleClosureSweep(db, {
+    const summary = await runLifecycleClosureSweep(db, {
       now: NOW,
       batchSize: 100,
     });
@@ -71,7 +71,7 @@ describe("F-resilience case A — lifecycle sweep batches burst writes", () => {
     expect(persisted?.c).toBe(500);
   });
 
-  test("a smaller batchSize splits the same workload into more transactions", () => {
+  test("a smaller batchSize splits the same workload into more transactions", async () => {
     const db = openDb(":memory:");
     for (let i = 0; i < 250; i++) {
       const row = emitEvent(db, {
@@ -84,7 +84,7 @@ describe("F-resilience case A — lifecycle sweep batches burst writes", () => {
       db.run("UPDATE events SET ts = ? WHERE id = ?", [DAYS_AGO(8).toISOString(), row.id]);
     }
 
-    const summary = runLifecycleClosureSweep(db, {
+    const summary = await runLifecycleClosureSweep(db, {
       now: NOW,
       batchSize: 50,
     });
@@ -94,7 +94,7 @@ describe("F-resilience case A — lifecycle sweep batches burst writes", () => {
     expect(summary.batches_committed).toBe(5);
   });
 
-  test("partial batch at the tail flushes in its own transaction", () => {
+  test("partial batch at the tail flushes in its own transaction", async () => {
     const db = openDb(":memory:");
     for (let i = 0; i < 7; i++) {
       const row = emitEvent(db, {
@@ -107,7 +107,7 @@ describe("F-resilience case A — lifecycle sweep batches burst writes", () => {
       db.run("UPDATE events SET ts = ? WHERE id = ?", [DAYS_AGO(8).toISOString(), row.id]);
     }
 
-    const summary = runLifecycleClosureSweep(db, {
+    const summary = await runLifecycleClosureSweep(db, {
       now: NOW,
       batchSize: 3,
     });
@@ -117,7 +117,7 @@ describe("F-resilience case A — lifecycle sweep batches burst writes", () => {
     expect(summary.batches_committed).toBe(3);
   });
 
-  test("dryRun mode commits zero batches (no INSERTs reach the ledger)", () => {
+  test("dryRun mode commits zero batches (no INSERTs reach the ledger)", async () => {
     const db = openDb(":memory:");
     for (let i = 0; i < 50; i++) {
       const row = emitEvent(db, {
@@ -129,7 +129,7 @@ describe("F-resilience case A — lifecycle sweep batches burst writes", () => {
       });
       db.run("UPDATE events SET ts = ? WHERE id = ?", [DAYS_AGO(8).toISOString(), row.id]);
     }
-    const summary = runLifecycleClosureSweep(db, { now: NOW, dryRun: true });
+    const summary = await runLifecycleClosureSweep(db, { now: NOW, dryRun: true });
     expect(summary.closure_owner_required_count).toBeGreaterThanOrEqual(50);
     expect(summary.batches_committed).toBe(0);
   });

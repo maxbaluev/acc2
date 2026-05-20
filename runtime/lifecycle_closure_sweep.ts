@@ -89,6 +89,24 @@ const STUCK_PROPOSAL_AGE_MS = 24 * 60 * 60 * 1000; // 24h
 const OWNER_REQUEST_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7d
 const STUCK_TASK_AGE_MS = 24 * 60 * 60 * 1000; // 24h
 
+/** Cooperative yield helper — releases the event loop so the daemon's
+ *  /health route, the bridge SSE pumps, and other workers can run while
+ *  this sweep walks the proposal / owner-input / task tables on a
+ *  280K-event ledger.
+ *
+ *  Per substrate KC GJ2KN1J3KD1Z (bounded amendments per worker —
+ *  event-loop starvation surfaced as wedged daemon in role=all). Each
+ *  iteration touches hasExistingTerminator (LIKE scan on context_refs),
+ *  hasCitingAppliedChange (LIKE scan), and 0-1 emitTerminator calls —
+ *  individually small, collectively a multi-second sync block when
+ *  maxRows=5000. */
+const yieldToEventLoop = (): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, 0));
+
+/** Yield every 25 rows matches the bounded-amendments cadence used by
+ *  embedder / artifact_kind_backfill_worker / contract_amendment_consumer. */
+const YIELD_INTERVAL_ROWS = 25;
+
 // F7: classifications whose lifecycles are EXPECTED to remain open
 // beyond the default 7-day expiry. The owner-observed outcome lands on
 // a weeks-to-years timescale (relationship signal, life outcome,
@@ -227,10 +245,10 @@ type PendingTerminator = {
   payload: JsonValue;
 };
 
-export const runLifecycleClosureSweep = (
+export const runLifecycleClosureSweep = async (
   db: Database,
   options: SweepOptions = {},
-): SweepSummary => {
+): Promise<SweepSummary> => {
   const now = options.now ?? new Date();
   const nowMs = now.getTime();
   const root = options.sourceCheckoutRoot ?? process.cwd();
@@ -297,6 +315,14 @@ export const runLifecycleClosureSweep = (
     }
   };
 
+  let processedSinceYield = 0;
+  const maybeYield = async (): Promise<void> => {
+    processedSinceYield += 1;
+    if (processedSinceYield % YIELD_INTERVAL_ROWS === 0) {
+      await yieldToEventLoop();
+    }
+  };
+
   // 1. Stuck contract_amendment_proposed
   try {
     const rows = db
@@ -314,6 +340,7 @@ export const runLifecycleClosureSweep = (
       )
       .all(maxRows);
     for (const row of rows) {
+      await maybeYield();
       summary.swept_count++;
       if (hasExistingTerminator(db, row.id)) continue;
       const ageMs = nowMs - isoToMs(row.ts);
@@ -398,6 +425,7 @@ export const runLifecycleClosureSweep = (
       )
       .all(maxRows);
     for (const row of rows) {
+      await maybeYield();
       summary.swept_count++;
       if (hasExistingTerminator(db, row.id)) continue;
       const ageMs = nowMs - isoToMs(row.ts);
@@ -463,6 +491,7 @@ export const runLifecycleClosureSweep = (
       )
       .all(maxRows);
     for (const row of rows) {
+      await maybeYield();
       summary.swept_count++;
       if (hasExistingTerminator(db, row.id)) continue;
       const ageMs = nowMs - isoToMs(row.ts);

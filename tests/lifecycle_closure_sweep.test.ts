@@ -55,7 +55,7 @@ const terminatorsFor = (db: ReturnType<typeof openDb>, sourceId: string) =>
     .all(`%${sourceId}%`);
 
 describe("runLifecycleClosureSweep — terminator emissions", () => {
-  test("(a) proposal whose anchor file no longer exists → closure_obsolete", () => {
+  test("(a) proposal whose anchor file no longer exists → closure_obsolete", async () => {
     const db = openDb(":memory:");
     const sourceId = insertEventAtTs(
       db,
@@ -72,7 +72,7 @@ describe("runLifecycleClosureSweep — terminator emissions", () => {
     // the named anchor — so the anchor cannot resolve.
     const root = mkdtempSync(join(tmpdir(), "acc2-sweep-obsolete-"));
     try {
-      const summary = runLifecycleClosureSweep(db, { now: NOW, sourceCheckoutRoot: root });
+      const summary = await runLifecycleClosureSweep(db, { now: NOW, sourceCheckoutRoot: root });
       expect(summary.closure_obsolete_count).toBeGreaterThanOrEqual(1);
       const terminators = terminatorsFor(db, sourceId);
       const obsolete = terminators.find((t) => t.kind === "closure_obsolete");
@@ -85,7 +85,7 @@ describe("runLifecycleClosureSweep — terminator emissions", () => {
     }
   });
 
-  test("(b) proposal already followed by applied_change_committed → closure_complete", () => {
+  test("(b) proposal already followed by applied_change_committed → closure_complete", async () => {
     const db = openDb(":memory:");
     const root = mkdtempSync(join(tmpdir(), "acc2-sweep-complete-"));
     try {
@@ -109,7 +109,7 @@ describe("runLifecycleClosureSweep — terminator emissions", () => {
         payload: { status: "ok", target_path: "real_file.ts" },
       });
 
-      const summary = runLifecycleClosureSweep(db, { now: NOW, sourceCheckoutRoot: root });
+      const summary = await runLifecycleClosureSweep(db, { now: NOW, sourceCheckoutRoot: root });
       expect(summary.closure_complete_count).toBeGreaterThanOrEqual(1);
       const terminators = terminatorsFor(db, sourceId);
       const complete = terminators.find((t) => t.kind === "closure_complete");
@@ -121,7 +121,7 @@ describe("runLifecycleClosureSweep — terminator emissions", () => {
     }
   });
 
-  test("(c) owner_input_required older than 7 days → closure_owner_required", () => {
+  test("(c) owner_input_required older than 7 days → closure_owner_required", async () => {
     const db = openDb(":memory:");
     const sourceId = insertEventAtTs(
       db,
@@ -131,7 +131,7 @@ describe("runLifecycleClosureSweep — terminator emissions", () => {
       "dir_c",
       "task_c",
     );
-    const summary = runLifecycleClosureSweep(db, { now: NOW });
+    const summary = await runLifecycleClosureSweep(db, { now: NOW });
     expect(summary.closure_owner_required_count).toBeGreaterThanOrEqual(1);
     const terminators = terminatorsFor(db, sourceId);
     const owner = terminators.find((t) => t.kind === "closure_owner_required");
@@ -141,7 +141,7 @@ describe("runLifecycleClosureSweep — terminator emissions", () => {
     expect(payload.reason).toBe("owner_response_expired_7d");
   });
 
-  test("idempotency: re-running the sweep on already-closed lifecycles emits no duplicates", () => {
+  test("idempotency: re-running the sweep on already-closed lifecycles emits no duplicates", async () => {
     const db = openDb(":memory:");
     const sourceId = insertEventAtTs(
       db,
@@ -151,16 +151,16 @@ describe("runLifecycleClosureSweep — terminator emissions", () => {
       "dir_d",
       "task_d",
     );
-    const first = runLifecycleClosureSweep(db, { now: NOW });
+    const first = await runLifecycleClosureSweep(db, { now: NOW });
     expect(first.closure_owner_required_count).toBeGreaterThanOrEqual(1);
     const before = terminatorsFor(db, sourceId).length;
-    const second = runLifecycleClosureSweep(db, { now: NOW });
+    const second = await runLifecycleClosureSweep(db, { now: NOW });
     expect(second.closure_owner_required_count).toBe(0);
     const after = terminatorsFor(db, sourceId).length;
     expect(after).toBe(before);
   });
 
-  test("dryRun mode returns counts WITHOUT emitting terminator rows", () => {
+  test("dryRun mode returns counts WITHOUT emitting terminator rows", async () => {
     const db = openDb(":memory:");
     insertEventAtTs(
       db,
@@ -170,7 +170,7 @@ describe("runLifecycleClosureSweep — terminator emissions", () => {
       "dir_e",
       "task_e",
     );
-    const dryRun = runLifecycleClosureSweep(db, { now: NOW, dryRun: true });
+    const dryRun = await runLifecycleClosureSweep(db, { now: NOW, dryRun: true });
     expect(dryRun.closure_owner_required_count).toBeGreaterThanOrEqual(1);
     const persisted = db
       .query<{ c: number }, []>(

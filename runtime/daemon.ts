@@ -1349,7 +1349,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     markWorkerReady("lifecycle_closure_sweep");
     recordWorkerTick("lifecycle_closure_sweep");
     const sweepTick = supervisedTick(db, "lifecycle_closure_sweep", sweepTickMs, async () => {
-      runLifecycleClosureSweep(db);
+      await runLifecycleClosureSweep(db);
     });
     registerReactiveWorker("lifecycle_closure_sweep", sweepTickMs, ["contract_amendment_proposed", "owner_input_required", "task_node_opened", "applied_change_committed", "owner_decision_recorded", "owner_input_received", "task_committed", "task_failed", "task_abandoned", "closure_complete", "closure_obsolete", "closure_owner_required"], sweepTick, { minReactiveGapMs: sweepTickMs });
     // lifecycle_closure_sweep is activation-driven; safety net covers age-threshold scans.

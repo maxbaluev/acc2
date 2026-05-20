@@ -174,7 +174,7 @@ describe("F7 slow_feedback_not_prematurely_closed", () => {
   const daysAgo = (n: number) =>
     new Date(NOW.getTime() - n * 24 * 60 * 60 * 1000);
 
-  test("long-window task_node_opened survives the sweep past 30 days", () => {
+  test("long-window task_node_opened survives the sweep past 30 days", async () => {
     const db = openDb(":memory:");
     const row = emitEvent(db, {
       kind: "task_node_opened",
@@ -194,7 +194,7 @@ describe("F7 slow_feedback_not_prematurely_closed", () => {
       row.id,
     ]);
 
-    const summary = runLifecycleClosureSweep(db, { now: NOW });
+    const summary = await runLifecycleClosureSweep(db, { now: NOW });
     expect(summary.feedback_window_respected_count).toBeGreaterThanOrEqual(1);
 
     // No terminator was emitted for the long-window task.
@@ -208,7 +208,7 @@ describe("F7 slow_feedback_not_prematurely_closed", () => {
     expect(terminators?.c).toBe(0);
   });
 
-  test("a stale owner_input_required with classification=very_long is exempt", () => {
+  test("a stale owner_input_required with classification=very_long is exempt", async () => {
     const db = openDb(":memory:");
     const row = emitEvent(db, {
       kind: "owner_input_required",
@@ -229,7 +229,7 @@ describe("F7 slow_feedback_not_prematurely_closed", () => {
       row.id,
     ]);
 
-    const summary = runLifecycleClosureSweep(db, { now: NOW });
+    const summary = await runLifecycleClosureSweep(db, { now: NOW });
     expect(summary.feedback_window_respected_count).toBeGreaterThanOrEqual(1);
     const terminators = db
       .query<{ c: number }, [string]>(
@@ -241,7 +241,7 @@ describe("F7 slow_feedback_not_prematurely_closed", () => {
     expect(terminators?.c).toBe(0);
   });
 
-  test("a stale row WITHOUT feedback_window still closes (control case)", () => {
+  test("a stale row WITHOUT feedback_window still closes (control case)", async () => {
     const db = openDb(":memory:");
     const row = emitEvent(db, {
       kind: "owner_input_required",
@@ -255,12 +255,12 @@ describe("F7 slow_feedback_not_prematurely_closed", () => {
       row.id,
     ]);
 
-    const summary = runLifecycleClosureSweep(db, { now: NOW });
+    const summary = await runLifecycleClosureSweep(db, { now: NOW });
     expect(summary.closure_owner_required_count).toBeGreaterThanOrEqual(1);
     expect(summary.feedback_window_respected_count).toBe(0);
   });
 
-  test("the short-window classification does NOT exempt the lifecycle", () => {
+  test("the short-window classification does NOT exempt the lifecycle", async () => {
     // Only long / very_long are exempt. short / medium / immediate
     // lifecycles still close at the standard age.
     const db = openDb(":memory:");
@@ -282,7 +282,7 @@ describe("F7 slow_feedback_not_prematurely_closed", () => {
       row.id,
     ]);
 
-    const summary = runLifecycleClosureSweep(db, { now: NOW });
+    const summary = await runLifecycleClosureSweep(db, { now: NOW });
     expect(summary.closure_owner_required_count).toBeGreaterThanOrEqual(1);
     expect(summary.feedback_window_respected_count).toBe(0);
   });
