@@ -1869,6 +1869,26 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const timer = setInterval(tick, tickMs);
     workers.push(() => clearInterval(timer));
   }
+
+  // archival_worker — 6h tick. Hot/cold archival (docs/Architecture.md
+  // commit 6b8ebea + brain KC TE6P3958, conf=0.86). Events older than
+  // archival_retention_days (default 30) move into sibling
+  // state-archive-YYYY-MM.db files; verify-then-delete keeps the hot
+  // ledger bounded so aggregate scans don't grow with production rate.
+  // Opt-OUT via ACC2_DISABLE_WORKERS=archival.
+  if (isWorkerEnabled("archival")) {
+    const tickMs = 6 * 60 * 60 * 1000;
+    const { runArchivalSweep } = await import("./archival_worker");
+    const { resolveDbPath } = await import("./state_paths");
+    const dbPath = resolveDbPath();
+    markWorkerReady("archival");
+    recordWorkerTick("archival");
+    const tick = supervisedTick(db, "archival", tickMs, async () => {
+      await runArchivalSweep(db, { stateDbPath: dbPath });
+    });
+    const timer = setInterval(tick, tickMs);
+    workers.push(() => clearInterval(timer));
+  }
   } // end if (!skipWorkers)
 
   // Declare `stop` BEFORE Bun.serve so the fetch closure can capture it; the

@@ -135,7 +135,16 @@ export type WorkerName =
   | "storage_integrity_floor"
   | "deterministic_computation"
   | "kernel_sandbox"
-  | "owner_identity";
+  | "owner_identity"
+  // 2026-05-20 (T-1 storage longevity floor, docs/Architecture.md
+  // commit 6b8ebea + brain KC TE6P3958): hot/cold archival worker.
+  // 6h tick. Moves events older than archival_retention_days into
+  // sibling state-archive-YYYY-MM.db files; verify-then-delete keeps
+  // the hot ledger bounded as the daily event rate grows. Without
+  // this floor, aggregate-scan cost grows linearly with production
+  // rate (live: 301K events / 5.5d → 50 GB/year projection).
+  // Opt-out via ACC2_DISABLE_WORKERS=archival.
+  | "archival";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -169,6 +178,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "deterministic_computation",
   "kernel_sandbox",
   "owner_identity",
+  "archival",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

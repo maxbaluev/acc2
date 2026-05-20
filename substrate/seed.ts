@@ -2685,6 +2685,19 @@ const THRESHOLD_PREDICATE_SEEDS: ThresholdPredicateSeed[] = [
       "gate is now structural and reads this threshold from the registry so " +
       "brain amendments can tune it without editing dispatcher code.",
   },
+  {
+    name: "archival_retention_days",
+    value: 30,
+    display_name: "archival_retention_days",
+    why:
+      "Hot/cold archival retention horizon (docs/Architecture.md commit " +
+      "6b8ebea + brain KC TE6P3958, conf=0.86). Events older than this " +
+      "value move from hot state.db to sibling state-archive-YYYY-MM.db " +
+      "files; only bounded hot retention caps aggregate-scan cost as the " +
+      "event ledger grows. Live pre-fix: 301K events in 5.5 days / 746 MB " +
+      "projected 50 GB/year. Default 30 days bounds the hot DB at ~30 × " +
+      "daily-rate. Brain amendments can tune via posterior calibration.",
+  },
 ];
 
 const THRESHOLD_PREDICATE_ARTIFACTS: SeedArtifact[] = THRESHOLD_PREDICATE_SEEDS.map((t) => ({

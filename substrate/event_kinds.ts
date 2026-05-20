@@ -795,6 +795,18 @@ export const EVENT_KINDS = {
   owner_identity_check:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   owner_identity_discontinuity:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
 
+  // ── Hot/cold archival worker (runtime/archival_worker.ts) ───────────
+  // Per docs/Architecture.md commit 6b8ebea + brain KC TE6P3958
+  // (conf=0.86): hot/cold archival is the ONLY policy that bounds
+  // aggregate-scan cost independently of event production rate. The
+  // 6h sweep moves events older than archival_retention_days into
+  // sibling state-archive-YYYY-MM.db files (verify-then-delete);
+  // archival_sweep_completed records the per-month deltas. On any
+  // verify mismatch the archive transaction rolls back and
+  // archival_integrity_failed fires (hot rows untouched).
+  archival_sweep_completed:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  archival_integrity_failed:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+
   // ── Lifecycle ───────────────────────────────────────────────────────
   goal_committed:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   goal_abandoned:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
