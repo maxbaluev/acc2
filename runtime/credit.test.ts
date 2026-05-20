@@ -12,6 +12,7 @@ import {
   __extractBodyCitationsForTest,
   __collectCitationsForTest,
   __residualToBetaDeltasForTest,
+  __brainAccuracyArtifactIdForTest,
 } from "./credit";
 import type { Database } from "bun:sqlite";
 
@@ -1370,3 +1371,467 @@ describe("bindCitation — citation binding enforcement at emitEvent boundary (T
     expect(payload.knowledge_id).toBe(kcPreferred.id); // not kcFallback
   });
 });
+
+// T4.2 meta-credit (roadmap.md §T4.2) — when distributeCredit projects an
+// outcome, the COMPOSER policy bundle (artifact selected at compose time
+// by prompt_policy_section_selected) accrues posterior. The selector
+// behind the selection is now first-class.
+describe("T4.2 meta-credit — composer policy bundle gets credit", () => {
+  test("prompt_policy_section_selected on the same task moves the bundle's posterior on action_scored", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action body");
+    insertSampleArtifact(db, "art_verifier", "// verifier body");
+    // Seed the policy bundle act_artifact that the composer "selected".
+    const bundleBefore = insertSampleArtifact(db, "art_policy_bundle_alpha", "// policy bundle alpha");
+    expect(bundleBefore.posteriorAlpha).toBe(1);
+    expect(bundleBefore.posteriorBeta).toBe(1);
+
+    // Emit a prompt_policy_section_selected pointing at the bundle on the
+    // same task that the action_predicted/scored will land under.
+    emitEvent(db, {
+      kind: "prompt_policy_section_selected",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_meta",
+      task_id: "t_meta",
+      payload: {
+        section_name: "owner_rendering_policy",
+        source: "policy_bundle",
+        artifact_id: "art_policy_bundle_alpha",
+        score: 0.7,
+        fallback_reason: null,
+        variant_score_observed: null,
+        competitor_score_observed: null,
+      },
+    });
+
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: "d_meta",
+      task_id: "t_meta",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      predicted_residual: 0.0,
+      payload: {},
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_meta",
+      task_id: "t_meta",
+      action_artifact_id: "art_action",
+      payload: {},
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_meta",
+      task_id: "t_meta",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0,
+      payload: {},
+    });
+
+    await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0,
+      observed_residual: 0,
+    });
+
+    // Bundle posterior moved (alpha > 1 from a successful residual=0 outcome).
+    const bundleAfter = getArtifact(db, "art_policy_bundle_alpha")!;
+    expect(bundleAfter.posteriorAlpha).toBeGreaterThan(1);
+
+    // A meta_credit_projected audit row fired for the bundle.
+    const metaRow = db
+      .query<{ payload: string }, []>(
+        "SELECT payload FROM events WHERE kind = 'meta_credit_projected' LIMIT 1",
+      )
+      .get();
+    expect(metaRow).not.toBeNull();
+    const metaPayload = JSON.parse(metaRow!.payload) as Record<string, unknown>;
+    expect(metaPayload.bundle_artifact_id).toBe("art_policy_bundle_alpha");
+    expect(metaPayload.section_name).toBe("owner_rendering_policy");
+    expect(metaPayload.scored_event_id).toBe(scored.id);
+    expect(metaPayload.bundle_registered).toBe(true);
+    expect(metaPayload.projection_key).toBe("meta_credit:" + scored.id + ":art_policy_bundle_alpha");
+
+    // act_artifact_score_updated with role=composer_policy fired alongside.
+    const compRow = db
+      .query<{ payload: string }, []>(
+        "SELECT payload FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.role') = 'composer_policy' LIMIT 1",
+      )
+      .get();
+    expect(compRow).not.toBeNull();
+    const compPayload = JSON.parse(compRow!.payload) as Record<string, unknown>;
+    expect(compPayload.artifact_id).toBe("art_policy_bundle_alpha");
+    expect(compPayload.projected_from).toBe("meta_credit");
+  });
+
+  test("idempotent: re-running distributeCredit on the same scored event does NOT re-credit the bundle", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action body");
+    insertSampleArtifact(db, "art_verifier", "// verifier body");
+    insertSampleArtifact(db, "art_policy_bundle_beta", "// policy beta");
+
+    emitEvent(db, {
+      kind: "prompt_policy_section_selected",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_idem",
+      task_id: "t_idem",
+      payload: {
+        section_name: "top_laws",
+        source: "policy_bundle",
+        artifact_id: "art_policy_bundle_beta",
+      },
+    });
+
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: "d_idem",
+      task_id: "t_idem",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      predicted_residual: 0.2,
+      payload: {},
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_idem",
+      task_id: "t_idem",
+      action_artifact_id: "art_action",
+      payload: {},
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_idem",
+      task_id: "t_idem",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0,
+      payload: {},
+    });
+
+    await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0.2,
+      observed_residual: 0,
+    });
+    await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0.2,
+      observed_residual: 0,
+    });
+
+    const rows = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'meta_credit_projected'")
+      .get() as { c: number };
+    expect(rows.c).toBe(1);
+  });
+});
+
+// T4.3 brain prediction-accuracy posterior (roadmap.md §T4.3) — for every
+// brain action_predicted/scored pair, emit brain_accuracy_observation
+// with prediction_error = |predicted − observed| and update the per-
+// goal_shape brain_accuracy_predicate posterior.
+describe("T4.3 brain accuracy — predicted vs observed residual posterior", () => {
+  test("brain_accuracy_observation fires with prediction_error = |predicted − observed|", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action body");
+    insertSampleArtifact(db, "art_verifier", "// verifier body");
+
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode", // brain
+      directive_id: "d_bacc",
+      task_id: "t_bacc",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      predicted_residual: 0.2,
+      payload: {},
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_bacc",
+      task_id: "t_bacc",
+      action_artifact_id: "art_action",
+      payload: {},
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_bacc",
+      task_id: "t_bacc",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0.4,
+      payload: {},
+    });
+
+    await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0.2,
+      observed_residual: 0.4,
+    });
+
+    const obsRow = db
+      .query<{ payload: string }, []>(
+        "SELECT payload FROM events WHERE kind = 'brain_accuracy_observation' LIMIT 1",
+      )
+      .get();
+    expect(obsRow).not.toBeNull();
+    const payload = JSON.parse(obsRow!.payload) as Record<string, unknown>;
+    expect(payload.predicted_residual).toBeCloseTo(0.2, 6);
+    expect(payload.observed_residual).toBeCloseTo(0.4, 6);
+    expect(payload.prediction_error).toBeCloseTo(0.2, 6);
+    expect(payload.action_predicted_event_id).toBe(ap.id);
+    expect(payload.action_scored_event_id).toBe(scored.id);
+
+    // The per-goal_shape brain_accuracy_predicate artifact was created and
+    // its posterior moved.
+    const accId = __brainAccuracyArtifactIdForTest("");
+    const accArt = getArtifact(db, accId)!;
+    expect(accArt).not.toBeNull();
+    // prediction_error = 0.2 — well within the success band (≤0.3) so alpha > 1.
+    expect(accArt.posteriorAlpha).toBeGreaterThan(1);
+  });
+
+  test("does NOT fire when action_predicted.substrate_origin is not the brain (opencode)", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action body");
+    insertSampleArtifact(db, "art_verifier", "// verifier body");
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "substrate_auto", // NOT the brain
+      directive_id: "d_nob",
+      task_id: "t_nob",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      predicted_residual: 0.4,
+      payload: {},
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_nob",
+      task_id: "t_nob",
+      action_artifact_id: "art_action",
+      payload: {},
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_nob",
+      task_id: "t_nob",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0.4,
+      payload: {},
+    });
+    await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0.4,
+      observed_residual: 0.4,
+    });
+    const rows = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'brain_accuracy_observation'")
+      .get() as { c: number };
+    expect(rows.c).toBe(0);
+  });
+
+  test("idempotent: re-running distributeCredit on the same pair does NOT emit a second observation", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action body");
+    insertSampleArtifact(db, "art_verifier", "// verifier body");
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: "d_bidem",
+      task_id: "t_bidem",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      predicted_residual: 0.1,
+      payload: {},
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_bidem",
+      task_id: "t_bidem",
+      action_artifact_id: "art_action",
+      payload: {},
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_bidem",
+      task_id: "t_bidem",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0.1,
+      payload: {},
+    });
+    await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0.1,
+      observed_residual: 0.1,
+    });
+    await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0.1,
+      observed_residual: 0.1,
+    });
+    const rows = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'brain_accuracy_observation'")
+      .get() as { c: number };
+    expect(rows.c).toBe(1);
+  });
+});
+
+// T4.4 coalition / joint-citation posterior (roadmap.md §T4.4) — when
+// the brain's action_predicted cited N>1 cooperating artifacts, emit a
+// coalition_credit_distributed audit row carrying the sorted-member
+// coalition id + per-member shapley shares + observed residual.
+describe("T4.4 coalition credit — multi-artifact joint citation posterior", () => {
+  test("N=3 cited artifacts emit coalition_credit_distributed with shapley shares matching shapleyWeightsByCorroboration(3)", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action body");
+    insertSampleArtifact(db, "art_verifier", "// verifier body");
+    insertSampleArtifact(db, "art_co_a", "// co a");
+    insertSampleArtifact(db, "art_co_b", "// co b");
+    insertSampleArtifact(db, "art_co_c", "// co c");
+
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: "d_coal",
+      task_id: "t_coal",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      predicted_residual: 0,
+      payload: { cited_artifact_ids: ["art_co_a", "art_co_b", "art_co_c"] },
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_coal",
+      task_id: "t_coal",
+      action_artifact_id: "art_action",
+      payload: {},
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_coal",
+      task_id: "t_coal",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0,
+      payload: {},
+    });
+
+    await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0,
+      observed_residual: 0,
+    });
+
+    const coalRow = db
+      .query<{ payload: string }, []>(
+        "SELECT payload FROM events WHERE kind = 'coalition_credit_distributed' LIMIT 1",
+      )
+      .get();
+    expect(coalRow).not.toBeNull();
+    const payload = JSON.parse(coalRow!.payload) as {
+      coalition_id: string;
+      sorted_member_ids: string[];
+      ordered_member_ids: string[];
+      member_count: number;
+      residual: number;
+      member_shares: Array<{ artifact_id: string; shapley_share: number }>;
+    };
+    expect(payload.member_count).toBe(3);
+    expect(payload.coalition_id).toBe("coalition:art_co_a+art_co_b+art_co_c");
+    expect(payload.sorted_member_ids).toEqual(["art_co_a", "art_co_b", "art_co_c"]);
+    expect(payload.ordered_member_ids).toEqual(["art_co_a", "art_co_b", "art_co_c"]);
+    expect(payload.residual).toBeCloseTo(0, 6);
+    // Shares match shapleyWeightsByCorroboration(3) = [4/7, 2/7, 1/7].
+    const expected = shapleyWeightsByCorroboration(3);
+    expect(payload.member_shares.length).toBe(3);
+    for (let i = 0; i < 3; i++) {
+      expect(payload.member_shares[i]!.artifact_id).toBe(["art_co_a", "art_co_b", "art_co_c"][i]);
+      expect(payload.member_shares[i]!.shapley_share).toBeCloseTo(expected[i]!, 6);
+    }
+    // Shares sum to 1.0.
+    const sum = payload.member_shares.reduce((a, m) => a + m.shapley_share, 0);
+    expect(sum).toBeCloseTo(1.0, 6);
+  });
+
+  test("N=1 cited artifact emits NO coalition row (no coalition — single node)", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action");
+    insertSampleArtifact(db, "art_verifier", "// verifier");
+    insertSampleArtifact(db, "art_solo", "// solo");
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: "d_solo",
+      task_id: "t_solo",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      predicted_residual: 0,
+      payload: { cited_artifact_ids: ["art_solo"] },
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_solo",
+      task_id: "t_solo",
+      action_artifact_id: "art_action",
+      payload: {},
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_solo",
+      task_id: "t_solo",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0,
+      payload: {},
+    });
+    await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0,
+      observed_residual: 0,
+    });
+    const rows = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'coalition_credit_distributed'")
+      .get() as { c: number };
+    expect(rows.c).toBe(0);
+  });
+});
+

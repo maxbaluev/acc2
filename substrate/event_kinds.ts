@@ -223,6 +223,27 @@ export const EVENT_KINDS = {
   // requiring the brain to explicitly cite the source directive.
   knowledge_propagated:                     { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
+  // ── T4.1 counterfactual credit (docs/roadmap.md Tier 6) ─────────────
+  // At every selection boundary (artifact pick, route choice, retrieval
+  // top-K filter) the substrate previously dropped the rejected
+  // alternatives — selectors had no signal from outcomes the chosen
+  // path produced. counterfactual_alternative_recorded persists the
+  // rejected set with a window_seconds so a later worker can score
+  // them against the chosen's residual:
+  //   - chosen succeeded → small negative posterior delta on rejected
+  //     (counterfactual_penalty: chosen was correct, you would have lost)
+  //   - chosen failed    → small positive posterior delta on rejected
+  //     (counterfactual_bonus: chosen lost, you MIGHT have done better)
+  // Idempotency: counterfactual_credit:{counterfactual_event_id}:{rejected_id}
+  // stamped on the act_artifact_score_updated payload via projection_key.
+  // counterfactual_closure_audited records the closure-predicate proxy:
+  // count of rejected_ids that subsequently won a later selection
+  // within 24h / total rejected_ids — selectors that learn from
+  // counterfactual posteriors should see their reject set re-enter the
+  // chosen pool over time.
+  counterfactual_alternative_recorded:     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  counterfactual_closure_audited:          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+
   // ── Act artifacts (polymorphic handle registry, F4a 2026-05-18) ────
   // F4a (roadmap WW7W1NZ8A10R52PB4E7EJE9YBW): kinds were code_artifact_*
   // before the rename. Historical events in the ledger retain the old
@@ -312,6 +333,33 @@ export const EVENT_KINDS = {
   // action_scored already landed; the error is observable for audits but
   // does not block the primary emit).
   projection_error:                        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // T4.2 meta-credit (roadmap.md §T4.2) — when distributeCredit projects a
+  // residual outcome, the COMPOSER policy bundle / prompt section that was
+  // active for the task at scoring time accrues posterior alongside the
+  // artifact/knowledge it selected. One meta_credit_projected row per
+  // selected policy_bundle per scored event so the credit chain shows the
+  // "scorer behind the score". Embedded act_artifact_score_updated emit
+  // for the bundle row is the structural mutation; this kind is the
+  // audit surface.
+  meta_credit_projected:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // T4.3 brain prediction-accuracy posterior (roadmap.md §T4.3) — at each
+  // brain dispatch close (or whenever an action_predicted with the brain
+  // as substrate_origin meets its action_scored), |predicted − observed|
+  // is the brain's calibration sample. The substrate emits one
+  // brain_accuracy_observation per (action_predicted, action_scored) pair
+  // and updates a per-goal_shape brain_accuracy_predicate act_artifact
+  // posterior — low residual → confirmed (brain predicted well),
+  // high residual → contradicted (brain predicted poorly).
+  brain_accuracy_observation:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // T4.4 coalition / joint-citation posterior (roadmap.md §T4.4) — when
+  // action_predicted.cited_artifact_ids.length > 1 (multiple artifacts
+  // cooperated on the action), distributeCredit splits the residual
+  // among them via shapleyWeightsByCorroboration(N). The coalition
+  // itself is now first-class: a coalition_credit_distributed row
+  // captures the (sorted) coalition id, per-member shapley shares, and
+  // the observed residual so future routing can score combinations,
+  // not just nodes.
+  coalition_credit_distributed:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   // F4a deprecated aliases — historical event rows wrote these kind
   // strings before the rename. Registered here so existing queries that
   // SELECT WHERE kind = 'code_artifact_admitted' still match. The
@@ -702,9 +750,17 @@ export const EVENT_KINDS = {
   //   - runtime/event_authenticity_worker.ts (60s)
   //   - runtime/storage_integrity_worker.ts (5min) — also emits wal_checkpointed
   //   - runtime/deterministic_computation_worker.ts (10min)
+  //   - runtime/kernel_sandbox_worker.ts (5min) — reuses sandbox_degraded
+  //     above for the violation path; emits kernel_sandbox_check clean.
+  //   - runtime/owner_identity_worker.ts (5min) — emits owner_identity_check
+  //     clean; on discontinuity emits owner_identity_discontinuity AND
+  //     owner_input_required so autonomous commit pauses.
   event_authenticity_check:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   storage_integrity_check:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   deterministic_computation_check:         { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  kernel_sandbox_check:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  owner_identity_check:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  owner_identity_discontinuity:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
 
   // ── Lifecycle ───────────────────────────────────────────────────────
   goal_committed:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },

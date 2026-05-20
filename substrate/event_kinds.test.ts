@@ -175,6 +175,14 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // carries this discriminator; emissions remain action_scored /
   // act_artifact_score_updated under the standard machinery.
   "should_decompose_predicate",
+  // T4.3 (roadmap.md §T4.3, 2026-05-20): runtime/credit.ts admits
+  // per-goal_shape act_artifact rows with kind:'brain_accuracy_predicate'
+  // so the brain's prediction calibration becomes a posterior-ranked
+  // row scored by |predicted_residual − observed_residual|. NOT an
+  // event kind — the registry row carries this discriminator;
+  // emissions use brain_accuracy_observation +
+  // act_artifact_score_updated.
+  "brain_accuracy_predicate",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────
@@ -470,6 +478,38 @@ describe("derived sets match their pre-unification shape", () => {
       "event_authenticity_check",
       "storage_integrity_check",
       "deterministic_computation_check",
+      // Tier -1 floors 4 + 5 (kernel_sandbox_integrity,
+      // owner_identity_continuity). Same health-metric treatment as the
+      // first three — tick liveness is visible at substrate-status; the
+      // violation path reuses sandbox_degraded for the kernel floor and
+      // emits owner_identity_discontinuity for the owner-identity floor.
+      "kernel_sandbox_check",
+      "owner_identity_check",
+      "owner_identity_discontinuity",
+      // T4.1 counterfactual credit (docs/roadmap.md Tier 6,
+      // counterfactual_comparison_predicate). Each selection boundary
+      // (artifact pick, route choice, retrieval top-K filter) emits one
+      // counterfactual_alternative_recorded with the rejected set; the
+      // scorer worker emits act_artifact_score_updated against them
+      // after window_seconds. Counterfactual closure audit emits one
+      // counterfactual_closure_audited per scoring sweep. Both count as
+      // health metrics so dashboards can show how often counterfactual
+      // rows accumulate (selection coverage) and whether closure
+      // residual is falling (selectors learning from unchosen options).
+      "counterfactual_alternative_recorded",
+      "counterfactual_closure_audited",
+      // T4.2 / T4.3 / T4.4 (docs/roadmap.md frontier credit extensions,
+      // 2026-05-20). meta_credit_projected fires when the composer
+      // policy bundle accrues posterior on action_scored;
+      // brain_accuracy_observation fires per brain action_predicted vs
+      // observed residual pair; coalition_credit_distributed fires when
+      // an action_predicted cited > 1 cooperating artifacts. All three
+      // count as health metrics so dashboards can show selector
+      // calibration trends (T4.2 / T4.3) and coalition reuse rates
+      // (T4.4).
+      "meta_credit_projected",
+      "brain_accuracy_observation",
+      "coalition_credit_distributed",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

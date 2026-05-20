@@ -52,6 +52,7 @@ import { getEventById, type EmitEventInput, emitEvent } from "./events";
 import {
   applyResidualOutcome,
   getArtifact,
+  insertArtifact,
   maybePromote,
   residualToBetaDeltas,
 } from "./artifact_store";
@@ -926,6 +927,168 @@ export const distributeCredit = async (
     }
   }
 
+  // 4. T4.4 coalition / joint-citation posterior (roadmap.md §T4.4):
+  //    when the brain's action_predicted cited N>1 cooperating artifacts
+  //    (payload.cited_artifact_ids carries the brain-stated coalition),
+  //    emit a coalition_credit_distributed audit row carrying the
+  //    sorted-member coalition id + per-member shapley shares + observed
+  //    residual. The per-artifact posterior is already mutated above by
+  //    the Shapley loop on `cited`; this row makes the COMBINATION
+  //    first-class so future routing can score "these N together" as a
+  //    unit, not only the individual nodes. shapleyWeightsByCorroboration
+  //    is the canonical share fn — same algebra distributeCredit already
+  //    uses for the per-artifact split, so the emitted shares match the
+  //    posterior moves exactly.
+  const actionPredictedPayload = jsonObject(actionEv.payload);
+  const coalitionMembers = stringArrayField(actionPredictedPayload, "cited_artifact_ids")
+    .filter((id) => id !== actionArtifactId && id !== verifierArtifactId);
+  if (coalitionMembers.length > 1) {
+    const sortedMembers = [...coalitionMembers].sort();
+    const coalitionId = "coalition:" + sortedMembers.join("+");
+    const shares = shapleyWeightsByCorroboration(coalitionMembers.length);
+    // Ordered shares track context_refs / cited_artifact_ids order
+    // (first-discoverer gets largest share) — matches the per-artifact
+    // posterior moves emitted by the Shapley loop above.
+    const memberShares = coalitionMembers.map((id, i) => ({
+      artifact_id: id,
+      shapley_share: shares[i] ?? 0,
+    }));
+    emit({
+      kind: "coalition_credit_distributed",
+      substrate_origin: "substrate_auto",
+      context_refs: [params.scored_event_id, ...sortedMembers],
+      payload: {
+        coalition_id: coalitionId,
+        sorted_member_ids: sortedMembers,
+        ordered_member_ids: coalitionMembers,
+        member_count: coalitionMembers.length,
+        residual: params.observed_residual,
+        scored_event_id: params.scored_event_id,
+        action_predicted_event_id: params.action_event_id,
+        member_shares: memberShares,
+        goal_shape: directiveGoalShape,
+      } as JsonValue,
+    });
+  }
+
+  // 5. T4.2 meta-credit (roadmap.md §T4.2): credit the COMPOSER policy
+  //    bundle that selected the winning artifact/knowledge. The composer
+  //    emits prompt_policy_section_selected per pushPolicy at compose
+  //    time carrying payload.artifact_id (the chosen bundle row). For
+  //    every distinct artifact_id selected on this task before the
+  //    scored event landed, project credit to that bundle's posterior
+  //    so the SELECTOR accrues evidence about its own quality — not
+  //    only the artifact it picked. Idempotent via projection_key
+  //    "meta_credit:{scored_event_id}:{bundle_artifact_id}".
+  if (inheritTaskId && scoredEv) {
+    const selections = db
+      .query<{ payload: string }, [string, string]>(
+        `SELECT payload FROM events
+         WHERE kind = 'prompt_policy_section_selected'
+           AND task_id = ?
+           AND ts <= ?
+         ORDER BY ts ASC`,
+      )
+      .all(inheritTaskId, scoredEv.ts);
+    const seenBundles = new Set<string>();
+    for (const sel of selections) {
+      let bundleId: string | null = null;
+      let sectionName: string | null = null;
+      try {
+        const p = JSON.parse(sel.payload) as Record<string, unknown>;
+        if (typeof p.artifact_id === "string" && p.artifact_id.length > 0) bundleId = p.artifact_id;
+        if (typeof p.section_name === "string") sectionName = p.section_name;
+      } catch { /* skip malformed */ }
+      if (!bundleId || seenBundles.has(bundleId)) continue;
+      seenBundles.add(bundleId);
+      // Idempotency: skip if a prior meta_credit_projected row already
+      // exists for (scored_event_id, bundle).
+      const projectionKey = "meta_credit:" + params.scored_event_id + ":" + bundleId;
+      const prior = db
+        .query<{ x: number }, [string]>(
+          "SELECT 1 AS x FROM events WHERE kind = 'meta_credit_projected' AND json_extract(payload, '$.projection_key') = ? LIMIT 1",
+        )
+        .get(projectionKey);
+      if (prior) continue;
+      const bundleRow = getArtifact(db, bundleId);
+      let postScore: number | null = null;
+      let postConfidence: number | null = null;
+      if (bundleRow) {
+        const updated = applyResidualOutcome(
+          db,
+          bundleId,
+          params.observed_residual,
+          ts,
+          (e) => emit(e),
+          { weight: 1.0 },
+        );
+        postScore = updated.score;
+        postConfidence = updated.confidence;
+        // Emit the canonical score_updated audit row so the bundle's
+        // posterior move is visible on the same surface as other
+        // artifact credit rows. role="composer_policy" disambiguates
+        // it from action/verifier/cited roles.
+        emit({
+          kind: "act_artifact_score_updated",
+          substrate_origin: "substrate_auto",
+          action_artifact_id: bundleId,
+          payload: {
+            artifact_id: bundleId,
+            role: "composer_policy",
+            residual: params.observed_residual,
+            weight: 1.0,
+            score: postScore,
+            confidence: postConfidence,
+            scored_event_id: params.scored_event_id,
+            goal_shape: directiveGoalShape,
+            projected_from: "meta_credit",
+            section_name: sectionName,
+          } as JsonValue,
+        });
+        maybePromote(db, bundleId, (e) => emit(e));
+      }
+      emit({
+        kind: "meta_credit_projected",
+        substrate_origin: "substrate_auto",
+        context_refs: [params.scored_event_id, bundleId],
+        payload: {
+          bundle_artifact_id: bundleId,
+          section_name: sectionName,
+          residual: params.observed_residual,
+          scored_event_id: params.scored_event_id,
+          action_predicted_event_id: params.action_event_id,
+          goal_shape: directiveGoalShape,
+          bundle_registered: bundleRow !== null,
+          post_score: postScore,
+          post_confidence: postConfidence,
+          projection_key: projectionKey,
+        } as JsonValue,
+      });
+    }
+  }
+
+  // 6. T4.3 brain prediction-accuracy posterior (roadmap.md §T4.3):
+  //    every action_predicted whose substrate_origin is the brain (opencode)
+  //    is a calibration sample — emit brain_accuracy_observation with
+  //    |predicted − observed| as prediction_error, and update a per-goal_shape
+  //    brain_accuracy_predicate act_artifact posterior (auto-admitted on
+  //    first sighting). Low residual = "brain predicted well" → confirmed;
+  //    high residual = "brain predicted poorly" → contradicted. This makes
+  //    the brain's predictive calibration a first-class Beta posterior the
+  //    dispatcher can read from to route between brain / replay / inline.
+  if (actionEv.substrate_origin === "opencode") {
+    recordBrainAccuracy(db, {
+      action_predicted_event_id: params.action_event_id,
+      action_scored_event_id: params.scored_event_id,
+      predicted_residual: params.predicted_residual,
+      observed_residual: params.observed_residual,
+      goal_shape: directiveGoalShape,
+      directive_id: inheritDirectiveId,
+      task_id: inheritTaskId,
+      emit,
+    });
+  }
+
   return {
     action_artifact_id: actionArtifactId,
     verifier_artifact_id: verifierArtifactId,
@@ -936,6 +1099,118 @@ export const distributeCredit = async (
     emitted_events: emittedEvents,
   };
 };
+
+// ── T4.3 brain prediction-accuracy posterior (roadmap.md §T4.3) ──────
+//
+// Per-goal_shape Beta posterior on the brain's predicted_residual vs the
+// substrate's observed residual. brain_accuracy_predicate act_artifact
+// rows accumulate evidence per dispatch — the dispatcher can read score /
+// confidence to decide whether to trust the brain's next predicted
+// residual for a routing call (substrate_replay vs opencode_brain vs
+// claude_inline). The "outcome" we score is the prediction's ACCURACY,
+// not the action's success: low |predicted − observed| → confirmed (the
+// brain calibrated well); high |predicted − observed| → contradicted.
+
+const BRAIN_ACCURACY_ARTIFACT_PREFIX = "brain_accuracy_predicate:";
+
+const brainAccuracyArtifactId = (goalShapeToken: string): string =>
+  BRAIN_ACCURACY_ARTIFACT_PREFIX + (goalShapeToken || "default");
+
+/** Ensure the per-goal_shape brain_accuracy_predicate act_artifact row
+ *  exists; cold-start with a Beta(1,1) prior so the first observation
+ *  moves the posterior off neutral. */
+const ensureBrainAccuracyArtifact = (db: Database, artifactId: string, goalShapeToken: string): void => {
+  const existing = getArtifact(db, artifactId);
+  if (existing) return;
+  // Insert lazily; the kind="brain_accuracy_predicate" string is the
+  // canonical registry handle (T4.3 open-vocab — adding a new kind row,
+  // not extending a closed enum).
+  insertArtifact(db, {
+    id: artifactId,
+    runtime: "bun",
+    kind: "brain_accuracy_predicate",
+    body: "// brain_accuracy_predicate goal_shape=" + (goalShapeToken || "default"),
+    declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+    stateRoot: null,
+    posteriorAlpha: 1,
+    posteriorBeta: 1,
+    score: 0.5,
+    confidence: 0.0,
+    recentResidualMean: 0,
+    recentKillCount: 0,
+    status: "admitted",
+    name: "brain_accuracy_predicate_" + (goalShapeToken || "default"),
+    fixtureInput: null,
+    fixtureExpectedResidual: 0,
+  });
+};
+
+type RecordBrainAccuracyParams = {
+  action_predicted_event_id: string;
+  action_scored_event_id: string;
+  predicted_residual: number;
+  observed_residual: number;
+  goal_shape: string;
+  directive_id: string;
+  task_id: string;
+  emit: (event: EmitEventInput) => string;
+};
+
+/** Compute prediction_error = |predicted − observed|, update the per-
+ *  goal_shape brain_accuracy_predicate posterior, and emit a
+ *  brain_accuracy_observation audit row. Idempotent via projection_key
+ *  "brain_accuracy:{action_predicted_event_id}:{action_scored_event_id}". */
+const recordBrainAccuracy = (db: Database, params: RecordBrainAccuracyParams): void => {
+  const projectionKey =
+    "brain_accuracy:" + params.action_predicted_event_id + ":" + params.action_scored_event_id;
+  const prior = db
+    .query<{ x: number }, [string]>(
+      "SELECT 1 AS x FROM events WHERE kind = 'brain_accuracy_observation' AND json_extract(payload, '$.projection_key') = ? LIMIT 1",
+    )
+    .get(projectionKey);
+  if (prior) return;
+  const predicted = clampResidual(params.predicted_residual);
+  const observed = clampResidual(params.observed_residual);
+  const predictionError = Math.abs(predicted - observed);
+  // Map prediction_error to a residual-shaped signal for the Beta posterior:
+  //   error in [0, 0.2]  → score ~ 0  (well-calibrated)
+  //   error in [0.8, 1]  → score ~ 1  (badly calibrated)
+  // applyResidualOutcome's success/failure bands handle the rest.
+  const accuracyResidual = predictionError;
+  const artifactId = brainAccuracyArtifactId(params.goal_shape);
+  ensureBrainAccuracyArtifact(db, artifactId, params.goal_shape);
+  const ts = nowIso();
+  const updated = applyResidualOutcome(
+    db,
+    artifactId,
+    accuracyResidual,
+    ts,
+    (e) => params.emit(e),
+    { weight: 1.0 },
+  );
+  params.emit({
+    kind: "brain_accuracy_observation",
+    substrate_origin: "substrate_auto",
+    context_refs: [params.action_predicted_event_id, params.action_scored_event_id, artifactId],
+    payload: {
+      action_predicted_event_id: params.action_predicted_event_id,
+      action_scored_event_id: params.action_scored_event_id,
+      predicted_residual: predicted,
+      observed_residual: observed,
+      prediction_error: predictionError,
+      goal_shape: params.goal_shape,
+      brain_accuracy_artifact_id: artifactId,
+      post_score: updated.score,
+      post_confidence: updated.confidence,
+      post_alpha: updated.posteriorAlpha,
+      post_beta: updated.posteriorBeta,
+      projection_key: projectionKey,
+    } as JsonValue,
+  });
+};
+
+export const __recordBrainAccuracyForTest = recordBrainAccuracy;
+export const __brainAccuracyArtifactIdForTest = brainAccuracyArtifactId;
 
 export const distributeOwnerObservedOutcomeCredit = async (
   db: Database,
