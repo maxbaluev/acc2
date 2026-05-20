@@ -738,8 +738,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // pre-step would still call expensive readiness paths, so the entire
   // block — registration plus setIntervals — is gated.
   if (!skipWorkers) {
-  registerWorker("amendment", amendmentTickMs);
-  registerWorker("metrics_gauge_refresh", gaugeTickMs);
+  // Brain audit D (2026-05-15) closure: amendment + metrics_gauge_refresh
+  // are part of the canonical ACC2_DISABLE_WORKERS taxonomy (WorkerName
+  // union in runtime/worker_autostart.ts). Pre-fix these two registered
+  // unconditionally so operators could not opt them out via the canonical
+  // env var. Per the same audit lesson, isWorkerEnabled gates them now.
+  if (isWorkerEnabled("amendment")) registerWorker("amendment", amendmentTickMs);
+  if (isWorkerEnabled("metrics_gauge_refresh")) registerWorker("metrics_gauge_refresh", gaugeTickMs);
   if (isWorkerEnabled("integrity")) registerWorker("integrity", integrityIntervalMs);
   if (isWorkerEnabled("embedder")) registerWorker("embedder", embedderIntervalMs);
   if (isWorkerEnabled("rehabilitation")) registerWorker("rehabilitation", rehabIntervalMs);
@@ -823,44 +828,52 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // for missed in-process notifications. Errors are surfaced as error_caught
   // events (one per amendment) so a malformed amendment can't kill the daemon
   // AND never vanishes silently.
-  let amendmentMarked = false;
-  const amendmentTick = supervisedTick(db, "amendment", amendmentTickMs, async () => {
-    const unapplied = findUnappliedAmendments(db);
-    for (const id of unapplied) {
-      try {
-        await applyAmendment(db, id);
-      } catch (err) {
-        logger.warn(
-          { amendment_id: id, err: (err as Error).message },
-          "applyAmendment failed — surfaced as error_caught, continuing",
-        );
+  // Brain audit D (2026-05-15) closure: gate the amendment reactive
+  // worker on isWorkerEnabled too (matches the registerWorker pre-check
+  // earlier). Without this, ACC2_DISABLE_WORKERS=amendment opt-out
+  // disabled the periodic tick registration but kept the reactive
+  // dispatcher running — pathology surface for operators expecting
+  // the env var to fully silence the worker.
+  if (isWorkerEnabled("amendment")) {
+    let amendmentMarked = false;
+    const amendmentTick = supervisedTick(db, "amendment", amendmentTickMs, async () => {
+      const unapplied = findUnappliedAmendments(db);
+      for (const id of unapplied) {
         try {
-          emitEvent(db, {
-            kind: "error_caught",
-            substrate_origin: "substrate_auto",
-            payload: {
-              where: "daemon.amendment.apply",
-              recoverable: true,
-              amendment_id: id,
-              message: (err as Error).message,
-            },
-          });
-        } catch (emitErr) {
-          logger.debug(
-            { where: "daemon.amendment.emit", err: String(emitErr) },
-            "could not emit error_caught (db likely closed)",
+          await applyAmendment(db, id);
+        } catch (err) {
+          logger.warn(
+            { amendment_id: id, err: (err as Error).message },
+            "applyAmendment failed — surfaced as error_caught, continuing",
           );
+          try {
+            emitEvent(db, {
+              kind: "error_caught",
+              substrate_origin: "substrate_auto",
+              payload: {
+                where: "daemon.amendment.apply",
+                recoverable: true,
+                amendment_id: id,
+                message: (err as Error).message,
+              },
+            });
+          } catch (emitErr) {
+            logger.debug(
+              { where: "daemon.amendment.emit", err: String(emitErr) },
+              "could not emit error_caught (db likely closed)",
+            );
+          }
         }
       }
-    }
-    if (!amendmentMarked) { markWorkerReady("amendment"); amendmentMarked = true; }
-  });
-  registerReactiveWorker("amendment", amendmentTickMs, ["directive_amended"], amendmentTick, { minReactiveGapMs: amendmentTickMs });
-  // Fire one synchronous mark right away so amendment readiness does
-  // not block /ready for 2s on a quiet daemon.
-  markWorkerReady("amendment");
-  amendmentMarked = true;
-  recordWorkerTick("amendment");
+      if (!amendmentMarked) { markWorkerReady("amendment"); amendmentMarked = true; }
+    });
+    registerReactiveWorker("amendment", amendmentTickMs, ["directive_amended"], amendmentTick, { minReactiveGapMs: amendmentTickMs });
+    // Fire one synchronous mark right away so amendment readiness does
+    // not block /ready for 2s on a quiet daemon.
+    markWorkerReady("amendment");
+    amendmentMarked = true;
+    recordWorkerTick("amendment");
+  }
   // amendment is activation-driven; activationDisposers are cleared on shutdown.
 
   // Batch 3.OPS: gauge refresh (every 30s) keeps the SQLite-backed gauges
