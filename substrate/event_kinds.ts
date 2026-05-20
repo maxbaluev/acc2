@@ -305,6 +305,13 @@ export const EVENT_KINDS = {
   artifact_health_counter_updated:         { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   act_artifact_rehabilitated:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   act_artifact_score_updated:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // T0.2 universal projection — emit-boundary projector for action_scored
+  // walks source_act_event_id → action_predicted's cited_artifact_ids and
+  // emits act_artifact_score_updated per cited artifact. Errors during
+  // that projection emit a projection_error row (fail-soft: the parent
+  // action_scored already landed; the error is observable for audits but
+  // does not block the primary emit).
+  projection_error:                        { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // F4a deprecated aliases — historical event rows wrote these kind
   // strings before the rename. Registered here so existing queries that
   // SELECT WHERE kind = 'code_artifact_admitted' still match. The

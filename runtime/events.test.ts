@@ -266,14 +266,28 @@ describe("emitEvent act_tuple_recorded projector", () => {
     //   (b) every derived row carries source_act_id = the act event's id
     //   (c) every derived row's context_refs includes the act id
     const kinds = rows.map((r) => r.kind);
-    expect(kinds[0]).toBe("act_tuple_recorded");
+    // 2026-05-20: ORDER BY ts is unstable on millisecond ties — the
+    // emit-boundary projections may land in the same ms as the source
+    // act_tuple_recorded row. Assert that act_tuple_recorded is present
+    // and was the FIRST emit (its id appears in every derived row's
+    // context_refs / source_act_id), not that it sorts first.
+    expect(kinds).toContain("act_tuple_recorded");
     // 2026-05-19 (brain EH5A37DPHX0GSCJKBSRNZDX700): action_scored
     // projection now auto-admits unseen verifier_kinds and emits
     // verifier_kind_auto_admitted for operator audit. The audit row's
     // context_refs reference the source action_scored, not the
     // act_tuple_recorded; it sits at task scope as a sibling to the
     // projection set.
-    expect(kinds.slice(1).sort()).toEqual([
+    // 2026-05-20 (T0.2 universal projector): act_artifact_score_updated
+    // rows fire for the action_artifact_id, verifier_artifact_id, and each
+    // cited_artifact_id on the projected action_scored row. The projector
+    // closes the parity gap between action_scored and credit emission
+    // structurally — every action_scored produces one credit row per
+    // referenced artifact.
+    expect(kinds.filter((k) => k !== "act_tuple_recorded").sort()).toEqual([
+      "act_artifact_score_updated",
+      "act_artifact_score_updated",
+      "act_artifact_score_updated",
       "action_predicted",
       "action_scored",
       "applied_change_committed",
@@ -282,7 +296,7 @@ describe("emitEvent act_tuple_recorded projector", () => {
       "retrieval_binding",
       "verifier_kind_auto_admitted",
     ]);
-    for (const row of rows.slice(1)) {
+    for (const row of rows.filter((r) => r.kind !== "act_tuple_recorded")) {
       // The auto-admit row is a sibling — source_act_id is the
       // action_scored event id, NOT the act_tuple_recorded id. ONE event
       // per logical first-observation; payload.admissions lists every
@@ -665,7 +679,13 @@ describe("emitEvent act_tuple_recorded projector", () => {
     // before-INSERT idempotency keeps the registry row count at 1 —
     // and the audit event fires only on the FIRST observation because
     // the helper short-circuits when the row already exists.
+    // 2026-05-20 (T0.2 universal projector): act_artifact_score_updated
+    // rows fire per referenced artifact (action + verifier + cited) on
+    // the projected action_scored. The replayed act collapses to the
+    // same projection_key on every projector emit, so the multiset
+    // stays at 3 (action + verifier + cited).
     expect(Object.fromEntries(projected.map((row) => [row.kind, row.n]))).toEqual({
+      act_artifact_score_updated: 3,
       action_predicted: 1,
       action_scored: 1,
       applied_change_committed: 1,

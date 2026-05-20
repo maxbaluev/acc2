@@ -622,6 +622,19 @@ export const distributeCredit = async (
   //    the action's stamp and miss its own novelty.
   let computedActionWeight = 1.0;
   let computedVerifierWeight = 1.0;
+  // T0.2 universal projector idempotency guard: the emit-boundary
+  // projector in runtime/events.ts may have already credited the action
+  // and verifier artifacts for this scored_event_id. Skip the
+  // applyResidualOutcome calls when that's the case so the posterior
+  // doesn't move twice. The score_updated row emission below is also
+  // gated by the same check (priorScoreUpdateExists) to keep audit-row
+  // counts honest.
+  // When this credit run is itself an owner-observed pass, ignore any
+  // prior NON-owner credit rows for the same scored_event_id — the
+  // owner's verdict is a fresh signal that must always apply.
+  const isOwnerObservedRun = creditMetadata.ownerEvidenceEventId !== null;
+  const actionAlreadyCredited = !isOwnerObservedRun && primaryArtifactsRegistered && priorScoreUpdateExists(db, params.scored_event_id, actionArt!.id);
+  const verifierAlreadyCredited = !isOwnerObservedRun && primaryArtifactsRegistered && priorScoreUpdateExists(db, params.scored_event_id, verifierArt!.id);
   if (primaryArtifactsRegistered) {
     computedActionWeight = applyNoveltyBonus(actionArt!.id, 1.0);
     computedVerifierWeight = applyNoveltyBonus(verifierArt!.id, 1.0);
@@ -630,22 +643,26 @@ export const distributeCredit = async (
     // the LATM novelty-bonus path. Auto-quarantine fires inside the
     // primitive so the explicit maybeQuarantine below is now structural
     // backup, not a separate driver.
-    applyResidualOutcome(
-      db,
-      actionArt!.id,
-      params.observed_residual,
-      ts,
-      (e) => emit(e),
-      { weight: computedActionWeight },
-    );
-    applyResidualOutcome(
-      db,
-      verifierArt!.id,
-      params.observed_residual,
-      ts,
-      (e) => emit(e),
-      { weight: computedVerifierWeight },
-    );
+    if (!actionAlreadyCredited) {
+      applyResidualOutcome(
+        db,
+        actionArt!.id,
+        params.observed_residual,
+        ts,
+        (e) => emit(e),
+        { weight: computedActionWeight },
+      );
+    }
+    if (!verifierAlreadyCredited) {
+      applyResidualOutcome(
+        db,
+        verifierArt!.id,
+        params.observed_residual,
+        ts,
+        (e) => emit(e),
+        { weight: computedVerifierWeight },
+      );
+    }
   } else {
     // Synthetic actuator path: record the skip so observers can see the
     // credit chain ran but skipped primary artifact updates. Cited
@@ -668,38 +685,42 @@ export const distributeCredit = async (
   // registered. Synthetic actuators skip cleanly here and still
   // distribute citation credit below.
   if (primaryArtifactsRegistered) {
-    const actionRowPost = getArtifact(db, actionArt!.id)!;
-    emit({
-      kind: "act_artifact_score_updated",
-      substrate_origin: "substrate_auto",
-      action_artifact_id: actionArt!.id,
-      payload: {
-        artifact_id: actionArt!.id,
-        role: "action",
-        residual: params.observed_residual,
-        weight: computedActionWeight,
-        score: actionRowPost.score,
-        confidence: actionRowPost.confidence,
-        scored_event_id: params.scored_event_id,
-        goal_shape: directiveGoalShape,
-      } as JsonValue,
-    });
-    const verifierRowPost = getArtifact(db, verifierArt!.id)!;
-    emit({
-      kind: "act_artifact_score_updated",
-      substrate_origin: "substrate_auto",
-      action_artifact_id: verifierArt!.id,
-      payload: {
-        artifact_id: verifierArt!.id,
-        role: "verifier",
-        residual: params.observed_residual,
-        weight: computedVerifierWeight,
-        score: verifierRowPost.score,
-        confidence: verifierRowPost.confidence,
-        scored_event_id: params.scored_event_id,
-        goal_shape: directiveGoalShape,
-      } as JsonValue,
-    });
+    if (!actionAlreadyCredited) {
+      const actionRowPost = getArtifact(db, actionArt!.id)!;
+      emit({
+        kind: "act_artifact_score_updated",
+        substrate_origin: "substrate_auto",
+        action_artifact_id: actionArt!.id,
+        payload: {
+          artifact_id: actionArt!.id,
+          role: "action",
+          residual: params.observed_residual,
+          weight: computedActionWeight,
+          score: actionRowPost.score,
+          confidence: actionRowPost.confidence,
+          scored_event_id: params.scored_event_id,
+          goal_shape: directiveGoalShape,
+        } as JsonValue,
+      });
+    }
+    if (!verifierAlreadyCredited) {
+      const verifierRowPost = getArtifact(db, verifierArt!.id)!;
+      emit({
+        kind: "act_artifact_score_updated",
+        substrate_origin: "substrate_auto",
+        action_artifact_id: verifierArt!.id,
+        payload: {
+          artifact_id: verifierArt!.id,
+          role: "verifier",
+          residual: params.observed_residual,
+          weight: computedVerifierWeight,
+          score: verifierRowPost.score,
+          confidence: verifierRowPost.confidence,
+          scored_event_id: params.scored_event_id,
+          goal_shape: directiveGoalShape,
+        } as JsonValue,
+      });
+    }
 
     // 2. Promotion checks on action + verifier. Quarantine already
     // fired inside applyResidualOutcome (canonical Hole-7 wiring +
@@ -761,7 +782,14 @@ export const distributeCredit = async (
       // inside; we still call maybePromote explicitly because the
       // primitive owns demotion (Hole 7) but not promotion.
       const row = getArtifact(db, targetId);
-      if (row) {
+      // T0.2 universal projector idempotency guard: skip if a prior
+      // act_artifact_score_updated row already exists for this
+      // (scored_event_id, artifact_id) pair (the emit-boundary
+      // projector may have credited this artifact already). Owner-
+      // observed runs ignore non-owner prior rows so the verdict
+      // always applies.
+      const alreadyCredited = !isOwnerObservedRun && priorScoreUpdateExists(db, params.scored_event_id, targetId);
+      if (row && !alreadyCredited) {
         const updated = applyResidualOutcome(
           db,
           targetId,
@@ -945,6 +973,272 @@ export const distributeOwnerObservedOutcomeCredit = async (
     predicted_residual: actionRow.predicted_residual ?? scoredRow.predicted_residual ?? 0.5,
     observed_residual: observedResidual,
   });
+};
+
+// ── T0.2 Universal action_scored → act_artifact_score_updated projection ─
+//
+// Live evidence (24h pre-fix): action_scored=2380,
+// act_artifact_score_updated=123, parity=5.17%. distributeCredit's full
+// Shapley pipeline is the rich path, but many emit sites (internal
+// substrate decisions whose action handles aren't registered act_artifact
+// rows — closure_verifier_v1, dispatch_decider_v1, intent_classifier_v1,
+// lesson_extractor_v1, knowledge_merger_v1, citation_chooser_v1) hit the
+// synthetic-actuator branch and produce no per-cited-artifact credit row.
+// The universal projector closes that gap structurally: walk
+// source_act_event_id → action_predicted, pull cited_artifact_ids from
+// payload + context_refs, and emit act_artifact_score_updated per cited
+// artifact with the residual + Beta posterior delta. Idempotent via
+// projection_key. The recursive distributeCredit machinery still owns
+// the rich Shapley + LATM novelty + knowledge candidate path; this
+// projector is the catch-all that guarantees parity == 100% for every
+// action_scored that carries a resolvable source_act_event_id.
+//
+// Recursion guard: rows whose payload.projected_from === "distribute_credit"
+// are skipped — distributeCredit owns the Shapley share for the act,
+// projector would double-count if it ran on those rows.
+
+const projectionKeyFor = (sourceActEventId: string, artifactId: string): string =>
+  "act_artifact_score_updated:" + sourceActEventId + ":" + artifactId;
+
+const projectionKeyExists = (db: Database, kind: string, key: string): boolean => {
+  const row = db
+    .query<{ x: number }, [string, string]>(
+      "SELECT 1 AS x FROM events WHERE kind = ? AND json_extract(payload, '$.projection_key') = ? LIMIT 1",
+    )
+    .get(kind, key);
+  return row !== null;
+};
+
+/** Broader idempotency check — has any prior act_artifact_score_updated
+ *  row already been emitted that mentions both the scored_event_id and
+ *  artifact_id (covers distributeCredit's projection-key shape AND the
+ *  universal projector's). The owner-observed-outcome credit pass is a
+ *  separate logical event (carries its own owner_observed_outcome_event_id
+ *  on the payload); it is allowed to run again on the same scored_event_id
+ *  to apply the owner's negative/positive verdict to cited posteriors.
+ *  Returns true only when a prior row exists that is NOT an owner-observed
+ *  credit row, so the post-write projector and the followup distributeCredit
+ *  don't double-credit, but distributeOwnerObservedOutcomeCredit can still
+ *  apply its residual. */
+const priorScoreUpdateExists = (
+  db: Database,
+  scoredEventId: string,
+  artifactId: string,
+  opts?: { ignoreOwnerObserved?: boolean },
+): boolean => {
+  const ignoreOwner = opts?.ignoreOwnerObserved !== false; // default true
+  const sql = ignoreOwner
+    ? `SELECT 1 AS x FROM events WHERE kind = 'act_artifact_score_updated'
+         AND json_extract(payload, '$.scored_event_id') = ?
+         AND json_extract(payload, '$.artifact_id') = ?
+         AND (json_extract(payload, '$.owner_observed_outcome_event_id') IS NULL)
+       LIMIT 1`
+    : `SELECT 1 AS x FROM events WHERE kind = 'act_artifact_score_updated'
+         AND json_extract(payload, '$.scored_event_id') = ?
+         AND json_extract(payload, '$.artifact_id') = ?
+       LIMIT 1`;
+  const row = db
+    .query<{ x: number }, [string, string]>(sql)
+    .get(scoredEventId, artifactId);
+  return row !== null;
+};
+
+type ScoredEventLite = {
+  id: string;
+  payload: string;
+  context_refs: string;
+  directive_id: string;
+  task_id: string;
+  residual: number | null;
+  action_artifact_id?: string | null;
+  verifier_artifact_id?: string | null;
+};
+
+/** Universal post-write projector for action_scored.
+ *  Reads source_act_event_id → action_predicted; collects
+ *  cited_artifact_ids from payload + context_refs; emits
+ *  act_artifact_score_updated per cited artifact with the scored
+ *  residual + Beta posterior delta. Idempotent via projection_key
+ *  (act_artifact_score_updated:{source_act_event_id}:{artifact_id}).
+ *  Skips when the row was emitted by distributeCredit (recursion
+ *  guard) or when source_act_event_id is missing/unresolvable.
+ *  Fail-soft: any error emits a projection_error row but never throws. */
+export const projectActionScoredToCredit = (
+  db: Database,
+  scoredEvent: ScoredEventLite,
+): void => {
+  try {
+    const payload = JSON.parse(scoredEvent.payload || "{}") as Record<string, unknown>;
+    // Recursion guard: distributeCredit-stamped rows already own their
+    // credit share; projecting again would double-count.
+    if (payload.projected_from === "distribute_credit") return;
+    // Prefer action_predicted_event_id when stamped (act_tuple projection
+    // path); fall back to source_act_event_id when only that is present
+    // (direct emit paths). source_act_event_id may point at a non-
+    // action_predicted row (e.g. an act_tuple_recorded), so we always
+    // require the resolved row's kind to be action_predicted.
+    const actionPredictedEventId = typeof payload.action_predicted_event_id === "string" && payload.action_predicted_event_id.length > 0
+      ? payload.action_predicted_event_id
+      : null;
+    const sourceActEventId = typeof payload.source_act_event_id === "string" && payload.source_act_event_id.length > 0
+      ? payload.source_act_event_id
+      : null;
+    const lookupId = actionPredictedEventId ?? sourceActEventId;
+    if (!lookupId) return; // safe no-op
+    const predictedRow = db
+      .query<{ id: string; payload: string; context_refs: string }, [string]>(
+        "SELECT id, payload, context_refs FROM events WHERE id = ? AND kind = 'action_predicted'",
+      )
+      .get(lookupId);
+    if (!predictedRow) {
+      // The act_tuple projection path stamps source_act_event_id with
+      // the act_tuple_recorded id (not the projected action_predicted),
+      // so a lookup miss is EXPECTED when only source_act_event_id is
+      // present and the id is itself a non-action_predicted row. Check
+      // whether the lookupId resolves to ANY known row — if it does,
+      // skip silently (expected case); if it resolves to no row at all,
+      // emit projection_error (the dangling reference is a real audit
+      // signal).
+      const anyRow = db.query("SELECT kind FROM events WHERE id = ?").get(lookupId) as { kind: string } | null;
+      if (!anyRow) {
+        emitEvent(db, {
+          kind: "projection_error",
+          substrate_origin: "substrate_auto",
+          directive_id: scoredEvent.directive_id,
+          task_id: scoredEvent.task_id,
+          context_refs: [scoredEvent.id, lookupId],
+          payload: {
+            where: "projectActionScoredToCredit",
+            reason: "source_act_event_id_unresolvable",
+            action_predicted_event_id: actionPredictedEventId,
+            source_act_event_id: sourceActEventId,
+            looked_up_id: lookupId,
+            action_scored_event_id: scoredEvent.id,
+          } as JsonValue,
+        });
+      }
+      return;
+    }
+    const predictedPayload = JSON.parse(predictedRow.payload || "{}") as Record<string, unknown>;
+    const predictedContextRefs = JSON.parse(predictedRow.context_refs || "[]") as string[];
+    const citedArtifactIds = new Set<string>();
+    // PRIMARY: action_artifact_id and verifier_artifact_id from the scored
+    // event itself. These are the primary act participants — every
+    // action_scored row should produce a credit row for both, even when
+    // they aren't registered act_artifact rows (in which case the row
+    // emits but the posterior update is a no-op).
+    if (typeof scoredEvent.action_artifact_id === "string" && scoredEvent.action_artifact_id.length > 0) {
+      citedArtifactIds.add(scoredEvent.action_artifact_id);
+    }
+    if (typeof scoredEvent.verifier_artifact_id === "string" && scoredEvent.verifier_artifact_id.length > 0) {
+      citedArtifactIds.add(scoredEvent.verifier_artifact_id);
+    }
+    // CITED: from action_predicted payload.cited_artifact_ids
+    const payloadCited = predictedPayload.cited_artifact_ids;
+    if (Array.isArray(payloadCited)) {
+      for (const id of payloadCited) {
+        if (typeof id === "string" && id.length > 0) citedArtifactIds.add(id);
+      }
+    }
+    // CITED: from action_predicted.context_refs — context_refs may include
+    // ids that are act_artifact rows. Classify each to confirm before
+    // crediting. Knowledge candidates go through distributeCredit's
+    // knowledge path; the projector is artifact-only.
+    for (const ref of predictedContextRefs) {
+      if (typeof ref !== "string" || ref.length === 0) continue;
+      const isArtifact = db.query("SELECT 1 AS x FROM act_artifact WHERE id = ?").get(ref) as { x: number } | null;
+      if (isArtifact) citedArtifactIds.add(ref);
+    }
+    if (citedArtifactIds.size === 0) return; // nothing to credit
+    const residual = typeof payload.residual === "number" && Number.isFinite(payload.residual)
+      ? clampResidual(payload.residual)
+      : (typeof scoredEvent.residual === "number" && Number.isFinite(scoredEvent.residual)
+          ? clampResidual(scoredEvent.residual)
+          : 0.5);
+    const { alphaDelta, betaDelta } = residualToBetaDeltas(residual);
+    const ts = nowIso();
+    // Key on the resolved action_predicted id so the projection key is
+    // stable regardless of which header field (action_predicted_event_id
+    // or source_act_event_id) the emitter happened to stamp.
+    const projectionAnchorId = predictedRow.id;
+    for (const artifactId of citedArtifactIds) {
+      const key = projectionKeyFor(projectionAnchorId, artifactId);
+      if (projectionKeyExists(db, "act_artifact_score_updated", key)) continue;
+      // Broader guard: distributeCredit may have already emitted an
+      // act_artifact_score_updated for this (scored_event_id, artifact_id)
+      // pair via its own projection-key shape. Skip to avoid the
+      // double-update on the posterior.
+      if (priorScoreUpdateExists(db, scoredEvent.id, artifactId)) continue;
+      // Apply weighted Beta posterior delta to the artifact's row when
+      // it's registered. When the row is missing (synthetic/unregistered
+      // handle) we still emit the credit row — the audit trail needs to
+      // show parity even when the posterior cannot be applied.
+      const row = getArtifact(db, artifactId);
+      let postScore: number | null = null;
+      let postConfidence: number | null = null;
+      if (row) {
+        const updated = applyResidualOutcome(
+          db,
+          artifactId,
+          residual,
+          ts,
+          () => { /* downstream emits handled by primitive */ },
+          { weight: 1.0 },
+        );
+        postScore = updated.score;
+        postConfidence = updated.confidence;
+      }
+      emitEvent(db, {
+        kind: "act_artifact_score_updated",
+        substrate_origin: "substrate_auto",
+        directive_id: scoredEvent.directive_id,
+        task_id: scoredEvent.task_id,
+        action_artifact_id: artifactId,
+        context_refs: [scoredEvent.id, projectionAnchorId, artifactId, ...(sourceActEventId && sourceActEventId !== projectionAnchorId ? [sourceActEventId] : [])],
+        payload: {
+          artifact_id: artifactId,
+          role: "cited",
+          residual,
+          weight: 1.0,
+          posterior_delta_alpha: alphaDelta,
+          posterior_delta_beta: betaDelta,
+          score: postScore,
+          confidence: postConfidence,
+          scored_event_id: scoredEvent.id,
+          // source_act_id mirrors distributeCredit's payload convention —
+          // points at the logical act (act_tuple_recorded id when the
+          // scored row came through the projection path, or the
+          // action_predicted id for direct emits).
+          source_act_id: sourceActEventId ?? projectionAnchorId,
+          source_act_event_id: sourceActEventId ?? projectionAnchorId,
+          action_predicted_event_id: projectionAnchorId,
+          projected_from: "action_scored_universal_projector",
+          projection_key: key,
+        } as JsonValue,
+      });
+    }
+  } catch (err) {
+    // Fail-soft: parent action_scored already landed. Surface the
+    // failure as a projection_error so it's observable, but DO NOT
+    // throw — that would poison the emit boundary.
+    try {
+      emitEvent(db, {
+        kind: "projection_error",
+        substrate_origin: "substrate_auto",
+        directive_id: scoredEvent.directive_id,
+        task_id: scoredEvent.task_id,
+        context_refs: [scoredEvent.id],
+        payload: {
+          where: "projectActionScoredToCredit",
+          reason: "exception",
+          error: (err as Error).message ?? String(err),
+          action_scored_event_id: scoredEvent.id,
+        } as JsonValue,
+      });
+    } catch {
+      /* swallow secondary failure */
+    }
+  }
 };
 
 // ── Internal exports for tests ────────────────────────────────────

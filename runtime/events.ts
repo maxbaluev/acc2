@@ -1268,6 +1268,39 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       }).catch(() => { /* swallow; can be re-driven from the action_scored row */ });
     } catch { /* defensive */ }
   }
+  // T0.2 universal action_scored → act_artifact_score_updated projection.
+  //
+  // Live evidence (24h pre-fix): action_scored=2380,
+  // act_artifact_score_updated=123, parity=5.17%. distributeCredit's rich
+  // Shapley pipeline only fires for select code paths and silently skips
+  // when the action_artifact_id isn't a registered act_artifact row
+  // (synthetic-actuator branch). The universal projector closes the gap:
+  // every action_scored emit walks source_act_event_id → action_predicted's
+  // cited_artifact_ids and emits act_artifact_score_updated per cited
+  // artifact, idempotently. The recursion guard
+  // (payload.projected_from === "distribute_credit") prevents
+  // double-credit when distributeCredit itself drives the action_scored
+  // emit. Synchronous so idempotency is race-free.
+  if (input.kind === "action_scored") {
+    try {
+      const { projectActionScoredToCredit } = require("./credit") as typeof import("./credit");
+      projectActionScoredToCredit(db, {
+        id,
+        payload: JSON.stringify(eventPayload),
+        context_refs: JSON.stringify(input.context_refs ?? []),
+        directive_id: directive_id,
+        task_id: task_id,
+        residual: input.residual ?? null,
+        action_artifact_id: input.action_artifact_id ?? null,
+        verifier_artifact_id: input.verifier_artifact_id ?? null,
+      });
+    } catch (err) {
+      // Fail-soft: parent action_scored row already landed. The projector
+      // emits its own projection_error rows on internal failure; this
+      // outer guard only catches require/import-time exceptions.
+      void err;
+    }
+  }
   // Code-artifact-candidate emit-side screen (dark-gate observability,
   // 2026-05-18). The candidate row lands first so its id is stable; the
   // screen returns sibling refusal events (predicate_gate_rejected,

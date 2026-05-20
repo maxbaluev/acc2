@@ -959,3 +959,199 @@ describe("act_tuple_recorded projected credit", () => {
     expect(JSON.parse(update!.payload).residual).toBe(1);
   });
 });
+
+// T0.2 — universal emit-boundary projector tests. The projector at the
+// runtime/events.ts post-write hook walks action_scored.source_act_event_id
+// back to action_predicted, pulls cited_artifact_ids, and emits
+// act_artifact_score_updated per cited artifact. Idempotent via
+// projection_key act_artifact_score_updated:{source_act_event_id}:{artifact_id}.
+describe("projectActionScoredToCredit — universal emit-boundary projector", () => {
+  test("emits act_artifact_score_updated per cited_artifact_id with correct residual + posterior delta", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "proj_cited_a", "// cited a");
+    insertSampleArtifact(db, "proj_cited_b", "// cited b");
+    // Emit action_predicted that lists two cited artifacts in payload.
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_proj_1",
+      task_id: "t_proj_1",
+      action_artifact_id: "synthetic_handle_v1",
+      verifier_artifact_id: "synthetic_verifier_v1",
+      predicted_residual: 0.2,
+      payload: {
+        source_act_event_id: "synthetic_source",
+        cited_artifact_ids: ["proj_cited_a", "proj_cited_b"],
+      },
+    });
+    const aBefore = getArtifact(db, "proj_cited_a")!;
+    const bBefore = getArtifact(db, "proj_cited_b")!;
+    // Emit action_scored that references the action_predicted via
+    // payload.source_act_event_id. The projector should fire and credit
+    // both cited artifacts.
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_proj_1",
+      task_id: "t_proj_1",
+      action_artifact_id: "synthetic_handle_v1",
+      verifier_artifact_id: "synthetic_verifier_v1",
+      residual: 0.2,
+      payload: {
+        source_act_event_id: ap.id,
+        verifier_kind: "deterministic_code",
+      },
+    });
+    // Expect one act_artifact_score_updated per cited artifact AND for
+    // the primary action_artifact_id + verifier_artifact_id.
+    const updates = db
+      .query<{ payload: string }, []>(
+        "SELECT payload FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.projected_from') = 'action_scored_universal_projector'",
+      )
+      .all();
+    const artifactIds = updates.map((r) => JSON.parse(r.payload).artifact_id as string);
+    expect(artifactIds).toContain("proj_cited_a");
+    expect(artifactIds).toContain("proj_cited_b");
+    expect(artifactIds).toContain("synthetic_handle_v1"); // primary action
+    expect(artifactIds).toContain("synthetic_verifier_v1"); // primary verifier
+    // Cited artifacts' posteriors moved (registered rows).
+    const aAfter = getArtifact(db, "proj_cited_a")!;
+    const bAfter = getArtifact(db, "proj_cited_b")!;
+    expect(aAfter.posteriorAlpha).toBeGreaterThan(aBefore.posteriorAlpha);
+    expect(bAfter.posteriorAlpha).toBeGreaterThan(bBefore.posteriorAlpha);
+  });
+
+  test("idempotent: re-emitting an action_scored with the same source_act_event_id does not double-emit", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "idem_cited", "// cited");
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_idem",
+      task_id: "t_idem",
+      action_artifact_id: "handle_v1",
+      verifier_artifact_id: "verifier_v1",
+      predicted_residual: 0.2,
+      payload: {
+        source_act_event_id: "synthetic",
+        cited_artifact_ids: ["idem_cited"],
+      },
+    });
+    // First emission.
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_idem",
+      task_id: "t_idem",
+      action_artifact_id: "handle_v1",
+      verifier_artifact_id: "verifier_v1",
+      residual: 0.2,
+      payload: { source_act_event_id: ap.id, verifier_kind: "deterministic_code" },
+    });
+    const firstCount = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.artifact_id') = 'idem_cited'")
+      .get() as { c: number }).c;
+    expect(firstCount).toBe(1);
+    // Second emission with the SAME source_act_event_id — the projector
+    // must skip via the projection_key idempotency check.
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_idem",
+      task_id: "t_idem",
+      action_artifact_id: "handle_v1",
+      verifier_artifact_id: "verifier_v1",
+      residual: 0.2,
+      payload: { source_act_event_id: ap.id, verifier_kind: "deterministic_code" },
+    });
+    const secondCount = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.artifact_id') = 'idem_cited'")
+      .get() as { c: number }).c;
+    expect(secondCount).toBe(1); // no new row
+  });
+
+  test("action_scored with NO source_act_event_id is a safe no-op (no projector emit)", () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "noop_handle", "// handle");
+    const beforeCount = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.projected_from') = 'action_scored_universal_projector'")
+      .get() as { c: number }).c;
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_noop",
+      task_id: "t_noop",
+      action_artifact_id: "noop_handle",
+      verifier_artifact_id: "noop_verifier",
+      residual: 0.5,
+      payload: { verifier_kind: "deterministic_code" }, // no source_act_event_id
+    });
+    const afterCount = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.projected_from') = 'action_scored_universal_projector'")
+      .get() as { c: number }).c;
+    expect(afterCount).toBe(beforeCount); // no new universal-projector rows
+  });
+
+  test("action_scored with source_act_event_id pointing at non-existent event emits projection_error and no credit", () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "err_handle", "// handle");
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_err",
+      task_id: "t_err",
+      action_artifact_id: "err_handle",
+      verifier_artifact_id: "err_verifier",
+      residual: 0.5,
+      payload: {
+        source_act_event_id: "does_not_exist_eventid",
+        verifier_kind: "deterministic_code",
+      },
+    });
+    const err = db
+      .query<{ payload: string }, []>(
+        "SELECT payload FROM events WHERE kind = 'projection_error' AND json_extract(payload, '$.where') = 'projectActionScoredToCredit'",
+      )
+      .get();
+    expect(err).not.toBeNull();
+    const errPayload = JSON.parse(err!.payload) as Record<string, unknown>;
+    expect(errPayload.reason).toBe("source_act_event_id_unresolvable");
+    // No projector-credit rows landed.
+    const creditRows = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.projected_from') = 'action_scored_universal_projector'")
+      .get() as { c: number };
+    expect(creditRows.c).toBe(0);
+  });
+
+  test("recursion guard: action_scored stamped with projected_from='distribute_credit' is skipped", () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "rec_cited", "// cited");
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_rec",
+      task_id: "t_rec",
+      action_artifact_id: "rec_handle",
+      verifier_artifact_id: "rec_verifier",
+      predicted_residual: 0.2,
+      payload: { cited_artifact_ids: ["rec_cited"] },
+    });
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_rec",
+      task_id: "t_rec",
+      action_artifact_id: "rec_handle",
+      verifier_artifact_id: "rec_verifier",
+      residual: 0.2,
+      payload: {
+        source_act_event_id: ap.id,
+        projected_from: "distribute_credit", // recursion guard
+      },
+    });
+    const projectorRows = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.projected_from') = 'action_scored_universal_projector'")
+      .get() as { c: number };
+    expect(projectorRows.c).toBe(0); // projector did NOT fire
+  });
+});
