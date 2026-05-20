@@ -112,6 +112,18 @@ export const EVENT_KINDS = {
   // act lets distributeCredit adjust the edge's posterior alongside its
   // endpoint nodes.
   causal_edge_observed:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // Tier-S3 trajectory-motif posterior (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
+  // 2026-05-19): substrate-emitted when the bounded trajectory-motif
+  // extractor (runtime/trajectory_motif_extractor.ts) observes a
+  // frequent (≥ 3 occurrences in a 30-day window) ordered n-gram of
+  // event kinds across directives. Carries { motif_act_artifact_id,
+  // kinds, length, frequency, directive_count, avg_closure_residual,
+  // admitted_this_tick }. The motif_act_artifact_id resolves to an
+  // act_artifact{kind: trajectory_motif_predicate} row whose Beta
+  // posterior calibrates from downstream closure outcomes — citing
+  // the motif row on a future act lets distributeCredit adjust its
+  // posterior alongside the entities it composes.
+  trajectory_motif_observed:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Knowledge (Model D) ─────────────────────────────────────────────
   knowledge_candidate:                     { producer: "brain",     embeddable: true,  mirror_inline: true,  health_metric: false, narrative: true },

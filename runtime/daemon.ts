@@ -972,6 +972,19 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       } catch (err) {
         logger.warn({ where: "daemon.extractors.causal_edges", err: (err as Error).message }, "causal-edge extractor tick failed");
       }
+      // Tier-S3 trajectory-motif posterior (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
+      // 2026-05-19): admit trajectory_motif_predicate rows for frequent
+      // multi-event n-grams (3-grams and 4-grams) across directives so
+      // recipe shapes accumulate their own Beta posterior. Complementary
+      // to S2 causal-edge — edges score pairs, motifs score sequences.
+      // Bounded: 5000 events per tick, 30-day window, top 50 motifs,
+      // yields every 25 directives.
+      try {
+        const { extractTrajectoryMotifs } = await import("./trajectory_motif_extractor");
+        await extractTrajectoryMotifs(db);
+      } catch (err) {
+        logger.warn({ where: "daemon.extractors.trajectory_motifs", err: (err as Error).message }, "trajectory-motif extractor tick failed");
+      }
       // Auto cross-directive interference (organism-alignment Track C,
       // 2026-05-15): scan act_artifact.target_resources/target_files for cross-directive
       // overlap and emit resource_conflict edges so the scheduler defers

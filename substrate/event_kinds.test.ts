@@ -128,6 +128,12 @@ const NON_EVENT_KIND_LITERALS = new Set([
   "action",
   "predicate",
   "exit_classifier",
+  // 2026-05-19 (brain dispatch J4HP5SYT3N4GK45S Candidate A): the
+  // artifact_kind_backfill_worker infers `browser_action` as a concrete
+  // act_artifact.kind discriminator for camofox-browser runtime rows.
+  // NOT an event kind — the registry row carries `kind: "browser_action"`,
+  // but no production code emits an event with that kind string.
+  "browser_action",
   // T2.1 (2026-05-19, F-Universal-Threshold-Registry meta-move #1):
   // runtime/threshold_registry.ts admits act_artifact rows with
   // `kind: 'threshold_predicate'` so every runtime literal threshold
@@ -135,6 +141,12 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // row carries this discriminator; emissions still use action_scored /
   // act_artifact_score_updated under the standard machinery.
   "threshold_predicate",
+  // Tier-S3 (2026-05-19, brain KC G3PR7X6TCD4T57D7T6GXCDY9AW):
+  // runtime/trajectory_motif_extractor.ts admits act_artifact rows with
+  // `kind: 'trajectory_motif_predicate'` so frequent multi-event motifs
+  // become posterior-ranked rows. NOT an event kind — the registry row
+  // carries this discriminator; emissions use trajectory_motif_observed.
+  "trajectory_motif_predicate",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────
@@ -403,6 +415,17 @@ describe("derived sets match their pre-unification shape", () => {
       // test-file-target / anchor-missing pending_owner_decision rows
       // emits this so dashboards can count retire rate per stale-class.
       "pending_decision_retired",
+      // 2026-05-19 (brain dispatch J4HP5SYT3N4GK45S Candidate A): the
+      // artifact_kind_backfill_worker sweep emits one
+      // artifact_kind_backfilled per applied verdict and one
+      // artifact_kind_inference_uncertain per deferred row. Counted as
+      // health metrics so dashboards can show substrate-wide alias-
+      // removal convergence (legacy-kind row count → 0) and the rate at
+      // which the sweep declined to mutate (signal a human-curated kind
+      // override may be needed). artifact_kind_inferred is per-row audit
+      // trail — NOT health metric (every scanned row emits one).
+      "artifact_kind_backfilled",
+      "artifact_kind_inference_uncertain",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);
