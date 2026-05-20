@@ -430,18 +430,26 @@ export const runArtifactKindBackfill = async (
     errors: [],
   };
 
+  // T3.8/T5: route the full-table sweep through the SQL worker-thread
+  // pool when available. Bun.SQL is fake-async; this scan can return
+  // 1000+ rows over a large substrate and blocks the main event loop
+  // for the full SQLite read. Falls back to the sync path when the pool
+  // is absent (unit tests, ACC2_DISABLE_SQL_POOL=1).
+  const scanSql = `SELECT id, body, declared_sandbox, state_root, name,
+            target_resources, source_candidate_id
+     FROM act_artifact
+     WHERE kind = 'code_artifact'
+     ORDER BY created_at ASC, id ASC
+     LIMIT ?`;
   let rows: BackfillRow[];
   try {
-    rows = db
-      .query<BackfillRow, [number]>(
-        `SELECT id, body, declared_sandbox, state_root, name,
-                target_resources, source_candidate_id
-         FROM act_artifact
-         WHERE kind = 'code_artifact'
-         ORDER BY created_at ASC, id ASC
-         LIMIT ?`,
-      )
-      .all(maxRows);
+    const poolMod = await import("./sql_pool_singleton");
+    const pool = poolMod.getSqlPool();
+    if (pool) {
+      rows = await pool.query<BackfillRow>(scanSql, [maxRows]);
+    } else {
+      rows = db.query<BackfillRow, [number]>(scanSql).all(maxRows);
+    }
   } catch (err) {
     summary.errors.push(`scan_failed:${(err as Error).message}`);
     return summary;

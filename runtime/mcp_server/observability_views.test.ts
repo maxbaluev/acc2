@@ -25,14 +25,18 @@ const ctx = (db: ReturnType<typeof openDb>): McpContext =>
 
 type ViewResult = { rows: Array<Record<string, unknown>>; view_name: string; args: unknown; generated_at: string };
 
-const unwrap = (r: ReturnType<typeof handleRead>): ViewResult => {
-  expect(r.ok).toBe(true);
-  if (!r.ok) throw new Error("handleRead failed");
-  return r.result as unknown as ViewResult;
+// T3.8/T5: handleRead may return McpResult OR Promise<McpResult> after the
+// SQL worker-thread pool migration. Await the result; sync returns pass
+// through unchanged via Promise.resolve coercion.
+const unwrap = async (r: ReturnType<typeof handleRead>): Promise<ViewResult> => {
+  const resolved = await r;
+  expect(resolved.ok).toBe(true);
+  if (!resolved.ok) throw new Error("handleRead failed");
+  return resolved.result as unknown as ViewResult;
 };
 
 describe("event_kind_occurrence_view", () => {
-  test("groups emitted kinds with counts, first_emit_ts, last_emit_ts, distinct_origins", () => {
+  test("groups emitted kinds with counts, first_emit_ts, last_emit_ts, distinct_origins", async () => {
     const db = openDb(":memory:");
     // Three directive_opened (different origins) + one task_committed.
     emitEvent(db, { kind: "directive_opened", substrate_origin: "claude", payload: { directive_text: "a" } });
@@ -40,7 +44,7 @@ describe("event_kind_occurrence_view", () => {
     emitEvent(db, { kind: "directive_opened", substrate_origin: "claude", payload: { directive_text: "c" } });
     emitEvent(db, { kind: "task_committed", substrate_origin: "runtime", payload: {} });
 
-    const result = unwrap(handleRead(ctx(db), { view_name: "event_kind_occurrence_view", args: {} }));
+    const result = await unwrap(handleRead(ctx(db), { view_name: "event_kind_occurrence_view", args: {} }));
     expect(result.view_name).toBe("event_kind_occurrence_view");
     expect(typeof result.generated_at).toBe("string");
 
@@ -58,11 +62,11 @@ describe("event_kind_occurrence_view", () => {
     expect(committed!.distinct_origins).toBe(1);
   });
 
-  test("dead_only=true surfaces registered-but-never-emitted kinds with zero counts", () => {
+  test("dead_only=true surfaces registered-but-never-emitted kinds with zero counts", async () => {
     const db = openDb(":memory:");
     emitEvent(db, { kind: "directive_opened", substrate_origin: "claude", payload: {} });
 
-    const result = unwrap(handleRead(ctx(db), {
+    const result = await unwrap(handleRead(ctx(db), {
       view_name: "event_kind_occurrence_view",
       args: { dead_only: true },
     }));
@@ -76,13 +80,13 @@ describe("event_kind_occurrence_view", () => {
 });
 
 describe("worker_liveness_view", () => {
-  test("aggregates worker_tick_completed per worker_name with seconds_since_last_tick", () => {
+  test("aggregates worker_tick_completed per worker_name with seconds_since_last_tick", async () => {
     const db = openDb(":memory:");
     emitEvent(db, { kind: "worker_tick_completed", substrate_origin: "runtime", payload: { worker: "scheduler" } });
     emitEvent(db, { kind: "worker_tick_completed", substrate_origin: "runtime", payload: { worker: "scheduler" } });
     emitEvent(db, { kind: "worker_tick_completed", substrate_origin: "runtime", payload: { worker: "embedder" } });
 
-    const result = unwrap(handleRead(ctx(db), { view_name: "worker_liveness_view", args: {} }));
+    const result = await unwrap(handleRead(ctx(db), { view_name: "worker_liveness_view", args: {} }));
     expect(result.view_name).toBe("worker_liveness_view");
 
     const byName = new Map(result.rows.map((r) => [r.worker_name as string, r]));
@@ -97,7 +101,7 @@ describe("worker_liveness_view", () => {
     }
   });
 
-  test("respects window_hours arg (large negative window returns no rows for old events)", () => {
+  test("respects window_hours arg (large negative window returns no rows for old events)", async () => {
     const db = openDb(":memory:");
     emitEvent(db, { kind: "worker_tick_completed", substrate_origin: "runtime", payload: { worker: "scheduler" } });
 
@@ -107,7 +111,7 @@ describe("worker_liveness_view", () => {
     // window_hours and assert the shape is well-formed and rows is
     // either empty or contains only scheduler. The structural assertion
     // here is that the arg propagates without error.
-    const result = unwrap(handleRead(ctx(db), {
+    const result = await unwrap(handleRead(ctx(db), {
       view_name: "worker_liveness_view",
       args: { window_hours: 24 },
     }));
@@ -117,7 +121,7 @@ describe("worker_liveness_view", () => {
 });
 
 describe("stale_zero_score_knowledge_view", () => {
-  test("surfaces promoted_knowledge rows with zero confirm + zero contradict older than threshold", () => {
+  test("surfaces promoted_knowledge rows with zero confirm + zero contradict older than threshold", async () => {
     const db = openDb(":memory:");
     // Promote two knowledge rows. One gets a candidate_confirmed citing
     // its id; the other stays untouched. Both rows were emitted "now",
@@ -139,7 +143,7 @@ describe("stale_zero_score_knowledge_view", () => {
       payload: { knowledge_id: cited.id },
     });
 
-    const result = unwrap(handleRead(ctx(db), {
+    const result = await unwrap(handleRead(ctx(db), {
       view_name: "stale_zero_score_knowledge_view",
       args: { minimum_hours_stale: -1 },
     }));
@@ -156,14 +160,14 @@ describe("stale_zero_score_knowledge_view", () => {
     expect(typeof staleRow.promoted_ts).toBe("string");
   });
 
-  test("default minimum_hours_stale=168 filters out freshly-promoted rows", () => {
+  test("default minimum_hours_stale=168 filters out freshly-promoted rows", async () => {
     const db = openDb(":memory:");
     emitEvent(db, {
       kind: "knowledge_promoted",
       substrate_origin: "substrate",
       payload: { claim: "just-now claim" },
     });
-    const result = unwrap(handleRead(ctx(db), {
+    const result = await unwrap(handleRead(ctx(db), {
       view_name: "stale_zero_score_knowledge_view",
       args: {},
     }));

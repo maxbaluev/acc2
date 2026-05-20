@@ -86,6 +86,8 @@ import {
   recordWorkerTick,
   stuckWorkers,
 } from "./readiness";
+import { SqlWorkerPool, resolveSqlPoolConfigFromEnv } from "./sql_worker_pool";
+import { setSqlPool, clearSqlPool } from "./sql_pool_singleton";
 
 export const DEFAULT_DAEMON_PORT = 9387;
 export const DEFAULT_AUX_PORT_OFFSET = 1;
@@ -456,6 +458,31 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   ensureDir(stateDbPath);
   const db = openDb(stateDbPath);
   runViews(db);
+
+  // T3.8/T5: spawn the SQL worker-thread pool BEFORE workers register so
+  // every migrated callsite finds it via getSqlPool() from its first
+  // tick. Bun.SQL is fake-async — every heavy aggregate SELECT blocks
+  // the main event loop synchronously. The pool routes those reads to
+  // N=ACC2_SQL_WORKER_COUNT (default 4) worker_threads, each owning a
+  // private readonly bun:sqlite handle, freeing the main loop for
+  // emitEvent + MCP orchestration + bridge IO. Without this, worker
+  // ticks overrun their intervals (3 / 21min pre-fix) and dispatch
+  // orphan-recoveries spike (28 / 15min pre-fix). The pool is opt-out
+  // via ACC2_DISABLE_SQL_POOL=1 (tests + diagnostics).
+  let sqlPool: SqlWorkerPool | null = null;
+  if (process.env.ACC2_DISABLE_SQL_POOL !== "1") {
+    try {
+      sqlPool = new SqlWorkerPool(resolveSqlPoolConfigFromEnv(stateDbPath));
+      setSqlPool(sqlPool);
+      logger.info(
+        { workers: sqlPool.metrics().workers, db_path: stateDbPath },
+        "sql_worker_pool started",
+      );
+    } catch (err) {
+      logger.warn({ err: String(err) }, "sql_worker_pool start failed — falling back to main-thread reads");
+      sqlPool = null;
+    }
+  }
 
   // 2026-05-19 (brain 198YWW39K94KH2ZQ1A7XHP2T8R): seed act_artifact rows
   // on every daemon boot. Idempotent via per-row content-hash meta keys
@@ -850,6 +877,42 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   recordWorkerTick("metrics_gauge_refresh");
   workers.push(() => clearInterval(gaugeTick));
 
+  // T3.8/T5: sql_worker_pool_metrics emitter. Every 30s the pool's
+  // pending/active/completed counters + percentile wait/exec latencies
+  // are written to the ledger so /metrics + dashboards can plot the
+  // event-loop unblock progress. The pool is opt-out via
+  // ACC2_DISABLE_SQL_POOL=1; when absent the interval is a no-op.
+  const sqlPoolMetricsTickMs = 30_000;
+  const sqlPoolMetricsTick = setInterval(() => {
+    const p = sqlPool;
+    if (!p) return;
+    try {
+      const m = p.metrics();
+      emitEvent(db, {
+        kind: "sql_worker_pool_metrics",
+        substrate_origin: "substrate_auto",
+        payload: {
+          workers: m.workers,
+          pending: m.pending,
+          active: m.active,
+          completed: m.completed,
+          failed: m.failed,
+          rejected_overflow: m.rejected_overflow,
+          timed_out: m.timed_out,
+          worker_respawns: m.worker_respawns,
+          avg_wait_ms: m.avg_wait_ms,
+          p50_wait_ms: m.p50_wait_ms,
+          p90_wait_ms: m.p90_wait_ms,
+          p99_wait_ms: m.p99_wait_ms,
+          avg_exec_ms: m.avg_exec_ms,
+        },
+      });
+    } catch (err) {
+      logger.debug({ where: "daemon.sql_pool_metrics_tick", err: String(err) }, "emit failed (db likely closed)");
+    }
+  }, sqlPoolMetricsTickMs);
+  workers.push(() => clearInterval(sqlPoolMetricsTick));
+
   // Batch 3.OPS: DB integrity worker. Default ON unless explicitly
   // disabled (`ACC2_DISABLE_WORKERS=integrity` for tests). 6h cadence
   // is universal — replaced by adaptive scoring in a later cohort.
@@ -1187,7 +1250,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       // The embeddable-only count makes batch sizing honest. Cap batchSize
       // at 50 (well below OpenAI's 100-item per-request chunk) so worst-case
       // tick wall time stays bounded even on rare large backlogs.
-      const pendingEmbeddings = pendingEmbeddableCount(db);
+      const pendingEmbeddings = await pendingEmbeddableCount(db);
       const batchSize = pendingEmbeddings > 100 ? 50 : pendingEmbeddings > 20 ? 20 : Math.max(1, pendingEmbeddings);
       if (batchSize > 0) await embedderWorkerTick(db, { batchSize });
       if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
@@ -1945,6 +2008,17 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     resetBus();
     // Reset readiness slot so a same-process restart starts clean.
     resetReadiness();
+    // T3.8/T5: drain SQL worker-thread pool before closing the writer.
+    // 2s budget — pool jobs are read-only SELECTs that should drain
+    // promptly; anything still in flight after the budget is rejected
+    // with sql_pool_shutting_down rather than silently hanging shutdown.
+    if (sqlPool) {
+      try { await sqlPool.shutdown(2000); } catch (err) {
+        logger.debug({ where: "daemon.stop.sql_pool_shutdown", err: String(err) }, "pool shutdown failed (best-effort)");
+      }
+      clearSqlPool();
+      sqlPool = null;
+    }
     closeDb(stateDbPath);
     tryRemove(socketFile);
     tryRemove(tokenFile);
@@ -2327,6 +2401,15 @@ const routeAux = async (
         loadedGitHead = fs.readFileSync(path, "utf8").trim() || null;
       }
     } catch { /* tolerate */ }
+    // T3.8/T5: SQL worker-thread pool surface. Reports null when the pool
+    // is disabled (ACC2_DISABLE_SQL_POOL=1) so operators can distinguish
+    // "pool disabled" from "pool present but idle".
+    let sqlWorkerPoolStats: Record<string, number> | null = null;
+    try {
+      const mod = await import("./sql_pool_singleton");
+      const p = mod.getSqlPool();
+      if (p) sqlWorkerPoolStats = p.metrics() as unknown as Record<string, number>;
+    } catch { /* tolerate */ }
     return Response.json({
       status: stuck.length === 0 ? "ok" : "degraded",
       pid: process.pid,
@@ -2344,6 +2427,7 @@ const routeAux = async (
       brain_failed_recent_count: counts.brain_failed,
       health_window_iso: counts.window_iso,
       sql_pool_stats: poolStats,
+      sql_worker_pool: sqlWorkerPoolStats,
       wal_stats: walStats,
       credentials,
       loaded_git_head: loadedGitHead,

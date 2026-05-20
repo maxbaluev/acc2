@@ -510,6 +510,9 @@ describe("derived sets match their pre-unification shape", () => {
       "meta_credit_projected",
       "brain_accuracy_observation",
       "coalition_credit_distributed",
+      // T3.8/T5: SQL worker-thread pool metrics. Health-metric so
+      // /metrics + dashboards can plot the event-loop unblock progress.
+      "sql_worker_pool_metrics",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

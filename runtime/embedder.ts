@@ -249,18 +249,26 @@ const resolveJoinedText = (db: Database, kind: string, payload: Record<string, u
   return null;
 };
 
-const readUnembedded = (db: Database, batchSize: number): UnembeddedRow[] => {
+// T3.8/T5: readUnembedded now returns a Promise so the heavy SELECT can
+// route through the SQL worker-thread pool when present. Bun.SQL is
+// fake-async; this SELECT scans the events table by (embedding IS NULL,
+// kind IN (...)) which on a 270K-row substrate takes 30-90ms of fully
+// synchronous work. Routing through worker_threads frees the main loop
+// for emitEvent + MCP IO. The sync fallback path stays correct for unit
+// tests and ACC2_DISABLE_SQL_POOL=1 diagnostics.
+const readUnembedded = async (db: Database, batchSize: number): Promise<UnembeddedRow[]> => {
   const placeholders = Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ");
   const sql =
     `SELECT id, kind, payload FROM events ` +
     `WHERE embedding IS NULL AND kind IN (${placeholders}) ` +
     `ORDER BY ts ASC LIMIT ?`;
-  const rows = db.query(sql).all(...Array.from(EMBEDDABLE_KINDS), batchSize) as Array<{
-    id: string;
-    kind: string;
-    payload: string;
-  }>;
-  return rows;
+  const params: unknown[] = [...Array.from(EMBEDDABLE_KINDS), batchSize];
+  try {
+    const poolMod = await import("./sql_pool_singleton");
+    const pool = poolMod.getSqlPool();
+    if (pool) return pool.query<UnembeddedRow>(sql, params);
+  } catch { /* tolerate — fall through */ }
+  return db.query(sql).all(...params) as UnembeddedRow[];
 };
 
 /** Count unembedded rows USING THE EMBEDDABLE-KIND FILTER. Daemon-side
@@ -270,13 +278,25 @@ const readUnembedded = (db: Database, batchSize: number): UnembeddedRow[] => {
  *  bridge_frame_received, embedding_computed, retrieval_binding, ...) that
  *  is intentionally NEVER embedded. Per `FAWT1B3BT56S` + `T6EQS07X6X0V` +
  *  `VEC3MX7RD15F`, the raw-COUNT approach made the daemon think a 280K-event
- *  DB had a 252K-event backlog when the actual embeddable backlog was 1543. */
-export const pendingEmbeddableCount = (db: Database): number => {
+ *  DB had a 252K-event backlog when the actual embeddable backlog was 1543.
+ *
+ *  T3.8/T5: now async — routes through the SQL worker-thread pool when
+ *  available so the COUNT scan never blocks the main loop. */
+export const pendingEmbeddableCount = async (db: Database): Promise<number> => {
   const placeholders = Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ");
   const sql =
     `SELECT COUNT(*) AS c FROM events ` +
     `WHERE embedding IS NULL AND kind IN (${placeholders})`;
-  const row = db.query(sql).get(...Array.from(EMBEDDABLE_KINDS)) as { c: number } | null;
+  const params: unknown[] = [...Array.from(EMBEDDABLE_KINDS)];
+  try {
+    const poolMod = await import("./sql_pool_singleton");
+    const pool = poolMod.getSqlPool();
+    if (pool) {
+      const rows = await pool.query<{ c: number }>(sql, params);
+      return rows[0]?.c ?? 0;
+    }
+  } catch { /* tolerate — fall through */ }
+  const row = db.query(sql).get(...params) as { c: number } | null;
   return row?.c ?? 0;
 };
 
@@ -396,7 +416,7 @@ export const embedderWorkerTick = async (
   opts?: { batchSize?: number },
 ): Promise<EmbedderTickResult> => {
   const batchSize = Math.max(1, Math.min(500, opts?.batchSize ?? 20));
-  const rows = readUnembedded(db, batchSize);
+  const rows = await readUnembedded(db, batchSize);
   if (rows.length === 0) {
     return { embedded: 0, skipped_no_text: 0, failed: 0 };
   }
@@ -572,7 +592,7 @@ export const embedPendingEvents = async (
   // remain. Each iteration calls into `batchComputeEmbeddings` (chunked
   // at 100 per OpenAI request) and persists each successful row.
   while (true) {
-    const rows = readUnembedded(db, batchSize);
+    const rows = await readUnembedded(db, batchSize);
     if (rows.length === 0) break;
     const items: Array<{ id: string; text: string }> = [];
     for (const r of rows) {

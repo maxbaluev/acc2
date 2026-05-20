@@ -7,6 +7,7 @@
 // the wire shape is uniform.
 
 import type { z } from "zod";
+import type { Database } from "bun:sqlite";
 import type { BunSandboxDecl, CamofoxSandboxDecl, JsonValue, Runtime, SandboxDecl, SubstrateOrigin, UvSandboxDecl } from "../../substrate/types";
 import { EVENT_KINDS, getCurrentEventKinds } from "../../substrate/event_kinds";
 import { emitEvent, getEventById, type EmitEventInput } from "../events";
@@ -621,10 +622,25 @@ export const handleEmit = (
   return { ok: true, result: { id: emitted.id, ts: emitted.ts } };
 };
 
+// T3.8/T5: SQL worker-thread pool router. Aggregate-heavy view projections
+// (event_kind_occurrence_view, worker_liveness_view,
+// stale_zero_score_knowledge_view) are routed off the main thread when the
+// pool is present so Bun.SQL's fake-async sync read can't block emitEvent
+// + bridge IO. When the pool is absent (tests, ACC2_DISABLE_SQL_POOL=1),
+// we fall back to the synchronous main-thread path.
+const poolQuery = async <T>(db: Database, sql: string, params: unknown[]): Promise<T[]> => {
+  try {
+    const mod = await import("../sql_pool_singleton");
+    const pool = mod.getSqlPool();
+    if (pool) return pool.query<T>(sql, params);
+  } catch { /* tolerate — fall through to sync */ }
+  return (params.length > 0 ? db.query(sql).all(...(params as Parameters<typeof db.query>)) : db.query(sql).all()) as T[];
+};
+
 export const handleRead = (
   ctx: McpContext,
   args: z.infer<typeof ReadSchema>,
-): McpResult => {
+): McpResult | Promise<McpResult> => {
   // Route `view_name` to the substrate/views.ts accessor.
   // Unknown views return `view_not_implemented:<name>` so callers see a
   // clear signal instead of a silent empty. The set below mirrors §4.2
@@ -824,11 +840,14 @@ export const handleRead = (
           `;
           const bindings: Array<string | number> = [...kinds];
           if (windowHours !== undefined) bindings.push(windowHours);
-          const rows = db.query(sql).all(...bindings) as Array<Record<string, unknown>>;
-          return {
-            ok: true,
-            result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
-          };
+          // T3.8/T5: route through worker-thread pool when available.
+          return (async (): Promise<McpResult> => {
+            const rows = await poolQuery<Record<string, unknown>>(db, sql, bindings);
+            return {
+              ok: true,
+              result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
+            };
+          })();
         }
         const sql = windowHours !== undefined
           ? `
@@ -854,13 +873,15 @@ export const handleRead = (
             GROUP BY kind
             ORDER BY last_emit_ts DESC
           `;
-        const rows = windowHours !== undefined
-          ? db.query(sql).all(windowHours) as Array<Record<string, unknown>>
-          : db.query(sql).all() as Array<Record<string, unknown>>;
-        return {
-          ok: true,
-          result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
-        };
+        // T3.8/T5: route through worker-thread pool when available.
+        return (async (): Promise<McpResult> => {
+          const bindings: unknown[] = windowHours !== undefined ? [windowHours] : [];
+          const rows = await poolQuery<Record<string, unknown>>(db, sql, bindings);
+          return {
+            ok: true,
+            result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
+          };
+        })();
       }
       case "worker_liveness_view": {
         // Closes brain KC CZS8VBKGAD4K: dead workers — registered
@@ -887,11 +908,14 @@ export const handleRead = (
           GROUP BY worker_name
           ORDER BY last_tick_ts DESC
         `;
-        const rows = db.query(sql).all(windowHours) as Array<Record<string, unknown>>;
-        return {
-          ok: true,
-          result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
-        };
+        // T3.8/T5: route through worker-thread pool when available.
+        return (async (): Promise<McpResult> => {
+          const rows = await poolQuery<Record<string, unknown>>(db, sql, [windowHours]);
+          return {
+            ok: true,
+            result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
+          };
+        })();
       }
       case "stale_zero_score_knowledge_view": {
         // Closes brain KC KRG33K7VT14M: promoted knowledge with no
@@ -931,11 +955,14 @@ export const handleRead = (
           ORDER BY hours_since_promotion DESC
           LIMIT 100
         `;
-        const rows = db.query(sql).all(minHours) as Array<Record<string, unknown>>;
-        return {
-          ok: true,
-          result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
-        };
+        // T3.8/T5: route through worker-thread pool when available.
+        return (async (): Promise<McpResult> => {
+          const rows = await poolQuery<Record<string, unknown>>(db, sql, [minHours]);
+          return {
+            ok: true,
+            result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
+          };
+        })();
       }
       case "contradictory_candidates_view": {
         const rows = db

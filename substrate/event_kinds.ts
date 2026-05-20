@@ -796,6 +796,13 @@ export const EVENT_KINDS = {
   // in-process Map lost across daemon restarts; the TUI Supervisor panel
   // and auditors could never see workers ticking.
   worker_tick_completed:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // SQL worker-thread pool metrics. Emitted by the daemon every ~30s with
+  // pending / active / completed counters + percentile wait+exec latencies.
+  // Health-metric so /metrics + observability dashboards can plot
+  // event-loop unblock progress (Bun.SQL is fake-async — pre-pool baseline
+  // = 3 worker tick overruns / 21 min, 28 dispatch orphan recoveries /
+  // 15 min). Per T3.8/T5: the metric IS the live verification path.
+  sql_worker_pool_metrics:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true, narrative: false },
   bridge_stuck:                            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   runtime_subprocess_killed:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // ── Brain-observability (audit b0kheqg3g, 2026-05-15) ───────────────

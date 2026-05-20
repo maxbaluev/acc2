@@ -1295,6 +1295,15 @@ const projectionKeyExists = (db: Database, kind: string, key: string): boolean =
  *  credit row, so the post-write projector and the followup distributeCredit
  *  don't double-credit, but distributeOwnerObservedOutcomeCredit can still
  *  apply its residual. */
+// T3.8/T5: INTENTIONAL SYNC — runs on the main thread. This idempotency
+// probe fires inside the emitEvent post-write hook chain (distributeCredit
+// and the universal projector at the action_scored write boundary). The
+// SQL worker-thread pool migration deliberately skips this callsite — the
+// idempotency check MUST complete before the rest of the post-write
+// projection runs, and Bun.SQL's fake-async sync read is acceptable here
+// because the LIMIT 1 with json_extract on a payload-indexed match is
+// fast (<1ms typical). Migrating it would require restructuring the
+// emitEvent post-write contract which is out of scope for the pool.
 const priorScoreUpdateExists = (
   db: Database,
   scoredEventId: string,

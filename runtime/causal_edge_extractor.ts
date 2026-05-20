@@ -152,13 +152,19 @@ export const extractCausalEdges = async (
   };
 
   // Citation co-occurrence + artifact co-occurrence from act_tuple_recorded.
-  const acts = db
-    .query(
-      `SELECT id, ts, task_id, payload FROM events
+  // T3.8/T5: heavy time-window sweep — route through the SQL worker-thread
+  // pool when present so Bun.SQL's sync read can't starve the main loop.
+  const actsSql = `SELECT id, ts, task_id, payload FROM events
         WHERE kind = 'act_tuple_recorded' AND ts > ?
-        ORDER BY ts ASC LIMIT ?`,
-    )
-    .all(cutoff, maxActs) as ActTupleRow[];
+        ORDER BY ts ASC LIMIT ?`;
+  const acts = await (async (): Promise<ActTupleRow[]> => {
+    try {
+      const mod = await import("./sql_pool_singleton");
+      const pool = mod.getSqlPool();
+      if (pool) return pool.query<ActTupleRow>(actsSql, [cutoff, maxActs]);
+    } catch { /* tolerate */ }
+    return db.query(actsSql).all(cutoff, maxActs) as ActTupleRow[];
+  })();
 
   let processedSinceYield = 0;
   for (const act of acts) {
@@ -210,14 +216,18 @@ export const extractCausalEdges = async (
     }
   }
 
-  // Refinement edges from task_edge_recorded.
-  const edges = db
-    .query(
-      `SELECT id, ts, payload FROM events
+  // Refinement edges from task_edge_recorded. T3.8/T5: pool-routed sweep.
+  const edgesSql = `SELECT id, ts, payload FROM events
         WHERE kind = 'task_edge_recorded' AND ts > ?
-        ORDER BY ts ASC LIMIT ?`,
-    )
-    .all(cutoff, maxActs) as EdgeEventRow[];
+        ORDER BY ts ASC LIMIT ?`;
+  const edges = await (async (): Promise<EdgeEventRow[]> => {
+    try {
+      const mod = await import("./sql_pool_singleton");
+      const pool = mod.getSqlPool();
+      if (pool) return pool.query<EdgeEventRow>(edgesSql, [cutoff, maxActs]);
+    } catch { /* tolerate */ }
+    return db.query(edgesSql).all(cutoff, maxActs) as EdgeEventRow[];
+  })();
 
   processedSinceYield = 0;
   for (const ev of edges) {
