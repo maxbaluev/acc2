@@ -7,6 +7,42 @@ export const RETIREMENT_AGE_DAYS = 14;
 export const SUCCESS_RESIDUAL_THRESHOLD = 0.3;
 export const CLOSURE_RESIDUAL_THRESHOLD = 0.3;
 
+/** Hard cap on action_scored rows scanned per tick. Per substrate KC
+ *  GJ2KN1J3KD1Z (bounded amendments per worker): on a 280K-event
+ *  ledger the unbounded `SELECT ... FROM events WHERE kind='action_scored'
+ *  ORDER BY ts ASC` walked thousands of rows synchronously, with N
+ *  per-row sub-queries for prediction / closure / lessons / task goal.
+ *  The 14-day window already filters by RETIREMENT_AGE_DAYS for lesson
+ *  retirement; capping the trajectory scan at the same window keeps the
+ *  compression cycle bounded. */
+const TRAJECTORY_SCAN_WINDOW_DAYS = 14;
+const TRAJECTORY_SCAN_LIMIT = 1000;
+
+/** Hard cap on knowledge_candidate / knowledge_promoted rows scanned
+ *  when looking for prior compressions of a cluster_key. The set is
+ *  filtered to recipe_shape.enabled rows but historically grows
+ *  monotonically. Bounded scan keeps the per-tick cost flat. */
+const EXISTING_COMPRESSION_SCAN_LIMIT = 1000;
+
+/** Hard cap on lesson_extracted + applied_change_committed rows scanned
+ *  by retireStaleLessons. The retire cutoff already filters lessons to
+ *  the > 14-day-old set; bounding the SQL pull keeps a fresh install's
+ *  pre-cursor catch-up cycle short. */
+const LESSON_SCAN_LIMIT = 1000;
+const APPLY_SCAN_LIMIT = 2000;
+
+/** Cooperative yield helper — releases the event loop so the daemon's
+ *  /health route, the bridge SSE pumps, and other workers can run while
+ *  this worker walks the trajectory + cluster + lesson sets on a
+ *  280K-event ledger. */
+const yieldToEventLoop = (): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, 0));
+
+/** Yield every 25 rows matches the bounded-amendments cadence used by
+ *  embedder / artifact_kind_backfill_worker / contract_amendment_consumer
+ *  / lifecycle_closure_sweep. */
+const YIELD_INTERVAL_ROWS = 25;
+
 export type ExperienceCompressionWorkerResult = {
   scanned_scored: number;
   eligible_trajectories: number;
@@ -135,17 +171,31 @@ const latestClosureFor = (db: Database, directiveId: string, taskId: string): { 
   return null;
 };
 
-const loadSuccessfulTrajectories = (db: Database): { scanned: number; trajectories: SuccessfulTrajectory[] } => {
+const loadSuccessfulTrajectories = async (db: Database): Promise<{ scanned: number; trajectories: SuccessfulTrajectory[] }> => {
+  // Bounded scan per KC GJ2KN1J3KD1Z: window the action_scored set to
+  // the last TRAJECTORY_SCAN_WINDOW_DAYS days and cap at
+  // TRAJECTORY_SCAN_LIMIT rows. Older successes are already credited
+  // in earlier ticks via the idempotency check on cluster_key +
+  // source_action_scored_ids; rescanning them every cycle was pure
+  // cost.
+  const cutoffIso = new Date(Date.now() - TRAJECTORY_SCAN_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const scoredRows = db
     .query(
       `SELECT id, ts, directive_id, task_id, loop_id, payload, residual
        FROM events
        WHERE kind = 'action_scored'
-       ORDER BY ts ASC, rowid ASC`,
+         AND ts >= ?
+       ORDER BY ts ASC, rowid ASC
+       LIMIT ?`,
     )
-    .all() as EventRow[];
+    .all(cutoffIso, TRAJECTORY_SCAN_LIMIT) as EventRow[];
   const trajectories: SuccessfulTrajectory[] = [];
+  let processed = 0;
   for (const scored of scoredRows) {
+    if (processed > 0 && processed % YIELD_INTERVAL_ROWS === 0) {
+      await yieldToEventLoop();
+    }
+    processed += 1;
     const scoredResidual = typeof scored.residual === "number" ? scored.residual : asNumber(parsePayload(scored.payload).residual);
     if (scoredResidual === null || scoredResidual >= SUCCESS_RESIDUAL_THRESHOLD) continue;
     const predicted = latestPredictionFor(db, scored.directive_id, scored.task_id);
@@ -192,6 +242,12 @@ const sourceIds = (cluster: SuccessfulTrajectory[]): string[] => cluster.map((tr
 const sameIds = (a: unknown, b: string[]): boolean => Array.isArray(a) && a.length === b.length && a.every((value, index) => value === b[index]);
 
 const existingCompressions = (db: Database, clusterKey: string): Array<{ id: string; sourceIds: string[] }> => {
+  // Bounded scan per KC GJ2KN1J3KD1Z: recipe-shaped knowledge rows
+  // grow monotonically over the substrate's lifetime. Cap at the
+  // EXISTING_COMPRESSION_SCAN_LIMIT most-recent rows; older
+  // compressions for the same cluster_key would already have been
+  // emitted and credited in prior ticks. Order changed to DESC so the
+  // LIMIT keeps the most-recent compressions in view.
   const rows = db
     .query(
       `SELECT id, payload FROM events
@@ -202,9 +258,10 @@ const existingCompressions = (db: Database, clusterKey: string): Array<{ id: str
            json_extract(payload, '$.is_recipe'),
            0
          ) IN (1, 'true')
-       ORDER BY ts ASC, rowid ASC`,
+       ORDER BY ts DESC, rowid DESC
+       LIMIT ?`,
     )
-    .all() as Array<{ id: string; payload: string }>;
+    .all(EXISTING_COMPRESSION_SCAN_LIMIT) as Array<{ id: string; payload: string }>;
   const out: Array<{ id: string; sourceIds: string[] }> = [];
   for (const row of rows) {
     const payload = parsePayload(row.payload);
@@ -372,16 +429,44 @@ const emitCompression = (db: Database, clusterKey: string, cluster: SuccessfulTr
   return { recipeId: recipe.id, knowledge: 1 };
 };
 
-const retireStaleLessons = (db: Database, nowMs: number): number => {
+const retireStaleLessons = async (db: Database, nowMs: number): Promise<number> => {
   const cutoffMs = nowMs - RETIREMENT_AGE_DAYS * 24 * 60 * 60 * 1000;
+  const cutoffIso = new Date(cutoffMs).toISOString();
+  // Bounded scan per KC GJ2KN1J3KD1Z: only walk lesson_extracted rows
+  // already past the retirement cutoff. The retirement audit doesn't
+  // need to see fresh lessons — they're not retire-eligible. Bounded
+  // by LESSON_SCAN_LIMIT so a fresh install's catch-up cycle stays
+  // short.
   const lessons = db
-    .query(`SELECT id, ts, directive_id, task_id, loop_id FROM events WHERE kind = 'lesson_extracted' ORDER BY ts ASC, rowid ASC`)
-    .all() as EventRow[];
+    .query(
+      `SELECT id, ts, directive_id, task_id, loop_id FROM events
+       WHERE kind = 'lesson_extracted'
+         AND ts < ?
+       ORDER BY ts ASC, rowid ASC
+       LIMIT ?`,
+    )
+    .all(cutoffIso, LESSON_SCAN_LIMIT) as EventRow[];
+  // applied_change_committed scan: cap at APPLY_SCAN_LIMIT most-recent
+  // rows. If a lesson was already retired in a prior tick, the
+  // refused/compression_supersede apply row is in scope (recent); old
+  // applies that pre-date the lesson are irrelevant to the
+  // has-history check (they cannot cite a lesson that didn't yet
+  // exist).
   const applyRows = db
-    .query(`SELECT payload, context_refs FROM events WHERE kind = 'applied_change_committed'`)
-    .all() as Array<{ payload: string; context_refs: string }>;
+    .query(
+      `SELECT payload, context_refs FROM events
+       WHERE kind = 'applied_change_committed'
+       ORDER BY ts DESC, rowid DESC
+       LIMIT ?`,
+    )
+    .all(APPLY_SCAN_LIMIT) as Array<{ payload: string; context_refs: string }>;
   let retired = 0;
+  let processed = 0;
   for (const lesson of lessons) {
+    if (processed > 0 && processed % YIELD_INTERVAL_ROWS === 0) {
+      await yieldToEventLoop();
+    }
+    processed += 1;
     const tsMs = Date.parse(lesson.ts);
     if (!Number.isFinite(tsMs) || tsMs >= cutoffMs) continue;
     const hasHistory = applyRows.some((row) => {
@@ -409,8 +494,8 @@ const retireStaleLessons = (db: Database, nowMs: number): number => {
   return retired;
 };
 
-export const experienceCompressionWorkerTick = (db: Database, now: Date = new Date()): ExperienceCompressionWorkerResult => {
-  const loaded = loadSuccessfulTrajectories(db);
+export const experienceCompressionWorkerTick = async (db: Database, now: Date = new Date()): Promise<ExperienceCompressionWorkerResult> => {
+  const loaded = await loadSuccessfulTrajectories(db);
   const clusters = new Map<string, SuccessfulTrajectory[]>();
   for (const trajectory of loaded.trajectories) {
     const key = compressionKey(trajectory.goalShape, trajectory.lessonKind);
@@ -424,7 +509,12 @@ export const experienceCompressionWorkerTick = (db: Database, now: Date = new Da
   let knowledgeCandidates = 0;
   let skippedExistingCompression = 0;
   let supersededRefusals = 0;
+  let processedClusters = 0;
   for (const [key, cluster] of clusters) {
+    if (processedClusters > 0 && processedClusters % YIELD_INTERVAL_ROWS === 0) {
+      await yieldToEventLoop();
+    }
+    processedClusters += 1;
     if (cluster.length < COMPRESSION_MIN_CLUSTER_SIZE) continue;
     clustersFound += 1;
     const sorted = [...cluster].sort((a, b) => a.ts.localeCompare(b.ts));
@@ -440,7 +530,7 @@ export const experienceCompressionWorkerTick = (db: Database, now: Date = new Da
     supersededRefusals += emitSupersedeRefusals(db, previous, emitted.recipeId, sorted.length);
   }
 
-  const lessonsRetired = retireStaleLessons(db, now.getTime());
+  const lessonsRetired = await retireStaleLessons(db, now.getTime());
   return {
     scanned_scored: loaded.scanned,
     eligible_trajectories: loaded.trajectories.length,

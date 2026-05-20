@@ -103,13 +103,13 @@ const insertSuccessfulTrajectory = (
 };
 
 describe("experienceCompressionWorkerTick", () => {
-  test("compresses repeated successful trajectories into recipe-shape knowledge plus knowledge_candidate", () => {
+  test("compresses repeated successful trajectories into recipe-shape knowledge plus knowledge_candidate", async () => {
     const db = openDb(":memory:");
     runViews(db);
     const first = insertSuccessfulTrajectory(db, 1);
     const second = insertSuccessfulTrajectory(db, 2);
 
-    const outcome = experienceCompressionWorkerTick(db);
+    const outcome = await experienceCompressionWorkerTick(db);
     expect(outcome.scanned_scored).toBe(2);
     expect(outcome.eligible_trajectories).toBe(2);
     expect(outcome.recipes_extracted).toBe(1);
@@ -149,14 +149,14 @@ describe("experienceCompressionWorkerTick", () => {
     for (const kind of emittedKinds) expect(kind in EVENT_KINDS).toBe(true);
   });
 
-  test("is idempotent when the current cluster is already covered", () => {
+  test("is idempotent when the current cluster is already covered", async () => {
     const db = openDb(":memory:");
     runViews(db);
     insertSuccessfulTrajectory(db, 1);
     insertSuccessfulTrajectory(db, 2);
 
-    expect(experienceCompressionWorkerTick(db).recipes_extracted).toBe(1);
-    const second = experienceCompressionWorkerTick(db);
+    expect((await experienceCompressionWorkerTick(db)).recipes_extracted).toBe(1);
+    const second = await experienceCompressionWorkerTick(db);
     expect(second.recipes_extracted).toBe(0);
     expect(second.skipped_existing_compression).toBe(1);
 
@@ -166,19 +166,19 @@ describe("experienceCompressionWorkerTick", () => {
     expect(recipeCount).toBe(1);
   });
 
-  test("requires low action residual, low closure residual, and a lesson", () => {
+  test("requires low action residual, low closure residual, and a lesson", async () => {
     const db = openDb(":memory:");
     runViews(db);
     insertSuccessfulTrajectory(db, 1, { residual: 0.4 });
     insertSuccessfulTrajectory(db, 2, { closureResidual: 0.4 });
     insertSuccessfulTrajectory(db, 3, { omitLesson: true });
 
-    const outcome = experienceCompressionWorkerTick(db);
+    const outcome = await experienceCompressionWorkerTick(db);
     expect(outcome.eligible_trajectories).toBe(0);
     expect(outcome.recipes_extracted).toBe(0);
   });
 
-  test("does not compress without a complete repeated eligible cluster", () => {
+  test("does not compress without a complete repeated eligible cluster", async () => {
     const db = openDb(":memory:");
     runViews(db);
 
@@ -189,7 +189,7 @@ describe("experienceCompressionWorkerTick", () => {
     db.run("DELETE FROM events WHERE kind = 'task_closure_audited' AND task_id = ?", ["t_2"]);
     insertSuccessfulTrajectory(db, 3, { goal: "unique one-off trajectory" });
 
-    const outcome = experienceCompressionWorkerTick(db);
+    const outcome = await experienceCompressionWorkerTick(db);
     expect(outcome.scanned_scored).toBe(3);
     expect(outcome.eligible_trajectories).toBe(1);
     expect(outcome.clusters_found).toBe(0);
@@ -206,16 +206,16 @@ describe("experienceCompressionWorkerTick", () => {
     expect(emitted.c).toBe(0);
   });
 
-  test("emits refused applied_change_committed when a larger compression supersedes an older one", () => {
+  test("emits refused applied_change_committed when a larger compression supersedes an older one", async () => {
     const db = openDb(":memory:");
     runViews(db);
     insertSuccessfulTrajectory(db, 1);
     insertSuccessfulTrajectory(db, 2);
-    const first = experienceCompressionWorkerTick(db);
+    const first = await experienceCompressionWorkerTick(db);
     expect(first.recipes_extracted).toBe(1);
 
     insertSuccessfulTrajectory(db, 3);
-    const second = experienceCompressionWorkerTick(db);
+    const second = await experienceCompressionWorkerTick(db);
     expect(second.recipes_extracted).toBe(1);
     expect(second.superseded_refusals).toBe(1);
 
@@ -234,7 +234,7 @@ describe("experienceCompressionWorkerTick", () => {
     expect(typeof payload.superseded_by_recipe_id).toBe("string");
   });
 
-  test("retires stale lessons through applied_change_committed compression_supersede events", () => {
+  test("retires stale lessons through applied_change_committed compression_supersede events", async () => {
     const db = openDb(":memory:");
     runViews(db);
     const oldLessonId = insertEvent(db, {
@@ -254,9 +254,9 @@ describe("experienceCompressionWorkerTick", () => {
       payload: { lesson_kind: "verifier_gap", summary: "recent lesson stays active" },
     });
 
-    const first = experienceCompressionWorkerTick(db, new Date(base));
+    const first = await experienceCompressionWorkerTick(db, new Date(base));
     expect(first.lessons_retired).toBe(1);
-    const second = experienceCompressionWorkerTick(db, new Date(base));
+    const second = await experienceCompressionWorkerTick(db, new Date(base));
     expect(second.lessons_retired).toBe(0);
 
     const retired = db
