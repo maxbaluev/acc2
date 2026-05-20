@@ -35,6 +35,7 @@ type ScoredRow = {
   action_artifact_id: string | null;
   verifier_artifact_id: string | null;
   residual: number | null;
+  directive_id: string | null;
 };
 
 type PairAudit = {
@@ -124,13 +125,14 @@ export const deterministicComputationWorkerTick = (
   try {
     rows = db
       .query<ScoredRow, []>(
-        `SELECT id, ts, action_artifact_id, verifier_artifact_id, residual
+        `SELECT id, ts, action_artifact_id, verifier_artifact_id, residual, directive_id
            FROM events
           WHERE kind = 'action_scored'
             AND json_extract(payload, '$.verifier_kind') = 'deterministic_code'
             AND residual IS NOT NULL
             AND action_artifact_id IS NOT NULL
             AND verifier_artifact_id IS NOT NULL
+            AND directive_id IS NOT NULL
           ORDER BY ts DESC
           LIMIT 500`,
       )
@@ -149,11 +151,18 @@ export const deterministicComputationWorkerTick = (
     };
   }
 
-  // Group by (action_artifact_id, verifier_artifact_id).
+  // Group by (action_artifact_id, verifier_artifact_id, directive_id).
+  // The directive_id is load-bearing: the floor wants to catch a verifier
+  // returning different residuals when re-invoked on the SAME observation.
+  // Without directive_id, the grouping collapses every invocation of the
+  // same (action, verifier) pair across different directives into one
+  // bucket, where legitimate cross-directive variance reads as
+  // non-determinism (measurement artifact, not a real bug). Adding
+  // directive_id restricts the audit to true natural duplicates.
   const groups = new Map<string, PairAudit>();
   for (const r of rows) {
     if (r.action_artifact_id === null || r.verifier_artifact_id === null || r.residual === null) continue;
-    const key = `${r.action_artifact_id}|${r.verifier_artifact_id}`;
+    const key = `${r.action_artifact_id}|${r.verifier_artifact_id}|${r.directive_id ?? ""}`;
     let entry = groups.get(key);
     if (!entry) {
       entry = {
