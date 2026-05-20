@@ -116,3 +116,25 @@ Security and schema surfaces have a carve-out (also enforced in §10): admin_tok
 AccInt is alive when every goal enters one residual-scored loop, selected artifacts and cited knowledge receive honest credit, failures tighten the substrate, and open-vocabulary rows replace hardcoded boundaries.
 
 **Verdict: ALIVE, not done.** Live ledger: 262,325 events, 1,496 act_artifacts (94.9% still legacy-kind), 305 promoted knowledge, 4,027 scored actions, 2,197 act tuples, 695 closure audits, 7,036 retrieval bindings — and only 20 artifact-score updates plus 2 owner-observed outcomes. The numbers themselves diagnose the next moves: **artifact-credit revival (T0.2) unlocks compounding**, the **owner-outcome channel (T1.1) calibrates non-code goals**, and **Tier S (S2→S4→S5→S3→S1) follows only after trust gaps close** (`SAF9AVJ8HD7W5DK847W72ETXHR`, `A4V81PN9E960S02MWSM4HSM5G4`, `6DZ417CCK57P90B7B2FTAV024M`, `G3PR7X6TCD4T57D7T6GXCDY9AW`). The roadmap (`docs/roadmap.md`) is the executable plan.
+
+## 15. Recursion Stop Floor (Two Epistemic Regimes)
+
+AccInt has two epistemic regimes. Scoreable assumptions become predicate rows whose residuals improve routing, credit, and retrieval. Floor assumptions are different: they are established by absence-of-violation evidence because the substrate cannot use a possibly compromised substrate to recursively prove them (`2XXFM1SPZX5XHFN31RWSR69TN4`, `PY1WBY1RF12RSBCQEQKBHDFH8R`).
+
+The five floor predicates are `event_authenticity_predicate`, `storage_integrity_predicate`, `kernel_sandbox_integrity_predicate`, `deterministic_computation_sanity_predicate`, and `owner_identity_continuity_predicate`. Their contract is not higher posterior from frequent use; it is immediate quarantine on violation plus continuous absence-of-violation checks.
+
+The graceful set remains scoreable: causality, economics, provenance, retrieval binding, epistemic convergence, language grounding, continuity, and time. This dispatch surfaced the full assumption ledger as predicate signatures (`WF1JWSVCV908NDNPYR35WX1B0G`, `PZ0A37EG4H5A7AK5A1ZC31AFRC`, `9SYBW09P5D22VERW9ZD4VNJB74`, `63R4HGE6R51953Q8MCZDV00GGC`, `3PE66T6YHH1W10S3JR1PMHN7GM`, `N8Z83PT9VS2VZ3PCHN3MDA4XHW`, `Q893DFQK0X6MF3BZ153NJZ3KA0`, `FQWQQSS4F1341CXF4AH0NB0W70`, `0QQ1SY4FDX7ZV45CGPXACGS3MG`, `JV56YRF4SH4YSBZ102BXCZVVT8`, `05YEB51TA91376PE273B62KGF0`, `YQQZBASDHD693C56KGWYH6S8BM`, `BC0XEFQ6W92ZZBVRJNRDX4ET08`, `M1GB6W46V576B5165EZ5TAZPAM`, `XHKNFE83914ES4SW1FRW82ZFKW`, `KSEEXD1PKN2GFF7TBCVCWG728W`, `2D0J7KSV9N7DH86BBASWHVZ62M`, `11HQGPNDVS6TB4D3Y4A7KVSRVG`, `CF30S9MAWN2FF62H9W99AA3H50`, `NSSPCF3XKD6750NX3HW45QW40M`, `NGAPYB5QHH50K4XHCPBKQJRXP8`, `AG9PZRDRP57RQEZDPQAE8EQ5Y4`, `PSZTCA96497YSB68CE4VM1H7MW`, `R2NV90BZV95CF267BBDJPNT5RW`, `QFRHFNFZG11P14A9NWPTDVA5MG`).
+
+Interaction triage matrix (`TNMTQAZS3D7T3AD78GAA2TKTSG`):
+
+```
+Floor                         | Scoreable assumptions invalidated or compounded
+------------------------------|------------------------------------------------
+event_authenticity            | causal_edge, intervention_effect, credit_assignment, retrieval_binding, epistemic_convergence, contradiction_resolution, ledger_time, goal_continuity
+storage_integrity             | source_provenance, retrieval_binding, epistemic_convergence, calibration_transfer, semantic_anchor, ledger_time, review_cadence, cost_model
+kernel_sandbox_integrity      | intervention_effect, cost_model, artifact_reuse, marginal_information, artifact_observation, source_provenance, uncertainty_expression
+deterministic_computation     | action_residuals, credit_assignment, cost_model, counterfactual_comparison, epistemic_convergence, uncertainty_expression, calibration_transfer
+owner_identity_continuity     | owner_term_alignment, goal_continuity, language_grounding, opportunity_cost, review_cadence, owner_outcome_calibration
+```
+
+Boot order is substrate-of-itself dependency order, not a metaphysical claim: host/hardware sanity must return stable bytes; storage integrity must preserve ledger state; kernel/sandbox integrity must enforce runtime observations; deterministic computation sanity must make residuals repeatable; owner identity continuity must bind goals to the right authority (`29PYKT08KN7SH4AXEVMNEJAE0R`). A disk returning stale pages, a compromised kernel, nondeterministic verifier arithmetic, or spoofed owner input each invalidates a different downstream layer.
