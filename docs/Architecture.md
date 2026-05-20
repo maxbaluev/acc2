@@ -37,6 +37,10 @@ The loop is universal because residual is universal and breakdown axes are open 
 
 The daemon owns the append-only SQLite ledger, MCP surface, worker registry, external ingress, hot reload, restart drain, and health/readiness projections (`SAF9AVJ8HD7W5DK847W72ETXHR`). Fast hot paths stay embedded and local; heavy aggregate reads move to worker-thread contracts rather than network SQL (`A4V81PN9E960S02MWSM4HSM5G4`).
 
+Longevity contract: production state is a bounded hot SQLite ledger plus cold sibling archive databases. Events older than the hot-retention window (default target: 30 days unless operations evidence changes it) are moved into monthly `state-archive-YYYY-MM.db` files with provenance and integrity evidence; default views and liveness queries hit only the hot ledger, while explicit history/search paths can join hot + cold archives transparently. High-volume event rollups, per-kind emit budgets, and deferred-row suppression are slope controls, but bounded hot retention is the structural guarantee that multi-year SQLite operation does not turn every aggregate into an all-history scan.
+
+Fast hot paths stay embedded and local; heavy aggregate reads move to worker-thread contracts rather than network SQL (`A4V81PN9E960S02MWSM4HSM5G4`).
+
 State is projected through views, not direct SQLite reads by agents (`D2624218B9C64BF29A2D203A2D`). Workers are always-on operators with opt-out controls, not strategic planners (`runtime.system_map`, `SAF9AVJ8HD7W5DK847W72ETXHR`).
 
 ## 4. The Act Primitive
