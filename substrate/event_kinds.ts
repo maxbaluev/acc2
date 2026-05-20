@@ -124,6 +124,18 @@ export const EVENT_KINDS = {
   // the motif row on a future act lets distributeCredit adjust its
   // posterior alongside the entities it composes.
   trajectory_motif_observed:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // Tier-S5 goal-shape predicate (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
+  // 2026-05-19): substrate-emitted when the bounded goal-shape
+  // predicate extractor (runtime/goal_shape_predicate_extractor.ts)
+  // groups recent act_artifact_score_updated residuals by goal_shape
+  // and admits or refreshes an act_artifact{kind:
+  // goal_shape_strategy_predicate} row. Carries { goal_shape,
+  // predicate_act_artifact_id, sample_count, mean_residual,
+  // std_residual, effective_score, last_observed_ts, created }. The
+  // predicate row scores whether a given goal_shape tag PREDICTS
+  // trajectory similarity (low variance of residual = good shape) —
+  // the signal downstream T2.2/T2.3/T4.1 posteriors read.
+  goal_shape_strategy_observed:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Knowledge (Model D) ─────────────────────────────────────────────
   knowledge_candidate:                     { producer: "brain",     embeddable: true,  mirror_inline: true,  health_metric: false, narrative: true },

@@ -972,6 +972,21 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       } catch (err) {
         logger.warn({ where: "daemon.extractors.causal_edges", err: (err as Error).message }, "causal-edge extractor tick failed");
       }
+      // Tier-S5 goal-shape predicate (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
+      // 2026-05-19): scan recent act_artifact_score_updated events, group
+      // residuals by goal_shape, and admit/refresh one
+      // act_artifact{kind:goal_shape_strategy_predicate} row per shape.
+      // Each row scores whether the goal_shape tag PREDICTS trajectory
+      // similarity (low residual variance = good shape) — closes the
+      // feedback loop for posterior-per-goal_class predicates (T2.2,
+      // T2.3, T4.1). Bounded: 5000 events per tick, 14-day window,
+      // yields every 25 distinct shapes.
+      try {
+        const { extractGoalShapePredicates } = await import("./goal_shape_predicate_extractor");
+        await extractGoalShapePredicates(db);
+      } catch (err) {
+        logger.warn({ where: "daemon.extractors.goal_shape_predicates", err: (err as Error).message }, "goal-shape-predicate extractor tick failed");
+      }
       // Tier-S3 trajectory-motif posterior (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
       // 2026-05-19): admit trajectory_motif_predicate rows for frequent
       // multi-event n-grams (3-grams and 4-grams) across directives so
