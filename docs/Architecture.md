@@ -53,13 +53,25 @@ The artifact-credit gap is the current rate limiter: 20 `act_artifact_score_upda
 
 Artifacts can target bun, uv, or camofox-browser; runtime is execution metadata, while artifact kind stays open vocabulary in the registry (`879407FA824B4B94A96CE7ADBC`). Sandbox declarations must state reads, writes, network, processes, env, CPU, wall, and memory budgets (`6FDAD5FFB0954E3094D24808CE`).
 
+ResourceUri scheme vocabulary is open like `act_artifact.kind`. Repository paths (`repo:`), URLs (`url:`), inflow/outflow artifacts (`inflow:`, `outflow:`), runtime artifacts (`runtime:<runtime-name>:<artifact_id>`), and external MCP sources (`external:<mcp-server-name>:<resource_id>`) all coexist without enum closure. Any MCP server the owner registers in Claude Code's `~/.claude.json` automatically becomes reachable as a new `external:<server-name>:` scheme without substrate code change; the substrate discovers servers through the existing MCP registry and routes reads through `substrate.read` view-name projections that the brain calls from its opencode shell.
+
 When nsjail or equivalent enforcement is absent, the runtime must emit warnings rather than pretending the sandbox is hard (`5EKBX6PTDS6XS1XAZXAZD0NMX4`). Opening runtime type vocabulary remains deferred until SandboxDecl and runner registry are redesigned (`A4V81PN9E960S02MWSM4HSM5G4`).
+
+**Multi-runtime code creation is one substrate primitive.** The brain proposes executable handles as `act_artifact` rows with open `kind` and runtime declaration: `python_script_v1` payload carries `{code, runtime:"uv", sandbox, inputs_schema, outputs_schema, verifier_artifact_id}`; `bun_script_v1` is analogous for bun; `browser_flow_v1` is analogous for camofox steps; `telegram_action_v1` and `gdrive_action_v1` are analogous for external MCP runtimes; `claude_inline_edit_v1` carries an `anchored_replace_v1` diff for Claude apply. The substrate admits through existing `substrate.admit_artifact` (no new MCP method). The runtime executor reads the row, runs it under the declared sandbox, emits `artifact_invoked` + `artifact_observed` with output evidence. The verifier returns `action_scored` with open `verifier_kind`, residual, breakdown, and reliability profile. Credit flows through existing `runtime/credit.ts`: `retrieval_credit_attributed` for cited knowledge that inspired the script, `act_artifact_score_updated` for the artifact's posterior, and `candidate_confirmed`/`candidate_contradicted` for predicted-vs-observed claims. This closes the act four-tuple uniformly across code and non-code domains; the empirical proof is the live cross-domain workload at directive `MPF9FF644502D7V8DW5ZJ6TPH0` (Telegram + Google Drive auto-ingest) flowing through identical primitives as code dispatches.
+
+**ResourceUri routing must not assume repo-file shape.** The universality bottleneck identified by knowledge entries `BC7H26S5NS7S`, `NJR1JP2ZC52Z`, and `WT9M8BW95X0F` is provenance/routing assuming `repo:path/to/file` everywhere. The parser must accept additional schemes: `runtime:python:<artifact_id>`, `runtime:bun:<artifact_id>`, `runtime:browser:<artifact_id>`, `external:telegram:<chat_id>:<msg_id>`, `external:gdrive:<doc_id>`, `inflow:<artifact_id>`, and `outflow:<task_id>:<ext>` — same parser, more schemes; no enum closure; `contract_amendment_proposed.target_resource` accepts any URI scheme so non-code domains are first-class. Code creation is recursive in the RLM sense: a bun script that succeeded yesterday becomes a cited artifact today, not a re-derived plan; external scored state replaces deeper deliberation.
 
 ## 6. Brain Bridge & Depth-1 RLM
 
 The brain is opencode gpt-5.5, pinned rather than scored as a model marketplace. The bridge denies filesystem-write tools and treats zero-substrate-frame success as `brain_silent_exit` prompt-compliance failure (`4EAFA894A8194C4CA74F08430C`, `SAF9AVJ8HD7W5DK847W72ETXHR`).
 
 Depth-1 RLM means small invariant prompt metadata plus retrieval from substrate state; detailed emission grammars, examples, gates, and runbooks are substrate-level policy artifacts, named here but not re-explained (`433DGRZ27547KESBFYR4FZ10WC`, `S1PCZEFEDD4BS04RVPQF2JNBY8`). Cycle-1-only is enforced by dispatch and refinement edges (`206B19C06C2E461A8E8C3720C6`).
+
+**Depth-1 retrieval is load-bearing.** Xu et al. on Retrieval in Long-context Language Models (arXiv:2512.24601) shows a growing intelligence cannot pour accumulated state into one prompt and expect the model to find the right needle. AccInt therefore keeps the model at depth one and makes the substrate choose what enters each cycle through top-K posterior-ranked retrieval. The world model is the union of seven scored surfaces, each a different angle on the same state: event ledger (what happened), promoted knowledge with Beta posteriors (what usually works), `act_artifact` registry with open `kind`/`runtime`/`sandbox` (what executable handles exist), owner profile (what the owner will/won't accept), trajectory motifs (what sequences repeat), causal edges (which edges cause improvement), and decomposition strategy (how the next graph should be shaped). Continuity is not memory inside Claude or the brain; it is later cycles reading scored external state.
+
+**Composer trimming is load-bearing.** Live evidence shows `brain_prompt_composed` events with `chars_original=46699, truncated=true` — knowledge entry `WETXPFZZAN2X` already named the tension: the composer over-injects workflow grammar and emission tutorials instead of producing the minimal substrate projection the depth-1 contract requires. The remediation lives in `docs/roadmap.md` Tier 7 (composer trimming): keep evidence sections (directive, retrieved knowledge ranked by score×confidence, owner profile, active failures, pending proposals, top laws); keep minimal emission grammar for opencode brain per knowledge entry `38GYZ26QYX1N` (GPT-5.5 needs explicit MCP/ledger grammar to avoid silent exits); delete workflow tutoring, vocabulary tutorials, MCP tool catalogs (already advertised by opencode), and example scaffolding; compact section markers and headers. Typical dispatch projects to ~8000-9000 chars; cross-domain dispatches with broad retrieval cap at 11000; the 12000-char gate becomes real, not aspirational.
+
+**Brain content observability via extended `substrate.read`.** The brain runs in its opencode background_job shell and must observe whole-system content — raw event payloads, artifact bodies, inflow file contents, owner transcript spans, cross-directive proposal clusters — through the EXISTING `substrate.read` MCP method with extended `view_name` arguments, NOT new MCP vocabulary. New `view_name` values to project from existing events: `event_payload_view` (raw `events.payload` JSON for given ids), `act_artifact_body_view` (project `act_artifact.payload` + `kind` + runtime declaration), `inflow_artifact_view` (resolves `act_artifact(kind="ingested_file")` to bytes/text with source hash), `owner_conversation_window_view` (owner_input_received + directives within time range), `proposal_cluster_view` (joins amendments/lessons/applied-changes by `payload.diff_cluster_id`), `outflow_artifact_view` (resolves `~/.accint/outflow/<task_id>.<ext>` paths). All views are projections over existing event rows; zero new MCP methods.
 
 ## 7. Knowledge Merger
 
@@ -164,3 +176,70 @@ Per brain dispatch `VJDMME8JD961SE6F` amendment `4AV2NPJW2H1HV0XQ3MR2ZV78KC` (KC
 A `substrate/migrations/` registry is the ONLY path for `state.db` schema changes. Migrations are idempotent, ledger-audited (each application emits `schema_migration_applied {version, ts, success}`), and tested against representative organism snapshots before release. Schema changes outside this registry are a substrate violation.
 
 Owner-state portability is a CLI capability layered on this boundary: `acc snapshot` / `acc restore` export/import the organism's `state.db` plus ledger artifacts, never `canonical.db`. The mnemonic-sovereignty curation set (`always_keep` kinds — owner-channel, knowledge-graph backbone, Tier -1 violations, constitutional events) is the minimum portable surface.
+
+## 17. Reuse-First Contract
+
+Before adding any new event kind, predicate, worker, MCP method, or `act_artifact.kind`, verify no existing entity can carry the burden (`P2TH6BYK6H6FVEP1BH5SH8NVRW`). The substrate's open vocabulary — `act_artifact.kind` and payload extensions such as `knowledge_candidate.payload.judgment_packet=true` — is the canonical extension point. Every entity not added is one less surface to learn, one less dashboard row to explain, and one less integration contract to keep synchronized.
+
+**Audit rule.** Every implementation proposal must classify each proposed entity as one of: folded into existing worker (name the worker), carried by existing event kind via payload extension (name the kind and field), implemented as `act_artifact` row with open `kind` (name the kind), read through existing view (name the view), or genuinely irreducible (prove existing surface fails). A generic "new" claim is insufficient. Closed enums, fixed predicate tables, and parallel registries are substrate violations.
+
+**Current surface inventory.** 239 event kinds (claude=19, runtime=144, brain=18, substrate=54, both=4); 46 views; 28 MCP/runtime methods; 1,673 live `act_artifact` registry rows; 30 registered workers. Worker absorption points: `experience_compression`, `extractors`, `contract_amendment_consumer`, `amendment`, `rendering_audit`, `owner_outcome_followup`, `scheduler`.
+
+## 18. Dataflow Contract
+
+Every data source maps to exactly one substrate primitive; orchestrator intelligence is preserved as durable evidence packets, never as Claude chat-memory paraphrase (`GX3B0TTE453XQ1W6TDGDJXBZWM`, `QWAGAECET158`, `1BDDY69G3N1J`, `40MQX7P41150`). The four-link causal chain (k_555) — create → retrieve → mutate retrieval state → credit outcome — holds for every path. Citation without retrieval binding is decorative memory (k_554); retrieval rejection feeds composer-policy posterior updates (k_201).
+
+| Source | Substrate primitive |
+|---|---|
+| Owner words via chat | `owner_input_received` → `directive_opened` → `intent_classified` → `dispatch_decided` |
+| Owner files via inflow | `act_artifact(kind="ingested_file")` via existing `substrate.admit_artifact`; `artifact_observed` for runtime observation |
+| Claude observation of substrate views | Pure read = no emit; durable insight → `knowledge_candidate(payload.judgment_packet=true)` |
+| Claude situated judgment | `knowledge_candidate(payload.judgment_packet=true, payload.evidence_event_ids[], payload.source_actor="claude_orchestrator")`; known-false brain output → `payload.contradiction_observation=true, payload.contradicted_event_ids[]` |
+| Brain depth-1 reasoning | `action_predicted`, `knowledge_candidate`, `lesson_extracted`, `contract_amendment_proposed`, `task_node_opened`, `task_edge_recorded(payload.edge_kind="refines")` |
+| Runtime artifact observations | `artifact_invoked`, `artifact_observed` |
+| Runtime verifier residuals | `action_scored` with open `verifier_kind`, `breakdown`, `reliability_profile` |
+| Owner feedback on output | `owner_observed_outcome_recorded`; profile changes → `owner_profile_recorded` |
+| Claude-applied mutations | One `act_tuple_recorded` envelope per coherent act → substrate projects `action_predicted`, `action_scored`, `applied_change_committed`, `retrieval_binding`, credit rows idempotently |
+
+**Downstream consumers read substrate state, never Claude chat memory.** `prompt_composer` reads ledger + candidates + judgment packets + profile + contradictions + proposals + task graph + artifact registry. Dispatch reads task graph + dispatch state + recipe/artifact registry + residuals + owner-control surfaces. Merger reads `knowledge_candidate` + `candidate_confirmed`/`candidate_contradicted` + embeddings + thresholds, absorbing both actors' candidates through one pipeline (`substrate/extractors.ts`: `extractKnowledgePromotions`, `maybePromoteKnowledge`, `extractSemanticDedup`, `extractCrossCandidateCorroboration`; `runtime/credit.ts`: distributes action outcomes over cited entities and emits candidate verdicts). Credit reads `action_predicted` + `action_scored` + `act_tuple_recorded` projections + `retrieval_binding` + citations + `owner_observed_outcome_recorded`.
+
+**Dispatch-resume continuity.** Every new `acc task` brain run reads three continuity surfaces from prior runs (knowledge entry `44NHV1MZKS2R`): proposal inbox (already exposed through `lesson_implementer_queue_view`, `lesson_implementation_status_view`, `pending_contract_amendments_view`, composer sections `pending_proposals` and `outstanding_contract_amendments`); cited diff clusters (payload extensions: `contract_amendment_proposed.payload.diff_cluster_id`, `lesson_extracted.payload.diff_cluster_id`, `act_tuple_recorded.payload.cited_diff_cluster_ids`, `applied_change_committed.payload.diff_cluster_id`); retrieval/credit handoff (already exposed through `retrieval_credit_view`, `act_projection_observability_view`, `promoted_knowledge_view`; payload extensions: `retrieval_binding.payload.handoff_role`, `action_predicted.payload.cited_retrieval_binding_ids`, `act_tuple_recorded.payload.cited_knowledge_ids`/`cited_artifact_ids`). Judgment inbox: ordinary `knowledge_candidate` rows with `payload.judgment_packet=true`, `payload.contradiction_observation=true`, `payload.source_actor`, `payload.evidence_event_ids`, `payload.contradicted_event_ids` — prompt composer prioritizes these when they match the active directive.
+
+## 19. Reactive Invariant
+
+Substrate transitions are event-driven, not polled. **Load-bearing invariant: `event_emitted → subscribed_worker → next_event_emitted`.** The 30 registered workers in `worker_liveness_view` already subscribe to event kinds; no `setInterval` scans are permitted inside the daemon loop. Polling is allowed only at the external boundary (Claude transcript file watcher, opencode bridge, external MCP source like Telegram or Drive) and must normalize to an event within one hop. External adapters write `external_event_received` or admit the source's content as `act_artifact`; from that point the cascade is reactive. Compounding consequence: dispatch resume always reads the ledger as authoritative; there is no in-memory state that survives daemon restart unless an event row carries it.
+
+## 20. CLI ↔ MCP Canonical Surface Map
+
+The CLI composes MCP primitives — it does NOT bypass them. Every CLI command that mutates substrate state routes through a named MCP method; no parallel paths.
+
+| CLI command | Canonical MCP method | Purpose |
+|---|---|---|
+| `acc task "..."` | `substrate.emit({kind:"owner_input_received"})` + `substrate.emit({kind:"directive_opened"})` | Owner intent ingress |
+| `acc state me/contracts/focus/portfolio/govern` | `substrate.read({view_name})` | Owner-facing status reads |
+| `acc state search "<topic>"` | `substrate.search({query, k})` | Knowledge retrieval |
+| `acc state entity <id>` | `substrate.read({view_name:"entity_view"})` | Entity inspection |
+| `acc contract live/claim/done/integrate` | `substrate.emit` + `substrate.read({view_name:"commitments_view"})` | Coordination |
+| `acc watch` | `substrate.read({view_name:"watch_panels_view"})` streaming | Live TUI |
+| `acc doctor` | `runtime.system_map` + `substrate.read({view_name:"failure_view"})` | Diagnostic |
+| `acc admin substrate-status` | `runtime.system_map` + `substrate.read({view_name:"health_view"})` | Operator status |
+| `acc admin claude-mcp-register` | filesystem-only setup write (irreducible: writes Claude Code `~/.claude.json`) | One-time bootstrap |
+| `acc init` | filesystem setup + `substrate.emit({kind:"state_snapshot_recorded"})` | First-run bootstrap |
+| `acc daemon start/stop/restart/status` | daemon process control + `runtime.system_map` for health | Process lifecycle |
+
+The only legitimate CLI-direct paths are (a) daemon process control (no substrate state involved) and (b) bootstrap operations that precede daemon start. All other CLI-direct mutations are legacy and must be re-routed through `runtime/mcp_server/substrate_tools.ts`; the retirement contract lives in `docs/roadmap.md` Tier 7.
+
+## 21. Legacy Path Retirement
+
+Two-way paths violate the one-workflow contract. Canonical writer per concern, retirement step via `act_artifact_aliased` for renames or payload migration for shape changes:
+
+| Legacy / parallel | Canonical | Retirement |
+|---|---|---|
+| `code_artifact_*` event kinds | `act_artifact` registry | Emit `act_artifact_aliased(old_id, new_id, reason)` for in-place renames; alias chains resolved via existing `substrate/migration_runner.ts:resolveAliasChain` |
+| Direct DB writes from `cli/*.ts` | `runtime/mcp_server/substrate_tools.ts` | Re-route per §20 surface map |
+| Per-Edit/Write/Bash event emitters | One `act_tuple_recorded` envelope per coherent act | Substrate-side projection in `runtime/internal_act_projection.ts` expands one envelope into all derived rows |
+| Mirror-inline outcome events | Same `act_tuple_recorded` envelope | Same projector |
+| Duplicate `knowledge_candidate.payload` shapes | Single payload schema with `payload.judgment_packet` and `payload.contradiction_observation` flags | Existing `substrate/extractors.ts` merger handles uniformly |
+| CLI-side dispatch race with daemon workers | Daemon is authoritative writer for all reactive event kinds | CLI emits only ingress events (`owner_input_received`, `directive_opened`) |
+
+Each retirement is a payload migration or alias emission; no schema changes. Contract entries with closure predicates live in `docs/roadmap.md` Tier 7.

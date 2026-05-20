@@ -379,6 +379,21 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
         const failed = total - passed;
         return `closure_residual=${residual} checks=${passed}/${total}${failed > 0 ? ` failed=${failed}` : ""}`;
       }
+      // Modern brain payload shape: { breakdown: Record<string, number> } where each value is
+      // a per-axis residual contribution. Without this branch the renderer falls through to
+      // the legacy covered/uncovered fallback and prints 0/0 for rich payloads.
+      const breakdown = p.breakdown as Record<string, number> | undefined;
+      if (breakdown && typeof breakdown === "object") {
+        const axes = Object.keys(breakdown).length;
+        const top = Object.entries(breakdown)
+          .filter(([, v]) => typeof v === "number" && Number.isFinite(v))
+          .sort((a, b) => (b[1] as number) - (a[1] as number))
+          .slice(0, 3)
+          .map(([k, v]) => `${k}:${(v as number).toFixed(2)}`)
+          .join(",");
+        const verifierKind = typeof p.verifier_kind === "string" ? p.verifier_kind : undefined;
+        return `closure_residual=${residual} axes=${axes}${top ? ` top=${top}` : ""}${verifierKind ? ` verifier=${verifierKind}` : ""}`;
+      }
       const uncovered = (p.uncovered_aspects as unknown[] | undefined)?.length ?? 0;
       const covered = (p.covered_sub_tasks as unknown[] | undefined)?.length ?? 0;
       return `closure_residual=${residual} covered=${covered} uncovered=${uncovered}`;

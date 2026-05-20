@@ -148,6 +148,70 @@ describe("formatEvent — task_closure_audited rendering (live + legacy payloads
     expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
   });
 
+  test("modern brain payload with breakdown: renders axes count and top-3 contributors", () => {
+    const line = formatEvent({
+      id: "ev_breakdown",
+      kind: "task_closure_audited",
+      ts: "2026-05-20T20:23:07.325Z",
+      task_id: "t_root",
+      payload: {
+        closure_residual: 0.18,
+        verifier_kind: "peer_llm_opencode_reuse_audit_checklist",
+        breakdown: {
+          reuse_principle_stated_first_class: 0,
+          every_proposed_new_entity_audited_for_reusability: 0.12,
+          irreducible_new_entities_named_separately: 0.08,
+          zero_new_event_kinds_added: 0,
+          introspection_tools_called_with_exact_counts: 0.14,
+          proposal_count_constraint_satisfied: 0,
+          cycle_1_only_satisfied: 0,
+        },
+      },
+    });
+    expect(line).toContain("closure_residual=0.18");
+    expect(line).toContain("axes=7");
+    expect(line).toContain("top=");
+    expect(line).toContain("introspection_tools_called");
+    expect(line).not.toContain("covered=0");
+    expect(line).not.toContain("uncovered=0");
+    expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
+  });
+
+  test("modern brain payload with short axis names: renders top contributors and avoids legacy fallback", () => {
+    const line = formatEvent({
+      id: "ev_breakdown_short",
+      kind: "task_closure_audited",
+      ts: "2026-05-20T20:23:07.325Z",
+      task_id: "t_root",
+      payload: {
+        closure_residual: 0.05,
+        verifier_kind: "brain_self_audit",
+        breakdown: { a: 0.02, b: 0.01, c: 0.02 },
+      },
+    });
+    expect(line).toContain("axes=3");
+    expect(line).toContain("a:0.02");
+    expect(line).not.toContain("covered=");
+    expect(line).not.toContain("uncovered=");
+    expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
+  });
+
+  test("breakdown payload with empty breakdown object still avoids legacy 0/0 print", () => {
+    const line = formatEvent({
+      id: "ev_breakdown_empty",
+      kind: "task_closure_audited",
+      ts: "2026-05-20T20:23:07.325Z",
+      task_id: "t_root",
+      payload: {
+        closure_residual: 0.0,
+        breakdown: {},
+      },
+    });
+    expect(line).toContain("axes=0");
+    expect(line).not.toContain("covered=");
+    expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
+  });
+
   test("T0.1 augmented payload (substrate_verifications) renders claims=/verified=/discrepancies=", () => {
     const line = formatEvent({
       id: "ev_audit_t01",

@@ -282,9 +282,57 @@ Metric direction: successful coalition reuse rises (`YB2C2QCKC10BNBDVF22CX1Y5V8`
 
 ## Tier 5 — UNIVERSALITY + OPERATIONS
 
-Sandbox parity, freeze-state, token rotation, backup/export cadence, migration sweep, worker-thread pool for heavy aggregates, and runtime-runner registry land here because they improve operational universality after the trust and posterior boundaries are in place. Closure predicate for the cluster: each operational surface ships with declared SLOs, observable health signals, and recovery procedures cited from substrate knowledge — no operational change earns "done" without measurable absence-of-violation evidence (`A4V81PN9E960S02MWSM4HSM5G4`, `HBQ8FM8HED2AX2R7EDCVY15R8W`).
+Sandbox parity, freeze-state, token rotation, backup/export cadence, migration sweep, worker-thread pool for heavy aggregates, runtime-runner registry, and Claude-native operator integration land here because they make the same substrate loop operationally universal after trust and posterior boundaries exist. Closure predicate for the cluster: each operational surface ships with declared SLOs, observable health signals, recovery procedures, and absence-of-violation evidence (`A4V81PN9E960S02MWSM4HSM5G4`, `HBQ8FM8HED2AX2R7EDCVY15R8W`).
+
+Claude Code integration contract: `acc init` performs the irreducible user-scope setup by idempotently registering the AccInt MCP server in `~/.claude.json`; Claude hooks (`UserPromptSubmit`, `SessionStart`, `Stop`) capture owner prompts and refresh transcript watches; the chat-transcript observer and automatic legacy-memory import fold into existing `extractors`, emitting existing `owner_input_received` / `directive_opened` / `knowledge_candidate` rows with `payload.origin="claude_legacy_memory"` where applicable; outflow markdown/docs are written by emit-time hooks on existing `applied_change_committed`, `knowledge_promoted`, and `task_closure_audited`; release distribution is an `act_artifact(kind="claude_plugin_package")` so the normal path can become `claude plugins install accint`. Reuse-first constraint: zero new event kinds, zero new MCP methods, zero new worker files, zero new predicate enums. Closure predicate: owner opens Claude Code, talks normally, and the substrate captures intent, routes, dispatches, and returns owner-readable outflow without requiring `acc task` or any other AccInt command; detailed implementation contracts live in Tier 7.
 
 Worker-thread pool contract: keep embedded SQLite for microsecond hot paths and offload known heavy aggregate reads only; closure predicate is event-loop freed during heavy queries while writes remain serialized (`A4V81PN9E960S02MWSM4HSM5G4`).
+
+## Tier 7 — CLAUDE-NATIVE INTEGRATION COMPLETION
+
+Five implementation contracts that close the Claude Code integration contract named in Tier 5. Every entry is an extension of an existing file or worker; zero new event kinds, zero new MCP methods, zero new worker files, zero new predicate enums.
+
+### T7.1 — MCP registration in `acc init` (irreducible setup-config)
+
+Problem: fresh Claude Code chats cannot read substrate state through MCP unless the AccInt server is registered at user scope; manual `claude mcp add-json` works but is not part of the install loop.
+
+Contract: extend `cli/init.ts` + `cli/init.test.ts` to idempotently register the AccInt MCP server in Claude Code's `~/.claude.json` at user scope (prefer local stdio transport; the server proxies to the running daemon). Reversal: `claude mcp remove accint` or `acc init --undo-claude-integration`. Emit `state_snapshot_recorded` on success. Closure predicate: `claude mcp list` after `acc init` shows `accint` registered; re-running `acc init` is a no-op.
+
+Metric direction: fresh-chat MCP availability = 1 after install; manual `claude mcp add-json` invocations trend to zero.
+
+### T7.2 — Claude hooks integration
+
+Problem: owner prompts in Claude Code chat do not enter the ledger automatically; only explicit `acc task` invocations do.
+
+Contract: package `UserPromptSubmit`, `SessionStart`, and `Stop` hook configs in `.claude-plugin/hooks/hooks.json`. The `UserPromptSubmit` hook posts the prompt payload to the daemon over the existing MCP `substrate.emit` surface, which writes `owner_input_received` (and `directive_opened` when the intent classifier flags new directive-shaped work). `SessionStart`/`Stop` refresh the chat-transcript observer's active set. Hooks are accelerators, not authority — file polling remains as fallback per existing extractors design.
+
+Closure predicate: owner messages in watched Claude Code chats reach the ledger within one hop without the owner typing `acc task`.
+
+### T7.3 — Chat-transcript observer + legacy memory import (folded into existing `extractors`)
+
+Problem: owner-intent ingress from chat transcripts and legacy memory must enter the ledger as evidence, not as transient text the next session forgets.
+
+Contract: extend `substrate/extractors.ts` to consume `~/.claude/projects/*/conversation.jsonl` and `~/.claude/memory/`. Each owner message → `owner_input_received` event with dedup hash `sha256(transcript_path + stable_message_id_or_offset + role + text)`. Legacy memory snippets → `knowledge_candidate` rows with `payload.origin="claude_legacy_memory"`, source path/hash evidence, baseline `confidence_estimate`. No `owner_input_required` prompts (merger pipeline is the review layer). No new worker file.
+
+Closure predicate: legacy-memory candidates promoted at rates similar to fresh candidates; chat-derived directives reach `task_committed` parity with explicit `acc task` directives.
+
+### T7.4 — Outflow markdown via emit-time hook (extends existing consumers)
+
+Problem: substantive completed work has no durable owner-readable surface.
+
+Contract: emit-time hook on existing `runtime/contract_amendment_consumer.ts` or `runtime/rendering_audit_worker.ts` writes `~/.accint/outflow/<task_id>.{md|pdf|docx|...}` when an `applied_change_committed` / `knowledge_promoted(score≥0.75, owner_readable=true)` / `task_closure_audited(residual<0.3)` / `closure_complete` event lands. Linked ledger event carries the path. Inherits `always_keep` Mnemonic curation. Claude reads via existing `substrate.read({view_name:"outflow_artifact_view"})`.
+
+Closure predicate: outflow artifacts produced per substantive completion ≥ 0.8; owner-observed outcome citations of outflow paths > 0.
+
+### T7.5 — Claude plugin packaging (act_artifact distribution row)
+
+Problem: AccInt installation is multi-step manual setup; the owner-facing channel should be `claude plugins install accint`.
+
+Contract: package the AccInt plugin as `act_artifact(kind="claude_plugin_package")` admitted at release-cut time. Package: `.claude-plugin/plugin.json`, inline `mcpServers` entry for local stdio AccInt server, `hooks/hooks.json` per T7.2, optional `skills/acc/SKILL.md`, bundled `substrate/canonical.db` for first install. Release pipeline validates with Claude Code's plugin validator; existing organism memory preserved via §16 migration registry. No new substrate vocabulary.
+
+Closure predicate: `claude plugins install accint` results in a working substrate with daemon health and MCP registered.
+
+**Closure predicate (Tier 7).** All five contracts land with predicates met; owner opens Claude Code, talks normally, substrate captures intent, routes, dispatches, returns outflow. Zero new event kinds, MCP methods, worker files, or predicate enums introduced by Tier 7 itself.
 
 ## Tier 6 — Scoreable-Assumption Predicates
 
@@ -310,6 +358,102 @@ These are graceful-degradation assumptions: violations raise residuals and route
 - `semantic_anchor_stability_predicate` — Problem: doc anchors can match text while meaning changes. Contract: score anchor meaning across concurrent edits. Why: auto-apply needs semantic locality. Closure predicate: stale anchors are refused. Metric direction: anchor-collision residual falls.
 - `goal_continuity_predicate` — Problem: refinements can optimize a different goal. Contract: score objective preservation across DAG edges. Why: recursion must serve the originating intent. Closure predicate: goal drift is detected before commit. Metric direction: drift residual falls.
 - `ledger_time_consistency_predicate` — Problem: event ordering and due dates can mislead reasoning. Contract: score timestamp/order consistency. Why: causality and review cadence depend on time. Closure predicate: inconsistent temporal claims raise residual. Metric direction: temporal inconsistency falls.
+
+## Tier 7 — INTEGRATION COMPLETION
+
+Live cross-domain dispatch evidence — directive `MPF9FF644502D7V8DW5ZJ6TPH0` (Telegram + Google Drive auto-ingest) and code dispatches both flow through identical RLM primitives — confirms universality is structural. The alignment audit `45PDCXPKEX20HDB6DC1FK8GM9M` named the remaining drift: credit closure is not uniformly traceable from every mutation-like outcome back through `action_predicted`/`action_scored` to posterior movement. Brain self-audit shows `first_dispatch_committed_rate=0.973` and `residual_below_threshold_rate=0.850`, **but** 1779 `knowledge_candidate` emissions with 0 promoted in-window, 1289 contradicted, 1420 contract amendments, 2933 applied commits, only 223 `action_scored` rows. The system is good at emitting and committing, weak at credit closure. Tier 7 closes that gap and ships the reuse-first integration surfaces named in Architecture.md §§17–21.
+
+### T7.1 — Claude chat observer (folded into existing `extractors`)
+
+Problem: Claude Code conversations are the owner-intent ingress for new chats but do not enter the ledger as `owner_input_received` events without explicit dispatch through `acc task` (`P2TH6BYK6H6FVEP1BH5SH8NVRW`, `CP48EY9APS0794T3VNCN3CV1V0`).
+
+Contract: extend existing `substrate/extractors.ts` to consume `~/.claude/projects/*/conversation.jsonl` and `transcript_path` values supplied by Claude Code `UserPromptSubmit`/`SessionStart`/`Stop` hook JSON; emit `owner_input_received` (and `directive_opened` when the intent classifier signals new directive-shaped work); dedupe by `sha256(transcript_path + stable_message_id_or_offset + role + text)`. Closure predicate: every owner prompt in a watched transcript reaches the ledger within one hop and an existing brain dispatch can compose against the resulting events. NO new worker file; the polling adapter folds into the existing reactive extractor surface.
+
+Metric direction: owner_input_received from chat transcripts > 0; chat-derived directives reach `task_committed` parity with `acc task` directives.
+
+### T7.2 — Outflow writes (folded into existing amendment/rendering consumers)
+
+Problem: substantive completed work has no durable owner-readable surface; Claude renders chat that disappears on session end (`P2TH6BYK6H6FVEP1BH5SH8NVRW`, `CP48EY9APS0794T3VNCN3CV1V0`).
+
+Contract: emit-time hook on existing `runtime/contract_amendment_consumer.ts` or `runtime/rendering_audit_worker.ts` writes `~/.accint/outflow/<task_id>.{md|pdf|docx|xlsx|pptx|...}` when an `applied_change_committed` / `knowledge_promoted(score≥0.75, owner_readable=true)` / `task_closure_audited(residual<0.3)` / `closure_complete` event lands. The file starts with a concise status, links back to ledger ids in a technical footer, and inherits `always_keep` Mnemonic curation per commit `a750bbb`. Closure predicate: every substantive completion produces an outflow artifact path readable via `substrate.read({view_name:"outflow_artifact_view"})` and Claude renders the link without inferring completion from stdout.
+
+Metric direction: outflow artifacts produced per substantive completion event ≥ 0.8; owner-observed outcome citations of outflow paths > 0.
+
+### T7.3 — Mutation credit parity (extend existing projection + credit)
+
+Problem: this is the highest-leverage drift named by `45PDCXPKEX20HDB6DC1FK8GM9M`. Legacy applies, `code_artifact` mutations, imported-memory completion, and recovery completion do not route through the `act_tuple_recorded` projection consistently, so `action_scored` counts lag committed mutation counts and posteriors stop compounding (`P2TH6BYK6H6FVEP1BH5SH8NVRW`).
+
+Contract: extend `runtime/internal_act_projection.ts` and `runtime/events.ts` so every legacy apply / `code_artifact` / imported-memory / recovery-completion path routes through the existing `act_tuple_recorded` projection (substrate-side expansion into `action_predicted`, `action_scored`, `applied_change_committed`, `retrieval_binding`, candidate verdicts, credit rows). Extend `runtime/credit.ts` so Claude-origin judgment packets and owner-observed outcomes feed existing candidate/artifact credit paths by citations and context refs. NO second projector, NO second credit worker (prior lessons explicitly warn against this). Closure predicate: `action_scored` count rises toward committed mutation count; `silent_dispatch_quarantine` stops recurring; promoted-knowledge rate recovers; `act_projection_observability_view` and `retrieval_credit_view` show parity.
+
+Metric direction: `action_scored` / `applied_change_committed` ratio rises from current ~0.08 toward 1.0; `silent_dispatch_quarantine` count trends to zero.
+
+### T7.4 — Claude Code MCP registration in `acc init` (genuinely irreducible)
+
+Problem: fresh Claude Code sessions cannot read substrate state through MCP unless the AccInt server is registered at user scope; manual `claude mcp add-json` works but is not part of the install loop (`CP48EY9APS0794T3VNCN3CV1V0`, `QHKZTW506N18B6SV4KHZVVZYAR`).
+
+Contract: extend `cli/init.ts` and `cli/init.test.ts` to idempotently register the AccInt substrate MCP server in Claude Code's `~/.claude.json` at user scope (NOT `~/.claude/.mcp.json`); prefer local stdio transport; the server proxies to the running daemon. Reversal: `claude mcp remove accint` or `acc init --undo-claude-integration`. Closure predicate: `claude mcp list` after `acc init` shows `accint` registered; re-running `acc init` is a no-op. This is genuinely irreducible setup-config because it writes Claude's own settings file; emit `state_snapshot_recorded` evidence on success.
+
+Metric direction: fresh-chat MCP availability = 1 after install.
+
+### T7.5 — Automatic Claude memory import (payload extension)
+
+Problem: prior Claude Code sessions accumulated knowledge in `~/.claude/memory/` and project transcripts; that evidence is invisible to AccInt's posterior machinery until ingested (`CP48EY9APS0794T3VNCN3CV1V0`, `P2TH6BYK6H6FVEP1BH5SH8NVRW`).
+
+Contract: extend `cli/init.ts` to detect `~/.claude/memory/` and `~/.claude/projects/*/conversation.jsonl` during setup and admit durable snippets as `knowledge_candidate` with `payload.origin="claude_legacy_memory"`, source path/hash evidence, `confidence_estimate` near baseline, and `applies_to` tags from file location/transcript context. NO `owner_input_required` prompts (commit `fcf4fb0` made this fully automatic — merger pipeline is the review layer). NO direct promotion; merger absorbs via existing `substrate/extractors.ts`. Closure predicate: imported candidates reach the merger and compete for promotion through the same path as fresh candidates.
+
+Metric direction: legacy-memory candidates promoted at rates similar to fresh candidates (no origin discrimination).
+
+### T7.6 — File ingest via existing `substrate.admit_artifact` (no new MCP method)
+
+Problem: owner files referenced in chat must enter the ledger with provenance and hash-grounded identity, not as transient chat text (`QS0G3V1QQ10HD90FDGK6D4A2Z4`, `P2TH6BYK6H6FVEP1BH5SH8NVRW`).
+
+Contract: file ingestion uses existing `substrate.admit_artifact({kind:"ingested_file", target_resources, payload:{source_path, file_hash, scope}, sandbox})`. Idempotency key: `sha256(source_path + file_hash + kind + scope_or_default)`. The daemon may watch `~/.accint/inflow/` for owner-initiated drops via existing reactive worker; admission emits `act_artifact_admitted` (existing event) and `artifact_observed`. NO new `substrate.ingest_file` MCP tool; the convenience layer is documented as a thin wrapper if byte/path/idempotency semantics demand it later, but the canonical path is `admit_artifact`. Closure predicate: a file dropped under `~/.accint/inflow/` reaches the ledger as `act_artifact(kind="ingested_file")` within one reactive hop; later directives cite the artifact id, not the path string.
+
+Metric direction: `act_artifact(kind="ingested_file")` admissions > 0; downstream citations bind to artifact ids.
+
+### T7.7 — Composer trimming (extend `runtime/prompt_composer.ts`)
+
+Problem: live `brain_prompt_composed` events show `chars_original=46699, truncated=true` (`WETXPFZZAN2X`). Composer over-injects workflow grammar instead of producing the minimal substrate projection the depth-1 contract requires. Truncation clips the evidence section.
+
+Contract: extend `runtime/prompt_composer.ts` with section budgets that fit the 12000-char gate. Keep: owner directive verbatim (~1500), retrieved knowledge ranked by score×confidence (~3000), owner profile compact (~500), active failures + pending proposals (~1500), top laws (~800), minimal emission grammar for opencode brain (~600 — knowledge entry `38GYZ26QYX1N` says GPT-5.5 needs explicit MCP/ledger grammar to avoid silent exits; do NOT delete entirely), refinement edge syntax (~200), citation rules (~200), compact section markers (~250). Delete: substrate vocabulary tutorial (brain learns from retrieved candidates), MCP tool catalog (opencode already advertises tools), examples/scaffolding (evidence is enough). Relocate workflow tutoring to `act_artifact(kind="brain_system_prompt", id="brain_system_prompt_v1")` retrieved once per opencode session. Closure predicate: typical dispatch composes ≤ 9000 chars; cross-domain dispatches cap at 11000; `brain_prompt_composed.truncated=false` for ≥ 95% of dispatches in a 24h window.
+
+Metric direction: `chars_original` p90 falls below 11000; `truncated=true` rate falls below 5%.
+
+### T7.8 — ResourceUri parser extension for non-code schemes
+
+Problem: provenance/routing assumes `repo:path/to/file` everywhere, making non-code domains second-class (`BC7H26S5NS7S`, `NJR1JP2ZC52Z`, `WT9M8BW95X0F`).
+
+Contract: extend `runtime/resource_uri.ts` (and tests) to parse additional schemes: `runtime:python:<artifact_id>`, `runtime:bun:<artifact_id>`, `runtime:browser:<artifact_id>`, `external:telegram:<chat_id>:<msg_id>`, `external:gdrive:<doc_id>`, `inflow:<artifact_id>`, `outflow:<task_id>:<ext>`. Same parser, more schemes; no enum closure. Extend `substrate/views.ts` registry selectors to filter by `act_artifact.kind` and `target_resources` URI scheme without closed enums. Update `contract_amendment_proposed.target_resource` to accept any URI scheme. Closure predicate: round-trip tests pass for all 7 schemes; brain emits `act_artifact(kind="python_script_v1"|"bun_script_v1"|"browser_flow_v1")` for at least one non-code dispatch within the first week.
+
+Metric direction: non-`repo:` `target_resource` rows in `contract_amendment_proposed` > 0; runtime-kind `act_artifact` rows admitted across uv/bun/browser.
+
+### T7.9 — Brain content-observability views via existing `substrate.read`
+
+Problem: the brain runs in its opencode background_job shell and needs to observe whole-system content (raw event payloads, artifact bodies, inflow file contents, owner transcript spans, cross-directive proposal clusters); existing views summarize/truncate (`P2TH6BYK6H6FVEP1BH5SH8NVRW`, Architecture.md §6).
+
+Contract: extend `substrate/views.ts` with new projected view names readable through the EXISTING `substrate.read({view_name})` MCP method — no new MCP tools. Required `view_name` values: `event_payload_view` (raw `events.payload` JSON for given event_ids), `act_artifact_body_view` (project `act_artifact.payload` + `kind` + runtime declaration), `inflow_artifact_view` (resolves `act_artifact(kind="ingested_file")` to bytes/text with source hash), `owner_conversation_window_view` (owner_input_received + directives in time range), `proposal_cluster_view` (joins amendments/lessons/applied-changes by `payload.diff_cluster_id`), `outflow_artifact_view` (resolves outflow paths). All projections over existing event rows; zero new state. Closure predicate: brain dispatches successfully retrieve raw payload/body/inflow content via `substrate.read` and cite them in `knowledge_candidate.evidence_event_ids`.
+
+Metric direction: `substrate.read({view_name in <new set>})` call count > 0 from brain frames; brain-cited evidence_event_ids include payload-bearing reads.
+
+### T7.10 — Claude plugin packaging (act_artifact distribution row)
+
+Problem: AccInt installation requires multi-step manual setup; the owner-facing channel should be `claude plugins install accint` (`CP48EY9APS0794T3VNCN3CV1V0`).
+
+Contract: package the AccInt plugin as `act_artifact(kind="claude_plugin_package")` admitted at release-cut time. Package contents: `.claude-plugin/plugin.json`, `.mcp.json` (or inline `mcpServers` for local stdio AccInt server), `hooks/hooks.json` (`UserPromptSubmit`/`SessionStart`/`Stop` notifications — accelerators not authority), optional `skills/acc/SKILL.md` for explicit override, bundled `substrate/canonical.db` for first install. The release pipeline validates with Claude Code's plugin validator and pins the marketplace entry by version or commit SHA; existing organism memory is preserved via T0.4 backfill and §16 migration registry. Closure predicate: `claude plugins install accint` results in a working substrate with daemon health and MCP registered.
+
+Metric direction: install paths converge on plugin install; multi-step manual installs drop.
+
+### T7.11 — Legacy path retirement sweep
+
+Problem: parallel writers and shape duplications (Architecture.md §21) accumulate operational complexity.
+
+Contract: execute the retirement table from Architecture.md §21 row by row: emit `act_artifact_aliased` for `code_artifact_*` → `act_artifact_*` renames; re-route CLI-direct DB writes through `runtime/mcp_server/substrate_tools.ts` per §20 surface map; collapse per-tool-call emitters into one `act_tuple_recorded` envelope per coherent act (projection in `runtime/internal_act_projection.ts` expands derived rows idempotently); standardize `knowledge_candidate.payload` shapes around `payload.judgment_packet` and `payload.contradiction_observation` flags; ensure CLI emits only ingress events (`owner_input_received`, `directive_opened`) for ledger writes that daemon workers will pick up. Closure predicate: every event kind has exactly one canonical writer; `act_artifact_aliased` chains resolve cleanly via `substrate/migration_runner.ts:resolveAliasChain`; CLI-side dispatch races with daemon workers stop appearing in `failure_view`.
+
+Metric direction: legacy-shape `code_artifact_*` event emissions trend to zero; per-event-kind writer cardinality = 1; race-condition failures fall.
+
+**Closure predicate (Tier 7).** All eleven contracts above land with closure predicates met; the alignment audit's drift signal (action_scored ≪ applied_change_committed) closes; the live cross-domain dispatch shape (Telegram/Drive ingest at `MPF9FF644502D7V8DW5ZJ6TPH0`) continues working without any domain-specific code paths; the reuse-first audit holds (zero new event kinds, zero new MCP methods, zero new workers, zero new predicate enums introduced by Tier 7 itself).
+
+**Metric direction (Tier 7).** Every owner-channel intent (chat / file drop / external MCP source / `acc task` directive) lands in the ledger with provenance; every substantive completion produces an owner-readable outflow artifact; credit closure parity is observable in `act_projection_observability_view` and `retrieval_credit_view`; composer truncation rate falls; ResourceUri non-code schemes carry first-class artifacts.
 
 ## Rejected Alternatives
 

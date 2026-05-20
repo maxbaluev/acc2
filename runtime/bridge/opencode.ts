@@ -237,7 +237,11 @@ export const spawnRealOpencode = async (
   // (v2-design §13) is falsifiable only when the prompt is in the ledger.
   // Capped at PROMPT_FULL_CAP_CHARS to keep SQLite bounded; sha256 +
   // chars_original give exact provenance.
-  const PROMPT_FULL_CAP_CHARS = 32_768;
+  // Audit-row cap. Raised from 32_768 to 65_536 so operators can see the full
+  // prompt when composer bloat is suspected. Brain receives the full prompt
+  // regardless; this only caps the events.payload.text snapshot stored in
+  // state.db for inspection. SQLite handles 64KB rows comfortably.
+  const PROMPT_FULL_CAP_CHARS = 65_536;
   try {
     const promptHasher = new Bun.CryptoHasher("sha256");
     promptHasher.update(req.prompt);
