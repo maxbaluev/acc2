@@ -15,9 +15,16 @@ import {
   maybePromoteOwnerProfile,
 } from "./extractors";
 import { encodeEmbeddingBlob, EMBEDDING_VERSION, EMBEDDING_DIMS, upsertVecEventRow } from "../runtime/embedder";
+import { invalidateThresholdCache, seedThresholdPredicate } from "../runtime/threshold_registry";
 
 afterAll(() => closeDb());
-beforeEach(() => closeDb());
+beforeEach(() => {
+  closeDb();
+  // Tier-S4: extractors now read merger thresholds through the universal
+  // registry (cached per-process). Invalidate between tests so a seed
+  // from a prior test cannot bleed into a fresh in-memory db.
+  invalidateThresholdCache();
+});
 
 const newId = (): string =>
   crypto.randomUUID().replace(/-/g, "").slice(0, 26).toUpperCase();
@@ -992,5 +999,204 @@ describe("extractCrossCandidateCorroboration (T1.3 promotion-rate spine)", () =>
     const summary = await extractCrossCandidateCorroboration(db);
     expect(summary.corroborated).toBe(0);
     expect(summary.skipped_existing).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ── Tier-S4: merger-rule thresholds via T2.1 registry ─────────────
+//
+// Every hardcoded constant in extractSemanticDedup + extractCrossCandidateCorroboration
+// now routes through getThreshold(db, "<name>", default). The cold-start
+// default is the original literal; an admitted threshold_predicate row
+// overrides it. These five tests prove the override path works for each
+// migrated threshold.
+describe("Tier-S4 — merger thresholds via threshold registry", () => {
+  // Helpers — local copies of the cross-corroboration test fixtures so
+  // we can build embeddings + vec_events rows for the corroboration tests.
+  const makeUnitVec = (dims: number, axis: number): number[] => {
+    const v = new Array<number>(dims).fill(0);
+    v[axis] = 1;
+    return v;
+  };
+  const makeNearAxis0 = (bleed: number): number[] => {
+    const v = makeUnitVec(EMBEDDING_DIMS, 0);
+    v[1] = bleed;
+    const n = Math.sqrt(1 + bleed * bleed);
+    for (let i = 0; i < v.length; i++) v[i] = v[i] / n;
+    return v;
+  };
+  const attachEmbedding = (
+    db: ReturnType<typeof openDb>,
+    eventId: string,
+    axis: number,
+  ): void => {
+    const vec = makeUnitVec(EMBEDDING_DIMS, axis);
+    db.run(
+      "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
+      [encodeEmbeddingBlob(vec), EMBEDDING_VERSION, eventId],
+    );
+    try { upsertVecEventRow(db, eventId, vec, EMBEDDING_VERSION); } catch { /* vec0 not loaded */ }
+  };
+  const attachExplicit = (
+    db: ReturnType<typeof openDb>,
+    eventId: string,
+    vec: number[],
+  ): void => {
+    db.run(
+      "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
+      [encodeEmbeddingBlob(vec), EMBEDDING_VERSION, eventId],
+    );
+    try { upsertVecEventRow(db, eventId, vec, EMBEDDING_VERSION); } catch { /* vec0 not loaded */ }
+  };
+
+  test("merger_dedup_cosine_threshold override raises the bar — near-duplicates at cosine ≈ 0.93 no longer collapse", async () => {
+    const db = openDb(":memory:");
+    // Seed the override BEFORE any extractor read so the cache lands on
+    // the registry value, not the default. 0.95 > 0.93 so the prior
+    // candidate fails the new cosine bar even though it passes the
+    // default 0.92.
+    seedThresholdPredicate(db, "merger_dedup_cosine_threshold", 0.95);
+
+    const priorId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      payload: { text: "claim under test" },
+    });
+    attachEmbedding(db, priorId, 0);
+
+    // bleed=0.4 → cosine = 1/√(1+0.16) ≈ 0.928 — above default 0.92 but
+    // below the registry-seeded 0.95. With the override active, the
+    // pair must NOT merge.
+    const candId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      payload: { text: "claim under test (near-dup)" },
+    });
+    attachExplicit(db, candId, makeNearAxis0(0.4));
+
+    const summary = await extractSemanticDedup(db);
+    expect(summary.merged).toBe(0);
+    expect(summary.contradicted).toBe(0);
+  });
+
+  test("merger_synthesis_eligibility_count override raises the bar — 2 corroborations no longer synthesize", async () => {
+    const db = openDb(":memory:");
+    // Default is 2 — seed 5 so the dedup loop's synthesis branch fails
+    // even when a second corroborator lands. The merged row still
+    // emits (cosine + polarity dedup), but the synthesised row does NOT.
+    seedThresholdPredicate(db, "merger_synthesis_eligibility_count", 5);
+
+    // Anchor candidate (axis-0) + two near-duplicates (also axis-0) from
+    // two DIFFERENT origins so the synthesis branch's distinctOrigins
+    // gate would normally pass (>=2 origins) at count=2. With the
+    // override at 5, the count gate fails and no synthesis lands.
+    const anchorId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "anchor claim about retrieval" },
+    });
+    attachEmbedding(db, anchorId, 0);
+
+    const corrA = insertEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode_brain",
+      payload: { text: "anchor claim about retrieval (rephrased A)" },
+    });
+    attachEmbedding(db, corrA, 0);
+
+    const corrB = insertEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "substrate_auto",
+      payload: { text: "anchor claim about retrieval (rephrased B)" },
+    });
+    attachEmbedding(db, corrB, 0);
+
+    await extractSemanticDedup(db);
+
+    const synthRows = db
+      .query("SELECT id FROM events WHERE kind = 'knowledge_synthesized'")
+      .all() as Array<{ id: string }>;
+    expect(synthRows.length).toBe(0);
+  });
+
+  test("merger_corroboration_cosine_threshold override raises the bar — cosine 0.95 no longer corroborates", async () => {
+    const db = openDb(":memory:");
+    // Default is 0.88. Seed 0.99 so even very-near matches fail.
+    seedThresholdPredicate(db, "merger_corroboration_cosine_threshold", 0.99);
+
+    const promotedId = insertEvent(db, {
+      kind: "knowledge_promoted",
+      payload: { score: 0.91, goal_shape_tags: ["dispatch_strategy"], claim: "promoted" },
+    });
+    attachEmbedding(db, promotedId, 0);
+
+    // bleed=0.1 → cosine ≈ 0.995 — well above default 0.88, but barely
+    // above the seeded 0.99. Use bleed=0.2 → cosine ≈ 0.981 to land
+    // BELOW the new 0.99 floor while still being a strong neighbor.
+    const candidateId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      payload: { claim: "candidate near promoted", goal_shape_tags: ["dispatch_strategy"] },
+    });
+    attachExplicit(db, candidateId, makeNearAxis0(0.2));
+
+    const summary = await extractCrossCandidateCorroboration(db);
+    expect(summary.corroborated).toBe(0);
+    // skipped_recent counts candidates that scanned but failed cosine /
+    // polarity / goal-shape gates. The override pushes this candidate
+    // into skipped_recent.
+    expect(summary.skipped_recent + summary.skipped_existing).toBeGreaterThanOrEqual(1);
+  });
+
+  test("merger_corroboration_polarity_floor override raises the bar — promoted score 0.90 no longer counts as polarity-positive", async () => {
+    const db = openDb(":memory:");
+    // Default polarity floor is 0.85. Seed 0.95 so a 0.91-scored
+    // promoted neighbor no longer qualifies as a corroboration source.
+    seedThresholdPredicate(db, "merger_corroboration_polarity_floor", 0.95);
+
+    const promotedId = insertEvent(db, {
+      kind: "knowledge_promoted",
+      payload: { score: 0.91, goal_shape_tags: ["dispatch_strategy"], claim: "promoted" },
+    });
+    attachEmbedding(db, promotedId, 0);
+
+    const candidateId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      payload: { claim: "candidate near promoted", goal_shape_tags: ["dispatch_strategy"] },
+    });
+    attachExplicit(db, candidateId, makeNearAxis0(0.1));
+
+    const summary = await extractCrossCandidateCorroboration(db);
+    expect(summary.corroborated).toBe(0);
+    void candidateId;
+  });
+
+  test("merger_corroboration_credit_weight override changes the emitted weight payload", async () => {
+    const db = openDb(":memory:");
+    // Default credit weight is 0.3. Seed 0.7 — the emitted
+    // candidate_confirmed row must carry weight=0.7, not 0.3.
+    seedThresholdPredicate(db, "merger_corroboration_credit_weight", 0.7);
+
+    const promotedId = insertEvent(db, {
+      kind: "knowledge_promoted",
+      payload: { score: 0.91, goal_shape_tags: ["dispatch_strategy"], claim: "promoted" },
+    });
+    attachEmbedding(db, promotedId, 0);
+
+    const candidateId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      payload: { claim: "candidate near promoted", goal_shape_tags: ["dispatch_strategy"] },
+    });
+    attachExplicit(db, candidateId, makeNearAxis0(0.1));
+
+    const summary = await extractCrossCandidateCorroboration(db);
+    expect(summary.corroborated).toBe(1);
+
+    const confirms = db
+      .query(
+        `SELECT payload FROM events
+         WHERE kind = 'candidate_confirmed'
+           AND payload LIKE '%"confirmation_source":"semantic_corroboration"%'`,
+      )
+      .all() as Array<{ payload: string }>;
+    expect(confirms.length).toBe(1);
+    const p = JSON.parse(confirms[0]!.payload) as Record<string, unknown>;
+    expect(p.weight).toBe(0.7);
   });
 });

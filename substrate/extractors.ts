@@ -28,6 +28,7 @@ import { parseResourceRefs } from "../runtime/resource_uri";
 import { decodeEmbeddingBlob } from "../runtime/embedder";
 import { betaMean as canonicalBetaMean, betaEvidenceConfidence } from "../runtime/posterior";
 import { evaluatePromotion } from "../runtime/posterior_promotion";
+import { getThreshold } from "../runtime/threshold_registry";
 
 // ── ULID-ish id minter (same convention as Phase B1 tests) ─────────
 
@@ -749,8 +750,17 @@ const cosineSimilarity = (a: Float32Array, b: Float32Array): number => {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 };
 
-const KNOWLEDGE_DEDUP_COSINE_THRESHOLD = 0.92;
-const SYNTHESIS_CORROBORATION_THRESHOLD = 2;
+// T2.1 / Tier-S4 — both of these constants are now adaptive via the
+// universal threshold registry. The hardcoded literals remain as the
+// cold-start defaults (returned when no admitted threshold_predicate
+// row exists). External callers can still import these for the
+// canonical defaults; in-file consumers route through getThreshold().
+//
+// Canonical names (act_artifact.name):
+//   - merger_dedup_cosine_threshold        (default 0.92)
+//   - merger_synthesis_eligibility_count   (default 2)
+export const KNOWLEDGE_DEDUP_COSINE_THRESHOLD = 0.92;
+export const SYNTHESIS_CORROBORATION_THRESHOLD = 2;
 
 /** Read text from a knowledge_candidate payload (handles `text` or `claim`). */
 const candidateText = (payload: unknown): string => {
@@ -761,6 +771,22 @@ const candidateText = (payload: unknown): string => {
 
 export const extractSemanticDedup = async (db: Database): Promise<SemanticDedupSummary> => {
   const cursor = readMeta(db, META_KEYS.dedup);
+
+  // Tier-S4: thresholds resolved through the universal registry. Cold-start
+  // falls back to the hardcoded defaults; once a threshold_predicate row
+  // is admitted, its Beta-posterior-ranked value wins. Read once per pass
+  // so the hot row-by-row loop doesn't pay the cache + SQL lookup cost
+  // per comparison.
+  const dedupCosineThreshold = getThreshold(
+    db,
+    "merger_dedup_cosine_threshold",
+    KNOWLEDGE_DEDUP_COSINE_THRESHOLD,
+  );
+  const synthesisEligibilityCount = getThreshold(
+    db,
+    "merger_synthesis_eligibility_count",
+    SYNTHESIS_CORROBORATION_THRESHOLD,
+  );
 
   // New candidates since last run (with their embeddings + text).
   // Cursor-bounded scan per KC GJ2KN1J3KD1Z: cursor + LIMIT cap the
@@ -865,7 +891,7 @@ export const extractSemanticDedup = async (db: Database): Promise<SemanticDedupS
         if (!vecB) continue;
         if (vecB.length !== vecA.length) continue;
         const cos = cosineSimilarity(vecA, vecB);
-        if (cos < KNOWLEDGE_DEDUP_COSINE_THRESHOLD) continue;
+        if (cos < dedupCosineThreshold) continue;
         const textB = candidateText(JSON.parse(prior.payload ?? "{}"));
         const polB = polarityOf(textB);
 
@@ -951,7 +977,7 @@ export const extractSemanticDedup = async (db: Database): Promise<SemanticDedupS
                    AND context_refs LIKE '%"' || ? || '"%'`,
               )
               .get(prior.id) as { c: number }).c;
-            if (corroborationCount >= SYNTHESIS_CORROBORATION_THRESHOLD && distinctOrigins.size >= 2) {
+            if (corroborationCount >= synthesisEligibilityCount && distinctOrigins.size >= 2) {
               insertEvent(db, {
                 kind: "knowledge_synthesized",
                 directive_id: prior.directive_id,
@@ -1078,7 +1104,20 @@ export const extractSemanticDedup = async (db: Database): Promise<SemanticDedupS
 // that already received a `semantic_corroboration` confirmation are
 // skipped. Yields to the event loop every 25 rows per KC GJ2KN1J3KD1Z.
 
-const CROSS_CANDIDATE_CORROBORATION_CONFIG = {
+// T2.1 / Tier-S4 — three of these defaults are now adaptive via the
+// universal threshold registry. The hardcoded literals remain as the
+// cold-start defaults (returned when no admitted threshold_predicate
+// row exists). External callers can import the const for the canonical
+// defaults; in-function consumers route through getThreshold().
+//
+// Canonical names (act_artifact.name):
+//   - merger_corroboration_cosine_threshold   (default 0.88)
+//   - merger_corroboration_polarity_floor     (default 0.85)
+//   - merger_corroboration_credit_weight      (default 0.3)
+//
+// scanLimit / windowDays / knn remain non-adaptive — they bound the
+// per-tick work, not the merger semantics.
+export const CROSS_CANDIDATE_CORROBORATION_CONFIG = {
   scanLimit: 500,
   windowDays: 30,
   cosineThreshold: 0.88,
@@ -1127,6 +1166,26 @@ export const extractCrossCandidateCorroboration = async (
 ): Promise<CrossCandidateCorroborationSummary> => {
   const cfg = CROSS_CANDIDATE_CORROBORATION_CONFIG;
   const cutoffIso = new Date(Date.now() - cfg.windowDays * 24 * 60 * 60 * 1000).toISOString();
+
+  // Tier-S4: merger thresholds resolved via the universal registry.
+  // Cold-start falls back to the hardcoded defaults from cfg; once a
+  // threshold_predicate row is admitted, its Beta-posterior-ranked
+  // value wins. Read once per pass — the inner loop reuses these.
+  const cosineThreshold = getThreshold(
+    db,
+    "merger_corroboration_cosine_threshold",
+    cfg.cosineThreshold,
+  );
+  const polarityFloor = getThreshold(
+    db,
+    "merger_corroboration_polarity_floor",
+    cfg.promotedScoreThreshold,
+  );
+  const creditWeight = getThreshold(
+    db,
+    "merger_corroboration_credit_weight",
+    cfg.bootstrapWeight,
+  );
 
   // 1. Pull unverified candidates inside the time window.
   //    "Unverified" = no candidate_confirmed/contradicted citing this
@@ -1259,7 +1318,7 @@ export const extractCrossCandidateCorroboration = async (
       if (n.event_id === cand.id) continue;
       const cosineDistance = Math.max(0, Math.min(2, n.distance / 2));
       const cosine = 1 - cosineDistance;
-      if (cosine < cfg.cosineThreshold) continue;
+      if (cosine < cosineThreshold) continue;
 
       // The neighbor row must be a knowledge_promoted (score ≥ threshold
       // + positive polarity). knowledge_candidate neighbors are common
@@ -1273,7 +1332,7 @@ export const extractCrossCandidateCorroboration = async (
 
       const promotedPayload = parsePayloadSafe(neighbor.payload);
       const promotedScore = typeof promotedPayload.score === "number" ? promotedPayload.score : NaN;
-      if (!Number.isFinite(promotedScore) || promotedScore < cfg.promotedScoreThreshold) continue;
+      if (!Number.isFinite(promotedScore) || promotedScore < polarityFloor) continue;
 
       // Goal-shape overlap: prefer at least one common tag; lenient
       // fallback when either side declares no tags.
@@ -1302,7 +1361,7 @@ export const extractCrossCandidateCorroboration = async (
       payload: {
         candidate_id: cand.id,
         confirmation_source: "semantic_corroboration",
-        weight: cfg.bootstrapWeight,
+        weight: creditWeight,
         matched_promoted_id: matchedPromoted.id,
         cosine_similarity: matchedPromoted.cosine,
         evidence_event_ids: [cand.id, matchedPromoted.id],
