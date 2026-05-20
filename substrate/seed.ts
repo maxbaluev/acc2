@@ -2649,6 +2649,65 @@ const PREDICATE_ARTIFACTS: SeedArtifact[] = PREDICATE_SEEDS.map((p) => ({
   posterior_beta_override: 1,
 }));
 
+// ── Threshold predicates (act_artifact{kind:"threshold_predicate"}) ──
+//
+// Universal threshold registry (runtime/threshold_registry.ts) reads
+// the HIGHEST-posterior admitted row whose kind = 'threshold_predicate'
+// and name matches the queried threshold name. The body is JSON
+// `{value: <number>}` — getThreshold parses body.value.
+//
+// closure_gate_residual_threshold (default 0.3) gates task_committed:
+// the hardened closure commit gate in runtime/closure_audit.ts refuses
+// the emission when the referenced task's most recent
+// task_closure_audited row carries closure_residual >= this value.
+// Brain amendments can propose new variants (per-goal-class, per-risk
+// profile, etc.) and the registry resolves to the highest-posterior
+// admitted row. Default ships at 0.3 so first-boot installs match the
+// documented "closure_residual >= 0.3 → refine, do NOT commit root"
+// workflow contract that pre-fix was advisory.
+type ThresholdPredicateSeed = {
+  name: string;
+  value: number;
+  display_name: string;
+  why: string;
+};
+
+const THRESHOLD_PREDICATE_SEEDS: ThresholdPredicateSeed[] = [
+  {
+    name: "closure_gate_residual_threshold",
+    value: 0.3,
+    display_name: "closure_gate_residual_threshold",
+    why:
+      "Hardened closure commit gate (k_252): task_committed is refused when " +
+      "the referenced task's most recent task_closure_audited row carries " +
+      "closure_residual >= this value. Live evidence (24h) showed 10 commits " +
+      "at residual >= 0.3 with the dispatcher's advisory check ignored; the " +
+      "gate is now structural and reads this threshold from the registry so " +
+      "brain amendments can tune it without editing dispatcher code.",
+  },
+];
+
+const THRESHOLD_PREDICATE_ARTIFACTS: SeedArtifact[] = THRESHOLD_PREDICATE_SEEDS.map((t) => ({
+  stable_id: `threshold_${t.name}`,
+  seedName: `threshold_${t.name}`,
+  runtime: "bun" as Runtime,
+  // body MUST be `{value: <number>}` — getThreshold parses body.value.
+  body: JSON.stringify({ value: t.value, why: t.why }),
+  declared_sandbox: PREDICATE_SANDBOX,
+  state_root: `substrate/threshold/${t.name}`,
+  // Uninformative prior so brain amendments calibrate via cited
+  // action_scored events; default value still applies at cold-start
+  // because the registry resolves the highest-posterior admitted row.
+  initial_score: 0.5,
+  initial_confidence: 0.3,
+  fixture_input: { name: t.name },
+  fixture_expected_residual: 0.5,
+  display_name: t.display_name,
+  kind: "threshold_predicate",
+  posterior_alpha_override: 1,
+  posterior_beta_override: 1,
+}));
+
 export type ActArtifactSeedSummary = { inserted: number; skipped: number; upgraded?: number };
 
 const seedIdFor = (seedName: string): string => `seed_${seedName}`;
@@ -2664,6 +2723,7 @@ export const seedActArtifacts = (db: Database): ActArtifactSeedSummary => {
       ...SEED_ARTIFACTS,
       ...SUBSTRATE_PRIMITIVE_ARTIFACTS,
       ...PREDICATE_ARTIFACTS,
+      ...THRESHOLD_PREDICATE_ARTIFACTS,
     ]) {
       // 2026-05-19: stable_id takes precedence so substrate-primitive rows
       // collide with the canonical action_artifact_id their events already

@@ -22,7 +22,8 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
-import { verifyClosureAudit } from "./closure_audit";
+import { evaluateClosureCommitGate, verifyClosureAudit } from "./closure_audit";
+import { invalidateThresholdCache, seedThresholdPredicate } from "./threshold_registry";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());

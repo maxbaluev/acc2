@@ -24,6 +24,7 @@
 
 import type { Database } from "bun:sqlite";
 import { emitEvent } from "./events";
+import { getThreshold } from "./threshold_registry";
 
 export type ClosureAuditSelection = {
   /** Event id of the selected task_closure_audited row. */
@@ -417,4 +418,242 @@ export const verifyClosureAudit = (
   if (input.closure_predicate) payload.closure_predicate = input.closure_predicate;
 
   return { payload, blocked, emitted_event_ids: emittedEventIds };
+};
+
+// ── Hardened closure commit gate (2026-05-20) ─────────────────────────
+//
+// Closes the k_252 advisory-gate fake at the dispatcher boundary. Live
+// evidence (24h): 10 task_committed events at closure_residual >= 0.3,
+// including 3 at residual = 1.00 (max). The substrate's workflow
+// documented "closure_residual >= 0.3 → refine, do NOT commit root" but
+// the dispatcher committed anyway because the gate was advisory.
+//
+// The hardened gate intercepts task_committed emissions: when the
+// referenced task carries a recent task_closure_audited row with
+// closure_residual >= threshold (default 0.3, configurable via
+// threshold registry's closure_gate_residual_threshold) AND no fresh
+// owner_input_received{closure_override:true} is on file (override must
+// be more recent than the audit, otherwise it does NOT unlock commit),
+// the emission is refused. A closure_blocked_high_residual event
+// records the refusal with task_id + closure_residual + discrepancies
+// + recommended_action so operators see the structural refusal in real
+// time and the brain can react via a refinement edge instead of
+// re-emitting the same commit.
+//
+// When an owner override does post-date the audit, commit IS allowed
+// and a closure_override_acknowledged event is stamped for audit.
+//
+// The gate is fail-OPEN when no task_closure_audited exists for the
+// task at all — pre-closure-audit tasks (e.g. low-fanout leaf
+// dispatches, test fixtures that bypass closure verification) keep
+// working. The k_252 violation is specifically "audited high residual,
+// committed anyway"; tasks without an audit are an orthogonal class.
+
+export type ClosureGateDecision =
+  | {
+      /** Commit IS allowed. closure_residual was below threshold OR a
+       *  fresh owner override post-dates the audit. */
+      allow: true;
+      /** Threshold value the gate evaluated against (from registry). */
+      threshold: number;
+      /** Most-recent closure_residual the gate saw, or null when no
+       *  audit row exists for this task. */
+      closure_residual: number | null;
+      /** Audit event id the gate referenced. Null when no audit row. */
+      closure_audit_event_id: string | null;
+      /** Override event id when the gate unlocked via owner consent. */
+      override_event_id?: string;
+      /** Override ts when the gate unlocked via owner consent. */
+      override_ts?: string;
+      /** Event id of the closure_override_acknowledged row stamped on
+       *  the ledger when the override fired. Undefined when no
+       *  override was needed. */
+      override_acknowledged_event_id?: string;
+    }
+  | {
+      /** Commit is REFUSED. closure_residual >= threshold and no fresh
+       *  owner override is on file. */
+      allow: false;
+      threshold: number;
+      closure_residual: number;
+      closure_audit_event_id: string;
+      /** Event id of the closure_blocked_high_residual row the gate
+       *  emitted for audit. */
+      blocked_event_id: string;
+      /** Discrepancies pulled from the audit payload (the brain_claims
+       *  vs substrate_verifications delta). Passed through to the
+       *  refusal payload so operators can pivot directly to the failed
+       *  named checks. */
+      discrepancies: string[];
+    };
+
+/** Evaluate the closure commit gate for a task before allowing
+ *  task_committed to land. Callers (handleEmit in
+ *  runtime/mcp_server/substrate_tools.ts, dispatcher auto-commit paths)
+ *  pass the task_id and optional directive_id; the gate looks up the
+ *  most recent task_closure_audited row scoped to that task, reads the
+ *  threshold from the registry, checks for a fresh owner override, and
+ *  emits the appropriate sibling event (closure_blocked_high_residual
+ *  on refusal, closure_override_acknowledged on override-unlock).
+ *
+ *  Returns ClosureGateDecision. Refusal callers MUST treat allow=false
+ *  as terminal (do NOT proceed with task_committed). */
+export const evaluateClosureCommitGate = (
+  db: Database,
+  args: {
+    /** task_id stamped on the task_committed the caller is about to
+     *  emit. Required — the gate scopes the audit lookup to this id. */
+    task_id: string;
+    /** Optional directive_id scope so audit lookups across multi-root
+     *  directives still resolve to the right audit row when a task_id
+     *  is reused across directives (defensive — task_id should be
+     *  globally unique but we filter here to be safe). */
+    directive_id?: string;
+  },
+): ClosureGateDecision => {
+  const threshold = getThreshold(db, "closure_gate_residual_threshold", 0.3);
+  // Look up the MOST RECENT task_closure_audited row for this task.
+  // We scope by task_id (and optionally directive_id) and read the
+  // newest by (ts, rowid) so a refinement that audited a second time
+  // gets evaluated against the latest verdict, not a stale row.
+  const auditRow = args.directive_id
+    ? db
+        .query<{ id: string; ts: string; payload: string }, [string, string]>(
+          `SELECT id, ts, payload FROM events
+            WHERE kind = 'task_closure_audited'
+              AND task_id = ?
+              AND directive_id = ?
+            ORDER BY ts DESC, rowid DESC
+            LIMIT 1`,
+        )
+        .get(args.task_id, args.directive_id)
+    : db
+        .query<{ id: string; ts: string; payload: string }, [string]>(
+          `SELECT id, ts, payload FROM events
+            WHERE kind = 'task_closure_audited'
+              AND task_id = ?
+            ORDER BY ts DESC, rowid DESC
+            LIMIT 1`,
+        )
+        .get(args.task_id);
+  if (!auditRow) {
+    // Fail-OPEN when no audit exists. The gate only refuses tasks that
+    // HAVE been audited and scored >= threshold — pre-audit tasks fall
+    // through to the existing commit path. The k_252 violation we're
+    // closing is "audited high residual, committed anyway", not
+    // "committed without an audit" (that's a separate gate elsewhere).
+    return {
+      allow: true,
+      threshold,
+      closure_residual: null,
+      closure_audit_event_id: null,
+    };
+  }
+  let closureResidual = 0;
+  let discrepancies: string[] = [];
+  try {
+    const payload = JSON.parse(auditRow.payload ?? "{}") as Record<string, unknown>;
+    if (typeof payload.closure_residual === "number") closureResidual = payload.closure_residual;
+    if (Array.isArray(payload.discrepancies)) {
+      discrepancies = (payload.discrepancies as unknown[]).filter((s): s is string => typeof s === "string");
+    }
+  } catch {
+    // Malformed payload — treat as residual=0 so we don't block on
+    // unparseable rows. The closure verifier should never emit
+    // malformed JSON; this is defensive.
+    closureResidual = 0;
+  }
+  // Residual below threshold → commit cleanly. No sibling event needed.
+  if (closureResidual < threshold) {
+    return {
+      allow: true,
+      threshold,
+      closure_residual: closureResidual,
+      closure_audit_event_id: auditRow.id,
+    };
+  }
+  // Residual >= threshold. Check for a fresh owner consent override:
+  // owner_input_received with payload.closure_override = true whose ts
+  // is STRICTLY GREATER than the audit's ts. Stale overrides (emitted
+  // before the audit) do NOT unlock commit — every fresh audit
+  // re-locks the gate. We scope to task_id so an override on a
+  // different task can't accidentally unlock this one.
+  const overrideRow = args.directive_id
+    ? db
+        .query<{ id: string; ts: string }, [string, string, string]>(
+          `SELECT id, ts FROM events
+            WHERE kind = 'owner_input_received'
+              AND task_id = ?
+              AND directive_id = ?
+              AND ts > ?
+              AND json_extract(payload, '$.closure_override') = 1
+            ORDER BY ts DESC, rowid DESC
+            LIMIT 1`,
+        )
+        .get(args.task_id, args.directive_id, auditRow.ts)
+    : db
+        .query<{ id: string; ts: string }, [string, string]>(
+          `SELECT id, ts FROM events
+            WHERE kind = 'owner_input_received'
+              AND task_id = ?
+              AND ts > ?
+              AND json_extract(payload, '$.closure_override') = 1
+            ORDER BY ts DESC, rowid DESC
+            LIMIT 1`,
+        )
+        .get(args.task_id, auditRow.ts);
+  if (overrideRow) {
+    // Owner consented post-audit — allow commit and stamp the
+    // acknowledgement for audit. The acknowledgement is structural
+    // (health_metric=true) so dashboards count the rate of overrides
+    // independently from the rate of refusals.
+    const ack = emitEvent(db, {
+      kind: "closure_override_acknowledged",
+      substrate_origin: "substrate_auto",
+      directive_id: args.directive_id,
+      task_id: args.task_id,
+      payload: {
+        task_id: args.task_id,
+        closure_residual: closureResidual,
+        threshold,
+        closure_audit_event_id: auditRow.id,
+        override_event_id: overrideRow.id,
+        override_ts: overrideRow.ts,
+      },
+    });
+    return {
+      allow: true,
+      threshold,
+      closure_residual: closureResidual,
+      closure_audit_event_id: auditRow.id,
+      override_event_id: overrideRow.id,
+      override_ts: overrideRow.ts,
+      override_acknowledged_event_id: ack.id,
+    };
+  }
+  // No fresh override — refuse the commit and emit
+  // closure_blocked_high_residual for audit. The brain reading the
+  // ledger will see the refusal and can react via a refinement edge.
+  const blocked = emitEvent(db, {
+    kind: "closure_blocked_high_residual",
+    substrate_origin: "substrate_auto",
+    directive_id: args.directive_id,
+    task_id: args.task_id,
+    payload: {
+      task_id: args.task_id,
+      closure_residual: closureResidual,
+      threshold,
+      discrepancies,
+      closure_audit_event_id: auditRow.id,
+      recommended_action: "refine_or_decline",
+    },
+  });
+  return {
+    allow: false,
+    threshold,
+    closure_residual: closureResidual,
+    closure_audit_event_id: auditRow.id,
+    blocked_event_id: blocked.id,
+    discrepancies,
+  };
 };

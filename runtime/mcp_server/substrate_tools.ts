@@ -31,6 +31,7 @@ import { newId } from "../ids";
 import { createHash } from "node:crypto";
 import { classifyIntent, INTENT_CLASSIFIER_VERSION } from "../intent_classifier";
 import { recordInternalAct } from "../internal_act_projection";
+import { evaluateClosureCommitGate } from "../closure_audit";
 import {
   actArtifactRegistry,
   readyTasks,
@@ -615,6 +616,35 @@ export const handleEmit = (
       return {
         ok: false,
         error: `action_predicted_missing_act_loop_tuple:${missing.join(",")};hint=action_predicted MUST carry action_artifact_id+verifier_artifact_id+predicted_residual (v2-design.md §3). For design work without a runtime artifact, emit knowledge_candidate (recommendation) or lesson_extracted (reusable pattern) instead. For repo changes, emit contract_amendment_proposed. To execute an action, first substrate.admit_artifact for BOTH the action artifact and the verifier artifact, then emit action_predicted with both IDs.`,
+      };
+    }
+  }
+  // Hardened closure commit gate (2026-05-20). Refuse task_committed
+  // emissions whose referenced task_id has a recent
+  // task_closure_audited row with closure_residual >= threshold
+  // (default 0.3, configurable via threshold registry). Live evidence
+  // pre-fix: 10 task_committed events at residual >= 0.3 in 24h,
+  // including 3 at residual = 1.00 — the brain's workflow documented
+  // "refine, do NOT commit" but the dispatcher accepted the emission.
+  // evaluateClosureCommitGate emits closure_blocked_high_residual on
+  // refusal and closure_override_acknowledged when a fresh
+  // owner_input_received{closure_override:true} post-dates the audit.
+  // Fail-OPEN when no audit row exists for the task — pre-audit tasks
+  // remain on the existing commit path.
+  if (kind === "task_committed" && typeof input.task_id === "string") {
+    const decision = evaluateClosureCommitGate(ctx.db, {
+      task_id: input.task_id,
+      directive_id: typeof input.directive_id === "string" ? input.directive_id : undefined,
+    });
+    if (!decision.allow) {
+      return {
+        ok: false,
+        error:
+          `closure_gate_high_residual:closure_residual=${decision.closure_residual.toFixed(3)};threshold=${decision.threshold.toFixed(3)};` +
+          `closure_audit_event_id=${decision.closure_audit_event_id};` +
+          `blocked_event_id=${decision.blocked_event_id};` +
+          `discrepancies=${decision.discrepancies.join("|") || "<none>"};` +
+          `hint=closure_residual >= threshold and no fresh owner_input_received{closure_override:true} post-dates the audit. Open a refinement edge (task_node_opened + task_edge_recorded{kind:'refines'}) to address the discrepancies, OR have the owner emit owner_input_received{closure_override:true} on this task to override.`,
       };
     }
   }

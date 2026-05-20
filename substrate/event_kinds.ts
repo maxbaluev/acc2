@@ -563,6 +563,39 @@ export const EVENT_KINDS = {
   //     reason: "no_contract_amendment_for_declared_target_files"
   //   }
   closure_blocked_no_amendments:           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+  // Hardened closure commit gate (2026-05-20). Refuses task_committed when the
+  // current root's most recent task_closure_audited row carries
+  // closure_residual >= getThreshold(db, "closure_gate_residual_threshold", 0.3)
+  // and no fresh owner_input_received{closure_override:true} is on file.
+  // Closes the k_252 advisory-gate fake at the dispatcher boundary — pre-fix
+  // the workflow documented "closure_residual >= 0.3 → refine, do NOT commit
+  // root" but the dispatcher committed anyway (10 task_committed events at
+  // closure_residual >= 0.3 in the last 24h of live evidence; 3 at residual
+  // = 1.00). Payload:
+  //   {
+  //     task_id: string,
+  //     closure_residual: number,
+  //     threshold: number,
+  //     discrepancies?: string[],
+  //     closure_audit_event_id: string,
+  //     recommended_action: "refine_or_decline"
+  //   }
+  closure_blocked_high_residual:           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+  // Owner consent override acknowledgement: when an owner_input_received
+  // event carrying payload.closure_override = true post-dates the most
+  // recent task_closure_audited row, the gate permits commit and stamps
+  // this acknowledgement on the ledger for audit. Stale overrides (older
+  // than the audit) do NOT unlock commit — every fresh audit re-locks the
+  // gate. Payload:
+  //   {
+  //     task_id: string,
+  //     closure_residual: number,
+  //     threshold: number,
+  //     closure_audit_event_id: string,
+  //     override_event_id: string,
+  //     override_ts: string
+  //   }
+  closure_override_acknowledged:           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
   lesson_extracted:                        { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   contract_amendment_proposed:             { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   // Pre-apply correction/adversarial primitive. Payload carries free-string
