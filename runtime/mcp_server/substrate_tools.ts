@@ -865,7 +865,10 @@ export const handleRead = (
       case "worker_liveness_view": {
         // Closes brain KC CZS8VBKGAD4K: dead workers — registered
         // but never tick in window. Aggregates worker_tick_completed
-        // events by worker_name and exposes seconds_since_last_tick.
+        // events by the payload's `worker` key (canonical producer
+        // field per live ledger evidence; brain KC 5EX1PHZYZD4R caught
+        // an earlier draft that grouped by a nonexistent `worker_name`
+        // key and rolled every row under one null bucket).
         // Args: { window_hours? } (default 24). No registry-sweep
         // dead_only branch yet — there is no canonical ALL_WORKER_NAMES
         // export; that follow-up is a separate contract.
@@ -873,7 +876,7 @@ export const handleRead = (
         const windowHours = typeof arg.window_hours === "number" ? arg.window_hours : 24;
         const sql = `
           SELECT
-            json_extract(payload, '$.worker_name') AS worker_name,
+            json_extract(payload, '$.worker') AS worker_name,
             COUNT(*) AS tick_count,
             MIN(ts) AS first_tick_ts,
             MAX(ts) AS last_tick_ts,

@@ -78,9 +78,9 @@ describe("event_kind_occurrence_view", () => {
 describe("worker_liveness_view", () => {
   test("aggregates worker_tick_completed per worker_name with seconds_since_last_tick", () => {
     const db = openDb(":memory:");
-    emitEvent(db, { kind: "worker_tick_completed", substrate_origin: "runtime", payload: { worker_name: "scheduler" } });
-    emitEvent(db, { kind: "worker_tick_completed", substrate_origin: "runtime", payload: { worker_name: "scheduler" } });
-    emitEvent(db, { kind: "worker_tick_completed", substrate_origin: "runtime", payload: { worker_name: "embedder" } });
+    emitEvent(db, { kind: "worker_tick_completed", substrate_origin: "runtime", payload: { worker: "scheduler" } });
+    emitEvent(db, { kind: "worker_tick_completed", substrate_origin: "runtime", payload: { worker: "scheduler" } });
+    emitEvent(db, { kind: "worker_tick_completed", substrate_origin: "runtime", payload: { worker: "embedder" } });
 
     const result = unwrap(handleRead(ctx(db), { view_name: "worker_liveness_view", args: {} }));
     expect(result.view_name).toBe("worker_liveness_view");
@@ -99,7 +99,7 @@ describe("worker_liveness_view", () => {
 
   test("respects window_hours arg (large negative window returns no rows for old events)", () => {
     const db = openDb(":memory:");
-    emitEvent(db, { kind: "worker_tick_completed", substrate_origin: "runtime", payload: { worker_name: "scheduler" } });
+    emitEvent(db, { kind: "worker_tick_completed", substrate_origin: "runtime", payload: { worker: "scheduler" } });
 
     // window_hours = 0 means "events strictly newer than now"; freshly
     // emitted rows have ts very close to now so they MAY or may not
