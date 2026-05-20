@@ -267,6 +267,13 @@ export const startHotreloadWorker = (
   const debounceTimers = new Map<string, NodeJS.Timeout>();
   const pendingQuiescent = new Map<string, HotReloadEntry>(); // file_path → entry
   const rateLimitWindows = new Map<string, number[]>(); // file_path → ts[]
+  // Dedup map for full_restart strategy modules. Key is module name, value is
+  // last-emit ts. Repeated file touches in the same module within
+  // FULL_RESTART_DEDUP_MS get suppressed — the operator already saw the signal
+  // and re-emitting just pollutes the ledger (10+ restart_pending events for
+  // runtime_mcp_server in 30 min observed pre-fix).
+  const fullRestartPending = new Map<string, number>(); // module_name → last_emit_ms
+  const FULL_RESTART_DEDUP_MS = 5 * 60 * 1000; // 5 minutes
   let disposed = false;
 
   const checkRateLimit = (relPath: string, entry: HotReloadEntry): boolean => {
@@ -371,6 +378,25 @@ export const startHotreloadWorker = (
       // "failures" in a 24h window were benign restart-pending signals.
       // Use the dedicated daemon_hotreload_restart_pending kind so the
       // failure counter reflects actual faults.
+      //
+      // Dedup: only emit ONCE per module within FULL_RESTART_DEDUP_MS.
+      // Operator restart clears the map (handled at daemon startup —
+      // the new process starts with an empty map). Repeated file touches
+      // to runtime_mcp_server within 5 min produce ONE restart_pending,
+      // not ten.
+      const nowMs = Date.now();
+      const lastEmit = fullRestartPending.get(entry.name) ?? 0;
+      const sinceLast = nowMs - lastEmit;
+      if (sinceLast < FULL_RESTART_DEDUP_MS) {
+        recordOutcome({
+          ts: new Date().toISOString(),
+          module: entry.name,
+          file_path: relPath,
+          outcome: "full_restart_required",
+        });
+        return;
+      }
+      fullRestartPending.set(entry.name, nowMs);
       try {
         emitEvent(db, {
           kind: "daemon_hotreload_restart_pending",
@@ -381,6 +407,7 @@ export const startHotreloadWorker = (
             strategy: entry.strategy,
             reason: "full_restart_required",
             hint: "module requires fresh process (MCP server / DB / daemon entrypoint); run `acc daemon restart` when convenient",
+            dedup_window_ms: FULL_RESTART_DEDUP_MS,
           },
         });
         recordOutcome({
