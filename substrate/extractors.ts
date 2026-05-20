@@ -1060,6 +1060,261 @@ export const extractSemanticDedup = async (db: Database): Promise<SemanticDedupS
   return { merged, contradicted };
 };
 
+// ── 3b. Cross-candidate semantic corroboration extractor (T1.3) ────
+//
+// Promotion rate gap (live evidence 2026-05-19): 3324+ knowledge_candidate
+// events vs ~311 knowledge_promoted (~9.3% rate). Many candidates never
+// receive a direct `candidate_confirmed` because no downstream act
+// intentionally cited them — but their CLAIM semantically corroborates
+// already-promoted entries. This extractor walks the unverified tail,
+// finds nearest promoted-knowledge neighbors via vec_events cosine
+// (≥ 0.88), checks goal_shape overlap + positive polarity, and emits
+// `candidate_confirmed` with `confirmation_source: "semantic_corroboration"`
+// and a bootstrap weight of 0.3. The downstream knowledge-promotion
+// extractor then folds these confirmations into the Beta posterior the
+// same way direct citations are folded.
+//
+// Bounded: LIMIT 500 per tick + 30-day window. Idempotent: candidates
+// that already received a `semantic_corroboration` confirmation are
+// skipped. Yields to the event loop every 25 rows per KC GJ2KN1J3KD1Z.
+
+const CROSS_CANDIDATE_CORROBORATION_CONFIG = {
+  scanLimit: 500,
+  windowDays: 30,
+  cosineThreshold: 0.88,
+  promotedScoreThreshold: 0.85,
+  bootstrapWeight: 0.3,
+  knn: 10,
+} as const;
+
+export type CrossCandidateCorroborationSummary = {
+  scanned: number;
+  corroborated: number;
+  skipped_recent: number;
+  skipped_existing: number;
+};
+
+const parsePayloadSafe = (raw: unknown): Record<string, unknown> => {
+  if (!raw || typeof raw !== "string") return {};
+  try { return JSON.parse(raw) as Record<string, unknown>; } catch { return {}; }
+};
+
+const parseRefsSafe = (raw: unknown): string[] => {
+  if (!raw || typeof raw !== "string") return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? (v as unknown[]).map(String) : [];
+  } catch { return []; }
+};
+
+const goalShapeTagsFor = (payload: Record<string, unknown>): string[] => {
+  const tags = payload.goal_shape_tags;
+  if (Array.isArray(tags)) return (tags as unknown[]).map(String).filter((t) => t.length > 0);
+  // Fallback: applies_to[] is the rich-schema sibling; accept it as a
+  // surrogate when goal_shape_tags is absent (older candidate shape).
+  const applies = payload.applies_to;
+  if (Array.isArray(applies)) return (applies as unknown[]).map(String).filter((t) => t.length > 0);
+  return [];
+};
+
+/** Scan unverified knowledge_candidate events, find nearest promoted
+ *  neighbors via vec_events cosine, and emit candidate_confirmed
+ *  (confirmation_source=semantic_corroboration) when the neighbor
+ *  passes the cosine + goal-shape + polarity gates. See section
+ *  comment above for design rationale. */
+export const extractCrossCandidateCorroboration = async (
+  db: Database,
+): Promise<CrossCandidateCorroborationSummary> => {
+  const cfg = CROSS_CANDIDATE_CORROBORATION_CONFIG;
+  const cutoffIso = new Date(Date.now() - cfg.windowDays * 24 * 60 * 60 * 1000).toISOString();
+
+  // 1. Pull unverified candidates inside the time window.
+  //    "Unverified" = no candidate_confirmed/contradicted citing this
+  //    candidate id yet. The NOT-EXISTS sub-query LIKE-matches the
+  //    candidate id token in context_refs JSON (mirrors the pattern
+  //    used in maybePromoteKnowledge / extractSemanticDedup).
+  const candidates = db
+    .query(
+      `SELECT id, ts, directive_id, task_id, loop_id, payload
+       FROM events
+       WHERE kind = 'knowledge_candidate'
+         AND ts > ?
+         AND NOT EXISTS (
+           SELECT 1 FROM events v
+           WHERE v.kind IN ('candidate_confirmed', 'candidate_contradicted')
+             AND v.context_refs LIKE '%"' || events.id || '"%'
+         )
+       ORDER BY ts DESC
+       LIMIT ?`,
+    )
+    .all(cutoffIso, cfg.scanLimit) as Array<{
+      id: string;
+      ts: string;
+      directive_id: string;
+      task_id: string;
+      loop_id: string;
+      payload: string;
+    }>;
+
+  let scanned = 0;
+  let corroborated = 0;
+  let skipped_recent = 0;
+  let skipped_existing = 0;
+
+  // 2. Probe whether vec_events is available. If the extension is
+  //    absent (test envs without sqlite-vec wired in), every nearest-
+  //    neighbor query would throw — fail soft by counting the
+  //    candidate as skipped_existing (no embedding row).
+  let vecAvailable = true;
+  try {
+    db.query("SELECT 1 FROM vec_events LIMIT 1").get();
+  } catch {
+    vecAvailable = false;
+  }
+
+  for (const cand of candidates) {
+    if (scanned > 0 && scanned % EXTRACTOR_YIELD_INTERVAL === 0) {
+      await yieldToEventLoop();
+    }
+    scanned += 1;
+
+    // 2a. Idempotency: skip if a prior semantic_corroboration confirm
+    //     already references this candidate id (either in
+    //     context_refs or in payload.candidate_id).
+    const priorRow = db
+      .query(
+        `SELECT id FROM events
+         WHERE kind = 'candidate_confirmed'
+           AND (
+             context_refs LIKE '%"' || ? || '"%'
+             OR payload LIKE '%"candidate_id":"' || ? || '"%'
+           )
+           AND payload LIKE '%"confirmation_source":"semantic_corroboration"%'
+         LIMIT 1`,
+      )
+      .get(cand.id, cand.id) as { id: string } | null;
+    if (priorRow) {
+      skipped_existing += 1;
+      continue;
+    }
+
+    if (!vecAvailable) {
+      skipped_existing += 1;
+      continue;
+    }
+
+    // 2b. Pull candidate embedding from vec_events. If absent (embedder
+    //     hasn't backfilled this row yet) skip silently.
+    let queryVec: number[] | null = null;
+    try {
+      // vec_events stores the embedding as the virtual table's float[]
+      // column. Reading it back is the "embedding" alias; we serialise
+      // via the embedding_index path by selecting the source events
+      // row's embedding BLOB instead (cheaper + portable).
+      const blobRow = db
+        .query("SELECT embedding FROM events WHERE id = ?")
+        .get(cand.id) as { embedding: Uint8Array | null } | null;
+      if (!blobRow?.embedding) {
+        skipped_existing += 1;
+        continue;
+      }
+      const decoded = decodeEmbeddingBlob(blobRow.embedding);
+      if (!decoded) {
+        skipped_existing += 1;
+        continue;
+      }
+      queryVec = Array.from(decoded);
+    } catch {
+      skipped_existing += 1;
+      continue;
+    }
+
+    if (!queryVec) {
+      skipped_existing += 1;
+      continue;
+    }
+
+    // 2c. Top-K nearest neighbors via vec_events MATCH.
+    let neighbors: Array<{ event_id: string; distance: number }> = [];
+    try {
+      neighbors = db
+        .query(
+          "SELECT event_id, distance FROM vec_events WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+        )
+        .all(JSON.stringify(queryVec), cfg.knn) as Array<{ event_id: string; distance: number }>;
+    } catch {
+      skipped_existing += 1;
+      continue;
+    }
+
+    // 2d. Walk neighbors. Distance convention matches
+    //     runtime/embedding_index.ts (vec0 returns L2² between
+    //     L2-normalised unit vectors → cosine_distance = distance / 2;
+    //     cosine_similarity = 1 - distance / 2).
+    const candPayload = parsePayloadSafe(cand.payload);
+    const candTags = goalShapeTagsFor(candPayload);
+
+    let matchedPromoted: { id: string; cosine: number } | null = null;
+    for (const n of neighbors) {
+      if (n.event_id === cand.id) continue;
+      const cosineDistance = Math.max(0, Math.min(2, n.distance / 2));
+      const cosine = 1 - cosineDistance;
+      if (cosine < cfg.cosineThreshold) continue;
+
+      // The neighbor row must be a knowledge_promoted (score ≥ threshold
+      // + positive polarity). knowledge_candidate neighbors are common
+      // for embedded events but the spec only credits promoted ones —
+      // a co-promoted neighbor is the structurally-honest corroborator.
+      const neighbor = db
+        .query("SELECT id, kind, payload FROM events WHERE id = ?")
+        .get(n.event_id) as { id: string; kind: string; payload: string } | null;
+      if (!neighbor) continue;
+      if (neighbor.kind !== "knowledge_promoted") continue;
+
+      const promotedPayload = parsePayloadSafe(neighbor.payload);
+      const promotedScore = typeof promotedPayload.score === "number" ? promotedPayload.score : NaN;
+      if (!Number.isFinite(promotedScore) || promotedScore < cfg.promotedScoreThreshold) continue;
+
+      // Goal-shape overlap: prefer at least one common tag; lenient
+      // fallback when either side declares no tags.
+      const neighborTags = goalShapeTagsFor(promotedPayload);
+      if (candTags.length > 0 && neighborTags.length > 0) {
+        const common = candTags.some((t) => neighborTags.includes(t));
+        if (!common) continue;
+      }
+
+      matchedPromoted = { id: neighbor.id, cosine };
+      break;
+    }
+
+    if (!matchedPromoted) {
+      skipped_recent += 1;
+      continue;
+    }
+
+    // 2e. Emit candidate_confirmed citing both rows.
+    insertEvent(db, {
+      kind: "candidate_confirmed",
+      directive_id: cand.directive_id,
+      task_id: cand.task_id,
+      loop_id: cand.loop_id,
+      substrate_origin: "substrate_auto",
+      payload: {
+        candidate_id: cand.id,
+        confirmation_source: "semantic_corroboration",
+        weight: cfg.bootstrapWeight,
+        matched_promoted_id: matchedPromoted.id,
+        cosine_similarity: matchedPromoted.cosine,
+        evidence_event_ids: [cand.id, matchedPromoted.id],
+      },
+      context_refs: [cand.id, matchedPromoted.id],
+    });
+    corroborated += 1;
+  }
+
+  return { scanned, corroborated, skipped_recent, skipped_existing };
+};
+
 // ── 4. Recipe-candidate extractor ──────────────────────────────────
 //
 // Group task_committed events by a coarse "goal shape" — the

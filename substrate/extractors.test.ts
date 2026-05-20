@@ -6,6 +6,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "./db";
 import {
   extractActArtifactScores,
+  extractCrossCandidateCorroboration,
   extractKnowledgePromotions,
   extractOwnerProfilePromotions,
   extractRecipeCandidates,
@@ -13,6 +14,7 @@ import {
   extractSemanticDedup,
   maybePromoteOwnerProfile,
 } from "./extractors";
+import { encodeEmbeddingBlob, EMBEDDING_VERSION, EMBEDDING_DIMS, upsertVecEventRow } from "../runtime/embedder";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -798,5 +800,197 @@ describe("maybePromoteOwnerProfile (Layer-2 owner autonomy)", () => {
     const again = await extractOwnerProfilePromotions(db);
     expect(again.promoted).toBe(0);
     void c1; void c2; void c3;
+  });
+});
+
+describe("extractCrossCandidateCorroboration (T1.3 promotion-rate spine)", () => {
+  // Helpers — write an embedding BLOB on the events row AND upsert into
+  // vec_events so the extractor's MATCH query can find the row.
+  const makeUnitVec = (dims: number, axis: number): number[] => {
+    const v = new Array<number>(dims).fill(0);
+    v[axis] = 1;
+    return v;
+  };
+  const attachEmbedding = (
+    db: ReturnType<typeof openDb>,
+    eventId: string,
+    axis: number,
+  ): void => {
+    const vec = makeUnitVec(EMBEDDING_DIMS, axis);
+    db.run(
+      "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
+      [encodeEmbeddingBlob(vec), EMBEDDING_VERSION, eventId],
+    );
+    try { upsertVecEventRow(db, eventId, vec, EMBEDDING_VERSION); } catch { /* vec0 not loaded → fall through */ }
+  };
+  // Build a unit vector aligned with axis-0 that picks up `bleed` on
+  // axis-1 so cosine(query, near) = 1/√(1+bleed²) lands at a known value.
+  const makeNearAxis0 = (bleed: number): number[] => {
+    const v = makeUnitVec(EMBEDDING_DIMS, 0);
+    v[1] = bleed;
+    // Re-normalise so the L2 distance ↔ cosine math from
+    // runtime/embedding_index matches the extractor's read.
+    const n = Math.sqrt(1 + bleed * bleed);
+    for (let i = 0; i < v.length; i++) v[i] = v[i] / n;
+    return v;
+  };
+  const attachExplicit = (
+    db: ReturnType<typeof openDb>,
+    eventId: string,
+    vec: number[],
+  ): void => {
+    db.run(
+      "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
+      [encodeEmbeddingBlob(vec), EMBEDDING_VERSION, eventId],
+    );
+    try { upsertVecEventRow(db, eventId, vec, EMBEDDING_VERSION); } catch { /* vec0 not loaded */ }
+  };
+
+  test("cosine 0.92 + goal_shape overlap + score 0.91 → emits semantic_corroboration confirm", async () => {
+    const db = openDb(":memory:");
+
+    // Promoted neighbor on axis-0 with score 0.91 + matching goal_shape tag.
+    const promotedId = insertEvent(db, {
+      kind: "knowledge_promoted",
+      payload: { score: 0.91, goal_shape_tags: ["dispatch_strategy"], claim: "promoted claim" },
+    });
+    attachEmbedding(db, promotedId, 0);
+
+    // Unverified candidate near axis-0 (bleed=0.1) → cosine ≈ 0.995/√1.01
+    // ≈ 0.995; well above the 0.88 floor. Same goal_shape tag.
+    const candidateId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      payload: { claim: "candidate near promoted", goal_shape_tags: ["dispatch_strategy"] },
+    });
+    attachExplicit(db, candidateId, makeNearAxis0(0.1));
+
+    const summary = await extractCrossCandidateCorroboration(db);
+    expect(summary.scanned).toBe(1);
+    expect(summary.corroborated).toBe(1);
+
+    const confirms = db
+      .query(
+        `SELECT context_refs, payload FROM events
+         WHERE kind = 'candidate_confirmed'
+           AND payload LIKE '%"confirmation_source":"semantic_corroboration"%'`,
+      )
+      .all() as Array<{ context_refs: string; payload: string }>;
+    expect(confirms.length).toBe(1);
+    const refs = JSON.parse(confirms[0]!.context_refs) as string[];
+    expect(refs).toContain(candidateId);
+    expect(refs).toContain(promotedId);
+    const p = JSON.parse(confirms[0]!.payload) as Record<string, unknown>;
+    expect(p.confirmation_source).toBe("semantic_corroboration");
+    expect(p.weight).toBe(0.3);
+    expect(p.matched_promoted_id).toBe(promotedId);
+    expect(p.candidate_id).toBe(candidateId);
+    expect(typeof p.cosine_similarity).toBe("number");
+  });
+
+  test("cosine below threshold (0.85) → no corroboration", async () => {
+    const db = openDb(":memory:");
+
+    const promotedId = insertEvent(db, {
+      kind: "knowledge_promoted",
+      payload: { score: 0.91, goal_shape_tags: ["dispatch_strategy"], claim: "promoted claim" },
+    });
+    attachEmbedding(db, promotedId, 0);
+
+    // Candidate at bleed ≈ 0.62 → cosine ≈ 1/√(1+0.62²) ≈ 0.85 (just below
+    // the 0.88 floor).
+    const candidateId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      payload: { claim: "candidate borderline", goal_shape_tags: ["dispatch_strategy"] },
+    });
+    attachExplicit(db, candidateId, makeNearAxis0(0.62));
+
+    const summary = await extractCrossCandidateCorroboration(db);
+    expect(summary.scanned).toBe(1);
+    expect(summary.corroborated).toBe(0);
+    expect(summary.skipped_recent).toBe(1);
+    void candidateId;
+  });
+
+  test("promoted neighbor with score 0.7 (below polarity bar) → no corroboration", async () => {
+    const db = openDb(":memory:");
+
+    const promotedId = insertEvent(db, {
+      kind: "knowledge_promoted",
+      payload: { score: 0.7, goal_shape_tags: ["dispatch_strategy"], claim: "weakly promoted" },
+    });
+    attachEmbedding(db, promotedId, 0);
+
+    const candidateId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      payload: { claim: "candidate near weak promoted", goal_shape_tags: ["dispatch_strategy"] },
+    });
+    attachExplicit(db, candidateId, makeNearAxis0(0.1));
+
+    const summary = await extractCrossCandidateCorroboration(db);
+    expect(summary.corroborated).toBe(0);
+    void candidateId;
+  });
+
+  test("prior semantic_corroboration confirm already exists → skipped_existing", async () => {
+    const db = openDb(":memory:");
+
+    const promotedId = insertEvent(db, {
+      kind: "knowledge_promoted",
+      payload: { score: 0.91, goal_shape_tags: ["dispatch_strategy"], claim: "promoted" },
+    });
+    attachEmbedding(db, promotedId, 0);
+
+    const candidateId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      payload: { claim: "candidate", goal_shape_tags: ["dispatch_strategy"] },
+    });
+    attachExplicit(db, candidateId, makeNearAxis0(0.1));
+
+    // Seed a prior semantic_corroboration confirm on this candidate.
+    insertEvent(db, {
+      kind: "candidate_confirmed",
+      context_refs: [candidateId, promotedId],
+      payload: {
+        candidate_id: candidateId,
+        confirmation_source: "semantic_corroboration",
+        weight: 0.3,
+      },
+    });
+
+    const summary = await extractCrossCandidateCorroboration(db);
+    // Because the prior confirm makes the candidate non-"unverified" (the
+    // NOT-EXISTS guard hides it), the candidate doesn't even reach the
+    // semantic_corroboration scan. Either path is correct — the canonical
+    // outcome is that NO additional corroboration row is emitted.
+    expect(summary.corroborated).toBe(0);
+    const count = (db
+      .query(
+        `SELECT COUNT(*) AS c FROM events
+         WHERE kind = 'candidate_confirmed'
+           AND payload LIKE '%"confirmation_source":"semantic_corroboration"%'`,
+      )
+      .get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
+  test("candidate without embedding → skipped silently (counted under skipped_existing)", async () => {
+    const db = openDb(":memory:");
+
+    // Promoted neighbor exists with an embedding, but the candidate has
+    // no embedding row yet — the extractor must skip without throwing.
+    const promotedId = insertEvent(db, {
+      kind: "knowledge_promoted",
+      payload: { score: 0.91, goal_shape_tags: ["dispatch_strategy"], claim: "promoted" },
+    });
+    attachEmbedding(db, promotedId, 0);
+
+    insertEvent(db, {
+      kind: "knowledge_candidate",
+      payload: { claim: "candidate with no embedding", goal_shape_tags: ["dispatch_strategy"] },
+    });
+
+    const summary = await extractCrossCandidateCorroboration(db);
+    expect(summary.corroborated).toBe(0);
+    expect(summary.skipped_existing).toBeGreaterThanOrEqual(1);
   });
 });

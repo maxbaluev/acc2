@@ -933,6 +933,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       extractActArtifactScores,
       extractRecipeCandidates,
       extractSemanticDedup,
+      extractCrossCandidateCorroboration,
       extractDirectiveInterference,
       extractOwnerProfilePromotions,
     } = await import("../substrate/extractors");
@@ -950,6 +951,15 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       }
       try { await extractSemanticDedup(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.semantic_dedup", err: (err as Error).message }, "semantic-dedup extractor tick failed");
+      }
+      // T1.3 cross-candidate semantic corroboration (2026-05-19): scan
+      // unverified knowledge_candidate rows for nearest promoted-knowledge
+      // neighbors via vec_events cosine and emit candidate_confirmed
+      // (confirmation_source=semantic_corroboration) so the long tail of
+      // never-cited candidates can still feed the Beta-posterior promotion
+      // gate. Live evidence: 3324+ candidates vs ~311 promoted (~9.3%).
+      try { await extractCrossCandidateCorroboration(db); } catch (err) {
+        logger.warn({ where: "daemon.extractors.cross_candidate_corroboration", err: (err as Error).message }, "cross-candidate-corroboration extractor tick failed");
       }
       // Auto cross-directive interference (organism-alignment Track C,
       // 2026-05-15): scan act_artifact.target_resources/target_files for cross-directive
