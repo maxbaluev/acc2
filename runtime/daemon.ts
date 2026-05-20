@@ -1291,26 +1291,30 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     markWorkerReady("artifact_kind_backfill");
     recordWorkerTick("artifact_kind_backfill");
     // Fire the sweep on the next tick so daemon boot stays non-blocking.
+    // The sweep itself yields every 25 rows so it shares the event loop
+    // with request handlers + reactive workers during the run.
     const backfillTimer = setTimeout(() => {
-      try {
-        const summary = runArtifactKindBackfill(db);
-        logger.info(
-          {
-            scanned: summary.scanned,
-            backfilled: summary.backfilled,
-            uncertain: summary.uncertain,
-            skipped: summary.skipped_idempotent,
-            errors: summary.errors.length,
-            sweep_id: summary.sweep_id,
-          },
-          "artifact_kind_backfill sweep complete",
-        );
-      } catch (err) {
-        logger.warn(
-          { err: (err as Error).message },
-          "artifact_kind_backfill sweep failed",
-        );
-      }
+      void (async () => {
+        try {
+          const summary = await runArtifactKindBackfill(db);
+          logger.info(
+            {
+              scanned: summary.scanned,
+              backfilled: summary.backfilled,
+              uncertain: summary.uncertain,
+              skipped: summary.skipped_idempotent,
+              errors: summary.errors.length,
+              sweep_id: summary.sweep_id,
+            },
+            "artifact_kind_backfill sweep complete",
+          );
+        } catch (err) {
+          logger.warn(
+            { err: (err as Error).message },
+            "artifact_kind_backfill sweep failed",
+          );
+        }
+      })();
     }, 1000);
     workers.push(() => clearTimeout(backfillTimer));
   }
