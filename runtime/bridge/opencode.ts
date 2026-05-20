@@ -322,31 +322,30 @@ export const spawnRealOpencode = async (
     return { ok: false, reason: { kind: "parse_error", raw: (err as Error).message } };
   }
 
-  // `opencode run` expects the message as positional args; piping via stdin
-  // is not the documented path. We pass --format=json so opencode emits one
-  // JSON event per stdout line. Do NOT pass
-  // --dangerously-skip-permissions: the per-dispatch config keeps the brain
-  // on the positive read-only tool surface.
+  // Keep the CLI invocation small and stable. Large prompts passed as a
+  // positional argv correlate with opencode startup/MCP-registration stalls
+  // (observed mcp_handshake_timed_out / silent_dispatch_quarantine on
+  // prompts >5K chars throughout the 2026-05-20 session). Stage the full
+  // prompt inside the isolated workspace as a file and boot opencode with
+  // only a short instruction to read it before acting — handshake window
+  // stays clean regardless of prompt size.
+  //
+  // Do NOT pass --dangerously-skip-permissions: the per-dispatch config keeps
+  // the brain on the positive read-only tool surface.
   // Sandbox the brain's CWD AND env. When `checkoutIsolation` is explicit,
   // honor it (workflow-isolated dispatches, tests). Otherwise spawn the
   // brain in a per-dispatch empty tempdir so its built-in filesystem tools
   // (edit / write / bash) cannot reach the source checkout even if a future
   // opencode rev or config-merge edge exposes an unexpected tool. This is
-  // defense-in-depth A behind the permission
-  // policy. The env var ACC2_CHECKOUT_ISOLATION_ROOT used to default to
-  // sourceCheckoutRoot which LEAKED the source path — observed 2026-05-16
-  // (Q2NTPKM + K8YKPXDZXX): brain dispatches wrote files like
-  // cli/lineage.ts, cli/whoami.ts, runtime/experience_compression_worker.ts
-  // DIRECTLY to the source checkout, bypassing applied_change_committed
-  // entirely. The fix below routes the env var to brainWorkspace by
-  // default. If the brain legitimately needs to reason about source code,
-  // it MUST go through substrate.read / substrate.search (which honors the
-  // event ledger and credit chains), not raw filesystem ops.
+  // defense-in-depth A behind the permission policy.
   const sourceCheckoutRoot = process.cwd();
   void sourceCheckoutRoot; // retained for future reuse; intentionally unused
   const brainWorkspace = req.checkoutIsolation?.root
     ?? mkdtempSync(join(tmpdir(), "acc2-brain-ws-"));
   const brainWorkspaceIsEphemeral = req.checkoutIsolation === undefined;
+  const promptPath = join(brainWorkspace, "brain-prompt.md");
+  await Bun.write(promptPath, req.prompt);
+  const bootPrompt = `Read ${promptPath} first, then follow it exactly. Your first externally meaningful action must satisfy the prompt's substrate tool-use invariant.`;
   let proc: ReturnType<typeof spawn>;
   try {
     proc = spawn([
@@ -354,7 +353,7 @@ export const spawnRealOpencode = async (
       "--format=json",
       "--model", model,
       "--agent", BRAIN_OPENCODE_AGENT_NAME,
-      req.prompt,
+      bootPrompt,
     ], {
       cwd: brainWorkspace,
       stdout: "pipe",
