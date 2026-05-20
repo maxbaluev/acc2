@@ -330,6 +330,48 @@ export const shapleyWeightsByCorroboration = (n: number): number[] => {
   return raw.map((w) => w / sum);
 };
 
+// ── Recency × confidence damping (2026-05-20 research integration) ──
+//
+// Per "Credit Assignment in LLM RL" survey (Zhang 2026, arXiv:2604.09459):
+// ultralong-horizon credit assignment requires recency weighting — flat
+// attribution over 5+ day event windows produces decayed posteriors
+// that don't track recent behavior. Plus "From Passive Metric to Active
+// Signal" (Zhang et al. 2026, arXiv:2601.15690): low-confidence verifiers
+// should damp credit gain ("trust but verify" — KL increase when RM
+// uncertain).
+//
+// recencyDecayWeight(ageMs, halfLifeMs): smooth exponential decay.
+// Newer evidence (age < halfLife) gets weight ~1.0; older evidence
+// decays toward 0. Default halfLifeMs = 7 days matches the substrate's
+// hot-retention window — credit older than archive cutoff carries less
+// weight even before archival removes it.
+const DEFAULT_RECENCY_HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export const recencyDecayWeight = (
+  ageMs: number,
+  halfLifeMs: number = DEFAULT_RECENCY_HALF_LIFE_MS,
+): number => {
+  if (ageMs <= 0) return 1;
+  if (halfLifeMs <= 0) return 1;
+  // exp(-ln(2) * ageMs / halfLifeMs) — classic exponential half-life decay
+  return Math.exp(-Math.LN2 * ageMs / halfLifeMs);
+};
+
+/** Confidence-aware damping: low verifier confidence dampens posterior
+ *  delta toward zero. Used by distributeCredit when the verifier emits
+ *  `reliability_profile.confidence` (open-keyed Record<string, number>;
+ *  see substrate/types.ts). Returns a [0, 1] multiplier; default 1.0
+ *  when confidence is unset (preserves legacy behavior pre-this commit). */
+export const confidenceDampingMultiplier = (
+  confidence: number | undefined,
+): number => {
+  if (typeof confidence !== "number" || !Number.isFinite(confidence)) return 1;
+  // Clamp to [0, 1]; identity at confidence=1.0; ~0.25 at confidence=0.5
+  // (curve: out = confidence^1.5 — gentle damp below 1.0, harsh below 0.5).
+  const clamped = Math.min(1, Math.max(0, confidence));
+  return Math.pow(clamped, 1.5);
+};
+
 // ── Posterior-delta computation ────────────────────────────────────
 //
 // The Beta-delta + EMA + posterior-recompute algebra lives ONCE in
