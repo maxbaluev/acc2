@@ -347,6 +347,6 @@ Rejected. The organism pins opencode gpt-5.5 as the brain. Alternate-model arbit
 | T4 | selector and credit calibration error | n/a | Down |
 | T5 | health latency under heavy aggregate load | n/a | Down |
 
-Baseline numbers are from the live substrate (`/home/maxbaluev/.accint/state.db`) at the time of this revision; the same numbers appear in Architecture.md §1 and §14.
+Baseline numbers are a point-in-time diagnostic snapshot, not a canonical promise. Regenerate them from the substrate status/audit surface before making dispatch-order decisions; Architecture.md should cite the same generated snapshot event rather than repeating mutable counts.
 
 **Final state.** Every reusable boundary is a scored row, every credit path closes, protected security gates stay protected by absence-of-violation evidence, and the substrate compounds across code, research, work, relationships, and embodied goals through one residual-scored loop. The roadmap is done when (a) Tier S0/T0/T1 metrics calibrate, (b) Tier 2/3 predicates show posterior divergence, and (c) Tier 4 selector error trends down — see Architecture.md §14 for the live ALIVE verdict (`5F21YF13Z13W5FNJ6DR2YJ04M0`, `YB2C2QCKC10BNBDVF22CX1Y5V8`, `HBQ8FM8HED2AX2R7EDCVY15R8W`).

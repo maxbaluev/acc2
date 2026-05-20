@@ -6,7 +6,7 @@ One event ledger, one act primitive, one credit machinery, one retrieval surface
 
 ## 1. Top Laws
 
-Top laws are the substrate's posterior-scored operating truths; the live prompt surface compiles them from scored knowledge (`4EAFA894A8194C4CA74F08430C`, `6FDAD5FFB0954E3094D24808CE`). Live snapshot (state.db as of this revision): **262,325 events, 1,496 act_artifacts, 305 promoted knowledge, 2,197 act_tuple_recorded, 4,027 action_scored, 695 closure audits, 7,036 retrieval bindings, 20 artifact-score updates, 2 owner-observed outcomes** — the last two numbers diagnose why Tier 0 (artifact-credit revival) and Tier 1 (owner-outcome channel) are sequenced first in `docs/roadmap.md`.
+Top laws are the substrate's posterior-scored operating truths; the live prompt surface compiles them from scored knowledge (`4EAFA894A8194C4CA74F08430C`, `6FDAD5FFB0954E3094D24808CE`). Point-in-time ledger snapshots belong in generated state_snapshot_recorded/state_snapshot_diffed evidence, not durable architecture prose; the invariant is that artifact-credit and owner-outcome metrics diagnose why Tier 0 (artifact-credit revival) and Tier 1 (owner-outcome channel) are sequenced first in `docs/roadmap.md`.
 
 - The substrate is the operator; brain and Claude are invoked tools (`5F21YF13Z13W5FNJ6DR2YJ04M0`).
 - Cycle-1-only is structural; recursion is a new task edge, not in-context continuation (`206B19C06C2E461A8E8C3720C6`).
