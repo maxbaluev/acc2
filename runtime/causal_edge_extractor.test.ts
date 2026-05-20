@@ -1,0 +1,242 @@
+// Tier-S2 causal-edge extractor — proves the bounded extractor admits
+// one act_artifact{kind:causal_edge_predicate} row per (edge_class,
+// node_a, node_b) tuple with canonical ordering, emits one
+// causal_edge_observed event per observation, is idempotent across
+// reruns, and respects the recency window.
+
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { closeDb, openDb } from "../substrate/db";
+import { extractCausalEdges } from "./causal_edge_extractor";
+
+afterAll(() => closeDb());
+beforeEach(() => closeDb());
+
+const newId = (): string =>
+  crypto.randomUUID().replace(/-/g, "").slice(0, 26).toUpperCase();
+
+const _baseTs = Date.now();
+let _tsCounter = 0;
+const tickTs = (): string => {
+  _tsCounter += 1;
+  return new Date(_baseTs + _tsCounter * 1000).toISOString();
+};
+
+const insertEvent = (
+  db: ReturnType<typeof openDb>,
+  fields: {
+    kind: string;
+    directive_id?: string;
+    task_id?: string;
+    loop_id?: string;
+    substrate_origin?: string;
+    payload?: unknown;
+    context_refs?: string[];
+    ts?: string;
+  },
+): string => {
+  const id = newId();
+  db.run(
+    `INSERT INTO events (
+       id, ts, directive_id, task_id, loop_id, substrate_origin, kind,
+       payload, context_refs
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      fields.ts ?? tickTs(),
+      fields.directive_id ?? "d_test",
+      fields.task_id ?? "t_test",
+      fields.loop_id ?? "l_test",
+      fields.substrate_origin ?? "substrate_auto",
+      fields.kind,
+      JSON.stringify(fields.payload ?? {}),
+      JSON.stringify(fields.context_refs ?? []),
+    ],
+  );
+  return id;
+};
+
+const countEdges = (
+  db: ReturnType<typeof openDb>,
+  edgeClass?: string,
+): number => {
+  if (edgeClass) {
+    const row = db
+      .query(
+        `SELECT COUNT(*) AS n FROM act_artifact
+         WHERE kind = 'causal_edge_predicate' AND name LIKE ?`,
+      )
+      .get(`${edgeClass}:%`) as { n: number };
+    return row.n;
+  }
+  const row = db
+    .query(`SELECT COUNT(*) AS n FROM act_artifact WHERE kind = 'causal_edge_predicate'`)
+    .get() as { n: number };
+  return row.n;
+};
+
+const countObservations = (db: ReturnType<typeof openDb>): number =>
+  (db.query(`SELECT COUNT(*) AS n FROM events WHERE kind = 'causal_edge_observed'`).get() as { n: number }).n;
+
+describe("extractCausalEdges", () => {
+  test("act_tuple_recorded with two cited_knowledge_ids admits one cocitation edge + one observation", async () => {
+    const db = openDb(":memory:");
+    insertEvent(db, {
+      kind: "act_tuple_recorded",
+      payload: { cited_knowledge_ids: ["k_alpha", "k_beta"] },
+    });
+
+    const summary = await extractCausalEdges(db);
+    expect(summary.scanned).toBe(1);
+    expect(summary.cocitations_recorded).toBe(1);
+    expect(summary.artifact_edges_recorded).toBe(0);
+    expect(summary.refinement_edges_recorded).toBe(0);
+    expect(summary.edges_admitted).toBe(1);
+
+    expect(countEdges(db, "citation_cocitation")).toBe(1);
+    expect(countObservations(db)).toBe(1);
+
+    // Canonical ordering: alphabetical min first.
+    const row = db
+      .query(
+        `SELECT id, name, body FROM act_artifact WHERE kind = 'causal_edge_predicate'`,
+      )
+      .get() as { id: string; name: string; body: string };
+    expect(row.id).toBe("edge_citation_cocitation__k_alpha__k_beta");
+    expect(row.name).toBe("citation_cocitation:k_alpha:k_beta");
+    const body = JSON.parse(row.body) as Record<string, unknown>;
+    expect(body.node_a).toBe("k_alpha");
+    expect(body.node_b).toBe("k_beta");
+  });
+
+  test("three cited_artifact_ids yield C(3,2)=3 distinct artifact-pair edges", async () => {
+    const db = openDb(":memory:");
+    insertEvent(db, {
+      kind: "act_tuple_recorded",
+      payload: { cited_artifact_ids: ["a_one", "a_two", "a_three"] },
+    });
+
+    const summary = await extractCausalEdges(db);
+    expect(summary.artifact_edges_recorded).toBe(3);
+    expect(summary.edges_admitted).toBe(3);
+    expect(countEdges(db, "citation_artifact")).toBe(3);
+    expect(countObservations(db)).toBe(3);
+  });
+
+  test("task_edge_recorded with parent + child admits one refinement edge", async () => {
+    const db = openDb(":memory:");
+    insertEvent(db, {
+      kind: "task_edge_recorded",
+      payload: { parent_task_id: "t_parent", child_task_id: "t_child" },
+    });
+
+    const summary = await extractCausalEdges(db);
+    expect(summary.refinement_edges_recorded).toBe(1);
+    expect(summary.edges_admitted).toBe(1);
+    expect(countEdges(db, "refinement_parent_child")).toBe(1);
+
+    const row = db
+      .query(
+        `SELECT id FROM act_artifact
+         WHERE kind = 'causal_edge_predicate' AND name LIKE 'refinement_parent_child:%'`,
+      )
+      .get() as { id: string };
+    // Canonical ordering: alphabetical min first. "t_child" < "t_parent".
+    expect(row.id).toBe("edge_refinement_parent_child__t_child__t_parent");
+  });
+
+  test("re-running on the same acts is idempotent (no duplicate rows)", async () => {
+    const db = openDb(":memory:");
+    insertEvent(db, {
+      kind: "act_tuple_recorded",
+      payload: { cited_knowledge_ids: ["k_x", "k_y"] },
+    });
+    insertEvent(db, {
+      kind: "task_edge_recorded",
+      payload: { parent_task_id: "t_p", child_task_id: "t_c" },
+    });
+
+    await extractCausalEdges(db);
+    const edgeCountFirst = countEdges(db);
+    expect(edgeCountFirst).toBe(2);
+
+    // Second run sees the same source events and the existing edge rows.
+    await extractCausalEdges(db);
+    const edgeCountSecond = countEdges(db);
+    expect(edgeCountSecond).toBe(edgeCountFirst);
+  });
+
+  test("ordering is canonical regardless of input order", async () => {
+    const db = openDb(":memory:");
+    // Insert ids in reverse alphabetical order — extractor must still
+    // canonicalize to (min, max).
+    insertEvent(db, {
+      kind: "act_tuple_recorded",
+      payload: { cited_knowledge_ids: ["k_zebra", "k_apple"] },
+    });
+    await extractCausalEdges(db);
+    const row = db
+      .query(`SELECT id FROM act_artifact WHERE kind = 'causal_edge_predicate'`)
+      .get() as { id: string };
+    expect(row.id).toBe("edge_citation_cocitation__k_apple__k_zebra");
+  });
+
+  test("acts older than windowDays are not picked up", async () => {
+    const db = openDb(":memory:");
+    // 30 days ago — outside the default 14-day window.
+    const oldTs = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    insertEvent(db, {
+      kind: "act_tuple_recorded",
+      payload: { cited_knowledge_ids: ["k_old1", "k_old2"] },
+      ts: oldTs,
+    });
+    // And a recent one — must be picked up.
+    insertEvent(db, {
+      kind: "act_tuple_recorded",
+      payload: { cited_knowledge_ids: ["k_new1", "k_new2"] },
+    });
+
+    const summary = await extractCausalEdges(db);
+    expect(summary.scanned).toBe(1);
+    expect(summary.cocitations_recorded).toBe(1);
+    expect(countEdges(db, "citation_cocitation")).toBe(1);
+  });
+
+  test("admitted edge row carries neutral Beta(1,1) prior", async () => {
+    const db = openDb(":memory:");
+    insertEvent(db, {
+      kind: "act_tuple_recorded",
+      payload: { cited_knowledge_ids: ["k_a", "k_b"] },
+    });
+    await extractCausalEdges(db);
+    const row = db
+      .query(
+        `SELECT posterior_alpha, posterior_beta, score, status
+         FROM act_artifact WHERE kind = 'causal_edge_predicate'`,
+      )
+      .get() as {
+        posterior_alpha: number;
+        posterior_beta: number;
+        score: number;
+        status: string;
+      };
+    expect(row.posterior_alpha).toBe(1);
+    expect(row.posterior_beta).toBe(1);
+    expect(row.score).toBeCloseTo(0.5, 8);
+    expect(row.status).toBe("admitted");
+  });
+
+  test("task_edge_recorded without both endpoints is skipped", async () => {
+    const db = openDb(":memory:");
+    insertEvent(db, {
+      kind: "task_edge_recorded",
+      payload: { parent_task_id: "t_parent" }, // child missing
+    });
+    insertEvent(db, {
+      kind: "task_edge_recorded",
+      payload: { child_task_id: "t_child" }, // parent missing
+    });
+    const summary = await extractCausalEdges(db);
+    expect(summary.refinement_edges_recorded).toBe(0);
+    expect(countEdges(db, "refinement_parent_child")).toBe(0);
+  });
+});

@@ -961,6 +961,17 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       try { await extractCrossCandidateCorroboration(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.cross_candidate_corroboration", err: (err as Error).message }, "cross-candidate-corroboration extractor tick failed");
       }
+      // Tier-S2 causal-edge posterior (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
+      // 2026-05-19): admit causal_edge_predicate rows for citation
+      // co-occurrence and refinement edges so edges between substrate
+      // entities can accumulate their own Beta posterior. Bounded: 500
+      // acts per tick, 14-day window, yields every 25 rows.
+      try {
+        const { extractCausalEdges } = await import("./causal_edge_extractor");
+        await extractCausalEdges(db);
+      } catch (err) {
+        logger.warn({ where: "daemon.extractors.causal_edges", err: (err as Error).message }, "causal-edge extractor tick failed");
+      }
       // Auto cross-directive interference (organism-alignment Track C,
       // 2026-05-15): scan act_artifact.target_resources/target_files for cross-directive
       // overlap and emit resource_conflict edges so the scheduler defers

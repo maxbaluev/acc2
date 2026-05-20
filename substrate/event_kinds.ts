@@ -100,6 +100,18 @@ export const EVENT_KINDS = {
   // + structured outcome — no semantic text. Cosine retrieval over it is noise.
   action_scored:                           { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   irreversible_effect_recorded:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true, narrative: true },
+  // Tier-S2 causal-edge posterior (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
+  // 2026-05-19): substrate-emitted when the bounded causal-edge extractor
+  // (runtime/causal_edge_extractor.ts) observes a pair of substrate
+  // entities co-cited on the same act or wired by a task_edge_recorded
+  // refinement edge. Carries { edge_class, node_a, node_b,
+  // edge_act_artifact_id, source_act_id|source_event_id }. The
+  // edge_act_artifact_id resolves to an act_artifact{kind:
+  // causal_edge_predicate} row whose Beta posterior calibrates from
+  // downstream outcome credit — citing the edge row's id on a future
+  // act lets distributeCredit adjust the edge's posterior alongside its
+  // endpoint nodes.
+  causal_edge_observed:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Knowledge (Model D) ─────────────────────────────────────────────
   knowledge_candidate:                     { producer: "brain",     embeddable: true,  mirror_inline: true,  health_metric: false, narrative: true },
@@ -273,6 +285,32 @@ export const EVENT_KINDS = {
   code_artifact_retired:                   { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   code_artifact_rehabilitated:             { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   code_artifact_score_updated:             { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // 2026-05-19 (brain dispatch J4HP5SYT3N4GK45S Candidate A — substrate-wide
+  // kind="code_artifact" alias removal). The artifact_kind_backfill_worker
+  // (runtime/artifact_kind_backfill_worker.ts) scans every act_artifact row
+  // whose kind is the legacy default "code_artifact" and infers the
+  // concrete kind from weighted evidence (name suffix → body signature →
+  // declared_sandbox.runtime → state_root prefix). Three audit kinds:
+  //
+  //   artifact_kind_inferred — per-row inference verdict. NOT health-metric
+  //     (every scanned row emits one; signal is in the breakdown rows).
+  //     Surfaces evidence map (name_pattern / body_signature / runtime /
+  //     state_root_prefix / source_candidate_id / target_resources) so the
+  //     audit trail of WHY the worker picked the kind is replayable.
+  //
+  //   artifact_kind_backfilled — applied: kind column updated in place
+  //     (high-confidence verdict ≥ 0.75). Health-metric so dashboards can
+  //     count substrate-wide backfill convergence — the bigger this count
+  //     is per sweep, the closer the substrate is to legacy-kind-zero.
+  //
+  //   artifact_kind_inference_uncertain — deferred: row stays as
+  //     code_artifact because no evidence strand crossed the confidence
+  //     floor. Health-metric so dashboards can show how many rows the
+  //     sweep declined to mutate; non-zero count after a sweep is the
+  //     signal a human-curated kind override may be needed.
+  artifact_kind_inferred:                  { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  artifact_kind_backfilled:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true  },
+  artifact_kind_inference_uncertain:       { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true  },
   latm_novelty_bonus_applied:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   sandbox_violation:                       { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   sandbox_unenforced_warning:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
