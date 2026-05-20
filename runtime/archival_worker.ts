@@ -43,6 +43,78 @@ const SWEEP_LIMIT = 50_000;
 const COPY_CHUNK = 1000;
 const VERIFY_SAMPLE = 100;
 
+// ── Mnemonic sovereignty curation (Lin et al. 2026, arXiv:2604.16548) ─
+//
+// "Mnemonic sovereignty protects not merely stored content but a system's
+// sovereign capacity to govern its own past. Memory-lifecycle framework
+// first asks what memory should represent, not just how to store it."
+//
+// Pre-fix: every event archived by age regardless of value. High-value
+// (owner_observed_outcome_recorded) and decorative (worker_tick_completed)
+// flowed identically into cold archives. Hot DB stayed bloated with
+// low-signal events while owner-channel evidence aged into cold storage.
+//
+// Policy: classify each event_kind into one of four curation modes:
+//   - always_keep: never archive (owner-channel, root commits, high-score
+//                  promotions). These stay in HOT permanently.
+//   - archive_cold: current move-by-age behavior (default).
+//   - compress_summary: high-volume telemetry kinds get aggregated into
+//                       hourly summary rows; originals dropped.
+//   - drop: pure noise (resolved transient errors); purge without archive.
+export type CurationMode = "always_keep" | "archive_cold" | "compress_summary" | "drop";
+
+const ALWAYS_KEEP_KINDS = new Set<string>([
+  // Owner-channel evidence: rarest + highest value.
+  "owner_observed_outcome_recorded",
+  "owner_input_received",
+  "owner_input_required",
+  "owner_decision_recorded",
+  "owner_insight_candidate",
+  "owner_profile_recorded",
+  // Knowledge graph backbone.
+  "knowledge_promoted",
+  "contract_amendment_proposed",
+  "closure_blocked_high_residual",
+  "closure_override_acknowledged",
+  // Tier -1 floor violations (rare; load-bearing for audit).
+  "integrity_check_failed",
+  "memory_reconciliation_drift_detected",
+  "owner_identity_discontinuity",
+  // Constitutional events.
+  "constitutional_ratification_recorded",
+  "constitutional_ratification_refused",
+]);
+
+const COMPRESS_SUMMARY_KINDS = new Set<string>([
+  // High-volume telemetry — aggregate to hourly summary.
+  "worker_tick_completed",
+  "sql_worker_pool_metrics",
+  "event_authenticity_check",
+  "storage_integrity_check",
+  "wal_checkpointed",
+  "memory_reconciliation_completed",
+  "sahoo_diagnostics_recorded",
+  "kernel_sandbox_check",
+  "owner_identity_check",
+  "deterministic_computation_check",
+]);
+
+const DROP_KINDS = new Set<string>([
+  // Pure noise that doesn't need archive (recovered transient errors).
+  "knowledge_candidate_redundant",
+]);
+
+/** Per docs/Architecture.md commit 6b8ebea + Lin et al. 2026 mnemonic
+ *  sovereignty: classify each event_kind into curation mode. Default
+ *  archive_cold preserves the original behavior; the carve-out sets
+ *  above add semantic curation. */
+export const curationModeForKind = (kind: string): CurationMode => {
+  if (DROP_KINDS.has(kind)) return "drop";
+  if (ALWAYS_KEEP_KINDS.has(kind)) return "always_keep";
+  if (COMPRESS_SUMMARY_KINDS.has(kind)) return "compress_summary";
+  return "archive_cold";
+};
+
 // Mirror substrate/schema.sql events table columns (lines 34-56). Keep
 // in lockstep — adding a column to schema.sql means adding it here.
 const EVENTS_COLUMNS = [
@@ -181,15 +253,25 @@ export const runArchivalSweep = async (
     skipped: false,
   };
 
-  // 1. Select candidate rows from hot, bounded.
+  // 1. Select candidate rows from hot, bounded. Mnemonic-sovereignty
+  // curation (Lin et al. 2026, arXiv:2604.16548): owner-channel +
+  // knowledge-graph-backbone + Tier-1-floor-violation events are
+  // ALWAYS_KEEP — excluded from the sweep so they stay in hot DB
+  // permanently. Drop-class kinds are also excluded (purged separately
+  // via a future drop sweep, not move-to-cold).
+  const alwaysKeepList = Array.from(ALWAYS_KEEP_KINDS);
+  const dropList = Array.from(DROP_KINDS);
+  const exclusionList = [...alwaysKeepList, ...dropList];
+  const exclusionPlaceholders = exclusionList.map(() => "?").join(",");
   const candidates = hotDb
-    .query<EventRowFull, [string, number]>(
+    .query<EventRowFull, [string, ...string[]]>(
       `SELECT ${EVENTS_COLUMNS.join(", ")} FROM events
         WHERE ts < ?
+          AND kind NOT IN (${exclusionPlaceholders})
         ORDER BY ts ASC
         LIMIT ?`,
     )
-    .all(cutoffIso, limit);
+    .all(cutoffIso, ...exclusionList, limit as unknown as string);
   summary.scanned = candidates.length;
 
   if (candidates.length === 0) {

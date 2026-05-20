@@ -955,6 +955,27 @@ export const EVENT_KINDS = {
   brain_invocation_dispatched:             { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   brain_invocation_throttled:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   brain_invocation_failed:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // ── 2026 research integration (2026-05-20) ───────────────────────
+  // SSGM memory reconciliation (Lam et al. 2026, arXiv:2603.11768):
+  // periodic operator R re-aligns mutable in-memory caches against
+  // the immutable ledger. drift_detected fires when cache hash
+  // diverges from ledger projection; completed fires per clean tick.
+  memory_reconciliation_completed:         { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  memory_reconciliation_drift_detected:    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // SAHOO safeguarded alignment (Sahoo et al. 2026, arXiv:2603.06333):
+  // intrinsic diagnostics 5-tuple emitted per 10min tick — delegation
+  // safety, drift bound headroom, closure residual avg, owner outcome
+  // coverage, posterior promotion rate. Operators read the tuple to
+  // catch recursive self-improvement regression.
+  sahoo_diagnostics_recorded:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // AgentCity constitutional ratification (Ruan & Zhang 2026,
+  // arXiv:2604.07007): high-impact repo: amendment apply requires
+  // multi-verifier consensus (claude + opencode + owner_consent when
+  // owner_profile.things_to_never_do touched). Below count as health
+  // metrics so dashboards plot ratification refusals + the
+  // multi-verifier-consensus path.
+  constitutional_ratification_recorded:    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  constitutional_ratification_refused:     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   // ── Unified pathology budget (brain elegance bc8je5f3x, 2026-05-15) ─
   // Pre-fix six backpressure mechanisms (bridge_failure_streak,
   // consecutive_bridge_failures, supervisor_redispatch_storm,

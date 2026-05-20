@@ -154,7 +154,19 @@ export type WorkerName =
   // by topic+triggering_event_ids, composes a directive, and
   // dispatches through the existing acc task path. Opt-out via
   // ACC2_DISABLE_WORKERS=brain_invocation.
-  | "brain_invocation";
+  | "brain_invocation"
+  // 2026-05-20 (SSGM Lam et al. 2026 arXiv:2603.11768): memory
+  // reconciliation worker — 5min tick. Computes per-cache ledger
+  // projection hashes; emits memory_reconciliation_completed on
+  // clean tick and memory_reconciliation_drift_detected on mismatch.
+  // Opt-out via ACC2_DISABLE_WORKERS=memory_reconciliation.
+  | "memory_reconciliation"
+  // 2026-05-20 (SAHOO Sahoo et al. 2026 arXiv:2603.06333): recursive
+  // self-improvement governor — 10min tick. Emits sahoo_diagnostics
+  // _recorded (5-tuple). The pure evaluateGoNoGo function is the
+  // Go/No-Go gate (callable from amendment apply path).
+  // Opt-out via ACC2_DISABLE_WORKERS=sahoo_governor.
+  | "sahoo_governor";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -190,6 +202,8 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "owner_identity",
   "archival",
   "brain_invocation",
+  "memory_reconciliation",
+  "sahoo_governor",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

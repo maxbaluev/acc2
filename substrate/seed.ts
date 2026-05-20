@@ -2353,6 +2353,40 @@ const PREDICATE_SEEDS: PredicateSeed[] = [
     metric_direction: "unresolved identity discontinuities stay zero.",
     display_name: "Owner identity continuity floor — authority channel binding",
   },
+  // ── 2026 research integration (2026-05-20) ────────────────────────
+  // Three predicates landing the post-roadmap 2026-research enhancements:
+  // SSGM memory reconciliation (Tier -1), SAHOO recursive-self-improvement
+  // safeguard (Tier -1), AgentCity constitutional ratification (Tier S0).
+  {
+    name: "memory_reconciliation_predicate",
+    tier: "tier_minus_1_floor",
+    problem: "mutable in-memory caches (embedder buffer, hot-reload state, prompt_composer cache, threshold registry TTL, SQL worker pool prepared statements, owner_profile maps) can drift silently from the immutable event ledger; without periodic reconciliation, downstream posteriors compound stale state.",
+    contract: "periodically project the ledger to a deterministic per-cache hash; compare against live cache hash; mismatch emits memory_reconciliation_drift_detected and flushes the cache. Grounds in SSGM Lam, Li, Zhang, Zhao 2026 (arXiv:2603.11768) — Stability and Safety-Governed Memory framework Reconciliation operator R.",
+    why: "Tier -1 floor: without cache-vs-ledger reconciliation, every Tier-S extractor reads possibly-stale state — invalidates posterior compounding.",
+    closure_predicate: "ledger projection hash matches live cache hash across all surfaces; mismatches trigger flush and emit drift_detected.",
+    metric_direction: "drift_detected count stays bounded; reconciliation_completed ticks fire on cadence.",
+    display_name: "Memory reconciliation — SSGM operator R for mutable caches vs ledger",
+  },
+  {
+    name: "recursive_self_improvement_safeguard_predicate",
+    tier: "tier_minus_1_floor",
+    problem: "Kriger 2026 proves goal preservation under recursive self-improvement is subject to a formal upper bound under lossy compression; without a concrete gate that ACTS on the bound, drift accumulates silently.",
+    contract: "evaluate Go/No-Go gate before amendment apply: drift_score (from integrity_check_failed + memory_reconciliation_drift_detected + closure_blocked_high_residual + owner_identity_discontinuity events in 24h window) must stay below sahoo_drift_bound threshold; high-impact targets additionally require non-empty evidence_event_ids chain. Per SAHOO Sahoo, Chadha, Jain, Chaudhary 2026 (arXiv:2603.06333) three safeguards: Go/No-Go gate, constraint-preserving evidence chain, intrinsic diagnostics 5-tuple.",
+    why: "Tier -1 floor: SAHOO is the formal mechanism that ACTS on Kriger's drift bound; without it, owner_goal_preservation_drift_predicate scores drift but the substrate has no concrete refusal gate.",
+    closure_predicate: "drift_score < bound AND high-impact amendments cite evidence chain; sahoo_diagnostics_recorded 5-tuple emitted per 10min tick.",
+    metric_direction: "drift_bound_headroom stays positive; Go/No-Go refusals rise when drift accumulates and fall when reconciled.",
+    display_name: "Recursive self-improvement safeguard — SAHOO Go/No-Go + constraint-preserving + diagnostics",
+  },
+  {
+    name: "constitutional_amendment_ratification_predicate",
+    tier: "tier_s0_owner_alignment",
+    problem: "closure gate is executive-only refusal; high-impact amendments (repo:runtime/, repo:substrate/, repo:cli/) need legislative ratification across multiple verifiers, not single-gate apply.",
+    contract: "for high-impact target_resources, amendment apply requires multi-verifier consensus: (1) deterministic_code verifier (tests pass + anchor matches live file), (2) peer_llm verifier (second-pass review residual < 0.3), (3) owner_consent when owner_profile.things_to_never_do is touched. Lower-impact amendments retain single-verifier path. Per AgentCity Ruan & Zhang 2026 (arXiv:2604.07007) Separation of Power constitutional governance architecture.",
+    why: "Tier S0: constitutional separation of legislative/executive/judicial roles in LLM-MAS enables causal attribution. Single closure gate cannot prevent the closure_blocked_high_residual override path from laundering autonomous-commit creep into high-impact files.",
+    closure_predicate: "ratification_recorded for every high-impact amendment apply; refusals fire on missing verifier consensus.",
+    metric_direction: "high-impact amendment refusal rate stays bounded by verifier-disagreement rate; autonomous-commit reversals on high-impact targets fall to zero.",
+    display_name: "Constitutional amendment ratification — AgentCity SoP multi-verifier consensus",
+  },
   // ── Tier S0 owner alignment (8 tiered predicates) ─────────────────
   // Per brain dispatch 70XT4ZKMBH5CQ3A3 amendment Q29A3DWAHN69F4TQPB:
   // owner alignment is a tiered decomposition of 8 scoreable boundaries

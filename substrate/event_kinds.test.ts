@@ -535,6 +535,15 @@ describe("derived sets match their pre-unification shape", () => {
       "brain_invocation_dispatched",
       "brain_invocation_throttled",
       "brain_invocation_failed",
+      // 2026 research integration (2026-05-20):
+      // - SSGM (arXiv:2603.11768) memory reconciliation
+      // - SAHOO (arXiv:2603.06333) recursive self-improvement diagnostics
+      // - AgentCity (arXiv:2604.07007) constitutional ratification
+      "memory_reconciliation_completed",
+      "memory_reconciliation_drift_detected",
+      "sahoo_diagnostics_recorded",
+      "constitutional_ratification_recorded",
+      "constitutional_ratification_refused",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

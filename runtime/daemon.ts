@@ -1910,6 +1910,40 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const timer = setInterval(tick, tickMs);
     workers.push(() => clearInterval(timer));
   }
+
+  // memory_reconciliation_worker — 5min tick. SSGM Lam et al. 2026
+  // (arXiv:2603.11768) Reconciliation operator R: periodically align
+  // mutable in-memory caches against immutable ledger.
+  // Opt-OUT via ACC2_DISABLE_WORKERS=memory_reconciliation.
+  if (isWorkerEnabled("memory_reconciliation")) {
+    const tickMs = 5 * 60 * 1000;
+    const { runMemoryReconciliationTick } = await import("./memory_reconciliation_worker");
+    markWorkerReady("memory_reconciliation");
+    recordWorkerTick("memory_reconciliation");
+    const tick = supervisedTick(db, "memory_reconciliation", tickMs, async () => {
+      runMemoryReconciliationTick(db);
+    });
+    const timer = setInterval(tick, tickMs);
+    workers.push(() => clearInterval(timer));
+  }
+
+  // sahoo_governor_worker — 10min tick. SAHOO Sahoo et al. 2026
+  // (arXiv:2603.06333) intrinsic diagnostics 5-tuple. The pure
+  // evaluateGoNoGo function (exported from
+  // recursive_self_improvement_governor.ts) is the Go/No-Go gate
+  // callable from amendment apply path. Opt-OUT via
+  // ACC2_DISABLE_WORKERS=sahoo_governor.
+  if (isWorkerEnabled("sahoo_governor")) {
+    const tickMs = 10 * 60 * 1000;
+    const { runSahooDiagnosticsTick } = await import("./recursive_self_improvement_governor");
+    markWorkerReady("sahoo_governor");
+    recordWorkerTick("sahoo_governor");
+    const tick = supervisedTick(db, "sahoo_governor", tickMs, async () => {
+      runSahooDiagnosticsTick(db);
+    });
+    const timer = setInterval(tick, tickMs);
+    workers.push(() => clearInterval(timer));
+  }
   } // end if (!skipWorkers)
 
   // Declare `stop` BEFORE Bun.serve so the fetch closure can capture it; the
