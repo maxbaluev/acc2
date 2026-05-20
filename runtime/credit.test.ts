@@ -855,7 +855,13 @@ describe("act_tuple_recorded projected credit", () => {
       const row = db.query("SELECT kind FROM events WHERE id = ?").get(id) as { kind: string } | null;
       return row?.kind === "candidate_confirmed";
     })!);
-    const confirmations = db.query("SELECT payload FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.knowledge_id') = ?").all(knowledge.id) as Array<{ payload: string }>;
+    // T0.3 citation binding enforcement (2026-05-20): the act_tuple
+    // projection also emits a retrieval_binding which fires the
+    // bind_citation hook, producing a second candidate_confirmed row
+    // stamped projected_from="bind_citation". Filter those out to
+    // verify distributeCredit's projection-keyed idempotency still
+    // produces exactly one act-driven confirmation.
+    const confirmations = db.query("SELECT payload FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.knowledge_id') = ? AND (json_extract(payload, '$.projected_from') IS NULL OR json_extract(payload, '$.projected_from') != 'bind_citation')").all(knowledge.id) as Array<{ payload: string }>;
     expect(confirmations).toHaveLength(1);
     const payload = JSON.parse(confirmations[0]!.payload) as Record<string, unknown>;
     expect(payload.source_act_id).toBe(act.id);
@@ -1153,5 +1159,214 @@ describe("projectActionScoredToCredit — universal emit-boundary projector", ()
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.projected_from') = 'action_scored_universal_projector'")
       .get() as { c: number };
     expect(projectorRows.c).toBe(0); // projector did NOT fire
+  });
+});
+
+// T0.3 — citation binding enforcement at emitEvent boundary. Symmetric
+// to T0.2: every retrieval_binding emit immediately credits the cited
+// knowledge row via candidate_confirmed{projected_from=bind_citation,
+// weight=BINDING_WEIGHT}. Decorative citations land as retrieval_rejected.
+// Idempotent via projection_key retrieval_binding_credit:{event_id}.
+describe("bindCitation — citation binding enforcement at emitEvent boundary (T0.3)", () => {
+  test("emits candidate_confirmed with weight=BINDING_WEIGHT when retrieval_binding cites a knowledge_candidate", () => {
+    const db = openDb(":memory:");
+    // Seed a knowledge_candidate to be cited.
+    const kc = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "seed candidate for binding credit" },
+    });
+    // Emit a retrieval_binding citing it via source_event_id (the
+    // canonical payload shape in production — see 7158/7186 live rows).
+    const binding = emitEvent(db, {
+      kind: "retrieval_binding",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_bind_1",
+      task_id: "t_bind_1",
+      context_refs: [kc.id],
+      payload: {
+        query: "test",
+        source_event_id: kc.id,
+        binding_surface: "search",
+      },
+    });
+    // The post-write hook should have emitted a candidate_confirmed
+    // stamped projected_from="bind_citation" carrying weight=0.1.
+    const confirmed = db
+      .query<{ payload: string }, [string]>(
+        "SELECT payload FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.retrieval_binding_event_id') = ? LIMIT 1",
+      )
+      .get(binding.id);
+    expect(confirmed).not.toBeNull();
+    const payload = JSON.parse(confirmed!.payload) as Record<string, unknown>;
+    expect(payload.knowledge_id).toBe(kc.id);
+    expect(payload.weight).toBe(0.1);
+    expect(payload.projected_from).toBe("bind_citation");
+    expect(payload.projection_key).toBe("retrieval_binding_credit:" + binding.id);
+  });
+
+  test("posterior moves: maybePromoteKnowledge sees fractional wins from binding credit", async () => {
+    const { maybePromoteKnowledge } = await import("../substrate/extractors");
+    const db = openDb(":memory:");
+    const kc = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "candidate posterior probe" },
+    });
+    const beforeVerdict = maybePromoteKnowledge(db, kc.id);
+    expect(beforeVerdict.kind).toBe("no_action");
+    expect(beforeVerdict.score).toBe(0.5); // alpha=1, beta=1 → 0.5
+
+    // Emit ONE retrieval_binding — should add 0.1 wins.
+    emitEvent(db, {
+      kind: "retrieval_binding",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_post",
+      task_id: "t_post",
+      context_refs: [kc.id],
+      payload: { query: "q", source_event_id: kc.id, binding_surface: "prompt" },
+    });
+    const afterOne = maybePromoteKnowledge(db, kc.id);
+    // Posterior moved: alpha = 1 + 0.1 = 1.1, beta = 1 → score ≈ 0.524
+    expect(afterOne.score).toBeGreaterThan(beforeVerdict.score);
+    expect(afterOne.score).toBeLessThan(0.6); // still well under promote threshold
+    expect(afterOne.kind).toBe("no_action"); // 0.1 wins << 5 threshold
+  });
+
+  test("idempotent: re-emitting the same retrieval_binding does NOT double-credit", () => {
+    const db = openDb(":memory:");
+    const kc = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "idempotency probe" },
+    });
+    const binding = emitEvent(db, {
+      kind: "retrieval_binding",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_idem",
+      task_id: "t_idem",
+      context_refs: [kc.id],
+      payload: { source_event_id: kc.id, binding_surface: "search" },
+    });
+    const firstCount = (db
+      .query<{ c: number }, [string]>(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.retrieval_binding_event_id') = ?",
+      )
+      .get(binding.id) as { c: number }).c;
+    expect(firstCount).toBe(1);
+    // Directly invoke bindCitation again on the same row — should be a no-op.
+    // (Re-emitting a retrieval_binding through emitEvent would mint a new
+    // event_id and credit it independently; the idempotency guard is on
+    // projection_key = retrieval_binding_credit:{event_id}, which only
+    // fires for the SAME binding_event_id.)
+    const { bindCitation } = require("./credit") as typeof import("./credit");
+    bindCitation(db, {
+      id: binding.id,
+      payload: JSON.stringify({ source_event_id: kc.id, binding_surface: "search" }),
+      directive_id: "d_idem",
+      task_id: "t_idem",
+    });
+    const secondCount = (db
+      .query<{ c: number }, [string]>(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.retrieval_binding_event_id') = ?",
+      )
+      .get(binding.id) as { c: number }).c;
+    expect(secondCount).toBe(1); // no double-emit
+  });
+
+  test("decorative citation (unresolvable cited id) emits retrieval_rejected, no candidate_confirmed", () => {
+    const db = openDb(":memory:");
+    const binding = emitEvent(db, {
+      kind: "retrieval_binding",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_dec",
+      task_id: "t_dec",
+      payload: {
+        source_event_id: "does_not_exist_eventid",
+        binding_surface: "search",
+      },
+    });
+    // No candidate_confirmed should have landed for this binding.
+    const confirmedRows = db
+      .query<{ c: number }, [string]>(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.retrieval_binding_event_id') = ?",
+      )
+      .get(binding.id) as { c: number };
+    expect(confirmedRows.c).toBe(0);
+    // A retrieval_rejected row should have landed instead, citing the
+    // binding event and stamping the projection_key for idempotency.
+    const rejected = db
+      .query<{ payload: string }, [string]>(
+        "SELECT payload FROM events WHERE kind = 'retrieval_rejected' AND json_extract(payload, '$.retrieval_binding_event_id') = ? LIMIT 1",
+      )
+      .get(binding.id);
+    expect(rejected).not.toBeNull();
+    const rejPayload = JSON.parse(rejected!.payload) as Record<string, unknown>;
+    expect(rejPayload.reason).toBe("cited_knowledge_id_unresolvable");
+    expect(rejPayload.rejected_by).toBe("bind_citation_hook");
+    expect(rejPayload.projected_from).toBe("bind_citation");
+    expect(rejPayload.projection_key).toBe("retrieval_binding_credit:" + binding.id);
+  });
+
+  test("recursion guard: retrieval_binding stamped projected_from='bind_citation' does NOT re-credit", () => {
+    const db = openDb(":memory:");
+    const kc = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "recursion probe" },
+    });
+    // Emit a retrieval_binding pre-stamped with the recursion guard.
+    const binding = emitEvent(db, {
+      kind: "retrieval_binding",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_rec",
+      task_id: "t_rec",
+      context_refs: [kc.id],
+      payload: {
+        source_event_id: kc.id,
+        binding_surface: "search",
+        projected_from: "bind_citation",
+      },
+    });
+    // The hook should skip — no candidate_confirmed row for this binding.
+    const rows = db
+      .query<{ c: number }, [string]>(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.retrieval_binding_event_id') = ?",
+      )
+      .get(binding.id) as { c: number };
+    expect(rows.c).toBe(0);
+  });
+
+  test("forward-compat: payload.cited_knowledge_id is preferred over source_event_id when both present", () => {
+    const db = openDb(":memory:");
+    const kcPreferred = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "preferred via cited_knowledge_id" },
+    });
+    const kcFallback = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "fallback via source_event_id" },
+    });
+    const binding = emitEvent(db, {
+      kind: "retrieval_binding",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_fwd",
+      task_id: "t_fwd",
+      payload: {
+        cited_knowledge_id: kcPreferred.id,
+        source_event_id: kcFallback.id,
+        binding_surface: "search",
+      },
+    });
+    const confirmed = db
+      .query<{ payload: string }, [string]>(
+        "SELECT payload FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.retrieval_binding_event_id') = ? LIMIT 1",
+      )
+      .get(binding.id);
+    expect(confirmed).not.toBeNull();
+    const payload = JSON.parse(confirmed!.payload) as Record<string, unknown>;
+    expect(payload.knowledge_id).toBe(kcPreferred.id); // not kcFallback
   });
 });

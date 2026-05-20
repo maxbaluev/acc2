@@ -1379,6 +1379,43 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       void err;
     }
   }
+  // T0.3 citation binding enforcement — symmetric to T0.2 (commit
+  // d8baa7e). Live evidence (brain_self_audit 168h): citations
+  // kc_emitted=1745 promoted=0 — 1745 candidates cited, zero downstream
+  // promotions. Citation = mutation was advisory (k_252: advisory = fake;
+  // k_201: retrieval binding; k_554: citation = mutation). Fix: every
+  // retrieval_binding emit walks payload.cited_knowledge_id (or
+  // source_event_id) and emits a candidate_confirmed row with weight=
+  // BINDING_WEIGHT carrying projected_from="bind_citation" so the
+  // extractor's Beta-posterior recompute accumulates fractional wins.
+  // Recursion guard: rows already stamped projected_from="bind_citation"
+  // are skipped. Decorative citations (unresolvable id) emit
+  // retrieval_rejected instead. Idempotent via projection_key
+  // retrieval_binding_credit:{event_id}. Synchronous so idempotency is
+  // race-free.
+  if (input.kind === "retrieval_binding") {
+    try {
+      const payloadJson = JSON.stringify(eventPayload);
+      // Skip the recursion case at the boundary too — defense in depth
+      // against direct emit paths that stamp projected_from before
+      // bindCitation's own checks.
+      if (typeof eventPayload === "object" && eventPayload !== null
+          && (eventPayload as Record<string, unknown>).projected_from !== "bind_citation") {
+        const { bindCitation } = require("./credit") as typeof import("./credit");
+        bindCitation(db, {
+          id,
+          payload: payloadJson,
+          directive_id: directive_id,
+          task_id: task_id,
+        });
+      }
+    } catch (err) {
+      // Fail-soft: parent retrieval_binding row already landed. The
+      // helper emits its own projection_error rows on internal failure;
+      // this outer guard only catches require/import-time exceptions.
+      void err;
+    }
+  }
   return { id, ts };
 };
 

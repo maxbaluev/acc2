@@ -1241,6 +1241,188 @@ export const projectActionScoredToCredit = (
   }
 };
 
+// ── T0.3 Citation binding enforcement — knowledge credit symmetry ──
+//
+// Symmetric to T0.2 (commit d8baa7e — universal artifact credit
+// projection). T0.3 closes the knowledge-credit half: every
+// retrieval_binding event now mutates the cited knowledge candidate's
+// Beta posterior immediately, not advisorily.
+//
+// Live evidence (brain_self_audit 168h): citations kc_emitted=1745
+// promoted=0 — zero downstream promotions despite 1745 cited
+// candidates. Citation = mutation was advisory (k_252: advisory = fake;
+// k_201: retrieval binding; k_554: citation = mutation; k_555: four
+// links create → retrieve → mutate retrieval state → credit outcome).
+//
+// The fix: at the emitEvent post-write hook in runtime/events.ts,
+// every retrieval_binding event whose payload was NOT stamped
+// projected_from="bind_citation" walks payload.cited_knowledge_id
+// (forward-compat) OR payload.source_event_id (current shape) and
+// emits a candidate_confirmed row with weight=BINDING_WEIGHT carrying
+// payload.projected_from="bind_citation". The extractor accumulates
+// fractional wins (it already honors payload.weight for
+// knowledge_contradiction_observed; we extend that read to
+// bind_citation candidate_confirmed rows so a retention nudge of
+// 0.1 counts as 0.1 wins, not 1.0).
+//
+// Idempotency: projection_key = retrieval_binding_credit:{event_id}.
+// A prior row skips the emit.
+//
+// Decorative citation: when the cited id doesn't resolve to a known
+// knowledge_candidate / knowledge_promoted / lesson_extracted row,
+// we emit retrieval_rejected (reason=cited_knowledge_id_unresolvable)
+// instead of a candidate_confirmed; the binding stays in the ledger
+// but contributes no retention bias.
+//
+// Recursion guard: bindCitation's own emits stamp
+// payload.projected_from="bind_citation" so the hook does not recurse.
+// The bulk retrieval_audit_worker (if any) remains the safety net;
+// this hook makes the mutation STRUCTURAL at every emit.
+
+/** Per-binding retention bias on the cited knowledge candidate's
+ *  Beta posterior. Each binding accumulates BINDING_WEIGHT fractional
+ *  wins via candidate_confirmed{projected_from=bind_citation, weight}.
+ *  10 bindings on the same candidate accumulate ≈1.0 wins, 50 bindings
+ *  ≈5.0 wins → crosses POSTERIOR.countThreshold (5) only on sustained
+ *  retrieval, which is exactly the "compounding" semantic. */
+export const BINDING_WEIGHT = 0.1;
+
+const bindingProjectionKey = (retrievalBindingEventId: string): string =>
+  "retrieval_binding_credit:" + retrievalBindingEventId;
+
+const bindingProjectionExists = (db: Database, key: string): boolean => {
+  const row = db
+    .query<{ x: number }, [string]>(
+      "SELECT 1 AS x FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.projection_key') = ? LIMIT 1",
+    )
+    .get(key);
+  if (row) return true;
+  // Decorative citations land as retrieval_rejected rows that also
+  // stamp the same projection_key so the hook is idempotent across
+  // both terminal branches.
+  const rejected = db
+    .query<{ x: number }, [string]>(
+      "SELECT 1 AS x FROM events WHERE kind = 'retrieval_rejected' AND json_extract(payload, '$.projection_key') = ? LIMIT 1",
+    )
+    .get(key);
+  return rejected !== null;
+};
+
+const KNOWLEDGE_BEARING_KINDS = new Set<string>([
+  "knowledge_candidate",
+  "knowledge_promoted",
+  "lesson_extracted",
+]);
+
+type RetrievalBindingLite = {
+  id: string;
+  payload: string;
+  directive_id: string;
+  task_id: string;
+};
+
+/** Post-write hook for retrieval_binding events. Reads the cited
+ *  knowledge id from payload (cited_knowledge_id preferred, source_event_id
+ *  fallback), confirms the id resolves to a knowledge-bearing event row,
+ *  and emits one candidate_confirmed{weight=BINDING_WEIGHT,
+ *  projected_from=bind_citation} per binding so the extractor's
+ *  Beta-posterior recompute accumulates fractional wins. Decorative
+ *  citations (unresolvable id) emit retrieval_rejected instead.
+ *  Idempotent via projection_key retrieval_binding_credit:{event_id}.
+ *  Fail-soft: any error emits a projection_error and never throws. */
+export const bindCitation = (
+  db: Database,
+  bindingEvent: RetrievalBindingLite,
+): void => {
+  try {
+    const payload = JSON.parse(bindingEvent.payload || "{}") as Record<string, unknown>;
+    // Recursion guard: a binding stamped by bindCitation itself should
+    // never re-enter the hook. Defense-in-depth in case the hook is
+    // called directly on a substrate-replay row.
+    if (payload.projected_from === "bind_citation") return;
+    // Forward-compat: prefer payload.cited_knowledge_id when present
+    // (matches the T0.3 design vocabulary); fall back to source_event_id
+    // (current canonical field — 7158/7186 bindings carry it).
+    const citedFromPayload = typeof payload.cited_knowledge_id === "string" && payload.cited_knowledge_id.length > 0
+      ? payload.cited_knowledge_id
+      : null;
+    const sourceEventId = typeof payload.source_event_id === "string" && payload.source_event_id.length > 0
+      ? payload.source_event_id
+      : null;
+    const citedKnowledgeId = citedFromPayload ?? sourceEventId;
+    if (!citedKnowledgeId) return; // safe no-op: nothing to credit
+    const projectionKey = bindingProjectionKey(bindingEvent.id);
+    if (bindingProjectionExists(db, projectionKey)) return; // idempotent
+
+    // Resolve the cited id. Must point at a known knowledge-bearing row
+    // (knowledge_candidate / knowledge_promoted / lesson_extracted). When
+    // it resolves to any other kind OR no row at all, the citation is
+    // decorative — emit retrieval_rejected so the rejection is observable
+    // but no Beta posterior moves.
+    const citedRow = db
+      .query<{ kind: string }, [string]>("SELECT kind FROM events WHERE id = ?")
+      .get(citedKnowledgeId);
+    if (!citedRow || !KNOWLEDGE_BEARING_KINDS.has(citedRow.kind)) {
+      emitEvent(db, {
+        kind: "retrieval_rejected",
+        substrate_origin: "substrate_auto",
+        directive_id: bindingEvent.directive_id,
+        task_id: bindingEvent.task_id,
+        context_refs: [bindingEvent.id, citedKnowledgeId],
+        payload: {
+          retrieval_binding_event_id: bindingEvent.id,
+          cited_knowledge_id: citedKnowledgeId,
+          reason: citedRow ? "cited_id_not_knowledge_bearing" : "cited_knowledge_id_unresolvable",
+          resolved_kind: citedRow?.kind ?? null,
+          rejected_by: "bind_citation_hook",
+          projected_from: "bind_citation",
+          projection_key: projectionKey,
+        } as JsonValue,
+      });
+      return;
+    }
+
+    // Emit the retention-bias credit row. The extractor reads payload.weight
+    // for candidate_confirmed rows stamped by bind_citation and accumulates
+    // fractional wins (the existing weight read for
+    // knowledge_contradiction_observed is generalized to honor
+    // candidate_confirmed payload.weight when projected_from="bind_citation").
+    emitEvent(db, {
+      kind: "candidate_confirmed",
+      substrate_origin: "substrate_auto",
+      directive_id: bindingEvent.directive_id,
+      task_id: bindingEvent.task_id,
+      context_refs: [citedKnowledgeId, bindingEvent.id],
+      payload: {
+        knowledge_id: citedKnowledgeId,
+        retrieval_binding_event_id: bindingEvent.id,
+        weight: BINDING_WEIGHT,
+        polarity: "retention_bias",
+        projected_from: "bind_citation",
+        projection_key: projectionKey,
+      } as JsonValue,
+    });
+  } catch (err) {
+    // Fail-soft: the retrieval_binding row already landed. Surface as
+    // projection_error so the bulk audit worker can re-drive if needed.
+    try {
+      emitEvent(db, {
+        kind: "projection_error",
+        substrate_origin: "substrate_auto",
+        directive_id: bindingEvent.directive_id,
+        task_id: bindingEvent.task_id,
+        context_refs: [bindingEvent.id],
+        payload: {
+          where: "bindCitation",
+          reason: "exception",
+          error: (err as Error).message ?? String(err),
+          retrieval_binding_event_id: bindingEvent.id,
+        } as JsonValue,
+      });
+    } catch { /* swallow secondary failure */ }
+  }
+};
+
 // ── Internal exports for tests ────────────────────────────────────
 
 export const __extractBodyCitationsForTest = extractBodyCitations;

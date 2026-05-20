@@ -284,6 +284,13 @@ describe("emitEvent act_tuple_recorded projector", () => {
     // closes the parity gap between action_scored and credit emission
     // structurally — every action_scored produces one credit row per
     // referenced artifact.
+    // 2026-05-20 (T0.3 citation binding enforcement): the bind_citation
+    // hook fires on every retrieval_binding. The knowledge-role binding
+    // cites k_200 which doesn't resolve to a knowledge_candidate row in
+    // this synthetic test, so the hook emits retrieval_rejected (decorative
+    // citation) instead of candidate_confirmed. The artifact-role binding
+    // carries source_artifact_id (not source_event_id), so bindCitation
+    // returns early — no extra emit.
     expect(kinds.filter((k) => k !== "act_tuple_recorded").sort()).toEqual([
       "act_artifact_score_updated",
       "act_artifact_score_updated",
@@ -294,6 +301,7 @@ describe("emitEvent act_tuple_recorded projector", () => {
       "candidate_confirmed",
       "retrieval_binding",
       "retrieval_binding",
+      "retrieval_rejected",
       "verifier_kind_auto_admitted",
     ]);
     for (const row of rows.filter((r) => r.kind !== "act_tuple_recorded")) {
@@ -305,6 +313,18 @@ describe("emitEvent act_tuple_recorded projector", () => {
         const audit = JSON.parse(row.payload);
         expect(audit.verifier_kind).toBe("deterministic_code");
         expect(Array.isArray(audit.admissions)).toBe(true);
+        continue;
+      }
+      // 2026-05-20 (T0.3 citation binding enforcement): the bind_citation
+      // hook emits retrieval_rejected for unresolvable cited ids (k_200
+      // in this synthetic test). The rejection is anchored to the
+      // retrieval_binding event, not the act_tuple, so it carries no
+      // source_act_id. Verify it cites the binding instead via
+      // projected_from + projection_key.
+      if (row.kind === "retrieval_rejected") {
+        const rej = JSON.parse(row.payload);
+        expect(rej.projected_from).toBe("bind_citation");
+        expect(typeof rej.projection_key).toBe("string");
         continue;
       }
       expect(JSON.parse(row.payload).source_act_id).toBe(act.id);
@@ -684,6 +704,14 @@ describe("emitEvent act_tuple_recorded projector", () => {
     // the projected action_scored. The replayed act collapses to the
     // same projection_key on every projector emit, so the multiset
     // stays at 3 (action + verifier + cited).
+    // 2026-05-20 (T0.3 citation binding enforcement): the bind_citation
+    // hook fires on the knowledge-role retrieval_binding citing k_200,
+    // which doesn't resolve to a knowledge_candidate row in this synthetic
+    // test → emits 1 retrieval_rejected. The artifact-role binding carries
+    // source_artifact_id (not source_event_id), so bindCitation returns
+    // early. The replay is idempotent: the retrieval_binding's
+    // emit-boundary projection_key collapses the second call, so the
+    // hook only fires once.
     expect(Object.fromEntries(projected.map((row) => [row.kind, row.n]))).toEqual({
       act_artifact_score_updated: 3,
       action_predicted: 1,
@@ -691,6 +719,7 @@ describe("emitEvent act_tuple_recorded projector", () => {
       applied_change_committed: 1,
       candidate_confirmed: 1,
       retrieval_binding: 2,
+      retrieval_rejected: 1,
       verifier_kind_auto_admitted: 1,
     });
     const predicted = db
@@ -725,9 +754,15 @@ describe("emitEvent act_tuple_recorded projector", () => {
       },
     });
 
+    // 2026-05-20 (T0.3 citation binding enforcement): the bind_citation
+    // hook also emits candidate_confirmed for the cited knowledge with
+    // payload.knowledge_id set but no source_act_id (the binding is not
+    // anchored to a specific act). Filter to the distributeCredit-driven
+    // row (carries source_act_id) so this test still verifies the
+    // async credit chain through the projected source citations.
     let confirmed: { payload: string } | null = null;
     for (let i = 0; i < 20; i++) {
-      confirmed = db.query("SELECT payload FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.knowledge_id') = ?").get(knowledge.id) as { payload: string } | null;
+      confirmed = db.query("SELECT payload FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.knowledge_id') = ? AND json_extract(payload, '$.source_act_id') IS NOT NULL").get(knowledge.id) as { payload: string } | null;
       if (confirmed) break;
       await Bun.sleep(10);
     }

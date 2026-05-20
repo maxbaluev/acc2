@@ -376,6 +376,16 @@ export const extractKnowledgePromotions = async (db: Database): Promise<Knowledg
     // less than an action-validated contradiction by default). The
     // declared weight × the time-decay weight gives the final
     // contribution.
+    //
+    // T0.3 citation binding enforcement (2026-05-20): candidate_confirmed
+    // rows stamped projected_from="bind_citation" carry a small
+    // retention-bias weight (BINDING_WEIGHT=0.1 by default) emitted by
+    // the bindCitation post-write hook in runtime/events.ts. The
+    // extractor honors that weight so a single binding contributes
+    // ~0.1 fractional wins, not 1.0. Sustained retrieval (~50 bindings)
+    // crosses POSTERIOR.countThreshold (5) for promotion — the
+    // "compounding" semantic. All other candidate_confirmed rows
+    // default to weight=1.0 (the existing unit-count behavior).
     let weightMul = 1;
     if (v.kind === "knowledge_contradiction_observed") {
       try {
@@ -383,6 +393,14 @@ export const extractKnowledgePromotions = async (db: Database): Promise<Knowledg
         const w = p.weight;
         weightMul = (typeof w === "number" && Number.isFinite(w) && w >= 0 && w <= 1) ? w : 0.5;
       } catch { weightMul = 0.5; }
+    } else if (v.kind === "candidate_confirmed") {
+      try {
+        const p = JSON.parse(v.payload ?? "{}") as Record<string, unknown>;
+        if (p.projected_from === "bind_citation") {
+          const w = p.weight;
+          weightMul = (typeof w === "number" && Number.isFinite(w) && w >= 0 && w <= 1) ? w : 0.1;
+        }
+      } catch { /* keep default 1.0 — backward-compatible */ }
     }
     const w = ageWeight * weightMul;
     for (const ref of refs) {
@@ -525,19 +543,39 @@ export const maybePromoteKnowledge = (db: Database, candidateId: string): Knowle
     return { kind: "no_action", candidate_id: candidateId, score: 0, confidence: 0 };
   }
 
+  // T0.3 citation binding enforcement (2026-05-20): also walk
+  // candidate_confirmed.payload for projected_from="bind_citation"
+  // rows and honor payload.weight so retention nudges (default
+  // weight=0.1) contribute fractional wins instead of unit wins. The
+  // canonical bulk extractor extractKnowledgePromotions has the same
+  // read; mirror it here so synchronous promotion (called after every
+  // distributeCredit knowledge emit) doesn't promote on sustained
+  // retrieval alone unless ~50 bindings have accumulated.
   const verdicts = db
     .query(
-      `SELECT kind, context_refs FROM events
+      `SELECT kind, context_refs, payload FROM events
        WHERE kind IN ('candidate_confirmed', 'candidate_contradicted')`,
     )
-    .all() as Array<{ kind: string; context_refs: string }>;
+    .all() as Array<{ kind: string; context_refs: string; payload: string }>;
   let wins = 0;
   let losses = 0;
   for (const v of verdicts) {
     let refs: string[] = [];
     try { refs = JSON.parse(v.context_refs); } catch { /* skip */ }
     if (!refs.includes(candidateId)) continue;
-    if (v.kind === "candidate_confirmed") wins++; else losses++;
+    if (v.kind === "candidate_confirmed") {
+      let weight = 1;
+      try {
+        const p = JSON.parse(v.payload ?? "{}") as Record<string, unknown>;
+        if (p.projected_from === "bind_citation") {
+          const w = p.weight;
+          weight = (typeof w === "number" && Number.isFinite(w) && w >= 0 && w <= 1) ? w : 0.1;
+        }
+      } catch { /* keep weight=1 — backward-compatible */ }
+      wins += weight;
+    } else {
+      losses += 1;
+    }
   }
   const alpha = 1 + wins;
   const beta = 1 + losses;
