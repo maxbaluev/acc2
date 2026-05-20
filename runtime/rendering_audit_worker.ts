@@ -50,14 +50,31 @@ export const DEFAULT_RENDERING_AUDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
  *  workers. */
 export const RENDERING_AUDIT_BATCH_LIMIT = 200;
 
+/** Cooperative yield helper — releases the event loop so the daemon's
+ *  /health route, the bridge SSE pumps, and other workers can run while
+ *  a long sweep walks the rendered_owner_message_recorded set on a
+ *  280K-event ledger. Per substrate KC GJ2KN1J3KD1Z (bounded amendments
+ *  per worker — event-loop starvation surfaced as wedged daemon in
+ *  role=all). */
+const yieldToEventLoop = (): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, 0));
+
+/** Yield interval — 25 rows per yield matches the bounded-amendments
+ *  cadence already in use by embedder / artifact_kind_backfill_worker. */
+const YIELD_INTERVAL_ROWS = 25;
+
 /** One tick of the rendering-audit worker. Returns a summary the daemon
  *  can log. Idempotent: rows that already carry feedback are skipped
  *  (we look at any owner_rendering_feedback_recorded with matching
- *  source_rendered_event_id). */
-export const renderingAuditWorkerTick = (
+ *  source_rendered_event_id).
+ *
+ *  Async per KC GJ2KN1J3KD1Z — yields the event loop every
+ *  YIELD_INTERVAL_ROWS rows so the worker cannot starve the daemon
+ *  even when a backlog of renders demands the full batchLimit pass. */
+export const renderingAuditWorkerTick = async (
   db: Database,
   opts: { windowMs?: number; batchLimit?: number } = {},
-): RenderingAuditResult => {
+): Promise<RenderingAuditResult> => {
   const windowMs = opts.windowMs ?? DEFAULT_RENDERING_AUDIT_WINDOW_MS;
   const batchLimit = opts.batchLimit ?? RENDERING_AUDIT_BATCH_LIMIT;
   const sinceIso = new Date(Date.now() - windowMs).toISOString();
@@ -98,7 +115,12 @@ export const renderingAuditWorkerTick = (
 
   const policy = ownerRenderingPolicy(db);
 
+  let processed = 0;
   for (const row of rows) {
+    if (processed > 0 && processed % YIELD_INTERVAL_ROWS === 0) {
+      await yieldToEventLoop();
+    }
+    processed += 1;
     let payload: Record<string, unknown> = {};
     try { payload = JSON.parse(row.payload) as Record<string, unknown>; } catch { /* keep empty */ }
     const renderedText = typeof payload.rendered_text === "string" ? payload.rendered_text : "";

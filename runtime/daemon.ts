@@ -872,7 +872,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const { renderingAuditWorkerTick } = await import("./rendering_audit_worker");
     let renderingAuditMarked = false;
     const renderingAuditTickHandle = supervisedTick(db, "rendering_audit", RENDERING_AUDIT_INTERVAL_MS, async () => {
-      renderingAuditWorkerTick(db);
+      await renderingAuditWorkerTick(db);
       if (!renderingAuditMarked) { markWorkerReady("rendering_audit"); renderingAuditMarked = true; }
     });
     registerReactiveWorker("rendering_audit", RENDERING_AUDIT_INTERVAL_MS, ["rendered_owner_message_recorded", "owner_rendering_feedback_recorded", "owner_observed_outcome_recorded"], renderingAuditTickHandle, { minReactiveGapMs: 60_000 });
