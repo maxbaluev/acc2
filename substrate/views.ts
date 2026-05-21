@@ -196,8 +196,8 @@ CREATE VIEW IF NOT EXISTS artifact_routing_view AS
   ORDER BY routing_score DESC;
 `;
 
-// embedding_index_view — events that carry an embedding BLOB. The daemon
-// rebuilds its HNSW index from this view at boot.
+// embedding_index_view — events plus active data-class artifacts with embedding BLOBs.
+// The daemon rebuilds its vector metadata from this view at boot.
 const VIEW_EMBEDDING_INDEX = `
 CREATE VIEW IF NOT EXISTS embedding_index_view AS
   SELECT
@@ -209,7 +209,15 @@ CREATE VIEW IF NOT EXISTS embedding_index_view AS
       json_extract(payload, '$.domain_weights')
     ) AS retrieval_domains
   FROM events
-  WHERE embedding IS NOT NULL;
+  WHERE embedding IS NOT NULL
+  UNION ALL
+  SELECT
+    id, 'act_artifact' AS kind, COALESCE(updated_at, created_at) AS ts, '' AS directive_id, '' AS task_id, embedding, 'v1' AS embedding_version, 'act_artifact' AS substrate_origin,
+    json_object('artifact_id', id, 'artifact_kind', kind, 'body', body, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, '')) AS payload,
+    json_object('body', body, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, ''), 'artifact_kind', kind) AS retrieval_aspects,
+    NULL AS retrieval_domains
+  FROM act_artifact
+  WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') AND embedding IS NOT NULL AND length(embedding) > 0;
 `;
 
 // origin_promotion_view — per substrate_origin, summarise how often candidate
@@ -2769,7 +2777,13 @@ terminal_ranked AS (
   JOIN events e
     ON e.directive_id = t.directive_id
    AND e.task_id = t.task_id
-   AND e.kind IN ('task_committed', 'task_failed', 'dispatcher_violation')
+   -- 2026-05-21: task_abandoned added. The pre-dispatch-orphan reaper
+   -- (reconcilePreDispatchOrphans) emits task_abandoned for directives that
+   -- opened but never dispatched before a restart. Without it here, those
+   -- reaped tasks had terminal_kind=NULL → fell through to the open-dispatch
+   -- / orphan logic → showed as 'zombie' FOREVER in acc watch despite being
+   -- terminally abandoned (owner saw a 2m-old reaped task still 'zombie').
+   AND e.kind IN ('task_committed', 'task_failed', 'dispatcher_violation', 'task_abandoned')
 ),
 terminal AS (
   SELECT * FROM terminal_ranked WHERE rn = 1
@@ -2884,7 +2898,7 @@ SELECT
     -- instead of 'failed' — wrong classification, masks the failure.
     -- 'completed' still allows post-commit refinement to render as
     -- 'live' or 'zombie' (child task may be running after root commit).
-    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
+    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation', 'task_abandoned') THEN 'failed'
     -- 2026-05-18 foundational fix (matches lifecycle_status logic below):
     -- root committed + open children = 'live_amended', honestly distinct
     -- from a fresh 'live' (no terminal yet).
@@ -2937,7 +2951,7 @@ SELECT
            WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
          )
       THEN 'abandoned'
-    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 'failed'
+    WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation', 'task_abandoned') THEN 'failed'
     -- 2026-05-18 foundational fix: when the brain emits task_committed AND
     -- subsequently directive_amended that opens new child task_node_opened
     -- rows, the substrate had open_dispatch_count > 0 on the SAME directive
