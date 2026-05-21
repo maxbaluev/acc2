@@ -109,7 +109,30 @@ const NOISY_OPERATIONAL_ARCHIVE_KINDS = new Set<string>([
 const DROP_KINDS = new Set<string>([
   // Pure noise that doesn't need archive (recovered transient errors).
   "knowledge_candidate_redundant",
+  // 2026-05-21 Tier 5 T5.1: pure operational telemetry — liveness/metrics
+  // with ZERO credit/knowledge/owner value, no downstream references. On a
+  // young high-volume DB these dominate the event table (worker_tick_completed
+  // alone was 11K of 326K) and bloat every worker scan; age-based archival
+  // (30-day cutoff) never prunes them on a <30-day-old DB. Drop them after a
+  // SHORT retention (DROP_RETENTION_DAYS) so the hot ledger stays bounded.
+  // NONE of these are in ALWAYS_KEEP, and none are cited by credit/retrieval.
+  "worker_tick_completed",
+  "worker_tick_overrun",
+  "bridge_frame_received",
+  "sql_worker_pool_metrics",
 ]);
+
+// Short retention for DROP_KINDS — telemetry needs ~recent debugging value
+// only, not the 30-day archive window. Drop-class rows older than this are
+// purged (not archived) by runDropSweep. Override via ACC2_DROP_RETENTION_DAYS.
+const DROP_RETENTION_DAYS = (() => {
+  const raw = process.env.ACC2_DROP_RETENTION_DAYS;
+  if (typeof raw === "string" && raw.length > 0) {
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 1) return n;
+  }
+  return 2;
+})();
 
 /** Per docs/Architecture.md commit 6b8ebea + Lin et al. 2026 mnemonic
  *  sovereignty: classify each event_kind into curation mode. Default
@@ -490,6 +513,69 @@ export const runArchivalSweep = async (
   return summary;
 };
 
+export type DropSweepSummary = {
+  scanned: number;
+  dropped: number;
+  retention_days: number;
+  cutoff_iso: string;
+};
+
+/** 2026-05-21 Tier 5 T5.1: bounded DROP-sweep. Purges DROP_KINDS rows older
+ *  than DROP_RETENTION_DAYS WITHOUT archiving — they are pure operational
+ *  noise (telemetry/metrics) with no credit/knowledge/owner value. This is
+ *  the hot-retention boundary the age-based move-to-cold sweep can't provide
+ *  on a young high-volume DB (nothing is >30 days old yet, so the bulk —
+ *  worker_tick_completed / bridge_frame_received / sql_worker_pool_metrics —
+ *  never gets pruned and bloats every worker scan). Bounded by `limit` per
+ *  sweep (default SWEEP_LIMIT) so a single tick can't lock the writer.
+ *  Idempotent + safe: only DROP_KINDS, only past the cutoff, ALWAYS_KEEP
+ *  kinds can never enter DROP_KINDS by construction. */
+export const runDropSweep = async (
+  hotDb: Database,
+  opts?: { retentionDays?: number; limit?: number; nowMs?: number },
+): Promise<DropSweepSummary> => {
+  const retentionDays = opts?.retentionDays ?? DROP_RETENTION_DAYS;
+  const nowMs = opts?.nowMs ?? Date.now();
+  const limit = opts?.limit ?? SWEEP_LIMIT;
+  const cutoffIso = new Date(nowMs - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+  const dropList = Array.from(DROP_KINDS);
+  const summary: DropSweepSummary = { scanned: 0, dropped: 0, retention_days: retentionDays, cutoff_iso: cutoffIso };
+  if (dropList.length === 0) return summary;
+
+  const ph = dropList.map(() => "?").join(", ");
+  // Select candidate ids (bounded), then delete in chunks. ts comparison is
+  // ISO-vs-ISO (cutoffIso is an ISO string) — index-friendly, no datetime()
+  // string-format trap.
+  const ids = (hotDb
+    .query(`SELECT id FROM events WHERE kind IN (${ph}) AND ts < ? ORDER BY ts ASC LIMIT ?`)
+    .all(...dropList, cutoffIso, limit) as Array<{ id: string }>).map((r) => r.id);
+  summary.scanned = ids.length;
+  if (ids.length === 0) return summary;
+
+  const CHUNK = 500;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const delPh = chunk.map(() => "?").join(", ");
+    try {
+      const result = hotDb.run(`DELETE FROM events WHERE id IN (${delPh})`, chunk);
+      summary.dropped += (result as unknown as { changes?: number }).changes ?? 0;
+    } catch (err) {
+      logger.warn({ where: "archival_worker.drop_sweep", err: (err as Error).message }, "drop-sweep chunk failed");
+    }
+  }
+  try {
+    emitEvent(hotDb, {
+      kind: "archival_sweep_completed",
+      substrate_origin: "substrate_auto",
+      payload: { sweep_kind: "drop", scanned: summary.scanned, dropped: summary.dropped, retention_days: retentionDays, cutoff_iso: cutoffIso } as JsonValue,
+    });
+  } catch { /* fail-soft */ }
+  if (summary.dropped > 0) {
+    logger.info({ dropped: summary.dropped, retention_days: retentionDays }, "drop-sweep purged noise telemetry");
+  }
+  return summary;
+};
+
 /** Start the 6-hour archival tick. Returns a stop function. */
 export const startArchivalWorker = (
   db: Database,
@@ -501,6 +587,14 @@ export const startArchivalWorker = (
       logger.warn(
         { where: "archival_worker.tick", err: (err as Error).message },
         "archival sweep threw at top-level",
+      );
+    });
+    // Tier 5 T5.1: also purge pure-noise telemetry past the short retention
+    // (the hot-retention boundary the age-based archive can't give a young DB).
+    void runDropSweep(db).catch((err) => {
+      logger.warn(
+        { where: "archival_worker.drop_tick", err: (err as Error).message },
+        "drop sweep threw at top-level",
       );
     });
   }, tickMs);
