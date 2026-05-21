@@ -852,7 +852,7 @@ export const handleRead = (
           // so the LEFT JOIN against events works portably under bun:sqlite.
           const registryCte = kinds.map(() => "SELECT ? AS kind").join(" UNION ALL ");
           const eventsScope = windowHours !== undefined
-            ? `(SELECT kind, ts, substrate_origin FROM events WHERE ts > datetime('now', '-' || ? || ' hours'))`
+            ? `(SELECT kind, ts, substrate_origin FROM events WHERE ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ? || ' hours'))`
             : `events`;
           const sql = `
             WITH registry AS (${registryCte})
@@ -888,7 +888,7 @@ export const handleRead = (
               MAX(ts) AS last_emit_ts,
               COUNT(DISTINCT substrate_origin) AS distinct_origins
             FROM events
-            WHERE ts > datetime('now', '-' || ? || ' hours')
+            WHERE ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ? || ' hours')
             GROUP BY kind
             ORDER BY last_emit_ts DESC
           `
@@ -934,7 +934,7 @@ export const handleRead = (
             CAST((julianday('now') - julianday(MAX(ts))) * 86400 AS INTEGER) AS seconds_since_last_tick
           FROM events
           WHERE kind = 'worker_tick_completed'
-            AND ts > datetime('now', '-' || ? || ' hours')
+            AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ? || ' hours')
           GROUP BY worker_name
           ORDER BY last_tick_ts DESC
         `;

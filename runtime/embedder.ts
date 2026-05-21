@@ -217,7 +217,14 @@ export const extractTextFromEvent = (kind: string, payload: unknown): string | n
   return null;
 };
 
-type UnembeddedRow = { id: string; kind: string; payload: string };
+type EmbeddingSourceTable = "events" | "act_artifact";
+type UnembeddedRow = { id: string; kind: string; payload: string; source_table: EmbeddingSourceTable };
+type EmbeddingItem = { id: string; text: string; source_table: EmbeddingSourceTable };
+
+const extractTextFromArtifactPayload = (payload: Record<string, unknown>): string | null => {
+  const body = payload.body;
+  return typeof body === "string" && body.trim().length > 0 ? body : null;
+};
 
 /** Resolve the embedding text for one event row, including cross-table joins
  *  for kinds where the truth-bearing text lives on a different row. Called by
@@ -259,9 +266,16 @@ const resolveJoinedText = (db: Database, kind: string, payload: Record<string, u
 const readUnembedded = async (db: Database, batchSize: number): Promise<UnembeddedRow[]> => {
   const placeholders = Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ");
   const sql =
-    `SELECT id, kind, payload FROM events ` +
+    `SELECT id, kind, payload, source_table FROM (` +
+    `SELECT id, kind, payload, 'events' AS source_table, ts FROM events ` +
     `WHERE embedding IS NULL AND kind IN (${placeholders}) ` +
-    `ORDER BY ts ASC LIMIT ?`;
+    `UNION ALL ` +
+    `SELECT id, 'act_artifact' AS kind, ` +
+    `json_object('body', body, 'artifact_kind', kind, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, '')) AS payload, ` +
+    `'act_artifact' AS source_table, COALESCE(updated_at, created_at) AS ts FROM act_artifact ` +
+    `WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') ` +
+    `AND (embedding IS NULL OR length(embedding) = 0)` +
+    `) ORDER BY ts ASC LIMIT ?`;
   const params: unknown[] = [...Array.from(EMBEDDABLE_KINDS), batchSize];
   try {
     const poolMod = await import("./sql_pool_singleton");
@@ -285,8 +299,13 @@ const readUnembedded = async (db: Database, batchSize: number): Promise<Unembedd
 export const pendingEmbeddableCount = async (db: Database): Promise<number> => {
   const placeholders = Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ");
   const sql =
-    `SELECT COUNT(*) AS c FROM events ` +
-    `WHERE embedding IS NULL AND kind IN (${placeholders})`;
+    `SELECT SUM(c) AS c FROM (` +
+    `SELECT COUNT(*) AS c FROM events WHERE embedding IS NULL AND kind IN (${placeholders}) ` +
+    `UNION ALL ` +
+    `SELECT COUNT(*) AS c FROM act_artifact ` +
+    `WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') ` +
+    `AND (embedding IS NULL OR length(embedding) = 0)` +
+    `)`;
   const params: unknown[] = [...Array.from(EMBEDDABLE_KINDS)];
   try {
     const poolMod = await import("./sql_pool_singleton");
@@ -317,10 +336,13 @@ export const upsertVecEventRow = (
   eventId: string,
   embedding: number[],
   version: string,
+  sourceTable: EmbeddingSourceTable = "events",
 ): void => {
-  const row = db
-    .query("SELECT kind, ts FROM events WHERE id = ?")
-    .get(eventId) as { kind: string; ts: string } | null;
+  const row = sourceTable === "act_artifact"
+    ? db.query("SELECT 'act_artifact' AS kind, COALESCE(updated_at, created_at) AS ts FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL")
+      .get(eventId) as { kind: string; ts: string } | null
+    : db.query("SELECT kind, ts FROM events WHERE id = ?")
+      .get(eventId) as { kind: string; ts: string } | null;
   if (!row) return;
   // vec0 stores the vector as JSON or BLOB; we send JSON for portability
   // (smaller code path, no Buffer juggling) — the extension parses it
@@ -356,24 +378,32 @@ export const upsertVecEventRow = (
  *  but the publish itself was the cost). */
 const persistEmbedding = (
   db: Database,
-  sourceEventId: string,
+  sourceId: string,
   embedding: number[],
   version: string,
+  sourceTable: EmbeddingSourceTable = "events",
 ): void => {
   const blob = encodeEmbeddingBlob(embedding);
-  db.run(
-    "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
-    [blob, version, sourceEventId],
-  );
+  if (sourceTable === "act_artifact") {
+    db.run(
+      "UPDATE act_artifact SET embedding = ?, updated_at = ? WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL",
+      [blob, new Date().toISOString(), sourceId],
+    );
+  } else {
+    db.run(
+      "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
+      [blob, version, sourceId],
+    );
+  }
   // Canonical v2 path — see schema.sql for vec_events shape + reasoning.
   // We swallow failures here so a vec0 mishap doesn't stall the embedder
   // loop; retrieval degrades to the in-memory wrapper which reads the
   // legacy BLOB column.
   try {
-    upsertVecEventRow(db, sourceEventId, embedding, version);
+    upsertVecEventRow(db, sourceId, embedding, version, sourceTable);
   } catch (err) {
     logger.warn(
-      { source_event_id: sourceEventId, err: (err as Error).message ?? String(err) },
+      { source_id: sourceId, source_table: sourceTable, err: (err as Error).message ?? String(err) },
       "vec_events upsert failed",
     );
   }
@@ -420,20 +450,22 @@ export const embedderWorkerTick = async (
   if (rows.length === 0) {
     return { embedded: 0, skipped_no_text: 0, failed: 0 };
   }
-  const items: Array<{ id: string; text: string }> = [];
+  const items: EmbeddingItem[] = [];
   const noTextIds: string[] = [];
   for (const r of rows) {
     let payload: Record<string, unknown> = {};
     try { payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>; } catch { /* skip */ }
-    let text = extractTextFromEvent(r.kind, payload);
-    if (!text) {
+    let text = r.source_table === "act_artifact"
+      ? extractTextFromArtifactPayload(payload)
+      : extractTextFromEvent(r.kind, payload);
+    if (!text && r.source_table === "events") {
       // Fall back to cross-table JOIN resolution (e.g. knowledge_promoted →
       // candidate.claim). Saves the row from being sentinel-marked when its
       // text genuinely exists but lives on a different row.
       text = resolveJoinedText(db, r.kind, payload);
     }
     if (!text) { noTextIds.push(r.id); continue; }
-    items.push({ id: r.id, text });
+    items.push({ id: r.id, text, source_table: r.source_table });
   }
   // Mark text-less rows with a 0-byte sentinel BLOB so subsequent ticks don't
   // keep re-reading them. `readUnembedded` filters on `embedding IS NULL`, so
@@ -477,7 +509,7 @@ export const embedderWorkerTick = async (
       const vec = embeddings.get(item.id);
       if (!vec) { failed++; continue; }
       try {
-        persistEmbedding(db, item.id, vec, EMBEDDING_VERSION);
+        persistEmbedding(db, item.id, vec, EMBEDDING_VERSION, item.source_table);
         persistedIds.push(item.id);
         embedded++;
         try { recordEmbedding(batchDurMs / Math.max(1, embeddings.size) / 1000); } catch { /* swallow */ }
@@ -533,12 +565,7 @@ export const embedPendingEvents = async (
   const batchSize = Math.max(1, Math.min(500, opts.batchSize ?? 100));
   // Honour the no-API-key path up front: emit ONE audit row carrying the
   // pending count so the substrate explains why nothing was indexed.
-  const pendingCount = (db
-    .query(
-      `SELECT COUNT(*) AS c FROM events
-       WHERE embedding IS NULL AND kind IN (${Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ")})`,
-    )
-    .get(...Array.from(EMBEDDABLE_KINDS)) as { c: number }).c;
+  const pendingCount = await pendingEmbeddableCount(db);
   if (pendingCount === 0) {
     return { embedded: 0, skipped: 0, failed: 0 };
   }
@@ -563,7 +590,7 @@ export const embedPendingEvents = async (
          WHERE kind = 'hidl_action_required'
            AND json_extract(payload, '$.reason') = 'env_missing'
            AND json_extract(payload, '$.env_var') = 'OPENAI_API_KEY'
-           AND ts > datetime('now', '-1 hour')
+           AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')
          LIMIT 1`,
       )
       .get();
@@ -594,12 +621,14 @@ export const embedPendingEvents = async (
   while (true) {
     const rows = await readUnembedded(db, batchSize);
     if (rows.length === 0) break;
-    const items: Array<{ id: string; text: string }> = [];
+    const items: EmbeddingItem[] = [];
     for (const r of rows) {
       let payload: Record<string, unknown> = {};
       try { payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>; } catch { /* skip */ }
-      let text = extractTextFromEvent(r.kind, payload);
-      if (!text) {
+      let text = r.source_table === "act_artifact"
+        ? extractTextFromArtifactPayload(payload)
+        : extractTextFromEvent(r.kind, payload);
+      if (!text && r.source_table === "events") {
         // Cross-table JOIN fallback (knowledge_promoted → candidate.claim).
         text = resolveJoinedText(db, r.kind, payload);
       }
@@ -619,7 +648,7 @@ export const embedPendingEvents = async (
         );
         continue;
       }
-      items.push({ id: r.id, text });
+      items.push({ id: r.id, text, source_table: r.source_table });
     }
     if (items.length === 0) {
       // Nothing embeddable in this slice; loop again only if readUnembedded
@@ -635,7 +664,7 @@ export const embedPendingEvents = async (
         const vec = embeddings.get(item.id);
         if (!vec) { failed++; continue; }
         try {
-          persistEmbedding(db, item.id, vec, EMBEDDING_VERSION);
+          persistEmbedding(db, item.id, vec, EMBEDDING_VERSION, item.source_table);
           persistedIds.push(item.id);
           embedded++;
         } catch {

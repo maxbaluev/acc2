@@ -394,7 +394,7 @@ CREATE VIEW IF NOT EXISTS owner_rendering_policy_view AS
       COUNT(*) AS n
     FROM events
     WHERE kind = 'owner_rendering_feedback_recorded'
-      AND ts > datetime('now', '-14 days')
+      AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-14 days')
     GROUP BY feedback_kind
   )
   SELECT
@@ -564,7 +564,7 @@ CREATE VIEW IF NOT EXISTS owner_state_belief_view AS
       'owner_rendering_feedback_recorded','task_deferred_for_interference','task_blocked',
       'owner_input_required','hidl_action_required','task_failed','dispatcher_violation'
     )
-      AND ts > datetime('now', '-30 days')
+      AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')
   ),
   evidence_agg AS (
     SELECT
@@ -593,7 +593,7 @@ CREATE VIEW IF NOT EXISTS owner_state_belief_view AS
       )) AS recent_avg_prediction_error
     FROM events
     WHERE kind = 'owner_state_prediction_error_recorded'
-      AND ts > datetime('now', '-14 days')
+      AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-14 days')
   ),
   base AS (
     SELECT
@@ -823,7 +823,7 @@ CREATE VIEW IF NOT EXISTS retrieval_credit_view AS
       json_extract(payload, '$.rerank_score')       AS rerank_score
     FROM events
     WHERE kind = 'retrieval_binding'
-      AND ts > datetime('now', '-14 days')
+      AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-14 days')
   ),
   scored_cites AS (
     SELECT

@@ -82,7 +82,7 @@ const hasRecentAuthHidl = (db: Database, reason: "auth_missing" | "auth_expired"
       `SELECT 1 FROM events
        WHERE kind = 'hidl_action_required'
          AND json_extract(payload, '$.reason') = ?
-         AND ts > datetime('now', ?)
+         AND ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
        LIMIT 1`,
     )
     .get(reason, HIDL_AUTH_IDEMPOTENCY_WINDOW);
