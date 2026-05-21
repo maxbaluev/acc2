@@ -81,10 +81,10 @@ CREATE INDEX IF NOT EXISTS idx_events_unembedded_by_ts
 -- 'quarantined' or 'promoted' via posterior thresholds (§11.5, §11.6).
 CREATE TABLE IF NOT EXISTS act_artifact (
   id                          TEXT PRIMARY KEY,
-  runtime                     TEXT NOT NULL,
+  runtime                     TEXT,
   body                        TEXT NOT NULL,
-  declared_sandbox            TEXT NOT NULL,
-  state_root                  TEXT NOT NULL,
+  declared_sandbox            TEXT,
+  state_root                  TEXT,
   -- L8 (2026-05-17, brain design 48SN4XF3WN4KBBCHHCANDRDQRW act_artifact
   -- registry rename): free-string discriminator for the row's purpose.
   -- Default 'runtime_action' for generic actions; typed rows declare
@@ -103,8 +103,8 @@ CREATE TABLE IF NOT EXISTS act_artifact (
   recent_kill_count           INTEGER NOT NULL DEFAULT 0,
   status                      TEXT NOT NULL DEFAULT 'admitted',
   name                        TEXT,
-  fixture_input               TEXT NOT NULL,
-  fixture_expected_residual   REAL NOT NULL,
+  fixture_input               TEXT,
+  fixture_expected_residual   REAL,
   -- Brain dataflow audit bxdhdkm9e #3 (2026-05-15): per-artifact
   -- provenance + intent metadata that the brain emits on
   -- act_artifact_candidate but the admission path used to drop.

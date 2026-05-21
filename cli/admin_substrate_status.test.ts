@@ -128,6 +128,34 @@ describe("computeSubstrateStatus", () => {
     expect(r.actArtifactsBrain).toBe(1);
     expect(r.actArtifactsSeed).toBeGreaterThan(0);
   });
+
+  test("counts data-class (runtime IS NULL) act_artifact rows in the brain bucket", () => {
+    // Path A (2026-05-20, contract A0DQT211JH): non-executing data-class
+    // rows admit with runtime/declared_sandbox/fixture_input NULL. The
+    // status report's seed/brain split must still tolerate the row
+    // (state_root is null so it falls into the brain bucket — substrate-
+    // primitive / threshold rows carry their own state_root prefix).
+    const db = openDb(":memory:");
+    seedActArtifacts(db);
+    db.run(
+      `INSERT INTO act_artifact (id, runtime, body, declared_sandbox, state_root,
+         posterior_alpha, posterior_beta, score, confidence,
+         recent_residual_mean, recent_kill_count, status, name,
+         fixture_input, fixture_expected_residual, summary, created_at, updated_at
+       ) VALUES (?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
+      [
+        "art_data_class_xyz",
+        "raw corpus body",
+        2, 2, 0.5, 0.5, 0, 0, "admitted", "data_thing",
+        "data-class summary",
+        new Date().toISOString(),
+        new Date().toISOString(),
+      ],
+    );
+    const r = computeSubstrateStatus(db, "/tmp/x.db");
+    expect(r.actArtifactsBrain).toBe(1);
+    expect(r.actArtifactsSeed).toBeGreaterThan(0);
+  });
 });
 
 describe("renderSubstrateStatus", () => {

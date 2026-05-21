@@ -1271,6 +1271,12 @@ const callArtifactByRuntime = async (
   if (row.status === "quarantined") {
     return { ok: false, error: "artifact_quarantined" };
   }
+  // Path A (2026-05-20, contract A0DQT211JH): data-class rows have
+  // runtime=null and declaredSandbox=null — no executable semantics.
+  // Refuse invocation explicitly so callers get a clean error.
+  if (row.runtime === null || row.declaredSandbox === null) {
+    return { ok: false, error: "artifact_not_executable_data_class" };
+  }
   const decl = row.declaredSandbox;
   if (decl.runtime !== row.runtime) {
     return { ok: false, error: "sandbox_decl_runtime_mismatch" };
@@ -1380,17 +1386,21 @@ export const handleAdmitArtifact = async (
   ctx: McpContext,
   args: z.infer<typeof AdmitArtifactSchema>,
 ): Promise<McpResult> => {
-  const runtime = args.runtime as Runtime;
-  const decl = args.declared_sandbox as SandboxDecl;
+  // Path A (2026-05-20, contract A0DQT211JH): pass through null/undefined
+  // for runtime + declared_sandbox + fixture_input + state_root. Data-
+  // class admission relies on these being null; do not coerce to
+  // defaults.
+  const runtime = (args.runtime ?? null) as Runtime | null;
+  const decl = (args.declared_sandbox ?? null) as SandboxDecl | null;
   const result = await admitArtifact(
     ctx.db,
     {
       runtime,
       body: args.body,
       declaredSandbox: decl,
-      fixtureInput: (args.fixture_input ?? null) as JsonValue,
+      fixtureInput: (args.fixture_input ?? null) as JsonValue | null,
       fixtureExpectedResidualBelow: args.fixture_expected_residual_below ?? 0.2,
-      stateRoot: args.state_root,
+      stateRoot: args.state_root ?? undefined,
       name: args.name,
       targetFiles: args.target_files,
       targetResources: args.target_resources,

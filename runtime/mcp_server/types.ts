@@ -164,17 +164,17 @@ export const RunVerifierSchema = z.object({
 });
 
 export const AdmitArtifactSchema = z.object({
-  // "data" is the sentinel runtime for non-executing artifacts (raw
-  // corpus dumps, target universes, privileged AccInt files). Admission
-  // short-circuits fixture execution entirely — see DATA_RUNTIME in
-  // runtime/artifact_admission.ts. The other three runtimes run the
-  // body through their declared sandbox during admission.
-  runtime: z.enum(["bun", "uv", "camofox-browser", "data"]),
+  // Path A (2026-05-20, contract A0DQT211JH): non-executing data-class
+  // rows omit runtime (null/undefined). Admission stores body+name+
+  // summary without sandbox/fixture/owner-gate machinery. Executable
+  // rows MUST declare runtime ∈ {bun, uv, camofox-browser} and a
+  // declared_sandbox shape that matches the chosen runtime.
+  runtime: z.enum(["bun", "uv", "camofox-browser"]).nullable().optional(),
   body: z.string(),
-  declared_sandbox: z.unknown(),
-  fixture_input: z.unknown(),
+  declared_sandbox: z.unknown().optional().nullable(),
+  fixture_input: z.unknown().optional().nullable(),
   fixture_expected_residual_below: z.number().optional(),
-  state_root: z.string().optional(),
+  state_root: z.string().optional().nullable(),
   name: z.string().optional(),
   target_files: z.array(z.string()).optional(),
   target_resources: z.array(z.string()).optional(),

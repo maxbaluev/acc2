@@ -22,6 +22,10 @@ import { runCamofoxArtifact, type CamofoxRuntimeObservation } from "./camofox";
 export type UnifiedRuntimeInvocation = {
   artifactId: string;
   body: string;
+  /** Path A (2026-05-20, contract A0DQT211JH): runArtifactForRuntime is
+   *  executable-only. Callers MUST NOT invoke it on data-class rows
+   *  (runtime=null, declaredSandbox=null) — the dispatcher reads
+   *  declaredSandbox.runtime to route and would throw. */
   declaredSandbox: SandboxDecl;
   inputs: JsonValue;
   budget?: { wallMs?: number; memoryMb?: number };
@@ -109,6 +113,14 @@ export const lookupRunnerInRegistry = (
 export const runArtifactForRuntime = async (
   inv: UnifiedRuntimeInvocation,
 ): Promise<UnifiedRuntimeObservation> => {
+  // Path A (2026-05-20, contract A0DQT211JH): refuse invocation when the
+  // caller passed a null declaredSandbox (data-class row). Callers must
+  // gate on row.runtime !== null before reaching this dispatcher.
+  if (!inv.declaredSandbox) {
+    throw new Error(
+      "runArtifactForRuntime called with null declaredSandbox; data-class rows have no executable semantics",
+    );
+  }
   const runtime = inv.declaredSandbox.runtime;
   if (runtime === "bun") {
     return runBunArtifact({

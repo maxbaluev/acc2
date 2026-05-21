@@ -40,7 +40,9 @@ import { betaMean, betaStreamConfidence } from "./posterior";
 
 export type ActArtifactRow = {
   id: string;
-  runtime: Runtime;
+  /** Path A (2026-05-20, contract A0DQT211JH): nullable for non-executing
+   *  data-class rows. Executable rows carry a concrete Runtime string. */
+  runtime: Runtime | null;
   /** Free-string discriminator for the row's purpose. Schema default is
    *  `runtime_action`; typed rows declare their own (e.g.
    *  `dispatch_strategy_v1`, `published_drive_doc`). Historical rows
@@ -48,7 +50,8 @@ export type ActArtifactRow = {
    *  preserves whatever is stored. See schema.sql:86. */
   kind: string;
   body: string;
-  declaredSandbox: SandboxDecl;
+  /** Path A: nullable for data-class rows (no executable semantics). */
+  declaredSandbox: SandboxDecl | null;
   stateRoot: string | null;
   posteriorAlpha: number;
   posteriorBeta: number;
@@ -82,7 +85,17 @@ export type ActArtifactRow = {
   updatedAt: string;
 };
 
-export type InsertArtifactInput = Omit<ActArtifactRow, "createdAt" | "updatedAt" | "id" | "targetResources" | "supersedes" | "supersededBy" | "lostVersionCount" | "kind"> & {
+export type InsertArtifactInput = Omit<
+  ActArtifactRow,
+  | "createdAt"
+  | "updatedAt"
+  | "id"
+  | "targetResources"
+  | "supersedes"
+  | "supersededBy"
+  | "lostVersionCount"
+  | "kind"
+> & {
   id?: string;
   /** Optional kind discriminator. Defaults to `runtime_action` on
    *  insert when omitted (matches the schema default). */
@@ -144,10 +157,14 @@ const parseStringArray = (raw: unknown): string[] | null => {
 
 const mapRow = (raw: Record<string, unknown>): ActArtifactRow => ({
   id: raw.id as string,
-  runtime: raw.runtime as Runtime,
+  runtime: (raw.runtime as Runtime | null) ?? null,
   kind: ((raw.kind as string | null) ?? "code_artifact"),
   body: raw.body as string,
-  declaredSandbox: JSON.parse(raw.declared_sandbox as string) as SandboxDecl,
+  declaredSandbox: (() => {
+    const ds = raw.declared_sandbox as string | null | undefined;
+    if (ds === null || ds === undefined) return null;
+    try { return JSON.parse(ds) as SandboxDecl; } catch { return null; }
+  })(),
   stateRoot: (raw.state_root as string | null) ?? null,
   posteriorAlpha: raw.posterior_alpha as number,
   posteriorBeta: raw.posterior_beta as number,
@@ -157,7 +174,11 @@ const mapRow = (raw: Record<string, unknown>): ActArtifactRow => ({
   recentKillCount: raw.recent_kill_count as number,
   status: raw.status as ActArtifactStatus,
   name: (raw.name as string | null) ?? null,
-  fixtureInput: JSON.parse((raw.fixture_input as string) ?? "null") as JsonValue | null,
+  fixtureInput: (() => {
+    const fi = raw.fixture_input as string | null | undefined;
+    if (fi === null || fi === undefined) return null;
+    try { return JSON.parse(fi) as JsonValue; } catch { return null; }
+  })(),
   fixtureExpectedResidual: (raw.fixture_expected_residual as number | null) ?? null,
   intent: (raw.intent as string | null) ?? null,
   summary: (raw.summary as string | null) ?? null,
@@ -180,9 +201,20 @@ const mapRow = (raw: Record<string, unknown>): ActArtifactRow => ({
 export const insertArtifact = (db: Database, input: InsertArtifactInput): ActArtifactRow => {
   const id = input.id ?? newId();
   const ts = nowIso();
-  const stateRoot = input.stateRoot ?? "";
+  // Path A (2026-05-20, contract A0DQT211JH): state_root nullable; do
+  // not coerce undefined into "" (would mask data-class rows). Same for
+  // declared_sandbox + fixture_input + fixture_expected_residual:
+  // executable rows bind their JSON; data-class rows bind NULL.
+  const stateRoot = input.stateRoot ?? null;
   const targetResources = parseResourceRefs(input.targetResources) ?? resourcesFromTargetFiles(input.targetFiles ?? null);
   const targetFiles = input.targetFiles ?? repoTargetFilesFromResources(targetResources);
+  const declaredSandboxJson = input.declaredSandbox === null || input.declaredSandbox === undefined
+    ? null
+    : JSON.stringify(input.declaredSandbox);
+  const fixtureInputJson = input.fixtureInput === null || input.fixtureInput === undefined
+    ? null
+    : JSON.stringify(input.fixtureInput);
+  const fixtureExpected = input.fixtureExpectedResidual ?? null;
   db.run(
     `INSERT INTO act_artifact (
        id, runtime, kind, body, declared_sandbox, state_root,
@@ -195,10 +227,10 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): ActArt
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
-      input.runtime,
+      input.runtime ?? null,
       input.kind ?? "runtime_action",
       input.body,
-      JSON.stringify(input.declaredSandbox),
+      declaredSandboxJson,
       stateRoot,
       input.posteriorAlpha,
       input.posteriorBeta,
@@ -208,8 +240,8 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): ActArt
       input.recentKillCount,
       input.status,
       input.name,
-      JSON.stringify(input.fixtureInput ?? null),
-      input.fixtureExpectedResidual ?? 0,
+      fixtureInputJson,
+      fixtureExpected,
       input.intent,
       input.summary,
       targetFiles ? JSON.stringify(targetFiles) : null,
@@ -237,9 +269,12 @@ export const listArtifactsByRuntime = (
   runtime: Runtime,
   limit = 100,
 ): ActArtifactRow[] => {
+  // Path A (2026-05-20, contract A0DQT211JH): exclude data-class rows
+  // (runtime IS NULL). This selector is executable-only — invoking a
+  // null-runtime row has no semantics.
   const rows = db
     .query(
-      "SELECT * FROM act_artifact WHERE runtime = ? ORDER BY score DESC, updated_at DESC LIMIT ?",
+      "SELECT * FROM act_artifact WHERE runtime IS NOT NULL AND runtime = ? ORDER BY score DESC, updated_at DESC LIMIT ?",
     )
     .all(runtime, limit) as Array<Record<string, unknown>>;
   return rows.map(mapRow);

@@ -49,12 +49,18 @@ import {
 } from "./render_pipeline";
 
 export type AdmissionInput = {
-  runtime: Runtime;
+  /** Path A (2026-05-20, contract A0DQT211JH): non-executing data-class
+   *  rows omit runtime (null/undefined). When runtime is null/undefined
+   *  admission stores body+name+summary without running fixture/sandbox/
+   *  owner-gate machinery. Concrete runtimes ("bun" | "uv" |
+   *  "camofox-browser") run the full executable admission flow. */
+  runtime: Runtime | null;
   body: string;
-  declaredSandbox: SandboxDecl;
-  fixtureInput: JsonValue;
+  declaredSandbox: SandboxDecl | null;
+  fixtureInput: JsonValue | null;
   /** Threshold the fixture's residual must come in BELOW for admission to pass.
-   *  Typically 0.2 per v2-design.md §11.5. */
+   *  Typically 0.2 per v2-design.md §11.5. Ignored when runtime is null
+   *  (data-class admission skips fixture execution entirely). */
   fixtureExpectedResidualBelow: number;
   /** Optional pre-allocated id so callers (or tests) can refer to the row
    *  before the function returns. */
@@ -144,29 +150,121 @@ const ADMIT_CONFIDENCE = 0.3;
  *  runs the fixture, and either confirms admission (emitting
  *  `act_artifact_admitted`) or rolls back + emits
  *  `act_artifact_admission_rejected`. */
-/** Sentinel runtime value for non-executing data artifacts (corpus dumps,
- *  privileged AccInt files, target universes, raw external corpora). When
- *  input.runtime === DATA_RUNTIME the admission flow:
- *    - accepts a minimal `{runtime:"data", fields:{}}` declared_sandbox
- *    - skips the runtime/declared_sandbox mismatch check trivially
- *    - SKIPS fixture execution entirely (data is not code)
- *    - SKIPS the owner-gate (data has no execution risk)
- *    - SKIPS the kernel_sandbox_worker quarantine pressure (no
- *      artifact_invoked emit, so no missing sandbox_enforced gap)
- *    - inserts the row at admit priors with `fixtureExpectedResidualBelow`
- *      effectively ignored (no fixture residual is computed)
- *    - emits `act_artifact_admitted` immediately
- *  This is the structural fix for the blocker that quarantined raw corpus
- *  admissions (kernel_sandbox_enforcement_missing for runtime=bun bodies
- *  that read filesystem paths). Data artifacts are substrate-owned bytes;
- *  no executable semantics apply. */
-export const DATA_RUNTIME = "data";
-
+/** Path A (2026-05-20, contract A0DQT211JH): data-class admission. Non-
+ *  executing rows (raw corpus dumps, target universes, privileged AccInt
+ *  files) pass runtime === null/undefined. Admission stores body+name+
+ *  summary without running fixture/sandbox/owner-gate/predicate-gate
+ *  machinery and emits `act_artifact_admitted` with
+ *  admission_mode='data_class_nullable'. The earlier runtime="data"
+ *  sentinel is deleted. */
 export const admitArtifact = async (
   db: Database,
   input: AdmissionInput,
   emit: (event: EmitEventInput) => void,
 ): Promise<AdmissionResult> => {
+  // Path A short-circuit: null/undefined runtime → data-class row.
+  // Skip every executable gate (sandbox shape, owner consent, predicate
+  // gate, strategy-first gate, render-pipeline lineage, fixture
+  // execution). Require body+name+summary so the substrate stores
+  // self-describing bytes.
+  if (input.runtime === null || input.runtime === undefined) {
+    if (typeof input.body !== "string" || input.body.length === 0) {
+      emit({
+        kind: "act_artifact_admission_rejected",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: "runtime_error",
+          detail: "data_class_admission_requires_body",
+          admission_mode: "data_class_nullable",
+        } as JsonValue,
+      });
+      return { ok: false, reason: "runtime_error", detail: "data_class_admission_requires_body" };
+    }
+    if (typeof input.name !== "string" || input.name.length === 0) {
+      emit({
+        kind: "act_artifact_admission_rejected",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: "runtime_error",
+          detail: "data_class_admission_requires_name",
+          admission_mode: "data_class_nullable",
+        } as JsonValue,
+      });
+      return { ok: false, reason: "runtime_error", detail: "data_class_admission_requires_name" };
+    }
+    if (typeof input.summary !== "string" || input.summary.length === 0) {
+      emit({
+        kind: "act_artifact_admission_rejected",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: "runtime_error",
+          detail: "data_class_admission_requires_summary",
+          admission_mode: "data_class_nullable",
+        } as JsonValue,
+      });
+      return { ok: false, reason: "runtime_error", detail: "data_class_admission_requires_summary" };
+    }
+    const dataRow = insertArtifact(db, {
+      runtime: null,
+      kind: input.kind,
+      body: input.body,
+      declaredSandbox: null,
+      stateRoot: input.stateRoot ?? null,
+      posteriorAlpha: ADMIT_ALPHA,
+      posteriorBeta: ADMIT_BETA,
+      score: ADMIT_SCORE,
+      confidence: ADMIT_CONFIDENCE,
+      recentResidualMean: 0,
+      recentKillCount: 0,
+      status: "admitted",
+      name: input.name,
+      fixtureInput: null,
+      fixtureExpectedResidual: null,
+      intent: input.intent ?? null,
+      summary: input.summary,
+      targetFiles: input.targetFiles ?? null,
+      targetResources: input.targetResources ?? null,
+      sourceCandidateId: input.sourceCandidateId ?? null,
+      ownerGateVerdict: "auto",
+      supersedes: input.supersedes ?? null,
+      id: input.artifactId,
+    });
+    emit({
+      kind: "act_artifact_admitted",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: dataRow.id,
+      payload: {
+        artifact_id: dataRow.id,
+        runtime: null,
+        kind: input.kind ?? "runtime_action",
+        admission_mode: "data_class_nullable",
+        body_length: input.body.length,
+        name: input.name,
+        source_candidate_id: input.sourceCandidateId ?? null,
+      } as JsonValue,
+    });
+    if (input.supersedes) {
+      try {
+        markSuperseded(db, input.supersedes, dataRow.id, emit);
+      } catch { /* supersede chain is best-effort for data artifacts */ }
+    }
+    return { ok: true, artifactId: dataRow.id };
+  }
+
+  // Executable admission path (runtime is bun/uv/camofox-browser/registry).
+  if (!input.declaredSandbox) {
+    emit({
+      kind: "act_artifact_admission_rejected",
+      substrate_origin: "substrate_auto",
+      payload: {
+        reason: "sandbox_decl_invalid",
+        detail: "declared_sandbox_required_for_executable_runtime",
+        runtime: input.runtime,
+      } as JsonValue,
+    });
+    return { ok: false, reason: "sandbox_decl_invalid", detail: "declared_sandbox_required_for_executable_runtime" };
+  }
+
   // 1. Sandbox shape gate.
   const v = validateSandboxDecl(input.declaredSandbox);
   if (!v.ok) {
@@ -195,61 +293,6 @@ export const admitArtifact = async (
       reason: "sandbox_decl_invalid",
       detail: `runtime_mismatch:${input.declaredSandbox.runtime}!=${input.runtime}`,
     };
-  }
-
-  // Data-artifact short-circuit (2026-05-21). Non-executing rows (raw
-  // corpus dumps, target universes, privileged AccInt files) bypass the
-  // fixture-execution machinery entirely. Without this branch the brain
-  // had to fake a `runtime:bun` declaration whose body actually
-  // contained data; the bun runner then "executed" the data and the
-  // kernel_sandbox_worker quarantined the result for missing
-  // sandbox_enforced evidence. The clean break: declare runtime=data and
-  // the substrate stores the bytes without ever invoking them.
-  if (input.runtime === DATA_RUNTIME) {
-    const dataRow = insertArtifact(db, {
-      runtime: DATA_RUNTIME,
-      kind: input.kind,
-      body: input.body,
-      declaredSandbox: input.declaredSandbox,
-      stateRoot: input.stateRoot ?? null,
-      posteriorAlpha: ADMIT_ALPHA,
-      posteriorBeta: ADMIT_BETA,
-      score: ADMIT_SCORE,
-      confidence: ADMIT_CONFIDENCE,
-      recentResidualMean: 0,
-      recentKillCount: 0,
-      status: "admitted",
-      name: input.name ?? null,
-      fixtureInput: input.fixtureInput,
-      fixtureExpectedResidual: input.fixtureExpectedResidualBelow,
-      intent: input.intent ?? null,
-      summary: input.summary ?? null,
-      targetFiles: input.targetFiles ?? null,
-      targetResources: input.targetResources ?? null,
-      sourceCandidateId: input.sourceCandidateId ?? null,
-      ownerGateVerdict: "auto",
-      supersedes: input.supersedes ?? null,
-      id: input.artifactId,
-    });
-    emit({
-      kind: "act_artifact_admitted",
-      substrate_origin: "substrate_auto",
-      action_artifact_id: dataRow.id,
-      payload: {
-        runtime: DATA_RUNTIME,
-        kind: input.kind ?? "runtime_action",
-        admission_mode: "data_short_circuit",
-        body_length: typeof input.body === "string" ? input.body.length : 0,
-        name: input.name ?? null,
-        source_candidate_id: input.sourceCandidateId ?? null,
-      } as JsonValue,
-    });
-    if (input.supersedes) {
-      try {
-        markSuperseded(db, input.supersedes, dataRow.id, emit);
-      } catch { /* supersede chain is best-effort for data artifacts */ }
-    }
-    return { ok: true, artifactId: dataRow.id };
   }
 
   const gate = ownerGateDecision(input.declaredSandbox);

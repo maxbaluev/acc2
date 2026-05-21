@@ -181,6 +181,9 @@ CREATE VIEW IF NOT EXISTS act_artifact_registry_view AS
 
 // artifact_routing_view — same registry, ranked by score*(1-residual_mean).
 // (cosine × posterior reranker is Phase F; this is a placeholder ordering.)
+// Path A (2026-05-20, contract A0DQT211JH): routing implies executable
+// invocation; data-class rows (runtime IS NULL) cannot be invoked and
+// must be excluded from the routing view.
 const VIEW_ARTIFACT_ROUTING = `
 CREATE VIEW IF NOT EXISTS artifact_routing_view AS
   SELECT
@@ -189,6 +192,7 @@ CREATE VIEW IF NOT EXISTS artifact_routing_view AS
     (score * (1.0 - recent_residual_mean)) AS routing_score
   FROM act_artifact
   WHERE status IN ('admitted', 'promoted')
+    AND runtime IS NOT NULL
   ORDER BY routing_score DESC;
 `;
 
