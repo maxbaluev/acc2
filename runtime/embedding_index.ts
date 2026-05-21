@@ -201,21 +201,41 @@ export class EmbeddingIndex {
     const metadata = new Map<string, Meta>();
     const inVec = new Set<string>();
     const jsVectors = new Map<string, Float32Array>();
+    // 2026-05-21 instant-startup fix: pre-load the set of event_ids ALREADY
+    // present in vec_events so the rebuild loop can SKIP re-upserting them.
+    // Pre-fix, every boot re-upserted EVERY embedded vector into vec_events
+    // (thousands of vec0 1536-dim inserts) even though they were already
+    // persisted from their first embedding — the dominant boot CPU sink and
+    // a major contributor to slow startup. vec_events is the durable vector
+    // store; rebuildFromDb only needs to (a) load metadata into memory and
+    // (b) backfill the FEW rows whose embedding blob exists but never made
+    // it into vec_events (legacy / mid-write-crash rows).
+    const alreadyInVec = new Set<string>();
+    try {
+      const vecRows = db.query("SELECT event_id FROM vec_events").all() as Array<{ event_id: string }>;
+      for (const v of vecRows) alreadyInVec.add(v.event_id);
+    } catch { /* vec_events may not exist in some test DBs; tolerate */ }
     for (const row of rows) {
       const blob = row.embedding;
       if (!blob) continue;
       const decoded = decodeEmbeddingBlob(blob);
       if (!decoded) continue;
       const version = row.embedding_version ?? EMBEDDING_VERSION;
-      // Try to backfill vec_events. Test embeddings (dim != 1536) raise
-      // a schema error; we catch and stash the vector in jsVectors so
-      // the JS-fallback knn can serve them.
+      // Skip the vec_events upsert when the row is already present — the
+      // expensive path. Only genuinely-missing rows pay the upsert cost.
       let projectedToVec = false;
-      try {
-        upsertVecEventRow(db, row.id, Array.from(decoded), version);
+      if (alreadyInVec.has(row.id)) {
         projectedToVec = true;
-      } catch {
-        jsVectors.set(row.id, decoded);
+      } else {
+        // Try to backfill vec_events. Test embeddings (dim != 1536) raise
+        // a schema error; we catch and stash the vector in jsVectors so
+        // the JS-fallback knn can serve them.
+        try {
+          upsertVecEventRow(db, row.id, Array.from(decoded), version);
+          projectedToVec = true;
+        } catch {
+          jsVectors.set(row.id, decoded);
+        }
       }
       if (projectedToVec) inVec.add(row.id);
       const payload = parsePayload(row.payload);

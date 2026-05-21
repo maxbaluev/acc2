@@ -554,10 +554,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   //      task did not close in the previous boot is marked as
   //      `dispatch_recovered_orphan`; the scheduler will re-pick the task
   //      on its next ready_tasks_view check.
-  const bootIntegrity = await runIntegrityCheck(db);
+  // Boot uses quick_check (fast) not the full integrity_check; the full
+  // check runs on the 6h integrity_worker cadence. quick_check still
+  // refuses startup on structural/page corruption — see runIntegrityCheck.
+  const bootIntegrity = await runIntegrityCheck(db, { quick: true });
   if (!bootIntegrity.ok) {
     const msg =
-      `acc2 daemon: REFUSING TO START — PRAGMA integrity_check failed: ` +
+      `acc2 daemon: REFUSING TO START — PRAGMA quick_check failed: ` +
       `${bootIntegrity.pragma_integrity_check}`;
     process.stderr.write(msg + "\n");
     logger.fatal({ pragma_result: bootIntegrity.pragma_integrity_check }, msg);

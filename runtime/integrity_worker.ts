@@ -63,21 +63,32 @@ const readWalSizeBytes = (db: Database): number => {
 };
 
 /** Run one integrity check and return the report. Does NOT emit events —
- *  the caller (boot-time or worker tick) decides whether to emit. */
-export const runIntegrityCheck = async (db: Database): Promise<IntegrityReport> => {
+ *  the caller (boot-time or worker tick) decides whether to emit.
+ *
+ *  2026-05-21 instant-startup fix: `quick=true` runs `PRAGMA quick_check`
+ *  instead of the full `PRAGMA integrity_check`. quick_check skips the
+ *  expensive index-vs-table cross-validation (which scans every index on
+ *  the 738MB DB — seconds of boot latency) while still catching
+ *  page-level / structural corruption. Boot uses quick=true so the daemon
+ *  binds ports fast; the periodic integrity worker keeps running the FULL
+ *  check on its 6h cadence where latency doesn't block availability. */
+export const runIntegrityCheck = async (db: Database, opts?: { quick?: boolean }): Promise<IntegrityReport> => {
   const startMs = Date.now();
   let integrityResult: "ok" | string = "ok";
   let ok = true;
+  const pragma = opts?.quick ? "PRAGMA quick_check" : "PRAGMA integrity_check";
+  const resultKey = opts?.quick ? "quick_check" : "integrity_check";
   try {
-    const rows = db.query("PRAGMA integrity_check").all() as Array<{ integrity_check: string }>;
+    const rows = db.query(pragma).all() as Array<Record<string, string>>;
+    const firstVal = rows.length > 0 ? (rows[0][resultKey] ?? rows[0].integrity_check ?? rows[0].quick_check) : undefined;
     if (rows.length === 0) {
       integrityResult = "no_rows";
       ok = false;
-    } else if (rows.length === 1 && rows[0].integrity_check === "ok") {
+    } else if (rows.length === 1 && firstVal === "ok") {
       integrityResult = "ok";
       ok = true;
     } else {
-      integrityResult = rows.map((r) => r.integrity_check).join("; ");
+      integrityResult = rows.map((r) => r[resultKey] ?? r.integrity_check ?? r.quick_check ?? "").join("; ");
       ok = false;
     }
   } catch (err) {
