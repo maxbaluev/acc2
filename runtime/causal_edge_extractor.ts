@@ -180,9 +180,15 @@ export const extractCausalEdges = async (
     const artifactPairs = stringPairs(payload.cited_artifact_ids);
 
     for (const [a, b] of knowledgePairs) {
-      const { id } = ensureEdgeRow(db, "citation_cocitation", a, b);
+      const { id, created } = ensureEdgeRow(db, "citation_cocitation", a, b);
       summary.cocitations_recorded++;
-      // Audit the edge observation; downstream credit can attribute later.
+      // Audit emit ONLY on first observation (2026-05-21 noise audit:
+      // 5374 causal_edge_observed events in 24h had 43 distinct payloads
+      // = 99% dupes. The edge row's posterior already accumulates each
+      // observation via downstream credit; the audit event is signal
+      // only when the edge is brand new. Subsequent observations are
+      // counted on the act_artifact row, not in events).
+      if (!created) continue;
       emitEvent(db, {
         kind: "causal_edge_observed",
         substrate_origin: "substrate_auto",
@@ -194,12 +200,14 @@ export const extractCausalEdges = async (
           node_b: b,
           edge_act_artifact_id: id,
           source_act_id: act.id,
+          first_observation: true,
         },
       });
     }
     for (const [a, b] of artifactPairs) {
-      const { id } = ensureEdgeRow(db, "citation_artifact", a, b);
+      const { id, created } = ensureEdgeRow(db, "citation_artifact", a, b);
       summary.artifact_edges_recorded++;
+      if (!created) continue;
       emitEvent(db, {
         kind: "causal_edge_observed",
         substrate_origin: "substrate_auto",
@@ -211,6 +219,7 @@ export const extractCausalEdges = async (
           node_b: b,
           edge_act_artifact_id: id,
           source_act_id: act.id,
+          first_observation: true,
         },
       });
     }
@@ -241,8 +250,10 @@ export const extractCausalEdges = async (
     const child = typeof p.child_task_id === "string" ? p.child_task_id : null;
     if (!parent || !child) continue;
     const [a, b] = parent < child ? [parent, child] : [child, parent];
-    const { id } = ensureEdgeRow(db, "refinement_parent_child", a, b);
+    const { id, created } = ensureEdgeRow(db, "refinement_parent_child", a, b);
     summary.refinement_edges_recorded++;
+    // First-observation gate per the noise-audit fix above.
+    if (!created) continue;
     emitEvent(db, {
       kind: "causal_edge_observed",
       substrate_origin: "substrate_auto",
@@ -253,6 +264,7 @@ export const extractCausalEdges = async (
         node_b: b,
         edge_act_artifact_id: id,
         source_event_id: ev.id,
+        first_observation: true,
       },
     });
   }

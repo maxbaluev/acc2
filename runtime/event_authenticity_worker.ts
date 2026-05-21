@@ -25,7 +25,12 @@ import { logger } from "./logger";
 export const EVENT_AUTHENTICITY_TICK_MS = 60 * 1000;
 const SAMPLE_WINDOW_SECONDS = 3600;
 const DEFAULT_SAMPLE_SIZE = 100;
-const MIN_GAP_MS = 60 * 1000;
+// 2026-05-21 noise audit fix: bump from 60s to 6h. Measured 991 emits /
+// 24h with 0% unique payload — pure pass-through telemetry. Failures
+// branch into integrity_check_failed (separate kind, retains immediate
+// emission). Clean-pass debounce protects observers from a 99% noise
+// stream while preserving the every-6h heartbeat for liveness audits.
+const MIN_GAP_MS = 6 * 60 * 60 * 1000;
 
 // Canonical substrate_origin set used by emitEvent. Any value outside
 // this set is treated as a tamper signal (the column is open-string

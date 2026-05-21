@@ -278,23 +278,33 @@ export const extractTrajectoryMotifs = async (
     } else {
       summary.motifs_already_present++;
     }
-    // Emit one audit event per observation (created or not) so
-    // downstream credit can attribute closure outcomes later. Matches
-    // the causal_edge_observed pattern in causal_edge_extractor.ts.
-    emitEvent(db, {
-      kind: "trajectory_motif_observed",
-      substrate_origin: "substrate_auto",
-      context_refs: [id, ...motif.kinds],
-      payload: {
-        motif_act_artifact_id: id,
-        kinds: motif.kinds,
-        length: motif.kinds.length,
-        frequency: motif.frequency,
-        directive_count: motif.directives.size,
-        avg_closure_residual: avgResidual,
-        admitted_this_tick: created,
-      },
-    });
+    // 2026-05-21 noise audit fix: emit ONLY on first observation
+    // (created=true) OR when frequency crosses a power-of-2 threshold
+    // (1, 2, 4, 8, 16, ...). Pre-fix every tick emitted for every
+    // motif resulting in 5500 events / 24h with only 4% unique
+    // payloads. Powers-of-2 milestones preserve compounding signal
+    // (we see when a motif goes from rare → common) without flooding
+    // the substrate every tick. Downstream credit reads the motif's
+    // act_artifact row directly for current frequency, not the audit
+    // stream.
+    const isPowerOf2 = (n: number) => n > 0 && (n & (n - 1)) === 0;
+    if (created || isPowerOf2(motif.frequency)) {
+      emitEvent(db, {
+        kind: "trajectory_motif_observed",
+        substrate_origin: "substrate_auto",
+        context_refs: [id, ...motif.kinds],
+        payload: {
+          motif_act_artifact_id: id,
+          kinds: motif.kinds,
+          length: motif.kinds.length,
+          frequency: motif.frequency,
+          directive_count: motif.directives.size,
+          avg_closure_residual: avgResidual,
+          admitted_this_tick: created,
+          milestone: created ? "first_observation" : `frequency_${motif.frequency}`,
+        },
+      });
+    }
   }
 
   return summary;
