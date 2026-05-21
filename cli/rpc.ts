@@ -331,12 +331,96 @@ const parseEnvelope = (res: { content: Array<{ type: string; text?: string }> })
   try { return JSON.parse(first.text) as McpEnvelope; } catch { return { ok: false, error: `bad_envelope:${first.text.slice(0, 80)}` }; }
 };
 
-/** Open an MCP client against the daemon's MCP port, invoke one tool, close.
+// ── Persistent MCP client (2026-05-21 SQLite bottleneck audit fix) ──
+// Pre-fix: every mcpCall opened a NEW StreamableHTTPClientTransport →
+// new MCP session on the daemon's fastmcp registry. One `acc task`
+// invocation makes 10-20 mcpCalls (open_directive, recent_events, two
+// owner_input emits, owner_insight, plus poll loop calls). At 10-20
+// sessions per CLI invocation, repeated `acc task` invocations across
+// terminals saturated fastmcp's session table — observed 48K+ sessions
+// established during a single 4h session, with the daemon spending its
+// CPU on session-establishment overhead rather than tool execution.
+//
+// Post-fix: per-process cached client. First mcpCall in the process
+// connects once; subsequent calls reuse the same client + transport.
+// Process exit closes the client (registered via process.on("exit")).
+// Each `acc task` now opens ONE session instead of 10-20. Multiplied
+// across multiple terminals and the orchestrator, this drops the
+// daemon's session pressure by ~95%.
+type CachedMcpClient = {
+  client: Client;
+  baseUrl: string;
+  connecting: Promise<void> | null;
+};
+let cachedMcp: CachedMcpClient | null = null;
+let mcpCloseHookInstalled = false;
+
+const installMcpCloseHook = (): void => {
+  if (mcpCloseHookInstalled) return;
+  mcpCloseHookInstalled = true;
+  const close = async (): Promise<void> => {
+    if (cachedMcp) {
+      try { await cachedMcp.client.close(); } catch { /* swallow */ }
+      cachedMcp = null;
+    }
+  };
+  // Bun + node both honor "beforeExit"; "exit" is too late for async.
+  process.on("beforeExit", () => { void close(); });
+  process.on("SIGINT", () => { void close().finally(() => process.exit(130)); });
+  process.on("SIGTERM", () => { void close().finally(() => process.exit(143)); });
+};
+
+const getMcpClient = async (baseUrl: string, timeoutMs: number): Promise<Client> => {
+  installMcpCloseHook();
+  if (cachedMcp && cachedMcp.baseUrl === baseUrl) {
+    // Wait for any in-flight connect, then return the shared client.
+    if (cachedMcp.connecting) await cachedMcp.connecting;
+    return cachedMcp.client;
+  }
+  // If a prior cached client exists for a different base (daemon restart
+  // moved the port), tear it down before creating the new one.
+  if (cachedMcp) {
+    try { await cachedMcp.client.close(); } catch { /* swallow */ }
+    cachedMcp = null;
+  }
+  const transport = new StreamableHTTPClientTransport(new URL(baseUrl));
+  const client = new Client({ name: "acc2-cli", version: "0.0.1" }, { capabilities: {} });
+  const connecting = Promise.race([
+    client.connect(transport),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`mcp_connect_timeout:${timeoutMs}ms`)), timeoutMs),
+    ),
+  ]) as Promise<void>;
+  cachedMcp = { client, baseUrl, connecting };
+  try {
+    await connecting;
+    cachedMcp.connecting = null;
+    return client;
+  } catch (err) {
+    // Connect failed — drop the cache so the next call retries fresh.
+    cachedMcp = null;
+    try { await client.close(); } catch { /* swallow */ }
+    throw err;
+  }
+};
+
+/** Invalidate the cached MCP client. Used by recovery paths that detect
+ *  a wedged connection (call timeout, transport error) so the next
+ *  mcpCall reconnects fresh instead of reusing a dead client. */
+export const invalidateMcpClient = async (): Promise<void> => {
+  if (!cachedMcp) return;
+  const prev = cachedMcp;
+  cachedMcp = null;
+  try { await prev.client.close(); } catch { /* swallow */ }
+};
+
+/** Open an MCP client against the daemon's MCP port, invoke one tool.
  *  This is the canonical CLI → substrate call path for substrate.* methods.
+ *  Connection is reused across calls in the same process (cached client);
+ *  the daemon sees ONE session per CLI process instead of one per call.
  *  Robustness: the entire connect + callTool path is bounded by
- *  `MCP_CALL_TIMEOUT_MS` (30s default; bridge → daemon tool calls). A wedged
- *  daemon now produces a structured `{ ok:false, error:"timeout:..." }`
- *  envelope instead of hanging the CLI indefinitely. */
+ *  `MCP_CALL_TIMEOUT_MS` (30s default; bridge → daemon tool calls). On
+ *  timeout the cached client is invalidated so the next call reconnects. */
 export const mcpCall = async (
   toolName: string,
   args: Record<string, unknown>,
@@ -344,20 +428,17 @@ export const mcpCall = async (
 ): Promise<McpEnvelope> => {
   const base = requireMcp(opts);
   const timeoutMs = opts.timeoutMs ?? MCP_CALL_TIMEOUT_MS;
-  const transport = new StreamableHTTPClientTransport(new URL(base));
-  const client = new Client({ name: "acc2-cli", version: "0.0.1" }, { capabilities: {} });
+  let client: Client;
   try {
-    // Bound the connect step explicitly — a wedged transport handshake
-    // would otherwise sit forever waiting on the daemon's first frame.
-    await Promise.race([
-      client.connect(transport),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`mcp_connect_timeout:${timeoutMs}ms`)), timeoutMs),
-      ),
-    ]);
-    // callTool accepts a RequestOptions.timeout — feeds the protocol's own
-    // RequestTimeout enforcement so the daemon side learns the request was
-    // abandoned and frees its slot.
+    client = await getMcpClient(base, timeoutMs);
+  } catch (err) {
+    const msg = (err as Error).message ?? String(err);
+    if (msg.includes("timeout") || msg.includes("Timeout") || msg.includes("RequestTimeout")) {
+      return { ok: false, error: `timeout:${timeoutMs}ms:mcp_connect` };
+    }
+    return { ok: false, error: `mcp_connect_failed:${msg}` };
+  }
+  try {
     const res = await client.callTool(
       { name: toolName, arguments: args },
       undefined,
@@ -366,17 +447,13 @@ export const mcpCall = async (
     return parseEnvelope(res);
   } catch (err) {
     const msg = (err as Error).message ?? String(err);
-    if (msg.includes("timeout") || msg.includes("Timeout") || msg.includes("RequestTimeout")) {
+    // Invalidate the cached client on transport-level error so the next
+    // call doesn't reuse a dead connection. Tool-level errors (validation,
+    // domain) preserve the client.
+    if (msg.includes("timeout") || msg.includes("Timeout") || msg.includes("RequestTimeout") || msg.includes("transport") || msg.includes("ECONN")) {
+      await invalidateMcpClient();
       return { ok: false, error: `timeout:${timeoutMs}ms:mcp:${toolName}` };
     }
     return { ok: false, error: `mcp_call_failed:${msg}` };
-  } finally {
-    try {
-      await client.close();
-    } catch (closeErr) {
-      // close() throws when the client never connected — benign during
-      // shutdown / timeout paths. Caller already has the envelope it needs.
-      void closeErr;
-    }
   }
 };
