@@ -1418,10 +1418,17 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       // "Main-Loop Write Isolation".
       const pendingEmbeddings = await pendingEmbeddableCount(db);
       const batchSize = Math.min(8, Math.max(1, pendingEmbeddings));
-      if (batchSize > 0) {
-        const result = await embedderWorkerTick(db, { batchSize });
-        if (result.embedded > 0) index.reloadFromDb();
-      }
+      // 2026-05-21 boot-death fix: do NOT index.reloadFromDb() after each
+      // tick. reloadFromDb() = full EmbeddingIndex.rebuildFromDb (scans
+      // embedding_index_view + decodes every embedded vector). A spurious
+      // S0-wiring-dispatch amendment (K93WQJHW/B86VATTZ) added it after
+      // every reactive embedder tick — repeated full-index rebuilds spun
+      // the daemon to death post-bind (the boot hang debugged this session).
+      // The embedder's persistEmbedding already upserts vec_events (the
+      // durable store); vec0 MATCH queries hit the DB directly, so per-tick
+      // in-memory reload is unnecessary. Periodic/incremental reload, if
+      // ever needed, is a separate bounded concern — never per-tick.
+      if (batchSize > 0) await embedderWorkerTick(db, { batchSize });
       if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
     }, {
       // Embedder ticks legitimately take 30-90s during heavy backlog
@@ -1445,17 +1452,21 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // EMBEDDABLE_KINDS list (knowledge_candidate, knowledge_promoted,
     // lesson_extracted, owner_input_received, etc.) is exactly the set of
     // emissions that can actually produce new vec_events rows.
-    // 2026-05-21 owner directive: embeddings should be reactive. The prior
-    // `minReactiveGapMs: embedderIntervalMs` was dropping ~29 reactive
-    // fires per dampen window during heavy event bursts (Path A admission,
-    // brain emissions), causing brain query_embedding_unavailable
-    // false-positives. supervisedTick already gates concurrent work
-    // (skip-fire if previous tick still running); the gap was redundant
-    // and harmful for reactivity. minReactiveGapMs:0 keeps the EMIT of
-    // worker_tick_completed dampened (WORKER_TICK_EVENT_DAMPEN_MS still
-    // throttles the audit event) but lets the actual embedding work
-    // fire on every new embeddable event.
-    registerReactiveWorker("embedder", embedderIntervalMs, EMBEDDABLE_KINDS, embedderTick, { minReactiveGapMs: 0 });
+    // 2026-05-21: minReactiveGapMs restored to embedderIntervalMs after
+    // minReactiveGapMs:0 was found to DEATH-SPIRAL the daemon. With gap 0
+    // the embedder fires on EVERY embeddable event; during boot (artifact
+    // backfill + orphan reap + brain emissions burst events) a single
+    // slow/stuck embedder tick + the constant re-firing churns the daemon
+    // — observed this session: daemon binds, embedder logs "previous tick
+    // still running" on every fire for ~30s, then the process dies
+    // (resource exhaustion). Every OTHER reactive worker uses
+    // minReactiveGapMs = its interval; the embedder's 0 was the lone
+    // outlier and the lone death. A 10s gap (embedderIntervalMs) keeps
+    // embeddings near-reactive (the worst-case staleness is one interval)
+    // while preventing the fire-storm. The earlier "29 dropped fires /
+    // query_embedding_unavailable" concern is addressed structurally by
+    // supervisedTick's skip-gate, not by removing the rate limit.
+    registerReactiveWorker("embedder", embedderIntervalMs, EMBEDDABLE_KINDS, embedderTick, { minReactiveGapMs: embedderIntervalMs });
     // Boot tick — fire embedding work asynchronously without blocking
     // daemon readiness. Pre-fix (2026-05-19, this commit): the boot
     // tick awaited a large OpenAI batch synchronously at startup
@@ -1487,8 +1498,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
         // Boot-tick batch capped at 8 (was 20) — same main-loop-unlock
         // rationale as the reactive tick above. The persist phase is
         // synchronous on the main thread; small batches bound the block.
-        const result = await embedderWorkerTick(db, { batchSize: 8 });
-        if (result.embedded > 0) index.reloadFromDb();
+        // No per-tick index.reloadFromDb() (boot-death fix — see above).
+        await embedderWorkerTick(db, { batchSize: 8 });
         recordWorkerTick("embedder");
       } catch (err) {
         logger.warn(

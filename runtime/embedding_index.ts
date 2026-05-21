@@ -391,13 +391,6 @@ export class EmbeddingIndex {
     this.jsVectors = fresh.jsVectors;
   }
 
-  reloadFromDb(): void {
-    const fresh = EmbeddingIndex.rebuildFromDb(this.db);
-    this.metadata = fresh.metadata;
-    this.inVec = fresh.inVec;
-    this.jsVectors = fresh.jsVectors;
-  }
-
   size(): number {
     return this.metadata.size;
   }
