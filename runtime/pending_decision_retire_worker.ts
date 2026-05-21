@@ -175,7 +175,18 @@ export const runPendingDecisionRetireWorker = (
              q.candidate_diff
            FROM lesson_implementer_queue_view q
            WHERE q.source_kind = 'contract_amendment_proposed'
-             AND (q.owner_gate_required = 1 OR q.apply_gate_status = 'manual_review')
+             -- 2026-05-21: structurally-broken amendments (empty anchor)
+             -- are un-appliable REGARDLESS of gate status — include them in
+             -- the retire scan even when they are not owner-gated /
+             -- manual-review. Pre-fix the scan was scoped to gated rows
+             -- only, so ~190 of 265 anchorless amendments accumulated
+             -- forever (the worker retired the gated subset but never the
+             -- rest). An amendment with no anchor can never resolve a target
+             -- location, so it is safe to retire on sight.
+             AND (q.owner_gate_required = 1
+                  OR q.apply_gate_status = 'manual_review'
+                  OR q.anchor IS NULL
+                  OR length(trim(q.anchor)) = 0)
              AND (q.apply_status IS NULL)
              AND (q.candidate_diff IS NULL OR json_valid(q.candidate_diff) = 1)
              AND NOT EXISTS (
