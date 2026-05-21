@@ -342,6 +342,10 @@ Contract: package the AccInt plugin as `act_artifact(kind="claude_plugin_package
 
 Closure predicate: `claude plugins install accint` results in a working substrate with daemon health and MCP registered.
 
+### T7.7 — Proposal-inbox views (rank 5 consolidation: keep separate, not merge)
+
+Decision (per brain dispatch `QJZQSJ6T750T7A6FQ1GDKC5K10` + orchestrator judgment `KRFDEJQVV57K791QMSX78NPNCM`): `lesson_implementer_queue_view`, `lesson_implementation_status_view`, and `lesson_apply_candidate_view` stay as three separate views, not merged into one parameterized `proposal_inbox_view`. They are complementary projections, not accidental duplicates: queue is the apply inbox (consumed by `cli/apply.ts`, `runtime/prompt_composer.ts`, `cli/admin_pending_decisions.ts`, `runtime/pending_decision_retire_worker.ts`); status is the lifecycle/audit projection (request/action/scored/commit timestamps + residuals + flywheel_status); apply_candidate is the derived contract joining queue + status + `applied_lesson_effectiveness_view`. Merging would either widen every consumer to a mixed mega-row or hide mode-specific joins behind arguments — both recreate three contracts inside one name. If future duplication shows shared normalization logic across the three projections, extract an internal SQL fragment helper without changing the public projections.
+
 ### T7.6 — Lesson/judgment consolidation through knowledge_candidate
 
 Problem: `lesson_extracted` and `knowledge_candidate` are both scored, embeddable, evidence-bearing rows that feed the same merger, but lessons still have a parallel proposal lifecycle.
