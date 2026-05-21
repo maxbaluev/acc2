@@ -352,6 +352,136 @@ const emitSchedulerAdmissionGate = (
   });
 };
 
+const DELIVERABLE_PROGRESS_KINDS: ReadonlySet<string> = new Set([
+  "contract_amendment_proposed",
+  "knowledge_candidate",
+  "act_artifact_candidate",
+  "lesson_extracted",
+  "pre_apply_adjudication_recorded",
+]);
+
+const STRUCTURAL_PROGRESS_KINDS: ReadonlySet<string> = new Set([
+  ...DELIVERABLE_PROGRESS_KINDS,
+  "action_predicted",
+  "action_scored",
+  "task_node_opened",
+  "task_edge_recorded",
+  "task_closure_audited",
+  "task_committed",
+  "task_failed",
+  "task_abandoned",
+  "task_blocked",
+  "task_committed_superseded",
+]);
+
+const TERMINAL_OR_RECURSION_KINDS: ReadonlySet<string> = new Set([
+  "task_closure_audited",
+  "task_committed",
+  "task_failed",
+  "task_abandoned",
+  "task_blocked",
+  "task_committed_superseded",
+  "task_edge_recorded",
+]);
+
+type NoProgressTermination = {
+  terminated: boolean;
+  reason?: "no_structural_progress_since_last_dispatch" | "deliverable_without_closure_or_refinement";
+  dispatch_id?: string;
+  evidence_event_ids?: string[];
+};
+
+const parseEventPayload = (payload: string | null): Record<string, unknown> => {
+  try {
+    return JSON.parse(payload ?? "{}") as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+};
+
+/** Dispatch-termination policy: a task that has already had a brain dispatch
+ *  must not be re-dispatched unchanged. Amendment/candidate-only cycles are
+ *  real deliverables, but they do not alter task topology/status; the next
+ *  scheduler admission must therefore see closure, terminalization, or a
+ *  refinement edge. Otherwise the daemon self-reaps the zombie before it can
+ *  consume another brain slot. */
+const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgressTermination => {
+  const lastDispatch = db
+    .query(
+      `SELECT id, ts, payload FROM events
+       WHERE task_id = ? AND kind = 'brain_dispatched'
+       ORDER BY ts DESC, rowid DESC LIMIT 1`,
+    )
+    .get(task.id) as { id: string; ts: string; payload: string | null } | null;
+  if (!lastDispatch) return { terminated: false };
+
+  const dispatchPayload = parseEventPayload(lastDispatch.payload);
+  const dispatchId = typeof dispatchPayload.dispatch_id === "string" ? dispatchPayload.dispatch_id : undefined;
+  const rows = db
+    .query(
+      `SELECT id, kind, residual, payload FROM events
+       WHERE task_id = ? AND ts > ?
+       ORDER BY ts ASC, rowid ASC`,
+    )
+    .all(task.id, lastDispatch.ts) as Array<{ id: string; kind: string; residual: number | null; payload: string | null }>;
+
+  const progressRows = rows.filter((r) => STRUCTURAL_PROGRESS_KINDS.has(r.kind));
+  if (progressRows.some((r) => r.kind === "task_committed" || r.kind === "task_failed" || r.kind === "task_abandoned" || r.kind === "task_blocked" || r.kind === "task_committed_superseded")) {
+    return { terminated: false };
+  }
+
+  const deliverableRows = progressRows.filter((r) => DELIVERABLE_PROGRESS_KINDS.has(r.kind));
+  const terminalOrRecursionRows = progressRows.filter((r) => TERMINAL_OR_RECURSION_KINDS.has(r.kind));
+  const cleanClosure = terminalOrRecursionRows.find((r) => {
+    if (r.kind !== "task_closure_audited") return false;
+    const payload = parseEventPayload(r.payload);
+    const residual = typeof payload.closure_residual === "number" ? payload.closure_residual : r.residual;
+    return typeof residual === "number" && Number.isFinite(residual) && residual < 0.3;
+  });
+
+  if (cleanClosure) {
+    emitEvent(db, {
+      kind: "task_committed",
+      substrate_origin: "substrate_auto",
+      directive_id: task.directive_id,
+      task_id: task.id,
+      residual: 0,
+      context_refs: [cleanClosure.id],
+      payload: {
+        dispatch_id: dispatchId,
+        reason: "auto_commit_on_no_progress_redispatch_after_clean_closure",
+        closure_audit_event_id: cleanClosure.id,
+      } as JsonValue,
+    });
+    return { terminated: true, reason: "deliverable_without_closure_or_refinement", dispatch_id: dispatchId, evidence_event_ids: [cleanClosure.id] };
+  }
+
+  const noStructuralProgress = progressRows.length === 0;
+  const deliverableWithoutClosureOrRefinement = deliverableRows.length > 0 && terminalOrRecursionRows.length === 0;
+  if (!noStructuralProgress && !deliverableWithoutClosureOrRefinement) return { terminated: false };
+
+  const reason = noStructuralProgress
+    ? "no_structural_progress_since_last_dispatch"
+    : "deliverable_without_closure_or_refinement";
+  const evidenceEventIds = (deliverableRows.length > 0 ? deliverableRows : rows).map((r) => r.id).slice(0, 20);
+  emitEvent(db, {
+    kind: "task_abandoned",
+    substrate_origin: "substrate_auto",
+    directive_id: task.directive_id,
+    task_id: task.id,
+    failure_kind: reason,
+    payload: {
+      reason,
+      dispatch_id: dispatchId,
+      prior_dispatch_event_id: lastDispatch.id,
+      evidence_event_ids: evidenceEventIds,
+      policy: "first_no_progress_redispatch_terminates_before_spawning_brain",
+      hint: "Brain cycles that emit deliverables must also emit task_closure_audited/task_committed or a refinement edge; amendment-only exits are not eligible for re-dispatch on the same task_id.",
+    } as JsonValue,
+  });
+  return { terminated: true, reason, dispatch_id: dispatchId, evidence_event_ids: evidenceEventIds };
+};
+
 /** One tick: read ready tasks, fill open dispatch slots, route by lane.
  *  Returns immediately after launching dispatches — the per-task promises
  *  remain tracked in IN_FLIGHT until they resolve. Tests await the
@@ -460,6 +590,17 @@ export const schedulerTick = async (
 
   for (const task of ready) {
     if (IN_FLIGHT.has(task.id)) continue; // already dispatched in a prior tick.
+
+    const noProgressTermination = terminateNoProgressRedispatch(db, task);
+    if (noProgressTermination.terminated) {
+      skippedFailureCapped.push(task.id);
+      emitSchedulerAdmissionGate(db, task, "scheduler_no_progress_redispatch_terminated", {
+        reason: noProgressTermination.reason ?? "no_progress_redispatch_terminated",
+        dispatch_id: noProgressTermination.dispatch_id ?? null,
+        evidence_event_ids: noProgressTermination.evidence_event_ids ?? [],
+      });
+      continue;
+    }
 
     // SILENT-DISPATCH QUARANTINE (FOUNDATIONAL FIX 2026-05-17):
     // Brain failures classified as `brain_silent_exit`, `mcp_handshake_timed_out`,

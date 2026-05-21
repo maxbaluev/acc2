@@ -84,17 +84,13 @@ const SUPERVISOR_DIRECTIVE_AGE_MS = SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS * 60 * 60
  *  cost-burn from any pathology the per-task / per-bridge gates miss. */
 export const SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE = 50;
 
-/** No-closure-progress loop detector (2026-05-21). A distinct pathology
- *  from both the redispatch STORM (rate-based, 6/5min — a slow steady loop
- *  slips under it) and the 50-dispatch budget cap (too high — ~1.5h of
- *  burn first). Observed: a directive re-dispatched its SINGLE node 18×
- *  over 40min, emitting amendment duplicates + brain_reasoning but ZERO
- *  task_closure_audited and ZERO task_edge_recorded — the brain never ran
- *  a closure verifier nor opened a refinement edge, so the dispatcher kept
- *  re-invoking it forever. Legit deep work makes structural progress
- *  (edges or closure attempts); a directive past this cap with NEITHER is
- *  genuinely stuck. Lower than the budget cap so the loop is caught early. */
-export const SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP = 10;
+/** No-closure-progress loop detector (2026-05-21). Fallback only.
+ *  The primary fix is scheduler-admission self-reaping: the first attempted
+ *  unchanged redispatch terminates the task before spawning another brain.
+ *  This supervisor cap remains as an idempotent belt-and-suspenders audit
+ *  for legacy daemons or missed scheduler paths, and is intentionally low so
+ *  it can never become the garbage collector of record again. */
+export const SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP = 1;
 
 /** Stuck-task detector (2026-05-17): when the brain emits the SAME
  *  action_predicted (keyed by `(task_id, action_artifact_id)`) N+ times
