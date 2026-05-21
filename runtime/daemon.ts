@@ -597,6 +597,39 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   resetReadiness();
 
   const adminToken = newAdminToken();
+  // 2026-05-21 owner-identity-continuity fix: every daemon boot mints a
+  // fresh admin_token via newAdminToken() above, which writes a new
+  // ~/.accint/v2.sock.token. The owner_identity_continuity_predicate
+  // observes the token-file SHA changed and refuses autonomous commits
+  // ("token_changed_without_admin_token_rotated_event"). Pre-fix only
+  // owner-initiated `acc admin rotate-token` emitted the audit row, so
+  // every daemon restart left the predicate in refuse state until
+  // someone manually emitted the audit. The structural fix is at the
+  // mint site: any new admin_token MUST be paired with an
+  // admin_token_rotated event so the continuity predicate stays
+  // honest. reason='daemon_restart' distinguishes this from operator-
+  // initiated rotations (reason absent or 'operator_request').
+  try {
+    emitEvent(db, {
+      kind: "admin_token_rotated",
+      substrate_origin: "substrate_auto",
+      payload: {
+        token_file: tokenFile,
+        new_token_preview: adminToken.slice(0, 8) + "...",
+        reason: "daemon_restart",
+        boot_session_token: `daemon-${process.pid}-${Date.now()}`,
+      },
+    });
+  } catch (err) {
+    // Audit is best-effort at boot — surface a warning but never block
+    // daemon startup. The continuity predicate will still observe the
+    // token change; the operator can emit the audit manually via
+    // `acc admin rotate-token --noop-audit` (CLI follow-up).
+    logger.warn(
+      { where: "daemon.boot.admin_token_rotated_audit", err: String(err) },
+      "could not emit admin_token_rotated at daemon boot",
+    );
+  }
   const ingressState = createExternalIngressState({
     ownerDefaultToken: opts.externalPushToken ?? process.env.ACC2_EXTERNAL_PUSH_TOKEN ?? null,
   });
@@ -1414,6 +1447,20 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
           async (artifactId) => {
             const row = getArtifact(db, artifactId);
             if (!row) return { ok: false, residual: 1 };
+            // Path A (2026-05-20, contract A0DQT211JH): data-class rows
+            // have runtime=null and no executable semantics; the rehab
+            // worker cannot probe them via fixture invocation. Skip
+            // with residual=1+ok=false so the cooldown re-fires; the
+            // null-runtime row will stay quarantined indefinitely
+            // unless an operator re-admits it via the data-class
+            // admission path.
+            if (row.runtime === null || !row.declaredSandbox) {
+              logger.debug(
+                { artifactId: row.id },
+                "rehab tick skipped — null runtime (data-class row, no executable semantics)",
+              );
+              return { ok: false, residual: 1 };
+            }
             const fixtureInput = row.fixtureInput ?? null;
             // Candidate B (brain dispatch SW94JRKNFD36Q7G9, 2026-05-19):
             // open Runtime in the rehab worker. Concrete fast-paths

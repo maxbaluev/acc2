@@ -48,7 +48,7 @@ describe("admitArtifact — happy path", () => {
     expect(admitted.length).toBe(1);
   });
 
-  test("data runtime: admits a raw corpus dump without fixture execution", async () => {
+  test("data class (runtime=null): admits a raw corpus dump without fixture execution", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
     const body = JSON.stringify({
@@ -58,14 +58,15 @@ describe("admitArtifact — happy path", () => {
     const result = await admitArtifact(
       db,
       {
-        runtime: "data",
+        runtime: null,
         body,
-        declaredSandbox: { runtime: "data" } as never,
+        declaredSandbox: null,
         fixtureInput: null,
         fixtureExpectedResidualBelow: 0,
         kind: "telegram_chat_dump",
         name: "tony-direct-test",
         intent: "private corpus admission",
+        summary: "Telegram corpus dump (1500 messages, owner-private)",
       },
       captureEmit(events, db),
     );
@@ -73,7 +74,7 @@ describe("admitArtifact — happy path", () => {
     if (!result.ok) return;
     const row = getArtifact(db, result.artifactId);
     expect(row).not.toBeNull();
-    expect(row!.runtime).toBe("data");
+    expect(row!.runtime).toBeNull();
     expect(row!.status).toBe("admitted");
     expect(row!.body).toBe(body);
     const admitted = events.filter((e) => e.kind === "act_artifact_admitted");
@@ -83,28 +84,29 @@ describe("admitArtifact — happy path", () => {
     expect(events.filter((e) => e.kind === "artifact_observed").length).toBe(0);
     // Admission mode flag visible on the emit for downstream observers.
     const payload = admitted[0]!.payload as { admission_mode?: string };
-    expect(payload.admission_mode).toBe("data_short_circuit");
+    expect(payload.admission_mode).toBe("data_class_nullable");
   });
 
-  test("data runtime: refuses a decl that smuggles execution fields", async () => {
+  test("data class (runtime=null): refuses when summary missing", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
     const result = await admitArtifact(
       db,
       {
-        runtime: "data",
+        runtime: null,
         body: "raw bytes",
-        // proc_allow is forbidden under runtime=data — execution semantics
-        // do not apply.
-        declaredSandbox: { runtime: "data", proc_allow: ["bun"] } as never,
+        declaredSandbox: null,
         fixtureInput: null,
         fixtureExpectedResidualBelow: 0,
+        name: "missing-summary-test",
+        // intentionally omit summary
       },
       captureEmit(events, db),
     );
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.reason).toBe("sandbox_decl_invalid");
+    expect(result.reason).toBe("runtime_error");
+    expect(result.detail).toContain("summary");
   });
 
   test("admits a bun artifact whose fixture result includes a low residual field", async () => {

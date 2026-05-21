@@ -57,6 +57,15 @@ type NormalizedActTuple = {
   verifier_artifact_id: string;
   outcome: Event["outcome"];
   source_act_id?: string;
+  /** Original source event id (lesson_extracted /
+   *  contract_amendment_proposed / etc.) that this act applies. When the
+   *  apply lifecycle is projected from act_tuple_recorded, the projected
+   *  action_predicted / action_scored / candidate_confirmed /
+   *  applied_change_committed rows carry this id in payload.source_event_id
+   *  so lesson_implementation_status_view can join by the original
+   *  proposal id rather than the act-tuple id. Brain amendment
+   *  7D4VK9EYJX63V0K2WD40VXT5WG (FINDING 4). */
+  source_event_id?: string;
   cited_knowledge_ids: string[];
   cited_artifact_ids: string[];
   affected_resources: string[];
@@ -627,6 +636,17 @@ const normalizeActTuple = (input: EmitEventInput): NormalizedActTuple => {
   const logicalSourceActId = typeof payload.source_act_id === "string" && payload.source_act_id.trim().length > 0
     ? payload.source_act_id.trim()
     : undefined;
+  // Path-A FINDING-4 amendment 7D4VK9EYJX63V0K2WD40VXT5WG: when the
+  // act_tuple represents an apply lifecycle (cli/apply.ts), extract
+  // payload.source_event_id so the projection chain carries the
+  // original proposal id (lesson_extracted / contract_amendment_proposed)
+  // through to the projected action_predicted / action_scored /
+  // candidate_confirmed / applied_change_committed payloads. Without
+  // this, lesson_implementation_status_view can't join the projected
+  // rows back to the original proposal id.
+  const sourceEventId = typeof payload.source_event_id === "string" && payload.source_event_id.trim().length > 0
+    ? payload.source_event_id.trim()
+    : undefined;
   return {
     intent: requireString(payload, "intent"),
     reasoning_summary: requireString(payload, "reasoning_summary"),
@@ -638,6 +658,7 @@ const normalizeActTuple = (input: EmitEventInput): NormalizedActTuple => {
     verifier_artifact_id: verifierArtifact,
     outcome,
     source_act_id: logicalSourceActId,
+    source_event_id: sourceEventId,
     cited_knowledge_ids: optionalStringArray(payload, "cited_knowledge_ids"),
     cited_artifact_ids: optionalStringArray(payload, "cited_artifact_ids"),
     affected_resources: optionalStringArray(payload, "affected_resources"),
@@ -692,6 +713,11 @@ const projectActTupleRecorded = (db: Database, source: {
     }
   }
   const projectedContext = [...sourceRefs, ...bindings.map((binding) => binding.id), ...source.context_refs];
+  // Path-A FINDING-4: surface the original proposal id on every
+  // projected payload so lesson_implementation_status_view can join
+  // by it. Empty spread when not provided keeps the payload shape
+  // unchanged for non-apply act_tuples (internal decision acts etc.).
+  const originalProposalId = source.act.source_event_id;
   const predicted = emitProjectedEvent(db, sourceActId, "action_predicted", "primary", {
     ...base,
     kind: "action_predicted",
@@ -702,6 +728,7 @@ const projectActTupleRecorded = (db: Database, source: {
     payload: {
       source_act_id: sourceActId,
       source_act_event_id: sourceEventId,
+      ...(originalProposalId ? { source_event_id: originalProposalId } : {}),
       projected_from: "act_tuple_recorded",
       intent: source.act.intent,
       reasoning_summary: source.act.reasoning_summary,
@@ -725,6 +752,7 @@ const projectActTupleRecorded = (db: Database, source: {
     payload: {
       source_act_id: sourceActId,
       source_act_event_id: sourceEventId,
+      ...(originalProposalId ? { source_event_id: originalProposalId } : {}),
       action_predicted_event_id: predicted.id,
       projected_from: "act_tuple_recorded",
       verifier_kind: source.act.verifier_kind,
@@ -747,6 +775,7 @@ const projectActTupleRecorded = (db: Database, source: {
       payload: {
         source_act_id: sourceActId,
         source_act_event_id: sourceEventId,
+        ...(originalProposalId ? { source_event_id: originalProposalId } : {}),
         action_scored_event_id: scored.id,
         projected_from: "act_tuple_recorded",
         reason: "act_tuple_lifecycle_projection",
@@ -792,6 +821,7 @@ const projectActTupleRecorded = (db: Database, source: {
     payload: {
       source_act_id: sourceActId,
       source_act_event_id: sourceEventId,
+      ...(originalProposalId ? { source_event_id: originalProposalId } : {}),
       action_predicted_event_id: predicted.id,
       action_scored_event_id: scored.id,
       projected_from: "act_tuple_recorded",

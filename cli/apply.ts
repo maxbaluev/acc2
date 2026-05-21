@@ -1070,158 +1070,24 @@ export const recordApplyOutcome = async (opts: {
   }
   const requestEventId = (requestEnv.result as { id?: string })?.id;
 
-  const actionEnv = await mcpCall("substrate.emit", {
-    kind: "action_predicted",
-    substrate_origin: applyActorOrigin,
-    directive_id: ev.directive_id,
-    task_id: ev.task_id,
-    context_refs: [eventId, requestEventId].filter(Boolean),
-    action_artifact_id: actionArtifactId,
-    verifier_artifact_id: verifierArtifactId,
-    predicted_residual: 0.2,
-    payload: {
-      intent: "Apply a substrate-emitted lesson or contract amendment as a committed code change.",
-      source_event_id: eventId,
-      request_event_id: requestEventId,
-      authorization_event_id: requestEventId,
-      source_kind: ev.kind,
-      target,
-      owner_gate_checked: true,
-      owner_gate_required: auth.ownerGateRequired,
-      owner_approved: auth.ownerApproved,
-      authorization_status: "approved",
-      design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
-    },
-  });
-  if (!actionEnv.ok) {
-    return { ok: false, reason: `action_predicted emit failed - ${actionEnv.error}`, exitCode: 1 };
-  }
-  const actionEventId = (actionEnv.result as { id?: string })?.id;
-
-  const scoredEnv = await mcpCall("substrate.emit", {
-    kind: "action_scored",
-    substrate_origin: applyActorOrigin,
-    directive_id: ev.directive_id,
-    task_id: ev.task_id,
-    context_refs: [eventId, requestEventId, actionEventId].filter(Boolean),
-    action_artifact_id: actionArtifactId,
-    verifier_artifact_id: verifierArtifactId,
-    outcome: status,
-    residual,
-    payload: {
-      source_event_id: eventId,
-      request_event_id: requestEventId,
-      authorization_event_id: requestEventId,
-      source_kind: ev.kind,
-      commit_sha: opts.commitSha,
-      target,
-      summary: opts.summary,
-      reason: opts.reason,
-      owner_gate_checked: true,
-      owner_gate_required: auth.ownerGateRequired,
-      owner_approved: auth.ownerApproved,
-      authorization_status: "approved",
-    },
-  });
-  if (!scoredEnv.ok) {
-    return { ok: false, reason: `action_scored emit failed - ${scoredEnv.error}`, exitCode: 1 };
-  }
-  const scoredEventId = (scoredEnv.result as { id?: string })?.id;
-  if (status === "refused" && isAmendment && scoredEventId) {
-    const contradictionEnv = await mcpCall("substrate.emit", {
-      kind: "candidate_contradicted",
-      substrate_origin: "claude_root",
-      directive_id: ev.directive_id,
-      task_id: ev.task_id,
-      context_refs: [eventId, requestEventId, actionEventId, scoredEventId].filter(Boolean),
-      payload: {
-        candidate_event_id: eventId,
-        amendment_id: eventId,
-        action_scored_event_id: scoredEventId,
-        reason: opts.reason || "claude_apply_refused",
-        contradicted_by: "claude_root",
-        source_kind: ev.kind,
-        status,
-        target,
-      },
-    });
-    if (!contradictionEnv.ok) {
-      return { ok: false, reason: `candidate_contradicted emit failed - ${contradictionEnv.error}`, exitCode: 1 };
-    }
-  }
-  // k_555 four-link spine: distribute credit so context_refs cites mutate
-  // posterior state. Without this call the candidate_confirmed / artifact
-  // posterior updates never happen — audit b7kjyk2k1 / WTF8EZSFAD measured
-  // only 11.8% of action_scored rows actually closing the credit loop.
-  // Best-effort: a credit-distribution failure (no action_predicted lineage,
-  // missing artifact rows in test fixtures, etc.) must NOT abort the apply
-  // chain — the four-link events have already been written and the worker
-  // can re-attempt credit out-of-band. Applies brain proposal MB9YVKN25H3K.
-  if (actionEventId && scoredEventId) {
-    try {
-      await mcpCall("substrate.credit", {
-        action_event_id: actionEventId,
-        observation_event_id: scoredEventId,
-        scored_event_id: scoredEventId,
-        predicted_residual: 0.2,
-        observed_residual: residual,
-      });
-    } catch { /* swallow — see comment above */ }
-  }
-
-  // Universal applied_change_committed (audit #3 collapse, owner-approved
-  // 2026-05-16): applied_change_committed now fires for EVERY apply attempt
-  // (success / failed / refused) carrying status in payload. The two legacy
-  // kinds lesson_applied + contract_amendment_applied are deleted — they
-  // differed only by source_kind, which is already in payload, and they
-  // duplicated the credit closure semantics. Consumers filter on
-  // payload.source_kind to distinguish lesson vs amendment, payload.status
-  // to distinguish success/failed/refused.
+  // FINDING 4 (brain amendment 7D4VK9EYJX63V0K2WD40VXT5WG): a single
+  // act_tuple_recorded envelope replaces the 5 explicit emits the
+  // pre-fix flow used (action_predicted, action_scored,
+  // candidate_contradicted, substrate.credit, applied_change_committed).
+  // The substrate-side projection in runtime/events.ts:projectActTupleRecorded
+  // expands the envelope into all of those rows automatically. With
+  // payload.source_event_id set on the act_tuple, the projection
+  // payloads also carry source_event_id so lesson_implementation_status_view
+  // can join projected action_predicted / action_scored / commit rows
+  // by the original proposal id.
   const verifierPassed = status === "applied" && residual < 0.3;
-  const committedEnv = await mcpCall("substrate.emit", {
-    kind: "applied_change_committed",
-    substrate_origin: applyActorOrigin,
-    directive_id: ev.directive_id,
-    task_id: ev.task_id,
-    context_refs: [eventId, requestEventId, actionEventId, scoredEventId].filter(Boolean),
-    action_artifact_id: actionArtifactId,
-    verifier_artifact_id: verifierArtifactId,
-    residual,
-    payload: {
-      source_event_id: eventId,
-      source_kind: ev.kind,
-      status,
-      verifier_passed: verifierPassed,
-      applied_at: new Date().toISOString(),
-      commit_sha: opts.commitSha,
-      subagent_task_id: opts.subagentTaskId,
-      summary: opts.summary,
-      reason: opts.reason,
-      target,
-      affected_resources: affectedResources,
-      affected_files: affectedFiles,
-      source_brain_event_id: sourceBrainEventId,
-      residual,
-      request_event_id: requestEventId,
-      authorization_event_id: requestEventId,
-      action_event_id: actionEventId,
-      scored_event_id: scoredEventId,
-      owner_gate_checked: true,
-      owner_gate_required: auth.ownerGateRequired,
-      owner_approved: auth.ownerApproved,
-      authorization_status: "approved",
-    },
-  });
-  if (!committedEnv.ok) {
-    return { ok: false, reason: `applied_change_committed emit failed - ${committedEnv.error}`, exitCode: 1 };
-  }
-  const committedEventId = (committedEnv.result as { id?: string })?.id;
+  let actTupleEventId: string;
   try {
-    await emitActTupleViaMcp(mcpCall, {
+    const actTuple = await emitActTupleViaMcp(mcpCall, {
       substrateOrigin: applyActorOrigin,
       directiveId: ev.directive_id,
       taskId: ev.task_id,
-      intent: "Record one coherent Claude apply act boundary for a substrate-emitted lesson or contract amendment.",
+      intent: "Apply a substrate-emitted lesson or contract amendment as a committed code change.",
       reasoningSummary: opts.reason || opts.summary || "Claude apply recorded the verified outcome for one proposal as a coherent act.",
       actionSummary: `Apply outcome recorded for ${ev.kind} ${eventId}`,
       effectSummary: opts.summary || status,
@@ -1235,8 +1101,8 @@ export const recordApplyOutcome = async (opts: {
       citedKnowledgeIds: [eventId],
       citedArtifactIds: [actionArtifactId, verifierArtifactId],
       sourceEventId: eventId,
-      contextRefs: [eventId, requestEventId, actionEventId, scoredEventId, committedEventId].filter(Boolean) as string[],
-      derivedEventIds: [requestEventId, actionEventId, scoredEventId, committedEventId].filter(Boolean) as string[],
+      contextRefs: [eventId, requestEventId].filter(Boolean) as string[],
+      derivedEventIds: [requestEventId].filter(Boolean) as string[],
       extra: {
         co_actors: [
           "claude_root",
@@ -1245,23 +1111,33 @@ export const recordApplyOutcome = async (opts: {
         ].filter((actor): actor is string => typeof actor === "string" && actor.length > 0),
         source_kind: ev.kind ?? null,
         source_brain_event_id: sourceBrainEventId,
+        request_event_id: requestEventId ?? null,
+        authorization_event_id: requestEventId ?? null,
+        target,
         affected_files: affectedFiles,
         status,
         verifier_passed: verifierPassed,
         commit_sha: opts.commitSha ?? null,
+        subagent_task_id: opts.subagentTaskId ?? null,
+        reason: opts.reason ?? null,
         owner_gate_checked: true,
         owner_gate_required: auth.ownerGateRequired,
         owner_approved: auth.ownerApproved,
+        authorization_status: "approved",
+        is_amendment: isAmendment,
+        applied_at: new Date().toISOString(),
+        design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
       },
     });
+    actTupleEventId = actTuple.id;
   } catch (err) {
     return { ok: false, reason: `act_tuple_recorded emit failed - ${(err as Error).message}`, exitCode: 1 };
   }
   return {
     ok: true,
     appliedKind: "applied_change_committed",
-    appliedEventId: committedEventId ?? "?",
-    committedEventId,
+    appliedEventId: actTupleEventId,
+    committedEventId: actTupleEventId,
     residual,
     status,
     verifierPassed,
@@ -1307,7 +1183,7 @@ export const runApply = async (argv: string[]): Promise<number> => {
     console.log("                  [--commit-sha X] [--subagent-task-id Y]");
     console.log("                  [--summary Z] [--reason W] [--target FILE] [--residual N]");
     console.log("                  [--action-artifact-id A] [--verifier-artifact-id V]");
-    console.log("        Emit action_predicted/action_scored, then applied_change_committed (always, carrying status + source_kind in payload).");
+    console.log("        Emit lesson_apply_requested plus one act_tuple_recorded; substrate projections write action/action_scored/applied_change_committed.");
     return positional.length === 0 ? 1 : 0;
   }
   const eventId = (typeof flags.record === "string" ? flags.record : positional[0]) ?? "";

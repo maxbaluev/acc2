@@ -51,7 +51,12 @@ describe("F9 SqliteDbPool", () => {
     expect(pragmas.synchronous).toBe(1); // NORMAL
     expect(pragmas.autocheckpoint).toBe(1000);
     expect(pragmas.busy_timeout).toBe(5000);
-    expect(pragmas.mmap_size).toBe(268435456);
+    // 2026-05-21 tuning bump: applyWalPragmas (substrate/db.ts) raised
+    // mmap_size to 1GB for the writer connection so frequently-queried
+    // views stay hot on the 800MB+ production DB. The reader pool
+    // still uses 256MB (applyReaderPragmas). Writer-mmap value follows
+    // the bump.
+    expect(pragmas.mmap_size).toBe(1073741824);
   });
 
   test("(b) concurrent reads share pool connections (no queue when under maxReaders)", async () => {
