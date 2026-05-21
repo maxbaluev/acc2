@@ -73,51 +73,52 @@ export const runObserveOutcome = async (argv: string[]): Promise<number> => {
     process.stderr.write("acc observe: missing <event_id> positional\n");
     return 1;
   }
-  const verdict = String(flags.verdict ?? "").toLowerCase();
-  if (verdict !== "positive" && verdict !== "negative" && verdict !== "partial") {
-    process.stderr.write(`acc observe: --verdict must be one of {positive, negative, partial} (got: ${verdict || "missing"})\n`);
-    return 1;
-  }
+  const signal = String(flags.signal ?? flags.verdict ?? "");
+  const { buildOwnerOutcomeEmitInput } = await import("../runtime/owner_outcome_channel");
   const reason = typeof flags.reason === "string" ? flags.reason : null;
 
-  // Sanity-check the referenced event exists and is one of the expected
-  // kinds (applied_change_committed / task_committed / act_tuple_recorded).
-  // We don't HARD-fail on other kinds — the operator may want to observe
-  // outcomes on other events too — but we print a warning so a typo isn't
-  // silently committed.
   const refEnv = await mcpCall("substrate.get_event", { id: eventId });
   if (!refEnv.ok) {
     process.stderr.write(`acc observe: event ${eventId} not found (${refEnv.error})\n`);
     return 1;
   }
-  const refRow = refEnv.result as { kind?: string; ts?: string; directive_id?: string; task_id?: string } | null;
-  if (!refRow) {
+  const refRow = refEnv.result as {
+    id?: string;
+    kind?: string;
+    directive_id?: string;
+    task_id?: string;
+    payload?: unknown;
+    context_refs?: string[];
+    residual?: number;
+  } | null;
+  if (!refRow || !refRow.id || !refRow.kind) {
     process.stderr.write(`acc observe: event ${eventId} not found in substrate\n`);
     return 1;
   }
-  const expected = new Set(["applied_change_committed", "task_committed", "act_tuple_recorded"]);
-  if (refRow.kind && !expected.has(refRow.kind)) {
+  const expected = new Set(["applied_change_committed", "task_committed", "act_tuple_recorded", "action_scored"]);
+  if (!expected.has(refRow.kind)) {
     process.stderr.write(
-      `acc observe: warning — event ${eventId} is kind=${refRow.kind}, not an applied/committed/act-tuple. ` +
+      `acc observe: warning — event ${eventId} is kind=${refRow.kind}, not an applied/committed/action row. ` +
       `Posterior credit propagation expects one of {${[...expected].join(", ")}}. ` +
       `The observation will still be recorded.\n`,
     );
   }
 
-  const emit = await mcpCall("substrate.emit", {
-    kind: "owner_observed_outcome_recorded",
-    payload: {
-      verdict,
-      reason,
-      observer: "owner",
-      observed_at: new Date().toISOString(),
-      source_event_id: eventId,
-      source_kind: refRow.kind ?? null,
-    },
-    context_refs: [eventId],
-    directive_id: refRow.directive_id ?? null,
-    task_id: refRow.task_id ?? null,
+  const eventInput = buildOwnerOutcomeEmitInput({
+    id: refRow.id,
+    kind: refRow.kind as never,
+    directive_id: refRow.directive_id ?? "directive_root",
+    task_id: refRow.task_id ?? "task_root",
+    payload: refRow.payload as never,
+    context_refs: refRow.context_refs ?? [],
+    residual: refRow.residual,
+  }, {
+    signal,
+    target: { event_id: eventId },
+    reason,
+    observation: reason,
   });
+  const emit = await mcpCall("substrate.emit", eventInput);
   if (!emit.ok) {
     process.stderr.write(`acc observe: emit failed — ${emit.error}\n`);
     return 1;
@@ -125,7 +126,7 @@ export const runObserveOutcome = async (argv: string[]): Promise<number> => {
   const out = emit.result as { event_id?: string; id?: string } | null;
   const newId = out?.event_id ?? out?.id ?? "?";
   process.stdout.write(
-    `owner_observed_outcome_recorded ${newId} verdict=${verdict} source=${eventId}` +
+    `owner_observed_outcome_recorded ${newId} verdict=${(eventInput.payload as { verdict?: string }).verdict ?? "partial"} source=${eventId}` +
     (reason ? ` reason=${JSON.stringify(reason)}` : "") + "\n",
   );
   return 0;

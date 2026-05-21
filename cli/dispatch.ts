@@ -198,6 +198,19 @@ const dispatchTask = async (
       payload: { text: words, directive_text: words, turn_pattern: turnPattern },
     }).catch(() => null);
     const ownerInputId = ownerInputEnv?.ok ? (ownerInputEnv.result as { id?: string })?.id : undefined;
+    try {
+      const { classifyOwnerOutcomeSignal, recordOwnerObservedOutcomeViaMcp } = await import("../runtime/owner_outcome_channel");
+      const outcomeSignal = classifyOwnerOutcomeSignal(words);
+      if (outcomeSignal) {
+        await recordOwnerObservedOutcomeViaMcp(mcpCall, {
+          signal: outcomeSignal,
+          text: words,
+          owner_input_event_id: ownerInputId,
+        });
+      }
+    } catch {
+      // Outcome-channel capture is best-effort; owner_input_received remains the durable raw signal.
+    }
     const cls = classifyOwnerRenderingSignals(words, priorTexts, turnPattern);
     const languageConfidence = cls.language_distribution?.[0]?.confidence ?? cls.confidence;
     // Idempotency check (2026-05-21 emit-storm fix): every acc task invocation
