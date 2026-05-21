@@ -1369,6 +1369,13 @@ const priorScoreUpdateExists = (
   return row !== null;
 };
 
+const BRIDGE_EXIT_ACTION_ARTIFACT_ID = "opencode_brain_exit_action";
+const BRIDGE_EXIT_VERIFIER_ARTIFACT_ID = "opencode_bridge_exit_verifier";
+
+const isBridgeExitArtifactPair = (actionArtifactId?: string | null, verifierArtifactId?: string | null): boolean =>
+  actionArtifactId === BRIDGE_EXIT_ACTION_ARTIFACT_ID
+  && verifierArtifactId === BRIDGE_EXIT_VERIFIER_ARTIFACT_ID;
+
 type ScoredEventLite = {
   id: string;
   payload: string;
@@ -1453,11 +1460,13 @@ export const projectActionScoredToCredit = (
     // action_scored row should produce a credit row for both, even when
     // they aren't registered act_artifact rows (in which case the row
     // emits but the posterior update is a no-op).
-    if (typeof scoredEvent.action_artifact_id === "string" && scoredEvent.action_artifact_id.length > 0) {
-      citedArtifactIds.add(scoredEvent.action_artifact_id);
-    }
-    if (typeof scoredEvent.verifier_artifact_id === "string" && scoredEvent.verifier_artifact_id.length > 0) {
-      citedArtifactIds.add(scoredEvent.verifier_artifact_id);
+    if (!isBridgeExitArtifactPair(scoredEvent.action_artifact_id, scoredEvent.verifier_artifact_id)) {
+      if (typeof scoredEvent.action_artifact_id === "string" && scoredEvent.action_artifact_id.length > 0) {
+        citedArtifactIds.add(scoredEvent.action_artifact_id);
+      }
+      if (typeof scoredEvent.verifier_artifact_id === "string" && scoredEvent.verifier_artifact_id.length > 0) {
+        citedArtifactIds.add(scoredEvent.verifier_artifact_id);
+      }
     }
     // CITED: from action_predicted payload.cited_artifact_ids
     const payloadCited = predictedPayload.cited_artifact_ids;

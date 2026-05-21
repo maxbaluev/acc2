@@ -134,6 +134,9 @@ const ARTIFACT_METADATA_COLUMNS: Array<{ name: string; ddl: string }> = [
   { name: "supersedes",          ddl: "ALTER TABLE act_artifact ADD COLUMN supersedes TEXT" },
   { name: "superseded_by",       ddl: "ALTER TABLE act_artifact ADD COLUMN superseded_by TEXT" },
   { name: "lost_version_count",  ddl: "ALTER TABLE act_artifact ADD COLUMN lost_version_count INTEGER NOT NULL DEFAULT 0" },
+  // Data-class artifacts share the embedding version contract with events
+  // once their bodies are projected into vec_events for semantic retrieval.
+  { name: "embedding_version",   ddl: "ALTER TABLE act_artifact ADD COLUMN embedding_version TEXT" },
 ];
 
 const EVENT_HOT_PATH_INDEXES = [

@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS act_artifact (
   score                       REAL NOT NULL DEFAULT 0.5,
   confidence                  REAL NOT NULL DEFAULT 0.3,
   embedding                   BLOB,
+  embedding_version           TEXT,
   recent_residual_mean        REAL NOT NULL DEFAULT 0.0,
   recent_kill_count           INTEGER NOT NULL DEFAULT 0,
   status                      TEXT NOT NULL DEFAULT 'admitted',
