@@ -318,10 +318,11 @@ describe("dispatch_decider", () => {
     const decision = decideDispatch(db, task);
     expect(decision.route).toBe("substrate_replay");
   });
-  test("uses originPromotionByGoalShape before choosing between feasible brain and inline lanes", () => {
+  test("uses peer accuracy posteriors before choosing between feasible peer lanes", () => {
     const db = openDb(":memory:");
     runViews(db);
     const directiveText = "fix doc typo posterior routed";
+    const shape = goalShape(directiveText);
     emitEvent(db, {
       kind: "directive_opened",
       substrate_origin: "owner",
@@ -342,29 +343,47 @@ describe("dispatch_decider", () => {
         confidence: 0.8,
       },
     });
-    for (let i = 0; i < 4; i++) {
-      emitEvent(db, {
-        kind: "knowledge_candidate",
-        substrate_origin: "opencode",
-        directive_id: "d_shape",
-        task_id: "opencode_candidate_" + i,
-        payload: { claim: "brain candidate " + i },
-      });
-      emitEvent(db, {
-        kind: "knowledge_promoted",
-        substrate_origin: "opencode",
-        directive_id: "d_shape",
-        task_id: "opencode_promoted_" + i,
-        payload: { candidate_id: "brain_candidate_" + i },
-      });
-      emitEvent(db, {
-        kind: "knowledge_candidate",
-        substrate_origin: "claude_inline",
-        directive_id: "d_shape",
-        task_id: "claude_candidate_" + i,
-        payload: { claim: "inline candidate " + i },
-      });
-    }
+    const nowTs = new Date().toISOString();
+    db.run(
+      `INSERT INTO act_artifact (id, runtime, kind, body, declared_sandbox, posterior_alpha, posterior_beta, score, confidence, status, name, fixture_expected_residual, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        `brain_accuracy_predicate:opencode:${shape}`,
+        "bun",
+        "brain_accuracy_predicate",
+        `// peer=opencode goal_shape=${shape}`,
+        "{}",
+        9,
+        1,
+        0.95,
+        0.8,
+        "admitted",
+        `brain_accuracy_predicate_opencode_${shape}`,
+        0,
+        nowTs,
+        nowTs,
+      ],
+    );
+    db.run(
+      `INSERT INTO act_artifact (id, runtime, kind, body, declared_sandbox, posterior_alpha, posterior_beta, score, confidence, status, name, fixture_expected_residual, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        `brain_accuracy_predicate:claude_inline:${shape}`,
+        "bun",
+        "brain_accuracy_predicate",
+        `// peer=claude_inline goal_shape=${shape}`,
+        "{}",
+        1,
+        9,
+        0.05,
+        0.8,
+        "admitted",
+        `brain_accuracy_predicate_claude_inline_${shape}`,
+        0,
+        nowTs,
+        nowTs,
+      ],
+    );
 
     const decision = decideDispatch(db, sampleTask({
       directive_id: "d_shape",
@@ -374,9 +393,9 @@ describe("dispatch_decider", () => {
 
     expect(decision.route).toBe("opencode_brain");
     expect(decision.route_scores.opencode_brain).toBeGreaterThan(decision.route_scores.claude_inline);
-    expect(decision.verifier_evidence.origin_promotion_adjustment_applied).toBe(1);
-    expect(decision.verifier_evidence.origin_promotion_opencode_brain_posterior).toBe(1);
-    expect(decision.verifier_evidence.origin_promotion_claude_inline_posterior).toBe(0);
+    expect(decision.verifier_evidence.peer_accuracy_adjustment_applied).toBe(1);
+    expect(decision.verifier_evidence.peer_accuracy_opencode_brain_score).toBeGreaterThan(0.9);
+    expect(decision.verifier_evidence.peer_accuracy_claude_inline_predicted_residual).toBeGreaterThan(0.9);
   });
 
   test("uses learned open-ended axes to choose among feasible non-blocked routes", () => {

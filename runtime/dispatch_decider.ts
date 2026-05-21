@@ -22,7 +22,7 @@ import type { TaskNode } from "./task_topology";
 import { readCurrentMode } from "./crisis_mode";
 import { blockersOf } from "./interference";
 import { findRecipeMatch as findRealRecipeMatch } from "./recipe_replay";
-import { lowRiskInlinePatterns, originPromotionByGoalShape } from "../substrate/views";
+import { lowRiskInlinePatterns } from "../substrate/views";
 import { parseResourceRefs, resourceMatchesPattern, type ResourceRef } from "./resource_uri";
 import { betaMean as canonicalBetaMean, betaEvidenceConfidence } from "./posterior";
 import { goalShape as computeGoalShape } from "./goal_shape";
@@ -350,14 +350,31 @@ const chooseHighestScoredRoute = (routeScores: DispatchRouteScores, feasibleRout
   return best;
 };
 
-const POSTERIOR_ROUTED_ORIGINS: Record<"opencode_brain" | "claude_inline", string[]> = {
-  opencode_brain: ["opencode", "opencode_brain"],
-  claude_inline: ["claude_inline", "claude_root", "claude"],
+const BRAIN_ACCURACY_ARTIFACT_PREFIX = "brain_accuracy_predicate:";
+
+const POSTERIOR_ROUTED_PEER_HINTS: Record<"opencode_brain" | "claude_inline", { kinds: string[]; origins: string[] }> = {
+  opencode_brain: { kinds: ["opencode"], origins: ["opencode", "opencode_brain"] },
+  claude_inline: { kinds: ["claude_root", "claude_agent", "claude"], origins: ["claude_inline", "claude_root", "claude_agent", "claude"] },
 };
 
-type OriginPromotionRouteAdjustment = {
+type PeerAccuracyRouteAdjustment = {
   route_scores: DispatchRouteScores;
   verifier_evidence: Record<string, number>;
+};
+
+type PeerActivityRow = {
+  peer_id: string | null;
+  kind: string | null;
+  spawnability: string | null;
+  liveness_verdict: string | null;
+  latest_activity_event_id: string | null;
+};
+
+type PeerAccuracyPosterior = {
+  artifact_id: string;
+  score: number;
+  confidence: number;
+  predicted_residual: number;
 };
 
 const currentGoalShapeForTask = (db: Database, task: TaskNode): string => {
@@ -368,45 +385,108 @@ const currentGoalShapeForTask = (db: Database, task: TaskNode): string => {
   return computeGoalShape(directiveText || goal || intent || task.goal);
 };
 
-const applyOriginPromotionRouteAdjustment = (
+const readPeerActivityRows = (db: Database): PeerActivityRow[] => {
+  try {
+    return db
+      .query(
+        `SELECT peer_id, kind, spawnability, liveness_verdict, latest_activity_event_id
+         FROM peer_activity_view
+         WHERE liveness_verdict = 'live'`,
+      )
+      .all() as PeerActivityRow[];
+  } catch {
+    return [];
+  }
+};
+
+const routePeerTokens = (route: "opencode_brain" | "claude_inline", peerRows: PeerActivityRow[]): string[] => {
+  const hints = POSTERIOR_ROUTED_PEER_HINTS[route];
+  const tokens = new Set<string>([...hints.origins, ...hints.kinds]);
+  for (const row of peerRows) {
+    const kind = typeof row.kind === "string" ? row.kind : "";
+    if (!hints.kinds.includes(kind) && !hints.origins.includes(kind)) continue;
+    if (typeof row.peer_id === "string" && row.peer_id.trim()) tokens.add(row.peer_id.trim());
+    if (typeof row.spawnability === "string" && row.spawnability.trim()) tokens.add(row.spawnability.trim());
+  }
+  return Array.from(tokens).map((t) => t.toLowerCase());
+};
+
+const readPeerAccuracyPosteriors = (
+  db: Database,
+  goalShapeToken: string,
+  peerTokens: string[],
+): PeerAccuracyPosterior[] => {
+  if (peerTokens.length === 0) return [];
+  const needle = `%${goalShapeToken}%`;
+  let rows: Array<{ id: string; name: string | null; body: string; score: number; confidence: number }> = [];
+  try {
+    rows = db
+      .query(
+        `SELECT id, name, body, score, confidence
+         FROM act_artifact
+         WHERE kind = 'brain_accuracy_predicate'
+           AND status NOT IN ('quarantined', 'retired')
+           AND (id LIKE ? OR name LIKE ? OR body LIKE ?)`,
+      )
+      .all(needle, needle, needle) as Array<{ id: string; name: string | null; body: string; score: number; confidence: number }>;
+  } catch {
+    return [];
+  }
+
+  const tokenSet = new Set(peerTokens);
+  return rows
+    .filter((row) => {
+      const haystack = `${row.id} ${row.name ?? ""} ${row.body ?? ""}`.toLowerCase();
+      return haystack.includes(BRAIN_ACCURACY_ARTIFACT_PREFIX) && Array.from(tokenSet).some((token) => haystack.includes(token));
+    })
+    .map((row) => {
+      const score = clamp01(row.score);
+      return {
+        artifact_id: row.id,
+        score,
+        confidence: clamp01(row.confidence),
+        predicted_residual: clamp01(1 - score),
+      };
+    });
+};
+
+const applyPeerAccuracyRouteAdjustment = (
   db: Database,
   task: TaskNode,
   routeScores: DispatchRouteScores,
   feasibleRoutes: DispatchRoute[],
-): OriginPromotionRouteAdjustment => {
+): PeerAccuracyRouteAdjustment => {
   const adjusted: DispatchRouteScores = { ...routeScores };
   const evidence: Record<string, number> = {};
-  if (!feasibleRoutes.includes("opencode_brain") || !feasibleRoutes.includes("claude_inline")) {
-    return { route_scores: adjusted, verifier_evidence: evidence };
-  }
+  const peerRoutes = feasibleRoutes.filter((r): r is "opencode_brain" | "claude_inline" => r === "opencode_brain" || r === "claude_inline");
+  if (peerRoutes.length === 0) return { route_scores: adjusted, verifier_evidence: evidence };
 
-  let rows: ReturnType<typeof originPromotionByGoalShape> = [];
   const shape = currentGoalShapeForTask(db, task);
-  try {
-    rows = originPromotionByGoalShape(db, computeGoalShape).filter((r) => r.goal_shape === shape);
-  } catch {
-    return { route_scores: adjusted, verifier_evidence: evidence };
+  const peerRows = readPeerActivityRows(db);
+  evidence.peer_accuracy_goal_shape_present = shape ? 1 : 0;
+  evidence.peer_activity_live_count = peerRows.length;
+
+  let applied = 0;
+  for (const route of peerRoutes) {
+    const peerTokens = routePeerTokens(route, peerRows);
+    const posteriors = readPeerAccuracyPosteriors(db, shape, peerTokens);
+    evidence[`peer_accuracy_${route}_posterior_count`] = posteriors.length;
+    if (posteriors.length === 0) continue;
+
+    const totalConfidence = posteriors.reduce((sum, p) => sum + p.confidence, 0);
+    const weightedScore = totalConfidence > 0
+      ? posteriors.reduce((sum, p) => sum + p.score * p.confidence, 0) / totalConfidence
+      : posteriors.reduce((sum, p) => sum + p.score, 0) / posteriors.length;
+    const confidence = clamp01(totalConfidence / posteriors.length);
+    const posteriorScore = clamp01(weightedScore);
+    evidence[`peer_accuracy_${route}_score`] = posteriorScore;
+    evidence[`peer_accuracy_${route}_confidence`] = confidence;
+    evidence[`peer_accuracy_${route}_predicted_residual`] = clamp01(1 - posteriorScore);
+    adjusted[route] = clamp01((adjusted[route] ?? 0) * (1 - confidence) + posteriorScore * confidence);
+    applied = 1;
   }
 
-  evidence.origin_promotion_goal_shape_present = rows.length > 0 ? 1 : 0;
-  for (const route of ["opencode_brain", "claude_inline"] as const) {
-    const origins = new Set(POSTERIOR_ROUTED_ORIGINS[route]);
-    let candidates = 0;
-    let promoted = 0;
-    for (const row of rows) {
-      if (!origins.has(row.substrate_origin)) continue;
-      candidates += row.candidate_count;
-      promoted += row.promoted_count;
-    }
-    evidence["origin_promotion_" + route + "_candidates"] = candidates;
-    evidence["origin_promotion_" + route + "_promoted"] = promoted;
-    if (candidates <= 0) continue;
-    const posterior = clamp01(promoted / candidates);
-    evidence["origin_promotion_" + route + "_posterior"] = posterior;
-    adjusted[route] = clamp01((adjusted[route] ?? 0) * 0.5 + posterior * 0.5);
-  }
-
-  evidence.origin_promotion_adjustment_applied = Object.keys(evidence).some((k) => k.endsWith("_posterior")) ? 1 : 0;
+  evidence.peer_accuracy_adjustment_applied = applied;
   return { route_scores: adjusted, verifier_evidence: evidence };
 };
 
@@ -807,10 +887,11 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
   if (!hardness.is_hard && matchedInlinePatterns && matchedInlinePatterns.length > 0) feasibleRoutes.push("claude_inline");
 
   // Route availability still fails closed (no recipe/no inline knowledge means
-  // no such lane). When both LLM lanes pass risk/owner gates, fold in the
-  // per-(goal_shape, substrate_origin) promotion posterior before selecting
-  // between claude_inline and opencode_brain.
-  const posteriorAdjusted = applyOriginPromotionRouteAdjustment(db, task, baseEvidence.route_scores, feasibleRoutes);
+  // no such lane). When a peer lane is feasible, fold in the per-peer,
+  // per-goal-shape brain_accuracy_predicate posterior before selecting.
+  // Missing peer posteriors are a cold-start condition, not a blocker: the
+  // static route scores remain the fallback.
+  const posteriorAdjusted = applyPeerAccuracyRouteAdjustment(db, task, baseEvidence.route_scores, feasibleRoutes);
 
   // Shadow ranker (2026-05-17 brain design 48SN4XF3WN4KBBCHHCANDRDQRW):
   // compute dispatch_strategy_v1 artifact rankings ALONGSIDE the
