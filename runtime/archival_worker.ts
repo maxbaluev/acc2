@@ -97,6 +97,9 @@ const COMPRESS_SUMMARY_KINDS = new Set<string>([
   "kernel_sandbox_check",
   "owner_identity_check",
   "deterministic_computation_check",
+  // Noisy operational telemetry: archive after the standard 30-day cutoff.
+  "father_yielded",
+  "artifact_kind_inference_uncertain",
 ]);
 
 const DROP_KINDS = new Set<string>([
