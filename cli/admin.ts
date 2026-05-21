@@ -53,6 +53,7 @@ import { runCleanTempState } from "./admin_clean_temp";
 import { runEmbedAll } from "./admin_embed_all";
 import { runSubstrateStatus } from "./admin_substrate_status";
 import { runExportKnowledge } from "./admin_export_knowledge";
+import { runExportCanonicalCmd } from "./admin_export_canonical";
 import { runDispatchStatus } from "./admin_dispatch_status";
 import { runHotreloadStatus } from "./admin_hotreload_status";
 import { runPendingDecisions } from "./admin_pending_decisions";
@@ -85,6 +86,14 @@ const usage = (): string => `acc admin — operator-side maintenance
                               rows NEVER ship. recipe goal_text hashed.
                               Distinct from \`export\` (which is the full
                               state.db); --yes is the owner-approval gate.
+    export-canonical <path> [--yes]
+                              Build release-owned canonical.db (Architecture
+                              §16 portable-wisdom boundary). Ships predicate /
+                              recipe / prompt-bundle / verifier act_artifacts +
+                              portable promoted knowledge with posteriors
+                              preserved; owner identity stripped. Deny-by-
+                              default: do_not_export + owner-local kinds + raw
+                              owner text NEVER ship. --yes is the release gate.
 
   Secrets:
     rotate-admin-token        Mint a fresh admin token (write 0600 to token file).
@@ -795,6 +804,13 @@ export const runAdmin = async (argv: string[], envOverride?: AdminEnv): Promise<
   // owner_input/owner_decision/owner_observed rows.
   if (sub === "export-knowledge") return runExportKnowledge(argv.slice(1), {
     out: env.out, err: env.err, yes: env.yes,
+  });
+  if (sub === "export-canonical") return runExportCanonicalCmd(argv.slice(1), {
+    out: env.out,
+    err: env.err,
+    yes: env.yes,
+    sourceDbPath: env.stateDbPath ?? defaultStateDbPath(),
+    openSubstrate: () => (env.openSubstrate ?? openDb)(env.stateDbPath ?? defaultStateDbPath()),
   });
   if (sub === "import") return runImportCmd(argv.slice(1), env);
   if (sub === "rotate-admin-token") return runRotateAdminTokenCmd(argv.slice(1), env);
