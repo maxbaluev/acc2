@@ -57,8 +57,18 @@ const applyWalPragmas = (db: Database): void => {
   db.run("PRAGMA synchronous = NORMAL");
   db.run("PRAGMA busy_timeout = 5000");
   db.run("PRAGMA foreign_keys = ON");
-  db.run("PRAGMA cache_size = 10000");
-  db.run("PRAGMA mmap_size = 268435456");
+  // 2026-05-21 tuning bump: 326K-event substrate showed worker first-ticks
+  // doing aggregate queries that thrashed the 40MB page cache. Bumping
+  // cache to ~200MB (50K pages × 4KB) keeps frequently-queried views
+  // (event_kind_occurrence, worker_liveness, etc.) hot.
+  db.run("PRAGMA cache_size = 50000");
+  // 1GB mmap supports the current state.db growth path (782MB observed)
+  // without re-mmapping on each new page. Linux maps lazily so unused
+  // bytes don't reserve physical memory.
+  db.run("PRAGMA mmap_size = 1073741824");
+  // Temp tables and intermediate sorts live in RAM, not on disk. Speeds
+  // up aggregate worker queries that materialize temp result sets.
+  db.run("PRAGMA temp_store = MEMORY");
   // WAL hygiene (foundational fix 2026-05-16). Pre-fix the WAL grew to
   // 303MB in a single session because the integrity worker (the only
   // explicit checkpoint caller) fires every 6h AND the daemon was
