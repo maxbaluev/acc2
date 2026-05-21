@@ -322,16 +322,24 @@ export const spawnRealOpencode = async (
     return { ok: false, reason: { kind: "parse_error", raw: (err as Error).message } };
   }
 
-  // Keep the CLI invocation small and stable. Large prompts passed as a
-  // positional argv correlate with opencode startup/MCP-registration stalls
-  // (observed mcp_handshake_timed_out / silent_dispatch_quarantine on
-  // prompts >5K chars throughout the 2026-05-20 session). Stage the full
-  // prompt inside the isolated workspace as a file and boot opencode with
-  // only a short instruction to read it before acting — handshake window
-  // stays clean regardless of prompt size.
+  // `opencode run` expects the message as positional args; piping via stdin
+  // is not the documented path. We pass --format=json so opencode emits one
+  // JSON event per stdout line. Do NOT pass
+  // --dangerously-skip-permissions: the per-dispatch config keeps the brain
+  // on the positive read-only tool surface.
   //
-  // Do NOT pass --dangerously-skip-permissions: the per-dispatch config keeps
-  // the brain on the positive read-only tool surface.
+  // 2026-05-21 reversal: earlier commits eb8e3bd + fccbb1b tried to stage
+  // the prompt as a file and boot opencode with a short "read this file"
+  // instruction, on the theory that large positional argv was correlated
+  // with MCP-handshake stalls. The file-staging strategy is structurally
+  // incompatible with opencode's tool permission policy: opencode's "read"
+  // tool computes the workspace from project detection (typically the
+  // process.cwd of acc when spawned, NOT the spawn `cwd` we pass) and
+  // refuses any path the brain reads — both absolute (/tmp/...) and
+  // relative (./brain-prompt.md) — because the file is outside the brain's
+  // declared workspace. The transient-cap fix from 788fb05 is the right
+  // answer for handshake races; we keep the prompt on argv.
+  //
   // Sandbox the brain's CWD AND env. When `checkoutIsolation` is explicit,
   // honor it (workflow-isolated dispatches, tests). Otherwise spawn the
   // brain in a per-dispatch empty tempdir so its built-in filesystem tools
@@ -343,18 +351,6 @@ export const spawnRealOpencode = async (
   const brainWorkspace = req.checkoutIsolation?.root
     ?? mkdtempSync(join(tmpdir(), "acc2-brain-ws-"));
   const brainWorkspaceIsEphemeral = req.checkoutIsolation === undefined;
-  // The prompt file lives at the workspace root and is referenced by RELATIVE
-  // path in the boot instruction because opencode's tool permission policy
-  // denies absolute paths outside the agent workspace (CWD = brainWorkspace).
-  // Observed 2026-05-20T23:36 (directive 2RYTVWYXWH2BBDHZVDDENEG8DW): brain
-  // refused `Read /tmp/acc2-brain-ws-<X>/brain-prompt.md` saying "tool
-  // permission policy denies access to external directories". The file is
-  // technically inside the workspace because CWD is set to brainWorkspace,
-  // but the absolute path triggers the deny rule. Relative reference works.
-  const PROMPT_FILENAME = "brain-prompt.md";
-  const promptPath = join(brainWorkspace, PROMPT_FILENAME);
-  await Bun.write(promptPath, req.prompt);
-  const bootPrompt = `Read ./${PROMPT_FILENAME} (in your current working directory) first, then follow it exactly. Your first externally meaningful action must satisfy the prompt's substrate tool-use invariant.`;
   let proc: ReturnType<typeof spawn>;
   try {
     proc = spawn([
@@ -362,7 +358,7 @@ export const spawnRealOpencode = async (
       "--format=json",
       "--model", model,
       "--agent", BRAIN_OPENCODE_AGENT_NAME,
-      bootPrompt,
+      req.prompt,
     ], {
       cwd: brainWorkspace,
       stdout: "pipe",
