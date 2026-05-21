@@ -312,6 +312,7 @@ const dispatchTask = async (
     stream: true,
     exitOnTerminal: true,
     deadlineMs: opts.timeoutSecs ? Date.now() + opts.timeoutSecs * 1000 : undefined,
+    detachOnDeadline: Boolean(opts.timeoutSecs),
     // Eager heartbeat fires at t+5s from dispatch start so the trailing-5-
     // line background_tasks panel always shows brain-progress signal during
     // the pre-event window, not stale prompt-echo.

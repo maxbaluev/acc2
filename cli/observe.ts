@@ -860,8 +860,10 @@ export type TailOpts = EventsOpts & {
   /** Stop after the FIRST terminal event matching task/directive scope.
    *  Default true when scope is specified, false otherwise. */
   exitOnTerminal?: boolean;
-  /** Absolute deadline (Date.now() + ms). When exceeded, exit non-zero. */
+  /** Absolute deadline (Date.now() + ms). When exceeded, exit non-zero unless detachOnDeadline is set. */
   deadlineMs?: number;
+  /** Return success with a detach message when the follow budget elapses. */
+  detachOnDeadline?: boolean;
   /** Use SSE push (canonical, ~realtime) instead of polling. Default true —
    *  SSE eliminates the 2s poll lag and the missed-events-between-polls window.
    *  Polling is the fallback used only when SSE cannot connect. */
@@ -888,6 +890,7 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
   const exitOnTerminal = opts.exitOnTerminal ?? Boolean(opts.task || opts.directive);
   const deadlineMs = opts.deadlineMs;
   const ac = new AbortController();
+  let deadlineExpired = false;
   let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   if (deadlineMs) {
     const ms = deadlineMs - Date.now();
@@ -895,7 +898,10 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
       console.error("acc tail: deadline already exceeded");
       return 2;
     }
-    deadlineTimer = setTimeout(() => ac.abort(), ms);
+    deadlineTimer = setTimeout(() => {
+      deadlineExpired = true;
+      ac.abort();
+    }, ms);
   }
   let sawTerminal = false;
   let terminalCheckInFlight = false;
@@ -981,6 +987,10 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
   } catch (err) {
     if (ac.signal.aborted) {
       if (sawTerminal) return 0;
+      if (deadlineExpired && opts.detachOnDeadline) {
+        console.log("acc task: follow budget elapsed; detached while the directive continues in the background");
+        return 0;
+      }
       if (deadlineMs) {
         console.error("acc tail: deadline exceeded (no terminal event)");
         return 2;
@@ -1005,6 +1015,10 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
   // reconnect=false and a fatal error occurs OR when signal aborts during
   // a backoff sleep. With reconnect=true the generator should not exhaust.
   if (sawTerminal) return 0;
+  if (deadlineExpired && opts.detachOnDeadline) {
+    console.log("acc task: follow budget elapsed; detached while the directive continues in the background");
+    return 0;
+  }
   console.error("acc tail: SSE stream closed before any terminal event (daemon may have stopped)");
   return 3;
 };
@@ -1074,6 +1088,10 @@ const runTailPoll = async (opts: TailOpts): Promise<number> => {
     // do not carry the directive/root pair needed to query the projection.
     if (sawTerminal && exitOnTerminal && !canReadResolvedDispatch) return 0;
     if (deadlineMs && Date.now() > deadlineMs) {
+      if (opts.detachOnDeadline) {
+        console.log("acc task: follow budget elapsed; detached while the directive continues in the background");
+        return 0;
+      }
       console.error("acc tail: deadline exceeded (no terminal event)");
       return 2;
     }
