@@ -663,6 +663,68 @@ const gateAutonomousCommitByOwnerOutcomeForecast = async (
   };
 };
 
+const ownerRenderingRoute = (verdict: string): ApplyRoute => {
+  switch (verdict) {
+    case "violates_avoided_term":
+    case "wrong_language":
+    case "exposes_declined_concept":
+      return "NEEDS_BRAIN_RECYCLE";
+    case "clean":
+    default:
+      return "OWNER_GATE";
+  }
+};
+
+const ownerVisibleDraftFromPayload = (payload: Record<string, unknown>): unknown => {
+  if (typeof payload.owner_visible_text === "string") return payload.owner_visible_text;
+  if (typeof payload.rendered_message === "string" || (payload.rendered_message && typeof payload.rendered_message === "object")) return payload.rendered_message;
+  if (typeof payload.message_draft === "string" || (payload.message_draft && typeof payload.message_draft === "object")) return payload.message_draft;
+  return undefined;
+};
+
+const evaluateAutonomousCommitOwnerRendering = async (
+  payload: Record<string, unknown>,
+) => {
+  try {
+    const [{ evaluateOwnerRendering }, policyEnv] = await Promise.all([
+      import("../runtime/owner_rendering"),
+      mcpCall("substrate.read", { view_name: "owner_rendering_policy_view" }),
+    ]);
+    if (!policyEnv.ok) return { residual: 0, verdict: "clean" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+    const policyRow = Array.isArray(policyEnv.result) ? (policyEnv.result[0] as { profile_payload?: unknown } | undefined) : undefined;
+    const profile = parsePayload(policyRow?.profile_payload);
+    return evaluateOwnerRendering({
+      rendered_message: ownerVisibleDraftFromPayload(payload),
+      owner_profile: profile,
+      candidate_language: typeof payload.detected_language === "string" ? payload.detected_language : undefined,
+    });
+  } catch {
+    return { residual: 0, verdict: "clean" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+  }
+};
+
+const gateAutonomousCommitByOwnerRendering = async (
+  decision: ApplyRouteDecision,
+  payload: Record<string, unknown>,
+): Promise<ApplyRouteDecision> => {
+  const rendering = await evaluateAutonomousCommitOwnerRendering(payload);
+  if (rendering.residual < 0.6 && rendering.verdict === "clean") return decision;
+  return {
+    route: ownerRenderingRoute(rendering.verdict),
+    score: 1,
+    confidence: 0.85,
+    deterministic: false,
+    reason: "owner_rendering_predicate",
+    preconditions: {
+      ...decision.preconditions,
+      owner_rendering_residual: rendering.residual,
+      owner_rendering_verdict: rendering.verdict,
+      owner_rendering_breakdown: rendering.breakdown,
+      owner_rendering_reasons: rendering.reasons,
+    },
+  };
+};
+
 const gateAutonomousCommit = async (
   decision: ApplyRouteDecision,
   payload: Record<string, unknown>,
@@ -677,7 +739,9 @@ const gateAutonomousCommit = async (
   if (metacognitiveDecision.route !== "AUTO_APPLY") return metacognitiveDecision;
   const continualDecision = await gateAutonomousCommitByContinualOwnerState(metacognitiveDecision, payload, targets);
   if (continualDecision.route !== "AUTO_APPLY") return continualDecision;
-  return gateAutonomousCommitByOwnerOutcomeForecast(continualDecision, payload, targets);
+  const forecastDecision = await gateAutonomousCommitByOwnerOutcomeForecast(continualDecision, payload, targets);
+  if (forecastDecision.route !== "AUTO_APPLY") return forecastDecision;
+  return gateAutonomousCommitByOwnerRendering(forecastDecision, payload);
 };
 
 const deterministicApplyRoute = async (
