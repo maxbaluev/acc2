@@ -216,6 +216,16 @@ export type VerifyClosureAuditInput = {
   /** Residual the brain asserted. Used to gate the hard precondition
    *  (target_files check fires only when this is < 0.3). */
   asserted_residual: number;
+  /** 2026-05-21 leniency fix: count of RAW checks the brain emitted
+   *  (boolean AND non-boolean). The gate only verifies boolean claims, so
+   *  when the brain emits non-boolean checks (axis values / verdict
+   *  strings) they were silently dropped → empty substrate_verifications →
+   *  residual fell back to the brain's asserted value. Both terminals hit
+   *  this: a task committed at residual 0.08 with checks=0/6 satisfied.
+   *  raw_claim_count lets the residual derivation distinguish "brain made
+   *  claims the substrate couldn't verify" (fail-closed) from "brain made
+   *  no claims at all" (legitimately falls back to asserted). */
+  raw_claim_count?: number;
   /** Any other fields the brain stamped on the closure payload —
    *  preserved on the augmented output so historical readers keep
    *  working (k_204 save richness). */
@@ -395,8 +405,18 @@ export const verifyClosureAudit = (
   // residual rather than synthesising a pass. This preserves the
   // path where a brain emits a residual without any named checks
   // (still legal, just unverified).
+  // 2026-05-21 leniency fix (k_252, both terminals): when the substrate
+  // verified NOTHING but the brain DID emit checks (raw_claim_count > 0)
+  // AND asserts a passing residual (< 0.3), the substrate cannot confirm
+  // closure — it must NOT auto-pass on the brain's unverifiable word.
+  // Bump to 0.3 (the gate boundary; not a hard 1.0 block so genuine
+  // self-reported partials aren't punished, but it can no longer slip
+  // under the < 0.3 auto-pass bar). The legitimate fall-back to
+  // asserted_residual survives ONLY when the brain made NO claims at all
+  // (raw_claim_count 0) — truly nothing for the substrate to verify.
+  const rawClaims = input.raw_claim_count ?? 0;
   const residual = Object.keys(substrateVerifications).length === 0
-    ? input.asserted_residual
+    ? (rawClaims > 0 && input.asserted_residual < 0.3 ? 0.3 : input.asserted_residual)
     : (anyFailedVerification ? 1.0 : 0);
 
   // Discrepancies: claims that disagree with substrate verifications.

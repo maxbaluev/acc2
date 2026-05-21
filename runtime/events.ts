@@ -231,6 +231,11 @@ const runClosureAuditTruthGate = (db: Database, input: EmitEventInput): JsonValu
       : (targetFiles.length > 0 ? { target_files: targetFiles } : undefined),
     brain_claims: brainClaims,
     asserted_residual: assertedResidual,
+    // Raw check count (boolean + non-boolean) so the gate can fail-closed
+    // when the brain emitted checks the substrate couldn't verify as
+    // booleans — instead of silently falling back to the asserted residual
+    // (the 0.08-with-0/6-checks leniency bug).
+    raw_claim_count: checks ? Object.keys(checks).length : 0,
     legacy_fields: legacyFields,
   });
   // Project brain_claims back onto `checks` for legacy renderers that
