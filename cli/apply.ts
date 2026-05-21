@@ -582,6 +582,87 @@ const gateAutonomousCommitByContinualOwnerState = async (
   };
 };
 
+const ownerOutcomeForecastRoute = (predicted: string): ApplyRoute => {
+  switch (predicted) {
+    case "reject": return "NEEDS_BRAIN_RECYCLE";
+    case "revise": return "OWNER_GATE";
+    case "accept":
+    default:
+      return "OWNER_GATE";
+  }
+};
+
+const evaluateAutonomousCommitOwnerOutcomeForecast = async (
+  decision: ApplyRouteDecision,
+  payload: Record<string, unknown>,
+  targets: readonly string[],
+) => {
+  try {
+    const [{ evaluateOwnerOutcomeForecast }, profileEnv, recentEnv] = await Promise.all([
+      import("../runtime/owner_outcome_forecast"),
+      mcpCall("substrate.read", { view_name: "owner_profile_view" }),
+      mcpCall("runtime.recent_events", { k: 50, kinds: ["owner_input_received", "owner_decision_recorded", "owner_observed_outcome_recorded"] }),
+    ]);
+    if (!profileEnv.ok) return { residual: 0, predicted_owner_verdict: "accept" as const, verdict: "aligned" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+    const profileRow = Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
+    const profile = parsePayload(profileRow?.payload);
+    const recentEvents = recentEnv.ok ? ((recentEnv.result as { events?: EventRow[] } | null)?.events ?? []) : [];
+    const ownerHistory = recentEvents.map((row) => {
+      const eventPayload = parsePayload(row.payload);
+      return {
+        kind: row.kind,
+        ts: row.ts,
+        text: ownerGoalDriftText(row),
+        signal: typeof eventPayload.signal === "string" ? eventPayload.signal : undefined,
+        verdict: typeof eventPayload.verdict === "string" ? eventPayload.verdict : undefined,
+        residual: eventPayload.observed_residual ?? eventPayload.residual,
+      };
+    }).filter((row) => row.text.length > 0 || row.signal || row.verdict);
+    return evaluateOwnerOutcomeForecast({
+      candidate_predicted_verdict: "accept",
+      proposed_action: {
+        intent: typeof payload.intent === "string" ? payload.intent : undefined,
+        summary: JSON.stringify(payload.proposed_behavior ?? payload.proposed_action ?? payload),
+        owner_visible_text: typeof payload.owner_visible_text === "string" ? payload.owner_visible_text : undefined,
+        route: decision.route,
+        target_resources: [...targets],
+        reversible: true,
+        risk: decision.score < 0.7 ? 0.5 : payload.risk,
+        novelty: payload.classification === "novel" ? 0.8 : payload.novelty,
+      },
+      owner_profile: profile,
+      owner_history: ownerHistory,
+      upstream_residuals: decision.preconditions,
+    });
+  } catch {
+    return { residual: 0, predicted_owner_verdict: "accept" as const, verdict: "aligned" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+  }
+};
+
+const gateAutonomousCommitByOwnerOutcomeForecast = async (
+  decision: ApplyRouteDecision,
+  payload: Record<string, unknown>,
+  targets: readonly string[],
+): Promise<ApplyRouteDecision> => {
+  const forecast = await evaluateAutonomousCommitOwnerOutcomeForecast(decision, payload, targets);
+  if (forecast.residual < 0.6 && forecast.predicted_owner_verdict === "accept") return decision;
+  return {
+    route: ownerOutcomeForecastRoute(forecast.predicted_owner_verdict),
+    score: 1,
+    confidence: 0.85,
+    deterministic: false,
+    reason: "owner_outcome_forecast_predicate",
+    preconditions: {
+      ...decision.preconditions,
+      owner_outcome_forecast_residual: forecast.residual,
+      owner_outcome_forecast_predicted_verdict: forecast.predicted_owner_verdict,
+      owner_outcome_forecast_verdict: forecast.verdict,
+      owner_outcome_forecast_breakdown: forecast.breakdown,
+      owner_outcome_forecast_reasons: forecast.reasons,
+    },
+  };
+};
+
 const gateAutonomousCommit = async (
   decision: ApplyRouteDecision,
   payload: Record<string, unknown>,
@@ -594,7 +675,9 @@ const gateAutonomousCommit = async (
   if (delegationDecision.route !== "AUTO_APPLY") return delegationDecision;
   const metacognitiveDecision = await gateAutonomousCommitByMetacognitiveOwnerPolicy(delegationDecision, payload, targets);
   if (metacognitiveDecision.route !== "AUTO_APPLY") return metacognitiveDecision;
-  return gateAutonomousCommitByContinualOwnerState(metacognitiveDecision, payload, targets);
+  const continualDecision = await gateAutonomousCommitByContinualOwnerState(metacognitiveDecision, payload, targets);
+  if (continualDecision.route !== "AUTO_APPLY") return continualDecision;
+  return gateAutonomousCommitByOwnerOutcomeForecast(continualDecision, payload, targets);
 };
 
 const deterministicApplyRoute = async (

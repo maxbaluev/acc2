@@ -2330,6 +2330,8 @@ const PREDICATE_SEEDS: PredicateSeed[] = [
     why: "S0 forecast — pre-commit owner outcome forecasting, now downstream of drift + policy + safety rather than acting alone.",
     closure_predicate: "forecast residual converges to observed owner residual; consumes upstream S0 floor + policy + safety residuals.",
     metric_direction: "owner-forecast residual falls.",
+    evaluator_artifact_id: "owner_outcome_forecast_evaluator_v1",
+    consumer_gate: "cli/apply.ts deterministicApplyRoute gates AUTO_APPLY on owner_outcome_forecast_predicate after continual owner-state; reject forecasts recycle, revise forecasts route to owner gate, and later owner_observed_outcome_recorded rows calibrate residuals through runtime/owner_outcome_channel.ts",
     display_name: "Owner outcome forecast — pre-commit prediction consuming drift/policy/safety",
   },
   {
