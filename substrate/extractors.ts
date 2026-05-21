@@ -1300,7 +1300,12 @@ export const extractSemanticDedup = async (db: Database): Promise<SemanticDedupS
 // scanLimit / windowDays / knn remain non-adaptive — they bound the
 // per-tick work, not the merger semantics.
 export const CROSS_CANDIDATE_CORROBORATION_CONFIG = {
-  scanLimit: 500,
+  // 2026-05-21: scanLimit 500→120. Each candidate runs a vec0 knn search
+  // (~44ms); 500/tick was ~22s of CPU even after the candidates-query +
+  // 2a-Set O(n²) fixes. The extractor runs reactively + every 5min, so a
+  // 120-candidate batch (~5s) still drains the unverified backlog steadily
+  // without pinning the daemon. Bounds per-tick work, not merger semantics.
+  scanLimit: 120,
   windowDays: 30,
   cosineThreshold: 0.88,
   promotedScoreThreshold: 0.85,
@@ -1374,17 +1379,32 @@ export const extractCrossCandidateCorroboration = async (
   //    candidate id yet. The NOT-EXISTS sub-query LIKE-matches the
   //    candidate id token in context_refs JSON (mirrors the pattern
   //    used in maybePromoteKnowledge / extractSemanticDedup).
+  // 2026-05-21 O(n²)→O(n) fix (owner: avoid O(n²), stay fast/reactive).
+  // Pre-fix this used a CORRELATED `NOT EXISTS (… context_refs LIKE
+  // '%"'||events.id||'"%')` — a leading-% LIKE (un-indexable) scanned over
+  // all candidate_confirmed/contradicted events (37K+ on the live DB) FOR
+  // EVERY knowledge_candidate in the window, until 500 unverified passed.
+  // Since most candidates ARE confirmed, SQLite evaluated the full-scan
+  // LIKE for thousands of candidates = O(N×M). Measured 48,625 ms — the
+  // entire daemon-CPU burden ran through this one extractor.
+  //
+  // Fix: materialize the verified-candidate-id set ONCE via json_each over
+  // the confirmed/contradicted context_refs arrays, then anti-join with
+  // `id NOT IN (…)`. One scan + a hash anti-join instead of N full-scan
+  // LIKEs. Semantics preserved (a candidate is "verified" iff some
+  // confirmed/contradicted event cites its id in context_refs).
   const candidates = db
     .query(
-      `SELECT id, ts, directive_id, task_id, loop_id, payload
+      `WITH verified_candidate_ids AS (
+         SELECT DISTINCT je.value AS cand_id
+         FROM events v, json_each(v.context_refs) je
+         WHERE v.kind IN ('candidate_confirmed', 'candidate_contradicted')
+       )
+       SELECT id, ts, directive_id, task_id, loop_id, payload
        FROM events
        WHERE kind = 'knowledge_candidate'
          AND ts > ?
-         AND NOT EXISTS (
-           SELECT 1 FROM events v
-           WHERE v.kind IN ('candidate_confirmed', 'candidate_contradicted')
-             AND v.context_refs LIKE '%"' || events.id || '"%'
-         )
+         AND id NOT IN (SELECT cand_id FROM verified_candidate_ids)
        ORDER BY ts DESC
        LIMIT ?`,
     )
@@ -1413,6 +1433,33 @@ export const extractCrossCandidateCorroboration = async (
     vecAvailable = false;
   }
 
+  // 2026-05-21 O(n²)→O(n) fix (part 2): precompute the set of candidate ids
+  // that ALREADY have a semantic_corroboration candidate_confirmed, ONCE.
+  // Pre-fix the loop ran a per-candidate correlated double-LIKE (context_refs
+  // LIKE + payload LIKE, both leading-%, un-indexable) over all 37K
+  // candidate_confirmed rows — 500× full scans = the bulk of the remaining
+  // 36s after the candidates-query fix. One scan + a Set membership check
+  // (O(1)) replaces 500 full-scan queries.
+  const semanticCorroboratedIds = new Set<string>();
+  try {
+    const rows = db
+      .query(
+        `SELECT context_refs, payload FROM events
+         WHERE kind = 'candidate_confirmed'
+           AND payload LIKE '%"confirmation_source":"semantic_corroboration"%'`,
+      )
+      .all() as Array<{ context_refs: string | null; payload: string | null }>;
+    for (const row of rows) {
+      try {
+        for (const ref of JSON.parse(row.context_refs ?? "[]") as string[]) semanticCorroboratedIds.add(ref);
+      } catch { /* tolerate malformed context_refs */ }
+      try {
+        const cid = (JSON.parse(row.payload ?? "{}") as { candidate_id?: string }).candidate_id;
+        if (cid) semanticCorroboratedIds.add(cid);
+      } catch { /* tolerate malformed payload */ }
+    }
+  } catch { /* fail-soft: empty set just means no idempotency skip */ }
+
   for (const cand of candidates) {
     if (scanned > 0 && scanned % EXTRACTOR_YIELD_INTERVAL === 0) {
       await yieldToEventLoop();
@@ -1420,21 +1467,9 @@ export const extractCrossCandidateCorroboration = async (
     scanned += 1;
 
     // 2a. Idempotency: skip if a prior semantic_corroboration confirm
-    //     already references this candidate id (either in
-    //     context_refs or in payload.candidate_id).
-    const priorRow = db
-      .query(
-        `SELECT id FROM events
-         WHERE kind = 'candidate_confirmed'
-           AND (
-             context_refs LIKE '%"' || ? || '"%'
-             OR payload LIKE '%"candidate_id":"' || ? || '"%'
-           )
-           AND payload LIKE '%"confirmation_source":"semantic_corroboration"%'
-         LIMIT 1`,
-      )
-      .get(cand.id, cand.id) as { id: string } | null;
-    if (priorRow) {
+    //     already references this candidate id (precomputed Set — O(1) —
+    //     replacing the former per-candidate correlated double-LIKE scan).
+    if (semanticCorroboratedIds.has(cand.id)) {
       skipped_existing += 1;
       continue;
     }
