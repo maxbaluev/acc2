@@ -37,6 +37,7 @@ import { emitEvent } from "./events";
 import { subscribe, resetBus, type BusEvent } from "./event_bus";
 import { onEvent, type ActivationPayload } from "./activation_bus";
 import type { EventKind } from "../substrate/event_kinds";
+import { EMBEDDABLE_KINDS } from "../substrate/event_kinds";
 import { newAdminToken } from "./ids";
 import { createMcpServer } from "./mcp_server/index";
 import {
@@ -1306,7 +1307,20 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       // operator on normal drain work.
       overrunThresholdMs: embedderIntervalMs * 10,
     });
-    registerReactiveWorker("embedder", embedderIntervalMs, ["*"], embedderTick, { minReactiveGapMs: embedderIntervalMs });
+    // 2026-05-21 MCP-saturation fix: replace wildcard subscription with the
+    // EMBEDDABLE_KINDS set. Wildcard ["*"] caused embedder to re-fire on
+    // every event emission (worker_tick_completed at 3.6/sec,
+    // father_yielded at 1.7/sec, candidate_confirmed, origin_calibration_*
+    // etc.). None of those kinds carry embeddable content, so each spurious
+    // re-fire was wasted work that held the SQLite write lock and starved
+    // the fastmcp HTTP request queue — the structural cause of CLI
+    // mcp_call_failed:Request timed out at 120000ms observed across this
+    // session (e.g., directive bmc10qmn1, bbeqlpgao). The embedder still
+    // ticks at its 10s scheduled cadence for backlog drain, and the
+    // EMBEDDABLE_KINDS list (knowledge_candidate, knowledge_promoted,
+    // lesson_extracted, owner_input_received, etc.) is exactly the set of
+    // emissions that can actually produce new vec_events rows.
+    registerReactiveWorker("embedder", embedderIntervalMs, EMBEDDABLE_KINDS, embedderTick, { minReactiveGapMs: embedderIntervalMs });
     // Boot tick — fire embedding work asynchronously without blocking
     // daemon readiness. Pre-fix (2026-05-19, this commit): the boot
     // tick awaited a large OpenAI batch synchronously at startup
