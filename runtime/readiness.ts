@@ -32,6 +32,13 @@ export type ReadinessState = {
    *  /health degraded-state detection. A worker that hasn't ticked in
    *  3× its declared interval is reported as stuck. */
   lastTickMs: Map<string, number>;
+  /** Tier D D1: timestamp (ms) at which a worker's CURRENT tick started, IFF
+   *  it has not yet completed. Cleared on completion (recordWorkerTick). A
+   *  worker present here with (now - started) past threshold is STUCK-IN-
+   *  FLIGHT — the case lastTickMs/stuckWorkers cannot see (a tick that began
+   *  but never returned, e.g. the supervisor scanning 325K events for 33s).
+   *  This is the heartbeat that names the spinning worker in one read. */
+  tickStartedMs: Map<string, number>;
   /** Declared interval (ms) per worker — set when the worker registers so
    *  the stuck threshold (3× interval) can be computed without consulting
    *  daemon-side env defaults from outside. */
@@ -51,6 +58,7 @@ const createState = (): ReadinessState => ({
   readyAtMs: null,
   onReady: null,
   lastTickMs: new Map(),
+  tickStartedMs: new Map(),
   tickIntervalMs: new Map(),
   reactive: new Set(),
 });
@@ -101,6 +109,39 @@ export const markWorkerReactive = (name: string): void => {
  *  skips them). */
 export const recordWorkerTick = (name: string, atMs: number = Date.now()): void => {
   state.lastTickMs.set(name, atMs);
+  // Tick completed — clear the in-flight marker (Tier D D1).
+  state.tickStartedMs.delete(name);
+};
+
+/** Tier D D1: mark a worker tick as STARTED (in-flight). Paired with
+ *  recordWorkerTick (completion) which clears it. supervisedTick calls this
+ *  the moment a tick body begins so a never-returning tick is observable. */
+export const recordWorkerTickStart = (name: string, atMs: number = Date.now()): void => {
+  state.tickStartedMs.set(name, atMs);
+};
+
+/** Tier D D1: clear ONLY the in-flight marker (does NOT set lastTickMs).
+ *  Called in supervisedTick's finally so a tick that threw is no longer
+ *  reported stuck-in-flight, without being falsely counted as a success. */
+export const clearWorkerTickInFlight = (name: string): void => {
+  state.tickStartedMs.delete(name);
+};
+
+/** Tier D D1: workers whose CURRENT tick started but has not completed for
+ *  longer than `thresholdMs` (default 60s). This is the diagnosis the
+ *  daemon lacked this session — a stuck/spinning worker tick is named in
+ *  one read instead of blind restart-bisection. Returns the worker name +
+ *  how long its tick has been in-flight. */
+export const inFlightStuckWorkers = (
+  thresholdMs = 60_000,
+  nowMs: number = Date.now(),
+): Array<{ worker: string; in_flight_ms: number }> => {
+  const out: Array<{ worker: string; in_flight_ms: number }> = [];
+  for (const [name, startedMs] of state.tickStartedMs) {
+    const inFlight = nowMs - startedMs;
+    if (inFlight > thresholdMs) out.push({ worker: name, in_flight_ms: inFlight });
+  }
+  return out.sort((a, b) => b.in_flight_ms - a.in_flight_ms);
 };
 
 /** Return any registered worker that has not ticked within 3× its declared

@@ -10,6 +10,9 @@ import {
   isReady,
   markWorkerReady,
   recordWorkerTick,
+  recordWorkerTickStart,
+  clearWorkerTickInFlight,
+  inFlightStuckWorkers,
   registerWorker,
   resetReadiness,
   setOnReady,
@@ -77,5 +80,37 @@ describe("readiness — stuckWorkers detection", () => {
     recordWorkerTick("father", Date.now() - 5 * 60_000); // 5min lag, way over 3*60s
     const stuck = stuckWorkers();
     expect(stuck.map((s) => s.worker)).toEqual(["father"]);
+  });
+});
+
+describe("readiness — Tier D D1 in-flight stuck detection", () => {
+  beforeEach(() => { resetReadiness(); });
+  afterEach(() => { resetReadiness(); });
+
+  test("names a worker whose tick started but never completed past threshold", () => {
+    const now = Date.now();
+    recordWorkerTickStart("supervisor", now - 90_000); // in-flight 90s
+    recordWorkerTickStart("embedder", now - 5_000);     // in-flight 5s (ok)
+    const stuck = inFlightStuckWorkers(60_000, now);
+    expect(stuck.map((s) => s.worker)).toEqual(["supervisor"]);
+    expect(stuck[0].in_flight_ms).toBeGreaterThanOrEqual(90_000);
+  });
+
+  test("recordWorkerTick (success) clears the in-flight marker", () => {
+    const now = Date.now();
+    recordWorkerTickStart("supervisor", now - 90_000);
+    recordWorkerTick("supervisor");
+    expect(inFlightStuckWorkers(60_000, now)).toEqual([]);
+  });
+
+  test("clearWorkerTickInFlight (failure path) clears without marking a tick", () => {
+    const now = Date.now();
+    recordWorkerTickStart("extractors", now - 120_000);
+    clearWorkerTickInFlight("extractors");
+    expect(inFlightStuckWorkers(60_000, now)).toEqual([]);
+    // It must NOT count as a completed tick (lastTickMs untouched) — a
+    // failed tick is neither stuck-in-flight nor falsely "ticked".
+    registerWorker("extractors", 30_000);
+    // (no recordWorkerTick was called, so stuckWorkers logic is unaffected)
   });
 });

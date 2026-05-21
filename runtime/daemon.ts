@@ -85,7 +85,10 @@ import {
   resetReadiness,
   readyAt,
   recordWorkerTick,
+  recordWorkerTickStart,
+  clearWorkerTickInFlight,
   stuckWorkers,
+  inFlightStuckWorkers,
 } from "./readiness";
 import { SqlWorkerPool, resolveSqlPoolConfigFromEnv } from "./sql_worker_pool";
 import { setSqlPool, clearSqlPool } from "./sql_pool_singleton";
@@ -264,6 +267,7 @@ const supervisedTick = (
     }
     running = true;
     runningSinceMs = now;
+    recordWorkerTickStart(workerName, now); // Tier D D1: in-flight heartbeat
     void (async () => {
       try {
         await body();
@@ -318,6 +322,11 @@ const supervisedTick = (
         }
       } finally {
         running = false;
+        // Tier D D1: clear the in-flight marker even when the tick threw
+        // (recordWorkerTick — which clears it — only runs on success).
+        // Clears in-flight WITHOUT marking a successful tick (lastTickMs),
+        // so a failed tick is neither stuck-in-flight nor falsely "ticked".
+        clearWorkerTickInFlight(workerName);
       }
     })();
   };
@@ -2625,6 +2634,11 @@ const routeAux = async (
     // don't restart the process — operators reading the body see the
     // degraded state directly.
     const stuck = stuckWorkers();
+    // Tier D D1: workers whose CURRENT tick started but never completed past
+    // 60s — the spinning/wedged-worker signal that named nothing this
+    // session. Surfaced in /health so a hung daemon is diagnosable in one
+    // probe (the supervisor-scanning-325K-events case).
+    const inFlightStuck = inFlightStuckWorkers();
     let hotreloadState: unknown = null;
     try {
       const mod = await import("./hotreload_worker");
@@ -2731,6 +2745,7 @@ const routeAux = async (
       aux_port: auxPort,
       mcp_transport: "fastmcp:httpStream",
       stuck_workers: stuck,
+      in_flight_stuck_workers: inFlightStuck,
       hotreload: hotreloadState,
       activation_listener_count: activationListenerCount,
       pathology_budget_exhausted_recent_count: counts.pathology_exhausted,
