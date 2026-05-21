@@ -414,7 +414,25 @@ const FAILURE_BAND = 0.7;
 const PROPAGATION_ONLY_FACTOR = 0.35;
 
 type CitationEntry = { id: string; weightFactor: number };
-type RetrievalRejectionEmitter = (bindingEventId: string, sourceIds: string[]) => void;
+type RetrievalRejectionEmitter = (bindingEventId: string | null, sourceIds: string[], reason: string) => void;
+
+const declaredCitationIds = (events: Array<EventLike | null>, actTupleIds: string[]): string[] => {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (id: string) => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.push(id);
+  };
+  for (const id of actTupleIds) push(id);
+  for (const ev of events) {
+    if (!ev) continue;
+    const payload = jsonObject(ev.payload);
+    for (const id of stringArrayField(payload, "cited_knowledge_ids")) push(id);
+    for (const id of stringArrayField(payload, "cited_artifact_ids")) push(id);
+  }
+  return out;
+};
 
 const collectCitations = (
   db: Database,
@@ -428,49 +446,39 @@ const collectCitations = (
   const seen = new Set<string>();
   const out: CitationEntry[] = [];
   const explicitlyCited = new Set<string>();
+  const boundIds = new Set<string>();
   const actionEv = getEventById(db, params.action_event_id);
   const obsEv = getEventById(db, params.observation_event_id);
   const scoredEv = getEventById(db, params.scored_event_id);
+  const sourceActId = resolveSourceActId([actionEv, obsEv, scoredEv]);
+  const declaredIds = declaredCitationIds([actionEv, obsEv, scoredEv], actTupleCitationIds(db, sourceActId));
+  const declaredSet = new Set(declaredIds);
 
-  // First pass: every EXPLICIT citation (context_refs across the three
-  // events + body @cite markers). These get the full Shapley share.
+  // First pass: every explicit binding surface (context_refs across the three
+  // events + body @cite markers). These are legitimate bindings and keep the
+  // full Shapley share; do not require a retrieval_binding row for them.
   const ordered: CitationEntry[] = [];
+  const pushExplicit = (id: string) => {
+    ordered.push({ id, weightFactor: 1.0 });
+    explicitlyCited.add(id);
+    boundIds.add(id);
+  };
   for (const ev of [actionEv, obsEv, scoredEv]) {
     if (!ev) continue;
     for (const ref of ev.context_refs ?? []) {
       for (const resolved of resolveBindingTargets(db, ref)) {
-        ordered.push({ id: resolved, weightFactor: 1.0 });
-        explicitlyCited.add(resolved);
+        pushExplicit(resolved);
       }
     }
   }
-  for (const id of actTupleCitationIds(db, resolveSourceActId([actionEv, obsEv, scoredEv]))) {
-    ordered.push({ id, weightFactor: 1.0 });
-    explicitlyCited.add(id);
-  }
-  for (const id of actionBodyCitations) {
-    ordered.push({ id, weightFactor: 1.0 });
-    explicitlyCited.add(id);
-  }
-  for (const id of verifierBodyCitations) {
-    ordered.push({ id, weightFactor: 1.0 });
-    explicitlyCited.add(id);
-  }
+  for (const id of actionBodyCitations) pushExplicit(id);
+  for (const id of verifierBodyCitations) pushExplicit(id);
 
-  // Second pass: retrieval_binding source ids. Per the policy documented
-  // at the top of this file ("exposed but not cited are recorded as
-  // retrieval_rejected and excluded from Shapley credit"), bindings whose
-  // source id is NOT in the explicit-citation set get NO credit weight —
-  // exposure alone is not evidence the entry drove the action. The
-  // pre-V08SXCG9 implementation gave them a small EXPOSURE_ONLY_FACTOR
-  // (≈0.1) but the brain's behavioral-binding amendment removed that
-  // const without updating this loop, leaving a dangling reference.
-  // The honest implementation: skip uncited bindings entirely (so they
-  // never enter Shapley) and, when a rejection emitter is provided,
-  // surface them as retrieval_rejected so credit history retains the
-  // provenance. Bindings whose source is ALREADY in explicitlyCited
-  // are also skipped (the explicit pass above already pushed them with
-  // factor 1.0 — double-pushing would double-count).
+  // Second pass: retrieval_binding used-set ids for this task. The used-set
+  // joins context_refs and body @cite markers in the binding union. A payload
+  // declared citation may earn credit when it is also in this union. A merely
+  // exposed binding that was never cited remains excluded and is surfaced as
+  // retrieval_rejected negative evidence.
   if (actionEv && actionEv.task_id && scoredEv) {
     const bindings = db
       .query(
@@ -486,11 +494,24 @@ const collectCitations = (
         const p = JSON.parse(b.payload) as Record<string, unknown>;
         const sourceIds = [p.source_event_id, p.source_artifact_id]
           .filter((value): value is string => typeof value === "string" && value.length > 0);
-        const uncited = sourceIds.filter((sourceId) => !explicitlyCited.has(sourceId));
+        for (const sourceId of sourceIds) boundIds.add(sourceId);
+        const uncited = sourceIds.filter((sourceId) => !explicitlyCited.has(sourceId) && !declaredSet.has(sourceId));
         if (uncited.length > 0 && rejectRetrievalBinding) {
-          rejectRetrievalBinding(b.id, uncited);
+          rejectRetrievalBinding(b.id, uncited, "exposed_but_not_cited_by_act");
         }
       } catch { /* skip malformed */ }
+    }
+  }
+
+  // Third pass: payload-declared citations are citation intent, not binding by
+  // themselves. They earn credit only when the id is also present in the bound
+  // union above. Payload-only decorative citations are denied and recorded as
+  // retrieval_rejected negative evidence.
+  for (const id of declaredIds) {
+    if (boundIds.has(id)) {
+      ordered.push({ id, weightFactor: 1.0 });
+    } else if (rejectRetrievalBinding) {
+      rejectRetrievalBinding(null, [id], "decorative_citation_not_bound");
     }
   }
 
@@ -791,19 +812,35 @@ export const distributeCredit = async (
     verifierBodyCites,
     actionArtifactId,
     verifierArtifactId,
-    (bindingEventId, sourceIds) => {
-      emit({
+    (bindingEventId, sourceIds, reason) => {
+      const refs = [bindingEventId, ...sourceIds, params.scored_event_id].filter((ref): ref is string => typeof ref === "string" && ref.length > 0);
+      const rejectedId = emit({
         kind: "retrieval_rejected",
         substrate_origin: "substrate_auto",
-        context_refs: [bindingEventId, ...sourceIds, params.scored_event_id],
+        context_refs: refs,
         payload: {
           retrieval_binding_id: bindingEventId,
           source_ids: sourceIds,
           action_scored_event_id: params.scored_event_id,
-          reason: "exposed_but_not_cited_by_act",
+          reason,
           selection_point: "credit.collectCitations",
         } as JsonValue,
       });
+      for (const sourceId of sourceIds) {
+        if (classifyTarget(db, sourceId) !== "knowledge") continue;
+        emit({
+          kind: "candidate_contradicted",
+          substrate_origin: "substrate_auto",
+          context_refs: [sourceId, rejectedId, params.scored_event_id],
+          payload: {
+            knowledge_id: sourceId,
+            retrieval_rejected_event_id: rejectedId,
+            action_scored_event_id: params.scored_event_id,
+            reason,
+            projected_from: "retrieval_rejected_negative_evidence",
+          } as JsonValue,
+        });
+      }
     },
   );
   const weights = shapleyWeightsByCorroboration(cited.length);
