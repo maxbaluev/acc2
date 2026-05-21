@@ -394,9 +394,19 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
         const verifierKind = typeof p.verifier_kind === "string" ? p.verifier_kind : undefined;
         return `closure_residual=${residual} axes=${axes}${top ? ` top=${top}` : ""}${verifierKind ? ` verifier=${verifierKind}` : ""}`;
       }
-      const uncovered = (p.uncovered_aspects as unknown[] | undefined)?.length ?? 0;
-      const covered = (p.covered_sub_tasks as unknown[] | undefined)?.length ?? 0;
-      return `closure_residual=${residual} covered=${covered} uncovered=${uncovered}`;
+      // Only render covered/uncovered when the legacy arrays are actually
+      // PRESENT. Modern brain payloads carry none of substrate_verifications/
+      // checks/breakdown/covered_sub_tasks — falling through to `?? 0` printed
+      // a perpetually-misleading "covered=0 uncovered=0" (looks like the audit
+      // measured nothing, when really it was a summary-only closure). Be honest.
+      const hasLegacyCoverage =
+        Array.isArray(p.covered_sub_tasks) || Array.isArray(p.uncovered_aspects);
+      if (hasLegacyCoverage) {
+        const uncovered = (p.uncovered_aspects as unknown[] | undefined)?.length ?? 0;
+        const covered = (p.covered_sub_tasks as unknown[] | undefined)?.length ?? 0;
+        return `closure_residual=${residual} covered=${covered} uncovered=${uncovered}`;
+      }
+      return `closure_residual=${residual} summary-only (no structured checks/verifications)`;
     }
     case "hidl_action_required": {
       const reason = (p.reason as string) ?? "owner action required";
