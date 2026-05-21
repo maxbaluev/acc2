@@ -4,6 +4,32 @@
 
 Cross-references: architecture surfaces live in `docs/Architecture.md` — §9 (owner alignment) grounds Tier S0; §10 (universal posterior boundary) maps tiers to scored-row moves; §12 (open frontier) enumerates the same tier clusters; §14 (universal intent) cites the live numbers that motivate sequencing.
 
+## Tier A — AUTONOMOUS COMPOUNDING ACTIVATION
+
+Problem: the inner brain dispatch loop compounds once invoked, but the outer loop is owner-mediated when substrate workers detect review debt, pathology exhaustion, dedup drift, calibration drift, or maintenance opportunities without emitting `brain_invocation_request`.
+
+Contract: Father is re-enabled with autonomous-improvement templates and a tighter owner-idle window; rolling reviewer, pathology budget/supervisor, extractors, and credit calibration emit `brain_invocation_request` when their scored views cross thresholds; each request opens substrate-auto work that must propose a concrete amendment or lesson and pass closure audit.
+
+Why this tier: Tier-1 bottlenecks are no longer the limiting factor; the organism now needs autonomous opportunity discovery so improvement is not gated by explicit owner prompts.
+
+Closure predicate: `brain_invocation_request` emissions/day > 10 AND Father template fires/day > 3 AND substrate_auto-origin directives/day > 5.
+
+Metric direction: substrate_auto-origin `contract_amendment_proposed` rows rise above 5/day while owner-observed negative outcomes and high-residual closures stay bounded.
+
+## Tier R — RUNTIME MAIN-LOOP ISOLATION
+
+Problem (measured 2026-05-21): the daemon's single Bun event loop serializes ALL SQLite writes (emitEvent, projections, embedder persist, credit) plus MCP request serving. Three concrete failures observed this session: (a) the embedder's per-row vec0 (sqlite-vec, 1536-dim) persist loop pinned the main thread 30-90s, making `/health` + the MCP HEAD probe time out (surfaced as `mcp_unreachable_at_spawn`); (b) daemon boot-to-listening was ~87s because port-bind is sequenced after every worker's first tick completes, and the embedder's first tick alone took 56s; (c) `EmbeddingIndex.rebuildFromDb` re-upserted every vector into vec_events on every boot (fixed in df4ce5a), and 286K non-embeddable rows bloated the `embedding IS NULL` partial index until the emit-time sentinel fix (369b7ef).
+
+Contract — three independent moves, each closes one structural gap:
+
+- **R1 Write isolation.** `runtime/sql_worker_pool.ts` today is READ-ONLY (`query<T>()`). Add a single dedicated WRITER worker thread that owns the write connection; main thread enqueues writes via a fast channel and gets the row id back via promise. `emitEvent` keeps its synchronous-id contract by minting the ULID client-side and deferring only the INSERT. Closure predicate: main-loop p99 blocked-time per tick < 50ms under a 50-events/sec write load; `/health` responds < 200ms while the embedder drains a 10K backlog. Metric direction: `bridge_failed{reason=mcp_unreachable_at_spawn}` and `Bun.serve request timed out` lines fall to zero.
+
+- **R2 Instant startup.** Decouple port-bind from worker-readiness. Bind MCP + aux ports immediately after `openDb` + `runViews` + migrations (the minimum the MCP handlers need); run seed, orphan reconciliation, `EmbeddingIndex.rebuildFromDb`, and first worker ticks in the background after the daemon is already `listening`. Boot integrity uses `quick_check` not full `integrity_check` (shipped 369b7ef/df4ce5a). Closure predicate: boot-to-`acc2 daemon listening` < 3s on the production-size DB; `/ready` flips true only after first ticks, but `/health` + MCP serve from t+3s. Metric direction: daemon startup_duration_ms drops from ~87,000 to < 3,000.
+
+- **R3 Embedder first-tick cost.** Profile why the embedder's first tick costs 56s with zero genuine backlog (post-sentinel). Candidates: query-plan staleness (needs `ANALYZE` after large mutations — run live this session), vec0 index warmup, or `minReactiveGapMs:0` reactive-storm during boot event bursts. Closure predicate: embedder tick wall-time < 2s at steady state; first-tick < 5s. Metric direction: `worker tick overrun` for the embedder falls to zero at steady state.
+
+Why this tier: it precedes Tier A (autonomous compounding) operationally — father re-activation + brain_invocation_request producers add MORE concurrent dispatch load, which a serialized main loop cannot absorb. Runtime isolation is the substrate that makes autonomous throughput safe. Sits above Tier -1 floors because it is availability/throughput, not correctness-of-bytes.
+
 ## Tier -1 — RECURSION STOP FLOOR
 
 These contracts precede posterior scoring. They are floors, not high-frequency features: the contract is absence-of-violation evidence plus immediate quarantine on violation (`2XXFM1SPZX5XHFN31RWSR69TN4`, `PY1WBY1RF12RSBCQEQKBHDFH8R`).
