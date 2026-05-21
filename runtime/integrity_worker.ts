@@ -220,12 +220,13 @@ export const integrityWorkerTick = async (db: Database): Promise<IntegrityReport
 };
 
 /** Mid-session dispatch staleness threshold. A brain_dispatched row older
- *  than this with no closing event is treated as a zombie. 15 minutes is a
- *  comfortable margin above the worst-case opencode latency (5 min default
- *  timeout × 2 retries + slack). reconcileStaleDispatches uses this; the
- *  boot-time reconcileOrphanedDispatches has no age filter (the daemon was
- *  killed, every in-flight dispatch is dead). */
-export const STALE_DISPATCH_THRESHOLD_MS = 15 * 60 * 1000;
+ *  than this with no closing event is treated as a zombie. 2026-05-21
+ *  bump 15min → 25min to track DEFAULT_TIMEOUT_MS (bridge/config.ts) which
+ *  also bumped to 1500s based on FINDING 4 evidence (legitimate
+ *  multi-file refactor took 930s of brain work). reconcileStaleDispatches
+ *  uses this; the boot-time reconcileOrphanedDispatches has no age filter
+ *  (the daemon was killed, every in-flight dispatch is dead). */
+export const STALE_DISPATCH_THRESHOLD_MS = 25 * 60 * 1000;
 
 /** Parse the original brain_dispatched payload to recover its dispatch_id.
  *  The orphan-recovery path uses this to emit a properly-keyed

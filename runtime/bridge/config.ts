@@ -42,10 +42,16 @@ export const DEFAULT_OPENCODE_MODEL = "openai/gpt-5.5";
  *  directive took 718s (12 minutes) of real work — 5 brain cycles,
  *  4 complete act_tuple projections, 19 messages, 53 reasoning steps,
  *  130 bridge frames — and got SIGTERMed at the 600s overall budget.
- *  900s (15min) matches the existing STALE_DISPATCH_THRESHOLD_MS so the
- *  bridge timeout and stale-detection align. Override via
+ *  2026-05-21 bump from 900s → 1500s: FINDING 4 brain run hit 930s
+ *  after producing a valid contract_amendment_proposed (the work
+ *  succeeded) but was killed before reaching task_committed. The
+ *  pattern — brain emits the substantive output then continues into
+ *  verification cycles — is legitimate; the 900s ceiling forced false-
+ *  positive timeouts. 1500s (25min) gives complex multi-file refactor
+ *  dispatches headroom for emit + test + commit verification while
+ *  still bounding runaway loops. Override via
  *  `ACC2_OPENCODE_TIMEOUT_MS` or `SpawnOpts.timeoutMs`. */
-export const DEFAULT_TIMEOUT_MS = 900_000;
+export const DEFAULT_TIMEOUT_MS = 1500_000;
 /** Default MCP-handshake window — the time opencode has between connecting
  *  to v2's MCP server and invoking its first `substrate.*` / `runtime.*`
  *  tool. The pre-gpt-5 default was 30s, which was tight even for the 5.4-mini
