@@ -436,6 +436,7 @@ export const EVENT_KINDS = {
   bridge_completed:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   bridge_failed:                           { producer: "runtime",   embeddable: false, mirror_inline: true,  health_metric: false, narrative: true },
   bridge_mcp_connected:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  bridge_mcp_preflight:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Dispatcher (cycle-1 enforcement) ────────────────────────────────
   brain_dispatched:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },

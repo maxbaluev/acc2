@@ -78,4 +78,11 @@ export type SpawnOpts = {
    *  bridge treats that as "unknown, proceed" so a transient probe failure
    *  doesn't block legitimate dispatches. */
   authProbe?: () => { credentialCount: number; envProviderCount: number } | null;
+  /** Test-only: bypass the pre-spawn MCP HEAD probe (2026-05-21
+   *  multi-brain foundation fix). The probe verifies the daemon's MCP
+   *  endpoint is reachable before burning a subprocess on guaranteed
+   *  handshake failure. Tests inject mock spawn fns and don't have a
+   *  real MCP server bound; setting this true keeps unit tests fast and
+   *  hermetic. Production callers leave undefined. */
+  skipMcpReadinessProbe?: boolean;
 };

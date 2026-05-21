@@ -157,6 +157,129 @@ export const killAllLiveOpencodeProcs = (): number => {
   return snapshot.length;
 };
 
+// ── Handshake serialization gate (2026-05-21, multi-brain foundation fix) ──
+// Foundational reason for the mcp_handshake_timed_out cascade observed on
+// the live ledger at 11:21Z (DATA_ADMISSION_P, 671H0XQ1890S55ES,
+// PRIVILEGED_ACCIN — three of four concurrent brains timed out, one got
+// through): when 5 brains spawn within a ~30s window they race for fastmcp
+// session-establishment slots + the SQLite write lock. One wins the
+// handshake; the rest find the MCP server unresponsive within their 120s
+// window and exit silently.
+//
+// The fix is NOT to serialize brain RUNS — multi-brain parallelism is
+// the design intent. The fix is to serialize the HANDSHAKE WINDOW (the
+// first ~5-30s of contention). Once a brain's first MCP frame lands
+// (mcpHandshakeOk flips true) the gate releases its slot; the brain
+// continues running in parallel with everyone else.
+//
+// Mechanism:
+//   - HANDSHAKE_SEMAPHORE caps concurrent in-flight handshakes (default 2)
+//   - Pre-spawn await for a free slot; release on first-frame OR on exit
+//   - HANDSHAKE_PROBE_BACKOFF_MS bounds wait time before fail-open
+// All knobs honor ACC2_BRIDGE_* env vars so the operator can tune to
+// daemon capacity without a code change.
+
+const HANDSHAKE_PERMIT_CAP = (() => {
+  const raw = process.env.ACC2_BRIDGE_HANDSHAKE_PERMIT_CAP;
+  if (typeof raw === "string" && raw.length > 0) {
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 16) return n;
+  }
+  return 2;
+})();
+
+const HANDSHAKE_WAIT_BUDGET_MS = (() => {
+  const raw = process.env.ACC2_BRIDGE_HANDSHAKE_WAIT_BUDGET_MS;
+  if (typeof raw === "string" && raw.length > 0) {
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 1000 && n <= 120_000) return n;
+  }
+  return 45_000;
+})();
+
+const HANDSHAKE_POLL_MS = 200;
+
+type HandshakeWaiter = { resolve: () => void };
+let handshakePermitsInUse = 0;
+const handshakeWaiters: HandshakeWaiter[] = [];
+
+const acquireHandshakePermit = async (deadlineMs: number): Promise<{ acquired: boolean; waitedMs: number }> => {
+  const start = Date.now();
+  if (handshakePermitsInUse < HANDSHAKE_PERMIT_CAP) {
+    handshakePermitsInUse++;
+    return { acquired: true, waitedMs: 0 };
+  }
+  // Wait for a permit; fail-open at deadline so a leaked permit never
+  // permanently blocks new dispatches.
+  return await new Promise<{ acquired: boolean; waitedMs: number }>((resolve) => {
+    let settled = false;
+    const waiter: HandshakeWaiter = {
+      resolve: () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const idx = handshakeWaiters.indexOf(waiter);
+        if (idx >= 0) handshakeWaiters.splice(idx, 1);
+        handshakePermitsInUse++;
+        resolve({ acquired: true, waitedMs: Date.now() - start });
+      },
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const idx = handshakeWaiters.indexOf(waiter);
+      if (idx >= 0) handshakeWaiters.splice(idx, 1);
+      // Fail-open: proceed without permit so a stuck permit-holder
+      // doesn't permanently starve subsequent dispatches.
+      resolve({ acquired: false, waitedMs: Date.now() - start });
+    }, deadlineMs);
+    handshakeWaiters.push(waiter);
+  });
+};
+
+const releaseHandshakePermit = (held: boolean): void => {
+  if (!held) return;
+  if (handshakePermitsInUse > 0) handshakePermitsInUse--;
+  const next = handshakeWaiters.shift();
+  if (next) next.resolve();
+};
+
+/** Quick MCP readiness probe. Returns true if the URL is reachable
+ *  within `timeoutMs`. Used before spawning opencode to surface a dead
+ *  daemon as a clean parse_error rather than a 120s handshake timeout. */
+const probeMcpReachable = async (url: string, timeoutMs: number): Promise<boolean> => {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // fastmcp's HTTP stream transport accepts the MCP endpoint; a HEAD
+    // request returns method-not-allowed (405) but proves reachability.
+    // 404 / 405 / 5xx all prove the daemon is listening on the port.
+    const res = await fetch(url, { method: "HEAD", signal: controller.signal });
+    clearTimeout(timer);
+    void res;
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** Test-only handshake-gate accessor — exposes the static counters so
+ *  the test suite can assert serialization behavior without driving
+ *  real subprocess spawns. NOT part of the production surface. */
+export const _handshakeGateStateForTests = () => ({
+  permitsInUse: handshakePermitsInUse,
+  waitersWaiting: handshakeWaiters.length,
+  permitCap: HANDSHAKE_PERMIT_CAP,
+});
+
+export const _testReleaseAllHandshakePermits = (): void => {
+  while (handshakePermitsInUse > 0) {
+    const waiter = handshakeWaiters.shift();
+    if (waiter) waiter.resolve();
+    else handshakePermitsInUse = 0;
+  }
+};
+
 export const spawnRealOpencode = async (
   req: BridgeRequest,
   db: Database,
@@ -302,12 +425,79 @@ export const spawnRealOpencode = async (
       reason: { kind: "parse_error", raw: "V2_MCP_SERVER_URL not set; opencode would have no MCP tools" },
     };
   }
+  // ── MCP readiness probe (2026-05-21 multi-brain foundation fix) ──
+  // Fast HEAD check that the daemon's MCP endpoint is reachable BEFORE
+  // we burn a subprocess on a guaranteed handshake failure. When the
+  // daemon is healthy this completes in <5ms; when the daemon is down
+  // we surface mcp_unreachable as a clean parse_error rather than the
+  // 120s handshake-window dance.
+  // Tests inject `spawnFn`; in that mode no real daemon is running and
+  // the probe would always fail. Default skip = true when spawnFn is
+  // mocked, matching the same coupling already used by the auth probe.
+  const skipProbe = spawnOpts.skipMcpReadinessProbe
+    ?? (spawnOpts.spawnFn !== undefined);
+  const mcpReachable = skipProbe
+    ? true
+    : await probeMcpReachable(mcpServerUrl, 3_000);
+  if (!mcpReachable) {
+    emitEvent(db, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        reason: "mcp_unreachable_at_spawn",
+        mcp_handshake_ok: false,
+        mcp_server_url: mcpServerUrl,
+        hint: "MCP HEAD probe failed within 3s. Daemon likely down or unbinding. Check `acc daemon status` + ~/.accint/logs/daemon.log.",
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    return { ok: false, reason: { kind: "parse_error", raw: `mcp_unreachable:${mcpServerUrl}` } };
+  }
+
+  // ── Handshake permit acquire (multi-brain serialization gate) ──
+  // Acquire one of HANDSHAKE_PERMIT_CAP (default 2) handshake slots
+  // before launching opencode. When the cap is full this blocks for up
+  // to HANDSHAKE_WAIT_BUDGET_MS (default 45s) until a holder releases.
+  // The permit is released when this brain's first MCP frame lands
+  // (mcpHandshakeOk flips true below) OR when the subprocess exits.
+  // The gate serializes ONLY the contended handshake window — once the
+  // brain is past handshake, it runs in parallel with everyone else.
+  const handshakePermitResult = await acquireHandshakePermit(HANDSHAKE_WAIT_BUDGET_MS);
+  const handshakePermitHeld = handshakePermitResult.acquired;
+  let handshakePermitReleased = false;
+  const releasePermitOnce = (): void => {
+    if (handshakePermitReleased) return;
+    handshakePermitReleased = true;
+    releaseHandshakePermit(handshakePermitHeld);
+  };
+  if (handshakePermitResult.waitedMs > 100) {
+    emitEvent(db, {
+      kind: "bridge_mcp_preflight",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        phase: "handshake_permit_acquired",
+        waited_ms: handshakePermitResult.waitedMs,
+        permit_held: handshakePermitHeld,
+        permit_cap: HANDSHAKE_PERMIT_CAP,
+        wait_budget_ms: HANDSHAKE_WAIT_BUDGET_MS,
+        note: handshakePermitHeld
+          ? "serialized handshake slot acquired"
+          : "wait budget elapsed before slot freed — proceeding fail-open",
+      } as JsonValue,
+      invoker: "opencode",
+    });
+  }
   try {
     materializedConfig = materializeOpencodeMcpConfig({
       mcpServerUrl,
       configDir: spawnOpts.configDir,
     });
   } catch (err) {
+    releasePermitOnce();
     emitEvent(db, {
       kind: "bridge_failed",
       substrate_origin: "opencode",
@@ -408,7 +598,13 @@ export const spawnRealOpencode = async (
     kill: (sig) => { try { proc.kill(sig); return true; } catch { return false; } },
   };
   LIVE_OPENCODE_PROCS.add(liveEntry);
-  proc.exited.finally(() => { LIVE_OPENCODE_PROCS.delete(liveEntry); });
+  proc.exited.finally(() => {
+    LIVE_OPENCODE_PROCS.delete(liveEntry);
+    // Belt-and-suspenders: always release the handshake permit when the
+    // subprocess exits, even if the first-frame release didn't fire
+    // (e.g. brain crashed before any MCP call landed).
+    releasePermitOnce();
+  });
 
   // F8: bracket the subprocess lifecycle with spawn-time
   // brain_dispatched + brain_dispatch_closed rows. The task_dispatcher
@@ -579,6 +775,9 @@ export const spawnRealOpencode = async (
       if (!mcpHandshakeOk) {
         mcpHandshakeOk = true;
         clearInterval(mcpHandshakeWatchdog);
+        // Release the handshake permit — brain is past the contended
+        // handshake window and is now running in parallel with peers.
+        releasePermitOnce();
       }
       try {
         emitEvent(db, {
@@ -892,6 +1091,9 @@ export const spawnRealOpencode = async (
         if (hit) {
           mcpHandshakeOk = true;
           clearInterval(mcpHandshakeWatchdog);
+          // Release the handshake permit — first MCP tool call landed,
+          // brain is past the contended window.
+          releasePermitOnce();
           emitEvent(db, {
             kind: "bridge_mcp_connected",
             substrate_origin: "opencode",
@@ -1029,6 +1231,9 @@ export const spawnRealOpencode = async (
       if (hit && hit.n > 0) {
         mcpHandshakeOk = true;
         clearInterval(mcpHandshakeWatchdog);
+        // Release the handshake permit — exit-time substrate
+        // reconciliation proved handshake completed.
+        releasePermitOnce();
         emitEvent(db, {
           kind: "bridge_mcp_connected",
           substrate_origin: "opencode",
