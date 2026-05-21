@@ -1670,6 +1670,7 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       )                                             AS apply_candidate
     FROM events e
     WHERE e.kind IN ('lesson_extracted', 'contract_amendment_proposed')
+       OR (e.kind = 'knowledge_candidate' AND json_extract(e.payload, '$.is_lesson') IN (1, 'true'))
   ),
   target_candidates AS (
     SELECT source_event_id, trim(target) AS target
@@ -2150,6 +2151,7 @@ CREATE VIEW IF NOT EXISTS lesson_implementation_status_view AS
       context_refs
     FROM events
     WHERE kind IN ('lesson_extracted', 'contract_amendment_proposed')
+       OR (kind = 'knowledge_candidate' AND json_extract(payload, '$.is_lesson') IN (1, 'true'))
   ),
   latest_request AS (
     SELECT
