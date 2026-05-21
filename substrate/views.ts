@@ -2907,9 +2907,24 @@ SELECT
       THEN 'live_amended'
     -- In-flight dispatch ANYWHERE under the root wins over a stale terminal:
     -- a child task may be running a refinement cycle after the root committed.
+    -- 2026-05-21 false-zombie fix: age alone (oldest open dispatch > 5min)
+    -- is NOT zombie evidence. A legit brain dispatch routinely runs 10-13min,
+    -- emitting events (brain_reasoning_recorded, contract_amendment_proposed,
+    -- bridge_frame_received) every few seconds the whole time. The pure
+    -- age-based rule flagged every long-but-healthy dispatch as 'zombie' at
+    -- the 5min mark (observed: continual_owner_state actively emitting 4
+    -- amendments + reasoning, shown 'zombie' in acc watch). Add a
+    -- recent-activity guard: only zombie when there's been NO event for the
+    -- directive in the last 3min (genuinely stalled), not merely old. ISO-vs-
+    -- ISO strftime cutoff (index-friendly, no datetime() space-format trap).
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
+         AND NOT EXISTS (
+           SELECT 1 FROM events e_act
+           WHERE e_act.directive_id = r.directive_id
+             AND e_act.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-3 minutes')
+         )
       THEN 'zombie'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0 THEN 'live'
     WHEN cg.latest_cap_gate_at IS NOT NULL
@@ -2967,9 +2982,24 @@ SELECT
     WHEN term.terminal_kind = 'task_committed'
          AND COALESCE(ds.open_dispatch_count, 0) > 0
       THEN 'live_amended'
+    -- 2026-05-21 false-zombie fix: age alone (oldest open dispatch > 5min)
+    -- is NOT zombie evidence. A legit brain dispatch routinely runs 10-13min,
+    -- emitting events (brain_reasoning_recorded, contract_amendment_proposed,
+    -- bridge_frame_received) every few seconds the whole time. The pure
+    -- age-based rule flagged every long-but-healthy dispatch as 'zombie' at
+    -- the 5min mark (observed: continual_owner_state actively emitting 4
+    -- amendments + reasoning, shown 'zombie' in acc watch). Add a
+    -- recent-activity guard: only zombie when there's been NO event for the
+    -- directive in the last 3min (genuinely stalled), not merely old. ISO-vs-
+    -- ISO strftime cutoff (index-friendly, no datetime() space-format trap).
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0
          AND ds.oldest_open_dispatched_at IS NOT NULL
          AND CAST((julianday('now') - julianday(ds.oldest_open_dispatched_at)) * 86400000 AS INTEGER) > 300000
+         AND NOT EXISTS (
+           SELECT 1 FROM events e_act
+           WHERE e_act.directive_id = r.directive_id
+             AND e_act.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-3 minutes')
+         )
       THEN 'zombie'
     WHEN COALESCE(ds.open_dispatch_count, 0) > 0 THEN 'live'
     WHEN cg.latest_cap_gate_at IS NOT NULL
