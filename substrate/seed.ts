@@ -2280,6 +2280,8 @@ const PREDICATE_SEEDS: PredicateSeed[] = [
     why: "S0 floor — guards every downstream owner-profile posterior against lossy compression drift ceiling before continual learning, forecasting, rendering, or belief modeling fires.",
     closure_predicate: "drift residual stays below the Kriger upper bound; violations trigger owner_input_required + evidence refresh.",
     metric_direction: "drift residual falls after reconciliation; autonomous-commit reversals fall.",
+    evaluator_artifact_id: "owner_goal_preservation_drift_evaluator_v1",
+    consumer_gate: "cli/apply.ts deterministicApplyRoute blocks AUTO_APPLY when drift residual >= 0.6 and emits owner_input_required",
     display_name: "Owner goal-preservation drift — Kriger-bounded compression-drift floor",
   },
   {
