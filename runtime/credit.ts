@@ -249,6 +249,13 @@ const residualFromOwnerObservedOutcome = (ownerEv: EventLike, fallback: number):
   return clampResidual(fallback);
 };
 
+const isPeerPredictionOrigin = (actionEv: EventLike): boolean => {
+  if (actionEv.substrate_origin === "opencode") return true;
+  const payload = jsonObject(actionEv.payload);
+  const verifierKind = typeof payload.verifier_kind === "string" ? payload.verifier_kind.trim() : "";
+  return verifierKind.startsWith("peer_llm_");
+};
+
 const resolveOwnerObservedSourceActId = (db: Database, ownerEv: EventLike): string | null => {
   const direct = resolveSourceActId([ownerEv]);
   if (direct) return direct;
@@ -1110,15 +1117,15 @@ export const distributeCredit = async (
   }
 
   // 6. T4.3 brain prediction-accuracy posterior (roadmap.md §T4.3):
-  //    every action_predicted whose substrate_origin is the brain (opencode)
-  //    is a calibration sample — emit brain_accuracy_observation with
+  //    every action_predicted whose substrate_origin is opencode or a peer
+  //    LLM is a calibration sample — emit brain_accuracy_observation with
   //    |predicted − observed| as prediction_error, and update a per-goal_shape
   //    brain_accuracy_predicate act_artifact posterior (auto-admitted on
   //    first sighting). Low residual = "brain predicted well" → confirmed;
   //    high residual = "brain predicted poorly" → contradicted. This makes
-  //    the brain's predictive calibration a first-class Beta posterior the
-  //    dispatcher can read from to route between brain / replay / inline.
-  if (actionEv.substrate_origin === "opencode") {
+  //    peer predictive calibration a first-class Beta posterior the dispatcher
+  //    can read from to route between brain / replay / inline.
+  if (isPeerPredictionOrigin(actionEv)) {
     recordBrainAccuracy(db, {
       action_predicted_event_id: params.action_event_id,
       action_scored_event_id: params.scored_event_id,

@@ -286,11 +286,12 @@ const normalizeDispatcherViolationPayload = (input: EmitEventInput): { payload: 
  *
  *  Brain lesson TA4X4Q36XH38789BWQMV2AYB3W identified 102 historical
  *  action_scored events with action_artifact_id IS NULL — the dominant
- *  pattern was peer-LLM reviews (verifier_kind ∈ {peer_llm_opencode,
+ *  pattern was peer-LLM reviews (verifier_kind ∈ {peer_llm_claude,
+ *  peer_llm_claude_diagnostic, peer_llm_opencode,
  *  peer_llm_opencode_diagnostic, peer_llm_opencode_adversarial_review,
  *  peer_llm_opencode_inline_catalog_completeness_check,
  *  peer_llm_opencode_manual_requirement_check,
- *  peer_llm_opencode_structural_check, ...}) emitted by the brain to
+ *  peer_llm_opencode_structural_check, ...}) emitted by a peer to
  *  score OTHER actors' work without a registered action artifact. These
  *  bypass artifact-credit because the canonical action_artifact_id is
  *  null.
@@ -443,14 +444,14 @@ const maybeAutoAdmitVerifierKind = (
     .query<{ id: string }, [string]>("SELECT id FROM act_artifact WHERE id = ? LIMIT 1")
     .get(verifierKind);
   if (existing) return;
-  // peer_llm_opencode_* variant detection (metadata-only collapse rule).
+  // peer_llm_<hemisphere>_* variant detection (metadata-only collapse rule).
   let parentKind: string | null = null;
   let variantTag: string | null = null;
   let rollup = false;
-  const PEER_PREFIX = "peer_llm_opencode_";
-  if (verifierKind.startsWith(PEER_PREFIX) && verifierKind !== "peer_llm_opencode") {
-    parentKind = "peer_llm_opencode";
-    variantTag = verifierKind.slice(PEER_PREFIX.length);
+  const peerVariantMatch = verifierKind.match(/^peer_llm_([^_]+)_(.+)$/);
+  if (peerVariantMatch) {
+    parentKind = `peer_llm_${peerVariantMatch[1]}`;
+    variantTag = peerVariantMatch[2];
     rollup = true;
   }
   const ts = nowIso();

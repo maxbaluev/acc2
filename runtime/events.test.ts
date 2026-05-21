@@ -1085,6 +1085,51 @@ describe("emitEvent action_scored verifier_kind auto-admit gate (brain EH5A37DPH
     expect(auditPayload.rollup).toBe(true);
     expect(auditPayload.source_action_scored_event_id).toBe(scored.id);
   });
+
+  test("peer_llm_<hemisphere>_<variant> observations preserve symmetric hemisphere parent metadata", () => {
+    const db = openDb(":memory:");
+    const cases = [
+      { verifierKind: "peer_llm_claude_diagnostic", parentKind: "peer_llm_claude", variantTag: "diagnostic" },
+      { verifierKind: "peer_llm_opencode_diagnostic", parentKind: "peer_llm_opencode", variantTag: "diagnostic" },
+    ];
+
+    for (const item of cases) {
+      const scored = emitEvent(db, {
+        kind: "action_scored",
+        substrate_origin: "opencode",
+        directive_id: newId(),
+        task_id: newId(),
+        action_artifact_id: item.verifierKind,
+        verifier_artifact_id: item.verifierKind,
+        residual: 0.25,
+        payload: { verifier_kind: item.verifierKind },
+      });
+      const row = db
+        .query<{ fixture_input: string; body: string }, [string]>(
+          "SELECT fixture_input, body FROM act_artifact WHERE id = ? LIMIT 1",
+        )
+        .get(item.verifierKind);
+      expect(row).not.toBeNull();
+      const fixture = JSON.parse(row!.fixture_input);
+      expect(fixture.parent_kind).toBe(item.parentKind);
+      expect(fixture.variant_tag).toBe(item.variantTag);
+      expect(fixture.rollup).toBe(true);
+      expect(row!.body).toContain(`parent_kind=${item.parentKind}`);
+      expect(row!.body).toContain(`variant_tag=${item.variantTag}`);
+
+      const audit = db
+        .query<{ payload: string }, [string]>(
+          "SELECT payload FROM events WHERE kind = 'verifier_kind_auto_admitted' AND json_extract(payload, '$.verifier_kind') = ? LIMIT 1",
+        )
+        .get(item.verifierKind);
+      expect(audit).not.toBeNull();
+      const auditPayload = JSON.parse(audit!.payload);
+      expect(auditPayload.parent_kind).toBe(item.parentKind);
+      expect(auditPayload.variant_tag).toBe(item.variantTag);
+      expect(auditPayload.rollup).toBe(true);
+      expect(auditPayload.source_action_scored_event_id).toBe(scored.id);
+    }
+  });
 });
 
 describe("emitEvent dispatcher_violation classification gate (Hole 6 — 2026-05-19)", () => {
