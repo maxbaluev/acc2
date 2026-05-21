@@ -232,6 +232,38 @@ export const runBunArtifact = async (
         memory_mb: memoryMb,
       } as JsonValue,
     });
+    inv.emit?.({
+      kind: perm.warnings.length > 0 ? "sandbox_degraded" : "sandbox_enforced",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: inv.artifactId,
+      payload: perm.warnings.length > 0
+        ? {
+            runtime: "bun",
+            reason: "declared_sandbox_partially_unenforceable",
+            warnings: perm.warnings,
+            limits: {
+              wall_ms: wallMs,
+              memory_mb: memoryMb,
+              fs_read: inv.declaredSandbox.fs_read ?? [],
+              fs_write: inv.declaredSandbox.fs_write ?? [],
+              net_allow: inv.declaredSandbox.net_allow ?? [],
+              proc_allow: inv.declaredSandbox.proc_allow ?? [],
+              substrate_access: inv.declaredSandbox.substrate_access ?? "none",
+            },
+          } as JsonValue
+        : {
+            runtime: "bun",
+            limits: {
+              wall_ms: wallMs,
+              memory_mb: memoryMb,
+              fs_read: inv.declaredSandbox.fs_read ?? [],
+              fs_write: inv.declaredSandbox.fs_write ?? [],
+              net_allow: inv.declaredSandbox.net_allow ?? [],
+              proc_allow: inv.declaredSandbox.proc_allow ?? [],
+              substrate_access: inv.declaredSandbox.substrate_access ?? "none",
+            },
+          } as JsonValue,
+    });
     // §5.5 supervision event — pid + sandbox decl recorded at start.
     inv.emit?.({
       kind: "runtime_subprocess_started",

@@ -501,6 +501,32 @@ const runCamofoxArtifactInner = async (
         camoufox_binary: camoufoxBinary,
       } as JsonValue,
     });
+    inv.emit?.({
+      kind: baseWarnings.length > 0 ? "sandbox_degraded" : "sandbox_enforced",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: inv.artifactId,
+      payload: baseWarnings.length > 0
+        ? {
+            runtime: "camofox-browser",
+            reason: "declared_sandbox_partially_unenforceable",
+            warnings: baseWarnings,
+            limits: {
+              wall_ms: wallMs,
+              memory_mb: memoryMb,
+              browser_allow_domains: allowDomains,
+              browser_profile_root: profileRoot,
+            },
+          } as JsonValue
+        : {
+            runtime: "camofox-browser",
+            limits: {
+              wall_ms: wallMs,
+              memory_mb: memoryMb,
+              browser_allow_domains: allowDomains,
+              browser_profile_root: profileRoot,
+            },
+          } as JsonValue,
+    });
 
     // SIGTERM at wall_ms; SIGKILL escalation a fixed window later (independent
     // of wall_ms — firefox hung pages should hard-kill within a bounded

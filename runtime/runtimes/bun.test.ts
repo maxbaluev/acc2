@@ -64,6 +64,34 @@ describe("runBunArtifact — trivial success path", () => {
     expect(kinds).toContain("artifact_invoked");
     expect(kinds).toContain("artifact_observed");
   });
+
+  test("emits a sandbox posture event for every invocation", async () => {
+    const events: Array<{ kind: string; action_artifact_id?: string }> = [];
+    const body = `console.log('@@RESULT@@ ' + JSON.stringify({ ok: 1 }));`;
+    const declaredSandbox = { ...stdSandbox, net_allow: ["example.com"] };
+
+    for (const artifactId of ["art_posture_1", "art_posture_2"]) {
+      const obs = await runBunArtifact({
+        artifactId,
+        body,
+        declaredSandbox,
+        inputs: null,
+        emit: (e) => events.push({ kind: e.kind, action_artifact_id: e.action_artifact_id }),
+      });
+      expect(obs.ok).toBe(true);
+    }
+
+    for (const artifactId of ["art_posture_1", "art_posture_2"]) {
+      const invokedIdx = events.findIndex(
+        (e) => e.kind === "artifact_invoked" && e.action_artifact_id === artifactId,
+      );
+      expect(invokedIdx).toBeGreaterThanOrEqual(0);
+      expect(events[invokedIdx + 1]).toEqual({
+        kind: "sandbox_degraded",
+        action_artifact_id: artifactId,
+      });
+    }
+  });
 });
 
 describe("runBunArtifact — failure paths", () => {
