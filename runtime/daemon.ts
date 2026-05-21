@@ -325,6 +325,26 @@ const supervisedTick = (
 
 const RESTART_DRAIN_TIMEOUT_MS = 30_000;
 
+/** R2 instant-startup grace (2026-05-21). Boot-time catch-up passes
+ *  (extractor sweep over the whole event table, embedder backlog drain)
+ *  are deferred this many ms so the daemon binds ports + serves /health
+ *  BEFORE their synchronous bun:sqlite scans grind the single event loop.
+ *  Deliberately SHORT (3s) to keep the system reactive: the catch-up pass
+ *  only handles work accumulated while the daemon was OFF; NEW events are
+ *  served by the reactive activation-bus subscriptions immediately
+ *  regardless of this delay. The complete fix is roadmap R1 (writer
+ *  thread) which removes main-loop write blocking entirely; this defer is
+ *  the surgical interim that makes boot-to-serving near-instant. Override
+ *  via ACC2_BOOT_HEAVY_PASS_DELAY_MS. */
+const BOOT_HEAVY_PASS_DELAY_MS = (() => {
+  const raw = process.env.ACC2_BOOT_HEAVY_PASS_DELAY_MS;
+  if (typeof raw === "string" && raw.length > 0) {
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 0 && n <= 60_000) return n;
+  }
+  return 3_000;
+})();
+
 const countEvents = (db: Database): number => {
   const row = db.query("SELECT COUNT(*) AS n FROM events").get() as { n: number } | null;
   return row?.n ?? 0;
@@ -1237,19 +1257,29 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       if (!extractorsMarked) { markWorkerReady("extractors"); extractorsMarked = true; }
     });
     registerReactiveWorker("extractors", EXTRACTORS_INTERVAL_MS, ["knowledge_candidate", "act_artifact_candidate", "code_artifact_candidate", "action_scored", "task_committed", "lesson_extracted", "owner_insight_candidate", "owner_input_received", "owner_observed_outcome_recorded", "applied_change_committed", "applied_change_failed", "irreversible_effect_recorded"], extractorsTickHandle, { minReactiveGapMs: EXTRACTORS_INTERVAL_MS });
-    // Round-2 audit (2026-05-15): run ONE extractor pass synchronously at
-    // boot so candidates accumulated while the daemon was off don't have
-    // to wait the full 5-min cadence before being promoted. Marks ready
-    // AFTER the first pass completes so /ready reflects real liveness.
-    void (async () => {
-      try {
-        await runExtractorsOnce();
-      } finally {
-        markWorkerReady("extractors");
-        extractorsMarked = true;
-        recordWorkerTick("extractors");
-      }
-    })();
+    // Round-2 audit (2026-05-15): run ONE extractor pass at boot so
+    // candidates accumulated while the daemon was off don't wait the full
+    // 5-min cadence. 2026-05-21 R2 instant-startup: DEFER this pass by
+    // BOOT_HEAVY_PASS_DELAY_MS. runExtractorsOnce scans the whole event
+    // table through ~10 extractors (causal_edge, trajectory_motif,
+    // semantic_dedup, …); on the production-size DB its synchronous
+    // bun:sqlite queries grind the single event loop for tens of seconds.
+    // Running it immediately at boot starved the port-bind + first /health
+    // window (measured: 56s embedder/extractor grind delayed listening).
+    // Deferring lets the daemon bind ports and serve health FIRST, then
+    // do the heavy backfill pass. /ready still flips only after the pass
+    // (real liveness); /health + MCP serve from bind time.
+    setTimeout(() => {
+      void (async () => {
+        try {
+          await runExtractorsOnce();
+        } finally {
+          markWorkerReady("extractors");
+          extractorsMarked = true;
+          recordWorkerTick("extractors");
+        }
+      })();
+    }, BOOT_HEAVY_PASS_DELAY_MS).unref();
     // extractors is activation-driven; activationDisposers are cleared on shutdown.
   }
 
@@ -1418,6 +1448,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // background work" — what T3.8 (worker-thread pool) will fully
     // close. This is the surgical interim fix.
     if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
+    // 2026-05-21 R2 instant-startup: defer the embedder boot tick by
+    // BOOT_HEAVY_PASS_DELAY_MS so its synchronous readUnembedded scan +
+    // vec0 persist don't grind the event loop during the port-bind window.
+    setTimeout(() => {
     void (async () => {
       try {
         // Boot-tick batch capped at 8 (was 20) — same main-loop-unlock
@@ -1448,6 +1482,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
         }
       }
     })();
+    }, BOOT_HEAVY_PASS_DELAY_MS).unref();
     // embedder is activation-driven; activationDisposers are cleared on shutdown.
   }
 
