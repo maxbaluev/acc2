@@ -527,6 +527,61 @@ const gateAutonomousCommitByMetacognitiveOwnerPolicy = async (
   };
 };
 
+const evaluateAutonomousCommitContinualOwnerState = async (
+  payload: Record<string, unknown>,
+  targets: readonly string[],
+) => {
+  try {
+    const [{ evaluateContinualOwnerState }, profileEnv, recentEnv] = await Promise.all([
+      import("../runtime/continual_owner_state"),
+      mcpCall("substrate.read", { view_name: "owner_profile_view" }),
+      mcpCall("runtime.recent_events", { k: 30, kinds: ["owner_input_received", "owner_decision_recorded", "owner_observed_outcome_recorded"] }),
+    ]);
+    if (!profileEnv.ok) return { residual: 0, updated_owner_profile: {}, verdict: "stable" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+    const profileRow = Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
+    const profile = parsePayload(profileRow?.payload);
+    const recentEvents = recentEnv.ok ? ((recentEnv.result as { events?: EventRow[] } | null)?.events ?? []) : [];
+    const recentInteractions = recentEvents.map((row) => ({ kind: row.kind, ts: row.ts, text: ownerGoalDriftText(row) })).filter((row) => row.text.length > 0);
+    const candidateState = payload.owner_profile && typeof payload.owner_profile === "object" ? payload.owner_profile as Record<string, unknown> : undefined;
+    return evaluateContinualOwnerState({
+      prior_owner_profile: profile,
+      interaction_signals: {
+        task_ambiguity: payload.task_ambiguity,
+        target_count: Math.min(1, targets.length / 5),
+        runtime_surface: targets.some((resource) => /^repo:(runtime|substrate|cli)\//.test(resource)) ? 0.25 : 0,
+      },
+      recent_interactions: recentInteractions,
+      candidate_updated_state: candidateState,
+    });
+  } catch {
+    return { residual: 0, updated_owner_profile: {}, verdict: "stable" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+  }
+};
+
+const gateAutonomousCommitByContinualOwnerState = async (
+  decision: ApplyRouteDecision,
+  payload: Record<string, unknown>,
+  targets: readonly string[],
+): Promise<ApplyRouteDecision> => {
+  const state = await evaluateAutonomousCommitContinualOwnerState(payload, targets);
+  if (state.residual < 0.6) return decision;
+  return {
+    route: "NEEDS_BRAIN_RECYCLE",
+    score: 1,
+    confidence: 0.85,
+    deterministic: false,
+    reason: "continual_owner_state_predicate",
+    preconditions: {
+      ...decision.preconditions,
+      continual_owner_state_residual: state.residual,
+      continual_owner_state_verdict: state.verdict,
+      continual_owner_state_breakdown: state.breakdown,
+      continual_owner_state_reasons: state.reasons,
+      continual_owner_state_updated_owner_profile: state.updated_owner_profile,
+    },
+  };
+};
+
 const gateAutonomousCommit = async (
   decision: ApplyRouteDecision,
   payload: Record<string, unknown>,
@@ -537,7 +592,9 @@ const gateAutonomousCommit = async (
   if (driftDecision.route !== "AUTO_APPLY") return driftDecision;
   const delegationDecision = await gateAutonomousCommitByDelegationSafety(driftDecision, payload, targets);
   if (delegationDecision.route !== "AUTO_APPLY") return delegationDecision;
-  return gateAutonomousCommitByMetacognitiveOwnerPolicy(delegationDecision, payload, targets);
+  const metacognitiveDecision = await gateAutonomousCommitByMetacognitiveOwnerPolicy(delegationDecision, payload, targets);
+  if (metacognitiveDecision.route !== "AUTO_APPLY") return metacognitiveDecision;
+  return gateAutonomousCommitByContinualOwnerState(metacognitiveDecision, payload, targets);
 };
 
 const deterministicApplyRoute = async (
