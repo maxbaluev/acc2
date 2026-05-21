@@ -1412,7 +1412,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       // "Main-Loop Write Isolation".
       const pendingEmbeddings = await pendingEmbeddableCount(db);
       const batchSize = Math.min(8, Math.max(1, pendingEmbeddings));
-      if (batchSize > 0) await embedderWorkerTick(db, { batchSize });
+      if (batchSize > 0) {
+        const result = await embedderWorkerTick(db, { batchSize });
+        if (result.embedded > 0) index.reloadFromDb();
+      }
       if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
     }, {
       // Embedder ticks legitimately take 30-90s during heavy backlog
@@ -1478,7 +1481,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
         // Boot-tick batch capped at 8 (was 20) — same main-loop-unlock
         // rationale as the reactive tick above. The persist phase is
         // synchronous on the main thread; small batches bound the block.
-        await embedderWorkerTick(db, { batchSize: 8 });
+        const result = await embedderWorkerTick(db, { batchSize: 8 });
+        if (result.embedded > 0) index.reloadFromDb();
         recordWorkerTick("embedder");
       } catch (err) {
         logger.warn(

@@ -28,6 +28,8 @@ import { mcpCall } from "./rpc";
 import { lessonApplyTargetsPolicy } from "../substrate/lesson_apply_policy";
 import { classifyApply } from "./verify";
 import { emitActTupleViaMcp } from "../runtime/act_tuple";
+import { evaluateOwnerGoalPreservationDrift } from "../runtime/owner_goal_preservation_drift";
+import { evaluateOwnerGoalPreservationDrift } from "../runtime/owner_goal_preservation_drift";
 
 type Args = Record<string, string | boolean>;
 
@@ -319,6 +321,62 @@ const ownerAutonomyThreshold = async (): Promise<number> => {
   return typeof threshold === "number" && Number.isFinite(threshold) ? Math.min(1, Math.max(0, threshold)) : 0.5;
 };
 
+const ownerGoalDriftText = (row: EventRow): string => {
+  const payload = parsePayload(row.payload);
+  for (const key of ["input", "text", "message", "directive_text", "summary", "reason"] as const) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return JSON.stringify(payload);
+};
+
+const evaluateAutonomousCommitOwnerGoalDrift = async (
+  payload: Record<string, unknown>,
+  target: string,
+  targets: readonly string[],
+) => {
+  try {
+    const profileEnv = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
+    const profileRow = profileEnv.ok && Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
+    const recentEnv = await mcpCall("runtime.recent_events", { k: 30, kinds: ["owner_input_received", "owner_decision_recorded", "owner_observed_outcome_recorded"] });
+    const recentEvents = recentEnv.ok ? ((recentEnv.result as { events?: EventRow[] } | null)?.events ?? []) : [];
+    return evaluateOwnerGoalPreservationDrift({
+      fresh_owner_evidence: recentEvents.map(ownerGoalDriftText).filter((text) => text.length > 0),
+      accumulated_state: {
+        owner_profile: parsePayload(profileRow?.payload),
+        session_summaries: [JSON.stringify({ target, targets, proposal: payload.proposed_behavior ?? payload.proposed_action ?? payload })],
+      },
+    });
+  } catch {
+    return { residual: 0, verdict: "clean" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+  }
+};
+
+const gateAutonomousCommitByOwnerGoalDrift = async (
+  decision: ApplyRouteDecision,
+  payload: Record<string, unknown>,
+  target: string,
+  targets: readonly string[],
+): Promise<ApplyRouteDecision> => {
+  const drift = await evaluateAutonomousCommitOwnerGoalDrift(payload, target, targets);
+  if (drift.residual < 0.6) return decision;
+  return {
+    route: "OWNER_GATE",
+    score: 1,
+    confidence: 0.85,
+    deterministic: false,
+    reason: "owner_goal_preservation_drift",
+    preconditions: {
+      ...decision.preconditions,
+      owner_goal_preservation_drift_residual: drift.residual,
+      owner_goal_preservation_drift_verdict: drift.verdict,
+      owner_goal_preservation_drift_breakdown: drift.breakdown,
+      owner_goal_preservation_drift_reasons: drift.reasons,
+      reconciliation_required: true,
+    },
+  };
+};
+
 const deterministicApplyRoute = async (
   payload: Record<string, unknown>,
   target: string,
@@ -390,13 +448,13 @@ const deterministicApplyRoute = async (
   const posteriorScore = gateResidual == null ? 0.95 : Math.max(0, 1 - gateResidual);
   const threshold = await ownerAutonomyThreshold();
   if (queuedRoute === "AUTO_APPLY" && posteriorScore >= threshold) {
-    return { route: "AUTO_APPLY", score: posteriorScore, confidence: 0.8, deterministic: false, reason: "preconditions_passed_posterior_above_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } };
+    return gateAutonomousCommitByOwnerGoalDrift({ route: "AUTO_APPLY", score: posteriorScore, confidence: 0.8, deterministic: false, reason: "preconditions_passed_posterior_above_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } }, payload, target, targets);
   }
   if (queuedRoute === "OWNER_GATE") {
     return { route: "OWNER_GATE", score: posteriorScore, confidence: 0.7, deterministic: false, reason: "queue_route_owner_gate", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true } };
   }
   if (queuedRoute === null && posteriorScore >= threshold) {
-    return { route: "AUTO_APPLY", score: posteriorScore, confidence: 0.65, deterministic: false, reason: "preconditions_passed_local_predicate_above_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } };
+    return gateAutonomousCommitByOwnerGoalDrift({ route: "AUTO_APPLY", score: posteriorScore, confidence: 0.65, deterministic: false, reason: "preconditions_passed_local_predicate_above_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } }, payload, target, targets);
   }
   return { route: "NEEDS_BRAIN_RECYCLE", score: posteriorScore, confidence: 0.6, deterministic: false, reason: "posterior_missing_or_below_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } };
 };

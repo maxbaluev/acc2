@@ -1,7 +1,7 @@
 // acc apply tests: prove the owner/auto gates are target/shape based, not
 // special-cased by lesson kind.
 
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +17,16 @@ let dir = "";
 let dbPath = "";
 let directiveSeq = 0;
 let runApply: (argv: string[]) => Promise<number>;
+let ownerGoalDriftResidual = 0;
+
+mock.module("../runtime/owner_goal_preservation_drift", () => ({
+  evaluateOwnerGoalPreservationDrift: () => ({
+    residual: ownerGoalDriftResidual,
+    verdict: ownerGoalDriftResidual >= 0.6 ? "drift" : "clean",
+    breakdown: { mocked_owner_goal_preservation_drift: ownerGoalDriftResidual },
+    reasons: ["mocked_owner_goal_preservation_drift"],
+  }),
+}));
 
 const ctx = (): McpContext => ({ db, invoker: "claude_root" } as McpContext);
 
@@ -102,6 +112,10 @@ beforeAll(async () => {
   db = openDb(dbPath);
   mock.module("./rpc", () => ({ mcpCall: rpc }));
   ({ runApply } = await import("./apply"));
+});
+
+beforeEach(() => {
+  ownerGoalDriftResidual = 0;
 });
 
 afterAll(() => {
@@ -358,6 +372,43 @@ describe("runApply gates", () => {
     const payload = rowPayload(gateScore);
     expect(payload.apply_route).not.toBe("AUTO_APPLY_TEST_LANE");
     expect(payload.apply_route_reason).not.toBe("test_lane_target");
+  });
+
+  test("owner goal-preservation drift blocks autonomous apply and opens reconciliation", async () => {
+    ownerGoalDriftResidual = 0.72;
+    const scope = nextScope();
+    const env = await rpc("substrate.emit", {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
+      payload: {
+        target_resource: "repo:cli/apply.ts",
+        anchor: "renderGateBlock",
+        current_behavior: "acc apply prompts omit structured gate facts",
+        proposed_behavior: {
+          target_resource: "repo:cli/apply.ts",
+          anchor: "renderGateBlock",
+          diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+        },
+      },
+    });
+    expect(env.ok).toBe(true);
+    const eventId = (env.result as { id: string }).id;
+
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+
+    expect(code).toBe(1);
+    expect(cap.err.join("\n")).toContain("owner_goal_preservation_drift");
+    const gateScore = gateScoreFor(eventId);
+    const payload = rowPayload(gateScore);
+    expect(payload.apply_route).toBe("OWNER_GATE");
+    expect(payload.apply_route_reason).toBe("owner_goal_preservation_drift");
+    const preconditions = payload.apply_route_preconditions as Record<string, unknown>;
+    expect(preconditions.owner_goal_preservation_drift_residual).toBe(0.72);
+    expect(preconditions.reconciliation_required).toBe(true);
   });
 
   test("high-residual applied executor attempts remain uncommitted and queued", async () => {
