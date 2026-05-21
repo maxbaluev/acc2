@@ -35,10 +35,33 @@
 // task_node_opened, worker_tick_completed.
 
 import type { Database } from "bun:sqlite";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
 import { pendingContractAmendments, type PendingContractAmendmentRow } from "../substrate/views";
+
+const OUTFLOW_EVENT_KINDS = ["applied_change_committed", "knowledge_promoted", "task_closure_audited", "closure_complete"] as const;
+const outflowRoot = (): string => join(process.env.ACC2_STATE_DIR ?? join(homedir(), ".accint"), "outflow");
+const eventScore = (payload: Record<string, unknown>): number => Number(payload.score ?? payload.promotion_score ?? payload.closure_residual ?? 0);
+const shouldWriteOutflow = (kind: string, payload: Record<string, unknown>): boolean => kind === "knowledge_promoted" ? eventScore(payload) >= 0.75 : kind === "task_closure_audited" ? eventScore(payload) < 0.3 : true;
+const conciseStatus = (kind: string, payload: Record<string, unknown>): string => String(payload.summary ?? payload.claim ?? payload.reason ?? kind);
+const writeOutflowArtifacts = (db: Database): number => {
+  const rows = db.query<{ id: string; kind: string; task_id: string | null; payload: string }, []>(`SELECT id, kind, task_id, payload FROM events WHERE kind IN ('applied_change_committed','knowledge_promoted','task_closure_audited','closure_complete') AND task_id IS NOT NULL ORDER BY ts DESC LIMIT 200`).all();
+  let written = 0;
+  const root = outflowRoot();
+  if (!existsSync(root)) mkdirSync(root, { recursive: true, mode: 0o700 });
+  for (const row of rows) {
+    let payload: Record<string, unknown> = {};
+    try { payload = JSON.parse(row.payload ?? "{}"); } catch {}
+    if (!shouldWriteOutflow(row.kind, payload)) continue;
+    writeFileSync(join(root, `${row.task_id}.md`), `# Status\n\n${conciseStatus(row.kind, payload)}\n\n---\nledger_id: ${row.id}\nevent_kind: ${row.kind}\ntask_id: ${row.task_id}\n`, { mode: 0o600 });
+    written += 1;
+  }
+  return written;
+};
 
 export type ConsumerVerdictKind =
   | "route_to_implementation"
@@ -349,6 +372,12 @@ export const runContractAmendmentConsumer = async (
     verdicts: [],
     errors: [],
   };
+
+  try {
+    writeOutflowArtifacts(db);
+  } catch (err) {
+    summary.errors.push(`outflow_write_failed:${(err as Error).message}`);
+  }
 
   let rows: PendingContractAmendmentRow[];
   try {
