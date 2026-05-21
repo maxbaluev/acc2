@@ -13,6 +13,15 @@ import { publishActivation } from "./activation_bus";
 import { recordEventEmission } from "./metrics";
 import { screenActArtifactCandidate } from "./artifact_candidate_screen";
 
+/** Empty-blob sentinel (maps to SQLite X'') written to the `embedding`
+ *  column for non-embeddable event kinds at INSERT time. Keeps the
+ *  `embedding IS NULL` partial index (idx_events_unembedded_by_ts)
+ *  matching ONLY genuinely-pending embeddable rows — see the
+ *  foundational-fix comment at the INSERT site in emitEvent. The
+ *  embedder's no-text path uses the identical X'' marker, so vec_events
+ *  (vec0) never receives these rows. */
+const EMPTY_EMBEDDING_SENTINEL = new Uint8Array(0);
+
 export type EmitEventInput = {
   kind: EventKind;
   substrate_origin?: SubstrateOrigin;
@@ -1018,6 +1027,27 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   const payload = JSON.stringify(eventPayload);
   const context_refs = JSON.stringify(input.context_refs ?? []);
 
+  // FOUNDATIONAL embedding-scan fix (2026-05-21): non-embeddable kinds
+  // get the empty-blob sentinel (X'') at INSERT time instead of NULL.
+  // Root cause this fixed: 286,204 rows had `embedding IS NULL` because
+  // they were non-embeddable kinds (worker_tick_completed,
+  // candidate_confirmed, origin_calibration_recorded, etc.) that the
+  // embedder filters OUT of its scan (`kind IN (EMBEDDABLE_KINDS)`) and
+  // therefore NEVER sentinel-marks. They accumulated forever, bloating
+  // the `idx_events_unembedded_by_ts ... WHERE embedding IS NULL` partial
+  // index to 286K entries. Every embedder reactive fire (minReactiveGapMs:0
+  // = fires on every embeddable event) ran pendingEmbeddableCount + a scan
+  // against that bloated index, pinning the daemon main thread at 98% CPU
+  // with a REAL embeddable backlog of ZERO. Stamping the sentinel here
+  // keeps `embedding IS NULL` matching ONLY genuinely-pending embeddable
+  // rows, so the partial index stays small and the scans stay O(few).
+  // Embeddable kinds keep NULL (caller's input.embedding wins when the
+  // embedder back-fills the real vector). The empty Uint8Array maps to
+  // SQLite X'' — same sentinel the embedder's no-text path already uses.
+  const kindMeta = getCurrentEventKinds()[input.kind];
+  const isEmbeddableKind = kindMeta?.embeddable === true;
+  const embeddingValue = input.embedding ?? (isEmbeddableKind ? null : EMPTY_EMBEDDING_SENTINEL);
+
   db.run(
     `INSERT INTO events (
        id, ts, directive_id, task_id, parent_task_id, loop_id,
@@ -1034,7 +1064,7 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       input.verifier_artifact_id ?? null,
       input.outcome ?? null,
       input.residual ?? null,
-      input.embedding ?? null,
+      embeddingValue,
       input.embedding_version ?? null,
       input.payload_hash ?? null,
       input.blob_ref ?? null,
