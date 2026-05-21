@@ -2359,14 +2359,16 @@ const PREDICATE_SEEDS: PredicateSeed[] = [
     display_name: "Ordered theory of mind — order-axis + staged ToM-Agent-to-Moral-Agent model",
   },
   {
-    name: "owner_alignment_orchestrator_predicate",
+    name: "orchestrator_predicate",
     tier: "tier_s0_owner_alignment",
-    problem: "the substrate must SELF-SELECT which owner-alignment predicates run for a task; running them all every cycle wastes budget, running none collapses to autonomous-commit creep.",
-    contract: "self-select the minimum owner-alignment boundary set needed for the current risk, novelty, drift, and control signals; ground in COSMIC Vashishtha et al. IEEE 2026 self-supervised agent selection with self-invocation loop prevention. Reuses brain/substrate primitive visibility lessons (34Z9VFMP5H5N substrate-side brain primitive, MYMQZFM2XX7732AQ subagent visibility verdict, V3CED593BH5M bridge ledger-evidence-first).",
-    why: "S0 orchestration — owner alignment is itself a meta-routed concern; the substrate decides which of its 7 owner-alignment boundaries to evaluate per task.",
-    closure_predicate: "orchestrator's chosen boundary set covers the structural-evidence axes (risk, novelty, drift, control signals) without redundancy.",
-    metric_direction: "orchestrator selects minimum-sufficient set; over- and under-selection rates both fall.",
-    display_name: "Owner alignment orchestrator — COSMIC SSA self-selection of S0 boundaries",
+    problem: "the seven S0 owner-alignment predicates can each pass locally while the overall orchestration decision remains misaligned because their residuals, verdicts, order, and selected boundary set were never composed into one top-level verdict.",
+    contract: "compose owner_goal_preservation_drift, delegation_safety, metacognitive_owner_policy, continual_owner_state, owner_outcome_forecast, owner_rendering, and ordered_theory_of_mind into one scored owner-alignment verdict before autonomous apply. Ground in COSMIC Vashishtha et al. IEEE 2026 self-supervised agent selection with self-invocation loop prevention and the ordered_theory_of_mind S0 boundary just shipped on floor b592551.",
+    why: "S0 final composition — owner alignment must be scored at the orchestration level, not only as seven independent local gates.",
+    closure_predicate: "orchestrator residual composes all seven S0 sub-predicate residuals/verdicts; AUTO_APPLY survives only when the composed verdict is aligned.",
+    metric_direction: "orchestration-level owner-alignment residual falls; autonomous-commit reversals caused by cross-predicate disagreement fall to zero.",
+    evaluator_artifact_id: "orchestrator_predicate_evaluator_v1",
+    consumer_gate: "cli/apply.ts deterministicApplyRoute gates AUTO_APPLY on orchestrator_predicate after ordered_theory_of_mind_predicate; misaligned compositions recycle and watch compositions route to owner gate while clean compositions preserve AUTO_APPLY",
+    display_name: "Orchestrator predicate — top-level S0 owner-alignment composition",
   },
   // ── Tier 6 scoreable assumption predicates (20) ───────────────────
   {

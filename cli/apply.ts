@@ -821,6 +821,136 @@ const gateAutonomousCommitByOrderedTheoryOfMind = async (
   };
 };
 
+const orchestratorPredicateRoute = (recommended: string): ApplyRoute => {
+  switch (recommended) {
+    case "NEEDS_BRAIN_RECYCLE": return "NEEDS_BRAIN_RECYCLE";
+    case "OWNER_GATE": return "OWNER_GATE";
+    case "AUTO_APPLY":
+    default:
+      return "AUTO_APPLY";
+  }
+};
+
+const subPredicateResultsFromDecision = (decision: ApplyRouteDecision): Record<string, { name: string; residual: unknown; verdict?: string; reasons?: string[]; breakdown?: Record<string, unknown> }> => ({
+  owner_goal_preservation_drift: {
+    name: "owner_goal_preservation_drift",
+    residual: decision.preconditions.owner_goal_preservation_drift_residual ?? 0,
+    verdict: typeof decision.preconditions.owner_goal_preservation_drift_verdict === "string" ? decision.preconditions.owner_goal_preservation_drift_verdict : "clean",
+    reasons: Array.isArray(decision.preconditions.owner_goal_preservation_drift_reasons) ? decision.preconditions.owner_goal_preservation_drift_reasons as string[] : [],
+    breakdown: decision.preconditions.owner_goal_preservation_drift_breakdown && typeof decision.preconditions.owner_goal_preservation_drift_breakdown === "object" ? decision.preconditions.owner_goal_preservation_drift_breakdown as Record<string, unknown> : {},
+  },
+  delegation_safety: {
+    name: "delegation_safety",
+    residual: decision.preconditions.delegation_safety_residual ?? 0,
+    verdict: typeof decision.preconditions.delegation_safety_verdict === "string" ? decision.preconditions.delegation_safety_verdict : "safe",
+    reasons: Array.isArray(decision.preconditions.delegation_safety_reasons) ? decision.preconditions.delegation_safety_reasons as string[] : [],
+    breakdown: decision.preconditions.delegation_safety_breakdown && typeof decision.preconditions.delegation_safety_breakdown === "object" ? decision.preconditions.delegation_safety_breakdown as Record<string, unknown> : {},
+  },
+  metacognitive_owner_policy: {
+    name: "metacognitive_owner_policy",
+    residual: decision.preconditions.metacognitive_owner_policy_residual ?? 0,
+    verdict: typeof decision.preconditions.metacognitive_owner_policy_verdict === "string" ? decision.preconditions.metacognitive_owner_policy_verdict : "aligned",
+    reasons: Array.isArray(decision.preconditions.metacognitive_owner_policy_reasons) ? decision.preconditions.metacognitive_owner_policy_reasons as string[] : [],
+    breakdown: decision.preconditions.metacognitive_owner_policy_breakdown && typeof decision.preconditions.metacognitive_owner_policy_breakdown === "object" ? decision.preconditions.metacognitive_owner_policy_breakdown as Record<string, unknown> : {},
+  },
+  continual_owner_state: {
+    name: "continual_owner_state",
+    residual: decision.preconditions.continual_owner_state_residual ?? 0,
+    verdict: typeof decision.preconditions.continual_owner_state_verdict === "string" ? decision.preconditions.continual_owner_state_verdict : "stable",
+    reasons: Array.isArray(decision.preconditions.continual_owner_state_reasons) ? decision.preconditions.continual_owner_state_reasons as string[] : [],
+    breakdown: decision.preconditions.continual_owner_state_breakdown && typeof decision.preconditions.continual_owner_state_breakdown === "object" ? decision.preconditions.continual_owner_state_breakdown as Record<string, unknown> : {},
+  },
+  owner_outcome_forecast: {
+    name: "owner_outcome_forecast",
+    residual: decision.preconditions.owner_outcome_forecast_residual ?? 0,
+    verdict: typeof decision.preconditions.owner_outcome_forecast_verdict === "string" ? decision.preconditions.owner_outcome_forecast_verdict : "aligned",
+    reasons: Array.isArray(decision.preconditions.owner_outcome_forecast_reasons) ? decision.preconditions.owner_outcome_forecast_reasons as string[] : [],
+    breakdown: decision.preconditions.owner_outcome_forecast_breakdown && typeof decision.preconditions.owner_outcome_forecast_breakdown === "object" ? decision.preconditions.owner_outcome_forecast_breakdown as Record<string, unknown> : {},
+  },
+  owner_rendering: {
+    name: "owner_rendering",
+    residual: decision.preconditions.owner_rendering_residual ?? 0,
+    verdict: typeof decision.preconditions.owner_rendering_verdict === "string" ? decision.preconditions.owner_rendering_verdict : "clean",
+    reasons: Array.isArray(decision.preconditions.owner_rendering_reasons) ? decision.preconditions.owner_rendering_reasons as string[] : [],
+    breakdown: decision.preconditions.owner_rendering_breakdown && typeof decision.preconditions.owner_rendering_breakdown === "object" ? decision.preconditions.owner_rendering_breakdown as Record<string, unknown> : {},
+  },
+  ordered_theory_of_mind: {
+    name: "ordered_theory_of_mind",
+    residual: decision.preconditions.ordered_theory_of_mind_residual ?? 0,
+    verdict: typeof decision.preconditions.ordered_theory_of_mind_verdict === "string" ? decision.preconditions.ordered_theory_of_mind_verdict : "aligned",
+    reasons: Array.isArray(decision.preconditions.ordered_theory_of_mind_reasons) ? decision.preconditions.ordered_theory_of_mind_reasons as string[] : [],
+    breakdown: decision.preconditions.ordered_theory_of_mind_breakdown && typeof decision.preconditions.ordered_theory_of_mind_breakdown === "object" ? decision.preconditions.ordered_theory_of_mind_breakdown as Record<string, unknown> : {},
+  },
+});
+
+const evaluateAutonomousCommitOrchestratorPredicate = async (
+  decision: ApplyRouteDecision,
+  payload: Record<string, unknown>,
+  targets: readonly string[],
+) => {
+  try {
+    const { evaluateOrchestratorPredicate } = await import("../runtime/orchestrator_predicate");
+    return evaluateOrchestratorPredicate({
+      candidate_route: decision.route,
+      proposed_action: {
+        intent: typeof payload.intent === "string" ? payload.intent : undefined,
+        summary: JSON.stringify(payload.proposed_behavior ?? payload.proposed_action ?? payload),
+        target_resources: [...targets],
+        reversible: true,
+        risk: decision.score < 0.7 ? 0.5 : payload.risk,
+        novelty: payload.classification === "novel" ? 0.8 : payload.novelty,
+      },
+      sub_predicate_results: subPredicateResultsFromDecision(decision),
+      candidate_orchestration: {
+        boundary_order: [
+          "owner_goal_preservation_drift",
+          "delegation_safety",
+          "metacognitive_owner_policy",
+          "continual_owner_state",
+          "owner_outcome_forecast",
+          "owner_rendering",
+          "ordered_theory_of_mind",
+        ],
+        selected_boundaries: [
+          "owner_goal_preservation_drift",
+          "delegation_safety",
+          "metacognitive_owner_policy",
+          "continual_owner_state",
+          "owner_outcome_forecast",
+          "owner_rendering",
+          "ordered_theory_of_mind",
+        ],
+      },
+    });
+  } catch {
+    return { residual: 0, verdict: "aligned" as const, recommended_route: "AUTO_APPLY" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+  }
+};
+
+const gateAutonomousCommitByOrchestratorPredicate = async (
+  decision: ApplyRouteDecision,
+  payload: Record<string, unknown>,
+  targets: readonly string[],
+): Promise<ApplyRouteDecision> => {
+  const orchestrator = await evaluateAutonomousCommitOrchestratorPredicate(decision, payload, targets);
+  if (orchestrator.residual < 0.6 && orchestrator.recommended_route === "AUTO_APPLY") return decision;
+  return {
+    route: orchestratorPredicateRoute(orchestrator.recommended_route),
+    score: 1,
+    confidence: 0.85,
+    deterministic: false,
+    reason: "orchestrator_predicate",
+    preconditions: {
+      ...decision.preconditions,
+      orchestrator_predicate_residual: orchestrator.residual,
+      orchestrator_predicate_verdict: orchestrator.verdict,
+      orchestrator_predicate_recommended_route: orchestrator.recommended_route,
+      orchestrator_predicate_breakdown: orchestrator.breakdown,
+      orchestrator_predicate_reasons: orchestrator.reasons,
+    },
+  };
+};
+
 const gateAutonomousCommit = async (
   decision: ApplyRouteDecision,
   payload: Record<string, unknown>,
@@ -839,7 +969,9 @@ const gateAutonomousCommit = async (
   if (forecastDecision.route !== "AUTO_APPLY") return forecastDecision;
   const renderingDecision = await gateAutonomousCommitByOwnerRendering(forecastDecision, payload);
   if (renderingDecision.route !== "AUTO_APPLY") return renderingDecision;
-  return gateAutonomousCommitByOrderedTheoryOfMind(renderingDecision, payload, targets);
+  const theoryDecision = await gateAutonomousCommitByOrderedTheoryOfMind(renderingDecision, payload, targets);
+  if (theoryDecision.route !== "AUTO_APPLY") return theoryDecision;
+  return gateAutonomousCommitByOrchestratorPredicate(theoryDecision, payload, targets);
 };
 
 const deterministicApplyRoute = async (
