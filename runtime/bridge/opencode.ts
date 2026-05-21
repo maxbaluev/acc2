@@ -263,13 +263,14 @@ const probeMcpReachable = async (url: string, timeoutMs: number): Promise<boolea
   }
 };
 
-/** Test-only handshake-gate accessor — exposes the static counters so
- *  the test suite can assert serialization behavior without driving
- *  real subprocess spawns. NOT part of the production surface. */
+/** Handshake-gate state accessor. Returns current permit utilization
+ *  so /health (daemon.ts) and tests can observe queue depth. Read-only;
+ *  callers cannot mutate the counters from outside this module. */
 export const _handshakeGateStateForTests = () => ({
   permitsInUse: handshakePermitsInUse,
   waitersWaiting: handshakeWaiters.length,
   permitCap: HANDSHAKE_PERMIT_CAP,
+  waitBudgetMs: HANDSHAKE_WAIT_BUDGET_MS,
 });
 
 export const _testReleaseAllHandshakePermits = (): void => {

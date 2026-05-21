@@ -2606,6 +2606,16 @@ const routeAux = async (
       const p = mod.getSqlPool();
       if (p) sqlWorkerPoolStats = p.metrics() as unknown as Record<string, number>;
     } catch { /* tolerate */ }
+    // Handshake gate state (2026-05-21, b9869bc multi-brain foundation).
+    // Surfaces the in-process serialization gate that limits concurrent
+    // MCP-handshake-window holders during burst-spawn periods. Operators
+    // see queue depth + permit utilization via `acc daemon status` without
+    // needing to read internal bridge state.
+    let handshakeGate: Record<string, number> | null = null;
+    try {
+      const mod = await import("./bridge/opencode");
+      handshakeGate = mod._handshakeGateStateForTests();
+    } catch { /* bridge module may be unloadable in tests; tolerate */ }
     return Response.json({
       status: stuck.length === 0 ? "ok" : "degraded",
       pid: process.pid,
@@ -2625,6 +2635,7 @@ const routeAux = async (
       sql_pool_stats: poolStats,
       sql_worker_pool: sqlWorkerPoolStats,
       wal_stats: walStats,
+      handshake_gate: handshakeGate,
       credentials,
       loaded_git_head: loadedGitHead,
     });

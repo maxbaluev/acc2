@@ -243,3 +243,23 @@ Two-way paths violate the one-workflow contract. Canonical writer per concern, r
 | CLI-side dispatch race with daemon workers | Daemon is authoritative writer for all reactive event kinds | CLI emits only ingress events (`owner_input_received`, `directive_opened`) |
 
 Each retirement is a payload migration or alias emission; no schema changes. Contract entries with closure predicates live in `docs/roadmap.md` Tier 7.
+
+## 22. Multi-Brain Substrate Concurrency
+
+Multiple terminals × multiple brain dispatches each share one daemon process. Three structural mechanisms keep this scalable without serializing the brain runs themselves:
+
+**Persistent MCP client (`cli/rpc.ts`, commit `1eb4b71`)** — every CLI process holds ONE cached `StreamableHTTPClientTransport` + `Client` pair across all `mcpCall` invocations in its lifetime. Pre-fix, each `mcpCall` opened a fresh session (10-20 sessions per `acc task` invocation × N terminals × orchestrator poll loops = fastmcp session-table thrashing). Cache invalidates on transport-level errors so a wedged connection auto-reconnects. `beforeExit` / `SIGINT` / `SIGTERM` close the client so sessions don't outlive the process. Measured drop: ~95% fewer session establishments under live load.
+
+**Handshake serialization gate (`runtime/bridge/opencode.ts`, commit `b9869bc`)** — bounded semaphore (default 2 permits, env override `ACC2_BRIDGE_HANDSHAKE_PERMIT_CAP`) caps concurrent MCP-handshake-window holders. Permits acquire before opencode spawn and release when the first MCP frame lands OR the subprocess exits (belt-and-suspenders in `proc.exited.finally`). This serializes ONLY the contended handshake window — brain runs continue in parallel after handshake. Pre-spawn `probeMcpReachable` HEAD probe surfaces dead-daemon as `mcp_unreachable_at_spawn` instead of burning 120s on a guaranteed-fail handshake. Wait budget `ACC2_BRIDGE_HANDSHAKE_WAIT_BUDGET_MS` (default 45s) fails open so a leaked permit can't permanently starve dispatches.
+
+**Worker-tick dampen (`runtime/daemon.ts:173`, commit `2ee0618`)** — `WORKER_TICK_EVENT_DAMPEN_MS = 5*60_000` (5min per worker). Pre-fix at 60s the substrate absorbed ~1200 `worker_tick_completed` rows/hour × 20 workers; post-fix ~240/hour. Stuck-worker detection unaffected (reads `recordWorkerTick` state, not events). Reactive-fire path (line 620) also gates via `lastTickEmitMs` so subscription-driven workers don't bypass the dampen.
+
+**JSON-path indexes (`substrate/db.ts:139+`, commit `826771f`)** — partial indexes on the 6 hottest payload extractions: `source_event_id`, `knowledge_id`, `source_act_id`, `retrieval_binding_event_id`, `artifact_id`, `dispatch_id`. Every view that joins by these (e.g. `lesson_implementation_status_view`, `retrieval_credit_view`) was previously full-scanning 355K+ rows. Measured: 0.02-0.10ms indexed lookup vs ~50ms full scan = ~100× speedup. Partial WHERE clauses (`IS NOT NULL`) keep index size small.
+
+**Operator observability** — `/health` returns `handshake_gate: {permitsInUse, waitersWaiting, permitCap, waitBudgetMs}` so `acc daemon status` surfaces gate state directly. Combined with `bridge_mcp_preflight` event (kind registered in `substrate/event_kinds.ts`, emitted when permit-acquire waited >100ms), operators see queue dynamics live without instrumenting the bridge.
+
+**Data-class admission (`runtime/artifact_admission.ts`, contract A0DQT211JH)** — non-executing rows (telegram dumps, doc content, target universes) admit with `runtime: null` and `declaredSandbox: null`. Path A short-circuits before fixture / owner-gate / predicate-gate machinery, requires `body + name + summary`, emits `act_artifact_admitted{admission_mode: 'data_class_nullable'}`. No `runtime='data'` sentinel — null IS the data signal.
+
+**Wall-clock budget (`runtime/bridge/config.ts:48`, commit `867ce8d`)** — `DEFAULT_TIMEOUT_MS = 1500_000` (25min). Bumped from 900s after live evidence (`GHYWE89D5D5GB941XS5HCWMC20`) showed a legitimate multi-file refactor brain run hit 930s emitting valid amendments then SIGTERMed before reaching task_committed. `STALE_DISPATCH_THRESHOLD_MS` tracks the same 25min budget so stale-detection aligns. Override via `ACC2_OPENCODE_TIMEOUT_MS`.
+
+The composite property: N terminals × M brain dispatches each remain effective because the bottlenecks (MCP session establishment, SQLite write lock contention, handshake-window races) are all bounded by either substrate-level concurrency primitives or substrate-observable telemetry.
