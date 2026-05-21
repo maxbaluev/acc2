@@ -1344,8 +1344,20 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       // The embeddable-only count makes batch sizing honest. Cap batchSize
       // at 50 (well below OpenAI's 100-item per-request chunk) so worst-case
       // tick wall time stays bounded even on rare large backlogs.
+      // 2026-05-21 main-loop-unlock fix: cap batch at 8 (was 50). The
+      // embedder's OpenAI fetch is async (yields the loop), but the
+      // per-row persist loop — UPDATE events + vec0 vector upsert ×
+      // batchSize, all inside one synchronous BEGIN/COMMIT on the main
+      // thread's db handle — is NOT yieldable. At batchSize=50 the vec0
+      // (sqlite-vec) 1536-dim upserts pinned the event loop long enough
+      // that the /health + MCP HEAD probe timed out (observed
+      // mcp_unreachable_at_spawn at 13:39Z). Small batches keep each
+      // tick's main-thread blocking bounded to <2s; the 10s reactive
+      // cadence drains backlog steadily. The true fix (all writes off
+      // the main thread via a dedicated writer worker) is roadmap Tier
+      // "Main-Loop Write Isolation".
       const pendingEmbeddings = await pendingEmbeddableCount(db);
-      const batchSize = pendingEmbeddings > 100 ? 50 : pendingEmbeddings > 20 ? 20 : Math.max(1, pendingEmbeddings);
+      const batchSize = Math.min(8, Math.max(1, pendingEmbeddings));
       if (batchSize > 0) await embedderWorkerTick(db, { batchSize });
       if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
     }, {
@@ -1370,7 +1382,17 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // EMBEDDABLE_KINDS list (knowledge_candidate, knowledge_promoted,
     // lesson_extracted, owner_input_received, etc.) is exactly the set of
     // emissions that can actually produce new vec_events rows.
-    registerReactiveWorker("embedder", embedderIntervalMs, EMBEDDABLE_KINDS, embedderTick, { minReactiveGapMs: embedderIntervalMs });
+    // 2026-05-21 owner directive: embeddings should be reactive. The prior
+    // `minReactiveGapMs: embedderIntervalMs` was dropping ~29 reactive
+    // fires per dampen window during heavy event bursts (Path A admission,
+    // brain emissions), causing brain query_embedding_unavailable
+    // false-positives. supervisedTick already gates concurrent work
+    // (skip-fire if previous tick still running); the gap was redundant
+    // and harmful for reactivity. minReactiveGapMs:0 keeps the EMIT of
+    // worker_tick_completed dampened (WORKER_TICK_EVENT_DAMPEN_MS still
+    // throttles the audit event) but lets the actual embedding work
+    // fire on every new embeddable event.
+    registerReactiveWorker("embedder", embedderIntervalMs, EMBEDDABLE_KINDS, embedderTick, { minReactiveGapMs: 0 });
     // Boot tick — fire embedding work asynchronously without blocking
     // daemon readiness. Pre-fix (2026-05-19, this commit): the boot
     // tick awaited a large OpenAI batch synchronously at startup
@@ -1395,7 +1417,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
     void (async () => {
       try {
-        await embedderWorkerTick(db, { batchSize: 20 });
+        // Boot-tick batch capped at 8 (was 20) — same main-loop-unlock
+        // rationale as the reactive tick above. The persist phase is
+        // synchronous on the main thread; small batches bound the block.
+        await embedderWorkerTick(db, { batchSize: 8 });
         recordWorkerTick("embedder");
       } catch (err) {
         logger.warn(
