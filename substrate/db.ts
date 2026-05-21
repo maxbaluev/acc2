@@ -375,6 +375,24 @@ export const openDb = (dbPath: string): Database => {
   loadSqliteVec(db);
   runSchema(db);
   runMigrations(db);
+  // 2026-05-21 fix (root cause of the full-suite verify-signal failures,
+  // 9YFCYTGA): the VERSIONED migrations (substrate/migrations/*.sql, e.g.
+  // v002's `ALTER TABLE act_artifact RENAME`) MUST run BEFORE runViews below.
+  // Pre-fix only the daemon ran them (daemon.ts:529) — AFTER openDb had
+  // already created embedding_index_view — so v002's rename auto-rewrote the
+  // existing view to `act_artifact_v001` (SQLite's modern dependent-view
+  // rewrite), which v002 then dropped → broken view → rebuildFromDb failed
+  // `no such table: act_artifact_v001` across every daemon-boot test. Running
+  // them here, before views, means views are always built against the final
+  // post-migration schema. Idempotent (versioned via schema_migration_applied
+  // event); the daemon's later call becomes a no-op skip.
+  try {
+    (require("./migration_runner") as typeof import("./migration_runner")).runVersionedMigrations(db);
+  } catch (err) {
+    if (process.env.ACC2_DB_VERBOSE === "1") {
+      process.stderr.write(`acc2 db: runVersionedMigrations in openDb failed (${(err as Error).message})\n`);
+    }
+  }
   // Phase 2 distribution (docs/Architecture.md §16, brain
   // 4YBZ1E7MAX49Q4Z0 K1+L1+M3+N1): attach packaged canonical.db
   // read-only when present. Runtime read paths can union
