@@ -613,15 +613,25 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     run: () => void;
     skippedReactiveFires: number;
     lastReactiveFireMs: number;
+    lastTickEmitMs: number;
+    suppressedTickEmits: number;
   };
   const reactiveWorkers: ReactiveWorkerEntry[] = [];
   const emitReactiveFire = (entry: ReactiveWorkerEntry, source: "event" | "safety_net", trigger?: ActivationPayload): void => {
+    const now = Date.now();
+    if (source === "event" && entry.lastTickEmitMs > 0 && now - entry.lastTickEmitMs < WORKER_TICK_EVENT_DAMPEN_MS) {
+      entry.suppressedTickEmits++;
+      return;
+    }
+    entry.lastTickEmitMs = now;
     try {
       const payload: { [k: string]: JsonValue } = {
         worker: entry.worker,
         activation_source: source,
         skipped_reactive_fires: entry.skippedReactiveFires,
+        suppressed_tick_emits: entry.suppressedTickEmits,
         expected_interval_ms: entry.expectedIntervalMs,
+        dampen_ms: WORKER_TICK_EVENT_DAMPEN_MS,
       };
       if (trigger?.kind) payload.trigger_kind = trigger.kind;
       if (trigger?.event_id) payload.trigger_event_id = trigger.event_id;
@@ -630,6 +640,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
         substrate_origin: "substrate_auto",
         payload,
       });
+      entry.suppressedTickEmits = 0;
     } catch { /* telemetry must not break activation or shutdown */ }
   };
   const fireReactiveWorker = (entry: ReactiveWorkerEntry, source: "event" | "safety_net", trigger?: ActivationPayload): void => {
@@ -656,6 +667,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       run,
       skippedReactiveFires: 0,
       lastReactiveFireMs: 0,
+      lastTickEmitMs: 0,
+      suppressedTickEmits: 0,
     };
     reactiveWorkers.push(entry);
     // Tell readiness this worker is activation-driven so the per-worker
