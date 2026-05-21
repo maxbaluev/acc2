@@ -2318,6 +2318,8 @@ const PREDICATE_SEEDS: PredicateSeed[] = [
     why: "S0 state — supersedes the split estimator+transition pair; continual learning across sessions is the right granularity.",
     closure_predicate: "joint state-and-transition outputs match owner-observed outcome on a calibration window; posteriors compound across sessions.",
     metric_direction: "owner-state estimation + transition forecast error falls.",
+    evaluator_artifact_id: "continual_owner_state_evaluator_v1",
+    consumer_gate: "cli/apply.ts deterministicApplyRoute recycles AUTO_APPLY when continual owner-state residual >= 0.6, after drift/delegation/metacognitive gates preserve their existing downgrade reasons",
     display_name: "Continual owner state — joint state + transition across sessions",
   },
   {
