@@ -421,14 +421,11 @@ export const EVENT_KINDS = {
   // merger_quality_axes as Record<string, number>; do not enumerate a fixed
   // quality taxonomy in the schema.
   merger_debate_required:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
-  merger_debate_resolved:                  { producer: "brain",     embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
-  cross_origin_verification_recorded:      { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   origin_calibration_recorded:             { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   knowledge_uncertainty_observed:          { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
 
   // ── External-source registration ────────────────────────────────────
   external_source_registered:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  external_source_suggested:               { producer: "substrate", embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
 
   // ── Embeddings ──────────────────────────────────────────────────────
   embedding_computed:                      { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
@@ -449,8 +446,6 @@ export const EVENT_KINDS = {
 
   // ── Stakeholder model ───────────────────────────────────────────────
   stakeholder_state_recorded:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  stakeholder_interaction_edge:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  stakeholder_alignment_observed:          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Owner channel ───────────────────────────────────────────────────
   owner_input_received:                    { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
@@ -493,7 +488,6 @@ export const EVENT_KINDS = {
 
   // ── Crisis mode ─────────────────────────────────────────────────────
   crisis_mode_engaged:                     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
-  crisis_mode_disengaged:                  { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   crisis_postmortem_opened:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   latm_suspended_in_crisis:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
@@ -506,7 +500,6 @@ export const EVENT_KINDS = {
   state_snapshot_recorded:                 { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   state_snapshot_diffed:                   { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   external_source_quarantined:             { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  external_source_rehabilitated:           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Daemon lifecycle ────────────────────────────────────────────────
   daemon_started:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
@@ -720,7 +713,6 @@ export const EVENT_KINDS = {
   // classifier decision before the demo action runs so outcomes train which
   // demo family fits which owner sentence.
   // Payload: {goal_shape_tags, matcher_id, confidence, owner_sentence, required_auth?: string[]}.
-  demo_dispatched:                         { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: false },
 
   // Auto-apply worker (DGT1MKXY proposal, 2026-05-15): daemon-side scanner
   // signals each lesson_implementer_queue_view row whose auto_apply_eligible=1.
@@ -736,7 +728,6 @@ export const EVENT_KINDS = {
   applied_change_failed:                   { producer: "substrate", embeddable: false, mirror_inline: true,  health_metric: true, narrative: true },
 
   // ── Substrate self-events ───────────────────────────────────────────
-  projection_checkpointed:                 { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   constitutional_gate_decision:            { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   dispatch_decided:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   self_modification_recorded:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
@@ -833,7 +824,6 @@ export const EVENT_KINDS = {
   // by the daemon-owned safety-net sweep when it detects work that should
   // have been caught by activation_bus.onEvent but was not. Non-zero
   // missed_work_count is observability evidence for reactive misses.
-  worker_safety_net_fired:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true, narrative: false },
   // Substrate-side proof of worker liveness (audit-#5, 2026-05-15). Emitted
   // by supervisedTick AFTER each successful body() with per-worker dampening
   // (WORKER_TICK_EVENT_DAMPEN_MS = 60s) so the scheduler's 500ms cadence

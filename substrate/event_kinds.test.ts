@@ -322,11 +322,6 @@ describe("derived sets match their pre-unification shape", () => {
       // stable preferences + Claude/brain observations about the owner.
       "owner_profile_recorded",
       "owner_insight_candidate",
-      // Onboarding (bp93s80hn): demo router. The earlier
-      // `owner_persona_detected` kind was removed 2026-05-15 — owner
-      // adaptation is now a continuous rendering_signals map on
-      // owner_profile_recorded (no fixed persona enum).
-      "demo_dispatched",
       // External-push envelope.
       "external_event_received",
       // Human-In-the-Loop blocker (substrate-side HIDL surface): retrieval
@@ -441,10 +436,6 @@ describe("derived sets match their pre-unification shape", () => {
       // closure_complete is healthy traffic, not a metric.
       "closure_obsolete",
       "closure_owner_required",
-      // Timer-reactive redesign (directive 7AS6BPTNSS2YZD5M2ZS3V3S1GG):
-      // worker_safety_net_fired counts as health metric because non-zero
-      // missed_work_count signals reactive activation gaps.
-      "worker_safety_net_fired",
       // T0.1 (brain dispatch TFZ6AJXNPS6655QMFWT6KPB3QM): substrate-truth
       // gate at the closure-audit boundary. Counts as a health metric so
       // dashboards can surface how often the brain claimed a clean closure
