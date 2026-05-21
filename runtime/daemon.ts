@@ -64,7 +64,7 @@ import { lookupRunnerInRegistry, runArtifactForRuntime } from "./runtimes/index"
 import type { BunSandboxDecl, CamofoxSandboxDecl, JsonValue, SandboxDecl, UvSandboxDecl } from "../substrate/types";
 import { logger } from "./logger";
 import { metricsHandler, refreshGauges } from "./metrics";
-import { integrityWorkerTick, runIntegrityCheck, reconcileOrphanedDispatches } from "./integrity_worker";
+import { integrityWorkerTick, runIntegrityCheck, reconcileOrphanedDispatches, reconcilePreDispatchOrphans } from "./integrity_worker";
 import { reconcileBrainDispatchesAtBoot, getOpenBrainDispatches, setBootSessionToken } from "./brain_dispatch_reconciler";
 import { waitForBrainQuiescence } from "./restart_quiescence";
 import { noActiveBrainDispatches } from "./dispatch_survival";
@@ -592,6 +592,12 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   const orphans = reconcileOrphanedDispatches(db);
   if (orphans.length > 0) {
     logger.info({ orphan_count: orphans.length }, "reconciled orphan dispatches at boot");
+  }
+  // Also reap PRE-dispatch orphans: directives opened but never reached the
+  // dispatch stage before a prior restart (the 'zombie' rows in acc watch).
+  const preDispatchOrphans = reconcilePreDispatchOrphans(db);
+  if (preDispatchOrphans.length > 0) {
+    logger.info({ pre_dispatch_orphan_count: preDispatchOrphans.length }, "reaped pre-dispatch orphan directives at boot");
   }
   // F8 boot reconciler: mint a session token for this daemon process and
   // close every `brain_dispatched` row still lacking a matching

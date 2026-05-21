@@ -457,3 +457,83 @@ export const reconcileOrphanedDispatches = (db: Database): Array<{ dispatch_even
   }
   return orphans;
 };
+
+/** Reconcile PRE-DISPATCH orphans (2026-05-21). reconcileOrphanedDispatches
+ *  above only closes `brain_dispatched` rows that never closed — but a
+ *  directive can be orphaned EARLIER: opened + intent_classified +
+ *  owner_input_received, then the daemon (or the dispatching CLI) is killed
+ *  before `dispatch_decided` / `brain_dispatched` fires. Those directives
+ *  never reach the dispatch stage, so the orphan reconciler never sees them
+ *  and they linger forever as "zombie" rows in dispatch_resolved_view /
+ *  acc watch ACTIVE. Observed after repeated daemon restarts that abandoned
+ *  in-flight directives mid-intake.
+ *
+ *  This closes any directive whose root task has `directive_opened` but NO
+ *  `dispatch_decided`, `brain_dispatched`, child `task_node_opened`, or any
+ *  terminal — AND is older than STALE_DISPATCH_THRESHOLD_MS — by emitting
+ *  `task_abandoned` (reason=orphaned_pre_dispatch). The age gate ensures a
+ *  freshly-opened directive still waiting for the scheduler/brain slot is
+ *  NOT closed; only genuinely-stuck pre-dispatch directives are reaped. */
+export const reconcilePreDispatchOrphans = (
+  db: Database,
+  opts?: { minAgeMs?: number; now?: string },
+): Array<{ task_id: string; directive_id: string | null }> => {
+  const minAgeMs = opts?.minAgeMs ?? STALE_DISPATCH_THRESHOLD_MS;
+  const nowMs = opts?.now ? Date.parse(opts.now) : Date.now();
+  const cutoffIso = new Date(nowMs - minAgeMs).toISOString();
+  const rows = db
+    .query(
+      `SELECT e.id AS open_event_id, e.task_id, e.directive_id, e.ts
+       FROM events e
+       WHERE e.kind = 'directive_opened'
+         AND e.ts < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM events adv
+           WHERE adv.task_id = e.task_id
+             AND adv.kind IN (
+               'dispatch_decided', 'brain_dispatched', 'task_node_opened',
+               'act_tuple_recorded'
+             )
+             AND adv.ts >= e.ts
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM events t
+           WHERE t.task_id = e.task_id
+             AND t.kind IN (
+               'task_committed', 'task_failed', 'task_abandoned',
+               'task_blocked', 'closure_complete', 'closure_obsolete',
+               'task_committed_superseded'
+             )
+             AND t.ts >= e.ts
+         )`,
+    )
+    .all(cutoffIso) as Array<{ open_event_id: string; task_id: string; directive_id: string | null; ts: string }>;
+  const reaped: Array<{ task_id: string; directive_id: string | null }> = [];
+  for (const row of rows) {
+    try {
+      emitEvent(db, {
+        kind: "task_abandoned",
+        substrate_origin: "substrate_auto",
+        directive_id: row.directive_id ?? undefined,
+        task_id: row.task_id,
+        context_refs: [row.open_event_id],
+        payload: {
+          reason: "orphaned_pre_dispatch",
+          opened_at: row.ts,
+          open_event_id: row.open_event_id,
+          note: "directive opened but never reached dispatch_decided/brain_dispatched before a restart; reaped at boot",
+        },
+      });
+      reaped.push({ task_id: row.task_id, directive_id: row.directive_id });
+    } catch (err) {
+      logger.warn(
+        { where: "integrity.reconcile_pre_dispatch_orphan", task_id: row.task_id, err: (err as Error).message },
+        "could not emit task_abandoned for pre-dispatch orphan",
+      );
+    }
+  }
+  if (reaped.length > 0) {
+    logger.warn({ count: reaped.length }, "reaped pre-dispatch orphan directives at boot");
+  }
+  return reaped;
+};

@@ -12,6 +12,7 @@ import { emitEvent } from "./events";
 import {
   integrityWorkerTick,
   reconcileOrphanedDispatches,
+  reconcilePreDispatchOrphans,
   reconcileStaleDispatches,
   runIntegrityCheck,
   STALE_DISPATCH_THRESHOLD_MS,
@@ -413,6 +414,38 @@ describe("runIntegrityCheck — corrupt db", () => {
       expect(report.pragma_integrity_check).not.toBe("ok");
     } finally {
       try { rawDb.close(); } catch { /* swallow */ }
+    }
+  });
+});
+
+describe("reconcilePreDispatchOrphans", () => {
+  test("reaps only stale directives orphaned before dispatch (not fresh, not dispatched)", () => {
+    const db = openDb(":memory:");
+    try {
+      const now = Date.now();
+      const oldTs = new Date(now - 30 * 60 * 1000).toISOString();
+      const freshTs = new Date(now - 2 * 60 * 1000).toISOString();
+      // Stale pre-dispatch orphan → should be reaped.
+      emitEvent(db, { kind: "directive_opened", substrate_origin: "substrate_auto", task_id: "STALE_ORPHAN", directive_id: "d1", payload: {} });
+      db.run("UPDATE events SET ts=? WHERE task_id='STALE_ORPHAN'", [oldTs]);
+      // Fresh directive still waiting for the scheduler → must NOT be reaped.
+      emitEvent(db, { kind: "directive_opened", substrate_origin: "substrate_auto", task_id: "FRESH", directive_id: "d2", payload: {} });
+      db.run("UPDATE events SET ts=? WHERE task_id='FRESH'", [freshTs]);
+      // Stale but already dispatched → must NOT be reaped (the brain-dispatch
+      // reconciler owns that case).
+      emitEvent(db, { kind: "directive_opened", substrate_origin: "substrate_auto", task_id: "DISPATCHED", directive_id: "d3", payload: {} });
+      emitEvent(db, { kind: "brain_dispatched", substrate_origin: "substrate_auto", task_id: "DISPATCHED", directive_id: "d3", payload: {} });
+      db.run("UPDATE events SET ts=? WHERE task_id='DISPATCHED'", [oldTs]);
+
+      const reaped = reconcilePreDispatchOrphans(db, { now: new Date(now).toISOString() });
+      expect(reaped.length).toBe(1);
+      expect(reaped[0].task_id).toBe("STALE_ORPHAN");
+      // A task_abandoned event was emitted for the orphan.
+      const abandoned = eventsByKind(db, "task_abandoned");
+      expect(abandoned.length).toBe(1);
+      expect(abandoned[0].task_id).toBe("STALE_ORPHAN");
+    } finally {
+      closeDb(":memory:");
     }
   });
 });
