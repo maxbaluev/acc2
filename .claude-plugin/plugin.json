@@ -7,9 +7,10 @@
     "accint": {
       "type": "stdio",
       "command": "bun",
-      "args": ["run", "runtime/mcp_server/stdio.ts"],
+      "args": ["run", "runtime/mcp_server_stdio_entry.ts"],
       "env": {
-        "ACC2_STATE_DIR": "${ACC2_STATE_DIR:-~/.acc2}"
+        "ACC2_STATE_DIR": "${ACC2_STATE_DIR:-~/.accint}",
+        "ACC2_CANONICAL_DB_PATH": "${ACC2_CANONICAL_DB_PATH:-./.claude-plugin/substrate/canonical.db}"
       }
     }
   }
