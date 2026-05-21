@@ -43,24 +43,30 @@ import { emitEvent } from "./events";
 import { newId } from "./ids";
 import { pendingContractAmendments, type PendingContractAmendmentRow } from "../substrate/views";
 
+type OutflowWrite = { source_event_id: string; task_id: string; path: string; resource_uri: string };
 const OUTFLOW_EVENT_KINDS = ["applied_change_committed", "knowledge_promoted", "task_closure_audited", "closure_complete"] as const;
 const outflowRoot = (): string => join(process.env.ACC2_STATE_DIR ?? join(homedir(), ".accint"), "outflow");
-const eventScore = (payload: Record<string, unknown>): number => Number(payload.score ?? payload.promotion_score ?? payload.closure_residual ?? 0);
-const shouldWriteOutflow = (kind: string, payload: Record<string, unknown>): boolean => kind === "knowledge_promoted" ? eventScore(payload) >= 0.75 : kind === "task_closure_audited" ? eventScore(payload) < 0.3 : true;
-const conciseStatus = (kind: string, payload: Record<string, unknown>): string => String(payload.summary ?? payload.claim ?? payload.reason ?? kind);
-const writeOutflowArtifacts = (db: Database): number => {
+const eventScore = (payload: Record<string, unknown>): number => Number(payload.score ?? payload.promotion_score ?? payload.closure_residual ?? payload.residual);
+const shouldWriteOutflow = (kind: string, payload: Record<string, unknown>): boolean => {
+  if (kind === "knowledge_promoted") return payload.owner_readable === true && eventScore(payload) >= 0.75;
+  if (kind === "task_closure_audited") return eventScore(payload) < 0.3;
+  return true;
+};
+const conciseStatus = (kind: string, payload: Record<string, unknown>): string => String(payload.summary ?? payload.claim ?? payload.reason ?? kind).slice(0, 1200);
+const writeOutflowArtifacts = (db: Database): OutflowWrite[] => {
   const rows = db.query<{ id: string; kind: string; task_id: string | null; payload: string }, []>(`SELECT id, kind, task_id, payload FROM events WHERE kind IN ('applied_change_committed','knowledge_promoted','task_closure_audited','closure_complete') AND task_id IS NOT NULL ORDER BY ts DESC LIMIT 200`).all();
-  let written = 0;
   const root = outflowRoot();
   if (!existsSync(root)) mkdirSync(root, { recursive: true, mode: 0o700 });
+  const writes: OutflowWrite[] = [];
   for (const row of rows) {
     let payload: Record<string, unknown> = {};
     try { payload = JSON.parse(row.payload ?? "{}"); } catch {}
-    if (!shouldWriteOutflow(row.kind, payload)) continue;
-    writeFileSync(join(root, `${row.task_id}.md`), `# Status\n\n${conciseStatus(row.kind, payload)}\n\n---\nledger_id: ${row.id}\nevent_kind: ${row.kind}\ntask_id: ${row.task_id}\n`, { mode: 0o600 });
-    written += 1;
+    if (!row.task_id || !shouldWriteOutflow(row.kind, payload)) continue;
+    const path = join(root, `${row.task_id}.md`);
+    writeFileSync(path, `# Status\n\n${conciseStatus(row.kind, payload)}\n\n---\nledger_id: ${row.id}\nevent_kind: ${row.kind}\ntask_id: ${row.task_id}\noutflow_resource: outflow:${row.task_id}:md\n`, { mode: 0o600 });
+    writes.push({ source_event_id: row.id, task_id: row.task_id, path, resource_uri: `outflow:${row.task_id}:md` });
   }
-  return written;
+  return writes;
 };
 
 export type ConsumerVerdictKind =
