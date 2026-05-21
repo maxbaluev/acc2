@@ -21,6 +21,10 @@
 // Each extractor returns a small summary object for daemon telemetry.
 
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { withImmediateTransaction } from "./db";
 import type { EventKind, OwnerProfile, SubstrateOrigin } from "./types";
 import { OWNER_PROFILE_DEFAULTS, OWNER_PROFILE_JSON_SCHEMA } from "./types";
@@ -44,6 +48,7 @@ const META_KEYS = {
   scores:     "extractor:act_artifact_scores:last_ts",
   dedup:      "extractor:semantic_dedup:last_ts",
   recipes:    "extractor:recipe_candidates:last_ts",
+  claudeConversations: "extractor:claude_project_conversations:last_run_ts",
 } as const;
 
 // ── Event-loop fairness (KC GJ2KN1J3KD1Z) ──────────────────────────
@@ -83,6 +88,145 @@ const writeMeta = (db: Database, key: string, value: string): void => {
     "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     [key, value],
   );
+};
+
+// ── Claude Code conversation importer ──────────────────────────────
+
+const DEFAULT_CLAUDE_PROJECTS_ROOT = join(homedir(), ".claude", "projects");
+
+export type ClaudeProjectConversationSummary = {
+  files_scanned: number;
+  messages_seen: number;
+  emitted: number;
+  skipped_duplicate: number;
+  skipped_non_owner: number;
+  skipped_invalid: number;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+
+const textFromClaudeContent = (content: unknown): string => {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+  }
+  return "";
+};
+
+const claudeMessageRole = (entry: Record<string, unknown>, message: Record<string, unknown>): string => {
+  const role = message.role ?? entry.role ?? entry.type;
+  return typeof role === "string" ? role : "";
+};
+
+const stableClaudeMessageId = (
+  entry: Record<string, unknown>,
+  message: Record<string, unknown>,
+  offset: number,
+): string => {
+  const raw = entry.uuid ?? entry.id ?? message.uuid ?? message.id;
+  return typeof raw === "string" && raw.length > 0 ? raw : String(offset);
+};
+
+const claudeConversationDedupKey = (
+  transcriptPath: string,
+  stableId: string,
+  role: string,
+  text: string,
+): string => createHash("sha256").update(`${transcriptPath}${stableId}${role}${text}`).digest("hex");
+
+const ownerInputDedupExists = (db: Database, dedupKey: string): boolean => {
+  const row = db
+    .query(
+      `SELECT 1 AS x FROM events
+       WHERE kind = 'owner_input_received'
+         AND json_extract(payload, '$.source_dedup_key') = ?
+       LIMIT 1`,
+    )
+    .get(dedupKey) as { x: number } | null;
+  return row !== null;
+};
+
+export const extractClaudeProjectConversations = async (
+  db: Database,
+  projectsRoot = DEFAULT_CLAUDE_PROJECTS_ROOT,
+): Promise<ClaudeProjectConversationSummary> => {
+  const summary: ClaudeProjectConversationSummary = {
+    files_scanned: 0,
+    messages_seen: 0,
+    emitted: 0,
+    skipped_duplicate: 0,
+    skipped_non_owner: 0,
+    skipped_invalid: 0,
+  };
+  if (!existsSync(projectsRoot)) return summary;
+
+  const projects = readdirSync(projectsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(projectsRoot, entry.name, "conversation.jsonl"))
+    .filter((path) => existsSync(path));
+
+  let processed = 0;
+  for (const transcriptPath of projects) {
+    summary.files_scanned += 1;
+    const lines = readFileSync(transcriptPath, "utf8").split(/\r?\n/);
+    for (let offset = 0; offset < lines.length; offset++) {
+      const line = lines[offset]!.trim();
+      if (!line) continue;
+      if (processed > 0 && processed % EXTRACTOR_YIELD_INTERVAL === 0) await yieldToEventLoop();
+      processed += 1;
+      summary.messages_seen += 1;
+
+      let entry: Record<string, unknown>;
+      try {
+        const parsed = JSON.parse(line) as unknown;
+        if (!isRecord(parsed)) throw new Error("not_object");
+        entry = parsed;
+      } catch {
+        summary.skipped_invalid += 1;
+        continue;
+      }
+      const message = isRecord(entry.message) ? entry.message : entry;
+      const role = claudeMessageRole(entry, message);
+      if (!["owner", "user", "human"].includes(role)) {
+        summary.skipped_non_owner += 1;
+        continue;
+      }
+      const text = textFromClaudeContent(message.content ?? entry.content);
+      if (!text) {
+        summary.skipped_invalid += 1;
+        continue;
+      }
+      const stableId = stableClaudeMessageId(entry, message, offset);
+      const dedupKey = claudeConversationDedupKey(transcriptPath, stableId, role, text);
+      if (ownerInputDedupExists(db, dedupKey)) {
+        summary.skipped_duplicate += 1;
+        continue;
+      }
+      insertEvent(db, {
+        kind: "owner_input_received",
+        directive_id: "claude_project_conversation_import",
+        task_id: "claude_project_conversation_import",
+        loop_id: "extract_claude_project_conversations",
+        substrate_origin: "claude_root",
+        payload: {
+          text,
+          source: "claude_project_conversation",
+          transcript_path: transcriptPath,
+          stable_message_id_or_offset: stableId,
+          role,
+          source_dedup_key: dedupKey,
+        },
+      });
+      summary.emitted += 1;
+    }
+  }
+  writeMeta(db, META_KEYS.claudeConversations, nowIso());
+  return summary;
 };
 
 // ── event insertion helper ─────────────────────────────────────────

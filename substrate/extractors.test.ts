@@ -3,9 +3,13 @@
 // canonical input shapes.
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDb, openDb } from "./db";
 import {
   extractActArtifactScores,
+  extractClaudeProjectConversations,
   extractCrossCandidateCorroboration,
   extractKnowledgePromotions,
   extractOwnerProfilePromotions,
@@ -1198,5 +1202,53 @@ describe("Tier-S4 — merger thresholds via threshold registry", () => {
     expect(confirms.length).toBe(1);
     const p = JSON.parse(confirms[0]!.payload) as Record<string, unknown>;
     expect(p.weight).toBe(0.7);
+  });
+});
+
+describe("extractClaudeProjectConversations", () => {
+  test("imports unread owner messages from Claude project conversation JSONL and skips non-owner rows", async () => {
+    const db = openDb(":memory:");
+    const root = mkdtempSync(join(tmpdir(), "acc2-claude-projects-"));
+    try {
+      const projectDir = join(root, "sample-project");
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, "conversation.jsonl"), [
+        JSON.stringify({ uuid: "u1", type: "user", message: { role: "user", content: [{ type: "text", text: "please fix this" }] } }),
+        JSON.stringify({ uuid: "a1", type: "assistant", message: { role: "assistant", content: "working" } }),
+      ].join("\n"));
+
+      const first = await extractClaudeProjectConversations(db, root);
+      expect(first).toMatchObject({ files_scanned: 1, messages_seen: 2, emitted: 1, skipped_non_owner: 1 });
+
+      const rows = db.query("SELECT payload FROM events WHERE kind = 'owner_input_received'").all() as Array<{ payload: string }>;
+      expect(rows).toHaveLength(1);
+      const payload = JSON.parse(rows[0]!.payload) as Record<string, unknown>;
+      expect(payload.text).toBe("please fix this");
+      expect(payload.source).toBe("claude_project_conversation");
+      expect(typeof payload.source_dedup_key).toBe("string");
+
+      const second = await extractClaudeProjectConversations(db, root);
+      expect(second.emitted).toBe(0);
+      expect(second.skipped_duplicate).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("dedups fallback-offset owner messages with the same transcript path, role, and text", async () => {
+    const db = openDb(":memory:");
+    const root = mkdtempSync(join(tmpdir(), "acc2-claude-projects-"));
+    try {
+      const projectDir = join(root, "sample-project");
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, "conversation.jsonl"), JSON.stringify({ role: "owner", content: "same owner text" }));
+
+      expect((await extractClaudeProjectConversations(db, root)).emitted).toBe(1);
+      expect((await extractClaudeProjectConversations(db, root)).skipped_duplicate).toBe(1);
+      const count = (db.query("SELECT COUNT(*) AS c FROM events WHERE kind = 'owner_input_received'").get() as { c: number }).c;
+      expect(count).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
