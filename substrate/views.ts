@@ -4244,6 +4244,142 @@ CREATE VIEW IF NOT EXISTS peer_registry_view AS
   ORDER BY last_seen_ts DESC;
 `;
 
+// peer_activity_view — Tier U/U2 on-the-fly mutual awareness. Each live
+// peer-registry row gets a depth-1 summary of that peer's in-flight acts,
+// target resources, peer-LLM scores/reviews, and latest activity timestamp.
+// This lets another peer check live collisions before acting on the same
+// target_resource while preserving Tier U's symmetric participation model.
+const VIEW_PEER_ACTIVITY = `
+CREATE VIEW IF NOT EXISTS peer_activity_view AS
+  WITH live_peers AS (
+    SELECT
+      p.*,
+      CASE
+        WHEN p.kind = 'opencode' THEN 'opencode'
+        WHEN p.kind = 'claude_agent' THEN 'claude_agent'
+        ELSE 'claude_root'
+      END AS expected_origin
+    FROM peer_registry_view p
+    WHERE p.liveness_verdict = 'live'
+  ),
+  candidate_acts AS (
+    SELECT
+      p.peer_id,
+      e.id AS act_event_id,
+      e.ts AS act_ts,
+      e.kind AS act_kind,
+      e.directive_id,
+      e.task_id,
+      e.payload,
+      COALESCE(
+        json_extract(e.payload, '$.source_act_id'),
+        json_extract(e.payload, '$.projection.source_act_id'),
+        json_extract(e.payload, '$.act_tuple.source_act_id'),
+        e.id
+      ) AS source_act_id
+    FROM live_peers p
+    JOIN events e
+      ON e.kind IN ('action_predicted', 'act_tuple_recorded')
+     AND (
+       e.id = p.current_act_id
+       OR json_extract(e.payload, '$.source_act_id') = p.current_act_id
+       OR json_extract(e.payload, '$.projection.source_act_id') = p.current_act_id
+       OR json_extract(e.payload, '$.act_tuple.source_act_id') = p.current_act_id
+       OR (
+         p.directive_id IS NOT NULL
+         AND p.task_id IS NOT NULL
+         AND e.directive_id = p.directive_id
+         AND e.task_id = p.task_id
+         AND COALESCE(e.substrate_origin, '') = p.expected_origin
+       )
+     )
+  ),
+  inflight_acts AS (
+    SELECT a.*
+    FROM candidate_acts a
+    WHERE NOT EXISTS (
+      SELECT 1 FROM events s
+      WHERE s.kind = 'action_scored'
+        AND s.ts >= a.act_ts
+        AND (
+          json_extract(s.payload, '$.source_act_id') = a.source_act_id
+          OR json_extract(s.payload, '$.projection.source_act_id') = a.source_act_id
+          OR json_extract(s.payload, '$.act_tuple.source_act_id') = a.source_act_id
+          OR EXISTS (SELECT 1 FROM json_each(s.context_refs) WHERE value IN (a.act_event_id, a.source_act_id))
+        )
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM events t
+      WHERE t.kind IN ('task_committed', 'task_failed', 'task_abandoned', 'dispatcher_violation')
+        AND t.directive_id = a.directive_id
+        AND t.task_id = a.task_id
+        AND t.ts >= a.act_ts
+    )
+  ),
+  target_rows AS (
+    SELECT act_event_id, value AS target_resource
+    FROM inflight_acts, json_each(inflight_acts.payload, '$.target_resources')
+    UNION
+    SELECT act_event_id, value AS target_resource
+    FROM inflight_acts, json_each(inflight_acts.payload, '$.affected_resources')
+    UNION
+    SELECT act_event_id, json_extract(payload, '$.target_resource') AS target_resource
+    FROM inflight_acts
+    WHERE json_extract(payload, '$.target_resource') IS NOT NULL
+    UNION
+    SELECT act_event_id, json_extract(payload, '$.proposed_behavior.target_resource') AS target_resource
+    FROM inflight_acts
+    WHERE json_extract(payload, '$.proposed_behavior.target_resource') IS NOT NULL
+  ),
+  peer_scores AS (
+    SELECT
+      p.peer_id,
+      s.id AS score_event_id,
+      s.ts AS score_ts,
+      s.directive_id,
+      s.task_id,
+      COALESCE(json_extract(s.payload, '$.verifier_kind'), json_extract(s.payload, '$.verifier.kind')) AS verifier_kind,
+      COALESCE(s.residual, CAST(json_extract(s.payload, '$.residual') AS REAL), CAST(json_extract(s.payload, '$.observed_residual') AS REAL)) AS residual,
+      s.payload
+    FROM live_peers p
+    JOIN events s
+      ON s.kind = 'action_scored'
+     AND COALESCE(json_extract(s.payload, '$.verifier_kind'), json_extract(s.payload, '$.verifier.kind')) IN ('peer_llm_claude', 'peer_llm_opencode')
+     AND s.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-24 hours')
+     AND (
+       s.substrate_origin = p.expected_origin
+       OR (p.directive_id IS NOT NULL AND s.directive_id = p.directive_id AND (p.task_id IS NULL OR s.task_id = p.task_id))
+       OR EXISTS (SELECT 1 FROM json_each(s.context_refs) WHERE value = p.current_act_id)
+     )
+  )
+  SELECT
+    p.peer_id,
+    p.kind,
+    p.spawnability,
+    p.directive_id,
+    p.task_id,
+    p.current_act_id,
+    p.scope,
+    p.git_head,
+    p.registered_ts,
+    p.last_seen_ts,
+    p.seconds_since_last_seen,
+    p.liveness_verdict,
+    p.registration_event_id,
+    p.latest_activity_event_id,
+    COALESCE((SELECT json_group_array(json_object('event_id', a.act_event_id, 'kind', a.act_kind, 'ts', a.act_ts, 'directive_id', a.directive_id, 'task_id', a.task_id, 'source_act_id', a.source_act_id)) FROM inflight_acts a WHERE a.peer_id = p.peer_id), '[]') AS in_flight_acts,
+    COALESCE((SELECT json_group_array(DISTINCT tr.target_resource) FROM target_rows tr JOIN inflight_acts a ON a.act_event_id = tr.act_event_id WHERE a.peer_id = p.peer_id AND tr.target_resource IS NOT NULL), '[]') AS target_resources,
+    COALESCE((SELECT json_group_array(json_object('event_id', s.score_event_id, 'ts', s.score_ts, 'directive_id', s.directive_id, 'task_id', s.task_id, 'verifier_kind', s.verifier_kind, 'residual', s.residual)) FROM peer_scores s WHERE s.peer_id = p.peer_id), '[]') AS recent_peer_scores,
+    COALESCE((SELECT json_group_array(s.score_event_id) FROM peer_scores s WHERE s.peer_id = p.peer_id), '[]') AS review_event_ids,
+    MAX(
+      p.last_seen_ts,
+      COALESCE((SELECT MAX(a.act_ts) FROM inflight_acts a WHERE a.peer_id = p.peer_id), p.last_seen_ts),
+      COALESCE((SELECT MAX(s.score_ts) FROM peer_scores s WHERE s.peer_id = p.peer_id), p.last_seen_ts)
+    ) AS last_activity_ts
+  FROM live_peers p
+  ORDER BY last_activity_ts DESC;
+`;
+
 // ── Public entrypoint ──────────────────────────────────────────────
 
 // recipes_latest_view and recipe_registry_view now project from
@@ -4280,6 +4416,7 @@ export const VIEW_NAMES = [
   "event_kind_occurrence_view",
   "worker_liveness_view",
   "peer_registry_view",
+  "peer_activity_view",
   "stale_zero_score_knowledge_view",
   "retrieval_credit_view",
   "top_laws_view",
@@ -4356,6 +4493,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_ARTIFACT_WARNING);
   db.exec(VIEW_MODEL_ROUTING);
   db.exec(VIEW_PEER_REGISTRY);
+  db.exec(VIEW_PEER_ACTIVITY);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────

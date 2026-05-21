@@ -73,6 +73,7 @@ import {
   artifactWarnings,
   modelRouting,
 } from "../../substrate/views";
+import { readPeerActivity } from "../peer_registry";
 import type {
   AdmitArtifactSchema,
   AmendDirectiveSchema,
@@ -957,6 +958,24 @@ export const handleRead = (
         return {
           ok: true,
           result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
+        };
+      }
+      case "peer_activity_view": {
+        // Tier U/U2: on-the-fly mutual awareness. Args:
+        // { current_peer_id?, target_resource?, limit? }. current_peer_id
+        // excludes the caller so peers see other live peers before acting.
+        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const currentPeerId = typeof arg.current_peer_id === "string" ? arg.current_peer_id : undefined;
+        const targetResource = typeof arg.target_resource === "string" ? arg.target_resource : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return {
+          ok: true,
+          result: {
+            rows: readPeerActivity(db, { current_peer_id: currentPeerId, target_resource: targetResource, limit }) as unknown as JsonValue,
+            view_name: view,
+            args,
+            generated_at: new Date().toISOString(),
+          } as unknown as JsonValue,
         };
       }
       case "stale_zero_score_knowledge_view": {
