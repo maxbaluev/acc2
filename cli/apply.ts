@@ -441,6 +441,92 @@ const gateAutonomousCommitByDelegationSafety = async (
   };
 };
 
+const metacognitiveActionToApplyRoute = (action: string): ApplyRoute => {
+  switch (action) {
+    case "defer": return "AUTO_DEFER_DEPENDENCY";
+    case "learn": return "NEEDS_BRAIN_RECYCLE";
+    case "ask": return "OWNER_GATE";
+    case "compress":
+    default:
+      return "AUTO_APPLY";
+  }
+};
+
+const evaluateAutonomousCommitMetacognitiveOwnerPolicy = async (
+  payload: Record<string, unknown>,
+  targets: readonly string[],
+) => {
+  try {
+    const [{ evaluateMetacognitiveOwnerPolicy }, profileEnv, recentEnv] = await Promise.all([
+      import("../runtime/metacognitive_owner_policy"),
+      mcpCall("substrate.read", { view_name: "owner_profile_view" }),
+      mcpCall("runtime.recent_events", { k: 30, kinds: ["owner_input_received", "owner_decision_recorded", "owner_observed_outcome_recorded"] }),
+    ]);
+    if (!profileEnv.ok) return { residual: 0, recommended_policy_action: "compress" as const, verdict: "aligned" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+    const profileRow = Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
+    const profile = parsePayload(profileRow?.payload);
+    const renderingSignals = profile.rendering_signals && typeof profile.rendering_signals === "object" ? profile.rendering_signals as Record<string, unknown> : {};
+    const controlSignals = profile.control_signals && typeof profile.control_signals === "object" ? profile.control_signals as Record<string, unknown> : {};
+    const riskSignals = profile.risk_signals && typeof profile.risk_signals === "object" ? profile.risk_signals as Record<string, unknown> : {};
+    const autonomySignals = profile.autonomy_signals && typeof profile.autonomy_signals === "object" ? profile.autonomy_signals as Record<string, unknown> : {};
+    const recentEvents = recentEnv.ok ? ((recentEnv.result as { events?: EventRow[] } | null)?.events ?? []) : [];
+    const recentTexts = recentEvents.map(ownerGoalDriftText).filter((text) => text.length > 0);
+    const recentCorrections = recentTexts.filter((text) => /\b(correction|wrong|reverted|broken|regression|do not|don't)\b/i.test(text));
+    const recentQuestions = recentTexts.filter((text) => /\?|\b(clarify|unclear|ask)\b/i.test(text));
+    const recentDeclines = recentTexts.filter((text) => /\b(no|decline|defer|not now|blocked)\b/i.test(text));
+    const recentSatisfaction = recentTexts.filter((text) => /\b(approved|works|good|passing|accepted)\b/i.test(text));
+    return evaluateMetacognitiveOwnerPolicy({
+      candidate_policy_action: "compress",
+      session_signals: {
+        ...renderingSignals,
+        ...controlSignals,
+        ...riskSignals,
+        owner_control_need: profile.owner_control_need,
+        task_ambiguity: payload.task_ambiguity,
+        active_failures: payload.active_failures,
+      },
+      cross_session_signals: {
+        ...autonomySignals,
+        profile_control_signal: profile.profile_control_signal,
+        policy_uncertainty: profile.policy_uncertainty,
+      },
+      owner_interaction: {
+        recent_corrections: recentCorrections,
+        recent_questions: recentQuestions,
+        recent_declines: recentDeclines,
+        recent_satisfaction: recentSatisfaction,
+        unresolved_decisions: targets,
+      },
+    });
+  } catch {
+    return { residual: 0, recommended_policy_action: "compress" as const, verdict: "aligned" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+  }
+};
+
+const gateAutonomousCommitByMetacognitiveOwnerPolicy = async (
+  decision: ApplyRouteDecision,
+  payload: Record<string, unknown>,
+  targets: readonly string[],
+): Promise<ApplyRouteDecision> => {
+  const policy = await evaluateAutonomousCommitMetacognitiveOwnerPolicy(payload, targets);
+  if (policy.residual < 0.6 && policy.recommended_policy_action === "compress") return decision;
+  return {
+    route: metacognitiveActionToApplyRoute(policy.recommended_policy_action),
+    score: 1,
+    confidence: 0.85,
+    deterministic: false,
+    reason: "metacognitive_owner_policy_predicate",
+    preconditions: {
+      ...decision.preconditions,
+      metacognitive_owner_policy_residual: policy.residual,
+      metacognitive_owner_policy_recommended_action: policy.recommended_policy_action,
+      metacognitive_owner_policy_verdict: policy.verdict,
+      metacognitive_owner_policy_breakdown: policy.breakdown,
+      metacognitive_owner_policy_reasons: policy.reasons,
+    },
+  };
+};
+
 const gateAutonomousCommit = async (
   decision: ApplyRouteDecision,
   payload: Record<string, unknown>,
@@ -449,7 +535,9 @@ const gateAutonomousCommit = async (
 ): Promise<ApplyRouteDecision> => {
   const driftDecision = await gateAutonomousCommitByOwnerGoalDrift(decision, payload, target, targets);
   if (driftDecision.route !== "AUTO_APPLY") return driftDecision;
-  return gateAutonomousCommitByDelegationSafety(driftDecision, payload, targets);
+  const delegationDecision = await gateAutonomousCommitByDelegationSafety(driftDecision, payload, targets);
+  if (delegationDecision.route !== "AUTO_APPLY") return delegationDecision;
+  return gateAutonomousCommitByMetacognitiveOwnerPolicy(delegationDecision, payload, targets);
 };
 
 const deterministicApplyRoute = async (

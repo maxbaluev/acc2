@@ -591,4 +591,58 @@ describe("runApply gates", () => {
     expect(actPayload.affected_files).toContain("cli/apply.ts");
     expect(JSON.parse(act!.context_refs)).toContain(eventId);
   });
+
+  test("metacognitive owner policy downgrades unsafe autonomous apply", async () => {
+    const scope = nextScope();
+    const profileEnv = await rpc("substrate.emit", {
+      kind: "owner_profile_recorded",
+      substrate_origin: "substrate",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
+      payload: {
+        owner_control_need: 0.9,
+        control_signals: { recent_control_language: 1 },
+      },
+    });
+    expect(profileEnv.ok).toBe(true);
+    const inputEnv = await rpc("substrate.emit", {
+      kind: "owner_input_received",
+      substrate_origin: "claude_root",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
+      payload: { input: "Correction: ask before applying this kind of autonomous change." },
+    });
+    expect(inputEnv.ok).toBe(true);
+    const env = await rpc("substrate.emit", {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
+      payload: {
+        target_resource: "repo:cli/apply.ts",
+        anchor: "renderGateBlock",
+        current_behavior: "acc apply prompts omit structured gate facts",
+        proposed_behavior: {
+          target_resource: "repo:cli/apply.ts",
+          anchor: "renderGateBlock",
+          diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+        },
+      },
+    });
+    expect(env.ok).toBe(true);
+    const eventId = (env.result as { id: string }).id;
+
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+
+    expect(code).toBe(1);
+    expect(cap.err.join("\n")).toContain("metacognitive_owner_policy_predicate");
+    const payload = rowPayload(gateScoreFor(eventId));
+    expect(payload.apply_route).toBe("OWNER_GATE");
+    expect(payload.apply_route_reason).toBe("metacognitive_owner_policy_predicate");
+    const preconditions = payload.apply_route_preconditions as Record<string, unknown>;
+    expect(preconditions.metacognitive_owner_policy_residual).toBeGreaterThanOrEqual(0.6);
+    expect(preconditions.metacognitive_owner_policy_recommended_action).toBe("ask");
+  });
 });
