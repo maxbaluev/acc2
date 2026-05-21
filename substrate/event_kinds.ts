@@ -1125,6 +1125,31 @@ export const HEALTH_METRIC_KINDS: EventKind[] = (Object.entries(EVENT_KINDS) as 
   .filter(([, m]) => m.health_metric)
   .map(([k]) => k);
 
+/** 2026-05-21 dual-kind consolidation. The 2026-05-17 code_artifact →
+ *  act_artifact rename left ~2,559 IMMUTABLE historical code_artifact_*
+ *  rows in the ledger, so read paths must still match BOTH names. Pre-fix
+ *  the dual-kind list was copy-pasted across 8 call sites (retrieval,
+ *  task_dispatcher, extractors, daemon, closure checks) — a "one path"
+ *  violation. These canonical constants are the single source of truth;
+ *  the reads stay (immutable history) but the duplication collapses here.
+ *  `*_SQL` variants are pre-quoted for `kind IN (…)` clauses (constants,
+ *  no injection surface). */
+export const ARTIFACT_CANDIDATE_KINDS = [
+  "act_artifact_candidate",
+  "code_artifact_candidate",
+] as const;
+export const ARTIFACT_LIFECYCLE_KINDS = [
+  "act_artifact_candidate",
+  "act_artifact_admitted",
+  "act_artifact_promoted",
+  "code_artifact_candidate",
+  "code_artifact_admitted",
+  "code_artifact_promoted",
+] as const;
+/** Pre-quoted comma lists for SQL `kind IN (...)`. */
+export const ARTIFACT_CANDIDATE_KINDS_SQL = ARTIFACT_CANDIDATE_KINDS.map((k) => `'${k}'`).join(", ");
+export const ARTIFACT_LIFECYCLE_KINDS_SQL = ARTIFACT_LIFECYCLE_KINDS.map((k) => `'${k}'`).join(", ");
+
 /** Orchestrator mirror-inline set (operator MUST see these inline). The
  *  rule lives in the parent harness's CLAUDE.md; acc2 has no progress-
  *  event bus today so the set is empty until a v2 surface lands. */

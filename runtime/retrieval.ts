@@ -21,6 +21,7 @@
 
 import type { Database } from "bun:sqlite";
 import { computeEmbedding, EMBEDDING_VERSION } from "./embedder";
+import { ARTIFACT_LIFECYCLE_KINDS } from "../substrate/event_kinds";
 import type { EmbeddingIndex, IndexEntry, KnnHit } from "./embedding_index";
 import { originPromotion, originPromotionByGoalShape } from "../substrate/views";
 import { goalShape as computeGoalShape } from "./goal_shape";
@@ -168,10 +169,12 @@ const readOriginBiasForGoalShape = (db: Database, goalShape: string): Map<string
  *
  *  Returns 0.5 (neutral) when no signal is available — Beta(1,1) prior. */
 const readPosterior = (db: Database, eventId: string, kind: string): number => {
-  if (
-    kind === "act_artifact_admitted" || kind === "act_artifact_promoted" || kind === "act_artifact_candidate" ||
-    kind === "code_artifact_admitted" || kind === "code_artifact_promoted" || kind === "code_artifact_candidate"
-  ) {
+  if (kind === "act_artifact") {
+    const row = db.query("SELECT score FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL").get(eventId) as { score: number } | null;
+    if (row && typeof row.score === "number") return row.score;
+    return 0.5;
+  }
+  if ((ARTIFACT_LIFECYCLE_KINDS as readonly string[]).includes(kind)) {
     // Pull the score from the registry by looking up via context_refs or
     // payload.artifact_id. We use a shape-tolerant fallback: scan the event,
     // look for an artifact_id reference, otherwise return neutral.
@@ -206,6 +209,11 @@ const readPosterior = (db: Database, eventId: string, kind: string): number => {
 
 /** Pack one KnnHit into the retrieval result shape, computing the final
  *  rerank score along the way. */
+const isActiveArtifactHit = (db: Database, artifactId: string): boolean => {
+  const row = db.query("SELECT 1 AS ok FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') LIMIT 1").get(artifactId) as { ok: number } | null;
+  return !!row;
+};
+
 const packHit = (
   db: Database,
   hit: KnnHit,
@@ -283,6 +291,7 @@ export const retrieve = async (
       return false;
     }
     if (kindFilter && !kindFilter.has(entry.kind)) return false;
+    if (entry.kind === "act_artifact" && !isActiveArtifactHit(db, entry.event_id)) return false;
     return true;
   };
 
@@ -339,6 +348,7 @@ export const retrieveWithEmbedding = (
       return false;
     }
     if (kindFilter && !kindFilter.has(entry.kind)) return false;
+    if (entry.kind === "act_artifact" && !isActiveArtifactHit(db, entry.event_id)) return false;
     return true;
   };
   const overFetch = Math.max(q.k, q.k * 3);

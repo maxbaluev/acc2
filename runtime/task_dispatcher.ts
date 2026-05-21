@@ -22,6 +22,7 @@
 
 import type { Database } from "bun:sqlite";
 import type { Event, JsonValue } from "../substrate/types";
+import { ARTIFACT_LIFECYCLE_KINDS } from "../substrate/event_kinds";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
 import { composePrompt } from "./prompt_composer";
@@ -504,12 +505,10 @@ export const dispatchReadyTask = async (
         retrievedArtifacts = await retrieve(db, deps.index, {
           text: task.goal ?? task.directive_id,
           k: 6,
-          kindFilter: [
-            "act_artifact_candidate", "act_artifact_admitted", "act_artifact_promoted",
-            // F4a legacy aliases — historical rows authored before the
-            // act_artifact rename still need to match through retrieval.
-            "code_artifact_candidate", "code_artifact_admitted", "code_artifact_promoted",
-          ],
+          // act_artifact_* canonical + code_artifact_* legacy aliases (F4a):
+          // single source of truth in event_kinds.ts (immutable historical
+          // rows still need the legacy names through retrieval).
+          kindFilter: [...ARTIFACT_LIFECYCLE_KINDS],
           goalText: task.goal,
         });
         if (retrievedArtifacts.query_embedding_unavailable) retrievedArtifacts = null;

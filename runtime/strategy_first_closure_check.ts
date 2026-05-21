@@ -28,6 +28,7 @@
 
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
+import { ARTIFACT_CANDIDATE_KINDS_SQL } from "../substrate/event_kinds";
 import { STRATEGIC_DIRECTION_CHOSEN_SUFFIX, findStrategicDirectionCitation } from "./artifact_admission";
 import { requiresStrategicGrounding } from "../substrate/artifact_kind_metadata";
 
@@ -80,7 +81,7 @@ export const checkStrategyFirstClosure = (
   //    string-matching a prefix.
   const candidateRows = db
     .query<{ id: string; payload: string }, [string]>(
-      "SELECT id, payload FROM events WHERE directive_id = ? AND kind IN ('act_artifact_candidate', 'code_artifact_candidate')",
+      `SELECT id, payload FROM events WHERE directive_id = ? AND kind IN (${ARTIFACT_CANDIDATE_KINDS_SQL})`,
     )
     .all(directiveId);
   const atmsReportCandidates: Array<{

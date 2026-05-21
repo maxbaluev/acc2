@@ -27,6 +27,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { withImmediateTransaction } from "./db";
 import type { EventKind, OwnerProfile, SubstrateOrigin } from "./types";
+import { ARTIFACT_CANDIDATE_KINDS_SQL } from "./event_kinds";
 import { OWNER_PROFILE_DEFAULTS, OWNER_PROFILE_JSON_SCHEMA } from "./types";
 import { parseResourceRefs } from "../runtime/resource_uri";
 import { decodeEmbeddingBlob } from "../runtime/embedder";
@@ -2329,7 +2330,7 @@ const collectArtifactDirectives = (
          e.directive_id       AS directive_id
        FROM act_artifact a
        LEFT JOIN events e
-         ON e.kind IN ('act_artifact_candidate', 'code_artifact_candidate')
+         ON e.kind IN (${ARTIFACT_CANDIDATE_KINDS_SQL})
         AND e.id = a.source_candidate_id
        WHERE a.target_resources IS NOT NULL
          AND a.source_candidate_id IS NOT NULL
