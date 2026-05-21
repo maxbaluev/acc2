@@ -308,7 +308,18 @@ export const screenActArtifactCandidate = (
   //    structural-placeholder text; if they happen to cite labels (b)
   //    still applies.
   const bodyText = typeof payload.body === "string" ? payload.body : "";
-  const isPlaceholderKind = typeof declaredKind === "string" && PLACEHOLDER_BODY_KINDS.has(declaredKind);
+  // 2026-05-21 executable-tool exemption (mirror of artifact_admission.ts).
+  // Executable artifacts (non-null runtime ∈ {bun,uv,camofox-browser}) are
+  // TOOLS the brain creates to do work (diagnostic/test/patch runners),
+  // rooted by sandbox + verifier residual — NOT knowledge claims. They are
+  // exempt from the citation-underrooted refusal, exactly as placeholder
+  // kinds are. Without this, every uncited runner the brain admits during a
+  // normal implementation dispatch storms lane_routing_refused and stalls.
+  const declaredRuntime = typeof payload.runtime === "string" ? payload.runtime : null;
+  const isExecutableTool = declaredRuntime !== null && declaredRuntime.length > 0;
+  const isPlaceholderKind =
+    (typeof declaredKind === "string" && PLACEHOLDER_BODY_KINDS.has(declaredKind)) ||
+    isExecutableTool;
   const isSubstantive =
     (typeof payload.audience === "string" && payload.audience.length > 0) ||
     bodyText.length > 200;

@@ -409,10 +409,27 @@ export const admitArtifact = async (
     "rendered_docx",
     "markdown_body",
   ]);
+  // 2026-05-21 executable-tool exemption. The citation-underrooted gate was
+  // designed for SUBSTANTIVE KNOWLEDGE artifacts (documents, reports,
+  // claims) — those must cite the knowledge that grounds the claim. But the
+  // brain also admits EXECUTABLE TOOLING artifacts (diagnostic/test/patch
+  // runners, e.g. t02_git_diff_runner, t02_anchor_diagnostic) to DO its
+  // implementation work. A code runner is a tool, not a knowledge claim —
+  // its "rooting" is the declared sandbox + verifier residual, not a
+  // knowledge citation. Pre-fix, every uncited executable runner the brain
+  // created during a normal implementation dispatch (T0.2) was refused with
+  // artifact_citation_underrooted, storming lane_routing_refused and
+  // blocking the dispatch from making progress. Executable artifacts (a
+  // non-null runtime ∈ {bun, uv, camofox-browser}) are therefore exempt
+  // from the knowledge-citation requirement, exactly as placeholder kinds
+  // are. Knowledge artifacts (runtime: null) still must root their claims.
+  const admissionIsExecutableTool = input.runtime !== null && input.runtime !== undefined;
   const admissionIsSubstantive =
     (typeof input.audience === "string" && input.audience.length > 0) ||
     (typeof input.body === "string" && input.body.length > 200);
-  const admissionIsPlaceholder = typeof input.kind === "string" && PLACEHOLDER_BODY_KINDS.has(input.kind);
+  const admissionIsPlaceholder =
+    (typeof input.kind === "string" && PLACEHOLDER_BODY_KINDS.has(input.kind)) ||
+    admissionIsExecutableTool;
   if (admissionIsSubstantive) {
     const cited = input.citedKnowledgeIds ?? [];
     const { resolved: resolvedAtAdmit, unresolved: unresolvedAtAdmit } =

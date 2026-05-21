@@ -48,6 +48,43 @@ describe("admitArtifact — happy path", () => {
     expect(admitted.length).toBe(1);
   });
 
+  test("executable tool (>200-char body, no citations) is EXEMPT from artifact_citation_underrooted", async () => {
+    // Regression for the 2026-05-21 T0.2 blocker: the brain admits
+    // executable tooling (diagnostic/test/patch runners) with substantial
+    // bodies and no knowledge citations. A tool is rooted by its sandbox +
+    // verifier, not knowledge — it must NOT be refused as underrooted.
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const body = [
+      "// t02_anchor_diagnostic — long executable tool body, no citations.",
+      "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
+      "// padding to exceed the 200-char substantive threshold ".repeat(4),
+      "console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, echoed: inputs }));",
+    ].join("\n");
+    expect(body.length).toBeGreaterThan(200);
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: { ping: "pong" },
+        fixtureExpectedResidualBelow: 0.2,
+        kind: "diagnostic_runner",
+        name: "t02_anchor_diagnostic",
+        // citedKnowledgeIds intentionally omitted (a tool cites nothing).
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(true);
+    // The underrooted refusal must NOT fire for an executable artifact.
+    const underrooted = events.filter(
+      (e) => e.kind === "lane_routing_refused" &&
+        (e.payload as { reason?: string })?.reason === "artifact_citation_underrooted",
+    );
+    expect(underrooted.length).toBe(0);
+  });
+
   test("data class (runtime=null): admits a raw corpus dump without fixture execution", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
