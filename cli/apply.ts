@@ -725,6 +725,102 @@ const gateAutonomousCommitByOwnerRendering = async (
   };
 };
 
+const orderedTheoryOfMindRoute = (verdict: string): ApplyRoute => {
+  switch (verdict) {
+    case "constraint_miss":
+    case "order_mismatch":
+      return "NEEDS_BRAIN_RECYCLE";
+    case "sparse":
+    case "aligned":
+    default:
+      return "OWNER_GATE";
+  }
+};
+
+const orderedTheoryOfMindText = (value: unknown): string => {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value); } catch { return String(value); }
+};
+
+const candidateNestedBeliefFromPayload = (payload: Record<string, unknown>): Record<string, unknown> | undefined => {
+  for (const key of ["ordered_theory_of_mind", "theory_of_mind", "nested_belief_estimate"] as const) {
+    const value = payload[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  }
+  return undefined;
+};
+
+const evaluateAutonomousCommitOrderedTheoryOfMind = async (
+  decision: ApplyRouteDecision,
+  payload: Record<string, unknown>,
+  targets: readonly string[],
+) => {
+  try {
+    const [{ evaluateOrderedTheoryOfMind }, profileEnv, beliefEnv, recentEnv] = await Promise.all([
+      import("../runtime/ordered_theory_of_mind"),
+      mcpCall("substrate.read", { view_name: "owner_profile_view" }),
+      mcpCall("substrate.read", { view_name: "owner_state_belief_view" }),
+      mcpCall("runtime.recent_events", { k: 50, kinds: ["owner_input_received", "owner_decision_recorded", "owner_observed_outcome_recorded", "owner_rendering_feedback_recorded"] }),
+    ]);
+    if (!profileEnv.ok || !beliefEnv.ok) return { residual: 0, verdict: "aligned" as const, nested_belief_estimate: { depth: 0, owner_believes: [], owner_believes_system_believes: [], owner_wants_system_to_infer: [], constraints: [], uncertainty: 0 }, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+    const profileRow = Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
+    const profile = parsePayload(profileRow?.payload);
+    const belief = beliefEnv.result && typeof beliefEnv.result === "object" && !Array.isArray(beliefEnv.result) ? beliefEnv.result as Record<string, unknown> : {};
+    const recentEvents = recentEnv.ok ? ((recentEnv.result as { events?: EventRow[] } | null)?.events ?? []) : [];
+    const ownerHistory = recentEvents.map((row) => {
+      const eventPayload = parsePayload(row.payload);
+      return {
+        kind: row.kind,
+        ts: row.ts,
+        text: ownerGoalDriftText(row),
+        signal: typeof eventPayload.signal === "string" ? eventPayload.signal : typeof eventPayload.feedback_kind === "string" ? eventPayload.feedback_kind : undefined,
+        payload: eventPayload,
+      };
+    }).filter((row) => row.text.length > 0 || row.signal);
+    return evaluateOrderedTheoryOfMind({
+      owner_profile: profile,
+      owner_state_belief: belief,
+      interaction_history: ownerHistory,
+      proposed_action: {
+        intent: typeof payload.intent === "string" ? payload.intent : undefined,
+        summary: JSON.stringify(payload.proposed_behavior ?? payload.proposed_action ?? payload),
+        owner_visible_text: orderedTheoryOfMindText(ownerVisibleDraftFromPayload(payload)),
+        route: decision.route,
+        target_resources: [...targets],
+      },
+      candidate_nested_belief: candidateNestedBeliefFromPayload(payload),
+      upstream_residuals: decision.preconditions,
+    });
+  } catch {
+    return { residual: 0, verdict: "aligned" as const, nested_belief_estimate: { depth: 0, owner_believes: [], owner_believes_system_believes: [], owner_wants_system_to_infer: [], constraints: [], uncertainty: 0 }, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+  }
+};
+
+const gateAutonomousCommitByOrderedTheoryOfMind = async (
+  decision: ApplyRouteDecision,
+  payload: Record<string, unknown>,
+  targets: readonly string[],
+): Promise<ApplyRouteDecision> => {
+  const theory = await evaluateAutonomousCommitOrderedTheoryOfMind(decision, payload, targets);
+  if (theory.residual < 0.6 && theory.verdict !== "constraint_miss" && theory.verdict !== "order_mismatch") return decision;
+  return {
+    route: orderedTheoryOfMindRoute(theory.verdict),
+    score: 1,
+    confidence: 0.85,
+    deterministic: false,
+    reason: "ordered_theory_of_mind_predicate",
+    preconditions: {
+      ...decision.preconditions,
+      ordered_theory_of_mind_residual: theory.residual,
+      ordered_theory_of_mind_verdict: theory.verdict,
+      ordered_theory_of_mind_nested_belief_estimate: theory.nested_belief_estimate,
+      ordered_theory_of_mind_breakdown: theory.breakdown,
+      ordered_theory_of_mind_reasons: theory.reasons,
+    },
+  };
+};
+
 const gateAutonomousCommit = async (
   decision: ApplyRouteDecision,
   payload: Record<string, unknown>,
@@ -741,7 +837,9 @@ const gateAutonomousCommit = async (
   if (continualDecision.route !== "AUTO_APPLY") return continualDecision;
   const forecastDecision = await gateAutonomousCommitByOwnerOutcomeForecast(continualDecision, payload, targets);
   if (forecastDecision.route !== "AUTO_APPLY") return forecastDecision;
-  return gateAutonomousCommitByOwnerRendering(forecastDecision, payload);
+  const renderingDecision = await gateAutonomousCommitByOwnerRendering(forecastDecision, payload);
+  if (renderingDecision.route !== "AUTO_APPLY") return renderingDecision;
+  return gateAutonomousCommitByOrderedTheoryOfMind(renderingDecision, payload, targets);
 };
 
 const deterministicApplyRoute = async (

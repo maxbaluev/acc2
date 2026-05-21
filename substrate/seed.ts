@@ -2354,6 +2354,8 @@ const PREDICATE_SEEDS: PredicateSeed[] = [
     why: "S0 belief — anticipating owner beliefs about substrate capability AT EACH ORDER improves transparency and consent.",
     closure_predicate: "ToM outputs include explicit order axis (or explicit rejection reason); ToM-derived expectations match later owner_input_received corrections.",
     metric_direction: "ToM expectation error falls; order-axis coverage rises.",
+    evaluator_artifact_id: "ordered_theory_of_mind_evaluator_v1",
+    consumer_gate: "cli/apply.ts deterministicApplyRoute gates AUTO_APPLY on ordered_theory_of_mind_predicate after owner_rendering_predicate; hard constraint misses and order mismatches recycle, sparse ordered-belief evidence routes to owner gate only when residual is high, and owner_state_belief_view plus recent owner events ground nested-belief estimates",
     display_name: "Ordered theory of mind — order-axis + staged ToM-Agent-to-Moral-Agent model",
   },
   {
