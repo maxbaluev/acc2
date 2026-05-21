@@ -86,6 +86,14 @@ export const EVENT_KINDS = {
   // applied_change_committed) with source_act_id context. Only this source
   // kind projects; derived rows never recursively expand themselves.
   act_tuple_recorded:                      { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+
+  // Tier U/U5 Claude-agent job queue. The substrate never spawns Claude;
+  // it requests work that a live, externally-launched Claude orchestrator
+  // drains by claiming the job and later completing it with the same
+  // act_tuple_recorded envelope used by every other execution peer.
+  claude_agent_job_requested:              { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  claude_agent_job_claimed:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
+  claude_agent_job_completed:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   // Claude-side reasoning distillation. ONE summary per substantive turn
   // (commit / multi-file edit / confirmed diagnosis) — NOT per-tool-call.
   // The per-(substrate_origin, goal_shape) primitive

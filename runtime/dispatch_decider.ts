@@ -65,6 +65,7 @@ type DispatchDecisionBase = { reason: string } & DispatchDecisionEvidence;
 export type DispatchDecision =
   | ({ route: "substrate_replay"; recipe_id: string } & DispatchDecisionBase)
   | ({ route: "claude_inline"; cited_artifact_ids: string[] } & DispatchDecisionBase)
+  | ({ route: "claude_agent"; job_intent: string; target_files: string[]; acceptance_predicate: Record<string, unknown> } & DispatchDecisionBase)
   | ({ route: "opencode_brain"; predicted_complexity: "low" | "mid" | "high" } & DispatchDecisionBase)
   | ({ route: "deferred_blocked"; blockers: string[] } & DispatchDecisionBase);
 
@@ -332,6 +333,11 @@ const scoreRoutesFromAxes = (axes: Record<string, number>): DispatchRouteScores 
   return {
     substrate_replay: clamp01(oneShot * 0.45 + cost * 0.25 + time * 0.15 + (1 - gap) * 0.10 + (1 - decomposition) * 0.05),
     claude_inline: clamp01(oneShot * 0.35 + reversible * 0.25 + (1 - control) * 0.20 + (1 - gap) * 0.10 + cost * 0.10),
+    // Claude-agent work is still substrate-orchestrated, but it is drained
+    // by a live external Claude orchestrator. Score it for decomposable,
+    // reversible work where background parallelism can reduce elapsed time
+    // without forcing the main Claude thread to inline the act.
+    claude_agent: clamp01(decomposition * 0.40 + gap * 0.20 + reversible * 0.15 + time * 0.15 + (1 - control) * 0.10),
     opencode_brain: clamp01(gap * 0.25 + decomposition * 0.35 + control * 0.15 + (1 - oneShot) * 0.15 + (1 - reversible) * 0.10),
     deferred_blocked: clamp01(control * 0.25 + gap * 0.20 + (1 - reversible) * 0.25),
   };
@@ -352,9 +358,12 @@ const chooseHighestScoredRoute = (routeScores: DispatchRouteScores, feasibleRout
 
 const BRAIN_ACCURACY_ARTIFACT_PREFIX = "brain_accuracy_predicate:";
 
-const POSTERIOR_ROUTED_PEER_HINTS: Record<"opencode_brain" | "claude_inline", { kinds: string[]; origins: string[] }> = {
+type PosteriorRoutedPeerRoute = "opencode_brain" | "claude_inline" | "claude_agent";
+
+const POSTERIOR_ROUTED_PEER_HINTS: Record<PosteriorRoutedPeerRoute, { kinds: string[]; origins: string[] }> = {
   opencode_brain: { kinds: ["opencode"], origins: ["opencode", "opencode_brain"] },
-  claude_inline: { kinds: ["claude_root", "claude_agent", "claude"], origins: ["claude_inline", "claude_root", "claude_agent", "claude"] },
+  claude_inline: { kinds: ["claude_root", "claude_terminal", "claude"], origins: ["claude_inline", "claude_root", "claude"] },
+  claude_agent: { kinds: ["claude_agent", "claude_terminal"], origins: ["claude_agent", "claude_root", "claude"] },
 };
 
 type PeerAccuracyRouteAdjustment = {
@@ -399,7 +408,10 @@ const readPeerActivityRows = (db: Database): PeerActivityRow[] => {
   }
 };
 
-const routePeerTokens = (route: "opencode_brain" | "claude_inline", peerRows: PeerActivityRow[]): string[] => {
+const hasLiveClaudeAgentPeer = (db: Database): boolean =>
+  readPeerActivityRows(db).some((row) => row.kind === "claude_agent" || row.kind === "claude_terminal");
+
+const routePeerTokens = (route: PosteriorRoutedPeerRoute, peerRows: PeerActivityRow[]): string[] => {
   const hints = POSTERIOR_ROUTED_PEER_HINTS[route];
   const tokens = new Set<string>([...hints.origins, ...hints.kinds]);
   for (const row of peerRows) {
@@ -458,7 +470,8 @@ const applyPeerAccuracyRouteAdjustment = (
 ): PeerAccuracyRouteAdjustment => {
   const adjusted: DispatchRouteScores = { ...routeScores };
   const evidence: Record<string, number> = {};
-  const peerRoutes = feasibleRoutes.filter((r): r is "opencode_brain" | "claude_inline" => r === "opencode_brain" || r === "claude_inline");
+  const peerRoutes = feasibleRoutes.filter((r): r is PosteriorRoutedPeerRoute =>
+    r === "opencode_brain" || r === "claude_inline" || r === "claude_agent");
   if (peerRoutes.length === 0) return { route_scores: adjusted, verifier_evidence: evidence };
 
   const shape = currentGoalShapeForTask(db, task);
@@ -885,6 +898,12 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
   // when the task itself is hard. Inline lane should never absorb strategic
   // work just because the file extension is .ts.
   if (!hardness.is_hard && matchedInlinePatterns && matchedInlinePatterns.length > 0) feasibleRoutes.push("claude_inline");
+  // Tier U/U5: the substrate cannot spawn Claude. It may route to the
+  // claude_agent lane only when a live Claude orchestrator/agent peer is
+  // already registered and heartbeating, so queued jobs always have a
+  // plausible external drainer. Without that peer, fail closed to the
+  // existing opencode_brain / claude_inline lanes.
+  if (hasLiveClaudeAgentPeer(db)) feasibleRoutes.push("claude_agent");
 
   // Route availability still fails closed (no recipe/no inline knowledge means
   // no such lane). When a peer lane is feasible, fold in the per-peer,
@@ -927,6 +946,21 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
       route: "claude_inline",
       cited_artifact_ids: matchedInlinePatterns.map((m) => m.cited_id),
       reason: "scored_inline_lane",
+      ...evidence,
+    };
+  }
+
+  if (selectedRoute === "claude_agent") {
+    return {
+      route: "claude_agent",
+      job_intent: task.goal,
+      target_files: taskTargetsForHardness(task).map((target) => target.startsWith("repo:") ? target.slice("repo:".length) : target),
+      acceptance_predicate: {
+        kind: "task_residual_below_threshold",
+        residual_below: 0.3,
+        closure_requires_act_tuple_recorded: true,
+      },
+      reason: "live_claude_agent_peer_scored_lane",
       ...evidence,
     };
   }

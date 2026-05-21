@@ -4380,6 +4380,86 @@ CREATE VIEW IF NOT EXISTS peer_activity_view AS
   ORDER BY last_activity_ts DESC;
 `;
 
+// claude_agent_job_queue_view — Tier U/U5 queue semantics. Requested jobs
+// are pending until completed. A claimed job remains hidden only while its
+// claimant peer is live in peer_registry_view; stale claimants fail open so
+// another live Claude orchestrator can reclaim the job and no work is lost.
+const VIEW_CLAUDE_AGENT_JOB_QUEUE = `
+CREATE VIEW IF NOT EXISTS claude_agent_job_queue_view AS
+  WITH requested AS (
+    SELECT
+      id AS request_event_id,
+      ts AS requested_ts,
+      directive_id,
+      task_id,
+      json_extract(payload, '$.job_id') AS job_id,
+      json_extract(payload, '$.intent') AS intent,
+      COALESCE(json_extract(payload, '$.target_files'), '[]') AS target_files,
+      COALESCE(json_extract(payload, '$.acceptance_predicate'), '{}') AS acceptance_predicate,
+      payload AS request_payload
+    FROM events
+    WHERE kind = 'claude_agent_job_requested'
+      AND json_extract(payload, '$.job_id') IS NOT NULL
+  ),
+  latest_claim AS (
+    SELECT * FROM (
+      SELECT
+        id AS claim_event_id,
+        ts AS claimed_ts,
+        json_extract(payload, '$.job_id') AS job_id,
+        json_extract(payload, '$.claimant_peer_id') AS claimant_peer_id,
+        payload AS claim_payload,
+        ROW_NUMBER() OVER (
+          PARTITION BY json_extract(payload, '$.job_id')
+          ORDER BY ts DESC, id DESC
+        ) AS rn
+      FROM events
+      WHERE kind = 'claude_agent_job_claimed'
+        AND json_extract(payload, '$.job_id') IS NOT NULL
+    ) WHERE rn = 1
+  ),
+  completed AS (
+    SELECT
+      json_extract(payload, '$.job_id') AS job_id,
+      MAX(ts) AS completed_ts
+    FROM events
+    WHERE kind = 'claude_agent_job_completed'
+      AND json_extract(payload, '$.job_id') IS NOT NULL
+    GROUP BY json_extract(payload, '$.job_id')
+  )
+  SELECT
+    r.job_id,
+    r.directive_id,
+    r.task_id,
+    r.intent,
+    r.target_files,
+    r.acceptance_predicate,
+    r.request_event_id,
+    r.requested_ts,
+    c.claim_event_id,
+    c.claimed_ts,
+    c.claimant_peer_id,
+    p.kind AS claimant_kind,
+    p.liveness_verdict AS claimant_liveness_verdict,
+    CASE
+      WHEN c.claim_event_id IS NULL THEN 'pending'
+      WHEN p.peer_id IS NULL OR p.liveness_verdict != 'live' THEN 'stale_claim_requeued'
+      ELSE 'claimed_live'
+    END AS queue_status,
+    r.request_payload,
+    c.claim_payload
+  FROM requested r
+  LEFT JOIN latest_claim c ON c.job_id = r.job_id AND c.rn = 1
+  LEFT JOIN peer_registry_view p ON p.peer_id = c.claimant_peer_id
+  WHERE r.job_id NOT IN (SELECT job_id FROM completed WHERE job_id IS NOT NULL)
+    AND (
+      c.claim_event_id IS NULL
+      OR p.peer_id IS NULL
+      OR p.liveness_verdict != 'live'
+    )
+  ORDER BY r.requested_ts ASC;
+`;
+
 // ── Public entrypoint ──────────────────────────────────────────────
 
 // recipes_latest_view and recipe_registry_view now project from
@@ -4417,6 +4497,7 @@ export const VIEW_NAMES = [
   "worker_liveness_view",
   "peer_registry_view",
   "peer_activity_view",
+  "claude_agent_job_queue_view",
   "stale_zero_score_knowledge_view",
   "retrieval_credit_view",
   "top_laws_view",
@@ -4494,6 +4575,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_MODEL_ROUTING);
   db.exec(VIEW_PEER_REGISTRY);
   db.exec(VIEW_PEER_ACTIVITY);
+  db.exec(VIEW_CLAUDE_AGENT_JOB_QUEUE);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────

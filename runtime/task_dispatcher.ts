@@ -47,6 +47,7 @@ const resolveComposePrompt = async (): Promise<typeof composePrompt> => {
   }
 };
 import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
+import { requestJob } from "./claude_agent_job";
 import { recordInternalAct } from "./internal_act_projection";
 import { invokeVerifierWithMeta } from "./verifier_invocation";
 import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge/index";
@@ -281,8 +282,8 @@ export const dispatchReadyTask = async (
   // rejected route is identified by its bare route string. Fail-soft:
   // emission failure must never block dispatch.
   try {
-    const allRoutes: Array<"substrate_replay" | "claude_inline" | "opencode_brain" | "deferred_blocked"> =
-      ["substrate_replay", "claude_inline", "opencode_brain", "deferred_blocked"];
+    const allRoutes: Array<"substrate_replay" | "claude_inline" | "claude_agent" | "opencode_brain" | "deferred_blocked"> =
+      ["substrate_replay", "claude_inline", "claude_agent", "opencode_brain", "deferred_blocked"];
     const rejectedRoutes = allRoutes.filter((r) => r !== decision.route);
     const rejectedCandidates = rejectedRoutes
       .map((r) => ({
@@ -461,6 +462,35 @@ export const dispatchReadyTask = async (
       } as JsonValue,
     });
     effectiveRoute = "opencode_brain";
+  }
+
+  if (effectiveRoute === "claude_agent" && decision.route === "claude_agent") {
+    const job = requestJob(db, {
+      directive_id: task.directive_id,
+      task_id: task.id,
+      intent: decision.job_intent,
+      target_files: decision.target_files,
+      acceptance_predicate: decision.acceptance_predicate as JsonValue,
+    });
+    emitEvent(db, {
+      kind: "brain_dispatch_closed",
+      substrate_origin: "substrate_auto",
+      directive_id: task.directive_id,
+      task_id: task.id,
+      context_refs: [job.id],
+      payload: {
+        dispatch_id: dispatchId,
+        reason: "claude_agent_job_requested",
+        job_id: job.job_id,
+        job_request_event_id: job.id,
+      } as JsonValue,
+    });
+    return {
+      dispatch_id: dispatchId,
+      task_id: task.id,
+      events: readEventsSinceTs(db, dispatchStartedTs, task.id),
+      violations: [],
+    };
   }
 
   if (effectiveRoute === "claude_inline") {
