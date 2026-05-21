@@ -178,6 +178,34 @@ export const DIRECTIVE_TEMPLATES: readonly FatherDirectiveTemplate[] = Object.fr
 const OWNER_ACTIVE_WINDOW_MS_DEFAULT = 5 * 60_000;
 const TEMPLATE_USE_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes between same template fires
 
+// 2026-05-21 father_yielded dampen (owner: "huge amount of father_yielded
+// events, do we need it?"). Father is a REACTIVE worker — during active
+// owner/brain work it fires on every event and yields each time. Emitting a
+// father_yielded LEDGER event on EVERY yield is pure noise (a yield is the
+// ABSENCE of action). The yield itself is still returned to the caller every
+// time (behavior unchanged); only the audit EVENT is rate-limited to once per
+// window per reason — enough to prove "father is correctly idle" without
+// storming the ledger / acc watch. Mirrors the worker_tick_completed dampen.
+const FATHER_YIELD_EVENT_DAMPEN_MS = 10 * 60_000; // 10 min per reason
+const lastFatherYieldEmitMs = new Map<string, number>();
+
+/** Emit father_yielded at most once per FATHER_YIELD_EVENT_DAMPEN_MS per
+ *  reason. The cycle still yields every tick; this only throttles the audit
+ *  event so a reactive yield-storm doesn't flood the ledger. */
+const emitFatherYieldedDampened = (
+  db: Database,
+  reason: string,
+  payload: Record<string, unknown>,
+  nowMs: number,
+): void => {
+  const last = lastFatherYieldEmitMs.get(reason) ?? 0;
+  if (nowMs - last < FATHER_YIELD_EVENT_DAMPEN_MS) return;
+  lastFatherYieldEmitMs.set(reason, nowMs);
+  try {
+    emitEvent(db, { kind: "father_yielded", substrate_origin: "father", payload: payload as JsonValue });
+  } catch { /* fail-soft: a dropped audit event must not break the yield */ }
+};
+
 /** Check whether an `owner_input_received` event exists within the active
  *  window. When true Father MUST yield (§3 owner-yield contract). */
 const ownerIsActive = (db: Database, nowIso: string, windowMs: number): boolean => {
@@ -606,15 +634,11 @@ export const fatherIterate = async (
 
   // Owner-active backoff (§3 yield contract).
   if (ownerIsActive(db, ts, windowMs)) {
-    emitEvent(db, {
-      kind: "father_yielded",
-      substrate_origin: "father",
-      payload: {
-        cycle_id: cycleId,
-        reason: "owner_active",
-        owner_active_window_ms: windowMs,
-      } as JsonValue,
-    });
+    emitFatherYieldedDampened(db, "owner_active", {
+      cycle_id: cycleId,
+      reason: "owner_active",
+      owner_active_window_ms: windowMs,
+    }, Date.parse(ts) || Date.now());
     return {
       cycle_id: cycleId,
       action: "yield",
@@ -639,15 +663,11 @@ export const fatherIterate = async (
   // behind autonomous maintenance. Father resumes once the brain slot is
   // free AND the owner-active window has elapsed.
   if (inFlight.size > 0) {
-    emitEvent(db, {
-      kind: "father_yielded",
-      substrate_origin: "father",
-      payload: {
-        cycle_id: cycleId,
-        reason: "directive_in_flight",
-        in_flight_count: inFlight.size,
-      } as JsonValue,
-    });
+    emitFatherYieldedDampened(db, "directive_in_flight", {
+      cycle_id: cycleId,
+      reason: "directive_in_flight",
+      in_flight_count: inFlight.size,
+    }, Date.parse(ts) || Date.now());
     return {
       cycle_id: cycleId,
       action: "yield",
@@ -756,14 +776,10 @@ export const fatherIterate = async (
   }
 
   // No work and no eligible template — yield.
-  emitEvent(db, {
-    kind: "father_yielded",
-    substrate_origin: "father",
-    payload: {
-      cycle_id: cycleId,
-      reason: "no_work_in_queue",
-    } as JsonValue,
-  });
+  emitFatherYieldedDampened(db, "no_work_in_queue", {
+    cycle_id: cycleId,
+    reason: "no_work_in_queue",
+  }, Date.parse(ts) || Date.now());
   return {
     cycle_id: cycleId,
     action: "yield",

@@ -320,44 +320,48 @@ export const detectDagExplosion = (
   const nowMs = opts?.nowMs ?? Date.now();
   const ageCutoffIso = new Date(nowMs - SUPERVISOR_DIRECTIVE_AGE_MS).toISOString();
 
-  // Directives whose oldest task_node_opened is older than the age threshold
-  // AND have no terminal root commit yet.
+  // 2026-05-21 O(n²) → O(n) rewrite (owner directive: avoid O(n²), stay
+  // fast/reactive). Pre-fix this did GROUP BY over all task_node_opened to
+  // find aged directives, then for EACH ran a per-directive correlated
+  // `NOT EXISTS` COUNT + a per-directive closed-check — N round-trips, each
+  // a correlated subquery over the events table = O(N×M). On the 326K-event
+  // DB this was a multi-second supervisor tick that pinned the daemon CPU.
+  //
+  // Single-pass anti-join replacement: LEFT JOIN task_node_opened against
+  // its terminal events (uses idx_events_task_kind_ts on (task_id,kind,ts));
+  // t.id IS NULL = the task is still open. Count open tasks + take MIN(ts)
+  // per directive in ONE grouped pass, exclude closed/archived directives
+  // via a single small subquery, and HAVING-filter to directives that are
+  // both exploded (ready_count > cap) AND aged (oldest open task past the
+  // age cutoff). One query, index-backed, no per-directive loop.
   const aged = db
     .query(
-      `SELECT directive_id, MIN(ts) AS first_ts
-       FROM events
-       WHERE kind = 'task_node_opened'
-       GROUP BY directive_id
-       HAVING first_ts <= ?`,
+      `WITH closed_directives AS (
+         SELECT DISTINCT directive_id FROM events
+         WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+       )
+       SELECT n.directive_id AS directive_id,
+              COUNT(*)        AS ready_count,
+              MIN(n.ts)       AS first_ts
+       FROM events n
+       LEFT JOIN events t
+         ON t.task_id = n.task_id
+        AND t.kind IN ('task_committed', 'task_failed', 'task_abandoned')
+       WHERE n.kind = 'task_node_opened'
+         AND t.id IS NULL
+         AND n.directive_id NOT IN (SELECT directive_id FROM closed_directives)
+       GROUP BY n.directive_id
+       HAVING ready_count > ? AND first_ts <= ?`,
     )
-    .all(ageCutoffIso) as Array<{ directive_id: string; first_ts: string }>;
+    .all(SUPERVISOR_MAX_READY_TASKS_PER_DIRECTIVE, ageCutoffIso) as Array<{
+      directive_id: string;
+      ready_count: number;
+      first_ts: string;
+    }>;
 
   const archived: Array<{ directive_id: string; ready_count: number; age_hours: number }> = [];
   for (const r of aged) {
-    // Skip directives already closed/archived.
-    const closed = db
-      .query(
-        `SELECT 1 FROM events
-         WHERE directive_id = ?
-           AND kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
-         LIMIT 1`,
-      )
-      .get(r.directive_id);
-    if (closed) continue;
-    // Count ready (opened but not terminal) tasks under this directive.
-    const readyCount = (db
-      .query(
-        `SELECT COUNT(*) AS c FROM events n
-         WHERE n.kind = 'task_node_opened' AND n.directive_id = ?
-           AND NOT EXISTS (
-             SELECT 1 FROM events t
-             WHERE t.task_id = n.task_id
-               AND t.kind IN ('task_committed', 'task_failed', 'task_abandoned')
-           )`,
-      )
-      .get(r.directive_id) as { c: number }).c;
-    if (readyCount <= SUPERVISOR_MAX_READY_TASKS_PER_DIRECTIVE) continue;
-
+    const readyCount = r.ready_count;
     const ageHours = (nowMs - Date.parse(r.first_ts)) / (60 * 60 * 1000);
     try {
       // Preserve unfinished task ids + goals so the archive is recoverable.
