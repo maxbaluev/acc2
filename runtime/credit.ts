@@ -1230,7 +1230,7 @@ const recordBrainAccuracy = (db: Database, params: RecordBrainAccuracyParams): v
     (e) => params.emit(e),
     { weight: 1.0 },
   );
-  params.emit({
+  const observationId = params.emit({
     kind: "brain_accuracy_observation",
     substrate_origin: "substrate_auto",
     context_refs: [params.action_predicted_event_id, params.action_scored_event_id, artifactId],
@@ -1249,6 +1249,25 @@ const recordBrainAccuracy = (db: Database, params: RecordBrainAccuracyParams): v
       projection_key: projectionKey,
     } as JsonValue,
   });
+  if (updated.confidence >= 0.3 && updated.score < 0.45) {
+    params.emit({
+      kind: "brain_invocation_request",
+      substrate_origin: "substrate_auto",
+      directive_id: params.directive_id,
+      task_id: params.task_id,
+      context_refs: [observationId, params.action_predicted_event_id, params.action_scored_event_id, artifactId],
+      payload: {
+        request_reason: "credit_posterior_calibration_drift",
+        topic_keywords: ["credit", "posterior_calibration", params.goal_shape || "default"],
+        triggering_event_ids: [observationId],
+        cited_artifact_ids: [artifactId],
+        cited_knowledge_ids: [],
+        emitter_identity: "credit.brain_accuracy",
+        urgency: "normal",
+        metrics: { post_score: updated.score, post_confidence: updated.confidence, prediction_error: predictionError },
+      } as JsonValue,
+    });
+  }
 };
 
 export const __recordBrainAccuracyForTest = recordBrainAccuracy;

@@ -204,5 +204,20 @@ export const maybeExhaustPathologyBudget = (
       hint: "directive is consuming scheduler attention without converging; review pathologies and amend / archive the directive",
     } as JsonValue,
   });
+  emitEvent(db, {
+    kind: "brain_invocation_request",
+    substrate_origin: "substrate_auto",
+    directive_id: directiveId,
+    context_refs: [emitted.id],
+    payload: {
+      request_reason: "pathology_budget_exhausted",
+      topic_keywords: ["pathology_budget", ...Object.keys(summary.pathologies)],
+      triggering_event_ids: [emitted.id],
+      cited_artifact_ids: [],
+      cited_knowledge_ids: [],
+      emitter_identity: "pathology_budget",
+      urgency: "elevated",
+    } as JsonValue,
+  });
   return emitted.id;
 };

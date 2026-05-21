@@ -180,8 +180,8 @@ export const processRollingReviews = async (
       missed_advanced += 1;
       continue;
     }
-    // 1. Emit directive_review_due.
-    emitEvent(db, {
+    // 1. Emit directive_review_due and request brain synthesis for the review debt.
+    const dueEvent = emitEvent(db, {
       kind: "directive_review_due",
       substrate_origin: "substrate_auto",
       directive_id: d.directive_id,
@@ -189,6 +189,21 @@ export const processRollingReviews = async (
         cadence: d.lifecycle.review_cadence,
         due_at: dueTs,
         missed_review_count: d.missed_review_count,
+      } as JsonValue,
+    });
+    emitEvent(db, {
+      kind: "brain_invocation_request",
+      substrate_origin: "substrate_auto",
+      directive_id: d.directive_id,
+      context_refs: [dueEvent.id],
+      payload: {
+        request_reason: "rolling_review_due",
+        topic_keywords: ["rolling_review", d.lifecycle.review_cadence, "autonomous_improvement"],
+        triggering_event_ids: [dueEvent.id],
+        cited_artifact_ids: [],
+        cited_knowledge_ids: [],
+        emitter_identity: "rolling_reviewer",
+        urgency: d.missed_review_count > 0 ? "elevated" : "normal",
       } as JsonValue,
     });
 

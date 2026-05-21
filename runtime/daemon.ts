@@ -1151,7 +1151,28 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       try { await extractRecipeCandidates(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.recipes", err: (err as Error).message }, "recipe extractor tick failed");
       }
-      try { await extractSemanticDedup(db); } catch (err) {
+      try {
+        const semanticDedup = await extractSemanticDedup(db);
+        const redundant = Number((semanticDedup as { redundant_count?: number }).redundant_count ?? 0);
+        const confirmed = Number((semanticDedup as { confirmed_count?: number }).confirmed_count ?? 0);
+        if (redundant >= 10 && redundant > confirmed * 2) {
+          const request = emitEvent(db, {
+            kind: "brain_invocation_request",
+            substrate_origin: "substrate_auto",
+            payload: {
+              request_reason: "extractor_dedup_noise_floor_rising",
+              topic_keywords: ["semantic_dedup", "noise_floor", "knowledge_candidate_redundant"],
+              triggering_event_ids: [],
+              cited_artifact_ids: [],
+              cited_knowledge_ids: [],
+              emitter_identity: "extractors.semantic_dedup",
+              urgency: "normal",
+              metrics: { redundant_count: redundant, confirmed_count: confirmed },
+            } as JsonValue,
+          });
+          logger.info({ request_event_id: request.id, redundant, confirmed }, "semantic-dedup extractor requested brain synthesis");
+        }
+      } catch (err) {
         logger.warn({ where: "daemon.extractors.semantic_dedup", err: (err as Error).message }, "semantic-dedup extractor tick failed");
       }
       // T1.3 cross-candidate semantic corroboration (2026-05-19): scan
