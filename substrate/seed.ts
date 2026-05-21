@@ -2294,6 +2294,8 @@ const PREDICATE_SEEDS: PredicateSeed[] = [
     why: "S0 policy — meta-policy state must be scored across sessions, not collapsed to per-task posteriors.",
     closure_predicate: "outer-loop GRPO reward improves across sessions; per-cycle DPO loss converges within budget.",
     metric_direction: "metacognitive policy drift falls; cost-aware reward improves.",
+    evaluator_artifact_id: "metacognitive_owner_policy_evaluator_v1",
+    consumer_gate: "cli/apply.ts deterministicApplyRoute blocks AUTO_APPLY when metacognitive owner-policy residual >= 0.6 and the recommended policy action is ask or defer",
     display_name: "Metacognitive owner policy — HILA Dual-Loop Policy Optimization with continual learning",
   },
   {
