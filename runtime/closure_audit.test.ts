@@ -180,34 +180,41 @@ describe("verifyClosureAudit — T0.1 substrate-truth gate", () => {
     expect(result.payload.closure_residual).toBe(0.7);
   });
 
-  describe("leniency fix — unverifiable claims cannot auto-pass at low residual", () => {
-    test("brain emits checks the substrate can't verify + asserts <0.3 → bumped to 0.3 (not auto-passed)", () => {
+  describe("leniency narrowing — only modern closure_predicate summaries are bumped", () => {
+    test("modern closure_predicate + no verifiable structure + asserts <0.3 → bumped to 0.3", () => {
       const db = openDb(":memory:");
-      // The false-closure both terminals hit: 6 non-boolean checks (→ 0
-      // boolean brain_claims), asserted_residual 0.08, no target_files.
       const r = verifyClosureAudit(db, {
-        directive_id: "d_falseclose", task_id: "t1",
-        brain_claims: {}, asserted_residual: 0.08, raw_claim_count: 6,
+        directive_id: "d_modern_summary", task_id: "t1",
+        closure_predicate: { verifier_kind: "deterministic_code" },
+        brain_claims: {}, asserted_residual: 0.08, raw_claim_count: 0,
       });
-      expect(r.payload.closure_residual).toBe(0.3); // no longer 0.08
+      expect(r.payload.closure_residual).toBe(0.3);
     });
 
-    test("no claims at all → legitimately falls back to asserted residual", () => {
+    test("legacy no closure_predicate + no verifiable structure → preserves asserted residual", () => {
       const db = openDb(":memory:");
       const r = verifyClosureAudit(db, {
-        directive_id: "d_noclaims", task_id: "t2",
+        directive_id: "d_legacy_summary", task_id: "t2",
         brain_claims: {}, asserted_residual: 0.1, raw_claim_count: 0,
       });
       expect(r.payload.closure_residual).toBe(0.1);
     });
 
-    test("brain self-reports failure (asserted >=0.3) → unchanged, not punished further", () => {
+    test("structured closure_predicate with matching amendment → derives from substrate verification", () => {
       const db = openDb(":memory:");
-      const r = verifyClosureAudit(db, {
-        directive_id: "d_selffail", task_id: "t3",
-        brain_claims: {}, asserted_residual: 0.6, raw_claim_count: 6,
+      emitEvent(db, {
+        kind: "contract_amendment_proposed",
+        substrate_origin: "brain",
+        directive_id: "d_structured",
+        task_id: "t3",
+        payload: { target_resource: "repo:runtime/foo.ts", proposed_behavior: "wire something" },
       });
-      expect(r.payload.closure_residual).toBe(0.6);
+      const r = verifyClosureAudit(db, {
+        directive_id: "d_structured", task_id: "t3",
+        closure_predicate: { target_files: ["runtime/foo.ts"] },
+        asserted_residual: 0.05, raw_claim_count: 0,
+      });
+      expect(r.payload.closure_residual).toBe(0);
     });
   });
 });

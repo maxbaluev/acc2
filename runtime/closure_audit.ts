@@ -403,20 +403,21 @@ export const verifyClosureAudit = (
   // When no checks ran at all (no target_files, no brain_claims), the
   // substrate has nothing to verify — fall back to the asserted
   // residual rather than synthesising a pass. This preserves the
-  // path where a brain emits a residual without any named checks
-  // (still legal, just unverified).
-  // 2026-05-21 leniency fix (k_252, both terminals): when the substrate
-  // verified NOTHING but the brain DID emit checks (raw_claim_count > 0)
-  // AND asserts a passing residual (< 0.3), the substrate cannot confirm
-  // closure — it must NOT auto-pass on the brain's unverifiable word.
-  // Bump to 0.3 (the gate boundary; not a hard 1.0 block so genuine
-  // self-reported partials aren't punished, but it can no longer slip
-  // under the < 0.3 auto-pass bar). The legitimate fall-back to
-  // asserted_residual survives ONLY when the brain made NO claims at all
-  // (raw_claim_count 0) — truly nothing for the substrate to verify.
+  // legacy path where a closure is self-reported without opting into
+  // the T0.1 closure_predicate contract.
+  // 2026-05-21 leniency narrowing (k_252 lineage): the summary-only
+  // bump applies ONLY to modern closures that declare closure_predicate,
+  // produce zero substrate verifications, make zero raw claims, and assert
+  // a passing residual. Legacy numeric-only/no-predicate payloads stay on
+  // the pre-T0.1 pass-through path and keep their asserted residual.
   const rawClaims = input.raw_claim_count ?? 0;
-  const residual = Object.keys(substrateVerifications).length === 0
-    ? (rawClaims > 0 && input.asserted_residual < 0.3 ? 0.3 : input.asserted_residual)
+  const noSubstrateVerifications = Object.keys(substrateVerifications).length === 0;
+  const modernSummaryOnlyClosure = !!input.closure_predicate
+    && rawClaims === 0
+    && noSubstrateVerifications
+    && input.asserted_residual < 0.3;
+  const residual = noSubstrateVerifications
+    ? (modernSummaryOnlyClosure ? 0.3 : input.asserted_residual)
     : (anyFailedVerification ? 1.0 : 0);
 
   // Discrepancies: claims that disagree with substrate verifications.

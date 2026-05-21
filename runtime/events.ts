@@ -146,11 +146,16 @@ const normalizeClosureAuditPayload = (input: EmitEventInput): JsonValue => {
  *  trust gap.
  *
  *  Trigger shape (T0.1 payload): a task_closure_audited input carries
- *  either `closure_predicate` (with optional `target_files`) OR a `checks`
- *  Record<string,boolean> in payload. Detection is presence-based so
- *  that legacy emit shapes (covered_sub_tasks/uncovered_aspects only)
- *  preserve their pre-T0.1 path unchanged — substrate-truth verification
- *  applies only to rows that declare what they are closing against.
+ *  `closure_predicate` (with optional `target_files`). `checks` may ride
+ *  along as structure once the predicate opts the row into the T0.1
+ *  substrate-verified closure contract, but checks alone do not modernize
+ *  a legacy row.
+ *
+ *  Legacy emit shapes without closure_predicate — including numeric-only
+ *  residuals and covered_sub_tasks/uncovered_aspects rows — preserve their
+ *  pre-T0.1 path unchanged. This keeps historical self-reported residuals
+ *  verbatim while tightening only closures that declare what they are
+ *  closing against.
  *
  *  When triggered:
  *   - Call verifyClosureAudit(db, …) with the brain-declared predicate,
@@ -170,10 +175,10 @@ const runClosureAuditTruthGate = (db: Database, input: EmitEventInput): JsonValu
   if (!payload) return null;
   const closurePredicate = isObject(payload.closure_predicate) ? payload.closure_predicate : null;
   const checks = isObject(payload.checks) ? payload.checks : null;
-  // T0.1 shape requires at least one of: closure_predicate or checks.
-  // Legacy rows (covered_sub_tasks/uncovered_aspects only, OR plain
-  // closure_residual without predicate) fall through unchanged.
-  if (!closurePredicate && !checks) return null;
+  // T0.1 shape requires closure_predicate. Legacy rows without predicate
+  // (including plain closure_residual, covered_sub_tasks/uncovered_aspects,
+  // or checks-only payloads) fall through unchanged.
+  if (!closurePredicate) return null;
   // verifyClosureAudit needs a directive_id — without it the substrate
   // cannot scope the contract_amendment_proposed SELECT. Skip the gate
   // when missing; the legacy normalizer still adds the classification
