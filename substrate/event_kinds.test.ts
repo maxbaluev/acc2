@@ -73,6 +73,10 @@ const NON_EVENT_KIND_LITERALS = new Set([
   "directive_interference_cycle", "consecutive_bridge_failures",
   // credit.ts target_kind values
   "knowledge", "code_artifact",
+  // act_artifact registry sub-kind values (open vocabulary on act_artifact.kind
+  // column — NOT event kinds). claude_plugin_package added 2026-05-21 by
+  // T7.5 amendment H5ENQT3DBX4AD2107ZYK1QSHQG.
+  "claude_plugin_package",
   // View row_kind discriminators
   "node", "extension",
   // Lifecycle / cadence enum strings

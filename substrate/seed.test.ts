@@ -166,7 +166,7 @@ describe("seedActArtifacts", () => {
     // kind check below.
     const legacyRows = db
       .query(
-        "SELECT kind FROM act_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%' AND state_root NOT LIKE 'render/%' AND state_root NOT LIKE 'substrate/primitive/%' AND state_root NOT LIKE 'substrate/threshold/%'",
+        "SELECT kind FROM act_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%' AND state_root NOT LIKE 'render/%' AND state_root NOT LIKE 'substrate/primitive/%' AND state_root NOT LIKE 'substrate/threshold/%' AND state_root NOT LIKE 'release/claude-plugin/%'",
       )
       .all() as Array<{ kind: string }>;
     expect(legacyRows.length).toBeGreaterThan(0);

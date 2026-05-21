@@ -2669,6 +2669,43 @@ const THRESHOLD_PREDICATE_ARTIFACTS: SeedArtifact[] = THRESHOLD_PREDICATE_SEEDS.
   posterior_beta_override: 1,
 }));
 
+const CLAUDE_PLUGIN_PACKAGE_ARTIFACTS: SeedArtifact[] = [
+  {
+    seedName: "claude_plugin_package_accint",
+    runtime: "bun",
+    body: JSON.stringify({
+      kind: "claude_plugin_package",
+      package_root: ".claude-plugin",
+      required_files: [
+        ".claude-plugin/plugin.json",
+        ".claude-plugin/hooks/hooks.json",
+        ".mcp.json",
+        ".claude-plugin/substrate/canonical.db",
+      ],
+      validator: "claude plugin validator",
+      install_command: "claude plugins install accint",
+    }),
+    declared_sandbox: {
+      runtime: "bun",
+      fs_read: [".claude-plugin/**", ".mcp.json"],
+      fs_write: [],
+      net_allow: [],
+      proc_allow: ["claude"],
+      env_requires: [],
+      cpu_ms: 1000,
+      wall_ms: 5000,
+      memory_mb: 128,
+    },
+    state_root: "release/claude-plugin/accint",
+    initial_score: 0.5,
+    initial_confidence: 0.3,
+    fixture_input: { package_root: ".claude-plugin" },
+    fixture_expected_residual: 0.0,
+    display_name: "AccInt Claude plugin package",
+    kind: "claude_plugin_package",
+  },
+];
+
 export type ActArtifactSeedSummary = { inserted: number; skipped: number; upgraded?: number };
 
 const seedIdFor = (seedName: string): string => `seed_${seedName}`;
@@ -2685,6 +2722,7 @@ export const seedActArtifacts = (db: Database): ActArtifactSeedSummary => {
       ...SUBSTRATE_PRIMITIVE_ARTIFACTS,
       ...PREDICATE_ARTIFACTS,
       ...THRESHOLD_PREDICATE_ARTIFACTS,
+      ...CLAUDE_PLUGIN_PACKAGE_ARTIFACTS,
     ]) {
       // 2026-05-19: stable_id takes precedence so substrate-primitive rows
       // collide with the canonical action_artifact_id their events already
@@ -2797,6 +2835,8 @@ export const seedArtifactIds = (): string[] => [
   ...SEED_ARTIFACTS.map((s) => s.stable_id ?? seedIdFor(s.seedName)),
   ...SUBSTRATE_PRIMITIVE_ARTIFACTS.map((s) => s.stable_id ?? seedIdFor(s.seedName)),
   ...PREDICATE_ARTIFACTS.map((s) => s.stable_id ?? seedIdFor(s.seedName)),
+  ...THRESHOLD_PREDICATE_ARTIFACTS.map((s) => s.stable_id ?? seedIdFor(s.seedName)),
+  ...CLAUDE_PLUGIN_PACKAGE_ARTIFACTS.map((s) => s.stable_id ?? seedIdFor(s.seedName)),
 ];
 
 /** Names of the 30 seeded scoreable predicates (Tier -1 floor +
