@@ -232,9 +232,6 @@ const SILENT_DISPATCH_REASONS: ReadonlySet<string> = new Set([
 
 const MAX_DETERMINISTIC_SILENT_FAILURES = 1;
 const MAX_TRANSIENT_SILENT_FAILURES = 3;
-// Back-compat alias: legacy emit sites still reference MAX_SILENT_DISPATCH_FAILURES.
-// Points at deterministic cap (the original semantic).
-const MAX_SILENT_DISPATCH_FAILURES = MAX_DETERMINISTIC_SILENT_FAILURES;
 
 /** Count silent-class bridge_failed events for a task (irrespective of
  *  whether they're consecutive). A task that silent-failed even ONCE in
