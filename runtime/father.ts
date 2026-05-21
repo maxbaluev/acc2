@@ -119,6 +119,53 @@ export const DIRECTIVE_TEMPLATES: readonly FatherDirectiveTemplate[] = Object.fr
     initial_task_goal:
       "Measure duplicated prompt clauses, workflow branches, low-value event kinds, overlapping lessons, repeated verifier axes, and fragmented recipes; propose concrete deletion/merge/compression amendments ranked by expected architectural entropy reduction.",
   },
+  // Tier A autonomous-improvement templates (2026-05-21). These fire
+  // during owner-idle windows and route brain dispatches that DISCOVER
+  // and PROPOSE improvement work — they do NOT duplicate any canonical
+  // worker (per the byaeuflif note above). Each produces a brain dispatch
+  // that emits concrete contract_amendment_proposed / lesson_extracted
+  // rows the orchestrator then applies. This is the outer-loop autonomy
+  // that makes roadmap progress happen without an explicit owner prompt.
+  {
+    template_id: "father_roadmap_progress_review",
+    action: "compile_directive_from_template",
+    directive_text:
+      "Roadmap progress review: read docs/roadmap.md, identify the highest-leverage tier or contract that is NOT yet implemented (cross-check against the codebase and recent commits), and propose ONE concrete anchored_replace_v1 contract_amendment_proposed that advances it. Prefer the lowest-numbered unblocked tier.",
+    lifecycle: "finite",
+    urgency: "normal",
+    initial_task_goal:
+      "Select the next unimplemented roadmap contract by tier order + dependency, verify it is genuinely not yet shipped, and emit one concrete implementation amendment with literal source diff and closure predicate.",
+  },
+  {
+    template_id: "father_substrate_hole_audit",
+    action: "compile_directive_from_template",
+    directive_text:
+      "Substrate hole audit: search for structural inconsistencies — event kinds in the DB not registered in substrate/event_kinds.ts, registry kinds never emitted, views referenced but undefined, workers registered but never ticking, predicate rows with no posterior movement, broken citation chains. Propose concrete fixes ranked by integrity impact.",
+    lifecycle: "finite",
+    urgency: "normal",
+    initial_task_goal:
+      "Enumerate registry drift, dead surfaces, and broken causal chains via substrate.read + substrate.search; emit one amendment per high-impact inconsistency with evidence_event_ids.",
+  },
+  {
+    template_id: "father_noise_floor_audit",
+    action: "compile_directive_from_template",
+    directive_text:
+      "Noise-floor audit: measure per-event-kind emission volume vs distinct-payload ratio over the last 24h. Any kind emitting >500 rows/day at <10% payload uniqueness is an emit-storm. Propose producer-side idempotency / debounce / first-observation-gate fixes (the pattern already applied to worker_tick_completed, causal_edge_observed, trajectory_motif_observed).",
+    lifecycle: "finite",
+    urgency: "normal",
+    initial_task_goal:
+      "Compute emit-storm candidates (volume × dedup ratio) and emit one amendment per high-volume low-uniqueness kind tightening its producer.",
+  },
+  {
+    template_id: "father_compounding_health_review",
+    action: "compile_directive_from_template",
+    directive_text:
+      "Compounding health review: measure the k_201/k_555 four-link chain health — promoted-knowledge citation rate (retrieval_binding coverage), candidate_confirmed posterior alpha growth, action_scored residual distribution, owner-approval rate. Identify where compounding breaks (knowledge promoted but never cited, citations that never mutate posteriors, residuals that never calibrate) and propose fixes.",
+    lifecycle: "finite",
+    urgency: "normal",
+    initial_task_goal:
+      "Quantify the compounding/scoring loop health and emit one amendment closing the weakest link in the four-link chain.",
+  },
 ]);
 
 const OWNER_ACTIVE_WINDOW_MS_DEFAULT = 60_000;
