@@ -4,11 +4,13 @@
 
 Cross-references: architecture surfaces live in `docs/Architecture.md` — §9 (owner alignment) grounds Tier S0; §10 (universal posterior boundary) maps tiers to scored-row moves; §12 (open frontier) enumerates the same tier clusters; §14 (universal intent) cites the live numbers that motivate sequencing.
 
-## Tier A — AUTONOMOUS COMPOUNDING ACTIVATION
+## Tier A — Autonomous Compounding Activation
 
 Problem: the inner brain dispatch loop compounds once invoked, but the outer loop is owner-mediated when substrate workers detect review debt, pathology exhaustion, dedup drift, calibration drift, or maintenance opportunities without emitting `brain_invocation_request`.
 
 Contract: Father is re-enabled with autonomous-improvement templates and a tighter owner-idle window; rolling reviewer, pathology budget/supervisor, extractors, and credit calibration emit `brain_invocation_request` when their scored views cross thresholds; each request opens substrate-auto work that must propose a concrete amendment or lesson and pass closure audit.
+
+Owner/autonomous ratio: keep owner-mediated work for irreversible effects, external-owner-sensitive work, and high owner-control surfaces; route routine substrate hygiene, review debt, pathology synthesis, dedup drift, stale knowledge retirement, recipe promotion, and calibration drift through substrate-auto requests. Initial target is at least 5 substrate_auto-origin amendment proposals/day while owner-observed negative outcomes and high-residual closures stay bounded.
 
 Why this tier: Tier-1 bottlenecks are no longer the limiting factor; the organism now needs autonomous opportunity discovery so improvement is not gated by explicit owner prompts.
 
