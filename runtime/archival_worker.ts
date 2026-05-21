@@ -97,7 +97,11 @@ const COMPRESS_SUMMARY_KINDS = new Set<string>([
   "kernel_sandbox_check",
   "owner_identity_check",
   "deterministic_computation_check",
-  // Noisy operational telemetry: archive after the standard 30-day cutoff.
+]);
+
+const NOISY_OPERATIONAL_ARCHIVE_KINDS = new Set<string>([
+  // Operational telemetry: not load-bearing after 30 days, but preserve
+  // provenance in the monthly archive instead of keeping it hot forever.
   "father_yielded",
   "artifact_kind_inference_uncertain",
 ]);
@@ -115,6 +119,7 @@ export const curationModeForKind = (kind: string): CurationMode => {
   if (DROP_KINDS.has(kind)) return "drop";
   if (ALWAYS_KEEP_KINDS.has(kind)) return "always_keep";
   if (COMPRESS_SUMMARY_KINDS.has(kind)) return "compress_summary";
+  if (NOISY_OPERATIONAL_ARCHIVE_KINDS.has(kind)) return "archive_cold";
   return "archive_cold";
 };
 
