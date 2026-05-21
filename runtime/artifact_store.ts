@@ -697,7 +697,8 @@ export const maybeRetire = (
 // ── Rehabilitation (Phase H — v2-design.md §11.6) ──────────────────
 //
 // Quarantined artifacts can re-enter `admitted` status after:
-//   (a) 14-day cooldown elapsed since the latest `act_artifact_quarantined` event,
+//   (a) the cause-aware cooldown elapsed since the latest
+//       `act_artifact_quarantined` event,
 //   (b) the admission fixture re-passes,
 //   (c) ≥ 10 controlled fixture invocations succeed in sequence.
 //
@@ -707,7 +708,10 @@ export const maybeRetire = (
 // runner is injected so tests can substitute a deterministic stub.
 
 const REHABILITATION_COOLDOWN_MS = 14 * 24 * 60 * 60 * 1000;
+const REHABILITATION_INFRASTRUCTURE_COOLDOWN_MS = 15 * 60 * 1000;
 const REHABILITATION_CONTROLLED_INVOCATIONS = 10;
+
+type QuarantineEvent = { ts: string; reason: string | null };
 
 export type RehabFixtureRunner = (artifactId: string) => Promise<{ ok: boolean; residual: number }>;
 
@@ -715,23 +719,45 @@ export type RehabResult =
   | { rehabilitated: true; controlledRuns: number }
   | { rehabilitated: false; reason: "not_quarantined" | "cooldown_pending" | "fixture_run_failed" | "fixture_residual_too_high"; detail?: string };
 
-/** Read the latest `act_artifact_quarantined` event ts for an artifact.
+const quarantineReasonIndicatesInfrastructureEvidenceGap = (reason: string | null): boolean => {
+  if (!reason) return false;
+  return reason.includes("sandbox_enforcement_missing") || reason.includes("evidence_missing");
+};
+
+const rehabilitationCooldownMsForReason = (reason: string | null): number => {
+  if (quarantineReasonIndicatesInfrastructureEvidenceGap(reason)) {
+    return REHABILITATION_INFRASTRUCTURE_COOLDOWN_MS;
+  }
+  return REHABILITATION_COOLDOWN_MS;
+};
+
+const quarantineReasonFromPayload = (payload: string | null): string | null => {
+  try {
+    const parsed = JSON.parse(payload ?? "{}") as Record<string, unknown>;
+    return typeof parsed.reason === "string" ? parsed.reason : null;
+  } catch {
+    return null;
+  }
+};
+
+/** Read the latest quarantine event ts + reason for an artifact.
  *  F4a: matches both canonical and legacy kind strings so historical
  *  events authored before the act_artifact rename still resolve. */
-const latestQuarantineTs = (db: Database, artifactId: string): string | null => {
+const latestQuarantineEvent = (db: Database, artifactId: string): QuarantineEvent | null => {
   const row = db
     .query(
-      `SELECT ts FROM events
+      `SELECT ts, payload FROM events
        WHERE action_artifact_id = ?
          AND kind IN ('act_artifact_quarantined', 'code_artifact_quarantined')
        ORDER BY ts DESC LIMIT 1`,
     )
-    .get(artifactId) as { ts: string } | null;
-  return row?.ts ?? null;
+    .get(artifactId) as { ts: string; payload: string | null } | null;
+  if (!row) return null;
+  return { ts: row.ts, reason: quarantineReasonFromPayload(row.payload) };
 };
 
 /** Per v2-design.md §11.6: a quarantined artifact may re-enter `admitted`
- *  status after the 14-day cooldown elapses, the admission fixture
+ *  status after the cause-aware cooldown elapses, the admission fixture
  *  re-passes, and 10 controlled fixture invocations all return residual
  *  below the artifact's admission threshold. The runner closure is
  *  injected so callers wire it to the appropriate runtime; tests pass a
@@ -748,17 +774,18 @@ export const maybeRehabilitate = async (
   if (row.status !== "quarantined") {
     return { rehabilitated: false, reason: "not_quarantined" };
   }
-  const quarantinedAt = latestQuarantineTs(db, artifactId);
-  if (!quarantinedAt) {
+  const quarantine = latestQuarantineEvent(db, artifactId);
+  if (!quarantine) {
     return { rehabilitated: false, reason: "not_quarantined", detail: "quarantine_event_missing" };
   }
   const now = opts?.nowMs ?? Date.now();
-  const elapsed = now - new Date(quarantinedAt).getTime();
-  if (elapsed < REHABILITATION_COOLDOWN_MS) {
+  const elapsed = now - new Date(quarantine.ts).getTime();
+  const requiredCooldownMs = rehabilitationCooldownMsForReason(quarantine.reason);
+  if (elapsed < requiredCooldownMs) {
     return {
       rehabilitated: false,
       reason: "cooldown_pending",
-      detail: `${Math.floor(elapsed / 86_400_000)}d/14d`,
+      detail: `${elapsed}ms/${requiredCooldownMs}ms`,
     };
   }
 
@@ -798,8 +825,10 @@ export const maybeRehabilitate = async (
     action_artifact_id: artifactId,
     payload: {
       artifact_id: artifactId,
-      quarantined_at: quarantinedAt,
+      quarantined_at: quarantine.ts,
+      quarantine_reason: quarantine.reason,
       cooldown_ms: elapsed,
+      required_cooldown_ms: requiredCooldownMs,
       controlled_runs: REHABILITATION_CONTROLLED_INVOCATIONS,
     } as JsonValue,
   });
@@ -807,30 +836,28 @@ export const maybeRehabilitate = async (
 };
 
 /** List quarantined artifacts whose latest quarantine event is older than
- *  the cooldown window. The daemon's rehabilitation worker tick consumes
- *  this. */
+ *  the cause-aware cooldown window. The daemon's rehabilitation worker tick
+ *  consumes this. */
 export const listRehabilitationCandidates = (db: Database, nowMs?: number): ActArtifactRow[] => {
-  const ts = new Date((nowMs ?? Date.now()) - REHABILITATION_COOLDOWN_MS).toISOString();
+  const now = nowMs ?? Date.now();
   const rows = db
-    .query(
-      `SELECT ca.* FROM act_artifact ca
-       WHERE ca.status = 'quarantined'
-         AND EXISTS (
-           SELECT 1 FROM events e
-           WHERE e.action_artifact_id = ca.id
-             AND e.kind IN ('act_artifact_quarantined', 'code_artifact_quarantined')
-             AND e.ts <= ?
-         )`,
-    )
-    .all(ts) as Array<Record<string, unknown>>;
-  return rows.map(mapRow);
+    .query("SELECT * FROM act_artifact WHERE status = 'quarantined'")
+    .all() as Array<Record<string, unknown>>;
+  return rows
+    .map(mapRow)
+    .filter((row) => {
+      const quarantine = latestQuarantineEvent(db, row.id);
+      if (!quarantine) return false;
+      const elapsed = now - new Date(quarantine.ts).getTime();
+      return elapsed >= rehabilitationCooldownMsForReason(quarantine.reason);
+    });
 };
 
 export const REHABILITATION_COOLDOWN_MS_FOR_TEST = REHABILITATION_COOLDOWN_MS;
 export const REHABILITATION_CONTROLLED_INVOCATIONS_FOR_TEST = REHABILITATION_CONTROLLED_INVOCATIONS;
 
 /** Daemon-side rehabilitation tick. Scans quarantined artifacts past their
- *  14-day cooldown and attempts rehabilitation via the supplied runner.
+ *  cause-aware cooldown and attempts rehabilitation via the supplied runner.
  *  Production default: ON. Tests opt-OUT via
  *  `ACC2_DISABLE_WORKERS=rehabilitation` (set in tests/preload.ts) so the
  *  unit suite does not run controlled fixture invocations as a side
