@@ -3,6 +3,20 @@
 -- NOTE: migration_runner already wraps each .sql file in BEGIN/COMMIT, so this
 -- file MUST NOT contain explicit transaction control (nested BEGIN throws
 -- "cannot start a transaction within a transaction" on SQLite).
+-- 2026-05-21 fix (verify-signal root cause 9YFCYTGA): modern SQLite
+-- auto-rewrites dependent VIEW bodies on `ALTER TABLE … RENAME`. When this
+-- migration runs AFTER views exist (the daemon ran versioned migrations at
+-- daemon.ts:529, after openDb's runViews), the RENAME below rewrote
+-- embedding_index_view (and other act_artifact views) to reference
+-- act_artifact_v001, which this migration then DROPs → broken view →
+-- daemon-boot rebuildFromDb failed `no such table: act_artifact_v001`.
+-- legacy_alter_table=ON restores the OLD rename semantics (does NOT rewrite
+-- dependent view bodies), so the views keep `FROM act_artifact` and resolve
+-- correctly to the NEW act_artifact created below — regardless of whether
+-- the migration runs before or after the views are created. Reset to OFF at
+-- the end so no other ALTER inherits the legacy behavior. (PRAGMA is not
+-- transaction control, so it is safe inside migration_runner's BEGIN/COMMIT.)
+PRAGMA legacy_alter_table=ON;
 DROP VIEW IF EXISTS act_artifact_registry_view;
 DROP VIEW IF EXISTS artifact_routing_view;
 DROP VIEW IF EXISTS code_artifact_registry_view;
@@ -60,3 +74,5 @@ CREATE INDEX IF NOT EXISTS idx_act_artifact_score ON act_artifact(score DESC);
 CREATE INDEX IF NOT EXISTS idx_act_artifact_kind ON act_artifact(kind);
 CREATE INDEX IF NOT EXISTS idx_act_artifact_supersedes ON act_artifact(supersedes) WHERE supersedes IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_act_artifact_superseded_by ON act_artifact(superseded_by) WHERE superseded_by IS NOT NULL;
+
+PRAGMA legacy_alter_table=OFF;
