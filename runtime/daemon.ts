@@ -168,9 +168,13 @@ const tryRemove = (path: string): void => {
 /** Min interval (ms) between consecutive `worker_tick_completed` event
  *  emissions per worker. The scheduler ticks every 500ms = 7200/h; without
  *  dampening we'd write that to the ledger. The dampening keeps each worker
- *  at most ~60 rows/hour while still letting auditors reconstruct tick
- *  liveness from the substrate (audit-#5 fix, 2026-05-15). */
-const WORKER_TICK_EVENT_DAMPEN_MS = 60_000;
+ *  at most ~12 rows/hour while still letting auditors reconstruct tick
+ *  liveness from the substrate (audit-#5 fix, 2026-05-15). 2026-05-21
+ *  bump: from 60s → 5min based on SQLite bottleneck audit. 44K
+ *  worker_tick_completed events in 7 days = 12.6% of all writes. At 5min
+ *  cadence the same dashboard observability holds (worker_liveness_view
+ *  alarms when no tick in 15min) but ledger pressure drops 5x. */
+const WORKER_TICK_EVENT_DAMPEN_MS = 5 * 60_000;
 const lastEmittedWorkerTickMs = new Map<string, number>();
 
 /** Emit a dampened `worker_tick_completed` for workers that don't go
