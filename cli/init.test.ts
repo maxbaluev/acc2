@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb } from "../substrate/db";
 import {
-  detectOpenAiKey, ensureAdminToken, resolveInitPaths,
+  configureClaudeIntegration, detectOpenAiKey, ensureAdminToken, resolveInitPaths,
   runInit, runInitProgrammatic, writeOpenAiKey,
 } from "./init";
 
@@ -94,6 +94,37 @@ describe("ensureAdminToken", () => {
   });
 });
 
+describe("configureClaudeIntegration", () => {
+  test("registers accint in user-scope Claude Code config and is idempotent", () => {
+    const paths = { ...resolveInitPaths(), claudeConfigFile: join(tmpRoot, ".claude.json") };
+    const first = configureClaudeIntegration(paths);
+    expect(first.status).toBe("registered");
+    const raw = readFileSync(paths.claudeConfigFile, "utf8");
+    const parsed = JSON.parse(raw) as { mcpServers?: Record<string, { type?: string; command?: string; args?: string[]; env?: Record<string, string> }> };
+    expect(parsed.mcpServers?.accint?.type).toBe("stdio");
+    expect(parsed.mcpServers?.accint?.command).toBe("bun");
+    expect(parsed.mcpServers?.accint?.args?.join(" ")).toContain("runtime/mcp_server_stdio_entry.ts");
+    expect(parsed.mcpServers?.accint?.env?.ACC2_STATE_DIR).toBe(stateDir);
+
+    const second = configureClaudeIntegration(paths);
+    expect(second.status).toBe("existing");
+    expect(readFileSync(paths.claudeConfigFile, "utf8")).toBe(raw);
+    cleanup();
+  });
+
+  test("removes only the accint Claude Code MCP entry on undo", () => {
+    const paths = { ...resolveInitPaths(), claudeConfigFile: join(tmpRoot, ".claude.json") };
+    writeFileSync(paths.claudeConfigFile, JSON.stringify({ mcpServers: { other: { type: "stdio" }, accint: { type: "stdio" } } }, null, 2));
+    const removed = configureClaudeIntegration(paths, { undo: true });
+    expect(removed.status).toBe("removed");
+    const parsed = JSON.parse(readFileSync(paths.claudeConfigFile, "utf8")) as { mcpServers?: Record<string, unknown> };
+    expect(parsed.mcpServers?.accint).toBeUndefined();
+    expect(parsed.mcpServers?.other).toBeDefined();
+    expect(configureClaudeIntegration(paths, { undo: true }).status).toBe("absent");
+    cleanup();
+  });
+});
+
 describe("detectOpenAiKey", () => {
   test("returns 'env' when process.env has it", () => {
     process.env.OPENAI_API_KEY = "sk-test-from-env";
@@ -152,6 +183,9 @@ describe("runInitProgrammatic(--yes mode)", () => {
     expect(summary.actArtifactsImported).toBe(0);
     expect(summary.recipesSeeded).toBe(0);
     expect(summary.eventsEmbedded).toBe(0);
+    expect(summary.claudeIntegration).toBe("registered");
+    const claudeConfig = join(require("node:os").homedir(), ".claude.json");
+    expect(existsSync(claudeConfig)).toBe(true);
 
     // Canonical flat layout — no `state/` subdir.
     const tokenFile = join(stateDir, "v2.sock.token");
@@ -168,6 +202,7 @@ describe("runInitProgrammatic(--yes mode)", () => {
     expect(second.actArtifactsImported).toBe(0);
     expect(second.recipesSeeded).toBe(0);
     expect(second.eventsEmbedded).toBe(0);
+    expect(second.claudeIntegration).toBe("existing");
     cleanup();
   });
 

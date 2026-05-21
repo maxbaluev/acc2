@@ -46,6 +46,7 @@ export type InitPaths = {
   tokenFile: string;           // ${stateDir}/v2.sock.token
   dbPath: string;              // ${stateDir}/state.db
   envFile: string;             // <cwd>/.env
+  claudeConfigFile: string;    // ~/.claude.json (Claude Code user-scope config)
 };
 
 export const resolveInitPaths = (cwd: string = process.cwd()): InitPaths => {
@@ -60,6 +61,7 @@ export const resolveInitPaths = (cwd: string = process.cwd()): InitPaths => {
     tokenFile: resolveTokenFile(),
     dbPath: resolveDbPath(),
     envFile: join(cwd, ".env"),
+    claudeConfigFile: join(homedir(), ".claude.json"),
   };
 };
 
@@ -130,6 +132,59 @@ export const ensureAdminToken = (path: string): { minted: boolean } => {
   return { minted: true };
 };
 
+type JsonObject = Record<string, unknown>;
+
+export type ClaudeIntegrationStatus = "registered" | "existing" | "removed" | "absent";
+
+const ACCINT_CLAUDE_MCP_NAME = "accint";
+
+const readJsonObject = (path: string): JsonObject => {
+  if (!existsSync(path)) return {};
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${path} must contain a JSON object`);
+  }
+  return parsed as JsonObject;
+};
+
+const claudeMcpServerConfig = (paths: InitPaths): JsonObject => ({
+  type: "stdio",
+  command: "bun",
+  args: [join(import.meta.dir, "..", "runtime", "mcp_server_stdio_entry.ts")],
+  env: {
+    ACC2_STATE_DIR: paths.stateDir,
+    ACC2_SOCKET_FILE: paths.socketFile,
+    ACC2_TOKEN_FILE: paths.tokenFile,
+    ACC2_DB_PATH: paths.dbPath,
+    ACC2_TEST_DB_PATH: paths.dbPath,
+  },
+});
+
+export const configureClaudeIntegration = (paths: InitPaths, opts: { undo?: boolean } = {}): { status: ClaudeIntegrationStatus } => {
+  const config = readJsonObject(paths.claudeConfigFile);
+  const mcpServers = (config.mcpServers && typeof config.mcpServers === "object" && !Array.isArray(config.mcpServers))
+    ? config.mcpServers as JsonObject
+    : {};
+  const existing = JSON.stringify(mcpServers[ACCINT_CLAUDE_MCP_NAME] ?? null);
+
+  if (opts.undo) {
+    if (!(ACCINT_CLAUDE_MCP_NAME in mcpServers)) return { status: "absent" };
+    delete mcpServers[ACCINT_CLAUDE_MCP_NAME];
+    config.mcpServers = mcpServers;
+    writeFileSync(paths.claudeConfigFile, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+    try { chmodSync(paths.claudeConfigFile, 0o600); } catch { /* best-effort */ }
+    return { status: "removed" };
+  }
+
+  const desired = claudeMcpServerConfig(paths);
+  if (existing === JSON.stringify(desired)) return { status: "existing" };
+  mcpServers[ACCINT_CLAUDE_MCP_NAME] = desired;
+  config.mcpServers = mcpServers;
+  writeFileSync(paths.claudeConfigFile, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  try { chmodSync(paths.claudeConfigFile, 0o600); } catch { /* best-effort */ }
+  return { status: "registered" };
+};
+
 const which = async (binary: string): Promise<string | null> => {
   try {
     const proc = Bun.spawnSync({ cmd: ["which", binary], stdout: "pipe", stderr: "pipe" });
@@ -179,6 +234,7 @@ export type InitOptions = {
   validateKeys?: boolean; // cheap OpenAI/Serper validation before .env persistence (UX dispatch b71pfyddv JNKK2C18 lesson)
   seedContent?: boolean;  // test seam: production default imports seed content when approved
   probeTools?: boolean;   // test seam: production default probes external CLIs
+  undoClaudeIntegration?: boolean;
   paths?: InitPaths;      // injection for tests
   log?: Logger;           // injection for tests
   warn?: Logger;
@@ -203,6 +259,7 @@ export type InitSummary = {
    *  0 when OPENAI_API_KEY is missing (operator must run `acc admin embed-all`
    *  after setting the key) or when there were no embeddable events. */
   eventsEmbedded: number;
+  claudeIntegration: ClaudeIntegrationStatus;
   warnings: string[];
 };
 
@@ -222,6 +279,7 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
     actArtifactsImported: 0,
     recipesSeeded: 0,
     eventsEmbedded: 0,
+    claudeIntegration: "absent",
     warnings: [],
   };
 
@@ -232,12 +290,19 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
   ensureDir(paths.logsDir);
   ensureDir(paths.tmpDir);
   summary.stateDirCreated = state.created;
-  log(`[1/8] state directory: ${paths.stateDir}` + (summary.stateDirCreated ? "  (created)" : "  (existing)"));
+  log(`[1/9] state directory: ${paths.stateDir}` + (summary.stateDirCreated ? "  (created)" : "  (existing)"));
 
   // 2. Admin token.
   const tok = ensureAdminToken(paths.tokenFile);
   summary.tokenMinted = tok.minted;
-  log(`[2/8] admin token:     ${paths.tokenFile}` + (tok.minted ? "  (minted)" : "  (existing)"));
+  log(`[2/9] admin token:     ${paths.tokenFile}` + (tok.minted ? "  (minted)" : "  (existing)"));
+
+  // 3. Claude Code MCP integration.
+  const claude = configureClaudeIntegration(paths, { undo: opts.undoClaudeIntegration });
+  summary.claudeIntegration = claude.status;
+  log(`[3/9] Claude Code MCP: ${claude.status} (${paths.claudeConfigFile})`);
+
+  if (opts.undoClaudeIntegration) return summary;
 
   // 3. OPENAI_API_KEY.
   const keyStatus = detectOpenAiKey(paths.envFile);
@@ -466,6 +531,7 @@ export const runInit = async (argv: string[]): Promise<number> => {
     }
   }
   const yes = argv.includes("--yes") || argv.includes("-y");
+  const undoClaudeIntegration = argv.includes("--undo-claude-integration");
 
   // Graceful interrupt: finish any in-progress file write, then exit clean.
   // We rely on Node/Bun's default SIGINT handler unless something is in flight;
@@ -475,7 +541,7 @@ export const runInit = async (argv: string[]): Promise<number> => {
   const onInt = () => { console.log("\nacc init: interrupted"); process.exit(130); };
   process.once("SIGINT", onInt);
   try {
-    const summary = await runInitProgrammatic({ yes });
+    const summary = await runInitProgrammatic({ yes, undoClaudeIntegration });
     return summary.exitCode;
   } catch (err) {
     console.error(`acc init failed: ${(err as Error).message}`);
