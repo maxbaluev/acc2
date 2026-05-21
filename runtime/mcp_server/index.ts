@@ -103,6 +103,17 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     instructions:
       "AccInt v2 substrate. Every method returns `{ok, result|error}` " +
       "JSON-stringified. Read v2-design.md §11 + §13.2 for the protocol.",
+    // 2026-05-21 wedge fix: fastmcp default ping fires every 5s on EVERY
+    // active SSE session. After ~1000 sessions accumulate from one day of
+    // dispatch churn (each acc task / orchestrator poll / opencode brain
+    // opens a session, and ungracefully-closed clients leak), the main
+    // event loop spends most cycles draining keep-alive frames. Daemon
+    // CPU climbs to 93-100% even with most workers disabled.
+    //
+    // Substrate doesn't depend on MCP ping for liveness — it has
+    // substrate.read({view_name:"dispatch_resolved_view"}) and the aux
+    // /health endpoint. Disable ping entirely.
+    ping: { enabled: false },
   });
 
   // Each tool's `execute` returns `JSON.stringify(McpResult)` so the wire shape
