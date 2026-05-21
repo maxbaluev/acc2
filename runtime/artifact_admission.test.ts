@@ -48,6 +48,65 @@ describe("admitArtifact — happy path", () => {
     expect(admitted.length).toBe(1);
   });
 
+  test("data runtime: admits a raw corpus dump without fixture execution", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const body = JSON.stringify({
+      chat_id: 571292618,
+      messages: [{ id: 1, text: "owner-private corpus payload" }],
+    });
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "data",
+        body,
+        declaredSandbox: { runtime: "data" } as never,
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0,
+        kind: "telegram_chat_dump",
+        name: "tony-direct-test",
+        intent: "private corpus admission",
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const row = getArtifact(db, result.artifactId);
+    expect(row).not.toBeNull();
+    expect(row!.runtime).toBe("data");
+    expect(row!.status).toBe("admitted");
+    expect(row!.body).toBe(body);
+    const admitted = events.filter((e) => e.kind === "act_artifact_admitted");
+    expect(admitted.length).toBe(1);
+    // No fixture-execution side effects.
+    expect(events.filter((e) => e.kind === "artifact_invoked").length).toBe(0);
+    expect(events.filter((e) => e.kind === "artifact_observed").length).toBe(0);
+    // Admission mode flag visible on the emit for downstream observers.
+    const payload = admitted[0]!.payload as { admission_mode?: string };
+    expect(payload.admission_mode).toBe("data_short_circuit");
+  });
+
+  test("data runtime: refuses a decl that smuggles execution fields", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "data",
+        body: "raw bytes",
+        // proc_allow is forbidden under runtime=data — execution semantics
+        // do not apply.
+        declaredSandbox: { runtime: "data", proc_allow: ["bun"] } as never,
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0,
+      },
+      captureEmit(events, db),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("sandbox_decl_invalid");
+  });
+
   test("admits a bun artifact whose fixture result includes a low residual field", async () => {
     const db = openDb(":memory:");
     const body = `console.log('@@RESULT@@ ' + JSON.stringify({ residual: 0.05 }));`;

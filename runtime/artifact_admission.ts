@@ -144,6 +144,24 @@ const ADMIT_CONFIDENCE = 0.3;
  *  runs the fixture, and either confirms admission (emitting
  *  `act_artifact_admitted`) or rolls back + emits
  *  `act_artifact_admission_rejected`. */
+/** Sentinel runtime value for non-executing data artifacts (corpus dumps,
+ *  privileged AccInt files, target universes, raw external corpora). When
+ *  input.runtime === DATA_RUNTIME the admission flow:
+ *    - accepts a minimal `{runtime:"data", fields:{}}` declared_sandbox
+ *    - skips the runtime/declared_sandbox mismatch check trivially
+ *    - SKIPS fixture execution entirely (data is not code)
+ *    - SKIPS the owner-gate (data has no execution risk)
+ *    - SKIPS the kernel_sandbox_worker quarantine pressure (no
+ *      artifact_invoked emit, so no missing sandbox_enforced gap)
+ *    - inserts the row at admit priors with `fixtureExpectedResidualBelow`
+ *      effectively ignored (no fixture residual is computed)
+ *    - emits `act_artifact_admitted` immediately
+ *  This is the structural fix for the blocker that quarantined raw corpus
+ *  admissions (kernel_sandbox_enforcement_missing for runtime=bun bodies
+ *  that read filesystem paths). Data artifacts are substrate-owned bytes;
+ *  no executable semantics apply. */
+export const DATA_RUNTIME = "data";
+
 export const admitArtifact = async (
   db: Database,
   input: AdmissionInput,
@@ -177,6 +195,61 @@ export const admitArtifact = async (
       reason: "sandbox_decl_invalid",
       detail: `runtime_mismatch:${input.declaredSandbox.runtime}!=${input.runtime}`,
     };
+  }
+
+  // Data-artifact short-circuit (2026-05-21). Non-executing rows (raw
+  // corpus dumps, target universes, privileged AccInt files) bypass the
+  // fixture-execution machinery entirely. Without this branch the brain
+  // had to fake a `runtime:bun` declaration whose body actually
+  // contained data; the bun runner then "executed" the data and the
+  // kernel_sandbox_worker quarantined the result for missing
+  // sandbox_enforced evidence. The clean break: declare runtime=data and
+  // the substrate stores the bytes without ever invoking them.
+  if (input.runtime === DATA_RUNTIME) {
+    const dataRow = insertArtifact(db, {
+      runtime: DATA_RUNTIME,
+      kind: input.kind,
+      body: input.body,
+      declaredSandbox: input.declaredSandbox,
+      stateRoot: input.stateRoot ?? null,
+      posteriorAlpha: ADMIT_ALPHA,
+      posteriorBeta: ADMIT_BETA,
+      score: ADMIT_SCORE,
+      confidence: ADMIT_CONFIDENCE,
+      recentResidualMean: 0,
+      recentKillCount: 0,
+      status: "admitted",
+      name: input.name ?? null,
+      fixtureInput: input.fixtureInput,
+      fixtureExpectedResidual: input.fixtureExpectedResidualBelow,
+      intent: input.intent ?? null,
+      summary: input.summary ?? null,
+      targetFiles: input.targetFiles ?? null,
+      targetResources: input.targetResources ?? null,
+      sourceCandidateId: input.sourceCandidateId ?? null,
+      ownerGateVerdict: "auto",
+      supersedes: input.supersedes ?? null,
+      id: input.artifactId,
+    });
+    emit({
+      kind: "act_artifact_admitted",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: dataRow.id,
+      payload: {
+        runtime: DATA_RUNTIME,
+        kind: input.kind ?? "runtime_action",
+        admission_mode: "data_short_circuit",
+        body_length: typeof input.body === "string" ? input.body.length : 0,
+        name: input.name ?? null,
+        source_candidate_id: input.sourceCandidateId ?? null,
+      } as JsonValue,
+    });
+    if (input.supersedes) {
+      try {
+        markSuperseded(db, input.supersedes, dataRow.id, emit);
+      } catch { /* supersede chain is best-effort for data artifacts */ }
+    }
+    return { ok: true, artifactId: dataRow.id };
   }
 
   const gate = ownerGateDecision(input.declaredSandbox);

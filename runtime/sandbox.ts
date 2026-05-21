@@ -58,6 +58,25 @@ export const validateSandboxDecl = (decl: SandboxDecl): SandboxResult => {
   if (typeof runtime !== "string" || runtime.length === 0) {
     return { ok: false, reason: `unknown_runtime:${String(runtime)}` };
   }
+  // Data-artifact sentinel (2026-05-21). Non-executing rows skip every
+  // resource-budget, fs/net/proc field, and even the `fields` payload
+  // the runtime_runner catch-all otherwise demands. The minimal valid
+  // decl is `{runtime: "data"}`. Bodies admitted under this runtime
+  // are stored bytes, never invoked, never sandboxed — admission flow
+  // short-circuits at admitArtifact() → see DATA_RUNTIME branch in
+  // runtime/artifact_admission.ts. Refuse any forbidden field so a
+  // copy-paste from another runtime's decl is caught at validation.
+  if (runtime === "data") {
+    const d = decl as { fields?: unknown; cpu_ms?: unknown; wall_ms?: unknown; memory_mb?: unknown; env_requires?: unknown; fs_read?: unknown; fs_write?: unknown; net_allow?: unknown; proc_allow?: unknown };
+    if (d.cpu_ms !== undefined) return { ok: false, reason: "data_runtime_refuses_cpu_ms" };
+    if (d.wall_ms !== undefined) return { ok: false, reason: "data_runtime_refuses_wall_ms" };
+    if (d.memory_mb !== undefined) return { ok: false, reason: "data_runtime_refuses_memory_mb" };
+    if (d.fs_read !== undefined) return { ok: false, reason: "data_runtime_refuses_fs_read" };
+    if (d.fs_write !== undefined) return { ok: false, reason: "data_runtime_refuses_fs_write" };
+    if (d.net_allow !== undefined) return { ok: false, reason: "data_runtime_refuses_net_allow" };
+    if (d.proc_allow !== undefined) return { ok: false, reason: "data_runtime_refuses_proc_allow" };
+    return { ok: true };
+  }
   // Candidate B (2026-05-19): unknown-runtime catch-all variant. The
   // three concrete runtimes fall through to their explicit shape checks
   // below; any other runtime string MUST be a catch-all decl declaring
