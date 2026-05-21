@@ -84,6 +84,18 @@ const SUPERVISOR_DIRECTIVE_AGE_MS = SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS * 60 * 60
  *  cost-burn from any pathology the per-task / per-bridge gates miss. */
 export const SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE = 50;
 
+/** No-closure-progress loop detector (2026-05-21). A distinct pathology
+ *  from both the redispatch STORM (rate-based, 6/5min — a slow steady loop
+ *  slips under it) and the 50-dispatch budget cap (too high — ~1.5h of
+ *  burn first). Observed: a directive re-dispatched its SINGLE node 18×
+ *  over 40min, emitting amendment duplicates + brain_reasoning but ZERO
+ *  task_closure_audited and ZERO task_edge_recorded — the brain never ran
+ *  a closure verifier nor opened a refinement edge, so the dispatcher kept
+ *  re-invoking it forever. Legit deep work makes structural progress
+ *  (edges or closure attempts); a directive past this cap with NEITHER is
+ *  genuinely stuck. Lower than the budget cap so the loop is caught early. */
+export const SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP = 10;
+
 /** Stuck-task detector (2026-05-17): when the brain emits the SAME
  *  action_predicted (keyed by `(task_id, action_artifact_id)`) N+ times
  *  within the window without the task committing, the brain is wedged on
@@ -470,6 +482,88 @@ export const detectDispatchBudgetExceeded = (
   return archived;
 };
 
+/** Detect no-closure-progress loops: directives re-dispatched past
+ *  SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP with ZERO task_closure_audited
+ *  AND ZERO task_edge_recorded (no closure verifier run, no refinement edge
+ *  opened — the brain is re-emitting the same node forever). Archives the
+ *  directive (recoverable) so the slow loop stops burning the brain slot
+ *  long before the 50-dispatch budget cap would. Idempotent: skips
+ *  directives already closed/archived/committed, and skips any directive
+ *  that DID make structural progress (legit deep work). */
+export const detectNoClosureProgressLoop = (
+  db: Database,
+): Array<{ directive_id: string; dispatch_count: number }> => {
+  const rows = db
+    .query(
+      `SELECT directive_id, COUNT(*) AS dispatch_count
+       FROM events
+       WHERE kind = 'brain_dispatched'
+       GROUP BY directive_id
+       HAVING dispatch_count > ?`,
+    )
+    .all(SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP) as Array<{ directive_id: string; dispatch_count: number }>;
+
+  const archived: Array<{ directive_id: string; dispatch_count: number }> = [];
+  for (const r of rows) {
+    const terminalOrClosed = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE directive_id = ?
+           AND kind IN ('directive_closed', 'directive_archived_by_operator',
+                        'directive_archived_missed_reviews', 'task_committed')
+         LIMIT 1`,
+      )
+      .get(r.directive_id);
+    if (terminalOrClosed) continue;
+    // Structural progress = a closure verifier ran OR a refinement edge was
+    // opened. Either means the dispatch is doing real work (legit deep), not
+    // looping on one node. Skip those.
+    const madeProgress = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE directive_id = ?
+           AND kind IN ('task_closure_audited', 'task_edge_recorded')
+         LIMIT 1`,
+      )
+      .get(r.directive_id);
+    if (madeProgress) continue;
+    try {
+      const unfinished = collectUnfinishedTasks(db, r.directive_id);
+      emitEvent(db, {
+        kind: "directive_archived_by_operator",
+        substrate_origin: "substrate_auto",
+        directive_id: r.directive_id,
+        payload: {
+          reason: "supervisor_no_closure_progress_loop",
+          dispatch_count: r.dispatch_count,
+          threshold: SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP,
+          quarantined_tasks: unfinished,
+          recoverable: true,
+          resume_command: `acc directive resume ${r.directive_id}`,
+        } as JsonValue,
+      });
+      emitEvent(db, {
+        kind: "supervisor_intervention_recorded",
+        substrate_origin: "substrate_auto",
+        directive_id: r.directive_id,
+        payload: {
+          pathology: "no_closure_progress_loop",
+          corrective_event: "directive_archived_by_operator",
+          dispatch_count: r.dispatch_count,
+          threshold: SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP,
+        } as JsonValue,
+      });
+      archived.push(r);
+    } catch (err) {
+      logger.warn(
+        { where: "supervisor.no_closure_progress", directive_id: r.directive_id, err: (err as Error).message },
+        "supervisor failed to archive no-closure-progress directive",
+      );
+    }
+  }
+  return archived;
+};
+
 /** Round-2 audit (2026-05-15): ready-starvation detector. A task that
  *  sits in ready_tasks_view for longer than this without any
  *  dispatch_decided / brain_dispatched / action_predicted /
@@ -563,6 +657,7 @@ export type SupervisorTickResult = {
   redispatch_storm_count: number;
   dag_explosion_count: number;
   dispatch_budget_exceeded_count: number;
+  no_closure_progress_loop_count: number;
   ready_starvation_count: number;
   pathology_budget_exhausted_count: number;
   brain_stuck_repeating_action_count: number;
@@ -580,6 +675,7 @@ export const supervisorTick = (
     redispatch_storm_count: 0,
     dag_explosion_count: 0,
     dispatch_budget_exceeded_count: 0,
+    no_closure_progress_loop_count: 0,
     ready_starvation_count: 0,
     pathology_budget_exhausted_count: 0,
     brain_stuck_repeating_action_count: 0,
@@ -627,6 +723,13 @@ export const supervisorTick = (
     for (const b of overBudget) debitOnDirective(b.directive_id, "dispatch_budget_exceeded", "supervisor.dispatch_budget");
   } catch (err) {
     logger.warn({ where: "supervisor.tick.dispatch_budget", err: (err as Error).message }, "dispatch-budget detector failed");
+  }
+  try {
+    const noProgress = detectNoClosureProgressLoop(db);
+    result.no_closure_progress_loop_count = noProgress.length;
+    for (const n of noProgress) debitOnDirective(n.directive_id, "no_closure_progress_loop", "supervisor.no_closure_progress");
+  } catch (err) {
+    logger.warn({ where: "supervisor.tick.no_closure_progress", err: (err as Error).message }, "no-closure-progress detector failed");
   }
   try {
     const starved = probeReadyStarvation(db, opts);
