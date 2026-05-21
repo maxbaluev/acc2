@@ -1319,10 +1319,17 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // extractors is activation-driven; activationDisposers are cleared on shutdown.
   }
 
-  // auto_apply worker deleted (owner-approved 2026-05-16): the orchestrator
-  // (Claude Code) reads brain proposals directly via MCP and decides inline
-  // vs Agent subagent per the scored low_risk_inline lane. No autonomous
-  // landing path; the operator-driven loop closes credit via cli/apply.ts.
+  // auto_apply worker stage-2 contract: Claude Code is not the serial hand-
+  // applier for every eligible amendment. A substrate worker may apply ONLY
+  // lesson_implementer_queue_view rows with auto_apply_eligible=1, structured
+  // anchored_replace_v1 diffs, no owner_profile things_to_never_do conflict,
+  // no trajectory hazard, an isolated worktree at current default-branch HEAD,
+  // and a zero-regression verifier run (`bun test --bail`) before emitting
+  // applied_change_committed via cli/apply.ts recordApplyOutcome. Failures emit
+  // applied_change_failed, leave the source checkout untouched, and preserve the
+  // local worktree/patch path in the payload for reversible operator review.
+  // Claude Code remains the owner-visible exception handler for owner-gated,
+  // unstructured, stale-anchor, failing-test, or cross-surface proposals.
 
   // Brain audit bqlr29psq (2026-05-15): daemon source hot-reload worker.
   // Watches runtime/, substrate/, cli/ via fs.watch (recursive). When a

@@ -684,14 +684,37 @@ export const dispatchReadyTask = async (
       "policy-artifact retrieval threw — composing prompt with default policy_bundle fallback chain",
     );
   }
-  const composer = await resolveComposePrompt();
-  const composed = composer(db, {
-    taskId: task.id,
-    retrievedKnowledge,
-    retrievedArtifacts,
-    retrievalUnavailable,
-    retrievedPolicyArtifacts: retrievedPolicyArtifacts as never,
-  });
+  const promptCache = await import("./prompt_cache");
+  const promptCacheKey = {
+    directive_id: task.directive_id,
+    task_id: task.id,
+    options_signature: JSON.stringify({
+      retrievedKnowledgeIds: retrievedKnowledge?.hits.map((h) => h.event_id) ?? [],
+      retrievedArtifactIds: retrievedArtifacts?.hits.map((h) => h.event_id) ?? [],
+      retrievalUnavailable,
+      retrievedPolicySections: Object.keys(retrievedPolicyArtifacts ?? {}).sort(),
+    }),
+  };
+  const cachedPrompt = promptCache.lookupCachedPrompt<{ text: string }>(db, promptCacheKey);
+  let composed: { text: string };
+  if (cachedPrompt.hit) {
+    composed = cachedPrompt.value;
+    promptCache.recordPromptCacheHit(db, promptCacheKey, cachedPrompt.age_ms);
+  } else {
+    const composer = await resolveComposePrompt();
+    composed = composer(db, {
+      taskId: task.id,
+      retrievedKnowledge,
+      retrievedArtifacts,
+      retrievalUnavailable,
+      retrievedPolicyArtifacts: retrievedPolicyArtifacts as never,
+    });
+    promptCache.storeCachedPrompt(db, promptCacheKey, composed);
+    promptCache.recordPromptCacheMiss(db, promptCacheKey, cachedPrompt.reason, {
+      cached_rowid: "cached_rowid" in cachedPrompt ? cachedPrompt.cached_rowid : undefined,
+      current_rowid: "current_rowid" in cachedPrompt ? cachedPrompt.current_rowid : undefined,
+    });
+  }
   bridgeResult = await bridge(
     {
       prompt: composed.text,

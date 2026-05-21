@@ -50,9 +50,13 @@ Do not add fixed predicate enums, refusal taxonomies, or pre-check gates when a 
 
 Dispatch is substrate-side. Routes include substrate_replay, claude_inline, opencode_brain, clarification/owner input, and deferred_blocked. Claude reads dispatch_decided; it does not override it.
 
+Parallel brain dispatch is allowed for independent directives and independent sibling leaves. This is not multi-brain strategic divergence: one canonical brain lane may run in multiple isolated opencode subprocesses when the scheduler's global cap, per-directive cap, host-RAM cap, bridge-health gate, and directive-interference graph all permit it. The bridge may serialize only the contended MCP handshake window; it must not serialize the full reasoning run unless live residual evidence shows concurrency is unsafe.
+
 Cycle-1-only is structural. A brain dispatch must not continue in-context. If work remains, emit refinement edges. The scheduler picks the next ready task, and prompt_composer builds a fresh depth-1 projection.
 
 Refinement edges are observable, inspectable, bounded, and composable. Use bounded_peek for narrow immediately action-relevant state; use symbolic_recursion for broad, independently verifiable, owner-gated, or reusable work.
+
+For repo-targeted strategic amendments, the preferred throughput path is propose -> auto_apply_gate -> substrate-side isolated apply+verify worker -> applied_change_committed. Claude Code remains the owner-visible orchestrator and exception handler, not the serial hand-applier for every eligible anchored replacement.
 
 ## Owner Model
 
