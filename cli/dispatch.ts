@@ -200,7 +200,39 @@ const dispatchTask = async (
     const ownerInputId = ownerInputEnv?.ok ? (ownerInputEnv.result as { id?: string })?.id : undefined;
     const cls = classifyOwnerRenderingSignals(words, priorTexts, turnPattern);
     const languageConfidence = cls.language_distribution?.[0]?.confidence ?? cls.confidence;
-    if (cls.detected_language) {
+    // Idempotency check (2026-05-21 emit-storm fix): every acc task invocation
+    // pre-fix fired a fresh `owner_insight_candidate` for detected_language +
+    // rendering_signals regardless of whether the value differed from the
+    // current observation. Measured: 304 detected_language insights with
+    // only 3 distinct values (~99% noise). Now we look at the most recent
+    // SAME-field insight; emit only if the value changed OR more than 6
+    // hours elapsed since the last emission (long-tail refresh so
+    // confidence updates still propagate eventually).
+    const STALE_INSIGHT_MS = 6 * 60 * 60 * 1000;
+    const recentInsightEnv = await mcpCall("runtime.recent_events", {
+      k: 50,
+      kinds: ["owner_insight_candidate"],
+    }).catch(() => null);
+    const recentInsights = ((recentInsightEnv?.ok
+      ? (recentInsightEnv.result as { events?: Array<{ ts?: string; payload?: { field?: string; value?: unknown } }> })?.events
+      : null) ?? []) as Array<{ ts?: string; payload?: { field?: string; value?: unknown } }>;
+    const findRecentInsightFor = (field: string): { ts: number; value: unknown } | null => {
+      for (const e of recentInsights) {
+        if (e.payload?.field !== field) continue;
+        const ts = e.ts ? Date.parse(e.ts) : NaN;
+        if (!Number.isFinite(ts)) continue;
+        return { ts, value: e.payload.value };
+      }
+      return null;
+    };
+    const insightChangedOrStale = (field: string, value: unknown): boolean => {
+      const prev = findRecentInsightFor(field);
+      if (!prev) return true;
+      if (JSON.stringify(prev.value) !== JSON.stringify(value)) return true;
+      if (Date.now() - prev.ts > STALE_INSIGHT_MS) return true;
+      return false;
+    };
+    if (cls.detected_language && insightChangedOrStale("detected_language", cls.detected_language)) {
       await mcpCall("substrate.emit", {
         kind: "owner_insight_candidate",
         substrate_origin: "claude_root",
@@ -216,9 +248,11 @@ const dispatchTask = async (
         },
       }).catch(() => null);
     }
-    if (Object.keys(cls.signals).length > 0) {
-      // Only emit when at least one signal fired — silent observations
-      // pollute the ledger without earning posterior.
+    if (Object.keys(cls.signals).length > 0 && insightChangedOrStale("rendering_signals", cls.signals)) {
+      // Only emit when at least one signal fired AND the signal vector
+      // changed from the last observed value (or 6h elapsed). Silent
+      // observations + repeat-same-value pollute the ledger without
+      // earning posterior.
       const summary = Object.entries(cls.signals)
         .map(([k, v]) => `${k}=${v.toFixed(2)}`)
         .join(", ");
