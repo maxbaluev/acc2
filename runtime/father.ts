@@ -168,7 +168,14 @@ export const DIRECTIVE_TEMPLATES: readonly FatherDirectiveTemplate[] = Object.fr
   },
 ]);
 
-const OWNER_ACTIVE_WINDOW_MS_DEFAULT = 60_000;
+// 2026-05-21: widened 60s → 5min (owner directive: father should work ONLY
+// when owner direct tasks don't exist). 60s reopened in every short gap
+// between an owner's directives during an active session, letting father
+// compete for the single brain-flight slot. 5min keeps father quiet across
+// the natural review/apply/re-dispatch rhythm of an active session; the
+// in-flight gate in fatherIterate covers the case where a dispatch is
+// actively running. Together: father fires only in GENUINE extended idle.
+const OWNER_ACTIVE_WINDOW_MS_DEFAULT = 5 * 60_000;
 const TEMPLATE_USE_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes between same template fires
 
 /** Check whether an `owner_input_received` event exists within the active
@@ -616,17 +623,45 @@ export const fatherIterate = async (
     };
   }
 
+  // Multi-process in-flight set (SQL-backed; no dependency on the scheduler's
+  // in-memory Map). Used both for the global throughput-yield gate below and
+  // by the priority selector to down-rank conflicting objectives.
+  const inFlight = inFlightDirectivesFromSql(db);
+
+  // 2026-05-21 throughput-yield gate (owner directive: "father should work
+  // only when owner direct tasks don't exist"). The 60s owner-active window
+  // above only checks recent owner SPEECH — it opens in any gap between
+  // directives, letting father grab the single brain-flight slot while an
+  // owner-originated dispatch is mid-cycle (or about to arrive), then the
+  // owner's next directive waits behind father's brain run. Father is for
+  // GENUINE idle: if ANY directive is currently running a brain dispatch,
+  // yield entirely so the owner's (and other terminals') work never queues
+  // behind autonomous maintenance. Father resumes once the brain slot is
+  // free AND the owner-active window has elapsed.
+  if (inFlight.size > 0) {
+    emitEvent(db, {
+      kind: "father_yielded",
+      substrate_origin: "father",
+      payload: {
+        cycle_id: cycleId,
+        reason: "directive_in_flight",
+        in_flight_count: inFlight.size,
+      } as JsonValue,
+    });
+    return {
+      cycle_id: cycleId,
+      action: "yield",
+      detail: { reason: "directive_in_flight", in_flight_count: inFlight.size } as JsonValue,
+      ts,
+    };
+  }
+
   // Read state inputs.
   const objectives = activeObjectives(db);
   const rolling = readRollingReviewsDue(db, ts);
   const edges = readInterferenceEdges(db);
   const templateUses = readTemplateUseTimestamps(db);
   const recipeBackedTemplates = recipeBackedFatherTemplateIds(db, DIRECTIVE_TEMPLATES);
-  // Multi-process in-flight set (SQL-backed; no dependency on the scheduler's
-  // in-memory Map). Used by the priority selector to down-rank objectives
-  // that have a mutual_exclusion / resource_conflict edge to a directive
-  // currently running a brain dispatch.
-  const inFlight = inFlightDirectivesFromSql(db);
   // Multi-goal alignment (2026-05-15): directives with unresolved
   // owner_input_required events. A directive is owner-blocked when
   // its most-recent owner_input_required has no later owner_decision_recorded
