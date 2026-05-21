@@ -142,6 +142,21 @@ const EVENT_HOT_PATH_INDEXES = [
   "CREATE INDEX IF NOT EXISTS idx_events_directive_kind_ts ON events(directive_id, kind, ts)",
   "CREATE INDEX IF NOT EXISTS idx_events_action_artifact_kind_ts ON events(action_artifact_id, kind, ts)",
   "CREATE INDEX IF NOT EXISTS idx_events_projection_key ON events(json_extract(payload, '$.projection_key')) WHERE json_extract(payload, '$.projection_key') IS NOT NULL",
+  // JSON-path indexes on the hottest payload extractions (2026-05-21
+  // SQLite bottleneck audit). Inventory: source_event_id appears in 27
+  // SQL sites, retrieval_binding_event_id in 16, knowledge_id in 8,
+  // source_act_id in 9, source_rendered_event_id in 5. Every view that
+  // joins by these fields (lesson_implementation_status_view,
+  // retrieval_credit_view, applied_lesson_effectiveness_view, etc.)
+  // previously did full-table scan over 355K rows because the
+  // json_extract was not indexed. Partial WHERE clauses keep these
+  // indexes small (only rows where the field is non-null).
+  "CREATE INDEX IF NOT EXISTS idx_events_payload_source_event_id ON events(json_extract(payload, '$.source_event_id')) WHERE json_extract(payload, '$.source_event_id') IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_events_payload_knowledge_id ON events(json_extract(payload, '$.knowledge_id')) WHERE json_extract(payload, '$.knowledge_id') IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_events_payload_source_act_id ON events(json_extract(payload, '$.source_act_id')) WHERE json_extract(payload, '$.source_act_id') IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_events_payload_retrieval_binding_event_id ON events(json_extract(payload, '$.retrieval_binding_event_id')) WHERE json_extract(payload, '$.retrieval_binding_event_id') IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_events_payload_artifact_id ON events(json_extract(payload, '$.artifact_id')) WHERE json_extract(payload, '$.artifact_id') IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_events_payload_dispatch_id ON events(json_extract(payload, '$.dispatch_id')) WHERE json_extract(payload, '$.dispatch_id') IS NOT NULL",
   // C5 (2026-05-18) provenance indexes — mirrors schema.sql so older DBs
   // upgraded via runMigrations() get the same lookup shape.
   "CREATE INDEX IF NOT EXISTS idx_act_artifact_supersedes    ON act_artifact(supersedes)    WHERE supersedes IS NOT NULL",
