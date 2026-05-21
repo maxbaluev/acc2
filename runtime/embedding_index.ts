@@ -192,12 +192,35 @@ export class EmbeddingIndex {
    *  with a non-null embedding BLOB gets backfilled into vec_events
    *  (if dim matches) and recorded in the metadata Map. */
   static rebuildFromDb(db: Database): EmbeddingIndex {
+    // 2026-05-21 OOM fix: bound the in-memory index to the most-recent
+    // EMBEDDING_INDEX_MAX_ROWS events. Pre-fix this loaded ALL embedded
+    // events (`SELECT … FROM embedding_index_view` with no limit) — on the
+    // production DB that was 328,085 rows with payloads up to ~298KB, plus
+    // backfilling the ~308K not yet in vec_events into the in-memory
+    // jsVectors map (1536 floats × ~6KB each). The bun process grew to 14GB
+    // RSS and the kernel OOM-killed it on EVERY boot (dmesg: "Out of memory:
+    // Killed process … total-vm:101GB anon-rss:14GB"). That — not any
+    // worker spin — was the daemon-death debugged this session.
+    //
+    // vec_events (vec0, on-disk) remains the FULL vector store and serves
+    // `MATCH` knn over all embedded rows regardless of this cap; the
+    // in-memory metadata map only enriches/reranks results, so bounding it
+    // to recent history trades a little old-event rerank metadata for not
+    // dying. Cap via ACC2_EMBEDDING_INDEX_MAX_ROWS (default 40000).
+    const maxRowsRaw = process.env.ACC2_EMBEDDING_INDEX_MAX_ROWS;
+    const maxRows = (() => {
+      if (typeof maxRowsRaw === "string" && maxRowsRaw.length > 0) {
+        const n = parseInt(maxRowsRaw, 10);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      return 40000;
+    })();
     const rows = db
       .query(
         "SELECT id, kind, ts, directive_id, task_id, substrate_origin, payload, embedding, embedding_version, retrieval_aspects, retrieval_domains " +
-          "FROM embedding_index_view",
+          "FROM embedding_index_view ORDER BY ts DESC LIMIT ?",
       )
-      .all() as EventRow[];
+      .all(maxRows) as EventRow[];
     const metadata = new Map<string, Meta>();
     const inVec = new Set<string>();
     const jsVectors = new Map<string, Float32Array>();
