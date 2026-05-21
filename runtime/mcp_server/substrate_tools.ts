@@ -947,6 +947,18 @@ export const handleRead = (
           };
         })();
       }
+      case "peer_registry_view": {
+        // Tier U/U1: unified multi-brain peer awareness. The SQL view
+        // performs registration/activity coalescing and 24h dead-peer aging;
+        // this read path preserves the standard substrate.read envelope.
+        const rows = db
+          .query("SELECT * FROM peer_registry_view ORDER BY last_seen_ts DESC")
+          .all() as Array<Record<string, unknown>>;
+        return {
+          ok: true,
+          result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
+        };
+      }
       case "stale_zero_score_knowledge_view": {
         // Closes brain KC KRG33K7VT14M: promoted knowledge with no
         // posterior activity (never cited, never confirmed/contradicted)

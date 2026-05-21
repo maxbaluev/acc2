@@ -360,6 +360,13 @@ export const EVENT_KINDS = {
   // the observed residual so future routing can score combinations,
   // not just nodes.
   coalition_credit_distributed:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // Tier U/U1 peer registry foundation: participation is symmetric across
+  // opencode brains, Claude terminals, and Claude background agents, while
+  // spawning remains asymmetric (only opencode is substrate-spawnable).
+  // peer_registered is the durable identity/scope row; peer_liveness is the
+  // heartbeat/activity row used by peer_registry_view to age stale peers.
+  peer_registered:                         { producer: "both",      embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  peer_liveness:                           { producer: "both",      embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // F4a deprecated aliases — historical event rows wrote these kind
   // strings before the rename. Registered here so existing queries that
   // SELECT WHERE kind = 'code_artifact_admitted' still match. The

@@ -4171,6 +4171,79 @@ CREATE VIEW IF NOT EXISTS model_routing_view AS
   GROUP BY d.model, COALESCE(o.terminal_kind, '<open>');
 `;
 
+// peer_registry_view — latest registered peer identity plus latest heartbeat.
+// Tier U/U1 keeps spawning asymmetric (substrate can spawn opencode only) but
+// participation symmetric: opencode brains, Claude terminals, and Claude
+// background agents all register and appear in one depth-1 awareness surface.
+const VIEW_PEER_REGISTRY = `
+CREATE VIEW IF NOT EXISTS peer_registry_view AS
+  WITH registration_rows AS (
+    SELECT
+      id                                                                 AS registration_event_id,
+      ts                                                                 AS registered_ts,
+      COALESCE(json_extract(payload, '$.peer_id'), json_extract(payload, '$.id')) AS peer_id,
+      json_extract(payload, '$.kind')                                    AS peer_kind,
+      json_extract(payload, '$.spawnability')                            AS spawnability,
+      COALESCE(json_extract(payload, '$.scope'), '{}')                   AS scope,
+      json_extract(payload, '$.git_head')                                AS git_head,
+      COALESCE(directive_id, json_extract(payload, '$.directive_id'))     AS directive_id,
+      COALESCE(task_id, json_extract(payload, '$.task_id'))               AS task_id,
+      json_extract(payload, '$.current_act_id')                          AS current_act_id,
+      ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(json_extract(payload, '$.peer_id'), json_extract(payload, '$.id'))
+        ORDER BY ts DESC, id DESC
+      )                                                                  AS rn
+    FROM events
+    WHERE kind = 'peer_registered'
+      AND COALESCE(json_extract(payload, '$.peer_id'), json_extract(payload, '$.id')) IS NOT NULL
+  ),
+  activity_rows AS (
+    SELECT
+      id                                                                 AS activity_event_id,
+      ts                                                                 AS last_seen_ts,
+      COALESCE(json_extract(payload, '$.peer_id'), json_extract(payload, '$.id')) AS peer_id,
+      json_extract(payload, '$.kind')                                    AS peer_kind,
+      json_extract(payload, '$.spawnability')                            AS spawnability,
+      COALESCE(json_extract(payload, '$.scope'), '{}')                   AS scope,
+      json_extract(payload, '$.git_head')                                AS git_head,
+      COALESCE(directive_id, json_extract(payload, '$.directive_id'))     AS directive_id,
+      COALESCE(task_id, json_extract(payload, '$.task_id'))               AS task_id,
+      json_extract(payload, '$.current_act_id')                          AS current_act_id,
+      ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(json_extract(payload, '$.peer_id'), json_extract(payload, '$.id'))
+        ORDER BY ts DESC, id DESC
+      )                                                                  AS rn
+    FROM events
+    WHERE kind IN ('peer_registered', 'peer_liveness')
+      AND COALESCE(json_extract(payload, '$.peer_id'), json_extract(payload, '$.id')) IS NOT NULL
+  )
+  SELECT
+    r.peer_id                                                            AS peer_id,
+    COALESCE(a.peer_kind, r.peer_kind)                                   AS kind,
+    COALESCE(a.spawnability, r.spawnability)                             AS spawnability,
+    COALESCE(a.directive_id, r.directive_id)                             AS directive_id,
+    COALESCE(a.task_id, r.task_id)                                       AS task_id,
+    COALESCE(a.current_act_id, r.current_act_id)                         AS current_act_id,
+    COALESCE(a.scope, r.scope, '{}')                                     AS scope,
+    COALESCE(a.git_head, r.git_head)                                     AS git_head,
+    r.registered_ts                                                      AS registered_ts,
+    COALESCE(a.last_seen_ts, r.registered_ts)                            AS last_seen_ts,
+    CAST((julianday('now') - julianday(COALESCE(a.last_seen_ts, r.registered_ts))) * 86400 AS INTEGER)
+                                                                         AS seconds_since_last_seen,
+    CASE
+      WHEN (julianday('now') - julianday(COALESCE(a.last_seen_ts, r.registered_ts))) * 86400 > 300
+        THEN 'stale'
+      ELSE 'live'
+    END                                                                  AS liveness_verdict,
+    r.registration_event_id                                              AS registration_event_id,
+    COALESCE(a.activity_event_id, r.registration_event_id)               AS latest_activity_event_id
+  FROM registration_rows r
+  LEFT JOIN activity_rows a ON a.peer_id = r.peer_id AND a.rn = 1
+  WHERE r.rn = 1
+    AND datetime(COALESCE(a.last_seen_ts, r.registered_ts)) > datetime('now', '-24 hours')
+  ORDER BY last_seen_ts DESC;
+`;
+
 // ── Public entrypoint ──────────────────────────────────────────────
 
 // recipes_latest_view and recipe_registry_view now project from
@@ -4206,6 +4279,7 @@ export const VIEW_NAMES = [
   "owner_plain_status_view",
   "event_kind_occurrence_view",
   "worker_liveness_view",
+  "peer_registry_view",
   "stale_zero_score_knowledge_view",
   "retrieval_credit_view",
   "top_laws_view",
@@ -4281,6 +4355,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_ACTIVE_INFERENCE);
   db.exec(VIEW_ARTIFACT_WARNING);
   db.exec(VIEW_MODEL_ROUTING);
+  db.exec(VIEW_PEER_REGISTRY);
 };
 
 // ── Accessor types + functions ─────────────────────────────────────
