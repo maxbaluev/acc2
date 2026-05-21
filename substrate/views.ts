@@ -3573,6 +3573,19 @@ CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
           AND q.target_resource IS NOT NULL
           AND length(trim(q.target_resource)) > 0
           AND q.ts > p.ts
+          -- 2026-05-21 supersession-scope fix: supersession is per-DIRECTIVE,
+          -- not global per target_resource. Pre-fix, when two DIFFERENT
+          -- directives proposed amendments to the SAME file (routine — many
+          -- S0 sub-predicates each edit cli/apply.ts / substrate/seed.ts),
+          -- the later directive's amendment falsely marked the earlier
+          -- directive's as 'superseded_by'. The earlier directive's
+          -- legitimate, independent edit then looked stale ('file does not
+          -- exist' / skipped) even though it targeted its own concern. A
+          -- newer proposal only supersedes a prior one when it is the SAME
+          -- directive re-emitting (brain refinement rounds) for the SAME
+          -- target — that is the true supersession. Cross-directive edits to
+          -- a shared file are INDEPENDENT, not supersessions.
+          AND q.directive_id = p.directive_id
         ORDER BY q.ts ASC
         LIMIT 1
       ) AS newer_proposal_id
