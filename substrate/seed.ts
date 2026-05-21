@@ -2178,6 +2178,8 @@ type PredicateSeed = {
   closure_predicate: string;
   metric_direction: string;
   display_name: string;
+  evaluator_artifact_id?: string;
+  consumer_gate?: string;
 };
 
 const PREDICATE_SEEDS: PredicateSeed[] = [
@@ -2302,6 +2304,8 @@ const PREDICATE_SEEDS: PredicateSeed[] = [
     why: "S0 safety — delegation is high-leverage owner-control gate; advisory delegation collapses to autonomous-commit creep.",
     closure_predicate: "delegation_safety residual scored on every dispatch_decided; autonomous-commit reversals + owner_input_required precision both move.",
     metric_direction: "autonomous-commit reversals fall; owner-input-required precision rises.",
+    evaluator_artifact_id: "delegation_safety_evaluator_v1",
+    consumer_gate: "cli/apply.ts deterministicApplyRoute downgrades unsafe AUTO_APPLY recommendations to owner-gate/defer at the final autonomous-commit decision",
     display_name: "Delegation safety — SBD bilevel + COSMIC SSA scored boundary",
   },
   {
@@ -2584,6 +2588,8 @@ const PREDICATE_ARTIFACTS: SeedArtifact[] = PREDICATE_SEEDS.map((p) => ({
     why: p.why,
     closure_predicate: p.closure_predicate,
     metric_direction: p.metric_direction,
+    evaluator_artifact_id: p.evaluator_artifact_id,
+    consumer_gate: p.consumer_gate,
   }),
   declared_sandbox: PREDICATE_SANDBOX,
   state_root: `substrate/primitive/predicate/${p.name}`,

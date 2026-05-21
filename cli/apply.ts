@@ -29,7 +29,7 @@ import { lessonApplyTargetsPolicy } from "../substrate/lesson_apply_policy";
 import { classifyApply } from "./verify";
 import { emitActTupleViaMcp } from "../runtime/act_tuple";
 import { evaluateOwnerGoalPreservationDrift } from "../runtime/owner_goal_preservation_drift";
-import { evaluateOwnerGoalPreservationDrift } from "../runtime/owner_goal_preservation_drift";
+import { evaluateDelegationSafety } from "../runtime/delegation_safety";
 
 type Args = Record<string, string | boolean>;
 
@@ -377,6 +377,81 @@ const gateAutonomousCommitByOwnerGoalDrift = async (
   };
 };
 
+const delegationLaneToApplyRoute = (lane: string): ApplyRoute => {
+  switch (lane) {
+    case "defer": return "AUTO_DEFER_DEPENDENCY";
+    case "opencode_brain": return "NEEDS_BRAIN_RECYCLE";
+    case "ask_owner":
+    case "claude_inline":
+    default:
+      return "OWNER_GATE";
+  }
+};
+
+const evaluateAutonomousCommitDelegationSafety = async (
+  payload: Record<string, unknown>,
+  targets: readonly string[],
+  decision: ApplyRouteDecision,
+) => {
+  try {
+    const profileEnv = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
+    if (!profileEnv.ok) return { residual: 0, recommended_lane: "autonomous_commit" as const, verdict: "safe" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+    const profileRow = Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
+    const profile = parsePayload(profileRow?.payload);
+    const riskSignals = profile.risk_signals && typeof profile.risk_signals === "object" ? profile.risk_signals as Record<string, unknown> : {};
+    const controlSignals = profile.control_signals && typeof profile.control_signals === "object" ? profile.control_signals as Record<string, unknown> : {};
+    const autonomySignals = profile.autonomy_signals && typeof profile.autonomy_signals === "object" ? profile.autonomy_signals as Record<string, unknown> : {};
+    return evaluateDelegationSafety({
+      candidate_lane: "autonomous_commit",
+      task: {
+        risk: Math.max(Number(decision.score < 0.7 ? 0.5 : 0), Number(riskSignals.directive_risk ?? 0)),
+        novelty: payload.classification === "novel" || payload.route === "opencode_brain" ? 0.8 : 0.2,
+        reversible: true,
+        target_resources: targets,
+        recent_failures: [],
+      },
+      owner_control_signals: { ...autonomySignals, ...controlSignals, owner_control_need: profile.owner_control_need },
+    });
+  } catch {
+    return { residual: 0, recommended_lane: "autonomous_commit" as const, verdict: "safe" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+  }
+};
+
+const gateAutonomousCommitByDelegationSafety = async (
+  decision: ApplyRouteDecision,
+  payload: Record<string, unknown>,
+  targets: readonly string[],
+): Promise<ApplyRouteDecision> => {
+  const safety = await evaluateAutonomousCommitDelegationSafety(payload, targets, decision);
+  if (safety.residual < 0.6 && safety.recommended_lane === "autonomous_commit") return decision;
+  return {
+    route: delegationLaneToApplyRoute(safety.recommended_lane),
+    score: 1,
+    confidence: 0.85,
+    deterministic: false,
+    reason: "delegation_safety_predicate",
+    preconditions: {
+      ...decision.preconditions,
+      delegation_safety_residual: safety.residual,
+      delegation_safety_recommended_lane: safety.recommended_lane,
+      delegation_safety_verdict: safety.verdict,
+      delegation_safety_breakdown: safety.breakdown,
+      delegation_safety_reasons: safety.reasons,
+    },
+  };
+};
+
+const gateAutonomousCommit = async (
+  decision: ApplyRouteDecision,
+  payload: Record<string, unknown>,
+  target: string,
+  targets: readonly string[],
+): Promise<ApplyRouteDecision> => {
+  const driftDecision = await gateAutonomousCommitByOwnerGoalDrift(decision, payload, target, targets);
+  if (driftDecision.route !== "AUTO_APPLY") return driftDecision;
+  return gateAutonomousCommitByDelegationSafety(driftDecision, payload, targets);
+};
+
 const deterministicApplyRoute = async (
   payload: Record<string, unknown>,
   target: string,
@@ -448,13 +523,13 @@ const deterministicApplyRoute = async (
   const posteriorScore = gateResidual == null ? 0.95 : Math.max(0, 1 - gateResidual);
   const threshold = await ownerAutonomyThreshold();
   if (queuedRoute === "AUTO_APPLY" && posteriorScore >= threshold) {
-    return gateAutonomousCommitByOwnerGoalDrift({ route: "AUTO_APPLY", score: posteriorScore, confidence: 0.8, deterministic: false, reason: "preconditions_passed_posterior_above_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } }, payload, target, targets);
+    return gateAutonomousCommit({ route: "AUTO_APPLY", score: posteriorScore, confidence: 0.8, deterministic: false, reason: "preconditions_passed_posterior_above_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } }, payload, target, targets);
   }
   if (queuedRoute === "OWNER_GATE") {
     return { route: "OWNER_GATE", score: posteriorScore, confidence: 0.7, deterministic: false, reason: "queue_route_owner_gate", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true } };
   }
   if (queuedRoute === null && posteriorScore >= threshold) {
-    return gateAutonomousCommitByOwnerGoalDrift({ route: "AUTO_APPLY", score: posteriorScore, confidence: 0.65, deterministic: false, reason: "preconditions_passed_local_predicate_above_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } }, payload, target, targets);
+    return gateAutonomousCommit({ route: "AUTO_APPLY", score: posteriorScore, confidence: 0.65, deterministic: false, reason: "preconditions_passed_local_predicate_above_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } }, payload, target, targets);
   }
   return { route: "NEEDS_BRAIN_RECYCLE", score: posteriorScore, confidence: 0.6, deterministic: false, reason: "posterior_missing_or_below_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } };
 };

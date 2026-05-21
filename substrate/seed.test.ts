@@ -493,6 +493,8 @@ describe("seedActArtifacts", () => {
         why?: string;
         closure_predicate?: string;
         metric_direction?: string;
+        evaluator_artifact_id?: string;
+        consumer_gate?: string;
       };
       expect(typeof payload.tier).toBe("string");
       expect(payload.tier && payload.tier.length).toBeGreaterThan(0);
@@ -506,6 +508,10 @@ describe("seedActArtifacts", () => {
       expect(payload.closure_predicate && payload.closure_predicate.length).toBeGreaterThan(0);
       expect(typeof payload.metric_direction).toBe("string");
       expect(payload.metric_direction && payload.metric_direction.length).toBeGreaterThan(0);
+      if (name === "delegation_safety_predicate") {
+        expect(payload.evaluator_artifact_id).toBe("delegation_safety_evaluator_v1");
+        expect(payload.consumer_gate).toContain("deterministicApplyRoute");
+      }
     }
 
     // 9. Tier distribution. Original split was 5/5/20; 2026-research

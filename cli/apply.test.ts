@@ -18,6 +18,9 @@ let dbPath = "";
 let directiveSeq = 0;
 let runApply: (argv: string[]) => Promise<number>;
 let ownerGoalDriftResidual = 0;
+let delegationSafetyResidual = 0;
+let delegationSafetyLane = "autonomous_commit";
+let failOwnerProfileRead = false;
 
 mock.module("../runtime/owner_goal_preservation_drift", () => ({
   evaluateOwnerGoalPreservationDrift: () => ({
@@ -28,12 +31,29 @@ mock.module("../runtime/owner_goal_preservation_drift", () => ({
   }),
 }));
 
+mock.module("../runtime/delegation_safety", () => ({
+  evaluateDelegationSafety: (input: { task?: { risk?: number; reversible?: boolean }; owner_control_signals?: { owner_control_need?: number } }) => {
+    const fixtureUnsafe = input.task?.risk === 0.8 && input.task?.reversible === false && input.owner_control_signals?.owner_control_need === 0.9;
+    const residual = fixtureUnsafe ? 0.9 : delegationSafetyResidual;
+    const lane = fixtureUnsafe ? "ask_owner" : delegationSafetyLane;
+    return {
+      residual,
+      recommended_lane: lane,
+      verdict: residual >= 0.6 ? "unsafe" : "safe",
+      breakdown: { mocked_delegation_safety: residual },
+      reasons: ["mocked_delegation_safety"],
+    };
+  },
+}));
+
 const ctx = (): McpContext => ({ db, invoker: "claude_root" } as McpContext);
 
 const rpc = async (toolName: string, args: Record<string, unknown>) => {
   switch (toolName) {
     case "substrate.emit": return handleEmit(ctx(), args as never);
-    case "substrate.read": return handleRead(ctx(), args as never);
+    case "substrate.read":
+      if (failOwnerProfileRead && args.view_name === "owner_profile_view") return { ok: false as const, error: "mock_owner_profile_read_failed" };
+      return handleRead(ctx(), args as never);
     case "substrate.get_event": return handleGetEvent(ctx(), args as never);
     case "substrate.credit": return handleCredit(ctx(), args as never);
     case "runtime.recent_events": return handleRecentEvents(ctx(), args as never);
@@ -116,6 +136,9 @@ beforeAll(async () => {
 
 beforeEach(() => {
   ownerGoalDriftResidual = 0;
+  delegationSafetyResidual = 0;
+  delegationSafetyLane = "autonomous_commit";
+  failOwnerProfileRead = false;
 });
 
 afterAll(() => {
@@ -409,6 +432,107 @@ describe("runApply gates", () => {
     const preconditions = payload.apply_route_preconditions as Record<string, unknown>;
     expect(preconditions.owner_goal_preservation_drift_residual).toBe(0.72);
     expect(preconditions.reconciliation_required).toBe(true);
+  });
+
+  test("delegation safety allows safe autonomous apply", async () => {
+    const scope = nextScope();
+    const env = await rpc("substrate.emit", {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
+      payload: {
+        target_resource: "repo:cli/apply.ts",
+        anchor: "renderGateBlock",
+        current_behavior: "acc apply prompts omit structured gate facts",
+        proposed_behavior: {
+          target_resource: "repo:cli/apply.ts",
+          anchor: "renderGateBlock",
+          diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+        },
+      },
+    });
+    expect(env.ok).toBe(true);
+    const eventId = (env.result as { id: string }).id;
+
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+
+    expect(code).toBe(0);
+    const payload = rowPayload(gateScoreFor(eventId));
+    expect(payload.apply_route).toBe("AUTO_APPLY");
+    expect(payload.apply_route_reason).toBe("preconditions_passed_local_predicate_above_threshold");
+  });
+
+  test("delegation safety downgrades unsafe autonomous apply", async () => {
+    delegationSafetyResidual = 0.78;
+    delegationSafetyLane = "ask_owner";
+    const scope = nextScope();
+    const env = await rpc("substrate.emit", {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
+      payload: {
+        target_resource: "repo:cli/apply.ts",
+        anchor: "renderGateBlock",
+        current_behavior: "acc apply prompts omit structured gate facts",
+        proposed_behavior: {
+          target_resource: "repo:cli/apply.ts",
+          anchor: "renderGateBlock",
+          diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+        },
+      },
+    });
+    expect(env.ok).toBe(true);
+    const eventId = (env.result as { id: string }).id;
+
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+
+    expect(code).toBe(1);
+    expect(cap.err.join("\n")).toContain("delegation_safety_predicate");
+    const payload = rowPayload(gateScoreFor(eventId));
+    expect(payload.apply_route).toBe("OWNER_GATE");
+    expect(payload.apply_route_reason).toBe("delegation_safety_predicate");
+    const preconditions = payload.apply_route_preconditions as Record<string, unknown>;
+    expect(preconditions.delegation_safety_residual).toBe(0.78);
+    expect(preconditions.delegation_safety_recommended_lane).toBe("ask_owner");
+  });
+
+  test("delegation safety read failure fails open", async () => {
+    failOwnerProfileRead = true;
+    delegationSafetyResidual = 0.8;
+    delegationSafetyLane = "ask_owner";
+    const scope = nextScope();
+    const env = await rpc("substrate.emit", {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
+      payload: {
+        target_resource: "repo:cli/apply.ts",
+        anchor: "renderGateBlock",
+        current_behavior: "acc apply prompts omit structured gate facts",
+        proposed_behavior: {
+          target_resource: "repo:cli/apply.ts",
+          anchor: "renderGateBlock",
+          diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+        },
+      },
+    });
+    expect(env.ok).toBe(true);
+    const eventId = (env.result as { id: string }).id;
+
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+
+    expect(code).toBe(0);
+    const payload = rowPayload(gateScoreFor(eventId));
+    expect(payload.apply_route).toBe("AUTO_APPLY");
   });
 
   test("high-residual applied executor attempts remain uncommitted and queued", async () => {
