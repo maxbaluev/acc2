@@ -13,32 +13,11 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
-import type { Database } from "bun:sqlite";
-import { getArtifact, insertArtifact } from "./artifact_store";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
-
-const insertSampleArtifact = (db: Database, id: string, body = "// artifact") =>
-  insertArtifact(db, {
-    runtime: "bun",
-    body,
-    declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
-    stateRoot: null,
-    posteriorAlpha: 1,
-    posteriorBeta: 1,
-    score: 0.5,
-    confidence: 0.3,
-    recentResidualMean: 0,
-    recentKillCount: 0,
-    status: "admitted",
-    name: null,
-    fixtureInput: null,
-    fixtureExpectedResidual: 0.2,
-    id,
-  });
 
 describe("emitEvent task_failed classification", () => {
   test("accepts open-ended failure_kind strings without editing a taxonomy", () => {
@@ -322,8 +301,6 @@ describe("emitEvent act_tuple_recorded projector", () => {
       "candidate_confirmed",
       "retrieval_binding",
       "retrieval_binding",
-      "retrieval_binding",
-      "retrieval_binding",
       "retrieval_rejected",
       "verifier_kind_auto_admitted",
     ]);
@@ -458,87 +435,6 @@ describe("emitEvent act_tuple_recorded projector", () => {
     expect(kinds).toContain("action_scored");
     // The phantom event is GONE.
     expect(kinds).not.toContain("applied_change_committed");
-  });
-
-  test("auto-binds selected artifacts into citations and credits registered action artifact", () => {
-    const db = openDb(":memory:");
-    const directiveId = newId();
-    const taskId = newId();
-    insertSampleArtifact(db, "real_action_artifact", "// real action");
-    insertSampleArtifact(db, "real_verifier_artifact", "// real verifier");
-    const before = getArtifact(db, "real_action_artifact")!;
-
-    emitEvent(db, {
-      kind: "act_tuple_recorded",
-      substrate_origin: "claude_root",
-      directive_id: directiveId,
-      task_id: taskId,
-      action_artifact_id: "real_action_artifact",
-      verifier_artifact_id: "real_verifier_artifact",
-      predicted_residual: 0.1,
-      residual: 0,
-      payload: {
-        intent: "record selected artifacts for credit",
-        reasoning_summary: "selected artifacts should be bound automatically",
-        effect_summary: "projected credit updates registered artifacts",
-        verifier_kind: "deterministic_code",
-      },
-    });
-
-    const predicted = db
-      .query<{ payload: string }, []>("SELECT payload FROM events WHERE kind = 'action_predicted' LIMIT 1")
-      .get()!;
-    expect(JSON.parse(predicted.payload).cited_artifact_ids).toEqual([
-      "real_action_artifact",
-      "real_verifier_artifact",
-    ]);
-    const bindings = db
-      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM events WHERE kind = 'retrieval_binding' AND json_extract(payload, '$.source_artifact_id') IN ('real_action_artifact', 'real_verifier_artifact')")
-      .get()!.n;
-    expect(bindings).toBe(2);
-    const update = db
-      .query<{ payload: string }, []>("SELECT payload FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.artifact_id') = 'real_action_artifact' LIMIT 1")
-      .get();
-    expect(update).not.toBeNull();
-    expect(getArtifact(db, "real_action_artifact")!.posteriorAlpha).toBeGreaterThan(before.posteriorAlpha);
-  });
-
-  test("bridge-exit artifact pair is not auto-bound or credited", () => {
-    const db = openDb(":memory:");
-    const directiveId = newId();
-    const taskId = newId();
-    insertSampleArtifact(db, "opencode_brain_exit_action", "// synthetic bridge exit action");
-    insertSampleArtifact(db, "opencode_bridge_exit_verifier", "// synthetic bridge exit verifier");
-
-    emitEvent(db, {
-      kind: "act_tuple_recorded",
-      substrate_origin: "opencode",
-      directive_id: directiveId,
-      task_id: taskId,
-      action_artifact_id: "opencode_brain_exit_action",
-      verifier_artifact_id: "opencode_bridge_exit_verifier",
-      predicted_residual: 0.2,
-      residual: 0,
-      payload: {
-        intent: "Record one coherent opencode brain dispatch exit boundary.",
-        reasoning_summary: "bridge_completed",
-        effect_summary: "bridge_completed final_response_chars=884",
-        verifier_kind: "opencode_bridge_exit",
-      },
-    });
-
-    const predicted = db
-      .query<{ payload: string }, []>("SELECT payload FROM events WHERE kind = 'action_predicted' LIMIT 1")
-      .get()!;
-    expect(JSON.parse(predicted.payload).cited_artifact_ids).toEqual([]);
-    const bindings = db
-      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM events WHERE kind = 'retrieval_binding'")
-      .get()!.n;
-    expect(bindings).toBe(0);
-    const updates = db
-      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.artifact_id') IN ('opencode_brain_exit_action', 'opencode_bridge_exit_verifier')")
-      .get()!.n;
-    expect(updates).toBe(0);
   });
 
   test("task_closure_audited without numeric residual gets a classification_source marker", () => {
@@ -822,7 +718,7 @@ describe("emitEvent act_tuple_recorded projector", () => {
       action_scored: 1,
       applied_change_committed: 1,
       candidate_confirmed: 1,
-      retrieval_binding: 4,
+      retrieval_binding: 2,
       retrieval_rejected: 1,
       verifier_kind_auto_admitted: 1,
     });

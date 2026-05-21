@@ -169,16 +169,9 @@ const readOriginBiasForGoalShape = (db: Database, goalShape: string): Map<string
  *  Returns 0.5 (neutral) when no signal is available — Beta(1,1) prior. */
 const readPosterior = (db: Database, eventId: string, kind: string): number => {
   if (
-    kind === "act_artifact" || kind === "act_artifact_admitted" || kind === "act_artifact_promoted" || kind === "act_artifact_candidate" ||
+    kind === "act_artifact_admitted" || kind === "act_artifact_promoted" || kind === "act_artifact_candidate" ||
     kind === "code_artifact_admitted" || kind === "code_artifact_promoted" || kind === "code_artifact_candidate"
   ) {
-    if (kind === "act_artifact") {
-      const ca = db
-        .query("SELECT score FROM act_artifact WHERE id = ? AND superseded_by IS NULL")
-        .get(eventId) as { score: number } | null;
-      if (ca && typeof ca.score === "number") return ca.score;
-      return 0.5;
-    }
     // Pull the score from the registry by looking up via context_refs or
     // payload.artifact_id. We use a shape-tolerant fallback: scan the event,
     // look for an artifact_id reference, otherwise return neutral.

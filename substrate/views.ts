@@ -196,9 +196,8 @@ CREATE VIEW IF NOT EXISTS artifact_routing_view AS
   ORDER BY routing_score DESC;
 `;
 
-// embedding_index_view — rows that carry an embedding BLOB. Events and
-// active data-class artifacts share the same vec_events index so substrate
-// retrieval can rank durable corpus artifacts alongside ledger knowledge.
+// embedding_index_view — events that carry an embedding BLOB. The daemon
+// rebuilds its HNSW index from this view at boot.
 const VIEW_EMBEDDING_INDEX = `
 CREATE VIEW IF NOT EXISTS embedding_index_view AS
   SELECT
@@ -210,40 +209,7 @@ CREATE VIEW IF NOT EXISTS embedding_index_view AS
       json_extract(payload, '$.domain_weights')
     ) AS retrieval_domains
   FROM events
-  WHERE embedding IS NOT NULL
-  UNION ALL
-  SELECT
-    id,
-    'act_artifact' AS kind,
-    updated_at AS ts,
-    '' AS directive_id,
-    '' AS task_id,
-    embedding,
-    embedding_version,
-    'artifact_registry' AS substrate_origin,
-    json_object(
-      'body', body,
-      'intent', intent,
-      'summary', summary,
-      'name', name,
-      'artifact_kind', kind,
-      'target_resources', target_resources
-    ) AS payload,
-    json_object(
-      'body', body,
-      'intent', intent,
-      'summary', summary,
-      'name', name
-    ) AS retrieval_aspects,
-    CASE
-      WHEN target_resources IS NOT NULL THEN json_object('act_artifact data-class admissions', 1)
-      ELSE NULL
-    END AS retrieval_domains
-  FROM act_artifact
-  WHERE embedding IS NOT NULL
-    AND runtime IS NULL
-    AND superseded_by IS NULL
-    AND status IN ('admitted', 'promoted');
+  WHERE embedding IS NOT NULL;
 `;
 
 // origin_promotion_view — per substrate_origin, summarise how often candidate

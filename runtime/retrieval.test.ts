@@ -231,31 +231,6 @@ describe("retrieveWithEmbedding (sync variant, no API call)", () => {
     expect(result.hits.length).toBe(3);
     expect(result.hits[0].event_id).toBe(nearId);
   });
-  test("returns active data-class act_artifact rows and excludes superseded ones", () => {
-    const db = openDb(":memory:");
-    runViews(db);
-    const dims = 8;
-    const now = new Date().toISOString();
-    db.run(
-      `INSERT INTO act_artifact (id, runtime, body, declared_sandbox, state_root, kind, status, score, confidence, embedding, embedding_version, created_at, updated_at)
-       VALUES (?, NULL, ?, NULL, NULL, ?, 'admitted', 0.8, 0.5, ?, ?, ?, ?)`,
-      ["artifact_active", "Alex roadmap language critique", "private_corpus_doc", encodeEmbeddingBlob(makeUnitVec(dims, 0)), EMBEDDING_VERSION, now, now],
-    );
-    db.run(
-      `INSERT INTO act_artifact (id, runtime, body, declared_sandbox, state_root, kind, status, score, confidence, embedding, embedding_version, superseded_by, created_at, updated_at)
-       VALUES (?, NULL, ?, NULL, NULL, ?, 'admitted', 0.9, 0.5, ?, ?, ?, ?, ?)`,
-      ["artifact_superseded", "Alex roadmap language critique superseded", "private_corpus_doc", encodeEmbeddingBlob(makeUnitVec(dims, 0)), EMBEDDING_VERSION, "artifact_active", now, now],
-    );
-    const idx = EmbeddingIndex.rebuildFromDb(db);
-    const result = retrieveWithEmbedding(db, idx, new Float32Array(makeUnitVec(dims, 0)), { k: 5 });
-
-    expect(result.hits.map((h) => h.event_id)).toContain("artifact_active");
-    expect(result.hits.map((h) => h.event_id)).not.toContain("artifact_superseded");
-    const hit = result.hits.find((h) => h.event_id === "artifact_active");
-    expect(hit?.kind).toBe("act_artifact");
-    expect(hit?.snippet).toContain("Alex roadmap language critique");
-    expect(hit?.posterior).toBe(0.8);
-  });
 });
 
 describe("per-(origin, goal_shape) bias (Phase H)", () => {

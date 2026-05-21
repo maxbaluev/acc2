@@ -26,7 +26,7 @@
 // wrapper after callers move to the SQL surface directly.
 
 import type { Database } from "bun:sqlite";
-import { decodeEmbeddingBlob, EMBEDDING_VERSION, upsertVecIndexRow } from "./embedder";
+import { decodeEmbeddingBlob, EMBEDDING_VERSION, upsertVecEventRow } from "./embedder";
 
 export type IndexEntry = {
   event_id: string;
@@ -231,7 +231,7 @@ export class EmbeddingIndex {
         // a schema error; we catch and stash the vector in jsVectors so
         // the JS-fallback knn can serve them.
         try {
-          upsertVecIndexRow(db, row.id, row.kind, row.ts, Array.from(decoded), version);
+          upsertVecEventRow(db, row.id, Array.from(decoded), version);
           projectedToVec = true;
         } catch {
           jsVectors.set(row.id, decoded);
@@ -269,7 +269,7 @@ export class EmbeddingIndex {
   add(entry: IndexEntry): void {
     let projectedToVec = false;
     try {
-      upsertVecIndexRow(this.db, entry.event_id, entry.kind, entry.ts, Array.from(entry.embedding), entry.embedding_version);
+      upsertVecEventRow(this.db, entry.event_id, Array.from(entry.embedding), entry.embedding_version);
       const probe = this.db
         .query("SELECT 1 AS ok FROM vec_events WHERE event_id = ? LIMIT 1")
         .get(entry.event_id) as { ok: number } | null;

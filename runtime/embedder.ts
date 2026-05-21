@@ -111,12 +111,6 @@ export const computeEmbedding = async (
 };
 
 const BATCH_SIZE = 100;
-const MAX_EMBEDDING_TEXT_CHARS = 12_000;
-
-const boundEmbeddingText = (text: string): string => {
-  const trimmed = text.trim();
-  return trimmed.length > MAX_EMBEDDING_TEXT_CHARS ? trimmed.slice(0, MAX_EMBEDDING_TEXT_CHARS) : trimmed;
-};
 
 /** Batch variant — chunks at 100 items per OpenAI request (the documented
  *  per-request input cap). On any chunk failure the surviving keys remain in
@@ -140,7 +134,7 @@ export const batchComputeEmbeddings = async (
         },
         body: JSON.stringify({
           model: EMBEDDING_MODEL,
-          input: slice.map((i) => boundEmbeddingText(i.text)),
+          input: slice.map((i) => i.text),
           dimensions: EMBEDDING_DIMS,
         }),
         signal: AbortSignal.timeout(EMBED_FETCH_TIMEOUT_MS),
@@ -218,12 +212,12 @@ export const extractTextFromEvent = (kind: string, payload: unknown): string | n
     );
   }
   for (const c of candidates) {
-    if (typeof c === "string" && c.trim().length > 0) return boundEmbeddingText(c);
+    if (typeof c === "string" && c.trim().length > 0) return c;
   }
   return null;
 };
 
-type UnembeddedRow = { id: string; kind: string; payload: string; source: "event" | "artifact" };
+type UnembeddedRow = { id: string; kind: string; payload: string };
 
 /** Resolve the embedding text for one event row, including cross-table joins
  *  for kinds where the truth-bearing text lives on a different row. Called by
@@ -262,10 +256,10 @@ const resolveJoinedText = (db: Database, kind: string, payload: Record<string, u
 // synchronous work. Routing through worker_threads frees the main loop
 // for emitEvent + MCP IO. The sync fallback path stays correct for unit
 // tests and ACC2_DISABLE_SQL_POOL=1 diagnostics.
-const readUnembeddedEvents = async (db: Database, batchSize: number): Promise<UnembeddedRow[]> => {
+const readUnembedded = async (db: Database, batchSize: number): Promise<UnembeddedRow[]> => {
   const placeholders = Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ");
   const sql =
-    `SELECT id, kind, payload, 'event' AS source FROM events ` +
+    `SELECT id, kind, payload FROM events ` +
     `WHERE embedding IS NULL AND kind IN (${placeholders}) ` +
     `ORDER BY ts ASC LIMIT ?`;
   const params: unknown[] = [...Array.from(EMBEDDABLE_KINDS), batchSize];
@@ -275,32 +269,6 @@ const readUnembeddedEvents = async (db: Database, batchSize: number): Promise<Un
     if (pool) return pool.query<UnembeddedRow>(sql, params);
   } catch { /* tolerate — fall through */ }
   return db.query(sql).all(...params) as UnembeddedRow[];
-};
-
-const readUnembeddedArtifacts = (db: Database, batchSize: number): UnembeddedRow[] => {
-  return db
-    .query(
-      `SELECT
-         id,
-         'act_artifact' AS kind,
-         json_object('body', body, 'intent', intent, 'summary', summary, 'name', name) AS payload,
-         'artifact' AS source
-       FROM act_artifact
-       WHERE embedding IS NULL
-         AND runtime IS NULL
-         AND superseded_by IS NULL
-         AND status IN ('admitted', 'promoted')
-       ORDER BY updated_at ASC
-       LIMIT ?`,
-    )
-    .all(batchSize) as UnembeddedRow[];
-};
-
-const readUnembedded = async (db: Database, batchSize: number): Promise<UnembeddedRow[]> => {
-  const eventRows = await readUnembeddedEvents(db, batchSize);
-  if (eventRows.length >= batchSize) return eventRows;
-  const artifactRows = readUnembeddedArtifacts(db, batchSize - eventRows.length);
-  return [...eventRows, ...artifactRows];
 };
 
 /** Count unembedded rows USING THE EMBEDDABLE-KIND FILTER. Daemon-side
@@ -320,28 +288,16 @@ export const pendingEmbeddableCount = async (db: Database): Promise<number> => {
     `SELECT COUNT(*) AS c FROM events ` +
     `WHERE embedding IS NULL AND kind IN (${placeholders})`;
   const params: unknown[] = [...Array.from(EMBEDDABLE_KINDS)];
-  const artifactPending = (): number => {
-    const row = db
-      .query(
-        `SELECT COUNT(*) AS c FROM act_artifact
-         WHERE embedding IS NULL
-           AND runtime IS NULL
-           AND superseded_by IS NULL
-           AND status IN ('admitted', 'promoted')`,
-      )
-      .get() as { c: number } | null;
-    return row?.c ?? 0;
-  };
   try {
     const poolMod = await import("./sql_pool_singleton");
     const pool = poolMod.getSqlPool();
     if (pool) {
       const rows = await pool.query<{ c: number }>(sql, params);
-      return (rows[0]?.c ?? 0) + artifactPending();
+      return rows[0]?.c ?? 0;
     }
   } catch { /* tolerate — fall through */ }
   const row = db.query(sql).get(...params) as { c: number } | null;
-  return (row?.c ?? 0) + artifactPending();
+  return row?.c ?? 0;
 };
 
 /** Insert (or replace) the matching row in the vec0 virtual table.
@@ -356,27 +312,6 @@ export const pendingEmbeddableCount = async (db: Database): Promise<number> => {
  *  exception so the caller can swallow it. The events.embedding BLOB
  *  column is still written by persistEmbedding before this runs, so
  *  retrieval can degrade to the in-memory path. */
-export const upsertVecIndexRow = (
-  db: Database,
-  id: string,
-  kind: string,
-  ts: string,
-  embedding: number[],
-  version: string,
-): void => {
-  // vec0 stores the vector as JSON or BLOB; we send JSON for portability
-  // (smaller code path, no Buffer juggling) — the extension parses it
-  // into the internal float[N] representation either way.
-  const vec = JSON.stringify(embedding);
-  // Replace-if-present: DELETE then INSERT keeps the rebuild + live-add
-  // paths convergent without relying on UPSERT.
-  db.run("DELETE FROM vec_events WHERE event_id = ?", [id]);
-  db.run(
-    "INSERT INTO vec_events(event_id, embedding, kind, ts, embedding_version) VALUES (?, ?, ?, ?, ?)",
-    [id, vec, kind, ts, version],
-  );
-};
-
 export const upsertVecEventRow = (
   db: Database,
   eventId: string,
@@ -387,23 +322,17 @@ export const upsertVecEventRow = (
     .query("SELECT kind, ts FROM events WHERE id = ?")
     .get(eventId) as { kind: string; ts: string } | null;
   if (!row) return;
-  upsertVecIndexRow(db, eventId, row.kind, row.ts, embedding, version);
-};
-
-const upsertVecArtifactRow = (
-  db: Database,
-  artifactId: string,
-  embedding: number[],
-  version: string,
-): void => {
-  const row = db
-    .query(
-      `SELECT updated_at AS ts FROM act_artifact
-       WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted')`,
-    )
-    .get(artifactId) as { ts: string } | null;
-  if (!row) return;
-  upsertVecIndexRow(db, artifactId, "act_artifact", row.ts, embedding, version);
+  // vec0 stores the vector as JSON or BLOB; we send JSON for portability
+  // (smaller code path, no Buffer juggling) — the extension parses it
+  // into the internal float[N] representation either way.
+  const vec = JSON.stringify(embedding);
+  // Replace-if-present: DELETE then INSERT keeps the rebuild + live-add
+  // paths convergent without relying on UPSERT.
+  db.run("DELETE FROM vec_events WHERE event_id = ?", [eventId]);
+  db.run(
+    "INSERT INTO vec_events(event_id, embedding, kind, ts, embedding_version) VALUES (?, ?, ?, ?, ?)",
+    [eventId, vec, row.kind, row.ts, version],
+  );
 };
 
 /** Persist one embedding back onto the source row. We UPDATE the source
@@ -450,56 +379,25 @@ const persistEmbedding = (
   }
 };
 
-const persistArtifactEmbedding = (
-  db: Database,
-  artifactId: string,
-  embedding: number[],
-  version: string,
-): void => {
-  const blob = encodeEmbeddingBlob(embedding);
-  db.run(
-    "UPDATE act_artifact SET embedding = ?, embedding_version = ? WHERE id = ?",
-    [blob, version, artifactId],
-  );
-  try {
-    upsertVecArtifactRow(db, artifactId, embedding, version);
-  } catch (err) {
-    logger.warn(
-      { artifact_id: artifactId, err: (err as Error).message ?? String(err) },
-      "vec_events artifact upsert failed",
-    );
-  }
-};
-
-const extractTextFromArtifactPayload = (payload: Record<string, unknown>): string | null => {
-  const candidates = [payload.body, payload.summary, payload.intent, payload.name];
-  for (const c of candidates) {
-    if (typeof c === "string" && c.trim().length > 0) return c;
-  }
-  return null;
-};
-
 /** Emit ONE summary embedding_computed event for an entire batch.
  *  Replaces the per-row emit storm — see persistEmbedding for rationale. */
 const emitBatchEmbeddingAudit = (
   db: Database,
   sourceEventIds: string[],
-  sourceArtifactIds: string[],
   version: string,
 ): void => {
-  if (sourceEventIds.length === 0 && sourceArtifactIds.length === 0) return;
+  if (sourceEventIds.length === 0) return;
   emitEvent(db, {
     kind: "embedding_computed",
     substrate_origin: "substrate_auto",
     payload: {
       source_event_ids: sourceEventIds,
-      source_artifact_ids: sourceArtifactIds,
-      count: sourceEventIds.length + sourceArtifactIds.length,
+      count: sourceEventIds.length,
       version,
       dims: EMBEDDING_DIMS,
       model: EMBEDDING_MODEL,
     },
-    context_refs: [...sourceEventIds, ...sourceArtifactIds].slice(0, 20),
+    context_refs: sourceEventIds.slice(0, 20),
   });
 };
 
@@ -522,20 +420,20 @@ export const embedderWorkerTick = async (
   if (rows.length === 0) {
     return { embedded: 0, skipped_no_text: 0, failed: 0 };
   }
-  const items: Array<{ id: string; text: string; source: "event" | "artifact" }> = [];
-  const noTextRows: UnembeddedRow[] = [];
+  const items: Array<{ id: string; text: string }> = [];
+  const noTextIds: string[] = [];
   for (const r of rows) {
     let payload: Record<string, unknown> = {};
     try { payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>; } catch { /* skip */ }
-    let text = r.source === "artifact" ? extractTextFromArtifactPayload(payload) : extractTextFromEvent(r.kind, payload);
-    if (!text && r.source === "event") {
+    let text = extractTextFromEvent(r.kind, payload);
+    if (!text) {
       // Fall back to cross-table JOIN resolution (e.g. knowledge_promoted →
       // candidate.claim). Saves the row from being sentinel-marked when its
       // text genuinely exists but lives on a different row.
       text = resolveJoinedText(db, r.kind, payload);
     }
-    if (!text) { noTextRows.push(r); continue; }
-    items.push({ id: r.id, text, source: r.source });
+    if (!text) { noTextIds.push(r.id); continue; }
+    items.push({ id: r.id, text });
   }
   // Mark text-less rows with a 0-byte sentinel BLOB so subsequent ticks don't
   // keep re-reading them. `readUnembedded` filters on `embedding IS NULL`, so
@@ -545,27 +443,16 @@ export const embedderWorkerTick = async (
   // embeddable text (e.g. act_artifact_admitted, action_scored — they're
   // registered embeddable historically but the runtime emitter writes only
   // structured fields, so extractTextFromEvent returns null forever).
-  const noTextEventIds = noTextRows.filter((r) => r.source === "event").map((r) => r.id);
-  const noTextArtifactIds = noTextRows.filter((r) => r.source === "artifact").map((r) => r.id);
-  if (noTextEventIds.length > 0) {
-    const placeholders = noTextEventIds.map(() => "?").join(", ");
+  if (noTextIds.length > 0) {
+    const placeholders = noTextIds.map(() => "?").join(", ");
     try {
       db.run(
         `UPDATE events SET embedding = X'' WHERE id IN (${placeholders}) AND embedding IS NULL`,
-        noTextEventIds,
+        noTextIds,
       );
     } catch { /* swallow — next tick re-checks; retry is harmless */ }
   }
-  if (noTextArtifactIds.length > 0) {
-    const placeholders = noTextArtifactIds.map(() => "?").join(", ");
-    try {
-      db.run(
-        `UPDATE act_artifact SET embedding = X'', embedding_version = 'no_text' WHERE id IN (${placeholders}) AND embedding IS NULL`,
-        noTextArtifactIds,
-      );
-    } catch { /* swallow — next tick re-checks; retry is harmless */ }
-  }
-  const skipped_no_text = noTextRows.length;
+  const skipped_no_text = noTextIds.length;
   if (items.length === 0) {
     return { embedded: 0, skipped_no_text, failed: 0 };
   }
@@ -583,21 +470,15 @@ export const embedderWorkerTick = async (
   // in BEGIN/COMMIT collapses fsync to once and lets WAL fast-path.
   // Failures inside the txn fall through to the catch and rollback the
   // whole batch — surviving rows are picked up by the next tick.
-  const persistedEventIds: string[] = [];
-  const persistedArtifactIds: string[] = [];
+  const persistedIds: string[] = [];
   db.run("BEGIN");
   try {
     for (const item of items) {
       const vec = embeddings.get(item.id);
       if (!vec) { failed++; continue; }
       try {
-        if (item.source === "artifact") {
-          persistArtifactEmbedding(db, item.id, vec, EMBEDDING_VERSION);
-          persistedArtifactIds.push(item.id);
-        } else {
-          persistEmbedding(db, item.id, vec, EMBEDDING_VERSION);
-          persistedEventIds.push(item.id);
-        }
+        persistEmbedding(db, item.id, vec, EMBEDDING_VERSION);
+        persistedIds.push(item.id);
         embedded++;
         try { recordEmbedding(batchDurMs / Math.max(1, embeddings.size) / 1000); } catch { /* swallow */ }
       } catch {
@@ -615,7 +496,7 @@ export const embedderWorkerTick = async (
   }
   // ONE audit emit per batch, AFTER the transaction commits. Replaces the
   // per-row emit storm that was the structural wedge.
-  emitBatchEmbeddingAudit(db, persistedEventIds, persistedArtifactIds, EMBEDDING_VERSION);
+  emitBatchEmbeddingAudit(db, persistedIds, EMBEDDING_VERSION);
   return { embedded, skipped_no_text, failed };
 };
 
@@ -652,22 +533,12 @@ export const embedPendingEvents = async (
   const batchSize = Math.max(1, Math.min(500, opts.batchSize ?? 100));
   // Honour the no-API-key path up front: emit ONE audit row carrying the
   // pending count so the substrate explains why nothing was indexed.
-  const pendingEventCount = (db
+  const pendingCount = (db
     .query(
       `SELECT COUNT(*) AS c FROM events
        WHERE embedding IS NULL AND kind IN (${Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ")})`,
     )
     .get(...Array.from(EMBEDDABLE_KINDS)) as { c: number }).c;
-  const pendingArtifactCount = (db
-    .query(
-      `SELECT COUNT(*) AS c FROM act_artifact
-       WHERE embedding IS NULL
-         AND runtime IS NULL
-         AND superseded_by IS NULL
-         AND status IN ('admitted', 'promoted')`,
-    )
-    .get() as { c: number }).c;
-  const pendingCount = pendingEventCount + pendingArtifactCount;
   if (pendingCount === 0) {
     return { embedded: 0, skipped: 0, failed: 0 };
   }
@@ -723,12 +594,12 @@ export const embedPendingEvents = async (
   while (true) {
     const rows = await readUnembedded(db, batchSize);
     if (rows.length === 0) break;
-    const items: Array<{ id: string; text: string; source: "event" | "artifact" }> = [];
+    const items: Array<{ id: string; text: string }> = [];
     for (const r of rows) {
       let payload: Record<string, unknown> = {};
       try { payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>; } catch { /* skip */ }
-      let text = r.source === "artifact" ? extractTextFromArtifactPayload(payload) : extractTextFromEvent(r.kind, payload);
-      if (!text && r.source === "event") {
+      let text = extractTextFromEvent(r.kind, payload);
+      if (!text) {
         // Cross-table JOIN fallback (knowledge_promoted → candidate.claim).
         text = resolveJoinedText(db, r.kind, payload);
       }
@@ -742,20 +613,13 @@ export const embedPendingEvents = async (
         // so the row is removed from the pending pool. Empty BLOB is
         // a legitimate marker because decodeEmbeddingBlob returns null
         // for zero-length input.
-        if (r.source === "artifact") {
-          db.run(
-            "UPDATE act_artifact SET embedding = ?, embedding_version = ? WHERE id = ?",
-            [new Uint8Array(0), "no_text", r.id],
-          );
-        } else {
-          db.run(
-            "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
-            [new Uint8Array(0), "no_text", r.id],
-          );
-        }
+        db.run(
+          "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
+          [new Uint8Array(0), "no_text", r.id],
+        );
         continue;
       }
-      items.push({ id: r.id, text, source: r.source });
+      items.push({ id: r.id, text });
     }
     if (items.length === 0) {
       // Nothing embeddable in this slice; loop again only if readUnembedded
@@ -764,21 +628,15 @@ export const embedPendingEvents = async (
       continue;
     }
     const embeddings = await batchComputeEmbeddings(items);
-    const persistedEventIds: string[] = [];
-    const persistedArtifactIds: string[] = [];
+    const persistedIds: string[] = [];
     db.run("BEGIN");
     try {
       for (const item of items) {
         const vec = embeddings.get(item.id);
         if (!vec) { failed++; continue; }
         try {
-          if (item.source === "artifact") {
-            persistArtifactEmbedding(db, item.id, vec, EMBEDDING_VERSION);
-            persistedArtifactIds.push(item.id);
-          } else {
-            persistEmbedding(db, item.id, vec, EMBEDDING_VERSION);
-            persistedEventIds.push(item.id);
-          }
+          persistEmbedding(db, item.id, vec, EMBEDDING_VERSION);
+          persistedIds.push(item.id);
           embedded++;
         } catch {
           failed++;
@@ -788,10 +646,10 @@ export const embedPendingEvents = async (
     } catch (err) {
       try { db.run("ROLLBACK"); } catch { /* best-effort */ }
       logger.warn({ err: (err as Error).message }, "embedPendingEvents batch persist rolled back");
-      failed += items.length - persistedEventIds.length - persistedArtifactIds.length;
+      failed += items.length - persistedIds.length;
     }
     // ONE audit emit per batch — replaces the per-row storm.
-    emitBatchEmbeddingAudit(db, persistedEventIds, persistedArtifactIds, EMBEDDING_VERSION);
+    emitBatchEmbeddingAudit(db, persistedIds, EMBEDDING_VERSION);
     // Defensive cap: if a slice came back with EVERY item failing (no
     // network, bad key, etc) we'd loop forever — bail out so the caller
     // sees the failed count without hanging.

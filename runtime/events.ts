@@ -629,30 +629,6 @@ const requireResidual = (value: unknown, key: string): number => {
   return value;
 };
 
-const BRIDGE_EXIT_ACTION_ARTIFACT_ID = "opencode_brain_exit_action";
-const BRIDGE_EXIT_VERIFIER_ARTIFACT_ID = "opencode_bridge_exit_verifier";
-
-const isBridgeExitArtifactPair = (actionArtifactId: string, verifierArtifactId: string): boolean =>
-  actionArtifactId === BRIDGE_EXIT_ACTION_ARTIFACT_ID
-  && verifierArtifactId === BRIDGE_EXIT_VERIFIER_ARTIFACT_ID;
-
-const autoBindSelectedArtifacts = (
-  citedArtifactIds: string[],
-  actionArtifactId: string,
-  verifierArtifactId: string,
-): string[] => {
-  if (isBridgeExitArtifactPair(actionArtifactId, verifierArtifactId)) return citedArtifactIds;
-  const seen = new Set(citedArtifactIds);
-  const out = [...citedArtifactIds];
-  for (const artifactId of [actionArtifactId, verifierArtifactId]) {
-    if (!seen.has(artifactId)) {
-      seen.add(artifactId);
-      out.push(artifactId);
-    }
-  }
-  return out;
-};
-
 const normalizeActTuple = (input: EmitEventInput): NormalizedActTuple => {
   if (!isObject(input.payload)) throw new Error("invalid_act_tuple_recorded:payload_object_required");
   const payload = input.payload;
@@ -680,11 +656,6 @@ const normalizeActTuple = (input: EmitEventInput): NormalizedActTuple => {
   const sourceEventId = typeof payload.source_event_id === "string" && payload.source_event_id.trim().length > 0
     ? payload.source_event_id.trim()
     : undefined;
-  const citedArtifactIds = autoBindSelectedArtifacts(
-    optionalStringArray(payload, "cited_artifact_ids"),
-    actionArtifact,
-    verifierArtifact,
-  );
   return {
     intent: requireString(payload, "intent"),
     reasoning_summary: requireString(payload, "reasoning_summary"),
@@ -698,7 +669,7 @@ const normalizeActTuple = (input: EmitEventInput): NormalizedActTuple => {
     source_act_id: logicalSourceActId,
     source_event_id: sourceEventId,
     cited_knowledge_ids: optionalStringArray(payload, "cited_knowledge_ids"),
-    cited_artifact_ids: citedArtifactIds,
+    cited_artifact_ids: optionalStringArray(payload, "cited_artifact_ids"),
     affected_resources: optionalStringArray(payload, "affected_resources"),
     candidate_event_ids: optionalStringArray(payload, "candidate_event_ids"),
     co_actors: optionalStringArray(payload, "co_actors"),
@@ -834,7 +805,8 @@ const projectActTupleRecorded = (db: Database, source: {
   // Legitimate non-mutation acts (owner-credit, observation, research)
   // with empty affected_resources still project — they aren't bridge
   // closures.
-  const isBridgeExitAct = isBridgeExitArtifactPair(source.act.action_artifact_id, source.act.verifier_artifact_id);
+  const isBridgeExitAct = source.act.action_artifact_id === "opencode_brain_exit_action"
+    && source.act.verifier_artifact_id === "opencode_bridge_exit_verifier";
   const correlatedFailure = db
     .query<{ c: number }, [string, string, string, string]>(
       `SELECT COUNT(*) AS c FROM events

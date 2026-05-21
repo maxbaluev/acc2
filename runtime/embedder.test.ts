@@ -236,40 +236,6 @@ describe("embedderWorkerTick", () => {
     expect(vecRow!.embedding_version).toBe(EMBEDDING_VERSION);
   });
 
-  test("embeds active data-class artifacts into act_artifact and vec_events", async () => {
-    process.env.OPENAI_API_KEY = "sk-test-mock";
-    installMockFetch(async (_url, init) => {
-      const reqBody = JSON.parse((init.body as string) ?? "{}") as { input: string[] };
-      expect(reqBody.input).toContain("Lakeland fire services pilot corpus body");
-      const data = reqBody.input.map((_t, i) => ({ embedding: synthEmbedding(i + 21), index: i }));
-      return new Response(JSON.stringify({ data }), { status: 200 });
-    });
-
-    const db = openDb(":memory:");
-    db.run(
-      `INSERT INTO act_artifact (id, runtime, body, declared_sandbox, state_root, kind, status, score, confidence, created_at, updated_at)
-       VALUES (?, NULL, ?, NULL, NULL, ?, 'admitted', 0.5, 0.3, datetime('now'), datetime('now'))`,
-      ["artifact_lakeland", "Lakeland fire services pilot corpus body", "private_corpus_doc"],
-    );
-
-    const result = await embedderWorkerTick(db, { batchSize: 5 });
-    expect(result.embedded).toBe(1);
-    expect(result.failed).toBe(0);
-
-    const artifactRow = db
-      .query("SELECT embedding, embedding_version FROM act_artifact WHERE id = ?")
-      .get("artifact_lakeland") as { embedding: Uint8Array | null; embedding_version: string | null };
-    expect(artifactRow.embedding).not.toBeNull();
-    expect(artifactRow.embedding_version).toBe(EMBEDDING_VERSION);
-
-    const vecRow = db
-      .query("SELECT event_id, kind, embedding_version FROM vec_events WHERE event_id = ?")
-      .get("artifact_lakeland") as { event_id: string; kind: string; embedding_version: string } | null;
-    expect(vecRow).not.toBeNull();
-    expect(vecRow!.kind).toBe("act_artifact");
-    expect(vecRow!.embedding_version).toBe(EMBEDDING_VERSION);
-  });
-
   test("idempotent — a second tick does not re-embed an already-embedded row", async () => {
     process.env.OPENAI_API_KEY = "sk-test-mock";
     let calls = 0;
