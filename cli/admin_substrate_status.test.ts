@@ -103,6 +103,39 @@ describe("computeSubstrateStatus", () => {
     expect(r.actArtifactsBrain).toBe(0);
   });
 
+  test("reports only real embeddable-with-text events in the retrieval denominator", () => {
+    const db = openDb(":memory:");
+    const embedded = emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      payload: { directive_text: "real text already embedded" },
+    });
+    emitEvent(db, {
+      kind: "owner_input_received",
+      substrate_origin: "owner",
+      payload: { text: "real text still pending" },
+    });
+    const noText = emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      payload: { candidate_id: "missing-candidate-row" },
+    });
+    emitEvent(db, {
+      kind: "task_ready",
+      substrate_origin: "substrate_auto",
+      payload: { reason: "non-embeddable lifecycle chatter" },
+    });
+
+    db.run("UPDATE events SET embedding = ? WHERE id = ?", [new Uint8Array([1, 2, 3, 4]), embedded.id]);
+    db.run("UPDATE events SET embedding = X'', embedding_version = 'no_text' WHERE id = ?", [noText.id]);
+
+    const r = computeSubstrateStatus(db, "/tmp/x.db");
+    expect(r.vecEvents).toBe(1);
+    expect(r.embeddablePending).toBe(1);
+    expect(r.embeddableTotal).toBe(2);
+    expect(r.nonEmbeddableSkipped).toBe(2);
+  });
+
   test("counts seed vs brain-authored artifacts separately", () => {
     const db = openDb(":memory:");
     seedActArtifacts(db);
@@ -170,6 +203,8 @@ describe("renderSubstrateStatus", () => {
         actArtifactsBrain: 0,
         vecEvents: 5,
         embeddableTotal: 5,
+        embeddablePending: 0,
+        nonEmbeddableSkipped: 3,
         recipeRows: 2,
         knowledgePromoted: 10,
         stakeholderState: 0,
@@ -193,7 +228,9 @@ describe("renderSubstrateStatus", () => {
     expect(joined).toContain("verdict: ALIVE");
     expect(joined).toContain("events:");
     expect(joined).toContain("act_artifact:");
+    expect(joined).toContain("retrieval index:            5 embedded, 0 pending, 3 non-embeddable (skipped)");
     expect(joined).toContain("vec_events:");
+    expect(joined).toContain("genuinely embeddable");
     expect(joined).toContain("(8 seed, 0 brain-authored)");
     expect(joined).toContain("all embedded");
     expect(joined).toContain("health metrics:");

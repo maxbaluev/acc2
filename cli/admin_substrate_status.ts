@@ -72,6 +72,8 @@ export type SubstrateStatusReport = {
   actArtifactsBrain: number;
   vecEvents: number;
   embeddableTotal: number;
+  embeddablePending: number;
+  nonEmbeddableSkipped: number;
   recipeRows: number;
   knowledgePromoted: number;
   stakeholderState: number;
@@ -123,13 +125,22 @@ export const computeSubstrateStatus = (
     "SELECT COUNT(*) AS c FROM act_artifact WHERE id LIKE 'seed_%' OR state_root LIKE 'substrate/primitive/%' OR state_root LIKE 'substrate/threshold/%'",
   );
   const actArtifactsBrain = Math.max(0, actArtifacts - actArtifactsSeed);
-  const vecEvents = safeCount(db, "SELECT COUNT(*) AS c FROM vec_events");
 
   const placeholders = EMBEDDABLE_KINDS.map(() => "?").join(", ");
-  const embeddableTotal = safeCount(
+  const vecEvents = safeCount(
     db,
-    `SELECT COUNT(*) AS c FROM events WHERE kind IN (${placeholders})`,
+    `SELECT COUNT(*) AS c FROM events WHERE kind IN (${placeholders}) AND embedding IS NOT NULL AND length(embedding) > 0`,
     EMBEDDABLE_KINDS as unknown as unknown[],
+  );
+  const embeddablePending = safeCount(
+    db,
+    `SELECT COUNT(*) AS c FROM events WHERE kind IN (${placeholders}) AND embedding IS NULL`,
+    EMBEDDABLE_KINDS as unknown as unknown[],
+  );
+  const embeddableTotal = vecEvents + embeddablePending;
+  const nonEmbeddableSkipped = safeCount(
+    db,
+    "SELECT COUNT(*) AS c FROM events WHERE embedding IS NOT NULL AND length(embedding) = 0",
   );
 
   const recipeRows = safeCount(
@@ -203,6 +214,8 @@ export const computeSubstrateStatus = (
     actArtifactsBrain,
     vecEvents,
     embeddableTotal,
+    embeddablePending,
+    nonEmbeddableSkipped,
     recipeRows,
     knowledgePromoted,
     stakeholderState,
@@ -235,8 +248,13 @@ export const renderSubstrateStatus = (
       `(${report.actArtifactsSeed} seed, ${report.actArtifactsBrain} brain-authored)`,
   );
   out(
+    `retrieval index:            ${fmt(report.vecEvents)} embedded, ` +
+      `${fmt(report.embeddablePending)} pending, ` +
+      `${fmt(report.nonEmbeddableSkipped)} non-embeddable (skipped)`,
+  );
+  out(
     `vec_events:                 ${fmt(report.vecEvents)}   ` +
-      `(embedded / ${report.embeddableTotal} total embeddable)`,
+      `(embedded / ${report.embeddableTotal} genuinely embeddable)`,
   );
   out(`recipe-shape knowledge:     ${fmt(report.recipeRows)}`);
   out(`knowledge_promoted:         ${fmt(report.knowledgePromoted)}`);
