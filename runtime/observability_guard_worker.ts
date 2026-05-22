@@ -15,6 +15,16 @@
 //      (e.g. the reported retrieval-index count vs. the count of
 //      genuinely-embeddable events). → emits metric_veracity_alert.
 //
+//   3. ERROR FLOODS (loud problems). The same error_caught (where,message)
+//      repeating hundreds of times over a short window — the LOUD failure
+//      class the silent-loop/lying-metric checks could not catch. This
+//      session, error_caught flooded 2245x/15min with the SAME message
+//      (sql_worker_query_failed:no such module: vec0) and only the human
+//      owner caught it via `acc watch`. A diversity of occasional
+//      recoverable errors is normal; the SAME error repeating past a
+//      threshold inside a short flood window is the signal.
+//      → emits error_flood_alert naming the exact culprit.
+//
 // The worker is defensive per-check (try/catch around every check; a
 // query error emits a guard_check_error breadcrumb but never crashes
 // the tick) and idempotent (skips emitting a loop_inert_alert when one
@@ -26,6 +36,18 @@ import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 
 const DEFAULT_WINDOW_HOURS = 24;
+
+// Error-flood watch. Rationale: a flood is about RATE, not lifetime total —
+// 50 of the SAME error in 24h is benign noise, but 50 in a single hour is a
+// tight repeating loop screaming. So the flood window is INDEPENDENT of the
+// main tick window: ERROR_FLOOD_WINDOW_HOURS=1 isolates rate, and
+// ERROR_FLOOD_THRESHOLD=50 sits well above normal recoverable noise (a
+// diverse handful of occasional errors) yet well below a real flood (the
+// vec0 incident was 2245x/15min). Grouping by (where,message) means a
+// healthy diversity of distinct occasional errors never trips it — only the
+// SAME error repeating past threshold inside the flood window does.
+const ERROR_FLOOD_THRESHOLD = 50;
+const ERROR_FLOOD_WINDOW_HOURS = 1;
 
 /** A wired loop and the upstream trigger that should keep it non-inert.
  *  upstream_kind is the simple-count case; upstream_query overrides it
@@ -124,6 +146,9 @@ export type ObservabilityGuardSummary = {
   metric_checks: number;
   metric_alerts_emitted: number;
   metric_skipped_within_tolerance: number;
+  error_flood_checks: number;
+  error_flood_alerts_emitted: number;
+  error_flood_skipped_idempotent: number;
   check_errors: number;
   alert_event_ids: string[];
 };
@@ -161,10 +186,29 @@ const inertAlertExistsInWindow = (
   return row !== null;
 };
 
+const errorFloodAlertExistsInWindow = (
+  db: Database,
+  where: string,
+  message: string,
+  sinceIso: string,
+): boolean => {
+  const row = db
+    .query<{ x: number }, [string, string, string]>(
+      `SELECT 1 AS x FROM events
+        WHERE kind = 'error_flood_alert'
+          AND json_extract(payload, '$.where') = ?
+          AND json_extract(payload, '$.message') = ?
+          AND ts >= ?
+        LIMIT 1`,
+    )
+    .get(where, message, sinceIso);
+  return row !== null;
+};
+
 /**
- * One observability-fidelity sweep. Runs every inert-loop check and
- * every metric-veracity check defensively; a single failing query
- * never aborts the others or crashes the tick.
+ * One observability-fidelity sweep. Runs every inert-loop check, every
+ * metric-veracity check, and the error-flood watch defensively; a single
+ * failing query never aborts the others or crashes the tick.
  */
 export const observabilityGuardTick = async (
   db: Database,
@@ -186,6 +230,9 @@ export const observabilityGuardTick = async (
     metric_checks: 0,
     metric_alerts_emitted: 0,
     metric_skipped_within_tolerance: 0,
+    error_flood_checks: 0,
+    error_flood_alerts_emitted: 0,
+    error_flood_skipped_idempotent: 0,
     check_errors: 0,
     alert_event_ids: [],
   };
@@ -280,9 +327,60 @@ export const observabilityGuardTick = async (
     }
   }
 
+  // ---- ERROR-FLOOD WATCH (loud problems) ----
+  // Group recent error_caught by (where, message) over a SHORT flood window
+  // (independent of the main tick window — a flood is about rate, not
+  // lifetime total) and alert on any single group that exceeds the
+  // threshold, naming the exact culprit. Defensive: a query failure here
+  // never crashes the tick.
+  summary.error_flood_checks += 1;
+  try {
+    const floodWindowMs = ERROR_FLOOD_WINDOW_HOURS * 60 * 60 * 1000;
+    const floodSinceIso = new Date(now.getTime() - floodWindowMs).toISOString();
+    const groups = db
+      .query<{ where_: string | null; message: string | null; c: number }, [string, number]>(
+        `SELECT json_extract(payload, '$.where') AS where_,
+                substr(json_extract(payload, '$.message'), 1, 160) AS message,
+                COUNT(*) AS c
+           FROM events
+          WHERE kind = 'error_caught' AND ts >= ?
+          GROUP BY where_, message
+         HAVING c > ?
+          ORDER BY c DESC`,
+      )
+      .all(floodSinceIso, ERROR_FLOOD_THRESHOLD);
+    for (const group of groups) {
+      const where = group.where_ ?? "(unknown)";
+      const message = group.message ?? "(none)";
+      // Idempotency: skip if an error_flood_alert for the same
+      // (where, message) already exists within the flood window.
+      if (errorFloodAlertExistsInWindow(db, where, message, floodSinceIso)) {
+        summary.error_flood_skipped_idempotent += 1;
+        continue;
+      }
+      const emitted = emit(db, {
+        kind: "error_flood_alert",
+        substrate_origin: "substrate_auto",
+        payload: {
+          where,
+          message,
+          count: group.c,
+          window_hours: ERROR_FLOOD_WINDOW_HOURS,
+          threshold: ERROR_FLOOD_THRESHOLD,
+        } as JsonValue,
+      });
+      summary.error_flood_alerts_emitted += 1;
+      summary.alert_event_ids.push(emitted.id);
+    }
+  } catch (err) {
+    recordError("error_flood", err);
+  }
+
   return summary;
 };
 
 // Exported for tests / introspection.
 export const __INERT_LOOP_CHECKS = INERT_LOOP_CHECKS;
 export const __METRIC_VERACITY_CHECKS = METRIC_VERACITY_CHECKS;
+export const __ERROR_FLOOD_THRESHOLD = ERROR_FLOOD_THRESHOLD;
+export const __ERROR_FLOOD_WINDOW_HOURS = ERROR_FLOOD_WINDOW_HOURS;

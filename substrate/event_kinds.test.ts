@@ -551,9 +551,12 @@ describe("derived sets match their pre-unification shape", () => {
       // The standing observability_guard_worker emits loop_inert_alert
       // when a wired loop is silent while its upstream fired, and
       // metric_veracity_alert when a status metric diverges from ground
-      // truth. Both health_metric so dashboards plot guard firings.
+      // truth, and error_flood_alert when the same error_caught
+      // (where,message) repeats past threshold inside a short flood
+      // window. All three health_metric so dashboards plot guard firings.
       "loop_inert_alert",
       "metric_veracity_alert",
+      "error_flood_alert",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

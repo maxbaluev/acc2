@@ -392,8 +392,16 @@ export const EVENT_KINDS = {
   // Both health_metric so dashboards can plot guard firings; a rising
   // rate is a regression signal that a loop went silent or a metric
   // started lying.
+  //   - error_flood_alert  — the same error_caught (where,message) repeated
+  //     past ERROR_FLOOD_THRESHOLD inside a short flood window (default 50 in
+  //     1h). The LOUD failure class the silent-loop/lying-metric checks
+  //     missed: this session error_caught flooded 2245x/15min with the same
+  //     vec0 message and only the owner caught it via `acc watch`. Grouping
+  //     by (where,message) means a diversity of occasional recoverable
+  //     errors is benign — only a single repeating culprit trips it.
   loop_inert_alert:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
   metric_veracity_alert:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+  error_flood_alert:                       { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
   // Tier U/U1 peer registry foundation: participation is symmetric across
   // opencode brains, Claude terminals, and Claude background agents, while
   // spawning remains asymmetric (only opencode is substrate-spawnable).

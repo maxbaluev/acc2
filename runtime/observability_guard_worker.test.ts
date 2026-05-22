@@ -166,3 +166,119 @@ describe("observabilityGuardTick — lying-metric (veracity) detection", () => {
     expect(countAlerts(db, "metric_veracity_alert")).toBe(0);
   });
 });
+
+/** Insert an error_caught row carrying a (where, message) payload. */
+const insertErrorCaught = (
+  db: ReturnType<typeof openDb>,
+  where: string,
+  message: string,
+  ageMs: number,
+): void => {
+  const id = newId();
+  db.run(
+    `INSERT INTO events (
+       id, ts, directive_id, task_id, parent_task_id, loop_id,
+       substrate_origin, kind, payload, context_refs, embedding
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      recentTs(ageMs),
+      "directive_test",
+      "task_test",
+      null,
+      "loop_root",
+      "substrate_auto",
+      "error_caught",
+      JSON.stringify({ where, message, recoverable: true }),
+      JSON.stringify([]),
+      null,
+    ],
+  );
+};
+
+const countFloodAlerts = (
+  db: ReturnType<typeof openDb>,
+  where?: string,
+  message?: string,
+): number => {
+  if (where && message) {
+    const row = db
+      .query<{ c: number }, [string, string]>(
+        `SELECT COUNT(*) AS c FROM events
+          WHERE kind = 'error_flood_alert'
+            AND json_extract(payload, '$.where') = ?
+            AND json_extract(payload, '$.message') = ?`,
+      )
+      .get(where, message);
+    return row?.c ?? 0;
+  }
+  const row = db
+    .query<{ c: number }, []>(
+      "SELECT COUNT(*) AS c FROM events WHERE kind = 'error_flood_alert'",
+    )
+    .get();
+  return row?.c ?? 0;
+};
+
+describe("observabilityGuardTick — error-flood watch", () => {
+  test("same (where,message) repeated past threshold emits one error_flood_alert naming the culprit", async () => {
+    const db = openDb();
+    const where = "daemon.worker.sql_worker";
+    const message = "sql_worker_query_failed:no such module: vec0";
+    // 60 (> 50 threshold) of the SAME error, all inside the 1h flood window.
+    for (let i = 0; i < 60; i += 1) {
+      insertErrorCaught(db, where, message, 60_000 + i * 1000);
+    }
+
+    const summary = await observabilityGuardTick(db, undefined, { now: FIXED_NOW });
+
+    expect(summary.error_flood_alerts_emitted).toBe(1);
+    expect(countFloodAlerts(db, where, message)).toBe(1);
+    // The alert names the exact culprit and reports the count/threshold.
+    const row = db
+      .query<{ payload: string }, []>(
+        "SELECT payload FROM events WHERE kind = 'error_flood_alert' LIMIT 1",
+      )
+      .get();
+    const payload = JSON.parse(row!.payload);
+    expect(payload.where).toBe(where);
+    expect(payload.message).toBe(message);
+    expect(payload.count).toBe(60);
+    expect(payload.threshold).toBe(50);
+    expect(payload.window_hours).toBe(1);
+  });
+
+  test("a diversity of distinct errors (each below threshold) emits NO alert", async () => {
+    const db = openDb();
+    // 10 distinct errors, 10 occurrences each (< 50) → benign diversity.
+    for (let g = 0; g < 10; g += 1) {
+      for (let i = 0; i < 10; i += 1) {
+        insertErrorCaught(db, `where_${g}`, `message_${g}`, 60_000 + i * 1000);
+      }
+    }
+
+    const summary = await observabilityGuardTick(db, undefined, { now: FIXED_NOW });
+
+    expect(summary.error_flood_alerts_emitted).toBe(0);
+    expect(countFloodAlerts(db)).toBe(0);
+  });
+
+  test("idempotency — second tick in the same flood window does not re-alert", async () => {
+    const db = openDb();
+    const where = "daemon.worker.sql_worker";
+    const message = "sql_worker_query_failed:no such module: vec0";
+    for (let i = 0; i < 60; i += 1) {
+      insertErrorCaught(db, where, message, 60_000 + i * 1000);
+    }
+
+    await observabilityGuardTick(db, undefined, { now: FIXED_NOW });
+    expect(countFloodAlerts(db, where, message)).toBe(1);
+
+    // Run again a few minutes later — still inside the 1h flood window.
+    const later = new Date(FIXED_NOW.getTime() + 5 * 60 * 1000);
+    const summary2 = await observabilityGuardTick(db, undefined, { now: later });
+
+    expect(summary2.error_flood_skipped_idempotent).toBeGreaterThanOrEqual(1);
+    expect(countFloodAlerts(db, where, message)).toBe(1);
+  });
+});
