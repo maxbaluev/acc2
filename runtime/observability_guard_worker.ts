@@ -67,18 +67,19 @@ type MetricVeracityCheck = {
 
 const METRIC_VERACITY_CHECKS: readonly MetricVeracityCheck[] = [
   {
-    // The substrate-status retrieval index reports vec_events row count.
-    // Ground truth: events that carry a genuine (non-empty) embedding
-    // BLOB. A divergence means the index claims coverage it does not
-    // have (or has orphaned rows) — a lying metric. tolerance:0 — the
-    // two MUST agree exactly when the embedder is healthy. The
-    // ground-truth query is conservative: it counts only events whose
-    // embedding column is genuinely populated, so a transient
-    // mid-embed window cannot false-positive in the wrong direction.
-    metric_name: "retrieval_index",
-    reported_query: "SELECT COUNT(*) AS c FROM vec_events",
-    ground_truth_query:
-      "SELECT COUNT(*) AS c FROM events WHERE embedding IS NOT NULL AND length(embedding) > 0",
+    // Retrieval-index integrity: EVERY vec_events row must resolve to a
+    // live source — either an event row OR an act_artifact row (vec_events
+    // indexes BOTH; an earlier version compared vec_events to events-only
+    // embeddings and false-positived on the ~26 legitimate act_artifact
+    // embeddings — a lying metric in the guard itself). The honest signal
+    // is TRUE ORPHANS: vec_events rows resolving to neither. That count
+    // MUST be 0 (the orphan-GC + archival cascade keep it 0). reported =
+    // orphan count, ground_truth = 0, tolerance 0 → alerts iff any vec_events
+    // row points at a vanished source.
+    metric_name: "retrieval_index_orphans",
+    reported_query:
+      "SELECT COUNT(*) AS c FROM vec_events v WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.id = v.event_id) AND NOT EXISTS (SELECT 1 FROM act_artifact a WHERE a.id = v.event_id)",
+    ground_truth_query: "SELECT 0 AS c",
     tolerance: 0,
   },
 ];

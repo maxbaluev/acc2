@@ -13,6 +13,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { newId } from "./ids";
 import { observabilityGuardTick } from "./observability_guard_worker";
+import { upsertVecEventRow, EMBEDDING_DIMS } from "./embedder";
 
 const FIXED_NOW = new Date("2026-05-22T12:00:00.000Z");
 
@@ -137,18 +138,17 @@ describe("observabilityGuardTick — wired-but-inert loop detection", () => {
 });
 
 describe("observabilityGuardTick — lying-metric (veracity) detection", () => {
-  test("diverging retrieval index emits metric_veracity_alert", async () => {
+  test("orphaned vec_events row (resolves to neither event nor act_artifact) emits metric_veracity_alert", async () => {
     const db = openDb();
-    // Ground truth (events carrying a genuine embedding BLOB) diverges
-    // from reported (vec_events row count, which stays 0 here) — the
-    // index is NOT covering events that already have an embedding. A
-    // lying metric in the orphaned-rows direction.
-    insertEvent(db, "action_predicted", recentTs(60_000), {
-      embedding: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]),
-    });
-    insertEvent(db, "knowledge_candidate", recentTs(50_000), {
-      embedding: new Uint8Array([9, 10, 11, 12]),
-    });
+    // Create a TRUE orphan: insert an event, project its vec_events row,
+    // then delete the event — the vec_events row now points at a vanished
+    // source. The honest retrieval-index integrity metric is orphan count,
+    // which MUST be 0; a non-zero orphan count is the lying-metric/stale-
+    // index signal the guard exists to catch.
+    const orphanId = insertEvent(db, "action_predicted", recentTs(60_000));
+    const emb = new Array(EMBEDDING_DIMS).fill(0.01);
+    upsertVecEventRow(db, orphanId, emb, "v1");
+    db.run("DELETE FROM events WHERE id = ?", [orphanId]);
 
     const summary = await observabilityGuardTick(db, undefined, { now: FIXED_NOW });
 
