@@ -19,7 +19,7 @@
 //     `bridge_stuck` and surfaces `subprocess_stuck`.
 
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,6 +52,47 @@ import { getWarmPool, mcpPoolEnabled, type WarmSession } from "./mcp_pool";
  *  registers its proc here and de-registers on exit. */
 type LiveProc = { pid: number; kill: (sig: NodeJS.Signals) => boolean };
 const LIVE_OPENCODE_PROCS: Set<LiveProc> = new Set();
+
+// Cached peak brain-subprocess RSS (bytes) for dispatch-cap calibration.
+// Sampled at most once per RSS_SAMPLE_INTERVAL_MS from a CALLER (the scheduler
+// cap computation) — the cache means the /proc sweep runs at most ~once/5s, NOT
+// on every scheduler tick, so this adds no per-tick sync-I/O blocking. Used
+// ONLY to RAISE the per-brain memory estimate when brains run heavier than the
+// fixed default (OOM protection) — never to lower it below the default, so
+// calibration can only make admission MORE conservative, never riskier.
+let _cachedMaxBrainRssBytes = 0;
+let _lastRssSampleMs = 0;
+const RSS_SAMPLE_INTERVAL_MS = 5000;
+
+/** Cached peak RSS (bytes) across live opencode brain subprocesses, read from
+ *  /proc/<pid>/status (Linux). Re-samples at most once per 5s; returns the
+ *  cached max between samples. null when no brains are live / RSS unreadable
+ *  (non-Linux). The scheduler uses this only to raise the per-brain estimate. */
+export const observedBrainRssBytes = (now: number = Date.now()): number | null => {
+  if (now - _lastRssSampleMs >= RSS_SAMPLE_INTERVAL_MS) {
+    _lastRssSampleMs = now;
+    let maxRss = 0;
+    let any = false;
+    for (const p of LIVE_OPENCODE_PROCS) {
+      try {
+        const status = readFileSync(`/proc/${p.pid}/status`, "utf8");
+        const m = status.match(/^VmRSS:\s+(\d+)\s+kB/m);
+        if (m) { any = true; const b = parseInt(m[1], 10) * 1024; if (b > maxRss) maxRss = b; }
+      } catch { /* dead pid / non-Linux / race — skip */ }
+    }
+    // Only update the cache when we actually observed live procs; otherwise
+    // keep the last observation (decays only when explicitly reset).
+    if (any) _cachedMaxBrainRssBytes = maxRss;
+    else if (LIVE_OPENCODE_PROCS.size === 0) _cachedMaxBrainRssBytes = 0;
+  }
+  return _cachedMaxBrainRssBytes > 0 ? _cachedMaxBrainRssBytes : null;
+};
+
+/** Test seam: reset the RSS sample cache. */
+export const __resetBrainRssCacheForTest = (): void => {
+  _cachedMaxBrainRssBytes = 0;
+  _lastRssSampleMs = 0;
+};
 
 /** Default opencode auth probe — runs `opencode auth list` and parses the
  *  output into a credential / env-provider snapshot. Returns null when the

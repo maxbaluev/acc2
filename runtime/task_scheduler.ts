@@ -26,7 +26,7 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { readDagForDirective, readyTasks, type TaskNode } from "./task_topology";
 import { dispatchReadyTask } from "./task_dispatcher";
-import { hasFreeHandshakePermit, freeHandshakePermits } from "./bridge/opencode";
+import { hasFreeHandshakePermit, freeHandshakePermits, observedBrainRssBytes } from "./bridge/opencode";
 import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
 import { emitEvent } from "./events";
 import { readCurrentMode, applyModeAdjustments } from "./crisis_mode";
@@ -125,7 +125,17 @@ export const computeBrainDispatchCap = (): number => {
     return 2; // os module shouldn't fail; conservative default if it does.
   }
   const usableBytes = Math.max(0, Math.min(freeBytes, totalBytes - HOST_RAM_RESERVE_BYTES));
-  const cap = Math.floor(usableBytes / BRAIN_PROCESS_RAM_BYTES);
+  // RSS-calibrated per-brain estimate: take the GREATER of the fixed default
+  // and 1.2× the observed peak brain RSS. This can ONLY raise the estimate
+  // (→ fewer concurrent brains) when brains run heavier than 700MB — OOM
+  // protection — and never lowers it below the default, so calibration is
+  // safe-by-construction (admission only becomes more conservative, never
+  // riskier). Falls back to the fixed default when no live RSS observation.
+  const observedRss = observedBrainRssBytes();
+  const perBrainBytes = observedRss && observedRss > 0
+    ? Math.max(BRAIN_PROCESS_RAM_BYTES, Math.floor(observedRss * 1.2))
+    : BRAIN_PROCESS_RAM_BYTES;
+  const cap = Math.floor(usableBytes / perBrainBytes);
   return Math.max(1, cap);
 };
 
