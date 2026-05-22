@@ -37,7 +37,7 @@ import { emitEvent } from "./events";
 import { subscribe, resetBus, type BusEvent } from "./event_bus";
 import { onEvent, type ActivationPayload } from "./activation_bus";
 import type { EventKind } from "../substrate/event_kinds";
-import { EMBEDDABLE_KINDS } from "../substrate/event_kinds";
+import { ARTIFACT_CANDIDATE_KINDS, EMBEDDABLE_KINDS } from "../substrate/event_kinds";
 import { newAdminToken } from "./ids";
 import { createMcpServer } from "./mcp_server/index";
 import {
@@ -1292,7 +1292,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       await runExtractorsOnce();
       if (!extractorsMarked) { markWorkerReady("extractors"); extractorsMarked = true; }
     });
-    registerReactiveWorker("extractors", EXTRACTORS_INTERVAL_MS, ["knowledge_candidate", "act_artifact_candidate", "code_artifact_candidate", "action_scored", "task_committed", "lesson_extracted", "owner_insight_candidate", "owner_input_received", "owner_observed_outcome_recorded", "applied_change_committed", "applied_change_failed", "irreversible_effect_recorded"], extractorsTickHandle, { minReactiveGapMs: EXTRACTORS_INTERVAL_MS });
+    registerReactiveWorker("extractors", EXTRACTORS_INTERVAL_MS, ["knowledge_candidate", ...ARTIFACT_CANDIDATE_KINDS, "action_scored", "task_committed", "lesson_extracted", "owner_insight_candidate", "owner_input_received", "owner_observed_outcome_recorded", "applied_change_committed", "applied_change_failed", "irreversible_effect_recorded"], extractorsTickHandle, { minReactiveGapMs: EXTRACTORS_INTERVAL_MS });
     // Round-2 audit (2026-05-15): run ONE extractor pass at boot so
     // candidates accumulated while the daemon was off don't wait the full
     // 5-min cadence. 2026-05-21 R2 instant-startup: DEFER this pass by

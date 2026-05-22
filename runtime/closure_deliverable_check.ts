@@ -18,6 +18,7 @@
 // this commit establishes the verifiable helper.
 
 import type { Database } from "bun:sqlite";
+import { ARTIFACT_CANDIDATE_KINDS } from "../substrate/event_kinds";
 import type { JsonValue } from "../substrate/types";
 
 export interface ClosureDeliverableResult {
@@ -105,10 +106,7 @@ export const checkClosureDeliverables = (
   const nodes = eventsForTasks(db, subtree, "task_node_opened");
   // act_artifact_candidate is canonical; code_artifact_candidate is the
   // pre-rename alias retained for historical events on this directive.
-  const artifacts = [
-    ...eventsForTasks(db, subtree, "act_artifact_candidate"),
-    ...eventsForTasks(db, subtree, "code_artifact_candidate"),
-  ];
+  const artifacts = ARTIFACT_CANDIDATE_KINDS.flatMap((kind) => eventsForTasks(db, subtree, kind));
   const amendments = eventsForTasks(db, subtree, "contract_amendment_proposed");
   const lessons = eventsForTasks(db, subtree, "lesson_extracted");
 
