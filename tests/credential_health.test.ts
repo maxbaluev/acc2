@@ -92,8 +92,9 @@ describe("credential_health case B — SERPER_API_KEY present emits no Serper wa
     tmpDir = mkdtempSync(join(tmpdir(), "acc2-cred-present-"));
     prevSerper = process.env.SERPER_API_KEY;
     process.env.SERPER_API_KEY = "test-serper-key-not-real";
-    const port = 29000 + Math.floor(Math.random() * 200);
-    const auxPort = port + 1;
+    const pair = getFreePortPair();
+    const port = pair.mcp;
+    const auxPort = pair.aux;
     const { result, chunks } = await captureStderr(() =>
       startDaemon({
         port,
@@ -139,8 +140,9 @@ describe("credential_health case C — /health payload exposes credentials prese
     // OPENAI, missing SERPER. The keys themselves never appear on the wire.
     process.env.OPENAI_API_KEY = "test-openai-key-not-real";
     delete process.env.SERPER_API_KEY;
-    const port = 29200 + Math.floor(Math.random() * 200);
-    auxPort = port + 1;
+    const pair = getFreePortPair();
+    const port = pair.mcp;
+    auxPort = pair.aux;
     handle = await startDaemon({
       port,
       auxPort,
