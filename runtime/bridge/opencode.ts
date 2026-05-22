@@ -244,6 +244,20 @@ const releaseHandshakePermit = (held: boolean): void => {
   if (next) next.resolve();
 };
 
+/** FOUNDATIONAL anti-starve gate (owner directive: solve starving at the
+ *  root). The scheduler's brain-dispatch cap is RAM-based (can be 5–8) but
+ *  the bridge handshakes only HANDSHAKE_PERMIT_CAP (2) at a time. When the
+ *  scheduler admitted more brains than could handshake, the excess waited
+ *  HANDSHAKE_WAIT_BUDGET_MS then FAILED OPEN — spawning opencode WITHOUT a
+ *  permit, which then contended the MCP handshake and timed out (starved).
+ *  Exposing free-permit availability lets the SCHEDULER gate admission: it
+ *  only dispatches a brain when a handshake slot is free, so the excess
+ *  stays queued_at_cap and retries next tick instead of spawning a doomed
+ *  subprocess. Permits release after the brief handshake, so run-concurrency
+ *  still reaches the RAM cap — only the handshake phase is staggered. */
+export const hasFreeHandshakePermit = (): boolean =>
+  handshakePermitsInUse < HANDSHAKE_PERMIT_CAP;
+
 /** Quick MCP readiness probe. Returns true if the URL is reachable
  *  within `timeoutMs`. Used before spawning opencode to surface a dead
  *  daemon as a clean parse_error rather than a 120s handshake timeout. */

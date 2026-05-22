@@ -26,6 +26,7 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { readDagForDirective, readyTasks, type TaskNode } from "./task_topology";
 import { dispatchReadyTask } from "./task_dispatcher";
+import { hasFreeHandshakePermit } from "./bridge/opencode";
 import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
 import { emitEvent } from "./events";
 import { readCurrentMode, applyModeAdjustments } from "./crisis_mode";
@@ -839,7 +840,15 @@ export const schedulerTick = async (
     // the task stays in ready state and re-attempts next tick.
     if (decision.route === "opencode_brain") {
       const brainCap = computeBrainDispatchCap();
-      if (IN_FLIGHT_BRAIN.size >= brainCap) {
+      // FOUNDATIONAL anti-starve gate: only admit a brain when the bridge has
+      // a FREE handshake permit. The RAM cap alone over-admitted relative to
+      // the handshake capacity (cap 2), so excess dispatches failed-open and
+      // spawned doomed opencode subprocesses that starved at the MCP handshake.
+      // Gating admission on handshake availability keeps the excess queued
+      // (retries next tick) instead of spawning a starving subprocess. Permits
+      // free after the brief handshake, so run-concurrency still reaches the
+      // RAM cap — only the handshake phase is staggered (no starvation).
+      if (IN_FLIGHT_BRAIN.size >= brainCap || !hasFreeHandshakePermit()) {
         // Dedupe at_cap notifications per (task_id, gate) — see GATE_NOTIFIED.
         const key = gateKey(task.id, "brain_concurrency_cap");
         if (!GATE_NOTIFIED.has(key)) {
@@ -851,11 +860,14 @@ export const schedulerTick = async (
             task_id: task.id,
             payload: {
               gate: "brain_concurrency_cap",
-              reason: "opencode_brain_in_flight_at_cap",
+              reason: IN_FLIGHT_BRAIN.size >= brainCap
+                ? "opencode_brain_in_flight_at_cap"
+                : "no_free_handshake_permit",
               in_flight_brain: IN_FLIGHT_BRAIN.size,
               cap: brainCap,
-              cap_source: "dynamic_host_ram",
-              note: "single notification per saturation cycle; tick keeps trying silently until cap clears",
+              cap_source: IN_FLIGHT_BRAIN.size >= brainCap ? "dynamic_host_ram" : "bridge_handshake_capacity",
+              handshake_permit_free: hasFreeHandshakePermit(),
+              note: "single notification per saturation cycle; tick keeps trying silently until cap clears (anti-starve: excess queues, never spawns a doomed subprocess)",
             } as JsonValue,
           });
         }
