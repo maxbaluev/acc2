@@ -551,7 +551,7 @@ describe("buildOwnerRenderingPolicySection + buildOwnerFeedbackSummarySection", 
     expect(text).toContain("Primary owner-visible text MUST NOT contain event_ids");
   });
 
-  test("policy with preferred / avoided / declined / things_to_never_do renders them inline", () => {
+  test("policy with declined / things_to_never_do renders them inline; preferred/avoided terms are NOT mirrored", () => {
     const text = buildOwnerRenderingPolicySection(policy({
       preferred_terms: ["plain", "simple"],
       avoided_terms: ["dispatch", "residual"],
@@ -560,8 +560,9 @@ describe("buildOwnerRenderingPolicySection + buildOwnerFeedbackSummarySection", 
       manual_review_patterns: ["release tags"],
       autonomy_score: 0.3,
     }));
-    expect(text).toContain("preferred_terms (use these in primary surfaces): plain, simple");
-    expect(text).toContain("avoided_terms (do not use in primary surfaces): dispatch, residual");
+    // vocabulary-mirroring subsystem removed: word-forms are never injected.
+    expect(text).not.toContain("preferred_terms");
+    expect(text).not.toContain("avoided_terms");
     expect(text).toContain("declined_concepts");
     expect(text).toContain("things_to_never_do");
     expect(text).toContain("- force-push to main");

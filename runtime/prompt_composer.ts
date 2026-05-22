@@ -1099,13 +1099,12 @@ export const buildOwnerProfileSection = (profile: OwnerProfile, input: OwnerPoli
     const lineParts = sigs.map(([k, v]) => `${k}=${(v as number).toFixed(2)}`);
     lines.push(`${field} (continuous, open-ended Record<string,number>): ${lineParts.join(", ")}`);
   }
-  if (Array.isArray(profile.preferred_terms) && profile.preferred_terms.length > 0) {
-    lines.push(`preferred_terms (mirror these back; do NOT use jargon equivalents): ${profile.preferred_terms.join(", ")}`);
-  }
-  if (Array.isArray(profile.avoided_terms) && profile.avoided_terms.length > 0) {
-    lines.push("avoided_terms (NEVER use in chat output to this owner):");
-    for (const t of profile.avoided_terms) lines.push(`  - ${t}`);
-  }
+  // preferred_terms / avoided_terms vocabulary-mirroring removed: the owner's
+  // LANGUAGE comes from detected_language and the owner predicates
+  // (theory_of_mind / owner_state); mirroring their exact word-forms back
+  // into output degraded deliverable quality (a non-native owner's imperfect
+  // phrasing is not a style guide). Fields remain on the profile but are no
+  // longer injected into the composed prompt.
   if (profile.exposed_concepts && typeof profile.exposed_concepts === "object") {
     const concepts = Object.keys(profile.exposed_concepts).filter((k) => k.length > 0);
     if (concepts.length > 0) {
@@ -1229,12 +1228,9 @@ export const buildOwnerRenderingPolicySection = (policy: OwnerRenderingPolicyRow
     if (typeof policy.autonomy_score === "number") {
       lines.push(`autonomy_score: ${policy.autonomy_score.toFixed(2)} (below ~0.4 → block multi-file diffs and require explicit owner confirmation before action)`);
     }
-    if (policy.preferred_terms.length > 0) {
-      lines.push(`preferred_terms (use these in primary surfaces): ${formatStringArray(policy.preferred_terms)}`);
-    }
-    if (policy.avoided_terms.length > 0) {
-      lines.push(`avoided_terms (do not use in primary surfaces): ${formatStringArray(policy.avoided_terms)}`);
-    }
+    // preferred_terms / avoided_terms vocabulary-mirroring removed (see
+    // buildOwnerProfileSection): owner language is sourced from
+    // detected_language + owner predicates, not word-form mirroring.
     if (policy.declined_concepts.length > 0) {
       lines.push(`declined_concepts (owner declined this concept; use preferred_term mapping if present): ${formatStringArray(policy.declined_concepts)}`);
     }

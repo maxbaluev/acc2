@@ -1160,7 +1160,6 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       extractDirectiveInterference,
       extractOwnerProfilePromotions,
     } = await import("../substrate/extractors");
-    const { runOwnerVocabularyExtractorTick } = await import("../substrate/owner_vocabulary_extractor");
     const { runOwnerAutonomyAdjusterTick } = await import("../substrate/owner_autonomy_adjuster");
     const runExtractorsOnce = async (): Promise<void> => {
       try { await extractKnowledgePromotions(db); } catch (err) {
@@ -1273,14 +1272,6 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       // confidence ≥ 0.85 / owner-approval bypass / sibling cosine.
       try { await extractOwnerProfilePromotions(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.owner_profile", err: (err as Error).message }, "owner-profile extractor tick failed");
-      }
-      // Owner vocabulary mining (DSGSAZGMF1, universal): scan owner_input_received
-      // history for the owner's distinctive n-grams + explicit rejection
-      // patterns. Emits owner_insight_candidate rows for preferred_terms
-      // and avoided_terms which the promotion pass above merges into the
-      // canonical owner_profile_recorded row.
-      try { runOwnerVocabularyExtractorTick(db); } catch (err) {
-        logger.warn({ where: "daemon.extractors.owner_vocabulary", err: (err as Error).message }, "owner-vocabulary extractor tick failed");
       }
       // Outcome-driven autonomy_score adjuster (DSGSAZGMF1 follow-up,
       // 2026-05-15): fold recent applied_change_committed / failed /
