@@ -266,6 +266,16 @@ export const hasFreeHandshakePermit = (): boolean =>
 export const freeHandshakePermits = (): number =>
   Math.max(0, HANDSHAKE_PERMIT_CAP - handshakePermitsInUse);
 
+/** Test-only: reset the module-global handshake-permit counter. The counter
+ *  is process-global, so a leaked permit in one test file would bleed into
+ *  another (e.g. the scheduler's anti-starve gate would see <cap free and
+ *  block dispatches it should allow). Tests that assert brain-dispatch
+ *  concurrency call this in setup to start from a clean full-permit state. */
+export const __resetHandshakePermitsForTest = (): void => {
+  handshakePermitsInUse = 0;
+  handshakeWaiters.length = 0;
+};
+
 /** Quick MCP readiness probe. Returns true if the URL is reachable
  *  within `timeoutMs`. Used before spawning opencode to surface a dead
  *  daemon as a clean parse_error rather than a 120s handshake timeout. */

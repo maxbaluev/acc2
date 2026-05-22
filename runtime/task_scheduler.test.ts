@@ -17,11 +17,16 @@ import {
 import { FIXTURE_D_DIRECTIVE_TEXT, openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
+import { __resetHandshakePermitsForTest } from "./bridge/opencode";
 
 afterAll(() => closeDb());
 beforeEach(() => {
   closeDb();
   _resetSchedulerForTests();
+  // The anti-starve handshake gate reads the process-global handshake-permit
+  // counter; reset it so a leaked permit from a sibling test file can't block
+  // brain dispatches this file's concurrency assertions expect.
+  __resetHandshakePermitsForTest();
 });
 
 describe("task_scheduler", () => {
