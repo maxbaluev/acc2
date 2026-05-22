@@ -104,6 +104,11 @@ const usage = (): string => `acc — v2 thin CLI
                                   active DAG + pending decisions + Enter drilldown).
   acc admin <sub>                 Operator maintenance (update-opencode, opencode-version, ...).
   acc doctor                      Multi-check readiness report.
+  acc version [--json]            Print the installed acc2 version and, when a
+                                  daemon is running, the commit it has loaded
+                                  (loaded_git_head). The two can diverge between
+                                  a \`git pull\` and a daemon restart — see
+                                  UPDATING.md for the update flow.
 `;
 
 // `acc ask` + `scoreAskRoutes` + `acc help me with <words>` all removed
@@ -584,6 +589,10 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
   if (cmd === "doctor") {
     const { runDoctor } = await import("./doctor");
     return runDoctor(argv.slice(1));
+  }
+  if (cmd === "version" || cmd === "--version" || cmd === "-v") {
+    const { runVersion } = await import("./version");
+    return runVersion(argv.slice(1));
   }
   if (cmd === "status") {
     const { runStatus } = await import("./status");

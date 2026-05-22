@@ -176,10 +176,13 @@ bun cli/dispatch.ts daemon start         # detached restart
 # OR if running under systemd / launchd:
 #   systemctl --user restart accint
 #   launchctl unload ~/Library/LaunchAgents/com.accint.daemon.plist && launchctl load <same path>
-bun cli/doctor.ts                        # confirm the new build came up cleanly
+bun cli/dispatch.ts doctor               # confirm the new build came up cleanly
+bun cli/dispatch.ts version              # prints the source version + the commit the daemon loaded
 ```
 
-The substrate schema is versioned in `substrate/schema.sql`. Schema migrations are applied at daemon boot; the daemon refuses to start if the migration fails, so the old process keeps running until you restart cleanly.
+`acc version` is the canonical post-update check: it prints the shipped semver (from `package.json`) AND the running daemon's `loaded_git_head`. After a `git pull` the source tree is at the new commit but the daemon is still serving the old one until you restart — `acc version` makes that divergence visible. Once `loaded_git_head` matches `git rev-parse HEAD`, the restart picked up the new build.
+
+The substrate schema is versioned in `substrate/schema.sql`. Schema migrations are applied at daemon boot (idempotent — re-running a migrated boot is a no-op); the daemon refuses to start if the migration fails, so the old process keeps running until you restart cleanly.
 
 ### 5a. Keeping the system current
 

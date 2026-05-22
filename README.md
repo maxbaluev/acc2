@@ -88,6 +88,7 @@ For per-component manual install paths, see
 | `acc daemon {start\|stop\|status\|install-service}` | Daemon lifecycle. |
 | `acc watch` | Live TUI subscribed to the daemon's event stream. |
 | `acc doctor` | Composite readiness — file existence AND state content (seed knowledge, seed artifacts, sqlite-vec). PASS is the canonical "ready" signal. |
+| `acc version [--json]` | Print the installed acc2 semver + (when a daemon is running) its loaded `git_head`. Canonical post-update check — see [`UPDATING.md`](UPDATING.md). |
 | `acc admin update-opencode [--yes]` | Upgrade the opencode subscription CLI in place. |
 | `acc admin opencode-version` | Print installed + latest opencode versions. |
 | `acc admin upgrade-check` | Multi-subsystem upgrade report (opencode, bun, uv, camoufox). |
