@@ -1246,7 +1246,7 @@ export const buildOwnerRenderingPolicySection = (policy: OwnerRenderingPolicyRow
     lines.push(`policy_health: ${policy.policy_health.toFixed(2)} (1.0 = clean recent feedback; below ~0.7 → route to careful-render mode)`);
   }
   lines.push("");
-  lines.push("Rendering invariants (ALWAYS apply; the rendering_verifier scores adherence):");
+  lines.push("Rendering invariants (ALWAYS apply when rendering owner-facing text):");
   for (const inv of RENDERING_INVARIANT_LINES) lines.push(inv);
   return lines.join("\n");
 };

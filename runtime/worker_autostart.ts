@@ -53,15 +53,6 @@ export type WorkerName =
   // Primitive #3 (SZG5PQ01): standalone experience compression tick that mines
   // low-residual closed trajectories into existing recipe/knowledge events.
   | "experience_compression"
-  // Brain contract Q471RAN88X0H513V8BC3BTW0AW Phase F (2026-05-17):
-  // periodic auditor that closes the 88ESCTN8XN6J gap — the rendering
-  // flywheel was persisted+exposed but unconsumed by any always-on
-  // worker. The tick scans recent rendered_owner_message_recorded rows
-  // that lack feedback, runs verifyRendering against the current policy,
-  // and emits owner_rendering_feedback_recorded with feedback_kind=
-  // auto_verifier|auto_verifier_clean so the policy posterior moves
-  // on machine evidence before any owner reacts.
-  | "rendering_audit"
   // F3 (2026-05-18): periodic sweep that closes open lifecycles.
   // contract_amendment_proposed / owner_input_required /
   // task_node_opened rows that never received a terminator pile up
@@ -197,7 +188,6 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "recipe_inertia",
   "verify_heal",
   "experience_compression",
-  "rendering_audit",
   "lifecycle_closure_sweep",
   "contract_amendment_consumer",
   "wal_pressure_check",

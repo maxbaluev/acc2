@@ -1091,28 +1091,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // supervisor is activation-driven; activationDisposers are cleared on shutdown.
   }
 
-  // Brain contract Q471RAN88X0H513V8BC3BTW0AW Phase F (2026-05-17):
-  // rendering-audit worker. Scans recent rendered_owner_message_recorded
-  // rows that lack feedback, runs the rendering verifier, and emits
-  // owner_rendering_feedback_recorded with feedback_kind=auto_verifier|
-  // auto_verifier_clean so the policy posterior moves on machine
-  // evidence. Closes the 88ESCTN8XN6J gap ("flywheel persisted but
-  // unconsumed by any always-on worker"). 5-min reactive cadence;
-  // reactive_safety_net is the genuine deadline.
-  const RENDERING_AUDIT_INTERVAL_MS = 5 * 60 * 1000;
-  if (isWorkerEnabled("rendering_audit")) {
-    const { renderingAuditWorkerTick } = await import("./rendering_audit_worker");
-    let renderingAuditMarked = false;
-    const renderingAuditTickHandle = supervisedTick(db, "rendering_audit", RENDERING_AUDIT_INTERVAL_MS, async () => {
-      await renderingAuditWorkerTick(db);
-      if (!renderingAuditMarked) { markWorkerReady("rendering_audit"); renderingAuditMarked = true; }
-    });
-    registerReactiveWorker("rendering_audit", RENDERING_AUDIT_INTERVAL_MS, ["rendered_owner_message_recorded", "owner_rendering_feedback_recorded", "owner_observed_outcome_recorded"], renderingAuditTickHandle, { minReactiveGapMs: 60_000 });
-    markWorkerReady("rendering_audit");
-    renderingAuditMarked = true;
-    recordWorkerTick("rendering_audit");
-    // rendering_audit is activation-driven; activationDisposers are cleared on shutdown.
-  }
+  // RLM-first clean break (2026-05-22): the rule-based rendering-audit
+  // worker (verifyRendering jargon/ID post-check) was removed. The LM
+  // renders owner-facing text in the owner's language at high quality,
+  // instructed by the OWNER RENDERING POLICY prompt section. No
+  // deterministic post-audit parallel path.
 
   // Batch 10: substrate compactor — periodic pruning of bridge_frame_received
   // rows older than COMPACTION_FRAME_RETENTION_MS (24h default). The
