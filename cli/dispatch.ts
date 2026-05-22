@@ -159,28 +159,12 @@ const dispatchTask = async (
     console.log(`  text_chars=${words.length}`);
   }
 
-  // Conversation-as-learning-surface (DSGSAZGMF1, universalized per
-  // owner feedback "people not 3 types, all of them different"):
-  // extract continuous rendering signals from the directive text +
-  // recent prior input. Each signal is independent — code_density,
-  // ops_vocabulary, explanation_appetite, etc. — and accumulates
-  // into a per-owner vector. NO persona enum, NO bucketing.
-  // Best-effort — classifier failure never blocks dispatch.
+  // Capture the raw owner turn as the durable signal. Soft rendering/tone is
+  // derived by the RLM from recent owner ledger context at compose time — NOT
+  // by a rule-based classifier persisting rendering_signals/detected_language
+  // insights (RLM-first owner-model consolidation, brain directive MA0YKYKZ).
+  // Best-effort — capture failure never blocks dispatch.
   try {
-    const { classifyOwnerRenderingSignals } = await import("../substrate/owner_rendering_classifier");
-    const priorEnv = await mcpCall("runtime.recent_events", {
-      k: 5,
-      kinds: ["owner_input_received"],
-    }).catch(() => null);
-    const priorTexts: string[] = [];
-    if (priorEnv?.ok) {
-      const evs = ((priorEnv.result as { events?: Array<{ payload?: unknown }> })?.events ?? []);
-      for (const e of evs) {
-        const p = e.payload as { text?: string; directive_text?: string } | undefined;
-        const t = p?.text ?? p?.directive_text;
-        if (typeof t === "string" && t.length > 0 && t !== words) priorTexts.push(t);
-      }
-    }
     const replyWords = words.match(/[\p{L}\p{N}_-]+/gu)?.length ?? 0;
     const commandTokens = words.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^(acc|bun|git|npm|pnpm|yarn|uv|cargo|docker|kubectl)\b/.test(l)).length;
     const turnPattern = {
@@ -188,7 +172,6 @@ const dispatchTask = async (
       reply_word_count: replyWords,
       command_token_count: commandTokens,
       prose_token_count: Math.max(0, replyWords - commandTokens),
-      prior_turn_count: priorTexts.length,
     };
     const ownerInputEnv = await mcpCall("substrate.emit", {
       kind: "owner_input_received",
@@ -211,83 +194,8 @@ const dispatchTask = async (
     } catch {
       // Outcome-channel capture is best-effort; owner_input_received remains the durable raw signal.
     }
-    const cls = classifyOwnerRenderingSignals(words, priorTexts, turnPattern);
-    const languageConfidence = cls.language_distribution?.[0]?.confidence ?? cls.confidence;
-    // Idempotency check (2026-05-21 emit-storm fix): every acc task invocation
-    // pre-fix fired a fresh `owner_insight_candidate` for detected_language +
-    // rendering_signals regardless of whether the value differed from the
-    // current observation. Measured: 304 detected_language insights with
-    // only 3 distinct values (~99% noise). Now we look at the most recent
-    // SAME-field insight; emit only if the value changed OR more than 6
-    // hours elapsed since the last emission (long-tail refresh so
-    // confidence updates still propagate eventually).
-    const STALE_INSIGHT_MS = 6 * 60 * 60 * 1000;
-    const recentInsightEnv = await mcpCall("runtime.recent_events", {
-      k: 50,
-      kinds: ["owner_insight_candidate"],
-    }).catch(() => null);
-    const recentInsights = ((recentInsightEnv?.ok
-      ? (recentInsightEnv.result as { events?: Array<{ ts?: string; payload?: { field?: string; value?: unknown } }> })?.events
-      : null) ?? []) as Array<{ ts?: string; payload?: { field?: string; value?: unknown } }>;
-    const findRecentInsightFor = (field: string): { ts: number; value: unknown } | null => {
-      for (const e of recentInsights) {
-        if (e.payload?.field !== field) continue;
-        const ts = e.ts ? Date.parse(e.ts) : NaN;
-        if (!Number.isFinite(ts)) continue;
-        return { ts, value: e.payload.value };
-      }
-      return null;
-    };
-    const insightChangedOrStale = (field: string, value: unknown): boolean => {
-      const prev = findRecentInsightFor(field);
-      if (!prev) return true;
-      if (JSON.stringify(prev.value) !== JSON.stringify(value)) return true;
-      if (Date.now() - prev.ts > STALE_INSIGHT_MS) return true;
-      return false;
-    };
-    if (cls.detected_language && insightChangedOrStale("detected_language", cls.detected_language)) {
-      await mcpCall("substrate.emit", {
-        kind: "owner_insight_candidate",
-        substrate_origin: "claude_root",
-        directive_id,
-        payload: {
-          field: "detected_language",
-          value: cls.detected_language,
-          confidence: languageConfidence,
-          claim: `Detected owner directive language '${cls.detected_language}' from dispatch text.`,
-          evidence: cls.evidence,
-          turn_pattern: cls.turn_pattern,
-          language_distribution: cls.language_distribution ?? [{ lang: cls.detected_language, confidence: cls.confidence, evidence: "legacy_classifier" }],
-        },
-      }).catch(() => null);
-    }
-    if (Object.keys(cls.signals).length > 0 && insightChangedOrStale("rendering_signals", cls.signals)) {
-      // Only emit when at least one signal fired AND the signal vector
-      // changed from the last observed value (or 6h elapsed). Silent
-      // observations + repeat-same-value pollute the ledger without
-      // earning posterior.
-      const summary = Object.entries(cls.signals)
-        .map(([k, v]) => `${k}=${v.toFixed(2)}`)
-        .join(", ");
-      await mcpCall("substrate.emit", {
-        kind: "owner_insight_candidate",
-        substrate_origin: "claude_root",
-        directive_id,
-        payload: {
-          field: "rendering_signals",
-          value: cls.signals,
-          confidence: cls.confidence,
-          claim: `Rendering signals extracted from directive text: ${summary}. Evidence: ${cls.evidence.join("; ")}.`,
-          evidence: cls.evidence,
-          turn_pattern: cls.turn_pattern,
-        },
-        context_refs: ownerInputId ? [ownerInputId] : [],
-      }).catch(() => null);
-    }
   } catch {
-    // Classifier failure must not block dispatch. The brain's cycle-1
-    // OWNER PROFILE section will just render "no rendering signals
-    // recorded yet" and the next directive will retry.
+    // Raw-turn capture must not block dispatch.
   }
 
   if (!opts.follow) return 0;

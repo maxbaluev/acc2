@@ -199,40 +199,11 @@ export const verifyRendering = (input: RenderingVerifierInput): RenderingVerifie
   }
   breakdown.jargon_soft = Math.min(0.20, softJargonHits * 0.05);
 
-  // (4–6) Owner-profile-derived terms.
+  // Owner-profile-derived hard constraints only. Soft vocabulary/style choices
+  // are evaluated by the language model from fresh ledger context, not by
+  // persisted preferred/avoided/declined term lists.
   const policy = input.policy;
   if (policy) {
-    // avoided_terms
-    let avoidedHits = 0;
-    for (const term of policy.avoided_terms) {
-      const hit = findTerm(text, term);
-      if (hit) {
-        avoidedHits += 1;
-        violations.push({
-          axis: "avoided_term",
-          sample: hit,
-          message: `term '${hit}' is on the owner's avoided_terms list`,
-        });
-      }
-    }
-    breakdown.avoided_term = Math.min(0.40, avoidedHits * 0.20);
-
-    // declined_concepts
-    let declinedHits = 0;
-    for (const term of policy.declined_concepts) {
-      const hit = findTerm(text, term);
-      if (hit) {
-        declinedHits += 1;
-        violations.push({
-          axis: "declined_concept",
-          sample: hit,
-          message: `concept '${hit}' was previously declined by the owner`,
-        });
-      }
-    }
-    breakdown.declined_concept = Math.min(0.40, declinedHits * 0.20);
-
-    // things_to_never_do — a single hit is near-total violation.
     for (const term of policy.things_to_never_do) {
       const hit = findTerm(text, term);
       if (hit) {

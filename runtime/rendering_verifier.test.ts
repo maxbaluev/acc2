@@ -82,7 +82,11 @@ describe("verifyRendering — substrate jargon", () => {
 });
 
 describe("verifyRendering — owner-profile-derived axes", () => {
-  test("avoided_terms hit raises residual by 0.20", () => {
+  // RLM-first owner-model consolidation (brain directive MA0YKYKZ): soft
+  // vocabulary/style choices (avoided_terms, declined_concepts) are no longer
+  // scored by persisted term lists — the language model evaluates tone from
+  // fresh ledger context. Only the hard things_to_never_do constraint remains.
+  test("avoided_terms no longer scored — soft vocabulary is RLM-derived", () => {
     const policy = emptyPolicy();
     policy.avoided_terms = ["telemetry"];
     const r = verifyRendering({
@@ -90,8 +94,8 @@ describe("verifyRendering — owner-profile-derived axes", () => {
       audience: "primary",
       policy,
     });
-    expect(r.breakdown.avoided_term).toBeCloseTo(0.20, 5);
-    expect(r.violations.some((v) => v.axis === "avoided_term" && v.sample.toLowerCase() === "telemetry")).toBe(true);
+    expect(r.breakdown.avoided_term).toBe(0);
+    expect(r.violations.some((v) => v.axis === "avoided_term")).toBe(false);
   });
 
   test("things_to_never_do hit raises residual to ≥0.5 — hard constraint", () => {
@@ -106,7 +110,7 @@ describe("verifyRendering — owner-profile-derived axes", () => {
     expect(r.residual).toBeGreaterThanOrEqual(0.5);
   });
 
-  test("declined_concepts hit raises residual by 0.20 per term, capped", () => {
+  test("declined_concepts no longer scored — soft vocabulary is RLM-derived", () => {
     const policy = emptyPolicy();
     policy.declined_concepts = ["graphs", "metrics"];
     const r = verifyRendering({
@@ -114,8 +118,8 @@ describe("verifyRendering — owner-profile-derived axes", () => {
       audience: "primary",
       policy,
     });
-    // Two declined hits: 0.20 + 0.20 = 0.40 (capped exactly at cap).
-    expect(r.breakdown.declined_concept).toBeCloseTo(0.40, 5);
+    expect(r.breakdown.declined_concept).toBe(0);
+    expect(r.violations.some((v) => v.axis === "declined_concept")).toBe(false);
   });
 });
 
