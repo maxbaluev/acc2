@@ -60,7 +60,6 @@ const RAW_PHRASE_HINTS = [
   "act_tuple_recorded",
   "predicate_gate_rejected",
   "atms_strategy_first_violation",
-  "intent_classified",
   "lane_routing_refused",
   "refinement_depth_exceeded",
   "verifier_residual_high",

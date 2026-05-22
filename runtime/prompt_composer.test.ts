@@ -72,6 +72,27 @@ describe("prompt_composer", () => {
     expect(sectionNames).toContain("do_not");
   });
 
+  test("uses the same prompt section set for research, question, code, outreach, and project goals", () => {
+    const db = openDb(":memory:");
+    seedFoundationalKnowledge(db, { ownerApproved: true });
+    const goals = [
+      "Deep research the market for privacy-preserving analytics",
+      "Answer what residual means in acc2",
+      "Change runtime prompt composer tests",
+      "Plan a business outreach campaign for Lakeland clinics",
+      "Run a multi-stage project to publish a report",
+    ];
+    const sectionSets = goals.map((goal) => {
+      const directiveId = newId();
+      const taskId = newId();
+      emitEvent(db, { kind: "directive_opened", substrate_origin: "owner", directive_id: directiveId, task_id: directiveId, payload: { directive_text: goal } });
+      emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: taskId, payload: { goal } });
+      return composePrompt(db, { taskId }).sections.map((s) => s.name);
+    });
+    expect(new Set(sectionSets.map((sections) => JSON.stringify(sections))).size).toBe(1);
+    expect(sectionSets[0]).not.toContain("fixture_marker");
+  });
+
   test("EXIT INVARIANT is structurally pinned (load-bearing fix for brain_silent_exit, audit 2026-05-16)", () => {
     // Foundational fix: the bridge classifier split (commit 59b2872) revealed
     // 87% of bridge_failed events were `brain_silent_exit` — opencode running

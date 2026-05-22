@@ -637,7 +637,6 @@ export const dispatchReadyTask = async (
     | Partial<Record<string, Array<import("./prompt_composer").RetrievedPolicyArtifactBundle>>>
     | undefined = undefined;
   try {
-    const goalText = task.goal ?? task.directive_id ?? "";
     const policyArtifactRows = db
       .query(
         `SELECT id, body, score, name
@@ -667,21 +666,9 @@ export const dispatchReadyTask = async (
         if (surface !== "brain_prompt") continue;
         const body = payload.body;
         if (typeof body !== "string" || body.length === 0) continue;
-        // goal_shape pre-filter: when the row declares goal_shape_tags
-        // require a substring match against the directive's goal_shape;
-        // when it doesn't declare any, accept (legacy/cold-start rows).
-        const tags = Array.isArray(payload.goal_shape_tags) ? payload.goal_shape_tags : [];
-        if (tags.length > 0) {
-          const lower = goalText.toLowerCase();
-          let matched = false;
-          for (const t of tags) {
-            if (typeof t === "string" && t.length > 0 && lower.includes(t.toLowerCase())) {
-              matched = true;
-              break;
-            }
-          }
-          if (!matched) continue;
-        }
+        // Universal prompt policy retrieval is section-scoped only.
+        // Goal/domain labels may remain metadata for search and credit, but
+        // they must not pre-filter which prompt policy can reach composePrompt.
         const kindRaw = (parsed.kind as string | undefined) ?? "prompt_policy_bundle";
         const bundleArtifactKind: "prompt_policy_bundle" | "emission_grammar" | "self_introspection" =
           (kindRaw === "emission_grammar" || kindRaw === "self_introspection")

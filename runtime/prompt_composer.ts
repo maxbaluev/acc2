@@ -650,7 +650,7 @@ const selectPromptSectionVariant = (
     if (score <= 0) continue;
     const goalShapeMatch = computeGoalShapeMatch(payload.goal_shape_tags, opts.goalText);
     const ownerProfileAlignment = computeOwnerProfileAlignment(payload.owner_profile_alignment, opts.ownerProfile);
-    const ranked = score * goalShapeMatch * ownerProfileAlignment;
+    const ranked = score * ownerProfileAlignment;
     if (ranked <= 0) continue;
     if (ranked > bestRanked) {
       bestRanked = ranked;
@@ -1740,7 +1740,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     const retrievedScore = retrievedBundle && typeof retrievedBundle.score === "number" && Number.isFinite(retrievedBundle.score)
       ? retrievedBundle.score
       : 0;
-    const posteriorBundle = selectPolicyBundleByPosterior(db, composerGoalShape, name);
+    const posteriorBundle = selectPolicyBundleByPosterior(db, "", name);
     const posteriorScore = posteriorBundle?.posteriorScore ?? 0;
     const variant = selectPromptSectionVariant(db, {
       sectionName: name,

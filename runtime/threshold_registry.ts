@@ -11,9 +11,9 @@
 // applies uniformly because threshold predicates are just act_artifacts.
 //
 // Idempotency contract: getThreshold reads the HIGHEST-posterior admitted
-// row matching the name. There may be multiple variants (e.g., per
-// goal_class); the caller can pass a more specific name to opt into
-// class-scoped tuning. Default-cold-start = hardcoded number.
+// row matching the name. Variants may scope mechanical runtime context
+// such as sandbox class or verifier provenance, but must not recreate
+// semantic intent/goal-class gates. Default-cold-start = hardcoded number.
 //
 // Caching: a per-process Map memoizes (name → value) reads so the hot
 // path doesn't hit SQLite per call. The cache invalidates on a
