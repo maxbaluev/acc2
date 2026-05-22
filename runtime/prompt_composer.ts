@@ -422,6 +422,188 @@ const buildProvenDecompositionStrategySection = (
   ].join("\n");
 };
 
+// ── Proven trajectory motif (Tier-S3 retrieval-binding leg) ────────────────
+//
+// The trajectory_motif_extractor mines recurring n-gram (length 3/4) tuples of
+// event KINDS across closed directives and admits one
+// act_artifact{kind:trajectory_motif_predicate, id:motif_<n>_<hash>} row per
+// recurring sub-sequence. The row body is { kinds, length, frequency,
+// avg_closure_residual }; its `score` is calibrated to 1 - avg_closure_residual
+// (a motif whose directives closed with LOW residual is a GOOD recipe → high
+// score). Until now those scored rows were WRITTEN + CREDITED but never
+// RETRIEVED — the write+credit side of the primitive existed, the
+// retrieval-binding leg did not, so "reuse proven trajectory shapes for similar
+// goals" was unrealized.
+//
+// KEY MAPPING (no goal-text guessing, no DAG-geometry invention). A motif key
+// is PURELY post-hoc event-kind geometry — it carries no goal_class/shape
+// bucket, so there is no decomposition-style goal→category key to reuse. The
+// only honest compose-time key is the directive's OWN trajectory-so-far: the
+// substrate already knows the ordered event KINDS this open directive has
+// emitted. A motif is a recurring contiguous sub-sequence; if the directive's
+// recent trajectory tail matches a motif's leading kinds, that motif is a
+// proven continuation of the path the directive is already on. So we read the
+// directive's event-kind sequence and surface the highest-scoring motif whose
+// kinds are anchored to (overlap a suffix of) that trajectory. This is
+// retrieval by REAL substrate state, not by guessed goal geometry.
+//
+// Purely additive: a non-floor advisory candidate that drops first under budget
+// pressure. It reads existing scored rows + the directive's own ledger events
+// and emits nothing; it changes nothing about how/whether tasks dispatch or
+// close. It only feeds the brain an outcome-scored recipe-shape prior.
+
+const PROVEN_MOTIF_MIN_SAMPLES = 5;
+const PROVEN_MOTIF_MIN_SCORE = 0.55;
+// Bound the trajectory read: scan the directive's first N event kinds for a
+// contiguous motif run. A motif is at most a 4-gram and the strategic spine
+// (directive_opened → task_node_opened → …) lands early, so a bounded window
+// captures the recipe while keeping the synchronous read cheap.
+const PROVEN_MOTIF_TRAJECTORY_WINDOW = 64;
+
+type ProvenTrajectoryMotif = {
+  predicate_act_artifact_id: string;
+  motif_name: string;
+  kinds: string[];
+  length: number;
+  frequency: number;
+  effective_score: number;
+  avg_closure_residual: number;
+};
+
+// True when the directive's trajectory has already TRAVERSED the motif's
+// recipe path: the motif's leading kinds appear as a CONTIGUOUS run somewhere
+// in `trajectory`. A motif IS a recurring contiguous sub-sequence of event
+// kinds (the extractor mines 3/4-grams), so "anchored" means the directive is
+// on — or partway through — that proven sub-sequence. We require at least the
+// first 2 motif kinds to match contiguously (a single shared kind is noise,
+// not a recipe); a directive partway through a longer motif still matches its
+// proven prefix. The directive's own trajectory accumulates composer-internal
+// events (prompt_policy_section_selected, …) between the strategic kinds, so a
+// pure suffix/prefix line-up is too brittle — contiguous containment of the
+// motif's leading run is the honest, pollution-tolerant signal.
+const motifAnchoredToTrajectory = (
+  trajectory: ReadonlyArray<string>,
+  motif: ReadonlyArray<string>,
+): boolean => {
+  if (motif.length < 2 || trajectory.length < 2) return false;
+  // Longest leading run of the motif (down to 2 kinds) that appears verbatim
+  // and contiguous somewhere in the trajectory.
+  for (let runLen = Math.min(motif.length, trajectory.length); runLen >= 2; runLen--) {
+    const run = motif.slice(0, runLen);
+    for (let start = 0; start + runLen <= trajectory.length; start++) {
+      let ok = true;
+      for (let i = 0; i < runLen; i++) {
+        if (trajectory[start + i] !== run[i]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) return true;
+    }
+  }
+  return false;
+};
+
+const readProvenTrajectoryMotif = (
+  db: Database,
+  directiveId: string | null | undefined,
+): ProvenTrajectoryMotif | null => {
+  const dir = (directiveId ?? "").trim();
+  if (dir.length === 0) return null;
+  // Read the directive's OWN trajectory-so-far (ordered event kinds). This is
+  // the only honest compose-time key for a geometry-only motif — match the
+  // directive against the path it is already on, never against guessed goal
+  // shape.
+  let trajectory: string[];
+  try {
+    const rows = db
+      .query(
+        `SELECT kind FROM events
+          WHERE directive_id = ?
+          ORDER BY ts ASC, rowid ASC
+          LIMIT ?`,
+      )
+      .all(dir, PROVEN_MOTIF_TRAJECTORY_WINDOW) as Array<{ kind: string }>;
+    trajectory = rows.map((r) => r.kind);
+  } catch {
+    return null;
+  }
+  if (trajectory.length < 2) return null;
+
+  // Pull admitted/promoted motif rows ranked by score (best recipe first).
+  // Scored = score reflects 1 - avg_closure_residual, so high score = low
+  // residual = proven-good recipe. Bound the candidate set; the first one whose
+  // kinds anchor to the trajectory AND clear the advisory floor wins.
+  let rows: Array<{ id: string; name: string | null; body: string | null; score: number | null }>;
+  try {
+    rows = db
+      .query(
+        `SELECT id, name, body, score FROM act_artifact
+          WHERE kind = 'trajectory_motif_predicate'
+            AND superseded_by IS NULL
+            AND status IN ('admitted', 'promoted')
+          ORDER BY score DESC, updated_at DESC
+          LIMIT 200`,
+      )
+      .all() as Array<{ id: string; name: string | null; body: string | null; score: number | null }>;
+  } catch {
+    return null;
+  }
+
+  for (const row of rows) {
+    if (!row.body) continue;
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(row.body) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const kinds = Array.isArray(body.kinds)
+      ? (body.kinds.filter((k) => typeof k === "string") as string[])
+      : [];
+    if (kinds.length < 2) continue;
+    const frequency = typeof body.frequency === "number" ? body.frequency : 0;
+    // Advisory floor — sample side. frequency is the count of motif occurrences
+    // across the closed-directive corpus (the extractor's `sample_count`
+    // analogue). Don't recommend a recipe the substrate has barely seen.
+    if (frequency < PROVEN_MOTIF_MIN_SAMPLES) continue;
+    const score = typeof row.score === "number" ? row.score : 0;
+    // Advisory floor — score side. A low-score motif (high avg_closure_residual)
+    // is a path that historically closed POORLY — surfacing it would be noise.
+    if (score < PROVEN_MOTIF_MIN_SCORE) continue;
+    // Only recommend a motif the directive is actually on the path of. A motif
+    // whose kinds don't anchor to this trajectory is some other directive's
+    // recipe — irrelevant here.
+    if (!motifAnchoredToTrajectory(trajectory, kinds)) continue;
+    const avgResidual =
+      typeof body.avg_closure_residual === "number" && Number.isFinite(body.avg_closure_residual)
+        ? body.avg_closure_residual
+        : clamp01(1 - score);
+    return {
+      predicate_act_artifact_id: row.id,
+      motif_name: (row.name && row.name.length > 0 ? row.name : kinds.join(">")),
+      kinds,
+      length: kinds.length,
+      frequency,
+      effective_score: score,
+      avg_closure_residual: avgResidual,
+    };
+  }
+  return null;
+};
+
+const buildProvenTrajectoryMotifSection = (
+  m: ProvenTrajectoryMotif | null,
+): string => {
+  if (!m) return "";
+  const pct = (v: number): string => `${(Math.max(0, Math.min(1, v)) * 100).toFixed(0)}%`;
+  return [
+    `PROVEN TRAJECTORY MOTIF (outcome-scored recipe shape recurring across ${m.frequency} occurrence(s) of similar work):`,
+    `  Directives that followed the event sequence "${m.kinds.join(" → ")}" historically closed well (effective_score=${m.effective_score.toFixed(2)}, mean closure_residual=${m.avg_closure_residual.toFixed(2)}). Your directive is already on this path.`,
+    `  ADVISORY ONLY: continue this proven sub-sequence when it fits; deviate when the work genuinely differs. The substrate credits whichever trajectory closes — your residual feeds back into this score (${pct(m.effective_score)} confidence today). [cite ${m.predicate_act_artifact_id}]`,
+  ].join("\n");
+};
+
 const goalShapeTags = (goalText?: string | null): string[] => {
   const tokens = String(goalText ?? "")
     .toLowerCase()
@@ -2053,6 +2235,18 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   const provenDecompBody = buildProvenDecompositionStrategySection(provenDecomp);
   if (provenDecompBody.length > 0) {
     candidates.push({ name: "proven_decomposition_strategy", p: 1, body: provenDecompBody });
+  }
+  // Proven trajectory motif — Tier-S3 retrieval-binding leg. Surfaces the
+  // outcome-scored trajectory_motif_predicate row whose recurring event-kind
+  // sub-sequence is anchored to this directive's OWN trajectory-so-far, so the
+  // brain retrieves a PROVEN recipe shape for the path it is already on.
+  // Purely additive: non-floor (drops first under budget pressure),
+  // advisory-only, read-only, changes nothing about dispatch/closure. P1 so it
+  // lands in normal flow but never displaces a load-bearing section.
+  const provenMotif = readProvenTrajectoryMotif(db, task.directive_id);
+  const provenMotifBody = buildProvenTrajectoryMotifSection(provenMotif);
+  if (provenMotifBody.length > 0) {
+    candidates.push({ name: "proven_trajectory_motif", p: 1, body: provenMotifBody });
   }
   pushPolicySection("runtimes_available", 0, true);
   pushPolicySection("workflow", 0, true);
