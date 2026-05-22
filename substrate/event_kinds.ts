@@ -120,6 +120,16 @@ export const EVENT_KINDS = {
   // act lets distributeCredit adjust the edge's posterior alongside its
   // endpoint nodes.
   causal_edge_observed:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // 2026-05-22: emitted by the causal-edge extractor's credit half when a
+  // co-citing act's OWN residual (predicted_residual on the tuple, or its
+  // projected action_scored residual) moves an edge's Beta posterior.
+  // Carries { edge_act_artifact_id, source_act_id, act_residual, outcome,
+  // posterior_alpha, posterior_beta, score }; idempotency key is
+  // (edge_act_artifact_id, source_act_id). Without this registration the
+  // real-mode daemon throws unknown_event_kind and the whole credit tick
+  // aborts — the credit loop was double-inert before (scope mismatch +
+  // unregistered emit kind).
+  causal_edge_credited:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // Tier-S3 trajectory-motif posterior (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
   // 2026-05-19): substrate-emitted when the bounded trajectory-motif
   // extractor (runtime/trajectory_motif_extractor.ts) observes a

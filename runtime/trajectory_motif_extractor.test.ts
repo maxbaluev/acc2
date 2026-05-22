@@ -130,7 +130,7 @@ describe("extractTrajectoryMotifs", () => {
     expect(second.motifs_already_present).toBeGreaterThanOrEqual(1);
   });
 
-  test("closure correlation: avg_closure_residual averages across directives whose tail matches the motif", async () => {
+  test("closure correlation: avg_closure_residual averages over EVERY directive the motif occurred in (not literal-suffix tail-match)", async () => {
     const db = openDb(":memory:");
     const seq = ["directive_opened", "task_node_opened", "task_committed"];
     insertSequence(db, "d_low", seq);
@@ -138,6 +138,11 @@ describe("extractTrajectoryMotifs", () => {
     insertSequence(db, "d_high", seq);
 
     // Closure-audited events for each directive (different residuals).
+    // Inserted AFTER the seq, so they are the directive's TRAILING events —
+    // exactly the real-data shape where background events follow the
+    // closure and the motif is never the literal suffix. The corrected
+    // extractor correlates over directives the motif OCCURRED IN, so all
+    // three contribute their residual regardless of suffix position.
     insertEvent(db, {
       kind: "task_closure_audited",
       directive_id: "d_low",
@@ -164,34 +169,12 @@ describe("extractTrajectoryMotifs", () => {
       .get() as { body: string };
     expect(row).toBeTruthy();
     const body = JSON.parse(row.body) as Record<string, unknown>;
-    // task_closure_audited was inserted AFTER the seq, so the directive's
-    // last 3 kinds are still (task_node_opened, task_committed,
-    // task_closure_audited) — the motif's TAIL does NOT match that.
-    // But task_closure_audited residuals are NOT what we check here —
-    // we check that residuals are joined across the three directives.
-    // Tail-match requires the motif kinds to be the LAST n kinds of the
-    // directive's sequence. After inserting closure_audited the tail is
-    // not the motif, so we expect avg_closure_residual === null. This
-    // pins the contract: only directives whose tail actually matches
-    // contribute residuals.
-    expect(body.avg_closure_residual).toBeNull();
-
-    // Now exercise the positive path: a separate motif whose tail IS
-    // task_closure_audited across three directives.
-    const seq2 = ["task_node_opened", "task_committed", "task_closure_audited"];
-    // d_low, d_mid, d_high already have this exact tail.
-    await extractTrajectoryMotifs(db);
-    const row2 = db
-      .query(
-        `SELECT body FROM act_artifact
-          WHERE kind = 'trajectory_motif_predicate'
-            AND name = 'task_node_opened>task_committed>task_closure_audited'`,
-      )
-      .get() as { body: string };
-    expect(row2).toBeTruthy();
-    const body2 = JSON.parse(row2.body) as Record<string, unknown>;
-    expect(typeof body2.avg_closure_residual).toBe("number");
-    expect(body2.avg_closure_residual).toBeCloseTo(0.5, 6);
+    // The motif occurred in d_low, d_mid, d_high — each with a closure.
+    // avg = (0.1 + 0.5 + 0.9) / 3 = 0.5. The old literal-suffix logic
+    // would have returned null here (closure is not the tail) — that was
+    // the runtime-inert bug.
+    expect(typeof body.avg_closure_residual).toBe("number");
+    expect(body.avg_closure_residual).toBeCloseTo(0.5, 6);
   });
 
   test("score calibration: a motif with matching low-residual closures gets score>0.5 (not stuck at 0.5)", async () => {

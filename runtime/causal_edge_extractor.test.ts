@@ -225,25 +225,21 @@ describe("extractCausalEdges", () => {
     expect(row.status).toBe("admitted");
   });
 
-  test("credit half: edge co-cited in a low-residual closure gets posterior_alpha>1 + score>0.5, and a second tick does NOT double-credit", async () => {
+  test("credit half: edge co-cited in a low-residual ACT (predicted_residual) gets posterior_alpha>1 + score>0.5, and a second tick does NOT double-credit", async () => {
     const db = openDb(":memory:");
-    // An act in directive d_good co-cites k_a + k_b, then the directive
-    // closes with a LOW residual (good outcome).
+    // An act co-cites k_a + k_b AND carries its OWN low predicted_residual
+    // (good outcome). The act is the outcome unit — no separate closure.
     insertEvent(db, {
       kind: "act_tuple_recorded",
       directive_id: "d_good",
-      payload: { cited_knowledge_ids: ["k_a", "k_b"] },
-    });
-    insertEvent(db, {
-      kind: "task_closure_audited",
-      directive_id: "d_good",
-      payload: { closure_residual: 0.1 },
+      payload: { cited_knowledge_ids: ["k_a", "k_b"], predicted_residual: 0.1 },
     });
 
     const first = await extractCausalEdges(db);
     // Edge admitted by the creation half, then credited by the credit half.
     expect(first.edges_credited).toBe(1);
-    expect(first.closures_scanned).toBe(1);
+    expect(first.credit_acts_scanned).toBe(1);
+    expect(first.credit_acts_with_residual).toBe(1);
 
     const edgeIdStr = "edge_citation_cocitation__k_a__k_b";
     const row1 = db
@@ -257,13 +253,13 @@ describe("extractCausalEdges", () => {
     expect(row1.score).toBeGreaterThan(0.5);
     expect(row1.score).toBeCloseTo(2 / 3, 6);
 
-    // Exactly one credit event for this (edge, closure) pair.
+    // Exactly one credit event for this (edge, act) pair.
     const creditCount1 = (db
       .query(`SELECT COUNT(*) AS n FROM events WHERE kind = 'causal_edge_credited'`)
       .get() as { n: number }).n;
     expect(creditCount1).toBe(1);
 
-    // Second tick: same closure, same edge — must NOT double-credit.
+    // Second tick: same act, same edge — must NOT double-credit.
     const second = await extractCausalEdges(db);
     expect(second.edges_credited).toBe(0);
     expect(second.credit_pairs_skipped_dup).toBe(1);
@@ -280,17 +276,12 @@ describe("extractCausalEdges", () => {
     expect(creditCount2).toBe(1);
   });
 
-  test("credit half: high-residual closure applies +beta (bad outcome) → score<0.5", async () => {
+  test("credit half: high-residual ACT applies +beta (bad outcome) → score<0.5", async () => {
     const db = openDb(":memory:");
     insertEvent(db, {
       kind: "act_tuple_recorded",
       directive_id: "d_bad",
-      payload: { cited_knowledge_ids: ["k_p", "k_q"] },
-    });
-    insertEvent(db, {
-      kind: "task_closure_audited",
-      directive_id: "d_bad",
-      payload: { closure_residual: 0.8 },
+      payload: { cited_knowledge_ids: ["k_p", "k_q"], predicted_residual: 0.8 },
     });
 
     await extractCausalEdges(db);
@@ -307,6 +298,58 @@ describe("extractCausalEdges", () => {
     expect(row.posterior_alpha).toBe(1);
     expect(row.posterior_beta).toBe(2);
     expect(row.score).toBeLessThan(0.5);
+  });
+
+  test("credit half: act with no predicted_residual falls back to its projected action_scored residual", async () => {
+    const db = openDb(":memory:");
+    const actId = insertEvent(db, {
+      kind: "act_tuple_recorded",
+      directive_id: "d_scored",
+      payload: { cited_knowledge_ids: ["k_s1", "k_s2"], source_act_id: "src_act_1" },
+    });
+    // The projected action_scored row carries the realized residual, keyed
+    // by source_act_id. Low residual → good outcome.
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_scored",
+      payload: { source_act_id: "src_act_1", residual: 0.05, observation: "ok" },
+    });
+    void actId;
+
+    const summary = await extractCausalEdges(db);
+    expect(summary.credit_acts_with_residual).toBe(1);
+    expect(summary.edges_credited).toBe(1);
+    const row = db
+      .query(`SELECT posterior_alpha, posterior_beta FROM act_artifact WHERE id = ?`)
+      .get("edge_citation_cocitation__k_s1__k_s2") as {
+        posterior_alpha: number;
+        posterior_beta: number;
+      };
+    expect(row.posterior_alpha).toBe(2);
+    expect(row.posterior_beta).toBe(1);
+  });
+
+  test("credit half: act with no residual signal at all is skipped (not credited)", async () => {
+    const db = openDb(":memory:");
+    insertEvent(db, {
+      kind: "act_tuple_recorded",
+      directive_id: "d_none",
+      payload: { cited_knowledge_ids: ["k_n1", "k_n2"] },
+    });
+    const summary = await extractCausalEdges(db);
+    // Edge admitted by creation half, but no residual → no credit.
+    expect(summary.credit_acts_scanned).toBe(1);
+    expect(summary.credit_acts_with_residual).toBe(0);
+    expect(summary.edges_credited).toBe(0);
+    const row = db
+      .query(`SELECT posterior_alpha, posterior_beta FROM act_artifact WHERE id = ?`)
+      .get("edge_citation_cocitation__k_n1__k_n2") as {
+        posterior_alpha: number;
+        posterior_beta: number;
+      };
+    // Still at neutral cold-start prior.
+    expect(row.posterior_alpha).toBe(1);
+    expect(row.posterior_beta).toBe(1);
   });
 
   test("task_edge_recorded without both endpoints is skipped", async () => {

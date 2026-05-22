@@ -249,24 +249,26 @@ export const extractTrajectoryMotifs = async (
     .slice(0, topK);
 
   // For each frequent motif compute closure correlation over the set of
-  // directives whose tail matches the motif. "Tail matches" = the motif
-  // appears as the LAST n-gram in the directive's event sequence.
+  // directives the motif OCCURRED IN.
+  //
+  // SCOPE-MISMATCH DIAGNOSIS (2026-05-22, runtime-verified): the prior
+  // logic required the motif to be the LITERAL SUFFIX (last n-gram) of the
+  // directive's event sequence. On real data that matched almost nothing —
+  // only 1 of 333 closure-directives actually ENDS with
+  // task_closure_audited; directives keep emitting background events
+  // (worker_tick_completed, embedding_computed, artifact_kind_inferred, …)
+  // long after the closure audit, so the closure is virtually never the
+  // terminal event and no motif tail lines up with it. Result:
+  // residualCount=0 for every motif, motifs_score_calibrated=0.
+  //
+  // The correct causal semantics: a motif is a recurring SUB-sequence of
+  // event kinds; if the directives it occurred in close with low residual,
+  // the motif is a good recipe → high score. So correlate over EVERY
+  // directive the motif appeared in (motif.directives, already tracked by
+  // the n-gram aggregation) that also carries a closure residual — not a
+  // literal suffix match.
   for (const motif of frequent) {
-    const tailLength = motif.kinds.length;
-    const matchingDirectives: string[] = [];
-    for (const directiveId of motif.directives) {
-      const kinds = perDirective.get(directiveId);
-      if (!kinds || kinds.length < tailLength) continue;
-      const tail = kinds.slice(kinds.length - tailLength);
-      let matches = true;
-      for (let i = 0; i < tailLength; i++) {
-        if (tail[i] !== motif.kinds[i]) {
-          matches = false;
-          break;
-        }
-      }
-      if (matches) matchingDirectives.push(directiveId);
-    }
+    const matchingDirectives: string[] = Array.from(motif.directives);
 
     let residualSum = 0;
     let residualCount = 0;
