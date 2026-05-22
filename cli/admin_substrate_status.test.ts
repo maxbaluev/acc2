@@ -9,7 +9,7 @@ import {
   seedFoundationalKnowledge,
   seedRecipes,
 } from "../substrate/seed";
-import { embedPendingEvents } from "../runtime/embedder";
+import { EMBEDDING_VERSION, embedPendingEvents, encodeEmbeddingBlob, upsertVecEventRow } from "../runtime/embedder";
 import {
   computeSubstrateStatus,
   renderSubstrateStatus,
@@ -126,7 +126,13 @@ describe("computeSubstrateStatus", () => {
       payload: { reason: "non-embeddable lifecycle chatter" },
     });
 
-    db.run("UPDATE events SET embedding = ? WHERE id = ?", [new Uint8Array([1, 2, 3, 4]), embedded.id]);
+    const vec = synthEmbedding(1);
+    db.run("UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?", [
+      encodeEmbeddingBlob(vec),
+      EMBEDDING_VERSION,
+      embedded.id,
+    ]);
+    upsertVecEventRow(db, embedded.id, vec, EMBEDDING_VERSION);
     db.run("UPDATE events SET embedding = X'', embedding_version = 'no_text' WHERE id = ?", [noText.id]);
 
     const r = computeSubstrateStatus(db, "/tmp/x.db");

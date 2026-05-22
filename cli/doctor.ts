@@ -140,7 +140,7 @@ const realSubstrateCounts = (): SubstrateCounts => {
       .get() as { n: number };
     const a = db
       .query(
-        "SELECT COUNT(*) AS n FROM act_artifact WHERE name LIKE 'seed_%' OR id LIKE 'seed_%'",
+        "SELECT COUNT(*) AS n FROM act_artifact WHERE id LIKE 'seed_%' OR name LIKE 'seed_%' OR state_root LIKE 'substrate/primitive/%' OR state_root LIKE 'substrate/threshold/%'",
       )
       .get() as { n: number };
     const r = db

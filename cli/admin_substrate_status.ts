@@ -51,8 +51,9 @@ const defaultEnv = (): SubstrateStatusEnv => ({
 const safeCount = (db: Database, sql: string, params: unknown[] = []): number => {
   try {
     return (db.query(sql).get(...params) as { c: number } | null)?.c ?? 0;
-  } catch {
-    return 0;
+  } catch (err) {
+    console.error(`substrate-status count failed: ${(err as Error).message}`);
+    return Number.NaN;
   }
 };
 
@@ -122,16 +123,12 @@ export const computeSubstrateStatus = (
   // `threshold_<name>`). They are substrate-seeded too — same rationale.
   const actArtifactsSeed = safeCount(
     db,
-    "SELECT COUNT(*) AS c FROM act_artifact WHERE id LIKE 'seed_%' OR state_root LIKE 'substrate/primitive/%' OR state_root LIKE 'substrate/threshold/%'",
+    "SELECT COUNT(*) AS c FROM act_artifact WHERE id LIKE 'seed_%' OR name LIKE 'seed_%' OR state_root LIKE 'substrate/primitive/%' OR state_root LIKE 'substrate/threshold/%'",
   );
   const actArtifactsBrain = Math.max(0, actArtifacts - actArtifactsSeed);
 
   const placeholders = EMBEDDABLE_KINDS.map(() => "?").join(", ");
-  const vecEvents = safeCount(
-    db,
-    `SELECT COUNT(*) AS c FROM events WHERE kind IN (${placeholders}) AND embedding IS NOT NULL AND length(embedding) > 0`,
-    EMBEDDABLE_KINDS as unknown as unknown[],
-  );
+  const vecEvents = safeCount(db, "SELECT COUNT(*) AS c FROM vec_events");
   const embeddablePending = safeCount(
     db,
     `SELECT COUNT(*) AS c FROM events WHERE kind IN (${placeholders}) AND embedding IS NULL`,

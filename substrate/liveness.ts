@@ -67,8 +67,9 @@ export type LivenessReport = {
 const safeCount = (db: Database, sql: string): number => {
   try {
     return (db.query(sql).get() as { c: number } | null)?.c ?? 0;
-  } catch {
-    return 0;
+  } catch (err) {
+    console.error(`liveness count failed: ${(err as Error).message}`);
+    return Number.NaN;
   }
 };
 
@@ -83,7 +84,7 @@ export const computeLivenessReport = (db: Database): LivenessReport => {
   );
   const actArtifactsSeed = safeCount(
     db,
-    "SELECT COUNT(*) AS c FROM act_artifact WHERE id LIKE 'seed_%' OR name LIKE 'seed_%'",
+    "SELECT COUNT(*) AS c FROM act_artifact WHERE id LIKE 'seed_%' OR name LIKE 'seed_%' OR state_root LIKE 'substrate/primitive/%' OR state_root LIKE 'substrate/threshold/%'",
   );
   const recipesSeed = safeCount(
     db,
