@@ -1055,6 +1055,15 @@ export const EVENT_KINDS = {
   prompt_composition_cache_hit:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   prompt_composition_cache_miss:           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
+  // ── Query-embedding cache (compounding lever #4, 2026-05-22) ──────────────
+  // Broadens the prompt_composition_cache idiom to the per-search-query
+  // OpenAI embedding round-trip. computeEmbedding(text) is a pure deterministic
+  // function of (text, model, dims, version) — no ledger state — so it needs no
+  // high-water-mark version key. cache_hit means a query embedding was reused
+  // without an OpenAI fetch; cache_miss means a fresh embedding was computed.
+  query_embedding_cache_hit:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  query_embedding_cache_miss:              { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+
   // ── Bridge-health gate (Batch 8.A, cites brain lesson 5SWP11NZFS3YX68Y95T164HT9W) ─
   // Substrate-emitted when ≥ BRIDGE_DEGRADATION_THRESHOLD bridge_failed events
   // land within BRIDGE_FAILURE_WINDOW_MS. Scheduler refuses opencode_brain

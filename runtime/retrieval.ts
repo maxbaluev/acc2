@@ -20,7 +20,8 @@
 // is a thin wrapper around `retrieve(...)`.
 
 import type { Database } from "bun:sqlite";
-import { computeEmbedding, EMBEDDING_VERSION } from "./embedder";
+import { EMBEDDING_VERSION } from "./embedder";
+import { getCachedQueryEmbedding } from "./embedding_cache";
 import { ARTIFACT_LIFECYCLE_KINDS } from "../substrate/event_kinds";
 import type { EmbeddingIndex, IndexEntry, KnnHit } from "./embedding_index";
 import { originPromotion, originPromotionByGoalShape } from "../substrate/views";
@@ -269,7 +270,10 @@ export const retrieve = async (
     };
   }
 
-  const queryResult = await computeEmbedding(q.text);
+  // Query embedding is a pure deterministic function of (text, model, dims,
+  // version) — no ledger state — so it is safely keyed-cached (compounding
+  // lever #4) to avoid re-paying the OpenAI round-trip for a repeated query.
+  const queryResult = await getCachedQueryEmbedding(db, q.text);
   if (!queryResult) {
     return {
       hits: [],
