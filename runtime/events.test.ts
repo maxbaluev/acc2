@@ -1314,5 +1314,39 @@ describe("emitEvent dispatcher_violation classification gate (Hole 6 — 2026-05
     const payload = JSON.parse(row!.payload);
     expect(payload.classification_source).toBeUndefined();
     expect(payload.failure_kind).toBe("out_of_scope_target");
+    expect(payload.violation).toBe("out_of_scope_target");
+    expect(payload.reason).toBe("Dispatcher violation classified as out_of_scope_target; emitter did not provide payload.reason.");
+    expect(payload.directive_id).toBe(directiveId);
+    expect(payload.task_id).toBe(taskId);
+  });
+
+  test("dispatcher_violation with payload.kind only exposes non-null violation and reason", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const event = emitEvent(db, {
+      kind: "dispatcher_violation",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: {
+        kind: "floor_section_missing",
+        dispatch_id: "dispatch-test",
+        missing_floor_sections: [],
+        floor_sections_over_budget: ["top_laws"],
+      },
+    });
+    const row = db
+      .query<{ failure_kind: string | null; payload: string }, [string]>(
+        "SELECT failure_kind, payload FROM events WHERE id = ?",
+      )
+      .get(event.id);
+    expect(row?.failure_kind).toBe("floor_section_missing");
+    const payload = JSON.parse(row!.payload);
+    expect(payload.violation).toBe("floor_section_missing");
+    expect(payload.reason).toBe("Dispatcher violation classified as floor_section_missing; emitter did not provide payload.reason.");
+    expect(payload.directive_id).toBe(directiveId);
+    expect(payload.task_id).toBe(taskId);
+    expect(payload.dispatch_id).toBe("dispatch-test");
   });
 });

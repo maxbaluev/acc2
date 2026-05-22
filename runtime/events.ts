@@ -274,16 +274,37 @@ const normalizeDispatcherViolationPayload = (input: EmitEventInput): { payload: 
     : (typeof payload.failure_kind === "string" && payload.failure_kind.trim().length > 0
       ? payload.failure_kind.trim()
       : null);
+  const payloadViolation = typeof payload.violation === "string" && payload.violation.trim().length > 0
+    ? payload.violation.trim()
+    : (typeof payload.kind === "string" && payload.kind.trim().length > 0
+      ? payload.kind.trim()
+      : null);
+  const failure_kind = explicitFailureKind ?? payloadViolation ?? "unclassified_emit_bug";
+  const reason = typeof payload.reason === "string" && payload.reason.trim().length > 0
+    ? payload.reason.trim()
+    : (failure_kind === "unclassified_emit_bug"
+      ? "Emitter did not provide failure_kind, payload.failure_kind, payload.violation, or payload.kind; substrate defaulted to unclassified_emit_bug at the emit boundary so audits surface the gap."
+      : `Dispatcher violation classified as ${failure_kind}; emitter did not provide payload.reason.`);
+  const augmented: Record<string, unknown> = {
+    ...payload,
+    violation: typeof payload.violation === "string" && payload.violation.trim().length > 0 ? payload.violation.trim() : failure_kind,
+    reason,
+    directive_id: input.directive_id ?? (typeof payload.directive_id === "string" ? payload.directive_id : null),
+    task_id: input.task_id ?? (typeof payload.task_id === "string" ? payload.task_id : null),
+  };
+  if (typeof payload.dispatch_id === "string" && payload.dispatch_id.trim().length > 0) {
+    augmented.dispatch_id = payload.dispatch_id.trim();
+  }
   if (explicitFailureKind) {
-    return { payload, failure_kind: explicitFailureKind };
+    return { payload: augmented as JsonValue, failure_kind };
   }
   return {
     payload: {
-      ...payload,
+      ...augmented,
       classification_source: "default_unclassified",
       classification_default_note: "emitter did not provide failure_kind; substrate defaulted to unclassified_emit_bug at the emit boundary so audits surface the gap. Cite Hole 6 (2026-05-19) — 21 historical NULL rows.",
     },
-    failure_kind: "unclassified_emit_bug",
+    failure_kind,
   };
 };
 
