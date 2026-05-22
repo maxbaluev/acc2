@@ -547,6 +547,13 @@ describe("derived sets match their pre-unification shape", () => {
       // metric — separate role).
       "schema_migration_applied",
       "schema_migration_failed",
+      // Observability-fidelity guard (2026-05-22, phase-2 SJPF3VB9).
+      // The standing observability_guard_worker emits loop_inert_alert
+      // when a wired loop is silent while its upstream fired, and
+      // metric_veracity_alert when a status metric diverges from ground
+      // truth. Both health_metric so dashboards plot guard firings.
+      "loop_inert_alert",
+      "metric_veracity_alert",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

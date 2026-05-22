@@ -368,6 +368,22 @@ export const EVENT_KINDS = {
   // the observed residual so future routing can score combinations,
   // not just nodes.
   coalition_credit_distributed:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // Observability-fidelity guard (2026-05-22, phase-2 SJPF3VB9). The
+  // standing observability_guard_worker institutionalizes two bug
+  // classes as permanent self-audits:
+  //   - loop_inert_alert    — a wired loop emitted 0 over the trailing
+  //     window while its upstream trigger fired >= min_upstream times
+  //     (e.g. counterfactual_closure_audited=0 while
+  //     counterfactual_alternative_recorded>50). The producer is wired
+  //     but inert; without this alert the silence is invisible.
+  //   - metric_veracity_alert — a status metric diverged from ground
+  //     truth beyond tolerance (e.g. reported retrieval-index count
+  //     vs. genuinely-embeddable event count). A lying metric.
+  // Both health_metric so dashboards can plot guard firings; a rising
+  // rate is a regression signal that a loop went silent or a metric
+  // started lying.
+  loop_inert_alert:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+  metric_veracity_alert:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
   // Tier U/U1 peer registry foundation: participation is symmetric across
   // opencode brains, Claude terminals, and Claude background agents, while
   // spawning remains asymmetric (only opencode is substrate-spawnable).

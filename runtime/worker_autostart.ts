@@ -166,7 +166,17 @@ export type WorkerName =
   // _recorded (5-tuple). The pure evaluateGoNoGo function is the
   // Go/No-Go gate (callable from amendment apply path).
   // Opt-out via ACC2_DISABLE_WORKERS=sahoo_governor.
-  | "sahoo_governor";
+  | "sahoo_governor"
+  // 2026-05-22 (phase-2 SJPF3VB9 observability-fidelity ceiling):
+  // standing observability-fidelity guard. Hourly tick that
+  // institutionalizes two bug classes as permanent self-audits:
+  // loop_inert_alert when a wired loop emits 0 while its upstream
+  // trigger fired (counterfactual / coalition / meta_credit), and
+  // metric_veracity_alert when a status metric diverges from ground
+  // truth (retrieval index). Built Claude-side after the brain could
+  // not build the worker across 3 dispatches. Default ON; opt-out via
+  // ACC2_DISABLE_WORKERS=observability_guard.
+  | "observability_guard";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -204,6 +214,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "brain_invocation",
   "memory_reconciliation",
   "sahoo_governor",
+  "observability_guard",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

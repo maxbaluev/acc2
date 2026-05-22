@@ -930,6 +930,12 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // chosen path produced. Default 5-minute cadence.
   // Opt-out via ACC2_DISABLE_WORKERS=counterfactual_credit.
   if (isWorkerEnabled("counterfactual_credit")) registerWorker("counterfactual_credit", 5 * 60 * 1000);
+  // 2026-05-22 (phase-2 SJPF3VB9): standing observability-fidelity guard.
+  // Hourly tick — institutionalizes wired-but-inert loop detection
+  // (loop_inert_alert) + lying-metric detection (metric_veracity_alert)
+  // as permanent self-audits. Opt-out via
+  // ACC2_DISABLE_WORKERS=observability_guard.
+  if (isWorkerEnabled("observability_guard")) registerWorker("observability_guard", 60 * 60 * 1000);
   // Tier -1 floors (docs/roadmap.md): absence-of-violation evidence
   // emitters. Each predicate (event_authenticity_predicate,
   // storage_integrity_predicate, deterministic_computation_sanity_predicate,
@@ -1757,6 +1763,33 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     markWorkerReady("counterfactual_credit");
     recordWorkerTick("counterfactual_credit");
     workers.push(() => clearInterval(counterfactualTimer));
+  }
+
+  // 2026-05-22 (phase-2 SJPF3VB9 observability-fidelity ceiling):
+  // standing observability-fidelity guard. Hourly sweep that
+  // institutionalizes this session's two bug classes as PERMANENT
+  // self-audits so they can never silently return:
+  //   - loop_inert_alert       — a wired loop emitted 0 over the
+  //     trailing window while its upstream trigger fired >= min_upstream
+  //     (counterfactual / coalition / meta_credit).
+  //   - metric_veracity_alert  — a status metric diverged from ground
+  //     truth beyond tolerance (retrieval index).
+  // Defensive per-check (a query error never crashes the tick) and
+  // idempotent (no duplicate inert alert inside the same window).
+  // Built Claude-side after the brain could not build the worker across
+  // 3 dispatches. Opt-out via ACC2_DISABLE_WORKERS=observability_guard.
+  if (isWorkerEnabled("observability_guard")) {
+    const observabilityGuardTickMs = 60 * 60 * 1000;
+    const { observabilityGuardTick } = await import("./observability_guard_worker");
+    let observabilityGuardMarked = false;
+    const observabilityGuardTickFn = supervisedTick(db, "observability_guard", observabilityGuardTickMs, async () => {
+      await observabilityGuardTick(db);
+      if (!observabilityGuardMarked) { markWorkerReady("observability_guard"); observabilityGuardMarked = true; }
+    });
+    const observabilityGuardTimer = setInterval(observabilityGuardTickFn, observabilityGuardTickMs);
+    markWorkerReady("observability_guard");
+    recordWorkerTick("observability_guard");
+    workers.push(() => clearInterval(observabilityGuardTimer));
   }
 
   // 2026-05-19 (brain dispatch J4HP5SYT3N4GK45S Candidate A): one-shot
