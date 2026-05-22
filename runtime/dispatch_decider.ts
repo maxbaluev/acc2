@@ -73,19 +73,6 @@ type DispatchRoute = DispatchDecision["route"];
 
 type RecipeMatch = { id: string; confidence: number };
 
-export type HardTaskClassification = {
-  is_hard: boolean;
-  axes: string[];
-  score: number;
-  diagnostics: Record<string, number>;
-};
-
-export const HARD_TASK_VERB_RE = /\b(audit|improve|refactor|design|harden|extend|decompose|parallel|falsif(?:y|iable|iability)?|universal|diagnostic|measure|synthesis)\b/i;
-export const HARD_TASK_WORD_COUNT_THRESHOLD = 20;
-export const HARD_TASK_MULTI_FILE_TARGET_THRESHOLD = 1;
-export const HARD_TASK_RECIPE_OVERRIDE_SAMPLE_SIZE = 3;
-export const HARD_TASK_RECIPE_OVERRIDE_RESIDUAL_THRESHOLD = 0.2;
-
 const safeJson = (raw: string | null | undefined): Record<string, unknown> => {
   try {
     return JSON.parse(raw ?? "{}") as Record<string, unknown>;
@@ -101,63 +88,17 @@ const readDirectivePayload = (db: Database, directiveId: string): Record<string,
   return safeJson(row?.payload);
 };
 
-const taskTargetsForHardness = (task: TaskNode): string[] => {
+/** Collect the task's declared target resources (universal lane). Both
+ *  modern `target_resources` and legacy `target_files` (normalized to the
+ *  `repo:` scheme) contribute structural blast-radius evidence for the
+ *  routing-axis vector. This is a structural inventory, NOT a semantic
+ *  intent classifier — there is no regex verb/keyword judgment here. */
+const taskTargetResources = (task: TaskNode): string[] => {
   const t = task as TaskNode & { target_resources?: string[]; target_files?: string[] };
   const out: string[] = [];
   if (Array.isArray(t.target_resources)) out.push(...t.target_resources.filter((x): x is string => typeof x === "string"));
-  // Legacy target_files are NOT accepted for inline routing, but they are
-  // still useful blast-radius evidence for hardness classification.
   if (Array.isArray(t.target_files)) out.push(...t.target_files.filter((x): x is string => typeof x === "string").map((x) => `repo:${x}`));
   return Array.from(new Set(out));
-};
-
-const countBudgetNumbers = (value: unknown): number => {
-  if (typeof value === "number" && Number.isFinite(value)) return value > 10_000 ? 1 : 0;
-  if (Array.isArray(value)) return value.reduce((sum, v) => sum + countBudgetNumbers(v), 0);
-  if (value && typeof value === "object") {
-    return Object.values(value as Record<string, unknown>).reduce((sum, v) => sum + countBudgetNumbers(v), 0);
-  }
-  return 0;
-};
-
-export const classifyHardTask = (db: Database, task: TaskNode): HardTaskClassification => {
-  const directivePayload = readDirectivePayload(db, task.directive_id);
-  const directiveText = typeof directivePayload.directive_text === "string" ? directivePayload.directive_text : "";
-  const text = `${directiveText}\n${task.goal}`;
-  const words = text.split(/\s+/).filter(Boolean).length;
-  const targets = taskTargetsForHardness(task);
-  const surfaces = new Set<string>();
-  for (const target of targets) {
-    const normalized = target.startsWith("repo:") ? target.slice("repo:".length) : target;
-    const first = normalized.split("/")[0] ?? "";
-    if (["cli", "runtime", "substrate"].includes(first)) surfaces.add(first);
-  }
-  const stakeholders = Array.isArray(directivePayload.stakeholders) ? directivePayload.stakeholders.length : 0;
-  const budgetAxis = countBudgetNumbers(directivePayload.budget);
-
-  const axes: string[] = [];
-  if (HARD_TASK_VERB_RE.test(text)) axes.push("strategic_verb");
-  if (words > HARD_TASK_WORD_COUNT_THRESHOLD) axes.push("long_goal_text");
-  if (targets.length > HARD_TASK_MULTI_FILE_TARGET_THRESHOLD) axes.push("multi_file_blast_radius");
-  if (surfaces.size >= 2) axes.push("multi_surface_target");
-  if (stakeholders > 1) axes.push("multi_stakeholder");
-  if (budgetAxis > 0) axes.push("declared_budget_high");
-  if (/\b(irreversible|consent|owner-visible|stakeholder)\b/i.test(text)) axes.push("owner_visible_reversibility");
-
-  const diagnostics: Record<string, number> = {
-    word_count: words,
-    target_count: targets.length,
-    surface_count: surfaces.size,
-    stakeholder_count: stakeholders,
-    budget_high_fields: budgetAxis,
-  };
-
-  const isHard = axes.includes("strategic_verb") ||
-    axes.includes("multi_surface_target") ||
-    axes.includes("multi_stakeholder") ||
-    axes.length >= 2;
-
-  return { is_hard: isHard, axes, score: axes.length, diagnostics };
 };
 
 /** Semantic-DAG signals extracted from owner free-text. Per brain lessons
@@ -229,15 +170,6 @@ export const decompositionValueFromSignals = (signals: SemanticDagSignals, heuri
     Math.max(0, 0.20 - signals.one_shot_answer_fit * 0.20);
   return clamp01(Math.max(heuristicBaseline, sigContribution));
 };
-
-const hardTaskReason = (hardness: HardTaskClassification, suffix: string): string => {
-  const axes = hardness.axes.length > 0 ? hardness.axes.join("|") : "none";
-  const diagnostics = Object.entries(hardness.diagnostics)
-    .map(([k, v]) => `${k}=${v}`)
-    .join(",");
-  return `hard_task_dag_required:axes=${axes};score=${hardness.score};diagnostics=${diagnostics};${suffix}`;
-};
-
 
 const DISPATCH_ROUTE_AXIS_KEYS = [
   "one_shot_confidence",
@@ -542,26 +474,42 @@ export const dispatchEvidencePayload = (decision: DispatchDecision): {
   strategy_shadow_ranks: decision.strategy_shadow_ranks ?? [],
 });
 
-const buildDispatchDecisionEvidence = (db: Database, task: TaskNode, hardness: HardTaskClassification): DispatchDecisionEvidence => {
+/** Build the open-ended routing-axis vector + verifier evidence for a task.
+ *
+ *  CLEAN-BREAK (universal-workflow design DKDWVBTX2S0J9FQY0863GS1SJ0): there
+ *  is NO regex/keyword hard-task pre-classification here. Risk and
+ *  decomposition are not decided by matching strategic verbs or counting
+ *  stakeholders/budget fields — the LM decides decomposition (it emits
+ *  refinement edges for any task that needs it) and verifier residual +
+ *  the unified owner_alignment gate handle risk. The fallback axis vector is
+ *  derived only from (a) structural-marker semantic-DAG signals (numbered
+ *  parts, gates, citation demands — counts, not meaning interpretation),
+ *  (b) the count of declared target resources (structural blast radius), and
+ *  (c) directive urgency. Learned action_scored/knowledge_promoted evidence
+ *  blends on top of these via blendLearnedAxis. */
+const buildDispatchDecisionEvidence = (db: Database, task: TaskNode): DispatchDecisionEvidence => {
   const directivePayload = readDirectivePayload(db, task.directive_id);
   const text = String(typeof directivePayload.directive_text === "string" ? directivePayload.directive_text : "") + "\n" + task.goal;
-  const targets = taskTargetsForHardness(task);
+  const targets = taskTargetResources(task);
   const urgency = typeof directivePayload.urgency === "string" ? directivePayload.urgency : "normal";
   const learned = readLearnedDispatchAxisEvidence(db);
-  // Semantic-DAG signals: extracted from owner free-text + task goal so
-  // the decomposition_value axis reflects what the owner is actually
-  // asking for (numbered parts, mandatory gates, citation demands, etc.),
-  // not just hardness heuristics. Per brain lessons VZE6Q5PS/EEEF091H/
-  // FX6AT1TQ — REUSE-first: feeds decomposition_value, not new axes.
+  // Semantic-DAG signals: extracted from owner free-text + task goal so the
+  // decomposition_value axis reflects what the owner is actually asking for
+  // (numbered parts, mandatory gates, citation demands). These are
+  // structural-marker counts, not semantic intent classification — the brain
+  // interprets meaning; this scorer only counts the structural language.
   const semantic = extractSemanticDagSignals(text);
-  const heuristicDecomposition = hardness.is_hard ? 0.85 : 0.20 + hardness.axes.length * 0.15;
+  // Decomposition baseline rises with the number of declared independent
+  // deliverables/targets — structural evidence, not a regex verdict. The
+  // semantic signal scorer only ever pushes this higher (never lower).
+  const decompositionBaseline = clamp01(0.20 + Math.max(0, targets.length - 1) * 0.10);
   const fallbackAxes: Record<string, number> = {
-    one_shot_confidence: clamp01((hardness.is_hard ? 0.35 : 0.85 - hardness.score * 0.12 - Math.max(0, targets.length - 1) * 0.10) * semantic.one_shot_answer_fit),
-    information_gap: hardness.is_hard ? Math.max(0.55, 0.15 + hardness.score * 0.12 + (targets.length === 0 ? 0.10 : 0)) : 0.15 + hardness.score * 0.12 + (targets.length === 0 ? 0.10 : 0),
-    reversibility: /\b(irreversible|payment|delete|destructive|external|stakeholder)\b/i.test(text) ? 0.25 : 0.80,
-    owner_control_need: /\b(consent|owner|manual|review|approval|stakeholder|irreversible)\b/i.test(text) ? 0.80 : (hardness.is_hard || targets.length > 1 ? 0.55 : 0.25),
-    decomposition_value: decompositionValueFromSignals(semantic, heuristicDecomposition),
-    cost_pressure: urgency === "crisis" ? 0.85 : (hardness.diagnostics.budget_high_fields > 0 ? 0.70 : 0.35),
+    one_shot_confidence: clamp01((0.85 - Math.max(0, targets.length - 1) * 0.10) * semantic.one_shot_answer_fit),
+    information_gap: clamp01(0.15 + (targets.length === 0 ? 0.10 : 0) + (1 - semantic.one_shot_answer_fit) * 0.40),
+    reversibility: 0.80,
+    owner_control_need: clamp01(0.25 + Math.max(0, targets.length - 1) * 0.15),
+    decomposition_value: decompositionValueFromSignals(semantic, decompositionBaseline),
+    cost_pressure: urgency === "crisis" ? 0.85 : 0.35,
     time_sensitivity: urgency === "crisis" ? 0.95 : (urgency === "elevated" ? 0.65 : 0.25),
   };
   const routing_axes: Record<string, number> = {};
@@ -571,66 +519,16 @@ const buildDispatchDecisionEvidence = (db: Database, task: TaskNode, hardness: H
     route_scores: scoreRoutesFromAxes(routing_axes),
     verifier_evidence: {
       ...learned.verifier_evidence,
-      hard_axis_count: hardness.axes.length,
       target_count: targets.length,
       semantic_independent_deliverable_count: semantic.independent_deliverable_count,
       semantic_gate_count: semantic.gate_count,
       semantic_evidence_modality_count: semantic.evidence_modality_count,
       semantic_one_shot_answer_fit: semantic.one_shot_answer_fit,
-      semantic_decomposition_baseline: heuristicDecomposition,
+      semantic_decomposition_baseline: decompositionBaseline,
     },
   };
 };
 
-type RecipeReplayHealth = {
-  observed: number;
-  sample_size: number;
-  residual_threshold: number;
-  max_residual: number | null;
-  all_below_threshold: boolean;
-  can_override_hardness: boolean;
-};
-
-const readRecipeReplayHealth = (db: Database, recipeId: string): RecipeReplayHealth => {
-  let rows: Array<{ residual: number | null; payload: string }> = [];
-  try {
-    rows = db
-      .query(
-        `SELECT residual, payload FROM events
-         WHERE kind = 'action_scored'
-           AND json_extract(payload, '$.recipe_id') = ?
-         ORDER BY ts DESC, rowid DESC LIMIT ?`,
-      )
-      .all(recipeId, HARD_TASK_RECIPE_OVERRIDE_SAMPLE_SIZE) as Array<{ residual: number | null; payload: string }>;
-  } catch {
-    rows = db
-      .query(
-        `SELECT residual, payload FROM events
-         WHERE kind = 'action_scored'
-           AND payload LIKE '%' || ? || '%'
-         ORDER BY ts DESC, rowid DESC LIMIT ?`,
-      )
-      .all(recipeId, HARD_TASK_RECIPE_OVERRIDE_SAMPLE_SIZE) as Array<{ residual: number | null; payload: string }>;
-  }
-  const residuals = rows
-    .map((r) => {
-      if (typeof r.residual === "number") return r.residual;
-      const p = safeJson(r.payload);
-      return typeof p.residual === "number" ? p.residual : null;
-    })
-    .filter((r): r is number => typeof r === "number" && Number.isFinite(r));
-  const maxResidual = residuals.length > 0 ? Math.max(...residuals) : null;
-  const allBelow = residuals.length >= HARD_TASK_RECIPE_OVERRIDE_SAMPLE_SIZE &&
-    residuals.every((r) => r < HARD_TASK_RECIPE_OVERRIDE_RESIDUAL_THRESHOLD);
-  return {
-    observed: residuals.length,
-    sample_size: HARD_TASK_RECIPE_OVERRIDE_SAMPLE_SIZE,
-    residual_threshold: HARD_TASK_RECIPE_OVERRIDE_RESIDUAL_THRESHOLD,
-    max_residual: maxResidual,
-    all_below_threshold: allBelow,
-    can_override_hardness: allBelow,
-  };
-};
 
 /** Phase J: delegate to the real matcher in runtime/recipe_replay.ts which
  *  computes goal_shape via runtime/goal_shape.ts and topology_signature off
@@ -851,8 +749,7 @@ export const recordLowRiskInlineOutcome = (
 };
 
 export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision => {
-  const hardness = classifyHardTask(db, task);
-  const baseEvidence = buildDispatchDecisionEvidence(db, task, hardness);
+  const baseEvidence = buildDispatchDecisionEvidence(db, task);
 
   // 0. Down-rank: directive blocked by an unresolved higher-priority directive.
   const blockers = blockersOf(db, task.directive_id);
@@ -870,34 +767,26 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
   const mode = readCurrentMode(db, task.directive_id);
   const recipeThreshold = mode.recipe_confidence_threshold;
   const recipe = findRecipeMatch(db, task, recipeThreshold);
-  let recipeRouteReason: string | null = null;
-  let hardRecipeFallthroughReason: string | null = null;
-  if (recipe) {
-    if (hardness.is_hard) {
-      const replayHealth = readRecipeReplayHealth(db, recipe.id);
-      if (replayHealth.can_override_hardness) {
-        recipeRouteReason = "recipe_match_hard_override_verified";
-      } else {
-        hardRecipeFallthroughReason = hardTaskReason(
-          hardness,
-          "recipe=" + recipe.id + ";recipe_replay_observed=" + replayHealth.observed + ";recipe_replay_max_residual=" + (replayHealth.max_residual ?? "none"),
-        );
-      }
-    } else {
-      recipeRouteReason = "recipe_match";
-    }
-  }
+  // CLEAN-BREAK (universal-workflow design DKDWVBTX): recipe-replay feasibility
+  // is NOT gated by hard-task semantic classification. A high-confidence
+  // recipe match is feasible for every task; residual-scored route selection
+  // (below) decides whether substrate_replay actually wins. There is no
+  // "recipe_match_hard_override_verified" branch — the recipe's confidence
+  // (and crisis-mode threshold) IS the override evidence.
+  const recipeRouteReason: string | null = recipe ? "recipe_match" : null;
 
   const inlinePatterns = readLowRiskInlinePatterns(db);
   const matchedInlinePatterns = inlineMatchingPatterns(task as TaskNode & { target_resources?: string[] }, inlinePatterns);
 
   const feasibleRoutes: DispatchRoute[] = ["opencode_brain"];
   if (recipe && recipeRouteReason) feasibleRoutes.push("substrate_replay");
-  // Hard-task classifier (brain amendment HVEQA85G, 2026-05-16): even when a
-  // target file matches a low-risk inline pattern, force routing to the brain
-  // when the task itself is hard. Inline lane should never absorb strategic
-  // work just because the file extension is .ts.
-  if (!hardness.is_hard && matchedInlinePatterns && matchedInlinePatterns.length > 0) feasibleRoutes.push("claude_inline");
+  // CLEAN-BREAK (universal-workflow design DKDWVBTX): inline eligibility is
+  // structural/retrieval-backed only. There is no hard-task semantic
+  // classifier removing a lane from feasibleRoutes before residual-scored
+  // route selection. If every declared target_resource matches a promoted
+  // low-risk inline pattern, the inline lane is feasible; the scored route
+  // selection (and learned/peer-accuracy posteriors) decide whether it wins.
+  if (matchedInlinePatterns && matchedInlinePatterns.length > 0) feasibleRoutes.push("claude_inline");
   // Tier U/U5: the substrate cannot spawn Claude. It may route to the
   // claude_agent lane only when a live Claude orchestrator/agent peer is
   // already registered and heartbeating, so queued jobs always have a
@@ -954,7 +843,7 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
     return {
       route: "claude_agent",
       job_intent: task.goal,
-      target_files: taskTargetsForHardness(task).map((target) => target.startsWith("repo:") ? target.slice("repo:".length) : target),
+      target_files: taskTargetResources(task).map((target) => target.startsWith("repo:") ? target.slice("repo:".length) : target),
       acceptance_predicate: {
         kind: "task_residual_below_threshold",
         residual_below: 0.3,
@@ -965,15 +854,12 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
     };
   }
 
-  if (hardness.is_hard) {
-    return {
-      route: "opencode_brain",
-      predicted_complexity: "high",
-      reason: hardRecipeFallthroughReason ?? hardTaskReason(hardness, "no_verified_recipe_override"),
-      ...evidence,
-    };
-  }
-
+  // CLEAN-BREAK (universal-workflow design DKDWVBTX): the universal lane is
+  // opencode_brain. There is no regex hard-task force to "high" complexity —
+  // the LM decides decomposition (it emits refinement edges for any task that
+  // needs them) and risk is handled by verifier residual + the unified
+  // owner_alignment gate, not by pre-classification. Complexity is a coarse
+  // structural estimate only; routing is always valid (defaults here).
   return {
     route: "opencode_brain",
     predicted_complexity: estimateComplexity(task),

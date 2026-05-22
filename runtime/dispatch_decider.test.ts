@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
-import { classifyHardTask, decideDispatch, extractSemanticDagSignals, decompositionValueFromSignals } from "./dispatch_decider";
+import { decideDispatch, extractSemanticDagSignals, decompositionValueFromSignals } from "./dispatch_decider";
 import type { TaskNode } from "./task_topology";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
@@ -62,7 +62,13 @@ describe("dispatch_decider", () => {
     }
   });
 
-  test("classifies strategic audit/design work as hard with measured axes", () => {
+  test("strategic audit/design work is NOT pre-classified by regex — it routes to the universal lane", () => {
+    // CLEAN-BREAK (universal-workflow design DKDWVBTX): there is no
+    // classifyHardTask regex/keyword judgment. A directive whose text used to
+    // trip the "strategic_verb" / "multi_surface_target" classifier now routes
+    // through the same universal opencode_brain lane as everything else — the
+    // LM decides decomposition, not a deterministic verb matcher. Risk/
+    // decomposition is surfaced as routing_axes evidence, not a hard verdict.
     const db = openDb(":memory:");
     emitEvent(db, {
       kind: "directive_opened",
@@ -73,15 +79,19 @@ describe("dispatch_decider", () => {
         lifecycle: "finite",
       },
     });
-    const classification = classifyHardTask(db, sampleTask({
+    const decision = decideDispatch(db, sampleTask({
       directive_id: "d_hard",
-      goal: "design hard-task classifier",
+      goal: "design dispatch behavior",
       target_resources: ["repo:runtime/dispatch_decider.ts", "repo:cli/dispatch.ts"],
     } as Partial<TaskNode>));
-    expect(classification.is_hard).toBe(true);
-    expect(classification.axes).toContain("strategic_verb");
-    expect(classification.axes).toContain("multi_surface_target");
-    expect(classification.diagnostics.surface_count).toBe(2);
+    // Valid universal route, never undefined.
+    expect(decision.route).toBe("opencode_brain");
+    // No regex hard-task reason leaks into the decision.
+    expect(decision.reason).not.toContain("hard_task_dag_required");
+    // The structural target count is still surfaced as evidence (NOT a verdict).
+    expect(decision.verifier_evidence.target_count).toBe(2);
+    // Decomposition is an axis the LM can act on, not a pre-gate.
+    expect(decision.routing_axes.decomposition_value).toBeGreaterThanOrEqual(0);
   });
 
   test("routes to substrate_replay when a high-confidence recipe matches", () => {
@@ -115,10 +125,15 @@ describe("dispatch_decider", () => {
     }
   });
 
-  test("forces hard tasks to DAG when a recipe match has not proven low replay residuals", () => {
+  test("a high-confidence recipe match is feasible for any directive — no hard-task gate blocks substrate_replay", () => {
+    // CLEAN-BREAK (universal-workflow design DKDWVBTX): recipe-replay
+    // feasibility is no longer gated by regex hard-task classification. A
+    // directive whose verbs used to force "hard_task_dag_required" now routes
+    // to substrate_replay on the strength of the recipe's confidence alone —
+    // there is no replay-residual override gate keyed to a hardness verdict.
     const db = openDb(":memory:");
     runViews(db);
-    emitEvent(db, {
+    const recipe = emitEvent(db, {
       kind: "knowledge_candidate",
       substrate_origin: "substrate_auto",
       directive_id: "d_recipe",
@@ -134,16 +149,23 @@ describe("dispatch_decider", () => {
       },
     });
     const decision = decideDispatch(db, sampleTask({ goal: "audit runtime design" }));
-    expect(decision.route).toBe("opencode_brain");
-    if (decision.route === "opencode_brain") {
-      expect(decision.predicted_complexity).toBe("high");
-      expect(decision.reason).toContain("hard_task_dag_required");
-      expect(decision.reason).toContain("recipe_replay_observed=0");
-      expect(decision.reason).toContain("diagnostics=word_count=");
+    expect(decision.route).toBe("substrate_replay");
+    if (decision.route === "substrate_replay") {
+      expect(decision.recipe_id).toBe(recipe.id);
+      expect(decision.reason).toBe("recipe_match");
     }
+    // No regex hard-task reason or override-verified branch survives.
+    expect(decision.reason).not.toContain("hard_task_dag_required");
+    expect(decision.reason).not.toContain("recipe_match_hard_override_verified");
   });
 
-  test("forces hard tasks to DAG before the inline lane even when targets match low-risk patterns", () => {
+  test("inline lane is not blocked by hard-task classification — matching patterns make it feasible", () => {
+    // CLEAN-BREAK (universal-workflow design DKDWVBTX): the inline lane is no
+    // longer removed from feasibleRoutes by a regex hardness verdict. With a
+    // promoted low-risk pattern matching every target_resource, the inline
+    // lane is feasible; residual-scored selection (plus learned/peer
+    // posteriors) decides whether it actually wins. Either way the route is a
+    // valid universal lane, never undefined.
     const db = openDb(":memory:");
     runViews(db);
     emitEvent(db, {
@@ -170,70 +192,14 @@ describe("dispatch_decider", () => {
       goal: "audit runtime dispatch behavior",
       target_resources: ["repo:runtime/dispatch_decider.ts"],
     } as Partial<TaskNode>));
-    expect(decision.route).toBe("opencode_brain");
-    if (decision.route === "opencode_brain") {
-      expect(decision.reason).toContain("hard_task_dag_required");
-      expect(decision.reason).toContain("no_verified_recipe_override");
-    }
-  });
-
-  test("allows recipe override for hard tasks only after recent replay residuals are low", () => {
-    const db = openDb(":memory:");
-    runViews(db);
-    const recipe = emitEvent(db, {
-      kind: "knowledge_candidate",
-      substrate_origin: "substrate_auto",
-      directive_id: "d_recipe",
-      task_id: "t_recipe",
-      payload: {
-        recipe_shape: { enabled: true },
-        goal_shape: goalShape("audit runtime design"),
-        topology_signature: "",
-        confidence: 0.95,
-        trajectory: [
-          { step_kind: "action_predicted", artifact_id: "art_x", verifier_artifact_id: "art_v", payload_template: {} },
-        ],
-      },
-    });
-    for (const residual of [0.05, 0.08, 0.1]) {
-      emitEvent(db, {
-        kind: "action_scored",
-        substrate_origin: "recipe",
-        directive_id: "d_prior",
-        task_id: newId(),
-        action_artifact_id: "test_action_handle",
-        verifier_artifact_id: "test_verifier_handle",
-        residual,
-        payload: { recipe_replayed: true, recipe_id: recipe.id, residual, verifier_kind: "deterministic_code" },
-      });
-    }
-    emitEvent(db, {
-      kind: "action_scored",
-      substrate_origin: "substrate_auto",
-      directive_id: "d_prior",
-      task_id: newId(),
-      action_artifact_id: "test_action_handle",
-      verifier_artifact_id: "test_verifier_handle",
-      residual: 0.03,
-      payload: {
-        verifier_kind: "deterministic_code",
-        dispatch_axes: {
-          one_shot_confidence: 1,
-          information_gap: 0,
-          decomposition_value: 0,
-          cost_pressure: 1,
-          time_sensitivity: 1,
-          reversibility: 1,
-          owner_control_need: 0,
-        },
-      },
-    });
-    const decision = decideDispatch(db, sampleTask({ goal: "audit runtime design" }));
-    expect(decision.route).toBe("substrate_replay");
-    if (decision.route === "substrate_replay") {
-      expect(decision.recipe_id).toBe(recipe.id);
-      expect(decision.reason).toBe("recipe_match_hard_override_verified");
-    }
+    // A valid route is always produced.
+    expect(["opencode_brain", "claude_inline"]).toContain(decision.route);
+    // No regex hard-task reason leaks in regardless of which lane scores highest.
+    expect(decision.reason).not.toContain("hard_task_dag_required");
+    expect(decision.reason).not.toContain("no_verified_recipe_override");
+    // The inline lane was admitted as feasible (claude_inline is one of the
+    // routes scored), proving hardness did not pre-strip it.
+    expect(decision.route_scores.claude_inline).toBeGreaterThanOrEqual(0);
   });
 
   test("routes inline only when every target_resource matches a scheme-aware pattern", () => {
