@@ -387,6 +387,162 @@ describe("prompt_composer", () => {
     expect(lowComposed.text).not.toContain("PROVEN DECOMPOSITION STRATEGY");
   });
 
+  test("PROVEN TRAJECTORY MOTIF section binds the outcome-scored trajectory_motif_predicate row to a directive on the motif's path (Tier-S3 retrieval-binding leg)", () => {
+    // Insert a scored trajectory_motif_predicate row exactly as the
+    // trajectory_motif_extractor's ensureMotifRow + calibrateMotifScore do:
+    // id=motif_<n>_<hash>, body carries { kinds, length, frequency,
+    // avg_closure_residual }, and `score` is calibrated to 1 -
+    // avg_closure_residual (a motif whose directives closed with LOW residual
+    // is a GOOD recipe → high score). The motif key is geometry-only (event
+    // kinds), so the compose-time match is the directive's OWN trajectory-so-far
+    // — never guessed goal shape.
+    const insertMotifPredicate = (
+      id: string,
+      kinds: string[],
+      frequency: number,
+      avgClosureResidual: number,
+    ): void => {
+      const score = Math.max(0, Math.min(1, 1 - avgClosureResidual));
+      const nowIso = new Date().toISOString();
+      db.run(
+        `INSERT INTO act_artifact (
+           id, runtime, body, declared_sandbox, state_root, kind,
+           posterior_alpha, posterior_beta, score, confidence,
+           recent_residual_mean, recent_kill_count, status, name,
+           fixture_input, fixture_expected_residual, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          "bun",
+          JSON.stringify({
+            kinds,
+            length: kinds.length,
+            frequency,
+            avg_closure_residual: avgClosureResidual,
+          }),
+          JSON.stringify({ runtime: "bun" }),
+          `substrate/trajectory_motif/${id}`,
+          "trajectory_motif_predicate",
+          1.0,
+          1.0,
+          score,
+          0.5,
+          avgClosureResidual,
+          0,
+          "admitted",
+          kinds.join(">"),
+          JSON.stringify({ kinds }),
+          0.5,
+          nowIso,
+          nowIso,
+        ],
+      );
+    };
+
+    const db = openDb(":memory:");
+    seedFoundationalKnowledge(db, { ownerApproved: true });
+
+    // A well-closing recurring recipe (high score = low residual, ≥5 samples).
+    const motifKinds = ["directive_opened", "task_node_opened", "task_committed"];
+    insertMotifPredicate("motif_3_proven", motifKinds, 11, 0.16);
+
+    // Open a directive whose trajectory-so-far IS this motif's leading path:
+    // directive_opened → task_node_opened. The motif is anchored to that tail,
+    // so it's a proven continuation the brain should see.
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "Ship the embedding-cache compounding lever", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { goal: "Ship the embedding-cache compounding lever", lifecycle: "finite" },
+    });
+
+    const composed = composePrompt(db, { taskId });
+    const section = composed.sections.find((s) => s.name === "proven_trajectory_motif");
+    expect(section).toBeDefined();
+    expect(section?.priorityP).toBe(1); // advisory, drops first under budget pressure
+    expect(composed.text).toContain("PROVEN TRAJECTORY MOTIF");
+    // Residual-derived metrics surface verbatim so credit binding is honest.
+    expect(composed.text).toContain("effective_score=0.84");
+    expect(composed.text).toContain("mean closure_residual=0.16");
+    expect(composed.text).toContain("directive_opened → task_node_opened → task_committed");
+    // Citation binding: the scored predicate id is cited so outcome credit flows.
+    expect(composed.text).toContain("[cite motif_3_proven]");
+
+    // Below the advisory floor (too few samples) → absent even when anchored.
+    // openDb(":memory:") returns the cached singleton, so reuse `db` and drop
+    // the well-closing row first; only a below-floor motif remains.
+    const fewDb = db;
+    fewDb.run(`DELETE FROM act_artifact WHERE kind = 'trajectory_motif_predicate'`);
+    const fewMotifKinds = ["directive_opened", "task_node_opened", "task_committed"];
+    const fewScore = 1 - 0.16;
+    const fewIso = new Date().toISOString();
+    fewDb.run(
+      `INSERT INTO act_artifact (
+         id, runtime, body, declared_sandbox, state_root, kind,
+         posterior_alpha, posterior_beta, score, confidence,
+         recent_residual_mean, recent_kill_count, status, name,
+         fixture_input, fixture_expected_residual, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "motif_3_rare",
+        "bun",
+        JSON.stringify({ kinds: fewMotifKinds, length: 3, frequency: 2, avg_closure_residual: 0.16 }),
+        JSON.stringify({ runtime: "bun" }),
+        "substrate/trajectory_motif/motif_3_rare",
+        "trajectory_motif_predicate",
+        1.0,
+        1.0,
+        fewScore,
+        0.5,
+        0.16,
+        0,
+        "admitted",
+        fewMotifKinds.join(">"),
+        JSON.stringify({ kinds: fewMotifKinds }),
+        0.5,
+        fewIso,
+        fewIso,
+      ],
+    );
+    const fewDirId = newId();
+    const fewTaskId = newId();
+    emitEvent(fewDb, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: fewDirId,
+      task_id: fewDirId,
+      payload: { directive_text: "Ship a rarely-seen recipe", lifecycle: "finite" },
+    });
+    emitEvent(fewDb, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: fewDirId,
+      task_id: fewTaskId,
+      payload: { goal: "Ship a rarely-seen recipe", lifecycle: "finite" },
+    });
+    const fewComposed = composePrompt(fewDb, { taskId: fewTaskId });
+    expect(fewComposed.sections.find((s) => s.name === "proven_trajectory_motif")).toBeUndefined();
+    expect(fewComposed.text).not.toContain("PROVEN TRAJECTORY MOTIF");
+
+    // Below the advisory floor (low score = high closure_residual) → absent
+    // even with ample samples. A poorly-closing recipe is noise, not signal.
+    fewDb.run(`DELETE FROM act_artifact WHERE kind = 'trajectory_motif_predicate'`);
+    insertMotifPredicate("motif_3_poorly_closing", motifKinds, 30, 0.7); // score 0.30 < 0.55
+    const poorComposed = composePrompt(fewDb, { taskId: fewTaskId });
+    expect(poorComposed.sections.find((s) => s.name === "proven_trajectory_motif")).toBeUndefined();
+    expect(poorComposed.text).not.toContain("PROVEN TRAJECTORY MOTIF");
+  });
+
   test("returns the fixture marker for fixture_d_count_todos prompts", () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
