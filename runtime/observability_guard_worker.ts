@@ -67,6 +67,19 @@ const INERT_LOOP_CHECKS: readonly InertLoopCheck[] = [
     upstream_kind: "prompt_policy_section_selected",
     min_upstream: 50,
   },
+  {
+    // Causal-edge credit (Tier-S2): the extractor admits causal_edge_predicate
+    // rows, but credit fires only when a co-citing act (>=2 cited_knowledge_ids)
+    // carries an own residual. This loop was DOUBLE-inert (window mismatch +
+    // unregistered event kind) and credited 0 despite 300+ triggers; once
+    // fixed it credits in bulk. Upstream = co-citation acts carrying a residual
+    // signal (predicted_residual), which is the real trigger for edge credit.
+    loop_kind: "causal_edge_credited",
+    upstream_kind: "act_tuple_recorded",
+    upstream_query:
+      "SELECT COUNT(*) AS c FROM events WHERE kind = 'act_tuple_recorded' AND json_array_length(json_extract(payload, '$.cited_knowledge_ids')) >= 2 AND json_extract(payload, '$.predicted_residual') IS NOT NULL AND ts >= ?",
+    min_upstream: 50,
+  },
 ];
 
 /** A status metric, its reported source, and the ground-truth it must
