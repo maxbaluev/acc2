@@ -258,6 +258,14 @@ const releaseHandshakePermit = (held: boolean): void => {
 export const hasFreeHandshakePermit = (): boolean =>
   handshakePermitsInUse < HANDSHAKE_PERMIT_CAP;
 
+/** Count of free handshake permits right now. The scheduler captures this
+ *  at the START of a tick and decrements a local budget per brain admission,
+ *  so a BURST of ready brain tasks in a single tick cannot over-admit before
+ *  the async handshake-acquires register (the within-tick race the boolean
+ *  gate alone could not close). */
+export const freeHandshakePermits = (): number =>
+  Math.max(0, HANDSHAKE_PERMIT_CAP - handshakePermitsInUse);
+
 /** Quick MCP readiness probe. Returns true if the URL is reachable
  *  within `timeoutMs`. Used before spawning opencode to surface a dead
  *  daemon as a clean parse_error rather than a 120s handshake timeout. */

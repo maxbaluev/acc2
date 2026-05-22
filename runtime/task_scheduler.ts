@@ -26,7 +26,7 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { readDagForDirective, readyTasks, type TaskNode } from "./task_topology";
 import { dispatchReadyTask } from "./task_dispatcher";
-import { hasFreeHandshakePermit } from "./bridge/opencode";
+import { hasFreeHandshakePermit, freeHandshakePermits } from "./bridge/opencode";
 import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
 import { emitEvent } from "./events";
 import { readCurrentMode, applyModeAdjustments } from "./crisis_mode";
@@ -600,6 +600,14 @@ export const schedulerTick = async (
   const skippedFailureCapped: string[] = [];
   const pending: Array<Promise<unknown>> = [];
 
+  // Per-tick brain handshake budget (anti-starve): handshake permits acquire
+  // ASYNC after dispatch, so within a single tick hasFreeHandshakePermit()
+  // stays true until the acquires register — a burst of ready brain tasks
+  // could over-admit. Capture the free-permit count at tick start and
+  // decrement per brain admission so a burst staggers across ticks instead
+  // of spawning doomed subprocesses.
+  let brainHandshakeBudget = freeHandshakePermits();
+
   for (const task of ready) {
     if (IN_FLIGHT.has(task.id)) continue; // already dispatched in a prior tick.
 
@@ -848,7 +856,7 @@ export const schedulerTick = async (
       // (retries next tick) instead of spawning a starving subprocess. Permits
       // free after the brief handshake, so run-concurrency still reaches the
       // RAM cap — only the handshake phase is staggered (no starvation).
-      if (IN_FLIGHT_BRAIN.size >= brainCap || !hasFreeHandshakePermit()) {
+      if (IN_FLIGHT_BRAIN.size >= brainCap || !hasFreeHandshakePermit() || brainHandshakeBudget <= 0) {
         // Dedupe at_cap notifications per (task_id, gate) — see GATE_NOTIFIED.
         const key = gateKey(task.id, "brain_concurrency_cap");
         if (!GATE_NOTIFIED.has(key)) {
@@ -876,7 +884,10 @@ export const schedulerTick = async (
     }
 
     // opencode_brain lane → actual dispatch.
-    if (decision.route === "opencode_brain") IN_FLIGHT_BRAIN.add(task.id);
+    if (decision.route === "opencode_brain") {
+      IN_FLIGHT_BRAIN.add(task.id);
+      brainHandshakeBudget -= 1; // consume one handshake slot this tick (anti-starve)
+    }
     const promise = dispatchReadyTask(db, task, {
       fixtureTargetPath: opts.fixtureTargetPath,
       index: opts.index,
