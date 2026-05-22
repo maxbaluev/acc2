@@ -126,26 +126,45 @@ const readCounterfactualPayload = (raw: string | null): CounterfactualPayload | 
   };
 };
 
-const findChosenResidual = (
-  db: Database,
-  payload: CounterfactualPayload,
-): number | null => {
-  if (!payload.selection_event_id) return null;
-  const row = db
-    .query<{ residual: number | null; payload: string | null }, [string, string, string]>(
-      `SELECT residual, payload FROM events
-        WHERE kind = 'action_scored'
-          AND (json_extract(payload, '$.source_event_id') = ?
-            OR json_extract(payload, '$.selection_event_id') = ?
-            OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?))
-        ORDER BY ts DESC LIMIT 1`,
-    )
-    .get(payload.selection_event_id, payload.selection_event_id, payload.selection_event_id);
+const residualFromActionScoredRow = (row: { residual: number | null; payload: string | null } | null): number | null => {
   if (!row) return null;
   if (typeof row.residual === "number") return row.residual;
   const parsed = parseJson<Record<string, unknown>>(row.payload, {});
   if (typeof parsed.residual === "number") return parsed.residual;
   return null;
+};
+
+const findChosenResidual = (
+  db: Database,
+  counterfactual: CounterfactualRow,
+  payload: CounterfactualPayload,
+): number | null => {
+  if (payload.selection_event_id) {
+    const row = db
+      .query<{ residual: number | null; payload: string | null }, [string, string, string]>(
+        `SELECT residual, payload FROM events
+          WHERE kind = 'action_scored'
+            AND (json_extract(payload, '$.source_event_id') = ?
+              OR json_extract(payload, '$.selection_event_id') = ?
+              OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?))
+          ORDER BY ts DESC LIMIT 1`,
+      )
+      .get(payload.selection_event_id, payload.selection_event_id, payload.selection_event_id);
+    const directResidual = residualFromActionScoredRow(row);
+    if (directResidual !== null) return directResidual;
+  }
+
+  const fallback = db
+    .query<{ residual: number | null; payload: string | null }, [string | null, string | null, string | null, string | null, string]>(
+      `SELECT residual, payload FROM events
+        WHERE kind = 'action_scored'
+          AND (? IS NULL OR directive_id = ?)
+          AND (? IS NULL OR task_id = ?)
+          AND ts >= ?
+        ORDER BY ts ASC LIMIT 1`,
+    )
+    .get(counterfactual.directive_id, counterfactual.directive_id, counterfactual.task_id, counterfactual.task_id, counterfactual.ts);
+  return residualFromActionScoredRow(fallback);
 };
 
 const projectionKeyFor = (counterfactualEventId: string, rejectedId: string): string =>
@@ -251,7 +270,7 @@ export const runCounterfactualCreditWorker = async (
       summary.skipped_already_scored++;
       continue;
     }
-    const chosenResidual = findChosenResidual(db, payload);
+    const chosenResidual = findChosenResidual(db, row, payload);
     if (chosenResidual === null) {
       summary.skipped_no_chosen_residual++;
       continue;

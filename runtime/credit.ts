@@ -250,10 +250,8 @@ const residualFromOwnerObservedOutcome = (ownerEv: EventLike, fallback: number):
 };
 
 const isPeerPredictionOrigin = (actionEv: EventLike): boolean => {
-  if (actionEv.substrate_origin === "opencode") return true;
-  const payload = jsonObject(actionEv.payload);
-  const verifierKind = typeof payload.verifier_kind === "string" ? payload.verifier_kind.trim() : "";
-  return verifierKind.startsWith("peer_llm_");
+  const origin = typeof actionEv.substrate_origin === "string" ? actionEv.substrate_origin.trim() : "";
+  return origin === "opencode" || origin.startsWith("peer_llm_");
 };
 
 const resolveOwnerObservedSourceActId = (db: Database, ownerEv: EventLike): string | null => {

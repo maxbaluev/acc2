@@ -1640,7 +1640,7 @@ describe("T4.3 brain accuracy — predicted vs observed residual posterior", () 
       action_artifact_id: "art_action",
       verifier_artifact_id: "art_verifier",
       residual: 0.4,
-      payload: {},
+      payload: { verifier_kind: "peer_llm_claude" },
     });
     await distributeCredit(db, {
       action_event_id: ap.id,
@@ -1653,6 +1653,51 @@ describe("T4.3 brain accuracy — predicted vs observed residual posterior", () 
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'brain_accuracy_observation'")
       .get() as { c: number };
     expect(rows.c).toBe(0);
+  });
+
+  test("brain_accuracy_observation fires for peer-origin action_predicted", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action body");
+    insertSampleArtifact(db, "art_verifier", "// verifier body");
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "peer_llm_claude",
+      directive_id: "d_peer_bacc",
+      task_id: "t_peer_bacc",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      predicted_residual: 0.25,
+      payload: {},
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_peer_bacc",
+      task_id: "t_peer_bacc",
+      action_artifact_id: "art_action",
+      payload: {},
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_peer_bacc",
+      task_id: "t_peer_bacc",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0.3,
+      payload: {},
+    });
+    await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0.25,
+      observed_residual: 0.3,
+    });
+    const rows = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'brain_accuracy_observation'")
+      .get() as { c: number };
+    expect(rows.c).toBe(1);
   });
 
   test("idempotent: re-running distributeCredit on the same pair does NOT emit a second observation", async () => {
@@ -1931,6 +1976,49 @@ describe("T4.4 coalition credit — multi-artifact joint citation posterior", ()
       .get() as { payload: string }).payload) as Record<string, unknown>;
     expect(metaPayload.projection_key).toBe("meta_credit:" + scored.id + ":art_policy_bundle_gamma");
     expect(coalitionPayload.projection_key).toBe("coalition_credit:" + scored.id + ":coalition:art_co_a+art_co_b");
+  });
+
+  test("repeated joint-citation sets emit one coalition row per scored action", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action");
+    insertSampleArtifact(db, "art_verifier", "// verifier");
+    insertSampleArtifact(db, "art_co_a", "// co a");
+    insertSampleArtifact(db, "art_co_b", "// co b");
+
+    for (const suffix of ["one", "two"]) {
+      const ap = emitEvent(db, {
+        kind: "action_predicted",
+        substrate_origin: "opencode",
+        directive_id: "d_coal_repeat",
+        task_id: "t_coal_repeat_" + suffix,
+        action_artifact_id: "art_action",
+        verifier_artifact_id: "art_verifier",
+        predicted_residual: 0.1,
+        payload: { cited_artifact_ids: ["art_co_a", "art_co_b"] },
+      });
+      emitEvent(db, {
+        kind: "action_scored",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_coal_repeat",
+        task_id: "t_coal_repeat_" + suffix,
+        action_artifact_id: "art_action",
+        verifier_artifact_id: "art_verifier",
+        residual: 0,
+        payload: { action_predicted_event_id: ap.id, residual: 0 },
+      });
+    }
+
+    const rows = db
+      .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM events WHERE kind = 'coalition_credit_distributed'")
+      .get()!;
+    expect(rows.c).toBe(2);
+    const coalitionIds = db
+      .query<{ coalition_id: string }, []>("SELECT json_extract(payload, '$.coalition_id') AS coalition_id FROM events WHERE kind = 'coalition_credit_distributed'")
+      .all();
+    expect(coalitionIds.map((r) => r.coalition_id)).toEqual([
+      "coalition:art_co_a+art_co_b",
+      "coalition:art_co_a+art_co_b",
+    ]);
   });
 });
 

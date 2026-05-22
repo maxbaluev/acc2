@@ -24,7 +24,7 @@ type InsertCounterfactualOpts = {
   id?: string;
   ts: string;
   selection_kind?: string;
-  selection_event_id?: string;
+  selection_event_id?: string | null;
   chosen_id?: string;
   rejected: Array<{ id: string; score: number; reason?: string; artifact_kind?: string }>;
   window_seconds?: number;
@@ -51,7 +51,7 @@ const insertCounterfactual = (
       "counterfactual_alternative_recorded",
       JSON.stringify({
         selection_kind: opts.selection_kind ?? "artifact_selection",
-        selection_event_id: opts.selection_event_id ?? "selection_evt_x",
+        selection_event_id: opts.selection_event_id === undefined ? "selection_evt_x" : opts.selection_event_id,
         chosen_id: opts.chosen_id ?? "chosen_x",
         rejected_candidates: opts.rejected,
         window_seconds: opts.window_seconds ?? 600,
@@ -226,6 +226,25 @@ describe("counterfactual_credit_worker", () => {
     expect(summary.scanned).toBe(1);
     expect(summary.skipped_recent).toBe(1);
     expect(summary.scored_count).toBe(0);
+  });
+
+  test("scores composer counterfactuals without selection_event_id from same task action_scored", async () => {
+    const db = openDb();
+    const cfId = insertCounterfactual(db, {
+      ts: oldTs(601_000),
+      selection_event_id: null,
+      chosen_id: "chosen_from_prompt",
+      rejected: [{ id: "rejected_from_prompt", score: 0.35 }],
+      window_seconds: 600,
+    });
+    insertActionScored(db, { selection_event_id: "unrelated_scored_event", residual: 0.2 });
+
+    const summary = await runCounterfactualCreditWorker(db, { now: FIXED_NOW });
+    expect(summary.scored_count).toBe(1);
+    expect(summary.closure_event_id).not.toBeNull();
+    const r = readScoreUpdateForRejected(db, cfId, "rejected_from_prompt");
+    expect(r).not.toBeNull();
+    expect(r!.residual).toBeCloseTo(0.25, 5);
   });
 
   test("skips counterfactuals where chosen has no action_scored residual", async () => {
