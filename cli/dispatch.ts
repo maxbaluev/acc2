@@ -238,9 +238,16 @@ const daemonStart = async (): Promise<number> => {
   // OTHER role's daemon is already running.
   const role = (process.env.ACC2_DAEMON_ROLE ?? "all").toLowerCase();
   const fsCheck = await import("node:fs");
-  const lockPath = role === "worker"
-    ? `${process.env.HOME ?? ""}/.accint/v2.sock.worker`
-    : `${process.env.HOME ?? ""}/.accint/v2.sock`;
+  // Lock path MUST resolve through the EXACT resolver the daemon uses to WRITE
+  // its lock (runtime/daemon.ts: baseSocketFile = resolveSocketFile(); worker
+  // = baseSocketFile + ".worker"), not a hardcoded $HOME/.accint. Otherwise a
+  // custom-state-dir (ACC2_STATE_DIR / ACC2_SOCKET_FILE) deployment probes the
+  // wrong lock and either false-positives "already running" against an
+  // unrelated default-dir daemon or false-negatives a real one. resolveSocketFile
+  // honours ACC2_SOCKET_FILE → resolveStateDir()/v2.sock, matching the daemon.
+  const { resolveSocketFile } = await import("../runtime/state_paths");
+  const baseLock = resolveSocketFile();
+  const lockPath = role === "worker" ? `${baseLock}.worker` : baseLock;
   if (fsCheck.existsSync(lockPath)) {
     try {
       const lockRaw = fsCheck.readFileSync(lockPath, "utf8");
