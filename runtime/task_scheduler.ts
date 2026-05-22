@@ -425,6 +425,17 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
     )
     .all(task.id, lastDispatch.ts) as Array<{ id: string; kind: string; residual: number | null; payload: string | null }>;
 
+  // A dispatch that bridge_failed (transient brain-subprocess timeout — 768+
+  // all-time, reason=timeout) never got a productive run, so its lack of
+  // structural progress is NOT a no-progress loop. Defer to the separate
+  // consecutive-bridge-failed cap (MAX_CONSECUTIVE_BRIDGE_FAILED) which fails
+  // the task only after repeated transient failures. Without this, research-
+  // heavy / new-feature directives that hit one transient bridge timeout were
+  // abandoned at the first re-dispatch before the brain could retry + emit.
+  if (rows.some((r) => r.kind === "bridge_failed")) {
+    return { terminated: false };
+  }
+
   const progressRows = rows.filter((r) => STRUCTURAL_PROGRESS_KINDS.has(r.kind));
   if (progressRows.some((r) => r.kind === "task_committed" || r.kind === "task_failed" || r.kind === "task_abandoned" || r.kind === "task_blocked" || r.kind === "task_committed_superseded")) {
     return { terminated: false };
