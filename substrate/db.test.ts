@@ -65,7 +65,7 @@ describe("openDb", () => {
     const busy = db.query("PRAGMA busy_timeout").get() as { timeout: number };
     const fk = db.query("PRAGMA foreign_keys").get() as { foreign_keys: number };
     expect(sync.synchronous).toBe(1); // NORMAL
-    expect(busy.timeout).toBe(5000);
+    expect(busy.timeout).toBe(15000);
     expect(fk.foreign_keys).toBe(1);
   });
 });

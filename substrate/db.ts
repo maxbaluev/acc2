@@ -44,6 +44,16 @@ const _dbCache = new Map<string, Database>();
 // "memory" — that branch is allowed. All other pragmas are mandatory:
 // if the driver rejects them we want the error loud.
 const applyWalPragmas = (db: Database): void => {
+  // busy_timeout MUST be the FIRST pragma — before journal_mode=wal and any
+  // other operation. Otherwise concurrent multi-process startup (e.g. the
+  // role-split server + worker daemons opening the same file-backed DB at
+  // once) races on WAL setup/recovery and the `journal_mode=wal` or first
+  // migration hits `SQLITE_BUSY`/`SQLITE_BUSY_RECOVERY` with NO busy-wait
+  // configured → the daemon dies on open. Set it first so every subsequent
+  // open-time operation waits-and-retries on a held lock instead of failing.
+  // 15s covers WAL crash-recovery by a sibling process. Env-overridable.
+  const busyMs = Number(process.env.ACC2_DB_BUSY_TIMEOUT_MS ?? 15000);
+  db.run(`PRAGMA busy_timeout = ${Number.isFinite(busyMs) && busyMs >= 0 ? busyMs : 15000}`);
   try {
     db.run("PRAGMA journal_mode = wal");
   } catch (err) {
@@ -55,7 +65,6 @@ const applyWalPragmas = (db: Database): void => {
     }
   }
   db.run("PRAGMA synchronous = NORMAL");
-  db.run("PRAGMA busy_timeout = 5000");
   db.run("PRAGMA foreign_keys = ON");
   // 2026-05-21 tuning bump: 326K-event substrate showed worker first-ticks
   // doing aggregate queries that thrashed the 40MB page cache. Bumping
