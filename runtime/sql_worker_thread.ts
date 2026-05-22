@@ -21,6 +21,7 @@
 
 import { parentPort, workerData } from "node:worker_threads";
 import { Database } from "bun:sqlite";
+import * as sqliteVec from "sqlite-vec";
 
 type WorkerData = {
   dbPath: string;
@@ -52,6 +53,12 @@ if (!data?.dbPath) {
 // pool is a SELECT. Write paths (emitEvent, action_predicted projections,
 // idempotency markers) stay on the main thread by design.
 const db = new Database(data.dbPath, { readonly: true, create: false });
+// Load the sqlite-vec (vec0) extension into THIS worker connection. The
+// main connection loads it in substrate/db.ts, but worker threads open
+// their own Database — without this, any vec_events (vec0 virtual table)
+// query routed through the pool fails with `no such module: vec0`
+// (observed: embedder orphan-GC + reproject flooding error_caught 2245×/15min).
+db.loadExtension(sqliteVec.getLoadablePath());
 // PRAGMA tuning: read-only WAL connections benefit from a small page cache
 // and the safe default journal mode. Keep these light — heavy cache would
 // fight with the main writer's WAL.
