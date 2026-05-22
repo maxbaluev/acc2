@@ -194,6 +194,59 @@ describe("extractTrajectoryMotifs", () => {
     expect(body2.avg_closure_residual).toBeCloseTo(0.5, 6);
   });
 
+  test("score calibration: a motif with matching low-residual closures gets score>0.5 (not stuck at 0.5)", async () => {
+    const db = openDb(":memory:");
+    // A motif whose TAIL is task_closure_audited across three directives,
+    // each closing with a LOW residual (good recipe). The closure event is
+    // the LAST event of the sequence so the motif tail matches it.
+    for (const directiveId of ["d_x", "d_y", "d_z"]) {
+      insertEvent(db, { kind: "task_node_opened", directive_id: directiveId });
+      insertEvent(db, { kind: "task_committed", directive_id: directiveId });
+      insertEvent(db, {
+        kind: "task_closure_audited",
+        directive_id: directiveId,
+        payload: { closure_residual: 0.1 },
+      });
+    }
+
+    const summary = await extractTrajectoryMotifs(db);
+    expect(summary.motifs_score_calibrated).toBeGreaterThanOrEqual(1);
+
+    const row = db
+      .query(
+        `SELECT score, recent_residual_mean, body FROM act_artifact
+          WHERE kind = 'trajectory_motif_predicate'
+            AND name = 'task_node_opened>task_committed>task_closure_audited'`,
+      )
+      .get() as { score: number; recent_residual_mean: number; body: string };
+    expect(row).toBeTruthy();
+    const body = JSON.parse(row.body) as Record<string, unknown>;
+    expect(body.avg_closure_residual).toBeCloseTo(0.1, 6);
+    // score = clamp(1 - 0.1) = 0.9 → no longer stuck at the 0.5 cold-start.
+    expect(row.score).toBeGreaterThan(0.5);
+    expect(row.score).toBeCloseTo(0.9, 6);
+    expect(row.recent_residual_mean).toBeCloseTo(0.1, 6);
+  });
+
+  test("score calibration: a motif with no closure evidence stays at the cold-start 0.5", async () => {
+    const db = openDb(":memory:");
+    const seq = ["directive_opened", "task_node_opened", "task_committed"];
+    insertSequence(db, "d_p", seq);
+    insertSequence(db, "d_q", seq);
+    insertSequence(db, "d_r", seq);
+
+    const summary = await extractTrajectoryMotifs(db);
+    expect(summary.motifs_score_calibrated).toBe(0);
+    const row = db
+      .query(
+        `SELECT score FROM act_artifact
+          WHERE kind = 'trajectory_motif_predicate'
+            AND name = 'directive_opened>task_node_opened>task_committed'`,
+      )
+      .get() as { score: number };
+    expect(row.score).toBeCloseTo(0.5, 8);
+  });
+
   test("bounded window: events older than windowDays are not picked up", async () => {
     const db = openDb(":memory:");
     // 60 days ago — outside the default 30-day window.

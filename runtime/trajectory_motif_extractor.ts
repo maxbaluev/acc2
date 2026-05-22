@@ -111,12 +111,39 @@ const ensureMotifRow = (
   return { id, created: true };
 };
 
+const clamp01 = (n: number): number => (n < 0 ? 0 : n > 1 ? 1 : n);
+
+/**
+ * Calibrate a motif row's `score` from its computed avg_closure_residual.
+ * A motif whose matching directives close with LOW residual is a GOOD
+ * recipe → high score (score = 1 - avg_closure_residual). Also records
+ * recent_residual_mean = avg_closure_residual. Idempotent: recomputed
+ * each tick from the current evidence, so re-running with the same
+ * residual is a no-op write. Only called when residualCount > 0.
+ */
+const calibrateMotifScore = (
+  db: Database,
+  id: string,
+  avgResidual: number,
+): void => {
+  const score = clamp01(1 - avgResidual);
+  db.run(
+    `UPDATE act_artifact
+       SET score = ?,
+           recent_residual_mean = ?,
+           updated_at = ?
+     WHERE id = ?`,
+    [score, avgResidual, new Date().toISOString(), id],
+  );
+};
+
 export type TrajectoryMotifSummary = {
   directives_scanned: number;
   events_scanned: number;
   unique_motifs_seen: number;
   motifs_admitted: number;
   motifs_already_present: number;
+  motifs_score_calibrated: number;
 };
 
 type MotifAggregate = {
@@ -159,6 +186,7 @@ export const extractTrajectoryMotifs = async (
     unique_motifs_seen: 0,
     motifs_admitted: 0,
     motifs_already_present: 0,
+    motifs_score_calibrated: 0,
   };
 
   // Pull recent events with a non-null directive_id, ordered by
@@ -277,6 +305,16 @@ export const extractTrajectoryMotifs = async (
       summary.motifs_admitted++;
     } else {
       summary.motifs_already_present++;
+    }
+    // Calibrate the row's score from outcome evidence. Without this the
+    // creation half left every motif stuck at the cold-start 0.5 score
+    // forever — never ranked by whether its matching directives actually
+    // close well. A motif whose matching directives close with LOW
+    // residual is a GOOD recipe → high score. Only calibrate when real
+    // closure evidence exists (residualCount > 0); recomputed each tick.
+    if (avgResidual !== null && residualCount > 0) {
+      calibrateMotifScore(db, id, avgResidual);
+      summary.motifs_score_calibrated++;
     }
     // 2026-05-21 noise audit fix: emit ONLY on first observation
     // (created=true) OR when frequency crosses a power-of-2 threshold

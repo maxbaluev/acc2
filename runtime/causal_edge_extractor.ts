@@ -15,6 +15,7 @@
 
 import type { Database } from "bun:sqlite";
 import { emitEvent } from "./events";
+import { betaMean, betaStreamConfidence } from "./posterior";
 
 const YIELD_EVERY_N = 25;
 const yieldToEventLoop = (): Promise<void> => new Promise<void>((r) => setTimeout(r, 0));
@@ -126,6 +127,160 @@ export type CausalEdgeSummary = {
   artifact_edges_recorded: number;
   refinement_edges_recorded: number;
   edges_admitted: number;
+  closures_scanned: number;
+  edges_credited: number;
+  credit_pairs_skipped_dup: number;
+};
+
+const DEFAULT_MAX_CLOSURES = 200;
+
+type ClosureRow = {
+  id: string;
+  ts: string;
+  directive_id: string | null;
+  task_id: string | null;
+  payload: string | null;
+};
+
+/**
+ * Apply Beta credit to existing causal-edge rows from recent closures.
+ *
+ * For each recent task_closure_audited carrying a numeric closure_residual,
+ * find the act_tuple_recorded events in the same directive (or task when no
+ * directive), extract their co-cited pairs (the same stringPairs over
+ * cited_knowledge_ids → citation_cocitation and cited_artifact_ids →
+ * citation_artifact), and for each EXISTING edge row apply credit:
+ *   residual < 0.3 → posterior_alpha += 1 (co-occurred in a good outcome)
+ *   residual >= 0.3 → posterior_beta  += 1
+ * then recompute score = α/(α+β) and confidence.
+ *
+ * Idempotent per (edge_id, source_closure_event_id): a causal_edge_credited
+ * event keyed on both ids is emitted, and a pair already credited for the
+ * same closure is skipped on later ticks (no double-credit). Bounded to the
+ * last `maxClosures` closures per tick.
+ */
+const creditEdgesFromClosures = async (
+  db: Database,
+  cutoff: string,
+  maxClosures: number,
+  summary: CausalEdgeSummary,
+): Promise<void> => {
+  const closures = db
+    .query(
+      `SELECT id, ts, directive_id, task_id, payload FROM events
+        WHERE kind = 'task_closure_audited' AND ts > ?
+        ORDER BY ts DESC LIMIT ?`,
+    )
+    .all(cutoff, maxClosures) as ClosureRow[];
+
+  const LOW_RESIDUAL = 0.3;
+  let processedSinceYield = 0;
+  for (const closure of closures) {
+    if (processedSinceYield >= YIELD_EVERY_N) {
+      await yieldToEventLoop();
+      processedSinceYield = 0;
+    }
+    processedSinceYield++;
+
+    const cp = parsePayload(closure.payload);
+    if (typeof cp.closure_residual !== "number") continue;
+    const residual = cp.closure_residual;
+    summary.closures_scanned++;
+
+    // Find the acts that belong to this closure's directive (preferred) or
+    // task. directive_id is the canonical grouping key the extractor uses
+    // elsewhere; fall back to task_id when the closure has no directive.
+    let acts: ActTupleRow[];
+    if (closure.directive_id) {
+      acts = db
+        .query(
+          `SELECT id, ts, task_id, payload FROM events
+            WHERE kind = 'act_tuple_recorded' AND directive_id = ?`,
+        )
+        .all(closure.directive_id) as ActTupleRow[];
+    } else if (closure.task_id) {
+      acts = db
+        .query(
+          `SELECT id, ts, task_id, payload FROM events
+            WHERE kind = 'act_tuple_recorded' AND task_id = ?`,
+        )
+        .all(closure.task_id) as ActTupleRow[];
+    } else {
+      continue;
+    }
+
+    // Collect the distinct edges this closure should credit. A pair that
+    // appears across multiple acts in the same directive is credited once
+    // per closure (the closure is the outcome unit, not the act).
+    const edgeIds = new Set<string>();
+    for (const act of acts) {
+      const payload = parsePayload(act.payload);
+      for (const [a, b] of stringPairs(payload.cited_knowledge_ids)) {
+        edgeIds.add(edgeId("citation_cocitation", a, b));
+      }
+      for (const [a, b] of stringPairs(payload.cited_artifact_ids)) {
+        edgeIds.add(edgeId("citation_artifact", a, b));
+      }
+    }
+
+    for (const id of edgeIds) {
+      // Idempotency: skip if this (edge_id, closure_event_id) pair was
+      // already credited on a prior tick. The causal_edge_credited event
+      // is the high-water-mark — keyed on both ids in context_refs.
+      const already = db
+        .query(
+          `SELECT 1 FROM events
+            WHERE kind = 'causal_edge_credited'
+              AND json_extract(payload, '$.edge_act_artifact_id') = ?
+              AND json_extract(payload, '$.source_closure_event_id') = ?
+            LIMIT 1`,
+        )
+        .get(id, closure.id);
+      if (already) {
+        summary.credit_pairs_skipped_dup++;
+        continue;
+      }
+
+      const row = db
+        .query(
+          `SELECT posterior_alpha, posterior_beta FROM act_artifact WHERE id = ? LIMIT 1`,
+        )
+        .get(id) as { posterior_alpha: number; posterior_beta: number } | null;
+      // Only credit existing edge rows — the creation half admits them.
+      if (!row) continue;
+
+      const isGood = residual < LOW_RESIDUAL;
+      const newAlpha = row.posterior_alpha + (isGood ? 1 : 0);
+      const newBeta = row.posterior_beta + (isGood ? 0 : 1);
+      const newScore = betaMean(newAlpha, newBeta);
+      const newConfidence = betaStreamConfidence(newAlpha, newBeta);
+      db.run(
+        `UPDATE act_artifact
+           SET posterior_alpha = ?, posterior_beta = ?,
+               score = ?, confidence = ?,
+               recent_residual_mean = ?, updated_at = ?
+         WHERE id = ?`,
+        [newAlpha, newBeta, newScore, newConfidence, residual, new Date().toISOString(), id],
+      );
+      summary.edges_credited++;
+      emitEvent(db, {
+        kind: "causal_edge_credited",
+        substrate_origin: "substrate_auto",
+        directive_id: closure.directive_id ?? undefined,
+        task_id: closure.task_id ?? undefined,
+        context_refs: [id, closure.id],
+        payload: {
+          edge_act_artifact_id: id,
+          source_closure_event_id: closure.id,
+          closure_residual: residual,
+          outcome: isGood ? "low_residual" : "high_residual",
+          posterior_alpha: newAlpha,
+          posterior_beta: newBeta,
+          score: newScore,
+        },
+      });
+    }
+  }
 };
 
 /**
@@ -138,10 +293,11 @@ export type CausalEdgeSummary = {
  */
 export const extractCausalEdges = async (
   db: Database,
-  opts?: { maxActs?: number; windowDays?: number },
+  opts?: { maxActs?: number; windowDays?: number; maxClosures?: number },
 ): Promise<CausalEdgeSummary> => {
   const maxActs = Math.max(1, opts?.maxActs ?? 500);
   const windowDays = Math.max(1, opts?.windowDays ?? 14);
+  const maxClosures = Math.max(1, opts?.maxClosures ?? DEFAULT_MAX_CLOSURES);
   const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
   const summary: CausalEdgeSummary = {
     scanned: 0,
@@ -149,6 +305,9 @@ export const extractCausalEdges = async (
     artifact_edges_recorded: 0,
     refinement_edges_recorded: 0,
     edges_admitted: 0,
+    closures_scanned: 0,
+    edges_credited: 0,
+    credit_pairs_skipped_dup: 0,
   };
 
   // Citation co-occurrence + artifact co-occurrence from act_tuple_recorded.
@@ -273,5 +432,12 @@ export const extractCausalEdges = async (
     summary.cocitations_recorded +
     summary.artifact_edges_recorded +
     summary.refinement_edges_recorded;
+
+  // Credit half: apply Beta credit to existing edge rows from recent
+  // closures. The creation half above admits edges at Beta(1,1)/0.5; this
+  // pass moves their posterior toward the outcome of the closures they
+  // co-occurred in. Idempotent per (edge_id, closure_event_id).
+  await creditEdgesFromClosures(db, cutoff, maxClosures, summary);
+
   return summary;
 };
