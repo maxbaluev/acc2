@@ -1071,15 +1071,7 @@ export const distributeCredit = async (
   //    only the artifact it picked. Idempotent via projection_key
   //    "meta_credit:{scored_event_id}:{bundle_artifact_id}".
   if (inheritTaskId && scoredEv) {
-    const selections = db
-      .query<{ payload: string }, [string, string]>(
-        `SELECT payload FROM events
-         WHERE kind = 'prompt_policy_section_selected'
-           AND task_id = ?
-           AND ts <= ?
-         ORDER BY ts ASC`,
-      )
-      .all(inheritTaskId, scoredEv.ts);
+    const selections = promptPolicySelectionRowsForLineage(db, inheritTaskId, "?", scoredEv.ts);
     const seenBundles = new Set<string>();
     for (const sel of selections) {
       let bundleId: string | null = null;
@@ -1390,6 +1382,39 @@ export const distributeOwnerObservedOutcomeCredit = async (
 const projectionKeyFor = (sourceActEventId: string, artifactId: string): string =>
   "act_artifact_score_updated:" + sourceActEventId + ":" + artifactId;
 
+
+const promptPolicySelectionRowsForLineage = (
+  db: Database,
+  taskId: string,
+  beforeTsSql: string,
+  beforeTsParam: string,
+): Array<{ payload: string }> => db
+  .query<{ payload: string }, [string, string]>(
+    `WITH RECURSIVE lineage(task_id) AS (
+       SELECT ?
+       UNION
+       SELECT n.parent_task_id
+         FROM events n
+         JOIN lineage l ON n.task_id = l.task_id
+        WHERE n.kind = 'task_node_opened'
+          AND n.parent_task_id IS NOT NULL
+          AND n.parent_task_id != ''
+       UNION
+       SELECT COALESCE(json_extract(e.payload, '$.from_task'), json_extract(e.payload, '$.from'))
+         FROM events e
+         JOIN lineage l ON COALESCE(json_extract(e.payload, '$.to_task'), json_extract(e.payload, '$.to')) = l.task_id
+        WHERE e.kind = 'task_edge_recorded'
+          AND COALESCE(json_extract(e.payload, '$.from_task'), json_extract(e.payload, '$.from')) IS NOT NULL
+          AND COALESCE(json_extract(e.payload, '$.from_task'), json_extract(e.payload, '$.from')) != ''
+     )
+     SELECT payload FROM events
+      WHERE kind = 'prompt_policy_section_selected'
+        AND task_id IN (SELECT task_id FROM lineage)
+        AND ts <= ${beforeTsSql}
+      ORDER BY ts ASC`,
+  )
+  .all(taskId, beforeTsParam);
+
 const projectionKeyExists = (db: Database, kind: string, key: string): boolean => {
   const row = db
     .query<{ x: number }, [string, string]>(
@@ -1658,15 +1683,7 @@ export const projectActionScoredToCredit = (
     // T4.2/T4.1-class meta-credit universal trigger: score the composer
     // policy bundle that selected the prompt section whenever its task's
     // action gets scored, not only when a caller remembered distributeCredit.
-    const selections = db
-      .query<{ payload: string }, [string, string]>(
-        `SELECT payload FROM events
-         WHERE kind = 'prompt_policy_section_selected'
-           AND task_id = ?
-           AND ts <= (SELECT ts FROM events WHERE id = ?)
-         ORDER BY ts ASC`,
-      )
-      .all(scoredEvent.task_id, scoredEvent.id);
+    const selections = promptPolicySelectionRowsForLineage(db, scoredEvent.task_id, "(SELECT ts FROM events WHERE id = ?)", scoredEvent.id);
     const seenBundles = new Set<string>();
     for (const sel of selections) {
       let bundleId: string | null = null;

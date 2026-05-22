@@ -1844,10 +1844,32 @@ describe("T4.4 coalition credit — multi-artifact joint citation posterior", ()
     insertSampleArtifact(db, "art_co_b", "// co b");
 
     emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "opencode",
+      directive_id: "d_universal_t4",
+      task_id: "t_universal_parent",
+      payload: { goal: "compose policy" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "opencode",
+      directive_id: "d_universal_t4",
+      task_id: "t_universal_t4",
+      parent_task_id: "t_universal_parent",
+      payload: { goal: "score child action" },
+    });
+    emitEvent(db, {
+      kind: "task_edge_recorded",
+      substrate_origin: "opencode",
+      directive_id: "d_universal_t4",
+      task_id: "t_universal_t4",
+      payload: { kind: "refines", from_task: "t_universal_parent", to_task: "t_universal_t4" },
+    });
+    emitEvent(db, {
       kind: "prompt_policy_section_selected",
       substrate_origin: "substrate_auto",
       directive_id: "d_universal_t4",
-      task_id: "t_universal_t4",
+      task_id: "t_universal_parent",
       payload: {
         section_name: "workflow",
         source: "policy_bundle",
