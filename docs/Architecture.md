@@ -21,7 +21,6 @@ One loop handles code, research, enterprise transformation work, outreach, embod
 ```
 owner words
   -> directive_opened / owner_input_received
-  -> intent_classified
   -> dispatch_decided
   -> act_tuple_recorded
   -> action artifact observation
@@ -191,7 +190,7 @@ Every data source maps to exactly one substrate primitive; orchestrator intellig
 
 | Source | Substrate primitive |
 |---|---|
-| Owner words via chat | `owner_input_received` → `directive_opened` → `intent_classified` → `dispatch_decided` |
+| Owner words via chat | `owner_input_received` → `directive_opened` → `dispatch_decided` |
 | Owner files via inflow | `act_artifact(kind="ingested_file")` via existing `substrate.admit_artifact`; `artifact_observed` for runtime observation |
 | Claude observation of substrate views | Pure read = no emit; durable insight → `knowledge_candidate(payload.judgment_packet=true)` |
 | Claude situated judgment | `knowledge_candidate(payload.judgment_packet=true, payload.evidence_event_ids[], payload.source_actor="claude_orchestrator")`; known-false brain output → `payload.contradiction_observation=true, payload.contradicted_event_ids[]` |

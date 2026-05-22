@@ -54,7 +54,7 @@ export const EXTERNAL_PUSH_TIMEOUT_MS = 10_000;
 // (687 listeners observed 2026-05-19) and the projection chain can dwarf
 // the 30s budget without the dispatch actually being broken.
 export const MCP_CALL_TIMEOUT_MS = 60_000;
-// 120s for write-class MCP calls — directive ingress runs intent_classifier,
+// 120s for write-class MCP calls — directive ingress runs
 // emit_event × ~5 with projection cascades, and stakeholder/conflict gates
 // in one atomic handler. 2× the read budget covers the cascade tail.
 export const MCP_WRITE_TIMEOUT_MS = 120_000;

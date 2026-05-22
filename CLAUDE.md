@@ -17,7 +17,7 @@ The event ledger is the universal state. If it is not in an event row, it does n
 Every non-trivial owner intent enters one loop:
 
 1. Capture the owner words as owner_input_received / directive_opened through acc task or the substrate ingress already dispatching this leaf.
-2. Route through the substrate. The orchestrator does not pre-decide whether the work is one-shot, decomposed, clarified, replayed, or deferred. Directive ingress emits intent_classified before prompt composition; the classification selects the prompt template and constrains eligible emission lanes, with forbidden attempts recorded as lane_routing_refused.
+2. Route through the substrate. The orchestrator does not pre-decide whether the work is one-shot, decomposed, clarified, replayed, or deferred. There is NO regex intent pre-classification: the directive flows straight to the universal prompt-composed dispatch and the LM understands intent natively (RLM-first). Forbidden downstream emission attempts are still recorded as lane_routing_refused, scored on structural validity and verifier residual rather than on a pre-classified intent.
 3. Let dispatch choose by residual evidence, target risk, available recipes, owner-control signals, and current substrate state.
 4. Execute only the lane assigned: substrate_replay, claude_inline, opencode_brain, clarification/owner input, or deferred_blocked.
 5. Observe the ledger and surface milestones or decisions without duplicating the scheduler.

@@ -3798,7 +3798,6 @@ CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
 //   brain_message_emitted       → payload.text (truncated)
 //   owner_decision_recorded     → payload.decision + .target_event_id
 //   constitutional_gate_decision → payload.gate + .reason
-//   intent_classified           → payload.classification
 //
 // Anything not in the map gets a fallback shape (kind + a short payload
 // preview). The view ALWAYS returns the raw payload too so the
@@ -3835,7 +3834,7 @@ CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
       WHEN e.kind = 'daemon_hotreload_failed' THEN 'high'
       WHEN e.kind IN ('task_failed','bridge_failed','dispatcher_violation','owner_input_required','hidl_action_required','brain_failed','daemon_hotreload_rejected') THEN 'critical'
       WHEN e.kind IN ('task_committed','directive_opened','directive_amended','contract_amendment_proposed','pre_apply_adjudication_recorded','owner_observed_outcome_recorded','applied_change_committed','applied_change_failed','task_closure_audited','owner_decision_recorded') THEN 'high'
-      WHEN e.kind IN ('knowledge_candidate','lesson_extracted','claude_reasoning_recorded','dispatch_decided','act_tuple_recorded','runtime_self_diagnostic_recorded','owner_insight_candidate','intent_classified','brain_message_emitted','knowledge_promoted','act_artifact_promoted', 'code_artifact_promoted') THEN 'medium'
+      WHEN e.kind IN ('knowledge_candidate','lesson_extracted','claude_reasoning_recorded','dispatch_decided','act_tuple_recorded','runtime_self_diagnostic_recorded','owner_insight_candidate','brain_message_emitted','knowledge_promoted','act_artifact_promoted', 'code_artifact_promoted') THEN 'medium'
       ELSE 'low'
     END AS importance,
     -- One-line human-readable summary per kind. The CASE order matters:
@@ -3873,7 +3872,6 @@ CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
       WHEN e.kind = 'brain_message_emitted'       THEN json_extract(e.payload, '$.text')
       WHEN e.kind = 'owner_decision_recorded'     THEN ('decision=' || COALESCE(json_extract(e.payload, '$.decision'), '?') || ' on ' || COALESCE(json_extract(e.payload, '$.target_event_id'), json_extract(e.payload, '$.source_event_id'), '?') || COALESCE(' [' || json_extract(e.payload, '$.reason') || ']', ''))
       WHEN e.kind = 'constitutional_gate_decision' THEN ('gate=' || COALESCE(json_extract(e.payload, '$.gate'), '?') || '; ' || COALESCE(json_extract(e.payload, '$.reason'), ''))
-      WHEN e.kind = 'intent_classified'           THEN COALESCE(json_extract(e.payload, '$.classification'), json_extract(e.payload, '$.intent'))
       WHEN e.kind = 'task_closure_audited'        THEN ('closure_residual=' || COALESCE(json_extract(e.payload, '$.closure_residual'), '?') || '; ' || COALESCE(json_extract(e.payload, '$.summary'), ''))
       WHEN e.kind = 'applied_change_committed'    THEN COALESCE(json_extract(e.payload, '$.summary'), 'applied change')
       WHEN e.kind = 'applied_change_failed'       THEN ('reason=' || COALESCE(json_extract(e.payload, '$.reason'), '?'))

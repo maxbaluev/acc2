@@ -28,9 +28,6 @@ import { recordInterferenceEdge, type InterferenceEdgeKind } from "../interferen
 import { findRecipeMatch } from "../recipe_replay";
 import { findSimilarRecentCandidate } from "../knowledge_dedup";
 import { newId } from "../ids";
-import { createHash } from "node:crypto";
-import { classifyIntent, INTENT_CLASSIFIER_VERSION } from "../intent_classifier";
-import { recordInternalAct } from "../internal_act_projection";
 import { evaluateClosureCommitGate } from "../closure_audit";
 import {
   actArtifactRegistry,
@@ -1653,59 +1650,11 @@ export const handleOpenDirective = (
     payload: lifecyclePayload as JsonValue,
   });
 
-  // Contract TJGFQC72 (2026-05-18): every directive ingress runs the
-  // deterministic intent classifier and emits intent_classified BEFORE
-  // any downstream gate (owner_input_received, task_node_opened,
-  // artifact admission). Open-string vocabulary — ad_hoc is the
-  // permissive fallback so historical paths still admit. Downstream
-  // gates read this row to decide lane routing; absence is treated as
-  // "back-population" and admits superseded chains unchanged.
-  const classification = classifyIntent(args.directive_text, ctx.db);
-  const directiveTextHash = createHash("sha256")
-    .update(args.directive_text)
-    .digest("hex")
-    .slice(0, 16);
-  const intentEvent = emitEvent(ctx.db, {
-    kind: "intent_classified",
-    substrate_origin: "substrate_auto",
-    directive_id: directiveId,
-    task_id: directiveId,
-    payload: {
-      intent_class: classification.intent_class,
-      confidence: classification.confidence,
-      evidence: classification.evidence,
-      classifier_version: INTENT_CLASSIFIER_VERSION,
-      directive_text_hash: directiveTextHash,
-    } as JsonValue,
-  });
-
-  // F6 — universal internal Act scoring: the substrate just made an
-  // internal decision (which intent class this directive belongs to).
-  // Record it as an act_tuple so the downstream lane outcome can
-  // score the classifier through the same posterior credit loop that
-  // scores outward work. The verifier is conceptual at emit time —
-  // when the lane outcome (task_committed / task_failed) arrives,
-  // credit distribution updates the intent_classifier_v1 handle.
-  recordInternalAct(ctx.db, {
-    intent: "classify directive intent",
-    actionHandle: "intent_classifier_v1",
-    verifierHandle: "lane_match_verifier",
-    verifierKind: "deterministic_code",
-    predictedResidual: 1 - classification.confidence,
-    reasoningSummary: `classifier matched ${classification.evidence.length} markers for class ${classification.intent_class}`,
-    actionSummary: `classified directive as ${classification.intent_class}`,
-    effectSummary: `intent_classified emitted with confidence ${classification.confidence.toFixed(2)}`,
-    directiveId,
-    taskId: directiveId,
-    sourceEventId: intentEvent.id,
-    sourceActId: "intent_classifier_v1:" + directiveTextHash,
-    extra: {
-      intent_class: classification.intent_class,
-      confidence: classification.confidence,
-      classifier_version: INTENT_CLASSIFIER_VERSION,
-      directive_text_hash: directiveTextHash,
-    },
-  });
+  // RLM-first ingress: the directive flows straight to dispatch with one
+  // universal prompt. No regex pre-classification — the LM reads the
+  // directive and understands intent natively. Emission validation rests
+  // on structural validity + verifier residual, not intent-based
+  // pre-refusal (no-regex-for-language-understanding law).
 
   // Owner input is, by definition, the directive text. Emitting
   // owner_input_received here is the structural fix for the gap that

@@ -23,7 +23,6 @@ import { describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { recordInternalAct } from "../runtime/internal_act_projection";
 import { emitEvent } from "../runtime/events";
-import { handleOpenDirective } from "../runtime/mcp_server/substrate_tools";
 import { newId } from "../runtime/ids";
 import { extractSemanticDedup } from "../substrate/extractors";
 import { encodeEmbeddingBlob } from "../runtime/embedder";
@@ -32,9 +31,6 @@ const fresh = () => {
   closeDb();
   return openDb(":memory:");
 };
-
-const ctx = (db: ReturnType<typeof openDb>) =>
-  ({ db, mode: "mock" as const, port: 0, server: null as unknown as Parameters<typeof handleOpenDirective>[0]["server"] });
 
 describe("F6 — recordInternalAct projection (Case A)", () => {
   test("emits act_tuple_recorded with internal_decision marker + handles", () => {
@@ -201,47 +197,12 @@ describe("F6 — idempotency (Case C)", () => {
 });
 
 describe("F6 — wired decision sites", () => {
-  test("directive ingress emits intent_classifier_v1 act_tuple alongside intent_classified", () => {
-    const db = fresh();
-    const directiveText = "DEEP-RESEARCH multi-source live data on Lakeland AI transformation";
-    const result = handleOpenDirective(ctx(db), {
-      directive_text: directiveText,
-      urgency: "normal",
-      stakeholders: [],
-    } as never);
-    expect(result.ok).toBe(true);
-    const actRow = db
-      .query("SELECT payload FROM events WHERE kind = 'act_tuple_recorded' AND action_artifact_id = 'intent_classifier_v1' ORDER BY ts DESC LIMIT 1")
-      .get() as { payload: string } | null;
-    expect(actRow).not.toBeNull();
-    const payload = JSON.parse(actRow!.payload) as Record<string, unknown>;
-    expect(payload.internal_decision).toBe(true);
-    expect(payload.action_handle).toBe("intent_classifier_v1");
-    expect(payload.verifier_handle).toBe("lane_match_verifier");
-    // Projection lands too — verify the action_scored row for the
-    // classifier handle exists.
-    const scored = db
-      .query<{ n: number }, []>(
-        "SELECT COUNT(*) AS n FROM events WHERE kind = 'action_scored' AND action_artifact_id = 'intent_classifier_v1'",
-      )
-      .get()!;
-    expect(scored.n).toBeGreaterThanOrEqual(1);
-  });
-
-  test("ingress with same directive text reuses the same projection key (idempotent classifier credit)", () => {
-    const db = fresh();
-    const text = "identical directive text for idempotency check";
-    handleOpenDirective(ctx(db), { directive_text: text, urgency: "normal", stakeholders: [] } as never);
-    handleOpenDirective(ctx(db), { directive_text: text, urgency: "normal", stakeholders: [] } as never);
-    const scored = db
-      .query<{ n: number }, []>(
-        "SELECT COUNT(*) AS n FROM events WHERE kind = 'action_scored' AND action_artifact_id = 'intent_classifier_v1'",
-      )
-      .get()!;
-    // sourceActId="intent_classifier_v1:" + directive_text_hash —
-    // same text → same hash → projection collapses.
-    expect(scored.n).toBe(1);
-  });
+  // The regex-based intent_classifier (intent_classifier_v1 act_tuple at
+  // directive ingress) was fully removed (RLM-first: the LM understands
+  // directive intent natively — no regex pre-classification). The two
+  // ingress-classifier projection tests that lived here are gone with it.
+  // The predicate-gate and closure-audit wired-decision-site tests below
+  // exercise internal-act projection on machinery that still exists.
 
   test("predicate-gate refusal records predicate_gate_v1 act_tuple", () => {
     const db = fresh();

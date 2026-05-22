@@ -460,7 +460,7 @@ export const reconcileOrphanedDispatches = (db: Database): Array<{ dispatch_even
 
 /** Reconcile PRE-DISPATCH orphans (2026-05-21). reconcileOrphanedDispatches
  *  above only closes `brain_dispatched` rows that never closed — but a
- *  directive can be orphaned EARLIER: opened + intent_classified +
+ *  directive can be orphaned EARLIER: opened +
  *  owner_input_received, then the daemon (or the dispatching CLI) is killed
  *  before `dispatch_decided` / `brain_dispatched` fires. Those directives
  *  never reach the dispatch stage, so the orphan reconciler never sees them

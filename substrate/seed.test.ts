@@ -68,7 +68,6 @@ describe("seedActArtifacts", () => {
       "claude_agent_apply_change_action",
       "lesson_extractor_v1",
       "closure_verifier_v1",
-      "intent_classifier_v1",
       "citation_chooser_v1",
       "recipe_confidence_bump_action",
       "predicate_gate_v1",

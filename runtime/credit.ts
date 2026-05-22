@@ -1363,7 +1363,7 @@ export const distributeOwnerObservedOutcomeCredit = async (
 // act_artifact_score_updated=123, parity=5.17%. distributeCredit's full
 // Shapley pipeline is the rich path, but many emit sites (internal
 // substrate decisions whose action handles aren't registered act_artifact
-// rows — closure_verifier_v1, dispatch_decider_v1, intent_classifier_v1,
+// rows — closure_verifier_v1, dispatch_decider_v1,
 // lesson_extractor_v1, knowledge_merger_v1, citation_chooser_v1) hit the
 // synthetic-actuator branch and produce no per-cited-artifact credit row.
 // The universal projector closes that gap structurally: walk

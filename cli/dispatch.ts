@@ -130,7 +130,7 @@ const dispatchTask = async (
   // brain was never invoked.
   let env;
   try {
-    // Write-class MCP call — directive ingress runs intent_classifier +
+    // Write-class MCP call — directive ingress runs
     // emit_event × ~5 with full projection cascades under the activation
     // bus fan-out. 60s default was tripping false-positive timeouts on
     // warm substrates with 600+ listeners; bumped to MCP_WRITE_TIMEOUT_MS.

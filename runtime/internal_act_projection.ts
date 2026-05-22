@@ -45,9 +45,8 @@ export type InternalActParams = {
   intent: string;
   /** Free-string handle for the action artifact — names the
    *  decision class (one per call site). Examples:
-   *  "intent_classifier_v1", "dispatch_decider_v1",
-   *  "predicate_gate_v1", "closure_verifier_v1",
-   *  "citation_selector_v1". */
+   *  "dispatch_decider_v1", "predicate_gate_v1",
+   *  "closure_verifier_v1", "citation_selector_v1". */
   actionHandle: string;
   /** Free-string handle for the verifier that will score this
    *  decision downstream. Examples: "lane_match_verifier",
@@ -75,7 +74,7 @@ export type InternalActParams = {
    *  "substrate_auto" for internal decisions. */
   substrateOrigin?: SubstrateOrigin;
   /** Event id of the primary event the decision produced (e.g. the
-   *  intent_classified row, the dispatch_decided row). Stamped onto
+   *  dispatch_decided row). Stamped onto
    *  the act envelope so the projection chain links back to the
    *  decision the act describes. */
   sourceEventId?: string;
@@ -84,7 +83,7 @@ export type InternalActParams = {
    *  event id becomes the source_act_id (and projection keys remain
    *  unique per emit). For deterministic idempotency across retries,
    *  pass a stable string derived from the decision context (e.g.
-   *  `intent_classifier_v1:` + directive_text_hash). */
+   *  `dispatch_decider_v1:` + directive_id). */
   sourceActId?: string;
   /** Knowledge IDs that shaped the decision. May be empty for
    *  deterministic classifiers that do not consult substrate

@@ -154,7 +154,7 @@ export const requiresStrategicGrounding = (
 };
 
 /** Returns every artifact_kind whose `needs_strategic_grounding`
- *  posterior exceeds the threshold. Used by intent_classifier and
+ *  posterior exceeds the threshold. Used by
  *  strategy_first_closure_check to enumerate "kinds that need strategic
  *  grounding right now" without hard-coding any single prefix. */
 export const listStrategicallyGroundedKinds = (db: Database): string[] => {
