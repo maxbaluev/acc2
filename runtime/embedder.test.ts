@@ -7,6 +7,7 @@ import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
 import {
   batchComputeEmbeddings,
+  cleanupOrphanedVecEvents,
   computeEmbedding,
   decodeEmbeddingBlob,
   embedderWorkerTick,
@@ -17,6 +18,7 @@ import {
   encodeEmbeddingBlob,
   extractTextFromEvent,
   readEmbeddingFromEvent,
+  upsertVecEventRow,
 } from "./embedder";
 
 afterAll(() => closeDb());

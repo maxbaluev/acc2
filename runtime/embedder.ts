@@ -410,6 +410,35 @@ export const upsertVecEventRow = (
   );
 };
 
+export const cleanupOrphanedVecEvents = (db: Database, limit = 5000): number => {
+  const rows = db
+    .query<{ event_id: string }, [number]>(
+      `SELECT v.event_id FROM vec_events v
+       WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.id = v.event_id)
+         AND NOT (
+           v.kind = 'act_artifact'
+           AND EXISTS (
+             SELECT 1 FROM act_artifact a
+             WHERE a.id = v.event_id
+               AND a.runtime IS NULL
+               AND a.superseded_by IS NULL
+               AND a.status IN ('admitted', 'promoted')
+           )
+         )
+       LIMIT ?`,
+    )
+    .all(limit);
+  if (rows.length === 0) return 0;
+  let deleted = 0;
+  for (let i = 0; i < rows.length; i += 500) {
+    const chunk = rows.slice(i, i + 500).map((r) => r.event_id);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const result = db.run(`DELETE FROM vec_events WHERE event_id IN (${placeholders})`, chunk);
+    deleted += (result as unknown as { changes?: number }).changes ?? chunk.length;
+  }
+  return deleted;
+};
+
 /** Persist one embedding back onto the source row. We UPDATE the source
  *  event row's `embedding` + `embedding_version` columns (transitional —
  *  kept for parity testing per the schema deprecation note) AND insert

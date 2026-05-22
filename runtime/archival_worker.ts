@@ -438,6 +438,7 @@ export const runArchivalSweep = async (
         const chunk = rows.slice(i, i + COPY_CHUNK);
         const ids = chunk.map((r) => r.id);
         const delPlaceholders = ids.map(() => "?").join(", ");
+        hotDb.run(`DELETE FROM vec_events WHERE event_id IN (${delPlaceholders})`, ids);
         const result = hotDb.run(
           `DELETE FROM events WHERE id IN (${delPlaceholders})`,
           ids,
