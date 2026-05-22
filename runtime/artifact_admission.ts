@@ -283,6 +283,7 @@ export const admitArtifact = async (
     emit({
       kind: "act_artifact_admission_rejected",
       substrate_origin: "substrate_auto",
+      directive_id: input.governance?.directiveId,
       payload: {
         reason: "sandbox_decl_invalid",
         detail: `runtime_mismatch:${input.declaredSandbox.runtime}!=${input.runtime}`,
@@ -755,6 +756,7 @@ export const admitArtifact = async (
     emit({
       kind: "act_artifact_admission_rejected",
       substrate_origin: "substrate_auto",
+      directive_id: input.governance?.directiveId,
       action_artifact_id: row.id,
       payload: {
         reason: "runtime_error",
