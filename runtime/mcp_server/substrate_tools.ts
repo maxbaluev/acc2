@@ -730,7 +730,10 @@ export const handleRead = (
       case "irreversible_effects_view":
         return { ok: true, result: irreversibleEffects(db) as unknown as JsonValue };
       case "embedding_index_view":
-        return { ok: true, result: embeddingIndex(db) as unknown as JsonValue };
+        return (async (): Promise<McpResult> => {
+          const rows = await poolQuery<Record<string, unknown>>(db, "SELECT * FROM embedding_index_view", []);
+          return { ok: true, result: rows as unknown as JsonValue };
+        })();
       case "origin_promotion_view":
         return { ok: true, result: originPromotion(db) as unknown as JsonValue };
       case "owner_profile_view": {
