@@ -1,5 +1,5 @@
 import { mcpCall } from "./rpc";
-import { renderOwnerString, type OwnerProfileCard } from "./owner_profile_renderer";
+import { type OwnerProfileCard } from "./owner_profile_renderer";
 
 type ViewEnvelope = { ok: true; result: unknown } | { ok: false; error: string };
 type OwnerProfileRow = { event_id?: string; ts?: string; payload?: OwnerProfileCard | string; substrate_origin?: string };
@@ -92,7 +92,6 @@ const signals = (values: Array<{ key: string; value: number }>): string => value
 
 export const renderWhoamiReport = (report: WhoamiReport): string => {
   const profile = report.profile;
-  const render = (text: string) => renderOwnerString(text, profile);
   const rows = [
     "acc whoami - owner profile @ " + report.generated_at,
     "source=" + (report.source_event_id ?? "fresh_substrate_default") + " ts=" + (report.source_ts ?? "unset"),
@@ -110,7 +109,7 @@ export const renderWhoamiReport = (report: WhoamiReport): string => {
   if (Object.keys(report.view_errors).length > 0) {
     rows.push("view_errors=" + Object.entries(report.view_errors).map(([name, error]) => name + ":" + error).join(", "));
   }
-  return rows.map(render).join("\n") + "\n";
+  return rows.join("\n") + "\n";
 };
 
 export const runWhoami = async (argv: string[]): Promise<number> => {

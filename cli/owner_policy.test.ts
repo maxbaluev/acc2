@@ -58,7 +58,7 @@ describe("runOwnerPolicy", () => {
     expect(c.out.join("")).toContain("autonomy_score:");
   });
 
-  test("`acc owner policy` with seeded profile renders preferred_terms", async () => {
+  test("`acc owner policy` renders the profile WITHOUT the removed vocabulary-mirroring (preferred_terms/avoided_terms subsystem deleted)", async () => {
     seed(process.env.ACC2_DB_PATH!, {
       detected_language: "es",
       preferred_terms: ["intent", "trajectory"],
@@ -68,12 +68,13 @@ describe("runOwnerPolicy", () => {
     expect(code).toBe(0);
     const out = c.out.join("");
     expect(out).toContain("## OWNER PROFILE");
-    expect(out).toContain("preferred_terms");
-    expect(out).toContain("intent");
-    expect(out).toContain("trajectory");
-    expect(out).toContain("avoided_terms");
-    expect(out).toContain("leverage");
+    // detected_language still drives owner-facing language (universal path).
     expect(out).toContain("detected_language: es");
+    // The owner-vocabulary subsystem was removed (owner directive: one
+    // universal workflow; mirroring the owner's own words degraded deliverable
+    // quality). preferred_terms/avoided_terms are no longer rendered or mirrored.
+    expect(out).not.toContain("preferred_terms");
+    expect(out).not.toContain("avoided_terms");
   });
 
   test("unknown subcommand prints to stderr and returns 1", async () => {

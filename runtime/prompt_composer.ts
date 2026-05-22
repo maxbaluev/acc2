@@ -1044,7 +1044,6 @@ const buildSituationalOwnerPolicyLines = (profile: OwnerProfile, input: OwnerPol
     profile_risk_signal: profileRiskSignal,
   };
   const axisText = Object.entries(axes).map(([k, v]) => k + "=" + ownerPolicyNumber(v)).join(", ");
-  const terms = Array.isArray(profile.preferred_terms) && profile.preferred_terms.length > 0 ? profile.preferred_terms.slice(0, 12).join(", ") : "(none recorded)";
   const signalSources = [
     ...topSignalKeys(profile.control_signals).map((k) => "control." + k),
     ...topSignalKeys(profile.risk_signals).map((k) => "risk." + k),
@@ -1063,8 +1062,7 @@ const buildSituationalOwnerPolicyLines = (profile: OwnerProfile, input: OwnerPol
     "  action_policy: " + actionPolicy,
     "  comprehension_policy: " + comprehensionPolicy,
     "  source_mix: profile_maps=" + (signalSources.length > 0 ? signalSources.join(",") : "none") + " recent_owner_events=" + recent.length + " directive_urgency=" + (input.directive?.urgency ?? "normal") + " directive_lifecycle=" + (input.directive?.lifecycle ?? "finite"),
-    "  render_policy: mirror preferred_terms; keep code identifiers literal; use compact evidence/event language when code_density or ops_vocabulary is high",
-    "  preferred_terms_sample: " + terms,
+    "  render_policy: render naturally in the owner's detected_language at high quality; keep code identifiers literal; use compact evidence/event language when code_density or ops_vocabulary is high",
   ];
 };
 export const buildOwnerProfileSection = (profile: OwnerProfile, input: OwnerPolicyProjectionInput = {}): string => {
