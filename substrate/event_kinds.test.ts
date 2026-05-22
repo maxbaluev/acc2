@@ -87,8 +87,9 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // Interference-edge kinds (payload values of directive_interference_edge)
   "resource_conflict",
   "none", "unspecified", "yield_template",
-  // Compositor task-kind strings
+  // Compositor / dispatch payload discriminator strings
   "stakeholder_consult",
+  "task_residual_below_threshold",
   // Bridge / extractor outcome enums
   "no_action", "mock_bridge_prompt_unrecognized",
   // irreversible_effect payload.kind values (not event kinds themselves)
