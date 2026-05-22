@@ -28,8 +28,36 @@ import { mcpCall } from "./rpc";
 import { lessonApplyTargetsPolicy } from "../substrate/lesson_apply_policy";
 import { classifyApply } from "./verify";
 import { emitActTupleViaMcp } from "../runtime/act_tuple";
-import { evaluateOwnerGoalPreservationDrift } from "../runtime/owner_goal_preservation_drift";
-import { evaluateDelegationSafety } from "../runtime/delegation_safety";
+import {
+  evaluateOwnerGoalPreservationDrift,
+  type OwnerGoalDriftInput,
+  type OwnerGoalDriftResult,
+} from "../runtime/owner_goal_preservation_drift";
+import {
+  evaluateDelegationSafety,
+  type DelegationSafetyInput,
+  type DelegationSafetyResult,
+} from "../runtime/delegation_safety";
+
+type ApplyEvaluators = {
+  evaluateOwnerGoalPreservationDrift: (input: OwnerGoalDriftInput) => OwnerGoalDriftResult;
+  evaluateDelegationSafety: (input: DelegationSafetyInput) => DelegationSafetyResult;
+};
+
+const defaultApplyEvaluators: ApplyEvaluators = {
+  evaluateOwnerGoalPreservationDrift,
+  evaluateDelegationSafety,
+};
+
+let applyEvaluators: ApplyEvaluators = defaultApplyEvaluators;
+
+export const setApplyEvaluatorsForTest = (overrides: Partial<ApplyEvaluators>): void => {
+  applyEvaluators = { ...defaultApplyEvaluators, ...overrides };
+};
+
+export const resetApplyEvaluatorsForTest = (): void => {
+  applyEvaluators = defaultApplyEvaluators;
+};
 
 type Args = Record<string, string | boolean>;
 
@@ -340,7 +368,7 @@ const evaluateAutonomousCommitOwnerGoalDrift = async (
     const profileRow = profileEnv.ok && Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
     const recentEnv = await mcpCall("runtime.recent_events", { k: 30, kinds: ["owner_input_received", "owner_decision_recorded", "owner_observed_outcome_recorded"] });
     const recentEvents = recentEnv.ok ? ((recentEnv.result as { events?: EventRow[] } | null)?.events ?? []) : [];
-    return evaluateOwnerGoalPreservationDrift({
+    return applyEvaluators.evaluateOwnerGoalPreservationDrift({
       fresh_owner_evidence: recentEvents.map(ownerGoalDriftText).filter((text) => text.length > 0),
       accumulated_state: {
         owner_profile: parsePayload(profileRow?.payload),
@@ -401,7 +429,7 @@ const evaluateAutonomousCommitDelegationSafety = async (
     const riskSignals = profile.risk_signals && typeof profile.risk_signals === "object" ? profile.risk_signals as Record<string, unknown> : {};
     const controlSignals = profile.control_signals && typeof profile.control_signals === "object" ? profile.control_signals as Record<string, unknown> : {};
     const autonomySignals = profile.autonomy_signals && typeof profile.autonomy_signals === "object" ? profile.autonomy_signals as Record<string, unknown> : {};
-    return evaluateDelegationSafety({
+    return applyEvaluators.evaluateDelegationSafety({
       candidate_lane: "autonomous_commit",
       task: {
         risk: Math.max(Number(decision.score < 0.7 ? 0.5 : 0), Number(riskSignals.directive_risk ?? 0)),

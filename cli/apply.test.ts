@@ -16,35 +16,15 @@ let db: Database;
 let dir = "";
 let dbPath = "";
 let directiveSeq = 0;
-let runApply: (argv: string[]) => Promise<number>;
+type ApplyModule = typeof import("./apply");
+
+let runApply: ApplyModule["runApply"];
+let setApplyEvaluatorsForTest: ApplyModule["setApplyEvaluatorsForTest"];
+let resetApplyEvaluatorsForTest: ApplyModule["resetApplyEvaluatorsForTest"] | undefined;
 let ownerGoalDriftResidual = 0;
 let delegationSafetyResidual = 0;
 let delegationSafetyLane = "autonomous_commit";
 let failOwnerProfileRead = false;
-
-mock.module("../runtime/owner_goal_preservation_drift", () => ({
-  evaluateOwnerGoalPreservationDrift: () => ({
-    residual: ownerGoalDriftResidual,
-    verdict: ownerGoalDriftResidual >= 0.6 ? "drift" : "clean",
-    breakdown: { mocked_owner_goal_preservation_drift: ownerGoalDriftResidual },
-    reasons: ["mocked_owner_goal_preservation_drift"],
-  }),
-}));
-
-mock.module("../runtime/delegation_safety", () => ({
-  evaluateDelegationSafety: (input: { task?: { risk?: number; reversible?: boolean }; owner_control_signals?: { owner_control_need?: number } }) => {
-    const fixtureUnsafe = input.task?.risk === 0.8 && input.task?.reversible === false && input.owner_control_signals?.owner_control_need === 0.9;
-    const residual = fixtureUnsafe ? 0.9 : delegationSafetyResidual;
-    const lane = fixtureUnsafe ? "ask_owner" : delegationSafetyLane;
-    return {
-      residual,
-      recommended_lane: lane,
-      verdict: residual >= 0.6 ? "unsafe" : "safe",
-      breakdown: { mocked_delegation_safety: residual },
-      reasons: ["mocked_delegation_safety"],
-    };
-  },
-}));
 
 const ctx = (): McpContext => ({ db, invoker: "claude_root" } as McpContext);
 
@@ -131,7 +111,28 @@ beforeAll(async () => {
   dbPath = join(dir, "apply.db");
   db = openDb(dbPath);
   mock.module("./rpc", () => ({ mcpCall: rpc }));
-  ({ runApply } = await import("./apply"));
+  const apply = await import("./apply");
+  ({ runApply, setApplyEvaluatorsForTest, resetApplyEvaluatorsForTest } = apply);
+  setApplyEvaluatorsForTest({
+    evaluateOwnerGoalPreservationDrift: () => ({
+      residual: ownerGoalDriftResidual,
+      verdict: ownerGoalDriftResidual >= 0.6 ? "drift" : "clean",
+      breakdown: { mocked_owner_goal_preservation_drift: ownerGoalDriftResidual },
+      reasons: ["mocked_owner_goal_preservation_drift"],
+    }),
+    evaluateDelegationSafety: (input) => {
+      const fixtureUnsafe = input.task?.risk === 0.8 && input.task?.reversible === false && input.owner_control_signals?.owner_control_need === 0.9;
+      const residual = fixtureUnsafe ? 0.9 : delegationSafetyResidual;
+      const lane = fixtureUnsafe ? "ask_owner" : delegationSafetyLane;
+      return {
+        residual,
+        recommended_lane: lane,
+        verdict: residual >= 0.6 ? "unsafe" : "safe",
+        breakdown: { mocked_delegation_safety: residual },
+        reasons: ["mocked_delegation_safety"],
+      };
+    },
+  });
 });
 
 beforeEach(() => {
@@ -142,6 +143,7 @@ beforeEach(() => {
 });
 
 afterAll(() => {
+  resetApplyEvaluatorsForTest?.();
   closeDb(dbPath);
   rmSync(dir, { recursive: true, force: true });
 });
