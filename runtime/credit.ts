@@ -1031,30 +1031,34 @@ export const distributeCredit = async (
   if (coalitionMembers.length > 1) {
     const sortedMembers = [...coalitionMembers].sort();
     const coalitionId = "coalition:" + sortedMembers.join("+");
-    const shares = shapleyWeightsByCorroboration(coalitionMembers.length);
-    // Ordered shares track context_refs / cited_artifact_ids order
-    // (first-discoverer gets largest share) — matches the per-artifact
-    // posterior moves emitted by the Shapley loop above.
-    const memberShares = coalitionMembers.map((id, i) => ({
-      artifact_id: id,
-      shapley_share: shares[i] ?? 0,
-    }));
-    emit({
-      kind: "coalition_credit_distributed",
-      substrate_origin: "substrate_auto",
-      context_refs: [params.scored_event_id, ...sortedMembers],
-      payload: {
-        coalition_id: coalitionId,
-        sorted_member_ids: sortedMembers,
-        ordered_member_ids: coalitionMembers,
-        member_count: coalitionMembers.length,
-        residual: params.observed_residual,
-        scored_event_id: params.scored_event_id,
-        action_predicted_event_id: params.action_event_id,
-        member_shares: memberShares,
-        goal_shape: directiveGoalShape,
-      } as JsonValue,
-    });
+    const projectionKey = "coalition_credit:" + params.scored_event_id + ":" + coalitionId;
+    if (!projectionKeyExists(db, "coalition_credit_distributed", projectionKey)) {
+      const shares = shapleyWeightsByCorroboration(coalitionMembers.length);
+      // Ordered shares track context_refs / cited_artifact_ids order
+      // (first-discoverer gets largest share) — matches the per-artifact
+      // posterior moves emitted by the Shapley loop above.
+      const memberShares = coalitionMembers.map((id, i) => ({
+        artifact_id: id,
+        shapley_share: shares[i] ?? 0,
+      }));
+      emit({
+        kind: "coalition_credit_distributed",
+        substrate_origin: "substrate_auto",
+        context_refs: [params.scored_event_id, ...sortedMembers],
+        payload: {
+          coalition_id: coalitionId,
+          sorted_member_ids: sortedMembers,
+          ordered_member_ids: coalitionMembers,
+          member_count: coalitionMembers.length,
+          residual: params.observed_residual,
+          scored_event_id: params.scored_event_id,
+          action_predicted_event_id: params.action_event_id,
+          member_shares: memberShares,
+          goal_shape: directiveGoalShape,
+          projection_key: projectionKey,
+        } as JsonValue,
+      });
+    }
   }
 
   // 5. T4.2 meta-credit (roadmap.md §T4.2): credit the COMPOSER policy
@@ -1603,6 +1607,136 @@ export const projectActionScoredToCredit = (
           action_predicted_event_id: projectionAnchorId,
           projected_from: "action_scored_universal_projector",
           projection_key: key,
+        } as JsonValue,
+      });
+    }
+
+    // T4.4 universal trigger: distributeCredit is not on every action_scored
+    // path, so emit-boundary projection must also make joint citations
+    // first-class. Idempotent with distributeCredit via projection_key.
+    const coalitionMembers = Array.isArray(predictedPayload.cited_artifact_ids)
+      ? predictedPayload.cited_artifact_ids
+          .filter((id): id is string => typeof id === "string" && id.length > 0)
+          .filter((id) => id !== scoredEvent.action_artifact_id && id !== scoredEvent.verifier_artifact_id)
+      : [];
+    const universalGoalShape = resolveGoalShape(db, scoredEvent.directive_id);
+    if (coalitionMembers.length > 1) {
+      const sortedMembers = [...coalitionMembers].sort();
+      const coalitionId = "coalition:" + sortedMembers.join("+");
+      const coalitionProjectionKey = "coalition_credit:" + scoredEvent.id + ":" + coalitionId;
+      if (!projectionKeyExists(db, "coalition_credit_distributed", coalitionProjectionKey)) {
+        const shares = shapleyWeightsByCorroboration(coalitionMembers.length);
+        emitEvent(db, {
+          kind: "coalition_credit_distributed",
+          substrate_origin: "substrate_auto",
+          directive_id: scoredEvent.directive_id,
+          task_id: scoredEvent.task_id,
+          context_refs: [scoredEvent.id, ...sortedMembers],
+          payload: {
+            coalition_id: coalitionId,
+            sorted_member_ids: sortedMembers,
+            ordered_member_ids: coalitionMembers,
+            member_count: coalitionMembers.length,
+            residual,
+            scored_event_id: scoredEvent.id,
+            action_predicted_event_id: projectionAnchorId,
+            member_shares: coalitionMembers.map((id, i) => ({ artifact_id: id, shapley_share: shares[i] ?? 0 })),
+            goal_shape: universalGoalShape,
+            projection_key: coalitionProjectionKey,
+            projected_from: "action_scored_universal_projector",
+          } as JsonValue,
+        });
+      }
+    }
+
+    // T4.2/T4.1-class meta-credit universal trigger: score the composer
+    // policy bundle that selected the prompt section whenever its task's
+    // action gets scored, not only when a caller remembered distributeCredit.
+    const selections = db
+      .query<{ payload: string }, [string, string]>(
+        `SELECT payload FROM events
+         WHERE kind = 'prompt_policy_section_selected'
+           AND task_id = ?
+           AND ts <= (SELECT ts FROM events WHERE id = ?)
+         ORDER BY ts ASC`,
+      )
+      .all(scoredEvent.task_id, scoredEvent.id);
+    const seenBundles = new Set<string>();
+    for (const sel of selections) {
+      let bundleId: string | null = null;
+      let sectionName: string | null = null;
+      try {
+        const p = JSON.parse(sel.payload) as Record<string, unknown>;
+        if (typeof p.artifact_id === "string" && p.artifact_id.length > 0) bundleId = p.artifact_id;
+        if (typeof p.section_name === "string") sectionName = p.section_name;
+      } catch { /* skip malformed */ }
+      if (!bundleId || seenBundles.has(bundleId)) continue;
+      seenBundles.add(bundleId);
+      const metaProjectionKey = "meta_credit:" + scoredEvent.id + ":" + bundleId;
+      if (projectionKeyExists(db, "meta_credit_projected", metaProjectionKey)) continue;
+      const bundleRow = getArtifact(db, bundleId);
+      let postScore: number | null = null;
+      let postConfidence: number | null = null;
+      if (bundleRow) {
+        const updated = applyResidualOutcome(
+          db,
+          bundleId,
+          residual,
+          nowIso(),
+          (e) => emitEvent(db, {
+            ...e,
+            directive_id: e.directive_id ?? scoredEvent.directive_id,
+            task_id: e.task_id ?? scoredEvent.task_id,
+          }),
+          { weight: 1.0 },
+        );
+        postScore = updated.score;
+        postConfidence = updated.confidence;
+        emitEvent(db, {
+          kind: "act_artifact_score_updated",
+          substrate_origin: "substrate_auto",
+          directive_id: scoredEvent.directive_id,
+          task_id: scoredEvent.task_id,
+          action_artifact_id: bundleId,
+          context_refs: [scoredEvent.id, bundleId],
+          payload: {
+            artifact_id: bundleId,
+            role: "composer_policy",
+            residual,
+            weight: 1.0,
+            score: postScore,
+            confidence: postConfidence,
+            scored_event_id: scoredEvent.id,
+            goal_shape: universalGoalShape,
+            projected_from: "meta_credit",
+            section_name: sectionName,
+            projection_key: metaProjectionKey + ":score_update",
+          } as JsonValue,
+        });
+        maybePromote(db, bundleId, (e) => emitEvent(db, {
+          ...e,
+          directive_id: e.directive_id ?? scoredEvent.directive_id,
+          task_id: e.task_id ?? scoredEvent.task_id,
+        }));
+      }
+      emitEvent(db, {
+        kind: "meta_credit_projected",
+        substrate_origin: "substrate_auto",
+        directive_id: scoredEvent.directive_id,
+        task_id: scoredEvent.task_id,
+        context_refs: [scoredEvent.id, bundleId],
+        payload: {
+          bundle_artifact_id: bundleId,
+          section_name: sectionName,
+          residual,
+          scored_event_id: scoredEvent.id,
+          action_predicted_event_id: projectionAnchorId,
+          goal_shape: universalGoalShape,
+          bundle_registered: bundleRow !== null,
+          post_score: postScore,
+          post_confidence: postConfidence,
+          projection_key: metaProjectionKey,
+          projected_from: "action_scored_universal_projector",
         } as JsonValue,
       });
     }

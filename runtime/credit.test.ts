@@ -9,6 +9,7 @@ import {
   distributeCredit,
   distributeOwnerObservedOutcomeCredit,
   shapleyWeightsByCorroboration,
+  projectActionScoredToCredit,
   __extractBodyCitationsForTest,
   __collectCitationsForTest,
   __residualToBetaDeltasForTest,
@@ -1832,6 +1833,82 @@ describe("T4.4 coalition credit — multi-artifact joint citation posterior", ()
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'coalition_credit_distributed'")
       .get() as { c: number };
     expect(rows.c).toBe(0);
+  });
+
+  test("action_scored write-boundary emits Tier-4 meta and coalition rows idempotently", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action");
+    insertSampleArtifact(db, "art_verifier", "// verifier");
+    insertSampleArtifact(db, "art_policy_bundle_gamma", "// policy bundle gamma");
+    insertSampleArtifact(db, "art_co_a", "// co a");
+    insertSampleArtifact(db, "art_co_b", "// co b");
+
+    emitEvent(db, {
+      kind: "prompt_policy_section_selected",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_universal_t4",
+      task_id: "t_universal_t4",
+      payload: {
+        section_name: "workflow",
+        source: "policy_bundle",
+        artifact_id: "art_policy_bundle_gamma",
+      },
+    });
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: "d_universal_t4",
+      task_id: "t_universal_t4",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      predicted_residual: 0.1,
+      payload: { cited_artifact_ids: ["art_co_a", "art_co_b"] },
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_universal_t4",
+      task_id: "t_universal_t4",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0,
+      payload: { action_predicted_event_id: ap.id, residual: 0 },
+    });
+
+    const scoredRow = db
+      .query<{ payload: string; context_refs: string; residual: number | null; action_artifact_id: string | null; verifier_artifact_id: string | null }, [string]>(
+        "SELECT payload, context_refs, residual, action_artifact_id, verifier_artifact_id FROM events WHERE id = ?",
+      )
+      .get(scored.id)!;
+    projectActionScoredToCredit(db, {
+      id: scored.id,
+      payload: scoredRow.payload,
+      context_refs: scoredRow.context_refs,
+      directive_id: "d_universal_t4",
+      task_id: "t_universal_t4",
+      residual: scoredRow.residual,
+      action_artifact_id: scoredRow.action_artifact_id,
+      verifier_artifact_id: scoredRow.verifier_artifact_id,
+    });
+
+    const metaRows = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'meta_credit_projected'")
+      .get() as { c: number };
+    const coalitionRows = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'coalition_credit_distributed'")
+      .get() as { c: number };
+    expect(metaRows.c).toBe(1);
+    expect(coalitionRows.c).toBe(1);
+    expect(getArtifact(db, "art_policy_bundle_gamma")!.posteriorAlpha).toBeGreaterThan(1);
+
+    const metaPayload = JSON.parse((db
+      .query("SELECT payload FROM events WHERE kind = 'meta_credit_projected' LIMIT 1")
+      .get() as { payload: string }).payload) as Record<string, unknown>;
+    const coalitionPayload = JSON.parse((db
+      .query("SELECT payload FROM events WHERE kind = 'coalition_credit_distributed' LIMIT 1")
+      .get() as { payload: string }).payload) as Record<string, unknown>;
+    expect(metaPayload.projection_key).toBe("meta_credit:" + scored.id + ":art_policy_bundle_gamma");
+    expect(coalitionPayload.projection_key).toBe("coalition_credit:" + scored.id + ":coalition:art_co_a+art_co_b");
   });
 });
 
