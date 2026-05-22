@@ -58,6 +58,14 @@ export {
 export { spawnRealOpencode } from "./opencode";
 
 export {
+  McpWarmPool,
+  getWarmPool,
+  mcpPoolEnabled,
+  __resetWarmPoolsForTest,
+} from "./mcp_pool";
+export type { WarmSession, LeaseResult, ReachabilityProbe } from "./mcp_pool";
+
+export {
   BRAIN_READONLY_PERMISSION,
   V2_OPENCODE_MCP_SERVER_NAME,
   V2_MCP_TOOL_SURFACE,

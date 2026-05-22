@@ -156,6 +156,38 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     expect(failed.c).toBeGreaterThanOrEqual(1);
   }, 30_000);
 
+  test("ACC2_MCP_POOL=1 with an injected spawnFn STILL takes the cold path (safety coupling — no warm lease)", async () => {
+    // Safety invariant: the warm pool is only consulted when spawnFn is
+    // undefined (real production spawn). Every existing test injects spawnFn,
+    // so flipping the flag ON in a test must NOT divert to the warm-lease
+    // path — otherwise unit tests would exercise unverified pool behavior and
+    // the flag-off-equivalence proof would be unsound. Assert the bridge
+    // emits NO warm_pool_lease bridge_mcp_connected event even with the flag
+    // ON, because spawnFn is injected.
+    const db = openDb(":memory:");
+    const originalPool = process.env.ACC2_MCP_POOL;
+    process.env.ACC2_MCP_POOL = "1";
+    try {
+      const fakeSpawn = (() => {
+        throw new Error("ENOENT: opencode not found");
+      }) as unknown as typeof Bun.spawn;
+      await spawnRealOpencode(
+        { prompt: "pool-flag-coupling probe", taskId: newId(), directiveId: newId() },
+        db,
+        { spawnFn: fakeSpawn, mcpServerUrl: "http://127.0.0.1:1/mcp" },
+      );
+      const warm = db
+        .query(
+          "SELECT COUNT(*) as c FROM events WHERE kind = 'bridge_mcp_connected' AND json_extract(payload, '$.detection_path') = 'warm_pool_lease'",
+        )
+        .get() as { c: number };
+      expect(warm.c).toBe(0);
+    } finally {
+      if (originalPool === undefined) delete process.env.ACC2_MCP_POOL;
+      else process.env.ACC2_MCP_POOL = originalPool;
+    }
+  }, 30_000);
+
   test("real spawn fails fast when V2_MCP_SERVER_URL is missing", async () => {
     const db = openDb(":memory:");
     // The bridge would refuse to invoke opencode without an MCP URL because

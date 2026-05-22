@@ -42,6 +42,7 @@ import {
   isV2McpToolName,
   materializeOpencodeMcpConfig,
 } from "./config";
+import { getWarmPool, mcpPoolEnabled, type WarmSession } from "./mcp_pool";
 
 /** Module-level registry of live opencode subprocesses. The daemon's
  *  stop() handler calls killAllLiveOpencodeProcs() to SIGTERM-then-SIGKILL
@@ -475,6 +476,53 @@ export const spawnRealOpencode = async (
       reason: { kind: "parse_error", raw: "V2_MCP_SERVER_URL not set; opencode would have no MCP tools" },
     };
   }
+  // ── MCP warm-session pool lease (FLAG-GATED behind ACC2_MCP_POOL) ──
+  // Brain design PQ2ZZH50 — the top compounding lever. When ACC2_MCP_POOL is
+  // ON, lease a PRE-VERIFIED warm session to mcpServerUrl. A warm lease has
+  // already proven the endpoint reachable AND already amortized the contended
+  // handshake window, so a warm-leased dispatch SKIPS the cold HEAD probe AND
+  // SKIPS the cold handshake-permit acquire below — that tax is moved off the
+  // dispatch critical path. On a dead/stale lease (or flag OFF) `warmLease`
+  // stays null and the dispatch falls over to the EXACT cold path that
+  // follows, byte-for-byte unchanged. SAFETY INVARIANT: when mcpPoolEnabled()
+  // is false this block does nothing — the pool is never touched and the cold
+  // path runs identically to before the pool existed. Tests inject spawnFn
+  // (no real daemon); the pool is skipped in that mode just like the readiness
+  // probe is, so existing tests prove the flag-off path is unchanged.
+  let warmLease: WarmSession | null = null;
+  if (mcpPoolEnabled() && spawnOpts.spawnFn === undefined) {
+    try {
+      const pool = getWarmPool(mcpServerUrl);
+      const leaseResult = await pool.lease();
+      if (leaseResult.ok) {
+        warmLease = leaseResult.session;
+        emitEvent(db, {
+          kind: "bridge_mcp_connected",
+          substrate_origin: "opencode",
+          directive_id: req.directiveId,
+          task_id: req.taskId,
+          payload: {
+            detection_path: "warm_pool_lease",
+            mcp_server_url: mcpServerUrl,
+            server_name: V2_OPENCODE_MCP_SERVER_NAME,
+            warm_session_id: warmLease.id,
+            note:
+              "ACC2_MCP_POOL ON: leased a pre-verified warm MCP session — "
+              + "cold HEAD probe + handshake-permit acquire amortized off the "
+              + "dispatch critical path. Brain still establishes its own MCP "
+              + "session; this lease proves the endpoint warm and holds the "
+              + "anti-starve handshake-slot equivalent.",
+          } as JsonValue,
+          invoker: "opencode",
+        });
+      }
+      // leaseResult.ok === false → warmLease stays null → cold path below.
+    } catch {
+      // Any pool fault → cold path. The pool can NEVER wedge a dispatch.
+      warmLease = null;
+    }
+  }
+
   // ── MCP readiness probe (2026-05-21 multi-brain foundation fix) ──
   // Fast HEAD check that the daemon's MCP endpoint is reachable BEFORE
   // we burn a subprocess on a guaranteed handshake failure. When the
@@ -484,8 +532,11 @@ export const spawnRealOpencode = async (
   // Tests inject `spawnFn`; in that mode no real daemon is running and
   // the probe would always fail. Default skip = true when spawnFn is
   // mocked, matching the same coupling already used by the auth probe.
-  const skipProbe = spawnOpts.skipMcpReadinessProbe
-    ?? (spawnOpts.spawnFn !== undefined);
+  // A warm pool lease (above) already re-verified reachability at lease
+  // time, so skip the redundant cold HEAD probe when warm-leased.
+  const skipProbe = warmLease !== null
+    || (spawnOpts.skipMcpReadinessProbe
+      ?? (spawnOpts.spawnFn !== undefined));
   const mcpReachable = skipProbe
     ? true
     : await probeMcpReachable(mcpServerUrl, 3_000);
@@ -514,32 +565,52 @@ export const spawnRealOpencode = async (
   // (mcpHandshakeOk flips true below) OR when the subprocess exits.
   // The gate serializes ONLY the contended handshake window — once the
   // brain is past handshake, it runs in parallel with everyone else.
-  const handshakePermitResult = await acquireHandshakePermit(HANDSHAKE_WAIT_BUDGET_MS);
-  const handshakePermitHeld = handshakePermitResult.acquired;
+  //
+  // WARM-LEASE PATH: when warmLease !== null the pool has already
+  // amortized the contended handshake window, so we SKIP the cold
+  // permit acquire entirely (do not consume an anti-starve slot — the
+  // warm session IS the slot). releasePermitOnce releases the warm
+  // session instead of a permit. When warmLease === null this runs
+  // byte-for-byte as the original cold path. The anti-starve semantics
+  // are preserved: cold dispatches still serialize on HANDSHAKE_PERMIT_CAP;
+  // warm dispatches don't contend it because they never entered the
+  // contended window.
   let handshakePermitReleased = false;
-  const releasePermitOnce = (): void => {
-    if (handshakePermitReleased) return;
-    handshakePermitReleased = true;
-    releaseHandshakePermit(handshakePermitHeld);
-  };
-  if (handshakePermitResult.waitedMs > 100) {
-    emitEvent(db, {
-      kind: "bridge_mcp_preflight",
-      substrate_origin: "opencode",
-      directive_id: req.directiveId,
-      task_id: req.taskId,
-      payload: {
-        phase: "handshake_permit_acquired",
-        waited_ms: handshakePermitResult.waitedMs,
-        permit_held: handshakePermitHeld,
-        permit_cap: HANDSHAKE_PERMIT_CAP,
-        wait_budget_ms: HANDSHAKE_WAIT_BUDGET_MS,
-        note: handshakePermitHeld
-          ? "serialized handshake slot acquired"
-          : "wait budget elapsed before slot freed — proceeding fail-open",
-      } as JsonValue,
-      invoker: "opencode",
-    });
+  let releasePermitOnce: () => void;
+  if (warmLease !== null) {
+    const leasedSession = warmLease;
+    releasePermitOnce = (): void => {
+      if (handshakePermitReleased) return;
+      handshakePermitReleased = true;
+      try { getWarmPool(mcpServerUrl).release(leasedSession); } catch { /* swallow */ }
+    };
+  } else {
+    const handshakePermitResult = await acquireHandshakePermit(HANDSHAKE_WAIT_BUDGET_MS);
+    const handshakePermitHeld = handshakePermitResult.acquired;
+    releasePermitOnce = (): void => {
+      if (handshakePermitReleased) return;
+      handshakePermitReleased = true;
+      releaseHandshakePermit(handshakePermitHeld);
+    };
+    if (handshakePermitResult.waitedMs > 100) {
+      emitEvent(db, {
+        kind: "bridge_mcp_preflight",
+        substrate_origin: "opencode",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        payload: {
+          phase: "handshake_permit_acquired",
+          waited_ms: handshakePermitResult.waitedMs,
+          permit_held: handshakePermitHeld,
+          permit_cap: HANDSHAKE_PERMIT_CAP,
+          wait_budget_ms: HANDSHAKE_WAIT_BUDGET_MS,
+          note: handshakePermitHeld
+            ? "serialized handshake slot acquired"
+            : "wait budget elapsed before slot freed — proceeding fail-open",
+        } as JsonValue,
+        invoker: "opencode",
+      });
+    }
   }
   try {
     materializedConfig = materializeOpencodeMcpConfig({
