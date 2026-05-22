@@ -28,25 +28,69 @@ import { mcpCall } from "./rpc";
 import { lessonApplyTargetsPolicy } from "../substrate/lesson_apply_policy";
 import { classifyApply } from "./verify";
 import { emitActTupleViaMcp } from "../runtime/act_tuple";
-import {
-  evaluateOwnerGoalPreservationDrift,
-  type OwnerGoalDriftInput,
-  type OwnerGoalDriftResult,
-} from "../runtime/owner_goal_preservation_drift";
-import {
-  evaluateDelegationSafety,
-  type DelegationSafetyInput,
-  type DelegationSafetyResult,
-} from "../runtime/delegation_safety";
+
+// Clean-break consolidation (RLM-first): the 7 rule-based owner-alignment
+// apply-gate evaluators (goal-drift, delegation-safety, metacognitive-policy,
+// continual-state, outcome-forecast, rendering, theory-of-mind) collapsed
+// into ONE owner_alignment gate. A change auto-applies UNLESS (a) it violates
+// owner hard constraints (things_to_never_do) OR (b) its residual/risk exceeds
+// the owner autonomy threshold. No legacy/backward-compat shims.
+
+// OwnerAlignmentInput / OwnerAlignmentResult — the single owner-alignment
+// signal. Injectable for tests via setApplyEvaluatorsForTest.
+type OwnerAlignmentInput = {
+  // upstream change/precondition residual (1 - decision.score) — already
+  // reflects diff well-formedness, anchor uniqueness, posterior score.
+  change_residual: number;
+  // owner autonomy threshold from owner_profile_view.autonomy_signals.
+  autonomy_threshold: number;
+  // owner hard-constraint match against the directive/target context, or null.
+  hard_constraint_hit: string | null;
+  // risk for the target surfaces (runtime/substrate/cli surfaces score higher).
+  target_surface_risk: number;
+};
+
+type OwnerAlignmentResult = {
+  residual: number;
+  verdict: "aligned" | "misaligned";
+  hard_constraint_hit: string | null;
+  breakdown: Record<string, unknown>;
+  reasons: string[];
+};
+
+// Default owner-alignment evaluator: the unified RLM-first rule. residual is
+// the max of the upstream change residual and the target-surface autonomy
+// risk; verdict is misaligned when a hard constraint is hit OR the residual
+// exceeds the owner autonomy threshold.
+const evaluateOwnerAlignment = (input: OwnerAlignmentInput): OwnerAlignmentResult => {
+  const residual = Math.min(1, Math.max(0, Math.max(input.change_residual, input.target_surface_risk)));
+  const constraintHit = input.hard_constraint_hit;
+  const exceedsThreshold = residual > input.autonomy_threshold;
+  const misaligned = constraintHit !== null || exceedsThreshold;
+  const reasons: string[] = [];
+  if (constraintHit !== null) reasons.push(`owner_hard_constraint:${constraintHit}`);
+  if (exceedsThreshold) reasons.push("residual_exceeds_autonomy_threshold");
+  if (!misaligned) reasons.push("within_autonomy_envelope");
+  return {
+    residual,
+    verdict: misaligned ? "misaligned" : "aligned",
+    hard_constraint_hit: constraintHit,
+    breakdown: {
+      change_residual: input.change_residual,
+      target_surface_risk: input.target_surface_risk,
+      autonomy_threshold: input.autonomy_threshold,
+      hard_constraint_hit: constraintHit !== null ? 1 : 0,
+    },
+    reasons,
+  };
+};
 
 type ApplyEvaluators = {
-  evaluateOwnerGoalPreservationDrift: (input: OwnerGoalDriftInput) => OwnerGoalDriftResult;
-  evaluateDelegationSafety: (input: DelegationSafetyInput) => DelegationSafetyResult;
+  evaluateOwnerAlignment: (input: OwnerAlignmentInput) => OwnerAlignmentResult;
 };
 
 const defaultApplyEvaluators: ApplyEvaluators = {
-  evaluateOwnerGoalPreservationDrift,
-  evaluateDelegationSafety,
+  evaluateOwnerAlignment,
 };
 
 let applyEvaluators: ApplyEvaluators = defaultApplyEvaluators;
@@ -349,502 +393,110 @@ const ownerAutonomyThreshold = async (): Promise<number> => {
   return typeof threshold === "number" && Number.isFinite(threshold) ? Math.min(1, Math.max(0, threshold)) : 0.5;
 };
 
-const ownerGoalDriftText = (row: EventRow): string => {
-  const payload = parsePayload(row.payload);
-  for (const key of ["input", "text", "message", "directive_text", "summary", "reason"] as const) {
-    const value = payload[key];
-    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+// targetSurfaceRisk — RLM-first autonomy-risk for the change's target
+// surfaces. repo:runtime/, repo:substrate/, and repo:cli/ are the
+// high-leverage surfaces the autonomy envelope must guard most tightly.
+const targetSurfaceRisk = (targets: readonly string[]): number => {
+  let risk = 0;
+  for (const resource of targets) {
+    if (/^repo:(runtime|substrate|cli)\//.test(resource)) risk = Math.max(risk, 0.5);
+    else if (resource.startsWith("repo:")) risk = Math.max(risk, 0.2);
   }
-  return JSON.stringify(payload);
+  return risk;
 };
 
-const evaluateAutonomousCommitOwnerGoalDrift = async (
-  payload: Record<string, unknown>,
-  target: string,
+// ownerAlignmentProfileContext — single owner_profile_view read returning the
+// autonomy threshold and any things_to_never_do hard-constraint hit. The
+// hard-constraint match runs against the change's target surfaces AND the
+// directive/proposal context text so an owner rule like "never touch billing"
+// blocks even when the file path does not literally contain the rule string.
+// Fail-open: substrate read failure yields the default 0.5 threshold and no
+// constraint hit (matches the prior evaluators' fail-open contract).
+const ownerAlignmentProfileContext = async (
   targets: readonly string[],
-) => {
-  try {
-    const profileEnv = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
-    const profileRow = profileEnv.ok && Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
-    const recentEnv = await mcpCall("runtime.recent_events", { k: 30, kinds: ["owner_input_received", "owner_decision_recorded", "owner_observed_outcome_recorded"] });
-    const recentEvents = recentEnv.ok ? ((recentEnv.result as { events?: EventRow[] } | null)?.events ?? []) : [];
-    return applyEvaluators.evaluateOwnerGoalPreservationDrift({
-      fresh_owner_evidence: recentEvents.map(ownerGoalDriftText).filter((text) => text.length > 0),
-      accumulated_state: {
-        owner_profile: parsePayload(profileRow?.payload),
-        session_summaries: [JSON.stringify({ target, targets, proposal: payload.proposed_behavior ?? payload.proposed_action ?? payload })],
-      },
-    });
-  } catch {
-    return { residual: 0, verdict: "clean" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
+  contextText: string,
+): Promise<{ ok: boolean; threshold: number; hardConstraintHit: string | null }> => {
+  const env = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
+  if (!env.ok) return { ok: false, threshold: 0.5, hardConstraintHit: null };
+  const row = Array.isArray(env.result) ? (env.result[0] as { payload?: unknown } | undefined) : undefined;
+  const payload = parsePayload(row?.payload);
+  const signals = payload.autonomy_signals && typeof payload.autonomy_signals === "object" ? payload.autonomy_signals as Record<string, unknown> : {};
+  const rawThreshold = signals.autonomy_threshold;
+  const threshold = typeof rawThreshold === "number" && Number.isFinite(rawThreshold) ? Math.min(1, Math.max(0, rawThreshold)) : 0.5;
+
+  const normalizedTargets = targets.map(normalizePolicyTarget).filter(Boolean);
+  const normalizedContext = contextText.toLowerCase();
+  const rules = Array.isArray(payload.things_to_never_do) ? payload.things_to_never_do : [];
+  let hardConstraintHit: string | null = null;
+  for (const raw of rules) {
+    if (typeof raw !== "string") continue;
+    const rule = raw.toLowerCase();
+    let hit = false;
+    for (const target of normalizedTargets) {
+      const basename = target.split("/").pop() ?? target;
+      if (rule.includes(target) || (basename.length > 0 && rule.includes(basename)) || normalizedContext.includes(rule)) { hit = true; break; }
+    }
+    if (!hit && normalizedTargets.length === 0 && normalizedContext.includes(rule)) hit = true;
+    if (hit) { hardConstraintHit = raw; break; }
   }
+  return { ok: true, threshold, hardConstraintHit };
 };
 
-const gateAutonomousCommitByOwnerGoalDrift = async (
+// gateAutonomousCommitByOwnerAlignment — the ONE owner-alignment gate. It
+// reads owner_profile_view, computes a single owner_alignment residual
+// (max of the upstream change/precondition residual and the target-surface
+// autonomy risk), and blocks (route -> OWNER_GATE) when the change plausibly
+// violates things_to_never_do OR the residual exceeds the owner autonomy
+// threshold; otherwise it returns the decision unchanged. Fail-open on
+// substrate read failure (residual 0). This single check replaced the 7 soft
+// rule-based heuristics (goal-drift, delegation-safety, metacognitive-policy,
+// continual-state, outcome-forecast, rendering, theory-of-mind).
+const gateAutonomousCommitByOwnerAlignment = async (
   decision: ApplyRouteDecision,
   payload: Record<string, unknown>,
-  target: string,
   targets: readonly string[],
 ): Promise<ApplyRouteDecision> => {
-  const drift = await evaluateAutonomousCommitOwnerGoalDrift(payload, target, targets);
-  if (drift.residual < 0.6) return decision;
+  const contextText = JSON.stringify({
+    intent: payload.intent,
+    proposal: payload.proposed_behavior ?? payload.proposed_action ?? payload,
+    owner_visible_text: payload.owner_visible_text,
+  });
+  const profile = await ownerAlignmentProfileContext(targets, contextText);
+  if (!profile.ok) {
+    // Fail-open: substrate read failed; residual 0, no constraint hit.
+    const alignment = applyEvaluators.evaluateOwnerAlignment({
+      change_residual: 0,
+      autonomy_threshold: profile.threshold,
+      hard_constraint_hit: null,
+      target_surface_risk: 0,
+    });
+    if (alignment.verdict === "aligned") return decision;
+    // verdict can only be misaligned here if an injected evaluator forces it.
+  }
+
+  const changeResidual = Math.min(1, Math.max(0, 1 - decision.score));
+  const alignment = applyEvaluators.evaluateOwnerAlignment({
+    change_residual: changeResidual,
+    autonomy_threshold: profile.threshold,
+    hard_constraint_hit: profile.hardConstraintHit,
+    target_surface_risk: targetSurfaceRisk(targets),
+  });
+  if (alignment.verdict === "aligned") return decision;
   return {
     route: "OWNER_GATE",
     score: 1,
     confidence: 0.85,
     deterministic: false,
-    reason: "owner_goal_preservation_drift",
+    reason: "owner_alignment_predicate",
     preconditions: {
       ...decision.preconditions,
-      owner_goal_preservation_drift_residual: drift.residual,
-      owner_goal_preservation_drift_verdict: drift.verdict,
-      owner_goal_preservation_drift_breakdown: drift.breakdown,
-      owner_goal_preservation_drift_reasons: drift.reasons,
+      owner_alignment_residual: alignment.residual,
+      owner_alignment_verdict: alignment.verdict,
+      owner_alignment_hard_constraint_hit: alignment.hard_constraint_hit,
+      owner_alignment_autonomy_threshold: profile.threshold,
+      owner_alignment_breakdown: alignment.breakdown,
+      owner_alignment_reasons: alignment.reasons,
       reconciliation_required: true,
-    },
-  };
-};
-
-const delegationLaneToApplyRoute = (lane: string): ApplyRoute => {
-  switch (lane) {
-    case "defer": return "AUTO_DEFER_DEPENDENCY";
-    case "opencode_brain": return "NEEDS_BRAIN_RECYCLE";
-    case "ask_owner":
-    case "claude_inline":
-    default:
-      return "OWNER_GATE";
-  }
-};
-
-const evaluateAutonomousCommitDelegationSafety = async (
-  payload: Record<string, unknown>,
-  targets: readonly string[],
-  decision: ApplyRouteDecision,
-) => {
-  try {
-    const profileEnv = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
-    if (!profileEnv.ok) return { residual: 0, recommended_lane: "autonomous_commit" as const, verdict: "safe" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
-    const profileRow = Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
-    const profile = parsePayload(profileRow?.payload);
-    const riskSignals = profile.risk_signals && typeof profile.risk_signals === "object" ? profile.risk_signals as Record<string, unknown> : {};
-    const controlSignals = profile.control_signals && typeof profile.control_signals === "object" ? profile.control_signals as Record<string, unknown> : {};
-    const autonomySignals = profile.autonomy_signals && typeof profile.autonomy_signals === "object" ? profile.autonomy_signals as Record<string, unknown> : {};
-    return applyEvaluators.evaluateDelegationSafety({
-      candidate_lane: "autonomous_commit",
-      task: {
-        risk: Math.max(Number(decision.score < 0.7 ? 0.5 : 0), Number(riskSignals.directive_risk ?? 0)),
-        novelty: payload.classification === "novel" || payload.route === "opencode_brain" ? 0.8 : 0.2,
-        reversible: true,
-        target_resources: targets,
-        recent_failures: [],
-      },
-      owner_control_signals: { ...autonomySignals, ...controlSignals, owner_control_need: profile.owner_control_need },
-    });
-  } catch {
-    return { residual: 0, recommended_lane: "autonomous_commit" as const, verdict: "safe" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
-  }
-};
-
-const gateAutonomousCommitByDelegationSafety = async (
-  decision: ApplyRouteDecision,
-  payload: Record<string, unknown>,
-  targets: readonly string[],
-): Promise<ApplyRouteDecision> => {
-  const safety = await evaluateAutonomousCommitDelegationSafety(payload, targets, decision);
-  if (safety.residual < 0.6 && safety.recommended_lane === "autonomous_commit") return decision;
-  return {
-    route: delegationLaneToApplyRoute(safety.recommended_lane),
-    score: 1,
-    confidence: 0.85,
-    deterministic: false,
-    reason: "delegation_safety_predicate",
-    preconditions: {
-      ...decision.preconditions,
-      delegation_safety_residual: safety.residual,
-      delegation_safety_recommended_lane: safety.recommended_lane,
-      delegation_safety_verdict: safety.verdict,
-      delegation_safety_breakdown: safety.breakdown,
-      delegation_safety_reasons: safety.reasons,
-    },
-  };
-};
-
-const metacognitiveActionToApplyRoute = (action: string): ApplyRoute => {
-  switch (action) {
-    case "defer": return "AUTO_DEFER_DEPENDENCY";
-    case "learn": return "NEEDS_BRAIN_RECYCLE";
-    case "ask": return "OWNER_GATE";
-    case "compress":
-    default:
-      return "AUTO_APPLY";
-  }
-};
-
-const evaluateAutonomousCommitMetacognitiveOwnerPolicy = async (
-  payload: Record<string, unknown>,
-  targets: readonly string[],
-) => {
-  try {
-    const [{ evaluateMetacognitiveOwnerPolicy }, profileEnv, recentEnv] = await Promise.all([
-      import("../runtime/metacognitive_owner_policy"),
-      mcpCall("substrate.read", { view_name: "owner_profile_view" }),
-      mcpCall("runtime.recent_events", { k: 30, kinds: ["owner_input_received", "owner_decision_recorded", "owner_observed_outcome_recorded"] }),
-    ]);
-    if (!profileEnv.ok) return { residual: 0, recommended_policy_action: "compress" as const, verdict: "aligned" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
-    const profileRow = Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
-    const profile = parsePayload(profileRow?.payload);
-    const renderingSignals = profile.rendering_signals && typeof profile.rendering_signals === "object" ? profile.rendering_signals as Record<string, unknown> : {};
-    const controlSignals = profile.control_signals && typeof profile.control_signals === "object" ? profile.control_signals as Record<string, unknown> : {};
-    const riskSignals = profile.risk_signals && typeof profile.risk_signals === "object" ? profile.risk_signals as Record<string, unknown> : {};
-    const autonomySignals = profile.autonomy_signals && typeof profile.autonomy_signals === "object" ? profile.autonomy_signals as Record<string, unknown> : {};
-    const recentEvents = recentEnv.ok ? ((recentEnv.result as { events?: EventRow[] } | null)?.events ?? []) : [];
-    const recentTexts = recentEvents.map(ownerGoalDriftText).filter((text) => text.length > 0);
-    const recentCorrections = recentTexts.filter((text) => /\b(correction|wrong|reverted|broken|regression|do not|don't)\b/i.test(text));
-    const recentQuestions = recentTexts.filter((text) => /\?|\b(clarify|unclear|ask)\b/i.test(text));
-    const recentDeclines = recentTexts.filter((text) => /\b(no|decline|defer|not now|blocked)\b/i.test(text));
-    const recentSatisfaction = recentTexts.filter((text) => /\b(approved|works|good|passing|accepted)\b/i.test(text));
-    return evaluateMetacognitiveOwnerPolicy({
-      candidate_policy_action: "compress",
-      session_signals: {
-        ...renderingSignals,
-        ...controlSignals,
-        ...riskSignals,
-        owner_control_need: profile.owner_control_need,
-        task_ambiguity: payload.task_ambiguity,
-        active_failures: payload.active_failures,
-      },
-      cross_session_signals: {
-        ...autonomySignals,
-        profile_control_signal: profile.profile_control_signal,
-        policy_uncertainty: profile.policy_uncertainty,
-      },
-      owner_interaction: {
-        recent_corrections: recentCorrections,
-        recent_questions: recentQuestions,
-        recent_declines: recentDeclines,
-        recent_satisfaction: recentSatisfaction,
-        unresolved_decisions: targets,
-      },
-    });
-  } catch {
-    return { residual: 0, recommended_policy_action: "compress" as const, verdict: "aligned" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
-  }
-};
-
-const gateAutonomousCommitByMetacognitiveOwnerPolicy = async (
-  decision: ApplyRouteDecision,
-  payload: Record<string, unknown>,
-  targets: readonly string[],
-): Promise<ApplyRouteDecision> => {
-  const policy = await evaluateAutonomousCommitMetacognitiveOwnerPolicy(payload, targets);
-  if (policy.residual < 0.6 && policy.recommended_policy_action === "compress") return decision;
-  return {
-    route: metacognitiveActionToApplyRoute(policy.recommended_policy_action),
-    score: 1,
-    confidence: 0.85,
-    deterministic: false,
-    reason: "metacognitive_owner_policy_predicate",
-    preconditions: {
-      ...decision.preconditions,
-      metacognitive_owner_policy_residual: policy.residual,
-      metacognitive_owner_policy_recommended_action: policy.recommended_policy_action,
-      metacognitive_owner_policy_verdict: policy.verdict,
-      metacognitive_owner_policy_breakdown: policy.breakdown,
-      metacognitive_owner_policy_reasons: policy.reasons,
-    },
-  };
-};
-
-const evaluateAutonomousCommitContinualOwnerState = async (
-  payload: Record<string, unknown>,
-  targets: readonly string[],
-) => {
-  try {
-    const [{ evaluateContinualOwnerState }, profileEnv, recentEnv] = await Promise.all([
-      import("../runtime/continual_owner_state"),
-      mcpCall("substrate.read", { view_name: "owner_profile_view" }),
-      mcpCall("runtime.recent_events", { k: 30, kinds: ["owner_input_received", "owner_decision_recorded", "owner_observed_outcome_recorded"] }),
-    ]);
-    if (!profileEnv.ok) return { residual: 0, updated_owner_profile: {}, verdict: "stable" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
-    const profileRow = Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
-    const profile = parsePayload(profileRow?.payload);
-    const recentEvents = recentEnv.ok ? ((recentEnv.result as { events?: EventRow[] } | null)?.events ?? []) : [];
-    const recentInteractions = recentEvents.map((row) => ({ kind: row.kind, ts: row.ts, text: ownerGoalDriftText(row) })).filter((row) => row.text.length > 0);
-    const candidateState = payload.owner_profile && typeof payload.owner_profile === "object" ? payload.owner_profile as Record<string, unknown> : undefined;
-    return evaluateContinualOwnerState({
-      prior_owner_profile: profile,
-      interaction_signals: {
-        task_ambiguity: payload.task_ambiguity,
-        target_count: Math.min(1, targets.length / 5),
-        runtime_surface: targets.some((resource) => /^repo:(runtime|substrate|cli)\//.test(resource)) ? 0.25 : 0,
-      },
-      recent_interactions: recentInteractions,
-      candidate_updated_state: candidateState,
-    });
-  } catch {
-    return { residual: 0, updated_owner_profile: {}, verdict: "stable" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
-  }
-};
-
-const gateAutonomousCommitByContinualOwnerState = async (
-  decision: ApplyRouteDecision,
-  payload: Record<string, unknown>,
-  targets: readonly string[],
-): Promise<ApplyRouteDecision> => {
-  const state = await evaluateAutonomousCommitContinualOwnerState(payload, targets);
-  if (state.residual < 0.6) return decision;
-  return {
-    route: "NEEDS_BRAIN_RECYCLE",
-    score: 1,
-    confidence: 0.85,
-    deterministic: false,
-    reason: "continual_owner_state_predicate",
-    preconditions: {
-      ...decision.preconditions,
-      continual_owner_state_residual: state.residual,
-      continual_owner_state_verdict: state.verdict,
-      continual_owner_state_breakdown: state.breakdown,
-      continual_owner_state_reasons: state.reasons,
-      continual_owner_state_updated_owner_profile: state.updated_owner_profile,
-    },
-  };
-};
-
-const ownerOutcomeForecastRoute = (predicted: string): ApplyRoute => {
-  switch (predicted) {
-    case "reject": return "NEEDS_BRAIN_RECYCLE";
-    case "revise": return "OWNER_GATE";
-    case "accept":
-    default:
-      return "OWNER_GATE";
-  }
-};
-
-const evaluateAutonomousCommitOwnerOutcomeForecast = async (
-  decision: ApplyRouteDecision,
-  payload: Record<string, unknown>,
-  targets: readonly string[],
-) => {
-  try {
-    const [{ evaluateOwnerOutcomeForecast }, profileEnv, recentEnv] = await Promise.all([
-      import("../runtime/owner_outcome_forecast"),
-      mcpCall("substrate.read", { view_name: "owner_profile_view" }),
-      mcpCall("runtime.recent_events", { k: 50, kinds: ["owner_input_received", "owner_decision_recorded", "owner_observed_outcome_recorded"] }),
-    ]);
-    if (!profileEnv.ok) return { residual: 0, predicted_owner_verdict: "accept" as const, verdict: "aligned" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
-    const profileRow = Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
-    const profile = parsePayload(profileRow?.payload);
-    const recentEvents = recentEnv.ok ? ((recentEnv.result as { events?: EventRow[] } | null)?.events ?? []) : [];
-    const ownerHistory = recentEvents.map((row) => {
-      const eventPayload = parsePayload(row.payload);
-      return {
-        kind: row.kind,
-        ts: row.ts,
-        text: ownerGoalDriftText(row),
-        signal: typeof eventPayload.signal === "string" ? eventPayload.signal : undefined,
-        verdict: typeof eventPayload.verdict === "string" ? eventPayload.verdict : undefined,
-        residual: eventPayload.observed_residual ?? eventPayload.residual,
-      };
-    }).filter((row) => row.text.length > 0 || row.signal || row.verdict);
-    return evaluateOwnerOutcomeForecast({
-      candidate_predicted_verdict: "accept",
-      proposed_action: {
-        intent: typeof payload.intent === "string" ? payload.intent : undefined,
-        summary: JSON.stringify(payload.proposed_behavior ?? payload.proposed_action ?? payload),
-        owner_visible_text: typeof payload.owner_visible_text === "string" ? payload.owner_visible_text : undefined,
-        route: decision.route,
-        target_resources: [...targets],
-        reversible: true,
-        risk: decision.score < 0.7 ? 0.5 : payload.risk,
-        novelty: payload.classification === "novel" ? 0.8 : payload.novelty,
-      },
-      owner_profile: profile,
-      owner_history: ownerHistory,
-      upstream_residuals: decision.preconditions,
-    });
-  } catch {
-    return { residual: 0, predicted_owner_verdict: "accept" as const, verdict: "aligned" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
-  }
-};
-
-const gateAutonomousCommitByOwnerOutcomeForecast = async (
-  decision: ApplyRouteDecision,
-  payload: Record<string, unknown>,
-  targets: readonly string[],
-): Promise<ApplyRouteDecision> => {
-  const forecast = await evaluateAutonomousCommitOwnerOutcomeForecast(decision, payload, targets);
-  if (forecast.residual < 0.6 && forecast.predicted_owner_verdict === "accept") return decision;
-  return {
-    route: ownerOutcomeForecastRoute(forecast.predicted_owner_verdict),
-    score: 1,
-    confidence: 0.85,
-    deterministic: false,
-    reason: "owner_outcome_forecast_predicate",
-    preconditions: {
-      ...decision.preconditions,
-      owner_outcome_forecast_residual: forecast.residual,
-      owner_outcome_forecast_predicted_verdict: forecast.predicted_owner_verdict,
-      owner_outcome_forecast_verdict: forecast.verdict,
-      owner_outcome_forecast_breakdown: forecast.breakdown,
-      owner_outcome_forecast_reasons: forecast.reasons,
-    },
-  };
-};
-
-const ownerRenderingRoute = (verdict: string): ApplyRoute => {
-  switch (verdict) {
-    case "violates_avoided_term":
-    case "wrong_language":
-    case "exposes_declined_concept":
-      return "NEEDS_BRAIN_RECYCLE";
-    case "clean":
-    default:
-      return "OWNER_GATE";
-  }
-};
-
-const ownerVisibleDraftFromPayload = (payload: Record<string, unknown>): unknown => {
-  if (typeof payload.owner_visible_text === "string") return payload.owner_visible_text;
-  if (typeof payload.rendered_message === "string" || (payload.rendered_message && typeof payload.rendered_message === "object")) return payload.rendered_message;
-  if (typeof payload.message_draft === "string" || (payload.message_draft && typeof payload.message_draft === "object")) return payload.message_draft;
-  return undefined;
-};
-
-const evaluateAutonomousCommitOwnerRendering = async (
-  payload: Record<string, unknown>,
-) => {
-  try {
-    const [{ evaluateOwnerRendering }, policyEnv] = await Promise.all([
-      import("../runtime/owner_rendering"),
-      mcpCall("substrate.read", { view_name: "owner_rendering_policy_view" }),
-    ]);
-    if (!policyEnv.ok) return { residual: 0, verdict: "clean" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
-    const policyRow = Array.isArray(policyEnv.result) ? (policyEnv.result[0] as { profile_payload?: unknown } | undefined) : undefined;
-    const profile = parsePayload(policyRow?.profile_payload);
-    return evaluateOwnerRendering({
-      rendered_message: ownerVisibleDraftFromPayload(payload),
-      owner_profile: profile,
-      candidate_language: typeof payload.detected_language === "string" ? payload.detected_language : undefined,
-    });
-  } catch {
-    return { residual: 0, verdict: "clean" as const, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
-  }
-};
-
-const gateAutonomousCommitByOwnerRendering = async (
-  decision: ApplyRouteDecision,
-  payload: Record<string, unknown>,
-): Promise<ApplyRouteDecision> => {
-  const rendering = await evaluateAutonomousCommitOwnerRendering(payload);
-  if (rendering.residual < 0.6 && rendering.verdict === "clean") return decision;
-  return {
-    route: ownerRenderingRoute(rendering.verdict),
-    score: 1,
-    confidence: 0.85,
-    deterministic: false,
-    reason: "owner_rendering_predicate",
-    preconditions: {
-      ...decision.preconditions,
-      owner_rendering_residual: rendering.residual,
-      owner_rendering_verdict: rendering.verdict,
-      owner_rendering_breakdown: rendering.breakdown,
-      owner_rendering_reasons: rendering.reasons,
-    },
-  };
-};
-
-const orderedTheoryOfMindRoute = (verdict: string): ApplyRoute => {
-  switch (verdict) {
-    case "constraint_miss":
-    case "order_mismatch":
-      return "NEEDS_BRAIN_RECYCLE";
-    case "sparse":
-    case "aligned":
-    default:
-      return "OWNER_GATE";
-  }
-};
-
-const orderedTheoryOfMindText = (value: unknown): string => {
-  if (value == null) return "";
-  if (typeof value === "string") return value;
-  try { return JSON.stringify(value); } catch { return String(value); }
-};
-
-const candidateNestedBeliefFromPayload = (payload: Record<string, unknown>): Record<string, unknown> | undefined => {
-  for (const key of ["ordered_theory_of_mind", "theory_of_mind", "nested_belief_estimate"] as const) {
-    const value = payload[key];
-    if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
-  }
-  return undefined;
-};
-
-const evaluateAutonomousCommitOrderedTheoryOfMind = async (
-  decision: ApplyRouteDecision,
-  payload: Record<string, unknown>,
-  targets: readonly string[],
-) => {
-  try {
-    const [{ evaluateOrderedTheoryOfMind }, profileEnv, beliefEnv, recentEnv] = await Promise.all([
-      import("../runtime/ordered_theory_of_mind"),
-      mcpCall("substrate.read", { view_name: "owner_profile_view" }),
-      mcpCall("substrate.read", { view_name: "owner_state_belief_view" }),
-      mcpCall("runtime.recent_events", { k: 50, kinds: ["owner_input_received", "owner_decision_recorded", "owner_observed_outcome_recorded", "owner_rendering_feedback_recorded"] }),
-    ]);
-    if (!profileEnv.ok || !beliefEnv.ok) return { residual: 0, verdict: "aligned" as const, nested_belief_estimate: { depth: 0, owner_believes: [], owner_believes_system_believes: [], owner_wants_system_to_infer: [], constraints: [], uncertainty: 0 }, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
-    const profileRow = Array.isArray(profileEnv.result) ? (profileEnv.result[0] as { payload?: unknown } | undefined) : undefined;
-    const profile = parsePayload(profileRow?.payload);
-    const belief = beliefEnv.result && typeof beliefEnv.result === "object" && !Array.isArray(beliefEnv.result) ? beliefEnv.result as Record<string, unknown> : {};
-    const recentEvents = recentEnv.ok ? ((recentEnv.result as { events?: EventRow[] } | null)?.events ?? []) : [];
-    const ownerHistory = recentEvents.map((row) => {
-      const eventPayload = parsePayload(row.payload);
-      return {
-        kind: row.kind,
-        ts: row.ts,
-        text: ownerGoalDriftText(row),
-        signal: typeof eventPayload.signal === "string" ? eventPayload.signal : typeof eventPayload.feedback_kind === "string" ? eventPayload.feedback_kind : undefined,
-        payload: eventPayload,
-      };
-    }).filter((row) => row.text.length > 0 || row.signal);
-    return evaluateOrderedTheoryOfMind({
-      owner_profile: profile,
-      owner_state_belief: belief,
-      interaction_history: ownerHistory,
-      proposed_action: {
-        intent: typeof payload.intent === "string" ? payload.intent : undefined,
-        summary: JSON.stringify(payload.proposed_behavior ?? payload.proposed_action ?? payload),
-        owner_visible_text: orderedTheoryOfMindText(ownerVisibleDraftFromPayload(payload)),
-        route: decision.route,
-        target_resources: [...targets],
-      },
-      candidate_nested_belief: candidateNestedBeliefFromPayload(payload),
-      upstream_residuals: decision.preconditions,
-    });
-  } catch {
-    return { residual: 0, verdict: "aligned" as const, nested_belief_estimate: { depth: 0, owner_believes: [], owner_believes_system_believes: [], owner_wants_system_to_infer: [], constraints: [], uncertainty: 0 }, breakdown: { substrate_read_failed_open: 0 }, reasons: ["substrate_read_failed_open"] };
-  }
-};
-
-const gateAutonomousCommitByOrderedTheoryOfMind = async (
-  decision: ApplyRouteDecision,
-  payload: Record<string, unknown>,
-  targets: readonly string[],
-): Promise<ApplyRouteDecision> => {
-  const theory = await evaluateAutonomousCommitOrderedTheoryOfMind(decision, payload, targets);
-  if (theory.residual < 0.6 && theory.verdict !== "constraint_miss" && theory.verdict !== "order_mismatch") return decision;
-  return {
-    route: orderedTheoryOfMindRoute(theory.verdict),
-    score: 1,
-    confidence: 0.85,
-    deterministic: false,
-    reason: "ordered_theory_of_mind_predicate",
-    preconditions: {
-      ...decision.preconditions,
-      ordered_theory_of_mind_residual: theory.residual,
-      ordered_theory_of_mind_verdict: theory.verdict,
-      ordered_theory_of_mind_nested_belief_estimate: theory.nested_belief_estimate,
-      ordered_theory_of_mind_breakdown: theory.breakdown,
-      ordered_theory_of_mind_reasons: theory.reasons,
     },
   };
 };
@@ -859,55 +511,16 @@ const orchestratorPredicateRoute = (recommended: string): ApplyRoute => {
   }
 };
 
+// subPredicateResultsFromDecision — projects the single owner_alignment
+// signal for the orchestrator predicate. The 7 rule-based sub-predicates were
+// collapsed into one owner_alignment boundary (clean break).
 const subPredicateResultsFromDecision = (decision: ApplyRouteDecision): Record<string, { name: string; residual: unknown; verdict?: string; reasons?: string[]; breakdown?: Record<string, unknown> }> => ({
-  owner_goal_preservation_drift: {
-    name: "owner_goal_preservation_drift",
-    residual: decision.preconditions.owner_goal_preservation_drift_residual ?? 0,
-    verdict: typeof decision.preconditions.owner_goal_preservation_drift_verdict === "string" ? decision.preconditions.owner_goal_preservation_drift_verdict : "clean",
-    reasons: Array.isArray(decision.preconditions.owner_goal_preservation_drift_reasons) ? decision.preconditions.owner_goal_preservation_drift_reasons as string[] : [],
-    breakdown: decision.preconditions.owner_goal_preservation_drift_breakdown && typeof decision.preconditions.owner_goal_preservation_drift_breakdown === "object" ? decision.preconditions.owner_goal_preservation_drift_breakdown as Record<string, unknown> : {},
-  },
-  delegation_safety: {
-    name: "delegation_safety",
-    residual: decision.preconditions.delegation_safety_residual ?? 0,
-    verdict: typeof decision.preconditions.delegation_safety_verdict === "string" ? decision.preconditions.delegation_safety_verdict : "safe",
-    reasons: Array.isArray(decision.preconditions.delegation_safety_reasons) ? decision.preconditions.delegation_safety_reasons as string[] : [],
-    breakdown: decision.preconditions.delegation_safety_breakdown && typeof decision.preconditions.delegation_safety_breakdown === "object" ? decision.preconditions.delegation_safety_breakdown as Record<string, unknown> : {},
-  },
-  metacognitive_owner_policy: {
-    name: "metacognitive_owner_policy",
-    residual: decision.preconditions.metacognitive_owner_policy_residual ?? 0,
-    verdict: typeof decision.preconditions.metacognitive_owner_policy_verdict === "string" ? decision.preconditions.metacognitive_owner_policy_verdict : "aligned",
-    reasons: Array.isArray(decision.preconditions.metacognitive_owner_policy_reasons) ? decision.preconditions.metacognitive_owner_policy_reasons as string[] : [],
-    breakdown: decision.preconditions.metacognitive_owner_policy_breakdown && typeof decision.preconditions.metacognitive_owner_policy_breakdown === "object" ? decision.preconditions.metacognitive_owner_policy_breakdown as Record<string, unknown> : {},
-  },
-  continual_owner_state: {
-    name: "continual_owner_state",
-    residual: decision.preconditions.continual_owner_state_residual ?? 0,
-    verdict: typeof decision.preconditions.continual_owner_state_verdict === "string" ? decision.preconditions.continual_owner_state_verdict : "stable",
-    reasons: Array.isArray(decision.preconditions.continual_owner_state_reasons) ? decision.preconditions.continual_owner_state_reasons as string[] : [],
-    breakdown: decision.preconditions.continual_owner_state_breakdown && typeof decision.preconditions.continual_owner_state_breakdown === "object" ? decision.preconditions.continual_owner_state_breakdown as Record<string, unknown> : {},
-  },
-  owner_outcome_forecast: {
-    name: "owner_outcome_forecast",
-    residual: decision.preconditions.owner_outcome_forecast_residual ?? 0,
-    verdict: typeof decision.preconditions.owner_outcome_forecast_verdict === "string" ? decision.preconditions.owner_outcome_forecast_verdict : "aligned",
-    reasons: Array.isArray(decision.preconditions.owner_outcome_forecast_reasons) ? decision.preconditions.owner_outcome_forecast_reasons as string[] : [],
-    breakdown: decision.preconditions.owner_outcome_forecast_breakdown && typeof decision.preconditions.owner_outcome_forecast_breakdown === "object" ? decision.preconditions.owner_outcome_forecast_breakdown as Record<string, unknown> : {},
-  },
-  owner_rendering: {
-    name: "owner_rendering",
-    residual: decision.preconditions.owner_rendering_residual ?? 0,
-    verdict: typeof decision.preconditions.owner_rendering_verdict === "string" ? decision.preconditions.owner_rendering_verdict : "clean",
-    reasons: Array.isArray(decision.preconditions.owner_rendering_reasons) ? decision.preconditions.owner_rendering_reasons as string[] : [],
-    breakdown: decision.preconditions.owner_rendering_breakdown && typeof decision.preconditions.owner_rendering_breakdown === "object" ? decision.preconditions.owner_rendering_breakdown as Record<string, unknown> : {},
-  },
-  ordered_theory_of_mind: {
-    name: "ordered_theory_of_mind",
-    residual: decision.preconditions.ordered_theory_of_mind_residual ?? 0,
-    verdict: typeof decision.preconditions.ordered_theory_of_mind_verdict === "string" ? decision.preconditions.ordered_theory_of_mind_verdict : "aligned",
-    reasons: Array.isArray(decision.preconditions.ordered_theory_of_mind_reasons) ? decision.preconditions.ordered_theory_of_mind_reasons as string[] : [],
-    breakdown: decision.preconditions.ordered_theory_of_mind_breakdown && typeof decision.preconditions.ordered_theory_of_mind_breakdown === "object" ? decision.preconditions.ordered_theory_of_mind_breakdown as Record<string, unknown> : {},
+  owner_alignment: {
+    name: "owner_alignment",
+    residual: decision.preconditions.owner_alignment_residual ?? 0,
+    verdict: typeof decision.preconditions.owner_alignment_verdict === "string" ? decision.preconditions.owner_alignment_verdict : "aligned",
+    reasons: Array.isArray(decision.preconditions.owner_alignment_reasons) ? decision.preconditions.owner_alignment_reasons as string[] : [],
+    breakdown: decision.preconditions.owner_alignment_breakdown && typeof decision.preconditions.owner_alignment_breakdown === "object" ? decision.preconditions.owner_alignment_breakdown as Record<string, unknown> : {},
   },
 });
 
@@ -930,24 +543,8 @@ const evaluateAutonomousCommitOrchestratorPredicate = async (
       },
       sub_predicate_results: subPredicateResultsFromDecision(decision),
       candidate_orchestration: {
-        boundary_order: [
-          "owner_goal_preservation_drift",
-          "delegation_safety",
-          "metacognitive_owner_policy",
-          "continual_owner_state",
-          "owner_outcome_forecast",
-          "owner_rendering",
-          "ordered_theory_of_mind",
-        ],
-        selected_boundaries: [
-          "owner_goal_preservation_drift",
-          "delegation_safety",
-          "metacognitive_owner_policy",
-          "continual_owner_state",
-          "owner_outcome_forecast",
-          "owner_rendering",
-          "ordered_theory_of_mind",
-        ],
+        boundary_order: ["owner_alignment"],
+        selected_boundaries: ["owner_alignment"],
       },
     });
   } catch {
@@ -985,21 +582,12 @@ const gateAutonomousCommit = async (
   target: string,
   targets: readonly string[],
 ): Promise<ApplyRouteDecision> => {
-  const driftDecision = await gateAutonomousCommitByOwnerGoalDrift(decision, payload, target, targets);
-  if (driftDecision.route !== "AUTO_APPLY") return driftDecision;
-  const delegationDecision = await gateAutonomousCommitByDelegationSafety(driftDecision, payload, targets);
-  if (delegationDecision.route !== "AUTO_APPLY") return delegationDecision;
-  const metacognitiveDecision = await gateAutonomousCommitByMetacognitiveOwnerPolicy(delegationDecision, payload, targets);
-  if (metacognitiveDecision.route !== "AUTO_APPLY") return metacognitiveDecision;
-  const continualDecision = await gateAutonomousCommitByContinualOwnerState(metacognitiveDecision, payload, targets);
-  if (continualDecision.route !== "AUTO_APPLY") return continualDecision;
-  const forecastDecision = await gateAutonomousCommitByOwnerOutcomeForecast(continualDecision, payload, targets);
-  if (forecastDecision.route !== "AUTO_APPLY") return forecastDecision;
-  const renderingDecision = await gateAutonomousCommitByOwnerRendering(forecastDecision, payload);
-  if (renderingDecision.route !== "AUTO_APPLY") return renderingDecision;
-  const theoryDecision = await gateAutonomousCommitByOrderedTheoryOfMind(renderingDecision, payload, targets);
-  if (theoryDecision.route !== "AUTO_APPLY") return theoryDecision;
-  return gateAutonomousCommitByOrchestratorPredicate(theoryDecision, payload, targets);
+  // ONE owner-alignment gate (clean break, RLM-first) replaces the prior 7
+  // rule-based heuristics; orchestrator_predicate (orchestration, not
+  // owner-alignment) stays as the final gate.
+  const alignmentDecision = await gateAutonomousCommitByOwnerAlignment(decision, payload, targets);
+  if (alignmentDecision.route !== "AUTO_APPLY") return alignmentDecision;
+  return gateAutonomousCommitByOrchestratorPredicate(alignmentDecision, payload, targets);
 };
 
 const deterministicApplyRoute = async (
