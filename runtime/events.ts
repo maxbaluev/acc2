@@ -640,6 +640,13 @@ const requireResidual = (value: unknown, key: string): number => {
   return value;
 };
 
+const isBridgeExitArtifactPair = (actionArtifactId: string, verifierArtifactId: string): boolean =>
+  actionArtifactId === "opencode_brain_exit_action" && verifierArtifactId === "opencode_bridge_exit_verifier";
+
+const appendUniqueString = (items: string[], item: string): void => {
+  if (!items.includes(item)) items.push(item);
+};
+
 const normalizeActTuple = (input: EmitEventInput): NormalizedActTuple => {
   if (!isObject(input.payload)) throw new Error("invalid_act_tuple_recorded:payload_object_required");
   const payload = input.payload;
@@ -667,6 +674,11 @@ const normalizeActTuple = (input: EmitEventInput): NormalizedActTuple => {
   const sourceEventId = typeof payload.source_event_id === "string" && payload.source_event_id.trim().length > 0
     ? payload.source_event_id.trim()
     : undefined;
+  const citedArtifactIds = optionalStringArray(payload, "cited_artifact_ids");
+  if (!isBridgeExitArtifactPair(actionArtifact, verifierArtifact)) {
+    appendUniqueString(citedArtifactIds, actionArtifact);
+    appendUniqueString(citedArtifactIds, verifierArtifact);
+  }
   return {
     intent: requireString(payload, "intent"),
     reasoning_summary: requireString(payload, "reasoning_summary"),
@@ -680,7 +692,7 @@ const normalizeActTuple = (input: EmitEventInput): NormalizedActTuple => {
     source_act_id: logicalSourceActId,
     source_event_id: sourceEventId,
     cited_knowledge_ids: optionalStringArray(payload, "cited_knowledge_ids"),
-    cited_artifact_ids: optionalStringArray(payload, "cited_artifact_ids"),
+    cited_artifact_ids: citedArtifactIds,
     affected_resources: optionalStringArray(payload, "affected_resources"),
     candidate_event_ids: optionalStringArray(payload, "candidate_event_ids"),
     co_actors: optionalStringArray(payload, "co_actors"),
@@ -1354,17 +1366,21 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // emit. Synchronous so idempotency is race-free.
   if (input.kind === "action_scored") {
     try {
-      const { projectActionScoredToCredit } = require("./credit") as typeof import("./credit");
-      projectActionScoredToCredit(db, {
-        id,
-        payload: JSON.stringify(eventPayload),
-        context_refs: JSON.stringify(input.context_refs ?? []),
-        directive_id: directive_id,
-        task_id: task_id,
-        residual: input.residual ?? null,
-        action_artifact_id: input.action_artifact_id ?? null,
-        verifier_artifact_id: input.verifier_artifact_id ?? null,
-      });
+      const actionArtifactId = typeof input.action_artifact_id === "string" ? input.action_artifact_id : "";
+      const verifierArtifactId = typeof input.verifier_artifact_id === "string" ? input.verifier_artifact_id : "";
+      if (!isBridgeExitArtifactPair(actionArtifactId, verifierArtifactId)) {
+        const { projectActionScoredToCredit } = require("./credit") as typeof import("./credit");
+        projectActionScoredToCredit(db, {
+          id,
+          payload: JSON.stringify(eventPayload),
+          context_refs: JSON.stringify(input.context_refs ?? []),
+          directive_id: directive_id,
+          task_id: task_id,
+          residual: input.residual ?? null,
+          action_artifact_id: input.action_artifact_id ?? null,
+          verifier_artifact_id: input.verifier_artifact_id ?? null,
+        });
+      }
     } catch (err) {
       // Fail-soft: parent action_scored row already landed. The projector
       // emits its own projection_error rows on internal failure; this
