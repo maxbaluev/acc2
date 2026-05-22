@@ -3089,7 +3089,13 @@ if (import.meta.main) {
     process.stderr.write(`acc2 daemon unhandledRejection: ${msg}\n`);
     process.exit(1);
   });
-  const STARTUP_TIMEOUT_MS = Number(process.env.ACC2_DAEMON_STARTUP_TIMEOUT_MS ?? 90_000);
+  // Default raised 90s→180s for distribution robustness: boot waits for every
+  // worker's first tick, and on a large ledger (300k+ events) or a slow/loaded
+  // operator machine the catch-up first-ticks can take >90s (observed 101s
+  // under daemon-swap contention), which false-killed the daemon mid-boot.
+  // 180s gives headroom for a slow-but-completing boot; the real instant-serve
+  // path is the role-split server role (skipWorkers). Env-overridable.
+  const STARTUP_TIMEOUT_MS = Number(process.env.ACC2_DAEMON_STARTUP_TIMEOUT_MS ?? 180_000);
   void (async () => {
     let startupResolved = false;
     const startupTimeout = setTimeout(() => {
