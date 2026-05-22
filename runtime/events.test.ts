@@ -1422,3 +1422,95 @@ describe("emitEvent dispatcher_violation classification gate (Hole 6 — 2026-05
     expect(payload.dispatch_id).toBe("dispatch-test");
   });
 });
+
+describe("emitEvent act_tuple lazy artifact admission (phase-2 four-link credit)", () => {
+  // Autonomous audit: 10/14 verifier_artifact_id values cited in
+  // act_tuple_recorded events were semantic names never admitted as
+  // act_artifact rows, so link 4 (credit) had no posterior to mutate.
+  // The act-tuple projection now lazily admits an unregistered
+  // verifier/action handle as a minimal cold-start row (Beta(1,1),
+  // runtime=null) so credit completes the chain (k_555). Idempotent;
+  // file/test-style refs (containing ':' or '#') are inline fixtures and
+  // are NOT admitted.
+
+  const emitTuple = (db: Database, overrides: Partial<{ action: string; verifier: string }> = {}) =>
+    emitEvent(db, {
+      kind: "act_tuple_recorded",
+      substrate_origin: "claude_root",
+      directive_id: newId(),
+      task_id: newId(),
+      action_artifact_id: overrides.action ?? "lazy_action_handle_aaa",
+      verifier_artifact_id: overrides.verifier ?? "lane_match_verifier",
+      predicted_residual: 0.2,
+      residual: 0.1,
+      payload: {
+        intent: "record an act citing an unregistered verifier handle",
+        reasoning_summary: "named verifier handle was never admitted to the registry",
+        effect_summary: "credit must accrue to a real act_artifact row",
+        verifier_kind: "deterministic_code",
+      },
+    });
+
+  const verifierRow = (db: Database, id: string) =>
+    db
+      .query<{
+        id: string;
+        kind: string;
+        status: string;
+        runtime: string | null;
+        posterior_alpha: number;
+        posterior_beta: number;
+        score: number;
+        confidence: number;
+      }, [string]>(
+        "SELECT id, kind, status, runtime, posterior_alpha, posterior_beta, score, confidence FROM act_artifact WHERE id = ? LIMIT 1",
+      )
+      .get(id);
+
+  test("unregistered verifier_artifact_id is admitted exactly once with a cold-start posterior", () => {
+    const db = openDb(":memory:");
+    expect(verifierRow(db, "lane_match_verifier")).toBeNull();
+    emitTuple(db);
+    const row = verifierRow(db, "lane_match_verifier");
+    expect(row).not.toBeNull();
+    expect(row!.kind).toBe("verifier");
+    expect(row!.status).toBe("admitted");
+    // runtime=null: it is a retrievable registry handle, not a runnable executor.
+    expect(row!.runtime).toBeNull();
+    // The row is admitted at the cold-start Beta(1,1) prior, then the same
+    // emit's credit pipeline immediately accrues this act's outcome onto
+    // the fresh row — proving link 4 (credit) now has a posterior to
+    // mutate (the whole point of the fix). A low observed residual (0.1)
+    // is a success, so alpha moves above the 1.0 cold start while beta
+    // stays at the prior.
+    expect(row!.posterior_alpha).toBeGreaterThan(1.0);
+    expect(row!.posterior_beta).toBe(1.0);
+    closeDb(db);
+  });
+
+  test("re-emitting the same act tuple does not duplicate the row or reset its posterior", () => {
+    const db = openDb(":memory:");
+    emitTuple(db);
+    // Mutate the posterior to prove a second admission would NOT clobber it.
+    db.run("UPDATE act_artifact SET posterior_alpha = 5.0 WHERE id = ?", ["lane_match_verifier"]);
+    emitTuple(db);
+    const count = db
+      .query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM act_artifact WHERE id = ?")
+      .get("lane_match_verifier")!.n;
+    expect(count).toBe(1);
+    const row = verifierRow(db, "lane_match_verifier")!;
+    // Not reset to the cold-start 1.0; the second emit accrued credit on
+    // the EXISTING row (5.0 + outcome weight), proving the four-link chain
+    // mutates a real posterior rather than re-admitting.
+    expect(row.posterior_alpha).toBeGreaterThanOrEqual(5.0);
+    closeDb(db);
+  });
+
+  test("file/test-style refs (containing ':' or '#') are NOT admitted", () => {
+    const db = openDb(":memory:");
+    emitTuple(db, { action: "repo:test-fixture", verifier: "runtime/events.ts#L1" });
+    expect(verifierRow(db, "repo:test-fixture")).toBeNull();
+    expect(verifierRow(db, "runtime/events.ts#L1")).toBeNull();
+    closeDb(db);
+  });
+});

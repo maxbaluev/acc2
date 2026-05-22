@@ -431,6 +431,11 @@ const emitActionScoredWithLift = (
  *  follow-up verifier_rollup_evaluator worker will route variants to the
  *  parent until promotion criteria are met (≥3 obs, ≥2 directives, OR
  *  residual diverges by ≥ 0.20). */
+/** File/test-style refs (containing ':' or '#', e.g. "repo:test-fixture",
+ *  "runtime/events.ts#L1") are inline fixtures, NOT registry handles —
+ *  they must never be auto-admitted as creditable act_artifact rows. */
+const looksLikeFixtureRef = (id: string): boolean => id.includes(":") || id.includes("#");
+
 const VERIFIER_AUTO_ADMIT_SANDBOX = JSON.stringify({
   runtime: "bun",
   substrate_access: "rw",
@@ -455,6 +460,9 @@ const maybeAutoAdmitVerifierKind = (
     ? payload.verifier_kind.trim()
     : null;
   if (!verifierKind) return;
+  // File/test-style refs are inline fixtures, never registry handles —
+  // do not admit them as creditable rows (phase-2 four-link skip rule).
+  if (looksLikeFixtureRef(verifierKind)) return;
   // Auto-admit hooks on the INSERT pass — the action_artifact_id column
   // is populated (either originally or post-lift). Skip pre-lift passes
   // where the column is still null; they will recurse with the lifted
@@ -492,9 +500,12 @@ const maybeAutoAdmitVerifierKind = (
   const verifierArtifactId = typeof input.verifier_artifact_id === "string" && input.verifier_artifact_id.trim().length > 0
     ? input.verifier_artifact_id.trim()
     : null;
-  const handleNeedsAdmit = verifierArtifactId !== null && verifierArtifactId !== verifierKind && !db
-    .query<{ id: string }, [string]>("SELECT id FROM act_artifact WHERE id = ? LIMIT 1")
-    .get(verifierArtifactId);
+  const handleNeedsAdmit = verifierArtifactId !== null
+    && verifierArtifactId !== verifierKind
+    && !looksLikeFixtureRef(verifierArtifactId)
+    && !db
+      .query<{ id: string }, [string]>("SELECT id FROM act_artifact WHERE id = ? LIMIT 1")
+      .get(verifierArtifactId);
 
   const insertVerifier = (
     id: string,
@@ -668,6 +679,106 @@ const appendUniqueString = (items: string[], item: string): void => {
   if (!items.includes(item)) items.push(item);
 };
 
+/** Lazy registry admission for act-tuple artifact handles (phase-2,
+ *  four-link credit completion).
+ *
+ *  Autonomous audit finding: of 14 distinct verifier_artifact_id values
+ *  cited in act_tuple_recorded events, 10 were SEMANTIC NAMES never
+ *  admitted as act_artifact rows (lane_match_verifier,
+ *  owner_observed_completeness, future_failure_prevention_rate, …).
+ *  Because the named handle has no row, the credit projector
+ *  (runtime/credit.ts) takes the synthetic-actuator branch and SKIPS the
+ *  posterior update — link 4 (credit) has nothing to mutate, so the
+ *  substrate never learns which verifiers are reliable (k_555 four-link:
+ *  create → retrieve → use → credit).
+ *
+ *  Fix: when an act tuple references an action_artifact_id /
+ *  verifier_artifact_id that is NOT yet an act_artifact row, lazily admit
+ *  a minimal cold-start row (Beta(1,1): score=0.5, confidence=0.5,
+ *  runtime=null so it stays retrievable as a registry handle, not a
+ *  runnable executor) so subsequent outcome credit completes the chain.
+ *
+ *  Idempotent: existence-guarded + `INSERT OR IGNORE`. Existing rows are
+ *  untouched (posteriors preserved). Re-projecting the same act tuple on
+ *  replay/retry is a clean no-op.
+ *
+ *  Skip rule: ids that look like file/test fixtures (contain ':' or '#',
+ *  e.g. "repo:test-fixture", "runtime/events.ts#L1") are inline
+ *  references, NOT registry handles — they must never be admitted as
+ *  creditable rows. The bridge-exit synthetic pair is also skipped (it is
+ *  deliberately not auto-bound or credited). */
+const ACT_TUPLE_LAZY_ADMIT_SANDBOX = JSON.stringify({
+  runtime: "bun",
+  substrate_access: "rw",
+  cpu_ms: 5000,
+  wall_ms: 10000,
+  memory_mb: 64,
+  fs_read: [],
+  fs_write: [],
+  net_allow: [],
+  proc_allow: [],
+});
+
+const lazilyAdmitActTupleArtifacts = (
+  db: Database,
+  args: { actionArtifactId: string; verifierArtifactId: string; sourceEventId: string },
+): void => {
+  // The bridge-exit synthetic pair is intentionally never credited — do
+  // not manufacture creditable rows for it.
+  if (isBridgeExitArtifactPair(args.actionArtifactId, args.verifierArtifactId)) return;
+  const ts = nowIso();
+  const targets: Array<{ id: string; kind: "action" | "verifier" }> = [
+    { id: args.actionArtifactId, kind: "action" },
+    { id: args.verifierArtifactId, kind: "verifier" },
+  ];
+  for (const { id, kind } of targets) {
+    if (!id || id.trim().length === 0) continue;
+    // File/test-style refs are inline fixtures, not registry handles.
+    if (looksLikeFixtureRef(id)) continue;
+    // Idempotent: leave any existing row (and its accumulated posterior)
+    // untouched. INSERT OR IGNORE is a second guard against same-ms races.
+    const existing = db
+      .query<{ id: string }, [string]>("SELECT id FROM act_artifact WHERE id = ? LIMIT 1")
+      .get(id);
+    if (existing) continue;
+    const body = `Lazily-admitted ${kind} handle — first observed in act_tuple_recorded event ${args.sourceEventId}. Created by runtime/events.ts act-tuple lazy-admission gate so credit can accrue (k_555 four-link). Audit: 10/14 verifier handles were unregistered.`;
+    const fixtureInput = JSON.stringify({
+      admission_source: "act_tuple_projection",
+      role: kind,
+      first_observed_act_tuple_event_id: args.sourceEventId,
+    });
+    db.run(
+      `INSERT OR IGNORE INTO act_artifact (
+         id, runtime, body, declared_sandbox, state_root, kind,
+         posterior_alpha, posterior_beta, score, confidence,
+         recent_residual_mean, recent_kill_count, status, name,
+         fixture_input, fixture_expected_residual,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        null, // runtime=null: retrievable registry handle, not a runnable executor
+        body,
+        ACT_TUPLE_LAZY_ADMIT_SANDBOX,
+        `substrate/auto_admit/act_tuple/${kind}/${id}`,
+        kind,
+        1.0,
+        1.0,
+        0.5,
+        0.5,
+        0.0,
+        0,
+        "admitted",
+        id,
+        fixtureInput,
+        0.5,
+        ts,
+        ts,
+      ],
+    );
+  }
+};
+
 const normalizeActTuple = (input: EmitEventInput): NormalizedActTuple => {
   if (!isObject(input.payload)) throw new Error("invalid_act_tuple_recorded:payload_object_required");
   const payload = input.payload;
@@ -733,6 +844,15 @@ const projectActTupleRecorded = (db: Database, source: {
   const sourceActId = source.act.source_act_id ?? source.id;
   const sourceEventId = source.id;
   const sourceRefs = sourceActId === sourceEventId ? [sourceEventId] : [sourceEventId, sourceActId];
+  // Phase-2 four-link credit completion: admit any unregistered
+  // action/verifier handle as a minimal creditable row BEFORE the credit
+  // projector runs on the projected action_scored row, so link 4 has a
+  // posterior to mutate (k_555). Idempotent; file/test refs skipped.
+  lazilyAdmitActTupleArtifacts(db, {
+    actionArtifactId: source.act.action_artifact_id,
+    verifierArtifactId: source.act.verifier_artifact_id,
+    sourceEventId,
+  });
   const base = {
     directive_id: source.directive_id,
     task_id: source.task_id,
