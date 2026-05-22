@@ -1,11 +1,20 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
-import { readDagForDirective, readyTasks, refinementDepth } from "./task_topology";
+import {
+  _resetTaskTopologyCacheForTests,
+  readDagForDirective,
+  readDagForDirectiveReplay,
+  readyTasks,
+  refinementDepth,
+} from "./task_topology";
 import { newId } from "./ids";
 
 afterAll(() => closeDb());
-beforeEach(() => closeDb());
+beforeEach(() => {
+  closeDb();
+  _resetTaskTopologyCacheForTests();
+});
 
 describe("task_topology", () => {
   test("readDagForDirective round-trips nodes + edges", () => {
@@ -93,5 +102,94 @@ describe("task_topology", () => {
     expect(refinementDepth(db, root)).toBe(0);
     expect(refinementDepth(db, r1)).toBe(1);
     expect(refinementDepth(db, r2)).toBe(2);
+  });
+
+  // COMPOUNDING SPEEDUP (2026-05-22): the incremental event-cursor cache MUST
+  // return a DAG identical to the pure full-replay path, both initially and
+  // after new events are appended. A wrong ready-set breaks the scheduler, so
+  // this is the load-bearing correctness proof for the cache.
+  test("incremental readDagForDirective == full replay across appended events", () => {
+    const db = openDb(":memory:");
+    // Build a multi-directive, multi-edge fixture so the cache is exercised
+    // per-directive (one directive's events must not invalidate another's).
+    const dirA = newId();
+    const dirB = newId();
+    const a1 = newId();
+    const a2 = newId();
+    const a3 = newId();
+    const b1 = newId();
+    const b2 = newId();
+
+    // Directive A: a1 → a2 (requires), a1 → a3 (refines).
+    emitEvent(db, { kind: "task_node_opened", directive_id: dirA, task_id: a1, payload: { goal: "a1" } });
+    emitEvent(db, { kind: "task_node_opened", directive_id: dirA, task_id: a2, payload: { goal: "a2" } });
+    emitEvent(db, { kind: "task_node_opened", directive_id: dirA, task_id: a3, payload: { goal: "a3" } });
+    emitEvent(db, { kind: "task_edge_recorded", directive_id: dirA, task_id: a2, payload: { from_task: a1, to_task: a2, kind: "requires" } });
+    emitEvent(db, { kind: "task_edge_recorded", directive_id: dirA, task_id: a3, payload: { from_task: a1, to_task: a3, kind: "refines" } });
+    // Directive B: b1 → b2 (requires).
+    emitEvent(db, { kind: "task_node_opened", directive_id: dirB, task_id: b1, payload: { goal: "b1" } });
+    emitEvent(db, { kind: "task_node_opened", directive_id: dirB, task_id: b2, payload: { goal: "b2" } });
+    emitEvent(db, { kind: "task_edge_recorded", directive_id: dirB, task_id: b2, payload: { from_task: b1, to_task: b2, kind: "requires" } });
+
+    const assertParity = (label: string): void => {
+      for (const d of [dirA, dirB]) {
+        // Compute the pure replay independently, then the (possibly cached)
+        // incremental result. They must be deep-equal.
+        const replay = readDagForDirectiveReplay(db, d);
+        const incremental = readDagForDirective(db, d);
+        expect(incremental).toEqual(replay);
+        // Calling again (now guaranteed cache hit) stays identical.
+        expect(readDagForDirective(db, d)).toEqual(replay);
+      }
+      // Ready-set semantics must match the full-replay-derived expectation too.
+      // (label kept for failure-message clarity.)
+      void label;
+    };
+
+    // 1) Initial parity (first call populates the cache).
+    assertParity("initial");
+    // Warm the cache, then assert ready-set is identical to a from-scratch
+    // recompute against the same ledger state.
+    const ready1 = readyTasks(db).map((n) => n.id).sort();
+    _resetTaskTopologyCacheForTests();
+    const ready1Cold = readyTasks(db).map((n) => n.id).sort();
+    expect(ready1).toEqual(ready1Cold);
+    // a1 ready (no requires), a3 ready (refines isn't a blocker), b1 ready;
+    // a2 blocked by a1, b2 blocked by b1.
+    expect(ready1).toEqual([a1, a3, b1].sort());
+
+    // 2) Append a new event for dirA only — its cache must invalidate while
+    //    dirB's stays valid, and parity must hold.
+    emitEvent(db, { kind: "task_committed", directive_id: dirA, task_id: a1, outcome: "succeeded", payload: {} });
+    assertParity("after dirA commit");
+    const ready2 = readyTasks(db).map((n) => n.id).sort();
+    // a1 now committed → a2 unblocked; a3 still ready; b1 ready.
+    expect(ready2).toEqual([a2, a3, b1].sort());
+    // Cross-check against a fully cold recompute.
+    _resetTaskTopologyCacheForTests();
+    expect(readyTasks(db).map((n) => n.id).sort()).toEqual(ready2);
+
+    // 3) Append to dirB and re-verify both directives.
+    emitEvent(db, { kind: "task_committed", directive_id: dirB, task_id: b1, outcome: "succeeded", payload: {} });
+    assertParity("after dirB commit");
+    const ready3 = readyTasks(db).map((n) => n.id).sort();
+    expect(ready3).toEqual([a2, a3, b2].sort());
+    _resetTaskTopologyCacheForTests();
+    expect(readyTasks(db).map((n) => n.id).sort()).toEqual(ready3);
+  });
+
+  test("cache hit returns the SAME instance until the directive cursor advances", () => {
+    const db = openDb(":memory:");
+    const dir = newId();
+    const t = newId();
+    emitEvent(db, { kind: "task_node_opened", directive_id: dir, task_id: t, payload: { goal: "t" } });
+    const first = readDagForDirective(db, dir);
+    const second = readDagForDirective(db, dir);
+    expect(second).toBe(first); // same reference — proves no recompute on hit
+    // New event for the directive advances the cursor → fresh instance.
+    emitEvent(db, { kind: "task_committed", directive_id: dir, task_id: t, outcome: "succeeded", payload: {} });
+    const third = readDagForDirective(db, dir);
+    expect(third).not.toBe(first);
+    expect(third).toEqual(readDagForDirectiveReplay(db, dir));
   });
 });
