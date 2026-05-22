@@ -1,4 +1,7 @@
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { registerPeer, peerActivity } from "./peer_registry";
@@ -18,11 +21,27 @@ const unwrap = async (result: ReturnType<typeof handleRead>): Promise<ViewResult
 };
 
 describe("peer registry", () => {
-  afterAll(() => closeDb());
-  beforeEach(() => closeDb());
+  // Use a UNIQUE on-disk db path per test rather than the shared `:memory:`
+  // cache slot. Under `bun test --parallel` the db-cache singleton keys
+  // `openDb(":memory:")` by the literal string, so two parallel files share
+  // ONE in-memory Database — and no-arg `closeDb()` nukes EVERY cached
+  // connection, including a sibling's live handle. A unique path + scoped
+  // `closeDb(path)` isolates this test completely (the observed 1/N parallel
+  // flake on this test).
+  let tmpDir = "";
+  let dbPath = "";
+
+  afterEach(() => {
+    if (dbPath) closeDb(dbPath);
+    if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ } }
+    tmpDir = "";
+    dbPath = "";
+  });
 
   test("registers substrate-spawnable opencode and externally launched Claude peers", async () => {
-    const db = openDb(":memory:");
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-peer-registry-"));
+    dbPath = join(tmpDir, "peer.db");
+    const db = openDb(dbPath);
     runViews(db);
 
     registerPeer(db, {

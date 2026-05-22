@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb } from "../substrate/db";
 import { startDaemon, stopDaemon, type DaemonHandle } from "../runtime/daemon";
-import { getFreePortPair } from "./free_port";
+import { startDaemonOnFreePorts } from "./free_port";
 
 type SharedDaemonOpts = {
   tmpPrefix: string;
@@ -48,39 +48,19 @@ export const useSharedDaemon = (opts: SharedDaemonOpts): SharedDaemonFixture => 
       prevAuxPort = process.env.V2_DAEMON_AUX_PORT;
       prevMcpServerUrl = process.env.V2_MCP_SERVER_URL;
     }
-    // Collision-retry: random ports in a shared band collide when parallel
-    // test files (or repeated attempts) pick the same port before release,
-    // producing "Failed to start server. Is port X in use?". Retry with a
-    // fresh random port on bind failure rather than failing the whole file.
-    let lastErr: unknown = null;
-    for (let attempt = 0; attempt < 10; attempt++) {
-      // OS-assigned free ports (collision-free); the retry covers the tiny
-      // close→reuse window. opts.mcpBase/auxBase + portRange are legacy and
-      // ignored — getFreePort never collides with the live daemon or siblings.
-      const pair = getFreePortPair();
-      port = pair.mcp;
-      auxPort = pair.aux;
-      try {
-        handle = await startDaemon({
-          port,
-          auxPort,
-          stateDbPath: join(dir, opts.dbName),
-          socketFile: join(dir, "v2.sock"),
-          tokenFile: join(dir, "v2.sock.token"),
-          externalPushToken: opts.externalPushToken,
-        });
-        lastErr = null;
-        break;
-      } catch (err) {
-        lastErr = err;
-        const msg = String((err as Error)?.message ?? err);
-        // Only retry on a port-binding collision; rethrow anything else.
-        if (!/port|EADDRINUSE|address already in use|Failed to start server/i.test(msg)) throw err;
-        try { if (handle) await stopDaemon(handle); } catch { /* best effort */ }
-        handle = null;
-      }
-    }
-    if (lastErr) throw lastErr;
+    // OS-assigned free ports (collision-free) + EADDRINUSE retry over the
+    // tiny close→reuse window. The retry loop lives once in
+    // tests/free_port.ts:startDaemonOnFreePorts; this fixture delegates to it.
+    // opts.mcpBase/auxBase + portRange are legacy and ignored — getFreePort
+    // never collides with the live daemon or sibling test files.
+    handle = await startDaemonOnFreePorts(startDaemon, {
+      stateDbPath: join(dir, opts.dbName),
+      socketFile: join(dir, "v2.sock"),
+      tokenFile: join(dir, "v2.sock.token"),
+      externalPushToken: opts.externalPushToken,
+    });
+    port = handle.port;
+    auxPort = handle.auxPort;
   });
 
   // Per-test re-bind of env vars protects against parallel-file races where

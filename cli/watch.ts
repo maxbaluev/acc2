@@ -11,11 +11,17 @@
 // reason) projected by substrate_narrative_recent_view; IDs are
 // drilldown-only metadata.
 
-import React from "react";
-import { render } from "ink";
 import { mcpCall } from "./rpc";
-import { App } from "./tui/App";
 import { realSubstrateClient } from "./tui/transport/substrate-client";
+
+// NOTE: `react` / `ink` (and its transitive `yoga-layout`) are NOT imported at
+// module top-level. yoga-layout is a WASM-backed ESM module with a circular
+// init that, under `bun test --parallel`'s concurrent module loading, hits
+// "ReferenceError: Cannot access 'Yoga' before initialization" merely on
+// IMPORT. cli/watch.test.ts only checks that `runWatch` exists and the legacy
+// stubs are gone — it must be able to import this module WITHOUT triggering
+// yoga init. The TUI deps are therefore loaded lazily inside runWatch, right
+// before render, so they load only when `acc watch` actually renders.
 
 const HELP = `acc watch — substrate-content-first realtime TUI
 
@@ -70,6 +76,16 @@ export const runWatch = async (argv: string[]): Promise<number> => {
     process.stderr.write(`acc watch: daemon unreachable (${String(err)}). run \`acc daemon start\`.\n`);
     return 1;
   }
+
+  // Lazy-load the TUI stack (react + ink + yoga-layout + the App tree) only
+  // now, at actual render time. Importing them eagerly at module top-level
+  // triggers yoga-layout's circular-init race under parallel test module
+  // loading; deferring the import keeps `import("./watch")` side-effect-free.
+  const [{ default: React }, { render }, { App }] = await Promise.all([
+    import("react"),
+    import("ink"),
+    import("./tui/App"),
+  ]);
 
   const client = realSubstrateClient();
   const instance = render(React.createElement(App, { client }));

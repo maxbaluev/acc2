@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb } from "../substrate/db";
 import { startDaemon, stopDaemon, type DaemonHandle } from "../runtime/daemon";
-import { getFreePortPair } from "./free_port";
+import { startDaemonOnFreePorts } from "./free_port";
 
 const captureStderr = async <T>(fn: () => Promise<T>): Promise<{ result: T; chunks: string[] }> => {
   const chunks: string[] = [];
@@ -48,13 +48,8 @@ describe("credential_health case A — SERPER_API_KEY unset emits stderr warning
     tmpDir = mkdtempSync(join(tmpdir(), "acc2-cred-missing-"));
     prevSerper = process.env.SERPER_API_KEY;
     delete process.env.SERPER_API_KEY;
-    const pair = getFreePortPair();
-    const port = pair.mcp;
-    const auxPort = pair.aux;
     const { result, chunks } = await captureStderr(() =>
-      startDaemon({
-        port,
-        auxPort,
+      startDaemonOnFreePorts(startDaemon, {
         stateDbPath: join(tmpDir, "state.db"),
         socketFile: join(tmpDir, "v2.sock"),
         tokenFile: join(tmpDir, "v2.sock.token"),
@@ -92,13 +87,8 @@ describe("credential_health case B — SERPER_API_KEY present emits no Serper wa
     tmpDir = mkdtempSync(join(tmpdir(), "acc2-cred-present-"));
     prevSerper = process.env.SERPER_API_KEY;
     process.env.SERPER_API_KEY = "test-serper-key-not-real";
-    const pair = getFreePortPair();
-    const port = pair.mcp;
-    const auxPort = pair.aux;
     const { result, chunks } = await captureStderr(() =>
-      startDaemon({
-        port,
-        auxPort,
+      startDaemonOnFreePorts(startDaemon, {
         stateDbPath: join(tmpDir, "state.db"),
         socketFile: join(tmpDir, "v2.sock"),
         tokenFile: join(tmpDir, "v2.sock.token"),
@@ -140,16 +130,12 @@ describe("credential_health case C — /health payload exposes credentials prese
     // OPENAI, missing SERPER. The keys themselves never appear on the wire.
     process.env.OPENAI_API_KEY = "test-openai-key-not-real";
     delete process.env.SERPER_API_KEY;
-    const pair = getFreePortPair();
-    const port = pair.mcp;
-    auxPort = pair.aux;
-    handle = await startDaemon({
-      port,
-      auxPort,
+    handle = await startDaemonOnFreePorts(startDaemon, {
       stateDbPath: join(tmpDir, "state.db"),
       socketFile: join(tmpDir, "v2.sock"),
       tokenFile: join(tmpDir, "v2.sock.token"),
     });
+    auxPort = handle.auxPort;
   });
 
   afterAll(async () => {

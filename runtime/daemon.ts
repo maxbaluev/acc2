@@ -96,6 +96,31 @@ import { setSqlPool, clearSqlPool } from "./sql_pool_singleton";
 export const DEFAULT_DAEMON_PORT = 9387;
 export const DEFAULT_AUX_PORT_OFFSET = 1;
 
+/**
+ * True if a TCP listener is already accepting connections on host:port.
+ *
+ * Used to (a) pre-detect an occupied MCP port BEFORE handing it to fastmcp —
+ * which would otherwise emit an asynchronous, unhandled "Failed to start
+ * server. Is port N in use?" 'error' that escapes the boot try/catch — and
+ * (b) verify the port actually bound after fastmcp's fire-and-forget start().
+ * A successful Bun.connect means "something is listening"; a connection
+ * refused means "free". Best-effort: any non-connect outcome is treated as
+ * not-listening so a transient probe error never wedges boot.
+ */
+const isPortListening = async (host: string, port: number): Promise<boolean> => {
+  try {
+    const socket = await Bun.connect({
+      hostname: host,
+      port,
+      socket: { data() {}, open() {}, close() {}, error() {} },
+    });
+    socket.end();
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 export type DaemonOpts = {
   /** MCP (fastmcp) port. Defaults to V2_DAEMON_PORT env, then 9387. */
   port?: number;
@@ -2346,6 +2371,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     try { if (mcpServer) await mcpServer.stop(); } catch (err) {
       logger.debug({ where: "daemon.stop.mcp_server", err: String(err) }, "mcp server stop failed (best-effort)");
     }
+    // NOTE: fastmcp's stop() does NOT promptly release the underlying http
+    // listening socket in-process, so a same-port rebind in the same process
+    // is unreliable. Production daemon restart is a SEPARATE process (full
+    // exit releases the port); tests that restart in-process pick fresh ports.
     // Drop any lingering SSE subscribers — the daemon owns the bus singleton
     // and a new daemon instance in the same process must start clean.
     resetBus();
@@ -2434,12 +2463,37 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // promise never resolves on a large DB. We don't await it. The port
     // is bound by the time control returns to us.
     logger.info({ phase: "mcp_bind", port }, "daemon.boot.phase_calling_start");
+    // Pre-bind probe: if something is ALREADY listening on `port`, fastmcp's
+    // underlying Node http server would emit an asynchronous, unhandled
+    // 'error' ("Failed to start server. Is port N in use?") that escapes this
+    // try/catch (the start() promise is fire-and-forget, see below) and
+    // surfaces as an "unhandled error between tests" under `bun test
+    // --parallel`. Detect the in-use case synchronously here and throw a
+    // catchable EADDRINUSE so callers (startDaemonOnFreePorts retry loop)
+    // can pick a fresh port instead of crashing.
+    if (await isPortListening(host, port)) {
+      throw new Error(`listen EADDRINUSE: port ${port} in use`);
+    }
+    // FastMCP's start() binds the port SYNCHRONOUSLY as a side effect but the
+    // returned promise never resolves on a large DB, so we fire-and-forget.
     void mcpServer.start({
       transportType: "httpStream",
       httpStream: { host, port },
     }).catch((err) => {
       logger.warn({ phase: "mcp_bind_background", err: (err as Error).message }, "fastmcp start() rejected post-bind (best-effort log)");
     });
+    // Post-bind verify: poll until the port accepts connections. If it never
+    // binds within the timeout, the bind failed (e.g. lost a close→reuse
+    // race after the probe above) — throw a catchable error rather than
+    // leaving a half-started daemon and an unhandled async 'error'.
+    let mcpBound = false;
+    for (let i = 0; i < 40; i++) {
+      if (await isPortListening(host, port)) { mcpBound = true; break; }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    if (!mcpBound) {
+      throw new Error(`listen EADDRINUSE: MCP port ${port} did not bind`);
+    }
     logger.info({ phase: "mcp_bind", port }, "daemon.boot.phase_complete");
   } catch (err) {
     logger.fatal({ phase: "mcp_bind", port, err: (err as Error).message }, "daemon.boot.phase_failed");

@@ -31,7 +31,7 @@ import {
   setLastWalPressureSummary,
 } from "../runtime/wal_pressure_worker";
 import { startDaemon, stopDaemon, type DaemonHandle } from "../runtime/daemon";
-import { getFreePortPair } from "./free_port";
+import { startDaemonOnFreePorts } from "./free_port";
 
 const NOW = new Date("2026-05-18T12:00:00.000Z");
 const DAYS_AGO = (n: number): Date => new Date(NOW.getTime() - n * 24 * 60 * 60 * 1000);
@@ -233,16 +233,12 @@ describe("F-resilience case E — /health payload exposes wal_stats", () => {
 
   beforeAll(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "acc2-wal-health-"));
-    const pair = getFreePortPair();
-    const port = pair.mcp;
-    auxPort = pair.aux;
-    handle = await startDaemon({
-      port,
-      auxPort,
+    handle = await startDaemonOnFreePorts(startDaemon, {
       stateDbPath: join(tmpDir, "state.db"),
       socketFile: join(tmpDir, "v2.sock"),
       tokenFile: join(tmpDir, "v2.sock.token"),
     });
+    auxPort = handle.auxPort;
   });
 
   afterAll(async () => {

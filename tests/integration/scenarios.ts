@@ -19,7 +19,7 @@ import type { Database } from "bun:sqlite";
 import type { DaemonHandle } from "../../runtime/daemon";
 import { startDaemon, stopDaemon } from "../../runtime/daemon";
 import { openDb } from "../../substrate/db";
-import { getFreePortPair } from "../free_port";
+import { getFreePortPair, startDaemonOnFreePorts } from "../free_port";
 import { emitEvent } from "../../runtime/events";
 import { openFixtureDCountTodos } from "../../runtime/fixtures/d_count_todos";
 import { openFixtureBusinessOutreach } from "../../runtime/fixtures/d_business_outreach";
@@ -139,26 +139,14 @@ export const bootDaemon = async (
 ): Promise<DaemonHandle> => {
   // Retry the bind on EADDRINUSE: getFreePortPair is collision-free except for
   // the close→reuse window, so a fresh pair + retry makes daemon boot robust
-  // under heavy parallel load.
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const ports = pickPortPair();
-    try {
-      return await startDaemon({
-        port: ports.mcp,
-        auxPort: ports.aux,
-        stateDbPath: dbPath,
-        socketFile: join(tmpDir, "v2.sock"),
-        tokenFile: join(tmpDir, "v2.sock.token"),
-        externalPushToken: "harness-default-token",
-      });
-    } catch (err) {
-      lastErr = err;
-      const msg = (err as Error)?.message ?? String(err);
-      if (!/in use|EADDRINUSE/i.test(msg)) throw err;
-    }
-  }
-  throw lastErr;
+  // under heavy parallel load. The retry loop now lives once in
+  // tests/free_port.ts:startDaemonOnFreePorts — this is the canonical caller.
+  return startDaemonOnFreePorts(startDaemon, {
+    stateDbPath: dbPath,
+    socketFile: join(tmpDir, "v2.sock"),
+    tokenFile: join(tmpDir, "v2.sock.token"),
+    externalPushToken: "harness-default-token",
+  });
 };
 
 // ── Production-equivalent boot for ad-hoc real-brain runs ──────────

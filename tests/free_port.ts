@@ -33,3 +33,42 @@ export const getFreePortPair = (): { mcp: number; aux: number } => {
   while (aux === mcp) aux = getFreePort();
   return { mcp, aux };
 };
+
+/**
+ * Resilient daemon boot for tests.
+ *
+ * `getFreePortPair()` is collision-free by construction EXCEPT for a tiny
+ * close→reuse window: between releasing the throwaway listener and the daemon
+ * binding, another parallel test file can grab the same OS port, producing the
+ * intermittent "Failed to start server. Is port NNNNN in use?" flake under
+ * `bun test --parallel`. This helper loops up to 4 times, picking a FRESH
+ * port pair each attempt, and only retries on an in-use/EADDRINUSE bind error
+ * — any other failure rethrows immediately. The integration harness
+ * (tests/integration/scenarios.ts:bootDaemon) used to inline this pattern;
+ * it now delegates here so there is one canonical resilient-boot path.
+ *
+ * `startDaemon` is passed in (rather than imported) so this helper stays in
+ * the test-only module without pulling the daemon into every importer.
+ * `baseOpts` carries everything except the ports; `port` / `auxPort` are
+ * overwritten on each attempt.
+ */
+export async function startDaemonOnFreePorts<
+  H,
+  O extends { port?: number; auxPort?: number },
+>(
+  startDaemon: (opts: O) => Promise<H>,
+  baseOpts: Omit<O, "port" | "auxPort">,
+): Promise<H> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const { mcp, aux } = getFreePortPair();
+    try {
+      return await startDaemon({ ...(baseOpts as O), port: mcp, auxPort: aux });
+    } catch (err) {
+      lastErr = err;
+      const msg = (err as Error)?.message ?? String(err);
+      if (!/in use|EADDRINUSE/i.test(msg)) throw err;
+    }
+  }
+  throw lastErr;
+}

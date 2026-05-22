@@ -12,17 +12,22 @@ import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import { startDaemon, stopDaemon, type DaemonHandle } from "./daemon";
 import { isSchedulerDraining } from "./task_scheduler";
-import { getFreePort, getFreePortPair } from "../tests/free_port";
+import { getFreePortPair, startDaemonOnFreePorts } from "../tests/free_port";
 
 // OS-assigned free ports (collision-free by construction). Earlier schemes
 // (random-in-band, then monotonic) still collided across parallel files /
 // unreleased ports. getFreePort asks the OS for a guaranteed-free ephemeral
 // port — no band bookkeeping, no collision with the live daemon (9387/9388)
 // or sibling test files, and the suite is safe to run alongside a live daemon.
-const pickPort = () => getFreePort();
+//
+// Even OS-assigned ports have a tiny close→reuse window under heavy
+// `bun test --parallel` load, so the canonical boot path is
+// startDaemonOnFreePorts (getFreePortPair + 4-attempt EADDRINUSE retry).
 const pickPortPair = () => getFreePortPair();
 
-const mkTmp = (): { dir: string; dbPath: string; socketFile: string; tokenFile: string } => {
+type Tmp = { dir: string; dbPath: string; socketFile: string; tokenFile: string };
+
+const mkTmp = (): Tmp => {
   const dir = mkdtempSync(join(tmpdir(), "acc2-daemon-"));
   return {
     dir,
@@ -31,6 +36,16 @@ const mkTmp = (): { dir: string; dbPath: string; socketFile: string; tokenFile: 
     tokenFile: join(dir, "v2.sock.token"),
   };
 };
+
+// Resilient boot for the common case: fresh OS-assigned ports + retry. The
+// few tests that need a SPECIFIC port pair (same-port rebind on restart,
+// second-instance lock contention) still call startDaemon directly.
+const bootHandle = (tmp: Tmp): Promise<DaemonHandle> =>
+  startDaemonOnFreePorts(startDaemon, {
+    stateDbPath: tmp.dbPath,
+    socketFile: tmp.socketFile,
+    tokenFile: tmp.tokenFile,
+  });
 
 const cleanup = async (handle: DaemonHandle | null, tmp: ReturnType<typeof mkTmp>): Promise<void> => {
   if (handle) {
@@ -48,15 +63,12 @@ describe("startDaemon — boot + health + shutdown", () => {
   afterEach(async () => { await cleanup(handle, tmp); handle = null; });
 
   test("opens both ports, binds the lock, emits daemon_started + daemon_index_rebuilt", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     expect(handle.server).toBeTruthy();
     expect(handle.mcpServer).toBeTruthy();
-    expect(handle.port).toBe(ports.mcp);
-    expect(handle.auxPort).toBe(ports.aux);
+    expect(typeof handle.port).toBe("number");
+    expect(typeof handle.auxPort).toBe("number");
+    expect(handle.port).not.toBe(handle.auxPort);
     expect(existsSync(tmp.socketFile)).toBe(true);
     expect(existsSync(tmp.tokenFile)).toBe(true);
 
@@ -71,11 +83,7 @@ describe("startDaemon — boot + health + shutdown", () => {
   });
 
   test("GET /health (on auxPort) returns { status: ok, mcp_transport: 'fastmcp:httpStream', … }", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     const res = await fetch(`http://127.0.0.1:${handle.auxPort}/health`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
@@ -94,11 +102,7 @@ describe("startDaemon — boot + health + shutdown", () => {
   });
 
   test("stopDaemon emits daemon_shutdown, removes the lockfile, closes both ports", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     const auxPort = handle.auxPort;
     await stopDaemon(handle);
     handle = null;
@@ -121,11 +125,7 @@ describe("startDaemon — boot + health + shutdown", () => {
   });
 
   test("second-instance attempt under the same socket lock fails fast", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
 
     // Try again — same socket file, this process is alive, so we expect a throw.
     const other = pickPortPair();
@@ -141,11 +141,7 @@ describe("startDaemon — boot + health + shutdown", () => {
   });
 
   test("POST /shutdown (on auxPort) with the admin token gracefully stops the daemon", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     const adminToken = handle.adminToken;
     const auxPort = handle.auxPort;
 
@@ -168,11 +164,7 @@ describe("startDaemon — boot + health + shutdown", () => {
   });
 
   test("POST /shutdown without the admin token returns 401", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     const res = await fetch(`http://127.0.0.1:${handle.auxPort}/shutdown`, {
       method: "POST",
       headers: { authorization: "Bearer not-the-real-token" },
@@ -181,11 +173,7 @@ describe("startDaemon — boot + health + shutdown", () => {
   });
 
   test("GET /ready returns 200 once amendment+gauge+integrity workers complete", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     // Workers are marked ready synchronously inside startDaemon (no LLM
     // calls, no real subprocess fixtures), so /ready should flip almost
     // immediately. Poll up to 3s for safety.
@@ -204,11 +192,7 @@ describe("startDaemon — boot + health + shutdown", () => {
   });
 
   test("daemon_ready event is emitted exactly once after readiness flips", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     // Wait for readiness
     for (let i = 0; i < 30; i++) {
       const res = await fetch(`http://127.0.0.1:${handle.auxPort}/ready`);
@@ -222,11 +206,7 @@ describe("startDaemon — boot + health + shutdown", () => {
   });
 
   test("GET /metrics returns Prometheus exposition format", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     const res = await fetch(`http://127.0.0.1:${handle.auxPort}/metrics`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/plain");
@@ -251,13 +231,12 @@ describe("startDaemon — boot + health + shutdown", () => {
     // Instead we verify the handler is REGISTERED on the process — and
     // that the event kind is in the registry so the ledger insert won't
     // be rejected at the boundary when the handler fires for real.
-    const ports = pickPortPair();
     const before = process.listenerCount("unhandledRejection");
     const beforeExc = process.listenerCount("uncaughtException");
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    // bootHandle may retry on EADDRINUSE, but startDaemon registers its
+    // process handlers AFTER the port bind succeeds — a failed (retried)
+    // attempt throws before registration, so the +1 delta still holds.
+    handle = await bootHandle(tmp);
     expect(process.listenerCount("unhandledRejection")).toBe(before + 1);
     expect(process.listenerCount("uncaughtException")).toBe(beforeExc + 1);
     // And the registry knows about daemon_unhandled_rejection so the emit
@@ -280,11 +259,7 @@ describe("startDaemon — boot + health + shutdown", () => {
     closeDb(tmp.dbPath);
 
     // Stage 2: start the daemon and assert dispatch_recovered_orphan landed.
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     const recovered = handle.db
       .query("SELECT * FROM events WHERE kind = 'dispatch_recovered_orphan' AND task_id = ?")
       .all("t_orphan_boot");
@@ -292,11 +267,7 @@ describe("startDaemon — boot + health + shutdown", () => {
   });
 
   test("restart zero-loss recovery accounts for every parallel in-flight brain dispatch", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
 
     const { emitEvent: emit } = await import("./events");
     const directiveId = "YEF00QZM2S4T973MTJ3Q8EJ534";
@@ -319,10 +290,11 @@ describe("startDaemon — boot + health + shutdown", () => {
     await stopDaemon(handle, 0);
     handle = null;
 
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    // Restart against the SAME db/socket (the recovery source) but on fresh
+    // ports. This test proves zero-loss DISPATCH RECOVERY, not same-port
+    // rebind — and fastmcp does not release a port promptly enough in-process
+    // for a same-port rebind to be reliable under parallel load.
+    handle = await bootHandle(tmp);
 
     const recovered = handle.db
       .query("SELECT task_id, payload FROM events WHERE kind = 'dispatch_recovered_orphan' AND directive_id = ?")
@@ -375,11 +347,7 @@ describe("startDaemon — boot + health + shutdown", () => {
     // shape still works because the reactive worker drains the row
     // within milliseconds of the directive_amended emit below.
     try {
-      const ports = pickPortPair();
-      handle = await startDaemon({
-        port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-        socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-      });
+      handle = await bootHandle(tmp);
       const directiveId = "d_daemon_amend_test";
       const taskId = "t_daemon_amend_task";
       const { emitEvent } = await import("./events");
@@ -446,11 +414,7 @@ describe("bounded graceful drain (amendment 8EAKQCJW5D)", () => {
   afterEach(async () => { await cleanup(handle, tmp); handle = null; });
 
   test("default drain budget surfaces in restart_drain_started + daemon_shutdown payloads", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     // No in-flight dispatches → drain completes immediately. The payload
     // shape is what we're proving here; budget honoured = budget echoed.
     await stopDaemon(handle);
@@ -479,11 +443,7 @@ describe("bounded graceful drain (amendment 8EAKQCJW5D)", () => {
   });
 
   test("stopDaemon accepts a per-call drain budget and echoes it", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     // Pick a non-default budget so we can prove it threaded through.
     await stopDaemon(handle, 7_777);
     handle = null;
@@ -501,11 +461,7 @@ describe("bounded graceful drain (amendment 8EAKQCJW5D)", () => {
   });
 
   test("budget == 0 takes the immediate-kill path and still emits the drain pair", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     const t0 = Date.now();
     await stopDaemon(handle, 0);
     const elapsed = Date.now() - t0;
@@ -525,11 +481,7 @@ describe("bounded graceful drain (amendment 8EAKQCJW5D)", () => {
   });
 
   test("drain finishes early when nothing is in flight (no timed_out event)", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     // Generous budget — drain should still return in well under 1s because
     // IN_FLIGHT is empty (the helper short-circuits on snapshot.length === 0).
     const t0 = Date.now();
@@ -550,11 +502,7 @@ describe("bounded graceful drain (amendment 8EAKQCJW5D)", () => {
   });
 
   test("POST /shutdown accepts drain_budget_ms from the request body and echoes it", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     const adminToken = handle.adminToken;
     const auxPort = handle.auxPort;
     const dbPath = tmp.dbPath;
@@ -589,11 +537,7 @@ describe("bounded graceful drain (amendment 8EAKQCJW5D)", () => {
   });
 
   test("POST /shutdown without drain_budget_ms falls back to the default budget", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     const adminToken = handle.adminToken;
     const auxPort = handle.auxPort;
     const dbPath = tmp.dbPath;
@@ -637,11 +581,7 @@ describe("daemon_shutdown carries the full drain accounting (amendment 8EAKQCJW5
   afterEach(async () => { await cleanup(handle, tmp); handle = null; });
 
   test("payload exposes drained_count + interrupted_count + killed_opencode_procs (force-kill accounting fields)", async () => {
-    const ports = pickPortPair();
-    handle = await startDaemon({
-      port: ports.mcp, auxPort: ports.aux, stateDbPath: tmp.dbPath,
-      socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
-    });
+    handle = await bootHandle(tmp);
     await stopDaemon(handle, 12_345);
     handle = null;
 
