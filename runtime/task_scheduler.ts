@@ -385,6 +385,25 @@ const TERMINAL_OR_RECURSION_KINDS: ReadonlySet<string> = new Set([
   "task_edge_recorded",
 ]);
 
+/** Cognitive-work signals: the brain actually RAN and reasoned/researched
+ *  this cycle (vs a silent/empty dispatch). A clean closure with cognitive
+ *  work but no structural emit is a research cycle mid-flight, not a stuck
+ *  loop — it earns a bounded research grace before the no-progress abandon. */
+const COGNITIVE_PROGRESS_KINDS: ReadonlySet<string> = new Set([
+  "brain_reasoning_recorded",
+  "retrieval_binding",
+  "bridge_frame_received",
+  "brain_message_emitted",
+  "claude_reasoning_recorded",
+  "counterfactual_alternative_recorded",
+]);
+
+/** Bounded grace for research/analysis dispatches: a task whose cycles do
+ *  cognitive work but haven't emitted a structural event yet gets up to this
+ *  many total dispatches to converge before the no-progress abandon fires.
+ *  Truly silent dispatches (no cognitive work) get no grace. */
+const RESEARCH_GRACE_CYCLES = 4;
+
 type NoProgressTermination = {
   terminated: boolean;
   reason?: "no_structural_progress_since_last_dispatch" | "deliverable_without_closure_or_refinement";
@@ -471,6 +490,31 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
   const noStructuralProgress = progressRows.length === 0;
   const deliverableWithoutClosureOrRefinement = deliverableRows.length > 0 && terminalOrRecursionRows.length === 0;
   if (!noStructuralProgress && !deliverableWithoutClosureOrRefinement) return { terminated: false };
+
+  // RESEARCH GRACE (anti over-correction): a deep-research/analysis cycle does
+  // its work IN-CYCLE via tools (web fetch, reasoning) and may close cleanly
+  // having reasoned/researched without yet emitting a structural substrate
+  // event — e.g. the Lakeland groundbase run closed after ~28s, abandoned with
+  // no_structural_progress before it could emit a knowledge_candidate. Killing
+  // it on the FIRST clean closure is the same over-correction class as the
+  // reaper-cap (1→4) and bridge-failure cases. So: if the brain actually RAN
+  // and did COGNITIVE work this cycle (reasoning / retrieval / brain frames),
+  // give the task a bounded grace — re-dispatch to let research converge into a
+  // structural emit — until RESEARCH_GRACE_CYCLES consecutive cognitive-only
+  // closures. Truly SILENT dispatches (no cognitive activity at all) get no
+  // grace and abandon immediately; genuine no-progress loops abandon at the cap.
+  if (noStructuralProgress) {
+    const didCognitiveWork = rows.some((r) => COGNITIVE_PROGRESS_KINDS.has(r.kind));
+    if (didCognitiveWork) {
+      const dispatchCount = (db
+        .query("SELECT COUNT(*) AS c FROM events WHERE task_id = ? AND kind = 'brain_dispatched'")
+        .get(task.id) as { c: number } | null)?.c ?? 0;
+      if (dispatchCount < RESEARCH_GRACE_CYCLES) {
+        // Grace: the brain is researching; let it continue another cycle.
+        return { terminated: false };
+      }
+    }
+  }
 
   const reason = noStructuralProgress
     ? "no_structural_progress_since_last_dispatch"
