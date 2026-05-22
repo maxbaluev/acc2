@@ -9,6 +9,24 @@
 //
 // The substrate is the source of truth — we replay events to compute current
 // shape. Phase E will materialize a `task_graph_view` and add concurrency.
+//
+// COMPOUNDING SPEEDUP (2026-05-22, brain compounding-strategy lever #2):
+// readDagForDirective sits on the scheduler hot path — schedulerTick calls
+// readyTasks every ~500ms (and on every activation-bus wake), which previously
+// replayed EVERY event for EVERY open directive to rebuild each DAG from
+// scratch on every call: O(all events per directive) recomputation of an
+// identical result whenever the ledger had not advanced for that directive.
+// We now memoize the per-directive DAG keyed by the directive's max event
+// rowid. The events table is append-only (substrate invariant), so a
+// directive's MAX(rowid) strictly increases when (and only when) a new event
+// lands for that directive, and never changes otherwise — an exact
+// invalidation signal. A cache hit therefore returns a DAG byte-identical to a
+// fresh full replay, and any new event forces a recompute (O(new state) on the
+// next read, O(1) for the unchanged reads in between). This mirrors the
+// established prompt_cache.ts idiom (in-memory cache keyed by an events
+// high-water rowid) rather than introducing a foreign mechanism. The cache is
+// process-local and advisory — a daemon restart simply repopulates it on first
+// read; it is never the source of truth.
 
 import type { Database } from "bun:sqlite";
 import type { TaskEdgeKind } from "../substrate/types";
@@ -79,11 +97,61 @@ const computeStatus = (taskId: string, eventsByTask: Map<string, EventRow[]>): T
   return status;
 };
 
-/** Read all nodes + edges for one directive by replaying its events. */
+export type TaskDag = { nodes: TaskNode[]; edges: TaskEdge[] };
+
+// ── Incremental per-directive DAG cache (event-cursor) ────────────────────
+//
+// Process-local memo: directive_id → { cursor, dag }. `cursor` is the
+// directive's MAX(rowid) at the time the DAG was computed. A read recomputes
+// only when the directive's current MAX(rowid) differs from the cached cursor;
+// otherwise it returns the cached DAG instance. All current callers treat the
+// DAG read-only (filter/find/some — no mutation), so the shared reference is
+// safe and avoids a defensive clone that would defeat the speedup.
+// directive_ids are globally-unique ULIDs (newId()), so
+// the key never collides across independent :memory: DBs in tests; the cursor
+// comparison is the correctness guard regardless.
+type DagCacheEntry = { cursor: number; dag: TaskDag };
+const dagCache = new Map<string, DagCacheEntry>();
+
+/** The directive's append-only event high-water mark. Strictly increasing as
+ *  events are inserted for the directive; unchanged otherwise. 0 when the
+ *  directive has no events yet. Uses the (directive_id, …) index for a bounded
+ *  seek rather than a full-table scan. */
+const directiveCursor = (db: Database, directiveId: string): number => {
+  const row = db
+    .query("SELECT IFNULL(MAX(rowid), 0) AS m FROM events WHERE directive_id = ?")
+    .get(directiveId) as { m: number };
+  return row.m;
+};
+
+/** Read all nodes + edges for one directive.
+ *
+ *  Incremental (event-cursor): returns the memoized DAG when the directive's
+ *  max event rowid is unchanged since the last computation; otherwise replays
+ *  the directive's events once and re-caches. Output is identical to the pure
+ *  full-replay path (`readDagForDirectiveReplay`) — the cache is invalidated
+ *  precisely by any new event for the directive. */
 export const readDagForDirective = (
   db: Database,
   directiveId: string,
-): { nodes: TaskNode[]; edges: TaskEdge[] } => {
+): TaskDag => {
+  const cursor = directiveCursor(db, directiveId);
+  const cached = dagCache.get(directiveId);
+  if (cached && cached.cursor === cursor) {
+    return cached.dag;
+  }
+  const dag = readDagForDirectiveReplay(db, directiveId);
+  dagCache.set(directiveId, { cursor, dag });
+  return dag;
+};
+
+/** Pure full-replay computation of a directive's DAG. The cache wrapper
+ *  (`readDagForDirective`) calls this only when the directive's event cursor
+ *  has advanced. Kept exported so tests can assert incremental == replay. */
+export const readDagForDirectiveReplay = (
+  db: Database,
+  directiveId: string,
+): TaskDag => {
   const rows = db
     .query(
       "SELECT id, task_id, directive_id, parent_task_id, kind, payload FROM events WHERE directive_id = ? ORDER BY ts ASC",
@@ -202,4 +270,13 @@ export const refinementDepth = (db: Database, taskId: string): number => {
     if (depth > 1000) break; // pathological cap
   }
   return depth;
+};
+
+/** Drop the process-local per-directive DAG memo. The cache is self-
+ *  invalidating via the directive event cursor, so this is needed only for
+ *  test isolation (each test opens a fresh :memory: DB whose rowids restart
+ *  from 1, which could otherwise alias a prior test's directive cursor if a
+ *  directive_id were ever reused) and for hot-reload of this module. */
+export const _resetTaskTopologyCacheForTests = (): void => {
+  dagCache.clear();
 };
