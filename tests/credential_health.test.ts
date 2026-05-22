@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb } from "../substrate/db";
 import { startDaemon, stopDaemon, type DaemonHandle } from "../runtime/daemon";
+import { getFreePortPair } from "./free_port";
 
 const captureStderr = async <T>(fn: () => Promise<T>): Promise<{ result: T; chunks: string[] }> => {
   const chunks: string[] = [];
@@ -47,8 +48,9 @@ describe("credential_health case A — SERPER_API_KEY unset emits stderr warning
     tmpDir = mkdtempSync(join(tmpdir(), "acc2-cred-missing-"));
     prevSerper = process.env.SERPER_API_KEY;
     delete process.env.SERPER_API_KEY;
-    const port = 28800 + Math.floor(Math.random() * 200);
-    const auxPort = port + 1;
+    const pair = getFreePortPair();
+    const port = pair.mcp;
+    const auxPort = pair.aux;
     const { result, chunks } = await captureStderr(() =>
       startDaemon({
         port,
