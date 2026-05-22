@@ -271,8 +271,13 @@ describe("supervisor — no-closure-progress loop detector", () => {
   test("archives a completed re-dispatch with zero structural events since the last dispatch", () => {
     const db = openDb(":memory:");
     const dir = "DIRSTUCK0000000000000000000";
+    // Cap is 4 (bridge-failure-resilient): a genuinely stuck directive is
+    // only reaped after >4 productive dispatches with zero structural progress.
     insertClosedDispatch(db, dir, "TSTUCK", "2026-05-22T00:00:00.000Z", "stuck-dispatch-1");
     insertClosedDispatch(db, dir, "TSTUCK", "2026-05-22T00:01:00.000Z", "stuck-dispatch-2");
+    insertClosedDispatch(db, dir, "TSTUCK", "2026-05-22T00:02:00.000Z", "stuck-dispatch-3");
+    insertClosedDispatch(db, dir, "TSTUCK", "2026-05-22T00:03:00.000Z", "stuck-dispatch-4");
+    insertClosedDispatch(db, dir, "TSTUCK", "2026-05-22T00:04:00.000Z", "stuck-dispatch-5");
 
     const flagged = detectNoClosureProgressLoop(db);
     expect(flagged.map((f) => f.directive_id)).toContain(dir);

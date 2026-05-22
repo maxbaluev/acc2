@@ -88,9 +88,18 @@ export const SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE = 50;
  *  The primary fix is scheduler-admission self-reaping: the first attempted
  *  unchanged redispatch terminates the task before spawning another brain.
  *  This supervisor cap remains as an idempotent belt-and-suspenders audit
- *  for legacy daemons or missed scheduler paths, and is intentionally low so
- *  it can never become the garbage collector of record again. */
-export const SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP = 1;
+ *  for legacy daemons or missed scheduler paths. The precise scheduler-side
+ *  terminateNoProgressRedispatch (commit 5b7080d) is the primary fast-path
+ *  for genuine identical-redispatch loops, so this crude count-based cap is
+ *  pure fallback. It was briefly 1, but cap=1 over-reaped: bridge_failed is
+ *  frequent (transient brain-subprocess timeouts, 768+ all-time), and a
+ *  research-heavy or new-feature directive that hit even one bridge_failure
+ *  in its first 2 dispatches was archived before it could retry + emit. Set
+ *  to 4 so a directive survives a transient bridge failure plus 1-2 research
+ *  cycles before this fallback fires; the scheduler-side check still kills
+ *  genuine no-progress loops immediately. (A follow-up brain fix excludes
+ *  bridge_failed dispatches from the productive count entirely.) */
+export const SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP = 4;
 
 /** Stuck-task detector (2026-05-17): when the brain emits the SAME
  *  action_predicted (keyed by `(task_id, action_artifact_id)`) N+ times
