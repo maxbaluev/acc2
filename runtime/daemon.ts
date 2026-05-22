@@ -357,7 +357,24 @@ const supervisedTick = (
   };
 };
 
-const RESTART_DRAIN_TIMEOUT_MS = 30_000;
+// Graceful-restart drain budget. Was 30s — far shorter than a brain dispatch
+// (median ~6min), so `acc daemon restart` orphaned in-flight brains across
+// ALL terminals after 30s, killing other terminals' work mid-run. Raised to
+// 180s (env-overridable) so a graceful restart waits out the bulk of in-flight
+// dispatches before force-killing; the rare longer research dispatch resumes
+// via boot-time orphan-recovery + the no-progress research grace rather than
+// being lost. Operators who need an immediate stop pass drainBudgetMs=0.
+// NOTE: this is the GRACEFUL path only — never `pkill -9` the daemon (SIGKILL
+// bypasses this drain entirely and orphans every in-flight brain). Use
+// `acc daemon restart`/`stop`, and prefer in_process hot-reload (no restart).
+const RESTART_DRAIN_TIMEOUT_MS = (() => {
+  const raw = process.env.ACC2_RESTART_DRAIN_TIMEOUT_MS;
+  if (typeof raw === "string" && raw.length > 0) {
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return 180_000;
+})();
 
 /** R2 instant-startup grace (2026-05-21). Boot-time catch-up passes
  *  (extractor sweep over the whole event table, embedder backlog drain)
