@@ -1285,13 +1285,22 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // Deferring lets the daemon bind ports and serve health FIRST, then
     // do the heavy backfill pass. /ready still flips only after the pass
     // (real liveness); /health + MCP serve from bind time.
+    // INSTANT-STARTUP (perf fix): mark extractors ready IMMEDIATELY rather
+    // than gating worker-readiness on the heavy boot pass. runExtractorsOnce
+    // scans the whole event table through ~10 extractors and grinds the event
+    // loop for tens-to-hundreds of seconds on a production DB; gating
+    // markWorkerReady on it meant the "all workers completed first tick" gate
+    // (and therefore the MCP port bind + /health) waited the FULL pass —
+    // measured ~322s boot, leaving /health=000 for 5 minutes. The embedder
+    // already marks ready immediately + defers its boot tick (same rationale);
+    // extractors now matches. The heavy pass still runs (deferred, background);
+    // it just no longer blocks the daemon from binding + serving.
+    if (!extractorsMarked) { markWorkerReady("extractors"); extractorsMarked = true; }
     setTimeout(() => {
       void (async () => {
         try {
           await runExtractorsOnce();
         } finally {
-          markWorkerReady("extractors");
-          extractorsMarked = true;
           recordWorkerTick("extractors");
         }
       })();
