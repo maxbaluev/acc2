@@ -1978,7 +1978,7 @@ describe("T4.4 coalition credit — multi-artifact joint citation posterior", ()
     expect(coalitionPayload.projection_key).toBe("coalition_credit:" + scored.id + ":coalition:art_co_a+art_co_b");
   });
 
-  test("repeated joint-citation sets emit one coalition row per scored action", async () => {
+  test("repeated supplemental joint-citation sets emit one coalition row per scored action", async () => {
     const db = openDb(":memory:");
     insertSampleArtifact(db, "art_action", "// action");
     insertSampleArtifact(db, "art_verifier", "// verifier");
@@ -2018,6 +2018,51 @@ describe("T4.4 coalition credit — multi-artifact joint citation posterior", ()
     expect(coalitionIds.map((r) => r.coalition_id)).toEqual([
       "coalition:art_co_a+art_co_b",
       "coalition:art_co_a+art_co_b",
+    ]);
+  });
+
+  test("repeated act-tuple action/verifier joint-citation sets emit coalition rows via action_scored", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "dispatch_decider_v1", "// dispatch decider");
+    insertSampleArtifact(db, "lane_outcome_residual", "// lane verifier");
+
+    for (const suffix of ["one", "two"]) {
+      const ap = emitEvent(db, {
+        kind: "action_predicted",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_coal_live_shape",
+        task_id: "t_coal_live_shape_" + suffix,
+        action_artifact_id: "dispatch_decider_v1",
+        verifier_artifact_id: "lane_outcome_residual",
+        predicted_residual: 0.4,
+        payload: {
+          projected_from: "act_tuple_recorded",
+          cited_artifact_ids: ["dispatch_decider_v1", "lane_outcome_residual"],
+        },
+      });
+      emitEvent(db, {
+        kind: "action_scored",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_coal_live_shape",
+        task_id: "t_coal_live_shape_" + suffix,
+        action_artifact_id: "dispatch_decider_v1",
+        verifier_artifact_id: "lane_outcome_residual",
+        predicted_residual: 0.4,
+        residual: 0.2,
+        payload: { action_predicted_event_id: ap.id, residual: 0.2 },
+      });
+    }
+
+    const rows = db
+      .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM events WHERE kind = 'coalition_credit_distributed'")
+      .get()!;
+    expect(rows.c).toBe(2);
+    const coalitionIds = db
+      .query<{ coalition_id: string }, []>("SELECT json_extract(payload, '$.coalition_id') AS coalition_id FROM events WHERE kind = 'coalition_credit_distributed'")
+      .all();
+    expect(coalitionIds.map((r) => r.coalition_id)).toEqual([
+      "coalition:dispatch_decider_v1+lane_outcome_residual",
+      "coalition:dispatch_decider_v1+lane_outcome_residual",
     ]);
   });
 });

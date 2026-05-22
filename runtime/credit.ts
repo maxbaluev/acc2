@@ -1024,8 +1024,10 @@ export const distributeCredit = async (
   //    uses for the per-artifact split, so the emitted shares match the
   //    posterior moves exactly.
   const actionPredictedPayload = jsonObject(actionEv.payload);
-  const coalitionMembers = stringArrayField(actionPredictedPayload, "cited_artifact_ids")
-    .filter((id) => id !== actionArtifactId && id !== verifierArtifactId);
+  // The projected act tuple stores the primary action/verifier pair in
+  // cited_artifact_ids. Do not strip them here: they are the live repeated
+  // joint-citation set that T4.4 must make first-class.
+  const coalitionMembers = stringArrayField(actionPredictedPayload, "cited_artifact_ids");
   if (coalitionMembers.length > 1) {
     const sortedMembers = [...coalitionMembers].sort();
     const coalitionId = "coalition:" + sortedMembers.join("+");
@@ -1646,7 +1648,6 @@ export const projectActionScoredToCredit = (
     const coalitionMembers = Array.isArray(predictedPayload.cited_artifact_ids)
       ? predictedPayload.cited_artifact_ids
           .filter((id): id is string => typeof id === "string" && id.length > 0)
-          .filter((id) => id !== scoredEvent.action_artifact_id && id !== scoredEvent.verifier_artifact_id)
       : [];
     const universalGoalShape = resolveGoalShape(db, scoredEvent.directive_id);
     if (coalitionMembers.length > 1) {

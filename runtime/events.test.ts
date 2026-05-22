@@ -320,6 +320,7 @@ describe("emitEvent act_tuple_recorded projector", () => {
       "action_scored",
       "applied_change_committed",
       "candidate_confirmed",
+      "coalition_credit_distributed",
       "retrieval_binding",
       "retrieval_binding",
       "retrieval_binding",
@@ -348,6 +349,15 @@ describe("emitEvent act_tuple_recorded projector", () => {
         const rej = JSON.parse(row.payload);
         expect(rej.projected_from).toBe("bind_citation");
         expect(typeof rej.projection_key).toBe("string");
+        continue;
+      }
+      // Coalition credit is emitted by the action_scored universal projector.
+      // It is keyed to the scored/action_predicted pair rather than the
+      // source act tuple, so verify its own idempotency contract here.
+      if (row.kind === "coalition_credit_distributed") {
+        const coal = JSON.parse(row.payload);
+        expect(coal.projected_from).toBe("action_scored_universal_projector");
+        expect(typeof coal.projection_key).toBe("string");
         continue;
       }
       expect(JSON.parse(row.payload).source_act_id).toBe(act.id);
@@ -822,6 +832,7 @@ describe("emitEvent act_tuple_recorded projector", () => {
       action_scored: 1,
       applied_change_committed: 1,
       candidate_confirmed: 1,
+      coalition_credit_distributed: 1,
       retrieval_binding: 4,
       retrieval_rejected: 1,
       verifier_kind_auto_admitted: 1,
