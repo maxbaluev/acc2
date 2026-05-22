@@ -33,6 +33,13 @@ import type { EventKind, SubstrateOrigin } from "./types";
  *  the live window, not the entire history. */
 export const OWNER_VOCABULARY_INPUT_WINDOW = 50;
 
+/** owner_input_received `source` values that are OPERATOR/SYSTEM dispatch,
+ *  not genuine owner natural-language. Their text is engineering/technical
+ *  vocabulary and must never be mined as the owner's preferred_terms.
+ *  `acc_task_directive` = operator dispatching work via `acc task`. Extend
+ *  this set as new operator/system input channels appear. */
+export const OPERATOR_DISPATCH_SOURCES: readonly string[] = ["acc_task_directive"];
+
 /** A 1..N-gram must appear in at least this many DISTINCT owner_input
  *  events to qualify as a preferred term. "Repeatedly used across
  *  different messages" is the signal — not "occurred N times in one
@@ -577,14 +584,23 @@ export type OwnerVocabularyTickSummary = {
 export const runOwnerVocabularyExtractorTick = (
   db: Database,
 ): OwnerVocabularyTickSummary => {
+  // EXCLUDE operator/system dispatch sources. `acc_task_directive` is the
+  // operator dispatching engineering work via `acc task` — that text is the
+  // brain's/operator's technical vocabulary ("anchored replace", "closure
+  // budget", "full bun test"), NOT the human owner's natural language.
+  // Mining it polluted preferred_terms with hundreds of jargon n-grams that
+  // prompt_composer then mirrored BACK at the non-technical owner — the exact
+  // inverse of "use their language." Only genuine owner natural-language
+  // (sources other than the operator-dispatch channels) feeds vocabulary.
   const rows = db
     .query(
       `SELECT id, payload FROM events
        WHERE kind = 'owner_input_received'
+         AND COALESCE(json_extract(payload, '$.source'), '') NOT IN (${OPERATOR_DISPATCH_SOURCES.map(() => "?").join(", ")})
        ORDER BY ts DESC
        LIMIT ?`,
     )
-    .all(OWNER_VOCABULARY_INPUT_WINDOW) as Array<{ id: string; payload: string }>;
+    .all(...OPERATOR_DISPATCH_SOURCES, OWNER_VOCABULARY_INPUT_WINDOW) as Array<{ id: string; payload: string }>;
 
   const ownerInputs: Array<{ id: string; text: string }> = [];
   for (const r of rows) {

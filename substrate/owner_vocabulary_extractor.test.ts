@@ -30,9 +30,11 @@ const tickTs = (): string => {
 const insertOwnerInput = (
   db: ReturnType<typeof openDb>,
   text: string,
-  opts: { directive_id?: string; task_id?: string; loop_id?: string } = {},
+  opts: { directive_id?: string; task_id?: string; loop_id?: string; source?: string } = {},
 ): string => {
   const id = newId();
+  const payload: Record<string, unknown> = { text };
+  if (opts.source !== undefined) payload.source = opts.source;
   db.run(
     `INSERT INTO events (
        id, ts, directive_id, task_id, loop_id,
@@ -46,7 +48,7 @@ const insertOwnerInput = (
       opts.loop_id ?? "l_vocab_test",
       "claude_root",
       "owner_input_received",
-      JSON.stringify({ text }),
+      JSON.stringify(payload),
       JSON.stringify([]),
     ],
   );
@@ -164,6 +166,25 @@ describe("extractOwnerVocabulary — pure path", () => {
 // ──────────────────────────────────────────────────────────────────────
 
 describe("runOwnerVocabularyExtractorTick — DB driver", () => {
+  test("EXCLUDES operator-dispatch (acc_task_directive) source — never mines engineering jargon as owner vocabulary", () => {
+    const db = openDb(":memory:");
+    // Operator engineering directives repeated across events — exactly the
+    // pollution the owner caught (technical n-grams scraped into preferred_terms).
+    for (let i = 0; i < 5; i++) {
+      insertOwnerInput(db, "Run the full bun test and fix the anchored replace closure budget meta-credit.", { source: "acc_task_directive" });
+    }
+    const summary = runOwnerVocabularyExtractorTick(db);
+    // Zero genuine-owner input → zero scanned → zero candidates. The 5
+    // operator dispatches must NOT produce any preferred_terms.
+    expect(summary.scanned_events).toBe(0);
+    const rows = db.query("SELECT payload FROM events WHERE kind = 'owner_insight_candidate'").all() as Array<{ payload: string }>;
+    const polluted = rows.some((r) => {
+      const p = JSON.parse(r.payload) as { field?: string; value?: unknown };
+      return p.field === "preferred_terms";
+    });
+    expect(polluted).toBe(false);
+  });
+
   test("writes owner_insight_candidate rows with correct field/value/context_refs shape", () => {
     const db = openDb(":memory:");
     const ids = [
