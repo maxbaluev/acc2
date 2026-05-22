@@ -37,6 +37,7 @@ export const useSharedDaemon = (opts: SharedDaemonOpts): SharedDaemonFixture => 
   // refused, and runDispatch returned exit 1.
   let prevPort: string | undefined;
   let prevAuxPort: string | undefined;
+  let prevMcpServerUrl: string | undefined;
   const portRange = opts.portRange ?? 1000;
   const useEnv = opts.setEnvPorts ?? true;
 
@@ -44,6 +45,11 @@ export const useSharedDaemon = (opts: SharedDaemonOpts): SharedDaemonFixture => 
     dir = mkdtempSync(join(tmpdir(), opts.tmpPrefix));
     port = opts.mcpBase + Math.floor(Math.random() * portRange);
     auxPort = opts.auxBase + Math.floor(Math.random() * portRange);
+    if (useEnv) {
+      prevPort = process.env.V2_DAEMON_PORT;
+      prevAuxPort = process.env.V2_DAEMON_AUX_PORT;
+      prevMcpServerUrl = process.env.V2_MCP_SERVER_URL;
+    }
     handle = await startDaemon({
       port,
       auxPort,
@@ -52,19 +58,16 @@ export const useSharedDaemon = (opts: SharedDaemonOpts): SharedDaemonFixture => 
       tokenFile: join(dir, "v2.sock.token"),
       externalPushToken: opts.externalPushToken,
     });
-    if (useEnv) {
-      prevPort = process.env.V2_DAEMON_PORT;
-      prevAuxPort = process.env.V2_DAEMON_AUX_PORT;
-    }
   });
 
-  // Per-test re-bind of env vars — protects against parallel-file races
-  // where another fixture's beforeAll overwrote our ports. Each test in
-  // THIS file sees the correct daemon ports at the moment it runs.
+  // Per-test re-bind of env vars protects against parallel-file races where
+  // a sibling fixture overwrote daemon connection state. MCP URL must move
+  // with the port or bridge subprocesses can call the wrong daemon.
   beforeEach(() => {
     if (useEnv && handle) {
       process.env.V2_DAEMON_PORT = String(port);
       process.env.V2_DAEMON_AUX_PORT = String(auxPort);
+      process.env.V2_MCP_SERVER_URL = `http://127.0.0.1:${port}/mcp`;
     }
   });
 
@@ -83,6 +86,8 @@ export const useSharedDaemon = (opts: SharedDaemonOpts): SharedDaemonFixture => 
       else process.env.V2_DAEMON_PORT = prevPort;
       if (prevAuxPort === undefined) delete process.env.V2_DAEMON_AUX_PORT;
       else process.env.V2_DAEMON_AUX_PORT = prevAuxPort;
+      if (prevMcpServerUrl === undefined) delete process.env.V2_MCP_SERVER_URL;
+      else process.env.V2_MCP_SERVER_URL = prevMcpServerUrl;
     }
   });
 

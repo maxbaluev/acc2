@@ -219,8 +219,12 @@ export class SqlWorkerPool {
       const timeoutMs = this.cfg.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
       job.timeoutHandle = setTimeout(() => {
         if (!this.jobsById.has(id)) return;
+        const timedOutWorker = job.assignedWorker;
         this.timedOutCount++;
         this.failJob(job, new Error(`sql_pool_query_timeout:${timeoutMs}ms`));
+        if (timedOutWorker !== null) {
+          void this.workers[timedOutWorker]?.terminate().catch(() => undefined);
+        }
       }, timeoutMs);
 
       this.workers[workerIdx].postMessage({
