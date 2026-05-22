@@ -32,6 +32,7 @@ import * as sqliteVec from "sqlite-vec";
 import schemaSql from "./schema.sql" with { type: "text" };
 import { runViews } from "./views";
 import { ensureArtifactKindMetadataTable } from "./artifact_kind_metadata";
+import { ensureDispatchLeaseTable } from "../runtime/dispatch_leases";
 
 // ── Per-path connection cache ──────────────────────────────────────
 // One live `Database` per path. closeDb(path) flushes + removes the entry
@@ -346,6 +347,12 @@ export const runMigrations = (db: Database): void => {
   // `atms_report_v*` prefix kinds. Both steps are idempotent (CREATE
   // TABLE IF NOT EXISTS + INSERT … ON CONFLICT DO NOTHING).
   ensureArtifactKindMetadataTable(db);
+
+  // Durable dispatch-lease table (multi-worker-daemon coordination +
+  // restart-durable brain-dispatch claims). Idempotent CREATE TABLE IF NOT
+  // EXISTS — backs the in-memory IN_FLIGHT_BRAIN dedup in
+  // runtime/task_scheduler.ts as the cross-process authoritative claim.
+  ensureDispatchLeaseTable(db);
 
   // L8 backfill: dispatch_strategy seed rows (admitted with
   // state_root='dispatch/strategy') predate the kind column.

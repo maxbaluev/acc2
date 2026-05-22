@@ -32,6 +32,8 @@ import { emitEvent } from "./events";
 import { readCurrentMode, applyModeAdjustments } from "./crisis_mode";
 import { findDeferringConflict } from "./interference";
 import { isBridgeHealthDegraded } from "./bridge_health";
+import { claimDispatchLease, releaseDispatchLease } from "./dispatch_leases";
+import { getBootSessionToken } from "./brain_dispatch_reconciler";
 
 // Interaction kinds that block another directive's dispatch when one of the
 // two is mid-flight. `mutual_exclusion` is symmetric (either side blocks the
@@ -157,11 +159,24 @@ const IN_FLIGHT_BRAIN: Set<string> = new Set();
 const GATE_NOTIFIED: Set<string> = new Set();
 const gateKey = (taskId: string, gate: string): string => `${taskId}:${gate}`;
 
-const clearInFlightTask = (taskId: string): void => {
+/** Holder identity for the durable dispatch lease. Prefers the daemon's
+ *  minted boot session token (so a multi-daemon audit can attribute a lease
+ *  to its owning process); falls back to a stable process-local token when
+ *  no daemon booted (tests / direct scheduler use). Equality of this string
+ *  is the cross-process ownership signal — same holder may re-claim/renew. */
+const PROCESS_LOCAL_HOLDER = `sched-${process.pid}-${Date.now()}`;
+const leaseHolder = (): string => getBootSessionToken() ?? PROCESS_LOCAL_HOLDER;
+
+const clearInFlightTask = (taskId: string, db?: Database): void => {
   IN_FLIGHT.delete(taskId);
   IN_FLIGHT_DIRECTIVE.delete(taskId);
   IN_FLIGHT_PARENT.delete(taskId);
   IN_FLIGHT_BRAIN.delete(taskId);
+  // Release the durable cross-process lease on completion. Idempotent: a
+  // DELETE of an absent row is a no-op, and a release for a task this
+  // process never leased (db absent, or lease-write failed at claim) is
+  // harmless. Never throws into the dispatch lifecycle.
+  if (db) releaseDispatchLease(db, taskId);
   GATE_NOTIFIED.delete(gateKey(taskId, "brain_concurrency_cap"));
   GATE_NOTIFIED.delete(gateKey(taskId, "bridge_health_degraded"));
   if (IN_FLIGHT_BRAIN.size === 0) GATE_NOTIFIED.clear();
@@ -939,6 +954,27 @@ export const schedulerTick = async (
 
     // opencode_brain lane → actual dispatch.
     if (decision.route === "opencode_brain") {
+      // DURABLE CROSS-PROCESS CLAIM (multi-worker-daemon coordination).
+      // IN_FLIGHT.has(task.id) above is the in-process fast-path cache.
+      // The lease is the cross-process AUTHORITY: atomically claim it
+      // before launching the brain. If another worker daemon holds an
+      // UNEXPIRED lease, defer (skip this task this tick). On lease-write
+      // error, FAIL OPEN — degrade to the in-memory dedup we just passed
+      // rather than wedging dispatch. Expired leases are always reclaimed
+      // by the atomic upsert, so a crashed holder never blocks forever.
+      const claim = claimDispatchLease(db, task.id, leaseHolder());
+      if (claim.status === "held") {
+        skippedConcurrencyCap.push(task.id);
+        emitSchedulerAdmissionGate(db, task, "dispatch_lease_held_by_peer", {
+          reason: "dispatch_lease_held_by_another_holder",
+          holder: claim.holder,
+          expires_at: claim.expires_at,
+          note: "another worker daemon owns the durable brain-dispatch lease for this task; deferring (expired leases are always reclaimable, so this never blocks permanently)",
+        });
+        continue;
+      }
+      // claim.status === "claimed" → we own the durable lease.
+      // claim.status === "error"  → fall open to in-memory dedup.
       IN_FLIGHT_BRAIN.add(task.id);
       brainHandshakeBudget -= 1; // consume one handshake slot this tick (anti-starve)
     }
@@ -964,7 +1000,7 @@ export const schedulerTick = async (
         } catch { /* swallow */ }
       })
       .finally(() => {
-        clearInFlightTask(task.id);
+        clearInFlightTask(task.id, db);
       });
     // Mark settled-flag accessor lazily — best-effort cleanup helper.
     (promise as Promise<unknown> & { _settled?: boolean })._settled = false;
@@ -1042,7 +1078,7 @@ export const schedulerLoop = async (
     "task_committed_superseded",
   ] as const;
   const clearDisposers = clearOnEventKinds.map((kind) => onEvent(kind, (payload) => {
-    if (payload.task_id) clearInFlightTask(payload.task_id);
+    if (payload.task_id) clearInFlightTask(payload.task_id, db);
   }));
 
   try {

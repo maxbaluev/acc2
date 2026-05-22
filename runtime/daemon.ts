@@ -66,6 +66,7 @@ import { logger } from "./logger";
 import { metricsHandler, refreshGauges } from "./metrics";
 import { integrityWorkerTick, runIntegrityCheck, reconcileOrphanedDispatches, reconcilePreDispatchOrphans } from "./integrity_worker";
 import { reconcileBrainDispatchesAtBoot, getOpenBrainDispatches, setBootSessionToken } from "./brain_dispatch_reconciler";
+import { reconcileExpiredLeases } from "./dispatch_leases";
 import { waitForBrainQuiescence } from "./restart_quiescence";
 import { noActiveBrainDispatches } from "./dispatch_survival";
 import {
@@ -703,6 +704,18 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     logger.info(
       { reconciled_count: reconcileSummary.reconciled_count, boot_session_token: bootSessionToken },
       "reconciled live brain dispatches at boot (restart_reconciled)",
+    );
+  }
+  // Durable dispatch-lease boot sweep: release EXPIRED leases so a crashed
+  // holder's stale lease never blocks a fresh daemon from claiming the
+  // task. Mirrors reconcileBrainDispatchesAtBoot — runs before
+  // daemon_started. Unexpired leases are LEFT in place: another live worker
+  // daemon may legitimately own them (the lease is cross-process).
+  const releasedLeaseTaskIds = reconcileExpiredLeases(db);
+  if (releasedLeaseTaskIds.length > 0) {
+    logger.info(
+      { released_count: releasedLeaseTaskIds.length, boot_session_token: bootSessionToken },
+      "released expired dispatch leases at boot (crashed-holder reclaim)",
     );
   }
 
