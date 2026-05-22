@@ -251,28 +251,50 @@ describe("supervisor — detectRepeatingAction (2026-05-17 brain-stuck-loop dete
 });
 
 describe("supervisor — no-closure-progress loop detector", () => {
-  test("archives a directive re-dispatched past the cap with zero closure_audited + zero edges", () => {
+  const insertClosedDispatch = (
+    db: ReturnType<typeof openDb>,
+    directiveId: string,
+    taskId: string,
+    ts: string,
+    dispatchId: string,
+  ) => {
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'brain_dispatched', 'substrate_auto', ?, ?, '', ?)`,
+    ).run(newId(), ts, directiveId, taskId, JSON.stringify({ dispatch_id: dispatchId }));
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'brain_dispatch_closed', 'substrate_auto', ?, ?, '', ?)`,
+    ).run(newId(), new Date(Date.parse(ts) + 1000).toISOString(), directiveId, taskId, JSON.stringify({ dispatch_id: dispatchId }));
+  };
+
+  test("archives a completed re-dispatch with zero structural events since the last dispatch", () => {
     const db = openDb(":memory:");
     const dir = "DIRSTUCK0000000000000000000";
-    for (let i = 0; i < 12; i++) {
-      emitEvent(db, { kind: "brain_dispatched", substrate_origin: "substrate_auto", directive_id: dir, task_id: "TSTUCK", payload: { cycle: i } as JsonValue });
-    }
+    insertClosedDispatch(db, dir, "TSTUCK", "2026-05-22T00:00:00.000Z", "stuck-dispatch-1");
+    insertClosedDispatch(db, dir, "TSTUCK", "2026-05-22T00:01:00.000Z", "stuck-dispatch-2");
+
     const flagged = detectNoClosureProgressLoop(db);
     expect(flagged.map((f) => f.directive_id)).toContain(dir);
-    const archived = db.query("SELECT 1 FROM events WHERE kind='directive_archived_by_operator' AND directive_id=? AND json_extract(payload,'$.reason')='supervisor_no_closure_progress_loop' LIMIT 1").get(dir);
-    expect(archived).toBeTruthy();
+    const archived = db.query("SELECT payload FROM events WHERE kind='directive_archived_by_operator' AND directive_id=? AND json_extract(payload,'$.reason')='supervisor_no_closure_progress_loop' LIMIT 1").get(dir) as { payload: string } | null;
+    expect(archived).not.toBeNull();
+    expect(typeof JSON.parse(archived!.payload).last_dispatch_event_id).toBe("string");
   });
 
-  test("skips a directive that made structural progress (refinement edge or closure attempt)", () => {
+  test("does NOT archive a completed re-dispatch that made structural progress since the last dispatch", () => {
     const db = openDb(":memory:");
     const dir = "DIRLEGIT0000000000000000000";
-    for (let i = 0; i < 12; i++) {
-      emitEvent(db, { kind: "brain_dispatched", substrate_origin: "substrate_auto", directive_id: dir, task_id: "TLEGIT", payload: { cycle: i } as JsonValue });
-    }
-    // Made progress → must NOT be archived.
-    emitEvent(db, { kind: "task_edge_recorded", substrate_origin: "substrate_auto", directive_id: dir, task_id: "TLEGIT", payload: { edge_kind: "refines" } as JsonValue });
+    insertClosedDispatch(db, dir, "TLEGIT", "2026-05-22T00:00:00.000Z", "legit-dispatch-1");
+    insertClosedDispatch(db, dir, "TLEGIT", "2026-05-22T00:01:00.000Z", "legit-dispatch-2");
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'task_edge_recorded', 'substrate_auto', ?, ?, '', ?)`,
+    ).run(newId(), "2026-05-22T00:01:02.000Z", dir, "TLEGIT", JSON.stringify({ edge_kind: "refines" }));
+
     const flagged = detectNoClosureProgressLoop(db);
     expect(flagged.map((f) => f.directive_id)).not.toContain(dir);
+    const archived = db.query("SELECT 1 FROM events WHERE kind='directive_archived_by_operator' AND directive_id=? LIMIT 1").get(dir);
+    expect(archived).toBeNull();
   });
 });
 

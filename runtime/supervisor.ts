@@ -479,13 +479,12 @@ export const detectDispatchBudgetExceeded = (
 };
 
 /** Detect no-closure-progress loops: directives re-dispatched past
- *  SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP with ZERO task_closure_audited
- *  AND ZERO task_edge_recorded (no closure verifier run, no refinement edge
- *  opened — the brain is re-emitting the same node forever). Archives the
- *  directive (recoverable) so the slow loop stops burning the brain slot
- *  long before the 50-dispatch budget cap would. Idempotent: skips
- *  directives already closed/archived/committed, and skips any directive
- *  that DID make structural progress (legit deep work). */
+ *  SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP whose latest completed dispatch
+ *  emitted no structural progress. The scheduler-side no-progress redispatch
+ *  gate is the primary precise guard; this supervisor detector is only a
+ *  fallback for completed dispatches, so it must not race in-flight multi-node
+ *  build work before the dispatch has had a chance to emit edges, closures, or
+ *  deliverables. */
 export const detectNoClosureProgressLoop = (
   db: Database,
 ): Array<{ directive_id: string; dispatch_count: number }> => {
@@ -499,6 +498,16 @@ export const detectNoClosureProgressLoop = (
     )
     .all(SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP) as Array<{ directive_id: string; dispatch_count: number }>;
 
+  const progressKinds = [
+    "task_committed",
+    "task_closure_audited",
+    "task_edge_recorded",
+    "contract_amendment_proposed",
+    "act_artifact_candidate",
+    "knowledge_candidate",
+  ];
+  const progressKindList = progressKinds.map((k) => `'${k}'`).join(", ");
+
   const archived: Array<{ directive_id: string; dispatch_count: number }> = [];
   for (const r of rows) {
     const terminalOrClosed = db
@@ -511,18 +520,51 @@ export const detectNoClosureProgressLoop = (
       )
       .get(r.directive_id);
     if (terminalOrClosed) continue;
-    // Structural progress = a closure verifier ran OR a refinement edge was
-    // opened. Either means the dispatch is doing real work (legit deep), not
-    // looping on one node. Skip those.
-    const madeProgress = db
+
+    const lastDispatch = db
+      .query(
+        `SELECT id, ts, task_id, json_extract(payload, '$.dispatch_id') AS dispatch_id
+         FROM events
+         WHERE directive_id = ? AND kind = 'brain_dispatched'
+         ORDER BY ts DESC, rowid DESC
+         LIMIT 1`,
+      )
+      .get(r.directive_id) as { id: string; ts: string; task_id: string | null; dispatch_id: string | null } | null;
+    if (!lastDispatch) continue;
+
+    const dispatchClosed = lastDispatch.dispatch_id
+      ? db
+          .query(
+            `SELECT 1 FROM events
+             WHERE directive_id = ?
+               AND kind = 'brain_dispatch_closed'
+               AND json_extract(payload, '$.dispatch_id') = ?
+             LIMIT 1`,
+          )
+          .get(r.directive_id, lastDispatch.dispatch_id)
+      : db
+          .query(
+            `SELECT 1 FROM events
+             WHERE directive_id = ?
+               AND task_id = ?
+               AND kind = 'brain_dispatch_closed'
+               AND ts >= ?
+             LIMIT 1`,
+          )
+          .get(r.directive_id, lastDispatch.task_id, lastDispatch.ts);
+    if (!dispatchClosed) continue;
+
+    const madeProgressSinceLastDispatch = db
       .query(
         `SELECT 1 FROM events
          WHERE directive_id = ?
-           AND kind IN ('task_closure_audited', 'task_edge_recorded')
+           AND ts > ?
+           AND kind IN (${progressKindList})
          LIMIT 1`,
       )
-      .get(r.directive_id);
-    if (madeProgress) continue;
+      .get(r.directive_id, lastDispatch.ts);
+    if (madeProgressSinceLastDispatch) continue;
+
     try {
       const unfinished = collectUnfinishedTasks(db, r.directive_id);
       emitEvent(db, {
@@ -533,6 +575,7 @@ export const detectNoClosureProgressLoop = (
           reason: "supervisor_no_closure_progress_loop",
           dispatch_count: r.dispatch_count,
           threshold: SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP,
+          last_dispatch_event_id: lastDispatch.id,
           quarantined_tasks: unfinished,
           recoverable: true,
           resume_command: `acc directive resume ${r.directive_id}`,
@@ -547,6 +590,7 @@ export const detectNoClosureProgressLoop = (
           corrective_event: "directive_archived_by_operator",
           dispatch_count: r.dispatch_count,
           threshold: SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP,
+          last_dispatch_event_id: lastDispatch.id,
         } as JsonValue,
       });
       archived.push(r);
