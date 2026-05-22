@@ -22,6 +22,20 @@
 
 import type { Database } from "bun:sqlite";
 
+// RLM-first note (2026-05-22 threshold audit P2/P3): this file holds NO
+// judgment cutoffs. Every residual/confidence/retention cutoff lives as a
+// scored `threshold_predicate` act_artifact row (seeded in substrate/seed.ts,
+// e.g. closure_gate_residual_threshold=0.3, archival_retention_days=30) and is
+// resolved here by HIGHEST Beta posterior — the learned row supersedes the
+// caller-supplied cold-start default. The only literals below are genuine
+// infra/schema constants, not judgment:
+//   - CACHE_TTL_MS: a per-process memoization bound (read-path performance),
+//     not a decision boundary. Lower-bounds staleness; calibration is the
+//     posterior's job, not the cache window's.
+//   - seedThresholdPredicate priors (alpha=1, beta=1, score/confidence=0.5):
+//     the standard uninformative Beta prior — a math/schema constant so a
+//     freshly-seeded row starts unopinionated and calibrates from cited
+//     action_scored outcomes. These are KEPT by design (P3 carve-out).
 const CACHE_TTL_MS = 5 * 60 * 1000;
 type CacheEntry = { value: number; storedAt: number };
 const cache: Map<string, CacheEntry> = new Map();

@@ -17,6 +17,20 @@
 // binary — a future revision can introduce a gray-band (0.3-0.7) for
 // ambiguous contexts (e.g. "modest" inside a quoted source) by
 // inspecting the matched_text's surrounding_context.
+//
+// RLM-first clean-break (2026-05-22): the predicate SET is owned by the
+// substrate's scored knowledge surface, NOT by hand-tuned inline regex.
+// `loadPredicatesFromKnowledge` reads `alex_predicate_*`
+// knowledge_candidate rows — pattern, flags, AND audience
+// allowlist/denylist all come from KC payload, so a learned/DB-sourced
+// predicate can FULLY supersede any inline entry (same kc_id wins) with
+// identical audience scoping. The inline CATALOG below is now an explicit
+// COLD-START BOOTSTRAP ONLY: the minimal predicate set that lets the gate
+// refuse known banned phrasing before the substrate has admitted scored
+// `alex_predicate_*` rows. It is not the canonical judgment surface and
+// must not grow into a fixed refusal taxonomy — new predicates arrive as
+// scored KC rows (verifier residual + posterior credit), per CLAUDE.md
+// ("don't add fixed predicate enums when residual+breakdown can score it").
 
 import type { Database } from "bun:sqlite";
 
@@ -67,18 +81,23 @@ export type PredicateGateResult = {
   citedKnowledgeIds: string[];
 };
 
-/** Canonical fallback catalog of predicate patterns. These are the
- *  patterns active 2026-05-18 whose KC payload does NOT carry a
- *  `predicate_pattern` field. When a future KC declares
- *  predicate_pattern in payload, the DB-loaded entry supersedes the
- *  matching catalog entry by kc_id.
+/** COLD-START BOOTSTRAP catalog (NOT the canonical judgment surface).
+ *  These are the minimal predicate patterns the gate falls back to
+ *  before the substrate has admitted scored `alex_predicate_*`
+ *  knowledge_candidate rows. Any DB-sourced predicate with the same
+ *  kc_id FULLY supersedes the matching bootstrap entry — pattern, flags,
+ *  AND audience allowlist/denylist all come from the KC payload, so the
+ *  learned/scored row carries identical (or refined) semantics. New
+ *  predicates MUST arrive as scored KC rows, not by appending here:
+ *  growing this list back into a fixed refusal taxonomy is the k_252
+ *  anti-pattern this clean-break removes.
  *
- *  F2 audience-conditional (2026-05-18): each entry MAY declare
- *  `audience_allowlist` and/or `audience_denylist` so a predicate can
- *  carve out audiences where the pattern is appropriate self-reference
- *  (substrate signing its own cofounder letters) without disabling the
- *  pattern for the rest of the gated set. When BOTH lists are absent
- *  the predicate applies universally. */
+ *  Audience scoping: each entry MAY declare `audience_allowlist` and/or
+ *  `audience_denylist` so a predicate can carve out audiences where the
+ *  pattern is appropriate self-reference (substrate signing its own
+ *  cofounder letters) without disabling the pattern for the rest of the
+ *  gated set. When BOTH lists are absent the predicate applies
+ *  universally. The DB loader honors the same two fields from payload. */
 type CatalogEntry = {
   kc_id: string;
   predicate_claim: string;
@@ -158,10 +177,22 @@ const CATALOG: CatalogEntry[] = [
   },
 ];
 
+/** Coerce a payload field into a string[] of audience tags, or
+ *  undefined when absent/empty. Used to lift `audience_allowlist` /
+ *  `audience_denylist` off a KC payload so a learned predicate carries
+ *  the same fine-grained audience scoping the bootstrap entries do. */
+const audienceList = (raw: unknown): readonly string[] | undefined => {
+  if (!Array.isArray(raw)) return undefined;
+  const list = raw.filter((t): t is string => typeof t === "string" && t.length > 0);
+  return list.length > 0 ? list : undefined;
+};
+
 /** Load alex_predicate_* knowledge_candidates from the events ledger
- *  whose payload declares `predicate_pattern` (and optionally an
- *  `audience` filter). KCs without predicate_pattern stay implicit and
- *  are matched via the inline CATALOG. */
+ *  whose payload declares `predicate_pattern`. The KC payload is the
+ *  canonical predicate surface: pattern, flags, AND audience
+ *  allowlist/denylist all come from it, so a learned/scored row fully
+ *  supersedes the matching bootstrap CATALOG entry by kc_id. KCs without
+ *  predicate_pattern stay implicit and are matched via the bootstrap. */
 const loadPredicatesFromKnowledge = (
   db: Database,
   audience: string,
@@ -212,10 +243,20 @@ const loadPredicatesFromKnowledge = (
     } catch {
       continue;
     }
+    // kc_id supersession key: a KC may declare `predicate_kc_id` to
+    // claim a specific bootstrap entry's stable id (so the learned row
+    // REPLACES that bootstrap predicate by kc_id). Absent that, the
+    // event row id keys an additive DB-only predicate.
+    const kcId =
+      typeof parsed.predicate_kc_id === "string" && parsed.predicate_kc_id.length > 0
+        ? parsed.predicate_kc_id
+        : row.id;
     entries.push({
-      kc_id: row.id,
+      kc_id: kcId,
       predicate_claim: claim,
       pattern: regex,
+      audience_allowlist: audienceList(parsed.audience_allowlist),
+      audience_denylist: audienceList(parsed.audience_denylist),
     });
   }
   return entries;

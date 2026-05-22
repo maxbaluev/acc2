@@ -154,3 +154,66 @@ describe("runPredicateGate — F2 audience-conditional predicates", () => {
     expect(systemHits.length).toBe(0);
   });
 });
+
+describe("runPredicateGate — DB-sourced (learned) predicates own the surface", () => {
+  // Clean-break (2026-05-22): the inline CATALOG is a cold-start bootstrap.
+  // The canonical predicate surface is the scored alex_predicate_*
+  // knowledge_candidate ledger. These tests assert a learned/DB row (a)
+  // adds a new predicate the bootstrap never knew, and (b) FULLY supersedes
+  // a bootstrap entry by kc_id — pattern AND audience scoping from payload.
+  const insertPredicateKc = (db: ReturnType<typeof openDb>, id: string, payload: object): void => {
+    db.run(
+      `INSERT INTO events (
+         id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload
+       ) VALUES (?, ?, 'd_test', 't_test', 'l_test', 'substrate_auto', 'knowledge_candidate', ?)`,
+      [id, new Date().toISOString(), JSON.stringify(payload)],
+    );
+  };
+
+  test("an additive DB predicate (predicate_pattern in payload) fires", () => {
+    const db = openDb(":memory:");
+    insertPredicateKc(db, "kc_learned_no_synergy", {
+      claim: "alex_predicate_no_synergy",
+      predicate_pattern: "\\bsynergy\\b",
+      predicate_pattern_flags: "gi",
+    });
+    const result = runPredicateGate(db, {
+      audience: "ceo_buyer",
+      body: "This unlocks real synergy across the org.",
+    });
+    expect(result.rejected).toBe(true);
+    expect(result.citedKnowledgeIds).toContain("kc_learned_no_synergy");
+  });
+
+  test("a DB predicate supersedes a bootstrap entry by predicate_kc_id (pattern + audience denylist from payload)", () => {
+    const db = openDb(":memory:");
+    // Learned row claims the bootstrap 'no_friction' kc_id and RELAXES it:
+    // narrower pattern + denylist that excludes ceo_buyer. The learned row
+    // must win — proving payload owns pattern AND audience scoping.
+    insertPredicateKc(db, "kc_relax_friction", {
+      claim: "alex_predicate_no_friction",
+      predicate_kc_id: "alex_predicate_xkc5n4a66s13_no_friction",
+      predicate_pattern: "\\bfrictionless\\b",
+      predicate_pattern_flags: "gi",
+      audience_denylist: ["external_executive"],
+    });
+    // ceo_buyer is NOT in the learned denylist → the (superseding) predicate
+    // does not apply; plain "friction" no longer trips because the bootstrap
+    // entry was replaced by the narrower learned pattern.
+    const ceo = runPredicateGate(db, {
+      audience: "ceo_buyer",
+      body: "This change reduces friction across the partner pipeline.",
+    });
+    const ceoFrictionHits = ceo.matches.filter((m) => m.predicate_claim === "alex_predicate_no_friction");
+    expect(ceoFrictionHits.length).toBe(0);
+
+    // external_executive IS in the learned denylist and the body contains
+    // the new pattern → the superseding learned predicate fires.
+    const exec = runPredicateGate(db, {
+      audience: "external_executive",
+      body: "A frictionless onboarding flow.",
+    });
+    expect(exec.rejected).toBe(true);
+    expect(exec.citedKnowledgeIds).toContain("alex_predicate_xkc5n4a66s13_no_friction");
+  });
+});
