@@ -19,6 +19,7 @@ import type { Database } from "bun:sqlite";
 import type { DaemonHandle } from "../../runtime/daemon";
 import { startDaemon, stopDaemon } from "../../runtime/daemon";
 import { openDb } from "../../substrate/db";
+import { getFreePortPair } from "../free_port";
 import { emitEvent } from "../../runtime/events";
 import { openFixtureDCountTodos } from "../../runtime/fixtures/d_count_todos";
 import { openFixtureBusinessOutreach } from "../../runtime/fixtures/d_business_outreach";
@@ -123,26 +124,41 @@ export type DaemonBootResult = {
 };
 
 const pickPortPair = (): { mcp: number; aux: number } => {
-  // Use a high band away from existing test ranges (8000-11000, 12000-18000,
-  // 30000-32000). 45000-50000 is well clear.
-  const mcp = 45000 + Math.floor(Math.random() * 2000);
-  const aux = 47000 + Math.floor(Math.random() * 2000);
-  return { mcp, aux };
+  // OS-assigned free ports (bind :0) — NOT random in a fixed band. Random
+  // ports in 45000-47000 collided under `bun test --parallel` (observed:
+  // "Failed to start server. Is port 45107 in use?" → intermittent harness
+  // smoke fail). getFreePortPair asks the OS for genuinely-free ports, which
+  // is collision-free except for a vanishingly small close→reuse window that
+  // bootDaemon's EADDRINUSE retry covers.
+  return getFreePortPair();
 };
 
 export const bootDaemon = async (
   tmpDir: string,
   dbPath: string,
 ): Promise<DaemonHandle> => {
-  const ports = pickPortPair();
-  return startDaemon({
-    port: ports.mcp,
-    auxPort: ports.aux,
-    stateDbPath: dbPath,
-    socketFile: join(tmpDir, "v2.sock"),
-    tokenFile: join(tmpDir, "v2.sock.token"),
-    externalPushToken: "harness-default-token",
-  });
+  // Retry the bind on EADDRINUSE: getFreePortPair is collision-free except for
+  // the close→reuse window, so a fresh pair + retry makes daemon boot robust
+  // under heavy parallel load.
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const ports = pickPortPair();
+    try {
+      return await startDaemon({
+        port: ports.mcp,
+        auxPort: ports.aux,
+        stateDbPath: dbPath,
+        socketFile: join(tmpDir, "v2.sock"),
+        tokenFile: join(tmpDir, "v2.sock.token"),
+        externalPushToken: "harness-default-token",
+      });
+    } catch (err) {
+      lastErr = err;
+      const msg = (err as Error)?.message ?? String(err);
+      if (!/in use|EADDRINUSE/i.test(msg)) throw err;
+    }
+  }
+  throw lastErr;
 };
 
 // ── Production-equivalent boot for ad-hoc real-brain runs ──────────
