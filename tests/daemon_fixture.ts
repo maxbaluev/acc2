@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb } from "../substrate/db";
 import { startDaemon, stopDaemon, type DaemonHandle } from "../runtime/daemon";
+import { getFreePortPair } from "./free_port";
 
 type SharedDaemonOpts = {
   tmpPrefix: string;
@@ -38,7 +39,6 @@ export const useSharedDaemon = (opts: SharedDaemonOpts): SharedDaemonFixture => 
   let prevPort: string | undefined;
   let prevAuxPort: string | undefined;
   let prevMcpServerUrl: string | undefined;
-  const portRange = opts.portRange ?? 1000;
   const useEnv = opts.setEnvPorts ?? true;
 
   beforeAll(async () => {
@@ -54,8 +54,12 @@ export const useSharedDaemon = (opts: SharedDaemonOpts): SharedDaemonFixture => 
     // fresh random port on bind failure rather than failing the whole file.
     let lastErr: unknown = null;
     for (let attempt = 0; attempt < 10; attempt++) {
-      port = opts.mcpBase + Math.floor(Math.random() * portRange);
-      auxPort = opts.auxBase + Math.floor(Math.random() * portRange);
+      // OS-assigned free ports (collision-free); the retry covers the tiny
+      // close→reuse window. opts.mcpBase/auxBase + portRange are legacy and
+      // ignored — getFreePort never collides with the live daemon or siblings.
+      const pair = getFreePortPair();
+      port = pair.mcp;
+      auxPort = pair.aux;
       try {
         handle = await startDaemon({
           port,
