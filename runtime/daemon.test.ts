@@ -426,7 +426,7 @@ describe("bounded graceful drain (amendment 8EAKQCJW5D)", () => {
       .get() as { payload: string } | null;
     expect(started).toBeTruthy();
     const startedPayload = parsePayload(started!.payload);
-    expect(startedPayload.timeout_ms).toBe(30_000); // default RESTART_DRAIN_TIMEOUT_MS
+    expect(startedPayload.timeout_ms).toBe(180_000); // default RESTART_DRAIN_TIMEOUT_MS
     expect(startedPayload.in_flight_count).toBe(0);
     expect(Array.isArray(startedPayload.in_flight_task_ids)).toBe(true);
 
@@ -435,7 +435,7 @@ describe("bounded graceful drain (amendment 8EAKQCJW5D)", () => {
       .get() as { payload: string } | null;
     expect(shutdown).toBeTruthy();
     const shutdownPayload = parsePayload(shutdown!.payload);
-    expect(shutdownPayload.drain_budget_ms).toBe(30_000);
+    expect(shutdownPayload.drain_budget_ms).toBe(180_000);
     expect(shutdownPayload.drained_count).toBe(0);
     expect(shutdownPayload.interrupted_count).toBe(0);
     expect(shutdownPayload.in_flight_count_at_start).toBe(0);
@@ -548,7 +548,7 @@ describe("bounded graceful drain (amendment 8EAKQCJW5D)", () => {
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { drain_budget_ms?: number };
-    expect(body.drain_budget_ms).toBe(30_000);
+    expect(body.drain_budget_ms).toBe(180_000);
 
     await new Promise((r) => setTimeout(r, 400));
     handle = null;
@@ -557,7 +557,7 @@ describe("bounded graceful drain (amendment 8EAKQCJW5D)", () => {
     const started = db
       .query("SELECT payload FROM events WHERE kind = 'restart_drain_started' ORDER BY ts DESC LIMIT 1")
       .get() as { payload: string } | null;
-    expect(parsePayload(started!.payload).timeout_ms).toBe(30_000);
+    expect(parsePayload(started!.payload).timeout_ms).toBe(180_000);
   });
 });
 
