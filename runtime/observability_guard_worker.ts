@@ -27,11 +27,17 @@ import { emitEvent } from "./events";
 
 const DEFAULT_WINDOW_HOURS = 24;
 
-/** A wired loop and the upstream trigger that should keep it non-inert. */
+/** A wired loop and the upstream trigger that should keep it non-inert.
+ *  upstream_kind is the simple-count case; upstream_query overrides it
+ *  with a precise SQL count (param: sinceIso) when "the upstream fired"
+ *  needs a filter — otherwise the guard false-positives (e.g. coalition
+ *  cannot fire on lifted/worker action_scored that carry no real
+ *  action_artifact_id, so counting ALL action_scored is a lying check). */
 type InertLoopCheck = {
   loop_kind: string;
   upstream_kind: string;
   min_upstream: number;
+  upstream_query?: string;
 };
 
 /** The real cases this session found — seed set. When upstream fired
@@ -44,8 +50,16 @@ const INERT_LOOP_CHECKS: readonly InertLoopCheck[] = [
     min_upstream: 50,
   },
   {
+    // Coalition fires only on REPEATED joint-citation sets, which require
+    // action_scored events that carry a real (non-null) action_artifact_id
+    // — NOT the lifted/worker action_scored (action_artifact_id IS NULL)
+    // that dominate the stream (~778/779 in 24h). Counting all action_scored
+    // false-positived coalition as inert; the honest upstream is real-artifact
+    // action_scored only, so coalition is correctly quiet when none repeat.
     loop_kind: "coalition_credit_distributed",
     upstream_kind: "action_scored",
+    upstream_query:
+      "SELECT COUNT(*) AS c FROM events WHERE kind = 'action_scored' AND json_extract(payload, '$.action_artifact_id') IS NOT NULL AND ts >= ?",
     min_upstream: 200,
   },
   {
@@ -185,7 +199,9 @@ export const observabilityGuardTick = async (
   for (const check of INERT_LOOP_CHECKS) {
     summary.inert_checks += 1;
     try {
-      const upstreamCount = countSince(db, check.upstream_kind, sinceIso);
+      const upstreamCount = check.upstream_query
+        ? (db.query<{ c: number }, [string]>(check.upstream_query).get(sinceIso)?.c ?? 0)
+        : countSince(db, check.upstream_kind, sinceIso);
       if (upstreamCount < check.min_upstream) {
         // Upstream did not fire enough to expect the loop — not inert.
         summary.inert_skipped_healthy += 1;
