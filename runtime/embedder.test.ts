@@ -258,6 +258,43 @@ describe("embedderWorkerTick", () => {
     expect(calls).toBe(1);
   });
 
+  test("selects oldest unembedded backlog rows before recent rows", async () => {
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    const embeddedTexts: string[] = [];
+    installMockFetch(async (_url, init) => {
+      const reqBody = JSON.parse((init.body as string) ?? "{}") as { input: string[] };
+      embeddedTexts.push(...reqBody.input);
+      const data = reqBody.input.map((_t, i) => ({ embedding: synthEmbedding(i + 21), index: i }));
+      return new Response(JSON.stringify({ data }), { status: 200 });
+    });
+
+    const db = openDb(":memory:");
+    const recent = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "recent pending row" },
+    });
+    const backlog = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "old backlog row" },
+    });
+    db.run("UPDATE events SET ts = ? WHERE id = ?", ["2026-01-01T00:00:00.000Z", backlog.id]);
+    db.run("UPDATE events SET ts = ? WHERE id = ?", ["2026-02-01T00:00:00.000Z", recent.id]);
+
+    const result = await embedderWorkerTick(db, { batchSize: 1 });
+    expect(result.embedded).toBe(1);
+    expect(embeddedTexts).toEqual(["old backlog row"]);
+    const backlogRow = db
+      .query("SELECT embedding FROM events WHERE id = ?")
+      .get(backlog.id) as { embedding: Uint8Array | null };
+    const recentRow = db
+      .query("SELECT embedding FROM events WHERE id = ?")
+      .get(recent.id) as { embedding: Uint8Array | null };
+    expect(backlogRow.embedding).not.toBeNull();
+    expect(recentRow.embedding).toBeNull();
+  });
+
   test("skips events whose payload has no text-like field", async () => {
     process.env.OPENAI_API_KEY = "sk-test-mock";
     installMockFetch(async () => new Response(JSON.stringify({ data: [] }), { status: 200 }));

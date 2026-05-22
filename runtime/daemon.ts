@@ -1483,6 +1483,14 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // query_embedding_unavailable" concern is addressed structurally by
     // supervisedTick's skip-gate, not by removing the rate limit.
     registerReactiveWorker("embedder", embedderIntervalMs, EMBEDDABLE_KINDS, embedderTick, { minReactiveGapMs: embedderIntervalMs });
+    // Backlog drain is not reactive-only. registerReactiveWorker's safety
+    // net fires every 30 minutes; with no new embeddable events, relying on
+    // activation leaves historical unembedded rows idle. A dedicated bounded
+    // interval keeps retrieval saturation trending to zero while the existing
+    // supervisedTick running-gate prevents overlapping OpenAI/write work.
+    const embedderBackfillTimer = setInterval(embedderTick, embedderIntervalMs);
+    embedderBackfillTimer.unref();
+    workers.push(() => clearInterval(embedderBackfillTimer));
     // Boot tick — fire embedding work asynchronously without blocking
     // daemon readiness. Pre-fix (2026-05-19, this commit): the boot
     // tick awaited a large OpenAI batch synchronously at startup
@@ -1497,13 +1505,14 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     //  - Mark embedder ready IMMEDIATELY so /ready flips and the
     //    aux-bind + writeLockFile path proceeds without waiting on
     //    the OpenAI roundtrip.
-    //  - Cap the boot-tick batch at 20 (one OpenAI request worst case,
-    //    bounded blocking even on a 270K-event backlog).
-    //  - The regular 10s reactive cadence drains the backlog passively.
+    //  - Cap the boot-tick batch at 8, matching the regular tick so
+    //    main-thread vec0 persists stay bounded.
+    //  - The regular 10s backfill interval drains historical backlog;
+    //    reactive activation handles newly emitted embeddable events.
     //
-    // Backlog drain shifts from "blocking startup" to "passive
-    // background work" — what T3.8 (worker-thread pool) will fully
-    // close. This is the surgical interim fix.
+    // Backlog drain shifts from "blocking startup" to "bounded
+    // background work". The dedicated interval closes the retrieval
+    // saturation hole without waiting for unrelated embeddable events.
     if (!embedderMarked) { markWorkerReady("embedder"); embedderMarked = true; }
     // 2026-05-21 R2 instant-startup: defer the embedder boot tick by
     // BOOT_HEAVY_PASS_DELAY_MS so its synchronous readUnembedded scan +
@@ -1511,10 +1520,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     setTimeout(() => {
     void (async () => {
       try {
-        // Boot-tick batch capped at 8 (was 20) — same main-loop-unlock
-        // rationale as the reactive tick above. The persist phase is
-        // synchronous on the main thread; small batches bound the block.
-        // No per-tick index.reloadFromDb() (boot-death fix — see above).
+        // Boot-tick batch capped at 8 — same main-loop-unlock rationale as
+        // the regular backfill tick above. The persist phase is synchronous
+        // on the main thread; small batches bound the block. No per-tick
+        // index.reloadFromDb() (boot-death fix — see above).
         await embedderWorkerTick(db, { batchSize: 8 });
         recordWorkerTick("embedder");
       } catch (err) {
@@ -1541,7 +1550,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       }
     })();
     }, BOOT_HEAVY_PASS_DELAY_MS).unref();
-    // embedder is activation-driven; activationDisposers are cleared on shutdown.
+    // embedder has both event activation and a dedicated backlog interval;
+    // activationDisposers and workers are cleared on shutdown.
   }
 
   // Phase H: rehabilitation worker. Default ON — production wants
