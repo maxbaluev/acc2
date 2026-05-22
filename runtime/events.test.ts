@@ -875,6 +875,67 @@ describe("emitEvent act_tuple_recorded projector", () => {
     expect(payload.source_act_id).toBe(act.id);
   });
 
+  test("emitEvent(action_scored) projects meta-credit for production fallback policy selections", () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const goalShape = "live_goal_shape";
+
+    emitEvent(db, {
+      kind: "prompt_policy_section_selected",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: {
+        section_name: "runtimes_available",
+        source: "policy_bundle",
+        artifact_id: null,
+        event_id: null,
+        score: 1,
+        goal_shape: goalShape,
+        task_class: "runtimes_available",
+        fallback_reason: "no_scored_prompt_policy_bundle_match",
+      },
+    });
+
+    const predicted = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "live_action",
+      verifier_artifact_id: "live_verifier",
+      predicted_residual: 0.1,
+      payload: {},
+    });
+
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "live_action",
+      verifier_artifact_id: "live_verifier",
+      residual: 0,
+      payload: {
+        action_predicted_event_id: predicted.id,
+        residual: 0,
+        verifier_kind: "deterministic_code",
+      },
+    });
+
+    const meta = db
+      .query<{ payload: string }, []>("SELECT payload FROM events WHERE kind = 'meta_credit_projected' LIMIT 1")
+      .get();
+    expect(meta).not.toBeNull();
+    const payload = JSON.parse(meta!.payload) as Record<string, unknown>;
+    expect(payload.scored_event_id).toBe(scored.id);
+    expect(payload.action_predicted_event_id).toBe(predicted.id);
+    expect(payload.bundle_artifact_id).toBe("prompt_policy_section:policy_bundle:runtimes_available:" + goalShape);
+    expect(payload.bundle_registered).toBe(false);
+    expect(payload.projected_from).toBe("action_scored_universal_projector");
+  });
+
   test("invalid act_tuple_recorded is refused before any source row lands", () => {
     const db = openDb(":memory:");
     expect(() => {

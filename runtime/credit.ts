@@ -1086,8 +1086,14 @@ export const distributeCredit = async (
       let sectionName: string | null = null;
       try {
         const p = JSON.parse(sel.payload) as Record<string, unknown>;
-        if (typeof p.artifact_id === "string" && p.artifact_id.length > 0) bundleId = p.artifact_id;
+        const artifactId = typeof p.artifact_id === "string" && p.artifact_id.length > 0 ? p.artifact_id : null;
+        const eventId = typeof p.event_id === "string" && p.event_id.length > 0 ? p.event_id : null;
+        const source = typeof p.source === "string" && p.source.length > 0 ? p.source : "unknown_source";
+        const taskClass = typeof p.task_class === "string" && p.task_class.length > 0 ? p.task_class : null;
+        const goalShape = typeof p.goal_shape === "string" && p.goal_shape.length > 0 ? p.goal_shape : "global";
         if (typeof p.section_name === "string") sectionName = p.section_name;
+        const selectionName = taskClass ?? sectionName ?? "unknown_section";
+        bundleId = artifactId ?? eventId ?? `prompt_policy_section:${source}:${selectionName}:${goalShape}`;
       } catch { /* skip malformed */ }
       if (!bundleId || seenBundles.has(bundleId)) continue;
       seenBundles.add(bundleId);
@@ -1667,8 +1673,14 @@ export const projectActionScoredToCredit = (
       let sectionName: string | null = null;
       try {
         const p = JSON.parse(sel.payload) as Record<string, unknown>;
-        if (typeof p.artifact_id === "string" && p.artifact_id.length > 0) bundleId = p.artifact_id;
+        const artifactId = typeof p.artifact_id === "string" && p.artifact_id.length > 0 ? p.artifact_id : null;
+        const eventId = typeof p.event_id === "string" && p.event_id.length > 0 ? p.event_id : null;
+        const source = typeof p.source === "string" && p.source.length > 0 ? p.source : "unknown_source";
+        const taskClass = typeof p.task_class === "string" && p.task_class.length > 0 ? p.task_class : null;
+        const goalShape = typeof p.goal_shape === "string" && p.goal_shape.length > 0 ? p.goal_shape : "global";
         if (typeof p.section_name === "string") sectionName = p.section_name;
+        const selectionName = taskClass ?? sectionName ?? "unknown_section";
+        bundleId = artifactId ?? eventId ?? `prompt_policy_section:${source}:${selectionName}:${goalShape}`;
       } catch { /* skip malformed */ }
       if (!bundleId || seenBundles.has(bundleId)) continue;
       seenBundles.add(bundleId);
