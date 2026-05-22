@@ -1,15 +1,18 @@
 // Tier S0: orchestrator predicate.
-// Composes the seven owner-alignment sub-predicate signals into one
-// top-level owner-alignment verdict for the orchestration decision.
+// Composes the live owner-alignment sub-predicate signal into one top-level
+// orchestration verdict for the autonomous-apply decision.
+//
+// History (RLM-first clean break): db0788e collapsed the seven rule-based
+// owner-alignment evaluators (owner_goal_preservation_drift, delegation_safety,
+// metacognitive_owner_policy, continual_owner_state, owner_outcome_forecast,
+// owner_rendering, ordered_theory_of_mind) into ONE unified owner_alignment
+// gate and deleted their evaluator code. This predicate now evaluates the SAME
+// owner_alignment boundary the apply gate actually projects (cli/apply.ts
+// subPredicateResultsFromDecision), not the seven deleted boundaries. The
+// blocking decision leans on the scored residual + breakdown; the verdict Set
+// holds only the verdict the live owner_alignment predicate actually emits.
 
-export type OrchestratorSubPredicateName =
-  | "owner_goal_preservation_drift"
-  | "delegation_safety"
-  | "metacognitive_owner_policy"
-  | "continual_owner_state"
-  | "owner_outcome_forecast"
-  | "owner_rendering"
-  | "ordered_theory_of_mind";
+export type OrchestratorSubPredicateName = "owner_alignment";
 
 export type OrchestratorSubPredicateResult = {
   name?: string;
@@ -47,36 +50,17 @@ export type OrchestratorPredicateResult = {
   reasons: string[];
 };
 
-const REQUIRED_BOUNDARIES: OrchestratorSubPredicateName[] = [
-  "owner_goal_preservation_drift",
-  "delegation_safety",
-  "metacognitive_owner_policy",
-  "continual_owner_state",
-  "owner_outcome_forecast",
-  "owner_rendering",
-  "ordered_theory_of_mind",
-];
+const REQUIRED_BOUNDARIES: OrchestratorSubPredicateName[] = ["owner_alignment"];
 
-const BLOCKING_VERDICTS = new Set([
-  "drift",
-  "unsafe",
-  "misaligned",
-  "forgetting",
-  "misforecast",
-  "violates_avoided_term",
-  "wrong_language",
-  "exposes_declined_concept",
-  "constraint_miss",
-  "order_mismatch",
-]);
-
-const WATCH_VERDICTS = new Set([
-  "stale",
-  "caution",
-  "watch",
-  "revise",
-  "sparse",
-]);
+// The unified owner_alignment predicate emits exactly two verdicts: "aligned"
+// and "misaligned" (see cli/apply.ts evaluateOwnerAlignment). Only "misaligned"
+// is blocking. The dead verdicts from the removed owner-vocabulary/rendering
+// subsystems (violates_avoided_term, wrong_language, exposes_declined_concept,
+// drift, unsafe, forgetting, misforecast, constraint_miss, order_mismatch) and
+// the watch-band verdict names (stale, caution, revise, sparse) are gone —
+// nothing live emits them, and the watch band is now derived from the residual
+// score, not a fixed verdict name (RLM-first: residual + breakdown, not enums).
+const BLOCKING_VERDICTS = new Set(["misaligned"]);
 
 const clamp01 = (n: number): number => Math.min(1, Math.max(0, Number.isFinite(n) ? n : 0));
 
@@ -156,12 +140,16 @@ export const evaluateOrchestratorPredicate = (input: OrchestratorPredicateInput)
   const maxResidual = Math.max(...residuals, 0);
   const meanResidual = residuals.reduce((sum, n) => sum + n, 0) / REQUIRED_BOUNDARIES.length;
   const blockingVerdict = REQUIRED_BOUNDARIES.some((name) => BLOCKING_VERDICTS.has(results[name]?.verdict ?? "")) ? 1 : 0;
-  const watchVerdict = REQUIRED_BOUNDARIES.some((name) => WATCH_VERDICTS.has(results[name]?.verdict ?? "")) ? 1 : 0;
   const coverageGap = boundaryCoverageGap(results);
   const sequencingGap = orderGap(input.candidate_orchestration?.boundary_order);
   const omittedBlockingBoundary = selectedGap(input.candidate_orchestration?.selected_boundaries, results);
   const actionRisk = Math.max(numberSignal(input.proposed_action?.risk), numberSignal(input.proposed_action?.novelty));
   const routePressure = input.candidate_route === "AUTO_APPLY" ? actionRisk * 0.25 : 0;
+  // RLM-first: the blocking decision leans on the scored residual + breakdown.
+  // A "misaligned" verdict forces residual to 1 (hard owner-constraint/threshold
+  // breach), but the watch band is no longer a verdict-name signal — it is the
+  // residual score itself (the [0.3, 0.6) band below). owner_alignment's own
+  // residual already captures threshold-exceed and target-surface risk.
   const residual = clamp01(Math.max(
     blockingVerdict,
     maxResidual,
@@ -169,7 +157,6 @@ export const evaluateOrchestratorPredicate = (input: OrchestratorPredicateInput)
     omittedBlockingBoundary,
     meanResidual * 0.7,
     coverageGap * 0.4,
-    watchVerdict ? 0.35 : 0,
     routePressure,
   ));
   const verdict = residual >= 0.6 ? "misaligned" : residual >= 0.3 ? "watch" : "aligned";
@@ -196,7 +183,6 @@ export const evaluateOrchestratorPredicate = (input: OrchestratorPredicateInput)
       max_sub_predicate_residual: maxResidual,
       mean_sub_predicate_residual: meanResidual,
       blocking_verdict: blockingVerdict,
-      watch_verdict: watchVerdict,
       coverage_gap: coverageGap,
       sequencing_gap: sequencingGap,
       omitted_blocking_boundary: omittedBlockingBoundary,
