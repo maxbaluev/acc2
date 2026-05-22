@@ -350,55 +350,35 @@ describe("embedderWorkerTick", () => {
     expect(recentRow.embedding).toBeNull();
   });
 
-  test("drains oldest embedded-but-missing-vec_events backlog across ticks", async () => {
+  test("embed + vec_events projection are atomic; hot path does NOT reproject embedded-but-missing rows", async () => {
+    // Instant-responsive clean-break: the per-tick NOT-EXISTS-vec0 reproject
+    // scan was removed (it blocked boot + ground the loop). persistEmbedding is
+    // now atomic-or-nothing — a successful embed ALWAYS lands in vec_events the
+    // same tick — so drift is impossible by construction and the hot path only
+    // embeds `embedding IS NULL` rows. This test pins both halves: (a) a
+    // NULL-embedding row gets embedded AND projected to vec_events in one tick;
+    // (b) a pre-existing embedded-but-unprojected row is NOT picked up (no
+    // reproject) — that case can no longer occur in production.
     process.env.OPENAI_API_KEY = "sk-test-mock";
-    let fetchCalls = 0;
     installMockFetch(async (_url, init) => {
-      fetchCalls++;
       const reqBody = JSON.parse((init.body as string) ?? "{}") as { input: string[] };
       const data = reqBody.input.map((_t, i) => ({ embedding: synthEmbedding(i + 31), index: i }));
       return new Response(JSON.stringify({ data }), { status: 200 });
     });
 
     const db = openDb(":memory:");
-    const older = emitEvent(db, {
-      kind: "knowledge_candidate",
-      substrate_origin: "claude_root",
-      payload: { text: "old already embedded row" },
-    });
-    const newer = emitEvent(db, {
-      kind: "knowledge_candidate",
-      substrate_origin: "claude_root",
-      payload: { text: "newer already embedded row" },
-    });
-    db.run("UPDATE events SET ts = ?, embedding = ?, embedding_version = ? WHERE id = ?", [
-      "2026-01-01T00:00:00.000Z",
-      encodeEmbeddingBlob(synthEmbedding(41)),
-      EMBEDDING_VERSION,
-      older.id,
-    ]);
-    db.run("UPDATE events SET ts = ?, embedding = ?, embedding_version = ? WHERE id = ?", [
-      "2026-01-02T00:00:00.000Z",
-      encodeEmbeddingBlob(synthEmbedding(42)),
-      EMBEDDING_VERSION,
-      newer.id,
-    ]);
+    // (b) pre-existing embedded-but-unprojected row — must be IGNORED by the hot path.
+    const stale = emitEvent(db, { kind: "knowledge_candidate", substrate_origin: "claude_root", payload: { text: "embedded but unprojected" } });
+    db.run("UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?", [encodeEmbeddingBlob(synthEmbedding(41)), EMBEDDING_VERSION, stale.id]);
+    // (a) a fresh NULL-embedding row — must be embedded + projected atomically.
+    const fresh = emitEvent(db, { kind: "knowledge_candidate", substrate_origin: "claude_root", payload: { text: "needs embedding" } });
 
-    const missingVecCount = () => (db.query(
-      "SELECT COUNT(*) AS c FROM events e WHERE e.kind = 'knowledge_candidate' AND length(e.embedding) > 0 AND NOT EXISTS (SELECT 1 FROM vec_events v WHERE v.event_id = e.id)",
-    ).get() as { c: number }).c;
-
-    expect(missingVecCount()).toBe(2);
-    const first = await embedderWorkerTick(db, { batchSize: 1 });
-    expect(first.embedded).toBe(1);
-    expect(missingVecCount()).toBe(1);
-    expect(db.query("SELECT event_id FROM vec_events WHERE event_id = ?").get(older.id)).not.toBeNull();
-    expect(db.query("SELECT event_id FROM vec_events WHERE event_id = ?").get(newer.id)).toBeNull();
-
-    const second = await embedderWorkerTick(db, { batchSize: 1 });
-    expect(second.embedded).toBe(1);
-    expect(missingVecCount()).toBe(0);
-    expect(fetchCalls).toBe(0);
+    const result = await embedderWorkerTick(db, { batchSize: 5 });
+    expect(result.embedded).toBe(1); // only the NULL-embedding row, NOT the pre-embedded one
+    // (a) atomic projection: fresh row embedded AND in vec_events same tick.
+    expect(db.query("SELECT 1 FROM vec_events WHERE event_id = ?").get(fresh.id)).not.toBeNull();
+    // (b) no reproject: the stale embedded-but-unprojected row stays unprojected (hot path ignores it).
+    expect(db.query("SELECT 1 FROM vec_events WHERE event_id = ?").get(stale.id)).toBeNull();
   });
 
   test("skips events whose payload has no text-like field", async () => {

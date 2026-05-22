@@ -308,21 +308,22 @@ const resolveJoinedText = (db: Database, kind: string, payload: Record<string, u
 // unit tests and ACC2_DISABLE_SQL_POOL=1 diagnostics.
 const readUnembedded = async (db: Database, batchSize: number): Promise<UnembeddedRow[]> => {
   const placeholders = Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ");
+  // HOT PATH = indexed `embedding IS NULL` only. The former reproject clause
+  // (... OR NOT EXISTS (SELECT 1 FROM vec_events ...)) was a correlated scan of
+  // the vec0 virtual table per candidate row — the boot blocker + per-tick
+  // loop grind. It existed only to heal embed→project drift, which is now
+  // impossible (persistEmbedding is atomic-or-nothing). So we drop it: the
+  // `embedding IS NULL` predicate hits idx_events_unembedded_by_ts directly.
   const sql =
     `SELECT id, kind, payload, source_table, embedding, embedding_version FROM (` +
     `SELECT id, kind, payload, 'events' AS source_table, ts, embedding, embedding_version FROM events e ` +
-    `WHERE kind IN (${placeholders}) AND (` +
-    `e.embedding IS NULL OR (` +
-    `length(e.embedding) > 0 AND NOT EXISTS (SELECT 1 FROM vec_events v WHERE v.event_id = e.id)` +
-    `)) ` +
+    `WHERE kind IN (${placeholders}) AND e.embedding IS NULL ` +
     `UNION ALL ` +
     `SELECT id, 'act_artifact' AS kind, ` +
     `json_object('body', body, 'artifact_kind', kind, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, '')) AS payload, ` +
     `'act_artifact' AS source_table, COALESCE(updated_at, created_at) AS ts, embedding, NULL AS embedding_version FROM act_artifact a ` +
     `WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') ` +
-    `AND (a.embedding IS NULL OR length(a.embedding) = 0 OR (` +
-    `length(a.embedding) > 0 AND NOT EXISTS (SELECT 1 FROM vec_events v WHERE v.event_id = a.id)` +
-    `))` +
+    `AND (a.embedding IS NULL OR length(a.embedding) = 0)` +
     `) ORDER BY ts ASC LIMIT ?`;
   const params: unknown[] = [...Array.from(EMBEDDABLE_KINDS), batchSize];
   try {
@@ -346,18 +347,15 @@ const readUnembedded = async (db: Database, batchSize: number): Promise<Unembedd
  *  available so the COUNT scan never blocks the main loop. */
 export const pendingEmbeddableCount = async (db: Database): Promise<number> => {
   const placeholders = Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ");
+  // Indexed `embedding IS NULL` only — matches readUnembedded's hot path now
+  // that embed+project are atomic (no reproject NOT-EXISTS-vec0 scan).
   const sql =
     `SELECT SUM(c) AS c FROM (` +
-    `SELECT COUNT(*) AS c FROM events e WHERE kind IN (${placeholders}) AND (` +
-    `e.embedding IS NULL OR (` +
-    `length(e.embedding) > 0 AND NOT EXISTS (SELECT 1 FROM vec_events v WHERE v.event_id = e.id)` +
-    `)) ` +
+    `SELECT COUNT(*) AS c FROM events e WHERE kind IN (${placeholders}) AND e.embedding IS NULL ` +
     `UNION ALL ` +
     `SELECT COUNT(*) AS c FROM act_artifact a ` +
     `WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') ` +
-    `AND (a.embedding IS NULL OR length(a.embedding) = 0 OR (` +
-    `length(a.embedding) > 0 AND NOT EXISTS (SELECT 1 FROM vec_events v WHERE v.event_id = a.id)` +
-    `))` +
+    `AND (a.embedding IS NULL OR length(a.embedding) = 0)` +
     `)`;
   const params: unknown[] = [...Array.from(EMBEDDABLE_KINDS)];
   try {
@@ -478,17 +476,19 @@ const persistEmbedding = (
     );
   }
   // Canonical v2 path — see schema.sql for vec_events shape + reasoning.
-  // We swallow failures here so a vec0 mishap doesn't stall the embedder
-  // loop; retrieval degrades to the in-memory wrapper which reads the
-  // legacy BLOB column.
-  try {
-    upsertVecEventRow(db, sourceId, embedding, version, sourceTable);
-  } catch (err) {
-    logger.warn(
-      { source_id: sourceId, source_table: sourceTable, err: (err as Error).message ?? String(err) },
-      "vec_events upsert failed",
-    );
-  }
+  // ATOMIC-OR-NOTHING (RLM-first instant-responsive fix): the embedding write
+  // and the vec_events projection happen together in the caller's batch
+  // transaction. If the vec0 upsert fails we RETHROW so the whole batch rolls
+  // back and the row retries next tick as `embedding IS NULL` — rather than
+  // swallowing (which left the row embedded-but-unprojected = drift). That
+  // drift was the ONLY reason the hot path carried a per-tick NOT-EXISTS-vec0
+  // reproject scan (a 300k-row correlated subquery against the vec0 virtual
+  // table) that blocked the daemon boot ~162s + ground the event loop. With
+  // embed+project atomic, drift is impossible, so the reproject scan is
+  // removed and the hot path is just the indexed `embedding IS NULL` predicate.
+  // A persistent upsert failure now surfaces (error_caught + the error-flood
+  // guard) instead of silently degrading retrieval.
+  upsertVecEventRow(db, sourceId, embedding, version, sourceTable);
 };
 
 /** Emit ONE summary embedding_computed event for an entire batch.
