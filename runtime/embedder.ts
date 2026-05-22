@@ -253,7 +253,14 @@ export const extractTextFromEvent = (kind: string, payload: unknown): string | n
 };
 
 type EmbeddingSourceTable = "events" | "act_artifact";
-type UnembeddedRow = { id: string; kind: string; payload: string; source_table: EmbeddingSourceTable };
+type UnembeddedRow = {
+  id: string;
+  kind: string;
+  payload: string;
+  source_table: EmbeddingSourceTable;
+  embedding: Uint8Array | null;
+  embedding_version: string | null;
+};
 type EmbeddingItem = { id: string; text: string; source_table: EmbeddingSourceTable };
 
 const extractTextFromArtifactPayload = (payload: Record<string, unknown>): string | null => {
@@ -293,23 +300,29 @@ const resolveJoinedText = (db: Database, kind: string, payload: Record<string, u
 
 // T3.8/T5: readUnembedded now returns a Promise so the heavy SELECT can
 // route through the SQL worker-thread pool when present. Bun.SQL is
-// fake-async; this SELECT scans the events table by (embedding IS NULL,
-// kind IN (...)) which on a 270K-row substrate takes 30-90ms of fully
-// synchronous work. Routing through worker_threads frees the main loop
-// for emitEvent + MCP IO. The sync fallback path stays correct for unit
-// tests and ACC2_DISABLE_SQL_POOL=1 diagnostics.
+// fake-async; this SELECT scans the events table by the true retrieval
+// backlog predicate: embeddable source rows that either still need an
+// embedding blob OR already have a real embedding blob but are missing the
+// canonical vec_events projection. Routing through worker_threads frees the
+// main loop for emitEvent + MCP IO. The sync fallback path stays correct for
+// unit tests and ACC2_DISABLE_SQL_POOL=1 diagnostics.
 const readUnembedded = async (db: Database, batchSize: number): Promise<UnembeddedRow[]> => {
   const placeholders = Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ");
   const sql =
-    `SELECT id, kind, payload, source_table FROM (` +
-    `SELECT id, kind, payload, 'events' AS source_table, ts FROM events ` +
-    `WHERE embedding IS NULL AND kind IN (${placeholders}) ` +
+    `SELECT id, kind, payload, source_table, embedding, embedding_version FROM (` +
+    `SELECT id, kind, payload, 'events' AS source_table, ts, embedding, embedding_version FROM events e ` +
+    `WHERE kind IN (${placeholders}) AND (` +
+    `e.embedding IS NULL OR (` +
+    `length(e.embedding) > 0 AND NOT EXISTS (SELECT 1 FROM vec_events v WHERE v.event_id = e.id)` +
+    `)) ` +
     `UNION ALL ` +
     `SELECT id, 'act_artifact' AS kind, ` +
     `json_object('body', body, 'artifact_kind', kind, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, '')) AS payload, ` +
-    `'act_artifact' AS source_table, COALESCE(updated_at, created_at) AS ts FROM act_artifact ` +
+    `'act_artifact' AS source_table, COALESCE(updated_at, created_at) AS ts, embedding, NULL AS embedding_version FROM act_artifact a ` +
     `WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') ` +
-    `AND (embedding IS NULL OR length(embedding) = 0)` +
+    `AND (a.embedding IS NULL OR length(a.embedding) = 0 OR (` +
+    `length(a.embedding) > 0 AND NOT EXISTS (SELECT 1 FROM vec_events v WHERE v.event_id = a.id)` +
+    `))` +
     `) ORDER BY ts ASC LIMIT ?`;
   const params: unknown[] = [...Array.from(EMBEDDABLE_KINDS), batchSize];
   try {
@@ -335,11 +348,16 @@ export const pendingEmbeddableCount = async (db: Database): Promise<number> => {
   const placeholders = Array.from(EMBEDDABLE_KINDS).map(() => "?").join(", ");
   const sql =
     `SELECT SUM(c) AS c FROM (` +
-    `SELECT COUNT(*) AS c FROM events WHERE embedding IS NULL AND kind IN (${placeholders}) ` +
+    `SELECT COUNT(*) AS c FROM events e WHERE kind IN (${placeholders}) AND (` +
+    `e.embedding IS NULL OR (` +
+    `length(e.embedding) > 0 AND NOT EXISTS (SELECT 1 FROM vec_events v WHERE v.event_id = e.id)` +
+    `)) ` +
     `UNION ALL ` +
-    `SELECT COUNT(*) AS c FROM act_artifact ` +
+    `SELECT COUNT(*) AS c FROM act_artifact a ` +
     `WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') ` +
-    `AND (embedding IS NULL OR length(embedding) = 0)` +
+    `AND (a.embedding IS NULL OR length(a.embedding) = 0 OR (` +
+    `length(a.embedding) > 0 AND NOT EXISTS (SELECT 1 FROM vec_events v WHERE v.event_id = a.id)` +
+    `))` +
     `)`;
   const params: unknown[] = [...Array.from(EMBEDDABLE_KINDS)];
   try {
@@ -487,7 +505,21 @@ export const embedderWorkerTick = async (
   }
   const items: EmbeddingItem[] = [];
   const noTextIds: string[] = [];
+  const projectedIds: string[] = [];
+  let failed = 0;
   for (const r of rows) {
+    if (r.embedding && r.embedding.byteLength > 0) {
+      const decoded = decodeEmbeddingBlob(r.embedding);
+      if (decoded) {
+        try {
+          upsertVecEventRow(db, r.id, Array.from(decoded), r.embedding_version ?? EMBEDDING_VERSION, r.source_table);
+          projectedIds.push(r.id);
+        } catch {
+          failed++;
+        }
+        continue;
+      }
+    }
     let payload: Record<string, unknown> = {};
     try { payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>; } catch { /* skip */ }
     let text = r.source_table === "act_artifact"
@@ -503,8 +535,8 @@ export const embedderWorkerTick = async (
     items.push({ id: r.id, text, source_table: r.source_table });
   }
   // Mark text-less rows with a 0-byte sentinel BLOB so subsequent ticks don't
-  // keep re-reading them. `readUnembedded` filters on `embedding IS NULL`, so
-  // the sentinel takes them out of the queue without polluting `vec_events`
+  // keep re-reading them. `readUnembedded` filters out X'' sentinels, so the
+  // sentinel takes them out of the queue without polluting `vec_events`
   // (vec0 only receives rows with real vectors). Without this the embedder
   // gets stuck on the oldest events of kinds whose payloads carry no
   // embeddable text (e.g. act_artifact_admitted, action_scored — they're
@@ -521,13 +553,13 @@ export const embedderWorkerTick = async (
   }
   const skipped_no_text = noTextIds.length;
   if (items.length === 0) {
-    return { embedded: 0, skipped_no_text, failed: 0 };
+    emitBatchEmbeddingAudit(db, projectedIds, EMBEDDING_VERSION);
+    return { embedded: projectedIds.length, skipped_no_text, failed };
   }
   const batchStartMs = Date.now();
   const embeddings = await batchComputeEmbeddings(items);
   const batchDurMs = Date.now() - batchStartMs;
-  let embedded = 0;
-  let failed = 0;
+  let embedded = projectedIds.length;
   // Wrap all per-row persist work in ONE transaction. Pre-fix, each
   // persistEmbedding ran UPDATE events + vec_events upsert + an
   // embedding_computed event emit (which itself writes to events AND
@@ -537,7 +569,7 @@ export const embedderWorkerTick = async (
   // in BEGIN/COMMIT collapses fsync to once and lets WAL fast-path.
   // Failures inside the txn fall through to the catch and rollback the
   // whole batch — surviving rows are picked up by the next tick.
-  const persistedIds: string[] = [];
+  const persistedIds: string[] = [...projectedIds];
   db.run("BEGIN");
   try {
     for (const item of items) {

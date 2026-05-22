@@ -348,6 +348,57 @@ describe("embedderWorkerTick", () => {
     expect(recentRow.embedding).toBeNull();
   });
 
+  test("drains oldest embedded-but-missing-vec_events backlog across ticks", async () => {
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    let fetchCalls = 0;
+    installMockFetch(async (_url, init) => {
+      fetchCalls++;
+      const reqBody = JSON.parse((init.body as string) ?? "{}") as { input: string[] };
+      const data = reqBody.input.map((_t, i) => ({ embedding: synthEmbedding(i + 31), index: i }));
+      return new Response(JSON.stringify({ data }), { status: 200 });
+    });
+
+    const db = openDb(":memory:");
+    const older = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "old already embedded row" },
+    });
+    const newer = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "newer already embedded row" },
+    });
+    db.run("UPDATE events SET ts = ?, embedding = ?, embedding_version = ? WHERE id = ?", [
+      "2026-01-01T00:00:00.000Z",
+      encodeEmbeddingBlob(synthEmbedding(41)),
+      EMBEDDING_VERSION,
+      older.id,
+    ]);
+    db.run("UPDATE events SET ts = ?, embedding = ?, embedding_version = ? WHERE id = ?", [
+      "2026-01-02T00:00:00.000Z",
+      encodeEmbeddingBlob(synthEmbedding(42)),
+      EMBEDDING_VERSION,
+      newer.id,
+    ]);
+
+    const missingVecCount = () => (db.query(
+      "SELECT COUNT(*) AS c FROM events e WHERE e.kind = 'knowledge_candidate' AND length(e.embedding) > 0 AND NOT EXISTS (SELECT 1 FROM vec_events v WHERE v.event_id = e.id)",
+    ).get() as { c: number }).c;
+
+    expect(missingVecCount()).toBe(2);
+    const first = await embedderWorkerTick(db, { batchSize: 1 });
+    expect(first.embedded).toBe(1);
+    expect(missingVecCount()).toBe(1);
+    expect(db.query("SELECT event_id FROM vec_events WHERE event_id = ?").get(older.id)).not.toBeNull();
+    expect(db.query("SELECT event_id FROM vec_events WHERE event_id = ?").get(newer.id)).toBeNull();
+
+    const second = await embedderWorkerTick(db, { batchSize: 1 });
+    expect(second.embedded).toBe(1);
+    expect(missingVecCount()).toBe(0);
+    expect(fetchCalls).toBe(0);
+  });
+
   test("skips events whose payload has no text-like field", async () => {
     process.env.OPENAI_API_KEY = "sk-test-mock";
     installMockFetch(async () => new Response(JSON.stringify({ data: [] }), { status: 200 }));
