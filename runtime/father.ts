@@ -486,11 +486,18 @@ export type FatherJournalEvent = {
 export type FatherJournalOpts = {
   now?: string;
   journalEveryEvents?: number;
+  /** Debounce window (ms) for the per-event threshold SQL. Default 3000.
+   *  Tests pass 0 for deterministic per-call checks. */
+  journalCheckDebounceMs?: number;
 };
 
 /** Count events since the last `father_cycle_recorded`. Used by the reactive
  *  entry point to throttle journal cycles to once per N events instead of
  *  once per cadence interval. */
+/** Wall-clock of the last father-threshold SQL check; debounces the per-event
+ *  threshold query off the hot emit path. Module-global (one daemon). */
+let lastFatherThresholdCheckMs = 0;
+
 const countEventsSinceLastFatherJournal = (db: Database): number => {
   const lastJournal = db
     .query<{ ts: string }, []>(
@@ -529,6 +536,21 @@ export const fatherJournalOnEvent = async (
   }
   if (origin === "father") return null;
   const threshold = opts.journalEveryEvents ?? 100;
+  // DEBOUNCE the threshold SQL (owner: father cleanup). This handler is wired
+  // to onEvent('*') — it fires on EVERY ledger write. Father only needs to
+  // journal every `threshold` events, but the unguarded code paid 2 synchronous
+  // SQL queries (latest father_cycle_recorded + COUNT since) on the hot emit
+  // path for every event. Bound the check to once per debounce window: between
+  // windows we skip cheaply. The count stays cross-process-accurate when it
+  // runs (we never undercount — we only defer the check), so journals still
+  // fire on the 100-event threshold, just checked at most once per window.
+  // Tests pass journalCheckDebounceMs=0 for deterministic per-call checks.
+  const debounceMs = opts.journalCheckDebounceMs ?? 3000;
+  if (debounceMs > 0) {
+    const nowMs = Date.now();
+    if (nowMs - lastFatherThresholdCheckMs < debounceMs) return null;
+    lastFatherThresholdCheckMs = nowMs;
+  }
   if (countEventsSinceLastFatherJournal(db) < threshold) return null;
   return fatherIterate(db, {
     now: opts.now,

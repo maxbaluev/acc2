@@ -185,7 +185,24 @@ const HANDSHAKE_PERMIT_CAP = (() => {
     const n = parseInt(raw, 10);
     if (Number.isFinite(n) && n >= 1 && n <= 16) return n;
   }
-  return 2;
+  // DYNAMIC start-rate (owner: "dynamically understand how many brain
+  // instances can work in parallel"). The handshake permit caps how many
+  // brain dispatches enter the MCP handshake window concurrently — the
+  // start-rate stagger that the anti-starve admission gate enforces. A fixed
+  // 2 was far too conservative on a 20-core host: the RAM-based RUN cap
+  // (computeBrainDispatchCap) already allows ~14 concurrent brains, so a
+  // start-rate of 2 needlessly throttled ramp-up. Now that the daemon is lean
+  // + instant (no boot grind, freed ~14GB), scale the concurrent-handshake
+  // cap with CPU — handshakes are CPU+IO bound — so brain parallelism ramps
+  // to the RAM cap quickly on capable hosts and stays conservative on small
+  // ones. The anti-starve admission gate still prevents over-spawn beyond
+  // available permits, so raising this only speeds the ramp; it never starves.
+  try {
+    const cores = require("node:os").cpus().length;
+    return Math.max(2, Math.min(8, Math.floor(cores / 4)));
+  } catch {
+    return 2;
+  }
 })();
 
 const HANDSHAKE_WAIT_BUDGET_MS = (() => {
