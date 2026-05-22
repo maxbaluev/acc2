@@ -428,24 +428,63 @@ let healthCountsCache: HealthCountsCache = {
   window_iso: new Date(0).toISOString(),
   computed_at_ms: 0,
 };
-const refreshHealthCounts = (db: Database): void => {
+// T5: now async. The four COUNTs — a full `COUNT(*) FROM events` over the
+// 360k+ row events table plus three recent-window COUNTs — block the
+// synchronous bun:sqlite main loop for seconds under WAL-writer load. When
+// this interval fires on the server-role process (which serves /health + MCP),
+// that stall starves the request loop even though the refresh is off the
+// request path. Routing the COUNTs through the SQL worker-thread pool moves
+// them off-thread; the sync fallback stays correct for unit tests and
+// ACC2_DISABLE_SQL_POOL diagnostics (matches embedder.ts's getSqlPool idiom).
+const refreshHealthCounts = async (db: Database): Promise<void> => {
   const now = Date.now();
   const recentCutoff = new Date(now - 30 * 60 * 1000).toISOString();
-  const recent = (kinds: string[]): number => {
+  let pool: import("./sql_worker_pool").SqlWorkerPool | null = null;
+  try {
+    const poolMod = await import("./sql_pool_singleton");
+    pool = poolMod.getSqlPool();
+  } catch { /* tolerate — fall through to sync */ }
+
+  const countSql = "SELECT COUNT(*) AS c FROM events";
+  const recentSql = (kinds: string[]): string =>
+    `SELECT COUNT(*) AS c FROM events WHERE kind IN (${kinds.map(() => "?").join(",")}) AND ts >= ?`;
+
+  const recentSync = (kinds: string[]): number => {
     try {
-      const placeholders = kinds.map(() => "?").join(",");
-      const row = db
-        .query(`SELECT COUNT(*) AS c FROM events WHERE kind IN (${placeholders}) AND ts >= ?`)
-        .get(...kinds, recentCutoff) as { c: number };
+      const row = db.query(recentSql(kinds)).get(...kinds, recentCutoff) as { c: number };
       return row.c;
     } catch { return 0; }
   };
+  const recentPool = async (kinds: string[]): Promise<number> => {
+    try {
+      const rows = await pool!.query<{ c: number }>(recentSql(kinds), [...kinds, recentCutoff]);
+      return rows[0]?.c ?? 0;
+    } catch { return 0; }
+  };
+
   try {
+    if (pool) {
+      const [eventsRows, exhausted, debited, failed] = await Promise.all([
+        pool.query<{ c: number }>(countSql, []),
+        recentPool(["pathology_budget_exhausted"]),
+        recentPool(["pathology_budget_debited"]),
+        recentPool(["bridge_failed", "dispatcher_violation"]),
+      ]);
+      healthCountsCache = {
+        events_count: eventsRows[0]?.c ?? 0,
+        pathology_exhausted: exhausted,
+        pathology_debited: debited,
+        brain_failed: failed,
+        window_iso: recentCutoff,
+        computed_at_ms: now,
+      };
+      return;
+    }
     healthCountsCache = {
       events_count: countEvents(db),
-      pathology_exhausted: recent(["pathology_budget_exhausted"]),
-      pathology_debited: recent(["pathology_budget_debited"]),
-      brain_failed: recent(["bridge_failed", "dispatcher_violation"]),
+      pathology_exhausted: recentSync(["pathology_budget_exhausted"]),
+      pathology_debited: recentSync(["pathology_budget_debited"]),
+      brain_failed: recentSync(["bridge_failed", "dispatcher_violation"]),
       window_iso: recentCutoff,
       computed_at_ms: now,
     };
@@ -846,10 +885,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // First refresh is scheduled via setTimeout so daemon boot is not blocked
   // on the initial COUNT(*); /health returns cached zeros for the first ~1s
   // until the first refresh completes.
-  setTimeout(() => { try { refreshHealthCounts(db); } catch { /* swallow */ } }, 250);
+  setTimeout(() => { void refreshHealthCounts(db).catch(() => { /* swallow */ }); }, 250);
   // Hard timer: /health cache freshness degrades with elapsed time even if no ledger event arrives.
   const healthCountsTick = setInterval(() => {
-    try { refreshHealthCounts(db); } catch { /* keep stale cache */ }
+    void refreshHealthCounts(db).catch(() => { /* keep stale cache */ });
   }, 60_000);
   workers.push(() => clearInterval(healthCountsTick));
 

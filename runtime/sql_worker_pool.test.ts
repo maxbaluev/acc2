@@ -47,6 +47,34 @@ describe("SqlWorkerPool", () => {
     expect(m.completed).toBeGreaterThanOrEqual(1);
   });
 
+  test("async pool COUNT(*) is identical to the sync bun:sqlite path", async () => {
+    // Guards the daemon refreshHealthCounts migration (T5): the four health
+    // COUNTs were moved from synchronous db.query onto the pool so they no
+    // longer block the serving loop. The async path MUST return byte-identical
+    // results to the sync path it replaced. We assert equality for both the
+    // full COUNT(*) and a parameterized recent-window COUNT shape (the exact
+    // two query shapes refreshHealthCounts routes through the pool).
+    const sync = new Database(dbPath, { readonly: true });
+    const syncTotal = (sync.query("SELECT COUNT(*) AS c FROM items").get() as { c: number }).c;
+    const syncWindow = (
+      sync.query("SELECT COUNT(*) AS c FROM items WHERE label IN (?, ?) AND value >= ?")
+        .get("label_0", "label_1", 0) as { c: number }
+    ).c;
+    sync.close();
+
+    pool = startSqlWorkerPool({ workerCount: 2, dbPath, taskQueueLimit: 32 });
+    const poolTotal = (await pool.query<{ c: number }>("SELECT COUNT(*) AS c FROM items", []))[0]?.c ?? -1;
+    const poolWindow =
+      (await pool.query<{ c: number }>(
+        "SELECT COUNT(*) AS c FROM items WHERE label IN (?, ?) AND value >= ?",
+        ["label_0", "label_1", 0],
+      ))[0]?.c ?? -1;
+
+    expect(poolTotal).toBe(syncTotal);
+    expect(poolWindow).toBe(syncWindow);
+    expect(poolTotal).toBe(200);
+  });
+
   test("runs two queries in parallel across two workers", async () => {
     pool = startSqlWorkerPool({ workerCount: 2, dbPath, taskQueueLimit: 64 });
     // Bun-sqlite WAL on a 200-row table is fast; just confirm both
