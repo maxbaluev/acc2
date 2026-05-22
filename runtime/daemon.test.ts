@@ -17,10 +17,21 @@ import { isSchedulerDraining } from "./task_scheduler";
 // mcp ∈ [30000, 31000), aux ∈ [31000, 32000) — keeps both inside 16-bit range
 // and away from external_ingress.test.ts ([8000, 11000)) and
 // cli/dispatch.test.ts ([12000, 18000)).
-const pickPort = () => 30000 + Math.floor(Math.random() * 1000);
+//
+// MONOTONIC allocation (not random): random picks in a 1000-wide band
+// collided frequently — many servers per run reusing the same random port
+// (often before the prior server released it) produced spurious
+// "Failed to start server. Is port X in use?" errors even in isolation. A
+// per-process monotonic counter never reuses a port within a run. The random
+// START offset spreads parallel test processes across the band so they don't
+// all begin at the base. Wraps within the band (well beyond this file's test
+// count) to stay in range.
+let mcpPortCursor = Math.floor(Math.random() * 500);
+let auxPortCursor = Math.floor(Math.random() * 500);
+const pickPort = () => 30000 + (mcpPortCursor++ % 1000);
 const pickPortPair = () => {
   const mcp = pickPort();
-  const aux = 31000 + Math.floor(Math.random() * 1000);
+  const aux = 31000 + (auxPortCursor++ % 1000);
   return { mcp, aux };
 };
 
