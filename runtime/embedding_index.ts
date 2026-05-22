@@ -4,26 +4,24 @@
 // surface for existing callers (`retrieve`, `retrieveWithEmbedding`, the
 // daemon boot path, `mcp_server.handleSearch`, `prompt_composer`).
 //
-// What changed (vs the previous in-memory linear-scan implementation):
-//   - The production knn path is a single SQL query against vec_events.
-//     The daemon no longer materialises every 1536-dim Float32Array in
-//     JS memory at boot.
-//   - `rebuildFromDb` backfills vec_events from the legacy
-//     `events.embedding` BLOB column for cutover-window parity, while
-//     building a small metadata Map (kind / ts / origin / snippet /
-//     version per entry) so callers can iterate without re-reading
-//     events for filter-only purposes.
-//   - Tests use non-1536 dims (typically 8) for cosine sanity. vec0
-//     refuses inserts that don't match the declared dim, so the
-//     wrapper transparently falls back to an in-process linear-scan
-//     for those entries — kept just for test parity; production always
-//     emits 1536-dim vectors through the OpenAI embedder.
-//
-// Why keep the class at all? Three callers depend on the API shape today
-// (retrieve / retrieveWithEmbedding / prompt_composer); deleting it would
-// thrash them for no semantic gain. The wrapper is ~140 LOC and keeps the
-// canonical store migration self-contained. Phase G can collapse the
-// wrapper after callers move to the SQL surface directly.
+// Storage model (2026-05-22 on-demand-metadata refactor — owner directive):
+//   - vec_events (vec0, ON-DISK) is the SOLE persistent vector store. It is
+//     always-ready: the daemon does NOT rebuild any in-memory vector/metadata
+//     map at boot. `rebuildFromDb` is now effectively instant — it only
+//     backfills the FEW legacy events.embedding BLOB rows that never reached
+//     vec_events (cutover-window / mid-write-crash parity), and never
+//     pre-loads the giant per-row metadata Map that previously cost ~95s of
+//     boot and ~240MB+ RSS (14GB OOM pre-cap) on the production DB.
+//   - `search`/`knn` runs the vec_events MATCH knn over ALL embedded rows,
+//     then fetches enrichment/rerank metadata (kind / ts / origin / aspects /
+//     domains / snippet) ON-DEMAND for ONLY the K returned event_ids via one
+//     batched embedding_index_view query. Memory is bounded to the K results.
+//   - Tests use non-1536 dims (typically 8) for cosine sanity. vec0 refuses
+//     inserts that don't match the declared dim (float[1536]); the wrapper
+//     transparently stores those entries inline (`jsEntries`: Meta + vector)
+//     so an in-process linear-scan can serve them. This path is test-only;
+//     production always emits 1536-dim vectors through the OpenAI embedder
+//     and therefore keeps an EMPTY in-memory map.
 
 import type { Database } from "bun:sqlite";
 import { decodeEmbeddingBlob, EMBEDDING_VERSION, upsertVecEventRow } from "./embedder";
@@ -142,6 +140,11 @@ const asNumberRecord = (raw: unknown, payload: Record<string, unknown> | null): 
 
 type Meta = Omit<IndexEntry, "embedding">;
 
+/** Test-only inline entry: a vector vec_events refused (dim != 1536) plus its
+ *  enrichment metadata. Production never populates this — every 1536-dim
+ *  vector lives in vec_events and its metadata is fetched on-demand. */
+type JsEntry = { meta: Meta; vec: Float32Array };
+
 type EventRow = {
   id: string;
   kind: string;
@@ -154,6 +157,22 @@ type EventRow = {
   embedding_version: string | null;
   retrieval_aspects?: string | null;
   retrieval_domains?: string | null;
+};
+
+const rowToMeta = (row: EventRow): Meta => {
+  const payload = parsePayload(row.payload);
+  return {
+    event_id: row.id,
+    kind: row.kind,
+    ts: row.ts,
+    directive_id: row.directive_id,
+    task_id: row.task_id,
+    substrate_origin: row.substrate_origin,
+    embedding_version: row.embedding_version ?? EMBEDDING_VERSION,
+    retrieval_aspects: asStringRecord(row.retrieval_aspects, payload),
+    retrieval_domains: asNumberRecord(row.retrieval_domains, payload),
+    snippet: buildSnippet(payload),
+  };
 };
 
 const cosineDistance = (a: Float32Array, b: Float32Array): number => {
@@ -174,108 +193,74 @@ const cosineDistance = (a: Float32Array, b: Float32Array): number => {
   return 1 - clamped;
 };
 
+const METADATA_SELECT =
+  "SELECT id, kind, ts, directive_id, task_id, substrate_origin, payload, embedding, " +
+  "embedding_version, retrieval_aspects, retrieval_domains FROM embedding_index_view";
+
 export class EmbeddingIndex {
-  /** All metadata for entries currently visible to the index. Vectors
-   *  that vec_events accepted (dim == 1536) are flagged `inVec = true`
-   *  and queried via SQL. Entries with mismatched dims (test-only) hold
-   *  their Float32Array inline so the JS-fallback knn can serve them. */
   private constructor(
     private readonly db: Database,
-    private metadata: Map<string, Meta>,
-    /** Entries whose vector lives in vec_events (production path). */
-    private inVec: Set<string>,
-    /** Test-only inline storage for entries vec_events refused (dim mismatch). */
-    private jsVectors: Map<string, Float32Array>,
+    /** Test-only inline storage for entries vec_events refused (dim mismatch).
+     *  Holds both the enrichment metadata and the raw vector so the
+     *  JS-fallback knn can rank and enrich them. Empty in production. */
+    private jsEntries: Map<string, JsEntry>,
   ) {}
 
-  /** Bulk-rebuild from the legacy embedding_index_view: every event
-   *  with a non-null embedding BLOB gets backfilled into vec_events
-   *  (if dim matches) and recorded in the metadata Map. */
-  static rebuildFromDb(db: Database): EmbeddingIndex {
-    // 2026-05-21 OOM fix: bound the in-memory index to the most-recent
-    // EMBEDDING_INDEX_MAX_ROWS events. Pre-fix this loaded ALL embedded
-    // events (`SELECT … FROM embedding_index_view` with no limit) — on the
-    // production DB that was 328,085 rows with payloads up to ~298KB, plus
-    // backfilling the ~308K not yet in vec_events into the in-memory
-    // jsVectors map (1536 floats × ~6KB each). The bun process grew to 14GB
-    // RSS and the kernel OOM-killed it on EVERY boot (dmesg: "Out of memory:
-    // Killed process … total-vm:101GB anon-rss:14GB"). That — not any
-    // worker spin — was the daemon-death debugged this session.
-    //
-    // vec_events (vec0, on-disk) remains the FULL vector store and serves
-    // `MATCH` knn over all embedded rows regardless of this cap; the
-    // in-memory metadata map only enriches/reranks results, so bounding it
-    // to recent history trades a little old-event rerank metadata for not
-    // dying. Cap via ACC2_EMBEDDING_INDEX_MAX_ROWS (default 40000).
-    const maxRowsRaw = process.env.ACC2_EMBEDDING_INDEX_MAX_ROWS;
-    const maxRows = (() => {
-      if (typeof maxRowsRaw === "string" && maxRowsRaw.length > 0) {
-        const n = parseInt(maxRowsRaw, 10);
-        if (Number.isFinite(n) && n > 0) return n;
-      }
-      return 40000;
-    })();
-    const rows = db
-      .query(
-        "SELECT id, kind, ts, directive_id, task_id, substrate_origin, payload, embedding, embedding_version, retrieval_aspects, retrieval_domains " +
-          "FROM embedding_index_view ORDER BY ts DESC LIMIT ?",
-      )
-      .all(maxRows) as EventRow[];
-    const metadata = new Map<string, Meta>();
-    const inVec = new Set<string>();
-    const jsVectors = new Map<string, Float32Array>();
-    // 2026-05-21 instant-startup fix: pre-load the set of event_ids ALREADY
-    // present in vec_events so the rebuild loop can SKIP re-upserting them.
-    // Pre-fix, every boot re-upserted EVERY embedded vector into vec_events
-    // (thousands of vec0 1536-dim inserts) even though they were already
-    // persisted from their first embedding — the dominant boot CPU sink and
-    // a major contributor to slow startup. vec_events is the durable vector
-    // store; rebuildFromDb only needs to (a) load metadata into memory and
-    // (b) backfill the FEW rows whose embedding blob exists but never made
-    // it into vec_events (legacy / mid-write-crash rows).
-    const alreadyInVec = new Set<string>();
+  /** Count of embedded rows in the canonical store (vec_events) plus the
+   *  test-only inline entries. A fast COUNT(*) — no row materialisation. */
+  private vecCount(): number {
     try {
-      const vecRows = db.query("SELECT event_id FROM vec_events").all() as Array<{ event_id: string }>;
-      for (const v of vecRows) alreadyInVec.add(v.event_id);
-    } catch { /* vec_events may not exist in some test DBs; tolerate */ }
-    for (const row of rows) {
+      const r = this.db.query("SELECT COUNT(*) AS n FROM vec_events").get() as { n: number } | null;
+      return r?.n ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** Construct the index. NO heavy boot scan: vec_events is already the
+   *  persistent, always-ready vector store. This only backfills the FEW
+   *  legacy events.embedding BLOB rows that never reached vec_events (and,
+   *  for tests, stashes dim-mismatch vectors inline). Production DBs have
+   *  ~0 backfill rows, so this returns near-instantly. */
+  static rebuildFromDb(db: Database): EmbeddingIndex {
+    const jsEntries = new Map<string, JsEntry>();
+    // Only consider rows whose embedding BLOB exists but is NOT already in
+    // vec_events. The previous implementation scanned up to 40k rows (and
+    // pre-fix ALL ~328k rows, ~298KB payloads, growing to 14GB RSS / OOM)
+    // purely to build an in-memory metadata map. That map is gone — metadata
+    // is fetched on-demand for the K knn results. The remaining backfill set
+    // is the legacy/mid-write-crash rows that have a BLOB but no vec_events
+    // row; on a healthy production DB that set is empty.
+    let backfillRows: EventRow[] = [];
+    try {
+      backfillRows = db
+        .query(
+          `${METADATA_SELECT} v WHERE v.embedding IS NOT NULL ` +
+            "AND NOT EXISTS (SELECT 1 FROM vec_events ve WHERE ve.event_id = v.id)",
+        )
+        .all() as EventRow[];
+    } catch {
+      // vec_events may be absent in some minimal test DBs; fall back to a
+      // bounded scan so test seeds (dim-mismatch, never in vec_events) still
+      // land in jsEntries.
+      backfillRows = db.query(`${METADATA_SELECT} WHERE embedding IS NOT NULL`).all() as EventRow[];
+    }
+    for (const row of backfillRows) {
       const blob = row.embedding;
       if (!blob) continue;
       const decoded = decodeEmbeddingBlob(blob);
       if (!decoded) continue;
       const version = row.embedding_version ?? EMBEDDING_VERSION;
-      // Skip the vec_events upsert when the row is already present — the
-      // expensive path. Only genuinely-missing rows pay the upsert cost.
-      let projectedToVec = false;
-      if (alreadyInVec.has(row.id)) {
-        projectedToVec = true;
-      } else {
-        // Try to backfill vec_events. Test embeddings (dim != 1536) raise
-        // a schema error; we catch and stash the vector in jsVectors so
-        // the JS-fallback knn can serve them.
-        try {
-          upsertVecEventRow(db, row.id, Array.from(decoded), version);
-          projectedToVec = true;
-        } catch {
-          jsVectors.set(row.id, decoded);
-        }
+      try {
+        // 1536-dim production rows backfill into vec_events (no in-memory
+        // retention — served on-demand thereafter). Test rows (dim != 1536)
+        // raise a schema error and fall through to the inline store.
+        upsertVecEventRow(db, row.id, Array.from(decoded), version);
+      } catch {
+        jsEntries.set(row.id, { meta: rowToMeta(row), vec: decoded });
       }
-      if (projectedToVec) inVec.add(row.id);
-      const payload = parsePayload(row.payload);
-      metadata.set(row.id, {
-        event_id: row.id,
-        kind: row.kind,
-        ts: row.ts,
-        directive_id: row.directive_id,
-        task_id: row.task_id,
-        substrate_origin: row.substrate_origin,
-        embedding_version: version,
-        retrieval_aspects: asStringRecord(row.retrieval_aspects, payload),
-        retrieval_domains: asNumberRecord(row.retrieval_domains, payload),
-        snippet: buildSnippet(payload),
-      });
     }
-    return new EmbeddingIndex(db, metadata, inVec, jsVectors);
+    return new EmbeddingIndex(db, jsEntries);
   }
 
   /** Append one entry — called by tests synthesizing entries directly
@@ -284,11 +269,10 @@ export class EmbeddingIndex {
    *  `add` after that would be a duplicate, but the upsert is
    *  idempotent so it's safe.
    *
-   *  Verification: after attempting the vec_events upsert we check
-   *  whether the row actually landed. upsertVecEventRow returns early
-   *  if there's no matching `events` row (synthetic `add` skips the
-   *  events table); in that case we stash the vector inline so knnJs
-   *  can still serve it. */
+   *  Production (1536-dim) entries land in vec_events and are NOT retained
+   *  in memory — their metadata is fetched on-demand at knn time. Entries
+   *  vec_events refuses (synthetic / dim-mismatch test rows) are stashed
+   *  inline so knnJs can serve them. */
   add(entry: IndexEntry): void {
     let projectedToVec = false;
     try {
@@ -301,42 +285,45 @@ export class EmbeddingIndex {
       /* vec0 refused (typically a dim mismatch for tests); fall through */
     }
     if (projectedToVec) {
-      this.inVec.add(entry.event_id);
-    } else {
-      this.jsVectors.set(entry.event_id, entry.embedding);
+      // In vec_events → metadata served on-demand. Drop any stale inline copy.
+      this.jsEntries.delete(entry.event_id);
+      return;
     }
-    this.metadata.set(entry.event_id, {
-      event_id: entry.event_id,
-      kind: entry.kind,
-      ts: entry.ts,
-      directive_id: entry.directive_id,
-      task_id: entry.task_id,
-      substrate_origin: entry.substrate_origin,
-      embedding_version: entry.embedding_version,
-      retrieval_aspects: entry.retrieval_aspects ?? {},
-      retrieval_domains: entry.retrieval_domains ?? {},
-      snippet: entry.snippet,
+    this.jsEntries.set(entry.event_id, {
+      meta: {
+        event_id: entry.event_id,
+        kind: entry.kind,
+        ts: entry.ts,
+        directive_id: entry.directive_id,
+        task_id: entry.task_id,
+        substrate_origin: entry.substrate_origin,
+        embedding_version: entry.embedding_version,
+        retrieval_aspects: entry.retrieval_aspects ?? {},
+        retrieval_domains: entry.retrieval_domains ?? {},
+        snippet: entry.snippet,
+      },
+      vec: entry.embedding,
     });
   }
 
-  /** KNN. Combines the SQL path (entries in vec_events) and the JS
-   *  fallback (test-only entries with non-1536 dims). The optional
-   *  `filter` predicate runs after the SQL pass; vec0 supports WHERE
-   *  on kind / ts / embedding_version directly, but the legacy callback
-   *  API takes arbitrary predicates so we over-fetch and post-filter. */
+  /** KNN. Combines the SQL path (vec_events) and the JS fallback (test-only
+   *  entries with non-1536 dims). The optional `filter` predicate runs after
+   *  the SQL pass; vec0 supports WHERE on kind / ts / embedding_version
+   *  directly, but the legacy callback API takes arbitrary predicates so we
+   *  over-fetch and post-filter. */
   knn(
     queryEmbedding: Float32Array,
     k: number,
     filter?: (e: IndexEntry) => boolean,
   ): KnnHit[] {
-    if (this.metadata.size === 0 || queryEmbedding.length === 0) return [];
-    const kCap = Math.max(1, Math.min(this.metadata.size, k));
+    if (queryEmbedding.length === 0 || k <= 0) return [];
+    const kCap = Math.max(1, k);
 
-    // Path selection: if the query is 1536-dim AND there is at least one
-    // entry in vec_events, use the SQL path. Otherwise fall back to JS.
-    const useSql = queryEmbedding.length === 1536 && this.inVec.size > 0;
-
-    if (useSql) return this.knnSql(queryEmbedding, kCap, filter);
+    // Path selection: 1536-dim query AND vec_events has rows → SQL path.
+    // Otherwise the JS fallback (test dim-mismatch entries, or no vec rows).
+    if (queryEmbedding.length === 1536 && this.vecCount() > 0) {
+      return this.knnSql(queryEmbedding, kCap, filter);
+    }
     return this.knnJs(queryEmbedding, kCap, filter);
   }
 
@@ -354,13 +341,25 @@ export class EmbeddingIndex {
         "SELECT event_id, distance FROM vec_events WHERE embedding MATCH ? AND k = ? ORDER BY distance",
       )
       .all(vec, fetchN) as Array<{ event_id: string; distance: number }>;
+    if (rows.length === 0) return [];
+
+    // ON-DEMAND metadata: one batched query for ONLY the K knn result ids.
+    // This is the entire memory footprint — no pre-loaded 40k map.
+    const ids = rows.map((r) => r.event_id);
+    const placeholders = ids.map(() => "?").join(", ");
+    const metaRows = this.db
+      .query(`${METADATA_SELECT} WHERE id IN (${placeholders})`)
+      .all(...ids) as EventRow[];
+    const metaById = new Map<string, Meta>();
+    for (const mr of metaRows) metaById.set(mr.id, rowToMeta(mr));
+
     const hits: KnnHit[] = [];
     for (const r of rows) {
-      const meta = this.metadata.get(r.event_id);
+      const meta = metaById.get(r.event_id);
       if (!meta) continue;
       const entry: IndexEntry = {
         ...meta,
-        embedding: queryEmbedding, // placeholder; callers don't use this in the SQL path
+        embedding: queryEmbedding, // placeholder; SQL-path callers don't use this
       };
       if (filter && !filter(entry)) continue;
       // sqlite-vec's default distance for float[] embeddings is L2 on the
@@ -381,9 +380,7 @@ export class EmbeddingIndex {
     filter?: (e: IndexEntry) => boolean,
   ): KnnHit[] {
     const hits: KnnHit[] = [];
-    for (const [eventId, meta] of this.metadata) {
-      const vec = this.jsVectors.get(eventId);
-      if (!vec) continue;
+    for (const { meta, vec } of this.jsEntries.values()) {
       if (vec.length !== queryEmbedding.length) continue;
       const entry: IndexEntry = { ...meta, embedding: vec };
       if (filter && !filter(entry)) continue;
@@ -393,28 +390,28 @@ export class EmbeddingIndex {
     return hits.slice(0, kCap);
   }
 
-  /** Snapshot the entry list — used by tests + the retrieval surface
-   *  to introspect what is currently indexed. The embedding field is
-   *  populated from jsVectors when available; SQL-path entries get an
-   *  empty placeholder (callers that need the vector must read the
-   *  events.embedding BLOB column directly). */
+  /** Snapshot the test-only inline entries — used by tests to introspect
+   *  what was loaded via the dim-mismatch fallback. Production vec_events
+   *  rows are NOT enumerated here (no in-memory copy exists; query
+   *  embedding_index_view directly if a full enumeration is ever needed). */
   list(): IndexEntry[] {
     const out: IndexEntry[] = [];
-    for (const meta of this.metadata.values()) {
-      const inline = this.jsVectors.get(meta.event_id);
-      out.push({ ...meta, embedding: inline ?? new Float32Array(0) });
+    for (const { meta, vec } of this.jsEntries.values()) {
+      out.push({ ...meta, embedding: vec });
     }
     return out;
   }
 
   reloadFromDb(): void {
     const fresh = EmbeddingIndex.rebuildFromDb(this.db);
-    this.metadata = fresh.metadata;
-    this.inVec = fresh.inVec;
-    this.jsVectors = fresh.jsVectors;
+    this.jsEntries = fresh.jsEntries;
   }
 
+  /** Embedded-row count. Reflects the canonical vec_events store (a fast
+   *  COUNT) plus any test-only inline entries. Callers gate retrieval on
+   *  `size() > 0` — with vec_events always-ready this is true whenever the
+   *  on-disk index has any rows, regardless of in-memory state. */
   size(): number {
-    return this.metadata.size;
+    return this.vecCount() + this.jsEntries.size;
   }
 }
