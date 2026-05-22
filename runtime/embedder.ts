@@ -75,46 +75,93 @@ export const decodeEmbeddingBlob = (blob: Uint8Array | null): Float32Array | nul
 };
 
 /** Compute one embedding via the OpenAI API. Returns null on missing
- *  credentials OR network/HTTP error — the caller decides whether to
- *  degrade. We deliberately do not throw: the embedder worker should
- *  continue past one bad event rather than crash the daemon. */
+ *  credentials OR after bounded retry of transient network/HTTP failures —
+ *  the caller decides whether to degrade. We deliberately do not throw: the
+ *  embedder worker should continue past one bad event rather than crash the
+ *  daemon. */
 /** Per-request OpenAI fetch deadline. Native Bun/Node fetch has NO default
  *  timeout — a hung OpenAI endpoint would hang the embedder worker
  *  indefinitely, blocking every subsequent embedding job. 30s is comfortably
  *  above OpenAI's published p99 (typically 1-3s for text-embedding-3-small
  *  on 100-item batches) while still failing fast on a genuine wedge. */
 const EMBED_FETCH_TIMEOUT_MS = 30_000;
+const EMBED_FETCH_RETRY_ATTEMPTS = 3;
+const EMBED_FETCH_RETRY_BASE_MS = 250;
+const EMBED_FETCH_RETRY_MAX_DELAY_MS = 2_000;
+
+const isRetryableEmbeddingStatus = (status: number): boolean =>
+  status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+
+const retryAfterMs = (response: Response): number | null => {
+  if (response.status !== 429) return null;
+  const raw = response.headers.get("retry-after");
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, EMBED_FETCH_RETRY_MAX_DELAY_MS);
+  const dateMs = Date.parse(raw);
+  if (!Number.isFinite(dateMs)) return null;
+  return Math.min(Math.max(0, dateMs - Date.now()), EMBED_FETCH_RETRY_MAX_DELAY_MS);
+};
+
+const embeddingRetryDelayMs = (attempt: number, response?: Response): number => {
+  const retryAfter = response ? retryAfterMs(response) : null;
+  if (retryAfter !== null) return retryAfter;
+  const exponential = EMBED_FETCH_RETRY_BASE_MS * (2 ** attempt);
+  const jitter = Math.floor(Math.random() * EMBED_FETCH_RETRY_BASE_MS);
+  return Math.min(exponential + jitter, EMBED_FETCH_RETRY_MAX_DELAY_MS);
+};
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const fetchEmbeddingResponse = async (
+  config: { apiKey: string; baseUrl: string },
+  body: unknown,
+): Promise<Response | null> => {
+  for (let attempt = 0; attempt <= EMBED_FETCH_RETRY_ATTEMPTS; attempt++) {
+    try {
+      const response = await fetch(`${config.baseUrl}/embeddings`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(EMBED_FETCH_TIMEOUT_MS),
+      });
+      if (response.ok) return response;
+      if (!isRetryableEmbeddingStatus(response.status) || attempt === EMBED_FETCH_RETRY_ATTEMPTS) return null;
+      await sleep(embeddingRetryDelayMs(attempt, response));
+    } catch {
+      if (attempt === EMBED_FETCH_RETRY_ATTEMPTS) return null;
+      await sleep(embeddingRetryDelayMs(attempt));
+    }
+  }
+  return null;
+};
 
 export const computeEmbedding = async (
   text: string,
 ): Promise<EmbeddingResult | null> => {
   const config = getApiConfig();
   if (!config) return null;
-  try {
-    const response = await fetch(`${config.baseUrl}/embeddings`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify({ model: EMBEDDING_MODEL, input: text, dimensions: EMBEDDING_DIMS }),
-      signal: AbortSignal.timeout(EMBED_FETCH_TIMEOUT_MS),
-    });
-    if (!response.ok) return null;
-    const data = (await response.json()) as { data?: Array<{ embedding: number[] }> };
-    const embedding = data.data?.[0]?.embedding;
-    if (!embedding) return null;
-    return { embedding, version: EMBEDDING_VERSION };
-  } catch {
-    return null;
-  }
+  const response = await fetchEmbeddingResponse(config, {
+    model: EMBEDDING_MODEL,
+    input: text,
+    dimensions: EMBEDDING_DIMS,
+  });
+  if (!response) return null;
+  const data = (await response.json()) as { data?: Array<{ embedding: number[] }> };
+  const embedding = data.data?.[0]?.embedding;
+  if (!embedding) return null;
+  return { embedding, version: EMBEDDING_VERSION };
 };
 
 const BATCH_SIZE = 100;
 
 /** Batch variant — chunks at 100 items per OpenAI request (the documented
- *  per-request input cap). On any chunk failure the surviving keys remain in
- *  the returned Map; missing keys signal failure to the caller. */
+ *  per-request input cap). On any chunk failure after bounded retry, the
+ *  surviving keys remain in the returned Map; missing keys signal failure to
+ *  the caller. */
 export const batchComputeEmbeddings = async (
   items: { id: string; text: string }[],
 ): Promise<Map<string, number[]>> => {
@@ -125,30 +172,18 @@ export const batchComputeEmbeddings = async (
 
   for (let offset = 0; offset < items.length; offset += BATCH_SIZE) {
     const slice = items.slice(offset, offset + BATCH_SIZE);
-    try {
-      const response = await fetch(`${config.baseUrl}/embeddings`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${config.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: EMBEDDING_MODEL,
-          input: slice.map((i) => i.text),
-          dimensions: EMBEDDING_DIMS,
-        }),
-        signal: AbortSignal.timeout(EMBED_FETCH_TIMEOUT_MS),
-      });
-      if (!response.ok) continue;
-      const data = (await response.json()) as { data?: Array<{ embedding: number[]; index: number }> };
-      if (!data.data) continue;
-      for (const entry of data.data) {
-        if (entry.index >= 0 && entry.index < slice.length) {
-          result.set(slice[entry.index].id, entry.embedding);
-        }
+    const response = await fetchEmbeddingResponse(config, {
+      model: EMBEDDING_MODEL,
+      input: slice.map((i) => i.text),
+      dimensions: EMBEDDING_DIMS,
+    });
+    if (!response) continue;
+    const data = (await response.json()) as { data?: Array<{ embedding: number[]; index: number }> };
+    if (!data.data) continue;
+    for (const entry of data.data) {
+      if (entry.index >= 0 && entry.index < slice.length) {
+        result.set(slice[entry.index].id, entry.embedding);
       }
-    } catch {
-      /* swallow — surviving chunks already in result; missing keys = failed */
     }
   }
   return result;

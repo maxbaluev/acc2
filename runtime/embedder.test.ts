@@ -89,18 +89,55 @@ describe("computeEmbedding (mocked fetch)", () => {
     expect(result!.embedding.length).toBe(EMBEDDING_DIMS);
   });
 
-  test("returns null on a 500 response (transient error)", async () => {
+  test("retries a 429 then returns embedding on a successful response", async () => {
     process.env.OPENAI_API_KEY = "sk-test-mock";
-    installMockFetch(async () => new Response("oops", { status: 500 }));
+    let calls = 0;
+    installMockFetch(async () => {
+      calls++;
+      if (calls === 1) return new Response("rate limited", { status: 429, headers: { "Retry-After": "0" } });
+      const body = JSON.stringify({ data: [{ embedding: synthEmbedding(2), index: 0 }] });
+      return new Response(body, { status: 200, headers: { "Content-Type": "application/json" } });
+    });
     const result = await computeEmbedding("hello world");
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result!.embedding.length).toBe(EMBEDDING_DIMS);
+    expect(calls).toBe(2);
   });
 
-  test("returns null on a network throw", async () => {
+  test("returns null immediately on a non-retryable 400 response", async () => {
     process.env.OPENAI_API_KEY = "sk-test-mock";
-    installMockFetch(async () => { throw new Error("ECONNRESET"); });
+    let calls = 0;
+    installMockFetch(async () => {
+      calls++;
+      return new Response("bad request", { status: 400 });
+    });
     const result = await computeEmbedding("hello world");
     expect(result).toBeNull();
+    expect(calls).toBe(1);
+  });
+
+  test("bounds retries for a transient 500 response", async () => {
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    let calls = 0;
+    installMockFetch(async () => {
+      calls++;
+      return new Response("oops", { status: 500, headers: { "Retry-After": "0" } });
+    });
+    const result = await computeEmbedding("hello world");
+    expect(result).toBeNull();
+    expect(calls).toBe(4);
+  });
+
+  test("returns null on a network throw after bounded retries", async () => {
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    let calls = 0;
+    installMockFetch(async () => {
+      calls++;
+      throw new Error("ECONNRESET");
+    });
+    const result = await computeEmbedding("hello world");
+    expect(result).toBeNull();
+    expect(calls).toBe(4);
   });
 });
 
@@ -139,6 +176,22 @@ describe("batchComputeEmbeddings", () => {
     expect(result.get("alpha")!.length).toBe(EMBEDDING_DIMS);
     expect(result.get("bravo")!.length).toBe(EMBEDDING_DIMS);
     expect(result.get("charlie")!.length).toBe(EMBEDDING_DIMS);
+  });
+
+  test("retries a transient chunk failure before mapping embeddings", async () => {
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    let calls = 0;
+    installMockFetch(async (_url, init) => {
+      calls++;
+      if (calls === 1) return new Response("rate limited", { status: 429, headers: { "Retry-After": "0" } });
+      const reqBody = JSON.parse((init.body as string) ?? "{}") as { input: string[] };
+      const data = reqBody.input.map((_t, i) => ({ embedding: synthEmbedding(i + 8), index: i }));
+      return new Response(JSON.stringify({ data }), { status: 200 });
+    });
+    const result = await batchComputeEmbeddings([{ id: "alpha", text: "a" }]);
+    expect(result.size).toBe(1);
+    expect(result.get("alpha")!.length).toBe(EMBEDDING_DIMS);
+    expect(calls).toBe(2);
   });
 });
 
