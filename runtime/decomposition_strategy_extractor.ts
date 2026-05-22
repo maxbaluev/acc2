@@ -200,6 +200,47 @@ export const categorizeShape = (
   total_nodes: number,
 ): ShapeCategory => categorizeShapeWithContributors(fan_out, max_depth, total_nodes).shape_category;
 
+/**
+ * Goal-only shape classification — the SEMANTIC half of
+ * `categorizeShapeWithContributors`, evaluated BEFORE any DAG geometry
+ * exists (i.e. at prompt-compose time, when the brain has not decomposed
+ * the directive yet). It reuses the exact same semantic contributor branches
+ * (goal_class + owner_gate/recovery/rolling/adjudication signals) so the
+ * category surfaced as advisory context matches the category the extractor
+ * later credits — single source of truth for the semantic mapping.
+ *
+ * It deliberately drops the geometry-first short-circuit (`total_nodes <= 1`
+ * → inline_atomic, fan_out/depth thresholds) because none of that is known
+ * pre-decomposition. When no semantic signal fires it returns null rather
+ * than guessing a geometry-derived bucket. The retrieval-binding leg in
+ * prompt_composer uses this to look up the matching scored predicate row.
+ */
+export const categorizeGoalShapeSemantic = (
+  goalText: string,
+  evidence: {
+    owner_gate_count?: number;
+    recovery_signal?: number;
+    rolling_signal?: number;
+    adjudication_signal?: number;
+  } = {},
+): ShapeCategory | null => {
+  const goal = (goalText ?? "").toLowerCase();
+  const ownerGate = clamp01(evidence.owner_gate_count ?? 0);
+  const recovery = clamp01(evidence.recovery_signal ?? 0);
+  const rolling = clamp01(evidence.rolling_signal ?? 0);
+  const adjudication = clamp01(evidence.adjudication_signal ?? 0);
+  if (ownerGate > 0) return "owner_gated_decision_tree";
+  if (recovery > 0) return "operational_recovery";
+  if (rolling > 0) return "rolling_maintenance";
+  if (adjudication > 0 || goal.includes("synthesize")) return "synthesize_adjudication";
+  if (goal.includes("audit")) return "audit_evidence_sweep";
+  if (goal.includes("build")) return "build_parallel_bundle";
+  if (goal.includes("migrate")) return "migrate_dependency_chain";
+  if (goal.includes("refactor")) return "refactor_change_bundle";
+  if (goal.includes("explore") || goal.includes("research")) return "explore_research_fanout";
+  return null;
+};
+
 export const shouldDecomposePredicate = (args: {
   expected_residual_reduction: number;
   independent_verifiability: number;

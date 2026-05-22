@@ -271,6 +271,122 @@ describe("prompt_composer", () => {
     expect(freshComposed.text).not.toContain("EXISTING DECOMPOSITION FOR THIS DIRECTIVE");
   });
 
+  test("PROVEN DECOMPOSITION STRATEGY section binds the outcome-scored decomposition_strategy_predicate row to a matching goal (Tier-S1 retrieval-binding leg)", () => {
+    const db = openDb(":memory:");
+    seedFoundationalKnowledge(db, { ownerApproved: true });
+
+    // Insert a scored decomposition_strategy_predicate row exactly as the
+    // extractor's upsertPredicateRow does: id=decomp_<shape>, body carries the
+    // outcome-derived metrics, posterior is Beta(alpha,beta). Audit goals map
+    // to shape_category "audit_evidence_sweep" via categorizeGoalShapeSemantic.
+    const insertDecompPredicate = (
+      shape: string,
+      effectiveScore: number,
+      sampleCount: number,
+      meanResidual: number,
+    ): void => {
+      const id = `decomp_${shape}`;
+      const alpha = 1 + effectiveScore * sampleCount;
+      const beta = 1 + (1 - effectiveScore) * sampleCount;
+      const nowIso = new Date().toISOString();
+      db.run(
+        `INSERT INTO act_artifact (
+           id, runtime, body, declared_sandbox, state_root, kind,
+           posterior_alpha, posterior_beta, score, confidence,
+           recent_residual_mean, recent_kill_count, status, name,
+           fixture_input, fixture_expected_residual, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          "bun",
+          JSON.stringify({
+            shape_category: shape,
+            sample_count: sampleCount,
+            mean_residual: meanResidual,
+            std_residual: 0.05,
+            effective_score: effectiveScore,
+            avg_fan_out: 4.2,
+            avg_max_depth: 2.1,
+            avg_total_nodes: 6.0,
+            last_observed_ts: nowIso,
+          }),
+          JSON.stringify({ runtime: "bun" }),
+          `substrate/decomposition_strategy/${id}`,
+          "decomposition_strategy_predicate",
+          alpha,
+          beta,
+          effectiveScore,
+          1 - 1 / Math.sqrt(alpha + beta),
+          meanResidual,
+          0,
+          "admitted",
+          shape,
+          JSON.stringify({ shape_category: shape }),
+          0.5,
+          nowIso,
+          nowIso,
+        ],
+      );
+    };
+
+    // A well-closing audit shape (high score, enough samples) → surfaced.
+    insertDecompPredicate("audit_evidence_sweep", 0.82, 12, 0.18);
+
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "Audit the dispatch pipeline for residual drift", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { goal: "Audit the dispatch pipeline for residual drift", lifecycle: "finite" },
+    });
+
+    const composed = composePrompt(db, { taskId });
+    const section = composed.sections.find((s) => s.name === "proven_decomposition_strategy");
+    expect(section).toBeDefined();
+    expect(section?.priorityP).toBe(1); // advisory, drops first under budget pressure
+    expect(composed.text).toContain("PROVEN DECOMPOSITION STRATEGY");
+    expect(composed.text).toContain("audit_evidence_sweep");
+    // Residual-derived metrics surface verbatim so credit binding is honest.
+    expect(composed.text).toContain("effective_score=0.82");
+    expect(composed.text).toContain("mean closure_residual=0.18");
+    // Citation binding: the scored predicate id is cited so outcome credit flows.
+    expect(composed.text).toContain("[cite decomp_audit_evidence_sweep]");
+
+    // Below the advisory floor: a low-score row (or too few samples) must NOT
+    // surface — surfacing a poorly-closing shape would be noise, not signal.
+    const lowDb = openDb(":memory:");
+    seedFoundationalKnowledge(lowDb, { ownerApproved: true });
+    const lowDirId = newId();
+    const lowTaskId = newId();
+    emitEvent(lowDb, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: lowDirId,
+      task_id: lowDirId,
+      payload: { directive_text: "Build the parallel ingestion bundle", lifecycle: "finite" },
+    });
+    emitEvent(lowDb, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: lowDirId,
+      task_id: lowTaskId,
+      payload: { goal: "Build the parallel ingestion bundle", lifecycle: "finite" },
+    });
+    // No matching predicate row at all → section absent.
+    const lowComposed = composePrompt(lowDb, { taskId: lowTaskId });
+    expect(lowComposed.sections.find((s) => s.name === "proven_decomposition_strategy")).toBeUndefined();
+    expect(lowComposed.text).not.toContain("PROVEN DECOMPOSITION STRATEGY");
+  });
+
   test("returns the fixture marker for fixture_d_count_todos prompts", () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);

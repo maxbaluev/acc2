@@ -24,6 +24,7 @@ import { renderStakeholderBlock } from "./stakeholder_compositor";
 import { renderInterferenceBlock } from "./interference";
 import { emitEvent } from "./events";
 import { goalShape } from "./goal_shape";
+import { categorizeGoalShapeSemantic } from "./decomposition_strategy_extractor";
 import { buildBrainSelfAudit, renderBrainSelfAuditSection } from "./brain_introspection";
 import type { JsonValue, OwnerProfile } from "../substrate/types";
 import { OWNER_PROFILE_DEFAULTS } from "../substrate/types";
@@ -307,6 +308,118 @@ const buildExistingDecompositionSection = (rows: ExistingChild[]): string => {
     "If a question on your decomposition list already has ≥ 1 committed sibling above, COMPOSE THE ANSWER FROM THE COMMITTED CHILD (substrate.read/get_event); do NOT emit another task_node_opened for it. Closure verifier will count duplicates as a decomposition-explosion failure.",
   );
   return lines.join("\n");
+};
+
+// ── Proven decomposition strategy (Tier-S1 retrieval-binding leg) ──────────
+//
+// The decomposition_strategy_extractor scans CLOSED directives, buckets each
+// by deterministic shape_category, and admits one
+// act_artifact{kind:decomposition_strategy_predicate, id:decomp_<category>}
+// row carrying an outcome-derived Beta posterior (effective_score is high when
+// that shape historically closed with LOW aggregate closure_residual and LOW
+// variance). Until now those scored rows were WRITTEN but never RETRIEVED —
+// the write side of primitive #1 existed, the retrieval-binding leg did not.
+//
+// This reader closes the loop: at compose time it maps the directive goal to
+// the SAME shape_category the extractor would assign (goal_class derived from
+// the goal text, zero DAG geometry yet because the brain has not decomposed),
+// looks up the matching scored predicate row, and — when that shape has
+// historically closed well (effective_score above the advisory floor with
+// enough samples) — surfaces it as advisory context so the brain retrieves a
+// PROVEN decomposition strategy for similar future goals.
+//
+// Purely additive: a non-floor advisory candidate that drops first under
+// budget pressure. It changes nothing about how/whether tasks dispatch or
+// close — it only feeds the brain an outcome-scored structural prior.
+
+const PROVEN_DECOMP_MIN_SAMPLES = 5;
+const PROVEN_DECOMP_MIN_SCORE = 0.55;
+
+type ProvenDecompositionStrategy = {
+  shape_category: string;
+  predicate_act_artifact_id: string;
+  effective_score: number;
+  mean_residual: number;
+  sample_count: number;
+  avg_fan_out: number;
+  avg_max_depth: number;
+  avg_total_nodes: number;
+};
+
+const readProvenDecompositionStrategy = (
+  db: Database,
+  goalText: string | null | undefined,
+): ProvenDecompositionStrategy | null => {
+  const goal = (goalText ?? "").trim();
+  if (goal.length === 0) return null;
+  // Map the goal to the SEMANTIC shape_category the extractor credits — no DAG
+  // geometry exists pre-decomposition, so the semantic-only classifier carries
+  // the signal. Returns null when no semantic signal fires (don't guess).
+  let shapeCategory: ReturnType<typeof categorizeGoalShapeSemantic>;
+  try {
+    shapeCategory = categorizeGoalShapeSemantic(goal);
+  } catch {
+    return null;
+  }
+  if (!shapeCategory) return null;
+  const id = `decomp_${shapeCategory}`;
+  let row: { body: string | null; score: number | null } | null = null;
+  try {
+    row = db
+      .query(
+        `SELECT body, score FROM act_artifact
+          WHERE id = ?
+            AND kind = 'decomposition_strategy_predicate'
+            AND superseded_by IS NULL
+            AND status IN ('admitted', 'promoted')
+          LIMIT 1`,
+      )
+      .get(id) as { body: string | null; score: number | null } | null;
+  } catch {
+    return null;
+  }
+  if (!row || !row.body) return null;
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(row.body) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const sampleCount = typeof body.sample_count === "number" ? body.sample_count : 0;
+  const effectiveScore =
+    typeof body.effective_score === "number"
+      ? body.effective_score
+      : typeof row.score === "number"
+        ? row.score
+        : 0;
+  // Advisory floor: only surface shapes the substrate has SEEN enough times
+  // AND that historically closed well. A low-score shape is not a strategy to
+  // recommend — surfacing it would be noise, not signal.
+  if (sampleCount < PROVEN_DECOMP_MIN_SAMPLES) return null;
+  if (effectiveScore < PROVEN_DECOMP_MIN_SCORE) return null;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  return {
+    shape_category: shapeCategory,
+    predicate_act_artifact_id: id,
+    effective_score: effectiveScore,
+    mean_residual: num(body.mean_residual),
+    sample_count: sampleCount,
+    avg_fan_out: num(body.avg_fan_out),
+    avg_max_depth: num(body.avg_max_depth),
+    avg_total_nodes: num(body.avg_total_nodes),
+  };
+};
+
+const buildProvenDecompositionStrategySection = (
+  s: ProvenDecompositionStrategy | null,
+): string => {
+  if (!s) return "";
+  const pct = (v: number): string => `${(v * 100).toFixed(0)}%`;
+  return [
+    `PROVEN DECOMPOSITION STRATEGY (outcome-scored from ${s.sample_count} closed directive(s) of shape "${s.shape_category}"):`,
+    `  This goal shape historically closed well (effective_score=${s.effective_score.toFixed(2)}, mean closure_residual=${s.mean_residual.toFixed(2)}) with a structure averaging ~${s.avg_fan_out.toFixed(1)} root child task(s), depth ~${s.avg_max_depth.toFixed(1)}, ~${s.avg_total_nodes.toFixed(1)} total node(s).`,
+    `  ADVISORY ONLY: prefer this proven structure when it fits; deviate when the directive genuinely differs. The substrate credits whichever decomposition closes — your residual feeds back into this score (${pct(s.effective_score)} confidence today). [cite ${s.predicate_act_artifact_id}]`,
+  ].join("\n");
 };
 
 const goalShapeTags = (goalText?: string | null): string[] => {
@@ -1929,6 +2042,17 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   const existingDecompBody = buildExistingDecompositionSection(existingDecomp);
   if (existingDecompBody.length > 0) {
     candidates.push({ name: "existing_decomposition", p: 0, floor: true, body: existingDecompBody });
+  }
+  // Proven decomposition strategy — Tier-S1 retrieval-binding leg. Surfaces
+  // the outcome-scored decomposition_strategy_predicate row matching this
+  // goal's shape_category so the brain retrieves a PROVEN structural prior
+  // for similar future goals. Purely additive: non-floor (drops first under
+  // budget pressure), advisory-only, changes nothing about dispatch/closure.
+  // P1 so it lands in normal flow but never displaces a load-bearing section.
+  const provenDecomp = readProvenDecompositionStrategy(db, directiveText ?? task.goal);
+  const provenDecompBody = buildProvenDecompositionStrategySection(provenDecomp);
+  if (provenDecompBody.length > 0) {
+    candidates.push({ name: "proven_decomposition_strategy", p: 1, body: provenDecompBody });
   }
   pushPolicySection("runtimes_available", 0, true);
   pushPolicySection("workflow", 0, true);

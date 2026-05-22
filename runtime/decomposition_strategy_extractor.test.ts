@@ -14,6 +14,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import {
   SHOULD_DECOMPOSE_PREDICATE_ARTIFACT,
+  categorizeGoalShapeSemantic,
   categorizeShape,
   categorizeShapeWithContributors,
   extractDecompositionStrategy,
@@ -174,6 +175,32 @@ describe("categorizeShape (back-compat surface)", () => {
     const c = categorizeShape(4, 2, 7);
     expect(a).toBe(b);
     expect(b).toBe(c);
+  });
+});
+
+describe("categorizeGoalShapeSemantic (pre-decomposition retrieval-binding map)", () => {
+  test("maps goal text to the same semantic shape_category the extractor credits", () => {
+    // These goal_class branches mirror categorizeShapeWithContributors's
+    // semantic half so the advisory section binds the right scored row.
+    expect(categorizeGoalShapeSemantic("Audit the dispatch pipeline")).toBe("audit_evidence_sweep");
+    expect(categorizeGoalShapeSemantic("Build the parallel bundle")).toBe("build_parallel_bundle");
+    expect(categorizeGoalShapeSemantic("Migrate the schema")).toBe("migrate_dependency_chain");
+    expect(categorizeGoalShapeSemantic("Refactor the worker")).toBe("refactor_change_bundle");
+    expect(categorizeGoalShapeSemantic("Synthesize the findings")).toBe("synthesize_adjudication");
+    expect(categorizeGoalShapeSemantic("Explore the failure modes")).toBe("explore_research_fanout");
+    expect(categorizeGoalShapeSemantic("Research the bridge")).toBe("explore_research_fanout");
+  });
+
+  test("owner/recovery/rolling/adjudication evidence wins over goal_class words", () => {
+    expect(categorizeGoalShapeSemantic("Audit X", { owner_gate_count: 1 })).toBe("owner_gated_decision_tree");
+    expect(categorizeGoalShapeSemantic("Audit X", { recovery_signal: 1 })).toBe("operational_recovery");
+    expect(categorizeGoalShapeSemantic("Audit X", { rolling_signal: 1 })).toBe("rolling_maintenance");
+    expect(categorizeGoalShapeSemantic("Audit X", { adjudication_signal: 1 })).toBe("synthesize_adjudication");
+  });
+
+  test("returns null when no semantic signal fires (don't guess a geometry bucket pre-decomposition)", () => {
+    expect(categorizeGoalShapeSemantic("do the thing")).toBeNull();
+    expect(categorizeGoalShapeSemantic("")).toBeNull();
   });
 });
 
