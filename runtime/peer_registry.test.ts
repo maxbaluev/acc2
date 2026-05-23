@@ -31,6 +31,21 @@ describe("peer registry", () => {
   let tmpDir = "";
   let dbPath = "";
 
+  // Busy-wait until the wall clock advances strictly past `afterMs`. emitEvent
+  // stamps `ts` at millisecond resolution (nowIso) and newId() is RANDOM (not
+  // time-sortable — see runtime/ids.ts). peer_registry_view's activity CTE
+  // picks the latest heartbeat by `ORDER BY ts DESC, id DESC`; when the
+  // registration and the later peerActivity land in the SAME millisecond, the
+  // tiebreak resolves on random id ordering and ~1-in-4 the registration row
+  // (directive-a) beats the activity row (directive-b). Forcing the activity
+  // emit into a strictly-later millisecond makes `ts DESC` decisive so the
+  // id-tiebreak never bites — deterministic, no production change. The flake
+  // only surfaced in the full serial suite because earlier tests warm the JIT
+  // and tighten the two emits into one millisecond.
+  const waitForNextMillisecond = (afterMs: number): void => {
+    while (Date.now() <= afterMs) { /* spin until clock advances */ }
+  };
+
   afterEach(() => {
     if (dbPath) closeDb(dbPath);
     if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ } }
@@ -60,6 +75,11 @@ describe("peer registry", () => {
       scope: { lane: "orchestrator" },
       git_head: "abc123",
     });
+    // Guarantee the heartbeat below lands in a strictly-later millisecond than
+    // the registration above so peer_registry_view's `ORDER BY ts DESC` picks
+    // it deterministically (defeats the random-id tiebreak — see comment on
+    // waitForNextMillisecond).
+    waitForNextMillisecond(Date.now());
     peerActivity(db, {
       peer_id: "peer-opencode-1",
       directive_id: "directive-b",
