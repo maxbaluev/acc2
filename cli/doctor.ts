@@ -18,7 +18,7 @@ import { homedir } from "node:os";
 import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { auxBaseUrl, readDaemonLock, rpcGet } from "./rpc";
-import { resolveDbPath } from "../runtime/state_paths";
+import { resolveDbPath, resolveStateDir } from "../runtime/state_paths";
 import { LIVENESS_THRESHOLDS } from "../substrate/liveness";
 import { openDb, closeDb } from "../substrate/db";
 import { inspectPendingMigrations, type PendingMigrationInspection } from "../substrate/migration_runner";
@@ -260,7 +260,10 @@ export const checkDbIntegrity = async (env: DoctorEnv): Promise<Check> => {
 };
 
 export const checkDiskFree = (env: DoctorEnv): Check => {
-  const stateDir = resolve(import.meta.dirname ?? ".", "..", "state");
+  // Probe the REAL state dir (ACC2_STATE_DIR / ~/.accint), not a repo-relative
+  // "../state" that does not exist outside a dev checkout — the latter made
+  // statfs fail and emit a spurious "disk space" warning on every run.
+  const stateDir = resolveStateDir();
   const free = env.diskFreeBytes(stateDir);
   if (free === null) {
     return { name: "disk space", verdict: "warn",
