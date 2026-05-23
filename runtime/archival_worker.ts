@@ -215,7 +215,16 @@ const DROP_RETENTION_DAYS = (() => {
 /** Per docs/Architecture.md commit 6b8ebea + Lin et al. 2026 mnemonic
  *  sovereignty: classify each event_kind into curation mode. Default
  *  archive_cold preserves the original behavior; the carve-out sets
- *  above add semantic curation. */
+ *  above add semantic curation.
+ *
+ *  Research frontier: this fixed classifier is the SAFE FALLBACK, not the
+ *  final memory manager. A learned curation policy should later score
+ *  keep / merge / archive / evict against downstream retrieval usefulness,
+ *  closure/owner outcomes, boot/readiness cost, and prompt-composition cost,
+ *  while preserving ALWAYS_KEEP and security/integrity carve-outs as hard
+ *  floors. Do not add a parallel taxonomy; make the learned policy an
+ *  act_artifact / promoted-knowledge bundle and keep this function as the
+ *  deterministic fallback when the policy is absent or high residual. */
 export const curationModeForKind = (kind: string): CurationMode => {
   if (EPHEMERAL_TELEMETRY_KINDS.has(kind)) return "evict";
   if (DROP_KINDS.has(kind)) return "drop";
