@@ -3,13 +3,16 @@
 // verification. Aggregates contract_amendment_proposed events under a
 // directive, joins to contract_amendment_applied (via context_refs or
 // payload.source_event_id), and verifies the named commit_sha exists in
-// git, touches the proposed target, and contains the expected text.
-// Closes the operator-side auditability gap for the k_555 four-link
-// credit chain at the directive level.
+// git and touches the proposed target. Correctness of the change itself is
+// established by the apply-time verifier residual, NOT by a literal
+// before/after text-marker match (one-path-apply / k_252). Closes the
+// operator-side auditability gap for the k_555 four-link credit chain at
+// the directive level.
 //
 // Exit: 0 clean / 1 stranded proposal(s) / 2 drift|missing commit.
-// SQL-direct via openDb (mirrors trust.ts). Legacy plain-string
-// proposed_behavior verifies on target-touch alone, not text.
+// SQL-direct via openDb (mirrors trust.ts). All proposals — semantic or
+// legacy — verify on target-touch alone; before/after snippets are advisory
+// context only and never form a match gate.
 
 import type { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
@@ -79,26 +82,15 @@ const proposalTarget = (payload: Record<string, unknown>): string => {
 
 const stripRepoPrefix = (target: string): string => target.startsWith("repo:") ? target.slice(5) : target;
 
-const diffField = (payload: Record<string, unknown>, key: "before" | "after"): string | null => {
-  const proposed = payload.proposed_behavior ?? payload.proposed_action;
-  if (!proposed || typeof proposed !== "object") return null;
-  const d = (proposed as Record<string, unknown>).diff;
-  if (!d || typeof d !== "object") return null;
-  const v = (d as Record<string, unknown>)[key];
-  return typeof v === "string" && v.length > 0 ? v : null;
-};
-
 type VerifyResult = "verified" | "drift" | "missing";
 
-export const verifyCommitTouches = (sha: string, target: string, repoRoot: string): { exists: boolean; touchesTarget: boolean; patchText: string } => {
+export const verifyCommitTouches = (sha: string, target: string, repoRoot: string): { exists: boolean; touchesTarget: boolean } => {
   const filePath = stripRepoPrefix(target);
   const stat = spawnSync("git", ["show", "--stat", "--format=", sha], { cwd: repoRoot, encoding: "utf8" });
-  if (stat.status !== 0) return { exists: false, touchesTarget: false, patchText: "" };
+  if (stat.status !== 0) return { exists: false, touchesTarget: false };
   const stdout = String(stat.stdout ?? "");
   const touchesTarget = stdout.includes(filePath);
-  const diff = spawnSync("git", ["show", sha, "--", filePath], { cwd: repoRoot, encoding: "utf8" });
-  const patchText = String(diff.stdout ?? "");
-  return { exists: true, touchesTarget, patchText };
+  return { exists: true, touchesTarget };
 };
 
 export const classifyApply = (
@@ -108,17 +100,18 @@ export const classifyApply = (
 ): VerifyResult => {
   if (!commitSha) return "missing";
   const target = proposalTarget(proposalPayload);
-  if (!target) return "drift";
+  // No declared target ⇒ commit cannot be located against a file; treat as
+  // missing (no verifiable apply surface), not a literal text "drift".
+  if (!target) return "missing";
   const g = verifyCommitTouches(commitSha, target, repoRoot);
   if (!g.exists) return "missing";
+  // One semantic apply path: a commit that exists and touches the proposed
+  // target IS the verified apply. Correctness of the change is established by
+  // the verifier residual at apply time, NOT by a literal before/after
+  // text-marker match here. Legacy before/after snippets in the proposal are
+  // advisory context only and never form a match gate (k_252 / one-path-apply).
   if (!g.touchesTarget) return "drift";
-  // Patch should mention the `after` text (additive) or `before` text
-  // (`-` line). Either marker corroborates a semantic apply; neither = drift.
-  const after = diffField(proposalPayload, "after");
-  const before = diffField(proposalPayload, "before");
-  if (after && g.patchText.includes(after)) return "verified";
-  if (before && g.patchText.includes(before)) return "verified";
-  return "drift";
+  return "verified";
 };
 
 type AggregateBucket = {
@@ -208,8 +201,8 @@ const renderReport = (directiveId: string, status: string, totals: AggregateBuck
   lines.push(`  refused:  ${totals.refused}`);
   lines.push(`  stranded: ${totals.stranded.length}  (proposed, no contract_amendment_applied event)`);
   lines.push(`diff verification:`);
-  lines.push(`  verified: ${totals.verified}  (commit_sha exists + touches the proposed target + contains expected text)`);
-  lines.push(`  drift:    ${totals.drift}  (commit_sha exists but diff does not match)`);
+  lines.push(`  verified: ${totals.verified}  (commit_sha exists + touches the proposed target)`);
+  lines.push(`  drift:    ${totals.drift}  (commit_sha exists but does not touch the proposed target)`);
   lines.push(`  missing:  ${totals.missing}  (claimed applied but commit_sha not in git)`);
   if (totals.stranded.length > 0) {
     lines.push(`stranded list:`);
@@ -245,7 +238,7 @@ const emitDriftContradictions = async (
     ).get(c.proposal_id, c.commit_sha);
     if (exists) continue;
     const reason = c.verdict === "drift"
-      ? `diff_verification_drift: claimed apply at ${c.commit_sha.slice(0, 10)} does not contain proposed before/after markers`
+      ? `apply_target_drift: claimed apply at ${c.commit_sha.slice(0, 10)} does not touch the proposed target file`
       : `diff_verification_missing: claimed apply at ${c.commit_sha.slice(0, 10)} not present in git history`;
     const r = await mcpCall("substrate.emit", {
       kind: "knowledge_contradiction_observed",

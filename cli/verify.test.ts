@@ -1,5 +1,8 @@
 // `acc verify` tests — empty directive, applied+verified, missing commit,
 // drift (commit exists but doesn't touch target), stranded proposal.
+// One-path-apply: verification is semantic — a commit that exists and
+// touches the proposed target IS verified. There is NO literal before/after
+// text-marker match gate; any legacy diff fields are advisory only.
 // ACC2_DB_PATH is pinned per test; git operations run in an ephemeral
 // repo created under tmpdir.
 
@@ -94,17 +97,18 @@ describe("runVerify", () => {
     expect(text).toContain("verified: 0");
   });
 
-  test("applied proposal with matching commit_sha + content → verified=1, exit 0", async () => {
+  test("applied semantic proposal with commit_sha touching target → verified=1, exit 0", async () => {
     const target = "verify_target.txt";
-    const afterText = "ANCHOR_AFTER_LINE_XYZ";
-    const parts = initRepoWithCommit(target, afterText);
+    const parts = initRepoWithCommit(target, "SOME_NEW_LINE");
     repoRoot = parts.split("::")[0]!;
     const sha = parts.split("::")[1]!;
     const db = openDb(process.env.ACC2_DB_PATH!);
     seedDirectiveOpened(db);
     seedProposal(db, "evt_prop_1", {
       target_resource: `repo:${target}`,
-      proposed_behavior: { target_resource: `repo:${target}`, anchor: "anchor1", diff: { kind: "anchored_replace_v1", before: "seed", after: afterText } },
+      current_behavior: "file lacks the new line",
+      proposed_behavior: { target_resource: `repo:${target}`, proposed_behavior: "add the new line" },
+      rationale: "semantic apply",
     });
     seedApply(db, "evt_app_1", "evt_prop_1", { status: "applied", commit_sha: sha });
     const c = cap(); const code = await runVerify([DIRECTIVE_ID, "--repo", repoRoot]); c.restore();
@@ -117,6 +121,33 @@ describe("runVerify", () => {
     expect(text).toContain(sha.slice(0, 10));
   });
 
+  test("one-path: commit touches target verifies even when legacy before/after text is absent from the patch", async () => {
+    // Regression guard: the old code returned "drift" when neither the
+    // before nor after literal text appeared in the commit patch. The
+    // one-path semantic verifier verifies on target-touch alone; advisory
+    // diff fields never form a match gate.
+    const target = "semantic_target.txt";
+    const parts = initRepoWithCommit(target, "ACTUAL_COMMITTED_TEXT");
+    repoRoot = parts.split("::")[0]!;
+    const sha = parts.split("::")[1]!;
+    const db = openDb(process.env.ACC2_DB_PATH!);
+    seedDirectiveOpened(db);
+    seedProposal(db, "evt_prop_path", {
+      target_resource: `repo:${target}`,
+      current_behavior: "old behavior",
+      proposed_behavior: { target_resource: `repo:${target}`, proposed_behavior: "new behavior" },
+      // Advisory legacy diff whose before/after text does NOT appear in the
+      // actual commit patch — must NOT cause a drift verdict.
+      diff: { kind: "anchored_replace_v1", before: "TEXT_NOT_IN_COMMIT_AAA", after: "TEXT_NOT_IN_COMMIT_BBB" },
+    });
+    seedApply(db, "evt_app_path", "evt_prop_path", { status: "applied", commit_sha: sha });
+    const c = cap(); const code = await runVerify([DIRECTIVE_ID, "--repo", repoRoot]); c.restore();
+    expect(code).toBe(0);
+    const text = c.out.join("");
+    expect(text).toContain("verified: 1");
+    expect(text).toContain("drift:    0");
+  });
+
   test("applied with commit_sha NOT in git → missing=1, exit 2", async () => {
     repoRoot = mkdtempSync(join(tmpdir(), "acc2-verify-empty-"));
     spawnSync("git", ["init", "-q"], { cwd: repoRoot });
@@ -124,7 +155,8 @@ describe("runVerify", () => {
     seedDirectiveOpened(db);
     seedProposal(db, "evt_prop_2", {
       target_resource: "repo:nofile.txt",
-      proposed_behavior: { target_resource: "repo:nofile.txt", anchor: "x", diff: { kind: "anchored_replace_v1", before: "a", after: "b" } },
+      current_behavior: "missing",
+      proposed_behavior: { target_resource: "repo:nofile.txt", proposed_behavior: "add" },
     });
     seedApply(db, "evt_app_2", "evt_prop_2", { status: "applied", commit_sha: "deadbeefcafe" });
     const c = cap(); const code = await runVerify([DIRECTIVE_ID, "--repo", repoRoot]); c.restore();
@@ -141,7 +173,8 @@ describe("runVerify", () => {
     seedDirectiveOpened(db);
     seedProposal(db, "evt_prop_3", {
       target_resource: "repo:OTHER_FILE_NOT_TOUCHED.txt",
-      proposed_behavior: { target_resource: "repo:OTHER_FILE_NOT_TOUCHED.txt", anchor: "x", diff: { kind: "anchored_replace_v1", before: "a", after: "b" } },
+      current_behavior: "untouched",
+      proposed_behavior: { target_resource: "repo:OTHER_FILE_NOT_TOUCHED.txt", proposed_behavior: "edit" },
     });
     seedApply(db, "evt_app_3", "evt_prop_3", { status: "applied", commit_sha: sha });
     const c = cap(); const code = await runVerify([DIRECTIVE_ID, "--repo", repoRoot]); c.restore();
@@ -154,8 +187,8 @@ describe("runVerify", () => {
     seedDirectiveOpened(db);
     seedProposal(db, "evt_prop_4", {
       target_resource: "repo:stranded.txt",
-      anchor: "stranded_anchor_that_is_longer_than_thirty_chars_yes",
-      proposed_behavior: { target_resource: "repo:stranded.txt", anchor: "a", diff: { kind: "anchored_replace_v1", before: "x", after: "y" } },
+      current_behavior: "stranded current behavior longer than thirty chars yes",
+      proposed_behavior: { target_resource: "repo:stranded.txt", proposed_behavior: "edit" },
     });
     repoRoot = mkdtempSync(join(tmpdir(), "acc2-verify-no-repo-"));
     spawnSync("git", ["init", "-q"], { cwd: repoRoot });
