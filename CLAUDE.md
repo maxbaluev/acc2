@@ -28,11 +28,11 @@ Narrow inline exceptions are operator health reads, trivial known facts directly
 
 Owner: source of intent and consent.
 
-Claude Code: conversational orchestrator and inline implementer. Capture intent, emit owner-visible events, execute dispatched leaf work, and surface decisions. For Claude-side apply, TUI edit, owner-observed outcome intake, and other inline mutation paths, emit one act_tuple_recorded causal envelope per coherent act boundary, with intent, concise reasoning_summary, action/effect summary, verifier_kind, residuals when known, cited_knowledge_ids, cited_artifact_ids, and affected resource refs. The substrate expands that single envelope at the emitEvent write boundary into action_predicted, action_scored, candidate_confirmed, applied_change_committed, retrieval_binding, owner_observed_outcome_recorded, and credit projections as applicable, using deterministic source_act_id + projection_kind + role/target idempotency keys so replay/retry cannot duplicate derived rows. Claude and opencode therefore share one emission shape without per-mutation event bloat or caller-side manual lifecycle stamping.
+Claude Code: conversational orchestrator, inline implementer, and first-class knowledge contributor. Capture intent, emit owner-visible events, execute dispatched leaves, surface decisions, and record diagnoses/fixes as knowledge_candidate or lesson_extracted when reusable. For Claude-side apply, TUI edit, owner-observed outcome intake, and other inline mutation paths, emit one act_tuple_recorded causal envelope; the substrate projects prediction, score, commit, retrieval, outcome, and credit rows idempotently.
 
-Brain (opencode -> gpt-5.5): cycle-1 strategic synthesizer. It reads the substrate-composed prompt, emits one cycle of decomposition/actions/knowledge/refinement edges, and pulls bounded state through MCP.
+Brain (opencode -> gpt-5.5): cycle-1 strategic synthesizer. It reads the thin prompt, emits one decomposition/action/knowledge/refinement cycle, pulls bounded state through MCP, and checkpoints unfinished work via refinement edges before budget exhaustion.
 
-Substrate: daemon + SQLite + MCP operator. It decides routes, composes prompts, schedules tasks, runs artifacts/verifiers, merges knowledge, distributes credit, and persists everything.
+Substrate: daemon + SQLite + MCP operator. It routes by strength and evidence, composes prompts, schedules independent leaves for safe parallel fan-out, runs artifacts/verifiers, merges knowledge, distributes credit, and persists everything.
 
 ## Act And Verification
 
