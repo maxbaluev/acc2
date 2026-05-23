@@ -33,6 +33,7 @@ import {
   actArtifactRegistry,
   readyTasks,
   dispatchResolved,
+  dispatchResolvedPooled,
   taskGraphFor,
   failureCounts,
   artifactRouting,
@@ -693,7 +694,17 @@ export const handleRead = (
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
         const rootTaskId = typeof arg.root_task_id === "string" ? arg.root_task_id : undefined;
-        return { ok: true, result: dispatchResolved(db, { directiveId, rootTaskId }) as unknown as JsonValue };
+        // dispatch_resolved_view is the authoritative dispatch-truth surface the
+        // orchestrator polls every ~5s during a live owner turn. On the 374K-event
+        // DB it materializes a full recursive task tree + per-task CTEs across all
+        // directives (~217ms even when scoped — SQLite can't push the outer WHERE
+        // into the materialized CTEs). Route through the SQL worker pool so it
+        // doesn't block the daemon main loop / starve /health; sync fallback when
+        // no pool (tests, ACC2_DISABLE_SQL_POOL). Identical results + ordering.
+        return (async (): Promise<McpResult> => {
+          const rows = await dispatchResolvedPooled(db, poolQuery, { directiveId, rootTaskId });
+          return { ok: true, result: rows as unknown as JsonValue };
+        })();
       }
       case "task_graph_view": {
         const arg = (args.args ?? {}) as Record<string, unknown>;

@@ -5545,50 +5545,88 @@ export const retrievalCredit = (
   }));
 };
 
-/** Authoritative lifecycle projection per (directive_id, root_task_id). */
-export const dispatchResolved = (
-  db: Database,
-  filter: { directiveId?: string; rootTaskId?: string; limit?: number } = {},
-): DispatchResolvedRow[] => {
+/** Authoritative lifecycle projection per (directive_id, root_task_id).
+ *
+ *  Build the (sql, params) pair for a dispatch_resolved_view read. Shared by
+ *  the synchronous `dispatchResolved` and the worker-pool `dispatchResolvedPooled`
+ *  so both surfaces issue byte-identical SQL. */
+const buildDispatchResolvedQuery = (
+  filter: { directiveId?: string; rootTaskId?: string; limit?: number },
+): { sql: string; params: Array<string | number> } => {
   const wheres: string[] = [];
   const params: Array<string | number> = [];
   if (filter.directiveId) { wheres.push("directive_id = ?"); params.push(filter.directiveId); }
   if (filter.rootTaskId) { wheres.push("root_task_id = ?"); params.push(filter.rootTaskId); }
   const whereSql = wheres.length === 0 ? "" : "WHERE " + wheres.join(" AND ");
   const limitSql = filter.limit ? ` LIMIT ${Math.max(1, Math.floor(filter.limit))}` : "";
-  const rows = db
-    .query(`SELECT * FROM dispatch_resolved_view ${whereSql} ORDER BY latest_signal_at DESC, directive_id ASC, root_task_id ASC${limitSql}`)
-    .all(...params) as Array<Record<string, unknown>>;
-  return rows.map((r) => ({
-    directive_id: r.directive_id as string,
-    root_task_id: r.root_task_id as string,
-    status: (r.status ?? r.lifecycle_status) as DispatchResolvedStatus,
-    lifecycle_status: (r.lifecycle_status ?? r.status) as DispatchResolvedStatus,
-    status_reason: (r.status_reason as string | null) ?? null,
-    dispatch_id: (r.dispatch_id as string | null) ?? null,
-    dispatch_event_id: (r.dispatch_event_id as string | null) ?? null,
-    close_event_id: (r.close_event_id as string | null) ?? null,
-    latest_event_id: (r.latest_event_id as string | null) ?? null,
-    latest_ts: (r.latest_ts as string | null) ?? null,
-    age_ms: r.age_ms == null ? null : Number(r.age_ms),
-    residual: r.residual == null ? null : Number(r.residual),
-    queued_reason: (r.queued_reason as string | null) ?? null,
-    cap: r.cap == null ? null : Number(r.cap),
-    in_flight_brain: r.in_flight_brain == null ? null : Number(r.in_flight_brain),
-    latest_cap_gate_event_id: (r.latest_cap_gate_event_id as string | null) ?? null,
-    dispatched_count: Number(r.dispatched_count ?? 0),
-    open_dispatch_count: Number(r.open_dispatch_count ?? 0),
-    latest_dispatched_at: (r.latest_dispatched_at as string | null) ?? null,
-    oldest_open_dispatched_at: (r.oldest_open_dispatched_at as string | null) ?? null,
-    latest_closed_at: (r.latest_closed_at as string | null) ?? null,
-    terminal_event_id: (r.terminal_event_id as string | null) ?? null,
-    terminal_at: (r.terminal_at as string | null) ?? null,
-    terminal_kind: (r.terminal_kind as string | null) ?? null,
-    failure_kind: (r.failure_kind as string | null) ?? null,
-    latest_cap_gate_at: (r.latest_cap_gate_at as string | null) ?? null,
-    ready_since: (r.ready_since as string | null) ?? null,
-    latest_signal_at: (r.latest_signal_at as string | null) ?? null,
-  }));
+  return {
+    sql: `SELECT * FROM dispatch_resolved_view ${whereSql} ORDER BY latest_signal_at DESC, directive_id ASC, root_task_id ASC${limitSql}`,
+    params,
+  };
+};
+
+/** Map a raw dispatch_resolved_view row into the typed DispatchResolvedRow.
+ *  Shared by the sync + pooled accessors so results are identical. */
+const mapDispatchResolvedRow = (r: Record<string, unknown>): DispatchResolvedRow => ({
+  directive_id: r.directive_id as string,
+  root_task_id: r.root_task_id as string,
+  status: (r.status ?? r.lifecycle_status) as DispatchResolvedStatus,
+  lifecycle_status: (r.lifecycle_status ?? r.status) as DispatchResolvedStatus,
+  status_reason: (r.status_reason as string | null) ?? null,
+  dispatch_id: (r.dispatch_id as string | null) ?? null,
+  dispatch_event_id: (r.dispatch_event_id as string | null) ?? null,
+  close_event_id: (r.close_event_id as string | null) ?? null,
+  latest_event_id: (r.latest_event_id as string | null) ?? null,
+  latest_ts: (r.latest_ts as string | null) ?? null,
+  age_ms: r.age_ms == null ? null : Number(r.age_ms),
+  residual: r.residual == null ? null : Number(r.residual),
+  queued_reason: (r.queued_reason as string | null) ?? null,
+  cap: r.cap == null ? null : Number(r.cap),
+  in_flight_brain: r.in_flight_brain == null ? null : Number(r.in_flight_brain),
+  latest_cap_gate_event_id: (r.latest_cap_gate_event_id as string | null) ?? null,
+  dispatched_count: Number(r.dispatched_count ?? 0),
+  open_dispatch_count: Number(r.open_dispatch_count ?? 0),
+  latest_dispatched_at: (r.latest_dispatched_at as string | null) ?? null,
+  oldest_open_dispatched_at: (r.oldest_open_dispatched_at as string | null) ?? null,
+  latest_closed_at: (r.latest_closed_at as string | null) ?? null,
+  terminal_event_id: (r.terminal_event_id as string | null) ?? null,
+  terminal_at: (r.terminal_at as string | null) ?? null,
+  terminal_kind: (r.terminal_kind as string | null) ?? null,
+  failure_kind: (r.failure_kind as string | null) ?? null,
+  latest_cap_gate_at: (r.latest_cap_gate_at as string | null) ?? null,
+  ready_since: (r.ready_since as string | null) ?? null,
+  latest_signal_at: (r.latest_signal_at as string | null) ?? null,
+});
+
+export const dispatchResolved = (
+  db: Database,
+  filter: { directiveId?: string; rootTaskId?: string; limit?: number } = {},
+): DispatchResolvedRow[] => {
+  const { sql, params } = buildDispatchResolvedQuery(filter);
+  const rows = db.query(sql).all(...params) as Array<Record<string, unknown>>;
+  return rows.map(mapDispatchResolvedRow);
+};
+
+/** Worker-pool variant of `dispatchResolved`. dispatch_resolved_view is the
+ *  authoritative dispatch-truth surface the orchestrator polls every ~5s while
+ *  an owner turn is live (.claude/rules/orchestrator-runtime.md "Dispatch
+ *  Observation Protocol"). On the 374K-event live DB it materializes a
+ *  full recursive task tree + per-task dispatch/close/cap CTEs across ALL
+ *  directives before the outer WHERE filters to one — ~217ms even when scoped,
+ *  because SQLite cannot push the outer predicate into the materialized CTEs.
+ *  Under Bun's fake-async SQL that 217ms blocks the daemon's main loop,
+ *  starving /health + concurrent MCP serving. Routing through the SQL
+ *  worker-thread pool (when present) moves it off the main thread; the sync
+ *  fallback (tests / ACC2_DISABLE_SQL_POOL) keeps identical results and
+ *  ordering. Same SQL, same row shape — only the execution thread differs. */
+export const dispatchResolvedPooled = async (
+  db: Database,
+  poolQuery: <T>(db: Database, sql: string, params: unknown[]) => Promise<T[]>,
+  filter: { directiveId?: string; rootTaskId?: string; limit?: number } = {},
+): Promise<DispatchResolvedRow[]> => {
+  const { sql, params } = buildDispatchResolvedQuery(filter);
+  const rows = await poolQuery<Record<string, unknown>>(db, sql, params);
+  return rows.map(mapDispatchResolvedRow);
 };
 
 /** Per-failure_kind tallies of task_failed events. */

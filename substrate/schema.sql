@@ -94,6 +94,16 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_ts
 CREATE INDEX IF NOT EXISTS idx_events_directive_ts
   ON events(directive_id, ts);
 
+-- prompt_composer.readRecentFailures runs on EVERY dispatch:
+-- `SELECT failure_kind, ts FROM events WHERE failure_kind IS NOT NULL ORDER BY ts DESC LIMIT 3`.
+-- Pre-fix: SCAN events USING INDEX idx_events_ts (walk ts index backwards,
+-- filter on the unindexed failure_kind column, reject ~374K rows). A partial
+-- (failure_kind, ts) index (only ~322 non-null rows) makes it a covering SEARCH
+-- seek. EXPLAIN on the 374K-row live-DB copy: 10.7ms → 0.16ms (~67x), identical
+-- result set. Partial WHERE keeps the index tiny.
+CREATE INDEX IF NOT EXISTS idx_events_failure_kind_ts
+  ON events(failure_kind, ts) WHERE failure_kind IS NOT NULL;
+
 -- ── act_artifact ───────────────────────────────────────────────────
 -- Registry row per polymorphic artifact handle. declared_sandbox +
 -- fixture_input are JSON-encoded TEXT (shape mirrors SandboxDecl /

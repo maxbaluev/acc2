@@ -181,6 +181,16 @@ const EVENT_HOT_PATH_INDEXES = [
   // scan forced USE TEMP B-TREE (no (directive_id, ts) index — the kind-in-middle
   // idx_events_directive_kind_ts can't serve it). 186ms → 14ms (~13x), byte-identical.
   "CREATE INDEX IF NOT EXISTS idx_events_directive_ts ON events(directive_id, ts)",
+  // 2026-05-22 per-dispatch hot-path audit: prompt_composer.readRecentFailures
+  // (runtime/prompt_composer.ts — `SELECT failure_kind, ts FROM events WHERE
+  // failure_kind IS NOT NULL ORDER BY ts DESC LIMIT 3`) runs on EVERY dispatch.
+  // Pre-fix it was a SCAN events USING INDEX idx_events_ts that walked the ts
+  // index backwards filtering on the unindexed failure_kind column, rejecting
+  // ~374K rows before finding 3 non-null. A partial (failure_kind, ts) index
+  // (only ~322 rows have a non-null failure_kind) turns it into a covering
+  // SEARCH seek. EXPLAIN on the 374K-row live-DB copy: 10.7ms → 0.16ms (~67x),
+  // identical result set. Partial WHERE keeps the index tiny.
+  "CREATE INDEX IF NOT EXISTS idx_events_failure_kind_ts ON events(failure_kind, ts) WHERE failure_kind IS NOT NULL",
 ];
 
 /** F4a table rename (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW):
@@ -350,7 +360,22 @@ export const runMigrations = (db: Database): void => {
     db.run(ddl);
   }
 
-  for (const ddl of EVENT_HOT_PATH_INDEXES) db.run(ddl);
+  for (const ddl of EVENT_HOT_PATH_INDEXES) {
+    try {
+      db.run(ddl);
+    } catch (err) {
+      // A legacy / partial `events` table reached via the RENAME-only
+      // migration path (no full runSchema) can lack a column a newer
+      // hot-path index references (e.g. failure_kind). On a real DB
+      // runSchema always creates the full events table first, so this
+      // only fires for synthetic minimal-schema callers; the index is
+      // simply not needed there yet. Tolerate the missing column the
+      // same way the act_artifact ADD COLUMN loop tolerates duplicates;
+      // re-throw anything else so genuine DDL faults still surface.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes("no such column")) throw err;
+    }
+  }
 
   // F4c (2026-05-18, contract 897XTN2GF11XB9D4N45N2R9W58): ensure the
   // artifact_kind_metadata table exists AND is seeded with the legacy
