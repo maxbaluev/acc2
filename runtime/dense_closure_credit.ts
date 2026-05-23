@@ -48,11 +48,12 @@
 //     root act itself is excluded (it already carries terminal credit via the
 //     closure verdict's own internal-act projection).
 //
-// The deterministic DAG-backprop is implemented here. The OPTIONAL
-// LLM hindsight-critic re-weighting (the brain re-scoring which intermediate
-// nodes actually mattered) is a deliberately deferred second step — this pass
-// uses uniform depth-damped weights, which is the deterministic core HCAPO
-// describes; the critic refines it later without changing this contract.
+// The deterministic DAG-backprop is implemented here. The learned
+// hindsight-critic re-weighting is the next credit-depth contract: score which
+// intermediate nodes, citations, memory-curation decisions, and reused recipes
+// actually changed closure outcome, then adjust these uniform depth-damped
+// weights through the same residual/Beta machinery. Until that critic is
+// admitted and verified, this deterministic pass remains the safe fallback.
 
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
