@@ -3,8 +3,22 @@ import { closeDb, openDb } from "../../substrate/db";
 import { openFixtureMultiStakeholder } from "./d_multi_stakeholder";
 import { schedulerTick, drainInFlightDispatches } from "../task_scheduler";
 
-afterAll(() => closeDb());
-beforeEach(() => closeDb());
+// This fixture exercises the NORMAL universal-goal-pilot path (deterministic
+// intersection-picker action + verifier → residual 0). The generate-and-select
+// organism lane (ACC2_GENERATE_SELECT=1, production-enabled in .env) would
+// reroute this ambiguous + report-like directive to a live-LLM lane that cannot
+// run in a test env (no LLM selection → residual 1). Pin the flag OFF so the
+// fixture tests the path it intends, independent of the deployment .env.
+const _priorGenerateSelect = process.env.ACC2_GENERATE_SELECT;
+beforeEach(() => {
+  delete process.env.ACC2_GENERATE_SELECT;
+  closeDb();
+});
+afterAll(() => {
+  if (_priorGenerateSelect === undefined) delete process.env.ACC2_GENERATE_SELECT;
+  else process.env.ACC2_GENERATE_SELECT = _priorGenerateSelect;
+  closeDb();
+});
 
 describe("fixture_d_multi_stakeholder — Batch 5 universal-goal pilot (§10.5)", () => {
   test("directive opens → intersection picked → verifier scores zero → task commits", async () => {
