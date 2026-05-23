@@ -29,6 +29,7 @@ import { dispatchReadyTask } from "./task_dispatcher";
 import { hasFreeHandshakePermit, freeHandshakePermits, observedBrainRssBytes } from "./bridge/opencode";
 import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
 import { emitEvent } from "./events";
+import { newId } from "./ids";
 import { readCurrentMode, applyModeAdjustments } from "./crisis_mode";
 import { findDeferringConflict } from "./interference";
 import { isBridgeHealthDegraded } from "./bridge_health";
@@ -429,6 +430,63 @@ const COGNITIVE_PROGRESS_KINDS: ReadonlySet<string> = new Set([
  *  Truly silent dispatches (no cognitive work) get no grace. */
 const RESEARCH_GRACE_CYCLES = 4;
 
+/** HIERARCHICAL CLOSURE (elegance primitive #e). When a dispatch emits a
+ *  DELIVERABLE (knowledge_candidate / lesson_extracted / contract_amendment_
+ *  proposed / act_artifact_candidate) but NO task_closure_audited and NO
+ *  refinement edge, the deliverable survives in the ledger but the task never
+ *  formally closes or earns closure-credit. Bare-abandoning that case throws
+ *  away real supercomplex-task progress. Instead the substrate gives the task a
+ *  BOUNDED closure-audit opportunity: it supersedes the unclosed task with a
+ *  closure-focused refinement child whose directive asks the brain to JUDGE
+ *  (RLM-first) whether the emitted deliverable closes the directive and emit
+ *  task_closure_audited. If the child closes cleanly (residual < 0.3) the
+ *  existing cleanClosure branch auto-commits it; if the child itself emits a
+ *  deliverable without closure, the lineage cap below terminates the chain so
+ *  it cannot loop forever — after the cap, the task abandons exactly as before.
+ *  This is additive: the genuinely-stuck (no-deliverable) abandon path and the
+ *  normal commit/refinement paths are unchanged. */
+const MAX_CLOSURE_AUDIT_REDISPATCHES = 1;
+
+/** Walk the `refines` lineage of a task (self + ancestors) and count how many
+ *  closure-audit refinement children the substrate has already opened for it.
+ *  The marker is `payload.closure_audit_redispatch === true` on the opening
+ *  `task_node_opened` event. Counting across the lineage (not per task_id) is
+ *  what BOUNDS the mechanism: each closure-audit child is a fresh task_id, so a
+ *  per-task counter would reset to 0 every hop and never terminate. */
+const closureAuditRedispatchCount = (db: Database, task: TaskNode): number => {
+  // Collect the lineage: this task plus every refines ancestor.
+  const lineage = new Set<string>([task.id]);
+  const { edges } = readDagForDirective(db, task.directive_id);
+  const refinesInto = new Map<string, string>(); // to_task -> from_task
+  for (const e of edges) {
+    if (e.kind === "refines") refinesInto.set(e.to_task, e.from_task);
+  }
+  let cur: string | undefined = task.id;
+  const seen = new Set<string>([cur]);
+  while (cur && refinesInto.has(cur)) {
+    const parent = refinesInto.get(cur)!;
+    if (seen.has(parent)) break; // cycle defense
+    seen.add(parent);
+    lineage.add(parent);
+    cur = parent;
+  }
+  // Count opening events in the lineage that are themselves closure-audit
+  // children. A row marks itself with closure_audit_redispatch on open.
+  const rows = db
+    .query(
+      `SELECT task_id, payload FROM events
+       WHERE kind = 'task_node_opened' AND directive_id = ?`,
+    )
+    .all(task.directive_id) as Array<{ task_id: string | null; payload: string | null }>;
+  let count = 0;
+  for (const r of rows) {
+    if (!r.task_id || !lineage.has(r.task_id)) continue;
+    const payload = parseEventPayload(r.payload);
+    if (payload.closure_audit_redispatch === true) count++;
+  }
+  return count;
+};
+
 type NoProgressTermination = {
   terminated: boolean;
   reason?: "no_structural_progress_since_last_dispatch" | "deliverable_without_closure_or_refinement";
@@ -539,6 +597,84 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
         return { terminated: false };
       }
     }
+  }
+
+  // HIERARCHICAL CLOSURE (elegance primitive #e): a dispatch that emitted a
+  // deliverable but no closure/refinement has REAL progress in the ledger — it
+  // just never formally closed. Before bare-abandoning, give it a BOUNDED
+  // closure-audit opportunity: supersede the unclosed task with a closure-
+  // focused refinement child that asks the brain to JUDGE (RLM-first) whether
+  // the emitted deliverable closes the directive and emit task_closure_audited.
+  // Bounded by MAX_CLOSURE_AUDIT_REDISPATCHES across the refines lineage so the
+  // chain cannot loop forever — once the cap is hit the task abandons exactly
+  // as before. ADDITIVE: only the deliverable-emitted-but-unclosed case takes
+  // this branch; genuinely-stuck (noStructuralProgress) still abandons below.
+  if (deliverableWithoutClosureOrRefinement) {
+    const auditsSoFar = closureAuditRedispatchCount(db, task);
+    if (auditsSoFar < MAX_CLOSURE_AUDIT_REDISPATCHES) {
+      const deliverableEvidence = deliverableRows.map((r) => r.id).slice(0, 20);
+      const childTaskId = newId();
+      const closureDirective =
+        `Closure audit (hierarchical closure): the prior cycle on this task emitted ` +
+        `${deliverableRows.length} deliverable(s) (` +
+        `${Array.from(new Set(deliverableRows.map((r) => r.kind))).join(", ")}` +
+        `) but did not formally close. Judge whether those deliverables close the ` +
+        `original directive: re-read the directive intent and the emitted ` +
+        `deliverable(s) (evidence event ids: ${deliverableEvidence.join(", ")}), then ` +
+        `emit task_closure_audited with closure_residual < 0.3 if they close it, or a ` +
+        `refinement edge describing the remaining work if they do not. Do NOT emit a ` +
+        `bare deliverable without a closure audit or refinement edge.`;
+      emitEvent(db, {
+        kind: "task_node_opened",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: childTaskId,
+        parent_task_id: task.id,
+        payload: {
+          goal: closureDirective,
+          lifecycle: "finite",
+          urgency: "normal",
+          closure_audit_redispatch: true,
+          source: "hierarchical_closure_audit",
+          superseded_task_id: task.id,
+          deliverable_evidence_event_ids: deliverableEvidence,
+        } as JsonValue,
+      });
+      emitEvent(db, {
+        kind: "task_edge_recorded",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: childTaskId,
+        payload: { kind: "refines", from_task: task.id, to_task: childTaskId } as JsonValue,
+      });
+      // Supersede the unclosed task so it drops out of readyTasks (terminal =
+      // committed in topology) and is NOT re-dispatched unchanged — the closure
+      // child carries the work forward. The deliverable survives in the ledger.
+      const supersede = emitEvent(db, {
+        kind: "task_committed_superseded",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        outcome: "superseded_for_closure_audit",
+        context_refs: deliverableEvidence,
+        payload: {
+          reason: "deliverable_without_closure_superseded_by_closure_audit",
+          dispatch_id: dispatchId,
+          closure_audit_task_id: childTaskId,
+          deliverable_evidence_event_ids: deliverableEvidence,
+          closure_audit_redispatch_count: auditsSoFar + 1,
+          cap: MAX_CLOSURE_AUDIT_REDISPATCHES,
+          policy: "hierarchical_closure_bounded_audit_before_abandon",
+        } as JsonValue,
+      });
+      return {
+        terminated: true,
+        reason: "deliverable_without_closure_or_refinement",
+        dispatch_id: dispatchId,
+        evidence_event_ids: [supersede.id, childTaskId],
+      };
+    }
+    // Cap reached: fall through to the existing bare-abandon below.
   }
 
   const reason = noStructuralProgress

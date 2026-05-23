@@ -915,4 +915,205 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
     });
     expect(findCrossDirectiveConflict(db, candidate)).toBeNull();
   });
+
+  // ── Hierarchical closure (elegance primitive #e) ───────────────────────
+  // A dispatch that emitted a DELIVERABLE but no closure/refinement should NOT
+  // be bare-abandoned: the substrate gives the task a BOUNDED closure-audit
+  // refinement child so supercomplex progress reaches formal closure.
+
+  /** Set up a directive + task that already had ONE brain dispatch which
+   *  emitted a deliverable (knowledge_candidate) but NO closure/refinement.
+   *  Returns the ids. The brain_dispatched ts precedes the deliverable so the
+   *  scheduler's `ts > lastDispatch.ts` window captures the deliverable. */
+  const seedDeliverableWithoutClosure = async (
+    db: ReturnType<typeof openDb>,
+    opts: { withClosure?: number; withDeliverable?: boolean } = {},
+  ): Promise<{ directiveId: string; taskId: string }> => {
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      payload: { directive_text: "supercomplex closure test", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { goal: "supercomplex closure test" },
+    });
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { dispatch_id: newId() },
+    });
+    await Bun.sleep(3); // guarantee distinct ms so ts > dispatch.ts holds
+    if (opts.withDeliverable !== false) {
+      emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "opencode",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { claim: "compounding lesson", confidence: 0.9 },
+      });
+    }
+    if (typeof opts.withClosure === "number") {
+      emitEvent(db, {
+        kind: "task_closure_audited",
+        substrate_origin: "opencode",
+        directive_id: directiveId,
+        task_id: taskId,
+        residual: opts.withClosure,
+        payload: { closure_residual: opts.withClosure },
+      });
+    }
+    return { directiveId, taskId };
+  };
+
+  test("hierarchical closure: deliverable-without-closure gets a closure-audit child (NOT bare-abandoned)", async () => {
+    const db = openDb(":memory:");
+    const { directiveId, taskId } = await seedDeliverableWithoutClosure(db);
+    await schedulerTick(db, { directiveId });
+
+    // No task_abandoned for the unclosed task.
+    const abandoned = db
+      .query("SELECT id FROM events WHERE task_id = ? AND kind = 'task_abandoned'")
+      .get(taskId) as { id: string } | null;
+    expect(abandoned).toBeNull();
+
+    // The task was superseded for closure audit (terminal = committed in
+    // topology, so it won't re-dispatch unchanged) and the deliverable survives.
+    const superseded = db
+      .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'task_committed_superseded'")
+      .get(taskId) as { payload: string } | null;
+    expect(superseded).not.toBeNull();
+    const sp = JSON.parse(superseded!.payload) as { reason: string; closure_audit_task_id: string };
+    expect(sp.reason).toBe("deliverable_without_closure_superseded_by_closure_audit");
+
+    // A closure-audit refinement child was opened with a closure-focused goal.
+    const child = db
+      .query(
+        "SELECT task_id, payload FROM events WHERE kind = 'task_node_opened' AND directive_id = ? AND json_extract(payload,'$.closure_audit_redispatch') = 1",
+      )
+      .get(directiveId) as { task_id: string; payload: string } | null;
+    expect(child).not.toBeNull();
+    expect(child!.task_id).toBe(sp.closure_audit_task_id);
+    const cp = JSON.parse(child!.payload) as { goal: string; source: string };
+    expect(cp.source).toBe("hierarchical_closure_audit");
+    expect(cp.goal.toLowerCase()).toContain("closure");
+
+    // The refines edge links child -> parent.
+    const edge = db
+      .query("SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND task_id = ?")
+      .get(child!.task_id) as { payload: string } | null;
+    expect(edge).not.toBeNull();
+    const ep = JSON.parse(edge!.payload) as { kind: string; from_task: string; to_task: string };
+    expect(ep.kind).toBe("refines");
+    expect(ep.from_task).toBe(taskId);
+
+    // The deliverable still exists in the ledger (progress not thrown away).
+    const kc = db
+      .query("SELECT id FROM events WHERE task_id = ? AND kind = 'knowledge_candidate'")
+      .get(taskId) as { id: string } | null;
+    expect(kc).not.toBeNull();
+  });
+
+  test("hierarchical closure is BOUNDED: a closure-audit child that ALSO emits a deliverable without closure abandons (no infinite loop)", async () => {
+    const db = openDb(":memory:");
+    const { directiveId, taskId: root } = await seedDeliverableWithoutClosure(db);
+    // First tick: root superseded -> closure-audit child opened.
+    await schedulerTick(db, { directiveId });
+    const child = db
+      .query(
+        "SELECT task_id FROM events WHERE kind = 'task_node_opened' AND directive_id = ? AND json_extract(payload,'$.closure_audit_redispatch') = 1",
+      )
+      .get(directiveId) as { task_id: string } | null;
+    expect(child).not.toBeNull();
+    const childId = child!.task_id;
+
+    // Simulate the child being dispatched and ALSO emitting a deliverable
+    // without closure (the loop-risk case). The child is already a
+    // closure_audit_redispatch node, so the lineage cap (1) is reached.
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: childId,
+      payload: { dispatch_id: newId() },
+    });
+    await Bun.sleep(3);
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: childId,
+      payload: { claim: "still no closure", confidence: 0.9 },
+    });
+
+    await schedulerTick(db, { directiveId });
+
+    // BOUNDED: the child abandons (cap reached) — it is NOT superseded into yet
+    // another closure-audit grandchild.
+    const childAbandoned = db
+      .query("SELECT failure_kind FROM events WHERE task_id = ? AND kind = 'task_abandoned'")
+      .get(childId) as { failure_kind: string } | null;
+    expect(childAbandoned).not.toBeNull();
+    expect(childAbandoned!.failure_kind).toBe("deliverable_without_closure_or_refinement");
+
+    // No second-generation closure-audit node (cap = 1, lineage already has 1).
+    const closureAuditNodes = db
+      .query(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'task_node_opened' AND directive_id = ? AND json_extract(payload,'$.closure_audit_redispatch') = 1",
+      )
+      .get(directiveId) as { c: number };
+    expect(closureAuditNodes.c).toBe(1);
+  });
+
+  test("hierarchical closure: genuinely-stuck (no-deliverable) path STILL abandons unchanged", async () => {
+    const db = openDb(":memory:");
+    // Brain dispatched, but emitted NOTHING (no deliverable, no cognitive work)
+    // — the genuinely-stuck case. This must abandon exactly as before.
+    const { directiveId, taskId } = await seedDeliverableWithoutClosure(db, { withDeliverable: false });
+    await schedulerTick(db, { directiveId });
+
+    const abandoned = db
+      .query("SELECT failure_kind, payload FROM events WHERE task_id = ? AND kind = 'task_abandoned'")
+      .get(taskId) as { failure_kind: string; payload: string } | null;
+    expect(abandoned).not.toBeNull();
+    expect(abandoned!.failure_kind).toBe("no_structural_progress_since_last_dispatch");
+
+    // No closure-audit child, no supersession — the stuck path is untouched.
+    const child = db
+      .query(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'task_node_opened' AND directive_id = ? AND json_extract(payload,'$.closure_audit_redispatch') = 1",
+      )
+      .get(directiveId) as { c: number };
+    expect(child.c).toBe(0);
+    const superseded = db
+      .query("SELECT id FROM events WHERE task_id = ? AND kind = 'task_committed_superseded'")
+      .get(taskId) as { id: string } | null;
+    expect(superseded).toBeNull();
+  });
+
+  test("hierarchical closure: a CLEAN closure (residual<0.3) still auto-commits — normal path unchanged", async () => {
+    const db = openDb(":memory:");
+    const { directiveId, taskId } = await seedDeliverableWithoutClosure(db, { withClosure: 0.1 });
+    await schedulerTick(db, { directiveId });
+
+    // The pre-existing cleanClosure branch auto-commits; no closure-audit child.
+    const committed = db
+      .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'task_committed'")
+      .get(taskId) as { payload: string } | null;
+    expect(committed).not.toBeNull();
+    const child = db
+      .query(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'task_node_opened' AND directive_id = ? AND json_extract(payload,'$.closure_audit_redispatch') = 1",
+      )
+      .get(directiveId) as { c: number };
+    expect(child.c).toBe(0);
+  });
 });
