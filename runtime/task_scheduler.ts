@@ -110,7 +110,14 @@ const DEFAULT_POLL_INTERVAL_MS = 500;
 const BRAIN_PROCESS_RAM_BYTES = 700_000_000;
 const HOST_RAM_RESERVE_BYTES = 2_000_000_000;  // ~2GB kept for OS + bun + tests
 const PROMPT_COMPOSITION_HEADROOM_BYTES = 150_000_000;
-const DAEMON_RSS_PRESSURE_BYTES = 1_200_000_000;
+// Heap-pressure circuit breaker. Must sit ABOVE the daemon's normal/heavy
+// operating RSS (idle baseline ~1.2-1.7GB; observed ~3.0GB under a 6-brain
+// burst WITHOUT OOM) and BELOW the OOM danger zone, so it defers NEW brain
+// admission only when RSS is genuinely runaway — never during normal load.
+// (A 1.2GB threshold regressed: it sat below idle baseline and deferred every
+// brain dispatch indefinitely.) The heap-aware computeBrainDispatchCap is the
+// primary guard; this gate is the backstop.
+const DAEMON_RSS_PRESSURE_BYTES = 3_500_000_000;
 
 export type DaemonHeapPressureState = {
   rss_bytes: number;

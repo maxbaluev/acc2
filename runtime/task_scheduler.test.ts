@@ -266,13 +266,13 @@ describe("task_scheduler", () => {
     const originalMemoryUsage = process.memoryUsage;
     try {
       Object.defineProperty(process, "memoryUsage", {
-        value: () => ({ ...originalMemoryUsage(), rss: 1_250_000_000, heapUsed: 700_000_000 }),
+        value: () => ({ ...originalMemoryUsage(), rss: 3_600_000_000, heapUsed: 2_400_000_000 }),
         configurable: true,
       });
       const state = computeDaemonHeapPressureState();
       expect(state.under_pressure).toBe(true);
-      expect(state.rss_bytes).toBe(1_250_000_000);
-      expect(state.heap_used_bytes).toBe(700_000_000);
+      expect(state.rss_bytes).toBe(3_600_000_000);
+      expect(state.heap_used_bytes).toBe(2_400_000_000);
     } finally {
       Object.defineProperty(process, "memoryUsage", { value: originalMemoryUsage, configurable: true });
     }
@@ -286,7 +286,7 @@ describe("task_scheduler", () => {
     try {
       const { taskId } = await openFixtureDCountTodos(db, tempDir);
       Object.defineProperty(process, "memoryUsage", {
-        value: () => ({ ...originalMemoryUsage(), rss: 1_250_000_000, heapUsed: 700_000_000 }),
+        value: () => ({ ...originalMemoryUsage(), rss: 3_600_000_000, heapUsed: 2_400_000_000 }),
         configurable: true,
       });
 
@@ -301,7 +301,7 @@ describe("task_scheduler", () => {
       const payload = JSON.parse(gate!.payload) as { gate?: string; reason?: string; daemon_rss_bytes?: number };
       expect(payload.gate).toBe("daemon_heap_pressure");
       expect(payload.reason).toBe("opencode_brain_dispatch_paused_for_daemon_heap_pressure");
-      expect(payload.daemon_rss_bytes).toBe(1_250_000_000);
+      expect(payload.daemon_rss_bytes).toBe(3_600_000_000);
     } finally {
       Object.defineProperty(process, "memoryUsage", { value: originalMemoryUsage, configurable: true });
       rmSync(tempDir, { recursive: true, force: true });
