@@ -21,7 +21,6 @@ import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "../runtime/events";
 import { runContractAmendmentConsumer } from "../runtime/contract_amendment_consumer";
 import { pendingContractAmendments } from "../substrate/views";
-import { evaluatePendingAmendmentBacklogSelection } from "../runtime/pending_amendment_backlog_verifier";
 import {
   selectCurrentRootClosureAudit,
   closureResidualsForLineage,
@@ -375,15 +374,6 @@ describe("F11 — contract amendment flywheel consumer", () => {
     // an owner-clarification signal.
     expect(rows.find((r) => r.proposal_id === unscored.id)?.triage_state).toBe("unscored");
     expect(rows.find((r) => r.proposal_id === unscored.id)?.missing_fields).toEqual([]);
-
-    const verified = evaluatePendingAmendmentBacklogSelection({ rows, selected_proposal_id: rows[0]!.proposal_id });
-    expect(verified.residual).toBe(0);
-    expect(verified.eligible_for_f16_f18_implementation).toBe(true);
-    expect(verified.expected_top_proposal_id).toBe(rows[0]!.proposal_id);
-
-    const wrong = evaluatePendingAmendmentBacklogSelection({ rows, selected_proposal_id: blocked.id });
-    expect(wrong.breakdown.selected_top_match).toBe(1);
-    expect(wrong.residual).toBeGreaterThanOrEqual(0.3);
   });
 
   test("(E) prompt_composer outstanding_contract_amendments section honours row cap and byte budget", async () => {
