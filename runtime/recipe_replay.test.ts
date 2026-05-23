@@ -462,6 +462,85 @@ describe("recipe_replay.replayRecipe", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  // Regression (2026-05-23 isolation-hygiene audit): a verifier can return a
+  // non-finite or out-of-range residual (NaN, Infinity, negative). The raw
+  // value passed the `typeof === "number"` extraction guard, and because
+  // `NaN >= ABORT_THRESHOLD` is false, the recipe would COMMIT with a NaN
+  // terminal residual — a broken signal masquerading as a clean replay. A
+  // negative residual would likewise slip past the abort gate. The fix clamps
+  // finite values into [0,1] and treats non-finite as a verifier failure
+  // (residual=1) so the abort gate fires. These two cases pin that fail-closed
+  // behavior.
+  test("verifier returning NaN residual aborts replay (broken-signal-is-never-a-pass)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-recipe-nan-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO\n");
+    try {
+      const { db } = await seedThreeSuccessRecipe(tempDir);
+      const { directiveId, taskId } = await openFixtureDCountTodos(db, tempDir);
+      const { nodes } = readDagForDirective(db, directiveId);
+      const task = nodes.find((n) => n.id === taskId)!;
+      const match = findRecipeMatch(db, task);
+      expect(match).not.toBeNull();
+
+      // Custom runArtifact: action succeeds, verifier returns a NaN residual.
+      const nanVerifierRunner: RecipeArtifactRunner = async (innerDb, artifactId, inputs) => {
+        const row = innerDb.query("SELECT name FROM act_artifact WHERE id = ?").get(artifactId) as { name: string | null } | null;
+        const name = row?.name ?? "";
+        if (name.includes("verifier")) return { ok: true, result: { residual: Number.NaN } };
+        return runRecipeReplayTestArtifact(innerDb, artifactId, inputs);
+      };
+
+      const outcome = await replayRecipe(db, task, match!, { runArtifact: nanVerifierRunner });
+      expect(outcome.task_committed).toBe(false);
+      expect(outcome.abort_reason).toBe("verifier_residual_above_threshold");
+      // The clamped residual is 1 (non-finite → fail-closed), never NaN.
+      expect(outcome.residuals[0]).toBe(1);
+      // No task_committed row with a NaN residual leaked into the ledger.
+      const committed = db
+        .query("SELECT residual FROM events WHERE kind = 'task_committed' AND task_id = ?")
+        .get(taskId) as { residual: number } | null;
+      expect(committed).toBeNull();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("verifier returning negative residual is clamped and aborts (no out-of-range commit)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-recipe-neg-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO\n");
+    try {
+      const { db } = await seedThreeSuccessRecipe(tempDir);
+      const { directiveId, taskId } = await openFixtureDCountTodos(db, tempDir);
+      const { nodes } = readDagForDirective(db, directiveId);
+      const task = nodes.find((n) => n.id === taskId)!;
+      const match = findRecipeMatch(db, task);
+      expect(match).not.toBeNull();
+
+      // A negative residual (-5) would, unclamped, pass `-5 >= 0.3` as false
+      // and commit. Clamp pulls it to 0 — which is BELOW the abort threshold,
+      // so the recipe legitimately commits but with a sane in-range residual.
+      const negVerifierRunner: RecipeArtifactRunner = async (innerDb, artifactId, inputs) => {
+        const row = innerDb.query("SELECT name FROM act_artifact WHERE id = ?").get(artifactId) as { name: string | null } | null;
+        const name = row?.name ?? "";
+        if (name.includes("verifier")) return { ok: true, result: { residual: -5 } };
+        return runRecipeReplayTestArtifact(innerDb, artifactId, inputs);
+      };
+
+      const outcome = await replayRecipe(db, task, match!, { runArtifact: negVerifierRunner });
+      // -5 clamps to 0 → below abort threshold → commits, but with residual 0.
+      expect(outcome.residuals[0]).toBe(0);
+      expect(outcome.task_committed).toBe(true);
+      const committed = db
+        .query("SELECT residual FROM events WHERE kind = 'task_committed' AND task_id = ?")
+        .get(taskId) as { residual: number } | null;
+      expect(committed).not.toBeNull();
+      expect(committed!.residual).toBeGreaterThanOrEqual(0);
+      expect(committed!.residual).toBeLessThanOrEqual(1);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("recipe_replay.replayRecipe — multi-step (Batch 4 Hole 4)", () => {

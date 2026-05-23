@@ -509,7 +509,18 @@ export const replayRecipe = async (
         !Array.isArray(verifierObs.result) &&
         typeof (verifierObs.result as Record<string, unknown>).residual === "number"
       ) {
-        residual = (verifierObs.result as { residual: number }).residual;
+        const raw = (verifierObs.result as { residual: number }).residual;
+        // Broken-signal-is-never-a-pass (mirrors the credit-residual write
+        // boundary, commit 79785a1): a verifier can return NaN, Infinity, a
+        // negative number, or a value > 1. The `typeof === "number"` guard
+        // above admits all of those. If we accepted them raw, a NaN residual
+        // would fail the `residual >= ABORT_THRESHOLD` comparison (NaN
+        // compares false) and the recipe would COMMIT with a NaN terminal
+        // residual — a broken signal masquerading as a clean replay. A
+        // negative residual would likewise slip past the abort gate and
+        // commit. Clamp finite values into [0,1]; treat non-finite as a
+        // verifier failure (residual=1) so the abort gate fires.
+        residual = Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 1;
       }
     } else {
       residual = actionObs.ok ? 0 : 1;
