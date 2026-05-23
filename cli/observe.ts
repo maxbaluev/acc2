@@ -815,7 +815,31 @@ export type EventsOpts = {
    *  filter passes the union through. */
   kinds?: string[];
   verbose?: boolean;
+  /** Emit machine-readable JSON of the raw event rows instead of the
+   *  human one-line-per-kind narrative. JSON mode bypasses the
+   *  NARRATIVE_KINDS suppression in `formatEvent` (so EVERY filtered row
+   *  is emitted, never silently dropped) and is the canonical surface for
+   *  a downstream consumer that wants to parse the structured events. The
+   *  shape matches the acc2 `--json` convention (`acc whoami --json`,
+   *  `acc dispatch --json`): a single `JSON.stringify(value, null, 2)`
+   *  value — here a JSON array of the (filtered) event rows. */
+  json?: boolean;
 };
+
+/** Apply the client-side task/directive/kind(s) filters to a raw event
+ *  window. Shared by the human-render path and the `--json` path so the
+ *  two cannot diverge (the historical `--json` bug was that the render
+ *  path silently dropped non-narrative rows; both paths now agree on
+ *  WHICH rows match before deciding HOW to print them). */
+export const filterEvents = (evs: EventLike[], opts: EventsOpts): EventLike[] =>
+  evs.filter((e) => {
+    if (opts.task && !(e.task_id ?? "").startsWith(opts.task)) return false;
+    if (opts.directive && !(e.directive_id ?? "").startsWith(opts.directive)) return false;
+    if (opts.kinds && opts.kinds.length > 0) {
+      if (!opts.kinds.includes(e.kind ?? "")) return false;
+    } else if (opts.kind && e.kind !== opts.kind) return false;
+    return true;
+  });
 
 export const runEvents = async (opts: EventsOpts): Promise<number> => {
   const k = Math.min(200, opts.limit ?? 30);  // server caps at 200
@@ -839,21 +863,36 @@ export const runEvents = async (opts: EventsOpts): Promise<number> => {
   }
   const evs = ((env.result as { events?: EventLike[] })?.events ?? []) as EventLike[];
   // Server already returns ts-ascending; no reverse needed.
+  // kind/kinds already server-filtered when set; the client-side filter is a
+  // no-op in that case but still applies the task/directive prefix filters.
+  const matched = filterEvents(evs, opts);
+  if (opts.json) {
+    // Machine-readable surface: emit the RAW filtered rows as a single JSON
+    // array — NOT the narrative one-liner, and NOT subject to NARRATIVE_KINDS
+    // suppression. An empty match is a valid `[]`, never a silent drop or an
+    // error. This is the documented `--json` contract and matches the acc2
+    // `JSON.stringify(value, null, 2)` convention.
+    console.log(JSON.stringify(matched, null, 2));
+    return 0;
+  }
   let shown = 0;
-  for (const e of evs) {
-    if (opts.task && !(e.task_id ?? "").startsWith(opts.task)) continue;
-    if (opts.directive && !(e.directive_id ?? "").startsWith(opts.directive)) continue;
-    // kind/kinds already server-filtered when set; double-check (no-op when filtered server-side)
-    if (opts.kinds && opts.kinds.length > 0) {
-      if (!opts.kinds.includes(e.kind ?? "")) continue;
-    } else if (opts.kind && e.kind !== opts.kind) continue;
+  for (const e of matched) {
     const line = formatEvent(e, { verbose: opts.verbose });
     if (line) {
       console.log(line);
       shown++;
     }
   }
-  if (shown === 0 && evs.length > 0) {
+  if (shown === 0 && matched.length > 0) {
+    // Rows matched the task/directive/kind filters but were all suppressed by
+    // the NARRATIVE_KINDS surface — tell the operator how to see them rather
+    // than implying nothing matched. `--json` and `--verbose` both bypass the
+    // narrative filter.
+    console.error(
+      `acc events: ${matched.length} row(s) matched filters but are non-narrative; ` +
+      `use --verbose or --json to see them`,
+    );
+  } else if (shown === 0 && evs.length > 0) {
     console.error(`acc events: no events matched filters (saw ${evs.length} in window)`);
   }
   return 0;
@@ -985,8 +1024,16 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
       if (opts.kinds && opts.kinds.length > 0) {
         if (!opts.kinds.includes(e.kind ?? "")) continue;
       } else if (opts.kind && e.kind !== opts.kind) continue;
-      const line = formatEvent(e, { verbose: opts.verbose });
-      if (line) console.log(line);
+      if (opts.json) {
+        // Streaming machine-readable surface: NDJSON — one compact JSON
+        // object per line per event (a stream cannot be a single array).
+        // Raw row, no NARRATIVE_KINDS suppression. Each line is parseable in
+        // isolation by a line-delimited consumer.
+        console.log(JSON.stringify(e));
+      } else {
+        const line = formatEvent(e, { verbose: opts.verbose });
+        if (line) console.log(line);
+      }
       if (TERMINAL_KINDS.has(e.kind ?? "")) {
         // When a rootTaskId is specified (typical for `acc task` which
         // follows the whole directive subtree but should exit only on
@@ -1107,8 +1154,13 @@ const runTailPoll = async (opts: TailOpts): Promise<number> => {
       if (opts.kinds && opts.kinds.length > 0) {
         if (!opts.kinds.includes(e.kind ?? "")) continue;
       } else if (opts.kind && e.kind !== opts.kind) continue;
-      const line = formatEvent(e, { verbose: opts.verbose });
-      if (line) console.log(line);
+      if (opts.json) {
+        // NDJSON streaming surface (poll fallback parity with runTailStream).
+        console.log(JSON.stringify(e));
+      } else {
+        const line = formatEvent(e, { verbose: opts.verbose });
+        if (line) console.log(line);
+      }
       if (TERMINAL_KINDS.has(e.kind ?? "")) {
         const isRootTerminal = !opts.rootTaskId || (e.task_id === opts.rootTaskId);
         if (isRootTerminal) sawTerminal = e;
@@ -1206,7 +1258,7 @@ export const runGraph = async (directiveId: string): Promise<number> => {
 // suffer the window limit.
 const RECENT_EVENTS_SERVER_CAP = 200;
 
-export const runInspect = async (taskId: string): Promise<number> => {
+export const runInspect = async (taskId: string, opts: { json?: boolean } = {}): Promise<number> => {
   let env;
   try {
     env = await mcpCall("runtime.recent_events", { k: RECENT_EVENTS_SERVER_CAP });
@@ -1222,6 +1274,20 @@ export const runInspect = async (taskId: string): Promise<number> => {
   // Server returns ts-ascending; no reverse.
   const windowFull = evs.length >= RECENT_EVENTS_SERVER_CAP;
   const taskEvs = evs.filter((e) => (e.task_id ?? "").startsWith(taskId));
+  if (opts.json) {
+    // Machine-readable surface: emit the raw matched rows as a single JSON
+    // array (matches `acc events --json`). An empty match is a valid `[]` —
+    // the window-truncation caveats are advisory and stay on stderr so they
+    // don't corrupt the parseable stdout payload.
+    console.log(JSON.stringify(taskEvs, null, 2));
+    if (taskEvs.length === 0 && windowFull) {
+      console.error(
+        `acc inspect: task ${taskId} not in the most recent ${RECENT_EVENTS_SERVER_CAP} events — ` +
+        `it may be older than this window. Use \`acc dispatch <directive_id>\` for an index-backed report.`,
+      );
+    }
+    return taskEvs.length === 0 ? 1 : 0;
+  }
   if (taskEvs.length === 0) {
     // Distinguish "task does not exist" from "task is older than the recent
     // window". When the window is full we cannot prove absence — say so and
@@ -1319,6 +1385,7 @@ export const runNotify = async (argv: string[]): Promise<number> => {
       kinds,
       limit: flags.limit ? Number(flags.limit) : undefined,
       verbose: Boolean(flags.verbose),
+      json: Boolean(flags.json),
     });
   }
   return runTail({
@@ -1330,6 +1397,7 @@ export const runNotify = async (argv: string[]): Promise<number> => {
       : undefined,
     stream: flags["no-stream"] ? false : (flags.stream !== false),
     verbose: Boolean(flags.verbose),
+    json: Boolean(flags.json),
   });
 };
 
@@ -1343,6 +1411,7 @@ export const runObserve = async (cmd: string, argv: string[]): Promise<number> =
         directive: typeof flags.directive === "string" ? flags.directive : undefined,
         kind: typeof flags.kind === "string" ? flags.kind : undefined,
         verbose: Boolean(flags.verbose),
+        json: Boolean(flags.json),
       });
     case "tail":
       return runTail({
@@ -1351,6 +1420,7 @@ export const runObserve = async (cmd: string, argv: string[]): Promise<number> =
         directive: typeof flags.directive === "string" ? flags.directive : undefined,
         kind: typeof flags.kind === "string" ? flags.kind : undefined,
         verbose: Boolean(flags.verbose),
+        json: Boolean(flags.json),
         rootTaskId: resolveRootTaskIdFlag(flags),
         pollMs: flags["poll-ms"] ? Number(flags["poll-ms"]) : undefined,
         deadlineMs: flags.timeout
@@ -1373,7 +1443,7 @@ export const runObserve = async (cmd: string, argv: string[]): Promise<number> =
         console.error("acc inspect: requires <task_id>");
         return 1;
       }
-      return runInspect(tid);
+      return runInspect(tid, { json: Boolean(flags.json) });
     }
     default:
       console.error(`acc observe: unknown subcommand '${cmd}'`);
