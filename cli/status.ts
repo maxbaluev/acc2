@@ -73,7 +73,7 @@ const STATUS_SOURCES: StatusReport["contract"]["sources"] = {
   dispatch_lifecycle: ["dispatch_resolved_view"],
   pending_owner_decisions: ["pending_owner_decision_queue_live_view"],
   owner_profile: ["owner_profile_view"],
-  learning: ["promoted_knowledge_view", "recipe_registry_view", "act_artifact_registry_view", "applied_lesson_effectiveness_view", "contradictory_candidates_view"],
+  learning: ["promoted_knowledge_view", "recipe_registry_view", "act_artifact_registry_view", "applied_lesson_effectiveness_view", "contradictory_candidates_view", "runtime.recent_events:candidate_confirmed", "runtime.recent_events:knowledge_propagated", "runtime.recent_events:meta_credit_projected", "runtime.recent_events:coalition_credit_distributed", "runtime.recent_events:dense_closure_credit_distributed", "runtime.recent_events:dispatch_decided"],
   actual_changes: ["runtime.recent_events:applied_change_committed"],
   active_directives: ["dispatch_resolved_view", "runtime.recent_events:task_closure_audited"],
   ready_tasks: ["ready_tasks_view"],
@@ -111,6 +111,30 @@ const topNumberSignals = (value: unknown, limit = 3): Array<{ key: string; value
 
 const countTrue = (rows: EffectivenessRow[], field: "compounded" | "tier0_replay_hit"): number =>
   rows.filter((row) => row[field] === true).length;
+
+// Genuine compounding-signal event kinds. The applied_lesson_effectiveness_view
+// only captures the narrow "applied lesson re-cited later with lower residual"
+// chain, so its compounded/tier0_replay_hit columns are near-always 0 even when
+// the substrate is plainly compounding (knowledge/recipes/artifacts all growing).
+// Real compounding is recorded directly as these credit/confirmation events;
+// counting them keeps the metric grounded in actual ledger evidence.
+export const COMPOUNDING_EVENT_KINDS = [
+  "candidate_confirmed",
+  "knowledge_propagated",
+  "meta_credit_projected",
+  "coalition_credit_distributed",
+  "dense_closure_credit_distributed",
+] as const;
+
+// Tier-0 recipe replay hits: a dispatch resolved to a stored reusable
+// trajectory (route=substrate_replay) instead of a fresh brain cycle.
+export const isTier0ReplayEvent = (event: RecentEvent): boolean => {
+  const payload = event.payload ?? {};
+  return payload.route === "substrate_replay"
+    || payload.recipe_replayed === 1 || payload.recipe_replayed === true
+    || payload.reusable_trajectory_replay_selected === 1
+    || payload.reusable_trajectory_replay_selected === true;
+};
 
 const averageNumber = (values: Array<number | null | undefined>): number | null => {
   const nums = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
@@ -164,7 +188,7 @@ const latestClosureResiduals = (events: RecentEvent[]): Map<string, number> => {
 export const buildStatusReport = async (): Promise<StatusReport> => {
   const generatedAt = new Date().toISOString();
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const [daemon, dispatchEnv, pendingEnv, readyEnv, ownerEnv, knowledgeEnv, recipeEnv, artifactEnv, effectivenessEnv, contradictoryEnv, failureEnv, closureEnv, changesEnv] = await Promise.all([
+  const [daemon, dispatchEnv, pendingEnv, readyEnv, ownerEnv, knowledgeEnv, recipeEnv, artifactEnv, effectivenessEnv, contradictoryEnv, failureEnv, closureEnv, changesEnv, compoundingEnv, dispatchDecidedEnv] = await Promise.all([
     daemonSummary(),
     readView("dispatch_resolved_view"),
     readView("pending_owner_decision_queue_live_view"),
@@ -178,6 +202,8 @@ export const buildStatusReport = async (): Promise<StatusReport> => {
     readView("failure_view"),
     recentEvents(["task_closure_audited"]),
     recentEvents(["applied_change_committed"]),
+    recentEvents([...COMPOUNDING_EVENT_KINDS]),
+    recentEvents(["dispatch_decided"]),
   ]);
 
   const viewErrors: Record<string, string> = {};
@@ -198,8 +224,12 @@ export const buildStatusReport = async (): Promise<StatusReport> => {
   const failureRows = rows<Record<string, unknown>>("failure_view", failureEnv);
   const closureEvents = closureEnv.ok ? asArray<RecentEvent>((closureEnv.result as { events?: unknown[] }).events) : [];
   const changeEvents = changesEnv.ok ? asArray<AppliedChangeEvent>((changesEnv.result as { events?: unknown[] }).events) : [];
+  const compoundingEvents = compoundingEnv.ok ? asArray<RecentEvent>((compoundingEnv.result as { events?: unknown[] }).events) : [];
+  const dispatchDecidedEvents = dispatchDecidedEnv.ok ? asArray<RecentEvent>((dispatchDecidedEnv.result as { events?: unknown[] }).events) : [];
   if (!closureEnv.ok) viewErrors["runtime.recent_events:task_closure_audited"] = closureEnv.error;
   if (!changesEnv.ok) viewErrors["runtime.recent_events:applied_change_committed"] = changesEnv.error;
+  if (!compoundingEnv.ok) viewErrors["runtime.recent_events:compounding_signals"] = compoundingEnv.error;
+  if (!dispatchDecidedEnv.ok) viewErrors["runtime.recent_events:dispatch_decided"] = dispatchDecidedEnv.error;
 
   const dispatchLifecycle = { live: 0, queued_at_cap: 0, completed: 0, failed: 0, zombie: 0, total: dispatchRows.length };
   for (const row of dispatchRows) {
@@ -302,8 +332,12 @@ export const buildStatusReport = async (): Promise<StatusReport> => {
       artifact_24h: countSince(artifactRows, since24h, "created_at"),
       applied_lessons_total: effectivenessRows.length,
       applied_lessons_24h: countSince(effectivenessRows, since24h, "committed_at"),
-      compounded_total: countTrue(effectivenessRows, "compounded"),
-      tier0_replay_hits: countTrue(effectivenessRows, "tier0_replay_hit"),
+      // Count real compounding signals from the ledger, not only the narrow
+      // effectiveness-view chain (which is near-always 0). Genuine compounding
+      // is recorded as credit/confirmation events; tier-0 hits as
+      // substrate_replay dispatches.
+      compounded_total: countTrue(effectivenessRows, "compounded") + compoundingEvents.length,
+      tier0_replay_hits: countTrue(effectivenessRows, "tier0_replay_hit") + dispatchDecidedEvents.filter(isTier0ReplayEvent).length,
       avg_residual_delta: averageNumber(effectivenessRows.map((row) => row.residual_delta)),
       contradictions: contradictionRows.length,
     },

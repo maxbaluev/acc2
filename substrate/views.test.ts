@@ -568,6 +568,44 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(row?.terminal_kind).toBeNull();
   });
 
+  test("stale-live leak fix (2026-05-23): a directive that dispatched, closed all dispatches, never reached a terminal, and went quiet > 1h is 'abandoned' (NOT perpetual 'live') — while a fresh dispatched-and-closed root with recent activity stays live", () => {
+    // Diagnosed leak: `acc status` showed dispatch lifecycle live=52 while
+    // active directives: none and 0 ready tasks. Those 52 roots had ALL their
+    // brain dispatches closed (open_dispatch_count=0) but no terminal
+    // task_committed/task_failed on the root, and no event for over an hour.
+    // The orphan_node branch above requires dispatched_count=0 (these
+    // dispatched, so it didn't catch them); the zombie branch requires
+    // open_dispatch_count>0 (these had none). They fell through to the
+    // `dispatched_count > 0 → 'live'` fallback and stuck on 'live' forever,
+    // inflating the operator's live count with work that isn't running.
+    const db = openDb(":memory:");
+    runViews(db);
+    const twoHoursAgo = new Date(Date.now() - 120 * 60 * 1000).toISOString();
+
+    // LEAK ROOT: dispatched, closed, no terminal, no event for > 1h → abandoned.
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_stale", task_id: "t_stale", ts: twoHoursAgo });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_stale", task_id: "t_stale", ts: twoHoursAgo, payload: { dispatch_id: "disp_stale" } });
+    insertEvent(db, { kind: "brain_dispatch_closed", directive_id: "d_stale", task_id: "t_stale", ts: twoHoursAgo, payload: { dispatch_id: "disp_stale" } });
+
+    // HEALTHY ROOT: identical dispatched-then-closed shape, but a recent event
+    // for the directive (< 1h) proves it's still progressing → stays live.
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_recent", task_id: "t_recent", ts: twoHoursAgo });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_recent", task_id: "t_recent", ts: twoHoursAgo, payload: { dispatch_id: "disp_recent" } });
+    insertEvent(db, { kind: "brain_dispatch_closed", directive_id: "d_recent", task_id: "t_recent", ts: twoHoursAgo, payload: { dispatch_id: "disp_recent" } });
+    insertEvent(db, { kind: "brain_reasoning_recorded", directive_id: "d_recent", task_id: "t_recent", ts: nowIso() });
+
+    const byDirective = new Map(dispatchResolved(db).map((r) => [r.directive_id, r]));
+    const stale = byDirective.get("d_stale");
+    expect(stale?.lifecycle_status).toBe("abandoned");
+    expect(stale?.status).toBe("abandoned");
+    expect(stale?.status_reason).toBe("abandoned_dispatch_no_terminal");
+    expect(stale?.terminal_kind).toBeNull();
+    expect(stale?.open_dispatch_count).toBe(0);
+    expect(stale?.dispatched_count).toBe(1);
+    // The genuinely-progressing root with recent activity is NOT abandoned:
+    expect(byDirective.get("d_recent")?.lifecycle_status).toBe("live");
+  });
+
   test("Bug C fix: terminal_kind=dispatcher_violation classifies as 'failed' even when an open dispatch lingers past 5min (hard failure must win over zombie heuristic)", () => {
     const db = openDb(":memory:");
     runViews(db);

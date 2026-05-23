@@ -2981,6 +2981,32 @@ SELECT
            WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
          )
       THEN 'orphan_node'
+    -- 2026-05-23 stale-live leak fix: a directive that DID dispatch
+    -- (dispatched_count > 0) but whose dispatches all closed
+    -- (open_dispatch_count = 0) WITHOUT any terminal root event, and which
+    -- has gone quiet (no event for the directive in the last hour), is
+    -- terminally abandoned — the brain ran, closed, and never re-dispatched
+    -- or committed. The pre-fix view fell straight through to the
+    -- dispatched_count > 0 then 'live' fallback, inflating the live count with
+    -- old roots that aren't running (observed: 52 phantom 'live' rows while
+    -- 0 ready tasks / 0 active directives). The orphan_node branch above does
+    -- NOT catch these (it requires dispatched_count = 0). Mark them
+    -- 'abandoned' (same terminal bucket as closed-directive stragglers) so
+    -- the live count reflects only genuinely-in-flight work — honest, not
+    -- hidden.
+    WHEN term.terminal_kind IS NULL
+         AND COALESCE(ds.dispatched_count, 0) > 0
+         AND COALESCE(ds.open_dispatch_count, 0) = 0
+         AND r.directive_id NOT IN (
+           SELECT directive_id FROM events
+           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM events e_act
+           WHERE e_act.directive_id = r.directive_id
+             AND e_act.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')
+         )
+      THEN 'abandoned'
     WHEN COALESCE(ds.dispatched_count, 0) > 0 THEN 'live'
     ELSE 'live'
   END AS status,
@@ -3043,6 +3069,22 @@ SELECT
            WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
          )
       THEN 'orphan_node'
+    -- 2026-05-23 stale-live leak fix (lifecycle parity with status CASE
+    -- above): dispatched-then-all-closed, no terminal root event, gone quiet
+    -- for > 1h → 'abandoned', not a perpetual 'live'.
+    WHEN term.terminal_kind IS NULL
+         AND COALESCE(ds.dispatched_count, 0) > 0
+         AND COALESCE(ds.open_dispatch_count, 0) = 0
+         AND r.directive_id NOT IN (
+           SELECT directive_id FROM events
+           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM events e_act
+           WHERE e_act.directive_id = r.directive_id
+             AND e_act.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')
+         )
+      THEN 'abandoned'
     WHEN COALESCE(ds.dispatched_count, 0) > 0 THEN 'live'
     ELSE 'live'
   END AS lifecycle_status,
@@ -3122,6 +3164,21 @@ SELECT
            WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
          )
       THEN 'orphan_root_no_dispatch'
+    -- 2026-05-23 stale-live leak fix parity: dispatched, all closed, no
+    -- terminal, quiet > 1h → abandoned (mirrors status/lifecycle CASEs).
+    WHEN term.terminal_kind IS NULL
+         AND COALESCE(ds.dispatched_count, 0) > 0
+         AND COALESCE(ds.open_dispatch_count, 0) = 0
+         AND r.directive_id NOT IN (
+           SELECT directive_id FROM events
+           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM events e_act
+           WHERE e_act.directive_id = r.directive_id
+             AND e_act.ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')
+         )
+      THEN 'abandoned_dispatch_no_terminal'
     WHEN ready.ready_since IS NOT NULL THEN 'ready'
     ELSE COALESCE(ls.latest_signal_reason, 'root_opened')
   END AS status_reason,
@@ -4460,6 +4517,12 @@ export type DispatchResolvedStatus =
   // Distinct from 'orphan_node' (open directive, expected to complete) so
   // the operator surface can group + ignore these without false-positive
   // alerts. 200+ stragglers from killed past sessions classify here.
+  // 2026-05-23 stale-live leak fix: ALSO covers a directive that DID
+  // dispatch but whose dispatches all closed without any terminal root
+  // event and which then went quiet (no event for > 1h). Such roots are
+  // terminally abandoned (the brain ran, closed, never re-dispatched or
+  // committed) — pre-fix they leaked as perpetual 'live', inflating the
+  // operator's live count with work that isn't running.
   | "abandoned";
 
 export type DispatchResolvedRow = {

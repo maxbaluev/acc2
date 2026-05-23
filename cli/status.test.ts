@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderStatusReport, type StatusReport } from "./status";
+import { renderStatusReport, type StatusReport, isTier0ReplayEvent, COMPOUNDING_EVENT_KINDS } from "./status";
 
 describe("renderStatusReport", () => {
   test("renders owner-state status fields for one-screen CLI/TUI reuse", () => {
@@ -27,6 +27,55 @@ describe("renderStatusReport", () => {
     expect(out).toContain("knowledge=10 (+1/24h) recipes=20 (+2/24h) artifacts=30 (+3/24h) applied_lessons=7 (+1/24h) compounded=2 tier0=1 contradictions=4");
     expect(out).toContain("applied_24h=2 failed_24h=1 refused_24h=0");
     expect(out).toContain("closure_residual=0.12");
+  });
+});
+
+
+describe("compounding metric veracity", () => {
+  // Regression for the metric-veracity bug: compounded/tier0 reported 0 even
+  // while knowledge/recipes/artifacts were plainly growing, because the metric
+  // only read the near-always-empty applied_lesson_effectiveness_view chain.
+  // The fix counts genuine compounding-signal events from the ledger.
+
+  test("tier-0 replay hit is detected from a real substrate_replay dispatch_decided event", () => {
+    const replayDispatch = {
+      event_id: "E_replay",
+      ts: "2026-05-23T00:00:00.000Z",
+      kind: "dispatch_decided",
+      payload: { route: "substrate_replay", recipe_id: "R1" },
+    };
+    const freshDispatch = {
+      event_id: "E_fresh",
+      ts: "2026-05-23T00:00:01.000Z",
+      kind: "dispatch_decided",
+      payload: { route: "opencode_brain" },
+    };
+    expect(isTier0ReplayEvent(replayDispatch)).toBe(true);
+    expect(isTier0ReplayEvent(freshDispatch)).toBe(false);
+    // Alternative reusable-trajectory replay flag also counts.
+    expect(isTier0ReplayEvent({ kind: "task_committed", payload: { reusable_trajectory_replay_selected: true } })).toBe(true);
+    expect(isTier0ReplayEvent({ kind: "action_scored", payload: { recipe_replayed: 1 } })).toBe(true);
+  });
+
+  test("compounding signal kinds are the genuine credit/confirmation events, not the empty effectiveness chain", () => {
+    // These are the real compounding events the substrate emits during credit
+    // distribution and knowledge confirmation — the metric now counts them.
+    expect(COMPOUNDING_EVENT_KINDS).toContain("candidate_confirmed");
+    expect(COMPOUNDING_EVENT_KINDS).toContain("knowledge_propagated");
+    expect(COMPOUNDING_EVENT_KINDS).toContain("meta_credit_projected");
+    expect(COMPOUNDING_EVENT_KINDS).toContain("coalition_credit_distributed");
+    expect(COMPOUNDING_EVENT_KINDS).toContain("dense_closure_credit_distributed");
+  });
+
+  test("status.ts derives compounded/tier0 from recent_events, not solely the effectiveness view", async () => {
+    const source = await Bun.file(new URL("./status.ts", import.meta.url)).text();
+    // compounded_total adds genuine compounding events to any effectiveness-view hits.
+    expect(source).toContain('countTrue(effectivenessRows, "compounded") + compoundingEvents.length');
+    // tier0 adds substrate_replay dispatch hits.
+    expect(source).toContain('dispatchDecidedEvents.filter(isTier0ReplayEvent).length');
+    // and the new event fetches are wired in.
+    expect(source).toContain("recentEvents([...COMPOUNDING_EVENT_KINDS])");
+    expect(source).toContain('recentEvents(["dispatch_decided"])');
   });
 });
 
