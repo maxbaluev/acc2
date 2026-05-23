@@ -206,10 +206,18 @@ export type SseConnectOpts = RpcOpts & {
   /** Disable the exponential-backoff reconnect loop (default true). Useful
    *  in tests that want a single fetch and a deterministic end. */
   reconnect?: boolean;
-  /** Override the initial backoff delay (ms). Default 1000. */
+  /** Override the initial backoff delay (ms). Default 250. */
   backoffMs?: number;
-  /** Override the cap on backoff delay (ms). Default 8000. */
+  /** Override the cap on backoff delay (ms). Default 10000. */
   backoffCapMs?: number;
+  /** A connection must stay open at least this long (ms) before its
+   *  backoff is reset to the initial delay. Guards against a fast-flap loop
+   *  where the daemon (mid-restart) accepts the GET then immediately drops
+   *  it: without this, backoff resets to `initial` on every accept and the
+   *  client reconnects in a tight loop. Default 5000. */
+  stableConnectMs?: number;
+  /** Jitter source — injectable for deterministic tests. Default Math.random. */
+  rng?: () => number;
 };
 
 const parseSseFrame = (chunk: string): SseEvent | null => {
@@ -242,21 +250,51 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
   });
 
+/** Exponential-backoff step with full jitter. Returns the next backoff
+ *  ceiling (doubled, capped) AND the jittered delay to actually sleep.
+ *  Full jitter (random in [base/2, base]) de-synchronizes many clients that
+ *  all dropped at the same instant (e.g. every `acc watch` when the daemon
+ *  restarts), so they do NOT reconnect in lockstep and re-storm the daemon.
+ *
+ *  Exported for the reconnect-storm regression test. */
+export const nextBackoff = (
+  current: number,
+  cap: number,
+  rng: () => number = Math.random,
+): { delay: number; next: number } => {
+  const bounded = Math.min(current, cap);
+  // Full jitter: sleep a random fraction (50%–100%) of the current ceiling.
+  const delay = Math.max(1, Math.round(bounded * (0.5 + rng() * 0.5)));
+  const next = Math.min(bounded * 2, cap);
+  return { delay, next };
+};
+
 /** Open an SSE connection to <aux>/events/stream and yield each parsed
  *  event. Reconnects automatically on disconnect unless `reconnect=false`.
  *  Throw-safe: if the daemon is unreachable from the very first attempt we
  *  surface the fetch error so the caller can decide to abort or retry. */
 export async function* sseConnect(opts: SseConnectOpts = {}): AsyncGenerator<SseEvent> {
   const reconnect = opts.reconnect !== false;
-  const initial = opts.backoffMs ?? 1000;
-  const cap = opts.backoffCapMs ?? 8000;
+  const initial = opts.backoffMs ?? 250;
+  const cap = opts.backoffCapMs ?? 10_000;
+  const stableConnectMs = opts.stableConnectMs ?? 5_000;
+  const rng = opts.rng ?? Math.random;
   let backoff = initial;
+  // Backoff-advance helper: jittered sleep + ceiling growth. Keeps the four
+  // disconnect/no-base/non-ok/EOF paths from each tight-looping. The `/events/
+  // stream` endpoint never sends Last-Event-ID and the daemon never replays the
+  // ledger on it (it only subscribes to the live bus), so the ONLY storm risk
+  // here is a tight reconnect loop — which the jittered backoff below closes.
+  const stepBackoff = async (): Promise<void> => {
+    const { delay, next } = nextBackoff(backoff, cap, rng);
+    await sleep(delay, opts.signal);
+    backoff = next;
+  };
   while (!opts.signal?.aborted) {
     const base = auxBaseUrl(opts);
     if (!base) {
       if (!reconnect) throw new Error("daemon not running — start it with `acc daemon start`");
-      await sleep(backoff, opts.signal);
-      backoff = Math.min(backoff * 2, cap);
+      await stepBackoff();
       continue;
     }
     let res: Response;
@@ -269,18 +307,18 @@ export async function* sseConnect(opts: SseConnectOpts = {}): AsyncGenerator<Sse
     } catch (err) {
       if (opts.signal?.aborted) return;
       if (!reconnect) throw err;
-      await sleep(backoff, opts.signal);
-      backoff = Math.min(backoff * 2, cap);
+      await stepBackoff();
       continue;
     }
     if (!res.ok || !res.body) {
       if (!reconnect) throw new Error(`sse_failed:${res.status}`);
-      await sleep(backoff, opts.signal);
-      backoff = Math.min(backoff * 2, cap);
+      await stepBackoff();
       continue;
     }
-    // Reset backoff on a successful connect.
-    backoff = initial;
+    // A connect is "stable" only after it survives `stableConnectMs`. Until
+    // then we keep the prior backoff ceiling so a daemon that accepts-then-
+    // immediately-drops (mid-restart) cannot reset us into a tight loop.
+    const connectedAt = Date.now();
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -288,6 +326,9 @@ export async function* sseConnect(opts: SseConnectOpts = {}): AsyncGenerator<Sse
       while (!opts.signal?.aborted) {
         const { value, done } = await reader.read();
         if (done) break;
+        // The connection has produced live bytes; if it has stayed open past
+        // the stability window, it is healthy — reset the backoff ceiling.
+        if (Date.now() - connectedAt >= stableConnectMs) backoff = initial;
         buffer += decoder.decode(value, { stream: true });
         // SSE frame separator is \n\n; we split on the literal sequence.
         let idx = buffer.indexOf("\n\n");
@@ -312,8 +353,10 @@ export async function* sseConnect(opts: SseConnectOpts = {}): AsyncGenerator<Sse
       }
     }
     if (!reconnect || opts.signal?.aborted) return;
-    await sleep(backoff, opts.signal);
-    backoff = Math.min(backoff * 2, cap);
+    // If the connection lasted long enough to be considered stable, start the
+    // next reconnect from the initial delay; otherwise keep escalating.
+    if (Date.now() - connectedAt >= stableConnectMs) backoff = initial;
+    await stepBackoff();
   }
 }
 
@@ -383,7 +426,28 @@ const getMcpClient = async (baseUrl: string, timeoutMs: number): Promise<Client>
     try { await cachedMcp.client.close(); } catch { /* swallow */ }
     cachedMcp = null;
   }
-  const transport = new StreamableHTTPClientTransport(new URL(baseUrl));
+  // Reconnect-storm fix (2026-05-23): the SDK's StreamableHTTPClientTransport
+  // opens a standalone GET SSE stream on connect and, on disconnect, auto-
+  // reconnects with a `Last-Event-ID` header. mcp-proxy answers that header by
+  // replaying its InMemoryEventStore for the session (a full localeCompare sort
+  // of every stored stream message on EVERY reconnect). When the daemon
+  // restarts (slow boot), every cached client's GET stream drops at once and
+  // the SDK's default 1s reconnect retries hammer the mid-boot daemon with
+  // Last-Event-ID replays — saturating the single-threaded event loop so
+  // /health can't respond, which slows the boot, which drops more streams: a
+  // vicious cycle. We disable the SDK's auto-reconnect (`maxRetries: 0`) so NO
+  // Last-Event-ID replay is ever requested. mcpCall reconnects on demand via
+  // getMcpClient (a fresh session, NOT a Last-Event-ID resume), with the
+  // call-site bounded by MCP_CALL_TIMEOUT_MS — so a restart degrades to cheap
+  // fresh sessions instead of a replay storm.
+  const transport = new StreamableHTTPClientTransport(new URL(baseUrl), {
+    reconnectionOptions: {
+      maxRetries: 0,
+      initialReconnectionDelay: 1_000,
+      maxReconnectionDelay: 30_000,
+      reconnectionDelayGrowFactor: 1.5,
+    },
+  });
   const client = new Client({ name: "acc2-cli", version: "0.0.1" }, { capabilities: {} });
   const connecting = Promise.race([
     client.connect(transport),
