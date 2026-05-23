@@ -63,6 +63,12 @@ const usage = (): string => `acc — v2 thin CLI
                                   (preview-first rule) plus a follow-up
                                   contract_amendment_proposed for the missing
                                   Drive upload integration (C2).
+  acc solve "<task>" [--n N]      Run the generate-and-select organism on a task:
+                                  one OpenAI verbalized-sampling call generates N
+                                  diverse candidates, deterministically provenance-
+                                  filters invented numbers, pairwise-compares, spends
+                                  a sparse owner preference on close calls, and records
+                                  the outcome to the experience stream.
   acc dispatch <directive_id> [--json] [--no-color]
                                   Canonical substrate-truth inspection of one
                                   directive's full dispatch trajectory: task
@@ -615,6 +621,14 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     // pointing at the missing Drive upload integration.
     const { runRenderPreview } = await import("./render_preview");
     return runRenderPreview(argv.slice(1));
+  }
+  if (cmd === "solve") {
+    // `acc solve "<task>"` — run the generate-and-select organism live:
+    // route -> predict -> generate (real OpenAI verbalized sampling) ->
+    // provenance-filter -> pairwise compare -> sparse owner preference ->
+    // record. See cli/solve.ts + runtime/llm_generate.ts + solve_loop.ts.
+    const { runSolve } = await import("./solve");
+    return runSolve(argv.slice(1));
   }
   if (cmd === "dispatch") {
     // `acc dispatch <directive_id_or_prefix> [--json]` — canonical
