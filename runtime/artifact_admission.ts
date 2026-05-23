@@ -703,6 +703,19 @@ export const admitArtifact = async (
   // Residual check — if the result envelope carries a numeric `residual` we
   // honour the threshold; otherwise admission passes on the strength of a
   // clean ok:true run (§11.5 admission is a smoke test, not a full verify).
+  //
+  // RESIDUAL-INTEGRITY GATE (2026-05-23): the truth-bearing signal is a
+  // residual in [0,1] (Architecture.md "Act And Verification"; CLAUDE.md
+  // "Residual in [0,1] ... is the truth-bearing signal"). A fixture that
+  // reports a residual OUTSIDE [0,1] — or a NaN/±Infinity — is reporting a
+  // BROKEN signal, not a passing one. Pre-fix the gate used a bare
+  // `observedResidual >= threshold` comparison: `NaN >= 0.2` is `false`,
+  // `-5 >= 0.2` is `false`, and `1e9 >= 0.2` was the only out-of-range case
+  // caught — so a fixture emitting `{residual: NaN}` or `{residual: -5}`
+  // was ADMITTED, faking a pass with a verifier signal that does not mean
+  // what residual semantics require. We now refuse any non-finite or
+  // out-of-[0,1] residual as fixture_residual_too_high (an untrustworthy
+  // residual is treated as a failed smoke test, never a pass).
   const result = observation.result;
   if (
     result &&
@@ -711,7 +724,8 @@ export const admitArtifact = async (
     typeof (result as Record<string, unknown>).residual === "number"
   ) {
     const observedResidual = (result as { residual: number }).residual;
-    if (observedResidual >= input.fixtureExpectedResidualBelow) {
+    const residualOutOfRange = !Number.isFinite(observedResidual) || observedResidual < 0 || observedResidual > 1;
+    if (residualOutOfRange || observedResidual >= input.fixtureExpectedResidualBelow) {
       db.run("DELETE FROM act_artifact WHERE id = ?", [row.id]);
       emit({
         kind: "act_artifact_admission_rejected",
@@ -719,14 +733,17 @@ export const admitArtifact = async (
         action_artifact_id: row.id,
         payload: {
           reason: "fixture_residual_too_high",
-          observed_residual: observedResidual,
+          observed_residual: Number.isFinite(observedResidual) ? observedResidual : String(observedResidual),
           threshold_below: input.fixtureExpectedResidualBelow,
+          residual_out_of_range: residualOutOfRange,
         } as JsonValue,
       });
       return {
         ok: false,
         reason: "fixture_residual_too_high",
-        detail: `observed=${observedResidual} threshold=${input.fixtureExpectedResidualBelow}`,
+        detail: residualOutOfRange
+          ? `observed=${observedResidual} is not a valid residual in [0,1]`
+          : `observed=${observedResidual} threshold=${input.fixtureExpectedResidualBelow}`,
       };
     }
   }

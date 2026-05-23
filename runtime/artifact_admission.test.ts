@@ -384,6 +384,40 @@ describe("admitArtifact — rejections", () => {
     expect(result.reason).toBe("fixture_residual_too_high");
   });
 
+  // RESIDUAL-INTEGRITY GATE (2026-05-23): a fixture reporting a NEGATIVE
+  // residual is a BROKEN signal, not a pass. Pre-fix the gate was a bare
+  // `observedResidual >= threshold` comparison, and `-5 >= 0.2` evaluates
+  // to FALSE, so a fixture emitting `{residual: -5}` slipped through and
+  // was ADMITTED — faking a pass with a residual that violates the
+  // truth-bearing [0,1] contract (CLAUDE.md "Residual in [0,1] ... is the
+  // truth-bearing signal"). Only valid-JSON numbers reach this check;
+  // NaN/Infinity fail JSON.parse upstream and reject as runtime_error.
+  test("rejects when the fixture residual is negative (out of [0,1])", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const body = `console.log('@@RESULT@@ ' + JSON.stringify({ residual: -5 }));`;
+    const result = await admitArtifact(
+      db,
+      {
+        runtime: "bun",
+        body,
+        declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+        fixtureInput: null,
+        fixtureExpectedResidualBelow: 0.2,
+      },
+      (e) => { events.push(e); },
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("fixture_residual_too_high");
+    // The row must have been rolled back — a broken-residual fixture
+    // never leaves an admitted artifact behind.
+    const rejected = events.find((e) => e.kind === "act_artifact_admission_rejected");
+    expect(rejected).toBeDefined();
+    expect((rejected!.payload as Record<string, unknown>).residual_out_of_range).toBe(true);
+    expect(events.some((e) => e.kind === "act_artifact_admitted")).toBe(false);
+  });
+
   // C3 (2026-05-18, directive QHTRBV6PFX2JVBMHDNDA4B03GC).
   test("strategy-first gate admits atms_report_v* when a cited knowledge_candidate ends with _strategic_direction_chosen", async () => {
     const db = openDb(":memory:");
