@@ -789,6 +789,7 @@ export const runAdmin = async (argv: string[], envOverride?: AdminEnv): Promise<
     return 0;
   }
   if (sub === "opencode-version") return runOpencodeVersion(env);
+  if (sub === "update") { const { runUpdate } = await import("./update"); return runUpdate(argv.slice(1)); }
   if (sub === "update-opencode") return runUpdateOpencode(env);
   if (sub === "upgrade-check") return runUpgradeCheck(env);
   if (sub === "install-deps") return runInstallDeps(argv.slice(1));

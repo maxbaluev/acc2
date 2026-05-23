@@ -8,9 +8,13 @@
 // Read-only. Never opens SQLite directly; the daemon truth comes through the
 // same /health aux-port surface every other CLI read uses.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { auxBaseUrl, rpcGet } from "./rpc";
+import { resolveDbPath } from "../runtime/state_paths";
+import { openDb, closeDb } from "../substrate/db";
+import { inspectPendingMigrations } from "../substrate/migration_runner";
 
 /** The shipped semver, read once from the package manifest at module load.
  *  Single source of truth — bump package.json `version` and every surface
@@ -40,10 +44,37 @@ export const readDaemonGitHead = async (): Promise<string | null> => {
   }
 };
 
+export const readSourceGitHead = (): string | null => {
+  const r = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" });
+  if (r.status !== 0) return null;
+  return (r.stdout ?? "").trim() || null;
+};
+
+export const readStateSchemaSnapshot = (): { db_path: string; latest_version: string | null; pending_versions: string[] } => {
+  const dbPath = resolveDbPath();
+  if (!existsSync(dbPath)) return { db_path: dbPath, latest_version: null, pending_versions: [] };
+  const db = openDb(dbPath);
+  try {
+    const m = inspectPendingMigrations(db);
+    return { db_path: dbPath, latest_version: m.latest_version, pending_versions: m.pending_versions };
+  } finally {
+    closeDb(dbPath);
+  }
+};
+
+const toolVersion = (cmd: string, args: string[] = ["--version"]): string | null => {
+  const r = spawnSync(cmd, args, { encoding: "utf8" });
+  if (r.status !== 0) return null;
+  return ((r.stdout || r.stderr) ?? "").split("\n")[0]!.trim() || null;
+};
+
 export const runVersion = async (argv: string[]): Promise<number> => {
   const json = argv.includes("--json");
   const version = readPackageVersion();
   const daemonHead = await readDaemonGitHead();
+  const sourceHead = readSourceGitHead();
+  const schema = readStateSchemaSnapshot();
+  const tools = { bun: toolVersion("bun"), opencode: toolVersion("opencode"), uv: toolVersion("uv"), nsjail: toolVersion("nsjail", ["--version"]), camoufox: process.env.CAMOUFOX_BINARY_PATH ?? null };
 
   if (json) {
     console.log(JSON.stringify({
@@ -64,10 +95,14 @@ export const runVersion = async (argv: string[]): Promise<number> => {
   }
 
   console.log(`acc2 ${version}`);
+  console.log(`  source git_head: ${sourceHead ?? "unknown"}`);
   if (daemonHead) {
     console.log(`  daemon loaded_git_head: ${daemonHead}`);
+    if (sourceHead && sourceHead !== daemonHead) console.log("  skew: daemon is not serving current source; run `acc update`");
   } else {
     console.log(`  daemon: not running (start with \`acc daemon start\`)`);
   }
+  console.log(`  state schema: ${schema.latest_version ?? "none"}; pending=${schema.pending_versions.length}`);
+  console.log(`  tools: bun=${tools.bun ?? "missing"} opencode=${tools.opencode ?? "missing"} uv=${tools.uv ?? "missing"} camoufox=${tools.camoufox ? "present" : "missing"} nsjail=${tools.nsjail ?? "missing"}`);
   return 0;
 };

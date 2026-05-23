@@ -40,6 +40,15 @@ export type MigrationSummary = {
   errors: string[];
 };
 
+export type PendingMigrationInspection = {
+  latest_version: string | null;
+  applied_versions: string[];
+  pending_versions: string[];
+  pending_files: string[];
+  total_files: number;
+  up_to_date: boolean;
+};
+
 export type PendingMigration = {
   version: string;
   file: string;
@@ -103,6 +112,21 @@ export const listPendingMigrations = (db: Database): PendingMigration[] => {
     pending.push({ version, file: basename(file), sql_bytes: sqlText.length });
   }
   return pending;
+};
+
+export const inspectPendingMigrations = (db: Database): PendingMigrationInspection => {
+  const files = listMigrationFiles();
+  const pending = listPendingMigrations(db);
+  const pendingVersions = pending.map((m) => m.version);
+  const appliedVersions = files.map(extractVersion).filter((v) => !pendingVersions.includes(v));
+  return {
+    latest_version: files.length > 0 ? extractVersion(files[files.length - 1]!) : null,
+    applied_versions: appliedVersions,
+    pending_versions: pendingVersions,
+    pending_files: pending.map((m) => m.file),
+    total_files: files.length,
+    up_to_date: pendingVersions.length === 0,
+  };
 };
 
 export const runVersionedMigrations = (db: Database): MigrationSummary => {

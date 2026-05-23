@@ -100,6 +100,7 @@ const usage = (): string => `acc — v2 thin CLI
   acc daemon install-service      Write systemd unit (Linux) / launchd plist (macOS).
   acc watch                       Substrate-content-first realtime TUI (narrative stream +
                                   active DAG + pending decisions + Enter drilldown).
+  acc update [--yes]              Safe self-update: pull, migrate, restart, verify, rollback.
   acc admin <sub>                 Operator maintenance (update-opencode, opencode-version, ...).
   acc doctor                      Multi-check readiness report.
   acc version [--json]            Print the installed acc2 version and, when a
@@ -582,6 +583,7 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     const { runWatch } = await import("./watch");
     return runWatch(argv.slice(1));
   }
+  if (cmd === "update") { const { runUpdate } = await import("./update"); return runUpdate(argv.slice(1)); }
   if (cmd === "admin") {
     const { runAdmin } = await import("./admin");
     return runAdmin(argv.slice(1));
