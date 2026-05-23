@@ -1195,10 +1195,21 @@ export const runGraph = async (directiveId: string): Promise<number> => {
 
 // ── acc inspect ────────────────────────────────────────────────────
 
+// runtime.recent_events caps the window server-side at 200 rows. `acc inspect`
+// filters that window client-side by task_id prefix, so on a busy ledger a
+// task whose events have scrolled out of the most-recent-200 window matches
+// nothing — and the prior code reported that as "no events for task" (a
+// false-negative that implies the task never existed). The window edge also
+// means a long task's chronology can be silently truncated. Both cases are
+// now reported honestly, and the operator is pointed at the indexed,
+// directive-scoped substrate-truth surface (`acc dispatch`) which does NOT
+// suffer the window limit.
+const RECENT_EVENTS_SERVER_CAP = 200;
+
 export const runInspect = async (taskId: string): Promise<number> => {
   let env;
   try {
-    env = await mcpCall("runtime.recent_events", { k: 200 });
+    env = await mcpCall("runtime.recent_events", { k: RECENT_EVENTS_SERVER_CAP });
   } catch (err) {
     console.error(`acc inspect: ${(err as Error).message}`);
     return 1;
@@ -1209,9 +1220,22 @@ export const runInspect = async (taskId: string): Promise<number> => {
   }
   const evs = ((env.result as { events?: EventLike[] })?.events ?? []) as EventLike[];
   // Server returns ts-ascending; no reverse.
+  const windowFull = evs.length >= RECENT_EVENTS_SERVER_CAP;
   const taskEvs = evs.filter((e) => (e.task_id ?? "").startsWith(taskId));
   if (taskEvs.length === 0) {
-    console.error(`acc inspect: no events for task starting with ${taskId} (recent window)`);
+    // Distinguish "task does not exist" from "task is older than the recent
+    // window". When the window is full we cannot prove absence — say so and
+    // route the operator to the indexed inspector instead of falsely
+    // reporting the task as missing.
+    if (windowFull) {
+      console.error(
+        `acc inspect: task ${taskId} not in the most recent ${RECENT_EVENTS_SERVER_CAP} events — ` +
+        `it may be older than this window. Use \`acc dispatch <directive_id>\` for a directive-scoped, ` +
+        `index-backed report that is not bounded by the recent-events window.`,
+      );
+    } else {
+      console.error(`acc inspect: no events for task starting with ${taskId} (recent window)`);
+    }
     return 1;
   }
   console.log(`task ${taskEvs[0]!.task_id}`);
@@ -1225,6 +1249,16 @@ export const runInspect = async (taskId: string): Promise<number> => {
   for (const e of taskEvs) {
     const line = formatEvent(e, { verbose: true });
     if (line) console.log("  " + line);
+  }
+  // When the window was saturated AND the task's oldest matched event sits at
+  // the head of the window, earlier events for this task may have been
+  // dropped — flag the chronology as potentially partial so the operator does
+  // not read it as complete.
+  if (windowFull && taskEvs[0] && evs[0] && taskEvs[0]!.task_id === evs[0]!.task_id) {
+    console.error(
+      `acc inspect: warning — chronology may be truncated; this task reaches the head of the ` +
+      `${RECENT_EVENTS_SERVER_CAP}-event window. Use \`acc dispatch <directive_id>\` for the full index-backed trajectory.`,
+    );
   }
   return 0;
 };
