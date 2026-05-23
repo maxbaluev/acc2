@@ -153,9 +153,16 @@ export const validateSandboxDecl = (decl: SandboxDecl): SandboxResult => {
  *      module enforces wall_ms via a kill-watchdog (see runtimes/bun.ts).
  *      cpu_ms and memory_mb are honor-system on the bun side; Phase G adds a
  *      real cgroup/nsjail wrapper.
- *    - fs_read / fs_write: enforced by spawning with `cwd = <tempdir>` AND
- *      refusing to spawn if any glob references an absolute path that escapes
- *      the tempdir. Globs reading anything under the cwd ARE allowed.
+ *    - fs_read / fs_write: PARTIALLY enforced. The bun runtime spawns with
+ *      `cwd = <tempdir>`, so relative paths resolve inside the sandbox dir.
+ *      But bun has NO Deno-style --allow-read / --allow-write flag, so an
+ *      ABSOLUTE path (e.g. `/etc/passwd`, `..`-traversal) is NOT blocked at
+ *      the process level — the script can still open it. This is honor-system
+ *      for absolute/escaping paths exactly like net_allow/proc_allow. We emit
+ *      a `sandbox_unenforced_warning` for any absolute fs_read/fs_write entry
+ *      so the audit trail is honest about the gap (Architecture.md §5: "the
+ *      runtime must emit warnings rather than pretending the sandbox is
+ *      hard"). Phase G's nsjail wrapper makes fs scoping real.
  *    - net_allow: NOT enforceable via bun's flags. Emit a warning so the audit
  *      trail records that the runtime promised something it cannot guarantee.
  *    - proc_allow: NOT enforceable. We expose ACC2_ALLOWED_SUBPROCS in env so
@@ -200,7 +207,45 @@ export const buildBunPermissionArgs = (
       `proc_allow declared (${(decl.proc_allow ?? []).join(",")}) but bun runtime cannot enforce — honor-system only`,
     );
   }
+  // fs_read / fs_write honesty (2026-05-23). The bun runtime spawns with
+  // cwd=tempdir so RELATIVE paths stay inside the sandbox, but bun has no
+  // --allow-read/--allow-write flag — an ABSOLUTE path (or one escaping via
+  // `..`) is NOT blocked at the process level. The earlier docstring claimed
+  // such paths were "refused"; nothing implemented that refusal. Emit an
+  // honest unenforced-warning per escaping entry instead of pretending the
+  // fs scope is hard (Architecture.md §5; mirrors the net_allow/proc_allow
+  // warnings the caller already turns into sandbox_unenforced_warning events).
+  for (const entry of decl.fs_read ?? []) {
+    if (isEscapingFsPath(entry)) {
+      warnings.push(
+        `fs_read entry '${entry}' is absolute or escapes the sandbox cwd — bun runtime cannot enforce fs scope (honor-system only)`,
+      );
+    }
+  }
+  for (const entry of decl.fs_write ?? []) {
+    if (isEscapingFsPath(entry)) {
+      warnings.push(
+        `fs_write entry '${entry}' is absolute or escapes the sandbox cwd — bun runtime cannot enforce fs scope (honor-system only)`,
+      );
+    }
+  }
   return { argv, env, warnings };
+};
+
+/** True when a declared fs glob/path is absolute or escapes the sandbox
+ *  tempdir cwd via `..` traversal — the cases bun's cwd confinement does
+ *  NOT cover. A leading `/` (POSIX absolute), a Windows drive (`C:\`), or
+ *  any path component equal to `..` all escape. Pure relative-under-cwd
+ *  paths (`out/x.txt`, `./data`) are honored by the cwd and need no
+ *  warning. */
+const isEscapingFsPath = (raw: string): boolean => {
+  if (typeof raw !== "string" || raw.length === 0) return false;
+  const p = raw.trim();
+  if (p.startsWith("/")) return true; // POSIX absolute
+  if (/^[A-Za-z]:[\\/]/.test(p)) return true; // Windows drive-absolute
+  // `..` as a whole path component (handles `../x`, `a/../../b`, bare `..`).
+  if (p.split(/[\\/]/).some((seg) => seg === "..")) return true;
+  return false;
 };
 
 export type UvPermissionArgs = {

@@ -148,6 +148,41 @@ describe("buildBunPermissionArgs", () => {
     expect(JSON.parse(out.env.ACC2_SANDBOX_FS_WRITE!)).toEqual(["out/*"]);
   });
 
+  test("relative-under-cwd fs paths produce NO warning (cwd confinement honors them)", () => {
+    const out = buildBunPermissionArgs({
+      runtime: "bun",
+      fs_read: ["*.md", "./data", "out/x.txt"],
+      fs_write: ["out/*"],
+      cpu_ms: 1000, wall_ms: 5000, memory_mb: 64,
+    });
+    expect(out.warnings).toEqual([]);
+  });
+
+  // HONESTY GAP (2026-05-23): the docstring claimed absolute/escaping fs
+  // paths were "refused", but nothing implemented that refusal and no
+  // warning was emitted. bun has no --allow-read/--allow-write, so an
+  // absolute path is NOT enforced — emit an honest unenforced-warning per
+  // escaping entry instead of pretending the fs scope is hard (Arch §5).
+  test("absolute fs_write path emits an honest unenforced warning (bun cannot scope it)", () => {
+    const out = buildBunPermissionArgs({
+      runtime: "bun",
+      fs_write: ["/etc/cron.d/evil"],
+      cpu_ms: 1000, wall_ms: 5000, memory_mb: 64,
+    });
+    expect(out.warnings.some((w) => w.includes("fs_write") && w.includes("/etc/cron.d/evil"))).toBe(true);
+  });
+
+  test("absolute + dotdot-escaping fs_read paths each emit an unenforced warning", () => {
+    const out = buildBunPermissionArgs({
+      runtime: "bun",
+      fs_read: ["/etc/passwd", "../../secrets", "C:\\Windows\\System32", "fine.txt"],
+      cpu_ms: 1000, wall_ms: 5000, memory_mb: 64,
+    });
+    const fsReadWarnings = out.warnings.filter((w) => w.includes("fs_read"));
+    // /etc/passwd, ../../secrets, C:\Windows — three escaping entries; fine.txt honored.
+    expect(fsReadWarnings.length).toBe(3);
+  });
+
   test("throws on an invalid decl rather than silently returning bad permissions", () => {
     const bad = { runtime: "bun" } as unknown as SandboxDecl & { runtime: "bun" };
     expect(() => buildBunPermissionArgs(bad)).toThrow(/invalid bun sandbox decl/);
