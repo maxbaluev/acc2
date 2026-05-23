@@ -76,6 +76,7 @@ import {
   resolveChildGitHeadPath,
 } from "./daemon_supervisor";
 import { isWorkerEnabled } from "./worker_autostart";
+import { McpSessionReaper, runMcpSessionReaperTick, resolveReapIntervalMs } from "./mcp_session_reaper";
 import {
   isReady,
   pendingWorkers,
@@ -774,6 +775,12 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // refuse time-based action until substrate evidence makes work eligible.
   const workers: Array<() => void> = [];
   const activationDisposers: Array<() => void> = [];
+  // MCP session GC (2026-05-23). The reaper instance is shared between the
+  // fastmcp connect/disconnect hooks (which feed its first-seen registry) and
+  // the periodic worker tick (which force-closes leaked/dead/idle/over-cap
+  // sessions). Declared here at startDaemon scope so both capture the same
+  // instance; only constructed lazily on role=server/all (skipPorts no-ops).
+  const mcpSessionReaper = new McpSessionReaper();
   type ReactiveTriggerKind = EventKind | "*";
   type ReactiveWorkerEntry = {
     worker: string;
@@ -966,6 +973,9 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // "expected" cadence between journal entries. The reactive_safety_net
   // (30 min) is the genuine deadline. Universal value — no env knob.
   const fatherIntervalMs = 5 * 60 * 1000;
+  // MCP session-reaper cadence (2026-05-23). Universal default 30s; the
+  // genuine deadline is the same supervisedTick wrapper as every other worker.
+  const mcpSessionReaperTickMs = resolveReapIntervalMs();
 
   // Batch 3.OPS readiness: always-on workers must be registered up-front
   // so /ready can refuse traffic until each has completed its first tick.
@@ -1066,6 +1076,12 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // as permanent self-audits. Opt-out via
   // ACC2_DISABLE_WORKERS=observability_guard.
   if (isWorkerEnabled("observability_guard")) registerWorker("observability_guard", 60 * 60 * 1000);
+  // 2026-05-23 (MCP session GC, owner-directed reliability fix): periodic
+  // reaper that force-closes leaked/dead/idle/over-cap fastmcp sessions.
+  // Only meaningful when this daemon binds the MCP port (role=server/all);
+  // on role=worker (skipPorts) there is no mcpServer so the tick no-ops.
+  // Opt-out via ACC2_DISABLE_WORKERS=mcp_session_reaper.
+  if (!skipPorts && isWorkerEnabled("mcp_session_reaper")) registerWorker("mcp_session_reaper", mcpSessionReaperTickMs);
   // Tier -1 floors (docs/roadmap.md): absence-of-violation evidence
   // emitters. Each predicate (event_authenticity_predicate,
   // storage_integrity_predicate, deterministic_computation_sanity_predicate,
@@ -2341,6 +2357,23 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const timer = setInterval(tick, tickMs);
     workers.push(() => clearInterval(timer));
   }
+
+  // mcp_session_reaper — periodic fastmcp session GC (2026-05-23). Only runs
+  // when this daemon binds the MCP port (role=server/all); on role=worker
+  // there is no mcpServer so the worker is not registered at all (guarded by
+  // `!skipPorts` in the registration block above). The tick reads the live
+  // `mcpServer.sessions` array and force-closes leaked/dead/idle/over-cap
+  // sessions, which triggers fastmcp's own splice-from-#sessions cleanup.
+  // Opt-OUT via ACC2_DISABLE_WORKERS=mcp_session_reaper.
+  if (!skipPorts && isWorkerEnabled("mcp_session_reaper")) {
+    markWorkerReady("mcp_session_reaper");
+    recordWorkerTick("mcp_session_reaper");
+    const tick = supervisedTick(db, "mcp_session_reaper", mcpSessionReaperTickMs, async () => {
+      if (mcpServer) await runMcpSessionReaperTick(db, mcpSessionReaper, mcpServer);
+    });
+    const timer = setInterval(tick, mcpSessionReaperTickMs);
+    workers.push(() => clearInterval(timer));
+  }
   } // end if (!skipWorkers)
   }; // end startWorkers closure
 
@@ -2555,6 +2588,20 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   logger.info({ phase: "mcp_bind", port }, "daemon.boot.phase_start");
   try {
     mcpServer = createMcpServer({ db, invoker: "claude_root", index, ingressState });
+    // MCP session GC (2026-05-23): feed the reaper's first-seen registry from
+    // fastmcp's lifecycle events. `connect` starts a session's age clock;
+    // `disconnect` (graceful close — fastmcp already spliced it from
+    // #sessions) drops its tracking row so a graceful reconnect is never
+    // mistaken for a leak. The periodic mcp_session_reaper worker handles
+    // sessions that LEAK (never fire disconnect) via age/transport-death.
+    mcpServer.on("connect", (event) => {
+      try { mcpSessionReaper.noteConnect(event.session as unknown as import("./mcp_session_reaper").ReapableSession); }
+      catch (err) { logger.debug({ where: "daemon.mcp.connect_hook", err: String(err) }, "noteConnect failed (best-effort)"); }
+    });
+    mcpServer.on("disconnect", (event) => {
+      try { mcpSessionReaper.noteDisconnect(event.session as unknown as import("./mcp_session_reaper").ReapableSession); }
+      catch (err) { logger.debug({ where: "daemon.mcp.disconnect_hook", err: String(err) }, "noteDisconnect failed (best-effort)"); }
+    });
     // FastMCP wedge workaround (2026-05-19): mcpServer.start() resolves
     // promptly on a fresh DB but NEVER resolves on a large DB (276K events).
     // The HTTP port IS bound — we observe LISTEN on the port in ss output

@@ -578,6 +578,14 @@ export const EVENT_KINDS = {
   integrity_check_failed:                  { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   wal_checkpointed:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   dispatch_recovered_orphan:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // 2026-05-23: MCP session GC. fastmcp's httpStream transport keeps one
+  // FastMCPSession per client connection; ungracefully-closed clients leak
+  // their session (the server-side transport.onclose never fires on its
+  // own). After hundreds accumulate the daemon event loop pegs CPU. The
+  // mcp_session_reaper worker force-closes dead/idle/over-cap sessions and
+  // emits this event with the reaped count + remaining count so the GC is
+  // visible in the ledger. Only emitted when at least one session is reaped.
+  mcp_sessions_reaped:                     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Closure audit + lessons learned (universal post-trajectory loop) ─
   //

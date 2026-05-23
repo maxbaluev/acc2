@@ -167,7 +167,16 @@ export type WorkerName =
   // truth (retrieval index). Built Claude-side after the brain could
   // not build the worker across 3 dispatches. Default ON; opt-out via
   // ACC2_DISABLE_WORKERS=observability_guard.
-  | "observability_guard";
+  | "observability_guard"
+  // 2026-05-23 (MCP session GC, owner-directed reliability fix): fastmcp's
+  // httpStream transport leaks one FastMCPSession per ungracefully-closed
+  // client; hundreds accumulate and peg daemon CPU at 93-100%. This worker
+  // (30s tick) force-closes dead (transport gone) / idle (past TTL) /
+  // over-cap sessions via session.close(), which triggers fastmcp's own
+  // splice-from-#sessions path, and emits mcp_sessions_reaped. The
+  // connect/disconnect hooks feed its first-seen registry. Default ON;
+  // opt-out via ACC2_DISABLE_WORKERS=mcp_session_reaper.
+  | "mcp_session_reaper";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -205,6 +214,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "memory_reconciliation",
   "sahoo_governor",
   "observability_guard",
+  "mcp_session_reaper",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into

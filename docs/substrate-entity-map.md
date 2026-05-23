@@ -76,6 +76,8 @@ All views are CREATE VIEW IF NOT EXISTS over `events` ± `act_artifact`.
 | `irreversible_effects_view`                | `irreversible_effect_recorded`                                                   | crisis mode, audit                       | empty                 |
 | `promoted_knowledge_view`                  | `knowledge_promoted`                                                             | retrieval, prompt composer               | yes — 10 promoted seed rows |
 | `lesson_implementer_queue_view`            | `lesson_extracted`, `contract_amendment_proposed`, `owner_decision_recorded`, `dispatcher_violation`, `irreversible_effect_recorded`, `applied_change_committed` | lesson apply orchestrator | empty |
+| `pending_owner_decision_queue_view`        | `lesson_implementer_queue_view`, `owner_decision_recorded`                         | `acc admin pending-decisions --include-retired`, audit | empty |
+| `pending_owner_decision_queue_live_view`   | `lesson_implementer_queue_view`, `owner_decision_recorded`, `pending_decision_retired` | `acc admin pending-decisions`, status pending-decision count | empty |
 | `lesson_implementation_status_view`        | `lesson_extracted`, `contract_amendment_proposed`, `lesson_apply_requested`, `action_scored`, `applied_change_committed` | lesson apply orchestrator, audit | empty |
 | `applied_lesson_effectiveness_view`        | `applied_change_committed`, future cited `action_scored`, `recipe_invoked`, `action_predicted`, `task_committed`, `task_node_opened` | compounding measurement | empty |
 | `lesson_apply_candidate_view`              | `lesson_implementation_status_view` × `lesson_implementer_queue_view` × `applied_lesson_effectiveness_view` | normalized apply candidate | empty |
@@ -280,14 +282,16 @@ the code-artifact authoring loop in §11.5, and recipe replay compounding in §1
 | `contract_amendment_proposed`              | brain          | —    | —      | embeddable | — |
 | `lesson_apply_requested`                   | claude         | —    | —      | embeddable | — |
 | `applied_change_committed`                 | claude         | —    | —      | embeddable | — |
+| `pending_decision_retired`                 | runtime (`pending_decision_retire_worker`) | — | — | yes (count) | — |
 
 Irreducible data-structure contract:
 
 - New event kinds: `lesson_apply_requested` records the owner/auto-gated handoff into the applier; `applied_change_committed` is the unified terminal kind firing for every apply attempt (success/failed/refused) carrying `payload.status` + `payload.source_kind` (audit #3 collapse at commit `3208a41` subsumed the legacy `lesson_applied` + `contract_amendment_applied` kinds — they differed only by source_kind discriminator which is now in payload).
-- New derived views: `lesson_implementer_queue_view`, `lesson_implementation_status_view`, `applied_lesson_effectiveness_view`, and `lesson_apply_candidate_view`. The candidate view exposes the single normalized apply-candidate projection `{ source_event_id, target, anchor, patch_or_recipe, verifier_residual, owner_gate, trajectory_health, compounding_metric }` for `recipe_candidate`, `verifier_gap`, and `contract_amendment_proposed` sources.
+- New derived views: `lesson_implementer_queue_view`, `lesson_implementation_status_view`, `applied_lesson_effectiveness_view`, `lesson_apply_candidate_view`, `pending_owner_decision_queue_view`, and `pending_owner_decision_queue_live_view`. The candidate view exposes the single normalized apply-candidate projection `{ source_event_id, target, anchor, patch_or_recipe, verifier_residual, owner_gate, trajectory_health, compounding_metric }` for `recipe_candidate`, `verifier_gap`, and `contract_amendment_proposed` sources. The pending-decision historical view keeps every unresolved owner-gated/manual-review amendment for audit; the live view removes rows with a `pending_decision_retired` event so operator-facing admin/status surfaces do not show retired anchor-missing, test-target, or stale backlog.
 - New tables: none.
 - New posterior shapes: none. Compounding updates flow through existing cited `action_scored`, knowledge, code-artifact, and recipe posterior paths.
 - Owner gating: `lesson_implementer_queue_view` derives explicit-consent and safe auto-apply eligibility from the declarative target policy in `substrate/lesson_apply_policy.ts`; cli/runtime targets are auto-apply candidates only when the proposal is structured as `{ file_path, anchor, diff }` and the source trajectory has no `dispatcher_violation` or `irreversible_effect_recorded`.
+- Pending-decision retirement: `runtime/pending_decision_retire_worker.ts` emits one idempotent `pending_decision_retired` row per source amendment when the row is structurally un-appliable (`anchor_missing`/malformed diff), targets tests, or is older than the stale threshold. `acc admin pending-decisions` reads the live view by default; `--include-retired` reads the historical audit view.
 - Flywheel sequence: `lesson_extracted` or `contract_amendment_proposed` -> gate `action_predicted` / `action_scored` -> `lesson_apply_requested` -> apply `action_predicted` -> apply `action_scored` with residual < 0.3 -> `applied_change_committed` -> future cited `action_scored` / `recipe_invoked` rows measured by `applied_lesson_effectiveness_view`.
 
 ### Father (`substrate/types.ts:185-190`)
