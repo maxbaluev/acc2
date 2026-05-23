@@ -69,6 +69,7 @@ import { readCurrentMode } from "./crisis_mode";
 import { isCycleViolation } from "./cycle_one_gate";
 import { recordDispatch, recordActionResidual } from "./metrics";
 import { extractRecipeFromCommit } from "../substrate/extractors";
+import { maybeRunGenerateSelect } from "./generate_select_dispatch";
 
 const REFINEMENT_DEPTH_CAP = 5;
 const TREE_SEARCH_FANOUT_THRESHOLD = 5;
@@ -503,6 +504,50 @@ export const dispatchReadyTask = async (
       payload: { dispatch_id: dispatchId, reason: "claude_inline_phase_e_stub" } as JsonValue,
     });
     return { dispatch_id: dispatchId, task_id: task.id, events: [], violations: [] };
+  }
+
+  // Phase 9 (generate-and-select): env-gated, default-OFF organism hook. When
+  // ACC2_GENERATE_SELECT=1 AND the directive classifies as `ambiguous`, route
+  // its work through solveTask (the organism records its outcome to the
+  // experience stream) and complete the task lifecycle, skipping the brain
+  // lane. Unset/non-ambiguous -> {handled:false}, byte-identical to today.
+  {
+    const gs = await maybeRunGenerateSelect(db, task.goal ?? "", {
+      directiveId: task.directive_id,
+      taskId: task.id,
+      substrateOrigin: "substrate_auto",
+    });
+    if (gs.handled) {
+      const residual = gs.result?.selected ? 0 : 1;
+      emitEvent(db, {
+        kind: "task_committed",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        residual,
+        payload: {
+          dispatch_id: dispatchId,
+          reason: "generate_select_organism",
+          path: gs.result?.path,
+          route: gs.result?.route,
+          selected: gs.result?.selected?.id ?? null,
+          organism_reason: gs.result?.reason,
+        } as JsonValue,
+      });
+      emitEvent(db, {
+        kind: "brain_dispatch_closed",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        payload: { dispatch_id: dispatchId, reason: "generate_select_organism" } as JsonValue,
+      });
+      return {
+        dispatch_id: dispatchId,
+        task_id: task.id,
+        events: readEventsSinceTs(db, dispatchStartedTs, task.id),
+        violations: [],
+      };
+    }
   }
 
   // 3. opencode_brain — compose prompt + call bridge.
