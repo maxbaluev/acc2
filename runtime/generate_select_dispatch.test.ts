@@ -1,12 +1,13 @@
-// Phase 9 unit tests — the env-gated daemon dispatch hook.
+// Phase 9 unit tests — the env-gated, RLM-first daemon dispatch hook.
 //
 // We never touch the network or a real DB schema: the generator is stubbed and
-// the deps-builder is replaced so `solveTask` runs entirely in-memory. The
-// cases exercise the universal gate matrix:
-//   1. flag UNSET                       -> {handled:false}, generator NEVER called.
-//   2. flag SET + single_deliverable    -> {handled:true}, generator called, recorded.
-//   3. flag SET + complex               -> {handled:false}, brain decomposes.
-//   4. flag SET + verifiable            -> {handled:true}, deterministic path.
+// the deps-builder is replaced so `solveTask` runs entirely in-memory. There is
+// NO keyword/regex intent classifier in the path — interception is authorized
+// only by the env flag AND an injected scored `shouldHandle` predicate. The
+// cases exercise the RLM-first gate matrix:
+//   1. flag UNSET                              -> {handled:false}, generator NEVER called.
+//   2. flag SET + no scored allowance          -> {handled:false}, generator NEVER called.
+//   3. flag SET + shouldHandle returns true     -> {handled:true}, generator called, recorded.
 
 import { describe, test, expect, afterEach } from "bun:test";
 import {
@@ -51,12 +52,13 @@ afterEach(() => {
   delete process.env.ACC2_GENERATE_SELECT;
 });
 
-describe("maybeRunGenerateSelect — env-gated organism hook", () => {
-  test("flag UNSET -> {handled:false}, does nothing", async () => {
+describe("maybeRunGenerateSelect — env-gated RLM-first organism hook", () => {
+  test("flag UNSET -> {handled:false}, does nothing (even with a true predicate)", async () => {
     delete process.env.ACC2_GENERATE_SELECT;
     let genCalls = 0;
     const recorded: SelectOutcome<string>[] = [];
     const deps: GenerateSelectDispatchDeps = {
+      shouldHandle: () => true, // env flag still gates: must be no-op
       generate: async () => {
         genCalls += 1;
         return [cleanCandidate("c1")];
@@ -75,19 +77,56 @@ describe("maybeRunGenerateSelect — env-gated organism hook", () => {
     expect(recorded.length).toBe(0);
   });
 
-  test("flag SET + single_deliverable (NON-report) -> {handled:true}, records an outcome", async () => {
+  test("flag SET + no scored allowance -> {handled:false}, generator NEVER called (falls through to brain)", async () => {
     process.env.ACC2_GENERATE_SELECT = "1";
     let genCalls = 0;
     const recorded: SelectOutcome<string>[] = [];
+    // Two sub-cases: shouldHandle absent, and shouldHandle returning false.
+    const baseDeps = (shouldHandle?: GenerateSelectDispatchDeps["shouldHandle"]): GenerateSelectDispatchDeps => ({
+      shouldHandle,
+      generate: async () => {
+        genCalls += 1;
+        return [cleanCandidate("c1")];
+      },
+      buildDeps: stubBuildDeps(recorded),
+    });
+
+    const noPredicate = await maybeRunGenerateSelect(
+      fakeDb,
+      "write a haiku about the sea",
+      {},
+      baseDeps(undefined),
+    );
+    expect(noPredicate.handled).toBe(false);
+
+    const falsePredicate = await maybeRunGenerateSelect(
+      fakeDb,
+      "write a haiku about the sea",
+      {},
+      baseDeps(() => false),
+    );
+    expect(falsePredicate.handled).toBe(false);
+
+    expect(genCalls).toBe(0);
+    expect(recorded.length).toBe(0);
+  });
+
+  test("flag SET + shouldHandle returns true -> {handled:true}, records an outcome", async () => {
+    process.env.ACC2_GENERATE_SELECT = "1";
+    let genCalls = 0;
+    const seen: string[] = [];
+    const recorded: SelectOutcome<string>[] = [];
     const deps: GenerateSelectDispatchDeps = {
+      shouldHandle: (directiveText) => {
+        seen.push(directiveText);
+        return true;
+      },
       generate: async (_t, _n) => {
         genCalls += 1;
         return [cleanCandidate("a1"), cleanCandidate("a2"), cleanCandidate("a3")];
       },
       buildDeps: stubBuildDeps(recorded),
     };
-    // A non-report single deliverable — universalization: the organism now
-    // serves ANY single-shot goal, not just reports.
     const res = await maybeRunGenerateSelect(
       fakeDb,
       "write a haiku about the sea",
@@ -99,50 +138,6 @@ describe("maybeRunGenerateSelect — env-gated organism hook", () => {
     expect(genCalls).toBeGreaterThan(0);
     expect(recorded.length).toBeGreaterThan(0);
     expect(res.result?.selected).not.toBeNull();
-  });
-
-  test("flag SET + complex -> {handled:false}, falls through to brain for decomposition", async () => {
-    process.env.ACC2_GENERATE_SELECT = "1";
-    let genCalls = 0;
-    const recorded: SelectOutcome<string>[] = [];
-    const deps: GenerateSelectDispatchDeps = {
-      generate: async () => {
-        genCalls += 1;
-        return [cleanCandidate("n1")];
-      },
-      buildDeps: stubBuildDeps(recorded),
-    };
-    const res = await maybeRunGenerateSelect(
-      fakeDb,
-      "design and implement the dispatch architecture for the substrate",
-      {},
-      deps,
-    );
-    expect(res.handled).toBe(false);
-    expect(genCalls).toBe(0);
-    expect(recorded.length).toBe(0);
-  });
-
-  test("flag SET + verifiable -> {handled:true}, deterministic single-candidate path", async () => {
-    process.env.ACC2_GENERATE_SELECT = "1";
-    let genCalls = 0;
-    const recorded: SelectOutcome<string>[] = [];
-    const deps: GenerateSelectDispatchDeps = {
-      generate: async (_t, _n) => {
-        genCalls += 1;
-        return [cleanCandidate("v1")];
-      },
-      buildDeps: stubBuildDeps(recorded),
-    };
-    const res = await maybeRunGenerateSelect(
-      fakeDb,
-      "compile the function, run the unit tests, fix the type error and lint",
-      {},
-      deps,
-    );
-    expect(res.handled).toBe(true);
-    expect(res.result?.route).toBe("verifiable");
-    expect(res.result?.path).toBe("deterministic");
-    expect(genCalls).toBeGreaterThan(0);
+    expect(seen).toContain("write a haiku about the sea");
   });
 });

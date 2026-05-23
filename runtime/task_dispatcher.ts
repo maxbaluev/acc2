@@ -506,11 +506,11 @@ export const dispatchReadyTask = async (
     return { dispatch_id: dispatchId, task_id: task.id, events: [], violations: [] };
   }
 
-  // Phase 9 (generate-and-select): env-gated, default-OFF organism hook. When
-  // ACC2_GENERATE_SELECT=1 AND the directive classifies as `ambiguous`, route
-  // its work through solveTask (the organism records its outcome to the
-  // experience stream) and complete the task lifecycle, skipping the brain
-  // lane. Unset/non-ambiguous -> {handled:false}, byte-identical to today.
+  // Phase 9 (generate-and-select): env-gated, default-OFF organism hook
+  // (RLM-first). Interception requires ACC2_GENERATE_SELECT=1 AND an injected
+  // scored `shouldHandle` predicate (no keyword/regex classifier). Until the
+  // substrate wires that predicate here, the hook returns {handled:false} and
+  // every directive falls through to the brain lane — fail-closed by design.
   {
     const gs = await maybeRunGenerateSelect(db, task.goal ?? "", {
       directiveId: task.directive_id,

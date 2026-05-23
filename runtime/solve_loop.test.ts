@@ -56,38 +56,26 @@ const sparseNovel = (_task: string, _k: number): Promise<PastOutcome[]> =>
   Promise.resolve([]);
 
 describe("solveTask — unified organism loop", () => {
-  test("VERIFIABLE: clean candidate selected, deterministic path", async () => {
+  // RLM-first: there is no keyword "verifiable" route. A directive that once
+  // tripped verifiable keywords (compute / unit tests) now flows the ambiguous
+  // world-model path like everything else. With a confident-good prediction it
+  // takes the FAST path.
+  test("former-verifiable directive -> ambiguous, world-model decides path", async () => {
     let genCalls = 0;
-    let genN = 0;
     const deps: SolveDeps<string> = {
-      generate: async (_t, n) => {
+      generate: async (_t, _n) => {
         genCalls += 1;
-        genN = n;
         return [cleanCandidate("v1")];
       },
-      retrieveSimilar: async () => {
-        throw new Error("retrieveSimilar must NOT be called on verifiable route");
-      },
+      retrieveSimilar: confidentGood,
+      recordOutcome: () => {},
     };
     const res = await solveTask("compute the sum and run unit tests", deps);
-    expect(res.route).toBe("verifiable");
-    expect(res.path).toBe("deterministic");
+    expect(res.route).toBe("ambiguous");
+    expect(res.path).toBe("fast");
     expect(res.selected?.id).toBe("v1");
     expect(genCalls).toBe(1);
-    expect(genN).toBe(1); // no candidate budget on the verifiable route
-    expect(res.prediction).toBeUndefined();
-  });
-
-  test("VERIFIABLE: bad-provenance candidate -> selected null", async () => {
-    const deps: SolveDeps<string> = {
-      generate: async () => [slopCandidate("v2")],
-      retrieveSimilar: async () => [],
-    };
-    const res = await solveTask("calculate the checksum and parse the json", deps);
-    expect(res.route).toBe("verifiable");
-    expect(res.path).toBe("deterministic");
-    expect(res.selected).toBeNull();
-    expect(res.reason).toContain("provenance failed");
+    expect(res.prediction).toBeDefined();
   });
 
   test("AMBIGUOUS + confident-good prediction -> FAST path (one candidate, no generateAndSelect)", async () => {

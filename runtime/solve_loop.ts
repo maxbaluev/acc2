@@ -31,14 +31,19 @@
 // `retrieveSimilar` as the experience-stream reader, and let `comparator`,
 // `requestOwnerPreference`, and `recordOutcome` default to the structural
 // comparator, the `owner_input_required` emit, and the act-tuple recorder
-// respectively. `solveTask` self-classifies via `classifyTask`, so the
-// dispatcher does NOT need to pre-decide the path — hand the raw directive
-// to `solveTask` and the spine picks deterministic / fast / full and writes
+// respectively. `solveTask` no longer self-classifies on free text (RLM-first:
+// no keyword classifier); the dispatcher hands the raw directive to `solveTask`
+// and the world-model prediction picks fast / full and writes
 // the single `generate_select_outcome` act-tuple back to the ledger for
 // credit. (No dispatch code is changed by this comment; it documents where
 // the call belongs once the ambiguous lane is wired.)
 
-import { classifyTask, type TaskRoute } from "./task_route";
+// RLM-first: there is no keyword classifier. solve_loop no longer self-routes
+// on free-text tokens. Every directive that reaches the organism is treated as
+// `ambiguous` (no ground-truth shortcut); the world-model prediction decides
+// fast-vs-full. Lane eligibility (whether the organism runs at all) is decided
+// upstream by the substrate's scored dispatch decision, not by this module.
+type TaskRoute = "ambiguous";
 import {
   predictOutcome,
   shouldSpendFullLoop,
@@ -97,7 +102,7 @@ export type SolveResult<T> = {
 };
 
 // Provenance-filter a single candidate: it survives iff its claims score
-// below the 0.3 bar. Shared by the deterministic and fast paths.
+// below the 0.3 bar. Used by the fast path.
 const passesProvenance = <T>(candidate: Candidate<T>): boolean =>
   verifyClaimProvenance(candidate.claims).residual < PROVENANCE_THRESHOLD;
 
@@ -119,35 +124,9 @@ export async function solveTask<T>(
   task: string,
   deps: SolveDeps<T>,
 ): Promise<SolveResult<T>> {
-  const routing = classifyTask(task);
-
-  // ── (2) VERIFIABLE: deterministic verifier only. ────────────────────
-  // There is a ground truth, so spend no candidate budget and no contact:
-  // generate ONE candidate and accept it iff its provenance residual clears
-  // the bar.
-  if (routing.route === "verifiable") {
-    const [candidate] = await deps.generate(task, 1);
-    if (!candidate) {
-      return {
-        route: "verifiable",
-        path: "deterministic",
-        selected: null,
-        reason: "verifiable: generator produced no candidate",
-      };
-    }
-    const { residual } = verifyClaimProvenance(candidate.claims);
-    const ok = residual < PROVENANCE_THRESHOLD;
-    return {
-      route: "verifiable",
-      path: "deterministic",
-      selected: ok ? candidate : null,
-      reason: ok
-        ? `verifiable: provenance ok (residual ${residual.toFixed(3)} < ${PROVENANCE_THRESHOLD})`
-        : `verifiable: provenance failed (residual ${residual.toFixed(3)} >= ${PROVENANCE_THRESHOLD})`,
-    };
-  }
-
-  // ── (3) AMBIGUOUS: ask the world model whether to spend the full loop. ──
+  // RLM-first: no keyword pre-classification. Every directive that reaches the
+  // organism is `ambiguous` — there is no free-text "verifiable" shortcut. Ask
+  // the world model whether to spend the full loop.
   const prediction = await predictOutcome(task, {
     retrieveSimilar: deps.retrieveSimilar,
   });

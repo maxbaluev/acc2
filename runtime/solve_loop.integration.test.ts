@@ -163,25 +163,33 @@ describe("solveTask end-to-end organism (real adapters + real schema DB)", () =>
     expect(after - before).toBe(1);
   });
 
-  it("(3) VERIFIABLE task: deterministic path, no generate-and-select spend", async () => {
+  it("(3) RLM-first: a former-verifiable directive routes ambiguous (no keyword shortcut)", async () => {
+    // RLM-first: there is no keyword "verifiable" route. A directive that once
+    // tripped verifiable keywords (fix / unit test / compiles / passes) now
+    // flows the ambiguous world-model path. With a confident-good history it
+    // takes the FAST path and DOES consult the experience stream.
     const db = openDb(":memory:");
     const task = "fix the failing unit test so it compiles and passes";
 
+    const now = Date.now();
     let generateCalls = 0;
-    const generate = async (_t: string, n: number): Promise<Candidate<Report>[]> => {
+    const generate = async (): Promise<Candidate<Report>[]> => {
       generateCalls += 1;
-      // Deterministic path asks for exactly ONE candidate.
-      expect(n).toBe(1);
       return [cand("det", cleanClaims("det"))];
     };
-    const retrieveSimilar = async (): Promise<PastOutcome[]> => {
-      throw new Error("verifiable path must not consult the experience stream");
-    };
+    const retrieveSimilar = async (): Promise<PastOutcome[]> =>
+      Array.from({ length: 8 }, (_, i) => ({
+        task,
+        residual: 0.05,
+        ts_ms: now - i * 60_000,
+        similarity: 0.95,
+        was_real_contact: true,
+      }));
 
     const result = await solveTask(task, realDeps(db, generate, retrieveSimilar, task));
 
-    expect(result.route).toBe("verifiable");
-    expect(result.path).toBe("deterministic");
+    expect(result.route).toBe("ambiguous");
+    expect(result.path).toBe("fast");
     expect(generateCalls).toBe(1);
     expect(result.selected).not.toBeNull();
   });

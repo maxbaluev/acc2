@@ -10,11 +10,13 @@
 // CONTRACT — `maybeRunGenerateSelect` returns `{ handled: false }` (and does
 // NOTHING — no LLM call, no ledger write) UNLESS BOTH:
 //   1. process.env.ACC2_GENERATE_SELECT === "1", AND
-//   2. classifyGoal(directiveText).route is 'verifiable' OR
-//      'single_deliverable' — i.e. a single-shot goal the organism can serve
-//      whole. A 'complex' (multi-step / decomposable) goal returns
-//      { handled: false } so the brain decomposes it; generate-and-select then
-//      applies at the resulting leaves.
+//   2. an injected `shouldHandle` predicate returns true. This is the
+//      RLM-first authorization: there is NO keyword/regex intent classifier
+//      in the path. The substrate wires `shouldHandle` from its scored
+//      dispatch decision or a posterior-scored predicate; when it is missing
+//      or returns false the directive falls through to the brain (cold-start
+//      uncertainty is brain-routed, never keyword-guessed). The env flag
+//      ALONE never authorizes interception.
 // When both hold it runs `solveTask` with the LIVE LLM generator
 // (generateCandidates) + substrate adapters (buildSubstrateDeps), which record
 // the organism's outcome to the experience stream as ONE act_tuple_recorded
@@ -25,7 +27,6 @@
 // any network/LLM contact; production passes neither and gets the live wiring.
 
 import type { Database } from "bun:sqlite";
-import { classifyGoal } from "./task_route";
 import { solveTask, type SolveResult } from "./solve_loop";
 import { generateCandidates } from "./llm_generate";
 import { buildSubstrateDeps } from "./generate_select_adapters";
@@ -48,9 +49,16 @@ export type MaybeRunGenerateSelectResult = {
   result?: SolveResult<string>;
 };
 
-// Test/override seams. Production leaves both undefined and gets the live
-// LLM generator + substrate adapters.
+// Test/override seams. Production leaves these undefined and gets the live
+// LLM generator + substrate adapters; the substrate wires `shouldHandle` from
+// its scored dispatch decision.
 export type GenerateSelectDispatchDeps = {
+  // RLM-first interception predicate. The ONLY thing (alongside the env flag)
+  // that authorizes the organism to handle a directive instead of the brain.
+  // Sourced from the substrate's scored dispatch decision or a posterior-
+  // scored predicate. When absent or returning false, the directive falls
+  // through to the brain — there is NO keyword/regex classifier in this path.
+  shouldHandle?: (directiveText: string, ctx: GenerateSelectDispatchCtx) => boolean;
   // Diversity engine. Defaults to the live OpenAI verbalized-sampling generator.
   generate?: (task: string, n: number) => Promise<Candidate<string>[]>;
   // Builds the GenerateSelectDeps bound to the live DB handle. Defaults to
@@ -72,14 +80,14 @@ export type GenerateSelectDispatchDeps = {
 };
 
 /**
- * Env-gated, additive entry to the generate-and-select organism.
+ * Env-gated, additive entry to the generate-and-select organism (RLM-first).
  *
- * Returns `{ handled: false }` (zero side effects) when the flag is unset OR
- * the goal classifies as `complex` (multi-step / decomposable — the brain
- * must decompose first). Otherwise — when the goal is `verifiable` or
- * `single_deliverable`, i.e. a single-shot goal the organism can serve whole
- * — runs solveTask with the live (or injected) generator + substrate deps,
- * records the outcome, and returns `{ handled: true, result }`.
+ * Returns `{ handled: false }` (zero side effects) when the env flag is unset
+ * OR the injected `shouldHandle` predicate is missing / returns false. There
+ * is NO keyword/regex intent classifier here: interception is authorized only
+ * by the substrate's scored dispatch decision (wired through `shouldHandle`).
+ * When BOTH gates pass it runs solveTask with the live (or injected) generator
+ * + substrate deps, records the outcome, and returns `{ handled: true, result }`.
  */
 export async function maybeRunGenerateSelect(
   db: Database,
@@ -88,14 +96,16 @@ export async function maybeRunGenerateSelect(
   deps: GenerateSelectDispatchDeps = {},
 ): Promise<MaybeRunGenerateSelectResult> {
   // Gate 1 — the env flag. Default-OFF: behavior is byte-identical to today.
+  // The env flag ALONE never authorizes interception.
   if (process.env.ACC2_GENERATE_SELECT !== "1") return { handled: false };
 
-  // Gate 2 — universal goal route. The organism serves any SINGLE-SHOT goal:
-  // 'verifiable' (deterministic single-candidate path) or 'single_deliverable'
-  // (produce one artifact via diversity + provenance + preference). A 'complex'
-  // goal falls through to the brain for decomposition; generate-and-select then
-  // applies at the resulting leaves.
-  if (classifyGoal(directiveText).route === "complex") return { handled: false };
+  // Gate 2 — RLM-first scored allowance. The organism intercepts only when the
+  // substrate's scored dispatch decision (or a posterior-scored predicate),
+  // wired through `shouldHandle`, says so. No predicate -> fall through to the
+  // brain (fail-closed: cold-start uncertainty is brain-routed, not guessed).
+  if (!deps.shouldHandle || !deps.shouldHandle(directiveText, ctx)) {
+    return { handled: false };
+  }
 
   const generate =
     deps.generate ?? ((task: string, n: number) => generateCandidates(task, n));
