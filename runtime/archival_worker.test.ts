@@ -9,7 +9,13 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
-import { runArchivalSweep, _listArchivesForDir } from "./archival_worker";
+import {
+  runArchivalSweep,
+  runTelemetryEvictionSweep,
+  retainedEvictedCount,
+  curationModeForKind,
+  _listArchivesForDir,
+} from "./archival_worker";
 import { listArchives, openColdDb, searchAcrossArchives } from "../substrate/cold_db";
 
 const eventsCount = (db: Database, kind?: string): number => {
@@ -362,5 +368,101 @@ describe("substrate/cold_db.ts — list + open + union", () => {
       { includeCold: false },
     );
     expect(hotOnly.length).toBe(3);
+  });
+});
+
+describe("runTelemetryEvictionSweep — event-class tiering", () => {
+  let tmpDir: string;
+  let dbPath: string;
+  let db: Database;
+  const NOW = Date.parse("2026-05-23T12:00:00.000Z");
+
+  // Emit an event of any kind, then rewrite its ts so we can synthesize
+  // "old" / "recent" rows deterministically (mock test mode permits
+  // unregistered kinds like the defunct recipe_promotion_deferred).
+  const seedKindAtTs = (kind: string, tsIso: string, idx: number): string => {
+    // Mock test mode permits unregistered/defunct kind strings (e.g.
+    // recipe_promotion_deferred); cast to satisfy the EventKind union type
+    // the same way other emit-arbitrary-kind tests do.
+    const ev = emitEvent(db, { kind: kind as Parameters<typeof emitEvent>[1]["kind"], payload: { idx } });
+    db.run("UPDATE events SET ts = ? WHERE id = ?", [tsIso, ev.id]);
+    return ev.id;
+  };
+  const hoursAgo = (h: number): string => new Date(NOW - h * 60 * 60 * 1000).toISOString();
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-evict-"));
+    dbPath = join(tmpDir, "state.db");
+    db = openDb(dbPath);
+  });
+  afterEach(() => {
+    closeDb(dbPath);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("evicts an old ephemeral-telemetry row, keeps a recent one and a non-telemetry row", async () => {
+    // Old ephemeral telemetry (3h ago, past the 1h TTL) — should be evicted.
+    seedKindAtTs("recipe_promotion_deferred", hoursAgo(3), 1);
+    seedKindAtTs("artifact_kind_inference_uncertain", hoursAgo(3), 2);
+    // Recent ephemeral telemetry (10min ago, inside TTL) — must NOT be evicted.
+    seedKindAtTs("artifact_kind_inference_uncertain", hoursAgo(1 / 6), 3);
+    // Non-telemetry durable row, also old — must NEVER be evicted.
+    seedKindAtTs("knowledge_promoted", hoursAgo(3), 4);
+
+    const summary = await runTelemetryEvictionSweep(db, { retentionHours: 1, nowMs: NOW });
+
+    expect(summary.evicted).toBe(2);
+    expect(summary.by_kind.recipe_promotion_deferred).toBe(1);
+    expect(summary.by_kind.artifact_kind_inference_uncertain).toBe(1);
+
+    // Old telemetry gone; recent telemetry + durable knowledge survive.
+    expect(eventsCount(db, "recipe_promotion_deferred")).toBe(0);
+    expect(eventsCount(db, "artifact_kind_inference_uncertain")).toBe(1); // the recent one
+    expect(eventsCount(db, "knowledge_promoted")).toBe(1);
+
+    // One telemetry_evicted audit event emitted.
+    expect(eventsCount(db, "telemetry_evicted")).toBe(1);
+  });
+
+  test("health counter is preserved: live rows + retained evicted count == lifetime total", async () => {
+    // Lifetime total of artifact_kind_inference_uncertain = 5 (3 old, 2 recent).
+    for (let i = 0; i < 3; i++) seedKindAtTs("artifact_kind_inference_uncertain", hoursAgo(5), i);
+    for (let i = 0; i < 2; i++)
+      seedKindAtTs("artifact_kind_inference_uncertain", hoursAgo(1 / 6), 10 + i);
+
+    await runTelemetryEvictionSweep(db, { retentionHours: 1, nowMs: NOW });
+
+    const live = eventsCount(db, "artifact_kind_inference_uncertain");
+    const retained = retainedEvictedCount(db, "artifact_kind_inference_uncertain");
+    expect(live).toBe(2); // recent rows kept
+    expect(retained).toBe(3); // old rows preserved as a counter
+    // The health-counter consumer (admin_substrate_status) reads live + retained.
+    expect(live + retained).toBe(5);
+  });
+
+  test("retained count is cumulative across sweeps and 0 for non-evicted kinds", async () => {
+    seedKindAtTs("recipe_promotion_deferred", hoursAgo(3), 1);
+    await runTelemetryEvictionSweep(db, { retentionHours: 1, nowMs: NOW });
+    seedKindAtTs("recipe_promotion_deferred", hoursAgo(3), 2);
+    await runTelemetryEvictionSweep(db, { retentionHours: 1, nowMs: NOW });
+    expect(retainedEvictedCount(db, "recipe_promotion_deferred")).toBe(2);
+    // A kind never evicted has no retained counter.
+    expect(retainedEvictedCount(db, "knowledge_promoted")).toBe(0);
+  });
+
+  test("curationModeForKind classifies ephemeral telemetry as 'evict', durable kinds as not-evict", () => {
+    expect(curationModeForKind("recipe_promotion_deferred")).toBe("evict");
+    expect(curationModeForKind("artifact_kind_inference_uncertain")).toBe("evict");
+    expect(curationModeForKind("knowledge_promoted")).not.toBe("evict");
+    expect(curationModeForKind("act_artifact_promoted")).not.toBe("evict");
+    expect(curationModeForKind("retrieval_binding")).not.toBe("evict");
+  });
+
+  test("empty sweep is a no-op and emits no telemetry_evicted", async () => {
+    seedKindAtTs("artifact_kind_inference_uncertain", hoursAgo(1 / 6), 1); // recent only
+    const summary = await runTelemetryEvictionSweep(db, { retentionHours: 1, nowMs: NOW });
+    expect(summary.evicted).toBe(0);
+    expect(eventsCount(db, "telemetry_evicted")).toBe(0);
+    expect(eventsCount(db, "artifact_kind_inference_uncertain")).toBe(1);
   });
 });
