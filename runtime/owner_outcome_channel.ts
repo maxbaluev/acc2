@@ -28,6 +28,7 @@ export type OwnerOutcomeResidualAdjustment = {
 
 type EventRow = {
   id: string;
+  kind?: string;
   directive_id: string | null;
   task_id: string | null;
   payload: string | Record<string, unknown> | null;
@@ -215,10 +216,35 @@ const findMcpEvent = (events: EventRow[], target: OwnerOutcomeTarget | undefined
   return applied[0] ?? null;
 };
 
+// `runtime.recent_events` projects each row with the field name `event_id`
+// (NOT `id`) and does not surface `context_refs`. EventRow — and every
+// downstream lookup in this module (`findMcpEvent` matching `e.id`,
+// `applied.id` for context_refs + source_applied_change_event_id) — keys on
+// `id`. Without this normalization `applied.id` is undefined, the owner
+// outcome is recorded with `source_applied_change_event_id: undefined` and a
+// context_refs array missing the applied-change id — the four-link credit
+// chain silently breaks (owner verdict never causally binds to the change it
+// is about). Map `event_id` → `id` (and tolerate a row that already carries
+// `id`, e.g. a future projection change or a direct caller).
+const normalizeMcpEventRow = (raw: Record<string, unknown>): EventRow => {
+  const id = (typeof raw.id === "string" && raw.id) || (typeof raw.event_id === "string" ? raw.event_id : "");
+  return {
+    id,
+    kind: typeof raw.kind === "string" ? raw.kind : undefined,
+    directive_id: (raw.directive_id as string | null) ?? null,
+    task_id: (raw.task_id as string | null) ?? null,
+    payload: (raw.payload as EventRow["payload"]) ?? null,
+    context_refs: (raw.context_refs as EventRow["context_refs"]) ?? null,
+    residual: typeof raw.residual === "number" ? raw.residual : null,
+  };
+};
+
 export const recordOwnerObservedOutcomeViaMcp = async (mcpCall: McpCall, input: OwnerOutcomeInput): Promise<EmittedEvent | null> => {
   const recent = await mcpCall("runtime.recent_events", { k: 100, kinds: ["applied_change_committed", "action_scored"] });
   if (!recent.ok) return null;
-  const events = ((recent.result?.events as EventRow[] | undefined) ?? []).slice().reverse();
+  const events = ((recent.result?.events as Array<Record<string, unknown>> | undefined) ?? [])
+    .map(normalizeMcpEventRow)
+    .reverse();
   const applied = findMcpEvent(events.filter((e) => (e as { kind?: string }).kind === "applied_change_committed" || parsePayload(e.payload).status === "applied"), input.target);
   if (!applied) return null;
   const appliedPayload = parsePayload(applied.payload);
