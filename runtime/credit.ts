@@ -708,14 +708,20 @@ export const distributeCredit = async (
   const actionAlreadyCredited = !isOwnerObservedRun && primaryArtifactsRegistered && priorScoreUpdateExists(db, params.scored_event_id, actionArt!.id);
   const verifierAlreadyCredited = !isOwnerObservedRun && primaryArtifactsRegistered && priorScoreUpdateExists(db, params.scored_event_id, verifierArt!.id);
   if (primaryArtifactsRegistered) {
-    computedActionWeight = applyNoveltyBonus(actionArt!.id, 1.0);
-    computedVerifierWeight = applyNoveltyBonus(verifierArt!.id, 1.0);
     // Delegating to the canonical primitive (cleanup audit batch 1):
     // weight=1.0 reproduces the prior unweighted path; weight>1.0 is
     // the LATM novelty-bonus path. Auto-quarantine fires inside the
     // primitive so the explicit maybeQuarantine below is now structural
     // backup, not a separate driver.
+    //
+    // The novelty bonus is computed and emitted ONLY when this run actually
+    // applies the posterior. When the emit-boundary universal projector
+    // already credited the primary artifact for this scored_event_id (it now
+    // applies the same novelty bonus itself), distributeCredit must not
+    // re-compute or re-emit the bonus — otherwise latm_novelty_bonus_applied
+    // double-counts and the posterior would move twice.
     if (!actionAlreadyCredited) {
+      computedActionWeight = applyNoveltyBonus(actionArt!.id, 1.0);
       applyResidualOutcome(
         db,
         actionArt!.id,
@@ -726,6 +732,7 @@ export const distributeCredit = async (
       );
     }
     if (!verifierAlreadyCredited) {
+      computedVerifierWeight = applyNoveltyBonus(verifierArt!.id, 1.0);
       applyResidualOutcome(
         db,
         verifierArt!.id,
@@ -1525,21 +1532,22 @@ export const projectActionScoredToCredit = (
       ? payload.source_act_event_id
       : null;
     const lookupId = actionPredictedEventId ?? sourceActEventId;
-    if (!lookupId) return; // safe no-op
-    const predictedRow = db
-      .query<{ id: string; payload: string; context_refs: string }, [string]>(
-        "SELECT id, payload, context_refs FROM events WHERE id = ? AND kind = 'action_predicted'",
-      )
-      .get(lookupId);
-    if (!predictedRow) {
+    const predictedRow = lookupId
+      ? db
+          .query<{ id: string; payload: string; context_refs: string }, [string]>(
+            "SELECT id, payload, context_refs FROM events WHERE id = ? AND kind = 'action_predicted'",
+          )
+          .get(lookupId)
+      : null;
+    if (lookupId && !predictedRow) {
       // The act_tuple projection path stamps source_act_event_id with
       // the act_tuple_recorded id (not the projected action_predicted),
       // so a lookup miss is EXPECTED when only source_act_event_id is
       // present and the id is itself a non-action_predicted row. Check
       // whether the lookupId resolves to ANY known row — if it does,
-      // skip silently (expected case); if it resolves to no row at all,
-      // emit projection_error (the dangling reference is a real audit
-      // signal).
+      // continue with primary action/verifier artifact credit only; if it
+      // resolves to no row at all, emit projection_error (the dangling
+      // reference is a real audit signal) and still credit primary ids.
       const anyRow = db.query("SELECT kind FROM events WHERE id = ?").get(lookupId) as { kind: string } | null;
       if (!anyRow) {
         emitEvent(db, {
@@ -1558,10 +1566,9 @@ export const projectActionScoredToCredit = (
           } as JsonValue,
         });
       }
-      return;
     }
-    const predictedPayload = JSON.parse(predictedRow.payload || "{}") as Record<string, unknown>;
-    const predictedContextRefs = JSON.parse(predictedRow.context_refs || "[]") as string[];
+    const predictedPayload = predictedRow ? JSON.parse(predictedRow.payload || "{}") as Record<string, unknown> : {};
+    const predictedContextRefs = predictedRow ? JSON.parse(predictedRow.context_refs || "[]") as string[] : [];
     const citedArtifactIds = new Set<string>();
     // PRIMARY: action_artifact_id and verifier_artifact_id from the scored
     // event itself. These are the primary act participants — every
@@ -1601,7 +1608,23 @@ export const projectActionScoredToCredit = (
     // Key on the resolved action_predicted id so the projection key is
     // stable regardless of which header field (action_predicted_event_id
     // or source_act_event_id) the emitter happened to stamp.
-    const projectionAnchorId = predictedRow.id;
+    const projectionAnchorId = predictedRow?.id ?? scoredEvent.id;
+    // LATM novelty bonus (§11.5): now that the universal projector is the
+    // primary-credit driver for the emit-boundary path (and distributeCredit
+    // dedups against it via priorScoreUpdateExists), the novelty bonus must
+    // follow the credit onto this path for the PRIMARY action/verifier
+    // artifacts. distributeCredit keeps applying the bonus on the paths it
+    // owns; the projector applies it for the scored event's own primary ids
+    // so the bonus is not lost when the projector wins the credit slot.
+    const projectorGoalShape = resolveGoalShape(db, scoredEvent.directive_id);
+    const noveltyMultiplier = noveltyBonusMultiplier(db);
+    const primaryArtifactIds = new Set<string>();
+    if (typeof scoredEvent.action_artifact_id === "string" && scoredEvent.action_artifact_id.length > 0) {
+      primaryArtifactIds.add(scoredEvent.action_artifact_id);
+    }
+    if (typeof scoredEvent.verifier_artifact_id === "string" && scoredEvent.verifier_artifact_id.length > 0) {
+      primaryArtifactIds.add(scoredEvent.verifier_artifact_id);
+    }
     for (const artifactId of citedArtifactIds) {
       const key = projectionKeyFor(projectionAnchorId, artifactId);
       if (projectionKeyExists(db, "act_artifact_score_updated", key)) continue;
@@ -1610,6 +1633,32 @@ export const projectActionScoredToCredit = (
       // pair via its own projection-key shape. Skip to avoid the
       // double-update on the posterior.
       if (priorScoreUpdateExists(db, scoredEvent.id, artifactId)) continue;
+      // Novelty bonus applies only to the primary action/verifier artifacts
+      // (mirrors distributeCredit's primary-credit path); cited artifacts
+      // keep their base weight. Check novelty BEFORE the score_updated row
+      // below stamps this goal_shape onto the artifact's history.
+      const isPrimary = primaryArtifactIds.has(artifactId);
+      const weight = (isPrimary && projectorGoalShape && !artifactSeenGoalShape(db, artifactId, projectorGoalShape))
+        ? noveltyMultiplier
+        : 1.0;
+      if (weight !== 1.0) {
+        emitEvent(db, {
+          kind: "latm_novelty_bonus_applied",
+          substrate_origin: "substrate_auto",
+          directive_id: scoredEvent.directive_id,
+          task_id: scoredEvent.task_id,
+          action_artifact_id: artifactId,
+          payload: {
+            artifact_id: artifactId,
+            goal_shape: projectorGoalShape,
+            base_weight: 1.0,
+            bonus_weight: weight,
+            multiplier: noveltyMultiplier,
+            scored_event_id: scoredEvent.id,
+            projected_from: "action_scored_universal_projector",
+          } as JsonValue,
+        });
+      }
       // Apply weighted Beta posterior delta to the artifact's row when
       // it's registered. When the row is missing (synthetic/unregistered
       // handle) we still emit the credit row — the audit trail needs to
@@ -1624,7 +1673,7 @@ export const projectActionScoredToCredit = (
           residual,
           ts,
           () => { /* downstream emits handled by primitive */ },
-          { weight: 1.0 },
+          { weight },
         );
         postScore = updated.score;
         postConfidence = updated.confidence;
@@ -1640,7 +1689,7 @@ export const projectActionScoredToCredit = (
           artifact_id: artifactId,
           role: "cited",
           residual,
-          weight: 1.0,
+          weight,
           posterior_delta_alpha: alphaDelta,
           posterior_delta_beta: betaDelta,
           score: postScore,
@@ -1653,6 +1702,11 @@ export const projectActionScoredToCredit = (
           source_act_id: sourceActEventId ?? projectionAnchorId,
           source_act_event_id: sourceActEventId ?? projectionAnchorId,
           action_predicted_event_id: projectionAnchorId,
+          // Stamp goal_shape (mirrors distributeCredit's score_updated rows)
+          // so artifactSeenGoalShape() recognizes this credit on later runs
+          // and the LATM novelty bonus fires at most once per (artifact,
+          // goal_shape) regardless of which credit driver wins the slot.
+          goal_shape: projectorGoalShape,
           projected_from: "action_scored_universal_projector",
           projection_key: key,
         } as JsonValue,

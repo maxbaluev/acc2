@@ -1078,12 +1078,12 @@ describe("projectActionScoredToCredit — universal emit-boundary projector", ()
     expect(secondCount).toBe(1); // no new row
   });
 
-  test("action_scored with NO source_act_event_id is a safe no-op (no projector emit)", () => {
+  test("action_scored with NO source_act_event_id still credits primary action + verifier artifacts", () => {
     const db = openDb(":memory:");
     insertSampleArtifact(db, "noop_handle", "// handle");
-    const beforeCount = (db
-      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.projected_from') = 'action_scored_universal_projector'")
-      .get() as { c: number }).c;
+    insertSampleArtifact(db, "noop_verifier", "// verifier");
+    const actionBefore = getArtifact(db, "noop_handle")!;
+    const verifierBefore = getArtifact(db, "noop_verifier")!;
     emitEvent(db, {
       kind: "action_scored",
       substrate_origin: "substrate_auto",
@@ -1091,18 +1091,27 @@ describe("projectActionScoredToCredit — universal emit-boundary projector", ()
       task_id: "t_noop",
       action_artifact_id: "noop_handle",
       verifier_artifact_id: "noop_verifier",
-      residual: 0.5,
+      residual: 0.0,
       payload: { verifier_kind: "deterministic_code" }, // no source_act_event_id
     });
-    const afterCount = (db
-      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.projected_from') = 'action_scored_universal_projector'")
-      .get() as { c: number }).c;
-    expect(afterCount).toBe(beforeCount); // no new universal-projector rows
+    const updates = db
+      .query<{ payload: string }, []>(
+        "SELECT payload FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.projected_from') = 'action_scored_universal_projector'",
+      )
+      .all()
+      .map((r) => JSON.parse(r.payload).artifact_id as string);
+    expect(updates).toContain("noop_handle");
+    expect(updates).toContain("noop_verifier");
+    expect(getArtifact(db, "noop_handle")!.posteriorAlpha).toBeGreaterThan(actionBefore.posteriorAlpha);
+    expect(getArtifact(db, "noop_verifier")!.posteriorAlpha).toBeGreaterThan(verifierBefore.posteriorAlpha);
   });
 
-  test("action_scored with source_act_event_id pointing at non-existent event emits projection_error and no credit", () => {
+  test("action_scored with source_act_event_id pointing at non-existent event emits projection_error AND still credits primary artifacts", () => {
     const db = openDb(":memory:");
     insertSampleArtifact(db, "err_handle", "// handle");
+    insertSampleArtifact(db, "err_verifier", "// verifier");
+    const actionBefore = getArtifact(db, "err_handle")!;
+    const verifierBefore = getArtifact(db, "err_verifier")!;
     emitEvent(db, {
       kind: "action_scored",
       substrate_origin: "substrate_auto",
@@ -1110,12 +1119,13 @@ describe("projectActionScoredToCredit — universal emit-boundary projector", ()
       task_id: "t_err",
       action_artifact_id: "err_handle",
       verifier_artifact_id: "err_verifier",
-      residual: 0.5,
+      residual: 0.0,
       payload: {
         source_act_event_id: "does_not_exist_eventid",
         verifier_kind: "deterministic_code",
       },
     });
+    // The dangling source reference is still surfaced as an audit signal.
     const err = db
       .query<{ payload: string }, []>(
         "SELECT payload FROM events WHERE kind = 'projection_error' AND json_extract(payload, '$.where') = 'projectActionScoredToCredit'",
@@ -1124,11 +1134,18 @@ describe("projectActionScoredToCredit — universal emit-boundary projector", ()
     expect(err).not.toBeNull();
     const errPayload = JSON.parse(err!.payload) as Record<string, unknown>;
     expect(errPayload.reason).toBe("source_act_event_id_unresolvable");
-    // No projector-credit rows landed.
-    const creditRows = db
-      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.projected_from') = 'action_scored_universal_projector'")
-      .get() as { c: number };
-    expect(creditRows.c).toBe(0);
+    // BUT primary credit must NOT be gated by source lineage: both the action
+    // and verifier artifacts' posteriors move, and projector credit rows land.
+    const updates = db
+      .query<{ payload: string }, []>(
+        "SELECT payload FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.projected_from') = 'action_scored_universal_projector'",
+      )
+      .all()
+      .map((r) => JSON.parse(r.payload).artifact_id as string);
+    expect(updates).toContain("err_handle");
+    expect(updates).toContain("err_verifier");
+    expect(getArtifact(db, "err_handle")!.posteriorAlpha).toBeGreaterThan(actionBefore.posteriorAlpha);
+    expect(getArtifact(db, "err_verifier")!.posteriorAlpha).toBeGreaterThan(verifierBefore.posteriorAlpha);
   });
 
   test("recursion guard: action_scored stamped with projected_from='distribute_credit' is skipped", () => {
