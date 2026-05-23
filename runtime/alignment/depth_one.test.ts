@@ -22,7 +22,7 @@ import { seedFoundationalKnowledge } from "../../substrate/seed";
 afterAll(() => closeDb());
 
 describe("alignment / depth_one (Principle 5)", () => {
-  test("fat substrate + tiny budget triggers prompt_truncated", () => {
+  test("fat substrate + tiny budget triggers prompt_truncated", async () => {
     closeDb();
     const db = openDb(":memory:");
 
@@ -70,7 +70,7 @@ describe("alignment / depth_one (Principle 5)", () => {
     // composed prompt body — at 2000 the prompt comfortably fits without
     // truncation. 500 keeps the P0 task_goal but forces retrieval rows
     // out, which is the truncation invariant this test asserts.
-    const result = composePrompt(db, { taskId, budgetTokens: 500 });
+    const result = await composePrompt(db, { taskId, budgetTokens: 500 });
     const tokens = estimateTokens(result.text);
     // Floor sections are load-bearing: if they alone exceed a pathological
     // test budget, the composer keeps them and records the violation instead
@@ -103,7 +103,7 @@ describe("alignment / depth_one (Principle 5)", () => {
     expect(violationPayload.floor_sections_over_budget.length).toBeGreaterThan(0);
   });
 
-  test("non-trivial budget keeps everything and does NOT emit prompt_truncated", () => {
+  test("non-trivial budget keeps everything and does NOT emit prompt_truncated", async () => {
     closeDb();
     const db = openDb(":memory:");
     const directiveId = newId();
@@ -123,7 +123,7 @@ describe("alignment / depth_one (Principle 5)", () => {
       payload: { goal: "short goal", lifecycle: "finite", urgency: "normal" },
     });
 
-    const result = composePrompt(db, { taskId, budgetTokens: 8000 });
+    const result = await composePrompt(db, { taskId, budgetTokens: 8000 });
     expect(result.truncated.length).toBe(0);
     const trunc = db
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'prompt_truncated'")

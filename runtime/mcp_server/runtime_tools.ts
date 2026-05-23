@@ -347,11 +347,11 @@ export const handleTrajectoryReplay = (
   return { ok: true, result: trajectoryReplayToJson(replay) };
 };
 
-export const handlePromptSelfInspect = (
+export const handlePromptSelfInspect = async (
   ctx: McpContext,
   args: z.infer<typeof PromptSelfInspectSchema>,
-): McpResult => {
-  const inspect = buildPromptSelfInspect(ctx.db, args.task_id, {
+): Promise<McpResult> => {
+  const inspect = await buildPromptSelfInspect(ctx.db, args.task_id, {
     budgetTokens: args.budget_tokens,
     includePreview: args.include_preview,
   });

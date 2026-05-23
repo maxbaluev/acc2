@@ -327,7 +327,7 @@ export const runRealBrainSmoke = async (opts: SmokeOpts = {}): Promise<number> =
     });
 
     if (opts.printPrompt) {
-      const composed = composePrompt(handle.db, { taskId, budgetTokens: 8000 });
+      const composed = await composePrompt(handle.db, { taskId, budgetTokens: 8000 });
       process.stdout.write("\n--- composed prompt (--print-prompt) ---\n");
       process.stdout.write(composed.text + "\n");
       process.stdout.write(`--- (${composed.sections.length} sections, ${composed.truncated.length} truncated) ---\n\n`);

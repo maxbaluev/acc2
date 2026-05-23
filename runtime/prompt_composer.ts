@@ -16,6 +16,7 @@
 // mid-cycle (§13.2). Depth-1 retrieval is the RLM constraint.
 
 import type { Database } from "bun:sqlite";
+import { poolQuery } from "./sql_pool_singleton";
 import { snapshotWatchedOutputs } from "./watch_edges";
 import { encodingForModel, type Tiktoken } from "js-tiktoken";
 import type { EmbeddingIndex } from "./embedding_index";
@@ -173,14 +174,15 @@ type OwnerPolicyProjectionInput = {
   directive?: { text?: string | null; goal?: string; lifecycle?: string; urgency?: string };
 };
 
-const readTaskRow = (db: Database, taskId: string): TaskRow | null => {
+const readTaskRow = async (db: Database, taskId: string): Promise<TaskRow | null> => {
   // Phase D: task rows live as `task_node_opened` events with payload.goal.
   // Once a tasks table exists (Phase E DAG topology), we'll query it directly.
-  const row = db
-    .query(
-      "SELECT id, directive_id, payload FROM events WHERE task_id = ? AND kind = 'task_node_opened' ORDER BY ts ASC LIMIT 1",
-    )
-    .get(taskId) as Record<string, unknown> | null;
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    "SELECT id, directive_id, payload FROM events WHERE task_id = ? AND kind = 'task_node_opened' ORDER BY ts ASC LIMIT 1",
+    [taskId],
+  );
+  const row = rows[0] ?? null;
   if (!row) return null;
   let payload: Record<string, unknown> = {};
   try {
@@ -195,12 +197,13 @@ const readTaskRow = (db: Database, taskId: string): TaskRow | null => {
   };
 };
 
-const readDirectiveGoal = (db: Database, directiveId: string): string | null => {
-  const row = db
-    .query(
-      "SELECT payload FROM events WHERE directive_id = ? AND kind = 'directive_opened' ORDER BY ts ASC LIMIT 1",
-    )
-    .get(directiveId) as Record<string, unknown> | null;
+const readDirectiveGoal = async (db: Database, directiveId: string): Promise<string | null> => {
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    "SELECT payload FROM events WHERE directive_id = ? AND kind = 'directive_opened' ORDER BY ts ASC LIMIT 1",
+    [directiveId],
+  );
+  const row = rows[0] ?? null;
   if (!row) return null;
   try {
     const payload = JSON.parse((row.payload as string) ?? "{}") as Record<string, unknown>;
@@ -225,41 +228,36 @@ type ExistingChild = {
   goal_head: string;
   status: "committed" | "failed" | "open";
 };
-const readExistingDecomposition = (
+const readExistingDecomposition = async (
   db: Database,
   directiveId: string,
   excludeTaskId: string,
   cap = 30,
-): ExistingChild[] => {
+): Promise<ExistingChild[]> => {
   if (!directiveId) return [];
-  const rows = db
-    .query<
-      { task_id: string; ts: string; payload: string },
-      [string, string]
-    >(
-      `SELECT task_id, ts, payload FROM events
+  const rows = await poolQuery<{ task_id: string; ts: string; payload: string }>(
+    db,
+    `SELECT task_id, ts, payload FROM events
        WHERE kind = 'task_node_opened'
          AND directive_id = ?
          AND task_id != ?
        ORDER BY ts ASC`,
-    )
-    .all(directiveId, excludeTaskId);
+    [directiveId, excludeTaskId],
+  );
   if (rows.length === 0) return [];
   const committedSet = new Set(
-    db
-      .query<{ task_id: string }, [string]>(
-        `SELECT task_id FROM events WHERE kind = 'task_committed' AND directive_id = ?`,
-      )
-      .all(directiveId)
-      .map((r) => r.task_id),
+    (await poolQuery<{ task_id: string }>(
+      db,
+      `SELECT task_id FROM events WHERE kind = 'task_committed' AND directive_id = ?`,
+      [directiveId],
+    )).map((r) => r.task_id),
   );
   const failedSet = new Set(
-    db
-      .query<{ task_id: string }, [string]>(
-        `SELECT task_id FROM events WHERE kind = 'task_failed' AND directive_id = ?`,
-      )
-      .all(directiveId)
-      .map((r) => r.task_id),
+    (await poolQuery<{ task_id: string }>(
+      db,
+      `SELECT task_id FROM events WHERE kind = 'task_failed' AND directive_id = ?`,
+      [directiveId],
+    )).map((r) => r.task_id),
   );
   const out: ExistingChild[] = [];
   for (const r of rows) {
@@ -346,10 +344,10 @@ type ProvenDecompositionStrategy = {
   avg_total_nodes: number;
 };
 
-const readProvenDecompositionStrategy = (
+const readProvenDecompositionStrategy = async (
   db: Database,
   goalText: string | null | undefined,
-): ProvenDecompositionStrategy | null => {
+): Promise<ProvenDecompositionStrategy | null> => {
   const goal = (goalText ?? "").trim();
   if (goal.length === 0) return null;
   // Map the goal to the SEMANTIC shape_category the extractor credits — no DAG
@@ -365,16 +363,17 @@ const readProvenDecompositionStrategy = (
   const id = `decomp_${shapeCategory}`;
   let row: { body: string | null; score: number | null } | null = null;
   try {
-    row = db
-      .query(
-        `SELECT body, score FROM act_artifact
+    const rows = await poolQuery<{ body: string | null; score: number | null }>(
+      db,
+      `SELECT body, score FROM act_artifact
           WHERE id = ?
             AND kind = 'decomposition_strategy_predicate'
             AND superseded_by IS NULL
             AND status IN ('admitted', 'promoted')
           LIMIT 1`,
-      )
-      .get(id) as { body: string | null; score: number | null } | null;
+      [id],
+    );
+    row = rows[0] ?? null;
   } catch {
     return null;
   }
@@ -504,10 +503,10 @@ const motifAnchoredToTrajectory = (
   return false;
 };
 
-const readProvenTrajectoryMotif = (
+const readProvenTrajectoryMotif = async (
   db: Database,
   directiveId: string | null | undefined,
-): ProvenTrajectoryMotif | null => {
+): Promise<ProvenTrajectoryMotif | null> => {
   const dir = (directiveId ?? "").trim();
   if (dir.length === 0) return null;
   // Read the directive's OWN trajectory-so-far (ordered event kinds). This is
@@ -516,14 +515,14 @@ const readProvenTrajectoryMotif = (
   // shape.
   let trajectory: string[];
   try {
-    const rows = db
-      .query(
-        `SELECT kind FROM events
+    const rows = await poolQuery<{ kind: string }>(
+      db,
+      `SELECT kind FROM events
           WHERE directive_id = ?
           ORDER BY ts ASC, rowid ASC
           LIMIT ?`,
-      )
-      .all(dir, PROVEN_MOTIF_TRAJECTORY_WINDOW) as Array<{ kind: string }>;
+      [dir, PROVEN_MOTIF_TRAJECTORY_WINDOW],
+    );
     trajectory = rows.map((r) => r.kind);
   } catch {
     return null;
@@ -536,16 +535,15 @@ const readProvenTrajectoryMotif = (
   // kinds anchor to the trajectory AND clear the advisory floor wins.
   let rows: Array<{ id: string; name: string | null; body: string | null; score: number | null }>;
   try {
-    rows = db
-      .query(
-        `SELECT id, name, body, score FROM act_artifact
+    rows = await poolQuery<{ id: string; name: string | null; body: string | null; score: number | null }>(
+      db,
+      `SELECT id, name, body, score FROM act_artifact
           WHERE kind = 'trajectory_motif_predicate'
             AND superseded_by IS NULL
             AND status IN ('admitted', 'promoted')
           ORDER BY score DESC, updated_at DESC
           LIMIT 200`,
-      )
-      .all() as Array<{ id: string; name: string | null; body: string | null; score: number | null }>;
+    );
   } catch {
     return null;
   }
@@ -613,12 +611,12 @@ const goalShapeTags = (goalText?: string | null): string[] => {
   return Array.from(new Set(tokens)).slice(0, 24);
 };
 
-const readKnowledgeTopK = (
+const readKnowledgeTopK = async (
   db: Database,
   k: number,
   goalText?: string | null,
   shapeMatchOnly = false,
-): Array<{ id: string; text: string; score: number }> => {
+): Promise<Array<{ id: string; text: string; score: number }>> => {
   // Recency fallback for the RETRIEVED KNOWLEDGE section: pulls recent
   // promoted knowledge candidates when the caller did NOT pre-compute a
   // reranker hit list (i.e. the embedding index is empty or the caller chose
@@ -634,8 +632,8 @@ const readKnowledgeTopK = (
   // so the prompt section renders useful text instead of '(no text)'.
   const shape = goalText ? goalShape(goalText) : null;
   const shapeTagsJson = JSON.stringify(goalShapeTags(goalText));
-  const rows = db
-    .query(
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
       `SELECT
          p.id              AS id,
          p.payload         AS p_payload,
@@ -681,8 +679,8 @@ const readKnowledgeTopK = (
          )
        ORDER BY shape_match DESC, p.ts DESC, p.rowid DESC
        LIMIT ?`,
-    )
-    .all(shape, shape, shape, shapeTagsJson, shapeMatchOnly ? 1 : 0, shape, shape, shape, shapeTagsJson, k) as Array<Record<string, unknown>>;
+    [shape, shape, shape, shapeTagsJson, shapeMatchOnly ? 1 : 0, shape, shape, shape, shapeTagsJson, k],
+  );
   const out: Array<{ id: string; text: string; score: number }> = [];
   for (const r of rows) {
     try {
@@ -732,23 +730,23 @@ const isPolicyBundleSectionName = (value: string): value is PolicyBundleSectionN
   return (REQUIRED_POLICY_SECTION_NAMES as readonly string[]).includes(value);
 };
 
-const readPolicyBundleSections = (
+const readPolicyBundleSections = async (
   db: Database,
   surface: string,
   sectionNames: readonly PolicyBundleSectionName[],
-): PolicyBundleSection[] => {
+): Promise<PolicyBundleSection[]> => {
   const wanted = new Set(sectionNames);
-  const rows = db
-    .query(
-      `SELECT payload
+  const rows = await poolQuery<{ payload: string }>(
+    db,
+    `SELECT payload
          FROM events
         WHERE kind = 'knowledge_promoted'
           AND COALESCE(json_extract(payload, '$.policy_bundle.surface'), json_extract(payload, '$.surface')) = ?
           AND COALESCE(json_extract(payload, '$.type'), json_extract(payload, '$.policy_bundle.type')) = 'policy_bundle'
         ORDER BY ts DESC, rowid DESC
         LIMIT 100`,
-    )
-    .all(surface) as Array<{ payload: string }>;
+    [surface],
+  );
 
   const latestBySection = new Map<string, PolicyBundleSection>();
   for (const row of rows) {
@@ -903,7 +901,7 @@ const computeGoalShapeMatch = (variantGoalShapeTags: unknown, goalText: string):
 
 // Q3: select the best admitted prompt_section_content_variant for the
 // given section. Returns null when no variant scores positive.
-const selectPromptSectionVariant = (
+const selectPromptSectionVariant = async (
   db: Database,
   opts: {
     sectionName: PolicyBundleSectionName;
@@ -912,18 +910,18 @@ const selectPromptSectionVariant = (
     fallbackBody: string;
     policyBundleArtifactId?: string | null;
   },
-): PromptSectionVariant | null => {
-  const rows = db
-    .query(
-      `SELECT id, body, score, confidence, name
+): Promise<PromptSectionVariant | null> => {
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    `SELECT id, body, score, confidence, name
          FROM act_artifact
         WHERE kind = 'prompt_section_content_variant'
           AND status = 'admitted'
           AND (name = ? OR name IS NULL)
         ORDER BY score DESC, confidence DESC
         LIMIT 50`,
-    )
-    .all(opts.sectionName) as Array<Record<string, unknown>>;
+    [opts.sectionName],
+  );
   let best: PromptSectionVariant | null = null;
   let bestRanked = -Infinity;
   for (const r of rows) {
@@ -973,28 +971,28 @@ const selectPromptSectionVariant = (
 // and can route them through new task DAGs / actions. Owner-gated
 // proposals are excluded (those need orchestrator-side apply, not
 // brain-side automation). Capped at k entries by ts ASC (oldest first).
-const readPendingProposals = (
+const readPendingProposals = async (
   db: Database,
   k: number,
   excludeDirectiveId?: string,
-): Array<{ id: string; ts: string; kind: string; target: string | null; summary: string; directive_id: string }> => {
+): Promise<Array<{ id: string; ts: string; kind: string; target: string | null; summary: string; directive_id: string }>> => {
   // lesson_implementer_queue_view already filters out applied proposals
   // (its WHERE clause excludes rows with applied_change_committed). We
   // additionally skip owner-gated proposals — those need orchestrator-
   // side apply, not brain-side automation. Filter by directive when
   // excludeDirectiveId is set so the section doesn't echo the current
   // goal's own proposals.
-  const rows = db
-    .query(
-      `SELECT source_event_id, ts, source_kind, directive_id, target, anchor,
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    `SELECT source_event_id, ts, source_kind, directive_id, target, anchor,
               proposed_behavior, proposed_action, lesson_kind, owner_gate_required
        FROM lesson_implementer_queue_view
        WHERE COALESCE(owner_gate_required, 0) = 0
          AND (? IS NULL OR directive_id != ?)
        ORDER BY ts ASC
        LIMIT ?`,
-    )
-    .all(excludeDirectiveId ?? null, excludeDirectiveId ?? null, k) as Array<Record<string, unknown>>;
+    [excludeDirectiveId ?? null, excludeDirectiveId ?? null, k],
+  );
   return rows.map((r) => {
     const proposedBehavior = (r.proposed_behavior as string | null) ?? "";
     const proposedAction = (r.proposed_action as string | null) ?? "";
@@ -1021,7 +1019,7 @@ const readPendingProposals = (
   });
 };
 
-const buildPendingProposalsSection = (rows: ReturnType<typeof readPendingProposals>): string => {
+const buildPendingProposalsSection = (rows: Awaited<ReturnType<typeof readPendingProposals>>): string => {
   if (rows.length === 0) return "PENDING PROPOSALS: (none)";
   const lines = ["PENDING PROPOSALS:"];
   for (const r of rows) {
@@ -1099,20 +1097,20 @@ const buildOutstandingContractAmendmentsSection = (rows: PendingContractAmendmen
 // Cross-goal context (multi-directive parallelism): list OTHER active
 // directives so the brain knows what concurrent work is in flight and
 // can avoid duplication / cite peer work / propose interference edges.
-const readOtherActiveGoals = (
+const readOtherActiveGoals = async (
   db: Database,
   currentDirectiveId: string,
   k: number,
-): Array<{ id: string; opened_ts: string; text: string; lifecycle: string }> => {
-  const rows = db
-    .query(
-      `SELECT directive_id, opened_ts, payload
+): Promise<Array<{ id: string; opened_ts: string; text: string; lifecycle: string }>> => {
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    `SELECT directive_id, opened_ts, payload
        FROM active_objectives_view
        WHERE directive_id != ?
        ORDER BY opened_ts DESC
        LIMIT ?`,
-    )
-    .all(currentDirectiveId, k) as Array<Record<string, unknown>>;
+    [currentDirectiveId, k],
+  );
   return rows.map((r) => {
     let text = "";
     let lifecycle = "finite";
@@ -1130,7 +1128,7 @@ const readOtherActiveGoals = (
   });
 };
 
-const buildOtherGoalsSection = (rows: ReturnType<typeof readOtherActiveGoals>): string => {
+const buildOtherGoalsSection = (rows: Awaited<ReturnType<typeof readOtherActiveGoals>>): string => {
   if (rows.length === 0) return "OTHER ACTIVE GOALS: (none — this is the only goal in flight)";
   const lines = ["OTHER ACTIVE GOALS:"];
   for (const r of rows) {
@@ -1146,18 +1144,18 @@ const buildOtherGoalsSection = (rows: ReturnType<typeof readOtherActiveGoals>): 
 // constraints — the kind of context a careful human collaborator would
 // remember between sessions. Stored on the ledger; surfaced through the
 // canonical owner_conversation_view (substrate/views.ts:275-289).
-const readOwnerContext = (
+const readOwnerContext = async (
   db: Database,
   k: number,
-): OwnerContextRow[] => {
-  const rows = db
-    .query(
-      `SELECT event_id, ts, directive_id, kind, payload
+): Promise<OwnerContextRow[]> => {
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    `SELECT event_id, ts, directive_id, kind, payload
        FROM owner_conversation_view
        ORDER BY ts DESC
        LIMIT ?`,
-    )
-    .all(k) as Array<Record<string, unknown>>;
+    [k],
+  );
   // Sort ascending for chronological narrative (oldest → newest of the recent window).
   return rows.reverse().map((r) => {
     let text = "";
@@ -1185,7 +1183,7 @@ const readOwnerContext = (
   });
 };
 
-const buildOwnerContextSection = (rows: ReturnType<typeof readOwnerContext>): string => {
+const buildOwnerContextSection = (rows: Awaited<ReturnType<typeof readOwnerContext>>): string => {
   if (rows.length === 0) return "OWNER CONTEXT: (no prior owner messages on file)";
   const lines = ["OWNER CONTEXT (recent owner-channel events, oldest → newest):"];
   for (const r of rows) {
@@ -1712,12 +1710,12 @@ export const buildOwnerFeedbackSummarySection = (policy: OwnerRenderingPolicyRow
   return lines.join("\n");
 };
 
-const readArtifactRegistryTopK = (db: Database, k: number): Array<{ id: string; runtime: string; name: string; score: number; kind?: string }> => {
-  const rows = db
-    .query(
-      "SELECT id, runtime, name, score, confidence, kind FROM act_artifact WHERE status IN ('admitted','promoted') ORDER BY score DESC, confidence DESC LIMIT ?",
-    )
-    .all(k) as Array<Record<string, unknown>>;
+const readArtifactRegistryTopK = async (db: Database, k: number): Promise<Array<{ id: string; runtime: string; name: string; score: number; kind?: string }>> => {
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    "SELECT id, runtime, name, score, confidence, kind FROM act_artifact WHERE status IN ('admitted','promoted') ORDER BY score DESC, confidence DESC LIMIT ?",
+    [k],
+  );
   return rows.map((r) => ({
     id: r.id as string,
     runtime: r.runtime as string,
@@ -1730,16 +1728,16 @@ const readArtifactRegistryTopK = (db: Database, k: number): Array<{ id: string; 
 /** T4.1 counterfactual credit boundary — read the next K artifact-registry
  *  rows that LOST the top-K cut. The counterfactual_credit_worker scores
  *  these against the chosen path's residual after window_seconds. */
-const readArtifactRegistryRejected = (
+const readArtifactRegistryRejected = async (
   db: Database,
   chosenK: number,
   rejectedK: number,
-): Array<{ id: string; score: number; kind?: string }> => {
-  const rows = db
-    .query(
-      "SELECT id, score, kind FROM act_artifact WHERE status IN ('admitted','promoted') ORDER BY score DESC, confidence DESC LIMIT ? OFFSET ?",
-    )
-    .all(rejectedK, chosenK) as Array<Record<string, unknown>>;
+): Promise<Array<{ id: string; score: number; kind?: string }>> => {
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    "SELECT id, score, kind FROM act_artifact WHERE status IN ('admitted','promoted') ORDER BY score DESC, confidence DESC LIMIT ? OFFSET ?",
+    [rejectedK, chosenK],
+  );
   return rows.map((r) => ({
     id: r.id as string,
     score: r.score as number,
@@ -1751,20 +1749,20 @@ const readArtifactRegistryRejected = (
  *  rows that LOST the top-K cut (the K+1, K+2 near-misses). Simpler than
  *  readKnowledgeTopK (no rich-payload extraction needed — the worker only
  *  needs id + score for the counterfactual emission). */
-const readKnowledgeRejected = (
+const readKnowledgeRejected = async (
   db: Database,
   chosenK: number,
   rejectedK: number,
-): Array<{ id: string; score: number }> => {
-  const rows = db
-    .query(
-      `SELECT p.id AS id, p.payload AS payload
+): Promise<Array<{ id: string; score: number }>> => {
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    `SELECT p.id AS id, p.payload AS payload
          FROM events p
         WHERE p.kind = 'knowledge_promoted'
         ORDER BY p.ts DESC, p.rowid DESC
         LIMIT ? OFFSET ?`,
-    )
-    .all(rejectedK, chosenK) as Array<Record<string, unknown>>;
+    [rejectedK, chosenK],
+  );
   const out: Array<{ id: string; score: number }> = [];
   for (const r of rows) {
     let score = 0;
@@ -1777,21 +1775,20 @@ const readKnowledgeRejected = (
   return out;
 };
 
-const readRecentFailures = (db: Database, k: number): Array<{ kind: string; ts: string }> => {
-  const rows = db
-    .query(
-      "SELECT failure_kind, ts FROM events WHERE failure_kind IS NOT NULL ORDER BY ts DESC LIMIT ?",
-    )
-    .all(k) as Array<Record<string, unknown>>;
+const readRecentFailures = async (db: Database, k: number): Promise<Array<{ kind: string; ts: string }>> => {
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    "SELECT failure_kind, ts FROM events WHERE failure_kind IS NOT NULL ORDER BY ts DESC LIMIT ?",
+    [k],
+  );
   return rows.map((r) => ({ kind: r.failure_kind as string, ts: r.ts as string }));
 };
 
-const readConstitutionalGates = (db: Database): string[] => {
-  const rows = db
-    .query(
-      "SELECT payload FROM events WHERE kind = 'constitutional_gate_decision' ORDER BY ts DESC LIMIT 10",
-    )
-    .all() as Array<Record<string, unknown>>;
+const readConstitutionalGates = async (db: Database): Promise<string[]> => {
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    "SELECT payload FROM events WHERE kind = 'constitutional_gate_decision' ORDER BY ts DESC LIMIT 10",
+  );
   const gates: string[] = [];
   for (const r of rows) {
     try {
@@ -1902,9 +1899,9 @@ const FIXTURE_D_MARKER = "FIXTURE: fixture_d_count_todos";
  *  in priority order; lowest-priority sections drop first when the budget
  *  would be exceeded. Returns the rendered text plus a section manifest so
  *  callers (and tests) can audit what was kept vs dropped. */
-export const composePrompt = (db: Database, opts: PromptComposeOptions): ComposedPrompt => {
+export const composePrompt = async (db: Database, opts: PromptComposeOptions): Promise<ComposedPrompt> => {
   const budget = opts.budgetTokens ?? DEFAULT_BUDGET_TOKENS;
-  const task = readTaskRow(db, opts.taskId);
+  const task = await readTaskRow(db, opts.taskId);
   if (!task) {
     // Empty stub so tests have something to assert; the dispatcher gates
     // on the task existing before calling us.
@@ -1916,12 +1913,12 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     };
   }
 
-  const directiveText = readDirectiveGoal(db, task.directive_id);
+  const directiveText = await readDirectiveGoal(db, task.directive_id);
 
   // Build candidate sections in priority order. Each entry is {name, p, body}.
   type Candidate = { name: string; p: number; body: string; floor?: boolean };
   const candidates: Candidate[] = [];
-  const policySections = readPolicyBundleSections(db, "brain_prompt", REQUIRED_POLICY_SECTION_NAMES);
+  const policySections = await readPolicyBundleSections(db, "brain_prompt", REQUIRED_POLICY_SECTION_NAMES);
   const policyByName = new Map(policySections.map((policy) => [policy.sectionName, policy]));
   // Q3 owner-profile snapshot for variant ranking. Read once per
   // composePrompt — variant queries below reuse this. Failure returns
@@ -1949,12 +1946,13 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     return typeof fallback === "number" && Number.isFinite(fallback) ? fallback : 0;
   };
 
-  const selectPolicyBundleByPosterior = (
+  const selectPolicyBundleByPosterior = async (
     db: Database,
     goal_shape: string,
     task_class: string,
-  ): PosteriorPolicyBundle | null => {
-    const rows = db.query(
+  ): Promise<PosteriorPolicyBundle | null> => {
+    const rows = await poolQuery<Record<string, unknown>>(
+      db,
       `SELECT id, body, posterior_alpha, posterior_beta, score, confidence, name,
               intent, summary, target_files, target_resources, source_candidate_id
          FROM act_artifact
@@ -1962,7 +1960,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
           AND status IN ('admitted', 'promoted')
         ORDER BY score DESC, confidence DESC, updated_at DESC
         LIMIT 200`,
-    ).all() as Array<Record<string, unknown>>;
+    );
 
     const matches: PosteriorPolicyBundle[] = [];
     for (const row of rows) {
@@ -2028,16 +2026,16 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // scored registry bundle matches, fall back to the Q2/Q3 heuristic path.
   const composerGoalShape = goalShape(directiveText ?? task.goal);
 
-  const pushPolicySection = (name: PolicyBundleSectionName, fallbackPriority: number, floor = false) => {
+  const pushPolicySection = async (name: PolicyBundleSectionName, fallbackPriority: number, floor = false) => {
     const policy = policyByName.get(name);
     const bundleScore = policy ? 1 : 0; // fallback heuristic: promoted policy_bundle rows are admitted = 1, missing = 0.
     const retrievedBundle = pickHighestScorePolicyBundle(opts.retrievedPolicyArtifacts?.[name], name);
     const retrievedScore = retrievedBundle && typeof retrievedBundle.score === "number" && Number.isFinite(retrievedBundle.score)
       ? retrievedBundle.score
       : 0;
-    const posteriorBundle = selectPolicyBundleByPosterior(db, "", name);
+    const posteriorBundle = await selectPolicyBundleByPosterior(db, "", name);
     const posteriorScore = posteriorBundle?.posteriorScore ?? 0;
-    const variant = selectPromptSectionVariant(db, {
+    const variant = await selectPromptSectionVariant(db, {
       sectionName: name,
       goalText: goalTextForVariants,
       ownerProfile: ownerProfileForVariants,
@@ -2202,25 +2200,25 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // — but the dedicated name makes the on-demand-retrieval intent
   // legible at the call site (the brain amendment named these two slots
   // specifically).
-  const pushRetrievedPolicyArtifactSection = (
+  const pushRetrievedPolicyArtifactSection = async (
     name: PolicyBundleSectionName,
     fallbackPriority: number,
     floor = false,
-  ): void => {
-    pushPolicySection(name, fallbackPriority, floor);
+  ): Promise<void> => {
+    await pushPolicySection(name, fallbackPriority, floor);
   };
 
   // EXIT INVARIANT first — load-bearing structural rule against brain_silent_exit
   // (commit 59b2872 + this fix). p=0 so it never drops; first in order so the
   // brain reads "you MUST call substrate.* before exit" before anything else.
-  pushPolicySection("exit_invariant", 0, true);
+  await pushPolicySection("exit_invariant", 0, true);
   candidates.push({ name: "task_goal", p: 0, floor: true, body: buildTaskGoalSection(task, directiveText) });
   // Existing decomposition awareness — load-bearing reuse-first signal
   // against the re-decomposition explosion (audit 2026-05-17: hot-reload
   // directive accumulated 62 task_node_opened events because the brain
   // re-decomposed Q1-Q6 nine times). p=0 so it never drops; placed right
   // after task_goal so the brain reads it before workflow/emission grammar.
-  const existingDecomp = readExistingDecomposition(db, task.directive_id, task.id);
+  const existingDecomp = await readExistingDecomposition(db, task.directive_id, task.id);
   const existingDecompBody = buildExistingDecompositionSection(existingDecomp);
   if (existingDecompBody.length > 0) {
     candidates.push({ name: "existing_decomposition", p: 0, floor: true, body: existingDecompBody });
@@ -2231,7 +2229,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // for similar future goals. Purely additive: non-floor (drops first under
   // budget pressure), advisory-only, changes nothing about dispatch/closure.
   // P1 so it lands in normal flow but never displaces a load-bearing section.
-  const provenDecomp = readProvenDecompositionStrategy(db, directiveText ?? task.goal);
+  const provenDecomp = await readProvenDecompositionStrategy(db, directiveText ?? task.goal);
   const provenDecompBody = buildProvenDecompositionStrategySection(provenDecomp);
   if (provenDecompBody.length > 0) {
     candidates.push({ name: "proven_decomposition_strategy", p: 1, body: provenDecompBody });
@@ -2243,27 +2241,27 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // Purely additive: non-floor (drops first under budget pressure),
   // advisory-only, read-only, changes nothing about dispatch/closure. P1 so it
   // lands in normal flow but never displaces a load-bearing section.
-  const provenMotif = readProvenTrajectoryMotif(db, task.directive_id);
+  const provenMotif = await readProvenTrajectoryMotif(db, task.directive_id);
   const provenMotifBody = buildProvenTrajectoryMotifSection(provenMotif);
   if (provenMotifBody.length > 0) {
     candidates.push({ name: "proven_trajectory_motif", p: 1, body: provenMotifBody });
   }
-  pushPolicySection("runtimes_available", 0, true);
-  pushPolicySection("workflow", 0, true);
-  pushPolicySection("do_not", 0, true);
+  await pushPolicySection("runtimes_available", 0, true);
+  await pushPolicySection("workflow", 0, true);
+  await pushPolicySection("do_not", 0, true);
   // Detailed emission grammars — env_requires + rich knowledge schema +
   // artifact provenance. P1 so it drops first under tight-budget pressure
   // (depth-1 tests pin a tiny 800-token budget) but lands in normal flow.
   // Q2 (brain amendment MDBZV4YVRH7D172BW40W1J5ASM): routed through
   // pushRetrievedPolicyArtifactSection so the dispatcher's on-demand
   // act_artifact retrieval feeds the body selection.
-  pushRetrievedPolicyArtifactSection("emission_grammars", 1);
+  await pushRetrievedPolicyArtifactSection("emission_grammars", 1);
   // Phase 1 brain-harness rewrite (2026-05-17): teach the brain about
   // runtime.{system_map, brain_self_audit, trajectory_replay,
   // prompt_self_inspect}. P1 so it ships in normal flow but drops first
   // along with emission_grammars under tight-budget pressure — the
   // EXIT INVARIANT + WORKFLOW + DO NOT still win the tightest budgets.
-  pushRetrievedPolicyArtifactSection("self_introspection", 1);
+  await pushRetrievedPolicyArtifactSection("self_introspection", 1);
 
   // Phase D fixture marker — the mocked bridge keys off this so the
   // fixture_d_count_todos dispatch can be reproduced deterministically.
@@ -2278,14 +2276,17 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   //      silent recency fallback (that masquerade hid SERPER-style holes).
   //   2. retrievedKnowledge present + has hits → render reranked section.
   //   3. neither flag set → recency stand-in (tests / fresh empty substrate).
-  const knowledgeBody = opts.retrievalUnavailable
-    ? `RETRIEVED KNOWLEDGE: (unavailable: ${opts.retrievalUnavailable.reason})`
-    : opts.retrievedKnowledge && opts.retrievedKnowledge.hits.length > 0
-      ? buildRetrievedKnowledgeSection(
-          opts.retrievedKnowledge.hits,
-          readKnowledgeTopK(db, 4, directiveText ?? task.goal, true),
-        )
-      : buildKnowledgeSection(readKnowledgeTopK(db, 8, directiveText ?? task.goal));
+  let knowledgeBody: string;
+  if (opts.retrievalUnavailable) {
+    knowledgeBody = `RETRIEVED KNOWLEDGE: (unavailable: ${opts.retrievalUnavailable.reason})`;
+  } else if (opts.retrievedKnowledge && opts.retrievedKnowledge.hits.length > 0) {
+    knowledgeBody = buildRetrievedKnowledgeSection(
+      opts.retrievedKnowledge.hits,
+      await readKnowledgeTopK(db, 4, directiveText ?? task.goal, true),
+    );
+  } else {
+    knowledgeBody = buildKnowledgeSection(await readKnowledgeTopK(db, 8, directiveText ?? task.goal));
+  }
   candidates.push({ name: "retrieved_knowledge", p: 1, floor: true, body: knowledgeBody });
 
   // F6 completion (decision 12) — citation choice wrap. The composer
@@ -2315,9 +2316,9 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   try {
     const chosenIds: string[] = opts.retrievedKnowledge && opts.retrievedKnowledge.hits.length > 0
       ? opts.retrievedKnowledge.hits.map((h) => h.event_id)
-      : readKnowledgeTopK(db, 8, directiveText ?? task.goal).map((r) => r.id);
+      : (await readKnowledgeTopK(db, 8, directiveText ?? task.goal)).map((r) => r.id);
     if (chosenIds.length > 0) {
-      const rejected = readKnowledgeRejected(db, chosenIds.length, 6);
+      const rejected = await readKnowledgeRejected(db, chosenIds.length, 6);
       if (rejected.length > 0) {
         emitEvent(db, {
           kind: "counterfactual_alternative_recorded",
@@ -2342,7 +2343,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
     }
   } catch { /* fail-soft */ }
 
-  const chosenArtifactsTopK = readArtifactRegistryTopK(db, 6);
+  const chosenArtifactsTopK = await readArtifactRegistryTopK(db, 6);
   const artifactBody = opts.retrievedArtifacts && opts.retrievedArtifacts.hits.length > 0
     ? buildRetrievedArtifactSection(opts.retrievedArtifacts.hits)
     : buildArtifactSection(chosenArtifactsTopK);
@@ -2357,7 +2358,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
       ? opts.retrievedArtifacts.hits.map((h) => h.event_id)
       : chosenArtifactsTopK.map((r) => r.id);
     if (chosenArtifactIds.length > 0) {
-      const rejected = readArtifactRegistryRejected(db, chosenArtifactIds.length, 6);
+      const rejected = await readArtifactRegistryRejected(db, chosenArtifactIds.length, 6);
       if (rejected.length > 0) {
         emitEvent(db, {
           kind: "counterfactual_alternative_recorded",
@@ -2418,7 +2419,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // load-bearing for the LLM-on-the-fly demo generation (WORKFLOW step
   // 3) AND for the rendering rule (step 9) AND for owner-input learning
   // (step 10) — three workflow steps depend on this being present.
-  const ownerContextRows = readOwnerContext(db, 8);
+  const ownerContextRows = await readOwnerContext(db, 8);
   const ownerProfileBody = buildOwnerProfileSection(readOwnerProfile(db), {
     recentOwnerContext: ownerContextRows,
     directive: {
@@ -2477,7 +2478,7 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // and can route them through new task DAGs / actions. Owner-gated
   // proposals are filtered out — those need orchestrator-side apply.
   const proposalsBody = buildPendingProposalsSection(
-    readPendingProposals(db, 6, task.directive_id),
+    await readPendingProposals(db, 6, task.directive_id),
   );
   candidates.push({ name: "pending_proposals", p: 3, body: proposalsBody });
   // F11 (2026-05-18, contract 2AMJKN0GTX32790173EPYH6YT4): OUTSTANDING
@@ -2498,12 +2499,12 @@ export const composePrompt = (db: Database, opts: PromptComposeOptions): Compose
   // / coordinate. Pre-fix the brain saw only its own directive in the
   // prompt — couldn't tell if a peer goal was already covering this work.
   const otherGoalsBody = buildOtherGoalsSection(
-    readOtherActiveGoals(db, task.directive_id, 5),
+    await readOtherActiveGoals(db, task.directive_id, 5),
   );
   candidates.push({ name: "other_active_goals", p: 3, body: otherGoalsBody });
 
-  candidates.push({ name: "active_failures", p: 4, body: buildFailuresSection(readRecentFailures(db, 3)) });
-  candidates.push({ name: "constitutional_gates", p: 4, body: buildGatesSection(readConstitutionalGates(db)) });
+  candidates.push({ name: "active_failures", p: 4, body: buildFailuresSection(await readRecentFailures(db, 3)) });
+  candidates.push({ name: "constitutional_gates", p: 4, body: buildGatesSection(await readConstitutionalGates(db)) });
 
   // Brain self-audit reflexive section (Phase 3 brain harness rewrite,
   // 2026-05-17). The brain sees its own live report card every cycle —

@@ -44,7 +44,7 @@ const openTask = (db: ReturnType<typeof openDb>): { directiveId: string; taskId:
 };
 
 describe("prompt_composer", () => {
-  test("CLAUDE.md stays slim and points moved context at promoted knowledge", () => {
+  test("CLAUDE.md stays slim and points moved context at promoted knowledge", async () => {
     const contract = readFileSync(new URL("../CLAUDE.md", import.meta.url), "utf8");
     expect(estimateTokens(contract)).toBeLessThan(3000);
     expect(contract.split("\n").length).toBeLessThan(180);
@@ -58,10 +58,10 @@ describe("prompt_composer", () => {
     expect(contract).not.toContain("commit hashes");
   });
 
-  test("composes under default budget with P0 sections always present", () => {
+  test("composes under default budget with P0 sections always present", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
-    const composed = composePrompt(db, { taskId });
+    const composed = await composePrompt(db, { taskId });
     expect(composed.text.length).toBeGreaterThan(0);
     expect(estimateTokens(composed.text)).toBeLessThan(8000);
     const sectionNames = composed.sections.map((s) => s.name);
@@ -72,7 +72,7 @@ describe("prompt_composer", () => {
     expect(sectionNames).toContain("do_not");
   });
 
-  test("uses the same prompt section set for research, question, code, outreach, and project goals", () => {
+  test("uses the same prompt section set for research, question, code, outreach, and project goals", async () => {
     const db = openDb(":memory:");
     seedFoundationalKnowledge(db, { ownerApproved: true });
     const goals = [
@@ -82,18 +82,18 @@ describe("prompt_composer", () => {
       "Plan a business outreach campaign for Lakeland clinics",
       "Run a multi-stage project to publish a report",
     ];
-    const sectionSets = goals.map((goal) => {
+    const sectionSets = await Promise.all(goals.map(async (goal) => {
       const directiveId = newId();
       const taskId = newId();
       emitEvent(db, { kind: "directive_opened", substrate_origin: "owner", directive_id: directiveId, task_id: directiveId, payload: { directive_text: goal } });
       emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: taskId, payload: { goal } });
-      return composePrompt(db, { taskId }).sections.map((s) => s.name);
-    });
+      return (await composePrompt(db, { taskId })).sections.map((s) => s.name);
+    }));
     expect(new Set(sectionSets.map((sections) => JSON.stringify(sections))).size).toBe(1);
     expect(sectionSets[0]).not.toContain("fixture_marker");
   });
 
-  test("EXIT INVARIANT is structurally pinned (load-bearing fix for brain_silent_exit, audit 2026-05-16)", () => {
+  test("EXIT INVARIANT is structurally pinned (load-bearing fix for brain_silent_exit, audit 2026-05-16)", async () => {
     // Foundational fix: the bridge classifier split (commit 59b2872) revealed
     // 87% of bridge_failed events were `brain_silent_exit` — opencode running
     // cleanly to exit_code:0 in the handshake window without invoking ANY
@@ -104,7 +104,7 @@ describe("prompt_composer", () => {
     // before anything else.
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
-    const composed = composePrompt(db, { taskId });
+    const composed = await composePrompt(db, { taskId });
 
     // Structural marker — must appear verbatim in rendered text.
     expect(composed.text).toContain("EXIT INVARIANT");
@@ -124,7 +124,7 @@ describe("prompt_composer", () => {
     expect(composed.text).toContain("Exit having produced only conversational text");
   });
 
-  test("renders brain prompt policy from typed policy_bundle rows, not local constants", () => {
+  test("renders brain prompt policy from typed policy_bundle rows, not local constants", async () => {
     const source = readFileSync(new URL("./prompt_composer.ts", import.meta.url), "utf8");
     expect(source).not.toContain("const WORKFLOW_TEXT");
     expect(source).not.toContain("const NOT_DO_TEXT");
@@ -175,14 +175,14 @@ describe("prompt_composer", () => {
       },
     });
 
-    const composed = composePrompt(db, { taskId });
+    const composed = await composePrompt(db, { taskId });
     expect(composed.text).toContain("POLICY_BUNDLE_OVERRIDE_WORKFLOW");
     expect(composed.text).toContain("POLICY_BUNDLE_OVERRIDE_DO_NOT");
     expect(composed.sections.find((s) => s.name === "workflow")?.priorityP).toBe(0);
     expect(composed.sections.find((s) => s.name === "do_not")?.priorityP).toBe(0);
   });
 
-  test("EXISTING DECOMPOSITION section surfaces same-directive task_node_opened siblings to prevent re-decomposition explosion (audit 2026-05-17)", () => {
+  test("EXISTING DECOMPOSITION section surfaces same-directive task_node_opened siblings to prevent re-decomposition explosion (audit 2026-05-17)", async () => {
     // FOUNDATIONAL FIX: pre-fix the brain dispatched against the root task
     // blind to its prior cycles' children. Each re-dispatch on a multi-Q root
     // produced a fresh batch of Q1-Q6 task_node_opened events. The hot-reload
@@ -236,7 +236,7 @@ describe("prompt_composer", () => {
       payload: { goal: "Q2 RELOAD MECHANISM: choose smallest delta" },
     });
 
-    const composed = composePrompt(db, { taskId: rootId });
+    const composed = await composePrompt(db, { taskId: rootId });
 
     expect(composed.text).toContain("EXISTING DECOMPOSITION FOR THIS DIRECTIVE");
     expect(composed.text).toContain("Q1 DETECTION");
@@ -266,12 +266,12 @@ describe("prompt_composer", () => {
       task_id: freshTaskId,
       payload: { goal: "Fresh root task" },
     });
-    const freshComposed = composePrompt(db, { taskId: freshTaskId });
+    const freshComposed = await composePrompt(db, { taskId: freshTaskId });
     expect(freshComposed.sections.find((s) => s.name === "existing_decomposition")).toBeUndefined();
     expect(freshComposed.text).not.toContain("EXISTING DECOMPOSITION FOR THIS DIRECTIVE");
   });
 
-  test("PROVEN DECOMPOSITION STRATEGY section binds the outcome-scored decomposition_strategy_predicate row to a matching goal (Tier-S1 retrieval-binding leg)", () => {
+  test("PROVEN DECOMPOSITION STRATEGY section binds the outcome-scored decomposition_strategy_predicate row to a matching goal (Tier-S1 retrieval-binding leg)", async () => {
     const db = openDb(":memory:");
     seedFoundationalKnowledge(db, { ownerApproved: true });
 
@@ -349,7 +349,7 @@ describe("prompt_composer", () => {
       payload: { goal: "Audit the dispatch pipeline for residual drift", lifecycle: "finite" },
     });
 
-    const composed = composePrompt(db, { taskId });
+    const composed = await composePrompt(db, { taskId });
     const section = composed.sections.find((s) => s.name === "proven_decomposition_strategy");
     expect(section).toBeDefined();
     expect(section?.priorityP).toBe(1); // advisory, drops first under budget pressure
@@ -382,12 +382,12 @@ describe("prompt_composer", () => {
       payload: { goal: "Build the parallel ingestion bundle", lifecycle: "finite" },
     });
     // No matching predicate row at all → section absent.
-    const lowComposed = composePrompt(lowDb, { taskId: lowTaskId });
+    const lowComposed = await composePrompt(lowDb, { taskId: lowTaskId });
     expect(lowComposed.sections.find((s) => s.name === "proven_decomposition_strategy")).toBeUndefined();
     expect(lowComposed.text).not.toContain("PROVEN DECOMPOSITION STRATEGY");
   });
 
-  test("PROVEN TRAJECTORY MOTIF section binds the outcome-scored trajectory_motif_predicate row to a directive on the motif's path (Tier-S3 retrieval-binding leg)", () => {
+  test("PROVEN TRAJECTORY MOTIF section binds the outcome-scored trajectory_motif_predicate row to a directive on the motif's path (Tier-S3 retrieval-binding leg)", async () => {
     // Insert a scored trajectory_motif_predicate row exactly as the
     // trajectory_motif_extractor's ensureMotifRow + calibrateMotifScore do:
     // id=motif_<n>_<hash>, body carries { kinds, length, frequency,
@@ -466,7 +466,7 @@ describe("prompt_composer", () => {
       payload: { goal: "Ship the embedding-cache compounding lever", lifecycle: "finite" },
     });
 
-    const composed = composePrompt(db, { taskId });
+    const composed = await composePrompt(db, { taskId });
     const section = composed.sections.find((s) => s.name === "proven_trajectory_motif");
     expect(section).toBeDefined();
     expect(section?.priorityP).toBe(1); // advisory, drops first under budget pressure
@@ -530,7 +530,7 @@ describe("prompt_composer", () => {
       task_id: fewTaskId,
       payload: { goal: "Ship a rarely-seen recipe", lifecycle: "finite" },
     });
-    const fewComposed = composePrompt(fewDb, { taskId: fewTaskId });
+    const fewComposed = await composePrompt(fewDb, { taskId: fewTaskId });
     expect(fewComposed.sections.find((s) => s.name === "proven_trajectory_motif")).toBeUndefined();
     expect(fewComposed.text).not.toContain("PROVEN TRAJECTORY MOTIF");
 
@@ -538,22 +538,22 @@ describe("prompt_composer", () => {
     // even with ample samples. A poorly-closing recipe is noise, not signal.
     fewDb.run(`DELETE FROM act_artifact WHERE kind = 'trajectory_motif_predicate'`);
     insertMotifPredicate("motif_3_poorly_closing", motifKinds, 30, 0.7); // score 0.30 < 0.55
-    const poorComposed = composePrompt(fewDb, { taskId: fewTaskId });
+    const poorComposed = await composePrompt(fewDb, { taskId: fewTaskId });
     expect(poorComposed.sections.find((s) => s.name === "proven_trajectory_motif")).toBeUndefined();
     expect(poorComposed.text).not.toContain("PROVEN TRAJECTORY MOTIF");
   });
 
-  test("returns the fixture marker for fixture_d_count_todos prompts", () => {
+  test("returns the fixture marker for fixture_d_count_todos prompts", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
-    const composed = composePrompt(db, { taskId });
+    const composed = await composePrompt(db, { taskId });
     expect(composed.text).toContain("FIXTURE: fixture_d_count_todos");
   });
 
-  test("renders universal act-loop metadata and target_resources URI grammar", () => {
+  test("renders universal act-loop metadata and target_resources URI grammar", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
-    const composed = composePrompt(db, { taskId });
+    const composed = await composePrompt(db, { taskId });
     expect(composed.text).toContain("CONSTANT ACT-LOOP METADATA");
     expect(composed.text).toContain("target_resources:");
     expect(composed.text).toContain("repo:runtime/foo.ts");
@@ -566,7 +566,7 @@ describe("prompt_composer", () => {
     expect(composed.text).not.toContain('target_files:        ["path/to/touched.ts", ...]');
   });
 
-  test("under heavy budget pressure, P4 sections drop first", () => {
+  test("under heavy budget pressure, P4 sections drop first", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
     emitEvent(db, {
@@ -583,20 +583,20 @@ describe("prompt_composer", () => {
       payload: { gate: "brain_concurrency_cap" },
     });
     // Tiny budget — even with approximate token counting we should not fit P4.
-    const composed = composePrompt(db, { taskId, budgetTokens: 150 });
+    const composed = await composePrompt(db, { taskId, budgetTokens: 150 });
     // P0 sections must remain — but seeded constitutional gates / active
     // failures must drop before higher-priority owner/task context.
     expect(composed.truncated).toContain("active_failures");
     expect(composed.truncated).toContain("constitutional_gates");
   });
 
-  test("returns a clear stub when task not found", () => {
+  test("returns a clear stub when task not found", async () => {
     const db = openDb(":memory:");
-    const composed = composePrompt(db, { taskId: "nonexistent_task" });
+    const composed = await composePrompt(db, { taskId: "nonexistent_task" });
     expect(composed.text).toContain("TASK NOT FOUND");
   });
 
-  test("includes promoted-knowledge entries when present", () => {
+  test("includes promoted-knowledge entries when present", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
     emitEvent(db, {
@@ -604,11 +604,11 @@ describe("prompt_composer", () => {
       substrate_origin: "substrate_auto",
       payload: { text: "Prefer recursive grep over shell find", score: 0.88, tags: ["pattern"] },
     });
-    const composed = composePrompt(db, { taskId });
+    const composed = await composePrompt(db, { taskId });
     expect(composed.text).toContain("Prefer recursive grep");
   });
 
-  test("renders WATCHED OUTPUTS with the upstream observation when a watch edge exists", () => {
+  test("renders WATCHED OUTPUTS with the upstream observation when a watch edge exists", async () => {
     const db = openDb(":memory:");
     const { directiveId, taskId } = openTask(db);
     const upstream = newId();
@@ -632,19 +632,19 @@ describe("prompt_composer", () => {
       verifier_artifact_id: "test_verifier_handle",
       payload: { observed_value: "PROBE_WATCH_TOKEN", verifier_kind: "deterministic_code" },
     });
-    const composed = composePrompt(db, { taskId });
+    const composed = await composePrompt(db, { taskId });
     expect(composed.text).toContain("WATCHED OUTPUTS");
     expect(composed.text).toContain("PROBE_WATCH_TOKEN");
   });
 
-  test("WATCHED OUTPUTS reads as (none) when no watch edges target this task", () => {
+  test("WATCHED OUTPUTS reads as (none) when no watch edges target this task", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
-    const composed = composePrompt(db, { taskId });
+    const composed = await composePrompt(db, { taskId });
     expect(composed.text).toContain("WATCHED OUTPUTS: (none)");
   });
 
-  test("when retrievedKnowledge is supplied, RETRIEVED KNOWLEDGE renders the rerank lines instead of recency", () => {
+  test("when retrievedKnowledge is supplied, RETRIEVED KNOWLEDGE renders the rerank lines instead of recency", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
     // Seed a recency stand-in entry; rerank must override it, but
@@ -659,7 +659,7 @@ describe("prompt_composer", () => {
       substrate_origin: "substrate_auto",
       payload: { text: "GOAL_SHAPE_WITH_RERANK", score: 0.6, goal_shape: goalShape("Count files containing TODO substring") },
     });
-    const composed = composePrompt(db, {
+    const composed = await composePrompt(db, {
       taskId,
       retrievedKnowledge: {
         hits: [
@@ -688,10 +688,10 @@ describe("prompt_composer", () => {
     expect(composed.text).not.toContain("RECENCY_FALLBACK_STAND_IN");
   });
 
-  test("when retrievedArtifacts is supplied, CODE ARTIFACT REGISTRY renders the rerank lines", () => {
+  test("when retrievedArtifacts is supplied, CODE ARTIFACT REGISTRY renders the rerank lines", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
-    const composed = composePrompt(db, {
+    const composed = await composePrompt(db, {
       taskId,
       retrievedArtifacts: {
         hits: [
@@ -716,7 +716,7 @@ describe("prompt_composer", () => {
     expect(composed.text).toContain("RERANK_ARTIFACT_TOPHIT");
   });
 
-  test("estimateTokens returns positive integer counts via the real tokenizer", () => {
+  test("estimateTokens returns positive integer counts via the real tokenizer", async () => {
     expect(estimateTokens("hello world")).toBeGreaterThan(0);
     expect(estimateTokens("")).toBeGreaterThanOrEqual(0);
     // Tokens should be fewer than characters for typical English text.
@@ -724,14 +724,14 @@ describe("prompt_composer", () => {
       .toBeLessThan("hello world this is a longer test sentence".length);
   });
 
-  test("OWNER PROFILE section renders defaults stub when no owner_profile_recorded row exists, and renders the latest profile fields when one does", () => {
+  test("OWNER PROFILE section renders defaults stub when no owner_profile_recorded row exists, and renders the latest profile fields when one does", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
     // Before any owner_profile_recorded: section MUST be present with the
     // bootstrap policy block — the brain learns to look for it and apply
     // the sparse-profile heuristics (plain language, one question at a
     // time, explain on first encounter).
-    const composedDefaults = composePrompt(db, { taskId });
+    const composedDefaults = await composePrompt(db, { taskId });
     expect(composedDefaults.text).toContain("## OWNER PROFILE");
     expect(composedDefaults.text).toContain("bootstrap_policy: sparse profile");
     expect(composedDefaults.text).toContain("do not assume English");
@@ -797,7 +797,7 @@ describe("prompt_composer", () => {
     expect(rendered).toContain("time_window: 9:00-17:00 mon,tue UTC");
     expect(rendered).toContain("autonomy_scope: include=[cli/**, runtime/**] exclude=[**/*.test.ts]");
 
-    const composed = composePrompt(db, { taskId });
+    const composed = await composePrompt(db, { taskId });
     expect(composed.text).toContain("## OWNER PROFILE");
     expect(composed.text).toContain("detected_language: ru");
     expect(composed.text).toContain("autonomy_score: 0.30");
@@ -837,14 +837,14 @@ describe("buildOwnerRenderingPolicySection + buildOwnerFeedbackSummarySection", 
     ...overrides,
   });
 
-  test("null policy renders default invariants only", () => {
+  test("null policy renders default invariants only", async () => {
     const text = buildOwnerRenderingPolicySection(null);
     expect(text).toContain("## OWNER RENDERING POLICY");
     expect(text).toContain("no owner_profile_recorded row yet");
     expect(text).toContain("Primary owner-visible text MUST NOT contain event_ids");
   });
 
-  test("policy with declined / things_to_never_do renders them inline; preferred/avoided terms are NOT mirrored", () => {
+  test("policy with declined / things_to_never_do renders them inline; preferred/avoided terms are NOT mirrored", async () => {
     const text = buildOwnerRenderingPolicySection(policy({
       preferred_terms: ["plain", "simple"],
       avoided_terms: ["dispatch", "residual"],
@@ -863,7 +863,7 @@ describe("buildOwnerRenderingPolicySection + buildOwnerFeedbackSummarySection", 
     expect(text).toContain("autonomy_score: 0.30");
   });
 
-  test("feedback summary renders aggregates when present, default copy when window is empty", () => {
+  test("feedback summary renders aggregates when present, default copy when window is empty", async () => {
     const empty = buildOwnerFeedbackSummarySection(policy());
     expect(empty).toContain("no rendering feedback yet");
 
@@ -880,29 +880,29 @@ describe("buildOwnerRenderingPolicySection + buildOwnerFeedbackSummarySection", 
 
 
 describe("prompt_composer goal-shape knowledge fallback", () => {
-  test("promoted knowledge with matching goal_shape is pulled before recency-only rows", () => {
+  test("promoted knowledge with matching goal_shape is pulled before recency-only rows", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
     emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "RECENT_BUT_GENERIC", score: 0.9 } });
     emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "GOAL_SHAPE_MATCHED_KNOWLEDGE", score: 0.6, goal_shape: goalShape("Count files containing TODO substring") } });
-    const composed = composePrompt(db, { taskId, budgetTokens: 1200 });
+    const composed = await composePrompt(db, { taskId, budgetTokens: 1200 });
     expect(composed.text.indexOf("GOAL_SHAPE_MATCHED_KNOWLEDGE")).toBeLessThan(composed.text.indexOf("RECENT_BUT_GENERIC"));
   });
 
-  test("promoted knowledge with matching goal_shape_tags is pulled before recency-only rows", () => {
+  test("promoted knowledge with matching goal_shape_tags is pulled before recency-only rows", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
     emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "RECENT_BUT_GENERIC_TAG_CASE", score: 0.9 } });
     emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "TAG_MATCHED_MOVED_CONTRACT_KNOWLEDGE", score: 0.6, goal_shape_tags: ["todo"] } });
-    const composed = composePrompt(db, { taskId, budgetTokens: 1200 });
+    const composed = await composePrompt(db, { taskId, budgetTokens: 1200 });
     expect(composed.text.indexOf("TAG_MATCHED_MOVED_CONTRACT_KNOWLEDGE")).toBeLessThan(composed.text.indexOf("RECENT_BUT_GENERIC_TAG_CASE"));
   });
 
-  test("direct promoted moved-contract knowledge renders rich payload text without a candidate join", () => {
+  test("direct promoted moved-contract knowledge renders rich payload text without a candidate join", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
     emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { claim: "DIRECT_PROMOTED_CONTRACT_CLAIM", evidence: ["moved from CLAUDE.md"], implications: ["retrieve by goal shape"], score: 0.7, goal_shape_tags: ["todo"] } });
-    const composed = composePrompt(db, { taskId, budgetTokens: 1200 });
+    const composed = await composePrompt(db, { taskId, budgetTokens: 1200 });
     expect(composed.text).toContain("DIRECT_PROMOTED_CONTRACT_CLAIM");
     expect(composed.text).toContain("evidence: moved from CLAUDE.md");
     expect(composed.text).toContain("implications: retrieve by goal shape");
@@ -928,13 +928,13 @@ describe("buildOwnerStateBeliefSection + buildAlignmentActionPolicySection + bui
     ...overrides,
   });
 
-  test("null belief renders the cold-install hint", () => {
+  test("null belief renders the cold-install hint", async () => {
     const text = buildOwnerStateBeliefSection(null);
     expect(text).toContain("## OWNER STATE BELIEF");
     expect(text).toContain("no owner_state_hypothesis_recorded row yet");
   });
 
-  test("belief with latent_state surfaces axes inline + cites hypothesis_event_id", () => {
+  test("belief with latent_state surfaces axes inline + cites hypothesis_event_id", async () => {
     const text = buildOwnerStateBeliefSection(belief({
       latent_state: {
         emotional_register: "tired",
@@ -956,7 +956,7 @@ describe("buildOwnerStateBeliefSection + buildAlignmentActionPolicySection + bui
     expect(text).toContain("grounded_in (event_ids): OBS1, OBS2");
   });
 
-  test("belief with prediction_error >= 0.5 surfaces high-error WARNING", () => {
+  test("belief with prediction_error >= 0.5 surfaces high-error WARNING", async () => {
     const text = buildOwnerStateFeedbackSummarySection(belief({
       recent_prediction_error_count: 3,
       recent_avg_prediction_error: 0.6,
@@ -966,12 +966,12 @@ describe("buildOwnerStateBeliefSection + buildAlignmentActionPolicySection + bui
     expect(text).toContain("WARNING");
   });
 
-  test("belief is_stale=true is surfaced inline so the brain refreshes the hypothesis", () => {
+  test("belief is_stale=true is surfaced inline so the brain refreshes the hypothesis", async () => {
     const text = buildOwnerStateBeliefSection(belief({ is_stale: true }));
     expect(text).toContain("STALE");
   });
 
-  test("alignment_action_policy renders all 8 decision rules when belief is present", () => {
+  test("alignment_action_policy renders all 8 decision rules when belief is present", async () => {
     const text = buildAlignmentActionPolicySection(belief());
     expect(text).toContain("## ALIGNMENT ACTION POLICY");
     expect(text).toContain("things_to_never_do");
@@ -979,12 +979,12 @@ describe("buildOwnerStateBeliefSection + buildAlignmentActionPolicySection + bui
     expect(text).toContain("uncertainty > 0.6");
   });
 
-  test("alignment_action_policy short-circuits on null belief", () => {
+  test("alignment_action_policy short-circuits on null belief", async () => {
     const text = buildAlignmentActionPolicySection(null);
     expect(text).toContain("no owner_state_belief");
   });
 
-  test("buildTopLawsSection renders ranked laws with event_id citation hint (Phase I3+)", () => {
+  test("buildTopLawsSection renders ranked laws with event_id citation hint (Phase I3+)", async () => {
     const laws: TopLawRow[] = [
       { event_id: "LAW1", ts: "2026-05-18", substrate_origin: "brain", candidate_id: null, directive_id: null, score: 0.95, confidence: 0.9, text: "Citation is mutation (k_554)", tags: [], context_refs: [], law_rank: 1 },
       { event_id: "LAW2", ts: "2026-05-18", substrate_origin: "brain", candidate_id: null, directive_id: null, score: 0.92, confidence: 0.88, text: "Retrieval binding (k_201) — knowledge compounds only when retrieval is behaviorally binding", tags: [], context_refs: [], law_rank: 2 },
@@ -997,7 +997,7 @@ describe("buildOwnerStateBeliefSection + buildAlignmentActionPolicySection + bui
     expect(text).toContain("citation is mutation (k_554)");
   });
 
-  test("buildTopLawsSection renders empty hint when no laws", () => {
+  test("buildTopLawsSection renders empty hint when no laws", async () => {
     const text = buildTopLawsSection([]);
     expect(text).toContain("## TOP LAWS");
     expect(text).toContain("substrate is still learning");

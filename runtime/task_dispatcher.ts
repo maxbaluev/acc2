@@ -719,7 +719,7 @@ export const dispatchReadyTask = async (
     promptCache.recordPromptCacheHit(db, promptCacheKey, cachedPrompt.age_ms);
   } else {
     const composer = await resolveComposePrompt();
-    composed = composer(db, {
+    composed = await composer(db, {
       taskId: task.id,
       retrievedKnowledge,
       retrievedArtifacts,

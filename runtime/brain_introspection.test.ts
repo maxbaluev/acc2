@@ -276,13 +276,13 @@ describe("buildTrajectoryReplay", () => {
 });
 
 describe("buildPromptSelfInspect", () => {
-  test("returns null for unknown task", () => {
+  test("returns null for unknown task", async () => {
     const db = openDb(":memory:");
     runViews(db);
-    expect(buildPromptSelfInspect(db, "missing")).toBeNull();
+    expect(await buildPromptSelfInspect(db, "missing")).toBeNull();
   });
 
-  test("returns section names + budgets + truncation list for a real task", () => {
+  test("returns section names + budgets + truncation list for a real task", async () => {
     const db = openDb(":memory:");
     runViews(db);
     const directiveId = "dir_inspect";
@@ -301,7 +301,7 @@ describe("buildPromptSelfInspect", () => {
       task_id: taskId,
       payload: { goal: "test goal" },
     });
-    const inspect = buildPromptSelfInspect(db, taskId, { includePreview: true });
+    const inspect = await buildPromptSelfInspect(db, taskId, { includePreview: true });
     expect(inspect).not.toBeNull();
     expect(inspect!.directive_id).toBe(directiveId);
     expect(inspect!.sections.length).toBeGreaterThan(0);

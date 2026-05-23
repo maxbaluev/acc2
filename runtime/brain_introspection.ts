@@ -545,11 +545,11 @@ export type PromptSelfInspect = {
 
 const PROMPT_PREVIEW_CHARS = 4096;
 
-export const buildPromptSelfInspect = (
+export const buildPromptSelfInspect = async (
   db: Database,
   taskId: string,
   opts: { budgetTokens?: number; includePreview?: boolean } = {},
-): PromptSelfInspect | null => {
+): Promise<PromptSelfInspect | null> => {
   const row = db
     .query(
       `SELECT directive_id FROM events
@@ -561,7 +561,7 @@ export const buildPromptSelfInspect = (
   // Lazy-require composePrompt to avoid a top-of-file cycle (composer
   // imports tools from this module via the audit section).
   const { composePrompt } = require("./prompt_composer") as typeof import("./prompt_composer");
-  const composed = composePrompt(db, { taskId, budgetTokens: opts.budgetTokens });
+  const composed = await composePrompt(db, { taskId, budgetTokens: opts.budgetTokens });
   const totalTokens = composed.sections.reduce((sum, s) => sum + s.tokens, 0);
   return {
     task_id: taskId,

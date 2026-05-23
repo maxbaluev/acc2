@@ -436,7 +436,7 @@ describe("F11 — contract amendment flywheel consumer", () => {
     void directive;
     void task;
 
-    const composed = composePrompt(db, { taskId: "ROOT_E", budgetTokens: 50_000 });
+    const composed = await composePrompt(db, { taskId: "ROOT_E", budgetTokens: 50_000 });
     const section = composed.sections.find((s) => s.name === "outstanding_contract_amendments");
     expect(section).toBeDefined();
     expect(composed.text).toContain("OUTSTANDING CONTRACT AMENDMENTS:");
