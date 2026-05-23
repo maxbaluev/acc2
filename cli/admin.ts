@@ -67,6 +67,11 @@ const usage = (): string => `acc admin — operator-side maintenance
     upgrade-check             Show which subsystems have an update available.
 
   Updates:
+    update [--yes]            Safe acc2 self-update: preflight doctor snapshot,
+                              git fetch/pull or fast-forward, pending migrations,
+                              no-job-loss daemon drain+restart, post-update
+                              health verify, rollback to previous git ref on
+                              failed health.
     update-opencode [--yes]   Upgrade opencode to the latest version.
     install-deps              Verify + install host prereqs (bun, opencode,
                               OPENAI_API_KEY, camoufox, nsjail). Single-command

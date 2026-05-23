@@ -498,10 +498,12 @@ export const runInitProgrammatic = async (opts: InitOptions = {}): Promise<InitS
   // 8. Next steps.
   log("");
   log("[8/8] acc2 is ready. Try:");
+  log("       acc doctor                # verify install + version compatibility");
+  log("       acc daemon install-service # optional: install the user service");
   log("       acc daemon start          # spawn the daemon");
   log("       acc daemon status         # confirm it's up");
   log("       acc task \"your first goal\"");
-  log("       acc watch                 # live dashboard (Batch 1.β)");
+  log("       acc watch                 # live dashboard");
   log("");
   if (summary.warnings.length > 0) {
     warn(`(${summary.warnings.length} warning${summary.warnings.length === 1 ? "" : "s"} above; rerun \`acc init\` after addressing.)`);

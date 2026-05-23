@@ -3,7 +3,11 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "./db";
 import { emitEvent } from "../runtime/events";
-import { runVersionedMigrations, resolveAliasChain } from "./migration_runner";
+import {
+  runVersionedMigrations,
+  resolveAliasChain,
+  listPendingMigrations,
+} from "./migration_runner";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -71,6 +75,30 @@ describe("migration_runner", () => {
       )
       .get())?.c ?? 0;
     expect(tableExists).toBe(1);
+  });
+
+  test("listPendingMigrations enumerates unapplied versions before run and is empty after (read-only — no schema_migration_applied emitted)", () => {
+    const db = openDb(":memory:");
+    const before = listPendingMigrations(db);
+    // Read-only enumeration must not have applied anything.
+    const markerCountAfterList = (db
+      .query<{ c: number }, []>(
+        `SELECT COUNT(*) AS c FROM events WHERE kind = 'schema_migration_applied'`,
+      )
+      .get())?.c ?? 0;
+    expect(markerCountAfterList).toBe(0);
+
+    const summary = runVersionedMigrations(db);
+    expect(before.length).toBe(summary.applied);
+    for (const p of before) {
+      expect(p.version).toMatch(/^v\d{3}$/);
+      expect(p.file).toMatch(/\.sql$/);
+      expect(p.sql_bytes).toBeGreaterThan(0);
+      expect(summary.versions_applied).toContain(p.version);
+    }
+
+    // After applying, nothing is pending.
+    expect(listPendingMigrations(db)).toEqual([]);
   });
 });
 

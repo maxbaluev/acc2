@@ -65,9 +65,25 @@ describe("acc version", () => {
       version: string;
       daemon_running: boolean;
       daemon_loaded_git_head: string | null;
+      compatibility: {
+        cli_package_version: string;
+        daemon_loaded_git_head: string | null;
+        state_schema: string;
+        external_tools: string;
+      };
     };
     expect(parsed.version).toBe(readPackageVersion());
     expect(parsed.daemon_running).toBe(false);
     expect(parsed.daemon_loaded_git_head).toBeNull();
+    // Distribution/compat surface: version --json carries a compatibility block
+    // pairing the CLI package version with the daemon's loaded head and naming
+    // the canonical schema/tool probes (version.ts stays read-only / no SQLite).
+    expect(parsed.compatibility).toBeDefined();
+    expect(parsed.compatibility.cli_package_version).toBe(readPackageVersion());
+    expect(parsed.compatibility.daemon_loaded_git_head).toBeNull();
+    expect(typeof parsed.compatibility.state_schema).toBe("string");
+    expect(parsed.compatibility.state_schema.length).toBeGreaterThan(0);
+    expect(typeof parsed.compatibility.external_tools).toBe("string");
+    expect(parsed.compatibility.external_tools.length).toBeGreaterThan(0);
   });
 });

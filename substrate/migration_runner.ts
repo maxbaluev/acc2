@@ -40,6 +40,12 @@ export type MigrationSummary = {
   errors: string[];
 };
 
+export type PendingMigration = {
+  version: string;
+  file: string;
+  sql_bytes: number;
+};
+
 const MIGRATIONS_DIR = join(import.meta.dir, "migrations");
 
 const versionAlreadyApplied = (db: Database, version: string): boolean => {
@@ -76,6 +82,27 @@ const listMigrationFiles = (): string[] => {
 const extractVersion = (filename: string): string => {
   const m = filename.match(/^(v\d{3})_/);
   return m ? m[1] : filename;
+};
+
+/** Read-only enumeration of migrations not yet applied to this db (the
+ *  schema_migration_applied event ledger is the sole marker). Used by
+ *  `acc doctor`'s pending-migration check and update tooling to surface
+ *  schema drift without mutating state. */
+export const listPendingMigrations = (db: Database): PendingMigration[] => {
+  const pending: PendingMigration[] = [];
+  for (const file of listMigrationFiles()) {
+    const version = extractVersion(file);
+    if (versionAlreadyApplied(db, version)) continue;
+    const fullPath = join(MIGRATIONS_DIR, file);
+    let sqlText = "";
+    try {
+      sqlText = readFileSync(fullPath, "utf8");
+    } catch {
+      sqlText = "";
+    }
+    pending.push({ version, file: basename(file), sql_bytes: sqlText.length });
+  }
+  return pending;
 };
 
 export const runVersionedMigrations = (db: Database): MigrationSummary => {
