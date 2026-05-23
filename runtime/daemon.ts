@@ -2315,6 +2315,14 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     });
     const timer = setInterval(tick, tickMs);
     workers.push(() => clearInterval(timer));
+    // Kick the first sweep ~10s after boot (off the boot-critical path) so
+    // telemetry eviction + drop shrink the hot ledger IMMEDIATELY on every
+    // start, not only after the first 6h interval. The eviction is the
+    // bounded-ledger lever; deferring it 6h leaves a young/large hot DB slow
+    // for hours. Each sweep is row-capped, so the startup kick is cheap.
+    const kick = setTimeout(() => { void tick(); }, 10_000);
+    kick.unref();
+    workers.push(() => clearTimeout(kick));
   }
 
   // brain_invocation_worker — 30s tick. Substrate-side brain dispatch
