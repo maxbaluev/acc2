@@ -1659,6 +1659,66 @@ describe("lesson implementer flywheel views", () => {
     expect(queued.apply_status).toBe("failed");
   });
 
+  // PERF rewrite regression (2026-05-22): the committed / latest_apply CTEs were
+  // de-correlated from a per-row correlated EXISTS into a one-shot JOIN. CRITICAL:
+  // the two consumers use DIFFERENT scored->request linkage rules, which the
+  // rewrite preserves exactly:
+  //   * committed (the queue's not-yet-applied exclusion) uses the NARROW rule —
+  //     the action_scored row must carry payload.request_event_id /
+  //     authorization_event_id (NOT its context_refs) to count toward the
+  //     authorization chain, AND residual < 0.3.
+  //   * latest_apply uses the BROAD rule — payload keys OR the scored row's
+  //     context_refs, with no residual filter.
+  // This test pins that split: a low-residual commit whose action_scored links to
+  // the request ONLY through the scored row's context_refs (no payload keys) must
+  // NOT be treated as committed (it stays in the queue), but latest_apply (broad
+  // linkage) still projects the apply row. Collapsing the two link rules into one
+  // would wrongly drop this proposal from the queue.
+  test("committed uses narrow scored linkage; latest_apply uses broad (context_refs)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const source = insertEvent(db, {
+      kind: "lesson_extracted",
+      directive_id: "d_ctxref_only",
+      task_id: "t_ctxref_only",
+      payload: { lesson_kind: "verifier_gap", summary: "ctxref linkage" },
+    });
+    const requested = insertEvent(db, {
+      kind: "lesson_apply_requested",
+      directive_id: "d_ctxref_only",
+      task_id: "t_ctxref_only",
+      payload: { source_event_id: source, authorization_status: "approved" },
+      context_refs: [source],
+    });
+    // action_scored links to the request ONLY through context_refs (no
+    // request_event_id / authorization_event_id keys in payload).
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_ctxref_only",
+      task_id: "t_ctxref_only",
+      payload: { source_event_id: source },
+      context_refs: [source, requested],
+      residual: 0.1,
+    });
+    // applied_change_committed cites the request via context_refs.
+    insertEvent(db, {
+      kind: "applied_change_committed",
+      directive_id: "d_ctxref_only",
+      task_id: "t_ctxref_only",
+      payload: { source_event_id: source, status: "applied", residual: 0.1 },
+      context_refs: [source, requested],
+      residual: 0.1,
+    });
+
+    // committed (narrow scored linkage) does NOT fire because the scored row
+    // carries no payload request/authorization key => proposal STAYS in queue.
+    expect(lessonImplementerQueue(db).some((r) => r.source_event_id === source)).toBe(true);
+    // latest_apply (broad linkage incl. context_refs) DOES project the apply row.
+    const queued = lessonImplementerQueue(db).find((r) => r.source_event_id === source)!;
+    expect(queued.apply_event_id).not.toBeNull();
+    expect(queued.apply_status).toBe("applied");
+  });
+
   test("status requires authorization before prediction and commit transitions", () => {
     const db = openDb(":memory:");
     runViews(db);

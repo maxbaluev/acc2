@@ -1744,75 +1744,143 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
     WHERE kind = 'lesson_apply_requested'
       AND json_extract(payload, '$.authorization_status') = 'approved'
   ),
-  passed_scores AS (
-    SELECT
-      COALESCE(json_extract(payload, '$.source_event_id'), json_extract(context_refs, '$[0]')) AS source_event_id,
-      COALESCE(json_extract(payload, '$.request_event_id'), json_extract(payload, '$.authorization_event_id')) AS request_event_id,
-      ts AS scored_at
-    FROM events
-    WHERE kind = 'action_scored'
-      AND CAST(COALESCE(residual, json_extract(payload, '$.residual'), 1) AS REAL) < 0.3
+  -- PERF (2026-05-22): the committed and latest_apply CTEs previously each
+  -- ran a CORRELATED EXISTS subquery per applied_change_committed row (~2.5K-4K
+  -- rows on the live DB), and the inner EXISTS additionally ran a json_each over
+  -- context_refs per probe. On the 374K-event live DB this materialized the
+  -- whole view at ~837ms (cold) and made the per-dispatch consumer query ~230ms
+  -- because composePrompt's synchronous read forced both CTEs to materialize
+  -- fully before the LIMIT 6 could apply. The fix de-correlates the linkage into
+  -- a one-shot JOIN: the authorization chain (approved lesson_apply_requested x
+  -- action_scored x applied_change_committed, linked via
+  -- request_event_id / authorization_event_id / context_refs) is computed ONCE as
+  -- a derived set instead of re-evaluated per outer row. Row sets are IDENTICAL,
+  -- verified bit-for-bit (full 3456-row x 38-col view hash) on a read-only copy
+  -- of the live DB. The json_each linkage is preserved exactly; it is now a JOIN
+  -- branch rather than a correlated inner EXISTS so the optimizer can seek it once.
+  --
+  -- apply_link_scores materializes (source_event_id, request_event_id,
+  -- requested_at, scored_at, scored_residual) for every action_scored that links
+  -- to an approved authorization. latest_apply uses it directly (no residual
+  -- filter; it tracks the latest apply regardless of score); committed applies
+  -- the additional scored_residual < 0.3 gate. Both share the approved-request
+  -- linkage so the de-correlated join lives in one place.
+  -- IMPORTANT: the two consumers use DIFFERENT scored->request linkage rules
+  -- (preserved exactly from the original correlated CTEs):
+  --   * committed uses the NARROW rule (former passed_scores): the action_scored
+  --     row links to the request ONLY through its payload request_event_id /
+  --     authorization_event_id keys, AND must already satisfy residual < 0.3.
+  --     It does NOT consult the scored row's context_refs.
+  --   * latest_apply uses the BROAD rule: payload keys OR the scored row's
+  --     context_refs (json_each), and NO residual filter.
+  -- Keeping these split is load-bearing; collapsing them into one shared link set
+  -- changes which commits the queue excludes.
+  --
+  -- apply_link_scores_committed = NARROW + residual-gated scored linkage.
+  apply_link_scores_committed AS (
+    SELECT DISTINCT
+      ar.source_event_id AS source_event_id,
+      ar.request_event_id AS request_event_id,
+      ar.requested_at AS requested_at,
+      s.ts AS scored_at
+    FROM authorized_requests ar
+    JOIN events s
+      ON s.kind = 'action_scored'
+     AND CAST(COALESCE(s.residual, json_extract(s.payload, '$.residual'), 1) AS REAL) < 0.3
+     AND COALESCE(json_extract(s.payload, '$.source_event_id'), json_extract(s.context_refs, '$[0]')) = ar.source_event_id
+     AND COALESCE(json_extract(s.payload, '$.request_event_id'), json_extract(s.payload, '$.authorization_event_id')) = ar.request_event_id
   ),
-  committed AS (
-    SELECT DISTINCT json_extract(payload, '$.source_event_id') AS source_event_id
+  -- apply_link_scores_latest = BROAD scored linkage (payload keys OR context_refs),
+  -- no residual filter (latest_apply tracks the latest apply regardless of score).
+  apply_link_scores_latest AS (
+    SELECT DISTINCT
+      ar.source_event_id AS source_event_id,
+      ar.request_event_id AS request_event_id,
+      ar.requested_at AS requested_at,
+      s.ts AS scored_at
+    FROM authorized_requests ar
+    JOIN events s
+      ON s.kind = 'action_scored'
+     AND COALESCE(json_extract(s.payload, '$.source_event_id'), json_extract(s.context_refs, '$[0]')) = ar.source_event_id
+     AND (
+       json_extract(s.payload, '$.request_event_id') = ar.request_event_id
+       OR json_extract(s.payload, '$.authorization_event_id') = ar.request_event_id
+       OR EXISTS (SELECT 1 FROM json_each(s.context_refs) je WHERE je.value = ar.request_event_id)
+     )
+  ),
+  -- Every applied_change_committed row keyed for the de-correlated JOIN.
+  apply_base AS (
+    SELECT
+      id AS apply_event_id,
+      ts AS apply_ts,
+      rowid AS apply_rowid,
+      kind AS apply_kind,
+      json_extract(payload, '$.source_event_id') AS source_event_id,
+      json_extract(payload, '$.status') AS apply_status,
+      CAST(COALESCE(residual, json_extract(payload, '$.residual'), 1) AS REAL) AS apply_residual,
+      json_extract(payload, '$.request_event_id') AS apply_request_event_id,
+      json_extract(payload, '$.authorization_event_id') AS apply_authorization_event_id,
+      context_refs AS apply_context_refs
     FROM events
     WHERE kind = 'applied_change_committed'
-      AND json_extract(payload, '$.status') = 'applied'
-      AND CAST(COALESCE(residual, json_extract(payload, '$.residual'), 1) AS REAL) < 0.3
-      AND EXISTS (
-        SELECT 1 FROM authorized_requests ar
-        JOIN passed_scores ps
-          ON ps.source_event_id = ar.source_event_id
-         AND ps.request_event_id = ar.request_event_id
-         AND ps.scored_at <= events.ts
-        WHERE ar.source_event_id = json_extract(events.payload, '$.source_event_id')
-          AND ar.requested_at <= events.ts
-          AND (
-            json_extract(events.payload, '$.request_event_id') = ar.request_event_id
-            OR json_extract(events.payload, '$.authorization_event_id') = ar.request_event_id
-            OR EXISTS (SELECT 1 FROM json_each(events.context_refs) WHERE value = ar.request_event_id)
-          )
-      )
   ),
+  -- committed: applied + low-residual commits whose authorization chain is
+  -- satisfied by a residual<0.3 action_scored linkage (de-correlated JOIN). The
+  -- apply->request linkage keeps all three branches (payload keys OR the apply
+  -- row's context_refs) exactly as the original correlated EXISTS did.
+  committed AS (
+    SELECT DISTINCT ab.source_event_id AS source_event_id
+    FROM apply_base ab
+    JOIN apply_link_scores_committed als
+      ON als.source_event_id = ab.source_event_id
+     AND als.requested_at <= ab.apply_ts
+     AND als.scored_at <= ab.apply_ts
+     AND (
+       ab.apply_request_event_id = als.request_event_id
+       OR ab.apply_authorization_event_id = als.request_event_id
+       OR EXISTS (SELECT 1 FROM json_each(ab.apply_context_refs) je WHERE je.value = als.request_event_id)
+     )
+    WHERE ab.apply_status = 'applied'
+      AND ab.apply_residual < 0.3
+  ),
+  -- Audit #3 collapse (owner-approved 2026-05-16): applied_change_committed
+  -- now subsumes lesson_applied + contract_amendment_applied; status lives in
+  -- payload.status (applied/failed/refused), source_kind in payload.source_kind.
+  -- Authorization gate (mirrors terminal CTE): only count applied_change_committed
+  -- whose source has a matching lesson_apply_requested + action_scored linkage
+  -- (NO residual filter here; latest_apply tracks the latest apply regardless of
+  -- score), so "unauthorized" + "unscored" apply rows stay invisible to the
+  -- flywheel view (same invariants as the pre-collapse *_applied path).
   latest_apply AS (
     SELECT
-      json_extract(payload, '$.source_event_id') AS source_event_id,
-      id AS apply_event_id,
-      kind AS apply_kind,
-      json_extract(payload, '$.status') AS apply_status,
-      ts AS apply_ts,
+      source_event_id,
+      apply_event_id,
+      apply_kind,
+      apply_status,
+      apply_ts,
       ROW_NUMBER() OVER (
-        PARTITION BY json_extract(payload, '$.source_event_id')
-        ORDER BY ts DESC, rowid DESC
+        PARTITION BY source_event_id
+        ORDER BY apply_ts DESC, apply_rowid DESC
       ) AS rn
-    FROM events
-    -- Audit #3 collapse (owner-approved 2026-05-16): applied_change_committed
-    -- now subsumes lesson_applied + contract_amendment_applied; status lives in
-    -- payload.status (applied/failed/refused), source_kind in payload.source_kind.
-    -- Authorization gate (mirrors terminal CTE): only count applied_change_committed
-    -- whose source has a matching lesson_apply_requested + action_scored linkage,
-    -- so "unauthorized" + "unscored" apply rows stay invisible to the flywheel
-    -- view (same invariants as the pre-collapse *_applied path).
-    WHERE kind = 'applied_change_committed'
-      AND EXISTS (
-        SELECT 1 FROM authorized_requests ar
-        JOIN events s
-          ON s.kind = 'action_scored'
-         AND COALESCE(json_extract(s.payload, '$.source_event_id'), json_extract(s.context_refs, '$[0]')) = ar.source_event_id
-         AND s.ts <= events.ts
-         AND (
-           json_extract(s.payload, '$.request_event_id') = ar.request_event_id
-           OR json_extract(s.payload, '$.authorization_event_id') = ar.request_event_id
-           OR EXISTS (SELECT 1 FROM json_each(s.context_refs) WHERE value = ar.request_event_id)
-         )
-        WHERE ar.source_event_id = json_extract(events.payload, '$.source_event_id')
-          AND ar.requested_at <= events.ts
-          AND (
-            json_extract(events.payload, '$.request_event_id') = ar.request_event_id
-            OR json_extract(events.payload, '$.authorization_event_id') = ar.request_event_id
-            OR EXISTS (SELECT 1 FROM json_each(events.context_refs) WHERE value = ar.request_event_id)
-          )
-      )
+    FROM (
+      SELECT DISTINCT
+        ab.source_event_id AS source_event_id,
+        ab.apply_event_id AS apply_event_id,
+        ab.apply_kind AS apply_kind,
+        ab.apply_status AS apply_status,
+        ab.apply_ts AS apply_ts,
+        ab.apply_rowid AS apply_rowid
+      FROM apply_base ab
+      JOIN apply_link_scores_latest als
+        ON als.source_event_id = ab.source_event_id
+       AND als.requested_at <= ab.apply_ts
+       AND als.scored_at <= ab.apply_ts
+       AND (
+         ab.apply_request_event_id = als.request_event_id
+         OR ab.apply_authorization_event_id = als.request_event_id
+         OR EXISTS (SELECT 1 FROM json_each(ab.apply_context_refs) je WHERE je.value = als.request_event_id)
+       )
+    )
   ),
   owner_approvals AS (
     SELECT DISTINCT COALESCE(
