@@ -22,6 +22,10 @@ const makeEnv = (opts: {
   startDaemon: async () => { opts.events.push("START"); },
   stopDaemon: async () => { opts.events.push("STOP"); return true; },
   healthOk: async () => opts.healthOk,
+  // Injected so the test never runs the real doctor probe (which contends on
+  // the live state.db/daemon under parallel test load — the cause of the
+  // earlier parallel-only failure).
+  snapshot: async () => ["mock pre-update snapshot: ok"],
   // Nonexistent db path → migration block is skipped (existsSync false).
   dbPath: "/nonexistent/acc2-update-test/state.db",
 });
