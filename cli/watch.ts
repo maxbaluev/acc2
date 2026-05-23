@@ -23,13 +23,24 @@ import { realSubstrateClient } from "./tui/transport/substrate-client";
 // yoga init. The TUI deps are therefore loaded lazily inside runWatch, right
 // before render, so they load only when `acc watch` actually renders.
 
-const HELP = `acc watch — substrate-content-first realtime TUI
+const HELP = `acc watch — authoritative live operator dashboard
 
 usage: acc watch [--help]
 
-  ONE screen: narrative event stream (left), active dispatches (right),
-  decisions strip (bottom), small daemon-health footer. Each event row
-  is the substrate's human_summary projection — not a hex id.
+  Rich TUI for humans. It is not a second event parser and not a pretty
+  acc events. The screen is composed from bounded substrate projections:
+  in-flight dispatches, recent terminal outcomes, ready queue, owner/action
+  decisions, daemon/worker health, and a compact recent narrative timeline.
+
+  Restart behavior is visible: during daemon loss/reconnect, keep the last
+  confirmed snapshot on screen and show RECONNECTING with the last successful
+  refresh time. Never imply fresh state while the transport is disconnected.
+
+  Stream boundary:
+    watch   rich dashboard + drilldown for humans
+    tail    NDJSON line protocol for scripts/background follows
+    events  bounded one-shot recent-event query
+    notify  preset alias over tail/events for mirror-inline kinds
 
   Keyboard:
     j / ↓        next row
@@ -37,10 +48,9 @@ usage: acc watch [--help]
     PgDn / PgUp  page
     Enter        drilldown: full payload + cited refs
     Esc / q      close drilldown / quit
-    p            plain-language view (hides substrate IDs/vocabulary;
-                 renders owner_plain_status_view cards instead)
+    p            plain-language view
     d            toggle critical+high importance filter
-    r            force refresh
+    r            force bounded snapshot refresh
 `;
 
 export const runWatch = async (argv: string[]): Promise<number> => {

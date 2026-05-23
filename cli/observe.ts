@@ -891,9 +891,20 @@ export const runEvents = async (opts: EventsOpts): Promise<number> => {
 
 // ── acc tail ───────────────────────────────────────────────────────
 //
-// Poll runtime.recent_events on an interval, dedupe by event id, emit each
-// new event as one structured line. Exit when a terminal event lands for the
-// scoped directive/task (or never, when no scope is given — operator can Ctrl-C).
+// Thin scriptable live stream. Default stdout is NDJSON: one raw event object
+// per line after task/directive/kind filtering. Human one-line rendering is an
+// explicit --human/--pretty mode for terminals; rich human observation belongs
+// to `acc watch`, and bounded historical inspection belongs to `acc events`.
+//
+// Terminal-exit contract: when directive + rootTaskId are available, exit 0
+// only after dispatch_resolved_view confirms a completed/failed lifecycle and
+// emit exactly one terminal sentinel. Raw task_committed/task_failed SSE rows
+// are evidence to print, not sufficient terminal authority. Without that scope,
+// raw terminal rows remain the best available generic-tail signal.
+//
+// Surface collapse: `acc notify` is not its own stream implementation. It is
+// `tail`/`events` with the mirror-inline kind preset. Keep all reconnect,
+// filtering, NDJSON, and terminal-exit behavior in the shared tail path.
 
 export type TailOpts = EventsOpts & {
   pollMs?: number;
@@ -904,28 +915,23 @@ export type TailOpts = EventsOpts & {
   deadlineMs?: number;
   /** Return success with a detach message when the follow budget elapses. */
   detachOnDeadline?: boolean;
-  /** Use SSE push (canonical, ~realtime) instead of polling. Default true —
-   *  SSE eliminates the 2s poll lag and the missed-events-between-polls window.
-   *  Polling is the fallback used only when SSE cannot connect. */
+  /** Use SSE push (canonical, ~realtime) instead of polling. Default true.
+   *  --no-stream is a diagnostic fallback, not a parallel user-facing mode. */
   stream?: boolean;
   /** When the caller follows a whole directive subtree but still wants to
    *  exit only on the ROOT task's terminal event (not the first sub-task
-   *  to commit), pass the root task id here. Terminal events for
-   *  non-root tasks are still printed but do not end the follow. */
+   *  to commit), pass the root task id here. */
   rootTaskId?: string;
-  /** Emit a `[t+Ns] waiting on brain · …` line every FOLLOW_HEARTBEAT_MS
-   *  starting at t+5s after follow-start (NOT after first event), capped at
-   *  FOLLOW_HEARTBEAT_WINDOW_MS. The flag is opt-in because operators tailing
-   *  for grep / pipelines don't want the synthetic lines; the dispatch
-   *  follow tail (the panel surface that needs them) sets it explicitly. */
+  /** Deprecated no-op. Do not reintroduce synthetic progress lines; scripts
+   *  get NDJSON, humans get watch, and transport liveness stays transport-level. */
   heartbeat?: boolean;
+  // `json` (default true for `acc tail`; false only for explicit human
+  // rendering) is inherited from EventsOpts — see its declaration there.
 };
 
-// SSE-backed live stream — the canonical Claude-native observation path.
-// Each event arrives via the daemon's `/events/stream` push transport (no
-// polling lag), is filtered + formatted into one structured line, and is
-// written to stdout. When this command runs as a Claude Code background
-// task, each line becomes a notification automatically.
+// SSE-backed live stream — canonical implementation for tail and notify.
+// Polling must share the same emit/filter/terminal helper so the fallback does
+// not drift into a second line protocol.
 const runTailStream = async (opts: TailOpts): Promise<number> => {
   const exitOnTerminal = opts.exitOnTerminal ?? Boolean(opts.task || opts.directive);
   // When BOTH directive + rootTaskId are present we can query
