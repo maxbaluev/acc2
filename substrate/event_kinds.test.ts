@@ -544,6 +544,11 @@ describe("derived sets match their pre-unification shape", () => {
       "loop_inert_alert",
       "metric_veracity_alert",
       "error_flood_alert",
+      // 2026-05-23 event-class tiering: telemetry-eviction sweep purges
+      // EPHEMERAL_TELEMETRY_KINDS from the hot ledger after a short TTL.
+      // health_metric so `acc admin substrate-status` can surface how
+      // many rows the sweep reclaimed (the eviction is itself auditable).
+      "telemetry_evicted",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

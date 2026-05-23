@@ -27,6 +27,7 @@ import {
   EMBEDDABLE_KINDS,
   HEALTH_METRIC_KINDS,
 } from "../substrate/event_kinds";
+import { retainedEvictedCount } from "../runtime/archival_worker";
 import { join } from "node:path";
 
 export type SubstrateStatusEnv = {
@@ -170,11 +171,15 @@ export const computeSubstrateStatus = (
   // renderer iterates the same set so no second list to keep in sync.
   const healthMetricCounts: Record<string, number> = {};
   for (const kind of HEALTH_METRIC_KINDS) {
-    healthMetricCounts[kind] = safeCount(
-      db,
-      "SELECT COUNT(*) AS c FROM events WHERE kind = ?",
-      [kind],
-    );
+    // 2026-05-23 event-class tiering: live rows + RETAINED evicted count.
+    // EPHEMERAL_TELEMETRY_KINDS rows are purged from the hot ledger after a
+    // short TTL, but their lifetime count is preserved in meta so this
+    // health metric still reports the true cumulative total rather than
+    // silently shrinking after each eviction sweep. retainedEvictedCount is
+    // 0 for non-evicted kinds, so the addition is a no-op for them.
+    healthMetricCounts[kind] =
+      safeCount(db, "SELECT COUNT(*) AS c FROM events WHERE kind = ?", [kind]) +
+      retainedEvictedCount(db, kind);
   }
   const dispatcherViolations = healthMetricCounts.dispatcher_violation ?? 0;
   const irreversibleEffects = healthMetricCounts.irreversible_effect_recorded ?? 0;

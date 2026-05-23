@@ -605,6 +605,19 @@ export const EVENT_KINDS = {
   // emits this event with the reaped count + remaining count so the GC is
   // visible in the ledger. Only emitted when at least one session is reaped.
   mcp_sessions_reaped:                     { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // 2026-05-23 event-class tiering: emitted by the telemetry-eviction
+  // sweep (runtime/archival_worker.ts runTelemetryEvictionSweep) when it
+  // purges EPHEMERAL_TELEMETRY_KINDS rows older than a short TTL from the
+  // hot `events` table. These are pure process telemetry with ZERO
+  // compounding/credit/retrieval value whose only consumers are
+  // observability/health counters (and those counters read a RETAINED
+  // running-count aggregate in `meta`, not the raw rows). Payload:
+  //   { by_kind: Record<string, number>, count: number,
+  //     retention_hours: number, cutoff_iso: string }.
+  // health_metric so the eviction's reach is auditable in
+  // `acc admin substrate-status`; narrative so an operator tailing the
+  // ledger sees the hot-ledger shrink. Not embeddable (numeric only).
+  telemetry_evicted:                       { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
 
   // ── Closure audit + lessons learned (universal post-trajectory loop) ─
   //

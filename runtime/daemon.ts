@@ -2291,13 +2291,27 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // Opt-OUT via ACC2_DISABLE_WORKERS=archival.
   if (isWorkerEnabled("archival")) {
     const tickMs = 6 * 60 * 60 * 1000;
-    const { runArchivalSweep } = await import("./archival_worker");
+    const { runArchivalSweep, runDropSweep, runTelemetryEvictionSweep } = await import(
+      "./archival_worker"
+    );
     const { resolveDbPath } = await import("./state_paths");
     const dbPath = resolveDbPath();
     markWorkerReady("archival");
     recordWorkerTick("archival");
     const tick = supervisedTick(db, "archival", tickMs, async () => {
+      // 1. Age-based move-to-cold (30-day retention) — bounds the ledger
+      //    independently of production rate over the long horizon.
       await runArchivalSweep(db, { stateDbPath: dbPath });
+      // 2. Drop pure-noise liveness/metrics telemetry past the short
+      //    retention (the hot-retention boundary the age-based archive
+      //    can't give a young DB; previously wired only via the unused
+      //    startArchivalWorker helper).
+      await runDropSweep(db);
+      // 3. 2026-05-23 event-class tiering: evict EPHEMERAL_TELEMETRY_KINDS
+      //    (defunct/uncertain-inference telemetry with zero compounding
+      //    value) past a SHORT TTL, preserving lifetime health counts in
+      //    meta so observability counters still report correctly.
+      await runTelemetryEvictionSweep(db);
     });
     const timer = setInterval(tick, tickMs);
     workers.push(() => clearInterval(timer));

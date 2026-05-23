@@ -61,7 +61,7 @@ const VERIFY_SAMPLE = 100;
 //   - compress_summary: high-volume telemetry kinds get aggregated into
 //                       hourly summary rows; originals dropped.
 //   - drop: pure noise (resolved transient errors); purge without archive.
-export type CurationMode = "always_keep" | "archive_cold" | "compress_summary" | "drop";
+export type CurationMode = "always_keep" | "archive_cold" | "compress_summary" | "drop" | "evict";
 
 const ALWAYS_KEEP_KINDS = new Set<string>([
   // Owner-channel evidence: rarest + highest value.
@@ -103,7 +103,11 @@ const NOISY_OPERATIONAL_ARCHIVE_KINDS = new Set<string>([
   // Operational telemetry: not load-bearing after 30 days, but preserve
   // provenance in the monthly archive instead of keeping it hot forever.
   "father_yielded",
-  "artifact_kind_inference_uncertain",
+  // 2026-05-23 event-class tiering: artifact_kind_inference_uncertain moved
+  // OUT of archive_cold and INTO EPHEMERAL_TELEMETRY_KINDS — its only
+  // consumer is a lifetime health COUNT(*) (now backed by a retained
+  // aggregate), so a short-TTL hot purge is correct; the 30-day move-to-cold
+  // never fired on a young DB and let 10K+ rows accumulate hot.
 ]);
 
 const DROP_KINDS = new Set<string>([
@@ -122,6 +126,80 @@ const DROP_KINDS = new Set<string>([
   "sql_worker_pool_metrics",
 ]);
 
+// ── Event-class tiering: ephemeral telemetry eviction (2026-05-23) ───
+//
+// The hot `events` table conflates DURABLE compounding memory (knowledge,
+// act_artifacts, amendments, credit posteriors, lifecycle) with DISPOSABLE
+// process telemetry. The latter has zero compounding/credit/retrieval value
+// yet dominates row count on a young high-volume DB (live evidence: ~403K
+// rows / 1 GB, ~80-90% pure telemetry), slowing prompt composition, boot,
+// and every MCP aggregate scan.
+//
+// EPHEMERAL_TELEMETRY_KINDS is the EXPLICIT, AUDITABLE allowlist of kinds
+// PROVEN safe-to-evict — each entry's only consumers are observability /
+// health-counter aggregates (which now read a RETAINED running count, not
+// the raw rows), NOT credit / retrieval / knowledge / lifecycle. The set is
+// deliberately CONSERVATIVE: when a kind's eviction-safety is uncertain it
+// is LEFT OUT. Eviction is a SHORT-TTL DELETE from the hot ledger via
+// runTelemetryEvictionSweep, distinct from:
+//   - DROP_KINDS (already-handled liveness/metrics; 2-day purge)
+//   - the 30-day age-based move-to-cold archival sweep.
+//
+// Proof of safety (repo-wide grep, excl. node_modules/.claude — see the
+// 2026-05-23 perf/event-class-tiering investigation):
+//   recipe_promotion_deferred — DEFUNCT kind, absorbed into
+//     knowledge_candidate/knowledge_promoted (event_kinds.ts ~L823). NOT
+//     registered in EVENT_KINDS, NOT in any HEALTH_METRIC/EMBEDDABLE set,
+//     never emitted by current code. The only references are a dead
+//     cli/observe.ts narrative-render case + its test. ~18K legacy rows
+//     in the live ledger with ZERO consumers. Purest possible evict.
+//   artifact_kind_inference_uncertain — emitted per deferred row by
+//     runtime/artifact_kind_backfill_worker.ts. Its idempotency guard
+//     reads artifact_kind_inferred (NOT _uncertain), so eviction cannot
+//     re-trigger emission. Sole consumer is the lifetime COUNT(*) in
+//     cli/admin_substrate_status.ts (HEALTH_METRIC_KINDS). That count is
+//     PRESERVED: the sweep increments meta["evicted_count:<kind>"] before
+//     deleting, and admin-status reads live-rows + retained-count.
+const EPHEMERAL_TELEMETRY_KINDS = new Set<string>([
+  "recipe_promotion_deferred",
+  "artifact_kind_inference_uncertain",
+]);
+
+// Short TTL — telemetry retains only recent-debugging value. Rows of an
+// EPHEMERAL_TELEMETRY_KIND older than this are purged. Override via
+// ACC2_TELEMETRY_EVICTION_RETENTION_HOURS.
+const TELEMETRY_EVICTION_RETENTION_HOURS = (() => {
+  const raw = process.env.ACC2_TELEMETRY_EVICTION_RETENTION_HOURS;
+  if (typeof raw === "string" && raw.length > 0) {
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 1) return n;
+  }
+  return 1;
+})();
+
+const EVICTED_COUNT_META_PREFIX = "evicted_count:";
+
+/** Retained running count of rows evicted for a kind. Health/observability
+ *  counters that previously read raw rows MUST add this to their live count
+ *  so eviction does not silently shrink a lifetime metric. */
+export const retainedEvictedCount = (db: Database, kind: string): number => {
+  const row = db
+    .query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?")
+    .get(`${EVICTED_COUNT_META_PREFIX}${kind}`);
+  if (!row) return 0;
+  const n = parseInt(row.value, 10);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const bumpRetainedEvictedCount = (db: Database, kind: string, delta: number): void => {
+  if (delta <= 0) return;
+  const prior = retainedEvictedCount(db, kind);
+  db.run(
+    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    [`${EVICTED_COUNT_META_PREFIX}${kind}`, String(prior + delta)],
+  );
+};
+
 // Short retention for DROP_KINDS — telemetry needs ~recent debugging value
 // only, not the 30-day archive window. Drop-class rows older than this are
 // purged (not archived) by runDropSweep. Override via ACC2_DROP_RETENTION_DAYS.
@@ -139,6 +217,7 @@ const DROP_RETENTION_DAYS = (() => {
  *  archive_cold preserves the original behavior; the carve-out sets
  *  above add semantic curation. */
 export const curationModeForKind = (kind: string): CurationMode => {
+  if (EPHEMERAL_TELEMETRY_KINDS.has(kind)) return "evict";
   if (DROP_KINDS.has(kind)) return "drop";
   if (ALWAYS_KEEP_KINDS.has(kind)) return "always_keep";
   if (COMPRESS_SUMMARY_KINDS.has(kind)) return "compress_summary";
@@ -292,7 +371,11 @@ export const runArchivalSweep = async (
   // via a future drop sweep, not move-to-cold).
   const alwaysKeepList = Array.from(ALWAYS_KEEP_KINDS);
   const dropList = Array.from(DROP_KINDS);
-  const exclusionList = [...alwaysKeepList, ...dropList];
+  // Ephemeral-telemetry kinds are purged by runTelemetryEvictionSweep on a
+  // SHORT TTL, never moved to cold — exclude them here so a row can't be
+  // both archived and evicted.
+  const evictList = Array.from(EPHEMERAL_TELEMETRY_KINDS);
+  const exclusionList = [...alwaysKeepList, ...dropList, ...evictList];
   const exclusionPlaceholders = exclusionList.map(() => "?").join(",");
   const candidates = hotDb
     .query<EventRowFull, [string, ...string[]]>(
@@ -577,6 +660,120 @@ export const runDropSweep = async (
   return summary;
 };
 
+export type TelemetryEvictionSummary = {
+  scanned: number;
+  evicted: number;
+  by_kind: Record<string, number>;
+  retention_hours: number;
+  cutoff_iso: string;
+  emitted_event_id?: string;
+};
+
+/** 2026-05-23 event-class tiering: bounded eviction sweep for
+ *  EPHEMERAL_TELEMETRY_KINDS. DELETEs rows of those PROVEN-safe kinds older
+ *  than a SHORT TTL (default 1h) from the hot `events` table — they carry
+ *  zero compounding/credit/retrieval value. Before deleting, the lifetime
+ *  count for each kind is preserved into meta["evicted_count:<kind>"] so
+ *  observability/health counters that read raw rows can add the retained
+ *  aggregate back and report correctly. Emits one telemetry_evicted event
+ *  per non-empty sweep so the eviction is itself visible in the ledger.
+ *
+ *  Conservative + safe by construction: only EPHEMERAL_TELEMETRY_KINDS,
+ *  only past the cutoff, bounded by `limit` per sweep. ALWAYS_KEEP /
+ *  credit / retrieval / lifecycle kinds can never enter the allowlist. */
+export const runTelemetryEvictionSweep = async (
+  hotDb: Database,
+  opts?: { retentionHours?: number; limit?: number; nowMs?: number },
+): Promise<TelemetryEvictionSummary> => {
+  const retentionHours = opts?.retentionHours ?? TELEMETRY_EVICTION_RETENTION_HOURS;
+  const nowMs = opts?.nowMs ?? Date.now();
+  const limit = opts?.limit ?? SWEEP_LIMIT;
+  const cutoffIso = new Date(nowMs - retentionHours * 60 * 60 * 1000).toISOString();
+  const kindList = Array.from(EPHEMERAL_TELEMETRY_KINDS);
+  const summary: TelemetryEvictionSummary = {
+    scanned: 0,
+    evicted: 0,
+    by_kind: {},
+    retention_hours: retentionHours,
+    cutoff_iso: cutoffIso,
+  };
+  if (kindList.length === 0) return summary;
+
+  // Select candidate (id, kind) past the cutoff, bounded. ISO-vs-ISO ts
+  // comparison is index-friendly (idx_events_kind_ts / idx_events_ts).
+  const ph = kindList.map(() => "?").join(", ");
+  const rows = hotDb
+    .query<{ id: string; kind: string }, [...string[], string, number]>(
+      `SELECT id, kind FROM events WHERE kind IN (${ph}) AND ts < ? ORDER BY ts ASC LIMIT ?`,
+    )
+    .all(...kindList, cutoffIso, limit) as Array<{ id: string; kind: string }>;
+  summary.scanned = rows.length;
+  if (rows.length === 0) return summary;
+
+  const idsByKind = new Map<string, string[]>();
+  for (const r of rows) {
+    let list = idsByKind.get(r.kind);
+    if (!list) {
+      list = [];
+      idsByKind.set(r.kind, list);
+    }
+    list.push(r.id);
+  }
+
+  const CHUNK = 500;
+  for (const [kind, ids] of idsByKind) {
+    let deletedThisKind = 0;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const chunk = ids.slice(i, i + CHUNK);
+      const delPh = chunk.map(() => "?").join(", ");
+      try {
+        // Drop any retrieval-index rows first (none for these non-embeddable
+        // kinds today, but symmetric with the archival DELETE path).
+        hotDb.run(`DELETE FROM vec_events WHERE event_id IN (${delPh})`, chunk);
+        const result = hotDb.run(`DELETE FROM events WHERE id IN (${delPh})`, chunk);
+        deletedThisKind += (result as unknown as { changes?: number }).changes ?? 0;
+      } catch (err) {
+        logger.warn(
+          { where: "archival_worker.telemetry_eviction", kind, err: (err as Error).message },
+          "telemetry-eviction chunk failed",
+        );
+      }
+    }
+    if (deletedThisKind > 0) {
+      // Preserve the lifetime count BEFORE the rows are gone for good.
+      bumpRetainedEvictedCount(hotDb, kind, deletedThisKind);
+      summary.by_kind[kind] = deletedThisKind;
+      summary.evicted += deletedThisKind;
+    }
+  }
+
+  if (summary.evicted > 0) {
+    try {
+      const emitted = emitEvent(hotDb, {
+        kind: "telemetry_evicted",
+        substrate_origin: "substrate_auto",
+        payload: {
+          by_kind: summary.by_kind,
+          count: summary.evicted,
+          retention_hours: retentionHours,
+          cutoff_iso: cutoffIso,
+        } as JsonValue,
+      });
+      summary.emitted_event_id = emitted.id;
+    } catch (err) {
+      logger.warn(
+        { where: "archival_worker.emit_telemetry_evicted", err: (err as Error).message },
+        "telemetry_evicted emit failed",
+      );
+    }
+    logger.info(
+      { evicted: summary.evicted, by_kind: summary.by_kind, retention_hours: retentionHours },
+      "telemetry-eviction purged ephemeral telemetry from hot ledger",
+    );
+  }
+  return summary;
+};
+
 /** Start the 6-hour archival tick. Returns a stop function. */
 export const startArchivalWorker = (
   db: Database,
@@ -596,6 +793,14 @@ export const startArchivalWorker = (
       logger.warn(
         { where: "archival_worker.drop_tick", err: (err as Error).message },
         "drop sweep threw at top-level",
+      );
+    });
+    // 2026-05-23 event-class tiering: evict EPHEMERAL_TELEMETRY_KINDS past
+    // the short TTL (preserving lifetime health counts in meta).
+    void runTelemetryEvictionSweep(db).catch((err) => {
+      logger.warn(
+        { where: "archival_worker.telemetry_eviction_tick", err: (err as Error).message },
+        "telemetry-eviction sweep threw at top-level",
       );
     });
   }, tickMs);
