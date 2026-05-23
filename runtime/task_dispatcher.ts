@@ -904,6 +904,160 @@ export const dispatchReadyTask = async (
         }
       }
     }
+    // ── Productive-timeout continuation (2026-05-23) ──────────────────────
+    // PROBLEM (observed live): a brain dispatch that ran the full wall-clock
+    // budget while making REAL progress (handshook MCP, received frames,
+    // emitted brain observations, was actively editing) gets SIGTERM-killed
+    // and recorded as a terminal bridge_failed{reason=timeout}. The closure-
+    // audit recovery above only rescues runs that ALSO produced a clean
+    // task_closure_audited; a productive-but-unclosed run still dropped all
+    // in-progress work and fed supervisor_redispatch_storm -> task_failed.
+    //
+    // FIX: when the timeout fired BUT the dispatch was PRODUCTIVE
+    // (first_frame_seen AND frames_received_count > 0 AND
+    // brain_obs_emit_count > 0), treat it as NEEDS-CONTINUATION instead of a
+    // hard terminal failure. We re-open the work via the EXISTING refinement
+    // edge mechanism (task_node_opened + task_edge_recorded kind="refines"),
+    // so the scheduler picks a fresh cycle-1 dispatch that continues the
+    // remaining work. A zero-progress timeout (genuinely wedged) is NOT
+    // productive and falls through to the normal terminal close path.
+    //
+    // No infinite loop: the continuation child sits one step deeper on the
+    // 'refines' chain, so refinementDepth grows by 1 per productive timeout.
+    // The same depth>=REFINEMENT_DEPTH_CAP guard that bounds residual-driven
+    // refinement bounds this chain — after the cap the lineage emits
+    // refinement_depth_exceeded -> task_failed. Each continuation dispatch
+    // also emits a fresh brain_dispatched under the directive, so the
+    // supervisor's per-directive dispatch budget (and the per-task storm cap
+    // on any task that DOESN'T advance via a new edge) still backstop it.
+    let productiveTimeoutContinuation: "not_attempted" | "opened" | "depth_capped" = "not_attempted";
+    if (
+      isTimeout &&
+      (timeoutRecoveryOutcome === "no_closure_audit" || timeoutRecoveryOutcome === "closure_residual_high")
+    ) {
+      const budget = (bridgeBudgetObserved ?? {}) as Record<string, unknown>;
+      const framesReceivedCount = typeof lastBridgeFailurePayload.frames_received_count === "number"
+        ? lastBridgeFailurePayload.frames_received_count
+        : 0;
+      const brainObsEmitCount = typeof lastBridgeFailurePayload.brain_obs_emit_count === "number"
+        ? lastBridgeFailurePayload.brain_obs_emit_count
+        : 0;
+      const firstFrameSeen = budget.first_frame_seen === true;
+      const productive = firstFrameSeen && framesReceivedCount > 0 && brainObsEmitCount > 0;
+      if (productive) {
+        const depth = refinementDepth(db, task.id);
+        if (depth >= REFINEMENT_DEPTH_CAP) {
+          // Continuation lineage exhausted the depth cap — terminalize so the
+          // perpetually-slow task cannot resume forever.
+          productiveTimeoutContinuation = "depth_capped";
+          emitEvent(db, {
+            kind: "refinement_depth_exceeded",
+            substrate_origin: "substrate_auto",
+            directive_id: task.directive_id,
+            task_id: task.id,
+            payload: {
+              depth,
+              cap: REFINEMENT_DEPTH_CAP,
+              dispatch_id: dispatchId,
+              reason: "productive_timeout_continuation_depth_cap",
+            } as JsonValue,
+          });
+          emitEvent(db, {
+            kind: "task_failed",
+            substrate_origin: "substrate_auto",
+            directive_id: task.directive_id,
+            task_id: task.id,
+            outcome: "failed",
+            failure_kind: "refinement_depth_exceeded",
+            payload: {
+              dispatch_id: dispatchId,
+              refinement_depth: depth,
+              cap: REFINEMENT_DEPTH_CAP,
+              reason: `refinement_depth_exceeded:productive_timeout_continuation depth=${depth} cap=${REFINEMENT_DEPTH_CAP}`,
+            } as JsonValue,
+          });
+        } else {
+          productiveTimeoutContinuation = "opened";
+          const continuationTaskId = newId();
+          const continuationGoal =
+            `continue (productive_timeout): the prior cycle on goal "${task.goal}" hit the wall-clock ` +
+            `timeout MID-PROGRESS (frames=${framesReceivedCount}, brain_emissions=${brainObsEmitCount}, ` +
+            `first_frame_seen) — resume the remaining work from where it left off (continuation depth=${depth + 1}).`;
+          emitEvent(db, {
+            kind: "task_node_opened",
+            substrate_origin: "substrate_auto",
+            directive_id: task.directive_id,
+            task_id: continuationTaskId,
+            parent_task_id: task.id,
+            payload: {
+              goal: continuationGoal,
+              lifecycle: "finite",
+              urgency: "normal",
+              refines_task_id: task.id,
+              continuation_reason: "productive_timeout_continuation",
+              prior_dispatch_id: dispatchId,
+              prior_bridge_failure_event_ids: bridgeFailureEventIds,
+              prior_frames_received_count: framesReceivedCount,
+              prior_brain_obs_emit_count: brainObsEmitCount,
+            } as JsonValue,
+          });
+          const continuationEdge = emitEvent(db, {
+            kind: "task_edge_recorded",
+            substrate_origin: "substrate_auto",
+            directive_id: task.directive_id,
+            task_id: continuationTaskId,
+            parent_task_id: task.id,
+            payload: {
+              from_task: task.id,
+              to_task: continuationTaskId,
+              kind: "refines",
+              continuation_reason: "productive_timeout_continuation",
+            } as JsonValue,
+          });
+          // Mark the timed-out parent terminal-by-supersession so it drops out
+          // of readyTasks (the continuation child now carries the work) — this
+          // is the SAME pattern the scheduler uses when it opens a closure
+          // refinement child for an unclosed deliverable. Without it, BOTH the
+          // parent and the child would be ready and the parent would re-dispatch
+          // its own (lost) work in parallel.
+          emitEvent(db, {
+            kind: "task_committed_superseded",
+            substrate_origin: "substrate_auto",
+            directive_id: task.directive_id,
+            task_id: task.id,
+            context_refs: [continuationEdge.id],
+            payload: {
+              dispatch_id: dispatchId,
+              reason: "productive_timeout_continuation",
+              superseded_by_task_id: continuationTaskId,
+              continuation_edge_event_id: continuationEdge.id,
+            } as JsonValue,
+          });
+          recordInternalAct(db, {
+            intent: "open productive-timeout continuation edge",
+            actionHandle: "productive_timeout_continuation_v1",
+            verifierHandle: "continuation_closure_after_resume",
+            verifierKind: "deterministic_code",
+            predictedResidual: 0.3,
+            reasoningSummary:
+              `wall-clock timeout fired mid-progress (frames=${framesReceivedCount}, ` +
+              `brain_emissions=${brainObsEmitCount}); resuming via refinement edge at depth ${depth + 1}`,
+            actionSummary: `task_edge_recorded refines (continuation) -> ${continuationTaskId}`,
+            effectSummary: `scheduler now has a continuation task to resume the timed-out work`,
+            directiveId: task.directive_id,
+            taskId: continuationTaskId,
+            sourceEventId: continuationEdge.id,
+            sourceActId: "productive_timeout_continuation_v1:" + task.id + ":" + (depth + 1),
+            extra: {
+              from_task: task.id,
+              to_task: continuationTaskId,
+              continuation_depth: depth + 1,
+              prior_dispatch_id: dispatchId,
+            },
+          });
+        }
+      }
+    }
     emitEvent(db, {
       kind: "brain_dispatch_closed",
       substrate_origin: "substrate_auto",
@@ -917,6 +1071,7 @@ export const dispatchReadyTask = async (
         budget_observed: bridgeBudgetObserved,
         timeout_recovery_attempted: isTimeout,
         timeout_recovery_outcome: timeoutRecoveryOutcome,
+        productive_timeout_continuation: productiveTimeoutContinuation,
         events_count: dispatchEvents.length,
       } as JsonValue,
     });

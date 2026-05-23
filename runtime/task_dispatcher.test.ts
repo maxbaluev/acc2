@@ -785,4 +785,223 @@ describe("task_dispatcher", () => {
       .get(taskId) as { c: number };
     expect(committed.c).toBe(0);
   }, 10_000);
+
+  // ── Productive-timeout continuation (2026-05-23) ──────────────────────
+  // A wall-clock timeout that fired MID-PRODUCTIVE-WORK must NOT terminally
+  // fail the task. The dispatcher re-opens the work via the existing
+  // refinement-edge mechanism so the scheduler resumes it on a fresh cycle.
+  // A zero-progress timeout (genuinely wedged) stays a hard failure. The
+  // refinement-depth cap still bounds repeated productive timeouts so a
+  // perpetually-slow task eventually fails (no infinite resume).
+
+  /** Bridge stub: emits a productive-shape bridge_failed:timeout (frames>0,
+   *  brain emissions>0, first_frame_seen) then returns the timeout result —
+   *  mirroring the real opencode bridge's killed-by-overall-timeout path. */
+  const productiveTimeoutBridge = async (
+    req: { directiveId: string; taskId: string; prompt: string },
+    bridgeDb: Database,
+  ): Promise<{ ok: false; reason: { kind: "timeout"; ms_elapsed: number } }> => {
+    emitEvent(bridgeDb, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        reason: "timeout",
+        timeout_mode: "overall_wall_clock",
+        frames_received_count: 68,
+        brain_obs_emit_count: 20,
+        budget_observed: { terminal_reason: "timeout", first_frame_seen: true, wall_ms: 1_600_000 },
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    return { ok: false, reason: { kind: "timeout", ms_elapsed: 1_500_000 } };
+  };
+
+  /** Bridge stub: zero-progress timeout — first_frame_seen=false, no frames,
+   *  no brain emissions. Genuinely wedged; must stay a hard failure. */
+  const wedgedTimeoutBridge = async (
+    req: { directiveId: string; taskId: string; prompt: string },
+    bridgeDb: Database,
+  ): Promise<{ ok: false; reason: { kind: "timeout"; ms_elapsed: number } }> => {
+    emitEvent(bridgeDb, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        reason: "timeout",
+        timeout_mode: "overall_wall_clock",
+        frames_received_count: 0,
+        brain_obs_emit_count: 0,
+        budget_observed: { terminal_reason: "timeout", first_frame_seen: false, wall_ms: 1_600_000 },
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    return { ok: false, reason: { kind: "timeout", ms_elapsed: 1_500_000 } };
+  };
+
+  const castBridge = <B>(b: B) =>
+    b as unknown as typeof dispatchReadyTask extends (db: unknown, t: unknown, d: { bridge?: infer X }) => unknown ? X : never;
+
+  test("productive timeout opens a continuation refinement edge (task NOT terminally failed)", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "fixture", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      parent_task_id: null,
+      payload: { goal: "long productive goal that exceeds the wall-clock budget" },
+    });
+
+    const result = await dispatchReadyTask(
+      db,
+      { id: taskId, directive_id: directiveId, parent_id: null, goal: "long goal", status: "ready" },
+      { bridge: castBridge(productiveTimeoutBridge) },
+    );
+    expect(result.bridge_result?.ok).toBe(false);
+
+    // The task is NOT terminally failed.
+    const failed = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_failed' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(failed.c).toBe(0);
+
+    // A continuation child was opened via the refinement-edge mechanism.
+    const childNode = db
+      .query("SELECT task_id, payload FROM events WHERE kind = 'task_node_opened' AND parent_task_id = ?")
+      .get(taskId) as { task_id: string; payload: string } | null;
+    expect(childNode).not.toBeNull();
+    const childPayload = JSON.parse(childNode!.payload);
+    expect(childPayload.continuation_reason).toBe("productive_timeout_continuation");
+    expect(childPayload.refines_task_id).toBe(taskId);
+
+    const edge = db
+      .query("SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND task_id = ?")
+      .get(childNode!.task_id) as { payload: string } | null;
+    expect(edge).not.toBeNull();
+    const edgePayload = JSON.parse(edge!.payload);
+    expect(edgePayload.kind).toBe("refines");
+    expect(edgePayload.from_task).toBe(taskId);
+
+    // Parent is superseded (drops out of readyTasks); the continuation child
+    // becomes the ready task the scheduler resumes on a fresh cycle.
+    const superseded = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_committed_superseded' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(superseded.c).toBe(1);
+    const ready = readyTasks(db, directiveId).map((t) => t.id);
+    expect(ready).not.toContain(taskId);
+    expect(ready).toContain(childNode!.task_id);
+
+    // brain_dispatch_closed records the continuation outcome for observability.
+    const closed = db
+      .query("SELECT payload FROM events WHERE kind = 'brain_dispatch_closed' AND task_id = ?")
+      .get(taskId) as { payload: string } | null;
+    expect(JSON.parse(closed!.payload).productive_timeout_continuation).toBe("opened");
+  }, 10_000);
+
+  test("zero-progress timeout stays a hard failure (no continuation edge)", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "fixture", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      parent_task_id: null,
+      payload: { goal: "wedged goal — no progress before the wall clock" },
+    });
+
+    await dispatchReadyTask(
+      db,
+      { id: taskId, directive_id: directiveId, parent_id: null, goal: "wedged", status: "ready" },
+      { bridge: castBridge(wedgedTimeoutBridge) },
+    );
+
+    // No continuation child opened — a zero-progress timeout is genuinely
+    // wedged and must not resume.
+    const child = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_node_opened' AND parent_task_id = ?")
+      .get(taskId) as { c: number };
+    expect(child.c).toBe(0);
+    const superseded = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_committed_superseded' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(superseded.c).toBe(0);
+    const closed = db
+      .query("SELECT payload FROM events WHERE kind = 'brain_dispatch_closed' AND task_id = ?")
+      .get(taskId) as { payload: string } | null;
+    expect(JSON.parse(closed!.payload).productive_timeout_continuation).toBe("not_attempted");
+  }, 10_000);
+
+  test("repeated productive timeouts are bounded — at the refinement-depth cap the lineage fails (no infinite resume)", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const rootTaskId = newId();
+
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "fixture", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: rootTaskId,
+      parent_task_id: null,
+      payload: { goal: "perpetually-slow goal that always times out productively" },
+    });
+
+    // Drive the continuation chain: each productive timeout opens the next
+    // refinement child, growing refinementDepth by 1. After REFINEMENT_DEPTH_CAP
+    // (5) the lineage must terminalize with task_failed instead of resuming.
+    let currentTaskId = rootTaskId;
+    let sawDepthCappedFailure = false;
+    for (let i = 0; i < 8; i++) {
+      await dispatchReadyTask(
+        db,
+        { id: currentTaskId, directive_id: directiveId, parent_id: null, goal: "slow", status: "ready" },
+        { bridge: castBridge(productiveTimeoutBridge) },
+      );
+      const failed = db
+        .query("SELECT payload FROM events WHERE kind = 'task_failed' AND task_id = ? AND failure_kind = 'refinement_depth_exceeded'")
+        .get(currentTaskId) as { payload: string } | null;
+      if (failed) {
+        expect(JSON.parse(failed.payload).reason).toContain("productive_timeout_continuation");
+        sawDepthCappedFailure = true;
+        break;
+      }
+      const child = db
+        .query("SELECT task_id FROM events WHERE kind = 'task_node_opened' AND parent_task_id = ?")
+        .get(currentTaskId) as { task_id: string } | null;
+      expect(child).not.toBeNull();
+      currentTaskId = child!.task_id;
+    }
+    // The chain terminated within the cap — it did NOT resume forever.
+    expect(sawDepthCappedFailure).toBe(true);
+  }, 20_000);
 });
