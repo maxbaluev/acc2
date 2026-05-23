@@ -32,14 +32,11 @@
 // from 0.7 → 0.4 (§I crisis_mode.ts already exposes that constant).
 
 import type { Database } from "bun:sqlite";
-import type { BunSandboxDecl, CamofoxSandboxDecl, JsonValue, UvSandboxDecl } from "../substrate/types";
+import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { goalShape } from "./goal_shape";
 import { getArtifact, applyResidualOutcome } from "./artifact_store";
-import { runBunArtifact } from "./runtimes/bun";
-import { runUvArtifact } from "./runtimes/uv";
-import { runCamofoxArtifact } from "./runtimes/camofox";
-import { lookupRunnerInRegistry, runArtifactForRuntime } from "./runtimes/index";
+import { runArtifactForRuntime } from "./runtimes/index";
 import type { TaskNode } from "./task_topology";
 import { distributeCredit } from "./credit";
 import { nowIso } from "./ids";
@@ -282,6 +279,16 @@ const runArtifactByRuntime: RecipeArtifactRunner = async (
     return { ok: false, result: null, error: `artifact_kill_fenced:count=${row.recentKillCount}` };
   }
   const decl = row.declaredSandbox;
+  // Path A (2026-05-20, contract A0DQT211JH): data-class rows carry
+  // runtime=null and declaredSandbox=null — they have NO executable
+  // semantics. A recipe trajectory that names a data-class artifact_id as
+  // an action step cannot replay it; fail closed cleanly (no throw on
+  // `decl.runtime`) so the dispatcher routes back to brain refinement
+  // instead of crashing the replay. resolveRuntime would throw on a null
+  // declaredSandbox by design, so we never reach it.
+  if (row.runtime === null || decl === null) {
+    return { ok: false, result: null, error: "data_class_artifact_not_executable" };
+  }
   if (decl.runtime !== row.runtime) {
     return { ok: false, result: null, error: "sandbox_decl_runtime_mismatch" };
   }
@@ -290,45 +297,21 @@ const runArtifactByRuntime: RecipeArtifactRunner = async (
     result?: JsonValue;
     error?: string;
   };
-  if (row.runtime === "bun") {
-    observation = await runBunArtifact({
-      artifactId: row.id,
-      body: row.body,
-      declaredSandbox: decl as BunSandboxDecl,
-      inputs,
-    });
-  } else if (row.runtime === "uv") {
-    observation = await runUvArtifact({
-      artifactId: row.id,
-      body: row.body,
-      declaredSandbox: decl as UvSandboxDecl,
-      inputs,
-    });
-  } else if (row.runtime === "camofox-browser") {
-    observation = await runCamofoxArtifact({
-      artifactId: row.id,
-      body: row.body,
-      declaredSandbox: decl as CamofoxSandboxDecl,
-      inputs,
-    });
-  } else {
-    // Candidate B (brain dispatch SW94JRKNFD36Q7G9, 2026-05-19): open
-    // Runtime via runtime_runner registry. Replay defers when there is
-    // no registered runner — the dispatcher falls through to brain
-    // refinement so a missing runner doesn't poison a recipe trajectory.
-    const runner = lookupRunnerInRegistry(db, row.runtime);
-    if (!runner) {
-      return { ok: false, result: null, error: `unknown_runtime:${row.runtime}` };
-    }
-    const obs = await runArtifactForRuntime({
-      artifactId: row.id,
-      body: row.body,
-      declaredSandbox: decl,
-      inputs,
-      db,
-    });
-    observation = { ok: obs.ok, result: obs.result ?? null, error: obs.error };
-  }
+  // Capability-aware runtime resolution is centralized in
+  // runArtifactForRuntime (runtime/runtimes/index.ts resolveRuntime):
+  // replay no longer switches on row.runtime or performs its own
+  // registry-runner existence check. A missing/unavailable runtime returns
+  // a fail-closed observation (error: runtime_unavailable:<rt> /
+  // unknown_runtime:<rt>) instead of throwing, so the dispatcher falls
+  // through to brain refinement without poisoning the recipe trajectory.
+  const obs = await runArtifactForRuntime({
+    artifactId: row.id,
+    body: row.body,
+    declaredSandbox: decl,
+    inputs,
+    db,
+  });
+  observation = { ok: obs.ok, result: obs.result ?? null, error: obs.error };
   return {
     ok: observation.ok,
     result: observation.result ?? null,

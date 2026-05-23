@@ -78,6 +78,16 @@ export type SpawnOpts = {
    *  bridge treats that as "unknown, proceed" so a transient probe failure
    *  doesn't block legitimate dispatches. */
   authProbe?: () => { credentialCount: number; envProviderCount: number } | null;
+  /** Inject the opencode capability pre-flight probe. Returns the
+   *  resolved binary availability + version + model. When `ok` is false
+   *  the bridge emits `runtime_self_diagnostic_recorded` + `bridge_failed`
+   *  and skips the spawn — a missing/broken opencode CLI is a known-failed
+   *  dispatch. Tests inject deterministic values; production runs
+   *  `opencode --version`. Mirrors the `authProbe` test-coupling: when
+   *  `spawnFn` is injected but `capabilityProbe` is not, the bridge treats
+   *  capability as "available" so host CLI state doesn't leak into
+   *  deterministic test fixtures. */
+  capabilityProbe?: () => { ok: boolean; version?: string; missing_binary?: string; install_hint?: string };
   /** Test-only: bypass the pre-spawn MCP HEAD probe (2026-05-21
    *  multi-brain foundation fix). The probe verifies the daemon's MCP
    *  endpoint is reachable before burning a subprocess on guaranteed

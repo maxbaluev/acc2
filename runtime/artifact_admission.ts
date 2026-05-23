@@ -27,12 +27,9 @@
 //   the body cleanly, not that the verifier is perfect.
 
 import type { Database } from "bun:sqlite";
-import type { BunSandboxDecl, CamofoxSandboxDecl, JsonValue, Runtime, SandboxDecl, UvSandboxDecl } from "../substrate/types";
+import type { JsonValue, Runtime, SandboxDecl } from "../substrate/types";
 import { validateSandboxDecl } from "./sandbox";
-import { runBunArtifact } from "./runtimes/bun";
-import { runUvArtifact } from "./runtimes/uv";
-import { runCamofoxArtifact } from "./runtimes/camofox";
-import { lookupRunnerInRegistry, runArtifactForRuntime } from "./runtimes/index";
+import { runArtifactForRuntime } from "./runtimes/index";
 import { getArtifact, insertArtifact } from "./artifact_store";
 import { ownerGateDecision } from "./owner_gate";
 import { runPredicateGate } from "./verifiers/predicate_gate";
@@ -610,78 +607,63 @@ export const admitArtifact = async (
     sandboxWarnings: string[];
     irreversibleEffects: Array<{ kind: string; description: string }>;
   };
-  if (input.runtime === "bun") {
-    observation = await runBunArtifact({
-      artifactId: row.id,
-      body: input.body,
-      declaredSandbox: input.declaredSandbox as BunSandboxDecl,
-      inputs: input.fixtureInput,
-      emit,
+  // Capability-aware runtime resolution is now centralized in
+  // runArtifactForRuntime (runtime/runtimes/index.ts resolveRuntime): it
+  // probes availability BEFORE selecting a runner, emits one
+  // runtime_self_diagnostic_recorded row, and returns a fail-closed
+  // observation (never throws) for unavailable/unknown runtimes — so the
+  // admission path no longer switches on the concrete runtime string or
+  // performs its own registry-runner existence check. The downstream
+  // observation-error interpretation below maps those fail-closed errors
+  // to admission rejections.
+  const obs = await runArtifactForRuntime({
+    artifactId: row.id,
+    body: input.body,
+    declaredSandbox: input.declaredSandbox,
+    inputs: input.fixtureInput,
+    emit,
+    db,
+  });
+  observation = {
+    ok: obs.ok,
+    result: obs.result,
+    error: obs.error,
+    durationMs: obs.durationMs,
+    exitCode: obs.exitCode,
+    stderrTail: obs.stderrTail,
+    sandboxWarnings: obs.sandboxWarnings,
+    irreversibleEffects: obs.irreversibleEffects,
+  };
+
+  // Unknown runtime (no registry runner row): the centralized resolver
+  // returns `error: unknown_runtime:<rt>`. Admission cannot smoke-test an
+  // unrunnable artifact, so reject it (mirrors the prior registry-miss
+  // branch, now driven by the resolver's structured error).
+  if (!observation.ok && (observation.error ?? "").startsWith("unknown_runtime")) {
+    db.run("DELETE FROM act_artifact WHERE id = ?", [row.id]);
+    emit({
+      kind: "act_artifact_admission_rejected",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: row.id,
+      payload: {
+        reason: "unknown_runtime",
+        detail: `no runtime_runner registry row for runtime=${input.runtime}`,
+        runtime: input.runtime,
+      } as JsonValue,
     });
-  } else if (input.runtime === "uv") {
-    observation = await runUvArtifact({
-      artifactId: row.id,
-      body: input.body,
-      declaredSandbox: input.declaredSandbox as UvSandboxDecl,
-      inputs: input.fixtureInput,
-      emit,
-    });
-  } else if (input.runtime === "camofox-browser") {
-    observation = await runCamofoxArtifact({
-      artifactId: row.id,
-      body: input.body,
-      declaredSandbox: input.declaredSandbox as CamofoxSandboxDecl,
-      inputs: input.fixtureInput,
-      emit,
-    });
-  } else {
-    // Candidate B (brain dispatch SW94JRKNFD36Q7G9, 2026-05-19): open
-    // Runtime path. Concrete fast-paths handled above; this branch
-    // consults the runtime_runner registry. Missing row → admission
-    // refuses with `unknown_runtime` (no fixture invocation possible).
-    const runner = lookupRunnerInRegistry(db, input.runtime);
-    if (!runner) {
-      db.run("DELETE FROM act_artifact WHERE id = ?", [row.id]);
-      emit({
-        kind: "act_artifact_admission_rejected",
-        substrate_origin: "substrate_auto",
-        action_artifact_id: row.id,
-        payload: {
-          reason: "unknown_runtime",
-          detail: `no runtime_runner registry row for runtime=${input.runtime}`,
-          runtime: input.runtime,
-        } as JsonValue,
-      });
-      return { ok: false, reason: "unknown_runtime", detail: input.runtime };
-    }
-    // Registry-resolved runner: dispatch through the unified surface so
-    // the same observation envelope is consumed everywhere.
-    const obs = await runArtifactForRuntime({
-      artifactId: row.id,
-      body: input.body,
-      declaredSandbox: input.declaredSandbox,
-      inputs: input.fixtureInput,
-      emit,
-      db,
-    });
-    observation = {
-      ok: obs.ok,
-      result: obs.result,
-      error: obs.error,
-      durationMs: obs.durationMs,
-      exitCode: obs.exitCode,
-      stderrTail: obs.stderrTail,
-      sandboxWarnings: obs.sandboxWarnings,
-      irreversibleEffects: obs.irreversibleEffects,
-    };
+    return { ok: false, reason: "unknown_runtime", detail: input.runtime };
   }
 
   // Surface "runtime not installed" cleanly as `runtime_unavailable` so the
   // caller can treat it as a soft refusal (e.g. admit the artifact anyway,
   // run at execution time once playwright/uv are present). For Phase G we
   // KEEP the rejection: admission is a smoke test and a smoke test that
-  // can't be run isn't a pass.
+  // can't be run isn't a pass. The centralized resolver fails closed with
+  // `runtime_unavailable:<rt>` from its capability pre-check; the concrete
+  // runtimes still also return their own `<rt>_runtime_unavailable` when a
+  // post-resolution check trips, so both shapes map here.
   if (!observation.ok && (
+    (observation.error ?? "").startsWith("runtime_unavailable") ||
     observation.error === "uv_runtime_unavailable" ||
     observation.error === "camofox_runtime_unavailable"
   )) {

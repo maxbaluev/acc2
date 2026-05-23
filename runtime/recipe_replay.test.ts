@@ -329,6 +329,74 @@ describe("recipe_replay.replayRecipe", () => {
     expect(aborted.c).toBe(1);
   });
 
+  test("aborts cleanly (no throw) when an action step names a data-class (null-runtime) artifact", async () => {
+    // Path A (contract A0DQT211JH): data-class rows carry runtime=null /
+    // declaredSandbox=null and have NO executable semantics. The default
+    // runArtifactByRuntime runner reads decl.runtime to compare against
+    // row.runtime; without the null guard it would throw on `decl.runtime`.
+    // The guard must fail closed with data_class_artifact_not_executable so
+    // the dispatcher routes back to brain refinement instead of crashing.
+    const db = openDb(":memory:");
+    runViews(db);
+
+    // Insert a data-class artifact (null runtime, null sandbox).
+    const dataRow = insertArtifact(db, {
+      runtime: null,
+      kind: "runtime_action",
+      body: "raw corpus bytes — no executable semantics",
+      declaredSandbox: null,
+      stateRoot: null,
+      posteriorAlpha: 1,
+      posteriorBeta: 1,
+      score: 0.5,
+      confidence: 0.3,
+      recentResidualMean: 0,
+      recentKillCount: 0,
+      status: "admitted",
+      name: "data_class_corpus_row",
+      fixtureInput: null,
+      fixtureExpectedResidual: null,
+      intent: null,
+      summary: "data-class row used as a replay trajectory action step",
+      targetFiles: null,
+      sourceCandidateId: null,
+      ownerGateVerdict: "auto",
+    });
+
+    const task: TaskNode = {
+      id: "t_dataclass",
+      directive_id: "d_dataclass",
+      parent_id: null,
+      goal: "replay against data-class artifact",
+      status: "pending",
+    };
+    const match = {
+      recipe_id: "rec_dataclass",
+      recipe_knowledge_event_id: "rec_dataclass",
+      knowledge_id: "rec_dataclass",
+      goal_shape: "replay against data-class artifact",
+      topology_signature: "topo_00000000::1",
+      confidence: 0.9,
+      trajectory: [
+        {
+          step_kind: "action_predicted" as const,
+          artifact_id: dataRow.id,
+          verifier_artifact_id: null,
+          payload_template: {} as JsonValue,
+          predicted_residual: 0,
+        },
+      ],
+      cited_act_artifact_ids: [dataRow.id],
+    };
+
+    // DEFAULT runner (no opts.runArtifact) so the real null guard runs.
+    const outcome = await replayRecipe(db, task, match);
+    expect(outcome.task_committed).toBe(false);
+    expect(outcome.abort_reason).toBe(
+      "action_runtime_failed:data_class_artifact_not_executable",
+    );
+  });
+
   test("verifier residual ≥ threshold aborts replay", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "acc2-recipe-abort-"));
     writeFileSync(join(tempDir, "a.txt"), "// TODO\n");

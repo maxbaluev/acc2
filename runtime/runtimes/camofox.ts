@@ -68,7 +68,7 @@
 //     RUNNING the artifact is gated.
 
 import type { Subprocess } from "bun";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CamofoxSandboxDecl, JsonValue } from "../../substrate/types";
@@ -215,19 +215,29 @@ const camoufoxBinaryCandidates = (): string[] => {
  *  pointed at a binary, so we honor their choice (existence-checked) without
  *  falling back to the cache locations. Falling back would silently mask a
  *  typo in the env var and surprise the operator. */
+/** A camoufox binary is only usable when it is a regular file the current
+ *  process can execute. `existsSync` alone accepts directories and
+ *  non-executable files, which would surface as an opaque spawn failure
+ *  AFTER the runtime was already selected. Probing executability up front
+ *  lets the capability-aware resolver fail closed with an install hint
+ *  before any launch attempt. */
+const isExecutableFile = (path: string): boolean => {
+  try {
+    const st = statSync(path);
+    accessSync(path, constants.X_OK);
+    return st.isFile();
+  } catch {
+    return false;
+  }
+};
+
 const resolveCamoufoxBinary = (): string | null => {
   const override = process.env.CAMOUFOX_BINARY_PATH;
   if (override !== undefined && override.length > 0) {
-    try {
-      return existsSync(override) ? override : null;
-    } catch {
-      return null;
-    }
+    return isExecutableFile(override) ? override : null;
   }
   for (const candidate of camoufoxBinaryCandidates()) {
-    try {
-      if (existsSync(candidate)) return candidate;
-    } catch { /* swallow */ }
+    if (isExecutableFile(candidate)) return candidate;
   }
   return null;
 };
@@ -656,8 +666,37 @@ const runCamofoxArtifactInner = async (
   }
 };
 
+/** Structural capability probe consumed by the centralized runtime
+ *  resolver (`runtime/runtimes/index.ts`). Pure — no spawn, no profile
+ *  mutex acquisition. Reports both gates camofox needs before launch:
+ *  the playwright JS driver and an executable camoufox firefox binary.
+ *  Returning a structured `ok:false` with an install hint up front lets
+ *  the resolver fail closed BEFORE selecting/attempting the runtime. */
+export const probeCamofoxAvailability = (): {
+  ok: boolean;
+  executable?: string;
+  missing_binary?: string;
+  install_hint?: string;
+} => {
+  if (!isPlaywrightInstalled()) {
+    return {
+      ok: false,
+      missing_binary: "playwright",
+      install_hint:
+        "playwright not installed — run `bun add playwright` to enable camofox-browser execution. " +
+        installHint,
+    };
+  }
+  const binary = resolveCamoufoxBinary();
+  if (!binary) {
+    return { ok: false, missing_binary: "camoufox", install_hint: installHint };
+  }
+  return { ok: true, executable: binary };
+};
+
 // Exposed for tests — checks that the wrapper script generation is stable
 // without spawning firefox.
 export const __wrapBrowserBodyForTest = wrapBrowserBody;
 export const __isPlaywrightInstalledForTest = isPlaywrightInstalled;
 export const __resolveCamoufoxBinaryForTest = resolveCamoufoxBinary;
+export const __isExecutableFileForTest = isExecutableFile;

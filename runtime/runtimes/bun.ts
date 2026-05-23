@@ -145,6 +145,17 @@ const lastBytes = (s: string, n: number): string => {
   return s.slice(s.length - n);
 };
 
+/** Structural capability probe consumed by the centralized runtime
+ *  resolver (`runtime/runtimes/index.ts`). Bun is the host interpreter —
+ *  if this code is running, bun is by definition available. We report the
+ *  running interpreter path + version so the diagnostic ledger carries the
+ *  exact build the runtime would spawn against. Pure — no spawn. */
+export const probeBunAvailability = (): {
+  ok: boolean;
+  executable?: string;
+  version?: string;
+} => ({ ok: true, executable: process.execPath, version: Bun.version });
+
 /** Execute an artifact body under a bun subprocess and return the observation.
  *  Tempdir is created + cleaned up here; the caller does not need to manage it.
  *  Watchdog wakes at wall_ms (SIGTERM) and wall_ms × 1.25 (SIGKILL); both

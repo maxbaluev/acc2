@@ -8,18 +8,30 @@
 //      resolved through the registry lookup and returns a declarative
 //      observation envelope (the runner protocol is declarative in
 //      this commit; runner execution is the brain's next cycle).
-//   3. An unknown runtime WITHOUT a registry row throws
-//      `unknown_runtime:<name>` so the dispatcher caller can emit a
-//      deterministic refusal (admission rejection / replay defer /
-//      mcp error / daemon skip — per Stage 4).
+//   3. An unknown runtime WITHOUT a registry row fails closed with a
+//      structured `unknown_runtime:<name>` observation (ok:false) so the
+//      dispatcher caller can emit a deterministic refusal (admission
+//      rejection / replay defer / mcp error / daemon skip — per Stage 4)
+//      WITHOUT an exception path. Capability-aware resolveRuntime returns
+//      a resolution rather than throwing (E4JWEQHT9N1JZ0P6CE89F78HG0).
 //   4. The sandbox validator accepts the catch-all variant when
 //      `fields` is present and rejects when omitted.
+//   5. resolveRuntime probes capability BEFORE selecting a runner, emits
+//      one runtime_self_diagnostic_recorded per resolution, and threads
+//      the install hint into the fail-closed observation's sandboxWarnings.
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../../substrate/db";
+import type { EmitEventInput } from "../events";
 import type { SandboxDecl } from "../../substrate/types";
 import { validateSandboxDecl } from "../sandbox";
-import { lookupRunnerInRegistry, runArtifactForRuntime } from "./index";
+import {
+  clearRuntimeResolutionCachesForTest,
+  lookupRunnerInRegistry,
+  resolveRuntime,
+  runArtifactForRuntime,
+} from "./index";
+import { probeCamofoxAvailability } from "./camofox";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -179,41 +191,50 @@ describe("runArtifactForRuntime — registry fallback path", () => {
     });
   });
 
-  test("unknown runtime WITHOUT a registered runner throws unknown_runtime", async () => {
+  test("unknown runtime WITHOUT a registered runner fails closed with unknown_runtime observation", async () => {
+    // Capability-aware resolution (resolveRuntime) returns a STRUCTURED
+    // fail-closed observation instead of throwing — the four dispatcher
+    // sites read obs.ok===false + obs.error to surface a deterministic
+    // refusal (admission rejection / replay defer / mcp error / daemon
+    // skip) rather than catching an exception. Fail-closed safety is
+    // preserved: ok is false and the error names the unknown runtime.
     const db = openDb(":memory:");
-    await expect(
-      runArtifactForRuntime({
-        artifactId: "art_no_runner",
-        body: "// no runner registered",
-        declaredSandbox: {
-          runtime: "phantom-runtime",
-          fields: {},
-          wall_ms: 5000,
-          memory_mb: 64,
-        },
-        inputs: null,
-        db,
-      }),
-    ).rejects.toThrow(/unknown_runtime:phantom-runtime/);
+    const obs = await runArtifactForRuntime({
+      artifactId: "art_no_runner",
+      body: "// no runner registered",
+      declaredSandbox: {
+        runtime: "phantom-runtime",
+        fields: {},
+        wall_ms: 5000,
+        memory_mb: 64,
+      },
+      inputs: null,
+      db,
+    });
+    expect(obs.ok).toBe(false);
+    expect(obs.error).toBe("unknown_runtime:phantom-runtime");
+    expect(obs.exitCode).toBe(-1);
   });
 
-  test("unknown runtime without a db handle also throws unknown_runtime", async () => {
+  test("unknown runtime without a db handle also fails closed with unknown_runtime observation", async () => {
     // Without a db, there is no registry to consult — the only available
-    // outcome is the fail-closed throw. This is the contract that lets
-    // the four dispatcher sites surface a deterministic refusal.
-    await expect(
-      runArtifactForRuntime({
-        artifactId: "art_no_db",
-        body: "// no db handle",
-        declaredSandbox: {
-          runtime: "no-db-runtime",
-          fields: {},
-          wall_ms: 5000,
-          memory_mb: 64,
-        },
-        inputs: null,
-      }),
-    ).rejects.toThrow(/unknown_runtime:no-db-runtime/);
+    // outcome is the fail-closed observation. This is the contract that
+    // lets the four dispatcher sites surface a deterministic refusal
+    // without an exception path.
+    const obs = await runArtifactForRuntime({
+      artifactId: "art_no_db",
+      body: "// no db handle",
+      declaredSandbox: {
+        runtime: "no-db-runtime",
+        fields: {},
+        wall_ms: 5000,
+        memory_mb: 64,
+      },
+      inputs: null,
+    });
+    expect(obs.ok).toBe(false);
+    expect(obs.error).toBe("unknown_runtime:no-db-runtime");
+    expect(obs.exitCode).toBe(-1);
   });
 
   test("bun fast-path still invokes the hardcoded runner (no registry hit needed)", async () => {
@@ -232,5 +253,88 @@ describe("runArtifactForRuntime — registry fallback path", () => {
     });
     expect(obs.ok).toBe(true);
     expect(obs.result).toEqual({ pong: true });
+  });
+});
+
+describe("resolveRuntime — capability-aware probe + diagnostic emission", () => {
+  test("emits runtime_self_diagnostic_recorded and resolves the bun fast-path", () => {
+    clearRuntimeResolutionCachesForTest();
+    const events: EmitEventInput[] = [];
+    const resolution = resolveRuntime({
+      artifactId: "art_probe_bun",
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      emit: (e) => events.push(e),
+    });
+    // bun is always available under the test runner — fast-path resolves.
+    expect(resolution.ok).toBe(true);
+    expect(resolution.runtime).toBe("bun");
+    // Exactly one diagnostic row per resolution, reporting availability.
+    const diag = events.filter((e) => e.kind === "runtime_self_diagnostic_recorded");
+    expect(diag.length).toBe(1);
+    const payload = diag[0]!.payload as Record<string, unknown>;
+    expect(payload.runtime).toBe("bun");
+    expect(payload.fault_kind).toBe("runtime_available");
+    expect(typeof payload.executable === "string" || payload.executable === null).toBe(true);
+  });
+
+  test("unknown runtime resolution is fail-closed (ok:false) and still emits a diagnostic", () => {
+    clearRuntimeResolutionCachesForTest();
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const resolution = resolveRuntime({
+      artifactId: "art_probe_unknown",
+      declaredSandbox: { runtime: "ghost-runtime", fields: {}, wall_ms: 5000, memory_mb: 64 },
+      db,
+      emit: (e) => events.push(e),
+    });
+    expect(resolution.ok).toBe(false);
+    if (!resolution.ok) {
+      expect(resolution.error).toBe("unknown_runtime:ghost-runtime");
+    }
+    expect(events.filter((e) => e.kind === "runtime_self_diagnostic_recorded").length).toBe(1);
+  });
+
+  test("an unavailable runtime fails closed BEFORE spawn, threading its install hint into sandboxWarnings + runtime_unavailable error", async () => {
+    // Deterministic regardless of environment: drive the camofox-browser
+    // runtime and branch on the probe's own verdict. When the binary is
+    // ABSENT, the capability gate must short-circuit BEFORE any spawn — the
+    // fail-closed observation carries the probe's install hint as a sandbox
+    // warning and a runtime_unavailable:<rt> error. When the binary is
+    // PRESENT we skip the (slow, real-browser) spawn entirely and only
+    // assert that the diagnostic + resolution path is wired (resolveRuntime
+    // resolves ok without throwing). Either branch exercises the gate
+    // without depending on a flaky browser launch.
+    clearRuntimeResolutionCachesForTest();
+    const probe = probeCamofoxAvailability();
+    const decl = { runtime: "camofox-browser", browser_allow_domains: [], wall_ms: 5000, memory_mb: 64 } as unknown as SandboxDecl;
+    if (!probe.ok) {
+      const obs = await runArtifactForRuntime({
+        artifactId: "art_probe_camofox",
+        body: "// not spawned when unavailable",
+        declaredSandbox: decl,
+        inputs: null,
+      });
+      expect(obs.ok).toBe(false);
+      expect(obs.error).toBe("runtime_unavailable:camofox-browser");
+      expect(obs.exitCode).toBe(-1);
+      // The probe's install hint is forwarded so the operator sees how to
+      // repair the missing capability without reading the runtime source.
+      expect(obs.sandboxWarnings.some((w) => w.length > 0)).toBe(true);
+      if (probe.install_hint) {
+        expect(obs.sandboxWarnings).toContain(probe.install_hint);
+      }
+    } else {
+      // camofox is installed — assert the resolver path (no spawn) resolves
+      // the fast-path without throwing and emits exactly one diagnostic.
+      const events: EmitEventInput[] = [];
+      const resolution = resolveRuntime({
+        artifactId: "art_probe_camofox",
+        declaredSandbox: decl,
+        emit: (e) => events.push(e),
+      });
+      expect(resolution.ok).toBe(true);
+      expect(resolution.runtime).toBe("camofox-browser");
+      expect(events.filter((e) => e.kind === "runtime_self_diagnostic_recorded").length).toBe(1);
+    }
   });
 });

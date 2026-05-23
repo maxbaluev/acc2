@@ -88,6 +88,47 @@ export const observedBrainRssBytes = (now: number = Date.now()): number | null =
   return _cachedMaxBrainRssBytes > 0 ? _cachedMaxBrainRssBytes : null;
 };
 
+/** Capability snapshot for the opencode brain bridge — the bridge-layer
+ *  analogue of the runtime `RuntimeAvailability` shape. Carries the
+ *  resolved binary, its version when probeable, the model the bridge
+ *  would dispatch against, and a missing-binary + install hint when the
+ *  CLI cannot run. Probing version/availability BEFORE spawn means a
+ *  missing or upgraded opencode CLI surfaces as a structured capability
+ *  result instead of an opaque post-spawn bridge_failed row. */
+export type OpencodeCapability = {
+  ok: boolean;
+  executable: "opencode";
+  version?: string;
+  model: string;
+  missing_binary?: string;
+  install_hint?: string;
+};
+
+/** Probe opencode CLI availability + version without dispatching a brain
+ *  run. `opencode --version` is the cheapest liveness signal; a non-zero
+ *  exit or spawn error means the binary is missing or broken, so we fail
+ *  closed with an install hint the bridge can surface. Pure — no spawn of
+ *  a brain run. */
+const probeOpencodeCapability = (): OpencodeCapability => {
+  const version = spawnSync("opencode", ["--version"], { encoding: "utf8" });
+  if (version.error || version.status !== 0) {
+    return {
+      ok: false,
+      executable: "opencode",
+      model: DEFAULT_OPENCODE_MODEL,
+      missing_binary: "opencode",
+      install_hint:
+        "Install/upgrade opencode and verify `opencode --version` and `opencode run` work before dispatch.",
+    };
+  }
+  return {
+    ok: true,
+    executable: "opencode",
+    version: (version.stdout || version.stderr || "").trim(),
+    model: DEFAULT_OPENCODE_MODEL,
+  };
+};
+
 /** Default opencode auth probe — runs `opencode auth list` and parses the
  *  output into a credential / env-provider snapshot. Returns null when the
  *  probe could not run (binary missing, exit non-zero). The bridge treats
@@ -442,6 +483,59 @@ export const spawnRealOpencode = async (
       invoker: "opencode",
     });
     return { ok: false, reason: { kind: "auth_missing" } };
+  }
+
+  // ── Capability pre-flight (opencode CLI availability + version) ──
+  // Probe `opencode --version` BEFORE spawning a brain run so a missing or
+  // upgraded CLI surfaces as a structured capability result + ledger-visible
+  // `runtime_self_diagnostic_recorded` row instead of an opaque post-spawn
+  // bridge_failed. This is the bridge-layer analogue of the centralized
+  // runtime capability resolver (runtime/runtimes/index.ts resolveRuntime).
+  // Test-mode coupling mirrors the auth probe: when `spawnFn` is injected
+  // but `capabilityProbe` is not, assume the CLI is available so host state
+  // doesn't leak into deterministic fixtures.
+  const capabilityDefault: () => {
+    ok: boolean;
+    version?: string;
+    missing_binary?: string;
+    install_hint?: string;
+  } = spawnOpts.spawnFn ? (() => ({ ok: true })) : probeOpencodeCapability;
+  const capabilityProbe = spawnOpts.capabilityProbe ?? capabilityDefault;
+  const capability = capabilityProbe();
+  if (!capability.ok) {
+    const installHint =
+      capability.install_hint ??
+      "Install/upgrade opencode and verify `opencode --version` and `opencode run` work before dispatch.";
+    emitEvent(db, {
+      kind: "runtime_self_diagnostic_recorded",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        runtime: "opencode_bridge",
+        fault_kind: "runtime_unavailable",
+        missing_binary: capability.missing_binary ?? "opencode",
+        repair_hint: installHint,
+        evidence_event_ids: [],
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    emitEvent(db, {
+      kind: "bridge_failed",
+      substrate_origin: "opencode",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      payload: {
+        reason: "runtime_unavailable",
+        mcp_handshake_ok: false,
+        hint: installHint,
+      } as JsonValue,
+      invoker: "opencode",
+    });
+    return {
+      ok: false,
+      reason: { kind: "subprocess_crash", stderr_tail: `opencode_runtime_unavailable: ${installHint}` },
+    };
   }
 
   // Brain audit b0kheqg3g hole D (2026-05-15): persist the composed prompt

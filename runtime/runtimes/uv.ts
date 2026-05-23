@@ -229,6 +229,39 @@ export const __resetNsjailCacheForTest = (overridePath: string | null | undefine
   sandboxDegradedReported = false;
 };
 
+/** Structural capability probe consumed by the centralized runtime
+ *  resolver (`runtime/runtimes/index.ts`). Pure — checks only that the
+ *  `uv` binary is on PATH. Returning a structured `ok:false` with an
+ *  install hint up front lets the resolver fail closed BEFORE selecting
+ *  the runtime, rather than after a doomed spawn. nsjail sandbox status
+ *  is reported degraded-but-available (the runtime still executes without
+ *  it, emitting `sandbox_degraded`). */
+export const probeUvAvailability = (): {
+  ok: boolean;
+  executable?: string;
+  missing_binary?: string;
+  install_hint?: string;
+  sandbox?: { enforced: boolean; mechanism?: string; degraded_reason?: string };
+} => {
+  const uvPath = whichSync("uv");
+  if (!uvPath) {
+    return {
+      ok: false,
+      missing_binary: "uv",
+      install_hint:
+        "uv runtime not on PATH — install Astral uv (https://docs.astral.sh/uv/) to enable Python execution",
+    };
+  }
+  const nsjail = resolveNsjailPath();
+  return {
+    ok: true,
+    executable: uvPath,
+    sandbox: nsjail
+      ? { enforced: true, mechanism: "nsjail" }
+      : { enforced: false, degraded_reason: "nsjail not on PATH" },
+  };
+};
+
 /** Wrap the user-supplied Python body so it (a) reads inputs from ACC2_INPUTS,
  *  (b) binds the unpacked inputs to a `inputs` local before user code, and
  *  (c) only emits the @@RESULT@@ marker when the user code didn't already.
