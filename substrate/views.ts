@@ -1580,8 +1580,7 @@ CREATE VIEW IF NOT EXISTS recipes_latest_view AS
 //      plus the latest_apply tuple. queue exposes ~25 gate-decision columns
 //      (owner_gate_required, owner_approved, auto_apply_target, auto_apply_
 //      eligible, 5-axis residual breakdown, apply_gate_status/reason,
-//      trajectory_hazard_count, structured_change, candidate_target/anchor/
-//      diff, proposed_behavior, proposed_action, lesson_kind). status_view
+//      trajectory_hazard_count, structured_change, candidate_target, proposed_behavior, proposed_action, lesson_kind). status_view
 //      exposes ~15 lifecycle columns (request_event_id, requested_at, action_
 //      event_id, predicted_at, action_artifact_id, verifier_artifact_id,
 //      predicted_residual, scored_event_id, scored_at, verifier_residual,
@@ -1931,9 +1930,7 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
         ) AS REAL) AS auto_apply_gate_residual,
         CAST(COALESCE(
           json_extract(payload, '$.auto_apply_gate.breakdown.freshness'),
-          json_extract(payload, '$.auto_apply_gate.breakdown.anchor_freshness'),
           json_extract(payload, '$.breakdown.freshness'),
-          json_extract(payload, '$.breakdown.anchor_freshness'),
           1
         ) AS REAL) AS freshness_residual,
         CAST(COALESCE(
@@ -1989,41 +1986,8 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
     SELECT
       p.*,
       CASE
-        WHEN json_type(p.payload, '$.proposed_behavior') = 'object'
-         AND (
-           json_extract(p.payload, '$.proposed_behavior.target_resource') = p.target
-           OR json_extract(p.payload, '$.proposed_behavior.resource_uri') = p.target
-           OR json_extract(p.payload, '$.proposed_behavior.target') = p.target
-           OR json_extract(p.payload, '$.proposed_behavior.file_path') = p.target
-           OR 'repo:' || json_extract(p.payload, '$.proposed_behavior.file_path') = p.target
-         )
-         AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_behavior.anchor'), ''))) > 0
-         AND (
-           (json_type(p.payload, '$.proposed_behavior.diff') = 'text'
-             AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_behavior.diff'), ''))) > 0)
-           OR (json_type(p.payload, '$.proposed_behavior.diff') = 'object'
-             AND json_extract(p.payload, '$.proposed_behavior.diff.kind') = 'anchored_replace_v1'
-             AND length(COALESCE(json_extract(p.payload, '$.proposed_behavior.diff.before'), '')) > 0
-             AND json_type(p.payload, '$.proposed_behavior.diff.after') = 'text')
-         )
-        THEN 1
-        WHEN json_type(p.payload, '$.proposed_action') = 'object'
-         AND (
-           json_extract(p.payload, '$.proposed_action.target_resource') = p.target
-           OR json_extract(p.payload, '$.proposed_action.resource_uri') = p.target
-           OR json_extract(p.payload, '$.proposed_action.target') = p.target
-           OR json_extract(p.payload, '$.proposed_action.file_path') = p.target
-           OR 'repo:' || json_extract(p.payload, '$.proposed_action.file_path') = p.target
-         )
-         AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_action.anchor'), ''))) > 0
-         AND (
-           (json_type(p.payload, '$.proposed_action.diff') = 'text'
-             AND length(trim(COALESCE(json_extract(p.payload, '$.proposed_action.diff'), ''))) > 0)
-           OR (json_type(p.payload, '$.proposed_action.diff') = 'object'
-             AND json_extract(p.payload, '$.proposed_action.diff.kind') = 'anchored_replace_v1'
-             AND length(COALESCE(json_extract(p.payload, '$.proposed_action.diff.before'), '')) > 0
-             AND json_type(p.payload, '$.proposed_action.diff.after') = 'text')
-         )
+        WHEN p.proposed_behavior IS NOT NULL OR p.proposed_action IS NOT NULL
+          OR length(trim(COALESCE(json_extract(p.payload, '$.summary'), json_extract(p.payload, '$.intent'), ''))) > 0
         THEN 1
         ELSE 0
       END AS structured_change
@@ -2038,8 +2002,7 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       -- hits owner_profile.things_to_never_do or any other dynamic policy
       -- the apply-side decided requires consent. Absent that explicit
       -- flag the queue treats the proposal as not-owner-gated and lets
-      -- the apply-time structural axes (residual, trajectory, diff
-      -- shape) carry the decision.
+      -- the apply-time semantic gate and verifier residual carry the decision.
       CASE
         WHEN json_extract(s.payload, '$.owner_consent_required') = 1
           OR json_extract(s.payload, '$.owner_consent_required') = 'true'
@@ -2102,8 +2065,6 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
     gs.auto_apply_gate_breakdown,
     CASE
       WHEN p.auto_apply_target = 1
-       AND p.structured_change = 1
-       AND COALESCE(h.hazard_count, 0) = 0
        AND gs.auto_apply_gate_event_id IS NOT NULL
        AND gs.auto_apply_gate_residual < 0.3
        AND gs.freshness_residual < 0.3
@@ -2116,10 +2077,6 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
     CASE
       WHEN p.auto_apply_target = 0
       THEN 'not_auto_apply_target'
-      WHEN COALESCE(h.hazard_count, 0) > 0
-      THEN 'blocked_trajectory_hazard'
-      WHEN p.structured_change = 0
-      THEN 'blocked_unstructured_proposal'
       WHEN gs.auto_apply_gate_event_id IS NULL
       THEN 'blocked_auto_apply_gate_missing'
       WHEN gs.auto_apply_gate_residual >= 0.3
@@ -2133,12 +2090,6 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       ELSE 'auto_apply_eligible'
     END AS auto_apply_gate_verdict,
     CASE
-      WHEN p.auto_apply_target = 1
-       AND COALESCE(h.hazard_count, 0) > 0
-      THEN 'blocked_trajectory_hazard'
-      WHEN p.auto_apply_target = 1
-       AND p.structured_change = 0
-      THEN 'blocked_unstructured_proposal'
       WHEN p.auto_apply_target = 1
        AND gs.auto_apply_gate_event_id IS NULL
       THEN 'blocked_auto_apply_gate_missing'
@@ -2155,12 +2106,6 @@ CREATE VIEW IF NOT EXISTS lesson_implementer_queue_view AS
       ELSE 'manual_review'
     END AS apply_gate_status,
     CASE
-      WHEN p.auto_apply_target = 1
-       AND COALESCE(h.hazard_count, 0) > 0
-      THEN 'trajectory_hazard_present'
-      WHEN p.auto_apply_target = 1
-       AND p.structured_change = 0
-      THEN 'structured_proposed_behavior_required'
       WHEN p.auto_apply_target = 1
        AND gs.auto_apply_gate_event_id IS NULL
       THEN 'auto_apply_gate_score_missing'
@@ -3190,100 +3135,33 @@ LEFT JOIN ready ON ready.directive_id = r.directive_id AND ready.root_task_id = 
 LEFT JOIN latest_signal ls ON ls.directive_id = r.directive_id AND ls.root_task_id = r.root_task_id;
 `;
 
-// pending_owner_decision_queue_view — ranked, de-duplicated projection
-// of owner-gated proposals the substrate is still waiting on. Sources
-// from lesson_implementer_queue_view but applies four corrections that
-// the raw queue lacked (see brain design KHA109RW5972D2BZMYQ63HX0F4):
-//
-//  1. Filter out any source_event_id that has ANY owner_decision_recorded
-//     (approve OR decline). The lesson view only tracks approves, so
-//     declines silently stayed visible — exactly the bug today.
-//  2. Group by (normalized_target, anchor) so 16 variants of the same
-//     idea collapse to one ranked row with duplicate_count.
-//  3. Score open-ended axes (target_risk / shape_quality / staleness /
-//     duplicate weight) and compute decision_rank for ordering.
-//  4. Mark malformed proposals (anchor missing / empty after-text /
-//     missing diff) with decline_candidate_reason so the operator
-//     surface can auto-decline them in one stroke.
+// pending_owner_decision_queue_view — thin owner-consent inbox.
+// Semantic amendment apply removed anchor/diff churn from this surface: rows
+// appear here only when a producer set owner_consent_required and no owner
+// decision or apply outcome has resolved them. Legacy before/after fields stay
+// advisory for the applier; they are never classified here.
 const VIEW_PENDING_OWNER_DECISION_QUEUE = `
 CREATE VIEW IF NOT EXISTS pending_owner_decision_queue_view AS
 WITH base AS (
   SELECT
-    q.source_event_id,
-    q.ts,
-    q.source_kind,
-    q.directive_id,
-    q.task_id,
-    q.target,
-    q.anchor,
-    q.candidate_diff,
-    q.owner_gate_required,
-    q.owner_gate_verdict,
-    -- 2026-05-17 (k_88ESCTN8XN6J: amendment flywheel doesn't drain).
-    -- Live evidence: 1909 lesson_implementer_queue rows, ZERO with
-    -- owner_gate_required=1, 975 stuck at apply_gate_status='manual_review'.
-    -- The brain never sets owner_consent_required, so the explicit gate
-    -- always reads 0; meanwhile auto-apply also refuses these rows
-    -- (not_auto_apply_target / blocked_*). They piled up invisible.
-    -- Widening the filter to include manual_review surfaces ~173 dedup'd
-    -- groups for the operator without touching producer code.
-    q.apply_gate_status,
-    q.apply_status,
-    CASE
-      WHEN q.owner_gate_required = 1 THEN 'owner_consent_explicit'
-      WHEN q.apply_gate_status = 'manual_review' THEN 'manual_review_implicit'
-      ELSE NULL
-    END AS gate_source,
+    q.source_event_id, q.ts, q.source_kind, q.directive_id, q.task_id,
+    q.target, q.owner_gate_required,
+    q.owner_gate_verdict, q.apply_gate_status, q.apply_status,
+    'owner_consent_explicit' AS gate_source,
     CASE WHEN q.target LIKE 'repo:%' THEN substr(q.target, 6) ELSE q.target END AS normalized_target
   FROM lesson_implementer_queue_view q
-  WHERE (q.owner_gate_required = 1 OR q.apply_gate_status = 'manual_review')
-    -- Exclude rows that have already produced an apply outcome via any
-    -- channel (auto-apply success, refusal, apply_record). The view is
-    -- meant for waiting-on-decision rows only.
+  WHERE q.owner_gate_required = 1
     AND (q.apply_status IS NULL)
-    -- Pre-existing latent bug exposed by the 2026-05-17 widening:
-    -- production substrates accumulate occasional candidate_diff
-    -- columns that are not strict JSON (legacy seeds, truncated
-    -- bridge frames, brain emissions with diff fields containing
-    -- raw code). The shape CTE's json_extract(candidate_diff,...)
-    -- chains throw "malformed JSON" on those rows and the entire
-    -- view errors out — which surfaced in production as the
-    -- defensive fallback in pendingOwnerDecisionQueue() (helper
-    -- line 3486) returning an empty result. Filter at the source
-    -- so the shape CTE never sees a bad candidate_diff. The
-    -- excluded rows fall back to "no diff" semantics for
-    -- decline_candidate_reason classification — safer than a hard
-    -- view failure.
-    AND (q.candidate_diff IS NULL OR json_valid(q.candidate_diff) = 1)
     AND NOT EXISTS (
       SELECT 1 FROM events odr
       WHERE odr.kind = 'owner_decision_recorded'
-        AND (
-          json_extract(odr.payload, '$.source_event_id') = q.source_event_id
-          OR EXISTS (SELECT 1 FROM json_each(COALESCE(odr.context_refs, '[]')) WHERE value = q.source_event_id)
-        )
+        AND (json_extract(odr.payload, '$.source_event_id') = q.source_event_id
+          OR EXISTS (SELECT 1 FROM json_each(COALESCE(odr.context_refs, '[]')) WHERE value = q.source_event_id))
     )
 ),
 shape AS (
-  SELECT
-    b.*,
-    CASE
-      WHEN b.anchor IS NULL OR length(trim(b.anchor)) = 0 THEN 'anchor_missing'
-      WHEN b.candidate_diff IS NULL THEN 'diff_missing'
-      WHEN json_extract(b.candidate_diff, '$.kind') = 'anchored_replace_v1'
-        AND length(COALESCE(json_extract(b.candidate_diff, '$.after'), '')) = 0 THEN 'empty_after'
-      WHEN json_extract(b.candidate_diff, '$.kind') = 'anchored_replace_v1'
-        AND length(COALESCE(json_extract(b.candidate_diff, '$.before'), '')) = 0 THEN 'empty_before'
-      ELSE NULL
-    END AS decline_candidate_reason,
-    CASE
-      WHEN b.anchor IS NULL OR length(trim(b.anchor)) = 0 THEN 0.0
-      WHEN b.candidate_diff IS NULL THEN 0.2
-      WHEN json_extract(b.candidate_diff, '$.kind') = 'anchored_replace_v1'
-        AND length(COALESCE(json_extract(b.candidate_diff, '$.before'), '')) > 0
-        AND length(COALESCE(json_extract(b.candidate_diff, '$.after'), '')) > 0 THEN 1.0
-      ELSE 0.5
-    END AS shape_quality_score,
+  SELECT b.*, NULL AS decline_candidate_reason,
+    1.0 AS shape_quality_score,
     CASE
       WHEN b.normalized_target LIKE '%CLAUDE.md' THEN 1.0
       WHEN b.normalized_target LIKE '%.claude/rules/%' THEN 1.0
@@ -3296,172 +3174,31 @@ shape AS (
       ELSE 0.3
     END AS target_risk_score,
     MIN(1.0, MAX(0.0, CAST((julianday('now') - julianday(b.ts)) AS REAL) / 7.0)) AS staleness_score,
-    (COALESCE(b.normalized_target, '?') || '|' || COALESCE(b.anchor, '')) AS group_key
+    COALESCE(b.normalized_target, '?') AS group_key
   FROM base b
 )
 SELECT
-  s.group_key,
-  s.normalized_target AS target,
-  s.anchor,
-  COUNT(*) AS duplicate_count,
-  -- 2026-05-17 widening: surface which path put the row in the queue
-  -- (explicit owner gate vs. apply-gate-said-manual-review). The TUI
-  -- can render this so the operator sees the provenance at a glance.
-  -- If a group has BOTH, prefer 'owner_consent_explicit' as the
-  -- stronger signal.
-  CASE WHEN SUM(CASE WHEN s.gate_source = 'owner_consent_explicit' THEN 1 ELSE 0 END) > 0
-       THEN 'owner_consent_explicit'
-       ELSE 'manual_review_implicit'
-  END AS gate_source,
-  (SELECT s2.source_event_id FROM shape s2
-   WHERE s2.group_key = s.group_key
-   ORDER BY s2.shape_quality_score DESC, s2.ts DESC
-   LIMIT 1) AS representative_event_id,
-  MIN(s.ts) AS oldest_ts,
-  MAX(s.ts) AS newest_ts,
-  MAX(s.shape_quality_score) AS shape_quality_score,
-  MAX(s.target_risk_score) AS target_risk_score,
-  MAX(s.staleness_score) AS staleness_score,
-  CASE WHEN SUM(CASE WHEN s.decline_candidate_reason IS NULL THEN 1 ELSE 0 END) = 0
-    THEN MIN(s.decline_candidate_reason)
-    ELSE NULL END AS group_decline_reason,
-  (CASE WHEN SUM(CASE WHEN s.decline_candidate_reason IS NULL THEN 1 ELSE 0 END) = 0 THEN 0.0 ELSE 1.0 END
-   + MAX(s.target_risk_score) * 0.5
-   + MAX(s.shape_quality_score) * 0.3
-   + MAX(s.staleness_score) * 0.1
-   + MIN(1.0, COUNT(*) * 0.05)) AS decision_rank
+  s.group_key, s.normalized_target AS target, NULL AS anchor, COUNT(*) AS duplicate_count,
+  'owner_consent_explicit' AS gate_source,
+  (SELECT s2.source_event_id FROM shape s2 WHERE s2.group_key = s.group_key ORDER BY s2.shape_quality_score DESC, s2.ts DESC LIMIT 1) AS representative_event_id,
+  MIN(s.ts) AS oldest_ts, MAX(s.ts) AS newest_ts, MAX(s.shape_quality_score) AS shape_quality_score,
+  MAX(s.target_risk_score) AS target_risk_score, MAX(s.staleness_score) AS staleness_score,
+  NULL AS group_decline_reason,
+  (1.0 + MAX(s.target_risk_score) * 0.5 + MAX(s.shape_quality_score) * 0.3 + MAX(s.staleness_score) * 0.1 + MIN(1.0, COUNT(*) * 0.05)) AS decision_rank
 FROM shape s
-GROUP BY s.group_key, s.normalized_target, s.anchor
+GROUP BY s.group_key, s.normalized_target
 ORDER BY decision_rank DESC, MAX(s.ts) DESC;
 `;
 
-// pending_owner_decision_queue_live_view — the operator-facing surface.
-// 2026-05-19 (KCs YKJYRGVJJX21XAMQS042PMK7JG +
-// G3CBVAGY2S5QN5XDC1GR7GJP0G): the historical view above kept piling
-// up noise (40+ rows including test-file targets the brain should never
-// have routed for owner review, anchor-missing candidates whose diffs
-// can't apply, and amendments older than the staleness threshold that
-// nobody is going to action). Brain validation REFUSED full removal of
-// the historical view (the audit trail for failed amendments still
-// matters) and recommended Option B+: keep the historical surface for
-// audit, project the operator-facing CLI through this LIVE view that
-// EXCLUDES every source_event_id retired by the
-// pending_decision_retire_worker (runtime/pending_decision_retire_worker.ts).
-//
-// The view is otherwise identical to pending_owner_decision_queue_view
-// — same ranking, same group key, same dedup. The only difference is the
-// exclusion clause for retired source ids. We re-group (rather than
-// filtering the outer rows) because a group can have N members, some
-// retired and some not; retired members should not contribute to
-// duplicate_count, oldest_ts, shape_quality_score, or decision_rank.
+// pending_owner_decision_queue_live_view — same thin owner-consent surface, minus stale retired decisions.
 const VIEW_PENDING_OWNER_DECISION_QUEUE_LIVE = `
 CREATE VIEW IF NOT EXISTS pending_owner_decision_queue_live_view AS
-WITH base AS (
-  SELECT
-    q.source_event_id,
-    q.ts,
-    q.source_kind,
-    q.directive_id,
-    q.task_id,
-    q.target,
-    q.anchor,
-    q.candidate_diff,
-    q.owner_gate_required,
-    q.owner_gate_verdict,
-    q.apply_gate_status,
-    q.apply_status,
-    CASE
-      WHEN q.owner_gate_required = 1 THEN 'owner_consent_explicit'
-      WHEN q.apply_gate_status = 'manual_review' THEN 'manual_review_implicit'
-      ELSE NULL
-    END AS gate_source,
-    CASE WHEN q.target LIKE 'repo:%' THEN substr(q.target, 6) ELSE q.target END AS normalized_target
-  FROM lesson_implementer_queue_view q
-  WHERE (q.owner_gate_required = 1 OR q.apply_gate_status = 'manual_review')
-    AND (q.apply_status IS NULL)
-    AND (q.candidate_diff IS NULL OR json_valid(q.candidate_diff) = 1)
-    AND NOT EXISTS (
-      SELECT 1 FROM events odr
-      WHERE odr.kind = 'owner_decision_recorded'
-        AND (
-          json_extract(odr.payload, '$.source_event_id') = q.source_event_id
-          OR EXISTS (SELECT 1 FROM json_each(COALESCE(odr.context_refs, '[]')) WHERE value = q.source_event_id)
-        )
-    )
-    -- LIVE-view exclusion: drop rows that pending_decision_retire_worker
-    -- already retired. The retired source_event_id stays in
-    -- pending_owner_decision_queue_view (historical audit) but
-    -- disappears from the operator-facing surface here.
-    AND NOT EXISTS (
-      SELECT 1 FROM events ret
-      WHERE ret.kind = 'pending_decision_retired'
-        AND json_extract(ret.payload, '$.amendment_event_id') = q.source_event_id
-    )
-),
-shape AS (
-  SELECT
-    b.*,
-    CASE
-      WHEN b.anchor IS NULL OR length(trim(b.anchor)) = 0 THEN 'anchor_missing'
-      WHEN b.candidate_diff IS NULL THEN 'diff_missing'
-      WHEN json_extract(b.candidate_diff, '$.kind') = 'anchored_replace_v1'
-        AND length(COALESCE(json_extract(b.candidate_diff, '$.after'), '')) = 0 THEN 'empty_after'
-      WHEN json_extract(b.candidate_diff, '$.kind') = 'anchored_replace_v1'
-        AND length(COALESCE(json_extract(b.candidate_diff, '$.before'), '')) = 0 THEN 'empty_before'
-      ELSE NULL
-    END AS decline_candidate_reason,
-    CASE
-      WHEN b.anchor IS NULL OR length(trim(b.anchor)) = 0 THEN 0.0
-      WHEN b.candidate_diff IS NULL THEN 0.2
-      WHEN json_extract(b.candidate_diff, '$.kind') = 'anchored_replace_v1'
-        AND length(COALESCE(json_extract(b.candidate_diff, '$.before'), '')) > 0
-        AND length(COALESCE(json_extract(b.candidate_diff, '$.after'), '')) > 0 THEN 1.0
-      ELSE 0.5
-    END AS shape_quality_score,
-    CASE
-      WHEN b.normalized_target LIKE '%CLAUDE.md' THEN 1.0
-      WHEN b.normalized_target LIKE '%.claude/rules/%' THEN 1.0
-      WHEN b.normalized_target = 'docs/Architecture.md' THEN 0.95
-      WHEN b.normalized_target = 'docs/operator-install.md' THEN 0.85
-      WHEN b.normalized_target = 'docs/ops-guide.md' THEN 0.85
-      WHEN b.normalized_target LIKE 'docs/%' THEN 0.65
-      WHEN b.normalized_target LIKE 'substrate/%' OR b.normalized_target LIKE 'runtime/%' THEN 0.55
-      WHEN b.normalized_target LIKE 'cli/%' THEN 0.5
-      ELSE 0.3
-    END AS target_risk_score,
-    MIN(1.0, MAX(0.0, CAST((julianday('now') - julianday(b.ts)) AS REAL) / 7.0)) AS staleness_score,
-    (COALESCE(b.normalized_target, '?') || '|' || COALESCE(b.anchor, '')) AS group_key
-  FROM base b
-)
-SELECT
-  s.group_key,
-  s.normalized_target AS target,
-  s.anchor,
-  COUNT(*) AS duplicate_count,
-  CASE WHEN SUM(CASE WHEN s.gate_source = 'owner_consent_explicit' THEN 1 ELSE 0 END) > 0
-       THEN 'owner_consent_explicit'
-       ELSE 'manual_review_implicit'
-  END AS gate_source,
-  (SELECT s2.source_event_id FROM shape s2
-   WHERE s2.group_key = s.group_key
-   ORDER BY s2.shape_quality_score DESC, s2.ts DESC
-   LIMIT 1) AS representative_event_id,
-  MIN(s.ts) AS oldest_ts,
-  MAX(s.ts) AS newest_ts,
-  MAX(s.shape_quality_score) AS shape_quality_score,
-  MAX(s.target_risk_score) AS target_risk_score,
-  MAX(s.staleness_score) AS staleness_score,
-  CASE WHEN SUM(CASE WHEN s.decline_candidate_reason IS NULL THEN 1 ELSE 0 END) = 0
-    THEN MIN(s.decline_candidate_reason)
-    ELSE NULL END AS group_decline_reason,
-  (CASE WHEN SUM(CASE WHEN s.decline_candidate_reason IS NULL THEN 1 ELSE 0 END) = 0 THEN 0.0 ELSE 1.0 END
-   + MAX(s.target_risk_score) * 0.5
-   + MAX(s.shape_quality_score) * 0.3
-   + MAX(s.staleness_score) * 0.1
-   + MIN(1.0, COUNT(*) * 0.05)) AS decision_rank
-FROM shape s
-GROUP BY s.group_key, s.normalized_target, s.anchor
-ORDER BY decision_rank DESC, MAX(s.ts) DESC;
+SELECT * FROM pending_owner_decision_queue_view q
+WHERE NOT EXISTS (
+  SELECT 1 FROM events ret
+  WHERE ret.kind = 'pending_decision_retired'
+    AND json_extract(ret.payload, '$.amendment_event_id') = q.representative_event_id
+);
 `;
 
 
@@ -5965,14 +5702,8 @@ export type PendingOwnerDecisionRow = {
   target: string | null;
   anchor: string | null;
   duplicate_count: number;
-  /** 2026-05-17 (k_88ESCTN8XN6J): provenance signal. Tells the TUI
-   *  whether the brain explicitly demanded owner consent
-   *  ('owner_consent_explicit') or whether the apply-gate classified
-   *  the proposal as needing manual review ('manual_review_implicit').
-   *  The latter is the much larger bucket — patches that match no
-   *  safe-auto-apply policy, are unstructured, or have trajectory
-   *  hazards. */
-  gate_source: "owner_consent_explicit" | "manual_review_implicit";
+  /** Provenance signal for this consent-only surface. */
+  gate_source: "owner_consent_explicit";
   representative_event_id: string;
   oldest_ts: string;
   newest_ts: string;
@@ -5984,13 +5715,9 @@ export type PendingOwnerDecisionRow = {
 };
 
 /** Ranked, de-duplicated owner-decision inbox — LIVE projection.
- *  2026-05-19 (KCs YKJYRGVJJX21XAMQS042PMK7JG +
- *  G3CBVAGY2S5QN5XDC1GR7GJP0G): excludes source_event_ids that the
- *  pending_decision_retire_worker has already retired
- *  (test_file_target, anchor_missing, stale). Operator-facing CLI
- *  (`acc admin pending-decisions`) projects through this. The
- *  historical pendingOwnerDecisionQueue() projection below stays
- *  for audit. */
+ *  Excludes source_event_ids that the pending_decision_retire_worker has
+ *  retired as stale. Operator-facing CLI (`acc admin pending-decisions`)
+ *  projects through this consent-only view. */
 export const pendingOwnerDecisionQueueLive = (db: Database): PendingOwnerDecisionRow[] => {
   let rows: Array<Record<string, unknown>>;
   try {
@@ -6009,7 +5736,7 @@ export const pendingOwnerDecisionQueueLive = (db: Database): PendingOwnerDecisio
     target: (r.target as string | null) ?? null,
     anchor: (r.anchor as string | null) ?? null,
     duplicate_count: (r.duplicate_count as number) ?? 0,
-    gate_source: ((r.gate_source as string | null) ?? "manual_review_implicit") as PendingOwnerDecisionRow["gate_source"],
+    gate_source: "owner_consent_explicit",
     representative_event_id: r.representative_event_id as string,
     oldest_ts: r.oldest_ts as string,
     newest_ts: r.newest_ts as string,
@@ -6022,13 +5749,9 @@ export const pendingOwnerDecisionQueueLive = (db: Database): PendingOwnerDecisio
 };
 
 /** Ranked, de-duplicated owner-decision inbox — HISTORICAL projection.
- *  Includes every pending row regardless of pending_decision_retired
- *  state, so audit tooling can reconstruct what the operator was
- *  presented with at the time. The CLI's `--include-retired` flag
- *  reaches for THIS function; the default surface uses the LIVE view
- *  above. Rows where every member is a decline candidate carry a
- *  non-null group_decline_reason so the CLI can offer a one-shot
- *  auto-decline. */
+ *  Includes every pending owner-consent row regardless of pending_decision_retired
+ *  state, so audit tooling can reconstruct stale rows hidden from the live
+ *  operator surface. */
 export const pendingOwnerDecisionQueue = (db: Database): PendingOwnerDecisionRow[] => {
   let rows: Array<Record<string, unknown>>;
   try {
@@ -6036,15 +5759,9 @@ export const pendingOwnerDecisionQueue = (db: Database): PendingOwnerDecisionRow
       .query("SELECT * FROM pending_owner_decision_queue_view")
       .all() as Array<Record<string, unknown>>;
   } catch (err) {
-    // Defensive fallback: production substrates accumulate occasional
-    // events whose payload column isn't strict JSON (legacy seeds, truncated
-    // bridge frames). The view's json_extract chains throw SQLITE
-    // "malformed JSON" on those rows and that propagated up as the entire
-    // query failing — which made the TUI's Inbox panel render zero rows
-    // against a real queue. The SQL fix lives at the SOURCE CTE (filter
-    // by json_valid(payload)); this helper is the runtime fallback so an
-    // operator never sees a totally-blank inbox just because ONE event has
-    // a bad payload.
+    // Defensive fallback for legacy rows with non-JSON payload columns; the
+    // operator-facing inbox should not fail closed because one historic event is
+    // unreadable.
     const msg = (err as Error).message ?? "";
     if (!/malformed JSON/i.test(msg)) throw err;
     rows = db
@@ -6056,7 +5773,7 @@ export const pendingOwnerDecisionQueue = (db: Database): PendingOwnerDecisionRow
     target: (r.target as string | null) ?? null,
     anchor: (r.anchor as string | null) ?? null,
     duplicate_count: (r.duplicate_count as number) ?? 0,
-    gate_source: ((r.gate_source as string | null) ?? "manual_review_implicit") as PendingOwnerDecisionRow["gate_source"],
+    gate_source: "owner_consent_explicit",
     representative_event_id: r.representative_event_id as string,
     oldest_ts: r.oldest_ts as string,
     newest_ts: r.newest_ts as string,

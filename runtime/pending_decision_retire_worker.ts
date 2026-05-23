@@ -1,41 +1,6 @@
-// acc2 pending_decision_retire_worker — auto-prune pending-owner-decision
-// queue noise per brain validation dispatch (2026-05-19).
-//
-// Brain validation REFUSED Option A (full removal of the
-// pending_owner_decision_queue_view) because the audit trail for failed
-// amendments matters — the surface IS valuable for owner visibility into
-// what the brain wanted but couldn't auto-apply. The brain recommended
-// Option B+: keep the surface, auto-retire the three stale classes that
-// pollute it.
-//
-// Retire shapes:
-//
-//   1. anchor_missing — the amendment's proposed anchor doesn't resolve
-//      against the target file (or the diff is malformed: empty after,
-//      empty before, missing diff). The pending_owner_decision_queue_view
-//      already classifies these via decline_candidate_reason; this worker
-//      observes the classification and retires.
-//
-//   2. test_file_target — target_resource looks like a test path
-//      (tests/**, *.test.ts, *.spec.ts, *.test.tsx, *.spec.tsx). These
-//      should never have been routed to operator review — the brain's
-//      test-lane handles them, and dropping a contract_amendment_proposed
-//      against a test file is almost always a misroute artifact.
-//
-//   3. stale — the source contract_amendment_proposed is older than the
-//      configurable age threshold (default 7 days) and has not received
-//      an owner_decision_recorded or any other terminator. Cites KC
-//      YKJYRGVJJX21XAMQS042PMK7JG.
-//
-// Idempotency: every retire emit consults the existing
-// `pending_decision_retired` events for the source event id; re-running
-// the worker on already-retired rows is a no-op.
-//
-// The companion `pending_owner_decision_queue_live_view` (substrate/views.ts)
-// excludes any source_event_id that has a pending_decision_retired row, so
-// `acc admin pending-decisions` (which now projects through the LIVE view)
-// shows only the un-retired remainder. The historical
-// pending_owner_decision_queue_view stays for audit.
+// acc2 pending_decision_retire_worker — expire unresolved owner-consent
+// decisions after the configured age threshold. The pending-decision surface is
+// consent-only; this worker no longer classifies amendment structure.
 
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
@@ -45,10 +10,7 @@ import { emitEvent } from "./events";
  *  pending_owner_decision row is treated as stale. */
 export const STALE_PENDING_DECISION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-export type RetireReason =
-  | "stale"
-  | "test_file_target"
-  | "anchor_missing";
+export type RetireReason = "stale";
 
 export type RetireSummary = {
   /** Pending rows the worker considered (the size of the source scan). */
@@ -60,9 +22,7 @@ export type RetireSummary = {
   /** Rows skipped because a pending_decision_retired event already exists
    *  for the same source event id (idempotency dedup). */
   skipped_already_retired: number;
-  /** Rows skipped because they did not match ANY retire predicate. These
-   *  stay on the live view — they ARE the legitimate operator-decision
-   *  candidates the surface exists to surface. */
+  /** Rows skipped because they are still recent unresolved owner-consent decisions. */
   skipped_not_eligible: number;
   /** error_caught style strings for failed retire emits. */
   errors: string[];
@@ -79,41 +39,21 @@ export type RetireOptions = {
   dryRun?: boolean;
 };
 
-/** True when the target string looks like a test-file path. The brain
- *  occasionally routes amendments against test files for owner review,
- *  but tests are the brain's own lane — the operator should never have
- *  been asked. Patterns checked: `tests/**`, `*.test.ts(x)`, `*.spec.ts(x)`. */
-export const isTestFileTarget = (target: string | null | undefined): boolean => {
-  if (typeof target !== "string" || target.length === 0) return false;
-  // Normalize a repo: prefix the lesson-implementer view sometimes adds.
-  const normalized = target.startsWith("repo:") ? target.slice(5) : target;
-  if (normalized.startsWith("tests/") || normalized.includes("/tests/")) return true;
-  if (/\.(test|spec)\.[tj]sx?$/i.test(normalized)) return true;
-  return false;
-};
-
 type ScanRow = {
   source_event_id: string;
   ts: string;
   target: string | null;
-  anchor: string | null;
-  candidate_diff: string | null;
-  decline_candidate_reason: string | null;
+  owner_gate_required: number;
 };
 
-/** Classify a row from the pending-decision scan. Returns the FIRST
- *  matching retire reason, or null when the row should stay live. The
- *  order — anchor_missing → test_file_target → stale — matches the
- *  priority documented in the payload contract: anchor problems and
- *  test-file misroutes are categorical (retire regardless of age);
- *  stale is the age-based fallback for everything else. */
+/** Classify a row from the consent-only scan. Only stale unresolved owner-consent
+ *  decisions retire; recent consent decisions remain live. */
 export const classifyRetire = (
   row: ScanRow,
   nowMs: number,
   staleAgeMs: number,
 ): RetireReason | null => {
-  if (row.decline_candidate_reason !== null) return "anchor_missing";
-  if (isTestFileTarget(row.target)) return "test_file_target";
+  if (row.owner_gate_required !== 1) return null;
   const rowMs = Date.parse(row.ts);
   if (Number.isFinite(rowMs) && nowMs - rowMs >= staleAgeMs) return "stale";
   return null;
@@ -148,81 +88,38 @@ export const runPendingDecisionRetireWorker = (
   const summary: RetireSummary = {
     scanned: 0,
     retired: 0,
-    by_reason: { stale: 0, test_file_target: 0, anchor_missing: 0 },
+    by_reason: { stale: 0 },
     skipped_already_retired: 0,
     skipped_not_eligible: 0,
     errors: [],
   };
 
-  // The pending_owner_decision_queue_view groups rows by (target, anchor)
-  // so a single visible group can correspond to many underlying source
-  // event ids. To produce ONE retire event per amendment row (not per
-  // group), we scan the underlying base shape — every
-  // contract_amendment_proposed that the view would surface — via the
-  // same CTE shape inlined here. We deliberately do NOT push retired
-  // rows back into the historical view; the LIVE view filters them out
-  // instead so the audit trail stays intact.
+  // The pending_owner_decision_queue_view groups rows by target, so a single
+  // visible group can correspond to many underlying source event ids. Scan the
+  // consent-only base rows directly to retire each stale decision idempotently.
   let rows: ScanRow[];
   try {
     rows = db
       .query<ScanRow, [number]>(
-        `WITH base AS (
-           SELECT
-             q.source_event_id,
-             q.ts,
-             CASE WHEN q.target LIKE 'repo:%' THEN substr(q.target, 6) ELSE q.target END AS target,
-             q.anchor,
-             q.candidate_diff
-           FROM lesson_implementer_queue_view q
-           WHERE q.source_kind = 'contract_amendment_proposed'
-             -- 2026-05-21: structurally-broken amendments (empty anchor)
-             -- are un-appliable REGARDLESS of gate status — include them in
-             -- the retire scan even when they are not owner-gated /
-             -- manual-review. Pre-fix the scan was scoped to gated rows
-             -- only, so ~190 of 265 anchorless amendments accumulated
-             -- forever (the worker retired the gated subset but never the
-             -- rest). An amendment with no anchor can never resolve a target
-             -- location, so it is safe to retire on sight.
-             AND (q.owner_gate_required = 1
-                  OR q.apply_gate_status = 'manual_review'
-                  OR q.anchor IS NULL
-                  OR length(trim(q.anchor)) = 0)
-             AND (q.apply_status IS NULL)
-             AND (q.candidate_diff IS NULL OR json_valid(q.candidate_diff) = 1)
-             AND NOT EXISTS (
-               SELECT 1 FROM events odr
-               WHERE odr.kind = 'owner_decision_recorded'
-                 AND (
-                   json_extract(odr.payload, '$.source_event_id') = q.source_event_id
-                   OR EXISTS (SELECT 1 FROM json_each(COALESCE(odr.context_refs, '[]')) WHERE value = q.source_event_id)
-                 )
-             )
-              -- Exclude already-retired rows before LIMIT. Otherwise a large
-              -- historical retired backlog can consume the scan window and
-              -- starve newly malformed live rows.
-              AND NOT EXISTS (
-                SELECT 1 FROM events ret
-                WHERE ret.kind = 'pending_decision_retired'
-                  AND json_extract(ret.payload, '$.amendment_event_id') = q.source_event_id
-              )
-         )
-         SELECT
-           b.source_event_id,
-           b.ts,
-           b.target,
-           b.anchor,
-           b.candidate_diff,
-           CASE
-             WHEN b.anchor IS NULL OR length(trim(b.anchor)) = 0 THEN 'anchor_missing'
-             WHEN b.candidate_diff IS NULL THEN 'diff_missing'
-             WHEN json_extract(b.candidate_diff, '$.kind') = 'anchored_replace_v1'
-               AND length(COALESCE(json_extract(b.candidate_diff, '$.after'), '')) = 0 THEN 'empty_after'
-             WHEN json_extract(b.candidate_diff, '$.kind') = 'anchored_replace_v1'
-               AND length(COALESCE(json_extract(b.candidate_diff, '$.before'), '')) = 0 THEN 'empty_before'
-             ELSE NULL
-           END AS decline_candidate_reason
-         FROM base b
-         ORDER BY b.ts ASC
+        `SELECT q.source_event_id, q.ts,
+           CASE WHEN q.target LIKE 'repo:%' THEN substr(q.target, 6) ELSE q.target END AS target,
+           CASE WHEN q.owner_gate_required = 1 THEN 1 ELSE 0 END AS owner_gate_required
+         FROM lesson_implementer_queue_view q
+         WHERE q.source_kind = 'contract_amendment_proposed'
+            AND q.owner_gate_required = 1
+           AND (q.apply_status IS NULL)
+           AND NOT EXISTS (
+             SELECT 1 FROM events odr
+             WHERE odr.kind = 'owner_decision_recorded'
+               AND (json_extract(odr.payload, '$.source_event_id') = q.source_event_id
+                 OR EXISTS (SELECT 1 FROM json_each(COALESCE(odr.context_refs, '[]')) WHERE value = q.source_event_id))
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM events ret
+             WHERE ret.kind = 'pending_decision_retired'
+               AND json_extract(ret.payload, '$.amendment_event_id') = q.source_event_id
+           )
+         ORDER BY q.ts ASC
          LIMIT ?`,
       )
       .all(maxRows);
@@ -252,12 +149,6 @@ export const runPendingDecisionRetireWorker = (
         reason,
         retired_at: now.toISOString(),
         target: row.target ?? null,
-        anchor: row.anchor ?? null,
-        // The decline_candidate_reason classification from the view is
-        // preserved so a future audit can distinguish anchor_missing
-        // vs. diff_missing vs. empty_after even though the canonical
-        // reason field collapses all three into "anchor_missing".
-        source_decline_candidate_reason: row.decline_candidate_reason ?? null,
         amendment_ts: row.ts,
       };
       emitEvent(db, {

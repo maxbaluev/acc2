@@ -235,10 +235,3 @@ export const setOnReady = (cb: () => void): void => {
 /** Timestamp (ms since epoch) of the first transition to ready, or null
  *  if not yet ready. */
 export const readyAt = (): number | null => state.readyAtMs;
-
-/** Internal snapshot for tests / diagnostics. */
-export const _snapshot = (): { registered: string[]; ready: string[]; readyAtMs: number | null } => ({
-  registered: Array.from(state.registered),
-  ready: Array.from(state.ready),
-  readyAtMs: state.readyAtMs,
-});

@@ -67,8 +67,6 @@ export const peerActivity = (db: Database, activity: PeerActivity): { id: string
   return { id: emitted.id, ts: emitted.ts };
 };
 
-export const heartbeatPeer = peerActivity;
-
 export type PeerInFlightAct = {
   event_id: string;
   kind: string;

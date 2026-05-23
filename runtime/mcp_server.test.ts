@@ -564,7 +564,7 @@ describe("fastmcp substrate tools — stdio transport", () => {
       triage_state: "unscored",
       evidence_event_ids: expect.arrayContaining([emitted.result.id, "ctx_1", "evidence_1"]),
       selection_gate: expect.objectContaining({
-        requires_anchor_freshness: true,
+        requires_current_state_semantic_review: true,
         requires_semantic_duplicate_detection: true,
         requires_behavioral_novelty: true,
         requires_necessity: true,

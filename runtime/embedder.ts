@@ -219,7 +219,7 @@ export const extractTextFromEvent = (kind: string, payload: unknown): string | n
     p.current_behavior as string | undefined,
   ];
   // contract_amendment_proposed.proposed_behavior shape (the canonical
-  // anchored_replace_v1 structure): pick the most semantic-rich pieces.
+  // legacy diff structure): pick the most semantic-rich pieces.
   // Most brain proposals carry either a string (prose direction) or an
   // object { file_path, anchor, diff: { kind, before, after } }. We
   // surface the `after` text since that's "what the amendment WILL look

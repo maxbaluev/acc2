@@ -87,7 +87,7 @@ export const verifyHealWorkerTick = (
       `not contain the proposed before/after markers.\n\n` +
       `Read the original contract_amendment_proposed event (${proposalId}) via ` +
       `substrate.get_event, inspect the current source state of its target, and ` +
-      `emit a NEW contract_amendment_proposed with anchored_replace_v1 diff that ` +
+      `emit a NEW semantic contract_amendment_proposed that ` +
       `produces the intended end state. The original proposal's posterior has ` +
       `already been demoted via knowledge_contradiction_observed (event ${row.id}); ` +
       `the new proposal will close the heal loop. Apply isolation gate (cli/apply.ts) ` +

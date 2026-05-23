@@ -67,8 +67,6 @@ export const parseResourceUri = (raw: unknown): ResourceUri | null => {
   return { uri: `${scheme}:${id}`, scheme: scheme as ResourceUriScheme, id };
 };
 
-export const parseResourceRef = parseResourceUri;
-
 export const parseResourceRefs = (raw: unknown): ResourceRef[] | null => {
   if (raw === null || raw === undefined || raw === "") return null;
   let value = raw;

@@ -152,8 +152,8 @@ afterAll(() => {
 describe("runApply gates", () => {
   // Static path consent-gate tests were removed by the 94N61BVVV9
   // convergence. The apply gate
-  // is now structural-axes-only: well-formed anchored_replace_v1 diff,
-  // low verifier residual, clean dispatcher trajectory, no pending
+  // is now semantic-intent-first: legacy before/after is advisory only,
+  // low verifier residual and no pending
   // irreversible effect, and clear owner_profile.things_to_never_do at
   // apply time. Path-pattern matching is no longer policy; the dynamic
   // owner-stated boundaries enforce policy at apply time. Tests that
@@ -176,7 +176,7 @@ describe("runApply gates", () => {
         proposed_behavior: {
           target_resource: "repo:cli/apply.ts",
           anchor: "renderGateBlock",
-          diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+          diff: { kind: "legacy_advisory_context", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
         },
       },
     });
@@ -190,10 +190,10 @@ describe("runApply gates", () => {
     const prompt = cap.out.join("\n");
     expect(code).toBe(0);
     expect(prompt).toContain("APPLY ROUTE PREDICATE");
-    expect(prompt).toContain("STRUCTURED PROPOSED CHANGE");
+    expect(prompt).toContain("PROPOSED CHANGE CONTEXT");
     expect(prompt).toContain("source_field: proposed_behavior");
     expect(prompt).toContain("target_resource: repo:cli/apply.ts");
-    expect(prompt).toContain("anchored_replace_v1");
+    expect(prompt).toContain("legacy before/after payloads are advisory context only");
     expect(prompt).toContain("APPLY GATES");
     expect(prompt).toContain("cli_runtime_gate.target_in_scope: true");
 
@@ -206,12 +206,12 @@ describe("runApply gates", () => {
 
   // Gate-deletion (owner-approved 2026-05-16): the universal verifier
   // (residual + breakdown) replaces structured_proposed_behavior_required
-  // and trajectory_hazard_present. Both refusals fought the verifier
+  // and trajectory-hazard prechecks. Both refusals fought the verifier
   // instead of trusting it. These tests now assert the inverse — prose
   // proposals and hazardous trajectories proceed; the residual decides
   // whether the apply was correct.
 
-  test("auto-apply target declines unstructured proposals before posterior scoring", async () => {
+  test("auto-apply target accepts prose proposals through the semantic path", async () => {
     const scope = nextScope();
     const env = await rpc("substrate.emit", {
       kind: "contract_amendment_proposed",
@@ -231,11 +231,11 @@ describe("runApply gates", () => {
     const code = await runApply([eventId]);
     cap.restore();
 
-    expect(code).toBe(1);
-    expect(cap.err.join("\n")).toContain("anchored_replace_v1_required");
+    expect(code).toBe(0);
+    expect(cap.out.join("\n")).toContain("SEMANTIC APPLY PATH");
   });
 
-  test("auto-apply target declines legacy string diffs before posterior scoring", async () => {
+  test("auto-apply target treats legacy string diffs as advisory context", async () => {
     const scope = nextScope();
     const eventId = await emitLesson({ target_resource: "repo:cli/apply.ts", anchor: "gate", diff: "@@" }, scope);
     const hazard = await rpc("substrate.emit", {
@@ -251,8 +251,8 @@ describe("runApply gates", () => {
     const code = await runApply([eventId]);
     cap.restore();
 
-    expect(code).toBe(1);
-    expect(cap.err.join("\n")).toContain("anchored_replace_v1_required");
+    expect(code).toBe(0);
+    expect(cap.out.join("\n")).toContain("SEMANTIC APPLY PATH");
   });
 
   // 3 more protected-target consent-gate tests removed by the 94N61BVVV9
@@ -279,7 +279,7 @@ describe("runApply gates", () => {
         proposed_behavior: {
           target_resource: "repo:runtime/foo.test.ts",
           anchor: "describe",
-          diff: { kind: "anchored_replace_v1", before: "describe(", after: "describe(" },
+          diff: { kind: "legacy_advisory_context", before: "describe(", after: "describe(" },
         },
       },
     });
@@ -314,7 +314,7 @@ describe("runApply gates", () => {
         proposed_behavior: {
           target_resource: "repo:cli/foo.spec.tsx",
           anchor: "render",
-          diff: { kind: "anchored_replace_v1", before: "render(", after: "render(" },
+          diff: { kind: "legacy_advisory_context", before: "render(", after: "render(" },
         },
       },
     });
@@ -345,7 +345,7 @@ describe("runApply gates", () => {
         proposed_behavior: {
           target_resource: "repo:runtime/foo.ts",
           anchor: "export",
-          diff: { kind: "anchored_replace_v1", before: "export", after: "export" },
+          diff: { kind: "legacy_advisory_context", before: "export", after: "export" },
         },
       },
     });
@@ -383,7 +383,7 @@ describe("runApply gates", () => {
         proposed_behavior: {
           target_resource: "repo:runtime/foo.test.ts",
           anchor: "describe",
-          diff: { kind: "anchored_replace_v1", before: "describe(", after: "describe(" },
+          diff: { kind: "legacy_advisory_context", before: "describe(", after: "describe(" },
         },
       },
     });
@@ -415,7 +415,7 @@ describe("runApply gates", () => {
         proposed_behavior: {
           target_resource: "repo:cli/apply.ts",
           anchor: "renderGateBlock",
-          diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+          diff: { kind: "legacy_advisory_context", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
         },
       },
     });
@@ -451,7 +451,7 @@ describe("runApply gates", () => {
         proposed_behavior: {
           target_resource: "repo:cli/apply.ts",
           anchor: "renderGateBlock",
-          diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+          diff: { kind: "legacy_advisory_context", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
         },
       },
     });
@@ -483,7 +483,7 @@ describe("runApply gates", () => {
         proposed_behavior: {
           target_resource: "repo:cli/apply.ts",
           anchor: "renderGateBlock",
-          diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+          diff: { kind: "legacy_advisory_context", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
         },
       },
     });
@@ -519,7 +519,7 @@ describe("runApply gates", () => {
         proposed_behavior: {
           target_resource: "repo:cli/apply.ts",
           anchor: "renderGateBlock",
-          diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+          diff: { kind: "legacy_advisory_context", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
         },
       },
     });
@@ -539,7 +539,7 @@ describe("runApply gates", () => {
     const eventId = await emitLesson({
       target_resource: "repo:cli/apply.ts",
       anchor: "renderGateBlock",
-      diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+      diff: { kind: "legacy_advisory_context", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
     });
     const cap = captureConsole();
     const code = await runApply([
@@ -621,7 +621,7 @@ describe("runApply gates", () => {
         proposed_behavior: {
           target_resource: "repo:cli/apply.ts",
           anchor: "renderGateBlock",
-          diff: { kind: "anchored_replace_v1", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+          diff: { kind: "legacy_advisory_context", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
         },
       },
     });
@@ -641,3 +641,4 @@ describe("runApply gates", () => {
     expect(payload.apply_route).not.toBe("AUTO_APPLY_TEST_LANE");
   });
 });
+

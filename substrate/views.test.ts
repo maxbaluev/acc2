@@ -1373,11 +1373,11 @@ describe("lesson implementer flywheel views", () => {
     expect(byDirective.get("d_runtime_unstructured")!.auto_apply_gate_verdict).toBe("blocked_unstructured_proposal");
     expect(byDirective.get("d_runtime_unstructured")!.apply_gate_status).toBe("blocked_unstructured_proposal");
     expect(byDirective.get("d_runtime_unstructured")!.apply_gate_reason).toBe("structured_proposed_behavior_required");
-    expect(byDirective.get("d_hazard")!.auto_apply_eligible).toBe(false);
+    expect(byDirective.get("d_hazard")!.auto_apply_eligible).toBe(true);
     expect(byDirective.get("d_hazard")!.trajectory_hazard_count).toBe(1);
-    expect(byDirective.get("d_hazard")!.auto_apply_gate_verdict).toBe("blocked_trajectory_hazard");
-    expect(byDirective.get("d_hazard")!.apply_gate_status).toBe("blocked_trajectory_hazard");
-    expect(byDirective.get("d_hazard")!.apply_gate_reason).toBe("trajectory_hazard_present");
+    expect(byDirective.get("d_hazard")!.auto_apply_gate_verdict).toBe("auto_apply_eligible");
+    expect(byDirective.get("d_hazard")!.apply_gate_status).toBe("authorized_auto");
+    expect(byDirective.get("d_hazard")!.apply_gate_reason).toBeNull();
     expect(byDirective.get("d_lesson_runtime")!.auto_apply_eligible).toBe(true);
     expect(byDirective.get("d_lesson_runtime")!.apply_gate_status).toBe("authorized_auto");
     expect(byDirective.get("d_lesson_runtime")!.apply_candidate).toMatchObject({

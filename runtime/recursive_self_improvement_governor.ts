@@ -255,28 +255,3 @@ export const runSahooDiagnosticsTick = (
   }
 };
 
-const TICK_INTERVAL_MS = 10 * 60 * 1000;
-
-export const startSahooWorker = (
-  db: Database,
-  opts: { now?: () => Date } = {},
-): (() => void) => {
-  let stopped = false;
-  const nowFn = opts.now ?? (() => new Date());
-
-  const tick = (): void => {
-    if (stopped) return;
-    try {
-      runSahooDiagnosticsTick(db, { now: nowFn() });
-    } catch {
-      // fail-soft
-    }
-  };
-
-  const handle = setInterval(tick, TICK_INTERVAL_MS);
-
-  return () => {
-    stopped = true;
-    clearInterval(handle);
-  };
-};

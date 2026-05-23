@@ -236,28 +236,3 @@ export const runMemoryReconciliationTick = (
   return summary;
 };
 
-const TICK_INTERVAL_MS = 5 * 60 * 1000;
-
-export const startMemoryReconciliationWorker = (
-  db: Database,
-  opts: { now?: () => Date } = {},
-): (() => void) => {
-  let stopped = false;
-  const nowFn = opts.now ?? (() => new Date());
-
-  const tick = (): void => {
-    if (stopped) return;
-    try {
-      runMemoryReconciliationTick(db, { now: nowFn() });
-    } catch {
-      // fail-soft per worker contract
-    }
-  };
-
-  const handle = setInterval(tick, TICK_INTERVAL_MS);
-
-  return () => {
-    stopped = true;
-    clearInterval(handle);
-  };
-};

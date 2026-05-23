@@ -22,7 +22,7 @@
 //       (closes the four-link chain:
 //       create -> retrieve -> mutate -> credit, k_555).
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { mcpCall } from "./rpc";
 import { lessonApplyTargetsPolicy } from "../substrate/lesson_apply_policy";
@@ -40,7 +40,7 @@ import { emitActTupleViaMcp } from "../runtime/act_tuple";
 // signal. Injectable for tests via setApplyEvaluatorsForTest.
 type OwnerAlignmentInput = {
   // upstream change/precondition residual (1 - decision.score) — already
-  // reflects diff well-formedness, anchor uniqueness, posterior score.
+  // comes from the semantic apply gate; legacy before/after is advisory only.
   change_residual: number;
   // owner autonomy threshold from owner_profile_view.autonomy_signals.
   autonomy_threshold: number;
@@ -295,16 +295,6 @@ const proposalTargetsPayloadTarget = (proposal: Record<string, unknown>, target:
   return false;
 };
 
-const structuredDiff = (diff: unknown): boolean => {
-  if (typeof diff === "string") return diff.trim().length > 0;
-  if (!diff || typeof diff !== "object" || Array.isArray(diff)) return false;
-  const d = diff as Record<string, unknown>;
-  return d.kind === "anchored_replace_v1"
-    && typeof d.before === "string"
-    && d.before.length > 0
-    && typeof d.after === "string";
-};
-
 const applyRouteFromUnknown = (value: unknown): ApplyRoute | null => {
   if (typeof value !== "string") return null;
   switch (value) {
@@ -330,34 +320,10 @@ const routeFromQueue = (row: LessonQueueRow | null): ApplyRoute | null => {
   switch (row?.apply_gate_status) {
     case "authorized_auto": return "AUTO_APPLY";
     case "manual_review": return "OWNER_GATE";
-    case "blocked_trajectory_hazard": return "AUTO_DEFER_DEPENDENCY";
-    case "blocked_unstructured_proposal": return "AUTO_DECLINE_PROSE_ONLY";
     case "blocked_auto_apply_gate_missing": return null;
     case "blocked_auto_apply_gate_residual": return "NEEDS_BRAIN_RECYCLE";
     default:
       return null;
-  }
-};
-
-const anchoredReplaceDiff = (payload: Record<string, unknown>): { before: string; after: string; occurrence: number } | null => {
-  const structured = proposedChangeFields(payload);
-  const diff = structured?.proposal.diff;
-  if (!diff || typeof diff !== "object" || Array.isArray(diff)) return null;
-  const d = diff as Record<string, unknown>;
-  if (d.kind !== "anchored_replace_v1" || typeof d.before !== "string" || d.before.length === 0 || typeof d.after !== "string") return null;
-  const occurrence = typeof d.occurrence === "number" && Number.isInteger(d.occurrence) && d.occurrence > 0 ? d.occurrence : 1;
-  return { before: d.before, after: d.after, occurrence };
-};
-
-const countOccurrences = (haystack: string, needle: string): number => {
-  if (needle.length === 0) return 0;
-  let count = 0;
-  let pos = 0;
-  while (true) {
-    const next = haystack.indexOf(needle, pos);
-    if (next === -1) return count;
-    count++;
-    pos = next + needle.length;
   }
 };
 
@@ -638,38 +604,20 @@ const deterministicApplyRoute = async (
     return { route: "AUTO_DECLINE_TARGET_MISSING", score: 1, confidence: 1, deterministic: true, reason: "target_file_missing", preconditions: { target_file_exists: false, file } };
   }
 
-  const diff = anchoredReplaceDiff(payload);
-  if (!diff) {
-    return { route: "AUTO_DECLINE_PROSE_ONLY", score: 1, confidence: 1, deterministic: true, reason: "anchored_replace_v1_required", preconditions: { diff_well_formed: false, target_file_exists: true } };
-  }
-
-  const body = readFileSync(abs, "utf8");
-  const beforeCount = countOccurrences(body, diff.before);
-  const afterCount = diff.after.length > 0 ? countOccurrences(body, diff.after) : 0;
-  if (beforeCount === 0 && afterCount > 0) {
-    return { route: "AUTO_DECLINE_ALREADY_APPLIED", score: 1, confidence: 0.95, deterministic: true, reason: "before_absent_after_present", preconditions: { anchor_found_exactly_once: false, before_count: beforeCount, after_count: afterCount } };
-  }
-  if (beforeCount === 0) {
-    return { route: "AUTO_DECLINE_TARGET_MISSING", score: 1, confidence: 0.9, deterministic: true, reason: "before_anchor_missing", preconditions: { anchor_found_exactly_once: false, before_count: beforeCount } };
-  }
-  if (beforeCount !== 1) {
-    return { route: "NEEDS_BRAIN_RECYCLE", score: 0.2, confidence: 0.8, deterministic: true, reason: "before_anchor_not_unique", preconditions: { anchor_found_exactly_once: false, before_count: beforeCount } };
-  }
-
   const queuedRoute = routeFromQueue(queueRow);
   const gateResidual = typeof queueRow?.auto_apply_gate_residual === "number" ? queueRow.auto_apply_gate_residual : null;
   const posteriorScore = gateResidual == null ? 0.95 : Math.max(0, 1 - gateResidual);
   const threshold = await ownerAutonomyThreshold();
   if (queuedRoute === "AUTO_APPLY" && posteriorScore >= threshold) {
-    return gateAutonomousCommit({ route: "AUTO_APPLY", score: posteriorScore, confidence: 0.8, deterministic: false, reason: "preconditions_passed_posterior_above_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } }, payload, target, targets);
+    return gateAutonomousCommit({ route: "AUTO_APPLY", score: posteriorScore, confidence: 0.8, deterministic: false, reason: "preconditions_passed_posterior_above_threshold", preconditions: { semantic_apply_intent: true, target_file_exists: true, autonomy_threshold: threshold } }, payload, target, targets);
   }
   if (queuedRoute === "OWNER_GATE") {
-    return { route: "OWNER_GATE", score: posteriorScore, confidence: 0.7, deterministic: false, reason: "queue_route_owner_gate", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true } };
+    return { route: "OWNER_GATE", score: posteriorScore, confidence: 0.7, deterministic: false, reason: "queue_route_owner_gate", preconditions: { semantic_apply_intent: true, target_file_exists: true } };
   }
   if (queuedRoute === null && posteriorScore >= threshold) {
-    return gateAutonomousCommit({ route: "AUTO_APPLY", score: posteriorScore, confidence: 0.65, deterministic: false, reason: "preconditions_passed_local_predicate_above_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } }, payload, target, targets);
+    return gateAutonomousCommit({ route: "AUTO_APPLY", score: posteriorScore, confidence: 0.65, deterministic: false, reason: "preconditions_passed_local_predicate_above_threshold", preconditions: { semantic_apply_intent: true, target_file_exists: true, autonomy_threshold: threshold } }, payload, target, targets);
   }
-  return { route: "NEEDS_BRAIN_RECYCLE", score: posteriorScore, confidence: 0.6, deterministic: false, reason: "posterior_missing_or_below_threshold", preconditions: { diff_well_formed: true, anchor_found_exactly_once: true, target_file_exists: true, autonomy_threshold: threshold } };
+  return { route: "NEEDS_BRAIN_RECYCLE", score: posteriorScore, confidence: 0.6, deterministic: false, reason: "posterior_missing_or_below_threshold", preconditions: { semantic_apply_intent: true, target_file_exists: true, autonomy_threshold: threshold } };
 };
 
 const boolish = (v: unknown): boolean => v === true || v === 1 || v === "1" || v === "true";
@@ -724,14 +672,12 @@ const ownerProfileThingsToNeverDoBlock = async (targets: readonly string[]): Pro
   return null;
 };
 
-const structuredChangeProposal = (payload: Record<string, unknown>, target: string): boolean => {
-  const proposed = payload.proposed_behavior ?? payload.proposed_action;
-  if (!proposed || typeof proposed !== "object") return false;
-  const p = proposed as Record<string, unknown>;
-  return proposalTargetsPayloadTarget(p, target)
-    && typeof p.anchor === "string"
-    && p.anchor.trim().length > 0
-    && structuredDiff(p.diff);
+const semanticChangeProposal = (payload: Record<string, unknown>, target: string): boolean => {
+  const proposed = payload.proposed_behavior ?? payload.proposed_action ?? payload.summary ?? payload.intent;
+  if (proposed === undefined || proposed === null || proposed === "") return false;
+  const structured = proposedChangeFields(payload);
+  if (!structured) return typeof proposed === "string" ? proposed.trim().length > 0 : true;
+  return proposalTargetsPayloadTarget(structured.proposal, target) || target.trim().length > 0;
 };
 
 const proposalText = (value: unknown): string => {
@@ -762,15 +708,15 @@ const renderStructuredProposalBlock = (payload: Record<string, unknown>): string
   if (!structured) {
     const fallback = proposalText(payload.proposed_behavior) || proposalText(payload.proposed_action);
     return [
-      `STRUCTURED PROPOSED CHANGE`,
-      `  status: unstructured`,
+      `PROPOSED CHANGE CONTEXT`,
+      `  status: prose_or_unstructured`,
       fallback ? `  proposal_text: ${JSON.stringify(fallback)}` : `  proposal_text: (missing)`,
     ].join("\n");
   }
 
   const { sourceField, proposal } = structured;
   return [
-    `STRUCTURED PROPOSED CHANGE`,
+    `PROPOSED CHANGE CONTEXT`,
     `  source_field: ${sourceField}`,
     `  target_resource: ${formatPromptValue(proposal.target_resource ?? proposal.resource_uri ?? proposal.target ?? (typeof proposal.file_path === "string" ? "repo:" + proposal.file_path : undefined))}`,
     `  anchor:          ${formatPromptValue(proposal.anchor)}`,
@@ -787,15 +733,15 @@ const renderGateBlock = (
   policy: ReturnType<typeof lessonApplyTargetsPolicy>,
 ): string => {
   const hazardCount = Number(auth.queueRow?.trajectory_hazard_count ?? 0);
-  const structured = structuredChangeProposal(payload, auth.target);
+  const semanticIntent = semanticChangeProposal(payload, auth.target);
   return [
     `APPLY GATES`,
     `  owner_gate.required: ${auth.ownerGateRequired}`,
     `  owner_gate.approved: ${auth.ownerApproved}`,
     `  owner_gate.rule: dynamic owner_profile.things_to_never_do entries can require explicit owner approval; static path enumeration is not policy.`,
     `  cli_runtime_gate.target_in_scope: ${policy.autoApplyTarget}`,
-    `  cli_runtime_gate.rule: repo:cli/* and repo:runtime/* may auto-apply only with structured {target_resource, anchor, diff:{kind:\"anchored_replace_v1\", before, after}}, verifier residual < 0.3, and no dispatcher_violation or irreversible_effect_recorded in the trajectory.`,
-    `  cli_runtime_gate.structured_change: ${structured || !policy.autoApplyTarget}`,
+    `  cli_runtime_gate.rule: repo:cli/* and repo:runtime/* use the same semantic apply path as every other target; legacy before/after payloads are advisory context only. Correctness is decided by verifier residual and owner-consent policy, not literal anchor matching.`,
+    `  cli_runtime_gate.semantic_change_intent: ${semanticIntent || !policy.autoApplyTarget}`,
     `  cli_runtime_gate.trajectory_hazard_count: ${hazardCount}`,
   ].join("\n");
 };
@@ -1060,7 +1006,7 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean; aut
 
   const policy = lessonApplyTargetsPolicy(targetCandidatesFromPayload(payload));
   const ownerGateLine = policy.autoApplyTarget
-    ? `APPLY ROUTE PREDICATE — CLI/RUNTIME: proceed according to apply_route, not a brain-authored boolean. Hard preconditions run first: anchored_replace_v1 well-formed, target exists, before text appears exactly once, no owner manual-review match; posterior scoring is consulted only after those pass.`
+    ? `APPLY ROUTE PREDICATE — CLI/RUNTIME: proceed according to apply_route, not a brain-authored boolean. The only local file precondition is that the target exists; the applier must understand the amendment intent against current file state, and verifier residual scores correctness.`
       : `(target outside auto-apply surface — apply directly unless owner_profile.things_to_never_do blocks it)`;
 
   return [
@@ -1101,17 +1047,14 @@ const renderSubagentPrompt = (ev: EventRow, opts: { ownerApproved?: boolean; aut
     ``,
     ownerGateLine,
     ``,
-    `ANCHORED REPLACE PREFLIGHT`,
-    `  - If STRUCTURED PROPOSED CHANGE carries diff.kind=anchored_replace_v1, read the`,
-    `    target file from the current worktree before editing and search for diff.before.`,
-    `  - If diff.before is not an exact substring, try a diagnostic-only normalized match`,
-    `    that ignores line-ending differences and common prompt-rendering artifacts`,
-    `    (escaped newlines, quote/comma delimiters from TypeScript string arrays).`,
-    `  - Do not silently invent a patch from a stale anchor. If only the normalized`,
-    `    diagnostic matches, make the smallest semantic edit against live source and`,
-    `    report residual/breakdown.anchor_freshness; if neither exact nor normalized`,
-    `    match is credible, return failed with reason=before_text_not_found_in_target`,
-    `    plus the closest anchor context.`,
+    `SEMANTIC APPLY PATH`,
+    `  - Read the amendment intent (current_behavior, proposed_behavior, rationale,`,
+    `    and any legacy diff fields) plus the CURRENT target file before editing.`,
+    `  - Treat legacy before/after strings as advisory context only. Do not require`,
+    `    exact substring matches, do not run an anchor-missing branch, and do not`,
+    `    fall back to a second mechanical workflow.`,
+    `  - Make the smallest semantic edit that satisfies the intent; correctness is`,
+    `    established by the verifier residual and breakdown after the edit.`,
     ``,
     `OPERATING CONTRACT`,
     `  1. Use EXACT substrate handles, not file/log scanning, as your primary information surface.`,

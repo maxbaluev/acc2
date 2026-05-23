@@ -1081,7 +1081,7 @@ export const handleRead = (
                 priority_score: Math.max(0, Math.min(1, row.selection_priority / 100)),
               },
               selection_gate: {
-                requires_anchor_freshness: true,
+                requires_current_state_semantic_review: true,
                 requires_semantic_duplicate_detection: true,
                 requires_behavioral_novelty: true,
                 requires_necessity: true,

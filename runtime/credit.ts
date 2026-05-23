@@ -362,21 +362,6 @@ export const recencyDecayWeight = (
   return Math.exp(-Math.LN2 * ageMs / halfLifeMs);
 };
 
-/** Confidence-aware damping: low verifier confidence dampens posterior
- *  delta toward zero. Used by distributeCredit when the verifier emits
- *  `reliability_profile.confidence` (open-keyed Record<string, number>;
- *  see substrate/types.ts). Returns a [0, 1] multiplier; default 1.0
- *  when confidence is unset (preserves legacy behavior pre-this commit). */
-export const confidenceDampingMultiplier = (
-  confidence: number | undefined,
-): number => {
-  if (typeof confidence !== "number" || !Number.isFinite(confidence)) return 1;
-  // Clamp to [0, 1]; identity at confidence=1.0; ~0.25 at confidence=0.5
-  // (curve: out = confidence^1.5 — gentle damp below 1.0, harsh below 0.5).
-  const clamped = Math.min(1, Math.max(0, confidence));
-  return Math.pow(clamped, 1.5);
-};
-
 // ── Posterior-delta computation ────────────────────────────────────
 //
 // The Beta-delta + EMA + posterior-recompute algebra lives ONCE in
@@ -1349,7 +1334,6 @@ const recordBrainAccuracy = (db: Database, params: RecordBrainAccuracyParams): v
   }
 };
 
-export const __recordBrainAccuracyForTest = recordBrainAccuracy;
 export const __brainAccuracyArtifactIdForTest = brainAccuracyArtifactId;
 
 export const distributeOwnerObservedOutcomeCredit = async (

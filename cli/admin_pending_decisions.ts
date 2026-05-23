@@ -1,49 +1,13 @@
-// `acc admin pending-decisions` — owner-decision inbox.
+// `acc admin pending-decisions` — thin owner-consent inbox.
 //
-// Defaults to the ranked, de-duplicated projection from
-// pending_owner_decision_queue_view (substrate/views.ts). Per the brain's
-// design (lesson KHA109RW5972D2BZMYQ63HX0F4) the orchestrator should never
-// dump 92 rows when 4 grouped ranked rows tell the same story; nor should
-// it silently miss decisions because the raw queue counts approves but not
-// declines. This surface fixes both:
-//
-//   - Default mode: top N groups by decision_rank, with duplicate_count
-//     and group_decline_reason exposed so the operator can bulk-decline
-//     malformed shapes in one stroke.
-//   - --all: ungrouped legacy projection (lesson_implementer_queue_view).
-//   - --target <substr>: filter rows whose normalized_target contains substr.
-//   - --limit N: cap the ranked output (default 10).
-//   - --json: machine-readable for orchestrator polling.
-//   - --auto-decline-malformed [--yes]: bulk-emit owner_decision_recorded
-//     decline=true for every group whose decline_candidate_reason is set
-//     (anchor_missing, diff_missing, empty_after, empty_before). The
-//     operator running this command IS the owner; the gate enforces an
-//     explicit --yes so a typo doesn't drain real decisions.
-//
-// Usage:
-//   acc admin pending-decisions                       # ranked top 10 (LIVE)
-//   acc admin pending-decisions --limit 20            # top 20 groups
-//   acc admin pending-decisions --target rules        # filter by substring
-//   acc admin pending-decisions --all                 # raw ungrouped view
-//   acc admin pending-decisions --json                # JSON (ranked by default)
-//   acc admin pending-decisions --all --json          # JSON ungrouped
-//   acc admin pending-decisions --include-retired     # include pending_decision_retired rows (audit)
-//   acc admin pending-decisions --auto-decline-malformed --yes
-//                                                     # bulk-decline malformed shapes
-//
-// LIVE vs. historical (2026-05-19):
-//   The default surface projects through pending_owner_decision_queue_live_view,
-//   which EXCLUDES rows the pending_decision_retire_worker auto-pruned
-//   (anchor_missing / test_file_target / age > 7d). Pass --include-retired
-//   to fall back to the historical pending_owner_decision_queue_view that
-//   includes every retired row too (audit / replay).
+// Semantic amendment apply removed amendment-structure churn from this surface.
+// The command shows only proposals with explicit owner consent required and no
+// recorded owner decision.
 
 import type { Database } from "bun:sqlite";
 import { openDb } from "../substrate/db";
-import { emitEvent } from "../runtime/events";
 import {
   lessonImplementerQueue,
-  pendingOwnerDecisionQueue,
   pendingOwnerDecisionQueueLive,
   runViews,
   type LessonImplementerQueueRow,
@@ -100,8 +64,8 @@ const renderRanked = (
   }
   out(`acc admin pending-decisions — ranked groups from ${viewLabel}`);
   out("");
-  out("  rank  age    dup risk shape target                                          anchor                                  representative");
-  out("  ──── ────── ─── ──── ───── ─────────────────────────────────────────────── ─────────────────────────────────────── ──────────────────────────");
+  out("  rank  age    dup risk shape target                                          representative");
+  out("  ──── ────── ─── ──── ───── ─────────────────────────────────────────────── ──────────────────────────");
   for (const r of rows) {
     const rank = r.decision_rank.toFixed(2).padStart(4);
     const age = formatAge(ageMs(r.newest_ts)).padEnd(6);
@@ -109,19 +73,11 @@ const renderRanked = (
     const risk = r.target_risk_score.toFixed(2).padStart(4);
     const shape = r.shape_quality_score.toFixed(2).padStart(5);
     const target = pad(r.target, 47);
-    const anchor = pad(r.anchor, 39);
     const rep = (r.representative_event_id ?? "").slice(0, 26);
-    const declineMark = r.group_decline_reason ? ` [decline:${r.group_decline_reason}]` : "";
-    out(`  ${rank} ${age} ${dup} ${risk} ${shape} ${target} ${anchor} ${rep}${declineMark}`);
+    out(`  ${rank} ${age} ${dup} ${risk} ${shape} ${target} ${rep}`);
   }
   out("");
-  const declineCount = rows.filter((r) => r.group_decline_reason).length;
-  out(
-    `${rows.length} pending group${rows.length === 1 ? "" : "s"}` +
-      (declineCount > 0
-        ? ` (${declineCount} are auto-decline candidates — anchor missing, empty after-text, or malformed diff).`
-        : "."),
-  );
+  out(`${rows.length} pending group${rows.length === 1 ? "" : "s"}.`);
 };
 
 const renderAll = (
@@ -134,14 +90,13 @@ const renderAll = (
   }
   out("acc admin pending-decisions --all — raw ungrouped lesson_implementer_queue_view rows");
   out("");
-  out("  age   source                          target                                                anchor");
-  out("  ───── ─────────────────────────────── ───────────────────────────────────────────────────── ───────────────────────────────");
+  out("  age   source                          target");
+  out("  ───── ─────────────────────────────── ─────────────────────────────────────────────────────");
   for (const r of rows) {
     const age = formatAge(ageMs(r.ts)).padEnd(5);
     const src = pad(r.source_event_id, 31);
     const target = pad(r.target, 53);
-    const anchor = pad(r.anchor, 31);
-    out(`  ${age} ${src} ${target} ${anchor}`);
+    out(`  ${age} ${src} ${target}`);
   }
   out("");
   out(`${rows.length} pending owner decision${rows.length === 1 ? "" : "s"}.`);
@@ -194,86 +149,7 @@ export const runPendingDecisions = async (
     return 0;
   }
 
-  // 2026-05-19 (KCs YKJYRGVJJX21XAMQS042PMK7JG +
-  // G3CBVAGY2S5QN5XDC1GR7GJP0G): default surface is the LIVE view that
-  // excludes pending_decision_retire_worker retires (anchor_missing /
-  // test_file_target / stale > 7d). --include-retired opts back into the
-  // historical projection that includes every retired row too, useful for
-  // audit. Auto-decline-malformed must always work on the LIVE rows so
-  // the operator doesn't re-decline already-retired ones.
-  const wantIncludeRetired = argv.includes("--include-retired");
-  const ranked = wantIncludeRetired
-    ? pendingOwnerDecisionQueue(db)
-    : pendingOwnerDecisionQueueLive(db);
-
-  // Auto-decline-malformed mode: drain every group whose
-  // decline_candidate_reason is set. Operator types --auto-decline-malformed
-  // --yes once; the substrate gets owner_decision_recorded decline=true
-  // for every group representative + ungrouped member. Each emission
-  // cites the group_key + reason so a future audit knows why.
-  const wantAutoDecline = argv.includes("--auto-decline-malformed");
-  if (wantAutoDecline) {
-    const wantYes = argv.includes("--yes") || argv.includes("-y");
-    const declinables = ranked.filter((r) => r.group_decline_reason !== null);
-    if (declinables.length === 0) {
-      env.out("acc admin pending-decisions --auto-decline-malformed: no malformed groups to decline (group_decline_reason was null for every ranked row).");
-      return 0;
-    }
-    if (!wantYes) {
-      env.err(
-        `acc admin pending-decisions --auto-decline-malformed: ${declinables.length} groups match (` +
-          `${declinables.reduce((a, r) => a + r.duplicate_count, 0)} total proposals would be declined). Pass --yes to apply.`,
-      );
-      for (const r of declinables.slice(0, 5)) {
-        env.err(`  • ${r.target ?? "?"}  ×${r.duplicate_count}  decline:${r.group_decline_reason}`);
-      }
-      if (declinables.length > 5) env.err(`  • …and ${declinables.length - 5} more.`);
-      return 1;
-    }
-    let declined = 0;
-    let groups = 0;
-    for (const r of declinables) {
-      // Find every member of this group (same group_key) and decline each.
-      type Mem = { id: string; ts: string };
-      const members = db
-        .query(
-          `WITH base AS (
-             SELECT q.source_event_id AS id, q.ts,
-                    CASE WHEN q.target LIKE 'repo:%' THEN substr(q.target, 6) ELSE q.target END AS normalized_target,
-                    q.anchor
-             FROM lesson_implementer_queue_view q
-             WHERE (q.owner_gate_required = 1 OR q.apply_gate_status = 'manual_review')
-               AND q.apply_status IS NULL
-               AND (q.candidate_diff IS NULL OR json_valid(q.candidate_diff) = 1)
-           )
-           SELECT id, ts FROM base
-           WHERE (COALESCE(normalized_target, '?') || '|' || COALESCE(anchor, '')) = ?`,
-        )
-        .all(r.group_key) as Mem[];
-      for (const m of members) {
-        try {
-          emitEvent(db, {
-            kind: "owner_decision_recorded",
-            substrate_origin: "owner",
-            payload: {
-              source_event_id: m.id,
-              decision: "decline",
-              reason: `auto_decline_malformed:${r.group_decline_reason}`,
-              group_key: r.group_key,
-              triggered_by: "acc admin pending-decisions --auto-decline-malformed",
-            },
-            context_refs: [m.id],
-          });
-          declined++;
-        } catch (err) {
-          env.err(`  ! failed to decline ${m.id}: ${(err as Error).message}`);
-        }
-      }
-      groups++;
-    }
-    env.out(`acc admin pending-decisions --auto-decline-malformed: declined ${declined} proposals across ${groups} groups.`);
-    return 0;
-  }
+  const ranked = pendingOwnerDecisionQueueLive(db);
 
   const filtered = targetFilter
     ? ranked.filter((r) => (r.target ?? "").includes(targetFilter))
@@ -286,9 +162,7 @@ export const runPendingDecisions = async (
     renderRanked(
       limited,
       env.out,
-      wantIncludeRetired
-        ? "pending_owner_decision_queue_view (--include-retired)"
-        : "pending_owner_decision_queue_live_view",
+      "pending_owner_decision_queue_live_view",
     );
     if (filtered.length > limit) {
       env.out("");

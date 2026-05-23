@@ -296,35 +296,3 @@ export const runBrainInvocationTick = async (
   return summary;
 };
 
-const TICK_INTERVAL_MS = 30 * 1000;
-
-export const startBrainInvocationWorker = (
-  db: Database,
-  opts: { now?: () => Date } = {},
-): (() => void) => {
-  let stopped = false;
-  let inFlight = false;
-  const nowFn = opts.now ?? (() => new Date());
-
-  const tick = async (): Promise<void> => {
-    if (stopped || inFlight) return;
-    inFlight = true;
-    try {
-      await runBrainInvocationTick(db, { now: nowFn() });
-    } catch {
-      // fail-soft per worker contract
-    } finally {
-      inFlight = false;
-    }
-  };
-
-  // First tick after 30s, then every 30s
-  const handle = setInterval(() => {
-    void tick();
-  }, TICK_INTERVAL_MS);
-
-  return () => {
-    stopped = true;
-    clearInterval(handle);
-  };
-};

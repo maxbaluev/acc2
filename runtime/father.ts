@@ -130,11 +130,11 @@ export const DIRECTIVE_TEMPLATES: readonly FatherDirectiveTemplate[] = Object.fr
     template_id: "father_roadmap_progress_review",
     action: "compile_directive_from_template",
     directive_text:
-      "Roadmap progress review: read docs/roadmap.md, identify the highest-leverage tier or contract that is NOT yet implemented (cross-check against the codebase and recent commits), and propose ONE concrete anchored_replace_v1 contract_amendment_proposed that advances it. Prefer the lowest-numbered unblocked tier.",
+      "Roadmap progress review: read docs/roadmap.md, identify the highest-leverage tier or contract that is NOT yet implemented (cross-check against the codebase and recent commits), and propose ONE concrete semantic contract_amendment_proposed that advances it. Prefer the lowest-numbered unblocked tier.",
     lifecycle: "finite",
     urgency: "normal",
     initial_task_goal:
-      "Select the next unimplemented roadmap contract by tier order + dependency, verify it is genuinely not yet shipped, and emit one concrete implementation amendment with literal source diff and closure predicate.",
+      "Select the next unimplemented roadmap contract by tier order + dependency, verify it is genuinely not yet shipped, and emit one concrete semantic implementation amendment with current file context, rationale, and closure predicate.",
   },
   {
     template_id: "father_substrate_hole_audit",

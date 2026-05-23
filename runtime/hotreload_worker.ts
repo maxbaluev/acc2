@@ -902,12 +902,6 @@ export const __testApplyChange = (
   })();
 };
 
-/** Helper for tests: render the manifest into the shape /health exposes. */
-export const renderHotreloadHealth = (s: HotReloadState = state): HotReloadState => ({
-  ...s,
-  recent_outcomes: [...s.recent_outcomes],
-});
-
 /** Convenience for the importers — relative path utility kept here so
  *  tests that simulate the watcher don't need their own path helpers. */
 export const toProjectRelative = (absPath: string, projectRoot: string): string => {

@@ -88,12 +88,6 @@ export const observedBrainRssBytes = (now: number = Date.now()): number | null =
   return _cachedMaxBrainRssBytes > 0 ? _cachedMaxBrainRssBytes : null;
 };
 
-/** Test seam: reset the RSS sample cache. */
-export const __resetBrainRssCacheForTest = (): void => {
-  _cachedMaxBrainRssBytes = 0;
-  _lastRssSampleMs = 0;
-};
-
 /** Default opencode auth probe — runs `opencode auth list` and parses the
  *  output into a credential / env-provider snapshot. Returns null when the
  *  probe could not run (binary missing, exit non-zero). The bridge treats
@@ -363,14 +357,6 @@ export const _handshakeGateStateForTests = () => ({
   permitCap: HANDSHAKE_PERMIT_CAP,
   waitBudgetMs: HANDSHAKE_WAIT_BUDGET_MS,
 });
-
-export const _testReleaseAllHandshakePermits = (): void => {
-  while (handshakePermitsInUse > 0) {
-    const waiter = handshakeWaiters.shift();
-    if (waiter) waiter.resolve();
-    else handshakePermitsInUse = 0;
-  }
-};
 
 export const spawnRealOpencode = async (
   req: BridgeRequest,

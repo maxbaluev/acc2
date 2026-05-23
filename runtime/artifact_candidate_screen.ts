@@ -32,41 +32,6 @@ export type CandidateRefusal = {
   payload: JsonValue;
 };
 
-/** F1 decorative-citation refusal helper. Resolves a cited entry that is
- *  NOT a valid events.id by searching the events ledger for a
- *  knowledge_candidate / knowledge_synthesized whose payload.claim or
- *  payload.text matches the label. Used by callers that want to
- *  rehabilitate a label citation into a real event_id before refusal
- *  fires. Returns null when no match is found. The lookup is exact
- *  (label === claim or label === text); fuzzy matching is intentionally
- *  not attempted — labels that drift get refused, the brain retries
- *  with a real id. */
-export const resolveCitedByClaim = (
-  db: Database,
-  label: string,
-): string | null => {
-  if (typeof label !== "string" || label.length === 0) return null;
-  const trimmed = label.trim();
-  if (trimmed.length === 0) return null;
-  // Two passes: first try claim, then text. Order is stable so a label
-  // that matches both surfaces resolves to the claim-matched event id.
-  try {
-    const row = db
-      .query<{ id: string }, [string]>(
-        `SELECT id FROM events
-          WHERE kind IN ('knowledge_candidate','knowledge_synthesized','knowledge_promoted')
-            AND (json_extract(payload, '$.claim') = ?
-                 OR json_extract(payload, '$.text') = ?
-                 OR json_extract(payload, '$.title') = ?)
-          ORDER BY ts DESC LIMIT 1`,
-      )
-      .get(trimmed, trimmed, trimmed);
-    return row?.id ?? null;
-  } catch {
-    return null;
-  }
-};
-
 /** Minimum prefix length to consider for unique-prefix citation resolution.
  *  12 chars of ULID base32 = 60 bits — collision probability at 1M events is
  *  ~1 in 1e6, well below the truncation surface area the brain emits. */

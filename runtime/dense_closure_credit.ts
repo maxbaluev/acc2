@@ -447,5 +447,4 @@ export const distributeDenseClosureCredit = (
 };
 
 // ── Internal exports for tests ────────────────────────────────────
-export const __denseProjectionKeyForTest = denseProjectionKey;
 export const __depthByTaskForTest = depthByTask;

@@ -1169,7 +1169,7 @@ export const EVENT_KINDS = {
   //    worker emits ONE pending_decision_retired event per retire so the
   //    historical audit captures WHICH stale-class triggered the retire.
   //    Payload: { amendment_event_id, reason: "stale" | "test_file_target"
-  //    | "anchor_missing", retired_at: iso, ... }. substrate-internal,
+  //    | "legacy_amendment_churn", retired_at: iso, ... }. substrate-internal,
   //    NOT narrative (operator already sees the count drop on the live
   //    view; no need to surface every retire in the owner narrative).
   pending_decision_retired:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
@@ -1215,7 +1215,6 @@ export const ARTIFACT_LIFECYCLE_KINDS = [
 ] as const;
 /** Pre-quoted comma lists for SQL `kind IN (...)`. */
 export const ARTIFACT_CANDIDATE_KINDS_SQL = ARTIFACT_CANDIDATE_KINDS.map((k) => `'${k}'`).join(", ");
-export const ARTIFACT_LIFECYCLE_KINDS_SQL = ARTIFACT_LIFECYCLE_KINDS.map((k) => `'${k}'`).join(", ");
 
 /** Orchestrator mirror-inline set (operator MUST see these inline). The
  *  rule lives in the parent harness's CLAUDE.md; acc2 has no progress-
@@ -1265,13 +1264,6 @@ let cachedKinds: typeof EVENT_KINDS = EVENT_KINDS;
  *  reference. Hot-reload swaps the underlying map; the next call
  *  sees the new kind without a daemon restart. */
 export const getCurrentEventKinds = (): typeof EVENT_KINDS => cachedKinds;
-
-/** Hot-reload swap point. The reloadable registry calls this after a
- *  successful load + validate so subsequent getCurrentEventKinds()
- *  calls return the new map. Exposed for tests + the registry only. */
-export const __setEventKindsForReload = (fresh: typeof EVENT_KINDS): void => {
-  cachedKinds = fresh;
-};
 
 // Self-register with the reloadable registry. Mirror of the
 // prompt_composer.ts pattern. The smokeProbe asserts the loaded

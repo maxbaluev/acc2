@@ -158,10 +158,6 @@ const acquireProfileMutex = <T>(profileRoot: string, fn: () => Promise<T>): Prom
   return guarded;
 };
 
-// Exposed for tests that need to assert serialization behavior end-to-end.
-export const __getProfileMutexQueueDepth = (profileRoot: string): boolean =>
-  profileMutexes.has(profileRoot);
-
 /** Test surface: run an arbitrary async function under the per-profile-root
  *  mutex without spawning firefox. Phase Align Principle 8 uses this to
  *  prove the mutex serializes concurrent invocations against the same

@@ -125,11 +125,3 @@ export const logger: pino.Logger = createLogger();
 export const withContext = (ctx: LogContext): pino.Logger => {
   return logger.child(ctx);
 };
-
-/** Reset the canonical logger — test-only. Used to swap log destinations
- *  between cases. Not exported as a public API surface. */
-export const _resetLoggerForTests = (next: pino.Logger): void => {
-  // Replace the bindings on the existing logger so module-level imports
-  // keep working.
-  (logger as unknown as { level: string }).level = next.level;
-};

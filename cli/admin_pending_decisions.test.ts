@@ -28,7 +28,7 @@ const insertAmendment = (
       resource_uri: `repo:${fields.target}`,
       anchor: fields.anchor,
       diff: {
-        kind: "anchored_replace_v1",
+        kind: "legacy_advisory_context",
         before: fields.diff?.before ?? "old text",
         after: fields.diff?.after ?? "new text",
         occurrence: 1,
@@ -44,93 +44,6 @@ const insertAmendment = (
   );
   return id;
 };
-
-describe("admin_pending_decisions --auto-decline-malformed (2026-05-17)", () => {
-  test("refuses without --yes (gate)", async () => {
-    closeDb(":memory:");
-    const db = openDb(":memory:");
-    runViews(db);
-    // Malformed (anchor missing) — should be a decline candidate
-    insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
-    const errs: string[] = [];
-    const code = await runPendingDecisions(["--auto-decline-malformed"], {
-      out: () => {},
-      err: (s) => errs.push(s),
-      openSubstrate: () => db,
-    });
-    expect(code).toBe(1);
-    expect(errs.join("\n")).toContain("Pass --yes");
-  });
-
-  test("--yes emits owner_decision_recorded decline for every group member", async () => {
-    closeDb(":memory:");
-    const db = openDb(":memory:");
-    runViews(db);
-    // Three malformed (anchor missing) → one group with duplicate_count=3
-    insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
-    insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
-    insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
-    const code = await runPendingDecisions(["--auto-decline-malformed", "--yes"], {
-      out: () => {},
-      err: () => {},
-      openSubstrate: () => db,
-    });
-    expect(code).toBe(0);
-    const declined = db.query("SELECT count(*) AS c FROM events WHERE kind = 'owner_decision_recorded' AND json_extract(payload, '$.decision') = 'decline'").get() as { c: number };
-    expect(declined.c).toBe(3);
-    // Queue should now be empty
-    const remaining = await runPendingDecisions(["--limit", "10"], {
-      out: () => {},
-      err: () => {},
-      openSubstrate: () => db,
-    });
-    expect(remaining).toBe(0);
-    const queue = db.query("SELECT count(*) AS c FROM pending_owner_decision_queue_view").get() as { c: number };
-    expect(queue.c).toBe(0);
-  });
-
-  test("only declines groups whose decline_candidate_reason is non-null (well-formed proposals untouched)", async () => {
-    closeDb(":memory:");
-    const db = openDb(":memory:");
-    runViews(db);
-    // One well-formed, one malformed
-    insertAmendment(db, { target: "CLAUDE.md", anchor: "## Owner Decisions", consent_required: true });
-    insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
-    const code = await runPendingDecisions(["--auto-decline-malformed", "--yes"], {
-      out: () => {},
-      err: () => {},
-      openSubstrate: () => db,
-    });
-    expect(code).toBe(0);
-    const declined = db.query("SELECT count(*) AS c FROM events WHERE kind = 'owner_decision_recorded'").get() as { c: number };
-    expect(declined.c).toBe(1);
-    // Well-formed one should still be in the queue
-    const queue = db.query("SELECT count(*) AS c FROM pending_owner_decision_queue_view").get() as { c: number };
-    expect(queue.c).toBe(1);
-  });
-
-  test("idempotent — declined proposals don't re-decline on second run", async () => {
-    closeDb(":memory:");
-    const db = openDb(":memory:");
-    runViews(db);
-    insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
-    await runPendingDecisions(["--auto-decline-malformed", "--yes"], {
-      out: () => {},
-      err: () => {},
-      openSubstrate: () => db,
-    });
-    const after1 = db.query("SELECT count(*) AS c FROM events WHERE kind = 'owner_decision_recorded'").get() as { c: number };
-    expect(after1.c).toBe(1);
-    await runPendingDecisions(["--auto-decline-malformed", "--yes"], {
-      out: () => {},
-      err: () => {},
-      openSubstrate: () => db,
-    });
-    const after2 = db.query("SELECT count(*) AS c FROM events WHERE kind = 'owner_decision_recorded'").get() as { c: number };
-    // Should still be 1 — the view's NOT EXISTS check excludes already-declined rows.
-    expect(after2.c).toBe(1);
-  });
-});
 
 describe("admin_pending_decisions", () => {
   test("selectPendingDecisions keeps owner-gated unapplied rows and drops the rest", () => {
@@ -176,7 +89,7 @@ describe("admin_pending_decisions", () => {
     });
     expect(code).toBe(0);
     expect(lines.join("\n")).toContain("orchestrator-runtime.md");
-    expect(lines.join("\n")).toContain("Owner-Facing Dispatch Truth");
+    expect(lines.join("\n")).not.toContain("Owner-Facing Dispatch Truth");
 
     const jsonLines: string[] = [];
     const jsonCode = await runPendingDecisions(["--json"], {
@@ -203,25 +116,20 @@ describe("admin_pending_decisions", () => {
     expect(lines.join("\n")).toContain("none");
   });
 
-  test("pending_owner_decision_queue_view groups duplicates and flags decline candidates", () => {
+  test("pending_owner_decision_queue_view groups duplicates by target only", () => {
     closeDb(":memory:");
     const db = openDb(":memory:");
     runViews(db);
-    // Two well-formed amendments on the SAME (target, anchor) → one group, duplicate_count=2.
     insertAmendment(db, { target: "CLAUDE.md", anchor: "## Owner Decisions", consent_required: true });
-    insertAmendment(db, { target: "CLAUDE.md", anchor: "## Owner Decisions", consent_required: true });
-    // One malformed (empty after) on a different anchor → its own group with group_decline_reason='empty_after'.
     insertAmendment(db, { target: "CLAUDE.md", anchor: "## Other", consent_required: true, diff: { before: "old", after: "" } });
 
     const ranked = pendingOwnerDecisionQueue(db);
-    expect(ranked.length).toBe(2);
-    const ownerGroup = ranked.find((r) => r.anchor === "## Owner Decisions")!;
-    expect(ownerGroup.duplicate_count).toBe(2);
-    expect(ownerGroup.group_decline_reason).toBeNull();
-    expect(ownerGroup.target_risk_score).toBe(1.0);
-    const emptyGroup = ranked.find((r) => r.anchor === "## Other")!;
-    expect(emptyGroup.duplicate_count).toBe(1);
-    expect(emptyGroup.group_decline_reason).toBe("empty_after");
+    expect(ranked.length).toBe(1);
+    expect(ranked[0]!.target).toBe("CLAUDE.md");
+    expect(ranked[0]!.anchor).toBeNull();
+    expect(ranked[0]!.duplicate_count).toBe(2);
+    expect(ranked[0]!.group_decline_reason).toBeNull();
+    expect(ranked[0]!.target_risk_score).toBe(1.0);
   });
 
   test("pending_owner_decision_queue_view excludes rows with any owner_decision_recorded", () => {
@@ -240,32 +148,24 @@ describe("admin_pending_decisions", () => {
 
     const ranked = pendingOwnerDecisionQueue(db);
     expect(ranked.length).toBe(1);
-    expect(ranked[0]!.anchor).toBe("## B");
+    expect(ranked[0]!.anchor).toBeNull();
     expect(ranked[0]!.representative_event_id).toBe(id2);
   });
 
-  test("widening (k_88ESCTN8XN6J): amendments WITHOUT explicit owner_consent_required also surface when apply_gate_status='manual_review'", () => {
+  test("non-consent manual-review churn does not surface as owner decisions", () => {
     closeDb(":memory:");
     const db = openDb(":memory:");
     runViews(db);
-    // No explicit consent flag — and the target is a conceptual
-    // resource URI (NOT a repo:* path), so auto_apply_target=0 and
-    // apply_gate_status becomes 'manual_review'. Pre-fix this row was
-    // invisible (1909 live-substrate rows / ZERO in the decision
-    // queue). Post-fix it surfaces with gate_source='manual_review_implicit'.
-    // The 975 production manual_review rows mostly take this shape:
-    // contract:.../..., ledger:.../..., worker:.../... etc.
     insertAmendment(db, {
       target: "contract:dispatch_decider/routing_axes",
       anchor: "routing_axes_decision_point",
       consent_required: false,
     });
     const ranked = pendingOwnerDecisionQueue(db);
-    expect(ranked.length).toBe(1);
-    expect(ranked[0]!.gate_source).toBe("manual_review_implicit");
+    expect(ranked.length).toBe(0);
   });
 
-  test("widening: explicit owner_consent_required still wins gate_source labelling when both signals fire", () => {
+  test("explicit owner_consent_required is the only pending-decision gate source", () => {
     closeDb(":memory:");
     const db = openDb(":memory:");
     runViews(db);
@@ -279,7 +179,7 @@ describe("admin_pending_decisions", () => {
     expect(ranked[0]!.gate_source).toBe("owner_consent_explicit");
   });
 
-  test("--limit caps ranked output and hides the rest", async () => {
+  test("--limit is applied after target-level grouping", async () => {
     closeDb(":memory:");
     const db = openDb(":memory:");
     runViews(db);
@@ -295,22 +195,8 @@ describe("admin_pending_decisions", () => {
     });
     expect(code).toBe(0);
     const text = lines.join("\n");
-    expect(text).toContain("1 more rows hidden");
+    expect(text).toContain("1 pending group");
+    expect(text).not.toContain("more rows hidden");
   });
 });
 
-
-test("malformed groups rank below well-formed applicable groups", () => {
-  closeDb(":memory:");
-  const db = openDb(":memory:");
-  runViews(db);
-  for (let i = 0; i < 20; i++) insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
-  insertAmendment(db, { target: "runtime/daemon.ts", anchor: "const runRetireTick", consent_required: true });
-
-  const ranked = pendingOwnerDecisionQueue(db);
-  expect(ranked.length).toBe(2);
-  expect(ranked[0]!.anchor).toBe("const runRetireTick");
-  expect(ranked[0]!.group_decline_reason).toBeNull();
-  expect(ranked[1]!.group_decline_reason).toBe("anchor_missing");
-  expect(ranked[0]!.decision_rank).toBeGreaterThan(ranked[1]!.decision_rank);
-});
