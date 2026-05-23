@@ -8,7 +8,7 @@
 //    plumbing scenarios under ACC2_BRIDGE_MODE=mock — the 9 §17/§18 cutover
 //    scenarios, 3 Phase DAG scenarios (rolling-active review, stakeholder
 //    conflict, cross-directive interference), and 8 Batch 5 universal-goal
-//    pilots covering v2-design.md §10.2-10.9 (each hermetic, sub-second).
+//    pilots covering Architecture.md (each hermetic, sub-second).
 //    `--include-real` adds the 21st canned real-brain scenario; `--real-only`
 //    runs only that one. Real-brain runs are opt-in because each burns
 //    ~2 min wall-clock + opencode tokens.
@@ -170,7 +170,7 @@ const PLUMBING_SCENARIOS: ScenarioEntry[] = [
     kind: "shared_daemon",
     run: async (h) => { await scenarioCrossDirectiveInterference(h!); },
   },
-  // Batch 5 universal-goal pilots (v2-design.md §10.2-10.9) — eight additional
+  // Batch 5 universal-goal pilots (Architecture.md) — eight additional
   // plumbing scenarios proving the substrate handles each canonical goal shape
   // under the mock bridge.
   {

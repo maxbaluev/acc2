@@ -1,4 +1,4 @@
-// acc2 watch edges — typed consistency for downstream readers (v2-design.md §9.4).
+// acc2 watch edges — typed consistency for downstream readers (Architecture.md).
 //
 // `watches` is a soft dependency that lets a downstream task observe an
 // upstream's intermediate output mid-flight. The consistency contract is
@@ -159,7 +159,7 @@ export const snapshotWatchedOutputs = (
 /** Detect revocation violations: a monotonic watcher observed a value that
  *  the upstream then revoked (emitted an explicit `revocation_recorded` event
  *  on that kind, or rewrote a committed observation to a lower-information
- *  value). Per v2-design §9.4: "Mid-flight observation revocation: monotonic-
+ *  value). Per Architecture: "Mid-flight observation revocation: monotonic-
  *  only mode; revocation forbidden." Returns the offending event ids. */
 export const detectRevocationViolations = (
   db: Database,

@@ -1,5 +1,5 @@
 // acc2 task dispatcher — single-cycle brain dispatch with structural
-// cycle-1-only enforcement (v2-design.md §3.7, §9.2).
+// cycle-1-only enforcement (Architecture.md, §9.2).
 //
 // Per dispatch:
 //   1. Emit `brain_dispatched` once per ready task.

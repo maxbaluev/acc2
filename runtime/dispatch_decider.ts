@@ -1,4 +1,4 @@
-// acc2 dispatch decider — scored routing predicate (v2-design.md §3.6).
+// acc2 dispatch decider — scored routing predicate (Architecture.md).
 //
 // Three lanes:
 //   1. substrate_replay  — `recipes_view` matches by embedding × shape with
@@ -607,7 +607,7 @@ const estimateComplexity = (task: TaskNode): "low" | "mid" | "high" => {
  *  delegate to the canonical implementation in `runtime/posterior.ts`
  *  so the inline-lane refresh, the knowledge-promotion extractor in
  *  `substrate/extractors.ts`, and the dispatcher all share exactly the
- *  same algebra (v2-design.md §11.5; posterior-consistency alignment
+ *  same algebra (Architecture.md; posterior-consistency alignment
  *  test pins both formulas). Local aliases keep the call-site names
  *  unchanged. */
 const betaMean = canonicalBetaMean;
@@ -711,7 +711,7 @@ const refreshInlinePatternPosterior = (db: Database, knowledgeId: string): void 
  *  `candidate_confirmed` (success) or `candidate_contradicted` (failure)
  *  event citing the promotion id; the existing knowledge extractor consumes
  *  these and recomputes the Beta posterior so the inline-vs-delegate
- *  selector adapts to outcomes. v2-design.md §3.6, k_252 "advisory=fake"
+ *  selector adapts to outcomes. Architecture.md, k_252 "advisory=fake"
  *  remediated by structural credit emission.
  *
  *  Batch 4 Hole 3: after emitting the verdict, also refresh the promotion

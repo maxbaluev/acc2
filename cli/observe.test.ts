@@ -323,7 +323,7 @@ describe("formatEvent — Hole 1: 10 high-volume kinds get dedicated renderers",
       kind: "brain_reasoning_recorded",
       ts: "2026-05-19T12:00:00.000Z",
       task_id: "t_x",
-      payload: { summary: "decomposing directive into 3 sub-tasks per docs/v2-design.md" },
+      payload: { summary: "decomposing directive into 3 sub-tasks per docs/Architecture.md" },
     }, V);
     expect(line).toContain("🧠💭");
     expect(line).toContain("brain_reasoning_recorded");

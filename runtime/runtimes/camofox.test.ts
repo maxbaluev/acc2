@@ -152,7 +152,7 @@ describe("__resolveCamoufoxBinaryForTest", () => {
   });
 });
 
-describe("per-profile-root mutex (v2-design.md §11.2)", () => {
+describe("per-profile-root mutex (Architecture.md)", () => {
   test("concurrent calls against the same profile_root serialise", async () => {
     const order: string[] = [];
     await Promise.all([

@@ -3,7 +3,7 @@
 // dispatcher, and the per-dispatch MCP config materializer can all
 // consume one definition each).
 //
-// The shapes mirror v2-design.md §12 (BridgeResult / BridgeFailureReason).
+// The shapes mirror Architecture.md (BridgeResult / BridgeFailureReason).
 // Keep this file pure-type — anything importing here must remain
 // dependency-light so the index module's public surface stays cheap to
 // load.

@@ -1,5 +1,5 @@
 // acc2 retrieval reranker — embedding cosine × posterior × per-origin bias
-// (v2-design.md §13.1 priority + K caps, §3.6.1 Rule 4 per-origin bias).
+// (Architecture.md priority + K caps, §3.6.1 Rule 4 per-origin bias).
 //
 // Flow:
 //   1. Embed the query text (live OpenAI call). If embedding fails (no API

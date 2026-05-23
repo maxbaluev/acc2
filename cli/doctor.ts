@@ -2,7 +2,7 @@
 // diagnostic. Each check returns a typed verdict; the final exit code is 0 if
 // every check is ok/warn/info, 1 if any check is fail.
 //
-// v2-design.md §1 binds the system to subscription CLIs (Claude Code,
+// Architecture.md binds the system to subscription CLIs (Claude Code,
 // opencode) plus the single API-key exception (OPENAI_API_KEY for
 // text-embedding-3-small); §5 binds the always-on daemon and its health
 // surface. Doctor folds those constraints into one structured surface so the
@@ -228,7 +228,7 @@ export const checkDaemonHealth = async (env: DoctorEnv): Promise<Check> => {
 };
 
 export const checkDbIntegrity = async (env: DoctorEnv): Promise<Check> => {
-  // Per v2-design.md §5, the daemon owns the WAL connection. The /health
+  // Per Architecture.md, the daemon owns the WAL connection. The /health
   // endpoint already runs in-process and returns events_count; PRAGMA
   // integrity_check is delegated to daemon boot (it would fail to start if
   // the file were corrupt). We surface the delegation explicitly so the

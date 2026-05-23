@@ -1,6 +1,6 @@
 // Phase Align — Principle 4: code-as-capability
 //
-// v2-design.md §3.4, §6, §11: every action is a code artifact resolved from
+// Architecture.md, §6, §11: every action is a code artifact resolved from
 // the artifact_store and executed inside a per-runtime sandbox. There is no
 // "hardcoded helper" path that bypasses artifact lookup or permission args.
 //

@@ -270,7 +270,7 @@ The lesson-implementer flywheel uses the existing event ledger as its only
 storage surface. It adds no table and no posterior family: queue state,
 authorization state, verifier state, terminal mutation state, and cheaper-next
 economics are derived from events. This preserves the universal workflow in
-`v2-design.md` §3, the act primitive in §6, the cited-event credit path in §7,
+`Architecture.md` §3, the act primitive in §6, the cited-event credit path in §7,
 the code-artifact authoring loop in §11.5, and recipe replay compounding in §15.
 
 | Kind                                       | Producer       | seed | doctor | status | GAP |

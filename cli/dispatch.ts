@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // `acc task "<owner words>"` and `acc daemon {start|stop|status}` thin client
-// per v2-design.md §21. The CLI never opens SQLite directly — every surface
+// per Architecture.md. The CLI never opens SQLite directly — every surface
 // flows through the daemon: substrate.* via MCP (fastmcp StreamableHTTP),
 // /health + /shutdown via plain HTTP on the auxiliary port.
 

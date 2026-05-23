@@ -1,5 +1,5 @@
 // acc2 task scheduler — picks ready tasks and dispatches them
-// (v2-design.md §9.1).
+// (Architecture.md).
 //
 // Phase E lights up real parallelism:
 //   - Up to maxConcurrent dispatches per tick (default 5, configurable up to

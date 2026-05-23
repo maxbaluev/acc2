@@ -839,7 +839,7 @@ const emitApplyGateEvaluation = async (
       apply_route_deterministic: args.routeDecision?.deterministic,
       apply_route_reason: args.routeDecision?.reason,
       apply_route_preconditions: args.routeDecision?.preconditions,
-      design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
+      design_citations: ["Architecture: Universal Workflow", "Architecture: Act Primitive", "Architecture: Runtimes & Sandboxes", "Architecture: Knowledge Merger", "Architecture: Recipes & Reuse"],
     },
   });
   if (!actionEnv.ok) throw new Error(`gate action_predicted emit failed - ${actionEnv.error}`);
@@ -923,7 +923,7 @@ const emitApplyDenied = async (
       apply_route_score: routeDecision?.score,
       apply_route_confidence: routeDecision?.confidence,
       apply_route_reason: routeDecision?.reason,
-      design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
+      design_citations: ["Architecture: Universal Workflow", "Architecture: Act Primitive", "Architecture: Runtimes & Sandboxes", "Architecture: Knowledge Merger", "Architecture: Recipes & Reuse"],
     },
   });
   if (!env.ok) {
@@ -1212,7 +1212,7 @@ const renderPromptCommand = async (eventId: string): Promise<number> => {
       apply_route_confidence: auth.routeDecision.confidence,
       apply_route_reason: auth.routeDecision.reason,
       target: auth.target || payload.target,
-      design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
+      design_citations: ["Architecture: Universal Workflow", "Architecture: Act Primitive", "Architecture: Runtimes & Sandboxes", "Architecture: Knowledge Merger", "Architecture: Recipes & Reuse"],
     },
   });
   if (!requestEnv.ok) {
@@ -1333,7 +1333,7 @@ export const recordApplyOutcome = async (opts: {
       gate_scored_event_id: gateScoredEventId,
       gate_residual: 0,
       authorization_status: "approved",
-      design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
+      design_citations: ["Architecture: Universal Workflow", "Architecture: Act Primitive", "Architecture: Runtimes & Sandboxes", "Architecture: Knowledge Merger", "Architecture: Recipes & Reuse"],
     },
   });
   if (!requestEnv.ok) {
@@ -1397,7 +1397,7 @@ export const recordApplyOutcome = async (opts: {
         authorization_status: "approved",
         is_amendment: isAmendment,
         applied_at: new Date().toISOString(),
-        design_citations: ["v2-design.md §3", "v2-design.md §6", "v2-design.md §7", "v2-design.md §11.5", "v2-design.md §15"],
+        design_citations: ["Architecture: Universal Workflow", "Architecture: Act Primitive", "Architecture: Runtimes & Sandboxes", "Architecture: Knowledge Merger", "Architecture: Recipes & Reuse"],
       },
     });
     actTupleEventId = actTuple.id;

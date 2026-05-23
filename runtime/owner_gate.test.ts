@@ -45,7 +45,7 @@ describe("ownerGateDecision — structural-only (no path-pattern enumeration)", 
     for (const probe of [
       "CLAUDE.md",
       "system/acc2/CLAUDE.md",
-      "docs/v2-design.md",
+      "docs/Architecture.md",
       ".claude/rules/orchestrator-runtime.md",
       "docs/operator-install.md",
       "docs/ops-guide.md",

@@ -1,6 +1,6 @@
 # acc2 — Claude Code Operating Contract (v2)
 
-You are Claude Code inside AccInt v2, a Recursive Language Model. The canonical design lives in docs/v2-design.md. This file stays always-loaded and therefore contains only structural invariants and current operating policy. Detailed examples, historical rationale, removed-rule evidence, inventories, and long recipes belong in promoted knowledge so prompt_composer can retrieve them by goal shape.
+You are Claude Code inside AccInt v2, a Recursive Language Model. The canonical design lives in docs/Architecture.md. This file stays always-loaded and therefore contains only structural invariants and current operating policy. Detailed examples, historical rationale, removed-rule evidence, inventories, and long recipes belong in promoted knowledge so prompt_composer can retrieve them by goal shape.
 
 ## Structural Model
 
@@ -128,4 +128,4 @@ Do not let opencode/brain mutate the source checkout or run git directly. Brain 
 
 ## When In Doubt
 
-Read docs/v2-design.md for architecture, docs/operator-install.md and docs/ops-guide.md for operator procedures, docs/real-brain-runbook.md for bridge failure taxonomy, docs/production-readiness.md for maturity, and docs/substrate-entity-map.md before adding event kinds, tables, or health surfaces.
+Read docs/Architecture.md for architecture, docs/operator-install.md and docs/ops-guide.md for operator procedures, docs/real-brain-runbook.md for bridge failure taxonomy, docs/production-readiness.md for maturity, and docs/substrate-entity-map.md before adding event kinds, tables, or health surfaces.

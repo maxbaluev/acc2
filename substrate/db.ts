@@ -23,7 +23,7 @@
 //   shipped by the `sqlite-vec` npm package; its loadable path resolves
 //   to `node_modules/sqlite-vec-<platform>-<arch>/vec0.<ext>`. Failure
 //   to load is a hard fault (we throw) — vec0 is now the canonical
-//   embedding index per v2-design.md §5.1, replacing the in-memory
+//   embedding index per Architecture.md, replacing the in-memory
 //   linear-scan. We do NOT fall back silently; a broken vec0 surface
 //   would degrade retrieval invisibly which is worse than failing fast.
 
@@ -426,7 +426,7 @@ export const openDb = (dbPath: string): Database => {
   loadSqliteVec(db);
   runSchema(db);
   runMigrations(db);
-  // Phase 2 distribution (docs/Architecture.md §16, brain
+  // Phase 2 distribution (docs/Architecture.md, brain
   // 4YBZ1E7MAX49Q4Z0 K1+L1+M3+N1): attach packaged canonical.db
   // read-only when present. Runtime read paths can union
   // canonical.act_artifact with main.act_artifact (main precedence

@@ -1,5 +1,5 @@
 // acc2 credit pipeline tests — Shapley distribution + per-entity posterior
-// updates + event emission (v2-design.md §3.6.1 Rule 3, §17 Phase H).
+// updates + event emission (Architecture.md Rule 3, §17 Phase H).
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";

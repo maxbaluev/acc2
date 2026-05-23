@@ -1,7 +1,7 @@
 // `acc admin export-canonical <path> --yes` — build release-owned canonical.db.
 //
 // The output is a fresh SQLite database containing only the portable-wisdom
-// boundary from docs/Architecture.md §16. Export is deny-by-default: any row
+// boundary from docs/Architecture.md. Export is deny-by-default: any row
 // whose provenance touches owner-local/private-corpus events or raw owner text
 // is refused, not redacted after the fact.
 

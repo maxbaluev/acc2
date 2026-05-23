@@ -1,4 +1,4 @@
-// acc2 crisis-mode adjustments — Phase I (v2-design.md §3.5).
+// acc2 crisis-mode adjustments — Phase I (Architecture.md).
 //
 // Crisis directives carry `urgency: 'crisis'` (alongside the default 'normal'
 // and 'elevated'). When a directive in crisis is the active one for a task,

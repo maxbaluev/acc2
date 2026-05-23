@@ -14,7 +14,7 @@
 // Keeping the auxiliary HTTP endpoints on a sibling port keeps the wire
 // surfaces strictly orthogonal: MCP-only on the primary, non-MCP HTTP on the
 // sidecar. Both ports are env-configurable (V2_DAEMON_PORT,
-// V2_DAEMON_AUX_PORT). Per v2-design.md §5.1 the daemon is single-instance
+// V2_DAEMON_AUX_PORT). Per Architecture.md the daemon is single-instance
 // via a lock file (~/.accint/v2.sock); a stale lock (pid not alive) is reaped.
 //
 // Lifecycle events:
@@ -604,7 +604,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // run versioned schema migrations BEFORE seedActArtifacts so any
   // schema changes are in place before the seeder admits rows.
   // substrate/migrations is the ONLY path for state.db schema changes
-  // going forward (docs/Architecture.md §16). Per-migration application
+  // going forward (docs/Architecture.md). Per-migration application
   // is idempotent (versioned via schema_migration_applied event).
   try {
     const { runVersionedMigrations } = await import("../substrate/migration_runner");
@@ -1036,7 +1036,9 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // Auto-prunes stale / test-file-target / anchor-missing rows from
   // the pending_owner_decision_queue surface so the operator never
   // sees 40+ rows of brain-routing noise. Default 1h cadence; the
-  // queue grows slowly so reactive activation is unnecessary.
+  // reactive activation is required because malformed anchorless
+  // proposals can arrive in bursts and must not wait an hour before
+  // disappearing from the live owner-decision surface.
   // Opt-OUT via ACC2_DISABLE_WORKERS=pending_decision_retire.
   if (isWorkerEnabled("pending_decision_retire")) registerWorker("pending_decision_retire", 60 * 60 * 1000);
   // 2026-05-19 (brain amendment 1Z3PMEYE7X44343E7K8ARCDY20, T1.1):
@@ -1820,12 +1822,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const { runPendingDecisionRetireWorker } = await import("./pending_decision_retire_worker");
     markWorkerReady("pending_decision_retire");
     recordWorkerTick("pending_decision_retire");
-    const retireTick = setInterval(
-      supervisedTick(db, "pending_decision_retire", retireTickMs, async () => {
-        runPendingDecisionRetireWorker(db);
-      }),
-      retireTickMs,
-    );
+    const runRetireTick = supervisedTick(db, "pending_decision_retire", retireTickMs, async () => {
+      runPendingDecisionRetireWorker(db);
+    });
+    registerReactiveWorker("pending_decision_retire", retireTickMs, ["contract_amendment_proposed"], runRetireTick, { minReactiveGapMs: 30 * 1000 });
+    const retireTick = setInterval(runRetireTick, retireTickMs);
     workers.push(() => clearInterval(retireTick));
   }
 
@@ -2715,7 +2716,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       transport: "fastmcp:httpStream",
     },
   });
-  // Per v2-design.md §5.1 the canonical embedding index is sqlite-vec
+  // Per Architecture.md the canonical embedding index is sqlite-vec
   // (substrate/schema.sql `vec_events` virtual table). The "rebuild"
   // step is now effectively instant — we backfill vec_events from the
   // legacy events.embedding BLOB column for cutover-window parity, then

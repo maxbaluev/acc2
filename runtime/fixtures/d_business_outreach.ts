@@ -1,4 +1,4 @@
-// acc2 Batch 5 universal-goal pilot — fixture_d_business_outreach (v2-design.md §10.2).
+// acc2 Batch 5 universal-goal pilot — fixture_d_business_outreach (Architecture.md).
 //
 // Goal shape: compose a personalized outreach email to a single recipient and
 // write the body to a tempfile. The verifier checks file existence + body

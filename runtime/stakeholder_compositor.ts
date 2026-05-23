@@ -1,4 +1,4 @@
-// acc2 stakeholder compositor — Phase I (v2-design.md §3.3, §11 module slot).
+// acc2 stakeholder compositor — Phase I (Architecture.md, §11 module slot).
 //
 // Multi-stakeholder directives carry one stakeholder_state_recorded event per
 // distinct stakeholder. Each event declares that stakeholder's utility (numeric

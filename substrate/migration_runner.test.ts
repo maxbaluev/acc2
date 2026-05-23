@@ -1,4 +1,4 @@
-// substrate/migrations runner tests per docs/Architecture.md §16.
+// substrate/migrations runner tests per docs/Architecture.md.
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "./db";

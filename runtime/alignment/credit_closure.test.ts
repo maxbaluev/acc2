@@ -1,6 +1,6 @@
 // Phase Align — Principle 6: credit chain closure.
 //
-// v2-design.md §3.6.1 Rule 3 + §17 Phase H: every `action_scored` event
+// Architecture.md Rule 3 + §17 Phase H: every `action_scored` event
 // MUST produce at least one credit-distribution side-effect — concretely a
 // `act_artifact_score_updated` event linked to the same scoring row. The
 // four-link chain is `create → retrieve → mutate retrieval state → credit

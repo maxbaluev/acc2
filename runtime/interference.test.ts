@@ -1,4 +1,4 @@
-// acc2 cross-directive interference tests — Phase I (v2-design.md §3.4).
+// acc2 cross-directive interference tests — Phase I (Architecture.md).
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";

@@ -1,6 +1,6 @@
 // Phase Align — Principle 9: posterior-update consistency.
 //
-// v2-design.md §3.6.1, §7.2, §11.5: code_artifact and knowledge_candidate
+// Architecture.md, §7.2, §11.5: code_artifact and knowledge_candidate
 // share the SAME Beta posterior + EMA constants. Recipe confidence uses a
 // DIFFERENT (coarser, qualitative) formula on purpose — recipes do not
 // have a residual-driven posterior; they have a single trajectory whose

@@ -1,5 +1,5 @@
 // acc2 brain prompt composer — substrate projection under a strict token budget
-// (v2-design.md §13).
+// (Architecture.md).
 //
 // Composes the prompt the brain sees as a projection over substrate state:
 //   - P0 sections always present (TASK GOAL, RUNTIMES, WORKFLOW).
@@ -2391,7 +2391,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // the upstream-task projection lands (no producer wires non-watch outputs
   // into this slot yet).
   candidates.push({ name: "upstream_outputs", p: 2, body: "UPSTREAM OUTPUTS: (none)" });
-  // Watch edges (v2-design.md §9.4) — projected through declared consistency
+  // Watch edges (Architecture.md) — projected through declared consistency
   // mode. Empty when no watch edges target this task.
   const watched = snapshotWatchedOutputs(db, opts.taskId);
   const watchedBody = watched.length === 0
@@ -2555,7 +2555,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // Restore canonical order in output (P0 → P4). The sort already did this.
   const text = kept.map((c) => c.body).join("\n\n");
 
-  // Depth-1 retrieval budget enforcement (v2-design.md §13, prompt budget).
+  // Depth-1 retrieval budget enforcement (Architecture.md, prompt budget).
   // When any section was dropped to fit under the budget, emit a single
   // `prompt_truncated` event so the audit trail records the structural
   // budget bite — the brain sees a leaner prompt, the substrate can see

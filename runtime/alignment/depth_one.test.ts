@@ -1,6 +1,6 @@
 // Phase Align — Principle 5: depth-1 retrieval, prompt budget enforced.
 //
-// v2-design.md §13: each prompt section uses a small K-cap or a view
+// Architecture.md: each prompt section uses a small K-cap or a view
 // accessor with LIMIT — no section dumps every row. The total prompt stays
 // under PROMPT_BUDGET_TOKENS (default 8000). When the composer can't fit a
 // section under budget it drops the lowest-priority candidate AND emits a

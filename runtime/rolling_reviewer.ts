@@ -1,8 +1,8 @@
-// acc2 rolling-active reviewer — Phase I (v2-design.md §3.1).
+// acc2 rolling-active reviewer — Phase I (Architecture.md).
 //
 // Rolling-active directives never close. They emit `directive_review_due` on
 // cadence; Father (Phase K) picks them up and opens a review subtask each
-// time. v2-design §3.1 defines four cadences (daily, weekly, monthly,
+// time. Architecture defines four cadences (daily, weekly, monthly,
 // quarterly, annually).
 //
 // This module:

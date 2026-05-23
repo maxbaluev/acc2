@@ -1195,9 +1195,9 @@ describe("lesson implementer flywheel views", () => {
       directive_id: "d_contract",
       task_id: "t_contract",
       payload: {
-        target: "docs/v2-design.md",
+        target: "docs/Architecture.md",
         anchor: "§11.5",
-        proposed_behavior: { file_path: "docs/v2-design.md", anchor: "§11.5", diff: "@@" },
+        proposed_behavior: { file_path: "docs/Architecture.md", anchor: "§11.5", diff: "@@" },
         // Post-94N61BVVV9 convergence: owner_gate_required derives from
         // the explicit payload flag, not the file path. A producer that
         // hits owner_profile.things_to_never_do sets this; tests must
@@ -2826,7 +2826,7 @@ describe("owner_plain_status_view + ownerPlainStatus", () => {
   });
 });
 
-// ── v2-design §4.2 named-view restoration tests ───────────────────
+// ── Architecture named-view restoration tests ───────────────────
 
 describe("directive_view + directives", () => {
   test("live directive: status NULL when root task has no terminal", () => {

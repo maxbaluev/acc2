@@ -3,7 +3,7 @@
 **Generated:** 2026-05-14
 **Substrate state:** HEAD `4178f42` ("feat(tests): real opencode smoke + first non-trivial directive (Batch 2.α)"); 458 tests passing across 56 test files; ~28,179 lines of TypeScript across 51 source modules.
 **Reviewer:** Phase-Audit follow-up subagent (read-only inspection pass; only deliverable is this file).
-**Scope:** Inspection of `system/acc2/` only — design (`docs/v2-design.md`, 1,938 lines), schema (`substrate/schema.sql`), event taxonomy (`substrate/types.ts`), views (`substrate/views.ts`), runtime modules under `runtime/`, CLI surfaces under `cli/`, integration scenarios under `tests/`. v1's `system/scripts` and v1's `.opencode/tool` are out of scope.
+**Scope:** Inspection of `system/acc2/` only — design (`docs/Architecture.md`, 1,938 lines), schema (`substrate/schema.sql`), event taxonomy (`substrate/types.ts`), views (`substrate/views.ts`), runtime modules under `runtime/`, CLI surfaces under `cli/`, integration scenarios under `tests/`. v1's `system/scripts` and v1's `.opencode/tool` are out of scope.
 
 ---
 
@@ -21,7 +21,7 @@ The **Top-10 production blockers** in compact form (each detailed in §"Top 10 p
 | 4 | blocker  | Recipe replay is **single-step only** (audit-report.md E.4); multi-step trajectories defer to a Phase J refinement that has no contract yet. | L | Phase J+ |
 | 5 | major    | Admin token + external-push token are **never rotated** — minted once at first run, written to `~/.accint/v2.sock.token`, plaintext, no rotation path. (`runtime/daemon.ts:157`, `runtime/external_ingress.ts`) | M | Phase H+ |
 | 6 | major    | Father drift detection emits `father_drift_detected` but never **self-suspends** (audit-report.md E.5) — the `father_self_suspended` event kind is not even declared in `EventKind`. | M | post-Phase K |
-| 7 | major    | Five named views from v2-design.md §4.2 are **never created**: `directive_view`, `task_critical_path_view`, `active_inference_view`, `artifact_warning_view`, `model_routing_view`, plus the typed-extractor views `knowledge_view`, `entities_view`, `recipes_view`, `provenance_view`, `judgment_packet_view`. (audit-report.md A.4.2-R2) | L | Phase L |
+| 7 | major    | Five named views from Architecture.md are **never created**: `directive_view`, `task_critical_path_view`, `active_inference_view`, `artifact_warning_view`, `model_routing_view`, plus the typed-extractor views `knowledge_view`, `entities_view`, `recipes_view`, `provenance_view`, `judgment_packet_view`. (audit-report.md A.4.2-R2) | L | Phase L |
 | 8 | major    | `.env.example` is **stale from v1** — references TELEGRAM, PINATA, AdsPower, ACC_OPERATOR, ACC_BUDGET_WARN_THRESHOLD, ACC_HARD_SILENCE_TIMEOUT_MS — none of which acc2 reads. (`acc2/.env.example`) | S | Phase L |
 | 9 | major    | `runtime/bridge.ts` is **1,235 LOC** and growing — by far the largest module after `runtime/mcp_server.ts` (1,465 LOC). Both are due for a module split. | M | post-Phase L |
 | 10 | major   | No backup / export / snapshot CLI yet (`docs/ops-guide.md:150` says "A full `acc admin export` flow with online snapshots ships in Batch 3"). For a substrate whose canonical state is one SQLite file, this is critical. | M | Batch 3 |
@@ -50,7 +50,7 @@ The substrate is functionally complete enough to run a real opencode dispatch en
 
 ### A. Phase markers (deferrals across the implementation)
 
-Every site that names a still-pending Phase as the owner of behavior we ship anyway. Source-of-truth phase plan is `docs/v2-design.md` §17.
+Every site that names a still-pending Phase as the owner of behavior we ship anyway. Source-of-truth phase plan is `docs/Architecture.md` §17.
 
 | File:line | Comment / verbatim string | Responsible phase | Impact |
 |-----------|--------------------------|-------------------|--------|
@@ -81,7 +81,7 @@ Every site that names a still-pending Phase as the owner of behavior we ship any
 | `runtime/task_scheduler.ts:11,57,141` | `error: "phase_j"` failure-shape from `phaseJRecipeReplay` — the substrate-replay route still uses this string. Comment: "Phase J recipe replay: stub returns {ok:false, error:'phase_j'}." | Phase J | **minor** — only the new dispatcher path uses the real `replayRecipe`; this stub remains in the scheduler's older dispatch path for back-compat. See item 4. |
 | `runtime/watch_edges.ts:22-23` | "(Phase D) currently feeds an empty array into prompt_composer's WATCHED OUTPUTS section; Phase E lights up the real walk." | Phase E | Closed via `watch_edges.ts` real walk; comment is historical. |
 | `runtime/prompt_composer.ts:13,39-40,58-82,105-106,142,335-355` | "Phase F replaces with a real tokenizer." (closed), "Phase F wires the async retrieve()", "Phase F: real tokenizer via js-tiktoken's cl100k_base", "Phase D stand-in: pull recent promoted knowledge candidates. Phase F lights …", "P2/P3 sections are stubs in Phase D (no upstream-task or stakeholder data …)" | Phase D + F | **minor** — P2/P3 prompt sections are now populated by real upstream walks (Phase E `watch_edges.ts`) but the comment says "stubs in Phase D" — comments are stale. Verify via code, not comments. |
-| `runtime/runtimes/bun.ts:25,27,71,148` | "Irreversible-effect detection (v2-design.md §6.2) is honor-system in Phase C: substrate watches stdout for `@@IRREVERSIBLE@@` markers and trusts them. Phase G adds an out-of-process detector." | Phase G | **major** — `@@IRREVERSIBLE@@` marker discipline is the brain's responsibility today; the substrate cannot OBSERVE a real side-effect (write to network, fs outside the sandbox). |
+| `runtime/runtimes/bun.ts:25,27,71,148` | "Irreversible-effect detection (Architecture.md) is honor-system in Phase C: substrate watches stdout for `@@IRREVERSIBLE@@` markers and trusts them. Phase G adds an out-of-process detector." | Phase G | **major** — `@@IRREVERSIBLE@@` marker discipline is the brain's responsibility today; the substrate cannot OBSERVE a real side-effect (write to network, fs outside the sandbox). |
 | `runtime/runtimes/camofox.ts:165` | "mutex without spawning firefox. Phase Align Principle 8 uses this to …" | Phase Align | Closed. |
 | `runtime/runtimes/uv.ts:16,27` | "Phase G adds nsjail wrapper" / "Irreversible-effect detection is honor-system in Phase G" | Phase G | nsjail wrapper is OPPORTUNISTIC (uses if installed, warns + runs directly if not). |
 | `runtime/mcp_server.ts:363-367,431,517,545,1170,1214,1224` | "Phase Audit: route `view_name` to the substrate/views.ts accessor.", "Views not yet implemented return `view_not_implemented:<name>`", "mode: recent_events_stub", "uv / camofox-browser → return `phase_g_runtime_unsupported`" | Phase Audit (closed for routed views) + Phase G (closed when binaries present) | OK. |
@@ -165,7 +165,7 @@ Every site where the substrate emits `sandbox_unenforced_warning` or comments "h
 | `runtime/runtimes/uv.ts:16,27,228,255` | uv: irreversible effects + nsjail | Same shape — honor-system without nsjail. "nsjail not on PATH — uv runtime executing without syscall sandbox" emitted as warning. | **blocker** when nsjail is absent |
 | `cli/doctor.ts:196` | nsjail | "not installed — uv sandbox is honor-system without nsjail (runs still work)" — verdict `info`, not `warn`. **Should be `warn` in production-readiness mode.** | **minor** |
 
-**Severity overall: blocker.** The design (`v2-design.md` §11.3) promises "per-runtime sandbox declaration … the substrate enforces." Today the substrate WARNS but does not enforce. A brain that authors a network-exfiltrating action artifact succeeds at runtime; only the warning event is generated.
+**Severity overall: blocker.** The design (`Architecture.md` §11.3) promises "per-runtime sandbox declaration … the substrate enforces." Today the substrate WARNS but does not enforce. A brain that authors a network-exfiltrating action artifact succeeds at runtime; only the warning event is generated.
 
 ### G. External tool dependencies + absence handling
 
@@ -294,7 +294,7 @@ Plus 15 tools BEYOND what §13.2 documents: `substrate.embed_text`, `substrate.r
 ### K. Docs coverage gaps
 
 `docs/` enumeration (7 files; 3,786 lines total):
-- `v2-design.md` (1,938 LOC) — canonical design.
+- `Architecture.md` (1,938 LOC) — canonical design.
 - `whitepaper.md` (612 LOC) — philosophy.
 - `audit-report.md` (355 LOC) — Phase Audit findings.
 - `alignment-report.md` (333 LOC) — Phase Align findings.
@@ -308,8 +308,8 @@ Plus 15 tools BEYOND what §13.2 documents: `substrate.embed_text`, `substrate.r
 |---------|----------------------|----------|
 | First-run quickstart (≤30 lines) | `docs/quickstart.md` | **major** — design A.6 says "Re-authored against daemon CLI shape" but the file is not yet created. |
 | MCP tool reference (every tool + parameter shape) | `docs/mcp-reference.md` | **major** — operators wiring third-party MCP clients have no canonical surface. |
-| Brain prompt structure (literal §13 walkthrough) | `docs/prompt-structure.md` or §13 sub-page | **minor** — `v2-design.md` §13 exists but isn't operator-extractable. |
-| Architecture overview (1-pager for new contributors) | `docs/architecture.md` | **major** — v2-design.md at 1,938 lines is too dense for first-read. |
+| Brain prompt structure (literal §13 walkthrough) | `docs/prompt-structure.md` or §13 sub-page | **minor** — `Architecture.md` §13 exists but isn't operator-extractable. |
+| Architecture overview (1-pager for new contributors) | `docs/architecture.md` | **major** — Architecture.md at 1,938 lines is too dense for first-read. |
 | Failure-mode runbook (not just the Batch 2.α one) | `docs/runbook.md` | **major** — `real-brain-runbook.md` covers ONE path; a generalized "what to do when X" runbook is missing. |
 | Contributing guide / module layout | `docs/CONTRIBUTING.md` | **minor.** |
 | Security model (token rotation, sandbox guarantees, threat model) | `docs/security.md` | **blocker** — relates directly to §F honor-system warnings. |
@@ -382,7 +382,7 @@ Plus 15 tools BEYOND what §13.2 documents: `substrate.embed_text`, `substrate.r
 
 ### Top-1: Sandbox is honor-system on net_allow / proc_allow / cpu / memory
 
-**Gap.** The design (`v2-design.md` §11.3) promises "per-runtime sandbox declaration … the substrate enforces." Today, only `--allow-read` / `--allow-write` and `wall_ms` are enforced by the bun runtime; `net_allow`, `proc_allow`, `cpu_ms`, `memory_mb` are honor-system on the bun side. uv runs honor-system without nsjail. Camofox's `browser_allow_domains` is declared but not enforced via playwright's request-router.
+**Gap.** The design (`Architecture.md` §11.3) promises "per-runtime sandbox declaration … the substrate enforces." Today, only `--allow-read` / `--allow-write` and `wall_ms` are enforced by the bun runtime; `net_allow`, `proc_allow`, `cpu_ms`, `memory_mb` are honor-system on the bun side. uv runs honor-system without nsjail. Camofox's `browser_allow_domains` is declared but not enforced via playwright's request-router.
 
 **Why it blocks production.** A brain that authors a network-exfiltrating action artifact succeeds at runtime. The substrate generates `sandbox_unenforced_warning` events but proceeds. An owner cannot trust a long-horizon directive that pulls in unknown third-party data sources.
 
@@ -432,7 +432,7 @@ Plus 15 tools BEYOND what §13.2 documents: `substrate.embed_text`, `substrate.r
 
 **Gap.** `audit-report.md` E.4 marks this as deferred — informational. `runtime/recipe_replay.ts:replayRecipe` iterates ONCE over the trajectory. The `recipe_extracted` payload already carries the multi-step trajectory; the loop just stops after action 1.
 
-**Why it blocks production.** Recipe coverage is one of the cutover criteria (`v2-design.md` §18 criterion 6: "≥30% of routine directives hit Tier-0 replay"). A single-step replay can only match the shortest trajectories. Anything that took ≥2 actions to solve historically must re-dispatch the full opencode chain.
+**Why it blocks production.** Recipe coverage is one of the cutover criteria (`Architecture.md` §18 criterion 6: "≥30% of routine directives hit Tier-0 replay"). A single-step replay can only match the shortest trajectories. Anything that took ≥2 actions to solve historically must re-dispatch the full opencode chain.
 
 **Fix path.**
 - Sequence-aware `replayRecipe` that runs each `action_artifact_id` in order, feeding observation N into action N+1's inputs. ~120 LOC in `runtime/recipe_replay.ts`.
@@ -492,7 +492,7 @@ Plus 15 tools BEYOND what §13.2 documents: `substrate.embed_text`, `substrate.r
 
 **Gap.** `acc2/.env.example` (the file referenced by `docs/operator-install.md:42` for "copy `.env.example` to `.env`") references TELEGRAM_BOT_TOKEN, PINATA_JWT, ADSPOWER_URL, ACC_OPERATOR, ACC_HARD_SILENCE_TIMEOUT_MS, ACC_BUDGET_WARN_THRESHOLD, ACC_REFLECT_TIMEOUT, and ACC_MAX_CONSECUTIVE_FAILURES. None of these are read by any acc2 source file.
 
-**Why it blocks production.** Operators copy the example, see TELEGRAM/PINATA, and either (a) waste time installing services that aren't connected, or (b) lose trust in the rest of the doc. The acc2 design rejected all of these surfaces (`v2-design.md` §22).
+**Why it blocks production.** Operators copy the example, see TELEGRAM/PINATA, and either (a) waste time installing services that aren't connected, or (b) lose trust in the rest of the doc. The acc2 design rejected all of these surfaces (`Architecture.md` §22).
 
 **Fix path.** Rewrite `acc2/.env.example` to only document acc2-reachable env vars: OPENAI_API_KEY, ACC2_BRIDGE_MODE, ACC2_OPENCODE_MODEL, ACC2_OPENCODE_TIMEOUT_MS, ACC2_OPENCODE_MCP_HANDSHAKE_MS, ACC2_DISABLE_WORKERS (canonical opt-OUT, comma-separated worker names), ACC2_FATHER_INTERVAL_MS, V2_DAEMON_PORT, V2_DAEMON_AUX_PORT, V2_MCP_SERVER_URL, ACC2_STATE_DIR, ACC2_DB_PATH, ACC2_EXTERNAL_PUSH_TOKEN, CAMOUFOX_BINARY_PATH, CAMOUFOX_HEADLESS, CAMOUFOX_LOCALE, ACC2_SANDBOX_PROC_ALLOW, SERPER_API_KEY, ACC2_TEST_DB_PATH. ~60 LOC delete + ~30 LOC add.
 

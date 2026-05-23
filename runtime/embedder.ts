@@ -1,11 +1,11 @@
 // acc2 embedder — wraps the OpenAI text-embedding-3-small endpoint and the
 // daemon's background "embed every text-bearing event" worker tick.
 //
-// Per v2-design.md §5 and §20 question 1 (resolved: `text-embedding-3-small`
+// Per Architecture.md and §20 question 1 (resolved: `text-embedding-3-small`
 // via `OPENAI_API_KEY`). Tests mock `globalThis.fetch` so we never hit the
 // real OpenAI API in CI. Production deployments set OPENAI_API_KEY in env.
 //
-// Version stamping (v2-design.md §19 risk 16):
+// Version stamping (Architecture.md risk 16):
 //   Every stored embedding row carries `embedding_version` alongside the
 //   BLOB column. The reranker excludes mixed-version sets — when we change
 //   model or dimensions, bump EMBEDDING_VERSION and stale rows fall out of
@@ -191,7 +191,7 @@ export const batchComputeEmbeddings = async (
 
 /** Extract the embedding-target text from one event row payload. Returns
  *  null when the kind isn't embeddable or no text-like field is present.
- *  v2-design.md §5.2: external-pushed events wrap their payload in a
+ *  Architecture.md: external-pushed events wrap their payload in a
  *  `data: { ... }` envelope under `payload.data`; we look there too so an
  *  ingested external event becomes first-class for retrieval just like
  *  brain-emitted rows. */
@@ -374,7 +374,7 @@ export const pendingEmbeddableCount = async (db: Database): Promise<number> => {
  *  Idempotent — we DELETE-by-PK first then INSERT, since vec0 does not
  *  reliably support UPSERT semantics across versions. We READ kind + ts
  *  from the source event row (one cheap PK lookup) rather than threading
- *  them through every caller. Per v2-design.md §5.1, vec_events is the
+ *  them through every caller. Per Architecture.md, vec_events is the
  *  canonical embedding index.
  *
  *  Failure handling: if the vec_events insert fails (extension didn't

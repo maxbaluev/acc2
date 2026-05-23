@@ -47,7 +47,7 @@ export type EmitEventInput = {
    *  worker — most call sites leave it undefined. */
   embedding?: Uint8Array;
   /** Embedding model/version stamp. Stored alongside the BLOB so the
-   *  reranker can exclude mixed-version sets (v2-design §19 risk 16). */
+   *  reranker can exclude mixed-version sets (Architecture risk 16). */
   embedding_version?: string;
 };
 

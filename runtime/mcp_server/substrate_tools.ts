@@ -56,6 +56,7 @@ import {
   lowRiskInlinePatterns,
   lessonImplementerQueue,
   pendingOwnerDecisionQueue,
+  pendingOwnerDecisionQueueLive,
   lessonImplementationStatus,
   appliedLessonEffectiveness,
   lessonApplyCandidates,
@@ -588,7 +589,7 @@ export const handleEmit = (
   input.residual = e.residual;
 
   // ACT-LOOP TUPLE VALIDATION (FOUNDATIONAL FIX 2026-05-17):
-  // v2-design.md §3 + §10 mandate that every action_predicted carries
+  // Architecture.md + §10 mandate that every action_predicted carries
   // `intent + action_artifact_id + verifier_artifact_id + predicted_residual`.
   // Observed brain behavior: 28 of 30 recent action_predicted events from
   // opencode 1.4 omitted the artifact tuple, emitting only intent + free-form
@@ -614,7 +615,7 @@ export const handleEmit = (
     if (missing.length > 0) {
       return {
         ok: false,
-        error: `action_predicted_missing_act_loop_tuple:${missing.join(",")};hint=action_predicted MUST carry action_artifact_id+verifier_artifact_id+predicted_residual (v2-design.md §3). For design work without a runtime artifact, emit knowledge_candidate (recommendation) or lesson_extracted (reusable pattern) instead. For repo changes, emit contract_amendment_proposed. To execute an action, first substrate.admit_artifact for BOTH the action artifact and the verifier artifact, then emit action_predicted with both IDs.`,
+        error: `action_predicted_missing_act_loop_tuple:${missing.join(",")};hint=action_predicted MUST carry action_artifact_id+verifier_artifact_id+predicted_residual (Architecture.md). For design work without a runtime artifact, emit knowledge_candidate (recommendation) or lesson_extracted (reusable pattern) instead. For repo changes, emit contract_amendment_proposed. To execute an action, first substrate.admit_artifact for BOTH the action artifact and the verifier artifact, then emit action_predicted with both IDs.`,
       };
     }
   }
@@ -673,7 +674,7 @@ export const handleRead = (
   // Route `view_name` to the substrate/views.ts accessor.
   // Unknown views return `view_not_implemented:<name>` so callers see a
   // clear signal instead of a silent empty. The set below mirrors §4.2
-  // of v2-design.md.
+  // of Architecture.md.
   const db = ctx.db;
   const view = args.view_name;
   try {
@@ -1052,6 +1053,8 @@ export const handleRead = (
         return { ok: true, result: lessonImplementerQueue(db) as unknown as JsonValue };
       case "pending_owner_decision_queue_view":
         return { ok: true, result: pendingOwnerDecisionQueue(db) as unknown as JsonValue };
+      case "pending_owner_decision_queue_live_view":
+        return { ok: true, result: pendingOwnerDecisionQueueLive(db) as unknown as JsonValue };
       case "pending_contract_amendments_view": {
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;

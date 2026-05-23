@@ -1,4 +1,4 @@
-// acc2 ULID-ish id minter. v2-design.md §4.1 allows ULID or UUID-derived ids.
+// acc2 ULID-ish id minter. Architecture.md allows ULID or UUID-derived ids.
 // We standardise on a 26-char Crockford-base-32 string. crypto.randomUUID()
 // gives us 122 bits of entropy; we re-encode to base32 to match ULID shape.
 

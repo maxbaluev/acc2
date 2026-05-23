@@ -1,5 +1,5 @@
 // acc2 task topology — DAG analysis over task_node_opened + task_edge_recorded
-// events (v2-design.md §3.8, §8, §9.3).
+// events (Architecture.md, §8, §9.3).
 //
 // Phase D scope:
 //   - readDagForDirective: walk events for one directive, return nodes + edges.

@@ -449,7 +449,7 @@ export const spawnRealOpencode = async (
 
   // Brain audit b0kheqg3g hole D (2026-05-15): persist the composed prompt
   // so auditors can inspect what the brain saw. The depth-1-retrieval claim
-  // (v2-design §13) is falsifiable only when the prompt is in the ledger.
+  // (Architecture) is falsifiable only when the prompt is in the ledger.
   // Capped at PROMPT_FULL_CAP_CHARS to keep SQLite bounded; sha256 +
   // chars_original give exact provenance.
   // Audit-row cap. Raised from 32_768 to 65_536 so operators can see the full
@@ -1274,7 +1274,7 @@ export const spawnRealOpencode = async (
     // Cycle-1-only self-iteration signals — kill the process. Predicate
     // sourced from `cycle_one_gate.ts` so the mock-bridge dispatcher scan
     // and this real-bridge stdout scan can never drift on what counts as
-    // a violation (v2-design.md §3.7).
+    // a violation (Architecture.md).
     if (isCycleViolation(kind)) {
       cycleViolation = kind ?? null;
       try { proc.kill("SIGTERM"); } catch { /* swallow */ }

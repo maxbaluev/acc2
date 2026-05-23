@@ -3,7 +3,7 @@
 // `runtime.recent_events` MCP tool) so `acc watch` can see events as they
 // land without polling SQLite.
 //
-// Design constraints (v2-design.md §5.1, §21):
+// Design constraints (Architecture.md, §21):
 //   - In-process only. The bus lives in the daemon's bun process; subscribers
 //     are HTTP response controllers held by the auxiliary Bun.serve handler.
 //   - Synchronous broadcast — every subscriber callback is invoked from inside

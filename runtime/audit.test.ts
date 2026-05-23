@@ -553,7 +553,7 @@ describe("audit A.5.5: runtime_subprocess_* events fire from the bun runtime", (
 // ── A.4.1 EventKind ↔ design parity check ──────────────────────────
 
 describe("audit A.4.1: design-named event kinds exist as EventKind union members", () => {
-  // Each of these is referenced in v2-design.md §4.1 / §5.5 / §3.6.1.
+  // Each of these is referenced in Architecture.md / §5.5 / §3.6.1.
   const must: EventKind[] = [
     "runtime_subprocess_started",
     "runtime_subprocess_resource_warning",

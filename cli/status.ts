@@ -71,7 +71,7 @@ const LIFECYCLES: Lifecycle[] = ["live", "queued_at_cap", "completed", "failed",
 const STATUS_SOURCES: StatusReport["contract"]["sources"] = {
   daemon: ["/health"],
   dispatch_lifecycle: ["dispatch_resolved_view"],
-  pending_owner_decisions: ["pending_owner_decision_queue_view"],
+  pending_owner_decisions: ["pending_owner_decision_queue_live_view"],
   owner_profile: ["owner_profile_view"],
   learning: ["promoted_knowledge_view", "recipe_registry_view", "act_artifact_registry_view", "applied_lesson_effectiveness_view", "contradictory_candidates_view"],
   actual_changes: ["runtime.recent_events:applied_change_committed"],
@@ -167,7 +167,7 @@ export const buildStatusReport = async (): Promise<StatusReport> => {
   const [daemon, dispatchEnv, pendingEnv, readyEnv, ownerEnv, knowledgeEnv, recipeEnv, artifactEnv, effectivenessEnv, contradictoryEnv, failureEnv, closureEnv, changesEnv] = await Promise.all([
     daemonSummary(),
     readView("dispatch_resolved_view"),
-    readView("pending_owner_decision_queue_view"),
+    readView("pending_owner_decision_queue_live_view"),
     readView("ready_tasks_view"),
     readView("owner_profile_view"),
     readView("promoted_knowledge_view"),
@@ -187,7 +187,7 @@ export const buildStatusReport = async (): Promise<StatusReport> => {
   };
 
   const dispatchRows = rows<DispatchRow>("dispatch_resolved_view", dispatchEnv);
-  const pendingRows = rows<Record<string, unknown>>("pending_owner_decision_queue_view", pendingEnv);
+  const pendingRows = rows<Record<string, unknown>>("pending_owner_decision_queue_live_view", pendingEnv);
   const readyRows = rows<ReadyRow>("ready_tasks_view", readyEnv);
   const ownerRows = rows<OwnerProfileRow>("owner_profile_view", ownerEnv);
   const knowledgeRows = rows<TimedRow>("promoted_knowledge_view", knowledgeEnv);

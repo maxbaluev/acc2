@@ -1,7 +1,7 @@
 // Phase Align — Principle 3: cycle-1-only enforcement is structural across
 // BOTH the mock and the real bridge.
 //
-// v2-design.md §3.7: cycle-1-only is a structural invariant, not advisory.
+// Architecture.md: cycle-1-only is a structural invariant, not advisory.
 // Before Phase Align, the mock-bridge path and the real-bridge path each
 // had their own enforcement copy. This test asserts that:
 //   1. The two forbidden event kinds are owned by a single canonical export

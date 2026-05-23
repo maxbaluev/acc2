@@ -1,7 +1,7 @@
 // Phase Align — Principle 8: per-state-root mutex on every stateful runtime
 // invocation.
 //
-// v2-design.md §11.2: stateful artifacts (camofox-browser is the canonical
+// Architecture.md: stateful artifacts (camofox-browser is the canonical
 // case in v2) queue against a per-state-root mutex. Concurrent invocations
 // against the SAME `profile_root` serialize; different roots run in parallel.
 //

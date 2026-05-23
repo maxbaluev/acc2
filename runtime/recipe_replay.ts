@@ -1,4 +1,4 @@
-// acc2 recipe replay — Tier-0 cost compression (v2-design.md §15).
+// acc2 recipe replay — Tier-0 cost compression (Architecture.md).
 //
 // A recipe is a cached successful task-graph trajectory: a goal_shape +
 // topology_signature with a sequence of action_predicted + verifier artifact
@@ -554,7 +554,7 @@ export const replayRecipe = async (
     });
     emitted.push(scoredEv.id);
 
-    // Close the credit chain (v2-design.md §3.6.1 Rule 3; Phase Align Principle 6).
+    // Close the credit chain (Architecture.md Rule 3; Phase Align Principle 6).
     // Every action_scored event MUST be followed by a distributeCredit call.
     try {
       await distributeCredit(db, {

@@ -3,7 +3,7 @@
 // handler files and the server bootstrap (index.ts) can each consume
 // these definitions without circular dependencies.
 //
-// The schemas mirror v2-design.md §13.2 — keep this file in lockstep
+// The schemas mirror Architecture.md — keep this file in lockstep
 // with the canonical surface declared in `McpMethods` below.
 
 import type { Database } from "bun:sqlite";
@@ -65,7 +65,7 @@ export const McpMethods = [
 ] as const;
 export type McpMethodName = (typeof McpMethods)[number];
 
-// ── Parameter schemas (zod, per v2-design.md §13.2) ────────────────
+// ── Parameter schemas (zod, per Architecture.md) ────────────────
 
 // substrate.emit accepts an `event` object, OR — for ergonomic CLI use — the
 // event fields directly at the top level. Both shapes are supported; the

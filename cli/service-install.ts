@@ -3,7 +3,7 @@
 // written; the operator is given the load command. We do NOT auto-load (the
 // system-level path requires sudo, and we keep the surface user-respectful).
 //
-// Per v2-design.md §5, the daemon is the always-on substrate. This module is
+// Per Architecture.md, the daemon is the always-on substrate. This module is
 // purely operator-side scaffolding — it does not touch the running daemon or
 // the substrate; the load step is a manual operator action so they can audit
 // the file before enabling it.

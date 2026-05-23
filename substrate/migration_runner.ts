@@ -1,7 +1,7 @@
 // acc2 substrate/migrations registry — versioned schema migrations.
 //
 // Per brain dispatch VJDMME8JD961SE6F amendment 4AV2NPJW2H1HV0XQ3MR2ZV78KC
-// + docs/Architecture.md §16: "A substrate/migrations registry is the
+// + docs/Architecture.md: "A substrate/migrations registry is the
 // ONLY path for state.db schema changes. Migrations are idempotent,
 // ledger-audited (each application emits schema_migration_applied
 // {version, ts, success}), and tested against representative organism
@@ -22,7 +22,7 @@
 // migration corruption is worse than a loud refusal).
 //
 // Schema migrations are SHIPPED state (canonical.db side per
-// Architecture.md §16), NOT brain-mediated mutation. acc upgrade
+// Architecture.md), NOT brain-mediated mutation. acc upgrade
 // applies them deterministically.
 
 import type { Database } from "bun:sqlite";

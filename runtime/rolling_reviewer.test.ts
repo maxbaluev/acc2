@@ -1,4 +1,4 @@
-// acc2 rolling-reviewer tests — Phase I (v2-design.md §3.1).
+// acc2 rolling-reviewer tests — Phase I (Architecture.md).
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";

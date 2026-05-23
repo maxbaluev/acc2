@@ -221,7 +221,7 @@ const banner = (log: Logger): void => {
   log("");
   log("─── Welcome to AccInt v2 ───");
   log("Universal Recursive Language Model — persistent thinking daemon.");
-  log("Canonical design: docs/v2-design.md");
+  log("Canonical design: docs/Architecture.md");
   log("Quickstart:       docs/operator-install.md (Batch 1.δ)");
   log("");
 };

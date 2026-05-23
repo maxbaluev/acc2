@@ -9,7 +9,7 @@
 // real daemon (real fastmcp wire, real Bun.serve aux port, real SQLite, real
 // bun-runtime artifacts). The bridge runs in mock mode for the 17 plumbing
 // scenarios — 9 cutover-criteria scenarios plus 8 Batch 5 universal-goal
-// pilots covering v2-design.md §10.2-10.9. The production default is `real`,
+// pilots covering Architecture.md. The production default is `real`,
 // but harness.ts and the bun test preload (`tests/preload.ts`) pin
 // `ACC2_BRIDGE_MODE=mock` so no opencode subprocess is spawned. The 18th
 // scenario (scenarioRealBrainEndToEnd) flips to real for its own dispatch
@@ -1220,7 +1220,7 @@ export const scenarioCrossDirectiveInterference = async (handle: DaemonHandle): 
   }
 };
 
-// ── Batch 5 universal-goal pilot scenarios (v2-design.md §10.2-10.9) ──
+// ── Batch 5 universal-goal pilot scenarios (Architecture.md) ──
 //
 // Each scenario mirrors its sibling fixture under the shared daemon. The
 // substrate runs an unmodified scheduler tick against the fixture's directive,
@@ -1748,7 +1748,7 @@ export type AdHocTaskOptions = {
   /** When true, keep the temp state dir + DB on exit so the operator can inspect.
    *  The path is printed in the final summary. */
   keepState?: boolean;
-  /** Directive urgency. `crisis` engages crisis-mode dispatch (v2-design.md §3.5);
+  /** Directive urgency. `crisis` engages crisis-mode dispatch (Architecture.md);
    *  the post-run summary reports `crisis_mode_engaged: yes/no` based on whether
    *  a `crisis_mode_engaged` event fired during the run. Default "normal". */
   urgency?: AdHocTaskUrgency;
@@ -1885,7 +1885,7 @@ export const scenarioAdHocTask = async (opts: AdHocTaskOptions): Promise<AdHocTa
         urgency,
       } as JsonValue,
     });
-    // Crisis directives engage crisis-mode dispatch (v2-design.md §3.5). The
+    // Crisis directives engage crisis-mode dispatch (Architecture.md). The
     // mode change is recorded as a structural `crisis_mode_engaged` event so
     // downstream surfaces (and the post-run summary) can tell whether the
     // substrate actually flipped into the lowered-threshold lane —

@@ -2,10 +2,10 @@
 
 **Date:** 2026-05-13
 **Baseline:** master at `cf58b42` (330 tests passing)
-**Audited:** `docs/v2-design.md` (1,938 lines) ↔ acc2 codebase (cli/, runtime/, substrate/, runtime/runtimes/, runtime/fixtures/)
+**Audited:** `docs/Architecture.md` (1,938 lines) ↔ acc2 codebase (cli/, runtime/, substrate/, runtime/runtimes/, runtime/fixtures/)
 **Result:** **354 tests passing** (330 baseline + 24 audit). All blocker and major findings closed in-pass. Minor + informational findings catalogued at end with recommended phase.
 
-The audit walked v2-design.md section by section against the live code, then enumerated every gap, inconsistency, and undeclared invariant. Findings are grouped under the five sections of the audit brief. Each finding carries the design-citation line(s), the code location, and the action taken.
+The audit walked Architecture.md section by section against the live code, then enumerated every gap, inconsistency, and undeclared invariant. Findings are grouped under the five sections of the audit brief. Each finding carries the design-citation line(s), the code location, and the action taken.
 
 ---
 
@@ -106,7 +106,7 @@ The audit walked v2-design.md section by section against the live code, then enu
 ### A.5.5-R1 — Sandbox unenforced warnings as events
 
 - **Severity:** major.
-- **Design (line 12 of `runtime/runtimes/bun.ts` source comments + risk 11 of v2-design.md):** sandbox warnings should be queryable as substrate events.
+- **Design (line 12 of `runtime/runtimes/bun.ts` source comments + risk 11 of Architecture.md):** sandbox warnings should be queryable as substrate events.
 - **Code before:** `buildBunPermissionArgs` returned warnings as a `warnings: string[]` field on `BunRuntimeObservation` only; nothing wrote them to the substrate.
 - **Action taken:** *fixed-in-this-pass*. `runBunArtifact` now emits one `sandbox_unenforced_warning` event per declared-but-unenforceable permission entry, with `runtime + warning` payload.
 
@@ -352,4 +352,4 @@ Confirmed by three consecutive full-suite runs: 354/354 passing.
 - E.4 (recipe replay multi-step) → Phase J refinement.
 - E.5 (Father self-suspend on repeated drift) → post-K maintenance.
 
-The substrate is now coherent with v2-design.md on every blocker and major finding. The DAG-level semantic merger, the dispatch decider's inline lane, the runtime supervision event surface, the external-source registration MCP tool, and the substrate.read view router are all live and tested.
+The substrate is now coherent with Architecture.md on every blocker and major finding. The DAG-level semantic merger, the dispatch decider's inline lane, the runtime supervision event surface, the external-source registration MCP tool, and the substrate.read view router are all live and tested.

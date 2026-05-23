@@ -2,7 +2,7 @@
 
 A universal **Recursive Language Model** whose recursive memory, synthesis operator, and code-runtime broker all live in a persistent substrate daemon. The owner speaks naturally; Claude Code (you) routes; opencode (gpt-5.5) reasons; the substrate compounds.
 
-**Canonical design:** [`docs/v2-design.md`](docs/v2-design.md) (1,940+ lines, ground truth).
+**Canonical design:** [`docs/Architecture.md`](docs/Architecture.md) (1,940+ lines, ground truth).
 
 ## How it works
 
@@ -98,7 +98,7 @@ For per-component manual install paths, see
 
 ## Architecture
 
-- **Canonical design:** [`docs/v2-design.md`](docs/v2-design.md) — the architectural ground truth.
+- **Canonical design:** [`docs/Architecture.md`](docs/Architecture.md) — the architectural ground truth.
 - **Operator install:** [`docs/operator-install.md`](docs/operator-install.md) — first-install walkthrough.
 - **Ops guide:** [`docs/ops-guide.md`](docs/ops-guide.md) — running, updating, backing up, troubleshooting.
 - **Real-brain runbook:** [`docs/real-brain-runbook.md`](docs/real-brain-runbook.md) — diagnosing real-bridge failures.
@@ -116,7 +116,7 @@ acc2/
 ├── cli/                  thin RPC clients to the daemon (init, dispatch, doctor, watch, admin, service-install, rpc)
 ├── tests/                unit tests + harness-smoke + real-brain-smoke-shape
 │   └── integration/      harness.ts, scenarios.ts (10 scenarios), real_brain_smoke.ts, crash_recovery.ts
-├── docs/                 v2-design.md (canonical), whitepaper.md, ops-guide.md, real-brain-runbook.md, production-readiness.md
+├── docs/                 Architecture.md (canonical), whitepaper.md, ops-guide.md, real-brain-runbook.md, production-readiness.md
 ├── scripts/              postinstall.ts (camoufox fetcher), fetch-camoufox.ts
 └── bunfig.toml           pins ACC2_BRIDGE_MODE=mock for `bun test`
 ```

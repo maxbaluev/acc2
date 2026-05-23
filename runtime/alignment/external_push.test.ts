@@ -1,6 +1,6 @@
 // Phase Align — Principle 7: external-push first-class.
 //
-// v2-design.md §5.2: events ingested via `POST /external/push` are first-
+// Architecture.md: events ingested via `POST /external/push` are first-
 // class substrate rows. The embedder includes them in `EMBEDDABLE_KINDS`,
 // and once embedded they show up in retrieval just like brain-emitted rows.
 //

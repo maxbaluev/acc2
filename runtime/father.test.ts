@@ -1,4 +1,4 @@
-// acc2 Father tests — Phase K (v2-design.md §14).
+// acc2 Father tests — Phase K (Architecture.md).
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";

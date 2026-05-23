@@ -44,5 +44,5 @@ real work until `acc doctor` says PASS.**
   changes mid-flight via amendments.
 
 See [docs/operator-install.md](operator-install.md) for the manual install
-path (used by integration tests + CI). See [docs/v2-design.md](v2-design.md)
+path (used by integration tests + CI). See [docs/Architecture.md](Architecture.md)
 for the canonical architectural reference.

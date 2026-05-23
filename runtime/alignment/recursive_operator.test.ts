@@ -1,6 +1,6 @@
 // Phase Align — Principle 1: substrate-as-recursive-operator
 //
-// v2-design.md: the daemon owns every call surface. The brain (opencode) and
+// Architecture.md: the daemon owns every call surface. The brain (opencode) and
 // the orchestrator (Claude Code) MUST NOT read each other directly. Every
 // cross-actor read goes through the substrate — `getEventById`, a view
 // accessor, or `substrate.read` — not via a shared in-memory channel.

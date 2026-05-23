@@ -1,7 +1,7 @@
 // acc2 brain-bridge mock dispatcher — Phase D + Batch-5 fixture bodies,
 // markers, sandbox helpers, dispatch table, and `opencodeQueryMock`
 // + adversarial / high-residual variants. Split out of the monolithic
-// runtime/bridge.ts (Batch 5 universal-goal pilots, v2-design.md §10.2-10.9).
+// runtime/bridge.ts (Batch 5 universal-goal pilots, Architecture.md).
 //
 // PHASE D MOCK. The real bridge spawns `opencode run …` as a subprocess
 // and streams typed BridgeFrames; that path lives in `./opencode.ts`.
@@ -31,7 +31,7 @@ const FIXTURE_D_MARKER = "FIXTURE: fixture_d_count_todos";
 const EXAMPLE_COM_MARKER = "Fetch the URL https://example.com via Bun.fetch (the bun runtime).";
 
 // Batch 5: eight universal-goal pilot fixtures covering
-// v2-design.md §10.2-10.9. Each marker is embedded verbatim in its
+// Architecture.md. Each marker is embedded verbatim in its
 // fixture's directive_text so the prompt composer carries it through to
 // the bridge prompt; the mock then keys off the marker to admit the
 // canonical action + verifier pair and emit `action_predicted`.
@@ -153,7 +153,7 @@ const BUN_FS_WRITE_SANDBOX = (): SandboxDecl => ({
   memory_mb: 128,
 });
 
-// ── Batch 5 universal-goal fixture bodies (v2-design.md §10.2-10.9) ──
+// ── Batch 5 universal-goal fixture bodies (Architecture.md) ──
 //
 // Each pair (action + verifier) is a small deterministic goal shape executed
 // under the bun runtime. The action artifact reads its parameters from

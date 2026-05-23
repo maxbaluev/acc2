@@ -1,5 +1,5 @@
 // acc2 Father — brainless scheduler running on a fixed cadence
-// (v2-design.md §14).
+// (Architecture.md).
 //
 // Father is a recurring task in the substrate, NOT a separate process. Each
 // tick reads:

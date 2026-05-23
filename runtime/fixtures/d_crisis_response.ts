@@ -1,4 +1,4 @@
-// acc2 Batch 5 universal-goal pilot — fixture_d_crisis_response (v2-design.md §10.9).
+// acc2 Batch 5 universal-goal pilot — fixture_d_crisis_response (Architecture.md).
 //
 // Goal shape: emit an emergency-mode directive (urgency="crisis") whose
 // initial task produces a triage step list. The fixture exercises crisis-mode

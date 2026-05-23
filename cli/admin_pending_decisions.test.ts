@@ -298,3 +298,19 @@ describe("admin_pending_decisions", () => {
     expect(text).toContain("1 more rows hidden");
   });
 });
+
+
+test("malformed groups rank below well-formed applicable groups", () => {
+  closeDb(":memory:");
+  const db = openDb(":memory:");
+  runViews(db);
+  for (let i = 0; i < 20; i++) insertAmendment(db, { target: "CLAUDE.md", anchor: "", consent_required: true });
+  insertAmendment(db, { target: "runtime/daemon.ts", anchor: "const runRetireTick", consent_required: true });
+
+  const ranked = pendingOwnerDecisionQueue(db);
+  expect(ranked.length).toBe(2);
+  expect(ranked[0]!.anchor).toBe("const runRetireTick");
+  expect(ranked[0]!.group_decline_reason).toBeNull();
+  expect(ranked[1]!.group_decline_reason).toBe("anchor_missing");
+  expect(ranked[0]!.decision_rank).toBeGreaterThan(ranked[1]!.decision_rank);
+});

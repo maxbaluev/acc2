@@ -1,5 +1,5 @@
 // acc2 artifact store — CRUD + posterior update + LATM promotion / quarantine
-// thresholds for the `act_artifact` table (v2-design.md §11.4, §11.5, §11.6).
+// thresholds for the `act_artifact` table (Architecture.md, §11.5, §11.6).
 //
 // Posterior model:
 //   - Beta(α, β) with α + β = total observations.
@@ -15,10 +15,10 @@
 // EMA of residual: half-life N = 20 events → decay = 0.5^(1/N). New
 // `recent_residual_mean` = decay × old + (1 − decay) × new_residual.
 //
-// LATM promotion threshold (v2-design.md §11.5):
+// LATM promotion threshold (Architecture.md):
 //     score ≥ 0.85  AND  confidence ≥ 0.7  AND  total_invocations ≥ 20.
 //
-// Quarantine (v2-design.md §11.6):
+// Quarantine (Architecture.md):
 //     recent_residual_mean > 0.7  AND  total_invocations ≥ 5
 //   OR `recent_kill_count` ≥ 3 (column-backed; incremented by the runtime
 //      supervisor on hard_killed/orphaned subprocesses).
@@ -115,7 +115,7 @@ const PROMOTION_SCORE_THRESHOLD = 0.85;
 const PROMOTION_CONFIDENCE_THRESHOLD = 0.7;
 const PROMOTION_INVOCATION_THRESHOLD = 20;
 
-// Quarantine thresholds (v2-design.md §11.6). Defaults are tuned for fast
+// Quarantine thresholds (Architecture.md). Defaults are tuned for fast
 // detection of regressions; the env knobs let operators dial in per-deploy
 // sensitivity without code edits.
 // Universal threshold values — pending f13 adaptive-scoring contract
@@ -694,7 +694,7 @@ export const maybeRetire = (
   return true;
 };
 
-// ── Rehabilitation (Phase H — v2-design.md §11.6) ──────────────────
+// ── Rehabilitation (Phase H — Architecture.md) ──────────────────
 //
 // Quarantined artifacts can re-enter `admitted` status after:
 //   (a) the cause-aware cooldown elapsed since the latest
@@ -756,7 +756,7 @@ const latestQuarantineEvent = (db: Database, artifactId: string): QuarantineEven
   return { ts: row.ts, reason: quarantineReasonFromPayload(row.payload) };
 };
 
-/** Per v2-design.md §11.6: a quarantined artifact may re-enter `admitted`
+/** Per Architecture.md: a quarantined artifact may re-enter `admitted`
  *  status after the cause-aware cooldown elapses, the admission fixture
  *  re-passes, and 10 controlled fixture invocations all return residual
  *  below the artifact's admission threshold. The runner closure is

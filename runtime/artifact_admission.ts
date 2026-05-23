@@ -1,4 +1,4 @@
-// acc2 artifact admission — gate for new code artifacts (v2-design.md §11.5).
+// acc2 artifact admission — gate for new code artifacts (Architecture.md).
 //
 // Admission protocol:
 //   1. Validate the sandbox declaration shape. Bad shape → admission rejected.
@@ -59,7 +59,7 @@ export type AdmissionInput = {
   declaredSandbox: SandboxDecl | null;
   fixtureInput: JsonValue | null;
   /** Threshold the fixture's residual must come in BELOW for admission to pass.
-   *  Typically 0.2 per v2-design.md §11.5. Ignored when runtime is null
+   *  Typically 0.2 per Architecture.md. Ignored when runtime is null
    *  (data-class admission skips fixture execution entirely). */
   fixtureExpectedResidualBelow: number;
   /** Optional pre-allocated id so callers (or tests) can refer to the row
@@ -140,7 +140,7 @@ export type AdmissionResult =
   | { ok: true; artifactId: string; supersedes_dropped?: boolean }
   | { ok: false; reason: AdmissionRejectionReason; detail?: string };
 
-// Canonical admission priors per v2-design.md §11.5.
+// Canonical admission priors per Architecture.md.
 const ADMIT_ALPHA = 1.0;
 const ADMIT_BETA = 1.0;
 const ADMIT_SCORE = 0.5;

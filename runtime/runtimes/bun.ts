@@ -1,5 +1,5 @@
 // acc2 bun runtime — executes TypeScript code artifacts under a declared
-// sandbox (v2-design.md §6.1, §11.2, §11.3, §5.5).
+// sandbox (Architecture.md, §11.2, §11.3, §5.5).
 //
 // Lifecycle:
 //   1. Materialize the artifact body into an ephemeral tempdir.
@@ -22,7 +22,7 @@
 //      `ok:false, error:"result_parse_failed"`.
 //   5. Tempdir removed unconditionally in a `finally` block.
 //
-// Irreversible-effect detection (v2-design.md §6.2) is honor-system in Phase C:
+// Irreversible-effect detection (Architecture.md) is honor-system in Phase C:
 // the bun process cannot reliably observe its own filesystem writes from
 // outside, so `observation.irreversibleEffects` starts empty. Phase G adds an
 // nsjail-based shim that intercepts open(O_WRONLY) and forwards effect records.
@@ -74,7 +74,7 @@ const SIGTERM_SIGKILL_ESCALATION_MS = 2_000;
 
 /** Scan stdout for `@@IRREVERSIBLE@@ <kind>:<description>` lines. The
  *  artifact opts in to declaring its irreversible effects via this marker
- *  (v2-design.md §6.2 + Phase H light-weight detection). Multiple lines
+ *  (Architecture.md + Phase H light-weight detection). Multiple lines
  *  allowed; the dispatcher fires irreversible_effect_recorded events for
  *  every entry. */
 const parseIrreversibleLines = (stdout: string): Array<{ kind: string; description: string }> => {

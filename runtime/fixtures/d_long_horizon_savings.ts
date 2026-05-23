@@ -1,4 +1,4 @@
-// acc2 Batch 5 universal-goal pilot — fixture_d_long_horizon_savings (v2-design.md §10.8).
+// acc2 Batch 5 universal-goal pilot — fixture_d_long_horizon_savings (Architecture.md).
 //
 // Goal shape: given a savings target, a horizon in months, and an optional
 // annual rate, compute the monthly contribution required to reach the target.

@@ -1,6 +1,6 @@
 // acc2 Phase D canonical fixture — fixture_d_count_todos.
 //
-// Per v2-design.md §17 Phase D, the fixture directive says:
+// Per Architecture.md Phase D, the fixture directive says:
 //   "Count files in <dir> whose contents contain the substring TODO,
 //    return the integer count."
 //

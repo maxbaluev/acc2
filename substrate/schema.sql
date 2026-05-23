@@ -198,7 +198,7 @@ CREATE INDEX IF NOT EXISTS idx_artifact_kind_metadata_needs_strategic
 -- source of truth for these indexes — see substrate/db.ts:113-114.
 
 -- ── sqlite-vec virtual table: canonical embedding index ────────────
--- Per v2-design.md §3.6.1 Rule 1 (embedding-based candidate dedup) and
+-- Per Architecture.md Rule 1 (embedding-based candidate dedup) and
 -- §5.1 / §13.1 (depth-1 retrieval). vec_events is the SOLE embedding
 -- index in v2. The `events.embedding` BLOB column above is kept as a
 -- TRANSITIONAL field for one cutover window so we can compare new

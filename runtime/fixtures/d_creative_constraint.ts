@@ -1,4 +1,4 @@
-// acc2 Batch 5 universal-goal pilot — fixture_d_creative_constraint (v2-design.md §10.4).
+// acc2 Batch 5 universal-goal pilot — fixture_d_creative_constraint (Architecture.md).
 //
 // Goal shape: produce a haiku (three lines of 5-7-5 syllables) on the supplied
 // subject. The verifier counts syllables per line via a deterministic

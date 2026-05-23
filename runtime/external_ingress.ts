@@ -1,4 +1,4 @@
-// acc2 external-push webhook — POST /external/push per v2-design.md §5.2.
+// acc2 external-push webhook — POST /external/push per Architecture.md.
 //
 // Behaviour:
 //   1. Authorization: Bearer <token>. Accepted token comes from either the
@@ -205,7 +205,7 @@ export type ExternalSourceRegistration = {
 /** Register a new external source. Mints a per-source token override and
  *  adds the source to the allowlist so subsequent pushes pass the
  *  registered-source check. Emits `external_source_registered` for audit
- *  (v2-design.md §5.2). Returns the registered name + a redacted token
+ *  (Architecture.md). Returns the registered name + a redacted token
  *  preview so the caller knows what was committed without echoing the
  *  secret. */
 export const registerExternalSource = (

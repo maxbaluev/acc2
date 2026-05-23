@@ -1,5 +1,5 @@
 // acc2 credit pipeline — Shapley distribution across cited knowledge +
-// code artifacts (v2-design.md §3.6.1 Rule 3 + §17 Phase H + §18 cutover
+// code artifacts (Architecture.md Rule 3 + §17 Phase H + §18 cutover
 // criterion 8 "knowledge promotion balance").
 //
 // One outcome (action_scored.residual) → many credit destinations:
@@ -66,7 +66,7 @@ import { nowIso } from "./ids";
 import { maybePromoteKnowledge } from "../substrate/extractors";
 import { getThreshold } from "./threshold_registry";
 
-// ── LATM novelty bonus (v2-design.md §11.5) ───────────────────────
+// ── LATM novelty bonus (Architecture.md) ───────────────────────
 //
 // When an artifact earns credit for a previously-unseen goal_shape (i.e. the
 // directive's hashed goal token), its first-time weight is multiplied by

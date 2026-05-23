@@ -1,4 +1,4 @@
-// acc2 substrate types — canonical shape per docs/v2-design.md §4.1, §11.3.
+// acc2 substrate types — canonical shape per docs/Architecture.md, §11.3.
 // One events table, many views. Three runtimes. Sandbox is per-runtime.
 
 export type Ulid = string;

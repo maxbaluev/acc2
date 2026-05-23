@@ -29,3 +29,12 @@ describe("renderStatusReport", () => {
     expect(out).toContain("closure_residual=0.12");
   });
 });
+
+
+test("status-live-pending-owner-decision-source-regression", async () => {
+  const source = await Bun.file(new URL("./status.ts", import.meta.url)).text();
+  expect(source).toContain('pending_owner_decisions: ["pending_owner_decision_queue_live_view"]');
+  expect(source).toContain('readView("pending_owner_decision_queue_live_view")');
+  expect(source).toContain('rows<Record<string, unknown>>("pending_owner_decision_queue_live_view", pendingEnv)');
+  expect(source).not.toContain('pending_owner_decisions: ["pending_owner_decision_queue_view"]');
+});

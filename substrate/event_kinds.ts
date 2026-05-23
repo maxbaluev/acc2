@@ -1033,7 +1033,7 @@ export const EVENT_KINDS = {
   // KCs R6BS0FP17S6375 + ZM4HZPQFMS2D7E. Canonical-vs-learned boundary
   // is separate-canonical.db (choice C); aliasing is generic
   // act_artifact_aliased event (choice E); update mechanism is
-  // acc upgrade CLI (choice H). See docs/Architecture.md §16.
+  // acc upgrade CLI (choice H). See docs/Architecture.md.
   //
   // act_artifact_aliased: emitted when a release renames a handle
   // (predicate/artifact/etc). Alias chains are append-only, cycle-

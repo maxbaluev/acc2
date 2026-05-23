@@ -1,4 +1,4 @@
-// acc2 Batch 5 universal-goal pilot — fixture_d_research_summary (v2-design.md §10.3).
+// acc2 Batch 5 universal-goal pilot — fixture_d_research_summary (Architecture.md).
 //
 // Goal shape: produce a short summary of a small text corpus, then verify the
 // summary length lives in a reasonable window AND every required keyword

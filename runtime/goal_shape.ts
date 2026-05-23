@@ -1,5 +1,5 @@
 // acc2 goal-shape hashing — coarse approximation for per-origin retrieval
-// bias (v2-design.md §3.6.1 Rule 4, §17 Phase H, §18 cutover criterion 19).
+// bias (Architecture.md Rule 4, §17 Phase H, §18 cutover criterion 19).
 //
 // The reranker multiplies cosine × posterior by a per-(origin, goal_shape)
 // bias multiplier sourced from `origin_promotion_view`. To do that, we need

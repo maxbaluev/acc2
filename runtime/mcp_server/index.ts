@@ -1,4 +1,4 @@
-// acc2 MCP server — bootstrap + HTTP wrapper. Per v2-design.md §11.1
+// acc2 MCP server — bootstrap + HTTP wrapper. Per Architecture.md
 // the daemon hosts ONE MCP server that BOTH Claude Code and opencode
 // connect to as native MCP clients. This file constructs that server
 // using `fastmcp` (https://github.com/punkpeye/fastmcp). Each substrate
@@ -102,7 +102,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     version: opts.version ?? "0.0.1",
     instructions:
       "AccInt v2 substrate. Every method returns `{ok, result|error}` " +
-      "JSON-stringified. Read v2-design.md §11 + §13.2 for the protocol.",
+      "JSON-stringified. Read Architecture.md + §13.2 for the protocol.",
     // 2026-05-21 wedge fix: fastmcp default ping fires every 5s on EVERY
     // active SSE session. After ~1000 sessions accumulate from one day of
     // dispatch churn (each acc task / orchestrator poll / opencode brain

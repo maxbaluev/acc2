@@ -1,4 +1,4 @@
-// acc2 substrate views — pure SQL view definitions per docs/v2-design.md §4.2.
+// acc2 substrate views — pure SQL view definitions per docs/Architecture.md.
 // Each view is a CREATE VIEW over the events + act_artifact
 // tables already declared in schema.sql. Accessor functions are thin: one
 // query, parse JSON columns, return rows. Heavier projections (semantic
@@ -1159,7 +1159,7 @@ CREATE VIEW IF NOT EXISTS watch_edge_observations_view AS
 
 // directive_conflicts_view — cross-directive interference edges projected to
 // (from_directive, to_directive, interaction). The `interaction` column
-// reads payload.interaction first (v2-design.md §3.4 canonical naming) and
+// reads payload.interaction first (Architecture.md canonical naming) and
 // falls back to payload.kind (Phase I emitter still uses this) so the view
 // surfaces edges from both eras of the codebase. `payload` is retained for
 // callers that need the full row.
@@ -3275,7 +3275,7 @@ shape AS (
     CASE
       WHEN b.normalized_target LIKE '%CLAUDE.md' THEN 1.0
       WHEN b.normalized_target LIKE '%.claude/rules/%' THEN 1.0
-      WHEN b.normalized_target = 'docs/v2-design.md' THEN 0.95
+      WHEN b.normalized_target = 'docs/Architecture.md' THEN 0.95
       WHEN b.normalized_target = 'docs/operator-install.md' THEN 0.85
       WHEN b.normalized_target = 'docs/ops-guide.md' THEN 0.85
       WHEN b.normalized_target LIKE 'docs/%' THEN 0.65
@@ -3313,7 +3313,8 @@ SELECT
   CASE WHEN SUM(CASE WHEN s.decline_candidate_reason IS NULL THEN 1 ELSE 0 END) = 0
     THEN MIN(s.decline_candidate_reason)
     ELSE NULL END AS group_decline_reason,
-  (MAX(s.target_risk_score) * 0.5
+  (CASE WHEN SUM(CASE WHEN s.decline_candidate_reason IS NULL THEN 1 ELSE 0 END) = 0 THEN 0.0 ELSE 1.0 END
+   + MAX(s.target_risk_score) * 0.5
    + MAX(s.shape_quality_score) * 0.3
    + MAX(s.staleness_score) * 0.1
    + MIN(1.0, COUNT(*) * 0.05)) AS decision_rank
@@ -3408,7 +3409,7 @@ shape AS (
     CASE
       WHEN b.normalized_target LIKE '%CLAUDE.md' THEN 1.0
       WHEN b.normalized_target LIKE '%.claude/rules/%' THEN 1.0
-      WHEN b.normalized_target = 'docs/v2-design.md' THEN 0.95
+      WHEN b.normalized_target = 'docs/Architecture.md' THEN 0.95
       WHEN b.normalized_target = 'docs/operator-install.md' THEN 0.85
       WHEN b.normalized_target = 'docs/ops-guide.md' THEN 0.85
       WHEN b.normalized_target LIKE 'docs/%' THEN 0.65
@@ -3441,7 +3442,8 @@ SELECT
   CASE WHEN SUM(CASE WHEN s.decline_candidate_reason IS NULL THEN 1 ELSE 0 END) = 0
     THEN MIN(s.decline_candidate_reason)
     ELSE NULL END AS group_decline_reason,
-  (MAX(s.target_risk_score) * 0.5
+  (CASE WHEN SUM(CASE WHEN s.decline_candidate_reason IS NULL THEN 1 ELSE 0 END) = 0 THEN 0.0 ELSE 1.0 END
+   + MAX(s.target_risk_score) * 0.5
    + MAX(s.shape_quality_score) * 0.3
    + MAX(s.staleness_score) * 0.1
    + MIN(1.0, COUNT(*) * 0.05)) AS decision_rank
@@ -4005,7 +4007,7 @@ CREATE VIEW IF NOT EXISTS substrate_narrative_recent_view AS
   ORDER BY e.ts DESC;
 `;
 
-// directive_view — per-directive top-level synthesis per v2-design.md §4.2
+// directive_view — per-directive top-level synthesis per Architecture.md
 // line 589: "root + status + lifecycle + urgency." One row per
 // `directive_opened` event, joined with the root task's terminal event
 // (task_committed / task_failed / task_abandoned) to expose status.
@@ -4069,7 +4071,7 @@ CREATE VIEW IF NOT EXISTS directive_view AS
 `;
 
 // task_critical_path_view — per-directive longest dependency chain
-// through `requires` edges per v2-design.md §4.2 line 592. The chain is
+// through `requires` edges per Architecture.md line 592. The chain is
 // computed by walking edges backward from each task_node_opened (depth
 // 0 = task with no outgoing 'requires' edge depending on it). Returns
 // one row per directive carrying the max depth and the path string
@@ -4123,7 +4125,7 @@ CREATE VIEW IF NOT EXISTS task_critical_path_view AS
 `;
 
 // active_inference_view — residual statistics per substrate_origin and
-// action_artifact_id per v2-design.md §4.2 line 595 ("residual stats
+// action_artifact_id per Architecture.md line 595 ("residual stats
 // per task-kind, substrate_origin"). Pulls residual from action_scored
 // payloads; action_artifact_id stands in for "task-kind" (the
 // open-vocabulary discriminator of what the act DID). The view is
@@ -4153,7 +4155,7 @@ CREATE VIEW IF NOT EXISTS active_inference_view AS
 `;
 
 // artifact_warning_view — quarantined / retired act_artifact rows with
-// rehabilitation eligibility per v2-design.md §4.2 line 597. The 14-day
+// rehabilitation eligibility per Architecture.md line 597. The 14-day
 // cooldown mirrors `runtime/recipe_inertia.ts` (RECIPE_INERTIA_DECAY_DAYS
 // = 14); a quarantined artifact whose updated_at sits inside the cooldown
 // is `cooldown` (rehab worker will skip it); past cooldown it becomes
@@ -4191,7 +4193,7 @@ CREATE VIEW IF NOT EXISTS artifact_warning_view AS
 `;
 
 // model_routing_view — brain-model dispatch outcome counts per
-// (model, terminal_kind) per v2-design.md §4.2 line 598 ("{sub_task_kind,
+// (model, terminal_kind) per Architecture.md line 598 ("{sub_task_kind,
 // model} success rates"). The "sub_task_kind" axis here is the brain
 // dispatch's terminal_kind (task_committed / task_failed / dispatcher_violation);
 // "model" is read from brain_dispatched.payload.model (e.g., "openai/gpt-5.5").
@@ -6623,7 +6625,7 @@ export const pendingContractAmendments = (
   });
 };
 
-// ── directive_view accessor (v2-design §4.2 line 589) ─────────────
+// ── directive_view accessor (Architecture line 589) ─────────────
 
 export type DirectiveRow = {
   directive_id: string;
@@ -6662,7 +6664,7 @@ export const directives = (db: Database, directiveId?: string): DirectiveRow[] =
   }));
 };
 
-// ── task_critical_path_view accessor (v2-design §4.2 line 592) ────
+// ── task_critical_path_view accessor (Architecture line 592) ────
 
 export type TaskCriticalPathRow = {
   directive_id: string;
@@ -6684,7 +6686,7 @@ export const taskCriticalPaths = (db: Database, directiveId?: string): TaskCriti
   }));
 };
 
-// ── active_inference_view accessor (v2-design §4.2 line 595) ──────
+// ── active_inference_view accessor (Architecture line 595) ──────
 
 export type ActiveInferenceRow = {
   substrate_origin: string;
@@ -6711,7 +6713,7 @@ export const activeInference = (db: Database): ActiveInferenceRow[] => {
   }));
 };
 
-// ── artifact_warning_view accessor (v2-design §4.2 line 597) ──────
+// ── artifact_warning_view accessor (Architecture line 597) ──────
 
 export type ArtifactWarningRow = {
   artifact_id: string;
@@ -6749,7 +6751,7 @@ export const artifactWarnings = (db: Database): ArtifactWarningRow[] => {
   }));
 };
 
-// ── model_routing_view accessor (v2-design §4.2 line 598) ─────────
+// ── model_routing_view accessor (Architecture line 598) ─────────
 
 export type ModelRoutingRow = {
   model: string;

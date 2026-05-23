@@ -1,4 +1,4 @@
-// acc2 sandbox — per-runtime permission grammar enforcement (v2-design.md §11.3).
+// acc2 sandbox — per-runtime permission grammar enforcement (Architecture.md).
 //
 // The sandbox is per-RUNTIME, not per-action: bun has fs/net/proc/substrate_access
 // permissions; uv adds pypi; camofox-browser swaps to browser-allow-domains +
@@ -11,7 +11,7 @@
 //   - buildUvPermissionArgs(decl) / buildCamofoxPermissionArgs(decl) — Phase G
 //     stubs (throw with `phase_g` so callers fail loudly).
 //
-// Honesty caveats for the bun builder (per v2-design.md §5.5 + §11.3):
+// Honesty caveats for the bun builder (per Architecture.md + §11.3):
 //   - bun does not have Deno-style --allow-net / --allow-read / --allow-write
 //     enforcement at the process level. We approximate by setting `cwd` to a
 //     tempdir and refusing to spawn if the decl references absolute paths

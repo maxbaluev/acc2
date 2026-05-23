@@ -1,5 +1,5 @@
 // acc2 cycle-1 enforcement gate — shared structural guard for both the mock
-// and real opencode bridges (v2-design.md §3.7 cycle-1-only).
+// and real opencode bridges (Architecture.md cycle-1-only).
 //
 // Why a separate module: the design says cycle-1-only is structural. Before
 // this gate existed, the mock bridge path's cycle-1 enforcement lived in

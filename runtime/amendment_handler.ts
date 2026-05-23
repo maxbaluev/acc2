@@ -1,5 +1,5 @@
 // acc2 amendment handler — processes `directive_amended` events
-// (v2-design.md §3.2, §4.1).
+// (Architecture.md, §4.1).
 //
 // When the owner says "narrow the goal to X" mid-flight, the substrate
 // receives a `directive_amended` event with:

@@ -1,4 +1,4 @@
-// acc2 recipe replay tests — Phase J (v2-design.md §15).
+// acc2 recipe replay tests — Phase J (Architecture.md).
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";

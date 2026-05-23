@@ -1,4 +1,4 @@
-// acc2 Batch 5 universal-goal pilot — fixture_d_multi_stakeholder (v2-design.md §10.5).
+// acc2 Batch 5 universal-goal pilot — fixture_d_multi_stakeholder (Architecture.md).
 //
 // Goal shape: pick a single value (the "decision") that lies inside every
 // stakeholder's declared utility window [low, high]. Verifier checks the

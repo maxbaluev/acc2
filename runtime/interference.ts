@@ -1,4 +1,4 @@
-// acc2 cross-directive interference — Phase I (v2-design.md §3.4, §19 risk 20).
+// acc2 cross-directive interference — Phase I (Architecture.md, §19 risk 20).
 //
 // Directives interact: "save for retirement" depletes "buy a house"; "ship MVP"
 // blocks "refactor build pipeline"; "exec_directive_A watches market_signal_B".
@@ -21,7 +21,7 @@ import type { JsonValue } from "../substrate/types";
 import { emitEvent, type EmitEventInput } from "./events";
 
 // Phase I (legacy) kinds: blocks/watches/depletes — what `recordInterferenceEdge`
-// emits today. Phase DAG extends the taxonomy with the v2-design.md §3.4
+// emits today. Phase DAG extends the taxonomy with the Architecture.md
 // canonical kinds: `mutual_exclusion`, `resource_conflict`,
 // `sequencing_dependency`, `enabling`. The scheduler-aware concurrency
 // conflicts (`mutual_exclusion`, `resource_conflict`) drive dispatch-time
@@ -283,7 +283,7 @@ export const renderInterferenceBlock = (
   return lines.join("\n");
 };
 
-/** Scheduler-side concurrency check (v2-design.md §3.4, Phase DAG).
+/** Scheduler-side concurrency check (Architecture.md, Phase DAG).
  *
  *  For a candidate ready task that belongs to `directiveId`, return the FIRST
  *  in-flight directive that conflicts with it via a `mutual_exclusion` or

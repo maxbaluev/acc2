@@ -1,7 +1,7 @@
 -- v001_distribution_baseline — substrate/migrations registry baseline.
 --
 -- Per brain dispatch VJDMME8JD961SE6F amendment 4AV2NPJW2H1HV0XQ3MR2ZV78KC
--- (docs/Architecture.md §16): substrate/migrations is the ONLY path for
+-- (docs/Architecture.md): substrate/migrations is the ONLY path for
 -- state.db schema changes going forward. This v001 is the BASELINE
 -- migration — it records that the organism has joined the migration
 -- registry. All future schema changes get a v0NN migration file.

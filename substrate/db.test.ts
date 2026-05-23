@@ -1,6 +1,6 @@
 // acc2 substrate db tests — proves the connection layer keeps WAL +
 // schema + transaction invariants. Uses crypto.randomUUID() in place
-// of a ULID lib since v2-design.md §4.1 allows either (deliverable §3).
+// of a ULID lib since Architecture.md allows either (deliverable §3).
 
 import { describe, test, expect, afterAll, beforeEach } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";

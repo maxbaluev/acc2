@@ -1,6 +1,6 @@
 // acc2 camofox-browser runtime — REAL Camoufox (firefox fork) driven via
 // playwright's `firefox.launchPersistentContext` against a long-lived,
-// substrate-owned profile root (v2-design.md §6.1 row "camofox-browser",
+// substrate-owned profile root (Architecture.md row "camofox-browser",
 // §11.3 camofox variant, §5.5 supervision).
 //
 // Batch 1.α reality: the runtime spawns the real Camoufox binary —
@@ -36,7 +36,7 @@
 //   - CAMOUFOX_HEADLESS — "true" | "false"
 //
 // Lifecycle when camoufox + playwright are BOTH present:
-//   1. Acquire the per-profile-root mutex (v2-design.md §11.2 — stateful
+//   1. Acquire the per-profile-root mutex (Architecture.md — stateful
 //      artifacts queue on a per-state-root mutex; camofox is stateful per
 //      profile_root). Concurrent invocations against the SAME profile_root
 //      serialize; different profile_roots run in parallel.
@@ -125,7 +125,7 @@ const parseIrreversibleLines = (stdout: string): Array<{ kind: string; descripti
   return out;
 };
 
-// ── Per-state-root mutex (v2-design.md §11.2) ─────────────────────
+// ── Per-state-root mutex (Architecture.md) ─────────────────────
 //
 // Concurrent invocations against the same profile_root MUST queue. We model
 // this as a Map<profile_root, Promise>: each entry is a tail promise; new

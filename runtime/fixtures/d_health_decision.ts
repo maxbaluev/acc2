@@ -1,4 +1,4 @@
-// acc2 Batch 5 universal-goal pilot — fixture_d_health_decision (v2-design.md §10.6).
+// acc2 Batch 5 universal-goal pilot — fixture_d_health_decision (Architecture.md).
 //
 // Goal shape: given a symptom list, recommend an over-the-counter remedy
 // citing a knowledge entry AND including the canonical "consult a clinician"

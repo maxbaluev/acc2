@@ -197,6 +197,14 @@ export const runPendingDecisionRetireWorker = (
                    OR EXISTS (SELECT 1 FROM json_each(COALESCE(odr.context_refs, '[]')) WHERE value = q.source_event_id)
                  )
              )
+              -- Exclude already-retired rows before LIMIT. Otherwise a large
+              -- historical retired backlog can consume the scan window and
+              -- starve newly malformed live rows.
+              AND NOT EXISTS (
+                SELECT 1 FROM events ret
+                WHERE ret.kind = 'pending_decision_retired'
+                  AND json_extract(ret.payload, '$.amendment_event_id') = q.source_event_id
+              )
          )
          SELECT
            b.source_event_id,

@@ -2858,7 +2858,7 @@ export const PREDICATE_SEED_NAMES = PREDICATE_SEEDS.map((p) => p.name);
 // replays of the same goal_shape × topology accumulate. Day-1 substrates
 // have zero trace history, so the recipe-replay lane is dead until the
 // first dozen tasks have committed — that starves the Tier-0 cost
-// compression path described in v2-design.md §15.
+// compression path described in Architecture.md.
 //
 // `seedRecipes` lays down canonical priors for goal shapes the brain
 // will see repeatedly in practice (URL title fetch + arithmetic). The

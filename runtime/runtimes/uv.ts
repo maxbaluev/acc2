@@ -1,5 +1,5 @@
 // acc2 uv runtime — Python under nsjail (when available) via the Astral `uv`
-// fast Python package manager (v2-design.md §6.1 row "uv", §11.3 uv variant,
+// fast Python package manager (Architecture.md row "uv", §11.3 uv variant,
 // §5.5 supervision).
 //
 // Lifecycle (mirrors runtimes/bun.ts):

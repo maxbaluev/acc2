@@ -4,7 +4,7 @@
 **Baseline:** master, audit-report.md complete (354 tests passing)
 **Result:** **376 tests passing** (354 baseline + 22 alignment). All 9 load-bearing principles verified structurally. Misalignments closed in-pass; no principle deferred past Phase Align.
 
-The audit pass closed surface-level gaps (named events, view dispatch, MCP tools). This pass goes deeper: it verifies that the v2-design.md principles are *structurally* executed in the code — not merely present as strings. Where the seam was advisory, this pass made it structural by factoring shared gates, threading missing credit calls, or pinning constants via tests.
+The audit pass closed surface-level gaps (named events, view dispatch, MCP tools). This pass goes deeper: it verifies that the Architecture.md principles are *structurally* executed in the code — not merely present as strings. Where the seam was advisory, this pass made it structural by factoring shared gates, threading missing credit calls, or pinning constants via tests.
 
 ---
 

@@ -1,4 +1,4 @@
-// acc2 Batch 5 universal-goal pilot — fixture_d_embodied_recipe (v2-design.md §10.7).
+// acc2 Batch 5 universal-goal pilot — fixture_d_embodied_recipe (Architecture.md).
 //
 // Goal shape: turn an unordered ingredients list into an ordered, non-empty
 // step list where every step references at least one ingredient. Mirrors

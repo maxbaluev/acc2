@@ -91,7 +91,7 @@ opencode exited non-zero with stderr captured. The smoke surfaces the last 200 c
 - Bun version too old (the spawn line uses Bun.spawn under the hood — Bun >= 1.0.0 is required).
 
 ### `cycle_1_only_breach`
-opencode emitted a `brain_cycle_2_started` or `continue_cycle_requested` event mid-dispatch. This is the cycle-1 enforcement firing (v2-design.md §3.7). Ironically a sign the structural guard works — but the brain shouldn't be hitting it for a task this simple. Investigate the prompt with `--print-prompt`; the brain might be misreading the workflow text. The dispatcher correctly aborts the dispatch and emits `dispatcher_violation` with `failure_kind=cycle_1_only_breach`.
+opencode emitted a `brain_cycle_2_started` or `continue_cycle_requested` event mid-dispatch. This is the cycle-1 enforcement firing (Architecture.md). Ironically a sign the structural guard works — but the brain shouldn't be hitting it for a task this simple. Investigate the prompt with `--print-prompt`; the brain might be misreading the workflow text. The dispatcher correctly aborts the dispatch and emits `dispatcher_violation` with `failure_kind=cycle_1_only_breach`.
 
 ### `verifier_residual_high`
 The brain authored an action whose verifier rejected the observation (residual ≥ 0.3). For this title-fetching directive that almost never happens (example.com's `<title>` is stable). When it does:

@@ -412,7 +412,7 @@ const POSTERIOR = {
 // preserve the existing call-site names (`betaMean`, `betaConfidence`)
 // and keep the surrounding diff minimal. `betaConfidence` resolves to
 // the evidence-count variant `1 − 1/√(max(0, α + β − 2) + 1)` so the
-// Beta(1, 1) prior reads as zero confirmations (v2-design.md §11.5).
+// Beta(1, 1) prior reads as zero confirmations (Architecture.md).
 const betaMean = canonicalBetaMean;
 const betaConfidence = betaEvidenceConfidence;
 
@@ -661,7 +661,7 @@ export const extractKnowledgePromotions = async (db: Database): Promise<Knowledg
  *  `maybePromote` in artifact_store.ts. Returns the verdict so callers
  *  (Father, brain) can branch on the result without re-querying. The
  *  thresholds match the bulk extractor above so single-row and bulk
- *  passes are interchangeable. v2-design.md §3.6.1 + §7.2 + Phase Audit. */
+ *  passes are interchangeable. Architecture.md + §7.2 + Phase Audit. */
 export type KnowledgeVerdict =
   | { kind: "promoted"; candidate_id: string; score: number; confidence: number; alpha: number; beta: number }
   | { kind: "demoted"; candidate_id: string; score: number; confidence: number; alpha: number; beta: number }

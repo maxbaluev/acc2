@@ -1,5 +1,5 @@
 // acc2 embedding index — thin wrapper around the sqlite-vec `vec_events`
-// virtual table (substrate/schema.sql). Per v2-design.md §5.1 the canonical
+// virtual table (substrate/schema.sql). Per Architecture.md the canonical
 // embedding store in v2 is sqlite-vec; this class survives as a compatibility
 // surface for existing callers (`retrieve`, `retrieveWithEmbedding`, the
 // daemon boot path, `mcp_server.handleSearch`, `prompt_composer`).

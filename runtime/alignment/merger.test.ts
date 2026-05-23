@@ -1,6 +1,6 @@
 // Phase Align — Principle 2: Model D merger
 //
-// v2-design.md §3.6.1: every knowledge candidate flows through the
+// Architecture.md: every knowledge candidate flows through the
 // substrate's extractor merger. No fast path should bypass `extractors.ts`
 // and emit `knowledge_promoted` directly from runtime/cli code. The only
 // allowed direct emissions are:

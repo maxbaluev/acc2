@@ -315,7 +315,8 @@ describe("runPendingDecisionRetireWorker — end-to-end", () => {
 
     const second = runPendingDecisionRetireWorker(db, { now: FIXED_NOW });
     expect(second.retired).toBe(0);
-    expect(second.skipped_already_retired).toBe(1);
+    expect(second.scanned).toBe(0);
+    expect(second.skipped_already_retired).toBe(0);
 
     // Only ONE pending_decision_retired row in the ledger.
     const count = db
@@ -342,4 +343,67 @@ describe("runPendingDecisionRetireWorker — end-to-end", () => {
     expect(summary.by_reason.stale).toBe(1);
     expect(summary.skipped_not_eligible).toBe(1);
   });
+});
+
+
+test("retire worker removes malformed backlog from live view while preserving historical audit rows", () => {
+  const db = openDb();
+  runViews(db);
+  for (let i = 0; i < 8; i++) {
+    insertAmendment(db, {
+      ts: recentTs(-i * 1000),
+      target: "docs/operator-install.md",
+      anchor: null,
+      diff: goodDiff,
+    });
+  }
+  insertAmendment(db, {
+    ts: recentTs(),
+    target: "runtime/daemon.ts",
+    anchor: "const runRetireTick",
+    diff: goodDiff,
+  });
+
+  expect(pendingOwnerDecisionQueueLive(db).some((r) => r.group_decline_reason === "anchor_missing")).toBe(true);
+  const summary = runPendingDecisionRetireWorker(db, { now: FIXED_NOW });
+  expect(summary.retired).toBe(8);
+  expect(summary.by_reason.anchor_missing).toBe(8);
+
+  const historical = pendingOwnerDecisionQueue(db);
+  const live = pendingOwnerDecisionQueueLive(db);
+  expect(historical.some((r) => r.group_decline_reason === "anchor_missing")).toBe(true);
+  expect(live.some((r) => r.group_decline_reason === "anchor_missing")).toBe(false);
+  expect(live).toHaveLength(1);
+  expect(live[0]!.target).toBe("runtime/daemon.ts");
+});
+
+
+test("scan limit skips already retired rows before selecting candidates", () => {
+  const db = openDb();
+  runViews(db);
+  for (let i = 0; i < 5; i++) {
+    const id = insertAmendment(db, {
+      ts: oldTs(STALE_PENDING_DECISION_AGE_MS + 10_000 + i),
+      target: "docs/already-retired.md",
+      anchor: "old",
+      diff: goodDiff,
+    });
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [newId(), recentTs(i), "directive_test", "task_test", "loop_root", "substrate_auto", "pending_decision_retired", JSON.stringify({ amendment_event_id: id, reason: "stale" }), JSON.stringify([id])],
+    );
+  }
+  const liveMalformed = insertAmendment(db, {
+    ts: recentTs(),
+    target: "docs/operator-install.md",
+    anchor: null,
+    diff: goodDiff,
+  });
+
+  const summary = runPendingDecisionRetireWorker(db, { now: FIXED_NOW, maxRows: 1 });
+  expect(summary.scanned).toBe(1);
+  expect(summary.retired).toBe(1);
+  expect(summary.by_reason.anchor_missing).toBe(1);
+  expect(pendingOwnerDecisionQueueLive(db).find((r) => r.representative_event_id === liveMalformed)).toBeUndefined();
 });

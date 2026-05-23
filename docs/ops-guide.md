@@ -1,6 +1,6 @@
 # AccInt v2 — Operator Deployment Guide
 
-This guide covers installing, running, updating, backing up, and troubleshooting an AccInt v2 install on a single host (Linux or macOS). For the architectural ground truth see [v2-design.md](v2-design.md); for the operator contract see `../CLAUDE.md`.
+This guide covers installing, running, updating, backing up, and troubleshooting an AccInt v2 install on a single host (Linux or macOS). For the architectural ground truth see [Architecture.md](Architecture.md); for the operator contract see `../CLAUDE.md`.
 
 > v2 is greenfield. There is no migration path from v1. v1's substrate lives read-only at `../state/accint.db` and is not consulted.
 
@@ -8,7 +8,7 @@ This guide covers installing, running, updating, backing up, and troubleshooting
 
 ## 1. Prerequisites
 
-AccInt v2 is bound by [v2-design.md §1](v2-design.md) to **subscription CLIs only** with one exception: `OPENAI_API_KEY` for `text-embedding-3-small`. Concretely, you need:
+AccInt v2 is bound by [Architecture.md](Architecture.md) to **subscription CLIs only** with one exception: `OPENAI_API_KEY` for `text-embedding-3-small`. Concretely, you need:
 
 | Component | Required? | Purpose | Install |
 |---|---|---|---|
@@ -87,7 +87,7 @@ Exit code is `0` if every check is `ok`/`warn`/`info`, `1` if any check is `fail
 
 ## 4. Running the daemon
 
-The daemon is the always-on substrate (v2-design.md §5). All CLI surfaces talk to it through MCP + an auxiliary HTTP port. The daemon must be running for `acc task`, `acc state *`, retrieval, embeddings, and external-push to work.
+The daemon is the always-on substrate (Architecture.md). All CLI surfaces talk to it through MCP + an auxiliary HTTP port. The daemon must be running for `acc task`, `acc state *`, retrieval, embeddings, and external-push to work.
 
 ### 4a. Manual (foreground / detached shell)
 
