@@ -640,6 +640,28 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(row?.residual).toBe(1.0);
   });
 
+  test("Bug A parity: a task_abandoned terminal (reaped pre-dispatch orphan) buckets as 'failed' AND carries residual 1.0 (same maximal-residual convention as task_failed / dispatcher_violation)", () => {
+    // The integrity worker's pre-dispatch-orphan reaper emits task_abandoned
+    // with NO residual column and NO payload.residual. The view classifies
+    // task_abandoned as lifecycle_status='failed'; the residual must follow the
+    // SAME convention as the other hard-failure terminals (1.0 = goal missed).
+    // Pre-fix this row showed residual=NULL while sibling failed rows showed
+    // 1.0 — inconsistent within the SAME 'failed' bucket.
+    const db = openDb(":memory:");
+    runViews(db);
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_aband", task_id: "t_aband" });
+    insertEvent(db, {
+      kind: "task_abandoned",
+      directive_id: "d_aband",
+      task_id: "t_aband",
+      payload: { reason: "orphaned_pre_dispatch" },
+    });
+    const [row] = dispatchResolved(db, { directiveId: "d_aband", rootTaskId: "t_aband" });
+    expect(row?.lifecycle_status).toBe("failed");
+    expect(row?.terminal_kind).toBe("task_abandoned");
+    expect(row?.residual).toBe(1.0);
+  });
+
   test("Bug B extension: closed-directive stragglers classify as 'abandoned' (not 'orphan_node', not 'live')", () => {
     const db = openDb(":memory:");
     runViews(db);

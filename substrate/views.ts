@@ -3111,7 +3111,14 @@ SELECT
   -- NULL — the verifier hasn't scored them yet, and 1.0 would be wrong.
   COALESCE(
     term.residual,
-    CASE WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation') THEN 1.0 ELSE NULL END
+    -- task_abandoned buckets as 'failed' in the status / lifecycle_status CASEs
+    -- above; it must follow the SAME maximal-residual convention as the other
+    -- hard-failure terminals. Pre-fix an abandoned (e.g. reaped pre-dispatch
+    -- orphan) row classified 'failed' but surfaced residual=NULL while sibling
+    -- task_failed / dispatcher_violation rows showed 1.0 — internally
+    -- inconsistent for the SAME lifecycle bucket. The reaper never scores a
+    -- residual, so the convention (1.0 = goal missed) applies.
+    CASE WHEN term.terminal_kind IN ('task_failed', 'dispatcher_violation', 'task_abandoned') THEN 1.0 ELSE NULL END
   ) AS residual,
   cg.latest_cap_gate_at,
   cg.latest_cap_gate_event_id,
