@@ -33,9 +33,11 @@ import { logger } from "./logger";
 
 /** Retention window. Frames older than this are eligible for pruning.
  *  24 h gives operators a full day to inspect a closed dispatch via
- *  `acc events` before the frames vanish. Universal value pending f13
- *  adaptive-scoring contract (observed audit-window vs. frame-volume
- *  pressure should drive the threshold). */
+ *  `acc events` before the frames vanish. This constant is the deterministic
+ *  fallback for a learned compaction policy: observed audit-window demand,
+ *  frame-volume pressure, bridge failure debugging value, boot/readiness cost,
+ *  and prompt-composition cost should drive the threshold through scored
+ *  evidence rather than another universal magic number. */
 export const COMPACTION_FRAME_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 /** Cap on rows pruned per tick. Keeps the compaction worker bounded so it
