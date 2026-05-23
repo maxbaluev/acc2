@@ -13,6 +13,9 @@ import {
   checkDiskFree,
   checkNsjail,
   checkOpenAiKey,
+  checkPendingMigrations,
+  checkSourceUpdateAvailability,
+  checkDaemonSourceSkew,
   checkOpencode,
   checkSeedArtifacts,
   checkSeedKnowledge,
@@ -50,6 +53,7 @@ const makeEnv = (overrides: Partial<DoctorEnv> = {}): DoctorEnv => ({
     error: null,
   }),
   vecExtensionLoadable: () => ({ ok: true, version: "v0.1.6" }),
+  pendingMigrations: () => ({ latest_version: "v002", applied_versions: ["v001", "v002"], pending_versions: [], pending_files: [], total_files: 2, up_to_date: true }),
   ...overrides,
 });
 
@@ -143,6 +147,22 @@ describe("checkSerperKey", () => {
   test("warn when absent (recommended, not required)", () => {
     const { checkSerperKey } = require("./doctor");
     expect(checkSerperKey(makeEnv({ env: {} })).verdict).toBe("warn");
+  });
+});
+
+describe("update/skew checks", () => {
+  test("checkPendingMigrations warns when versions are pending", () => {
+    const c = checkPendingMigrations(makeEnv({ pendingMigrations: () => ({ latest_version: "v003", applied_versions: ["v001"], pending_versions: ["v002", "v003"], pending_files: ["v002_a.sql", "v003_b.sql"], total_files: 3, up_to_date: false }) }));
+    expect(c.verdict).toBe("warn");
+    expect(c.detail).toContain("acc update");
+  });
+  test("checkSourceUpdateAvailability warns when upstream differs", () => {
+    const c = checkSourceUpdateAvailability(makeEnv({ version: (_cmd, args) => args[1] === "HEAD" ? "aaa" : "bbb" }));
+    expect(c.verdict).toBe("warn");
+  });
+  test("checkDaemonSourceSkew warns when daemon reports a different loaded head", async () => {
+    const c = await checkDaemonSourceSkew(makeEnv({ version: () => "source-head", daemonHealth: async () => ({ reachable: true, ok: true, raw: { loaded_git_head: "daemon-head" } }) }));
+    expect(c.verdict).toBe("warn");
   });
 });
 
@@ -573,6 +593,9 @@ describe("collectChecks ordering", () => {
       "camoufox binary",
       "nsjail",
       "bun",
+      "pending migrations",
+      "acc source update",
+      "daemon/source skew",
       "ACC2_BRIDGE_MODE",
       "seed knowledge",
       "seed artifacts",

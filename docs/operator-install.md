@@ -49,6 +49,8 @@ acc admin install-deps               # verifies + finishes any missing pieces
 acc init --yes                       # state dir, admin token, knowledge + artifact seeds
 acc doctor                           # composite readiness — must be PASS
 acc daemon start                     # all workers ON by default
+acc version                          # source/daemon/schema/tool snapshot
+acc update --yes                     # future safe self-update path
 acc task "your first goal"           # the loop begins
 acc watch                            # live TUI in another terminal
 ```
@@ -82,6 +84,10 @@ What each step does:
 6. `acc task "..."` — opens a directive; the substrate dispatches the
    brain. Watch the event stream live with `acc watch` in another
    terminal.
+
+### Updating an existing operator install
+
+Use `acc update --yes` from the repo root. It takes a pre-update health snapshot, pulls with `git pull --ff-only`, applies pending migrations, restarts the daemon, verifies post-update health, and rolls the source tree back to the previous commit if post-health fails.
 
 The rest of this guide explains each host dependency in detail. Use it
 when one of the six steps above reports an issue, or when you want the

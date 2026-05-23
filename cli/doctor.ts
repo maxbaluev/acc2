@@ -20,6 +20,8 @@ import { spawnSync } from "node:child_process";
 import { auxBaseUrl, readDaemonLock, rpcGet } from "./rpc";
 import { resolveDbPath } from "../runtime/state_paths";
 import { LIVENESS_THRESHOLDS } from "../substrate/liveness";
+import { openDb, closeDb } from "../substrate/db";
+import { inspectPendingMigrations, type PendingMigrationInspection } from "../substrate/migration_runner";
 
 export type Verdict = "ok" | "warn" | "fail" | "info";
 export type Check = { name: string; verdict: Verdict; detail: string };
@@ -45,6 +47,7 @@ export type DoctorEnv = {
    *  inject; production opens a fresh :memory: handle via openDb (which
    *  loads the extension before runSchema). */
   vecExtensionLoadable: () => VecLoadResult;
+  pendingMigrations: () => PendingMigrationInspection | { error: string };
 };
 
 export type SubstrateCounts = {
@@ -169,6 +172,15 @@ const realSubstrateCounts = (): SubstrateCounts => {
   }
 };
 
+const realPendingMigrations = (): PendingMigrationInspection | { error: string } => {
+  const dbPath = resolveDbPath();
+  if (!existsSync(dbPath)) return { error: `state DB not found at ${dbPath} — run \`acc init --yes\`` };
+  const db = openDb(dbPath);
+  try { return inspectPendingMigrations(db); }
+  catch (err) { return { error: (err as Error).message }; }
+  finally { closeDb(dbPath); }
+};
+
 const realVecExtensionLoadable = (): VecLoadResult => {
   try {
     // openDb(":memory:") loads sqlite-vec BEFORE runSchema, and runSchema
@@ -206,6 +218,7 @@ export const defaultDoctorEnv = (): DoctorEnv => ({
   platform: process.platform,
   substrateCounts: realSubstrateCounts,
   vecExtensionLoadable: realVecExtensionLoadable,
+  pendingMigrations: realPendingMigrations,
 });
 
 // ── Individual checks ─────────────────────────────────────────────────────
@@ -417,6 +430,35 @@ export const checkNsjail = (env: DoctorEnv): Check => {
     detail: "not installed — uv sandbox degrades to honor-system (runs still work, but net/proc/fs restrictions are advisory)" };
 };
 
+export const checkPendingMigrations = (env: DoctorEnv): Check => {
+  const m = env.pendingMigrations();
+  if ("error" in m) return { name: "pending migrations", verdict: "fail", detail: m.error };
+  if (m.pending_versions.length > 0) return { name: "pending migrations", verdict: "warn", detail: `${m.pending_versions.join(", ")} pending — run \`acc update\`` };
+  return { name: "pending migrations", verdict: "ok", detail: `up to date (${m.latest_version ?? "no migrations shipped"})` };
+};
+
+export const checkSourceUpdateAvailability = (env: DoctorEnv): Check => {
+  const head = env.version("git", ["rev-parse", "HEAD"]);
+  const upstream = env.version("git", ["rev-parse", "@{u}"]);
+  if (!head) return { name: "acc source update", verdict: "warn", detail: "not a git checkout or git unavailable" };
+  if (!upstream) return { name: "acc source update", verdict: "info", detail: "no upstream configured; use git pull manually or set upstream" };
+  const h = head.trim().split(/\s+/)[0];
+  const u = upstream.trim().split(/\s+/)[0];
+  if (h !== u) return { name: "acc source update", verdict: "warn", detail: "upstream differs — run `acc update`" };
+  return { name: "acc source update", verdict: "ok", detail: "source matches upstream" };
+};
+
+export const checkDaemonSourceSkew = async (env: DoctorEnv): Promise<Check> => {
+  const head = env.version("git", ["rev-parse", "HEAD"]);
+  const snap = await env.daemonHealth();
+  if (!snap.reachable) return { name: "daemon/source skew", verdict: "info", detail: "daemon not running" };
+  const raw = snap.raw as { loaded_git_head?: string | null } | undefined;
+  const daemonHead = raw?.loaded_git_head ?? null;
+  const sourceHead = head?.trim().split(/\s+/)[0] ?? null;
+  if (daemonHead && sourceHead && daemonHead !== sourceHead) return { name: "daemon/source skew", verdict: "warn", detail: "daemon is serving an older/different source commit — run `acc update`" };
+  return { name: "daemon/source skew", verdict: "ok", detail: daemonHead ? "daemon matches source" : "daemon did not report loaded_git_head" };
+};
+
 export const checkBunVersion = (env: DoctorEnv): Check => {
   const raw = env.version("bun", ["--version"]);
   if (!raw) {
@@ -620,6 +662,9 @@ export const collectChecks = async (env: DoctorEnv = defaultDoctorEnv()): Promis
   checks.push(checkCamoufoxBinary(env));
   checks.push(checkNsjail(env));
   checks.push(checkBunVersion(env));
+  checks.push(checkPendingMigrations(env));
+  checks.push(checkSourceUpdateAvailability(env));
+  checks.push(await checkDaemonSourceSkew(env));
   checks.push(checkBridgeMode(env));
   // Substrate-content checks (Task 3 wiring). A passing acc doctor now
   // means BOTH file-existence AND state-content correctness — not just
