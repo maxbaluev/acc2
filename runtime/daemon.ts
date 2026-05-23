@@ -2866,6 +2866,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     logger.fatal({ phase: "mcp_bind", port, err: (err as Error).message }, "daemon.boot.phase_failed");
     for (const dispose of workers) dispose();
     closeDb(stateDbPath);
+    // Release the boot-intent lock acquireBootLock wrote (phase:"booting").
+    // Without this a failed bind leaves a stale lock that blocks the next
+    // start until the dead-pid reaper fires — the retry should proceed
+    // immediately. (DAEMON_BOOT_LOCK brain amendment.)
+    tryRemove(socketFile);
     throw new Error(`failed to bind MCP port ${port}: ${(err as Error).message}`);
   }
 
@@ -2886,6 +2891,9 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       logger.debug({ where: "daemon.boot.aux_bind_recovery", err: String(stopErr) }, "mcp stop during aux-bind failure");
     }
     closeDb(stateDbPath);
+    // Release the boot-intent lock so a retry can proceed (see mcp_bind
+    // handler above). (DAEMON_BOOT_LOCK brain amendment.)
+    tryRemove(socketFile);
     throw new Error(`failed to bind aux port ${auxPort}: ${(err as Error).message}`);
   }
 

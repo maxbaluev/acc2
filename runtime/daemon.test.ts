@@ -713,6 +713,38 @@ describe("atomic boot-intent lock", () => {
     expect(lock.pid).toBe(process.pid);
   });
 
+  test("mcp bind failure releases the boot-intent lock so retry can proceed", async () => {
+    // DAEMON_BOOT_LOCK brain amendment: acquireBootLock writes the
+    // phase:"booting" lock BEFORE the port binds. If the bind then fails,
+    // the catch handler must remove the lock — otherwise the failed boot
+    // leaves a stale lock that blocks the next start until the dead-pid
+    // reaper fires. Occupy the MCP port, confirm start fails, and assert
+    // the lock file is gone.
+    const occupied = pickPortPair();
+    const blocker = Bun.serve({
+      hostname: "127.0.0.1",
+      port: occupied.mcp,
+      fetch: () => new Response("occupied"),
+    });
+    try {
+      let caught: unknown = null;
+      try {
+        await startDaemon({
+          port: occupied.mcp,
+          auxPort: occupied.aux,
+          stateDbPath: tmp.dbPath,
+          socketFile: tmp.socketFile,
+          tokenFile: tmp.tokenFile,
+        });
+      } catch (err) { caught = err; }
+      expect(String((caught as Error | null)?.message ?? caught)).toContain("failed to bind MCP port");
+      // The boot-intent lock acquireBootLock wrote must be released.
+      expect(existsSync(tmp.socketFile)).toBe(false);
+    } finally {
+      blocker.stop(true);
+    }
+  });
+
   test("a STALE (dead-pid) lock is reaped and start proceeds", async () => {
     // Pick a pid that is essentially certainly dead. process.kill(pid, 0)
     // throws ESRCH → pidAlive=false → acquireBootLock reaps + proceeds.
