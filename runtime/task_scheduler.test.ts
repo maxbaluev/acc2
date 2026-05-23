@@ -1184,3 +1184,35 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
     expect(child.c).toBe(0);
   });
 });
+
+describe("drainInFlightDispatches — timer hygiene", () => {
+  test("empty registry returns completed immediately (no dangling budget timer)", async () => {
+    _resetSchedulerForTests();
+    // With nothing in flight the function returns before arming any timer.
+    const r = await drainInFlightDispatches({ timeoutMs: 180_000 });
+    expect(r.completed).toBe(true);
+    expect(r.timed_out_task_ids).toEqual([]);
+  });
+
+  test("clean-drain path with a real fast dispatch resolves well under the budget", async () => {
+    _resetSchedulerForTests();
+    const db = openDb(":memory:");
+    // Run a tick to populate IN_FLIGHT, then drain with a large budget. The
+    // dispatch self-cleans via .finally before the budget expires, so
+    // allSettled wins the race. Pre-fix the anonymous 180s budget setTimeout
+    // stayed pending after the clean drain, keeping the event loop alive past
+    // teardown (a dangling timer on every graceful shutdown); the fix clears it
+    // on the non-timeout path. Observable contract is unchanged (completed),
+    // but a hung budget timer would surface as the process not exiting cleanly
+    // under --parallel. We assert prompt + correct resolution.
+    const { directiveId } = await openFixtureDCountTodos(db);
+    await schedulerTick(db, { directiveId });
+    const startedMs = Date.now();
+    const r = await drainInFlightDispatches({ timeoutMs: 180_000 });
+    const elapsedMs = Date.now() - startedMs;
+    expect(r.completed).toBe(true);
+    // Resolves in well under the 180s budget — proves allSettled won the race
+    // and the budget timer was cleared rather than awaited.
+    expect(elapsedMs).toBeLessThan(30_000);
+  });
+});

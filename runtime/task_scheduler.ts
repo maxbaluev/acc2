@@ -1336,9 +1336,21 @@ export const drainInFlightDispatches = async (
     await allSettled;
     return { completed: true, timed_out_task_ids: [] };
   }
-  const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), opts.timeoutMs));
+  // Hold the timer handle so we can clear it when `allSettled` wins the race.
+  // Pre-fix the setTimeout was anonymous, so on the common clean-drain path
+  // (drain finishes before the budget) the timer stayed pending for the FULL
+  // budget (default 180s) — a dangling timer on every graceful shutdown that
+  // kept the event loop alive past teardown. Clearing it on the non-timeout
+  // path removes the leak; the timeout path's timer has already fired.
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timeoutHandle = setTimeout(() => resolve("timeout"), opts.timeoutMs);
+  });
   const result = await Promise.race([allSettled, timeout]);
-  if (result !== "timeout") return { completed: true, timed_out_task_ids: [] };
+  if (result !== "timeout") {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    return { completed: true, timed_out_task_ids: [] };
+  }
   return { completed: false, timed_out_task_ids: Array.from(IN_FLIGHT.keys()) };
 };
 
