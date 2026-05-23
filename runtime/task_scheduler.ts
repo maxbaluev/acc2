@@ -108,13 +108,44 @@ const DEFAULT_POLL_INTERVAL_MS = 500;
 // ~8 concurrent brains instead of 3. Single universal value — no env
 // override; the universal workflow stays one path.
 const BRAIN_PROCESS_RAM_BYTES = 700_000_000;
-const HOST_RAM_RESERVE_BYTES = 2_000_000_000;  // ~2GB kept for OS + daemon + bun + tests
+const HOST_RAM_RESERVE_BYTES = 2_000_000_000;  // ~2GB kept for OS + bun + tests
+const PROMPT_COMPOSITION_HEADROOM_BYTES = 150_000_000;
+const DAEMON_RSS_PRESSURE_BYTES = 1_200_000_000;
+
+export type DaemonHeapPressureState = {
+  rss_bytes: number;
+  heap_used_bytes: number;
+  rss_pressure_threshold_bytes: number;
+  under_pressure: boolean;
+};
+
+const readDaemonMemoryUsage = (): { rss_bytes: number; heap_used_bytes: number } => {
+  try {
+    const usage = process.memoryUsage();
+    return {
+      rss_bytes: Number.isFinite(usage.rss) ? Math.max(0, Math.floor(usage.rss)) : 0,
+      heap_used_bytes: Number.isFinite(usage.heapUsed) ? Math.max(0, Math.floor(usage.heapUsed)) : 0,
+    };
+  } catch {
+    return { rss_bytes: 0, heap_used_bytes: 0 };
+  }
+};
+
+export const computeDaemonHeapPressureState = (): DaemonHeapPressureState => {
+  const usage = readDaemonMemoryUsage();
+  return {
+    ...usage,
+    rss_pressure_threshold_bytes: DAEMON_RSS_PRESSURE_BYTES,
+    under_pressure: usage.rss_bytes >= DAEMON_RSS_PRESSURE_BYTES,
+  };
+};
 
 /** Compute the brain-dispatch cap from live host memory. We use the
  *  *less* of available-free and the conservative free-from-total
  *  estimate to avoid optimism when the OS reports stale "free" while
  *  the page cache is hot. Floor of 1 — we never block dispatch entirely
- *  even on a tiny host; the user can always run one brain at a time. */
+ *  even on a tiny host; heap pressure is handled by a separate scheduler
+ *  admission gate so existing in-flight work can settle gracefully. */
 export const computeBrainDispatchCap = (): number => {
   let totalBytes = 0;
   let freeBytes = 0;
@@ -127,7 +158,9 @@ export const computeBrainDispatchCap = (): number => {
   } catch {
     return 2; // os module shouldn't fail; conservative default if it does.
   }
-  const usableBytes = Math.max(0, Math.min(freeBytes, totalBytes - HOST_RAM_RESERVE_BYTES));
+  const daemonHeap = computeDaemonHeapPressureState();
+  const hostUsableBytes = Math.max(0, Math.min(freeBytes, totalBytes - HOST_RAM_RESERVE_BYTES));
+  const usableBytes = Math.max(0, hostUsableBytes - daemonHeap.rss_bytes);
   // RSS-calibrated per-brain estimate: take the GREATER of the fixed default
   // and 1.2× the observed peak brain RSS. This can ONLY raise the estimate
   // (→ fewer concurrent brains) when brains run heavier than 700MB — OOM
@@ -135,9 +168,10 @@ export const computeBrainDispatchCap = (): number => {
   // safe-by-construction (admission only becomes more conservative, never
   // riskier). Falls back to the fixed default when no live RSS observation.
   const observedRss = observedBrainRssBytes();
-  const perBrainBytes = observedRss && observedRss > 0
+  const brainProcessBytes = observedRss && observedRss > 0
     ? Math.max(BRAIN_PROCESS_RAM_BYTES, Math.floor(observedRss * 1.2))
     : BRAIN_PROCESS_RAM_BYTES;
+  const perBrainBytes = brainProcessBytes + PROMPT_COMPOSITION_HEADROOM_BYTES;
   const cap = Math.floor(usableBytes / perBrainBytes);
   return Math.max(1, cap);
 };
@@ -1052,6 +1086,20 @@ export const schedulerTick = async (
     // with 4GB / 8GB / 32GB / 64GB RAM without operator tuning. When full,
     // the task stays in ready state and re-attempts next tick.
     if (decision.route === "opencode_brain") {
+      const daemonHeap = computeDaemonHeapPressureState();
+      if (daemonHeap.under_pressure) {
+        skippedConcurrencyCap.push(task.id);
+        emitSchedulerAdmissionGate(db, task, "daemon_heap_pressure", {
+          reason: "opencode_brain_dispatch_paused_for_daemon_heap_pressure",
+          daemon_rss_bytes: daemonHeap.rss_bytes,
+          daemon_heap_used_bytes: daemonHeap.heap_used_bytes,
+          rss_pressure_threshold_bytes: daemonHeap.rss_pressure_threshold_bytes,
+          in_flight_brain: IN_FLIGHT_BRAIN.size,
+          note: "new opencode_brain admission is deferred until daemon RSS falls below the pressure threshold; existing in-flight work may settle",
+        });
+        continue;
+      }
+
       const brainCap = computeBrainDispatchCap();
       // FOUNDATIONAL anti-starve gate: only admit a brain when the bridge has
       // a FREE handshake permit. The RAM cap alone over-admitted relative to

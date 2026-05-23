@@ -112,6 +112,10 @@ const embeddingRetryDelayMs = (attempt: number, response?: Response): number => 
 };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+export const MAX_DAEMON_EMBEDDER_BATCH_SIZE = 8;
+export const MAX_EMBED_PENDING_BATCH_SIZE = 25;
 
 const fetchEmbeddingResponse = async (
   config: { apiKey: string; baseUrl: string },
@@ -527,7 +531,7 @@ export const embedderWorkerTick = async (
   db: Database,
   opts?: { batchSize?: number },
 ): Promise<EmbedderTickResult> => {
-  const batchSize = Math.max(1, Math.min(500, opts?.batchSize ?? 20));
+  const batchSize = Math.max(1, Math.min(MAX_DAEMON_EMBEDDER_BATCH_SIZE, opts?.batchSize ?? MAX_DAEMON_EMBEDDER_BATCH_SIZE));
   const rows = await readUnembedded(db, batchSize);
   if (rows.length === 0) {
     return { embedded: 0, skipped_no_text: 0, failed: 0 };
@@ -658,7 +662,7 @@ export const embedPendingEvents = async (
   db: Database,
   opts: { batchSize?: number; timeoutMs?: number } = {},
 ): Promise<{ embedded: number; skipped: number; failed: number }> => {
-  const batchSize = Math.max(1, Math.min(500, opts.batchSize ?? 100));
+  const batchSize = Math.max(1, Math.min(MAX_EMBED_PENDING_BATCH_SIZE, opts.batchSize ?? MAX_EMBED_PENDING_BATCH_SIZE));
   // Honour the no-API-key path up front: emit ONE audit row carrying the
   // pending count so the substrate explains why nothing was indexed.
   const pendingCount = await pendingEmbeddableCount(db);
@@ -747,9 +751,9 @@ export const embedPendingEvents = async (
       items.push({ id: r.id, text, source_table: r.source_table });
     }
     if (items.length === 0) {
-      // Nothing embeddable in this slice; loop again only if readUnembedded
-      // returned <= skipped (the skipped rows are now marked, so the next
-      // iteration won't re-see them). Break to avoid an infinite loop.
+      // Nothing embeddable in this slice; yield before the next read so a
+      // no-text backlog cannot spin in one macrotask.
+      await yieldToEventLoop();
       continue;
     }
     const embeddings = await batchComputeEmbeddings(items);
@@ -775,6 +779,7 @@ export const embedPendingEvents = async (
     }
     // ONE audit emit per batch — replaces the per-row storm.
     emitBatchEmbeddingAudit(db, persistedIds, EMBEDDING_VERSION);
+    await yieldToEventLoop();
     // Defensive cap: if a slice came back with EVERY item failing (no
     // network, bad key, etc) we'd loop forever — bail out so the caller
     // sees the failed count without hanging.

@@ -19,6 +19,8 @@ import {
   extractTextFromEvent,
   readEmbeddingFromEvent,
   upsertVecEventRow,
+  MAX_DAEMON_EMBEDDER_BATCH_SIZE,
+  MAX_EMBED_PENDING_BATCH_SIZE,
 } from "./embedder";
 
 afterAll(() => closeDb());
@@ -381,6 +383,34 @@ describe("embedderWorkerTick", () => {
     expect(db.query("SELECT 1 FROM vec_events WHERE event_id = ?").get(stale.id)).toBeNull();
   });
 
+  test("daemon worker clamps oversized caller batches to the small per-tick budget", async () => {
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    const requestSizes: number[] = [];
+    installMockFetch(async (_url, init) => {
+      const reqBody = JSON.parse((init.body as string) ?? "{}") as { input: string[] };
+      requestSizes.push(reqBody.input.length);
+      const data = reqBody.input.map((_t, i) => ({ embedding: synthEmbedding(i + 51), index: i }));
+      return new Response(JSON.stringify({ data }), { status: 200 });
+    });
+
+    const db = openDb(":memory:");
+    for (let i = 0; i < MAX_DAEMON_EMBEDDER_BATCH_SIZE + 3; i++) {
+      emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "claude_root",
+        payload: { text: "worker backlog " + i },
+      });
+    }
+
+    const result = await embedderWorkerTick(db, { batchSize: 500 });
+    expect(result.embedded).toBe(MAX_DAEMON_EMBEDDER_BATCH_SIZE);
+    expect(requestSizes).toEqual([MAX_DAEMON_EMBEDDER_BATCH_SIZE]);
+    const pending = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate' AND embedding IS NULL")
+      .get() as { c: number };
+    expect(pending.c).toBe(3);
+  });
+
   test("skips events whose payload has no text-like field", async () => {
     process.env.OPENAI_API_KEY = "sk-test-mock";
     installMockFetch(async () => new Response(JSON.stringify({ data: [] }), { status: 200 }));
@@ -484,6 +514,35 @@ describe("embedPendingEvents", () => {
       .all() as Array<{ payload: string }>;
     // Two embedding_skipped events but only one HIDL within the hour window.
     expect(hidlRows.length).toBe(1);
+  });
+
+  test("yields to the event loop between embedPendingEvents batches", async () => {
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    let calls = 0;
+    let timerFired = false;
+    let timerFiredBeforeThirdFetch = false;
+    installMockFetch(async (_url, init) => {
+      calls++;
+      if (calls === 3) timerFiredBeforeThirdFetch = timerFired;
+      const reqBody = JSON.parse((init.body as string) ?? "{}") as { input: string[] };
+      const data = reqBody.input.map((_t, i) => ({ embedding: synthEmbedding(i + 61 + calls), index: i }));
+      return new Response(JSON.stringify({ data }), { status: 200 });
+    });
+    const db = openDb(":memory:");
+    for (let i = 0; i < MAX_EMBED_PENDING_BATCH_SIZE * 2 + 1; i++) {
+      emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "claude_root",
+        payload: { text: "pending backlog " + i },
+      });
+    }
+
+    setTimeout(() => { timerFired = true; }, 0);
+    const result = await embedPendingEvents(db, { batchSize: 500 });
+
+    expect(result.embedded).toBe(MAX_EMBED_PENDING_BATCH_SIZE * 2 + 1);
+    expect(calls).toBe(3);
+    expect(timerFiredBeforeThirdFetch).toBe(true);
   });
 
   test("idempotent — a second call after success is a cheap no-op", async () => {

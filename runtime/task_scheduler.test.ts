@@ -11,6 +11,7 @@ import {
   inFlightDirectivesFromSql,
   findCrossDirectiveConflict,
   computeBrainDispatchCap,
+  computeDaemonHeapPressureState,
   isSchedulerDraining,
   setSchedulerDraining,
 } from "./task_scheduler";
@@ -225,21 +226,87 @@ describe("task_scheduler", () => {
   }, 60_000);
 
   test("computeBrainDispatchCap returns a positive integer scaled to host RAM", () => {
-    // Dynamic cap = floor((min(freemem, totalmem - 2GB)) / 700MB), floor 1.
+    // Dynamic cap = floor((min(freemem, totalmem - 2GB) - daemon RSS) /
+    // (700MB brain + 150MB prompt-composition headroom)), floor 1.
     // We can't assert the exact number (depends on the test host) but we CAN
     // assert the invariants: integer, >= 1, never larger than what total RAM
-    // can physically support. This is the OOM defence: opencode subprocesses
-    // run gpt-5.5 at ~340MB observed peak; 700MB per slot leaves headroom.
-    // Cap scales automatically — no env knob.
+    // can physically support. Cap scales automatically — no env knob.
     const cap = computeBrainDispatchCap();
     expect(Number.isInteger(cap)).toBe(true);
     expect(cap).toBeGreaterThanOrEqual(1);
-    // Total RAM bound (700MB per slot, 2GB reserved): cap can never exceed
-    // floor((totalmem - 2GB) / 700MB).
+    // Total RAM bound: cap can never exceed the ceiling before subtracting
+    // daemon RSS, so this remains host-independent and conservative.
     const os = require("node:os") as typeof import("node:os");
-    const ceiling = Math.max(1, Math.floor((os.totalmem() - 2_000_000_000) / 700_000_000));
+    const ceiling = Math.max(1, Math.floor((os.totalmem() - 2_000_000_000) / 850_000_000));
     expect(cap).toBeLessThanOrEqual(ceiling);
   });
+
+  test("computeBrainDispatchCap subtracts daemon RSS and prompt-composition headroom", () => {
+    const os = require("node:os") as typeof import("node:os");
+    const originalTotalmem = os.totalmem;
+    const originalFreemem = os.freemem;
+    const originalMemoryUsage = process.memoryUsage;
+    try {
+      Object.defineProperty(os, "totalmem", { value: () => 16_000_000_000, configurable: true });
+      Object.defineProperty(os, "freemem", { value: () => 12_000_000_000, configurable: true });
+      Object.defineProperty(process, "memoryUsage", {
+        value: () => ({ ...originalMemoryUsage(), rss: 1_000_000_000, heapUsed: 600_000_000 }),
+        configurable: true,
+      });
+
+      expect(computeBrainDispatchCap()).toBe(Math.floor(11_000_000_000 / 850_000_000));
+    } finally {
+      Object.defineProperty(os, "totalmem", { value: originalTotalmem, configurable: true });
+      Object.defineProperty(os, "freemem", { value: originalFreemem, configurable: true });
+      Object.defineProperty(process, "memoryUsage", { value: originalMemoryUsage, configurable: true });
+    }
+  });
+
+  test("daemon heap pressure state flips when daemon RSS crosses the pressure threshold", () => {
+    const originalMemoryUsage = process.memoryUsage;
+    try {
+      Object.defineProperty(process, "memoryUsage", {
+        value: () => ({ ...originalMemoryUsage(), rss: 1_250_000_000, heapUsed: 700_000_000 }),
+        configurable: true,
+      });
+      const state = computeDaemonHeapPressureState();
+      expect(state.under_pressure).toBe(true);
+      expect(state.rss_bytes).toBe(1_250_000_000);
+      expect(state.heap_used_bytes).toBe(700_000_000);
+    } finally {
+      Object.defineProperty(process, "memoryUsage", { value: originalMemoryUsage, configurable: true });
+    }
+  });
+
+  test("schedulerTick gates new opencode_brain work under daemon heap pressure", async () => {
+    const originalMemoryUsage = process.memoryUsage;
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-heap-pressure-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      const { taskId } = await openFixtureDCountTodos(db, tempDir);
+      Object.defineProperty(process, "memoryUsage", {
+        value: () => ({ ...originalMemoryUsage(), rss: 1_250_000_000, heapUsed: 700_000_000 }),
+        configurable: true,
+      });
+
+      const tick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 5 });
+      expect(tick.dispatched).not.toContain(taskId);
+      expect(tick.skipped_concurrency_cap).toContain(taskId);
+
+      const gate = db
+        .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'constitutional_gate_decision' ORDER BY ts DESC LIMIT 1")
+        .get(taskId) as { payload: string } | null;
+      expect(gate).not.toBeNull();
+      const payload = JSON.parse(gate!.payload) as { gate?: string; reason?: string; daemon_rss_bytes?: number };
+      expect(payload.gate).toBe("daemon_heap_pressure");
+      expect(payload.reason).toBe("opencode_brain_dispatch_paused_for_daemon_heap_pressure");
+      expect(payload.daemon_rss_bytes).toBe(1_250_000_000);
+    } finally {
+      Object.defineProperty(process, "memoryUsage", { value: originalMemoryUsage, configurable: true });
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   test("schedulerLoop drains queue and stops on quiescence", async () => {
     const db = openDb(":memory:");
