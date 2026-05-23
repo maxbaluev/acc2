@@ -174,6 +174,34 @@ export const HOTRELOAD_MANIFEST: readonly HotReloadEntry[] = [
     reason: "Module-local IN_FLIGHT maps would fork on naive re-import. Wait until no brain_dispatched is outstanding.",
   },
   {
+    // Coverage-gap fix (2026-05-23): runtime/task_route.ts emitted
+    // daemon_hotreload_unmapped on every edit (observed live), forcing a
+    // slow full restart to load committed routing changes. task_route +
+    // dispatch_decider are pure routing/decision helpers re-read per
+    // dispatch — quiescent_only matches the scheduler pair they sit beside
+    // (they are imported by the dispatcher's decideDispatch path, whose
+    // module-local state must not fork mid-dispatch).
+    name: "runtime_routing",
+    globs: ["runtime/task_route.ts", "runtime/dispatch_decider.ts"],
+    strategy: "quiescent_only",
+    reason: "Routing/decision helpers consumed by the dispatcher; reload once no brain dispatch is in-flight so decideDispatch state cannot fork mid-cycle.",
+  },
+  {
+    // Coverage-gap fix (2026-05-23): the daemon's reactive workers are
+    // high-churn developer surfaces (extractors, credit sweeps, owner
+    // outcome followups, etc.). Each is registered once at boot via a
+    // setInterval/onEvent disposer captured in the daemon `workers` array,
+    // so a naive in-process re-import does NOT re-register the live tick —
+    // the running daemon keeps the boot-time closure. Map them to
+    // full_restart so an edit surfaces a clear restart-required signal
+    // (daemon_hotreload_restart_pending) instead of a silent unmapped/no-op.
+    name: "runtime_workers",
+    globs: ["runtime/*_worker.ts"],
+    excludes: ["runtime/*_worker.test.ts"],
+    strategy: "full_restart",
+    reason: "Reactive workers register their tick once at daemon boot (setInterval/onEvent disposer); a fresh process is required to re-bind the new tick body.",
+  },
+  {
     name: "runtime_bridge",
     globs: ["runtime/bridge.ts", "runtime/bridge/**/*.ts"],
     excludes: ["runtime/bridge/**/*.test.ts"],
@@ -205,6 +233,28 @@ export const HOTRELOAD_MANIFEST: readonly HotReloadEntry[] = [
     excludes: ["cli/**/*.test.ts"],
     strategy: "in_process",
     reason: "CLI invocations run as fresh subprocesses; manifest entry is for `acc daemon status` watched_module_count reporting only.",
+  },
+  {
+    // Coverage-derivation fallback (2026-05-23). Every prior entry maps a
+    // SPECIFIC reloadable surface to its safe strategy. This LAST entry is
+    // the catch-all for any remaining .ts file under the watched runtime /
+    // substrate roots that no specific entry claimed (test files are
+    // pre-filtered as noise before manifest matching). Because
+    // matchHotReloadEntry returns the FIRST matching entry, this only fires
+    // for genuinely-unmapped modules — and it degrades them GRACEFULLY:
+    // strategy=full_restart emits daemon_hotreload_restart_pending (logged +
+    // a clear "run `acc daemon restart`" hint) instead of the old silent
+    // daemon_hotreload_unmapped no-op. A new module a developer adds is
+    // therefore never silently dropped: worst case the operator gets an
+    // honest restart-required signal. To make a new module hot-reloadable
+    // in-process, add a SPECIFIC entry above with its reload strategy (and a
+    // reloadable_slot when a live consumer must read the swap) — this
+    // fallback exists so the gap is loud, not so it is the destination.
+    name: "runtime_substrate_fallback",
+    globs: ["runtime/**/*.ts", "substrate/**/*.ts"],
+    excludes: ["runtime/**/*.test.ts", "substrate/**/*.test.ts"],
+    strategy: "full_restart",
+    reason: "Unmapped runtime/substrate module under a watched root — no specific reload strategy declared; a fresh process is the safe default. Add a specific manifest entry to make it hot-reloadable in-process.",
   },
 ];
 

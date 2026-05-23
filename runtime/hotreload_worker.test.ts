@@ -107,25 +107,59 @@ describe("truth-in-audit: hot reload emits the right event for each outcome", ()
   // without spinning up the fs.watch loop. We then introspect the
   // substrate events table to assert which kind landed.
 
-  test("unmapped: file under a watched directory but not in manifest emits daemon_hotreload_unmapped", async () => {
+  test("coverage-derivation fallback: a previously-unmapped runtime module degrades to a clear restart-required signal (NOT silent unmapped)", async () => {
+    // GOAL-1 graceful degradation (2026-05-23): pre-fix, a runtime module
+    // with no specific manifest entry emitted daemon_hotreload_unmapped — a
+    // silent no-op that forced the operator to notice and extend the
+    // manifest before a slow full restart would load the change. The
+    // runtime_substrate_fallback catch-all now claims any unmapped
+    // runtime/substrate .ts file with strategy=full_restart, so the operator
+    // gets an honest daemon_hotreload_restart_pending hint instead.
     const db = openDb(":memory:");
     const root = mkdtempSync(join(tmpdir(), "acc2-hotreload-test-"));
     try {
+      const entry = matchHotReloadEntry("runtime/random_unmapped_file.ts");
+      expect(entry?.name).toBe("runtime_substrate_fallback");
+      expect(entry?.strategy).toBe("full_restart");
+
       __testApplyChange(db, root, "runtime/random_unmapped_file.ts");
-      // Wait for the async import path inside __testApplyChange to run.
       await Bun.sleep(20);
-      const rows = db
-        .query("SELECT kind, payload FROM events WHERE kind = 'daemon_hotreload_unmapped' ORDER BY ts DESC LIMIT 1")
-        .all() as Array<{ kind: string; payload: string }>;
-      expect(rows.length).toBe(1);
-      const payload = JSON.parse(rows[0]!.payload) as { file_path: string };
+
+      const unmapped = db
+        .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'daemon_hotreload_unmapped'")
+        .get() as { c: number };
+      expect(unmapped.c).toBe(0); // no silent unmapped — fallback claimed it
+
+      const pending = db
+        .query("SELECT payload FROM events WHERE kind = 'daemon_hotreload_restart_pending' ORDER BY ts DESC LIMIT 1")
+        .all() as Array<{ payload: string }>;
+      expect(pending.length).toBe(1);
+      const payload = JSON.parse(pending[0]!.payload) as { file_path: string; module: string };
       expect(payload.file_path).toBe("runtime/random_unmapped_file.ts");
-      const state = getHotreloadState();
-      expect(state.unmapped_total).toBe(1);
-      expect(state.recent_outcomes[state.recent_outcomes.length - 1]?.outcome).toBe("unmapped");
+      expect(payload.module).toBe("runtime_substrate_fallback");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("coverage-gap fix: previously-unmapped high-churn modules (task_route, dispatch_decider, workers) are now mapped", () => {
+    // GOAL-1 (2026-05-23): runtime/task_route.ts emitted daemon_hotreload_unmapped
+    // live, forcing slow full restarts. These high-churn developer surfaces
+    // are now explicitly mapped to an appropriate reload strategy.
+    const route = matchHotReloadEntry("runtime/task_route.ts");
+    expect(route?.name).toBe("runtime_routing");
+    expect(route?.strategy).toBe("quiescent_only");
+
+    const decider = matchHotReloadEntry("runtime/dispatch_decider.ts");
+    expect(decider?.name).toBe("runtime_routing");
+
+    const worker = matchHotReloadEntry("runtime/counterfactual_credit_worker.ts");
+    expect(worker?.name).toBe("runtime_workers");
+    expect(worker?.strategy).toBe("full_restart");
+
+    // The fallback never shadows a specific entry (first-match wins).
+    expect(matchHotReloadEntry("runtime/credit.ts")?.name).toBe("runtime_elegance_primitives");
+    expect(matchHotReloadEntry("runtime/prompt_composer.ts")?.name).toBe("runtime_prompt_composer");
   });
 
   test("no_op: in_process import with no reloadable_slot emits daemon_hotreload_no_op (not completed)", async () => {

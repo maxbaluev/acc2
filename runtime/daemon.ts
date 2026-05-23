@@ -69,6 +69,7 @@ import { reconcileBrainDispatchesAtBoot, getOpenBrainDispatches, setBootSessionT
 import { reconcileExpiredLeases } from "./dispatch_leases";
 import { waitForBrainQuiescence } from "./restart_quiescence";
 import { noActiveBrainDispatches } from "./dispatch_survival";
+import { checkpointInterruptedDispatches } from "./dispatch_continuation";
 import {
   getCurrentGitHead,
   writeChildGitHead,
@@ -2592,6 +2593,44 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const interruptedTaskIds = drain.timed_out_task_ids;
     const interruptedCount = interruptedTaskIds.length;
     const drainedCount = Math.max(0, inFlightCountAtStart - interruptedCount);
+    // ── No-job-loss-on-restart checkpoint (2026-05-23) ───────────────────
+    // PROBLEM (observed live): a graceful restart whose drain budget expires
+    // with brain dispatches still in flight SIGTERM-kills them. On the next
+    // boot, reconcileOrphanedDispatches closes the dangling lease and the
+    // scheduler re-picks the SAME task FROM SCRATCH — the in-progress brain
+    // cycle's proposed amendments are abandoned (task_abandoned-equivalent).
+    // FIX: before killing the leftover subprocesses, emit a refinement-edge
+    // continuation for each interrupted dispatch (reusing the productive-
+    // timeout continuation primitive). The next boot's scheduler then resumes
+    // the work as a continuation child instead of restarting it. Bounded by
+    // REFINEMENT_DEPTH_CAP so an interrupted-every-restart task terminalizes
+    // rather than resuming forever. Best-effort — never blocks shutdown.
+    let checkpoint = {
+      checkpointed_task_ids: [] as string[],
+      continuation_task_ids: [] as string[],
+      depth_capped_task_ids: [] as string[],
+      skipped_task_ids: [] as string[],
+    };
+    if (interruptedCount > 0) {
+      try {
+        checkpoint = checkpointInterruptedDispatches(db, interruptedTaskIds);
+        if (checkpoint.checkpointed_task_ids.length > 0) {
+          logger.info(
+            {
+              checkpointed: checkpoint.checkpointed_task_ids.length,
+              continuations: checkpoint.continuation_task_ids,
+              depth_capped: checkpoint.depth_capped_task_ids.length,
+            },
+            "checkpointed interrupted brain dispatches as refinement continuations — work resumes on next boot",
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          { where: "daemon.stop.checkpoint_interrupted", err: String(err) },
+          "checkpointInterruptedDispatches failed — interrupted tasks fall back to boot orphan recovery",
+        );
+      }
+    }
     try {
       emitEvent(db, {
         kind: drain.completed ? "restart_drain_completed" : "restart_drain_timed_out",
@@ -2604,7 +2643,14 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
           timed_out_task_ids: interruptedTaskIds,
           drained_count: drainedCount,
           interrupted_count: interruptedCount,
-          recovery_action: drain.completed ? "none" : "kill_remaining_live_opencode_then_boot_recovery_repick",
+          checkpointed_task_ids: checkpoint.checkpointed_task_ids,
+          continuation_task_ids: checkpoint.continuation_task_ids,
+          checkpoint_depth_capped_task_ids: checkpoint.depth_capped_task_ids,
+          recovery_action: drain.completed
+            ? "none"
+            : checkpoint.checkpointed_task_ids.length > 0
+              ? "refinement_continuation_resumes_on_next_boot"
+              : "kill_remaining_live_opencode_then_boot_recovery_repick",
         },
       });
     } catch (err) {
