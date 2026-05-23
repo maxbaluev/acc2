@@ -2865,6 +2865,20 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   } catch (err) {
     logger.fatal({ phase: "mcp_bind", port, err: (err as Error).message }, "daemon.boot.phase_failed");
     for (const dispose of workers) dispose();
+    // Resource-leak fix (2026-05-23): the SQL worker-thread pool is spawned
+    // BEFORE the port bind (so migrated callsites find it on their first
+    // tick), so a bind failure here would otherwise orphan N worker_threads
+    // AND leave the process-global singleton pointing at a DB we are about to
+    // close. Under the startDaemonOnFreePorts retry loop every retry would
+    // leak another pool. Shut it down on this failure path too — `stop()`
+    // already does this on the success path, but this branch bypasses stop().
+    if (sqlPool) {
+      try { await sqlPool.shutdown(2000); } catch (poolErr) {
+        logger.debug({ where: "daemon.boot.mcp_bind_recovery.sql_pool", err: String(poolErr) }, "sql pool shutdown during mcp-bind failure (best-effort)");
+      }
+      clearSqlPool();
+      sqlPool = null;
+    }
     closeDb(stateDbPath);
     // Release the boot-intent lock acquireBootLock wrote (phase:"booting").
     // Without this a failed bind leaves a stale lock that blocks the next
@@ -2889,6 +2903,17 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     for (const dispose of workers) dispose();
     try { await mcpServer?.stop(); } catch (stopErr) {
       logger.debug({ where: "daemon.boot.aux_bind_recovery", err: String(stopErr) }, "mcp stop during aux-bind failure");
+    }
+    // Resource-leak fix (2026-05-23): same as the mcp_bind failure path — the
+    // SQL worker-thread pool was spawned before the bind, so tear it down here
+    // too. Otherwise an aux-bind failure (which CAN happen independently: the
+    // MCP port bound but auxPort is occupied) orphans N worker_threads.
+    if (sqlPool) {
+      try { await sqlPool.shutdown(2000); } catch (poolErr) {
+        logger.debug({ where: "daemon.boot.aux_bind_recovery.sql_pool", err: String(poolErr) }, "sql pool shutdown during aux-bind failure (best-effort)");
+      }
+      clearSqlPool();
+      sqlPool = null;
     }
     closeDb(stateDbPath);
     // Release the boot-intent lock so a retry can proceed (see mcp_bind

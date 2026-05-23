@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import { startDaemon, stopDaemon, isDaemonAlreadyRunningError, getBootIntegrityState, type DaemonHandle } from "./daemon";
 import { isSchedulerDraining } from "./task_scheduler";
+import { getSqlPool, clearSqlPool } from "./sql_pool_singleton";
 import { getFreePortPair, startDaemonOnFreePorts } from "../tests/free_port";
 
 // OS-assigned free ports (collision-free by construction). Earlier schemes
@@ -740,8 +741,19 @@ describe("atomic boot-intent lock", () => {
       expect(String((caught as Error | null)?.message ?? caught)).toContain("failed to bind MCP port");
       // The boot-intent lock acquireBootLock wrote must be released.
       expect(existsSync(tmp.socketFile)).toBe(false);
+      // Resource-leak fix (2026-05-23): the SQL worker-thread pool is spawned
+      // BEFORE the bind, so a bind failure must shut it down + clear the
+      // process-global singleton — otherwise N worker_threads leak (one set
+      // per retry under startDaemonOnFreePorts) and getSqlPool() returns a
+      // pool pointing at a now-closed DB. Skip the assertion when the pool is
+      // disabled (ACC2_DISABLE_SQL_POOL=1) — there is nothing to leak then.
+      if (process.env.ACC2_DISABLE_SQL_POOL !== "1") {
+        expect(getSqlPool()).toBeNull();
+      }
     } finally {
       blocker.stop(true);
+      // Defensive: ensure no leaked pool bleeds into sibling tests.
+      clearSqlPool();
     }
   });
 
