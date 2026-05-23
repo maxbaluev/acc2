@@ -10,7 +10,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
-import { startDaemon, stopDaemon, isDaemonAlreadyRunningError, type DaemonHandle } from "./daemon";
+import { startDaemon, stopDaemon, isDaemonAlreadyRunningError, getBootIntegrityState, type DaemonHandle } from "./daemon";
 import { isSchedulerDraining } from "./task_scheduler";
 import { getFreePortPair, startDaemonOnFreePorts } from "../tests/free_port";
 
@@ -99,6 +99,48 @@ describe("startDaemon — boot + health + shutdown", () => {
     // daemon every worker just ticked, so the array is empty.
     expect(Array.isArray(body.stuck_workers)).toBe(true);
     expect((body.stuck_workers as unknown[]).length).toBe(0);
+  });
+
+  test("INSTANT-BOOT: health=ok is reachable WITHOUT the boot integrity check completing", async () => {
+    // The boot PRAGMA quick_check (formerly synchronous, pre-bind, scanning
+    // every page of the ≈1GB state.db) is now deferred to AFTER the ports
+    // bind + /health serves. startDaemon resolving + /health returning
+    // status:ok must NOT depend on the integrity scan having run. We assert
+    // /health is ok while boot_integrity is still `pending` (the scan is
+    // scheduled via setTimeout(BOOT_HEAVY_PASS_DELAY_MS) and has not fired
+    // by the time the daemon is serving).
+    const fresh = mkTmp();
+    const localHandle = await startDaemonOnFreePorts(startDaemon, {
+      stateDbPath: fresh.dbPath,
+      socketFile: fresh.socketFile,
+      tokenFile: fresh.tokenFile,
+    });
+    try {
+      // The deferred check has not fired yet; the in-process getter must
+      // report `pending` immediately after boot resolved.
+      expect(getBootIntegrityState().status).toBe("pending");
+
+      // /health serves status:ok with the integrity scan still pending —
+      // proving health is decoupled from the (deferred) boot integrity check.
+      const res = await fetch(`http://127.0.0.1:${localHandle.auxPort}/health`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.status).toBe("ok");
+      const bi = body.boot_integrity as { status?: string };
+      expect(bi.status).toBe("pending");
+
+      // The deferred check still RUNS (correctness preserved): wait for it to
+      // transition off `pending` to `ok` on this fresh, healthy temp DB.
+      const deadline = Date.now() + 8000;
+      while (getBootIntegrityState().status === "pending" && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(getBootIntegrityState().status).toBe("ok");
+    } finally {
+      await stopDaemon(localHandle);
+      closeDb();
+      rmSync(fresh.dir, { recursive: true, force: true });
+    }
   });
 
   test("stopDaemon emits daemon_shutdown, removes the lockfile, closes both ports", async () => {

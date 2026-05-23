@@ -495,6 +495,39 @@ const refreshHealthCounts = async (db: Database): Promise<void> => {
 };
 const readHealthCounts = (_db: Database): HealthCountsCache => healthCountsCache;
 
+// Boot integrity state (2026-05-23 instant-boot fix). The boot-time
+// PRAGMA quick_check scans every page of the (≈1GB) state.db — seconds of
+// SYNCHRONOUS bun:sqlite work that, when run BEFORE the MCP/aux ports bind,
+// kept health=ok unreachable for the whole scan. The check now runs in a
+// background task AFTER the ports are bound + /health is serving; its result
+// is surfaced HERE (and on the `/health` body as `boot_integrity`) instead of
+// gating the bind. `pending` is the honest state until the deferred check
+// completes; corruption is surfaced as an `integrity_check_failed` event
+// (the periodic 6h integrity worker also independently catches it). This is a
+// process-global singleton because `/health`'s routeAux closure cannot capture
+// per-boot locals; resetBootIntegrity() restores `pending` on each boot so a
+// same-process restart never reports a stale prior-boot verdict.
+type BootIntegrityState = {
+  status: "pending" | "ok" | "failed" | "skipped";
+  pragma_result: string | null;
+  duration_ms: number | null;
+  checked_at_ms: number | null;
+};
+let bootIntegrityState: BootIntegrityState = {
+  status: "pending",
+  pragma_result: null,
+  duration_ms: null,
+  checked_at_ms: null,
+};
+const resetBootIntegrity = (): void => {
+  bootIntegrityState = { status: "pending", pragma_result: null, duration_ms: null, checked_at_ms: null };
+};
+const setBootIntegrity = (next: BootIntegrityState): void => { bootIntegrityState = next; };
+/** Read the current boot-integrity verdict. Exported for the health handler
+ *  and for tests that prove health=ok is reachable WHILE the check is still
+ *  `pending` (i.e. the deferred check is not a precondition for serving). */
+export const getBootIntegrityState = (): BootIntegrityState => bootIntegrityState;
+
 const pidAlive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 };
@@ -772,27 +805,25 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   }
 
   // Batch 3.OPS: pre-traffic boot checks.
-  //   1. Run PRAGMA integrity_check. On non-"ok" result, stderr diagnostic
-  //      + exit 1 — silent corruption is worse than a loud refusal.
   //   2. Reconcile in-flight dispatches: any `brain_dispatched` row whose
   //      task did not close in the previous boot is marked as
   //      `dispatch_recovered_orphan`; the scheduler will re-pick the task
   //      on its next ready_tasks_view check.
-  // Boot uses quick_check (fast) not the full integrity_check; the full
-  // check runs on the 6h integrity_worker cadence. quick_check still
-  // refuses startup on structural/page corruption — see runIntegrityCheck.
-  const bootIntegrity = await runIntegrityCheck(db, { quick: true });
-  if (!bootIntegrity.ok) {
-    const msg =
-      `acc2 daemon: REFUSING TO START — PRAGMA quick_check failed: ` +
-      `${bootIntegrity.pragma_integrity_check}`;
-    process.stderr.write(msg + "\n");
-    logger.fatal({ pragma_result: bootIntegrity.pragma_integrity_check }, msg);
-    try { closeDb(stateDbPath); } catch (closeErr) {
-      logger.debug({ where: "daemon.boot.integrity_close", err: String(closeErr) }, "closeDb after integrity refusal failed");
-    }
-    throw new Error(msg);
-  }
+  //
+  // INSTANT-BOOT (2026-05-23): the boot-time PRAGMA quick_check (formerly
+  // run RIGHT HERE, synchronously, BEFORE the ports bind) scans every page
+  // of the ≈1GB state.db — seconds of bun:sqlite work that blocked the
+  // single event loop and kept health=ok unreachable for the whole scan
+  // (the dominant pre-health cost on a production-sized ledger). It now runs
+  // DEFERRED, AFTER the ports are bound + /health is already serving (see the
+  // `runBootIntegrityCheck()` schedule below the bind). The check still RUNS
+  // and still catches structural/page corruption — it just no longer gates
+  // boot. Its verdict is surfaced via `bootIntegrityState` (and the `/health`
+  // body's `boot_integrity` field) plus an `integrity_check_failed` event on
+  // corruption; the periodic 6h integrity worker independently re-checks.
+  // resetBootIntegrity() clears any prior-boot verdict so a same-process
+  // restart starts at `pending`.
+  resetBootIntegrity();
   const orphans = reconcileOrphanedDispatches(db);
   if (orphans.length > 0) {
     logger.info({ orphan_count: orphans.length }, "reconciled orphan dispatches at boot");
@@ -1319,9 +1350,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       if (!integrityMarked) { markWorkerReady("integrity"); integrityMarked = true; }
     });
     registerReactiveWorker("integrity", integrityIntervalMs, ["brain_dispatched", "brain_dispatch_closed", "bridge_failed", "task_node_opened", "task_committed", "task_failed", "task_abandoned"], integrityTick, { minReactiveGapMs: integrityIntervalMs });
-    // Mark ready immediately — the boot-time runIntegrityCheck already
-    // proved the substrate is healthy. Reactive event wakes handle new rows;
-    // the shared safety net still covers stale dispatch/task scans.
+    // Mark ready immediately — worker readiness is decoupled from the
+    // (now deferred) boot integrity scan. The deferred runBootIntegrityCheck
+    // surfaces the page-level verdict via /health.boot_integrity; this
+    // reactive worker re-checks on dispatch/task events and the periodic 6h
+    // cadence. The shared safety net still covers stale dispatch/task scans.
     markWorkerReady("integrity");
     integrityMarked = true;
     recordWorkerTick("integrity");
@@ -3075,6 +3108,83 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       });
   });
 
+  // INSTANT-BOOT deferred integrity check (2026-05-23). The boot-time
+  // PRAGMA quick_check used to run synchronously BEFORE the ports bound,
+  // scanning every page of the ≈1GB state.db and keeping health=ok
+  // unreachable for the whole scan. It now runs HERE — after the ports are
+  // bound, the lock is written `phase:"ready"`, and /health is already
+  // serving `status:ok`. The check still RUNS (correctness preserved) and
+  // still catches structural/page corruption; on failure it emits an
+  // `integrity_check_failed` event (the same kind the periodic 6h worker
+  // emits) instead of refusing a boot that has already succeeded — refusing
+  // here would mean killing a daemon that is already serving traffic, which
+  // is strictly worse than surfacing the verdict. The result is published to
+  // `bootIntegrityState` for the `/health` `boot_integrity` field.
+  //
+  // Deferred via setTimeout(BOOT_HEAVY_PASS_DELAY_MS) + .unref() so the scan
+  // does not contend with the first /health + MCP probes immediately after
+  // bind; the scan itself is a single synchronous bun:sqlite pragma (it
+  // cannot yield mid-scan) but by the time it fires the ports already serve,
+  // so the brief block is on a warm daemon, not on the boot-critical path.
+  // role=worker (skipPorts) also runs it so a worker-only daemon still
+  // surfaces a boot verdict.
+  const runBootIntegrityCheck = async (): Promise<void> => {
+    if (stopped) return;
+    try {
+      const report = await runIntegrityCheck(db, { quick: true });
+      if (stopped) return;
+      if (report.ok) {
+        setBootIntegrity({
+          status: "ok",
+          pragma_result: report.pragma_integrity_check,
+          duration_ms: report.duration_ms,
+          checked_at_ms: Date.now(),
+        });
+        logger.info(
+          { duration_ms: report.duration_ms, events_count: report.events_count },
+          "deferred boot integrity check passed (health was already serving)",
+        );
+      } else {
+        setBootIntegrity({
+          status: "failed",
+          pragma_result: report.pragma_integrity_check,
+          duration_ms: report.duration_ms,
+          checked_at_ms: Date.now(),
+        });
+        const msg =
+          `acc2 daemon: deferred boot PRAGMA quick_check FAILED: ${report.pragma_integrity_check}`;
+        process.stderr.write(msg + "\n");
+        logger.fatal({ pragma_result: report.pragma_integrity_check }, msg);
+        try {
+          emitEvent(db, {
+            kind: "integrity_check_failed",
+            substrate_origin: "substrate_auto",
+            payload: {
+              pragma_result: report.pragma_integrity_check,
+              wal_size_bytes: report.wal_size_bytes,
+              events_count: report.events_count,
+              embeddings_count: report.embeddings_count,
+              duration_ms: report.duration_ms,
+              marker: "integrity_check_failed_v1",
+              source: "boot_deferred",
+            },
+          });
+        } catch (emitErr) {
+          logger.debug({ where: "daemon.boot.deferred_integrity_emit", err: String(emitErr) }, "could not emit integrity_check_failed");
+        }
+      }
+    } catch (err) {
+      setBootIntegrity({
+        status: "failed",
+        pragma_result: (err as Error).message,
+        duration_ms: null,
+        checked_at_ms: Date.now(),
+      });
+      logger.warn({ where: "daemon.boot.deferred_integrity", err: String(err) }, "deferred boot integrity check threw");
+    }
+  };
+  setTimeout(() => { void runBootIntegrityCheck(); }, BOOT_HEAVY_PASS_DELAY_MS).unref();
+
   return {
     server: auxServer,
     mcpServer,
@@ -3248,6 +3358,12 @@ const routeAux = async (
       handshake_gate: handshakeGate,
       credentials,
       loaded_git_head: loadedGitHead,
+      // INSTANT-BOOT (2026-05-23): the boot integrity check runs DEFERRED,
+      // after the ports bind + /health serves. `pending` until the deferred
+      // quick_check completes; `ok` / `failed` afterward. health=ok does NOT
+      // depend on this — a `pending` boot_integrity with status=ok is the
+      // normal just-booted state.
+      boot_integrity: getBootIntegrityState(),
     });
   }
 
