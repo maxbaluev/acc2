@@ -84,6 +84,16 @@ CREATE INDEX IF NOT EXISTS idx_events_unembedded_by_ts
 CREATE INDEX IF NOT EXISTS idx_events_origin_ts
   ON events(substrate_origin, ts);
 
+-- trajectory_motif_extractor scans `WHERE ts > cutoff ORDER BY directive_id, ts,
+-- rowid LIMIT 5000` per tick (the heaviest extractor tick). idx_events_ts serves
+-- the ts filter but the directive_id-first sort order forced USE TEMP B-TREE FOR
+-- ORDER BY over the whole 30d window. idx_events_directive_kind_ts puts `kind` in
+-- the middle so it can't serve a (directive_id, ts) order. EXPLAIN on the 374K-row
+-- live-DB copy: 186ms (SCAN + temp b-tree) → 14ms (SEARCH USING INDEX), ~13x,
+-- byte-identical result set. The (directive_id, ts) order serves the sort directly.
+CREATE INDEX IF NOT EXISTS idx_events_directive_ts
+  ON events(directive_id, ts);
+
 -- ── act_artifact ───────────────────────────────────────────────────
 -- Registry row per polymorphic artifact handle. declared_sandbox +
 -- fixture_input are JSON-encoded TEXT (shape mirrors SandboxDecl /

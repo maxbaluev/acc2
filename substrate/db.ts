@@ -177,6 +177,10 @@ const EVENT_HOT_PATH_INDEXES = [
   // ~12ms/call on the 374K-row live DB). (substrate_origin, ts) converts it to
   // a single SEARCH seek (~0.16ms, ~77x). Mirrors schema.sql for older DBs.
   "CREATE INDEX IF NOT EXISTS idx_events_origin_ts ON events(substrate_origin, ts)",
+  // trajectory_motif_extractor's per-tick `ts>cutoff ORDER BY directive_id, ts`
+  // scan forced USE TEMP B-TREE (no (directive_id, ts) index — the kind-in-middle
+  // idx_events_directive_kind_ts can't serve it). 186ms → 14ms (~13x), byte-identical.
+  "CREATE INDEX IF NOT EXISTS idx_events_directive_ts ON events(directive_id, ts)",
 ];
 
 /** F4a table rename (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW):
