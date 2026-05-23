@@ -132,4 +132,80 @@ describe("alignment / depth_one (Principle 5)", () => {
     // clean (no spurious rows on the audit trail).
     expect(trunc.c).toBe(0);
   });
+
+  // Regression — real (production) dispatch must compose under the
+  // PRODUCTION default budget (DEFAULT_BUDGET_TOKENS=32000), NOT the tiny
+  // test-pin budget. The dispatcher calls composePrompt WITHOUT a
+  // budgetTokens override, so the legitimate ~5k-token floor sections
+  // (task_goal, runtimes_available, workflow, do_not, retrieved_knowledge,
+  // owner_profile, owner_rendering_policy, top_laws, …) must fit and emit
+  // NO spurious floor_section_missing / over-budget dispatcher_violation.
+  // Pre-fix this path resolved to an 800-token default and fired
+  // dispatcher_violation{kind:floor_section_missing} on every real dispatch
+  // (observed live: directive 2QX74XE9, budget_tokens=800, total=5474).
+  test("default-budget dispatch on fat substrate emits NO spurious floor violation", async () => {
+    closeDb();
+    const db = openDb(":memory:");
+    seedFoundationalKnowledge(db);
+
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: {
+        directive_text:
+          "CLAUDE_MD_TERSE_INVARIANTS_LEAF regression fixture — a realistic directive whose floor sections legitimately consume several thousand tokens once the substrate accumulates promoted knowledge and owner profile rows.",
+      },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { goal: "terse invariants leaf goal", lifecycle: "finite", urgency: "normal" },
+    });
+
+    // Fatten the floor surfaces the live violation listed: promoted
+    // knowledge (retrieved_knowledge / top_laws) so the prompt body lands
+    // in the ~5k+ token range the live dispatch hit.
+    for (let i = 0; i < 200; i++) {
+      emitEvent(db, {
+        kind: "knowledge_promoted",
+        substrate_origin: "substrate_auto",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: {
+          text: "terse-invariants knowledge promoted row #" + i + " — " + "padding".repeat(30),
+          score: 0.95,
+        },
+      });
+    }
+
+    // Compose with the PRODUCTION default — NO budgetTokens override, the
+    // exact shape the task_dispatcher uses on a real dispatch.
+    const result = await composePrompt(db, { taskId });
+
+    // The realistic floor sections must fit comfortably under the 32000
+    // production default — no truncation.
+    expect(estimateTokens(result.text)).toBeLessThan(32000);
+    expect(result.truncated.length).toBe(0);
+
+    // And — the heart of the regression — NO floor_section_missing
+    // dispatcher_violation may be emitted on this real-dispatch path.
+    const floorViolations = db
+      .query(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'dispatcher_violation' AND failure_kind = 'floor_section_missing'",
+      )
+      .get() as { c: number };
+    expect(floorViolations.c).toBe(0);
+
+    // Every load-bearing floor section survived.
+    const keptNames = new Set(result.sections.map((s) => s.name));
+    for (const name of ["task_goal", "runtimes_available", "workflow", "do_not", "retrieved_knowledge"]) {
+      expect(keptNames.has(name)).toBe(true);
+    }
+  });
 });

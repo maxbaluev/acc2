@@ -2251,7 +2251,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   await pushPolicySection("do_not", 0, true);
   // Detailed emission grammars — env_requires + rich knowledge schema +
   // artifact provenance. P1 so it drops first under tight-budget pressure
-  // (depth-1 tests pin a tiny 800-token budget) but lands in normal flow.
+  // (depth-1 tests pin a tiny ~500-token budget) but lands in normal flow.
   // Q2 (brain amendment MDBZV4YVRH7D172BW40W1J5ASM): routed through
   // pushRetrievedPolicyArtifactSection so the dispatcher's on-demand
   // act_artifact retrieval feeds the body selection.
