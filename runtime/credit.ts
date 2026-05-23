@@ -404,15 +404,20 @@ const FAILURE_BAND = 0.7;
 //     get FULL Shapley weight (factor 1.0). A cited retrieval_binding id is
 //     resolved to its source_event_id/source_artifact_id before credit.
 //   - prompt-level retrieval_binding rows that were exposed but not cited are
-//     recorded as retrieval_rejected and excluded from Shapley credit. Prompt
-//     exposure alone is not evidence that the entry drove the action.
+//     batched into one retrieval_rejected summary as composer retrieval-
+//     precision feedback. Prompt exposure is a COMPOSER choice, not evidence
+//     against the exposed knowledge's truth posterior.
 //   - knowledge_propagated remains a weaker explicit transfer signal because
 //     propagation is a substrate-authored cross-directive act, not mere prompt
 //     exposure.
 const PROPAGATION_ONLY_FACTOR = 0.35;
+const RETRIEVAL_REJECTION_CONTEXT_REF_LIMIT = 20;
+const RETRIEVAL_REJECTION_SOURCE_LIMIT = 50;
 
 type CitationEntry = { id: string; weightFactor: number };
-type RetrievalRejectionEmitter = (bindingEventId: string | null, sourceIds: string[], reason: string) => void;
+type RetrievalRejectionReason = "exposed_but_not_cited_by_act" | "decorative_citation_not_bound" | "cited_id_not_knowledge_bearing";
+type RetrievalRejectedSource = { sourceId: string; bindingEventIds: string[] };
+type RetrievalRejectionEmitter = (bindingEventIds: string[], sources: RetrievalRejectedSource[], reason: RetrievalRejectionReason) => void;
 
 const declaredCitationIds = (events: Array<EventLike | null>, actTupleIds: string[]): string[] => {
   const out: string[] = [];
@@ -474,10 +479,11 @@ const collectCitations = (
 
   // Second pass: retrieval_binding used-set ids for this task. The used-set
   // joins context_refs and body @cite markers in the binding union. A payload
-  // declared citation may earn credit when it is also in this union. A merely
-  // exposed binding that was never cited remains excluded and is surfaced as
-  // retrieval_rejected negative evidence.
+  // declared citation may earn credit when it is also in this union. Merely
+  // exposed bindings are deduped and summarized once per act as composer
+  // retrieval-precision feedback; they are not knowledge-truth contradictions.
   if (actionEv && actionEv.task_id && scoredEv) {
+    const exposureOnlyBySource = new Map<string, Set<string>>();
     const bindings = db
       .query(
         `SELECT id, payload FROM events
@@ -494,10 +500,22 @@ const collectCitations = (
           .filter((value): value is string => typeof value === "string" && value.length > 0);
         for (const sourceId of sourceIds) boundIds.add(sourceId);
         const uncited = sourceIds.filter((sourceId) => !explicitlyCited.has(sourceId) && !declaredSet.has(sourceId));
-        if (uncited.length > 0 && rejectRetrievalBinding) {
-          rejectRetrievalBinding(b.id, uncited, "exposed_but_not_cited_by_act");
+        for (const sourceId of uncited) {
+          let bindingIds = exposureOnlyBySource.get(sourceId);
+          if (!bindingIds) {
+            bindingIds = new Set<string>();
+            exposureOnlyBySource.set(sourceId, bindingIds);
+          }
+          bindingIds.add(b.id);
         }
       } catch { /* skip malformed */ }
+    }
+    if (exposureOnlyBySource.size > 0 && rejectRetrievalBinding) {
+      const sources = [...exposureOnlyBySource.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([sourceId, bindingIds]) => ({ sourceId, bindingEventIds: [...bindingIds].sort() }));
+      const bindingEventIds = [...new Set(sources.flatMap((source) => source.bindingEventIds))].sort();
+      rejectRetrievalBinding(bindingEventIds, sources, "exposed_but_not_cited_by_act");
     }
   }
 
@@ -509,7 +527,7 @@ const collectCitations = (
     if (boundIds.has(id)) {
       ordered.push({ id, weightFactor: 1.0 });
     } else if (rejectRetrievalBinding) {
-      rejectRetrievalBinding(null, [id], "decorative_citation_not_bound");
+      rejectRetrievalBinding([], [{ sourceId: id, bindingEventIds: [] }], "decorative_citation_not_bound");
     }
   }
 
@@ -810,20 +828,35 @@ export const distributeCredit = async (
     verifierBodyCites,
     actionArtifactId,
     verifierArtifactId,
-    (bindingEventId, sourceIds, reason) => {
-      const refs = [bindingEventId, ...sourceIds, params.scored_event_id].filter((ref): ref is string => typeof ref === "string" && ref.length > 0);
+    (bindingEventIds, sources, reason) => {
+      const isExposureOnly = reason === "exposed_but_not_cited_by_act";
+      const sourceIds = sources.map((source) => source.sourceId);
+      const boundedBindingIds = bindingEventIds.slice(0, RETRIEVAL_REJECTION_CONTEXT_REF_LIMIT);
+      const boundedSourceIds = sourceIds.slice(0, RETRIEVAL_REJECTION_CONTEXT_REF_LIMIT);
+      const refs = [...boundedBindingIds, ...boundedSourceIds, params.scored_event_id]
+        .filter((ref): ref is string => typeof ref === "string" && ref.length > 0);
       const rejectedId = emit({
         kind: "retrieval_rejected",
         substrate_origin: "substrate_auto",
         context_refs: refs,
         payload: {
-          retrieval_binding_id: bindingEventId,
-          source_ids: sourceIds,
+          retrieval_binding_event_id: bindingEventIds.length === 1 ? bindingEventIds[0] : null,
+          retrieval_binding_event_ids: bindingEventIds,
+          retrieval_binding_event_count: bindingEventIds.length,
+          source_ids: sourceIds.slice(0, RETRIEVAL_REJECTION_SOURCE_LIMIT),
+          source_count: sourceIds.length,
+          omitted_source_count: Math.max(0, sourceIds.length - RETRIEVAL_REJECTION_SOURCE_LIMIT),
+          sources: sources.slice(0, RETRIEVAL_REJECTION_SOURCE_LIMIT),
           action_scored_event_id: params.scored_event_id,
           reason,
+          feedback_target: isExposureOnly ? "composer_retrieval_precision" : "citation_binding_honesty",
+          posterior_target: isExposureOnly ? "composer_precision_by_goal_shape" : "knowledge_truth",
+          goal_shape: directiveGoalShape,
+          batch: isExposureOnly,
           selection_point: "credit.collectCitations",
         } as JsonValue,
       });
+      if (isExposureOnly) return;
       for (const sourceId of sourceIds) {
         if (classifyTarget(db, sourceId) !== "knowledge") continue;
         emit({

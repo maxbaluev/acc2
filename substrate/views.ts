@@ -849,13 +849,25 @@ CREATE VIEW IF NOT EXISTS retrieval_credit_view AS
     FROM scored_cites
     GROUP BY retrieval_binding_event_id
   ),
-  reject_agg AS (
+  rejected_bindings AS (
     SELECT
-      json_extract(payload, '$.retrieval_binding_event_id') AS retrieval_binding_event_id,
-      COUNT(*) AS times_rejected
+      json_extract(payload, '$.retrieval_binding_event_id') AS retrieval_binding_event_id
     FROM events
     WHERE kind = 'retrieval_rejected'
-    GROUP BY json_extract(payload, '$.retrieval_binding_event_id')
+      AND json_extract(payload, '$.retrieval_binding_event_id') IS NOT NULL
+    UNION ALL
+    SELECT
+      je.value AS retrieval_binding_event_id
+    FROM events e, json_each(e.payload, '$.retrieval_binding_event_ids') je
+    WHERE e.kind = 'retrieval_rejected'
+      AND json_type(e.payload, '$.retrieval_binding_event_ids') = 'array'
+  ),
+  reject_agg AS (
+    SELECT
+      retrieval_binding_event_id,
+      COUNT(*) AS times_rejected
+    FROM rejected_bindings
+    GROUP BY retrieval_binding_event_id
   ),
   credit_agg AS (
     SELECT
