@@ -195,6 +195,41 @@ describe("extractKnowledgePromotions", () => {
       .get() as { c: number }).c;
     expect(count).toBe(1);
   });
+
+  test("cursor-advance idempotency hole: a candidate scanned while UNRESOLVED still promotes after its confirmations arrive on a later tick (cursor must not skip open candidates)", async () => {
+    const db = openDb(":memory:");
+    // Tick 1: candidate exists with NO confirmations yet. The extractor scans
+    // it, finds it unresolved, and (pre-fix) advanced the cursor past its ts.
+    const candidateId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      payload: { text: "confirmations arrive later" },
+      ts: tickTs(),
+    });
+    const tick1 = await extractKnowledgePromotions(db);
+    expect(tick1.promoted).toBe(0);
+
+    // Confirmations land AFTER the first extractor tick (real flow: the brain /
+    // retrieval bindings corroborate the entry over subsequent cycles). Their
+    // ts is later than the candidate's ts and later than the pre-fix cursor.
+    for (let i = 0; i < 6; i++) {
+      insertEvent(db, {
+        kind: "candidate_confirmed",
+        context_refs: [candidateId],
+        payload: { idx: i },
+        ts: tickTs(),
+      });
+    }
+
+    // Tick 2: the candidate (ts < cursor pre-fix) must still be re-scanned and
+    // now promoted. Pre-fix the cursor had advanced past candidate.ts, the
+    // `ts > cursor` filter excluded it, and it could NEVER promote.
+    const tick2 = await extractKnowledgePromotions(db);
+    expect(tick2.promoted).toBe(1);
+    const count = (db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind='knowledge_promoted'")
+      .get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
 });
 
 describe("extractSemanticDedup", () => {

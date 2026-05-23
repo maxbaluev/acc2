@@ -446,10 +446,16 @@ export const extractKnowledgePromotions = async (db: Database): Promise<Knowledg
   // separate time floor — cursor + LIMIT together bound the work.
   const candidates = db
     .query(
+      // Inclusive lower bound (>=): the cursor is clamped below to the oldest
+      // STILL-UNRESOLVED candidate (see the cursor-advance comment), so the
+      // boundary row must be re-included to give it another promotion chance
+      // when its verdicts finally arrive. Already-resolved boundary rows are
+      // idempotent-skipped via the promotedIds set, so re-scanning them is a
+      // cheap no-op rather than a double-promotion.
       `SELECT id, ts, directive_id, task_id, loop_id, substrate_origin, payload
        FROM events
        WHERE kind = 'knowledge_candidate'
-         AND (? IS NULL OR ts > ?)
+         AND (? IS NULL OR ts >= ?)
        ORDER BY ts ASC
        LIMIT ?`,
     )
@@ -564,6 +570,18 @@ export const extractKnowledgePromotions = async (db: Database): Promise<Knowledg
   let promoted = 0;
   let demoted = 0;
   let latestTs = cursor;
+  // Cursor-advance correctness (idempotency hole fix): the cursor must NOT
+  // advance past a candidate that is still UNRESOLVED (neither promoted nor
+  // demoted this pass). Promotion/demotion depends on verdict events
+  // (candidate_confirmed / candidate_contradicted) that arrive LATER than the
+  // candidate's own ts. The pre-fix loop set `latestTs = c.ts` for EVERY
+  // scanned candidate and persisted it; an open candidate whose confirmations
+  // landed after the next tick was then filtered out by `ts > cursor` forever
+  // and could NEVER be promoted — knowledge silently dropped. We instead clamp
+  // the cursor to just before the OLDEST still-open candidate so unresolved
+  // rows stay in the scan window. Already-resolved older rows that fall back
+  // into the window are protected by the idempotent `promotedIds` skip above.
+  let oldestUnresolvedTs: string | null = null;
 
   withImmediateTransaction(db, () => {
     for (const c of candidates) {
@@ -648,10 +666,31 @@ export const extractKnowledgePromotions = async (db: Database): Promise<Knowledg
         });
         demoted++;
         promotedIds.add(cid);
+      } else {
+        // Unresolved this pass: it must remain re-scannable next tick because
+        // its verdicts may still be accumulating. Remember the oldest such ts.
+        const cts = c.ts as string;
+        if (oldestUnresolvedTs === null || cts < oldestUnresolvedTs) {
+          oldestUnresolvedTs = cts;
+        }
       }
+      // Track the newest candidate ts we saw (the all-resolved cursor target).
       latestTs = c.ts as string;
     }
-    if (latestTs) writeMeta(db, META_KEYS.promotions, latestTs);
+    // Clamp: never advance past the oldest still-open candidate. Strict `<`
+    // is used at scan time (`ts > cursor`), so setting the cursor to the
+    // oldest-unresolved ts re-includes that candidate (and everything after)
+    // on the next tick. When NOTHING is open, advance to the newest ts seen.
+    const nextCursor = oldestUnresolvedTs ?? latestTs;
+    if (nextCursor) {
+      // Monotonic guard: a clamp must never move the cursor BACKWARDS past
+      // where it already was, or a long-resolved early candidate could rewind
+      // the whole window every tick. The pre-existing cursor is always a valid
+      // floor because everything <= it was already scanned (and resolved rows
+      // are idempotent via promotedIds).
+      const floored = cursor !== null && nextCursor < cursor ? cursor : nextCursor;
+      writeMeta(db, META_KEYS.promotions, floored);
+    }
   });
 
   return { promoted, demoted };
