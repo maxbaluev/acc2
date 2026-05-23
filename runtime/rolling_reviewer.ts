@@ -24,6 +24,7 @@ import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { newId, nowIso } from "./ids";
 import { rollingReviewDue, type RollingReviewDueRow } from "../substrate/views";
+import { poolQuery } from "./sql_pool_singleton";
 
 const META_REVIEW_PREFIX = "rolling_review_opened_";
 const DEFAULT_MAX_MISSED_REVIEWS = 3;
@@ -269,14 +270,19 @@ export const archiveStaleRollingDirectives = async (
   const max = opts?.maxMissedReviews ?? DEFAULT_MAX_MISSED_REVIEWS;
 
   // Find every directive_opened whose latest payload lifecycle is
-  // 'rolling_active' AND that is not already archived.
-  const directives = db
-    .query(
-      `SELECT directive_id, payload, ts FROM events
-       WHERE kind IN ('directive_opened', 'directive_amended')
-       ORDER BY ts ASC`,
-    )
-    .all() as Array<{ directive_id: string; payload: string; ts: string }>;
+  // 'rolling_active' AND that is not already archived. This is an UNBOUNDED
+  // scan of every directive lifecycle event (no kind-restricting index helps
+  // much at scale), re-run every rolling tick (60s). Route through the SQL
+  // worker-thread pool when present so it runs off the main loop. NOT
+  // watermarked: a fresh directive_amended on an OLD directive can flip its
+  // lifecycle, so the latest-per-directive resolution genuinely needs the
+  // full set each tick.
+  const directives = (await poolQuery<{ directive_id: string; payload: string; ts: string }>(
+    db,
+    `SELECT directive_id, payload, ts FROM events
+     WHERE kind IN ('directive_opened', 'directive_amended')
+     ORDER BY ts ASC`,
+  ));
 
   const latestByDirective = new Map<string, { lifecycle: string; ts: string }>();
   for (const r of directives) {

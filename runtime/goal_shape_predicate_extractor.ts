@@ -28,6 +28,7 @@
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { emitEvent } from "./events";
+import { poolQuery } from "./sql_pool_singleton";
 
 const YIELD_EVERY_N = 25;
 const PREDICATE_KIND = "goal_shape_strategy_predicate";
@@ -220,13 +221,18 @@ export const extractGoalShapePredicates = async (
     skipped_empty_shape: 0,
   };
 
-  const rows = db
-    .query(
-      `SELECT id, ts, payload FROM events
-        WHERE kind = 'act_artifact_score_updated' AND ts > ?
-        ORDER BY ts ASC LIMIT ?`,
-    )
-    .all(cutoff, maxEvents) as ScoreUpdatedRow[];
+  // Windowed scan of recent score-update events. Route through the SQL
+  // worker-thread pool when present so the heavy time-window read doesn't
+  // block the main loop (Bun.SQL is fake-async). The full window aggregate is
+  // genuinely needed each tick (per-shape residual variance), so this is
+  // pool-routed but NOT watermarked.
+  const rows = (await poolQuery<ScoreUpdatedRow>(
+    db,
+    `SELECT id, ts, payload FROM events
+      WHERE kind = 'act_artifact_score_updated' AND ts > ?
+      ORDER BY ts ASC LIMIT ?`,
+    [cutoff, maxEvents],
+  ));
 
   // Group residuals by goal_shape. Track last_observed_ts per shape.
   const byShape = new Map<string, { residuals: number[]; lastTs: string }>();

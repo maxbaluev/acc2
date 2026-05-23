@@ -366,4 +366,52 @@ describe("extractCausalEdges", () => {
     expect(summary.refinement_edges_recorded).toBe(0);
     expect(countEdges(db, "refinement_parent_child")).toBe(0);
   });
+
+  // Scale fix: the creation half persists a high-watermark (max processed
+  // act_tuple_recorded ts) in the meta table so each tick scans only NEWER
+  // acts. This test proves both legs of the contract:
+  //   (a) NEW acts emitted after a tick ARE processed on the next tick;
+  //   (b) OLD acts already processed are NOT re-scanned (no redundant
+  //       creation work / re-observation), while still producing identical
+  //       cumulative edge rows.
+  test("creation watermark: second tick processes only NEW acts, does not reprocess old ones", async () => {
+    const db = openDb(":memory:");
+
+    // Tick 1: one cocitation act → one edge + one observation.
+    insertEvent(db, {
+      kind: "act_tuple_recorded",
+      payload: { cited_knowledge_ids: ["k_old_a", "k_old_b"] },
+    });
+    const first = await extractCausalEdges(db);
+    expect(first.scanned).toBe(1);
+    expect(first.cocitations_recorded).toBe(1);
+    expect(countEdges(db, "citation_cocitation")).toBe(1);
+    expect(countObservations(db)).toBe(1);
+
+    // Watermark was persisted.
+    const wm = db
+      .query("SELECT value FROM meta WHERE key = 'causal_edge:creation_watermark_ts'")
+      .get() as { value: string } | null;
+    expect(wm?.value).toBeTruthy();
+
+    // Tick 2: add a NEW act. The creation half must scan ONLY the new act
+    // (scanned=1, not 2 — the old act is behind the watermark), admit the new
+    // edge, and emit exactly one new observation (total 2). The old edge row
+    // is untouched and not duplicated.
+    insertEvent(db, {
+      kind: "act_tuple_recorded",
+      payload: { cited_knowledge_ids: ["k_new_a", "k_new_b"] },
+    });
+    const second = await extractCausalEdges(db);
+    expect(second.scanned).toBe(1); // ONLY the new act — old one is behind the watermark
+    expect(second.cocitations_recorded).toBe(1);
+    expect(countEdges(db, "citation_cocitation")).toBe(2); // cumulative: old + new, no dupes
+    expect(countObservations(db)).toBe(2); // one observation per first-seen edge, no re-observation of the old
+
+    // Tick 3 with no new acts: nothing scanned, no new observations.
+    const third = await extractCausalEdges(db);
+    expect(third.scanned).toBe(0);
+    expect(countObservations(db)).toBe(2);
+    expect(countEdges(db, "citation_cocitation")).toBe(2);
+  });
 });

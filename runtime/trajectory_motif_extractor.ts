@@ -26,6 +26,7 @@
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { emitEvent } from "./events";
+import { poolQuery } from "./sql_pool_singleton";
 
 const YIELD_EVERY_N = 25;
 const yieldToEventLoop = (): Promise<void> => new Promise<void>((r) => setTimeout(r, 0));
@@ -192,14 +193,19 @@ export const extractTrajectoryMotifs = async (
   // Pull recent events with a non-null directive_id, ordered by
   // (directive_id, ts) so the sliding-window walk per directive is
   // a single linear scan.
-  const events = db
-    .query(
-      `SELECT id, ts, directive_id, kind, payload FROM events
-        WHERE ts > ? AND directive_id IS NOT NULL
-        ORDER BY directive_id ASC, ts ASC, rowid ASC
-        LIMIT ?`,
-    )
-    .all(cutoff, maxEvents) as EventRow[];
+  // This windowed scan has NO kind filter (it walks every directive-scoped
+  // event to build per-directive kind sequences), so it touches the most rows
+  // of any extractor scan. Route through the SQL worker-thread pool when
+  // present so it runs off the main loop. The full window is needed each tick
+  // to recompute n-gram frequencies, so it is pool-routed but NOT watermarked.
+  const events = (await poolQuery<EventRow>(
+    db,
+    `SELECT id, ts, directive_id, kind, payload FROM events
+      WHERE ts > ? AND directive_id IS NOT NULL
+      ORDER BY directive_id ASC, ts ASC, rowid ASC
+      LIMIT ?`,
+    [cutoff, maxEvents],
+  ));
 
   // Group event kinds by directive.
   const perDirective = new Map<string, string[]>();
@@ -273,15 +279,17 @@ export const extractTrajectoryMotifs = async (
     let residualSum = 0;
     let residualCount = 0;
     if (matchingDirectives.length > 0) {
-      // Pull task_closure_audited residuals for these directives.
+      // Pull task_closure_audited residuals for these directives. Runs up to
+      // topK (50) times per tick — route through the pool so the cumulative
+      // closure-residual scans don't block the main loop.
       const placeholders = matchingDirectives.map(() => "?").join(",");
-      const rows = db
-        .query(
-          `SELECT payload FROM events
-            WHERE kind = 'task_closure_audited'
-              AND directive_id IN (${placeholders})`,
-        )
-        .all(...matchingDirectives) as Array<{ payload: string | null }>;
+      const rows = (await poolQuery<{ payload: string | null }>(
+        db,
+        `SELECT payload FROM events
+          WHERE kind = 'task_closure_audited'
+            AND directive_id IN (${placeholders})`,
+        matchingDirectives,
+      ));
       for (const row of rows) {
         if (!row.payload) continue;
         try {

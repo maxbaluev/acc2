@@ -16,11 +16,36 @@
 import type { Database } from "bun:sqlite";
 import { emitEvent } from "./events";
 import { betaMean, betaStreamConfidence } from "./posterior";
+import { poolQuery } from "./sql_pool_singleton";
 
 const YIELD_EVERY_N = 25;
 const yieldToEventLoop = (): Promise<void> => new Promise<void>((r) => setTimeout(r, 0));
 
 const EDGE_KIND = "causal_edge_predicate";
+
+// Incremental-scan watermark for the creation half. Persisted in the `meta`
+// key/value table (same mechanism substrate/extractors.ts uses for its
+// promotion/dedup cursors) so it survives daemon restarts. The value is the
+// highest act_tuple_recorded `ts` the creation half has already turned into
+// edge rows; the next tick starts strictly after it.
+const CREATION_WATERMARK_KEY = "causal_edge:creation_watermark_ts";
+
+const readCreationWatermark = (db: Database): string | null => {
+  try {
+    const row = db
+      .query("SELECT value FROM meta WHERE key = ?")
+      .get(CREATION_WATERMARK_KEY) as { value: string } | null;
+    return row?.value ?? null;
+  } catch {
+    return null;
+  }
+};
+
+const writeCreationWatermark = (db: Database, ts: string): void => {
+  try {
+    db.run("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", [CREATION_WATERMARK_KEY, ts]);
+  } catch { /* meta write is best-effort; a missed write just re-scans next tick */ }
+};
 
 type ActTupleRow = {
   id: string;
@@ -233,13 +258,16 @@ const creditEdgesFromActResiduals = async (
   maxActs: number,
   summary: CausalEdgeSummary,
 ): Promise<void> => {
-  const acts = db
-    .query(
-      `SELECT id, ts, directive_id, task_id, payload FROM events
-        WHERE kind = 'act_tuple_recorded' AND ts > ?
-        ORDER BY ts DESC LIMIT ?`,
-    )
-    .all(cutoff, maxActs) as CreditActRow[];
+  // Windowed scan of recent act tuples for the credit half. Route through the
+  // SQL worker-thread pool when present so the heavy read runs off the main
+  // loop (mirrors the creation-half scans below).
+  const acts = (await poolQuery<CreditActRow>(
+    db,
+    `SELECT id, ts, directive_id, task_id, payload FROM events
+      WHERE kind = 'act_tuple_recorded' AND ts > ?
+      ORDER BY ts DESC LIMIT ?`,
+    [cutoff, maxActs],
+  ));
 
   const LOW_RESIDUAL = 0.3;
   let processedSinceYield = 0;
@@ -367,20 +395,29 @@ export const extractCausalEdges = async (
   // Citation co-occurrence + artifact co-occurrence from act_tuple_recorded.
   // T3.8/T5: heavy time-window sweep — route through the SQL worker-thread
   // pool when present so Bun.SQL's sync read can't starve the main loop.
+  //
+  // INCREMENTAL WATERMARK (scale fix): edge creation is monotonic and
+  // idempotent (ensureEdgeRow is SELECT-before-INSERT; the audit event only
+  // fires on the FIRST observation). Re-scanning the oldest acts of the
+  // 14-day window every tick produces NO new output after the first pass —
+  // pure O(window) waste. We persist the highest act `ts` the creation half
+  // has processed and start the next tick AFTER it, so each tick scans only
+  // acts newer than the watermark (O(new)). This is SAFE because the credit
+  // half independently calls ensureEdgeRow on demand (line ~297), so any edge
+  // the creation half skips is still materialized when an outcome arrives.
+  // First call (no watermark row) scans the full window from `cutoff` —
+  // identical to the pre-watermark behavior the unit tests pin.
+  const creationFloor = readCreationWatermark(db);
+  const creationLowerBound = creationFloor && creationFloor > cutoff ? creationFloor : cutoff;
   const actsSql = `SELECT id, ts, task_id, payload FROM events
         WHERE kind = 'act_tuple_recorded' AND ts > ?
         ORDER BY ts ASC LIMIT ?`;
-  const acts = await (async (): Promise<ActTupleRow[]> => {
-    try {
-      const mod = await import("./sql_pool_singleton");
-      const pool = mod.getSqlPool();
-      if (pool) return pool.query<ActTupleRow>(actsSql, [cutoff, maxActs]);
-    } catch { /* tolerate */ }
-    return db.query(actsSql).all(cutoff, maxActs) as ActTupleRow[];
-  })();
+  const acts = await poolQuery<ActTupleRow>(db, actsSql, [creationLowerBound, maxActs]);
+  let maxCreationTs = creationFloor;
 
   let processedSinceYield = 0;
   for (const act of acts) {
+    if (!maxCreationTs || act.ts > maxCreationTs) maxCreationTs = act.ts;
     if (processedSinceYield >= YIELD_EVERY_N) {
       await yieldToEventLoop();
       processedSinceYield = 0;
@@ -439,17 +476,14 @@ export const extractCausalEdges = async (
   }
 
   // Refinement edges from task_edge_recorded. T3.8/T5: pool-routed sweep.
+  // (Refinement-edge creation is also idempotent, but task_edge_recorded
+  // volume is far lower than act_tuple_recorded, so we leave this as a plain
+  // windowed+pool-routed scan rather than add a second watermark cursor —
+  // correctness/clarity over an over-aggressive optimization.)
   const edgesSql = `SELECT id, ts, payload FROM events
         WHERE kind = 'task_edge_recorded' AND ts > ?
         ORDER BY ts ASC LIMIT ?`;
-  const edges = await (async (): Promise<EdgeEventRow[]> => {
-    try {
-      const mod = await import("./sql_pool_singleton");
-      const pool = mod.getSqlPool();
-      if (pool) return pool.query<EdgeEventRow>(edgesSql, [cutoff, maxActs]);
-    } catch { /* tolerate */ }
-    return db.query(edgesSql).all(cutoff, maxActs) as EdgeEventRow[];
-  })();
+  const edges = await poolQuery<EdgeEventRow>(db, edgesSql, [cutoff, maxActs]);
 
   processedSinceYield = 0;
   for (const ev of edges) {
@@ -498,6 +532,13 @@ export const extractCausalEdges = async (
   // different directives, so directive-correlation credited 0 of 193
   // closures. The act's own residual is the connecting signal.
   await creditEdgesFromActResiduals(db, cutoff, maxCreditActs, summary);
+
+  // Advance the creation watermark to the newest act this tick processed so
+  // the next tick scans only newer acts. Only persisted when it strictly
+  // advances (no regression past a prior watermark on an empty tick).
+  if (maxCreationTs && maxCreationTs !== creationFloor) {
+    writeCreationWatermark(db, maxCreationTs);
+  }
 
   return summary;
 };

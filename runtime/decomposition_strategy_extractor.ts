@@ -32,6 +32,7 @@
 
 import type { Database } from "bun:sqlite";
 import { emitEvent } from "./events";
+import { poolQuery } from "./sql_pool_singleton";
 
 const YIELD_EVERY_N = 25;
 const PREDICATE_KIND = "decomposition_strategy_predicate";
@@ -547,20 +548,22 @@ export const extractDecompositionStrategy = async (
 
   // Pull the most-recent task_closure_audited per directive in the
   // window. A directive can be re-audited; we take the latest closure.
-  const directives = db
-    .query(
-      `SELECT directive_id,
-              MAX(ts)     AS closure_ts,
-              payload     AS closure_payload
-         FROM events
-        WHERE kind = 'task_closure_audited'
-          AND ts > ?
-          AND directive_id IS NOT NULL
-        GROUP BY directive_id
-        ORDER BY closure_ts DESC
-        LIMIT ?`,
-    )
-    .all(cutoff, maxDirectives) as DirectiveRow[];
+  // Route through the SQL worker-thread pool when present so this windowed
+  // GROUP BY aggregate over the events table doesn't block the main loop.
+  const directives = (await poolQuery<DirectiveRow>(
+    db,
+    `SELECT directive_id,
+            MAX(ts)     AS closure_ts,
+            payload     AS closure_payload
+       FROM events
+      WHERE kind = 'task_closure_audited'
+        AND ts > ?
+        AND directive_id IS NOT NULL
+      GROUP BY directive_id
+      ORDER BY closure_ts DESC
+      LIMIT ?`,
+    [cutoff, maxDirectives],
+  ));
 
   // Group fingerprints by shape category. Track the latest observed
   // closure_ts per shape so the predicate row's `last_observed_ts`
@@ -578,15 +581,18 @@ export const extractDecompositionStrategy = async (
     const closurePayload = parsePayload(dir.closure_payload);
     const closureResidual = numberOr(closurePayload.closure_residual, 1.0);
 
-    const events = db
-      .query(
-        `SELECT id, task_id, parent_task_id, kind, payload
-           FROM events
-          WHERE directive_id = ?
-            AND kind IN ('task_node_opened', 'task_edge_recorded')
-          ORDER BY ts ASC, rowid ASC`,
-      )
-      .all(dir.directive_id) as DirectiveEventRow[];
+    // Per-directive DAG event pull. This is the heavy part of the tick — up
+    // to maxDirectives (500) of these run per tick. Route each through the
+    // pool so the cumulative scan time doesn't peg the main loop.
+    const events = (await poolQuery<DirectiveEventRow>(
+      db,
+      `SELECT id, task_id, parent_task_id, kind, payload
+         FROM events
+        WHERE directive_id = ?
+          AND kind IN ('task_node_opened', 'task_edge_recorded')
+        ORDER BY ts ASC, rowid ASC`,
+      [dir.directive_id],
+    ));
 
     if (events.length === 0) continue;
 
