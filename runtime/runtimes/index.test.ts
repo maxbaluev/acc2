@@ -162,7 +162,7 @@ describe("lookupRunnerInRegistry — runtime_runner row resolution", () => {
 });
 
 describe("runArtifactForRuntime — registry fallback path", () => {
-  test("unknown runtime WITH a registered runner returns declarative observation", async () => {
+  test("unknown runtime WITH a registered runner fails closed — declarative-only runner cannot fabricate a residual", async () => {
     const db = openDb(":memory:");
     insertRunnerRow(db, {
       runtime: "demo-runtime",
@@ -180,15 +180,17 @@ describe("runArtifactForRuntime — registry fallback path", () => {
       inputs: null,
       db,
     });
-    expect(obs.ok).toBe(true);
+    // A registry runner is resolved but has no execution protocol wired.
+    // Returning ok:true here would let a verifier_artifact bound to a
+    // registry runtime report success (a scored residual) WITHOUT ever
+    // executing — a fabricated truth signal. It must fail closed: the
+    // four dispatcher sites read obs.ok===false + obs.error to refuse.
+    expect(obs.ok).toBe(false);
+    expect(obs.error).toBe("registry_runner_not_executable:demo-runtime");
+    expect(obs.exitCode).toBe(-1);
     expect(obs.durationMs).toBe(0);
-    // Surface that the runner is declarative-only so call sites can see
-    // the resolution path through the audit trail.
+    // Still surfaces the declarative-only audit breadcrumb.
     expect(obs.sandboxWarnings).toContain("registry_runner_declarative_only:demo-runtime");
-    expect(obs.result).toMatchObject({
-      runtime: "demo-runtime",
-      status: "registered_runner_declarative_only",
-    });
   });
 
   test("unknown runtime WITHOUT a registered runner fails closed with unknown_runtime observation", async () => {

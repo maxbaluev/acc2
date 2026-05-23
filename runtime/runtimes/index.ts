@@ -302,31 +302,21 @@ export const runArtifactForRuntime = async (
   return invokeRegisteredRunner(resolution.runner!, inv);
 };
 
-/** Invoke a runtime_runner registry row. The runner protocol is
- *  declarative-only in this commit — the row's payload is returned as
- *  the observation result so callers can observe registry resolution
- *  without spawning anything. A subsequent brain dispatch wires actual
- *  runner execution (module load vs inline body); the dispatcher
- *  surface stays the same. */
+/** Invoke a runtime_runner registry row. Registry rows are currently
+ *  declarative capability records only; there is no execution protocol
+ *  that can prove the action/verifier artifact actually ran. Until that
+ *  protocol exists, registry runners fail closed so residuals cannot be
+ *  fabricated from a declarative-only no-op. */
 const invokeRegisteredRunner = async (
   runner: RuntimeRunnerRow,
   _inv: UnifiedRuntimeInvocation,
 ): Promise<RegistryRunnerObservation> => {
-  // Declarative no-op: the runner row was resolved successfully. Real
-  // runner execution lands in the brain's follow-up design cycle. We
-  // mark the result clearly so call-site logs identify these
-  // invocations as registry-resolved-but-not-yet-executed.
   return {
-    ok: true,
-    result: {
-      runner_id: runner.id,
-      runtime: runner.runtime,
-      status: "registered_runner_declarative_only",
-      payload: runner.payload,
-    } as JsonValue,
+    ok: false,
+    error: `registry_runner_not_executable:${runner.runtime}`,
     durationMs: 0,
-    exitCode: 0,
-    stderrTail: "",
+    exitCode: -1,
+    stderrTail: `runtime_runner ${runner.id} is declarative-only; no execution protocol is wired`,
     sandboxWarnings: [
       `registry_runner_declarative_only:${runner.runtime}`,
     ],
