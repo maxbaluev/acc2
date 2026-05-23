@@ -27,7 +27,7 @@ type RecentEvent = { event_id?: string; ts?: string; kind?: string; directive_id
 
 export type StatusReport = {
   generated_at: string;
-  contract: { name: "acc_status_snapshot"; version: 1; lifecycle_values: Lifecycle[]; sources: Record<string, string[]> };
+  contract: { name: "acc_current_state"; version: 1; lifecycle_values: Lifecycle[]; sources: Record<string, string[]> };
   daemon: { running: boolean; status: string; pid?: unknown; uptime_s?: number; events_count?: unknown; stuck_workers: number; error?: string };
   dispatch_lifecycle: Record<Lifecycle, number> & { total: number };
   pending_owner_decisions: { count: number; top: Array<Record<string, unknown>> };
@@ -318,7 +318,7 @@ export const buildStatusReport = async (): Promise<StatusReport> => {
 
   return {
     generated_at: generatedAt,
-    contract: { name: "acc_status_snapshot", version: 1, lifecycle_values: [...LIFECYCLES], sources: STATUS_SOURCES },
+    contract: { name: "acc_current_state", version: 1, lifecycle_values: [...LIFECYCLES], sources: STATUS_SOURCES },
     daemon,
     dispatch_lifecycle: dispatchLifecycle,
     pending_owner_decisions: { count: pendingRows.length, top: pendingRows.slice(0, 5) },

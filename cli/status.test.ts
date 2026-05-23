@@ -5,7 +5,7 @@ describe("renderStatusReport", () => {
   test("renders owner-state status fields for one-screen CLI/TUI reuse", () => {
     const report: StatusReport = {
       generated_at: "2026-05-16T00:00:00.000Z",
-      contract: { name: "acc_status_snapshot", version: 1, lifecycle_values: ["live", "queued_at_cap", "completed", "failed", "zombie"], sources: {} },
+      contract: { name: "acc_current_state", version: 1, lifecycle_values: ["live", "queued_at_cap", "completed", "failed", "zombie"], sources: {} },
       daemon: { running: true, status: "ok", pid: 123, uptime_s: 7, stuck_workers: 0 },
       dispatch_lifecycle: { live: 1, queued_at_cap: 2, completed: 3, failed: 4, zombie: 5, total: 15 },
       pending_owner_decisions: { count: 6, top: [] },

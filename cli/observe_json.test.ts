@@ -124,17 +124,38 @@ describe("acc events --json", () => {
     expect(cap.err.length).toBe(0);
   });
 
-  test("regression: human (non-json) path no longer silently swallows all-non-narrative matches", async () => {
-    // A window of only non-narrative kinds matched by --kind: the old code
-    // printed the misleading "no events matched filters (saw N)". The fix
-    // tells the operator the rows exist but are non-narrative.
+  test("regression: human (non-json) path RENDERS every matched row, never silently drops or misleads", async () => {
+    // `acc events` is the honest bounded ledger-window reader. A window of
+    // only non-narrative kinds matched by --kind must be RENDERED (not
+    // suppressed): the old code printed the misleading "no events matched
+    // filters (saw N)" even though rows DID match. The honest render prints
+    // every matched row (verbose) and never emits a misleading empty message.
     const cap = captureConsole();
     const code = await runEvents({ kind: "embedding_computed" });
     cap.restore();
     expect(code).toBe(0);
+    // The previously-suppressed non-narrative row is now printed on stdout.
+    expect(cap.out.length).toBe(1);
+    expect(cap.out.join("\n")).toContain("embedding_computed");
+    // No misleading "no events matched" / "no rows matched" message, because
+    // a row DID match.
     const errText = cap.err.join("\n");
-    expect(errText).toContain("non-narrative");
-    expect(errText).toContain("--json");
+    expect(errText).not.toContain("no events matched filters");
+    expect(errText).not.toContain("no rows matched filters");
+  });
+
+  test("regression: honest empty message only fires when ZERO rows matched the filters", async () => {
+    // When the window is non-empty but NO row matches the explicit filters,
+    // the honest reader says so against the bounded window size — and does
+    // NOT use the old misleading "no events matched filters (saw N)" wording.
+    const cap = captureConsole();
+    const code = await runEvents({ task: "T_nonexistent" });
+    cap.restore();
+    expect(code).toBe(0);
+    expect(cap.out.length).toBe(0);
+    const errText = cap.err.join("\n");
+    expect(errText).toContain("no rows matched filters in the bounded");
+    expect(errText).toContain("3-row window");
     expect(errText).not.toContain("no events matched filters");
   });
 });

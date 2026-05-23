@@ -3,6 +3,8 @@
 // with the owner's words and prints the directive id.
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { runDispatch } from "./dispatch";
 import { useSharedDaemon } from "../tests/daemon_fixture";
 
@@ -109,5 +111,30 @@ describe("runDispatch", () => {
     } finally {
       console.error = orig;
     }
+  });
+});
+
+describe("daemonRestart stale-lock cleanup uses the canonical resolvers", () => {
+  // Regression for the drift the brain caught: daemonRestart's stale-lock
+  // cleanup hardcoded `homedir()/.accint/v2.sock`, so an ACC2_STATE_DIR /
+  // ACC2_SOCKET_FILE deployment would probe/delete the wrong default lock.
+  // The fix routes through resolveSocketFile()/resolveTokenFile() — the same
+  // resolvers daemonStart() and runtime/daemon.ts use. Asserted at the
+  // source level because daemonRestart spawns a real daemon (can't exercise
+  // it without restarting the running one).
+  const src = readFileSync(join(import.meta.dir, "dispatch.ts"), "utf8");
+  const block = (() => {
+    const i = src.indexOf("Clean any lingering stale lock");
+    expect(i).toBeGreaterThanOrEqual(0);
+    return src.slice(i, i + 600);
+  })();
+
+  test("uses resolveSocketFile() / resolveTokenFile()", () => {
+    expect(block).toContain("resolveSocketFile()");
+    expect(block).toContain("resolveTokenFile()");
+  });
+
+  test("no longer hardcodes the default ~/.accint/v2.sock path", () => {
+    expect(block).not.toContain('homedir(), ".accint", "v2.sock"');
   });
 });

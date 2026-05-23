@@ -875,25 +875,16 @@ export const runEvents = async (opts: EventsOpts): Promise<number> => {
     console.log(JSON.stringify(matched, null, 2));
     return 0;
   }
-  let shown = 0;
+  // `acc events` is the honest bounded ledger-window reader, so every row
+  // matching the explicit filters is rendered. Narrative suppression belongs
+  // to the live operator stream (`acc tail` / `acc notify`), not to this
+  // historical query surface.
   for (const e of matched) {
-    const line = formatEvent(e, { verbose: opts.verbose });
-    if (line) {
-      console.log(line);
-      shown++;
-    }
+    const line = formatEvent(e, { verbose: true });
+    console.log(line || `${e.ts ?? "?"} ${e.kind ?? "?"} ${e.task_id ?? "-"} id=${eventId(e) ?? "?"}`);
   }
-  if (shown === 0 && matched.length > 0) {
-    // Rows matched the task/directive/kind filters but were all suppressed by
-    // the NARRATIVE_KINDS surface — tell the operator how to see them rather
-    // than implying nothing matched. `--json` and `--verbose` both bypass the
-    // narrative filter.
-    console.error(
-      `acc events: ${matched.length} row(s) matched filters but are non-narrative; ` +
-      `use --verbose or --json to see them`,
-    );
-  } else if (shown === 0 && evs.length > 0) {
-    console.error(`acc events: no events matched filters (saw ${evs.length} in window)`);
+  if (matched.length === 0 && evs.length > 0) {
+    console.error(`acc events: no rows matched filters in the bounded ${evs.length}-row window`);
   }
   return 0;
 };

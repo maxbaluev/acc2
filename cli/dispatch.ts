@@ -29,25 +29,23 @@ const usage = (): string => `acc — v2 thin CLI
                                   separate Monitor wiring. --no-follow / --bare
                                   reverts to fire-and-return (just emit + ack).
   acc whoami [--json]             Inspect owner_profile_view for CLI/TUI rendering.
-  acc events [--limit N] [--task PREFIX] [--directive PREFIX] [--kind K] [--verbose]
-                                  Recent events, one structured line per event.
-                                  Replaces inline 'bun -e mcpCall(...)' boilerplate.
+  acc status [--json]             Current-state answer: daemon, live work,
+                                  owner decisions, ready tasks, failures, and
+                                  next action. Start here; no internal ids needed.
+  acc events [--limit N] [--task PREFIX] [--directive PREFIX] [--kind K] [--json]
+                                  Bounded ledger-window reader. Honest by default:
+                                  every matched row is shown; --json is one JSON
+                                  array. Use explicit filters for narrow reads.
+  acc inspect <id_prefix> [--json] Per-entity detail. Task prefixes use the bounded
+                                  recent window; directive prefixes route to the
+                                  dispatch trajectory inspector.
   acc tail   [--directive PREFIX] [--task PREFIX] [--kind K] [--timeout SECS]
-                                  Poll-and-stream events; exits on the first
-                                  terminal event (task_committed / task_failed /
-                                  dispatcher_violation) when scoped, runs until
-                                  Ctrl-C otherwise.
-  acc notify [--follow]           Claude Code chat-friendly event stream for the
-                                  canonical mirror-inline kinds only: HIDL,
-                                  owner_input_required, auto_apply_signaled,
-                                  applied_change_committed, applied_change_failed,
-                                  dispatcher_violation, bridge_failed. Thin
-                                  alias over 'acc tail --kind <mirror-set>
-                                  --follow'; does not inspect SQLite directly.
-                                  Without --follow, prints the most recent N
-                                  matching rows and exits.
-  acc graph <directive_id>        Render the task DAG (nodes ranked, edges).
-  acc inspect <task_id_prefix>    Per-task report: event histogram + chronology.
+                                  Live event stream for humans/background tasks.
+                                  Narrative-filtered unless --verbose.
+  acc notify [--follow]           Narrow live alias for owner/action-required
+                                  notifications. Prefer 'acc status' for state.
+  acc graph <directive_id>        Legacy alias for directive DAG only; prefer
+                                  'acc inspect <directive_id>' for full detail.
   acc artifact provenance <artifact_id> [--json] [--no-color]
                                   Graph-walk an act_artifact's supersedes
                                   chain (ancestors + descendants) and render
@@ -345,13 +343,15 @@ const daemonRestart = async (): Promise<number> => {
       return 1;
     }
   }
-  // Clean any lingering stale lock from a killed daemon.
+  // Clean any lingering stale lock from a killed daemon using the same
+  // state-path resolvers as daemonStart()/runtime/daemon.ts. This keeps
+  // ACC2_STATE_DIR / ACC2_SOCKET_FILE deployments from deleting or probing
+  // the default ~/.accint lock by accident.
   try {
-    const { homedir } = await import("node:os");
-    const path = await import("node:path");
     const fs = await import("node:fs");
-    const sock = path.join(homedir(), ".accint", "v2.sock");
-    const token = path.join(homedir(), ".accint", "v2.sock.token");
+    const { resolveSocketFile, resolveTokenFile } = await import("../runtime/state_paths");
+    const sock = resolveSocketFile();
+    const token = resolveTokenFile();
     if (fs.existsSync(sock)) fs.unlinkSync(sock);
     if (fs.existsSync(token)) fs.unlinkSync(token);
   } catch { /* best-effort */ }
