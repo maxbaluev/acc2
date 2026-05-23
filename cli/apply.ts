@@ -1227,7 +1227,14 @@ export const recordApplyOutcome = async (opts: {
   // hunk-context even when the edit is semantically identical (witnessed
   // PSWPPZMKVS5G this session). Drift is now an informational signal
   // consumed by the residual + breakdown packet, not a hard refusal.
-  if (status === "applied" && opts.commitSha && isAmendment) {
+  //
+  // This prerequisite is kind-agnostic: a `lesson_extracted` that claims a
+  // commit_sha is just as capable of fabricating a credit chain as a
+  // contract_amendment_proposed. classifyApply returns "missing" when the
+  // proposal carries no resolvable target (the lesson stands on its summary
+  // alone), so prose-only lessons sail through unaffected — only lessons that
+  // DECLARE a target AND claim a commit are held to commit-existence.
+  if (status === "applied" && opts.commitSha) {
     const verdict = classifyApply(payload, opts.commitSha, process.cwd());
     if (verdict === "missing") {
       console.error(`acc apply --record: refusing status=applied — commit ${opts.commitSha} either does not exist or does not touch the proposed target.`);

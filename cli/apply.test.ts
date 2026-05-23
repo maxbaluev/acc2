@@ -4,8 +4,21 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// A real commit sha that touches cli/apply.ts in this repo's history.
+// classifyApply (cli/verify.ts) refuses status=applied when commit_sha
+// neither exists nor touches the proposed target; the high-residual test
+// asserts residual handling, NOT commit-missing refusal, so it must use a
+// genuine commit instead of a fabricated sha.
+const realApplyTsCommit = (): string => {
+  const r = spawnSync("git", ["log", "-1", "--format=%h", "--", "cli/apply.ts"], { encoding: "utf8" });
+  const sha = String(r.stdout ?? "").trim();
+  if (!sha) throw new Error("no commit touching cli/apply.ts found");
+  return sha;
+};
 import { closeDb, openDb } from "../substrate/db";
 import { lessonImplementationStatus, lessonImplementerQueue } from "../substrate/views";
 import { handleCredit, handleEmit, handleGetEvent, handleRead } from "../runtime/mcp_server/substrate_tools";
@@ -550,7 +563,7 @@ describe("runApply gates", () => {
       "--residual",
       "0.7",
       "--commit-sha",
-      "abcdef1234",
+      realApplyTsCommit(),
     ]);
     cap.restore();
 
@@ -590,6 +603,43 @@ describe("runApply gates", () => {
     expect(actPayload.affected_resources).toContain("repo:cli/apply.ts");
     expect(actPayload.affected_files).toContain("cli/apply.ts");
     expect(JSON.parse(act!.context_refs)).toContain(eventId);
+  });
+
+  test("lesson_extracted claiming a fabricated commit_sha is refused (no fabricated credit chain)", async () => {
+    // The Layer-1 commit-existence prerequisite is kind-agnostic: a
+    // lesson_extracted that DECLARES a target and claims status=applied with a
+    // commit_sha must prove the commit exists and touches the target, exactly
+    // like a contract_amendment_proposed. Otherwise a lesson could fabricate an
+    // applied_change_committed credit chain against a commit that never landed.
+    const eventId = await emitLesson({
+      target_resource: "repo:cli/apply.ts",
+      anchor: "renderGateBlock",
+      diff: { kind: "legacy_advisory_context", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+    });
+    const cap = captureConsole();
+    const code = await runApply([
+      "--record",
+      eventId,
+      "--status",
+      "applied",
+      "--residual",
+      "0",
+      "--commit-sha",
+      "deadbeef99", // fabricated — not in git history
+    ]);
+    cap.restore();
+
+    // Refused with the dedicated mismatch exit code; NO applied_change_committed
+    // line on stdout (the credit chain is not written).
+    expect(code).toBe(3);
+    expect(cap.out.join("\n")).not.toContain("applied_change_committed");
+    expect(cap.err.join("\n")).toContain("does not exist or does not touch the proposed target");
+
+    // No act_tuple_recorded credit envelope was written for this fabricated apply.
+    const act = db
+      .query("SELECT id FROM events WHERE kind = 'act_tuple_recorded' AND json_extract(payload, '$.source_event_id') = ? AND json_extract(payload, '$.verifier_kind') = 'claude_apply_record'")
+      .get(eventId) as { id: string } | null;
+    expect(act).toBeNull();
   });
 
   test("owner-alignment gate blocks autonomous apply on a things_to_never_do hard-constraint hit", async () => {
