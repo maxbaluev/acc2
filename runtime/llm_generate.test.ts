@@ -29,11 +29,11 @@ afterEach(() => {
 });
 
 describe("generateCandidates (mocked fetch)", () => {
-  test("returns n candidates with parsed claims", async () => {
+  test("FACTUAL goal: returns n candidates with parsed claims (unsourced number caught)", async () => {
     const payload = {
       candidates: [
         {
-          body: "Thesis A: cite the McKinsey figure.",
+          solution: "Thesis A: cite the McKinsey figure.",
           claims: [
             {
               id: "c1",
@@ -47,14 +47,26 @@ describe("generateCandidates (mocked fetch)", () => {
           ],
         },
         {
-          body: "Thesis B: no numbers, pure qualitative pitch.",
-          claims: [],
+          // A factual claim with an UNSOURCED input -> the provenance filter
+          // must catch it even though sibling candidates exist.
+          solution: "Thesis B: asserts an invented growth multiplier.",
+          claims: [
+            {
+              id: "b1",
+              expression: "rev * growth",
+              result: 500,
+              inputs: [
+                { label: "rev", value: 100, source_uri: "https://example.com/10k" },
+                { label: "growth", value: 5, unsourced: true },
+              ],
+            },
+          ],
         },
       ],
     };
     globalThis.fetch = (async () => mockCompletion(payload)) as typeof fetch;
 
-    const candidates = await generateCandidates("write a value thesis", 2);
+    const candidates = await generateCandidates("write a value thesis with sourced figures", 2);
     expect(candidates).toHaveLength(2);
     expect(candidates[0].artifact).toContain("Thesis A");
     expect(candidates[0].generator).toBe("llm_vs");
@@ -63,13 +75,38 @@ describe("generateCandidates (mocked fetch)", () => {
     expect(candidates[0].id).not.toBe(candidates[1].id);
     // The fully-sourced candidate passes the provenance filter.
     expect(verifyClaimProvenance(candidates[0].claims).residual).toBeLessThan(0.3);
+    // The candidate with an unsourced number is caught (above the 0.3 bar).
+    expect(verifyClaimProvenance(candidates[1].claims).residual).toBeGreaterThanOrEqual(0.3);
+  });
+
+  test("NON-FACTUAL goal: candidates carry empty claims, provenance filter is a no-op", async () => {
+    // "suggest 3 names for a coffee app" — pure naming, no factual/numeric
+    // assertions, so every candidate's claims array is empty and the
+    // provenance filter passes them all (selection relies on comparison).
+    const payload = {
+      candidates: [
+        { solution: "BeanFlow", claims: [] },
+        { solution: "Daybreak Brew", claims: [] },
+        { solution: "Crema", claims: [] },
+      ],
+    };
+    globalThis.fetch = (async () => mockCompletion(payload)) as typeof fetch;
+
+    const candidates = await generateCandidates("suggest 3 names for a coffee app", 3);
+    expect(candidates).toHaveLength(3);
+    expect(candidates.map((c) => c.artifact)).toEqual(["BeanFlow", "Daybreak Brew", "Crema"]);
+    for (const c of candidates) {
+      expect(c.claims).toEqual([]);
+      // No factual content -> provenance filter is a no-op (residual 0).
+      expect(verifyClaimProvenance(c.claims).residual).toBeLessThan(0.3);
+    }
   });
 
   test("a candidate carrying unsourced:true round-trips so the verifier catches it", async () => {
     const payload = {
       candidates: [
         {
-          body: "Thesis with an invented multiplier.",
+          solution: "Thesis with an invented multiplier.",
           claims: [
             {
               id: "bad",
@@ -112,11 +149,17 @@ describe("generateCandidates (mocked fetch)", () => {
 });
 
 describe("parseCandidates", () => {
-  test("tolerates a markdown-fenced bare array", () => {
-    const fenced = "```json\n[{\"body\":\"hi\",\"claims\":[]}]\n```";
+  test("tolerates a markdown-fenced bare array (solution key)", () => {
+    const fenced = "```json\n[{\"solution\":\"hi\",\"claims\":[]}]\n```";
     const out = parseCandidates(fenced, 5);
     expect(out).toHaveLength(1);
     expect(out[0].artifact).toBe("hi");
+  });
+
+  test("accepts legacy `body` key for tolerance", () => {
+    const out = parseCandidates("[{\"body\":\"legacy\",\"claims\":[]}]", 5);
+    expect(out).toHaveLength(1);
+    expect(out[0].artifact).toBe("legacy");
   });
 
   test("returns [] on unparseable content", () => {
@@ -125,11 +168,16 @@ describe("parseCandidates", () => {
 });
 
 describe("buildGeneratePrompt", () => {
-  test("instructs n diverse candidates and unsourced honesty", () => {
-    const { system, user } = buildGeneratePrompt("my task", 4);
-    expect(user).toContain("my task");
+  test("instructs n diverse candidate solutions, unsourced honesty, and is goal-agnostic", () => {
+    const { system, user } = buildGeneratePrompt("my goal", 4);
+    expect(user).toContain("my goal");
     expect(user).toContain("4");
     expect(system).toContain("unsourced");
     expect(system).toContain("candidates");
+    // Universal: the prompt produces candidate SOLUTIONS, never "report".
+    expect(system.toLowerCase()).toContain("solution");
+    expect(system.toLowerCase()).not.toContain("report bod");
+    // Empty-claims path for non-factual goals is spelled out.
+    expect(system).toContain("EMPTY claims array");
   });
 });

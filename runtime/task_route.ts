@@ -32,6 +32,40 @@ export type TaskRouteResult = {
   signals: string[];
 };
 
+// ── Universal three-way goal route ────────────────────────────────────────
+//
+// The 2-way `verifiable | ambiguous` split above answers "does this need a
+// deterministic verifier or generate-and-select?" — it is consumed by
+// solve_loop, which spends a candidate budget on everything that is not
+// strictly verifiable. But the daemon dispatch hook needs a FINER question:
+// can the generate-and-select organism produce the WHOLE answer in one shot,
+// or does the goal need the brain to decompose it into steps first?
+//
+//   verifiable        — objectively checkable answer (code/math/data/
+//                        arithmetic). One ground truth; deterministic verifier.
+//   single_deliverable — produce ONE artifact/answer where generate-and-select
+//                        fits (write/answer/draft/summarize/name/recommend a
+//                        SINGLE thing). No ground truth; diversity + provenance
+//                        filter + sparse owner preference.
+//   complex           — multi-step / strategic / decomposable goal that needs
+//                        planning (design a system, run a multi-phase project,
+//                        "figure out and do X" across steps). The brain
+//                        decomposes; generate-and-select applies at the leaves.
+//
+// This is additive: `classifyTask` (the 2-way API) is unchanged, so every
+// existing caller keeps working. `classifyGoal` layers the complex/single
+// distinction on top of the same keyword evidence.
+
+export type GoalRoute = "verifiable" | "single_deliverable" | "complex";
+
+export type GoalRouteResult = {
+  route: GoalRoute;
+  /** [0,1] confidence in the dominant route. */
+  confidence: number;
+  /** Matched keyword signals, prefixed with their class, for auditability. */
+  signals: string[];
+};
+
 // Objectively-checkable: a deterministic verifier can return a residual
 // without taste. Code/tests/math/data-extraction/arithmetic/source
 // resolution.
@@ -56,6 +90,36 @@ const AMBIGUOUS_KEYWORDS: string[] = [
   "summarize", "explain to", "recommend", "advice", "opinion", "best way",
   "improve", "polish", "rewrite", "engaging", "audience", "ceo", "executive",
   "investor", "customer", "tradeoff", "prioritize", "should we", "design the",
+];
+
+// Multi-step / strategic / decomposable: the goal is not a single artifact
+// but a project or system that must be PLANNED and built across steps. These
+// signal that the brain should decompose before generate-and-select can apply
+// at any leaf. "design THE/A system", "build THE/A platform", "run a
+// multi-phase project", "figure out and do X", "architect", "end-to-end".
+const COMPLEX_KEYWORDS: string[] = [
+  "design the", "design a", "design and implement", "implement the",
+  "build the", "build a", "build an", "architect", "architecture",
+  "end to end", "end-to-end", "multi-step", "multi step", "multi-phase",
+  "multi phase", "multiple phases", "step by step", "step-by-step",
+  "figure out and", "research and", "plan and execute", "plan and build",
+  "roll out", "rollout", "migrate the", "migration", "overhaul",
+  "from scratch", "across steps", "orchestrate", "coordinate the",
+  "pipeline", "system for", "platform for", "framework for", "set up the",
+  "stand up the", "launch the", "run a campaign", "run a project",
+  "strategy and execution", "and then",
+];
+
+// Single-deliverable verbs/nouns: produce ONE artifact or answer. These are
+// the goals generate-and-select serves directly without decomposition.
+const SINGLE_DELIVERABLE_KEYWORDS: string[] = [
+  "write a", "write an", "write me", "draft a", "draft an", "compose a",
+  "answer", "summarize", "summary of", "summarise", "name a", "name some",
+  "names for", "suggest", "recommend a", "recommend the", "give me a",
+  "explain", "describe", "list a", "list the", "list some", "haiku",
+  "poem", "tagline", "headline", "slogan", "caption", "title for",
+  "subject line", "one-liner", "tweet", "paragraph about", "short",
+  "a single", "one ", "respond to", "reply to",
 ];
 
 const matchKeywords = (haystack: string, keywords: string[]): string[] => {
@@ -100,4 +164,70 @@ export function classifyTask(task: string): TaskRouteResult {
   }
 
   return { route: "ambiguous", confidence: a >= v ? margin : 0, signals };
+}
+
+/**
+ * Universal three-way goal classifier used by the daemon dispatch hook.
+ *
+ * Layers the complex/single distinction on top of the same keyword evidence
+ * `classifyTask` uses, so the organism can serve ANY single-shot goal while
+ * complex (decomposable) goals still fall through to the brain.
+ *
+ * Decision order:
+ *   1. COMPLEX — multi-step / strategic / decomposable. When complex signals
+ *      are present AND outweigh single-deliverable signals, the brain must
+ *      decompose first; do NOT hand the whole goal to the organism. This is
+ *      checked FIRST: a goal like "design and implement the architecture"
+ *      reads `implement` as a verifiable keyword, but it is genuinely a
+ *      multi-step build — the complex framing dominates a stray verifiable
+ *      token. (A clean, dominant verifiable signal with NO complex framing
+ *      still routes verifiable in step 2.)
+ *   2. VERIFIABLE — objectively checkable answer (code/math/data/arithmetic),
+ *      as decided by `classifyTask`, when no dominant complex framing is
+ *      present. There is a ground truth, so generate-and-select runs its
+ *      deterministic single-candidate path.
+ *   3. SINGLE_DELIVERABLE — everything else (including the safe default).
+ *      Produce ONE artifact/answer; generate-and-select fits directly. This
+ *      is the safe default because the organism is non-destructive: it
+ *      proposes a candidate and the owner/verifier judges it. Spending the
+ *      organism on a goal that should have decomposed wastes a candidate
+ *      budget but ships nothing; only a confident complex signal opts out.
+ */
+export function classifyGoal(task: string): GoalRouteResult {
+  const text = task.toLowerCase();
+
+  const base = classifyTask(task);
+  const complexHits = matchKeywords(text, COMPLEX_KEYWORDS);
+  const singleHits = matchKeywords(text, SINGLE_DELIVERABLE_KEYWORDS);
+  const signals: string[] = [
+    ...base.signals,
+    ...complexHits.map((k) => `complex:${k}`),
+    ...singleHits.map((k) => `single:${k}`),
+  ];
+  const c = complexHits.length;
+  const s = singleHits.length;
+
+  // 1. COMPLEX — present and not outweighed by an explicit single-deliverable
+  //    framing. Checked before verifiable so a multi-step build phrased with a
+  //    stray verifiable token ("implement") still decomposes. A goal that says
+  //    both "design the system" AND "write a haiku" is contradictory; the
+  //    complex framing dominates because decomposition is the conservative
+  //    choice (the brain can still emit a single leaf).
+  if (c > 0 && c >= s) {
+    const total = c + s;
+    return { route: "complex", confidence: total > 0 ? c / total : 1, signals };
+  }
+
+  // 2. VERIFIABLE — clean checkable answer with no dominant complex framing.
+  if (base.route === "verifiable") {
+    return { route: "verifiable", confidence: base.confidence, signals };
+  }
+
+  // 3. SINGLE_DELIVERABLE — the safe, non-destructive default.
+  const total = c + s;
+  return {
+    route: "single_deliverable",
+    confidence: total > 0 ? s / total : 0,
+    signals,
+  };
 }

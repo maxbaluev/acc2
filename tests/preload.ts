@@ -27,6 +27,17 @@ if (process.env.ACC2_BRIDGE_MODE !== "mock") {
   process.env.ACC2_BRIDGE_MODE = "mock";
 }
 
+// Pin the generate-and-select daemon hook OFF for the suite by default. The
+// operator's `.env` may set `ACC2_GENERATE_SELECT=1` (the organism is live in
+// real dispatch), and bun auto-loads `.env` — that stray leak would otherwise
+// hijack the hermetic dispatch fixtures (e.g. fixture_d_count_todos, a
+// verifiable directive the harness expects to flow through the brain lane to
+// emit action_predicted). Unconditionally clearing it here keeps the
+// brain-dispatch scenarios hermetic. Tests that exercise the organism set the
+// flag themselves inside the test body (which runs after this preload), so the
+// organism unit tests are unaffected.
+delete process.env.ACC2_GENERATE_SELECT;
+
 // Tests do NOT autostart any worker that hits external services or alters
 // long-lived state. Production defaults to ON; tests explicitly opt out
 // via the single canonical env var. `integrity` and `amendment` stay ON

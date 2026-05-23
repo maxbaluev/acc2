@@ -2,15 +2,15 @@
 //
 // We never touch the network or a real DB schema: the generator is stubbed and
 // the deps-builder is replaced so `solveTask` runs entirely in-memory. The
-// three cases exercise the gate matrix:
-//   1. flag UNSET            -> {handled:false}, generator NEVER called.
-//   2. flag SET + ambiguous  -> {handled:true}, generator called, outcome recorded.
-//   3. flag SET + verifiable -> {handled:false}, generator NEVER called.
+// cases exercise the universal gate matrix:
+//   1. flag UNSET                       -> {handled:false}, generator NEVER called.
+//   2. flag SET + single_deliverable    -> {handled:true}, generator called, recorded.
+//   3. flag SET + complex               -> {handled:false}, brain decomposes.
+//   4. flag SET + verifiable            -> {handled:true}, deterministic path.
 
 import { describe, test, expect, afterEach } from "bun:test";
 import {
   maybeRunGenerateSelect,
-  isReportLikeDeliverable,
   type GenerateSelectDispatchDeps,
 } from "./generate_select_dispatch";
 import type { Candidate, GenerateSelectDeps, SelectOutcome } from "./generate_select";
@@ -75,7 +75,7 @@ describe("maybeRunGenerateSelect — env-gated organism hook", () => {
     expect(recorded.length).toBe(0);
   });
 
-  test("flag SET + ambiguous + report-like -> {handled:true}, records an outcome", async () => {
+  test("flag SET + single_deliverable (NON-report) -> {handled:true}, records an outcome", async () => {
     process.env.ACC2_GENERATE_SELECT = "1";
     let genCalls = 0;
     const recorded: SelectOutcome<string>[] = [];
@@ -86,9 +86,11 @@ describe("maybeRunGenerateSelect — env-gated organism hook", () => {
       },
       buildDeps: stubBuildDeps(recorded),
     };
+    // A non-report single deliverable — universalization: the organism now
+    // serves ANY single-shot goal, not just reports.
     const res = await maybeRunGenerateSelect(
       fakeDb,
-      "Write a Lakeland AI transformation roadmap",
+      "write a haiku about the sea",
       { directiveId: "d1", taskId: "t1" },
       deps,
     );
@@ -99,7 +101,7 @@ describe("maybeRunGenerateSelect — env-gated organism hook", () => {
     expect(res.result?.selected).not.toBeNull();
   });
 
-  test("flag SET + ambiguous + NON-report -> {handled:false}, falls through to brain", async () => {
+  test("flag SET + complex -> {handled:false}, falls through to brain for decomposition", async () => {
     process.env.ACC2_GENERATE_SELECT = "1";
     let genCalls = 0;
     const recorded: SelectOutcome<string>[] = [];
@@ -112,7 +114,7 @@ describe("maybeRunGenerateSelect — env-gated organism hook", () => {
     };
     const res = await maybeRunGenerateSelect(
       fakeDb,
-      "design the dispatch architecture for the substrate",
+      "design and implement the dispatch architecture for the substrate",
       {},
       deps,
     );
@@ -121,12 +123,12 @@ describe("maybeRunGenerateSelect — env-gated organism hook", () => {
     expect(recorded.length).toBe(0);
   });
 
-  test("flag SET + verifiable -> {handled:false}, generator never called", async () => {
+  test("flag SET + verifiable -> {handled:true}, deterministic single-candidate path", async () => {
     process.env.ACC2_GENERATE_SELECT = "1";
     let genCalls = 0;
     const recorded: SelectOutcome<string>[] = [];
     const deps: GenerateSelectDispatchDeps = {
-      generate: async () => {
+      generate: async (_t, _n) => {
         genCalls += 1;
         return [cleanCandidate("v1")];
       },
@@ -138,21 +140,9 @@ describe("maybeRunGenerateSelect — env-gated organism hook", () => {
       {},
       deps,
     );
-    expect(res.handled).toBe(false);
-    expect(genCalls).toBe(0);
-    expect(recorded.length).toBe(0);
-  });
-});
-
-describe("isReportLikeDeliverable — conservative deliverable classifier", () => {
-  test("positive: clear deliverable directives", () => {
-    expect(isReportLikeDeliverable("write a report")).toBe(true);
-    expect(isReportLikeDeliverable("AI transformation roadmap")).toBe(true);
-  });
-
-  test("negative: non-deliverable directives", () => {
-    expect(isReportLikeDeliverable("fix the bug")).toBe(false);
-    expect(isReportLikeDeliverable("design the architecture")).toBe(false);
-    expect(isReportLikeDeliverable("research world models")).toBe(false);
+    expect(res.handled).toBe(true);
+    expect(res.result?.route).toBe("verifiable");
+    expect(res.result?.path).toBe("deterministic");
+    expect(genCalls).toBeGreaterThan(0);
   });
 });

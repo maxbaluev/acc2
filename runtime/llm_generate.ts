@@ -3,10 +3,17 @@
 // This is the ONLY LLM seam the solve_loop needs (`generate(task, n)`). It
 // makes ONE real OpenAI /chat/completions call using VERBALIZED SAMPLING:
 // rather than calling the model n times for n samples, we instruct the model
-// to verbalize an array of n DIVERSE candidates in a single completion, each
-// carrying its own NumericClaim provenance breakdown so the deterministic
-// claim-provenance verifier (claim_provenance_verifier.ts) can catch invented
-// / unsourced numbers before pairwise comparison.
+// to verbalize an array of n DIVERSE candidate SOLUTIONS in a single
+// completion, each carrying its own NumericClaim provenance breakdown so the
+// deterministic claim-provenance verifier (claim_provenance_verifier.ts) can
+// catch invented / unsourced numbers before pairwise comparison.
+//
+// UNIVERSAL, not report-specialized: a "candidate solution" is whatever the
+// goal asks for — an answer, a plan, code, a message, a research synthesis, a
+// report, three coffee-app names. The provenance filter only bites WHERE a
+// candidate makes FACTUAL/NUMERIC assertions; goals with no factual content
+// produce empty claims arrays and selection then relies on comparison /
+// owner preference alone. The prompt never mentions "report".
 //
 // Config / timeout / fetch shape are COPIED from runtime/embedder.ts so the
 // same env vars apply (OPENAI_API_KEY, OPENAI_BASE_URL) and tests can mock
@@ -34,28 +41,37 @@ const getApiConfig = (): { apiKey: string; baseUrl: string } | null => {
 
 /** Build the verbalized-sampling chat prompt. Exported so tests and the brain
  *  can inspect/override the contract. The model must return STRICT JSON with a
- *  top-level `candidates` array of length n; each entry carries a prose `body`
- *  plus a `claims` array whose every numeric assertion declares provenance so
- *  the deterministic verifier can score it. */
+ *  top-level `candidates` array of length n; each entry carries the candidate
+ *  `solution` text plus a `claims` array whose every FACTUAL/NUMERIC assertion
+ *  declares provenance so the deterministic verifier can score it. The prompt
+ *  is GOAL-AGNOSTIC: it never assumes the goal is a report, and a candidate
+ *  that makes no factual/numeric assertions uses an empty claims array. */
 export const buildGeneratePrompt = (
   task: string,
   n: number,
 ): { system: string; user: string } => {
   const system = [
     "You are a verbalized-sampling generator. In ONE response you produce",
-    `${n} DIVERSE, mutually distinct candidate solutions to the task — different`,
-    "angles, framings, and emphases, not paraphrases of one answer.",
+    `${n} DIVERSE, mutually distinct candidate SOLUTIONS to the goal — different`,
+    "angles, framings, and emphases, not paraphrases of one answer. A solution",
+    "is whatever the goal asks for: an answer, a plan, code, a message, a name,",
+    "a research synthesis, a report — produce the actual artifact the goal wants.",
     "",
-    "Every numeric figure (dollar amounts, percentages, multipliers, counts)",
+    "For EACH candidate, list any FACTUAL or NUMERIC claims its solution makes",
+    "as structured claims with sources. Every numeric figure (dollar amounts,",
+    "percentages, multipliers, counts) and every checkable factual assertion",
     "MUST be declared as a structured claim with explicit provenance. A claim",
     "input is grounded ONLY if it carries a real source_uri, OR a derived_from",
     "chain that bottoms out in source_uri'd inputs. If you do NOT have a real",
-    "source for a number, you MUST mark that input { \"unsourced\": true } —",
+    "source for a value, you MUST mark that input { \"unsourced\": true } —",
     "never fabricate a source_uri. Honesty about provenance is the point.",
+    "",
+    "If the solution makes NO factual or numeric assertions (e.g. a name, a",
+    "poem, a subjective recommendation), give it an EMPTY claims array [].",
     "",
     "Return STRICT JSON only (no markdown fence), shape:",
     "{ \"candidates\": [ {",
-    "  \"body\": string,",
+    "  \"solution\": string,   // the solution text / artifact the goal asks for",
     "  \"claims\": [ {",
     "    \"id\": string,",
     "    \"expression\": string,   // e.g. \"revenue * margin\" or \"\" if none",
@@ -70,9 +86,9 @@ export const buildGeneratePrompt = (
     "  } ]",
     "} ] }",
     "",
-    "A candidate that asserts no numbers may use an empty claims array [].",
+    "A candidate that makes no factual/numeric claims uses claims: [].",
   ].join("\n");
-  const user = `Task:\n${task}\n\nReturn exactly ${n} diverse candidates as JSON.`;
+  const user = `Goal:\n${task}\n\nReturn exactly ${n} diverse candidate solutions as JSON.`;
   return { system, user };
 };
 
@@ -89,7 +105,7 @@ type RawClaim = {
   result?: unknown;
   inputs?: unknown;
 };
-type RawCandidate = { body?: unknown; claims?: unknown };
+type RawCandidate = { solution?: unknown; body?: unknown; claims?: unknown };
 
 const coerceInput = (raw: RawInput): ClaimInput | null => {
   const label = typeof raw.label === "string" ? raw.label : null;
@@ -120,7 +136,8 @@ const coerceClaim = (raw: RawClaim, idx: number): NumericClaim => {
 
 /** Parse the model's JSON response into Candidate<string>[]. Tolerant of an
  *  accidental markdown fence and of a bare top-level array. Each candidate's
- *  artifact is its `body`; claims are coerced into NumericClaim[]. */
+ *  artifact is its `solution` text (legacy `body` accepted for tolerance);
+ *  claims are coerced into NumericClaim[]. */
 export const parseCandidates = (rawJson: string, n: number): Candidate<string>[] => {
   let text = rawJson.trim();
   // Strip an accidental ```json … ``` fence.
@@ -139,13 +156,18 @@ export const parseCandidates = (rawJson: string, n: number): Candidate<string>[]
   const stamp = Date.now().toString(36);
   return arr.slice(0, n).map((c, i): Candidate<string> => {
     const raw = (c ?? {}) as RawCandidate;
-    const body = typeof raw.body === "string" ? raw.body : String(raw.body ?? "");
+    const sol =
+      typeof raw.solution === "string"
+        ? raw.solution
+        : typeof raw.body === "string"
+          ? raw.body
+          : String(raw.solution ?? raw.body ?? "");
     const claims = Array.isArray(raw.claims)
       ? (raw.claims as RawClaim[]).map((cl, j) => coerceClaim(cl, j))
       : [];
     return {
       id: `${LLM_GENERATOR_TAG}_${stamp}_${i}`,
-      artifact: body,
+      artifact: sol,
       claims,
       generator: LLM_GENERATOR_TAG,
     };

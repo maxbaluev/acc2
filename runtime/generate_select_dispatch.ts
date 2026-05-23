@@ -10,7 +10,11 @@
 // CONTRACT — `maybeRunGenerateSelect` returns `{ handled: false }` (and does
 // NOTHING — no LLM call, no ledger write) UNLESS BOTH:
 //   1. process.env.ACC2_GENERATE_SELECT === "1", AND
-//   2. classifyTask(directiveText).route === "ambiguous".
+//   2. classifyGoal(directiveText).route is 'verifiable' OR
+//      'single_deliverable' — i.e. a single-shot goal the organism can serve
+//      whole. A 'complex' (multi-step / decomposable) goal returns
+//      { handled: false } so the brain decomposes it; generate-and-select then
+//      applies at the resulting leaves.
 // When both hold it runs `solveTask` with the LIVE LLM generator
 // (generateCandidates) + substrate adapters (buildSubstrateDeps), which record
 // the organism's outcome to the experience stream as ONE act_tuple_recorded
@@ -21,7 +25,7 @@
 // any network/LLM contact; production passes neither and gets the live wiring.
 
 import type { Database } from "bun:sqlite";
-import { classifyTask } from "./task_route";
+import { classifyGoal } from "./task_route";
 import { solveTask, type SolveResult } from "./solve_loop";
 import { generateCandidates } from "./llm_generate";
 import { buildSubstrateDeps } from "./generate_select_adapters";
@@ -32,46 +36,6 @@ import { logger } from "./logger";
 // path inside solveTask requests its own FULL_PATH_N; this caps the per-call
 // upper bound the adapters' generator closure hands the generate engine.
 const LIVE_GENERATE_N_CAP = 5;
-
-/**
- * Conservative positive-signal classifier: is this directive asking to PRODUCE
- * a written business DELIVERABLE (report / roadmap / memo / brief / proposal /
- * one-pager / assessment / plan)?
- *
- * The organism's only generator today (llm_generate.ts) is REPORT/DOCUMENT
- * specialized, but classifyTask marks ALL subjective/strategy/writing tasks
- * 'ambiguous'. This narrows the daemon hook so only deliverable-generation
- * directives are routed through the report generator; everything else (e.g.
- * "design the architecture for X", "research world models") falls through to
- * the brain lane. Be conservative: when in doubt, return false.
- *
- * Exported for testing.
- */
-export function isReportLikeDeliverable(directiveText: string): boolean {
-  const t = directiveText.toLowerCase();
-
-  // Standalone deliverable nouns — strong positive signals.
-  const deliverableNouns = [
-    "report",
-    "roadmap",
-    "memo",
-    "brief",
-    "proposal",
-    "one-pager",
-    "one pager",
-    "assessment",
-    "transformation roadmap",
-    "ai readiness",
-  ];
-  if (deliverableNouns.some((n) => t.includes(n))) return true;
-
-  // "write a" / "draft a" / "produce a" + a deliverable head noun.
-  const verbDeliverable =
-    /\b(write|draft|produce)\s+(a|an|the)\s+[\w\s-]*?\b(report|doc|document|roadmap|memo|brief|plan|proposal|summary)\b/;
-  if (verbDeliverable.test(t)) return true;
-
-  return false;
-}
 
 export type GenerateSelectDispatchCtx = {
   directiveId?: string;
@@ -111,9 +75,11 @@ export type GenerateSelectDispatchDeps = {
  * Env-gated, additive entry to the generate-and-select organism.
  *
  * Returns `{ handled: false }` (zero side effects) when the flag is unset OR
- * the directive does not classify as `ambiguous`. Otherwise runs solveTask
- * with the live (or injected) generator + substrate deps, records the outcome,
- * and returns `{ handled: true, result }`.
+ * the goal classifies as `complex` (multi-step / decomposable — the brain
+ * must decompose first). Otherwise — when the goal is `verifiable` or
+ * `single_deliverable`, i.e. a single-shot goal the organism can serve whole
+ * — runs solveTask with the live (or injected) generator + substrate deps,
+ * records the outcome, and returns `{ handled: true, result }`.
  */
 export async function maybeRunGenerateSelect(
   db: Database,
@@ -124,14 +90,12 @@ export async function maybeRunGenerateSelect(
   // Gate 1 — the env flag. Default-OFF: behavior is byte-identical to today.
   if (process.env.ACC2_GENERATE_SELECT !== "1") return { handled: false };
 
-  // Gate 2 — only ambiguous (subjective-quality) directives route here.
-  // Verifiable directives stay on the default lane untouched.
-  if (classifyTask(directiveText).route !== "ambiguous") return { handled: false };
-
-  // Gate 3 — only report/document DELIVERABLE-generation directives are handled.
-  // The organism's only generator today is report-specialized; non-report
-  // ambiguous directives fall through to the brain lane.
-  if (!isReportLikeDeliverable(directiveText)) return { handled: false };
+  // Gate 2 — universal goal route. The organism serves any SINGLE-SHOT goal:
+  // 'verifiable' (deterministic single-candidate path) or 'single_deliverable'
+  // (produce one artifact via diversity + provenance + preference). A 'complex'
+  // goal falls through to the brain for decomposition; generate-and-select then
+  // applies at the resulting leaves.
+  if (classifyGoal(directiveText).route === "complex") return { handled: false };
 
   const generate =
     deps.generate ?? ((task: string, n: number) => generateCandidates(task, n));
