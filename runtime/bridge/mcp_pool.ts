@@ -334,10 +334,22 @@ export const getWarmPool = (url: string, opts?: { probe?: ReachabilityProbe; pro
   return pool;
 };
 
+/** Stop every warm pool's keepalive timer and drop the registry. Called from
+ *  daemon.stop() so a graceful shutdown (and especially a same-process restart)
+ *  never leaves a keepalive interval probing a now-dead daemon URL forever.
+ *  The timers are .unref()'d so they don't block process exit, but in an
+ *  in-process restart the old daemon's pool would otherwise keep probing the
+ *  stale URL while the new daemon spins up a fresh pool on a new port — an
+ *  unbounded timer + state leak across daemon generations. Idempotent: clearing
+ *  an already-empty registry is a no-op. */
+export const shutdownWarmPools = (): void => {
+  for (const pool of POOLS.values()) pool.stopKeepalive();
+  POOLS.clear();
+};
+
 /** Test-only: drop all pools + stop their timers. Pools are process-global,
  *  so a leaked timer or warm entry from one test file would bleed into
  *  another. Tests call this in setup/teardown to start from a clean state. */
 export const __resetWarmPoolsForTest = (): void => {
-  for (const pool of POOLS.values()) pool.stopKeepalive();
-  POOLS.clear();
+  shutdownWarmPools();
 };

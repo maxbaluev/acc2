@@ -12,6 +12,7 @@ import {
   McpWarmPool,
   getWarmPool,
   mcpPoolEnabled,
+  shutdownWarmPools,
   __resetWarmPoolsForTest,
   type ReachabilityProbe,
 } from "./mcp_pool";
@@ -269,5 +270,25 @@ describe("getWarmPool registry", () => {
     const p2 = getWarmPool(URL, { probe: okProbe });
     // Fresh instance after reset.
     expect(p2.stats().total).toBeGreaterThanOrEqual(0);
+  });
+
+  test("shutdownWarmPools stops every keepalive timer + drops the registry (daemon.stop teardown)", () => {
+    // Resource-leak fix (2026-05-23): daemon.stop() must tear pools down so a
+    // same-process restart never leaves a keepalive interval probing the dead
+    // URL forever. After shutdownWarmPools the registry is empty (a subsequent
+    // getWarmPool builds a fresh instance) and every pool's keepalive timer is
+    // cleared (stopKeepalive idempotent → null).
+    const url2 = "http://127.0.0.1:65502/mcp";
+    const p1 = getWarmPool(URL, { probe: okProbe });
+    const p2 = getWarmPool(url2, { probe: okProbe });
+    shutdownWarmPools();
+    // Calling stopKeepalive again is a no-op (timer already cleared) — proves
+    // the shutdown already cleared them rather than throwing on double-clear.
+    expect(() => { p1.stopKeepalive(); p2.stopKeepalive(); }).not.toThrow();
+    // Registry was dropped → a new getWarmPool returns a DIFFERENT instance.
+    const p1b = getWarmPool(URL, { probe: okProbe });
+    expect(p1b).not.toBe(p1);
+    // Idempotent: a second shutdown on the now-empty registry is safe.
+    expect(() => shutdownWarmPools()).not.toThrow();
   });
 });

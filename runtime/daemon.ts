@@ -2700,6 +2700,19 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     } catch (err) {
       logger.debug({ where: "daemon.stop.kill_opencode_procs", err: String(err) }, "killAllLiveOpencodeProcs import/call failed (best-effort)");
     }
+    // Tear down the MCP warm-session pool (flag-gated behind ACC2_MCP_POOL).
+    // The pool starts a keepalive setInterval per daemon MCP URL; without an
+    // explicit shutdown a same-process daemon restart would leave the prior
+    // generation's interval probing the now-dead URL forever while the new
+    // daemon spins up a fresh pool on a new port. The timers are .unref()'d so
+    // they never block process exit, but in-process restarts (tests, fast
+    // restart) accumulate them across generations — a real timer + state leak.
+    try {
+      const { shutdownWarmPools } = await import("./bridge/mcp_pool");
+      shutdownWarmPools();
+    } catch (err) {
+      logger.debug({ where: "daemon.stop.shutdown_warm_pools", err: String(err) }, "shutdownWarmPools import/call failed (best-effort)");
+    }
     try {
       emitEvent(db, {
         kind: "daemon_shutdown",
