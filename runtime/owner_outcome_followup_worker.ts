@@ -93,15 +93,37 @@ export const runOwnerOutcomeFollowupWorker = async (
     emitted_event_ids: [],
   };
 
+  // STARVATION FIX (2026-05-23 isolation-hygiene audit): the prior query was
+  // `ORDER BY ts ASC LIMIT maxRows` over ALL applied_change_committed rows.
+  // Past ~maxRows applied changes, the absolute-oldest maxRows rows are all
+  // either already-followed-up or within-window-stale, so the LIMIT is fully
+  // consumed by rows the loop skips — and a NEWLY-aged-out change (which sits
+  // at the tail of ts-ascending order) is never reached. The worker silently
+  // stops emitting follow-ups at scale. Fix: push the feedback-window age
+  // cutoff AND the prior-followup exclusion into SQL so the LIMIT applies to
+  // the set of rows the worker can actually act on (aged-out, no follow-up
+  // yet), oldest-first. `skipped_recent` is no longer observable from this
+  // query path (the cutoff removes within-window rows before they are
+  // scanned); the loop still defends the window for callers who pass a
+  // larger feedbackWindowMs than the cutoff implies.
+  const cutoffIso = new Date(now.getTime() - feedbackWindowMs).toISOString();
   const rows = db
-    .query<AppliedChangeRow, [number]>(
+    .query<AppliedChangeRow, [string, number]>(
       `SELECT id, ts, directive_id, task_id, context_refs, payload
-        FROM events
+        FROM events e
         WHERE kind = 'applied_change_committed'
+          AND ts <= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM events f
+            WHERE (f.kind = 'hidl_action_required' OR f.kind = 'owner_observed_outcome_recorded')
+              AND (f.context_refs LIKE '%' || e.id || '%'
+                OR json_extract(f.payload, '$.source_applied_change_event_id') = e.id
+                OR json_extract(f.payload, '$.source_event_id') = e.id)
+          )
         ORDER BY ts ASC
         LIMIT ?`,
     )
-    .all(maxRows);
+    .all(cutoffIso, maxRows);
 
   for (const row of rows) {
     summary.scanned++;

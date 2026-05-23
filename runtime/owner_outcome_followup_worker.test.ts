@@ -133,8 +133,10 @@ describe("owner_outcome_followup_worker", () => {
       affected_resources: ["docs/operator-install.md"],
     });
     const summary = await runOwnerOutcomeFollowupWorker(db, { now: FIXED_NOW });
-    expect(summary.scanned).toBe(1);
-    expect(summary.skipped_recent).toBe(1);
+    // STARVATION FIX (2026-05-23): the feedback-window cutoff is now pushed
+    // into SQL (`ts <= now - window`), so within-window rows are filtered
+    // BEFORE the scan loop rather than skipped inside it. scanned=0 here.
+    expect(summary.scanned).toBe(0);
     expect(summary.emitted_count).toBe(0);
   });
 
@@ -147,9 +149,39 @@ describe("owner_outcome_followup_worker", () => {
     });
     insertPriorHidl(db, id);
     const summary = await runOwnerOutcomeFollowupWorker(db, { now: FIXED_NOW });
-    expect(summary.scanned).toBe(1);
-    expect(summary.skipped_existing_followup).toBe(1);
+    // STARVATION FIX (2026-05-23): already-followed-up rows are now excluded
+    // by a SQL NOT EXISTS so they never consume the LIMIT (the prior bug
+    // starved newly-aged changes once >maxRows older rows accumulated).
+    // The row is filtered pre-scan, so scanned=0 and nothing is re-emitted.
+    expect(summary.scanned).toBe(0);
     expect(summary.emitted_count).toBe(0);
+  });
+
+  test("newly-aged change is reachable even behind maxRows already-followed older changes (starvation regression)", async () => {
+    const db = openDb();
+    // Seed maxRows older applied changes that ALL already have a follow-up.
+    // Pre-fix, these consumed the entire `ORDER BY ts ASC LIMIT maxRows`
+    // window and the newly-aged change below was never reached.
+    const maxRows = 5;
+    for (let i = 0; i < maxRows; i++) {
+      const olderId = insertAppliedChange(db, {
+        ts: oldTs(ONE_DAY_MS + 10 * ONE_DAY_MS + i * 1000),
+        status: "applied",
+        affected_resources: ["docs/operator-install.md"],
+      });
+      insertPriorHidl(db, olderId);
+    }
+    // A newer (but still aged-out) change with NO follow-up yet.
+    const freshId = insertAppliedChange(db, {
+      ts: oldTs(ONE_DAY_MS + 60_000),
+      status: "applied",
+      affected_resources: ["runtime/foo.ts"],
+    });
+    const summary = await runOwnerOutcomeFollowupWorker(db, { now: FIXED_NOW, maxRows });
+    // The fresh change must be reached and emitted despite the maxRows older
+    // already-followed rows that previously consumed the limit.
+    expect(summary.emitted_count).toBe(1);
+    expect(findHidlForSource(db, freshId)).not.toBeNull();
   });
 
   test("skips applied changes whose status is not 'applied'", async () => {
