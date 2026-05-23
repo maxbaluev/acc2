@@ -849,6 +849,40 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       activationDisposers.push(onEvent(kind, (payload) => fireReactiveWorker(entry, "event", payload)));
     }
   };
+
+  // BIND-BEFORE-WORKERS (2026-05-22): the worker setup below registers
+  // setIntervals and runs SYNCHRONOUS first-tick bun:sqlite scans
+  // (embedder, integrity, rolling_reviewer, father, extractors, …). On a
+  // production-sized ledger (367k+ events, ~782MB state.db) those first
+  // ticks STARVE the single JS event loop for 104s+ (>180s with the
+  // embedder enabled) — long enough to trip the startup watchdog and kill
+  // the daemon before it ever binds. The fix: collect ALL worker setup
+  // into this closure and KICK IT OFF AFTER the MCP/aux ports are bound,
+  // the lock file is written, and startDaemon() has resolved. The ports
+  // serve /health + MCP within a few seconds; the workers complete their
+  // first ticks in the background afterward. Worker-readiness
+  // (setOnReady/isReady → daemon_ready) is now an INTERNAL signal surfaced
+  // in /health detail, NOT a precondition for binding or for startDaemon()
+  // resolving. role=server (skipWorkers) still runs this closure but its
+  // internal `if (!skipWorkers)` gate skips the heavy workers (the cheap
+  // reactive safety net + health-counts refresher still register, exactly
+  // as before); role=worker (skipPorts) runs every worker in this closure.
+  const startWorkers = async (): Promise<void> => {
+  // Stop-before-start guard: this closure is scheduled deferred (after the
+  // bind + startDaemon resolve). A test or a fast restart can call stop()
+  // BEFORE the deferred kickoff fires. If we proceed after stop(), we
+  // register setIntervals + onEvent subscriptions that stop()'s `workers`
+  // disposal already ran past — leaking timers and bus subscribers for the
+  // life of the process (under `bun test --parallel` this leaked into
+  // cross-test memory pressure → SIGILL crashes). `stopped` is the same flag
+  // stop() sets; bail before registering anything. The registration phase
+  // below (registerWorker batch + every registerReactiveWorker onEvent
+  // subscription) runs SYNCHRONOUSLY to its first `await import(...)`, so an
+  // event emitted by an immediate post-boot caller (e.g. directive_amended)
+  // is caught by the reactive subscriptions — there is no pre-subscription
+  // gap. Do NOT introduce an `await` before the reactive subscriptions are
+  // installed.
+  if (stopped) return;
   // The reactive safety net is the ONLY genuine heartbeat for the
   // activation-driven worker pool: it fires every safetyNetTickMs and
   // unconditionally ticks every reactive worker. Reactive workers do not
@@ -2307,6 +2341,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     workers.push(() => clearInterval(timer));
   }
   } // end if (!skipWorkers)
+  }; // end startWorkers closure
 
   // Declare `stop` BEFORE Bun.serve so the fetch closure can capture it; the
   // handles are filled in after binding succeeds.
@@ -2353,7 +2388,10 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     } catch (err) {
       logger.debug({ where: "daemon.stop.emit_restart_drain_started", err: String(err) }, "db may already be closed");
     }
-    for (const dispose of workers) dispose();
+    // splice(0) drains so the deferred startWorkers race close-out (which
+    // also splices) cannot double-dispose: each disposer runs exactly once
+    // regardless of which path observes it first.
+    for (const dispose of workers.splice(0)) dispose();
     // Budget == 0 means "skip the wait, kill immediately". We still call the
     // drain helper with timeoutMs=0 so the standard event pair is emitted —
     // observers see exactly which path the shutdown took.
@@ -2739,6 +2777,69 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
         payload: { reason: err.message, stack: err.stack?.slice(0, 2000) ?? null, source: "uncaughtException" },
       });
     } catch { /* never let logging crash */ }
+  });
+
+  // BIND-BEFORE-WORKERS kickoff (2026-05-22): ports are bound, the lock
+  // file + token are written, daemon_started/daemon_index_rebuilt are
+  // emitted, and signal handlers are installed. NOW — and only now —
+  // schedule the worker setup. It runs on a fresh macrotask AFTER
+  // startDaemon() resolves to its caller, so the heavy synchronous
+  // first-tick scans (which previously starved the event loop for 100s+
+  // on a 367k-event ledger and tripped the startup watchdog before the
+  // ports ever bound) can no longer block the bind or the resolve. The
+  // ports already serve /health + MCP; the workers complete their first
+  // ticks in the background and setOnReady → daemon_ready still fires once
+  // every registered worker has ticked. role=server (skipWorkers) and
+  // role=worker (skipPorts) both still run startWorkers — the internal
+  // `if (!skipWorkers)` gate decides which workers register, exactly as
+  // before — only the timing relative to the bind changed.
+  //
+  // queueMicrotask (not setTimeout): startWorkers' SYNCHRONOUS prefix
+  // (the registerWorker batch + every registerReactiveWorker
+  // onEvent-subscription) must be installed before the first ledger event
+  // an immediate post-boot caller emits, or that event slips past the
+  // reactive subscriptions and only the 30-min safety net would catch it.
+  // The microtask fires the instant startDaemon()'s promise resolves —
+  // after the bind/lock/resolve, before any caller continuation runs — so
+  // subscriptions are live with a zero-event gap. The heavy first-tick
+  // scans (the actual event-loop starvers) still run in this background
+  // task AFTER the ports are already serving, broken up by the worker
+  // block's many `await import(...)` yields; they no longer gate the bind.
+  queueMicrotask(() => {
+    void startWorkers()
+      .then(() => {
+        // Race close-out: stop() may have fired during one of
+        // startWorkers' `await import(...)` points, AFTER it had already
+        // pushed some disposers into `workers` but BEFORE stop()'s own
+        // disposal loop saw them (stop() drains `workers` once). Any such
+        // late-registered timer/subscriber would leak for the process
+        // lifetime — under `bun test --parallel` that leak accumulates
+        // across the suite into memory pressure → SIGILL worker crashes.
+        // If stop() ran, drain whatever startWorkers registered. Idempotent
+        // with stop()'s own loop because both splice the shared array.
+        if (stopped) {
+          for (const dispose of workers.splice(0)) {
+            try { dispose(); } catch { /* best-effort */ }
+          }
+        }
+      })
+      .catch((err) => {
+        logger.error(
+          { where: "daemon.startWorkers", err: (err as Error).message, stack: (err as Error).stack },
+          "deferred worker setup failed — daemon serves ports but workers did not start; check for a worker-init throw",
+        );
+        try {
+          emitEvent(db, {
+            kind: "error_caught",
+            substrate_origin: "substrate_auto",
+            payload: {
+              where: "daemon.startWorkers",
+              recoverable: false,
+              message: (err as Error).message,
+            },
+          });
+        } catch { /* db may be closed */ }
+      });
   });
 
   return {
