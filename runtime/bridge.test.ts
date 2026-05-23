@@ -1039,6 +1039,75 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     expect(failedCount.c).toBe(2);
   }, 5_000);
 
+  test("concurrent stdout/stderr drain yields during large stdout bursts so frames and liveness heartbeats progress", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const encoder = new TextEncoder();
+    const toolFrame = (i: number) => JSON.stringify({
+      type: "tool_use",
+      part: { type: "tool", tool: "substrate.emit", id: `tool_${i}` },
+      input: { seq: i },
+    });
+    const burst = encoder.encode(Array.from({ length: 600 }, (_, i) => toolFrame(i)).join("\n") + "\n");
+    let stdoutReads = 0;
+    const sentinel = {
+      pid: 4343,
+      kill: () => {},
+      stdout: {
+        getReader: () => ({
+          read: async () => {
+            stdoutReads += 1;
+            if (stdoutReads === 1) return { done: false, value: burst };
+            return { done: true, value: undefined };
+          },
+        }),
+      },
+      stderr: {
+        getReader: () => ({
+          read: async () => {
+            await new Promise((r) => setTimeout(r, 10));
+            return { done: true, value: undefined };
+          },
+        }),
+      },
+      exited: new Promise<number>((resolve) => setTimeout(() => resolve(0), 50)),
+    };
+    const fakeSpawn = (() => sentinel) as unknown as typeof Bun.spawn;
+    const tmpConfigDir = mkdtempSync(join(tmpdir(), "acc2-bridge-burst-test-"));
+    try {
+      await spawnRealOpencode(
+        { prompt: "large stdout burst probe", taskId, directiveId },
+        db,
+        {
+          spawnFn: fakeSpawn,
+          mcpServerUrl: "http://127.0.0.1:45680/mcp",
+          configDir: tmpConfigDir,
+          mcpHandshakeWindowMs: 500,
+          firstFrameThresholdMs: 500,
+          timeoutMs: 2_000,
+          livenessHeartbeatMs: 1,
+        },
+      );
+
+      const frames = db
+        .query<{ c: number }, [string]>(
+          "SELECT COUNT(*) AS c FROM events WHERE kind = 'bridge_frame_received' AND task_id = ?",
+        )
+        .get(taskId);
+      expect(frames!.c).toBe(600);
+
+      const beats = db
+        .query<{ c: number }, [string]>(
+          "SELECT COUNT(*) AS c FROM events WHERE kind = 'brain_liveness_heartbeat' AND directive_id = ?",
+        )
+        .get(directiveId);
+      expect(beats!.c).toBeGreaterThan(0);
+    } finally {
+      try { rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* swallow */ }
+    }
+  }, 10_000);
+
   test("brain-dispatch liveness heartbeat: timer clears on subprocess exit (no leak), and the brain_liveness_heartbeat kind is wired through emitEvent for the dispatch's directive", async () => {
     // False-zombie fix (2026-05-23). While the subprocess is alive the bridge
     // runs a ~60s setInterval emitting brain_liveness_heartbeat for req.directiveId

@@ -379,6 +379,7 @@ export const spawnRealOpencode = async (
   const spawn = spawnOpts.spawnFn ?? Bun.spawn;
   const handshakeWindowMs = spawnOpts.mcpHandshakeWindowMs ?? DEFAULT_MCP_HANDSHAKE_WINDOW_MS;
   const firstFrameThresholdMs = spawnOpts.firstFrameThresholdMs ?? DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS;
+  const livenessHeartbeatMs = spawnOpts.livenessHeartbeatMs ?? BRAIN_LIVENESS_HEARTBEAT_MS;
 
   emitEvent(db, {
     kind: "bridge_invoked",
@@ -826,7 +827,7 @@ export const spawnRealOpencode = async (
       // db may be closing mid-flight; the heartbeat is best-effort
       // liveness signal, never load-bearing for correctness.
     }
-  }, BRAIN_LIVENESS_HEARTBEAT_MS);
+  }, livenessHeartbeatMs);
   livenessTimer.unref();
   const clearLivenessHeartbeat = (): void => {
     if (livenessTimer !== null) {
@@ -1203,9 +1204,17 @@ export const spawnRealOpencode = async (
   // an invalid model id.
   let opencodeErrorEvent: { name?: string; message?: string } | null = null;
 
-  // Stream stdout line-by-line.
-  const reader = proc.stdout.getReader();
-  const decoder = new TextDecoder();
+  // Stream stdout/stderr concurrently. A large stdout burst can contain
+  // thousands of JSON lines; yield every few parsed lines so timers (notably
+  // brain_liveness_heartbeat) and stderr backpressure keep moving in realtime.
+  const stdoutReader = proc.stdout.getReader();
+  const stderrReader = proc.stderr.getReader();
+  const stdoutDecoder = new TextDecoder();
+  const stderrDecoder = new TextDecoder();
+  const DRAIN_YIELD_EVERY_LINES = 25;
+  const yieldToEventLoop = async (): Promise<void> => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  };
   const consumeLine = (line: string): void => {
     // Tolerate trailing whitespace and bare \r\n (Windows-spawned shells).
     const trimmed = line.replace(/\r$/, "").trim();
@@ -1333,39 +1342,55 @@ export const spawnRealOpencode = async (
     }
   };
 
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      stdoutBuf += decoder.decode(value, { stream: true });
-      let nl = stdoutBuf.indexOf("\n");
-      while (nl !== -1) {
-        const line = stdoutBuf.slice(0, nl);
-        stdoutBuf = stdoutBuf.slice(nl + 1);
-        consumeLine(line);
-        nl = stdoutBuf.indexOf("\n");
+  const drainStdout = async (): Promise<void> => {
+    let linesSinceYield = 0;
+    try {
+      while (true) {
+        const { done, value } = await stdoutReader.read();
+        if (done) break;
+        stdoutBuf += stdoutDecoder.decode(value, { stream: true });
+        let nl = stdoutBuf.indexOf("\n");
+        while (nl !== -1) {
+          const line = stdoutBuf.slice(0, nl);
+          stdoutBuf = stdoutBuf.slice(nl + 1);
+          consumeLine(line);
+          linesSinceYield += 1;
+          if (linesSinceYield >= DRAIN_YIELD_EVERY_LINES) {
+            linesSinceYield = 0;
+            await yieldToEventLoop();
+          }
+          nl = stdoutBuf.indexOf("\n");
+        }
       }
+      const tail = stdoutDecoder.decode();
+      if (tail.length > 0) stdoutBuf += tail;
+      if (stdoutBuf.length > 0) consumeLine(stdoutBuf);
+    } catch (err) {
+      stderrBuf += `\nreader_error:${(err as Error).message}`;
     }
-    if (stdoutBuf.length > 0) consumeLine(stdoutBuf);
-  } catch (err) {
-    stderrBuf += `\nreader_error:${(err as Error).message}`;
-  }
+  };
 
-  // Capture any remaining stderr for diagnostics.
-  try {
-    const stderrReader = proc.stderr.getReader();
-    while (true) {
-      const { done, value } = await stderrReader.read();
-      if (done) break;
-      stderrBuf += decoder.decode(value, { stream: true });
+  const drainStderr = async (): Promise<void> => {
+    try {
+      while (true) {
+        const { done, value } = await stderrReader.read();
+        if (done) break;
+        stderrBuf += stderrDecoder.decode(value, { stream: true });
+      }
+      const tail = stderrDecoder.decode();
+      if (tail.length > 0) stderrBuf += tail;
+    } catch (err) {
+      // stderr draining is best-effort — never throw. Keep the diagnostic so
+      // operators auditing JSONL output can see the read died vs ended.
+      stderrBuf += `\nstderr_drain_error:${(err as Error).message}`;
     }
-  } catch (err) {
-    // stderr draining is best-effort — never throw. Keep the diagnostic so
-    // operators auditing JSONL output can see the read died vs ended.
-    stderrBuf += `\nstderr_drain_error:${(err as Error).message}`;
-  }
+  };
+
+  const stdoutDrain = drainStdout();
+  const stderrDrain = drainStderr();
 
   const exitCode = await proc.exited;
+  await Promise.allSettled([stdoutDrain, stderrDrain]);
   clearTimeout(sigTerm);
   clearTimeout(sigKill);
   clearInterval(mcpHandshakeWatchdog);
