@@ -20,7 +20,15 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 let mcpImpl: (...args: unknown[]) => Promise<unknown>;
 let sseImpl: (opts: { signal?: AbortSignal }) => AsyncGenerator<unknown>;
 
+// Spread the real module so this mock overrides ONLY mcpCall + sseConnect.
+// `mock.module` is process-global and is NOT undone by `mock.restore()`, so a
+// non-spread stub would clobber every OTHER export (e.g. nextBackoff, the real
+// sseConnect) for sibling test files loaded in the same parallel preload pass
+// (observed: cli/rpc_reconnect.test.ts failing only when co-loaded). Spreading
+// keeps all un-stubbed exports live.
+const realRpc = await import("./rpc");
 mock.module("./rpc", () => ({
+  ...realRpc,
   mcpCall: (...args: unknown[]) => mcpImpl(...args),
   sseConnect: (opts: { signal?: AbortSignal }) => sseImpl(opts),
 }));

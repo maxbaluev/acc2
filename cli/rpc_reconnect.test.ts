@@ -63,13 +63,24 @@ describe("sseConnect reconnect: backoff + bounded resume (no replay storm)", () 
   // exercise the real reconnect loop here — the nextBackoff tests above still
   // pin the storm-closing logic, and this case passes in isolation.
   const realSseConnect = async (): Promise<boolean> => {
-    try {
-      const probe = sseConnect({ reconnect: false, mcpPort: undefined, auxPort: undefined });
-      await probe.next();
-      return false;
-    } catch (err) {
-      return String((err as Error)?.message ?? err).includes("daemon not running");
-    }
+    // The real impl with {reconnect:false} + no daemon throws "daemon not
+    // running" on the first .next(). A sibling-file stub may instead return a
+    // generator that awaits forever, so race the probe against a short timeout:
+    // a hang (or any non-matching result) means sseConnect is mock-replaced.
+    const ac = new AbortController();
+    const probe = (async () => {
+      try {
+        const g = sseConnect({ reconnect: false, signal: ac.signal, mcpPort: undefined, auxPort: undefined });
+        await g.next();
+        return false;
+      } catch (err) {
+        return String((err as Error)?.message ?? err).includes("daemon not running");
+      }
+    })();
+    const timed = new Promise<boolean>((r) => setTimeout(() => r(false), 100));
+    const result = await Promise.race([probe, timed]);
+    ac.abort(); // release a hung stub generator
+    return result;
   };
 
   test("a dropped stream reconnects with a growing gap and never sends Last-Event-ID", async () => {
