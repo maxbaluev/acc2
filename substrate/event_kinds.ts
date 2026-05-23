@@ -378,6 +378,18 @@ export const EVENT_KINDS = {
   // the observed residual so future routing can score combinations,
   // not just nodes.
   coalition_credit_distributed:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // Dense post-closure credit (HCAPO arXiv:2603.08754 / Mem-T
+  // arXiv:2601.23014: dense/hindsight credit > coarse terminal credit for
+  // long-horizon agents). On a ROOT task's task_closure_audited, the
+  // dense-credit pass walks the directive's OWN task DAG + the act/retrieval
+  // citation graph and applies the existing credit primitives
+  // (applyResidualOutcome / candidate_confirmed) to the INTERMEDIATE
+  // contributors, weighted by closure_residual and damped by graph distance.
+  // One dense_closure_credit_distributed audit row summarizes the bounded
+  // pass (node count, contributors seen/credited, cap flag). Additive +
+  // idempotent: dispatch, the four-link chain, and per-act terminal credit
+  // are unchanged. health_metric so the pass's reach is observable.
+  dense_closure_credit_distributed:        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   // Observability-fidelity guard (2026-05-22, phase-2 SJPF3VB9). The
   // standing observability_guard_worker institutionalizes two bug
   // classes as permanent self-audits:

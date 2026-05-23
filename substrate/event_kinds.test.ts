@@ -489,6 +489,10 @@ describe("derived sets match their pre-unification shape", () => {
       "meta_credit_projected",
       "brain_accuracy_observation",
       "coalition_credit_distributed",
+      // Dense post-closure credit (HCAPO arXiv:2603.08754 / Mem-T
+      // arXiv:2601.23014). One summary row per root closure; health_metric
+      // so dashboards can plot the dense pass's reach (contributors_credited).
+      "dense_closure_credit_distributed",
       // T3.8/T5: SQL worker-thread pool metrics. Health-metric so
       // /metrics + dashboards can plot the event-loop unblock progress.
       "sql_worker_pool_metrics",

@@ -1347,6 +1347,51 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       });
     } catch { /* fail-soft: closure audit already landed */ }
   }
+  // Dense post-closure credit — DAG-backprop of closure_residual
+  // (HCAPO arXiv:2603.08754 / Mem-T arXiv:2601.23014: dense/hindsight
+  // credit beats coarse terminal credit for long-horizon agents). When a
+  // ROOT task's closure verdict lands with a numeric closure_residual, walk
+  // the directive's OWN task DAG + the act/retrieval citation graph under it
+  // and apply the EXISTING credit primitives to the INTERMEDIATE
+  // contributors (decompositions/acts/retrievals/artifacts), weighted by
+  // closure_residual and damped by graph distance. ADDITIVE: it does not
+  // touch dispatch, the four-link chain, or the per-act terminal credit;
+  // idempotent via projection_key dense_closure_credit:{audit_id}:{target};
+  // bounded to the closing directive's DAG. Synchronous so the idempotency
+  // guard is race-free. Gated to root tasks: the dense pass only fires when
+  // input.task_id resolves to the directive's root node, so a child task's
+  // own closure audit does not re-walk the whole directive.
+  if (input.kind === "task_closure_audited") {
+    try {
+      const closurePayloadObj = isObject(input.payload) ? input.payload : {};
+      const numericResidual = typeof closurePayloadObj.closure_residual === "number" && Number.isFinite(closurePayloadObj.closure_residual)
+        ? closurePayloadObj.closure_residual
+        : null;
+      const closingTaskId = typeof input.task_id === "string" ? input.task_id : null;
+      const closingDirectiveId = typeof input.directive_id === "string" ? input.directive_id : null;
+      if (numericResidual !== null && closingTaskId && closingDirectiveId) {
+        const { distributeDenseClosureCredit, resolveDirectiveRootTaskId } = require("./dense_closure_credit") as typeof import("./dense_closure_credit");
+        const rootTaskId = resolveDirectiveRootTaskId(db, closingDirectiveId);
+        // Only fire on the directive ROOT closure (the most-grounded
+        // outcome). A non-root child audit is skipped — its acts already
+        // received per-act credit and will be backpropped when the root
+        // closes.
+        if (rootTaskId && rootTaskId === closingTaskId) {
+          distributeDenseClosureCredit(db, {
+            closure_audit_event_id: id,
+            directive_id: closingDirectiveId,
+            root_task_id: rootTaskId,
+            closure_residual: numericResidual,
+          });
+        }
+      }
+    } catch (err) {
+      // Fail-soft: the parent task_closure_audited row already landed; the
+      // dense pass emits its own projection_error rows internally. This
+      // outer guard only catches require/import-time exceptions.
+      void err;
+    }
+  }
   // F6 extension — universal internal Act scoring for lesson
   // extraction. Each lesson_extracted row IS a bet: the substrate (or
   // brain, when it emits) is asserting "this pattern will help
