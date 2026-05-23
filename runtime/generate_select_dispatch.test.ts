@@ -10,6 +10,7 @@
 import { describe, test, expect, afterEach } from "bun:test";
 import {
   maybeRunGenerateSelect,
+  isReportLikeDeliverable,
   type GenerateSelectDispatchDeps,
 } from "./generate_select_dispatch";
 import type { Candidate, GenerateSelectDeps, SelectOutcome } from "./generate_select";
@@ -74,7 +75,7 @@ describe("maybeRunGenerateSelect — env-gated organism hook", () => {
     expect(recorded.length).toBe(0);
   });
 
-  test("flag SET + ambiguous -> {handled:true}, records an outcome", async () => {
+  test("flag SET + ambiguous + report-like -> {handled:true}, records an outcome", async () => {
     process.env.ACC2_GENERATE_SELECT = "1";
     let genCalls = 0;
     const recorded: SelectOutcome<string>[] = [];
@@ -87,7 +88,7 @@ describe("maybeRunGenerateSelect — env-gated organism hook", () => {
     };
     const res = await maybeRunGenerateSelect(
       fakeDb,
-      "write an engaging persuasive headline with great tone and voice",
+      "Write a Lakeland AI transformation roadmap",
       { directiveId: "d1", taskId: "t1" },
       deps,
     );
@@ -96,6 +97,28 @@ describe("maybeRunGenerateSelect — env-gated organism hook", () => {
     expect(genCalls).toBeGreaterThan(0);
     expect(recorded.length).toBeGreaterThan(0);
     expect(res.result?.selected).not.toBeNull();
+  });
+
+  test("flag SET + ambiguous + NON-report -> {handled:false}, falls through to brain", async () => {
+    process.env.ACC2_GENERATE_SELECT = "1";
+    let genCalls = 0;
+    const recorded: SelectOutcome<string>[] = [];
+    const deps: GenerateSelectDispatchDeps = {
+      generate: async () => {
+        genCalls += 1;
+        return [cleanCandidate("n1")];
+      },
+      buildDeps: stubBuildDeps(recorded),
+    };
+    const res = await maybeRunGenerateSelect(
+      fakeDb,
+      "design the dispatch architecture for the substrate",
+      {},
+      deps,
+    );
+    expect(res.handled).toBe(false);
+    expect(genCalls).toBe(0);
+    expect(recorded.length).toBe(0);
   });
 
   test("flag SET + verifiable -> {handled:false}, generator never called", async () => {
@@ -118,5 +141,18 @@ describe("maybeRunGenerateSelect — env-gated organism hook", () => {
     expect(res.handled).toBe(false);
     expect(genCalls).toBe(0);
     expect(recorded.length).toBe(0);
+  });
+});
+
+describe("isReportLikeDeliverable — conservative deliverable classifier", () => {
+  test("positive: clear deliverable directives", () => {
+    expect(isReportLikeDeliverable("write a report")).toBe(true);
+    expect(isReportLikeDeliverable("AI transformation roadmap")).toBe(true);
+  });
+
+  test("negative: non-deliverable directives", () => {
+    expect(isReportLikeDeliverable("fix the bug")).toBe(false);
+    expect(isReportLikeDeliverable("design the architecture")).toBe(false);
+    expect(isReportLikeDeliverable("research world models")).toBe(false);
   });
 });

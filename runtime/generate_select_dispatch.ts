@@ -33,6 +33,46 @@ import { logger } from "./logger";
 // upper bound the adapters' generator closure hands the generate engine.
 const LIVE_GENERATE_N_CAP = 5;
 
+/**
+ * Conservative positive-signal classifier: is this directive asking to PRODUCE
+ * a written business DELIVERABLE (report / roadmap / memo / brief / proposal /
+ * one-pager / assessment / plan)?
+ *
+ * The organism's only generator today (llm_generate.ts) is REPORT/DOCUMENT
+ * specialized, but classifyTask marks ALL subjective/strategy/writing tasks
+ * 'ambiguous'. This narrows the daemon hook so only deliverable-generation
+ * directives are routed through the report generator; everything else (e.g.
+ * "design the architecture for X", "research world models") falls through to
+ * the brain lane. Be conservative: when in doubt, return false.
+ *
+ * Exported for testing.
+ */
+export function isReportLikeDeliverable(directiveText: string): boolean {
+  const t = directiveText.toLowerCase();
+
+  // Standalone deliverable nouns — strong positive signals.
+  const deliverableNouns = [
+    "report",
+    "roadmap",
+    "memo",
+    "brief",
+    "proposal",
+    "one-pager",
+    "one pager",
+    "assessment",
+    "transformation roadmap",
+    "ai readiness",
+  ];
+  if (deliverableNouns.some((n) => t.includes(n))) return true;
+
+  // "write a" / "draft a" / "produce a" + a deliverable head noun.
+  const verbDeliverable =
+    /\b(write|draft|produce)\s+(a|an|the)\s+[\w\s-]*?\b(report|doc|document|roadmap|memo|brief|plan|proposal|summary)\b/;
+  if (verbDeliverable.test(t)) return true;
+
+  return false;
+}
+
 export type GenerateSelectDispatchCtx = {
   directiveId?: string;
   taskId?: string;
@@ -87,6 +127,11 @@ export async function maybeRunGenerateSelect(
   // Gate 2 — only ambiguous (subjective-quality) directives route here.
   // Verifiable directives stay on the default lane untouched.
   if (classifyTask(directiveText).route !== "ambiguous") return { handled: false };
+
+  // Gate 3 — only report/document DELIVERABLE-generation directives are handled.
+  // The organism's only generator today is report-specialized; non-report
+  // ambiguous directives fall through to the brain lane.
+  if (!isReportLikeDeliverable(directiveText)) return { handled: false };
 
   const generate =
     deps.generate ?? ((task: string, n: number) => generateCandidates(task, n));
