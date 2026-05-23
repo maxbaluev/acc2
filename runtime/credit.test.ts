@@ -1235,6 +1235,64 @@ describe("bindCitation — citation binding enforcement at emitEvent boundary (T
     expect(afterOne.kind).toBe("no_action"); // 0.1 wins << 5 threshold
   });
 
+  test("four-link: binding that cites a knowledge_promoted id credits the underlying candidate posterior", async () => {
+    // Production retrieval cites whatever the index returned. For promoted
+    // knowledge that is the knowledge_promoted EVENT id, not the candidate
+    // id. The bulk Beta-posterior recompute keys wins by candidate id, so a
+    // candidate_confirmed citing only the promoted id would never move the
+    // posterior (decorative memory, k_554). bindCitation must resolve
+    // promoted -> candidate_id and cite the candidate.
+    const { extractKnowledgePromotions } = await import("../substrate/extractors");
+    const db = openDb(":memory:");
+    const kc = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "claude_root",
+      payload: { text: "promoted-id binding probe" },
+    });
+    // A knowledge_promoted row whose payload.candidate_id points at kc.
+    const promoted = emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      payload: { candidate_id: kc.id, score: 0.9, wins: 5, losses: 0 },
+    });
+    // Retrieval binds the PROMOTED id (what the index returns).
+    const binding = emitEvent(db, {
+      kind: "retrieval_binding",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_pid",
+      task_id: "t_pid",
+      context_refs: [promoted.id],
+      payload: { source_event_id: promoted.id, binding_surface: "prompt" },
+    });
+    // The candidate_confirmed must cite the candidate id so the recompute
+    // lands on it.
+    const confirmed = db
+      .query<{ payload: string; context_refs: string }, [string]>(
+        "SELECT payload, context_refs FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.retrieval_binding_event_id') = ? LIMIT 1",
+      )
+      .get(binding.id);
+    expect(confirmed).not.toBeNull();
+    const payload = JSON.parse(confirmed!.payload) as Record<string, unknown>;
+    expect(payload.knowledge_id).toBe(kc.id);
+    expect(payload.candidate_id).toBe(kc.id);
+    expect(payload.cited_event_id).toBe(promoted.id);
+    const refs = JSON.parse(confirmed!.context_refs) as string[];
+    expect(refs).toContain(kc.id);
+    // The bulk extractor's candidate-keyed recompute now actually credits kc.
+    const before = (db.query<{ a: number }, []>("SELECT IFNULL(MAX(rowid),0) AS a FROM events").get() as { a: number }).a;
+    void before;
+    extractKnowledgePromotions(db);
+    // Posterior recompute: kc accumulated 0.1 fractional wins -> the
+    // candidate_confirmed contributed to winsByCandidate keyed by kc.id.
+    // We assert the win landed by checking the candidate is creditable: a
+    // second identical binding (new id) crosses no threshold but the
+    // recompute must see >0 wins. Probe via maybePromoteKnowledge which
+    // shares the same candidate-keyed scan.
+    const { maybePromoteKnowledge } = await import("../substrate/extractors");
+    const verdict = maybePromoteKnowledge(db, kc.id);
+    expect(verdict.score).toBeGreaterThan(0.5); // alpha=1+0.1 -> >0.5
+  });
+
   test("idempotent: re-emitting the same retrieval_binding does NOT double-credit", () => {
     const db = openDb(":memory:");
     const kc = emitEvent(db, {

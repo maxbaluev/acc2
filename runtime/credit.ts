@@ -1928,7 +1928,7 @@ export const bindCitation = (
     // decorative — emit retrieval_rejected so the rejection is observable
     // but no Beta posterior moves.
     const citedRow = db
-      .query<{ kind: string }, [string]>("SELECT kind FROM events WHERE id = ?")
+      .query<{ kind: string; payload: string }, [string]>("SELECT kind, payload FROM events WHERE id = ?")
       .get(citedKnowledgeId);
     if (!citedRow || !KNOWLEDGE_BEARING_KINDS.has(citedRow.kind)) {
       emitEvent(db, {
@@ -1950,6 +1950,32 @@ export const bindCitation = (
       return;
     }
 
+    // Four-link integrity (k_554): the Beta-posterior recompute
+    // (substrate/extractors.ts extractKnowledgePromotions /
+    // maybePromoteKnowledge) keys wins by the underlying
+    // knowledge_candidate id. Production retrieval cites whatever the
+    // index returned — which for promoted knowledge is the
+    // knowledge_promoted EVENT id, not the candidate id. If we emit
+    // candidate_confirmed citing only the promoted id, the bulk extractor
+    // (which iterates knowledge_candidate rows and matches their id in
+    // context_refs) never finds it, so the citation never moves the
+    // posterior — decorative memory. Resolve promoted → candidate_id and
+    // cite BOTH so the recompute lands on the candidate the posterior
+    // actually scans, while keeping the cited id for traceability.
+    let candidateId: string | null = null;
+    if (citedRow.kind === "knowledge_promoted") {
+      try {
+        const p = JSON.parse(citedRow.payload || "{}") as Record<string, unknown>;
+        const cid = p.candidate_id;
+        if (typeof cid === "string" && cid.length > 0 && cid !== citedKnowledgeId) {
+          candidateId = cid;
+        }
+      } catch { /* fall through — cite promoted id only */ }
+    }
+    const confirmRefs = candidateId
+      ? [candidateId, citedKnowledgeId, bindingEvent.id]
+      : [citedKnowledgeId, bindingEvent.id];
+
     // Emit the retention-bias credit row. The extractor reads payload.weight
     // for candidate_confirmed rows stamped by bind_citation and accumulates
     // fractional wins (the existing weight read for
@@ -1960,9 +1986,11 @@ export const bindCitation = (
       substrate_origin: "substrate_auto",
       directive_id: bindingEvent.directive_id,
       task_id: bindingEvent.task_id,
-      context_refs: [citedKnowledgeId, bindingEvent.id],
+      context_refs: confirmRefs,
       payload: {
-        knowledge_id: citedKnowledgeId,
+        knowledge_id: candidateId ?? citedKnowledgeId,
+        cited_event_id: citedKnowledgeId,
+        candidate_id: candidateId ?? undefined,
         retrieval_binding_event_id: bindingEvent.id,
         weight: BINDING_WEIGHT,
         polarity: "retention_bias",
