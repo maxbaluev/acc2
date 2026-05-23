@@ -27,7 +27,7 @@
 // daemon only owns supervision + IO here.
 
 import type { Server } from "bun";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Database } from "bun:sqlite";
 import { closeDb, openDb, getAllPoolStats } from "../substrate/db";
@@ -498,6 +498,116 @@ const pidAlive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 };
 
+/** Thrown when an atomic boot-intent lock is held by a LIVE daemon (booting
+ *  or ready). Distinguished from generic boot failures so the CLI / daemon
+ *  entrypoint can treat a second concurrent start as an IDEMPOTENT no-op
+ *  (exit 0) rather than a crash (exit 1). The `phase` field reports whether
+ *  the incumbent is still `booting` or already `ready`. */
+export class DaemonAlreadyRunningError extends Error {
+  readonly pid: number;
+  readonly phase: string;
+  constructor(pid: number, phase: string) {
+    super(`daemon already ${phase === "ready" ? "running" : "booting"} (pid=${pid})`);
+    this.name = "DaemonAlreadyRunningError";
+    this.pid = pid;
+    this.phase = phase;
+  }
+}
+
+export const isDaemonAlreadyRunningError = (err: unknown): err is DaemonAlreadyRunningError =>
+  err instanceof DaemonAlreadyRunningError ||
+  (err instanceof Error && err.name === "DaemonAlreadyRunningError");
+
+type BootLockPayload = {
+  pid: number;
+  started_at_ms: number;
+  phase: "booting" | "ready";
+  role: string;
+  [k: string]: unknown;
+};
+
+/**
+ * Atomically acquire the single-instance boot-intent lock at the VERY START
+ * of daemon startup — BEFORE the ~150s of slow boot work (DB open, schema
+ * migrations, seed, integrity check, MCP/aux bind).
+ *
+ * ROOT-CAUSE FIX (duplicate-daemon race): the lock file was previously only
+ * WRITTEN at the end of boot (after ports bound), but the second-instance
+ * GUARD ran at the start. During the long boot window the file did not yet
+ * exist, so two concurrent `daemon start` calls BOTH saw "no lock", BOTH
+ * proceeded to boot, and BOTH tried to bind MCP port — one won, the other
+ * lingered as a duplicate/zombie daemon.ts proc.
+ *
+ * The fix closes the window with an EXCLUSIVE-CREATE (`wx` → O_CREAT|O_EXCL):
+ *   - The create is atomic at the filesystem layer: exactly one of N racing
+ *     processes succeeds; the rest get EEXIST.
+ *   - On EEXIST we read the incumbent payload. If its pid is ALIVE the
+ *     incumbent is booting or running → REFUSE this start with a
+ *     DaemonAlreadyRunningError (caller treats it as an idempotent no-op).
+ *   - If the pid is DEAD the lock is stale (crashed daemon) → reap (unlink)
+ *     and retry the exclusive create ONCE. Stale-lock reaping for genuinely
+ *     dead daemons is preserved so a crash never blocks startup forever.
+ *
+ * The lock is written with phase:"booting"; the existing end-of-boot
+ * writeLockFile call rewrites the SAME path with the full ready payload
+ * (phase:"ready" + ports), keeping `daemon status` working. Clean shutdown
+ * (`stop`) unlinks the path as before.
+ */
+const acquireBootLock = (socketFile: string, role: string): void => {
+  ensureDir(socketFile);
+  const payload: BootLockPayload = {
+    pid: process.pid,
+    started_at_ms: Date.now(),
+    phase: "booting",
+    role,
+  };
+  const body = JSON.stringify(payload, null, 2);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      // `wx` = O_WRONLY | O_CREAT | O_EXCL — fails with EEXIST if the file
+      // already exists. This is the atomic single-writer primitive.
+      const fd = openSync(socketFile, "wx", 0o600);
+      try { writeSync(fd, body); } finally { closeSync(fd); }
+      return; // acquired
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      // File exists — inspect the incumbent.
+      let prevPid: number | undefined;
+      let prevPhase = "booting";
+      try {
+        const prev = JSON.parse(readFileSync(socketFile, "utf8")) as { pid?: number; phase?: string };
+        prevPid = prev.pid;
+        if (typeof prev.phase === "string") prevPhase = prev.phase;
+      } catch {
+        // Malformed lock — treat as stale and reap below.
+        prevPid = undefined;
+      }
+      if (prevPid && pidAlive(prevPid)) {
+        // Live incumbent — refuse cleanly. The caller (CLI / entrypoint)
+        // turns this into an idempotent no-op; we do NOT pay the boot cost.
+        throw new DaemonAlreadyRunningError(prevPid, prevPhase);
+      }
+      // Stale lock (dead pid or malformed) — reap and retry the exclusive
+      // create exactly once. A second EEXIST after reaping means another
+      // process won the reap-and-recreate race; that process is the live
+      // owner, so the next loop iteration's pidAlive check will refuse.
+      tryRemove(socketFile);
+    }
+  }
+  // Both attempts exhausted (a competitor recreated the lock after our reap).
+  // Re-read to refuse against the live owner if present.
+  try {
+    const prev = JSON.parse(readFileSync(socketFile, "utf8")) as { pid?: number; phase?: string };
+    if (prev.pid && pidAlive(prev.pid)) {
+      throw new DaemonAlreadyRunningError(prev.pid, typeof prev.phase === "string" ? prev.phase : "booting");
+    }
+  } catch (err) {
+    if (isDaemonAlreadyRunningError(err)) throw err;
+  }
+  // Last resort: force-create over whatever is there (dead competitor).
+  writeFileSync(socketFile, body, { mode: 0o600 });
+};
+
 /** Start the daemon. Throws if the socket file already exists AND its pid is
  *  alive (second-instance guard). On boot emits daemon_started +
  *  daemon_index_rebuilt; on graceful stop emits daemon_shutdown. */
@@ -555,22 +665,23 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   }
 
 
-  // Single-instance guard: if the lock file exists AND names a live pid,
-  // refuse to start. A stale lock (pid not alive) gets reaped.
-  if (existsSync(socketFile)) {
-    try {
-      const prev = JSON.parse(await Bun.file(socketFile).text()) as { pid?: number };
-      if (prev.pid && pidAlive(prev.pid)) {
-        throw new Error(`daemon already running on pid ${prev.pid}`);
-      }
-      tryRemove(socketFile);
-      tryRemove(tokenFile);
-    } catch (err) {
-      if ((err as Error).message?.startsWith("daemon already running")) throw err;
-      tryRemove(socketFile);
-      tryRemove(tokenFile);
-    }
-  }
+  // Single-instance guard — ATOMIC boot-intent lock acquired at the VERY
+  // START of startup, BEFORE the ~150s of slow boot work below. This is the
+  // root-cause fix for the duplicate-daemon race: the lock file is now
+  // exclusive-created (O_EXCL) the instant we enter boot, not written at the
+  // end after ports bind. Two concurrent `daemon start` calls can no longer
+  // BOTH see "no lock" during the boot window — exactly one wins the atomic
+  // create; the other reads the live-pid lock and refuses IMMEDIATELY
+  // (before paying any boot cost) with a DaemonAlreadyRunningError. A stale
+  // lock (dead pid) is still reaped so a crashed daemon never blocks startup.
+  //
+  // acquireBootLock throws DaemonAlreadyRunningError on a live incumbent; we
+  // let it propagate so the entrypoint / CLI turns it into an idempotent
+  // no-op (exit 0). On refusal we have not yet opened the DB or bound any
+  // port, so there is nothing to tear down. The tokenFile is NOT reaped here
+  // (the live incumbent owns it); a genuinely-stale tokenFile is harmless and
+  // gets overwritten by the incumbent's own mint.
+  acquireBootLock(socketFile, role);
 
   ensureDir(stateDbPath);
   const db = openDb(stateDbPath);
@@ -2702,6 +2813,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   } // end if (!skipPorts)
 
   logger.info({ phase: "write_lock_file" }, "daemon.boot.phase_start");
+  // Rewrite the boot-intent lock (acquireBootLock wrote phase:"booting" at the
+  // top of startup) with the full ready payload now that ports are bound. The
+  // phase:"ready" marker lets a concurrent probe distinguish a daemon that has
+  // finished booting from one still in its boot window — both refuse a second
+  // start, but the message differs ("running" vs "booting").
   writeLockFile(socketFile, {
     pid: process.pid,
     port: skipPorts ? -1 : port,
@@ -2709,6 +2825,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     started_at_ms: startedAtMs,
     db_path: stateDbPath,
     role,
+    phase: "ready",
   });
 
   // F10 canonical hot-reload (cite EJFZER4SBH3C51WF1J6KWX2V6G): write
@@ -3293,6 +3410,15 @@ if (import.meta.main) {
     } catch (err) {
       startupResolved = true;
       clearTimeout(startupTimeout);
+      // Idempotent no-op: another daemon already holds the atomic boot lock
+      // (booting or running). This is the EXPECTED outcome of a second
+      // concurrent `daemon start` — exit 0 cleanly, do NOT report a crash.
+      if (isDaemonAlreadyRunningError(err)) {
+        const m = err.message;
+        try { logger.info({ pid: err.pid, phase: err.phase }, "acc2 daemon start is a no-op — another instance holds the boot lock"); } catch { /* logger may be down */ }
+        process.stderr.write(`acc2 daemon: ${m} — start is a no-op\n`);
+        process.exit(0);
+      }
       const msg = err instanceof Error ? err.stack ?? err.message : String(err);
       logger.fatal({ err: msg }, "acc2 daemon failed to start");
       process.stderr.write(`acc2 daemon failed to start: ${msg}\n`);

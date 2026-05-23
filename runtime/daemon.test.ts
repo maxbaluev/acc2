@@ -6,11 +6,11 @@
 // in mcp_server.test.ts via the stdio transport.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
-import { startDaemon, stopDaemon, type DaemonHandle } from "./daemon";
+import { startDaemon, stopDaemon, isDaemonAlreadyRunningError, type DaemonHandle } from "./daemon";
 import { isSchedulerDraining } from "./task_scheduler";
 import { getFreePortPair, startDaemonOnFreePorts } from "../tests/free_port";
 
@@ -610,5 +610,107 @@ describe("daemon_shutdown carries the full drain accounting (amendment 8EAKQCJW5
     // killAllLiveOpencodeProcs always runs after the drain (regardless of
     // completed vs timed_out); on a clean shutdown the counter is 0.
     expect(payload.killed_opencode_procs).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Atomic boot-intent lock (duplicate-daemon race fix).
+//
+// Root cause: the lock file was only WRITTEN at the END of boot (after ports
+// bound) but the second-instance guard ran at the START. During the ~150s
+// boot window the file did not exist, so two concurrent `daemon start` calls
+// BOTH saw "no lock" and BOTH proceeded to bind the MCP port — one won, the
+// other lingered as a duplicate/zombie. The fix exclusive-creates the lock
+// (`wx` / O_EXCL) at the very start of startup, so a 2nd concurrent start
+// reads the live-pid lock and refuses IMMEDIATELY, before paying boot cost.
+//
+// These tests inject the lock path so they never touch the real
+// ~/.accint/v2.sock or the live daemon (constraint: do not touch live state).
+// ---------------------------------------------------------------------------
+describe("atomic boot-intent lock", () => {
+  let tmp = mkTmp();
+  beforeEach(() => { tmp = mkTmp(); });
+  afterEach(() => { closeDb(); rmSync(tmp.dir, { recursive: true, force: true }); });
+
+  test("2nd start while a LIVE-pid lock exists refuses immediately, before any boot/bind", async () => {
+    // Pre-write a lock naming a LIVE pid (this test process). The exclusive
+    // create must hit EEXIST, read the live pid, and refuse.
+    writeFileSync(
+      tmp.socketFile,
+      JSON.stringify({ pid: process.pid, started_at_ms: Date.now(), phase: "booting", role: "all" }),
+      { mode: 0o600 },
+    );
+    const other = pickPortPair();
+    const startedAt = Date.now();
+    let caught: unknown = null;
+    try {
+      await startDaemon({
+        port: other.mcp, auxPort: other.aux,
+        stateDbPath: join(tmp.dir, "should-never-open.db"),
+        socketFile: tmp.socketFile, tokenFile: tmp.tokenFile,
+      });
+    } catch (err) { caught = err; }
+    const elapsedMs = Date.now() - startedAt;
+
+    // Refused as a distinguishable already-running error.
+    expect(isDaemonAlreadyRunningError(caught)).toBe(true);
+    expect((caught as Error).message).toContain(String(process.pid));
+    // Refusal is FAST — no 150s boot. (Generous ceiling to avoid flake; the
+    // point is it returned without binding a port or opening the DB.)
+    expect(elapsedMs).toBeLessThan(3_000);
+    // No 2nd boot: the supplied DB was never created, the supplied MCP port
+    // was never bound, and the incumbent's lock is untouched.
+    expect(existsSync(join(tmp.dir, "should-never-open.db"))).toBe(false);
+    let portBound = false;
+    try {
+      const sock = await Bun.connect({ hostname: "127.0.0.1", port: other.mcp, socket: { data() {}, open() {}, close() {}, error() {} } });
+      sock.end(); portBound = true;
+    } catch { portBound = false; }
+    expect(portBound).toBe(false);
+    const lock = JSON.parse(readFileSync(tmp.socketFile, "utf8")) as { pid: number };
+    expect(lock.pid).toBe(process.pid);
+  });
+
+  test("a STALE (dead-pid) lock is reaped and start proceeds", async () => {
+    // Pick a pid that is essentially certainly dead. process.kill(pid, 0)
+    // throws ESRCH → pidAlive=false → acquireBootLock reaps + proceeds.
+    const deadPid = 2_147_480_000;
+    expect(() => process.kill(deadPid, 0)).toThrow(); // confirm it's dead
+    writeFileSync(
+      tmp.socketFile,
+      JSON.stringify({ pid: deadPid, started_at_ms: 1, phase: "ready", role: "all" }),
+      { mode: 0o600 },
+    );
+    const handle = await startDaemonOnFreePorts(startDaemon, {
+      stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile,
+      tokenFile: tmp.tokenFile,
+    });
+    try {
+      // Boot succeeded → lock was reaped and rewritten with OUR pid + ready.
+      expect(existsSync(tmp.socketFile)).toBe(true);
+      const lock = JSON.parse(readFileSync(tmp.socketFile, "utf8")) as { pid: number; phase?: string };
+      expect(lock.pid).toBe(process.pid);
+      expect(lock.phase).toBe("ready");
+    } finally {
+      await stopDaemon(handle);
+    }
+  });
+
+  test("boot writes phase:booting then phase:ready, and clean shutdown releases the lock", async () => {
+    expect(existsSync(tmp.socketFile)).toBe(false);
+    const handle = await startDaemonOnFreePorts(startDaemon, {
+      stateDbPath: tmp.dbPath,
+      socketFile: tmp.socketFile,
+      tokenFile: tmp.tokenFile,
+    });
+    // After boot completes the lock is rewritten with the ready payload.
+    const lock = JSON.parse(readFileSync(tmp.socketFile, "utf8")) as { pid: number; phase?: string; port?: number };
+    expect(lock.pid).toBe(process.pid);
+    expect(lock.phase).toBe("ready");
+    expect(typeof lock.port).toBe("number");
+    // Clean shutdown unlinks the lock.
+    await stopDaemon(handle);
+    expect(existsSync(tmp.socketFile)).toBe(false);
   });
 });
