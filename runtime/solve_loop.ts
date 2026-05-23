@@ -19,6 +19,24 @@
 // record deps default to the structural/substrate adapters but can be
 // overridden for tests or for an LLM-backed comparator. This is the falsifiable
 // test of the design: the whole spine runs without any substrate present.
+//
+// ── INTEGRATION SEAM (dispatcher → solveTask) ─────────────────────────
+// The dispatcher should route an AMBIGUOUS directive (subjective quality,
+// no single ground truth — persuasion, strategy, writing, reports) into
+// this organism by calling `solveTask(directiveText, deps)` where `deps`
+// is assembled from `buildSubstrateDeps` (or its individual exports) in
+// runtime/generate_select_adapters.ts bound to the live state.db handle and
+// the active directive_id / task_id / substrate_origin: pass `generate` as
+// the diversity-engine seam (verbalized-sampling / cross-model brain calls),
+// `retrieveSimilar` as the experience-stream reader, and let `comparator`,
+// `requestOwnerPreference`, and `recordOutcome` default to the structural
+// comparator, the `owner_input_required` emit, and the act-tuple recorder
+// respectively. `solveTask` self-classifies via `classifyTask`, so the
+// dispatcher does NOT need to pre-decide the path — hand the raw directive
+// to `solveTask` and the spine picks deterministic / fast / full and writes
+// the single `generate_select_outcome` act-tuple back to the ledger for
+// credit. (No dispatch code is changed by this comment; it documents where
+// the call belongs once the ambiguous lane is wired.)
 
 import { classifyTask, type TaskRoute } from "./task_route";
 import {
