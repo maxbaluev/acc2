@@ -173,7 +173,12 @@ export const AdmitArtifactSchema = z.object({
   body: z.string(),
   declared_sandbox: z.unknown().optional().nullable(),
   fixture_input: z.unknown().optional().nullable(),
-  fixture_expected_residual_below: z.number().optional(),
+  // Residual threshold the fixture must come in below to admit. Must be a
+  // finite [0,1] value — a NaN/negative threshold makes every
+  // `observedResidual >= threshold` comparison false and silently
+  // disables the admission residual gate (admission would pass any
+  // residual). Bound it at the write boundary.
+  fixture_expected_residual_below: z.number().finite().min(0).max(1).optional(),
   state_root: z.string().optional().nullable(),
   name: z.string().optional(),
   target_files: z.array(z.string()).optional(),
@@ -197,12 +202,22 @@ export const AdmitArtifactSchema = z.object({
   reference_docx_artifact_id: z.string().optional(),
 });
 
+// Residual is the truth-bearing signal and MUST be a finite number in
+// [0,1] (Architecture.md / CLAUDE.md "Act And Verification"). z.number()
+// alone accepts NaN, ±Infinity, and out-of-range magnitudes — all of
+// which flow UNCLAMPED through distributeCredit into residualToBetaDeltas
+// and corrupt the artifact Beta posterior (credit.ts clamps only
+// owner-evidence-derived residuals, not the MCP-supplied params). Reject
+// a malformed residual at the substrate write boundary so a bad credit
+// call fails closed instead of silently poisoning posteriors.
+const ResidualValue = z.number().finite().min(0).max(1);
+
 export const CreditSchema = z.object({
   action_event_id: z.string(),
   observation_event_id: z.string(),
   scored_event_id: z.string(),
-  predicted_residual: z.number(),
-  observed_residual: z.number(),
+  predicted_residual: ResidualValue,
+  observed_residual: ResidualValue,
 });
 
 export const OpenFixtureSchema = z.object({

@@ -384,6 +384,29 @@ describe("fastmcp substrate tools — stdio transport", () => {
     expect(run.result.result.value).toBe(42);
   });
 
+  test("substrate.admit_artifact rejects an out-of-[0,1] fixture_expected_residual_below at the write boundary", async () => {
+    // A NaN/negative threshold makes every `observedResidual >= threshold`
+    // comparison false and silently disables the admission residual gate.
+    // The schema now bounds the threshold to a finite [0,1] value so a bad
+    // threshold fails closed at the MCP boundary.
+    let threw = false;
+    try {
+      await h!.client.callTool({
+        name: "substrate.admit_artifact",
+        arguments: {
+          runtime: "bun",
+          body: "console.log('@@RESULT@@ ' + JSON.stringify({ residual: 0.9 }));",
+          declared_sandbox: { runtime: "bun", cpu_ms: 2000, wall_ms: 5000, memory_mb: 128 },
+          fixture_input: null,
+          fixture_expected_residual_below: -1,
+        },
+      });
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+  });
+
   test("substrate.run_artifact routes uv-runtime artifacts (admit-or-skip when uv absent)", async () => {
     // Phase G: a uv-runtime artifact admits when uv is on PATH, otherwise the
     // admission cleanly refuses with `runtime_unavailable`. Either branch
@@ -475,6 +498,38 @@ describe("fastmcp substrate tools — stdio transport", () => {
       expect(String(err)).toContain("action_event_id");
     }
     expect(threw).toBe(true);
+  });
+
+  test("substrate.credit rejects out-of-[0,1] / non-finite residuals at the write boundary", async () => {
+    // Residual is the truth-bearing signal and MUST be a finite [0,1]
+    // value. Pre-fix the schema used a bare z.number(), so a NaN /
+    // negative / >1 residual flowed UNCLAMPED into distributeCredit ->
+    // residualToBetaDeltas and corrupted the artifact Beta posterior. The
+    // schema now rejects these before the handler runs.
+    for (const bad of [
+      { observed_residual: -0.5 },
+      { observed_residual: 1.5 },
+      { predicted_residual: -1 },
+      { predicted_residual: 42 },
+    ]) {
+      let threw = false;
+      try {
+        await h!.client.callTool({
+          name: "substrate.credit",
+          arguments: {
+            action_event_id: "a",
+            observation_event_id: "b",
+            scored_event_id: "c",
+            predicted_residual: 0.1,
+            observed_residual: 0.1,
+            ...bad,
+          },
+        });
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(true);
+    }
   });
 
   test("substrate.credit returns credit_distribution_failed on unknown action_event_id", async () => {
