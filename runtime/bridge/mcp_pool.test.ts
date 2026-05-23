@@ -190,11 +190,26 @@ describe("McpWarmPool — anti-starve permit semantics preserved", () => {
 });
 
 describe("McpWarmPool — real endpoint on an isolated free port (no live daemon)", () => {
-  test("default probe warms + leases against a live endpoint, fails over when it closes", async () => {
+  test("default probe warms + leases against a live endpoint, fails over against a dead one", async () => {
     // Stand up a throwaway HTTP server on an OS-assigned free port (NOT the
     // live daemon's fixed 9387/9388). The pool's DEFAULT probe (real fetch
-    // HEAD) must warm + lease against it, then fail over once it closes —
-    // proving the real connectivity path, not just the injected probe.
+    // HEAD) must warm + lease against it (proving the real connectivity path,
+    // not just the injected probe), then deterministically fail over against
+    // a dead endpoint.
+    //
+    // Why a FIXED unrouted dead address (127.0.0.1:9) rather than stop(true)
+    // on the same ephemeral port: an OS-assigned ephemeral port is reused the
+    // instant it is freed, and under full-suite load the daemon-test fleet
+    // sprays Bun.serve HTTP servers across ephemeral ports. The just-freed
+    // port (or even a port we hold with an exclusive silent TCP listener) gets
+    // answered with HTTP 200 by a concurrent server, so the warm session never
+    // fails over — the original fixed-20ms wait flaked exactly this way
+    // (observed: the HEAD probe returned ok:200 from a squatter for the entire
+    // poll window). Port 9 (discard) is privileged, never in the ephemeral
+    // allocation pool, and nothing in the suite binds it, so the real
+    // defaultProbe's fetch HEAD is refused INSTANTLY (ECONNREFUSED, ~0ms) —
+    // deterministic regardless of suite load, with no reuse hazard.
+    const DEAD_URL = "http://127.0.0.1:9/mcp";
     const port = getFreePort();
     const server = Bun.serve({
       port,
@@ -213,16 +228,30 @@ describe("McpWarmPool — real endpoint on an isolated free port (no live daemon
         expect(r.session.url).toBe(liveUrl);
         pool.release(r.session);
       }
-      // Close the endpoint → next lease must fail over to cold (lease_failed
-      // on the re-verify of the existing warm session).
       server.stop(true);
-      await new Promise((res) => setTimeout(res, 20));
-      const r2 = await pool.lease();
+
+      // Failover leg: the real defaultProbe against the refused dead address
+      // exercises the same defaultProbe → reachable=false path the warm
+      // session's re-verify takes when its daemon goes away. ensureWarm runs
+      // the real probe; it establishes nothing (connection refused), so lease()
+      // finds no warm session and fails over to cold. Poll defensively with a
+      // load-tolerant ceiling well under the test timeout.
+      const deadPool = new McpWarmPool({ url: DEAD_URL, size: 1, keepaliveMs: 60_000, probeTimeoutMs: 1_000 });
+      await deadPool.ensureWarm();
+      let r2 = await deadPool.lease();
+      const deadlineMs = Date.now() + 8_000;
+      while (r2.ok && Date.now() < deadlineMs) {
+        deadPool.release(r2.session);
+        await new Promise((res) => setTimeout(res, 25));
+        await deadPool.ensureWarm();
+        r2 = await deadPool.lease();
+      }
       expect(r2.ok).toBe(false);
+      expect(deadPool.stats().total).toBe(0);
     } finally {
       try { server.stop(true); } catch { /* already stopped */ }
     }
-  });
+  }, 20_000);
 });
 
 describe("getWarmPool registry", () => {

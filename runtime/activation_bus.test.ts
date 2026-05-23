@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   activationListenerCount,
   clearAllActivationListeners,
@@ -8,6 +8,14 @@ import {
 } from "./activation_bus";
 import { newId } from "./ids";
 
+// The activation bus is a process-wide SINGLETON. In the full suite, other
+// files (notably runtime/daemon.test.ts) start real daemons whose workers
+// subscribe via onEvent("*"); stopDaemon() returns before the async
+// startWorkers() background task finishes draining those subscriptions, so
+// leftover listeners can survive into THIS file and break the absolute-count
+// assertions below. Reset the singleton both before AND after every case so
+// these tests are robust to any prior leak regardless of file ordering.
+beforeEach(() => clearAllActivationListeners());
 afterEach(() => clearAllActivationListeners());
 
 const samplePayload = (kind: string) => ({

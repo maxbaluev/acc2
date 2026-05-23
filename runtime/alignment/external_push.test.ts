@@ -10,7 +10,7 @@
 // and KNN against that same vector. The external row must surface with
 // distance ≈ 0.
 
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../../substrate/db";
 import { runViews } from "../../substrate/views";
 import {
@@ -29,6 +29,18 @@ beforeEach(() => {
   // Default state: restore original fetch so other tests are unaffected.
   globalThis.fetch = ORIGINAL_FETCH;
   process.env.OPENAI_API_KEY = ORIGINAL_API_KEY;
+});
+// beforeEach only resets BEFORE each test in THIS file — it does NOT clean up
+// after the file's last test. A test here replaces globalThis.fetch with an
+// unconditional-200 OpenAI mock; without an afterEach restore that mock leaks
+// onto the process-wide globalThis.fetch and poisons whatever test file runs
+// next in the serial suite (observed: runtime/bridge/mcp_pool.test.ts's real
+// defaultProbe got a fake 200 from this mock and never failed over → 8s
+// timeout). Restore the global after every test so the leak cannot escape.
+afterEach(() => {
+  globalThis.fetch = ORIGINAL_FETCH;
+  if (ORIGINAL_API_KEY === undefined) delete process.env.OPENAI_API_KEY;
+  else process.env.OPENAI_API_KEY = ORIGINAL_API_KEY;
 });
 
 describe("alignment / external_push (Principle 7)", () => {
