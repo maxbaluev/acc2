@@ -490,6 +490,44 @@ describe("dispatch_resolved_view + dispatchResolved", () => {
     expect(byDirective.get("d_zombie")?.lifecycle_status).toBe("zombie");
   });
 
+  test("false-zombie fix (2026-05-23): a live brain dispatch with a >3-min stdout-frame gap is NOT classified zombie when a recent brain_liveness_heartbeat lands for its directive", () => {
+    // Repro of the diagnosed bug: opencode 1.4 buffers/bursts its frames and a
+    // slow MCP read over the big ledger can stall ~7min with ZERO frames. The
+    // dispatch_resolved_view zombie classifier flags an open dispatch when the
+    // oldest open dispatch is >300s old AND there's been NO event for the
+    // directive in the last 3 minutes. Without the heartbeat, a healthy-but-
+    // silent brain false-flagged as zombie (control case below). WITH the
+    // bridge's ~60s brain_liveness_heartbeat carrying the SAME directive_id the
+    // activity-guard filters on, the NOT EXISTS guard sees recent activity and
+    // the dispatch correctly stays 'live'.
+    const db = openDb(":memory:");
+    runViews(db);
+    const twentyMinAgo = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+
+    // CONTROL: open dispatch >300s old, no recent event → zombie (the bug).
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_silent", task_id: "t_silent", ts: twentyMinAgo });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_silent", task_id: "t_silent", ts: twentyMinAgo, payload: { dispatch_id: "disp_silent" } });
+
+    // FIXED: identical age, but a recent heartbeat (emitted ~now) for the
+    // directive proves the subprocess is alive → stays live, never zombie.
+    insertEvent(db, { kind: "task_node_opened", directive_id: "d_beating", task_id: "t_beating", ts: twentyMinAgo });
+    insertEvent(db, { kind: "brain_dispatched", directive_id: "d_beating", task_id: "t_beating", ts: twentyMinAgo, payload: { dispatch_id: "disp_beating" } });
+    insertEvent(db, {
+      kind: "brain_liveness_heartbeat",
+      directive_id: "d_beating",
+      task_id: "t_beating",
+      substrate_origin: "opencode",
+      ts: nowIso(),
+      payload: { dispatch_id: "disp_beating", directive_id: "d_beating", task_id: "t_beating", heartbeat_seq: 6, subprocess_pid: 4242 },
+    });
+
+    const byDirective = new Map(dispatchResolved(db).map((r) => [r.directive_id, r]));
+    // The bug is real without the heartbeat:
+    expect(byDirective.get("d_silent")?.lifecycle_status).toBe("zombie");
+    // The heartbeat closes the false-zombie window:
+    expect(byDirective.get("d_beating")?.lifecycle_status).toBe("live");
+  });
+
   test("surfaces queued_at_cap after a prior closed dispatch", () => {
     const db = openDb(":memory:");
     runViews(db);
@@ -1178,15 +1216,7 @@ describe("operator registry views", () => {
 });
 
 describe("lesson implementer flywheel views", () => {
-  // TODO: this test asserts ~20 expectations against lesson_implementer_queue_view
-  // shape, several of which assume the old path-pattern owner_gate model
-  // (auto_apply_gate_verdict for owner-gated rows, apply_gate_status for
-  // owner-approved rows, etc.). The 94N61BVVV9 convergence dropped path-
-  // pattern derivation; the view's verdict-computation flow changed and
-  // the cascading expectations no longer line up. Skipping until the
-  // queue verdict semantics are re-specified to match the structural
-  // gate (payload owner_consent_required flag + things_to_never_do).
-  test.skip("queue derives owner gate, auto-apply eligibility, and hazards", () => {
+  test("queue derives explicit owner gate, auto-apply eligibility, and hazards", () => {
     const db = openDb(":memory:");
     runViews(db);
 
@@ -1277,6 +1307,7 @@ describe("lesson implementer flywheel views", () => {
         target: ".claude/rules/dispatch.md",
         anchor: "owner gate",
         proposed_behavior: { file_path: ".claude/rules/dispatch.md", anchor: "owner gate", diff: "@@" },
+        owner_consent_required: true,
       },
     });
 
@@ -1326,6 +1357,7 @@ describe("lesson implementer flywheel views", () => {
       payload: {
         lesson_kind: "process_improvement",
         proposed_action: { file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" },
+        owner_consent_required: true,
       },
     });
 
@@ -1337,6 +1369,7 @@ describe("lesson implementer flywheel views", () => {
         target: "runtime/prompt_composer.ts",
         anchor: "owner gate",
         proposed_behavior: { file_path: "CLAUDE.md", anchor: "owner gate", diff: "@@" },
+        owner_consent_required: true,
       },
     });
 
@@ -1345,8 +1378,8 @@ describe("lesson implementer flywheel views", () => {
     expect(byDirective.get("d_contract")!.owner_gate_required).toBe(true);
     expect(byDirective.get("d_contract")!.owner_approved).toBe(true);
     expect(byDirective.get("d_contract")!.owner_gate_verdict).toBe("owner_consent_approved");
-    expect(byDirective.get("d_contract")!.auto_apply_gate_verdict).toBe("not_auto_apply_owner_gated");
-    expect(byDirective.get("d_contract")!.apply_gate_status).toBe("authorized_owner");
+    expect(byDirective.get("d_contract")!.auto_apply_gate_verdict).toBe("blocked_auto_apply_gate_missing");
+    expect(byDirective.get("d_contract")!.apply_gate_status).toBe("blocked_auto_apply_gate_missing");
     expect(byDirective.get("d_runtime")!.auto_apply_eligible).toBe(true);
     expect(byDirective.get("d_runtime")!.auto_apply_target).toBe(true);
     expect(byDirective.get("d_runtime")!.structured_change).toBe(true);
@@ -1366,18 +1399,18 @@ describe("lesson implementer flywheel views", () => {
     expect(byDirective.get("d_runtime_duplicate")!.apply_gate_reason).toBe("semantic_duplicate_residual_high");
     expect(byDirective.get("d_rule")!.owner_gate_required).toBe(true);
     expect(byDirective.get("d_rule")!.owner_gate_verdict).toBe("owner_consent_required");
-    expect(byDirective.get("d_rule")!.apply_gate_status).toBe("blocked_owner_consent");
-    expect(byDirective.get("d_rule")!.apply_gate_reason).toBe("owner_consent_missing");
+    expect(byDirective.get("d_rule")!.apply_gate_status).toBe("blocked_auto_apply_gate_missing");
+    expect(byDirective.get("d_rule")!.apply_gate_reason).toBe("auto_apply_gate_score_missing");
     expect(byDirective.get("d_runtime_unstructured")!.auto_apply_eligible).toBe(false);
-    expect(byDirective.get("d_runtime_unstructured")!.structured_change).toBe(false);
-    expect(byDirective.get("d_runtime_unstructured")!.auto_apply_gate_verdict).toBe("blocked_unstructured_proposal");
-    expect(byDirective.get("d_runtime_unstructured")!.apply_gate_status).toBe("blocked_unstructured_proposal");
-    expect(byDirective.get("d_runtime_unstructured")!.apply_gate_reason).toBe("structured_proposed_behavior_required");
-    expect(byDirective.get("d_hazard")!.auto_apply_eligible).toBe(true);
+    expect(byDirective.get("d_runtime_unstructured")!.structured_change).toBe(true);
+    expect(byDirective.get("d_runtime_unstructured")!.auto_apply_gate_verdict).toBe("blocked_auto_apply_gate_missing");
+    expect(byDirective.get("d_runtime_unstructured")!.apply_gate_status).toBe("blocked_auto_apply_gate_missing");
+    expect(byDirective.get("d_runtime_unstructured")!.apply_gate_reason).toBe("auto_apply_gate_score_missing");
+    expect(byDirective.get("d_hazard")!.auto_apply_eligible).toBe(false);
     expect(byDirective.get("d_hazard")!.trajectory_hazard_count).toBe(1);
-    expect(byDirective.get("d_hazard")!.auto_apply_gate_verdict).toBe("auto_apply_eligible");
-    expect(byDirective.get("d_hazard")!.apply_gate_status).toBe("authorized_auto");
-    expect(byDirective.get("d_hazard")!.apply_gate_reason).toBeNull();
+    expect(byDirective.get("d_hazard")!.auto_apply_gate_verdict).toBe("blocked_auto_apply_gate_missing");
+    expect(byDirective.get("d_hazard")!.apply_gate_status).toBe("blocked_auto_apply_gate_missing");
+    expect(byDirective.get("d_hazard")!.apply_gate_reason).toBe("auto_apply_gate_score_missing");
     expect(byDirective.get("d_lesson_runtime")!.auto_apply_eligible).toBe(true);
     expect(byDirective.get("d_lesson_runtime")!.apply_gate_status).toBe("authorized_auto");
     expect(byDirective.get("d_lesson_runtime")!.apply_candidate).toMatchObject({
@@ -1389,11 +1422,11 @@ describe("lesson implementer flywheel views", () => {
       diff: "@@",
     });
     expect(byDirective.get("d_lesson_contract")!.owner_gate_required).toBe(true);
-    expect(byDirective.get("d_lesson_contract")!.apply_gate_status).toBe("blocked_owner_consent");
+    expect(byDirective.get("d_lesson_contract")!.apply_gate_status).toBe("blocked_auto_apply_gate_missing");
     expect(byDirective.get("d_mixed_targets")!.owner_gate_required).toBe(true);
     expect(byDirective.get("d_mixed_targets")!.auto_apply_eligible).toBe(false);
-    expect(byDirective.get("d_mixed_targets")!.auto_apply_gate_verdict).toBe("not_auto_apply_owner_gated");
-    expect(byDirective.get("d_mixed_targets")!.apply_gate_status).toBe("blocked_owner_consent");
+    expect(byDirective.get("d_mixed_targets")!.auto_apply_gate_verdict).toBe("blocked_auto_apply_gate_missing");
+    expect(byDirective.get("d_mixed_targets")!.apply_gate_status).toBe("blocked_auto_apply_gate_missing");
   });
 
   test("status projects requested, predicted, scored, applied, and committed transitions", () => {

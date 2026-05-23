@@ -498,6 +498,25 @@ export const EVENT_KINDS = {
   bridge_failed:                           { producer: "runtime",   embeddable: false, mirror_inline: true,  health_metric: false, narrative: true },
   bridge_mcp_connected:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   bridge_mcp_preflight:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // ── Brain-dispatch liveness heartbeat (2026-05-23 false-zombie fix) ──
+  // Emitted by the opencode bridge on a ~60s timer while a brain subprocess
+  // is ALIVE for an OPEN dispatch. opencode 1.4 buffers/bursts its stdout
+  // frames and a slow MCP read over a large ledger can stall for minutes
+  // with ZERO frames — yet the subprocess is healthy and actively working.
+  // The dispatch_resolved_view zombie classifier flags a dispatch when the
+  // oldest open dispatch is > 300s old AND there is NO event for the
+  // directive in the last 3 minutes. A silent-but-alive brain therefore got
+  // FALSE-flagged as zombie. This heartbeat carries the SAME directive_id
+  // the zombie view's activity-guard filters on, so a live dispatch always
+  // shows recent activity and the false-zombie window closes — WITHOUT
+  // touching the zombie view itself. The timer is cleared on every
+  // subprocess-exit path (proc.exited / closeBrainDispatch / timeout / kill)
+  // and .unref()'d so it never blocks process exit. Strictly substrate-
+  // internal: NOT narrative (one row/min/live-dispatch would flood the
+  // owner stream), NOT embeddable, NOT health_metric, NOT mirror_inline.
+  // Payload: { dispatch_id, directive_id, task_id, heartbeat_seq,
+  // subprocess_pid, emitted_at_ms }.
+  brain_liveness_heartbeat:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Dispatcher (cycle-1 enforcement) ────────────────────────────────
   brain_dispatched:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },

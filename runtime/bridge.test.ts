@@ -1038,4 +1038,90 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       .get() as { c: number };
     expect(failedCount.c).toBe(2);
   }, 5_000);
+
+  test("brain-dispatch liveness heartbeat: timer clears on subprocess exit (no leak), and the brain_liveness_heartbeat kind is wired through emitEvent for the dispatch's directive", async () => {
+    // False-zombie fix (2026-05-23). While the subprocess is alive the bridge
+    // runs a ~60s setInterval emitting brain_liveness_heartbeat for req.directiveId
+    // so dispatch_resolved_view's 3-min activity-guard always sees recent activity.
+    // The timer is cleared on EVERY exit path (closeBrainDispatch + proc.exited +
+    // synchronous post-exit cleanup) and .unref()'d so it never leaks. This test
+    // proves clear-on-exit: a fast-exiting dispatch (well under the 60s cadence)
+    // produces ZERO heartbeat rows AND the dispatch closes cleanly — if the timer
+    // leaked, a heartbeat would eventually fire against this db after exit.
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const sentinel = {
+      pid: 4242,
+      kill: () => {},
+      stdout: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      stderr: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      exited: Promise.resolve(0),
+    };
+    const fakeSpawn = (() => sentinel) as unknown as typeof Bun.spawn;
+    const tmpConfigDir = mkdtempSync(join(tmpdir(), "acc2-bridge-heartbeat-test-"));
+    try {
+      await spawnRealOpencode(
+        { prompt: "heartbeat probe", taskId, directiveId },
+        db,
+        {
+          spawnFn: fakeSpawn,
+          mcpServerUrl: "http://127.0.0.1:45679/mcp",
+          configDir: tmpConfigDir,
+          mcpHandshakeWindowMs: 200,
+          timeoutMs: 1_000,
+        },
+      );
+
+      // The brain_dispatch_closed row proves closeBrainDispatch ran (the
+      // canonical clear point for the heartbeat timer).
+      const closed = db
+        .query<{ c: number }, [string]>(
+          "SELECT COUNT(*) AS c FROM events WHERE kind = 'brain_dispatch_closed' AND task_id = ?",
+        )
+        .get(taskId);
+      expect(closed!.c).toBeGreaterThan(0);
+
+      // No heartbeat should have fired — the 60s cadence is far longer than the
+      // fast exit, and the timer was cleared on exit. A leaked timer would emit
+      // one against this directive on its next tick.
+      const beatsNow = db
+        .query<{ c: number }, [string]>(
+          "SELECT COUNT(*) AS c FROM events WHERE kind = 'brain_liveness_heartbeat' AND directive_id = ?",
+        )
+        .get(directiveId);
+      expect(beatsNow!.c).toBe(0);
+
+      // Wait past one heartbeat cadence-equivalent window; still zero proves the
+      // interval was genuinely cleared (no leak) rather than merely not-yet-fired.
+      await new Promise((r) => setTimeout(r, 50));
+      const beatsAfter = db
+        .query<{ c: number }, [string]>(
+          "SELECT COUNT(*) AS c FROM events WHERE kind = 'brain_liveness_heartbeat' AND directive_id = ?",
+        )
+        .get(directiveId);
+      expect(beatsAfter!.c).toBe(0);
+
+      // The kind is fully wired: emitEvent accepts it (validates registry +
+      // schema) and the row carries the directive_id the zombie-view guard
+      // filters on.
+      const { emitEvent } = await import("./events");
+      emitEvent(db, {
+        kind: "brain_liveness_heartbeat",
+        substrate_origin: "opencode",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { dispatch_id: "disp_probe", directive_id: directiveId, task_id: taskId, heartbeat_seq: 1, subprocess_pid: 4242 },
+        invoker: "opencode",
+      });
+      const wired = db
+        .query<{ c: number }, [string]>(
+          "SELECT COUNT(*) AS c FROM events WHERE kind = 'brain_liveness_heartbeat' AND directive_id = ?",
+        )
+        .get(directiveId);
+      expect(wired!.c).toBe(1);
+    } finally {
+      try { rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* swallow */ }
+    }
+  }, 5_000);
 });

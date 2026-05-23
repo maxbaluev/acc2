@@ -252,6 +252,16 @@ const HANDSHAKE_WAIT_BUDGET_MS = (() => {
 
 const HANDSHAKE_POLL_MS = 200;
 
+/** Brain-dispatch liveness heartbeat cadence (2026-05-23 false-zombie fix).
+ *  While an opencode brain subprocess is alive for an OPEN dispatch, the
+ *  bridge emits one brain_liveness_heartbeat per interval carrying the
+ *  dispatch's directive_id so the dispatch_resolved_view zombie classifier's
+ *  3-minute activity-guard always sees recent activity for a live (but
+ *  possibly stdout-silent) dispatch. 60s is well under the 3-minute guard
+ *  window — ~3x margin — so even a single dropped tick cannot false-zombie a
+ *  live brain. Decoupled from opencode's bursty frame-emission timing. */
+const BRAIN_LIVENESS_HEARTBEAT_MS = 60_000;
+
 type HandshakeWaiter = { resolve: () => void };
 let handshakePermitsInUse = 0;
 const handshakeWaiters: HandshakeWaiter[] = [];
@@ -780,10 +790,59 @@ export const spawnRealOpencode = async (
     } as JsonValue,
     invoker: "opencode",
   });
+  // ── Brain-dispatch liveness heartbeat (2026-05-23 false-zombie fix) ──
+  // While the subprocess is ALIVE for this OPEN dispatch, emit a lightweight
+  // brain_liveness_heartbeat (carrying req.directiveId — the SAME field the
+  // dispatch_resolved_view zombie classifier's activity-guard filters on)
+  // every BRAIN_LIVENESS_HEARTBEAT_MS. opencode 1.4 buffers/bursts stdout and
+  // a slow MCP read can stall for minutes with zero frames; the heartbeat
+  // decouples liveness from frame-emission timing so a healthy-but-silent
+  // brain never trips the zombie view. The 60s cadence is well below the
+  // view's 3-minute activity window, giving ~3x margin. Cleared on EVERY
+  // exit path via clearLivenessHeartbeat() (invoked from closeBrainDispatch,
+  // which fires deterministically on proc.exited; also called directly on
+  // proc.exited as belt-and-suspenders) and .unref()'d so it never blocks
+  // process exit or leaks past the subprocess.
+  let livenessSeq = 0;
+  let livenessTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+    livenessSeq += 1;
+    try {
+      emitEvent(db, {
+        kind: "brain_liveness_heartbeat",
+        substrate_origin: "opencode",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        payload: {
+          dispatch_id: dispatchId,
+          directive_id: req.directiveId,
+          task_id: req.taskId,
+          heartbeat_seq: livenessSeq,
+          subprocess_pid: spawnSubprocessPid,
+          emitted_at_ms: Date.now(),
+        } as JsonValue,
+        invoker: "opencode",
+      });
+    } catch {
+      // db may be closing mid-flight; the heartbeat is best-effort
+      // liveness signal, never load-bearing for correctness.
+    }
+  }, BRAIN_LIVENESS_HEARTBEAT_MS);
+  livenessTimer.unref();
+  const clearLivenessHeartbeat = (): void => {
+    if (livenessTimer !== null) {
+      clearInterval(livenessTimer);
+      livenessTimer = null;
+    }
+  };
+
   let dispatchClosureEmitted = false;
   const closeBrainDispatch = (closureReason: string): void => {
     if (dispatchClosureEmitted) return;
     dispatchClosureEmitted = true;
+    // Stop the liveness heartbeat the instant the dispatch closes — this is
+    // the canonical clear point (closeBrainDispatch fires on proc.exited and
+    // on every explicit close), so the timer can never outlive the dispatch.
+    clearLivenessHeartbeat();
     try {
       emitEvent(db, {
         kind: "brain_dispatch_closed",
@@ -805,7 +864,14 @@ export const spawnRealOpencode = async (
   };
   // Defense-in-depth: when the subprocess exits, fire the close
   // deterministically. Idempotent — second call no-ops via the flag above.
-  proc.exited.finally(() => closeBrainDispatch("brain_subprocess_exited"));
+  // Also clear the liveness heartbeat directly here so it is stopped the
+  // instant proc.exited resolves even if closeBrainDispatch were ever
+  // skipped — no exit path can leak the timer (clearLivenessHeartbeat is
+  // idempotent).
+  proc.exited.finally(() => {
+    clearLivenessHeartbeat();
+    closeBrainDispatch("brain_subprocess_exited");
+  });
 
   // Watchdog: SIGTERM at timeoutMs, SIGKILL at timeoutMs * 1.5.
   let killed = false;
@@ -1304,6 +1370,10 @@ export const spawnRealOpencode = async (
   clearTimeout(sigKill);
   clearInterval(mcpHandshakeWatchdog);
   clearInterval(stuckInterval);
+  // Stop the liveness heartbeat on the synchronous exit path too (idempotent
+  // with the closeBrainDispatch clear fired from proc.exited.finally) — the
+  // dispatch is terminal here, so no further heartbeat should land.
+  clearLivenessHeartbeat();
   if (stdoutLogFh) {
     try { await stdoutLogFh.end(); } catch { /* swallow */ }
   }
