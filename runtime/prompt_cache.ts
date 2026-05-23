@@ -57,8 +57,29 @@ const cache = new Map<string, CacheEntry<unknown>>();
 let hitCount = 0;
 let missCount = 0;
 
-const renderKey = (key: CacheKey): string =>
-  `${key.directive_id}|${key.task_id}|${key.options_signature}`;
+// Per-Database identity. The cache is a module-level Map shared across the
+// whole process, but the high-water rowid (its only freshness signal besides
+// TTL) is db-relative — two distinct Database instances (e.g. two `:memory:`
+// test DBs, or a real db + an in-process probe db) can sit at the SAME rowid
+// while holding entirely different state. Without a db tag in the rendered
+// key, a store from db A could be served to db B whose matching key + matching
+// rowid falsely passes the high-water guard, leaking a stale/foreign prompt.
+// `:memory:` DBs even share `.filename` (":memory:") so the filename can't
+// disambiguate. A WeakMap mints a stable, GC-friendly tag per Database
+// instance and folds it into the key so entries never cross databases.
+const dbTags = new WeakMap<Database, string>();
+let dbTagSeq = 0;
+const tagFor = (db: Database): string => {
+  let tag = dbTags.get(db);
+  if (tag === undefined) {
+    tag = `db${dbTagSeq++}`;
+    dbTags.set(db, tag);
+  }
+  return tag;
+};
+
+const renderKey = (db: Database, key: CacheKey): string =>
+  `${tagFor(db)}|${key.directive_id}|${key.task_id}|${key.options_signature}`;
 
 // Composer-telemetry kinds that composePrompt itself emits as a side
 // effect of composing. They must be excluded from the high-water mark:
@@ -98,7 +119,7 @@ export const lookupCachedPrompt = <T>(
   key: CacheKey,
   opts?: { nowMs?: number },
 ): LookupResult<T> => {
-  const rendered = renderKey(key);
+  const rendered = renderKey(db, key);
   const entry = cache.get(rendered) as CacheEntry<T> | undefined;
   if (!entry) {
     missCount++;
@@ -169,7 +190,7 @@ export const storeCachedPrompt = <T>(
   value: T,
   opts?: { nowMs?: number; highWaterRowid?: number },
 ): void => {
-  const rendered = renderKey(key);
+  const rendered = renderKey(db, key);
   // The caller (composePrompt) may pass the high-water mark it snapshotted
   // BEFORE composition began. Composition emits its own act_tuple_recorded
   // (citation-choice credit) which is NOT in COMPOSER_TELEMETRY_KINDS;

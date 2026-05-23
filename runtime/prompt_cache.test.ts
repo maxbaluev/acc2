@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { newId } from "./ids";
@@ -70,6 +71,34 @@ describe("prompt_cache", () => {
     const b = lookupCachedPrompt<{ text: string }>(db, key(directiveId, taskId, "v2"));
     expect(a.hit && a.value.text).toBe("A");
     expect(b.hit && b.value.text).toBe("B");
+  });
+
+  test("entries never cross databases (per-db tag in key) even with identical key + rowid", () => {
+    // Two distinct in-memory DBs can sit at the same high-water rowid while
+    // holding different state. A store in dbA must NOT be served to dbB under
+    // the same logical key — otherwise the high-water guard false-passes and
+    // leaks a foreign prompt. The per-Database WeakMap tag prevents this.
+    // Use raw Database instances: openDb(":memory:") caches by path and would
+    // return the SAME handle twice, defeating the test. The cache only needs
+    // the events table for the high-water query.
+    const dbA = new Database(":memory:");
+    const dbB = new Database(":memory:");
+    for (const d of [dbA, dbB]) {
+      d.run("CREATE TABLE events (rowid INTEGER PRIMARY KEY, kind TEXT)");
+    }
+    const k = key("d_shared", "t_shared", "v1");
+    storeCachedPrompt(dbA, k, { text: "from_A" });
+    // dbB has the SAME key and (being fresh) the SAME high-water rowid as dbA
+    // had at store time — but must still miss.
+    const onB = lookupCachedPrompt<{ text: string }>(dbB, k);
+    expect(onB.hit).toBe(false);
+    if (!onB.hit) expect(onB.reason).toBe("no_entry");
+    // dbA still hits its own entry.
+    const onA = lookupCachedPrompt<{ text: string }>(dbA, k);
+    expect(onA.hit).toBe(true);
+    if (onA.hit) expect(onA.value.text).toBe("from_A");
+    dbA.close();
+    dbB.close();
   });
 
   test("recordPromptCacheHit + recordPromptCacheMiss emit telemetry events explicitly", () => {
