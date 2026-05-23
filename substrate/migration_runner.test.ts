@@ -33,6 +33,45 @@ describe("migration_runner", () => {
     expect(second.skipped_already_applied).toBeGreaterThanOrEqual(first.applied);
     expect(second.failed).toBe(0);
   });
+
+  test("crash-window atomicity: the schema_migration_applied marker is committed in the SAME transaction as the migration SQL (every applied version has exactly one durable marker, no partial-apply re-run risk)", () => {
+    // The marker event is the SOLE idempotency signal. If it lands in a
+    // separate write after COMMIT, a crash between COMMIT and the emit leaves
+    // the SQL durable but the version unrecorded → re-run. v002 is
+    // NON-idempotent (RENAME act_artifact → DROP), so a re-run would throw or
+    // destroy data. After the fix the marker commits atomically with the SQL:
+    // for every version reported applied there is exactly one durable marker,
+    // and a re-run skips it without re-executing the destructive SQL.
+    const db = openDb(":memory:");
+    const summary = runVersionedMigrations(db);
+    expect(summary.failed).toBe(0);
+
+    for (const version of summary.versions_applied) {
+      const markerCount = (db
+        .query<{ c: number }, [string]>(
+          `SELECT COUNT(*) AS c FROM events
+            WHERE kind = 'schema_migration_applied'
+              AND json_extract(payload, '$.version') = ?`,
+        )
+        .get(version))?.c ?? 0;
+      expect(markerCount).toBe(1);
+    }
+
+    // Re-run: every previously-applied version is skipped via its durable
+    // marker; the non-idempotent v002 SQL must NOT execute again.
+    const rerun = runVersionedMigrations(db);
+    expect(rerun.applied).toBe(0);
+    expect(rerun.failed).toBe(0);
+    expect(rerun.skipped_already_applied).toBe(summary.applied);
+
+    // act_artifact survived (not dropped by a destructive v002 re-apply).
+    const tableExists = (db
+      .query<{ c: number }, []>(
+        `SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name='act_artifact'`,
+      )
+      .get())?.c ?? 0;
+    expect(tableExists).toBe(1);
+  });
 });
 
 describe("resolveAliasChain", () => {

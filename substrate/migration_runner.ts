@@ -122,25 +122,29 @@ export const runVersionedMigrations = (db: Database): MigrationSummary => {
     try {
       db.exec("BEGIN");
       db.exec(sqlText);
+      // Crash-window idempotency fix: the schema_migration_applied event is
+      // the SOLE marker versionAlreadyApplied() consults. Emitting it AFTER
+      // COMMIT left a window where the migration SQL was durable but the
+      // marker was not (process crash, or a failed/swallowed emit) — on the
+      // next boot the migration re-ran. v002 is NON-idempotent (it RENAMEs
+      // act_artifact then DROPs the renamed table); re-applying it throws (or
+      // worse, drops live data). Emit the marker INSIDE the same transaction
+      // as the SQL so "applied" and "recorded-as-applied" commit atomically:
+      // either both land or both roll back. emitEvent is a plain INSERT and
+      // joins the open transaction; if it throws, the whole migration rolls
+      // back and is retried cleanly next boot.
+      emitEvent(db, {
+        kind: "schema_migration_applied",
+        substrate_origin: "substrate_auto",
+        payload: {
+          version,
+          file: basename(file),
+          sql_bytes: sqlText.length,
+        } satisfies Record<string, JsonValue>,
+      });
       db.exec("COMMIT");
       summary.applied++;
       summary.versions_applied.push(version);
-      try {
-        emitEvent(db, {
-          kind: "schema_migration_applied",
-          substrate_origin: "substrate_auto",
-          payload: {
-            version,
-            file: basename(file),
-            sql_bytes: sqlText.length,
-          } satisfies Record<string, JsonValue>,
-        });
-      } catch (err) {
-        logger.warn(
-          { where: "migration_runner.emit_applied", version, err: String(err) },
-          "could not emit schema_migration_applied",
-        );
-      }
     } catch (err) {
       try { db.exec("ROLLBACK"); } catch {}
       summary.failed++;
