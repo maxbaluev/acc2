@@ -898,6 +898,16 @@ export type TailOpts = EventsOpts & {
 // task, each line becomes a notification automatically.
 const runTailStream = async (opts: TailOpts): Promise<number> => {
   const exitOnTerminal = opts.exitOnTerminal ?? Boolean(opts.task || opts.directive);
+  // When BOTH directive + rootTaskId are present we can query
+  // dispatch_resolved_view — the authoritative substrate projection. In that
+  // case a raw task_committed/task_failed/dispatcher_violation SSE event is
+  // NOT sufficient evidence to declare the dispatch terminal (orchestrator-
+  // runtime.md "don't classify a dispatch terminal without substrate
+  // evidence"): the projection must confirm lifecycle_status ∈ {completed,
+  // failed}. Only generic `acc tail` scopes that lack the directive/root pair
+  // fall back to the raw event as the terminal signal. This mirrors the poll
+  // path's `!canReadResolvedDispatch` guard so SSE and poll agree.
+  const canReadResolvedDispatch = Boolean(opts.directive && opts.rootTaskId);
   const deadlineMs = opts.deadlineMs;
   const ac = new AbortController();
   let deadlineExpired = false;
@@ -984,13 +994,25 @@ const runTailStream = async (opts: TailOpts): Promise<number> => {
         // sub-tasks as informational and continue. Only the root task's
         // terminal closes the stream.
         const isRootTerminal = !opts.rootTaskId || (e.task_id === opts.rootTaskId);
-        if (isRootTerminal) {
-          sawTerminal = true;
-          if (exitOnTerminal) {
-            if (!sentinelEmitted) sentinelEmitted = await emitResolvedTerminalSentinel(opts);
+        if (isRootTerminal && exitOnTerminal) {
+          if (!sentinelEmitted) sentinelEmitted = await emitResolvedTerminalSentinel(opts);
+          // When the resolved-view projection is queryable, require the
+          // sentinel (substrate evidence) before declaring the dispatch
+          // terminal. If the projection has not yet flipped to
+          // completed/failed, keep following — the resolvedViewTimer emits +
+          // aborts once it does. Without the directive/root pair the raw event
+          // is the only terminal signal available, so accept it. Only mark
+          // sawTerminal (the authoritative success flag the abort/deadline
+          // branches read) when we actually have terminal authority.
+          if (sentinelEmitted || !canReadResolvedDispatch) {
+            sawTerminal = true;
             ac.abort();
             return 0;
           }
+        } else if (isRootTerminal) {
+          // Not exiting on terminal (generic tail): the raw event is still a
+          // legitimate observation for non-exit callers.
+          sawTerminal = true;
         }
       }
     }

@@ -123,6 +123,55 @@ describe("acc task bounded follow exits", () => {
     expect(cap.err.join("\n")).not.toContain("Request timed out");
   });
 
+  test("raw root terminal SSE event does NOT exit success while resolved view says live", async () => {
+    // Substrate-evidence discipline (orchestrator-runtime.md): when the
+    // directive+root pair is present we can query dispatch_resolved_view, and
+    // a raw task_committed SSE event for the root is NOT sufficient to declare
+    // the dispatch terminal. The resolved view here stays `live`, so the
+    // follow must keep going and exit only via the deadline detach — NOT emit
+    // a terminal sentinel and NOT claim a clean terminal exit off the raw
+    // event alone.
+    mcpImpl = async () => ({
+      ok: true,
+      result: [{
+        directive_id: "D1234567890123456789012345",
+        root_task_id: "T1234567890123456789012345",
+        lifecycle_status: "live",
+      }],
+    });
+    sseImpl = async function* (opts: { signal?: AbortSignal }): AsyncGenerator<unknown> {
+      yield {
+        event_id: "E1",
+        kind: "task_committed",
+        ts: new Date().toISOString(),
+        directive_id: "D1234567890123456789012345",
+        task_id: "T1234567890123456789012345",
+      };
+      // Then behave like the never-yielding generator until aborted.
+      if (!opts.signal?.aborted) {
+        await new Promise<void>((resolve) =>
+          opts.signal?.addEventListener("abort", () => resolve(), { once: true }),
+        );
+      }
+    };
+    const cap = captureConsole();
+    const code = await runTail({
+      directive: "D1234567890123456789012345",
+      rootTaskId: "T1234567890123456789012345",
+      stream: true,
+      exitOnTerminal: true,
+      detachOnDeadline: true,
+      deadlineMs: Date.now() + 60,
+    });
+    cap.restore();
+
+    // The raw event was rendered, but no terminal sentinel was emitted (the
+    // projection never went terminal) and the exit is the deadline detach.
+    expect(code).toBe(0);
+    expect(cap.out.join("\n")).not.toContain("ACC_DISPATCH_RESOLVED");
+    expect(cap.out.join("\n")).toContain(DETACH_LINE);
+  });
+
   test("detaches cleanly when the max follow budget elapses", async () => {
     const cap = captureConsole();
     const code = await runTail({
