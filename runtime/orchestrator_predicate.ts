@@ -104,9 +104,32 @@ const resultMap = (input: OrchestratorPredicateInput): Partial<Record<Orchestrat
 };
 
 const boundaryCoverageGap = (results: Partial<Record<OrchestratorSubPredicateName, OrchestratorSubPredicateResult>>): number => {
+  // A required owner-alignment boundary that is structurally ABSENT must not
+  // fail open. The earlier `present === 0 → 0.2` early return under-penalized
+  // a fully-missing boundary: with a single required boundary, 0.2 × 0.4
+  // weight collapses to residual 0.08 → verdict "aligned" → AUTO_APPLY, i.e.
+  // the apply gate auto-applies a change whose owner_alignment was never
+  // evaluated (k_252: advisory pretending to be hard). The honest signal is
+  // the literal coverage ratio — a missing boundary is a maximal gap (1.0),
+  // and that maps to coverageGap × 0.4 = 0.4 plus the dedicated all-missing
+  // floor below that forces a watch/owner-gate routing rather than silent
+  // AUTO_APPLY. We surface coverage as the real ratio so the breakdown is
+  // truthful, and the caller's residual composition treats a fully-missing
+  // required boundary as blocking via boundaryAbsenceFloor.
   const present = REQUIRED_BOUNDARIES.filter((name) => results[name]).length;
-  if (present === 0) return 0.2;
   return clamp01((REQUIRED_BOUNDARIES.length - present) / REQUIRED_BOUNDARIES.length);
+};
+
+/** When EVERY required boundary is absent, the gate has no owner-alignment
+ *  evidence at all. That is not "aligned" — it is "unevaluated", which must
+ *  route to the owner gate rather than AUTO_APPLY. Returns a residual floor
+ *  in the watch band so an unevaluated apply cannot silently auto-commit. */
+const boundaryAbsenceFloor = (results: Partial<Record<OrchestratorSubPredicateName, OrchestratorSubPredicateResult>>): number => {
+  const present = REQUIRED_BOUNDARIES.filter((name) => results[name]).length;
+  // 0.5 lands in the watch band [0.3, 0.6) → recommended_route OWNER_GATE
+  // (ask the owner), not AUTO_APPLY and not a hard brain-recycle. Missing
+  // alignment evidence means "unevaluated", which the owner should adjudicate.
+  return present === 0 ? 0.5 : 0;
 };
 
 const orderGap = (order: string[] | undefined): number => {
@@ -141,6 +164,7 @@ export const evaluateOrchestratorPredicate = (input: OrchestratorPredicateInput)
   const meanResidual = residuals.reduce((sum, n) => sum + n, 0) / REQUIRED_BOUNDARIES.length;
   const blockingVerdict = REQUIRED_BOUNDARIES.some((name) => BLOCKING_VERDICTS.has(results[name]?.verdict ?? "")) ? 1 : 0;
   const coverageGap = boundaryCoverageGap(results);
+  const absenceFloor = boundaryAbsenceFloor(results);
   const sequencingGap = orderGap(input.candidate_orchestration?.boundary_order);
   const omittedBlockingBoundary = selectedGap(input.candidate_orchestration?.selected_boundaries, results);
   const actionRisk = Math.max(numberSignal(input.proposed_action?.risk), numberSignal(input.proposed_action?.novelty));
@@ -155,6 +179,7 @@ export const evaluateOrchestratorPredicate = (input: OrchestratorPredicateInput)
     maxResidual,
     sequencingGap,
     omittedBlockingBoundary,
+    absenceFloor,
     meanResidual * 0.7,
     coverageGap * 0.4,
     routePressure,
@@ -184,6 +209,7 @@ export const evaluateOrchestratorPredicate = (input: OrchestratorPredicateInput)
       mean_sub_predicate_residual: meanResidual,
       blocking_verdict: blockingVerdict,
       coverage_gap: coverageGap,
+      absence_floor: absenceFloor,
       sequencing_gap: sequencingGap,
       omitted_blocking_boundary: omittedBlockingBoundary,
       action_risk: actionRisk,

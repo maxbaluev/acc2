@@ -73,13 +73,17 @@ describe("evaluateOrchestratorPredicate", () => {
     expect(result.recommended_route).toBe("OWNER_GATE");
   });
 
-  test("degrades gracefully when prior gates provide no detailed predicate rows", () => {
+  test("degrades to the owner gate (NOT AUTO_APPLY) when prior gates provide no detailed predicate rows", () => {
+    // Missing required boundary = unevaluated owner alignment. The gate must
+    // surface that to the owner rather than silently auto-applying (k_252).
     const result = evaluateOrchestratorPredicate({ candidate_route: "AUTO_APPLY" });
 
+    expect(result.residual).toBeGreaterThanOrEqual(0.3);
     expect(result.residual).toBeLessThan(0.6);
-    expect(result.verdict).toBe("aligned");
-    expect(result.recommended_route).toBe("AUTO_APPLY");
-    expect(result.breakdown.coverage_gap).toBeGreaterThan(0);
+    expect(result.verdict).toBe("watch");
+    expect(result.recommended_route).toBe("OWNER_GATE");
+    expect(result.breakdown.coverage_gap).toBe(1); // honest full-missing ratio
+    expect(result.breakdown.absence_floor).toBe(0.5);
   });
 
   test("dead verdicts from removed subsystems no longer block", () => {
@@ -97,5 +101,32 @@ describe("evaluateOrchestratorPredicate", () => {
       expect(result.breakdown.blocking_verdict).toBe(0);
       expect(result.recommended_route).toBe("AUTO_APPLY");
     }
+  });
+
+  test("fails closed when the required owner_alignment boundary is absent (no fail-open AUTO_APPLY)", () => {
+    // No sub_predicate_results at all → the gate has zero owner-alignment
+    // evidence. The earlier coverage formula collapsed this to residual ~0.08
+    // (verdict "aligned" → AUTO_APPLY): an apply auto-committed without ANY
+    // owner-alignment evaluation (k_252 advisory-not-hard). It must now route
+    // to the owner gate, never AUTO_APPLY.
+    const result = evaluateOrchestratorPredicate({
+      candidate_route: "AUTO_APPLY",
+      candidate_orchestration: { selected_boundaries: [], boundary_order: [] },
+    });
+    expect(result.recommended_route).not.toBe("AUTO_APPLY");
+    expect(result.recommended_route).toBe("OWNER_GATE");
+    expect(result.residual).toBeGreaterThanOrEqual(0.3);
+    expect(result.breakdown.absence_floor).toBe(0.5);
+    expect(result.breakdown.coverage_gap).toBe(1); // honest: boundary fully missing
+  });
+
+  test("present boundary carries no absence floor", () => {
+    const result = evaluateOrchestratorPredicate({
+      candidate_route: "AUTO_APPLY",
+      sub_predicate_results: cleanResult,
+      candidate_orchestration: { selected_boundaries: ["owner_alignment"] },
+    });
+    expect(result.breakdown.absence_floor).toBe(0);
+    expect(result.recommended_route).toBe("AUTO_APPLY");
   });
 });
