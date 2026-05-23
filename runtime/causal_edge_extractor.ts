@@ -92,16 +92,25 @@ const stringPairs = (ids: unknown): Array<[string, string]> => {
 const edgeId = (kind: EdgeClass, a: string, b: string): string =>
   `edge_${kind}__${a}__${b}`;
 
-const ensureEdgeRow = (
-  db: Database,
+const EDGE_ROW_INSERT_SQL = `INSERT INTO act_artifact (
+       id, runtime, body, declared_sandbox, state_root, kind,
+       posterior_alpha, posterior_beta, score, confidence,
+       recent_residual_mean, recent_kill_count, status, name,
+       fixture_input, fixture_expected_residual,
+       created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+/** Build the exact INSERT param tuple for a brand-new causal-edge row at the
+ *  neutral Beta(1,1) cold-start prior. Shared by ensureEdgeRow (autocommit
+ *  creation half) and the batched credit half so both materialize byte-
+ *  identical rows. */
+const edgeRowInsertParams = (
+  id: string,
   edgeClass: EdgeClass,
   a: string,
   b: string,
-): { id: string; created: boolean } => {
-  const id = edgeId(edgeClass, a, b);
-  const existing = db.query("SELECT id FROM act_artifact WHERE id = ? LIMIT 1").get(id);
-  if (existing) return { id, created: false };
-  const ts = new Date().toISOString();
+  ts: string,
+): unknown[] => {
   const body = JSON.stringify({ edge_class: edgeClass, node_a: a, node_b: b });
   const declaredSandbox = JSON.stringify({
     runtime: "bun",
@@ -114,35 +123,39 @@ const ensureEdgeRow = (
     net_allow: [],
     proc_allow: [],
   });
-  db.run(
-    `INSERT INTO act_artifact (
-       id, runtime, body, declared_sandbox, state_root, kind,
-       posterior_alpha, posterior_beta, score, confidence,
-       recent_residual_mean, recent_kill_count, status, name,
-       fixture_input, fixture_expected_residual,
-       created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id,
-      "bun",
-      body,
-      declaredSandbox,
-      `substrate/causal_edge/${edgeClass}/${a}/${b}`,
-      EDGE_KIND,
-      1.0,
-      1.0,
-      0.5,
-      0.5,
-      0.0,
-      0,
-      "admitted",
-      `${edgeClass}:${a}:${b}`,
-      JSON.stringify({ edge_class: edgeClass, node_a: a, node_b: b }),
-      0.5,
-      ts,
-      ts,
-    ],
-  );
+  return [
+    id,
+    "bun",
+    body,
+    declaredSandbox,
+    `substrate/causal_edge/${edgeClass}/${a}/${b}`,
+    EDGE_KIND,
+    1.0,
+    1.0,
+    0.5,
+    0.5,
+    0.0,
+    0,
+    "admitted",
+    `${edgeClass}:${a}:${b}`,
+    JSON.stringify({ edge_class: edgeClass, node_a: a, node_b: b }),
+    0.5,
+    ts,
+    ts,
+  ];
+};
+
+const ensureEdgeRow = (
+  db: Database,
+  edgeClass: EdgeClass,
+  a: string,
+  b: string,
+): { id: string; created: boolean } => {
+  const id = edgeId(edgeClass, a, b);
+  const existing = db.query("SELECT id FROM act_artifact WHERE id = ? LIMIT 1").get(id);
+  if (existing) return { id, created: false };
+  const ts = new Date().toISOString();
+  db.run(EDGE_ROW_INSERT_SQL, edgeRowInsertParams(id, edgeClass, a, b, ts));
   return { id, created: true };
 };
 
@@ -270,6 +283,65 @@ const creditEdgesFromActResiduals = async (
   ));
 
   const LOW_RESIDUAL = 0.3;
+
+  // WRITE-STORM FIX (scale, 2026-05-22): the prior shape did one
+  // `UPDATE act_artifact` PLUS one `emitEvent` PER credited edge in
+  // autocommit — N writes group-committed N times through SQLite's single
+  // WAL writer (~1.8s/pass at scale). We split the pass into a READ/PLAN
+  // phase (residual resolution, idempotency dup-check, posterior read) and
+  // a single (chunked) WRITE phase that group-commits all edge-row INSERTs,
+  // posterior UPDATEs, and credited-event emits inside one transaction so
+  // the writes commit once, not N times.
+  //
+  // Behavior-preserving invariants kept EXACTLY:
+  //  - Same edges credited, same +alpha/+beta deltas, same final posteriors.
+  //  - Sequential same-edge accumulation within a pass: an in-memory
+  //    posterior map (`edgePosterior`) is advanced per planned credit so a
+  //    later credit on the same edge in the same pass reads the bumped
+  //    posterior — identical to the prior read-after-write loop.
+  //  - One causal_edge_credited event per credited (edge, act) pair, carrying
+  //    that step's posterior_alpha/beta/score — emitted in the SAME order as
+  //    the autocommit loop (act-scan order, then per-act edgeTuples order).
+  //  - recent_residual_mean / updated_at on the final UPDATE reflect the LAST
+  //    credit applied to that edge in this pass (matches the prior
+  //    last-write-wins behavior).
+  //  - Idempotency dup-check (events causal_edge_credited high-water-mark) is
+  //    read in the PLAN phase before any emit, so the check sees the same
+  //    pre-pass ledger state the autocommit loop saw.
+
+  type PlannedUpdate = {
+    edgeId: string;
+    alpha: number;
+    beta: number;
+    score: number;
+    confidence: number;
+    residual: number;
+    updatedAt: string;
+  };
+  type PlannedInsert = { id: string; params: unknown[] };
+  type PlannedEmit = {
+    edgeId: string;
+    actId: string;
+    directiveId: string | null;
+    taskId: string | null;
+    residual: number;
+    isGood: boolean;
+    alpha: number;
+    beta: number;
+    score: number;
+  };
+
+  // Running posterior per edge across the whole pass (seeded from DB on
+  // first touch, then advanced in-memory so same-edge credits accumulate).
+  const edgePosterior = new Map<string, { alpha: number; beta: number }>();
+  // Final UPDATE per edge (keyed by edge id; later credits overwrite so the
+  // single flushed UPDATE carries the cumulative posterior + last residual).
+  const finalUpdates = new Map<string, PlannedUpdate>();
+  // Edge rows that must be INSERTed (absent at plan time), keyed by id so we
+  // insert each new edge exactly once even if multiple acts credit it.
+  const inserts = new Map<string, PlannedInsert>();
+  const emits: PlannedEmit[] = [];
+
   let processedSinceYield = 0;
   for (const act of acts) {
     if (processedSinceYield >= YIELD_EVERY_N) {
@@ -281,11 +353,6 @@ const creditEdgesFromActResiduals = async (
     const payload = parsePayload(act.payload);
     // Collect the distinct edges this act co-cites. A pair that appears
     // across both citation vectors on one act is credited once per act.
-    // Track the full (edge_class, node_a, node_b) tuple so we can admit
-    // the edge row here if the creation half hasn't seen this act yet —
-    // creation scans oldest-first while credit scans newest-first, so the
-    // two windows are disjoint on a large ledger (4045 acts in window vs
-    // 500/300 caps). Ensuring the row here is what makes credit fire.
     const edgeTuples = new Map<string, { edgeClass: EdgeClass; a: string; b: string }>();
     for (const [a, b] of stringPairs(payload.cited_knowledge_ids)) {
       edgeTuples.set(edgeId("citation_cocitation", a, b), { edgeClass: "citation_cocitation", a, b });
@@ -305,7 +372,9 @@ const creditEdgesFromActResiduals = async (
     for (const [id, tuple] of edgeTuples) {
       // Idempotency: skip if this (edge_id, source_act_id) pair was already
       // credited on a prior tick. The causal_edge_credited event is the
-      // high-water-mark — keyed on both ids.
+      // high-water-mark — keyed on both ids. (Read in the PLAN phase before
+      // any emit so the check sees the same pre-pass ledger the autocommit
+      // loop saw.)
       const already = db
         .query(
           `SELECT 1 FROM events
@@ -320,47 +389,131 @@ const creditEdgesFromActResiduals = async (
         continue;
       }
 
-      // Admit the edge row if absent (disjoint creation/credit windows),
-      // then read its current posterior. ensureEdgeRow is idempotent.
-      ensureEdgeRow(db, tuple.edgeClass, tuple.a, tuple.b);
-      const row = db
-        .query(
-          `SELECT posterior_alpha, posterior_beta FROM act_artifact WHERE id = ? LIMIT 1`,
-        )
-        .get(id) as { posterior_alpha: number; posterior_beta: number } | null;
-      if (!row) continue;
+      // Resolve the edge's running posterior. First touch in this pass reads
+      // the DB; if absent, the edge must be INSERTed (disjoint creation/credit
+      // windows) at the neutral Beta(1,1) prior — the same row ensureEdgeRow
+      // would have written. Subsequent same-pass touches read the in-memory
+      // accumulated value (mirrors the prior read-after-write loop).
+      let posterior = edgePosterior.get(id);
+      if (!posterior) {
+        const row = db
+          .query(
+            `SELECT posterior_alpha, posterior_beta FROM act_artifact WHERE id = ? LIMIT 1`,
+          )
+          .get(id) as { posterior_alpha: number; posterior_beta: number } | null;
+        if (row) {
+          posterior = { alpha: row.posterior_alpha, beta: row.posterior_beta };
+        } else {
+          // Absent → plan an INSERT at the Beta(1,1) cold-start prior.
+          posterior = { alpha: 1.0, beta: 1.0 };
+          if (!inserts.has(id)) {
+            inserts.set(id, {
+              id,
+              params: edgeRowInsertParams(id, tuple.edgeClass, tuple.a, tuple.b, new Date().toISOString()),
+            });
+          }
+        }
+        edgePosterior.set(id, posterior);
+      }
 
       const isGood = residual < LOW_RESIDUAL;
-      const newAlpha = row.posterior_alpha + (isGood ? 1 : 0);
-      const newBeta = row.posterior_beta + (isGood ? 0 : 1);
+      const newAlpha = posterior.alpha + (isGood ? 1 : 0);
+      const newBeta = posterior.beta + (isGood ? 0 : 1);
       const newScore = betaMean(newAlpha, newBeta);
       const newConfidence = betaStreamConfidence(newAlpha, newBeta);
-      db.run(
-        `UPDATE act_artifact
-           SET posterior_alpha = ?, posterior_beta = ?,
-               score = ?, confidence = ?,
-               recent_residual_mean = ?, updated_at = ?
-         WHERE id = ?`,
-        [newAlpha, newBeta, newScore, newConfidence, residual, new Date().toISOString(), id],
-      );
+      // Advance the running posterior so a later same-edge credit accumulates.
+      posterior.alpha = newAlpha;
+      posterior.beta = newBeta;
+      // Collapse to ONE final UPDATE per edge (cumulative posterior + the
+      // LAST credit's residual/updated_at — matches prior last-write-wins).
+      finalUpdates.set(id, {
+        edgeId: id,
+        alpha: newAlpha,
+        beta: newBeta,
+        score: newScore,
+        confidence: newConfidence,
+        residual,
+        updatedAt: new Date().toISOString(),
+      });
       summary.edges_credited++;
+      // One emit per credited (edge, act) pair, carrying THIS step's posterior.
+      emits.push({
+        edgeId: id,
+        actId: act.id,
+        directiveId: act.directive_id ?? null,
+        taskId: act.task_id ?? null,
+        residual,
+        isGood,
+        alpha: newAlpha,
+        beta: newBeta,
+        score: newScore,
+      });
+    }
+  }
+
+  // WRITE PHASE — group-commit all planned writes. Bounded chunks keep the
+  // single WAL writer from holding a multi-thousand-row transaction open too
+  // long (which would block other writers). Each chunk wraps its INSERTs +
+  // UPDATEs + emits in ONE BEGIN/COMMIT via db.transaction so the writes
+  // commit once per chunk instead of once per row.
+  if (inserts.size === 0 && finalUpdates.size === 0 && emits.length === 0) return;
+
+  const FLUSH_CHUNK = 500;
+  const insertList = [...inserts.values()];
+  const updateList = [...finalUpdates.values()];
+
+  const updateStmt = db.query(
+    `UPDATE act_artifact
+       SET posterior_alpha = ?, posterior_beta = ?,
+           score = ?, confidence = ?,
+           recent_residual_mean = ?, updated_at = ?
+     WHERE id = ?`,
+  );
+  const insertStmt = db.query(EDGE_ROW_INSERT_SQL);
+
+  // Edge-row INSERTs first (so the posterior UPDATE that targets a freshly
+  // inserted edge row has a row to update), then UPDATEs, then emits.
+  // emitEvent for causal_edge_credited is a clean INSERT + in-memory bus
+  // publish (no act-tuple projection cascade, non-embeddable kind, fail-soft
+  // metrics) — safe to call inside the transaction; the rows it writes are
+  // identical to the autocommit path, only the commit boundary differs.
+  const flushInserts = db.transaction((batch: PlannedInsert[]) => {
+    for (const ins of batch) insertStmt.run(...ins.params);
+  });
+  const flushUpdates = db.transaction((batch: PlannedUpdate[]) => {
+    for (const u of batch) {
+      updateStmt.run(u.alpha, u.beta, u.score, u.confidence, u.residual, u.updatedAt, u.edgeId);
+    }
+  });
+  const flushEmits = db.transaction((batch: PlannedEmit[]) => {
+    for (const e of batch) {
       emitEvent(db, {
         kind: "causal_edge_credited",
         substrate_origin: "substrate_auto",
-        directive_id: act.directive_id ?? undefined,
-        task_id: act.task_id ?? undefined,
-        context_refs: [id, act.id],
+        directive_id: e.directiveId ?? undefined,
+        task_id: e.taskId ?? undefined,
+        context_refs: [e.edgeId, e.actId],
         payload: {
-          edge_act_artifact_id: id,
-          source_act_id: act.id,
-          act_residual: residual,
-          outcome: isGood ? "low_residual" : "high_residual",
-          posterior_alpha: newAlpha,
-          posterior_beta: newBeta,
-          score: newScore,
+          edge_act_artifact_id: e.edgeId,
+          source_act_id: e.actId,
+          act_residual: e.residual,
+          outcome: e.isGood ? "low_residual" : "high_residual",
+          posterior_alpha: e.alpha,
+          posterior_beta: e.beta,
+          score: e.score,
         },
       });
     }
+  });
+
+  for (let i = 0; i < insertList.length; i += FLUSH_CHUNK) {
+    flushInserts(insertList.slice(i, i + FLUSH_CHUNK));
+  }
+  for (let i = 0; i < updateList.length; i += FLUSH_CHUNK) {
+    flushUpdates(updateList.slice(i, i + FLUSH_CHUNK));
+  }
+  for (let i = 0; i < emits.length; i += FLUSH_CHUNK) {
+    flushEmits(emits.slice(i, i + FLUSH_CHUNK));
   }
 };
 
