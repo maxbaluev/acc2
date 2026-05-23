@@ -18,9 +18,16 @@ import type { OwnerRenderingPolicyRow, OwnerStateBeliefRow, TopLawRow } from "..
 import { newId } from "./ids";
 import { goalShape } from "./goal_shape";
 import { seedFoundationalKnowledge } from "../substrate/seed";
+import { _resetPromptCacheForTests } from "./prompt_cache";
 
 afterAll(() => closeDb());
-beforeEach(() => closeDb());
+beforeEach(() => {
+  closeDb();
+  // RLMQ_PROMPT_COMP: the composition cache is process-global; reset it
+  // between tests so a prior test's stored entry can never serve a later
+  // test's compose (and so the cache-hit/miss tests below are deterministic).
+  _resetPromptCacheForTests();
+});
 
 const openTask = (db: ReturnType<typeof openDb>): { directiveId: string; taskId: string } => {
   seedFoundationalKnowledge(db, { ownerApproved: true });
@@ -564,6 +571,73 @@ describe("prompt_composer", () => {
     expect(composed.text).toContain("browser_session:research/customer-a");
     expect(composed.text).toContain("sensor:habit_tracker/<stream>");
     expect(composed.text).not.toContain('target_files:        ["path/to/touched.ts", ...]');
+    // RLMQ_PROMPT_COMP: the emission grammar must teach the ONE semantic
+    // current-file apply path and frame legacy before/after snippets as
+    // advisory context only (never a text-match gate). Guards against a
+    // regression that re-introduces anchor-text matching into the grammar.
+    expect(composed.text).toContain("semantic");
+    expect(composed.text.toLowerCase()).toContain("advisory");
+    expect(composed.text.toLowerCase()).not.toContain("anchor-text matching gate");
+  });
+
+  test("RLMQ_PROMPT_COMP: composing the same task twice reuses the cached prompt (miss then hit)", async () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    const first = await composePrompt(db, { taskId });
+    const second = await composePrompt(db, { taskId });
+    // The second compose must equal the first verbatim — served from cache.
+    expect(second.text).toBe(first.text);
+    const misses = db.query(
+      "SELECT COUNT(*) AS c FROM events WHERE kind = 'prompt_composition_cache_miss' AND task_id = ?",
+    ).get(taskId) as { c: number };
+    const hits = db.query(
+      "SELECT COUNT(*) AS c FROM events WHERE kind = 'prompt_composition_cache_hit' AND task_id = ?",
+    ).get(taskId) as { c: number };
+    expect(misses.c).toBe(1);
+    expect(hits.c).toBe(1);
+  });
+
+  test("RLMQ_PROMPT_COMP: a NEW non-telemetry event invalidates the cache (recompose misses again)", async () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    await composePrompt(db, { taskId }); // miss + store
+    await composePrompt(db, { taskId }); // hit
+    // Real substrate movement (not composer telemetry) must advance the
+    // high-water mark and invalidate the entry.
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      payload: { text: "fresh substrate movement", score: 0.5 },
+    });
+    await composePrompt(db, { taskId }); // miss again
+    const misses = db.query(
+      "SELECT COUNT(*) AS c FROM events WHERE kind = 'prompt_composition_cache_miss' AND task_id = ?",
+    ).get(taskId) as { c: number };
+    expect(misses.c).toBe(2);
+  });
+
+  test("RLMQ_PROMPT_COMP: fallback promoted-knowledge ranks by relevance score, not pure recency", async () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    // Older row with a HIGH score, then a NEWER row with a LOW score, both
+    // without goal-shape tags (same relevance class). Relevance-first
+    // ordering must surface the high-score row above the newer low-score one.
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      payload: { text: "HIGH_SCORE_OLDER relevance-first marker", score: 0.95 },
+    });
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      payload: { text: "LOW_SCORE_NEWER recency marker", score: 0.05 },
+    });
+    const composed = await composePrompt(db, { taskId });
+    const hi = composed.text.indexOf("HIGH_SCORE_OLDER");
+    const lo = composed.text.indexOf("LOW_SCORE_NEWER");
+    expect(hi).toBeGreaterThanOrEqual(0);
+    // The high-score (older) row must appear BEFORE the low-score (newer) one.
+    expect(hi).toBeLessThan(lo === -1 ? Number.MAX_SAFE_INTEGER : lo);
   });
 
   test("under heavy budget pressure, P4 sections drop first", async () => {
@@ -602,7 +676,11 @@ describe("prompt_composer", () => {
     emitEvent(db, {
       kind: "knowledge_promoted",
       substrate_origin: "substrate_auto",
-      payload: { text: "Prefer recursive grep over shell find", score: 0.88, tags: ["pattern"] },
+      // RLMQ_PROMPT_COMP: fallback knowledge now ranks relevance-score-first
+      // within a goal-shape class (not recency-first). Score 0.99 keeps this
+      // row competitive with the seeded policy-bundle rows (score 0.95) so the
+      // presence assertion holds under the new ordering.
+      payload: { text: "Prefer recursive grep over shell find", score: 0.99, tags: ["pattern"] },
     });
     const composed = await composePrompt(db, { taskId });
     expect(composed.text).toContain("Prefer recursive grep");
@@ -883,18 +961,22 @@ describe("prompt_composer goal-shape knowledge fallback", () => {
   test("promoted knowledge with matching goal_shape is pulled before recency-only rows", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
-    emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "RECENT_BUT_GENERIC", score: 0.9 } });
+    // High generic score keeps the comparison row inside the top-K under the
+    // relevance-score tier; the goal_shape MATCH class must still outrank it.
+    emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "RECENT_BUT_GENERIC", score: 0.99 } });
     emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "GOAL_SHAPE_MATCHED_KNOWLEDGE", score: 0.6, goal_shape: goalShape("Count files containing TODO substring") } });
-    const composed = await composePrompt(db, { taskId, budgetTokens: 1200 });
+    const composed = await composePrompt(db, { taskId, budgetTokens: 4000 });
+    expect(composed.text.indexOf("GOAL_SHAPE_MATCHED_KNOWLEDGE")).toBeGreaterThanOrEqual(0);
     expect(composed.text.indexOf("GOAL_SHAPE_MATCHED_KNOWLEDGE")).toBeLessThan(composed.text.indexOf("RECENT_BUT_GENERIC"));
   });
 
   test("promoted knowledge with matching goal_shape_tags is pulled before recency-only rows", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
-    emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "RECENT_BUT_GENERIC_TAG_CASE", score: 0.9 } });
+    emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "RECENT_BUT_GENERIC_TAG_CASE", score: 0.99 } });
     emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", payload: { text: "TAG_MATCHED_MOVED_CONTRACT_KNOWLEDGE", score: 0.6, goal_shape_tags: ["todo"] } });
-    const composed = await composePrompt(db, { taskId, budgetTokens: 1200 });
+    const composed = await composePrompt(db, { taskId, budgetTokens: 4000 });
+    expect(composed.text.indexOf("TAG_MATCHED_MOVED_CONTRACT_KNOWLEDGE")).toBeGreaterThanOrEqual(0);
     expect(composed.text.indexOf("TAG_MATCHED_MOVED_CONTRACT_KNOWLEDGE")).toBeLessThan(composed.text.indexOf("RECENT_BUT_GENERIC_TAG_CASE"));
   });
 

@@ -25,6 +25,14 @@ import { renderStakeholderBlock } from "./stakeholder_compositor";
 import { renderInterferenceBlock } from "./interference";
 import { emitEvent } from "./events";
 import { goalShape } from "./goal_shape";
+import {
+  currentHighWaterRowid,
+  lookupCachedPrompt,
+  recordPromptCacheHit,
+  recordPromptCacheMiss,
+  storeCachedPrompt,
+  type CacheKey,
+} from "./prompt_cache";
 import { categorizeGoalShapeSemantic } from "./decomposition_strategy_extractor";
 import { buildBrainSelfAudit, renderBrainSelfAuditSection } from "./brain_introspection";
 import type { JsonValue, OwnerProfile } from "../substrate/types";
@@ -677,7 +685,9 @@ const readKnowledgeTopK = async (
              )
            )
          )
-       ORDER BY shape_match DESC, p.ts DESC, p.rowid DESC
+       ORDER BY shape_match DESC,
+                CAST(COALESCE(json_extract(p.payload, '$.score'), 0) AS REAL) DESC,
+                p.ts DESC, p.rowid DESC
        LIMIT ?`,
     [shape, shape, shape, shapeTagsJson, shapeMatchOnly ? 1 : 0, shape, shape, shape, shapeTagsJson, k],
   );
@@ -1753,15 +1763,41 @@ const readKnowledgeRejected = async (
   db: Database,
   chosenK: number,
   rejectedK: number,
+  goalText?: string | null,
 ): Promise<Array<{ id: string; score: number }>> => {
+  // RLMQ_PROMPT_COMP: order the rejected boundary the SAME way the chosen
+  // top-K is ordered — relevance class (goal-shape match) first, then
+  // numeric relevance_score, then recency — so the K+1..K+rejectedK rows
+  // are the rows that actually lost the relevance-first cut, not the
+  // recency-first cut. When no goalText is supplied the shape_match class
+  // collapses to 0 for all rows and the ordering degrades to
+  // score-then-recency.
+  const shape = goalText ? goalShape(goalText) : null;
+  const shapeTagsJson = JSON.stringify(goalShapeTags(goalText));
   const rows = await poolQuery<Record<string, unknown>>(
     db,
-    `SELECT p.id AS id, p.payload AS payload
+    `SELECT p.id AS id, p.payload AS payload,
+            CASE
+              WHEN ? IS NOT NULL AND (
+                json_extract(p.payload, '$.goal_shape') = ?
+                OR EXISTS (
+                  SELECT 1 FROM json_each(p.payload, '$.goal_shapes')
+                  WHERE value = ?
+                )
+                OR EXISTS (
+                  SELECT 1 FROM json_each(p.payload, '$.goal_shape_tags')
+                  WHERE lower(value) IN (SELECT value FROM json_each(?))
+                )
+              ) THEN 1
+              ELSE 0
+            END AS shape_match
          FROM events p
         WHERE p.kind = 'knowledge_promoted'
-        ORDER BY p.ts DESC, p.rowid DESC
+        ORDER BY shape_match DESC,
+                 CAST(COALESCE(json_extract(p.payload, '$.score'), 0) AS REAL) DESC,
+                 p.ts DESC, p.rowid DESC
         LIMIT ? OFFSET ?`,
-    [rejectedK, chosenK],
+    [shape, shape, shape, shapeTagsJson, rejectedK, chosenK],
   );
   const out: Array<{ id: string; score: number }> = [];
   for (const r of rows) {
@@ -1914,6 +1950,60 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   }
 
   const directiveText = await readDirectiveGoal(db, task.directive_id);
+
+  // RLMQ_PROMPT_COMP (brain design, 2026-05-23): bounded in-memory
+  // composition reuse. The cache key is the task/directive identity plus
+  // an options_signature over every NON-substrate input that changes the
+  // composed text — budget, goal-shape, and the signatures of any
+  // pre-computed retrieval / policy-artifact inputs the caller passed.
+  // Substrate movement is captured separately by prompt_cache's high-water
+  // mark (which excludes prompt-composer telemetry). On a miss we compose
+  // normally and store; on a hit we return a deep clone of the cached
+  // ComposedPrompt so callers can't mutate the shared entry. Fail-soft:
+  // any cache error degrades to a normal compose.
+  const retrievalSignature = (r: RetrievalResult | null | undefined): string => {
+    if (!r) return "-";
+    return r.hits.map((h) => `${h.event_id}:${(h as { score?: number }).score ?? ""}`).join(",");
+  };
+  const policyArtifactSignature = (): string => {
+    const bundles = opts.retrievedPolicyArtifacts;
+    if (!bundles) return "-";
+    return Object.entries(bundles)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([section, rows]) => `${section}=${(rows ?? []).map((r) => `${r.artifactId}:${r.score ?? ""}`).join("+")}`)
+      .join(";");
+  };
+  const optionsSignature = JSON.stringify({
+    budget,
+    goal_shape: goalShape(directiveText ?? task.goal),
+    retrieval_unavailable: opts.retrievalUnavailable?.reason ?? null,
+    knowledge_sig: retrievalSignature(opts.retrievedKnowledge),
+    artifact_sig: retrievalSignature(opts.retrievedArtifacts),
+    policy_sig: policyArtifactSignature(),
+  });
+  const cacheKey: CacheKey = {
+    directive_id: task.directive_id,
+    task_id: task.id,
+    options_signature: optionsSignature,
+  };
+  // Snapshot the high-water mark BEFORE composition. Composition emits its
+  // own act_tuple_recorded (citation-choice credit) which is not in the
+  // telemetry-exclusion set; stamping the pre-composition mark prevents
+  // that self-emitted row from invalidating the just-stored entry.
+  let preComposeHighWater = 0;
+  try {
+    const cached = lookupCachedPrompt<ComposedPrompt>(db, cacheKey);
+    if (cached.hit) {
+      recordPromptCacheHit(db, cacheKey, cached.age_ms);
+      return {
+        text: cached.value.text,
+        sections: cached.value.sections.map((s) => ({ ...s })),
+        truncated: [...cached.value.truncated],
+      };
+    }
+    recordPromptCacheMiss(db, cacheKey, cached.reason);
+    preComposeHighWater = currentHighWaterRowid(db);
+  } catch { /* fail-soft: cache must never block composition */ }
 
   // Build candidate sections in priority order. Each entry is {name, p, body}.
   type Candidate = { name: string; p: number; body: string; floor?: boolean };
@@ -2318,7 +2408,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
       ? opts.retrievedKnowledge.hits.map((h) => h.event_id)
       : (await readKnowledgeTopK(db, 8, directiveText ?? task.goal)).map((r) => r.id);
     if (chosenIds.length > 0) {
-      const rejected = await readKnowledgeRejected(db, chosenIds.length, 6);
+      const rejected = await readKnowledgeRejected(db, chosenIds.length, 6, directiveText ?? task.goal);
       if (rejected.length > 0) {
         emitEvent(db, {
           kind: "counterfactual_alternative_recorded",
@@ -2595,11 +2685,18 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
     });
   }
 
-  return {
+  const composed: ComposedPrompt = {
     text,
     sections: kept.map((c) => ({ name: c.name, priorityP: c.p, tokens: estimateTokens(c.body), floor: c.floor === true })),
     truncated,
   };
+  // Store under the cache key stamped with the pre-composition high-water
+  // mark (see the lookup above). Fail-soft: a store failure must never
+  // surface to the caller.
+  try {
+    storeCachedPrompt(db, cacheKey, composed, { highWaterRowid: preComposeHighWater });
+  } catch { /* fail-soft */ }
+  return composed;
 };
 
 // Hot-reload deep-improvement (2026-05-17): register the composer with

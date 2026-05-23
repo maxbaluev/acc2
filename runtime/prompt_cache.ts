@@ -60,8 +60,28 @@ let missCount = 0;
 const renderKey = (key: CacheKey): string =>
   `${key.directive_id}|${key.task_id}|${key.options_signature}`;
 
-const currentHighWaterRowid = (db: Database): number => {
-  const row = db.query("SELECT IFNULL(MAX(rowid), 0) AS m FROM events").get() as { m: number };
+// Composer-telemetry kinds that composePrompt itself emits as a side
+// effect of composing. They must be excluded from the high-water mark:
+// otherwise the act of composing (which stores the cache entry) advances
+// the high-water past the stored entry, so the very next lookup for the
+// same task always misses with reason=high_water_advanced and the cache
+// can never serve a single hit. The brain's RLMQ_PROMPT_COMP design calls
+// this out explicitly ("a high-water mark that excludes prompt-composer
+// telemetry"). Any NON-telemetry event (real substrate movement) still
+// advances the mark and correctly invalidates the cache.
+const COMPOSER_TELEMETRY_KINDS = [
+  "prompt_composition_cache_hit",
+  "prompt_composition_cache_miss",
+  "prompt_truncated",
+  "counterfactual_alternative_recorded",
+  "prompt_policy_section_selected",
+] as const;
+
+const HIGH_WATER_SQL =
+  `SELECT IFNULL(MAX(rowid), 0) AS m FROM events WHERE kind NOT IN (${COMPOSER_TELEMETRY_KINDS.map(() => "?").join(",")})`;
+
+export const currentHighWaterRowid = (db: Database): number => {
+  const row = db.query(HIGH_WATER_SQL).get(...COMPOSER_TELEMETRY_KINDS) as { m: number };
   return row.m;
 };
 
@@ -147,12 +167,18 @@ export const storeCachedPrompt = <T>(
   db: Database,
   key: CacheKey,
   value: T,
-  opts?: { nowMs?: number },
+  opts?: { nowMs?: number; highWaterRowid?: number },
 ): void => {
   const rendered = renderKey(key);
+  // The caller (composePrompt) may pass the high-water mark it snapshotted
+  // BEFORE composition began. Composition emits its own act_tuple_recorded
+  // (citation-choice credit) which is NOT in COMPOSER_TELEMETRY_KINDS;
+  // stamping the pre-composition mark prevents that self-emitted row from
+  // invalidating the entry on the very next lookup. Falls back to the
+  // current (telemetry-excluding) mark when the caller omits it.
   const entry: CacheEntry<T> = {
     key,
-    highWaterRowid: currentHighWaterRowid(db),
+    highWaterRowid: opts?.highWaterRowid ?? currentHighWaterRowid(db),
     insertedAtMs: opts?.nowMs ?? Date.now(),
     value,
   };
