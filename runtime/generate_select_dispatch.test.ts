@@ -5,9 +5,14 @@
 // NO keyword/regex intent classifier in the path — interception is authorized
 // only by the env flag AND an injected scored `shouldHandle` predicate. The
 // cases exercise the RLM-first gate matrix:
-//   1. flag UNSET                              -> {handled:false}, generator NEVER called.
-//   2. flag SET + no scored allowance          -> {handled:false}, generator NEVER called.
-//   3. flag SET + shouldHandle returns true     -> {handled:true}, generator called, recorded.
+//   1. flag UNSET                                  -> {handled:false}, generator NEVER called.
+//   2. flag SET + no scored allowance              -> {handled:false}, generator NEVER called.
+//   3. flag SET + shouldHandle true + NO generator -> {handled:false}, falls through to brain.
+//   4. flag SET + shouldHandle returns true         -> {handled:true}, generator called, recorded.
+//
+// Candidate generation is an ACT performed by the intellect (brain / Claude
+// Code), NOT a direct LLM API call — so an intellect-backed `deps.generate`
+// MUST be wired. With it absent the organism falls through to the brain.
 
 import { describe, test, expect, afterEach } from "bun:test";
 import {
@@ -108,6 +113,26 @@ describe("maybeRunGenerateSelect — env-gated RLM-first organism hook", () => {
     expect(falsePredicate.handled).toBe(false);
 
     expect(genCalls).toBe(0);
+    expect(recorded.length).toBe(0);
+  });
+
+  test("flag SET + shouldHandle true + NO generator -> {handled:false} (falls through to brain)", async () => {
+    process.env.ACC2_GENERATE_SELECT = "1";
+    const recorded: SelectOutcome<string>[] = [];
+    // No `generate` wired: candidate generation is an act the intellect must
+    // perform, and there is NO direct-LLM-API fallback. The organism declines.
+    const deps: GenerateSelectDispatchDeps = {
+      shouldHandle: () => true,
+      buildDeps: stubBuildDeps(recorded),
+    };
+    const res = await maybeRunGenerateSelect(
+      fakeDb,
+      "write a haiku about the sea",
+      {},
+      deps,
+    );
+    expect(res.handled).toBe(false);
+    expect(res.result).toBeUndefined();
     expect(recorded.length).toBe(0);
   });
 

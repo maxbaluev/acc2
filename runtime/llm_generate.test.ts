@@ -1,36 +1,21 @@
-// Tests for runtime/llm_generate.ts — the live LLM candidate generator.
+// Tests for runtime/llm_generate.ts — the candidate-generation PROMPT builder
+// and response PARSER for the "generate-and-select" organism.
 //
-// No real network: globalThis.fetch is mocked exactly like embedder.test.ts.
-// We assert (1) n candidates parse with their NumericClaims, and (2) a
-// candidate carrying an `unsourced: true` input round-trips so the
-// deterministic provenance verifier can later catch it.
+// Candidate generation is an ACT performed by the intellect (the opencode
+// brain, or Claude Code), NOT a hardcoded OpenAI chat call — OPENAI_API_KEY is
+// for EMBEDDINGS ONLY. So this module has NO /chat/completions call and NO
+// network: it is a pure prompt builder + parser. These tests assert (1) the
+// verbalized-sampling prompt contract, (2) candidates + their NumericClaims
+// parse from a model JSON response, and (3) an `unsourced: true` input
+// round-trips so the deterministic provenance verifier can later catch it.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { generateCandidates, parseCandidates, buildGeneratePrompt } from "./llm_generate";
+import { describe, expect, test } from "bun:test";
+import { parseCandidates, buildGeneratePrompt } from "./llm_generate";
 import { verifyClaimProvenance } from "./claim_provenance_verifier";
 
-const originalFetch = globalThis.fetch;
-const originalKey = process.env.OPENAI_API_KEY;
-
-const mockCompletion = (content: unknown): Response =>
-  new Response(
-    JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }),
-    { status: 200, headers: { "Content-Type": "application/json" } },
-  );
-
-beforeEach(() => {
-  process.env.OPENAI_API_KEY = "sk-test-mock";
-});
-
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-  if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
-  else process.env.OPENAI_API_KEY = originalKey;
-});
-
-describe("generateCandidates (mocked fetch)", () => {
-  test("FACTUAL goal: returns n candidates with parsed claims (unsourced number caught)", async () => {
-    const payload = {
+describe("parseCandidates — intellect response parser", () => {
+  test("FACTUAL goal: parses n candidates with claims (unsourced number caught)", () => {
+    const payload = JSON.stringify({
       candidates: [
         {
           solution: "Thesis A: cite the McKinsey figure.",
@@ -63,10 +48,9 @@ describe("generateCandidates (mocked fetch)", () => {
           ],
         },
       ],
-    };
-    globalThis.fetch = (async () => mockCompletion(payload)) as typeof fetch;
+    });
 
-    const candidates = await generateCandidates("write a value thesis with sourced figures", 2);
+    const candidates = parseCandidates(payload, 2);
     expect(candidates).toHaveLength(2);
     expect(candidates[0].artifact).toContain("Thesis A");
     expect(candidates[0].generator).toBe("llm_vs");
@@ -79,20 +63,19 @@ describe("generateCandidates (mocked fetch)", () => {
     expect(verifyClaimProvenance(candidates[1].claims).residual).toBeGreaterThanOrEqual(0.3);
   });
 
-  test("NON-FACTUAL goal: candidates carry empty claims, provenance filter is a no-op", async () => {
+  test("NON-FACTUAL goal: candidates carry empty claims, provenance filter is a no-op", () => {
     // "suggest 3 names for a coffee app" — pure naming, no factual/numeric
     // assertions, so every candidate's claims array is empty and the
     // provenance filter passes them all (selection relies on comparison).
-    const payload = {
+    const payload = JSON.stringify({
       candidates: [
         { solution: "BeanFlow", claims: [] },
         { solution: "Daybreak Brew", claims: [] },
         { solution: "Crema", claims: [] },
       ],
-    };
-    globalThis.fetch = (async () => mockCompletion(payload)) as typeof fetch;
+    });
 
-    const candidates = await generateCandidates("suggest 3 names for a coffee app", 3);
+    const candidates = parseCandidates(payload, 3);
     expect(candidates).toHaveLength(3);
     expect(candidates.map((c) => c.artifact)).toEqual(["BeanFlow", "Daybreak Brew", "Crema"]);
     for (const c of candidates) {
@@ -102,8 +85,8 @@ describe("generateCandidates (mocked fetch)", () => {
     }
   });
 
-  test("a candidate carrying unsourced:true round-trips so the verifier catches it", async () => {
-    const payload = {
+  test("a candidate carrying unsourced:true round-trips so the verifier catches it", () => {
+    const payload = JSON.stringify({
       candidates: [
         {
           solution: "Thesis with an invented multiplier.",
@@ -120,10 +103,9 @@ describe("generateCandidates (mocked fetch)", () => {
           ],
         },
       ],
-    };
-    globalThis.fetch = (async () => mockCompletion(payload)) as typeof fetch;
+    });
 
-    const [candidate] = await generateCandidates("value thesis", 1);
+    const [candidate] = parseCandidates(payload, 1);
     expect(candidate).toBeDefined();
     const unsourced = candidate.claims[0].inputs.find(
       (i) => (i as { unsourced?: boolean }).unsourced === true,
@@ -135,20 +117,6 @@ describe("generateCandidates (mocked fetch)", () => {
     expect(breakdown.unsourced_inputs.length).toBeGreaterThan(0);
   });
 
-  test("returns [] without an API key (no network)", async () => {
-    delete process.env.OPENAI_API_KEY;
-    let called = false;
-    globalThis.fetch = (async () => {
-      called = true;
-      return mockCompletion({ candidates: [] });
-    }) as typeof fetch;
-    const candidates = await generateCandidates("x", 2);
-    expect(candidates).toEqual([]);
-    expect(called).toBe(false);
-  });
-});
-
-describe("parseCandidates", () => {
   test("tolerates a markdown-fenced bare array (solution key)", () => {
     const fenced = "```json\n[{\"solution\":\"hi\",\"claims\":[]}]\n```";
     const out = parseCandidates(fenced, 5);

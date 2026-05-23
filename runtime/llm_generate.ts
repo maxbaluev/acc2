@@ -1,12 +1,13 @@
-// Live LLM candidate generator for the "generate-and-select" organism.
+// Candidate-generation PROMPT + PARSER for the "generate-and-select" organism.
 //
-// This is the ONLY LLM seam the solve_loop needs (`generate(task, n)`). It
-// makes ONE real OpenAI /chat/completions call using VERBALIZED SAMPLING:
-// rather than calling the model n times for n samples, we instruct the model
-// to verbalize an array of n DIVERSE candidate SOLUTIONS in a single
-// completion, each carrying its own NumericClaim provenance breakdown so the
-// deterministic claim-provenance verifier (claim_provenance_verifier.ts) can
-// catch invented / unsourced numbers before pairwise comparison.
+// OWNER RULING: candidate generation is an ACT performed by the intellect (the
+// opencode brain, or Claude Code), NOT a hardcoded OpenAI chat call. The
+// OPENAI_API_KEY is provisioned for EMBEDDINGS ONLY (text-embedding-3-small via
+// runtime/embedder.ts); the brain's reasoning auth comes from opencode. So this
+// module contains NO /chat/completions call and NO use of OPENAI_API_KEY — it
+// is a pure VERBALIZED-SAMPLING prompt builder + response parser the intellect
+// can run as an act. The substrate wires an intellect-backed generator into the
+// dispatch; when none is wired the organism falls through to the brain.
 //
 // UNIVERSAL, not report-specialized: a "candidate solution" is whatever the
 // goal asks for — an answer, a plan, code, a message, a research synthesis, a
@@ -14,38 +15,20 @@
 // candidate makes FACTUAL/NUMERIC assertions; goals with no factual content
 // produce empty claims arrays and selection then relies on comparison /
 // owner preference alone. The prompt never mentions "report".
-//
-// Config / timeout / fetch shape are COPIED from runtime/embedder.ts so the
-// same env vars apply (OPENAI_API_KEY, OPENAI_BASE_URL) and tests can mock
-// `globalThis.fetch` without touching the network. Model defaults to gpt-4o
-// (override via ACC2_LLM_GENERATE_MODEL) at temperature ~0.9 for diversity.
 
 import type { Candidate } from "./generate_select";
 import type { ClaimInput, NumericClaim } from "./claim_provenance_verifier";
 
-export const LLM_GENERATE_MODEL = process.env.ACC2_LLM_GENERATE_MODEL ?? "gpt-4o";
-export const LLM_GENERATE_TEMPERATURE = 0.9;
 export const LLM_GENERATOR_TAG = "llm_vs";
 
-// Per-request OpenAI fetch deadline — native Bun/Node fetch has NO default
-// timeout. Mirrors embedder.ts's bounded-fetch shape so a hung endpoint fails
-// fast instead of wedging the solve loop.
-const LLM_FETCH_TIMEOUT_MS = 60_000;
-
-const getApiConfig = (): { apiKey: string; baseUrl: string } | null => {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return null;
-  const baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
-  return { apiKey, baseUrl };
-};
-
-/** Build the verbalized-sampling chat prompt. Exported so tests and the brain
- *  can inspect/override the contract. The model must return STRICT JSON with a
- *  top-level `candidates` array of length n; each entry carries the candidate
- *  `solution` text plus a `claims` array whose every FACTUAL/NUMERIC assertion
- *  declares provenance so the deterministic verifier can score it. The prompt
- *  is GOAL-AGNOSTIC: it never assumes the goal is a report, and a candidate
- *  that makes no factual/numeric assertions uses an empty claims array. */
+/** Build the verbalized-sampling chat prompt. Exported so the brain/intellect
+ *  can run it as an act and tests can inspect the contract. The model must
+ *  return STRICT JSON with a top-level `candidates` array of length n; each
+ *  entry carries the candidate `solution` text plus a `claims` array whose
+ *  every FACTUAL/NUMERIC assertion declares provenance so the deterministic
+ *  verifier can score it. The prompt is GOAL-AGNOSTIC: it never assumes the
+ *  goal is a report, and a candidate that makes no factual/numeric assertions
+ *  uses an empty claims array. */
 export const buildGeneratePrompt = (
   task: string,
   n: number,
@@ -134,10 +117,11 @@ const coerceClaim = (raw: RawClaim, idx: number): NumericClaim => {
   };
 };
 
-/** Parse the model's JSON response into Candidate<string>[]. Tolerant of an
+/** Parse the intellect's JSON response into Candidate<string>[]. Tolerant of an
  *  accidental markdown fence and of a bare top-level array. Each candidate's
  *  artifact is its `solution` text (legacy `body` accepted for tolerance);
- *  claims are coerced into NumericClaim[]. */
+ *  claims are coerced into NumericClaim[]. This is the parser the brain/intellect
+ *  pairs with buildGeneratePrompt when it runs candidate generation as an act. */
 export const parseCandidates = (rawJson: string, n: number): Candidate<string>[] => {
   let text = rawJson.trim();
   // Strip an accidental ```json … ``` fence.
@@ -173,57 +157,3 @@ export const parseCandidates = (rawJson: string, n: number): Candidate<string>[]
     };
   });
 };
-
-export type GenerateOpts = {
-  model?: string;
-  temperature?: number;
-  timeoutMs?: number;
-};
-
-/** ONE real OpenAI /chat/completions call (verbalized sampling) producing n
- *  diverse candidates. Returns [] on missing credentials or any
- *  network/HTTP/parse failure — the caller (solve_loop) treats an empty
- *  candidate set as a no-selection outcome rather than crashing. */
-export async function generateCandidates(
-  task: string,
-  n: number,
-  opts: GenerateOpts = {},
-): Promise<Candidate<string>[]> {
-  const config = getApiConfig();
-  if (!config) return [];
-  const count = Math.max(1, Math.floor(n));
-  const { system, user } = buildGeneratePrompt(task, count);
-  const body = {
-    model: opts.model ?? LLM_GENERATE_MODEL,
-    temperature: opts.temperature ?? LLM_GENERATE_TEMPERATURE,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-  };
-  let response: Response;
-  try {
-    response = await fetch(`${config.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(opts.timeoutMs ?? LLM_FETCH_TIMEOUT_MS),
-    });
-  } catch {
-    return [];
-  }
-  if (!response.ok) return [];
-  let data: { choices?: Array<{ message?: { content?: string } }> };
-  try {
-    data = (await response.json()) as typeof data;
-  } catch {
-    return [];
-  }
-  const content = data.choices?.[0]?.message?.content;
-  if (typeof content !== "string" || content.length === 0) return [];
-  return parseCandidates(content, count);
-}

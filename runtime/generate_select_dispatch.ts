@@ -17,18 +17,22 @@
 //      or returns false the directive falls through to the brain (cold-start
 //      uncertainty is brain-routed, never keyword-guessed). The env flag
 //      ALONE never authorizes interception.
-// When both hold it runs `solveTask` with the LIVE LLM generator
-// (generateCandidates) + substrate adapters (buildSubstrateDeps), which record
-// the organism's outcome to the experience stream as ONE act_tuple_recorded
-// envelope. It returns `{ handled: true, result }`. The dispatcher decides what
-// to do with `handled` (complete the task lifecycle and skip the brain lane).
+// When both hold it runs `solveTask` with the intellect-backed candidate
+// generator (wired through `deps.generate`) + substrate adapters
+// (buildSubstrateDeps), which record the organism's outcome to the experience
+// stream as ONE act_tuple_recorded envelope. It returns `{ handled: true,
+// result }`. The dispatcher decides what to do with `handled` (complete the
+// task lifecycle and skip the brain lane).
 //
-// The generator and dep-builder are injectable so tests can stub them without
-// any network/LLM contact; production passes neither and gets the live wiring.
+// Candidate generation is an ACT performed by the intellect (the opencode
+// brain, or Claude Code), NOT a hardcoded OpenAI chat call — OPENAI_API_KEY is
+// for EMBEDDINGS ONLY. The generator MUST be wired explicitly through
+// `deps.generate`. When it is absent the organism returns `{ handled: false }`
+// and the directive falls through to the brain (which generates candidates in
+// its normal reasoning). The dep-builder is injectable so tests can stub it.
 
 import type { Database } from "bun:sqlite";
 import { solveTask, type SolveResult } from "./solve_loop";
-import { generateCandidates } from "./llm_generate";
 import { buildSubstrateDeps } from "./generate_select_adapters";
 import type { Candidate, GenerateSelectDeps, SelectOutcome } from "./generate_select";
 import { logger } from "./logger";
@@ -59,7 +63,9 @@ export type GenerateSelectDispatchDeps = {
   // scored predicate. When absent or returning false, the directive falls
   // through to the brain — there is NO keyword/regex classifier in this path.
   shouldHandle?: (directiveText: string, ctx: GenerateSelectDispatchCtx) => boolean;
-  // Diversity engine. Defaults to the live OpenAI verbalized-sampling generator.
+  // Diversity engine — an ACT performed by the intellect (brain / Claude Code).
+  // MUST be wired explicitly; there is NO direct-LLM-API default. When absent
+  // the organism falls through to the brain (see maybeRunGenerateSelect).
   generate?: (task: string, n: number) => Promise<Candidate<string>[]>;
   // Builds the GenerateSelectDeps bound to the live DB handle. Defaults to
   // buildSubstrateDeps (structural comparator + owner-preference + recorder).
@@ -82,12 +88,13 @@ export type GenerateSelectDispatchDeps = {
 /**
  * Env-gated, additive entry to the generate-and-select organism (RLM-first).
  *
- * Returns `{ handled: false }` (zero side effects) when the env flag is unset
- * OR the injected `shouldHandle` predicate is missing / returns false. There
- * is NO keyword/regex intent classifier here: interception is authorized only
- * by the substrate's scored dispatch decision (wired through `shouldHandle`).
- * When BOTH gates pass it runs solveTask with the live (or injected) generator
- * + substrate deps, records the outcome, and returns `{ handled: true, result }`.
+ * Returns `{ handled: false }` (zero side effects) when the env flag is unset,
+ * the injected `shouldHandle` predicate is missing / returns false, OR no
+ * intellect-backed `deps.generate` is wired. There is NO keyword/regex intent
+ * classifier here: interception is authorized only by the substrate's scored
+ * dispatch decision (wired through `shouldHandle`). When all gates pass it runs
+ * solveTask with the wired generator + substrate deps, records the outcome, and
+ * returns `{ handled: true, result }`.
  */
 export async function maybeRunGenerateSelect(
   db: Database,
@@ -107,8 +114,12 @@ export async function maybeRunGenerateSelect(
     return { handled: false };
   }
 
-  const generate =
-    deps.generate ?? ((task: string, n: number) => generateCandidates(task, n));
+  // Gate 3 — an intellect-backed generator MUST be wired. Candidate generation
+  // is an act performed by the intellect, not a direct-LLM-API call. With no
+  // generator the organism falls through to the brain (which generates
+  // candidates in its normal reasoning). There is NO fallback generator.
+  if (!deps.generate) return { handled: false };
+  const generate = deps.generate;
   const buildDeps = deps.buildDeps ?? buildSubstrateDeps;
 
   try {
