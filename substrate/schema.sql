@@ -72,6 +72,17 @@ CREATE INDEX IF NOT EXISTS idx_events_embedding_version       ON events(embeddin
 CREATE INDEX IF NOT EXISTS idx_events_unembedded_by_ts
   ON events(kind, ts)
   WHERE embedding IS NULL;
+-- Composite index for the father autonomy loop's "recent events by this
+-- origin" query (runtime/father.ts:857 — SELECT … WHERE substrate_origin = ?
+-- ORDER BY ts DESC LIMIT N). Without it the planner satisfies the ORDER BY
+-- via idx_events_ts and then row-filters substrate_origin, walking the bulk
+-- of the table (substrate_auto is ~78% of rows) to collect N father rows.
+-- EXPLAIN on the 374K-row live-DB copy: SCAN events USING INDEX idx_events_ts
+-- → SEARCH events USING INDEX idx_events_origin_ts (substrate_origin=?),
+-- 12.3ms → 0.16ms per call (~77x). The (substrate_origin, ts) order serves
+-- both the equality filter and the ts-desc tiebreak as a single seek.
+CREATE INDEX IF NOT EXISTS idx_events_origin_ts
+  ON events(substrate_origin, ts);
 
 -- ── act_artifact ───────────────────────────────────────────────────
 -- Registry row per polymorphic artifact handle. declared_sandbox +

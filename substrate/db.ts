@@ -171,6 +171,12 @@ const EVENT_HOT_PATH_INDEXES = [
   // upgraded via runMigrations() get the same lookup shape.
   "CREATE INDEX IF NOT EXISTS idx_act_artifact_supersedes    ON act_artifact(supersedes)    WHERE supersedes IS NOT NULL",
   "CREATE INDEX IF NOT EXISTS idx_act_artifact_superseded_by ON act_artifact(superseded_by) WHERE superseded_by IS NOT NULL",
+  // 2026-05-22 covering-index audit: father autonomy loop's recent-by-origin
+  // query (runtime/father.ts:857 — WHERE substrate_origin=? ORDER BY ts DESC
+  // LIMIT N) was a SCAN events USING INDEX idx_events_ts (walk-and-filter,
+  // ~12ms/call on the 374K-row live DB). (substrate_origin, ts) converts it to
+  // a single SEARCH seek (~0.16ms, ~77x). Mirrors schema.sql for older DBs.
+  "CREATE INDEX IF NOT EXISTS idx_events_origin_ts ON events(substrate_origin, ts)",
 ];
 
 /** F4a table rename (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW):
