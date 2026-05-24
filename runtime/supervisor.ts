@@ -44,7 +44,6 @@ import {
 } from "./bridge_health";
 import { debit, maybeExhaustPathologyBudget, type PathologyKind } from "./pathology_budget";
 import { logger } from "./logger";
-import { poolQuery } from "./sql_pool_singleton";
 
 /** Maximum brain_dispatched events allowed on ONE task within the
  *  redispatch window. Above this, the supervisor force-fails the task as
@@ -78,12 +77,43 @@ export const SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS = 2;
 
 const SUPERVISOR_DIRECTIVE_AGE_MS = SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS * 60 * 60 * 1000;
 
+/** Recent-ts window bounding the DAG-explosion driving scan (2026-05-24).
+ *  The detector flags directives with > N open ready tasks whose OLDEST open
+ *  task is older than SUPERVISOR_MAX_DIRECTIVE_AGE_HOURS (2h). Bounding the
+ *  driving scan's `task_node_opened.ts` to the last 7 days cannot miss a real
+ *  explosion: any directive that is genuinely runaway has open tasks with
+ *  recent task_node_opened events (the explosion IS recent fanout), and the
+ *  age gate (first_ts <= now-2h) already requires the oldest open task be
+ *  ≤ 2h old — far inside 7d. 7 days is a wide safety margin over the 2h age
+ *  threshold so a directive that has been quietly accumulating ready tasks
+ *  for days is still scanned. A directive older than 7d with no terminal root
+ *  commit is already dead by every other gate (dispatch budget, no-closure).
+ *  Without the bound the LEFT-JOIN anti-join walks every task_node_opened
+ *  event ever recorded. */
+const SUPERVISOR_DAG_SCAN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 /** Token-burn budget per directive — maximum total brain_dispatched
  *  events allowed under ONE directive before the supervisor archives it.
  *  A healthy DAG with 5-10 sub-tasks should produce 10-20 dispatches
  *  total; > 50 means the brain is looping without converging. Caps
  *  cost-burn from any pathology the per-task / per-bridge gates miss. */
 export const SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE = 50;
+
+/** Recent-ts window bounding the dispatch-budget AND no-closure-progress
+ *  driving scans (2026-05-24). Both count brain_dispatched per directive and
+ *  HAVING-filter directives above a cap. Bounding the count to the last 6
+ *  hours cannot miss a real pathology: a directive that is still burning brain
+ *  cycles is emitting brain_dispatched events right now (the cap is about the
+ *  ONGOING burn rate, and a directive idle for 6h with no terminal event is
+ *  already caught by the DAG-explosion age gate at 2h). A directive that
+ *  accumulated >50 dispatches but went quiet >6h ago is dead — re-counting its
+ *  ancient dispatches changes nothing because the idempotency guard skips it
+ *  once any directive_closed/archived/task_committed exists, and a live
+ *  un-converged directive keeps its over-cap count inside any 6h slice once
+ *  it is dispatching ~once/minute or faster (50 dispatches < 1h at that rate).
+ *  Without the bound each detector walks every brain_dispatched event ever
+ *  (~8-9ms on a 400k-row ledger); the 6h window collapses it to ~0.1ms. */
+const SUPERVISOR_DISPATCH_COUNT_WINDOW_MS = 6 * 60 * 60 * 1000;
 
 /** No-closure-progress loop detector (2026-05-21). Fallback only.
  *  The primary fix is scheduler-admission self-reaping: the first attempted
@@ -139,29 +169,34 @@ export const __resetSupervisorThrottle = (): void => {
 /** Detect tasks in a redispatch storm and fail them. Returns the list of
  *  task ids that were quarantined this tick. Idempotent — a task that
  *  already has a task_failed event will not be re-failed. */
-export const detectRedispatchStorm = async (
+export const detectRedispatchStorm = (
   db: Database,
   opts?: { nowMs?: number },
-): Promise<Array<{ task_id: string; directive_id: string; dispatch_count: number }>> => {
+): Array<{ task_id: string; directive_id: string; dispatch_count: number }> => {
   const nowMs = opts?.nowMs ?? Date.now();
   const cutoffIso = new Date(nowMs - SUPERVISOR_REDISPATCH_WINDOW_MS).toISOString();
-  // Heavy GROUP BY scan over events → off-loaded to the SQL worker pool so the
-  // single daemon event loop stays free. Identical rows/ordering/results; only
-  // the execution thread differs (poolQuery falls back to the sync path when no
-  // pool is installed — unit tests + diagnostics).
-  const rows = await poolQuery<{
+  // Bounded GROUP BY scan over events, run synchronously on the main thread.
+  // Off-loading full-table scans to the SQL worker pool (b62fd6d) made the
+  // regression WORSE: concurrent pooled readers contended with the main-thread
+  // SQLite writer (WAL I/O), stalling emit/open_directive ~41-45s. The fix is
+  // to make the scan CHEAP, not to move it threads: the `ts >= cutoff` window
+  // (SUPERVISOR_REDISPATCH_WINDOW_MS = 5min) bounds this to the few hundred
+  // brain_dispatched rows in the last 5 minutes. A redispatch storm is by
+  // definition a burst of dispatches on ONE task in that window, so the recent
+  // window cannot miss a real storm — a storm that is genuinely ongoing emits
+  // its dispatches inside the window. EXPLAIN: SEARCH events USING INDEX
+  // idx_events_kind_ts (kind=? AND ts>?) — a ts-range seek, not a full SCAN.
+  const rows = db.query<{
     task_id: string;
     directive_id: string;
     dispatch_count: number;
-  }>(
-    db,
+  }, [string, number]>(
     `SELECT task_id, directive_id, COUNT(*) AS dispatch_count
        FROM events
        WHERE kind = 'brain_dispatched' AND ts >= ?
        GROUP BY task_id
        HAVING dispatch_count > ?`,
-    [cutoffIso, SUPERVISOR_MAX_REDISPATCHES_PER_TASK],
-  );
+  ).all(cutoffIso, SUPERVISOR_MAX_REDISPATCHES_PER_TASK);
 
   const quarantined: Array<{ task_id: string; directive_id: string; dispatch_count: number }> = [];
   for (const r of rows) {
@@ -232,20 +267,27 @@ export const detectRedispatchStorm = async (
  *  refactoring the artifact system in parallel; this detector works
  *  regardless of which artifact table exists). Idempotent — skips
  *  tasks that already have a terminal event. */
-export const detectRepeatingAction = async (
+export const detectRepeatingAction = (
   db: Database,
   opts?: { nowMs?: number },
-): Promise<Array<{ task_id: string; directive_id: string; action_artifact_id: string; repeat_count: number }>> => {
+): Array<{ task_id: string; directive_id: string; action_artifact_id: string; repeat_count: number }> => {
   const nowMs = opts?.nowMs ?? Date.now();
   const cutoffIso = new Date(nowMs - SUPERVISOR_REPEATING_ACTION_WINDOW_MS).toISOString();
-  // Heavy GROUP BY scan over events → off-loaded to the SQL worker pool.
-  const rows = await poolQuery<{
+  // Bounded GROUP BY scan, run synchronously on the main thread (reverted from
+  // the b62fd6d pool off-load — see detectRedispatchStorm). The
+  // `ts >= cutoff` window (SUPERVISOR_REPEATING_ACTION_WINDOW_MS = 10min)
+  // bounds this to recent action_predicted rows. A brain stuck repeating the
+  // same action is by definition emitting that action repeatedly right now, so
+  // a 10-minute window cannot miss a live wedge — the witnessed loop
+  // (ACTTUPLE03C_CREDIT: 13 repeats over ~12min) is fully inside the window.
+  // EXPLAIN: SEARCH events USING INDEX idx_events_origin_ts
+  // (substrate_origin=? AND ts>?) — a ts-range seek, not a full SCAN.
+  const rows = db.query<{
     task_id: string;
     directive_id: string;
     action_artifact_id: string;
     repeat_count: number;
-  }>(
-    db,
+  }, [string, number]>(
     `SELECT task_id, directive_id, action_artifact_id, COUNT(*) AS repeat_count
        FROM events
        WHERE kind = 'action_predicted'
@@ -255,8 +297,7 @@ export const detectRepeatingAction = async (
          AND action_artifact_id != ''
        GROUP BY task_id, action_artifact_id
        HAVING repeat_count >= ?`,
-    [cutoffIso, SUPERVISOR_MAX_REPEATING_ACTIONS],
-  );
+  ).all(cutoffIso, SUPERVISOR_MAX_REPEATING_ACTIONS);
 
   const quarantined: Array<{ task_id: string; directive_id: string; action_artifact_id: string; repeat_count: number }> = [];
   for (const r of rows) {
@@ -355,12 +396,13 @@ const collectUnfinishedTasks = (
  *  refinement fanout) AND have been running past the age threshold. Emits
  *  directive_archived_by_operator so readyTasks drops the entire DAG.
  *  Returns the directive ids that were archived this tick. */
-export const detectDagExplosion = async (
+export const detectDagExplosion = (
   db: Database,
   opts?: { nowMs?: number },
-): Promise<Array<{ directive_id: string; ready_count: number; age_hours: number }>> => {
+): Array<{ directive_id: string; ready_count: number; age_hours: number }> => {
   const nowMs = opts?.nowMs ?? Date.now();
   const ageCutoffIso = new Date(nowMs - SUPERVISOR_DIRECTIVE_AGE_MS).toISOString();
+  const scanCutoffIso = new Date(nowMs - SUPERVISOR_DAG_SCAN_WINDOW_MS).toISOString();
 
   // 2026-05-21 O(n²) → O(n) rewrite (owner directive: avoid O(n²), stay
   // fast/reactive). Pre-fix this did GROUP BY over all task_node_opened to
@@ -376,14 +418,20 @@ export const detectDagExplosion = async (
   // via a single small subquery, and HAVING-filter to directives that are
   // both exploded (ready_count > cap) AND aged (oldest open task past the
   // age cutoff). One query, index-backed, no per-directive loop.
-  // Heavy CTE + LEFT JOIN GROUP BY scan over events → off-loaded to the SQL
-  // worker pool. Same single index-backed query, just run off the main loop.
-  const aged = await poolQuery<{
+  // Bounded CTE + LEFT JOIN anti-join, run synchronously on the main thread
+  // (reverted from the b62fd6d pool off-load — see detectRedispatchStorm). The
+  // `n.ts >= scanCutoffIso` clause (SUPERVISOR_DAG_SCAN_WINDOW_MS = 7d) bounds
+  // the driving task_node_opened scan to the last week. It cannot miss a real
+  // explosion: the HAVING `first_ts <= ageCutoffIso` (now-2h) already requires
+  // the oldest OPEN task be ≥ 2h old (well inside 7d), and a genuinely runaway
+  // directive has its open tasks' task_node_opened events within the window.
+  // EXPLAIN: SEARCH n USING INDEX idx_events_kind_ts (kind=? AND ts>?) — a
+  // ts-range seek on the driving scan, not a full SCAN of all task_node_opened.
+  const aged = db.query<{
     directive_id: string;
     ready_count: number;
     first_ts: string;
-  }>(
-    db,
+  }, [string, number, string]>(
     `WITH closed_directives AS (
          SELECT DISTINCT directive_id FROM events
          WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
@@ -396,12 +444,12 @@ export const detectDagExplosion = async (
          ON t.task_id = n.task_id
         AND t.kind IN ('task_committed', 'task_failed', 'task_abandoned')
        WHERE n.kind = 'task_node_opened'
+         AND n.ts >= ?
          AND t.id IS NULL
          AND n.directive_id NOT IN (SELECT directive_id FROM closed_directives)
        GROUP BY n.directive_id
        HAVING ready_count > ? AND first_ts <= ?`,
-    [SUPERVISOR_MAX_READY_TASKS_PER_DIRECTIVE, ageCutoffIso],
-  );
+  ).all(scanCutoffIso, SUPERVISOR_MAX_READY_TASKS_PER_DIRECTIVE, ageCutoffIso);
 
   const archived: Array<{ directive_id: string; ready_count: number; age_hours: number }> = [];
   for (const r of aged) {
@@ -453,19 +501,27 @@ export const detectDagExplosion = async (
  *  pattern that the DAG-explosion gate misses when the directive has
  *  few simultaneously-ready tasks but many sequential rounds.
  *  Idempotent: skips directives already closed/archived. */
-export const detectDispatchBudgetExceeded = async (
+export const detectDispatchBudgetExceeded = (
   db: Database,
-): Promise<Array<{ directive_id: string; dispatch_count: number }>> => {
-  // Heavy full-table GROUP BY scan over events → off-loaded to the SQL pool.
-  const rows = await poolQuery<{ directive_id: string; dispatch_count: number }>(
-    db,
+  opts?: { nowMs?: number },
+): Array<{ directive_id: string; dispatch_count: number }> => {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const cutoffIso = new Date(nowMs - SUPERVISOR_DISPATCH_COUNT_WINDOW_MS).toISOString();
+  // Bounded GROUP BY scan, run synchronously on the main thread (reverted from
+  // the b62fd6d pool off-load — see detectRedispatchStorm). The
+  // `ts >= cutoff` window (SUPERVISOR_DISPATCH_COUNT_WINDOW_MS = 6h) bounds the
+  // count to recent dispatches. Cannot miss a real over-budget directive: a
+  // directive still burning >50 brain cycles is actively dispatching, so its
+  // over-cap count lands inside any recent 6h slice; one that went quiet >6h
+  // ago is already dead (DAG age gate fires at 2h). EXPLAIN: SEARCH events
+  // USING INDEX idx_events_kind_ts (kind=? AND ts>?) — ts-range seek, not SCAN.
+  const rows = db.query<{ directive_id: string; dispatch_count: number }, [string, number]>(
     `SELECT directive_id, COUNT(*) AS dispatch_count
        FROM events
-       WHERE kind = 'brain_dispatched'
+       WHERE kind = 'brain_dispatched' AND ts >= ?
        GROUP BY directive_id
        HAVING dispatch_count > ?`,
-    [SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE],
-  );
+  ).all(cutoffIso, SUPERVISOR_MAX_DISPATCHES_PER_DIRECTIVE);
 
   const archived: Array<{ directive_id: string; dispatch_count: number }> = [];
   for (const r of rows) {
@@ -522,21 +578,32 @@ export const detectDispatchBudgetExceeded = async (
  *  fallback for completed dispatches, so it must not race in-flight multi-node
  *  build work before the dispatch has had a chance to emit edges, closures, or
  *  deliverables. */
-export const detectNoClosureProgressLoop = async (
+export const detectNoClosureProgressLoop = (
   db: Database,
-): Promise<Array<{ directive_id: string; dispatch_count: number }>> => {
-  // Heavy full-table GROUP BY scan over events → off-loaded to the SQL pool.
-  // The per-row idempotency / last-dispatch / progress LIMIT-1 lookups below
-  // are cheap index point-reads and stay on the main thread.
-  const rows = await poolQuery<{ directive_id: string; dispatch_count: number }>(
-    db,
+  opts?: { nowMs?: number },
+): Array<{ directive_id: string; dispatch_count: number }> => {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const cutoffIso = new Date(nowMs - SUPERVISOR_DISPATCH_COUNT_WINDOW_MS).toISOString();
+  // Bounded GROUP BY scan, run synchronously on the main thread (reverted from
+  // the b62fd6d pool off-load — see detectRedispatchStorm). The
+  // `ts >= cutoff` window (SUPERVISOR_DISPATCH_COUNT_WINDOW_MS = 6h) bounds the
+  // count to recent dispatches. This detector is a FALLBACK only — the precise
+  // scheduler-side terminateNoProgressRedispatch (commit 5b7080d) kills genuine
+  // identical-redispatch loops immediately on the first attempted unchanged
+  // redispatch. A real no-progress LOOP dispatches frequently (it is a tight
+  // cycle), so its >4 dispatches always fall inside a 6h slice; a directive
+  // whose only dispatches are >6h old is not actively looping and the precise
+  // scheduler guard plus the per-row last-dispatch/progress checks below would
+  // not fire on it anyway. EXPLAIN: SEARCH events USING INDEX idx_events_kind_ts
+  // (kind=? AND ts>?) — ts-range seek, not a full SCAN. The per-row idempotency
+  // / last-dispatch / progress LIMIT-1 lookups below are cheap index point-reads.
+  const rows = db.query<{ directive_id: string; dispatch_count: number }, [string, number]>(
     `SELECT directive_id, COUNT(*) AS dispatch_count
        FROM events
-       WHERE kind = 'brain_dispatched'
+       WHERE kind = 'brain_dispatched' AND ts >= ?
        GROUP BY directive_id
        HAVING dispatch_count > ?`,
-    [SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP],
-  );
+  ).all(cutoffIso, SUPERVISOR_NO_CLOSURE_PROGRESS_DISPATCH_CAP);
 
   const progressKinds = [
     "task_committed",
@@ -661,20 +728,29 @@ export const SUPERVISOR_READY_STARVATION_MS = 2 * 60 * 60 * 1000;
  *  per starved task so operators see slow-drift without manual
  *  query. Returns the list of starved task ids. Idempotent — skips
  *  tasks whose latest event already includes a recent intervention. */
-export const probeReadyStarvation = async (
+export const probeReadyStarvation = (
   db: Database,
   opts?: { nowMs?: number },
-): Promise<Array<{ task_id: string; directive_id: string; ready_age_ms: number }>> => {
+): Array<{ task_id: string; directive_id: string; ready_age_ms: number }> => {
   const nowMs = opts?.nowMs ?? Date.now();
   const cutoffIso = new Date(nowMs - SUPERVISOR_READY_STARVATION_MS).toISOString();
-  // ready_tasks_view scan → off-loaded to the SQL pool. Per-candidate progress
-  // and idempotency LIMIT-1 lookups below stay on the main thread.
-  const candidates = await poolQuery<{ task_id: string; directive_id: string; ts: string }>(
-    db,
+  // ready_tasks_view scan, run synchronously on the main thread (reverted from
+  // the b62fd6d pool off-load — see detectRedispatchStorm). Unlike the other
+  // detectors this one CANNOT be bounded to a recent ts window: starvation is
+  // about tasks that are OLD (ts <= now - 2h) yet still ready, so a recent-ts
+  // floor would suppress exactly the rows it must find. It is instead bounded
+  // STRUCTURALLY by the view itself — ready_tasks_view returns only currently
+  // non-terminal, non-blocked, non-closed-directive task_node_opened rows (a
+  // tiny set: 0 on the current live ledger). The `ts <= cutoff` ceiling is a
+  // ts-range seek on the view's driving scan
+  // (SEARCH events USING INDEX idx_events_kind_ts (kind=? AND ts<?)); measured
+  // ~19ms on the 400k-row ledger — under the 50ms target. The view's internal
+  // committed/terminal/blocked CTEs are inherent to readiness and are the only
+  // remaining full-kind scans; they do not grow with starvation horizon.
+  const candidates = db.query<{ task_id: string; directive_id: string; ts: string }, [string]>(
     `SELECT task_id, directive_id, ts FROM ready_tasks_view
        WHERE ts <= ?`,
-    [cutoffIso],
-  );
+  ).all(cutoffIso);
 
   const starved: Array<{ task_id: string; directive_id: string; ready_age_ms: number }> = [];
   for (const c of candidates) {
@@ -753,19 +829,23 @@ export type SupervisorTickResult = {
 /** One supervisor tick. Composes the six pathology detectors + bridge_health
  *  gate. Safe to call repeatedly; every detector is idempotent.
  *
- *  Async (2026-05-24): each detector's heavy GROUP BY / view scan now runs off
- *  the single daemon event loop via the SQL worker pool (poolQuery). The
- *  synchronous debit/emit writes still happen on the main thread after the
- *  awaited rows return — single-writer invariant preserved.
+ *  Synchronous (2026-05-24): reverted the b62fd6d SQL-worker-pool off-load.
+ *  Pooling full-table scans made the loop block WORSE (event_loop_blocked
+ *  ~11s → ~41s) because the concurrent pooled readers contended with the
+ *  main-thread SQLite writer (WAL I/O), stalling emit/open_directive ~41-45s.
+ *  The real fix is making each detector scan CHEAP: every GROUP BY scan is now
+ *  bounded to a recent ts window (idx_events_kind_ts ts-range seek), so the
+ *  whole tick touches a few hundred rows and finishes well under 200ms on the
+ *  main thread without any cross-thread reader. Single-writer invariant holds.
  *
  *  Cadence-throttled: gated to one real scan per SUPERVISOR_MIN_GAP_MS. A call
  *  inside the gap returns immediately with throttled=true and emits nothing.
  *  Pass opts.force to bypass the throttle (used by detector-level tests that
  *  call the individual detectors; supervisorTick callers normally honor it). */
-export const supervisorTick = async (
+export const supervisorTick = (
   db: Database,
   opts?: { nowMs?: number; force?: boolean },
-): Promise<SupervisorTickResult> => {
+): SupervisorTickResult => {
   const result: SupervisorTickResult = {
     redispatch_storm_count: 0,
     dag_explosion_count: 0,
@@ -806,42 +886,42 @@ export const supervisorTick = async (
   };
 
   try {
-    const storms = await detectRedispatchStorm(db, opts);
+    const storms = detectRedispatchStorm(db, opts);
     result.redispatch_storm_count = storms.length;
     for (const s of storms) debitOnDirective(s.directive_id, "redispatch_storm", "supervisor.redispatch_storm");
   } catch (err) {
     logger.warn({ where: "supervisor.tick.redispatch", err: (err as Error).message }, "redispatch detector failed");
   }
   try {
-    const explosions = await detectDagExplosion(db, opts);
+    const explosions = detectDagExplosion(db, opts);
     result.dag_explosion_count = explosions.length;
     for (const e of explosions) debitOnDirective(e.directive_id, "dag_explosion", "supervisor.dag_explosion");
   } catch (err) {
     logger.warn({ where: "supervisor.tick.dag_explosion", err: (err as Error).message }, "dag-explosion detector failed");
   }
   try {
-    const overBudget = await detectDispatchBudgetExceeded(db);
+    const overBudget = detectDispatchBudgetExceeded(db, opts);
     result.dispatch_budget_exceeded_count = overBudget.length;
     for (const b of overBudget) debitOnDirective(b.directive_id, "dispatch_budget_exceeded", "supervisor.dispatch_budget");
   } catch (err) {
     logger.warn({ where: "supervisor.tick.dispatch_budget", err: (err as Error).message }, "dispatch-budget detector failed");
   }
   try {
-    const noProgress = await detectNoClosureProgressLoop(db);
+    const noProgress = detectNoClosureProgressLoop(db, opts);
     result.no_closure_progress_loop_count = noProgress.length;
     for (const n of noProgress) debitOnDirective(n.directive_id, "no_closure_progress_loop", "supervisor.no_closure_progress");
   } catch (err) {
     logger.warn({ where: "supervisor.tick.no_closure_progress", err: (err as Error).message }, "no-closure-progress detector failed");
   }
   try {
-    const starved = await probeReadyStarvation(db, opts);
+    const starved = probeReadyStarvation(db, opts);
     result.ready_starvation_count = starved.length;
     for (const s of starved) debitOnDirective(s.directive_id, "ready_starvation", "supervisor.ready_starvation");
   } catch (err) {
     logger.warn({ where: "supervisor.tick.ready_starvation", err: (err as Error).message }, "ready-starvation detector failed");
   }
   try {
-    const stuck = await detectRepeatingAction(db, opts);
+    const stuck = detectRepeatingAction(db, opts);
     result.brain_stuck_repeating_action_count = stuck.length;
     for (const s of stuck) debitOnDirective(s.directive_id, "brain_stuck_repeating_action", "supervisor.repeating_action");
   } catch (err) {

@@ -1458,11 +1458,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const { supervisorTick } = await import("./supervisor");
     let supervisorMarked = false;
     const supervisorTickHandle = supervisedTick(db, "supervisor", SUPERVISOR_INTERVAL_MS, async () => {
-      // supervisorTick is now async (its heavy GROUP BY scans run off-loop via
-      // the SQL worker pool) — await it so supervisedTick's running-flag,
-      // overrun accounting, and worker_tick_completed emit observe the real
-      // scan duration and unhandled rejections surface as error_caught.
-      await supervisorTick(db);
+      // supervisorTick is synchronous again (2026-05-24): the b62fd6d SQL-pool
+      // off-load of its GROUP BY scans made the loop block WORSE (pooled
+      // readers contended with the main-thread writer, stalling emit/
+      // open_directive ~41-45s). Reverted to synchronous; each detector scan is
+      // now bounded to a recent ts window (idx_events_kind_ts ts-range seek), so
+      // the whole tick touches a few hundred rows and finishes <200ms inline.
+      supervisorTick(db);
       if (!supervisorMarked) { markWorkerReady("supervisor"); supervisorMarked = true; }
     });
     registerReactiveWorker("supervisor", SUPERVISOR_INTERVAL_MS, ["brain_dispatched", "action_predicted", "task_node_opened", "task_committed", "task_failed", "task_abandoned", "bridge_failed", "bridge_completed"], supervisorTickHandle, { minReactiveGapMs: SUPERVISOR_INTERVAL_MS });
