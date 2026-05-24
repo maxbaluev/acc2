@@ -1518,8 +1518,12 @@ export const projectActionScoredToCredit = (
   try {
     const payload = JSON.parse(scoredEvent.payload || "{}") as Record<string, unknown>;
     // Recursion guard: distributeCredit-stamped rows already own their
-    // credit share; projecting again would double-count.
+    // credit share; projecting again would double-count. Apply records may
+    // deliberately withhold their residual until directive closure; those rows
+    // are audit records, not outcome observations, so immediate artifact credit
+    // must be skipped entirely.
     if (payload.projected_from === "distribute_credit") return;
+    if (payload.residual_withheld === true || payload.residual_source === "withheld_until_closure") return;
     // Prefer action_predicted_event_id when stamped (act_tuple projection
     // path); fall back to source_act_event_id when only that is present
     // (direct emit paths). source_act_event_id may point at a non-
@@ -1604,12 +1608,19 @@ export const projectActionScoredToCredit = (
       if (isArtifact) citedArtifactIds.add(ref);
     }
     if (citedArtifactIds.size === 0) return; // nothing to credit
+    const sourceActPayload = sourceActEventId
+      ? db.query<{ payload: string }, [string]>("SELECT payload FROM events WHERE id = ?").get(sourceActEventId)
+      : null;
+    const sourceAct = sourceActPayload ? JSON.parse(sourceActPayload.payload || "{}") as Record<string, unknown> : {};
+    const residualWithheld = payload.residual_withheld === true || sourceAct.residual_withheld === true;
     const residual = typeof payload.residual === "number" && Number.isFinite(payload.residual)
       ? clampResidual(payload.residual)
       : (typeof scoredEvent.residual === "number" && Number.isFinite(scoredEvent.residual)
           ? clampResidual(scoredEvent.residual)
           : 0.5);
-    const { alphaDelta, betaDelta } = residualToBetaDeltas(residual);
+    const { alphaDelta, betaDelta } = residualWithheld
+      ? { alphaDelta: 0, betaDelta: 0 }
+      : residualToBetaDeltas(residual);
     const ts = nowIso();
     // Key on the resolved action_predicted id so the projection key is
     // stable regardless of which header field (action_predicted_event_id
@@ -1672,7 +1683,15 @@ export const projectActionScoredToCredit = (
       const row = getArtifact(db, artifactId);
       let postScore: number | null = null;
       let postConfidence: number | null = null;
-      if (row) {
+      // Withheld residual = no outcome observation. The emitted credit row
+      // is preserved for audit parity (with zero deltas), but the posterior
+      // MUST NOT move — real credit binds later via the directive's
+      // task_closure_audited dense pass. Skipping applyResidualOutcome here
+      // (which would otherwise recompute deltas from the 0.5 placeholder
+      // residual) is the load-bearing half of the fabricated-residual fix:
+      // the zero alphaDelta/betaDelta above are only audit metadata; the
+      // real posterior write happens inside applyResidualOutcome.
+      if (row && !residualWithheld) {
         const updated = applyResidualOutcome(
           db,
           artifactId,

@@ -308,8 +308,11 @@ const decayedEvidence = (currentEvidence: number, dtMs: number): number => {
  *  distributing per-citation credit without re-implementing the band
  *  algebra. residual is clamped to [0,1] defensively. */
 export const residualToBetaDeltas = (
-  residual: number,
+  residual: number | null | undefined,
 ): { alphaDelta: number; betaDelta: number } => {
+  if (typeof residual !== "number" || !Number.isFinite(residual)) {
+    return { alphaDelta: 0, betaDelta: 0 };
+  }
   const r = clamp01(residual);
   let alphaDelta = 0;
   let betaDelta = 0;

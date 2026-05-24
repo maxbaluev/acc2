@@ -1208,9 +1208,11 @@ export const recordApplyOutcome = async (opts: {
   }
   const isAmendment = ev.kind === "contract_amendment_proposed";
   const status = opts.status || "applied";
-  const residual = typeof opts.residual === "number" && Number.isFinite(opts.residual)
-    ? Math.min(1, Math.max(0, opts.residual))
-    : status === "applied" ? 0 : 1;
+  const explicitResidual = typeof opts.residual === "number" && Number.isFinite(opts.residual);
+  const residual = explicitResidual
+    ? Math.min(1, Math.max(0, opts.residual!))
+    : 0.5;
+  const residualWithheld = !explicitResidual;
   const actionArtifactId = opts.actionArtifactId || DEFAULT_APPLY_ACTION_ARTIFACT_ID;
   const verifierArtifactId = opts.verifierArtifactId || DEFAULT_APPLY_VERIFIER_ARTIFACT_ID;
   const payload = parsePayload(ev.payload);
@@ -1301,7 +1303,7 @@ export const recordApplyOutcome = async (opts: {
   // payloads also carry source_event_id so lesson_implementation_status_view
   // can join projected action_predicted / action_scored / commit rows
   // by the original proposal id.
-  const verifierPassed = status === "applied" && residual < 0.3;
+  const verifierPassed = !residualWithheld && status === "applied" && residual < 0.3;
   let actTupleEventId: string;
   try {
     const actTuple = await emitActTupleViaMcp(mcpCall, {
@@ -1315,7 +1317,7 @@ export const recordApplyOutcome = async (opts: {
       verifierKind: "claude_apply_record",
       predictedResidual: 0.2,
       residual,
-      outcome: residual < 0.3 ? "succeeded" : "failed",
+      outcome: residualWithheld ? "pending" : residual < 0.3 ? "succeeded" : "failed",
       actionArtifactId,
       verifierArtifactId,
       affectedResources,
@@ -1338,6 +1340,9 @@ export const recordApplyOutcome = async (opts: {
         affected_files: affectedFiles,
         status,
         verifier_passed: verifierPassed,
+        residual_withheld: residualWithheld,
+        residual_provenance: residualWithheld ? "withheld_until_closure" : "explicit_cli_residual",
+        deferred_credit_until: residualWithheld ? "task_closure_audited" : null,
         commit_sha: opts.commitSha ?? null,
         subagent_task_id: opts.subagentTaskId ?? null,
         reason: opts.reason ?? null,

@@ -116,6 +116,21 @@ describe("residual → beta deltas", () => {
     expect(d.alphaDelta).toBeCloseTo(0.25, 6);
     expect(d.betaDelta).toBeCloseTo(0.25, 6);
   });
+  // Fabricated-residual honesty (directive BGXWQF2TH97973H5VJ17HF9KSC):
+  // a withheld/unmeasured residual is NOT an outcome observation. It must
+  // map to zero evidence — distinguishable from residual=0 (max success)
+  // and residual=1 (max failure). No posterior movement, no div-by-zero.
+  test("withheld (null/undefined/NaN): zero evidence — distinct from residual=0", () => {
+    for (const v of [null, undefined, NaN, Number.POSITIVE_INFINITY]) {
+      const d = __residualToBetaDeltasForTest(v as unknown as number);
+      expect(d.alphaDelta).toBe(0);
+      expect(d.betaDelta).toBe(0);
+    }
+    // residual=0 (measured perfect) must still be max alpha — proving the
+    // withheld branch is NOT collapsing a measured zero into no-evidence.
+    const measuredZero = __residualToBetaDeltasForTest(0);
+    expect(measuredZero.alphaDelta).toBeCloseTo(1, 6);
+  });
 });
 
 describe("distributeCredit — primary + cited entities", () => {
@@ -1027,6 +1042,55 @@ describe("projectActionScoredToCredit — universal emit-boundary projector", ()
     const bAfter = getArtifact(db, "proj_cited_b")!;
     expect(aAfter.posteriorAlpha).toBeGreaterThan(aBefore.posteriorAlpha);
     expect(bAfter.posteriorAlpha).toBeGreaterThan(bBefore.posteriorAlpha);
+  });
+
+  // Fabricated-residual honesty (directive BGXWQF2TH97973H5VJ17HF9KSC):
+  // when the source act withheld its residual (apply --record with no
+  // explicit --residual), the universal projector must NOT move artifact
+  // posteriors to max-success. Real credit binds later via closure.
+  test("withheld source act: zero posterior movement (no fabricated max-success credit)", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "withheld_cited", "// cited");
+    // Source act_tuple_recorded carrying residual_withheld=true in payload —
+    // this is what an apply --record with no --residual emits.
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_withheld",
+      task_id: "t_withheld",
+      action_artifact_id: "wh_handle_v1",
+      verifier_artifact_id: "wh_verifier_v1",
+      predicted_residual: 0.2,
+      payload: {
+        source_act_event_id: "synthetic_withheld",
+        cited_artifact_ids: ["withheld_cited"],
+        residual_withheld: true,
+        residual_provenance: "withheld_until_closure",
+      },
+    });
+    const before = getArtifact(db, "withheld_cited")!;
+    // action_scored points source_act_event_id at the withheld source act.
+    emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_withheld",
+      task_id: "t_withheld",
+      action_artifact_id: "wh_handle_v1",
+      verifier_artifact_id: "wh_verifier_v1",
+      // residual placeholder 0.5 (the apply.ts neutral) — NOT 0. The
+      // projected action_scored row does NOT carry residual_withheld
+      // (it is not in NormalizedActTuple), so the load-bearing guard is
+      // the dense-pass sourceAct lookup on source_act_event_id.
+      residual: 0.5,
+      payload: {
+        source_act_event_id: ap.id,
+        verifier_kind: "claude_apply_record",
+      },
+    });
+    const after = getArtifact(db, "withheld_cited")!;
+    // Withheld → NO posterior movement at all (neither alpha nor beta).
+    expect(after.posteriorAlpha).toBe(before.posteriorAlpha);
+    expect(after.posteriorBeta).toBe(before.posteriorBeta);
   });
 
   test("idempotent: re-emitting an action_scored with the same source_act_event_id does not double-emit", async () => {
