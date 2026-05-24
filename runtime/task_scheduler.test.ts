@@ -247,14 +247,23 @@ describe("task_scheduler", () => {
     const originalFreemem = os.freemem;
     const originalMemoryUsage = process.memoryUsage;
     try {
-      Object.defineProperty(os, "totalmem", { value: () => 16_000_000_000, configurable: true });
-      Object.defineProperty(os, "freemem", { value: () => 12_000_000_000, configurable: true });
       Object.defineProperty(process, "memoryUsage", {
         value: () => ({ ...originalMemoryUsage(), rss: 1_000_000_000, heapUsed: 600_000_000 }),
         configurable: true,
       });
 
-      expect(computeBrainDispatchCap()).toBe(Math.floor(11_000_000_000 / 850_000_000));
+      // RAM-subtraction math (below the reactivity ceiling so the clamp does
+      // not mask it): freemem 5GB → usable = min(5GB, 16GB-2GB) - 1GB rss = 4GB;
+      // perBrain = 850MB (700MB + 150MB headroom) → floor(4GB/850MB) = 4.
+      Object.defineProperty(os, "totalmem", { value: () => 16_000_000_000, configurable: true });
+      Object.defineProperty(os, "freemem", { value: () => 5_000_000_000, configurable: true });
+      expect(computeBrainDispatchCap()).toBe(Math.floor(4_000_000_000 / 850_000_000));
+
+      // Reactivity ceiling: ample RAM (freemem 12GB → RAM-math = 12) is clamped
+      // to DEFAULT_MAX_CONCURRENT (5) so brain concurrency can't starve the
+      // single-event-loop daemon regardless of free RAM.
+      Object.defineProperty(os, "freemem", { value: () => 12_000_000_000, configurable: true });
+      expect(computeBrainDispatchCap()).toBe(5);
     } finally {
       Object.defineProperty(os, "totalmem", { value: originalTotalmem, configurable: true });
       Object.defineProperty(os, "freemem", { value: originalFreemem, configurable: true });

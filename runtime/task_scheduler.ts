@@ -179,8 +179,22 @@ export const computeBrainDispatchCap = (): number => {
     ? Math.max(BRAIN_PROCESS_RAM_BYTES, Math.floor(observedRss * 1.2))
     : BRAIN_PROCESS_RAM_BYTES;
   const perBrainBytes = brainProcessBytes + PROMPT_COMPOSITION_HEADROOM_BYTES;
-  const cap = Math.floor(usableBytes / perBrainBytes);
-  return Math.max(1, cap);
+  const ramCap = Math.floor(usableBytes / perBrainBytes);
+  // Reactivity ceiling (not just OOM defence). The RAM-only cap permits many
+  // concurrent brains on an ample-RAM host (e.g. ~11 on 16GB), but the daemon
+  // runs a SINGLE event loop: every concurrent brain's emitted events drain
+  // through the post-commit projection cascade on that one loop, so beyond a
+  // few concurrent brains the daemon goes non-reactive (reads/`/health` queue
+  // behind the drain) even while host CPU/RAM sit idle. DEFAULT_MAX_CONCURRENT
+  // already exists as the intended ceiling but was only applied to the global
+  // task cap (not the brain cap). Clamp here so brain concurrency can never
+  // exceed it regardless of free RAM. ACC2_MAX_BRAIN_CONCURRENCY overrides for
+  // hosts that have tuned the projection drain off the main loop.
+  const envCeiling = Number(process.env.ACC2_MAX_BRAIN_CONCURRENCY);
+  const reactiveCeiling = Number.isFinite(envCeiling) && envCeiling > 0
+    ? Math.floor(envCeiling)
+    : DEFAULT_MAX_CONCURRENT;
+  return Math.max(1, Math.min(ramCap, reactiveCeiling));
 };
 
 /** Track in-flight opencode_brain dispatches separately so the brain cap

@@ -77,6 +77,10 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // column — NOT event kinds). claude_plugin_package added 2026-05-21 by
   // T7.5 amendment H5ENQT3DBX4AD2107ZYK1QSHQG.
   "claude_plugin_package",
+  // resolveCapability({ kind, name }) capability-kind values — the capability
+  // registry's `kind` column (render_pipeline / predicate_gate validators), NOT
+  // event-emit kinds. From runtime/render_pipeline.ts + runtime/verifiers/predicate_gate.ts.
+  "render_pipeline", "predicate_gate",
   // View row_kind discriminators
   "node", "extension",
   // Lifecycle / cadence enum strings
