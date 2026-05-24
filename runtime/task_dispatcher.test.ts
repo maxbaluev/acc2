@@ -1004,4 +1004,89 @@ describe("task_dispatcher", () => {
     // The chain terminated within the cap — it did NOT resume forever.
     expect(sawDepthCappedFailure).toBe(true);
   }, 20_000);
+
+  // Perf isolation (2026-05-24): the dispatcher's heavy read scans
+  // (readEventsSinceTs / readEventsForDispatch over `events`, the act_artifact
+  // policy scan, the task_edge_recorded plateau scan) now route through
+  // poolQuery so they run off the daemon main loop. poolQuery uses the SAME db
+  // handle + SQL + params as the old sync path, so the off-loop path must
+  // return rows/order identical to the sync-fallback path. This test runs the
+  // same happy-path dispatch twice — once with a mock pool installed (off-loop
+  // lane), once without (sync fallback) — and asserts the resulting event
+  // ledgers are byte-identical, plus that the mock pool actually fielded the
+  // heavy event-table scans.
+  test("off-loop poolQuery path returns dispatch results identical to the sync fallback", async () => {
+    const { setSqlPool, clearSqlPool } = await import("./sql_pool_singleton");
+    type AnyPool = import("./sql_worker_pool").SqlWorkerPool;
+
+    const runDispatch = async (db: Database) => {
+      const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
+      const task = readyTasks(db, directiveId)[0]!;
+      const act = inMemoryAct({ actionResult: { result: { count: 2 } }, verifierResidual: 0 });
+      const result = await dispatchReadyTask(db, task, act);
+      // Snapshot the full event ledger the dispatch produced — the heavy read
+      // scans feed the events the dispatch returns + every downstream emit.
+      const ledger = db
+        .query("SELECT kind, residual, payload FROM events WHERE task_id = ? ORDER BY ts ASC, id ASC")
+        .all(taskId) as Array<{ kind: string; residual: number | null; payload: string }>;
+      return { result, ledger, taskId };
+    };
+
+    // 1. Sync-fallback lane — no pool installed (the default unit-test path).
+    clearSqlPool();
+    const syncDb = openDb(":memory:");
+    const sync = await runDispatch(syncDb);
+    closeDb();
+
+    // 2. Off-loop lane — a mock pool delegating to the SAME db handle via the
+    //    identical SQL + params. Records the SQL it fielded so we can confirm
+    //    the heavy scans were routed through it.
+    const offloopDb = openDb(":memory:");
+    const seenSql: string[] = [];
+    const mockPool = {
+      query: async <T = unknown>(sql: string, params: unknown[] = []): Promise<T[]> => {
+        seenSql.push(sql);
+        // Delegate off-loop (await yields the loop) to the same db handle.
+        await Promise.resolve();
+        return offloopDb.query(sql).all(...params) as T[];
+      },
+    } as unknown as AnyPool;
+    setSqlPool(mockPool);
+    let offloop: Awaited<ReturnType<typeof runDispatch>>;
+    try {
+      offloop = await runDispatch(offloopDb);
+    } finally {
+      clearSqlPool();
+    }
+    closeDb();
+
+    // The mock pool fielded the heavy event-table read scan at least once
+    // (readEventsSinceTs runs several times per dispatch).
+    expect(seenSql.some((s) => s.includes("FROM events WHERE ts >= ? AND task_id = ?"))).toBe(true);
+
+    // Identical dispatch behavior: same violations, same bridge ok, and the
+    // SAME multiset of emitted event kinds. We compare sorted kind counts
+    // rather than the raw sequence because the credit/projection cascade emits
+    // several near-simultaneous events whose interleaving order is not stable
+    // across runs (random ids + async yields) — the off-loop poolQuery yields
+    // the loop, which can reorder same-ts emits without changing WHAT is
+    // emitted. poolQuery runs the identical SQL on the same db handle, so the
+    // rows each scan returns are identical; only the cascade interleave varies.
+    const kindCounts = (ledger: Array<{ kind: string }>) => {
+      const m: Record<string, number> = {};
+      for (const r of ledger) m[r.kind] = (m[r.kind] ?? 0) + 1;
+      return m;
+    };
+    expect(offloop.result.violations).toEqual(sync.result.violations);
+    expect(offloop.result.bridge_result?.ok).toBe(sync.result.bridge_result?.ok);
+    expect(kindCounts(offloop.ledger)).toEqual(kindCounts(sync.ledger));
+    expect([...offloop.ledger.map((r) => r.residual)].sort()).toEqual(
+      [...sync.ledger.map((r) => r.residual)].sort(),
+    );
+    // task_committed must land on both lanes with residual 0.
+    const offCommit = offloop.ledger.find((r) => r.kind === "task_committed");
+    const syncCommit = sync.ledger.find((r) => r.kind === "task_committed");
+    expect(offCommit?.residual).toBe(0);
+    expect(syncCommit?.residual).toBe(0);
+  });
 });

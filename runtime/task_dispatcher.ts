@@ -25,6 +25,7 @@ import type { Event, JsonValue } from "../substrate/types";
 import { ARTIFACT_LIFECYCLE_KINDS } from "../substrate/event_kinds";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
+import { poolQuery } from "./sql_pool_singleton";
 import { composePrompt } from "./prompt_composer";
 import { getReloadable } from "./reloadable";
 
@@ -142,12 +143,16 @@ type DispatchDeps = {
   index?: import("./embedding_index").EmbeddingIndex;
 };
 
-const readEventsForDispatch = (db: Database, dispatchId: string): Event[] => {
-  const rows = db
-    .query(
-      "SELECT * FROM events WHERE payload LIKE ? OR id IN (SELECT id FROM events WHERE ts >= (SELECT ts FROM events WHERE id = ?)) ORDER BY ts ASC",
-    )
-    .all(`%${dispatchId}%`, dispatchId) as Array<Record<string, unknown>>;
+const readEventsForDispatch = async (db: Database, dispatchId: string): Promise<Event[]> => {
+  // Heavy read scan (LIKE + correlated subquery over the events table) — route
+  // off the daemon main loop through the SQL worker pool. poolQuery uses the
+  // same db handle + SQL + params, so rows/order are identical to the sync
+  // path; falls back to sync when no pool is installed (unit tests / diagnostics).
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    "SELECT * FROM events WHERE payload LIKE ? OR id IN (SELECT id FROM events WHERE ts >= (SELECT ts FROM events WHERE id = ?)) ORDER BY ts ASC",
+    [`%${dispatchId}%`, dispatchId],
+  );
   // The LIKE filter is intentionally loose — every event the dispatcher cares
   // about either references dispatch_id in its payload or was emitted after
   // it. Strict filtering happens in the dispatcher's downstream consumers.
@@ -172,10 +177,16 @@ const readEventsForDispatch = (db: Database, dispatchId: string): Event[] => {
   }));
 };
 
-const readEventsSinceTs = (db: Database, sinceTs: string, taskId: string): Event[] => {
-  const rows = db
-    .query("SELECT * FROM events WHERE ts >= ? AND task_id = ? ORDER BY ts ASC")
-    .all(sinceTs, taskId) as Array<Record<string, unknown>>;
+const readEventsSinceTs = async (db: Database, sinceTs: string, taskId: string): Promise<Event[]> => {
+  // Heavy read scan over the events table (called several times per dispatch to
+  // collect every event emitted during the bridge run) — route off the main
+  // loop through the SQL worker pool. Same db/SQL/params → identical rows and
+  // ordering; sync fallback when no pool is present.
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    "SELECT * FROM events WHERE ts >= ? AND task_id = ? ORDER BY ts ASC",
+    [sinceTs, taskId],
+  );
   return rows.map((r) => ({
     id: r.id as string,
     ts: r.ts as string,
@@ -444,7 +455,7 @@ export const dispatchReadyTask = async (
       return {
         dispatch_id: dispatchId,
         task_id: task.id,
-        events: readEventsSinceTs(db, dispatchStartedTs, task.id),
+        events: await readEventsSinceTs(db, dispatchStartedTs, task.id),
         violations: [],
       };
     }
@@ -490,7 +501,7 @@ export const dispatchReadyTask = async (
     return {
       dispatch_id: dispatchId,
       task_id: task.id,
-      events: readEventsSinceTs(db, dispatchStartedTs, task.id),
+      events: await readEventsSinceTs(db, dispatchStartedTs, task.id),
       violations: [],
     };
   }
@@ -545,7 +556,7 @@ export const dispatchReadyTask = async (
       return {
         dispatch_id: dispatchId,
         task_id: task.id,
-        events: readEventsSinceTs(db, dispatchStartedTs, task.id),
+        events: await readEventsSinceTs(db, dispatchStartedTs, task.id),
         violations: [],
       };
     }
@@ -683,16 +694,18 @@ export const dispatchReadyTask = async (
     | Partial<Record<string, Array<import("./prompt_composer").RetrievedPolicyArtifactBundle>>>
     | undefined = undefined;
   try {
-    const policyArtifactRows = db
-      .query(
-        `SELECT id, body, score, name
+    // Heavy read scan over act_artifact (kind filter + ORDER BY + LIMIT 100) on
+    // the prompt-setup path — route off the main loop. Identical db/SQL/params
+    // → identical rows/order; sync fallback when no pool is installed.
+    const policyArtifactRows = await poolQuery<Record<string, unknown>>(
+      db,
+      `SELECT id, body, score, name
            FROM act_artifact
           WHERE kind IN ('prompt_policy_bundle', 'composer_policy_predicate')
             AND status = 'admitted'
           ORDER BY score DESC, confidence DESC
           LIMIT 100`,
-      )
-      .all() as Array<Record<string, unknown>>;
+    );
     if (policyArtifactRows.length > 0) {
       const perSection: Record<string, Array<import("./prompt_composer").RetrievedPolicyArtifactBundle>> = {};
       for (const r of policyArtifactRows) {
@@ -795,7 +808,7 @@ export const dispatchReadyTask = async (
   // 4. Inspect every event emitted on this task during the dispatch window.
   //    The dispatcher reads from the SAME substrate the bridge writes to —
   //    that's the symmetry §3.6 calls for.
-  const dispatchEvents = readEventsSinceTs(db, dispatchStartedTs, task.id);
+  const dispatchEvents = await readEventsSinceTs(db, dispatchStartedTs, task.id);
 
   // Cycle-1 enforcement: scan for forbidden self-iteration kinds. The
   // forbidden set is owned by `cycle_one_gate.ts` so the real-bridge
@@ -1418,9 +1431,15 @@ export const dispatchReadyTask = async (
           // earlier than REFINEMENT_DEPTH_CAP=5 would.
           const plateauCycles = 3;
           const plateauEpsilon = 0.03;
-          const edgeRows = db
-            .query("SELECT payload FROM events WHERE directive_id = ? AND kind = 'task_edge_recorded' ORDER BY ts ASC")
-            .all(task.directive_id) as Array<{ payload: string }>;
+          // Unbounded read scan over the events table (all task_edge_recorded
+          // rows for the directive) on the refinement path — route off the main
+          // loop. Same db/SQL/params → identical rows/order; sync fallback when
+          // no pool is installed.
+          const edgeRows = await poolQuery<{ payload: string }>(
+            db,
+            "SELECT payload FROM events WHERE directive_id = ? AND kind = 'task_edge_recorded' ORDER BY ts ASC",
+            [task.directive_id],
+          );
           const incomingRefines = new Map<string, string>();
           for (const row of edgeRows) {
             try {
@@ -1570,7 +1589,7 @@ export const dispatchReadyTask = async (
   }
 
   // 7. brain_dispatch_closed seals the audit trail.
-  const finalEvents = readEventsSinceTs(db, dispatchStartedTs, task.id);
+  const finalEvents = await readEventsSinceTs(db, dispatchStartedTs, task.id);
   emitEvent(db, {
     kind: "brain_dispatch_closed",
     substrate_origin: "substrate_auto",
@@ -1597,9 +1616,9 @@ export const dispatchReadyTask = async (
   // 99% CPU + 3.4GB RSS over ~2 hours. Hoisting the declaration outside
   // the try block fixes both the cascade AND the runaway resource use.
   let dispatchHadTerminal = false;
-  let closedEvents: ReturnType<typeof readEventsSinceTs> = [];
+  let closedEvents: Awaited<ReturnType<typeof readEventsSinceTs>> = [];
   try {
-    closedEvents = readEventsSinceTs(db, dispatchStartedTs, task.id);
+    closedEvents = await readEventsSinceTs(db, dispatchStartedTs, task.id);
     const hasCommit = closedEvents.some((e) => e.kind === "task_committed");
     const hasFail = closedEvents.some((e) => e.kind === "task_failed");
     dispatchHadTerminal = hasCommit || hasFail;
@@ -1682,7 +1701,7 @@ export const dispatchReadyTask = async (
   return {
     dispatch_id: dispatchId,
     task_id: task.id,
-    events: readEventsSinceTs(db, dispatchStartedTs, task.id),
+    events: await readEventsSinceTs(db, dispatchStartedTs, task.id),
     violations,
     bridge_result: bridgeResult,
   };
