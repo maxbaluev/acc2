@@ -24,7 +24,6 @@ import { openDb } from "../substrate/db";
 import { embedPendingEvents } from "../runtime/embedder";
 import { resolveDbPath } from "../runtime/state_paths";
 import { readDaemonLock } from "./rpc";
-import { join } from "node:path";
 
 export type EmbedAllEnv = {
   /** Open or reuse a DB handle.  Tests inject an in-memory DB. */
@@ -41,8 +40,7 @@ export type EmbedAllEnv = {
 };
 
 const defaultStateDbPath = (): string => {
-  const repoRoot = join(import.meta.dirname ?? ".", "..");
-  return resolveDbPath(repoRoot);
+  return resolveDbPath();
 };
 
 const defaultEnv = (): EmbedAllEnv => ({

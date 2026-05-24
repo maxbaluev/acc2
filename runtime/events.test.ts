@@ -14,6 +14,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import type { Database } from "bun:sqlite";
+import type { EventKind } from "../substrate/types";
 import { getArtifact, insertArtifact } from "./artifact_store";
 import { emitEvent, flushPostCommitProjectionsForTest, postCommitProjectionDepth, resetPostCommitProjectionsForTest } from "./events";
 import { newId } from "./ids";
@@ -1640,7 +1641,7 @@ describe("emitEvent act_tuple lazy artifact admission (phase-2 four-link credit)
     // stays at the prior.
     expect(row!.posterior_alpha).toBeGreaterThan(1.0);
     expect(row!.posterior_beta).toBe(1.0);
-    closeDb(db);
+    closeDb();
   });
 
   test("re-emitting the same act tuple does not duplicate the row or reset its posterior", async () => {
@@ -1660,7 +1661,7 @@ describe("emitEvent act_tuple lazy artifact admission (phase-2 four-link credit)
     // the EXISTING row (5.0 + outcome weight), proving the four-link chain
     // mutates a real posterior rather than re-admitting.
     expect(row.posterior_alpha).toBeGreaterThanOrEqual(5.0);
-    closeDb(db);
+    closeDb();
   });
 
   test("file/test-style refs (containing ':' or '#') are NOT admitted", async () => {
@@ -1669,14 +1670,14 @@ describe("emitEvent act_tuple lazy artifact admission (phase-2 four-link credit)
     await flushPostCommitProjectionsForTest();
     expect(verifierRow(db, "repo:test-fixture")).toBeNull();
     expect(verifierRow(db, "runtime/events.ts#L1")).toBeNull();
-    closeDb(db);
+    closeDb();
   });
 });
 
 describe("event_kind_rollup aggregate consistency (bounded-ledger-retention safety-a)", () => {
   test("rollup live_count matches a real COUNT(*) after N emits and after compaction", () => {
     const db = openDb(":memory:");
-    const kinds = ["directive_opened", "task_committed", "artifact_kind_inference_uncertain"];
+    const kinds: EventKind[] = ["directive_opened", "task_committed", "artifact_kind_inference_uncertain"];
     // N emits across several kinds.
     for (let i = 0; i < 30; i++) {
       const kind = kinds[i % kinds.length]!;
@@ -1709,6 +1710,6 @@ describe("event_kind_rollup aggregate consistency (bounded-ledger-retention safe
     expect(liveCount("artifact_kind_inference_uncertain")).toBe(0);
     // Lifetime total is retained across compaction (read-aggregate stays O(1)).
     expect(totalCount("artifact_kind_inference_uncertain")).toBe(telemetryBefore);
-    closeDb(db);
+    closeDb();
   });
 });

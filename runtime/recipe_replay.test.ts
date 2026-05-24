@@ -72,7 +72,7 @@ const runRecipeReplayTestArtifact: RecipeArtifactRunner = async (
   db: Database,
   artifactId: string,
   inputs: JsonValue,
-) => {
+): Promise<{ ok: boolean; result: JsonValue | null; error?: string }> => {
   const row = db.query("SELECT name FROM act_artifact WHERE id = ?").get(artifactId) as { name: string | null } | null;
   if (!row) return { ok: false, result: null, error: "artifact_not_found" };
   const name = row.name ?? "";

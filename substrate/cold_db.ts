@@ -13,7 +13,7 @@
 // structurally so a stray `INSERT` from a misbehaving caller cannot
 // corrupt the archive history.
 
-import { Database } from "bun:sqlite";
+import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { existsSync, readdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
@@ -58,7 +58,7 @@ export const searchAcrossArchives = async <T = Record<string, unknown>>(
   hotDb: Database,
   archiveDir: string,
   sql: string,
-  params: unknown[] = [],
+  params: SQLQueryBindings[] = [],
   opts: SearchAcrossArchivesOptions = {},
 ): Promise<T[]> => {
   const includeCold = opts.includeCold !== false;
@@ -67,7 +67,7 @@ export const searchAcrossArchives = async <T = Record<string, unknown>>(
 
   // Hot first (most recent rows; caller may LIMIT in sql).
   if (!hotOnlyCold) {
-    const hotRows = hotDb.query<T, unknown[]>(sql).all(...params);
+    const hotRows = hotDb.query<T, SQLQueryBindings[]>(sql).all(...params);
     for (const r of hotRows) results.push(r);
   }
 
@@ -82,7 +82,7 @@ export const searchAcrossArchives = async <T = Record<string, unknown>>(
     let cold: Database | null = null;
     try {
       cold = openColdDb(path);
-      const coldRows = cold.query<T, unknown[]>(sql).all(...params);
+      const coldRows = cold.query<T, SQLQueryBindings[]>(sql).all(...params);
       for (const r of coldRows) results.push(r);
     } finally {
       if (cold) {

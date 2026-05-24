@@ -693,7 +693,9 @@ describe("seedFoundationalKnowledge", () => {
       const payload = JSON.parse(p.payload) as { candidate_id?: string };
       expect(refs.length).toBe(1);
       expect(payload.candidate_id).toBeDefined();
-      expect(refs[0]).toBe(payload.candidate_id);
+      const candidateId = payload.candidate_id;
+      if (candidateId === undefined) throw new Error("candidate_id missing");
+      expect(refs[0]).toBe(candidateId);
     }
   });
 

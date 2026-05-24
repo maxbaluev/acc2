@@ -343,7 +343,7 @@ export const extractTrajectoryMotifs = async (
         context_refs: [id, ...motif.kinds],
         payload: {
           motif_act_artifact_id: id,
-          kinds: motif.kinds,
+          kinds: [...motif.kinds],
           length: motif.kinds.length,
           frequency: motif.frequency,
           directive_count: motif.directives.size,

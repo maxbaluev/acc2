@@ -21,6 +21,7 @@
 
 import { beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
+import type { JsonValue } from "../substrate/types";
 import { recordInternalAct } from "../runtime/internal_act_projection";
 import { emitEvent, flushPostCommitProjectionsForTest, resetPostCommitProjectionsForTest } from "../runtime/events";
 import { newId } from "../runtime/ids";

@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1044,7 +1044,7 @@ describe("task_dispatcher", () => {
     const offloopDb = openDb(":memory:");
     const seenSql: string[] = [];
     const mockPool = {
-      query: async <T = unknown>(sql: string, params: unknown[] = []): Promise<T[]> => {
+      query: async <T = unknown>(sql: string, params: SQLQueryBindings[] = []): Promise<T[]> => {
         seenSql.push(sql);
         // Delegate off-loop (await yields the loop) to the same db handle.
         await Promise.resolve();

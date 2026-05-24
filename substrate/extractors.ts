@@ -2505,6 +2505,8 @@ export const extractDirectiveInterference = async (
         insertEvent(db, {
           kind: "directive_interference_edge",
           directive_id: a,
+          task_id: "directive_interference_detection",
+          loop_id: "extractDirectiveInterference",
           substrate_origin: "substrate_auto",
           payload: {
             from_directive: a,

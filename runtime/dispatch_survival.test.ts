@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 import { closeDb, openDb } from "../substrate/db";
+import type { EventKind, JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import {
   ACTIVE_BRAIN_DISPATCH_RECENCY_MS,
@@ -162,9 +163,9 @@ const insertEvent = (
   db: Database,
   opts: {
     id: string;
-    kind: string;
+    kind: EventKind;
     task_id: string;
-    payload: Record<string, unknown>;
+    payload: JsonValue;
     /** Offset from "now" in milliseconds (negative = past). */
     tsOffsetMs: number;
   },

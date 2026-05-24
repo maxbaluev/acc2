@@ -15,7 +15,7 @@ describe("owner_outcome_channel", () => {
   });
 
   test("records linked owner-observed outcome with residual adjustment", () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     const scored = emitEvent(db, {
       kind: "action_scored",
       substrate_origin: "substrate_auto",

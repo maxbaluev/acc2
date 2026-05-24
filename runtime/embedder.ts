@@ -21,7 +21,7 @@
 // successful embed emits one `embedding_computed` event referencing the
 // source event id.
 
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { Event, JsonValue } from "../substrate/types";
 import { EMBEDDABLE_KINDS as REGISTRY_EMBEDDABLE_KINDS } from "../substrate/event_kinds";
 import { emitEvent } from "./events";
@@ -329,7 +329,7 @@ const readUnembedded = async (db: Database, batchSize: number): Promise<Unembedd
     `WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') ` +
     `AND (a.embedding IS NULL OR length(a.embedding) = 0)` +
     `) ORDER BY ts ASC LIMIT ?`;
-  const params: unknown[] = [...Array.from(EMBEDDABLE_KINDS), batchSize];
+  const params: SQLQueryBindings[] = [...Array.from(EMBEDDABLE_KINDS), batchSize];
   try {
     const poolMod = await import("./sql_pool_singleton");
     const pool = poolMod.getSqlPool();
@@ -361,7 +361,7 @@ export const pendingEmbeddableCount = async (db: Database): Promise<number> => {
     `WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') ` +
     `AND (a.embedding IS NULL OR length(a.embedding) = 0)` +
     `)`;
-  const params: unknown[] = [...Array.from(EMBEDDABLE_KINDS)];
+  const params: SQLQueryBindings[] = [...Array.from(EMBEDDABLE_KINDS)];
   try {
     const poolMod = await import("./sql_pool_singleton");
     const pool = poolMod.getSqlPool();

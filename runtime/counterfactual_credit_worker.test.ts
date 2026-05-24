@@ -127,7 +127,7 @@ const readScoreUpdateForRejected = (
 
 describe("counterfactual_credit_worker", () => {
   test("scores rejected candidates with penalty when chosen succeeded", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     const cfId = insertCounterfactual(db, {
       ts: oldTs(601_000),
       selection_event_id: "sel_evt_1",
@@ -163,7 +163,7 @@ describe("counterfactual_credit_worker", () => {
   });
 
   test("scores rejected candidates with bonus when chosen failed", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     const cfId = insertCounterfactual(db, {
       ts: oldTs(601_000),
       selection_event_id: "sel_evt_2",
@@ -187,7 +187,7 @@ describe("counterfactual_credit_worker", () => {
   });
 
   test("idempotent re-run produces no new score rows", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     const cfId = insertCounterfactual(db, {
       ts: oldTs(601_000),
       selection_event_id: "sel_evt_3",
@@ -213,7 +213,7 @@ describe("counterfactual_credit_worker", () => {
   });
 
   test("skips counterfactuals still inside their window", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     insertCounterfactual(db, {
       ts: oldTs(60_000), // 60s old, well within the 600s window
       selection_event_id: "sel_evt_4",
@@ -229,7 +229,7 @@ describe("counterfactual_credit_worker", () => {
   });
 
   test("scores composer counterfactuals without selection_event_id from same task action_scored", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     const cfId = insertCounterfactual(db, {
       ts: oldTs(601_000),
       selection_event_id: null,
@@ -248,7 +248,7 @@ describe("counterfactual_credit_worker", () => {
   });
 
   test("skips counterfactuals where chosen has no action_scored residual", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     insertCounterfactual(db, {
       ts: oldTs(601_000),
       selection_event_id: "sel_evt_5",
@@ -265,7 +265,7 @@ describe("counterfactual_credit_worker", () => {
   });
 
   test("counterfactual_closure_audited reports closure proxy across sweep", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     // Counterfactual 1: rejected_alpha lost a selection.
     insertCounterfactual(db, {
       ts: oldTs(601_000),

@@ -42,7 +42,7 @@ describe("classifyRetire", () => {
 
 describe("runPendingDecisionRetireWorker", () => {
   test("stale genuine owner-consent row is retired", () => {
-    const db = openDb(); runViews(db);
+    const db = openDb(":memory:"); runViews(db);
     const id = insertAmendment(db, { ts: oldTs(STALE_PENDING_DECISION_AGE_MS + 60_000), target: "docs/operator-install.md" });
     const summary = runPendingDecisionRetireWorker(db, { now: FIXED_NOW });
     expect(summary.retired).toBe(1);
@@ -51,14 +51,14 @@ describe("runPendingDecisionRetireWorker", () => {
     expect(JSON.parse(ret!.payload).reason).toBe("stale");
   });
   test("normal recent owner-consent row is not retired", () => {
-    const db = openDb(); runViews(db);
+    const db = openDb(":memory:"); runViews(db);
     const id = insertAmendment(db, { ts: recentTs(), target: "docs/operator-install.md" });
     const summary = runPendingDecisionRetireWorker(db, { now: FIXED_NOW });
     expect(summary.retired).toBe(0);
     expect(pendingOwnerDecisionQueueLive(db).find((r) => r.representative_event_id === id)).toBeDefined();
   });
   test("mixed batch scans only owner-consent rows and retires stale ones", () => {
-    const db = openDb(); runViews(db);
+    const db = openDb(":memory:"); runViews(db);
     insertAmendment(db, { ts: recentTs(-1000), target: "tests/a.test.ts" });
     insertAmendment(db, { ts: recentTs(-2000), target: "src/internal_helper.ts", ownerGateRequired: false });
     insertAmendment(db, { ts: oldTs(STALE_PENDING_DECISION_AGE_MS + 5000), target: "docs/c.md" });

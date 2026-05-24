@@ -56,7 +56,7 @@ describe("artifact_store CRUD", () => {
     expect(got).not.toBeNull();
     expect(got!.id).toBe("art_round_trip");
     expect(got!.runtime).toBe("bun");
-    expect(got!.declaredSandbox.runtime).toBe("bun");
+    expect(got!.declaredSandbox!.runtime).toBe("bun");
     expect(got!.score).toBeCloseTo(0.5, 6);
     expect(got!.status).toBe("admitted");
     expect(got!.createdAt).toBe(row.createdAt);

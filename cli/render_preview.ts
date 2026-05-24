@@ -176,7 +176,6 @@ export const runRenderPreview = async (
         targetResources: [`render-sha256://${result.sha256}`],
         markdownBodyId,
         referenceDocxArtifactId,
-        ownerGateVerdict: "auto",
       },
       captureEmit,
     );

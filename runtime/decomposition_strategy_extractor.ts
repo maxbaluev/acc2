@@ -343,7 +343,7 @@ const buildFingerprint = (
     while (cur && !visited.has(cur)) {
       visited.add(cur);
       const node = nodes.get(cur);
-      const parent =
+      const parent: string | null =
         (node?.parent_task_id ?? null) ??
         (refineParent.get(cur) ?? null);
       if (!parent || !nodes.has(parent)) break;

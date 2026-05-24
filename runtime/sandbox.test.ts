@@ -3,7 +3,7 @@
 // stub behavior for uv / camofox-browser.
 
 import { describe, expect, test } from "bun:test";
-import type { SandboxDecl } from "../substrate/types";
+import type { SandboxDecl, BunSandboxDecl, UvSandboxDecl, CamofoxSandboxDecl } from "../substrate/types";
 import {
   buildBunPermissionArgs,
   buildCamofoxPermissionArgs,
@@ -184,7 +184,7 @@ describe("buildBunPermissionArgs", () => {
   });
 
   test("throws on an invalid decl rather than silently returning bad permissions", () => {
-    const bad = { runtime: "bun" } as unknown as SandboxDecl & { runtime: "bun" };
+    const bad = { runtime: "bun" } as unknown as BunSandboxDecl;
     expect(() => buildBunPermissionArgs(bad)).toThrow(/invalid bun sandbox decl/);
   });
 });
@@ -232,7 +232,7 @@ describe("buildUvPermissionArgs (Phase G)", () => {
   });
 
   test("throws on a malformed uv decl rather than returning bad permissions", () => {
-    const bad = { runtime: "uv" } as unknown as SandboxDecl & { runtime: "uv" };
+    const bad = { runtime: "uv" } as unknown as UvSandboxDecl;
     expect(() => buildUvPermissionArgs(bad)).toThrow(/invalid uv sandbox decl/);
   });
 });
@@ -285,7 +285,7 @@ describe("buildCamofoxPermissionArgs (Batch 1.α)", () => {
       browser_profile_root: "/tmp/p",
       fingerprint_os: "plan9",
       wall_ms: 30000, memory_mb: 1024,
-    } as unknown as SandboxDecl & { runtime: "camofox-browser" };
+    } as unknown as CamofoxSandboxDecl;
     expect(() => buildCamofoxPermissionArgs(decl)).toThrow(/bad_fingerprint_os/);
   });
 
@@ -296,7 +296,7 @@ describe("buildCamofoxPermissionArgs (Batch 1.α)", () => {
       browser_profile_root: "/tmp/p",
       headless: "yes",
       wall_ms: 30000, memory_mb: 1024,
-    } as unknown as SandboxDecl & { runtime: "camofox-browser" };
+    } as unknown as CamofoxSandboxDecl;
     expect(() => buildCamofoxPermissionArgs(decl)).toThrow(/headless_bad_type/);
   });
 
@@ -336,7 +336,7 @@ describe("buildCamofoxPermissionArgs (Batch 1.α)", () => {
   });
 
   test("throws on a malformed camofox decl rather than returning bad permissions", () => {
-    const bad = { runtime: "camofox-browser" } as unknown as SandboxDecl & { runtime: "camofox-browser" };
+    const bad = { runtime: "camofox-browser" } as unknown as CamofoxSandboxDecl;
     expect(() => buildCamofoxPermissionArgs(bad)).toThrow(/invalid camofox sandbox decl/);
   });
 });

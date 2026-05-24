@@ -4,6 +4,7 @@
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
+import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { runBrainInvocationTick } from "./brain_invocation_worker";
 import { clearSqlPool, setSqlPool } from "./sql_pool_singleton";
@@ -29,7 +30,7 @@ const makeDelegatingPool = (
 
 const seedRequest = (
   db: ReturnType<typeof openDb>,
-  payload: Record<string, unknown>,
+  payload: JsonValue,
 ): string => {
   const ev = emitEvent(db, {
     kind: "brain_invocation_request",

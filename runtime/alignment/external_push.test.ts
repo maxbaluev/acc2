@@ -91,7 +91,7 @@ describe("alignment / external_push (Principle 7)", () => {
     });
     const res = await handleExternalPush(db, state, req);
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await res.json() as { ok: boolean; event_id: string };
     expect(body.ok).toBe(true);
     const eventId: string = body.event_id;
 

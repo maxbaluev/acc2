@@ -1316,7 +1316,7 @@ export const recordApplyOutcome = async (opts: {
         source_brain_event_id: sourceBrainEventId,
         request_event_id: requestEventId ?? null,
         authorization_event_id: requestEventId ?? null,
-        target,
+        target: target ?? null,
         affected_files: affectedFiles,
         status,
         verifier_passed: verifierPassed,

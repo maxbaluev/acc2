@@ -14,6 +14,7 @@
 // seam — this module just gives the loop a working default.
 
 import type { Database } from "bun:sqlite";
+import type { JsonValue } from "../substrate/types";
 import {
   verifyClaimProvenance,
   type ClaimInput,
@@ -137,7 +138,7 @@ export const requestOwnerPreference = <T>(
     generator: c.generator,
     provenance_residual: provenanceResidual(c),
     grounded_inputs: groundedInputCount(c),
-    artifact: c.artifact as unknown,
+    artifact: c.artifact as JsonValue,
   });
 
   const request = emitEvent(db, {

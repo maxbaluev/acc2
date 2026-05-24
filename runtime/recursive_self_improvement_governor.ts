@@ -70,13 +70,14 @@ export const computeDriftScore = (db: Database, now: Date = new Date()): number 
       "owner_identity_discontinuity",
     ];
     const placeholders = driftKinds.map(() => "?").join(",");
+    const bindings: string[] = [...driftKinds, sinceIso];
     const row = db
-      .query<{ c: number }, [string, ...string[]]>(
+      .query<{ c: number }, string[]>(
         `SELECT COUNT(*) AS c FROM events
           WHERE kind IN (${placeholders})
             AND ts > ?`,
       )
-      .get(...driftKinds, sinceIso);
+      .all(...bindings)[0];
     const count = row?.c ?? 0;
     // Saturate at 10 drifts/24h → score 1.0; 0 drifts → score 0.0.
     return Math.min(1, count / 10);

@@ -23,7 +23,7 @@
 //     production always emits 1536-dim vectors through the OpenAI embedder
 //     and therefore keeps an EMPTY in-memory map.
 
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { decodeEmbeddingBlob, EMBEDDING_VERSION, upsertVecEventRow } from "./embedder";
 
 export type IndexEntry = {
@@ -210,7 +210,7 @@ const VEC_KNN_SQL =
  *  `sql` with `params` against the same db and return identical rows in
  *  identical order (the pool falls back to the synchronous read on
  *  overflow/timeout, so results are byte-identical to `knnSql`). */
-export type AsyncDbRead = <T = unknown>(sql: string, params: unknown[]) => Promise<T[]>;
+export type AsyncDbRead = <T = unknown>(sql: string, params: SQLQueryBindings[]) => Promise<T[]>;
 
 export class EmbeddingIndex {
   private constructor(
@@ -346,7 +346,7 @@ export class EmbeddingIndex {
    *  JSON-serialised exactly as the synchronous and async paths both expect,
    *  and `fetchN` is the ×3 over-fetch so the JS-side filter has room to drop
    *  without starving the caller. vec_events.k must be a positive integer. */
-  private vecKnnParams(queryEmbedding: Float32Array, kCap: number): unknown[] {
+  private vecKnnParams(queryEmbedding: Float32Array, kCap: number): SQLQueryBindings[] {
     const fetchN = Math.max(kCap, kCap * 3);
     const vec = JSON.stringify(Array.from(queryEmbedding));
     return [vec, fetchN];

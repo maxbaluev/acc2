@@ -139,7 +139,7 @@ export class SqlWorkerPool {
       const active = this.workerActiveJobs[idx];
       if (active) {
         for (const job of active.values()) {
-          this.failJob(job, new Error(`sql_worker_thread_error:${err.message}`));
+          this.failJob(job, new Error(`sql_worker_thread_error:${(err as Error)?.message ?? String(err)}`));
         }
       }
     });

@@ -131,8 +131,8 @@ export const SearchSchema = z.object({
       kind_filter: z.array(z.string()).optional(),
       // Open-ended retrieval routing records. Keys are emitter/domain supplied,
       // not fixed enums; retrieval.ts clamps values and ignores unknown axes.
-      aspect_weights: z.record(z.number()).optional(),
-      domain_hints: z.record(z.number()).optional(),
+      aspect_weights: z.record(z.string(), z.number()).optional(),
+      domain_hints: z.record(z.string(), z.number()).optional(),
     })
     .optional(),
 });

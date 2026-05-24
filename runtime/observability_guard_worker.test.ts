@@ -89,7 +89,7 @@ const countAlerts = (
 
 describe("observabilityGuardTick — wired-but-inert loop detection", () => {
   test("inert loop (upstream >= min, loop == 0) emits loop_inert_alert", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     // counterfactual_alternative_recorded fired 60 times (>= 50) but
     // counterfactual_closure_audited emitted 0 → wired-but-inert.
     insertMany(db, "counterfactual_alternative_recorded", 60);
@@ -101,7 +101,7 @@ describe("observabilityGuardTick — wired-but-inert loop detection", () => {
   });
 
   test("healthy loop (loop > 0) emits NO alert", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     insertMany(db, "counterfactual_alternative_recorded", 60);
     // Loop is alive: at least one closure audit fired.
     insertEvent(db, "counterfactual_closure_audited", recentTs(30_000));
@@ -112,7 +112,7 @@ describe("observabilityGuardTick — wired-but-inert loop detection", () => {
   });
 
   test("upstream below min threshold emits NO alert", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     // Only 10 upstream rows (< 50) — not enough to expect the loop.
     insertMany(db, "counterfactual_alternative_recorded", 10);
 
@@ -122,7 +122,7 @@ describe("observabilityGuardTick — wired-but-inert loop detection", () => {
   });
 
   test("idempotency — second tick in same window emits no duplicate", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     insertMany(db, "counterfactual_alternative_recorded", 60);
 
     await observabilityGuardTick(db, undefined, { now: FIXED_NOW });
@@ -139,7 +139,7 @@ describe("observabilityGuardTick — wired-but-inert loop detection", () => {
 
 describe("observabilityGuardTick — lying-metric (veracity) detection", () => {
   test("orphaned vec_events row (resolves to neither event nor act_artifact) emits metric_veracity_alert", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     // Create a TRUE orphan: insert an event, project its vec_events row,
     // then delete the event — the vec_events row now points at a vanished
     // source. The honest retrieval-index integrity metric is orphan count,
@@ -158,7 +158,7 @@ describe("observabilityGuardTick — lying-metric (veracity) detection", () => {
   });
 
   test("matching metric emits no alert", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     // No vec_events rows and no genuinely-embedded events → reported == ground == 0.
     const summary = await observabilityGuardTick(db, undefined, { now: FIXED_NOW });
 
@@ -222,7 +222,7 @@ const countFloodAlerts = (
 
 describe("observabilityGuardTick — error-flood watch", () => {
   test("same (where,message) repeated past threshold emits one error_flood_alert naming the culprit", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     const where = "daemon.worker.sql_worker";
     const message = "sql_worker_query_failed:no such module: vec0";
     // 60 (> 50 threshold) of the SAME error, all inside the 1h flood window.
@@ -249,7 +249,7 @@ describe("observabilityGuardTick — error-flood watch", () => {
   });
 
   test("a diversity of distinct errors (each below threshold) emits NO alert", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     // 10 distinct errors, 10 occurrences each (< 50) → benign diversity.
     for (let g = 0; g < 10; g += 1) {
       for (let i = 0; i < 10; i += 1) {
@@ -264,7 +264,7 @@ describe("observabilityGuardTick — error-flood watch", () => {
   });
 
   test("idempotency — second tick in the same flood window does not re-alert", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     const where = "daemon.worker.sql_worker";
     const message = "sql_worker_query_failed:no such module: vec0";
     for (let i = 0; i < 60; i += 1) {

@@ -5,6 +5,7 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import type { SandboxDecl } from "../substrate/types";
 import { closeDb, openDb } from "../substrate/db";
 import { insertArtifact } from "./artifact_store";
 import {
@@ -25,18 +26,26 @@ const insertRow = (
   overrides: {
     body?: string;
     name?: string | null;
-    runtime?: "bun" | "uv" | "camofox-browser";
+    // This helper builds a cpu_ms/wall_ms/memory_mb sandbox, which is the
+    // BunSandboxDecl / UvSandboxDecl shape (camofox uses browser_* fields and
+    // is exercised separately via inferKindFromSandbox with raw JSON).
+    runtime?: "bun" | "uv";
     stateRoot?: string;
     kind?: string;
     sourceCandidateId?: string | null;
   } = {},
 ): void => {
+  const runtime = overrides.runtime ?? "bun";
+  const declaredSandbox: SandboxDecl =
+    runtime === "uv"
+      ? { runtime: "uv", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 }
+      : { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 };
   insertArtifact(db, {
     id,
-    runtime: overrides.runtime ?? "bun",
+    runtime,
     kind: overrides.kind ?? "code_artifact",
     body: overrides.body ?? "noop",
-    declaredSandbox: { runtime: overrides.runtime ?? "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+    declaredSandbox,
     stateRoot: overrides.stateRoot ?? "test/legacy_default",
     posteriorAlpha: 1,
     posteriorBeta: 1,

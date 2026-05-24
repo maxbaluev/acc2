@@ -184,14 +184,14 @@ describe("reconcileOrphanedDispatches — emits dispatch_recovered_orphan", () =
     expect(recovered.length).toBe(1);
     const closes = eventsByKind(db, "brain_dispatch_closed");
     expect(closes.length).toBe(1);
-    const closePayload = JSON.parse(closes[0]!.payload) as Record<string, unknown>;
+    const closePayload = JSON.parse(closes[0]!.payload as string) as Record<string, unknown>;
     expect(closePayload.reason).toBe("restart_orphan_recovered");
     expect(closePayload.dispatch_id).toBe("disp_lease_xyz");
     expect(typeof closePayload.original_dispatch_event_id).toBe("string");
     // The dispatch_recovered_orphan now also carries recovery_close_event_id
     // for traceability.
     const orphans = eventsByKind(db, "dispatch_recovered_orphan");
-    const orphanPayload = JSON.parse(orphans[0]!.payload) as Record<string, unknown>;
+    const orphanPayload = JSON.parse(orphans[0]!.payload as string) as Record<string, unknown>;
     expect(orphanPayload.recovery_close_event_id).toBe(closes[0]!.id);
   });
 
@@ -332,10 +332,10 @@ describe("reconcileStaleDispatches — mid-session zombie sweep", () => {
     // brain_dispatch_closed with reason='stale_orphan_recovered'.
     const closes = eventsByKind(db, "brain_dispatch_closed");
     expect(closes.length).toBe(1);
-    const closePayload = JSON.parse(closes[0]!.payload) as Record<string, unknown>;
+    const closePayload = JSON.parse(closes[0]!.payload as string) as Record<string, unknown>;
     expect(closePayload.reason).toBe("stale_orphan_recovered");
     expect(closePayload.dispatch_id).toBe("disp_stale");
-    const orphanPayload = JSON.parse(orphans[0]!.payload) as Record<string, unknown>;
+    const orphanPayload = JSON.parse(orphans[0]!.payload as string) as Record<string, unknown>;
     expect(orphanPayload.recovery_close_event_id).toBe(closes[0]!.id);
   });
 

@@ -637,7 +637,7 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       );
       // Explicit checkoutIsolation MUST be honored verbatim; the ephemeral
       // workspace path is only the default-when-absent behavior.
-      expect(capturedCwd).toBe(declaredRoot);
+      expect(capturedCwd as string | undefined).toBe(declaredRoot);
       expect(capturedEnv).not.toBeNull();
       expect(capturedEnv!.ACC2_CHECKOUT_ISOLATION_ROOT).toBe(declaredRoot);
       expect(capturedEnv!.ACC2_CHECKOUT_ISOLATION_REASON).toBe("test_isolation");
@@ -843,7 +843,7 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       "runtime.trajectory_replay",
       "runtime.prompt_self_inspect",
     ];
-    expect([...V2_MCP_TOOL_SURFACE].sort()).toEqual([...expected].sort());
+    expect(([...V2_MCP_TOOL_SURFACE] as string[]).sort()).toEqual([...expected].sort());
   });
 
   test("auth pre-flight: opencode has no auth providers → HIDL emitted and dispatch skipped", async () => {

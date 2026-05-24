@@ -83,7 +83,7 @@ const findEvents = (
 
 describe("event_authenticity_worker (Tier -1)", () => {
   test("emits event_authenticity_check with residual=0 on clean DB", () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     // Seed a handful of canonical-origin events
     insertRawEvent(db, { kind: "directive_opened", substrate_origin: "claude" });
     insertRawEvent(db, { kind: "task_node_opened", substrate_origin: "brain" });
@@ -104,7 +104,7 @@ describe("event_authenticity_worker (Tier -1)", () => {
   });
 
   test("emits integrity_check_failed when a row with unknown substrate_origin is seeded", () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     insertRawEvent(db, { kind: "directive_opened", substrate_origin: "claude" });
     // Tamper row — substrate_origin not in the canonical set
     insertRawEvent(db, { kind: "directive_opened", substrate_origin: "unknown" });
@@ -129,7 +129,7 @@ describe("event_authenticity_worker (Tier -1)", () => {
 
 describe("storage_integrity_worker (Tier -1)", () => {
   test("emits storage_integrity_check with status=ok on a fresh DB", () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     const summary = storageIntegrityWorkerTick(db, { now: FIXED_NOW, minGapMs: 0 });
     expect(summary.skipped).toBe(false);
     expect(summary.integrity_status).toBe("ok");
@@ -145,7 +145,7 @@ describe("storage_integrity_worker (Tier -1)", () => {
   });
 
   test("also emits wal_checkpointed event on the same tick", () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     storageIntegrityWorkerTick(db, { now: FIXED_NOW, minGapMs: 0 });
 
     const row = findEvent(db, "wal_checkpointed");
@@ -160,7 +160,7 @@ describe("storage_integrity_worker (Tier -1)", () => {
 
 describe("deterministic_computation_worker (Tier -1)", () => {
   test("emits deterministic_computation_check with sampled=0 on a DB with no eligible action_scored events", () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     const summary = deterministicComputationWorkerTick(db, { now: FIXED_NOW, minGapMs: 0 });
     expect(summary.emitted_kind).toBe("deterministic_computation_check");
     expect(summary.sampled).toBe(0);
@@ -177,7 +177,7 @@ describe("deterministic_computation_worker (Tier -1)", () => {
   });
 
   test("idempotency — second tick within minGapMs is a no-op (skipped)", () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     // Use real-time now so the lastEmitTsMs read (which sees real-time
     // emit ts) lands inside the min-gap window after the first emit.
     const realNow = new Date();

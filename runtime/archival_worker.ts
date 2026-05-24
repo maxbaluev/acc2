@@ -703,7 +703,7 @@ export const runDropSweep = async (
   if (ids.length === 0) return summary;
 
   const rowsForSummary = hotDb
-    .query<{ id: string; kind: string; ts: string }>(`SELECT id, kind, ts FROM events WHERE id IN (${ids.map(() => "?").join(", ")})`)
+    .query<{ id: string; kind: string; ts: string }, string[]>(`SELECT id, kind, ts FROM events WHERE id IN (${ids.map(() => "?").join(", ")})`)
     .all(...ids) as Array<{ id: string; kind: string; ts: string }>;
   recordArchiveSummary(hotDb, rowsForSummary, "drop");
 

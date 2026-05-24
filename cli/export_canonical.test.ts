@@ -8,6 +8,7 @@ import { Database } from "bun:sqlite";
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { runAdmin } from "./admin";
+import { defaultVersionEnv } from "../runtime/opencode_version";
 import { runExportCanonical, runExportCanonicalCmd } from "./admin_export_canonical";
 
 type Db = ReturnType<typeof openDb>;
@@ -221,7 +222,7 @@ describe("acc admin export-canonical", () => {
 
     const out: string[] = [];
     const routed = await runAdmin(["export-canonical", outPath, "--yes"], {
-      version: { spawnSync: () => ({ status: 0, stdout: "", stderr: "" }) },
+      version: { ...defaultVersionEnv(), spawn: () => ({ status: 0, stdout: "", stderr: "" }) },
       stopDaemon: async () => false,
       startDaemon: async () => undefined,
       prompt: async () => "y",

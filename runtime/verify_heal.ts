@@ -105,7 +105,7 @@ export const verifyHealWorkerTick = (
         corrective_for_proposal_id: proposalId,
         corrective_for_contradiction_event_id: row.id,
         source_directive_id: row.directive_id,
-        original_commit_sha: commitSha,
+        original_commit_sha: commitSha ?? null,
       },
     });
 

@@ -448,6 +448,9 @@ export const dispatchReadyTask = async (
           if (!artifact) {
             return { ok: false, result: null, error: "artifact_not_found:" + artifactId };
           }
+          if (!artifact.declaredSandbox) {
+            return { ok: false, result: null, error: "artifact_not_executable:" + artifactId };
+          }
           const observation = await deps.runArtifact!({
             artifactId: artifact.id,
             body: artifact.body,
@@ -1042,7 +1045,14 @@ export const dispatchReadyTask = async (
   if (actionPredicted && actionPredicted.action_artifact_id && actionPredicted.verifier_artifact_id) {
     const actionArtifact = getArtifact(db, actionPredicted.action_artifact_id);
     const verifierArtifact = getArtifact(db, actionPredicted.verifier_artifact_id);
-    if (actionArtifact && verifierArtifact) {
+    if (
+      actionArtifact &&
+      verifierArtifact &&
+      actionArtifact.declaredSandbox &&
+      verifierArtifact.declaredSandbox
+    ) {
+      const actionSandbox = actionArtifact.declaredSandbox;
+      const verifierSandbox = verifierArtifact.declaredSandbox;
       // Run action/verifier through the declared runtime, not a bun-only lane.
       // Universal act() requires the same observation + residual wrapper for bun,
       // uv, and camofox-browser; runtime-specific sandboxing belongs inside the
@@ -1060,7 +1070,7 @@ export const dispatchReadyTask = async (
       const actionObs = await runArtifact({
         artifactId: actionArtifact.id,
         body: actionArtifact.body,
-        declaredSandbox: actionArtifact.declaredSandbox,
+        declaredSandbox: actionSandbox,
         inputs: actionInputs,
         emit: (ev) => {
           emitEvent(db, {
@@ -1243,7 +1253,7 @@ export const dispatchReadyTask = async (
           invoke: () => runArtifact({
             artifactId: verifierArtifact.id,
             body: verifierArtifact.body,
-            declaredSandbox: verifierArtifact.declaredSandbox,
+            declaredSandbox: verifierSandbox,
             inputs: actionObs.result as JsonValue,
             emit: (ev) => {
               emitEvent(db, {
@@ -1508,7 +1518,7 @@ export const dispatchReadyTask = async (
               substrate_origin: "substrate_auto",
               directive_id: task.directive_id,
               task_id: task.id,
-              outcome: "committed",
+              outcome: "succeeded",
               residual: closureResidual,
               payload: {
                 dispatch_id: dispatchId,

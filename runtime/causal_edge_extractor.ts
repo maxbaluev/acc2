@@ -13,7 +13,7 @@
 //
 // Bounded: yields every 25 acts; LIMIT 500 acts per tick.
 
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { emitEvent } from "./events";
 import { betaMean, betaStreamConfidence } from "./posterior";
 import { poolQuery } from "./sql_pool_singleton";
@@ -110,7 +110,7 @@ const edgeRowInsertParams = (
   a: string,
   b: string,
   ts: string,
-): unknown[] => {
+): SQLQueryBindings[] => {
   const body = JSON.stringify({ edge_class: edgeClass, node_a: a, node_b: b });
   const declaredSandbox = JSON.stringify({
     runtime: "bun",
@@ -318,7 +318,7 @@ const creditEdgesFromActResiduals = async (
     residual: number;
     updatedAt: string;
   };
-  type PlannedInsert = { id: string; params: unknown[] };
+  type PlannedInsert = { id: string; params: SQLQueryBindings[] };
   type PlannedEmit = {
     edgeId: string;
     actId: string;

@@ -33,6 +33,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { openDb } from "../substrate/db";
+import { resolveDbPath } from "../runtime/state_paths";
 
 type ExportedKnowledge = {
   tier: "law" | "knowledge" | "policy_bundle";
@@ -248,7 +249,7 @@ export const runExportKnowledge = async (argv: string[], env: ExportKnowledgeEnv
     env.err("  Verify you have the authority to share; then re-run with --yes.");
     return 1;
   }
-  const db = (env.openSubstrate ?? openDb)();
+  const db = env.openSubstrate ? env.openSubstrate() : openDb(resolveDbPath());
   const exported = buildAnonymisedExport(db);
   const absPath = resolve(path);
   mkdirSync(dirname(absPath), { recursive: true });

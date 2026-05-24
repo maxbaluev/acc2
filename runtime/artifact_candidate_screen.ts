@@ -127,6 +127,7 @@ type CandidatePayload = {
   kind?: unknown;
   name?: unknown;
   audience?: unknown;
+  runtime?: unknown;
   source_candidate_id?: unknown;
   cited_knowledge_ids?: unknown;
 };

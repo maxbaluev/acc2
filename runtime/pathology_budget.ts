@@ -64,7 +64,12 @@ export type PathologyKind =
   // unimplementable action because it has no checkout-mutation lane.
   // Weight 3 — same severity as a dag_explosion (both are "brain is
   // looping without converging" signals).
-  | "brain_stuck_repeating_action";
+  | "brain_stuck_repeating_action"
+  // Supervisor no-closure-progress detector: a directive's tasks keep
+  // re-dispatching closure audits without the closure_residual ever
+  // dropping below threshold — the loop spins without converging.
+  // Weight 3 — same severity class as the other non-convergence signals.
+  | "no_closure_progress_loop";
 
 const DEFAULT_WEIGHTS: Record<PathologyKind, number> = {
   bridge_failure_streak: 3,
@@ -76,6 +81,7 @@ const DEFAULT_WEIGHTS: Record<PathologyKind, number> = {
   verifier_residual_high: 1,
   dag_explosion: 3,
   brain_stuck_repeating_action: 3,
+  no_closure_progress_loop: 3,
 };
 
 const envWeight = (kind: PathologyKind): number => {

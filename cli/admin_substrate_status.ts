@@ -18,7 +18,7 @@
 // directly with `mode=ro`) so calling this while the daemon is up
 // won't race writes.
 
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { resolveDbPath } from "../runtime/state_paths";
@@ -28,7 +28,6 @@ import {
   HEALTH_METRIC_KINDS,
 } from "../substrate/event_kinds";
 import { retainedEvictedCount } from "../runtime/archival_worker";
-import { join } from "node:path";
 
 export type SubstrateStatusEnv = {
   openSubstrate?: (path?: string) => Database;
@@ -38,8 +37,7 @@ export type SubstrateStatusEnv = {
 };
 
 const defaultStateDbPath = (): string => {
-  const repoRoot = join(import.meta.dirname ?? ".", "..");
-  return resolveDbPath(repoRoot);
+  return resolveDbPath();
 };
 
 const defaultEnv = (): SubstrateStatusEnv => ({
@@ -49,7 +47,7 @@ const defaultEnv = (): SubstrateStatusEnv => ({
   err: (line) => console.error(line),
 });
 
-const safeCount = (db: Database, sql: string, params: unknown[] = []): number => {
+const safeCount = (db: Database, sql: string, params: SQLQueryBindings[] = []): number => {
   try {
     return (db.query(sql).get(...params) as { c: number } | null)?.c ?? 0;
   } catch (err) {
@@ -58,7 +56,7 @@ const safeCount = (db: Database, sql: string, params: unknown[] = []): number =>
   }
 };
 
-const safeScalar = <T = unknown>(db: Database, sql: string, params: unknown[] = []): T | null => {
+const safeScalar = <T = unknown>(db: Database, sql: string, params: SQLQueryBindings[] = []): T | null => {
   try {
     return (db.query(sql).get(...params) as T | null) ?? null;
   } catch {
@@ -133,7 +131,7 @@ export const computeSubstrateStatus = (
   const embeddablePending = safeCount(
     db,
     `SELECT COUNT(*) AS c FROM events WHERE kind IN (${placeholders}) AND embedding IS NULL`,
-    EMBEDDABLE_KINDS as unknown as unknown[],
+    [...EMBEDDABLE_KINDS] as SQLQueryBindings[],
   );
   const embeddableTotal = vecEvents + embeddablePending;
   const nonEmbeddableSkipped = safeCount(
@@ -198,7 +196,7 @@ export const computeSubstrateStatus = (
     `SELECT ts FROM events
      WHERE embedding IS NULL AND kind IN (${placeholders})
      ORDER BY ts ASC LIMIT 1`,
-    EMBEDDABLE_KINDS as unknown as unknown[],
+    [...EMBEDDABLE_KINDS] as SQLQueryBindings[],
   );
 
   // Verdict computation is centralised in `substrate/liveness.ts` so

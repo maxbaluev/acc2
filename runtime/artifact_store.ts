@@ -95,11 +95,23 @@ export type InsertArtifactInput = Omit<
   | "supersededBy"
   | "lostVersionCount"
   | "kind"
+  | "intent"
+  | "summary"
+  | "targetFiles"
+  | "sourceCandidateId"
+  | "ownerGateVerdict"
 > & {
   id?: string;
   /** Optional kind discriminator. Defaults to `runtime_action` on
    *  insert when omitted (matches the schema default). */
   kind?: string;
+  /** Provenance / intent fields default to NULL on insert when omitted
+   *  (matches the schema default and the legacy-seed semantics). */
+  intent?: string | null;
+  summary?: string | null;
+  targetFiles?: string[] | null;
+  sourceCandidateId?: string | null;
+  ownerGateVerdict?: ActArtifactRow["ownerGateVerdict"];
   targetResources?: ResourceRef[] | string[] | null;
   supersedes?: string | null;
   supersededBy?: string | null;
@@ -242,12 +254,12 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): ActArt
       input.name,
       fixtureInputJson,
       fixtureExpected,
-      input.intent,
-      input.summary,
+      input.intent ?? null,
+      input.summary ?? null,
       targetFiles ? JSON.stringify(targetFiles) : null,
       targetResources ? JSON.stringify(targetResources.map((r) => r.uri)) : null,
-      input.sourceCandidateId,
-      input.ownerGateVerdict,
+      input.sourceCandidateId ?? null,
+      input.ownerGateVerdict ?? null,
       input.supersedes ?? null,
       input.supersededBy ?? null,
       input.lostVersionCount ?? 0,

@@ -28,7 +28,7 @@
 // to do with the ranking.
 
 import type { Database } from "bun:sqlite";
-import type { TaskNode } from "../substrate/types";
+import type { TaskNode } from "./task_topology";
 
 const STRATEGY_KIND_TAG = "dispatch_strategy_v1";
 

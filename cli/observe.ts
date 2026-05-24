@@ -62,7 +62,7 @@ type EventLike = {
   directive_id?: string;
   task_id?: string;
   substrate_origin?: string;
-  failure_kind?: string;
+  failure_kind?: string | null;
   payload?: unknown;
 };
 

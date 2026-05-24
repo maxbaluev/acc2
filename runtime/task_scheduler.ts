@@ -519,7 +519,7 @@ const closureAuditRedispatchCount = (db: Database, task: TaskNode): number => {
   let cur: string | undefined = task.id;
   const seen = new Set<string>([cur]);
   while (cur && refinesInto.has(cur)) {
-    const parent = refinesInto.get(cur)!;
+    const parent: string = refinesInto.get(cur)!;
     if (seen.has(parent)) break; // cycle defense
     seen.add(parent);
     lineage.add(parent);
@@ -710,7 +710,7 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
         substrate_origin: "substrate_auto",
         directive_id: task.directive_id,
         task_id: task.id,
-        outcome: "superseded_for_closure_audit",
+        outcome: "amended",
         context_refs: deliverableEvidence,
         payload: {
           reason: "deliverable_without_closure_superseded_by_closure_audit",

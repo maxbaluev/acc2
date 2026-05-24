@@ -100,7 +100,7 @@ const findHidlForSource = (
 
 describe("owner_outcome_followup_worker", () => {
   test("emits hidl_action_required for eligible applied change past the window", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     const id = insertAppliedChange(db, {
       ts: oldTs(ONE_DAY_MS + 60_000),
       status: "applied",
@@ -126,7 +126,7 @@ describe("owner_outcome_followup_worker", () => {
   });
 
   test("skips recent applied changes (within window)", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     insertAppliedChange(db, {
       ts: oldTs(60_000), // 1 minute old, well within the 24h window
       status: "applied",
@@ -141,7 +141,7 @@ describe("owner_outcome_followup_worker", () => {
   });
 
   test("skips applied changes with prior followup (idempotent)", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     const id = insertAppliedChange(db, {
       ts: oldTs(ONE_DAY_MS + 60_000),
       status: "applied",
@@ -158,7 +158,7 @@ describe("owner_outcome_followup_worker", () => {
   });
 
   test("newly-aged change is reachable even behind maxRows already-followed older changes (starvation regression)", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     // Seed maxRows older applied changes that ALL already have a follow-up.
     // Pre-fix, these consumed the entire `ORDER BY ts ASC LIMIT maxRows`
     // window and the newly-aged change below was never reached.
@@ -185,7 +185,7 @@ describe("owner_outcome_followup_worker", () => {
   });
 
   test("skips applied changes whose status is not 'applied'", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     insertAppliedChange(db, {
       ts: oldTs(ONE_DAY_MS + 60_000),
       status: "failed",
@@ -208,7 +208,7 @@ describe("owner_outcome_followup_worker", () => {
   });
 
   test("dryRun mode: counts eligibility but does not emit", async () => {
-    const db = openDb();
+    const db = openDb(":memory:");
     const id = insertAppliedChange(db, {
       ts: oldTs(ONE_DAY_MS + 60_000),
       status: "applied",

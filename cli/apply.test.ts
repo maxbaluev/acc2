@@ -56,6 +56,15 @@ const rpc = async (toolName: string, args: Record<string, unknown>) => {
   }
 };
 
+/** Narrow an MCP result to its success payload (or fail the test). The
+ *  `expect` calls don't narrow the discriminated union for TS, so this
+ *  guard does the narrowing AND the assertion in one place. */
+const okResult = (env: { ok: boolean; result?: unknown; error?: string }): unknown => {
+  expect(env.ok).toBe(true);
+  if (!env.ok) throw new Error(`expected ok result, got error: ${env.error}`);
+  return env.result;
+};
+
 const captureConsole = (): { out: string[]; err: string[]; restore: () => void } => {
   const out: string[] = [];
   const err: string[] = [];
@@ -124,7 +133,7 @@ const emitLesson = async (
     },
   });
   expect(env.ok).toBe(true);
-  return (env.result as { id: string }).id;
+  return (okResult(env) as { id: string }).id;
 };
 
 beforeAll(async () => {
@@ -201,7 +210,7 @@ describe("runApply gates", () => {
       },
     });
     expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
+    const eventId = (okResult(env) as { id: string }).id;
 
     const cap = captureConsole();
     const code = await runApply([eventId]);
@@ -231,7 +240,7 @@ describe("runApply gates", () => {
     expect(requestCount.n).toBe(0);
     const scoreUpdateCount = db
       .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'act_artifact_score_updated' AND EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?)")
-      .get(gateScore.id) as { n: number };
+      .get(gateScore.id as string) as { n: number };
     expect(scoreUpdateCount.n).toBe(0);
   });
 
@@ -258,7 +267,7 @@ describe("runApply gates", () => {
       confidence: 0.99,
       recentResidualMean: 0,
       recentKillCount: 0,
-      status: "active",
+      status: "admitted",
       name: "apply_route_predicate_action",
       fixtureInput: null,
       fixtureExpectedResidual: null,
@@ -289,7 +298,7 @@ describe("runApply gates", () => {
       },
     });
     expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
+    const eventId = (okResult(env) as { id: string }).id;
 
     const cap = captureConsole();
     const code = await runApply([eventId]);
@@ -324,7 +333,7 @@ describe("runApply gates", () => {
       },
     });
     expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
+    const eventId = (okResult(env) as { id: string }).id;
 
     const cap = captureConsole();
     const code = await runApply([eventId]);
@@ -383,7 +392,7 @@ describe("runApply gates", () => {
       },
     });
     expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
+    const eventId = (okResult(env) as { id: string }).id;
 
     const cap = captureConsole();
     const code = await runApply([eventId]);
@@ -418,7 +427,7 @@ describe("runApply gates", () => {
       },
     });
     expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
+    const eventId = (okResult(env) as { id: string }).id;
 
     const cap = captureConsole();
     const code = await runApply([eventId]);
@@ -449,7 +458,7 @@ describe("runApply gates", () => {
       },
     });
     expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
+    const eventId = (okResult(env) as { id: string }).id;
 
     const cap = captureConsole();
     const code = await runApply([eventId]);
@@ -487,7 +496,7 @@ describe("runApply gates", () => {
       },
     });
     expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
+    const eventId = (okResult(env) as { id: string }).id;
 
     const cap = captureConsole();
     const code = await runApply([eventId]);
@@ -519,7 +528,7 @@ describe("runApply gates", () => {
       },
     });
     expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
+    const eventId = (okResult(env) as { id: string }).id;
 
     const cap = captureConsole();
     const code = await runApply([eventId]);
@@ -555,7 +564,7 @@ describe("runApply gates", () => {
       },
     });
     expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
+    const eventId = (okResult(env) as { id: string }).id;
 
     const cap = captureConsole();
     const code = await runApply([eventId]);
@@ -587,7 +596,7 @@ describe("runApply gates", () => {
       },
     });
     expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
+    const eventId = (okResult(env) as { id: string }).id;
 
     const cap = captureConsole();
     const code = await runApply([eventId]);
@@ -623,7 +632,7 @@ describe("runApply gates", () => {
       },
     });
     expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
+    const eventId = (okResult(env) as { id: string }).id;
 
     const cap = captureConsole();
     const code = await runApply([eventId]);
@@ -762,7 +771,7 @@ describe("runApply gates", () => {
       },
     });
     expect(env.ok).toBe(true);
-    const eventId = (env.result as { id: string }).id;
+    const eventId = (okResult(env) as { id: string }).id;
 
     const cap = captureConsole();
     const code = await runApply([eventId]);

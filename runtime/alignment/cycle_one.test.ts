@@ -111,7 +111,7 @@ describe("alignment / cycle_one (Principle 3)", () => {
       // shape and matches how the dispatcher emits dispatcher_violation.
       expect(result.reason.kind).toBe("subprocess_crash");
     }
-    expect(killedSignal).toBe("SIGTERM");
+    expect(killedSignal as string | null).toBe("SIGTERM");
     const failedRow = db
       .query("SELECT payload FROM events WHERE kind = 'bridge_failed' ORDER BY ts DESC LIMIT 1")
       .get() as { payload: string } | null;

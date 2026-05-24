@@ -141,7 +141,7 @@ export type DaemonOpts = {
 
 export type DaemonHandle = {
   /** Auxiliary Bun.serve server (port = auxPort). */
-  server: Server;
+  server: Server<unknown>;
   /** FastMCP server on the primary port (transport = httpStream). */
   mcpServer: FastMCP;
   db: Database;
@@ -2608,7 +2608,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
 
   // Declare `stop` BEFORE Bun.serve so the fetch closure can capture it; the
   // handles are filled in after binding succeeds.
-  let auxServer: Server | null = null;
+  let auxServer: Server<unknown> | null = null;
   let mcpServer: FastMCP | null = null;
   let stopped = false;
   /** Bounded graceful drain on shutdown (amendment 8EAKQCJW5D).
@@ -3292,6 +3292,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     }
   };
   setTimeout(() => { void runBootIntegrityCheck(); }, BOOT_HEAVY_PASS_DELAY_MS).unref();
+
+  // By this point both servers have bound (the bind paths above throw on
+  // failure), so neither handle can be null. Assert the invariant so the
+  // returned DaemonHandle's non-null contract holds.
+  if (!auxServer || !mcpServer) {
+    throw new Error("daemon boot completed without binding both servers");
+  }
 
   return {
     server: auxServer,

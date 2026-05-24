@@ -13,7 +13,7 @@
 // would be a massive churn AND would conflict with the constraint of
 // touching only the 5 highest-leverage callsites.
 
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { SqlWorkerPool } from "./sql_worker_pool";
 
 let pool: SqlWorkerPool | null = null;
@@ -44,7 +44,7 @@ export const clearSqlPool = (): void => {
 export const poolQuery = async <T = unknown>(
   db: Database,
   sql: string,
-  params: unknown[] = [],
+  params: SQLQueryBindings[] = [],
 ): Promise<T[]> => {
   const p = pool;
   if (p) {

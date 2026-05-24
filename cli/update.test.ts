@@ -18,7 +18,7 @@ const makeEnv = (opts: {
     opts.calls.push({ cmd, args });
     if (args[0] === "rev-parse") return { status: 0, stdout: "abc1234deadbeef\n", stderr: "" } as never;
     return { status: 0, stdout: "", stderr: "" } as never;
-  }) as UpdateEnv["spawnSync"],
+  }) as unknown as UpdateEnv["spawnSync"],
   startDaemon: async () => { opts.events.push("START"); },
   stopDaemon: async () => { opts.events.push("STOP"); return true; },
   healthOk: async () => opts.healthOk,

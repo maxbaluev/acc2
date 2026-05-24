@@ -235,7 +235,7 @@ describe("post-commit projection queue — default config yields aggressively (b
     c.advance(DEFAULT_POST_COMMIT_QUEUE_CONFIG.watchdogMs * 2);
     await c.flushDue();
     expect(fires.length).toBe(1);
-    resolveHang?.();
+    (resolveHang as (() => void) | null)?.();
   });
 });
 
@@ -274,7 +274,7 @@ describe("post-commit projection queue — fire-once watchdog (c)", () => {
     await c.flushDue();
     expect(watchdogFires.length).toBe(1);
     // Cleanup: let the hang resolve so no dangling promise.
-    resolveHang?.();
+    (resolveHang as (() => void) | null)?.();
   });
 
   test("slow-but-progressing work does NOT fire the watchdog", async () => {

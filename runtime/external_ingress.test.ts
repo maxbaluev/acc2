@@ -81,7 +81,7 @@ describe("POST /external/push", () => {
       body: JSON.stringify({ source: "test_source", kind: "owner_input_received", payload: {} }),
     });
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = await res.json() as { error: string };
     expect(body.error).toBe("kind_must_be_external_event_received");
   });
 

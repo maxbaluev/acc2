@@ -87,12 +87,12 @@ export const createLogger = (overrides?: { level?: pino.LevelWithSilent; file?: 
     if (filePath) {
       ensureDirFor(filePath);
       const streams: pino.StreamEntry[] = [
-        { level, stream: pino.destination({ dest: filePath, sync: false }) },
+        { level: level as pino.Level, stream: pino.destination({ dest: filePath, sync: false }) },
       ];
       // Stdout target: pretty in dev, raw JSON in prod. pino-pretty would
       // require its own transport worker; for the fanout case we keep
       // stdout as raw JSON to avoid the transport-thread complication.
-      streams.push({ level, stream: pino.destination(1) });
+      streams.push({ level: level as pino.Level, stream: pino.destination(1) });
       return pino({ level }, pino.multistream(streams));
     }
     if (isProd) {

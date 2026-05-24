@@ -76,7 +76,7 @@ const lastEmitTsMs = (db: Database, kind: string): number => {
 const recentlyQuarantined = (db: Database, verifierId: string): boolean => {
   try {
     const row = db
-      .query<{ c: number }, [string]>(
+      .query<{ c: number }, [string, string, string]>(
         `SELECT COUNT(*) AS c FROM events
           WHERE kind = 'act_artifact_quarantined'
             AND (action_artifact_id = ?

@@ -670,7 +670,7 @@ describe("derived sets match their pre-unification shape", () => {
     // verification is a smoke test that the derived `EventKind`
     // re-export from `substrate/types.ts` matches the registry's
     // keyspace.
-    const keys = Object.keys(EVENT_KINDS);
+    const keys = Object.keys(EVENT_KINDS) as Array<keyof typeof EVENT_KINDS>;
     // Each entry has all five flags.
     for (const k of keys) {
       const m = EVENT_KINDS[k];

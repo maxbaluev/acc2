@@ -11,7 +11,7 @@
 // untouched; the daemon (Phase B3) and any test that uses views must
 // invoke runViews(db) explicitly. Documented choice (per task brief).
 
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { lessonApplyTargetPolicyValuesSql } from "./lesson_apply_policy";
 import { EVENT_KINDS } from "./event_kinds";
 
@@ -5688,7 +5688,7 @@ export const dispatchResolved = (
  *  ordering. Same SQL, same row shape — only the execution thread differs. */
 export const dispatchResolvedPooled = async (
   db: Database,
-  poolQuery: <T>(db: Database, sql: string, params: unknown[]) => Promise<T[]>,
+  poolQuery: <T>(db: Database, sql: string, params: SQLQueryBindings[]) => Promise<T[]>,
   filter: { directiveId?: string; rootTaskId?: string; limit?: number } = {},
 ): Promise<DispatchResolvedRow[]> => {
   const { sql, params } = buildDispatchResolvedQuery(filter);
@@ -6154,6 +6154,8 @@ export const embeddingIndex = (db: Database): EmbeddingIndexRow[] => {
     embedding_version: (r.embedding_version as string | null) ?? null,
     substrate_origin: r.substrate_origin as string,
     payload: parseJson<Record<string, unknown>>(r.payload),
+    retrieval_aspects: parseJson<Record<string, unknown>>((r.retrieval_aspects as string | null) ?? "{}"),
+    retrieval_domains: parseJson<Record<string, number>>((r.retrieval_domains as string | null) ?? "{}"),
   }));
 };
 
@@ -6415,7 +6417,7 @@ export const promotedKnowledge = (
   filter: PromotedKnowledgeFilter = {},
 ): PromotedKnowledgeRow[] => {
   const wheres: string[] = [];
-  const params: unknown[] = [];
+  const params: SQLQueryBindings[] = [];
   if (filter.origin) { wheres.push("substrate_origin = ?"); params.push(filter.origin); }
   if (filter.since) { wheres.push("ts >= ?"); params.push(filter.since); }
   const whereSql = wheres.length === 0 ? "" : `WHERE ${wheres.join(" AND ")}`;
@@ -6632,7 +6634,7 @@ export const pendingContractAmendments = (
  *  byte-identical rows + ordering; only the execution thread differs. */
 export const pendingContractAmendmentsPooled = async (
   db: Database,
-  poolQuery: <T>(db: Database, sql: string, params: unknown[]) => Promise<T[]>,
+  poolQuery: <T>(db: Database, sql: string, params: SQLQueryBindings[]) => Promise<T[]>,
   opts?: { limit?: number; directiveId?: string },
 ): Promise<PendingContractAmendmentRow[]> => {
   const { sql, params } = buildPendingContractAmendmentsQuery(opts);

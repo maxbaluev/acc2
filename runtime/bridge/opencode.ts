@@ -1301,8 +1301,13 @@ export const spawnRealOpencode = async (
   // Stream stdout/stderr concurrently. A large stdout burst can contain
   // thousands of JSON lines; yield every few parsed lines so timers (notably
   // brain_liveness_heartbeat) and stderr backpressure keep moving in realtime.
-  const stdoutReader = proc.stdout.getReader();
-  const stderrReader = proc.stderr.getReader();
+  // spawn() was called with stdout/stderr: "pipe", so both are ReadableStreams.
+  // The broad `typeof Bun.spawn` return type unions every pipe mode, so narrow
+  // to the concrete pipe shape we requested.
+  const procStdout = proc.stdout as ReadableStream<Uint8Array>;
+  const procStderr = proc.stderr as ReadableStream<Uint8Array>;
+  const stdoutReader = procStdout.getReader();
+  const stderrReader = procStderr.getReader();
   const stdoutDecoder = new TextDecoder();
   const stderrDecoder = new TextDecoder();
   const DRAIN_YIELD_EVERY_LINES = 25;
@@ -1514,7 +1519,7 @@ export const spawnRealOpencode = async (
   };
 
   const bridgeElapsedMs = (): number => Math.max(0, Date.now() - bridgeStartedAtMs);
-  const budgetObserved = (terminalReason: string): Record<string, unknown> => ({
+  const budgetObserved = (terminalReason: string): Record<string, JsonValue> => ({
     terminal_reason: terminalReason,
     wall_ms: bridgeElapsedMs(),
     timeout_ms: timeoutMs,
@@ -2051,7 +2056,8 @@ export const spawnRealOpencode = async (
   // code alone (Batch 2.α hardening).
   if (opencodeErrorEvent) {
     cleanupConfig();
-    const msg = opencodeErrorEvent.message ?? "unknown opencode error";
+    const errorEvent: { name?: string; message?: string } = opencodeErrorEvent;
+    const msg = errorEvent.message ?? "unknown opencode error";
     const isAuth = stderrIndicatesAuthFailure(msg) || msg.toLowerCase().includes("auth");
     const reason: BridgeFailureReason = isAuth
       ? { kind: "auth_missing" }
@@ -2065,7 +2071,7 @@ export const spawnRealOpencode = async (
         db,
         req,
         "auth_expired",
-        `opencode structured error event ${opencodeErrorEvent.name ?? "UnknownError"}: ${msg.slice(0, 256)}`,
+        `opencode structured error event ${errorEvent.name ?? "UnknownError"}: ${msg.slice(0, 256)}`,
       );
     }
     emitEvent(db, {
@@ -2074,7 +2080,7 @@ export const spawnRealOpencode = async (
       directive_id: req.directiveId,
       task_id: req.taskId,
       payload: {
-        reason: `opencode_error_event:${opencodeErrorEvent.name ?? "UnknownError"}`,
+        reason: `opencode_error_event:${errorEvent.name ?? "UnknownError"}`,
         message: msg,
         mcp_handshake_ok: mcpHandshakeOk,
       } as JsonValue,

@@ -166,7 +166,9 @@ export type OwnerProfile = {
   things_to_never_do?: string[];
 };
 
-export const OWNER_PROFILE_DEFAULTS = {
+export const OWNER_PROFILE_DEFAULTS: Required<
+  Omit<OwnerProfile, "autonomy_score_floor" | "time_window">
+> & { time_window: OwnerProfileTimeWindow | null } = {
   detected_language: "en",
   rendering_signals: {},
   autonomy_signals: {},
@@ -174,19 +176,19 @@ export const OWNER_PROFILE_DEFAULTS = {
   risk_signals: {},
   collaboration_signals: {},
   goal_continuity_signals: {},
-  preferred_terms: [],
-  avoided_terms: [],
+  preferred_terms: [] as string[],
+  avoided_terms: [] as string[],
   exposed_concepts: {},
   understood_concepts: {},
   declined_concepts: {},
   observation_count: 0,
   autonomy_scope: { include: [], exclude: [] },
   autonomy_score: 0.5,
-  manual_review_patterns: [],
+  manual_review_patterns: [] as string[],
   time_window: null,
-  hot_topics: [],
-  things_to_never_do: [],
-} as const;
+  hot_topics: [] as string[],
+  things_to_never_do: [] as string[],
+};
 
 export const OWNER_PROFILE_JSON_SCHEMA = {
   type: "object",
@@ -298,7 +300,8 @@ export type TaskEdgeKind = "requires" | "refines" | "watches";
 // surface metadata. We re-export `EventKind` (derived as
 // `keyof typeof EVENT_KINDS`) so existing call sites keep compiling.
 
-export type { EventKind } from "./event_kinds";
+import type { EventKind } from "./event_kinds";
+export type { EventKind };
 
 // ── The event row (§4.1) ────────────────────────────────────────────
 

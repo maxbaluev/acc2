@@ -150,7 +150,8 @@ describe("solveTask — unified organism loop", () => {
     const filteredIds = res.selectOutcome?.filtered_out.map((f) => f.id) ?? [];
     expect(filteredIds).toContain("u-slop");
     // A clean survivor was selected.
-    expect(["u1", "u2"]).toContain(res.selected?.id);
+    expect(res.selected?.id).toBeDefined();
+    expect(["u1", "u2"]).toContain(res.selected!.id);
     expect(res.prediction?.basis).not.toBe("sufficient");
   });
 

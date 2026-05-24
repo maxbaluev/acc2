@@ -727,7 +727,7 @@ export const scenarioExternalPushRetrievable = async (handle: DaemonHandle): Pro
   const originalFetch = globalThis.fetch;
   const originalKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "sk-harness-mock";
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : (input instanceof URL ? input.toString() : (input as Request).url);
     if (url.includes("/embeddings")) {
       // Parse the request to determine batch size + seed the embedding from

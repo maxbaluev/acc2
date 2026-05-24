@@ -399,7 +399,7 @@ describe("task_scheduler", () => {
         .get() as { c: number };
       expect(dispatched.c).toBe(0);
     } finally {
-      closeDb(db);
+      closeDb();
     }
   }, 10_000);
 

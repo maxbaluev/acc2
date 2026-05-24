@@ -193,6 +193,7 @@ export const EVENT_KINDS = {
   // declared weight in the knowledge posterior math.
   knowledge_contradiction_observed:        { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   knowledge_promoted:                      { producer: "substrate", embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  origin_promoted:                         { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   knowledge_demoted:                       { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   contradictory_candidates:                { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // Knowledge audit bc5vdkrik finding #4 (2026-05-15): emitted by the

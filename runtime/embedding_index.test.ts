@@ -2,6 +2,7 @@
 // KNN ordering correctness, optional kind filter.
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import type { SQLQueryBindings } from "bun:sqlite";
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { emitEvent } from "./events";
@@ -116,6 +117,8 @@ describe("EmbeddingIndex.add + knn", () => {
       task_id: "t1",
       substrate_origin: "claude_root",
       embedding_version: EMBEDDING_VERSION,
+      retrieval_aspects: {},
+      retrieval_domains: {},
       snippet: "synthetic",
     });
     expect(idx.size()).toBe(1);
@@ -240,7 +243,7 @@ describe("EmbeddingIndex.knnAsync (off-loop vec0 KNN — byte-identical to knn)"
   // on a microtask so the call genuinely returns a Promise off the call stack
   // (proving knnAsync awaits rather than reading inline).
   const makeRead = (db: ReturnType<typeof openDb>) =>
-    async <T = unknown>(sql: string, params: unknown[]): Promise<T[]> => {
+    async <T = unknown>(sql: string, params: SQLQueryBindings[]): Promise<T[]> => {
       await Promise.resolve();
       return (params.length > 0 ? db.query(sql).all(...params) : db.query(sql).all()) as T[];
     };

@@ -74,7 +74,7 @@ export const runObserveOutcome = async (argv: string[]): Promise<number> => {
     return 1;
   }
   const signal = String(flags.signal ?? flags.verdict ?? "");
-  const { buildOwnerOutcomeEmitInput } = await import("../runtime/owner_outcome_channel");
+  const { recordOwnerObservedOutcomeViaMcp, ownerOutcomeResidualAdjustment } = await import("../runtime/owner_outcome_channel");
   const reason = typeof flags.reason === "string" ? flags.reason : null;
 
   const refEnv = await mcpCall("substrate.get_event", { id: eventId });
@@ -104,29 +104,22 @@ export const runObserveOutcome = async (argv: string[]): Promise<number> => {
     );
   }
 
-  const eventInput = buildOwnerOutcomeEmitInput({
-    id: refRow.id,
-    kind: refRow.kind as never,
-    directive_id: refRow.directive_id ?? "directive_root",
-    task_id: refRow.task_id ?? "task_root",
-    payload: refRow.payload as never,
-    context_refs: refRow.context_refs ?? [],
-    residual: refRow.residual,
-  }, {
+  const emitted = await recordOwnerObservedOutcomeViaMcp(mcpCall, {
     signal,
-    target: { event_id: eventId },
-    reason,
-    observation: reason,
+    text: reason ?? undefined,
+    target: {
+      directive_id: refRow.directive_id,
+      task_id: refRow.task_id,
+      source_applied_change_event_id: eventId,
+    },
   });
-  const emit = await mcpCall("substrate.emit", eventInput);
-  if (!emit.ok) {
-    process.stderr.write(`acc observe: emit failed — ${emit.error}\n`);
+  if (!emitted) {
+    process.stderr.write(`acc observe: could not record owner outcome for ${eventId} (no matching applied/committed event)\n`);
     return 1;
   }
-  const out = emit.result as { event_id?: string; id?: string } | null;
-  const newId = out?.event_id ?? out?.id ?? "?";
+  const verdict = ownerOutcomeResidualAdjustment(signal).verdict;
   process.stdout.write(
-    `owner_observed_outcome_recorded ${newId} verdict=${(eventInput.payload as { verdict?: string }).verdict ?? "partial"} source=${eventId}` +
+    `owner_observed_outcome_recorded ${emitted.id} verdict=${verdict} source=${eventId}` +
     (reason ? ` reason=${JSON.stringify(reason)}` : "") + "\n",
   );
   return 0;
