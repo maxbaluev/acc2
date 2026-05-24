@@ -61,9 +61,23 @@ export const gatherTrustMetrics = (db: Database): TrustMetrics => {
         AND json_extract(payload,'$.closure_residual') IS NOT NULL`,
   ).get() as { a: number | null; mn: number | null; mx: number | null; c: number };
   const closure_residual_7d = { avg: num(cw?.a), min: num(cw?.mn), max: num(cw?.mx), count: num(cw?.c) };
+  // Audit #3 collapse (owner-approved 2026-05-16): contract_amendment_applied was
+  // folded into applied_change_committed. Apply rows are projected from
+  // act_tuple_recorded, so payload.source_kind is always the literal
+  // "act_tuple_recorded" — the originating proposal kind lives only on the source
+  // event referenced by payload.source_event_id. Join to that proposal and keep
+  // only rows whose proposal is a contract_amendment_proposed. The status literals
+  // the apply path actually writes are "applied" / "failed" / "refused"
+  // (cli/apply.ts subagent schema + recordApplyOutcome default; the act-tuple
+  // projection emits "applied"|"failed" in runtime/events.ts), so the bucket
+  // comparisons below are unchanged.
   const amRows = db.query(
-    `SELECT json_extract(payload,'$.status') AS status, COUNT(*) AS c FROM events
-      WHERE kind='contract_amendment_applied' AND JULIANDAY('now') - JULIANDAY(ts) < 7 GROUP BY status`,
+    `SELECT json_extract(a.payload,'$.status') AS status, COUNT(*) AS c FROM events a
+      JOIN events p ON p.id = json_extract(a.payload,'$.source_event_id')
+      WHERE a.kind='applied_change_committed'
+        AND p.kind='contract_amendment_proposed'
+        AND JULIANDAY('now') - JULIANDAY(a.ts) < 7
+      GROUP BY status`,
   ).all() as Array<{ status: string | null; c: number }>;
   const amendments_7d = { applied: 0, failed: 0, refused: 0 };
   for (const r of amRows) {

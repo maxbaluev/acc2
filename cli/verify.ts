@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // `acc verify <directive_id_prefix>` — orchestrator-side merger
 // verification. Aggregates contract_amendment_proposed events under a
-// directive, joins to contract_amendment_applied (via context_refs or
+// directive, joins to applied_change_committed (via context_refs or
 // payload.source_event_id), and verifies the named commit_sha exists in
 // git and touches the proposed target. Correctness of the change itself is
 // established by the apply-time verifier residual, NOT by a literal
@@ -26,7 +26,7 @@ const HELP = `acc verify <directive_id_prefix>
   Orchestrator-side intelligence-merger verification.
 
   Aggregates every contract_amendment_proposed under <directive_id>,
-  joins to contract_amendment_applied (via context_refs or
+  joins to applied_change_committed (via context_refs or
   payload.source_event_id), and verifies each applied commit_sha
   actually touches the proposed target with the expected text.
 
@@ -134,9 +134,17 @@ export const aggregateVerify = (db: Database, directiveId: string, repoRoot: str
     `SELECT id, ts, directive_id, task_id, kind, payload, context_refs
        FROM events WHERE kind='contract_amendment_proposed' AND directive_id=? ORDER BY ts ASC`,
   ).all(directiveId) as Row[];
+  // Audit #3 collapse (owner-approved 2026-05-16): contract_amendment_applied
+  // was folded into applied_change_committed. The apply rows are projected from
+  // act_tuple_recorded, so payload.source_kind is the literal "act_tuple_recorded",
+  // NOT "contract_amendment_proposed" — the originating proposal kind lives only
+  // on the source event referenced by payload.source_event_id. We therefore scope
+  // by directive_id and let the proposal->apply join (keyed by the proposal id
+  // below) restrict to amendment proposals: only ids from the
+  // contract_amendment_proposed query above are ever looked up in applyByProposal.
   const applies = db.query(
     `SELECT id, ts, directive_id, task_id, kind, payload, context_refs
-       FROM events WHERE kind='contract_amendment_applied' AND directive_id=? ORDER BY ts ASC`,
+       FROM events WHERE kind='applied_change_committed' AND directive_id=? ORDER BY ts ASC`,
   ).all(directiveId) as Row[];
 
   // Build join map: proposal_id → applied row(s)

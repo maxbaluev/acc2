@@ -39,7 +39,7 @@ const seedApply = (db: import("bun:sqlite").Database, id: string, sourceId: stri
     `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, new Date().toISOString(), DIRECTIVE_ID, "t_v", "l_v", "test",
-      "contract_amendment_applied", JSON.stringify({ source_event_id: sourceId, ...payload }), JSON.stringify([sourceId])],
+      "applied_change_committed", JSON.stringify({ source_event_id: sourceId, ...payload }), JSON.stringify([sourceId])],
   );
 };
 
@@ -182,7 +182,7 @@ describe("runVerify", () => {
     expect(c.out.join("")).toContain("drift:    1");
   });
 
-  test("proposal with no matching contract_amendment_applied → stranded=1, exit 1", async () => {
+  test("proposal with no matching applied_change_committed → stranded=1, exit 1", async () => {
     const db = openDb(process.env.ACC2_DB_PATH!);
     seedDirectiveOpened(db);
     seedProposal(db, "evt_prop_4", {

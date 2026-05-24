@@ -29,6 +29,28 @@ const insertEvent = (db: import("bun:sqlite").Database, kind: string, payload: R
   );
 };
 
+// Audit #3 collapse: an amendment apply is an applied_change_committed row whose
+// payload.source_event_id references a contract_amendment_proposed event. The
+// 7d-amendment metric joins by that id, so a bare apply row with no proposal is
+// (correctly) invisible — production reality. Seed the proposal + apply pair.
+const seedAmendmentApply = (db: import("bun:sqlite").Database, status: string): void => {
+  const propId = `evt_prop_${Math.random().toString(36).slice(2, 10)}`;
+  db.run(
+    `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [propId, new Date().toISOString(), "d_test", "t_test", "loop_test", "test",
+      "contract_amendment_proposed", JSON.stringify({ target_resource: "repo:x.ts" }), "[]"],
+  );
+  db.run(
+    `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [`evt_apply_${Math.random().toString(36).slice(2, 10)}`, new Date().toISOString(),
+      "d_test", "t_test", "loop_test", "test", "applied_change_committed",
+      JSON.stringify({ source_kind: "act_tuple_recorded", source_event_id: propId, status }),
+      JSON.stringify([propId])],
+  );
+};
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "acc2-trust-"));
   dbPath = join(dir, "trust.db");
@@ -130,10 +152,10 @@ describe("acc trust", () => {
     insertEvent(db, "owner_profile_recorded", { autonomy_score: 0.8 });
     insertEvent(db, "task_closure_audited", { closure_residual: 0.1 });
     insertEvent(db, "task_closure_audited", { closure_residual: 0.1 });
-    insertEvent(db, "contract_amendment_applied", { status: "applied" });
-    insertEvent(db, "contract_amendment_applied", { status: "applied" });
-    insertEvent(db, "contract_amendment_applied", { status: "applied" });
-    insertEvent(db, "contract_amendment_applied", { status: "failed" });
+    seedAmendmentApply(db, "applied");
+    seedAmendmentApply(db, "applied");
+    seedAmendmentApply(db, "applied");
+    seedAmendmentApply(db, "failed");
     const m = gatherTrustMetrics(db);
     expect(m.amendments_7d.applied).toBe(3);
     expect(m.amendments_7d.failed).toBe(1);
@@ -145,8 +167,8 @@ describe("acc trust", () => {
     const db = openDb(dbPath);
     insertEvent(db, "owner_profile_recorded", { autonomy_score: 0.4 });
     insertEvent(db, "task_closure_audited", { closure_residual: 0.5 });
-    insertEvent(db, "contract_amendment_applied", { status: "failed" });
-    insertEvent(db, "contract_amendment_applied", { status: "failed" });
+    seedAmendmentApply(db, "failed");
+    seedAmendmentApply(db, "failed");
     expect(gatherTrustMetrics(db).recommendation).toContain("trust mixed");
   });
 });
