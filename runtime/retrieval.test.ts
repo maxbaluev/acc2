@@ -459,4 +459,76 @@ describe("off-loop posterior reads (SQL worker pool) are byte-identical to sync"
     expect(seen.length).toBeGreaterThan(0); // pool was actually used
     expect(withPool.hits).toEqual(noPool.hits);
   });
+
+  test("pooled origin-bias (by goal_shape) path equals sync — same rows, order, scores", async () => {
+    // Regression guard for the dispatch-cascade off-load: the origin-bias
+    // reads (origin_promotion_view + the three directive/candidate/promotion
+    // event reads) ran SYNCHRONOUSLY on the daemon loop inside `retrieve`,
+    // twice per dispatch. They now route through `poolQuery`. This test pins
+    // that the pooled goal_shape-biased path is byte-identical to the sync
+    // path AND that the origin-bias SELECTs actually executed through the pool
+    // (so the off-load cannot silently revert to the synchronous main-loop
+    // read). The directive/candidate/promotion event reads are index-served
+    // (idx_events_kind_ts), not full table scans, so pooling them is a bounded
+    // read — not the writer-contention pattern that full-table pooling causes.
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    const db = openDb(":memory:");
+    runViews(db);
+    const dims = EMBEDDING_DIMS;
+
+    // Seed a directive + per-(origin, directive) candidate/promotion signal so
+    // the by-goal-shape bias map is non-trivial (opencode promotes well here).
+    emitEvent(db, {
+      kind: "directive_opened",
+      directive_id: "dir_bias",
+      task_id: "t_bias",
+      payload: { goal: "improve retrieval calibration on this shape" },
+    });
+    for (let i = 0; i < 3; i++) {
+      emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "opencode",
+        directive_id: "dir_bias",
+        task_id: "t_bias",
+        payload: { text: `cand-${i}` },
+      });
+      emitEvent(db, {
+        kind: "knowledge_promoted",
+        substrate_origin: "opencode",
+        directive_id: "dir_bias",
+        task_id: "t_bias",
+        payload: { text: `prom-${i}` },
+      });
+    }
+    const evId = seedEmbedded(db, "knowledge_candidate", "biased hit", 0, dims);
+    db.run("UPDATE events SET substrate_origin = ? WHERE id = ?", ["opencode", evId]);
+
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    const queryVec = makeUnitVec(dims, 0);
+    installMockFetch(async () => {
+      const data = { data: [{ embedding: queryVec, index: 0 }] };
+      return new Response(JSON.stringify(data), { status: 200 });
+    });
+    const goalText = "improve retrieval calibration on this shape";
+
+    // SYNC reference: no pool → poolQuery takes the synchronous fallback.
+    clearSqlPool();
+    const sync = await retrieve(db, idx, { text: "biased hit", k: 3, goalText });
+
+    // OFF-LOOP: delegating pool → the origin-bias SELECTs run through poolQuery.
+    const seen: string[] = [];
+    setSqlPool(makeDelegatingPool(db, seen));
+    const offloop = await retrieve(db, idx, { text: "biased hit", k: 3, goalText });
+
+    // Prove the origin-bias reads executed through the pool (not the loop).
+    expect(seen.some((s) => s.includes("origin_promotion_view"))).toBe(true);
+    expect(seen.some((s) => s.includes("kind = 'directive_opened'"))).toBe(true);
+    expect(seen.some((s) => s.includes("kind = 'knowledge_candidate'"))).toBe(true);
+    expect(seen.some((s) => s.includes("kind = 'knowledge_promoted'"))).toBe(true);
+
+    // Byte-identical hits: same ids, order, and rerank scores (origin bias
+    // multiplier included). retrieved_at differs by wall-clock so exclude it.
+    expect(offloop.hits).toEqual(sync.hits);
+    expect(offloop.hits.length).toBeGreaterThan(0);
+  });
 });

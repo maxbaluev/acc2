@@ -76,6 +76,37 @@ import { emitRefinementContinuation } from "./dispatch_continuation";
 const REFINEMENT_DEPTH_CAP = 5;
 const TREE_SEARCH_FANOUT_THRESHOLD = 5;
 
+// Dispatch-cascade stage profiling (gated behind ACC2_PROFILE_LOOP, mirrors
+// daemon.ts startLoopLagMonitor's gate). The event loop is single-threaded:
+// any SYNCHRONOUS bun:sqlite scan inside the directive-open → brain-spawn
+// cascade blocks the loop for its whole duration. The loop-lag monitor reports
+// THAT the loop blocked (lag_ms) but not WHICH stage. This helper wraps each
+// cascade stage with a high-resolution timer and logs
+// {event:"dispatch_stage_timing", stage, ms, task_id} whenever a stage exceeds
+// STAGE_LOG_THRESHOLD_MS, so the slow synchronous stage is attributable from
+// daemon.log without guessing. Default OFF → zero overhead (the await still
+// runs; only the timing + log is skipped). The threshold is well below the
+// ~200ms loop-block budget so a stage trending toward the budget is visible
+// before it regresses to a hard block.
+const DISPATCH_PROFILE_ENABLED = process.env.ACC2_PROFILE_LOOP === "1";
+const STAGE_LOG_THRESHOLD_MS = 50;
+
+const timeStage = async <T>(stage: string, taskId: string, fn: () => Promise<T> | T): Promise<T> => {
+  if (!DISPATCH_PROFILE_ENABLED) return await fn();
+  const t0 = performance.now();
+  try {
+    return await fn();
+  } finally {
+    const ms = performance.now() - t0;
+    if (ms > STAGE_LOG_THRESHOLD_MS) {
+      logger.warn(
+        { event: "dispatch_stage_timing", stage, ms: Math.round(ms), task_id: taskId },
+        "dispatch_stage_timing",
+      );
+    }
+  }
+};
+
 const resolveKnowledgeSourceDirective = (db: Database, eventId: string): string | null => {
   const row = db
     .query("SELECT directive_id, kind, payload FROM events WHERE id = ? LIMIT 1")
@@ -236,7 +267,7 @@ export const dispatchReadyTask = async (
   const dispatchStartedTs = nowIso();
 
   // 2. decideDispatch
-  const decision = decideDispatch(db, task);
+  const decision = await timeStage("decide_dispatch", task.id, () => decideDispatch(db, task));
   const dispatchDecisionEvidence = dispatchEvidencePayload(decision);
   const dispatchDecidedEvent = emitEvent(db, {
     kind: "dispatch_decided",
@@ -576,12 +607,12 @@ export const dispatchReadyTask = async (
   if (deps.index) {
     try {
       const { retrieve } = await import("./retrieval");
-      retrievedKnowledge = await retrieve(db, deps.index, {
+      retrievedKnowledge = await timeStage("retrieve_knowledge", task.id, () => retrieve(db, deps.index!, {
         text: task.goal ?? task.directive_id,
         k: 8,
         kindFilter: ["knowledge_candidate", "knowledge_promoted", "knowledge_synthesized"],
         goalText: task.goal,
-      });
+      }));
       // Organism-alignment audit b3qc9ryzj #4 (2026-05-15): retrieve
       // task-similar code artifacts too — the registry has a reranked
       // prompt path but pre-fix the dispatcher only fed it posterior-
@@ -589,7 +620,7 @@ export const dispatchReadyTask = async (
       // aware. Now the brain's CODE ARTIFACT REGISTRY prompt section
       // gets cosine × posterior × origin reranked artifacts.
       try {
-        retrievedArtifacts = await retrieve(db, deps.index, {
+        retrievedArtifacts = await timeStage("retrieve_artifacts", task.id, () => retrieve(db, deps.index!, {
           text: task.goal ?? task.directive_id,
           k: 6,
           // act_artifact_* canonical + code_artifact_* legacy aliases (F4a):
@@ -597,7 +628,7 @@ export const dispatchReadyTask = async (
           // rows still need the legacy names through retrieval).
           kindFilter: [...ARTIFACT_LIFECYCLE_KINDS],
           goalText: task.goal,
-        });
+        }));
         if (retrievedArtifacts.query_embedding_unavailable) retrievedArtifacts = null;
       } catch { retrievedArtifacts = null; }
       // Organism-alignment audit b3qc9ryzj #2 (2026-05-15): surface
@@ -697,7 +728,7 @@ export const dispatchReadyTask = async (
     // Heavy read scan over act_artifact (kind filter + ORDER BY + LIMIT 100) on
     // the prompt-setup path — route off the main loop. Identical db/SQL/params
     // → identical rows/order; sync fallback when no pool is installed.
-    const policyArtifactRows = await poolQuery<Record<string, unknown>>(
+    const policyArtifactRows = await timeStage("retrieve_policy_artifacts", task.id, () => poolQuery<Record<string, unknown>>(
       db,
       `SELECT id, body, score, name
            FROM act_artifact
@@ -705,7 +736,7 @@ export const dispatchReadyTask = async (
             AND status = 'admitted'
           ORDER BY score DESC, confidence DESC
           LIMIT 100`,
-    );
+    ));
     if (policyArtifactRows.length > 0) {
       const perSection: Record<string, Array<import("./prompt_composer").RetrievedPolicyArtifactBundle>> = {};
       for (const r of policyArtifactRows) {
@@ -778,13 +809,13 @@ export const dispatchReadyTask = async (
     promptCache.recordPromptCacheHit(db, promptCacheKey, cachedPrompt.age_ms);
   } else {
     const composer = await resolveComposePrompt();
-    composed = await composer(db, {
+    composed = await timeStage("compose_prompt", task.id, () => composer(db, {
       taskId: task.id,
       retrievedKnowledge,
       retrievedArtifacts,
       retrievalUnavailable,
       retrievedPolicyArtifacts: retrievedPolicyArtifacts as never,
-    });
+    }));
     promptCache.storeCachedPrompt(db, promptCacheKey, composed);
     promptCache.recordPromptCacheMiss(db, promptCacheKey, cachedPrompt.reason, {
       cached_rowid: "cached_rowid" in cachedPrompt ? cachedPrompt.cached_rowid : undefined,

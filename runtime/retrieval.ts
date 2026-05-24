@@ -162,6 +162,97 @@ const readOriginBiasForGoalShape = (db: Database, goalShape: string): Map<string
   return out;
 };
 
+// Off-loop origin-bias readers. The sync `readOriginBias` /
+// `readOriginBiasForGoalShape` above call substrate views that issue
+// SYNCHRONOUS SELECTs on the daemon's single event loop. During a live
+// dispatch `retrieve` is on the loop's critical path and runs these twice
+// (knowledge + artifacts), so the by-goal-shape variant's three reads
+// (directive_opened payloads + two kind-grouped COUNTs) block the loop. The
+// async variants below issue the EXACT same SQL the views run — index-served
+// (SEARCH events USING INDEX idx_events_kind_ts, NOT a full SCAN) and bounded
+// to the row count of those specific kinds — through `poolQuery`, so they run
+// on the SQL worker thread. The JS aggregation (goal-shape hashing, per-key
+// roll-up, clamp) is replicated byte-for-byte from substrate/views.ts so the
+// resulting bias map is identical to the sync path; only the SELECT execution
+// thread moves off the dispatch-critical loop. Fail-soft: poolQuery degrades
+// to the identical sync read when no pool is installed (unit tests).
+const ORIGIN_PROMOTION_VIEW_SQL = "SELECT * FROM origin_promotion_view";
+const DIRECTIVE_OPENED_SQL = "SELECT directive_id, payload FROM events WHERE kind = 'directive_opened'";
+const KNOWLEDGE_CANDIDATE_GROUP_SQL =
+  "SELECT substrate_origin, directive_id, COUNT(*) AS c FROM events WHERE kind = 'knowledge_candidate' GROUP BY substrate_origin, directive_id";
+const KNOWLEDGE_PROMOTED_GROUP_SQL =
+  "SELECT substrate_origin, directive_id, COUNT(*) AS c FROM events WHERE kind = 'knowledge_promoted' GROUP BY substrate_origin, directive_id";
+
+/** Off-loop equivalent of `originPromotion(db)` (substrate/views.ts). Same
+ *  view, same NULL-promotion_ratio skip + clamp, executed on the SQL worker. */
+const readOriginBiasPooled = async (db: Database): Promise<Map<string, number>> => {
+  const out = new Map<string, number>();
+  const rows = await poolQuery<{ substrate_origin: string; promotion_ratio: number | null }>(db, ORIGIN_PROMOTION_VIEW_SQL);
+  for (const row of rows) {
+    if (row.promotion_ratio === null || row.promotion_ratio === undefined || Number.isNaN(row.promotion_ratio)) continue;
+    out.set(row.substrate_origin, clampBias(row.promotion_ratio));
+  }
+  return out;
+};
+
+/** Off-loop equivalent of `originPromotionByGoalShape(db, goalShape)`
+ *  (substrate/views.ts:6060). Replicates the three-read + JS-aggregation logic
+ *  exactly, routing each SELECT through `poolQuery` so the daemon loop is not
+ *  blocked. Filters to the requested goal_shape, falling back to the global
+ *  per-origin ratio for origins that have global data but no shape-specific
+ *  row — identical fallback to the sync path. */
+const readOriginBiasForGoalShapePooled = async (db: Database, goalShape: string): Promise<Map<string, number>> => {
+  const out = new Map<string, number>();
+  // Step 1 — directive_id → goal_shape map (same hashing as the view).
+  const directives = await poolQuery<{ directive_id: string; payload: string }>(db, DIRECTIVE_OPENED_SQL);
+  const directiveToShape = new Map<string, string>();
+  for (const d of directives) {
+    let goal = "";
+    try {
+      const p = JSON.parse(d.payload) as { goal?: unknown; intent?: unknown; directive_text?: unknown };
+      goal = String((p.goal ?? p.intent ?? p.directive_text ?? "") as string);
+    } catch { /* malformed payload — empty shape */ }
+    directiveToShape.set(d.directive_id, computeGoalShape(goal));
+  }
+  // Step 2 — per-(origin, directive) candidate + promotion counts.
+  const candidates = await poolQuery<{ substrate_origin: string; directive_id: string; c: number }>(db, KNOWLEDGE_CANDIDATE_GROUP_SQL);
+  const promotions = await poolQuery<{ substrate_origin: string; directive_id: string; c: number }>(db, KNOWLEDGE_PROMOTED_GROUP_SQL);
+  // Step 3 — aggregate per (origin, goal_shape), then emit ratio rows.
+  const candMap = new Map<string, number>();
+  const promMap = new Map<string, number>();
+  const emptyShape = computeGoalShape("");
+  for (const c of candidates) {
+    const shape = directiveToShape.get(c.directive_id) ?? emptyShape;
+    const key = `${c.substrate_origin}::${shape}`;
+    candMap.set(key, (candMap.get(key) ?? 0) + c.c);
+  }
+  for (const p of promotions) {
+    const shape = directiveToShape.get(p.directive_id) ?? emptyShape;
+    const key = `${p.substrate_origin}::${shape}`;
+    promMap.set(key, (promMap.get(key) ?? 0) + p.c);
+  }
+  const seenKeys = new Set<string>([...candMap.keys(), ...promMap.keys()]);
+  for (const key of seenKeys) {
+    const sep = key.indexOf("::");
+    const origin = key.slice(0, sep);
+    const shape = key.slice(sep + 2);
+    if (shape !== goalShape) continue;
+    const cand = candMap.get(key) ?? 0;
+    const prom = promMap.get(key) ?? 0;
+    const ratio = cand === 0 ? 1.0 : prom / cand;
+    if (Number.isNaN(ratio)) continue;
+    out.set(origin, clampBias(ratio));
+  }
+  // Fill origins with global data but no shape-specific row (sync-path parity).
+  const globalRows = await poolQuery<{ substrate_origin: string; promotion_ratio: number | null }>(db, ORIGIN_PROMOTION_VIEW_SQL);
+  for (const row of globalRows) {
+    if (out.has(row.substrate_origin)) continue;
+    if (row.promotion_ratio === null || row.promotion_ratio === undefined || Number.isNaN(row.promotion_ratio)) continue;
+    out.set(row.substrate_origin, clampBias(row.promotion_ratio));
+  }
+  return out;
+};
+
 // Posterior-lookup SQL — shared verbatim between the sync and pooled
 // variants so both paths execute byte-identical statements against the same
 // db handle. Only the EXECUTION THREAD differs (main loop vs. SQL worker);
@@ -397,9 +488,15 @@ export const retrieve = async (
     indexFilter,
   );
 
+  // Off-loop the origin-bias reads (the only remaining SYNCHRONOUS event-table
+  // reads on the dispatch-critical loop in this path). The by-goal-shape
+  // variant ran three index-served SELECTs + JS aggregation synchronously on
+  // every retrieve (twice per dispatch); the pooled variant issues the exact
+  // same SQL on the SQL worker thread and replicates the aggregation byte-for-
+  // byte, so the bias map is identical. Sync fallback when no pool is present.
   const originBias = q.goalText
-    ? readOriginBiasForGoalShape(db, computeGoalShape(q.goalText))
-    : readOriginBias(db);
+    ? await readOriginBiasForGoalShapePooled(db, computeGoalShape(q.goalText))
+    : await readOriginBiasPooled(db);
   // Off-loop the per-hit posterior point reads. `Promise.all` preserves array
   // order, and each pooled read issues the same SQL against the same db as the
   // sync path, so `packed` is byte-identical to the synchronous map below —
