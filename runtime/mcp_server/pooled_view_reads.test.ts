@@ -9,7 +9,7 @@
 import { afterAll, beforeEach, afterEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../../substrate/db";
 import { emitEvent } from "../events";
-import { handleRead } from "./substrate_tools";
+import { handleRead, handleFindRecipe, handleOpenDirective, handleSearch } from "./substrate_tools";
 import { setSqlPool, clearSqlPool } from "../sql_pool_singleton";
 import type { SqlWorkerPool } from "../sql_worker_pool";
 import type { McpContext } from "./types";
@@ -160,5 +160,120 @@ describe("substrate.read off-loop pool routing", () => {
 
     expect(degradedRows).toEqual(syncRows);
     expect(degradedRows.length).toBe(1);
+  });
+});
+
+// ── Dispatch-window event-loop blockers (find_recipe / open_directive / search)
+//
+// Runtime profiling (ACC2_PROFILE_LOOP=1) measured these three handlers
+// blocking the daemon's single loop during a brain dispatch:
+//   substrate.find_recipe   ~20s   (recipes_latest_view scan + topology scan)
+//   substrate.open_directive ~5s   (json_extract dedup scan + NOT IN subquery)
+//   substrate.search        ~2.7s  (vec/event scan; recency stand-in here)
+// Each now routes its heavy SELECT(s) through poolQuery (off the main loop when
+// a pool is installed; sync db.query fallback otherwise). These tests pin the
+// pool-with-sync-fallback contract + byte-identical results for all three.
+
+describe("dispatch-window blockers route off-loop (find_recipe / open_directive / search)", () => {
+  test("find_recipe routes recipes_latest_view + topology scans through the pool, identical match", async () => {
+    const db = openDb(":memory:");
+    // Seed a task_node_opened (gives directive_id + goal) and a matching
+    // recipe-shape knowledge row so the matcher returns a non-null match.
+    emitEvent(db, {
+      kind: "task_node_opened",
+      directive_id: "d_recipe",
+      task_id: "t_recipe",
+      payload: { goal: "scrape inventory" },
+    });
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "ev_recipe_seed",
+        "2026-01-01T00:00:01.000Z",
+        "d_recipe_src",
+        "t_recipe_src",
+        "loop_root",
+        "substrate_auto",
+        "knowledge_candidate",
+        JSON.stringify({
+          recipe_shape: { enabled: true },
+          goal_shape: "scrape_inventory::n1",
+          topology_signature: "",
+          confidence: 0.92,
+          trajectory: [{ step_kind: "action_predicted", artifact_id: "a_dummy", payload_template: {} }],
+        }),
+        "[]",
+      ],
+    );
+
+    // 1. No pool → synchronous path.
+    clearSqlPool();
+    const syncRes = await handleFindRecipe(ctx(db), { task_id: "t_recipe" } as never);
+    expect(syncRes.ok).toBe(true);
+    if (!syncRes.ok) throw new Error("sync find_recipe failed");
+
+    // 2. Pool installed → routed off-loop, identical match.
+    const { pool, calls } = makeRecordingPool(db);
+    setSqlPool(pool);
+    const pooledRes = await handleFindRecipe(ctx(db), { task_id: "t_recipe" } as never);
+    expect(pooledRes.ok).toBe(true);
+    if (!pooledRes.ok) throw new Error("pooled find_recipe failed");
+
+    // Both the topology event scan AND the recipes_latest_view scan went
+    // through the pool surface.
+    const sqls = calls.map((c) => c.sql);
+    expect(sqls.some((s) => s.includes("FROM recipes_latest_view"))).toBe(true);
+    expect(sqls.some((s) => s.includes("kind = 'task_node_opened'") && s.includes("directive_id = ?"))).toBe(true);
+    expect(pooledRes.result).toEqual(syncRes.result);
+    expect((pooledRes.result as Record<string, unknown>).recipe_id).toBe("ev_recipe_seed");
+  });
+
+  test("open_directive routes the dedup lookup through the pool, identical dedup id (WRITES stay on main thread)", async () => {
+    const db = openDb(":memory:");
+    // First open (no pool) creates the directive.
+    clearSqlPool();
+    const first = await handleOpenDirective(ctx(db), { directive_text: "Count TODOs off-loop" } as never);
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error("first open failed");
+    const firstId = (first.result as Record<string, unknown>).directive_id as string;
+
+    // Second open WITH pool → the dedup READ routes off-loop and returns the
+    // same id; the directive-open writes stayed on the single writer (no
+    // duplicate directive emitted).
+    const { pool, calls } = makeRecordingPool(db);
+    setSqlPool(pool);
+    const second = await handleOpenDirective(ctx(db), { directive_text: "Count TODOs off-loop" } as never);
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error("second open failed");
+    const secondResult = second.result as Record<string, unknown>;
+
+    // The dedup lookup is the only thing routed through the pool here (writes
+    // are not). Same id, dedup flag set.
+    expect(calls.some((c) => c.sql.includes("kind = 'directive_opened'") && c.sql.includes("json_extract"))).toBe(true);
+    expect(secondResult.directive_id).toBe(firstId);
+    expect(secondResult.deduped).toBe(true);
+  });
+
+  test("search recency stand-in routes the events scan through the pool, identical hits", async () => {
+    const db = openDb(":memory:");
+    emitEvent(db, { kind: "directive_opened", substrate_origin: "claude", payload: { directive_text: "one" } });
+    emitEvent(db, { kind: "directive_opened", substrate_origin: "claude", payload: { directive_text: "two" } });
+
+    // ctx has no index → handleSearch takes the recency stand-in branch.
+    clearSqlPool();
+    const syncRes = await handleSearch(ctx(db), { query: "anything", opts: { k: 10 } } as never);
+    expect(syncRes.ok).toBe(true);
+    if (!syncRes.ok) throw new Error("sync search failed");
+
+    const { pool, calls } = makeRecordingPool(db);
+    setSqlPool(pool);
+    const pooledRes = await handleSearch(ctx(db), { query: "anything", opts: { k: 10 } } as never);
+    expect(pooledRes.ok).toBe(true);
+    if (!pooledRes.ok) throw new Error("pooled search failed");
+
+    expect(calls.some((c) => c.sql.includes("FROM events ORDER BY ts DESC LIMIT ?"))).toBe(true);
+    expect(pooledRes.result).toEqual(syncRes.result);
+    expect((pooledRes.result as Record<string, unknown>).mode).toBe("recent_events_stub");
   });
 });

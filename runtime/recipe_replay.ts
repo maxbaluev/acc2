@@ -95,18 +95,26 @@ export type RecipeMatch = {
   cited_act_artifact_ids: string[];
 };
 
-/** Compute a topology signature for a task. Today this is a degenerate "single
- *  root task" shape — when Phase E DAGs land, this walks the actual subtree.
- *  The replay matcher accepts a recipe whose signature matches the current
- *  task's signature OR is degenerate (count=1). */
-const taskTopologySignature = (db: Database, task: TaskNode): string => {
-  const rows = db
-    .query(
-      `SELECT task_id, parent_task_id FROM events
+/** SQL for the per-directive task-node scan that feeds taskTopologySignature.
+ *  Shared verbatim by the sync path (db.query) and the off-loop pooled path
+ *  (poolQuery) so the signature is byte-identical regardless of which thread
+ *  executes the SELECT. */
+const TASK_TOPOLOGY_SCAN_SQL =
+  `SELECT task_id, parent_task_id FROM events
        WHERE kind = 'task_node_opened' AND directive_id = ?
-       ORDER BY ts ASC`,
-    )
-    .all(task.directive_id) as Array<{ task_id: string; parent_task_id: string | null }>;
+       ORDER BY ts ASC`;
+
+/** Off-loop read router injected by the MCP handler (substrate_tools.poolQuery):
+ *  routes the SELECT through the SQL worker pool when present, sync db.query
+ *  otherwise. Same signature both surfaces use. */
+export type RecipePoolQuery = <T>(db: Database, sql: string, params: unknown[]) => Promise<T[]>;
+
+/** Pure folding of the task-node rows into a topology signature. Identical
+ *  arithmetic for the sync and pooled paths — only WHERE the SELECT ran
+ *  differs. */
+const foldTopologySignature = (
+  rows: Array<{ task_id: string; parent_task_id: string | null }>,
+): string => {
   if (rows.length === 0) return "topo_00000000::0";
   const ordinal = new Map<string, number>();
   rows.forEach((r, idx) => { ordinal.set(r.task_id, idx); });
@@ -123,6 +131,17 @@ const taskTopologySignature = (db: Database, task: TaskNode): string => {
     h = ((h * 33) ^ canonical.charCodeAt(i)) | 0;
   }
   return `topo_${(h >>> 0).toString(16).padStart(8, "0")}::${rows.length}`;
+};
+
+/** Compute a topology signature for a task. Today this is a degenerate "single
+ *  root task" shape — when Phase E DAGs land, this walks the actual subtree.
+ *  The replay matcher accepts a recipe whose signature matches the current
+ *  task's signature OR is degenerate (count=1). */
+const taskTopologySignature = (db: Database, task: TaskNode): string => {
+  const rows = db
+    .query(TASK_TOPOLOGY_SCAN_SQL)
+    .all(task.directive_id) as Array<{ task_id: string; parent_task_id: string | null }>;
+  return foldTopologySignature(rows);
 };
 
 /** Filter / shape one recipes_latest_view row into a RecipeMatch when it
@@ -218,7 +237,20 @@ export const findRecipeMatch = (
   const taskGoalLower = task.goal.toLowerCase();
 
   const viewRows: RecipesLatestRow[] = recipesLatestView(db);
+  return pickBestRecipeMatch(viewRows, taskGoalShape, taskGoalLower, taskTopology, minConfidence);
+};
 
+/** Pure best-match fold over recipes_latest_view rows. Shared verbatim by the
+ *  sync `findRecipeMatch` and the off-loop `findRecipeMatchPooled` so the
+ *  selected recipe is byte-identical regardless of which thread ran the two
+ *  heavy SELECTs (the recipes_latest_view scan + the topology event scan). */
+const pickBestRecipeMatch = (
+  viewRows: RecipesLatestRow[],
+  taskGoalShape: string,
+  taskGoalLower: string,
+  taskTopology: string,
+  minConfidence: number,
+): RecipeMatch | null => {
   let best: RecipeMatch | null = null;
   for (const r of viewRows) {
     const p = r.payload as Record<string, unknown>;
@@ -238,8 +270,67 @@ export const findRecipeMatch = (
     );
     if (match && (!best || match.confidence > best.confidence)) best = match;
   }
-
   return best;
+};
+
+/** Off-loop variant of findRecipeMatch for the MCP daemon's single event loop.
+ *
+ *  Runtime profiling (ACC2_PROFILE_LOOP=1) measured substrate.find_recipe at
+ *  ~20s during a brain dispatch — the dominant event-loop blocker. The cost is
+ *  the two heavy synchronous SELECTs: the recipes_latest_view scan (~876
+ *  recipe-shape knowledge rows) and the per-directive task_node_opened scan
+ *  that feeds the topology signature. This variant routes BOTH SELECTs through
+ *  the injected poolQuery (SQL worker pool when present; sync db.query fallback
+ *  when absent — tests, ACC2_DISABLE_SQL_POOL). The matching arithmetic is the
+ *  same pure fold (pickBestRecipeMatch + foldTopologySignature), so the result
+ *  is byte-identical to findRecipeMatch — only WHERE the SELECTs execute moved
+ *  off the dispatch loop. WRITES are never on this path. */
+export const findRecipeMatchPooled = async (
+  db: Database,
+  poolQuery: RecipePoolQuery,
+  task: TaskNode,
+  opts?: { minConfidence?: number },
+): Promise<RecipeMatch | null> => {
+  const minConfidence = opts?.minConfidence ?? RECIPE_DEFAULT_MIN_CONFIDENCE;
+  const taskGoalShape = goalShape(task.goal ?? "");
+  const taskGoalLower = task.goal.toLowerCase();
+
+  // Topology event scan — off-loop. Same SQL + params + fold as the sync path.
+  const topoRows = await poolQuery<{ task_id: string; parent_task_id: string | null }>(
+    db,
+    TASK_TOPOLOGY_SCAN_SQL,
+    [task.directive_id],
+  );
+  const taskTopology = foldTopologySignature(topoRows);
+
+  // recipes_latest_view scan — off-loop. Byte-identical SQL + mapping to
+  // substrate/views.ts:recipesLatestView (same WHERE, same ORDER BY).
+  const raw = await poolQuery<Record<string, unknown>>(
+    db,
+    `SELECT id, goal_shape, topology_signature, confidence, payload
+       FROM recipes_latest_view
+       WHERE goal_shape IS NOT NULL AND topology_signature IS NOT NULL
+       ORDER BY goal_shape ASC, topology_signature ASC`,
+    [],
+  );
+  const viewRows: RecipesLatestRow[] = raw.map((r) => {
+    let payload: Record<string, unknown> = {};
+    const rawPayload = r.payload;
+    if (typeof rawPayload === "string" && rawPayload.length > 0) {
+      try { payload = JSON.parse(rawPayload) as Record<string, unknown>; } catch { payload = {}; }
+    } else if (rawPayload && typeof rawPayload === "object") {
+      payload = rawPayload as Record<string, unknown>;
+    }
+    return {
+      id: r.id as string,
+      goal_shape: r.goal_shape as string,
+      topology_signature: r.topology_signature as string,
+      confidence: (r.confidence as number) ?? 0,
+      payload,
+    };
+  });
+
+  return pickBestRecipeMatch(viewRows, taskGoalShape, taskGoalLower, taskTopology, minConfidence);
 };
 
 export type RecipeReplayOutcome = {

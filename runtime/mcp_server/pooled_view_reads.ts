@@ -158,6 +158,54 @@ export const artifactRoutingPooled = async (
   return rows.map((r) => ({ ...rowToActArtifact(r), routing_score: r.routing_score as number }));
 };
 
+// ── open_directive idempotent-dedup lookup ──────────────────────────
+// Mirrors substrate_tools.ts:findOpenDirectiveByText. The json_extract scan
+// over directive_opened rows + the NOT IN closure/archive subquery is a full
+// events-table scan that runs synchronously inside handleOpenDirective —
+// measured at ~5s during a brain dispatch (substrate.open_directive). Route
+// the READ off the daemon loop; the directive-open WRITES stay on the
+// single-writer main thread. Byte-identical SQL + params + result selection.
+const FIND_OPEN_DIRECTIVE_BY_TEXT_SQL =
+  `SELECT directive_id FROM events
+       WHERE kind = 'directive_opened'
+         AND json_extract(payload, '$.directive_text') = ?
+         AND directive_id NOT IN (
+           SELECT directive_id FROM events
+           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         )
+       ORDER BY ts ASC LIMIT 1`;
+
+export const findOpenDirectiveByTextPooled = async (
+  db: Database,
+  poolQuery: PoolQuery,
+  text: string,
+): Promise<string | null> => {
+  const rows = await poolQuery<{ directive_id: string }>(
+    db,
+    FIND_OPEN_DIRECTIVE_BY_TEXT_SQL,
+    [text],
+  );
+  return rows[0]?.directive_id ?? null;
+};
+
+// ── substrate.search recency stand-in scan ──────────────────────────
+// Mirrors the recency stand-in branch of handleSearch (the no-index /
+// query-embedding-unavailable fallback): a `SELECT … FROM events ORDER BY ts
+// DESC LIMIT ?` full-table scan. Route off the daemon loop so the fallback
+// never blocks the event loop. Byte-identical SQL + LIMIT param + row shape.
+export const recentEventsForSearchPooled = async (
+  db: Database,
+  poolQuery: PoolQuery,
+  k: number,
+): Promise<Array<Record<string, unknown>>> => {
+  return poolQuery<Record<string, unknown>>(
+    db,
+    "SELECT id, ts, kind, directive_id, task_id, substrate_origin, payload " +
+      "FROM events ORDER BY ts DESC LIMIT ?",
+    [k],
+  );
+};
+
 // ── substrate_narrative_recent_view ─────────────────────────────────
 // Mirrors substrate/views.ts:substrateNarrativeRecent. Content-first TUI
 // primitive; newest-first, narrative-kind default, optional filters.

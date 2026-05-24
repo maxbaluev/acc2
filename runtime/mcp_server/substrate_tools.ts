@@ -25,7 +25,7 @@ import { computeEmbedding } from "../embedder";
 import { retrieve } from "../retrieval";
 import { recordStakeholderState, type StakeholderVisibility } from "../stakeholder_compositor";
 import { recordInterferenceEdge, type InterferenceEdgeKind } from "../interference";
-import { findRecipeMatch } from "../recipe_replay";
+import { findRecipeMatchPooled } from "../recipe_replay";
 import { findSimilarRecentCandidate } from "../knowledge_dedup";
 import { newId } from "../ids";
 import { evaluateClosureCommitGate } from "../closure_audit";
@@ -74,6 +74,8 @@ import {
   actArtifactRegistryPooled,
   artifactRoutingPooled,
   substrateNarrativeRecentPooled,
+  findOpenDirectiveByTextPooled,
+  recentEventsForSearchPooled,
 } from "./pooled_view_reads";
 import type {
   AdmitArtifactSchema,
@@ -171,25 +173,6 @@ const detectPromptTemplateLeak = (text: string): string | null => {
  *  CLI / brain / Father autonomous loop could legitimately retry an
  *  opening and produce duplicate top-level directives competing for the
  *  same scheduler slots. */
-const findOpenDirectiveByText = (
-  ctxDb: Parameters<typeof emitEvent>[0],
-  text: string,
-): string | null => {
-  const row = ctxDb
-    .query(
-      `SELECT directive_id FROM events
-       WHERE kind = 'directive_opened'
-         AND json_extract(payload, '$.directive_text') = ?
-         AND directive_id NOT IN (
-           SELECT directive_id FROM events
-           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
-         )
-       ORDER BY ts ASC LIMIT 1`,
-    )
-    .get(text) as { directive_id: string } | null;
-  return row?.directive_id ?? null;
-};
-
 export const handleEmit = (
   ctx: McpContext,
   args: z.infer<typeof EmitSchema>,
@@ -1299,12 +1282,13 @@ export const handleSearch = async (
     // fall through to recency stand-in when query embedding unavailable
   }
 
-  const rows = ctx.db
-    .query(
-      "SELECT id, ts, kind, directive_id, task_id, substrate_origin, payload " +
-        "FROM events ORDER BY ts DESC LIMIT ?",
-    )
-    .all(k) as Array<Record<string, unknown>>;
+  // Recency stand-in (no index / query-embedding-unavailable). This branch is
+  // a full events-table scan ordered by ts DESC. The primary `retrieve` path
+  // above already off-loads its per-hit posterior point reads via
+  // packHitPooled; this fallback's own scan is routed off the daemon loop here
+  // via poolQuery (sync fallback when no pool). Byte-identical SQL + LIMIT +
+  // row shape — only the execution thread of the SELECT moved off the loop.
+  const rows = await recentEventsForSearchPooled(ctx.db, poolQuery, k);
   const hits = rows.map((r) => ({
     id: r.id as string,
     ts: r.ts as string,
@@ -1651,10 +1635,10 @@ export const handleRecordInterferenceEdge = (
   return { ok: true, result: { event_id: result.event_id } as JsonValue };
 };
 
-export const handleOpenDirective = (
+export const handleOpenDirective = async (
   ctx: McpContext,
   args: z.infer<typeof OpenDirectiveSchema>,
-): McpResult => {
+): Promise<McpResult> => {
   // Brain privilege gate: opening a NEW top-level directive is an
   // owner/orchestrator action. The brain decomposes within its current
   // directive via task_node_opened + task_edge_recorded. Live evidence
@@ -1683,7 +1667,11 @@ export const handleOpenDirective = (
   // already exists (not closed / not archived), return its id instead of
   // opening a duplicate. Pre-fix double-clicks and shell loops produced
   // sibling directives competing for the same concurrency slots.
-  const existing = findOpenDirectiveByText(ctx.db, args.directive_text);
+  // The dedup lookup is a full events-table scan (json_extract + NOT IN
+  // closure/archive subquery) — ~5s during a brain dispatch. Route the READ
+  // off the daemon loop via poolQuery; the directive-open WRITES below stay on
+  // the single-writer main thread. Byte-identical to findOpenDirectiveByText.
+  const existing = await findOpenDirectiveByTextPooled(ctx.db, poolQuery, args.directive_text);
   if (existing) {
     return {
       ok: true,
@@ -1790,10 +1778,16 @@ export const handleOpenDirective = (
 
 // ── Phase J: recipe lookup ────────────────────────────────────────
 
-export const handleFindRecipe = (
+export const handleFindRecipe = async (
   ctx: McpContext,
   args: z.infer<typeof FindRecipeSchema>,
-): McpResult => {
+): Promise<McpResult> => {
+  // Two small point reads (task_id-indexed LIMIT 1) — left on the main loop.
+  // The two HEAVY scans (recipes_latest_view ~876 rows + the per-directive
+  // topology event scan) are inside findRecipeMatchPooled, which routes them
+  // off the daemon loop via poolQuery (sync fallback when no pool). Profiling
+  // attributed the ~20s find_recipe blocker to those two SELECTs, not to these
+  // point lookups. Result is byte-identical to the sync findRecipeMatch.
   const taskRow = ctx.db
     .query("SELECT directive_id FROM events WHERE task_id = ? AND kind = 'task_node_opened' LIMIT 1")
     .get(args.task_id) as { directive_id: string } | null;
@@ -1808,8 +1802,9 @@ export const handleFindRecipe = (
       goal = (p.goal as string | undefined) ?? "";
     } catch { /* swallow */ }
   }
-  const match = findRecipeMatch(
+  const match = await findRecipeMatchPooled(
     ctx.db,
+    poolQuery,
     { id: args.task_id, directive_id: taskRow.directive_id, parent_id: null, goal, status: "pending" },
     { minConfidence: args.min_confidence },
   );

@@ -9,31 +9,31 @@ beforeEach(() => closeDb());
 const ctx = (db: ReturnType<typeof openDb>): McpContext => ({ db, invoker: "claude_root" } as McpContext);
 
 describe("handleOpenDirective — prompt-template-leak gate", () => {
-  test("refuses directive_text starting with TASK GOAL:", () => {
+  test("refuses directive_text starting with TASK GOAL:", async () => {
     const db = openDb(":memory:");
-    const r = handleOpenDirective(ctx(db), { directive_text: "TASK GOAL: Install rolling governance..." } as never);
+    const r = await handleOpenDirective(ctx(db), { directive_text: "TASK GOAL: Install rolling governance..." } as never);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain("prompt_template_leak_refused");
   });
 
-  test("refuses recursive doubled TASK GOAL pattern", () => {
+  test("refuses recursive doubled TASK GOAL pattern", async () => {
     const db = openDb(":memory:");
-    const r = handleOpenDirective(ctx(db), { directive_text: "TASK GOAL: TASK GOAL: blah" } as never);
+    const r = await handleOpenDirective(ctx(db), { directive_text: "TASK GOAL: TASK GOAL: blah" } as never);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain("recursive_task_goal_doubled");
   });
 
-  test("refuses prompt-composer-marker laden text", () => {
+  test("refuses prompt-composer-marker laden text", async () => {
     const db = openDb(":memory:");
     const text = "Do the thing. DIRECTIVE ID: ABC RUNTIMES AVAILABLE: bun/uv/camofox YOUR WORKFLOW: 1.write 2.score";
-    const r = handleOpenDirective(ctx(db), { directive_text: text } as never);
+    const r = await handleOpenDirective(ctx(db), { directive_text: text } as never);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain("prompt_composer_markers");
   });
 
-  test("accepts genuine owner directive text", () => {
+  test("accepts genuine owner directive text", async () => {
     const db = openDb(":memory:");
-    const r = handleOpenDirective(ctx(db), {
+    const r = await handleOpenDirective(ctx(db), {
       directive_text: "Count files in /tmp containing TODO",
     } as never);
     expect(r.ok).toBe(true);
@@ -41,14 +41,14 @@ describe("handleOpenDirective — prompt-template-leak gate", () => {
 });
 
 describe("handleOpenDirective — idempotent directive-text dedup", () => {
-  test("second open with identical text returns the first directive's id", () => {
+  test("second open with identical text returns the first directive's id", async () => {
     const db = openDb(":memory:");
-    const first = handleOpenDirective(ctx(db), { directive_text: "Count TODOs in /tmp" } as never);
+    const first = await handleOpenDirective(ctx(db), { directive_text: "Count TODOs in /tmp" } as never);
     expect(first.ok).toBe(true);
     if (!first.ok) return;
     const firstId = (first.result as Record<string, unknown>).directive_id as string;
 
-    const second = handleOpenDirective(ctx(db), { directive_text: "Count TODOs in /tmp" } as never);
+    const second = await handleOpenDirective(ctx(db), { directive_text: "Count TODOs in /tmp" } as never);
     expect(second.ok).toBe(true);
     if (!second.ok) return;
     const secondResult = second.result as Record<string, unknown>;
@@ -56,9 +56,9 @@ describe("handleOpenDirective — idempotent directive-text dedup", () => {
     expect(secondResult.deduped).toBe(true);
   });
 
-  test("dedup ignores already-closed directives — new open with same text gets a fresh id", () => {
+  test("dedup ignores already-closed directives — new open with same text gets a fresh id", async () => {
     const db = openDb(":memory:");
-    const first = handleOpenDirective(ctx(db), { directive_text: "Closed work" } as never);
+    const first = await handleOpenDirective(ctx(db), { directive_text: "Closed work" } as never);
     expect(first.ok).toBe(true);
     if (!first.ok) return;
     const firstId = (first.result as Record<string, unknown>).directive_id as string;
@@ -70,7 +70,7 @@ describe("handleOpenDirective — idempotent directive-text dedup", () => {
       payload: { reason: "test_close" },
     } as never);
 
-    const second = handleOpenDirective(ctx(db), { directive_text: "Closed work" } as never);
+    const second = await handleOpenDirective(ctx(db), { directive_text: "Closed work" } as never);
     expect(second.ok).toBe(true);
     if (!second.ok) return;
     const secondId = (second.result as Record<string, unknown>).directive_id as string;
@@ -79,10 +79,10 @@ describe("handleOpenDirective — idempotent directive-text dedup", () => {
 });
 
 describe("handleEmit — task_node_opened (directive_id, goal) dedup", () => {
-  test("second task_node_opened with same (directive_id, goal) returns the first task_id", () => {
+  test("second task_node_opened with same (directive_id, goal) returns the first task_id", async () => {
     const db = openDb(":memory:");
     // Open a directive to host the task
-    const opened = handleOpenDirective(ctx(db), { directive_text: "host directive" } as never);
+    const opened = await handleOpenDirective(ctx(db), { directive_text: "host directive" } as never);
     expect(opened.ok).toBe(true);
     if (!opened.ok) return;
     const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
@@ -108,9 +108,9 @@ describe("handleEmit — task_node_opened (directive_id, goal) dedup", () => {
     expect(r2.deduped).toBe(true);
   });
 
-  test("different goals under the same directive open separate tasks", () => {
+  test("different goals under the same directive open separate tasks", async () => {
     const db = openDb(":memory:");
-    const opened = handleOpenDirective(ctx(db), { directive_text: "two-task directive" } as never);
+    const opened = await handleOpenDirective(ctx(db), { directive_text: "two-task directive" } as never);
     expect(opened.ok).toBe(true);
     if (!opened.ok) return;
     const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
@@ -136,9 +136,9 @@ describe("handleEmit — task_node_opened (directive_id, goal) dedup", () => {
 });
 
 describe("handleEmit — task_edge_recorded structural self-loop refusal", () => {
-  test("refuses task_edge_recorded with from_task == to_task", () => {
+  test("refuses task_edge_recorded with from_task == to_task", async () => {
     const db = openDb(":memory:");
-    const opened = handleOpenDirective(ctx(db), { directive_text: "self-loop refusal directive" } as never);
+    const opened = await handleOpenDirective(ctx(db), { directive_text: "self-loop refusal directive" } as never);
     expect(opened.ok).toBe(true);
     if (!opened.ok) return;
     const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
@@ -164,9 +164,9 @@ describe("handleEmit — task_edge_recorded structural self-loop refusal", () =>
     expect(selfLoop.error).toBe("task_edge_self_loop:t_root");
   });
 
-  test("refuses self-loop even when endpoints do not yet exist", () => {
+  test("refuses self-loop even when endpoints do not yet exist", async () => {
     const db = openDb(":memory:");
-    const opened = handleOpenDirective(ctx(db), { directive_text: "early self-loop directive" } as never);
+    const opened = await handleOpenDirective(ctx(db), { directive_text: "early self-loop directive" } as never);
     expect(opened.ok).toBe(true);
     if (!opened.ok) return;
     const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
@@ -183,9 +183,9 @@ describe("handleEmit — task_edge_recorded structural self-loop refusal", () =>
     expect(selfLoop.error).toBe("task_edge_self_loop:t_phantom");
   });
 
-  test("accepts task_edge_recorded between two distinct existing endpoints", () => {
+  test("accepts task_edge_recorded between two distinct existing endpoints", async () => {
     const db = openDb(":memory:");
-    const opened = handleOpenDirective(ctx(db), { directive_text: "valid-edge directive" } as never);
+    const opened = await handleOpenDirective(ctx(db), { directive_text: "valid-edge directive" } as never);
     expect(opened.ok).toBe(true);
     if (!opened.ok) return;
     const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
@@ -231,7 +231,7 @@ describe("handleEmit — knowledge_candidate emit-time dedup gate (δ-mem follow
     }
   };
 
-  test("test-mode bypass: duplicate claims pass through as two distinct events", () => {
+  test("test-mode bypass: duplicate claims pass through as two distinct events", async () => {
     const db = openDb(":memory:");
     const dir = "dir_dedup_testmode_bypass";
     const claim = "Brain self-audit shows promotion_rate near zero over 24 hours";
@@ -257,7 +257,7 @@ describe("handleEmit — knowledge_candidate emit-time dedup gate (δ-mem follow
     expect(idA).not.toBe(idB);
   });
 
-  test("production mode: duplicate knowledge_candidate refused — returns existing event_id and emits knowledge_candidate_redundant", () => {
+  test("production mode: duplicate knowledge_candidate refused — returns existing event_id and emits knowledge_candidate_redundant", async () => {
     const db = openDb(":memory:");
     const dir = "dir_dedup_production_refused";
     const claim = "Brain self-audit shows promotion_rate near zero over 24 hours";
@@ -296,7 +296,7 @@ describe("handleEmit — knowledge_candidate emit-time dedup gate (δ-mem follow
     });
   });
 
-  test("production mode: DISTINCT claim under same directive passes through unaffected", () => {
+  test("production mode: DISTINCT claim under same directive passes through unaffected", async () => {
     const db = openDb(":memory:");
     const dir = "dir_dedup_distinct_pass";
     const first = handleEmit(ctx(db), {
@@ -326,7 +326,7 @@ describe("handleEmit — knowledge_candidate emit-time dedup gate (δ-mem follow
     });
   });
 
-  test("production mode: cross-author candidates with same claim BOTH stand (substrate_origin scope)", () => {
+  test("production mode: cross-author candidates with same claim BOTH stand (substrate_origin scope)", async () => {
     const db = openDb(":memory:");
     const dir = "dir_dedup_cross_author";
     const claim = "Brain self-audit shows promotion_rate near zero over 24 hours";
@@ -359,9 +359,9 @@ describe("handleEmit — knowledge_candidate emit-time dedup gate (δ-mem follow
 });
 
 describe("handleEmit — closed-directive emit gate (2026-05-17, straggler prevention)", () => {
-  test("refuses task_node_opened on a directive_closed directive", () => {
+  test("refuses task_node_opened on a directive_closed directive", async () => {
     const db = openDb(":memory:");
-    const opened = handleOpenDirective(ctx(db), { directive_text: "host" } as never);
+    const opened = await handleOpenDirective(ctx(db), { directive_text: "host" } as never);
     expect(opened.ok).toBe(true);
     if (!opened.ok) return;
     const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
@@ -379,9 +379,9 @@ describe("handleEmit — closed-directive emit gate (2026-05-17, straggler preve
     if (!t.ok) expect(t.error).toContain("closed_directive_emit_refused");
   });
 
-  test("refuses task_node_opened on a directive_archived_by_operator directive", () => {
+  test("refuses task_node_opened on a directive_archived_by_operator directive", async () => {
     const db = openDb(":memory:");
-    const opened = handleOpenDirective(ctx(db), { directive_text: "host2" } as never);
+    const opened = await handleOpenDirective(ctx(db), { directive_text: "host2" } as never);
     expect(opened.ok).toBe(true);
     if (!opened.ok) return;
     const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
@@ -396,9 +396,9 @@ describe("handleEmit — closed-directive emit gate (2026-05-17, straggler preve
     if (!t.ok) expect(t.error).toContain("closed_directive_emit_refused");
   });
 
-  test("accepts task_node_opened after a directive_resumed revives the directive", () => {
+  test("accepts task_node_opened after a directive_resumed revives the directive", async () => {
     const db = openDb(":memory:");
-    const opened = handleOpenDirective(ctx(db), { directive_text: "host3" } as never);
+    const opened = await handleOpenDirective(ctx(db), { directive_text: "host3" } as never);
     expect(opened.ok).toBe(true);
     if (!opened.ok) return;
     const directiveId = (opened.result as Record<string, unknown>).directive_id as string;
