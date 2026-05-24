@@ -12,6 +12,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_POST_COMMIT_QUEUE_CONFIG,
   PostCommitProjectionQueue,
   type PostCommitQueueConfig,
   type QueueClock,
@@ -146,6 +147,95 @@ describe("post-commit projection queue — no dropped events + FIFO (b)", () => 
     }
     await q.flushForTest();
     expect(order).toEqual([0, 1, 2, 3, 4]);
+  });
+});
+
+describe("post-commit projection queue — default config yields aggressively (b/perf)", () => {
+  // The fix lowered DEFAULT_POST_COMMIT_QUEUE_CONFIG so the drain frees the
+  // event loop every few tasks (3) / few ms (5) instead of every 25 / 20.
+  // Pin those defaults so a future bump that re-blocks the loop is caught.
+  test("DEFAULT config caps a slice at a small task count + wall budget", () => {
+    expect(DEFAULT_POST_COMMIT_QUEUE_CONFIG.maxEventsPerSlice).toBeLessThanOrEqual(4);
+    expect(DEFAULT_POST_COMMIT_QUEUE_CONFIG.maxWallMsPerSlice).toBeLessThanOrEqual(5);
+    // Bounded depth + watchdog budget are unchanged by the perf fix.
+    expect(DEFAULT_POST_COMMIT_QUEUE_CONFIG.maxQueueDepth).toBe(50_000);
+    expect(DEFAULT_POST_COMMIT_QUEUE_CONFIG.watchdogMs).toBe(30_000);
+  });
+
+  test("under DEFAULT config the drain processes at most maxEventsPerSlice tasks before yielding the loop, yet drains ALL in FIFO with no drops", async () => {
+    // Hand-fired timer harness: fire timers strictly one at a time so we can
+    // observe exactly how many tasks a single drain slice processes before it
+    // yields (schedules the next setTimeout(0)). This proves the loop is freed
+    // every few tasks — reads can interleave between slices — instead of the
+    // queue running a 25-task block back-to-back.
+    let nowMs = 0;
+    const timers: Array<{ id: number; cb: () => void; dueAt: number }> = [];
+    let nextId = 1;
+    const clock: QueueClock = {
+      now: () => nowMs,
+      setTimeout: (cb, ms) => { const id = nextId++; timers.push({ id, cb, dueAt: nowMs + ms }); return id; },
+      clearTimeout: (handle) => { const i = timers.findIndex((t) => t.id === handle); if (i >= 0) timers.splice(i, 1); },
+    };
+    // Fire exactly one due timer (oldest), let microtasks settle, return whether one fired.
+    const fireOne = async (): Promise<boolean> => {
+      const idx = timers.findIndex((t) => t.dueAt <= nowMs);
+      if (idx < 0) return false;
+      const [t] = timers.splice(idx, 1);
+      t.cb();
+      await Promise.resolve();
+      return true;
+    };
+
+    const cap = DEFAULT_POST_COMMIT_QUEUE_CONFIG.maxEventsPerSlice;
+    const q = new PostCommitProjectionQueue(DEFAULT_POST_COMMIT_QUEUE_CONFIG, noSinks(), clock);
+    const order: number[] = [];
+    const TOTAL = 50;
+    for (let i = 0; i < TOTAL; i++) {
+      q.enqueue({ label: `t${i}`, sourceEventId: `e${i}`, run: () => { order.push(i); } });
+    }
+
+    // Fire the initial setTimeout(0) (the durability-before-ack yield) — runs
+    // the FIRST slice, which must stop after at most `cap` tasks then schedule
+    // the next slice. Each subsequent fireOne runs exactly one more slice.
+    let slices = 0;
+    let guard = 0;
+    while (await fireOne()) {
+      slices++;
+      const processedSoFar = order.length;
+      // Every slice processes at most `cap` tasks: the loop is freed at least
+      // every `cap` tasks, so concurrent reads always get a turn quickly.
+      // (clock does not advance here, so the wall budget never trips first —
+      // the event-count cap is what bounds the slice.)
+      expect(processedSoFar).toBeLessThanOrEqual(slices * cap);
+      if (++guard > 10_000) throw new Error("drain did not quiesce");
+    }
+
+    // No drops, strict FIFO, queue fully quiesced.
+    expect(order).toEqual(Array.from({ length: TOTAL }, (_, i) => i));
+    expect(q.drainedCount()).toBe(TOTAL);
+    expect(q.depth()).toBe(0);
+    // It genuinely yielded many times rather than draining in one block:
+    // at least ceil(TOTAL/cap) slices were needed.
+    expect(slices).toBeGreaterThanOrEqual(Math.ceil(TOTAL / cap));
+  });
+
+  test("watchdog still fires once on a genuine wedge under the small DEFAULT slice", async () => {
+    const c = makeClock();
+    const fires: string[] = [];
+    const sinks: QueueSinks = { onOverflow: () => {}, onWatchdog: (i) => { fires.push(i.watchdogId); } };
+    // Use the real DEFAULT watchdog budget with the small slice. A never-
+    // resolving task makes zero progress; the watchdog must still fire once.
+    let resolveHang: (() => void) | null = null;
+    const q = new PostCommitProjectionQueue(DEFAULT_POST_COMMIT_QUEUE_CONFIG, sinks, c.clock);
+    q.enqueue({ label: "hang", sourceEventId: "e1", run: () => new Promise<void>((res) => { resolveHang = res; }) });
+    await c.flushDue();
+    c.advance(DEFAULT_POST_COMMIT_QUEUE_CONFIG.watchdogMs + 1);
+    await c.flushDue();
+    expect(fires.length).toBe(1);
+    c.advance(DEFAULT_POST_COMMIT_QUEUE_CONFIG.watchdogMs * 2);
+    await c.flushDue();
+    expect(fires.length).toBe(1);
+    resolveHang?.();
   });
 });
 

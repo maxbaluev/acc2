@@ -80,8 +80,22 @@ export type PostCommitQueueConfig = {
 };
 
 export const DEFAULT_POST_COMMIT_QUEUE_CONFIG: PostCommitQueueConfig = {
-  maxEventsPerSlice: 25,
-  maxWallMsPerSlice: 20,
+  // Small per-slice budget so the drain yields to the event loop every few
+  // tasks / every ~5ms instead of monopolizing it for a full 25-task / 20ms
+  // window. Under 3-4 brains emitting 100-300 events/sec the prior 20ms slice
+  // fully blocked reads — reads got the loop only once per 20ms, and a single
+  // heavy task (closure-credit DAG walk) could blow past 20ms before any
+  // yield. Lowering BOTH bounds frees the loop after as few as 3 tasks (or
+  // ~5ms), so concurrent substrate.read calls interleave between slices. The
+  // change is pure-tuning: it only INCREASES yield frequency. Durability-
+  // before-ack, strict FIFO ordering, no-dropped-events, the fire-once
+  // watchdog, and the bounded depth cap are all unchanged — the drain loop
+  // still drains every enqueued task in order, just across more (cheaper)
+  // slices. The watchdog observes the lifetime drainedSeq counter (not a
+  // per-slice counter), so a smaller slice still re-arms on progress and only
+  // fires on genuine zero-progress wedge.
+  maxEventsPerSlice: 3,
+  maxWallMsPerSlice: 5,
   maxQueueDepth: 50_000,
   watchdogMs: 30_000,
 };
