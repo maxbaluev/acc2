@@ -199,13 +199,21 @@ export const buildBrainSelfAudit = (
   }
 
   // Citations — knowledge_candidate authored by brain, then how many
-  // were promoted (origin_promoted) or contradicted (candidate_contradicted).
+  // were promoted (knowledge_promoted) or contradicted (candidate_contradicted).
+  // The real promotion event is `knowledge_promoted`, emitted by the
+  // extractor promotion spine (substrate/extractors.ts) when a candidate
+  // crosses the Beta posterior threshold; its payload carries
+  // `candidate_id` (the promoted candidate's id), NOT `knowledge_id`. The
+  // earlier `origin_promoted` kind was never emitted in production — it
+  // only existed in this query and its test, so the metric was always 0.
+  // `origin_promotion_view` is a projection over the same
+  // `knowledge_promoted` rows, not a distinct concept.
   const kcCount = byKind.knowledge_candidate ?? 0;
   const promotedRow = db
     .query(
-      `SELECT COUNT(DISTINCT json_extract(payload, '$.knowledge_id')) AS c
+      `SELECT COUNT(DISTINCT json_extract(payload, '$.candidate_id')) AS c
        FROM events
-       WHERE ts >= ? AND kind = 'origin_promoted'`,
+       WHERE ts >= ? AND kind = 'knowledge_promoted'`,
     )
     .get(sinceIso) as { c: number };
   const contradictedRow = db

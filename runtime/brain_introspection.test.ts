@@ -148,12 +148,16 @@ describe("buildBrainSelfAudit", () => {
       payload: { target_resource: "repo:foo.ts", anchor: "X" },
     });
     // One promotion + one apply outcome (committed) so accept_rate > 0.
+    // Emit the REAL production promotion event (`knowledge_promoted`,
+    // emitted by the extractor promotion spine) carrying `candidate_id`
+    // — NOT the phantom `origin_promoted` kind that nothing in production
+    // ever emits. This exercises the same event production actually emits.
     emitEvent(db, {
-      kind: "origin_promoted",
+      kind: "knowledge_promoted",
       substrate_origin: "substrate_auto",
       directive_id: directiveId,
       task_id: taskId,
-      payload: { knowledge_id: "k1" },
+      payload: { candidate_id: "cand_k1" },
     });
     emitEvent(db, {
       kind: "applied_change_committed",
