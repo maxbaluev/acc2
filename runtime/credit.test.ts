@@ -1375,7 +1375,13 @@ describe("bindCitation — citation binding enforcement at emitEvent boundary (T
     // The bulk extractor's candidate-keyed recompute now actually credits kc.
     const before = (db.query<{ a: number }, []>("SELECT IFNULL(MAX(rowid),0) AS a FROM events").get() as { a: number }).a;
     void before;
-    extractKnowledgePromotions(db);
+    // extractKnowledgePromotions is async (its heavy read scans route off-loop
+    // via poolQuery, and it yields a macrotask before the heavy work). Await it
+    // so the scan completes before this test's db is closed in the next
+    // beforeEach — a bare fire-and-forget call leaks the promise onto a closed
+    // db ("Cannot use a closed database"). Behavior-preserving: the assertion
+    // below probes via the synchronous maybePromoteKnowledge regardless.
+    await extractKnowledgePromotions(db);
     // Posterior recompute: kc accumulated 0.1 fractional wins -> the
     // candidate_confirmed contributed to winsByCandidate keyed by kc.id.
     // We assert the win landed by checking the candidate is creditable: a
