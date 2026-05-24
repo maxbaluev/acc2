@@ -1581,10 +1581,16 @@ export const projectActionScoredToCredit = (
     if (typeof scoredEvent.verifier_artifact_id === "string" && scoredEvent.verifier_artifact_id.length > 0) {
       citedArtifactIds.add(scoredEvent.verifier_artifact_id);
     }
-    // CITED: from action_predicted payload.cited_artifact_ids
-    const payloadCited = predictedPayload.cited_artifact_ids;
-    if (Array.isArray(payloadCited)) {
-      for (const id of payloadCited) {
+    // CITED: from action_predicted payload.cited_artifact_ids.
+    // EXECUTION CONSTRAINTS: constraint_artifact_ids are ordinary act_artifact
+    // rows (open kind, nullable runtime allowed) that represent resource-class
+    // execution-shape beliefs. They receive the same residual posterior update
+    // as action/verifier artifacts, so catastrophic outcomes tighten future
+    // scheduling for that resource class and clean outcomes loosen it.
+    for (const field of ["cited_artifact_ids", "constraint_artifact_ids"]) {
+      const ids = predictedPayload[field];
+      if (!Array.isArray(ids)) continue;
+      for (const id of ids) {
         if (typeof id === "string" && id.length > 0) citedArtifactIds.add(id);
       }
     }

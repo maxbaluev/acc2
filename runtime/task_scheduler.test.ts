@@ -952,6 +952,34 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
     expect(conflict!.interaction).toBe("mutual_exclusion");
   });
 
+  test("declared shared ResourceUri serializes through the interference path", () => {
+    const db = openDb(":memory:");
+    const candidate = newId();
+    const inFlightDir = newId();
+    const resource = "external:outreach-account:primary";
+
+    emitEvent(db, { kind: "brain_dispatched", substrate_origin: "substrate_auto", directive_id: inFlightDir, payload: { dispatch_id: newId() } });
+    emitEvent(db, { kind: "action_predicted", substrate_origin: "opencode", directive_id: inFlightDir, payload: { engaged_resources: [resource] } });
+    emitEvent(db, { kind: "action_predicted", substrate_origin: "opencode", directive_id: candidate, payload: { engaged_resources: [resource] } });
+
+    const conflict = findCrossDirectiveConflict(db, candidate);
+    expect(conflict).not.toBeNull();
+    expect(conflict!.conflicting_directive).toBe(inFlightDir);
+    expect(conflict!.interaction).toBe("resource_conflict");
+  });
+
+  test("different declared ResourceUri values remain parallelizable", () => {
+    const db = openDb(":memory:");
+    const candidate = newId();
+    const inFlightDir = newId();
+
+    emitEvent(db, { kind: "brain_dispatched", substrate_origin: "substrate_auto", directive_id: inFlightDir, payload: { dispatch_id: newId() } });
+    emitEvent(db, { kind: "action_predicted", substrate_origin: "opencode", directive_id: inFlightDir, payload: { engaged_resources: ["repo:runtime/a.ts"] } });
+    emitEvent(db, { kind: "action_predicted", substrate_origin: "opencode", directive_id: candidate, payload: { engaged_resources: ["repo:runtime/b.ts"] } });
+
+    expect(findCrossDirectiveConflict(db, candidate)).toBeNull();
+  });
+
   test("findCrossDirectiveConflict returns null when no in-flight directive conflicts", () => {
     const db = openDb(":memory:");
     const candidate = newId();

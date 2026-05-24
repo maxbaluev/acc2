@@ -293,21 +293,94 @@ export const renderInterferenceBlock = (
  *
  *  Edges are direction-agnostic for these two kinds — a mutual-exclusion edge
  *  A↔B serialises the pair regardless of which side authored the edge. */
+export type DeferringConflict = {
+  conflicting_directive: string;
+  kind: InterferenceEdgeKind;
+  resource_uri?: string;
+  constraint_artifact_id?: string;
+  reason: string;
+};
+
+const readDeclaredExecutionResources = (
+  db: Database,
+  directiveIds: ReadonlySet<string>,
+): Map<string, Set<string>> => {
+  const out = new Map<string, Set<string>>();
+  if (directiveIds.size === 0) return out;
+  const placeholders = Array.from(directiveIds).map(() => "?").join(",");
+  const rows = db
+    .query(
+      `SELECT directive_id, payload FROM events
+       WHERE directive_id IN (${placeholders})
+         AND kind IN ('action_predicted','act_tuple_recorded')
+       ORDER BY ts DESC`,
+    )
+    .all(...Array.from(directiveIds)) as Array<{ directive_id: string; payload: string }>;
+  for (const row of rows) {
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(row.payload ?? "{}");
+    } catch {
+      continue;
+    }
+    const declared = [
+      ...(Array.isArray(payload.target_resources) ? payload.target_resources : []),
+      ...(Array.isArray(payload.affected_resources) ? payload.affected_resources : []),
+      ...(Array.isArray(payload.engaged_resources) ? payload.engaged_resources : []),
+    ]
+      .map(String)
+      .filter((v) => v.length > 0);
+    if (declared.length === 0) continue;
+    const set = out.get(row.directive_id) ?? new Set<string>();
+    for (const r of declared) set.add(r);
+    out.set(row.directive_id, set);
+  }
+  return out;
+};
+
+/** Scheduler-side execution-shape check.
+ *
+ * Existing directive_interference_edge rows remain authoritative. In addition,
+ * act declarations can carry open ResourceUri arrays in action_predicted or
+ * act_tuple_recorded payloads. A shared resource URI between a candidate and
+ * any in-flight directive is treated as the same `resource_conflict` edge the
+ * scheduler already understands. This keeps code edits, browser profiles,
+ * accounts, physical devices, and temporal handles on one path without adding
+ * platform-specific limiter enums. */
 export const findDeferringConflict = (
   db: Database,
   directiveId: string,
   inFlightDirectiveIds: ReadonlySet<string>,
-): { conflicting_directive: string; kind: InterferenceEdgeKind } | null => {
+): DeferringConflict | null => {
   if (inFlightDirectiveIds.size === 0) return null;
   const edges = readInterferenceEdges(db).filter((e) =>
     CONCURRENCY_CONFLICT_KINDS.has(e.kind),
   );
   for (const e of edges) {
     if (e.from_directive === directiveId && inFlightDirectiveIds.has(e.to_directive)) {
-      return { conflicting_directive: e.to_directive, kind: e.kind };
+      return { conflicting_directive: e.to_directive, kind: e.kind, reason: "directive_interference_edge" };
     }
     if (e.to_directive === directiveId && inFlightDirectiveIds.has(e.from_directive)) {
-      return { conflicting_directive: e.from_directive, kind: e.kind };
+      return { conflicting_directive: e.from_directive, kind: e.kind, reason: "directive_interference_edge" };
+    }
+  }
+
+  const all = new Set<string>([directiveId, ...inFlightDirectiveIds]);
+  const resources = readDeclaredExecutionResources(db, all);
+  const candidate = resources.get(directiveId);
+  if (!candidate || candidate.size === 0) return null;
+  for (const inFlight of inFlightDirectiveIds) {
+    const peer = resources.get(inFlight);
+    if (!peer) continue;
+    for (const resource of candidate) {
+      if (peer.has(resource)) {
+        return {
+          conflicting_directive: inFlight,
+          kind: "resource_conflict",
+          resource_uri: resource,
+          reason: "shared_declared_resource",
+        };
+      }
     }
   }
   return null;

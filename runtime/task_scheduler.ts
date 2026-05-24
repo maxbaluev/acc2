@@ -966,7 +966,9 @@ export const schedulerTick = async (
           from_directive: task.directive_id,
           conflicting_directive: conflict.conflicting_directive,
           interaction: conflict.kind,
-          reason: "concurrency_conflict_with_in_flight_directive",
+          reason: conflict.reason ?? "concurrency_conflict_with_in_flight_directive",
+          resource_uri: conflict.resource_uri ?? null,
+          constraint_artifact_id: conflict.constraint_artifact_id ?? null,
         } as JsonValue,
       });
       emitSchedulerAdmissionGate(db, task, "scheduler_interference_deferred", {
@@ -1425,44 +1427,16 @@ export const inFlightDirectivesFromSql = (db: Database): Set<string> => {
 export const findCrossDirectiveConflict = (
   db: Database,
   candidateDirectiveId: string,
-): { conflicting_directive: string; interaction: string } | null => {
+): { conflicting_directive: string; interaction: string; resource_uri?: string | null } | null => {
   const inFlight = inFlightDirectivesFromSql(db);
   // The candidate's own directive being in-flight doesn't count — only OTHER
   // in-flight directives produce a conflict.
   inFlight.delete(candidateDirectiveId);
-  if (inFlight.size === 0) return null;
-
-  const rows = db
-    .query(
-      `SELECT payload FROM events
-       WHERE kind = 'directive_interference_edge'
-       ORDER BY ts ASC`,
-    )
-    .all() as Array<{ payload: string }>;
-
-  for (const r of rows) {
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(r.payload ?? "{}") as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    const from = payload.from_directive as string | undefined;
-    const to = payload.to_directive as string | undefined;
-    // Some emitters use `interaction`, others use `kind` (the InterferenceEdge
-    // shape canonicalises both into `kind` on read, but here we read raw).
-    const interaction =
-      (payload.interaction as string | undefined) ??
-      (payload.kind as string | undefined);
-    if (!from || !to || !interaction) continue;
-    if (!CROSS_DIRECTIVE_BLOCKING_INTERACTIONS.has(interaction)) continue;
-
-    if (from === candidateDirectiveId && inFlight.has(to)) {
-      return { conflicting_directive: to, interaction };
-    }
-    if (to === candidateDirectiveId && inFlight.has(from)) {
-      return { conflicting_directive: from, interaction };
-    }
-  }
-  return null;
+  const conflict = findDeferringConflict(db, candidateDirectiveId, inFlight);
+  if (!conflict) return null;
+  return {
+    conflicting_directive: conflict.conflicting_directive,
+    interaction: conflict.kind,
+    resource_uri: conflict.resource_uri ?? null,
+  };
 };

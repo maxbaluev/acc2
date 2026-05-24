@@ -80,7 +80,11 @@ The next frontier makes merger rules themselves scored artifacts, so dedup thres
 
 ## 8. Dispatch & Routing
 
-Routes are open vocabulary: replay, Claude inline, opencode brain, owner clarification, or blocked/deferred; route axes are evidence-bearing strings, not enum limits (`5F21YF13Z13W5FNJ6DR2YJ04M0`). Fairness floors protect operator work from starvation when refinement branches are busy (`SAF9AVJ8HD7W5DK847W72ETXHR`).
+Routes are open vocabulary: replay, Claude inline, opencode brain, owner clarification, blocked, deferred, paced, or serialized; route axes are evidence-bearing strings, not enum limits (`5F21YF13Z13W5FNJ6DR2YJ04M0`). Fairness floors protect operator work from starvation when refinement branches are busy (`SAF9AVJ8HD7W5DK847W72ETXHR`).
+
+Execution shape is not a rate-limit subsystem. Every act declares the resources and constraints it engages as open ResourceUri/act_artifact rows: shared external handles, repository files, browser profiles, accounts, physical devices, temporal/ordering constraints, owner-consent class, and reversibility. The existing interference graph is the single scheduler primitive: conflicting resource/constraint rows serialize or defer; independent rows parallelize; owner-gated rows wait for consent; temporal rows pace by their declared window. The same rule prevents two agents editing one file, two browser flows sharing one profile, too many outreach actions against one account, and embodied tasks running out of order.
+
+Execution constraints learn through the normal residual-posterior path. A ban, corrupted file, clobbered edit, unsafe physical outcome, or owner-stated "too fast/too much" is a high-residual outcome credited to the engaged resource-class constraint artifact, tightening future admission for that class. Clean outcomes loosen by the same Beta update. No platform enums, no hardcoded rate tables, and no parallel limiter: new surfaces are ordinary `act_artifact.kind` rows plus payload fields on `action_predicted`/`act_tuple_recorded`, read by the existing scheduler/interference path.
 
 Dispatch quality becomes a posterior boundary after Tier 0 trust and Tier 3 structural scorers close (`G3PR7X6TCD4T57D7T6GXCDY9AW`).
 
