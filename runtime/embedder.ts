@@ -441,58 +441,63 @@ export const cleanupOrphanedVecEvents = (db: Database, limit = 5000): number => 
   return deleted;
 };
 
-/** Persist one embedding back onto the source row. We UPDATE the source
- *  event row's `embedding` + `embedding_version` columns (transitional —
- *  kept for parity testing per the schema deprecation note) AND insert
- *  into the canonical vec_events virtual table. The post-update emission
- *  of `embedding_computed` keeps the four-link chain auditable: the
- *  source event id appears in context_refs. */
-/** Persist a single embedding row WITHOUT emitting embedding_computed.
- *  Callers MUST emit the per-batch summary event after the persist loop
- *  completes (and after the surrounding transaction commits) — see
- *  embedderWorkerTick + embedPendingEvents below. Per-row emission of
- *  embedding_computed was the structural wedge: 50-row batches emitted
- *  50 events, each publishing through the activation bus to every
- *  subscriber on `["*"]` (the embedder itself, hotreload, extractors,
- *  …). Wall time per tick was 13-14s for actual OpenAI + 50 publish
- *  cascades. After this change, one summary event per batch — the audit
- *  trail still captures every successful embedding via source_event_ids
- *  array — and the embedder reactive worker only re-fires once instead
- *  of 50 times (which is then skipped by the running-tick gate anyway,
- *  but the publish itself was the cost). */
-const persistEmbedding = (
+/** Batched persist — prepares the four SQL statements ONCE and reuses them
+ *  across every row in the batch instead of recompiling UPDATE + the vec0
+ *  PK-lookup + DELETE + INSERT per row. The per-row `persistEmbedding` path
+ *  recompiled ~4 statements × N rows synchronously on the main loop inside
+ *  the batch transaction (~2-5s loop block per embedder tick on a large DB).
+ *  Reusing prepared statements collapses statement compilation to 4 total and
+ *  keeps every other invariant identical: same UPDATE on the source row, same
+ *  ATOMIC-OR-NOTHING vec_events projection (DELETE-then-INSERT), same rethrow
+ *  on a vec0 failure so the caller's transaction rolls back and the row
+ *  retries next tick. Exactly-once is preserved bit-for-bit — each accepted
+ *  embedding is written to the source row + vec_events exactly as the per-row
+ *  path did. Returns the ids that persisted successfully; on the FIRST vec0
+ *  failure it rethrows (the caller wraps this in BEGIN/COMMIT and rolls back).
+ *  MUST be called inside the caller's open transaction. */
+const persistEmbeddingsBatch = (
   db: Database,
-  sourceId: string,
-  embedding: number[],
+  items: Array<{ id: string; embedding: number[]; sourceTable: EmbeddingSourceTable }>,
   version: string,
-  sourceTable: EmbeddingSourceTable = "events",
+  onPersisted: (id: string) => void,
 ): void => {
-  const blob = encodeEmbeddingBlob(embedding);
-  if (sourceTable === "act_artifact") {
-    db.run(
-      "UPDATE act_artifact SET embedding = ?, updated_at = ? WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL",
-      [blob, new Date().toISOString(), sourceId],
-    );
-  } else {
-    db.run(
-      "UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?",
-      [blob, version, sourceId],
-    );
+  if (items.length === 0) return;
+  // Prepare each statement exactly once; bun:sqlite caches the compiled plan
+  // on the Statement handle so the loop only binds + steps.
+  const updateEvents = db.prepare("UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?");
+  const updateArtifact = db.prepare(
+    "UPDATE act_artifact SET embedding = ?, updated_at = ? WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL",
+  );
+  const selectEventMeta = db.prepare("SELECT kind, ts FROM events WHERE id = ?");
+  const selectArtifactMeta = db.prepare(
+    "SELECT 'act_artifact' AS kind, COALESCE(updated_at, created_at) AS ts FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL",
+  );
+  const deleteVec = db.prepare("DELETE FROM vec_events WHERE event_id = ?");
+  const insertVec = db.prepare(
+    "INSERT INTO vec_events(event_id, embedding, kind, ts, embedding_version) VALUES (?, ?, ?, ?, ?)",
+  );
+  const nowIso = new Date().toISOString();
+  for (const { id, embedding, sourceTable } of items) {
+    const blob = encodeEmbeddingBlob(embedding);
+    if (sourceTable === "act_artifact") {
+      updateArtifact.run(blob, nowIso, id);
+    } else {
+      updateEvents.run(blob, version, id);
+    }
+    // vec0 upsert (ATOMIC-OR-NOTHING): rethrows on failure → caller rolls back.
+    const meta = (sourceTable === "act_artifact"
+      ? selectArtifactMeta.get(id)
+      : selectEventMeta.get(id)) as { kind: string; ts: string } | null;
+    if (!meta) {
+      // Source row vanished mid-batch (race with archival/eviction). Skip the
+      // vec0 projection — the orphaned UPDATE is harmless; the row simply
+      // won't be projected. Do NOT mark it persisted.
+      continue;
+    }
+    deleteVec.run(id);
+    insertVec.run(id, JSON.stringify(embedding), meta.kind, meta.ts, version);
+    onPersisted(id);
   }
-  // Canonical v2 path — see schema.sql for vec_events shape + reasoning.
-  // ATOMIC-OR-NOTHING (RLM-first instant-responsive fix): the embedding write
-  // and the vec_events projection happen together in the caller's batch
-  // transaction. If the vec0 upsert fails we RETHROW so the whole batch rolls
-  // back and the row retries next tick as `embedding IS NULL` — rather than
-  // swallowing (which left the row embedded-but-unprojected = drift). That
-  // drift was the ONLY reason the hot path carried a per-tick NOT-EXISTS-vec0
-  // reproject scan (a 300k-row correlated subquery against the vec0 virtual
-  // table) that blocked the daemon boot ~162s + ground the event loop. With
-  // embed+project atomic, drift is impossible, so the reproject scan is
-  // removed and the hot path is just the indexed `embedding IS NULL` predicate.
-  // A persistent upsert failure now surfaces (error_caught + the error-flood
-  // guard) instead of silently degrading retrieval.
-  upsertVecEventRow(db, sourceId, embedding, version, sourceTable);
 };
 
 /** Emit ONE summary embedding_computed event for an entire batch.
@@ -603,20 +608,21 @@ export const embedderWorkerTick = async (
   // Failures inside the txn fall through to the catch and rollback the
   // whole batch — surviving rows are picked up by the next tick.
   const persistedIds: string[] = [...projectedIds];
+  // Build the persist set up front; items with no returned embedding are
+  // counted as failed (no row written for them).
+  const persistTargets: Array<{ id: string; embedding: number[]; sourceTable: EmbeddingSourceTable }> = [];
+  for (const item of items) {
+    const vec = embeddings.get(item.id);
+    if (!vec) { failed++; continue; }
+    persistTargets.push({ id: item.id, embedding: vec, sourceTable: item.source_table });
+  }
   db.run("BEGIN");
   try {
-    for (const item of items) {
-      const vec = embeddings.get(item.id);
-      if (!vec) { failed++; continue; }
-      try {
-        persistEmbedding(db, item.id, vec, EMBEDDING_VERSION, item.source_table);
-        persistedIds.push(item.id);
-        embedded++;
-        try { recordEmbedding(batchDurMs / Math.max(1, embeddings.size) / 1000); } catch { /* swallow */ }
-      } catch {
-        failed++;
-      }
-    }
+    persistEmbeddingsBatch(db, persistTargets, EMBEDDING_VERSION, (id) => {
+      persistedIds.push(id);
+      embedded++;
+      try { recordEmbedding(batchDurMs / Math.max(1, embeddings.size) / 1000); } catch { /* swallow */ }
+    });
     db.run("COMMIT");
   } catch (err) {
     try { db.run("ROLLBACK"); } catch { /* best-effort */ }
@@ -758,19 +764,18 @@ export const embedPendingEvents = async (
     }
     const embeddings = await batchComputeEmbeddings(items);
     const persistedIds: string[] = [];
+    const persistTargets: Array<{ id: string; embedding: number[]; sourceTable: EmbeddingSourceTable }> = [];
+    for (const item of items) {
+      const vec = embeddings.get(item.id);
+      if (!vec) { failed++; continue; }
+      persistTargets.push({ id: item.id, embedding: vec, sourceTable: item.source_table });
+    }
     db.run("BEGIN");
     try {
-      for (const item of items) {
-        const vec = embeddings.get(item.id);
-        if (!vec) { failed++; continue; }
-        try {
-          persistEmbedding(db, item.id, vec, EMBEDDING_VERSION, item.source_table);
-          persistedIds.push(item.id);
-          embedded++;
-        } catch {
-          failed++;
-        }
-      }
+      persistEmbeddingsBatch(db, persistTargets, EMBEDDING_VERSION, (id) => {
+        persistedIds.push(id);
+        embedded++;
+      });
       db.run("COMMIT");
     } catch (err) {
       try { db.run("ROLLBACK"); } catch { /* best-effort */ }

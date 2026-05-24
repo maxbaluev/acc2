@@ -17,6 +17,7 @@ import {
   runIntegrityCheck,
   STALE_DISPATCH_THRESHOLD_MS,
 } from "./integrity_worker";
+import { setSqlPool, clearSqlPool } from "./sql_pool_singleton";
 
 const eventsByKind = (db: Database, kind: string): Array<Record<string, unknown>> => {
   return db
@@ -447,5 +448,56 @@ describe("reconcilePreDispatchOrphans", () => {
     } finally {
       closeDb(":memory:");
     }
+  });
+});
+
+describe("runIntegrityCheck — COUNT scans route through SQL worker pool", () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-integrity-pool-"));
+    dbPath = join(tmpDir, "state.db");
+  });
+
+  afterEach(() => {
+    clearSqlPool();
+    closeDb(dbPath);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("events + vec_events COUNT(*) go through the pool when installed", async () => {
+    const db = openDb(dbPath);
+    emitEvent(db, { kind: "directive_opened", payload: { directive_text: "a" } });
+    emitEvent(db, { kind: "directive_opened", payload: { directive_text: "b" } });
+
+    // Fake pool: delegates to the same db synchronously (identical results)
+    // and records each routed SQL so the test proves the heavy COUNT scans
+    // were off-loaded. The PRAGMA integrity_check stays on the main thread.
+    const calls: string[] = [];
+    const fakePool = {
+      query: async <T,>(sql: string, params: unknown[] = []): Promise<T[]> => {
+        calls.push(sql);
+        return db.query(sql).all(...(params as never[])) as T[];
+      },
+    };
+    setSqlPool(fakePool as unknown as Parameters<typeof setSqlPool>[0]);
+
+    const report = await runIntegrityCheck(db);
+    expect(report.ok).toBe(true);
+    expect(report.events_count).toBeGreaterThanOrEqual(2);
+    // Both COUNT scans were routed through the pool; the PRAGMA was NOT.
+    expect(calls.some((s) => s.includes("COUNT(*)") && s.includes("FROM events"))).toBe(true);
+    expect(calls.some((s) => s.includes("COUNT(*)") && s.includes("FROM vec_events"))).toBe(true);
+    expect(calls.some((s) => s.includes("PRAGMA"))).toBe(false);
+  });
+
+  test("sync fallback when no pool — counts still correct", async () => {
+    clearSqlPool();
+    const db = openDb(dbPath);
+    emitEvent(db, { kind: "directive_opened", payload: { directive_text: "c" } });
+    const report = await runIntegrityCheck(db);
+    expect(report.ok).toBe(true);
+    expect(report.events_count).toBeGreaterThanOrEqual(1);
   });
 });

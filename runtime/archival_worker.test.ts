@@ -17,6 +17,7 @@ import {
   _listArchivesForDir,
 } from "./archival_worker";
 import { listArchives, openColdDb, searchAcrossArchives } from "../substrate/cold_db";
+import { setSqlPool, clearSqlPool } from "./sql_pool_singleton";
 
 const eventsCount = (db: Database, kind?: string): number => {
   if (kind) {
@@ -492,5 +493,59 @@ describe("runTelemetryEvictionSweep — event-class tiering", () => {
     expect(summary.evicted).toBe(0);
     expect(eventsCount(db, "telemetry_evicted")).toBe(0);
     expect(eventsCount(db, "artifact_kind_inference_uncertain")).toBe(1);
+  });
+});
+
+describe("runArchivalSweep — heavy READ scan routes through SQL worker pool", () => {
+  let tmpDir: string;
+  let dbPath: string;
+  let db: Database;
+  const NOW = Date.parse("2026-05-15T12:00:00.000Z");
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-archival-pool-"));
+    dbPath = join(tmpDir, "state.db");
+    db = openDb(dbPath);
+  });
+
+  afterEach(() => {
+    clearSqlPool();
+    closeDb(dbPath);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("candidate scan goes through the pool when one is installed (sync fallback when absent)", async () => {
+    // Seed two old months so the candidate scan returns rows.
+    for (let i = 0; i < 10; i++) {
+      seedEventAtTs(db, new Date(Date.parse("2026-02-10T00:00:00.000Z") + i * 1000).toISOString(), 100 + i);
+    }
+
+    // Fake pool: same idiom as embedder.readUnembedded — delegates to the same
+    // db synchronously (correct: identical rows/order) and records each call
+    // so the test proves the scan was off-loaded, not run on the main thread.
+    const calls: string[] = [];
+    const fakePool = {
+      query: async <T,>(sql: string, params: unknown[] = []): Promise<T[]> => {
+        calls.push(sql);
+        return db.query(sql).all(...(params as never[])) as T[];
+      },
+    };
+    setSqlPool(fakePool as unknown as Parameters<typeof setSqlPool>[0]);
+
+    const summary = await runArchivalSweep(db, { stateDbPath: dbPath, nowMs: NOW, retentionDays: 30 });
+    expect(summary.scanned).toBe(10);
+    expect(summary.deleted).toBe(10);
+    // The heavy candidate scan was routed through the pool.
+    expect(calls.some((s) => s.includes("FROM events") && s.includes("ORDER BY ts ASC"))).toBe(true);
+  });
+
+  test("sync fallback when no pool — identical result", async () => {
+    clearSqlPool();
+    for (let i = 0; i < 10; i++) {
+      seedEventAtTs(db, new Date(Date.parse("2026-02-10T00:00:00.000Z") + i * 1000).toISOString(), 200 + i);
+    }
+    const summary = await runArchivalSweep(db, { stateDbPath: dbPath, nowMs: NOW, retentionDays: 30 });
+    expect(summary.scanned).toBe(10);
+    expect(summary.deleted).toBe(10);
   });
 });

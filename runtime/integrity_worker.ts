@@ -22,6 +22,7 @@
 import type { Database } from "bun:sqlite";
 import { emitEvent } from "./events";
 import { logger } from "./logger";
+import { poolQuery } from "./sql_pool_singleton";
 
 const WAL_CHECKPOINT_THRESHOLD_BYTES = 20 * 1024 * 1024; // 20 MB (foundational fix 2026-05-16 — was 100MB; pair with PRAGMA wal_autocheckpoint=2000 + journal_size_limit=64MB in substrate/db.ts).
 
@@ -99,14 +100,22 @@ export const runIntegrityCheck = async (db: Database, opts?: { quick?: boolean }
   const wal_size_bytes = readWalSizeBytes(db);
   let events_count = 0;
   let embeddings_count = 0;
+  // T3.8/T5: the two COUNT(*) scans walk the full events / vec_events tables
+  // (700MB+ on a live DB) — running them on the main loop under Bun's
+  // fake-async SQL blocks emitEvent + MCP IO. Route them through the SQL
+  // worker-thread pool when the daemon installed one (mirrors
+  // embedder.readUnembedded); poolQuery falls back to the synchronous
+  // main-thread read when no pool (unit tests / ACC2_DISABLE_SQL_POOL). The
+  // PRAGMA integrity_check above stays on the main thread (pragmas can't go
+  // through the pool) on its deferred 6h cadence.
   try {
-    const e = db.query("SELECT COUNT(*) AS n FROM events").get() as { n: number } | null;
+    const e = (await poolQuery<{ n: number }>(db, "SELECT COUNT(*) AS n FROM events"))[0];
     events_count = e?.n ?? 0;
   } catch (err) {
     logger.debug({ where: "integrity.events_count", err: String(err) }, "events count failed");
   }
   try {
-    const v = db.query("SELECT COUNT(*) AS n FROM vec_events").get() as { n: number } | null;
+    const v = (await poolQuery<{ n: number }>(db, "SELECT COUNT(*) AS n FROM vec_events"))[0];
     embeddings_count = v?.n ?? 0;
   } catch (err) {
     logger.debug({ where: "integrity.embeddings_count", err: String(err) }, "vec_events count failed");
