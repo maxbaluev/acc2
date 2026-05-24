@@ -30,13 +30,9 @@ import { findSimilarRecentCandidate } from "../knowledge_dedup";
 import { newId } from "../ids";
 import { evaluateClosureCommitGate } from "../closure_audit";
 import {
-  actArtifactRegistry,
-  readyTasks,
   dispatchResolved,
   dispatchResolvedPooled,
-  taskGraphFor,
   failureCounts,
-  artifactRouting,
   stakeholderStateRows,
   activeObjectives,
   rollingReviewDue,
@@ -63,7 +59,6 @@ import {
   promotedKnowledge,
   recipeRegistry,
   actProjectionObservability,
-  substrateNarrativeRecent,
   claudeInlineReadyLeaves,
   pendingContractAmendments,
   directives,
@@ -73,6 +68,13 @@ import {
   modelRouting,
 } from "../../substrate/views";
 import { readPeerActivity } from "../peer_registry";
+import {
+  readyTasksPooled,
+  taskGraphForPooled,
+  actArtifactRegistryPooled,
+  artifactRoutingPooled,
+  substrateNarrativeRecentPooled,
+} from "./pooled_view_reads";
 import type {
   AdmitArtifactSchema,
   AmendDirectiveSchema,
@@ -662,7 +664,12 @@ const poolQuery = async <T>(db: Database, sql: string, params: unknown[]): Promi
   try {
     const mod = await import("../sql_pool_singleton");
     const pool = mod.getSqlPool();
-    if (pool) return pool.query<T>(sql, params);
+    // `await` here (not bare `return pool.query(...)`) so a pool rejection —
+    // overflow / per-query timeout / worker-thread death — is caught and we
+    // fail CLOSED to the synchronous read. Correctness (the view still
+    // returns its rows) over throughput. Matches the canonical idiom in
+    // sql_pool_singleton.ts:poolQuery.
+    if (pool) return await pool.query<T>(sql, params);
   } catch { /* tolerate — fall through to sync */ }
   return (params.length > 0 ? db.query(sql).all(...(params as Parameters<typeof db.query>)) : db.query(sql).all()) as T[];
 };
@@ -684,12 +691,23 @@ export const handleRead = (
       case "code_artifact_registry_view": {
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const runtime = typeof arg.runtime === "string" ? arg.runtime : undefined;
-        return { ok: true, result: actArtifactRegistry(db, runtime) as unknown as JsonValue };
+        // T3.8/T5: route the registry scan off the daemon main loop through the
+        // SQL worker pool (sync fallback when no pool). Identical rows + order.
+        return (async (): Promise<McpResult> => {
+          const rows = await actArtifactRegistryPooled(db, poolQuery, runtime);
+          return { ok: true, result: rows as unknown as JsonValue };
+        })();
       }
       case "ready_tasks_view": {
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
-        return { ok: true, result: readyTasks(db, limit) as unknown as JsonValue };
+        // T3.8/T5: ready_tasks_view is polled by the scheduler/dispatcher; route
+        // its scan off the main loop through the SQL worker pool. Sync fallback
+        // when no pool (tests, ACC2_DISABLE_SQL_POOL). Identical rows + order.
+        return (async (): Promise<McpResult> => {
+          const rows = await readyTasksPooled(db, poolQuery, limit);
+          return { ok: true, result: rows as unknown as JsonValue };
+        })();
       }
       case "dispatch_resolved_view": {
         const arg = (args.args ?? {}) as Record<string, unknown>;
@@ -711,14 +729,26 @@ export const handleRead = (
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : null;
         if (!directiveId) return { ok: false, error: "task_graph_view_requires_directive_id" };
-        return { ok: true, result: taskGraphFor(db, directiveId) as unknown as JsonValue };
+        // T3.8/T5: task_graph_view is the recursive per-directive DAG scan the
+        // TUI + brain read; route off the main loop through the SQL worker pool
+        // (sync fallback when no pool). Identical rows + ts ordering.
+        return (async (): Promise<McpResult> => {
+          const rows = await taskGraphForPooled(db, poolQuery, directiveId);
+          return { ok: true, result: rows as unknown as JsonValue };
+        })();
       }
       case "failure_view":
         return { ok: true, result: failureCounts(db) as unknown as JsonValue };
       case "artifact_routing_view": {
         const arg = (args.args ?? {}) as Record<string, unknown>;
         const runtime = typeof arg.runtime === "string" ? arg.runtime : undefined;
-        return { ok: true, result: artifactRouting(db, runtime) as unknown as JsonValue };
+        // T3.8/T5: artifact_routing_view joins the routing ranking against
+        // act_artifact; route off the main loop through the SQL worker pool
+        // (sync fallback when no pool). Identical rows + routing_score order.
+        return (async (): Promise<McpResult> => {
+          const rows = await artifactRoutingPooled(db, poolQuery, runtime);
+          return { ok: true, result: rows as unknown as JsonValue };
+        })();
       }
       case "stakeholder_state_view": {
         const arg = (args.args ?? {}) as Record<string, unknown>;
@@ -1134,15 +1164,18 @@ export const handleRead = (
         const kindsIn = Array.isArray(arg.kinds_in)
           ? (arg.kinds_in as unknown[]).filter((x): x is string => typeof x === "string")
           : undefined;
-        return {
-          ok: true,
-          result: substrateNarrativeRecent(db, {
+        // T3.8/T5: substrate_narrative_recent_view is the content-first TUI's
+        // hot poll surface; route its scan off the main loop through the SQL
+        // worker pool (sync fallback when no pool). Identical rows + order.
+        return (async (): Promise<McpResult> => {
+          const rows = await substrateNarrativeRecentPooled(db, poolQuery, {
             limit,
             directive_id: directiveId,
             importance_in: importanceIn,
             kinds_in: kindsIn,
-          }) as unknown as JsonValue,
-        };
+          });
+          return { ok: true, result: rows as unknown as JsonValue };
+        })();
       }
       case "lesson_implementation_status_view":
         return { ok: true, result: lessonImplementationStatus(db) as unknown as JsonValue };
