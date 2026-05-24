@@ -412,6 +412,10 @@ const BOOT_HEAVY_PASS_DELAY_MS = (() => {
 })();
 
 const countEvents = (db: Database): number => {
+  try {
+    const row = db.query("SELECT SUM(live_count) AS n FROM event_kind_rollup").get() as { n: number | null } | null;
+    if (typeof row?.n === "number") return row.n;
+  } catch { /* pre-rollup DBs during tests */ }
   const row = db.query("SELECT COUNT(*) AS n FROM events").get() as { n: number } | null;
   return row?.n ?? 0;
 };
@@ -460,7 +464,7 @@ const refreshHealthCounts = async (db: Database): Promise<void> => {
     pool = poolMod.getSqlPool();
   } catch { /* tolerate — fall through to sync */ }
 
-  const countSql = "SELECT COUNT(*) AS c FROM events";
+  const countSql = "SELECT COALESCE(SUM(live_count), 0) AS c FROM event_kind_rollup";
   const recentSql = (kinds: string[]): string =>
     `SELECT COUNT(*) AS c FROM events WHERE kind IN (${kinds.map(() => "?").join(",")}) AND ts >= ?`;
 

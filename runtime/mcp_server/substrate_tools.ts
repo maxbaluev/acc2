@@ -864,10 +864,24 @@ export const handleRead = (
           // use a UNION ALL of `SELECT ? AS kind` rows for the registry CTE
           // so the LEFT JOIN against events works portably under bun:sqlite.
           const registryCte = kinds.map(() => "SELECT ? AS kind").join(" UNION ALL ");
-          const eventsScope = windowHours !== undefined
-            ? `(SELECT kind, ts, substrate_origin FROM events WHERE ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ? || ' hours'))`
-            : `events`;
-          const sql = `
+          const useRollup = windowHours === undefined;
+          const eventsScope = useRollup
+            ? `event_kind_rollup`
+            : `(SELECT kind, ts, substrate_origin FROM events WHERE ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ? || ' hours'))`;
+          const sql = useRollup ? `
+            WITH registry AS (${registryCte})
+            SELECT
+              registry.kind AS kind,
+              COALESCE(e.total_count, 0) AS occurrence_count,
+              e.first_ts AS first_emit_ts,
+              e.last_ts AS last_emit_ts,
+              0 AS distinct_origins
+            FROM registry
+            LEFT JOIN ${eventsScope} AS e ON e.kind = registry.kind
+            GROUP BY registry.kind
+            HAVING COALESCE(e.total_count, 0) = 0
+            ORDER BY registry.kind ASC
+          ` : `
             WITH registry AS (${registryCte})
             SELECT
               registry.kind AS kind,
@@ -882,7 +896,7 @@ export const handleRead = (
             ORDER BY registry.kind ASC
           `;
           const bindings: Array<string | number> = [...kinds];
-          if (windowHours !== undefined) bindings.push(windowHours);
+          if (!useRollup && windowHours !== undefined) bindings.push(windowHours);
           // T3.8/T5: route through worker-thread pool when available.
           return (async (): Promise<McpResult> => {
             const rows = await poolQuery<Record<string, unknown>>(db, sql, bindings);
@@ -907,14 +921,18 @@ export const handleRead = (
           `
           : `
             SELECT
-              kind,
-              COUNT(*) AS occurrence_count,
-              MIN(ts) AS first_emit_ts,
-              MAX(ts) AS last_emit_ts,
-              COUNT(DISTINCT substrate_origin) AS distinct_origins
-            FROM events
-            GROUP BY kind
-            ORDER BY last_emit_ts DESC
+              r.kind,
+              r.total_count AS occurrence_count,
+              r.first_ts AS first_emit_ts,
+              r.last_ts AS last_emit_ts,
+              COALESCE(o.distinct_origins, 0) AS distinct_origins
+            FROM event_kind_rollup AS r
+            LEFT JOIN (
+              SELECT kind, COUNT(*) AS distinct_origins
+              FROM event_kind_origin_rollup
+              GROUP BY kind
+            ) AS o ON o.kind = r.kind
+            ORDER BY r.last_ts DESC
           `;
         // T3.8/T5: route through worker-thread pool when available.
         return (async (): Promise<McpResult> => {

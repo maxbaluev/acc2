@@ -83,6 +83,20 @@ const ALWAYS_KEEP_KINDS = new Set<string>([
   // Constitutional events.
   "constitutional_ratification_recorded",
   "constitutional_ratification_refused",
+  // Causal spine + substrate memory: these compound and must remain hot.
+  "task_committed",
+  "task_closure_audited",
+  "act_tuple_recorded",
+  "action_predicted",
+  "action_scored",
+  "causal_edge_observed",
+  "causal_edge_credited",
+  "retrieval_credit_attributed",
+  "knowledge_candidate",
+  "act_artifact_candidate",
+  "act_artifact_admitted",
+  "act_artifact_promoted",
+  "lesson_extracted",
 ]);
 
 const COMPRESS_SUMMARY_KINDS = new Set<string>([
@@ -198,6 +212,39 @@ const bumpRetainedEvictedCount = (db: Database, kind: string, delta: number): vo
     "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     [`${EVICTED_COUNT_META_PREFIX}${kind}`, String(prior + delta)],
   );
+};
+
+const adjustLiveRollup = (db: Database, kind: string, day: string, delta: number): void => {
+  if (delta === 0) return;
+  try {
+    db.run("UPDATE event_kind_rollup SET live_count = MAX(0, live_count + ?) WHERE kind = ?", [delta, kind]);
+    db.run("UPDATE event_day_kind_rollup SET live_count = MAX(0, live_count + ?) WHERE day = ? AND kind = ?", [delta, day, kind]);
+  } catch { /* pre-rollup DBs are tolerated until migrations run */ }
+};
+
+const recordArchiveSummary = (db: Database, rows: Array<{ id: string; kind: string; ts: string }>, reason: string): void => {
+  const buckets = new Map<string, { kind: string; hour: string; count: number; first_ts: string; last_ts: string }>();
+  for (const row of rows) {
+    const hour = row.ts.slice(0, 13);
+    const key = `${row.kind}:${hour}`;
+    const prior = buckets.get(key);
+    if (!prior) buckets.set(key, { kind: row.kind, hour, count: 1, first_ts: row.ts, last_ts: row.ts });
+    else {
+      prior.count++;
+      if (row.ts < prior.first_ts) prior.first_ts = row.ts;
+      if (row.ts > prior.last_ts) prior.last_ts = row.ts;
+    }
+  }
+  for (const summary of buckets.values()) {
+    try {
+      db.run(
+        `INSERT INTO event_archive_summary (id, kind, bucket, count, first_ts, last_ts, reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET count = excluded.count, first_ts = excluded.first_ts, last_ts = excluded.last_ts`,
+        [`${reason}:${summary.kind}:${summary.hour}`, summary.kind, summary.hour, summary.count, summary.first_ts, summary.last_ts, reason, new Date().toISOString()],
+      );
+    } catch { /* summary is best-effort; deletion remains bounded */ }
+  }
 };
 
 // Short retention for DROP_KINDS — telemetry needs ~recent debugging value
@@ -538,6 +585,7 @@ export const runArchivalSweep = async (
         // bun:sqlite returns { changes } as `changes` property.
         const changes = (result as unknown as { changes?: number }).changes ?? 0;
         deletedThisBucket += changes;
+        for (const r of chunk) adjustLiveRollup(hotDb, r.kind, r.ts.slice(0, 10), -1);
       }
 
       summary.archived_by_month[yyyymm] = copiedThisBucket;
@@ -645,6 +693,11 @@ export const runDropSweep = async (
   summary.scanned = ids.length;
   if (ids.length === 0) return summary;
 
+  const rowsForSummary = hotDb
+    .query<{ id: string; kind: string; ts: string }>(`SELECT id, kind, ts FROM events WHERE id IN (${ids.map(() => "?").join(", ")})`)
+    .all(...ids) as Array<{ id: string; kind: string; ts: string }>;
+  recordArchiveSummary(hotDb, rowsForSummary, "drop");
+
   const CHUNK = 500;
   for (let i = 0; i < ids.length; i += CHUNK) {
     const chunk = ids.slice(i, i + CHUNK);
@@ -652,6 +705,10 @@ export const runDropSweep = async (
     try {
       const result = hotDb.run(`DELETE FROM events WHERE id IN (${delPh})`, chunk);
       summary.dropped += (result as unknown as { changes?: number }).changes ?? 0;
+      for (const id of chunk) {
+        const row = rowsForSummary.find((r) => r.id === id);
+        if (row) adjustLiveRollup(hotDb, row.kind, row.ts.slice(0, 10), -1);
+      }
     } catch (err) {
       logger.warn({ where: "archival_worker.drop_sweep", err: (err as Error).message }, "drop-sweep chunk failed");
     }
@@ -712,12 +769,13 @@ export const runTelemetryEvictionSweep = async (
   // comparison is index-friendly (idx_events_kind_ts / idx_events_ts).
   const ph = kindList.map(() => "?").join(", ");
   const rows = hotDb
-    .query<{ id: string; kind: string }, [...string[], string, number]>(
-      `SELECT id, kind FROM events WHERE kind IN (${ph}) AND ts < ? ORDER BY ts ASC LIMIT ?`,
+    .query<{ id: string; kind: string; ts: string }, [...string[], string, number]>(
+      `SELECT id, kind, ts FROM events WHERE kind IN (${ph}) AND ts < ? ORDER BY ts ASC LIMIT ?`,
     )
-    .all(...kindList, cutoffIso, limit) as Array<{ id: string; kind: string }>;
+    .all(...kindList, cutoffIso, limit) as Array<{ id: string; kind: string; ts: string }>;
   summary.scanned = rows.length;
   if (rows.length === 0) return summary;
+  recordArchiveSummary(hotDb, rows, "telemetry_eviction");
 
   const idsByKind = new Map<string, string[]>();
   for (const r of rows) {
@@ -741,6 +799,10 @@ export const runTelemetryEvictionSweep = async (
         hotDb.run(`DELETE FROM vec_events WHERE event_id IN (${delPh})`, chunk);
         const result = hotDb.run(`DELETE FROM events WHERE id IN (${delPh})`, chunk);
         deletedThisKind += (result as unknown as { changes?: number }).changes ?? 0;
+        for (const id of chunk) {
+          const row = rows.find((r) => r.id === id);
+          if (row) adjustLiveRollup(hotDb, row.kind, row.ts.slice(0, 10), -1);
+        }
       } catch (err) {
         logger.warn(
           { where: "archival_worker.telemetry_eviction", kind, err: (err as Error).message },

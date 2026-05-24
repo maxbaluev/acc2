@@ -450,6 +450,34 @@ describe("runTelemetryEvictionSweep — event-class tiering", () => {
     expect(retainedEvictedCount(db, "knowledge_promoted")).toBe(0);
   });
 
+  test("telemetry eviction writes summary before delete and keeps causal-spine/substrate-memory hot", async () => {
+    const oldTs = hoursAgo(3);
+    seedKindAtTs("artifact_kind_inference_uncertain", oldTs, 1);
+    seedKindAtTs("task_committed", oldTs, 2);
+    seedKindAtTs("knowledge_promoted", oldTs, 3);
+    seedKindAtTs("act_artifact_admitted", oldTs, 4);
+
+    const summary = await runTelemetryEvictionSweep(db, { retentionHours: 1, nowMs: NOW });
+
+    expect(summary.evicted).toBe(1);
+    expect(eventsCount(db, "artifact_kind_inference_uncertain")).toBe(0);
+    expect(eventsCount(db, "task_committed")).toBe(1);
+    expect(eventsCount(db, "knowledge_promoted")).toBe(1);
+    expect(eventsCount(db, "act_artifact_admitted")).toBe(1);
+    const archiveSummary = db
+      .query<{ count: number; kind: string; reason: string }, []>(
+        "SELECT count, kind, reason FROM event_archive_summary WHERE kind = 'artifact_kind_inference_uncertain' LIMIT 1",
+      )
+      .get();
+    expect(archiveSummary).toEqual({ count: 1, kind: "artifact_kind_inference_uncertain", reason: "telemetry_eviction" });
+    const rollup = db
+      .query<{ live_count: number; total_count: number }, []>(
+        "SELECT live_count, total_count FROM event_kind_rollup WHERE kind = 'artifact_kind_inference_uncertain'",
+      )
+      .get();
+    expect(rollup).toEqual({ live_count: 0, total_count: 1 });
+  });
+
   test("curationModeForKind classifies ephemeral telemetry as 'evict', durable kinds as not-evict", () => {
     expect(curationModeForKind("recipe_promotion_deferred")).toBe("evict");
     expect(curationModeForKind("artifact_kind_inference_uncertain")).toBe("evict");

@@ -62,6 +62,17 @@ describe("event_kind_occurrence_view", () => {
     expect(committed!.distinct_origins).toBe(1);
   });
 
+  test("non-window reads use writer-maintained rollups, including compacted rows", async () => {
+    const db = openDb(":memory:");
+    emitEvent(db, { kind: "artifact_kind_inference_uncertain", substrate_origin: "runtime", payload: {} });
+    db.run("DELETE FROM events WHERE kind = 'artifact_kind_inference_uncertain'");
+    db.run("UPDATE event_kind_rollup SET live_count = 0 WHERE kind = 'artifact_kind_inference_uncertain'");
+
+    const result = await unwrap(handleRead(ctx(db), { view_name: "event_kind_occurrence_view", args: {} }));
+    const row = result.rows.find((r) => r.kind === "artifact_kind_inference_uncertain");
+    expect(row?.occurrence_count).toBe(1);
+  });
+
   test("dead_only=true surfaces registered-but-never-emitted kinds with zero counts", async () => {
     const db = openDb(":memory:");
     emitEvent(db, { kind: "directive_opened", substrate_origin: "claude", payload: {} });

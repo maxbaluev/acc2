@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_kind_ts                 ON events(kind, ts);
+CREATE INDEX IF NOT EXISTS idx_events_ts                      ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_task_kind_ts            ON events(task_id, kind, ts);
 CREATE INDEX IF NOT EXISTS idx_events_directive_kind_ts       ON events(directive_id, kind, ts);
 CREATE INDEX IF NOT EXISTS idx_events_action_artifact_kind_ts ON events(action_artifact_id, kind, ts);
@@ -103,6 +104,43 @@ CREATE INDEX IF NOT EXISTS idx_events_directive_ts
 -- result set. Partial WHERE keeps the index tiny.
 CREATE INDEX IF NOT EXISTS idx_events_failure_kind_ts
   ON events(failure_kind, ts) WHERE failure_kind IS NOT NULL;
+
+-- Writer-maintained rollups keep occurrence/health reads bounded while the hot
+-- events ledger is compacted. total_count is lifetime; live_count tracks rows
+-- still present in events after archive/telemetry deletion.
+CREATE TABLE IF NOT EXISTS event_kind_rollup (
+  kind        TEXT PRIMARY KEY,
+  total_count INTEGER NOT NULL DEFAULT 0,
+  live_count  INTEGER NOT NULL DEFAULT 0,
+  first_ts    TEXT NOT NULL,
+  last_ts     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS event_day_kind_rollup (
+  day         TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  total_count INTEGER NOT NULL DEFAULT 0,
+  live_count  INTEGER NOT NULL DEFAULT 0,
+  first_ts    TEXT NOT NULL,
+  last_ts     TEXT NOT NULL,
+  PRIMARY KEY (day, kind)
+);
+CREATE TABLE IF NOT EXISTS event_kind_origin_rollup (
+  kind             TEXT NOT NULL,
+  substrate_origin TEXT NOT NULL,
+  PRIMARY KEY (kind, substrate_origin)
+);
+CREATE TABLE IF NOT EXISTS event_archive_summary (
+  id         TEXT PRIMARY KEY,
+  kind       TEXT NOT NULL,
+  bucket     TEXT NOT NULL,
+  count      INTEGER NOT NULL,
+  first_ts   TEXT NOT NULL,
+  last_ts    TEXT NOT NULL,
+  reason     TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_event_archive_summary_kind_bucket
+  ON event_archive_summary(kind, bucket);
 
 -- ── act_artifact ───────────────────────────────────────────────────
 -- Registry row per polymorphic artifact handle. declared_sandbox +

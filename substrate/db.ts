@@ -148,6 +148,7 @@ const ARTIFACT_METADATA_COLUMNS: Array<{ name: string; ddl: string }> = [
 
 const EVENT_HOT_PATH_INDEXES = [
   "CREATE INDEX IF NOT EXISTS idx_events_kind_ts ON events(kind, ts)",
+  "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)",
   "CREATE INDEX IF NOT EXISTS idx_events_task_kind_ts ON events(task_id, kind, ts)",
   "CREATE INDEX IF NOT EXISTS idx_events_directive_kind_ts ON events(directive_id, kind, ts)",
   "CREATE INDEX IF NOT EXISTS idx_events_action_artifact_kind_ts ON events(action_artifact_id, kind, ts)",
@@ -213,6 +214,62 @@ const EVENT_HOT_PATH_INDEXES = [
  *
  *  Idempotent: re-running on a post-migration DB walks the "fresh
  *  install" branch and exits cleanly. */
+const ensureEventRollupTables = (db: Database): void => {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS event_kind_rollup (
+      kind TEXT PRIMARY KEY,
+      total_count INTEGER NOT NULL DEFAULT 0,
+      live_count INTEGER NOT NULL DEFAULT 0,
+      first_ts TEXT NOT NULL,
+      last_ts TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS event_day_kind_rollup (
+      day TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      total_count INTEGER NOT NULL DEFAULT 0,
+      live_count INTEGER NOT NULL DEFAULT 0,
+      first_ts TEXT NOT NULL,
+      last_ts TEXT NOT NULL,
+      PRIMARY KEY (day, kind)
+    );
+    CREATE TABLE IF NOT EXISTS event_kind_origin_rollup (
+      kind TEXT NOT NULL,
+      substrate_origin TEXT NOT NULL,
+      PRIMARY KEY (kind, substrate_origin)
+    );
+    CREATE TABLE IF NOT EXISTS event_archive_summary (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      bucket TEXT NOT NULL,
+      count INTEGER NOT NULL,
+      first_ts TEXT NOT NULL,
+      last_ts TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_archive_summary_kind_bucket
+      ON event_archive_summary(kind, bucket);
+  `);
+  db.exec(`
+    INSERT INTO event_kind_rollup (kind, total_count, live_count, first_ts, last_ts)
+    SELECT kind, COUNT(*), COUNT(*), MIN(ts), MAX(ts) FROM events
+    GROUP BY kind
+    ON CONFLICT(kind) DO UPDATE SET
+      live_count = excluded.live_count,
+      first_ts = excluded.first_ts,
+      last_ts = excluded.last_ts;
+    INSERT INTO event_day_kind_rollup (day, kind, total_count, live_count, first_ts, last_ts)
+    SELECT substr(ts, 1, 10), kind, COUNT(*), COUNT(*), MIN(ts), MAX(ts) FROM events
+    GROUP BY substr(ts, 1, 10), kind
+    ON CONFLICT(day, kind) DO UPDATE SET
+      live_count = excluded.live_count,
+      first_ts = excluded.first_ts,
+      last_ts = excluded.last_ts;
+    INSERT OR IGNORE INTO event_kind_origin_rollup (kind, substrate_origin)
+    SELECT DISTINCT kind, substrate_origin FROM events;
+  `);
+};
+
 const runActArtifactRename = (db: Database): void => {
   const tablesExist = (name: string): boolean => {
     const row = db.query(
@@ -337,6 +394,7 @@ export const runMigrations = (db: Database): void => {
   //   3. CREATE INDEX on the renamed table.
   //   4. Backfill kind discriminator for typed seed rows.
   runActArtifactRename(db);
+  ensureEventRollupTables(db);
 
   for (const col of ARTIFACT_METADATA_COLUMNS) {
     try {

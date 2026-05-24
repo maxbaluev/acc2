@@ -16,6 +16,7 @@ import {
   PostCommitProjectionQueue,
   type PostCommitProjectionTask,
 } from "./post_commit_projection_queue";
+import { withImmediateTransaction } from "../substrate/db";
 
 // ── Non-blocking post-commit projection cascade ──────────────────────────
 // (directive NHY908W0EX5Q72KGWXMASPFEY0, amendment B0DVM2APWX, 2026-05-24).
@@ -139,6 +140,34 @@ export type EmitEventInput = {
 export type EmittedEvent = { id: string; ts: string };
 
 type JsonObject = { [k: string]: JsonValue };
+
+const updateEventRollups = (db: Database, row: { kind: string; ts: string; substrate_origin: string }): void => {
+  const day = row.ts.slice(0, 10);
+  db.run(
+    `INSERT INTO event_kind_rollup (kind, total_count, live_count, first_ts, last_ts)
+     VALUES (?, 1, 1, ?, ?)
+     ON CONFLICT(kind) DO UPDATE SET
+       total_count = total_count + 1,
+       live_count = live_count + 1,
+       first_ts = CASE WHEN excluded.first_ts < first_ts THEN excluded.first_ts ELSE first_ts END,
+       last_ts = CASE WHEN excluded.last_ts > last_ts THEN excluded.last_ts ELSE last_ts END`,
+    [row.kind, row.ts, row.ts],
+  );
+  db.run(
+    `INSERT INTO event_day_kind_rollup (day, kind, total_count, live_count, first_ts, last_ts)
+     VALUES (?, ?, 1, 1, ?, ?)
+     ON CONFLICT(day, kind) DO UPDATE SET
+       total_count = total_count + 1,
+       live_count = live_count + 1,
+       first_ts = CASE WHEN excluded.first_ts < first_ts THEN excluded.first_ts ELSE first_ts END,
+       last_ts = CASE WHEN excluded.last_ts > last_ts THEN excluded.last_ts ELSE last_ts END`,
+    [day, row.kind, row.ts, row.ts],
+  );
+  db.run(
+    `INSERT OR IGNORE INTO event_kind_origin_rollup (kind, substrate_origin) VALUES (?, ?)`,
+    [row.kind, row.substrate_origin],
+  );
+};
 
 type NormalizedActTuple = {
   intent: string;
@@ -1297,30 +1326,71 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   const isEmbeddableKind = kindMeta?.embeddable === true;
   const embeddingValue = input.embedding ?? (isEmbeddableKind ? null : EMPTY_EMBEDDING_SENTINEL);
 
-  db.run(
-    `INSERT INTO events (
-       id, ts, directive_id, task_id, parent_task_id, loop_id,
-       substrate_origin, kind, payload, context_refs,
-       predicted_residual, action_artifact_id, verifier_artifact_id,
-       outcome, residual, embedding, embedding_version,
-       payload_hash, blob_ref, failure_kind, invoker
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id, ts, directive_id, task_id, input.parent_task_id ?? null, loop_id,
-      substrate_origin, input.kind, payload, context_refs,
-      input.predicted_residual ?? null,
-      input.action_artifact_id ?? null,
-      input.verifier_artifact_id ?? null,
-      input.outcome ?? null,
-      input.residual ?? null,
-      embeddingValue,
-      input.embedding_version ?? null,
-      input.payload_hash ?? null,
-      input.blob_ref ?? null,
-      eventFailureKind ?? null,
-      input.invoker ?? null,
-    ],
-  );
+  // Atomicity (bounded-ledger-retention safety-a): the durable event row and
+  // its retained per-kind aggregate must commit together so the rollup can
+  // never drift from a real COUNT(*) over events. Wrapping the INSERT + the
+  // three rollup UPSERTs in one BEGIN IMMEDIATE keeps them a single commit;
+  // the ack still fires durability-before-bus-publish. emitEvent is never
+  // called inside an outer withImmediateTransaction, so no nesting hazard.
+  const insertEventAndRollup = (): void => {
+    db.run(
+      `INSERT INTO events (
+         id, ts, directive_id, task_id, parent_task_id, loop_id,
+         substrate_origin, kind, payload, context_refs,
+         predicted_residual, action_artifact_id, verifier_artifact_id,
+         outcome, residual, embedding, embedding_version,
+         payload_hash, blob_ref, failure_kind, invoker
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id, ts, directive_id, task_id, input.parent_task_id ?? null, loop_id,
+        substrate_origin, input.kind, payload, context_refs,
+        input.predicted_residual ?? null,
+        input.action_artifact_id ?? null,
+        input.verifier_artifact_id ?? null,
+        input.outcome ?? null,
+        input.residual ?? null,
+        embeddingValue,
+        input.embedding_version ?? null,
+        input.payload_hash ?? null,
+        input.blob_ref ?? null,
+        eventFailureKind ?? null,
+        input.invoker ?? null,
+      ],
+    );
+    updateEventRollups(db, { kind: input.kind, ts, substrate_origin });
+  };
+  try {
+    withImmediateTransaction(db, insertEventAndRollup);
+  } catch {
+    // Pre-rollup DBs (older schema, mid-migration) may lack the rollup
+    // tables; the append-only event must still land durably. Fall back to a
+    // bare INSERT — the next ensureEventRollupTables backfill reconciles
+    // live_count from a real COUNT(*), so the aggregate self-heals.
+    db.run(
+      `INSERT INTO events (
+         id, ts, directive_id, task_id, parent_task_id, loop_id,
+         substrate_origin, kind, payload, context_refs,
+         predicted_residual, action_artifact_id, verifier_artifact_id,
+         outcome, residual, embedding, embedding_version,
+         payload_hash, blob_ref, failure_kind, invoker
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id, ts, directive_id, task_id, input.parent_task_id ?? null, loop_id,
+        substrate_origin, input.kind, payload, context_refs,
+        input.predicted_residual ?? null,
+        input.action_artifact_id ?? null,
+        input.verifier_artifact_id ?? null,
+        input.outcome ?? null,
+        input.residual ?? null,
+        embeddingValue,
+        input.embedding_version ?? null,
+        input.payload_hash ?? null,
+        input.blob_ref ?? null,
+        eventFailureKind ?? null,
+        input.invoker ?? null,
+      ],
+    );
+  }
   // Phase 1.β: broadcast to the in-process bus so SSE subscribers and tests
   // see the event without polling SQLite. The bus catches subscriber errors
   // so this is fail-soft.

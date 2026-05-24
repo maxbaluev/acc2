@@ -1672,3 +1672,43 @@ describe("emitEvent act_tuple lazy artifact admission (phase-2 four-link credit)
     closeDb(db);
   });
 });
+
+describe("event_kind_rollup aggregate consistency (bounded-ledger-retention safety-a)", () => {
+  test("rollup live_count matches a real COUNT(*) after N emits and after compaction", () => {
+    const db = openDb(":memory:");
+    const kinds = ["directive_opened", "task_committed", "artifact_kind_inference_uncertain"];
+    // N emits across several kinds.
+    for (let i = 0; i < 30; i++) {
+      const kind = kinds[i % kinds.length]!;
+      emitEvent(db, { kind, substrate_origin: "runtime", payload: { i } });
+    }
+    // After N emits the writer-maintained aggregate equals the real COUNT(*).
+    const realCount = (kind: string): number =>
+      (db.query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM events WHERE kind = ?").get(kind)!).n;
+    const liveCount = (kind: string): number =>
+      (db.query<{ n: number }, [string]>("SELECT live_count AS n FROM event_kind_rollup WHERE kind = ?").get(kind)!).n;
+    const totalCount = (kind: string): number =>
+      (db.query<{ n: number }, [string]>("SELECT total_count AS n FROM event_kind_rollup WHERE kind = ?").get(kind)!).n;
+    for (const kind of kinds) {
+      expect(liveCount(kind)).toBe(realCount(kind));
+      expect(totalCount(kind)).toBe(realCount(kind));
+    }
+    // SUM(live_count) equals the whole live ledger (the daemon health count source).
+    const sumLive = (db.query<{ n: number }, []>("SELECT COALESCE(SUM(live_count),0) AS n FROM event_kind_rollup").get()!).n;
+    const realTotal = (db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM events").get()!).n;
+    expect(sumLive).toBe(realTotal);
+
+    // Simulate compaction: delete the live telemetry rows and decrement
+    // live_count the way the archival worker does. After compaction the
+    // aggregate STILL matches the real COUNT(*): live_count drops to the new
+    // real count while total_count (lifetime) is preserved.
+    const telemetryBefore = realCount("artifact_kind_inference_uncertain");
+    db.run("DELETE FROM events WHERE kind = 'artifact_kind_inference_uncertain'");
+    db.run("UPDATE event_kind_rollup SET live_count = MAX(0, live_count - ?) WHERE kind = 'artifact_kind_inference_uncertain'", [telemetryBefore]);
+    expect(liveCount("artifact_kind_inference_uncertain")).toBe(realCount("artifact_kind_inference_uncertain"));
+    expect(liveCount("artifact_kind_inference_uncertain")).toBe(0);
+    // Lifetime total is retained across compaction (read-aggregate stays O(1)).
+    expect(totalCount("artifact_kind_inference_uncertain")).toBe(telemetryBefore);
+    closeDb(db);
+  });
+});
