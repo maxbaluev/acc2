@@ -44,8 +44,8 @@ Run from the acc2 repo root. Every step is idempotent and safe to re-run.
 
 ```bash
 cd /home/maxbaluev/bos2/system/acc2
-bun install                          # postinstall fetches camoufox automatically
-acc admin install-deps               # verifies + finishes any missing pieces
+bun install                          # installs npm deps
+acc admin install-deps               # canonical host dependency installer/checker
 acc init --yes                       # state dir, admin token, knowledge + artifact seeds
 acc doctor                           # composite readiness — must be PASS
 acc daemon start                     # all workers ON by default
@@ -57,14 +57,13 @@ acc watch                            # live TUI in another terminal
 
 What each step does:
 
-1. `bun install` — installs npm deps; the postinstall hook fetches the
-   Camoufox firefox binary into `~/.cache/camoufox/camoufox` (best-effort,
-   non-fatal — `acc admin install-deps` finishes anything postinstall
-   skipped).
-2. `acc admin install-deps` — verifies bun ≥ 1.3.14, opencode on PATH,
-   OPENAI_API_KEY in env / `.env`, the camoufox binary, and nsjail
-   (warn-only). Emits a structured `dep_check_complete` line so the
-   harness can pattern-match it. Exit 0 iff every must-have passes.
+1. `bun install` — installs npm deps only; it is not the maintained
+   Camoufox installer path.
+2. `acc admin install-deps` — canonically verifies bun ≥ 1.3.14, opencode
+   on PATH, OPENAI_API_KEY in env / `.env`, installs or verifies the
+   camoufox binary, and checks nsjail (warn-only). Emits a structured
+   `dep_check_complete` line so the harness can pattern-match it. Exit 0
+   iff every must-have passes.
 3. `acc init --yes` — creates `${stateDir}`, mints the admin token,
    imports the foundational knowledge seed (10 load-bearing principles)
    AND the canonical code-artifact seed pairs (action + verifier). Both
@@ -260,23 +259,19 @@ playwright-bundled firefox and uses the camoufox binary instead.
 
 ### 5.2 Install the camoufox binary
 
-Two paths. **Pick one.**
-
-**Path A — Python (recommended):**
+Use the canonical dependency installer from the repo root:
 
 ```bash
-pip install camoufox    # or: uv pip install camoufox
-python -m camoufox fetch
+acc admin install-deps
 ```
 
-This writes the binary to `~/.cache/camoufox/camoufox` (Linux) or
-`~/Library/Caches/camoufox/camoufox` (macOS). acc2 auto-detects both
-locations — no env var needed.
+The command installs or verifies the camoufox binary at the default cache
+location and reports it through the same structured dependency check as the
+rest of the host prerequisites. Re-run it whenever the binary is missing or
+a dependency check reports Camoufox as failed.
 
-**Path B — direct binary:**
-
-Download a release from <https://github.com/daijro/camoufox/releases>,
-unpack somewhere stable, and point acc2 at it:
+For a manually managed binary, set an explicit override instead of using a
+second installer path:
 
 ```bash
 export CAMOUFOX_BINARY_PATH=/your/path/to/camoufox
@@ -284,20 +279,16 @@ export CAMOUFOX_BINARY_PATH=/your/path/to/camoufox
 ```
 
 The override is checked FIRST — when `CAMOUFOX_BINARY_PATH` is set and
-points at an existing file, acc2 uses that path even if a default
-fetch-location binary also exists.
+points at an existing file, acc2 uses that path even if a default cached
+binary also exists.
 
-### 5.3 Alternative — npm camoufox launchers (informational)
+### 5.3 Npm camoufox launchers are not an acc2 install path
 
-There is an experimental npm package `camoufox-js`
-(<https://github.com/apify/camoufox-js>, <https://www.npmjs.com/package/camoufox-js>)
-that wraps the launch in a TypeScript-native helper. acc2 does **not** depend
-on it — the runtime drives playwright's `firefox.launchPersistentContext`
-directly and reads `CAMOUFOX_BINARY_PATH` for the executable. If you prefer
-the camoufox-js launch surface for your own scripts you can `bun add
-camoufox-js` alongside, but it is not required for the acc2 runtime to
-work; the canonical install path remains a fetched/downloaded binary plus
-playwright.
+acc2 does **not** depend on npm Camoufox launcher packages. The runtime
+drives playwright's `firefox.launchPersistentContext` directly and resolves
+the executable through `acc admin install-deps` plus the optional
+`CAMOUFOX_BINARY_PATH` override. Do not add a separate npm launcher when
+setting up the acc2 runtime.
 
 ### 5.4 Fingerprint hints
 

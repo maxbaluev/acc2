@@ -659,6 +659,8 @@ describe("seedFoundationalKnowledge", () => {
     expect(first.imported).toBeGreaterThan(0);
     const hashCount = (db.query("SELECT COUNT(*) AS c FROM meta WHERE key LIKE 'seed:law:%' OR key LIKE 'seed:bundle:%'").get() as { c: number }).c;
     expect(hashCount).toBe(first.imported);
+    const coarseMetaCount = (db.query("SELECT COUNT(*) AS c FROM meta WHERE key IN ('seed:foundational_knowledge', 'seed:policy_bundles:v1')").get() as { c: number }).c;
+    expect(coarseMetaCount).toBe(0);
     // Second run is a no-op.
     const second = seedFoundationalKnowledge(db, { ownerApproved: true });
     expect(second.imported).toBe(0);

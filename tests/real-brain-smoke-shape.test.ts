@@ -4,11 +4,11 @@
 // real-bridge smoke manually via:
 //   bun tests/integration/real_brain_smoke.ts
 //
-// The mock-bridge mode routes through the canonical fixture_d_count_todos
-// mock (the only canned bridge path that produces a full action_predicted +
-// artifact_observed + action_scored + task_committed chain). When green,
-// every event-stream assertion in the smoke has fired at least once, so
-// the structural shape is validated.
+// The mock-bridge mode routes through the same canonical example.com
+// directive as real mode, using the canned example.com bridge response to
+// produce a full action_predicted + artifact_observed + action_scored +
+// task_committed chain. When green, every event-stream assertion in the
+// smoke has fired at least once, so the structural shape is validated.
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { closeDb } from "../substrate/db";

@@ -81,15 +81,9 @@ export const runVersion = async (argv: string[]): Promise<number> => {
       version,
       daemon_running: daemonHead !== null,
       daemon_loaded_git_head: daemonHead,
-      compatibility: {
-        cli_package_version: version,
-        daemon_loaded_git_head: daemonHead,
-        // version.ts stays read-only / never opens SQLite — these two fields
-        // name the canonical probes the operator runs for the full picture
-        // rather than duplicating those surfaces here.
-        state_schema: "probe via listPendingMigrations(openDb(resolveDbPath()))",
-        external_tools: "doctor-compatible snapshot: bun/opencode/uv/camoufox/nsjail",
-      },
+      source_git_head: sourceHead,
+      state_schema: schema,
+      tools,
     }, null, 2));
     return 0;
   }

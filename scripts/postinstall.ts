@@ -26,7 +26,7 @@ async function main() {
     return;
   }
   if (process.env.CI === "true" || process.env.NODE_ENV === "test") {
-    log("CI / test env detected → skipping browser fetch (run `bun run browser:fetch` when needed)");
+    log("CI / test env detected → skipping Camoufox install (run `acc admin install-deps` when needed)");
     return;
   }
   const r = await installCamoufox({ log });
@@ -41,6 +41,6 @@ async function main() {
 
 main().catch((err) => {
   log(`unhandled error: ${err}`);
-  // Never fail bun install — operator can re-run `bun run browser:fetch` later.
+  // Never fail bun install — operator can re-run `acc admin install-deps` later.
   process.exit(0);
 });

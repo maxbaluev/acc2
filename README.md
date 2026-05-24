@@ -37,8 +37,8 @@ is always safe. `acc doctor` reporting **PASS** is the canonical
 
 ```bash
 cd /home/maxbaluev/bos2/system/acc2
-bun install                          # postinstall fetches camoufox automatically
-acc admin install-deps               # verifies + finishes any missing pieces
+bun install                          # installs npm deps
+acc admin install-deps               # canonical host dependency installer/checker
 acc init --yes                       # state dir, admin token, knowledge + artifact seeds
 acc doctor                           # composite readiness — must be PASS
 acc daemon start                     # all workers ON by default
@@ -73,7 +73,7 @@ For per-component manual install paths, see
 - [x] sqlite-vec retrieval backend (k-NN via the `vec_events` virtual table; `ACC2_USE_VEC=1`).
 - [x] Production observability: structured logging (`runtime/logger.ts`, pino), Prometheus metrics (`runtime/metrics.ts`), readiness probes (`runtime/readiness.ts`).
 - [x] Admin surface: `acc admin update-opencode`, `acc admin opencode-version`, `acc admin upgrade-check`, export/import/rotate.
-- [x] Auto-fetch of Camoufox via `bun install` postinstall (`scripts/fetch-camoufox.ts`).
+- [x] Canonical Camoufox setup via `acc admin install-deps` (with `CAMOUFOX_BINARY_PATH` as an explicit override).
 - [x] Integration harness: 9 plumbing scenarios + 1 real-brain scenario, exit-coded for CI.
 
 **Test status.** 570 unit tests passing across 56 test files (`bun test`). Integration harness: 10/10 scenarios green when `OPENAI_API_KEY` + `opencode` are present (9/10 + 1 skip otherwise). Real-brain smoke (`tests/integration/real_brain_smoke.ts`) confirms the loop end-to-end against live opencode.
@@ -117,7 +117,7 @@ acc2/
 ├── tests/                unit tests + harness-smoke + real-brain-smoke-shape
 │   └── integration/      harness.ts, scenarios.ts (10 scenarios), real_brain_smoke.ts, crash_recovery.ts
 ├── docs/                 Architecture.md (canonical), whitepaper.md, ops-guide.md, real-brain-runbook.md, production-readiness.md
-├── scripts/              postinstall.ts (camoufox fetcher), fetch-camoufox.ts
+├── scripts/              postinstall.ts (thin install-deps wrapper)
 └── bunfig.toml           pins ACC2_BRIDGE_MODE=mock for `bun test`
 ```
 

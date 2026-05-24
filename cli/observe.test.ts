@@ -130,24 +130,6 @@ describe("formatEvent — task_closure_audited rendering (live + legacy payloads
     expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
   });
 
-  test("legacy payload with covered_sub_tasks/uncovered_aspects: preserves old rendering", () => {
-    const line = formatEvent({
-      id: "ev_legacy",
-      kind: "task_closure_audited",
-      ts: "2026-05-19T21:16:10.687Z",
-      task_id: "t_root",
-      payload: {
-        closure_residual: 0.18,
-        covered_sub_tasks: ["a", "b", "c"],
-        uncovered_aspects: ["d"],
-      },
-    });
-    expect(line).toContain("closure_residual=0.18");
-    expect(line).toContain("covered=3");
-    expect(line).toContain("uncovered=1");
-    expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
-  });
-
   test("modern brain payload with breakdown: renders axes count and top-3 contributors", () => {
     const line = formatEvent({
       id: "ev_breakdown",
@@ -366,18 +348,24 @@ describe("formatEvent — Hole 1: 10 high-volume kinds get dedicated renderers",
     expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
   });
 
-  test("embedding_computed renders subject= and model (default fallback)", () => {
+  test("embedding_computed renders canonical batch source_event_ids/count/model", () => {
     const line = formatEvent({
       id: "ev_ec",
       kind: "embedding_computed",
       ts: "2026-05-19T12:00:00.000Z",
       task_id: "t_x",
-      payload: { subject_event_id: "ev_subject_1234567890", dims: 1536 },
+      payload: {
+        source_event_ids: ["ev_subject_1234567890", "ev_subject_abcdef"],
+        count: 2,
+        model: "text-embedding-3-small",
+        dims: 1536,
+      },
     }, V);
     expect(line).toContain("Ε");
     expect(line).toContain("embedding_computed");
     expect(line).toContain("subject=ev_subject_");
-    expect(line).toContain("model=default");
+    expect(line).toContain("batch=2");
+    expect(line).toContain("model=text-embedding-3-small");
     expect(line).toContain("dims=1536");
     expect(line.length).toBeLessThanOrEqual(MAX_EVENT_LINE_CHARS);
   });

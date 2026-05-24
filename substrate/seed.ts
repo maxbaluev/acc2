@@ -289,8 +289,8 @@ export const seedFoundationalKnowledge = (
   // Per-row hash gating (2026-05-17): both groups now iterate every
   // canonical row and import only those whose content-hash hasn't yet
   // been recorded. The legacy batch-level meta keys
-  // (META_SEEDED_FOUNDATIONAL / META_SEEDED_POLICY_BUNDLES) are kept
-  // for backwards-compat — if EITHER is present AND no per-row hashes
+  // (META_SEEDED_FOUNDATIONAL / META_SEEDED_POLICY_BUNDLES) are read
+  // only for warm-database conversion: if EITHER is present AND no per-row hashes
   // are recorded yet, we treat all existing batch members as
   // already-seeded by retroactively writing their hashes ON THIS FIRST
   // RUN. After that the batch key is irrelevant: subsequent runs see
@@ -372,9 +372,6 @@ export const seedFoundationalKnowledge = (
       recordSeedHash(db, "seed:law", hash, law.text.slice(0, 64));
       imported++;
     }
-    // Keep the legacy batch key in sync so an external observer still
-    // sees the historical "seeded" marker.
-    if (!legacyFoundationalSeeded) writeMeta(db, META_SEEDED_FOUNDATIONAL, nowIso());
 
     for (const bundle of POLICY_BUNDLE_SEEDS) {
       const bundleHash = hashSeedRow(`bundle:${bundle.surface}/${bundle.sectionName}@${bundle.version}|${bundle.body}`);
@@ -454,7 +451,6 @@ export const seedFoundationalKnowledge = (
         imported++;
       }
     }
-    if (!legacyBundlesSeeded) writeMeta(db, META_SEEDED_POLICY_BUNDLES, nowIso());
   });
 
   return { imported };

@@ -65,25 +65,19 @@ describe("acc version", () => {
       version: string;
       daemon_running: boolean;
       daemon_loaded_git_head: string | null;
-      compatibility: {
-        cli_package_version: string;
-        daemon_loaded_git_head: string | null;
-        state_schema: string;
-        external_tools: string;
-      };
+      source_git_head: string | null;
+      state_schema: { db_path: string; latest_version: string | null; pending_versions: string[] };
+      tools: Record<string, string | null>;
+      compatibility?: unknown;
     };
     expect(parsed.version).toBe(readPackageVersion());
     expect(parsed.daemon_running).toBe(false);
     expect(parsed.daemon_loaded_git_head).toBeNull();
-    // Distribution/compat surface: version --json carries a compatibility block
-    // pairing the CLI package version with the daemon's loaded head and naming
-    // the canonical schema/tool probes (version.ts stays read-only / no SQLite).
-    expect(parsed.compatibility).toBeDefined();
-    expect(parsed.compatibility.cli_package_version).toBe(readPackageVersion());
-    expect(parsed.compatibility.daemon_loaded_git_head).toBeNull();
-    expect(typeof parsed.compatibility.state_schema).toBe("string");
-    expect(parsed.compatibility.state_schema.length).toBeGreaterThan(0);
-    expect(typeof parsed.compatibility.external_tools).toBe("string");
-    expect(parsed.compatibility.external_tools.length).toBeGreaterThan(0);
+    expect(typeof parsed.source_git_head === "string" || parsed.source_git_head === null).toBe(true);
+    expect(parsed.state_schema.db_path).toContain(tmpDir);
+    expect(parsed.state_schema.latest_version).toBeNull();
+    expect(parsed.state_schema.pending_versions).toEqual([]);
+    expect(parsed.tools).toBeDefined();
+    expect(parsed.compatibility).toBeUndefined();
   });
 });

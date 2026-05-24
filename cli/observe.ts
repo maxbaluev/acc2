@@ -370,8 +370,6 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
         return `closure_residual=${residual} claims=${passedClaims}/${totalClaims} verified=${passedVerified}/${totalVerified} discrepancies=${discrepancyCount}`;
       }
       // Live payload shape is { checks: Record<string, boolean>, breakdown: Record<string, number> }.
-      // Older payloads used { covered_sub_tasks[], uncovered_aspects[] }. Prefer checks when present;
-      // fall back to the legacy arrays so historical events still render meaningfully.
       const checks = p.checks as Record<string, unknown> | undefined;
       if (checks && typeof checks === "object") {
         const entries = Object.values(checks);
@@ -380,9 +378,6 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
         const failed = total - passed;
         return `closure_residual=${residual} checks=${passed}/${total}${failed > 0 ? ` failed=${failed}` : ""}`;
       }
-      // Modern brain payload shape: { breakdown: Record<string, number> } where each value is
-      // a per-axis residual contribution. Without this branch the renderer falls through to
-      // the legacy covered/uncovered fallback and prints 0/0 for rich payloads.
       const breakdown = p.breakdown as Record<string, number> | undefined;
       if (breakdown && typeof breakdown === "object") {
         const axes = Object.keys(breakdown).length;
@@ -394,18 +389,6 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
           .join(",");
         const verifierKind = typeof p.verifier_kind === "string" ? p.verifier_kind : undefined;
         return `closure_residual=${residual} axes=${axes}${top ? ` top=${top}` : ""}${verifierKind ? ` verifier=${verifierKind}` : ""}`;
-      }
-      // Only render covered/uncovered when the legacy arrays are actually
-      // PRESENT. Modern brain payloads carry none of substrate_verifications/
-      // checks/breakdown/covered_sub_tasks — falling through to `?? 0` printed
-      // a perpetually-misleading "covered=0 uncovered=0" (looks like the audit
-      // measured nothing, when really it was a summary-only closure). Be honest.
-      const hasLegacyCoverage =
-        Array.isArray(p.covered_sub_tasks) || Array.isArray(p.uncovered_aspects);
-      if (hasLegacyCoverage) {
-        const uncovered = (p.uncovered_aspects as unknown[] | undefined)?.length ?? 0;
-        const covered = (p.covered_sub_tasks as unknown[] | undefined)?.length ?? 0;
-        return `closure_residual=${residual} covered=${covered} uncovered=${uncovered}`;
       }
       return `closure_residual=${residual} summary-only (no structured checks/verifications)`;
     }
@@ -619,15 +602,12 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       ].filter(Boolean).join(" ");
     }
     case "embedding_computed": {
-      // New shape (2026-05-19): batch summary. payload.source_event_ids
-      // is an array; payload.count is its length. Legacy shape carried
-      // subject_event_id (singular). Render gracefully for both.
       const ids = p.source_event_ids as string[] | undefined;
       const count = p.count as number | undefined;
-      const subject = idPrefix((p.subject_event_id as string) ?? (Array.isArray(ids) ? ids[0] : undefined), 12);
+      const subject = idPrefix(Array.isArray(ids) ? ids[0] : undefined, 12);
       const model = (p.model as string) ?? "default";
       const dims = p.dims as number | undefined;
-      const batchSize = typeof count === "number" ? count : (Array.isArray(ids) ? ids.length : 1);
+      const batchSize = typeof count === "number" ? count : (Array.isArray(ids) ? ids.length : 0);
       return `subject=${subject}${batchSize > 1 ? ` batch=${batchSize}` : ""} model=${model}${typeof dims === "number" ? ` dims=${dims}` : ""}`;
     }
     case "knowledge_propagated": {

@@ -14,8 +14,8 @@
 // Flags:
 //   --print-prompt   Print the composed brain prompt before dispatching.
 //   --mock-bridge    Run against ACC2_BRIDGE_MODE=mock (success criterion
-//                    becomes "scenario chain green" — the mock emits canned
-//                    fixture_d events; this is the CI lane).
+//                    becomes "scenario chain green" — the mock emits the
+//                    canonical example.com events; this is the CI lane).
 //
 // This is an executable, not a `bun test` test. The shape test under
 // tests/real-brain-smoke-shape.test.ts imports `runRealBrainSmoke` with
@@ -44,9 +44,8 @@ import type { JsonValue } from "../../substrate/types";
 
 export type SmokeOpts = {
   printPrompt?: boolean;
-  /** mock-bridge mode — runs the smoke against ACC2_BRIDGE_MODE=mock so CI
-   *  can validate plumbing without opencode on PATH. The directive is
-   *  swapped for the fixture marker so the mock returns canned events. */
+  /** mock-bridge mode — runs the same example.com directive against
+   *  ACC2_BRIDGE_MODE=mock so CI can validate plumbing without opencode on PATH. */
   mockBridge?: boolean;
   /** Optional override for the bridge model (passed through to opencode). */
   model?: string;
@@ -158,13 +157,6 @@ const REAL_DIRECTIVE_TEXT = [
   "refinement edge instead of self-iterating if anything is incomplete.",
 ].join("\n");
 
-// The mock-bridge mode uses the fixture-D marker so the canned mock returns
-// the canonical fixture_d_count_todos artifacts (a known-good path that
-// proves the assertion structure is sound without spawning opencode).
-const MOCK_DIRECTIVE_TEXT =
-  "FIXTURE: fixture_d_count_todos — count files containing TODO. " +
-  "Smoke-test mock path; the canned bridge produces action_predicted, " +
-  "the dispatcher runs the bun action + verifier, residual lands at 0.";
 
 // ── Per-step assertions ───────────────────────────────────────────
 
@@ -289,15 +281,11 @@ export const runRealBrainSmoke = async (opts: SmokeOpts = {}): Promise<number> =
       `seed: knowledge=${seedKnow.imported}, act_artifacts=${seedArt.inserted} (skipped=${seedArt.skipped})\n\n`,
     );
 
-    // 3. Open the directive. Both modes use the same REAL directive — the
-    //    mock bridge recognizes the example.com marker (added as part of
-    //    Batch 2.α hardening) and admits matching action+verifier artifacts;
-    //    the real bridge dispatches the natural-language directive to
-    //    opencode. Falling back to MOCK_DIRECTIVE_TEXT here only when the
-    //    operator explicitly opted into the legacy fixture-D path.
-    const directiveText = opts.mockBridge && process.env.ACC2_SMOKE_LEGACY_MOCK === "1"
-      ? MOCK_DIRECTIVE_TEXT
-      : REAL_DIRECTIVE_TEXT;
+    // 3. Open the directive. Both modes use the same REAL directive: the
+    //    mock bridge recognizes the example.com marker and admits matching
+    //    action+verifier artifacts; the real bridge dispatches the same
+    //    natural-language directive to opencode.
+    const directiveText = REAL_DIRECTIVE_TEXT;
     const directiveId = newId();
     const taskId = newId();
 
@@ -456,37 +444,30 @@ export const runRealBrainSmoke = async (opts: SmokeOpts = {}): Promise<number> =
       });
     }
 
-    // Title assertion — runs in BOTH modes because the mock-bridge now uses
-    // the example.com action body too (it actually fetches example.com via
-    // Bun.fetch during artifact_admission). The check is skipped only when
-    // the legacy fixture-D path is forced via ACC2_SMOKE_LEGACY_MOCK=1.
+    // Title assertion — runs in BOTH modes because mock and real bridge now
+    // exercise the same example.com action body.
     //
     // The title lives in the `action_scored` event's `action_result.result.title`
     // (that's the runtime-observed payload the dispatcher captured). The
     // `artifact_observed` rows only carry phase + duration; the actual result
-    // envelope is hoisted into action_scored.payload.action_result. We also
-    // scan act_artifact_admission_accepted payloads as a fallback because
-    // the bridge mock's admission path also captures the observation.
-    const isLegacyMock = opts.mockBridge && process.env.ACC2_SMOKE_LEGACY_MOCK === "1";
-    if (!isLegacyMock) {
-      recordStep(results, "observation result.title is non-empty string", Date.now(), () => {
-        const scoredRows = eventsByKindForDirective(handle!.db, "action_scored", directiveId);
-        let title: string | null = null;
-        for (const r of scoredRows.reverse()) {
-          try {
-            const p = JSON.parse((r.payload as string) ?? "{}") as Record<string, unknown>;
-            const ar = p.action_result as Record<string, unknown> | undefined;
-            const result = ar?.result as Record<string, unknown> | undefined;
-            if (result && typeof result.title === "string" && result.title.length > 0) {
-              title = result.title;
-              break;
-            }
-          } catch { /* skip */ }
-        }
-        assert(title !== null, `result.title must be a non-empty string (action_scored.payload.action_result.result.title)`);
-        return `title="${title}"`;
-      });
-    }
+    // envelope is hoisted into action_scored.payload.action_result.
+    recordStep(results, "observation result.title is non-empty string", Date.now(), () => {
+      const scoredRows = eventsByKindForDirective(handle!.db, "action_scored", directiveId);
+      let title: string | null = null;
+      for (const r of scoredRows.reverse()) {
+        try {
+          const p = JSON.parse((r.payload as string) ?? "{}") as Record<string, unknown>;
+          const ar = p.action_result as Record<string, unknown> | undefined;
+          const result = ar?.result as Record<string, unknown> | undefined;
+          if (result && typeof result.title === "string" && result.title.length > 0) {
+            title = result.title;
+            break;
+          }
+        } catch { /* skip */ }
+      }
+      assert(title !== null, `result.title must be a non-empty string (action_scored.payload.action_result.result.title)`);
+      return `title="${title}"`;
+    });
   } finally {
     if (handle) {
       try { await stopDaemon(handle); } catch { /* swallow */ }

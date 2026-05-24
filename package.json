@@ -7,8 +7,7 @@
     "daemon": "bun runtime/daemon.ts",
     "acc": "bun cli/dispatch.ts",
     "test": "bun test --parallel --bail",
-    "postinstall": "bun scripts/postinstall.ts",
-    "browser:fetch": "bun scripts/fetch-camoufox.ts"
+    "postinstall": "bun scripts/postinstall.ts"
   },
   "bin": {
     "acc": "cli/dispatch.ts"
