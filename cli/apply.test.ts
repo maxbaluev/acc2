@@ -124,7 +124,7 @@ beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "acc2-apply-"));
   dbPath = join(dir, "apply.db");
   db = openDb(dbPath);
-  mock.module("./rpc", () => ({ mcpCall: rpc }));
+  mock.module("./rpc", () => ({ mcpCall: rpc, auxRead: (viewName: string, args?: Record<string, unknown>) => rpc("substrate.read", { view_name: viewName, args }), auxRecentEvents: (args: Record<string, unknown>) => rpc("runtime.recent_events", args), auxGetEvent: (id: string) => rpc("substrate.get_event", { id }) }));
   const apply = await import("./apply");
   ({ runApply, setApplyEvaluatorsForTest, resetApplyEvaluatorsForTest } = apply);
   setApplyEvaluatorsForTest({

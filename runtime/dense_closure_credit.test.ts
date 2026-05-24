@@ -10,7 +10,7 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
-import { emitEvent } from "./events";
+import { emitEvent, flushPostCommitProjectionsForTest, resetPostCommitProjectionsForTest } from "./events";
 import { insertArtifact, getArtifact } from "./artifact_store";
 import { _resetTaskTopologyCacheForTests } from "./task_topology";
 import {
@@ -22,6 +22,10 @@ import type { Database } from "bun:sqlite";
 
 afterAll(() => closeDb());
 beforeEach(() => {
+  // Non-blocking post-commit cascade (directive NHY908W0EX5Q72KGWXMASPFEY0):
+  // the ROOT task_closure_audited dense-credit pass is deferred onto the
+  // bounded queue. Reset between cases; drain after the triggering emit.
+  resetPostCommitProjectionsForTest();
   closeDb();
   _resetTaskTopologyCacheForTests();
 });
@@ -243,7 +247,7 @@ describe("distributeDenseClosureCredit — idempotent", () => {
 });
 
 describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
-  test("emitting a ROOT task_closure_audited fires the dense pass via the hook", () => {
+  test("emitting a ROOT task_closure_audited fires the dense pass via the hook", async () => {
     const db = openDb(":memory:");
     const dir = "dir_dense_hook";
     const { root, childA } = seedDirective(db, dir);
@@ -252,7 +256,7 @@ describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
 
     const before = getArtifact(db, "art_a")!;
     // Emit the closure audit on the ROOT — the events.ts post-write hook
-    // should invoke the dense pass synchronously.
+    // enqueues the dense pass onto the bounded post-commit queue; drain it.
     emitEvent(db, {
       kind: "task_closure_audited",
       substrate_origin: "substrate_auto",
@@ -260,6 +264,7 @@ describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
       task_id: root,
       payload: { closure_residual: 0.1, verdict: "audited" },
     });
+    await flushPostCommitProjectionsForTest();
 
     const after = getArtifact(db, "art_a")!;
     expect(after.posteriorAlpha).toBeGreaterThan(before.posteriorAlpha);
@@ -269,7 +274,7 @@ describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
     expect(summary[0]!.root_task_id).toBe(root);
   });
 
-  test("a NON-root child closure audit does NOT fire the dense pass", () => {
+  test("a NON-root child closure audit does NOT fire the dense pass", async () => {
     const db = openDb(":memory:");
     const dir = "dir_dense_nonroot";
     const { childA } = seedDirective(db, dir);
@@ -285,6 +290,7 @@ describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
       task_id: childA,
       payload: { closure_residual: 0.1, verdict: "audited" },
     });
+    await flushPostCommitProjectionsForTest();
 
     // No dense credit applied — child audits are skipped.
     const after = getArtifact(db, "art_a")!;
@@ -292,7 +298,7 @@ describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
     expect(denseRows(db, "dense_closure_credit_distributed").length).toBe(0);
   });
 
-  test("root structural decomposition strategy citation receives closure credit", () => {
+  test("root structural decomposition strategy citation receives closure credit", async () => {
     const db = openDb(":memory:");
     const dir = "dir_dense_decomp_strategy";
     const { root } = seedDirective(db, dir);
@@ -319,6 +325,7 @@ describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
       task_id: root,
       payload: { closure_residual: 0.05, verdict: "audited" },
     });
+    await flushPostCommitProjectionsForTest();
 
     const after = getArtifact(db, "decomp_audit_evidence_sweep")!;
     expect(after.posteriorAlpha).toBeGreaterThan(before.posteriorAlpha);

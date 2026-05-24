@@ -1,4 +1,4 @@
-import { mcpCall } from "./rpc";
+import { auxRead } from "./rpc";
 import { type OwnerProfileCard } from "./owner_profile_renderer";
 
 type ViewEnvelope = { ok: true; result: unknown } | { ok: false; error: string };
@@ -51,7 +51,7 @@ export const buildWhoamiReport = async (): Promise<WhoamiReport> => {
   const generatedAt = new Date().toISOString();
   let env: ViewEnvelope;
   try {
-    env = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
+    env = await auxRead("owner_profile_view");
   } catch (err) {
     env = { ok: false, error: (err as Error).message };
   }

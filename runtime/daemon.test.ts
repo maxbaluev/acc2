@@ -11,6 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import { startDaemon, stopDaemon, isDaemonAlreadyRunningError, getBootIntegrityState, type DaemonHandle } from "./daemon";
+import { handleGetEvent, handleRead } from "./mcp_server/substrate_tools";
+import { handleRecentEvents } from "./mcp_server/runtime_tools";
 import { isSchedulerDraining } from "./task_scheduler";
 import { getSqlPool, clearSqlPool } from "./sql_pool_singleton";
 import { getFreePortPair, startDaemonOnFreePorts } from "../tests/free_port";
@@ -96,10 +98,97 @@ describe("startDaemon — boot + health + shutdown", () => {
     expect(body.mcp_port).toBe(handle.port);
     expect(body.aux_port).toBe(handle.auxPort);
     expect(body.mcp_transport).toBe("fastmcp:httpStream");
+    expect(body.mcp_sessions).toMatchObject({
+      active_sessions: 0,
+      max_sessions: expect.any(Number),
+      idle_ttl_ms: expect.any(Number),
+      reaper_interval_ms: expect.any(Number),
+    });
     // Robustness: /health now carries a stuck_workers array. On a fresh
     // daemon every worker just ticked, so the array is empty.
     expect(Array.isArray(body.stuck_workers)).toBe(true);
     expect((body.stuck_workers as unknown[]).length).toBe(0);
+  });
+
+  test("aux read endpoints match the canonical MCP read handlers", async () => {
+    handle = await bootHandle(tmp);
+    const { emitEvent } = await import("./events");
+    const emitted = emitEvent(handle.db, {
+      kind: "owner_input_received",
+      substrate_origin: "owner",
+      payload: { text: "aux-read-parity" },
+    });
+    const ctx = { db: handle.db, invoker: "claude_root" as const, index: null, ingressState: handle.ingressState };
+
+    const post = async (path: string, body: unknown): Promise<{ status: number; body: unknown }> => {
+      const res = await fetch("http://127.0.0.1:" + handle!.auxPort + path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: await res.json() };
+    };
+
+    const readArgs = { view_name: "failure_view", args: {} };
+    expect(await post("/read", readArgs)).toEqual({
+      status: 200,
+      body: await handleRead(ctx, readArgs),
+    });
+
+    const recentArgs = { k: 1, kinds: ["owner_input_received"] };
+    expect(await post("/recent-events", recentArgs)).toEqual({
+      status: 200,
+      body: handleRecentEvents(ctx, recentArgs),
+    });
+
+    const getArgs = { id: emitted.id };
+    expect(await post("/get-event", getArgs)).toEqual({
+      status: 200,
+      body: handleGetEvent(ctx, getArgs),
+    });
+  });
+
+  test("aux read endpoints reject malformed envelopes without reaching MCP", async () => {
+    handle = await bootHandle(tmp);
+    const res = await fetch("http://127.0.0.1:" + handle.auxPort + "/get-event", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ ok: false, error: "invalid_params" });
+  });
+
+  test("aux read endpoints do not create FastMCP sessions", async () => {
+    handle = await bootHandle(tmp);
+    const health = async (): Promise<Record<string, unknown>> => {
+      const res = await fetch("http://127.0.0.1:" + handle!.auxPort + "/health");
+      expect(res.status).toBe(200);
+      return await res.json() as Record<string, unknown>;
+    };
+    const sessionCount = async (): Promise<number> => {
+      const body = await health();
+      const sessions = body.mcp_sessions as { active_sessions?: number } | undefined;
+      return sessions?.active_sessions ?? -1;
+    };
+
+    expect(await sessionCount()).toBe(0);
+
+    const post = async (path: string, body: unknown): Promise<void> => {
+      const res = await fetch("http://127.0.0.1:" + handle!.auxPort + path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBeLessThan(500);
+      await res.text();
+    };
+
+    await post("/read", { view_name: "failure_view", args: {} });
+    await post("/recent-events", { k: 1 });
+    await post("/get-event", { id: "missing_event_id" });
+
+    expect(await sessionCount()).toBe(0);
   });
 
   test("INSTANT-BOOT: health=ok is reachable WITHOUT the boot integrity check completing", async () => {

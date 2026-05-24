@@ -10,10 +10,16 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
-import { emitEvent } from "../runtime/events";
+import { emitEvent, flushPostCommitProjectionsForTest, resetPostCommitProjectionsForTest } from "../runtime/events";
 
 afterAll(() => closeDb());
-beforeEach(() => closeDb());
+beforeEach(() => {
+  // Non-blocking post-commit cascade (directive NHY908W0EX5Q72KGWXMASPFEY0):
+  // the act_artifact_candidate emit-side screen is deferred onto the bounded
+  // post-commit queue. Reset between cases; drain after the candidate emit.
+  resetPostCommitProjectionsForTest();
+  closeDb();
+});
 
 // Filters lane_routing_refused rows whose reason matches the empty-body
 // floor predicate; F1 introduced sibling reasons
@@ -34,7 +40,7 @@ const refusalsFor = (db: ReturnType<typeof openDb>, eventId: string) => {
 };
 
 describe("empty_body_refusal — emit-side screen on act_artifact_candidate", () => {
-  test("refuses an atms_report_v* candidate with body below the 500-char floor", () => {
+  test("refuses an atms_report_v* candidate with body below the 500-char floor", async () => {
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {
       kind: "act_artifact_candidate",
@@ -46,6 +52,7 @@ describe("empty_body_refusal — emit-side screen on act_artifact_candidate", ()
         cited_knowledge_ids: [],
       },
     });
+    await flushPostCommitProjectionsForTest();
     const refusals = refusalsFor(db, candidate.id);
     expect(refusals.length).toBe(1);
     const payload = JSON.parse(refusals[0]!.payload) as Record<string, unknown>;
@@ -55,7 +62,7 @@ describe("empty_body_refusal — emit-side screen on act_artifact_candidate", ()
     expect(payload.classification).toBe("atms_report");
   });
 
-  test("refuses a generic-kind candidate with body below the 200-char floor", () => {
+  test("refuses a generic-kind candidate with body below the 200-char floor", async () => {
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {
       kind: "act_artifact_candidate",
@@ -66,6 +73,7 @@ describe("empty_body_refusal — emit-side screen on act_artifact_candidate", ()
         body: "short body well under two hundred chars",
       },
     });
+    await flushPostCommitProjectionsForTest();
     const refusals = refusalsFor(db, candidate.id);
     expect(refusals.length).toBe(1);
     const payload = JSON.parse(refusals[0]!.payload) as Record<string, unknown>;
@@ -74,7 +82,7 @@ describe("empty_body_refusal — emit-side screen on act_artifact_candidate", ()
     expect(payload.classification).toBe("default");
   });
 
-  test("admits a published_drive_doc candidate with a synthetic short body (placeholder exemption)", () => {
+  test("admits a published_drive_doc candidate with a synthetic short body (placeholder exemption)", async () => {
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {
       kind: "act_artifact_candidate",
@@ -86,11 +94,12 @@ describe("empty_body_refusal — emit-side screen on act_artifact_candidate", ()
         target_resources: ["drive://document/abc123"],
       },
     });
+    await flushPostCommitProjectionsForTest();
     const refusals = refusalsFor(db, candidate.id);
     expect(refusals.length).toBe(0);
   });
 
-  test("admits a generic candidate whose body crosses the 200-char floor", () => {
+  test("admits a generic candidate whose body crosses the 200-char floor", async () => {
     const db = openDb(":memory:");
     const body = "padding ".repeat(40);
     expect(body.length).toBeGreaterThanOrEqual(200);
@@ -103,11 +112,12 @@ describe("empty_body_refusal — emit-side screen on act_artifact_candidate", ()
         body,
       },
     });
+    await flushPostCommitProjectionsForTest();
     const refusals = refusalsFor(db, candidate.id);
     expect(refusals.length).toBe(0);
   });
 
-  test("does NOT fire when payload.body is absent (legacy worker stubs are exempt)", () => {
+  test("does NOT fire when payload.body is absent (legacy worker stubs are exempt)", async () => {
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {
       kind: "act_artifact_candidate",
@@ -117,6 +127,7 @@ describe("empty_body_refusal — emit-side screen on act_artifact_candidate", ()
         purpose: "fixture_d_count_todos_action",
       },
     });
+    await flushPostCommitProjectionsForTest();
     const refusals = refusalsFor(db, candidate.id);
     expect(refusals.length).toBe(0);
   });

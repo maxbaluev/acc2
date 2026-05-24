@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 // `acc events` / `acc tail` / `acc graph` / `acc inspect` — operator-side
-// observability surface. Replaces the inline `bun -e 'import {mcpCall}…'`
-// boilerplate every diagnostic session used to need.
+// observability surface. Replaces the inline `bun -e 'import {…}…'`
+// FastMCP-client boilerplate every diagnostic session used to need.
 //
-// All subcommands route through the daemon's MCP server (`mcpCall`) — never
-// open SQLite directly — so multi-process safety, schema migration, and
-// embedding-index hygiene are the daemon's problem, not the CLI's.
+// Read-only subcommands use the daemon's session-free auxiliary HTTP read
+// endpoints, not FastMCP. Writes stay on the substrate write path so
+// multi-process safety, schema migration, and embedding-index hygiene remain
+// the daemon's problem, not the CLI's.
 //
 // Output shape: one event per line, formatter pinned per-kind so a downstream
 // consumer (Claude Code background-task stream, log aggregator, grep) can
@@ -15,7 +16,7 @@
 // `acc task --follow` reuses `tailEvents` to stream brain progress as
 // Claude-native background-task stdout: every emit becomes a notification.
 
-import { mcpCall, sseConnect } from "./rpc";
+import { auxRead, auxRecentEvents, sseConnect } from "./rpc";
 import { EVENT_KINDS, MIRROR_INLINE_EVENT_TYPES } from "../substrate/event_kinds";
 
 // ── panel-friendly format invariants ───────────────────────────────
@@ -784,10 +785,7 @@ export const formatFollowTerminalSentinel = (row: DispatchResolvedLike): string 
 
 const readResolvedTerminalRow = async (opts: TailOpts): Promise<DispatchResolvedLike | null> => {
   if (!opts.directive || !opts.rootTaskId) return null;
-  const env = await mcpCall("substrate.read", {
-    view_name: "dispatch_resolved_view",
-    args: { directive_id: opts.directive, root_task_id: opts.rootTaskId },
-  }, { timeoutMs: 3_000 }).catch(() => null);
+  const env = await auxRead("dispatch_resolved_view", { directive_id: opts.directive, root_task_id: opts.rootTaskId }, { timeoutMs: 3_000 }).catch(() => null);
   if (!env?.ok) return null;
   const row = ((env.result as DispatchResolvedLike[] | undefined) ?? [])[0];
   if (!row || !RESOLVED_TERMINAL_STATUSES.has(resolvedLifecycleStatus(row))) return null;
@@ -852,7 +850,7 @@ export const runEvents = async (opts: EventsOpts): Promise<number> => {
     const args: Record<string, unknown> = { k };
     if (opts.kinds && opts.kinds.length > 0) args.kinds = opts.kinds;
     else if (opts.kind) args.kinds = [opts.kind];
-    env = await mcpCall("runtime.recent_events", args);
+    env = await auxRecentEvents(args as { kinds?: string[]; k?: number });
   } catch (err) {
     console.error(`acc events: ${(err as Error).message}`);
     return 1;
@@ -1121,7 +1119,7 @@ const runTailPoll = async (opts: TailOpts): Promise<number> => {
       const args: Record<string, unknown> = { k: Math.min(200, opts.limit ?? 60) };
       if (opts.kinds && opts.kinds.length > 0) args.kinds = opts.kinds;
       else if (opts.kind) args.kinds = [opts.kind];
-      env = await mcpCall("runtime.recent_events", args);
+      env = await auxRecentEvents(args as { kinds?: string[]; k?: number });
     } catch (err) {
       console.error(`acc tail: ${(err as Error).message}`);
       return 1;
@@ -1192,10 +1190,7 @@ export const runTail = async (opts: TailOpts): Promise<number> => {
 export const runGraph = async (directiveId: string): Promise<number> => {
   let env;
   try {
-    env = await mcpCall("substrate.read", {
-      view_name: "task_graph_view",
-      args: { directive_id: directiveId },
-    });
+    env = await auxRead("task_graph_view", { directive_id: directiveId });
   } catch (err) {
     console.error(`acc graph: ${(err as Error).message}`);
     return 1;
@@ -1258,7 +1253,7 @@ const RECENT_EVENTS_SERVER_CAP = 200;
 export const runInspect = async (taskId: string, opts: { json?: boolean } = {}): Promise<number> => {
   let env;
   try {
-    env = await mcpCall("runtime.recent_events", { k: RECENT_EVENTS_SERVER_CAP });
+    env = await auxRecentEvents({ k: RECENT_EVENTS_SERVER_CAP });
   } catch (err) {
     console.error(`acc inspect: ${(err as Error).message}`);
     return 1;

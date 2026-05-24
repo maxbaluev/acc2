@@ -6,7 +6,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
-import { emitEvent } from "./events";
+import { emitEvent, flushPostCommitProjectionsForTest, resetPostCommitProjectionsForTest } from "./events";
 import {
   buildBrainSelfAudit,
   buildPromptSelfInspect,
@@ -16,7 +16,13 @@ import {
 } from "./brain_introspection";
 
 afterAll(() => closeDb());
-beforeEach(() => closeDb());
+beforeEach(() => {
+  // Non-blocking post-commit cascade (directive NHY908W0EX5Q72KGWXMASPFEY0):
+  // emitEvent defers heavy projections onto the bounded post-commit queue.
+  // Reset between cases; the audit test drains before aggregating.
+  resetPostCommitProjectionsForTest();
+  closeDb();
+});
 
 describe("buildSystemMap", () => {
   test("returns a non-empty catalog covering kinds + views + tools + runtimes", () => {
@@ -111,7 +117,7 @@ describe("buildBrainSelfAudit", () => {
     expect(audit.recent_brain_failures[0]?.task_id).toBe(taskId);
   });
 
-  test("populated substrate aggregates emissions, citations, residuals, proposals", () => {
+  test("populated substrate aggregates emissions, citations, residuals, proposals", async () => {
     const db = openDb(":memory:");
     runViews(db);
     const directiveId = "dir_audit";
@@ -181,6 +187,7 @@ describe("buildBrainSelfAudit", () => {
       residual: 0.6,
       payload: { residual: 0.6, verifier_kind: "deterministic_code" },
     });
+    await flushPostCommitProjectionsForTest();
 
     const audit = buildBrainSelfAudit(db);
     expect(audit.emissions.total).toBe(4);

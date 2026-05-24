@@ -40,6 +40,9 @@ import type { EventKind } from "../substrate/event_kinds";
 import { ARTIFACT_CANDIDATE_KINDS, EMBEDDABLE_KINDS } from "../substrate/event_kinds";
 import { newAdminToken } from "./ids";
 import { createMcpServer } from "./mcp_server/index";
+import { handleGetEvent, handleRead } from "./mcp_server/substrate_tools";
+import { handleRecentEvents } from "./mcp_server/runtime_tools";
+import { IdSchema, ReadSchema, RecentEventsSchema, type McpContext, type McpResult } from "./mcp_server/types";
 import {
   resolveDbPath, resolveSocketFile, resolveTokenFile,
 } from "./state_paths";
@@ -179,6 +182,16 @@ const tryRemove = (path: string): void => {
   } catch (err) {
     logger.debug({ where: "daemon.tryRemove", path, err: String(err) }, "remove failed (best-effort)");
   }
+};
+
+const mcpSessionStats = (server: FastMCP | null, reaper: McpSessionReaper): Record<string, number> => {
+  const sessions = (server as unknown as { sessions?: unknown[] } | null)?.sessions;
+  return {
+    active_sessions: Array.isArray(sessions) ? sessions.length : 0,
+    max_sessions: reaper.maxSessions,
+    idle_ttl_ms: reaper.idleTtlMs,
+    reaper_interval_ms: resolveReapIntervalMs(),
+  };
 };
 
 /** Wrap a tick body with per-tick deadline + overrun detection.
@@ -2908,7 +2921,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     auxServer = Bun.serve({
       port: auxPort,
       hostname: host,
-      fetch: (req) => routeAux(req, db, ingressState, adminToken, stop, startedAtMs, stateDbPath, port, auxPort),
+      fetch: (req) => routeAux(req, db, ingressState, adminToken, stop, startedAtMs, stateDbPath, port, auxPort, mcpServer, mcpSessionReaper),
     });
     logger.info({ phase: "aux_bind", aux_port: auxPort }, "daemon.boot.phase_complete");
   } catch (err) {
@@ -3261,6 +3274,40 @@ export const stopDaemon = async (
 
 // ── Auxiliary HTTP routing (non-MCP) ───────────────────────────────
 
+type AuxReadRoute = {
+  schema: typeof ReadSchema | typeof IdSchema | typeof RecentEventsSchema;
+  handler: (ctx: McpContext, args: any) => McpResult | Promise<McpResult>;
+};
+
+const AUX_READ_ROUTES: Record<string, AuxReadRoute> = {
+  "/read": { schema: ReadSchema, handler: handleRead as AuxReadRoute["handler"] },
+  "/get-event": { schema: IdSchema, handler: handleGetEvent as AuxReadRoute["handler"] },
+  "/recent-events": { schema: RecentEventsSchema, handler: handleRecentEvents as AuxReadRoute["handler"] },
+};
+
+const routeAuxRead = async (
+  req: Request,
+  route: AuxReadRoute,
+  ctx: McpContext,
+): Promise<Response> => {
+  if (req.method !== "POST") {
+    return Response.json({ ok: false, error: "method_not_allowed" }, { status: 405 });
+  }
+  let body: unknown = {};
+  try {
+    const text = await req.text();
+    body = text.trim().length > 0 ? JSON.parse(text) : {};
+  } catch {
+    return Response.json({ ok: false, error: "invalid_json" }, { status: 400 });
+  }
+  const parsed = route.schema.safeParse(body);
+  if (!parsed.success) {
+    return Response.json({ ok: false, error: "invalid_params" }, { status: 400 });
+  }
+  const result = await route.handler(ctx, parsed.data);
+  return Response.json(result, { status: result.ok ? 200 : 400 });
+};
+
 const routeAux = async (
   req: Request,
   db: Database,
@@ -3271,8 +3318,15 @@ const routeAux = async (
   stateDbPath: string,
   mcpPort: number,
   auxPort: number,
+  mcpServer: FastMCP | null,
+  mcpSessionReaper: McpSessionReaper,
 ): Promise<Response> => {
   const url = new URL(req.url);
+
+  const auxReadRoute = AUX_READ_ROUTES[url.pathname];
+  if (auxReadRoute) {
+    return routeAuxRead(req, auxReadRoute, { db, invoker: "claude_root", index: null, ingressState });
+  }
 
   if (url.pathname === "/health" && req.method === "GET") {
     // Fail-fast surface: any worker that hasn't ticked in 3× its declared
@@ -3390,6 +3444,7 @@ const routeAux = async (
       mcp_port: mcpPort,
       aux_port: auxPort,
       mcp_transport: "fastmcp:httpStream",
+      mcp_sessions: mcpSessionStats(mcpServer, mcpSessionReaper),
       stuck_workers: stuck,
       in_flight_stuck_workers: inFlightStuck,
       hotreload: hotreloadState,
@@ -3482,6 +3537,7 @@ const routeAux = async (
   if (url.pathname === "/events/stream" && req.method === "GET") {
     return handleEventsStream(req);
   }
+
 
   return Response.json({ ok: false, error: `unknown_route:${url.pathname}` }, { status: 404 });
 };

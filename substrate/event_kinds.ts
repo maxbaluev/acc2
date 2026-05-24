@@ -619,6 +619,37 @@ export const EVENT_KINDS = {
   // ledger sees the hot-ledger shrink. Not embeddable (numeric only).
   telemetry_evicted:                       { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
 
+  // ── MCP operation receipt + non-blocking projection cascade ──────────
+  // (directive NHY908W0EX5Q72KGWXMASPFEY0, amendments N71APFH5Y9 /
+  //  B0DVM2APWX / 9J0CSDP7ND, 2026-05-24).
+  //
+  // ROOT CAUSE addressed: emitEvent ran its full post-insert projection
+  // cascade (recordInternalAct / dense-closure / action_scored projectors
+  // / artifact-candidate screen / verifier auto-admit / entity+owner-profile
+  // attribute writes) SYNCHRONOUSLY on the single bun event loop, so a
+  // heavy write cascade over a large ledger could monopolize the loop past
+  // the MCP client deadline and return "Request timed out" while the daemon
+  // was alive. The fix makes emitEvent DURABLE-FIRST: the row is INSERTed
+  // and the in-process bus/activation notification fires, then every heavy
+  // projection branch is enqueued onto a BOUNDED post-commit projection
+  // queue that drains in event-loop-yielding slices (runtime/post_commit_
+  // projection_queue.ts). emitEvent returns its {id, ts} ack the moment the
+  // row is durable — never before persistence, so we never ack a write that
+  // is not committed.
+  //
+  // Vocabulary (producer=runtime, not brain-emissible):
+  //  - mcp_operation_watchdog_fired — exactly one fire-once watchdog per
+  //    armed projection drain detected no progress within the budget.
+  //    Payload: {watchdog_id, queue_depth, last_drained_seq, hung_for_ms}.
+  //  - post_commit_projection_overflow — the BOUNDED queue rejected an
+  //    enqueue because depth hit its cap (backpressure, OOM guard). The
+  //    durable event row is already persisted; only the deferred projection
+  //    is dropped, and THIS row is the clear overflow signal so the loss is
+  //    never silent. Payload: {dropped_kind, dropped_event_id, queue_depth,
+  //    cap}. health_metric so overflow pressure is auditable.
+  mcp_operation_watchdog_fired:            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+  post_commit_projection_overflow:         { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+
   // ── Closure audit + lessons learned (universal post-trajectory loop) ─
   //
   // Every task's terminal commit MUST be preceded by a task_closure_audited

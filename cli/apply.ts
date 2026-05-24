@@ -24,7 +24,7 @@
 
 import { existsSync } from "node:fs";
 import { relative, resolve } from "node:path";
-import { mcpCall } from "./rpc";
+import { auxGetEvent, auxRead, auxRecentEvents, mcpCall } from "./rpc";
 import { lessonApplyTargetsPolicy } from "../substrate/lesson_apply_policy";
 import { classifyApply } from "./verify";
 import { emitActTupleViaMcp } from "../runtime/act_tuple";
@@ -189,7 +189,7 @@ const DEFAULT_APPLY_GATE_ACTION_ARTIFACT_ID = "apply_route_predicate_action";
 const DEFAULT_APPLY_GATE_VERIFIER_ARTIFACT_ID = "apply_route_predicate_verifier";
 
 const fetchEvent = async (eventId: string): Promise<EventRow | null> => {
-  const env = await mcpCall("substrate.get_event", { id: eventId });
+  const env = await auxGetEvent<EventRow>(eventId);
   if (!env.ok) return null;
   return (env.result as EventRow) ?? null;
 };
@@ -337,7 +337,7 @@ const globLikeMatch = (pattern: string, value: string): boolean => {
 };
 
 const ownerProfileManualReviewMatch = async (targets: readonly string[]): Promise<string | null> => {
-  const env = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
+  const env = await auxRead("owner_profile_view");
   const row = env.ok && Array.isArray(env.result) ? (env.result[0] as { payload?: unknown } | undefined) : undefined;
   const payload = parsePayload(row?.payload);
   const patterns = Array.isArray(payload.manual_review_patterns) ? payload.manual_review_patterns : [];
@@ -351,7 +351,7 @@ const ownerProfileManualReviewMatch = async (targets: readonly string[]): Promis
 };
 
 const ownerAutonomyThreshold = async (): Promise<number> => {
-  const env = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
+  const env = await auxRead("owner_profile_view");
   const row = env.ok && Array.isArray(env.result) ? (env.result[0] as { payload?: unknown } | undefined) : undefined;
   const payload = parsePayload(row?.payload);
   const signals = payload.autonomy_signals && typeof payload.autonomy_signals === "object" ? payload.autonomy_signals as Record<string, unknown> : {};
@@ -382,7 +382,7 @@ const ownerAlignmentProfileContext = async (
   targets: readonly string[],
   contextText: string,
 ): Promise<{ ok: boolean; threshold: number; hardConstraintHit: string | null }> => {
-  const env = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
+  const env = await auxRead("owner_profile_view");
   if (!env.ok) return { ok: false, threshold: 0.5, hardConstraintHit: null };
   const row = Array.isArray(env.result) ? (env.result[0] as { payload?: unknown } | undefined) : undefined;
   const payload = parsePayload(row?.payload);
@@ -623,7 +623,7 @@ const deterministicApplyRoute = async (
 const boolish = (v: unknown): boolean => v === true || v === 1 || v === "1" || v === "true";
 
 const fetchQueueRow = async (eventId: string): Promise<LessonQueueRow | null> => {
-  const env = await mcpCall("substrate.read", { view_name: "lesson_implementer_queue_view" });
+  const env = await auxRead("lesson_implementer_queue_view");
   if (!env.ok || !Array.isArray(env.result)) return null;
   return (env.result as LessonQueueRow[]).find((r) => r.source_event_id === eventId) ?? null;
 };
@@ -637,7 +637,7 @@ const resolveOwnerConsentFromSubstrate = async (
   queueRow: LessonQueueRow | null,
 ): Promise<boolean> => {
   if (boolish(queueRow?.owner_approved)) return true;
-  const env = await mcpCall("runtime.recent_events", { k: 200, kinds: ["owner_decision_recorded"] });
+  const env = await auxRecentEvents({ k: 200, kinds: ["owner_decision_recorded"] });
   const events = (env.ok ? (env.result as { events?: EventRow[] }).events : undefined) ?? [];
   return events.some((row) => {
     const payload = parsePayload(row.payload);
@@ -657,7 +657,7 @@ const normalizePolicyTarget = (target: string): string => {
 const ownerProfileThingsToNeverDoBlock = async (targets: readonly string[]): Promise<string | null> => {
   const normalizedTargets = targets.map(normalizePolicyTarget).filter(Boolean);
   if (normalizedTargets.length === 0) return null;
-  const env = await mcpCall("substrate.read", { view_name: "owner_profile_view" });
+  const env = await auxRead("owner_profile_view");
   const row = env.ok && Array.isArray(env.result) ? (env.result[0] as { payload?: unknown } | undefined) : undefined;
   const payload = parsePayload(row?.payload);
   const rules = Array.isArray(payload.things_to_never_do) ? payload.things_to_never_do : [];

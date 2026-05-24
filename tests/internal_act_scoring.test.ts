@@ -19,13 +19,22 @@
 //      the first projection so action_predicted / action_scored stay
 //      at the original counts.
 
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { recordInternalAct } from "../runtime/internal_act_projection";
-import { emitEvent } from "../runtime/events";
+import { emitEvent, flushPostCommitProjectionsForTest, resetPostCommitProjectionsForTest } from "../runtime/events";
 import { newId } from "../runtime/ids";
 import { extractSemanticDedup } from "../substrate/extractors";
 import { encodeEmbeddingBlob } from "../runtime/embedder";
+
+// Non-blocking post-commit cascade (directive NHY908W0EX5Q72KGWXMASPFEY0):
+// emitEvent defers heavy projections (recordInternalAct for closure / lesson
+// / refusal, entity + owner-profile attribute writes) onto a process-lived
+// bounded queue. Reset it between cases so a prior test's un-drained tasks
+// cannot bleed in; drain it after a triggering emit before asserting.
+beforeEach(() => {
+  resetPostCommitProjectionsForTest();
+});
 
 const fresh = () => {
   closeDb();
@@ -204,7 +213,7 @@ describe("F6 — wired decision sites", () => {
   // The predicate-gate and closure-audit wired-decision-site tests below
   // exercise internal-act projection on machinery that still exists.
 
-  test("predicate-gate refusal records predicate_gate_v1 act_tuple", () => {
+  test("predicate-gate refusal records predicate_gate_v1 act_tuple", async () => {
     const db = fresh();
     // Emit an act_artifact_candidate with an empty body — the
     // emit-side screen fires a lane_routing_refused refusal, which
@@ -221,6 +230,7 @@ describe("F6 — wired decision sites", () => {
         body: "", // below the default 200-char threshold
       },
     });
+    await flushPostCommitProjectionsForTest();
     const actRow = db
       .query("SELECT payload FROM events WHERE kind = 'act_tuple_recorded' AND action_artifact_id = 'predicate_gate_v1' ORDER BY ts DESC LIMIT 1")
       .get() as { payload: string } | null;
@@ -230,7 +240,7 @@ describe("F6 — wired decision sites", () => {
     expect(payload.verifier_handle).toBe("owner_refusal_confirmation");
   });
 
-  test("closure-audit emission records closure_verifier_v1 act_tuple", () => {
+  test("closure-audit emission records closure_verifier_v1 act_tuple", async () => {
     const db = fresh();
     const directiveId = newId();
     const taskId = newId();
@@ -244,6 +254,7 @@ describe("F6 — wired decision sites", () => {
         verdict: "audited",
       },
     });
+    await flushPostCommitProjectionsForTest();
     const actRow = db
       .query("SELECT payload, predicted_residual FROM events WHERE kind = 'act_tuple_recorded' AND action_artifact_id = 'closure_verifier_v1' ORDER BY ts DESC LIMIT 1")
       .get() as { payload: string; predicted_residual: number } | null;
@@ -434,7 +445,7 @@ describe("F6 extension — knowledge merger contradiction branch (decision 5)", 
 });
 
 describe("F6 extension — lesson extraction (decision 8)", () => {
-  test("lesson_extracted emission records lesson_extractor_v1 act_tuple with future_failure_prevention_rate verifier", () => {
+  test("lesson_extracted emission records lesson_extractor_v1 act_tuple with future_failure_prevention_rate verifier", async () => {
     const db = fresh();
     const directiveId = newId();
     const taskId = newId();
@@ -449,6 +460,7 @@ describe("F6 extension — lesson extraction (decision 8)", () => {
         proposed_action: "wrap retry in residual gate",
       },
     });
+    await flushPostCommitProjectionsForTest();
     const actRow = db
       .query("SELECT payload, predicted_residual, verifier_artifact_id FROM events WHERE kind = 'act_tuple_recorded' AND action_artifact_id = 'lesson_extractor_v1' ORDER BY ts DESC LIMIT 1")
       .get() as { payload: string; predicted_residual: number; verifier_artifact_id: string } | null;
@@ -467,7 +479,7 @@ describe("F6 extension — lesson extraction (decision 8)", () => {
     expect(scored.n).toBeGreaterThanOrEqual(1);
   });
 
-  test("two lesson_extracted emissions with different ids project independently (per-lesson scoring)", () => {
+  test("two lesson_extracted emissions with different ids project independently (per-lesson scoring)", async () => {
     const db = fresh();
     const directiveId = newId();
     const taskId = newId();
@@ -485,6 +497,7 @@ describe("F6 extension — lesson extraction (decision 8)", () => {
       task_id: taskId,
       payload: { kind: "verifier", summary: "second lesson" },
     });
+    await flushPostCommitProjectionsForTest();
     // Two distinct lessons → two distinct sourceActId values
     // (lesson_extractor_v1:<event_id>), so each gets its own projection.
     const scored = db
@@ -638,7 +651,7 @@ describe("F6 completion — entity attribute write (decision 9)", () => {
     expect(scored.n).toBeGreaterThanOrEqual(1);
   });
 
-  test("stakeholder_state_recorded emission triggers entity_attribute_writer_v1 wrap at the emit boundary", () => {
+  test("stakeholder_state_recorded emission triggers entity_attribute_writer_v1 wrap at the emit boundary", async () => {
     const db = fresh();
     const directiveId = newId();
     emitEvent(db, {
@@ -652,6 +665,7 @@ describe("F6 completion — entity attribute write (decision 9)", () => {
         information_visibility: "full",
       },
     });
+    await flushPostCommitProjectionsForTest();
     const actRow = db
       .query("SELECT payload FROM events WHERE kind = 'act_tuple_recorded' AND action_artifact_id = 'entity_attribute_writer_v1' ORDER BY ts DESC LIMIT 1")
       .get() as { payload: string } | null;
@@ -706,7 +720,7 @@ describe("F6 completion — owner profile attribute write (decision 10)", () => 
     expect(scored.n).toBeGreaterThanOrEqual(1);
   });
 
-  test("owner_profile_recorded emission triggers owner_profile_writer_v1 wrap at the emit boundary", () => {
+  test("owner_profile_recorded emission triggers owner_profile_writer_v1 wrap at the emit boundary", async () => {
     const db = fresh();
     emitEvent(db, {
       kind: "owner_profile_recorded",
@@ -717,6 +731,7 @@ describe("F6 completion — owner profile attribute write (decision 10)", () => 
         promoted_from: "candidate_alpha",
       },
     });
+    await flushPostCommitProjectionsForTest();
     const actRow = db
       .query("SELECT payload FROM events WHERE kind = 'act_tuple_recorded' AND action_artifact_id = 'owner_profile_writer_v1' ORDER BY ts DESC LIMIT 1")
       .get() as { payload: string } | null;

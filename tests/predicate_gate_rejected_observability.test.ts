@@ -9,13 +9,19 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
-import { emitEvent } from "../runtime/events";
+import { emitEvent, flushPostCommitProjectionsForTest, resetPostCommitProjectionsForTest } from "../runtime/events";
 
 afterAll(() => closeDb());
-beforeEach(() => closeDb());
+beforeEach(() => {
+  // Non-blocking post-commit cascade (directive NHY908W0EX5Q72KGWXMASPFEY0):
+  // the act_artifact_candidate emit-side screen is deferred onto the bounded
+  // post-commit queue. Reset between cases; drain after the candidate emit.
+  resetPostCommitProjectionsForTest();
+  closeDb();
+});
 
 describe("predicate_gate_rejected — emit-side screen on act_artifact_candidate", () => {
-  test("fires when a ceo_buyer candidate body contains banned 'the system' and 'modest' phrases", () => {
+  test("fires when a ceo_buyer candidate body contains banned 'the system' and 'modest' phrases", async () => {
     const db = openDb(":memory:");
     // Body deliberately includes two CATALOG predicates: 'the system'
     // (system_meta_v2_no_internal_substrate_language) and 'modest'
@@ -38,6 +44,7 @@ describe("predicate_gate_rejected — emit-side screen on act_artifact_candidate
         cited_knowledge_ids: ["fake_strategic_direction_chosen_kc"],
       },
     });
+    await flushPostCommitProjectionsForTest();
     const rejections = db
       .query<{ payload: string }, [string]>(
         `SELECT payload FROM events WHERE kind = 'predicate_gate_rejected' AND context_refs LIKE ?`,
@@ -51,7 +58,7 @@ describe("predicate_gate_rejected — emit-side screen on act_artifact_candidate
     expect((payload.match_count as number) >= 2).toBe(true);
   });
 
-  test("does NOT fire when audience is unset (gate scopes itself to high-stakes audiences)", () => {
+  test("does NOT fire when audience is unset (gate scopes itself to high-stakes audiences)", async () => {
     const db = openDb(":memory:");
     const padding = "x ".repeat(200);
     const candidate = emitEvent(db, {
@@ -63,6 +70,7 @@ describe("predicate_gate_rejected — emit-side screen on act_artifact_candidate
         body: `Banned phrase test: the system finds a modest improvement. ${padding}`,
       },
     });
+    await flushPostCommitProjectionsForTest();
     const rejections = db
       .query<{ n: number }, [string]>(
         `SELECT COUNT(*) AS n FROM events WHERE kind = 'predicate_gate_rejected' AND context_refs LIKE ?`,

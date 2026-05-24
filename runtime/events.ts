@@ -12,6 +12,91 @@ import { publishEvent } from "./event_bus";
 import { publishActivation } from "./activation_bus";
 import { recordEventEmission } from "./metrics";
 import { screenActArtifactCandidate } from "./artifact_candidate_screen";
+import {
+  PostCommitProjectionQueue,
+  type PostCommitProjectionTask,
+} from "./post_commit_projection_queue";
+
+// ── Non-blocking post-commit projection cascade ──────────────────────────
+// (directive NHY908W0EX5Q72KGWXMASPFEY0, amendment B0DVM2APWX, 2026-05-24).
+//
+// emitEvent INSERTs the row + fires the synchronous bus/activation
+// notification, then returns its {id, ts} ack the moment the row is durable
+// (durability-before-ack). Every HEAVY post-insert projection branch is
+// enqueued onto this single bounded FIFO queue instead of running on the MCP
+// handler's call stack. The queue drains in event-loop-yielding slices, so a
+// heavy write cascade can no longer monopolize the loop past the MCP client
+// deadline. See runtime/post_commit_projection_queue.ts for the full
+// deadlock-safety contract (durability-before-ack / no-dropped-events /
+// fire-once watchdog / bounded backpressure).
+//
+// The queue's overflow + watchdog sinks emit through emitEvent itself. They
+// are wired lazily (the queue module cannot import events.ts — that is a
+// cycle) and stamped projectActTuple:false so the diagnostic emit does not
+// itself spawn an act_tuple cascade. The sink db is captured from the first
+// enqueue's db handle (the daemon uses a single shared Database).
+let postCommitQueueDb: Database | null = null;
+const postCommitQueue = new PostCommitProjectionQueue(undefined, {
+  onOverflow: ({ droppedLabel, droppedEventId, queueDepth, cap }) => {
+    if (!postCommitQueueDb) return;
+    try {
+      emitEvent(postCommitQueueDb, {
+        kind: "post_commit_projection_overflow",
+        substrate_origin: "substrate_auto",
+        projectActTuple: false,
+        payload: {
+          dropped_kind: droppedLabel,
+          dropped_event_id: droppedEventId,
+          queue_depth: queueDepth,
+          cap,
+        },
+      });
+    } catch { /* fail-soft: overflow signal is best-effort */ }
+  },
+  onWatchdog: ({ watchdogId, queueDepth, lastDrainedSeq, hungForMs }) => {
+    if (!postCommitQueueDb) return;
+    try {
+      emitEvent(postCommitQueueDb, {
+        kind: "mcp_operation_watchdog_fired",
+        substrate_origin: "substrate_auto",
+        projectActTuple: false,
+        payload: {
+          watchdog_id: watchdogId,
+          queue_depth: queueDepth,
+          last_drained_seq: lastDrainedSeq,
+          hung_for_ms: hungForMs,
+        },
+      });
+    } catch { /* fail-soft: watchdog signal is best-effort */ }
+  },
+});
+
+/** Enqueue one deferred projection branch onto the bounded post-commit
+ *  queue. Captures the db handle for the queue's sink emits. Drops (with a
+ *  loud overflow event) only when the bounded cap is hit — the durable
+ *  source row already landed. */
+const enqueuePostCommitProjection = (db: Database, task: PostCommitProjectionTask): void => {
+  postCommitQueueDb = db;
+  postCommitQueue.enqueue(task);
+};
+
+/** Test/diagnostic surface: drain the post-commit queue to empty. Tests that
+ *  assert a projection landed call this after emitEvent returns its ack. */
+export const flushPostCommitProjectionsForTest = async (): Promise<void> => {
+  await postCommitQueue.flushForTest();
+};
+
+/** Test/diagnostic surface: hard-reset the post-commit queue between cases.
+ *  The queue is a process-lived singleton; without a reset a prior test's
+ *  un-drained deferred tasks (which captured a now-closed db) would bleed
+ *  into the next test when it drains. Wire into beforeEach. */
+export const resetPostCommitProjectionsForTest = (): void => {
+  postCommitQueue.resetForTest();
+  postCommitQueueDb = null;
+};
+
+/** Test/diagnostic: current pending depth of the post-commit queue. */
+export const postCommitProjectionDepth = (): number => postCommitQueue.depth();
 
 /** Empty-blob sentinel (maps to SQLite X'') written to the `embedding`
  *  column for non-embeddable event kinds at INSERT time. Keeps the
@@ -1320,32 +1405,36 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // arrives later (or the contradicting failure that arrives if the
   // verdict was wrong) credits the closure verifier posterior.
   if (input.kind === "task_closure_audited") {
-    try {
-      const payload = isObject(input.payload) ? input.payload : {};
-      const closureResidual = typeof payload.closure_residual === "number" && Number.isFinite(payload.closure_residual)
-        ? payload.closure_residual
-        : 0.5;
-      const verdict = typeof payload.verdict === "string" ? payload.verdict : "audited";
-      const { recordInternalAct } = require("./internal_act_projection") as typeof import("./internal_act_projection");
-      recordInternalAct(db, {
-        intent: "score closure verdict",
-        actionHandle: "closure_verifier_v1",
-        verifierHandle: "owner_observed_completeness",
-        verifierKind: "deterministic_code",
-        predictedResidual: closureResidual,
-        reasoningSummary: `closure verdict=${verdict} residual=${closureResidual.toFixed(2)}`,
-        actionSummary: `task_closure_audited emitted for task ${input.task_id ?? id}`,
-        effectSummary: `closure verdict landed; commit-gate threshold reads residual`,
-        directiveId: input.directive_id,
-        taskId: input.task_id,
-        sourceEventId: id,
-        sourceActId: "closure_verifier_v1:" + (input.task_id ?? id),
-        extra: {
-          verdict,
-          closure_residual: closureResidual,
-        },
-      });
-    } catch { /* fail-soft: closure audit already landed */ }
+    enqueuePostCommitProjection(db, {
+      label: "task_closure_audited:internal_act",
+      sourceEventId: id,
+      run: () => {
+        const payload = isObject(input.payload) ? input.payload : {};
+        const closureResidual = typeof payload.closure_residual === "number" && Number.isFinite(payload.closure_residual)
+          ? payload.closure_residual
+          : 0.5;
+        const verdict = typeof payload.verdict === "string" ? payload.verdict : "audited";
+        const { recordInternalAct } = require("./internal_act_projection") as typeof import("./internal_act_projection");
+        recordInternalAct(db, {
+          intent: "score closure verdict",
+          actionHandle: "closure_verifier_v1",
+          verifierHandle: "owner_observed_completeness",
+          verifierKind: "deterministic_code",
+          predictedResidual: closureResidual,
+          reasoningSummary: `closure verdict=${verdict} residual=${closureResidual.toFixed(2)}`,
+          actionSummary: `task_closure_audited emitted for task ${input.task_id ?? id}`,
+          effectSummary: `closure verdict landed; commit-gate threshold reads residual`,
+          directiveId: input.directive_id,
+          taskId: input.task_id,
+          sourceEventId: id,
+          sourceActId: "closure_verifier_v1:" + (input.task_id ?? id),
+          extra: {
+            verdict,
+            closure_residual: closureResidual,
+          },
+        });
+      },
+    });
   }
   // Dense post-closure credit — DAG-backprop of closure_residual
   // (HCAPO arXiv:2603.08754 / Mem-T arXiv:2601.23014: dense/hindsight
@@ -1362,35 +1451,34 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // input.task_id resolves to the directive's root node, so a child task's
   // own closure audit does not re-walk the whole directive.
   if (input.kind === "task_closure_audited") {
-    try {
-      const closurePayloadObj = isObject(input.payload) ? input.payload : {};
-      const numericResidual = typeof closurePayloadObj.closure_residual === "number" && Number.isFinite(closurePayloadObj.closure_residual)
-        ? closurePayloadObj.closure_residual
-        : null;
-      const closingTaskId = typeof input.task_id === "string" ? input.task_id : null;
-      const closingDirectiveId = typeof input.directive_id === "string" ? input.directive_id : null;
-      if (numericResidual !== null && closingTaskId && closingDirectiveId) {
-        const { distributeDenseClosureCredit, resolveDirectiveRootTaskId } = require("./dense_closure_credit") as typeof import("./dense_closure_credit");
-        const rootTaskId = resolveDirectiveRootTaskId(db, closingDirectiveId);
-        // Only fire on the directive ROOT closure (the most-grounded
-        // outcome). A non-root child audit is skipped — its acts already
-        // received per-act credit and will be backpropped when the root
-        // closes.
-        if (rootTaskId && rootTaskId === closingTaskId) {
-          distributeDenseClosureCredit(db, {
-            closure_audit_event_id: id,
-            directive_id: closingDirectiveId,
-            root_task_id: rootTaskId,
-            closure_residual: numericResidual,
-          });
+    enqueuePostCommitProjection(db, {
+      label: "task_closure_audited:dense_credit",
+      sourceEventId: id,
+      run: () => {
+        const closurePayloadObj = isObject(input.payload) ? input.payload : {};
+        const numericResidual = typeof closurePayloadObj.closure_residual === "number" && Number.isFinite(closurePayloadObj.closure_residual)
+          ? closurePayloadObj.closure_residual
+          : null;
+        const closingTaskId = typeof input.task_id === "string" ? input.task_id : null;
+        const closingDirectiveId = typeof input.directive_id === "string" ? input.directive_id : null;
+        if (numericResidual !== null && closingTaskId && closingDirectiveId) {
+          const { distributeDenseClosureCredit, resolveDirectiveRootTaskId } = require("./dense_closure_credit") as typeof import("./dense_closure_credit");
+          const rootTaskId = resolveDirectiveRootTaskId(db, closingDirectiveId);
+          // Only fire on the directive ROOT closure (the most-grounded
+          // outcome). A non-root child audit is skipped — its acts already
+          // received per-act credit and will be backpropped when the root
+          // closes.
+          if (rootTaskId && rootTaskId === closingTaskId) {
+            distributeDenseClosureCredit(db, {
+              closure_audit_event_id: id,
+              directive_id: closingDirectiveId,
+              root_task_id: rootTaskId,
+              closure_residual: numericResidual,
+            });
+          }
         }
-      }
-    } catch (err) {
-      // Fail-soft: the parent task_closure_audited row already landed; the
-      // dense pass emits its own projection_error rows internally. This
-      // outer guard only catches require/import-time exceptions.
-      void err;
-    }
+      },
+    });
   }
   // F6 extension — universal internal Act scoring for lesson
   // extraction. Each lesson_extracted row IS a bet: the substrate (or
@@ -1402,57 +1490,61 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // scoping: lessons are individually retrievable and individually
   // citeable, so each one earns or loses posterior independently.
   if (input.kind === "lesson_extracted") {
-    try {
-      const payload = isObject(eventPayload) ? eventPayload : {};
-      const summary = typeof payload.summary === "string" ? payload.summary : "lesson extracted";
-      const lessonKind = typeof payload.kind === "string"
-        ? payload.kind
-        : (typeof payload.lesson_kind === "string" ? payload.lesson_kind : "general");
-      const defaultedLessonKind = isObject(payload.classification_source)
-        && payload.classification_source.basis === "lesson_extracted_without_lesson_kind";
-      if (defaultedLessonKind) {
-        emitEvent(db, {
-          kind: "knowledge_uncertainty_observed",
-          substrate_origin: "substrate_auto",
-          directive_id,
-          task_id,
-          parent_task_id: input.parent_task_id ?? null,
-          loop_id,
-          context_refs: [id, ...(input.context_refs ?? [])],
-          payload: {
+    enqueuePostCommitProjection(db, {
+      label: "lesson_extracted:internal_act",
+      sourceEventId: id,
+      run: () => {
+        const payload = isObject(eventPayload) ? eventPayload : {};
+        const summary = typeof payload.summary === "string" ? payload.summary : "lesson extracted";
+        const lessonKind = typeof payload.kind === "string"
+          ? payload.kind
+          : (typeof payload.lesson_kind === "string" ? payload.lesson_kind : "general");
+        const defaultedLessonKind = isObject(payload.classification_source)
+          && payload.classification_source.basis === "lesson_extracted_without_lesson_kind";
+        if (defaultedLessonKind) {
+          emitEvent(db, {
+            kind: "knowledge_uncertainty_observed",
+            substrate_origin: "substrate_auto",
+            directive_id,
+            task_id,
+            parent_task_id: input.parent_task_id ?? null,
+            loop_id,
+            context_refs: [id, ...(input.context_refs ?? [])],
+            payload: {
+              lesson_event_id: id,
+              uncertainty_kind: "lesson_extracted_without_lesson_kind",
+              normalized_lesson_kind: lessonKind,
+              note: "runtime.emitEvent filled lesson_kind=unclassified; emitter should provide a more specific open-ended lesson_kind.",
+            },
+          });
+        }
+        const { recordInternalAct } = require("./internal_act_projection") as typeof import("./internal_act_projection");
+        recordInternalAct(db, {
+          intent: "extract reusable lesson",
+          actionHandle: "lesson_extractor_v1",
+          verifierHandle: "future_failure_prevention_rate",
+          verifierKind: "deterministic_code",
+          // Lessons are moderate-confidence bets — they generalize from
+          // one trajectory and may not transfer cleanly. 0.4 mirrors the
+          // F6 brief's predicted_residual for this decision class.
+          predictedResidual: 0.4,
+          reasoningSummary: `lesson_extracted kind=${lessonKind}`,
+          actionSummary: `lesson_extracted emitted for task ${input.task_id ?? id}`,
+          effectSummary: summary.length > 0 ? summary.slice(0, 200) : "lesson row landed on ledger",
+          directiveId: input.directive_id,
+          taskId: input.task_id,
+          sourceEventId: id,
+          // One act per lesson emit — projection key derives from the
+          // lesson event id so re-emitting the same row collapses to
+          // the same projection.
+          sourceActId: "lesson_extractor_v1:" + id,
+          extra: {
+            lesson_kind: lessonKind,
             lesson_event_id: id,
-            uncertainty_kind: "lesson_extracted_without_lesson_kind",
-            normalized_lesson_kind: lessonKind,
-            note: "runtime.emitEvent filled lesson_kind=unclassified; emitter should provide a more specific open-ended lesson_kind.",
           },
         });
-      }
-      const { recordInternalAct } = require("./internal_act_projection") as typeof import("./internal_act_projection");
-      recordInternalAct(db, {
-        intent: "extract reusable lesson",
-        actionHandle: "lesson_extractor_v1",
-        verifierHandle: "future_failure_prevention_rate",
-        verifierKind: "deterministic_code",
-        // Lessons are moderate-confidence bets — they generalize from
-        // one trajectory and may not transfer cleanly. 0.4 mirrors the
-        // F6 brief's predicted_residual for this decision class.
-        predictedResidual: 0.4,
-        reasoningSummary: `lesson_extracted kind=${lessonKind}`,
-        actionSummary: `lesson_extracted emitted for task ${input.task_id ?? id}`,
-        effectSummary: summary.length > 0 ? summary.slice(0, 200) : "lesson row landed on ledger",
-        directiveId: input.directive_id,
-        taskId: input.task_id,
-        sourceEventId: id,
-        // One act per lesson emit — projection key derives from the
-        // lesson event id so re-emitting the same row collapses to
-        // the same projection.
-        sourceActId: "lesson_extractor_v1:" + id,
-        extra: {
-          lesson_kind: lessonKind,
-          lesson_event_id: id,
-        },
-      });
-    } catch { /* fail-soft: lesson_extracted already landed */ }
+      },
+    });
   }
   // F6 completion (decision 9) — entity model attribute write. Every
   // stakeholder_state_recorded row commits one declared_utility +
@@ -1463,23 +1555,27 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // credit chain when downstream observations either match or refute
   // the recorded value.
   if (input.kind === "stakeholder_state_recorded") {
-    try {
-      const payload = isObject(input.payload) ? input.payload : {};
-      const entityId = typeof payload.stakeholder_id === "string" ? payload.stakeholder_id : (input.task_id ?? id);
-      const { recordEntityAttributeAct } = require("./owner_entity_acts") as typeof import("./owner_entity_acts");
-      recordEntityAttributeAct(db, {
-        entityId,
-        attributeName: "declared_utility",
-        attributeValue: (payload.declared_utility ?? null) as JsonValue,
-        sourceEventId: id,
-        directiveId: input.directive_id,
-        taskId: input.task_id,
-        extra: {
-          inferred_constraints: (payload.inferred_constraints ?? null) as JsonValue,
-          information_visibility: (payload.information_visibility ?? null) as JsonValue,
-        },
-      });
-    } catch { /* fail-soft: stakeholder row already landed */ }
+    enqueuePostCommitProjection(db, {
+      label: "stakeholder_state_recorded:entity_attr",
+      sourceEventId: id,
+      run: () => {
+        const payload = isObject(input.payload) ? input.payload : {};
+        const entityId = typeof payload.stakeholder_id === "string" ? payload.stakeholder_id : (input.task_id ?? id);
+        const { recordEntityAttributeAct } = require("./owner_entity_acts") as typeof import("./owner_entity_acts");
+        recordEntityAttributeAct(db, {
+          entityId,
+          attributeName: "declared_utility",
+          attributeValue: (payload.declared_utility ?? null) as JsonValue,
+          sourceEventId: id,
+          directiveId: input.directive_id,
+          taskId: input.task_id,
+          extra: {
+            inferred_constraints: (payload.inferred_constraints ?? null) as JsonValue,
+            information_visibility: (payload.information_visibility ?? null) as JsonValue,
+          },
+        });
+      },
+    });
   }
   // F6 completion (decision 10) — owner profile attribute write. The
   // adjudicator emits two related kinds: owner_insight_candidate
@@ -1496,24 +1592,28 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // owner-stated intent can still invoke recordOwnerProfileAttributeAct
   // explicitly; the emit boundary stays scoped to commits.
   if (input.kind === "owner_profile_recorded") {
-    try {
-      const payload = isObject(input.payload) ? input.payload : {};
-      const source = typeof payload.promotion_route === "string"
-        ? `promoter:${payload.promotion_route}`
-        : "promoter";
-      const { recordOwnerProfileAttributeAct } = require("./owner_entity_acts") as typeof import("./owner_entity_acts");
-      recordOwnerProfileAttributeAct(db, {
-        field: "*",
-        value: payload as JsonValue,
-        source,
-        sourceEventId: id,
-        directiveId: input.directive_id,
-        taskId: input.task_id,
-        extra: {
-          owner_event_kind: input.kind,
-        },
-      });
-    } catch { /* fail-soft: owner profile row already landed */ }
+    enqueuePostCommitProjection(db, {
+      label: "owner_profile_recorded:profile_attr",
+      sourceEventId: id,
+      run: () => {
+        const payload = isObject(input.payload) ? input.payload : {};
+        const source = typeof payload.promotion_route === "string"
+          ? `promoter:${payload.promotion_route}`
+          : "promoter";
+        const { recordOwnerProfileAttributeAct } = require("./owner_entity_acts") as typeof import("./owner_entity_acts");
+        recordOwnerProfileAttributeAct(db, {
+          field: "*",
+          value: payload as JsonValue,
+          source,
+          sourceEventId: id,
+          directiveId: input.directive_id,
+          taskId: input.task_id,
+          extra: {
+            owner_event_kind: input.kind,
+          },
+        });
+      },
+    });
   }
   // RLM retrieval credit attribution (brain task FX9PZDQ3W932,
   // 2026-05-18). Every action_scored event walks its context_refs for
@@ -1551,28 +1651,27 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // double-credit when distributeCredit itself drives the action_scored
   // emit. Synchronous so idempotency is race-free.
   if (input.kind === "action_scored") {
-    try {
-      const actionArtifactId = typeof input.action_artifact_id === "string" ? input.action_artifact_id : "";
-      const verifierArtifactId = typeof input.verifier_artifact_id === "string" ? input.verifier_artifact_id : "";
-      if (!isBridgeExitArtifactPair(actionArtifactId, verifierArtifactId)) {
-        const { projectActionScoredToCredit } = require("./credit") as typeof import("./credit");
-        projectActionScoredToCredit(db, {
-          id,
-          payload: JSON.stringify(eventPayload),
-          context_refs: JSON.stringify(input.context_refs ?? []),
-          directive_id: directive_id,
-          task_id: task_id,
-          residual: input.residual ?? null,
-          action_artifact_id: input.action_artifact_id ?? null,
-          verifier_artifact_id: input.verifier_artifact_id ?? null,
-        });
-      }
-    } catch (err) {
-      // Fail-soft: parent action_scored row already landed. The projector
-      // emits its own projection_error rows on internal failure; this
-      // outer guard only catches require/import-time exceptions.
-      void err;
-    }
+    enqueuePostCommitProjection(db, {
+      label: "action_scored:project_credit",
+      sourceEventId: id,
+      run: () => {
+        const actionArtifactId = typeof input.action_artifact_id === "string" ? input.action_artifact_id : "";
+        const verifierArtifactId = typeof input.verifier_artifact_id === "string" ? input.verifier_artifact_id : "";
+        if (!isBridgeExitArtifactPair(actionArtifactId, verifierArtifactId)) {
+          const { projectActionScoredToCredit } = require("./credit") as typeof import("./credit");
+          projectActionScoredToCredit(db, {
+            id,
+            payload: JSON.stringify(eventPayload),
+            context_refs: JSON.stringify(input.context_refs ?? []),
+            directive_id: directive_id,
+            task_id: task_id,
+            residual: input.residual ?? null,
+            action_artifact_id: input.action_artifact_id ?? null,
+            verifier_artifact_id: input.verifier_artifact_id ?? null,
+          });
+        }
+      },
+    });
   }
   // Code-artifact-candidate emit-side screen (dark-gate observability,
   // 2026-05-18). The candidate row lands first so its id is stable; the
@@ -1582,7 +1681,10 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // candidate stays in the ledger so audit/replay see what was attempted;
   // the refusal events explain why downstream gates blocked it.
   if (input.kind === "act_artifact_candidate") {
-    try {
+    enqueuePostCommitProjection(db, {
+      label: "act_artifact_candidate:screen",
+      sourceEventId: id,
+      run: () => {
       const { refusals } = screenActArtifactCandidate(db, {
         payload: input.payload,
         directive_id: input.directive_id,
@@ -1629,12 +1731,8 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
           });
         } catch { /* fail-soft: screen refusal already landed */ }
       }
-    } catch (err) {
-      // Screen failures must not poison the candidate emission. The
-      // candidate row already landed; a dead screen is observable as
-      // missing refusal rows on the next audit, not as a thrown emit.
-      void err;
-    }
+      },
+    });
   }
   // Auto-admit unseen verifier_kinds (brain EH5A37DPHX0GSCJKBSRNZDX700).
   // Runs AFTER the source action_scored row has landed so the audit
@@ -1644,13 +1742,13 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // because resolvedActionId is null; the recursive call with the lifted
   // handle is the one that fires the admit.
   if (input.kind === "action_scored") {
-    try {
-      maybeAutoAdmitVerifierKind(db, input, id);
-    } catch (err) {
-      // Fail-soft: auto-admit must not poison the action_scored emit.
-      // Missing rows surface as orphaned credit (visible to audits).
-      void err;
-    }
+    enqueuePostCommitProjection(db, {
+      label: "action_scored:auto_admit_verifier",
+      sourceEventId: id,
+      run: () => {
+        maybeAutoAdmitVerifierKind(db, input, id);
+      },
+    });
   }
   // T0.3 citation binding enforcement — symmetric to T0.2 (commit
   // d8baa7e). Live evidence (brain_self_audit 168h): citations

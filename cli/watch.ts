@@ -11,7 +11,7 @@
 // reason) projected by substrate_narrative_recent_view; IDs are
 // drilldown-only metadata.
 
-import { mcpCall } from "./rpc";
+import { auxRecentEvents } from "./rpc";
 import { realSubstrateClient } from "./tui/transport/substrate-client";
 
 // NOTE: `react` / `ink` (and its transitive `yoga-layout`) are NOT imported at
@@ -77,7 +77,7 @@ export const runWatch = async (argv: string[]): Promise<number> => {
   // terminal into raw mode. Failure prints the same shape every other
   // CLI surface uses so the operator sees a single error mode.
   try {
-    const probe = await mcpCall("runtime.recent_events", { since: Date.now() - 60_000, limit: 1 });
+    const probe = await auxRecentEvents({ k: 1 });
     if (probe.ok === false) {
       process.stderr.write(`acc watch: daemon unreachable (${probe.error}). run \`acc daemon start\`.\n`);
       return 1;

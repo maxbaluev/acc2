@@ -3,7 +3,7 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
-import { emitEvent } from "./events";
+import { emitEvent, flushPostCommitProjectionsForTest, resetPostCommitProjectionsForTest } from "./events";
 import { insertArtifact, getArtifact } from "./artifact_store";
 import {
   distributeCredit,
@@ -18,7 +18,15 @@ import {
 import type { Database } from "bun:sqlite";
 
 afterAll(() => closeDb());
-beforeEach(() => closeDb());
+beforeEach(() => {
+  // Non-blocking post-commit cascade (directive NHY908W0EX5Q72KGWXMASPFEY0):
+  // emitEvent(action_scored) defers projectActionScoredToCredit + the
+  // auto-admit pass onto the bounded post-commit queue. Reset between cases;
+  // tests that emit action_scored then assert the credit projection drain
+  // the queue with flushPostCommitProjectionsForTest() first.
+  resetPostCommitProjectionsForTest();
+  closeDb();
+});
 
 const insertSampleArtifact = (
   db: Database,
@@ -1025,6 +1033,7 @@ describe("projectActionScoredToCredit — universal emit-boundary projector", ()
         verifier_kind: "deterministic_code",
       },
     });
+    await flushPostCommitProjectionsForTest();
     // Expect one act_artifact_score_updated per cited artifact AND for
     // the primary action_artifact_id + verifier_artifact_id.
     const updates = db
@@ -1120,6 +1129,7 @@ describe("projectActionScoredToCredit — universal emit-boundary projector", ()
       residual: 0.2,
       payload: { source_act_event_id: ap.id, verifier_kind: "deterministic_code" },
     });
+    await flushPostCommitProjectionsForTest();
     const firstCount = (db
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.artifact_id') = 'idem_cited'")
       .get() as { c: number }).c;
@@ -1136,13 +1146,14 @@ describe("projectActionScoredToCredit — universal emit-boundary projector", ()
       residual: 0.2,
       payload: { source_act_event_id: ap.id, verifier_kind: "deterministic_code" },
     });
+    await flushPostCommitProjectionsForTest();
     const secondCount = (db
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.artifact_id') = 'idem_cited'")
       .get() as { c: number }).c;
     expect(secondCount).toBe(1); // no new row
   });
 
-  test("action_scored with NO source_act_event_id still credits primary action + verifier artifacts", () => {
+  test("action_scored with NO source_act_event_id still credits primary action + verifier artifacts", async () => {
     const db = openDb(":memory:");
     insertSampleArtifact(db, "noop_handle", "// handle");
     insertSampleArtifact(db, "noop_verifier", "// verifier");
@@ -1158,6 +1169,7 @@ describe("projectActionScoredToCredit — universal emit-boundary projector", ()
       residual: 0.0,
       payload: { verifier_kind: "deterministic_code" }, // no source_act_event_id
     });
+    await flushPostCommitProjectionsForTest();
     const updates = db
       .query<{ payload: string }, []>(
         "SELECT payload FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.projected_from') = 'action_scored_universal_projector'",
@@ -1170,7 +1182,7 @@ describe("projectActionScoredToCredit — universal emit-boundary projector", ()
     expect(getArtifact(db, "noop_verifier")!.posteriorAlpha).toBeGreaterThan(verifierBefore.posteriorAlpha);
   });
 
-  test("action_scored with source_act_event_id pointing at non-existent event emits projection_error AND still credits primary artifacts", () => {
+  test("action_scored with source_act_event_id pointing at non-existent event emits projection_error AND still credits primary artifacts", async () => {
     const db = openDb(":memory:");
     insertSampleArtifact(db, "err_handle", "// handle");
     insertSampleArtifact(db, "err_verifier", "// verifier");
@@ -1189,6 +1201,7 @@ describe("projectActionScoredToCredit — universal emit-boundary projector", ()
         verifier_kind: "deterministic_code",
       },
     });
+    await flushPostCommitProjectionsForTest();
     // The dangling source reference is still surfaced as an audit signal.
     const err = db
       .query<{ payload: string }, []>(
@@ -1934,6 +1947,7 @@ describe("T4.4 coalition credit — multi-artifact joint citation posterior", ()
       payload: {},
     });
 
+    await flushPostCommitProjectionsForTest();
     await distributeCredit(db, {
       action_event_id: ap.id,
       observation_event_id: obs.id,
@@ -1941,6 +1955,7 @@ describe("T4.4 coalition credit — multi-artifact joint citation posterior", ()
       predicted_residual: 0,
       observed_residual: 0,
     });
+    await flushPostCommitProjectionsForTest();
 
     const coalRow = db
       .query<{ payload: string }, []>(
@@ -2006,6 +2021,7 @@ describe("T4.4 coalition credit — multi-artifact joint citation posterior", ()
       residual: 0,
       payload: {},
     });
+    await flushPostCommitProjectionsForTest();
     await distributeCredit(db, {
       action_event_id: ap.id,
       observation_event_id: obs.id,
@@ -2013,6 +2029,7 @@ describe("T4.4 coalition credit — multi-artifact joint citation posterior", ()
       predicted_residual: 0,
       observed_residual: 0,
     });
+    await flushPostCommitProjectionsForTest();
     const rows = db
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'coalition_credit_distributed'")
       .get() as { c: number };
@@ -2146,6 +2163,7 @@ describe("T4.4 coalition credit — multi-artifact joint citation posterior", ()
         payload: { action_predicted_event_id: ap.id, residual: 0 },
       });
     }
+    await flushPostCommitProjectionsForTest();
 
     const rows = db
       .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM events WHERE kind = 'coalition_credit_distributed'")
@@ -2191,6 +2209,7 @@ describe("T4.4 coalition credit — multi-artifact joint citation posterior", ()
         payload: { action_predicted_event_id: ap.id, residual: 0.2 },
       });
     }
+    await flushPostCommitProjectionsForTest();
 
     const rows = db
       .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM events WHERE kind = 'coalition_credit_distributed'")

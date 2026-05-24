@@ -1,8 +1,8 @@
-// acc status - one-screen owner state answer. Uses substrate.read/MCP
-// projections for organism state and keeps daemon health as the only direct
-// auxiliary HTTP read. --json is intentionally shaped for a future Ink TUI.
+// acc status - one-screen owner state answer. Uses session-free aux HTTP
+// projections for organism state and daemon health; it must not open a
+// FastMCP session. --json is intentionally shaped for a future Ink TUI.
 
-import { auxBaseUrl, mcpCall, rpcGet } from "./rpc";
+import { auxBaseUrl, auxRead, auxRecentEvents, rpcGet } from "./rpc";
 import type { OwnerProfileCard } from "./owner_profile_renderer";
 
 type Lifecycle = "live" | "queued_at_cap" | "completed" | "failed" | "zombie";
@@ -144,7 +144,7 @@ const averageNumber = (values: Array<number | null | undefined>): number | null 
 
 const readView = async (viewName: string, args: Record<string, unknown> = {}): Promise<ViewEnvelope> => {
   try {
-    return await mcpCall("substrate.read", { view_name: viewName, args });
+    return await auxRead(viewName, args);
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -152,7 +152,7 @@ const readView = async (viewName: string, args: Record<string, unknown> = {}): P
 
 const recentEvents = async (kinds: string[], k = 200): Promise<ViewEnvelope> => {
   try {
-    return await mcpCall("runtime.recent_events", { kinds, k });
+    return await auxRecentEvents({ kinds, k });
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

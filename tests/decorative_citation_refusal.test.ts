@@ -16,10 +16,16 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
-import { emitEvent } from "../runtime/events";
+import { emitEvent, flushPostCommitProjectionsForTest, resetPostCommitProjectionsForTest } from "../runtime/events";
 
 afterAll(() => closeDb());
-beforeEach(() => closeDb());
+beforeEach(() => {
+  // Non-blocking post-commit cascade (directive NHY908W0EX5Q72KGWXMASPFEY0):
+  // the act_artifact_candidate emit-side screen is deferred onto the bounded
+  // post-commit queue. Reset between cases; drain after the candidate emit.
+  resetPostCommitProjectionsForTest();
+  closeDb();
+});
 
 const refusalsFor = (db: ReturnType<typeof openDb>, eventId: string) =>
   db
@@ -30,7 +36,7 @@ const refusalsFor = (db: ReturnType<typeof openDb>, eventId: string) =>
     .all(`%${eventId}%`);
 
 describe("decorative_citation_refusal — act_artifact_candidate", () => {
-  test("(a) all citations resolve to real events.id → no decorative refusal", () => {
+  test("(a) all citations resolve to real events.id → no decorative refusal", async () => {
     const db = openDb(":memory:");
     // Seed a real knowledge_candidate whose id we can cite.
     const real = emitEvent(db, {
@@ -56,7 +62,7 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
     expect(decorative.length).toBe(0);
   });
 
-  test("(b) mixed real + label citations → decorative_citation fires with unresolved_labels", () => {
+  test("(b) mixed real + label citations → decorative_citation fires with unresolved_labels", async () => {
     const db = openDb(":memory:");
     const real = emitEvent(db, {
       kind: "knowledge_candidate",
@@ -84,6 +90,7 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
       .get(candidate.id);
     expect(candidateRow).not.toBeNull();
     // And one lane_routing_refused with reason=decorative_citation.
+    await flushPostCommitProjectionsForTest();
     const refusals = refusalsFor(db, candidate.id);
     const decorative = refusals.find((r) => {
       const p = JSON.parse(r.payload) as Record<string, unknown>;
@@ -98,7 +105,7 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
     expect(resolved).toContain(real.id);
   });
 
-  test("unique ULID-prefix (>=12 chars) resolves to the full id → no decorative refusal", () => {
+  test("unique ULID-prefix (>=12 chars) resolves to the full id → no decorative refusal", async () => {
     const db = openDb(":memory:");
     // Seed a real lesson_extracted whose 12-char prefix the brain might cite.
     const real = emitEvent(db, {
@@ -119,6 +126,7 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
         cited_knowledge_ids: [prefix],
       },
     });
+    await flushPostCommitProjectionsForTest();
     const refusals = refusalsFor(db, candidate.id);
     const decorative = refusals.find((r) => {
       const p = JSON.parse(r.payload) as Record<string, unknown>;
@@ -127,7 +135,7 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
     expect(decorative).toBeUndefined();
   });
 
-  test("short prefix (<12 chars) does NOT resolve — falls to decorative_citation", () => {
+  test("short prefix (<12 chars) does NOT resolve — falls to decorative_citation", async () => {
     const db = openDb(":memory:");
     const real = emitEvent(db, {
       kind: "lesson_extracted",
@@ -146,6 +154,7 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
         cited_knowledge_ids: [shortPrefix],
       },
     });
+    await flushPostCommitProjectionsForTest();
     const decorative = refusalsFor(db, candidate.id).find((r) => {
       const p = JSON.parse(r.payload) as Record<string, unknown>;
       return p.reason === "decorative_citation";
@@ -153,7 +162,7 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
     expect(decorative).toBeDefined();
   });
 
-  test("(c) substantive candidate with zero citations → artifact_citation_underrooted", () => {
+  test("(c) substantive candidate with zero citations → artifact_citation_underrooted", async () => {
     const db = openDb(":memory:");
     const candidate = emitEvent(db, {
       kind: "act_artifact_candidate",
@@ -166,6 +175,7 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
         cited_knowledge_ids: [],
       },
     });
+    await flushPostCommitProjectionsForTest();
     const refusals = refusalsFor(db, candidate.id);
     const underrooted = refusals.find((r) => {
       const p = JSON.parse(r.payload) as Record<string, unknown>;
@@ -177,7 +187,7 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
     expect(payload.refused_kind).toBe("act_artifact_candidate");
   });
 
-  test("short body without audience → not substantive → no underrooted refusal", () => {
+  test("short body without audience → not substantive → no underrooted refusal", async () => {
     // Pre-fix: the screen would refuse anything; F1 scopes to substantive
     // candidates only so internal worker stubs aren't refused.
     const db = openDb(":memory:");
@@ -189,6 +199,7 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
         purpose: "internal_worker_stub",
       },
     });
+    await flushPostCommitProjectionsForTest();
     const refusals = refusalsFor(db, candidate.id);
     const decorative = refusals.find((r) => {
       const p = JSON.parse(r.payload) as Record<string, unknown>;
@@ -197,7 +208,7 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
     expect(decorative).toBeUndefined();
   });
 
-  test("placeholder kinds with audience set still trigger decorative refusal on labels", () => {
+  test("placeholder kinds with audience set still trigger decorative refusal on labels", async () => {
     // published_drive_doc is a structural placeholder body — the
     // underrooted path is exempt — but if its citations list contains
     // labels they MUST still trip decorative_citation.
@@ -214,6 +225,7 @@ describe("decorative_citation_refusal — act_artifact_candidate", () => {
         cited_knowledge_ids: ["bare_label_not_an_event_id"],
       },
     });
+    await flushPostCommitProjectionsForTest();
     const refusals = refusalsFor(db, candidate.id);
     const decorative = refusals.find((r) => {
       const p = JSON.parse(r.payload) as Record<string, unknown>;

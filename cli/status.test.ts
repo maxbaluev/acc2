@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderStatusReport, type StatusReport, isTier0ReplayEvent, COMPOUNDING_EVENT_KINDS } from "./status";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 describe("renderStatusReport", () => {
   test("renders owner-state status fields for one-screen CLI/TUI reuse", () => {
@@ -79,6 +81,13 @@ describe("compounding metric veracity", () => {
   });
 });
 
+
+test("read-only CLI modules stay on aux HTTP instead of MCP", () => {
+  for (const rel of ["status.ts", "observe.ts", "watch.ts", "whoami.ts"]) {
+    const source = readFileSync(join(import.meta.dir, rel), "utf8");
+    expect(source).not.toContain("mcpCall");
+  }
+});
 
 test("status-live-pending-owner-decision-source-regression", async () => {
   const source = await Bun.file(new URL("./status.ts", import.meta.url)).text();

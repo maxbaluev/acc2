@@ -271,6 +271,35 @@ describe("EVENT_KINDS registry coverage", () => {
       }),
     ).not.toThrow();
   });
+
+  test("the non-blocking post-commit cascade kinds are registered as runtime-produced (directive NHY908W0EX5Q72KGWXMASPFEY0)", () => {
+    // Amendment N71APFH5Y9: the receipt/watchdog + bounded-queue vocabulary
+    // must be declared in the registry, producer=runtime (NOT brain), so it
+    // cannot be emitted by the brain via MCP and is routed correctly by the
+    // health-metric / narrative filters.
+    for (const kind of ["mcp_operation_watchdog_fired", "post_commit_projection_overflow"] as const) {
+      expect(kind in EVENT_KINDS).toBe(true);
+      const meta = (EVENT_KINDS as Record<string, { producer: string; health_metric: boolean }>)[kind]!;
+      expect(meta.producer).toBe("runtime");
+      // Both are auditable overflow/wedge pressure signals.
+      expect(meta.health_metric).toBe(true);
+    }
+    const db = openDb(":memory:");
+    expect(() =>
+      emitEvent(db, {
+        kind: "post_commit_projection_overflow",
+        substrate_origin: "substrate_auto",
+        payload: { dropped_kind: "x", dropped_event_id: "e1", queue_depth: 3, cap: 3 },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      emitEvent(db, {
+        kind: "mcp_operation_watchdog_fired",
+        substrate_origin: "substrate_auto",
+        payload: { watchdog_id: "wd_1", queue_depth: 1, last_drained_seq: 0, hung_for_ms: 30000 },
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe("derived sets match their pre-unification shape", () => {
@@ -549,6 +578,12 @@ describe("derived sets match their pre-unification shape", () => {
       // health_metric so `acc admin substrate-status` can surface how
       // many rows the sweep reclaimed (the eviction is itself auditable).
       "telemetry_evicted",
+      // 2026-05-24 non-blocking post-commit cascade (directive
+      // NHY908W0EX5Q72KGWXMASPFEY0): the bounded queue's overflow/wedge
+      // pressure signals are health_metric so backpressure + hung-cascade
+      // events surface in `acc admin substrate-status`.
+      "mcp_operation_watchdog_fired",
+      "post_commit_projection_overflow",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

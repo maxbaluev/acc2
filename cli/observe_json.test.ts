@@ -24,6 +24,8 @@ const realRpc = await import("./rpc");
 mock.module("./rpc", () => ({
   ...realRpc,
   mcpCall: (...args: unknown[]) => mcpImpl(...args),
+  auxRecentEvents: (args: Record<string, unknown>) => mcpImpl("runtime.recent_events", args),
+  auxRead: (viewName: string, args?: Record<string, unknown>) => mcpImpl("substrate.read", { view_name: viewName, args }),
 }));
 
 const { runEvents, runInspect } = await import("./observe");

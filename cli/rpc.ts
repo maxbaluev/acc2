@@ -154,6 +154,32 @@ export const rpcGet = async <T = unknown>(url: string, opts?: { timeoutMs?: numb
   }
 };
 
+export const rpcPost = async <T = unknown>(
+  url: string,
+  body: unknown,
+  opts?: { timeoutMs?: number },
+): Promise<T> => {
+  const timeoutMs = resolveTimeoutMs(url, opts?.timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const text = await res.text();
+    try { return (text ? JSON.parse(text) : {}) as T; } catch {
+      return { ok: false, error: `non_json:${text.slice(0, 200)}` } as T;
+    }
+  } catch (err) {
+    const name = (err as Error).name;
+    if (name === "TimeoutError" || name === "AbortError") {
+      return { ok: false, error: `timeout:${timeoutMs}ms:${url}` } as T;
+    }
+    return { ok: false, error: `fetch_failed:${(err as Error).message}` } as T;
+  }
+};
+
 export const rpcPostAuth = async <T = unknown>(
   url: string,
   token: string,
@@ -179,6 +205,31 @@ export const rpcPostAuth = async <T = unknown>(
     }
     return { ok: false, error: `fetch_failed:${(err as Error).message}` } as T;
   }
+};
+
+export const auxRead = async <T = unknown>(
+  viewName: string,
+  args: Record<string, unknown> = {},
+  opts: RpcOpts & { timeoutMs?: number } = {},
+): Promise<McpEnvelope & { result?: T }> => {
+  const base = requireAux(opts);
+  return await rpcPost<McpEnvelope & { result?: T }>(`${base}/read`, { view_name: viewName, args }, opts);
+};
+
+export const auxRecentEvents = async (
+  params: { kinds?: string[]; k?: number },
+  opts: RpcOpts & { timeoutMs?: number } = {},
+): Promise<McpEnvelope> => {
+  const base = requireAux(opts);
+  return await rpcPost<McpEnvelope>(`${base}/recent-events`, params, opts);
+};
+
+export const auxGetEvent = async <T = unknown>(
+  id: string,
+  opts: RpcOpts & { timeoutMs?: number } = {},
+): Promise<McpEnvelope & { result?: T }> => {
+  const base = requireAux(opts);
+  return await rpcPost<McpEnvelope & { result?: T }>(`${base}/get-event`, { id }, opts);
 };
 
 // ── SSE client (/events/stream) ────────────────────────────────────

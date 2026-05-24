@@ -9,13 +9,19 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
-import { emitEvent } from "../runtime/events";
+import { emitEvent, flushPostCommitProjectionsForTest, resetPostCommitProjectionsForTest } from "../runtime/events";
 
 afterAll(() => closeDb());
-beforeEach(() => closeDb());
+beforeEach(() => {
+  // Non-blocking post-commit cascade (directive NHY908W0EX5Q72KGWXMASPFEY0):
+  // the act_artifact_candidate emit-side screen is deferred onto the bounded
+  // post-commit queue. Reset between cases; drain after the candidate emit.
+  resetPostCommitProjectionsForTest();
+  closeDb();
+});
 
 describe("atms_strategy_first_violation — emit-side screen on act_artifact_candidate", () => {
-  test("fires when an atms_report_v* candidate has no strategic-direction citation", () => {
+  test("fires when an atms_report_v* candidate has no strategic-direction citation", async () => {
     const db = openDb(":memory:");
     const body = "# Lakeland AI Transformation Roadmap v12\n\n".padEnd(800, "a");
     const candidate = emitEvent(db, {
@@ -30,6 +36,7 @@ describe("atms_strategy_first_violation — emit-side screen on act_artifact_can
         cited_knowledge_ids: [],
       },
     });
+    await flushPostCommitProjectionsForTest();
     const violations = db
       .query<{ payload: string }, [string]>(
         `SELECT payload FROM events WHERE kind = 'atms_strategy_first_violation' AND context_refs LIKE ?`,
@@ -42,7 +49,7 @@ describe("atms_strategy_first_violation — emit-side screen on act_artifact_can
     expect(payload.missing_claim_suffix).toBe("_strategic_direction_chosen");
   });
 
-  test("does NOT fire when the candidate cites a knowledge_candidate whose claim ends _strategic_direction_chosen", () => {
+  test("does NOT fire when the candidate cites a knowledge_candidate whose claim ends _strategic_direction_chosen", async () => {
     const db = openDb(":memory:");
     const kc = emitEvent(db, {
       kind: "knowledge_candidate",
@@ -63,6 +70,7 @@ describe("atms_strategy_first_violation — emit-side screen on act_artifact_can
         cited_knowledge_ids: [kc.id],
       },
     });
+    await flushPostCommitProjectionsForTest();
     const violations = db
       .query<{ n: number }, [string]>(
         `SELECT COUNT(*) AS n FROM events WHERE kind = 'atms_strategy_first_violation' AND context_refs LIKE ?`,
@@ -71,7 +79,7 @@ describe("atms_strategy_first_violation — emit-side screen on act_artifact_can
     expect(violations?.n ?? 0).toBe(0);
   });
 
-  test("does NOT fire when the candidate's name and kind are not atms_report_v*", () => {
+  test("does NOT fire when the candidate's name and kind are not atms_report_v*", async () => {
     const db = openDb(":memory:");
     const body = "# Some other report\n\n".padEnd(800, "z");
     const candidate = emitEvent(db, {
@@ -84,6 +92,7 @@ describe("atms_strategy_first_violation — emit-side screen on act_artifact_can
         cited_knowledge_ids: [],
       },
     });
+    await flushPostCommitProjectionsForTest();
     const violations = db
       .query<{ n: number }, [string]>(
         `SELECT COUNT(*) AS n FROM events WHERE kind = 'atms_strategy_first_violation' AND context_refs LIKE ?`,
@@ -92,7 +101,7 @@ describe("atms_strategy_first_violation — emit-side screen on act_artifact_can
     expect(violations?.n ?? 0).toBe(0);
   });
 
-  test("fires when payload.kind starts with atms_report_v but payload.name does NOT (v9 historical shape)", () => {
+  test("fires when payload.kind starts with atms_report_v but payload.name does NOT (v9 historical shape)", async () => {
     const db = openDb(":memory:");
     // The 2026-05-18 v9 Lakeland candidates set name to a domain label
     // (lakeland_industries_ai_transformation_report_v9) while kind
@@ -109,6 +118,7 @@ describe("atms_strategy_first_violation — emit-side screen on act_artifact_can
         cited_knowledge_ids: ["unresolved_label_kc"],
       },
     });
+    await flushPostCommitProjectionsForTest();
     const violations = db
       .query<{ payload: string }, [string]>(
         `SELECT payload FROM events WHERE kind = 'atms_strategy_first_violation' AND context_refs LIKE ?`,
