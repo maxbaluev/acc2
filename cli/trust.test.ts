@@ -138,7 +138,7 @@ describe("acc trust", () => {
     expect(m.amendments_7d.applied).toBe(3);
     expect(m.amendments_7d.failed).toBe(1);
     expect(m.recommendation).toContain("trust looks healthy");
-    expect(m.recommendation).toContain("father --max-cycles");
+    expect(m.recommendation).toContain("forecast-originated actions within the owner autonomy scope");
   });
 
   test("mixed-signal seed yields cautionary recommendation", async () => {

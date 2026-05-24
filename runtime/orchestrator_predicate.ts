@@ -169,6 +169,18 @@ export const evaluateOrchestratorPredicate = (input: OrchestratorPredicateInput)
   const omittedBlockingBoundary = selectedGap(input.candidate_orchestration?.selected_boundaries, results);
   const actionRisk = Math.max(numberSignal(input.proposed_action?.risk), numberSignal(input.proposed_action?.novelty));
   const routePressure = input.candidate_route === "AUTO_APPLY" ? actionRisk * 0.25 : 0;
+  // Owner-safety floor (runaway-dispatch guard). A forecast-originated or
+  // owner-sensitive action that is explicitly NOT reversible MUST surface to
+  // the owner — it can never silently AUTO_APPLY, regardless of how aligned
+  // the owner_alignment sub-predicate is. reversible===false forces the
+  // residual into the misaligned band (≥0.6 → recommended_route !== AUTO_APPLY,
+  // routing the proposed action to owner_input_required/hidl_action_required).
+  // Undefined reversibility is treated conservatively as reversible (no floor)
+  // so existing reversible-by-default applies are unaffected; only an explicit
+  // irreversible flag trips the guard. A high actionRisk (≥0.6) likewise floors
+  // into at least the watch band so a high-risk forecast cannot auto-execute.
+  const irreversibilityFloor = input.proposed_action?.reversible === false ? 1 : 0;
+  const highRiskFloor = actionRisk >= 0.6 ? 0.6 : 0;
   // RLM-first: the blocking decision leans on the scored residual + breakdown.
   // A "misaligned" verdict forces residual to 1 (hard owner-constraint/threshold
   // breach), but the watch band is no longer a verdict-name signal — it is the
@@ -183,6 +195,8 @@ export const evaluateOrchestratorPredicate = (input: OrchestratorPredicateInput)
     meanResidual * 0.7,
     coverageGap * 0.4,
     routePressure,
+    irreversibilityFloor,
+    highRiskFloor,
   ));
   const verdict = residual >= 0.6 ? "misaligned" : residual >= 0.3 ? "watch" : "aligned";
   const recommended_route = verdict === "misaligned" ? "NEEDS_BRAIN_RECYCLE" : verdict === "watch" ? "OWNER_GATE" : "AUTO_APPLY";
@@ -214,6 +228,8 @@ export const evaluateOrchestratorPredicate = (input: OrchestratorPredicateInput)
       omitted_blocking_boundary: omittedBlockingBoundary,
       action_risk: actionRisk,
       route_pressure: routePressure,
+      irreversibility_floor: irreversibilityFloor,
+      high_risk_floor: highRiskFloor,
       selected_boundary_count: stringArray(input.candidate_orchestration?.selected_boundaries).length,
     },
     reasons,

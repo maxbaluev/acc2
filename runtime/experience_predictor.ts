@@ -1,6 +1,10 @@
-// acc2 experience-stream predictor — generate-and-select Phase 5.
+// acc2 forecast/predicate predictor — universal reactive loop primitive.
 //
-// The world-model "imagined rollout" that makes the organism FAST.
+// The world-model "imagined rollout" predicts both action residuals and
+// candidate-directive usefulness. Forecast predicates are scored act artifacts
+// over substrate state; when activated by ledger events they return candidate
+// directives with predicted_residual, confidence, expected_value, and cited
+// predicate/artifact evidence for posterior credit.
 //
 // Grounding (encoded as design, not prose):
 //   Dreamer — predict cheaply by imagined rollout over the learned

@@ -857,9 +857,14 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
   // CLEAN-BREAK (universal-workflow design DKDWVBTX): the universal lane is
   // opencode_brain. There is no regex hard-task force to "high" complexity —
   // the LM decides decomposition (it emits refinement edges for any task that
-  // needs them) and risk is handled by verifier residual + the unified
-  // owner_alignment gate, not by pre-classification. Complexity is a coarse
-  // structural estimate only; routing is always valid (defaults here).
+  // needs them) and risk is handled by verifier residual plus the unified
+  // owner-autonomy gate. The same gate applies to forecast-originated
+  // directives: high-confidence, reversible forecasts inside
+  // owner_profile.autonomy_scope may dispatch; low-confidence, out-of-scope,
+  // irreversible, or owner-sensitive forecasts must route to
+  // owner_input_required/hidl_action_required as proposed actions. This is
+  // route evidence, not a Father mode or regex pre-classifier. Complexity is a
+  // coarse structural estimate only; routing is always valid (defaults here).
   return {
     route: "opencode_brain",
     predicted_complexity: estimateComplexity(task),

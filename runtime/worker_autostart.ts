@@ -184,7 +184,6 @@ export type WorkerName =
 export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "embedder",
   "scheduler",
-  "father",
   "rolling_reviewer",
   "rehabilitation",
   "integrity",

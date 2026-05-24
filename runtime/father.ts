@@ -1,5 +1,10 @@
-// acc2 Father — brainless scheduler running on a fixed cadence
-// (Architecture.md).
+// Legacy Father compatibility module.
+//
+// Father is being dissolved into the universal reactive scheduler loop. Static
+// templates become scored forecast predicates; owner-yield becomes the normal
+// owner-autonomy gate; rolling reviews become forecast candidates; and
+// father_* events are legacy diagnostics only until removed. No new autonomous
+// behavior may be added here.
 //
 // Father is a recurring task in the substrate, NOT a separate process. Each
 // tick reads:

@@ -1235,7 +1235,13 @@ export type SchedulerLoopOpts = SchedulerOpts & {
   abort?: AbortSignal;
 };
 
-/** setInterval-style loop suitable for the daemon to run continuously.
+/** Universal reactive loop suitable for the daemon to run continuously.
+ *  Every activation first drains scored forecast-origin predicates, which may
+ *  open candidate directives/tasks through the same ledger path as owner input;
+ *  then readyTasks dispatches through decideDispatch. There is no Father or
+ *  autonomous side loop: forecasting, owner-authored work, recipe replay,
+ *  Claude-inline, and brain dispatch all converge here. Quiescence means no
+ *  forecast candidates, no ready tasks, and no in-flight dispatches.
  *  Stops when (a) the AbortSignal fires, (b) stopAfterTicks is reached, or
  *  (c) readyTasks returns empty AND IN_FLIGHT is empty for two consecutive
  *  ticks (a "drained" quiescence — the loop yields rather than spinning). */

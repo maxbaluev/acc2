@@ -107,7 +107,7 @@ export const gatherTrustMetrics = (db: Database): TrustMetrics => {
   };
   const healthy = base.autonomy_score > 0.6 && base.closure_residual_7d.avg < 0.2 && base.amendments_7d.applied > base.amendments_7d.failed;
   const recommendation = healthy
-    ? "trust looks healthy; consider raising father --max-cycles"
+    ? "trust looks healthy; consider allowing higher-confidence forecast-originated actions within the owner autonomy scope"
     : "trust mixed; review dispatcher_violation + irreversible_effect_recorded before extending autonomy";
   return { ...base, recommendation };
 };

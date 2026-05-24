@@ -886,7 +886,10 @@ export const EVENT_KINDS = {
   // on action scoring.
   prompt_section_variant_selected:         { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
-  // ── Father ──────────────────────────────────────────────────────────
+  // ── Legacy Father diagnostics ───────────────────────────────────────
+  // Deprecated: autonomous origination now uses normal directive/task/action
+  // events plus scored forecast_predicate/autonomy_gate_predicate artifacts.
+  // These rows remain only for historical ledger readability until migration.
   father_cycle_recorded:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   father_yielded:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   father_drift_detected:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },

@@ -129,4 +129,71 @@ describe("evaluateOrchestratorPredicate", () => {
     expect(result.breakdown.absence_floor).toBe(0);
     expect(result.recommended_route).toBe("AUTO_APPLY");
   });
+
+  // ── Owner-safety gate (runaway-dispatch guard) ──────────────────────
+  // The unified forecast+autonomy loop routes forecast-originated candidate
+  // actions through this predicate. An IRREVERSIBLE or HIGH-RISK forecast must
+  // ALWAYS surface to the owner — it can never silently AUTO_APPLY, regardless
+  // of how clean the owner_alignment sub-predicate looks. These tests pin that
+  // structural floor so the loop cannot auto-execute owner-sensitive actions.
+
+  test("owner-safety: an IRREVERSIBLE forecast NEVER auto-executes — it surfaces to the owner even with a perfectly clean alignment boundary", () => {
+    const result = evaluateOrchestratorPredicate({
+      candidate_route: "AUTO_APPLY",
+      // Alignment is maximally clean — the ONLY blocking signal is reversibility.
+      sub_predicate_results: cleanResult,
+      proposed_action: {
+        intent: "send_irreversible_outreach",
+        reversible: false,
+      },
+      candidate_orchestration: { selected_boundaries: ["owner_alignment"] },
+    });
+    expect(result.breakdown.irreversibility_floor).toBe(1);
+    expect(result.residual).toBeGreaterThanOrEqual(0.6);
+    // Does NOT auto-execute — routes off AUTO_APPLY so the loop surfaces it.
+    expect(result.recommended_route).not.toBe("AUTO_APPLY");
+  });
+
+  test("owner-safety: a HIGH-RISK forecast does not auto-execute — it floors into at least the owner-gate band", () => {
+    const result = evaluateOrchestratorPredicate({
+      candidate_route: "AUTO_APPLY",
+      sub_predicate_results: cleanResult,
+      proposed_action: {
+        intent: "high_risk_forecast_action",
+        reversible: true,
+        risk: 0.8,
+      },
+      candidate_orchestration: { selected_boundaries: ["owner_alignment"] },
+    });
+    expect(result.breakdown.high_risk_floor).toBe(0.6);
+    expect(result.residual).toBeGreaterThanOrEqual(0.6);
+    expect(result.recommended_route).not.toBe("AUTO_APPLY");
+  });
+
+  test("owner-safety regression: a REVERSIBLE, low-risk, well-aligned forecast still auto-applies (the floor only trips on the explicit irreversible/high-risk flag)", () => {
+    const result = evaluateOrchestratorPredicate({
+      candidate_route: "AUTO_APPLY",
+      sub_predicate_results: cleanResult,
+      proposed_action: {
+        intent: "reversible_forecast_action",
+        reversible: true,
+        risk: 0.1,
+      },
+      candidate_orchestration: { selected_boundaries: ["owner_alignment"] },
+    });
+    expect(result.breakdown.irreversibility_floor).toBe(0);
+    expect(result.breakdown.high_risk_floor).toBe(0);
+    expect(result.recommended_route).toBe("AUTO_APPLY");
+  });
+
+  test("owner-safety: undefined reversibility is treated conservatively as reversible (no floor) so existing reversible-by-default applies are unaffected", () => {
+    const result = evaluateOrchestratorPredicate({
+      candidate_route: "AUTO_APPLY",
+      sub_predicate_results: cleanResult,
+      proposed_action: { intent: "unspecified_reversibility" },
+      candidate_orchestration: { selected_boundaries: ["owner_alignment"] },
+    });
+    expect(result.breakdown.irreversibility_floor).toBe(0);
+    expect(result.recommended_route).toBe("AUTO_APPLY");
+  });
 });

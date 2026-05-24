@@ -56,7 +56,6 @@ import {
   setSchedulerDraining,
 } from "./task_scheduler";
 import { rollingReviewerWorkerTick } from "./rolling_reviewer";
-import { fatherJournalOnEvent } from "./father";
 import { EmbeddingIndex } from "./embedding_index";
 import { embedderWorkerTick, pendingEmbeddableCount } from "./embedder";
 import { rehabilitationWorkerTick, getArtifact } from "./artifact_store";
@@ -1124,11 +1123,6 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // without forward-referencing the value defined later in the file.
   const SUPERVISOR_INTERVAL_MS = 30_000;
   const rollingIntervalMs = 60_000;
-  // Father is fully reactive (onEvent("*") subscription at line ~1296);
-  // this constant is purely the observability label for readiness — the
-  // "expected" cadence between journal entries. The reactive_safety_net
-  // (30 min) is the genuine deadline. Universal value — no env knob.
-  const fatherIntervalMs = 5 * 60 * 1000;
   // MCP session-reaper cadence (2026-05-23). Universal default 30s; the
   // genuine deadline is the same supervisedTick wrapper as every other worker.
   const mcpSessionReaperTickMs = resolveReapIntervalMs();
@@ -1162,7 +1156,6 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("embedder")) registerWorker("embedder", embedderIntervalMs);
   if (isWorkerEnabled("rehabilitation")) registerWorker("rehabilitation", rehabIntervalMs);
   if (isWorkerEnabled("rolling_reviewer")) registerWorker("rolling_reviewer", rollingIntervalMs);
-  if (isWorkerEnabled("father")) registerWorker("father", fatherIntervalMs);
   if (isWorkerEnabled("scheduler")) registerWorker("scheduler");
   if (isWorkerEnabled("supervisor")) registerWorker("supervisor", SUPERVISOR_INTERVAL_MS);
   if (isWorkerEnabled("compaction")) registerWorker("compaction", 60 * 60 * 1000);
@@ -2262,41 +2255,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // rolling_reviewer is activation-driven; safety net covers due-time arrival.
   }
 
-  // Phase K: Father worker. Father is no longer a cadence-bound planner.
-  // It observes the activation bus and emits a compact journal every N ledger
-  // events. Rolling reviews, scheduling, dispatch, refinement, and retrieval
-  // are owned by their dedicated substrate workers.
-  if (isWorkerEnabled("father")) {
-    // Father is activation-driven (onEvent("*") subscription) — it does
-    // not heartbeat on fatherIntervalMs. Mark it reactive so readiness
-    // skips its per-worker stuck check on idle substrate; the shared
-    // reactive_safety_net is the genuine deadline that applies.
-    markWorkerReactive("father");
-    markWorkerReady("father");
-    recordWorkerTick("father");
-    const disposeFatherJournal = onEvent("*", (event) => {
-      void fatherJournalOnEvent(db, event).catch((err) => {
-        logger.warn(
-          { err: (err as Error).message },
-          "father.journal failed — surfaced as error_caught",
-        );
-        try {
-          emitEvent(db, {
-            kind: "error_caught",
-            substrate_origin: "substrate_auto",
-            payload: {
-              where: "daemon.father.journal_step",
-              recoverable: true,
-              message: (err as Error).message,
-            },
-          });
-        } catch (emitErr) {
-          logger.debug({ err: String(emitErr) }, "could not emit error_caught (db closed)");
-        }
-      });
-    });
-    workers.push(disposeFatherJournal);
-  }
+  // Forecast origination is part of the universal scheduler activation path.
+  // Do not subscribe a separate Father/autonomous worker here; schedulerLoop
+  // owns event -> forecast predicates -> candidate directives -> dispatch.
+  // Legacy Father imports and readiness registration are removed with the
+  // runtime/father.ts compatibility layer.
 
   // Phase E: autoscheduler. Default ON — production wants the
   // scheduler drain-loop firing every ready dispatch as it lands.

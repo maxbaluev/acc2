@@ -12,6 +12,9 @@ import { dispatchReadyTask } from "../task_dispatcher";
 import { readDagForDirective } from "../task_topology";
 import { schedulerTick } from "../task_scheduler";
 import { processRollingReviews } from "../rolling_reviewer";
+// Father runtime tools are deprecated: autonomous origination is driven by
+// scheduler-integrated forecast predicates. The import is retained only for
+// temporary legacy drift inspection until historical consumers are migrated.
 import { fatherIterate, detectFatherDrift } from "../father";
 import { replayRecipe } from "../recipe_replay";
 import {

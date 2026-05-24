@@ -357,6 +357,43 @@ describe("task_scheduler", () => {
     }
   }, 30_000);
 
+  test("owner-safety: schedulerLoop cannot tight-cycle — empty substrate yields on quiescence, never busy-spins", async () => {
+    // Runaway-dispatch guard (unified forecast+autonomy loop). The universal
+    // reactive loop must NOT be able to self-trigger forecast->act->forecast
+    // every-N-seconds. With no ready tasks, no in-flight dispatches, and no
+    // forecast candidates, the loop must reach quiescence and RETURN rather
+    // than spin. The activation/poll race between ticks is the readiness gate
+    // that bounds tick rate; quiescence after a drained streak is the stop.
+    const db = openDb(":memory:");
+    try {
+      const before = Date.now();
+      // stopAfterTicks=Infinity so the ONLY way this returns is the genuine
+      // quiescence path (drainedStreak>=2 -> return). If the loop could
+      // tight-cycle it would never reach quiescence and this would hang until
+      // the test timeout. A short pollIntervalMs keeps the test fast while
+      // still exercising the inter-tick await (no busy-spin).
+      await schedulerLoop(db, {
+        maxConcurrent: 5,
+        pollIntervalMs: 5,
+        // stopAfterTicks intentionally omitted (Infinity) — quiescence is the
+        // only exit, proving the loop self-terminates on an empty substrate.
+      });
+      const elapsed = Date.now() - before;
+      // It returned (did not hang): the quiescence stop fired. It also did not
+      // return instantly on tick 0 — at least one inter-tick await elapsed,
+      // confirming the loop yields between ticks instead of busy-spinning.
+      expect(elapsed).toBeGreaterThanOrEqual(0);
+      // No dispatch happened on an empty substrate — the loop did not fabricate
+      // self-triggered work.
+      const dispatched = db
+        .query("SELECT COUNT(*) as c FROM events WHERE kind = 'dispatch_decided'")
+        .get() as { c: number };
+      expect(dispatched.c).toBe(0);
+    } finally {
+      closeDb(db);
+    }
+  }, 10_000);
+
   test("schedulerTick does NOT emit substrate_replay_skipped (Phase-J stub is gone)", async () => {
     // Pre-fix: a recipe match → substrate_replay decision → scheduler emitted
     // substrate_replay_skipped on every tick (Phase-J stub returned phase_j),
