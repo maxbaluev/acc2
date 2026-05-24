@@ -889,6 +889,136 @@ describe("prompt_composer", () => {
 
 });
 
+// ── compose-substage perf hygiene (2026-05-24) ───────────────────────
+// The four largest compose sub-stages (read_owner_context,
+// policy_section.*.posterior_bundle, read_other_active_goals,
+// read_policy_bundle_sections) are ALL routed through poolQuery — none is a
+// synchronous main-loop blocker. Their multi-second wall-times are SQL
+// worker-pool queue contention, not query cost. Two structural guards:
+//   1. attribution markers — every profiled subStage label carries [sync] or
+//      [pooled] so future attribution is unambiguous.
+//   2. memoization — selectPolicyBundleByPosterior fetches an identical row set
+//      for every section (goal_shape always "", task_class filters in JS), so
+//      the fetch is memoized once per compose and the 6 sections filter the
+//      cached rows. Equivalence: each section still gets its own JS match/sort.
+describe("compose substage attribution + memoization", () => {
+  test("every profiled subStage label carries a [sync] or [pooled] attribution marker", () => {
+    const source = readFileSync(new URL("./prompt_composer.ts", import.meta.url), "utf8");
+    // Match both string-quoted and template-literal subStage labels.
+    const labelRe = /subStage\(\s*(?:`([^`]+)`|"([^"]+)")/g;
+    const unmarked: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = labelRe.exec(source)) !== null) {
+      const label = m[1] ?? m[2] ?? "";
+      if (!label.includes("[sync]") && !label.includes("[pooled]")) unmarked.push(label);
+    }
+    expect(unmarked).toEqual([]);
+    // The four originally-ambiguous heavy sub-stages must now be marked pooled.
+    expect(source).toContain("read_owner_context[pooled]");
+    expect(source).toContain("read_other_active_goals[pooled]");
+    expect(source).toContain("read_policy_bundle_sections[pooled]");
+    expect(source).toContain(".posterior_bundle[pooled]`");
+  });
+
+  test("policy-bundle fetch is memoized once per compose (single SELECT shape, JS per-section filter)", () => {
+    const source = readFileSync(new URL("./prompt_composer.ts", import.meta.url), "utf8");
+    // The hoisted memo helper exists and the per-section selector reads from it
+    // instead of issuing its own poolQuery.
+    expect(source).toContain("let policyBundleRowsPromise");
+    expect(source).toContain("const policyBundleRows = (): Promise<Record<string, unknown>[]>");
+    expect(source).toContain("const rows = await policyBundleRows();");
+    // selectPolicyBundleByPosterior must NOT contain its own poolQuery on
+    // act_artifact prompt_policy_bundle (that fetch moved into the memo).
+    const selStart = source.indexOf("const selectPolicyBundleByPosterior");
+    const selEnd = source.indexOf("matches.sort", selStart);
+    const selBody = source.slice(selStart, selEnd);
+    expect(selBody).not.toContain("poolQuery");
+    expect(selBody).not.toContain("FROM act_artifact");
+  });
+
+  test("memoized fetch preserves per-section bundle selection (semantics equivalence)", async () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    const nowIso = new Date().toISOString();
+    // Seed two prompt_policy_bundle rows targeting distinct sections. Each
+    // section's JS filter (task_class = section name) must still pick its own
+    // bundle body from the shared, memoized row set.
+    const seedBundle = (id: string, section: string, body: string, score: number): void => {
+      db.run(
+        `INSERT INTO act_artifact (
+           id, runtime, body, declared_sandbox, state_root, kind,
+           posterior_alpha, posterior_beta, score, confidence,
+           recent_residual_mean, recent_kill_count, status, name,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          "bun",
+          JSON.stringify({ policy_bundle: { section_name: section, body, type: "policy_bundle", surface: "brain_prompt" }, task_class: section }),
+          JSON.stringify({ runtime: "bun" }),
+          `substrate/policy_bundle/${id}`,
+          "prompt_policy_bundle",
+          9,
+          1,
+          score,
+          0.9,
+          0.1,
+          0,
+          "admitted",
+          section,
+          nowIso,
+          nowIso,
+        ],
+      );
+    };
+    seedBundle("pb_workflow", "workflow", "MEMOIZED-WORKFLOW-MARKER", 0.95);
+    seedBundle("pb_do_not", "do_not", "MEMOIZED-DONOT-MARKER", 0.9);
+
+    const composed = await composePrompt(db, { taskId });
+    // Both section-specific bodies must surface — proving the single shared
+    // fetch is filtered per-section exactly as the prior per-call fetch did.
+    expect(composed.text).toContain("MEMOIZED-WORKFLOW-MARKER");
+    expect(composed.text).toContain("MEMOIZED-DONOT-MARKER");
+    closeDb();
+  });
+
+  test("EXPLAIN guard: heavy compose reads SEARCH via index, never full-SCAN the events table", () => {
+    const db = openDb(":memory:");
+    seedFoundationalKnowledge(db, { ownerApproved: true });
+    const plan = (sql: string, params: unknown[] = []): string =>
+      (db.query(`EXPLAIN QUERY PLAN ${sql}`).all(...(params as [])) as Array<{ detail?: string }>)
+        .map((r) => r.detail ?? "")
+        .join(" | ");
+
+    // owner_conversation_view + active_objectives_view + policy bundle reads
+    // must use SEARCH (indexed), never "SCAN events" (full-table scan on the
+    // ~420k-row ledger). A SCAN of events here would be the regression.
+    const ownerPlan = plan(
+      "SELECT event_id, ts, directive_id, kind, payload FROM owner_conversation_view ORDER BY ts DESC LIMIT ?",
+      [8],
+    );
+    expect(ownerPlan).not.toContain("SCAN events");
+    expect(ownerPlan).toContain("idx_events_kind");
+
+    const policyPlan = plan(
+      `SELECT payload FROM events WHERE kind='knowledge_promoted'
+         AND COALESCE(json_extract(payload,'$.policy_bundle.surface'),json_extract(payload,'$.surface'))=?
+         AND COALESCE(json_extract(payload,'$.type'),json_extract(payload,'$.policy_bundle.type'))='policy_bundle'
+        ORDER BY ts DESC, rowid DESC LIMIT 100`,
+      ["brain_prompt"],
+    );
+    expect(policyPlan).not.toContain("SCAN events");
+
+    const bundlePlan = plan(
+      `SELECT id FROM act_artifact WHERE kind='prompt_policy_bundle'
+         AND status IN ('admitted','promoted')
+        ORDER BY score DESC, confidence DESC, updated_at DESC LIMIT 200`,
+    );
+    expect(bundlePlan).not.toContain("SCAN act_artifact USING");
+    closeDb();
+  });
+});
+
 // ── owner-rendering policy + feedback summary section ────────────────
 describe("buildOwnerRenderingPolicySection + buildOwnerFeedbackSummarySection", () => {
   const policy = (overrides: Partial<OwnerRenderingPolicyRow> = {}): OwnerRenderingPolicyRow => ({
