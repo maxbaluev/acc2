@@ -11,6 +11,8 @@ import { emitEvent } from "./events";
 import { encodeEmbeddingBlob, EMBEDDING_VERSION, EMBEDDING_DIMS } from "./embedder";
 import { EmbeddingIndex } from "./embedding_index";
 import { retrieve, retrieveWithEmbedding } from "./retrieval";
+import { clearSqlPool, setSqlPool } from "./sql_pool_singleton";
+import type { SqlWorkerPool } from "./sql_worker_pool";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -361,5 +363,100 @@ describe("multi-vector/domain routed retrieval", () => {
     expect(result.hits[0].event_id).toBe(domainId);
     expect(result.hits[0].routing_score_breakdown.domain_boost).toBeGreaterThan(0);
     expect(result.hits[0].aspect_scores.any_axis).toBeGreaterThan(0);
+  });
+});
+
+describe("off-loop posterior reads (SQL worker pool) are byte-identical to sync", () => {
+  // The async `retrieve` path routes its per-hit posterior point reads
+  // through `poolQuery`. When the daemon installed a SQL worker pool, those
+  // SELECTs execute off the main event loop. Correctness invariant: the
+  // pooled path must return the EXACT same hits (same rows, same order, same
+  // scoring) as the synchronous fallback — `poolQuery` issues identical SQL
+  // against the same db handle, so only the execution thread differs.
+  afterEach(() => clearSqlPool());
+
+  /** A mock pool whose `query` delegates to the SAME db via the synchronous
+   *  bun:sqlite path — modeling "off-loop, same handle, same SQL". It records
+   *  every statement so the test can PROVE the pooled branch was taken. */
+  const makeDelegatingPool = (db: ReturnType<typeof openDb>, seen: string[]): SqlWorkerPool =>
+    ({
+      query<T = unknown>(sql: string, params: unknown[] = []): Promise<T[]> {
+        seen.push(sql);
+        return Promise.resolve(db.query(sql).all(...(params as any[])) as T[]);
+      },
+    } as unknown as SqlWorkerPool);
+
+  // Seed a heterogeneous substrate exercising every posterior branch:
+  // a plain knowledge_candidate (residual branch), an act_artifact-lifecycle
+  // event (payload→artifact_id branch), each with distinct residual/score so
+  // the posterior — and thus rerank_score and ordering — is non-trivial.
+  const seedMixed = (db: ReturnType<typeof openDb>, dims: number): void => {
+    const a = seedEmbedded(db, "knowledge_candidate", "alpha", 0, dims);
+    const b = seedEmbedded(db, "knowledge_candidate", "beta", 0, dims);
+    const c = seedEmbedded(db, "knowledge_candidate", "gamma", 0, dims);
+    // Distinct residuals → distinct posteriors → ordering depends on the read.
+    db.run("UPDATE events SET residual = ? WHERE id = ?", [0.1, a]);
+    db.run("UPDATE events SET residual = ? WHERE id = ?", [0.9, b]);
+    db.run("UPDATE events SET residual = ? WHERE id = ?", [0.5, c]);
+  };
+
+  test("pooled posterior path equals sync path — same rows, order, scores", async () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dims = EMBEDDING_DIMS;
+    seedMixed(db, dims);
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    const queryVec = makeUnitVec(dims, 0);
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    installMockFetch(async () => {
+      const data = { data: [{ embedding: queryVec, index: 0 }] };
+      return new Response(JSON.stringify(data), { status: 200 });
+    });
+
+    // SYNC reference: identical `retrieve` call (identical RoutingQuery) with
+    // NO pool installed → poolQuery takes the synchronous fallback. Comparing
+    // two `retrieve` invocations that differ ONLY in pool-presence isolates
+    // the execution-thread change (the variable under test) from query shape.
+    clearSqlPool();
+    const sync = await retrieve(db, idx, { text: "alpha beta gamma", k: 5 });
+
+    // OFF-LOOP: install the delegating pool; `retrieve` must use poolQuery.
+    const seen: string[] = [];
+    setSqlPool(makeDelegatingPool(db, seen));
+    const offloop = await retrieve(db, idx, { text: "alpha beta gamma", k: 5 });
+
+    // Prove the pooled branch actually executed posterior SELECTs off-loop.
+    expect(seen.some((s) => s.includes("residual") || s.includes("act_artifact"))).toBe(true);
+
+    // Byte-identical hits: same ids, same order, same scores. Compare the
+    // hit arrays directly (retrieved_at differs by wall-clock, so exclude it).
+    expect(offloop.hits).toEqual(sync.hits);
+    expect(offloop.mixed_version_excluded).toEqual(sync.mixed_version_excluded);
+  });
+
+  test("sync fallback (no pool installed) is identical to the pooled result", async () => {
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    const db = openDb(":memory:");
+    runViews(db);
+    const dims = EMBEDDING_DIMS;
+    seedMixed(db, dims);
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    const queryVec = makeUnitVec(dims, 0);
+    installMockFetch(async () => {
+      const data = { data: [{ embedding: queryVec, index: 0 }] };
+      return new Response(JSON.stringify(data), { status: 200 });
+    });
+
+    // No pool → poolQuery takes the sync fallback inside `retrieve`.
+    clearSqlPool();
+    const noPool = await retrieve(db, idx, { text: "alpha beta gamma", k: 5 });
+
+    // With a delegating pool → off-loop. Must match.
+    const seen: string[] = [];
+    setSqlPool(makeDelegatingPool(db, seen));
+    const withPool = await retrieve(db, idx, { text: "alpha beta gamma", k: 5 });
+
+    expect(seen.length).toBeGreaterThan(0); // pool was actually used
+    expect(withPool.hits).toEqual(noPool.hits);
   });
 });

@@ -26,6 +26,7 @@ import { ARTIFACT_LIFECYCLE_KINDS } from "../substrate/event_kinds";
 import type { EmbeddingIndex, IndexEntry, KnnHit } from "./embedding_index";
 import { originPromotion, originPromotionByGoalShape } from "../substrate/views";
 import { goalShape as computeGoalShape } from "./goal_shape";
+import { poolQuery } from "./sql_pool_singleton";
 
 export type RetrievalQuery = {
   text: string;
@@ -161,17 +162,52 @@ const readOriginBiasForGoalShape = (db: Database, goalShape: string): Map<string
   return out;
 };
 
-/** Cheap posterior lookup for an event. For Phase F we read the source
- *  event's `residual` (when present — lower residual = better) and convert
- *  to a posterior-shaped score in [0, 1]. Act-artifact-* event kinds get
- *  the artifact's stored `score` from the act_artifact table. Matches
- *  both canonical and pre-rename kind strings so historical events still
- *  resolve.
+// Posterior-lookup SQL — shared verbatim between the sync and pooled
+// variants so both paths execute byte-identical statements against the same
+// db handle. Only the EXECUTION THREAD differs (main loop vs. SQL worker);
+// rows, ordering, and scoring are unchanged.
+const POSTERIOR_ARTIFACT_SCORE_SQL =
+  "SELECT score FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL";
+const POSTERIOR_EVENT_PAYLOAD_SQL = "SELECT payload FROM events WHERE id = ?";
+const POSTERIOR_ARTIFACT_BY_ID_SQL = "SELECT score FROM act_artifact WHERE id = ?";
+const POSTERIOR_EVENT_RESIDUAL_SQL = "SELECT residual FROM events WHERE id = ?";
+
+/** Convert a posterior payload-scan row into a score in [0, 1]; shared by
+ *  both the sync and pooled posterior readers so the branch logic is single-
+ *  sourced and the two paths cannot drift. */
+const artifactIdFromPayload = (payload: string | undefined): string | null => {
+  if (!payload) return null;
+  try {
+    const p = JSON.parse(payload) as Record<string, unknown>;
+    return (p.artifact_id as string | undefined) ?? (p.id as string | undefined) ?? null;
+  } catch {
+    return null;
+  }
+};
+
+const residualToPosterior = (residual: number | null | undefined): number => {
+  if (typeof residual === "number") {
+    const r = Math.max(0, Math.min(1, residual));
+    return 1 - r;
+  }
+  return 0.5;
+};
+
+/** Cheap posterior lookup for an event — SYNCHRONOUS core. For Phase F we
+ *  read the source event's `residual` (when present — lower residual =
+ *  better) and convert to a posterior-shaped score in [0, 1]. Act-artifact-*
+ *  event kinds get the artifact's stored `score` from the act_artifact table.
+ *  Matches both canonical and pre-rename kind strings so historical events
+ *  still resolve.
  *
- *  Returns 0.5 (neutral) when no signal is available — Beta(1,1) prior. */
+ *  Returns 0.5 (neutral) when no signal is available — Beta(1,1) prior.
+ *
+ *  Used by the pure-sync `retrieveWithEmbedding` variant (tests/benchmarks).
+ *  The async `retrieve` path uses `readPosteriorPooled` instead so the point
+ *  reads execute off the main event loop during a live dispatch. */
 const readPosterior = (db: Database, eventId: string, kind: string): number => {
   if (kind === "act_artifact") {
-    const row = db.query("SELECT score FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL").get(eventId) as { score: number } | null;
+    const row = db.query(POSTERIOR_ARTIFACT_SCORE_SQL).get(eventId) as { score: number } | null;
     if (row && typeof row.score === "number") return row.score;
     return 0.5;
   }
@@ -179,49 +215,73 @@ const readPosterior = (db: Database, eventId: string, kind: string): number => {
     // Pull the score from the registry by looking up via context_refs or
     // payload.artifact_id. We use a shape-tolerant fallback: scan the event,
     // look for an artifact_id reference, otherwise return neutral.
-    const row = db
-      .query("SELECT payload FROM events WHERE id = ?")
-      .get(eventId) as { payload: string } | null;
-    if (row?.payload) {
-      try {
-        const p = JSON.parse(row.payload) as Record<string, unknown>;
-        const aid = (p.artifact_id as string | undefined) ?? (p.id as string | undefined);
-        if (aid) {
-          const ca = db
-            .query("SELECT score FROM act_artifact WHERE id = ?")
-            .get(aid) as { score: number } | null;
-          if (ca && typeof ca.score === "number") return ca.score;
-        }
-      } catch { /* swallow */ }
+    const row = db.query(POSTERIOR_EVENT_PAYLOAD_SQL).get(eventId) as { payload: string } | null;
+    const aid = artifactIdFromPayload(row?.payload);
+    if (aid) {
+      const ca = db.query(POSTERIOR_ARTIFACT_BY_ID_SQL).get(aid) as { score: number } | null;
+      if (ca && typeof ca.score === "number") return ca.score;
     }
     return 0.5;
   }
   // For non-artifact events, prefer the `residual` column when present
   // (lower = better → posterior = 1 − residual).
-  const row = db
-    .query("SELECT residual FROM events WHERE id = ?")
-    .get(eventId) as { residual: number | null } | null;
-  if (row && typeof row.residual === "number") {
-    const r = Math.max(0, Math.min(1, row.residual));
-    return 1 - r;
-  }
-  return 0.5;
+  const row = db.query(POSTERIOR_EVENT_RESIDUAL_SQL).get(eventId) as { residual: number | null } | null;
+  return residualToPosterior(row?.residual);
 };
 
-/** Pack one KnnHit into the retrieval result shape, computing the final
- *  rerank score along the way. */
+/** Off-loop posterior lookup — same SQL, same db handle, same branch logic
+ *  as `readPosterior`, but each point read is routed through `poolQuery` so
+ *  it runs on the SQL worker thread when the daemon installed a pool (and
+ *  falls back to the identical sync read otherwise). Because `poolQuery`
+ *  issues the exact same statement against the exact same db, the returned
+ *  row is byte-identical to the sync path — only the execution thread moves
+ *  off the dispatch-critical main loop. */
+const readPosteriorPooled = async (db: Database, eventId: string, kind: string): Promise<number> => {
+  if (kind === "act_artifact") {
+    const rows = await poolQuery<{ score: number }>(db, POSTERIOR_ARTIFACT_SCORE_SQL, [eventId]);
+    const row = rows[0] ?? null;
+    if (row && typeof row.score === "number") return row.score;
+    return 0.5;
+  }
+  if ((ARTIFACT_LIFECYCLE_KINDS as readonly string[]).includes(kind)) {
+    const rows = await poolQuery<{ payload: string }>(db, POSTERIOR_EVENT_PAYLOAD_SQL, [eventId]);
+    const aid = artifactIdFromPayload(rows[0]?.payload);
+    if (aid) {
+      const caRows = await poolQuery<{ score: number }>(db, POSTERIOR_ARTIFACT_BY_ID_SQL, [aid]);
+      const ca = caRows[0] ?? null;
+      if (ca && typeof ca.score === "number") return ca.score;
+    }
+    return 0.5;
+  }
+  const rows = await poolQuery<{ residual: number | null }>(db, POSTERIOR_EVENT_RESIDUAL_SQL, [eventId]);
+  return residualToPosterior(rows[0]?.residual);
+};
+
+/** Active-artifact membership check. Deliberately SYNCHRONOUS: it runs inside
+ *  the `index.knn` filter callback, and `knnSql` stops over-fetching once the
+ *  filter has admitted `kCap` hits (`if (hits.length >= kCap) break;`). The
+ *  predicate is therefore CAP-COUPLED — which entries it rejects determines
+ *  which entries reach the result set. Moving it off-loop would require an
+ *  async knn filter, which would change WHICH hits survive the cap and break
+ *  byte-identical results. It is a `LIMIT 1` primary-key point read (not a
+ *  table scan), so it does not contribute the heavy-scan loop stall this fix
+ *  targets — leaving it sync is both correct and cheap. */
 const isActiveArtifactHit = (db: Database, artifactId: string): boolean => {
   const row = db.query("SELECT 1 AS ok FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') LIMIT 1").get(artifactId) as { ok: number } | null;
   return !!row;
 };
 
-const packHit = (
-  db: Database,
+/** Assemble a RetrievalHit from a KnnHit and a pre-computed posterior. Pure
+ *  arithmetic — no db access — so the sync and pooled pack variants share the
+ *  EXACT scoring/ordering logic and differ only in HOW the posterior was
+ *  fetched (sync `db.query` vs. off-loop `poolQuery`). This guarantees the two
+ *  paths produce byte-identical hits. */
+const assembleHit = (
   hit: KnnHit,
+  posterior: number,
   originBias: Map<string, number>,
   q: RoutingQuery,
 ): RetrievalHit => {
-  const posterior = readPosterior(db, hit.entry.event_id, hit.entry.kind);
   const bias = originBias.get(hit.entry.substrate_origin) ?? 1.0;
   // similarity in [0, 1] — cosine distance maps [0, 2] → [1, 0]
   const similarity = Math.max(0, 1 - hit.distance / 2);
@@ -251,6 +311,25 @@ const packHit = (
     },
   };
 };
+
+/** Synchronous pack — used by `retrieveWithEmbedding`. */
+const packHit = (
+  db: Database,
+  hit: KnnHit,
+  originBias: Map<string, number>,
+  q: RoutingQuery,
+): RetrievalHit => assembleHit(hit, readPosterior(db, hit.entry.event_id, hit.entry.kind), originBias, q);
+
+/** Off-loop pack — used by the async `retrieve` path. The posterior point
+ *  reads run on the SQL worker thread (sync fallback when no pool) so they no
+ *  longer block the dispatch-critical main event loop. */
+const packHitPooled = async (
+  db: Database,
+  hit: KnnHit,
+  originBias: Map<string, number>,
+  q: RoutingQuery,
+): Promise<RetrievalHit> =>
+  assembleHit(hit, await readPosteriorPooled(db, hit.entry.event_id, hit.entry.kind), originBias, q);
 
 /** Reranked retrieval. Embeds the query, KNN against the index, multiplies
  *  by posterior, applies per-origin bias multiplier, sorts by rerank_score
@@ -307,7 +386,11 @@ export const retrieve = async (
   const originBias = q.goalText
     ? readOriginBiasForGoalShape(db, computeGoalShape(q.goalText))
     : readOriginBias(db);
-  let packed = knnHits.map((h) => packHit(db, h, originBias, q));
+  // Off-loop the per-hit posterior point reads. `Promise.all` preserves array
+  // order, and each pooled read issues the same SQL against the same db as the
+  // sync path, so `packed` is byte-identical to the synchronous map below —
+  // only the execution thread of the SELECTs moved off the dispatch loop.
+  let packed = await Promise.all(knnHits.map((h) => packHitPooled(db, h, originBias, q)));
   if (typeof q.minScore === "number") {
     packed = packed.filter((h) => h.posterior >= q.minScore!);
   }
