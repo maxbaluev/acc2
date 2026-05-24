@@ -192,6 +192,25 @@ const EVENT_HOT_PATH_INDEXES = [
   // SEARCH seek. EXPLAIN on the 374K-row live-DB copy: 10.7ms → 0.16ms (~67x),
   // identical result set. Partial WHERE keeps the index tiny.
   "CREATE INDEX IF NOT EXISTS idx_events_failure_kind_ts ON events(failure_kind, ts) WHERE failure_kind IS NOT NULL",
+  // 2026-05-23 dispatch hot-path audit (ACC2_PROFILE_LOOP=1): substrate.open_directive
+  // showed up to 56s with low loop lag — SQL-WORKER-POOL STARVATION, not event-loop
+  // block. The dedup query (findOpenDirectiveByText in
+  // runtime/mcp_server/substrate_tools.ts) filters
+  // `kind='directive_opened' AND json_extract(payload,'$.directive_text') = ?`.
+  // Pre-fix the dedup leaned on idx_events_kind_ts (kind=?), seeking ALL
+  // directive_opened rows and applying the json_extract(directive_text) equality
+  // as a per-row filter (plus a json parse each). On 400K rows that hogged a
+  // pool worker for seconds; during a dispatch burst (find_recipe + vec0 KNN +
+  // open_directive + brain reads on the 10-worker pool) it queued 50s+. A partial
+  // expression index keyed on (json_extract(...,'$.directive_text'), ts)
+  // restricted to directive_opened rows turns the dedup into a point SEARCH on
+  // directive_text. Including ts in the index lets the (expr, ts) order also
+  // serve the ORDER BY ts ASC tiebreak, so the planner prefers it over
+  // idx_events_kind_ts (a bare (expr) index loses that tie by forcing a temp
+  // sort). Partial WHERE keeps it tiny. Transparent: identical dedup results.
+  // EXPLAIN: SEARCH events USING INDEX idx_events_kind_ts (kind=?) →
+  // SEARCH events USING INDEX idx_events_directive_text_opened (<expr>=?).
+  "CREATE INDEX IF NOT EXISTS idx_events_directive_text_opened ON events(json_extract(payload, '$.directive_text'), ts) WHERE kind = 'directive_opened'",
 ];
 
 /** F4a table rename (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW):

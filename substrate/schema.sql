@@ -105,6 +105,31 @@ CREATE INDEX IF NOT EXISTS idx_events_directive_ts
 CREATE INDEX IF NOT EXISTS idx_events_failure_kind_ts
   ON events(failure_kind, ts) WHERE failure_kind IS NOT NULL;
 
+-- open_directive dedup (findOpenDirectiveByText in
+-- runtime/mcp_server/substrate_tools.ts) runs on EVERY directive open:
+-- `SELECT directive_id FROM events WHERE kind='directive_opened'
+--  AND json_extract(payload,'$.directive_text') = ? AND directive_id NOT IN (…)`.
+-- Pre-fix the dedup leaned on idx_events_kind_ts (kind=?), seeking ALL
+-- directive_opened rows and applying the json_extract(directive_text) equality
+-- as a per-row filter — effectively a scan of every directive_opened row plus a
+-- json parse each. On the 400K-row events table that hogged a SQL-worker-pool
+-- slot for seconds; during a dispatch burst (find_recipe + vec0 KNN +
+-- open_directive + brain reads on the 10-worker pool) it queued 50s+ (loop lag
+-- stayed low → pool starvation, not an event-loop block; ACC2_PROFILE_LOOP=1
+-- showed open_directive up to 56s). A partial expression index keyed on
+-- (json_extract(...,'$.directive_text'), ts) restricted to directive_opened
+-- rows turns the dedup into a point SEARCH on directive_text — the (expr, ts)
+-- order also serves the ORDER BY ts ASC tiebreak so the planner prefers it over
+-- idx_events_kind_ts (which would otherwise win by avoiding a temp sort). A bare
+-- (expr) index loses that tie; including ts is what makes the planner pick it.
+-- Partial WHERE keeps it tiny (only directive_opened rows). Transparent —
+-- identical dedup results, just a point seek instead of a per-row filter.
+-- EXPLAIN: SEARCH events USING INDEX idx_events_kind_ts (kind=?) →
+-- SEARCH events USING INDEX idx_events_directive_text_opened (<expr>=?).
+CREATE INDEX IF NOT EXISTS idx_events_directive_text_opened
+  ON events(json_extract(payload, '$.directive_text'), ts)
+  WHERE kind = 'directive_opened';
+
 -- Writer-maintained rollups keep occurrence/health reads bounded while the hot
 -- events ledger is compacted. total_count is lifetime; live_count tracks rows
 -- still present in events after archive/telemetry deletion.

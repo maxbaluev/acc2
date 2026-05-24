@@ -359,3 +359,84 @@ describe("SqliteDbPool", () => {
     await expect(pool.withWriter(() => undefined)).rejects.toThrow("sqlite_pool_closed");
   });
 });
+
+// The open_directive dedup query (findOpenDirectiveByText in
+// runtime/mcp_server/substrate_tools.ts) pre-fix leaned on idx_events_kind_ts
+// (kind=?), seeking EVERY directive_opened row and applying the
+// json_extract(payload,'$.directive_text') equality as a per-row filter (plus a
+// json parse each) — effectively a per-row scan over all directive_opened rows
+// that hogged a SQL-worker-pool slot for seconds during a dispatch burst
+// (profiling: substrate.open_directive up to 56s with low loop lag = pool
+// starvation). idx_events_directive_text_opened — a partial expression index on
+// (json_extract(...,'$.directive_text'), ts) WHERE kind='directive_opened' —
+// turns the dedup into a point SEARCH on directive_text; including ts lets the
+// (expr, ts) order also serve the ORDER BY ts ASC so the planner prefers it over
+// idx_events_kind_ts. This test pins that EXPLAIN QUERY PLAN reports the events
+// lookup as SEARCH ... USING INDEX idx_events_directive_text_opened (not a full
+// SCAN) and that the dedup results are byte-identical with the index present.
+describe("open_directive dedup index (idx_events_directive_text_opened)", () => {
+  // The exact dedup SQL from findOpenDirectiveByText.
+  const DEDUP_SQL = `SELECT directive_id FROM events
+       WHERE kind = 'directive_opened'
+         AND json_extract(payload, '$.directive_text') = ?
+         AND directive_id NOT IN (
+           SELECT directive_id FROM events
+           WHERE kind IN ('directive_closed', 'directive_archived_by_operator', 'directive_archived_missed_reviews')
+         )
+       ORDER BY ts ASC LIMIT 1`;
+
+  const insertDirectiveOpened = (db: ReturnType<typeof openDb>, ts: string, directiveId: string, text: string): void => {
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [newId(), ts, directiveId, "t", "l", "owner", "directive_opened", JSON.stringify({ directive_text: text })],
+    );
+  };
+  const insertClosure = (db: ReturnType<typeof openDb>, ts: string, directiveId: string): void => {
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [newId(), ts, directiveId, "t", "l", "owner", "directive_closed", "{}"],
+    );
+  };
+
+  test("EXPLAIN QUERY PLAN uses the index (SEARCH, not a full table SCAN)", () => {
+    const db = openDb(":memory:");
+    const plan = (db.query(`EXPLAIN QUERY PLAN ${DEDUP_SQL}`).all("probe") as Array<{ detail: string }>)
+      .map((r) => r.detail);
+    // The driving (events) scan over directive_text must be an index SEARCH.
+    expect(plan.some((d) => d.includes("SEARCH events USING INDEX idx_events_directive_text_opened"))).toBe(true);
+    // And it must NOT fall back to a bare full table scan of events for the
+    // primary lookup (the LIST SUBQUERY scan over the tiny closure set is fine).
+    expect(plan.some((d) => d === "SCAN events")).toBe(false);
+  });
+
+  test("the index is registered in sqlite_master as a partial expression index", () => {
+    const db = openDb(":memory:");
+    const row = db
+      .query("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_events_directive_text_opened'")
+      .get() as { sql: string } | null;
+    expect(row).not.toBeNull();
+    expect(row!.sql).toContain("json_extract");
+    expect(row!.sql).toContain("$.directive_text");
+    expect(row!.sql).toContain("WHERE kind = 'directive_opened'");
+  });
+
+  test("dedup returns identical results with the index present (transparent)", () => {
+    const db = openDb(":memory:");
+    // Two opens of the same text — dedup must return the EARLIEST (ts ASC).
+    insertDirectiveOpened(db, "2026-05-23T00:00:01Z", "d1", "hello world");
+    insertDirectiveOpened(db, "2026-05-23T00:00:05Z", "d4", "hello world");
+    insertDirectiveOpened(db, "2026-05-23T00:00:02Z", "d2", "other text");
+    // d3 was opened then closed — must be excluded by the NOT IN subquery.
+    insertDirectiveOpened(db, "2026-05-23T00:00:03Z", "d3", "closed text");
+    insertClosure(db, "2026-05-23T00:00:04Z", "d3");
+
+    const get = (text: string) => (db.query(DEDUP_SQL).get(text) as { directive_id: string } | null)?.directive_id ?? null;
+
+    expect(get("hello world")).toBe("d1"); // earliest open wins
+    expect(get("other text")).toBe("d2");
+    expect(get("closed text")).toBe(null); // closed → excluded
+    expect(get("no such directive")).toBe(null); // no match
+  });
+});
