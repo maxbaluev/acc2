@@ -522,6 +522,61 @@ describe("startDaemon — boot + health + shutdown", () => {
       // read by the daemon (reactive worker, env knob deleted).
     }
   }, 5_000);
+
+  // LOOP-BLOCK REGRESSION GUARD (2026-05-24): reactive workers must NOT run
+  // their (possibly heavy, synchronous) tick body on the emitEvent →
+  // publishActivation synchronous call stack. Before the fix, supervisorTick's
+  // 8 GROUP-BY detectors ran fully synchronously inside the emit that opened a
+  // directive, blocking the single event loop for ~11s on a large ledger.
+  // fireReactiveWorker now defers entry.run() (and the worker_tick_completed
+  // telemetry emit) to a macrotask. This test pins that off-stack contract:
+  // emitting task_node_opened (which both supervisor + integrity subscribe to)
+  // returns BEFORE any reactive worker_tick_completed row lands, and the row
+  // only appears after a macrotask yield.
+  test("reactive worker fire is deferred off the emitEvent call stack", async () => {
+    handle = await bootHandle(tmp);
+    const { emitEvent } = await import("./events");
+    const directiveId = "d_offstack_test";
+    const taskId = "t_offstack_test";
+    emitEvent(handle.db, {
+      kind: "directive_opened",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "off-stack reactive fire" },
+    });
+    const countReactiveTicks = (): number => {
+      const row = handle!.db
+        .query(
+          `SELECT COUNT(*) AS c FROM events
+             WHERE kind = 'worker_tick_completed'
+               AND json_extract(payload, '$.activation_source') = 'event'
+               AND json_extract(payload, '$.trigger_kind') = 'task_node_opened'`,
+        )
+        .get() as { c: number };
+      return row.c;
+    };
+    const before = countReactiveTicks();
+    // Emit on the current call stack. A reactive worker fire scheduled by this
+    // emit MUST NOT have written its telemetry row by the time emit returns —
+    // it is deferred to a macrotask. The synchronous read immediately after
+    // therefore sees no NEW event-sourced reactive tick from this emit.
+    emitEvent(handle.db, {
+      kind: "task_node_opened",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { goal: "off-stack" },
+    });
+    const immediatelyAfter = countReactiveTicks();
+    expect(immediatelyAfter).toBe(before);
+    // After macrotask yields the deferred fire runs and lands its telemetry.
+    let eventual = immediatelyAfter;
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 25));
+      eventual = countReactiveTicks();
+      if (eventual > before) break;
+    }
+    expect(eventual).toBeGreaterThan(before);
+  }, 5_000);
 });
 
 // ── Amendment 8EAKQCJW5D — bounded graceful drain on shutdown ────────

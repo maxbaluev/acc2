@@ -1024,8 +1024,38 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       return;
     }
     entry.lastReactiveFireMs = now;
-    emitReactiveFire(entry, source, trigger);
-    entry.run();
+    // LOOP-BLOCK FIX (2026-05-24): event-source fires arrive on the
+    // emitEvent → publishActivation synchronous call stack (the MCP handler's
+    // call frame). Several reactive workers have a HEAVY synchronous prefix —
+    // notably `supervisorTick`, which runs 8 detectors of GROUP BY scans over
+    // the events table FULLY SYNCHRONOUSLY (it is invoked sync, not awaited,
+    // inside its supervisedTick body). On a large ledger that prefix monopolized
+    // the single bun event loop for ~11s while open_directive emitted
+    // `task_node_opened`/`owner_input_received`, stalling every concurrent
+    // interactive read to ~12s (profiled `event_loop_blocked lag_ms: 11208`).
+    // The activation bus contract is explicitly fire-and-forget ("emitEvent does
+    // not block on subscriber work") — running the worker SYNCHRONOUSLY inside
+    // the emit stack violated that. Deferring the telemetry emit + entry.run()
+    // to a macrotask returns the loop to the emitEvent caller immediately after
+    // the durable INSERT + ack. The gap-check + lastReactiveFireMs update stay
+    // SYNCHRONOUS above so a burst of synchronous emits (e.g. open_directive's
+    // 3-4 back-to-back emits) still coalesces into a single reactive fire per
+    // minReactiveGapMs window — only the EXECUTION moves off-stack, never the
+    // dedup accounting. Durability-before-ack is unaffected: the source row is
+    // already committed before this fire is even scheduled. The safety-net
+    // path (source !== "event", fired from its own setInterval) is already
+    // off any emit stack, so deferral is a no-op-shaped change there too.
+    setTimeout(() => {
+      emitReactiveFire(entry, source, trigger);
+      try {
+        entry.run();
+      } catch (err) {
+        logger.debug(
+          { where: "daemon.fireReactiveWorker.run", worker: entry.worker, err: String(err) },
+          "deferred reactive worker run threw (swallowed)",
+        );
+      }
+    }, 0);
   };
   const registerReactiveWorker = (
     worker: string,
