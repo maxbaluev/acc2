@@ -259,6 +259,115 @@ export const startLoopLagMonitor = (): (() => void) => {
 const WORKER_TICK_EVENT_DAMPEN_MS = 5 * 60_000;
 const lastEmittedWorkerTickMs = new Map<string, number>();
 
+// ──────────────────────────────────────────────────────────────────────
+// Benign transport-reconnect fault classification + suppression.
+//
+// EVIDENCE (2026-05-24): the daemon's global unhandledRejection /
+// uncaughtException handlers were catching a THIRD-PARTY transport error
+// that fires constantly: `Conflict: Only one SSE stream is allowed per
+// session`, thrown by mcp-proxy's StreamableHTTPServerTransport
+// .handleGetRequest whenever an MCP client (Claude Code /mcp, opencode
+// brain, acc watch) reconnects to an existing session id. It occurred
+// 11,068 times in a single daemon lifetime. Each occurrence logged at
+// ERROR and emitted a `daemon_unhandled_rejection` ledger event — 11k
+// rows of benign churn into an already-unbounded ledger (1.1GB / 420k
+// events). The true fix (clean stale-stream replacement) lives inside the
+// mcp-proxy/fastmcp dependency and needs a version bump we cannot make
+// here, so we classify the benign transport-churn fault and downgrade its
+// handling: no per-event ledger row, DEBUG (rate-limited) instead of
+// ERROR. Genuine faults are untouched — still ERROR + ledgered.
+//
+// The classifier is deliberately NARROW (substring, case-insensitive)
+// over a small allow-list so it cannot silently swallow real faults. Add
+// new benign transport messages to BENIGN_TRANSPORT_RECONNECT_MARKERS as
+// fresh evidence accumulates — keep each entry commented with its source.
+const BENIGN_TRANSPORT_RECONNECT_MARKERS: readonly string[] = [
+  // mcp-proxy StreamableHTTPServerTransport.handleGetRequest — fires on
+  // every MCP client SSE reconnect to a live session id. 11,068 hits in
+  // one daemon lifetime (2026-05-24). Self-recovering: the client retries.
+  "only one sse stream is allowed per session",
+];
+
+/**
+ * Pure classifier: is this caught fault the known benign, self-recovering
+ * MCP transport-reconnect artifact? Narrow substring match (case-insensitive)
+ * against {@link BENIGN_TRANSPORT_RECONNECT_MARKERS}. Anything not on the
+ * allow-list is treated as a real fault (fail-loud).
+ */
+export function isBenignTransportReconnectFault(msg: string): boolean {
+  if (!msg) return false;
+  const lower = msg.toLowerCase();
+  return BENIGN_TRANSPORT_RECONNECT_MARKERS.some((marker) => lower.includes(marker));
+}
+
+// Rate-limit state for benign transport faults. We log at most one DEBUG
+// summary line per window and emit at most one rolled-up ledger event per
+// daemon lifetime so there is durable evidence of the churn WITHOUT
+// per-event bloat.
+const BENIGN_TRANSPORT_LOG_WINDOW_MS = 60_000;
+const benignTransportState = {
+  suppressedCount: 0, // total benign faults this daemon lifetime
+  windowSuppressedCount: 0, // benign faults since last DEBUG summary
+  lastLogMs: 0,
+  rolledUpLedgerEmitted: false, // single durable ledger row per lifetime
+};
+
+/** Pure decision: given the benign-classification result and current
+ *  rolled-up-ledger state, should this fault emit a `daemon_unhandled_rejection`
+ *  ledger row? Non-benign → always yes (existing behavior). Benign → only
+ *  the FIRST one per daemon lifetime (a single rolled-up evidence row),
+ *  never per-event. Exported for direct unit testing without a daemon. */
+export function shouldEmitLedgerEventForFault(
+  isBenign: boolean,
+  rolledUpAlreadyEmitted: boolean,
+): boolean {
+  if (!isBenign) return true;
+  return !rolledUpAlreadyEmitted;
+}
+
+/** Handle a caught benign transport-reconnect fault: bump counters, emit a
+ *  rate-limited DEBUG summary, and (once per daemon lifetime) a single
+ *  rolled-up ledger event. Never emits a per-event ledger row. */
+function handleBenignTransportFault(db: Database, msg: string, source: string, nowMs: number): void {
+  benignTransportState.suppressedCount += 1;
+  benignTransportState.windowSuppressedCount += 1;
+
+  if (shouldEmitLedgerEventForFault(true, benignTransportState.rolledUpLedgerEmitted)) {
+    benignTransportState.rolledUpLedgerEmitted = true;
+    try {
+      emitEvent(db, {
+        kind: "daemon_unhandled_rejection",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: msg,
+          stack: null,
+          source,
+          // Distinguishing flag: this is the ONE rolled-up evidence row for
+          // benign MCP SSE-reconnect churn this daemon lifetime, not a real
+          // fault. Reuses the existing kind to avoid touching the registry.
+          benign_transport_reconnect: true,
+          note: "rolled_up_once_per_daemon_lifetime; see daemon.log DEBUG for running count",
+        },
+      });
+    } catch { /* never let logging crash */ }
+  }
+
+  if (nowMs - benignTransportState.lastLogMs >= BENIGN_TRANSPORT_LOG_WINDOW_MS) {
+    logger.debug(
+      {
+        where: "daemon.benignTransportFault",
+        source,
+        suppressed_in_window: benignTransportState.windowSuppressedCount,
+        suppressed_total: benignTransportState.suppressedCount,
+        reason: msg,
+      },
+      `suppressed ${benignTransportState.windowSuppressedCount} benign SSE-reconnect transport faults in last ${BENIGN_TRANSPORT_LOG_WINDOW_MS / 1000}s`,
+    );
+    benignTransportState.lastLogMs = nowMs;
+    benignTransportState.windowSuppressedCount = 0;
+  }
+}
+
 /** Emit a dampened `worker_tick_completed` for workers that don't go
  *  through supervisedTick (e.g. the scheduler runs in its own async loop).
  *  Brain audit D (2026-05-15) — the scheduler ticked but was invisible
@@ -3133,6 +3242,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   process.on("unhandledRejection", (reason, _promise) => {
     const msg = reason instanceof Error ? reason.message : String(reason);
     const stack = reason instanceof Error ? reason.stack : undefined;
+    // Benign MCP SSE-reconnect transport churn (11k+ per lifetime): downgrade
+    // to rate-limited DEBUG + a single rolled-up ledger row. Daemon survives
+    // either way — these handlers always prevent process exit.
+    if (isBenignTransportReconnectFault(msg)) {
+      handleBenignTransportFault(db, msg, "unhandledRejection", Date.now());
+      return;
+    }
     logger.error({ where: "daemon.unhandledRejection", reason: msg, stack }, "unhandled rejection — daemon will continue");
     try {
       emitEvent(db, {
@@ -3143,12 +3259,17 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     } catch { /* never let logging crash */ }
   });
   process.on("uncaughtException", (err) => {
-    logger.error({ where: "daemon.uncaughtException", err: err.message, stack: err.stack }, "uncaught exception — daemon will continue");
+    const msg = err.message;
+    if (isBenignTransportReconnectFault(msg)) {
+      handleBenignTransportFault(db, msg, "uncaughtException", Date.now());
+      return;
+    }
+    logger.error({ where: "daemon.uncaughtException", err: msg, stack: err.stack }, "uncaught exception — daemon will continue");
     try {
       emitEvent(db, {
         kind: "daemon_unhandled_rejection",
         substrate_origin: "substrate_auto",
-        payload: { reason: err.message, stack: err.stack?.slice(0, 2000) ?? null, source: "uncaughtException" },
+        payload: { reason: msg, stack: err.stack?.slice(0, 2000) ?? null, source: "uncaughtException" },
       });
     } catch { /* never let logging crash */ }
   });
