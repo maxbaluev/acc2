@@ -293,6 +293,53 @@ describe("embedderWorkerTick", () => {
     expect(vecRow!.embedding_version).toBe(EMBEDDING_VERSION);
   });
 
+  test("batched persist writes N embeddings exactly-once (events row + vec_events) in one txn", async () => {
+    // Reduce embedder + heavy-worker main-loop blocking: persistEmbeddingsBatch
+    // prepares the four SQL statements once and reuses them across the batch.
+    // This asserts the batched path is exactly-once — every accepted row gets
+    // its events.embedding UPDATE AND exactly one vec_events projection, and a
+    // re-tick does NOT duplicate either (no double-write).
+    process.env.OPENAI_API_KEY = "sk-test-mock";
+    installMockFetch(async (_url, init) => {
+      const reqBody = JSON.parse((init.body as string) ?? "{}") as { input: string[] };
+      const data = reqBody.input.map((_t, i) => ({ embedding: synthEmbedding(i + 101), index: i }));
+      return new Response(JSON.stringify({ data }), { status: 200 });
+    });
+    const db = openDb(":memory:");
+    const ids: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const ev = emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "claude_root",
+        payload: { text: `exactly-once row ${i}` },
+      });
+      ids.push(ev.id);
+    }
+    const result = await embedderWorkerTick(db, { batchSize: 8 });
+    expect(result.embedded).toBe(6);
+    expect(result.failed).toBe(0);
+    // Every source row has its embedding BLOB written exactly once.
+    for (const id of ids) {
+      const row = db
+        .query("SELECT embedding, embedding_version FROM events WHERE id = ?")
+        .get(id) as { embedding: Uint8Array | null; embedding_version: string | null };
+      expect(row.embedding).not.toBeNull();
+      expect(row.embedding_version).toBe(EMBEDDING_VERSION);
+      // Exactly ONE vec_events row per id — no duplicate projection.
+      const vecCount = db
+        .query<{ c: number }, [string]>("SELECT COUNT(*) AS c FROM vec_events WHERE event_id = ?")
+        .get(id)!.c;
+      expect(vecCount).toBe(1);
+    }
+    // A second tick re-embeds nothing and does NOT duplicate vec_events rows.
+    const second = await embedderWorkerTick(db, { batchSize: 8 });
+    expect(second.embedded).toBe(0);
+    const totalVec = db
+      .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM vec_events")
+      .get()!.c;
+    expect(totalVec).toBe(6);
+  });
+
   test("idempotent — a second tick does not re-embed an already-embedded row", async () => {
     process.env.OPENAI_API_KEY = "sk-test-mock";
     let calls = 0;

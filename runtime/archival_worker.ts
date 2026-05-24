@@ -36,6 +36,7 @@ import { dirname, join, basename } from "node:path";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { logger } from "./logger";
+import { poolQuery } from "./sql_pool_singleton";
 import { getThreshold } from "./threshold_registry";
 
 export const ARCHIVAL_TICK_MS = 6 * 60 * 60 * 1000; // 6h
@@ -433,15 +434,20 @@ export const runArchivalSweep = async (
   const evictList = Array.from(EPHEMERAL_TELEMETRY_KINDS);
   const exclusionList = [...alwaysKeepList, ...dropList, ...evictList];
   const exclusionPlaceholders = exclusionList.map(() => "?").join(",");
-  const candidates = hotDb
-    .query<EventRowFull, [string, ...string[]]>(
-      `SELECT ${EVENTS_COLUMNS.join(", ")} FROM events
+  // T3.8/T5: route the heavy candidate scan through the SQL worker-thread pool
+  // when the daemon installed one (mirrors embedder.readUnembedded). This
+  // SELECT walks the events table by ts on a large (700MB+) DB — running it on
+  // the main loop under Bun's fake-async SQL blocks emitEvent + MCP IO for
+  // seconds per 6h tick. poolQuery off-loads it to a worker thread and falls
+  // back to the synchronous main-thread read when no pool (unit tests /
+  // ACC2_DISABLE_SQL_POOL) — same rows, same order, same results.
+  const candidateSql =
+    `SELECT ${EVENTS_COLUMNS.join(", ")} FROM events
         WHERE ts < ?
           AND kind NOT IN (${exclusionPlaceholders})
         ORDER BY ts ASC
-        LIMIT ?`,
-    )
-    .all(cutoffIso, ...exclusionList, limit as unknown as string);
+        LIMIT ?`;
+  const candidates = await poolQuery<EventRowFull>(hotDb, candidateSql, [cutoffIso, ...exclusionList, limit]);
   summary.scanned = candidates.length;
 
   if (candidates.length === 0) {
@@ -686,10 +692,13 @@ export const runDropSweep = async (
   const ph = dropList.map(() => "?").join(", ");
   // Select candidate ids (bounded), then delete in chunks. ts comparison is
   // ISO-vs-ISO (cutoffIso is an ISO string) — index-friendly, no datetime()
-  // string-format trap.
-  const ids = (hotDb
-    .query(`SELECT id FROM events WHERE kind IN (${ph}) AND ts < ? ORDER BY ts ASC LIMIT ?`)
-    .all(...dropList, cutoffIso, limit) as Array<{ id: string }>).map((r) => r.id);
+  // string-format trap. Heavy READ scan → route through the SQL worker pool
+  // when present (sync fallback when absent), mirroring readUnembedded.
+  const ids = (await poolQuery<{ id: string }>(
+    hotDb,
+    `SELECT id FROM events WHERE kind IN (${ph}) AND ts < ? ORDER BY ts ASC LIMIT ?`,
+    [...dropList, cutoffIso, limit],
+  )).map((r) => r.id);
   summary.scanned = ids.length;
   if (ids.length === 0) return summary;
 
@@ -766,13 +775,15 @@ export const runTelemetryEvictionSweep = async (
   if (kindList.length === 0) return summary;
 
   // Select candidate (id, kind) past the cutoff, bounded. ISO-vs-ISO ts
-  // comparison is index-friendly (idx_events_kind_ts / idx_events_ts).
+  // comparison is index-friendly (idx_events_kind_ts / idx_events_ts). Heavy
+  // READ scan → route through the SQL worker pool when present (sync fallback
+  // when absent), mirroring readUnembedded.
   const ph = kindList.map(() => "?").join(", ");
-  const rows = hotDb
-    .query<{ id: string; kind: string; ts: string }, [...string[], string, number]>(
-      `SELECT id, kind, ts FROM events WHERE kind IN (${ph}) AND ts < ? ORDER BY ts ASC LIMIT ?`,
-    )
-    .all(...kindList, cutoffIso, limit) as Array<{ id: string; kind: string; ts: string }>;
+  const rows = await poolQuery<{ id: string; kind: string; ts: string }>(
+    hotDb,
+    `SELECT id, kind, ts FROM events WHERE kind IN (${ph}) AND ts < ? ORDER BY ts ASC LIMIT ?`,
+    [...kindList, cutoffIso, limit],
+  );
   summary.scanned = rows.length;
   if (rows.length === 0) return summary;
   recordArchiveSummary(hotDb, rows, "telemetry_eviction");
