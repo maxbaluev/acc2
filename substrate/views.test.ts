@@ -33,8 +33,10 @@ import {
   recipeRegistry,
   recipesLatestView,
   claudeInlineReadyLeaves,
+  pendingContractAmendments,
   rollingReviewDue,
   runViews,
+  RUN_VIEW_NAMES,
   substrateNarrativeRecent,
   taskGraphFor,
   taskCriticalPaths,
@@ -3261,5 +3263,324 @@ describe("model_routing_view + modelRouting", () => {
     const rows = modelRouting(db);
     const open = rows.find((r) => r.model === "openai/gpt-5.5" && r.terminal_kind === "<open>");
     expect(open?.n).toBe(1);
+  });
+});
+
+// ── BUG #2 regression: pending_contract_amendments_view O(n²) collapse ──────
+// The view was the ~10.7s synchronous block inside composePrompt. The fix
+// replaces per-proposal correlated `context_refs LIKE '%id%'` scans with a
+// single json_each explosion (settled_refs / action_scored_refs) and a live
+// prefilter. These tests pin the live-set semantics that the rewrite must
+// preserve AND guard the EXPLAIN plan against re-introducing a per-proposal
+// correlated LIKE scan over the proposals set.
+describe("pending_contract_amendments_view perf rewrite (BUG #2)", () => {
+  test("settled (closure verdict) proposals are excluded; live ones surface", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    // Two proposals to the same target in different directives — both live.
+    const liveA = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_a",
+      task_id: "t_a",
+      payload: { proposed_behavior: { target_resource: "docs/X.md", predicate: "p_a", target_files: ["docs/X.md"] } },
+    });
+    const liveB = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_b",
+      task_id: "t_b",
+      payload: { proposed_behavior: { target_resource: "docs/Y.md", predicate: "p_b", target_files: ["docs/Y.md"] } },
+    });
+    // A proposal that has a closure verdict → settled → excluded.
+    const closed = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_c",
+      task_id: "t_c",
+      payload: { proposed_behavior: { target_resource: "docs/Z.md", predicate: "p_c" } },
+    });
+    insertEvent(db, {
+      kind: "closure_complete",
+      directive_id: "d_c",
+      task_id: "t_c",
+      payload: {},
+      context_refs: [closed],
+    });
+    // A proposal with an applied change → settled → excluded.
+    const applied = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_d",
+      task_id: "t_d",
+      payload: { proposed_behavior: { target_resource: "docs/W.md", predicate: "p_d" } },
+    });
+    insertEvent(db, {
+      kind: "applied_change_committed",
+      directive_id: "d_d",
+      task_id: "t_d",
+      payload: {},
+      context_refs: [applied],
+    });
+
+    const rows = pendingContractAmendments(db, { limit: 50 });
+    const ids = rows.map((r) => r.proposal_id).sort();
+    expect(ids).toEqual([liveA, liveB].sort());
+    // Live rows carry NULL closure verdict and has_applied_change=false.
+    for (const r of rows) {
+      expect(r.latest_closure_verdict).toBeNull();
+      expect(r.has_applied_change).toBe(false);
+    }
+  });
+
+  test("applied-change referenced via a multi-id context_refs array still excludes the proposal", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const live = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_live",
+      task_id: "t_live",
+      payload: { proposed_behavior: { target_resource: "a.md", predicate: "p" } },
+    });
+    const settled = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_settled",
+      task_id: "t_settled",
+      payload: { proposed_behavior: { target_resource: "b.md", predicate: "p" } },
+    });
+    // The applied_change references the settled proposal alongside other ids —
+    // the json_each explosion must still pick it up (the old LIKE matched any
+    // substring; the new set-based explode matches the exact array element).
+    insertEvent(db, {
+      kind: "applied_change_committed",
+      directive_id: "d_settled",
+      task_id: "t_settled",
+      payload: {},
+      context_refs: ["UNRELATED_EVENT_ID_1", settled, "UNRELATED_EVENT_ID_2"],
+    });
+    const ids = pendingContractAmendments(db, { limit: 50 }).map((r) => r.proposal_id);
+    expect(ids).toContain(live);
+    expect(ids).not.toContain(settled);
+  });
+
+  test("latest action_scored residual is attached set-wise (newest wins)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const prop = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_r",
+      task_id: "t_r",
+      payload: { proposed_behavior: { target_resource: "r.md", predicate: "p", target_files: ["r.md"] } },
+    });
+    // Older score residual 0.9, newer 0.1 — view must surface the newest (0.1).
+    insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_r",
+      task_id: "t_r",
+      payload: { residual: 0.9 },
+      context_refs: [prop],
+      residual: 0.9,
+    });
+    const newestScore = insertEvent(db, {
+      kind: "action_scored",
+      directive_id: "d_r",
+      task_id: "t_r",
+      payload: { residual: 0.1 },
+      context_refs: [prop],
+      residual: 0.1,
+    });
+    const row = pendingContractAmendments(db, { limit: 50 }).find((r) => r.proposal_id === prop);
+    expect(row).toBeDefined();
+    expect(row?.latest_action_residual).toBe(0.1);
+    expect(row?.latest_action_scored_event_id).toBe(newestScore);
+    // residual < 0.3 + no open deps ⇒ ready_for_implementation.
+    expect(row?.triage_state).toBe("ready_for_implementation");
+  });
+
+  test("same-directive newer proposal supersedes; cross-directive is independent", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    // Same directive, same target, two ts → newer supersedes older.
+    const older = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_same",
+      task_id: "t_1",
+      payload: { proposed_behavior: { target_resource: "shared.md", predicate: "p1" } },
+    });
+    const newer = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_same",
+      task_id: "t_2",
+      payload: { proposed_behavior: { target_resource: "shared.md", predicate: "p2" } },
+    });
+    // Different directive, same target → independent (NOT superseded).
+    const crossDir = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_other",
+      task_id: "t_3",
+      payload: { proposed_behavior: { target_resource: "shared.md", predicate: "p3" } },
+    });
+    const rows = pendingContractAmendments(db, { limit: 50 });
+    const byId = new Map(rows.map((r) => [r.proposal_id, r]));
+    expect(byId.get(older)?.supersession_state).toBe("superseded_by");
+    expect(byId.get(older)?.newer_proposal_id).toBe(newer);
+    expect(byId.get(newer)?.supersession_state).toBe("live");
+    expect(byId.get(crossDir)?.supersession_state).toBe("live");
+  });
+
+  test("EXPLAIN plan: closure/applied/residual lookups are folded into json_each set builds, not per-proposal LIKE scans", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const plan = db
+      .query<{ detail: string }, []>("EXPLAIN QUERY PLAN SELECT * FROM pending_contract_amendments_view LIMIT 40")
+      .all() as { detail: string }[];
+    const planText = plan.map((r) => r.detail).join(" | ");
+    // The KILLER in the old shape was an UN-INDEXABLE leading-wildcard LIKE
+    // (`context_refs LIKE '%' || proposal_id || '%'`) inside correlated scalar
+    // subqueries, run once per proposal over the full events table — that is
+    // what made it O(n²). The rewrite replaces those with json_each explosions
+    // (settled_refs, action_scored_refs). The plan must therefore contain
+    // json_each (the set explode) and the only remaining correlated lookups
+    // must be INDEXED seeks (supersession via idx_events_directive_kind_ts,
+    // dependency EXISTS via idx_events_kind_ts), never a non-indexed events SCAN.
+    // settled_refs + action_scored_refs are materialized ONCE (the json_each
+    // explosions render as MATERIALIZE <cte> + a virtual-table SCAN), replacing
+    // the per-proposal correlated LIKE scans.
+    expect(planText).toContain("MATERIALIZE settled_refs");
+    expect(planText).toContain("MATERIALIZE action_scored_refs");
+    expect(planText).toContain("VIRTUAL TABLE"); // json_each explode
+    // No FULL events table SCAN (every events access is an indexed SEARCH).
+    expect(planText).not.toContain("SCAN events");
+    // The supersession correlated subquery resolves through the
+    // (directive_id, kind, ts) composite index — the wildcard-LIKE killer is
+    // gone, so it is an indexed seek, not a scan.
+    expect(planText).toContain("idx_events_directive_kind_ts");
+  });
+
+  test("warm DB carrying the OLD correlated-LIKE definition is re-deployed to the json_each shape", () => {
+    // Same warm-DB scenario as BUG #1: a pre-existing DB whose view SQL predates
+    // the rewrite must pick up the new definition on boot (runViews drop+create).
+    const db = openDb(":memory:");
+    db.exec("DROP VIEW IF EXISTS pending_contract_amendments_view");
+    db.exec(`CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
+      SELECT e.id AS proposal_id FROM events e
+      WHERE e.kind = 'contract_amendment_proposed'
+        AND NOT EXISTS (
+          SELECT 1 FROM events t WHERE t.kind = 'closure_complete'
+            AND t.context_refs LIKE '%' || e.id || '%')`);
+    const before = (db
+      .query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name='pending_contract_amendments_view'")
+      .get() as { sql: string } | null)?.sql ?? "";
+    expect(before).toContain("LIKE");
+    expect(before).not.toContain("settled_refs");
+    runViews(db);
+    const after = (db
+      .query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name='pending_contract_amendments_view'")
+      .get() as { sql: string } | null)?.sql ?? "";
+    expect(after).toContain("settled_refs");
+    expect(after).toContain("action_scored_refs");
+    closeDb(":memory:");
+  });
+});
+
+// ── BUG #1 regression: warm-DB view re-deploy (recipe-view silent non-deploy)
+// runViews drops EVERY view it owns before recreating, deriving the drop set
+// from the same DDL list the creates use (RUN_VIEW_NAMES). The prior bug: the
+// drop loop iterated the hand-maintained VIEW_NAMES enumeration, which had
+// drifted — recipe_registry_view + recipes_latest_view were created but never
+// dropped, so a warm DB holding the OLD O(n²) correlated-subquery definition
+// kept it forever (CREATE VIEW IF NOT EXISTS is a no-op when the view exists).
+// These tests use a RAW (uncached) Database so we can plant a stale definition
+// and prove runViews swaps it.
+describe("runViews warm-DB re-deploy (BUG #1 — recipe view silent non-deploy)", () => {
+  const STALE_RECIPES_LATEST = `
+    CREATE VIEW IF NOT EXISTS recipes_latest_view AS
+      SELECT e.id AS id, e.ts AS ts
+      FROM events e
+      WHERE e.kind = 'knowledge_promoted'
+        AND NOT EXISTS (
+          SELECT 1 FROM events e2
+          WHERE e2.kind = 'knowledge_promoted'
+            AND e2.id <> e.id
+            AND e2.ts > e.ts
+        )`;
+
+  test("RUN_VIEW_NAMES includes the recipe views that VIEW_NAMES omitted", () => {
+    // The exact drift that caused the silent non-deploy: these two views are
+    // created by runViews but were absent from the old drop enumeration.
+    expect(RUN_VIEW_NAMES).toContain("recipe_registry_view");
+    expect(RUN_VIEW_NAMES).toContain("recipes_latest_view");
+  });
+
+  test("RUN_VIEW_NAMES exactly matches every CREATE VIEW runViews owns (no drift)", () => {
+    // Drop+create can never diverge again: the drop set is derived from the
+    // create DDL. Assert RUN_VIEW_NAMES has no dupes and covers the recipe pair.
+    const unique = new Set(RUN_VIEW_NAMES);
+    expect(unique.size).toBe(RUN_VIEW_NAMES.length);
+  });
+
+  test("warm DB with OLD correlated-subquery recipe view is re-deployed to ROW_NUMBER", () => {
+    // Use a fully-built DB (openDb applies schema + runViews), then simulate a
+    // warm DB carrying the OLD recipe-view definition by dropping the current
+    // one and planting the stale correlated-subquery version. This is exactly
+    // the live-daemon scenario: a pre-existing DB whose view SQL predates the
+    // ROW_NUMBER rewrite.
+    const raw = openDb(":memory:");
+    raw.exec("DROP VIEW IF EXISTS recipes_latest_view");
+    // Plant the stale O(n²) definition (NOT EXISTS correlated self-join).
+    raw.exec(STALE_RECIPES_LATEST);
+    const before = (raw
+      .query<{ sql: string }, []>(
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='recipes_latest_view'",
+      )
+      .get() as { sql: string } | null)?.sql ?? "";
+    expect(before).toContain("NOT EXISTS");
+    expect(before).not.toContain("ROW_NUMBER");
+
+    // Boot-time re-deploy.
+    runViews(raw);
+
+    const after = (raw
+      .query<{ sql: string }, []>(
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='recipes_latest_view'",
+      )
+      .get() as { sql: string } | null)?.sql ?? "";
+    // New definition is the window-function single pass; the correlated
+    // subquery is gone.
+    expect(after).toContain("ROW_NUMBER");
+    expect(after).not.toContain("NOT EXISTS");
+
+    // EXPLAIN proves no correlated scalar subquery remains in the plan.
+    const plan = raw
+      .query<{ detail: string }, []>("EXPLAIN QUERY PLAN SELECT * FROM recipes_latest_view")
+      .all() as { detail: string }[];
+    const planText = plan.map((r) => r.detail).join(" | ");
+    expect(planText).not.toContain("CORRELATED SCALAR SUBQUERY");
+    closeDb(":memory:");
+  });
+
+  test("recipe_registry_view is likewise re-deployed on a warm DB", () => {
+    const raw = openDb(":memory:");
+    raw.exec("DROP VIEW IF EXISTS recipe_registry_view");
+    raw.exec(`CREATE VIEW IF NOT EXISTS recipe_registry_view AS SELECT 1 AS stale_marker`);
+    runViews(raw);
+    const after = (raw
+      .query<{ sql: string }, []>(
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='recipe_registry_view'",
+      )
+      .get() as { sql: string } | null)?.sql ?? "";
+    // Stale single-column stub is gone; the real projection is back.
+    expect(after).not.toContain("stale_marker");
+    expect(after).toContain("events");
+    closeDb(":memory:");
+  });
+
+  test("runViews is idempotent on a warm DB (second call leaves valid views)", () => {
+    const raw = openDb(":memory:");
+    runViews(raw); // re-run must not throw (drop-then-create dependency order holds)
+    const views = raw
+      .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='view'")
+      .all() as { name: string }[];
+    const names = views.map((v) => v.name);
+    expect(names).toContain("recipes_latest_view");
+    expect(names).toContain("top_laws_view");
+    expect(names).toContain("promoted_knowledge_view");
+    closeDb(":memory:");
   });
 });

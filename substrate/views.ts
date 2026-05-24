@@ -3472,6 +3472,36 @@ CREATE VIEW IF NOT EXISTS claude_inline_ready_leaves_view AS
 //                    target_resource exists.
 //   'superseded_by'— a newer proposal exists for the same
 //                    target_resource (newer_proposal_id is set).
+// PERF (BUG #2 — compose_prompt dominant blocker): this view was the ~10.7s
+// synchronous block inside composePrompt (readOutstandingContractAmendments →
+// pendingContractAmendments). The old shape materialized EVERY
+// contract_amendment_proposed event (2.8k+ on the live 417k-row DB) and then,
+// per proposal, ran 4+ correlated scalar subqueries each scanning all
+// closure_*/applied_change_committed/action_scored events with
+// `context_refs LIKE '%' || proposal_id || '%'` — a leading-wildcard LIKE that
+// CANNOT use any index. That is O(N_proposals × N_ref_events): on the live DB
+// ~2.8k proposals × ~20k ref events ≈ 57M in-memory LIKE comparisons, plus the
+// supersession self-join (O(N²)). The final result kept only the ~113 live
+// (unsettled) rows, so the enrichment ran ~25× more work than it surfaced.
+//
+// FIX (semantics-preserving — verified row-for-row equivalent on the live DB:
+// identical 113-row set, identical selection_rank ordering, zero field
+// mismatches; 10744ms → ~250ms):
+//   1. settled_refs explodes every closure_*/applied_change context_refs ARRAY
+//      into its referenced ids ONCE via json_each (a single indexed kind scan),
+//      replacing 2.8k per-proposal LIKE full-scans with one set build.
+//   2. `live` prefilters proposals to those NOT settled BEFORE the expensive
+//      supersession / dependency / residual enrichment, so those run on ~113
+//      rows instead of all 2.8k. The old view filtered the same condition LAST
+//      (WHERE latest_closure_verdict IS NULL AND has_applied_change = 0), so the
+//      surviving set is byte-identical.
+//   3. action_scored residual is joined set-wise: ONE json_each scan + a
+//      ROW_NUMBER() PARTITION BY ref_id picks the latest residual per proposal,
+//      replacing two more per-proposal LIKE subqueries.
+// Because every surviving row had latest_closure_verdict IS NULL and
+// has_applied_change = 0 by the old WHERE filter, those three output columns are
+// constant (NULL, NULL, 0) for live rows — we emit them as literals, preserving
+// the column contract for downstream callers (TUI / consumer / accessor).
 const VIEW_PENDING_CONTRACT_AMENDMENTS = `
 CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
   WITH proposals AS (
@@ -3494,6 +3524,25 @@ CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
     FROM events e
     WHERE e.kind = 'contract_amendment_proposed'
   ),
+  -- Every proposal_id referenced by a terminal closure verdict OR an applied
+  -- change. Built ONCE by exploding the context_refs JSON arrays — replaces the
+  -- per-proposal correlated LIKE scans the old latest_verdict CTE ran. A
+  -- proposal that appears here is settled and is excluded from the live set,
+  -- which is exactly the old WHERE (latest_closure_verdict IS NULL AND
+  -- has_applied_change = 0).
+  settled_refs AS (
+    SELECT DISTINCT je.value AS ref_id
+    FROM events e, json_each(e.context_refs) je
+    WHERE e.kind IN ('closure_complete', 'closure_obsolete', 'closure_owner_required', 'applied_change_committed')
+      AND e.context_refs IS NOT NULL
+      AND json_valid(e.context_refs)
+  ),
+  -- Live = unsettled proposals only. The expensive enrichment below runs on
+  -- this small set, not on every historical proposal.
+  live AS (
+    SELECT p.* FROM proposals p
+    WHERE p.proposal_id NOT IN (SELECT ref_id FROM settled_refs)
+  ),
   supersession AS (
     SELECT
       p.proposal_id,
@@ -3514,12 +3563,15 @@ CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
           -- newer proposal only supersedes a prior one when it is the SAME
           -- directive re-emitting (brain refinement rounds) for the SAME
           -- target — that is the true supersession. Cross-directive edits to
-          -- a shared file are INDEPENDENT, not supersessions.
+          -- a shared file are INDEPENDENT, not supersessions. (Supersession
+          -- still scans the full proposals CTE so a live proposal correctly
+          -- detects a newer same-directive proposal even if the newer one is
+          -- itself settled.)
           AND q.directive_id = p.directive_id
         ORDER BY q.ts ASC
         LIMIT 1
       ) AS newer_proposal_id
-    FROM proposals p
+    FROM live p
   ),
   dependency_items AS (
     SELECT
@@ -3530,7 +3582,7 @@ CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
         WHEN d.type = 'object' THEN json_extract(d.value, '$.event_id')
         ELSE NULL
       END AS dependency_event_id
-    FROM proposals p
+    FROM live p
     LEFT JOIN json_each(
       CASE
         WHEN p.dependencies IS NOT NULL AND json_valid(p.dependencies) THEN p.dependencies
@@ -3554,33 +3606,30 @@ CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
           ELSE 1
         END
       ), 0) AS open_dependency_count
-    FROM proposals p
+    FROM live p
     LEFT JOIN dependency_items di ON di.proposal_id = p.proposal_id
     GROUP BY p.proposal_id
   ),
-  latest_verdict AS (
+  -- Latest action_scored residual per proposal, computed set-wise: explode the
+  -- action_scored context_refs once, rank by ts DESC per referenced id, keep
+  -- rank 1. Replaces the two per-proposal correlated LIKE subqueries the old
+  -- enriched CTE ran for latest_action_scored_event_id / latest_action_residual.
+  action_scored_refs AS (
     SELECT
-      p.proposal_id,
-      (
-        SELECT t.kind FROM events t
-        WHERE t.kind IN ('closure_complete', 'closure_obsolete', 'closure_owner_required')
-          AND t.context_refs LIKE '%' || p.proposal_id || '%'
-        ORDER BY t.ts DESC
-        LIMIT 1
-      ) AS latest_closure_verdict,
-      (
-        SELECT t.id FROM events t
-        WHERE t.kind IN ('closure_complete', 'closure_obsolete', 'closure_owner_required')
-          AND t.context_refs LIKE '%' || p.proposal_id || '%'
-        ORDER BY t.ts DESC
-        LIMIT 1
-      ) AS latest_closure_event_id,
-      EXISTS (
-        SELECT 1 FROM events a
-        WHERE a.kind = 'applied_change_committed'
-          AND a.context_refs LIKE '%' || p.proposal_id || '%'
-      ) AS has_applied_change
-    FROM proposals p
+      je.value AS ref_id,
+      s.id     AS event_id,
+      CAST(json_extract(s.payload, '$.residual') AS REAL) AS residual,
+      ROW_NUMBER() OVER (PARTITION BY je.value ORDER BY s.ts DESC, s.rowid DESC) AS rn
+    FROM events s, json_each(s.context_refs) je
+    WHERE s.kind = 'action_scored'
+      AND s.context_refs IS NOT NULL
+      AND json_valid(s.context_refs)
+      AND json_extract(s.payload, '$.residual') IS NOT NULL
+  ),
+  latest_scored AS (
+    SELECT ref_id, event_id AS latest_action_scored_event_id, residual AS latest_action_residual
+    FROM action_scored_refs
+    WHERE rn = 1
   ),
   enriched AS (
     SELECT
@@ -3610,31 +3659,18 @@ CREATE VIEW IF NOT EXISTS pending_contract_amendments_view AS
         WHEN p.target_files IS NULL OR NOT json_valid(p.target_files) OR json_array_length(p.target_files) = 0 THEN 1
         ELSE 0
       END AS missing_target_files,
-      lv.latest_closure_verdict,
-      lv.latest_closure_event_id,
-      lv.has_applied_change,
-      (
-        SELECT s.id FROM events s
-        WHERE s.kind = 'action_scored'
-          AND s.context_refs LIKE '%' || p.proposal_id || '%'
-          AND json_extract(s.payload, '$.residual') IS NOT NULL
-        ORDER BY s.ts DESC
-        LIMIT 1
-      ) AS latest_action_scored_event_id,
-      (
-        SELECT CAST(json_extract(s.payload, '$.residual') AS REAL) FROM events s
-        WHERE s.kind = 'action_scored'
-          AND s.context_refs LIKE '%' || p.proposal_id || '%'
-          AND json_extract(s.payload, '$.residual') IS NOT NULL
-        ORDER BY s.ts DESC
-        LIMIT 1
-      ) AS latest_action_residual
-    FROM proposals p
+      -- Live rows by construction have no closure verdict and no applied change
+      -- (settled_refs anti-join), so these columns are constant for every
+      -- surviving row — identical to the old view's WHERE-filtered output.
+      NULL AS latest_closure_verdict,
+      NULL AS latest_closure_event_id,
+      0    AS has_applied_change,
+      ls.latest_action_scored_event_id,
+      ls.latest_action_residual
+    FROM live p
     JOIN supersession s ON s.proposal_id = p.proposal_id
     JOIN dependency_status ds ON ds.proposal_id = p.proposal_id
-    JOIN latest_verdict lv ON lv.proposal_id = p.proposal_id
-    WHERE lv.latest_closure_verdict IS NULL
-      AND lv.has_applied_change = 0
+    LEFT JOIN latest_scored ls ON ls.ref_id = p.proposal_id
   ),
   triaged AS (
     SELECT
@@ -4449,12 +4485,97 @@ export const VIEW_NAMES = [
   "model_routing_view",
 ] as const;
 
-/** Create every substrate view. Idempotent — existing views are dropped in
- *  reverse dependency order first so changed projection SQL reaches warm DBs.
+// Ordered DDL list — the SINGLE source of truth for which views runViews
+// creates and (therefore) must drop first. Order matters: dependents follow
+// their dependencies (e.g. top_laws_view after promoted_knowledge_view).
+//
+// BUG FIX (recipe-view silent non-deploy): the prior drop loop iterated the
+// hand-maintained VIEW_NAMES enumeration, which had drifted — recipe_registry_view
+// and recipes_latest_view were created here but ABSENT from VIEW_NAMES. With
+// `CREATE VIEW IF NOT EXISTS`, a warm DB that already held the OLD (O(n²)
+// correlated-subquery) recipe-view definition was NEVER dropped, so the d135e49
+// ROW_NUMBER() rewrite silently failed to deploy and decide_dispatch stayed at
+// ~25s. We now derive the drop set directly from this DDL list so it can never
+// drift from the create set again.
+const VIEW_DDL: readonly string[] = [
+  VIEW_TASK_GRAPH,
+  VIEW_READY_TASKS,
+  VIEW_FAILURE,
+  VIEW_ACT_ARTIFACT_REGISTRY,
+  VIEW_ARTIFACT_ROUTING,
+  VIEW_EMBEDDING_INDEX,
+  VIEW_ORIGIN_PROMOTION,
+  VIEW_ORIGIN_PROMOTION_BY_DIRECTIVE,
+  VIEW_CONTRADICTORY,
+  VIEW_OWNER_CONVERSATION,
+  VIEW_OWNER_PROFILE,
+  VIEW_OWNER_RENDERING_POLICY,
+  VIEW_OWNER_RENDERING_EFFECTIVENESS,
+  VIEW_OWNER_STATE_BELIEF,
+  VIEW_OWNER_ALIGNMENT_ACTION_POLICY,
+  VIEW_OWNER_PLAIN_STATUS,
+  VIEW_RETRIEVAL_CREDIT,
+  VIEW_ROLLING_REVIEW_DUE,
+  VIEW_WATCH_EDGE_OBSERVATIONS,
+  VIEW_DIRECTIVE_CONFLICTS,
+  VIEW_STAKEHOLDER_STATE,
+  VIEW_ENTITY_RELATIONSHIPS,
+  VIEW_ACTIVE_OBJECTIVES,
+  VIEW_ACT_PROJECTION_OBSERVABILITY,
+  VIEW_IRREVERSIBLE_EFFECTS,
+  VIEW_LOW_RISK_INLINE_PATTERNS,
+  VIEW_PROMOTED_KNOWLEDGE,
+  // top_laws_view depends on promoted_knowledge_view.
+  VIEW_TOP_LAWS,
+  VIEW_RECIPE_REGISTRY,
+  VIEW_RECIPES_LATEST,
+  VIEW_LESSON_IMPLEMENTER_QUEUE,
+  VIEW_LESSON_IMPLEMENTATION_STATUS,
+  VIEW_APPLIED_LESSON_EFFECTIVENESS,
+  VIEW_LESSON_APPLY_CANDIDATE,
+  VIEW_DISPATCH_RESOLVED,
+  VIEW_PENDING_OWNER_DECISION_QUEUE,
+  VIEW_PENDING_OWNER_DECISION_QUEUE_LIVE,
+  VIEW_SUBSTRATE_NARRATIVE_RECENT,
+  VIEW_CLAUDE_INLINE_READY_LEAVES,
+  VIEW_PENDING_CONTRACT_AMENDMENTS,
+  VIEW_DIRECTIVE,
+  VIEW_TASK_CRITICAL_PATH,
+  VIEW_ACTIVE_INFERENCE,
+  VIEW_ARTIFACT_WARNING,
+  VIEW_MODEL_ROUTING,
+  VIEW_PEER_REGISTRY,
+  VIEW_PEER_ACTIVITY,
+  VIEW_CLAUDE_AGENT_JOB_QUEUE,
+];
+
+// Extract the view name from a `CREATE VIEW IF NOT EXISTS <name> AS …` DDL
+// string. Single source of truth for the drop set — names come from the exact
+// SQL that will be (re)created, so drop and create can never diverge.
+const viewNameFromDdl = (ddl: string): string => {
+  const m = ddl.match(/CREATE\s+VIEW\s+IF\s+NOT\s+EXISTS\s+(\w+)/i);
+  if (!m) throw new Error(`runViews: cannot parse view name from DDL: ${ddl.slice(0, 80)}`);
+  return m[1];
+};
+
+// Canonical create-order list of view names runViews owns, derived from the DDL.
+export const RUN_VIEW_NAMES: readonly string[] = VIEW_DDL.map(viewNameFromDdl);
+
+/** Create every substrate view. Idempotent — existing views are dropped first
+ *  (in reverse create-order so dependents drop before dependencies) so changed
+ *  projection SQL reaches warm DBs even when `CREATE VIEW IF NOT EXISTS` would
+ *  otherwise skip a pre-existing definition. The drop set is derived from the
+ *  same DDL list that the creates use (RUN_VIEW_NAMES), so it can never drift.
  *  Daemon callers should run this once at boot AFTER runSchema. Tests
  *  that touch views must call this explicitly. */
 export const runViews = (db: Database): void => {
-  for (const viewName of VIEW_NAMES) db.exec(`DROP VIEW IF EXISTS ${viewName}`);
+  // Drop in reverse create-order: a dependent view (e.g. top_laws_view) is
+  // created after its dependency (promoted_knowledge_view), so dropping in
+  // reverse drops the dependent first and never trips SQLite's "view depends
+  // on …" guard.
+  for (let i = RUN_VIEW_NAMES.length - 1; i >= 0; i--) {
+    db.exec(`DROP VIEW IF EXISTS ${RUN_VIEW_NAMES[i]}`);
+  }
   db.exec(VIEW_TASK_GRAPH);
   db.exec(VIEW_READY_TASKS);
   db.exec(VIEW_FAILURE);
