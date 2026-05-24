@@ -1458,7 +1458,11 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     const { supervisorTick } = await import("./supervisor");
     let supervisorMarked = false;
     const supervisorTickHandle = supervisedTick(db, "supervisor", SUPERVISOR_INTERVAL_MS, async () => {
-      supervisorTick(db);
+      // supervisorTick is now async (its heavy GROUP BY scans run off-loop via
+      // the SQL worker pool) — await it so supervisedTick's running-flag,
+      // overrun accounting, and worker_tick_completed emit observe the real
+      // scan duration and unhandled rejections surface as error_caught.
+      await supervisorTick(db);
       if (!supervisorMarked) { markWorkerReady("supervisor"); supervisorMarked = true; }
     });
     registerReactiveWorker("supervisor", SUPERVISOR_INTERVAL_MS, ["brain_dispatched", "action_predicted", "task_node_opened", "task_committed", "task_failed", "task_abandoned", "bridge_failed", "bridge_completed"], supervisorTickHandle, { minReactiveGapMs: SUPERVISOR_INTERVAL_MS });
