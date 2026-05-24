@@ -13,6 +13,18 @@
 
 import type { Database } from "bun:sqlite";
 import { lessonApplyTargetPolicyValuesSql } from "./lesson_apply_policy";
+import { EVENT_KINDS } from "./event_kinds";
+
+// Registry-derived narrative kind set — the default filter for the narrative
+// surface. Without it, substrate_narrative_recent_view returns EVERY kind
+// (it is `FROM events e` with no kind filter), so non-narrative health_metric
+// events (e.g. sql_worker_pool_metrics, every 30s) leak into the TUI and render
+// as "No content (payload keys: …)" via the format.ts fallback. `acc events`/
+// `tail` already filter by this same `narrative: true` flag; the TUI narrative
+// view must too. Single source of truth = the EVENT_KINDS registry (no drift).
+const NARRATIVE_KIND_LIST: string[] = Object.entries(EVENT_KINDS)
+  .filter(([, meta]) => (meta as { narrative?: boolean }).narrative)
+  .map(([kind]) => kind);
 
 // ── View DDL (one statement per view; runViews runs them all) ───────
 
@@ -5038,6 +5050,16 @@ export const substrateNarrativeRecent = (
     const placeholders = filter.kinds_in.map(() => "?").join(", ");
     wheres.push(`kind IN (${placeholders})`);
     params.push(...filter.kinds_in);
+  } else {
+    // No explicit kind filter → default to narrative-only kinds so the
+    // narrative surface stays narrative. Non-narrative health_metric/
+    // diagnostic events (sql_worker_pool_metrics, worker ticks, …) are
+    // excluded — they belong on the health/metrics surface, not the TUI
+    // narrative stream. Callers that want a specific set (e.g. the decision
+    // strip) pass kinds_in explicitly and bypass this default.
+    const placeholders = NARRATIVE_KIND_LIST.map(() => "?").join(", ");
+    wheres.push(`kind IN (${placeholders})`);
+    params.push(...NARRATIVE_KIND_LIST);
   }
   const whereClause = wheres.length > 0 ? `WHERE ${wheres.join(" AND ")}` : "";
   const limit = typeof filter.limit === "number" && filter.limit > 0 ? filter.limit : 200;
