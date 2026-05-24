@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { runDispatch } from "./dispatch";
+import { runDispatch, renderDaemonStatus } from "./dispatch";
 import { useSharedDaemon } from "../tests/daemon_fixture";
 
 // Stay in a tight band well-disjoint from runtime/*.test.ts (which sit in
@@ -87,6 +87,60 @@ describe("runDispatch", () => {
     const out = cap.lines.join("\n");
     expect(out).toContain('"status"');
     expect(out).toContain("ok");
+  });
+
+  // Amendment R6B5VZGXE5 (safe subset): reactive false-dead status fix.
+  // A client-side /health timeout must NOT be reported as a dead daemon when
+  // the lock pid is still alive — that is the "Terminated"-while-/health-ok
+  // false-dead the directive observed. Pure-render unit tests prove both legs:
+  // (a) reactive resolve — pending health + live pid → `processing`; and
+  // (b) escalate-on-genuine-death — pending health + dead pid → raw failure.
+  describe("renderDaemonStatus reactive false-dead fix (R6B5VZGXE5)", () => {
+    const timeoutHealth = { ok: false, error: "timeout:30000ms:http://127.0.0.1:9/health" };
+    const fetchFailHealth = { ok: false, error: "fetch_failed:Unable to connect" };
+    const okHealth = { ok: true, status: "ok", uptime_ms: 1234 };
+
+    test("(a) resolves promptly to processing when /health is pending but the lock pid is alive", () => {
+      const out = renderDaemonStatus(timeoutHealth, { pid: 4242 }, () => true);
+      expect(out.ok).toBe(true);
+      expect(out.status).toBe("processing");
+      expect(out.reason).toBe("health_pending_pid_alive");
+      expect(out.pid).toBe(4242);
+      // Never reports the daemon dead from a client deadline alone.
+      expect(JSON.stringify(out)).not.toContain("Terminated");
+    });
+
+    test("(a) same reactive treatment for a transient fetch_failed probe", () => {
+      const out = renderDaemonStatus(fetchFailHealth, { pid: 7 }, () => true);
+      expect(out.status).toBe("processing");
+    });
+
+    test("(b) escalates: pending /health + DEAD pid surfaces the raw failure envelope", () => {
+      const out = renderDaemonStatus(timeoutHealth, { pid: 4242 }, () => false);
+      // No false optimism — the genuine-death envelope passes through unchanged.
+      expect(out.ok).toBe(false);
+      expect(out.error).toBe(timeoutHealth.error);
+      expect(out.status).toBeUndefined();
+    });
+
+    test("(b) escalates: pending /health + NO lock surfaces the raw failure envelope", () => {
+      const out = renderDaemonStatus(timeoutHealth, null, () => true);
+      expect(out.ok).toBe(false);
+      expect(out.error).toBe(timeoutHealth.error);
+    });
+
+    test("a healthy /health response passes through untouched (no pid probe needed)", () => {
+      let probed = false;
+      const out = renderDaemonStatus(okHealth, { pid: 1 }, () => { probed = true; return true; });
+      expect(out).toEqual(okHealth);
+      expect(probed).toBe(false);
+    });
+
+    test("a non-timeout error (e.g. 500) is NOT masked as processing", () => {
+      const errHealth = { ok: false, error: "non_json:internal server error" };
+      const out = renderDaemonStatus(errHealth, { pid: 1 }, () => true);
+      expect(out).toEqual(errHealth);
+    });
   });
 
   test("`acc help` prints the usage banner", async () => {

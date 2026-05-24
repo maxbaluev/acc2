@@ -314,11 +314,55 @@ const daemonStop = async (opts: { drainBudgetMs?: number } = {}): Promise<number
   return 0;
 };
 
+/** Pure status-render decision (amendment R6B5VZGXE5, safe subset).
+ *
+ *  Reactive false-dead fix: a client-side /health timeout (or transient fetch
+ *  failure) is NOT proof the daemon is dead. The daemon runs bun:sqlite
+ *  synchronously on its event loop, so a heavy worker tick can occupy the route
+ *  past even the 30s HEALTH_TIMEOUT_MS while the process is alive and
+ *  progressing. When /health is pending we cross-check the lock pid: if it is
+ *  still alive, render `processing` (lock present, /health pending) instead of
+ *  presenting a bare failure envelope an operator reads as "Terminated". We
+ *  NEVER auto-restart from this read — status only observes; the orchestrator
+ *  owns runtime recovery. A genuinely dead pid still surfaces the raw envelope.
+ *
+ *  Pure + injectable (`pidAlive`) so the reactive branch and the
+ *  escalate-on-genuine-death branch are both unit-testable without a daemon. */
+export const renderDaemonStatus = (
+  health: Record<string, unknown>,
+  lock: { pid?: number } | null,
+  pidAlive: (pid: number) => boolean,
+): Record<string, unknown> => {
+  const errStr = typeof health.error === "string" ? health.error : "";
+  const healthPending = health.ok === false
+    && (errStr.startsWith("timeout:") || errStr.startsWith("fetch_failed:"));
+  if (healthPending && lock && typeof lock.pid === "number" && lock.pid > 0 && pidAlive(lock.pid)) {
+    return {
+      ok: true,
+      status: "processing",
+      reason: "health_pending_pid_alive",
+      detail: "lock present and pid alive; /health did not respond inside the client deadline — daemon is busy/booting, not dead",
+      pid: lock.pid,
+      health_probe: errStr,
+    };
+  }
+  // /health pending AND pid not alive (or no lock) → genuine death surfaces
+  // the raw failure envelope unchanged. This is the escalate-on-genuine-hang
+  // path: the reactive optimism does NOT mask a truly dead daemon.
+  return health;
+};
+
+/** `process.kill(pid, 0)` is a pure liveness probe — it sends NO signal, it
+ *  only tests whether the pid exists and is signalable by this process. */
+const pidIsAlive = (pid: number): boolean => {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+};
+
 const daemonStatus = async (): Promise<number> => {
   const base = auxBaseUrl();
   if (!base) { console.log("daemon not running"); return 1; }
   const health = await rpcGet<Record<string, unknown>>(`${base}/health`);
-  console.log(JSON.stringify(health, null, 2));
+  console.log(JSON.stringify(renderDaemonStatus(health, readDaemonLock(), pidIsAlive), null, 2));
   return 0;
 };
 
