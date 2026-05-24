@@ -17,6 +17,7 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
+import { poolQuery } from "./sql_pool_singleton";
 
 export type BrainInvocationOptions = {
   now?: Date;
@@ -60,41 +61,50 @@ const parsePayload = (raw: string | null): Record<string, unknown> => {
   }
 };
 
-const recentDispatchCountByEmitter = (
+// Heavy COUNT(*) scan over the events table (json_extract on a 400k-row table,
+// once per brain_invocation_request in the throttle check) — route off the
+// daemon main loop through the SQL worker pool. poolQuery uses the same db
+// handle + SQL + params, so the result is identical to the sync path; falls
+// back to sync when no pool is installed (unit tests / diagnostics).
+const recentDispatchCountByEmitter = async (
   db: Database,
   emitterIdentity: string,
   sinceIso: string,
-): number => {
+): Promise<number> => {
   try {
-    const row = db
-      .query<{ c: number }, [string, string]>(
-        `SELECT COUNT(*) AS c FROM events
+    const rows = await poolQuery<{ c: number }>(
+      db,
+      `SELECT COUNT(*) AS c FROM events
           WHERE kind = 'brain_invocation_dispatched'
             AND json_extract(payload, '$.emitter_identity') = ?
             AND ts > ?`,
-      )
-      .get(emitterIdentity, sinceIso);
-    return row?.c ?? 0;
+      [emitterIdentity, sinceIso],
+    );
+    return rows[0]?.c ?? 0;
   } catch {
     return 0;
   }
 };
 
-const dedupKeyExists = (
+// Heavy COUNT(*) scan over the events table (json_extract on a 400k-row table,
+// once per non-throttled request in the dedup check) — route off the daemon
+// main loop through the SQL worker pool. Same db/SQL/params → identical result;
+// sync fallback when no pool is present.
+const dedupKeyExists = async (
   db: Database,
   dedupKey: string,
   sinceIso: string,
-): boolean => {
+): Promise<boolean> => {
   try {
-    const row = db
-      .query<{ c: number }, [string, string]>(
-        `SELECT COUNT(*) AS c FROM events
+    const rows = await poolQuery<{ c: number }>(
+      db,
+      `SELECT COUNT(*) AS c FROM events
           WHERE kind = 'brain_invocation_dispatched'
             AND json_extract(payload, '$.dedup_key') = ?
             AND ts > ?`,
-      )
-      .get(dedupKey, sinceIso);
-    return (row?.c ?? 0) > 0;
+      [dedupKey, sinceIso],
+    );
+    return (rows[0]?.c ?? 0) > 0;
   } catch {
     return false;
   }
@@ -171,11 +181,19 @@ export const runBrainInvocationTick = async (
     emitted_event_ids: [],
   };
 
+  // Candidate-selection scan: a correlated double-NOT-EXISTS over the 400k-row
+  // events table (pathologically slow, 10-16s) that previously blocked the
+  // daemon's single event loop on every 30s tick. Route it off the main loop
+  // through the SQL worker pool. poolQuery uses the same db handle + SQL +
+  // params, so the row set, ordering, and LIMIT are identical to the sync path;
+  // falls back to sync when no pool is installed (unit tests / diagnostics).
+  // The query LOGIC (selection/dedup semantics) is unchanged — only the
+  // execution thread moves.
   let rows: RequestRow[] = [];
   try {
-    rows = db
-      .query<RequestRow, [string, number]>(
-        `SELECT id, ts, payload FROM events
+    rows = await poolQuery<RequestRow>(
+      db,
+      `SELECT id, ts, payload FROM events
           WHERE kind = 'brain_invocation_request'
             AND NOT EXISTS (
               SELECT 1 FROM events d
@@ -190,8 +208,8 @@ export const runBrainInvocationTick = async (
             AND ts > ?
           ORDER BY ts ASC
           LIMIT ?`,
-      )
-      .all(new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString(), maxRows);
+      [new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString(), maxRows],
+    );
   } catch (err) {
     return summary;
   }
@@ -213,7 +231,7 @@ export const runBrainInvocationTick = async (
     // 1. Loop prevention (COSMIC SSA): count recent DISPATCHED events
     // for this emitter (not raw requests). When dispatches reach
     // throttle_limit, subsequent requests in the same window get throttled.
-    const recentCount = recentDispatchCountByEmitter(db, emitterIdentity, throttleSinceIso);
+    const recentCount = await recentDispatchCountByEmitter(db, emitterIdentity, throttleSinceIso);
     if (recentCount >= throttleLimit) {
       try {
         const ev = emitEvent(db, {
@@ -238,7 +256,7 @@ export const runBrainInvocationTick = async (
 
     // 2. Dedup: skip if same (topic, triggering_event_ids) already dispatched recently.
     const dedupKey = computeDedupKey(topicKeywords, triggeringEventIds);
-    if (dedupKeyExists(db, dedupKey, dedupSinceIso)) {
+    if (await dedupKeyExists(db, dedupKey, dedupSinceIso)) {
       summary.deduped++;
       continue;
     }
