@@ -290,6 +290,26 @@ export class SqlWorkerPool {
  *  contract's direction text. */
 export const startSqlWorkerPool = (cfg: SqlPoolConfig): SqlWorkerPool => new SqlWorkerPool(cfg);
 
+/** Host-aware default SQL worker count. Reads (the embedder's unembedded
+ *  scan, retrieval, health/aggregate reads) run OFF the daemon's single event
+ *  loop through this pool and parallelize via SQLite WAL; with too few workers
+ *  they queue behind each other under load (observed: reads stalling 4-12s
+ *  while the embedder held a worker, on an otherwise-idle 20-core host). A flat
+ *  default of 4 under-utilises larger hosts. Scale to ~half the cores, clamped
+ *  to [4, 12] so tiny hosts stay conservative and huge hosts don't over-spawn
+ *  worker threads. Writes still serialize on the single writer (unaffected);
+ *  this only widens READ concurrency, which is the non-reactive symptom.
+ *  ACC2_SQL_WORKER_COUNT overrides explicitly. */
+const defaultSqlWorkerCount = (): number => {
+  let cores = 4;
+  try {
+    cores = (require("node:os") as typeof import("node:os")).cpus().length || 4;
+  } catch {
+    cores = 4;
+  }
+  return Math.max(4, Math.min(12, Math.floor(cores / 2)));
+};
+
 /** Resolve pool config from env + caller-supplied dbPath. */
 export const resolveSqlPoolConfigFromEnv = (dbPath: string): SqlPoolConfig => {
   const fromEnv = (name: string, fallback: number): number => {
@@ -300,7 +320,7 @@ export const resolveSqlPoolConfigFromEnv = (dbPath: string): SqlPoolConfig => {
   };
   return {
     dbPath,
-    workerCount: fromEnv("ACC2_SQL_WORKER_COUNT", 4),
+    workerCount: fromEnv("ACC2_SQL_WORKER_COUNT", defaultSqlWorkerCount()),
     taskQueueLimit: fromEnv("ACC2_SQL_TASK_QUEUE_LIMIT", 256),
     queryTimeoutMs: fromEnv("ACC2_SQL_QUERY_TIMEOUT_MS", DEFAULT_QUERY_TIMEOUT_MS),
     prepareCacheSize: fromEnv("ACC2_SQL_PREPARE_CACHE_SIZE", 64),
