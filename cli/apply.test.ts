@@ -20,6 +20,7 @@ const realApplyTsCommit = (): string => {
   return sha;
 };
 import { closeDb, openDb } from "../substrate/db";
+import { getArtifact, insertArtifact } from "../runtime/artifact_store";
 import { lessonImplementationStatus, lessonImplementerQueue } from "../substrate/views";
 import { handleCredit, handleEmit, handleGetEvent, handleRead } from "../runtime/mcp_server/substrate_tools";
 import { handleRecentEvents } from "../runtime/mcp_server/runtime_tools";
@@ -89,11 +90,17 @@ const implementationQueue = (eventId: string) => {
 };
 
 const gateScoreFor = (eventId: string): Record<string, unknown> => {
-  const status = implementationStatus(eventId);
-  expect(status.request_event_id).toBeTruthy();
-  const requestPayload = rowPayload(eventRow(status.request_event_id!));
-  expect(requestPayload.gate_scored_event_id).toBeTruthy();
-  return eventRow(requestPayload.gate_scored_event_id as string);
+  const status = lessonImplementationStatus(db).find((r) => r.source_event_id === eventId);
+  if (status?.request_event_id) {
+    const requestPayload = rowPayload(eventRow(status.request_event_id));
+    expect(requestPayload.gate_scored_event_id).toBeTruthy();
+    return eventRow(requestPayload.gate_scored_event_id as string);
+  }
+  const direct = db
+    .query("SELECT * FROM events WHERE kind = 'action_scored' AND json_extract(payload, '$.source_event_id') = ? ORDER BY ts DESC, rowid DESC LIMIT 1")
+    .get(eventId) as Record<string, unknown> | null;
+  expect(direct).toBeTruthy();
+  return direct!;
 };
 
 const nextScope = () => {
@@ -211,10 +218,89 @@ describe("runApply gates", () => {
     expect(prompt).toContain("cli_runtime_gate.target_in_scope: true");
 
     const gateScore = gateScoreFor(eventId);
-    expect(Number(gateScore.residual)).toBe(0);
-    expect(rowPayload(gateScore).authorization_status).toBe("approved");
-    expect(rowPayload(gateScore).apply_route).toBe("AUTO_APPLY");
-    expect(rowPayload(gateScore).apply_route_reason).toBe("preconditions_passed_local_predicate_above_threshold");
+    const gatePayload = rowPayload(gateScore);
+    expect(gateScore.residual).toBeNull();
+    expect(gatePayload.residual_withheld).toBe(true);
+    expect(gatePayload.residual_provenance).toBe("withheld_until_closure");
+    expect(gatePayload.authorization_status).toBe("approved");
+    expect(gatePayload.apply_route).toBe("AUTO_APPLY");
+    expect(gatePayload.apply_route_reason).toBe("preconditions_passed_local_predicate_above_threshold");
+    const requestCount = db
+      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'lesson_apply_requested' AND json_extract(payload, '$.source_event_id') = ?")
+      .get(eventId) as { n: number };
+    expect(requestCount.n).toBe(0);
+    const scoreUpdateCount = db
+      .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'act_artifact_score_updated' AND EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?)")
+      .get(gateScore.id) as { n: number };
+    expect(scoreUpdateCount.n).toBe(0);
+  });
+
+  // Directive Q4CEDB2S8H5QNE4WHHGZSCC090: the apply-route gate must never
+  // fabricate max-success credit at render time. A bare `acc apply <id>`
+  // RENDER emits an action_scored with residual_withheld=true; the credit
+  // projector (projectActionScoredToCredit) skips withheld rows, so the
+  // apply_route artifact's Beta posterior must NOT move on a render. This
+  // test seeds the artifact at max-alpha and proves the posterior is byte-
+  // for-byte unchanged after a render — closing the residual-fabrication hole.
+  test("apply RENDER does not move the apply_route artifact posterior (withheld credit)", async () => {
+    // Seed the apply-route action artifact at an extreme posterior so any
+    // fabricated residual=0 credit would visibly shift it.
+    insertArtifact(db, {
+      id: "apply_route_predicate_action",
+      runtime: "cli",
+      kind: "runtime_action",
+      body: "apply-route predicate action (gate)",
+      declaredSandbox: null,
+      stateRoot: null,
+      posteriorAlpha: 9000,
+      posteriorBeta: 1,
+      score: 0.9999,
+      confidence: 0.99,
+      recentResidualMean: 0,
+      recentKillCount: 0,
+      status: "active",
+      name: "apply_route_predicate_action",
+      fixtureInput: null,
+      fixtureExpectedResidual: null,
+      intent: "apply-route gate action",
+      summary: "seed",
+      targetFiles: null,
+      targetResources: null,
+      sourceCandidateId: null,
+      ownerGateVerdict: null,
+    });
+    const before = getArtifact(db, "apply_route_predicate_action")!;
+
+    const scope = nextScope();
+    const env = await rpc("substrate.emit", {
+      kind: "contract_amendment_proposed",
+      substrate_origin: "opencode",
+      directive_id: scope.directiveId,
+      task_id: scope.taskId,
+      payload: {
+        target_resource: "repo:cli/apply.ts",
+        anchor: "renderGateBlock",
+        current_behavior: "acc apply prompts omit structured gate facts",
+        proposed_behavior: {
+          target_resource: "repo:cli/apply.ts",
+          anchor: "renderGateBlock",
+          diff: { kind: "legacy_advisory_context", before: "const renderGateBlock = (", after: "const renderGateBlock = (" },
+        },
+      },
+    });
+    expect(env.ok).toBe(true);
+    const eventId = (env.result as { id: string }).id;
+
+    const cap = captureConsole();
+    const code = await runApply([eventId]);
+    cap.restore();
+    expect(code).toBe(0);
+
+    const after = getArtifact(db, "apply_route_predicate_action")!;
+    expect(after.posteriorAlpha).toBe(before.posteriorAlpha);
+    expect(after.posteriorBeta).toBe(before.posteriorBeta);
+    expect(after.score).toBe(before.score);
+    expect(after.confidence).toBe(before.confidence);
   });
 
   // Gate-deletion (owner-approved 2026-05-16): the universal verifier

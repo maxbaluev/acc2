@@ -757,9 +757,11 @@ const emitApplyGateEvaluation = async (
     ownerApproved: boolean;
     autoApplyTarget: boolean;
     routeDecision?: ApplyRouteDecision;
+    residualWithheld?: boolean;
   },
-): Promise<{ actionEventId?: string; scoredEventId?: string; residual: number }> => {
-  const residual = args.status === "approved" ? 0 : 1;
+): Promise<{ actionEventId?: string; scoredEventId?: string; residual: number | null }> => {
+  const measuredResidual = args.status === "approved" ? 0 : 1;
+  const residualWithheld = args.residualWithheld === true;
   const actionEnv = await mcpCall("substrate.emit", {
     kind: "action_predicted",
     substrate_origin: "claude_root",
@@ -791,7 +793,29 @@ const emitApplyGateEvaluation = async (
   if (!actionEnv.ok) throw new Error(`gate action_predicted emit failed - ${actionEnv.error}`);
   const actionEventId = (actionEnv.result as { id?: string })?.id;
 
-  const scoredEnv = await mcpCall("substrate.emit", {
+  const scoredPayload: Record<string, unknown> = {
+    source_event_id: eventId,
+    source_kind: ev.kind,
+    action_event_id: actionEventId,
+    target: args.target,
+    authorization_status: args.status,
+    reason: args.reason,
+    owner_gate_required: args.ownerGateRequired,
+    owner_approved: args.ownerApproved,
+    auto_apply_target: args.autoApplyTarget,
+    apply_route: args.routeDecision?.route,
+    apply_route_score: args.routeDecision?.score,
+    apply_route_confidence: args.routeDecision?.confidence,
+    apply_route_deterministic: args.routeDecision?.deterministic,
+    apply_route_reason: args.routeDecision?.reason,
+    apply_route_preconditions: args.routeDecision?.preconditions,
+    residual_withheld: residualWithheld,
+    residual_provenance: residualWithheld ? "withheld_until_closure" : "explicit_gate_residual",
+    deferred_credit_until: residualWithheld ? "applied_change_committed_or_task_closure_audited" : null,
+  };
+  if (!residualWithheld) scoredPayload.residual = measuredResidual;
+
+  const scoredArgs: Record<string, unknown> = {
     kind: "action_scored",
     substrate_origin: "claude_root",
     directive_id: ev.directive_id,
@@ -800,27 +824,13 @@ const emitApplyGateEvaluation = async (
     action_artifact_id: DEFAULT_APPLY_GATE_ACTION_ARTIFACT_ID,
     verifier_artifact_id: DEFAULT_APPLY_GATE_VERIFIER_ARTIFACT_ID,
     outcome: args.status,
-    residual,
-    payload: {
-      source_event_id: eventId,
-      source_kind: ev.kind,
-      action_event_id: actionEventId,
-      target: args.target,
-      authorization_status: args.status,
-      reason: args.reason,
-      owner_gate_required: args.ownerGateRequired,
-      owner_approved: args.ownerApproved,
-      auto_apply_target: args.autoApplyTarget,
-      apply_route: args.routeDecision?.route,
-      apply_route_score: args.routeDecision?.score,
-      apply_route_confidence: args.routeDecision?.confidence,
-      apply_route_deterministic: args.routeDecision?.deterministic,
-      apply_route_reason: args.routeDecision?.reason,
-      apply_route_preconditions: args.routeDecision?.preconditions,
-    },
-  });
+    payload: scoredPayload,
+  };
+  if (!residualWithheld) scoredArgs.residual = measuredResidual;
+
+  const scoredEnv = await mcpCall("substrate.emit", scoredArgs);
   if (!scoredEnv.ok) throw new Error(`gate action_scored emit failed - ${scoredEnv.error}`);
-  return { actionEventId, scoredEventId: (scoredEnv.result as { id?: string })?.id, residual };
+  return { actionEventId, scoredEventId: (scoredEnv.result as { id?: string })?.id, residual: residualWithheld ? null : measuredResidual };
 };
 
 const emitApplyDenied = async (
@@ -1117,49 +1127,19 @@ const renderPromptCommand = async (eventId: string): Promise<number> => {
   const payload = parsePayload(ev.payload);
   const auth = await authorizeApply(ev, eventId, { target: targetFromPayload(payload) });
   if (!auth.ok) return auth.code;
-  let gateActionEventId: string | undefined;
-  let gateScoredEventId: string | undefined;
   try {
     const gatePolicy = lessonApplyTargetsPolicy(targetCandidatesFromPayload(payload));
-    const gateEval = await emitApplyGateEvaluation(ev, eventId, {
+    await emitApplyGateEvaluation(ev, eventId, {
       target: auth.target || targetFromPayload(payload),
       status: "approved",
       ownerGateRequired: auth.ownerGateRequired,
       ownerApproved: auth.ownerApproved,
       autoApplyTarget: gatePolicy.autoApplyTarget,
       routeDecision: auth.routeDecision,
+      residualWithheld: true,
     });
-    gateActionEventId = gateEval.actionEventId;
-    gateScoredEventId = gateEval.scoredEventId;
   } catch (err) {
     console.error(`acc apply: ${(err as Error).message}`);
-    return 1;
-  }
-  const requestEnv = await mcpCall("substrate.emit", {
-    kind: "lesson_apply_requested",
-    substrate_origin: "claude_root",
-    directive_id: ev.directive_id,
-    task_id: ev.task_id,
-    context_refs: [eventId, gateActionEventId, gateScoredEventId].filter(Boolean),
-    payload: {
-      source_event_id: eventId,
-      source_kind: ev.kind,
-      owner_approved: auth.ownerApproved,
-      owner_gate_required: auth.ownerGateRequired,
-      gate_action_event_id: gateActionEventId,
-      gate_scored_event_id: gateScoredEventId,
-      gate_residual: 0,
-      authorization_status: "approved",
-      apply_route: auth.routeDecision.route,
-      apply_route_score: auth.routeDecision.score,
-      apply_route_confidence: auth.routeDecision.confidence,
-      apply_route_reason: auth.routeDecision.reason,
-      target: auth.target || payload.target,
-      design_citations: ["Architecture: Universal Workflow", "Architecture: Act Primitive", "Architecture: Runtimes & Sandboxes", "Architecture: Knowledge Merger", "Architecture: Recipes & Reuse"],
-    },
-  });
-  if (!requestEnv.ok) {
-    console.error(`acc apply: lesson_apply_requested emit failed - ${requestEnv.error}`);
     return 1;
   }
   const prompt = renderSubagentPrompt(ev, { ownerApproved: auth.ownerApproved, auth });
