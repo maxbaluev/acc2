@@ -6534,22 +6534,28 @@ export type PendingContractAmendmentRow = {
   latest_action_residual: number | null;
 };
 
-export const pendingContractAmendments = (
-  db: Database,
+// Build the (sql, params) pair for a pending_contract_amendments_view read.
+// Shared by the synchronous `pendingContractAmendments` and the worker-pool
+// `pendingContractAmendmentsPooled` so both surfaces issue byte-identical SQL
+// (same WHERE / ORDER BY / LIMIT). Mirrors buildDispatchResolvedQuery.
+const buildPendingContractAmendmentsQuery = (
   opts?: { limit?: number; directiveId?: string },
-): PendingContractAmendmentRow[] => {
+): { sql: string; params: Array<string | number> } => {
   const limit = opts?.limit ?? 200;
   const directiveId = opts?.directiveId;
-  const rows = directiveId
-    ? db
-        .query(
-          "SELECT * FROM pending_contract_amendments_view WHERE directive_id = ? ORDER BY selection_rank ASC LIMIT ?",
-        )
-        .all(directiveId, limit) as Array<Record<string, unknown>>
-    : db
-        .query("SELECT * FROM pending_contract_amendments_view ORDER BY selection_rank ASC LIMIT ?")
-        .all(limit) as Array<Record<string, unknown>>;
-  return rows.map((r) => {
+  if (directiveId) {
+    return {
+      sql: "SELECT * FROM pending_contract_amendments_view WHERE directive_id = ? ORDER BY selection_rank ASC LIMIT ?",
+      params: [directiveId, limit],
+    };
+  }
+  return {
+    sql: "SELECT * FROM pending_contract_amendments_view ORDER BY selection_rank ASC LIMIT ?",
+    params: [limit],
+  };
+};
+
+const mapPendingContractAmendmentRow = (r: Record<string, unknown>): PendingContractAmendmentRow => {
     let targetFiles: string[] | null = null;
     const rawTf = r.target_files;
     if (typeof rawTf === "string" && rawTf.length > 0) {
@@ -6599,7 +6605,39 @@ export const pendingContractAmendments = (
           ? Number.parseFloat(r.latest_action_residual)
           : null),
     };
-  });
+};
+
+export const pendingContractAmendments = (
+  db: Database,
+  opts?: { limit?: number; directiveId?: string },
+): PendingContractAmendmentRow[] => {
+  const { sql, params } = buildPendingContractAmendmentsQuery(opts);
+  const rows = db.query(sql).all(...params) as Array<Record<string, unknown>>;
+  return rows.map(mapPendingContractAmendmentRow);
+};
+
+/** Worker-pool variant of `pendingContractAmendments`. The view materializes
+ *  two full-ledger json_each explosions (settled_refs ~25k rows,
+ *  action_scored_refs ~15k rows) before filtering to the small live set — ~184ms
+ *  uncontended, but on the live daemon it runs SYNCHRONOUSLY on the single event
+ *  loop inside composePrompt's readOutstandingContractAmendments and balloons to
+ *  multiple seconds under write contention (the loop can't interleave the
+ *  in-flight write stream while the scan holds it). Routing through the SQL
+ *  worker-thread pool (when present) moves it off the main thread, mirroring the
+ *  4 sibling compose reads (readPendingProposals / readOtherActiveGoals /
+ *  readOwnerContext / readKnowledgeTopK) that already use poolQuery. This is a
+ *  single bounded compose read joining an established pattern — NOT a reactive
+ *  worker-tick full-table scan (those were reverted at 9325831 because they
+ *  saturated the pool). Sync fallback (tests / ACC2_DISABLE_SQL_POOL) keeps
+ *  byte-identical rows + ordering; only the execution thread differs. */
+export const pendingContractAmendmentsPooled = async (
+  db: Database,
+  poolQuery: <T>(db: Database, sql: string, params: unknown[]) => Promise<T[]>,
+  opts?: { limit?: number; directiveId?: string },
+): Promise<PendingContractAmendmentRow[]> => {
+  const { sql, params } = buildPendingContractAmendmentsQuery(opts);
+  const rows = await poolQuery<Record<string, unknown>>(db, sql, params);
+  return rows.map(mapPendingContractAmendmentRow);
 };
 
 // ── directive_view accessor (Architecture line 589) ─────────────

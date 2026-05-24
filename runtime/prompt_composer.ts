@@ -24,6 +24,7 @@ import type { RetrievalHit, RetrievalResult } from "./retrieval";
 import { renderStakeholderBlock } from "./stakeholder_compositor";
 import { renderInterferenceBlock } from "./interference";
 import { emitEvent } from "./events";
+import { logger } from "./logger";
 import { goalShape } from "./goal_shape";
 import {
   currentHighWaterRowid,
@@ -1058,15 +1059,18 @@ const formatAge = (ageMs: number): string => {
   return `${Math.floor(ageMs / 86_400_000)}d`;
 };
 
-const readOutstandingContractAmendments = (
+const readOutstandingContractAmendments = async (
   db: Database,
   currentDirectiveId: string,
   rowCap: number = OUTSTANDING_AMENDMENT_ROW_CAP,
-): PendingContractAmendmentRow[] => {
+): Promise<PendingContractAmendmentRow[]> => {
   // Pull a generous slice so we can prefer the current directive's own
   // rows before falling back to peers. The view already orders by ts
-  // ASC, so re-sort here keeps deterministic ordering.
-  const all = pendingContractAmendments(db, { limit: rowCap * 4 });
+  // ASC, so re-sort here keeps deterministic ordering. Routed through the
+  // SQL worker pool (pendingContractAmendmentsPooled) so the view's two
+  // full-ledger json_each scans run OFF the daemon event loop — same SQL,
+  // same row shape, byte-identical result; only the execution thread differs.
+  const all = await pendingContractAmendmentsPooled(db, poolQuery, { limit: rowCap * 4 });
   const own: PendingContractAmendmentRow[] = [];
   const others: PendingContractAmendmentRow[] = [];
   for (const r of all) {
@@ -1497,7 +1501,7 @@ import {
   ownerRenderingPolicy,
   ownerStateBelief,
   topLaws,
-  pendingContractAmendments,
+  pendingContractAmendmentsPooled,
   type OwnerRenderingPolicyRow,
   type OwnerStateBeliefRow,
   type PendingContractAmendmentRow,
@@ -1931,6 +1935,36 @@ const buildGatesSection = (gates: string[]): string => {
 
 const FIXTURE_D_MARKER = "FIXTURE: fixture_d_count_todos";
 
+// Sub-stage profiling inside composePrompt (gated behind ACC2_PROFILE_LOOP,
+// mirrors task_dispatcher.ts timeStage + daemon.ts startLoopLagMonitor). The
+// dispatcher's `compose_prompt` stage was the largest warm cost (~7s) but
+// opaque at sub-step granularity: it bundles ~20 awaited view reads, several
+// SYNCHRONOUS view reads (topLaws / pendingContractAmendments / owner-state)
+// that block the single event loop, and per-section pack/rank loops. This
+// helper wraps each meaningful sub-step so daemon.log attributes the >7s (and
+// any residual loop-block) to a SPECIFIC operation. Default OFF → zero overhead
+// (the awaited/sync work still runs; only the timer + log is skipped). The
+// threshold is well below the loop-block budget so a sub-step trending toward
+// it is visible before it regresses.
+const COMPOSE_PROFILE_ENABLED = process.env.ACC2_PROFILE_LOOP === "1";
+const COMPOSE_SUBSTAGE_THRESHOLD_MS = 25;
+
+const subStage = async <T>(stage: string, taskId: string, fn: () => Promise<T> | T): Promise<T> => {
+  if (!COMPOSE_PROFILE_ENABLED) return await fn();
+  const t0 = performance.now();
+  try {
+    return await fn();
+  } finally {
+    const ms = performance.now() - t0;
+    if (ms > COMPOSE_SUBSTAGE_THRESHOLD_MS) {
+      logger.warn(
+        { event: "compose_substage_timing", stage, ms: Math.round(ms), task_id: taskId },
+        "compose_substage_timing",
+      );
+    }
+  }
+};
+
 /** Compose the brain prompt as a substrate projection. Sections are emitted
  *  in priority order; lowest-priority sections drop first when the budget
  *  would be exceeded. Returns the rendered text plus a section manifest so
@@ -2008,7 +2042,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // Build candidate sections in priority order. Each entry is {name, p, body}.
   type Candidate = { name: string; p: number; body: string; floor?: boolean };
   const candidates: Candidate[] = [];
-  const policySections = await readPolicyBundleSections(db, "brain_prompt", REQUIRED_POLICY_SECTION_NAMES);
+  const policySections = await subStage("read_policy_bundle_sections", task.id, () => readPolicyBundleSections(db, "brain_prompt", REQUIRED_POLICY_SECTION_NAMES));
   const policyByName = new Map(policySections.map((policy) => [policy.sectionName, policy]));
   // Q3 owner-profile snapshot for variant ranking. Read once per
   // composePrompt — variant queries below reuse this. Failure returns
@@ -2123,15 +2157,15 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
     const retrievedScore = retrievedBundle && typeof retrievedBundle.score === "number" && Number.isFinite(retrievedBundle.score)
       ? retrievedBundle.score
       : 0;
-    const posteriorBundle = await selectPolicyBundleByPosterior(db, "", name);
+    const posteriorBundle = await subStage(`policy_section.${name}.posterior_bundle`, task.id, () => selectPolicyBundleByPosterior(db, "", name));
     const posteriorScore = posteriorBundle?.posteriorScore ?? 0;
-    const variant = await selectPromptSectionVariant(db, {
+    const variant = await subStage(`policy_section.${name}.variant`, task.id, () => selectPromptSectionVariant(db, {
       sectionName: name,
       goalText: goalTextForVariants,
       ownerProfile: ownerProfileForVariants,
       fallbackBody: posteriorBundle?.body ?? policy?.body ?? "",
       policyBundleArtifactId: posteriorBundle?.artifactId ?? null,
-    });
+    }));
 
     let chosenBody: string;
     let chosenPriority: number;
@@ -2308,7 +2342,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // directive accumulated 62 task_node_opened events because the brain
   // re-decomposed Q1-Q6 nine times). p=0 so it never drops; placed right
   // after task_goal so the brain reads it before workflow/emission grammar.
-  const existingDecomp = await readExistingDecomposition(db, task.directive_id, task.id);
+  const existingDecomp = await subStage("read_existing_decomposition", task.id, () => readExistingDecomposition(db, task.directive_id, task.id));
   const existingDecompBody = buildExistingDecompositionSection(existingDecomp);
   if (existingDecompBody.length > 0) {
     candidates.push({ name: "existing_decomposition", p: 0, floor: true, body: existingDecompBody });
@@ -2319,7 +2353,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // for similar future goals. Purely additive: non-floor (drops first under
   // budget pressure), advisory-only, changes nothing about dispatch/closure.
   // P1 so it lands in normal flow but never displaces a load-bearing section.
-  const provenDecomp = await readProvenDecompositionStrategy(db, directiveText ?? task.goal);
+  const provenDecomp = await subStage("read_proven_decomposition_strategy", task.id, () => readProvenDecompositionStrategy(db, directiveText ?? task.goal));
   const provenDecompBody = buildProvenDecompositionStrategySection(provenDecomp);
   if (provenDecompBody.length > 0) {
     candidates.push({ name: "proven_decomposition_strategy", p: 1, body: provenDecompBody });
@@ -2331,7 +2365,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // Purely additive: non-floor (drops first under budget pressure),
   // advisory-only, read-only, changes nothing about dispatch/closure. P1 so it
   // lands in normal flow but never displaces a load-bearing section.
-  const provenMotif = await readProvenTrajectoryMotif(db, task.directive_id);
+  const provenMotif = await subStage("read_proven_trajectory_motif", task.id, () => readProvenTrajectoryMotif(db, task.directive_id));
   const provenMotifBody = buildProvenTrajectoryMotifSection(provenMotif);
   if (provenMotifBody.length > 0) {
     candidates.push({ name: "proven_trajectory_motif", p: 1, body: provenMotifBody });
@@ -2372,10 +2406,10 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   } else if (opts.retrievedKnowledge && opts.retrievedKnowledge.hits.length > 0) {
     knowledgeBody = buildRetrievedKnowledgeSection(
       opts.retrievedKnowledge.hits,
-      await readKnowledgeTopK(db, 4, directiveText ?? task.goal, true),
+      await subStage("read_knowledge_topk.shape_match", task.id, () => readKnowledgeTopK(db, 4, directiveText ?? task.goal, true)),
     );
   } else {
-    knowledgeBody = buildKnowledgeSection(await readKnowledgeTopK(db, 8, directiveText ?? task.goal));
+    knowledgeBody = buildKnowledgeSection(await subStage("read_knowledge_topk.recency", task.id, () => readKnowledgeTopK(db, 8, directiveText ?? task.goal)));
   }
   candidates.push({ name: "retrieved_knowledge", p: 1, floor: true, body: knowledgeBody });
 
@@ -2433,7 +2467,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
     }
   } catch { /* fail-soft */ }
 
-  const chosenArtifactsTopK = await readArtifactRegistryTopK(db, 6);
+  const chosenArtifactsTopK = await subStage("read_artifact_registry_topk", task.id, () => readArtifactRegistryTopK(db, 6));
   const artifactBody = opts.retrievedArtifacts && opts.retrievedArtifacts.hits.length > 0
     ? buildRetrievedArtifactSection(opts.retrievedArtifacts.hits)
     : buildArtifactSection(chosenArtifactsTopK);
@@ -2483,7 +2517,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   candidates.push({ name: "upstream_outputs", p: 2, body: "UPSTREAM OUTPUTS: (none)" });
   // Watch edges (Architecture.md) — projected through declared consistency
   // mode. Empty when no watch edges target this task.
-  const watched = snapshotWatchedOutputs(db, opts.taskId);
+  const watched = await subStage("snapshot_watched_outputs[sync]", task.id, () => snapshotWatchedOutputs(db, opts.taskId));
   const watchedBody = watched.length === 0
     ? "WATCHED OUTPUTS: (none)"
     : (() => {
@@ -2509,8 +2543,8 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // load-bearing for the LLM-on-the-fly demo generation (WORKFLOW step
   // 3) AND for the rendering rule (step 9) AND for owner-input learning
   // (step 10) — three workflow steps depend on this being present.
-  const ownerContextRows = await readOwnerContext(db, 8);
-  const ownerProfileBody = buildOwnerProfileSection(readOwnerProfile(db), {
+  const ownerContextRows = await subStage("read_owner_context", task.id, () => readOwnerContext(db, 8));
+  const ownerProfileBody = buildOwnerProfileSection(await subStage("read_owner_profile[sync]", task.id, () => readOwnerProfile(db)), {
     recentOwnerContext: ownerContextRows,
     directive: {
       text: directiveText,
@@ -2526,7 +2560,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // We pull policy + 14-day feedback aggregates from one view and split
   // them into two sections so the brain can tune one without re-reading
   // the other.
-  const renderingPolicyRow = ownerRenderingPolicy(db);
+  const renderingPolicyRow = await subStage("owner_rendering_policy[sync]", task.id, () => ownerRenderingPolicy(db));
   candidates.push({ name: "owner_rendering_policy", p: 1, floor: true, body: buildOwnerRenderingPolicySection(renderingPolicyRow) });
   candidates.push({ name: "owner_feedback_summary", p: 1, body: buildOwnerFeedbackSummarySection(renderingPolicyRow) });
   // Brain contract CY7E62DSNX1DZ1BTD56845D994 Phase H2 (2026-05-18):
@@ -2536,7 +2570,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // the calibration section answers "how wrong has the substrate been?".
   // Together they make action selection belief-conditioned, not just
   // task-conditioned.
-  const beliefRow = ownerStateBelief(db);
+  const beliefRow = await subStage("owner_state_belief[sync]", task.id, () => ownerStateBelief(db));
   candidates.push({ name: "owner_state_belief", p: 1, body: buildOwnerStateBeliefSection(beliefRow) });
   candidates.push({ name: "alignment_action_policy", p: 1, body: buildAlignmentActionPolicySection(beliefRow) });
   candidates.push({ name: "owner_state_feedback_summary", p: 1, body: buildOwnerStateFeedbackSummarySection(beliefRow) });
@@ -2546,17 +2580,17 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // top_laws_view — without this section the view exists but nothing
   // reads it during dispatch. Limit 10 keeps the section compact
   // (default token budget); operator can widen via owner_profile.
-  const liveTopLaws = topLaws(db, { min_score: 0.75, limit: 10 });
+  const liveTopLaws = await subStage("top_laws[sync]", task.id, () => topLaws(db, { min_score: 0.75, limit: 10 }));
   candidates.push({ name: "top_laws", p: 1, floor: true, body: buildTopLawsSection(liveTopLaws) });
   const ownerContextBody = buildOwnerContextSection(ownerContextRows);
   candidates.push({ name: "owner_context", p: 1, body: ownerContextBody });
-  const stakeholderBody = renderStakeholderBlock(db, task.directive_id);
+  const stakeholderBody = await subStage("render_stakeholder_block[sync]", task.id, () => renderStakeholderBlock(db, task.directive_id));
   candidates.push({
     name: "stakeholder_state",
     p: 3,
     body: stakeholderBody.length > 0 ? stakeholderBody : "STAKEHOLDER STATE: (none)",
   });
-  const interferenceBody = renderInterferenceBlock(db, task.directive_id);
+  const interferenceBody = await subStage("render_interference_block[sync]", task.id, () => renderInterferenceBlock(db, task.directive_id));
   candidates.push({
     name: "cross_directive_interference",
     p: 3,
@@ -2568,7 +2602,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // and can route them through new task DAGs / actions. Owner-gated
   // proposals are filtered out — those need orchestrator-side apply.
   const proposalsBody = buildPendingProposalsSection(
-    await readPendingProposals(db, 6, task.directive_id),
+    await subStage("read_pending_proposals", task.id, () => readPendingProposals(db, 6, task.directive_id)),
   );
   candidates.push({ name: "pending_proposals", p: 3, body: proposalsBody });
   // F11 (2026-05-18, contract 2AMJKN0GTX32790173EPYH6YT4): OUTSTANDING
@@ -2581,7 +2615,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // OTHER ACTIVE GOALS under normal budgets and drops cleanly under
   // depth-1 tight-budget tests.
   const outstandingAmendmentsBody = buildOutstandingContractAmendmentsSection(
-    readOutstandingContractAmendments(db, task.directive_id),
+    await subStage("read_outstanding_contract_amendments[pooled]", task.id, () => readOutstandingContractAmendments(db, task.directive_id)),
   );
   candidates.push({ name: "outstanding_contract_amendments", p: 3, body: outstandingAmendmentsBody });
   // Multi-goal cross-pollination: surface OTHER active directives so the
@@ -2589,7 +2623,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // / coordinate. Pre-fix the brain saw only its own directive in the
   // prompt — couldn't tell if a peer goal was already covering this work.
   const otherGoalsBody = buildOtherGoalsSection(
-    await readOtherActiveGoals(db, task.directive_id, 5),
+    await subStage("read_other_active_goals", task.id, () => readOtherActiveGoals(db, task.directive_id, 5)),
   );
   candidates.push({ name: "other_active_goals", p: 3, body: otherGoalsBody });
 
@@ -2604,7 +2638,7 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // P0 policy + task_goal must win). Fail-soft: a builder exception
   // (no events table yet, fresh substrate) emits a stub line.
   try {
-    const audit = buildBrainSelfAudit(db, { windowHours: 168 });
+    const audit = await subStage("build_brain_self_audit[sync]", task.id, () => buildBrainSelfAudit(db, { windowHours: 168 }));
     candidates.push({
       name: "brain_self_audit",
       p: 2,

@@ -34,6 +34,7 @@ import {
   recipesLatestView,
   claudeInlineReadyLeaves,
   pendingContractAmendments,
+  pendingContractAmendmentsPooled,
   rollingReviewDue,
   runViews,
   RUN_VIEW_NAMES,
@@ -3475,6 +3476,53 @@ describe("pending_contract_amendments_view perf rewrite (BUG #2)", () => {
       .get() as { sql: string } | null)?.sql ?? "";
     expect(after).toContain("settled_refs");
     expect(after).toContain("action_scored_refs");
+    closeDb(":memory:");
+  });
+
+  test("pendingContractAmendmentsPooled returns byte-identical rows to the sync accessor (off-loop compose read)", async () => {
+    // PERF (compose_prompt sub-stage attribution): readOutstandingContractAmendments
+    // ran the view SYNCHRONOUSLY on the daemon event loop (~184ms uncontended,
+    // ballooning to multiple seconds under live write contention). It now routes
+    // through pendingContractAmendmentsPooled so the view's two full-ledger
+    // json_each scans run off the main thread — same SQL, same row shape. This
+    // test pins byte-equivalence between the sync and pooled accessors using the
+    // sync fallback (no pool installed → poolQuery runs the identical db.query).
+    const db = openDb(":memory:");
+    runViews(db);
+    const liveA = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_a",
+      task_id: "t_a",
+      payload: { proposed_behavior: { target_resource: "docs/A.md", predicate: "pa", target_files: ["docs/A.md"] } },
+    });
+    const liveB = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_b",
+      task_id: "t_b",
+      payload: { proposed_behavior: { target_resource: "docs/B.md", predicate: "pb", target_files: ["docs/B.md"] } },
+    });
+    const closed = insertEvent(db, {
+      kind: "contract_amendment_proposed",
+      directive_id: "d_c",
+      task_id: "t_c",
+      payload: { proposed_behavior: { target_resource: "docs/C.md", predicate: "pc" } },
+    });
+    insertEvent(db, { kind: "closure_complete", directive_id: "d_c", task_id: "t_c", payload: {}, context_refs: [closed] });
+
+    const sync = pendingContractAmendments(db, { limit: 50 });
+    // Sync-fallback poolQuery: no pool installed → runs the identical db.query.
+    const syncPoolQuery = async <T>(d: typeof db, sql: string, params: unknown[]): Promise<T[]> =>
+      d.query(sql).all(...(params as never[])) as T[];
+    const pooled = await pendingContractAmendmentsPooled(db, syncPoolQuery, { limit: 50 });
+
+    expect(pooled.map((r) => r.proposal_id).sort()).toEqual([liveA, liveB].sort());
+    // Byte-identical structural projection (id/ts/rank/supersession/target).
+    const norm = (rows: typeof sync) =>
+      JSON.stringify(rows.map((r) => ({
+        id: r.proposal_id, ts: r.ts, rank: r.selection_rank,
+        sup: r.supersession_state, newer: r.newer_proposal_id, target: r.target_resource,
+      })));
+    expect(norm(pooled)).toEqual(norm(sync));
     closeDb(":memory:");
   });
 });
