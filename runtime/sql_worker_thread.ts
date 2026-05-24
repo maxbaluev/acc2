@@ -59,11 +59,26 @@ const db = new Database(data.dbPath, { readonly: true, create: false });
 // query routed through the pool fails with `no such module: vec0`
 // (observed: embedder orphan-GC + reproject flooding error_caught 2245×/15min).
 db.loadExtension(sqliteVec.getLoadablePath());
-// PRAGMA tuning: read-only WAL connections benefit from a small page cache
-// and the safe default journal mode. Keep these light — heavy cache would
-// fight with the main writer's WAL.
+// PRAGMA tuning for the read-only worker connections. The hot read path is
+// heavy aggregate / index / vec0-KNN scans over a multi-hundred-MB-to-GB
+// events table; the OLD policy (2MB cache, no mmap) starved these reads,
+// causing page-faulting that (a) inflated pooled-read latency under a
+// dispatch burst and (b) held read locks long enough to block WAL-checkpoint
+// reclaim on the main writer (the 17MB-WAL / commit-stall loop-block).
+//   - mmap_size: memory-map the DB so reads come from the SHARED OS page
+//     cache instead of per-page syscalls. This is the big win on a large DB
+//     and does NOT multiply RAM across workers — every worker maps the same
+//     file, so the OS page cache is shared (virtual address space only).
+//   - cache_size: a modest 64MB private page cache (read-only conns never
+//     write WAL, so this does not "fight the writer" — the old comment's
+//     reasoning was inverted).
+//   - temp_store=MEMORY: GROUP BY / ORDER BY spill tables stay in RAM.
+// All are best-effort and env-tunable (ACC2_SQL_WORKER_MMAP_BYTES).
+const mmapBytes = Number(process.env.ACC2_SQL_WORKER_MMAP_BYTES ?? 2147483648);
 try { db.exec("PRAGMA journal_mode = WAL"); } catch { /* read-only conn cannot change journal; best effort */ }
-try { db.exec("PRAGMA cache_size = -2000"); } catch { /* best effort */ }
+try { db.exec(`PRAGMA mmap_size = ${Number.isFinite(mmapBytes) && mmapBytes >= 0 ? mmapBytes : 2147483648}`); } catch { /* best effort */ }
+try { db.exec("PRAGMA cache_size = -65536"); } catch { /* best effort */ }
+try { db.exec("PRAGMA temp_store = MEMORY"); } catch { /* best effort */ }
 
 // Small LRU for prepared statements. Same SQL string → same prepared
 // object. Eviction policy: when size exceeds limit, evict the
