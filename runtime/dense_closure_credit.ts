@@ -189,55 +189,90 @@ const depthByTask = (
  *  context_refs. Also pulls retrieval_binding source ids on those tasks. The
  *  returned map keys are target ids; the value is the minimum task depth at
  *  which the target contributed (so a target reused across depths is damped at
- *  its shallowest — most-credited — appearance). */
+ *  its shallowest — most-credited — appearance).
+ *
+ *  Root-level decomposition choices are structural acts, not leaf acts. When
+ *  requested, also read task_node_opened/task_edge_recorded citations from the
+ *  root and admit only decomposition_strategy_predicate artifacts into this
+ *  dense closure pass; ordinary root act artifacts remain excluded. */
 const collectContributors = (
   db: Database,
   taskIds: string[],
   depth: Map<string, number>,
+  opts?: { structuralTaskIds?: string[] },
 ): Map<string, number> => {
   const out = new Map<string, number>();
-  if (taskIds.length === 0) return out;
+  if (taskIds.length === 0 && (opts?.structuralTaskIds ?? []).length === 0) return out;
   const placeholders = taskIds.map(() => "?").join(",");
   const note = (id: string, taskDepth: number) => {
     if (!id) return;
     const prev = out.get(id);
     if (prev === undefined || taskDepth < prev) out.set(id, taskDepth);
   };
+  const noteDecompositionArtifact = (id: string, taskDepth: number) => {
+    if (!id) return;
+    const row = db
+      .query<{ kind: string }, [string]>("SELECT kind FROM act_artifact WHERE id = ? LIMIT 1")
+      .get(id);
+    if (row?.kind === "decomposition_strategy_predicate") note(id, taskDepth);
+  };
 
   // Acts under these tasks: action_predicted (carries the act tuple's cited
   // ids on payload + context_refs) and act_tuple_recorded (caller-declared
   // citation envelope). Both are the canonical citation surfaces.
-  const actRows = db
-    .query(
-      `SELECT task_id, payload, context_refs FROM events
-       WHERE kind IN ('action_predicted','act_tuple_recorded')
-         AND task_id IN (${placeholders})`,
-    )
-    .all(...taskIds) as Array<{ task_id: string; payload: string; context_refs: string }>;
-  for (const r of actRows) {
-    const d = depth.get(r.task_id) ?? 0;
-    const p = jsonObject(r.payload);
-    for (const id of stringArray(p.cited_artifact_ids)) note(id, d);
-    for (const id of stringArray(p.cited_knowledge_ids)) note(id, d);
-    for (const id of stringArray(safeParseArray(r.context_refs))) note(id, d);
+  if (taskIds.length > 0) {
+    const actRows = db
+      .query(
+        `SELECT task_id, payload, context_refs FROM events
+         WHERE kind IN ('action_predicted','act_tuple_recorded')
+           AND task_id IN (${placeholders})`,
+      )
+      .all(...taskIds) as Array<{ task_id: string; payload: string; context_refs: string }>;
+    for (const r of actRows) {
+      const d = depth.get(r.task_id) ?? 0;
+      const p = jsonObject(r.payload);
+      for (const id of stringArray(p.cited_artifact_ids)) note(id, d);
+      for (const id of stringArray(p.cited_knowledge_ids)) note(id, d);
+      for (const id of stringArray(safeParseArray(r.context_refs))) note(id, d);
+    }
+  }
+
+  const structuralTaskIds = opts?.structuralTaskIds ?? [];
+  if (structuralTaskIds.length > 0) {
+    const structuralPlaceholders = structuralTaskIds.map(() => "?").join(",");
+    const structuralRows = db
+      .query(
+        `SELECT task_id, payload, context_refs FROM events
+         WHERE kind IN ('task_node_opened','task_edge_recorded')
+           AND task_id IN (${structuralPlaceholders})`,
+      )
+      .all(...structuralTaskIds) as Array<{ task_id: string; payload: string; context_refs: string }>;
+    for (const r of structuralRows) {
+      const d = depth.get(r.task_id) ?? 0;
+      const p = jsonObject(r.payload);
+      for (const id of stringArray(p.cited_artifact_ids)) noteDecompositionArtifact(id, d);
+      for (const id of stringArray(safeParseArray(r.context_refs))) noteDecompositionArtifact(id, d);
+    }
   }
 
   // retrieval_binding rows scoped to these tasks: the bound source event /
   // artifact is a retrieval contributor to the task's outcome.
-  const bindingRows = db
-    .query(
-      `SELECT task_id, payload FROM events
-       WHERE kind = 'retrieval_binding'
-         AND task_id IN (${placeholders})`,
-    )
-    .all(...taskIds) as Array<{ task_id: string; payload: string }>;
-  for (const r of bindingRows) {
-    const d = depth.get(r.task_id) ?? 0;
-    const p = jsonObject(r.payload);
-    const srcEvent = typeof p.source_event_id === "string" ? p.source_event_id : "";
-    const srcArtifact = typeof p.source_artifact_id === "string" ? p.source_artifact_id : "";
-    if (srcEvent) note(srcEvent, d);
-    if (srcArtifact) note(srcArtifact, d);
+  if (taskIds.length > 0) {
+    const bindingRows = db
+      .query(
+        `SELECT task_id, payload FROM events
+         WHERE kind = 'retrieval_binding'
+           AND task_id IN (${placeholders})`,
+      )
+      .all(...taskIds) as Array<{ task_id: string; payload: string }>;
+    for (const r of bindingRows) {
+      const d = depth.get(r.task_id) ?? 0;
+      const p = jsonObject(r.payload);
+      const srcEvent = typeof p.source_event_id === "string" ? p.source_event_id : "";
+      const srcArtifact = typeof p.source_artifact_id === "string" ? p.source_artifact_id : "";
+      if (srcEvent) note(srcEvent, d);
+      if (srcArtifact) note(srcArtifact, d);
+    }
   }
 
   return out;
@@ -313,14 +348,18 @@ export const distributeDenseClosureCredit = (
     const allTaskIds = new Set(nodes.map((n) => n.id));
     const depth = depthByTask(input.root_task_id, edges, allTaskIds);
 
-    // INTERMEDIATE tasks only — exclude the root itself. The root act's
-    // closure verdict already produces its own internal-act credit
+    // INTERMEDIATE tasks only — exclude the root's ordinary leaf acts. The
+    // root closure verdict already produces its own internal-act credit
     // (events.ts task_closure_audited → recordInternalAct); dense-crediting
-    // the root would double-count the terminal signal we are explicitly
-    // leaving unchanged.
+    // root action_predicted artifacts would double-count the terminal signal.
+    // Root task_node/task_edge citations to decomposition_strategy_predicate are
+    // the exception: they are the decomposition act whose posterior should bind
+    // to the root closure outcome.
     const intermediateTaskIds = nodes.map((n) => n.id).filter((id) => id !== input.root_task_id);
 
-    const contributorDepth = collectContributors(db, intermediateTaskIds, depth);
+    const contributorDepth = collectContributors(db, intermediateTaskIds, depth, {
+      structuralTaskIds: [input.root_task_id],
+    });
     if (contributorDepth.size === 0) {
       return { ran: true, reason: "no_contributors", contributors_credited: 0, emitted_event_ids: emitted };
     }

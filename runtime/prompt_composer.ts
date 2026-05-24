@@ -425,7 +425,7 @@ const buildProvenDecompositionStrategySection = (
   return [
     `PROVEN DECOMPOSITION STRATEGY (outcome-scored from ${s.sample_count} closed directive(s) of shape "${s.shape_category}"):`,
     `  This goal shape historically closed well (effective_score=${s.effective_score.toFixed(2)}, mean closure_residual=${s.mean_residual.toFixed(2)}) with a structure averaging ~${s.avg_fan_out.toFixed(1)} root child task(s), depth ~${s.avg_max_depth.toFixed(1)}, ~${s.avg_total_nodes.toFixed(1)} total node(s).`,
-    `  ADVISORY ONLY: prefer this proven structure when it fits; deviate when the directive genuinely differs. The substrate credits whichever decomposition closes — your residual feeds back into this score (${pct(s.effective_score)} confidence today). [cite ${s.predicate_act_artifact_id}]`,
+    `  ADVISORY ONLY: prefer this proven structure when it fits; deviate when the directive genuinely differs. If this prior shapes a root decomposition, put ${s.predicate_act_artifact_id} in the context_refs or cited_artifact_ids of the root task_node_opened/task_edge_recorded rows you emit. The root closure verifier back-credits that structural citation, so winning shapes rise and losing shapes decay. [cite ${s.predicate_act_artifact_id}]`,
   ].join("\n");
 };
 

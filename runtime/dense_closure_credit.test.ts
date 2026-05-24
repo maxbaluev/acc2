@@ -291,4 +291,41 @@ describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
     expect(after.posteriorAlpha).toBe(before.posteriorAlpha);
     expect(denseRows(db, "dense_closure_credit_distributed").length).toBe(0);
   });
+
+  test("root structural decomposition strategy citation receives closure credit", () => {
+    const db = openDb(":memory:");
+    const dir = "dir_dense_decomp_strategy";
+    const { root } = seedDirective(db, dir);
+    makeArtifact(db, "decomp_audit_evidence_sweep");
+    db.run(
+      "UPDATE act_artifact SET kind = 'decomposition_strategy_predicate' WHERE id = ?",
+      ["decomp_audit_evidence_sweep"],
+    );
+    const before = getArtifact(db, "decomp_audit_evidence_sweep")!;
+
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "opencode",
+      directive_id: dir,
+      task_id: root,
+      context_refs: ["decomp_audit_evidence_sweep"],
+      payload: { goal: "root decomposition used proven audit evidence sweep" },
+    });
+
+    emitEvent(db, {
+      kind: "task_closure_audited",
+      substrate_origin: "substrate_auto",
+      directive_id: dir,
+      task_id: root,
+      payload: { closure_residual: 0.05, verdict: "audited" },
+    });
+
+    const after = getArtifact(db, "decomp_audit_evidence_sweep")!;
+    expect(after.posteriorAlpha).toBeGreaterThan(before.posteriorAlpha);
+    const rows = denseRows(db, "act_artifact_score_updated").filter(
+      (p) => p.artifact_id === "decomp_audit_evidence_sweep",
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.role).toBe("dense_closure_contributor");
+  });
 });
