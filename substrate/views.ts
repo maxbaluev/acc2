@@ -1489,6 +1489,34 @@ CREATE VIEW IF NOT EXISTS recipe_registry_view AS
         json_extract(e.payload, '$.is_recipe'),
         0
       ) IN (1, 'true')
+  ),
+  -- PERF (2026-05-24, supervisor-offload-throttle): replaced the correlated
+  -- NOT EXISTS (SELECT 1 FROM recipes newer ...) self-join (O(n^2) over the
+  -- recipe-shape set, ~33s on the live 417k-row ledger) with a window-function
+  -- "freshest row per key" pick computed in one pass. This view keys on the
+  -- FRESHEST row per (goal_shape, topology_signature) — tie-break ts DESC then
+  -- event_rowid DESC, with NO confidence term (matching the old clause exactly,
+  -- which distinguishes it from recipes_latest_view's confidence-first pick).
+  -- NULL-key semantics are preserved: PARTITION BY treats NULLs as one group,
+  -- exactly as the old NULL-matches-NULL / ''-matches-'' clause did.
+  ranked AS (
+    SELECT
+      recipe_id,
+      id,
+      ts,
+      directive_id,
+      task_id,
+      confidence,
+      goal_shape,
+      topology_signature,
+      status,
+      payload,
+      context_refs,
+      ROW_NUMBER() OVER (
+        PARTITION BY goal_shape, topology_signature
+        ORDER BY ts DESC, event_rowid DESC
+      ) AS rn
+    FROM recipes
   )
   SELECT
     recipe_id,
@@ -1502,19 +1530,8 @@ CREATE VIEW IF NOT EXISTS recipe_registry_view AS
     status,
     payload,
     context_refs
-  FROM recipes r
-  WHERE NOT EXISTS (
-    SELECT 1
-    FROM recipes newer
-    -- Organism-alignment audit b3qc9ryzj #6 (2026-05-15): distinguish
-    -- absent (NULL) from explicit empty string. Pre-fix COALESCE(...,'')
-    -- merged NULL goal_shape with '' goal_shape, collapsing two
-    -- structurally-distinct recipe keys into one. Now NULL matches
-    -- NULL exactly and '' matches '' exactly, never crosswise.
-    WHERE ((newer.goal_shape = r.goal_shape) OR (newer.goal_shape IS NULL AND r.goal_shape IS NULL))
-      AND ((newer.topology_signature = r.topology_signature) OR (newer.topology_signature IS NULL AND r.topology_signature IS NULL))
-      AND (newer.ts > r.ts OR (newer.ts = r.ts AND newer.event_rowid > r.event_rowid))
-  );
+  FROM ranked
+  WHERE rn = 1;
 `;
 
 // recipes_latest_view — materialized recipe matcher index keyed by
@@ -1526,6 +1543,22 @@ CREATE VIEW IF NOT EXISTS recipe_registry_view AS
 // audit QQEHAW97GS0AX7TEQ717Y3P174 (2026-05-15). After universality proposal
 // A12CR1QCDN0SS51CM95K39T45M the source rows are knowledge_candidate /
 // knowledge_promoted carrying recipe_shape.enabled.
+// PERF (2026-05-24, supervisor-offload-throttle): the prior body used a
+// correlated NOT EXISTS (SELECT 1 FROM recipes better ...) self-join to pick
+// the highest-confidence row per (goal_shape, topology_signature) key. SQLite
+// re-evaluated the recipes CTE for every outer row, making the view O(n^2)
+// over the recipe-shape knowledge set (~960 rows -> ~4.7M json_extracts). On the
+// live 417k-row ledger this measured ~33s SYNCHRONOUS -- the dominant
+// decide_dispatch cost (findRecipeMatch -> recipesLatestView blocks the event
+// loop on every dispatch). The window-function form computes the SAME
+// "highest-confidence per key" tie-broken by ts DESC, event_rowid DESC in one
+// pass (ROW_NUMBER ... rn=1), measured ~80ms -- result-equivalent (identical
+// id+confidence for all 787 keyed rows). NULL-key semantics are preserved: rows
+// with NULL goal_shape/topology_signature partition together exactly as the old
+// NULL-matches-NULL clause, then are dropped by the accessor's
+// goal_shape IS NOT NULL AND topology_signature IS NOT NULL filter (unchanged
+// behavior). The tie-break order matches the old precedence exactly:
+// confidence DESC > ts DESC > event_rowid DESC.
 const VIEW_RECIPES_LATEST = `
 CREATE VIEW IF NOT EXISTS recipes_latest_view AS
   WITH recipes AS (
@@ -1545,6 +1578,20 @@ CREATE VIEW IF NOT EXISTS recipes_latest_view AS
         json_extract(e.payload, '$.is_recipe'),
         0
       ) IN (1, 'true')
+  ),
+  ranked AS (
+    SELECT
+      id,
+      ts,
+      confidence,
+      goal_shape,
+      topology_signature,
+      payload,
+      ROW_NUMBER() OVER (
+        PARTITION BY goal_shape, topology_signature
+        ORDER BY confidence DESC, ts DESC, event_rowid DESC
+      ) AS rn
+    FROM recipes
   )
   SELECT
     id,
@@ -1553,20 +1600,8 @@ CREATE VIEW IF NOT EXISTS recipes_latest_view AS
     goal_shape,
     topology_signature,
     payload
-  FROM recipes r
-  WHERE NOT EXISTS (
-    SELECT 1
-    FROM recipes better
-    -- Same NULL-preserving key match as recipe_registry_view: NULL matches
-    -- NULL exactly, '' matches '' exactly, never crosswise.
-    WHERE ((better.goal_shape = r.goal_shape) OR (better.goal_shape IS NULL AND r.goal_shape IS NULL))
-      AND ((better.topology_signature = r.topology_signature) OR (better.topology_signature IS NULL AND r.topology_signature IS NULL))
-      AND (
-        better.confidence > r.confidence
-        OR (better.confidence = r.confidence AND better.ts > r.ts)
-        OR (better.confidence = r.confidence AND better.ts = r.ts AND better.event_rowid > r.event_rowid)
-      )
-  );
+  FROM ranked
+  WHERE rn = 1;
 `;
 
 // lesson_implementer_queue_view — derived inbox for the lesson-implementer

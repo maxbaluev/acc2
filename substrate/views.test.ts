@@ -1273,6 +1273,112 @@ describe("operator registry views", () => {
     // gone, not merely deprioritised.
     expect(rows.find((r) => r.id === lowerConfId)).toBeUndefined();
   });
+
+  // PERF guard (2026-05-24): recipes_latest_view / recipe_registry_view used a
+  // correlated NOT EXISTS self-join over the recipe-shape knowledge set —
+  // O(n^2), ~33s SYNCHRONOUS on the live 417k-row ledger and the dominant
+  // decide_dispatch cost (findRecipeMatch -> recipesLatestView blocks the loop
+  // on every dispatch). The window-function rewrite (ROW_NUMBER OVER PARTITION
+  // … rn=1) computes the SAME highest-confidence/freshest row per key in one
+  // pass. This test pins the plan so a refactor cannot silently reintroduce
+  // the quadratic self-join, AND pins the per-key pick + NULL-partition +
+  // tie-break semantics that the self-join previously guaranteed.
+  for (const viewName of ["recipes_latest_view", "recipe_registry_view"]) {
+    test(`${viewName} plan is a single-pass window (no correlated self-join)`, () => {
+      const db = openDb(":memory:");
+      runViews(db);
+      const plan = db
+        .query(`EXPLAIN QUERY PLAN SELECT * FROM ${viewName}`)
+        .all() as Array<{ detail: string }>;
+      const details = plan.map((p) => p.detail);
+      // The old O(n^2) form re-evaluated the recipes CTE per outer row,
+      // surfacing as a CORRELATED scalar/list subquery in the plan. The
+      // window form has none.
+      const hasCorrelated = details.some((d) => /CORRELATED/i.test(d));
+      expect(hasCorrelated).toBe(false);
+      // The window form materialises the recipe set exactly once (CO-ROUTINE
+      // / MATERIALIZE), never a second time for a per-row EXISTS probe. There
+      // must be at most ONE pass over the events index for the recipe scan.
+      const recipeScanPasses = details.filter((d) =>
+        /SEARCH (events|e) USING INDEX idx_events_kind/i.test(d),
+      ).length;
+      expect(recipeScanPasses).toBeLessThanOrEqual(1);
+    });
+  }
+
+  test("recipesLatestView keeps the higher-confidence row even when the lower one is newer (no ts-over-confidence drift)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    // High confidence, OLDER ts.
+    const highOld = insertEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d_tb",
+      task_id: "t_tb",
+      payload: {
+        goal_shape: "shape_tb",
+        topology_signature: "topo_tb",
+        confidence: 0.9,
+        trajectory: [{ step_kind: "action_predicted" }],
+        recipe_shape: { enabled: true },
+      },
+      ts: "2026-01-01T00:00:01.000Z",
+    });
+    // Lower confidence, NEWER ts — must NOT win (confidence dominates ts).
+    insertEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d_tb",
+      task_id: "t_tb",
+      payload: {
+        goal_shape: "shape_tb",
+        topology_signature: "topo_tb",
+        confidence: 0.5,
+        trajectory: [],
+        recipe_shape: { enabled: true },
+      },
+      ts: "2026-01-01T00:00:09.000Z",
+    });
+    const rows = recipesLatestView(db);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.id).toBe(highOld);
+    expect(rows[0]!.confidence).toBe(0.9);
+  });
+
+  test("recipeRegistry keeps the freshest row per key (ts dominates, confidence ignored in tie-break)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    // Higher confidence but OLDER — recipe_registry_view keys on FRESHNESS,
+    // so this must lose to the newer-but-lower-confidence row.
+    insertEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d_fr",
+      task_id: "t_fr",
+      payload: {
+        goal_shape: "shape_fr",
+        topology_signature: "topo_fr",
+        confidence: 0.9,
+        trajectory: [],
+        recipe_shape: { enabled: true },
+      },
+      ts: "2026-01-01T00:00:01.000Z",
+    });
+    const newerLowerConf = insertEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d_fr",
+      task_id: "t_fr",
+      payload: {
+        goal_shape: "shape_fr",
+        topology_signature: "topo_fr",
+        confidence: 0.2,
+        trajectory: [{ step_kind: "action_predicted" }],
+        recipe_shape: { enabled: true },
+      },
+      ts: "2026-01-01T00:00:05.000Z",
+    });
+    const rows = recipeRegistry(db);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.recipe_id).toBe(newerLowerConf);
+    expect(rows[0]!.confidence).toBe(0.2);
+  });
 });
 
 describe("lesson implementer flywheel views", () => {
