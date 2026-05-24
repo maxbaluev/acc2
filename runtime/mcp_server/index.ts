@@ -22,6 +22,7 @@
 //     This is the same binary; only the transport differs.
 
 import { FastMCP } from "fastmcp";
+import { logger } from "../logger";
 import type { McpContext, McpResult, McpServerOptions } from "./types";
 import {
   AdmitArtifactSchema,
@@ -85,6 +86,46 @@ import {
   handleTrajectoryReplay,
 } from "./runtime_tools";
 
+// ── Runtime loop-blocker profiling (gated, zero-cost when off) ──────
+//
+// ACC2_PROFILE_LOOP=1 turns on lightweight observability that pinpoints
+// which MCP call blocks the daemon event loop during an opencode brain
+// connect-burst (substrate.search / substrate.read / acc_pulse / emit …).
+// Default OFF → the gate is read once at module load and the timing
+// wrapper collapses to the bare handler, so there is ZERO overhead and no
+// behavior change unless the operator explicitly opts in. Pure measurement:
+// no handler logic changes, nothing routed off-loop.
+//
+// Threshold: only requests whose wall-clock duration exceeds
+// SLOW_MCP_THRESHOLD_MS are logged as {event:"slow_mcp_request", …} so the
+// log is signal, not noise. Exported so the daemon's loop-lag monitor and
+// the profiling test can read the same gate without re-deriving it.
+export const PROFILE_LOOP_ENABLED = process.env.ACC2_PROFILE_LOOP === "1";
+export const SLOW_MCP_THRESHOLD_MS = 500;
+
+/** Wrap a per-MCP-request executor so EVERY request whose wall-clock duration
+ *  exceeds the threshold logs `{event:"slow_mcp_request", method, duration_ms}`.
+ *  When profiling is disabled the original executor is returned unchanged —
+ *  no closure allocation per call, no `performance.now()` cost. Exported so
+ *  the test can exercise the timing path without booting a daemon. */
+export const profileMcpExecute = (
+  method: string,
+  exec: (args: unknown) => Promise<string>,
+): ((args: unknown) => Promise<string>) => {
+  if (!PROFILE_LOOP_ENABLED) return exec;
+  return async (args: unknown): Promise<string> => {
+    const startedAt = performance.now();
+    try {
+      return await exec(args);
+    } finally {
+      const durationMs = performance.now() - startedAt;
+      if (durationMs > SLOW_MCP_THRESHOLD_MS) {
+        logger.warn({ event: "slow_mcp_request", method, duration_ms: Math.round(durationMs) }, "slow_mcp_request");
+      }
+    }
+  };
+};
+
 /** Build a FastMCP server with every substrate tool wired against `ctx.db`.
  *  The caller drives `.start({transportType, …})` — daemon uses `httpStream`,
  *  tests use `stdio`. The server holds no Database reference of its own; all
@@ -122,8 +163,8 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
   // sync or async — we await the return so Phase C's runtime handlers (which
   // spawn subprocesses) plug in without contortion.
   const wrap =
-    <A>(handler: (ctx: McpContext, args: A) => McpResult | Promise<McpResult>) =>
-    async (args: unknown): Promise<string> => {
+    <A>(method: string, handler: (ctx: McpContext, args: A) => McpResult | Promise<McpResult>) =>
+    profileMcpExecute(method, async (args: unknown): Promise<string> => {
       try {
         const result = await handler(ctx, args as A);
         return JSON.stringify(result);
@@ -133,14 +174,14 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
           error: `handler_error:${(err as Error).message}`,
         } satisfies McpResult);
       }
-    };
+    });
 
   server.addTool({
     name: "substrate.emit",
     description:
       "Emit one substrate event. Returns {ok, result:{id, ts}} on success.",
     parameters: EmitSchema,
-    execute: wrap(handleEmit),
+    execute: wrap("substrate.emit", handleEmit),
   });
 
   server.addTool({
@@ -149,14 +190,14 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "Read a named substrate view. Unknown view_name returns " +
       "view_not_implemented:<name> so callers can detect typos.",
     parameters: ReadSchema,
-    execute: wrap(handleRead),
+    execute: wrap("substrate.read", handleRead),
   });
 
   server.addTool({
     name: "substrate.get_event",
     description: "Fetch one event by id. Returns {ok, result: Event}.",
     parameters: IdSchema,
-    execute: wrap(handleGetEvent),
+    execute: wrap("substrate.get_event", handleGetEvent),
   });
 
   server.addTool({
@@ -164,7 +205,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     description:
       "Fetch one act_artifact row by id. JSON columns are pre-parsed.",
     parameters: IdSchema,
-    execute: wrap(handleGetArtifact),
+    execute: wrap("substrate.get_artifact", handleGetArtifact),
   });
 
   server.addTool({
@@ -175,7 +216,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "stand-in on fresh / unembedded substrates. Supports kind_filter, " +
       "aspect_weights, and domain_hints to scope open-ended routing.",
     parameters: SearchSchema,
-    execute: wrap(handleSearch),
+    execute: wrap("substrate.search", handleSearch),
   });
 
   server.addTool({
@@ -184,7 +225,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "Embed an arbitrary text via the same model the substrate indexes with " +
       "(text-embedding-3-small). Returns {embedding: number[], version, model}.",
     parameters: EmbedTextSchema,
-    execute: wrap(handleEmbedText),
+    execute: wrap("substrate.embed_text", handleEmbedText),
   });
 
   server.addTool({
@@ -194,7 +235,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "Phase C: bun-runtime artifacts execute end-to-end; uv and " +
       "camofox-browser return phase_g_runtime_unsupported until Phase G.",
     parameters: RunArtifactSchema,
-    execute: wrap(handleRunArtifact),
+    execute: wrap("substrate.run_artifact", handleRunArtifact),
   });
 
   server.addTool({
@@ -204,7 +245,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "verifier's JSON output (expected shape `{residual: number}`). " +
       "Phase C wires bun verifiers; uv/camofox return phase_g_runtime_unsupported.",
     parameters: RunVerifierSchema,
-    execute: wrap(handleRunVerifier),
+    execute: wrap("substrate.run_verifier", handleRunVerifier),
   });
 
   server.addTool({
@@ -215,7 +256,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "(§3.6.1 Rule 3). Returns the per-entity weights, Beta posterior " +
       "deltas, and ids of every emitted event.",
     parameters: CreditSchema,
-    execute: wrap(handleCredit),
+    execute: wrap("substrate.credit", handleCredit),
   });
 
   server.addTool({
@@ -226,7 +267,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "score=0.5/confidence=0.3. uv and camofox-browser admissions are " +
       "deferred to Phase G.",
     parameters: AdmitArtifactSchema,
-    execute: wrap(handleAdmitArtifact),
+    execute: wrap("substrate.admit_artifact", handleAdmitArtifact),
   });
 
   server.addTool({
@@ -235,7 +276,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "Open a named test fixture directive. Phase D ships d_count_todos. " +
       "Returns {directive_id, task_id} so the caller can drive the dispatcher.",
     parameters: OpenFixtureSchema,
-    execute: wrap(handleOpenFixture),
+    execute: wrap("substrate.open_fixture", handleOpenFixture),
   });
 
   server.addTool({
@@ -245,7 +286,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "Phase D: composes prompt, calls mocked bridge, runs action + verifier, " +
       "emits action_scored + task_committed when residual < threshold.",
     parameters: DispatchReadyTaskSchema,
-    execute: wrap(handleDispatchReadyTask),
+    execute: wrap("runtime.dispatch_ready_task", handleDispatchReadyTask),
   });
 
   server.addTool({
@@ -255,7 +296,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "ready tasks (default 5), routes by dispatch lane, returns the per-tick " +
       "summary (dispatched / in_flight / skipped_*). Phase E.",
     parameters: SchedulerTickSchema,
-    execute: wrap(handleSchedulerTick),
+    execute: wrap("runtime.scheduler_tick", handleSchedulerTick),
   });
 
   server.addTool({
@@ -265,7 +306,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "the named tasks/predictions, open task_node_opened for each new_task_goals " +
       "entry, return the amendment summary. Phase E.",
     parameters: AmendDirectiveSchema,
-    execute: wrap(handleAmendDirective),
+    execute: wrap("substrate.amend_directive", handleAmendDirective),
   });
 
   server.addTool({
@@ -275,7 +316,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "directive. Auto-detects conflicts against prior stakeholder declarations " +
       "and emits stakeholder_conflict + owner_input_required when they disagree. Phase I.",
     parameters: RecordStakeholderStateSchema,
-    execute: wrap(handleRecordStakeholderState),
+    execute: wrap("substrate.record_stakeholder_state", handleRecordStakeholderState),
   });
 
   server.addTool({
@@ -286,7 +327,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "after surfacing them, and emits directive_interference_cycle_detected for " +
       "any cycle in the blocks subgraph. Phase I.",
     parameters: RecordInterferenceEdgeSchema,
-    execute: wrap(handleRecordInterferenceEdge),
+    execute: wrap("substrate.record_interference_edge", handleRecordInterferenceEdge),
   });
 
   server.addTool({
@@ -297,7 +338,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "initial root task, and an initial stakeholders list. Emits crisis_mode_engaged " +
       "when urgency=crisis. Phase I.",
     parameters: OpenDirectiveSchema,
-    execute: wrap(handleOpenDirective),
+    execute: wrap("substrate.open_directive", handleOpenDirective),
   });
 
   server.addTool({
@@ -307,7 +348,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "subtask, advance next_review_due by one cadence period. Father (Phase K) " +
       "calls this on its tick. Phase I.",
     parameters: ProcessRollingReviewsSchema,
-    execute: wrap(handleProcessRollingReviews),
+    execute: wrap("runtime.process_rolling_reviews", handleProcessRollingReviews),
   });
 
   server.addTool({
@@ -319,7 +360,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "(NEVER calls an LLM). Honors §3 owner-yield: if owner_input_received " +
       "is within the active window, Father yields without opening anything.",
     parameters: FatherIterateSchema,
-    execute: wrap(handleFatherIterate),
+    execute: wrap("runtime.father_iterate", handleFatherIterate),
   });
 
   server.addTool({
@@ -330,7 +371,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "FATHER_ACTION_EVENT_KINDS taxonomy. Idempotent — already-reported " +
       "offenders are not re-emitted.",
     parameters: DetectFatherDriftSchema,
-    execute: wrap(handleDetectFatherDrift),
+    execute: wrap("runtime.detect_father_drift", handleDetectFatherDrift),
   });
 
   server.addTool({
@@ -340,7 +381,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "signature with confidence ≥ min_confidence (Phase J, §15). Returns the " +
       "RecipeMatch or null.",
     parameters: FindRecipeSchema,
-    execute: wrap(handleFindRecipe),
+    execute: wrap("substrate.find_recipe", handleFindRecipe),
   });
 
   server.addTool({
@@ -353,7 +394,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "on standard action_scored rows (replay_aborted=true) and the dispatcher " +
       "routes back to opencode_brain.",
     parameters: ReplayRecipeSchema,
-    execute: wrap(handleReplayRecipe),
+    execute: wrap("runtime.replay_recipe", handleReplayRecipe),
   });
 
   server.addTool({
@@ -365,7 +406,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "ingress state to be wired into the MCP context (i.e. running inside " +
       "the daemon, not bare stdio).",
     parameters: RegisterExternalSourceSchema,
-    execute: wrap(handleRegisterExternalSource),
+    execute: wrap("substrate.register_external_source", handleRegisterExternalSource),
   });
 
   server.addTool({
@@ -375,7 +416,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "filtered by kind. Used by `acc watch` to fill its event buffer before " +
       "SSE has caught up. Result is `{events: [...]}` in ts-ASC order.",
     parameters: RecentEventsSchema,
-    execute: wrap(handleRecentEvents),
+    execute: wrap("runtime.recent_events", handleRecentEvents),
   });
 
   // ── Brain self-introspection (Phase 1 brain harness rewrite) ────
@@ -394,7 +435,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "Brain reads this once per new directive shape to know what it can " +
       "emit, read, and call. Pure read; safe at any depth.",
     parameters: SystemMapSchema,
-    execute: wrap(handleSystemMap),
+    execute: wrap("runtime.system_map", handleSystemMap),
   });
 
   server.addTool({
@@ -406,7 +447,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "failures. Brain reads every cycle so improvement proposals are " +
       "evidence-grounded, not vibes-based. Pure read.",
     parameters: BrainSelfAuditSchema,
-    execute: wrap(handleBrainSelfAudit),
+    execute: wrap("runtime.brain_self_audit", handleBrainSelfAudit),
   });
 
   server.addTool({
@@ -418,7 +459,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "it sees what's already been tried, not just the current task's " +
       "prompt. Pure read.",
     parameters: TrajectoryReplaySchema,
-    execute: wrap(handleTrajectoryReplay),
+    execute: wrap("runtime.trajectory_replay", handleTrajectoryReplay),
   });
 
   server.addTool({
@@ -429,7 +470,7 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
       "uses to detect 'section X kept dropping under budget' or to spot- " +
       "check 'was I shown the latest owner_profile?'. Pure read.",
     parameters: PromptSelfInspectSchema,
-    execute: wrap(handlePromptSelfInspect),
+    execute: wrap("runtime.prompt_self_inspect", handlePromptSelfInspect),
   });
 
   return server;
@@ -493,6 +534,7 @@ export const handleMcpRequest = async (ctx: McpContext, req: Request): Promise<R
   } catch (err) {
     return Response.json({ ok: false, error: `bad_json:${(err as Error).message}` }, { status: 400 });
   }
+  const startedAt = PROFILE_LOOP_ENABLED ? performance.now() : 0;
   try {
     const result = await handler(ctx, body);
     return Response.json(result, { status: result.ok ? 200 : 400 });
@@ -501,6 +543,13 @@ export const handleMcpRequest = async (ctx: McpContext, req: Request): Promise<R
       { ok: false, error: `handler_error:${(err as Error).message}` },
       { status: 500 },
     );
+  } finally {
+    if (PROFILE_LOOP_ENABLED) {
+      const durationMs = performance.now() - startedAt;
+      if (durationMs > SLOW_MCP_THRESHOLD_MS) {
+        logger.warn({ event: "slow_mcp_request", method, duration_ms: Math.round(durationMs) }, "slow_mcp_request");
+      }
+    }
   }
 };
 

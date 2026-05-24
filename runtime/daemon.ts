@@ -193,6 +193,45 @@ const mcpSessionStats = (server: FastMCP | null, reaper: McpSessionReaper): Reco
   };
 };
 
+// ── Event-loop-lag monitor (gated, zero-cost when off) ──────────────
+//
+// ACC2_PROFILE_LOOP=1 arms a lightweight setInterval that measures actual
+// elapsed wall-clock vs the expected interval. The JS event loop is
+// single-threaded: if a synchronous bun:sqlite scan (e.g. during an
+// opencode brain connect-burst) blocks the loop for ~16s, this interval
+// CANNOT fire on schedule, so the next time it runs the measured gap far
+// exceeds the expected period. When lag > EVENT_LOOP_LAG_THRESHOLD_MS we
+// log {event:"event_loop_blocked", lag_ms} — it fires AFTER the block but
+// still pinpoints how long (and roughly when) the loop was wedged. Cross-
+// referenced with the slow_mcp_request log, this identifies the exact MCP
+// call that blocked the loop. Default OFF → startLoopLagMonitor returns a
+// no-op disposer and arms nothing, so there is ZERO overhead.
+export const PROFILE_LOOP_ENABLED = process.env.ACC2_PROFILE_LOOP === "1";
+const LOOP_LAG_INTERVAL_MS = 100;
+const EVENT_LOOP_LAG_THRESHOLD_MS = 1000;
+
+/** Arm the event-loop-lag monitor when ACC2_PROFILE_LOOP=1. Returns a
+ *  disposer that clears the interval (pushed onto the daemon's `workers`
+ *  cleanup list so stop() tears it down). When profiling is off the monitor
+ *  is never created and the returned disposer is a no-op. Exported so the
+ *  profiling test can assert the armed/cleared lifecycle without booting the
+ *  full daemon. */
+export const startLoopLagMonitor = (): (() => void) => {
+  if (!PROFILE_LOOP_ENABLED) return () => {};
+  let last = performance.now();
+  const timer = setInterval(() => {
+    const now = performance.now();
+    const lagMs = now - last - LOOP_LAG_INTERVAL_MS;
+    last = now;
+    if (lagMs > EVENT_LOOP_LAG_THRESHOLD_MS) {
+      logger.warn({ event: "event_loop_blocked", lag_ms: Math.round(lagMs) }, "event_loop_blocked");
+    }
+  }, LOOP_LAG_INTERVAL_MS);
+  // Do not keep the process alive solely for the profiler.
+  (timer as unknown as { unref?: () => void }).unref?.();
+  return () => clearInterval(timer);
+};
+
 /** Wrap a tick body with per-tick deadline + overrun detection.
  *
  *  Semantics:
@@ -1104,6 +1143,13 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     void refreshHealthCounts(db).catch(() => { /* keep stale cache */ });
   }, 60_000);
   workers.push(() => clearInterval(healthCountsTick));
+
+  // Event-loop-lag monitor (gated behind ACC2_PROFILE_LOOP). Armed in ALL
+  // roles — the loop-blocker we are hunting wedges the same shared event
+  // loop whether the daemon is serving MCP requests or running workers.
+  // No-op disposer when the flag is unset → zero cost. Cleanup is pushed
+  // onto `workers` so stop() clears the interval like every other timer.
+  workers.push(startLoopLagMonitor());
 
   // Worker tick intervals — declared here so /health can compute the
   // "stuck after 3× interval" threshold without reading env vars twice.
