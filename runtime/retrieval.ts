@@ -381,7 +381,21 @@ export const retrieve = async (
   // Over-fetch from KNN (×3) so the rerank pass has room to reorder and
   // still meet `k`. The substrate is small; over-fetch cost is negligible.
   const overFetch = Math.max(q.k, q.k * 3);
-  const knnHits = index.knn(queryVec, overFetch, indexFilter);
+  // Off-loop the vec0 KNN. The sqlite-vec MATCH over the embedding index ran
+  // SYNCHRONOUSLY on the daemon's single event loop here, blocking it ~11s
+  // during substrate.search (profiling: event_loop_blocked lag_ms=11140).
+  // knnAsync routes BOTH vec0 SELECTs (the MATCH + the on-demand metadata
+  // IN-query) through poolQuery; the SQL worker pool loads sqlite-vec on its
+  // worker connections, so vec0 routes cleanly and the loop stays free. The
+  // pool falls back to the synchronous read on overflow/timeout, and the SQL,
+  // params, k binding, distance math, and filter semantics are identical, so
+  // `knnHits` is byte-identical to the synchronous `index.knn(...)`.
+  const knnHits = await index.knnAsync(
+    queryVec,
+    overFetch,
+    (sql, params) => poolQuery(db, sql, params),
+    indexFilter,
+  );
 
   const originBias = q.goalText
     ? readOriginBiasForGoalShape(db, computeGoalShape(q.goalText))

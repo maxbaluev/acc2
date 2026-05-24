@@ -197,6 +197,21 @@ const METADATA_SELECT =
   "SELECT id, kind, ts, directive_id, task_id, substrate_origin, payload, embedding, " +
   "embedding_version, retrieval_aspects, retrieval_domains FROM embedding_index_view";
 
+/** The vec0 KNN MATCH SQL — shared by the synchronous (`knnSql`) and the
+ *  off-loop pooled (`knnSqlAsync`) paths so the query, k binding, and
+ *  ordering are byte-identical regardless of execution thread. */
+const VEC_KNN_SQL =
+  "SELECT event_id, distance FROM vec_events WHERE embedding MATCH ? AND k = ? ORDER BY distance";
+
+/** Async DB-read injected into `knnAsync` so the vec0 MATCH + on-demand
+ *  metadata SELECTs run OFF the daemon's single event loop (the SQL worker
+ *  pool loads sqlite-vec on its worker connections, so vec0 queries route
+ *  cleanly). Same shape as `sql_pool_singleton.poolQuery`: it MUST execute
+ *  `sql` with `params` against the same db and return identical rows in
+ *  identical order (the pool falls back to the synchronous read on
+ *  overflow/timeout, so results are byte-identical to `knnSql`). */
+export type AsyncDbRead = <T = unknown>(sql: string, params: unknown[]) => Promise<T[]>;
+
 export class EmbeddingIndex {
   private constructor(
     private readonly db: Database,
@@ -327,34 +342,32 @@ export class EmbeddingIndex {
     return this.knnJs(queryEmbedding, kCap, filter);
   }
 
-  private knnSql(
-    queryEmbedding: Float32Array,
-    kCap: number,
-    filter?: (e: IndexEntry) => boolean,
-  ): KnnHit[] {
-    // Over-fetch ×3 so the JS-side filter has room to drop without
-    // starving the caller. vec_events.k must be a positive integer.
+  /** Build the vec0 MATCH params for a given over-fetch. The vector is
+   *  JSON-serialised exactly as the synchronous and async paths both expect,
+   *  and `fetchN` is the ×3 over-fetch so the JS-side filter has room to drop
+   *  without starving the caller. vec_events.k must be a positive integer. */
+  private vecKnnParams(queryEmbedding: Float32Array, kCap: number): unknown[] {
     const fetchN = Math.max(kCap, kCap * 3);
     const vec = JSON.stringify(Array.from(queryEmbedding));
-    const rows = this.db
-      .query(
-        "SELECT event_id, distance FROM vec_events WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-      )
-      .all(vec, fetchN) as Array<{ event_id: string; distance: number }>;
-    if (rows.length === 0) return [];
+    return [vec, fetchN];
+  }
 
-    // ON-DEMAND metadata: one batched query for ONLY the K knn result ids.
-    // This is the entire memory footprint — no pre-loaded 40k map.
-    const ids = rows.map((r) => r.event_id);
-    const placeholders = ids.map(() => "?").join(", ");
-    const metaRows = this.db
-      .query(`${METADATA_SELECT} WHERE id IN (${placeholders})`)
-      .all(...ids) as EventRow[];
+  /** Assemble KnnHits from the raw vec0 result rows + the on-demand metadata
+   *  rows. Pure (no DB access) so the synchronous and pooled paths produce
+   *  byte-identical hits — same ordering, same distance math, same filter
+   *  semantics, same kCap truncation. */
+  private assembleHits(
+    queryEmbedding: Float32Array,
+    kCap: number,
+    vecRows: Array<{ event_id: string; distance: number }>,
+    metaRows: EventRow[],
+    filter?: (e: IndexEntry) => boolean,
+  ): KnnHit[] {
     const metaById = new Map<string, Meta>();
     for (const mr of metaRows) metaById.set(mr.id, rowToMeta(mr));
 
     const hits: KnnHit[] = [];
-    for (const r of rows) {
+    for (const r of vecRows) {
       const meta = metaById.get(r.event_id);
       if (!meta) continue;
       const entry: IndexEntry = {
@@ -372,6 +385,72 @@ export class EmbeddingIndex {
       if (hits.length >= kCap) break;
     }
     return hits;
+  }
+
+  private knnSql(
+    queryEmbedding: Float32Array,
+    kCap: number,
+    filter?: (e: IndexEntry) => boolean,
+  ): KnnHit[] {
+    const vecParams = this.vecKnnParams(queryEmbedding, kCap);
+    const rows = this.db
+      .query(VEC_KNN_SQL)
+      .all(...vecParams) as Array<{ event_id: string; distance: number }>;
+    if (rows.length === 0) return [];
+
+    // ON-DEMAND metadata: one batched query for ONLY the K knn result ids.
+    // This is the entire memory footprint — no pre-loaded 40k map.
+    const ids = rows.map((r) => r.event_id);
+    const placeholders = ids.map(() => "?").join(", ");
+    const metaRows = this.db
+      .query(`${METADATA_SELECT} WHERE id IN (${placeholders})`)
+      .all(...ids) as EventRow[];
+    return this.assembleHits(queryEmbedding, kCap, rows, metaRows, filter);
+  }
+
+  /** Off-loop variant of `knnSql`: routes BOTH vec0 SELECTs (the MATCH and
+   *  the on-demand metadata IN-query) through `read`, which the daemon wires
+   *  to the SQL worker pool (sqlite-vec is loaded on the pool's worker
+   *  connections, so vec0 routes cleanly). The SQL strings, params, k binding,
+   *  distance math, filter semantics, and kCap truncation are identical to
+   *  `knnSql`, so the returned hits are byte-identical — only the execution
+   *  thread of the two SELECTs moved off the daemon's single event loop.
+   *  The vec0 MATCH over the embedding index was the ~11s loop blocker on
+   *  substrate.search; the JS-side filter callback (cheap point reads) stays
+   *  on the main thread, matching the synchronous path exactly. */
+  private async knnSqlAsync(
+    queryEmbedding: Float32Array,
+    kCap: number,
+    read: AsyncDbRead,
+    filter?: (e: IndexEntry) => boolean,
+  ): Promise<KnnHit[]> {
+    const vecParams = this.vecKnnParams(queryEmbedding, kCap);
+    const rows = await read<{ event_id: string; distance: number }>(VEC_KNN_SQL, vecParams);
+    if (rows.length === 0) return [];
+
+    const ids = rows.map((r) => r.event_id);
+    const placeholders = ids.map(() => "?").join(", ");
+    const metaRows = await read<EventRow>(`${METADATA_SELECT} WHERE id IN (${placeholders})`, ids);
+    return this.assembleHits(queryEmbedding, kCap, rows, metaRows, filter);
+  }
+
+  /** Async KNN. Identical path selection to `knn`, but the SQL (vec_events)
+   *  branch runs OFF the event loop through `read`. The JS-fallback branch
+   *  (test dim-mismatch entries / no vec rows) has no DB work, so it is run
+   *  inline and wrapped in a resolved promise. Results are byte-identical to
+   *  `knn(queryEmbedding, k, filter)` — same query, same k, same ordering. */
+  async knnAsync(
+    queryEmbedding: Float32Array,
+    k: number,
+    read: AsyncDbRead,
+    filter?: (e: IndexEntry) => boolean,
+  ): Promise<KnnHit[]> {
+    if (queryEmbedding.length === 0 || k <= 0) return [];
+    const kCap = Math.max(1, k);
+    if (queryEmbedding.length === 1536 && this.vecCount() > 0) {
+      return this.knnSqlAsync(queryEmbedding, kCap, read, filter);
+    }
+    return this.knnJs(queryEmbedding, kCap, filter);
   }
 
   private knnJs(
