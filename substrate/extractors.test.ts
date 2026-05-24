@@ -20,6 +20,7 @@ import {
 } from "./extractors";
 import { encodeEmbeddingBlob, EMBEDDING_VERSION, EMBEDDING_DIMS, upsertVecEventRow } from "../runtime/embedder";
 import { invalidateThresholdCache, seedThresholdPredicate } from "../runtime/threshold_registry";
+import { clearSqlPool, setSqlPool } from "../runtime/sql_pool_singleton";
 
 afterAll(() => closeDb());
 beforeEach(() => {
@@ -28,6 +29,10 @@ beforeEach(() => {
   // registry (cached per-process). Invalidate between tests so a seed
   // from a prior test cannot bleed into a fresh in-memory db.
   invalidateThresholdCache();
+  // Off-loop read routing: ensure no SQL pool installed by one test bleeds
+  // into the next. Tests that want the off-loop path install their own spy
+  // pool explicitly and clear it in a finally.
+  clearSqlPool();
 });
 
 const newId = (): string =>
@@ -1285,5 +1290,152 @@ describe("extractClaudeProjectConversations", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Off-loop read routing (poolQuery) correctness ──────────────────
+//
+// The heavy read scans are routed through poolQuery, which off-loads the
+// scan to the SQL worker-thread pool when the daemon installed one and
+// fail-closes to the synchronous db.query path otherwise. These tests
+// prove (a) the off-loop path is actually wired (the spy pool sees the
+// extractor's SELECTs) and (b) the off-loop path produces IDENTICAL
+// promotions/scores to the sync path (the change moves WHERE the read
+// runs, never WHAT it computes).
+
+/** Spy pool delegating to the same db synchronously — stands in for the
+ *  real SQL worker-thread pool. Records every SQL string it is asked to
+ *  run so a test can assert the extractor routed its heavy scan through
+ *  poolQuery rather than the inline sync path. Same db handle ⇒ identical
+ *  rows / ordering, so the extractor's computed output is unchanged. */
+const makeSpyPool = (db: ReturnType<typeof openDb>) => {
+  const seen: string[] = [];
+  const pool = {
+    seen,
+    query: async <T,>(sql: string, params: unknown[] = []): Promise<T[]> => {
+      seen.push(sql);
+      return db.query(sql).all(...(params as Parameters<ReturnType<typeof db.query>["all"]>)) as T[];
+    },
+  };
+  return pool;
+};
+
+describe("extractors — off-loop read routing (poolQuery)", () => {
+  test("extractKnowledgePromotions routes its heavy scans through the pool and promotes identically", async () => {
+    const db = openDb(":memory:");
+    const candidateId = insertEvent(db, { kind: "knowledge_candidate", payload: { text: "off-loop promote" } });
+    for (let i = 0; i < 6; i++) {
+      insertEvent(db, { kind: "candidate_confirmed", context_refs: [candidateId], payload: { idx: i } });
+    }
+    const spy = makeSpyPool(db);
+    setSqlPool(spy as never);
+    try {
+      const summary = await extractKnowledgePromotions(db);
+      expect(summary.promoted).toBe(1);
+      // The candidate scan, promoted-id scan, and verdict scan all routed.
+      expect(spy.seen.some((s) => s.includes("kind = 'knowledge_candidate'"))).toBe(true);
+      expect(spy.seen.some((s) => s.includes("knowledge_promoted") && s.includes("knowledge_demoted"))).toBe(true);
+      expect(spy.seen.some((s) => s.includes("candidate_confirmed") && s.includes("candidate_contradicted"))).toBe(true);
+    } finally {
+      clearSqlPool();
+    }
+    const promoted = db.query("SELECT context_refs FROM events WHERE kind = 'knowledge_promoted'").all() as Array<{ context_refs: string }>;
+    expect(promoted).toHaveLength(1);
+    expect((JSON.parse(promoted[0]!.context_refs) as string[])).toContain(candidateId);
+  });
+
+  test("pool path and sync path produce byte-identical promotion payloads", async () => {
+    // Build two identical in-memory dbs; run the extractor on one with a
+    // spy pool installed and on the other with none. The promotion payloads
+    // (wins/losses/score/confidence/alpha/beta) must match exactly.
+    const seedDb = (db: ReturnType<typeof openDb>): void => {
+      const cid = insertEvent(db, { kind: "knowledge_candidate", payload: { text: "parity" }, ts: new Date(_baseTs).toISOString() });
+      for (let i = 0; i < 6; i++) {
+        insertEvent(db, { kind: "candidate_confirmed", context_refs: [cid], payload: { idx: i }, ts: new Date(_baseTs).toISOString() });
+      }
+    };
+    const promotionPayload = (db: ReturnType<typeof openDb>): Record<string, unknown> => {
+      const row = db.query("SELECT payload FROM events WHERE kind = 'knowledge_promoted'").get() as { payload: string } | null;
+      const p = JSON.parse(row!.payload) as Record<string, unknown>;
+      // action/scored event ids differ run-to-run; compare only the math.
+      const { action_event_id, scored_event_id, candidate_id, ...math } = p;
+      void action_event_id; void scored_event_id; void candidate_id;
+      return math;
+    };
+
+    const dbSync = openDb(":memory:");
+    seedDb(dbSync);
+    await extractKnowledgePromotions(dbSync);
+    const syncMath = promotionPayload(dbSync);
+
+    const dbPool = openDb(":memory:");
+    seedDb(dbPool);
+    const spy = makeSpyPool(dbPool);
+    setSqlPool(spy as never);
+    try {
+      await extractKnowledgePromotions(dbPool);
+    } finally {
+      clearSqlPool();
+    }
+    const poolMath = promotionPayload(dbPool);
+    expect(poolMath).toEqual(syncMath);
+  });
+
+  test("extractActArtifactScores + extractRecipeCandidates route their heavy scans through the pool", async () => {
+    const db = openDb(":memory:");
+    insertArtifact(db, "art_offloop");
+    insertEvent(db, { kind: "task_committed", directive_id: "d_recipe", payload: {} });
+    const spy = makeSpyPool(db);
+    setSqlPool(spy as never);
+    try {
+      await extractActArtifactScores(db);
+      await extractRecipeCandidates(db);
+      expect(spy.seen.some((s) => s.includes("FROM act_artifact"))).toBe(true);
+      expect(spy.seen.some((s) => s.includes("kind = 'task_committed'"))).toBe(true);
+    } finally {
+      clearSqlPool();
+    }
+  });
+});
+
+describe("extractors — inter-extractor fairness yield", () => {
+  test("each routed extractor yields the loop before doing its write work (dispatcher fairness)", async () => {
+    // The daemon dispatcher awaits each extractor sequentially. A leading
+    // `await extractorFairnessYield()` (setTimeout(0) macrotask) at the top
+    // of every extractor body guarantees a macrotask boundary BETWEEN
+    // consecutive extractors so one can't chain into uninterrupted loop
+    // occupation. Deterministic proof: the extractor cannot have produced its
+    // promotion event by the time control returns to us at the FIRST await
+    // boundary — because its leading statement surrenders the loop before any
+    // read/compute/write runs. (A synchronous extractor would have already
+    // written knowledge_promoted before this microtask resumes.)
+    const db = openDb(":memory:");
+    const candidateId = insertEvent(db, { kind: "knowledge_candidate", payload: { text: "fairness" } });
+    for (let i = 0; i < 6; i++) insertEvent(db, { kind: "candidate_confirmed", context_refs: [candidateId] });
+
+    const p = extractKnowledgePromotions(db);
+    // Resume on the microtask queue (Promise.resolve) which drains BEFORE any
+    // setTimeout(0) macrotask the extractor scheduled at its leading yield.
+    await Promise.resolve();
+    const midFlight = (db.query("SELECT COUNT(*) AS c FROM events WHERE kind='knowledge_promoted'").get() as { c: number }).c;
+    expect(midFlight).toBe(0); // extractor yielded before writing — fairness boundary held
+
+    await p;
+    const afterDone = (db.query("SELECT COUNT(*) AS c FROM events WHERE kind='knowledge_promoted'").get() as { c: number }).c;
+    expect(afterDone).toBe(1); // and it still completes its promotion
+  });
+
+  test("extractActArtifactScores also yields before its write transaction", async () => {
+    const db = openDb(":memory:");
+    insertArtifact(db, "art_fairness");
+    for (let i = 0; i < 25; i++) {
+      insertEvent(db, { kind: "action_scored", action_artifact_id: "art_fairness", residual: 0.1 });
+    }
+    const p = extractActArtifactScores(db);
+    await Promise.resolve();
+    const midUpdated = (db.query("SELECT score FROM act_artifact WHERE id='art_fairness'").get() as { score: number }).score;
+    // Leading fairness yield ⇒ the recompute UPDATE has not run yet (still 0.5 seed).
+    expect(midUpdated).toBe(0.5);
+    await p;
   });
 });
