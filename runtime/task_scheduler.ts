@@ -116,18 +116,34 @@ const DEFAULT_POLL_INTERVAL_MS = 500;
 const BRAIN_PROCESS_RAM_BYTES = 700_000_000;
 const HOST_RAM_RESERVE_BYTES = 2_000_000_000;  // ~2GB kept for OS + bun + tests
 const PROMPT_COMPOSITION_HEADROOM_BYTES = 150_000_000;
-// Heap-pressure circuit breaker. Must sit ABOVE the daemon's normal/heavy
-// operating RSS (idle baseline ~1.2-1.7GB; observed ~3.0GB under a 6-brain
-// burst WITHOUT OOM) and BELOW the OOM danger zone, so it defers NEW brain
-// admission only when RSS is genuinely runaway — never during normal load.
-// (A 1.2GB threshold regressed: it sat below idle baseline and deferred every
-// brain dispatch indefinitely.) The heap-aware computeBrainDispatchCap is the
-// primary guard; this gate is the backstop.
-const DAEMON_RSS_PRESSURE_BYTES = 3_500_000_000;
+// Heap-pressure circuit breaker — the OOM backstop for NEW brain admission
+// (each opencode subprocess needs ~BRAIN_PROCESS_RAM_BYTES). It must defer a
+// new brain ONLY when the HOST genuinely lacks room, never during normal load.
+//
+// HISTORY / why this is host-AVAILABLE-relative, not a daemon-RSS absolute:
+// the previous gate tripped when daemon RSS >= a fixed 3.5GB. Two flaws
+// compounded into a permanent false positive that froze ALL brain dispatch:
+//   1. Daemon RSS is dominated by the SQLite page cache (the daemon mmaps a
+//      multi-hundred-MB→GB ledger). That cache is RECLAIMABLE — it is NOT
+//      committed pressure — yet it inflated RSS far past 3.5GB at idle (live
+//      evidence: 7.6GB RSS / 9.6GB peak on a 15.5GB host with 10.8GB MemAvailable
+//      and zero brains running).
+//   2. A fixed absolute does not scale with host RAM. As the ledger grew, the
+//      idle RSS baseline crossed 3.5GB — exactly the "threshold below idle
+//      baseline → defer every dispatch indefinitely" regression the old comment
+//      warned about, recurred.
+// The correct OOM signal is HOST AVAILABLE memory (MemAvailable — reclaimable-
+// cache-aware), not daemon RSS. Defer a new brain only when available memory
+// would not leave the OS reserve plus room for one more opencode subprocess.
+// A secondary daemon-RSS-vs-total ceiling still catches a genuine daemon leak.
+// computeBrainDispatchCap remains the primary admission guard; this is backstop.
+const DAEMON_PRESSURE_MIN_AVAILABLE_BYTES = HOST_RAM_RESERVE_BYTES + BRAIN_PROCESS_RAM_BYTES;
+const DAEMON_RSS_RUNAWAY_FRACTION_OF_TOTAL = 0.9;
 
 export type DaemonHeapPressureState = {
   rss_bytes: number;
   heap_used_bytes: number;
+  host_available_bytes: number;
   rss_pressure_threshold_bytes: number;
   under_pressure: boolean;
 };
@@ -144,12 +160,48 @@ const readDaemonMemoryUsage = (): { rss_bytes: number; heap_used_bytes: number }
   }
 };
 
+// Host memory genuinely available to allocate. os.freemem() returns Linux
+// MemFree, which EXCLUDES reclaimable page cache and so drastically under-
+// reports headroom for a daemon mmap'ing a large DB. Prefer /proc/meminfo
+// MemAvailable; fall back to os.freemem() off-Linux. Overridable for tests.
+const defaultReadHostAvailableBytes = (): number => {
+  try {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const m = fs.readFileSync("/proc/meminfo", "utf8").match(/^MemAvailable:\s+(\d+)\s+kB/m);
+    if (m) return Number(m[1]) * 1024;
+  } catch { /* non-linux / unreadable — fall through */ }
+  try {
+    return (require("node:os") as typeof import("node:os")).freemem();
+  } catch {
+    return 0;
+  }
+};
+
+let hostAvailableReader: () => number = defaultReadHostAvailableBytes;
+
+/** Test hook: override the host-available-memory reader (pass null to reset).
+ *  Mirrors the other _set…ForTests seams in this module so the OOM gate is
+ *  testable without writing /proc/meminfo. */
+export const _setHostAvailableReaderForTests = (fn: (() => number) | null): void => {
+  hostAvailableReader = fn ?? defaultReadHostAvailableBytes;
+};
+
 export const computeDaemonHeapPressureState = (): DaemonHeapPressureState => {
   const usage = readDaemonMemoryUsage();
+  const hostAvailableBytes = Math.max(0, Math.floor(hostAvailableReader()));
+  let totalBytes = 0;
+  try { totalBytes = (require("node:os") as typeof import("node:os")).totalmem(); } catch { /* keep 0 */ }
+  // Primary signal: not enough host memory for the OS reserve + one more brain.
+  // (hostAvailableBytes === 0 means the read failed → fail OPEN, never wedge.)
+  const lowAvailable = hostAvailableBytes > 0 && hostAvailableBytes < DAEMON_PRESSURE_MIN_AVAILABLE_BYTES;
+  // Secondary: a genuine daemon leak (RSS near total host RAM), independent of
+  // reclaimable cache — catches the case MemAvailable cannot.
+  const daemonRunaway = totalBytes > 0 && usage.rss_bytes > Math.floor(totalBytes * DAEMON_RSS_RUNAWAY_FRACTION_OF_TOTAL);
   return {
     ...usage,
-    rss_pressure_threshold_bytes: DAEMON_RSS_PRESSURE_BYTES,
-    under_pressure: usage.rss_bytes >= DAEMON_RSS_PRESSURE_BYTES,
+    host_available_bytes: hostAvailableBytes,
+    rss_pressure_threshold_bytes: DAEMON_PRESSURE_MIN_AVAILABLE_BYTES,
+    under_pressure: lowAvailable || daemonRunaway,
   };
 };
 
@@ -1357,6 +1409,7 @@ export const schedulerTick = async (
           reason: "opencode_brain_dispatch_paused_for_daemon_heap_pressure",
           daemon_rss_bytes: daemonHeap.rss_bytes,
           daemon_heap_used_bytes: daemonHeap.heap_used_bytes,
+          host_available_bytes: daemonHeap.host_available_bytes,
           rss_pressure_threshold_bytes: daemonHeap.rss_pressure_threshold_bytes,
           in_flight_brain: IN_FLIGHT_BRAIN.size,
           note: "new opencode_brain admission is deferred until daemon RSS falls below the pressure threshold; existing in-flight work may settle",

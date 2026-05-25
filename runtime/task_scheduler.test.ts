@@ -16,6 +16,7 @@ import {
   setSchedulerDraining,
   _setDispatchReadyTaskForTests,
   _injectBrainInFlightForTests,
+  _setHostAvailableReaderForTests,
 } from "./task_scheduler";
 import { FIXTURE_D_DIRECTIVE_TEXT, openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { emitEvent } from "./events";
@@ -361,19 +362,30 @@ describe("task_scheduler", () => {
     }
   });
 
-  test("daemon heap pressure state flips when daemon RSS crosses the pressure threshold", () => {
+  test("daemon heap pressure flips on LOW host-available memory, NOT on reclaimable-cache RSS", () => {
     const originalMemoryUsage = process.memoryUsage;
     try {
+      // A daemon with HIGH RSS (mostly reclaimable SQLite page cache) is NOT
+      // under pressure when the host has ample MemAvailable — this is the exact
+      // false-positive that previously froze all brain dispatch (7.6GB RSS on a
+      // 15.5GB host with 10.8GB available).
       Object.defineProperty(process, "memoryUsage", {
-        value: () => ({ ...originalMemoryUsage(), rss: 3_600_000_000, heapUsed: 2_400_000_000 }),
+        value: () => ({ ...originalMemoryUsage(), rss: 7_600_000_000, heapUsed: 2_400_000_000 }),
         configurable: true,
       });
-      const state = computeDaemonHeapPressureState();
-      expect(state.under_pressure).toBe(true);
-      expect(state.rss_bytes).toBe(3_600_000_000);
-      expect(state.heap_used_bytes).toBe(2_400_000_000);
+      _setHostAvailableReaderForTests(() => 10_800_000_000); // ample
+      const ample = computeDaemonHeapPressureState();
+      expect(ample.under_pressure).toBe(false);
+      expect(ample.rss_bytes).toBe(7_600_000_000);
+      expect(ample.host_available_bytes).toBe(10_800_000_000);
+
+      // Genuine pressure: host available below the OS reserve + one-brain floor.
+      _setHostAvailableReaderForTests(() => 1_000_000_000); // 1GB < 2.7GB floor
+      const tight = computeDaemonHeapPressureState();
+      expect(tight.under_pressure).toBe(true);
     } finally {
       Object.defineProperty(process, "memoryUsage", { value: originalMemoryUsage, configurable: true });
+      _setHostAvailableReaderForTests(null);
     }
   });
 
@@ -384,10 +396,8 @@ describe("task_scheduler", () => {
     writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
     try {
       const { taskId } = await openFixtureDCountTodos(db, tempDir);
-      Object.defineProperty(process, "memoryUsage", {
-        value: () => ({ ...originalMemoryUsage(), rss: 3_600_000_000, heapUsed: 2_400_000_000 }),
-        configurable: true,
-      });
+      // Force genuine host-memory pressure (available below the reserve+brain floor).
+      _setHostAvailableReaderForTests(() => 1_000_000_000);
 
       const tick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 5 });
       expect(tick.dispatched).not.toContain(taskId);
@@ -397,12 +407,13 @@ describe("task_scheduler", () => {
         .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'constitutional_gate_decision' ORDER BY ts DESC LIMIT 1")
         .get(taskId) as { payload: string } | null;
       expect(gate).not.toBeNull();
-      const payload = JSON.parse(gate!.payload) as { gate?: string; reason?: string; daemon_rss_bytes?: number };
+      const payload = JSON.parse(gate!.payload) as { gate?: string; reason?: string; host_available_bytes?: number };
       expect(payload.gate).toBe("daemon_heap_pressure");
       expect(payload.reason).toBe("opencode_brain_dispatch_paused_for_daemon_heap_pressure");
-      expect(payload.daemon_rss_bytes).toBe(3_600_000_000);
+      expect(payload.host_available_bytes).toBe(1_000_000_000);
     } finally {
       Object.defineProperty(process, "memoryUsage", { value: originalMemoryUsage, configurable: true });
+      _setHostAvailableReaderForTests(null);
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 60_000);
