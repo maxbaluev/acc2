@@ -158,6 +158,28 @@ describe("retrieve (full async path with mocked query embed)", () => {
     expect(result.hits[0].routing_score_breakdown.artifact_example_signal).toBe(1);
   });
 
+  test("two artifacts serving the same goal_shape: higher-posterior wins (wave-1 compose)", () => {
+    // Capability-gap → author-better → select-better → consolidate loop: when
+    // two artifacts serve the SAME goal_shape with identical similarity and
+    // identical interface signals, the artifact-fit selector must PREFER the
+    // higher-posterior one (better stored score + confidence + lower residual)
+    // so retrieval picks the better implementation.
+    const db = openDb(":memory:");
+    runViews(db);
+    const dims = 8;
+    const goalText = "count TODO markers in scripts";
+    const shape = goalShape(goalText);
+    const iface = { purpose: "count TODO markers", inputs_schema: { type: "object" }, outputs_schema: { type: "object" }, usage_examples: [{ description: "count", input: { path: "runtime" }, output: { count: 3 } }] };
+    // Same embedding axis → identical similarity; only posterior/fit differs.
+    const strongId = seedEmbeddedArtifact(db, "artifact_strong", 0, dims, { score: 0.9, confidence: 0.95, recentResidualMean: 0.05, interfaceMetadata: iface });
+    const weakId = seedEmbeddedArtifact(db, "artifact_weak", 0, dims, { score: 0.4, confidence: 0.4, recentResidualMean: 0.7, interfaceMetadata: iface });
+    for (const [artifactId, residual] of [[strongId, 0.05], [weakId, 0.7]] as const) emitEvent(db, { kind: "act_artifact_score_updated", substrate_origin: "substrate_auto", action_artifact_id: artifactId, residual, payload: { artifact_id: artifactId, goal_shape: shape, residual } });
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    const result = retrieveWithEmbedding(db, idx, new Float32Array(makeUnitVec(dims, 0)), { k: 3, kindFilter: ["act_artifact"], goalText, runtime: "bun" });
+    expect(result.hits.map((h) => h.event_id)).toEqual([strongId, weakId]);
+    expect(result.hits[0].rerank_score).toBeGreaterThan(result.hits[1].rerank_score);
+  });
+
   test("mixed-version rows are excluded; counter increments", async () => {
     process.env.OPENAI_API_KEY = "sk-test-mock";
     const dims = EMBEDDING_DIMS;
