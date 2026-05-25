@@ -580,6 +580,10 @@ describe("derived sets match their pre-unification shape", () => {
       // metric — separate role).
       "schema_migration_applied",
       "schema_migration_failed",
+      // update_refused: acc update min_acc_version compatibility-gate refusal
+      // (a behind organism refusing to partial-apply an incompatible release).
+      // Health metric so dashboards plot blocked-upgrade attempts.
+      "update_refused",
       // Observability-fidelity guard (2026-05-22, phase-2 SJPF3VB9).
       // The standing observability_guard_worker emits loop_inert_alert
       // when a wired loop is silent while its upstream fired, and

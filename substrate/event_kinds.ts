@@ -1160,6 +1160,17 @@ export const EVENT_KINDS = {
   // "runtime" (a substrate-side peer worker will own it); not embeddable
   // and not a health metric until the layer is real.
   release_announced:                       { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // update_refused: `acc update` emits this BEFORE applying a release when a
+  // hard precondition fails — primarily the min_acc_version compatibility
+  // gate (installed acc version < the release's declared minimum). The
+  // payload carries { reason, installed_version, min_acc_version,
+  // release_version?, source_kind } so the ledger records WHY a behind
+  // organism refused to partial-apply an incompatible release. Health
+  // metric so dashboards can plot blocked-upgrade attempts (a signal that
+  // an intermediate release must be applied first). Distinct from
+  // schema_migration_failed (which is a mid-apply SQL failure, not a
+  // pre-apply compatibility refusal).
+  update_refused:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   // ── Unified pathology budget (brain elegance bc8je5f3x, 2026-05-15) ─
   // Pre-fix six backpressure mechanisms (bridge_failure_streak,
   // consecutive_bridge_failures, supervisor_redispatch_storm,
