@@ -2937,7 +2937,11 @@ terminal_ranked AS (
    -- reaped tasks had terminal_kind=NULL → fell through to the open-dispatch
    -- / orphan logic → showed as 'zombie' FOREVER in acc watch despite being
    -- terminally abandoned (owner saw a 2m-old reaped task still 'zombie').
-   AND e.kind IN ('task_committed', 'task_failed', 'dispatcher_violation', 'task_abandoned')
+   -- 2026-05-25: task_committed_superseded added — same class of bug. A root
+   -- superseded by a newer version IS terminal, but without it here the row
+   -- fell through to the live/cap logic and showed 'live' FOREVER (observed:
+   -- two superseded repair roots stuck 'live' ~4h with a terminal present).
+   AND e.kind IN ('task_committed', 'task_failed', 'dispatcher_violation', 'task_abandoned', 'task_committed_superseded')
 ),
 terminal AS (
   SELECT * FROM terminal_ranked WHERE rn = 1
@@ -3056,7 +3060,7 @@ SELECT
     -- 2026-05-18 foundational fix (matches lifecycle_status logic below):
     -- root committed + open children = 'live_amended', honestly distinct
     -- from a fresh 'live' (no terminal yet).
-    WHEN term.terminal_kind = 'task_committed'
+    WHEN term.terminal_kind IN ('task_committed', 'task_committed_superseded')
          AND COALESCE(ds.open_dispatch_count, 0) > 0
       THEN 'live_amended'
     -- In-flight dispatch ANYWHERE under the root wins over a stale terminal:
@@ -3085,7 +3089,7 @@ SELECT
          AND COALESCE(ds.open_dispatch_count, 0) = 0
          AND ready.ready_since IS NOT NULL
       THEN 'queued_at_cap'
-    WHEN term.terminal_kind = 'task_committed' THEN 'completed'
+    WHEN term.terminal_kind IN ('task_committed', 'task_committed_superseded') THEN 'completed'
     -- Bug B partial fix (2026-05-17): widen the orphan_node threshold
     -- from 5 min to 1 hour so a brief scheduler/restart gap during
     -- normal operation does NOT immediately bucket a root as orphan.
@@ -3159,7 +3163,7 @@ SELECT
     -- the same directive_id. Renderers can choose to show
     -- "continuing" vs "fresh start"; consumers reading for closure can
     -- still detect it via terminal_kind='task_committed'.
-    WHEN term.terminal_kind = 'task_committed'
+    WHEN term.terminal_kind IN ('task_committed', 'task_committed_superseded')
          AND COALESCE(ds.open_dispatch_count, 0) > 0
       THEN 'live_amended'
     -- 2026-05-21 false-zombie fix: age alone (oldest open dispatch > 5min)
@@ -3186,7 +3190,7 @@ SELECT
          AND COALESCE(ds.open_dispatch_count, 0) = 0
          AND ready.ready_since IS NOT NULL
       THEN 'queued_at_cap'
-    WHEN term.terminal_kind = 'task_committed' THEN 'completed'
+    WHEN term.terminal_kind IN ('task_committed', 'task_committed_superseded') THEN 'completed'
     WHEN term.terminal_kind IS NULL
          AND COALESCE(ds.dispatched_count, 0) = 0
          AND COALESCE(ds.open_dispatch_count, 0) = 0
