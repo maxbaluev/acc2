@@ -266,3 +266,58 @@ export const resolveAliasChain = (db: Database, id: string): string => {
   }
   return current;
 };
+
+// ── Hot-path memoization for ALIAS_CHAI (directive 3XETJCYT) ─────────
+//
+// Every artifact lookup/credit path that resolves an OLD id → CURRENT id
+// would otherwise run resolveAliasChain on the hot path. Each hop scans
+// the events table filtered by json_extract(payload,'$.old_id') — the
+// idx_events_act_artifact_aliased (kind, ts) partial index (v001) covers
+// the kind+ORDER BY but NOT the old_id predicate, so a naive call is one
+// indexed-range-scan-per-hop. Aliases are append-only and rare (one row
+// per renamed handle per release), so a per-db process-lifetime cache is
+// the correct shape: resolved id is stable until a NEW act_artifact_aliased
+// row lands, at which point invalidateAliasCache(db) clears the map.
+//
+// Keyed by the Database object identity (WeakMap) so a fresh :memory: db
+// in a test gets its own cache and the entry is GC'd with the db. The
+// identity case (no alias) is cached as `id === id` so an un-aliased id
+// costs exactly one map lookup after the first resolve.
+const aliasResolutionCache = new WeakMap<Database, Map<string, string>>();
+
+const cacheForDb = (db: Database): Map<string, string> => {
+  let m = aliasResolutionCache.get(db);
+  if (!m) {
+    m = new Map<string, string>();
+    aliasResolutionCache.set(db, m);
+  }
+  return m;
+};
+
+/** Invalidate the per-db alias resolution cache. Called from the
+ *  emitEvent post-write boundary whenever an act_artifact_aliased row
+ *  lands so the next resolveArtifactId reflects the new edge. Cheap:
+ *  clears the whole map (alias mutations are rare; selective invalidation
+ *  would have to walk the chain anyway). */
+export const invalidateAliasCache = (db: Database): void => {
+  const m = aliasResolutionCache.get(db);
+  if (m) m.clear();
+};
+
+/** Canonical artifact-id resolver used by every lookup/credit/routing
+ *  path (ALIAS_CHAI). Resolves OLD → CURRENT through the append-only
+ *  act_artifact_aliased chain (multi-hop, cycle-refused via
+ *  resolveAliasChain) and memoizes the result per-db. An un-aliased id
+ *  resolves to itself (identity). This is the SINGLE seam through which
+ *  accumulated posterior credit survives a rename across many version
+ *  gaps — a citation of an old id lands on the current artifact's row,
+ *  never a phantom. */
+export const resolveArtifactId = (db: Database, id: string): string => {
+  if (!id) return id;
+  const cache = cacheForDb(db);
+  const hit = cache.get(id);
+  if (hit !== undefined) return hit;
+  const resolved = resolveAliasChain(db, id);
+  cache.set(id, resolved);
+  return resolved;
+};

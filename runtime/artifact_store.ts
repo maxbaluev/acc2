@@ -37,6 +37,7 @@ import type { EmitEventInput } from "./events";
 import { emitEvent } from "./events";
 import { parseResourceRefs, repoTargetFilesFromResources, resourcesFromTargetFiles, type ResourceRef } from "./resource_uri";
 import { betaMean, betaStreamConfidence } from "./posterior";
+import { resolveArtifactId } from "../substrate/migration_runner";
 
 export type ActArtifactRow = {
   id: string;
@@ -271,7 +272,15 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): ActArt
 };
 
 export const getArtifact = (db: Database, id: string): ActArtifactRow | null => {
-  const row = db.query("SELECT * FROM act_artifact WHERE id = ?").get(id) as Record<string, unknown> | null;
+  // ALIAS_CHAI (directive 3XETJCYT): resolve OLD → CURRENT id through the
+  // append-only act_artifact_aliased chain so a renamed handle (across
+  // many version gaps) still finds its current row. Memoized + cycle-
+  // refused inside resolveArtifactId; un-aliased ids resolve to themselves.
+  // This is the canonical read seam — credit.ts, dispatch_decider.ts,
+  // task_dispatcher.ts, render_pipeline.ts, artifact_provenance.ts, and
+  // recipe_replay.ts all funnel their by-id lookups through here.
+  const resolvedId = resolveArtifactId(db, id);
+  const row = db.query("SELECT * FROM act_artifact WHERE id = ?").get(resolvedId) as Record<string, unknown> | null;
   if (!row) return null;
   return mapRow(row);
 };
@@ -381,6 +390,11 @@ export const applyResidualOutcome = (
   emit?: (event: EmitEventInput) => void,
   opts?: { weight?: number },
 ): ActArtifactRow => {
+  // ALIAS_CHAI: resolve OLD → CURRENT before the posterior write so credit
+  // cited against a renamed id lands on the CURRENT row, not a phantom.
+  // getArtifact already resolves for the read; we resolve the id we UPDATE
+  // by so the write targets the same row.
+  artifactId = resolveArtifactId(db, artifactId);
   const row = getArtifact(db, artifactId);
   if (!row) throw new Error(`act_artifact_not_found:${artifactId}`);
   const r = clamp01(residual);
@@ -457,6 +471,7 @@ export const maybePromote = (
   artifactId: string,
   emit: (event: EmitEventInput) => void,
 ): boolean => {
+  artifactId = resolveArtifactId(db, artifactId); // ALIAS_CHAI: write the CURRENT row
   const row = getArtifact(db, artifactId);
   if (!row) return false;
   if (row.status !== "admitted") return false;
@@ -523,6 +538,7 @@ export const maybeQuarantine = (
   artifactId: string,
   emit: (event: EmitEventInput) => void,
 ): boolean => {
+  artifactId = resolveArtifactId(db, artifactId); // ALIAS_CHAI: write the CURRENT row
   const row = getArtifact(db, artifactId);
   if (!row) return false;
   if (row.status === "quarantined") return false;
@@ -641,6 +657,7 @@ export const recordArtifactKill = (
   emit: (event: EmitEventInput) => void,
   reason: string,
 ): { newCount: number; quarantined: boolean; retired: boolean } => {
+  artifactId = resolveArtifactId(db, artifactId); // ALIAS_CHAI: write the CURRENT row
   const row = getArtifact(db, artifactId);
   if (!row) return { newCount: 0, quarantined: false, retired: false };
   const newCount = row.recentKillCount + 1;
@@ -671,6 +688,7 @@ export const maybeRetire = (
   artifactId: string,
   emit: (event: EmitEventInput) => void,
 ): boolean => {
+  artifactId = resolveArtifactId(db, artifactId); // ALIAS_CHAI: write the CURRENT row
   const row = getArtifact(db, artifactId);
   if (!row) return false;
   if (row.status === "retired") return false;
@@ -784,6 +802,7 @@ export const maybeRehabilitate = async (
   emit: (event: EmitEventInput) => void,
   opts?: { nowMs?: number },
 ): Promise<RehabResult> => {
+  artifactId = resolveArtifactId(db, artifactId); // ALIAS_CHAI: write the CURRENT row
   const row = getArtifact(db, artifactId);
   if (!row) return { rehabilitated: false, reason: "not_quarantined", detail: "artifact_not_found" };
   if (row.status !== "quarantined") {

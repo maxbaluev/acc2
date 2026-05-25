@@ -1857,6 +1857,17 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       void err;
     }
   }
+  // ALIAS_CHAI (directive 3XETJCYT): a new act_artifact_aliased edge changes
+  // every OLD → CURRENT resolution downstream of the renamed id. Invalidate
+  // the per-db memoized alias cache so the next resolveArtifactId reflects
+  // the new hop. Lazy require avoids the events ↔ migration_runner import
+  // cycle (migration_runner imports ./events for emitEvent).
+  if (input.kind === "act_artifact_aliased") {
+    try {
+      const { invalidateAliasCache } = require("../substrate/migration_runner") as typeof import("../substrate/migration_runner");
+      invalidateAliasCache(db);
+    } catch { /* fail-soft: cold cache rebuilds on next miss */ }
+  }
   return { id, ts };
 };
 

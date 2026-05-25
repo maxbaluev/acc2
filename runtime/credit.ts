@@ -57,6 +57,7 @@ import {
   residualToBetaDeltas,
 } from "./artifact_store";
 import { goalShape } from "./goal_shape";
+import { resolveArtifactId } from "../substrate/migration_runner";
 import { nowIso } from "./ids";
 // Audit b7kjyk2k1 / Z9MXJ8YHXN1ZH knowledge cold-start (8.2% candidates ever
 // get a verdict). Brain proposal TNY4XZY0GD1W: after each candidate_confirmed
@@ -195,7 +196,12 @@ const extractBodyCitations = (body: string): string[] => {
  *  citation that names a row we haven't ingested yet still receives
  *  credit when its event lands later. */
 const classifyTarget = (db: Database, id: string): "knowledge" | "act_artifact" | "unknown" => {
-  const art = db.query("SELECT 1 AS x FROM act_artifact WHERE id = ?").get(id) as { x: number } | null;
+  // ALIAS_CHAI (directive 3XETJCYT): a citation may name an OLD artifact id
+  // renamed across releases. Resolve OLD → CURRENT before the existence
+  // probe so a renamed handle classifies as act_artifact (and is credited),
+  // not falls through to the knowledge/unknown branch.
+  const resolvedArtifactId = resolveArtifactId(db, id);
+  const art = db.query("SELECT 1 AS x FROM act_artifact WHERE id = ?").get(resolvedArtifactId) as { x: number } | null;
   if (art) return "act_artifact";
   const ev = db.query("SELECT kind FROM events WHERE id = ?").get(id) as { kind: string } | null;
   if (ev && (ev.kind === "knowledge_candidate" || ev.kind === "knowledge_promoted")) {
@@ -1604,8 +1610,13 @@ export const projectActionScoredToCredit = (
     // knowledge path; the projector is artifact-only.
     for (const ref of predictedContextRefs) {
       if (typeof ref !== "string" || ref.length === 0) continue;
-      const isArtifact = db.query("SELECT 1 AS x FROM act_artifact WHERE id = ?").get(ref) as { x: number } | null;
-      if (isArtifact) citedArtifactIds.add(ref);
+      // ALIAS_CHAI: resolve OLD → CURRENT so a context_ref naming a renamed
+      // artifact is still recognized as an artifact. Credit the resolved id
+      // (applyResidualOutcome would resolve again, but adding the resolved id
+      // keeps the score_updated audit row pointed at the live row).
+      const resolvedRef = resolveArtifactId(db, ref);
+      const isArtifact = db.query("SELECT 1 AS x FROM act_artifact WHERE id = ?").get(resolvedRef) as { x: number } | null;
+      if (isArtifact) citedArtifactIds.add(resolvedRef);
     }
     if (citedArtifactIds.size === 0) return; // nothing to credit
     const sourceActPayload = sourceActEventId
