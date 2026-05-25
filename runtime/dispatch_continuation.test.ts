@@ -76,6 +76,14 @@ describe("dispatch continuation — no job loss on restart (GOAL 2)", () => {
     expect(childPayload.continuation_reason).toBe("restart_drain_checkpoint");
     expect(childPayload.refines_task_id).toBe(taskId);
     expect(childPayload.checkpoint_origin).toBe("graceful_shutdown_drain");
+    expect(childPayload.trajectory_id).toBe(`trajectory:${directiveId}:${taskId}`);
+    expect(childPayload.resource_price).toEqual({ wall_ms: null, cpu_ms: null, slots: 1 });
+    expect(childPayload.expected_value).toEqual({ resume_prior_work: true });
+    expect(childPayload.world_model_delta).toEqual({ strand_state: "checkpointed", terminal_safe: true });
+    expect(childPayload.merge_policy).toEqual({
+      dedupe_key: ["parent_task_id", "continuation_reason", "prior_dispatch_id"],
+      duplicate_action: "reuse_existing_child",
+    });
 
     const edge = db
       .query("SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND task_id = ?")
@@ -95,6 +103,38 @@ describe("dispatch continuation — no job loss on restart (GOAL 2)", () => {
     const ready = readyTasks(db, directiveId).map((t) => t.id);
     expect(ready).not.toContain(taskId);
     expect(ready).toContain(continuationTaskId);
+  });
+
+  test("repeated continuation emission reuses the existing child and does not duplicate repair rows", () => {
+    const db = openDb(":memory:");
+    const { directiveId, taskId } = openInFlightTask(db, "idempotent continuation goal");
+
+    const first = emitRefinementContinuation(db, {
+      taskId,
+      directiveId,
+      goal: "idempotent continuation goal",
+      continuationReason: "partial_emit_no_terminal",
+      priorDispatchId: "dispatch-1",
+    });
+    const second = emitRefinementContinuation(db, {
+      taskId,
+      directiveId,
+      goal: "idempotent continuation goal",
+      continuationReason: "partial_emit_no_terminal",
+      priorDispatchId: "dispatch-1",
+    });
+
+    expect(first.outcome).toBe("opened");
+    expect(second.outcome).toBe("already_open");
+    expect(second.outcome === "already_open" ? second.continuation_task_id : "").toBe(first.outcome === "opened" ? first.continuation_task_id : "");
+    const childCount = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_node_opened' AND parent_task_id = ?")
+      .get(taskId) as { c: number };
+    expect(childCount.c).toBe(1);
+    const repairRows = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'artifact_repair_needed'")
+      .get() as { c: number };
+    expect(repairRows.c).toBe(0);
   });
 
   test("checkpoint is bounded by the refinement-depth cap — an interrupted-every-restart task terminalizes instead of resuming forever", () => {

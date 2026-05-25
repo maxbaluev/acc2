@@ -35,6 +35,7 @@ export const REFINEMENT_DEPTH_CAP = 5;
 
 export type ContinuationOutcome =
   | { outcome: "opened"; continuation_task_id: string; continuation_edge_event_id: string; depth: number }
+  | { outcome: "already_open"; continuation_task_id: string; continuation_edge_event_id: string | null; depth: number }
   | { outcome: "depth_capped"; depth: number }
   | { outcome: "skipped"; reason: string };
 
@@ -56,6 +57,34 @@ export type EmitContinuationArgs = {
   actionHandle?: string;
 };
 
+const findExistingContinuation = (
+  db: Database,
+  args: EmitContinuationArgs,
+): { taskId: string; edgeEventId: string | null } | null => {
+  const row = db
+    .query(
+      `SELECT task_id FROM events
+        WHERE kind = 'task_node_opened'
+          AND parent_task_id = ?
+          AND json_extract(payload, '$.continuation_reason') = ?
+          AND COALESCE(json_extract(payload, '$.prior_dispatch_id'), '__NULL__') = COALESCE(?, '__NULL__')
+        ORDER BY ts ASC LIMIT 1`,
+    )
+    .get(args.taskId, args.continuationReason, args.priorDispatchId ?? null) as { task_id: string } | null;
+  if (!row) return null;
+  const edge = db
+    .query(
+      `SELECT id FROM events
+        WHERE kind = 'task_edge_recorded'
+          AND parent_task_id = ?
+          AND task_id = ?
+          AND json_extract(payload, '$.kind') = 'refines'
+        ORDER BY ts ASC LIMIT 1`,
+    )
+    .get(args.taskId, row.task_id) as { id: string } | null;
+  return { taskId: row.task_id, edgeEventId: edge?.id ?? null };
+};
+
 /** Emit a refinement-edge continuation for ONE task. Reuses the canonical
  *  productive-timeout continuation shape:
  *    task_node_opened (refines parent) + task_edge_recorded(kind=refines) +
@@ -71,6 +100,15 @@ export const emitRefinementContinuation = (
   args: EmitContinuationArgs,
 ): ContinuationOutcome => {
   try {
+    const existing = findExistingContinuation(db, args);
+    if (existing) {
+      return {
+        outcome: "already_open",
+        continuation_task_id: existing.taskId,
+        continuation_edge_event_id: existing.edgeEventId,
+        depth: refinementDepth(db, existing.taskId),
+      };
+    }
     const depth = refinementDepth(db, args.taskId);
     if (depth >= REFINEMENT_DEPTH_CAP) {
       emitEvent(db, {
@@ -120,6 +158,14 @@ export const emitRefinementContinuation = (
         refines_task_id: args.taskId,
         continuation_reason: args.continuationReason,
         prior_dispatch_id: args.priorDispatchId ?? null,
+        trajectory_id: `trajectory:${args.directiveId}:${args.taskId}`,
+        resource_price: { wall_ms: null, cpu_ms: null, slots: 1 },
+        expected_value: { resume_prior_work: true },
+        world_model_delta: { strand_state: "checkpointed", terminal_safe: true },
+        merge_policy: {
+          dedupe_key: ["parent_task_id", "continuation_reason", "prior_dispatch_id"],
+          duplicate_action: "reuse_existing_child",
+        },
         ...(args.extra ?? {}),
       } as JsonValue,
     });
@@ -268,6 +314,9 @@ export const checkpointInterruptedDispatches = (
       extra: { checkpoint_origin: "graceful_shutdown_drain" as JsonValue },
     });
     if (outcome.outcome === "opened") {
+      result.checkpointed_task_ids.push(taskId);
+      result.continuation_task_ids.push(outcome.continuation_task_id);
+    } else if (outcome.outcome === "already_open") {
       result.checkpointed_task_ids.push(taskId);
       result.continuation_task_ids.push(outcome.continuation_task_id);
     } else if (outcome.outcome === "depth_capped") {

@@ -739,6 +739,26 @@ const existingProjection = (db: Database, kind: EventKind, key: string): Emitted
   return row ? { id: row.id, ts: row.ts } : null;
 };
 
+type RootCommitBlocker = { reason: "missing_clean_closure_audit" | "nonterminal_descendants"; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[] };
+const rootTaskCommitBlocker = (db: Database, taskId: string): RootCommitBlocker | null => {
+  const root = db.query(`SELECT 1 FROM events WHERE kind = 'task_node_opened' AND task_id = ? AND parent_task_id IS NULL LIMIT 1`).get(taskId) as { 1: number } | null;
+  if (!root) return null;
+  const descendants = new Set<string>(); const queue = [taskId]; const seen = new Set<string>();
+  while (queue.length > 0) {
+    const cur = queue.shift()!; if (seen.has(cur)) continue; seen.add(cur);
+    const rows = db.query(`SELECT task_id AS child_id FROM events WHERE kind = 'task_node_opened' AND parent_task_id = ? UNION SELECT json_extract(payload, '$.to_task') AS child_id FROM events WHERE kind = 'task_edge_recorded' AND json_extract(payload, '$.kind') IN ('refines', 'requires') AND json_extract(payload, '$.from_task') = ?`).all(cur, cur) as Array<{ child_id: string | null }>;
+    for (const row of rows) if (row.child_id && row.child_id !== taskId && !descendants.has(row.child_id)) { descendants.add(row.child_id); queue.push(row.child_id); }
+  }
+  if (descendants.size === 0) return null;
+  const audit = db.query(`SELECT id, residual, payload FROM events WHERE kind = 'task_closure_audited' AND task_id = ? ORDER BY ts DESC, rowid DESC LIMIT 1`).get(taskId) as { id: string; residual: number | null; payload: string } | null;
+  let closureResidual: number | null = null;
+  if (audit) { try { const p = JSON.parse(audit.payload ?? '{}') as { closure_residual?: unknown }; closureResidual = typeof p.closure_residual === 'number' && Number.isFinite(p.closure_residual) ? p.closure_residual : typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null; } catch { closureResidual = typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null; } }
+  if (closureResidual === null || closureResidual >= 0.3) return { reason: "missing_clean_closure_audit", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [] };
+  const nonterminal: string[] = [];
+  for (const descendant of descendants) { const terminal = db.query(`SELECT 1 FROM events WHERE task_id = ? AND kind IN ('task_committed', 'task_failed', 'task_abandoned', 'task_committed_superseded') LIMIT 1`).get(descendant) as { 1: number } | null; if (!terminal) nonterminal.push(descendant); }
+  return nonterminal.length > 0 ? { reason: "nonterminal_descendants", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: nonterminal } : null;
+};
+
 const emitProjectedEvent = (
   db: Database,
   sourceActId: string,
@@ -1189,6 +1209,12 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
     const existing = existingProjection(db, input.kind, inputProjectionKey);
     if (existing) return existing;
   }
+  if (input.kind === "task_committed" && input.task_id) {
+    const blocker = rootTaskCommitBlocker(db, input.task_id);
+    if (blocker) {
+      return emitEvent(db, { kind: "dispatcher_violation", substrate_origin: "substrate_auto", directive_id: input.directive_id, task_id: input.task_id, parent_task_id: input.parent_task_id ?? null, loop_id: input.loop_id, context_refs: input.context_refs ?? [], failure_kind: "root_commit_blocked", payload: { source_kind: "task_committed", refused_reason: blocker.reason, closure_audit_event_id: blocker.closure_audit_event_id, closure_residual: blocker.closure_residual, nonterminal_descendant_task_ids: blocker.nonterminal_descendant_task_ids, note: "Root task_committed refused: roots with descendants require a current task_closure_audited residual < 0.3 and terminal descendants." } });
+    }
+  }
   if (input.kind === "task_committed" || input.kind === "task_failed") {
     if (input.task_id) {
       const existing = db
@@ -1568,7 +1594,7 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
         const summary = typeof payload.summary === "string" ? payload.summary : "lesson extracted";
         const lessonKind = typeof payload.kind === "string"
           ? payload.kind
-          : (typeof payload.lesson_kind === "string" ? payload.lesson_kind : "general");
+          : (typeof payload.lesson_kind === "string" ? payload.lesson_kind : "unclassified");
         const defaultedLessonKind = isObject(payload.classification_source)
           && payload.classification_source.basis === "lesson_extracted_without_lesson_kind";
         if (defaultedLessonKind) {
