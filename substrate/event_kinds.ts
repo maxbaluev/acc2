@@ -343,6 +343,19 @@ export const EVENT_KINDS = {
   // shows WHY recent_kill_count climbed (and from which event).
   artifact_health_counter_updated:         { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   act_artifact_rehabilitated:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // RESIDUAL_D (directive 3XETJCYT): OFFENSIVE half of the artifact
+  // lifecycle. The defensive loop (maybeQuarantine/maybeRetire) only
+  // DEMOTES a failing artifact; capability_gap_detected is the durable,
+  // ledgered trigger emitted by runtime/capability_gap.ts when an
+  // artifact the defensive loop already quarantined/retired keeps failing
+  // (rolling residual ≥ band over ≥ N obs) for a goal_shape that still has
+  // demand. The worker then opens a brain-authoring directive so a
+  // more-effective replacement is authored (the brain authors; the
+  // detector only triggers). health_metric so dashboards surface how
+  // often the offensive loop fires. capability_gap_resolved is the
+  // resolution marker that closes the idempotency window for a pair.
+  capability_gap_detected:                 { producer: "runtime", embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+  capability_gap_resolved:                 { producer: "runtime", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   act_artifact_score_updated:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // T0.2 universal projection — emit-boundary projector for action_scored
   // walks source_act_event_id → action_predicted's cited_artifact_ids and

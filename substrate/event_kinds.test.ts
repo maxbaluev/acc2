@@ -601,6 +601,11 @@ describe("derived sets match their pre-unification shape", () => {
       // events surface in `acc admin substrate-status`.
       "mcp_operation_watchdog_fired",
       "post_commit_projection_overflow",
+      // RESIDUAL_D (directive 3XETJCYT): OFFENSIVE artifact lifecycle.
+      // capability_gap_detected is health_metric so dashboards surface
+      // how often the substrate decides a failing artifact needs a
+      // brain-authored replacement (offensive-loop firing rate).
+      "capability_gap_detected",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

@@ -1350,6 +1350,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("compaction")) registerWorker("compaction", 60 * 60 * 1000);
   if (isWorkerEnabled("recipe_inertia")) registerWorker("recipe_inertia", 60 * 60 * 1000);
   if (isWorkerEnabled("verify_heal")) registerWorker("verify_heal", 60 * 60 * 1000);
+  if (isWorkerEnabled("capability_gap")) registerWorker("capability_gap", 30 * 60 * 1000);
   // Brain audit B (2026-05-15): register the Model-D extractors worker
   // so candidate→promoted advancement happens on a bounded cadence,
   // not by chance dispatch through Father.
@@ -2425,6 +2426,27 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     });
     registerReactiveWorker("verify_heal", healTickMs, ["knowledge_contradiction_observed", "knowledge_candidate", "action_scored", "task_closure_audited"], healTick, { minReactiveGapMs: 5 * 60 * 1000 });
     // verify_heal is activation-driven; activationDisposers are cleared on shutdown.
+  }
+
+  // RESIDUAL_D (directive 3XETJCYT): OFFENSIVE half of the artifact
+  // lifecycle. Detects (artifact, goal_shape) capability gaps for
+  // artifacts the defensive loop already quarantined/retired whose rolling
+  // residual stays high for a still-demanded goal_shape, emits
+  // capability_gap_detected, and opens a brain-authoring directive (the
+  // scheduler dispatches it like any directive_opened). Per-tick dispatch
+  // is capped to bound brain spend. Default ON; opt-OUT via
+  // `ACC2_DISABLE_WORKERS=capability_gap`. Reactive on artifact-health
+  // signals; 30-min timer is the genuine deadline.
+  if (isWorkerEnabled("capability_gap")) {
+    const capGapTickMs = 30 * 60 * 1000;
+    const { capabilityGapWorkerTick } = await import("./capability_gap");
+    markWorkerReady("capability_gap");
+    recordWorkerTick("capability_gap");
+    const capGapTick = supervisedTick(db, "capability_gap", capGapTickMs, async () => {
+      capabilityGapWorkerTick(db);
+    });
+    registerReactiveWorker("capability_gap", capGapTickMs, ["act_artifact_quarantined", "act_artifact_retired", "act_artifact_score_updated"], capGapTick, { minReactiveGapMs: 5 * 60 * 1000 });
+    // capability_gap is activation-driven; activationDisposers are cleared on shutdown.
   }
 
   // Phase I: rolling-review worker. Default ON — production wants
