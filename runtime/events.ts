@@ -1780,11 +1780,33 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       label: "act_artifact_candidate:screen",
       sourceEventId: id,
       run: () => {
-      const { refusals } = screenActArtifactCandidate(db, {
+      const { refusals, rebaseBinding } = screenActArtifactCandidate(db, {
         payload: input.payload,
         directive_id: input.directive_id,
         task_id: input.task_id,
+        context_refs: input.context_refs,
       });
+      // citation_rooting_rebase_hard_gate: when the screen rooted a zero-
+      // direct-citation full body through inherited task/root evidence,
+      // persist the effective grounding (on the candidate, no artifact row
+      // exists yet) and emit one retrieval_binding per resolved root so the
+      // four-link credit chain closes. No refusal fires for a rebased body.
+      if (rebaseBinding) {
+        try {
+          const { persistRebasedRooting } = require("./artifact_provenance") as typeof import("./artifact_provenance");
+          persistRebasedRooting(
+            db,
+            {
+              artifactId: null,
+              rebase: rebaseBinding,
+              directiveId: input.directive_id,
+              taskId: input.task_id,
+              bindingSurface: "artifact_candidate_screen",
+            },
+            (event) => { emitEvent(db, event); },
+          );
+        } catch { /* fail-soft: rebase binding is additive credit, not a gate */ }
+      }
       for (const refusal of refusals) {
         const refusalEvent = emitEvent(db, {
           kind: refusal.kind,

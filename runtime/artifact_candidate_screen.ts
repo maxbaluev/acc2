@@ -26,11 +26,18 @@ import type { EventKind, JsonValue } from "../substrate/types";
 import { runPredicateGate } from "./verifiers/predicate_gate";
 import { findStrategicDirectionCitation } from "./artifact_admission";
 import { requiresStrategicGrounding } from "../substrate/artifact_kind_metadata";
+import { rebaseCitationRooting, type RebaseRootingResult } from "./artifact_provenance";
 
 export type CandidateRefusal = {
   kind: EventKind;
   payload: JsonValue;
 };
+
+/** When a zero-direct-citation full body is rooted through inherited task/root
+ *  evidence (amendment citation_rooting_rebase_hard_gate), the screen returns
+ *  the resolved roots so the caller can persist effective grounding + emit the
+ *  retrieval_binding events. Absent when no rebase applied. */
+export type CandidateRebaseBinding = Extract<RebaseRootingResult, { ok: true }>;
 
 /** Minimum prefix length to consider for unique-prefix citation resolution.
  *  12 chars of ULID base32 = 60 bits — collision probability at 1M events is
@@ -130,6 +137,7 @@ type CandidatePayload = {
   runtime?: unknown;
   source_candidate_id?: unknown;
   cited_knowledge_ids?: unknown;
+  context_refs?: unknown;
 };
 
 const asObject = (value: unknown): CandidatePayload | null => {
@@ -147,11 +155,19 @@ const asStringArray = (value: unknown): string[] => {
  *  each refusal references the candidate's id in context_refs. */
 export const screenActArtifactCandidate = (
   db: Database,
-  input: { payload?: JsonValue; directive_id?: string; task_id?: string },
-): { refusals: CandidateRefusal[] } => {
+  input: {
+    payload?: JsonValue;
+    directive_id?: string;
+    task_id?: string;
+    /** Candidate event's own context_refs (when the caller threads them in
+     *  addition to any context_refs embedded in payload). */
+    context_refs?: readonly string[];
+  },
+): { refusals: CandidateRefusal[]; rebaseBinding?: CandidateRebaseBinding } => {
   const payload = asObject(input.payload);
   if (!payload) return { refusals: [] };
   const refusals: CandidateRefusal[] = [];
+  let rebaseBinding: CandidateRebaseBinding | undefined;
 
   const declaredKind = typeof payload.kind === "string" ? payload.kind : undefined;
   const declaredName = typeof payload.name === "string" ? payload.name : undefined;
@@ -292,19 +308,37 @@ export const screenActArtifactCandidate = (
   if (isSubstantive) {
     const { resolved, unresolved } = partitionCitedKnowledge(db, citedIds);
     if (citedIds.length === 0 && !isPlaceholderKind) {
-      refusals.push({
-        kind: "lane_routing_refused",
-        payload: {
-          reason: "artifact_citation_underrooted",
-          refused_kind: "act_artifact_candidate",
-          artifact_kind: declaredKind ?? null,
-          artifact_name: declaredName ?? null,
-          audience: typeof payload.audience === "string" ? payload.audience : null,
-          body_length: bodyText.length,
-          directive_id: input.directive_id ?? null,
-          task_id: input.task_id ?? null,
-        } as JsonValue,
+      // citation_rooting_rebase_hard_gate: before refusing a zero-direct-
+      // citation full body, attempt to REBASE its rooting through inherited
+      // task/root/parent evidence. A document the task was opened to PRODUCE
+      // is grounded by its trajectory even when the brain did not restate
+      // explicit cited_knowledge_ids. Only legitimately-rooted bodies pass;
+      // truly ungrounded bodies (no inherited grounding) still refuse.
+      const payloadContextRefs = asStringArray(payload.context_refs);
+      const contextRefs = [...(input.context_refs ?? []), ...payloadContextRefs];
+      const rebase = rebaseCitationRooting(db, {
+        taskId: input.task_id ?? null,
+        directiveId: input.directive_id ?? null,
+        sourceCandidateId: sourceCandidateId ?? null,
+        contextRefs,
       });
+      if (rebase.ok) {
+        rebaseBinding = rebase;
+      } else {
+        refusals.push({
+          kind: "lane_routing_refused",
+          payload: {
+            reason: "artifact_citation_underrooted",
+            refused_kind: "act_artifact_candidate",
+            artifact_kind: declaredKind ?? null,
+            artifact_name: declaredName ?? null,
+            audience: typeof payload.audience === "string" ? payload.audience : null,
+            body_length: bodyText.length,
+            directive_id: input.directive_id ?? null,
+            task_id: input.task_id ?? null,
+          } as JsonValue,
+        });
+      }
     } else if (unresolved.length > 0) {
       refusals.push({
         kind: "lane_routing_refused",
@@ -322,5 +356,5 @@ export const screenActArtifactCandidate = (
     }
   }
 
-  return { refusals };
+  return { refusals, rebaseBinding };
 };
