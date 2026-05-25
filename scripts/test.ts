@@ -24,6 +24,16 @@ import { readFileSync } from "node:fs";
 const PER_WORKER_RAM_BYTES = 1_500_000_000; // ~1.5GB budget per daemon-booting worker
 const RESERVE_BYTES = 2_000_000_000;        // keep ~2GB for the OS + the test parent
 
+// Hard ceiling on parallel workers regardless of how much RAM is free. Bun's
+// test-worker fleet crashes nondeterministically with SIGILL / "Segmentation
+// fault" when too many workers do heavy native work at once (bun:sqlite +
+// spawning real FastMCP HTTP servers + subprocesses). Observed 2026-05-25:
+// runs at 8–11 workers SIGILL'd in runtime/bridge.test.ts and
+// runtime/daemon.test.ts while the identical files pass in isolation and the
+// whole suite passes no-bail. The crash is a runtime resource ceiling, not a
+// per-test memory budget, so cap worker COUNT independently of the RAM math.
+const MAX_WORKERS = 6;
+
 // Host memory genuinely available right now. Prefer Linux MemAvailable
 // (reclaimable-cache-aware); os.freemem() (MemFree) under-reports because it
 // excludes reclaimable page cache. Falls back off-Linux.
@@ -41,14 +51,34 @@ const computeWorkers = (): { workers: number; avail: number } => {
   if (Number.isFinite(envOverride) && envOverride >= 1) return { workers: Math.floor(envOverride), avail };
   const cores = Math.max(1, cpus().length);
   const memBudget = Math.max(1, Math.floor(Math.max(0, avail - RESERVE_BYTES) / PER_WORKER_RAM_BYTES));
-  return { workers: Math.max(2, Math.min(cores, memBudget)), avail };
+  return { workers: Math.max(2, Math.min(cores, memBudget, MAX_WORKERS)), avail };
 };
 
 const { workers, avail } = computeWorkers();
 const forwarded = Bun.argv.slice(2);
-const args = ["test", `--parallel=${workers}`, "--bail", ...forwarded];
 
-console.error(`[acc2 test] ${workers} parallel workers (cores=${cpus().length}, available=${(avail / 1e9).toFixed(1)}GB)`);
+const runSuite = async (parallel: number, bail: boolean): Promise<number> => {
+  const args = ["test", `--parallel=${parallel}`, ...(bail ? ["--bail"] : []), ...forwarded];
+  const proc = Bun.spawn(["bun", ...args], { stdio: ["inherit", "inherit", "inherit"] });
+  return await proc.exited;
+};
 
-const proc = Bun.spawn(["bun", ...args], { stdio: ["inherit", "inherit", "inherit"] });
-process.exit(await proc.exited);
+console.error(`[acc2 test] ${workers} parallel workers (cores=${cpus().length}, available=${(avail / 1e9).toFixed(1)}GB, ceiling=${MAX_WORKERS})`);
+
+// First pass: fast feedback with --bail at the computed concurrency.
+let code = await runSuite(workers, true);
+
+// A non-zero exit is AMBIGUOUS: it is either a real assertion failure OR a
+// transient Bun worker crash (SIGILL/segfault) that bail turned into a suite
+// abort. Distinguish by retrying ONCE at halved concurrency WITHOUT --bail:
+// a real failure reproduces (and we now get the full report instead of a
+// bailed-early one); a transient runtime crash almost always clears at lower
+// parallelism. Skip the retry for --watch and other interactive forwards.
+const interactive = forwarded.some((a) => a === "--watch" || a === "-w");
+if (code !== 0 && !interactive) {
+  const retryWorkers = Math.max(2, Math.floor(workers / 2));
+  console.error(`[acc2 test] non-zero exit — retrying once at ${retryWorkers} workers, no --bail (transient SIGILL/segfault clears at lower parallelism; a real failure will reproduce with full output)`);
+  code = await runSuite(retryWorkers, false);
+}
+
+process.exit(code);

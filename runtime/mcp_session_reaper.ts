@@ -20,11 +20,22 @@
 // The reaper force-closes sessions that are:
 //   - DEAD     — `session.server.transport` is already `undefined` (the SDK
 //                Server closed its transport but fastmcp hasn't spliced it),
-//   - IDLE     — first observed more than `idleTtlMs` ago (leaked sessions
-//                never disconnect, so age is the only signal we have), or
+//   - IDLE     — no MESSAGE observed on the session's transport for longer than
+//                `idleTtlMs` (a leaked session goes silent; an alive one keeps
+//                emitting — tool calls, notifications, ping/pong), or
 //   - OVER CAP — when total sessions exceed `maxSessions`, evict the
-//                oldest-first surplus.
-// A live, recently-seen session is always kept.
+//                least-recently-active surplus first.
+// A live, recently-ACTIVE session is always kept.
+//
+// IDLE = idle-since-last-activity, NOT session age (fixed 2026-05-25). The
+// previous check reaped on age-since-first-seen, which is correct for a
+// transient CLI/opencode dispatch (~6 min) but WRONG for a long-lived client:
+// the Claude Code chat holds ONE Streamable-HTTP session for the whole
+// conversation (hours). Age-based reaping culled that session every ~10 min
+// MID-USE, dropping the operator's MCP tools. Activity tracking distinguishes
+// "old but actively serving" (keep) from "leaked and silent" (reap): the
+// reaper wraps the transport's `onmessage` once per session to stamp a
+// last-activity time, and reaps only sessions silent past the TTL.
 //
 // The `disconnect` event hook (wired in mcp_server/index.ts) drops a session's
 // tracking row the moment fastmcp removes it gracefully, so the reaper's
@@ -40,11 +51,14 @@ import type { Database } from "bun:sqlite";
 import { emitEvent } from "./events";
 import { logger } from "./logger";
 
-/** Default idle TTL (ms). A session first observed longer ago than this with
- *  no observed liveness is treated as leaked and reaped. 10 min is well past
- *  any legitimate dispatch (median ~6 min) plus connection slack. Override via
+/** Default idle TTL (ms). A session with NO transport message for longer than
+ *  this is treated as leaked/silent and reaped. Measured from last ACTIVITY
+ *  (not connect time), so it bounds genuinely-silent sessions while never
+ *  culling an actively-served one. 30 min comfortably spans human-paced gaps
+ *  between an operator's chat tool calls while still reclaiming leaked CLI /
+ *  opencode sessions well under the cap. Override via
  *  ACC2_MCP_SESSION_IDLE_TTL_MS. */
-export const DEFAULT_SESSION_IDLE_TTL_MS = 10 * 60_000;
+export const DEFAULT_SESSION_IDLE_TTL_MS = 30 * 60_000;
 
 /** Default hard cap on concurrent sessions. The substrate's real concurrency
  *  (CLI + orchestrator polls + bounded parallel brain dispatch) sits well
@@ -92,34 +106,72 @@ export interface ReapableServer {
   readonly sessions: ReapableSession[];
 }
 
-/** Per-session tracking row. `firstSeenMs` is when the reaper (or the connect
- *  hook) first observed the session; it is the basis for idle-TTL eviction. */
-type SessionTrack = { firstSeenMs: number };
+/** Per-session tracking row. `firstSeenMs` is when the session was first
+ *  observed; `lastActivityMs` is the last time a message crossed its transport
+ *  (initialised to firstSeenMs, then bumped by the onmessage probe). Idle-TTL
+ *  eviction is measured from `lastActivityMs`. */
+type SessionTrack = { firstSeenMs: number; lastActivityMs: number };
 
-/** The reaper's first-seen registry, keyed by the session object identity.
+/** The reaper's session registry, keyed by the session object identity.
  *  WeakMap so a session GC'd by the JS runtime drops its row automatically;
  *  the `disconnect` hook also drops rows on graceful close. */
 export class McpSessionReaper {
   readonly idleTtlMs: number;
   readonly maxSessions: number;
   private readonly tracks = new WeakMap<ReapableSession, SessionTrack>();
+  /** Transports whose `onmessage` we have already wrapped — wrap exactly once
+   *  per transport so reconnects (new transport object) re-probe but a stable
+   *  transport is not double-wrapped. */
+  private readonly probed = new WeakSet<object>();
 
   constructor(opts?: { idleTtlMs?: number; maxSessions?: number }) {
     this.idleTtlMs = opts?.idleTtlMs ?? resolveSessionIdleTtlMs();
     this.maxSessions = opts?.maxSessions ?? resolveMaxSessions();
   }
 
-  /** Record a freshly-connected session so its age clock starts now. Called
-   *  from the fastmcp `connect` hook (and idempotently from `reapOnce` for any
+  /** Record a freshly-connected session so its clocks start now. Called from
+   *  the fastmcp `connect` hook (and idempotently from `reapOnce` for any
    *  session it sees for the first time). */
   noteConnect(session: ReapableSession, nowMs: number = Date.now()): void {
-    if (!this.tracks.has(session)) this.tracks.set(session, { firstSeenMs: nowMs });
+    if (!this.tracks.has(session)) this.tracks.set(session, { firstSeenMs: nowMs, lastActivityMs: nowMs });
   }
 
   /** Drop a session's tracking row. Called from the fastmcp `disconnect` hook
    *  so gracefully-closed sessions never linger in the registry. */
   noteDisconnect(session: ReapableSession): void {
     this.tracks.delete(session);
+  }
+
+  /** Stamp a session as active right now (its transport saw a message). */
+  noteActivity(session: ReapableSession, nowMs: number = Date.now()): void {
+    const track = this.tracks.get(session);
+    if (track) track.lastActivityMs = nowMs;
+    else this.tracks.set(session, { firstSeenMs: nowMs, lastActivityMs: nowMs });
+  }
+
+  /** Wrap the session transport's `onmessage` ONCE so every inbound message
+   *  (tool call, notification, ping/pong) stamps last-activity. Fully
+   *  defensive: only wraps a function handler the SDK has already installed,
+   *  preserves it exactly (forwards `this` + all args), never throws, and falls
+   *  back to no-op if the transport/handler is not yet present (re-tried next
+   *  tick). A leaked, silent session is never stamped → it ages out and is
+   *  reaped; an actively-served session is stamped continuously → kept. */
+  attachActivityProbe(session: ReapableSession): void {
+    try {
+      const transport = (session.server as { transport?: unknown } | undefined)?.transport as
+        | { onmessage?: unknown }
+        | undefined;
+      if (!transport || typeof transport !== "object") return;
+      if (this.probed.has(transport)) return;
+      const original = transport.onmessage;
+      if (typeof original !== "function") return; // SDK handler not installed yet — try next tick
+      const reaper = this;
+      (transport as { onmessage: unknown }).onmessage = function (this: unknown, ...args: unknown[]) {
+        try { reaper.noteActivity(session); } catch { /* timestamp is best-effort, never break message flow */ }
+        return (original as (...a: unknown[]) => unknown).apply(this, args);
+      };
+      this.probed.add(transport);
+    } catch { /* probing is best-effort; on any failure the age-fallback still bounds leaks */ }
   }
 
   /** True iff the session's underlying transport is already gone (the SDK
@@ -134,7 +186,10 @@ export class McpSessionReaper {
   private isIdleExpired(session: ReapableSession, nowMs: number): boolean {
     const track = this.tracks.get(session);
     if (!track) return false; // just observed this tick → not expired yet
-    return nowMs - track.firstSeenMs > this.idleTtlMs;
+    // Idle = silent since last activity, NOT old since connect. An actively-
+    // served long-lived session (e.g. the operator's chat) keeps lastActivityMs
+    // fresh and is never reaped; a leaked, silent session ages out.
+    return nowMs - track.lastActivityMs > this.idleTtlMs;
   }
 
   /**
@@ -144,10 +199,11 @@ export class McpSessionReaper {
    *
    * Selection:
    *   1. DEAD sessions (transport gone) — always reaped.
-   *   2. IDLE sessions (first-seen older than idleTtlMs) — reaped.
+   *   2. IDLE sessions (silent since last activity longer than idleTtlMs) — reaped.
    *   3. OVER-CAP surplus — after (1)+(2), if survivors still exceed
-   *      maxSessions, the oldest survivors are reaped down to the cap.
-   * Live, recently-seen, within-cap sessions are kept.
+   *      maxSessions, the LEAST-RECENTLY-ACTIVE survivors are reaped down to
+   *      the cap (so an actively-served long-lived session is evicted last).
+   * Live, recently-active, within-cap sessions are kept.
    */
   async reapOnce(server: ReapableServer, nowMs: number = Date.now()): Promise<{
     total: number;
@@ -159,8 +215,13 @@ export class McpSessionReaper {
   }> {
     const sessions = server.sessions ?? [];
     const total = sessions.length;
-    // First-seen bookkeeping for any session we have not tracked yet.
-    for (const s of sessions) this.noteConnect(s, nowMs);
+    // First-seen bookkeeping + attach the activity probe for any session we
+    // have not tracked/probed yet (idempotent; covers sessions that connected
+    // before any explicit noteConnect hook fired).
+    for (const s of sessions) {
+      this.noteConnect(s, nowMs);
+      this.attachActivityProbe(s);
+    }
 
     const victims = new Set<ReapableSession>();
     let reaped_dead = 0;
@@ -180,8 +241,8 @@ export class McpSessionReaper {
     const survivors = sessions.filter((s) => !victims.has(s));
     if (survivors.length > this.maxSessions) {
       const surplus = survivors
-        .map((s) => ({ s, firstSeenMs: this.tracks.get(s)?.firstSeenMs ?? nowMs }))
-        .sort((a, b) => a.firstSeenMs - b.firstSeenMs) // oldest first
+        .map((s) => ({ s, lastActivityMs: this.tracks.get(s)?.lastActivityMs ?? nowMs }))
+        .sort((a, b) => a.lastActivityMs - b.lastActivityMs) // least-recently-active first
         .slice(0, survivors.length - this.maxSessions);
       for (const { s } of surplus) {
         victims.add(s);

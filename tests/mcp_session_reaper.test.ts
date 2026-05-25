@@ -116,6 +116,55 @@ describe("mcp_session_reaper", () => {
     expect(fresh.closed).toBe(false);
   });
 
+  test("(F) actively-served long-lived session is NOT reaped despite an ancient connect time", async () => {
+    // The root-cause regression: the operator's chat holds one Streamable-HTTP
+    // session for hours. Age-based reaping culled it every ~10 min mid-use.
+    // Activity-based idle keeps it while it is served.
+    const idleTtlMs = 60_000;
+    const reaper = new McpSessionReaper({ idleTtlMs, maxSessions: 1000 });
+    const chat = new MockSession();
+    reaper.noteConnect(chat, NOW - idleTtlMs * 10); // connected long ago
+    reaper.noteActivity(chat, NOW - 1_000);          // but active 1s ago
+    const result = await reaper.reapOnce(serverOf([chat]), NOW);
+    expect(result.reaped_idle).toBe(0);
+    expect(chat.closed).toBe(false);
+    expect(result.remaining).toBe(1);
+  });
+
+  test("(G) the onmessage probe stamps activity AND preserves the original handler exactly", async () => {
+    const idleTtlMs = 60_000;
+    const reaper = new McpSessionReaper({ idleTtlMs, maxSessions: 1000 });
+    const received: unknown[] = [];
+    let sawThis: unknown;
+    const transport = {
+      onmessage(this: unknown, msg: unknown, extra?: unknown) { sawThis = this; received.push([msg, extra]); },
+    };
+    const session: ReapableSession = { server: { transport }, close: async () => {} };
+    // First seen ancient — would age out under the OLD age-based reap.
+    reaper.noteConnect(session, NOW - idleTtlMs * 5);
+    reaper.attachActivityProbe(session);
+    // A message crosses the transport → probe stamps activity, original runs.
+    (transport.onmessage as (m: unknown, e?: unknown) => void).call(transport, { method: "tools/call" }, { k: 1 });
+    expect(received).toEqual([[{ method: "tools/call" }, { k: 1 }]]); // forwarded args
+    expect(sawThis).toBe(transport);                                   // forwarded `this`
+    // Despite the ancient connect time, the just-observed activity keeps it.
+    const result = await reaper.reapOnce(serverOf([session]), NOW);
+    expect(result.reaped_idle).toBe(0);
+  });
+
+  test("(H) over-cap eviction evicts LEAST-recently-active, sparing the active long-lived session", async () => {
+    const reaper = new McpSessionReaper({ idleTtlMs: 60 * 60_000, maxSessions: 1 });
+    const oldButActive = new MockSession(); // connected first
+    const newButIdle = new MockSession();   // connected later
+    reaper.noteConnect(oldButActive, NOW - 10_000);
+    reaper.noteConnect(newButIdle, NOW - 1_000);
+    reaper.noteActivity(oldButActive, NOW - 100); // most recently active
+    const result = await reaper.reapOnce(serverOf([oldButActive, newButIdle]), NOW);
+    expect(result.reaped_over_cap).toBe(1);
+    expect(oldButActive.closed).toBe(false); // survived — most recently active
+    expect(newButIdle.closed).toBe(true);    // evicted — least recently active
+  });
+
   test("(E) tick emits mcp_sessions_reaped only when ≥1 reaped", async () => {
     const db = openDb(":memory:");
     const reaper = new McpSessionReaper({ idleTtlMs: 60_000, maxSessions: 1000 });
