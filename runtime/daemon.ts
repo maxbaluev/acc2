@@ -1632,6 +1632,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       extractActArtifactScores,
       extractRecipeCandidates,
       extractSemanticDedup,
+      extractArtifactConsolidation,
       extractCrossCandidateCorroboration,
       extractDirectiveInterference,
       extractOwnerProfilePromotions,
@@ -1643,6 +1644,14 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       }
       try { await extractActArtifactScores(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.act_artifact", err: (err as Error).message }, "act artifact extractor tick failed");
+      }
+      // CONSOLIDAT (directive 3XETJCYT): runs AFTER extractActArtifactScores
+      // so the Beta posteriors are freshly recomputed before consolidation
+      // picks the winner of an equivalent artifact pair. Retires the
+      // lower-posterior duplicate by aliasing it to the winner (wave-1
+      // resolveArtifactId mechanism) — closes the evolve-better-code loop.
+      try { await extractArtifactConsolidation(db); } catch (err) {
+        logger.warn({ where: "daemon.extractors.artifact_consolidation", err: (err as Error).message }, "artifact-consolidation extractor tick failed");
       }
       try { await extractRecipeCandidates(db); } catch (err) {
         logger.warn({ where: "daemon.extractors.recipes", err: (err as Error).message }, "recipe extractor tick failed");

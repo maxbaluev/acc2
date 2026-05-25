@@ -26,7 +26,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { withImmediateTransaction } from "./db";
-import type { EventKind, OwnerProfile, SubstrateOrigin } from "./types";
+import type { ArtifactInterfaceMetadata, EventKind, JsonValue, OwnerProfile, SubstrateOrigin } from "./types";
 import { ARTIFACT_CANDIDATE_KINDS_SQL } from "./event_kinds";
 import { OWNER_PROFILE_DEFAULTS, OWNER_PROFILE_JSON_SCHEMA } from "./types";
 import { parseResourceRefs } from "../runtime/resource_uri";
@@ -1356,6 +1356,388 @@ export const extractSemanticDedup = async (db: Database): Promise<SemanticDedupS
   });
 
   return { merged, contradicted };
+};
+
+// ── 3a. Artifact consolidation extractor (CONSOLIDAT, 3XETJCYT) ─────
+//
+// Knowledge candidates dedup (extractSemanticDedup above). act_artifacts
+// did NOT: two artifacts that do the SAME job (same `kind`, overlapping
+// `interface_metadata.goal_shapes`, near-identical interface_purpose/usage)
+// coexist forever, splitting posterior credit and cluttering selection
+// (ARTIFACT_S). This pass makes redundant artifacts CONVERGE by POSTERIOR:
+// the higher-Beta-posterior artifact wins; the loser is RETIRED by aliasing
+// it to the winner via the EXISTING act_artifact_aliased mechanism (wave-1
+// resolveArtifactId). After consolidation: (a) future citations of the loser
+// resolve to the winner, (b) selection sees only the winner, (c) the loser's
+// row is NOT deleted — append-only, one-way, cycle-safe.
+//
+// This is the closing half of the evolve-better-code loop: capability_gap
+// authors a competitor → both run + accrue posterior → selector prefers the
+// winner → consolidation retires the loser ONCE the winner is clearly better.
+//
+// Equivalence detector (CONSERVATIVE — only HIGH-confidence duplicates):
+//   1. Same `kind` (a telegram-sender is never equivalent to a code-runner).
+//   2. Same `runtime` AND structurally-compatible `declared_sandbox` — never
+//      merge across runtimes/sandboxes (would break execution).
+//   3. Overlapping `interface_metadata.goal_shapes` (≥1 shared shape) — both
+//      must claim the same goal-class.
+//   4. Compatible inputs/outputs schema (the JSON descriptors must not
+//      conflict — a mismatch means a different call convention → not a dup).
+//   5. High cosine of the interface descriptor embedding (purpose + usage +
+//      effects text) ≥ a tunable threshold (default 0.93, registry-overridable
+//      via `artifact_consolidation_cosine_threshold`).
+//   6. The winner must have ENOUGH observations (posterior_alpha+beta-2 ≥ a
+//      min-observation floor) so we never retire on a single lucky run.
+//
+// Safety: never consolidate INTO a quarantined/retired artifact (winner must
+// be admitted/promoted); never re-alias an already-consolidated pair
+// (idempotent — skip pairs that already carry an act_artifact_aliased edge in
+// EITHER direction OR an act_artifact_consolidated evidence row); never create
+// a cycle (winner is never the loser of a prior consolidation, and we refuse
+// to alias an id that is already an alias source). Emits an
+// act_artifact_consolidated evidence row per consolidation.
+//
+// Bounded scan: GROUP FIRST by (kind, primary goal_shape) so pairwise cosine
+// only runs WITHIN a group — never O(n^2) over all artifacts. Per-tick row
+// cap + per-group size cap bound the worst case.
+
+export type ArtifactConsolidationSummary = {
+  consolidated: number;
+  groups_scanned: number;
+  pairs_examined: number;
+};
+
+/** Default cosine floor for declaring two artifact interface descriptors
+ *  equivalent. Deliberately STRICTER than the knowledge dedup floor (0.92):
+ *  retiring an artifact is more consequential than corroborating knowledge,
+ *  so we demand a tighter match. Registry-overridable. */
+export const ARTIFACT_CONSOLIDATION_COSINE_THRESHOLD = 0.93;
+
+/** Minimum observations (alpha+beta-2, i.e. scored runs) the WINNER must have
+ *  before we retire a competitor against it. Mirrors the capability-gap min
+ *  so consolidation needs at least as much evidence as gap-detection. */
+export const ARTIFACT_CONSOLIDATION_MIN_WINNER_OBS = Number(
+  process.env.ACC2_CONSOLIDATION_MIN_WINNER_OBS ?? 5,
+);
+
+/** Per-group artifact cap. Within one (kind, goal_shape) bucket we examine at
+ *  most this many artifacts pairwise; larger buckets are truncated to the
+ *  highest-scored rows (the most-likely winners/losers). Bounds the inner
+ *  loop at O(cap^2) per group, never O(n^2) over the table. */
+const CONSOLIDATION_GROUP_CAP = 40;
+
+type ConsolidationArtifactRow = {
+  id: string;
+  kind: string;
+  runtime: string | null;
+  declared_sandbox: string | null;
+  status: string;
+  score: number;
+  confidence: number;
+  posterior_alpha: number;
+  posterior_beta: number;
+  interface_metadata: string | null;
+};
+
+/** Build the text we embed to compare two artifact INTERFACES. Domain-neutral:
+ *  purpose + usage example descriptions + effects + preconditions. NOT the
+ *  body — two artifacts can have very different code yet serve the identical
+ *  capability (that is precisely the pair we want to converge). Returns "" if
+ *  the descriptor carries no comparable text. */
+const consolidationInterfaceText = (meta: ArtifactInterfaceMetadata | null): string => {
+  if (!meta) return "";
+  const parts: string[] = [];
+  if (typeof meta.purpose === "string") parts.push(meta.purpose);
+  if (Array.isArray(meta.usage_examples)) {
+    for (const ex of meta.usage_examples) {
+      if (ex && typeof ex.description === "string") parts.push(ex.description);
+    }
+  }
+  if (Array.isArray(meta.effects)) parts.push(...meta.effects.filter((e): e is string => typeof e === "string"));
+  if (Array.isArray(meta.preconditions)) parts.push(...meta.preconditions.filter((p): p is string => typeof p === "string"));
+  return parts.join(" • ").trim();
+};
+
+/** First goal_shape of an artifact's descriptor (the GROUPING key). Returns
+ *  null when the artifact declares no goal_shapes — such rows are skipped
+ *  (we cannot group them and cannot honestly judge capability equivalence). */
+const primaryGoalShape = (meta: ArtifactInterfaceMetadata | null): string | null => {
+  if (!meta || !Array.isArray(meta.goal_shapes) || meta.goal_shapes.length === 0) return null;
+  const first = meta.goal_shapes[0];
+  return typeof first === "string" && first.length > 0 ? first : null;
+};
+
+/** Do the two artifacts share at least one goal_shape? */
+const sharesGoalShape = (a: ArtifactInterfaceMetadata | null, b: ArtifactInterfaceMetadata | null): boolean => {
+  const sa = new Set((a?.goal_shapes ?? []).filter((s): s is string => typeof s === "string"));
+  for (const s of (b?.goal_shapes ?? [])) {
+    if (typeof s === "string" && sa.has(s)) return true;
+  }
+  return false;
+};
+
+/** Conservative schema-compatibility check. We only need to refuse OBVIOUSLY
+ *  incompatible call conventions (a mismatch means different I/O → not a dup).
+ *  Both-null / either-null is treated as compatible (legacy rows + rows that
+ *  simply omit the optional descriptor — we fall back to the cosine + shape
+ *  signals). When BOTH declare a schema, they must be structurally equal
+ *  (deep JSON equality) to count as compatible — anything else is refused. */
+const schemaCompatible = (a: ArtifactInterfaceMetadata | null, b: ArtifactInterfaceMetadata | null): boolean => {
+  const cmp = (x: JsonValue | undefined, y: JsonValue | undefined): boolean => {
+    if (x === undefined || x === null || y === undefined || y === null) return true;
+    try { return JSON.stringify(x) === JSON.stringify(y); } catch { return false; }
+  };
+  return cmp(a?.inputs_schema, b?.inputs_schema) && cmp(a?.outputs_schema, b?.outputs_schema);
+};
+
+/** Structural compatibility of declared sandboxes — never merge across
+ *  different sandbox declarations (would change the execution contract). Both
+ *  null is compatible; otherwise the JSON must be equal. */
+const sandboxCompatible = (a: string | null, b: string | null): boolean => {
+  if (a === null && b === null) return true;
+  if (a === null || b === null) return false;
+  return a === b;
+};
+
+/** Total scored observations behind a Beta posterior (alpha+beta seeded at 1
+ *  each in admission → subtract the 2 priors). */
+const observationCount = (alpha: number, beta: number): number => Math.max(0, alpha + beta - 2);
+
+/** Pick the winner of an equivalent pair by POSTERIOR, not recency. Higher
+ *  score wins; ties broken by higher confidence, then more observations. */
+const consolidationWinner = <T extends ConsolidationArtifactRow>(
+  a: T,
+  b: T,
+): { winner: T; loser: T } => {
+  const aBetter =
+    a.score > b.score ||
+    (a.score === b.score && a.confidence > b.confidence) ||
+    (a.score === b.score && a.confidence === b.confidence &&
+      observationCount(a.posterior_alpha, a.posterior_beta) >= observationCount(b.posterior_alpha, b.posterior_beta));
+  return aBetter ? { winner: a, loser: b } : { winner: b, loser: a };
+};
+
+/** Embed function injection seam. Production passes the real
+ *  runtime/embedder.computeEmbedding (requires an API key); tests inject a
+ *  deterministic stub. Default resolves to computeEmbedding lazily so the
+ *  extractors module has no hard runtime/embedder cycle at import time. */
+export type ArtifactConsolidationEmbedFn = (text: string) => Promise<Float32Array | null>;
+
+const defaultConsolidationEmbed: ArtifactConsolidationEmbedFn = async (text) => {
+  if (!text) return null;
+  try {
+    const { computeEmbedding } = await import("../runtime/embedder");
+    const res = await computeEmbedding(text);
+    if (!res || !Array.isArray(res.embedding)) return null;
+    return Float32Array.from(res.embedding);
+  } catch { return null; }
+};
+
+export const extractArtifactConsolidation = async (
+  db: Database,
+  embedFn: ArtifactConsolidationEmbedFn = defaultConsolidationEmbed,
+): Promise<ArtifactConsolidationSummary> => {
+  // Inter-extractor fairness: macrotask boundary at the top of the body.
+  await extractorFairnessYield();
+
+  const cosineThreshold = getThreshold(
+    db,
+    "artifact_consolidation_cosine_threshold",
+    ARTIFACT_CONSOLIDATION_COSINE_THRESHOLD,
+  );
+
+  // Only EXECUTABLE artifacts (runtime IS NOT NULL) with a non-null
+  // interface_metadata participate — we judge capability equivalence from
+  // the descriptor, and data-class rows are not invoked by the selector.
+  // Bounded scan: cap rows per tick; group first so pairwise cosine is
+  // intra-group only.
+  const rows = (await poolQuery<ConsolidationArtifactRow>(
+    db,
+    `SELECT id, kind, runtime, declared_sandbox, status, score, confidence,
+            posterior_alpha, posterior_beta, interface_metadata
+       FROM act_artifact
+      WHERE runtime IS NOT NULL
+        AND interface_metadata IS NOT NULL
+        AND status IN ('admitted', 'promoted')
+      ORDER BY score DESC, updated_at DESC
+      LIMIT ?`,
+    [EXTRACTOR_SCAN_LIMIT],
+  ));
+
+  if (rows.length === 0) {
+    return { consolidated: 0, groups_scanned: 0, pairs_examined: 0 };
+  }
+
+  // GROUP FIRST: bucket by (kind, primary goal_shape). Pairwise similarity
+  // only runs WITHIN a bucket — never O(n^2) across all artifacts.
+  type Parsed = ConsolidationArtifactRow & { meta: ArtifactInterfaceMetadata | null };
+  const groups = new Map<string, Parsed[]>();
+  for (const r of rows) {
+    let meta: ArtifactInterfaceMetadata | null = null;
+    if (r.interface_metadata) {
+      try {
+        const p = JSON.parse(r.interface_metadata);
+        if (p && typeof p === "object" && !Array.isArray(p)) meta = p as ArtifactInterfaceMetadata;
+      } catch { meta = null; }
+    }
+    const shape = primaryGoalShape(meta);
+    if (shape === null) continue; // cannot group / judge — skip
+    const key = r.kind + " " + shape;
+    let bucket = groups.get(key);
+    if (!bucket) { bucket = []; groups.set(key, bucket); }
+    if (bucket.length < CONSOLIDATION_GROUP_CAP) bucket.push({ ...r, meta });
+  }
+
+  // Already-consolidated pair set (idempotency + cycle safety). A pair is
+  // skipped if EITHER an act_artifact_aliased edge OR an
+  // act_artifact_consolidated evidence row already links the two ids in
+  // EITHER direction. We also collect every id that is ALREADY an alias
+  // SOURCE (old_id) — such an id has been retired, so it can neither be a
+  // fresh loser again (already retired) nor a winner (would create a cycle:
+  // a retired id must never become an alias TARGET).
+  const aliasedOldIds = new Set<string>(
+    (db.query(`SELECT DISTINCT json_extract(payload,'$.old_id') AS old_id FROM events WHERE kind = 'act_artifact_aliased'`)
+      .all() as Array<{ old_id: string | null }>)
+      .map((r) => r.old_id)
+      .filter((x): x is string => !!x),
+  );
+  const consolidatedPairs = new Set<string>(
+    (db.query(`SELECT json_extract(payload,'$.winner_id') AS w, json_extract(payload,'$.loser_id') AS l FROM events WHERE kind = 'act_artifact_consolidated'`)
+      .all() as Array<{ w: string | null; l: string | null }>)
+      .flatMap((r) => (r.w && r.l) ? [r.w + " " + r.l, r.l + " " + r.w] : []),
+  );
+  const pairSeen = (x: string, y: string): boolean =>
+    consolidatedPairs.has(x + " " + y) || consolidatedPairs.has(y + " " + x);
+
+  // Embed each candidate's interface descriptor once (outside the write
+  // transaction — embedding may be async / network). Cache by id.
+  const textById = new Map<string, string>();
+  for (const bucket of groups.values()) {
+    for (const a of bucket) {
+      if (!textById.has(a.id)) textById.set(a.id, consolidationInterfaceText(a.meta));
+    }
+  }
+  const vecById = new Map<string, Float32Array>();
+  for (const [id, text] of textById) {
+    if (!text) continue;
+    const v = await embedFn(text);
+    if (v) vecById.set(id, v);
+  }
+
+  let consolidated = 0;
+  let pairsExamined = 0;
+  const groupsScanned = groups.size;
+  // Track ids retired THIS pass so we never use a fresh loser as a later
+  // winner within the same tick (cycle safety inside the batch).
+  const retiredThisPass = new Set<string>();
+
+  withImmediateTransaction(db, () => {
+    for (const bucket of groups.values()) {
+      if (bucket.length < 2) continue;
+      for (let i = 0; i < bucket.length; i++) {
+        for (let j = i + 1; j < bucket.length; j++) {
+          const a = bucket[i]!;
+          const b = bucket[j]!;
+          pairsExamined++;
+
+          // Cycle / idempotency / retirement guards.
+          if (a.id === b.id) continue;
+          if (retiredThisPass.has(a.id) || retiredThisPass.has(b.id)) continue;
+          if (aliasedOldIds.has(a.id) || aliasedOldIds.has(b.id)) continue; // already retired elsewhere
+          if (pairSeen(a.id, b.id)) continue; // already consolidated
+
+          // Equivalence signals (conservative — ALL must hold).
+          if (a.runtime !== b.runtime) continue;                       // never cross runtimes
+          if (!sandboxCompatible(a.declared_sandbox, b.declared_sandbox)) continue; // never cross sandboxes
+          if (!sharesGoalShape(a.meta, b.meta)) continue;              // must share a goal_shape
+          if (!schemaCompatible(a.meta, b.meta)) continue;             // compatible I/O convention
+          const va = vecById.get(a.id);
+          const vb = vecById.get(b.id);
+          if (!va || !vb || va.length !== vb.length) continue;         // need comparable embeddings
+          const cos = cosineSimilarity(va, vb);
+          if (cos < cosineThreshold) continue;                         // high-confidence only
+
+          const { winner, loser } = consolidationWinner(a, b);
+          // Winner must be a live (admitted/promoted) row with enough
+          // evidence; loser is retired INTO it. Never consolidate INTO a
+          // quarantined/retired winner (status filter already excludes those
+          // from the scan, but re-check defensively).
+          if (winner.status !== "admitted" && winner.status !== "promoted") continue;
+          if (observationCount(winner.posterior_alpha, winner.posterior_beta) < ARTIFACT_CONSOLIDATION_MIN_WINNER_OBS) continue;
+          // Cycle safety: the winner must not itself be a retired alias source.
+          if (aliasedOldIds.has(winner.id) || retiredThisPass.has(winner.id)) continue;
+
+          // RETIRE the loser by aliasing it to the winner (wave-1 mechanism).
+          // resolveArtifactId(loser) → winner thereafter; selection sees only
+          // the winner; the loser's row is preserved (append-only, one-way).
+          insertEvent(db, {
+            kind: "act_artifact_aliased",
+            directive_id: "3XETJCYT",
+            task_id: "artifact_consolidation",
+            loop_id: "substrate_consolidation",
+            substrate_origin: "substrate_auto",
+            payload: {
+              old_id: loser.id,
+              new_id: winner.id,
+              reason: "consolidation",
+              cosine: cos,
+            },
+            context_refs: [winner.id, loser.id],
+          });
+          // Durable evidence row (auditable + idempotency key for re-runs).
+          insertEvent(db, {
+            kind: "act_artifact_consolidated",
+            directive_id: "3XETJCYT",
+            task_id: "artifact_consolidation",
+            loop_id: "substrate_consolidation",
+            substrate_origin: "substrate_auto",
+            payload: {
+              winner_id: winner.id,
+              loser_id: loser.id,
+              kind: winner.kind,
+              cosine: cos,
+              winner_score: winner.score,
+              winner_confidence: winner.confidence,
+              loser_score: loser.score,
+              loser_confidence: loser.confidence,
+              winner_observations: observationCount(winner.posterior_alpha, winner.posterior_beta),
+              loser_observations: observationCount(loser.posterior_alpha, loser.posterior_beta),
+              shared_goal_shapes: (winner.meta?.goal_shapes ?? []).filter((s: string) =>
+                (loser.meta?.goal_shapes ?? []).includes(s)),
+            },
+            context_refs: [winner.id, loser.id],
+          });
+          // Flip the loser's status to 'retired' so the selector + every
+          // status-filtered surface stops considering it (the alias chain
+          // handles citation redirection; the status flip handles selection).
+          db.run(
+            `UPDATE act_artifact SET status = 'retired', updated_at = ? WHERE id = ?`,
+            [nowIso(), loser.id],
+          );
+
+          // In-pass bookkeeping so we cannot re-use these ids this tick.
+          retiredThisPass.add(loser.id);
+          aliasedOldIds.add(loser.id);
+          consolidatedPairs.add(winner.id + " " + loser.id);
+          consolidatedPairs.add(loser.id + " " + winner.id);
+          consolidated++;
+        }
+      }
+    }
+  });
+
+  // The alias cache (resolveArtifactId memoization) must be invalidated after
+  // emitting act_artifact_aliased through the extractor's LOCAL insertEvent
+  // (which bypasses the runtime/events.ts emitEvent post-write hook). Without
+  // this the next resolveArtifactId(loser) would return the stale identity.
+  if (consolidated > 0) {
+    try {
+      const { invalidateAliasCache } = require("../substrate/migration_runner") as typeof import("../substrate/migration_runner");
+      invalidateAliasCache(db);
+    } catch { /* fail-soft: cold cache rebuilds on next miss */ }
+  }
+
+  return { consolidated, groups_scanned: groupsScanned, pairs_examined: pairsExamined };
 };
 
 // ── 3b. Cross-candidate semantic corroboration extractor (T1.3) ────

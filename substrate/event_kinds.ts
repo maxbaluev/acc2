@@ -1129,6 +1129,18 @@ export const EVENT_KINDS = {
   // event kind covers every renamed handle. Embeddable so prompt
   // composition + retrieval surface rename evidence to the brain.
   act_artifact_aliased:                    { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: false },
+  // act_artifact_consolidated (CONSOLIDAT, directive 3XETJCYT): the
+  // substrate's periodic artifact-consolidation pass found two artifacts
+  // that serve the SAME capability (same kind + overlapping goal_shapes +
+  // high interface-purpose cosine + compatible schema) and retired the
+  // lower-posterior one by ALIASing it to the winner. This is the durable
+  // EVIDENCE row (payload carries winner_id / loser_id / cosine / both
+  // posteriors / the goal_shape overlap) emitted ALONGSIDE the canonical
+  // act_artifact_aliased edge so the consolidation decision is auditable
+  // and idempotency can re-detect already-consolidated pairs without
+  // re-walking the alias chain. Health metric so dashboards plot how the
+  // capability-gap → competitor → selector → consolidation loop converges.
+  act_artifact_consolidated:               { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   // schema_migration_applied: substrate/migrations registry emits one
   // row per applied migration. Idempotent — version is the canonical
   // dedup key. Health metric so dashboards plot migration history.

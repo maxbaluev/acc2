@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { closeDb, openDb } from "./db";
 import {
   extractActArtifactScores,
+  extractArtifactConsolidation,
   extractClaudeProjectConversations,
   extractCrossCandidateCorroboration,
   extractKnowledgePromotions,
@@ -18,6 +19,7 @@ import {
   extractSemanticDedup,
   maybePromoteOwnerProfile,
 } from "./extractors";
+import { resolveArtifactId } from "./migration_runner";
 import { encodeEmbeddingBlob, EMBEDDING_VERSION, EMBEDDING_DIMS, upsertVecEventRow } from "../runtime/embedder";
 import { invalidateThresholdCache, seedThresholdPredicate } from "../runtime/threshold_registry";
 import { clearSqlPool, setSqlPool } from "../runtime/sql_pool_singleton";
@@ -1437,5 +1439,226 @@ describe("extractors — inter-extractor fairness yield", () => {
     // Leading fairness yield ⇒ the recompute UPDATE has not run yet (still 0.5 seed).
     expect(midUpdated).toBe(0.5);
     await p;
+  });
+});
+
+// ── extractArtifactConsolidation (CONSOLIDAT, directive 3XETJCYT) ────
+//
+// Two equivalent artifacts (same kind + goal_shape + high-similarity
+// purpose) → the lower-posterior one is aliased to the higher; citations
+// of the loser then resolve to the winner; NON-equivalent pairs (different
+// goal_shape / low similarity / incompatible schema / cross-runtime) are
+// NOT merged; idempotent (second pass no-ops); no cycle; quarantined
+// excluded.
+describe("extractArtifactConsolidation", () => {
+  // Full-featured artifact insert: posterior + interface_metadata so the
+  // consolidation detector can group, judge equivalence, and pick a winner.
+  const insertArt = (
+    db: ReturnType<typeof openDb>,
+    opts: {
+      id: string;
+      runtime?: string;
+      kind?: string;
+      sandbox?: unknown;
+      status?: string;
+      alpha?: number; // observations behind the posterior
+      beta?: number;
+      score?: number;
+      confidence?: number;
+      goalShapes?: string[];
+      purpose?: string;
+      inputsSchema?: unknown;
+      outputsSchema?: unknown;
+    },
+  ): void => {
+    const ts = nowIso();
+    const meta = {
+      purpose: opts.purpose ?? "send a one-off notification to a contact",
+      goal_shapes: opts.goalShapes ?? ["notify_contact"],
+      ...(opts.inputsSchema !== undefined ? { inputs_schema: opts.inputsSchema } : {}),
+      ...(opts.outputsSchema !== undefined ? { outputs_schema: opts.outputsSchema } : {}),
+    };
+    db.run(
+      `INSERT INTO act_artifact (
+         id, runtime, kind, body, declared_sandbox, state_root,
+         posterior_alpha, posterior_beta, score, confidence,
+         recent_residual_mean, recent_kill_count, status, name,
+         fixture_input, fixture_expected_residual, interface_metadata,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        opts.id,
+        opts.runtime ?? "bun",
+        opts.kind ?? "runtime_action",
+        "// body " + opts.id + "\nexport default async () => 0;",
+        JSON.stringify(opts.sandbox ?? { runtime: opts.runtime ?? "bun", cpu_ms: 1000, wall_ms: 1000, memory_mb: 64 }),
+        "state/x",
+        opts.alpha ?? 1,
+        opts.beta ?? 1,
+        opts.score ?? 0.5,
+        opts.confidence ?? 0.3,
+        0, 0,
+        opts.status ?? "admitted",
+        null, "{}", 0,
+        JSON.stringify(meta),
+        ts, ts,
+      ],
+    );
+  };
+
+  // Deterministic embed stub keyed by purpose text: near-identical purposes
+  // get near-identical vectors (high cosine); different purposes get
+  // orthogonal-ish vectors. No network / API key needed.
+  const stubEmbed = (text: string): Promise<Float32Array | null> => {
+    const v = new Float32Array(8);
+    // "notify"-shaped text → axis 0; "scrape"-shaped → axis 1; else axis 2.
+    const lower = text.toLowerCase();
+    if (lower.includes("notif") || lower.includes("message") || lower.includes("contact")) {
+      v[0] = 1; v[2] = text.length % 7 === 0 ? 0.02 : 0.01; // tiny jitter, stays ~parallel
+    } else if (lower.includes("scrape") || lower.includes("page") || lower.includes("record")) {
+      v[1] = 1;
+    } else {
+      v[3] = 1;
+    }
+    return Promise.resolve(v);
+  };
+
+  test("two equivalent artifacts → lower-posterior aliased to higher; citations resolve to winner", async () => {
+    const db = openDb(":memory:");
+    // Winner: strong posterior, enough observations.
+    insertArt(db, { id: "art_win", score: 0.9, confidence: 0.8, alpha: 9, beta: 2 });
+    // Loser: weaker posterior, same kind + goal_shape + purpose.
+    insertArt(db, { id: "art_lose", score: 0.6, confidence: 0.5, alpha: 3, beta: 4 });
+
+    const summary = await extractArtifactConsolidation(db, stubEmbed);
+    expect(summary.consolidated).toBe(1);
+
+    // Loser is aliased to winner → citation resolution redirects.
+    expect(resolveArtifactId(db, "art_lose")).toBe("art_win");
+    // Winner is untouched (resolves to itself).
+    expect(resolveArtifactId(db, "art_win")).toBe("art_win");
+    // Loser row is RETIRED (not deleted — append-only, one-way).
+    const loserStatus = (db.query("SELECT status FROM act_artifact WHERE id='art_lose'").get() as { status: string }).status;
+    expect(loserStatus).toBe("retired");
+    expect(db.query("SELECT 1 FROM act_artifact WHERE id='art_lose'").get()).not.toBeNull();
+    // Evidence row emitted with winner/loser.
+    const ev = db.query("SELECT payload FROM events WHERE kind='act_artifact_consolidated'").get() as { payload: string } | null;
+    expect(ev).not.toBeNull();
+    const payload = JSON.parse(ev!.payload);
+    expect(payload.winner_id).toBe("art_win");
+    expect(payload.loser_id).toBe("art_lose");
+  });
+
+  test("NON-equivalent: different goal_shape → NOT merged", async () => {
+    const db = openDb(":memory:");
+    insertArt(db, { id: "art_a", score: 0.9, confidence: 0.8, alpha: 9, beta: 2, goalShapes: ["notify_contact"], purpose: "send a notification" });
+    insertArt(db, { id: "art_b", score: 0.6, confidence: 0.5, alpha: 3, beta: 4, goalShapes: ["scrape_page"], purpose: "scrape a web page record" });
+    const summary = await extractArtifactConsolidation(db, stubEmbed);
+    expect(summary.consolidated).toBe(0);
+    expect(resolveArtifactId(db, "art_b")).toBe("art_b");
+  });
+
+  test("NON-equivalent: low similarity (same goal_shape, divergent purpose) → NOT merged", async () => {
+    const db = openDb(":memory:");
+    // Same goal_shape tag but the purpose text embeds onto different axes
+    // (one notify-shaped, one scrape-shaped) → cosine below threshold.
+    insertArt(db, { id: "art_p", score: 0.9, confidence: 0.8, alpha: 9, beta: 2, goalShapes: ["shared"], purpose: "send a message to a contact" });
+    insertArt(db, { id: "art_q", score: 0.6, confidence: 0.5, alpha: 3, beta: 4, goalShapes: ["shared"], purpose: "scrape a product page record" });
+    const summary = await extractArtifactConsolidation(db, stubEmbed);
+    expect(summary.consolidated).toBe(0);
+    expect(resolveArtifactId(db, "art_q")).toBe("art_q");
+  });
+
+  test("NON-equivalent: incompatible inputs_schema → NOT merged", async () => {
+    const db = openDb(":memory:");
+    insertArt(db, { id: "art_s1", score: 0.9, confidence: 0.8, alpha: 9, beta: 2, inputsSchema: { fields: ["chat_id", "text"] } });
+    insertArt(db, { id: "art_s2", score: 0.6, confidence: 0.5, alpha: 3, beta: 4, inputsSchema: { fields: ["email", "subject", "body"] } });
+    const summary = await extractArtifactConsolidation(db, stubEmbed);
+    expect(summary.consolidated).toBe(0);
+    expect(resolveArtifactId(db, "art_s2")).toBe("art_s2");
+  });
+
+  test("NON-equivalent: different runtime → NOT merged (would break execution)", async () => {
+    const db = openDb(":memory:");
+    insertArt(db, { id: "art_r1", runtime: "bun", score: 0.9, confidence: 0.8, alpha: 9, beta: 2 });
+    insertArt(db, { id: "art_r2", runtime: "python", score: 0.6, confidence: 0.5, alpha: 3, beta: 4 });
+    const summary = await extractArtifactConsolidation(db, stubEmbed);
+    expect(summary.consolidated).toBe(0);
+    expect(resolveArtifactId(db, "art_r2")).toBe("art_r2");
+  });
+
+  test("idempotent: second pass no-ops (does not re-alias the same pair)", async () => {
+    const db = openDb(":memory:");
+    insertArt(db, { id: "art_w2", score: 0.9, confidence: 0.8, alpha: 9, beta: 2 });
+    insertArt(db, { id: "art_l2", score: 0.6, confidence: 0.5, alpha: 3, beta: 4 });
+    const first = await extractArtifactConsolidation(db, stubEmbed);
+    const second = await extractArtifactConsolidation(db, stubEmbed);
+    expect(first.consolidated).toBe(1);
+    expect(second.consolidated).toBe(0);
+    // Exactly ONE alias edge + ONE evidence row.
+    const aliasCount = (db.query("SELECT COUNT(*) AS c FROM events WHERE kind='act_artifact_aliased'").get() as { c: number }).c;
+    const evCount = (db.query("SELECT COUNT(*) AS c FROM events WHERE kind='act_artifact_consolidated'").get() as { c: number }).c;
+    expect(aliasCount).toBe(1);
+    expect(evCount).toBe(1);
+  });
+
+  test("no cycle: a retired loser is never used as a later winner", async () => {
+    const db = openDb(":memory:");
+    // Three equivalent artifacts; the strongest wins both pairings, the
+    // weakest two are retired INTO it — none aliases back.
+    insertArt(db, { id: "art_strong", score: 0.95, confidence: 0.9, alpha: 18, beta: 1 });
+    insertArt(db, { id: "art_mid", score: 0.7, confidence: 0.6, alpha: 6, beta: 3 });
+    insertArt(db, { id: "art_weak", score: 0.55, confidence: 0.4, alpha: 3, beta: 5 });
+    await extractArtifactConsolidation(db, stubEmbed);
+    // Every retired loser resolves to the strongest; the winner resolves to
+    // itself (no back-edge → no cycle).
+    expect(resolveArtifactId(db, "art_strong")).toBe("art_strong");
+    expect(resolveArtifactId(db, "art_mid")).toBe("art_strong");
+    expect(resolveArtifactId(db, "art_weak")).toBe("art_strong");
+    // The winner is never an alias source.
+    const winnerAsOld = db.query("SELECT 1 FROM events WHERE kind='act_artifact_aliased' AND json_extract(payload,'$.old_id')='art_strong'").get();
+    expect(winnerAsOld).toBeNull();
+  });
+
+  test("quarantined artifacts excluded from consolidation", async () => {
+    const db = openDb(":memory:");
+    // Both quarantined → neither participates (scan filters status).
+    insertArt(db, { id: "art_q1", status: "quarantined", score: 0.9, confidence: 0.8, alpha: 9, beta: 2 });
+    insertArt(db, { id: "art_q2", status: "quarantined", score: 0.6, confidence: 0.5, alpha: 3, beta: 4 });
+    const summary = await extractArtifactConsolidation(db, stubEmbed);
+    expect(summary.consolidated).toBe(0);
+    // An admitted winner is never allowed to retire INTO a quarantined row:
+    // here the would-be winner is quarantined, so the live admitted row is
+    // NOT retired against it.
+    const db2 = openDb(":memory:");
+    insertArt(db2, { id: "art_qwin", status: "quarantined", score: 0.95, confidence: 0.9, alpha: 18, beta: 1 });
+    insertArt(db2, { id: "art_alive", status: "admitted", score: 0.6, confidence: 0.5, alpha: 6, beta: 4 });
+    const s2 = await extractArtifactConsolidation(db2, stubEmbed);
+    expect(s2.consolidated).toBe(0);
+    expect(resolveArtifactId(db2, "art_alive")).toBe("art_alive");
+  });
+
+  test("winner with too few observations does NOT retire a competitor", async () => {
+    const db = openDb(":memory:");
+    // Higher score but only 2 observations (below MIN_WINNER_OBS=5).
+    insertArt(db, { id: "art_thin", score: 0.95, confidence: 0.9, alpha: 3, beta: 1 });
+    insertArt(db, { id: "art_other", score: 0.6, confidence: 0.5, alpha: 1, beta: 1 });
+    const summary = await extractArtifactConsolidation(db, stubEmbed);
+    expect(summary.consolidated).toBe(0);
+  });
+
+  test("bounded scan: pairwise only WITHIN (kind, goal_shape) groups, never cross-group", async () => {
+    const db = openDb(":memory:");
+    // Two independent equivalence groups; pairs_examined must reflect
+    // intra-group comparisons only (1 pair per 2-member group = 2), never
+    // the cross-group product (which would be 6 for 4 artifacts).
+    insertArt(db, { id: "g1_a", score: 0.9, confidence: 0.8, alpha: 9, beta: 2, goalShapes: ["notify_contact"], purpose: "send a notification message" });
+    insertArt(db, { id: "g1_b", score: 0.6, confidence: 0.5, alpha: 3, beta: 4, goalShapes: ["notify_contact"], purpose: "send a notification message" });
+    insertArt(db, { id: "g2_a", score: 0.9, confidence: 0.8, alpha: 9, beta: 2, goalShapes: ["scrape_page"], purpose: "scrape a web page record" });
+    insertArt(db, { id: "g2_b", score: 0.6, confidence: 0.5, alpha: 3, beta: 4, goalShapes: ["scrape_page"], purpose: "scrape a web page record" });
+    const summary = await extractArtifactConsolidation(db, stubEmbed);
+    expect(summary.groups_scanned).toBe(2);
+    expect(summary.pairs_examined).toBe(2); // 1 per group, NOT 6 cross-group
+    expect(summary.consolidated).toBe(2);   // both groups converge
   });
 });

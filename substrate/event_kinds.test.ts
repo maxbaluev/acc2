@@ -606,6 +606,11 @@ describe("derived sets match their pre-unification shape", () => {
       // how often the substrate decides a failing artifact needs a
       // brain-authored replacement (offensive-loop firing rate).
       "capability_gap_detected",
+      // CONSOLIDAT (directive 3XETJCYT): act_artifact_consolidated is
+      // health_metric so dashboards plot how the capability-gap →
+      // competitor → selector → consolidation loop converges (how often
+      // the substrate retires a redundant artifact into a better one).
+      "act_artifact_consolidated",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);
