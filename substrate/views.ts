@@ -5004,6 +5004,36 @@ const parseMaybeJson = (s: unknown): unknown => {
   try { return JSON.parse(s) as unknown; } catch { return s; }
 };
 
+/** BUG A fix — bounded depth-1 reads. acc2 is an RLM: every substrate read
+ *  must return a BOUNDED, query-scoped slice, NEVER an unbounded dump. A
+ *  `SELECT * FROM <view>` with no required scope filter and no default LIMIT
+ *  dumps the entire view (the dispatch_resolved_view 607K-char incident).
+ *
+ *  resolveDefaultLimit(callerLimit, defaultCap, opts?) returns the LIMIT to
+ *  apply when the view has no required scope filter:
+ *   - no caller limit → defaultCap (env-tunable for hot orchestrator surfaces)
+ *   - explicit caller limit → honored, but CLAMPED to [1, hardMax]
+ *  hardMax defaults to 1000 so even an explicit caller can't dump the table. */
+const resolveDefaultLimit = (
+  callerLimit: number | undefined,
+  defaultCap: number,
+  opts: { envVar?: string; hardMax?: number } = {},
+): number => {
+  const hardMax = opts.hardMax ?? 1000;
+  let cap = defaultCap;
+  if (opts.envVar) {
+    const raw = process.env[opts.envVar];
+    if (raw !== undefined) {
+      const parsed = Number.parseInt(raw, 10);
+      if (Number.isFinite(parsed) && parsed > 0) cap = parsed;
+    }
+  }
+  if (typeof callerLimit === "number" && Number.isFinite(callerLimit) && callerLimit > 0) {
+    return Math.min(Math.floor(callerLimit), hardMax);
+  }
+  return Math.min(cap, hardMax);
+};
+
 /** Return every task_graph_view row for one directive, ts-ascending. */
 export const taskGraphFor = (db: Database, directiveId: string): TaskGraphRow[] => {
   const rows = db
@@ -5625,7 +5655,17 @@ const buildDispatchResolvedQuery = (
   if (filter.directiveId) { wheres.push("directive_id = ?"); params.push(filter.directiveId); }
   if (filter.rootTaskId) { wheres.push("root_task_id = ?"); params.push(filter.rootTaskId); }
   const whereSql = wheres.length === 0 ? "" : "WHERE " + wheres.join(" AND ");
-  const limitSql = filter.limit ? ` LIMIT ${Math.max(1, Math.floor(filter.limit))}` : "";
+  // BUG A fix. A SCOPED read (directive_id and/or root_task_id present) keeps
+  // returning that directive's full tree unchanged — an explicit caller limit
+  // is honored if given, otherwise no cap (the scope filter already bounds it).
+  // An UNSCOPED read (no scope filter) MUST be capped or it dumps every row
+  // (the 607K-char incident). Default = 50 most-recent directives by
+  // latest_signal_at DESC; env-tunable for this hot orchestrator surface.
+  const scoped = wheres.length > 0;
+  const limit = scoped
+    ? (filter.limit && filter.limit > 0 ? Math.min(Math.floor(filter.limit), 1000) : undefined)
+    : resolveDefaultLimit(filter.limit, 50, { envVar: "ACC2_DISPATCH_RESOLVED_DEFAULT_LIMIT" });
+  const limitSql = typeof limit === "number" ? ` LIMIT ${Math.max(1, limit)}` : "";
   return {
     sql: `SELECT * FROM dispatch_resolved_view ${whereSql} ORDER BY latest_signal_at DESC, directive_id ASC, root_task_id ASC${limitSql}`,
     params,
@@ -5727,35 +5767,45 @@ const rowToActArtifact = (r: Record<string, unknown>): ActArtifactRow => ({
   updated_at: r.updated_at as string,
 });
 
-/** Admitted + promoted act artifacts ordered by score DESC. Optional runtime filter. */
-export const actArtifactRegistry = (db: Database, runtime?: string): ActArtifactRow[] => {
+/** Admitted + promoted act artifacts ordered by score DESC. Optional runtime
+ *  filter. BUG A: registry cardinality scales with admitted artifacts; cap the
+ *  read at 200 (env ACC2_ARTIFACT_REGISTRY_DEFAULT_LIMIT) so it can't dump. */
+export const actArtifactRegistry = (db: Database, runtime?: string, limit?: number): ActArtifactRow[] => {
+  const cap = resolveDefaultLimit(limit, 200, { envVar: "ACC2_ARTIFACT_REGISTRY_DEFAULT_LIMIT" });
   const rows = (runtime
-    ? db.query("SELECT * FROM act_artifact_registry_view WHERE runtime = ?").all(runtime)
-    : db.query("SELECT * FROM act_artifact_registry_view").all()) as Array<Record<string, unknown>>;
+    ? db.query("SELECT * FROM act_artifact_registry_view WHERE runtime = ? ORDER BY score DESC LIMIT ?").all(runtime, cap)
+    : db.query("SELECT * FROM act_artifact_registry_view ORDER BY score DESC LIMIT ?").all(cap)) as Array<Record<string, unknown>>;
   return rows.map(rowToActArtifact);
 };
 
-/** Routing ranking — score × (1 - residual_mean). Phase B+ adds cosine. */
-export const artifactRouting = (db: Database, runtime?: string): ArtifactRoutingRow[] => {
+/** Routing ranking — score × (1 - residual_mean). Phase B+ adds cosine.
+ *  BUG A: capped at 200 (env ACC2_ARTIFACT_REGISTRY_DEFAULT_LIMIT). */
+export const artifactRouting = (db: Database, runtime?: string, limit?: number): ArtifactRoutingRow[] => {
+  const cap = resolveDefaultLimit(limit, 200, { envVar: "ACC2_ARTIFACT_REGISTRY_DEFAULT_LIMIT" });
   const rows = (runtime
     ? db
         .query(
-          "SELECT ca.*, ar.routing_score FROM artifact_routing_view ar JOIN act_artifact ca ON ar.id = ca.id WHERE ca.runtime = ? ORDER BY ar.routing_score DESC",
+          "SELECT ca.*, ar.routing_score FROM artifact_routing_view ar JOIN act_artifact ca ON ar.id = ca.id WHERE ca.runtime = ? ORDER BY ar.routing_score DESC LIMIT ?",
         )
-        .all(runtime)
+        .all(runtime, cap)
     : db
         .query(
-          "SELECT ca.*, ar.routing_score FROM artifact_routing_view ar JOIN act_artifact ca ON ar.id = ca.id ORDER BY ar.routing_score DESC",
+          "SELECT ca.*, ar.routing_score FROM artifact_routing_view ar JOIN act_artifact ca ON ar.id = ca.id ORDER BY ar.routing_score DESC LIMIT ?",
         )
-        .all()) as Array<Record<string, unknown>>;
+        .all(cap)) as Array<Record<string, unknown>>;
   return rows.map((r) => ({ ...rowToActArtifact(r), routing_score: r.routing_score as number }));
 };
 
-/** Owner-channel events in ts order. */
-export const ownerConversation = (db: Database, directiveId?: string): OwnerConversationRow[] => {
+/** Owner-channel events in chronological (ts ASC) order. BUG A: the read is
+ *  bounded to the most-recent `cap` messages (default 200, env
+ *  ACC2_OWNER_CONVERSATION_DEFAULT_LIMIT) — selected newest-first in a
+ *  subquery, then re-ordered ASC so the transcript still reads chronologically.
+ *  An explicit caller limit is honored (clamped to 1000). */
+export const ownerConversation = (db: Database, directiveId?: string, limit?: number): OwnerConversationRow[] => {
+  const cap = resolveDefaultLimit(limit, 200, { envVar: "ACC2_OWNER_CONVERSATION_DEFAULT_LIMIT" });
   const rows = (directiveId
-    ? db.query("SELECT * FROM owner_conversation_view WHERE directive_id = ?").all(directiveId)
-    : db.query("SELECT * FROM owner_conversation_view").all()) as Array<Record<string, unknown>>;
+    ? db.query("SELECT * FROM (SELECT * FROM owner_conversation_view WHERE directive_id = ? ORDER BY ts DESC LIMIT ?) ORDER BY ts ASC").all(directiveId, cap)
+    : db.query("SELECT * FROM (SELECT * FROM owner_conversation_view ORDER BY ts DESC LIMIT ?) ORDER BY ts ASC").all(cap)) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     event_id: r.event_id as string,
     ts: r.ts as string,
@@ -5771,9 +5821,12 @@ export const ownerConversation = (db: Database, directiveId?: string): OwnerConv
  *  `past_due` boolean (true when next_review_due ≤ now-at-query-time).
  *  Projects every rolling_active row so operators can inspect future
  *  reviews; TS-side callers (rolling_reviewer.ts) filter on next_review_due. */
-export const rollingReviewDue = (db: Database): RollingReviewDueRow[] => {
+export const rollingReviewDue = (db: Database, limit?: number): RollingReviewDueRow[] => {
+  // BUG A: internal callers (rolling_reviewer, cli) read uncapped; the external
+  // MCP read surface passes a default cap so it can't dump every rolling row.
+  const limitSql = typeof limit === "number" && limit > 0 ? ` LIMIT ${Math.min(Math.floor(limit), 1000)}` : "";
   const rows = db
-    .query("SELECT * FROM rolling_review_due_view")
+    .query(`SELECT * FROM rolling_review_due_view ORDER BY next_review_due ASC${limitSql}`)
     .all() as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     directive_id: r.directive_id as string,
@@ -5826,7 +5879,11 @@ export const watchEdgeObservations = (
 export const directiveConflicts = (
   db: Database,
   directiveId?: string,
+  limit?: number,
 ): DirectiveConflictRow[] => {
+  // BUG A: an UNSCOPED read caps at 200 most-recent (env
+  // ACC2_DIRECTIVE_CONFLICTS_DEFAULT_LIMIT) so it can't dump. A directive
+  // scope already bounds the result and is left unchanged in shape/ordering.
   const rows = (directiveId
     ? db
         .query(
@@ -5834,7 +5891,9 @@ export const directiveConflicts = (
            WHERE from_directive = ? OR to_directive = ?`,
         )
         .all(directiveId, directiveId)
-    : db.query("SELECT * FROM directive_conflicts_view").all()) as Array<
+    : db
+        .query("SELECT * FROM directive_conflicts_view ORDER BY ts DESC LIMIT ?")
+        .all(resolveDefaultLimit(limit, 200, { envVar: "ACC2_DIRECTIVE_CONFLICTS_DEFAULT_LIMIT" }))) as Array<
       Record<string, unknown>
     >;
   return rows.map((r) => ({
@@ -5850,10 +5909,14 @@ export const directiveConflicts = (
 };
 
 /** Normalized entity graph edges from stakeholder declarations and directive interference. */
-export const entityRelationshipRows = (db: Database, directiveId?: string): EntityRelationshipRow[] => {
+export const entityRelationshipRows = (db: Database, directiveId?: string, limit?: number): EntityRelationshipRow[] => {
+  // BUG A: unscoped read caps at 200 most-recent (env
+  // ACC2_ENTITY_RELATIONSHIP_DEFAULT_LIMIT); scoped read is unchanged.
   const rows = (directiveId
     ? db.query("SELECT * FROM entity_relationship_view WHERE directive_id = ? ORDER BY ts DESC").all(directiveId)
-    : db.query("SELECT * FROM entity_relationship_view ORDER BY ts DESC").all()) as Array<Record<string, unknown>>;
+    : db
+        .query("SELECT * FROM entity_relationship_view ORDER BY ts DESC LIMIT ?")
+        .all(resolveDefaultLimit(limit, 200, { envVar: "ACC2_ENTITY_RELATIONSHIP_DEFAULT_LIMIT" }))) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     event_id: r.event_id as string,
     ts: r.ts as string,
@@ -5868,10 +5931,14 @@ export const entityRelationshipRows = (db: Database, directiveId?: string): Enti
 };
 
 /** Latest stakeholder_state_recorded per (directive_id, stakeholder_id). */
-export const stakeholderStateRows = (db: Database, directiveId?: string): StakeholderStateRow[] => {
+export const stakeholderStateRows = (db: Database, directiveId?: string, limit?: number): StakeholderStateRow[] => {
+  // BUG A: unscoped read caps at 200 most-recent (env
+  // ACC2_STAKEHOLDER_STATE_DEFAULT_LIMIT); scoped read is unchanged.
   const rows = (directiveId
     ? db.query("SELECT * FROM stakeholder_state_view WHERE directive_id = ?").all(directiveId)
-    : db.query("SELECT * FROM stakeholder_state_view").all()) as Array<Record<string, unknown>>;
+    : db
+        .query("SELECT * FROM stakeholder_state_view ORDER BY ts DESC LIMIT ?")
+        .all(resolveDefaultLimit(limit, 200, { envVar: "ACC2_STAKEHOLDER_STATE_DEFAULT_LIMIT" }))) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     event_id: r.event_id as string,
     ts: r.ts as string,
@@ -5885,10 +5952,14 @@ export const stakeholderStateRows = (db: Database, directiveId?: string): Stakeh
   }));
 };
 
-/** Non-terminal, non-archived directives. Father reads this. */
-export const activeObjectives = (db: Database): ActiveObjectiveRow[] => {
+/** Non-terminal, non-archived directives. Father reads this (uncapped, no
+ *  limit). BUG A: the external read surface passes a default cap so an MCP
+ *  caller can't dump every active directive; internal callers omit `limit`
+ *  and stay uncapped. */
+export const activeObjectives = (db: Database, limit?: number): ActiveObjectiveRow[] => {
+  const limitSql = typeof limit === "number" && limit > 0 ? ` LIMIT ${Math.min(Math.floor(limit), 1000)}` : "";
   const rows = db
-    .query("SELECT * FROM active_objectives_view ORDER BY opened_ts ASC")
+    .query(`SELECT * FROM active_objectives_view ORDER BY opened_ts ASC${limitSql}`)
     .all() as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     directive_id: r.directive_id as string,
@@ -5899,9 +5970,12 @@ export const activeObjectives = (db: Database): ActiveObjectiveRow[] => {
 
 /** Pending lesson/amendment proposals with owner-gate and auto-apply flags
  *  derived entirely from events. This is the orchestrator's apply inbox. */
-export const lessonImplementerQueue = (db: Database): LessonImplementerQueueRow[] => {
+export const lessonImplementerQueue = (db: Database, limit?: number): LessonImplementerQueueRow[] => {
+  // BUG A: internal selectPendingDecisions(cli) reads uncapped; the external
+  // MCP read surface passes a default cap so it can't dump the whole queue.
+  const limitSql = typeof limit === "number" && limit > 0 ? ` LIMIT ${Math.min(Math.floor(limit), 1000)}` : "";
   const rows = db
-    .query("SELECT * FROM lesson_implementer_queue_view ORDER BY ts ASC")
+    .query(`SELECT * FROM lesson_implementer_queue_view ORDER BY ts ASC${limitSql}`)
     .all() as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     source_event_id: r.source_event_id as string,
@@ -5966,11 +6040,14 @@ export type PendingOwnerDecisionRow = {
  *  Excludes source_event_ids that the pending_decision_retire_worker has
  *  retired as stale. Operator-facing CLI (`acc admin pending-decisions`)
  *  projects through this consent-only view. */
-export const pendingOwnerDecisionQueueLive = (db: Database): PendingOwnerDecisionRow[] => {
+export const pendingOwnerDecisionQueueLive = (db: Database, limit?: number): PendingOwnerDecisionRow[] => {
+  // BUG A: internal cli inbox reads uncapped; the external MCP read surface
+  // passes a default cap so it can't dump every pending decision group.
+  const limitSql = typeof limit === "number" && limit > 0 ? ` LIMIT ${Math.min(Math.floor(limit), 1000)}` : "";
   let rows: Array<Record<string, unknown>>;
   try {
     rows = db
-      .query("SELECT * FROM pending_owner_decision_queue_live_view")
+      .query(`SELECT * FROM pending_owner_decision_queue_live_view ORDER BY decision_rank DESC${limitSql}`)
       .all() as Array<Record<string, unknown>>;
   } catch (err) {
     const msg = (err as Error).message ?? "";
@@ -6000,11 +6077,14 @@ export const pendingOwnerDecisionQueueLive = (db: Database): PendingOwnerDecisio
  *  Includes every pending owner-consent row regardless of pending_decision_retired
  *  state, so audit tooling can reconstruct stale rows hidden from the live
  *  operator surface. */
-export const pendingOwnerDecisionQueue = (db: Database): PendingOwnerDecisionRow[] => {
+export const pendingOwnerDecisionQueue = (db: Database, limit?: number): PendingOwnerDecisionRow[] => {
+  // BUG A: external MCP read surface passes a default cap; internal audit
+  // callers (none today) may read uncapped by omitting `limit`.
+  const limitSql = typeof limit === "number" && limit > 0 ? ` LIMIT ${Math.min(Math.floor(limit), 1000)}` : "";
   let rows: Array<Record<string, unknown>>;
   try {
     rows = db
-      .query("SELECT * FROM pending_owner_decision_queue_view")
+      .query(`SELECT * FROM pending_owner_decision_queue_view ORDER BY decision_rank DESC${limitSql}`)
       .all() as Array<Record<string, unknown>>;
   } catch (err) {
     // Defensive fallback for legacy rows with non-JSON payload columns; the
@@ -6035,10 +6115,14 @@ export const pendingOwnerDecisionQueue = (db: Database): PendingOwnerDecisionRow
 
 /** Observable state machine for each proposal in the lesson-implementer
  *  flywheel: proposed → requested → predicted → verified → applied → committed. */
-export const lessonImplementationStatus = (db: Database): LessonImplementationStatusRow[] => {
+export const lessonImplementationStatus = (db: Database, limit?: number): LessonImplementationStatusRow[] => {
+  // BUG A: bounded — default cap 200 most-recent (env
+  // ACC2_LESSON_STATUS_DEFAULT_LIMIT). Newest-first so the cap keeps the most
+  // relevant rows; an explicit caller limit is honored, clamped to 1000.
+  const cap = resolveDefaultLimit(limit, 200, { envVar: "ACC2_LESSON_STATUS_DEFAULT_LIMIT" });
   const rows = db
-    .query("SELECT * FROM lesson_implementation_status_view ORDER BY ts ASC")
-    .all() as Array<Record<string, unknown>>;
+    .query("SELECT * FROM lesson_implementation_status_view ORDER BY ts DESC LIMIT ?")
+    .all(cap) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     source_event_id: r.source_event_id as string,
     ts: r.ts as string,
@@ -6072,10 +6156,13 @@ export const lessonImplementationStatus = (db: Database): LessonImplementationSt
 
 /** Feedback signal for whether an applied lesson made the next cited similar
  *  trajectory cheaper: lower residual, shorter DAG, or Tier-0 replay. */
-export const appliedLessonEffectiveness = (db: Database): AppliedLessonEffectivenessRow[] => {
+export const appliedLessonEffectiveness = (db: Database, limit?: number): AppliedLessonEffectivenessRow[] => {
+  // BUG A: bounded — default cap 200 most-recent (env
+  // ACC2_LESSON_EFFECTIVENESS_DEFAULT_LIMIT), newest-first.
+  const cap = resolveDefaultLimit(limit, 200, { envVar: "ACC2_LESSON_EFFECTIVENESS_DEFAULT_LIMIT" });
   const rows = db
-    .query("SELECT * FROM applied_lesson_effectiveness_view ORDER BY committed_at ASC")
-    .all() as Array<Record<string, unknown>>;
+    .query("SELECT * FROM applied_lesson_effectiveness_view ORDER BY committed_at DESC LIMIT ?")
+    .all(cap) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     source_event_id: r.source_event_id as string,
     applied_change_event_id: r.applied_change_event_id as string,
@@ -6105,10 +6192,14 @@ export const appliedLessonEffectiveness = (db: Database): AppliedLessonEffective
 /** Kind-agnostic normalized candidate shape consumed by the lesson applier.
  *  The first eight fields are the stable flywheel contract requested by the
  *  brain; trailing fields preserve audit context for operators. */
-export const lessonApplyCandidates = (db: Database): LessonApplyCandidateRow[] => {
+export const lessonApplyCandidates = (db: Database, limit?: number): LessonApplyCandidateRow[] => {
+  // BUG A: bounded — default cap 200 (env ACC2_LESSON_APPLY_DEFAULT_LIMIT).
+  // source_event_id is a ULID (lexicographically time-ordered) so DESC keeps
+  // the most-recent candidates.
+  const cap = resolveDefaultLimit(limit, 200, { envVar: "ACC2_LESSON_APPLY_DEFAULT_LIMIT" });
   const rows = db
-    .query("SELECT * FROM lesson_apply_candidate_view ORDER BY source_event_id ASC")
-    .all() as Array<Record<string, unknown>>;
+    .query("SELECT * FROM lesson_apply_candidate_view ORDER BY source_event_id DESC LIMIT ?")
+    .all(cap) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     source_event_id: r.source_event_id as string,
     target: (r.target as string | null) ?? null,
@@ -6129,9 +6220,12 @@ export const lessonApplyCandidates = (db: Database): LessonApplyCandidateRow[] =
 };
 
 /** Tally of irreversible_effect_recorded events per directive. */
-export const irreversibleEffects = (db: Database): IrreversibleEffectRow[] => {
+export const irreversibleEffects = (db: Database, limit?: number): IrreversibleEffectRow[] => {
+  // BUG A: per-directive aggregate; internal cli reads uncapped (then .find),
+  // the external MCP read surface passes a default cap.
+  const limitSql = typeof limit === "number" && limit > 0 ? ` LIMIT ${Math.min(Math.floor(limit), 1000)}` : "";
   const rows = db
-    .query("SELECT * FROM irreversible_effects_view")
+    .query(`SELECT * FROM irreversible_effects_view ORDER BY latest_ts DESC${limitSql}`)
     .all() as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     directive_id: r.directive_id as string,
@@ -6194,9 +6288,13 @@ export type LowRiskInlinePatternRow = {
  *  score ≥ 0.7 AND confidence ≥ 0.6. The dispatch decider reads this view
  *  to decide whether a directive can take the Claude inline lane. Fail-
  *  closed: empty result → no inline lane (§3.6). */
-export const lowRiskInlinePatterns = (db: Database): LowRiskInlinePatternRow[] => {
+export const lowRiskInlinePatterns = (db: Database, limit?: number): LowRiskInlinePatternRow[] => {
+  // BUG A: the dispatch_decider needs ALL matching patterns to decide the
+  // inline lane, so internal callers read uncapped (no limit). The external
+  // MCP read surface passes a default cap so the observability read can't dump.
+  const limitSql = typeof limit === "number" && limit > 0 ? ` LIMIT ${Math.min(Math.floor(limit), 1000)}` : "";
   const rows = db
-    .query("SELECT * FROM low_risk_inline_patterns_view ORDER BY ts DESC")
+    .query(`SELECT * FROM low_risk_inline_patterns_view ORDER BY ts DESC${limitSql}`)
     .all() as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     cited_id: r.cited_id as string,
@@ -6421,7 +6519,10 @@ export const promotedKnowledge = (
   if (filter.origin) { wheres.push("substrate_origin = ?"); params.push(filter.origin); }
   if (filter.since) { wheres.push("ts >= ?"); params.push(filter.since); }
   const whereSql = wheres.length === 0 ? "" : `WHERE ${wheres.join(" AND ")}`;
-  const limitSql = filter.limit && filter.limit > 0 ? `LIMIT ${Math.floor(filter.limit)}` : "";
+  // BUG A: default cap 200 (env ACC2_PROMOTED_KNOWLEDGE_DEFAULT_LIMIT) so an
+  // unbounded read can't dump every promoted row; explicit limit honored,
+  // clamped to 1000. Newest-first (ORDER BY ts DESC) keeps the cap relevant.
+  const limitSql = `LIMIT ${resolveDefaultLimit(filter.limit, 200, { envVar: "ACC2_PROMOTED_KNOWLEDGE_DEFAULT_LIMIT" })}`;
   const rows = db
     .query(
       `SELECT event_id, ts, substrate_origin, candidate_id, directive_id,
@@ -6449,7 +6550,9 @@ export const promotedKnowledge = (
 /** Latest recipe-shape knowledge row (knowledge_candidate / knowledge_promoted
  *  carrying recipe_shape.enabled) per recipe key, ordered newest first. */
 export const recipeRegistry = (db: Database, limit?: number): RecipeRegistryRow[] => {
-  const limitSql = limit && limit > 0 ? `LIMIT ${Math.floor(limit)}` : "";
+  // BUG A: default cap 200 (env ACC2_RECIPE_REGISTRY_DEFAULT_LIMIT); explicit
+  // limit honored, clamped to 1000. Newest-first keeps the cap relevant.
+  const limitSql = `LIMIT ${resolveDefaultLimit(limit, 200, { envVar: "ACC2_RECIPE_REGISTRY_DEFAULT_LIMIT" })}`;
   const rows = db
     .query(
       `SELECT recipe_id, id, ts, directive_id, task_id, confidence,
@@ -6662,10 +6765,15 @@ export type DirectiveRow = {
 /** Read directive_view. When `directiveId` is supplied, returns at
  *  most one row for that directive; otherwise returns every directive
  *  ordered newest-first by opened_ts. */
-export const directives = (db: Database, directiveId?: string): DirectiveRow[] => {
+export const directives = (db: Database, directiveId?: string, limit?: number): DirectiveRow[] => {
+  // BUG A: an UNSCOPED read returns every directive — cap at 200 most-recent
+  // by opened_ts (env ACC2_DIRECTIVE_VIEW_DEFAULT_LIMIT). A directive scope
+  // returns its single row unchanged.
   const rows = (directiveId
     ? db.query("SELECT * FROM directive_view WHERE directive_id = ?").all(directiveId)
-    : db.query("SELECT * FROM directive_view ORDER BY opened_ts DESC").all()
+    : db
+        .query("SELECT * FROM directive_view ORDER BY opened_ts DESC LIMIT ?")
+        .all(resolveDefaultLimit(limit, 200, { envVar: "ACC2_DIRECTIVE_VIEW_DEFAULT_LIMIT" }))
   ) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     directive_id: r.directive_id as string,
@@ -6691,10 +6799,14 @@ export type TaskCriticalPathRow = {
   path: string;
 };
 
-export const taskCriticalPaths = (db: Database, directiveId?: string): TaskCriticalPathRow[] => {
+export const taskCriticalPaths = (db: Database, directiveId?: string, limit?: number): TaskCriticalPathRow[] => {
+  // BUG A: unscoped read caps at 200 (env ACC2_CRITICAL_PATH_DEFAULT_LIMIT)
+  // ordered by longest critical path; a directive scope is unchanged.
   const rows = (directiveId
     ? db.query("SELECT * FROM task_critical_path_view WHERE directive_id = ?").all(directiveId)
-    : db.query("SELECT * FROM task_critical_path_view ORDER BY critical_path_length DESC").all()
+    : db
+        .query("SELECT * FROM task_critical_path_view ORDER BY critical_path_length DESC LIMIT ?")
+        .all(resolveDefaultLimit(limit, 200, { envVar: "ACC2_CRITICAL_PATH_DEFAULT_LIMIT" }))
   ) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     directive_id: r.directive_id as string,
@@ -6715,10 +6827,13 @@ export type ActiveInferenceRow = {
   latest_ts: string | null;
 };
 
-export const activeInference = (db: Database): ActiveInferenceRow[] => {
+export const activeInference = (db: Database, limit?: number): ActiveInferenceRow[] => {
+  // BUG A: grouped by (origin, action_artifact_id) — scales with artifacts.
+  // Default cap 200 (env ACC2_ACTIVE_INFERENCE_DEFAULT_LIMIT), most-scored first.
+  const cap = resolveDefaultLimit(limit, 200, { envVar: "ACC2_ACTIVE_INFERENCE_DEFAULT_LIMIT" });
   const rows = db
-    .query("SELECT * FROM active_inference_view ORDER BY scored_count DESC")
-    .all() as Array<Record<string, unknown>>;
+    .query("SELECT * FROM active_inference_view ORDER BY scored_count DESC LIMIT ?")
+    .all(cap) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     substrate_origin: r.substrate_origin as string,
     action_artifact_id: (r.action_artifact_id as string | null) ?? null,
@@ -6748,10 +6863,13 @@ export type ArtifactWarningRow = {
   eligibility_status: string;
 };
 
-export const artifactWarnings = (db: Database): ArtifactWarningRow[] => {
+export const artifactWarnings = (db: Database, limit?: number): ArtifactWarningRow[] => {
+  // BUG A: registry-subset; default cap 200 (env
+  // ACC2_ARTIFACT_WARNING_DEFAULT_LIMIT), most-recent status change first.
+  const cap = resolveDefaultLimit(limit, 200, { envVar: "ACC2_ARTIFACT_WARNING_DEFAULT_LIMIT" });
   const rows = db
-    .query("SELECT * FROM artifact_warning_view")
-    .all() as Array<Record<string, unknown>>;
+    .query("SELECT * FROM artifact_warning_view ORDER BY status_at_ts DESC LIMIT ?")
+    .all(cap) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     artifact_id: r.artifact_id as string,
     runtime: r.runtime as string,

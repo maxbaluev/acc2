@@ -38,6 +38,30 @@ import type {
  *  Same signature both surfaces use. */
 export type PoolQuery = <T>(db: Database, sql: string, params: unknown[]) => Promise<T[]>;
 
+/** resolveDefaultLimit — byte-identical bound resolution to substrate/views.ts's
+ *  module-private helper (not exported). BUG A: every unscoped pooled read must
+ *  apply a default cap; an explicit caller limit is honored but clamped to
+ *  [1, hardMax=1000] so even an explicit caller can't dump the view. */
+const resolveDefaultLimit = (
+  callerLimit: number | undefined,
+  defaultCap: number,
+  envVar?: string,
+  hardMax = 1000,
+): number => {
+  let cap = defaultCap;
+  if (envVar) {
+    const raw = process.env[envVar];
+    if (raw !== undefined) {
+      const parsed = Number.parseInt(raw, 10);
+      if (Number.isFinite(parsed) && parsed > 0) cap = parsed;
+    }
+  }
+  if (typeof callerLimit === "number" && Number.isFinite(callerLimit) && callerLimit > 0) {
+    return Math.min(Math.floor(callerLimit), hardMax);
+  }
+  return Math.min(cap, hardMax);
+};
+
 /** parseJson — byte-identical to substrate/views.ts's module-private helper
  *  (which is not exported). JSON-parse with a typed fallback so a malformed /
  *  null column never throws out of the read path. */
@@ -136,11 +160,14 @@ export const actArtifactRegistryPooled = async (
   db: Database,
   poolQuery: PoolQuery,
   runtime?: string,
+  limit?: number,
 ): Promise<ActArtifactRow[]> => {
+  // BUG A: bounded read — mirror substrate/views.ts:actArtifactRegistry cap.
+  const cap = resolveDefaultLimit(limit, 200, "ACC2_ARTIFACT_REGISTRY_DEFAULT_LIMIT");
   const sql = runtime
-    ? "SELECT * FROM act_artifact_registry_view WHERE runtime = ?"
-    : "SELECT * FROM act_artifact_registry_view";
-  const rows = await poolQuery<Record<string, unknown>>(db, sql, runtime ? [runtime] : []);
+    ? "SELECT * FROM act_artifact_registry_view WHERE runtime = ? ORDER BY score DESC LIMIT ?"
+    : "SELECT * FROM act_artifact_registry_view ORDER BY score DESC LIMIT ?";
+  const rows = await poolQuery<Record<string, unknown>>(db, sql, runtime ? [runtime, cap] : [cap]);
   return rows.map(rowToActArtifact);
 };
 
@@ -150,11 +177,14 @@ export const artifactRoutingPooled = async (
   db: Database,
   poolQuery: PoolQuery,
   runtime?: string,
+  limit?: number,
 ): Promise<ArtifactRoutingRow[]> => {
+  // BUG A: bounded read — mirror substrate/views.ts:artifactRouting cap.
+  const cap = resolveDefaultLimit(limit, 200, "ACC2_ARTIFACT_REGISTRY_DEFAULT_LIMIT");
   const sql = runtime
-    ? "SELECT ca.*, ar.routing_score FROM artifact_routing_view ar JOIN act_artifact ca ON ar.id = ca.id WHERE ca.runtime = ? ORDER BY ar.routing_score DESC"
-    : "SELECT ca.*, ar.routing_score FROM artifact_routing_view ar JOIN act_artifact ca ON ar.id = ca.id ORDER BY ar.routing_score DESC";
-  const rows = await poolQuery<Record<string, unknown>>(db, sql, runtime ? [runtime] : []);
+    ? "SELECT ca.*, ar.routing_score FROM artifact_routing_view ar JOIN act_artifact ca ON ar.id = ca.id WHERE ca.runtime = ? ORDER BY ar.routing_score DESC LIMIT ?"
+    : "SELECT ca.*, ar.routing_score FROM artifact_routing_view ar JOIN act_artifact ca ON ar.id = ca.id ORDER BY ar.routing_score DESC LIMIT ?";
+  const rows = await poolQuery<Record<string, unknown>>(db, sql, runtime ? [runtime, cap] : [cap]);
   return rows.map((r) => ({ ...rowToActArtifact(r), routing_score: r.routing_score as number }));
 };
 

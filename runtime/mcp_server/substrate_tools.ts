@@ -667,23 +667,41 @@ export const handleRead = (
   // of Architecture.md.
   const db = ctx.db;
   const view = args.view_name;
+  // BUG B fix (dual-shape arg resolution). Scope/filter args may arrive
+  // NESTED under `args.args` (the explicit envelope) OR FLAT on `args`
+  // itself (opencode 1.4+ flattens our zod schema when surfacing the read
+  // tool to the brain, so flat is the dominant calling shape). The EMIT
+  // handler already resolves both shapes (`const e = args.event ?? args`);
+  // the READ handler historically read ONLY `args.args`, so a flat caller's
+  // `directive_id` / `limit` / etc. silently arrived undefined → scoped
+  // reads became unscoped (wrong data + unbounded-dump path). Resolve from
+  // BOTH shapes here and feed every `case` from `viewArgs`. `view_name` is
+  // harmless if present (no case reads a filter field named `view_name`).
+  const viewArgs = (args.args ?? args) as Record<string, unknown>;
   try {
     switch (view) {
       case "act_artifact_registry_view":
       // Pre-rename view name accepted so historical brain dispatches resolve.
       case "code_artifact_registry_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const runtime = typeof arg.runtime === "string" ? arg.runtime : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         // T3.8/T5: route the registry scan off the daemon main loop through the
         // SQL worker pool (sync fallback when no pool). Identical rows + order.
         return (async (): Promise<McpResult> => {
-          const rows = await actArtifactRegistryPooled(db, poolQuery, runtime);
+          const rows = await actArtifactRegistryPooled(db, poolQuery, runtime, limit);
           return { ok: true, result: rows as unknown as JsonValue };
         })();
       }
       case "ready_tasks_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
-        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        const arg = viewArgs;
+        // BUG A: bound the external read surface. An explicit caller limit is
+        // honored (clamped to 1000); an unscoped read defaults to 200 most-
+        // recent so it can't dump. Internal scheduler readiness uses
+        // task_topology.readyTasks(), not this view, so capping the read
+        // surface doesn't starve dispatch.
+        const rawLimit = typeof arg.limit === "number" ? arg.limit : undefined;
+        const limit = rawLimit && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
         // T3.8/T5: ready_tasks_view is polled by the scheduler/dispatcher; route
         // its scan off the main loop through the SQL worker pool. Sync fallback
         // when no pool (tests, ACC2_DISABLE_SQL_POOL). Identical rows + order.
@@ -693,9 +711,10 @@ export const handleRead = (
         })();
       }
       case "dispatch_resolved_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
         const rootTaskId = typeof arg.root_task_id === "string" ? arg.root_task_id : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         // dispatch_resolved_view is the authoritative dispatch-truth surface the
         // orchestrator polls every ~5s during a live owner turn. On the 374K-event
         // DB it materializes a full recursive task tree + per-task CTEs across all
@@ -704,12 +723,12 @@ export const handleRead = (
         // doesn't block the daemon main loop / starve /health; sync fallback when
         // no pool (tests, ACC2_DISABLE_SQL_POOL). Identical results + ordering.
         return (async (): Promise<McpResult> => {
-          const rows = await dispatchResolvedPooled(db, poolQuery, { directiveId, rootTaskId });
+          const rows = await dispatchResolvedPooled(db, poolQuery, { directiveId, rootTaskId, limit });
           return { ok: true, result: rows as unknown as JsonValue };
         })();
       }
       case "task_graph_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : null;
         if (!directiveId) return { ok: false, error: "task_graph_view_requires_directive_id" };
         // T3.8/T5: task_graph_view is the recursive per-directive DAG scan the
@@ -723,37 +742,61 @@ export const handleRead = (
       case "failure_view":
         return { ok: true, result: failureCounts(db) as unknown as JsonValue };
       case "artifact_routing_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const runtime = typeof arg.runtime === "string" ? arg.runtime : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         // T3.8/T5: artifact_routing_view joins the routing ranking against
         // act_artifact; route off the main loop through the SQL worker pool
         // (sync fallback when no pool). Identical rows + routing_score order.
         return (async (): Promise<McpResult> => {
-          const rows = await artifactRoutingPooled(db, poolQuery, runtime);
+          const rows = await artifactRoutingPooled(db, poolQuery, runtime, limit);
           return { ok: true, result: rows as unknown as JsonValue };
         })();
       }
       case "stakeholder_state_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
-        return { ok: true, result: stakeholderStateRows(db, directiveId) as unknown as JsonValue };
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return { ok: true, result: stakeholderStateRows(db, directiveId, limit) as unknown as JsonValue };
       }
-      case "active_objectives_view":
-        return { ok: true, result: activeObjectives(db) as unknown as JsonValue };
-      case "rolling_review_due_view":
-        return { ok: true, result: rollingReviewDue(db) as unknown as JsonValue };
-      case "directive_conflicts_view":
-        return { ok: true, result: directiveConflicts(db) as unknown as JsonValue };
+      case "active_objectives_view": {
+        // BUG A: cap the external read at 200 (clamped to 1000); internal
+        // father reads uncapped via activeObjectives(db) with no limit.
+        const rawLimit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        const limit = rawLimit && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
+        return { ok: true, result: activeObjectives(db, limit) as unknown as JsonValue };
+      }
+      case "rolling_review_due_view": {
+        const rawLimit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        const limit = rawLimit && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
+        return { ok: true, result: rollingReviewDue(db, limit) as unknown as JsonValue };
+      }
+      case "directive_conflicts_view": {
+        const arg = viewArgs;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return { ok: true, result: directiveConflicts(db, directiveId, limit) as unknown as JsonValue };
+      }
       case "entity_relationship_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
-        return { ok: true, result: entityRelationshipRows(db, directiveId) as unknown as JsonValue };
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return { ok: true, result: entityRelationshipRows(db, directiveId, limit) as unknown as JsonValue };
       }
-      case "irreversible_effects_view":
-        return { ok: true, result: irreversibleEffects(db) as unknown as JsonValue };
+      case "irreversible_effects_view": {
+        const rawLimit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        const limit = rawLimit && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
+        return { ok: true, result: irreversibleEffects(db, limit) as unknown as JsonValue };
+      }
       case "embedding_index_view":
+        // BUG A: full ledger of embedded events with large BLOBs — cap the
+        // external read surface. The daemon's own index rebuild uses a
+        // dedicated batched query in runtime/embedding_index.ts (not this
+        // case), so capping here doesn't affect index reconstruction.
         return (async (): Promise<McpResult> => {
-          const rows = await poolQuery<Record<string, unknown>>(db, "SELECT * FROM embedding_index_view", []);
+          const rawLimit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+          const limit = rawLimit && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
+          const rows = await poolQuery<Record<string, unknown>>(db, "SELECT * FROM embedding_index_view ORDER BY ts DESC LIMIT ?", [limit]);
           return { ok: true, result: rows as unknown as JsonValue };
         })();
       case "origin_promotion_view":
@@ -773,9 +816,10 @@ export const handleRead = (
         };
       }
       case "owner_conversation_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
-        return { ok: true, result: ownerConversation(db, directiveId) as unknown as JsonValue };
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return { ok: true, result: ownerConversation(db, directiveId, limit) as unknown as JsonValue };
       }
       case "owner_rendering_policy_view": {
         // Owner-visible rendering loop — brain contract Q471RAN88X0H513V8BC3BTW0AW.
@@ -786,7 +830,7 @@ export const handleRead = (
       case "owner_rendering_effectiveness_view": {
         // Args: { audience?, surface?, limit? } — caller filters by primary
         // vs detail_drawer, by tui vs chat vs export, or just reads recent.
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const audience = typeof arg.audience === "string" ? arg.audience : undefined;
         const surface = typeof arg.surface === "string" ? arg.surface : undefined;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
@@ -808,7 +852,7 @@ export const handleRead = (
         // the operating contract self-updates from evidence rather
         // than being hard-coded as text-on-disk.
         // Args: { min_score?, limit? }
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const minScore = typeof arg.min_score === "number" ? arg.min_score : undefined;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         return { ok: true, result: topLaws(db, { min_score: minScore, limit }) as unknown as JsonValue };
@@ -817,7 +861,7 @@ export const handleRead = (
         // Phase I1: RLM retrieval credit observability. Args:
         // { directive_id?, band?, limit? }. band ∈ {unused, rejected,
         // positive, mixed, negative}.
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
         const band = typeof arg.band === "string" ? arg.band as "unused" | "rejected" | "positive" | "mixed" | "negative" : undefined;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
@@ -830,7 +874,7 @@ export const handleRead = (
         // Phase H5: recent alignment_action_selected × paired
         // prediction errors × belief axes. Args: { directive_id?,
         // action_kind?, limit? }.
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
         const actionKind = typeof arg.action_kind === "string" ? arg.action_kind : undefined;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
@@ -843,7 +887,7 @@ export const handleRead = (
         // Args: { directive_id?, limit? } — TUI primary surface reads
         // this view to render plain-language status cards. By default
         // returns the 20 most recently-active directives newest-first.
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         return {
@@ -858,7 +902,7 @@ export const handleRead = (
         // Args: { window_hours?, dead_only? }. When dead_only=true,
         // LEFT-JOIN against the EVENT_KINDS registry and return rows
         // whose occurrence_count = 0 (registered but never emitted).
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const windowHours = typeof arg.window_hours === "number" ? arg.window_hours : undefined;
         const deadOnly = arg.dead_only === true;
         if (deadOnly) {
@@ -967,7 +1011,7 @@ export const handleRead = (
         // Args: { window_hours? } (default 24). No registry-sweep
         // dead_only branch yet — there is no canonical ALL_WORKER_NAMES
         // export; that follow-up is a separate contract.
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const windowHours = typeof arg.window_hours === "number" ? arg.window_hours : 24;
         const sql = `
           SELECT
@@ -995,9 +1039,11 @@ export const handleRead = (
         // Tier U/U1: unified multi-brain peer awareness. The SQL view
         // performs registration/activity coalescing and 24h dead-peer aging;
         // this read path preserves the standard substrate.read envelope.
+        const rawLimit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        const limit = rawLimit && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
         const rows = db
-          .query("SELECT * FROM peer_registry_view ORDER BY last_seen_ts DESC")
-          .all() as Array<Record<string, unknown>>;
+          .query("SELECT * FROM peer_registry_view ORDER BY last_seen_ts DESC LIMIT ?")
+          .all(limit) as Array<Record<string, unknown>>;
         return {
           ok: true,
           result: { rows, view_name: view, args, generated_at: new Date().toISOString() } as unknown as JsonValue,
@@ -1007,7 +1053,7 @@ export const handleRead = (
         // Tier U/U2: on-the-fly mutual awareness. Args:
         // { current_peer_id?, target_resource?, limit? }. current_peer_id
         // excludes the caller so peers see other live peers before acting.
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const currentPeerId = typeof arg.current_peer_id === "string" ? arg.current_peer_id : undefined;
         const targetResource = typeof arg.target_resource === "string" ? arg.target_resource : undefined;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
@@ -1028,7 +1074,7 @@ export const handleRead = (
         // Surfaces decorative promotions that didn't bind to any
         // action — the complement of promoted_knowledge_view.
         // Args: { minimum_hours_stale? }.
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const minHours = typeof arg.minimum_hours_stale === "number" ? arg.minimum_hours_stale : 168;
         const sql = `
           SELECT
@@ -1069,25 +1115,40 @@ export const handleRead = (
         })();
       }
       case "contradictory_candidates_view": {
+        // BUG A: unbounded — cap the external read at 200 (clamped to 1000).
+        const rawLimit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        const limit = rawLimit && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
         const rows = db
-          .query("SELECT * FROM contradictory_candidates_view ORDER BY ts DESC")
-          .all() as Array<Record<string, unknown>>;
+          .query("SELECT * FROM contradictory_candidates_view ORDER BY ts DESC LIMIT ?")
+          .all(limit) as Array<Record<string, unknown>>;
         return { ok: true, result: rows as unknown as JsonValue };
       }
       case "low_risk_inline_patterns_view": {
+        // BUG A: external read cap; the dispatch_decider reads uncapped inline.
+        const rawLimit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        const limit = rawLimit && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
         return {
           ok: true,
-          result: lowRiskInlinePatterns(db) as unknown as JsonValue,
+          result: lowRiskInlinePatterns(db, limit) as unknown as JsonValue,
         };
       }
-      case "lesson_implementer_queue_view":
-        return { ok: true, result: lessonImplementerQueue(db) as unknown as JsonValue };
-      case "pending_owner_decision_queue_view":
-        return { ok: true, result: pendingOwnerDecisionQueue(db) as unknown as JsonValue };
-      case "pending_owner_decision_queue_live_view":
-        return { ok: true, result: pendingOwnerDecisionQueueLive(db) as unknown as JsonValue };
+      case "lesson_implementer_queue_view": {
+        const rawLimit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        const limit = rawLimit && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
+        return { ok: true, result: lessonImplementerQueue(db, limit) as unknown as JsonValue };
+      }
+      case "pending_owner_decision_queue_view": {
+        const rawLimit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        const limit = rawLimit && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
+        return { ok: true, result: pendingOwnerDecisionQueue(db, limit) as unknown as JsonValue };
+      }
+      case "pending_owner_decision_queue_live_view": {
+        const rawLimit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        const limit = rawLimit && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
+        return { ok: true, result: pendingOwnerDecisionQueueLive(db, limit) as unknown as JsonValue };
+      }
       case "pending_contract_amendments_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         const rows = pendingContractAmendments(db, { directiveId, limit });
@@ -1124,7 +1185,7 @@ export const handleRead = (
       case "claude_inline_ready_leaves_view": {
         // L3 inbox surface — brain design 48SN4XF3WN4KBBCHHCANDRDQRW.
         // Args: { directive_id?, limit?, only_unclaimed? }.
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         const onlyUnclaimed = arg.only_unclaimed === true;
@@ -1136,7 +1197,7 @@ export const handleRead = (
       case "substrate_narrative_recent_view": {
         // Content-first TUI primitive — brain design D9TBCHADS97DHAMNBC686HE3P0.
         // Args: { limit?, directive_id?, importance_in?, kinds_in? }.
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
         const importanceIn = Array.isArray(arg.importance_in)
@@ -1160,26 +1221,32 @@ export const handleRead = (
           return { ok: true, result: rows as unknown as JsonValue };
         })();
       }
-      case "lesson_implementation_status_view":
-        return { ok: true, result: lessonImplementationStatus(db) as unknown as JsonValue };
-      case "applied_lesson_effectiveness_view":
-        return { ok: true, result: appliedLessonEffectiveness(db) as unknown as JsonValue };
-      case "lesson_apply_candidate_view":
-        return { ok: true, result: lessonApplyCandidates(db) as unknown as JsonValue };
+      case "lesson_implementation_status_view": {
+        const limit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        return { ok: true, result: lessonImplementationStatus(db, limit) as unknown as JsonValue };
+      }
+      case "applied_lesson_effectiveness_view": {
+        const limit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        return { ok: true, result: appliedLessonEffectiveness(db, limit) as unknown as JsonValue };
+      }
+      case "lesson_apply_candidate_view": {
+        const limit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        return { ok: true, result: lessonApplyCandidates(db, limit) as unknown as JsonValue };
+      }
       case "promoted_knowledge_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const origin = typeof arg.origin === "string" ? arg.origin : undefined;
         const since = typeof arg.since === "string" ? arg.since : undefined;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         return { ok: true, result: promotedKnowledge(db, { origin, since, limit }) as unknown as JsonValue };
       }
       case "recipe_registry_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         return { ok: true, result: recipeRegistry(db, limit) as unknown as JsonValue };
       }
       case "act_projection_observability_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const sourceActId = typeof arg.source_act_id === "string" ? arg.source_act_id : null;
         if (!sourceActId) return { ok: false, error: "act_projection_observability_view_requires_source_act_id" };
         return { ok: true, result: actProjectionObservability(db, sourceActId) as unknown as JsonValue };
@@ -1189,25 +1256,29 @@ export const handleRead = (
         // own classification rate to learn whether depth-1 retrieval is
         // producing prompts the model can act on without refinement.
         // Pure read over events — no schema changes.
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const windowMs = typeof arg.window_ms === "number" ? arg.window_ms : undefined;
         return { ok: true, result: summarizeEffectiveness(db, { windowMs }) as unknown as JsonValue };
       }
       case "directive_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
-        return { ok: true, result: directives(db, directiveId) as unknown as JsonValue };
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return { ok: true, result: directives(db, directiveId, limit) as unknown as JsonValue };
       }
       case "task_critical_path_view": {
-        const arg = (args.args ?? {}) as Record<string, unknown>;
+        const arg = viewArgs;
         const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
-        return { ok: true, result: taskCriticalPaths(db, directiveId) as unknown as JsonValue };
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return { ok: true, result: taskCriticalPaths(db, directiveId, limit) as unknown as JsonValue };
       }
       case "active_inference_view": {
-        return { ok: true, result: activeInference(db) as unknown as JsonValue };
+        const limit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        return { ok: true, result: activeInference(db, limit) as unknown as JsonValue };
       }
       case "artifact_warning_view": {
-        return { ok: true, result: artifactWarnings(db) as unknown as JsonValue };
+        const limit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
+        return { ok: true, result: artifactWarnings(db, limit) as unknown as JsonValue };
       }
       case "model_routing_view": {
         return { ok: true, result: modelRouting(db) as unknown as JsonValue };
