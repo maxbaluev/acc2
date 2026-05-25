@@ -7,7 +7,23 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
-import { checkClosureDeliverables } from "./closure_deliverable_check";
+import { checkClosureDeliverables, hasRealDocumentBody } from "./closure_deliverable_check";
+
+// A body that comfortably clears the document hard-gate thresholds
+// (DOC_MIN_BODY_CHARS=400, DOC_MIN_BODY_WORDS=60, DOC_MIN_SECTIONS=2).
+const REAL_DOC_BODY = [
+  "# Growth Report — Q2",
+  "",
+  "The operator pipeline grew 18% quarter over quarter, driven by two factors that compounded across the funnel. New inbound from the partner channel doubled while retention on the core cohort held flat at ninety-one percent throughout the measured window.",
+  "",
+  "## Methodology",
+  "",
+  "We sampled every committed directive over the trailing ninety days and joined the residual ledger against the owner-observed outcomes table to separate real wins from optimistic self-scores recorded by the verifier at admission time.",
+  "",
+  "## Recommendations",
+  "",
+  "Double down on the partner channel, instrument the drop-off between first contact and qualified reply, and stand up a weekly review so regressions surface inside one cycle instead of one quarter as they currently do today.",
+].join("\n");
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -26,12 +42,13 @@ const seedLeaf = (
   goal: string,
   parent: string = ROOT,
   requiresDeliverable = false,
+  extra: Record<string, unknown> = {},
 ) => {
   emitEvent(db, {
     kind: "task_node_opened",
     directive_id: D,
     task_id: taskId,
-    payload: requiresDeliverable ? { goal, requires_deliverable: true } : { goal },
+    payload: { goal, ...(requiresDeliverable ? { requires_deliverable: true } : {}), ...extra },
   });
   emitEvent(db, { kind: "task_edge_recorded", directive_id: D, task_id: taskId, payload: { from_task: parent, to_task: taskId, kind: "refines" } });
 };
@@ -110,5 +127,100 @@ describe("checkClosureDeliverables", () => {
     const r = checkClosureDeliverables(db, ROOT);
     expect(r.ok).toBe(false);
     expect(r.uncovered_leaves).toContain(leaf);
+  });
+});
+
+// amendment #5 deliverable_body_verifier_hard_gate — DOCUMENT leaves require a
+// real multi-section body, not the presence of a summary/plan/outline stub.
+describe("checkClosureDeliverables — document body hard gate", () => {
+  test("(a) document leaf whose only artifact is a summary/stub body is UNCOVERED → blocks closure", () => {
+    const db = openDb(":memory:");
+    seedRoot(db);
+    const leaf = "t_doc_stub";
+    seedLeaf(db, leaf, "produce the growth report", ROOT, true, { deliverable_kind: "document" });
+    // A plan/summary substitute, not a finished document.
+    emitEvent(db, {
+      kind: "act_artifact_candidate",
+      directive_id: D,
+      task_id: leaf,
+      payload: { body: "Summary: I will write the report next cycle. Outline:\n- intro\n- TODO body" },
+    });
+    const r = checkClosureDeliverables(db, ROOT);
+    expect(r.ok).toBe(false);
+    expect(r.uncovered_leaves).toContain(leaf);
+  });
+
+  test("(b) same document leaf with a real multi-section body is COVERED", () => {
+    const db = openDb(":memory:");
+    seedRoot(db);
+    const leaf = "t_doc_real";
+    seedLeaf(db, leaf, "produce the growth report", ROOT, true, { deliverable_kind: "document" });
+    emitEvent(db, {
+      kind: "act_artifact_candidate",
+      directive_id: D,
+      task_id: leaf,
+      payload: { body: REAL_DOC_BODY },
+    });
+    expect(checkClosureDeliverables(db, ROOT)).toEqual({ ok: true, uncovered_leaves: [] });
+  });
+
+  test("(c) non-document deliverable leaf is unaffected — presence still suffices (thin body OK)", () => {
+    const db = openDb(":memory:");
+    seedRoot(db);
+    const leaf = "t_nondoc";
+    // requires_deliverable but NOT a document leaf → existing presence check.
+    seedLeaf(db, leaf, "implement the renderer", ROOT, true);
+    emitEvent(db, { kind: "act_artifact_candidate", directive_id: D, task_id: leaf, payload: { runtime: "bun", body: "/* x */" } });
+    expect(checkClosureDeliverables(db, ROOT)).toEqual({ ok: true, uncovered_leaves: [] });
+  });
+
+  test("(d) expected_outputs named sections must be present in the body", () => {
+    const db = openDb(":memory:");
+    seedRoot(db);
+    const leaf = "t_doc_sections";
+    // expected_outputs both flags this as a document leaf (the "report" entry)
+    // AND names required sections.
+    seedLeaf(db, leaf, "produce the operator report", ROOT, false, {
+      expected_outputs: ["report", "Methodology", "Recommendations", "Risks"],
+    });
+    // REAL_DOC_BODY has Methodology + Recommendations but NOT a Risks section.
+    emitEvent(db, { kind: "act_artifact_candidate", directive_id: D, task_id: leaf, payload: { body: REAL_DOC_BODY } });
+    const missing = checkClosureDeliverables(db, ROOT);
+    expect(missing.ok).toBe(false);
+    expect(missing.uncovered_leaves).toContain(leaf);
+  });
+
+  test("(d2) named sections all present in the body → covered", () => {
+    const db = openDb(":memory:");
+    seedRoot(db);
+    const leaf = "t_doc_sections_ok";
+    seedLeaf(db, leaf, "produce the operator report", ROOT, false, {
+      expected_outputs: ["report", "Methodology", "Recommendations", "Risks"],
+    });
+    emitEvent(db, {
+      kind: "act_artifact_candidate",
+      directive_id: D,
+      task_id: leaf,
+      payload: { body: REAL_DOC_BODY + "\n\n## Risks\n\nKey risks include partner-channel concentration and verifier optimism on self-scored residuals, both of which we mitigate with the weekly review and the owner-observed outcome join described above in this report." },
+    });
+    expect(checkClosureDeliverables(db, ROOT)).toEqual({ ok: true, uncovered_leaves: [] });
+  });
+
+  test("expected_outputs naming a 'report' classifies the leaf as document (detection via expected_outputs)", () => {
+    const db = openDb(":memory:");
+    seedRoot(db);
+    const leaf = "t_doc_via_expected";
+    seedLeaf(db, leaf, "ship it", ROOT, false, { expected_outputs: ["growth report doc"] });
+    // Stub body → document gate rejects.
+    emitEvent(db, { kind: "act_artifact_candidate", directive_id: D, task_id: leaf, payload: { body: "Plan: TBD" } });
+    expect(checkClosureDeliverables(db, ROOT).uncovered_leaves).toContain(leaf);
+  });
+
+  test("hasRealDocumentBody unit: stub rejected, real multi-section accepted, missing section rejected", () => {
+    expect(hasRealDocumentBody("Summary: TODO")).toBe(false);
+    expect(hasRealDocumentBody(null)).toBe(false);
+    expect(hasRealDocumentBody(REAL_DOC_BODY)).toBe(true);
+    expect(hasRealDocumentBody(REAL_DOC_BODY, ["Methodology", "Recommendations"])).toBe(true);
+    expect(hasRealDocumentBody(REAL_DOC_BODY, ["Appendix"])).toBe(false);
   });
 });
