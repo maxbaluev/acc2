@@ -66,6 +66,7 @@ import {
   activeInference,
   artifactWarnings,
   modelRouting,
+  worldModels,
 } from "../../substrate/views";
 import { readPeerActivity } from "../peer_registry";
 import {
@@ -1279,6 +1280,13 @@ export const handleRead = (
       case "artifact_warning_view": {
         const limit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
         return { ok: true, result: artifactWarnings(db, limit) as unknown as JsonValue };
+      }
+      case "world_model_view": {
+        const arg = viewArgs;
+        const directiveId = typeof arg.directive_id === "string" ? arg.directive_id : undefined;
+        const taskId = typeof arg.task_id === "string" ? arg.task_id : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return { ok: true, result: worldModels(db, { directive_id: directiveId, task_id: taskId, limit }) as unknown as JsonValue };
       }
       case "model_routing_view": {
         return { ok: true, result: modelRouting(db) as unknown as JsonValue };

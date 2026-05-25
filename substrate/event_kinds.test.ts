@@ -258,6 +258,16 @@ describe("EVENT_KINDS registry coverage", () => {
     expect(skipMeta.producer).toBe("runtime");
   });
 
+  test("world models reuse registered state snapshot event kinds instead of inventing a parallel event family", () => {
+    expect("state_snapshot_recorded" in EVENT_KINDS).toBe(true);
+    expect("state_snapshot_diffed" in EVENT_KINDS).toBe(true);
+    expect(Object.keys(EVENT_KINDS).filter((kind) => kind.startsWith("world_model_"))).toEqual([]);
+    const docs = readFileSync(join(import.meta.dirname ?? ".", "..", "docs", "substrate-entity-map.md"), "utf8");
+    expect(docs).toContain("world_model_view");
+    expect(docs).toContain("state_snapshot_recorded");
+    expect(docs).toContain("state_snapshot_diffed");
+  });
+
   test("emitEvent accepts the dark-gate observability kinds", () => {
     const db = openDb(":memory:");
     expect(() =>

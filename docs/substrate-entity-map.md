@@ -60,6 +60,7 @@ All views are CREATE VIEW IF NOT EXISTS over `events` ± `act_artifact`.
 | `task_graph_view`                          | `task_node_opened`, `task_edge_recorded`                                         | retrieval, prompt composer, scheduler    | empty until first directive |
 | `ready_tasks_view`                         | `task_node_opened`, `task_edge_recorded`, `task_committed`                       | scheduler                                | empty until first directive |
 | `failure_view`                             | `task_failed`                                                                    | brain (failure landscape)                | empty                 |
+| `world_model_view`                         | `state_snapshot_recorded`, `state_snapshot_diffed` with world-model payloads       | brain, scheduler/closure design leaves   | empty                 |
 | `act_artifact_registry_view`              | `act_artifact` (status in admitted/promoted)                                    | retrieval, prompt composer               | yes — 8 seed artifacts |
 | `artifact_routing_view`                    | `act_artifact`                                                                  | dispatch decider                         | yes                   |
 | `embedding_index_view`                     | `events` (embedding NOT NULL)                                                    | embedder, retrieval                      | yes after `embedPendingEvents` |
@@ -265,6 +266,16 @@ check in `cli/doctor.ts`; `seed` means rows of this kind are emitted by
 | `recipe_invoked`                           | runtime (recipe replay) | — | — | — | — |
 | `recipe_replay_aborted`                    | runtime (recipe replay) | — | — | — | — |
 | `prompt_truncated`                         | runtime (prompt composer) | — | — | — | — |
+
+### World model projection (reuse-first)
+
+First-class task world models do not add a parallel event family. The storage
+surface is the existing ledger: `state_snapshot_recorded` stores the latest
+model snapshot for a task, and `state_snapshot_diffed` stores model-delta
+evidence. The irreducible migration is two partial indexes over those existing
+event kinds plus `world_model_view`, which exposes goal state, environment,
+reader, medium, reality evidence, convergence, latest delta, and delta count.
+New event kinds: none. New tables: none.
 
 ### Closure learning and application (`substrate/event_kinds.ts`)
 
