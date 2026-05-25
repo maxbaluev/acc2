@@ -68,6 +68,8 @@ export type SchedulerOpts = {
 export type SchedulerTick = {
   dispatched: string[];
   in_flight: string[];
+  /** opencode_brain slots tracked by the brain-specific admission cap. */
+  brain_in_flight: string[];
   skipped_concurrency_cap: string[];
   skipped_recipe: string[];
   skipped_inline: string[];
@@ -202,6 +204,19 @@ export const computeBrainDispatchCap = (): number => {
  *  IN_FLIGHT — entries inserted at dispatch, deleted on promise
  *  resolution / rejection / catch. */
 const IN_FLIGHT_BRAIN: Set<string> = new Set();
+
+type DispatchReadyTaskFn = typeof dispatchReadyTask;
+let dispatchReadyTaskForScheduler: DispatchReadyTaskFn = dispatchReadyTask;
+
+/** Test-only hook: inject a dispatcher failure at the scheduler boundary. */
+export const _setDispatchReadyTaskForTests = (fn?: DispatchReadyTaskFn): void => {
+  dispatchReadyTaskForScheduler = fn ?? dispatchReadyTask;
+};
+
+/** Test-only hook: create a brain-cap entry without a tracked promise. */
+export const _injectBrainInFlightForTests = (taskId: string): void => {
+  IN_FLIGHT_BRAIN.add(taskId);
+};
 
 /** (task_id, gate_name) pairs that have already emitted a
  *  constitutional_gate_decision in the current queueing cycle. Without this
@@ -370,6 +385,7 @@ export const setSchedulerDraining = (draining: boolean): void => {
 export const isSchedulerDraining = (): boolean => SCHEDULER_DRAINING;
 
 export const inFlightDispatchTaskIds = (): string[] => Array.from(IN_FLIGHT.keys());
+export const brainInFlightTaskIds = (): string[] => Array.from(IN_FLIGHT_BRAIN.keys());
 
 const refinementParent = (db: Database, task: TaskNode): string | null => {
   if (task.parent_id) return task.parent_id;
@@ -432,6 +448,80 @@ const emitSchedulerAdmissionGate = (
       ...payload,
     } as JsonValue,
   });
+};
+
+const emitDispatchIsolatedError = (db: Database, task: TaskNode, err: unknown): void => {
+  try {
+    emitEvent(db, {
+      kind: "dispatcher_violation",
+      substrate_origin: "substrate_auto",
+      directive_id: task.directive_id,
+      task_id: task.id,
+      failure_kind: "bridge_killed",
+      payload: {
+        gate: "scheduler_dispatch_isolated_error",
+        error: err instanceof Error ? err.message : String(err),
+      } as JsonValue,
+    });
+  } catch { /* swallow */ }
+};
+
+const openBrainDispatchTaskIdsFromSql = (db: Database): Set<string> => {
+  const openRows = db
+    .query(
+      `SELECT task_id, payload FROM events
+       WHERE kind = 'brain_dispatched'`,
+    )
+    .all() as Array<{ task_id: string | null; payload: string | null }>;
+  const closeRows = db
+    .query(
+      `SELECT payload FROM events
+       WHERE kind = 'brain_dispatch_closed'`,
+    )
+    .all() as Array<{ payload: string | null }>;
+
+  const closed = new Set<string>();
+  for (const row of closeRows) {
+    const payload = parseEventPayload(row.payload);
+    const dispatchId = typeof payload.dispatch_id === "string" ? payload.dispatch_id : null;
+    if (dispatchId) closed.add(dispatchId);
+  }
+
+  const openTaskIds = new Set<string>();
+  for (const row of openRows) {
+    const payload = parseEventPayload(row.payload);
+    const dispatchId = typeof payload.dispatch_id === "string" ? payload.dispatch_id : null;
+    if (!dispatchId || closed.has(dispatchId) || !row.task_id) continue;
+    openTaskIds.add(row.task_id);
+  }
+  return openTaskIds;
+};
+
+const reconcileBrainInFlightSlots = (db: Database): void => {
+  if (IN_FLIGHT_BRAIN.size === 0) return;
+  const live = new Set<string>(IN_FLIGHT.keys());
+  for (const taskId of openBrainDispatchTaskIdsFromSql(db)) live.add(taskId);
+
+  const evicted: string[] = [];
+  for (const taskId of Array.from(IN_FLIGHT_BRAIN)) {
+    if (live.has(taskId)) continue;
+    IN_FLIGHT_BRAIN.delete(taskId);
+    evicted.push(taskId);
+  }
+  if (evicted.length === 0) return;
+  GATE_NOTIFIED.clear();
+  try {
+    emitEvent(db, {
+      kind: "dispatch_recovered_orphan",
+      substrate_origin: "substrate_auto",
+      payload: {
+        reason: "evicted_phantom_brain_in_flight_slots",
+        task_ids: evicted,
+        in_flight: Array.from(IN_FLIGHT.keys()),
+        brain_in_flight: Array.from(IN_FLIGHT_BRAIN.keys()),
+      } as JsonValue,
+    });
+  } catch { /* swallow */ }
 };
 
 const DELIVERABLE_PROGRESS_KINDS: ReadonlySet<string> = new Set([
@@ -777,6 +867,7 @@ export const schedulerTick = async (
   // global cap.
   const rawPerDir = effectiveOpts.maxConcurrentPerDirective ?? opts.maxConcurrentPerDirective;
   const maxConcurrentPerDirective = Math.max(1, rawPerDir ?? Math.ceil(maxConcurrent / 2));
+  reconcileBrainInFlightSlots(db);
   const ready = readyTasks(db, opts.directiveId);
   if (SCHEDULER_DRAINING) {
     for (const task of ready) {
@@ -788,6 +879,7 @@ export const schedulerTick = async (
     return {
       dispatched: [],
       in_flight: Array.from(IN_FLIGHT.keys()),
+      brain_in_flight: Array.from(IN_FLIGHT_BRAIN.keys()),
       skipped_concurrency_cap: [],
       skipped_recipe: [],
       skipped_inline: [],
@@ -1185,39 +1277,38 @@ export const schedulerTick = async (
       IN_FLIGHT_BRAIN.add(task.id);
       brainHandshakeBudget -= 1; // consume one handshake slot this tick (anti-starve)
     }
-    const promise = dispatchReadyTask(db, task, {
-      fixtureTargetPath: opts.fixtureTargetPath,
-      index: opts.index,
-    })
-      .catch((err: Error) => {
-        // Per-dispatch error isolation. Record a failure event so the audit
-        // trail stays complete; the tick continues.
-        try {
-          emitEvent(db, {
-            kind: "dispatcher_violation",
-            substrate_origin: "substrate_auto",
-            directive_id: task.directive_id,
-            task_id: task.id,
-            failure_kind: "bridge_killed",
-            payload: {
-              gate: "scheduler_dispatch_isolated_error",
-              error: err.message ?? String(err),
-            } as JsonValue,
-          });
-        } catch { /* swallow */ }
-      })
-      .finally(() => {
-        clearInFlightTask(task.id, db);
-      });
+
+    let promise: Promise<unknown>;
+    try {
+      promise = Promise.resolve(dispatchReadyTaskForScheduler(db, task, {
+        fixtureTargetPath: opts.fixtureTargetPath,
+        index: opts.index,
+      }))
+        .catch((err: Error) => {
+          // Per-dispatch error isolation. Record a failure event so the audit
+          // trail stays complete; the tick continues.
+          emitDispatchIsolatedError(db, task, err);
+        })
+        .finally(() => {
+          clearInFlightTask(task.id, db);
+        });
+      // Register the authoritative promise immediately after creation; if any
+      // synchronous failure occurs in this window, the catch below rolls back
+      // the brain slot so it cannot survive without a tracked promise.
+      IN_FLIGHT.set(task.id, promise);
+      IN_FLIGHT_DIRECTIVE.set(task.id, task.directive_id);
+      IN_FLIGHT_PARENT.set(task.id, refinementParent(db, task));
+    } catch (err) {
+      clearInFlightTask(task.id, db);
+      emitDispatchIsolatedError(db, task, err);
+      continue;
+    }
     // Mark settled-flag accessor lazily — best-effort cleanup helper.
     (promise as Promise<unknown> & { _settled?: boolean })._settled = false;
     void promise.then(
       () => ((promise as Promise<unknown> & { _settled?: boolean })._settled = true),
       () => ((promise as Promise<unknown> & { _settled?: boolean })._settled = true),
     );
-    IN_FLIGHT.set(task.id, promise);
-    IN_FLIGHT_DIRECTIVE.set(task.id, task.directive_id);
-    IN_FLIGHT_PARENT.set(task.id, refinementParent(db, task));
     pending.push(promise);
     dispatched.push(task.id);
   }
@@ -1234,6 +1325,7 @@ export const schedulerTick = async (
   return {
     dispatched,
     in_flight: Array.from(IN_FLIGHT.keys()),
+    brain_in_flight: Array.from(IN_FLIGHT_BRAIN.keys()),
     skipped_concurrency_cap: skippedConcurrencyCap,
     skipped_recipe: skippedRecipe,
     skipped_inline: skippedInline,
@@ -1299,7 +1391,7 @@ export const schedulerLoop = async (
     if (opts.abort?.aborted) return;
     const tick = await schedulerTick(db, opts);
     ticks++;
-    if (tick.dispatched.length === 0 && tick.in_flight.length === 0) {
+    if (tick.dispatched.length === 0 && tick.in_flight.length === 0 && tick.brain_in_flight.length === 0) {
       drainedStreak++;
       if (drainedStreak >= 2 && stopAfterTicks === Infinity) {
         // Quiescent — yield. The daemon can call schedulerLoop again when a

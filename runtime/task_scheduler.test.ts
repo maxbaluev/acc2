@@ -14,6 +14,8 @@ import {
   computeDaemonHeapPressureState,
   isSchedulerDraining,
   setSchedulerDraining,
+  _setDispatchReadyTaskForTests,
+  _injectBrainInFlightForTests,
 } from "./task_scheduler";
 import { FIXTURE_D_DIRECTIVE_TEXT, openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { emitEvent } from "./events";
@@ -313,6 +315,60 @@ describe("task_scheduler", () => {
       expect(payload.daemon_rss_bytes).toBe(3_600_000_000);
     } finally {
       Object.defineProperty(process, "memoryUsage", { value: originalMemoryUsage, configurable: true });
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("brain slot rolls back when dispatcher throws before promise registration", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-brain-rollback-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      const { taskId } = await openFixtureDCountTodos(db, tempDir);
+      _setDispatchReadyTaskForTests(() => {
+        throw new Error("synthetic pre-registration dispatch failure");
+      });
+
+      const failedTick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 5 });
+      expect(failedTick.dispatched).not.toContain(taskId);
+      expect(failedTick.in_flight).not.toContain(taskId);
+      expect(failedTick.brain_in_flight).not.toContain(taskId);
+
+      _setDispatchReadyTaskForTests();
+      const retryTick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 5 });
+      expect(retryTick.dispatched).toContain(taskId);
+      expect(retryTick.brain_in_flight).toContain(taskId);
+    } finally {
+      _setDispatchReadyTaskForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("schedulerTick reconciles phantom brain slots before enforcing the brain cap", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-brain-reconcile-"));
+    const originalCeiling = process.env.ACC2_MAX_BRAIN_CONCURRENCY;
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      process.env.ACC2_MAX_BRAIN_CONCURRENCY = "1";
+      const { taskId } = await openFixtureDCountTodos(db, tempDir);
+      _injectBrainInFlightForTests("phantom-brain-slot");
+
+      const tick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 5 });
+      expect(tick.brain_in_flight).not.toContain("phantom-brain-slot");
+      expect(tick.dispatched).toContain(taskId);
+      expect(tick.skipped_concurrency_cap).not.toContain(taskId);
+
+      const recovered = db
+        .query("SELECT payload FROM events WHERE kind = 'dispatch_recovered_orphan' ORDER BY ts DESC LIMIT 1")
+        .get() as { payload: string } | null;
+      expect(recovered).not.toBeNull();
+      const payload = JSON.parse(recovered!.payload) as { reason?: string; task_ids?: string[] };
+      expect(payload.reason).toBe("evicted_phantom_brain_in_flight_slots");
+      expect(payload.task_ids).toContain("phantom-brain-slot");
+    } finally {
+      if (originalCeiling === undefined) delete process.env.ACC2_MAX_BRAIN_CONCURRENCY;
+      else process.env.ACC2_MAX_BRAIN_CONCURRENCY = originalCeiling;
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 60_000);
@@ -883,7 +939,7 @@ describe("task_scheduler", () => {
 
   test("fairness: older ready tasks dispatch BEFORE younger ones across directives (anti-starvation)", async () => {
     // Live ledger evidence (2026-05-15) showed a verification directive
-    // opened at 01:09:18 sitting unprocessed for 30+ min while a Father
+    // opened at 01:09:18 sitting unprocessed for 30+ min while a OwnerAutonomy
     // directive's children (opened 01:11:35-01:16:57) kept burning the 5
     // dispatch slots. The fix: schedulerTick sorts `ready` by the oldest
     // task_node_opened ts before iterating, so the oldest waiting task
