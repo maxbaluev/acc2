@@ -13,6 +13,7 @@ import { goalShape } from "./goal_shape";
 import { encodeEmbeddingBlob, EMBEDDING_VERSION, EMBEDDING_DIMS } from "./embedder";
 import { EmbeddingIndex } from "./embedding_index";
 import { retrieve, retrieveWithEmbedding } from "./retrieval";
+import type { RetrievalHit } from "./retrieval";
 import { clearSqlPool, setSqlPool } from "./sql_pool_singleton";
 import type { SqlWorkerPool } from "./sql_worker_pool";
 
@@ -178,6 +179,121 @@ describe("retrieve (full async path with mocked query embed)", () => {
     const result = retrieveWithEmbedding(db, idx, new Float32Array(makeUnitVec(dims, 0)), { k: 3, kindFilter: ["act_artifact"], goalText, runtime: "bun" });
     expect(result.hits.map((h) => h.event_id)).toEqual([strongId, weakId]);
     expect(result.hits[0].rerank_score).toBeGreaterThan(result.hits[1].rerank_score);
+  });
+
+  // ── EXPLOIT03K: cost-aware + exploration-aware artifact selection ──────────
+  // These tests pin the four selection invariants the brain designed:
+  //   (1) cheaper artifact wins at comparable fit (cost breaks ties),
+  //   (2) high-uncertainty newcomer can outrank a slightly-higher-mean
+  //       incumbent (exploration lets new artifacts get tried),
+  //   (3) a well-established high-posterior artifact still beats a clearly
+  //       worse one (exploitation dominates when evidence is strong),
+  //   (4) ACC2_ARTIFACT_EXPLORATION_C=0 reduces to pure exploitation, and
+  //       missing cost_profile = neutral (no bias).
+  // The UCB exploration mechanism is deterministic by construction (no RNG),
+  // so every assertion below is reproducible without seeding randomness.
+
+  const SAME_FIT_IFACE = { purpose: "count TODO markers", inputs_schema: { type: "object" }, outputs_schema: { type: "object" }, usage_examples: [{ description: "count", input: { path: "runtime" }, output: { count: 3 } }] };
+
+  test("EXPLOIT03K — at comparable fit/posterior, the cheaper artifact (cost_profile) ranks higher", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dims = 8;
+    const goalText = "count TODO markers in scripts";
+    const shape = goalShape(goalText);
+    // Identical fit signals, identical posterior — ONLY cost_profile differs.
+    const cheapId = seedEmbeddedArtifact(db, "artifact_cheap", 0, dims, { score: 0.7, confidence: 0.8, recentResidualMean: 0.2, posteriorAlpha: 8, posteriorBeta: 4, interfaceMetadata: { ...SAME_FIT_IFACE, cost_profile: "low" } });
+    const dearId = seedEmbeddedArtifact(db, "artifact_dear", 0, dims, { score: 0.7, confidence: 0.8, recentResidualMean: 0.2, posteriorAlpha: 8, posteriorBeta: 4, interfaceMetadata: { ...SAME_FIT_IFACE, cost_profile: "high" } });
+    for (const id of [cheapId, dearId]) emitEvent(db, { kind: "act_artifact_score_updated", substrate_origin: "substrate_auto", action_artifact_id: id, residual: 0.2, payload: { artifact_id: id, goal_shape: shape, residual: 0.2 } });
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    const result = retrieveWithEmbedding(db, idx, new Float32Array(makeUnitVec(dims, 0)), { k: 3, kindFilter: ["act_artifact"], goalText, runtime: "bun" });
+    expect(result.hits.map((h) => h.event_id)).toEqual([cheapId, dearId]);
+    expect(result.hits[0].rerank_score).toBeGreaterThan(result.hits[1].rerank_score);
+    // Cost penalty is present and the cheaper artifact's is smaller.
+    const cheap = result.hits.find((h) => h.event_id === cheapId)!;
+    const dear = result.hits.find((h) => h.event_id === dearId)!;
+    expect(cheap.routing_score_breakdown.artifact_cost_penalty).toBeLessThan(dear.routing_score_breakdown.artifact_cost_penalty);
+  });
+
+  test("EXPLOIT03K — missing cost_profile is neutral (no bias vs. an explicitly-medium artifact)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dims = 8;
+    const goalText = "count TODO markers in scripts";
+    const noCostId = seedEmbeddedArtifact(db, "artifact_nocost", 0, dims, { score: 0.7, confidence: 0.8, recentResidualMean: 0.2, posteriorAlpha: 8, posteriorBeta: 4, interfaceMetadata: { ...SAME_FIT_IFACE } });
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    const result = retrieveWithEmbedding(db, idx, new Float32Array(makeUnitVec(dims, 0)), { k: 3, kindFilter: ["act_artifact"], goalText, runtime: "bun" });
+    const hit = result.hits.find((h) => h.event_id === noCostId)!;
+    // Neutral cost_score = 0.5 → identical to an explicit "medium" tier.
+    expect(hit.routing_score_breakdown.artifact_cost_score).toBeCloseTo(0.5, 6);
+  });
+
+  test("EXPLOIT03K — a high-uncertainty newcomer can outrank a slightly-higher-mean low-uncertainty incumbent (exploration)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dims = 8;
+    const goalText = "count TODO markers in scripts";
+    const shape = goalShape(goalText);
+    // Incumbent: tight posterior (many observations), slightly higher mean.
+    // Newcomer (capability_gap/SANDREPAIR-authored): wide posterior (alpha=beta=1,
+    // fresh), middling mean. UCB exploration bonus is large for the newcomer
+    // (n=2) and ~0 for the incumbent (n=200), so the newcomer gets TRIED.
+    const incumbentId = seedEmbeddedArtifact(db, "artifact_incumbent", 0, dims, { score: 0.62, confidence: 0.6, recentResidualMean: 0.38, posteriorAlpha: 124, posteriorBeta: 76, interfaceMetadata: { ...SAME_FIT_IFACE, cost_profile: "low" } });
+    const newcomerId = seedEmbeddedArtifact(db, "artifact_newcomer", 0, dims, { score: 0.55, confidence: 0.6, recentResidualMean: 0.45, posteriorAlpha: 1, posteriorBeta: 1, interfaceMetadata: { ...SAME_FIT_IFACE, cost_profile: "low" } });
+    for (const [id, r] of [[incumbentId, 0.38], [newcomerId, 0.45]] as const) emitEvent(db, { kind: "act_artifact_score_updated", substrate_origin: "substrate_auto", action_artifact_id: id, residual: r, payload: { artifact_id: id, goal_shape: shape, residual: r } });
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    const result = retrieveWithEmbedding(db, idx, new Float32Array(makeUnitVec(dims, 0)), { k: 3, kindFilter: ["act_artifact"], goalText, runtime: "bun" });
+    const newcomer = result.hits.find((h) => h.event_id === newcomerId)!;
+    const incumbent = result.hits.find((h) => h.event_id === incumbentId)!;
+    // Newcomer's exploration bonus dwarfs the incumbent's (tight posterior → ~0).
+    expect(newcomer.routing_score_breakdown.artifact_exploration_bonus).toBeGreaterThan(incumbent.routing_score_breakdown.artifact_exploration_bonus);
+    // And that bonus is enough to flip the ranking despite the lower mean.
+    expect(result.hits[0].event_id).toBe(newcomerId);
+  });
+
+  test("EXPLOIT03K — strong evidence still wins: a well-established high-posterior artifact beats a clearly-worse one (exploitation dominates)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dims = 8;
+    const goalText = "count TODO markers in scripts";
+    const shape = goalShape(goalText);
+    // Best: high mean AND tight posterior. Worst: low mean, also tight. The
+    // exploration bonus is ~0 for both (many obs), so exploitation decides.
+    const bestId = seedEmbeddedArtifact(db, "artifact_best", 0, dims, { score: 0.95, confidence: 0.95, recentResidualMean: 0.05, posteriorAlpha: 190, posteriorBeta: 10, interfaceMetadata: { ...SAME_FIT_IFACE, cost_profile: "low" } });
+    const worstId = seedEmbeddedArtifact(db, "artifact_worst", 0, dims, { score: 0.2, confidence: 0.2, recentResidualMean: 0.85, posteriorAlpha: 40, posteriorBeta: 160, interfaceMetadata: { ...SAME_FIT_IFACE, cost_profile: "low" } });
+    for (const [id, r] of [[bestId, 0.05], [worstId, 0.85]] as const) emitEvent(db, { kind: "act_artifact_score_updated", substrate_origin: "substrate_auto", action_artifact_id: id, residual: r, payload: { artifact_id: id, goal_shape: shape, residual: r } });
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    const result = retrieveWithEmbedding(db, idx, new Float32Array(makeUnitVec(dims, 0)), { k: 3, kindFilter: ["act_artifact"], goalText, runtime: "bun" });
+    expect(result.hits[0].event_id).toBe(bestId);
+    expect(result.hits[0].rerank_score).toBeGreaterThan(result.hits[1].rerank_score);
+  });
+
+  test("EXPLOIT03K — ACC2_ARTIFACT_EXPLORATION_C=0 reduces to pure exploitation (no exploration bonus)", async () => {
+    const prev = process.env.ACC2_ARTIFACT_EXPLORATION_C;
+    process.env.ACC2_ARTIFACT_EXPLORATION_C = "0";
+    try {
+      // Re-import the module under the zeroed env so the module-level const picks
+      // up the override (the const is evaluated at module init).
+      const mod = await import("./retrieval.ts?explore0=" + Date.now());
+      const db = openDb(":memory:");
+      runViews(db);
+      const dims = 8;
+      const goalText = "count TODO markers in scripts";
+      const shape = goalShape(goalText);
+      const incumbentId = seedEmbeddedArtifact(db, "artifact_incumbent0", 0, dims, { score: 0.62, confidence: 0.6, recentResidualMean: 0.38, posteriorAlpha: 124, posteriorBeta: 76, interfaceMetadata: { ...SAME_FIT_IFACE, cost_profile: "low" } });
+      const newcomerId = seedEmbeddedArtifact(db, "artifact_newcomer0", 0, dims, { score: 0.55, confidence: 0.6, recentResidualMean: 0.45, posteriorAlpha: 1, posteriorBeta: 1, interfaceMetadata: { ...SAME_FIT_IFACE, cost_profile: "low" } });
+      for (const [id, r] of [[incumbentId, 0.38], [newcomerId, 0.45]] as const) emitEvent(db, { kind: "act_artifact_score_updated", substrate_origin: "substrate_auto", action_artifact_id: id, residual: r, payload: { artifact_id: id, goal_shape: shape, residual: r } });
+      const idx = EmbeddingIndex.rebuildFromDb(db);
+      const result = mod.retrieveWithEmbedding(db, idx, new Float32Array(makeUnitVec(dims, 0)), { k: 3, kindFilter: ["act_artifact"], goalText, runtime: "bun" });
+      // With exploration disabled the bonus is exactly 0 for the newcomer, and
+      // the higher-mean incumbent wins on exploitation alone.
+      const newcomer = result.hits.find((h: RetrievalHit) => h.event_id === newcomerId)!;
+      expect(newcomer.routing_score_breakdown.artifact_exploration_bonus).toBe(0);
+      expect(result.hits[0].event_id).toBe(incumbentId);
+    } finally {
+      if (prev === undefined) delete process.env.ACC2_ARTIFACT_EXPLORATION_C;
+      else process.env.ACC2_ARTIFACT_EXPLORATION_C = prev;
+    }
   });
 
   test("mixed-version rows are excluded; counter increments", async () => {

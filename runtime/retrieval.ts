@@ -399,11 +399,108 @@ const hasExampleSignal = (metadata: Record<string, unknown>): boolean => Array.i
  *  recent window so a hot artifact with thousands of score events cannot turn
  *  the retrieval hot path into an unbounded aggregate. */
 const ARTIFACT_GOAL_SHAPE_RESIDUAL_LIMIT = 50;
+
+/** Exploration constant for the UCB exploration bonus (env-tunable).
+ *  Higher → the system explores uncertain artifacts more aggressively;
+ *  0 → pure exploitation (deterministic, reduces to the posterior mean and
+ *  the existing fit signals — backward-compat / determinism escape hatch).
+ *  The bonus is bounded (see `explorationBonus`) so it nudges/breaks ties,
+ *  it never dominates a strong incumbent's exploitation signal.
+ *
+ *  WHY THIS CLOSES THE EVOLVE-BETTER-CODE LOOP (compose with capability_gap /
+ *  SANDREPAIR): a freshly-authored competitor (capability_gap → SANDREPAIR
+ *  authors a sandbox-proven but observation-thin artifact) starts with a wide
+ *  Beta posterior (alpha+beta ≈ 2, few real outcomes) and a middling MEAN.
+ *  Pure exploitation would NEVER select it over the incumbent, so it could
+ *  never accrue evidence and the system would stay pinned to a local optimum.
+ *  The UCB exploration bonus lets the high-uncertainty newcomer occasionally
+ *  outrank a slightly-higher-mean incumbent → it gets TRIED → its outcomes
+ *  feed act_artifact_score_updated → its posterior tightens. If it is actually
+ *  better, its mean rises and uncertainty shrinks and it wins on merit (then
+ *  consolidation can retire the incumbent); if worse, the evidence sinks it.
+ *  This is the mechanism that makes the synthesis loop CONVERGE. */
+const ARTIFACT_EXPLORATION_C = (() => {
+  const raw = process.env.ACC2_ARTIFACT_EXPLORATION_C;
+  if (raw === undefined || raw === "") return 0.25;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 0.25;
+})();
+
+/** Cost-penalty weight (env-tunable). Deliberately SMALL: fit + reliability
+ *  must dominate; cost only breaks ties between comparable-fit artifacts and
+ *  nudges toward cheaper ones. 0 → cost-blind. */
+const ARTIFACT_COST_WEIGHT = (() => {
+  const raw = process.env.ACC2_ARTIFACT_COST_WEIGHT;
+  if (raw === undefined || raw === "") return 0.08;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 0.08;
+})();
+
+/** UCB exploration bonus over a Beta(alpha, beta) posterior. Uncertainty is
+ *  driven by the observation count n = alpha + beta: few observations → wide
+ *  posterior → large bonus; many observations → tight posterior → bonus → 0.
+ *  bonus = c · sqrt(1 / (n + 1)) (1/n shrinkage, +1 to avoid div-by-zero and
+ *  to keep a fresh alpha=beta=1 artifact at a finite, sizeable bonus). The
+ *  result is clamped to [0, 0.5] so exploration nudges/breaks ties but can
+ *  never swamp a strong incumbent's exploitation signal. Pure arithmetic on
+ *  already-loaded columns — no query, hot-path-safe. */
+const explorationBonus = (alpha: number, beta: number, c: number): number => {
+  if (c <= 0) return 0;
+  const n = Math.max(0, alpha) + Math.max(0, beta);
+  const bonus = c * Math.sqrt(1 / (n + 1));
+  return bonus < 0 ? 0 : bonus > 0.5 ? 0.5 : bonus;
+};
+
+/** Normalize the open-shaped `cost_profile` hint to a cost score in [0,1]
+ *  where 0 = cheapest, 1 = most expensive. Handles the open shape gracefully:
+ *  - missing / unparseable → 0.5 (NEUTRAL: no cost signal, no penalty bias).
+ *  - string tier ("free"/"low"/"medium"/"high"/"very_high") → mapped scale.
+ *  - bare number → treated as a normalized cost in [0,1] (clamped).
+ *  - object (e.g. { latency_ms, money, irreversible }) → blended from a
+ *    coarse latency band + a money band + an irreversibility surcharge, each
+ *    band saturating so a huge latency cannot dominate. Unknown object →
+ *    neutral. This is intentionally COARSE: cost is a tie-breaker, not a
+ *    precise economic model. */
+const normalizeCost = (raw: unknown): number => {
+  if (raw === undefined || raw === null) return 0.5;
+  if (typeof raw === "number") return Number.isFinite(raw) ? clamp01(raw) : 0.5;
+  if (typeof raw === "string") {
+    const tier = raw.trim().toLowerCase();
+    const map: Record<string, number> = { free: 0, none: 0, low: 0.2, cheap: 0.2, medium: 0.5, moderate: 0.5, high: 0.8, expensive: 0.8, very_high: 1, critical: 1 };
+    return tier in map ? map[tier] : 0.5;
+  }
+  if (typeof raw === "object" && !Array.isArray(raw)) {
+    const obj = raw as Record<string, unknown>;
+    // Try a coarse string tier nested under common keys first.
+    if (typeof obj.tier === "string") return normalizeCost(obj.tier);
+    let known = false;
+    let cost = 0;
+    if (typeof obj.latency_ms === "number" && Number.isFinite(obj.latency_ms)) {
+      // 0ms→0, saturates near 10s.
+      cost += 0.5 * clamp01(obj.latency_ms / 10000);
+      known = true;
+    }
+    if (typeof obj.money === "number" && Number.isFinite(obj.money)) {
+      // $0→0, saturates near $1 (these are per-call hints, typically cents).
+      cost += 0.4 * clamp01(obj.money);
+      known = true;
+    }
+    if (obj.irreversible === true) {
+      cost += 0.1;
+      known = true;
+    } else if (obj.irreversible === false) {
+      known = true;
+    }
+    return known ? clamp01(cost) : 0.5;
+  }
+  return 0.5;
+};
+
 const readArtifactFit = (db: Database, rawArtifactId: string, q: RoutingQuery): ArtifactFit => {
   // Resolve alias chain so a renamed/superseded artifact id still finds its
   // canonical act_artifact row and its score events (ALIAS_CHAI).
   const artifactId = resolveArtifactId(db, rawArtifactId);
-  const row = db.query("SELECT runtime, declared_sandbox, confidence, recent_residual_mean, interface_metadata FROM act_artifact WHERE id = ? AND runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') LIMIT 1").get(artifactId) as { runtime: string; declared_sandbox: string; confidence: number; recent_residual_mean: number; interface_metadata: string | null } | null;
+  const row = db.query("SELECT runtime, declared_sandbox, confidence, score, posterior_alpha, posterior_beta, recent_residual_mean, interface_metadata FROM act_artifact WHERE id = ? AND runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') LIMIT 1").get(artifactId) as { runtime: string; declared_sandbox: string; confidence: number; score: number; posterior_alpha: number; posterior_beta: number; recent_residual_mean: number; interface_metadata: string | null } | null;
   if (!row) return NEUTRAL_ARTIFACT_FIT;
   const metadata = parseJsonObject(row.interface_metadata);
   const sandbox = parseJsonObject(row.declared_sandbox);
@@ -419,8 +516,37 @@ const readArtifactFit = (db: Database, rawArtifactId: string, q: RoutingQuery): 
   const sandbox_runtime_match = sandbox.runtime === row.runtime ? 1 : 0.2;
   const requested_runtime_match = q.runtime ? (q.runtime === row.runtime ? 1 : 0.2) : 1;
   const sandbox_compatibility = Math.min(sandbox_runtime_match, requested_runtime_match);
-  const fit = clamp01(0.25 * confidence_score + 0.30 * residual_score + 0.15 * schema_signal + 0.15 * example_signal + 0.15 * sandbox_compatibility);
-  return { multiplier: 0.75 + 0.5 * fit, runtime: row.runtime, breakdown: { artifact_fit: fit, artifact_confidence_score: confidence_score, artifact_goal_shape_residual_score: residual_score, artifact_schema_signal: schema_signal, artifact_example_signal: example_signal, artifact_sandbox_compatibility: sandbox_compatibility, artifact_fit_multiplier: 0.75 + 0.5 * fit } };
+  // Exploitation: the posterior MEAN (score = alpha / (alpha + beta)). This is
+  // the "what we already believe is good" signal.
+  const alpha = typeof row.posterior_alpha === "number" ? row.posterior_alpha : 1;
+  const beta = typeof row.posterior_beta === "number" ? row.posterior_beta : 1;
+  const exploitation_score = clamp01(typeof row.score === "number" ? row.score : alpha / Math.max(alpha + beta, 1e-9));
+  // Exploration: UCB uncertainty bonus over the Beta posterior. A thin
+  // posterior (few observations) earns a bonus so an uncertain-but-promising
+  // newcomer can outrank a slightly-higher-mean incumbent and accrue evidence.
+  // Deterministic by construction (no RNG) — ACC2_ARTIFACT_EXPLORATION_C=0
+  // reduces selection to pure exploitation for backward-compat / test
+  // determinism.
+  const exploration_bonus = explorationBonus(alpha, beta, ARTIFACT_EXPLORATION_C);
+  // Cost: normalized cost in [0,1] (0 cheap, 1 expensive, 0.5 neutral/missing).
+  // The penalty is the cost weight × cost — small, so it only breaks ties
+  // between comparable-fit artifacts and nudges toward the cheaper one; fit +
+  // reliability still dominate.
+  const cost_score = normalizeCost((metadata as Record<string, unknown>).cost_profile);
+  const cost_penalty = ARTIFACT_COST_WEIGHT * cost_score;
+  // Base fit: the existing task-fit signals plus the exploitation mean.
+  const fit = clamp01(0.20 * confidence_score + 0.25 * residual_score + 0.10 * exploitation_score + 0.15 * schema_signal + 0.15 * example_signal + 0.15 * sandbox_compatibility);
+  // Final selection score = fit + exploration bonus − cost penalty, clamped so
+  // the multiplier stays in a sane reranking band (it reranks, never wildly
+  // distorts). Exploration and cost are additive nudges on top of the bounded
+  // fit, keeping the whole quantity explainable via the breakdown below.
+  const selection_score = clamp01(fit + exploration_bonus - cost_penalty);
+  // Map the selection score onto a reranking band [0.6, 1.4]. The band is wide
+  // enough that exploration/cost differences move the rank order (a thin-
+  // posterior newcomer can overcome a modest mean gap) yet bounded so the
+  // multiplier reranks rather than wildly distorts the similarity ordering.
+  const multiplier = 0.6 + 0.8 * selection_score;
+  return { multiplier, runtime: row.runtime, breakdown: { artifact_fit: fit, artifact_selection_score: selection_score, artifact_confidence_score: confidence_score, artifact_goal_shape_residual_score: residual_score, artifact_exploitation_score: exploitation_score, artifact_exploration_bonus: exploration_bonus, artifact_cost_score: cost_score, artifact_cost_penalty: cost_penalty, artifact_schema_signal: schema_signal, artifact_example_signal: example_signal, artifact_sandbox_compatibility: sandbox_compatibility, artifact_fit_multiplier: multiplier } };
 };
 
 /** Assemble a RetrievalHit from a KnnHit and a pre-computed posterior. Pure
