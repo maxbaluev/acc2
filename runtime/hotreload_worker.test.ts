@@ -60,6 +60,11 @@ describe("isNoiseFile (editor / build / OS noise filter)", () => {
   test("filters Bun.write atomic-rename backups", () => {
     expect(isNoiseFile("cli/tui/App.test.tsx.tmp.474444.1779020078043")).toBe(true);
     expect(isNoiseFile("runtime/foo.ts.tmp.123")).toBe(true);
+    // Regression: Bun's atomic-rename suffix grew a HEX hash segment
+    // (.tmp.PID.hexhash). The old digits-only regex missed it, so every edit
+    // to a watched source file leaked a daemon_hotreload_unmapped noise event.
+    expect(isNoiseFile("runtime/directive_closure.ts.tmp.3101307.09195e33ea65")).toBe(true);
+    expect(isNoiseFile("runtime/events.ts.tmp.3101307.d21a98a7fe59")).toBe(true);
   });
   test("filters editor swap and backup files", () => {
     expect(isNoiseFile("runtime/foo.ts.swp")).toBe(true);

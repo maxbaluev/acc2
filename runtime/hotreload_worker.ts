@@ -170,7 +170,7 @@ export type StartHotreloadOpts = {
  *  signal-bearing unmapped surface. Match by filename suffix and the
  *  `*.tmp.*` infix produced by Bun.write's atomic-rename path. */
 const NOISE_FILE_PATTERNS: RegExp[] = [
-  /\.tmp\.\d+(\.\d+)?$/,        // Bun.write atomic-rename: foo.ts.tmp.PID.MS
+  /\.tmp\.\d+(\.[0-9a-f]+)*$/i, // Bun.write atomic-rename: foo.ts.tmp.PID[.hexhash] (suffix grew a hex hash segment)
   /\.swp$|\.swx$|\.swo$/,        // vim swap
   /~$/,                           // emacs backup
   /^\.#|^#.*#$/,                  // emacs lockfile / autosave
