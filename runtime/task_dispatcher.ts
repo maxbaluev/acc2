@@ -61,9 +61,9 @@ import { distributeCredit } from "./credit";
 import { findRecipeMatch, replayRecipe } from "./recipe_replay";
 import { logger } from "./logger";
 import {
-  cascadeRootCommitToDescendants,
   cascadeUpwardWhenChildrenTerminal,
   maybeCloseFinishedDirective,
+  rootCommitReadiness,
 } from "./directive_closure";
 import { closureResidualsForLineage } from "./closure_audit";
 import { readCurrentMode } from "./crisis_mode";
@@ -956,8 +956,24 @@ export const dispatchReadyTask = async (
             : null;
           if (closureResidual !== null && closureResidual < 0.3) {
             const alreadyCommitted = dispatchEvents.find((e) => e.kind === "task_committed");
+            const readiness = rootCommitReadiness(db, task.id);
             if (alreadyCommitted) {
               timeoutRecoveryOutcome = "already_committed";
+            } else if (!readiness.ok && readiness.reason !== "not_root") {
+              timeoutRecoveryOutcome = "closure_residual_high";
+              emitEvent(db, {
+                kind: "dispatcher_violation",
+                substrate_origin: "substrate_auto",
+                directive_id: task.directive_id,
+                task_id: task.id,
+                failure_kind: "root_commit_blocked",
+                payload: {
+                  dispatch_id: dispatchId,
+                  reason: readiness.reason,
+                  closure_audit_event_id: readiness.closure_audit_event_id,
+                  nonterminal_descendant_task_ids: readiness.nonterminal_descendant_task_ids,
+                } as JsonValue,
+              });
             } else {
               timeoutRecoveryOutcome = "auto_committed";
               emitEvent(db, {
@@ -1473,7 +1489,7 @@ export const dispatchReadyTask = async (
           // (goal_shape, topology_signature) pair seeds a Tier-0 recipe at
           // confidence=1.0 so the dispatcher's recipe_replay route can
           // catch the next dispatch with the same shape without waiting
-          // for Father / the rolling reviewer to fire the 3-success
+          // for OwnerAutonomy / the rolling reviewer to fire the 3-success
           // statistical extractor. Idempotent: re-firing on the same
           // composite key is a no-op. Errors surfaced as error_caught
           // (recoverable) — recipe seeding failing must not derail the
@@ -1723,41 +1739,15 @@ export const dispatchReadyTask = async (
   // directive_closed idempotently. This closes the zombie-loop class
   // (scheduler kept re-dispatching tasks for finished directives).
   if (dispatchHadTerminal) {
-    // Orphan-children fix (2026-05-15): when the brain commits a directive's
-    // ROOT task (the closure_residual<0.3 audit covers all sub-goals), its
-    // refinement children are often left in `ready_tasks_view` with no
-    // terminal event. They get re-dispatched on the next scheduler tick,
-    // bridge-fail with timeout, and burn tokens on work the root already
-    // completed. Cascade-emit `task_committed` for every dangling descendant
-    // BEFORE the close check so maybeCloseFinishedDirective finds them all
-    // terminal and the directive actually closes.
-    try {
-      const committedRow = closedEvents.find((e) => e.kind === "task_committed" && e.task_id === task.id);
-      if (committedRow) {
-        const payload = committedRow.payload as { closure_residual?: number } | null;
-        const cascaded = cascadeRootCommitToDescendants(
-          db,
-          task.id,
-          payload?.closure_residual,
-        );
-        if (cascaded > 0) {
-          logger.info(
-            { where: "task_dispatcher.cascade_root_commit", root_task_id: task.id, cascaded },
-            "cascaded task_committed to dangling descendants of committed root",
-          );
-        }
-      }
-    } catch (err) {
-      logger.warn(
-        { where: "task_dispatcher.cascade_root_commit", task_id: task.id, err: (err as Error).message },
-        "cascadeRootCommitToDescendants failed — descendants may remain in ready_tasks_view",
-      );
-    }
+    // Root commits are guarded at the emit boundary: a root with descendants
+    // needs a current clean closure audit and every descendant already
+    // terminal. Dangling descendants remain live for scheduler re-drive or
+    // escalation instead of being fabricated as successful.
     // Upward cascade: if the brain committed only a child (e.g. MEASURE
     // verifier) without sealing the root, walk up the refines edges and
     // auto-commit parents whose every child is now terminal. Pairs with
-    // cascadeRootCommitToDescendants — together they handle both
-    // top-down and bottom-up partial commits the brain might emit.
+    // the removed root-to-child cascade, this only handles
+    // bottom-up completion after all children are terminal.
     try {
       const cascadedUp = cascadeUpwardWhenChildrenTerminal(db, task.id);
       if (cascadedUp > 0) {

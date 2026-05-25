@@ -28,7 +28,7 @@ real work until `acc doctor` says PASS.**
 3. **Seeds the substrate** — foundational knowledge, canonical artifacts,
    demo directive templates.
 4. **Starts the daemon** + the canonical worker set (embedder, scheduler,
-   father, extractors, auto_apply, …).
+   owner_autonomy, extractors, auto_apply, …).
 5. **Runs `acc doctor`** as the readiness check.
 6. **Offers 3-5 demo directives** matched to which keys you provided —
    each demo exercises the full RLM loop (decomposition → action artifact →

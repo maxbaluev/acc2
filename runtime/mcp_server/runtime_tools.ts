@@ -12,10 +12,6 @@ import { dispatchReadyTask } from "../task_dispatcher";
 import { readDagForDirective } from "../task_topology";
 import { schedulerTick } from "../task_scheduler";
 import { processRollingReviews } from "../rolling_reviewer";
-// Father runtime tools are deprecated: autonomous origination is driven by
-// scheduler-integrated forecast predicates. The import is retained only for
-// temporary legacy drift inspection until historical consumers are migrated.
-import { fatherIterate, detectFatherDrift } from "../father";
 import { replayRecipe } from "../recipe_replay";
 import {
   buildBrainSelfAudit,
@@ -29,9 +25,7 @@ import {
 } from "../brain_introspection";
 import type {
   BrainSelfAuditSchema,
-  DetectFatherDriftSchema,
   DispatchReadyTaskSchema,
-  FatherIterateSchema,
   McpContext,
   McpResult,
   ProcessRollingReviewsSchema,
@@ -50,7 +44,7 @@ import type {
  *  failures and blocked the daemon's MCP server.
  *
  *  The brain operates within ONE cycle per dispatch (§3.7). Triggering a
- *  scheduler tick, father iteration, recipe replay, or another dispatch
+ *  scheduler tick, recipe replay, or another dispatch
  *  from inside its current cycle violates the cycle-1-only contract AND
  *  the depth-1-retrieval contract. These are daemon-internal control
  *  surfaces; the brain emits events + reads views, nothing more. */
@@ -143,40 +137,6 @@ export const handleProcessRollingReviews = async (
 
 // ── Phase J + K handlers ──────────────────────────────────────────
 
-export const handleFatherIterate = async (
-  ctx: McpContext,
-  args: z.infer<typeof FatherIterateSchema>,
-): Promise<McpResult> => {
-  const blocked = brainForbiddenRuntimeOp(ctx, "runtime.father_iterate");
-  if (blocked) return blocked;
-  const result = await fatherIterate(ctx.db, {
-    now: args.now,
-    ownerActiveWindowMs: args.owner_active_window_ms,
-  });
-  return {
-    ok: true,
-    result: {
-      cycle_id: result.cycle_id,
-      action: result.action,
-      detail: result.detail,
-      ts: result.ts,
-    } as JsonValue,
-  };
-};
-
-export const handleDetectFatherDrift = (
-  ctx: McpContext,
-  args: z.infer<typeof DetectFatherDriftSchema>,
-): McpResult => {
-  const report = detectFatherDrift(ctx.db, args.lookback_events);
-  return {
-    ok: true,
-    result: {
-      drift_count: report.drift_count,
-      offending_event_ids: report.offending_event_ids,
-    } as JsonValue,
-  };
-};
 
 export const handleReplayRecipe = async (
   ctx: McpContext,

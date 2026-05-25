@@ -6,8 +6,8 @@ import {
 } from "./release_source";
 
 describe("parseReleaseSource", () => {
-  test("parses the current git path", () => {
-    expect(parseReleaseSource("git")).toEqual({ kind: "git" });
+  test("rejects the removed git update path", () => {
+    expect(parseReleaseSource("git")).toEqual({ error: "release_source_unrecognized_spec" });
   });
 
   test("parses an ipfs CID spec (no gateway)", () => {
@@ -33,7 +33,7 @@ describe("parseReleaseSource", () => {
   });
 
   test("trims surrounding whitespace", () => {
-    expect(parseReleaseSource("  git  ")).toEqual({ kind: "git" });
+    expect(parseReleaseSource("  ipfs:bafyabc123  ")).toEqual({ kind: "ipfs_cid", cid: "bafyabc123" });
   });
 
   test("rejects an empty spec", () => {
@@ -61,10 +61,6 @@ describe("parseReleaseSource", () => {
 });
 
 describe("resolveReleaseSource", () => {
-  test("git resolves through unchanged", () => {
-    const src: ReleaseSource = { kind: "git" };
-    expect(resolveReleaseSource(src)).toEqual(src);
-  });
 
   test("ipfs_cid resolves through unchanged", () => {
     const src: ReleaseSource = { kind: "ipfs_cid", cid: "bafyabc123" };

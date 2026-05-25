@@ -29,11 +29,9 @@ import {
   AmendDirectiveSchema,
   BrainSelfAuditSchema,
   CreditSchema,
-  DetectFatherDriftSchema,
   DispatchReadyTaskSchema,
   EmbedTextSchema,
   EmitSchema,
-  FatherIterateSchema,
   FindRecipeSchema,
   IdSchema,
   OpenDirectiveSchema,
@@ -74,9 +72,7 @@ import {
 } from "./substrate_tools";
 import {
   handleBrainSelfAudit,
-  handleDetectFatherDrift,
   handleDispatchReadyTask,
-  handleFatherIterate,
   handleProcessRollingReviews,
   handlePromptSelfInspect,
   handleRecentEvents,
@@ -345,34 +341,12 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     name: "runtime.process_rolling_reviews",
     description:
       "Drain rolling_review_due_view: emit directive_review_due, open a review " +
-      "subtask, advance next_review_due by one cadence period. Father (Phase K) " +
+      "subtask, advance next_review_due by one cadence period. OwnerAutonomy (Phase K) " +
       "calls this on its tick. Phase I.",
     parameters: ProcessRollingReviewsSchema,
     execute: wrap("runtime.process_rolling_reviews", handleProcessRollingReviews),
   });
 
-  server.addTool({
-    name: "runtime.father_iterate",
-    description:
-      "One Father tick (Phase K, §14). Reads active_objectives_view, " +
-      "rolling_review_due_view, and directive_conflicts_view; selects the " +
-      "highest-priority unblocked work; opens a directive from a template " +
-      "(NEVER calls an LLM). Honors §3 owner-yield: if owner_input_received " +
-      "is within the active window, Father yields without opening anything.",
-    parameters: FatherIterateSchema,
-    execute: wrap("runtime.father_iterate", handleFatherIterate),
-  });
-
-  server.addTool({
-    name: "runtime.detect_father_drift",
-    description:
-      "Diagnostic: scan recent events with substrate_origin='father' and emit " +
-      "father_drift_detected for any event whose kind is outside the §14 " +
-      "FATHER_ACTION_EVENT_KINDS taxonomy. Idempotent — already-reported " +
-      "offenders are not re-emitted.",
-    parameters: DetectFatherDriftSchema,
-    execute: wrap("runtime.detect_father_drift", handleDetectFatherDrift),
-  });
 
   server.addTool({
     name: "substrate.find_recipe",
@@ -502,8 +476,6 @@ const HTTP_DISPATCH: Record<string, (ctx: McpContext, args: any) => McpResult | 
   "runtime.dispatch_ready_task": handleDispatchReadyTask as any,
   "runtime.scheduler_tick": handleSchedulerTick as any,
   "runtime.process_rolling_reviews": handleProcessRollingReviews as any,
-  "runtime.father_iterate": handleFatherIterate as any,
-  "runtime.detect_father_drift": handleDetectFatherDrift as any,
   "substrate.find_recipe": handleFindRecipe as any,
   "runtime.replay_recipe": handleReplayRecipe as any,
   "substrate.register_external_source": handleRegisterExternalSource as any,

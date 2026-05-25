@@ -6,7 +6,7 @@
 //
 //   ACC2_DISABLE_WORKERS=                            # all on (default)
 //   ACC2_DISABLE_WORKERS=embedder                    # disable one
-//   ACC2_DISABLE_WORKERS=embedder, father, scheduler # whitespace tolerated
+//   ACC2_DISABLE_WORKERS=embedder, owner_autonomy, scheduler # whitespace tolerated
 //
 // Unknown worker names in the list are accepted silently. `isWorkerEnabled`
 // only consults the set for canonical names, so a misspelled entry is a no-op
@@ -16,18 +16,12 @@
 export type WorkerName =
   | "embedder"
   | "scheduler"
-  | "father"
+  | "owner_autonomy"
   | "rolling_reviewer"
   | "rehabilitation"
   | "integrity"
   | "supervisor"
   | "compaction"
-  // Brain audit B (2026-05-15): Model-D promotion pipeline was relying on
-  // Father opening maintenance directives to scan candidates — chance
-  // dispatch only. A first-class extractors tick scans candidates on a
-  // bounded cadence and emits knowledge_promoted / act_artifact_promoted
-  // (including recipe-shape knowledge rows) when posteriors cross promotion
-  // thresholds.
   | "extractors"
   // Brain audit D (2026-05-15): amendment + metrics_gauge_refresh workers
   // were registered + ticked in daemon.ts but absent from
@@ -202,6 +196,7 @@ export type WorkerName =
 export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "embedder",
   "scheduler",
+  "owner_autonomy",
   "rolling_reviewer",
   "rehabilitation",
   "integrity",

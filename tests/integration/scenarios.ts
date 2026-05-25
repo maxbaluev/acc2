@@ -41,7 +41,7 @@ import { readyTasks, readDagForDirective } from "../../runtime/task_topology";
 import { extractSemanticDedup } from "../../substrate/extractors";
 import { distributeCredit } from "../../runtime/credit";
 import { embedderWorkerTick, encodeEmbeddingBlob, EMBEDDING_DIMS } from "../../runtime/embedder";
-import { fatherIterate } from "../../runtime/father";
+import { ownerAutonomyWorkerTick } from "../../runtime/owner_autonomy_worker";
 import { processRollingReviews } from "../../runtime/rolling_reviewer";
 import { recordStakeholderState } from "../../runtime/stakeholder_compositor";
 import { applyAmendment, emitAndApplyAmendment } from "../../runtime/amendment_handler";
@@ -800,58 +800,35 @@ export const scenarioExternalPushRetrievable = async (handle: DaemonHandle): Pro
   }
 };
 
-// ── Scenario 8 — Father one-shot tick ─────────────────────────────
+// ── Scenario 8 — owner-autonomy idle tick ────────────────────────
 
-export const scenarioFatherOneShot = async (handle: DaemonHandle): Promise<void> => {
-  // Seed a rolling_active directive whose next_review_due is firmly in the
-  // past so the rolling-review picker fires on the first Father iterate.
-  const directiveId = `d_harness_s8_${newId()}`;
-  const pastTs = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  emitEvent(handle.db, {
-    kind: "directive_opened",
-    substrate_origin: "owner",
-    directive_id: directiveId,
-    task_id: directiveId,
-    payload: {
-      directive_text: "harness s8 rolling-active",
-      lifecycle: "rolling_active",
-      urgency: "normal",
-      review_cadence: "weekly",
-      next_review_due: pastTs,
-      partial_commit_checkpoints: [],
-    } as JsonValue,
+export const scenarioOwnerAutonomyOneShot = async (handle: DaemonHandle): Promise<void> => {
+  const profile = emitEvent(handle.db, {
+    kind: "owner_profile_recorded",
+    substrate_origin: "substrate_auto",
+    payload: { autonomy_score: 0.5, preferred_terms: ["owner"] } as JsonValue,
   });
 
-  // Snapshot bridge_invoked count before the iterate so we can assert no LLM
-  // was called from this iteration.
   const bridgeBefore = handle.db
     .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'bridge_invoked'")
     .get() as { n: number };
 
-  const result = await fatherIterate(handle.db);
-  assert(result.cycle_id.length > 0, "father iterate must return a cycle_id");
+  const result = ownerAutonomyWorkerTick(handle.db, { now: new Date("2030-01-01T00:00:00.000Z"), ownerActiveWindowMs: 1 });
+  assert(result.emitted_count === 1, "owner_autonomy must emit one brain invocation request while idle");
 
-  // father_cycle_recorded must have fired this tick.
-  const cycle = handle.db
-    .query(
-      "SELECT id FROM events WHERE kind = 'father_cycle_recorded' AND payload LIKE ?",
-    )
-    .get(`%${result.cycle_id}%`) as { id: string } | null;
-  assert(cycle !== null, "father_cycle_recorded must be emitted");
+  const request = handle.db
+    .query("SELECT kind, context_refs, payload FROM events WHERE id = ?")
+    .get(result.emitted_event_ids[0]) as { kind: string; context_refs: string; payload: string } | null;
+  assert(request?.kind === "brain_invocation_request", "owner_autonomy must route through brain_invocation_request");
+  assert(JSON.parse(request!.context_refs).includes(profile.id), "owner_autonomy must cite the owner profile it read");
+  assert(JSON.parse(request!.payload).reason === "owner_autonomy_idle", "owner_autonomy must explain the idle trigger");
 
-  // directive_review_due must have fired for the rolling-active directive.
-  const review = handle.db
-    .query("SELECT id FROM events WHERE kind = 'directive_review_due' AND directive_id = ?")
-    .get(directiveId) as { id: string } | null;
-  assert(review !== null, "directive_review_due must be emitted for the overdue rolling-active directive");
-
-  // No bridge_invoked since Father — Father never calls an LLM.
   const bridgeAfter = handle.db
     .query("SELECT COUNT(*) AS n FROM events WHERE kind = 'bridge_invoked'")
     .get() as { n: number };
   assert(
     bridgeAfter.n === bridgeBefore.n,
-    `Father iterate must not call any LLM (bridge_invoked delta=${bridgeAfter.n - bridgeBefore.n})`,
+    `owner_autonomy worker must not call any LLM directly (bridge_invoked delta=${bridgeAfter.n - bridgeBefore.n})`,
   );
 };
 

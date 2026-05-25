@@ -42,6 +42,8 @@ Fast hot paths stay embedded and local; heavy aggregate reads move to worker-thr
 
 State is projected through views, not direct SQLite reads by agents (`D2624218B9C64BF29A2D203A2D`). Workers are always-on operators with opt-out controls, not strategic planners (`runtime.system_map`, `SAF9AVJ8HD7W5DK847W72ETXHR`).
 
+Task world models are first-class projections, not a second state ledger. The current storage contract reuses `state_snapshot_recorded` for latest model snapshots and `state_snapshot_diffed` for model deltas; `world_model_view` projects goal state, environment, reader, medium, reality evidence, convergence, and latest delta for task-scoped readers.
+
 ## 4. The Act Primitive
 
 Every action is an act tuple: intent, action_artifact_id, verifier_artifact_id, predicted_residual, reasoning/effect summaries, cited knowledge/artifacts, and affected resources (`A24CCF6C2C2C4E85A91A529DFB`). The substrate projects one envelope into action prediction, scoring, retrieval binding, candidate confirmation/contradiction, applied-change rows, owner-observed outcomes, and credit rows (`17WRSQT7015DFDPQN5SXGM25FG`).

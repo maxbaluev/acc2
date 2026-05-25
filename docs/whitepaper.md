@@ -468,13 +468,13 @@ These problems are interesting enough to attract researchers, concrete enough to
 
 ## 10. Continuous Autonomous Operation
 
-Accreted intelligence that only runs when a human is watching loses most of its compounding potential. AccInt includes a continuous autonomous supervisor — Father — that operates the system 24/7 across cycles, domains, and time zones without requiring constant attention.
+Accreted intelligence that only runs when a human is watching loses most of its compounding potential. AccInt includes a continuous autonomous supervisor — OwnerAutonomy — that operates the system 24/7 across cycles, domains, and time zones without requiring constant attention.
 
-Father is deliberately not a brain. It does not make business decisions, choose communication approaches, or evaluate outcomes. It is scheduling and recovery infrastructure: it reads objectives and domain execution config from state, picks the highest-priority objective for each cycle, compiles owner events, spawns a fresh brain session, journals what happened, and applies adaptive backoff when no work is actionable. Strategy lives in compiled runtime state — objective strategy bundles, scored knowledge, and owner directives — not in prompt files. the brain reads this compiled strategy via tools (`acc_read({scope:"focus"})`) and sees structured segments, channel policies, approach rules, and value propositions rather than prose instructions.
+OwnerAutonomy is deliberately not a brain. It does not make business decisions, choose communication approaches, or evaluate outcomes. It is scheduling and recovery infrastructure: it reads objectives and domain execution config from state, picks the highest-priority objective for each cycle, compiles owner events, spawns a fresh brain session, journals what happened, and applies adaptive backoff when no work is actionable. Strategy lives in compiled runtime state — objective strategy bundles, scored knowledge, and owner directives — not in prompt files. the brain reads this compiled strategy via tools (`acc_read({scope:"focus"})`) and sees structured segments, channel policies, approach rules, and value propositions rather than prose instructions.
 
-**Cross-iteration compression.** When Father spawns consecutive brain sessions for the same objective, each session after the first receives an *iteration capsule* — a constant-size summary of what the prior iteration accomplished. The capsule carries the iteration number, the promise the brain made, the save receipt ID (linking to every artifact produced), a compressed summary, delta counts (knowledge created, entities modified, outcomes recorded), and a directive hash for consistency checking. This replaces the prior pattern of re-reading the full world model at each iteration start. The brain also records a `predicted_outcome` and `predicted_delta` in each capsule — its forecast of what the next cycle's results will look like. When the next cycle arrives, it can compare actual results against prediction, scoring its own model accuracy. This active inference loop — predict, act, observe residual, update — means that Father's consecutive iterations converge toward accurate environmental models rather than repeating the same exploration. The practical effect is that iteration 5 of a multi-cycle objective operates with the accumulated context of iterations 1 through 4 compressed into a fixed-size capsule, rather than either losing that context entirely or paying linear context cost to re-read it.
+**Cross-iteration compression.** When OwnerAutonomy spawns consecutive brain sessions for the same objective, each session after the first receives an *iteration capsule* — a constant-size summary of what the prior iteration accomplished. The capsule carries the iteration number, the promise the brain made, the save receipt ID (linking to every artifact produced), a compressed summary, delta counts (knowledge created, entities modified, outcomes recorded), and a directive hash for consistency checking. This replaces the prior pattern of re-reading the full world model at each iteration start. The brain also records a `predicted_outcome` and `predicted_delta` in each capsule — its forecast of what the next cycle's results will look like. When the next cycle arrives, it can compare actual results against prediction, scoring its own model accuracy. This active inference loop — predict, act, observe residual, update — means that OwnerAutonomy's consecutive iterations converge toward accurate environmental models rather than repeating the same exploration. The practical effect is that iteration 5 of a multi-cycle objective operates with the accumulated context of iterations 1 through 4 compressed into a fixed-size capsule, rather than either losing that context entirely or paying linear context cost to re-read it.
 
-The owner retains full sovereignty. Manual work takes priority — Father yields when the owner is active. A simple file touch provides graceful shutdown. Telegram polling keeps the owner informed between cycles. Every cycle is journaled, every state change is diffed, and the system can be observed from a second terminal while work continues:
+The owner retains full sovereignty. Manual work takes priority — OwnerAutonomy yields when the owner is active. A simple file touch provides graceful shutdown. Telegram polling keeps the owner informed between cycles. Every cycle is journaled, every state change is diffed, and the system can be observed from a second terminal while work continues:
 
 ```mermaid
 flowchart TB
@@ -512,12 +512,12 @@ flowchart TB
     S4 --> LOG
     S4 --> LEDGERS
 
-    classDef father fill:#38bdf8,stroke:#0284c7,color:#000,font-weight:bold
+    classDef owner_autonomy fill:#38bdf8,stroke:#0284c7,color:#000,font-weight:bold
     classDef domains fill:#a78bfa,stroke:#7c3aed,color:#000,font-weight:bold
     classDef owner fill:#fbbf24,stroke:#b45309,color:#000,font-weight:bold
     classDef observe fill:#fb7185,stroke:#e11d48,color:#000,font-weight:bold
 
-    class S1,S2,S3,S4,S5 father
+    class S1,S2,S3,S4,S5 owner_autonomy
     class D1,D2,D3 domains
     class TGPOLL,PRIORITY,STOP owner
     class TUI,LOG,LEDGERS observe

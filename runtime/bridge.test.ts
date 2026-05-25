@@ -829,8 +829,6 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
       "runtime.dispatch_ready_task",
       "runtime.scheduler_tick",
       "runtime.process_rolling_reviews",
-      "runtime.father_iterate",
-      "runtime.detect_father_drift",
       "runtime.replay_recipe",
       "runtime.recent_events",
       // Phase 1 brain-harness rewrite (2026-05-17): four READ-ONLY

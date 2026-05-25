@@ -69,7 +69,7 @@ For per-component manual install paths, see
 - [x] Real-brain dispatch via opencode CLI (gpt-5-mini default; pass `--model=<id>` to override).
 - [x] Cycle-1-only structural enforcement + refinement edges in the task DAG.
 - [x] Recipe replay (tier-0 cost compression — high-confidence recipes skip the brain).
-- [x] Father scheduler (brainless recurring task driver — `runtime/father.ts`).
+- [x] OwnerAutonomy scheduler (brainless recurring task driver — `runtime/owner_autonomy.ts`).
 - [x] sqlite-vec retrieval backend (k-NN via the `vec_events` virtual table; `ACC2_USE_VEC=1`).
 - [x] Production observability: structured logging (`runtime/logger.ts`, pino), Prometheus metrics (`runtime/metrics.ts`), readiness probes (`runtime/readiness.ts`).
 - [x] Admin surface: `acc admin update-opencode`, `acc admin opencode-version`, `acc admin upgrade-check`, export/import/rotate.
@@ -111,7 +111,7 @@ For per-component manual install paths, see
 acc2/
 ├── substrate/            schema, types, extractors, views, seed, db
 ├── runtime/              daemon, three runtimes, sandbox, artifact_store, embedder, retrieval, dispatch decider, bridge,
-│   │                     cycle_one_gate, credit, father, recipe_replay, prompt_composer, integrity_worker, metrics, ...
+│   │                     cycle_one_gate, credit, owner_autonomy, recipe_replay, prompt_composer, integrity_worker, metrics, ...
 │   └── runtimes/         bun.ts, uv.ts, camofox.ts
 ├── cli/                  thin RPC clients to the daemon (init, dispatch, doctor, watch, admin, service-install, rpc)
 ├── tests/                unit tests + harness-smoke + real-brain-smoke-shape
@@ -130,7 +130,7 @@ acc2/
 - `ACC2_OPENCODE_TIMEOUT_MS`, `ACC2_OPENCODE_MCP_HANDSHAKE_MS`, `ACC2_OPENCODE_MODEL` — opencode subprocess tuning.
 - `ACC2_DAEMON_PORT`, `ACC2_DAEMON_AUX_PORT` — pinned ports (auto-pick when unset).
 - `CAMOUFOX_BINARY_PATH` — override the auto-detected Camoufox binary.
-- Worker autostart opt-OUT (all six workers default ON): `ACC2_DISABLE_WORKERS=embedder,father,...` — single comma-separated env var. Canonical names: `embedder`, `scheduler`, `father`, `rolling_reviewer`, `rehabilitation`, `integrity`. Tests pin five off via `tests/preload.ts` (integrity stays on for `/ready`).
+- Worker autostart opt-OUT (all six workers default ON): `ACC2_DISABLE_WORKERS=embedder,owner_autonomy,...` — single comma-separated env var. Canonical names: `embedder`, `scheduler`, `owner_autonomy`, `rolling_reviewer`, `rehabilitation`, `integrity`. Tests pin five off via `tests/preload.ts` (integrity stays on for `/ready`).
 
 Claude Code and opencode authenticate via their subscription CLIs — no API keys needed for the LLM substrates themselves.
 

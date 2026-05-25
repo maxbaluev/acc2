@@ -9,8 +9,7 @@
  * (+ market) over IPFS pub/sub, with Pinata as the pin/metadata provider.
  * Right now we only RESERVE the seams:
  *
- *   - "git"                  — the CURRENT update path (clone/pull a ref).
- *   - "ipfs_cid"             — the NEW fetch-by-CID path (resolved by the
+ *   - "ipfs_cid"             — the sole fetch-by-CID release path (resolved by the
  *                              `acc update` task against a gateway/Pinata).
  *   - "pubsub_announcement"  — the RESERVED FUTURE P2P path. A
  *                              `release_announced` event id (see
@@ -20,7 +19,6 @@
  */
 
 export type ReleaseSource =
-  | { kind: "git" }
   | { kind: "ipfs_cid"; cid: string; gateway?: string }
   | { kind: "pubsub_announcement"; announcement_event_id: string };
 
@@ -31,20 +29,17 @@ export type ReleaseSourceError = { error: string };
  * Map a CLI `--from <spec>` string to a ReleaseSource (or a typed error).
  *
  * Accepted spec shapes:
- *   - "git"                  → { kind: "git" }
  *   - "ipfs:<cid>"           → { kind: "ipfs_cid", cid }
  *   - "ipfs:<cid>@<gateway>" → { kind: "ipfs_cid", cid, gateway }
  *   - "pubsub:<event_id>"    → { kind: "pubsub_announcement", announcement_event_id }
  *
- * `git` and `ipfs_cid` are parsed fully. `pubsub:` parses into a real
+ * `ipfs_cid` is parsed fully. `pubsub:` parses into a real
  * `pubsub_announcement` source so the seam is genuine, but it is not
  * resolvable yet — see `resolveReleaseSource`.
  */
 export function parseReleaseSource(spec: string): ReleaseSource | ReleaseSourceError {
   const trimmed = spec.trim();
   if (trimmed.length === 0) return { error: "release_source_empty_spec" };
-
-  if (trimmed === "git") return { kind: "git" };
 
   if (trimmed.startsWith("ipfs:")) {
     const rest = trimmed.slice("ipfs:".length);
@@ -73,7 +68,7 @@ export function parseReleaseSource(spec: string): ReleaseSource | ReleaseSourceE
 /**
  * Resolve a ReleaseSource to a concrete fetchable CID.
  *
- * `git` and `ipfs_cid` are terminal/concrete and pass through unchanged.
+ * `ipfs_cid` is terminal/concrete and passes through unchanged.
  * `pubsub_announcement` is the RESERVED future P2P seam: resolving it
  * requires the unimplemented pub/sub layer (look up the
  * `release_announced` event, verify the signature, extract `bundle_cid`),
@@ -84,7 +79,6 @@ export function resolveReleaseSource(
   source: ReleaseSource,
 ): ReleaseSource | ReleaseSourceError {
   switch (source.kind) {
-    case "git":
     case "ipfs_cid":
       return source;
     case "pubsub_announcement":

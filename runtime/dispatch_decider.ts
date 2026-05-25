@@ -729,7 +729,7 @@ export const recordLowRiskInlineOutcome = (
   // Lazy import to avoid a circular: emit lives in runtime/events.ts and
   // the dispatch_decider is imported by the MCP server which also imports
   // events.ts. Static import is fine; we keep the call here so any caller
-  // (Father, dispatcher, tests) can credit uniformly.
+  // (OwnerAutonomy, dispatcher, tests) can credit uniformly.
   const { emitEvent } = require("./events") as typeof import("./events");
   emitEvent(db, {
     kind: outcome === "success" ? "candidate_confirmed" : "candidate_contradicted",
@@ -863,7 +863,7 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
   // owner_profile.autonomy_scope may dispatch; low-confidence, out-of-scope,
   // irreversible, or owner-sensitive forecasts must route to
   // owner_input_required/hidl_action_required as proposed actions. This is
-  // route evidence, not a Father mode or regex pre-classifier. Complexity is a
+  // route evidence, not a OwnerAutonomy mode or regex pre-classifier. Complexity is a
   // coarse structural estimate only; routing is always valid (defaults here).
   return {
     route: "opencode_brain",

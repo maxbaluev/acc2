@@ -6,7 +6,7 @@
 // events with one of three kinds:
 //
 //   - blocks    — the source directive holds priority until it closes; the
-//                 target waits. Father / dispatch_decider down-rank targets.
+//                 target waits. OwnerAutonomy / dispatch_decider down-rank targets.
 //   - watches   — the source observes the target's progress for context.
 //   - depletes  — the two share an exhaustible resource (attention, budget,
 //                 calendar slot); concurrent execution thins each one's
@@ -26,7 +26,7 @@ import { emitEvent, type EmitEventInput } from "./events";
 // `sequencing_dependency`, `enabling`. The scheduler-aware concurrency
 // conflicts (`mutual_exclusion`, `resource_conflict`) drive dispatch-time
 // deferral via `CONCURRENCY_CONFLICT_KINDS` below; the other v2-design kinds
-// surface on read so downstream consumers (Father selector, dispatch decider)
+// surface on read so downstream consumers (OwnerAutonomy selector, dispatch decider)
 // see every kind.
 export type InterferenceEdgeKind =
   | "blocks"
@@ -391,7 +391,7 @@ export const findDeferringConflict = (
  *  tasks belonging to a blocked directive. A directive is "blocked" while
  *  another directive holds a `blocks` edge pointing at it AND the source
  *  hasn't itself committed/abandoned. (Phase I treats "unresolved" as "no
- *  goal_committed / goal_abandoned event on the source"; Phase K Father may
+ *  goal_committed / goal_abandoned event on the source"; Phase K OwnerAutonomy may
  *  refine.) */
 export const blockersOf = (db: Database, directiveId: string): string[] => {
   const edges = readInterferenceEdges(db).filter(

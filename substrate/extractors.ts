@@ -735,7 +735,7 @@ export const extractKnowledgePromotions = async (db: Database): Promise<Knowledg
 
 /** Promote (or demote) ONE knowledge candidate by id — parallel API to
  *  `maybePromote` in artifact_store.ts. Returns the verdict so callers
- *  (Father, brain) can branch on the result without re-querying. The
+ *  (OwnerAutonomy, brain) can branch on the result without re-querying. The
  *  thresholds match the bulk extractor above so single-row and bulk
  *  passes are interchangeable. Architecture.md + §7.2 + Phase Audit. */
 export type KnowledgeVerdict =
@@ -2564,7 +2564,7 @@ export const extractRecipeCandidates = async (db: Database): Promise<RecipeCandi
 //
 // `extractRecipeCandidates` (above) is the statistical 3-success path —
 // the brain accumulates evidence before the substrate commits to caching
-// a trajectory at confidence=0.5. That cadence depends on Father / the
+// a trajectory at confidence=0.5. That cadence depends on OwnerAutonomy / the
 // rolling reviewer firing periodically, which under pre-flip defaults was
 // off in tests and in fresh installs.
 //

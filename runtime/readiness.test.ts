@@ -73,13 +73,13 @@ describe("readiness — stuckWorkers detection", () => {
 
   test("multiple workers, only laggards show up", () => {
     registerWorker("amendment", 1000);
-    registerWorker("father", 60_000);
+    registerWorker("owner_autonomy", 60_000);
     markWorkerReady("amendment");
-    markWorkerReady("father");
+    markWorkerReady("owner_autonomy");
     recordWorkerTick("amendment");
-    recordWorkerTick("father", Date.now() - 5 * 60_000); // 5min lag, way over 3*60s
+    recordWorkerTick("owner_autonomy", Date.now() - 5 * 60_000); // 5min lag, way over 3*60s
     const stuck = stuckWorkers();
-    expect(stuck.map((s) => s.worker)).toEqual(["father"]);
+    expect(stuck.map((s) => s.worker)).toEqual(["owner_autonomy"]);
   });
 });
 

@@ -16,6 +16,30 @@ const captureEmit = (sink: EmitEventInput[], db: Database) => (event: EmitEventI
   emitEvent(db, event);
 };
 
+const admitValueVerifier = async (db: Database, events: EmitEventInput[]): Promise<string> => {
+  const verifier = await admitArtifact(
+    db,
+    {
+      runtime: "bun",
+      body: [
+        "const observation = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
+        "const residual = observation?.candidate_result === undefined || observation?.candidate_result?.value === 42 ? 0.05 : 0.9;",
+        "console.log('@@RESULT@@ ' + JSON.stringify({ residual }));",
+      ].join("\n"),
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null,
+      fixtureExpectedResidualBelow: 0.2,
+      name: "artifact_admission_value_verifier",
+      kind: "admission_verifier",
+      enableRepair: false,
+    },
+    captureEmit(events, db),
+  );
+  expect(verifier.ok).toBe(true);
+  if (!verifier.ok) throw new Error("verifier admission failed");
+  return verifier.artifactId;
+};
+
 describe("admitArtifact — happy path", () => {
   test("admits a valid bun artifact whose fixture run completes ok", async () => {
     const db = openDb(":memory:");
@@ -822,5 +846,103 @@ describe("admitArtifact — published_drive_doc supersede chain (C5)", () => {
     expect(result.reason).toBe("published_drive_doc_missing_drive_uri");
     const after = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
     expect(after).toBe(before);
+  });
+});
+
+
+describe("admitArtifact — SANDREPAIR verifier loop", () => {
+  test("keeps executable rows provisional until verifier residual passes", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const verifierId = await admitValueVerifier(db, events);
+    const result = await admitArtifact(db, {
+      runtime: "bun",
+      body: "console.log('@@RESULT@@ ' + JSON.stringify({ value: 42 }));",
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null,
+      fixtureExpectedResidualBelow: 0.2,
+      verifierArtifactId: verifierId,
+    }, captureEmit(events, db));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const row = getArtifact(db, result.artifactId);
+    expect(row?.status).toBe("admitted");
+    const admitted = events.filter((e) => e.kind === "act_artifact_admitted").at(-1)!;
+    const trace = (admitted.payload as { attempt_trace?: Array<Record<string, unknown>> }).attempt_trace!;
+    expect(trace.length).toBe(1);
+    expect(trace[0]!.verifier_residual).toBe(0.05);
+  });
+
+  test("rejects when verifier_artifact_id residual stays high and records attempt_trace", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const verifierId = await admitValueVerifier(db, events);
+    const before = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
+    const result = await admitArtifact(db, {
+      runtime: "bun",
+      body: "console.log('@@RESULT@@ ' + JSON.stringify({ value: 1 }));",
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null,
+      fixtureExpectedResidualBelow: 0.2,
+      verifierArtifactId: verifierId,
+      enableRepair: false,
+    }, captureEmit(events, db));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("fixture_residual_too_high");
+    const after = (db.query("SELECT COUNT(*) AS c FROM act_artifact").get() as { c: number }).c;
+    expect(after).toBe(before);
+    const rejected = events.filter((e) => e.kind === "act_artifact_admission_rejected").at(-1)!;
+    const trace = (rejected.payload as { attempt_trace?: Array<Record<string, unknown>> }).attempt_trace!;
+    expect(trace.length).toBe(1);
+    expect(trace[0]!.verifier_residual).toBe(0.9);
+  });
+
+  test("tries bounded inline repair bodies before admitting the winning body", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const verifierId = await admitValueVerifier(db, events);
+    const repairBody = "console.log('@@RESULT@@ ' + JSON.stringify({ value: 42 }));";
+    const result = await admitArtifact(db, {
+      runtime: "bun",
+      body: "console.log('@@RESULT@@ ' + JSON.stringify({ value: 1 }));",
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null,
+      fixtureExpectedResidualBelow: 0.2,
+      verifierArtifactId: verifierId,
+      repairCandidateBodies: [repairBody],
+    }, captureEmit(events, db));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const row = getArtifact(db, result.artifactId)!;
+    expect(row.body).toBe(repairBody);
+    expect(row.status).toBe("admitted");
+    const admitted = events.filter((e) => e.kind === "act_artifact_admitted").at(-1)!;
+    const trace = (admitted.payload as { attempt_trace?: Array<Record<string, unknown>> }).attempt_trace!;
+    expect(trace.length).toBe(2);
+    expect(trace[0]!.reason).toBe("fixture_residual_too_high");
+    expect(trace[1]!.source).toBe("inline_repair");
+    expect(trace[1]!.verifier_residual).toBe(0.05);
+  });
+
+  test("rejects after inline repair budget is exhausted with the full trace", async () => {
+    const db = openDb(":memory:");
+    const events: EmitEventInput[] = [];
+    const verifierId = await admitValueVerifier(db, events);
+    const result = await admitArtifact(db, {
+      runtime: "bun",
+      body: "console.log('@@RESULT@@ ' + JSON.stringify({ value: 1 }));",
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null,
+      fixtureExpectedResidualBelow: 0.2,
+      verifierArtifactId: verifierId,
+      repairCandidateBodies: ["console.log('@@RESULT@@ ' + JSON.stringify({ value: 2 }));"],
+      enableRepair: false,
+    }, captureEmit(events, db));
+    expect(result.ok).toBe(false);
+    const rejected = events.filter((e) => e.kind === "act_artifact_admission_rejected").at(-1)!;
+    const trace = (rejected.payload as { attempt_trace?: Array<Record<string, unknown>> }).attempt_trace!;
+    expect(trace.length).toBe(2);
+    expect(trace.every((entry) => entry.reason === "fixture_residual_too_high")).toBe(true);
   });
 });

@@ -144,7 +144,7 @@ The audit walked Architecture.md section by section against the live code, then 
 
 - **Severity:** minor.
 - **Design (lines 1647-1696):** each of 19 cutover criteria is "testable".
-- **Code:** Criteria 1-16 + 19 are covered by existing tests (refinement-depth cap, scope failures, retrieval, recipe replay, Father drift, semantic merger). Criteria 17 (adversarial cycle-1) and 18 (semantic merger Rules 1+2+3) are now locked by `audit.test.ts`.
+- **Code:** Criteria 1-16 + 19 are covered by existing tests (refinement-depth cap, scope failures, retrieval, recipe replay, OwnerAutonomy drift, semantic merger). Criteria 17 (adversarial cycle-1) and 18 (semantic merger Rules 1+2+3) are now locked by `audit.test.ts`.
 - **Action taken:** *fixed-in-this-pass* for 17+18; remaining criteria already covered. No further action.
 
 ### A.22-R1 — Rejected patterns absent from codebase
@@ -265,10 +265,10 @@ The audit walked Architecture.md section by section against the live code, then 
 - **Code:** Now exercised by `runtime/audit.test.ts:audit A.3.6.1`. The new tests construct two near-identical embeddings, run the extractor, and assert the merge + synthesis events fire.
 - **Action taken:** *fixed-in-this-pass*.
 
-### D.4 — Father drift detector with synthetic non-FatherAction event
+### D.4 — OwnerAutonomy drift detector with synthetic non-OwnerAutonomyAction event
 
 - **Severity:** minor.
-- **Code:** `runtime/father.test.ts:detect_father_drift` (already existed pre-audit) emits a `act_artifact_admitted` event under `substrate_origin='father'` and asserts the detector emits `father_drift_detected`.
+- **Code:** `runtime/owner_autonomy.test.ts:detect_owner_autonomy_drift` (already existed pre-audit) emits a `act_artifact_admitted` event under `substrate_origin='owner_autonomy'` and asserts the detector emits `owner_autonomy_drift_detected`.
 - **Action taken:** *no-action-design-correct*.
 
 ### D.5 — Cycle-1 in real bridge path (ACC2_BRIDGE_MODE=real with stub spawnFn)
@@ -306,9 +306,9 @@ The audit walked Architecture.md section by section against the live code, then 
 - **Status:** **deferred — informational**. The recipe replay engine handles single-step trajectories via `replayRecipe`. Multi-step replays (action_predicted → observed → action_predicted → …) deferred to Phase J+. The recipe_extracted payload already carries the multi-step trajectory; the replay loop just iterates once today.
 - **Recommended fixture spec:** a directive with two sequential action artifacts (action 1 emits an observation; action 2 consumes that observation as input). Phase J adds a sequence-aware `replayRecipe`.
 
-### E.5 — Phase K Father drift self-suspend (deferred)
+### E.5 — Phase K OwnerAutonomy drift self-suspend (deferred)
 
-- **Status:** **deferred — informational**. Father currently emits `father_drift_detected` on each offender but does not self-suspend. The reservation for the suspension event kind is `father_self_suspended` — not yet added to `EventKind`. Recommended phase: post-K maintenance.
+- **Status:** **deferred — informational**. OwnerAutonomy currently emits `owner_autonomy_drift_detected` on each offender but does not self-suspend. The reservation for the suspension event kind is `owner_autonomy_self_suspended` — not yet added to `EventKind`. Recommended phase: post-K maintenance.
 
 ---
 
@@ -350,6 +350,6 @@ Confirmed by three consecutive full-suite runs: 354/354 passing.
 - C.3 (counterfactual regret weighting for irreversible effects) → Phase I/J.
 - C.5 (embedding-version migration worker) → Phase F follow-up.
 - E.4 (recipe replay multi-step) → Phase J refinement.
-- E.5 (Father self-suspend on repeated drift) → post-K maintenance.
+- E.5 (OwnerAutonomy self-suspend on repeated drift) → post-K maintenance.
 
 The substrate is now coherent with Architecture.md on every blocker and major finding. The DAG-level semantic merger, the dispatch decider's inline lane, the runtime supervision event surface, the external-source registration MCP tool, and the substrate.read view router are all live and tested.

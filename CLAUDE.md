@@ -18,6 +18,8 @@ No regex intent pre-classification. RLM-first means the prompt-composed dispatch
 
 Narrow inline exceptions are operator health reads, trivial citeable facts, owner-facing clarification before ingress, and substrate-dispatched low-risk leaves.
 
+Strategic synthesis is never an inline exception. Understanding WHY the system behaves as it does, diagnosing an architecture defect, designing a feature or worker, decomposing work, deciding WHERE a fix lands, and any change to this operating contract or protocol are the brain's cycle-1 job. Route these through `acc task` and, for protocol changes, through `contract_amendment_proposed` before any source mutation. Forensic state reads use substrate/MCP views. Do not substitute Claude-side Agent subagents, ad-hoc analysis, or direct hand-edits for the brain; "understand why", "design what", and "change the contract" belong to the brain, not to you.
+
 ## Actors
 
 Owner: source of intent, constraints, consent, and observed outcomes.
@@ -40,7 +42,7 @@ verifier_kind is open provenance metadata, not a closed enum or gate. Owner cons
 
 Dispatch is substrate-side. Claude reads dispatch_decided and does not override it.
 
-Parallel-first is the default. Fan out independent implementation subagents concurrently in one message with multiple Agent calls. Dispatch independent directives and independent sibling leaves in parallel when the scheduler, interference graph, bridge health, and host resources allow it. Never serialize independent work merely because it is easier to narrate.
+Parallel-first is the default. Fan out independent implementation subagents concurrently in one message with multiple Agent calls — but Agent subagents exist ONLY to implement brain-dispatched leaves and run forensic reads; they are not a lane for design, research, diagnosis, or decomposition. Dispatch independent directives and independent sibling leaves in parallel when the scheduler, interference graph, bridge health, and host resources allow it. Never serialize independent work merely because it is easier to narrate.
 
 Cycle-1-only is structural. Do not continue in-context. If work remains, emit task_node_opened + task_edge_recorded with a bounded reason and stop condition.
 
@@ -62,7 +64,7 @@ Production bridge mode is real; tests pin mock. Workers are on by default and op
 
 Owners are not persona enums. The profile is a learned open-ended vector. Honor preferred_terms, avoided_terms, detected_language, autonomy_score, autonomy_scope, manual_review_patterns, hot_topics, things_to_never_do, and rendering_signals, autonomy_signals, control_signals, risk_signals, collaboration_signals, and goal_continuity_signals when present.
 
-Render owner-visible output through the profile. Keep substrate-internal fields English unless a schema says otherwise. If owner input changes durable language, terms, autonomy, control, risk, collaboration, continuity, or hard constraints, emit owner_insight_candidate or owner_profile_recorded.
+Render owner-visible output through the profile and the target medium. Before any human-facing delivery, strip internal ontology terms (substrate, directive, residual, verifier, dispatch, artifact, posterior, closure, groundbase, and similar system words), remove raw markdown syntax when the medium is not markdown, and cut any section that does not change the reader's decision. Keep substrate-internal fields English unless a schema says otherwise. If owner input changes durable language, terms, autonomy, control, risk, collaboration, continuity, or hard constraints, emit owner_insight_candidate or owner_profile_recorded.
 
 Before irreversible or owner-sensitive steps, surface a plain decision point. When active dispatches exist, source status from dispatch_resolved_view; completed means task_committed, failed means task_failed or dispatcher_violation, and live means no terminal event yet.
 

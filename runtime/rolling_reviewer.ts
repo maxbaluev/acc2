@@ -1,7 +1,7 @@
 // acc2 rolling-active reviewer — Phase I (Architecture.md).
 //
 // Rolling-active directives never close. They emit `directive_review_due` on
-// cadence; Father (Phase K) picks them up and opens a review subtask each
+// cadence; OwnerAutonomy (Phase K) picks them up and opens a review subtask each
 // time. Architecture defines four cadences (daily, weekly, monthly,
 // quarterly, annually).
 //
@@ -208,7 +208,7 @@ export const processRollingReviews = async (
       } as JsonValue,
     });
 
-    // 2. Open a review subtask. Father will pick it up via the scheduler.
+    // 2. Open a review subtask. OwnerAutonomy will pick it up via the scheduler.
     const reviewTaskId = newId();
     const latest = findLatestDirectiveEvent(db, d.directive_id);
     const directiveText =

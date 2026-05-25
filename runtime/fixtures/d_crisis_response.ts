@@ -25,7 +25,7 @@ export const FIXTURE_CRISIS_RESPONSE_DIRECTIVE_TEXT =
 
 /** Open the fixture_d_crisis_response directive plus its root task node.
  *  Emits `crisis_mode_engaged` alongside `directive_opened` so observers
- *  (scheduler, dispatch decider, Father) can subscribe to the transition. */
+ *  (scheduler, dispatch decider, OwnerAutonomy) can subscribe to the transition. */
 export const openFixtureCrisisResponse = async (
   db: Database,
 ): Promise<OpenFixtureCrisisResponseResult> => {

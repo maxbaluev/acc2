@@ -51,12 +51,9 @@ CREATE TABLE act_artifact (
   -- UNIVERSAL_ (2026-05-24, directive 3XETJCYT): domain-neutral interface
   -- metadata column. Present in this table-rebuild so a fresh DB applying
   -- v002 (which RENAMEs + recreates act_artifact) keeps the column in the
-  -- same boot rather than dropping it until the next openDb. The
-  -- INSERT...SELECT below intentionally omits this column: on already-
-  -- applied DBs act_artifact_v001 predates the column (no data to copy),
-  -- and on fresh DBs the source table is empty (runSchema just created
-  -- it), so no rows are lost. runMigrations' idempotent ADD COLUMN also
-  -- guarantees the column exists on every subsequent openDb.
+  -- same boot rather than dropping it until the next openDb. Copy it through
+  -- the rebuild because acc update may admit release_canonical_artifact rows
+  -- before runVersionedMigrations executes.
   interface_metadata TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -67,7 +64,7 @@ INSERT INTO act_artifact (
   recent_residual_mean, recent_kill_count, status, name,
   fixture_input, fixture_expected_residual,
   intent, summary, target_files, target_resources, source_candidate_id, owner_gate_verdict,
-  supersedes, superseded_by, lost_version_count, created_at, updated_at
+  supersedes, superseded_by, lost_version_count, interface_metadata, created_at, updated_at
 )
 SELECT
   id, runtime, body, declared_sandbox, state_root, kind,
@@ -75,7 +72,7 @@ SELECT
   recent_residual_mean, recent_kill_count, status, name,
   fixture_input, fixture_expected_residual,
   intent, summary, target_files, target_resources, source_candidate_id, owner_gate_verdict,
-  supersedes, superseded_by, lost_version_count, created_at, updated_at
+  supersedes, superseded_by, lost_version_count, interface_metadata, created_at, updated_at
 FROM act_artifact_v001;
 DROP TABLE act_artifact_v001;
 CREATE INDEX IF NOT EXISTS idx_act_artifact_runtime ON act_artifact(runtime);

@@ -77,7 +77,7 @@ What each step does:
    The bottom line reports `[PASS] ready for real-brain dispatch` when
    every must-have is green.
 5. `acc daemon start` — spawns the daemon detached. All workers are ON by
-   default (Father iteration, embedder catch-up, rolling reviewer,
+   default (OwnerAutonomy iteration, embedder catch-up, rolling reviewer,
    amendment handler, pending-decision retire, integrity and related
    maintenance checks).
 6. `acc task "..."` — opens a directive; the substrate dispatches the

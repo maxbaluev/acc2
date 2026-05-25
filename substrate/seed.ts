@@ -1310,7 +1310,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
   // event ids. The synthetic handle is 26 chars (ULID-shape) but
   // recognizably non-real ("SEEDSYNTH…") so any consumer that looks
   // up the id sees a clear non-event placeholder. The lesson origin —
-  // task T_FATHER_GOVERNANCE_06 — is preserved in this comment for
+  // task T_OWNER_AUTONOMY_GOVERNANCE_06 — is preserved in this comment for
   // historical attribution but is no longer part of any shipped row.
   {
     // Reusable gap-contract action for strategic-governance decomposition.
@@ -1365,7 +1365,7 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     initial_confidence: 0.70,
     fixture_input: {
       gap_kind: "verifier_gap",
-      target: "T_FATHER_GOVERNANCE_06",
+      target: "T_OWNER_AUTONOMY_GOVERNANCE_06",
       current_state: "refinement subtasks land as prose",
       desired_state: "refinement subtasks land as executable gap contracts",
       metric_name: "subtasks_with_scalar_verifier_ratio",
@@ -1405,9 +1405,9 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     initial_confidence: 0.70,
     fixture_input: {
       ok: true,
-      contract_id: "gap_verifier_gap__t_father_governance_06__subtasks_with_scalar_verifier_ra",
+      contract_id: "gap_verifier_gap__t_owner_autonomy_governance_06__subtasks_with_scalar_verifier_ra",
       gap_kind: "verifier_gap",
-      target: "T_FATHER_GOVERNANCE_06",
+      target: "T_OWNER_AUTONOMY_GOVERNANCE_06",
       current_state: "refinement subtasks land as prose",
       desired_state: "refinement subtasks land as executable gap contracts",
       metric_name: "subtasks_with_scalar_verifier_ratio",
@@ -2924,7 +2924,7 @@ type SeedRecipe = {
 //     Beta posterior; the answer next week is sharper than this week
 //   - `owner_profile_grounded` → answer is conditioned on persistent
 //     owner facts (constraints, hot_topics, things_to_never_do)
-//   - `father_ranked` → daemon picks the next session for the owner
+//   - `owner_autonomy_ranked` → daemon picks the next session for the owner
 //   - `stakeholder_tracked` → counterparty history persists across
 //     every conversation about that person/org
 //   - `recipe_compounds` → workflow observed once becomes a callable
@@ -2950,7 +2950,7 @@ export type DemoCapability = {
    *  posterior loop adjusts from real owner outcomes over time. */
   confidence: number;
   /** "finite" closes on terminal; "rolling_active" stays open and the
-   *  Father reopens the review subtask on cadence. */
+   *  OwnerAutonomy reopens the review subtask on cadence. */
   lifecycle: "finite" | "rolling_active";
   /** One concise capability description. It is embedded for retrieval but
    *  never surfaced verbatim as a canned demo; renderers synthesize a fresh
@@ -2984,13 +2984,13 @@ export const DEMO_CAPABILITIES: DemoCapability[] = [
   },
   {
     id: "finish_my_goal_weekly",
-    goal_shape_tags: ["finish_my_goal", "rolling_active", "father_ranked"],
+    goal_shape_tags: ["finish_my_goal", "rolling_active", "owner_autonomy_ranked"],
     requires_auth: [],
     confidence: 0.85,
     lifecycle: "rolling_active",
     capability_description:
       "The substrate can decompose a long-running goal into ready next steps, surface them at the right cadence, and credit what actually moved progress.",
-    substrate_capability: ["rolling_active", "father_ranked"],
+    substrate_capability: ["rolling_active", "owner_autonomy_ranked"],
   },
   {
     id: "make_my_decision_grounded",
@@ -3034,13 +3034,13 @@ export const DEMO_CAPABILITIES: DemoCapability[] = [
   },
   {
     id: "find_my_next_move",
-    goal_shape_tags: ["find_my_next_move", "father_ranked", "owner_profile_grounded"],
+    goal_shape_tags: ["find_my_next_move", "owner_autonomy_ranked", "owner_profile_grounded"],
     requires_auth: [],
     confidence: 0.77,
     lifecycle: "finite",
     capability_description:
       "The substrate can rank pending owner intents by likely impact using the owner profile and what is already in flight, so the next move is chosen on evidence not memory.",
-    substrate_capability: ["father_ranked", "owner_profile_grounded"],
+    substrate_capability: ["owner_autonomy_ranked", "owner_profile_grounded"],
   },
 ];
 

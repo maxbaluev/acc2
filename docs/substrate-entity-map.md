@@ -33,7 +33,7 @@ Producers:
   channel turns and the scored low-risk inline lane.
 - `runtime` — written by `runtime/*` modules that observe substrate-
   scheduled work (bridge, dispatcher, sandbox, embedder, crisis mode,
-  father, rolling reviewer, integrity worker).
+  owner_autonomy, rolling reviewer, integrity worker).
 - `seed` — written exclusively by `substrate/seed.ts` during install.
 
 ## Base tables
@@ -68,11 +68,11 @@ All views are CREATE VIEW IF NOT EXISTS over `events` ± `act_artifact`.
 | `origin_promotion_by_directive_view`       | `knowledge_promoted` × `directive_id`                                            | reranker (per-directive bias)            | yes (seed directive)  |
 | `contradictory_candidates_view`            | `contradictory_candidates`                                                       | retrieval (surface contradictions)       | empty                 |
 | `owner_conversation_view`                  | `owner_input_received`, `owner_decision_recorded`                                | brain (owner channel surface)            | empty until first chat |
-| `rolling_review_due_view`                  | `directive_opened` (lifecycle=rolling_active), `directive_review_due`            | Father (rolling cadence)                 | empty                 |
+| `rolling_review_due_view`                  | `directive_opened` (lifecycle=rolling_active), `directive_review_due`            | OwnerAutonomy (rolling cadence)                 | empty                 |
 | `watch_edge_observations_view`             | `task_edge_recorded` (kind=watches), upstream events                             | watching tasks                           | empty                 |
-| `directive_conflicts_view`                 | `directive_interference_edge`                                                    | Father (objective ranking)               | empty                 |
+| `directive_conflicts_view`                 | `directive_interference_edge`                                                    | OwnerAutonomy (objective ranking)               | empty                 |
 | `stakeholder_state_view`                   | `stakeholder_state_recorded`                                                     | stakeholder compositor                   | empty                 |
-| `active_objectives_view`                   | `directive_opened` × `directive_amended`                                         | Father                                   | empty                 |
+| `active_objectives_view`                   | `directive_opened` × `directive_amended`                                         | OwnerAutonomy                                   | empty                 |
 | `low_risk_inline_patterns_view`            | `knowledge_promoted` (tag=low_risk_inline_pattern)                               | dispatch decider (claude_inline lane)    | yes (seed knowledge)  |
 | `irreversible_effects_view`                | `irreversible_effect_recorded`                                                   | crisis mode, audit                       | empty                 |
 | `promoted_knowledge_view`                  | `knowledge_promoted`                                                             | retrieval, prompt composer               | yes — 10 promoted seed rows |
@@ -305,15 +305,15 @@ Irreducible data-structure contract:
 - Pending-decision retirement: `runtime/pending_decision_retire_worker.ts` emits one idempotent `pending_decision_retired` row per source amendment when the row is structurally un-appliable (`anchor_missing`/malformed diff), targets tests, or is older than the stale threshold. `acc admin pending-decisions` reads the live view by default; `--include-retired` reads the historical audit view.
 - Flywheel sequence: `lesson_extracted` or `contract_amendment_proposed` -> gate `action_predicted` / `action_scored` -> `lesson_apply_requested` -> apply `action_predicted` -> apply `action_scored` with residual < 0.3 -> `applied_change_committed` -> future cited `action_scored` / `recipe_invoked` rows measured by `applied_lesson_effectiveness_view`.
 
-### Father (`substrate/types.ts:185-190`)
+### OwnerAutonomy (`substrate/types.ts:185-190`)
 
 | Kind                                       | Producer       | seed | doctor | status | GAP |
 |--------------------------------------------|----------------|------|--------|--------|-----|
-| `father_cycle_recorded`                    | runtime (father) | — | — | — | — |
-| `father_yielded`                           | runtime (father) | — | — | — | — |
-| `father_drift_detected`                    | runtime (father) | — | — | — | — |
-| `father_self_suspended`                    | runtime (father) | — | — | — | — |
-| `father_drift_resolved`                    | runtime (father) | — | — | — | — |
+| `owner_autonomy_cycle_recorded`                    | runtime (owner_autonomy) | — | — | — | — |
+| `owner_autonomy_yielded`                           | runtime (owner_autonomy) | — | — | — | — |
+| `owner_autonomy_drift_detected`                    | runtime (owner_autonomy) | — | — | — | — |
+| `owner_autonomy_self_suspended`                    | runtime (owner_autonomy) | — | — | — | — |
+| `owner_autonomy_drift_resolved`                    | runtime (owner_autonomy) | — | — | — | — |
 
 ### Lifecycle (`substrate/types.ts:196-198`)
 

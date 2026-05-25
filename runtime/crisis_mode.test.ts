@@ -41,7 +41,7 @@ describe("crisis_mode", () => {
     );
     expect(CRISIS_MODE.latm_authoring_suspended).toBe(true);
     expect(NORMAL_MODE.latm_authoring_suspended).toBe(false);
-    expect(CRISIS_MODE.father_interval_ms).toBeLessThan(NORMAL_MODE.father_interval_ms);
+    expect(CRISIS_MODE.owner_autonomy_interval_ms).toBeLessThan(NORMAL_MODE.owner_autonomy_interval_ms);
     expect(CRISIS_MODE.recipe_confidence_threshold).toBeLessThan(
       NORMAL_MODE.recipe_confidence_threshold,
     );

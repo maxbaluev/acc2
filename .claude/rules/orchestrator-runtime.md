@@ -9,7 +9,9 @@ stdout silence, Bash subprocess exit, or process listings.
 These rules are deliberately small and load-bearing. The CLAUDE.md
 operating contract stays the canonical surface for "what the system
 is"; this file is the operational protocol for **how the orchestrator
-observes dispatch state**.
+observes dispatch state and avoids bypassing brain-owned synthesis**.
+
+Protocol and operating-contract changes are never direct Claude edits. The orchestrator may gather forensic evidence, but diagnosis, design, decomposition, and deciding where a protocol fix lands must enter the substrate loop and produce `contract_amendment_proposed` before source mutation. Claude-side Agent subagents may only implement substrate-dispatched leaves or run narrow forensic reads; they must not architect protocol changes.
 
 ## Daemon lifecycle — use the canonical CLI, never raw nohup
 

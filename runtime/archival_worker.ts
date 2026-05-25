@@ -117,7 +117,6 @@ const COMPRESS_SUMMARY_KINDS = new Set<string>([
 const NOISY_OPERATIONAL_ARCHIVE_KINDS = new Set<string>([
   // Operational telemetry: not load-bearing after 30 days, but preserve
   // provenance in the monthly archive instead of keeping it hot forever.
-  "father_yielded",
   // 2026-05-23 event-class tiering: artifact_kind_inference_uncertain moved
   // OUT of archive_cold and INTO EPHEMERAL_TELEMETRY_KINDS — its only
   // consumer is a lifetime health COUNT(*) (now backed by a retained

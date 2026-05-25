@@ -35,6 +35,9 @@ describe("buildSystemMap", () => {
     );
     expect(map.event_kinds.brain_emissible.length).toBeGreaterThan(0);
     expect(map.event_kinds.brain_emissible.every((k) => k.producer === "brain" || k.producer === "both")).toBe(true);
+    expect(map.event_kinds.all.map((k) => k.kind)).toEqual(
+      expect.arrayContaining(["owner_deliverable_published", "owner_notification_pushed"]),
+    );
     expect(map.views.total).toBeGreaterThan(20);
     expect(map.views.names).toContain("dispatch_resolved_view");
     expect(map.tools.substrate_methods).toContain("substrate.emit");
@@ -43,6 +46,14 @@ describe("buildSystemMap", () => {
     expect(map.tools.runtime_methods).toContain("runtime.trajectory_replay");
     expect(map.tools.runtime_methods).toContain("runtime.prompt_self_inspect");
     expect(map.runtimes).toEqual(["bun", "uv", "camofox-browser"]);
+  });
+
+  test("does not expose retired Father runtime methods or event kinds", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const map = buildSystemMap(db);
+    expect(map.tools.runtime_methods.filter((m) => m.toLowerCase().includes("father"))).toEqual([]);
+    expect(map.event_kinds.all.map((k) => k.kind).filter((kind) => kind.startsWith("father_"))).toEqual([]);
   });
 
   test("artifact_registry.top_by_score honours quarantine filter and the K cap", () => {

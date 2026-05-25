@@ -30,7 +30,7 @@ import type { Database } from "bun:sqlite";
 import type { ArtifactInterfaceMetadata, JsonValue, Runtime, SandboxDecl } from "../substrate/types";
 import { validateSandboxDecl } from "./sandbox";
 import { isCodeRuntime, validateCodeArtifactAdmission } from "./code_artifact_validation";
-import { requestArtifactRepair } from "./artifact_repair";
+import { priorRepairAttempts, repairSessionIdFor, requestArtifactRepair } from "./artifact_repair";
 import { runArtifactForRuntime } from "./runtimes/index";
 import { getArtifact, insertArtifact } from "./artifact_store";
 import { ownerGateDecision } from "./owner_gate";
@@ -152,6 +152,9 @@ export type AdmissionInput = {
    *  end-to-end; set false to preserve the legacy single-shot reject (used by
    *  callers/tests that do not want a repair dispatch). */
   enableRepair?: boolean;
+  /** Bounded inline repair bodies tried in the same pre-admission sandbox
+   *  loop before falling back to the external repair directive. */
+  repairCandidateBodies?: string[];
 };
 
 export type AdmissionRejectionReason =
@@ -669,7 +672,8 @@ export const admitArtifact = async (
     confidence: ADMIT_CONFIDENCE,
     recentResidualMean: 0,
     recentKillCount: 0,
-    status: "admitted",
+    // Authored executable rows are non-live until sandbox + verifier residual pass.
+    status: "provisional",
     name: input.name ?? null,
     fixtureInput: input.fixtureInput,
     fixtureExpectedResidual: input.fixtureExpectedResidualBelow,
@@ -686,10 +690,10 @@ export const admitArtifact = async (
     id: input.artifactId,
   });
 
-  // 3. Run the fixture in the artifact's declared runtime. Phase G lights up
-  //    uv and camofox-browser; bun was always wired. Each runtime returns the
-  //    same observation envelope shape so this dispatch is purely a router.
-  let observation: {
+  // 3. Run candidate bodies inside a bounded pre-admission loop. The row
+  //    remains provisional until one body passes sandbox execution and, when
+  //    supplied, the verifier_artifact_id residual gate.
+  type AdmissionObservation = {
     ok: boolean;
     result?: JsonValue;
     error?: string;
@@ -699,24 +703,13 @@ export const admitArtifact = async (
     sandboxWarnings: string[];
     irreversibleEffects: Array<{ kind: string; description: string }>;
   };
-  // Capability-aware runtime resolution is now centralized in
-  // runArtifactForRuntime (runtime/runtimes/index.ts resolveRuntime): it
-  // probes availability BEFORE selecting a runner, emits one
-  // runtime_self_diagnostic_recorded row, and returns a fail-closed
-  // observation (never throws) for unavailable/unknown runtimes — so the
-  // admission path no longer switches on the concrete runtime string or
-  // performs its own registry-runner existence check. The downstream
-  // observation-error interpretation below maps those fail-closed errors
-  // to admission rejections.
-  const obs = await runArtifactForRuntime({
-    artifactId: row.id,
-    body: input.body,
-    declaredSandbox: input.declaredSandbox,
-    inputs: input.fixtureInput,
-    emit,
-    db,
-  });
-  observation = {
+  type AttemptFailure = {
+    reason: AdmissionRejectionReason;
+    detail?: string;
+    evidence: { error_output: string; observed_residual: number | null; exit_code?: number };
+    body: string;
+  };
+  const normalizeObservation = (obs: Awaited<ReturnType<typeof runArtifactForRuntime>>): AdmissionObservation => ({
     ok: obs.ok,
     result: obs.result,
     error: obs.error,
@@ -725,32 +718,43 @@ export const admitArtifact = async (
     stderrTail: obs.stderrTail,
     sandboxWarnings: obs.sandboxWarnings,
     irreversibleEffects: obs.irreversibleEffects,
+  });
+  const residualFromResult = (result: JsonValue | undefined): number | null => {
+    if (result && typeof result === "object" && !Array.isArray(result) && typeof (result as Record<string, unknown>).residual === "number") {
+      return (result as { residual: number }).residual;
+    }
+    return null;
   };
-
-  // SANDREPAIR helper: open a bounded, error-grounded repair loop for a
-  // failed CODE-runtime fixture run. Gated on isCodeRuntime + enableRepair
-  // (default-on for code runtimes) so non-code / data-class / environment
-  // failures (runtime_unavailable, unknown_runtime) never spawn a repair —
-  // only repairable artifact DEFECTS (the body crashed, or ran but produced
-  // a bad residual) do. The repair seam is idempotent + bounded internally;
-  // this closure only forwards the failure evidence.
+  const observationPayload = (obs: AdmissionObservation): JsonValue => ({
+    ok: obs.ok,
+    result: obs.result ?? null,
+    error: obs.error ?? null,
+    duration_ms: obs.durationMs,
+    exit_code: obs.exitCode,
+    stderr_tail: obs.stderrTail,
+    sandbox_warnings: obs.sandboxWarnings as unknown as JsonValue,
+  });
+  const repairBodies = (input.repairCandidateBodies ?? [])
+    .filter((body): body is string => typeof body === "string" && body.length > 0)
+    .slice(0, 3);
+  const candidateBodies = [input.body, ...repairBodies];
+  const attemptTrace: JsonValue[] = [];
+  let observation: AdmissionObservation | null = null;
+  let winningBody = input.body;
+  let lastFailure: AttemptFailure | null = null;
   const repairEnabled = isCodeRuntime(input.runtime) && (input.enableRepair ?? true);
-  const maybeRequestRepair = (evidence: {
-    error_output: string;
-    observed_residual: number | null;
-    exit_code?: number;
-  }): void => {
+  const maybeRequestRepair = (failure: AttemptFailure): void => {
     if (!repairEnabled) return;
     requestArtifactRepair(
       db,
       {
         candidateArtifactId: row.id,
-        body: input.body,
+        body: failure.body,
         runtime: input.runtime as string,
         declaredSandbox: input.declaredSandbox as unknown as JsonValue,
         fixtureInput: input.fixtureInput,
         fixtureExpectedResidualBelow: input.fixtureExpectedResidualBelow,
-        evidence,
+        evidence: failure.evidence,
         originalIntent: input.intent ?? input.summary ?? null,
         goalShape: input.goalShape ?? null,
         sourceCandidateId: input.sourceCandidateId ?? null,
@@ -759,136 +763,189 @@ export const admitArtifact = async (
       emit,
     );
   };
-
-  // Unknown runtime (no registry runner row): the centralized resolver
-  // returns `error: unknown_runtime:<rt>`. Admission cannot smoke-test an
-  // unrunnable artifact, so reject it (mirrors the prior registry-miss
-  // branch, now driven by the resolver's structured error).
-  if (!observation.ok && (observation.error ?? "").startsWith("unknown_runtime")) {
+  const rejectWithTrace = (failure: AttemptFailure): AdmissionResult => {
     db.run("DELETE FROM act_artifact WHERE id = ?", [row.id]);
-    emit({
-      kind: "act_artifact_admission_rejected",
-      substrate_origin: "substrate_auto",
-      action_artifact_id: row.id,
-      payload: {
-        reason: "unknown_runtime",
-        detail: `no runtime_runner registry row for runtime=${input.runtime}`,
-        runtime: input.runtime,
-      } as JsonValue,
-    });
-    return { ok: false, reason: "unknown_runtime", detail: input.runtime };
-  }
-
-  // Surface "runtime not installed" cleanly as `runtime_unavailable` so the
-  // caller can treat it as a soft refusal (e.g. admit the artifact anyway,
-  // run at execution time once playwright/uv are present). For Phase G we
-  // KEEP the rejection: admission is a smoke test and a smoke test that
-  // can't be run isn't a pass. The centralized resolver fails closed with
-  // `runtime_unavailable:<rt>` from its capability pre-check; the concrete
-  // runtimes still also return their own `<rt>_runtime_unavailable` when a
-  // post-resolution check trips, so both shapes map here.
-  if (!observation.ok && (
-    (observation.error ?? "").startsWith("runtime_unavailable") ||
-    observation.error === "uv_runtime_unavailable" ||
-    observation.error === "camofox_runtime_unavailable"
-  )) {
-    db.run("DELETE FROM act_artifact WHERE id = ?", [row.id]);
-    emit({
-      kind: "act_artifact_admission_rejected",
-      substrate_origin: "substrate_auto",
-      action_artifact_id: row.id,
-      payload: {
-        reason: "runtime_unavailable",
-        detail: observation.error,
-        runtime: input.runtime,
-        sandbox_warnings: observation.sandboxWarnings as unknown as JsonValue,
-      } as JsonValue,
-    });
-    return { ok: false, reason: "runtime_unavailable", detail: observation.error };
-  }
-
-  if (!observation.ok) {
-    db.run("DELETE FROM act_artifact WHERE id = ?", [row.id]);
+    const lastAttempt = attemptTrace.at(-1);
+    const mirroredResidualFields = lastAttempt && typeof lastAttempt === "object" && !Array.isArray(lastAttempt)
+      ? {
+          observed_residual: (lastAttempt as Record<string, JsonValue>).observed_residual ?? null,
+          verifier_residual: (lastAttempt as Record<string, JsonValue>).verifier_residual ?? null,
+          residual_out_of_range: (lastAttempt as Record<string, JsonValue>).residual_out_of_range ?? null,
+        }
+      : { observed_residual: null, verifier_residual: null, residual_out_of_range: null };
     emit({
       kind: "act_artifact_admission_rejected",
       substrate_origin: "substrate_auto",
       directive_id: input.governance?.directiveId,
       action_artifact_id: row.id,
       payload: {
-        reason: "runtime_error",
-        detail: observation.error ?? "unknown",
-        stderr_tail: observation.stderrTail,
-        exit_code: observation.exitCode,
-        duration_ms: observation.durationMs,
+        reason: failure.reason,
+        detail: failure.detail ?? null,
+        runtime: input.runtime,
+        source_candidate_id: input.sourceCandidateId ?? null,
+        ...mirroredResidualFields,
+        attempt_trace: attemptTrace,
       } as JsonValue,
     });
-    // SANDREPAIR: the body CRASHED in the sandbox — a repairable defect.
-    // Capture the concrete stderr/error and open a bounded, error-grounded
-    // repair loop (the rejection above stays fail-closed; this is additive).
-    maybeRequestRepair({
-      error_output: observation.stderrTail || observation.error || "runtime_error",
-      observed_residual: null,
+    if (failure.reason === "runtime_error" || failure.reason === "fixture_residual_too_high") maybeRequestRepair(failure);
+    return { ok: false, reason: failure.reason, detail: failure.detail };
+  };
+
+  for (let i = 0; i < candidateBodies.length; i++) {
+    const body = candidateBodies[i]!;
+    const attempt = i + 1;
+    const source = i === 0 ? "initial" : "inline_repair";
+    db.run("UPDATE act_artifact SET body = ?, updated_at = ? WHERE id = ?", [body, new Date().toISOString(), row.id]);
+    observation = normalizeObservation(await runArtifactForRuntime({
+      artifactId: row.id,
+      body,
+      declaredSandbox: input.declaredSandbox,
+      inputs: input.fixtureInput,
+      emit,
+      db,
+    }));
+    const traceEntry: Record<string, JsonValue> = {
+      attempt,
+      source,
+      body_length: body.length,
+      ok: observation.ok,
       exit_code: observation.exitCode,
-    });
-    return { ok: false, reason: "runtime_error", detail: observation.error };
+      duration_ms: observation.durationMs,
+      sandbox_warnings: observation.sandboxWarnings as unknown as JsonValue,
+    };
+    const failAttempt = (failure: AttemptFailure, terminal = false): AdmissionResult | null => {
+      traceEntry.reason = failure.reason;
+      traceEntry.detail = failure.detail ?? null;
+      traceEntry.stderr_tail = observation?.stderrTail ?? "";
+      attemptTrace.push(traceEntry as JsonValue);
+      lastFailure = failure;
+      return terminal || attempt === candidateBodies.length ? rejectWithTrace(failure) : null;
+    };
+
+    if (!observation.ok && (observation.error ?? "").startsWith("unknown_runtime")) {
+      const result = failAttempt({
+        reason: "unknown_runtime",
+        detail: `no runtime_runner registry row for runtime=${input.runtime}`,
+        evidence: { error_output: observation.error ?? "unknown_runtime", observed_residual: null, exit_code: observation.exitCode },
+        body,
+      }, true);
+      if (result) return result;
+    }
+    if (!observation.ok && ((observation.error ?? "").startsWith("runtime_unavailable") || observation.error === "uv_runtime_unavailable" || observation.error === "camofox_runtime_unavailable")) {
+      const result = failAttempt({
+        reason: "runtime_unavailable",
+        detail: observation.error,
+        evidence: { error_output: observation.error ?? "runtime_unavailable", observed_residual: null, exit_code: observation.exitCode },
+        body,
+      }, true);
+      if (result) return result;
+    }
+    if (!observation.ok) {
+      const result = failAttempt({
+        reason: "runtime_error",
+        detail: observation.error ?? "unknown",
+        evidence: { error_output: observation.stderrTail || observation.error || "runtime_error", observed_residual: null, exit_code: observation.exitCode },
+        body,
+      });
+      if (result) return result;
+      continue;
+    }
+
+    const fixtureResidual = residualFromResult(observation.result);
+    if (fixtureResidual !== null) {
+      const residualOutOfRange = !Number.isFinite(fixtureResidual) || fixtureResidual < 0 || fixtureResidual > 1;
+      if (residualOutOfRange || fixtureResidual >= input.fixtureExpectedResidualBelow) {
+        traceEntry.observed_residual = Number.isFinite(fixtureResidual) ? fixtureResidual : String(fixtureResidual);
+        traceEntry.residual_out_of_range = residualOutOfRange;
+        const detail = residualOutOfRange
+          ? `observed=${fixtureResidual} is not a valid residual in [0,1]`
+          : `observed=${fixtureResidual} threshold=${input.fixtureExpectedResidualBelow}`;
+        const errorOutput = residualOutOfRange
+          ? `fixture_residual_out_of_range: observed=${fixtureResidual} is not a valid residual in [0,1]`
+          : `fixture_residual_too_high: observed=${fixtureResidual} must be < ${input.fixtureExpectedResidualBelow}`;
+        const result = failAttempt({
+          reason: "fixture_residual_too_high",
+          detail,
+          evidence: { error_output: errorOutput, observed_residual: Number.isFinite(fixtureResidual) ? fixtureResidual : null, exit_code: observation.exitCode },
+          body,
+        });
+        if (result) return result;
+        continue;
+      }
+    }
+
+    if (typeof input.verifierArtifactId === "string" && input.verifierArtifactId.length > 0) {
+      const verifier = getArtifact(db, input.verifierArtifactId);
+      if (!verifier || verifier.runtime === null || verifier.declaredSandbox === null) {
+        const detail = verifier ? "verifier_artifact_not_executable" : "verifier_artifact_not_found";
+        const result = failAttempt({
+          reason: "runtime_error",
+          detail,
+          evidence: { error_output: detail, observed_residual: null, exit_code: observation.exitCode },
+          body,
+        }, true);
+        if (result) return result;
+      } else {
+        const verifierObs = normalizeObservation(await runArtifactForRuntime({
+          artifactId: verifier.id,
+          body: verifier.body,
+          declaredSandbox: verifier.declaredSandbox,
+          inputs: {
+            candidate_artifact_id: row.id,
+            candidate_result: observation.result ?? null,
+            candidate_observation: observationPayload(observation),
+            fixture_input: input.fixtureInput,
+            attempt,
+            source,
+          } as JsonValue,
+          emit,
+          db,
+        }));
+        if (!verifierObs.ok) {
+          traceEntry.verifier_ok = false;
+          const result = failAttempt({
+            reason: "runtime_error",
+            detail: verifierObs.error ?? "verifier_runtime_error",
+            evidence: { error_output: verifierObs.stderrTail || verifierObs.error || "verifier_runtime_error", observed_residual: null, exit_code: verifierObs.exitCode },
+            body,
+          });
+          if (result) return result;
+          continue;
+        }
+        const verifierResidual = residualFromResult(verifierObs.result);
+        traceEntry.verifier_ok = true;
+        traceEntry.verifier_residual = verifierResidual === null ? null : (Number.isFinite(verifierResidual) ? verifierResidual : String(verifierResidual));
+        const residualOutOfRange = verifierResidual === null || !Number.isFinite(verifierResidual) || verifierResidual < 0 || verifierResidual > 1;
+        if (residualOutOfRange || verifierResidual >= input.fixtureExpectedResidualBelow) {
+          const detail = residualOutOfRange ? `verifier residual missing or invalid: ${verifierResidual}` : `verifier_residual=${verifierResidual} threshold=${input.fixtureExpectedResidualBelow}`;
+          const errorOutput = residualOutOfRange ? `verifier_residual_invalid:${verifierResidual}` : `verifier_residual_too_high: observed=${verifierResidual} must be < ${input.fixtureExpectedResidualBelow}`;
+          const result = failAttempt({
+            reason: "fixture_residual_too_high",
+            detail,
+            evidence: { error_output: errorOutput, observed_residual: verifierResidual !== null && Number.isFinite(verifierResidual) ? verifierResidual : null, exit_code: verifierObs.exitCode },
+            body,
+          });
+          if (result) return result;
+          continue;
+        }
+      }
+    }
+
+    traceEntry.reason = null;
+    traceEntry.detail = null;
+    attemptTrace.push(traceEntry as JsonValue);
+    winningBody = body;
+    db.run("UPDATE act_artifact SET body = ?, status = 'admitted', updated_at = ? WHERE id = ?", [winningBody, new Date().toISOString(), row.id]);
+    break;
   }
 
-  // Residual check — if the result envelope carries a numeric `residual` we
-  // honour the threshold; otherwise admission passes on the strength of a
-  // clean ok:true run (§11.5 admission is a smoke test, not a full verify).
-  //
-  // RESIDUAL-INTEGRITY GATE (2026-05-23): the truth-bearing signal is a
-  // residual in [0,1] (Architecture.md "Act And Verification"; CLAUDE.md
-  // "Residual in [0,1] ... is the truth-bearing signal"). A fixture that
-  // reports a residual OUTSIDE [0,1] — or a NaN/±Infinity — is reporting a
-  // BROKEN signal, not a passing one. Pre-fix the gate used a bare
-  // `observedResidual >= threshold` comparison: `NaN >= 0.2` is `false`,
-  // `-5 >= 0.2` is `false`, and `1e9 >= 0.2` was the only out-of-range case
-  // caught — so a fixture emitting `{residual: NaN}` or `{residual: -5}`
-  // was ADMITTED, faking a pass with a verifier signal that does not mean
-  // what residual semantics require. We now refuse any non-finite or
-  // out-of-[0,1] residual as fixture_residual_too_high (an untrustworthy
-  // residual is treated as a failed smoke test, never a pass).
-  const result = observation.result;
-  if (
-    result &&
-    typeof result === "object" &&
-    !Array.isArray(result) &&
-    typeof (result as Record<string, unknown>).residual === "number"
-  ) {
-    const observedResidual = (result as { residual: number }).residual;
-    const residualOutOfRange = !Number.isFinite(observedResidual) || observedResidual < 0 || observedResidual > 1;
-    if (residualOutOfRange || observedResidual >= input.fixtureExpectedResidualBelow) {
-      db.run("DELETE FROM act_artifact WHERE id = ?", [row.id]);
-      emit({
-        kind: "act_artifact_admission_rejected",
-        substrate_origin: "substrate_auto",
-        action_artifact_id: row.id,
-        payload: {
-          reason: "fixture_residual_too_high",
-          observed_residual: Number.isFinite(observedResidual) ? observedResidual : String(observedResidual),
-          threshold_below: input.fixtureExpectedResidualBelow,
-          residual_out_of_range: residualOutOfRange,
-        } as JsonValue,
-      });
-      // SANDREPAIR: the body RAN cleanly but produced a residual that does
-      // not meet the bar — a repairable defect. Open a bounded, error-
-      // grounded repair loop (the rejection above stays fail-closed).
-      maybeRequestRepair({
-        error_output: residualOutOfRange
-          ? `fixture_residual_out_of_range: observed=${observedResidual} is not a valid residual in [0,1]`
-          : `fixture_residual_too_high: observed=${observedResidual} must be < ${input.fixtureExpectedResidualBelow}`,
-        observed_residual: Number.isFinite(observedResidual) ? observedResidual : null,
-        exit_code: observation.exitCode,
-      });
-      return {
-        ok: false,
-        reason: "fixture_residual_too_high",
-        detail: residualOutOfRange
-          ? `observed=${observedResidual} is not a valid residual in [0,1]`
-          : `observed=${observedResidual} threshold=${input.fixtureExpectedResidualBelow}`,
-      };
-    }
+  if (!observation || getArtifact(db, row.id)?.status === "provisional") {
+    return rejectWithTrace(lastFailure ?? {
+      reason: "runtime_error",
+      detail: "no_candidate_attempts_ran",
+      evidence: { error_output: "no_candidate_attempts_ran", observed_residual: null },
+      body: input.body,
+    });
   }
 
   // Forward sandbox warnings so the audit trail is honest. Use the
@@ -932,6 +989,58 @@ export const admitArtifact = async (
     );
   }
 
+  const citedKnowledgeIds = input.citedKnowledgeIds ?? [];
+  const repairSessionId = repairSessionIdFor({
+    sourceCandidateId: input.sourceCandidateId ?? null,
+    candidateArtifactId: row.id,
+    body: input.body,
+  });
+  const repairAttempts = priorRepairAttempts(db, repairSessionId);
+  if (citedKnowledgeIds.length > 0 || repairAttempts > 0) {
+    emit({
+      kind: "knowledge_candidate",
+      substrate_origin: "substrate_auto",
+      directive_id: input.governance?.directiveId,
+      action_artifact_id: row.id,
+      context_refs: citedKnowledgeIds,
+      payload: {
+        claim: `Artifact ${row.id} was admitted after ${repairAttempts} repair attempt(s) and ${citedKnowledgeIds.length} cited knowledge item(s); successful authoring patterns should cite retrieved knowledge and preserve repair deltas for future artifact authors.`,
+        evidence: [`artifact_id=${row.id}`, `runtime=${input.runtime}`, `repair_attempts=${repairAttempts}`, `cited_knowledge_count=${citedKnowledgeIds.length}`],
+        implications: ["Future artifact authoring prompts can retrieve this row as evidence that cited guidance and repair deltas produced an admitted artifact."],
+        applies_to: ["artifact_authoring", "artifact_repair", input.runtime ?? "data_class"],
+        confidence_estimate: 0.7,
+        source_files: ["runtime/artifact_admission.ts"],
+        artifact_feedback: {
+          artifact_id: row.id,
+          runtime: input.runtime,
+          source_candidate_id: input.sourceCandidateId ?? null,
+          cited_knowledge_ids: citedKnowledgeIds,
+          repair_session_id: repairSessionId,
+          repair_attempts: repairAttempts,
+          goal_shape: input.goalShape ?? null,
+        },
+      } as JsonValue,
+    });
+  }
+  if (repairAttempts > 0) {
+    emit({
+      kind: "lesson_extracted",
+      substrate_origin: "substrate_auto",
+      directive_id: input.governance?.directiveId,
+      action_artifact_id: row.id,
+      context_refs: citedKnowledgeIds,
+      payload: {
+        lesson_kind: "artifact_repair_delta",
+        summary: `A repaired artifact candidate was admitted after ${repairAttempts} failed pre-admission attempt(s); keep concrete sandbox error evidence plus cited authoring guidance in repair prompts.`,
+        evidence_event_ids: citedKnowledgeIds,
+        applies_to: ["artifact_repair", input.runtime ?? "runtime"],
+        repair_session_id: repairSessionId,
+        artifact_id: row.id,
+        repair_attempts: repairAttempts,
+      } as JsonValue,
+    });
+  }
+
   // Re-read in case downstream stamped any field; mostly defensive.
   const final = getArtifact(db, row.id);
   emit({
@@ -945,6 +1054,8 @@ export const admitArtifact = async (
       confidence: final?.confidence ?? ADMIT_CONFIDENCE,
       target_files: final?.targetFiles ?? null,
       target_resources: final?.targetResources?.map((r) => r.uri) ?? null,
+      attempt_trace: attemptTrace,
+      verifier_artifact_id: input.verifierArtifactId ?? null,
     } as JsonValue,
   });
   // Composition closure (directive KDZVSFNPM): if this admission serves a

@@ -565,6 +565,11 @@ export const EVENT_KINDS = {
   owner_decision_recorded:                 { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   owner_observed_outcome_recorded:         { producer: "claude",    embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   owner_input_required:                    { producer: "brain",     embeddable: false, mirror_inline: true,  health_metric: false, narrative: true },
+  // Runtime-owned owner delivery/surfacing receipts. Payloads are intentionally
+  // open-ended: destination, channel, status, link, and delivery metadata are
+  // learned from configured owner surfaces, not constrained to enums.
+  owner_deliverable_published:             { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
+  owner_notification_pushed:               { producer: "runtime",   embeddable: true,  mirror_inline: false, health_metric: false, narrative: true },
   // ── Human-In-the-Loop (HIDL) action surface ─────────────────────────
   // Substrate-emitted when an in-flight action cannot proceed without an
   // out-of-band human decision (auth/quota/env missing, an irreversible
@@ -918,15 +923,6 @@ export const EVENT_KINDS = {
   // on action scoring.
   prompt_section_variant_selected:         { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
-  // ── Legacy Father diagnostics ───────────────────────────────────────
-  // Deprecated: autonomous origination now uses normal directive/task/action
-  // events plus scored forecast_predicate/autonomy_gate_predicate artifacts.
-  // These rows remain only for historical ledger readability until migration.
-  father_cycle_recorded:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  father_yielded:                          { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  father_drift_detected:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  father_self_suspended:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
-  father_drift_resolved:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
 
   // ── Runtime sandbox enforcement ─────────────────────────────────────
   sandbox_enforced:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },

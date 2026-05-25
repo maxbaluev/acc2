@@ -69,7 +69,7 @@ const computeStatus = (taskId: string, eventsByTask: Map<string, EventRow[]>): T
   const evs = eventsByTask.get(taskId) ?? [];
   // Terminal states are MONOTONIC. Once a task reaches committed / failed /
   // abandoned, NO subsequent event reopens it on the same task_id. Pre-fix
-  // a stale `task_node_opened` (from Father loops re-emitting the same
+  // a stale `task_node_opened` (from OwnerAutonomy loops re-emitting the same
   // template, or from brain refinement re-emits using the same id) would
   // reset status to "pending" and the scheduler would re-dispatch — exactly
   // the zombie-loop pattern this session exposed. Re-attempting work uses

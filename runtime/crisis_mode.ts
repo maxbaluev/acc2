@@ -4,7 +4,7 @@
 // and 'elevated'). When a directive in crisis is the active one for a task,
 // the scheduler, verifier, dispatch decider, and LATM authoring loop must all
 // respect raised concurrency, halved timeouts, hard recipe-preference, and a
-// suspended LATM authoring path. Father shortens its iteration interval from
+// suspended LATM authoring path. OwnerAutonomy shortens its iteration interval from
 // 5 min to 30 s.
 //
 // This module exposes:
@@ -27,7 +27,7 @@ export type CrisisModeAdjustments = {
   recipe_preferred: boolean;
   recipe_confidence_threshold: number;
   latm_authoring_suspended: boolean;
-  father_interval_ms: number;
+  owner_autonomy_interval_ms: number;
 };
 
 export const NORMAL_MODE: CrisisModeAdjustments = Object.freeze({
@@ -43,7 +43,7 @@ export const NORMAL_MODE: CrisisModeAdjustments = Object.freeze({
   // (§3.5) lowers to 0.7 (= four proven replays) — still conservative.
   recipe_confidence_threshold: 0.85,
   latm_authoring_suspended: false,
-  father_interval_ms: 5 * 60 * 1000,
+  owner_autonomy_interval_ms: 5 * 60 * 1000,
 });
 
 export const CRISIS_MODE: CrisisModeAdjustments = Object.freeze({
@@ -52,7 +52,7 @@ export const CRISIS_MODE: CrisisModeAdjustments = Object.freeze({
   recipe_preferred: true,
   recipe_confidence_threshold: 0.7,
   latm_authoring_suspended: true,
-  father_interval_ms: 30 * 1000,
+  owner_autonomy_interval_ms: 30 * 1000,
 });
 
 /** Read the urgency declared on the LATEST directive_opened or

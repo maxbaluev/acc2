@@ -221,6 +221,29 @@ describe("capability_gap detector", () => {
     expect(text).toContain("0.900");
   });
 
+  test("composeAuthorDirective includes retrieved authoring knowledge guidance", () => {
+    const db = openDb(":memory:");
+    seedFailingArtifact(db, { id: "art_guided", status: "quarantined", goalShape: "shape_guided", residual: 0.9, observations: 6, intent: "send onboarding email" });
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "brain",
+      payload: {
+        claim: "artifact repair guidance for shape_guided should preserve concrete error evidence",
+        summary: "artifact guidance summary",
+      },
+    });
+    const text = composeAuthorDirective(db, {
+      goal_shape: "shape_guided",
+      failing_artifact_id: "art_guided",
+      artifact_kind: "runtime_action",
+      residual_evidence: { mean: 0.9, observations: 6 },
+      reason: "test",
+    });
+    expect(text).toContain("Retrieved authoring knowledge and lessons to cite if used");
+    expect(text).toContain("artifact repair guidance for shape_guided");
+    expect(text).toContain("cited_knowledge_ids");
+  });
+
   test("respects dispatchLimitPerTick across multiple gaps", () => {
     const db = openDb(":memory:");
     for (let i = 0; i < 5; i++) {

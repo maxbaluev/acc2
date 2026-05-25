@@ -397,10 +397,36 @@ export const detectCapabilityGaps = (db: Database): DetectedGap[] => {
  *  that is a MORE-EFFECTIVE implementation. The brain authors; this
  *  function only describes the gap. Exported + pure so the seam is
  *  independently testable. */
+const artifactAuthoringGuidanceFor = (db: Database, goalShape: string, limit = 5): { ids: string[]; text: string } => {
+  const like = `%${goalShape.split("::")[0] ?? goalShape}%`;
+  const rows = db
+    .query<{ id: string; kind: string; payload: string }, [string, string, string, number]>(
+      `SELECT id, kind, payload FROM events
+       WHERE kind IN ('knowledge_promoted', 'knowledge_candidate', 'lesson_extracted')
+         AND (
+           payload LIKE ? OR payload LIKE ? OR payload LIKE ?
+         )
+       ORDER BY ts DESC LIMIT ?`,
+    )
+    .all(`%${goalShape}%`, like, "%artifact%", limit);
+  const ids: string[] = [];
+  const bullets: string[] = [];
+  for (const row of rows) {
+    let p: Record<string, unknown> = {};
+    try { p = JSON.parse(row.payload ?? "{}") as Record<string, unknown>; } catch { /* skip malformed */ }
+    const claim = typeof p.claim === "string" ? p.claim : typeof p.summary === "string" ? p.summary : null;
+    if (!claim) continue;
+    ids.push(row.id);
+    bullets.push(`- [${row.id}] ${claim.slice(0, 500)}`);
+  }
+  return { ids, text: bullets.length > 0 ? bullets.join("\n") : "- (no matching promoted knowledge or lessons found)" };
+};
+
 export const composeAuthorDirective = (db: Database, gap: DetectedGap): string => {
   const row = getArtifact(db, gap.failing_artifact_id);
   const intent = row?.intent ?? row?.summary ?? "(no recorded intent)";
   const kindLine = row?.kind ?? gap.artifact_kind;
+  const guidance = artifactAuthoringGuidanceFor(db, gap.goal_shape);
   return (
     `Author a more-effective replacement for a repeatedly-failing artifact.\n\n` +
     `Failing artifact: ${gap.failing_artifact_id} (kind=${kindLine}, status=${row?.status ?? "failing"}).\n` +
@@ -410,6 +436,7 @@ export const composeAuthorDirective = (db: Database, gap: DetectedGap): string =
     `${gap.residual_evidence.observations} recent observations — well above the ` +
     `${GAP_RESIDUAL_THRESHOLD} failure band. The defensive lifecycle already ` +
     `quarantined/retired this artifact; the goal-class still has demand.\n\n` +
+    `Retrieved authoring knowledge and lessons to cite if used:\n${guidance.text}\n\n` +
     `Design and emit ONE act_artifact_candidate that implements the SAME intent ` +
     `for this goal_shape with a more-effective approach (different algorithm, ` +
     `tighter sandbox, better verifier, etc.). The replacement competes with the ` +
@@ -417,7 +444,8 @@ export const composeAuthorDirective = (db: Database, gap: DetectedGap): string =
     `score it on real residual, and the loser retires via the existing ` +
     `maybeRetire / aliasing path. Do NOT modify the failing artifact in place; ` +
     `author a fresh candidate so credit (k_555) flows to the new implementation ` +
-    `when it is used.`
+    `when it is used. If any listed knowledge shaped the candidate, include its ` +
+    `id in act_artifact_candidate.cited_knowledge_ids.`
   );
 };
 

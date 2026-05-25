@@ -205,6 +205,10 @@ const NON_EVENT_KIND_LITERALS = new Set([
   "git",
   "ipfs_cid",
   "pubsub_announcement",
+  // cli/update.ts release-source parse results and artifact row kind.
+  // These are discriminators/payload fields, not event kinds.
+  "invalid",
+  "release_canonical_artifact",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────
@@ -266,6 +270,45 @@ describe("EVENT_KINDS registry coverage", () => {
     expect(docs).toContain("world_model_view");
     expect(docs).toContain("state_snapshot_recorded");
     expect(docs).toContain("state_snapshot_diffed");
+  });
+
+  test("emitEvent accepts owner delivery and notification receipts with open-ended payloads", () => {
+    const db = openDb(":memory:");
+    for (const kind of ["owner_deliverable_published", "owner_notification_pushed"] as const) {
+      expect(kind in EVENT_KINDS).toBe(true);
+      const meta = EVENT_KINDS[kind];
+      expect(meta.producer).toBe("runtime");
+      expect(meta.embeddable).toBe(true);
+      expect(meta.health_metric).toBe(false);
+      expect(meta.narrative).toBe(true);
+    }
+
+    expect(() =>
+      emitEvent(db, {
+        kind: "owner_deliverable_published",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_owner_delivery_schema",
+        payload: {
+          destination: "owner-private-surface:any-future-channel",
+          publication_status: "published-after-profile-render",
+          link: "external:gdrive:doc_123",
+          arbitrary_delivery_metadata: { consent_basis: "own_surface_default" },
+        },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      emitEvent(db, {
+        kind: "owner_notification_pushed",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_owner_delivery_schema",
+        payload: {
+          channel: "owner-channel:any-future-destination",
+          push_status: "queued-and-accepted",
+          trigger: "directive-closure",
+          status_snapshot: { summary: "closed and published" },
+        },
+      }),
+    ).not.toThrow();
   });
 
   test("emitEvent accepts the dark-gate observability kinds", () => {

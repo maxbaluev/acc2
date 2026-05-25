@@ -171,7 +171,7 @@ const detectPromptTemplateLeak = (text: string): string | null => {
 /** Find an already-open (non-closed, non-archived) directive whose
  *  directive_text matches the supplied text exactly. Used by
  *  handleOpenDirective for idempotent same-directive dedup — pre-fix the
- *  CLI / brain / Father autonomous loop could legitimately retry an
+ *  CLI / brain / OwnerAutonomy autonomous loop could legitimately retry an
  *  opening and produce duplicate top-level directives competing for the
  *  same scheduler slots. */
 export const handleEmit = (
@@ -762,7 +762,7 @@ export const handleRead = (
       }
       case "active_objectives_view": {
         // BUG A: cap the external read at 200 (clamped to 1000); internal
-        // father reads uncapped via activeObjectives(db) with no limit.
+        // owner_autonomy reads uncapped via activeObjectives(db) with no limit.
         const rawLimit = typeof viewArgs.limit === "number" ? viewArgs.limit : undefined;
         const limit = rawLimit && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 1000) : 200;
         return { ok: true, result: activeObjectives(db, limit) as unknown as JsonValue };
@@ -1741,7 +1741,7 @@ export const handleOpenDirective = async (
   // Structural prompt-template-leak gate: refuse directive_text that looks
   // like a leaked prompt-composer template (TASK GOAL: markers, WORKFLOW
   // / DIRECTIVE ID / RUNTIMES AVAILABLE prefaces, recursive doubling).
-  // Catches the autonomous Father / shelled-out brain loop that fed its
+  // Catches the autonomous OwnerAutonomy / shelled-out brain loop that fed its
   // OWN prompt back as a directive — the live ledger 2026-05-15 02:00-03:07
   // had 10+ such recursive openings before this gate.
   const leak = detectPromptTemplateLeak(args.directive_text);

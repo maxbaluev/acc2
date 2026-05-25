@@ -227,25 +227,12 @@ describe("task_dispatcher", () => {
     expect(committed.c).toBe(0);
   }, 10_000);
 
-  test("committed-root cascade runs without ReferenceError — closedEvents stays in scope (foundational fix 2026-05-18)", async () => {
-    // Live evidence: the daemon at pid 1643371 climbed to 99% CPU + 3.4GB
-    // RSS over 2 hours because every task_committed event threw
-    // ReferenceError ('closedEvents is not defined') inside the cascade
-    // block — the variable was declared in a separate try-block. The
-    // throw was caught by the warn-logger; the cascade never ran;
-    // every committed root left descendants in ready_tasks_view; the
-    // scheduler re-dispatched them on each 500ms tick.
-    //
-    // This test pins that a committed root with refinement descendants
-    // (a) does not throw inside the cascade block, and (b) cascades
-    // task_committed to the dangling descendant.
+  test("root commit with dangling descendant is blocked instead of cascaded", async () => {
     const db = openDb(":memory:");
     const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
     const ready = readyTasks(db, directiveId);
     const task = ready[0]!;
 
-    // Seed a refinement descendant BEFORE the dispatch so the cascade
-    // has something to seal.
     const childTaskId = newId();
     emitEvent(db, {
       kind: "task_node_opened",
@@ -263,27 +250,25 @@ describe("task_dispatcher", () => {
       payload: { from_task: taskId, to_task: childTaskId, kind: "refines" },
     });
 
-    // Happy path: commit the root via the dispatcher.
     const act = inMemoryAct({ actionResult: { result: { count: 2 } }, verifierResidual: 0 });
     const result = await dispatchReadyTask(db, task, act);
     expect(result.violations).toEqual([]);
 
-    // Root committed.
     const rootCommit = db
       .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_committed' AND task_id = ?")
       .get(taskId) as { c: number };
-    expect(rootCommit.c).toBe(1);
+    expect(rootCommit.c).toBe(0);
 
-    // Cascade fired → child task_committed with reason=cascaded_from_root_commit.
     const childCommit = db
-      .query(
-        `SELECT payload FROM events WHERE kind = 'task_committed' AND task_id = ?`,
-      )
-      .get(childTaskId) as { payload: string } | null;
-    expect(childCommit).not.toBeNull();
-    const childPayload = JSON.parse(childCommit!.payload) as { reason?: string; root_task_id?: string };
-    expect(childPayload.reason).toBe("cascaded_from_root_commit");
-    expect(childPayload.root_task_id).toBe(taskId);
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_committed' AND task_id = ?")
+      .get(childTaskId) as { c: number };
+    expect(childCommit.c).toBe(0);
+
+    const violation = db
+      .query("SELECT payload FROM events WHERE kind = 'dispatcher_violation' AND task_id = ? AND failure_kind = 'root_commit_blocked'")
+      .get(taskId) as { payload: string } | null;
+    expect(violation).not.toBeNull();
+    expect(JSON.parse(violation!.payload).refused_reason).toBe("missing_clean_closure_audit");
   }, 10_000);
 
   test("high-residual dispatch emits refinement edge + new task_node_opened child", async () => {

@@ -52,8 +52,6 @@ export const McpMethods = [
   "runtime.dispatch_ready_task",
   "runtime.scheduler_tick",
   "runtime.process_rolling_reviews",
-  "runtime.father_iterate",
-  "runtime.detect_father_drift",
   "substrate.find_recipe",
   "runtime.replay_recipe",
   "substrate.register_external_source",
@@ -303,14 +301,6 @@ export const ProcessRollingReviewsSchema = z.object({
   max_missed_reviews: z.number().optional(),
 });
 
-export const FatherIterateSchema = z.object({
-  now: z.string().optional(),
-  owner_active_window_ms: z.number().optional(),
-});
-
-export const DetectFatherDriftSchema = z.object({
-  lookback_events: z.number().optional(),
-});
 
 export const FindRecipeSchema = z.object({
   task_id: z.string(),

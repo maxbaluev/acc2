@@ -1357,7 +1357,7 @@ CREATE VIEW IF NOT EXISTS stakeholder_state_view AS
 
 // active_objectives_view — directives that are NOT terminal (not goal_committed
 // / goal_abandoned) AND not archived via directive_archived_missed_reviews.
-// Used by Father (§14) to pick its next work surface. Phase I (§3.1).
+// Used by OwnerAutonomy (§14) to pick its next work surface. Phase I (§3.1).
 const VIEW_ACTIVE_OBJECTIVES = `
 CREATE VIEW IF NOT EXISTS active_objectives_view AS
   WITH directives AS (
@@ -1369,7 +1369,7 @@ CREATE VIEW IF NOT EXISTS active_objectives_view AS
   -- Brain audit A2 (2026-05-15): pre-fix the terminal CTE only included
   -- goal_committed / goal_abandoned and ignored the substrate's own
   -- directive_closed (emitted by maybeCloseFinishedDirective when every
-  -- task in a finite directive reaches a terminal state). Father saw
+  -- task in a finite directive reaches a terminal state). OwnerAutonomy saw
   -- already-closed finite directives as active objectives. Also include
   -- directive_archived_by_operator — owner-initiated archives are
   -- terminal for the active-objectives projection.
@@ -6094,7 +6094,7 @@ export const stakeholderStateRows = (db: Database, directiveId?: string, limit?:
   }));
 };
 
-/** Non-terminal, non-archived directives. Father reads this (uncapped, no
+/** Non-terminal, non-archived directives. OwnerAutonomy reads this (uncapped, no
  *  limit). BUG A: the external read surface passes a default cap so an MCP
  *  caller can't dump every active directive; internal callers omit `limit`
  *  and stay uncapped. */

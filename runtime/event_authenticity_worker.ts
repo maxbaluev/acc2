@@ -47,7 +47,7 @@ const KNOWN_SUBSTRATE_ORIGINS: ReadonlySet<string> = new Set([
   "brain",
   "opencode",
   "opencode_brain",
-  "father",
+  "owner_autonomy",
   "owner",
   "recipe",
 ]);

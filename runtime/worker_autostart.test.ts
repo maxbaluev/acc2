@@ -47,10 +47,10 @@ describe("runtime/worker_autostart — ACC2_DISABLE_WORKERS resolver", () => {
     }
   });
 
-  test('"embedder, father" with whitespace disables both', () => {
-    process.env.ACC2_DISABLE_WORKERS = "embedder, father";
+  test('"embedder, owner_autonomy" with whitespace disables both', () => {
+    process.env.ACC2_DISABLE_WORKERS = "embedder, owner_autonomy";
     expect(isWorkerEnabled("embedder")).toBe(false);
-    expect(isWorkerEnabled("father")).toBe(false);
+    expect(isWorkerEnabled("owner_autonomy")).toBe(false);
     expect(isWorkerEnabled("scheduler")).toBe(true);
     expect(isWorkerEnabled("rolling_reviewer")).toBe(true);
     expect(isWorkerEnabled("rehabilitation")).toBe(true);
@@ -61,7 +61,7 @@ describe("runtime/worker_autostart — ACC2_DISABLE_WORKERS resolver", () => {
     process.env.ACC2_DISABLE_WORKERS = "  , embedder ,  , scheduler , ";
     expect(isWorkerEnabled("embedder")).toBe(false);
     expect(isWorkerEnabled("scheduler")).toBe(false);
-    expect(isWorkerEnabled("father")).toBe(true);
+    expect(isWorkerEnabled("owner_autonomy")).toBe(true);
   });
 
   test("unknown worker names in the list do not crash", () => {
@@ -69,12 +69,12 @@ describe("runtime/worker_autostart — ACC2_DISABLE_WORKERS resolver", () => {
       "embedder,not_a_worker,definitely-fake,123";
     // Helper does not throw …
     expect(() => isWorkerEnabled("embedder")).not.toThrow();
-    expect(() => isWorkerEnabled("father")).not.toThrow();
+    expect(() => isWorkerEnabled("owner_autonomy")).not.toThrow();
     // … embedder is still recognized as disabled, and every other canonical
     // worker stays enabled because unknown tokens are no-ops.
     expect(isWorkerEnabled("embedder")).toBe(false);
     expect(isWorkerEnabled("scheduler")).toBe(true);
-    expect(isWorkerEnabled("father")).toBe(true);
+    expect(isWorkerEnabled("owner_autonomy")).toBe(true);
     expect(isWorkerEnabled("rolling_reviewer")).toBe(true);
     expect(isWorkerEnabled("rehabilitation")).toBe(true);
     expect(isWorkerEnabled("integrity")).toBe(true);

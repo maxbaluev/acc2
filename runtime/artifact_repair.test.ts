@@ -181,6 +181,13 @@ describe("requestArtifactRepair — seam behaviour", () => {
     expect(txt).toContain("do not broaden capabilities");
   });
 
+  test("composeRepairDirective threads cited knowledge guidance into the repair prompt", () => {
+    const txt = composeRepairDirective(baseReq({ citedKnowledgeIds: ["kc_authoring_1"] }), 1);
+    expect(txt).toContain("Retrieved/cited authoring guidance from the failed candidate");
+    expect(txt).toContain("kc_authoring_1");
+    expect(txt).toContain("cited_knowledge_ids");
+  });
+
   test("MAX_REPAIR_ATTEMPTS test mirror matches the live const", () => {
     expect(MAX_REPAIR_ATTEMPTS_FOR_TEST).toBe(MAX_REPAIR_ATTEMPTS);
   });
@@ -319,6 +326,7 @@ describe("admitArtifact integration — test-and-repair loop", () => {
         fixtureInput: { ping: "pong" },
         fixtureExpectedResidualBelow: 0.2,
         sourceCandidateId: "cand_repaired",
+        citedKnowledgeIds: ["kc_repair_guidance"],
       },
       emit,
     );
@@ -326,5 +334,12 @@ describe("admitArtifact integration — test-and-repair loop", () => {
     expect(events.filter((e) => e.kind === "act_artifact_admitted").length).toBe(1);
     // The repaired candidate did NOT spawn a new repair (it passed).
     expect(events.filter((e) => e.kind === "artifact_repair_needed").length).toBe(1);
+    const learned = events.filter((e) => e.kind === "knowledge_candidate");
+    expect(learned.length).toBe(1);
+    expect((learned[0]!.context_refs ?? [])).toContain("kc_repair_guidance");
+    expect(String((learned[0]!.payload as Record<string, unknown>).claim)).toContain("repair attempt");
+    const lessons = events.filter((e) => e.kind === "lesson_extracted");
+    expect(lessons.length).toBe(1);
+    expect((lessons[0]!.payload as Record<string, unknown>).lesson_kind).toBe("artifact_repair_delta");
   });
 });

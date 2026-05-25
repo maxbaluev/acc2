@@ -1196,7 +1196,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
 
   // BIND-BEFORE-WORKERS (2026-05-22): the worker setup below registers
   // setIntervals and runs SYNCHRONOUS first-tick bun:sqlite scans
-  // (embedder, integrity, rolling_reviewer, father, extractors, …). On a
+  // (embedder, integrity, rolling_reviewer, owner_autonomy, extractors, …). On a
   // production-sized ledger (367k+ events, ~782MB state.db) those first
   // ticks STARVE the single JS event loop for 104s+ (>180s with the
   // embedder enabled) — long enough to trip the startup watchdog and kill
@@ -1322,7 +1322,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // "stuck" workers that miss 3× consecutive ticks.
   //
   // All subsystems default ON. Production wants the full organism running
-  // out of the box — embedder + recipe-replay + rolling-review + father +
+  // out of the box — embedder + recipe-replay + rolling-review + owner_autonomy +
   // scheduler. Tests opt OUT in tests/preload.ts (the suite must never call
   // OpenAI or alter long-lived state). The single canonical opt-out lever
   // is `ACC2_DISABLE_WORKERS` — comma-separated list of worker names
@@ -1353,7 +1353,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   if (isWorkerEnabled("capability_gap")) registerWorker("capability_gap", 30 * 60 * 1000);
   // Brain audit B (2026-05-15): register the Model-D extractors worker
   // so candidate→promoted advancement happens on a bounded cadence,
-  // not by chance dispatch through Father.
+  // not by chance dispatch through OwnerAutonomy.
   if (isWorkerEnabled("extractors")) registerWorker("extractors", 5 * 60 * 1000);
   // Experience compression worker (primitive #3 of SZG5PQ01 design,
   // owner-approved via amendment GHWARJHT1N26BA1T7HNSJJ5AAG from
@@ -1616,7 +1616,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // Brain audit B (2026-05-15): extractors worker — periodic scan of
   // open knowledge_candidate and act_artifact rows that have crossed
   // the promotion thresholds. Pre-fix the only way these advanced was
-  // chance dispatch through Father; substrate counts showed 0/53
+  // chance dispatch through OwnerAutonomy; substrate counts showed 0/53
   // act_artifact_promoted and 0/70 promoted recipe-shape knowledge. Running on a
   // bounded 5-min cadence makes promotion a substrate liveness function.
   const EXTRACTORS_INTERVAL_MS = 5 * 60 * 1000;
@@ -1624,8 +1624,8 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // Brain convergence axis F (2026-05-15): the extractors worker now
     // also runs extractRecipeCandidates and extractSemanticDedup so
     // recipe extraction is a substrate liveness function on the same
-    // 5-min cadence; pre-fix Father's recipe_extraction_pass template
-    // was the only path, leaving long gaps when Father was busy on
+    // 5-min cadence; pre-fix OwnerAutonomy's recipe_extraction_pass template
+    // was the only path, leaving long gaps when OwnerAutonomy was busy on
     // other objectives.
     const {
       extractKnowledgePromotions,
@@ -1949,7 +1949,7 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // 2026-05-21 MCP-saturation fix: replace wildcard subscription with the
     // EMBEDDABLE_KINDS set. Wildcard ["*"] caused embedder to re-fire on
     // every event emission (worker_tick_completed at 3.6/sec,
-    // father_yielded at 1.7/sec, candidate_confirmed, origin_calibration_*
+    // owner_autonomy_yielded at 1.7/sec, candidate_confirmed, origin_calibration_*
     // etc.). None of those kinds carry embeddable content, so each spurious
     // re-fire was wasted work that held the SQLite write lock and starved
     // the fastmcp HTTP request queue — the structural cause of CLI
@@ -2463,8 +2463,6 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
   // Opt-OUT via `ACC2_DISABLE_WORKERS=rolling_reviewer`
   // (tests/preload.ts pins the full set). Tick every 60s; errors
   // swallowed so a single malformed directive can't kill the daemon.
-  // Father (Phase K) drives the same loop on its own tick when both
-  // are on.
   if (isWorkerEnabled("rolling_reviewer")) {
     let rollingMarked = false;
     const rollingTick = supervisedTick(db, "rolling_reviewer", rollingIntervalMs, async () => {
@@ -2503,11 +2501,19 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // rolling_reviewer is activation-driven; safety net covers due-time arrival.
   }
 
-  // Forecast origination is part of the universal scheduler activation path.
-  // Do not subscribe a separate Father/autonomous worker here; schedulerLoop
-  // owns event -> forecast predicates -> candidate directives -> dispatch.
-  // Legacy Father imports and readiness registration are removed with the
-  // runtime/father.ts compatibility layer.
+  // Owner-autonomy worker. Default ON; it emits a brain invocation request
+  // only when the owner is inactive and no owner-direct directive is live.
+  // The normal scheduler/brain path still decides and verifies the work.
+  if (isWorkerEnabled("owner_autonomy")) {
+    const ownerAutonomyTickMs = 5 * 60 * 1000;
+    const { ownerAutonomyWorkerTick } = await import("./owner_autonomy_worker");
+    markWorkerReady("owner_autonomy");
+    recordWorkerTick("owner_autonomy");
+    const ownerAutonomyTick = supervisedTick(db, "owner_autonomy", ownerAutonomyTickMs, async () => {
+      ownerAutonomyWorkerTick(db);
+    });
+    registerReactiveWorker("owner_autonomy", ownerAutonomyTickMs, ["directive_closed", "directive_archived_by_operator", "owner_input_received", "task_committed"], ownerAutonomyTick, { minReactiveGapMs: ownerAutonomyTickMs });
+  }
 
   // Phase E: autoscheduler. Default ON — production wants the
   // scheduler drain-loop firing every ready dispatch as it lands.

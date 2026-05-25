@@ -2,8 +2,8 @@
 // runUpdate takes an injectable UpdateEnv so we drive git/daemon/health via mocks
 // without touching the real source tree, daemon, or state.db.
 import { test, expect, describe } from "bun:test";
-import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { createHash, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
+import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb, closeDb } from "../substrate/db";
@@ -37,6 +37,9 @@ const makeEnv = (opts: {
   settleMs: 0,
 });
 
+const canonicalUpdateJson = (value: unknown): string => { if (value === null || typeof value !== "object") return JSON.stringify(value); if (Array.isArray(value)) return "[" + value.map(canonicalUpdateJson).join(",") + "]"; const obj = value as Record<string, unknown>; return "{" + Object.keys(obj).sort().map((k) => JSON.stringify(k) + ":" + canonicalUpdateJson(obj[k])).join(",") + "}"; };
+const signedUpdateManifest = (files: Array<{ path: string; body: string }>) => { const { publicKey, privateKey } = generateKeyPairSync("ed25519"); const manifestFiles = files.map((f) => ({ path: f.path, sha256: createHash("sha256").update(f.body).digest("hex") })); const unsigned = { schema_version: "acc2.release.v1", version: "1.2.3", canonical_db_cid: "bafycanonical", migrations: [], files: manifestFiles }; const payload = canonicalUpdateJson(unsigned); return { publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(), manifest: { ...unsigned, manifest_checksum_sha256: createHash("sha256").update(payload).digest("hex"), signature: { algorithm: "ed25519" as const, value: sign(null, Buffer.from(payload), privateKey).toString("base64") } } }; };
+
 describe("acc update", () => {
   test("refuses to mutate without --yes", async () => {
     const events: string[] = [];
@@ -55,30 +58,45 @@ describe("acc update", () => {
     expect(calls.length).toBe(0);
   });
 
-  test("happy path: post-update health ok returns 0 and restarts the daemon", async () => {
-    const events: string[] = [];
-    const calls: Call[] = [];
-    const code = await runUpdate(["--yes", "--no-pull"], makeEnv({ healthOk: true, calls, events }));
-    expect(code).toBe(0);
-    expect(events).toContain("STOP");
-    expect(events).toContain("START");
-    expect(events.some((e) => e.includes("post-update health: ok"))).toBe(true);
-    // --no-pull means no `git pull`; only rev-parse before/after.
-    expect(calls.every((c) => c.args[0] !== "pull")).toBe(true);
-    // No rollback reset on the happy path.
-    expect(calls.every((c) => !(c.args[0] === "reset"))).toBe(true);
+  test("happy path: ipfs release applies, post-update health ok returns 0, and restarts the daemon", async () => {
+    const root = mkdtempSync(join(tmpdir(), "acc2-update-basic-ipfs-"));
+    try {
+      const body = "export const basicUpdated = true;\n";
+      const signed = signedUpdateManifest([{ path: "tmp-basic-release-file.ts", body }]);
+      const events: string[] = [];
+      const calls: Call[] = [];
+      const env = makeEnv({ healthOk: true, calls, events });
+      const code = await runUpdate(["--yes", "--source", "ipfs-cid", "--cid", "bafybasic"], {
+        ...env, repoRoot: root, releasePublicKeyPem: signed.publicKeyPem,
+        fetch: (async (url: string) => { if (url.endsWith("/manifest.json")) return new Response(JSON.stringify(signed.manifest)); if (url.endsWith("/tmp-basic-release-file.ts")) return new Response(body); return new Response("missing", { status: 404 }); }) as typeof fetch,
+      });
+      expect(code).toBe(0);
+      expect(events).toContain("STOP");
+      expect(events).toContain("START");
+      expect(events.some((e) => e.includes("post-update health: ok"))).toBe(true);
+      expect(calls.every((c) => c.args[0] !== "pull")).toBe(true);
+      expect(calls.every((c) => !(c.args[0] === "reset"))).toBe(true);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   test("rollback: failed post-update health resets --hard to the pre-update HEAD and returns 1", async () => {
-    const events: string[] = [];
-    const calls: Call[] = [];
-    const code = await runUpdate(["--yes", "--no-pull"], makeEnv({ healthOk: false, calls, events }));
-    expect(code).toBe(1);
-    // Rolled back to the HEAD captured before the update (abc1234deadbeef).
-    const reset = calls.find((c) => c.cmd === "git" && c.args[0] === "reset");
-    expect(reset).toBeDefined();
-    expect(reset!.args).toEqual(["reset", "--hard", "abc1234deadbeef"]);
-    expect(events.some((e) => e.includes("rolling source back"))).toBe(true);
+    const root = mkdtempSync(join(tmpdir(), "acc2-update-rollback-ipfs-"));
+    try {
+      const body = "export const rollbackUpdated = true;\n";
+      const signed = signedUpdateManifest([{ path: "tmp-rollback-release-file.ts", body }]);
+      const events: string[] = [];
+      const calls: Call[] = [];
+      const env = makeEnv({ healthOk: false, calls, events });
+      const code = await runUpdate(["--yes", "--source", "ipfs-cid", "--cid", "bafyrollback"], {
+        ...env, repoRoot: root, releasePublicKeyPem: signed.publicKeyPem,
+        fetch: (async (url: string) => { if (url.endsWith("/manifest.json")) return new Response(JSON.stringify(signed.manifest)); if (url.endsWith("/tmp-rollback-release-file.ts")) return new Response(body); return new Response("missing", { status: 404 }); }) as typeof fetch,
+      });
+      expect(code).toBe(1);
+      const reset = calls.find((c) => c.cmd === "git" && c.args[0] === "reset");
+      expect(reset).toBeDefined();
+      expect(reset!.args).toEqual(["reset", "--hard", "abc1234deadbeef"]);
+      expect(events.some((e) => e.includes("rolling source back"))).toBe(true);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
 
@@ -95,12 +113,15 @@ describe("acc update min_acc_version compatibility gate", () => {
   const canonicalJson = (value: unknown): string => { if (value === null || typeof value !== "object") return JSON.stringify(value); if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]"; const obj = value as Record<string, unknown>; return "{" + Object.keys(obj).sort().map((k) => JSON.stringify(k) + ":" + canonicalJson(obj[k])).join(",") + "}"; };
   // Builds a SIGNED manifest carrying min_acc_version + release_version so the
   // gate has a real floor to compare the installed version against.
-  const signedManifestWithMin = (minAccVersion: string, releaseVersion: string, files: Array<{ path: string; body: string }>) => {
+  const signUnsigned = (unsigned: Record<string, unknown>, privateKey: KeyObject) => {
+    const payload = canonicalJson(unsigned);
+    return { ...unsigned, manifest_checksum_sha256: createHash("sha256").update(payload).digest("hex"), signature: { algorithm: "ed25519" as const, value: sign(null, Buffer.from(payload), privateKey).toString("base64") } };
+  };
+  const signedManifestWithMin = (minAccVersion: string, releaseVersion: string, files: Array<{ path: string; body: string }>, extra: Record<string, unknown> = {}) => {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
     const manifestFiles = files.map((f) => ({ path: f.path, sha256: createHash("sha256").update(f.body).digest("hex") }));
-    const unsigned = { schema_version: "acc2.release.v1", release_version: releaseVersion, min_acc_version: minAccVersion, canonical_db_cid: "bafycanonical", migrations: [], files: manifestFiles };
-    const payload = canonicalJson(unsigned);
-    return { publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(), manifest: { ...unsigned, manifest_checksum_sha256: createHash("sha256").update(payload).digest("hex"), signature: { algorithm: "ed25519" as const, value: sign(null, Buffer.from(payload), privateKey).toString("base64") } } };
+    const unsigned = { schema_version: "acc2.release.v1", release_version: releaseVersion, min_acc_version: minAccVersion, canonical_db_cid: "bafycanonical", migrations: [], files: manifestFiles, ...extra };
+    return { publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(), manifest: signUnsigned(unsigned, privateKey), privateKey };
   };
 
   test("semver compare is numeric, not string: 0.9.0 < 0.10.0", () => {
@@ -169,22 +190,56 @@ describe("acc update min_acc_version compatibility gate", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  test("git: a pulled tree manifest with min_acc_version > installed → refuses and rolls source back", async () => {
-    const root = mkdtempSync(join(tmpdir(), "acc2-update-git-gate-"));
+  test("ipfs: manifest upgrade_chain applies compatible intermediate releases before target and admits canonical DB artifacts", async () => {
+    const root = mkdtempSync(join(tmpdir(), "acc2-update-chain-"));
+    const dbPath = join(root, "state.db");
     try {
-      // Simulate the pulled tree carrying a release manifest at repo root.
-      writeFileSync(join(root, "release-manifest.json"), JSON.stringify({ schema_version: "acc2.release.v1", release_version: "2.0.0", min_acc_version: "1.5.0", files: {} }));
+      const db = openDb(dbPath); closeDb(dbPath); void db;
+      const midBody = JSON.stringify({ version: "0.10.0" }) + "\n";
+      const targetBody = JSON.stringify({ version: "0.11.0" }) + "\n";
+      const canonicalBody = "canonical\n";
+      const signed = signedManifestWithMin("0.10.0", "0.11.0", [{ path: "package.json", body: targetBody }, { path: "canonical.db", body: canonicalBody }], { canonical_db: { path: "canonical.db", cid: "bafycanonical-target", sha256: createHash("sha256").update(canonicalBody).digest("hex") }, upgrade_chain: [{ cid: "bafymid" }] });
+      const midUnsigned = { schema_version: "acc2.release.v1", release_version: "0.10.0", min_acc_version: "0.9.0", canonical_db_cid: "bafycanonical-mid", migrations: [], files: [{ path: "package.json", sha256: createHash("sha256").update(midBody).digest("hex") }] };
+      const midManifest = signUnsigned(midUnsigned, signed.privateKey);
       const events: string[] = [];
       const calls: Call[] = [];
       const env = makeEnv({ healthOk: true, calls, events });
-      const code = await runUpdate(["--yes", "--no-pull"], { ...env, repoRoot: root, installedVersion: "1.0.0" });
-      expect(code).toBe(1);
-      expect(events.some((e) => e.includes("requires acc ≥ 1.5.0"))).toBe(true);
-      expect(events.some((e) => e.includes("you are on 1.0.0"))).toBe(true);
-      // Rolled the source back to pre-update HEAD; never started migrations/daemon.
-      const reset = calls.find((c) => c.cmd === "git" && c.args[0] === "reset");
-      expect(reset).toBeDefined();
-      expect(events).not.toContain("START");
+      const code = await runUpdate(["--yes", "--source", "ipfs-cid", "--cid", "bafytarget"], {
+        ...env, dbPath, repoRoot: root, installedVersion: "0.9.0", releasePublicKeyPem: signed.publicKeyPem,
+        fetch: (async (url: string) => {
+          if (url.includes("/ipfs/bafytarget/manifest.json")) return new Response(JSON.stringify(signed.manifest));
+          if (url.includes("/ipfs/bafymid/manifest.json")) return new Response(JSON.stringify(midManifest));
+          if (url.includes("/ipfs/bafymid/package.json")) return new Response(midBody);
+          if (url.includes("/ipfs/bafytarget/package.json")) return new Response(targetBody);
+          if (url.includes("/ipfs/bafytarget/canonical.db")) return new Response(canonicalBody);
+          return new Response("missing", { status: 404 });
+        }) as typeof fetch,
+      });
+      expect(code).toBe(0);
+      expect(readFileSync(join(root, "package.json"), "utf8")).toBe(targetBody);
+      expect(readFileSync(join(root, "canonical.db"), "utf8")).toBe(canonicalBody);
+      expect(events.some((e) => e.includes("via 2 chained releases"))).toBe(true);
+      const verify = openDb(dbPath);
+      try {
+        const row = verify.query<{ c: number }, []>(
+          `SELECT COUNT(*) AS c FROM act_artifact
+            WHERE kind = 'release_canonical_artifact'
+              AND runtime IS NULL
+              AND json_extract(interface_metadata, '$.canonical_db.cid') = 'bafycanonical-target'`,
+        ).get();
+        expect(row?.c ?? 0).toBe(1);
+      } finally { closeDb(dbPath); }
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("git release sources are rejected before mutation", async () => {
+    const events: string[] = [];
+    const calls: Call[] = [];
+    const env = makeEnv({ healthOk: true, calls, events });
+    const code = await runUpdate(["--yes", "--source", "git"], { ...env, installedVersion: "1.0.0" });
+    expect(code).toBe(1);
+    expect(events.some((e) => e.includes("git_release_source_removed"))).toBe(true);
+    expect(calls.length).toBe(0);
+    expect(events).not.toContain("START");
   });
 });

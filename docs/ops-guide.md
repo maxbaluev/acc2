@@ -149,21 +149,21 @@ Each daemon then writes its own lock file under its own state dir, runs its own 
 
 ### 4e. Background workers (all ON by default)
 
-The daemon starts the substrate workers automatically: the **embedder** (text-embedding-3-small over every text-bearing event), the **scheduler** (drains ready dispatches), **father** (long-horizon re-ranking), the **rolling-reviewer** (cadence-driven re-opens), **rehabilitation** (probes quarantined artifacts), **integrity** (PRAGMA integrity + WAL hygiene), **contract_amendment_consumer**, **wal_pressure_check**, **pending_decision_retire**, and the newer credit/observability workers registered in `runtime/daemon.ts`. All are ON by default — the substrate is meant to run the full organism out of the box.
+The daemon starts the substrate workers automatically: the **embedder** (text-embedding-3-small over every text-bearing event), the **scheduler** (drains ready dispatches), **owner_autonomy** (long-horizon re-ranking), the **rolling-reviewer** (cadence-driven re-opens), **rehabilitation** (probes quarantined artifacts), **integrity** (PRAGMA integrity + WAL hygiene), **contract_amendment_consumer**, **wal_pressure_check**, **pending_decision_retire**, and the newer credit/observability workers registered in `runtime/daemon.ts`. All are ON by default — the substrate is meant to run the full organism out of the box.
 
-The canonical opt-OUT is ONE env var — `ACC2_DISABLE_WORKERS` — carrying a comma-separated list of worker names. Empty / unset = all registered workers run (the production default). Example: disable the embedder during an OpenAI outage and the father during a controlled long-horizon test:
+The canonical opt-OUT is ONE env var — `ACC2_DISABLE_WORKERS` — carrying a comma-separated list of worker names. Empty / unset = all registered workers run (the production default). Example: disable the embedder during an OpenAI outage and the owner_autonomy during a controlled long-horizon test:
 
 ```bash
-ACC2_DISABLE_WORKERS=embedder,father
+ACC2_DISABLE_WORKERS=embedder,owner_autonomy
 ```
 
-Canonical worker names include `embedder`, `scheduler`, `father`, `rolling_reviewer`, `rehabilitation`, `integrity`, `contract_amendment_consumer`, `wal_pressure_check`, and `pending_decision_retire`. Unknown names in the list are silently ignored (no crash) so forgetting a worker after a rename is a no-op rather than a hard failure.
+Canonical worker names include `embedder`, `scheduler`, `owner_autonomy`, `rolling_reviewer`, `rehabilitation`, `integrity`, `contract_amendment_consumer`, `wal_pressure_check`, and `pending_decision_retire`. Unknown names in the list are silently ignored (no crash) so forgetting a worker after a rename is a no-op rather than a hard failure.
 
 `pending_decision_retire` runs hourly and also reacts to new contract amendments. It emits `pending_decision_retired` for anchor-missing/malformed, test-file-target, and stale pending decisions. The default `acc admin pending-decisions` surface reads `pending_owner_decision_queue_live_view`, which excludes those retired rows; pass `--include-retired` for the historical audit queue.
 
 The test suite (`bun test`) pins long-running workers off through `tests/preload.ts`; integrity stays on because it is pure-SQLite and required for `/ready`. Production code does not need to touch any of this.
 
-The legacy per-worker env vars (`ACC2_EMBEDDER_AUTOSTART`, `ACC2_FATHER_AUTOSTART`, `ACC2_ROLLING_AUTOSTART`, `ACC2_REHAB_AUTOSTART`, `ACC2_INTEGRITY_AUTOSTART`, `ACC2_AUTOSCHEDULER`) have been REMOVED. Operators who still export them will have no effect — migrate to `ACC2_DISABLE_WORKERS`.
+The legacy per-worker env vars (`ACC2_EMBEDDER_AUTOSTART`, `ACC2_OWNER_AUTONOMY_AUTOSTART`, `ACC2_ROLLING_AUTOSTART`, `ACC2_REHAB_AUTOSTART`, `ACC2_INTEGRITY_AUTOSTART`, `ACC2_AUTOSCHEDULER`) have been REMOVED. Operators who still export them will have no effect — migrate to `ACC2_DISABLE_WORKERS`.
 
 ---
 

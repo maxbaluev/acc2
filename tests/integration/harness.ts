@@ -65,7 +65,7 @@ import {
   scenarioDistributionMerger,
   scenarioEmbodiedRecipe,
   scenarioExternalPushRetrievable,
-  scenarioFatherOneShot,
+  scenarioOwnerAutonomyOneShot,
   scenarioHealthDecision,
   scenarioLongHorizonSavings,
   scenarioMultiStakeholder,
@@ -139,10 +139,10 @@ const PLUMBING_SCENARIOS: ScenarioEntry[] = [
     run: async (h) => { await scenarioExternalPushRetrievable(h!); },
   },
   {
-    id: "father_one_shot_tick",
-    label: "father_one_shot_tick",
+    id: "owner_autonomy_one_shot_tick",
+    label: "owner_autonomy_one_shot_tick",
     kind: "shared_daemon",
-    run: async (h) => { await scenarioFatherOneShot(h!); },
+    run: async (h) => { await scenarioOwnerAutonomyOneShot(h!); },
   },
   {
     id: "amendment_supersession",
@@ -319,7 +319,7 @@ export const runHarness = async (
   // Workers default ON in production (runtime/daemon.ts gates each via
   // `isWorkerEnabled`, which reads the canonical `ACC2_DISABLE_WORKERS`
   // env var). Plumbing scenarios run hermetically under the mock bridge
-  // and drive the scheduler / embedder / father explicitly per scenario
+  // and drive the scheduler / embedder / owner_autonomy explicitly per scenario
   // — autostart would race against the per-test setup and (worse) the
   // embedder worker would call OpenAI before the mock bridge has a
   // chance to intercept. Opt the harness out for plumbing only; the
@@ -327,7 +327,7 @@ export const runHarness = async (
   // operator sees the full organism in flight.
   const originalDisableWorkers = process.env.ACC2_DISABLE_WORKERS;
   process.env.ACC2_DISABLE_WORKERS ??=
-    "embedder,scheduler,father,rolling_reviewer,rehabilitation";
+    "embedder,scheduler,owner_autonomy,rolling_reviewer,rehabilitation";
 
   // Real-brain is OPT-IN: only run it when --include-real or --real-only
   // was passed. Bare invocation runs the 20 plumbing scenarios only.

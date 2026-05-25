@@ -8,13 +8,13 @@ Cross-references: architecture surfaces live in `docs/Architecture.md` — §9 (
 
 Problem: the inner brain dispatch loop compounds once invoked, but the outer loop is owner-mediated when substrate workers detect review debt, pathology exhaustion, dedup drift, calibration drift, or maintenance opportunities without emitting `brain_invocation_request`.
 
-Contract: Father is re-enabled with autonomous-improvement templates and a tighter owner-idle window; rolling reviewer, pathology budget/supervisor, extractors, and credit calibration emit `brain_invocation_request` when their scored views cross thresholds; each request opens substrate-auto work that must propose a concrete amendment or lesson and pass closure audit.
+Contract: OwnerAutonomy is re-enabled with autonomous-improvement templates and a tighter owner-idle window; rolling reviewer, pathology budget/supervisor, extractors, and credit calibration emit `brain_invocation_request` when their scored views cross thresholds; each request opens substrate-auto work that must propose a concrete amendment or lesson and pass closure audit.
 
 Owner/autonomous ratio: keep owner-mediated work for irreversible effects, external-owner-sensitive work, and high owner-control surfaces; route routine substrate hygiene, review debt, pathology synthesis, dedup drift, stale knowledge retirement, recipe promotion, and calibration drift through substrate-auto requests. Initial target is at least 5 substrate_auto-origin amendment proposals/day while owner-observed negative outcomes and high-residual closures stay bounded.
 
 Why this tier: Tier-1 bottlenecks are no longer the limiting factor; the organism now needs autonomous opportunity discovery so improvement is not gated by explicit owner prompts.
 
-Closure predicate: `brain_invocation_request` emissions/day > 10 AND Father template fires/day > 3 AND substrate_auto-origin directives/day > 5.
+Closure predicate: `brain_invocation_request` emissions/day > 10 AND OwnerAutonomy template fires/day > 3 AND substrate_auto-origin directives/day > 5.
 
 Metric direction: substrate_auto-origin `contract_amendment_proposed` rows rise above 5/day while owner-observed negative outcomes and high-residual closures stay bounded.
 
@@ -46,7 +46,7 @@ Contract — four independent moves:
 
 Why this tier: it sits beside Tier R (runtime) because the two failure classes are intertwined — R fixes the *cause* of breaks (main-loop blocking), D makes breaks *explainable and coordinated* when they still happen. This session proved that without D, a single boot regression costs an entire session of blind bisection across two uncoordinated terminals. Diagnosability is the substrate explaining itself; it is the same depth-1 retrieval discipline the whole architecture rests on, turned inward.
 
-Why this tier: it precedes Tier A (autonomous compounding) operationally — father re-activation + brain_invocation_request producers add MORE concurrent dispatch load, which a serialized main loop cannot absorb. Runtime isolation is the substrate that makes autonomous throughput safe. Sits above Tier -1 floors because it is availability/throughput, not correctness-of-bytes.
+Why this tier: it precedes Tier A (autonomous compounding) operationally — owner_autonomy re-activation + brain_invocation_request producers add MORE concurrent dispatch load, which a serialized main loop cannot absorb. Runtime isolation is the substrate that makes autonomous throughput safe. Sits above Tier -1 floors because it is availability/throughput, not correctness-of-bytes.
 
 ## Tier U — UNIFIED MULTI-BRAIN ORGANISM
 

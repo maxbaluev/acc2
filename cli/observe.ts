@@ -85,7 +85,7 @@ const FRAME_KINDS = new Set([
  *  Inclusion rule: changes the operator's MODEL of progress. If two reads
  *  ten minutes apart would look identical without this kind, suppress it.
  *  Anything substrate-internal (admission, scoring, score-update, embedding,
- *  Father heartbeats, daemon lifecycle, candidate confirm/contradict, sub-
+ *  OwnerAutonomy heartbeats, daemon lifecycle, candidate confirm/contradict, sub-
  *  process spawn lifecycle, gate-decision audit rows, prompt budget) is
  *  noise from the operator's perspective. Bridge handshake / frames /
  *  subprocess detail are diagnostic surfaces, not narrative.
@@ -165,8 +165,6 @@ const GLYPHS: Record<string, string> = {
   daemon_ready: "🟢✓",
   daemon_index_rebuilt: "Ι",
   daemon_stopped: "🔴",
-  father_cycle_recorded: "👤",
-  father_drift_detected: "👤⚠",
   task_deferred_for_interference: "⏸",
   constitutional_gate_decision: "⚖",
   prompt_truncated: "✂",
@@ -316,12 +314,6 @@ const formatPayload = (kind: string, p: Record<string, unknown>): string => {
       const runtime = (p.runtime as string) ?? "?";
       const intent = (p.intent as string) ?? (p.slug as string) ?? "";
       return `runtime=${runtime}${intent ? ` intent=${JSON.stringify(trunc(intent, 80))}` : ""}`;
-    }
-    case "father_cycle_recorded": {
-      const action = (p.action as string) ?? "?";
-      const detail = p.detail as Record<string, unknown> | undefined;
-      const directive = idPrefix(detail?.directive_id as string, 16);
-      return `action=${action}${directive !== "—" ? ` directive=${directive}` : ""}`;
     }
     case "constitutional_gate_decision": {
       const gate = (p.gate as string) ?? "?";

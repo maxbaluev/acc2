@@ -19,6 +19,7 @@ import {
 } from "./task_scheduler";
 import { FIXTURE_D_DIRECTIVE_TEXT, openFixtureDCountTodos } from "./fixtures/d_count_todos";
 import { emitEvent } from "./events";
+import { reconcileBrainDispatchesAtBoot, setBootSessionToken } from "./brain_dispatch_reconciler";
 import { newId } from "./ids";
 import { __resetHandshakePermitsForTest } from "./bridge/opencode";
 
@@ -221,8 +222,95 @@ describe("task_scheduler", () => {
       expect(gate).not.toBeNull();
       const payload = JSON.parse(gate!.payload) as { gate?: string; reason?: string };
       expect(payload.gate).toBe("scheduler_global_concurrency_cap");
-      expect(payload.reason).toBe("scheduler_global_in_flight_at_cap");
+      expect(payload.reason).toBe("scheduler_resource_budget_exhausted");
+      expect((payload as { admission_model?: string }).admission_model).toBe("marginal_value_cost_resource_budget");
     } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("resource admission orders ready tasks by marginal value/cost", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-value-cost-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      const { taskId: expensive } = await openFixtureDCountTodos(db, tempDir);
+      const { taskId: best } = await openFixtureDCountTodos(db, tempDir);
+      const { taskId: mid } = await openFixtureDCountTodos(db, tempDir);
+      emitEvent(db, { kind: "action_predicted", substrate_origin: "opencode", task_id: expensive, payload: { expected_value: 100, resource_cost: { dispatch_slots: 100 } } });
+      emitEvent(db, { kind: "action_predicted", substrate_origin: "opencode", task_id: best, payload: { expected_value: 10, resource_cost: { dispatch_slots: 1 } } });
+      emitEvent(db, { kind: "action_predicted", substrate_origin: "opencode", task_id: mid, payload: { expected_value: 9, resource_cost: { dispatch_slots: 1 } } });
+      _setDispatchReadyTaskForTests(() => new Promise(() => {}));
+
+      const tick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 1, resourceBudget: { dispatch_slots: 1, brain_slots: 1 } });
+      expect(tick.dispatched).toEqual([best]);
+      expect(tick.skipped_concurrency_cap).toContain(mid);
+      expect(tick.skipped_concurrency_cap).toContain(expensive);
+    } finally {
+      _setDispatchReadyTaskForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("resource admission serializes explicit exclusive resource conflicts", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-resource-conflict-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      const { taskId: t1 } = await openFixtureDCountTodos(db, tempDir);
+      const { taskId: t2 } = await openFixtureDCountTodos(db, tempDir);
+      for (const taskId of [t1, t2]) {
+        emitEvent(db, { kind: "action_predicted", substrate_origin: "opencode", task_id: taskId, payload: { expected_value: 1, resource_cost: { dispatch_slots: 1 }, exclusive_resources: ["repo:runtime/task_scheduler.ts"] } });
+      }
+      _setDispatchReadyTaskForTests(() => new Promise(() => {}));
+
+      const tick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 2, resourceBudget: { dispatch_slots: 2, brain_slots: 2 } });
+      expect(tick.dispatched.length).toBe(1);
+      const skipped = [t1, t2].find((id) => tick.skipped_concurrency_cap.includes(id));
+      expect(skipped).toBeDefined();
+      const gate = db
+        .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'constitutional_gate_decision' ORDER BY ts DESC LIMIT 1")
+        .get(skipped!) as { payload: string } | null;
+      expect(gate).not.toBeNull();
+      const payload = JSON.parse(gate!.payload) as { reason?: string; conflict_kind?: string; exhausted_resource?: string };
+      expect(payload.reason).toBe("scheduler_resource_budget_exhausted");
+      expect(payload.conflict_kind).toBe("exclusive_resource");
+      expect(payload.exhausted_resource).toBe("repo:runtime/task_scheduler.ts");
+    } finally {
+      _setDispatchReadyTaskForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("dead prior-generation brain slot cannot lock an empty in-flight scheduler", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-dead-slot-ready-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    const deadTask = newId();
+    const dispatchId = newId();
+    setBootSessionToken("current-resource-session");
+    try {
+      emitEvent(db, {
+        kind: "brain_dispatched",
+        substrate_origin: "substrate_auto",
+        directive_id: newId(),
+        task_id: deadTask,
+        payload: { dispatch_id: dispatchId, session_token: "previous-resource-session", subprocess_pid: 999_999_999, started_at_ms: Date.now() },
+      });
+      _injectBrainInFlightForTests(deadTask);
+      const { taskId } = await openFixtureDCountTodos(db, tempDir);
+      _setDispatchReadyTaskForTests(() => new Promise(() => {}));
+
+      const tick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 1, resourceBudget: { dispatch_slots: 1, brain_slots: 1 } });
+      expect(tick.brain_in_flight).not.toContain(deadTask);
+      expect(tick.dispatched).toContain(taskId);
+      expect(tick.skipped_concurrency_cap).not.toContain(taskId);
+      const close = db
+        .query("SELECT payload FROM events WHERE kind = 'brain_dispatch_closed' AND json_extract(payload, '$.dispatch_id') = ?")
+        .get(dispatchId) as { payload: string } | null;
+      expect(close).not.toBeNull();
+    } finally {
+      _setDispatchReadyTaskForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 60_000);
@@ -1312,6 +1400,82 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
       )
       .get(directiveId) as { c: number };
     expect(child.c).toBe(0);
+  });
+});
+
+describe("brain dispatch SQL liveness reconciliation", () => {
+  test("dead-generation open brain_dispatched row is closed and frees the cap slot within one scheduler tick", async () => {
+    const db = openDb(":memory:");
+    const taskId = newId();
+    const dispatchId = newId();
+    setBootSessionToken("current-session");
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: newId(),
+      task_id: taskId,
+      payload: {
+        dispatch_id: dispatchId,
+        session_token: "previous-session",
+        subprocess_pid: 999_999_999,
+        started_at_ms: Date.now(),
+      },
+    });
+    _injectBrainInFlightForTests(taskId);
+
+    const tick = await schedulerTick(db, { maxConcurrent: 1 });
+    expect(tick.brain_in_flight).toEqual([]);
+
+    const close = db
+      .query("SELECT payload FROM events WHERE kind = 'brain_dispatch_closed' AND json_extract(payload, '$.dispatch_id') = ?")
+      .get(dispatchId) as { payload: string } | null;
+    expect(close).not.toBeNull();
+    const payload = JSON.parse(close!.payload) as Record<string, unknown>;
+    expect(payload.closure_reason).toBe("orphaned_dead_generation");
+  });
+
+  test("boot recovery closes prior-generation open brain dispatch rows", () => {
+    const db = openDb(":memory:");
+    const dispatchId = newId();
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: newId(),
+      task_id: newId(),
+      payload: { dispatch_id: dispatchId, session_token: "old-boot", started_at_ms: Date.now() },
+    });
+
+    const summary = reconcileBrainDispatchesAtBoot(db, "new-boot");
+    expect(summary.reconciled_dispatch_ids).toContain(dispatchId);
+    const open = inFlightDirectivesFromSql(db);
+    expect(open.size).toBe(0);
+  });
+
+  test("live current-generation dispatch is not falsely closed", async () => {
+    const db = openDb(":memory:");
+    const taskId = newId();
+    const dispatchId = newId();
+    setBootSessionToken("current-live-session");
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: newId(),
+      task_id: taskId,
+      payload: {
+        dispatch_id: dispatchId,
+        session_token: "current-live-session",
+        subprocess_pid: process.pid,
+        started_at_ms: Date.now(),
+      },
+    });
+    _injectBrainInFlightForTests(taskId);
+
+    const tick = await schedulerTick(db, { maxConcurrent: 1 });
+    expect(tick.brain_in_flight).toEqual([taskId]);
+    const close = db
+      .query("SELECT id FROM events WHERE kind = 'brain_dispatch_closed' AND json_extract(payload, '$.dispatch_id') = ?")
+      .get(dispatchId) as { id: string } | null;
+    expect(close).toBeNull();
   });
 });
 
