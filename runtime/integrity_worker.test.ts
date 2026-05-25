@@ -484,6 +484,30 @@ describe("reconcilePreDispatchOrphans", () => {
       closeDb(":memory:");
     }
   });
+
+  test("does NOT reap a directive whose root already committed + closed (directive_id-keyed close signal)", () => {
+    const db = openDb(":memory:");
+    try {
+      const now = Date.now();
+      const old = new Date(now - 30 * 60 * 1000).toISOString();
+      // directive_opened.task_id is the DIRECTIVE id; the brain's work + root
+      // commit land under a SEPARATE root task_id, then directive_closed fires.
+      // Pre-fix the reaper's task_id-keyed terminal check missed this and emitted
+      // a spurious orphaned_pre_dispatch abandon for an already-completed
+      // directive (observed live: 77C6H9EN + AYTK3AYD).
+      emitEvent(db, { kind: "directive_opened", substrate_origin: "substrate_auto", task_id: "DCLOSED", directive_id: "DCLOSED", payload: {} });
+      emitEvent(db, { kind: "task_committed", substrate_origin: "substrate_auto", task_id: "DCLOSED_root", directive_id: "DCLOSED", payload: {} });
+      emitEvent(db, { kind: "directive_closed", substrate_origin: "substrate_auto", task_id: "DCLOSED", directive_id: "DCLOSED", payload: {} });
+      db.run("UPDATE events SET ts=? WHERE directive_id='DCLOSED'", [old]);
+
+      const reaped = reconcilePreDispatchOrphans(db, { now: new Date(now).toISOString() });
+      expect(reaped.map((r) => r.task_id)).not.toContain("DCLOSED");
+      const abandoned = eventsByKind(db, "task_abandoned").filter((e) => e.task_id === "DCLOSED");
+      expect(abandoned.length).toBe(0);
+    } finally {
+      closeDb(":memory:");
+    }
+  });
 });
 
 describe("runIntegrityCheck — COUNT scans route through SQL worker pool", () => {

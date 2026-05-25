@@ -1460,6 +1460,41 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
       .get(root) as { c: number };
     expect(violations.c).toBe(0); // no hot-loop spam
   });
+
+  test("root abandoned for no-progress cancels its OPEN descendants — no orphaned-child redispatch storm", async () => {
+    const db = openDb(":memory:");
+    // Genuinely-stuck root (no deliverable) → no_structural_progress abandon.
+    const { directiveId, taskId: root } = await seedDeliverableWithoutClosure(db, { withDeliverable: false });
+    // An open child still running under the root when the root dies. Pre-fix it
+    // stayed live, got re-dispatched every tick, and storm-failed at the cap
+    // (observed live: root ZHKQFATTN abandoned 21:35, child
+    // C_CREATE_LAKELAND_DOCUMENT_SET_06 redispatch_storm 21:36).
+    const child = newId();
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: child,
+      parent_task_id: root,
+      payload: { goal: "child still running when root dies" },
+    });
+
+    await schedulerTick(db, { directiveId });
+
+    // Root abandoned for no-progress.
+    const rootAbandoned = db
+      .query("SELECT failure_kind FROM events WHERE task_id = ? AND kind = 'task_abandoned'")
+      .get(root) as { failure_kind: string } | null;
+    expect(rootAbandoned?.failure_kind).toBe("no_structural_progress_since_last_dispatch");
+
+    // Open descendant cascade-cancelled so it can never storm.
+    const childAbandoned = db
+      .query("SELECT failure_kind, payload FROM events WHERE task_id = ? AND kind = 'task_abandoned'")
+      .get(child) as { failure_kind: string; payload: string } | null;
+    expect(childAbandoned).not.toBeNull();
+    expect(childAbandoned!.failure_kind).toBe("root_terminated_cascade");
+    expect((JSON.parse(childAbandoned!.payload) as { root_task_id: string }).root_task_id).toBe(root);
+  });
 });
 
 describe("brain dispatch SQL liveness reconciliation", () => {

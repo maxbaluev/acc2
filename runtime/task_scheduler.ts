@@ -27,6 +27,7 @@ import type { JsonValue } from "../substrate/types";
 import { readDagForDirective, readyTasks, type TaskNode } from "./task_topology";
 import { dispatchReadyTask } from "./task_dispatcher";
 import { rootCommitReadiness } from "./directive_closure";
+import { decompositionDescendantTaskIds } from "./task_descendants";
 import { hasFreeHandshakePermit, freeHandshakePermits, observedBrainRssBytes } from "./bridge/opencode";
 import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
 import { emitEvent } from "./events";
@@ -36,6 +37,7 @@ import { findDeferringConflict } from "./interference";
 import { isBridgeHealthDegraded } from "./bridge_health";
 import { claimDispatchLease, releaseDispatchLease } from "./dispatch_leases";
 import { closeOrphanedBrainDispatches, getBootSessionToken } from "./brain_dispatch_reconciler";
+import { logger } from "./logger";
 
 // Interaction kinds that block another directive's dispatch when one of the
 // two is mid-flight. `mutual_exclusion` is symmetric (either side blocks the
@@ -725,6 +727,70 @@ const parseEventPayload = (payload: string | null): Record<string, unknown> => {
   }
 };
 
+/** When a directive ROOT is terminally abandoned (no-progress / deliverable-
+ *  without-closure), its still-open DECOMPOSITION descendants can never
+ *  contribute to a root commit — the root is dead, so the directive can never
+ *  seal. Left live they keep getting re-dispatched until the supervisor
+ *  force-fails each as `redispatch_storm`. Observed 2026-05-25: root
+ *  ZHKQFATTN abandoned at 21:35, its child C_CREATE_LAKELAND_DOCUMENT_SET_06
+ *  then storm-failed at 21:36 on dispatch #7. Cascade-cancel open descendants
+ *  the moment the root dies so those wasted child dispatches never happen.
+ *  Mirrors the bottom-up cascadeUpwardWhenChildrenTerminal with a top-down
+ *  terminal-on-root-death. Only a TRUE root (no decomposition parent)
+ *  propagates death downward — a non-root abandon already terminalizes for
+ *  its parent's upward cascade and may have sibling paths, so it is left
+ *  alone. Returns the count of descendants cancelled. */
+const cascadeCancelOpenDescendantsOnRootAbandon = (
+  db: Database,
+  rootTaskId: string,
+  rootAbandonEventId: string,
+): number => {
+  const parentRow = db
+    .query(
+      `SELECT parent_task_id FROM events
+       WHERE kind = 'task_node_opened' AND task_id = ?
+       ORDER BY ts DESC LIMIT 1`,
+    )
+    .get(rootTaskId) as { parent_task_id: string | null } | null;
+  const isRoot = !parentRow || !parentRow.parent_task_id || parentRow.parent_task_id === "";
+  if (!isRoot) return 0;
+  let cancelled = 0;
+  for (const descId of decompositionDescendantTaskIds(db, rootTaskId)) {
+    const terminal = db
+      .query(
+        `SELECT 1 FROM events
+         WHERE task_id = ?
+           AND kind IN ('task_committed', 'task_failed', 'task_abandoned', 'task_committed_superseded')
+         LIMIT 1`,
+      )
+      .get(descId) as { 1: number } | null;
+    if (terminal) continue;
+    const descDirective = db
+      .query(
+        `SELECT directive_id FROM events
+         WHERE kind = 'task_node_opened' AND task_id = ?
+         ORDER BY ts DESC LIMIT 1`,
+      )
+      .get(descId) as { directive_id: string | null } | null;
+    emitEvent(db, {
+      kind: "task_abandoned",
+      substrate_origin: "substrate_auto",
+      directive_id: descDirective?.directive_id ?? undefined,
+      task_id: descId,
+      failure_kind: "root_terminated_cascade",
+      context_refs: [rootAbandonEventId],
+      payload: {
+        reason: "root_terminated_cascade",
+        root_task_id: rootTaskId,
+        root_abandon_event_id: rootAbandonEventId,
+        note: "Open decomposition descendant cancelled because its directive root was terminally abandoned; it can no longer contribute to a root commit. Prevents redispatch_storm on orphaned children.",
+      } as JsonValue,
+    });
+    cancelled++;
+  }
+  return cancelled;
+};
+
 type TaskAdmissionEconomics = {
   expected_value: number;
   resource_cost: Record<string, number>;
@@ -1025,7 +1091,7 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
     ? "no_structural_progress_since_last_dispatch"
     : "deliverable_without_closure_or_refinement";
   const evidenceEventIds = (deliverableRows.length > 0 ? deliverableRows : rows).map((r) => r.id).slice(0, 20);
-  emitEvent(db, {
+  const abandonEvt = emitEvent(db, {
     kind: "task_abandoned",
     substrate_origin: "substrate_auto",
     directive_id: task.directive_id,
@@ -1040,6 +1106,15 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
       hint: "Brain cycles that emit deliverables must also emit task_closure_audited/task_committed or a refinement edge; amendment-only exits are not eligible for re-dispatch on the same task_id.",
     } as JsonValue,
   });
+  // A dead root orphans its open descendants — cancel them now so the
+  // scheduler stops re-driving work that can never seal (k: redispatch_storm).
+  const cancelledDescendants = cascadeCancelOpenDescendantsOnRootAbandon(db, task.id, abandonEvt.id);
+  if (cancelledDescendants > 0) {
+    logger.info(
+      { where: "task_scheduler.cascade_cancel_on_root_abandon", root_task_id: task.id, cancelled: cancelledDescendants, reason },
+      "cancelled open descendants of terminally-abandoned root to prevent orphaned-child redispatch storms",
+    );
+  }
   return { terminated: true, reason, dispatch_id: dispatchId, evidence_event_ids: evidenceEventIds };
 };
 

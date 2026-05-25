@@ -524,6 +524,20 @@ export const reconcilePreDispatchOrphans = (
                'task_committed_superseded'
              )
              AND t.ts >= e.ts
+         )
+         -- A directive_opened's task_id is the DIRECTIVE id, but the brain's
+         -- work (and its root commit) lands under a SEPARATE root task_id, so
+         -- the task_id-keyed terminal check above misses a completed directive.
+         -- Without this clause the reaper emits a spurious task_abandoned
+         -- (orphaned_pre_dispatch) for directives whose root already committed
+         -- and closed (observed 2026-05-25: 77C6H9EN + AYTK3AYD reaped at boot
+         -- despite both being status=completed). Skip any directive that has a
+         -- close/archive signal keyed on directive_id.
+         AND NOT EXISTS (
+           SELECT 1 FROM events d
+           WHERE d.directive_id = e.directive_id
+             AND d.kind IN ('directive_closed', 'directive_archived_by_operator')
+             AND d.ts >= e.ts
          )`,
     )
     .all(cutoffIso) as Array<{ open_event_id: string; task_id: string; directive_id: string | null; ts: string }>;
