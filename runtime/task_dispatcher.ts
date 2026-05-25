@@ -634,6 +634,49 @@ export const dispatchReadyTask = async (
         }));
         if (retrievedArtifacts.query_embedding_unavailable) retrievedArtifacts = null;
       } catch { retrievedArtifacts = null; }
+      // PROACTIVE capability-gap detection at SELECTION time (directive
+      // KDZVSFNPM). The artifact retrieval above already reranked admitted
+      // act_artifact candidates by fit; a gap exists when the BEST fit is
+      // below the proactive floor (or there are zero candidates) for a goal
+      // that genuinely wants an executable artifact. The detection is a cheap
+      // comparison on already-computed fit scores — no extra heavy read on the
+      // hot path. The emission + brain-author dispatch is debounced
+      // (one open proactive gap per goal_shape, cooldown, attempt-cap) inside
+      // maybeOpenProactiveGap. Wrapped + best-effort so a detector fault never
+      // blocks dispatch. The "wants_artifact" gate is fail-closed: we fire
+      // when the goal's semantic neighborhood retrieved act_artifact
+      // candidates (poor-fit case) OR the substrate routed this to an
+      // execution/agent lane (zero-candidate case) — NOT a regex classifier.
+      try {
+        const { goalShape: computeGoalShape } = await import("./goal_shape");
+        const { maybeOpenProactiveGap } = await import("./capability_gap");
+        const goalTextForGap = task.goal ?? "";
+        const goalShapeForGap = goalTextForGap ? computeGoalShape(goalTextForGap) : "";
+        const artifactHits = retrievedArtifacts?.hits ?? [];
+        const candidateCount = artifactHits.length;
+        const bestFit = artifactHits.reduce(
+          (max, h) => Math.max(max, Number(h.routing_score_breakdown?.artifact_fit ?? 0)),
+          0,
+        );
+        // Fail-closed artifact-wanting gate. Poor-fit case: candidates exist
+        // (the goal's neighborhood IS artifact-shaped). Zero-candidate case:
+        // only an explicit execution/agent route asserts artifact-demand.
+        const wantsArtifact = candidateCount > 0 || decision.route === "claude_agent";
+        if (goalShapeForGap) {
+          maybeOpenProactiveGap(db, {
+            goal_shape: goalShapeForGap,
+            goal_text: goalTextForGap,
+            best_fit: bestFit,
+            candidate_count: candidateCount,
+            wants_artifact: wantsArtifact,
+          });
+        }
+      } catch (gapErr) {
+        logger.warn(
+          { where: "dispatcher.proactiveGap", err: (gapErr as Error).message, task_id: task.id },
+          "proactive capability-gap detection threw — non-fatal, dispatch continues",
+        );
+      }
       // Organism-alignment audit b3qc9ryzj #2 (2026-05-15): surface
       // query_embedding_unavailable as a fail-loud retrievalUnavailable
       // metadata instead of letting it silently degrade to recency-fallback.

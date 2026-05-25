@@ -947,6 +947,18 @@ export const admitArtifact = async (
       target_resources: final?.targetResources?.map((r) => r.uri) ?? null,
     } as JsonValue,
   });
+  // Composition closure (directive KDZVSFNPM): if this admission serves a
+  // goal_shape that had an OPEN proactive capability gap, resolve it — the
+  // organism BUILT the missing capability (proactive gap → author → SANDREPAIR
+  // → admission → resolve), so the next selection finds a good fit. Best-
+  // effort + idempotent; a missing goal_shape simply skips.
+  if (input.goalShape) {
+    try {
+      // Lazy require avoids a static import cycle (capability_gap → artifact_store).
+      const { resolveProactiveGap } = require("./capability_gap") as typeof import("./capability_gap");
+      resolveProactiveGap(db, input.goalShape, row.id, emit);
+    } catch { /* non-fatal — admission already succeeded */ }
+  }
   return { ok: true, artifactId: row.id };
 };
 
