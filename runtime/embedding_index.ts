@@ -270,7 +270,17 @@ export class EmbeddingIndex {
         // 1536-dim production rows backfill into vec_events (no in-memory
         // retention — served on-demand thereafter). Test rows (dim != 1536)
         // raise a schema error and fall through to the inline store.
-        upsertVecEventRow(db, row.id, Array.from(decoded), version);
+        // act_artifact-kind rows resolve their (kind, ts) from the
+        // act_artifact table, NOT events — without this the upsert finds no
+        // events row, returns early, and silently drops the artifact from
+        // BOTH stores (ARTIFACT_S fix).
+        upsertVecEventRow(
+          db,
+          row.id,
+          Array.from(decoded),
+          version,
+          row.kind === "act_artifact" ? "act_artifact" : "events",
+        );
       } catch {
         jsEntries.set(row.id, { meta: rowToMeta(row), vec: decoded });
       }

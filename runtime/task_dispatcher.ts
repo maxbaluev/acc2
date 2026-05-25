@@ -629,7 +629,7 @@ export const dispatchReadyTask = async (
           // act_artifact_* canonical + code_artifact_* legacy aliases (F4a):
           // single source of truth in event_kinds.ts (immutable historical
           // rows still need the legacy names through retrieval).
-          kindFilter: [...ARTIFACT_LIFECYCLE_KINDS],
+          kindFilter: ["act_artifact"],
           goalText: task.goal,
         }));
         if (retrievedArtifacts.query_embedding_unavailable) retrievedArtifacts = null;

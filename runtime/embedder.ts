@@ -267,9 +267,17 @@ type UnembeddedRow = {
 };
 type EmbeddingItem = { id: string; text: string; source_table: EmbeddingSourceTable };
 
+const stringifyArtifactMetadata = (value: unknown): string | null => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return value.trim().length > 0 ? value : null;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try { return JSON.stringify(value); } catch { return null; }
+};
+
 const extractTextFromArtifactPayload = (payload: Record<string, unknown>): string | null => {
-  const body = payload.body;
-  return typeof body === "string" && body.trim().length > 0 ? body : null;
+  const candidates = [payload.intent, payload.summary, payload.name, payload.interface_purpose, payload.inputs_schema, payload.outputs_schema, payload.usage_examples, payload.body];
+  const parts = candidates.map(stringifyArtifactMetadata).filter((p): p is string => !!p && p.trim().length > 0);
+  return parts.length > 0 ? parts.join("\n") : null;
 };
 
 /** Resolve the embedding text for one event row, including cross-table joins
@@ -324,9 +332,9 @@ const readUnembedded = async (db: Database, batchSize: number): Promise<Unembedd
     `WHERE kind IN (${placeholders}) AND e.embedding IS NULL ` +
     `UNION ALL ` +
     `SELECT id, 'act_artifact' AS kind, ` +
-    `json_object('body', body, 'artifact_kind', kind, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, '')) AS payload, ` +
+    `json_object('body', body, 'artifact_kind', kind, 'runtime', COALESCE(runtime, ''), 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, ''), 'interface_purpose', COALESCE(json_extract(interface_metadata, '$.purpose'), ''), 'inputs_schema', COALESCE(json_extract(interface_metadata, '$.inputs_schema'), ''), 'outputs_schema', COALESCE(json_extract(interface_metadata, '$.outputs_schema'), ''), 'usage_examples', COALESCE(json_extract(interface_metadata, '$.usage_examples'), '')) AS payload, ` +
     `'act_artifact' AS source_table, COALESCE(updated_at, created_at) AS ts, embedding, NULL AS embedding_version FROM act_artifact a ` +
-    `WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') ` +
+    `WHERE runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') ` +
     `AND (a.embedding IS NULL OR length(a.embedding) = 0)` +
     `) ORDER BY ts ASC LIMIT ?`;
   const params: SQLQueryBindings[] = [...Array.from(EMBEDDABLE_KINDS), batchSize];
@@ -358,7 +366,7 @@ export const pendingEmbeddableCount = async (db: Database): Promise<number> => {
     `SELECT COUNT(*) AS c FROM events e WHERE kind IN (${placeholders}) AND e.embedding IS NULL ` +
     `UNION ALL ` +
     `SELECT COUNT(*) AS c FROM act_artifact a ` +
-    `WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') ` +
+    `WHERE runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') ` +
     `AND (a.embedding IS NULL OR length(a.embedding) = 0)` +
     `)`;
   const params: SQLQueryBindings[] = [...Array.from(EMBEDDABLE_KINDS)];
@@ -394,7 +402,7 @@ export const upsertVecEventRow = (
   sourceTable: EmbeddingSourceTable = "events",
 ): void => {
   const row = sourceTable === "act_artifact"
-    ? db.query("SELECT 'act_artifact' AS kind, COALESCE(updated_at, created_at) AS ts FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL")
+    ? db.query("SELECT 'act_artifact' AS kind, COALESCE(updated_at, created_at) AS ts FROM act_artifact WHERE id = ? AND runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL")
       .get(eventId) as { kind: string; ts: string } | null
     : db.query("SELECT kind, ts FROM events WHERE id = ?")
       .get(eventId) as { kind: string; ts: string } | null;
@@ -422,7 +430,8 @@ export const cleanupOrphanedVecEvents = (db: Database, limit = 5000): number => 
            AND EXISTS (
              SELECT 1 FROM act_artifact a
              WHERE a.id = v.event_id
-               AND a.runtime IS NULL
+               AND a.runtime IS NOT NULL
+                AND a.declared_sandbox IS NOT NULL
                AND a.superseded_by IS NULL
                AND a.status IN ('admitted', 'promoted')
            )
@@ -466,11 +475,11 @@ const persistEmbeddingsBatch = (
   // on the Statement handle so the loop only binds + steps.
   const updateEvents = db.prepare("UPDATE events SET embedding = ?, embedding_version = ? WHERE id = ?");
   const updateArtifact = db.prepare(
-    "UPDATE act_artifact SET embedding = ?, updated_at = ? WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL",
+    "UPDATE act_artifact SET embedding = ?, updated_at = ? WHERE id = ? AND runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL",
   );
   const selectEventMeta = db.prepare("SELECT kind, ts FROM events WHERE id = ?");
   const selectArtifactMeta = db.prepare(
-    "SELECT 'act_artifact' AS kind, COALESCE(updated_at, created_at) AS ts FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL",
+    "SELECT 'act_artifact' AS kind, COALESCE(updated_at, created_at) AS ts FROM act_artifact WHERE id = ? AND runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL",
   );
   const deleteVec = db.prepare("DELETE FROM vec_events WHERE event_id = ?");
   const insertVec = db.prepare(

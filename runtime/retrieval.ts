@@ -27,6 +27,7 @@ import type { EmbeddingIndex, IndexEntry, KnnHit } from "./embedding_index";
 import { originPromotion, originPromotionByGoalShape } from "../substrate/views";
 import { goalShape as computeGoalShape } from "./goal_shape";
 import { poolQuery } from "./sql_pool_singleton";
+import { resolveArtifactId } from "../substrate/migration_runner";
 
 export type RetrievalQuery = {
   text: string;
@@ -258,7 +259,7 @@ const readOriginBiasForGoalShapePooled = async (db: Database, goalShape: string)
 // db handle. Only the EXECUTION THREAD differs (main loop vs. SQL worker);
 // rows, ordering, and scoring are unchanged.
 const POSTERIOR_ARTIFACT_SCORE_SQL =
-  "SELECT score FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL";
+  "SELECT score FROM act_artifact WHERE id = ? AND runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL";
 const POSTERIOR_EVENT_PAYLOAD_SQL = "SELECT payload FROM events WHERE id = ?";
 const POSTERIOR_ARTIFACT_BY_ID_SQL = "SELECT score FROM act_artifact WHERE id = ?";
 const POSTERIOR_EVENT_RESIDUAL_SQL = "SELECT residual FROM events WHERE id = ?";
@@ -358,8 +359,68 @@ const readPosteriorPooled = async (db: Database, eventId: string, kind: string):
  *  table scan), so it does not contribute the heavy-scan loop stall this fix
  *  targets — leaving it sync is both correct and cheap. */
 const isActiveArtifactHit = (db: Database, artifactId: string): boolean => {
-  const row = db.query("SELECT 1 AS ok FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') LIMIT 1").get(artifactId) as { ok: number } | null;
+  const row = db.query("SELECT 1 AS ok FROM act_artifact WHERE id = ? AND runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') LIMIT 1").get(artifactId) as { ok: number } | null;
   return !!row;
+};
+
+type ArtifactFit = { multiplier: number; breakdown: Record<string, number>; runtime: string | null };
+const NEUTRAL_ARTIFACT_FIT: ArtifactFit = { multiplier: 1, breakdown: {}, runtime: null };
+
+/** Runtime-exclusion gate for act_artifact hits (ARTIFACT_S). When a query
+ *  requests a specific runtime (e.g. "bun"), an act_artifact hit can only
+ *  satisfy it if the artifact's own runtime equals the requested one. A hit
+ *  whose runtime is null (data-class — already filtered by
+ *  embedding_index_view, kept here as a defence-in-depth invariant) OR whose
+ *  runtime differs is DROPPED, not merely neutral-scored. Scoped strictly to
+ *  act_artifact hits AND to runtime-specified queries: non-artifact (knowledge)
+ *  hits and runtime-agnostic queries are never affected. */
+const artifactRuntimeExcluded = (
+  hitKind: string,
+  artifactRuntime: string | null,
+  requestedRuntime: string | undefined,
+): boolean => {
+  if (hitKind !== "act_artifact") return false;
+  if (!requestedRuntime) return false;
+  return artifactRuntime !== requestedRuntime;
+};
+const parseJsonObject = (raw: string | null | undefined): Record<string, unknown> => {
+  if (!raw) return {};
+  try { const parsed = JSON.parse(raw) as unknown; return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}; } catch { return {}; }
+};
+const hasSchemaSignal = (metadata: Record<string, unknown>): boolean => metadata.inputs_schema !== undefined || metadata.outputs_schema !== undefined;
+const hasExampleSignal = (metadata: Record<string, unknown>): boolean => Array.isArray(metadata.usage_examples) ? metadata.usage_examples.length > 0 : metadata.usage_examples !== undefined;
+/** Bound on the per-goal_shape residual refinement query. recent_residual_mean
+ *  (already precomputed on act_artifact) is the PRIMARY hot-path signal; the
+ *  goal_shape-specific AVG is an optional refinement scanning at most this many
+ *  of the artifact's most-recent score events. The events scan is anchored on
+ *  the leading column of idx_events_action_artifact_kind_ts
+ *  (action_artifact_id, kind, ts), so it is an index range over ONE artifact's
+ *  score events — never a full-table scan — and the LIMIT caps it to a fixed
+ *  recent window so a hot artifact with thousands of score events cannot turn
+ *  the retrieval hot path into an unbounded aggregate. */
+const ARTIFACT_GOAL_SHAPE_RESIDUAL_LIMIT = 50;
+const readArtifactFit = (db: Database, rawArtifactId: string, q: RoutingQuery): ArtifactFit => {
+  // Resolve alias chain so a renamed/superseded artifact id still finds its
+  // canonical act_artifact row and its score events (ALIAS_CHAI).
+  const artifactId = resolveArtifactId(db, rawArtifactId);
+  const row = db.query("SELECT runtime, declared_sandbox, confidence, recent_residual_mean, interface_metadata FROM act_artifact WHERE id = ? AND runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') LIMIT 1").get(artifactId) as { runtime: string; declared_sandbox: string; confidence: number; recent_residual_mean: number; interface_metadata: string | null } | null;
+  if (!row) return NEUTRAL_ARTIFACT_FIT;
+  const metadata = parseJsonObject(row.interface_metadata);
+  const sandbox = parseJsonObject(row.declared_sandbox);
+  const shape = q.goalText ? computeGoalShape(q.goalText) : "";
+  // Bounded refinement: aggregate over at most ARTIFACT_GOAL_SHAPE_RESIDUAL_LIMIT
+  // of the artifact's most-recent matching score events (index range on
+  // action_artifact_id, ordered by ts DESC), NOT an unbounded LIKE scan.
+  const gr = shape ? db.query("SELECT AVG(residual) AS avg_residual, COUNT(*) AS n FROM (SELECT residual FROM events WHERE kind = 'act_artifact_score_updated' AND action_artifact_id = ? AND payload LIKE ? ORDER BY ts DESC LIMIT ?)").get(artifactId, '%"goal_shape":"' + shape + '"%', ARTIFACT_GOAL_SHAPE_RESIDUAL_LIMIT) as { avg_residual: number | null; n: number } | null : null;
+  const confidence_score = clamp01(row.confidence ?? 0.5);
+  const residual_score = gr && gr.n > 0 && typeof gr.avg_residual === "number" ? clamp01(1 - gr.avg_residual) : clamp01(1 - (row.recent_residual_mean ?? 0.5));
+  const schema_signal = hasSchemaSignal(metadata) ? 1 : 0.5;
+  const example_signal = hasExampleSignal(metadata) ? 1 : 0.5;
+  const sandbox_runtime_match = sandbox.runtime === row.runtime ? 1 : 0.2;
+  const requested_runtime_match = q.runtime ? (q.runtime === row.runtime ? 1 : 0.2) : 1;
+  const sandbox_compatibility = Math.min(sandbox_runtime_match, requested_runtime_match);
+  const fit = clamp01(0.25 * confidence_score + 0.30 * residual_score + 0.15 * schema_signal + 0.15 * example_signal + 0.15 * sandbox_compatibility);
+  return { multiplier: 0.75 + 0.5 * fit, runtime: row.runtime, breakdown: { artifact_fit: fit, artifact_confidence_score: confidence_score, artifact_goal_shape_residual_score: residual_score, artifact_schema_signal: schema_signal, artifact_example_signal: example_signal, artifact_sandbox_compatibility: sandbox_compatibility, artifact_fit_multiplier: 0.75 + 0.5 * fit } };
 };
 
 /** Assemble a RetrievalHit from a KnnHit and a pre-computed posterior. Pure
@@ -372,6 +433,7 @@ const assembleHit = (
   posterior: number,
   originBias: Map<string, number>,
   q: RoutingQuery,
+  artifactFit: ArtifactFit = NEUTRAL_ARTIFACT_FIT,
 ): RetrievalHit => {
   const bias = originBias.get(hit.entry.substrate_origin) ?? 1.0;
   // similarity in [0, 1] — cosine distance maps [0, 2] → [1, 0]
@@ -380,7 +442,7 @@ const assembleHit = (
   const domain_scores = scoreDomainRecord(hit.entry, q);
   const aspect_boost = weightedMean(aspect_scores, q.aspectWeights);
   const domain_boost = weightedMean(domain_scores, q.domainHints);
-  const routing_multiplier = (1 + 0.25 * aspect_boost) * (1 + 0.25 * domain_boost);
+  const routing_multiplier = (1 + 0.25 * aspect_boost) * (1 + 0.25 * domain_boost) * artifactFit.multiplier;
   const rerank_score = similarity * (1 + posterior) * bias * routing_multiplier;
   return {
     event_id: hit.entry.event_id,
@@ -399,28 +461,39 @@ const assembleHit = (
       aspect_boost,
       domain_boost,
       routing_multiplier,
+      ...artifactFit.breakdown,
     },
   };
 };
 
-/** Synchronous pack — used by `retrieveWithEmbedding`. */
+/** Synchronous pack — used by `retrieveWithEmbedding`. Returns null when the
+ *  hit is an act_artifact that cannot satisfy a runtime-specified query
+ *  (ARTIFACT_S runtime-exclusion gate). */
 const packHit = (
   db: Database,
   hit: KnnHit,
   originBias: Map<string, number>,
   q: RoutingQuery,
-): RetrievalHit => assembleHit(hit, readPosterior(db, hit.entry.event_id, hit.entry.kind), originBias, q);
+): RetrievalHit | null => {
+  const fit = hit.entry.kind === "act_artifact" ? readArtifactFit(db, hit.entry.event_id, q) : NEUTRAL_ARTIFACT_FIT;
+  if (artifactRuntimeExcluded(hit.entry.kind, fit.runtime, q.runtime)) return null;
+  return assembleHit(hit, readPosterior(db, hit.entry.event_id, hit.entry.kind), originBias, q, fit);
+};
 
 /** Off-loop pack — used by the async `retrieve` path. The posterior point
  *  reads run on the SQL worker thread (sync fallback when no pool) so they no
- *  longer block the dispatch-critical main event loop. */
+ *  longer block the dispatch-critical main event loop. Returns null on the
+ *  same runtime-exclusion condition as `packHit`. */
 const packHitPooled = async (
   db: Database,
   hit: KnnHit,
   originBias: Map<string, number>,
   q: RoutingQuery,
-): Promise<RetrievalHit> =>
-  assembleHit(hit, await readPosteriorPooled(db, hit.entry.event_id, hit.entry.kind), originBias, q);
+): Promise<RetrievalHit | null> => {
+  const fit = hit.entry.kind === "act_artifact" ? readArtifactFit(db, hit.entry.event_id, q) : NEUTRAL_ARTIFACT_FIT;
+  if (artifactRuntimeExcluded(hit.entry.kind, fit.runtime, q.runtime)) return null;
+  return assembleHit(hit, await readPosteriorPooled(db, hit.entry.event_id, hit.entry.kind), originBias, q, fit);
+};
 
 /** Reranked retrieval. Embeds the query, KNN against the index, multiplies
  *  by posterior, applies per-origin bias multiplier, sorts by rerank_score
@@ -501,7 +574,11 @@ export const retrieve = async (
   // order, and each pooled read issues the same SQL against the same db as the
   // sync path, so `packed` is byte-identical to the synchronous map below —
   // only the execution thread of the SELECTs moved off the dispatch loop.
-  let packed = await Promise.all(knnHits.map((h) => packHitPooled(db, h, originBias, q)));
+  // packHitPooled returns null for act_artifact hits excluded by the
+  // runtime-exclusion gate; drop them before scoring/sorting.
+  let packed = (await Promise.all(knnHits.map((h) => packHitPooled(db, h, originBias, q)))).filter(
+    (h): h is RetrievalHit => h !== null,
+  );
   if (typeof q.minScore === "number") {
     packed = packed.filter((h) => h.posterior >= q.minScore!);
   }
@@ -554,7 +631,9 @@ export const retrieveWithEmbedding = (
   const originBias = q.goalText
     ? readOriginBiasForGoalShape(db, computeGoalShape(q.goalText))
     : readOriginBias(db);
-  let packed = knnHits.map((h) => packHit(db, h, originBias, q));
+  let packed = knnHits
+    .map((h) => packHit(db, h, originBias, q))
+    .filter((h): h is RetrievalHit => h !== null);
   if (typeof q.minScore === "number") {
     packed = packed.filter((h) => h.posterior >= q.minScore!);
   }
