@@ -35,7 +35,7 @@ import { runArtifactForRuntime } from "./runtimes/index";
 import { getArtifact, insertArtifact } from "./artifact_store";
 import { ownerGateDecision } from "./owner_gate";
 import { runPredicateGate } from "./verifiers/predicate_gate";
-import { markSuperseded } from "./artifact_provenance";
+import { markSuperseded, rebaseCitationRooting, persistRebasedRooting, type RebaseRootingResult } from "./artifact_provenance";
 import { partitionCitedKnowledge } from "./artifact_candidate_screen";
 import { parseResourceUri } from "./resource_uri";
 import type { EmitEventInput } from "./events";
@@ -81,6 +81,12 @@ export type AdmissionInput = {
     directiveId?: string;
     ownerConsentEventId?: string;
   };
+  /** citation_rooting_rebase_hard_gate (amendment #6): task/trajectory context
+   *  used to REBASE the rooting of a zero-direct-citation full body through
+   *  inherited evidence before refusing artifact_citation_underrooted. OPTIONAL
+   *  — when absent the gate cannot rebase and refuses exactly as before. */
+  taskId?: string | null;
+  contextRefs?: string[];
   /** Predicate-gate audience tag (C1, 2026-05-18). When set to
    *  `ceo_buyer` or `external_executive`, the substrate runs
    *  alex_predicate_* knowledge_candidates against `body` BEFORE
@@ -522,23 +528,40 @@ export const admitArtifact = async (
   const admissionIsPlaceholder =
     (typeof input.kind === "string" && PLACEHOLDER_BODY_KINDS.has(input.kind)) ||
     admissionIsExecutableTool;
+  // citation_rooting_rebase_hard_gate (amendment #6): when a substantive
+  // zero-direct-citation full body would be refused, attempt to rebase its
+  // rooting through inherited task/root/parent evidence FIRST. A resolved
+  // rebase is persisted on the admitted row (effective_cited_knowledge_ids /
+  // effective_grounding_refs) + emits retrieval_binding events AFTER the row
+  // insert below; an unresolved rebase keeps the underrooted refusal.
+  let admissionRebase: Extract<RebaseRootingResult, { ok: true }> | null = null;
   if (admissionIsSubstantive) {
     const cited = input.citedKnowledgeIds ?? [];
     const { resolved: resolvedAtAdmit, unresolved: unresolvedAtAdmit } =
       partitionCitedKnowledge(db, cited);
     if (cited.length === 0 && !admissionIsPlaceholder) {
-      emit({
-        kind: "lane_routing_refused",
-        substrate_origin: "substrate_auto",
-        payload: {
-          reason: "artifact_citation_underrooted",
-          refused_kind: "act_artifact_admission",
-          artifact_kind: input.kind ?? null,
-          artifact_name: input.name ?? null,
-          audience: input.audience ?? null,
-          body_length: typeof input.body === "string" ? input.body.length : 0,
-        } as JsonValue,
+      const rebase = rebaseCitationRooting(db, {
+        taskId: input.taskId ?? null,
+        directiveId: input.governance?.directiveId ?? null,
+        sourceCandidateId: input.sourceCandidateId ?? null,
+        contextRefs: input.contextRefs ?? [],
       });
+      if (rebase.ok) {
+        admissionRebase = rebase;
+      } else {
+        emit({
+          kind: "lane_routing_refused",
+          substrate_origin: "substrate_auto",
+          payload: {
+            reason: "artifact_citation_underrooted",
+            refused_kind: "act_artifact_admission",
+            artifact_kind: input.kind ?? null,
+            artifact_name: input.name ?? null,
+            audience: input.audience ?? null,
+            body_length: typeof input.body === "string" ? input.body.length : 0,
+          } as JsonValue,
+        });
+      }
     } else if (unresolvedAtAdmit.length > 0) {
       emit({
         kind: "lane_routing_refused",
@@ -1058,6 +1081,26 @@ export const admitArtifact = async (
       verifier_artifact_id: input.verifierArtifactId ?? null,
     } as JsonValue,
   });
+  // citation_rooting_rebase_hard_gate (amendment #6): persist the rebased
+  // rooting on the now-admitted row + emit retrieval_binding for each resolved
+  // inherited root so the four-link credit chain closes. Best-effort: the
+  // artifact is already admitted; binding credit is additive, never a gate.
+  if (admissionRebase) {
+    try {
+      persistRebasedRooting(
+        db,
+        {
+          artifactId: row.id,
+          rebase: admissionRebase,
+          directiveId: input.governance?.directiveId ?? null,
+          taskId: input.taskId ?? null,
+          bindingSurface: "artifact_admission",
+        },
+        emit,
+      );
+    } catch { /* fail-soft: admission already succeeded */ }
+  }
+
   // Composition closure (directive KDZVSFNPM): if this admission serves a
   // goal_shape that had an OPEN proactive capability gap, resolve it — the
   // organism BUILT the missing capability (proactive gap → author → SANDREPAIR
