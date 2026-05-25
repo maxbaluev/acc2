@@ -8,6 +8,7 @@ import type { Database } from "bun:sqlite";
 import type { Event, EventKind, JsonValue, SubstrateOrigin } from "../substrate/types";
 import { EVENT_KINDS, getCurrentEventKinds } from "../substrate/event_kinds";
 import { newId, nowIso } from "./ids";
+import { decompositionDescendantTaskIds } from "./task_descendants";
 import { publishEvent } from "./event_bus";
 import { publishActivation } from "./activation_bus";
 import { recordEventEmission } from "./metrics";
@@ -743,19 +744,10 @@ type RootCommitBlocker = { reason: "missing_clean_closure_audit" | "nonterminal_
 const rootTaskCommitBlocker = (db: Database, taskId: string): RootCommitBlocker | null => {
   const root = db.query(`SELECT 1 FROM events WHERE kind = 'task_node_opened' AND task_id = ? AND parent_task_id IS NULL LIMIT 1`).get(taskId) as { 1: number } | null;
   if (!root) return null;
-  const descendants = new Set<string>(); const queue = [taskId]; const seen = new Set<string>();
-  while (queue.length > 0) {
-    const cur = queue.shift()!; if (seen.has(cur)) continue; seen.add(cur);
-    // Descendants for the root-commit block are DECOMPOSITION children only
-    // (parent_task_id). `requires` is a downstream dependency (a dependent runs
-    // AFTER this task — blocking on it deadlocks: the upstream can never commit
-    // until its dependents finish, but dependents can't start until it commits).
-    // `refines` is a checkpoint-continuation (a task commits its cycle and
-    // continues in a refines-child) — blocking on it forbids the checkpoint
-    // pattern. Neither is a decomposition descendant, so neither gates commit.
-    const rows = db.query(`SELECT task_id AS child_id FROM events WHERE kind = 'task_node_opened' AND parent_task_id = ?`).all(cur) as Array<{ child_id: string | null }>;
-    for (const row of rows) if (row.child_id && row.child_id !== taskId && !descendants.has(row.child_id)) { descendants.add(row.child_id); queue.push(row.child_id); }
-  }
+  // Decomposition descendants only (parent_task_id chain) — see the rationale in
+  // runtime/task_descendants.ts (requires/refines deliberately do NOT gate
+  // commit). Shared with directive_closure via that cycle-free module.
+  const descendants = new Set(decompositionDescendantTaskIds(db, taskId));
   if (descendants.size === 0) return null;
   const audit = db.query(`SELECT id, residual, payload FROM events WHERE kind = 'task_closure_audited' AND task_id = ? ORDER BY ts DESC, rowid DESC LIMIT 1`).get(taskId) as { id: string; residual: number | null; payload: string } | null;
   let closureResidual: number | null = null;

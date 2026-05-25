@@ -21,6 +21,7 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
+import { decompositionDescendantTaskIds } from "./task_descendants";
 
 type DirectivePayload = { lifecycle?: { kind?: string } | string; urgency?: string };
 
@@ -107,26 +108,11 @@ export type RootCommitReadiness =
   | { ok: true; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[] }
   | { ok: false; reason: "not_root" | "missing_clean_closure_audit" | "nonterminal_descendants"; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[] };
 
-export const descendantTaskIds = (db: Database, rootTaskId: string): string[] => {
-  const out = new Set<string>();
-  const queue = [rootTaskId];
-  const seen = new Set<string>();
-  while (queue.length > 0) {
-    const cur = queue.shift()!;
-    if (seen.has(cur)) continue;
-    seen.add(cur);
-    // Decomposition children only (parent_task_id). `requires` is a downstream
-    // dependency and `refines` is a checkpoint-continuation — neither is a
-    // descendant for closure-gating (blocking on them deadlocks commits /
-    // forbids the checkpoint pattern). See events.ts root-commit-block note.
-    const children = db.query(`SELECT task_id AS child_id FROM events WHERE kind = 'task_node_opened' AND parent_task_id = ?`).all(cur) as Array<{ child_id: string | null }>;
-    for (const child of children) {
-      if (!child.child_id || child.child_id === rootTaskId) continue;
-      if (!out.has(child.child_id)) { out.add(child.child_id); queue.push(child.child_id); }
-    }
-  }
-  return [...out];
-};
+// Decomposition descendants for closure-gating. The single definition lives in
+// runtime/task_descendants.ts (shared cycle-free with the events.ts root-commit
+// block, so the two can never drift again). Re-exported here under the
+// historical name for existing callers.
+export const descendantTaskIds = decompositionDescendantTaskIds;
 
 export const rootCommitReadiness = (db: Database, rootTaskId: string): RootCommitReadiness => {
   const rootRow = db.query(`SELECT 1 FROM events WHERE kind = 'task_node_opened' AND task_id = ? AND parent_task_id IS NULL LIMIT 1`).get(rootTaskId) as { 1: number } | null;
