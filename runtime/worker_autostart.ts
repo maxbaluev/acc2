@@ -74,6 +74,15 @@ export type WorkerName =
   // via ACC2_WAL_PRESSURE_THRESHOLD_MB). PASSIVE never blocks
   // writers — purely opportunistic checkpoint advancement.
   | "wal_pressure_check"
+  // 2026-05-24 (reactivity fix): timed WAL checkpoint driver. The writer
+  // connection now sets wal_autocheckpoint=0 (no synchronous
+  // checkpoint-on-COMMIT stall on the single bun loop). This low-frequency
+  // timer (default 12s, ACC2_WAL_CHECKPOINT_INTERVAL_MS) runs
+  // PRAGMA wal_checkpoint(PASSIVE) off the hot path as the steady-state
+  // reclaimer, and escalates to TRUNCATE when the WAL exceeds
+  // ACC2_WAL_FORCE_CHECKPOINT_BYTES (default 64MB) — the unbounded-growth
+  // backstop. Default ON; opt-out via ACC2_DISABLE_WORKERS=wal_checkpoint_driver.
+  | "wal_checkpoint_driver"
   // 2026-05-19 (KCs YKJYRGVJJX21XAMQS042PMK7JG +
   // G3CBVAGY2S5QN5XDC1GR7GJP0G): auto-retire stale / test-file /
   // anchor-missing rows in the pending_owner_decision_queue_view.
@@ -199,6 +208,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "lifecycle_closure_sweep",
   "contract_amendment_consumer",
   "wal_pressure_check",
+  "wal_checkpoint_driver",
   "pending_decision_retire",
   "artifact_kind_backfill",
   "owner_outcome_followup",

@@ -79,18 +79,38 @@ const applyWalPragmas = (db: Database): void => {
   // Temp tables and intermediate sorts live in RAM, not on disk. Speeds
   // up aggregate worker queries that materialize temp result sets.
   db.run("PRAGMA temp_store = MEMORY");
-  // WAL hygiene (foundational fix 2026-05-16). Pre-fix the WAL grew to
-  // 303MB in a single session because the integrity worker (the only
-  // explicit checkpoint caller) fires every 6h AND the daemon was
-  // crashing every 3h (now fixed by e446993). SQLite's default
-  // wal_autocheckpoint is 1000 pages (~4MB) but only fires on COMMIT
-  // boundaries — long-running readers (background workers holding open
-  // queries) can block checkpoint indefinitely. journal_size_limit is
-  // the structural backstop: after any checkpoint, the WAL file is
-  // truncated to at most this many bytes (forcing the next writes to
-  // recycle space rather than grow the file). 64MB is generous for
-  // normal bursts but bounds worst case.
-  db.run("PRAGMA wal_autocheckpoint = 2000");
+  // WAL hygiene (foundational fix 2026-05-16; reactivity fix 2026-05-24).
+  //
+  // HISTORY (load-bearing — do NOT strip without reading the 67MB-WAL
+  // incident note below): pre-fix the WAL grew to 303MB in a single
+  // session because the integrity worker (the only explicit checkpoint
+  // caller) fired every 6h AND the daemon crashed every 3h. SQLite's
+  // default wal_autocheckpoint is 1000 pages (~4MB) but only fires at
+  // COMMIT boundaries — long-running readers (the 10-thread read pool
+  // holding open queries during a dispatch burst) block the checkpoint
+  // from reclaiming frames, so the WAL grows AND, when a checkpoint
+  // finally does run synchronously on a COMMIT, it stalls the single
+  // bun event loop ~5s (the residual reactivity spike).
+  //
+  // REACTIVITY FIX (2026-05-24): set wal_autocheckpoint = 0 to DISABLE
+  // the synchronous checkpoint-on-COMMIT path entirely. This removes the
+  // ~5s stall from the emit hot path. The checkpoint cadence is now
+  // OWNED by an explicit OFF-hot-path driver: runtime/wal_checkpoint_driver.ts,
+  // a low-frequency timer wired into the daemon lifecycle that runs
+  // PRAGMA wal_checkpoint(PASSIVE) (never blocks on readers) every
+  // ACC2_WAL_CHECKPOINT_INTERVAL_MS (default 12s), with a hard WAL-size
+  // backstop that escalates to wal_checkpoint(TRUNCATE) when the WAL
+  // exceeds ACC2_WAL_FORCE_CHECKPOINT_BYTES (default 64MB).
+  //
+  // 67MB-WAL INCIDENT GUARD: disabling autocheckpoint is ONLY safe
+  // because (a) the timed driver reclaims on a fixed cadence regardless
+  // of COMMIT boundaries, and (b) the size backstop FORCES a TRUNCATE
+  // checkpoint under reader contention before the WAL can run away.
+  // journal_size_limit below remains the structural truncate-on-checkpoint
+  // backstop. Unbounded growth is impossible as long as the driver runs;
+  // if the driver is ever removed, autocheckpoint MUST be restored to a
+  // non-zero page count or the WAL will grow without bound.
+  db.run("PRAGMA wal_autocheckpoint = 0");
   db.run("PRAGMA journal_size_limit = 67108864");
 };
 
@@ -586,15 +606,18 @@ const applyReaderPragmas = (db: Database): void => {
  *  strip them:
  *    - `journal_mode = wal`          one writer + many readers, no blocking
  *    - `synchronous = NORMAL`        durable enough for WAL, much faster than FULL
- *    - `wal_autocheckpoint = 1000`   auto-checkpoint every 1000 pages
+ *    - `wal_autocheckpoint = 0`      synchronous checkpoint-on-COMMIT DISABLED
  *    - `busy_timeout = 5000`         wait up to 5s on writer contention
  *    - `mmap_size = 268435456`       256MB memory-mapped reads
- *  applyWalPragmas sets four of these on the writer; this helper
- *  re-applies `wal_autocheckpoint = 1000` (the writer pragmas default
- *  to 2000) so the pool path matches the documented contract value of
- *  1000 pages (~4MB checkpoint cadence). */
+ *  applyWalPragmas already sets `wal_autocheckpoint = 0` on the writer
+ *  (reactivity fix 2026-05-24 — see the long note there). This helper
+ *  only re-asserts it for the pool writer (defence-in-depth against a
+ *  future refactor that re-introduces a non-zero default upstream) and
+ *  bumps busy_timeout to 5s for multi-terminal write contention. The
+ *  checkpoint cadence for BOTH the openDb writer and the pool writer is
+ *  owned by runtime/wal_checkpoint_driver.ts, NOT by autocheckpoint. */
 const applyPoolWriterPragmas = (db: Database): void => {
-  db.run("PRAGMA wal_autocheckpoint = 1000");
+  db.run("PRAGMA wal_autocheckpoint = 0");
   db.run("PRAGMA busy_timeout = 5000");
 };
 

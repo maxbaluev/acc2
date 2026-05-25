@@ -2387,6 +2387,28 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // wal_pressure_check is activation-driven; safety net covers filesystem WAL growth without a ledger event.
   }
 
+  // Reactivity fix (2026-05-24): timed WAL checkpoint driver. The writer
+  // connection sets wal_autocheckpoint=0 (substrate/db.ts) so the ~5s
+  // synchronous checkpoint-on-COMMIT stall is gone from the single bun
+  // event loop's emit hot path. This driver OWNS the checkpoint cadence
+  // OFF the hot path: a low-frequency timer (default 12s) runs
+  // PRAGMA wal_checkpoint(PASSIVE) — never blocks on the 10-thread read
+  // pool — as the steady-state reclaimer, and escalates to TRUNCATE when
+  // the WAL exceeds ACC2_WAL_FORCE_CHECKPOINT_BYTES (default 64MB), the
+  // unbounded-growth backstop that makes a WAL runaway impossible while
+  // autocheckpoint is disabled. PASSIVE ticks do NOT emit (avoids ledger
+  // bloat); only the rare TRUNCATE escalation emits wal_checkpointed.
+  // Opt-OUT via ACC2_DISABLE_WORKERS=wal_checkpoint_driver.
+  if (isWorkerEnabled("wal_checkpoint_driver")) {
+    const { startWalCheckpointDriver } = await import("./wal_checkpoint_driver");
+    markWorkerReady("wal_checkpoint_driver");
+    recordWorkerTick("wal_checkpoint_driver");
+    const driver = startWalCheckpointDriver(db, stateDbPath, {
+      onCheckpoint: () => recordWorkerTick("wal_checkpoint_driver"),
+    });
+    workers.push(() => driver.stop());
+  }
+
   // Self-healing chain Layer 3 (owner-approved 2026-05-16, option d):
   // periodically scans for old knowledge_contradiction_observed events
   // (Layer 2 drift signal) and opens corrective directives so the brain

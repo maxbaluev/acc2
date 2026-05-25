@@ -1,5 +1,7 @@
 // F9 SQL pool tests. Five cases:
-//   (a) pool init applies the WAL + writer pragmas (autocheckpoint=1000,
+//   (a) pool init applies the WAL + writer pragmas (autocheckpoint=0 —
+//       reactivity fix 2026-05-24 disables synchronous checkpoint-on-COMMIT;
+//       cadence owned by runtime/wal_checkpoint_driver.ts —
 //       busy_timeout=5000, journal_mode=wal, synchronous=NORMAL, mmap=256MB).
 //   (b) concurrent reads share pool connections (acquireReader twice within
 //       maxReaders does not queue).
@@ -49,7 +51,11 @@ describe("F9 SqliteDbPool", () => {
     });
     expect(pragmas.journal_mode).toBe("wal");
     expect(pragmas.synchronous).toBe(1); // NORMAL
-    expect(pragmas.autocheckpoint).toBe(1000);
+    // Reactivity fix (2026-05-24): autocheckpoint=0 disables the
+    // synchronous checkpoint-on-COMMIT loop-stall. The checkpoint cadence
+    // is now owned by the timed runtime/wal_checkpoint_driver.ts (PASSIVE
+    // steady-state + TRUNCATE size backstop), not by SQLite's autocheckpoint.
+    expect(pragmas.autocheckpoint).toBe(0);
     expect(pragmas.busy_timeout).toBe(5000);
     // 2026-05-21 tuning bump: applyWalPragmas (substrate/db.ts) raised
     // mmap_size to 1GB for the writer connection so frequently-queried
