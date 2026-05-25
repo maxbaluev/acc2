@@ -31,7 +31,7 @@
 // is Phase H.
 
 import type { Database } from "bun:sqlite";
-import type { ActArtifactStatus, JsonValue, Runtime, SandboxDecl } from "../substrate/types";
+import type { ActArtifactStatus, ArtifactInterfaceMetadata, JsonValue, Runtime, SandboxDecl } from "../substrate/types";
 import { newId, nowIso } from "./ids";
 import type { EmitEventInput } from "./events";
 import { emitEvent } from "./events";
@@ -82,6 +82,13 @@ export type ActArtifactRow = {
   supersedes: string | null;
   supersededBy: string | null;
   lostVersionCount: number;
+  // UNIVERSAL_ (2026-05-24, directive 3XETJCYT, kc BD86CJ6HQS): first-
+  // class, domain-NEUTRAL interface metadata so the substrate + brain can
+  // understand WHAT an artifact does, WHEN to use it, and HOW to call it
+  // for ANY goal (Telegram action, browser flow, calendar handle,
+  // checklist, contact, script). Persisted as one nullable JSON column;
+  // NULL for legacy rows (backward-compatible).
+  interfaceMetadata: ArtifactInterfaceMetadata | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -101,6 +108,7 @@ export type InsertArtifactInput = Omit<
   | "targetFiles"
   | "sourceCandidateId"
   | "ownerGateVerdict"
+  | "interfaceMetadata"
 > & {
   id?: string;
   /** Optional kind discriminator. Defaults to `runtime_action` on
@@ -117,6 +125,9 @@ export type InsertArtifactInput = Omit<
   supersedes?: string | null;
   supersededBy?: string | null;
   lostVersionCount?: number | null;
+  /** UNIVERSAL_ (2026-05-24): domain-neutral interface descriptor.
+   *  Defaults to NULL on insert when omitted (legacy-seed semantics). */
+  interfaceMetadata?: ArtifactInterfaceMetadata | null;
 };
 
 // ── EMA / scoring helpers ──────────────────────────────────────────
@@ -168,6 +179,24 @@ const parseStringArray = (raw: unknown): string[] | null => {
   } catch { return null; }
 };
 
+/** UNIVERSAL_ (2026-05-24): parse the nullable JSON `interface_metadata`
+ *  column. Backward-compatible — NULL / empty / malformed JSON all decode
+ *  to null so legacy rows (and rows written before the column existed)
+ *  read cleanly without throwing. The descriptor is an open-ended
+ *  payload, so we trust whatever JSON object is stored (free-string fields
+ *  per Architecture.md "add capability vocabulary by admitting payload"). */
+const parseInterfaceMetadata = (raw: unknown): ArtifactInterfaceMetadata | null => {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "string" || raw === "") return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as ArtifactInterfaceMetadata;
+    }
+    return null;
+  } catch { return null; }
+};
+
 const mapRow = (raw: Record<string, unknown>): ActArtifactRow => ({
   id: raw.id as string,
   runtime: (raw.runtime as Runtime | null) ?? null,
@@ -202,6 +231,7 @@ const mapRow = (raw: Record<string, unknown>): ActArtifactRow => ({
   supersedes: (raw.supersedes as string | null) ?? null,
   supersededBy: (raw.superseded_by as string | null) ?? null,
   lostVersionCount: ((raw.lost_version_count as number | null) ?? 0),
+  interfaceMetadata: parseInterfaceMetadata(raw.interface_metadata),
   createdAt: raw.created_at as string,
   updatedAt: raw.updated_at as string,
 });
@@ -228,6 +258,12 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): ActArt
     ? null
     : JSON.stringify(input.fixtureInput);
   const fixtureExpected = input.fixtureExpectedResidual ?? null;
+  // UNIVERSAL_ (2026-05-24): serialize the domain-neutral interface
+  // descriptor to its nullable JSON column. Omitted → NULL (legacy-seed
+  // semantics, backward-compatible).
+  const interfaceMetadataJson = input.interfaceMetadata === null || input.interfaceMetadata === undefined
+    ? null
+    : JSON.stringify(input.interfaceMetadata);
   db.run(
     `INSERT INTO act_artifact (
        id, runtime, kind, body, declared_sandbox, state_root,
@@ -235,9 +271,9 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): ActArt
        recent_residual_mean, recent_kill_count, status, name,
        fixture_input, fixture_expected_residual,
        intent, summary, target_files, target_resources, source_candidate_id, owner_gate_verdict,
-       supersedes, superseded_by, lost_version_count,
+       supersedes, superseded_by, lost_version_count, interface_metadata,
        created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.runtime ?? null,
@@ -264,6 +300,7 @@ export const insertArtifact = (db: Database, input: InsertArtifactInput): ActArt
       input.supersedes ?? null,
       input.supersededBy ?? null,
       input.lostVersionCount ?? 0,
+      interfaceMetadataJson,
       ts,
       ts,
     ],

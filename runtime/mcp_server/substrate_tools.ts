@@ -8,7 +8,7 @@
 
 import type { z } from "zod";
 import type { Database } from "bun:sqlite";
-import type { BunSandboxDecl, CamofoxSandboxDecl, JsonValue, Runtime, SandboxDecl, SubstrateOrigin, UvSandboxDecl } from "../../substrate/types";
+import type { ArtifactInterfaceMetadata, BunSandboxDecl, CamofoxSandboxDecl, JsonValue, Runtime, SandboxDecl, SubstrateOrigin, UvSandboxDecl } from "../../substrate/types";
 import { EVENT_KINDS, getCurrentEventKinds } from "../../substrate/event_kinds";
 import { emitEvent, getEventById, type EmitEventInput } from "../events";
 import { summarizeEffectiveness } from "../brain_effectiveness";
@@ -1574,6 +1574,11 @@ export const handleAdmitArtifact = async (
       renderedDocxId: args.rendered_docx_id,
       markdownBodyId: args.markdown_body_id,
       referenceDocxArtifactId: args.reference_docx_artifact_id,
+      // UNIVERSAL_ (2026-05-24): thread the domain-neutral interface
+      // descriptor through to admission. The schema validates it as an
+      // open-ended payload; admitArtifact persists it to the
+      // interface_metadata column. NULL/undefined → legacy behavior.
+      interfaceMetadata: (args.interface_metadata ?? null) as ArtifactInterfaceMetadata | null,
     },
     (event) => {
       try {

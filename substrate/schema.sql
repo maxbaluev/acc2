@@ -223,6 +223,20 @@ CREATE TABLE IF NOT EXISTS act_artifact (
   supersedes                  TEXT,
   superseded_by               TEXT,
   lost_version_count          INTEGER NOT NULL DEFAULT 0,
+  -- UNIVERSAL_ (2026-05-24, directive 3XETJCYT, kc BD86CJ6HQS): first-
+  -- class, domain-NEUTRAL interface metadata so the substrate (and the
+  -- brain) can UNDERSTAND what an artifact does, WHEN to use it, and HOW
+  -- to call it — for ANY human goal, not just code. One nullable JSON
+  -- column (a polymorphic payload field, per Architecture.md "add
+  -- capability vocabulary by admitting rows/payload, not fixed enums")
+  -- holding an open-ended descriptor: purpose, goal_shapes,
+  -- usage_examples, preconditions, effects, cost_profile,
+  -- reliability_profile, inputs_schema, outputs_schema. Every field is
+  -- optional and domain-neutral — it describes a Telegram action, a
+  -- browser flow, a calendar handle, a checklist, a contact, AND a
+  -- script equally. NULL for legacy rows admitted before this column
+  -- (backward-compatible: missing-metadata artifacts still admit + run).
+  interface_metadata          TEXT,
   created_at                  TEXT NOT NULL,
   updated_at                  TEXT NOT NULL
 );
