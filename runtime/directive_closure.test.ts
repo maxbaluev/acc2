@@ -18,6 +18,24 @@ import { readyTasks } from "./task_topology";
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
 
+// lesson_coverage_hard_gate: every terminal-COMMITTED node must attempt a
+// lesson. The cheapest VALID attempt for fixtures that aren't exercising the
+// lesson dimension is the explicit no_new_lesson marker (a lesson_extracted
+// payload flag carrying reason + evidence). Helper keeps the prior fully-covered
+// graphs valid without weakening the gate.
+const markNoNewLesson = (
+  db: ReturnType<typeof openDb>,
+  directiveId: string,
+  taskId: string,
+) =>
+  emitEvent(db, {
+    kind: "lesson_extracted",
+    substrate_origin: "brain",
+    directive_id: directiveId,
+    task_id: taskId,
+    payload: { no_new_lesson: true, reason: "fixture: nothing new to learn", evidence: "fixture" },
+  });
+
 const openFiniteDirective = (db: ReturnType<typeof openDb>) => {
   const directiveId = newId();
   const taskId = newId();
@@ -56,6 +74,7 @@ describe("directive_closure", () => {
       task_id: taskId,
       payload: {},
     });
+    markNoNewLesson(db, directiveId, taskId);
     expect(directiveCloseReason(db, directiveId)).toBe("all_tasks_terminal");
   });
 
@@ -99,6 +118,7 @@ describe("directive_closure", () => {
       task_id: taskId,
       payload: {},
     });
+    markNoNewLesson(db, directiveId, taskId);
 
     expect(maybeCloseFinishedDirective(db, directiveId)).toBe("all_tasks_terminal");
     expect(maybeCloseFinishedDirective(db, directiveId)).toBeNull();
@@ -119,6 +139,7 @@ describe("directive_closure", () => {
       task_id: auto.taskId,
       payload: {},
     });
+    markNoNewLesson(db, auto.directiveId, auto.taskId);
     maybeCloseFinishedDirective(db, auto.directiveId);
 
     const archived = openFiniteDirective(db);
@@ -153,6 +174,7 @@ describe("directive_closure", () => {
       task_id: done.taskId,
       payload: {},
     });
+    markNoNewLesson(db, done.directiveId, done.taskId);
     maybeCloseFinishedDirective(db, done.directiveId);
 
     // Directive whose root is committed but no directive_closed event was
@@ -398,6 +420,7 @@ describe("directive_closure", () => {
       task_id: done.taskId,
       payload: {},
     });
+    markNoNewLesson(db, done.directiveId, done.taskId);
     maybeCloseFinishedDirective(db, done.directiveId);
 
     const rows = db
@@ -421,13 +444,19 @@ describe("coverage_invariant_hard_gate", () => {
     emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: childId, parent_task_id: rootTaskId, payload: { goal: "child", ...extra } });
     emitEvent(db, { kind: "task_edge_recorded", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, payload: { kind: "refines", from_task: rootTaskId, to_task: childId } });
   };
-  const term = (db: ReturnType<typeof openDb>, directiveId: string, taskId: string, kind: "task_committed" | "task_failed" | "task_abandoned" = "task_committed") =>
+  // term() commits/fails a node. For committed nodes it also emits the
+  // no_new_lesson marker (lesson_coverage_hard_gate) so the node satisfies the
+  // lesson-coverage dimension by default; failed/abandoned nodes are exempt.
+  const term = (db: ReturnType<typeof openDb>, directiveId: string, taskId: string, kind: "task_committed" | "task_failed" | "task_abandoned" = "task_committed") => {
     emitEvent(db, { kind, substrate_origin: "brain", directive_id: directiveId, task_id: taskId, payload: {} });
+    if (kind === "task_committed") markNoNewLesson(db, directiveId, taskId);
+  };
   // A root with descendants may only commit after a clean closure audit (the
   // existing events.ts root-commit gate), so realistic fixtures audit then commit.
   const commitRoot = (db: ReturnType<typeof openDb>, directiveId: string, rootTaskId: string) => {
     emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.12, payload: { closure_residual: 0.12 } });
     emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, payload: {} });
+    markNoNewLesson(db, directiveId, rootTaskId);
   };
 
   test("deliverable-declared leaf with no committed deliverable blocks closure until emitted", () => {
@@ -492,5 +521,134 @@ describe("coverage_invariant_hard_gate", () => {
     commitRoot(db, directiveId, rootTaskId);
     expect(directiveCoverage(db, directiveId)?.covered).toBe(true);
     expect(directiveCloseReason(db, directiveId)).toBe("all_tasks_terminal");
+  });
+});
+
+describe("lesson_coverage_hard_gate", () => {
+  const mkDirective = (db: ReturnType<typeof openDb>) => {
+    const directiveId = newId();
+    const rootTaskId = newId();
+    emitEvent(db, { kind: "directive_opened", substrate_origin: "owner", directive_id: directiveId, task_id: directiveId, payload: { directive_text: "lesson fixture", lifecycle: "finite" } });
+    emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, parent_task_id: null, payload: { goal: "root" } });
+    return { directiveId, rootTaskId };
+  };
+  const addChild = (db: ReturnType<typeof openDb>, directiveId: string, rootTaskId: string, childId: string) => {
+    emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: childId, parent_task_id: rootTaskId, payload: { goal: "child" } });
+    emitEvent(db, { kind: "task_edge_recorded", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, payload: { kind: "refines", from_task: rootTaskId, to_task: childId } });
+  };
+  const commitBare = (db: ReturnType<typeof openDb>, directiveId: string, taskId: string) =>
+    emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: taskId, payload: {} });
+  const commitRootBare = (db: ReturnType<typeof openDb>, directiveId: string, rootTaskId: string) => {
+    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.12, payload: { closure_residual: 0.12 } });
+    emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, payload: {} });
+  };
+
+  // (a) terminal-covered (committed) node with NO lesson and NO marker is a
+  // missing_lesson_node and blocks closure.
+  test("committed node with no lesson and no marker blocks closure", () => {
+    const db = openDb(":memory:");
+    const { directiveId, rootTaskId } = mkDirective(db);
+    const child = newId();
+    addChild(db, directiveId, rootTaskId, child);
+    commitBare(db, directiveId, child);
+    // root needs a lesson too, but give it one so the FAILURE is isolated to child
+    commitRootBare(db, directiveId, rootTaskId);
+    emitEvent(db, { kind: "lesson_extracted", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, payload: { proposed_action: "x" } });
+    emitEvent(db, { kind: "knowledge_candidate", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, payload: { claim: "k" } });
+    const cov = directiveCoverage(db, directiveId)!;
+    expect(cov.missing_lesson_nodes).toContain(child);
+    expect(cov.covered).toBe(false);
+    expect(directiveCloseReason(db, directiveId)).toBeNull();
+  });
+
+  // (b) emitting lesson_extracted + knowledge_candidate clears the node.
+  test("lesson_extracted + knowledge_candidate clears the missing-lesson gap", () => {
+    const db = openDb(":memory:");
+    const { directiveId, rootTaskId } = mkDirective(db);
+    const child = newId();
+    addChild(db, directiveId, rootTaskId, child);
+    commitBare(db, directiveId, child);
+    commitRootBare(db, directiveId, rootTaskId);
+    // Positive attempts for BOTH covered nodes.
+    for (const t of [rootTaskId, child]) {
+      emitEvent(db, { kind: "lesson_extracted", substrate_origin: "brain", directive_id: directiveId, task_id: t, payload: { proposed_action: "do x" } });
+      emitEvent(db, { kind: "knowledge_candidate", substrate_origin: "brain", directive_id: directiveId, task_id: t, payload: { claim: "k" } });
+    }
+    const cov = directiveCoverage(db, directiveId)!;
+    expect(cov.missing_lesson_nodes).toEqual([]);
+    expect(cov.covered).toBe(true);
+    expect(directiveCloseReason(db, directiveId)).toBe("all_tasks_terminal");
+  });
+
+  // (c) explicit no_new_lesson marker also clears the node.
+  test("explicit no_new_lesson marker clears the missing-lesson gap", () => {
+    const db = openDb(":memory:");
+    const { directiveId, rootTaskId } = mkDirective(db);
+    const child = newId();
+    addChild(db, directiveId, rootTaskId, child);
+    commitBare(db, directiveId, child);
+    commitRootBare(db, directiveId, rootTaskId);
+    for (const t of [rootTaskId, child]) {
+      markNoNewLesson(db, directiveId, t);
+    }
+    const cov = directiveCoverage(db, directiveId)!;
+    expect(cov.missing_lesson_nodes).toEqual([]);
+    expect(cov.skipped_with_reason_count).toBe(2);
+    expect(cov.covered).toBe(true);
+    expect(directiveCloseReason(db, directiveId)).toBe("all_tasks_terminal");
+  });
+
+  // A lesson_extracted carrying the no_new_lesson flag is NOT counted as a real
+  // lesson attempt, and the positive path still requires a knowledge_candidate.
+  test("no_new_lesson marker is not a real lesson; positive path needs knowledge_candidate", () => {
+    const db = openDb(":memory:");
+    const { directiveId, rootTaskId } = mkDirective(db);
+    const child = newId();
+    addChild(db, directiveId, rootTaskId, child);
+    commitBare(db, directiveId, child);
+    commitRootBare(db, directiveId, rootTaskId);
+    // root: real lesson but NO knowledge_candidate → positive path incomplete,
+    // and no marker → still missing.
+    emitEvent(db, { kind: "lesson_extracted", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, payload: { proposed_action: "x" } });
+    // child: marker → cleared.
+    markNoNewLesson(db, directiveId, child);
+    const cov = directiveCoverage(db, directiveId)!;
+    expect(cov.missing_lesson_nodes).toContain(rootTaskId);
+    expect(cov.missing_lesson_nodes).not.toContain(child);
+    expect(cov.lesson_attempted_count).toBe(1); // root's real lesson
+    expect(cov.knowledge_attempted_count).toBe(0);
+    expect(cov.skipped_with_reason_count).toBe(1); // child's marker
+    expect(cov.covered).toBe(false);
+  });
+
+  // (d) metrics counts are correct across mixed attempt shapes.
+  test("metrics counts are correct (positive + negative + promoted)", () => {
+    const db = openDb(":memory:");
+    const { directiveId, rootTaskId } = mkDirective(db);
+    const a = newId();
+    const b = newId();
+    addChild(db, directiveId, rootTaskId, a);
+    addChild(db, directiveId, rootTaskId, b);
+    commitBare(db, directiveId, a);
+    commitBare(db, directiveId, b);
+    commitRootBare(db, directiveId, rootTaskId);
+    // a: positive attempt + promotion
+    emitEvent(db, { kind: "lesson_extracted", substrate_origin: "brain", directive_id: directiveId, task_id: a, payload: { proposed_action: "x" } });
+    emitEvent(db, { kind: "knowledge_candidate", substrate_origin: "brain", directive_id: directiveId, task_id: a, payload: { claim: "k" } });
+    emitEvent(db, { kind: "knowledge_promoted", substrate_origin: "substrate_auto", directive_id: directiveId, task_id: a, payload: {} });
+    // b: negative marker
+    markNoNewLesson(db, directiveId, b);
+    // root: positive attempt (no promotion, but knowledge candidate → promoted_or_pending)
+    emitEvent(db, { kind: "lesson_extracted", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, payload: { proposed_action: "y" } });
+    emitEvent(db, { kind: "knowledge_candidate", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, payload: { claim: "k2" } });
+
+    const cov = directiveCoverage(db, directiveId)!;
+    expect(cov.missing_lesson_nodes).toEqual([]);
+    expect(cov.covered).toBe(true);
+    expect(cov.lesson_attempted_count).toBe(2); // a + root
+    expect(cov.knowledge_attempted_count).toBe(2); // a + root
+    expect(cov.skipped_with_reason_count).toBe(1); // b
+    // a (promoted) + a/root (knowledge candidate) → a, root counted; b has no knowledge candidate/promotion
+    expect(cov.promoted_or_pending_count).toBe(2);
   });
 });

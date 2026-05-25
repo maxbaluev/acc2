@@ -103,6 +103,43 @@ const COVERAGE_TERMINAL_KINDS = ["task_committed", "task_failed", "task_abandone
 const COVERAGE_FAILED_KINDS = ["task_failed", "task_abandoned"] as const;
 const COVERAGE_COMMITTED_KINDS = ["task_committed", "task_committed_superseded"] as const;
 
+// ── Lesson-coverage dimension (amendment lesson_coverage_hard_gate) ──────────
+//
+// PROBLEM: lesson_extracted counted as a deliverable ONLY when it was emitted —
+// nothing REQUIRED every explored node to attempt a lesson + knowledge
+// candidate. Per-facet depth was therefore left unlearned; the lesson space was
+// covered only opportunistically.
+//
+// FIX: for every TERMINAL-COVERED node (committed/superseded — a node whose work
+// actually landed, not a failed/abandoned leaf), require a "lesson coverage
+// attempt": EITHER
+//   (positive) a real lesson_extracted AND a knowledge_candidate for the task, OR
+//   (negative) an explicit no_new_lesson marker carrying reason + evidence.
+// A terminal-covered node with neither is a `missing_lesson_node` and blocks
+// closure. Promotion stays OUTCOME-BASED — the hard gate is on ATTEMPT/coverage,
+// never forced promotion.
+//
+// NEGATIVE-MARKER REPRESENTATION (event_kinds.ts / substrate-entity-map check):
+// rather than minting a new event kind, the negative marker is a PAYLOAD FLAG on
+// the existing brain-produced `lesson_extracted` event:
+//   { no_new_lesson: true, reason: string, evidence: <any> }
+// (the alias `no_reusable_knowledge: true` is also honoured). This reuses a kind
+// the scheduler + checkClosureDeliverables already scan, stays event-sourced and
+// idempotent (presence is set-membership, not a counter), and avoids adding
+// capability vocabulary by row instead of by enum (CLAUDE.md "Act And
+// Verification"). A `lesson_extracted` carrying the flag is a coverage ATTEMPT,
+// NOT a deliverable lesson — checkClosureDeliverables continues to require
+// proposed_action for the deliverable dimension, which the marker omits.
+
+const LESSON_KIND = "lesson_extracted" as const;
+const KNOWLEDGE_KIND = "knowledge_candidate" as const;
+
+/** Negative-marker predicate: a lesson_extracted payload that DECLARES the node
+ *  was considered and nothing new was learned. Carries reason + evidence so the
+ *  skip is auditable, not a silent omission. */
+const isNoNewLessonMarker = (payload: Record<string, unknown>): boolean =>
+  payload.no_new_lesson === true || payload.no_reusable_knowledge === true;
+
 export interface Coverage {
   /** Root task the coverage was computed against (the directive's root node). */
   root_task_id: string | null;
@@ -118,6 +155,22 @@ export interface Coverage {
   failed_unsuperseded: string[];
   /** Opened non-root nodes not reachable from the root via parent_task_id. */
   orphans: string[];
+  // ── Lesson-coverage dimension (lesson_coverage_hard_gate) ──────────────────
+  /** Count of terminal-covered nodes that emitted a real (non-marker)
+   *  lesson_extracted. */
+  lesson_attempted_count: number;
+  /** Count of terminal-covered nodes that emitted a knowledge_candidate. */
+  knowledge_attempted_count: number;
+  /** Count of terminal-covered nodes cleared via an explicit no_new_lesson
+   *  marker (the negative path — considered, nothing new). */
+  skipped_with_reason_count: number;
+  /** Count of terminal-covered nodes whose lesson_extracted was subsequently
+   *  promoted OR whose knowledge_candidate is pending/confirmed — observability
+   *  for the OUTCOME-BASED promotion side (NOT a gate). */
+  promoted_or_pending_count: number;
+  /** Terminal-covered nodes with NEITHER a (real lesson + knowledge_candidate)
+   *  NOR a no_new_lesson marker. Non-empty ⇒ closure refused. */
+  missing_lesson_nodes: string[];
 }
 
 const hasAnyEventKind = (db: Database, taskId: string, kinds: readonly string[]): boolean => {
@@ -126,6 +179,20 @@ const hasAnyEventKind = (db: Database, taskId: string, kinds: readonly string[])
     .query(`SELECT 1 FROM events WHERE task_id = ? AND kind IN (${placeholders}) LIMIT 1`)
     .get(taskId, ...kinds) as { 1: number } | null;
   return row !== null;
+};
+
+/** All payloads of `kind` for a task (parsed, malformed rows dropped). Used by
+ *  the lesson-coverage dimension to distinguish real lessons from no_new_lesson
+ *  markers carried on the same event kind. */
+const payloadsForTaskKind = (db: Database, taskId: string, kind: string): Array<Record<string, unknown>> => {
+  const rows = db
+    .query(`SELECT payload FROM events WHERE task_id = ? AND kind = ?`)
+    .all(taskId, kind) as Array<{ payload: string }>;
+  const out: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    try { out.push(JSON.parse(r.payload ?? "{}") as Record<string, unknown>); } catch { /* skip malformed */ }
+  }
+  return out;
 };
 
 /** The decomposition parent of a task (parent_task_id from its first
@@ -143,8 +210,15 @@ const decompositionParent = (db: Database, taskId: string): string | null => {
 
 /** Event-sourced coverage of a directive's root DAG. The single completion
  *  predicate: a directive is "fully covered" iff coverage.covered === true,
- *  i.e. open_nodes, missing_deliverables, failed_unsuperseded and orphans are
- *  ALL empty. Pure / idempotent — recomputed from the ledger every call.
+ *  i.e. open_nodes, missing_deliverables, failed_unsuperseded, orphans AND
+ *  missing_lesson_nodes are ALL empty. Pure / idempotent — recomputed from the
+ *  ledger every call.
+ *
+ *  The lesson-coverage dimension (lesson_coverage_hard_gate) additionally
+ *  requires every terminal-COMMITTED node to attempt a lesson — EITHER a real
+ *  lesson_extracted + knowledge_candidate, OR an explicit no_new_lesson marker
+ *  (a lesson_extracted payload flag carrying reason + evidence). Nodes with
+ *  neither are missing_lesson_nodes and refuse closure.
  *
  *  The root is the directive's first task_node_opened with a null parent. The
  *  covered node set is {root} ∪ decomposition descendants (parent_task_id
@@ -156,6 +230,13 @@ export const computeCoverage = (db: Database, rootTaskId: string): Coverage => {
   const failed_unsuperseded: string[] = [];
   const orphans: string[] = [];
 
+  // Lesson-coverage dimension accumulators (lesson_coverage_hard_gate).
+  const missing_lesson_nodes: string[] = [];
+  let lesson_attempted_count = 0;
+  let knowledge_attempted_count = 0;
+  let skipped_with_reason_count = 0;
+  let promoted_or_pending_count = 0;
+
   // The narrow decomposition set the commit gate also uses.
   const descendants = decompositionDescendantTaskIds(db, rootTaskId);
   const coveredSet = new Set<string>([rootTaskId, ...descendants]);
@@ -165,6 +246,32 @@ export const computeCoverage = (db: Database, rootTaskId: string): Coverage => {
     if (!terminal) {
       open_nodes.push(taskId);
       continue; // open nodes are surfaced once; not also "failed".
+    }
+    // ── Lesson-coverage attempt (lesson_coverage_hard_gate) ──────────────────
+    // Required for nodes whose work LANDED (committed/superseded). Failed/
+    // abandoned leaves are handled by failed_unsuperseded above — they were not
+    // "explored to a deliverable", so we do not also demand a lesson from them.
+    if (hasAnyEventKind(db, taskId, COVERAGE_COMMITTED_KINDS)) {
+      const lessons = payloadsForTaskKind(db, taskId, LESSON_KIND);
+      const realLessons = lessons.filter((p) => !isNoNewLessonMarker(p));
+      const markers = lessons.filter((p) => isNoNewLessonMarker(p));
+      const knowledge = payloadsForTaskKind(db, taskId, KNOWLEDGE_KIND);
+
+      if (realLessons.length > 0) lesson_attempted_count += 1;
+      if (knowledge.length > 0) knowledge_attempted_count += 1;
+      if (markers.length > 0) skipped_with_reason_count += 1;
+
+      // Observability for the OUTCOME-BASED promotion side (NOT a gate): a node
+      // whose lesson was promoted OR whose knowledge candidate landed (pending/
+      // confirmed) is "promoted_or_pending".
+      const promoted = hasAnyEventKind(db, taskId, ["knowledge_promoted", "knowledge_synthesized"]);
+      if (promoted || knowledge.length > 0) promoted_or_pending_count += 1;
+
+      // Hard gate (ATTEMPT, not promotion): EITHER (real lesson AND knowledge
+      // candidate) OR an explicit no_new_lesson marker. Neither ⇒ missing.
+      const positiveAttempt = realLessons.length > 0 && knowledge.length > 0;
+      const negativeMarker = markers.length > 0;
+      if (!positiveAttempt && !negativeMarker) missing_lesson_nodes.push(taskId);
     }
     // A node that reached failed/abandoned without a committed/superseded
     // event is only covered when a replacement path covers the same expected
@@ -221,9 +328,22 @@ export const computeCoverage = (db: Database, rootTaskId: string): Coverage => {
     open_nodes.length === 0 &&
     missing_deliverables.length === 0 &&
     failed_unsuperseded.length === 0 &&
-    orphans.length === 0;
+    orphans.length === 0 &&
+    missing_lesson_nodes.length === 0;
 
-  return { root_task_id: rootTaskId, covered, open_nodes, missing_deliverables, failed_unsuperseded, orphans };
+  return {
+    root_task_id: rootTaskId,
+    covered,
+    open_nodes,
+    missing_deliverables,
+    failed_unsuperseded,
+    orphans,
+    lesson_attempted_count,
+    knowledge_attempted_count,
+    skipped_with_reason_count,
+    promoted_or_pending_count,
+    missing_lesson_nodes,
+  };
 };
 
 /** Resolve a finite directive's root task id (first task_node_opened with a
