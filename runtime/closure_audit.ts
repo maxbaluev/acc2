@@ -315,6 +315,250 @@ const verifyTargetFilesHaveAmendments = (
   };
 };
 
+type DeliverableBodyCheck = {
+  verification: SubstrateVerification;
+  inspectedArtifactIds: string[];
+  independentDeliverableBodyReread: boolean;
+  bodySourceKind: string;
+  failureAxes: Record<string, string>;
+};
+
+type RealitySurfaceCheck = {
+  verifications: SubstrateVerifications;
+  evidence: Record<string, string[]>;
+  failureAxes: Record<string, string>;
+};
+
+type EventPayloadRow = { id: string; payload: string; residual?: number | null; outcome?: string | null };
+
+const parseJsonObject = (raw: string | null | undefined): Record<string, unknown> => {
+  try {
+    const parsed = JSON.parse(raw ?? "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+};
+
+const objectAt = (value: unknown, path: string[]): unknown => path.reduce((cursor, key) => (
+  cursor && typeof cursor === "object" && !Array.isArray(cursor) ? (cursor as Record<string, unknown>)[key] : undefined
+), value);
+
+const boolAt = (payload: Record<string, unknown>, paths: string[][]): boolean | null => {
+  for (const path of paths) {
+    const value = objectAt(payload, path);
+    if (typeof value === "boolean") return value;
+  }
+  return null;
+};
+
+const numberAt = (payload: Record<string, unknown>, paths: string[][]): number | null => {
+  for (const path of paths) {
+    const value = objectAt(payload, path);
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return null;
+};
+
+const stringAt = (payload: Record<string, unknown>, paths: string[][]): string | null => {
+  for (const path of paths) {
+    const value = objectAt(payload, path);
+    if (typeof value === "string") return value.toLowerCase();
+  }
+  return null;
+};
+
+const latestStateRows = (db: Database, directiveId: string): EventPayloadRow[] => db
+  .query<EventPayloadRow, [string]>(
+    "SELECT id, payload FROM events WHERE directive_id = ? AND kind = 'state_snapshot_recorded' ORDER BY ts DESC, rowid DESC LIMIT 50",
+  )
+  .all(directiveId);
+
+const stateSurfaceVerification = (
+  db: Database,
+  directiveId: string,
+  surface: string,
+  evaluate: (payload: Record<string, unknown>) => boolean | null,
+): SubstrateVerification => {
+  for (const row of latestStateRows(db, directiveId)) {
+    const verdict = evaluate(parseJsonObject(row.payload));
+    if (verdict === null) continue;
+    return { verified: verdict, evidence_event_ids: [row.id], query: "state_snapshot_recorded latest 50 for surface=" + surface };
+  }
+  return { verified: false, evidence_event_ids: [], query: "state_snapshot_recorded latest 50 missing surface=" + surface };
+};
+
+const verifyGitClean = (db: Database, directiveId: string): SubstrateVerification => stateSurfaceVerification(db, directiveId, "git_clean", (payload) => {
+  const clean = boolAt(payload, [["git_clean"], ["clean"], ["status_clean"], ["git", "clean"], ["git_status", "clean"]]);
+  if (clean !== null) return clean;
+  const status = stringAt(payload, [["git_status"], ["status"], ["git", "status"], ["git_status", "status"]]);
+  if (status === null) return null;
+  if (["clean", "working tree clean", "nothing to commit"].some((s) => status.includes(s))) return true;
+  if (["dirty", "modified", "untracked", "changes not staged"].some((s) => status.includes(s))) return false;
+  return null;
+});
+
+const verifyTestsPassed = (db: Database, directiveId: string): SubstrateVerification => {
+  const stateCheck = stateSurfaceVerification(db, directiveId, "tests_passed", (payload) => {
+    const passed = boolAt(payload, [["tests_passed"], ["passed"], ["test_result", "passed"], ["tests", "passed"]]);
+    if (passed !== null) return passed;
+    const residual = numberAt(payload, [["test_residual"], ["test_result", "residual"], ["tests", "residual"]]);
+    if (residual !== null) return residual < 0.3;
+    const status = stringAt(payload, [["test_status"], ["test_result", "status"], ["tests", "status"]]);
+    if (status === null) return null;
+    if (["pass", "passed", "success", "ok"].includes(status)) return true;
+    if (["fail", "failed", "error"].includes(status)) return false;
+    return null;
+  });
+  if (stateCheck.evidence_event_ids.length > 0) return stateCheck;
+  const rows = db.query<EventPayloadRow, [string]>("SELECT id, payload, residual, outcome FROM events WHERE directive_id = ? AND kind = 'action_scored' ORDER BY ts DESC, rowid DESC LIMIT 50").all(directiveId);
+  for (const row of rows) {
+    const payload = parseJsonObject(row.payload);
+    const label = [payload.verifier_kind, payload.check_kind, payload.command, payload.intent, payload.summary].filter((v): v is string => typeof v === "string").join(" ").toLowerCase();
+    if (!/(test|bun test|typecheck)/.test(label)) continue;
+    const residual = typeof row.residual === "number" ? row.residual : numberAt(payload, [["residual"], ["observed_residual"]]);
+    const outcome = (row.outcome ?? (typeof payload.outcome === "string" ? payload.outcome : "")).toLowerCase();
+    return { verified: outcome === "success" || (typeof residual === "number" && residual < 0.3), evidence_event_ids: [row.id], query: "action_scored latest 50 test-labeled" };
+  }
+  return stateCheck;
+};
+
+const artifactIdsForPredicate = (predicate: ClosurePredicate): string[] => {
+  const ids = [...stringArrayField(predicate.rendered_artifact_ids), ...stringArrayField(predicate.rendered_docx_ids), ...stringArrayField(predicate.deliverable_artifact_ids), ...stringArrayField(predicate.artifact_ids)];
+  for (const key of ["rendered_artifact_id", "rendered_docx_id", "deliverable_artifact_id"]) {
+    const value = predicate[key];
+    if (typeof value === "string" && value.trim().length > 0) ids.push(value);
+  }
+  return Array.from(new Set(ids));
+};
+
+const verifyRenderedArtifact = (db: Database, predicate: ClosurePredicate): SubstrateVerification => {
+  const ids = artifactIdsForPredicate(predicate);
+  if (ids.length === 0) return { verified: false, evidence_event_ids: [], query: "act_artifact rendered ids missing" };
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = db.query<{ id: string; body: string }, string[]>("SELECT id, body FROM act_artifact WHERE id IN (" + placeholders + ")").all(...ids);
+  const found = new Set(rows.map((r) => r.id));
+  return { verified: ids.every((id) => found.has(id)) && rows.every((r) => r.body.trim().length > 0), evidence_event_ids: rows.map((r) => r.id), query: "act_artifact rendered existence/body check" };
+};
+
+const verifyOwnerPublication = (db: Database, directiveId: string, predicate: ClosurePredicate): SubstrateVerification => {
+  const ids = artifactIdsForPredicate(predicate);
+  const rows = db.query<EventPayloadRow, [string]>("SELECT id, payload FROM events WHERE directive_id = ? AND kind = 'owner_deliverable_published' ORDER BY ts DESC, rowid DESC LIMIT 50").all(directiveId);
+  for (const row of rows) {
+    if (ids.length === 0) return { verified: true, evidence_event_ids: [row.id], query: "owner_deliverable_published latest 50" };
+    const payload = parseJsonObject(row.payload);
+    const publishedIds = [payload.artifact_id, payload.deliverable_artifact_id, ...(Array.isArray(payload.artifact_ids) ? payload.artifact_ids : [])].filter((v): v is string => typeof v === "string");
+    if (publishedIds.some((id) => ids.includes(id))) return { verified: true, evidence_event_ids: [row.id], query: "owner_deliverable_published artifact match" };
+  }
+  return { verified: false, evidence_event_ids: [], query: "owner_deliverable_published missing" };
+};
+
+const verifyQueueDrainTrend = (db: Database, directiveId: string): SubstrateVerification => stateSurfaceVerification(db, directiveId, "queue_drain_trend", (payload) => {
+  const trend = stringAt(payload, [["queue_drain_trend"], ["ready_queue", "trend"], ["convergence", "ready_queue_trend"], ["convergence", "queue_trend"]]);
+  if (trend) {
+    if (["draining", "empty", "settled", "down"].includes(trend)) return true;
+    if (["growing", "stalled", "up", "storm"].includes(trend)) return false;
+  }
+  const delta = numberAt(payload, [["ready_count_delta"], ["ready_queue", "delta"], ["convergence", "ready_count_delta"]]);
+  if (delta !== null) return delta <= 0;
+  const before = numberAt(payload, [["ready_before"], ["ready_queue", "before"]]);
+  const after = numberAt(payload, [["ready_after"], ["ready_queue", "after"]]);
+  return before !== null && after !== null ? after <= before : null;
+});
+
+const verifyRequiredRealitySurfaces = (db: Database, directiveId: string, predicate: ClosurePredicate): RealitySurfaceCheck => {
+  const verifications: SubstrateVerifications = {};
+  const evidence: Record<string, string[]> = {};
+  const failureAxes: Record<string, string> = {};
+  const add = (surface: string, verification: SubstrateVerification) => {
+    const key = "reality_surface_" + surface;
+    verifications[key] = verification;
+    evidence[surface] = verification.evidence_event_ids;
+    if (!verification.verified) failureAxes[key] = verification.evidence_event_ids.length > 0 ? "contradictory reality evidence" : "missing reality evidence";
+  };
+  for (const surface of stringArrayField(predicate.required_reality_surfaces)) {
+    if (surface === "git_clean" || surface === "git_status_clean") add(surface, verifyGitClean(db, directiveId));
+    else if (surface === "tests_passed" || surface === "test_passed") add(surface, verifyTestsPassed(db, directiveId));
+    else if (surface === "rendered_artifact" || surface === "rendered_artifact_exists") add(surface, verifyRenderedArtifact(db, predicate));
+    else if (surface === "owner_publication" || surface === "owner_deliverable_published") add(surface, verifyOwnerPublication(db, directiveId, predicate));
+    else if (surface === "queue_drain_trend" || surface === "ready_queue_draining") add(surface, verifyQueueDrainTrend(db, directiveId));
+    else add(surface, { verified: false, evidence_event_ids: [], query: "unknown required_reality_surfaces entry: " + surface });
+  }
+  return { verifications, evidence, failureAxes };
+};
+
+const stringArrayField = (value: unknown): string[] => Array.isArray(value)
+  ? value.filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+  : [];
+
+const isOwnerFacingDeliverableClosure = (predicate: ClosurePredicate | undefined): boolean => {
+  if (!predicate) return false;
+  if (predicate.owner_facing_deliverable === true || predicate.owner_deliverable === true) return true;
+  const kind = predicate.deliverable_kind;
+  return typeof kind === "string" && ["report_body", "rendered_docx", "published_drive_doc"].includes(kind);
+};
+
+const normalizedNeedle = (text: string): string => text.toLowerCase().replace(/\s+/g, " ").trim();
+
+const artifactLineage = (
+  db: Database,
+  artifactId: string,
+): Array<{ id: string; kind: string; body: string; supersedes: string | null }> => {
+  const out: Array<{ id: string; kind: string; body: string; supersedes: string | null }> = [];
+  const seen = new Set<string>();
+  let cursor: string | null = artifactId;
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    const row = db
+      .query<{ id: string; kind: string; body: string; supersedes: string | null }, [string]>(
+        "SELECT id, kind, body, supersedes FROM act_artifact WHERE id = ?",
+      )
+      .get(cursor);
+    if (!row) break;
+    out.push(row);
+    cursor = row.supersedes;
+  }
+  return out;
+};
+
+const verifyOwnerFacingDeliverableBody = (
+  db: Database,
+  predicate: ClosurePredicate,
+): DeliverableBodyCheck => {
+  const artifactIds = [
+    ...stringArrayField(predicate.deliverable_artifact_ids),
+    ...stringArrayField(predicate.artifact_ids),
+  ];
+  if (typeof predicate.deliverable_artifact_id === "string") artifactIds.push(predicate.deliverable_artifact_id);
+  const acceptanceCriteria = stringArrayField(predicate.acceptance_criteria);
+  const inspectedRows = artifactIds.flatMap((id) => artifactLineage(db, id));
+  const inspectedArtifactIds = Array.from(new Set(inspectedRows.map((r) => r.id)));
+  const inspectedBody = inspectedRows.map((r) => r.body).join("\n");
+  const normalizedBody = normalizedNeedle(inspectedBody);
+  const failureAxes: Record<string, string> = {};
+
+  if (artifactIds.length === 0) failureAxes.missing_artifact_ids = "owner-facing closure named no deliverable artifact ids";
+  const missingIds = artifactIds.filter((id) => !inspectedArtifactIds.includes(id));
+  if (missingIds.length > 0) failureAxes.missing_artifacts = missingIds.join(",");
+  if (inspectedArtifactIds.length > 0 && inspectedBody.trim().length === 0) failureAxes.empty_deliverable_body = "artifact body was empty";
+  if (acceptanceCriteria.length === 0) failureAxes.missing_acceptance_criteria = "owner-facing closure supplied no body-check criteria";
+
+  const missingCriteria = acceptanceCriteria.filter((criterion) => !normalizedBody.includes(normalizedNeedle(criterion)));
+  if (missingCriteria.length > 0) failureAxes.acceptance_criteria_missing_from_body = missingCriteria.join(" | ");
+
+  return {
+    verification: {
+      verified: Object.keys(failureAxes).length === 0,
+      evidence_event_ids: inspectedArtifactIds,
+      query: "SELECT id, kind, body, supersedes FROM act_artifact WHERE id = ? -- walked supersedes lineage",
+    },
+    inspectedArtifactIds,
+    independentDeliverableBodyReread: inspectedBody.trim().length > 0,
+    bodySourceKind: inspectedArtifactIds.length > 0 ? "act_artifact.body" : "missing",
+    failureAxes,
+  };
+};
+
 /** Verify a closure-audit attempt against substrate truth.
  *
  *  Returns the augmented payload the caller should stamp onto
@@ -343,6 +587,8 @@ export const verifyClosureAudit = (
   const targetFiles = Array.isArray(input.closure_predicate?.target_files)
     ? (input.closure_predicate!.target_files as unknown[]).filter((s): s is string => typeof s === "string")
     : [];
+  let deliverableBodyCheck: DeliverableBodyCheck | null = null;
+  let realitySurfaceCheck: RealitySurfaceCheck | null = null;
 
   // Hard precondition — only enforced when the brain asserts a passing
   // residual (< 0.3). Brains that already self-report failure don't
@@ -374,6 +620,21 @@ export const verifyClosureAudit = (
         },
       });
       emittedEventIds.push(refusal.id);
+    }
+  }
+
+  if (input.asserted_residual < 0.3 && isOwnerFacingDeliverableClosure(input.closure_predicate)) {
+    deliverableBodyCheck = verifyOwnerFacingDeliverableBody(db, input.closure_predicate!);
+    substrateVerifications.owner_facing_deliverable_body_inspected = deliverableBodyCheck.verification;
+    if (!deliverableBodyCheck.verification.verified) blocked = true;
+  }
+
+  if (input.asserted_residual < 0.3 && input.closure_predicate) {
+    const requiredRealitySurfaces = stringArrayField(input.closure_predicate.required_reality_surfaces);
+    if (requiredRealitySurfaces.length > 0) {
+      realitySurfaceCheck = verifyRequiredRealitySurfaces(db, input.directive_id, input.closure_predicate);
+      Object.assign(substrateVerifications, realitySurfaceCheck.verifications);
+      if (Object.values(realitySurfaceCheck.verifications).some((v) => !v.verified)) blocked = true;
     }
   }
 
@@ -435,6 +696,18 @@ export const verifyClosureAudit = (
     asserted_residual: input.asserted_residual,
     closure_residual: residual,
     discrepancies,
+    ...(deliverableBodyCheck ? {
+      inspected_artifact_ids: deliverableBodyCheck.inspectedArtifactIds,
+      independent_deliverable_body_reread: deliverableBodyCheck.independentDeliverableBodyReread,
+      body_source_kind: deliverableBodyCheck.bodySourceKind,
+    } : {}),
+    ...((deliverableBodyCheck || realitySurfaceCheck) ? {
+      failure_axes: {
+        ...(deliverableBodyCheck?.failureAxes ?? {}),
+        ...(realitySurfaceCheck?.failureAxes ?? {}),
+      },
+    } : {}),
+    ...(realitySurfaceCheck ? { reality_surface_evidence: realitySurfaceCheck.evidence } : {}),
   };
   if (input.closure_predicate) payload.closure_predicate = input.closure_predicate;
 

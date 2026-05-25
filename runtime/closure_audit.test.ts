@@ -217,4 +217,149 @@ describe("verifyClosureAudit — T0.1 substrate-truth gate", () => {
       expect(r.payload.closure_residual).toBe(0);
     });
   });
+
+  describe("owner-facing deliverable body reread", () => {
+    const seedArtifact = (db: ReturnType<typeof openDb>, id: string, body: string, kind = "report_body", supersedes: string | null = null) => {
+      db.run(
+        `INSERT INTO act_artifact (id, runtime, kind, body, supersedes, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?)`,
+        [id, kind, body, supersedes, "2026-05-25T00:00:00.000Z", "2026-05-25T00:00:00.000Z"],
+      );
+    };
+
+    test("summary-only owner-facing report closure cannot pass below threshold", () => {
+      const db = openDb(":memory:");
+      const r = verifyClosureAudit(db, {
+        directive_id: "d_owner_report_summary_only",
+        task_id: "t_owner_report_summary_only",
+        closure_predicate: {
+          verifier_kind: "owner_facing_report",
+          owner_facing_deliverable: true,
+          deliverable_kind: "report_body",
+          acceptance_criteria: ["CEO Q&A", "90-day plan"],
+        },
+        asserted_residual: 0.05,
+        raw_claim_count: 0,
+      });
+      expect(r.blocked).toBe(true);
+      expect(r.payload.closure_residual).toBe(1.0);
+      expect(r.payload.inspected_artifact_ids).toEqual([]);
+      expect(r.payload.independent_deliverable_body_reread).toBe(false);
+      expect(r.payload.body_source_kind).toBe("missing");
+      expect(r.payload.failure_axes).toEqual(expect.objectContaining({ missing_artifact_ids: expect.any(String) }));
+      const verifications = r.payload.substrate_verifications as Record<string, { verified: boolean }>;
+      expect(verifications.owner_facing_deliverable_body_inspected.verified).toBe(false);
+    });
+
+    test("body-read owner-facing report closure can pass and stamps artifact evidence", () => {
+      const db = openDb(":memory:");
+      seedArtifact(db, "report_body_ok", "Final report\nCEO Q&A connected to the recommendations.\n90-day plan included.");
+      const r = verifyClosureAudit(db, {
+        directive_id: "d_owner_report_body_read",
+        task_id: "t_owner_report_body_read",
+        closure_predicate: {
+          verifier_kind: "owner_facing_report",
+          owner_facing_deliverable: true,
+          deliverable_kind: "report_body",
+          deliverable_artifact_ids: ["report_body_ok"],
+          acceptance_criteria: ["CEO Q&A", "90-day plan"],
+        },
+        asserted_residual: 0.05,
+        raw_claim_count: 0,
+      });
+      expect(r.blocked).toBe(false);
+      expect(r.payload.closure_residual).toBe(0);
+      expect(r.payload.inspected_artifact_ids).toEqual(["report_body_ok"]);
+      expect(r.payload.independent_deliverable_body_reread).toBe(true);
+      expect(r.payload.body_source_kind).toBe("act_artifact.body");
+      expect(r.payload.failure_axes).toEqual({});
+      const verifications = r.payload.substrate_verifications as Record<string, { verified: boolean; evidence_event_ids: string[] }>;
+      expect(verifications.owner_facing_deliverable_body_inspected.verified).toBe(true);
+      expect(verifications.owner_facing_deliverable_body_inspected.evidence_event_ids).toEqual(["report_body_ok"]);
+    });
+  });
+
+
+  describe("grounded convergence reality surfaces", () => {
+    const seedRenderedArtifact = (db: ReturnType<typeof openDb>, id: string, body: string, kind = "rendered_docx") => {
+      db.run(
+        "INSERT INTO act_artifact (id, runtime, kind, body, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, ?)",
+        [id, kind, body, "2026-05-25T00:00:00.000Z", "2026-05-25T00:00:00.000Z"],
+      );
+    };
+
+    test("required reality surfaces reject summary-only closure", () => {
+      const db = openDb(":memory:");
+      const r = verifyClosureAudit(db, {
+        directive_id: "d_reality_missing",
+        task_id: "t_reality_missing",
+        closure_predicate: { required_reality_surfaces: ["git_clean", "tests_passed", "queue_drain_trend"] },
+        asserted_residual: 0.05,
+        raw_claim_count: 0,
+      });
+      expect(r.blocked).toBe(true);
+      expect(r.payload.closure_residual).toBe(1.0);
+      const verifications = r.payload.substrate_verifications as Record<string, { verified: boolean; evidence_event_ids: string[] }>;
+      expect(verifications.reality_surface_git_clean.verified).toBe(false);
+      expect(verifications.reality_surface_tests_passed.verified).toBe(false);
+      expect(verifications.reality_surface_queue_drain_trend.verified).toBe(false);
+      expect(r.payload.failure_axes).toEqual(expect.objectContaining({
+        reality_surface_git_clean: "missing reality evidence",
+        reality_surface_tests_passed: "missing reality evidence",
+      }));
+    });
+
+    test("contradictory repo/test reality blocks a passing ledger claim", () => {
+      const db = openDb(":memory:");
+      emitEvent(db, {
+        kind: "state_snapshot_recorded",
+        substrate_origin: "runtime",
+        directive_id: "d_reality_dirty",
+        task_id: "t_reality_dirty",
+        payload: { snapshot_kind: "git_status", git: { clean: false } },
+      });
+      emitEvent(db, {
+        kind: "action_scored",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_reality_dirty",
+        task_id: "t_reality_dirty",
+        residual: 0.8,
+        outcome: "failed",
+        payload: { verifier_kind: "bun_test" },
+      });
+      const r = verifyClosureAudit(db, {
+        directive_id: "d_reality_dirty",
+        task_id: "t_reality_dirty",
+        closure_predicate: { required_reality_surfaces: ["git_clean", "tests_passed"] },
+        brain_claims: { reality_surface_git_clean: true, reality_surface_tests_passed: true },
+        asserted_residual: 0.05,
+      });
+      expect(r.blocked).toBe(true);
+      expect(r.payload.closure_residual).toBe(1.0);
+      expect(r.payload.discrepancies).toEqual(expect.arrayContaining(["reality_surface_git_clean", "reality_surface_tests_passed"]));
+    });
+
+    test("all requested reality surfaces can pass with independent evidence", () => {
+      const db = openDb(":memory:");
+      seedRenderedArtifact(db, "rendered_ok", "native rendered body");
+      emitEvent(db, { kind: "state_snapshot_recorded", substrate_origin: "runtime", directive_id: "d_reality_ok", task_id: "t_reality_ok", payload: { snapshot_kind: "git_status", clean: true } });
+      emitEvent(db, { kind: "action_scored", substrate_origin: "substrate_auto", directive_id: "d_reality_ok", task_id: "t_reality_ok", residual: 0.0, outcome: "succeeded", payload: { verifier_kind: "bun_test" } });
+      emitEvent(db, { kind: "state_snapshot_recorded", substrate_origin: "runtime", directive_id: "d_reality_ok", task_id: "t_reality_ok", payload: { snapshot_kind: "ready_queue_trend", ready_before: 5, ready_after: 2 } });
+      emitEvent(db, { kind: "owner_deliverable_published", substrate_origin: "runtime", directive_id: "d_reality_ok", task_id: "t_reality_ok", payload: { artifact_id: "rendered_ok" } });
+      const r = verifyClosureAudit(db, {
+        directive_id: "d_reality_ok",
+        task_id: "t_reality_ok",
+        closure_predicate: {
+          required_reality_surfaces: ["git_clean", "tests_passed", "rendered_artifact", "owner_publication", "queue_drain_trend"],
+          rendered_artifact_ids: ["rendered_ok"],
+        },
+        asserted_residual: 0.05,
+        raw_claim_count: 0,
+      });
+      expect(r.blocked).toBe(false);
+      expect(r.payload.closure_residual).toBe(0);
+      expect(r.payload.failure_axes).toEqual({});
+      const verifications = r.payload.substrate_verifications as Record<string, { verified: boolean }>;
+      expect(Object.values(verifications).every((v) => v.verified)).toBe(true);
+    });
+  });
 });
