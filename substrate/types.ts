@@ -122,7 +122,7 @@ export type OwnerProfile = {
   avoided_terms?: string[];
   /** Substrate concepts the owner has already been exposed to. Keys are
    *  stable concept identifiers (e.g. "rolling_active",
-   *  "knowledge_compounds", "father_ranked"); values track first-event
+   *  "knowledge_compounds", "owner_autonomy_ranked"); values track first-event
    *  id + exposure count so the renderer explains on first encounter
    *  only. */
   exposed_concepts?: Record<string, OwnerConceptExposure>;
@@ -158,7 +158,7 @@ export type OwnerProfile = {
   /** Working-hours window for the owner. Outside this window, stage-2
    *  apply pauses (stage-1 signaling continues). */
   time_window?: OwnerProfileTimeWindow;
-  /** Topics the owner cares about — biases Father objective ranking
+  /** Topics the owner cares about — biases OwnerAutonomy objective ranking
    *  + capability-discoverability suggestions. */
   hot_topics?: string[];
   /** Hard-block patterns. Even with autonomy_score=1.0 the worker
@@ -500,7 +500,7 @@ export type ArtifactInterfaceMetadata = {
 // re-admit a retired artifact (only quarantined → admitted is allowed).
 // Used when an artifact has accumulated ≥ 3 quarantines, ≥ 10 hard
 // kills, or ≥ 3 irreversible_effect_recorded rows without owner consent.
-export type ActArtifactStatus = "admitted" | "quarantined" | "promoted" | "retired";
+export type ActArtifactStatus = "provisional" | "admitted" | "quarantined" | "promoted" | "retired";
 
 export type ActArtifact = {
   id: Ulid;

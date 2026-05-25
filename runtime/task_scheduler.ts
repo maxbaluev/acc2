@@ -50,6 +50,10 @@ export const CROSS_DIRECTIVE_BLOCKING_INTERACTIONS: ReadonlySet<string> = new Se
 
 export type SchedulerOpts = {
   maxConcurrent?: number;
+  /** Resource admission budget for one scheduler generation. maxConcurrent
+   *  is now only the legacy source for dispatch_slots; callers can declare
+   *  richer budgets such as brain_slots, memory_mb, or domain resources. */
+  resourceBudget?: Record<string, number>;
   pollIntervalMs?: number;
   directiveId?: string;
   fixtureTargetPath?: string;
@@ -242,6 +246,8 @@ const clearInFlightTask = (taskId: string, db?: Database): void => {
   IN_FLIGHT.delete(taskId);
   IN_FLIGHT_DIRECTIVE.delete(taskId);
   IN_FLIGHT_PARENT.delete(taskId);
+  IN_FLIGHT_RESOURCE_COST.delete(taskId);
+  IN_FLIGHT_EXCLUSIVE_RESOURCES.delete(taskId);
   IN_FLIGHT_BRAIN.delete(taskId);
   // Release the durable cross-process lease on completion. Idempotent: a
   // DELETE of an absent row is a no-op, and a release for a task this
@@ -373,6 +379,8 @@ const IN_FLIGHT: Map<string, Promise<unknown>> = new Map();
 // concurrency check (`findDeferringConflict`).
 const IN_FLIGHT_DIRECTIVE: Map<string, string> = new Map();
 const IN_FLIGHT_PARENT: Map<string, string | null> = new Map();
+const IN_FLIGHT_RESOURCE_COST: Map<string, Record<string, number>> = new Map();
+const IN_FLIGHT_EXCLUSIVE_RESOURCES: Map<string, string[]> = new Map();
 let SCHEDULER_DRAINING = false;
 
 /** Fence scheduler admission during daemon restart drain. Existing dispatches
@@ -664,6 +672,113 @@ const parseEventPayload = (payload: string | null): Record<string, unknown> => {
   }
 };
 
+type TaskAdmissionEconomics = {
+  expected_value: number;
+  resource_cost: Record<string, number>;
+  exclusive_resources: string[];
+};
+
+const finiteNonNegative = (value: unknown, fallback = 0): number => {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+};
+
+const numericRecord = (value: unknown): Record<string, number> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const n = finiteNonNegative(raw, NaN);
+    if (Number.isFinite(n) && n > 0) out[key] = n;
+  }
+  return out;
+};
+
+const stringArray = (value: unknown): string[] => Array.isArray(value)
+  ? value.filter((v): v is string => typeof v === "string" && v.length > 0)
+  : [];
+
+const latestAdmissionPayload = (db: Database, taskId: string): Record<string, unknown> => {
+  const rows = db
+    .query(
+      `SELECT kind, payload FROM events
+       WHERE task_id = ? AND kind IN ('task_node_opened','action_predicted')
+       ORDER BY ts ASC, rowid ASC`,
+    )
+    .all(taskId) as Array<{ kind: string; payload: string | null }>;
+  const merged: Record<string, unknown> = {};
+  for (const row of rows) {
+    const payload = parseEventPayload(row.payload);
+    for (const key of ["expected_value", "expected_marginal_value", "resource_cost", "expected_cost", "budget_estimate", "exclusive_resources", "engaged_resources"]) {
+      if (payload[key] !== undefined) merged[key] = payload[key];
+    }
+  }
+  return merged;
+};
+
+const taskAdmissionEconomics = (db: Database, task: TaskNode): TaskAdmissionEconomics => {
+  const payload = latestAdmissionPayload(db, task.id);
+  const expectedValue = finiteNonNegative(payload.expected_marginal_value ?? payload.expected_value, 1);
+  const budgetEstimate = payload.budget_estimate && typeof payload.budget_estimate === "object"
+    ? payload.budget_estimate as Record<string, unknown>
+    : {};
+  const resourceCost = {
+    dispatch_slots: 1,
+    ...numericRecord(payload.expected_cost),
+    ...numericRecord(budgetEstimate.resource_cost),
+    ...numericRecord(payload.resource_cost),
+  };
+  const exclusiveResources = stringArray(payload.exclusive_resources);
+  return { expected_value: expectedValue, resource_cost: resourceCost, exclusive_resources: exclusiveResources };
+};
+
+const schedulerResourceBudget = (maxConcurrent: number, opts: SchedulerOpts): Record<string, number> => ({
+  dispatch_slots: maxConcurrent,
+  brain_slots: computeBrainDispatchCap(),
+  ...(opts.resourceBudget ?? {}),
+});
+
+const resourcePressure = (cost: Record<string, number>, budget: Record<string, number>): number => {
+  let pressure = 0;
+  for (const [resource, amount] of Object.entries(cost)) {
+    if (amount <= 0) continue;
+    const capacity = finiteNonNegative(budget[resource], Number.POSITIVE_INFINITY);
+    pressure += Number.isFinite(capacity) && capacity > 0 ? amount / capacity : amount;
+  }
+  return pressure;
+};
+
+const marginalValueCostScore = (economics: TaskAdmissionEconomics, budget: Record<string, number>): number =>
+  economics.expected_value / Math.max(0.000001, resourcePressure(economics.resource_cost, budget));
+
+const addResourceUse = (used: Record<string, number>, cost: Record<string, number>): void => {
+  for (const [resource, amount] of Object.entries(cost)) used[resource] = (used[resource] ?? 0) + amount;
+};
+
+const firstBudgetConflict = (used: Record<string, number>, cost: Record<string, number>, budget: Record<string, number>): string | null => {
+  for (const [resource, amount] of Object.entries(cost)) {
+    const capacity = budget[resource];
+    if (capacity === undefined) continue;
+    if ((used[resource] ?? 0) + amount > capacity) return resource;
+  }
+  return null;
+};
+
+const resourceUseFromInFlight = (): Record<string, number> => {
+  const used: Record<string, number> = {};
+  for (const taskId of IN_FLIGHT.keys()) {
+    addResourceUse(used, IN_FLIGHT_RESOURCE_COST.get(taskId) ?? { dispatch_slots: 1 });
+  }
+  return used;
+};
+
+const exclusiveResourcesFromInFlight = (): Set<string> => {
+  const used = new Set<string>();
+  for (const resources of IN_FLIGHT_EXCLUSIVE_RESOURCES.values()) {
+    for (const resource of resources) used.add(resource);
+  }
+  return used;
+};
+
 /** Dispatch-termination policy: a task that has already had a brain dispatch
  *  must not be re-dispatched unchanged. Amendment/candidate-only cycles are
  *  real deliverables, but they do not alter task topology/status; the next
@@ -879,6 +994,7 @@ export const schedulerTick = async (
     effectiveOpts = applyModeAdjustments(effectiveOpts, mode);
   }
   const maxConcurrent = Math.max(1, effectiveOpts.maxConcurrent ?? opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
+  const resourceBudget = schedulerResourceBudget(maxConcurrent, effectiveOpts);
   // Multi-goal alignment (2026-05-15): per-directive cap so one
   // runaway goal can't starve concurrent goals. Default to half the
   // global cap.
@@ -955,6 +1071,8 @@ export const schedulerTick = async (
   };
   const effectiveScore = (taskId: string): number => branchCompetitionScore(taskId) + ageBonusFor(taskId);
   ready.sort((a, b) => {
+    const valueCostDelta = marginalValueCostScore(taskAdmissionEconomics(db, b), resourceBudget) - marginalValueCostScore(taskAdmissionEconomics(db, a), resourceBudget);
+    if (valueCostDelta !== 0) return valueCostDelta;
     const scoreDelta = effectiveScore(b.id) - effectiveScore(a.id);
     if (scoreDelta !== 0) return scoreDelta;
     return taskOpenedTs(a.id).localeCompare(taskOpenedTs(b.id));
@@ -968,6 +1086,8 @@ export const schedulerTick = async (
   const skippedInterference: string[] = [];
   const skippedFailureCapped: string[] = [];
   const pending: Array<Promise<unknown>> = [];
+  const resourceUse = resourceUseFromInFlight();
+  const exclusiveResources = exclusiveResourcesFromInFlight();
 
   // Per-tick brain handshake budget (anti-starve): handshake permits acquire
   // ASYNC after dispatch, so within a single tick hasFreeHandshakePermit()
@@ -1102,16 +1222,6 @@ export const schedulerTick = async (
       continue;
     }
 
-    const slotsLeft = maxConcurrent - IN_FLIGHT.size;
-    if (slotsLeft <= 0) {
-      skippedConcurrencyCap.push(task.id);
-      emitSchedulerAdmissionGate(db, task, "scheduler_global_concurrency_cap", {
-        reason: "scheduler_global_in_flight_at_cap",
-        in_flight: IN_FLIGHT.size,
-        cap: maxConcurrent,
-      });
-      continue;
-    }
     // Per-directive cap: how many slots is THIS directive already using?
     // When ≥ maxConcurrentPerDirective, defer this task so peer goals
     // get a turn. Logged via skippedConcurrencyCap so the scheduler-
@@ -1163,6 +1273,28 @@ export const schedulerTick = async (
     // {ok:false, error:"phase_j"} on every tick — tight loop emitting
     // `substrate_replay_skipped` because readyTasks kept returning the same
     // task forever). Real Tier-0 replay now runs.
+
+    const economics = taskAdmissionEconomics(db, task);
+    if (decision.route === "opencode_brain" && economics.resource_cost.brain_slots === undefined) {
+      economics.resource_cost.brain_slots = 1;
+    }
+    const exclusiveConflict = economics.exclusive_resources.find((resource) => exclusiveResources.has(resource));
+    const budgetConflict = firstBudgetConflict(resourceUse, economics.resource_cost, resourceBudget);
+    if (exclusiveConflict || budgetConflict) {
+      skippedConcurrencyCap.push(task.id);
+      emitSchedulerAdmissionGate(db, task, "scheduler_global_concurrency_cap", {
+        reason: "scheduler_resource_budget_exhausted",
+        admission_model: "marginal_value_cost_resource_budget",
+        exhausted_resource: budgetConflict ?? exclusiveConflict ?? null,
+        conflict_kind: exclusiveConflict ? "exclusive_resource" : "capacity",
+        resource_budget: resourceBudget,
+        resource_cost: economics.resource_cost,
+        exclusive_resources: economics.exclusive_resources,
+        expected_value: economics.expected_value,
+        in_flight: IN_FLIGHT.size,
+      });
+      continue;
+    }
 
     if (decision.route === "claude_inline") {
       emitEvent(db, {
@@ -1232,7 +1364,6 @@ export const schedulerTick = async (
         continue;
       }
 
-      const brainCap = computeBrainDispatchCap();
       // FOUNDATIONAL anti-starve gate: only admit a brain when the bridge has
       // a FREE handshake permit. The RAM cap alone over-admitted relative to
       // the handshake capacity (cap 2), so excess dispatches failed-open and
@@ -1241,7 +1372,7 @@ export const schedulerTick = async (
       // (retries next tick) instead of spawning a starving subprocess. Permits
       // free after the brief handshake, so run-concurrency still reaches the
       // RAM cap — only the handshake phase is staggered (no starvation).
-      if (IN_FLIGHT_BRAIN.size >= brainCap || !hasFreeHandshakePermit() || brainHandshakeBudget <= 0) {
+      if (!hasFreeHandshakePermit() || brainHandshakeBudget <= 0) {
         // Dedupe at_cap notifications per (task_id, gate) — see GATE_NOTIFIED.
         const key = gateKey(task.id, "brain_concurrency_cap");
         if (!GATE_NOTIFIED.has(key)) {
@@ -1253,14 +1384,12 @@ export const schedulerTick = async (
             task_id: task.id,
             payload: {
               gate: "brain_concurrency_cap",
-              reason: IN_FLIGHT_BRAIN.size >= brainCap
-                ? "opencode_brain_in_flight_at_cap"
-                : "no_free_handshake_permit",
+              reason: "no_free_handshake_permit",
               in_flight_brain: IN_FLIGHT_BRAIN.size,
-              cap: brainCap,
-              cap_source: IN_FLIGHT_BRAIN.size >= brainCap ? "dynamic_host_ram" : "bridge_handshake_capacity",
+              cap: resourceBudget.brain_slots ?? null,
+              cap_source: "bridge_handshake_capacity",
               handshake_permit_free: hasFreeHandshakePermit(),
-              note: "single notification per saturation cycle; tick keeps trying silently until cap clears (anti-starve: excess queues, never spawns a doomed subprocess)",
+              note: "single notification per saturation cycle; resource budgets handle run admission; handshake pressure only staggers process startup",
             } as JsonValue,
           });
         }
@@ -1315,6 +1444,10 @@ export const schedulerTick = async (
       IN_FLIGHT.set(task.id, promise);
       IN_FLIGHT_DIRECTIVE.set(task.id, task.directive_id);
       IN_FLIGHT_PARENT.set(task.id, refinementParent(db, task));
+      IN_FLIGHT_RESOURCE_COST.set(task.id, economics.resource_cost);
+      IN_FLIGHT_EXCLUSIVE_RESOURCES.set(task.id, economics.exclusive_resources);
+      addResourceUse(resourceUse, economics.resource_cost);
+      for (const resource of economics.exclusive_resources) exclusiveResources.add(resource);
     } catch (err) {
       clearInFlightTask(task.id, db);
       emitDispatchIsolatedError(db, task, err);
@@ -1439,6 +1572,8 @@ export const _resetSchedulerForTests = (): void => {
   IN_FLIGHT.clear();
   IN_FLIGHT_DIRECTIVE.clear();
   IN_FLIGHT_PARENT.clear();
+  IN_FLIGHT_RESOURCE_COST.clear();
+  IN_FLIGHT_EXCLUSIVE_RESOURCES.clear();
   // Parallel-DAG contract (1826363): schedulerTick returns after launch,
   // so a test that didn't drain leaves IN_FLIGHT_BRAIN populated. Cleared
   // here so the next test's brain dispatch isn't artificially capped.
