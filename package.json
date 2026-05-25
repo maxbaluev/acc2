@@ -6,7 +6,7 @@
   "scripts": {
     "daemon": "bun runtime/daemon.ts",
     "acc": "bun cli/dispatch.ts",
-    "test": "bun test --parallel --bail",
+    "test": "bun scripts/test.ts",
     "postinstall": "bun scripts/postinstall.ts"
   },
   "bin": {
