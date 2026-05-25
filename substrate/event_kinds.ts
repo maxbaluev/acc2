@@ -1121,6 +1121,20 @@ export const EVENT_KINDS = {
   // dedup key. Health metric so dashboards plot migration history.
   schema_migration_applied:                { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
   schema_migration_failed:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: true,  narrative: false },
+  // release_announced: RESERVED seam for the FUTURE P2P distribution layer
+  // (DISTREL_P2, directive 3GZGQ0V5TH5KHF3YDTTDVQ6BH8). When the planned
+  // IPFS pub/sub network ships, a peer will emit this to announce an
+  // available release; the payload will carry
+  //   { release_version, bundle_cid, manifest_cid, signature,
+  //     min_acc_version, announced_by }
+  // resolving to a ReleaseSource of kind "pubsub_announcement" (see
+  // runtime/release_source.ts). It is emitted by NO producer today — the
+  // pub/sub transport, libp2p, and the consumer/query are intentionally
+  // unimplemented. The kind is registered now only to reserve the seam so
+  // the schema is stable when the P2P layer arrives. producer is set to
+  // "runtime" (a substrate-side peer worker will own it); not embeddable
+  // and not a health metric until the layer is real.
+  release_announced:                       { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // ── Unified pathology budget (brain elegance bc8je5f3x, 2026-05-15) ─
   // Pre-fix six backpressure mechanisms (bridge_failure_streak,
   // consecutive_bridge_failures, supervisor_redispatch_storm,

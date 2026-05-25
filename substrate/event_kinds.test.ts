@@ -192,6 +192,16 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // emissions use brain_accuracy_observation +
   // act_artifact_score_updated.
   "brain_accuracy_predicate",
+  // DISTREL_P2 (2026-05-24, directive 3GZGQ0V5TH5KHF3YDTTDVQ6BH8):
+  // runtime/release_source.ts defines the `ReleaseSource` discriminated
+  // union for `acc update --from <spec>` transport. Its discriminators —
+  // "git", "ipfs_cid", "pubsub_announcement" — are union tags, NOT event
+  // kinds. The reserved future-P2P event kind itself (`release_announced`)
+  // IS registered in EVENT_KINDS; only these union discriminators are
+  // sub-payload literals.
+  "git",
+  "ipfs_cid",
+  "pubsub_announcement",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────

@@ -180,6 +180,18 @@ A `substrate/migrations/` registry is the ONLY path for `state.db` schema change
 
 Owner-state portability is a CLI capability layered on this boundary: `acc admin export` / `acc admin import` export/import the organism's `state.db` plus ledger artifacts, never `canonical.db`. The mnemonic-sovereignty curation set (`always_keep` kinds — owner-channel, knowledge-graph backbone, Tier -1 violations, constitutional events) is the minimum portable surface.
 
+### 16.1 Release transport abstraction & reserved P2P seam (DISTREL_P2)
+
+`acc update` does not hard-code git as the only way a release arrives. The transport is the `ReleaseSource` discriminated union (`runtime/release_source.ts`, pure types — no network code):
+
+- `{ kind: "git" }` — the CURRENT path: clone/pull a release ref.
+- `{ kind: "ipfs_cid"; cid; gateway? }` — the NEW fetch-by-CID path: `acc update` retrieves the release bundle by content id through an HTTP gateway. **Pinata is the pin + metadata + discovery provider now**: it pins the bundle/manifest and serves the gateway, so a CID published via Pinata is the practical `ipfs_cid` source today.
+- `{ kind: "pubsub_announcement"; announcement_event_id }` — the **RESERVED, NOT-IMPLEMENTED** future P2P path: a `release_announced` event id that a future pub/sub layer will resolve to a `bundle_cid`.
+
+`parseReleaseSource(spec)` maps a CLI `--from <spec>` string (`"git"`, `"ipfs:<cid>[@<gateway>]"`, `"pubsub:<event_id>"`) to the union. `git` and `ipfs_cid` parse and resolve fully. The `pubsub:` spec **parses into a real source** so the seam is genuine, but `resolveReleaseSource` returns `{ error: "pubsub_source_not_yet_implemented" }` — the parse succeeds, the resolve is gated.
+
+**Future P2P layer (RESERVED — not built).** The owner's vision is a peer-to-peer network for release distribution + peer communication + a market, carried over IPFS pub/sub with Pinata as the metadata/pinning provider. That layer sits behind the `release_announced` event kind (registered in `substrate/event_kinds.ts` but emitted by NO producer today) and the `pubsub_announcement` `ReleaseSource`. When it ships, a peer will emit `release_announced { release_version, bundle_cid, manifest_cid, signature, min_acc_version, announced_by }`; the resolver will verify the signature and extract `bundle_cid`, yielding an `ipfs_cid` fetch. No pub/sub, libp2p, or peer transport is implemented yet — only the event-kind and union seams are reserved so the schema is stable when the layer arrives.
+
 ## 17. Reuse-First Contract
 
 Before adding any new event kind, predicate, worker, MCP method, or `act_artifact.kind`, verify no existing entity can carry the burden (`P2TH6BYK6H6FVEP1BH5SH8NVRW`). The substrate's open vocabulary — `act_artifact.kind` and payload extensions such as `knowledge_candidate.payload.judgment_packet=true` — is the canonical extension point. Every entity not added is one less surface to learn, one less dashboard row to explain, and one less integration contract to keep synchronized.
