@@ -164,6 +164,15 @@ const ARTIFACT_METADATA_COLUMNS: Array<{ name: string; ddl: string }> = [
   { name: "supersedes",          ddl: "ALTER TABLE act_artifact ADD COLUMN supersedes TEXT" },
   { name: "superseded_by",       ddl: "ALTER TABLE act_artifact ADD COLUMN superseded_by TEXT" },
   { name: "lost_version_count",  ddl: "ALTER TABLE act_artifact ADD COLUMN lost_version_count INTEGER NOT NULL DEFAULT 0" },
+  // UNIVERSAL_ (2026-05-24, directive 3XETJCYT, kc BD86CJ6HQS): first-
+  // class, domain-NEUTRAL interface metadata (purpose / goal_shapes /
+  // usage_examples / preconditions / effects / cost_profile /
+  // reliability_profile / inputs_schema / outputs_schema). ONE nullable
+  // JSON column — a polymorphic payload field, not a fixed enum or side
+  // table — so the substrate + brain can understand/select ANY artifact
+  // (Telegram action, browser flow, calendar handle, checklist, contact,
+  // script) by the same shape. NULL for legacy rows (backward-compatible).
+  { name: "interface_metadata", ddl: "ALTER TABLE act_artifact ADD COLUMN interface_metadata TEXT" },
 ];
 
 const EVENT_HOT_PATH_INDEXES = [

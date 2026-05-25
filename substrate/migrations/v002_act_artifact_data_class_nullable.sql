@@ -48,6 +48,16 @@ CREATE TABLE act_artifact (
   supersedes TEXT,
   superseded_by TEXT,
   lost_version_count INTEGER NOT NULL DEFAULT 0,
+  -- UNIVERSAL_ (2026-05-24, directive 3XETJCYT): domain-neutral interface
+  -- metadata column. Present in this table-rebuild so a fresh DB applying
+  -- v002 (which RENAMEs + recreates act_artifact) keeps the column in the
+  -- same boot rather than dropping it until the next openDb. The
+  -- INSERT...SELECT below intentionally omits this column: on already-
+  -- applied DBs act_artifact_v001 predates the column (no data to copy),
+  -- and on fresh DBs the source table is empty (runSchema just created
+  -- it), so no rows are lost. runMigrations' idempotent ADD COLUMN also
+  -- guarantees the column exists on every subsequent openDb.
+  interface_metadata TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

@@ -429,6 +429,72 @@ export type SandboxDecl =
 
 // ── Code artifact registry row (§11) ────────────────────────────────
 
+// UNIVERSAL_ (2026-05-24, directive 3XETJCYT, kc BD86CJ6HQS): first-
+// class, domain-NEUTRAL interface metadata. The act four-tuple and the
+// open `act_artifact.kind` vocabulary are already structurally domain-
+// neutral, but compounding was limited because artifacts carried no
+// rich INTERFACE descriptor — the substrate/brain could not understand
+// WHAT an artifact does, WHEN to use it, or HOW to call it for ANY goal
+// (only code had implicit structure). This descriptor closes that gap.
+//
+// Every field is OPTIONAL and DOMAIN-NEUTRAL — it describes a Telegram
+// action, a browser flow, a calendar handle, a checklist, a contact, AND
+// a script equally. Nothing here is code-specific. It is persisted as a
+// single nullable JSON column (`interface_metadata`), a polymorphic
+// payload field per Architecture.md ("add capability vocabulary by
+// admitting rows/payload, not creating fixed enums or parallel tables").
+// Legacy rows admitted before the column carry `null` and still work.
+export type ArtifactUsageExample = {
+  /** Human/brain-readable label for this example (e.g. "send a one-off
+   *  reminder", "scrape one product page", "block a calendar hour"). */
+  description?: string;
+  /** Concrete input the artifact is called with — any JSON shape so the
+   *  brain learns the call convention for ANY domain (message text +
+   *  chat id; a URL; an event title + time; a checklist of steps). */
+  input?: JsonValue;
+  /** Concrete output / observed effect for that input. */
+  output?: JsonValue;
+};
+
+export type ArtifactInterfaceMetadata = {
+  /** What goal-class this artifact serves, in plain language. Domain-
+   *  neutral: "notify a contact on Telegram", "extract a structured
+   *  record from a web page", "reserve time on the owner's calendar",
+   *  "run a code change + tests". The brain reads this to decide WHEN an
+   *  artifact applies to an owner intent. */
+  purpose?: string;
+  /** goal_shape hashes (runtime/goal_shape.ts) this artifact applies to,
+   *  so retrieval/selection can match an artifact to directives of the
+   *  same shape regardless of domain. Free-string array — no enum. */
+  goal_shapes?: string[];
+  /** Concrete input→output examples so the brain learns HOW to call the
+   *  artifact for any domain (not just code). */
+  usage_examples?: ArtifactUsageExample[];
+  /** What must hold BEFORE invocation (free-string assertions): e.g.
+   *  "telegram account authorized", "owner consent for outreach",
+   *  "target URL reachable", "calendar write scope granted". */
+  preconditions?: string[];
+  /** What CHANGES after a successful invocation (free-string assertions):
+   *  e.g. "a message is delivered", "a calendar event exists", "files in
+   *  target_files are modified", "a contact row is created". Works for
+   *  outreach, browser, calendar, code alike. */
+  effects?: string[];
+  /** Cost hint (latency / money / rate-limit / irreversibility) so the
+   *  selector can weigh cheaper artifacts first. Open-ended JSON. */
+  cost_profile?: JsonValue;
+  /** Reliability hint (known failure modes, flakiness, confidence) —
+   *  complements the learned posterior with author-declared expectations.
+   *  Open-ended JSON. */
+  reliability_profile?: JsonValue;
+  /** Declared shape of the inputs the artifact accepts. Open-ended JSON
+   *  (JSON-Schema-like or prose) — NOT a code type, so it equally
+   *  describes a message payload, a URL+selector, or a calendar slot. */
+  inputs_schema?: JsonValue;
+  /** Declared shape of the outputs/observation the artifact returns.
+   *  Open-ended JSON. */
+  outputs_schema?: JsonValue;
+};
+
 // Brain sandbox audit bsfxsvgh9 (2026-05-15): `retired` is the terminal
 // status for chronically-failing artifacts — rehabilitation does NOT
 // re-admit a retired artifact (only quarantined → admitted is allowed).
@@ -453,6 +519,9 @@ export type ActArtifact = {
   name: string | null;
   fixture_input: JsonValue;
   fixture_expected_residual: number;
+  /** UNIVERSAL_ (2026-05-24): domain-neutral interface descriptor. NULL
+   *  for legacy rows admitted before the column. */
+  interface_metadata?: ArtifactInterfaceMetadata | null;
   created_at: string;
   updated_at: string;
 };

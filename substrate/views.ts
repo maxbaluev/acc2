@@ -185,6 +185,15 @@ CREATE VIEW IF NOT EXISTS act_artifact_registry_view AS
     recent_residual_mean, recent_kill_count, status, name,
     fixture_input, fixture_expected_residual,
     intent, summary, target_files, target_resources, source_candidate_id, owner_gate_verdict,
+    -- UNIVERSAL_ (2026-05-24, directive 3XETJCYT, kc BD86CJ6HQS): expose
+    -- the domain-neutral interface descriptor (purpose / goal_shapes /
+    -- usage_examples / preconditions / effects / cost_profile /
+    -- reliability_profile / inputs_schema / outputs_schema). This is what
+    -- retrieval, the prompt composer, and the sibling artifact selector
+    -- (ARTIFACT_S) read to understand WHAT an artifact does, WHEN to use
+    -- it, and HOW to call it — for ANY goal, not just code. NULL for
+    -- legacy rows.
+    interface_metadata,
     created_at, updated_at
   FROM act_artifact
   WHERE status IN ('admitted', 'promoted')
@@ -225,8 +234,14 @@ CREATE VIEW IF NOT EXISTS embedding_index_view AS
   UNION ALL
   SELECT
     id, 'act_artifact' AS kind, COALESCE(updated_at, created_at) AS ts, '' AS directive_id, '' AS task_id, embedding, 'v1' AS embedding_version, 'act_artifact' AS substrate_origin,
-    json_object('artifact_id', id, 'artifact_kind', kind, 'body', body, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, '')) AS payload,
-    json_object('body', body, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, ''), 'artifact_kind', kind) AS retrieval_aspects,
+    -- UNIVERSAL_ (2026-05-24): surface the domain-neutral interface
+    -- purpose (what goal-class the artifact serves) into both the
+    -- payload AND the retrieval_aspects so semantic search over artifacts
+    -- can match an owner intent to an artifact by what it DOES for ANY
+    -- domain, not just by its code body. COALESCE to empty string keeps
+    -- legacy rows (NULL interface_metadata) byte-stable.
+    json_object('artifact_id', id, 'artifact_kind', kind, 'body', body, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, ''), 'interface_purpose', COALESCE(json_extract(interface_metadata, '$.purpose'), '')) AS payload,
+    json_object('body', body, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, ''), 'artifact_kind', kind, 'interface_purpose', COALESCE(json_extract(interface_metadata, '$.purpose'), '')) AS retrieval_aspects,
     NULL AS retrieval_domains
   FROM act_artifact
   WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') AND embedding IS NOT NULL AND length(embedding) > 0;

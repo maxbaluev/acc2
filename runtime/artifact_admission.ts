@@ -27,7 +27,7 @@
 //   the body cleanly, not that the verifier is perfect.
 
 import type { Database } from "bun:sqlite";
-import type { JsonValue, Runtime, SandboxDecl } from "../substrate/types";
+import type { ArtifactInterfaceMetadata, JsonValue, Runtime, SandboxDecl } from "../substrate/types";
 import { validateSandboxDecl } from "./sandbox";
 import { runArtifactForRuntime } from "./runtimes/index";
 import { getArtifact, insertArtifact } from "./artifact_store";
@@ -111,6 +111,20 @@ export type AdmissionInput = {
   markdownBodyId?: string;
   referenceDocxArtifactId?: string;
   renderedDocxId?: string;
+  /** UNIVERSAL_ (2026-05-24, directive 3XETJCYT, kc BD86CJ6HQS): first-
+   *  class, domain-NEUTRAL interface metadata (purpose / goal_shapes /
+   *  usage_examples / preconditions / effects / cost_profile /
+   *  reliability_profile / inputs_schema / outputs_schema). OPTIONAL —
+   *  legacy / minimal admissions that omit it remain valid (the row's
+   *  interface_metadata column stays NULL). When supplied it lands on the
+   *  act_artifact row and flows through getArtifact + the registry view so
+   *  the selector + brain can understand/select the artifact for ANY goal
+   *  (Telegram action, browser flow, calendar handle, checklist, contact,
+   *  script) — not just code. Admission does NOT gate on it: it is
+   *  descriptive metadata, scored downstream by residual, never a refusal
+   *  surface (CLAUDE.md "do not add pre-check gates when residual can
+   *  score the same thing"). */
+  interfaceMetadata?: ArtifactInterfaceMetadata | null;
 };
 
 export type AdmissionRejectionReason =
@@ -224,6 +238,7 @@ export const admitArtifact = async (
       sourceCandidateId: input.sourceCandidateId ?? null,
       ownerGateVerdict: "auto",
       supersedes: input.supersedes ?? null,
+      interfaceMetadata: input.interfaceMetadata ?? null,
       id: input.artifactId,
     });
     emit({
@@ -591,6 +606,7 @@ export const admitArtifact = async (
     // (we already passed the gate check above for the require_consent branch).
     ownerGateVerdict: gate.requires_consent ? "owner_approved" : "auto",
     supersedes: effectiveSupersedes ?? null,
+    interfaceMetadata: input.interfaceMetadata ?? null,
     id: input.artifactId,
   });
 

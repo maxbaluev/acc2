@@ -200,6 +200,18 @@ export const AdmitArtifactSchema = z.object({
   rendered_docx_id: z.string().optional(),
   markdown_body_id: z.string().optional(),
   reference_docx_artifact_id: z.string().optional(),
+  // UNIVERSAL_ (2026-05-24, directive 3XETJCYT, kc BD86CJ6HQS): first-
+  // class, domain-NEUTRAL interface metadata so the substrate + brain can
+  // understand WHAT an artifact does, WHEN to use it, and HOW to call it
+  // for ANY goal (Telegram action, browser flow, calendar handle,
+  // checklist, contact, script) — not just code. Open-ended payload
+  // (z.unknown()) so the vocabulary grows by admitting payload fields, not
+  // by hard-coding a closed sub-schema (Architecture.md). Optional —
+  // legacy / minimal admissions omit it and still admit. The expected
+  // shape is ArtifactInterfaceMetadata { purpose, goal_shapes,
+  // usage_examples, preconditions, effects, cost_profile,
+  // reliability_profile, inputs_schema, outputs_schema }.
+  interface_metadata: z.unknown().optional().nullable(),
 });
 
 // Residual is the truth-bearing signal and MUST be a finite number in
