@@ -34,14 +34,14 @@ import { readCurrentMode, applyModeAdjustments } from "./crisis_mode";
 import { findDeferringConflict } from "./interference";
 import { isBridgeHealthDegraded } from "./bridge_health";
 import { claimDispatchLease, releaseDispatchLease } from "./dispatch_leases";
-import { getBootSessionToken } from "./brain_dispatch_reconciler";
+import { closeOrphanedBrainDispatches, getBootSessionToken } from "./brain_dispatch_reconciler";
 
 // Interaction kinds that block another directive's dispatch when one of the
 // two is mid-flight. `mutual_exclusion` is symmetric (either side blocks the
 // other while in flight); `resource_conflict` denotes a shared exhaustible
 // resource (attention, calendar slot, budget) — concurrent dispatch is
-// permitted to be down-ranked rather than refused, but Father-style ranking
-// uses the same set. The set is exported so Phase DAG callers and Father's
+// permitted to be down-ranked rather than refused, but OwnerAutonomy-style ranking
+// uses the same set. The set is exported so Phase DAG callers and OwnerAutonomy's
 // selector reference the same canonical taxonomy.
 export const CROSS_DIRECTIVE_BLOCKING_INTERACTIONS: ReadonlySet<string> = new Set([
   "mutual_exclusion",
@@ -498,6 +498,23 @@ const openBrainDispatchTaskIdsFromSql = (db: Database): Set<string> => {
 };
 
 const reconcileBrainInFlightSlots = (db: Database): void => {
+  const closedOrphans = closeOrphanedBrainDispatches(db, {
+    currentSessionToken: getBootSessionToken(),
+  });
+  if (closedOrphans.length > 0) {
+    try {
+      emitEvent(db, {
+        kind: "dispatch_recovered_orphan",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: "closed_orphaned_brain_dispatch_rows",
+          closed_dispatch_ids: closedOrphans.map((row) => row.dispatch_id),
+          closed_task_ids: closedOrphans.map((row) => row.task_id).filter((id): id is string => typeof id === "string"),
+          closure_reasons: closedOrphans.map((row) => row.closure_reason),
+        } as JsonValue,
+      });
+    } catch { /* swallow */ }
+  }
   if (IN_FLIGHT_BRAIN.size === 0) return;
   const live = new Set<string>(IN_FLIGHT.keys());
   for (const taskId of openBrainDispatchTaskIdsFromSql(db)) live.add(taskId);
@@ -854,7 +871,7 @@ export const schedulerTick = async (
 ): Promise<SchedulerTick> => {
   // Crisis-mode adjustments: if a directive scope is supplied AND that
   // directive is in crisis, raise maxConcurrent before applying the cap.
-  // Without a directive scope we keep the caller's baseline (Phase K Father
+  // Without a directive scope we keep the caller's baseline (Phase K OwnerAutonomy
   // will pick the active directive for us).
   let effectiveOpts: SchedulerOpts = { ...opts };
   if (opts.directiveId) {
@@ -1344,7 +1361,7 @@ export type SchedulerLoopOpts = SchedulerOpts & {
 /** Universal reactive loop suitable for the daemon to run continuously.
  *  Every activation first drains scored forecast-origin predicates, which may
  *  open candidate directives/tasks through the same ledger path as owner input;
- *  then readyTasks dispatches through decideDispatch. There is no Father or
+ *  then readyTasks dispatches through decideDispatch. There is no OwnerAutonomy or
  *  autonomous side loop: forecasting, owner-authored work, recipe replay,
  *  Claude-inline, and brain dispatch all converge here. Quiescence means no
  *  forecast candidates, no ready tasks, and no in-flight dispatches.

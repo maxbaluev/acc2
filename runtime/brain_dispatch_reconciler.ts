@@ -117,6 +117,109 @@ export const getOpenBrainDispatches = (db: Database): OpenBrainDispatch[] => {
   return out;
 };
 
+export const DEFAULT_BRAIN_DISPATCH_MAX_AGE_MS = 25 * 60 * 1000;
+
+export type BrainDispatchOrphanCloseReason =
+  | "orphaned_dead_generation"
+  | "orphaned_dead_pid"
+  | "orphaned_max_age"
+  | "orphaned_boot_reconcile";
+
+export type ClosedBrainDispatch = {
+  dispatch_event_id: string;
+  dispatch_id: string;
+  task_id: string | null;
+  directive_id: string | null;
+  closure_reason: BrainDispatchOrphanCloseReason | "restart_reconciled";
+  age_ms: number;
+};
+
+const pidAlive = (pid: number): boolean => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+const dispatchAgeMs = (row: OpenBrainDispatch, nowMs: number): number => {
+  if (row.started_at_ms !== null) return Math.max(0, nowMs - row.started_at_ms);
+  const openedAt = Date.parse(row.opened_at_iso);
+  return Number.isFinite(openedAt) ? Math.max(0, nowMs - openedAt) : 0;
+};
+
+const classifyOpenDispatch = (
+  row: OpenBrainDispatch,
+  opts: { currentSessionToken?: string | null; maxAgeMs: number; nowMs: number; closeAllOpen?: boolean },
+): { reason: BrainDispatchOrphanCloseReason; ageMs: number } | null => {
+  const ageMs = dispatchAgeMs(row, opts.nowMs);
+  if (opts.closeAllOpen) return { reason: "orphaned_boot_reconcile", ageMs };
+  if (row.session_token && opts.currentSessionToken && row.session_token !== opts.currentSessionToken) {
+    return { reason: "orphaned_dead_generation", ageMs };
+  }
+  if (row.subprocess_pid !== null && !pidAlive(row.subprocess_pid)) {
+    return { reason: "orphaned_dead_pid", ageMs };
+  }
+  if (ageMs >= opts.maxAgeMs) return { reason: "orphaned_max_age", ageMs };
+  return null;
+};
+
+export const closeOrphanedBrainDispatches = (
+  db: Database,
+  opts: {
+    currentSessionToken?: string | null;
+    maxAgeMs?: number;
+    nowMs?: number;
+    closeAllOpen?: boolean;
+    closureReasonOverride?: "restart_reconciled";
+  } = {},
+): ClosedBrainDispatch[] => {
+  const nowMs = opts.nowMs ?? Date.now();
+  const maxAgeMs = opts.maxAgeMs ?? DEFAULT_BRAIN_DISPATCH_MAX_AGE_MS;
+  const closed: ClosedBrainDispatch[] = [];
+  for (const row of getOpenBrainDispatches(db)) {
+    if (!row.dispatch_id) continue;
+    const classification = classifyOpenDispatch(row, {
+      currentSessionToken: opts.currentSessionToken ?? null,
+      maxAgeMs,
+      nowMs,
+      closeAllOpen: opts.closeAllOpen,
+    });
+    if (!classification) continue;
+    const closureReason = opts.closureReasonOverride ?? classification.reason;
+    emitEvent(db, {
+      kind: "brain_dispatch_closed",
+      substrate_origin: "substrate_auto",
+      directive_id: row.directive_id ?? undefined,
+      task_id: row.task_id ?? undefined,
+      payload: {
+        dispatch_id: row.dispatch_id,
+        closure_reason: closureReason,
+        orphan_reason: classification.reason,
+        closed_at_ms: nowMs,
+        current_session_token: opts.currentSessionToken ?? null,
+        original_dispatch_event_id: row.dispatch_event_id,
+        original_started_at_ms: row.started_at_ms,
+        original_subprocess_pid: row.subprocess_pid,
+        original_session_token: row.session_token,
+        stale_age_ms: classification.ageMs,
+        max_age_ms: maxAgeMs,
+      },
+    });
+    closed.push({
+      dispatch_event_id: row.dispatch_event_id,
+      dispatch_id: row.dispatch_id,
+      task_id: row.task_id,
+      directive_id: row.directive_id,
+      closure_reason: closureReason,
+      age_ms: classification.ageMs,
+    });
+  }
+  return closed;
+};
+
 export type ReconcileSummary = {
   reconciled_count: number;
   reconciled_dispatch_ids: string[];
@@ -136,32 +239,19 @@ export const reconcileBrainDispatchesAtBoot = (
   bootSessionToken: string,
 ): ReconcileSummary => {
   const open = getOpenBrainDispatches(db);
-  const reconciledIds: string[] = [];
   let earliest: string | null = null;
   let latest: string | null = null;
-  const closedAtMs = Date.now();
   for (const row of open) {
-    if (!row.dispatch_id) continue; // historical rows without dispatch_id are unrecoverable; skip
+    if (!row.dispatch_id) continue;
     if (earliest === null || row.opened_at_iso < earliest) earliest = row.opened_at_iso;
     if (latest === null || row.opened_at_iso > latest) latest = row.opened_at_iso;
-    emitEvent(db, {
-      kind: "brain_dispatch_closed",
-      substrate_origin: "substrate_auto",
-      directive_id: row.directive_id ?? undefined,
-      task_id: row.task_id ?? undefined,
-      payload: {
-        dispatch_id: row.dispatch_id,
-        closure_reason: "restart_reconciled",
-        closed_at_ms: closedAtMs,
-        boot_session_token: bootSessionToken,
-        original_dispatch_event_id: row.dispatch_event_id,
-        original_started_at_ms: row.started_at_ms,
-        original_subprocess_pid: row.subprocess_pid,
-        original_session_token: row.session_token,
-      },
-    });
-    reconciledIds.push(row.dispatch_id);
   }
+  const closed = closeOrphanedBrainDispatches(db, {
+    currentSessionToken: bootSessionToken,
+    closeAllOpen: true,
+    closureReasonOverride: "restart_reconciled",
+  });
+  const reconciledIds = closed.map((row) => row.dispatch_id);
   return {
     reconciled_count: reconciledIds.length,
     reconciled_dispatch_ids: reconciledIds,
