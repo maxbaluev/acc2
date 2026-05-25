@@ -20,7 +20,6 @@ import {
   lessonImplementerQueue,
   modelRouting,
   worldModels,
-  worldModels,
   originPromotionRanking,
   ownerConversation,
   ownerPlainStatus,
@@ -138,7 +137,6 @@ describe("runViews", () => {
       "artifact_warning_view",
       "model_routing_view",
       "world_model_view",
-      "world_model_view",
     ]) {
       expect(views).toContain(expected);
     }
@@ -248,25 +246,6 @@ describe("act_projection_observability_view + actProjectionObservability", () =>
     expect(row!.projection_residual).toBe(0.23);
     expect(row!.projection_residual_event_id).toBe(scoredId);
     expect(row!.projection_residual_kind).toBe("action_scored");
-  });
-});
-
-describe("world_model_view + worldModels", () => {
-  test("projects latest task world model snapshot and model delta from existing state events", () => {
-    const db = openDb(":memory:");
-    runViews(db);
-    insertEvent(db, { kind: "state_snapshot_recorded", directive_id: "d_wm", task_id: "t_wm", payload: { snapshot_kind: "world_model", model_id: "wm:t_wm", model_version: 1, world_model: { goal_state: { repo_tests: "passing" }, environment: { repo: "acc2" }, reader: { stakeholder: "owner" }, medium: { kind: "github" }, reality_evidence: ["git", "bun test"], convergence: { state: "open" } } } });
-    const deltaId = insertEvent(db, { kind: "state_snapshot_diffed", directive_id: "d_wm", task_id: "t_wm", payload: { diff_kind: "world_model", model_id: "wm:t_wm", model_delta: { convergence: { state: "settled" } } } });
-    const rows = worldModels(db, { directive_id: "d_wm" });
-    expect(rows).toHaveLength(1);
-    expect(rows[0].model_id).toBe("wm:t_wm");
-    expect(rows[0].goal_state).toEqual({ repo_tests: "passing" });
-    expect(rows[0].environment).toEqual({ repo: "acc2" });
-    expect(rows[0].reader).toEqual({ stakeholder: "owner" });
-    expect(rows[0].medium).toEqual({ kind: "github" });
-    expect(rows[0].latest_delta_event_id).toBe(deltaId);
-    expect(rows[0].latest_delta).toEqual({ convergence: { state: "settled" } });
-    expect(rows[0].delta_count).toBe(1);
   });
 });
 

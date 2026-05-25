@@ -233,73 +233,6 @@ CREATE VIEW IF NOT EXISTS world_model_view AS
   ORDER BY s.ts DESC;
 `;
 
-// world_model_view — first-class task world models projected from existing
-// state snapshot events. state_snapshot_recorded stores the current model in
-// payload.world_model (or the whole payload when snapshot_kind='world_model');
-// state_snapshot_diffed stores model_delta/world_model_delta updates.
-const VIEW_WORLD_MODEL = `
-CREATE VIEW IF NOT EXISTS world_model_view AS
-  WITH snapshots AS (
-    SELECT
-      e.id AS event_id,
-      e.ts,
-      e.directive_id,
-      e.task_id,
-      e.parent_task_id,
-      COALESCE(json_extract(e.payload, '$.model_id'), e.task_id) AS model_id,
-      json_extract(e.payload, '$.model_version') AS model_version,
-      COALESCE(json_extract(e.payload, '$.world_model'), e.payload) AS model_payload,
-      e.payload AS snapshot_payload,
-      ROW_NUMBER() OVER (
-        PARTITION BY e.directive_id, COALESCE(json_extract(e.payload, '$.model_id'), e.task_id)
-        ORDER BY e.ts DESC, e.id DESC
-      ) AS rn
-    FROM events e
-    WHERE e.kind = 'state_snapshot_recorded'
-      AND (json_extract(e.payload, '$.snapshot_kind') = 'world_model'
-        OR json_type(e.payload, '$.world_model') IS NOT NULL)
-  ),
-  deltas AS (
-    SELECT
-      e.id AS event_id,
-      e.ts,
-      e.directive_id,
-      e.task_id,
-      COALESCE(json_extract(e.payload, '$.model_id'), e.task_id) AS model_id,
-      COALESCE(json_extract(e.payload, '$.world_model_delta'), json_extract(e.payload, '$.model_delta'), e.payload) AS delta_payload
-    FROM events e
-    WHERE e.kind = 'state_snapshot_diffed'
-      AND (json_extract(e.payload, '$.diff_kind') = 'world_model'
-        OR json_type(e.payload, '$.world_model_delta') IS NOT NULL
-        OR json_type(e.payload, '$.model_delta') IS NOT NULL)
-  ),
-  latest_delta AS (
-    SELECT *, ROW_NUMBER() OVER (
-      PARTITION BY directive_id, model_id
-      ORDER BY ts DESC, event_id DESC
-    ) AS rn
-    FROM deltas
-  )
-  SELECT
-    s.event_id, s.ts, s.directive_id, s.task_id, s.parent_task_id, s.model_id, s.model_version,
-    json_extract(s.model_payload, '$.goal_state') AS goal_state,
-    json_extract(s.model_payload, '$.environment') AS environment,
-    json_extract(s.model_payload, '$.reader') AS reader,
-    json_extract(s.model_payload, '$.medium') AS medium,
-    json_extract(s.model_payload, '$.reality_evidence') AS reality_evidence,
-    json_extract(s.model_payload, '$.convergence') AS convergence,
-    ld.event_id AS latest_delta_event_id,
-    ld.ts AS latest_delta_ts,
-    ld.delta_payload AS latest_delta,
-    (SELECT COUNT(*) FROM deltas d WHERE d.directive_id = s.directive_id AND d.model_id = s.model_id) AS delta_count,
-    s.model_payload,
-    s.snapshot_payload
-  FROM snapshots s
-  LEFT JOIN latest_delta ld ON ld.directive_id = s.directive_id AND ld.model_id = s.model_id AND ld.rn = 1
-  WHERE s.rn = 1
-  ORDER BY s.ts DESC;
-`;
-
 // act_artifact_registry_view — admitted or promoted artifacts ordered by
 // score DESC. This is what retrieval and the prompt composer read.
 // Brain dataflow audit bxdhdkm9e #3 (2026-05-15): the registry view now
@@ -4622,7 +4555,6 @@ export const VIEW_NAMES = [
   "act_artifact_registry_view",
   "failure_view",
   "world_model_view",
-  "world_model_view",
   "ready_tasks_view",
   "task_graph_view",
   "dispatch_resolved_view",
@@ -4652,7 +4584,6 @@ const VIEW_DDL: readonly string[] = [
   VIEW_TASK_GRAPH,
   VIEW_READY_TASKS,
   VIEW_FAILURE,
-  VIEW_WORLD_MODEL,
   VIEW_WORLD_MODEL,
   VIEW_ACT_ARTIFACT_REGISTRY,
   VIEW_ARTIFACT_ROUTING,
@@ -4732,7 +4663,6 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_TASK_GRAPH);
   db.exec(VIEW_READY_TASKS);
   db.exec(VIEW_FAILURE);
-  db.exec(VIEW_WORLD_MODEL);
   db.exec(VIEW_WORLD_MODEL);
   db.exec(VIEW_ACT_ARTIFACT_REGISTRY);
   db.exec(VIEW_ARTIFACT_ROUTING);
@@ -4910,28 +4840,6 @@ export type FailureRow = {
   count: number;
   latest_ts: string;
   earliest_ts: string;
-};
-
-export type WorldModelRow = {
-  event_id: string;
-  ts: string;
-  directive_id: string;
-  task_id: string;
-  parent_task_id: string | null;
-  model_id: string;
-  model_version: string | number | null;
-  goal_state: unknown;
-  environment: unknown;
-  reader: unknown;
-  medium: unknown;
-  reality_evidence: unknown;
-  convergence: unknown;
-  latest_delta_event_id: string | null;
-  latest_delta_ts: string | null;
-  latest_delta: unknown;
-  delta_count: number;
-  model_payload: Record<string, unknown>;
-  snapshot_payload: Record<string, unknown>;
 };
 
 export type WorldModelRow = {
@@ -5936,41 +5844,6 @@ export const dispatchResolvedPooled = async (
 };
 
 /** Per-failure_kind tallies of task_failed events. */
-export const worldModels = (
-  db: Database,
-  opts: { directive_id?: string; task_id?: string; limit?: number } = {},
-): WorldModelRow[] => {
-  const where: string[] = [];
-  const bindings: SQLQueryBindings[] = [];
-  if (opts.directive_id) { where.push('directive_id = ?'); bindings.push(opts.directive_id); }
-  if (opts.task_id) { where.push('task_id = ?'); bindings.push(opts.task_id); }
-  const limit = Math.max(1, Math.min(opts.limit ?? 50, 200));
-  bindings.push(limit);
-  const sql = `SELECT * FROM world_model_view${where.length ? ' WHERE ' + where.join(' AND ') : ''} LIMIT ?`;
-  const rows = db.query(sql).all(...bindings) as Array<Record<string, unknown>>;
-  return rows.map((r) => ({
-    event_id: String(r.event_id),
-    ts: String(r.ts),
-    directive_id: String(r.directive_id),
-    task_id: String(r.task_id),
-    parent_task_id: r.parent_task_id == null ? null : String(r.parent_task_id),
-    model_id: String(r.model_id),
-    model_version: parseMaybeJson(r.model_version) as string | number | null,
-    goal_state: parseMaybeJson(r.goal_state),
-    environment: parseMaybeJson(r.environment),
-    reader: parseMaybeJson(r.reader),
-    medium: parseMaybeJson(r.medium),
-    reality_evidence: parseMaybeJson(r.reality_evidence),
-    convergence: parseMaybeJson(r.convergence),
-    latest_delta_event_id: r.latest_delta_event_id == null ? null : String(r.latest_delta_event_id),
-    latest_delta_ts: r.latest_delta_ts == null ? null : String(r.latest_delta_ts),
-    latest_delta: parseMaybeJson(r.latest_delta),
-    delta_count: Number(r.delta_count ?? 0),
-    model_payload: parseJson<Record<string, unknown>>(r.model_payload),
-    snapshot_payload: parseJson<Record<string, unknown>>(r.snapshot_payload),
-  }));
-};
-
 export const worldModels = (
   db: Database,
   opts: { directive_id?: string; task_id?: string; limit?: number } = {},

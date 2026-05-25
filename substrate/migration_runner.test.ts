@@ -55,18 +55,6 @@ describe("migration_runner", () => {
     expect(second.failed).toBe(0);
   });
 
-  test("v003 world-model projection migration is idempotent and creates only event-backed indexes", () => {
-    const db = openDb(":memory:");
-    const first = runVersionedMigrations(db);
-    expect(first.failed).toBe(0);
-    expect(first.versions_applied).toContain("v003");
-    const indexes = (db.query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_events_world_model_%' ORDER BY name`).all() ?? []).map((r) => r.name);
-    expect(indexes).toEqual(["idx_events_world_model_delta_task_ts", "idx_events_world_model_snapshot_task_ts"]);
-    const second = runVersionedMigrations(db);
-    expect(second.applied).toBe(0);
-    expect(second.failed).toBe(0);
-  });
-
   test("crash-window atomicity: the schema_migration_applied marker is committed in the SAME transaction as the migration SQL (every applied version has exactly one durable marker, no partial-apply re-run risk)", () => {
     // The marker event is the SOLE idempotency signal. If it lands in a
     // separate write after COMMIT, a crash between COMMIT and the emit leaves
