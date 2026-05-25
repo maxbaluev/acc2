@@ -35,6 +35,7 @@ import { isAbsolute, join } from "node:path";
 import type { JsonValue } from "../substrate/types";
 import { withImmediateTransaction } from "../substrate/db";
 import { emitEvent } from "./events";
+import { latestDescendantProgressTs } from "./task_descendants";
 
 export type SweepSummary = {
   swept_count: number;
@@ -88,6 +89,17 @@ export type SweepOptions = {
 const STUCK_PROPOSAL_AGE_MS = 24 * 60 * 60 * 1000; // 24h
 const OWNER_REQUEST_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7d
 const STUCK_TASK_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+
+/** ANCESTOR-PROGRESS QUIET WINDOW (amendment ancestor_progress_crediting).
+ *  A task_node_opened lifecycle is "stuck" ONLY when neither it NOR any task in
+ *  its decomposition/refines subtree has emitted structural progress within this
+ *  window before `now`. Descendant progress refreshes ancestor liveness, so a
+ *  deep healthy graph (root open while its children are actively committing) is
+ *  NOT swept as obsolete/owner-required. Mirrors the scheduler's
+ *  ANCESTOR_PROGRESS_QUIET_WINDOW_MS but expressed at the sweep's day-scale: the
+ *  task is age-eligible at 24h/7d, so a subtree quiet for less than this window
+ *  is still alive. */
+const ANCESTOR_PROGRESS_QUIET_WINDOW_MS = 60 * 60 * 1000; // 1h
 
 /** Cooperative yield helper — releases the event loop so the daemon's
  *  /health route, the bridge SSE pumps, and other workers can run while
@@ -513,6 +525,22 @@ export const runLifecycleClosureSweep = async (
         continue;
       }
       if (ageMs < STUCK_TASK_AGE_MS) continue;
+      // ANCESTOR-PROGRESS HARD GATE (amendment ancestor_progress_crediting).
+      // An aged-open root is NOT stuck if any task in its progress subtree
+      // (parent_task_id chain + refines/requires edges) emitted structural
+      // progress within the quiet window — descendant progress keeps the
+      // ancestor alive. Without this, deep healthy graphs were swept to
+      // obsolete/owner-required while their children were still committing
+      // deliverables (observed VCGTS7AE).
+      if (row.task_id) {
+        const latestSubtreeProgressMs = latestDescendantProgressTs(db, row.task_id);
+        if (
+          latestSubtreeProgressMs !== null &&
+          nowMs - latestSubtreeProgressMs < ANCESTOR_PROGRESS_QUIET_WINDOW_MS
+        ) {
+          continue;
+        }
+      }
       // F7: respect long-window feedback. A task whose act tuple
       // declared feedback_window.classification in {long, very_long}
       // (life decision, growth practice, relationship work) is

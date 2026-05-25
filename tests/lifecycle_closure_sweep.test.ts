@@ -179,4 +179,110 @@ describe("runLifecycleClosureSweep — terminator emissions", () => {
       .get();
     expect(persisted?.c).toBe(0);
   });
+
+  // ── Ancestor-progress crediting (amendment ancestor_progress_crediting) ──
+  // A stuck-aged root with a recently-progressing DESCENDANT must NOT be swept
+  // to obsolete/owner-required; a truly idle subtree still IS.
+
+  /** Like insertEventAtTs but also stamps parent_task_id, so we can build a
+   *  decomposition subtree the sweep must walk. */
+  const insertChildEventAtTs = (
+    db: ReturnType<typeof openDb>,
+    kind: string,
+    ts: Date,
+    payload: Record<string, unknown>,
+    directiveId: string,
+    taskId: string,
+    parentTaskId: string | null,
+  ): string => {
+    const row = emitEvent(db, {
+      kind: kind as Parameters<typeof emitEvent>[1]["kind"],
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: taskId,
+      parent_task_id: parentTaskId ?? undefined,
+      payload: payload as Parameters<typeof emitEvent>[1]["payload"],
+    });
+    db.run("UPDATE events SET ts = ? WHERE id = ?", [ts.toISOString(), row.id]);
+    return row.id;
+  };
+
+  test("(d) aged-open root with a RECENTLY-progressing descendant is NOT swept stuck", async () => {
+    const db = openDb(":memory:");
+    // Root opened 8 days ago (well past the 24h/7d thresholds), no terminator.
+    const rootOpen = insertChildEventAtTs(
+      db,
+      "task_node_opened",
+      DAYS_AGO(8),
+      { goal: "deep graph root" },
+      "dir_alive",
+      "root_alive",
+      null,
+    );
+    // A child opened under the root, also long ago.
+    insertChildEventAtTs(
+      db,
+      "task_node_opened",
+      DAYS_AGO(8),
+      { goal: "phase C child" },
+      "dir_alive",
+      "child_alive",
+      "root_alive",
+    );
+    // The child committed a deliverable JUST NOW (5 min before NOW) — well
+    // inside the 1h ancestor-progress quiet window.
+    insertChildEventAtTs(
+      db,
+      "knowledge_candidate",
+      new Date(NOW.getTime() - 5 * 60 * 1000),
+      { claim: "phase C lesson", confidence: 0.9 },
+      "dir_alive",
+      "child_alive",
+      "root_alive",
+    );
+
+    const summary = await runLifecycleClosureSweep(db, { now: NOW });
+    // No terminator for the root: descendant progress kept it alive.
+    const rootTerminators = terminatorsFor(db, rootOpen);
+    expect(rootTerminators.length).toBe(0);
+  });
+
+  test("(e) aged-open root with a TRULY IDLE subtree (no recent descendant progress) IS swept", async () => {
+    const db = openDb(":memory:");
+    const rootOpen = insertChildEventAtTs(
+      db,
+      "task_node_opened",
+      DAYS_AGO(8),
+      { goal: "deep graph root" },
+      "dir_idle",
+      "root_idle",
+      null,
+    );
+    // Child opened long ago; its last structural progress is also 8 days ago —
+    // far outside the 1h quiet window, so the subtree is genuinely idle.
+    insertChildEventAtTs(
+      db,
+      "task_node_opened",
+      DAYS_AGO(8),
+      { goal: "phase C child" },
+      "dir_idle",
+      "child_idle",
+      "root_idle",
+    );
+    insertChildEventAtTs(
+      db,
+      "knowledge_candidate",
+      DAYS_AGO(8),
+      { claim: "stale lesson", confidence: 0.9 },
+      "dir_idle",
+      "child_idle",
+      "root_idle",
+    );
+
+    const summary = await runLifecycleClosureSweep(db, { now: NOW });
+    // The idle root gets swept (directive still open → owner_required).
+    const rootTerminators = terminatorsFor(db, rootOpen);
+    expect(rootTerminators.length).toBeGreaterThanOrEqual(1);
+    expect(rootTerminators.some((t) => t.kind === "closure_owner_required")).toBe(true);
+  });
 });

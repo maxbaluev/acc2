@@ -27,7 +27,7 @@ import type { JsonValue } from "../substrate/types";
 import { readDagForDirective, readyTasks, type TaskNode } from "./task_topology";
 import { dispatchReadyTask } from "./task_dispatcher";
 import { rootCommitReadiness } from "./directive_closure";
-import { decompositionDescendantTaskIds } from "./task_descendants";
+import { decompositionDescendantTaskIds, subtreeHasRecentProgress } from "./task_descendants";
 import { hasFreeHandshakePermit, freeHandshakePermits, observedBrainRssBytes } from "./bridge/opencode";
 import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
 import { emitEvent } from "./events";
@@ -655,6 +655,16 @@ const COGNITIVE_PROGRESS_KINDS: ReadonlySet<string> = new Set([
  *  Truly silent dispatches (no cognitive work) get no grace. */
 const RESEARCH_GRACE_CYCLES = 4;
 
+/** ANCESTOR-PROGRESS QUIET WINDOW (amendment ancestor_progress_crediting).
+ *  A descendant emitting ANY structural-progress event counts as progress for
+ *  EVERY ancestor. An ancestor is "no_structural_progress" ONLY when neither it
+ *  NOR any decomposition/refines descendant has emitted structural progress
+ *  after the ancestor's last dispatch — falling back to this quiet window when
+ *  the last-dispatch timestamp is unavailable. Without this, deep healthy graphs
+ *  (root abandoned while its Phase-C children were still committing
+ *  deliverables, observed VCGTS7AE) were killed for "no progress" while alive. */
+const ANCESTOR_PROGRESS_QUIET_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
 /** HIERARCHICAL CLOSURE (elegance primitive #e). When a dispatch emits a
  *  DELIVERABLE (knowledge_candidate / lesson_extracted / contract_amendment_
  *  proposed / act_artifact_candidate) but NO task_closure_audited and NO
@@ -983,6 +993,25 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
   const noStructuralProgress = progressRows.length === 0;
   const deliverableWithoutClosureOrRefinement = deliverableRows.length > 0 && terminalOrRecursionRows.length === 0;
   if (!noStructuralProgress && !deliverableWithoutClosureOrRefinement) return { terminated: false };
+
+  // ANCESTOR-PROGRESS HARD GATE (amendment ancestor_progress_crediting).
+  // The task's OWN events showed no structural progress — but a deep healthy
+  // graph keeps its ancestors alive THROUGH ITS DESCENDANTS. If any task in this
+  // node's progress subtree (parent_task_id chain + refines/requires edges)
+  // emitted a structural-progress event after this node's last dispatch (or
+  // within the quiet window when the dispatch ts is somehow unusable), this is
+  // NOT a no-progress ancestor: descendant progress refreshes ancestor progress.
+  // Only suppress the no-structural-progress abandon — the deliverable-without-
+  // closure path is the node's OWN unclosed deliverable and is handled below.
+  if (noStructuralProgress) {
+    const lastDispatchMs = new Date(lastDispatch.ts).getTime();
+    const sinceMs = Number.isFinite(lastDispatchMs)
+      ? lastDispatchMs
+      : Date.now() - ANCESTOR_PROGRESS_QUIET_WINDOW_MS;
+    if (subtreeHasRecentProgress(db, task.id, sinceMs)) {
+      return { terminated: false };
+    }
+  }
 
   // RESEARCH GRACE (anti over-correction): a deep-research/analysis cycle does
   // its work IN-CYCLE via tools (web fetch, reasoning) and may close cleanly

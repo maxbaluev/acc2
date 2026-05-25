@@ -1478,6 +1478,20 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
       parent_task_id: root,
       payload: { goal: "child still running when root dies" },
     });
+    // The child was opened but then went SILENT — it emits no further structural
+    // progress. Re-dispatch the root AFTER the child node_opened so the child's
+    // opening is pre-last-dispatch: the ancestor-progress gate then sees a truly
+    // idle subtree (no descendant progress after the root's last dispatch) and
+    // the no_structural_progress abandon fires as before.
+    await Bun.sleep(3);
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: root,
+      payload: { dispatch_id: newId() },
+    });
+    await Bun.sleep(3);
 
     await schedulerTick(db, { directiveId });
 
@@ -1494,6 +1508,121 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
     expect(childAbandoned).not.toBeNull();
     expect(childAbandoned!.failure_kind).toBe("root_terminated_cascade");
     expect((JSON.parse(childAbandoned!.payload) as { root_task_id: string }).root_task_id).toBe(root);
+  });
+
+  // ── Ancestor-progress crediting (amendment ancestor_progress_crediting) ──
+  // A descendant emitting structural progress counts as progress for EVERY
+  // ancestor: a dispatched root whose OWN events show nothing must NOT be
+  // abandoned for no_structural_progress while a child is actively committing
+  // deliverables (observed live: directive VCGTS7AE root abandoned while Phase C
+  // children were still open and other children had just committed).
+
+  test("ancestor-progress: root with a RECENTLY-progressing descendant is NOT abandoned for no_structural_progress", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const root = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      payload: { directive_text: "deep graph", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: root,
+      payload: { goal: "deep graph root" },
+    });
+    // A child opened under the root before the root's dispatch.
+    const child = newId();
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: child,
+      parent_task_id: root,
+      payload: { goal: "phase C child" },
+    });
+    // The root was dispatched and its OWN cycle emitted nothing structural.
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: root,
+      payload: { dispatch_id: newId() },
+    });
+    await Bun.sleep(3);
+    // But the CHILD just committed a deliverable AFTER the root's dispatch.
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: child,
+      payload: { claim: "phase C lesson", confidence: 0.9 },
+    });
+
+    await schedulerTick(db, { directiveId });
+
+    const abandoned = db
+      .query("SELECT failure_kind FROM events WHERE task_id = ? AND kind = 'task_abandoned'")
+      .get(root) as { failure_kind: string } | null;
+    expect(abandoned).toBeNull();
+  });
+
+  test("ancestor-progress: root with a TRULY IDLE subtree (no descendant progress after dispatch) STILL abandons", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const root = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      payload: { directive_text: "deep graph", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: root,
+      payload: { goal: "deep graph root" },
+    });
+    // Child opened, but it emits nothing after the root's dispatch.
+    const child = newId();
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: child,
+      parent_task_id: root,
+      payload: { goal: "phase C child that goes idle" },
+    });
+    // Child's only deliverable lands BEFORE the root's dispatch — so after the
+    // dispatch window the subtree is silent.
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: child,
+      payload: { claim: "old lesson", confidence: 0.9 },
+    });
+    await Bun.sleep(3);
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: root,
+      payload: { dispatch_id: newId() },
+    });
+    await Bun.sleep(3);
+
+    await schedulerTick(db, { directiveId });
+
+    const abandoned = db
+      .query("SELECT failure_kind FROM events WHERE task_id = ? AND kind = 'task_abandoned'")
+      .get(root) as { failure_kind: string } | null;
+    expect(abandoned).not.toBeNull();
+    expect(abandoned!.failure_kind).toBe("no_structural_progress_since_last_dispatch");
   });
 });
 
