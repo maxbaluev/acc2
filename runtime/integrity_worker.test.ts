@@ -449,6 +449,38 @@ describe("reconcilePreDispatchOrphans", () => {
       closeDb(":memory:");
     }
   });
+
+  test("reaps a root that opened but NEVER dispatched (stuck at admission gate); spares fresh + dispatched", () => {
+    const db = openDb(":memory:");
+    try {
+      const now = Date.now();
+      const old = new Date(now - 4 * 60 * 60 * 1000).toISOString();  // 4h > 3h window
+      const fresh = new Date(now - 30 * 60 * 1000).toISOString();     // 30m < 3h window
+      // directive_opened + root task_node_opened + cap-gate (no brain_dispatched),
+      // mirroring the live zombie shape that escapes the no-advancement orphan check.
+      const seedStuck = (d: string, root: string, ts: string, withDispatch = false) => {
+        emitEvent(db, { kind: "directive_opened", substrate_origin: "substrate_auto", task_id: d, directive_id: d, payload: { lifecycle: "finite" } });
+        emitEvent(db, { kind: "task_node_opened", substrate_origin: "substrate_auto", task_id: root, directive_id: d, parent_task_id: null, payload: {} });
+        emitEvent(db, { kind: "constitutional_gate_decision", substrate_origin: "substrate_auto", task_id: root, directive_id: d, payload: { gate: "daemon_heap_pressure" } });
+        if (withDispatch) emitEvent(db, { kind: "brain_dispatched", substrate_origin: "substrate_auto", task_id: root, directive_id: d, payload: {} });
+        db.run("UPDATE events SET ts=? WHERE directive_id=?", [ts, d]);
+      };
+      seedStuck("z1", "z1_root", old);            // stuck > 3h, never dispatched → reap
+      seedStuck("z2", "z2_root", fresh);          // too fresh → keep
+      seedStuck("z3", "z3_root", old, true);      // dispatched → keep (orphan reconciler owns it)
+
+      const reaped = reconcilePreDispatchOrphans(db, { now: new Date(now).toISOString() });
+      const reapedRoots = reaped.map((r) => r.task_id);
+      expect(reapedRoots).toContain("z1_root");
+      expect(reapedRoots).not.toContain("z2_root");
+      expect(reapedRoots).not.toContain("z3_root");
+      const abandoned = eventsByKind(db, "task_abandoned").filter((e) => e.task_id === "z1_root");
+      expect(abandoned.length).toBe(1);
+      expect((JSON.parse(abandoned[0].payload as string) as { reason: string }).reason).toBe("stuck_pre_dispatch_never_dispatched");
+    } finally {
+      closeDb(":memory:");
+    }
+  });
 });
 
 describe("runIntegrityCheck — COUNT scans route through SQL worker pool", () => {

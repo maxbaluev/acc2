@@ -248,6 +248,16 @@ export const integrityWorkerTick = async (db: Database): Promise<IntegrityReport
  *  (the daemon was killed, every in-flight dispatch is dead). */
 export const STALE_DISPATCH_THRESHOLD_MS = 25 * 60 * 1000;
 
+/** A directive whose root task opened but which NEVER reached brain_dispatched
+ *  (e.g. it stuck at the scheduler admission gate) escapes the pre-dispatch
+ *  orphan check above — that check treats `task_node_opened` as "advancement".
+ *  Such directives can linger `live` forever (admission never selects them; no
+ *  terminal is ever emitted). They are reaped by the SECOND query in
+ *  reconcilePreDispatchOrphans once older than this DELIBERATELY-CONSERVATIVE
+ *  window — long enough that a directive merely queued behind the global
+ *  in-flight cap during a real burst is never mistaken for stuck. */
+export const STUCK_NEVER_DISPATCHED_THRESHOLD_MS = 3 * 60 * 60 * 1000; // 3h
+
 /** Parse the original brain_dispatched payload to recover its dispatch_id.
  *  The orphan-recovery path uses this to emit a properly-keyed
  *  brain_dispatch_closed event (per YEF00QZM lesson HJFTSQ4V2 — closing
@@ -485,7 +495,7 @@ export const reconcileOrphanedDispatches = (db: Database): Array<{ dispatch_even
  *  NOT closed; only genuinely-stuck pre-dispatch directives are reaped. */
 export const reconcilePreDispatchOrphans = (
   db: Database,
-  opts?: { minAgeMs?: number; now?: string },
+  opts?: { minAgeMs?: number; neverDispatchedMinAgeMs?: number; now?: string },
 ): Array<{ task_id: string; directive_id: string | null }> => {
   const minAgeMs = opts?.minAgeMs ?? STALE_DISPATCH_THRESHOLD_MS;
   const nowMs = opts?.now ? Date.parse(opts.now) : Date.now();
@@ -538,6 +548,62 @@ export const reconcilePreDispatchOrphans = (
       logger.warn(
         { where: "integrity.reconcile_pre_dispatch_orphan", task_id: row.task_id, err: (err as Error).message },
         "could not emit task_abandoned for pre-dispatch orphan",
+      );
+    }
+  }
+  // SECOND pattern: a directive whose ROOT task_node_opened exists (so the
+  // query above skipped it — task_node_opened counts as "advancement") but
+  // which NEVER reached brain_dispatched and has NO terminal. These stick at
+  // the scheduler admission gate and linger `live` forever. Keyed on
+  // directive_id + the root node (parent_task_id IS NULL) to avoid any
+  // directive_opened.task_id vs root-task_id ambiguity. Conservative 3h window
+  // so a directive merely queued behind the cap during a burst is never reaped.
+  const stuckCutoffIso = new Date(nowMs - (opts?.neverDispatchedMinAgeMs ?? STUCK_NEVER_DISPATCHED_THRESHOLD_MS)).toISOString();
+  const stuckRows = db
+    .query(
+      `SELECT root.task_id AS root_task_id, root.directive_id, root.id AS root_event_id, o.ts AS opened_ts
+       FROM events o
+       JOIN events root ON root.directive_id = o.directive_id
+            AND root.kind = 'task_node_opened'
+            AND root.parent_task_id IS NULL
+       WHERE o.kind = 'directive_opened'
+         AND o.directive_id IS NOT NULL
+         AND o.ts < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM events bd
+           WHERE bd.directive_id = o.directive_id AND bd.kind = 'brain_dispatched'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM events t
+           WHERE t.task_id = root.task_id
+             AND t.kind IN (
+               'task_committed', 'task_failed', 'task_abandoned',
+               'task_blocked', 'closure_complete', 'closure_obsolete',
+               'task_committed_superseded'
+             )
+         )`,
+    )
+    .all(stuckCutoffIso) as Array<{ root_task_id: string; directive_id: string | null; root_event_id: string; opened_ts: string }>;
+  for (const row of stuckRows) {
+    try {
+      emitEvent(db, {
+        kind: "task_abandoned",
+        substrate_origin: "substrate_auto",
+        directive_id: row.directive_id ?? undefined,
+        task_id: row.root_task_id,
+        context_refs: [row.root_event_id],
+        payload: {
+          reason: "stuck_pre_dispatch_never_dispatched",
+          opened_at: row.opened_ts,
+          root_event_id: row.root_event_id,
+          note: "root task opened but the directive never reached brain_dispatched (stuck at scheduler admission); reaped as stale never-dispatched residue",
+        },
+      });
+      reaped.push({ task_id: row.root_task_id, directive_id: row.directive_id });
+    } catch (err) {
+      logger.warn(
+        { where: "integrity.reconcile_stuck_never_dispatched", task_id: row.root_task_id, err: (err as Error).message },
+        "could not emit task_abandoned for stuck never-dispatched directive root",
       );
     }
   }

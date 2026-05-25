@@ -523,10 +523,6 @@ export const runArchivalSweep = async (
           errors: 0,
           retention_days: retentionDays,
           cutoff_iso: cutoffIso,
-          retained_aggregates: {
-            evicted_count_meta: Object.keys(summary.by_kind),
-            origin_calibration_rollup_rows: retainedOriginCalibrationRows,
-          },
         } as JsonValue,
       });
       summary.emitted_event_id = emitted.id;
