@@ -26,6 +26,7 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { readDagForDirective, readyTasks, type TaskNode } from "./task_topology";
 import { dispatchReadyTask } from "./task_dispatcher";
+import { rootCommitReadiness } from "./directive_closure";
 import { hasFreeHandshakePermit, freeHandshakePermits, observedBrainRssBytes } from "./bridge/opencode";
 import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
 import { emitEvent } from "./events";
@@ -711,7 +712,7 @@ const closureAuditRedispatchCount = (db: Database, task: TaskNode): number => {
 
 type NoProgressTermination = {
   terminated: boolean;
-  reason?: "no_structural_progress_since_last_dispatch" | "deliverable_without_closure_or_refinement";
+  reason?: "no_structural_progress_since_last_dispatch" | "deliverable_without_closure_or_refinement" | "awaiting_terminal_descendants";
   dispatch_id?: string;
   evidence_event_ids?: string[];
 };
@@ -883,6 +884,20 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
   });
 
   if (cleanClosure) {
+    // A ROOT whose descendants are not all terminal CANNOT commit yet: the
+    // emit-time guard converts task_committed → dispatcher_violation
+    // (root_commit_blocked), the root never terminalizes, and it is re-picked
+    // EVERY scheduler tick — an unbounded hot-loop (observed: 110
+    // dispatcher_violation rows in 2.5min for one root, spamming the ledger +
+    // transcript). Don't attempt the doomed commit. Park the root (terminated =
+    // skip dispatch this tick; the admission gate dedups so parking is silent);
+    // the upward cascade (cascadeUpwardWhenChildrenTerminal) commits the root
+    // when its LAST descendant terminalizes. Non-roots ('not_root') and
+    // actually-committable roots fall through to the normal auto-commit.
+    const readiness = rootCommitReadiness(db, task.id);
+    if (!readiness.ok && readiness.reason === "nonterminal_descendants") {
+      return { terminated: true, reason: "awaiting_terminal_descendants", dispatch_id: dispatchId, evidence_event_ids: [cleanClosure.id] };
+    }
     emitEvent(db, {
       kind: "task_committed",
       substrate_origin: "substrate_auto",

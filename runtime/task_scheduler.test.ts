@@ -1434,6 +1434,32 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
       .get(directiveId) as { c: number };
     expect(child.c).toBe(0);
   });
+
+  test("root with clean closure but NONTERMINAL descendant is PARKED — no doomed commit, no dispatcher_violation hot-loop", async () => {
+    const db = openDb(":memory:");
+    const { directiveId, taskId: root } = await seedDeliverableWithoutClosure(db, { withClosure: 0.1 });
+    // Add a not-yet-terminal child so the root cannot commit (root_commit_blocked).
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: newId(),
+      parent_task_id: root,
+      payload: { goal: "child still running" },
+    });
+
+    // Pre-fix: the no-progress auto-commit emitted task_committed every tick →
+    // the emit guard converted each to dispatcher_violation(root_commit_blocked),
+    // an unbounded hot-loop. Post-fix: the root is parked until the child finishes.
+    for (let i = 0; i < 3; i++) await schedulerTick(db, { directiveId });
+
+    const committed = db.query("SELECT COUNT(*) AS c FROM events WHERE task_id = ? AND kind = 'task_committed'").get(root) as { c: number };
+    expect(committed.c).toBe(0); // parked, not doom-committed
+    const violations = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE task_id = ? AND kind = 'dispatcher_violation' AND failure_kind = 'root_commit_blocked'")
+      .get(root) as { c: number };
+    expect(violations.c).toBe(0); // no hot-loop spam
+  });
 });
 
 describe("brain dispatch SQL liveness reconciliation", () => {
