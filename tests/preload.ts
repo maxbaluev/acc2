@@ -45,7 +45,7 @@ delete process.env.ACC2_GENERATE_SELECT;
 // need integrity off for that subprocess (e.g. tests/integration/
 // crash_recovery.ts) override per-spawn.
 process.env.ACC2_DISABLE_WORKERS ??=
-  "embedder,scheduler,father,rolling_reviewer,rehabilitation,supervisor,compaction,extractors,metrics_gauge_refresh,hotreload,recipe_inertia,verify_heal,rendering_audit,lifecycle_closure_sweep,contract_amendment_consumer,wal_pressure_check,pending_decision_retire,artifact_kind_backfill,owner_outcome_followup,counterfactual_credit,event_authenticity,storage_integrity_floor,deterministic_computation,kernel_sandbox,owner_identity,archival,brain_invocation,memory_reconciliation,sahoo_governor,mcp_session_reaper";
+  "embedder,scheduler,father,rolling_reviewer,rehabilitation,supervisor,compaction,extractors,metrics_gauge_refresh,hotreload,recipe_inertia,verify_heal,rendering_audit,lifecycle_closure_sweep,contract_amendment_consumer,wal_pressure_check,pending_decision_retire,artifact_kind_backfill,owner_outcome_followup,counterfactual_credit,event_authenticity,storage_integrity_floor,deterministic_computation,kernel_sandbox,owner_identity,archival,brain_invocation,memory_reconciliation,sahoo_governor,mcp_session_reaper,capability_gap";
 
 // Tests must NEVER read or write the operator's live ~/.accint/state.db.
 // Pin a per-suite hermetic state dir so admin / CLI tests that open the

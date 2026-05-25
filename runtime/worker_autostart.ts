@@ -185,7 +185,16 @@ export type WorkerName =
   // splice-from-#sessions path, and emits mcp_sessions_reaped. The
   // connect/disconnect hooks feed its first-seen registry. Default ON;
   // opt-out via ACC2_DISABLE_WORKERS=mcp_session_reaper.
-  | "mcp_session_reaper";
+  | "mcp_session_reaper"
+  // RESIDUAL_D (directive 3XETJCYT): OFFENSIVE half of the artifact
+  // lifecycle. Detects (artifact, goal_shape) capability gaps — an
+  // artifact the defensive loop already quarantined/retired whose rolling
+  // residual stays high for a still-demanded goal_shape — emits
+  // capability_gap_detected and opens a brain-authoring directive so a
+  // more-effective replacement is authored. Reactive on
+  // act_artifact_quarantined / act_artifact_retired / act_artifact_score_updated.
+  // Default ON; opt-out via ACC2_DISABLE_WORKERS=capability_gap.
+  | "capability_gap";
 
 /** The full canonical list — useful for tests/preload.ts to disable
  *  everything in one assignment, and for documentation surfaces that want
@@ -224,6 +233,7 @@ export const ALL_WORKER_NAMES: readonly WorkerName[] = [
   "sahoo_governor",
   "observability_guard",
   "mcp_session_reaper",
+  "capability_gap",
 ] as const;
 
 /** Parse `ACC2_DISABLE_WORKERS` (comma-separated, whitespace-tolerant) into
