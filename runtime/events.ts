@@ -8,7 +8,7 @@ import type { Database } from "bun:sqlite";
 import type { Event, EventKind, JsonValue, SubstrateOrigin } from "../substrate/types";
 import { EVENT_KINDS, getCurrentEventKinds } from "../substrate/event_kinds";
 import { newId, nowIso } from "./ids";
-import { decompositionDescendantTaskIds } from "./task_descendants";
+import { openFrontier } from "./task_descendants";
 import { publishEvent } from "./event_bus";
 import { publishActivation } from "./activation_bus";
 import { recordEventEmission } from "./metrics";
@@ -740,22 +740,22 @@ const existingProjection = (db: Database, kind: EventKind, key: string): Emitted
   return row ? { id: row.id, ts: row.ts } : null;
 };
 
-type RootCommitBlocker = { reason: "missing_clean_closure_audit" | "nonterminal_descendants"; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[] };
+type RootCommitBlocker = { reason: "missing_clean_closure_audit" | "nonterminal_descendants"; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[]; open_frontier_count: number };
 const rootTaskCommitBlocker = (db: Database, taskId: string): RootCommitBlocker | null => {
   const root = db.query(`SELECT 1 FROM events WHERE kind = 'task_node_opened' AND task_id = ? AND parent_task_id IS NULL LIMIT 1`).get(taskId) as { 1: number } | null;
   if (!root) return null;
   // Decomposition descendants only (parent_task_id chain) — see the rationale in
   // runtime/task_descendants.ts (requires/refines deliberately do NOT gate
-  // commit). Shared with directive_closure via that cycle-free module.
-  const descendants = new Set(decompositionDescendantTaskIds(db, taskId));
-  if (descendants.size === 0) return null;
+  // commit). The coverage frontier (openFrontier) is the single shared
+  // computation of "which descendants are not yet terminal" — the scheduler's
+  // drain-preference and this commit gate MUST use the same set.
+  const frontier = openFrontier(db, taskId);
+  if (frontier.total_descendant_count === 0) return null;
   const audit = db.query(`SELECT id, residual, payload FROM events WHERE kind = 'task_closure_audited' AND task_id = ? ORDER BY ts DESC, rowid DESC LIMIT 1`).get(taskId) as { id: string; residual: number | null; payload: string } | null;
   let closureResidual: number | null = null;
   if (audit) { try { const p = JSON.parse(audit.payload ?? '{}') as { closure_residual?: unknown }; closureResidual = typeof p.closure_residual === 'number' && Number.isFinite(p.closure_residual) ? p.closure_residual : typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null; } catch { closureResidual = typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null; } }
-  if (closureResidual === null || closureResidual >= 0.3) return { reason: "missing_clean_closure_audit", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [] };
-  const nonterminal: string[] = [];
-  for (const descendant of descendants) { const terminal = db.query(`SELECT 1 FROM events WHERE task_id = ? AND kind IN ('task_committed', 'task_failed', 'task_abandoned', 'task_committed_superseded') LIMIT 1`).get(descendant) as { 1: number } | null; if (!terminal) nonterminal.push(descendant); }
-  return nonterminal.length > 0 ? { reason: "nonterminal_descendants", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: nonterminal } : null;
+  if (closureResidual === null || closureResidual >= 0.3) return { reason: "missing_clean_closure_audit", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [], open_frontier_count: frontier.open_count };
+  return frontier.open_count > 0 ? { reason: "nonterminal_descendants", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: frontier.open_descendant_task_ids, open_frontier_count: frontier.open_count } : null;
 };
 
 const emitProjectedEvent = (
@@ -1211,7 +1211,7 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   if (input.kind === "task_committed" && input.task_id) {
     const blocker = rootTaskCommitBlocker(db, input.task_id);
     if (blocker) {
-      return emitEvent(db, { kind: "dispatcher_violation", substrate_origin: "substrate_auto", directive_id: input.directive_id, task_id: input.task_id, parent_task_id: input.parent_task_id ?? null, loop_id: input.loop_id, context_refs: input.context_refs ?? [], failure_kind: "root_commit_blocked", payload: { source_kind: "task_committed", refused_reason: blocker.reason, closure_audit_event_id: blocker.closure_audit_event_id, closure_residual: blocker.closure_residual, nonterminal_descendant_task_ids: blocker.nonterminal_descendant_task_ids, note: "Root task_committed refused: roots with descendants require a current task_closure_audited residual < 0.3 and terminal descendants." } });
+      return emitEvent(db, { kind: "dispatcher_violation", substrate_origin: "substrate_auto", directive_id: input.directive_id, task_id: input.task_id, parent_task_id: input.parent_task_id ?? null, loop_id: input.loop_id, context_refs: input.context_refs ?? [], failure_kind: "root_commit_blocked", payload: { source_kind: "task_committed", refused_reason: blocker.reason, ...(blocker.reason === "nonterminal_descendants" ? { status_reason: "wait_on_frontier" } : {}), closure_audit_event_id: blocker.closure_audit_event_id, closure_residual: blocker.closure_residual, nonterminal_descendant_task_ids: blocker.nonterminal_descendant_task_ids, open_frontier_count: blocker.open_frontier_count, note: "Root task_committed refused: roots with descendants require a current task_closure_audited residual < 0.3 and a drained coverage frontier (all decomposition descendants terminal). The scheduler drains ready descendants until open_frontier_count reaches 0." } });
     }
   }
   if (input.kind === "task_committed" || input.kind === "task_failed") {

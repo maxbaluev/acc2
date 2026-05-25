@@ -11,6 +11,7 @@ import {
   directiveCloseReason,
   maybeCloseFinishedDirective,
 } from "./directive_closure";
+import { openFrontier } from "./task_descendants";
 import { readyTasks } from "./task_topology";
 
 afterAll(() => closeDb());
@@ -211,6 +212,36 @@ describe("directive_closure", () => {
     expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: false, reason: "nonterminal_descendants", nonterminal_descendant_task_ids: expect.arrayContaining([childA, childB]) });
     for (const id of [childA, childB]) emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: id, payload: { summary: "child done" } });
     expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: true, closure_residual: 0.12 });
+  });
+
+  test("openFrontier counts open decomposition descendants and drains to commit-eligible (frontier_drainer)", () => {
+    const db = openDb(":memory:"); runViews(db);
+    const directiveId = newId(); const rootTaskId = newId(); const childA = newId(); const childB = newId();
+    emitEvent(db, { kind: "directive_opened", substrate_origin: "owner", directive_id: directiveId, task_id: directiveId, payload: { directive_text: "frontier fixture", lifecycle: "finite" } });
+    emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, parent_task_id: null, payload: { goal: "root goal" } });
+    for (const id of [childA, childB]) emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: id, parent_task_id: rootTaskId, payload: { goal: `child ${id}` } });
+
+    // Two open descendants → frontier count 2, root NOT terminal-eligible.
+    let f = openFrontier(db, rootTaskId);
+    expect(f.open_count).toBe(2);
+    expect(f.total_descendant_count).toBe(2);
+    expect(f.open_descendant_task_ids.sort()).toEqual([childA, childB].sort());
+
+    // Clean closure but open frontier → wait_on_frontier, root NOT ok.
+    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.1, payload: { closure_residual: 0.1 } });
+    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: false, reason: "nonterminal_descendants", status_reason: "wait_on_frontier", open_frontier_count: 2 });
+
+    // Drain one descendant → frontier shrinks, root still parked.
+    emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: childA, payload: { summary: "A done" } });
+    f = openFrontier(db, rootTaskId);
+    expect(f.open_count).toBe(1);
+    expect(f.open_descendant_task_ids).toEqual([childB]);
+    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: false, status_reason: "wait_on_frontier", open_frontier_count: 1 });
+
+    // Drain the last descendant → frontier empty, root becomes commit-eligible.
+    emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: childB, payload: { summary: "B done" } });
+    expect(openFrontier(db, rootTaskId).open_count).toBe(0);
+    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: true, open_frontier_count: 0 });
   });
 
   test("cascadeUpwardWhenChildrenTerminal seals the parent once every refines-child is terminal", () => {

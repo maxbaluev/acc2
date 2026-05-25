@@ -19,6 +19,7 @@ import {
   _setHostAvailableReaderForTests,
 } from "./task_scheduler";
 import { FIXTURE_D_DIRECTIVE_TEXT, openFixtureDCountTodos } from "./fixtures/d_count_todos";
+import { rootCommitReadiness } from "./directive_closure";
 import { emitEvent } from "./events";
 import { reconcileBrainDispatchesAtBoot, setBootSessionToken } from "./brain_dispatch_reconciler";
 import { newId } from "./ids";
@@ -227,6 +228,58 @@ describe("task_scheduler", () => {
       expect(payload.reason).toBe("scheduler_resource_budget_exhausted");
       expect((payload as { admission_model?: string }).admission_model).toBe("marginal_value_cost_resource_budget");
     } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("frontier_drainer: parked root parks as wait_on_frontier while its ready descendant is drained first", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-frontier-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      const directiveId = newId();
+      const rootTaskId = newId();
+      const childTaskId = newId();
+
+      // Root with a prior brain_dispatched + clean closure but an OPEN
+      // decomposition descendant → terminateNoProgressRedispatch parks it as
+      // wait_on_frontier instead of attempting the doomed commit.
+      emitEvent(db, { kind: "directive_opened", substrate_origin: "owner", directive_id: directiveId, task_id: directiveId, payload: { directive_text: FIXTURE_D_DIRECTIVE_TEXT, fixture: "fixture_d_count_todos", target_path: tempDir, lifecycle: "finite" } });
+      emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, parent_task_id: null, payload: { goal: "root goal", lifecycle: "finite", urgency: "normal", target_path: tempDir } });
+      emitEvent(db, { kind: "brain_dispatched", substrate_origin: "substrate_auto", directive_id: directiveId, task_id: rootTaskId, payload: { dispatch_id: newId(), session_token: "s", started_at_ms: Date.now() - 60_000 } });
+      // terminateNoProgressRedispatch scopes "progress since last dispatch" with
+      // a strict `ts > lastDispatch.ts`; nudge the clock so the closure audit
+      // lands in a strictly-later millisecond and is seen as a clean closure.
+      await Bun.sleep(3);
+      emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.1, payload: { closure_residual: 0.1 } });
+
+      // Open decomposition descendant — a fixture-D leaf the scheduler can dispatch.
+      emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: childTaskId, parent_task_id: rootTaskId, payload: { goal: FIXTURE_D_DIRECTIVE_TEXT, fixture: "fixture_d_count_todos", lifecycle: "finite", urgency: "normal", target_path: tempDir } });
+
+      _setDispatchReadyTaskForTests(() => new Promise(() => {}));
+      const tick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 5, resourceBudget: { dispatch_slots: 5, brain_slots: 5 } });
+
+      // (a) the parked root does NOT dispatch / commit; (c) the descendant is
+      // drained first (preferred over the parked root).
+      expect(tick.dispatched).toContain(childTaskId);
+      expect(tick.dispatched).not.toContain(rootTaskId);
+      expect(tick.skipped_failure_capped).toContain(rootTaskId);
+
+      // The parking gate surfaces wait_on_frontier + the open-frontier count.
+      const gate = db
+        .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'constitutional_gate_decision' ORDER BY ts DESC LIMIT 1")
+        .get(rootTaskId) as { payload: string } | null;
+      expect(gate).not.toBeNull();
+      const gp = JSON.parse(gate!.payload) as { reason?: string; open_frontier_count?: number };
+      expect(gp.reason).toBe("wait_on_frontier");
+      expect(gp.open_frontier_count).toBe(1);
+
+      // (b) once the descendant is terminal, the root is commit-eligible:
+      // openFrontier drains to 0 and rootCommitReadiness goes ok.
+      emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: childTaskId, payload: { summary: "child done" } });
+      expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: true, open_frontier_count: 0 });
+    } finally {
+      _setDispatchReadyTaskForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 60_000);

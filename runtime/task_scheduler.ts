@@ -724,9 +724,13 @@ const closureAuditRedispatchCount = (db: Database, task: TaskNode): number => {
 
 type NoProgressTermination = {
   terminated: boolean;
-  reason?: "no_structural_progress_since_last_dispatch" | "deliverable_without_closure_or_refinement" | "awaiting_terminal_descendants";
+  reason?: "no_structural_progress_since_last_dispatch" | "deliverable_without_closure_or_refinement" | "wait_on_frontier";
   dispatch_id?: string;
   evidence_event_ids?: string[];
+  /** Frontier of open descendants when the root parks on wait_on_frontier — the
+   *  set the scheduler must DRAIN before the root can commit. */
+  open_frontier_task_ids?: string[];
+  open_frontier_count?: number;
 };
 
 const parseEventPayload = (payload: string | null): Record<string, unknown> => {
@@ -965,14 +969,25 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
     // (root_commit_blocked), the root never terminalizes, and it is re-picked
     // EVERY scheduler tick — an unbounded hot-loop (observed: 110
     // dispatcher_violation rows in 2.5min for one root, spamming the ledger +
-    // transcript). Don't attempt the doomed commit. Park the root (terminated =
-    // skip dispatch this tick; the admission gate dedups so parking is silent);
-    // the upward cascade (cascadeUpwardWhenChildrenTerminal) commits the root
-    // when its LAST descendant terminalizes. Non-roots ('not_root') and
-    // actually-committable roots fall through to the normal auto-commit.
+    // transcript; directive EEZR4XQS looped on root_commit_blocked with 6 facet
+    // children left open). The fix (amendment frontier_drainer_hard_gate): do
+    // NOT retry the doomed commit. Park the root as `wait_on_frontier` and let
+    // the scheduler DRAIN the open frontier — its ready descendant leaves get
+    // PREFERRED over re-admitting this parked root (see the drain-preference
+    // sort below). The upward cascade (cascadeUpwardWhenChildrenTerminal)
+    // commits the root once its LAST descendant terminalizes (open_count → 0).
+    // Non-roots ('not_root') and actually-committable roots fall through to the
+    // normal auto-commit.
     const readiness = rootCommitReadiness(db, task.id);
     if (!readiness.ok && readiness.reason === "nonterminal_descendants") {
-      return { terminated: true, reason: "awaiting_terminal_descendants", dispatch_id: dispatchId, evidence_event_ids: [cleanClosure.id] };
+      return {
+        terminated: true,
+        reason: "wait_on_frontier",
+        dispatch_id: dispatchId,
+        evidence_event_ids: [cleanClosure.id],
+        open_frontier_task_ids: readiness.nonterminal_descendant_task_ids,
+        open_frontier_count: readiness.open_frontier_count,
+      };
     }
     emitEvent(db, {
       kind: "task_committed",
@@ -1241,7 +1256,43 @@ export const schedulerTick = async (
     return Math.max(0, (ageMs - FAIRNESS_AGE_THRESHOLD_MS) * FAIRNESS_AGE_BONUS_PER_MS);
   };
   const effectiveScore = (taskId: string): number => branchCompetitionScore(taskId) + ageBonusFor(taskId);
+
+  // DRAIN-PREFERENCE (amendment frontier_drainer_hard_gate). When a root is
+  // parked on `wait_on_frontier` (clean closure, but open decomposition
+  // descendants), re-admitting the root accomplishes nothing — its commit is
+  // refused (root_commit_blocked) and it loops. The scheduler must instead
+  // DRAIN the frontier: PREFER the ready descendants of a parked root over the
+  // parked root itself, so the subtree converges to terminal and the root then
+  // becomes commit-eligible (open_count → 0). We detect parked roots among the
+  // ready set (roots whose rootCommitReadiness reports wait_on_frontier), then:
+  //   - tag every open-frontier task id of a parked root as a "drain target"
+  //     (rank ABOVE normal work), and
+  //   - tag the parked root itself as "parked" (rank BELOW everything — it
+  //     cannot make progress until its frontier drains).
+  const drainTargetTaskIds = new Set<string>();
+  const parkedRootTaskIds = new Set<string>();
+  for (const candidate of ready) {
+    if (candidate.parent_id !== null) continue; // roots only
+    const readiness = rootCommitReadiness(db, candidate.id);
+    if (!readiness.ok && readiness.reason === "nonterminal_descendants" && readiness.open_frontier_count > 0) {
+      parkedRootTaskIds.add(candidate.id);
+      for (const id of readiness.nonterminal_descendant_task_ids) drainTargetTaskIds.add(id);
+    }
+  }
+  // A drain target that is ITSELF a parked root (a parked sub-root whose own
+  // frontier is open) stays parked: it can't be a useful leaf to dispatch.
+  for (const id of parkedRootTaskIds) drainTargetTaskIds.delete(id);
+  const drainPriorityClass = (taskId: string): number => {
+    if (drainTargetTaskIds.has(taskId)) return 2; // drain the frontier first
+    if (parkedRootTaskIds.has(taskId)) return 0; // parked root last — never re-loop
+    return 1; // normal work in between
+  };
+
   ready.sort((a, b) => {
+    // Drain-preference dominates: frontier descendants of a parked root beat
+    // the parked root (and ordinary work) so the subtree converges first.
+    const drainDelta = drainPriorityClass(b.id) - drainPriorityClass(a.id);
+    if (drainDelta !== 0) return drainDelta;
     const valueCostDelta = marginalValueCostScore(taskAdmissionEconomics(db, b), resourceBudget) - marginalValueCostScore(taskAdmissionEconomics(db, a), resourceBudget);
     if (valueCostDelta !== 0) return valueCostDelta;
     const scoreDelta = effectiveScore(b.id) - effectiveScore(a.id);
@@ -1278,6 +1329,12 @@ export const schedulerTick = async (
         reason: noProgressTermination.reason ?? "no_progress_redispatch_terminated",
         dispatch_id: noProgressTermination.dispatch_id ?? null,
         evidence_event_ids: noProgressTermination.evidence_event_ids ?? [],
+        ...(noProgressTermination.reason === "wait_on_frontier"
+          ? {
+              open_frontier_count: noProgressTermination.open_frontier_count ?? 0,
+              open_frontier_task_ids: noProgressTermination.open_frontier_task_ids ?? [],
+            }
+          : {}),
       });
       continue;
     }

@@ -21,7 +21,7 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
-import { decompositionDescendantTaskIds } from "./task_descendants";
+import { decompositionDescendantTaskIds, openFrontier } from "./task_descendants";
 
 type DirectivePayload = { lifecycle?: { kind?: string } | string; urgency?: string };
 
@@ -105,8 +105,8 @@ export const directiveCloseReason = (db: Database, directiveId: string): string 
 };
 
 export type RootCommitReadiness =
-  | { ok: true; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[] }
-  | { ok: false; reason: "not_root" | "missing_clean_closure_audit" | "nonterminal_descendants"; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[] };
+  | { ok: true; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[]; open_frontier_count: number }
+  | { ok: false; reason: "not_root" | "missing_clean_closure_audit" | "nonterminal_descendants"; status_reason?: "wait_on_frontier"; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[]; open_frontier_count: number };
 
 // Decomposition descendants for closure-gating. The single definition lives in
 // runtime/task_descendants.ts (shared cycle-free with the events.ts root-commit
@@ -116,21 +116,21 @@ export const descendantTaskIds = decompositionDescendantTaskIds;
 
 export const rootCommitReadiness = (db: Database, rootTaskId: string): RootCommitReadiness => {
   const rootRow = db.query(`SELECT 1 FROM events WHERE kind = 'task_node_opened' AND task_id = ? AND parent_task_id IS NULL LIMIT 1`).get(rootTaskId) as { 1: number } | null;
-  if (!rootRow) return { ok: false, reason: "not_root", closure_audit_event_id: null, closure_residual: null, nonterminal_descendant_task_ids: [] };
+  if (!rootRow) return { ok: false, reason: "not_root", closure_audit_event_id: null, closure_residual: null, nonterminal_descendant_task_ids: [], open_frontier_count: 0 };
   const audit = db.query(`SELECT id, residual, payload FROM events WHERE kind = 'task_closure_audited' AND task_id = ? ORDER BY ts DESC, rowid DESC LIMIT 1`).get(rootTaskId) as { id: string; residual: number | null; payload: string } | null;
   let closureResidual: number | null = null;
   if (audit) {
     try { const p = JSON.parse(audit.payload ?? '{}') as { closure_residual?: unknown }; closureResidual = typeof p.closure_residual === 'number' && Number.isFinite(p.closure_residual) ? p.closure_residual : typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null; }
     catch { closureResidual = typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null; }
   }
-  if (closureResidual === null || closureResidual >= 0.3) return { ok: false, reason: "missing_clean_closure_audit", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [] };
-  const nonterminal: string[] = [];
-  for (const taskId of descendantTaskIds(db, rootTaskId)) {
-    const terminal = db.query(`SELECT 1 FROM events WHERE task_id = ? AND kind IN ('task_committed', 'task_failed', 'task_abandoned', 'task_committed_superseded') LIMIT 1`).get(taskId) as { 1: number } | null;
-    if (!terminal) nonterminal.push(taskId);
-  }
-  if (nonterminal.length > 0) return { ok: false, reason: "nonterminal_descendants", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: nonterminal };
-  return { ok: true, closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [] };
+  // Coverage frontier: the single source of truth for "are all descendants
+  // terminal?". A root is terminal-eligible only when open_count === 0 — the
+  // scheduler DRAINS the frontier (schedules ready descendants) rather than
+  // re-attempting the doomed commit (amendment frontier_drainer_hard_gate).
+  const frontier = openFrontier(db, rootTaskId);
+  if (closureResidual === null || closureResidual >= 0.3) return { ok: false, reason: "missing_clean_closure_audit", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [], open_frontier_count: frontier.open_count };
+  if (frontier.open_count > 0) return { ok: false, reason: "nonterminal_descendants", status_reason: "wait_on_frontier", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: frontier.open_descendant_task_ids, open_frontier_count: frontier.open_count };
+  return { ok: true, closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [], open_frontier_count: 0 };
 };
 
 /** Upward cascade: when EVERY refines-child of a task has a terminal

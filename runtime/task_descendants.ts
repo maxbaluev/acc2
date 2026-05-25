@@ -39,6 +39,69 @@ export const decompositionDescendantTaskIds = (db: Database, rootTaskId: string)
   return [...out];
 };
 
+// ── Coverage frontier (amendment frontier_drainer_hard_gate) ─────────────────
+//
+// PROBLEM observed (directive EEZR4XQS): a root with open decomposition
+// descendants had its commit refused (dispatcher_violation root_commit_blocked),
+// but nothing DROVE those descendants to terminal. The root just re-emitted
+// task_committed and looped on the refusal until the directive died — passive
+// parking, no owned drain.
+//
+// FIX: a persistent, event-sourced "coverage frontier" keyed by root_task_id —
+// the set of DECOMPOSITION descendants that are NOT yet terminal (status
+// open|ready|in_progress). It is NOT mutable stored state: it is recomputed from
+// the events table every call, so the same ledger always yields the same
+// frontier (idempotent). A root is terminal-eligible only when this frontier is
+// empty. The scheduler uses it to PREFER ready frontier descendants over
+// re-admitting the parked root (drain instead of loop), and surfaces
+// `wait_on_frontier` while count > 0.
+
+/** A task is "terminal" for frontier purposes when it has any one of these
+ *  terminal/superseded events. Mirrors the descendant-terminal scan in
+ *  events.ts (rootTaskCommitBlocker) and directive_closure.ts so all three
+ *  agree on what "the frontier is drained" means. */
+const FRONTIER_TERMINAL_KINDS = ["task_committed", "task_failed", "task_abandoned", "task_committed_superseded"] as const;
+
+export type OpenFrontier = {
+  /** Root the frontier is computed for. */
+  root_task_id: string;
+  /** Decomposition descendant ids with NO terminal event yet (open|ready|in_progress). */
+  open_descendant_task_ids: string[];
+  /** Count of open descendants. A root is terminal-eligible iff this is 0. */
+  open_count: number;
+  /** Total decomposition descendants (terminal + open). */
+  total_descendant_count: number;
+};
+
+/** Event-sourced coverage frontier of a root: the DECOMPOSITION descendants
+ *  (parent_task_id chain, via decompositionDescendantTaskIds — the same narrow
+ *  set that gates root commit) that have not reached a terminal event. Pure and
+ *  idempotent: recomputed from the ledger, never stored. `open_count === 0`
+ *  means every descendant is terminal and the root may commit.
+ *
+ *  Decomposition-only on purpose: `requires`/`refines` are excluded for the
+ *  identical deadlock/checkpoint reasons documented at the top of this module
+ *  and enforced by the commit gate — the drain frontier and the commit gate
+ *  MUST cover exactly the same descendant set, or the scheduler would drain a
+ *  set the gate doesn't check (or vice versa). */
+export const openFrontier = (db: Database, rootTaskId: string): OpenFrontier => {
+  const descendants = decompositionDescendantTaskIds(db, rootTaskId);
+  const open: string[] = [];
+  for (const taskId of descendants) {
+    const placeholders = FRONTIER_TERMINAL_KINDS.map(() => "?").join(", ");
+    const terminal = db
+      .query(`SELECT 1 FROM events WHERE task_id = ? AND kind IN (${placeholders}) LIMIT 1`)
+      .get(taskId, ...FRONTIER_TERMINAL_KINDS) as { 1: number } | null;
+    if (!terminal) open.push(taskId);
+  }
+  return {
+    root_task_id: rootTaskId,
+    open_descendant_task_ids: open,
+    open_count: open.length,
+    total_descendant_count: descendants.length,
+  };
+};
+
 // ── Ancestor-progress crediting (amendment ancestor_progress_crediting) ──────
 //
 // The no-progress / stuck-lifecycle sweeps previously scored ONLY a task's OWN
