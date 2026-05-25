@@ -24,6 +24,9 @@
 //   - Config is read from env at call time (see pinataConfigFromEnv); this module
 //     never mutates .env or package.json.
 
+import { readdirSync, statSync } from "node:fs";
+import { basename, join, relative, resolve } from "node:path";
+
 export interface PinataConfig {
   jwt?: string;
   gateway?: string; // e.g. https://<gw>.mypinata.cloud
@@ -149,17 +152,22 @@ export function createPinataClient(
 
   async function pinFile(path: string, opts?: PinOpts): Promise<PinFileResult> {
     if (!pinataConfigured(cfg)) return { ok: false, error: "pinata_not_configured" };
-    let data: Uint8Array;
+    let files: Array<{ relativePath: string; bytes: Uint8Array }>;
     try {
-      data = await Bun.file(path).bytes();
+      files = await readPinFiles(path);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return { ok: false, error: `pinata_read_error:${msg}` };
     }
-    const fileName = opts?.name ?? path.split("/").pop() ?? "release.bin";
+    const totalBytes = files.reduce((n, file) => n + file.bytes.byteLength, 0);
+    const fileName = opts?.name ?? basename(path) ?? "release.bin";
     const form = new FormData();
-    // The Blob copy below is on the request path; the asserted multipart field is "file".
-    form.append("file", new Blob([data]), fileName);
+    // Pinata accepts multipart field "file"; directories are represented as
+    // repeated file parts with stable relative filenames.
+    for (const file of files) {
+      const uploadName = files.length === 1 ? fileName : file.relativePath;
+      form.append("file", new Blob([file.bytes]), uploadName);
+    }
     if (opts?.name) form.append("name", opts.name);
     if (opts?.keyvalues) form.append("keyvalues", JSON.stringify(opts.keyvalues));
 
@@ -176,7 +184,7 @@ export function createPinataClient(
       }
       const cid = extractCid(await safeJson(r));
       if (!cid) return { ok: false as const, error: "pinata_no_cid_in_response" };
-      return { ok: true as const, cid, bytes: data.byteLength };
+      return { ok: true as const, cid, bytes: totalBytes };
     });
     return res as PinFileResult;
   }
@@ -293,6 +301,27 @@ export function extractCid(json: unknown): string | undefined {
   const candidate =
     (data && (data.cid ?? data.IpfsHash)) ?? obj.IpfsHash ?? obj.cid ?? obj.Hash;
   return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
+}
+
+async function readPinFiles(path: string): Promise<Array<{ relativePath: string; bytes: Uint8Array }>> {
+  const root = resolve(path);
+  const st = statSync(root);
+  if (st.isFile()) return [{ relativePath: basename(root), bytes: await Bun.file(root).bytes() }];
+  if (!st.isDirectory()) throw new Error("path_not_file_or_directory");
+  const paths: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const abs = join(dir, entry.name);
+      if (entry.isDirectory()) walk(abs);
+      else if (entry.isFile()) paths.push(abs);
+    }
+  };
+  walk(root);
+  if (paths.length === 0) throw new Error("directory_empty");
+  return await Promise.all(paths.map(async (abs) => ({
+    relativePath: relative(root, abs).replaceAll("\\", "/"),
+    bytes: await Bun.file(abs).bytes(),
+  })));
 }
 
 async function safeJson(r: Response): Promise<unknown> {

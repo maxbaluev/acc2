@@ -54,11 +54,14 @@ import { runEmbedAll } from "./admin_embed_all";
 import { runSubstrateStatus } from "./admin_substrate_status";
 import { runExportKnowledge } from "./admin_export_knowledge";
 import { runExportCanonicalCmd } from "./admin_export_canonical";
+import { runBundleReleaseCmd } from "./admin_bundle_release";
 import { runDispatchStatus } from "./admin_dispatch_status";
 import { runHotreloadStatus } from "./admin_hotreload_status";
 import { runPendingDecisions } from "./admin_pending_decisions";
 import { runTopLaws } from "./admin_top_laws";
 import { runTrust } from "./trust";
+import { runPinReleaseCmd } from "./admin_pin_release";
+import type { PinataClient } from "../runtime/pinata_client";
 
 const usage = (): string => `acc admin — operator-side maintenance
 
@@ -98,6 +101,13 @@ const usage = (): string => `acc admin — operator-side maintenance
                               preserved; owner identity stripped. Deny-by-
                               default: do_not_export + owner-local kinds + raw
                               owner text NEVER ship. --yes is the release gate.
+    bundle-release <bundle-dir> --version <version> --yes
+                              Compose export-canonical into a release bundle,
+                              write manifest.json, and record release metadata.
+    pin-release <bundle-path> --version <version> --yes
+                              Pin a release bundle file/directory to IPFS via
+                              Pinata, pin release metadata JSON, and record
+                              release metadata in the event ledger.
 
   Secrets:
     rotate-admin-token        Mint a fresh admin token (write 0600 to token file).
@@ -206,6 +216,8 @@ export type AdminEnv = {
   auxBaseUrlProbe?: () => string | null;
   /** Current schema version the binary expects (import refuses on mismatch). */
   currentSchemaVersion?: string;
+  /** Test/CLI injection for env-gated Pinata release pinning. */
+  pinataClient?: PinataClient;
 };
 
 // Real daemon-control implementations.
@@ -808,6 +820,21 @@ export const runAdmin = async (argv: string[], envOverride?: AdminEnv): Promise<
     yes: env.yes,
     sourceDbPath: env.stateDbPath ?? defaultStateDbPath(),
     openSubstrate: () => (env.openSubstrate ?? openDb)(env.stateDbPath ?? defaultStateDbPath()),
+  });
+  if (sub === "bundle-release") return runBundleReleaseCmd(argv.slice(1), {
+    out: env.out,
+    err: env.err,
+    yes: env.yes,
+    sourceDbPath: env.stateDbPath ?? defaultStateDbPath(),
+    openSubstrate: () => (env.openSubstrate ?? openDb)(env.stateDbPath ?? defaultStateDbPath()),
+  });
+  if (sub === "pin-release") return runPinReleaseCmd(argv.slice(1), {
+    out: env.out,
+    err: env.err,
+    yes: env.yes,
+    stateDbPath: env.stateDbPath ?? defaultStateDbPath(),
+    openSubstrate: (path?: string) => (env.openSubstrate ?? openDb)(path ?? env.stateDbPath ?? defaultStateDbPath()),
+    pinataClient: env.pinataClient,
   });
   if (sub === "import") return runImportCmd(argv.slice(1), env);
   if (sub === "rotate-admin-token") return runRotateAdminTokenCmd(argv.slice(1), env);

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import {
   createPinataClient,
   pinataConfigFromEnv,
@@ -112,6 +113,23 @@ describe("pinFile", () => {
     expect(form.get("file")).toBeInstanceOf(Blob);
     expect(form.get("name")).toBe("rel-1.0.tar");
     expect(form.get("keyvalues")).toBe(JSON.stringify({ version: "1.0" }));
+  });
+
+  test("pins a directory as repeated stable relative file parts", async () => {
+    const dir = `/tmp/pinata-dir-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    mkdirSync(`${dir}/nested`, { recursive: true });
+    writeFileSync(`${dir}/a.txt`, "A");
+    writeFileSync(`${dir}/nested/b.txt`, "BB");
+    const { fetchImpl, calls } = mockFetch(() =>
+      new Response(JSON.stringify({ data: { cid: "bafyDIR" } }), { status: 200 }),
+    );
+    const client = createPinataClient(CONFIGURED, { fetchImpl });
+    const res = await client.pinFile(dir, { name: "release-dir", keyvalues: { version: "1.0" } });
+    expect(res).toEqual({ ok: true, cid: "bafyDIR", bytes: 3 });
+    const form = calls[0].init.body as FormData;
+    expect(form.getAll("file")).toHaveLength(2);
+    const names = form.getAll("file").map((part) => (part as File).name).sort();
+    expect(names).toEqual(["a.txt", "nested/b.txt"]);
   });
 
   test("read error on missing file returns typed error (no throw)", async () => {

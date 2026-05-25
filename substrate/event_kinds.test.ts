@@ -65,6 +65,9 @@ const TEST_ONLY_KINDS = new Set<string>([
 const NON_EVENT_KIND_LITERALS = new Set([
   // task_edge_recorded.payload.kind values
   "requires", "refines", "watches", "blocks", "depletes",
+  // release bundle_kind discriminator values (cli/admin_bundle_release.ts,
+  // cli/admin_pin_release.ts) — not event kinds.
+  "file", "directory",
   // FailureKind enum members (substrate/types.ts:34)
   "auth_missing", "rate_limit", "timeout", "parse_error",
   "subprocess_crash", "cycle_1_only_breach", "refinement_depth_exceeded",
