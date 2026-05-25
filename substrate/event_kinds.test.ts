@@ -615,6 +615,15 @@ describe("derived sets match their pre-unification shape", () => {
       // competitor → selector → consolidation loop converges (how often
       // the substrate retires a redundant artifact into a better one).
       "act_artifact_consolidated",
+      // SANDREPAIR (directive KDZVSFNPM): bounded pre-admission sandbox
+      // test-and-repair. artifact_repair_needed fires when an authored code
+      // artifact FAILS its fixture smoke-test and a bounded error-grounded
+      // repair is opened; artifact_repair_exhausted fires when
+      // MAX_REPAIR_ATTEMPTS is reached without a passing candidate. Both
+      // health_metric so dashboards surface how often authored code needs
+      // repair before it is effective (and how often repair gives up).
+      "artifact_repair_needed",
+      "artifact_repair_exhausted",
     ]);
     const derived = new Set(HEALTH_METRIC_KINDS);
     expect(derived.size).toBe(expected.size);

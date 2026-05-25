@@ -30,6 +30,7 @@ import type { Database } from "bun:sqlite";
 import type { ArtifactInterfaceMetadata, JsonValue, Runtime, SandboxDecl } from "../substrate/types";
 import { validateSandboxDecl } from "./sandbox";
 import { isCodeRuntime, validateCodeArtifactAdmission } from "./code_artifact_validation";
+import { requestArtifactRepair } from "./artifact_repair";
 import { runArtifactForRuntime } from "./runtimes/index";
 import { getArtifact, insertArtifact } from "./artifact_store";
 import { ownerGateDecision } from "./owner_gate";
@@ -134,6 +135,23 @@ export type AdmissionInput = {
    *  and only when interface_metadata is supplied (the wave-1 authored
    *  path); legacy / non-code admissions ignore it. */
   verifierArtifactId?: string | null;
+  /** SANDREPAIR (2026-05-24, directive KDZVSFNPM): goal_shape the artifact
+   *  serves, threaded so a failed code-artifact smoke-test can open an
+   *  error-grounded repair directive that keeps the corrected candidate
+   *  aimed at the SAME goal-class (selector continuity with capability_gap).
+   *  OPTIONAL — when absent the repair directive omits the goal-shape line.
+   *  Non-code runtimes / data-class rows ignore it. */
+  goalShape?: string | null;
+  /** SANDREPAIR (2026-05-24, directive KDZVSFNPM): when true, a FAILED
+   *  fixture smoke-test for a CODE runtime opens a bounded, error-grounded
+   *  repair loop (artifact_repair_needed → brain re-author → re-admit, capped
+   *  at MAX_REPAIR_ATTEMPTS) INSTEAD of leaving the rejection terminal. The
+   *  rejection event still fires (fail-closed: the artifact is NOT admitted
+   *  on this run); the repair dispatch is additive. Defaults to true for code
+   *  runtimes so the capability-gap → author → test → repair chain composes
+   *  end-to-end; set false to preserve the legacy single-shot reject (used by
+   *  callers/tests that do not want a repair dispatch). */
+  enableRepair?: boolean;
 };
 
 export type AdmissionRejectionReason =
@@ -709,6 +727,39 @@ export const admitArtifact = async (
     irreversibleEffects: obs.irreversibleEffects,
   };
 
+  // SANDREPAIR helper: open a bounded, error-grounded repair loop for a
+  // failed CODE-runtime fixture run. Gated on isCodeRuntime + enableRepair
+  // (default-on for code runtimes) so non-code / data-class / environment
+  // failures (runtime_unavailable, unknown_runtime) never spawn a repair —
+  // only repairable artifact DEFECTS (the body crashed, or ran but produced
+  // a bad residual) do. The repair seam is idempotent + bounded internally;
+  // this closure only forwards the failure evidence.
+  const repairEnabled = isCodeRuntime(input.runtime) && (input.enableRepair ?? true);
+  const maybeRequestRepair = (evidence: {
+    error_output: string;
+    observed_residual: number | null;
+    exit_code?: number;
+  }): void => {
+    if (!repairEnabled) return;
+    requestArtifactRepair(
+      db,
+      {
+        candidateArtifactId: row.id,
+        body: input.body,
+        runtime: input.runtime as string,
+        declaredSandbox: input.declaredSandbox as unknown as JsonValue,
+        fixtureInput: input.fixtureInput,
+        fixtureExpectedResidualBelow: input.fixtureExpectedResidualBelow,
+        evidence,
+        originalIntent: input.intent ?? input.summary ?? null,
+        goalShape: input.goalShape ?? null,
+        sourceCandidateId: input.sourceCandidateId ?? null,
+        directiveId: input.governance?.directiveId,
+      },
+      emit,
+    );
+  };
+
   // Unknown runtime (no registry runner row): the centralized resolver
   // returns `error: unknown_runtime:<rt>`. Admission cannot smoke-test an
   // unrunnable artifact, so reject it (mirrors the prior registry-miss
@@ -771,6 +822,14 @@ export const admitArtifact = async (
         duration_ms: observation.durationMs,
       } as JsonValue,
     });
+    // SANDREPAIR: the body CRASHED in the sandbox — a repairable defect.
+    // Capture the concrete stderr/error and open a bounded, error-grounded
+    // repair loop (the rejection above stays fail-closed; this is additive).
+    maybeRequestRepair({
+      error_output: observation.stderrTail || observation.error || "runtime_error",
+      observed_residual: null,
+      exit_code: observation.exitCode,
+    });
     return { ok: false, reason: "runtime_error", detail: observation.error };
   }
 
@@ -811,6 +870,16 @@ export const admitArtifact = async (
           threshold_below: input.fixtureExpectedResidualBelow,
           residual_out_of_range: residualOutOfRange,
         } as JsonValue,
+      });
+      // SANDREPAIR: the body RAN cleanly but produced a residual that does
+      // not meet the bar — a repairable defect. Open a bounded, error-
+      // grounded repair loop (the rejection above stays fail-closed).
+      maybeRequestRepair({
+        error_output: residualOutOfRange
+          ? `fixture_residual_out_of_range: observed=${observedResidual} is not a valid residual in [0,1]`
+          : `fixture_residual_too_high: observed=${observedResidual} must be < ${input.fixtureExpectedResidualBelow}`,
+        observed_residual: Number.isFinite(observedResidual) ? observedResidual : null,
+        exit_code: observation.exitCode,
       });
       return {
         ok: false,

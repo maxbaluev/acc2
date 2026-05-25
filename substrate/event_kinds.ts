@@ -356,6 +356,25 @@ export const EVENT_KINDS = {
   // resolution marker that closes the idempotency window for a pair.
   capability_gap_detected:                 { producer: "runtime", embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
   capability_gap_resolved:                 { producer: "runtime", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // SANDREPAIR (directive KDZVSFNPM): bounded pre-admission sandbox
+  // test-and-repair. When admission's fixture smoke-test FAILS for an
+  // authored CODE artifact (runtime error OR observed residual ≥
+  // threshold), instead of a terminal reject the substrate captures the
+  // failure evidence (runtime stderr/error, observed residual, fixture
+  // input, failing body) and emits artifact_repair_needed — a durable,
+  // ledgered trigger that opens a brain-REPAIR directive carrying the
+  // concrete error so the brain re-authors a corrected candidate
+  // (error-grounded refinement, not blind re-authoring). The corrected
+  // candidate re-enters admission; the loop is bounded by an attempt
+  // counter (MAX_REPAIR_ATTEMPTS). health_metric so dashboards surface
+  // how often authored code needs repair before it is effective.
+  artifact_repair_needed:                  { producer: "runtime", embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+  // Terminal marker emitted when the repair loop exhausts
+  // MAX_REPAIR_ATTEMPTS without a passing candidate. The artifact is NOT
+  // admitted (fail-closed, same as a single-shot reject — just after
+  // trying to fix it). Closes the repair-session idempotency window so no
+  // further repair dispatch fires for the session.
+  artifact_repair_exhausted:               { producer: "runtime", embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
   act_artifact_score_updated:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // T0.2 universal projection — emit-boundary projector for action_scored
   // walks source_act_event_id → action_predicted's cited_artifact_ids and
