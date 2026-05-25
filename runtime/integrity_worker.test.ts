@@ -458,9 +458,12 @@ describe("reconcilePreDispatchOrphans", () => {
       const fresh = new Date(now - 30 * 60 * 1000).toISOString();     // 30m < 3h window
       // directive_opened + root task_node_opened + cap-gate (no brain_dispatched),
       // mirroring the live zombie shape that escapes the no-advancement orphan check.
+      // parent_task_id is the EMPTY STRING (not null) — the real shape repair
+      // directives emit, and what dispatch_resolved_view's explicit_roots treats
+      // as a root (parent_task_id IS NULL OR = ''). The reaper must match both.
       const seedStuck = (d: string, root: string, ts: string, withDispatch = false) => {
         emitEvent(db, { kind: "directive_opened", substrate_origin: "substrate_auto", task_id: d, directive_id: d, payload: { lifecycle: "finite" } });
-        emitEvent(db, { kind: "task_node_opened", substrate_origin: "substrate_auto", task_id: root, directive_id: d, parent_task_id: null, payload: {} });
+        emitEvent(db, { kind: "task_node_opened", substrate_origin: "substrate_auto", task_id: root, directive_id: d, parent_task_id: "", payload: {} });
         emitEvent(db, { kind: "constitutional_gate_decision", substrate_origin: "substrate_auto", task_id: root, directive_id: d, payload: { gate: "daemon_heap_pressure" } });
         if (withDispatch) emitEvent(db, { kind: "brain_dispatched", substrate_origin: "substrate_auto", task_id: root, directive_id: d, payload: {} });
         db.run("UPDATE events SET ts=? WHERE directive_id=?", [ts, d]);

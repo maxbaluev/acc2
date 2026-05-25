@@ -565,7 +565,7 @@ export const reconcilePreDispatchOrphans = (
        FROM events o
        JOIN events root ON root.directive_id = o.directive_id
             AND root.kind = 'task_node_opened'
-            AND root.parent_task_id IS NULL
+            AND (root.parent_task_id IS NULL OR root.parent_task_id = '')
        WHERE o.kind = 'directive_opened'
          AND o.directive_id IS NOT NULL
          AND o.ts < ?
