@@ -174,11 +174,11 @@ Per brain dispatch `VJDMME8JD961SE6F` amendment `4AV2NPJW2H1HV0XQ3MR2ZV78KC` (KC
 
 **Predicate/artifact aliasing (`act_artifact_aliased` event).** Renames are first-class. When a release renames `owner_state_estimator_predicate` to `continual_owner_state_predicate`, the migration emits `act_artifact_aliased {old_id, new_id, reason, release_version?}`. Alias chains are append-only, cycle-refused, and credit resolution updates the current id when prior `action_scored` events cite the old id. The organism's accumulated posterior survives the rename. No predicate-specific evolution enum: generic `act_artifact_aliased` covers every renamed handle in the open vocabulary.
 
-**Update mechanism (`acc upgrade` CLI).** Updates are deterministic, not brain-mediated mutation. `acc upgrade` (1) fetches the release; (2) verifies signatures and checksums; (3) attaches the packaged `canonical.db`; (4) runs a local preflight against the organism's actual state (load new modules in sandbox, run module-exposed `selfTest(db)` checks); (5) applies registered schema migrations to `state.db` only; (6) resolves `act_artifact_aliased` chains for renamed handles; (7) smoke-tests workers and verifiers; (8) hot-reloads when the survival gate (`XA3ABKERHD4H`, commit `2915d2d`) passes; (9) restarts the daemon only when required by hot-swap classification. `brain_invocation_request` (commit `fcfecbe`) may be reused for evaluation or owner-control checks during upgrade, but the primary mechanism is deterministic.
+**Update mechanism (`acc update` CLI).** Updates are deterministic, not brain-mediated mutation. `acc update` (1) fetches the release; (2) verifies signatures and checksums; (3) attaches the packaged `canonical.db`; (4) runs a local preflight against the organism's actual state (load new modules in sandbox, run module-exposed `selfTest(db)` checks); (5) applies registered schema migrations to `state.db` only; (6) resolves `act_artifact_aliased` chains for renamed handles; (7) smoke-tests workers and verifiers; (8) hot-reloads when the survival gate (`XA3ABKERHD4H`, commit `2915d2d`) passes; (9) restarts the daemon only when required by hot-swap classification. `brain_invocation_request` (commit `fcfecbe`) may be reused for evaluation or owner-control checks during upgrade, but the primary mechanism is deterministic. (Current `cli/update.ts` implements the deterministic core — git pull, schema migrations, daemon restart, health gate, and source rollback on failure; the signature/checksum verification, `canonical.db` attach, sandbox preflight, and survival-gated hot-reload are the designed target surface.)
 
 A `substrate/migrations/` registry is the ONLY path for `state.db` schema changes. Migrations are idempotent, ledger-audited (each application emits `schema_migration_applied {version, ts, success}`), and tested against representative organism snapshots before release. Schema changes outside this registry are a substrate violation.
 
-Owner-state portability is a CLI capability layered on this boundary: `acc snapshot` / `acc restore` export/import the organism's `state.db` plus ledger artifacts, never `canonical.db`. The mnemonic-sovereignty curation set (`always_keep` kinds — owner-channel, knowledge-graph backbone, Tier -1 violations, constitutional events) is the minimum portable surface.
+Owner-state portability is a CLI capability layered on this boundary: `acc admin export` / `acc admin import` export/import the organism's `state.db` plus ledger artifacts, never `canonical.db`. The mnemonic-sovereignty curation set (`always_keep` kinds — owner-channel, knowledge-graph backbone, Tier -1 violations, constitutional events) is the minimum portable surface.
 
 ## 17. Reuse-First Contract
 
@@ -219,10 +219,10 @@ The CLI composes MCP primitives — it does NOT bypass them. Every CLI command t
 | CLI command | Canonical MCP method | Purpose |
 |---|---|---|
 | `acc task "..."` | `substrate.emit({kind:"owner_input_received"})` + `substrate.emit({kind:"directive_opened"})` | Owner intent ingress |
-| `acc state me/contracts/focus/portfolio/govern` | `substrate.read({view_name})` | Owner-facing status reads |
-| `acc state search "<topic>"` | `substrate.search({query, k})` | Knowledge retrieval |
-| `acc state entity <id>` | `substrate.read({view_name:"entity_view"})` | Entity inspection |
-| `acc contract live/claim/done/integrate` | `substrate.emit` + `substrate.read({view_name:"commitments_view"})` | Coordination |
+| `acc status` | `substrate.read({view_name})` | Owner-facing status reads |
+| `substrate.search` (no dedicated CLI verb; reached via `acc task` retrieval and composer) | `substrate.search({query, k})` | Knowledge retrieval |
+| `acc inspect <id_prefix>` / `acc directive <directive_id>` | `substrate.read({view_name})` | Entity / directive inspection |
+| `acc dispatch <directive_id>` | `substrate.read({view_name:"dispatch_resolved_view"})` | Dispatch trajectory inspection (v2 has no contract model — dispatch state is the coordination surface) |
 | `acc watch` | `substrate.read({view_name:"watch_panels_view"})` streaming | Live TUI |
 | `acc doctor` | `runtime.system_map` + `substrate.read({view_name:"failure_view"})` | Diagnostic |
 | `acc admin substrate-status` | `runtime.system_map` + `substrate.read({view_name:"health_view"})` | Operator status |

@@ -38,7 +38,7 @@ real work until `acc doctor` says PASS.**
 ## After install
 
 - `acc watch` — live SQLite-native TUI dashboard.
-- `acc state` (mcp) and `acc admin substrate-status` — substrate liveness.
+- `acc status` and `acc admin substrate-status` — owner-facing state read + substrate liveness.
 - `acc task "<your request>"` — natural language directive; brain decomposes.
 - Owner-facing chat with Claude: speak any language, ask anything, request
   changes mid-flight via amendments.

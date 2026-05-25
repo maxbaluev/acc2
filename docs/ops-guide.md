@@ -87,7 +87,7 @@ Exit code is `0` if every check is `ok`/`warn`/`info`, `1` if any check is `fail
 
 ## 4. Running the daemon
 
-The daemon is the always-on substrate (Architecture.md). All CLI surfaces talk to it through MCP + an auxiliary HTTP port. The daemon must be running for `acc task`, `acc state *`, retrieval, embeddings, and external-push to work.
+The daemon is the always-on substrate (Architecture.md). All CLI surfaces talk to it through MCP + an auxiliary HTTP port. The daemon must be running for `acc task`, `acc status`, retrieval, embeddings, and external-push to work.
 
 ### 4a. Manual (foreground / detached shell)
 
