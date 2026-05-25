@@ -245,6 +245,11 @@ const EVENT_HOT_PATH_INDEXES = [
   // on existing DBs without introducing a second state table.
   "CREATE INDEX IF NOT EXISTS idx_events_world_model_snapshot_task_ts ON events(task_id, ts) WHERE kind = 'state_snapshot_recorded' AND (json_extract(payload, '$.snapshot_kind') = 'world_model' OR json_type(payload, '$.world_model') IS NOT NULL)",
   "CREATE INDEX IF NOT EXISTS idx_events_world_model_delta_task_ts ON events(task_id, ts) WHERE kind = 'state_snapshot_diffed' AND (json_extract(payload, '$.diff_kind') = 'world_model' OR json_type(payload, '$.world_model_delta') IS NOT NULL)",
+  // WORLD_MODEL (2026-05-25): state_snapshot_recorded/diffed are the
+  // storage surface; these partial indexes make task-scoped projections cheap
+  // on existing DBs without introducing a second state table.
+  "CREATE INDEX IF NOT EXISTS idx_events_world_model_snapshot_task_ts ON events(task_id, ts) WHERE kind = 'state_snapshot_recorded' AND (json_extract(payload, '$.snapshot_kind') = 'world_model' OR json_type(payload, '$.world_model') IS NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS idx_events_world_model_delta_task_ts ON events(task_id, ts) WHERE kind = 'state_snapshot_diffed' AND (json_extract(payload, '$.diff_kind') = 'world_model' OR json_type(payload, '$.world_model_delta') IS NOT NULL)",
 ];
 
 /** F4a table rename (2026-05-18, roadmap WW7W1NZ8A10R52PB4E7EJE9YBW):

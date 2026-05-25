@@ -145,6 +145,21 @@ CREATE INDEX IF NOT EXISTS idx_events_world_model_delta_task_ts
     AND (json_extract(payload, '$.diff_kind') = 'world_model'
       OR json_type(payload, '$.world_model_delta') IS NOT NULL);
 
+-- World-model projection hot paths. Storage deliberately reuses the append-only
+-- event ledger: state_snapshot_recorded carries the current model, and
+-- state_snapshot_diffed carries model deltas. These partial indexes are the
+-- irreducible schema migration for first-class reads; no side table owns state.
+CREATE INDEX IF NOT EXISTS idx_events_world_model_snapshot_task_ts
+  ON events(task_id, ts)
+  WHERE kind = 'state_snapshot_recorded'
+    AND (json_extract(payload, '$.snapshot_kind') = 'world_model'
+      OR json_type(payload, '$.world_model') IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_events_world_model_delta_task_ts
+  ON events(task_id, ts)
+  WHERE kind = 'state_snapshot_diffed'
+    AND (json_extract(payload, '$.diff_kind') = 'world_model'
+      OR json_type(payload, '$.world_model_delta') IS NOT NULL);
+
 -- Writer-maintained rollups keep occurrence/health reads bounded while the hot
 -- events ledger is compacted. total_count is lifetime; live_count tracks rows
 -- still present in events after archive/telemetry deletion.
