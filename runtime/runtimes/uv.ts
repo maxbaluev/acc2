@@ -300,7 +300,11 @@ export const runUvArtifact = async (
   // gate here — refuse to invoke when declared env vars are missing,
   // emit owner_input_required so operator sees the gap via SSE.
   const envRequires = inv.declaredSandbox.env_requires ?? [];
-  const missingEnv = envRequires.filter((k) => !process.env[k] || process.env[k]!.length === 0);
+  // ACC2_INPUTS (and other runtime-injected vars) are supplied in the spawn env by the
+  // dispatcher at execution time, NOT pre-present in the daemon process.env. Excluding them
+  // here prevents a false missing_env_credentials gate that spawns unfixable repair storms.
+  const RUNTIME_INJECTED_ENV = new Set(["ACC2_INPUTS"]);
+  const missingEnv = envRequires.filter((k) => !RUNTIME_INJECTED_ENV.has(k) && (!process.env[k] || process.env[k]!.length === 0));
   if (missingEnv.length > 0) {
     inv.emit?.({
       kind: "owner_input_required",
