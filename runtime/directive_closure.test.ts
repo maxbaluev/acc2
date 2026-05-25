@@ -9,6 +9,7 @@ import {
   rootCommitReadiness,
   closedDirectiveIds,
   directiveCloseReason,
+  directiveCoverage,
   maybeCloseFinishedDirective,
 } from "./directive_closure";
 import { openFrontier } from "./task_descendants";
@@ -405,5 +406,91 @@ describe("directive_closure", () => {
     const ids = new Set(rows.map((r) => r.task_id));
     expect(ids.has(live.taskId)).toBe(true);
     expect(ids.has(done.taskId)).toBe(false);
+  });
+});
+
+describe("coverage_invariant_hard_gate", () => {
+  const mkDirective = (db: ReturnType<typeof openDb>) => {
+    const directiveId = newId();
+    const rootTaskId = newId();
+    emitEvent(db, { kind: "directive_opened", substrate_origin: "owner", directive_id: directiveId, task_id: directiveId, payload: { directive_text: "cov fixture", lifecycle: "finite" } });
+    emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, parent_task_id: null, payload: { goal: "root" } });
+    return { directiveId, rootTaskId };
+  };
+  const addChild = (db: ReturnType<typeof openDb>, directiveId: string, rootTaskId: string, childId: string, extra: Record<string, unknown> = {}) => {
+    emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: childId, parent_task_id: rootTaskId, payload: { goal: "child", ...extra } });
+    emitEvent(db, { kind: "task_edge_recorded", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, payload: { kind: "refines", from_task: rootTaskId, to_task: childId } });
+  };
+  const term = (db: ReturnType<typeof openDb>, directiveId: string, taskId: string, kind: "task_committed" | "task_failed" | "task_abandoned" = "task_committed") =>
+    emitEvent(db, { kind, substrate_origin: "brain", directive_id: directiveId, task_id: taskId, payload: {} });
+  // A root with descendants may only commit after a clean closure audit (the
+  // existing events.ts root-commit gate), so realistic fixtures audit then commit.
+  const commitRoot = (db: ReturnType<typeof openDb>, directiveId: string, rootTaskId: string) => {
+    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.12, payload: { closure_residual: 0.12 } });
+    emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, payload: {} });
+  };
+
+  test("deliverable-declared leaf with no committed deliverable blocks closure until emitted", () => {
+    const db = openDb(":memory:");
+    const { directiveId, rootTaskId } = mkDirective(db);
+    const child = newId();
+    addChild(db, directiveId, rootTaskId, child, { requires_deliverable: true });
+    term(db, directiveId, child);
+    commitRoot(db, directiveId, rootTaskId);
+    // all terminal, but the child declared a deliverable and emitted none
+    expect(directiveCloseReason(db, directiveId)).toBeNull();
+    expect(directiveCoverage(db, directiveId)?.missing_deliverables).toContain(child);
+    // now emit the deliverable artifact → fully covered
+    emitEvent(db, { kind: "act_artifact_candidate", substrate_origin: "brain", directive_id: directiveId, task_id: child, payload: { body: "real body" } });
+    expect(directiveCoverage(db, directiveId)?.missing_deliverables).toEqual([]);
+    expect(directiveCloseReason(db, directiveId)).toBe("all_tasks_terminal");
+  });
+
+  test("orphan-open node (terminal but unreachable from root) blocks closure", () => {
+    const db = openDb(":memory:");
+    const { directiveId, rootTaskId } = mkDirective(db);
+    const orphan = newId();
+    // opened under a parent that does NOT chain to the root → not a descendant
+    emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: orphan, parent_task_id: newId(), payload: { goal: "orphan" } });
+    term(db, directiveId, orphan);
+    commitRoot(db, directiveId, rootTaskId);
+    expect(directiveCoverage(db, directiveId)?.orphans).toContain(orphan);
+    expect(directiveCloseReason(db, directiveId)).toBeNull();
+  });
+
+  test("failed leaf is covered by a committed sibling under the same parent", () => {
+    const db = openDb(":memory:");
+    const { directiveId, rootTaskId } = mkDirective(db);
+    const failed = newId();
+    const ok = newId();
+    addChild(db, directiveId, rootTaskId, failed);
+    addChild(db, directiveId, rootTaskId, ok);
+    term(db, directiveId, failed, "task_failed");
+    term(db, directiveId, ok);
+    commitRoot(db, directiveId, rootTaskId);
+    expect(directiveCoverage(db, directiveId)?.failed_unsuperseded).toEqual([]);
+    expect(directiveCloseReason(db, directiveId)).toBe("all_tasks_terminal");
+  });
+
+  test("failed leaf with no committed sibling is failed_unsuperseded and blocks closure", () => {
+    const db = openDb(":memory:");
+    const { directiveId, rootTaskId } = mkDirective(db);
+    const failed = newId();
+    addChild(db, directiveId, rootTaskId, failed);
+    term(db, directiveId, failed, "task_failed");
+    commitRoot(db, directiveId, rootTaskId);
+    expect(directiveCoverage(db, directiveId)?.failed_unsuperseded).toContain(failed);
+    expect(directiveCloseReason(db, directiveId)).toBeNull();
+  });
+
+  test("fully-covered graph with no declared deliverables closes", () => {
+    const db = openDb(":memory:");
+    const { directiveId, rootTaskId } = mkDirective(db);
+    const child = newId();
+    addChild(db, directiveId, rootTaskId, child);
+    term(db, directiveId, child);
+    commitRoot(db, directiveId, rootTaskId);
+    expect(directiveCoverage(db, directiveId)?.covered).toBe(true);
+    expect(directiveCloseReason(db, directiveId)).toBe("all_tasks_terminal");
   });
 });
