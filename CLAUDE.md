@@ -60,6 +60,8 @@ On restart, drain or checkpoint in-flight brain dispatches with refinement edges
 
 Production bridge mode is real; tests pin mock. Workers are on by default and opt out via ACC2_DISABLE_WORKERS.
 
+Run the suite with `bun run test` (= `bun test --parallel --bail`), NOT bare `bun test`. Parallel is ~4x faster (~7s vs ~27s) and is the canonical, parallel-safe invocation; bare `bun test` is for debugging output interleaving only. Tests are isolated by construction — mock bridge, per-file temp state dirs, random ports — so they never touch the live daemon's state.db, socket, or port. Do not stop/restart the live daemon to run tests.
+
 ## Owner Model
 
 Owners are not persona enums. The profile is a learned open-ended vector. Honor preferred_terms, avoided_terms, detected_language, autonomy_score, autonomy_scope, manual_review_patterns, hot_topics, things_to_never_do, and rendering_signals, autonomy_signals, control_signals, risk_signals, collaboration_signals, and goal_continuity_signals when present.
