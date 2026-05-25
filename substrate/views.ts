@@ -217,7 +217,7 @@ CREATE VIEW IF NOT EXISTS artifact_routing_view AS
   ORDER BY routing_score DESC;
 `;
 
-// embedding_index_view — events plus active data-class artifacts with embedding BLOBs.
+// embedding_index_view — events plus active executable artifacts with embedding BLOBs.
 // The daemon rebuilds its vector metadata from this view at boot.
 const VIEW_EMBEDDING_INDEX = `
 CREATE VIEW IF NOT EXISTS embedding_index_view AS
@@ -240,11 +240,11 @@ CREATE VIEW IF NOT EXISTS embedding_index_view AS
     -- can match an owner intent to an artifact by what it DOES for ANY
     -- domain, not just by its code body. COALESCE to empty string keeps
     -- legacy rows (NULL interface_metadata) byte-stable.
-    json_object('artifact_id', id, 'artifact_kind', kind, 'body', body, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, ''), 'interface_purpose', COALESCE(json_extract(interface_metadata, '$.purpose'), '')) AS payload,
-    json_object('body', body, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, ''), 'artifact_kind', kind, 'interface_purpose', COALESCE(json_extract(interface_metadata, '$.purpose'), '')) AS retrieval_aspects,
+    json_object('artifact_id', id, 'artifact_kind', kind, 'runtime', COALESCE(runtime, ''), 'body', body, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, ''), 'interface_purpose', COALESCE(json_extract(interface_metadata, '$.purpose'), ''), 'inputs_schema', COALESCE(json_extract(interface_metadata, '$.inputs_schema'), ''), 'outputs_schema', COALESCE(json_extract(interface_metadata, '$.outputs_schema'), ''), 'usage_examples', COALESCE(json_extract(interface_metadata, '$.usage_examples'), '')) AS payload,
+    json_object('body', body, 'summary', COALESCE(summary, ''), 'intent', COALESCE(intent, ''), 'name', COALESCE(name, ''), 'artifact_kind', kind, 'runtime', COALESCE(runtime, ''), 'interface_purpose', COALESCE(json_extract(interface_metadata, '$.purpose'), ''), 'inputs_schema', COALESCE(json_extract(interface_metadata, '$.inputs_schema'), ''), 'outputs_schema', COALESCE(json_extract(interface_metadata, '$.outputs_schema'), ''), 'usage_examples', COALESCE(json_extract(interface_metadata, '$.usage_examples'), '')) AS retrieval_aspects,
     NULL AS retrieval_domains
   FROM act_artifact
-  WHERE runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') AND embedding IS NOT NULL AND length(embedding) > 0;
+  WHERE runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') AND embedding IS NOT NULL AND length(embedding) > 0;
 `;
 
 // origin_promotion_view — per substrate_origin, summarise how often candidate

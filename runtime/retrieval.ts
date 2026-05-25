@@ -258,7 +258,7 @@ const readOriginBiasForGoalShapePooled = async (db: Database, goalShape: string)
 // db handle. Only the EXECUTION THREAD differs (main loop vs. SQL worker);
 // rows, ordering, and scoring are unchanged.
 const POSTERIOR_ARTIFACT_SCORE_SQL =
-  "SELECT score FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL";
+  "SELECT score FROM act_artifact WHERE id = ? AND runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL";
 const POSTERIOR_EVENT_PAYLOAD_SQL = "SELECT payload FROM events WHERE id = ?";
 const POSTERIOR_ARTIFACT_BY_ID_SQL = "SELECT score FROM act_artifact WHERE id = ?";
 const POSTERIOR_EVENT_RESIDUAL_SQL = "SELECT residual FROM events WHERE id = ?";
@@ -358,8 +358,34 @@ const readPosteriorPooled = async (db: Database, eventId: string, kind: string):
  *  table scan), so it does not contribute the heavy-scan loop stall this fix
  *  targets — leaving it sync is both correct and cheap. */
 const isActiveArtifactHit = (db: Database, artifactId: string): boolean => {
-  const row = db.query("SELECT 1 AS ok FROM act_artifact WHERE id = ? AND runtime IS NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') LIMIT 1").get(artifactId) as { ok: number } | null;
+  const row = db.query("SELECT 1 AS ok FROM act_artifact WHERE id = ? AND runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') LIMIT 1").get(artifactId) as { ok: number } | null;
   return !!row;
+};
+
+type ArtifactFit = { multiplier: number; breakdown: Record<string, number> };
+const NEUTRAL_ARTIFACT_FIT: ArtifactFit = { multiplier: 1, breakdown: {} };
+const parseJsonObject = (raw: string | null | undefined): Record<string, unknown> => {
+  if (!raw) return {};
+  try { const parsed = JSON.parse(raw) as unknown; return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}; } catch { return {}; }
+};
+const hasSchemaSignal = (metadata: Record<string, unknown>): boolean => metadata.inputs_schema !== undefined || metadata.outputs_schema !== undefined;
+const hasExampleSignal = (metadata: Record<string, unknown>): boolean => Array.isArray(metadata.usage_examples) ? metadata.usage_examples.length > 0 : metadata.usage_examples !== undefined;
+const readArtifactFit = (db: Database, artifactId: string, q: RoutingQuery): ArtifactFit => {
+  const row = db.query("SELECT runtime, declared_sandbox, confidence, recent_residual_mean, interface_metadata FROM act_artifact WHERE id = ? AND runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL AND status IN ('admitted', 'promoted') LIMIT 1").get(artifactId) as { runtime: string; declared_sandbox: string; confidence: number; recent_residual_mean: number; interface_metadata: string | null } | null;
+  if (!row) return NEUTRAL_ARTIFACT_FIT;
+  const metadata = parseJsonObject(row.interface_metadata);
+  const sandbox = parseJsonObject(row.declared_sandbox);
+  const shape = q.goalText ? computeGoalShape(q.goalText) : "";
+  const gr = shape ? db.query("SELECT AVG(residual) AS avg_residual, COUNT(*) AS n FROM events WHERE kind = 'act_artifact_score_updated' AND action_artifact_id = ? AND payload LIKE ?").get(artifactId, '%"goal_shape":"' + shape + '"%') as { avg_residual: number | null; n: number } | null : null;
+  const confidence_score = clamp01(row.confidence ?? 0.5);
+  const residual_score = gr && gr.n > 0 && typeof gr.avg_residual === "number" ? clamp01(1 - gr.avg_residual) : clamp01(1 - (row.recent_residual_mean ?? 0.5));
+  const schema_signal = hasSchemaSignal(metadata) ? 1 : 0.5;
+  const example_signal = hasExampleSignal(metadata) ? 1 : 0.5;
+  const sandbox_runtime_match = sandbox.runtime === row.runtime ? 1 : 0.2;
+  const requested_runtime_match = q.runtime ? (q.runtime === row.runtime ? 1 : 0.2) : 1;
+  const sandbox_compatibility = Math.min(sandbox_runtime_match, requested_runtime_match);
+  const fit = clamp01(0.25 * confidence_score + 0.30 * residual_score + 0.15 * schema_signal + 0.15 * example_signal + 0.15 * sandbox_compatibility);
+  return { multiplier: 0.75 + 0.5 * fit, breakdown: { artifact_fit: fit, artifact_confidence_score: confidence_score, artifact_goal_shape_residual_score: residual_score, artifact_schema_signal: schema_signal, artifact_example_signal: example_signal, artifact_sandbox_compatibility: sandbox_compatibility, artifact_fit_multiplier: 0.75 + 0.5 * fit } };
 };
 
 /** Assemble a RetrievalHit from a KnnHit and a pre-computed posterior. Pure
@@ -372,6 +398,7 @@ const assembleHit = (
   posterior: number,
   originBias: Map<string, number>,
   q: RoutingQuery,
+  artifactFit: ArtifactFit = NEUTRAL_ARTIFACT_FIT,
 ): RetrievalHit => {
   const bias = originBias.get(hit.entry.substrate_origin) ?? 1.0;
   // similarity in [0, 1] — cosine distance maps [0, 2] → [1, 0]
@@ -380,7 +407,7 @@ const assembleHit = (
   const domain_scores = scoreDomainRecord(hit.entry, q);
   const aspect_boost = weightedMean(aspect_scores, q.aspectWeights);
   const domain_boost = weightedMean(domain_scores, q.domainHints);
-  const routing_multiplier = (1 + 0.25 * aspect_boost) * (1 + 0.25 * domain_boost);
+  const routing_multiplier = (1 + 0.25 * aspect_boost) * (1 + 0.25 * domain_boost) * artifactFit.multiplier;
   const rerank_score = similarity * (1 + posterior) * bias * routing_multiplier;
   return {
     event_id: hit.entry.event_id,
@@ -399,6 +426,7 @@ const assembleHit = (
       aspect_boost,
       domain_boost,
       routing_multiplier,
+      ...artifactFit.breakdown,
     },
   };
 };
@@ -409,7 +437,7 @@ const packHit = (
   hit: KnnHit,
   originBias: Map<string, number>,
   q: RoutingQuery,
-): RetrievalHit => assembleHit(hit, readPosterior(db, hit.entry.event_id, hit.entry.kind), originBias, q);
+): RetrievalHit => assembleHit(hit, readPosterior(db, hit.entry.event_id, hit.entry.kind), originBias, q, hit.entry.kind === "act_artifact" ? readArtifactFit(db, hit.entry.event_id, q) : NEUTRAL_ARTIFACT_FIT);
 
 /** Off-loop pack — used by the async `retrieve` path. The posterior point
  *  reads run on the SQL worker thread (sync fallback when no pool) so they no
@@ -420,7 +448,7 @@ const packHitPooled = async (
   originBias: Map<string, number>,
   q: RoutingQuery,
 ): Promise<RetrievalHit> =>
-  assembleHit(hit, await readPosteriorPooled(db, hit.entry.event_id, hit.entry.kind), originBias, q);
+  assembleHit(hit, await readPosteriorPooled(db, hit.entry.event_id, hit.entry.kind), originBias, q, hit.entry.kind === "act_artifact" ? readArtifactFit(db, hit.entry.event_id, q) : NEUTRAL_ARTIFACT_FIT);
 
 /** Reranked retrieval. Embeds the query, KNN against the index, multiplies
  *  by posterior, applies per-origin bias multiplier, sorts by rerank_score

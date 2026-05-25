@@ -8,6 +8,8 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { emitEvent } from "./events";
+import { insertArtifact } from "./artifact_store";
+import { goalShape } from "./goal_shape";
 import { encodeEmbeddingBlob, EMBEDDING_VERSION, EMBEDDING_DIMS } from "./embedder";
 import { EmbeddingIndex } from "./embedding_index";
 import { retrieve, retrieveWithEmbedding } from "./retrieval";
@@ -39,6 +41,13 @@ const makeUnitVec = (dims: number, axis: number): number[] => {
   const v = new Array<number>(dims).fill(0);
   v[axis] = 1;
   return v;
+};
+
+const TEST_SANDBOX = { runtime: "bun" as const, fs_read: [], fs_write: [], net_allow: [], proc_allow: [], env_requires: [], cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 };
+const seedEmbeddedArtifact = (db: ReturnType<typeof openDb>, id: string, axis: number, dims: number, overrides: Partial<Parameters<typeof insertArtifact>[1]> = {}): string => {
+  insertArtifact(db, { id, runtime: "bun", body: "console.log('@@RESULT@@ {\"ok\":true}')", declaredSandbox: TEST_SANDBOX, stateRoot: null, posteriorAlpha: 1, posteriorBeta: 1, score: 0.5, confidence: 0.3, recentResidualMean: 0.5, recentKillCount: 0, status: "admitted", name: id, fixtureInput: null, fixtureExpectedResidual: null, ...overrides });
+  db.run("UPDATE act_artifact SET embedding = ? WHERE id = ?", [encodeEmbeddingBlob(makeUnitVec(dims, axis)), id]);
+  return id;
 };
 
 const seedEmbedded = (
@@ -129,6 +138,24 @@ describe("retrieve (full async path with mocked query embed)", () => {
     });
     expect(result.hits.length).toBe(1);
     expect(result.hits[0].event_id).toBe(artId);
+  });
+
+  test("artifact retrieval indexes executable rows and artifact-fit reranks", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const dims = 8;
+    const goalText = "count TODO markers in scripts";
+    const shape = goalShape(goalText);
+    const goodId = seedEmbeddedArtifact(db, "artifact_fit_good", 0, dims, { score: 0.5, confidence: 0.95, recentResidualMean: 0.1, interfaceMetadata: { purpose: "count TODO markers", inputs_schema: { type: "object" }, outputs_schema: { type: "object" }, usage_examples: [{ description: "count", input: { path: "runtime" }, output: { count: 3 } }] } });
+    const badId = seedEmbeddedArtifact(db, "artifact_fit_bad", 0, dims, { score: 0.9, confidence: 0.1, recentResidualMean: 0.9, interfaceMetadata: null });
+    insertArtifact(db, { id: "artifact_data_hidden", runtime: null, body: "data only", declaredSandbox: null, stateRoot: null, posteriorAlpha: 1, posteriorBeta: 1, score: 0.99, confidence: 0.99, recentResidualMean: 0, recentKillCount: 0, status: "admitted", name: "data", fixtureInput: null, fixtureExpectedResidual: null });
+    db.run("UPDATE act_artifact SET embedding = ? WHERE id = ?", [encodeEmbeddingBlob(makeUnitVec(dims, 0)), "artifact_data_hidden"]);
+    for (const [artifactId, residual] of [[goodId, 0.05], [badId, 0.95]] as const) emitEvent(db, { kind: "act_artifact_score_updated", substrate_origin: "substrate_auto", action_artifact_id: artifactId, residual, payload: { artifact_id: artifactId, goal_shape: shape, residual } });
+    const idx = EmbeddingIndex.rebuildFromDb(db);
+    const result = retrieveWithEmbedding(db, idx, new Float32Array(makeUnitVec(dims, 0)), { k: 3, kindFilter: ["act_artifact"], goalText, runtime: "bun" });
+    expect(result.hits.map((h) => h.event_id)).toEqual([goodId, badId]);
+    expect(result.hits[0].routing_score_breakdown.artifact_schema_signal).toBe(1);
+    expect(result.hits[0].routing_score_breakdown.artifact_example_signal).toBe(1);
   });
 
   test("mixed-version rows are excluded; counter increments", async () => {
