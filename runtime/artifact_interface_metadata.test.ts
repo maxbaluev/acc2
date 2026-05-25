@@ -91,6 +91,9 @@ describe("artifact interface metadata — code artifact (executable)", () => {
         kind: "code_change_runner",
         name: "apply_and_test",
         interfaceMetadata: CODE_INTERFACE,
+        // RUNTIME_AD (2026-05-24, directive 3XETJCYT): a code artifact that
+        // declares interface_metadata must also declare HOW it is verified.
+        verifierArtifactId: "verifier_apply_and_test",
       },
       captureEmit(events, db),
     );
@@ -155,6 +158,9 @@ describe("artifact interface metadata — queryable via registry view", () => {
         kind: "code_change_runner",
         name: "apply_and_test_view",
         interfaceMetadata: CODE_INTERFACE,
+        // RUNTIME_AD (2026-05-24, directive 3XETJCYT): verifier required
+        // when a code artifact declares interface_metadata.
+        verifierArtifactId: "verifier_apply_and_test_view",
       },
       captureEmit(events, db),
     );

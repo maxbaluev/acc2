@@ -212,6 +212,12 @@ export const AdmitArtifactSchema = z.object({
   // usage_examples, preconditions, effects, cost_profile,
   // reliability_profile, inputs_schema, outputs_schema }.
   interface_metadata: z.unknown().optional().nullable(),
+  // RUNTIME_AD (2026-05-24, directive 3XETJCYT): the act-loop verifier id
+  // for this artifact. The code-artifact admission gate requires a code
+  // runtime declaring interface_metadata to also declare HOW it will be
+  // verified (this id OR an inline interface_metadata.verifier). Optional —
+  // only consulted for the three code runtimes; legacy admissions omit it.
+  verifier_artifact_id: z.string().optional(),
 });
 
 // Residual is the truth-bearing signal and MUST be a finite number in

@@ -29,6 +29,7 @@
 import type { Database } from "bun:sqlite";
 import type { ArtifactInterfaceMetadata, JsonValue, Runtime, SandboxDecl } from "../substrate/types";
 import { validateSandboxDecl } from "./sandbox";
+import { isCodeRuntime, validateCodeArtifactAdmission } from "./code_artifact_validation";
 import { runArtifactForRuntime } from "./runtimes/index";
 import { getArtifact, insertArtifact } from "./artifact_store";
 import { ownerGateDecision } from "./owner_gate";
@@ -125,6 +126,14 @@ export type AdmissionInput = {
    *  surface (CLAUDE.md "do not add pre-check gates when residual can
    *  score the same thing"). */
   interfaceMetadata?: ArtifactInterfaceMetadata | null;
+  /** RUNTIME_AD (2026-05-24, directive 3XETJCYT): the act-loop verifier id
+   *  for this artifact. Threaded so the code-artifact admission gate can
+   *  confirm a code runtime declares HOW it will be verified (a
+   *  verifier_artifact_id OR an inline verifier on interface_metadata)
+   *  before it runs. OPTIONAL — only consulted for the three code runtimes
+   *  and only when interface_metadata is supplied (the wave-1 authored
+   *  path); legacy / non-code admissions ignore it. */
+  verifierArtifactId?: string | null;
 };
 
 export type AdmissionRejectionReason =
@@ -145,7 +154,18 @@ export type AdmissionRejectionReason =
   // unknown runtime (not bun/uv/camofox-browser) with no matching
   // runtime_runner registry row → refuse admission rather than try to
   // run the fixture in a runner that does not exist.
-  | "unknown_runtime";
+  | "unknown_runtime"
+  // RUNTIME_AD (2026-05-24, directive 3XETJCYT): code-artifact admission
+  // hardening for the three code runtimes (bun / uv / camofox-browser).
+  // Authored code must be well-formed + safe BEFORE it runs — the
+  // capability-gap loop now authors replacements automatically, so a
+  // malformed authored artifact must be caught here, fail-closed, rather
+  // than executing broken code. These mirror CodeArtifactRejectionReason
+  // from runtime/code_artifact_validation.ts.
+  | "code_artifact_interface_incomplete"
+  | "code_artifact_schema_invalid"
+  | "code_artifact_body_invalid"
+  | "code_artifact_sandbox_incoherent";
 
 export type AdmissionResult =
   | { ok: true; artifactId: string; supersedes_dropped?: boolean }
@@ -306,6 +326,44 @@ export const admitArtifact = async (
       reason: "sandbox_decl_invalid",
       detail: `runtime_mismatch:${input.declaredSandbox.runtime}!=${input.runtime}`,
     };
+  }
+
+  // 1.4 Code-artifact admission hardening (RUNTIME_AD, directive 3XETJCYT).
+  //     Gate ONLY the three code runtimes (bun / uv / camofox-browser).
+  //     Authored code must be well-formed + safe BEFORE it runs: the
+  //     capability-gap loop (wave-1) now AUTHORS new code artifacts
+  //     automatically, so a malformed brain-authored replacement must be
+  //     caught here, fail-closed, rather than executing broken code. The
+  //     gate runs BEFORE the row insert + fixture run so a rejected
+  //     artifact never gets a row to roll back and never executes. Non-code
+  //     runtimes (registry runtimes) and data-class rows (handled by the
+  //     null-runtime short-circuit above) never reach this check.
+  //
+  //     Backward-compat: the interface-completeness leg fires only when
+  //     interface_metadata is supplied (the wave-1 authored path); legacy
+  //     executable-tool admissions that omit it admit exactly as before.
+  if (isCodeRuntime(input.runtime)) {
+    const codeCheck = validateCodeArtifactAdmission({
+      runtime: input.runtime,
+      body: input.body,
+      declaredSandbox: input.declaredSandbox,
+      interfaceMetadata: input.interfaceMetadata,
+      verifierArtifactId: input.verifierArtifactId,
+    });
+    if (!codeCheck.ok) {
+      emit({
+        kind: "act_artifact_admission_rejected",
+        substrate_origin: "substrate_auto",
+        directive_id: input.governance?.directiveId,
+        payload: {
+          reason: codeCheck.reason,
+          detail: codeCheck.detail,
+          runtime: input.runtime,
+          source_candidate_id: input.sourceCandidateId ?? null,
+        } as JsonValue,
+      });
+      return { ok: false, reason: codeCheck.reason, detail: codeCheck.detail };
+    }
   }
 
   const gate = ownerGateDecision(input.declaredSandbox);

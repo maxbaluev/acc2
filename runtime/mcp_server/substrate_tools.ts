@@ -1579,6 +1579,10 @@ export const handleAdmitArtifact = async (
       // open-ended payload; admitArtifact persists it to the
       // interface_metadata column. NULL/undefined → legacy behavior.
       interfaceMetadata: (args.interface_metadata ?? null) as ArtifactInterfaceMetadata | null,
+      // RUNTIME_AD (2026-05-24): thread the act-loop verifier id so the
+      // code-artifact admission gate can confirm a code runtime declaring
+      // interface_metadata also declares HOW it will be verified.
+      verifierArtifactId: args.verifier_artifact_id ?? null,
     },
     (event) => {
       try {
