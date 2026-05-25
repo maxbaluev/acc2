@@ -103,128 +103,53 @@ export const directiveCloseReason = (db: Database, directiveId: string): string 
   return "all_tasks_terminal";
 };
 
-/** Cascade-commit dangling descendants when a directive root commits.
- *
- *  Brain dispatches frequently open refinement children via
- *  `task_node_opened` + `task_edge_recorded(refines)`, then directly
- *  emit `task_committed` on the ROOT task once the closure verifier
- *  passes (closure_residual < 0.3). The children never receive their own
- *  terminal events, so the directive stays open and the scheduler
- *  re-dispatches them — burning tokens on work the root already completed.
- *
- *  When a ROOT task commits, this helper walks every descendant reachable
- *  via `refines` edges from the root, and emits `task_committed` for any
- *  descendant that has no terminal event yet. The cascaded event carries
- *  `reason: "cascaded_from_root_commit"` and cites the root task id so the
- *  credit chain stays intact and operators can audit the cascade.
- *
- *  "Root" = `task_node_opened` whose `parent_task_id` is null (the
- *  directive's top-level task). Non-root commits do not cascade — the
- *  brain is allowed to commit a single refinement node without sealing
- *  its siblings.
- *
- *  Returns the count of cascaded descendants. Idempotent: a re-call
- *  immediately after the first finds zero un-terminated descendants. */
-export const cascadeRootCommitToDescendants = (
-  db: Database,
-  rootTaskId: string,
-  rootClosureResidual?: number,
-): number => {
-  // Verify this IS a root task: task_node_opened row with parent_task_id IS NULL.
-  const rootRow = db
-    .query(
-      `SELECT 1 FROM events
-       WHERE kind = 'task_node_opened' AND task_id = ? AND parent_task_id IS NULL
-       LIMIT 1`,
-    )
-    .get(rootTaskId) as { 1: number } | null;
-  if (!rootRow) return 0;
+export type RootCommitReadiness =
+  | { ok: true; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[] }
+  | { ok: false; reason: "not_root" | "missing_clean_closure_audit" | "nonterminal_descendants"; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[] };
 
-  // BFS over refines edges to collect every descendant.
-  const visited = new Set<string>();
-  const queue: string[] = [rootTaskId];
+export const descendantTaskIds = (db: Database, rootTaskId: string): string[] => {
+  const out = new Set<string>();
+  const queue = [rootTaskId];
+  const seen = new Set<string>();
   while (queue.length > 0) {
     const cur = queue.shift()!;
-    if (visited.has(cur)) continue;
-    visited.add(cur);
-    const children = db
-      .query(
-        `SELECT json_extract(payload, '$.to_task') AS to_task
-         FROM events
-         WHERE kind = 'task_edge_recorded'
-           AND json_extract(payload, '$.kind') = 'refines'
-           AND json_extract(payload, '$.from_task') = ?`,
-      )
-      .all(cur) as Array<{ to_task: string | null }>;
-    for (const c of children) {
-      if (c.to_task && !visited.has(c.to_task)) queue.push(c.to_task);
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    // Decomposition children only (parent_task_id). `requires` is a downstream
+    // dependency and `refines` is a checkpoint-continuation — neither is a
+    // descendant for closure-gating (blocking on them deadlocks commits /
+    // forbids the checkpoint pattern). See events.ts root-commit-block note.
+    const children = db.query(`SELECT task_id AS child_id FROM events WHERE kind = 'task_node_opened' AND parent_task_id = ?`).all(cur) as Array<{ child_id: string | null }>;
+    for (const child of children) {
+      if (!child.child_id || child.child_id === rootTaskId) continue;
+      if (!out.has(child.child_id)) { out.add(child.child_id); queue.push(child.child_id); }
     }
   }
-  visited.delete(rootTaskId);
-  if (visited.size === 0) return 0;
+  return [...out];
+};
 
-  // Resolve the root's directive_id once — descendants inherit it. The
-  // brain sometimes emits task_node_opened only for the root and refers
-  // to children solely via task_edge_recorded(refines) with synthesised
-  // to_task IDs (e.g. `<root>-MEASURE`). Those synthetic descendant IDs
-  // never appear in task_node_opened, so we must fall back to the
-  // root's directive scope.
-  const rootDirective = db
-    .query(
-      `SELECT directive_id FROM events
-       WHERE kind = 'task_node_opened' AND task_id = ?
-       ORDER BY ts ASC, rowid ASC LIMIT 1`,
-    )
-    .get(rootTaskId) as { directive_id: string } | null;
-  if (!rootDirective) return 0;
-
-  let cascaded = 0;
-  for (const taskId of visited) {
-    // Skip descendants that already have a terminal event.
-    const terminal = db
-      .query(
-        `SELECT 1 FROM events
-         WHERE kind IN ('task_committed', 'task_failed', 'task_abandoned')
-           AND task_id = ?
-         LIMIT 1`,
-      )
-      .get(taskId) as { 1: number } | null;
-    if (terminal) continue;
-    // Prefer the descendant's own task_node_opened directive_id when
-    // available; otherwise inherit from the root (handles brain edge
-    // emissions that synthesise child IDs without backing them with
-    // task_node_opened).
-    const opened = db
-      .query(
-        `SELECT directive_id FROM events
-         WHERE kind = 'task_node_opened' AND task_id = ?
-         ORDER BY ts ASC, rowid ASC LIMIT 1`,
-      )
-      .get(taskId) as { directive_id: string } | null;
-    const directiveId = opened?.directive_id ?? rootDirective.directive_id;
-    emitEvent(db, {
-      kind: "task_committed",
-      substrate_origin: "substrate_auto",
-      directive_id: directiveId,
-      task_id: taskId,
-      payload: {
-        reason: "cascaded_from_root_commit",
-        root_task_id: rootTaskId,
-        root_closure_residual: typeof rootClosureResidual === "number"
-          ? rootClosureResidual
-          : null,
-        directive_source: opened ? "own_task_node_opened" : "inherited_from_root",
-      } as JsonValue,
-    });
-    cascaded++;
+export const rootCommitReadiness = (db: Database, rootTaskId: string): RootCommitReadiness => {
+  const rootRow = db.query(`SELECT 1 FROM events WHERE kind = 'task_node_opened' AND task_id = ? AND parent_task_id IS NULL LIMIT 1`).get(rootTaskId) as { 1: number } | null;
+  if (!rootRow) return { ok: false, reason: "not_root", closure_audit_event_id: null, closure_residual: null, nonterminal_descendant_task_ids: [] };
+  const audit = db.query(`SELECT id, residual, payload FROM events WHERE kind = 'task_closure_audited' AND task_id = ? ORDER BY ts DESC, rowid DESC LIMIT 1`).get(rootTaskId) as { id: string; residual: number | null; payload: string } | null;
+  let closureResidual: number | null = null;
+  if (audit) {
+    try { const p = JSON.parse(audit.payload ?? '{}') as { closure_residual?: unknown }; closureResidual = typeof p.closure_residual === 'number' && Number.isFinite(p.closure_residual) ? p.closure_residual : typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null; }
+    catch { closureResidual = typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null; }
   }
-  return cascaded;
+  if (closureResidual === null || closureResidual >= 0.3) return { ok: false, reason: "missing_clean_closure_audit", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [] };
+  const nonterminal: string[] = [];
+  for (const taskId of descendantTaskIds(db, rootTaskId)) {
+    const terminal = db.query(`SELECT 1 FROM events WHERE task_id = ? AND kind IN ('task_committed', 'task_failed', 'task_abandoned', 'task_committed_superseded') LIMIT 1`).get(taskId) as { 1: number } | null;
+    if (!terminal) nonterminal.push(taskId);
+  }
+  if (nonterminal.length > 0) return { ok: false, reason: "nonterminal_descendants", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: nonterminal };
+  return { ok: true, closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [] };
 };
 
 /** Upward cascade: when EVERY refines-child of a task has a terminal
- *  event, auto-commit the task. This complements `cascadeRootCommitToDescendants`
- *  — together they ensure a directive reaches `all_tasks_terminal` even
- *  when the brain commits only some nodes in the DAG.
+ *  event, auto-commit the task. This never fabricates child success; it only
+ *  seals an ancestor after all of its existing children are terminal.
  *
  *  The "older test-speedup" case observed 2026-05-15: the brain emitted
  *  `task_committed` on the MEASURE child after running the timing verifier,
@@ -331,6 +256,9 @@ export const cascadeUpwardWhenChildrenTerminal = (
       directiveId = cursorOpened?.directive_id;
     }
     if (!directiveId) break;
+
+    const readiness = rootCommitReadiness(db, parentId);
+    if (!readiness.ok && readiness.reason !== "not_root") break;
 
     emitEvent(db, {
       kind: "task_committed",

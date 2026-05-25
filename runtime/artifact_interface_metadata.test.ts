@@ -29,6 +29,28 @@ const captureEmit = (sink: EmitEventInput[], db: Database) => (event: EmitEventI
   emitEvent(db, event);
 };
 
+// A code artifact that declares interface_metadata must also declare a verifier
+// (directive 3XETJCYT). The SANDREPAIR gate is fail-closed on a declared-but-
+// absent verifier, so register an executable verifier with the declared id first.
+const registerVerifier = async (db: Database, events: EmitEventInput[], id: string): Promise<void> => {
+  const v = await admitArtifact(
+    db,
+    {
+      artifactId: id,
+      runtime: "bun",
+      kind: "admission_verifier",
+      body: "JSON.parse(process.env.ACC2_INPUTS ?? 'null'); console.log('@@RESULT@@ ' + JSON.stringify({ residual: 0.05 }));",
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null,
+      fixtureExpectedResidualBelow: 0.2,
+      name: "iface_test_verifier",
+      enableRepair: false,
+    },
+    captureEmit(events, db),
+  );
+  if (!v.ok) throw new Error("verifier registration failed: " + JSON.stringify(v));
+};
+
 // A CODE artifact's interface descriptor. Note: nothing here is
 // code-specific — purpose/preconditions/effects read like prose; the same
 // fields describe a non-code artifact below.
@@ -76,6 +98,7 @@ describe("artifact interface metadata — code artifact (executable)", () => {
   test("admission accepts + persists + returns interface_metadata", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
+    await registerVerifier(db, events, "verifier_apply_and_test");
     const body = [
       "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
       "console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, echoed: inputs }));",
@@ -143,6 +166,7 @@ describe("artifact interface metadata — queryable via registry view", () => {
   test("registry view exposes interface_metadata for an admitted artifact", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
+    await registerVerifier(db, events, "verifier_apply_and_test_view");
     const body = [
       "const inputs = JSON.parse(process.env.ACC2_INPUTS ?? 'null');",
       "console.log('@@RESULT@@ ' + JSON.stringify({ ok: true, echoed: inputs }));",

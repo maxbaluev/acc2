@@ -34,6 +34,29 @@ const captureEmit = (sink: EmitEventInput[], db: Database) => (event: EmitEventI
   emitEvent(db, event);
 };
 
+// The fixtures declare verifierArtifactId: "verifier_bun_v1"/"verifier_uv_v1".
+// The SANDREPAIR verifier-residual gate requires that verifier to EXIST and be
+// executable, so a test admitting a fixture with that id must first register the
+// verifier (the gate is correctly fail-closed on a declared-but-absent verifier).
+const registerBunVerifier = async (db: Database, events: EmitEventInput[], id = "verifier_bun_v1"): Promise<void> => {
+  const v = await admitArtifact(
+    db,
+    {
+      artifactId: id,
+      runtime: "bun",
+      kind: "admission_verifier",
+      body: "JSON.parse(process.env.ACC2_INPUTS ?? 'null'); console.log('@@RESULT@@ ' + JSON.stringify({ residual: 0.05 }));",
+      declaredSandbox: { runtime: "bun", cpu_ms: 1000, wall_ms: 5000, memory_mb: 64 },
+      fixtureInput: null,
+      fixtureExpectedResidualBelow: 0.2,
+      name: "fixture_bun_verifier",
+      enableRepair: false,
+    },
+    captureEmit(events, db),
+  );
+  if (!v.ok) throw new Error("verifier registration failed: " + JSON.stringify(v));
+};
+
 // ── Pure validator: fixtures accept / reject with the specific reason ──
 
 describe("validateCodeArtifactAdmission — fixtures", () => {
@@ -122,6 +145,7 @@ describe("admitArtifact — code-artifact hardening (fail-closed)", () => {
   test("valid bun authored artifact (complete interface) ADMITS through admitArtifact", async () => {
     const db = openDb(":memory:");
     const events: EmitEventInput[] = [];
+    await registerBunVerifier(db, events);
     const result = await admitArtifact(
       db,
       {

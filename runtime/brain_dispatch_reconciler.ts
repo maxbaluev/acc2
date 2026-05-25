@@ -200,6 +200,10 @@ export const closeOrphanedBrainDispatches = (
         orphan_reason: classification.reason,
         closed_at_ms: nowMs,
         current_session_token: opts.currentSessionToken ?? null,
+        // boot_session_token mirrors current_session_token on the boot
+        // (restart_reconciled) path — preserved for consumers/tests that read
+        // the boot token from restart-reconcile closes.
+        boot_session_token: opts.currentSessionToken ?? null,
         original_dispatch_event_id: row.dispatch_event_id,
         original_started_at_ms: row.started_at_ms,
         original_subprocess_pid: row.subprocess_pid,

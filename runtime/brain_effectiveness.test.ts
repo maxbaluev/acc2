@@ -53,6 +53,24 @@ const seedDirective = (db: ReturnType<typeof openDb>, withRefines = false): { di
       task_id: rootTaskId,
       payload: { kind: "refines", from_task: rootTaskId, to_task: childId },
     });
+    // The grounded-completion guard refuses a root commit while a decomposition
+    // child is live or without a clean closure audit. Make the root legitimately
+    // committable: terminalize the child and record a clean closure audit.
+    emitEvent(db, {
+      kind: "task_committed",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: childId,
+      payload: { summary: "child done" },
+    });
+    emitEvent(db, {
+      kind: "task_closure_audited",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: rootTaskId,
+      residual: 0.1,
+      payload: { closure_residual: 0.1 },
+    });
   }
   return { directiveId, rootTaskId };
 };

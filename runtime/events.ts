@@ -746,7 +746,14 @@ const rootTaskCommitBlocker = (db: Database, taskId: string): RootCommitBlocker 
   const descendants = new Set<string>(); const queue = [taskId]; const seen = new Set<string>();
   while (queue.length > 0) {
     const cur = queue.shift()!; if (seen.has(cur)) continue; seen.add(cur);
-    const rows = db.query(`SELECT task_id AS child_id FROM events WHERE kind = 'task_node_opened' AND parent_task_id = ? UNION SELECT json_extract(payload, '$.to_task') AS child_id FROM events WHERE kind = 'task_edge_recorded' AND json_extract(payload, '$.kind') IN ('refines', 'requires') AND json_extract(payload, '$.from_task') = ?`).all(cur, cur) as Array<{ child_id: string | null }>;
+    // Descendants for the root-commit block are DECOMPOSITION children only
+    // (parent_task_id). `requires` is a downstream dependency (a dependent runs
+    // AFTER this task — blocking on it deadlocks: the upstream can never commit
+    // until its dependents finish, but dependents can't start until it commits).
+    // `refines` is a checkpoint-continuation (a task commits its cycle and
+    // continues in a refines-child) — blocking on it forbids the checkpoint
+    // pattern. Neither is a decomposition descendant, so neither gates commit.
+    const rows = db.query(`SELECT task_id AS child_id FROM events WHERE kind = 'task_node_opened' AND parent_task_id = ?`).all(cur) as Array<{ child_id: string | null }>;
     for (const row of rows) if (row.child_id && row.child_id !== taskId && !descendants.has(row.child_id)) { descendants.add(row.child_id); queue.push(row.child_id); }
   }
   if (descendants.size === 0) return null;
