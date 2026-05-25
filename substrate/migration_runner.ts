@@ -38,6 +38,16 @@ export type MigrationSummary = {
   failed: number;
   versions_applied: string[];
   errors: string[];
+  /** Multi-gap halt safety: the version that failed mid-sequence, if any.
+   *  When a migration fails, the runner STOPS — it does not attempt k+1.
+   *  This is the version a behind organism's upgrade halted on; the
+   *  earlier versions are applied + audited, this one is NOT marked
+   *  applied (so a re-run after the fix retries cleanly), and the later
+   *  versions are left untouched (skipped, not attempted). */
+  failed_version: string | null;
+  /** Versions present in the registry that were never attempted because an
+   *  earlier migration failed and the runner halted. Empty on success. */
+  not_attempted_versions: string[];
 };
 
 export type PendingMigrationInspection = {
@@ -57,6 +67,13 @@ export type PendingMigration = {
 
 const MIGRATIONS_DIR = join(import.meta.dir, "migrations");
 
+/** Optional overrides for the migration source dir + version-order
+ *  validation. Production callers pass nothing (the shipped
+ *  substrate/migrations dir). Tests pass a temp dir holding synthetic
+ *  v0NN_*.sql files to exercise multi-gap and mid-sequence-failure
+ *  scenarios without touching the real registry. */
+export type MigrationRunOptions = { migrationsDir?: string };
+
 const versionAlreadyApplied = (db: Database, version: string): boolean => {
   try {
     const row = db
@@ -72,15 +89,15 @@ const versionAlreadyApplied = (db: Database, version: string): boolean => {
   }
 };
 
-const listMigrationFiles = (): string[] => {
+const listMigrationFiles = (dir: string = MIGRATIONS_DIR): string[] => {
   try {
-    const stat = statSync(MIGRATIONS_DIR);
+    const stat = statSync(dir);
     if (!stat.isDirectory()) return [];
   } catch {
     return [];
   }
   try {
-    return readdirSync(MIGRATIONS_DIR)
+    return readdirSync(dir)
       .filter((f) => /^v\d{3}_.+\.sql$/.test(f))
       .sort(); // lexicographic = version order due to zero-padding
   } catch {
@@ -97,12 +114,13 @@ const extractVersion = (filename: string): string => {
  *  schema_migration_applied event ledger is the sole marker). Used by
  *  `acc doctor`'s pending-migration check and update tooling to surface
  *  schema drift without mutating state. */
-export const listPendingMigrations = (db: Database): PendingMigration[] => {
+export const listPendingMigrations = (db: Database, opts: MigrationRunOptions = {}): PendingMigration[] => {
+  const dir = opts.migrationsDir ?? MIGRATIONS_DIR;
   const pending: PendingMigration[] = [];
-  for (const file of listMigrationFiles()) {
+  for (const file of listMigrationFiles(dir)) {
     const version = extractVersion(file);
     if (versionAlreadyApplied(db, version)) continue;
-    const fullPath = join(MIGRATIONS_DIR, file);
+    const fullPath = join(dir, file);
     let sqlText = "";
     try {
       sqlText = readFileSync(fullPath, "utf8");
@@ -114,9 +132,10 @@ export const listPendingMigrations = (db: Database): PendingMigration[] => {
   return pending;
 };
 
-export const inspectPendingMigrations = (db: Database): PendingMigrationInspection => {
-  const files = listMigrationFiles();
-  const pending = listPendingMigrations(db);
+export const inspectPendingMigrations = (db: Database, opts: MigrationRunOptions = {}): PendingMigrationInspection => {
+  const dir = opts.migrationsDir ?? MIGRATIONS_DIR;
+  const files = listMigrationFiles(dir);
+  const pending = listPendingMigrations(db, opts);
   const pendingVersions = pending.map((m) => m.version);
   const appliedVersions = files.map(extractVersion).filter((v) => !pendingVersions.includes(v));
   return {
@@ -129,31 +148,44 @@ export const inspectPendingMigrations = (db: Database): PendingMigrationInspecti
   };
 };
 
-export const runVersionedMigrations = (db: Database): MigrationSummary => {
+export const runVersionedMigrations = (db: Database, opts: MigrationRunOptions = {}): MigrationSummary => {
+  const dir = opts.migrationsDir ?? MIGRATIONS_DIR;
   const summary: MigrationSummary = {
     applied: 0,
     skipped_already_applied: 0,
     failed: 0,
     versions_applied: [],
     errors: [],
+    failed_version: null,
+    not_attempted_versions: [],
   };
 
-  const files = listMigrationFiles();
+  const files = listMigrationFiles(dir);
   if (files.length === 0) return summary;
 
-  for (const file of files) {
+  // Multi-gap halt safety: a user many versions behind applies pending
+  // migrations in version order (listMigrationFiles sorts lexicographically;
+  // the v0NN zero-padded convention makes lexicographic == numeric version
+  // order). If migration k FAILS we MUST STOP — applying k+1 on top of a
+  // half-migrated schema risks the same RENAME/DROP corruption v002 guards
+  // against. We record which version failed, leave it UNMARKED (so a re-run
+  // after the fix retries it cleanly), and list every later version as
+  // not-attempted so the caller knows the upgrade is incomplete.
+  for (let idx = 0; idx < files.length; idx++) {
+    const file = files[idx]!;
     const version = extractVersion(file);
     if (versionAlreadyApplied(db, version)) {
       summary.skipped_already_applied++;
       continue;
     }
 
-    const fullPath = join(MIGRATIONS_DIR, file);
+    const fullPath = join(dir, file);
     let sqlText = "";
     try {
       sqlText = readFileSync(fullPath, "utf8");
     } catch (err) {
       summary.failed++;
+      summary.failed_version = version;
       summary.errors.push(`read_failed:${file}:${(err as Error).message}`);
       try {
         emitEvent(db, {
@@ -167,7 +199,9 @@ export const runVersionedMigrations = (db: Database): MigrationSummary => {
           } satisfies Record<string, JsonValue>,
         });
       } catch {}
-      continue;
+      // HALT: do not attempt k+1..n on a failed sequence.
+      summary.not_attempted_versions = files.slice(idx + 1).map(extractVersion);
+      break;
     }
 
     try {
@@ -197,8 +231,14 @@ export const runVersionedMigrations = (db: Database): MigrationSummary => {
       summary.applied++;
       summary.versions_applied.push(version);
     } catch (err) {
+      // ROLLBACK leaves the DB exactly as it was before this migration's
+      // BEGIN — the failed version is atomic (all-or-nothing) and is NOT
+      // marked applied (the schema_migration_applied marker is emitted
+      // INSIDE the same transaction, so it rolls back too). Earlier
+      // versions already committed + audited stay applied.
       try { db.exec("ROLLBACK"); } catch {}
       summary.failed++;
+      summary.failed_version = version;
       summary.errors.push(`exec_failed:${file}:${(err as Error).message}`);
       try {
         emitEvent(db, {
@@ -212,6 +252,13 @@ export const runVersionedMigrations = (db: Database): MigrationSummary => {
           } satisfies Record<string, JsonValue>,
         });
       } catch {}
+      // HALT: a mid-sequence failure stops the run. Do NOT continue to
+      // k+1 — the later migrations may assume the failed one's schema
+      // shape. Record them as not-attempted so the upgrade is reported
+      // incomplete and a re-run (after the operator fixes the failure)
+      // resumes at the failed version.
+      summary.not_attempted_versions = files.slice(idx + 1).map(extractVersion);
+      break;
     }
   }
 
