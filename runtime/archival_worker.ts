@@ -177,6 +177,11 @@ const DROP_KINDS = new Set<string>([
 const EPHEMERAL_TELEMETRY_KINDS = new Set<string>([
   "recipe_promotion_deferred",
   "artifact_kind_inference_uncertain",
+  // Telemetry-only high-volume brain-cycle/liveness signal. Raw rows are only
+  // needed while dispatches are recent; scheduler grace reads remain inside TTL.
+  "brain_reasoning_recorded",
+  // Calibration signal is retained below as count + sums + histograms before raw eviction.
+  "origin_calibration_recorded",
 ]);
 
 // Short TTL — telemetry retains only recent-debugging value. Rows of an
@@ -212,6 +217,61 @@ const bumpRetainedEvictedCount = (db: Database, kind: string, delta: number): vo
     "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     [`${EVICTED_COUNT_META_PREFIX}${kind}`, String(prior + delta)],
   );
+};
+
+const calibrationBucket = (value: unknown): string => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "unknown";
+  const clamped = Math.max(0, Math.min(1, value));
+  if (clamped >= 1) return "1.0";
+  const lo = Math.floor(clamped * 10) / 10;
+  return `${lo.toFixed(1)}-${(lo + 0.1).toFixed(1)}`;
+};
+
+type TelemetryEvictionRow = { id: string; kind: string; ts: string; payload: string };
+
+const retainOriginCalibrationAggregates = (db: Database, rows: TelemetryEvictionRow[]): number => {
+  let retained = 0;
+  for (const row of rows) {
+    if (row.kind !== "origin_calibration_recorded") continue;
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(row.payload) as Record<string, unknown>;
+    } catch {
+      payload = {};
+    }
+    const origin = typeof payload.origin === "string" && payload.origin.length > 0 ? payload.origin : "unknown";
+    const role = typeof payload.role === "string" && payload.role.length > 0 ? payload.role : "unknown";
+    const predicted = typeof payload.predicted_confidence === "number" && Number.isFinite(payload.predicted_confidence) ? payload.predicted_confidence : null;
+    const observed = typeof payload.observed_success_probability === "number" && Number.isFinite(payload.observed_success_probability) ? payload.observed_success_probability : null;
+    const error = typeof payload.calibration_error === "number" && Number.isFinite(payload.calibration_error) ? payload.calibration_error : null;
+    db.run(
+      `INSERT INTO telemetry_origin_calibration_rollup (
+         origin, role, predicted_bucket, observed_bucket, error_bucket,
+         count, predicted_confidence_sum, observed_success_probability_sum, calibration_error_sum, first_ts, last_ts
+       ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+       ON CONFLICT(origin, role, predicted_bucket, observed_bucket, error_bucket) DO UPDATE SET
+         count = count + 1,
+         predicted_confidence_sum = predicted_confidence_sum + excluded.predicted_confidence_sum,
+         observed_success_probability_sum = observed_success_probability_sum + excluded.observed_success_probability_sum,
+         calibration_error_sum = calibration_error_sum + excluded.calibration_error_sum,
+         first_ts = MIN(first_ts, excluded.first_ts),
+         last_ts = MAX(last_ts, excluded.last_ts)`,
+      [
+        origin,
+        role,
+        calibrationBucket(predicted),
+        calibrationBucket(observed),
+        calibrationBucket(error),
+        predicted ?? 0,
+        observed ?? 0,
+        error ?? 0,
+        row.ts,
+        row.ts,
+      ],
+    );
+    retained++;
+  }
+  return retained;
 };
 
 const adjustLiveRollup = (db: Database, kind: string, day: string, delta: number): void => {
@@ -463,6 +523,10 @@ export const runArchivalSweep = async (
           errors: 0,
           retention_days: retentionDays,
           cutoff_iso: cutoffIso,
+          retained_aggregates: {
+            evicted_count_meta: Object.keys(summary.by_kind),
+            origin_calibration_rollup_rows: retainedOriginCalibrationRows,
+          },
         } as JsonValue,
       });
       summary.emitted_event_id = emitted.id;
@@ -778,14 +842,15 @@ export const runTelemetryEvictionSweep = async (
   // READ scan → route through the SQL worker pool when present (sync fallback
   // when absent), mirroring readUnembedded.
   const ph = kindList.map(() => "?").join(", ");
-  const rows = await poolQuery<{ id: string; kind: string; ts: string }>(
+  const rows = await poolQuery<TelemetryEvictionRow>(
     hotDb,
-    `SELECT id, kind, ts FROM events WHERE kind IN (${ph}) AND ts < ? ORDER BY ts ASC LIMIT ?`,
+    `SELECT id, kind, ts, payload FROM events WHERE kind IN (${ph}) AND ts < ? ORDER BY ts ASC LIMIT ?`,
     [...kindList, cutoffIso, limit],
   );
   summary.scanned = rows.length;
   if (rows.length === 0) return summary;
   recordArchiveSummary(hotDb, rows, "telemetry_eviction");
+  let retainedOriginCalibrationRows = 0;
 
   const idsByKind = new Map<string, string[]>();
   for (const r of rows) {
@@ -808,7 +873,12 @@ export const runTelemetryEvictionSweep = async (
         // kinds today, but symmetric with the archival DELETE path).
         hotDb.run(`DELETE FROM vec_events WHERE event_id IN (${delPh})`, chunk);
         const result = hotDb.run(`DELETE FROM events WHERE id IN (${delPh})`, chunk);
-        deletedThisKind += (result as unknown as { changes?: number }).changes ?? 0;
+        const changes = (result as unknown as { changes?: number }).changes ?? 0;
+        deletedThisKind += changes;
+        if (changes > 0) {
+          const chunkRows = rows.filter((r) => chunk.includes(r.id));
+          retainedOriginCalibrationRows += retainOriginCalibrationAggregates(hotDb, chunkRows);
+        }
         for (const id of chunk) {
           const row = rows.find((r) => r.id === id);
           if (row) adjustLiveRollup(hotDb, row.kind, row.ts.slice(0, 10), -1);
@@ -821,7 +891,7 @@ export const runTelemetryEvictionSweep = async (
       }
     }
     if (deletedThisKind > 0) {
-      // Preserve the lifetime count BEFORE the rows are gone for good.
+      // Preserve lifetime observability counts for rows this sweep deleted.
       bumpRetainedEvictedCount(hotDb, kind, deletedThisKind);
       summary.by_kind[kind] = deletedThisKind;
       summary.evicted += deletedThisKind;
@@ -838,6 +908,10 @@ export const runTelemetryEvictionSweep = async (
           count: summary.evicted,
           retention_hours: retentionHours,
           cutoff_iso: cutoffIso,
+          retained_aggregates: {
+            evicted_count_meta: Object.keys(summary.by_kind),
+            origin_calibration_rollup_rows: retainedOriginCalibrationRows,
+          },
         } as JsonValue,
       });
       summary.emitted_event_id = emitted.id;

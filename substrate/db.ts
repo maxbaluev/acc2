@@ -302,6 +302,20 @@ const ensureEventRollupTables = (db: Database): void => {
     );
     CREATE INDEX IF NOT EXISTS idx_event_archive_summary_kind_bucket
       ON event_archive_summary(kind, bucket);
+    CREATE TABLE IF NOT EXISTS telemetry_origin_calibration_rollup (
+      origin TEXT NOT NULL,
+      role TEXT NOT NULL,
+      predicted_bucket TEXT NOT NULL,
+      observed_bucket TEXT NOT NULL,
+      error_bucket TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      predicted_confidence_sum REAL NOT NULL DEFAULT 0,
+      observed_success_probability_sum REAL NOT NULL DEFAULT 0,
+      calibration_error_sum REAL NOT NULL DEFAULT 0,
+      first_ts TEXT NOT NULL,
+      last_ts TEXT NOT NULL,
+      PRIMARY KEY (origin, role, predicted_bucket, observed_bucket, error_bucket)
+    );
   `);
   db.exec(`
     INSERT INTO event_kind_rollup (kind, total_count, live_count, first_ts, last_ts)

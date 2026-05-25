@@ -23,6 +23,7 @@ import { emitEvent } from "./events";
 import { reconcileBrainDispatchesAtBoot, setBootSessionToken } from "./brain_dispatch_reconciler";
 import { newId } from "./ids";
 import { __resetHandshakePermitsForTest } from "./bridge/opencode";
+import { runTelemetryEvictionSweep } from "./archival_worker";
 
 afterAll(() => closeDb());
 beforeEach(() => {
@@ -1367,6 +1368,27 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
       )
       .get(directiveId) as { c: number };
     expect(closureAuditNodes.c).toBe(1);
+  });
+
+  test("cognitive progress: recent brain reasoning survives telemetry eviction TTL and still earns grace", async () => {
+    const db = openDb(":memory:");
+    const { directiveId, taskId } = await seedDeliverableWithoutClosure(db, { withDeliverable: false });
+    emitEvent(db, {
+      kind: "brain_reasoning_recorded",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { summary: "still investigating" },
+    });
+
+    await runTelemetryEvictionSweep(db, { retentionHours: 1, nowMs: Date.now() });
+    await schedulerTick(db, { directiveId });
+
+    const abandoned = db
+      .query("SELECT failure_kind FROM events WHERE task_id = ? AND kind = 'task_abandoned'")
+      .get(taskId) as { failure_kind: string } | null;
+    expect(abandoned).toBeNull();
+    expect(db.query("SELECT COUNT(*) AS c FROM events WHERE task_id = ? AND kind = 'brain_reasoning_recorded'").get(taskId)).toEqual({ c: 1 });
   });
 
   test("hierarchical closure: genuinely-stuck (no-deliverable) path STILL abandons unchanged", async () => {

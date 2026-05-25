@@ -482,9 +482,44 @@ describe("runTelemetryEvictionSweep — event-class tiering", () => {
   test("curationModeForKind classifies ephemeral telemetry as 'evict', durable kinds as not-evict", () => {
     expect(curationModeForKind("recipe_promotion_deferred")).toBe("evict");
     expect(curationModeForKind("artifact_kind_inference_uncertain")).toBe("evict");
+    expect(curationModeForKind("brain_reasoning_recorded")).toBe("evict");
+    expect(curationModeForKind("origin_calibration_recorded")).toBe("evict");
     expect(curationModeForKind("knowledge_promoted")).not.toBe("evict");
     expect(curationModeForKind("act_artifact_promoted")).not.toBe("evict");
     expect(curationModeForKind("retrieval_binding")).not.toBe("evict");
+  });
+
+  test("origin calibration eviction retains count, sums, and histogram buckets", async () => {
+    const old = hoursAgo(4);
+    const ev1 = emitEvent(db, {
+      kind: "origin_calibration_recorded",
+      payload: { origin: "brain", role: "cited_knowledge", predicted_confidence: 0.84, observed_success_probability: 1, calibration_error: 0.16 },
+    });
+    const ev2 = emitEvent(db, {
+      kind: "origin_calibration_recorded",
+      payload: { origin: "brain", role: "cited_knowledge", predicted_confidence: 0.81, observed_success_probability: 1, calibration_error: 0.19 },
+    });
+    db.run("UPDATE events SET ts = ? WHERE id IN (?, ?)", [old, ev1.id, ev2.id]);
+
+    const summary = await runTelemetryEvictionSweep(db, { retentionHours: 1, nowMs: NOW });
+
+    expect(summary.by_kind.origin_calibration_recorded).toBe(2);
+    expect(retainedEvictedCount(db, "origin_calibration_recorded")).toBe(2);
+    expect(eventsCount(db, "origin_calibration_recorded")).toBe(0);
+    const rollup = db
+      .query<{ count: number; predicted_confidence_sum: number; observed_success_probability_sum: number; calibration_error_sum: number; predicted_bucket: string; observed_bucket: string; error_bucket: string }, []>(
+        "SELECT count, predicted_confidence_sum, observed_success_probability_sum, calibration_error_sum, predicted_bucket, observed_bucket, error_bucket FROM telemetry_origin_calibration_rollup WHERE origin='brain' AND role='cited_knowledge'",
+      )
+      .get();
+    expect(rollup).toEqual({
+      count: 2,
+      predicted_confidence_sum: 1.65,
+      observed_success_probability_sum: 2,
+      calibration_error_sum: 0.35,
+      predicted_bucket: "0.8-0.9",
+      observed_bucket: "1.0",
+      error_bucket: "0.1-0.2",
+    });
   });
 
   test("empty sweep is a no-op and emits no telemetry_evicted", async () => {
