@@ -127,6 +127,71 @@ const isPortListening = async (host: string, port: number): Promise<boolean> => 
   }
 };
 
+/**
+ * CRASH-RESILIENCE (resource-spec AHV73KJDK54P3FF7D2NDV9TQ2C): bound EVERY
+ * await on the shutdown path so stop()/restart can NEVER hang.
+ *
+ * The measured failure mode: a graceful `stop()` / restart TIMED OUT at 40s
+ * under load because stop() awaited `mcpServer.stop()` UNBOUNDED — fastmcp's
+ * stop() does not promptly release its underlying http listener, and on an
+ * overloaded daemon the promise can hang indefinitely. A restart that cannot
+ * complete is a stuck-state: the operator cannot recover without manual kill.
+ *
+ * `withTimeout` races the supplied promise against a hard deadline. On timeout
+ * it RESOLVES (never rejects) with `{ timedOut: true }` so the caller proceeds
+ * to the next teardown step (port release, lock removal) regardless. The
+ * underlying promise is left to settle in the background — it can no longer
+ * wedge the shutdown sequence. The timer is `.unref()`'d so a still-pending
+ * timeout never keeps the process alive on its own.
+ */
+export const withTimeout = async <T>(
+  label: string,
+  promise: Promise<T>,
+  budgetMs: number,
+): Promise<{ value: T | undefined; timedOut: boolean }> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ value: undefined; timedOut: true }>((resolve) => {
+    timer = setTimeout(() => {
+      logger.debug({ where: "daemon.withTimeout", label, budget_ms: budgetMs }, "shutdown step exceeded budget — forcing past it");
+      resolve({ value: undefined, timedOut: true });
+    }, budgetMs);
+    (timer as unknown as { unref?: () => void }).unref?.();
+  });
+  const wrapped = promise
+    .then((value) => ({ value, timedOut: false as const }))
+    .catch((err) => {
+      logger.debug({ where: "daemon.withTimeout", label, err: String(err) }, "shutdown step rejected (best-effort)");
+      return { value: undefined, timedOut: false as const };
+    });
+  try {
+    return await Promise.race([wrapped, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
+/** Hard cap on the `mcpServer.stop()` await inside stop(). fastmcp's stop()
+ *  can hang under load; after this budget we force-close the listener and
+ *  proceed so a restart always completes in bounded time. Env-overridable. */
+const MCP_SHUTDOWN_BUDGET_MS = (() => {
+  const raw = process.env.ACC2_MCP_SHUTDOWN_BUDGET_MS;
+  if (typeof raw === "string" && raw.length > 0) {
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return 1500;
+})();
+
+/** Hard cap on the SQL worker-thread pool shutdown await inside stop(). */
+const SQL_POOL_SHUTDOWN_BUDGET_MS = (() => {
+  const raw = process.env.ACC2_SQL_POOL_SHUTDOWN_BUDGET_MS;
+  if (typeof raw === "string" && raw.length > 0) {
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return 2000;
+})();
+
 export type DaemonOpts = {
   /** MCP (fastmcp) port. Defaults to V2_DAEMON_PORT env, then 9387. */
   port?: number;
@@ -3050,11 +3115,30 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     } catch (err) {
       logger.debug({ where: "daemon.stop.emit_shutdown", err: String(err) }, "db may already be closed");
     }
+    // auxServer.stop(true) is synchronous best-effort — force-close drops live
+    // connections immediately and releases the aux port. A throw here must not
+    // block the rest of teardown.
     try { auxServer?.stop(true); } catch (err) {
       logger.debug({ where: "daemon.stop.aux_server", err: String(err) }, "aux server stop failed (best-effort)");
     }
-    try { if (mcpServer) await mcpServer.stop(); } catch (err) {
-      logger.debug({ where: "daemon.stop.mcp_server", err: String(err) }, "mcp server stop failed (best-effort)");
+    // CRASH-RESILIENCE (AHV73KJDK54P3FF7D2NDV9TQ2C): BOUND the mcpServer.stop()
+    // await. fastmcp's stop() does not promptly release its http listener and
+    // can hang indefinitely under load — the measured `shutdown refused:
+    // timeout:40000ms` stuck-state. withTimeout races it against a hard
+    // MCP_SHUTDOWN_BUDGET_MS deadline; on timeout we log + PROCEED to lock
+    // removal and DB close so the shutdown sequence always completes in bounded
+    // time. The MCP listener's port is released when the process exits (prod
+    // restart is a fresh process; the supervisor polls for OS port release
+    // before respawning, so an un-released-in-process port never blocks a real
+    // restart).
+    if (mcpServer) {
+      const { timedOut } = await withTimeout("mcpServer.stop", mcpServer.stop(), MCP_SHUTDOWN_BUDGET_MS);
+      if (timedOut) {
+        logger.warn(
+          { budget_ms: MCP_SHUTDOWN_BUDGET_MS },
+          "mcpServer.stop exceeded budget — force-proceeding with teardown; port releases on process exit",
+        );
+      }
     }
     // NOTE: fastmcp's stop() does NOT promptly release the underlying http
     // listening socket in-process, so a same-port rebind in the same process
@@ -3070,13 +3154,19 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // promptly; anything still in flight after the budget is rejected
     // with sql_pool_shutting_down rather than silently hanging shutdown.
     if (sqlPool) {
-      try { await sqlPool.shutdown(2000); } catch (err) {
-        logger.debug({ where: "daemon.stop.sql_pool_shutdown", err: String(err) }, "pool shutdown failed (best-effort)");
-      }
+      // BOUND the pool drain too — a wedged read job must never hang teardown.
+      await withTimeout("sqlPool.shutdown", sqlPool.shutdown(SQL_POOL_SHUTDOWN_BUDGET_MS), SQL_POOL_SHUTDOWN_BUDGET_MS + 250);
       clearSqlPool();
       sqlPool = null;
     }
     closeDb(stateDbPath);
+    // GUARANTEED port/lock release: removing the lock + token files is the LAST
+    // step and runs on EVERY graceful exit path (signal, /shutdown, force,
+    // in-process restart). Crash-only paths (SIGILL/SIGSEGV) skip stop()
+    // entirely — the outer supervisor (runtime/daemon_supervisor.ts) owns that
+    // cleanup by polling for OS port release and reaping the stale lock before
+    // respawning. Both files are removed best-effort so a partial teardown
+    // never leaves a stuck lock the next start trips over.
     tryRemove(socketFile);
     tryRemove(tokenFile);
     // F10 canonical hot-reload: reap the child git HEAD sibling state

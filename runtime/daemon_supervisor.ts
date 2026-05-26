@@ -56,7 +56,15 @@ import {
   getOpenBrainDispatches,
   type OpenBrainDispatch,
 } from "./brain_dispatch_reconciler";
-import { resolveStateDir } from "./state_paths";
+import {
+  resolveStateDir,
+  resolveSocketFile,
+  resolveTokenFile,
+  resolveDaemonPorts,
+  detectStaleLock,
+  defaultPidAlive,
+  type StaleLockVerdict,
+} from "./state_paths";
 import { logger } from "./logger";
 
 // ── Cross-process git HEAD state file ──────────────────────────────────
@@ -762,4 +770,338 @@ export const runSupervisorLoop = async (
   }
 
   return outcomes;
+};
+
+// ────────────────────────────────────────────────────────────────────────
+// CRASH-RESILIENCE WATCHDOG (resource-spec AHV73KJDK54P3FF7D2NDV9TQ2C)
+// ────────────────────────────────────────────────────────────────────────
+//
+// The hot-reload supervisor above swaps a HEALTHY daemon on a git-HEAD
+// change. This section handles the orthogonal failure the spec names: the
+// daemon DIED (native Bun SIGILL/SIGSEGV, or any exit that skipped stop()),
+// leaving the lock + ports behind, and the system is STUCK because:
+//   1. the crashed process never released ports 9387/9388 promptly, so the
+//      next `start` failed with EADDRINUSE, and
+//   2. the stale lock + token files were never reaped (stop() never ran),
+//      so a naive start short-circuits on "already running".
+//
+// The watchdog detects ONLY the dead-process signature (pid gone / stale
+// lock — NEVER slowness or /health unresponsiveness), polls for OS port
+// release, reaps the stale lock/token/child-head files, then respawns
+// EXACTLY ONE daemon via the canonical entry. The respawn is lock-aware +
+// idempotent: it delegates the single-writer guarantee to the daemon's own
+// O_CREAT|O_EXCL boot lock (acquireBootLock), so two racing watchdogs can
+// never create duplicate daemons — one wins the exclusive create, the other
+// gets DaemonAlreadyRunningError and exits 0 as a no-op.
+
+/** True when a TCP listener is accepting connections on host:port. The
+ *  watchdog polls this to confirm a crashed daemon's port has actually been
+ *  released by the OS before respawning (a dead pid can leave a port in
+ *  TIME_WAIT / not-yet-reclaimed for a short window). Best-effort: any
+ *  non-connect outcome counts as "not listening". */
+export const isPortBound = async (port: number, host = "127.0.0.1"): Promise<boolean> => {
+  try {
+    const socket = await Bun.connect({
+      hostname: host,
+      port,
+      socket: { data() {}, open() {}, close() {}, error() {} },
+    });
+    socket.end();
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export type CrashWatchdogDeps = {
+  /** Stale-lock verdict probe. Defaults to the canonical detector. */
+  detectStaleLock?: (lockPath?: string, pidAlive?: (pid: number) => boolean) => StaleLockVerdict;
+  /** pid-liveness probe injected into the detector. This — and ONLY this — is
+   *  the recovery trigger. The watchdog watches the OS process lifecycle, NOT
+   *  responsiveness: a pid that is ALIVE is never disturbed, no matter how slow
+   *  it is to answer /health (a 20+ min opencode/GPT-5.5 brain cycle keeps the
+   *  process alive and is legitimate long-running work — see the hard
+   *  constraint in resource-spec AHV73KJDK54P3FF7D2NDV9TQ2C). Recovery fires
+   *  exclusively when the pid is GONE (crash / SIGILL / SIGSEGV / clean exit
+   *  that skipped lock cleanup) or the lock is structurally stale (no/zero pid,
+   *  malformed). There is intentionally NO /health probe and NO time-deadline
+   *  "unresponsive → kill" path in this watchdog. */
+  pidAlive?: (pid: number) => boolean;
+  /** Port-bound probe (override in tests to simulate slow release). */
+  isPortBound?: (port: number, host?: string) => Promise<boolean>;
+  /** Reap a single file (lock / token / child-head). */
+  removeFile?: (path: string) => void;
+  /** Spawn the canonical daemon child. Defaults to the lock-aware entry. */
+  spawnDaemon?: (entry: string) => SupervisorChildHandle;
+  /** Clock + sleep overrides for deterministic tests. */
+  nowMs?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+export type CrashWatchdogOptions = {
+  /** Ports the crashed daemon owned. Defaults to resolveDaemonPorts(). */
+  ports?: readonly number[];
+  /** Max ms to poll for OS port release before giving up and surfacing an
+   *  operator diagnostic (a non-child process is holding the port). */
+  portReleaseDeadlineMs?: number;
+  /** Poll cadence while waiting for port release. */
+  portPollIntervalMs?: number;
+  /** Lock-file path override. */
+  lockPath?: string;
+  /** Token-file path override. */
+  tokenPath?: string;
+  /** State dir (for the child-head sibling file). */
+  stateDir?: string;
+  /** Daemon entry to spawn. Defaults to runtime/daemon.ts. */
+  daemonEntry?: string;
+  /** Host the ports are bound on. */
+  host?: string;
+};
+
+export type CrashRecoveryResult =
+  | { action: "no_recovery_needed"; reason: "lock_healthy" | "no_lock"; verdict: StaleLockVerdict }
+  | {
+      action: "operator_diagnostic_required";
+      reason: "port_held_by_non_child";
+      ports_still_bound: number[];
+      verdict: StaleLockVerdict;
+    }
+  | {
+      action: "recovered";
+      verdict: StaleLockVerdict;
+      reaped: string[];
+      ports_released: number[];
+      respawn_pid: number | null;
+    };
+
+const removeFileBestEffort = (path: string): void => {
+  try {
+    if (existsSync(path)) rmSync(path, { force: true });
+  } catch (err) {
+    logger.debug({ where: "daemon_supervisor.removeFileBestEffort", path, err: String(err) }, "reap failed (best-effort)");
+  }
+};
+
+/** Poll `ports` until every one is free OR the deadline expires. Returns the
+ *  ports STILL bound at deadline (empty array = all released). A crashed
+ *  daemon usually releases its ports within a few hundred ms; the poll lets
+ *  the OS reclaim them before the respawn tries to bind, eliminating the
+ *  EADDRINUSE stuck-state. */
+export const waitForPortRelease = async (
+  ports: readonly number[],
+  opts: { deadlineMs?: number; pollIntervalMs?: number; host?: string } = {},
+  deps: { isPortBound?: (port: number, host?: string) => Promise<boolean>; nowMs?: () => number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<number[]> => {
+  const deadlineMs = opts.deadlineMs ?? 10_000;
+  const pollIntervalMs = opts.pollIntervalMs ?? 200;
+  const host = opts.host ?? "127.0.0.1";
+  const bound = deps.isPortBound ?? isPortBound;
+  const now = deps.nowMs ?? (() => Date.now());
+  const sleep = deps.sleep ?? realSleep;
+  const deadline = now() + deadlineMs;
+  while (true) {
+    const stillBound: number[] = [];
+    for (const port of ports) {
+      if (await bound(port, host)) stillBound.push(port);
+    }
+    if (stillBound.length === 0) return [];
+    if (now() >= deadline) return stillBound;
+    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - now())));
+  }
+};
+
+const realSpawnDaemon = (entry: string): SupervisorChildHandle => {
+  // Canonical start path: spawn `bun runtime/daemon.ts`. The child runs
+  // acquireBootLock (O_CREAT|O_EXCL) itself, so the single-daemon guarantee
+  // is enforced at the filesystem layer regardless of how many watchdogs
+  // call this concurrently. Detached + unref so the watchdog process can
+  // exit without taking the daemon with it.
+  const child = spawn("bun", [entry], {
+    detached: true,
+    stdio: ["ignore", "ignore", "ignore"],
+    env: { ...process.env },
+  });
+  child.unref();
+  const handle: SupervisorChildHandle = {
+    pid: child.pid ?? null,
+    exited: false,
+    exitCode: null,
+    raw: child,
+  };
+  child.on("exit", (code) => {
+    handle.exited = true;
+    handle.exitCode = code;
+  });
+  return handle;
+};
+
+/**
+ * Single-pass crash recovery. CRASH-ONLY: the recovery trigger is the OS
+ * process lifecycle (pid liveness), NEVER responsiveness or a time deadline.
+ *
+ *   - lock present + pid ALIVE  → no_recovery_needed. The incumbent is left
+ *     COMPLETELY UNTOUCHED — no kill, no respawn, no /health probe — even if it
+ *     is slow or unresponsive. A live process running a 20+ min opencode/
+ *     GPT-5.5 brain cycle is legitimate long-running work; the watchdog must
+ *     not disturb it. This is the owner's hard constraint
+ *     (resource-spec AHV73KJDK54P3FF7D2NDV9TQ2C): NEVER kill live work.
+ *   - no lock                   → no_recovery_needed (nothing crashed).
+ *   - stale lock — pid GONE (crash / SIGILL / SIGSEGV / exit that skipped
+ *     stop()), or structurally stale (no/zero pid, malformed):
+ *       1. poll for OS port release (waitForPortRelease).
+ *       2. if a port is STILL bound after the deadline AND the lock pid is
+ *          dead → a non-child process owns it → surface
+ *          operator_diagnostic_required (do NOT thrash spawning into an
+ *          occupied port).
+ *       3. reap lock + token + child-head files.
+ *       4. respawn EXACTLY ONE daemon via the lock-aware canonical entry.
+ *
+ * There is deliberately NO "/health unresponsive past N seconds → kill"
+ * branch. The watchdog watches whether the child PROCESS exists, not whether
+ * it answers fast.
+ *
+ * `db` is optional and used only to attach orphan-count evidence to logs;
+ * the respawned daemon's boot reconcileBrainDispatchesAtBoot is what
+ * actually recovers orphaned dispatches.
+ */
+export const recoverCrashedDaemon = async (
+  opts: CrashWatchdogOptions = {},
+  deps: CrashWatchdogDeps = {},
+): Promise<CrashRecoveryResult> => {
+  const lockPath = opts.lockPath ?? resolveSocketFile();
+  const tokenPath = opts.tokenPath ?? resolveTokenFile();
+  const stateDir = opts.stateDir ?? resolveStateDir();
+  const ports = opts.ports ?? resolveDaemonPorts();
+  const host = opts.host ?? "127.0.0.1";
+  const entry = resolveDaemonEntry(opts.daemonEntry);
+
+  const detect = deps.detectStaleLock ?? detectStaleLock;
+  const pidAlive = deps.pidAlive ?? defaultPidAlive;
+  const removeFile = deps.removeFile ?? removeFileBestEffort;
+  const spawnDaemon = deps.spawnDaemon ?? realSpawnDaemon;
+
+  const verdict = detect(lockPath, pidAlive);
+
+  // No lock → nothing crashed; a fresh start is the caller's job, not the
+  // watchdog's. (The watchdog respawns only after detecting a crash.)
+  if (!verdict.present) {
+    return { action: "no_recovery_needed", reason: "no_lock", verdict };
+  }
+
+  // Lock present + pid ALIVE → the incumbent is the recovery trigger's ONLY
+  // negative: a live process is left completely untouched. No /health probe,
+  // no kill, no respawn — a slow-but-alive daemon running a long brain cycle is
+  // legitimate work the watchdog must never disturb (owner hard constraint).
+  // The watchdog watches the OS PROCESS lifecycle (pid liveness), not
+  // responsiveness. Recovery fires ONLY when the pid is gone / the lock is
+  // structurally stale (verdict.stale), handled below.
+  if (!verdict.stale) {
+    return { action: "no_recovery_needed", reason: "lock_healthy", verdict };
+  }
+
+  // ── Recovery path: pid GONE (crash / SIGILL / SIGSEGV) or stale lock ──────
+  const stillBound = await waitForPortRelease(
+    ports,
+    {
+      deadlineMs: opts.portReleaseDeadlineMs ?? 10_000,
+      pollIntervalMs: opts.portPollIntervalMs ?? 200,
+      host,
+    },
+    { isPortBound: deps.isPortBound, nowMs: deps.nowMs, sleep: deps.sleep },
+  );
+
+  if (stillBound.length > 0) {
+    // A port is held past the release deadline and the lock owner is gone:
+    // a NON-CHILD process owns the port. Spinning a respawn into an occupied
+    // port just reproduces EADDRINUSE. Surface an operator diagnostic instead
+    // (the spec's hidl_action_required), do NOT respawn blindly.
+    logger.error(
+      { ports_still_bound: stillBound, lock_pid: verdict.pid, reason: verdict.reason },
+      "crash-watchdog: ports still bound after release deadline; a non-child process owns them — operator action required",
+    );
+    return {
+      action: "operator_diagnostic_required",
+      reason: "port_held_by_non_child",
+      ports_still_bound: stillBound,
+      verdict,
+    };
+  }
+
+  // Reap stale lock/token/child-head so the respawn's acquireBootLock sees a
+  // clean slate. Idempotent — missing files are tolerated.
+  const reaped: string[] = [];
+  for (const path of [lockPath, tokenPath, join(stateDir, CHILD_GIT_HEAD_FILENAME)]) {
+    if (existsSync(path)) {
+      removeFile(path);
+      reaped.push(path);
+    }
+  }
+
+  // Respawn EXACTLY ONE daemon. The child's own O_CREAT|O_EXCL boot lock is
+  // the single-writer guarantee — even if two watchdogs reach this line
+  // concurrently, only one child wins the lock; the loser exits 0 as a no-op.
+  const handle = spawnDaemon(entry);
+  logger.info(
+    { respawn_pid: handle.pid, reaped, reason: verdict.reason },
+    "crash-watchdog: reaped stale daemon state, released ports, respawned single daemon",
+  );
+
+  return {
+    action: "recovered",
+    verdict,
+    reaped,
+    ports_released: [...ports],
+    respawn_pid: handle.pid,
+  };
+};
+
+export type CrashWatchdogLoopOptions = CrashWatchdogOptions & {
+  /** Detector cadence. Default 5s. */
+  tickIntervalMs?: number;
+  /** Cap on ticks before the loop returns (tests). Unbounded when absent. */
+  maxTicks?: number;
+  /** Abort signal — the loop exits on receipt. */
+  abortSignal?: AbortSignal;
+};
+
+/**
+ * Long-running crash watchdog. Ticks at `tickIntervalMs`, calling
+ * recoverCrashedDaemon each tick. Returns the recovery results (tests cap
+ * with maxTicks; production runs until aborted). The loop is intentionally
+ * stateless between ticks — the lock file is the single source of truth, so
+ * a watchdog restart never loses track of what it was doing.
+ */
+export const runCrashWatchdogLoop = async (
+  opts: CrashWatchdogLoopOptions = {},
+  deps: CrashWatchdogDeps = {},
+): Promise<CrashRecoveryResult[]> => {
+  const tickIntervalMs = opts.tickIntervalMs ?? 5_000;
+  const sleep = deps.sleep ?? realSleep;
+  const now = deps.nowMs ?? (() => Date.now());
+
+  let abortRequested = false;
+  const abortHandler = (): void => { abortRequested = true; };
+  opts.abortSignal?.addEventListener("abort", abortHandler);
+
+  const results: CrashRecoveryResult[] = [];
+  let ticks = 0;
+  try {
+    while (true) {
+      if (abortRequested || opts.abortSignal?.aborted) break;
+      if (typeof opts.maxTicks === "number" && ticks >= opts.maxTicks) break;
+      results.push(await recoverCrashedDaemon(opts, deps));
+      ticks += 1;
+      if (typeof opts.maxTicks === "number" && ticks >= opts.maxTicks) break;
+      const wakeAt = now() + tickIntervalMs;
+      while (now() < wakeAt) {
+        if (abortRequested || opts.abortSignal?.aborted) break;
+        const remaining = Math.min(250, wakeAt - now());
+        if (remaining <= 0) break;
+        await sleep(remaining);
+      }
+    }
+  } finally {
+    opts.abortSignal?.removeEventListener("abort", abortHandler);
+  }
+  return results;
 };
