@@ -27,7 +27,7 @@ import {
   EMBEDDABLE_KINDS,
   HEALTH_METRIC_KINDS,
 } from "../substrate/event_kinds";
-import { retainedEvictedCount } from "../runtime/archival_worker";
+import { retainedEvictedCount, evaluateLedgerCurationPressure } from "../runtime/archival_worker";
 
 export type SubstrateStatusEnv = {
   openSubstrate?: (path?: string) => Database;
@@ -97,6 +97,16 @@ export type SubstrateStatusReport = {
   latestEventTs: string | null;
   latestArtifactTs: string | null;
   oldestUnembeddedTs: string | null;
+  // Bounded-ledger curation pressure (amendment
+  // CS4WFHZM7H4TN425GRSW39ZVMG). The unified pressure policy compresses the
+  // archival + compaction retention windows as the hot ledger fills, so the
+  // ledger is bounded by row-count / db-size, not solely by a fixed age.
+  // Surfacing it here lets the operator see WHY archival/compaction is (or
+  // isn't) firing without reading the ledger.
+  ledgerPressure: number;
+  ledgerPressureSource: "row_count" | "db_size" | "none";
+  ledgerDbSizeBytes: number;
+  ledgerHotRetentionDays: number;
   verdict: "ALIVE" | "DEGRADED" | "DEAD";
 };
 
@@ -206,6 +216,12 @@ export const computeSubstrateStatus = (
   // the verdict numeric thresholds live in the liveness contract.
   const verdict = computeLivenessReport(db).verdict;
 
+  // Bounded-ledger curation pressure — pure read (row count + page size).
+  // Pass an empty options object so the policy reads its caps from the
+  // threshold registry (with constant fallbacks) and is not pinned by an
+  // explicit retention override.
+  const pressure = evaluateLedgerCurationPressure(db, {} as never, Date.now());
+
   return {
     dbPath,
     events,
@@ -227,6 +243,10 @@ export const computeSubstrateStatus = (
     latestEventTs: latestEvent?.ts ?? null,
     latestArtifactTs: latestArtifact?.ts ?? null,
     oldestUnembeddedTs: oldestUnembedded?.ts ?? null,
+    ledgerPressure: pressure.pressure,
+    ledgerPressureSource: pressure.pressure_source,
+    ledgerDbSizeBytes: pressure.db_size_bytes,
+    ledgerHotRetentionDays: pressure.hot_retention_days,
     verdict,
   };
 };
@@ -272,6 +292,14 @@ export const renderSubstrateStatus = (
   );
   for (const [kind, count] of Object.entries(report.healthMetricCounts)) {
     out(`  ${(kind + ":").padEnd(labelWidth + 2)} ${fmt(count)}`);
+  }
+  out("─".repeat(50));
+  out("bounded-ledger curation:");
+  {
+    const mb = (report.ledgerDbSizeBytes / (1024 * 1024)).toFixed(1);
+    out(`  ledger_pressure:          ${report.ledgerPressure.toFixed(3)} (source: ${report.ledgerPressureSource})`);
+    out(`  db_size:                  ${mb} MB`);
+    out(`  hot_retention_days:       ${report.ledgerHotRetentionDays} (compresses from 30 as pressure rises)`);
   }
   out("─".repeat(50));
   out("freshness:");

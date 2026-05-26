@@ -30,6 +30,7 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { logger } from "./logger";
+import { evaluateLedgerCurationPressure } from "./archival_worker";
 
 /** Retention window. Frames older than this are eligible for pruning.
  *  24 h gives operators a full day to inspect a closed dispatch via
@@ -84,6 +85,21 @@ export const COMPACTABLE_DERIVED_EVENT_KINDS: readonly string[] = [
  *  Mirrors the deterministic-fallback rationale of the frame retention: a
  *  learned policy should eventually drive this through scored evidence. */
 export const COMPACTION_DERIVED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Floor for the pressure-compressed derived-telemetry retention. Even at
+ *  maximum ledger pressure, derived telemetry stays hot for at least this
+ *  long so the most recent debugging window is preserved. */
+export const COMPACTION_DERIVED_MIN_RETENTION_MS = 24 * 60 * 60 * 1000; // 1d
+
+/** Map ledger pressure in [0,1] to a derived-telemetry retention window.
+ *  pressure=0 → 7-day default; pressure=1 → 1-day floor. Shares the
+ *  archival worker's pressure signal so compaction and archival compress
+ *  on the SAME trigger (one policy, not two magic numbers). */
+export const derivedRetentionForPressure = (pressure: number): number => {
+  const p = Math.max(0, Math.min(1, pressure));
+  const span = COMPACTION_DERIVED_RETENTION_MS - COMPACTION_DERIVED_MIN_RETENTION_MS;
+  return Math.round(COMPACTION_DERIVED_RETENTION_MS - p * span);
+};
 
 export type CompactionReport = {
   pruned_frames: number;
@@ -140,12 +156,21 @@ export const compactBridgeFrames = (
  *  origin_calibration_recorded) are intentionally NOT in the set. */
 export const compactDerivedEvents = (
   db: Database,
-  opts?: { nowMs?: number; batchSize?: number },
+  opts?: { nowMs?: number; batchSize?: number; retentionMs?: number },
 ): number => {
   if (COMPACTABLE_DERIVED_EVENT_KINDS.length === 0) return 0;
   const nowMs = opts?.nowMs ?? Date.now();
   const batchSize = opts?.batchSize ?? COMPACTION_BATCH_SIZE;
-  const cutoffIso = new Date(nowMs - COMPACTION_DERIVED_RETENTION_MS).toISOString();
+  // Unified pressure-triggered curation (amendment
+  // CS4WFHZM7H4TN425GRSW39ZVMG): the derived-telemetry prune shares the SAME
+  // pressure policy as archival. The caller (compactionWorkerTick) computes
+  // the compressed retention from ledger pressure and passes it here; under
+  // no pressure this defaults to the 7-day window (original behavior). The
+  // load-bearing carve-outs are unchanged: candidate_confirmed and
+  // origin_calibration_recorded are NOT in COMPACTABLE_DERIVED_EVENT_KINDS,
+  // so pressure can never cause them to be pruned here.
+  const retentionMs = opts?.retentionMs ?? COMPACTION_DERIVED_RETENTION_MS;
+  const cutoffIso = new Date(nowMs - retentionMs).toISOString();
   const placeholders = COMPACTABLE_DERIVED_EVENT_KINDS.map(() => "?").join(", ");
   const result = db
     .query(
@@ -164,8 +189,20 @@ export const compactDerivedEvents = (
  *  with the result when pruning happened. Safe to call repeatedly. */
 export const compactionWorkerTick = (db: Database): CompactionReport => {
   try {
-    const frameReport = compactBridgeFrames(db);
-    const prunedDerived = compactDerivedEvents(db);
+    const nowMs = Date.now();
+    const frameReport = compactBridgeFrames(db, { nowMs });
+    // Unified pressure-triggered curation (amendment
+    // CS4WFHZM7H4TN425GRSW39ZVMG): derive the compaction derived-telemetry
+    // retention from the SAME ledger-pressure policy archival uses. Under no
+    // pressure the window stays at COMPACTION_DERIVED_RETENTION_MS (7d). As
+    // the hot ledger crosses its row-count / db-size soft cap, the window
+    // compresses linearly toward a 1-day floor so derived telemetry is
+    // pruned sooner — bounding the ledger by pressure, not solely by a fixed
+    // age. evaluateLedgerCurationPressure is a pure read (row count + page
+    // size); it does not mutate state or touch credit-spine kinds.
+    const policy = evaluateLedgerCurationPressure(db, {} as never, nowMs);
+    const derivedRetentionMs = derivedRetentionForPressure(policy.pressure);
+    const prunedDerived = compactDerivedEvents(db, { nowMs, retentionMs: derivedRetentionMs });
     const report: CompactionReport = {
       pruned_frames: frameReport.pruned_frames,
       pruned_derived: prunedDerived,
@@ -181,7 +218,12 @@ export const compactionWorkerTick = (db: Database): CompactionReport => {
             pruned_derived: report.pruned_derived,
             cutoff_iso: report.cutoff_iso,
             retention_ms: COMPACTION_FRAME_RETENTION_MS,
-            derived_retention_ms: COMPACTION_DERIVED_RETENTION_MS,
+            derived_retention_ms: derivedRetentionMs,
+            derived_retention_ms_default: COMPACTION_DERIVED_RETENTION_MS,
+            ledger_pressure: policy.pressure,
+            ledger_pressure_source: policy.pressure_source,
+            ledger_row_count: policy.row_count,
+            ledger_db_size_bytes: policy.db_size_bytes,
             compactable_derived_kinds: COMPACTABLE_DERIVED_EVENT_KINDS as unknown as JsonValue,
           } as JsonValue,
         });

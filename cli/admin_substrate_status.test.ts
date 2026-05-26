@@ -226,12 +226,19 @@ describe("renderSubstrateStatus", () => {
         latestEventTs: "2026-01-01T00:00:00Z",
         latestArtifactTs: "2026-01-01T00:00:00Z",
         oldestUnembeddedTs: null,
+        ledgerPressure: 0,
+        ledgerPressureSource: "none",
+        ledgerDbSizeBytes: 1024 * 1024,
+        ledgerHotRetentionDays: 30,
         verdict: "ALIVE",
       },
       (line) => lines.push(line),
     );
     const joined = lines.join("\n");
     expect(joined).toContain("verdict: ALIVE");
+    expect(joined).toContain("bounded-ledger curation:");
+    expect(joined).toContain("ledger_pressure:");
+    expect(joined).toContain("hot_retention_days:");
     expect(joined).toContain("events:");
     expect(joined).toContain("act_artifact:");
     expect(joined).toContain("retrieval index:            5 embedded, 0 pending, 3 non-embeddable (skipped)");
