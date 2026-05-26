@@ -646,8 +646,19 @@ export const verifyClosureAudit = (
   // the discrepancy surfaces (brain says true, substrate says
   // unverified). This is fail-closed by design (k_252): substrate
   // never auto-passes a brain claim it cannot verify.
+  // Open provenance/verifier_kind labels are NOT closed-enum gates.
+  // Claim-keys that name provenance/verifier metadata (provenance,
+  // verifier_kind, non_self_audit, independent_audit, peer_audit,
+  // audit_source) describe HOW the audit was produced, not a check the
+  // substrate must verify true/false. Auto-marking them verified=false
+  // would map any passing audit's residual to 1.0 — turning an OPEN
+  // label set into a blocking closed enum (acc2 contract: verifier_kind
+  // is open provenance metadata, not a gate). These are structured
+  // claim-key identifiers, so a controlled-vocabulary guard is correct.
+  const provenanceClaimPattern = /^(provenance|verifier_kind|non_self_audit|independent_audit|peer_audit|audit_source)$/;
   for (const checkName of Object.keys(brainClaims)) {
     if (checkName in substrateVerifications) continue;
+    if (provenanceClaimPattern.test(checkName)) continue;
     substrateVerifications[checkName] = {
       verified: false,
       evidence_event_ids: [],

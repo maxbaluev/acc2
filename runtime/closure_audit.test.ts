@@ -180,6 +180,37 @@ describe("verifyClosureAudit — T0.1 substrate-truth gate", () => {
     expect(result.payload.closure_residual).toBe(0.7);
   });
 
+  test("(f) provenance/verifier_kind claim-keys are open labels, not closed-enum gates → no false-verified, residual not forced to 1.0", () => {
+    const db = openDb(":memory:");
+    // The brain reports a passing audit and tags it with OPEN provenance
+    // metadata (verifier_kind / non_self_audit / audit_source). These are
+    // free-string provenance labels, NOT checks the substrate must verify
+    // true/false. Pre-fix, the unknown-claim loop inserted them as
+    // verified=false, which forced closure_residual to 1.0 and blocked an
+    // otherwise-passing audit. They must be skipped instead.
+    const result = verifyClosureAudit(db, {
+      directive_id: DIRECTIVE,
+      task_id: TASK,
+      brain_claims: {
+        verifier_kind: true,
+        non_self_audit: true,
+        independent_audit: true,
+        peer_audit: true,
+        audit_source: true,
+        provenance: true,
+      },
+      asserted_residual: 0.08,
+      legacy_fields: { summary: "passing audit with provenance labels" },
+    });
+    expect(result.blocked).toBe(false);
+    // Provenance labels were skipped — not auto-marked verified:false.
+    expect(result.payload.substrate_verifications).toEqual({});
+    // No substrate verifications ran → residual falls back to assertion
+    // (a passing < 0.3), NOT forced to 1.0 by a false provenance gate.
+    expect(result.payload.closure_residual).toBe(0.08);
+    expect(result.payload.closure_residual).toBeLessThan(0.3);
+  });
+
   describe("leniency narrowing — only modern closure_predicate summaries are bumped", () => {
     test("modern closure_predicate + no verifiable structure + asserts <0.3 → bumped to 0.3", () => {
       const db = openDb(":memory:");
