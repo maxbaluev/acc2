@@ -187,6 +187,30 @@ export class SqlWorkerPool {
     job.reject(err);
   }
 
+  /** LIVENESS (EKTPHEYP): choose the worker that will not park a new reader
+   *  behind a wedged one. Among READY workers pick the one with the fewest
+   *  in-flight jobs (the idle-reader-first analogue); ties are broken by the
+   *  round-robin cursor so load spreads evenly. If no worker is ready yet
+   *  (boot / respawn window) fall back to the plain round-robin slot so the
+   *  job is still dispatched rather than dropped. */
+  private pickWorker(): number {
+    const n = this.workers.length;
+    const start = this.nextWorkerIdx % n;
+    let best = -1;
+    let bestLoad = Infinity;
+    for (let off = 0; off < n; off++) {
+      const idx = (start + off) % n;
+      if (!this.workerReady[idx]) continue;
+      const load = this.workerActiveJobs[idx]?.size ?? 0;
+      if (load < bestLoad) {
+        bestLoad = load;
+        best = idx;
+        if (load === 0) break; // an idle ready worker is optimal — stop early
+      }
+    }
+    return best === -1 ? start : best;
+  }
+
   /** Submit a SELECT job to the pool. Returns the rows array.
    *  `actor` (optional) routes the job through the universal resource governor
    *  so one terminal/brain cannot monopolise SQL admission and starve another
@@ -230,9 +254,23 @@ export class SqlWorkerPool {
       };
       this.jobsById.set(id, job);
 
-      // Round-robin dispatch. Increment first so we don't re-pick the same
-      // worker on every call when N=1 and a long query is still resolving.
-      const workerIdx = this.nextWorkerIdx % this.workers.length;
+      // LIVENESS (EKTPHEYP): reader-waiter handling. Pre-fix this dispatch
+      // was a blind round-robin: it posted the job to `nextWorkerIdx`
+      // regardless of whether that worker was idle, mid-respawn (not yet
+      // `ready`), or already holding a long-running query. A new SELECT
+      // could therefore WAIT behind a wedged worker even when sibling
+      // reader threads sat idle — the worker-pool analogue of handing a
+      // waiter to a busy reader instead of an idle one. The pool exists
+      // precisely to keep heavy reads OFF the event loop; a job parked
+      // behind a stuck worker defeats that and lets one slow query stall
+      // every reader that round-robins onto the same thread.
+      //
+      // Fix: pick the least-loaded READY worker (fewest in-flight jobs),
+      // preferring ready workers over not-yet-ready ones, and only fall
+      // back to plain round-robin when no worker is ready (boot/respawn
+      // window). nextWorkerIdx still advances so equal-load ties rotate
+      // fairly and an N=1 pool behaves exactly as before.
+      const workerIdx = this.pickWorker();
       this.nextWorkerIdx = (this.nextWorkerIdx + 1) % this.workers.length;
       job.assignedWorker = workerIdx;
       this.workerActiveJobs[workerIdx].set(id, job);

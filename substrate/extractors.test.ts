@@ -17,6 +17,7 @@ import {
   extractRecipeCandidates,
   extractRecipeFromCommit,
   extractSemanticDedup,
+  maybePromoteKnowledge,
   maybePromoteOwnerProfile,
 } from "./extractors";
 import { resolveArtifactId } from "./migration_runner";
@@ -1660,5 +1661,97 @@ describe("extractArtifactConsolidation", () => {
     expect(summary.groups_scanned).toBe(2);
     expect(summary.pairs_examined).toBe(2); // 1 per group, NOT 6 cross-group
     expect(summary.consolidated).toBe(2);   // both groups converge
+  });
+});
+
+// LIVENESS (X5AF768V): the closure-credit hot path (runtime/credit.ts
+// distributeCredit → maybePromoteKnowledge, called synchronously once per
+// cited knowledge id on EVERY scored act) previously ran an UNBOUNDED
+// `SELECT … FROM events WHERE kind IN ('candidate_confirmed',
+// 'candidate_contradicted')` with no candidate filter and no LIMIT —
+// materialising the entire verdict history into JS and JSON.parsing every
+// context_refs to test membership. On a mature ledger this blocked the Bun
+// event loop and was a direct contributor to the 88-min daemon wedge. The
+// fix pushes the candidate filter INTO SQLite (json_extract knowledge_id OR
+// context_refs LIKE) and bounds the result with a LIMIT. These tests prove
+// (a) the scan is now candidate-scoped — unrelated verdicts never cross
+// into JS, and (b) prior counting semantics are preserved exactly for both
+// the payload.knowledge_id citation path and the context_refs-only path.
+describe("maybePromoteKnowledge — bounded, candidate-scoped hot-path scan (X5AF768V)", () => {
+  test("only verdicts that cite THIS candidate are read — unrelated verdicts are SQL-filtered out, not JS-skipped", () => {
+    const db = openDb(":memory:");
+    try {
+      const cid = insertEvent(db, { kind: "knowledge_candidate", payload: { claim: "x" } });
+      const other = insertEvent(db, { kind: "knowledge_candidate", payload: { claim: "y" } });
+
+      // 5 confirmations for OUR candidate (enough to cross countThreshold=5).
+      for (let i = 0; i < 5; i++) {
+        insertEvent(db, {
+          kind: "candidate_confirmed",
+          payload: { knowledge_id: cid, residual: 0 },
+          context_refs: [cid],
+          substrate_origin: i % 2 === 0 ? "claude_root" : "opencode_brain",
+        });
+      }
+      // 50 unrelated verdicts for a DIFFERENT candidate. Pre-fix these were
+      // all pulled into JS and parsed; post-fix the SQL predicate excludes
+      // them entirely. Their presence must not change our verdict.
+      for (let i = 0; i < 50; i++) {
+        insertEvent(db, {
+          kind: "candidate_contradicted",
+          payload: { knowledge_id: other },
+          context_refs: [other],
+        });
+      }
+
+      // Instrument the query path: count how many verdict rows the SELECT
+      // returns. A bounded, candidate-scoped query returns ONLY the 5 that
+      // cite cid — never the 50 unrelated rows. This is the structural proof
+      // that the hot path no longer does an unbounded full-table scan.
+      const origQuery = db.query.bind(db);
+      let verdictRowsReturned = -1;
+      (db as unknown as { query: typeof db.query }).query = ((sql: string) => {
+        const stmt = origQuery(sql);
+        if (sql.includes("candidate_confirmed") && sql.includes("candidate_contradicted")) {
+          const origAll = stmt.all.bind(stmt);
+          (stmt as unknown as { all: typeof stmt.all }).all = ((...args: unknown[]) => {
+            const rows = origAll(...(args as [])) as unknown[];
+            verdictRowsReturned = rows.length;
+            return rows;
+          }) as typeof stmt.all;
+        }
+        return stmt;
+      }) as typeof db.query;
+
+      const verdict = maybePromoteKnowledge(db, cid);
+      expect(verdict.kind).toBe("promoted");
+      // The decisive assertion: the verdict scan saw ONLY our 5 rows, not
+      // the 55 total verdict rows in the ledger.
+      expect(verdictRowsReturned).toBe(5);
+    } finally {
+      closeDb();
+    }
+  });
+
+  test("context_refs-only citation (semantic-dedup corroboration shape, no payload.knowledge_id) is still counted", () => {
+    const db = openDb(":memory:");
+    try {
+      const cid = insertEvent(db, { kind: "knowledge_candidate", payload: { claim: "z" } });
+      // Dedup-style corroboration: cites the candidate ONLY via context_refs;
+      // payload carries corroborator_event_id, NOT knowledge_id. The LIKE leg
+      // of the predicate must keep these wins.
+      for (let i = 0; i < 6; i++) {
+        insertEvent(db, {
+          kind: "candidate_confirmed",
+          payload: { corroborator_event_id: newId(), reason: "embedding_dedup" },
+          context_refs: [newId(), cid],
+          substrate_origin: i % 2 === 0 ? "claude_root" : "opencode_brain",
+        });
+      }
+      const verdict = maybePromoteKnowledge(db, cid);
+      expect(verdict.kind).toBe("promoted");
+    } finally {
+      closeDb();
+    }
   });
 });

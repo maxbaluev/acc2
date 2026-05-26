@@ -3881,7 +3881,15 @@ const routeAux = async (
       };
     } catch { /* tolerate */ }
     return Response.json({
-      status: stuck.length === 0 ? "ok" : "degraded",
+      // LIVENESS (Z57SKME7): degrade when EITHER a worker missed 3× its
+      // heartbeat interval (stuck) OR a worker's CURRENT tick has been
+      // in-flight past the wedge threshold (inFlightStuck). The latter is
+      // the spinning/wedged-worker signal — a single long synchronous scan
+      // (e.g. the pre-fix closure-credit verdict scan) holding the loop —
+      // that the heartbeat-deadline check alone cannot see. Surfacing it in
+      // the status field lets `acc daemon status` and the /ready gate
+      // self-protect instead of reporting "ok" while the loop is wedged.
+      status: stuck.length === 0 && inFlightStuck.length === 0 ? "ok" : "degraded",
       pid: process.pid,
       uptime_ms: Date.now() - startedAtMs,
       db_path: stateDbPath,
@@ -3915,7 +3923,18 @@ const routeAux = async (
   }
 
   if (url.pathname === "/ready" && req.method === "GET") {
-    if (isReady()) {
+    // LIVENESS (472WP33K): the /ready gate is what the autonomous loop and
+    // any external orchestrator/load-balancer poll before sending work. It
+    // must fail closed (503) when a worker tick is wedged in-flight past the
+    // threshold, not just when startup workers haven't reported. Otherwise a
+    // daemon whose event loop is occupied by a runaway synchronous scan
+    // (the 88-min wedge) keeps answering "ready" and the loop keeps feeding
+    // it work. inFlightStuckWorkers() inspects ONLY supervised periodic
+    // worker ticks (state.tickStartedMs); a long brain dispatch is NOT a
+    // supervised tick, so a slow-but-live brain cycle is never misclassified
+    // as stuck here — liveness ≠ slowness.
+    const inFlightStuck = inFlightStuckWorkers();
+    if (isReady() && inFlightStuck.length === 0) {
       const readyAtMs = readyAt();
       return Response.json({
         status: "ready",
@@ -3931,6 +3950,7 @@ const routeAux = async (
         pid: process.pid,
         uptime_ms: Date.now() - startedAtMs,
         pending_workers: pendingWorkers(),
+        in_flight_stuck_workers: inFlightStuck,
       },
       { status: 503 },
     );
