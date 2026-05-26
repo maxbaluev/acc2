@@ -525,3 +525,41 @@ describe("dispatch_decider — active strategy ranking (amendment A12ET3SF)", ()
     expect(decision.verifier_evidence.strategy_ranker_fail_soft).toBe(0);
   });
 });
+
+// ── Amendment XN9P09R6 — no stale hard-task preclassifier ──────────
+import * as DispatchDeciderModule from "./dispatch_decider";
+
+describe("dispatch_decider — no stale lanes (amendment XN9P09R6)", () => {
+  test("no classifyHardTask / hard_task_regex symbol is exported", () => {
+    const exported = Object.keys(DispatchDeciderModule);
+    expect(exported).not.toContain("classifyHardTask");
+    expect(exported).not.toContain("hard_task_regex");
+    expect(exported.some((k) => /classifyHardTask|hard_task_regex|HARD_TASK/i.test(k))).toBe(false);
+  });
+
+  test("a keyword-heavy strategic goal keeps substrate_replay selectable when a high-confidence recipe scores highest", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_recipe_strat",
+      task_id: "t_recipe_strat",
+      payload: {
+        recipe_shape: { enabled: true },
+        goal_shape: goalShape("design and audit the runtime architecture"),
+        topology_signature: "",
+        confidence: 0.95,
+        trajectory: [
+          { step_kind: "action_predicted", artifact_id: "art_x", verifier_artifact_id: "art_v", payload_template: {} },
+        ],
+      },
+    });
+    const decision = decideDispatch(db, sampleTask({ goal: "design and audit the runtime architecture" }));
+    // Strategic verbs did NOT prune substrate_replay; it stays feasible and
+    // wins because its scored route is highest.
+    expect(decision.route_scores.substrate_replay).toBeGreaterThanOrEqual(0);
+    expect(decision.route).toBe("substrate_replay");
+    expect(decision.reason).not.toContain("hard_task");
+  });
+});

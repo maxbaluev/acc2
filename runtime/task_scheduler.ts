@@ -78,6 +78,11 @@ export type SchedulerTick = {
   /** opencode_brain slots tracked by the brain-specific admission cap. */
   brain_in_flight: string[];
   skipped_concurrency_cap: string[];
+  /** Back-compat field for schedulerTick callers (amendment XN9P09R6).
+   *  This is NOT a phase-era replay stub: substrate_replay is a live scored
+   *  route that runs replayRecipe. The field stays in the response shape for
+   *  callers/tests that destructure it and is always emptied — a real replay
+   *  abort surfaces as action_scored replay_aborted, not a skipped lane. */
   skipped_recipe: string[];
   skipped_inline: string[];
   skipped_blocked: string[];
@@ -1677,12 +1682,12 @@ export const schedulerTick = async (
       continue;
     }
 
-    // substrate_replay falls through to dispatchReadyTask below, which calls
-    // replayRecipe (runtime/recipe_replay.ts) internally. The scheduler used
-    // to short-circuit this route with a Phase-J stub (returning
-    // {ok:false, error:"phase_j"} on every tick — tight loop emitting
-    // `substrate_replay_skipped` because readyTasks kept returning the same
-    // task forever). Real Tier-0 replay now runs.
+    // substrate_replay is a LIVE scored route (amendment XN9P09R6): it
+    // falls through to dispatchReadyTask below, which calls replayRecipe
+    // (runtime/recipe_replay.ts) internally. There is no replay stub and no
+    // substrate_replay_skipped loop — a replay that aborts on high residual
+    // emits action_scored replay_aborted / routes back through normal
+    // residual scoring, not a skipped-lane short-circuit.
 
     const economics = taskAdmissionEconomics(db, task);
     if (decision.route === "opencode_brain" && economics.resource_cost.brain_slots === undefined) {

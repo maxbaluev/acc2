@@ -436,9 +436,9 @@ export const replayRecipe = async (
   const runArtifact = opts.runArtifact ?? runArtifactByRuntime;
 
   // Walk every action_predicted step in trajectory order (Batch 4 Hole 4).
-  // Phase J recipes were single-step; multi-step recipes are now first
-  // class. Steps without an artifact_id are skipped (some trajectories
-  // include task_node_opened markers for audit but no executable artifact).
+  // Multi-step recipes are first class. Steps without an artifact_id are
+  // skipped (some trajectories include task_node_opened markers for audit
+  // but no executable artifact).
   const actionSteps = match.trajectory.filter(
     (s) => s.step_kind === "action_predicted" && !!s.artifact_id,
   );

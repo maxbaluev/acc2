@@ -1,21 +1,27 @@
 // acc2 dispatch decider — scored routing predicate (Architecture.md).
 //
-// Three lanes:
-//   1. substrate_replay  — `recipes_view` matches by embedding × shape with
-//      confidence ≥ RECIPE_REPLAY_THRESHOLD. No LLM call. Phase J wires the
-//      recipe view; Phase D never returns this lane because no recipes
-//      have been extracted yet.
-//   2. claude_inline     — every normalized target_resource on the task
-//      matches at least one scheme-aware knowledge entry tagged
+// Three LIVE scored routes, all selected by chooseHighestScoredRoute from
+// the feasible set (amendment XN9P09R6 — no phase-era stubs, no
+// regex/keyword hard-task preclassification that prunes a lane before
+// scoring):
+//   1. substrate_replay  — findRecipeMatch (runtime/recipe_replay.ts)
+//      returns a real recipe whose embedding × shape confidence ≥
+//      RECIPE_REPLAY_THRESHOLD. No LLM call. Executes via replayRecipe.
+//   2. claude_inline     — every normalized target_resource matches at
+//      least one scheme-aware knowledge entry tagged
 //      `low_risk_inline_pattern` with score ≥ 0.7 AND confidence ≥ 0.6.
-//      Phase D never returns this lane because no low-risk patterns have
-//      been promoted yet.
-//   3. opencode_brain    — default. Strategic work, DAG decomposition,
-//      code-artifact authoring. Phase D's MVP fixture always hits this
-//      lane (and that's correct — the brain designs the bun grep + verifier).
+//   3. opencode_brain    — default scored route for strategic work, DAG
+//      decomposition, and code-artifact authoring.
 //
-// The predicate is testable: even without recipes or inline patterns wired,
-// the function must return `opencode_brain` cleanly with `reason = 'no_recipe_no_inline_match'`.
+// Feasibility is computed by the blocker / recipe / inline gates only;
+// semantic DAG signals (extractSemanticDagSignals) feed routing_axes for
+// SCORING but never prune feasibleRoutes. The selected route is always
+// whichever feasible route chooseHighestScoredRoute ranks highest — there
+// is no keyword/regex shortcut and no replay stub that skips scoring.
+//
+// The predicate is testable: with no recipe and no inline pattern, the
+// function returns `opencode_brain` cleanly with reason
+// 'no_recipe_no_inline_match'.
 
 import type { Database } from "bun:sqlite";
 import type { TaskNode } from "./task_topology";
@@ -543,10 +549,11 @@ const buildDispatchDecisionEvidence = (db: Database, task: TaskNode): DispatchDe
 };
 
 
-/** Phase J: delegate to the real matcher in runtime/recipe_replay.ts which
+/** Delegate to the live recipe matcher in runtime/recipe_replay.ts which
  *  computes goal_shape via runtime/goal_shape.ts and topology_signature off
  *  the task's directive DAG. The wrapper preserves the local RecipeMatch
- *  shape the decider uses. */
+ *  shape the decider uses. This is the live substrate_replay feasibility
+ *  signal — there is no phase-era stub path. */
 const findRecipeMatch = (db: Database, task: TaskNode, confidenceThreshold: number): RecipeMatch | null => {
   const match = findRealRecipeMatch(db, task, { minConfidence: confidenceThreshold });
   if (!match) return null;
