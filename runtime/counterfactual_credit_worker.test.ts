@@ -23,6 +23,8 @@ const oldTs = (ageMs: number): string =>
 type InsertCounterfactualOpts = {
   id?: string;
   ts: string;
+  directive_id?: string;
+  task_id?: string;
   selection_kind?: string;
   selection_event_id?: string | null;
   chosen_id?: string;
@@ -43,8 +45,8 @@ const insertCounterfactual = (
     [
       id,
       opts.ts,
-      "directive_test",
-      "task_test",
+      opts.directive_id ?? "directive_test",
+      opts.task_id ?? "task_test",
       null,
       "loop_root",
       "substrate_auto",
@@ -204,11 +206,12 @@ describe("counterfactual_credit_worker", () => {
     expect(first.scored_count).toBe(2);
     expect(countScoreUpdatedForCounterfactual(db, cfId)).toBe(2);
 
-    // Re-run: counterfactual_already_closed should short-circuit; no
+    // Re-run: closed counterfactuals are excluded from the pending scan; no
     // new score rows emitted.
     const second = await runCounterfactualCreditWorker(db, { now: FIXED_NOW });
+    expect(second.scanned).toBe(0);
     expect(second.scored_count).toBe(0);
-    expect(second.skipped_already_scored).toBe(1);
+    expect(second.skipped_already_scored).toBe(0);
     expect(countScoreUpdatedForCounterfactual(db, cfId)).toBe(2);
   });
 
@@ -260,8 +263,14 @@ describe("counterfactual_credit_worker", () => {
     const summary = await runCounterfactualCreditWorker(db, { now: FIXED_NOW });
     expect(summary.scanned).toBe(1);
     expect(summary.skipped_no_chosen_residual).toBe(1);
+    expect(summary.terminalized_count).toBe(1);
+    expect(summary.terminal_closure_event_ids).toHaveLength(1);
     expect(summary.scored_count).toBe(0);
     expect(summary.closure_event_id).toBeNull();
+
+    const second = await runCounterfactualCreditWorker(db, { now: FIXED_NOW });
+    expect(second.scanned).toBe(0);
+    expect(second.terminalized_count).toBe(0);
   });
 
   test("counterfactual_closure_audited reports closure proxy across sweep", async () => {
@@ -309,5 +318,51 @@ describe("counterfactual_credit_worker", () => {
     expect(parsed.rejected_unique_count).toBeGreaterThan(0);
     expect(parsed.rejected_subsequent_wins).toBeGreaterThanOrEqual(1);
     expect(parsed.closure_residual).toBeLessThanOrEqual(1);
+  });
+
+  test("terminalizes unscorable oldest rows and reaches later scorable counterfactuals", async () => {
+    const db = openDb(":memory:");
+    for (let i = 0; i < 205; i++) {
+      insertCounterfactual(db, {
+        id: `unscorable_${i}`,
+        ts: oldTs(900_000 - i),
+        directive_id: "directive_unscorable",
+        task_id: "task_unscorable",
+        selection_kind: "retrieval_topk_filter",
+        selection_event_id: null,
+        chosen_id: `missing_chosen_${i}`,
+        rejected: [{ id: `unscorable_rejected_${i}`, score: 0.1 }],
+        window_seconds: 60,
+      });
+    }
+    const scorableId = insertCounterfactual(db, {
+      id: "scorable_after_unscorable_window",
+      ts: oldTs(600_000),
+      selection_kind: "route_selection",
+      selection_event_id: "reachable_selection",
+      chosen_id: "reachable_chosen",
+      rejected: [{ id: "reachable_rejected", score: 0.25 }],
+      window_seconds: 60,
+    });
+    insertActionScored(db, {
+      selection_event_id: "reachable_selection",
+      residual: 0.2,
+      ts: oldTs(590_000),
+    });
+
+    const summary = await runCounterfactualCreditWorker(db, { now: FIXED_NOW, maxRows: 200 });
+    expect(summary.skipped_no_chosen_residual).toBe(205);
+    expect(summary.terminalized_count).toBe(205);
+    expect(summary.scored_count).toBe(1);
+    expect(summary.closure_event_id).not.toBeNull();
+
+    const scored = readScoreUpdateForRejected(db, scorableId, "reachable_rejected");
+    expect(scored).not.toBeNull();
+    expect(scored!.residual).toBeCloseTo(0.25, 5);
+
+    const second = await runCounterfactualCreditWorker(db, { now: FIXED_NOW, maxRows: 200 });
+    expect(second.scanned).toBe(0);
+    expect(second.scored_count).toBe(0);
+    expect(second.terminalized_count).toBe(0);
   });
 });

@@ -57,7 +57,9 @@ export type CounterfactualCreditOptions = {
 export type CounterfactualCreditSummary = {
   scanned: number;
   scored_count: number;
+  terminalized_count: number;
   rejected_score_event_ids: string[];
+  terminal_closure_event_ids: string[];
   skipped_recent: number;
   skipped_already_scored: number;
   skipped_no_chosen_residual: number;
@@ -182,16 +184,75 @@ const alreadyScored = (db: Database, projectionKey: string): boolean => {
   return row !== null;
 };
 
+const terminalProjectionKeyFor = (counterfactualEventId: string): string =>
+  `counterfactual_credit_terminal:${counterfactualEventId}`;
+
 const counterfactualAlreadyClosed = (db: Database, counterfactualEventId: string): boolean => {
   const row = db
-    .query<{ x: number }, [string]>(
+    .query<{ x: number }, [string, string]>(
       `SELECT 1 AS x FROM events
-        WHERE kind = 'act_artifact_score_updated'
-          AND json_extract(payload, '$.projection_key') LIKE ?
+        WHERE (kind = 'act_artifact_score_updated'
+            AND json_extract(payload, '$.projection_key') LIKE ?)
+           OR (kind = 'counterfactual_closure_audited'
+            AND json_extract(payload, '$.projection_key') = ?)
         LIMIT 1`,
     )
-    .get(`counterfactual_credit:${counterfactualEventId}:%`);
+    .get(`counterfactual_credit:${counterfactualEventId}:%`, terminalProjectionKeyFor(counterfactualEventId));
   return row !== null;
+};
+
+const readPendingCounterfactualRows = (db: Database, limit: number): CounterfactualRow[] =>
+  db
+    .query<CounterfactualRow, [number]>(
+      `SELECT e.id, e.ts, e.directive_id, e.task_id, e.payload, e.context_refs
+         FROM events e
+        WHERE e.kind = 'counterfactual_alternative_recorded'
+          AND NOT EXISTS (
+            SELECT 1 FROM events s
+             WHERE s.kind = 'act_artifact_score_updated'
+               AND json_extract(s.payload, '$.projection_key') LIKE 'counterfactual_credit:' || e.id || ':%'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM events c
+             WHERE c.kind = 'counterfactual_closure_audited'
+               AND json_extract(c.payload, '$.projection_key') = 'counterfactual_credit_terminal:' || e.id
+          )
+        ORDER BY e.ts ASC
+        LIMIT ?`,
+    )
+    .all(limit);
+
+const emitTerminalClosure = (
+  db: Database,
+  row: CounterfactualRow,
+  payload: CounterfactualPayload | null,
+  now: Date,
+  disposition: "invalid_payload" | "no_chosen_residual",
+  ageMs: number | null,
+): string => {
+  const emitted = emitEvent(db, {
+    kind: "counterfactual_closure_audited",
+    substrate_origin: "substrate_auto",
+    directive_id: row.directive_id ?? undefined,
+    task_id: row.task_id ?? undefined,
+    context_refs: [row.id],
+    payload: {
+      disposition,
+      counterfactual_event_id: row.id,
+      selection_kind: payload?.selection_kind ?? null,
+      selection_event_id: payload?.selection_event_id ?? null,
+      chosen_id: payload?.chosen_id ?? null,
+      rejected_count: payload?.rejected_candidates.length ?? 0,
+      scored_count: 0,
+      closure_residual: 1,
+      age_ms: ageMs,
+      window_seconds: payload?.window_seconds ?? null,
+      sweep_ts: now.toISOString(),
+      projected_from: "counterfactual_credit_terminal_v1",
+      projection_key: terminalProjectionKeyFor(row.id),
+    } as JsonValue,
+  });
+  return emitted.id;
 };
 
 const countRejectedWins = (
@@ -233,90 +294,100 @@ export const runCounterfactualCreditWorker = async (
   const summary: CounterfactualCreditSummary = {
     scanned: 0,
     scored_count: 0,
+    terminalized_count: 0,
     rejected_score_event_ids: [],
+    terminal_closure_event_ids: [],
     skipped_recent: 0,
     skipped_already_scored: 0,
     skipped_no_chosen_residual: 0,
     closure_event_id: null,
   };
 
-  const rows = db
-    .query<CounterfactualRow, [number]>(
-      `SELECT id, ts, directive_id, task_id, payload, context_refs
-         FROM events
-        WHERE kind = 'counterfactual_alternative_recorded'
-        ORDER BY ts ASC
-        LIMIT ?`,
-    )
-    .all(maxRows);
-
   let totalRejectedScanned = 0;
   const rejectedIdsCovered = new Set<string>();
+  let remainingScanBudget = maxRows * 10;
 
-  for (const row of rows) {
-    summary.scanned++;
-    const payload = readCounterfactualPayload(row.payload);
-    if (!payload) {
-      summary.skipped_already_scored++;
-      continue;
-    }
-    const windowMs = payload.window_seconds * 1000;
-    const ageMs = now.getTime() - new Date(row.ts).getTime();
-    if (ageMs < windowMs) {
-      summary.skipped_recent++;
-      continue;
-    }
-    if (counterfactualAlreadyClosed(db, row.id)) {
-      summary.skipped_already_scored++;
-      continue;
-    }
-    const chosenResidual = findChosenResidual(db, row, payload);
-    if (chosenResidual === null) {
-      summary.skipped_no_chosen_residual++;
-      continue;
+  while (remainingScanBudget > 0) {
+    const rows = readPendingCounterfactualRows(db, Math.min(maxRows, remainingScanBudget));
+    if (rows.length === 0) break;
+
+    let madeTerminalProgress = false;
+    for (const row of rows) {
+      summary.scanned++;
+      remainingScanBudget--;
+      const payload = readCounterfactualPayload(row.payload);
+      if (!payload) {
+        const closureId = emitTerminalClosure(db, row, null, now, "invalid_payload", null);
+        summary.terminalized_count++;
+        summary.terminal_closure_event_ids.push(closureId);
+        madeTerminalProgress = true;
+        continue;
+      }
+      const windowMs = payload.window_seconds * 1000;
+      const ageMs = now.getTime() - new Date(row.ts).getTime();
+      if (ageMs < windowMs) {
+        summary.skipped_recent++;
+        remainingScanBudget = 0;
+        break;
+      }
+      if (counterfactualAlreadyClosed(db, row.id)) {
+        summary.skipped_already_scored++;
+        continue;
+      }
+      const chosenResidual = findChosenResidual(db, row, payload);
+      if (chosenResidual === null) {
+        const closureId = emitTerminalClosure(db, row, payload, now, "no_chosen_residual", ageMs);
+        summary.skipped_no_chosen_residual++;
+        summary.terminalized_count++;
+        summary.terminal_closure_event_ids.push(closureId);
+        madeTerminalProgress = true;
+        continue;
+      }
+
+      let rejectedResidual: number;
+      if (chosenResidual < successBand) {
+        rejectedResidual = Math.min(1, chosenResidual + penalty);
+      } else if (chosenResidual >= failureBand) {
+        rejectedResidual = Math.max(0, chosenResidual - bonus);
+      } else {
+        rejectedResidual = Math.min(1, chosenResidual + penalty * 0.5);
+      }
+
+      for (const rejected of payload.rejected_candidates) {
+        totalRejectedScanned += 1;
+        rejectedIdsCovered.add(rejected.id);
+        const projectionKey = projectionKeyFor(row.id, rejected.id);
+        if (alreadyScored(db, projectionKey)) continue;
+        const emitted = emitEvent(db, {
+          kind: "act_artifact_score_updated",
+          substrate_origin: "substrate_auto",
+          directive_id: row.directive_id ?? undefined,
+          task_id: row.task_id ?? undefined,
+          action_artifact_id: rejected.id,
+          context_refs: [row.id],
+          payload: {
+            artifact_id: rejected.id,
+            role: "counterfactual_rejected",
+            residual: rejectedResidual,
+            weight: 1,
+            counterfactual_event_id: row.id,
+            counterfactual_chosen_id: payload.chosen_id ?? null,
+            counterfactual_chosen_residual: chosenResidual,
+            counterfactual_selection_kind: payload.selection_kind,
+            counterfactual_selection_event_id: payload.selection_event_id ?? null,
+            counterfactual_reason: rejected.reason ?? null,
+            counterfactual_artifact_kind: rejected.artifact_kind ?? null,
+            counterfactual_score_at_loss: rejected.score ?? null,
+            projected_from: "counterfactual_credit_v1",
+            projection_key: projectionKey,
+          } as JsonValue,
+        });
+        summary.scored_count++;
+        summary.rejected_score_event_ids.push(emitted.id);
+      }
     }
 
-    let rejectedResidual: number;
-    if (chosenResidual < successBand) {
-      rejectedResidual = Math.min(1, chosenResidual + penalty);
-    } else if (chosenResidual >= failureBand) {
-      rejectedResidual = Math.max(0, chosenResidual - bonus);
-    } else {
-      rejectedResidual = Math.min(1, chosenResidual + penalty * 0.5);
-    }
-
-    for (const rejected of payload.rejected_candidates) {
-      totalRejectedScanned += 1;
-      rejectedIdsCovered.add(rejected.id);
-      const projectionKey = projectionKeyFor(row.id, rejected.id);
-      if (alreadyScored(db, projectionKey)) continue;
-      const emitted = emitEvent(db, {
-        kind: "act_artifact_score_updated",
-        substrate_origin: "substrate_auto",
-        directive_id: row.directive_id ?? undefined,
-        task_id: row.task_id ?? undefined,
-        action_artifact_id: rejected.id,
-        context_refs: [row.id],
-        payload: {
-          artifact_id: rejected.id,
-          role: "counterfactual_rejected",
-          residual: rejectedResidual,
-          weight: 1,
-          counterfactual_event_id: row.id,
-          counterfactual_chosen_id: payload.chosen_id ?? null,
-          counterfactual_chosen_residual: chosenResidual,
-          counterfactual_selection_kind: payload.selection_kind,
-          counterfactual_selection_event_id: payload.selection_event_id ?? null,
-          counterfactual_reason: rejected.reason ?? null,
-          counterfactual_artifact_kind: rejected.artifact_kind ?? null,
-          counterfactual_score_at_loss: rejected.score ?? null,
-          projected_from: "counterfactual_credit_v1",
-          projection_key: projectionKey,
-        } as JsonValue,
-      });
-      summary.scored_count++;
-      summary.rejected_score_event_ids.push(emitted.id);
-    }
+    if (!madeTerminalProgress || rows.length < maxRows) break;
   }
 
   if (summary.scored_count > 0) {
