@@ -24,6 +24,50 @@ import { emitEvent } from "./events";
 import { decompositionDescendantTaskIds, openFrontier } from "./task_descendants";
 import { checkClosureDeliverables } from "./closure_deliverable_check";
 
+// ── Unified closure facade (amendment DZK9A0R9150RKAMT8RXKKDD3TR) ─────────────
+//
+// One coherent entry surface for every closure decision. Callers
+// (task_dispatcher, task_scheduler, task_topology, mcp_server/substrate_tools)
+// import the closure surface from THIS module rather than reaching into the
+// three internal closure files individually. The well-tested internals stay in
+// place — closure_audit.ts owns the substrate-truth verify gate (regression
+// gate + open-provenance fix + deliverable compounding), the commit gate, and
+// the residual-lineage selectors; closure_deliverable_check.ts owns the
+// deliverable coverage/pressure helpers; this module owns directive-level
+// coverage, root-commit readiness, and the close/cascade lifecycle. The facade
+// re-exports their public symbols so there is exactly one closure import path
+// and no caller has to know which internal file a given decision lives in.
+//
+// Behavior is unchanged: these are pass-through re-exports of the existing,
+// individually-tested functions. events.ts continues to lazily `require`
+// verifyClosureAudit straight from closure_audit.ts (the cyclic-import
+// boundary), so the verify gate's source of truth is unmoved.
+export {
+  verifyClosureAudit,
+  evaluateClosureCommitGate,
+  closureResidualsForLineage,
+  selectCurrentRootClosureAudit,
+} from "./closure_audit";
+export type {
+  ClosureAuditSelection,
+  BrainClaims,
+  SubstrateVerification,
+  SubstrateVerifications,
+  ClosurePredicate,
+  VerifyClosureAuditInput,
+  VerifyClosureAuditResult,
+  ClosureGateDecision,
+} from "./closure_audit";
+export {
+  checkClosureDeliverables,
+  closureDeliverablePressure,
+  hasRealDocumentBody,
+} from "./closure_deliverable_check";
+export type {
+  ClosureDeliverableResult,
+  ClosureDeliverablePressure,
+} from "./closure_deliverable_check";
+
 // Ungrounded / self-reported provenance MARKS (reduces credit weight) but
 // NEVER blocks commit (amendment ungrounded_provenance_weight). When the
 // closure signal's provenance is self-reported (legacy_residual / absent
