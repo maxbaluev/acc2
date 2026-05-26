@@ -19,6 +19,7 @@
 
 import type { Database } from "bun:sqlite";
 import { emitEvent } from "./events";
+import { BoundedLru } from "./bounded_lru";
 
 // Decoupled telemetry: emitting from inside lookup/store would advance
 // the events high-water rowid, which is the cache's own invalidation
@@ -53,7 +54,42 @@ export const PROMPT_CACHE_TTL_MS = 60_000;
 /** Max in-memory entries before LRU eviction. Universal value. */
 export const PROMPT_CACHE_MAX_ENTRIES = 200;
 
-const cache = new Map<string, CacheEntry<unknown>>();
+/** Byte cap — the real memory governor. Composed prompts can be large; 200
+ *  entries × multi-MB each is what fed the daemon RSS meltdown. The byte cap
+ *  bounds the cache's contribution to RSS regardless of entry size. Universal
+ *  value (ACC2_PROMPT_CACHE_MAX_BYTES overrides for constrained hosts/tests). */
+export const PROMPT_CACHE_MAX_BYTES = (() => {
+  const raw = Number(process.env.ACC2_PROMPT_CACHE_MAX_BYTES);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 64 * 1024 * 1024;
+})();
+
+/** Best-effort byte estimate of one cached entry. The dominant cost is the
+ *  composed value (a prompt string or a structured object serialised lazily);
+ *  we JSON-stringify defensively for size only when it is not already a string. */
+const entryBytes = (entry: CacheEntry<unknown>): number => {
+  const v = entry.value;
+  let valueBytes: number;
+  if (typeof v === "string") {
+    valueBytes = v.length * 2;
+  } else {
+    try {
+      valueBytes = JSON.stringify(v).length * 2;
+    } catch {
+      valueBytes = 1024; // unserialisable — charge a flat estimate
+    }
+  }
+  // Key + bookkeeping overhead.
+  const keyBytes =
+    (entry.key.directive_id.length + entry.key.task_id.length + entry.key.options_signature.length) * 2;
+  return valueBytes + keyBytes + 64;
+};
+
+const cache = new BoundedLru<CacheEntry<unknown>>({
+  name: "prompt_cache",
+  maxEntries: PROMPT_CACHE_MAX_ENTRIES,
+  maxBytes: PROMPT_CACHE_MAX_BYTES,
+  sizeOf: entryBytes,
+});
 let hitCount = 0;
 let missCount = 0;
 
@@ -120,7 +156,9 @@ export const lookupCachedPrompt = <T>(
   opts?: { nowMs?: number },
 ): LookupResult<T> => {
   const rendered = renderKey(db, key);
-  const entry = cache.get(rendered) as CacheEntry<T> | undefined;
+  // peek (no recency bump) — a stale/expired entry should be deleted, not
+  // promoted. We bump recency below only on a genuine hit.
+  const entry = cache.peek(rendered) as CacheEntry<T> | undefined;
   if (!entry) {
     missCount++;
     return { hit: false, reason: "no_entry" };
@@ -138,9 +176,8 @@ export const lookupCachedPrompt = <T>(
     missCount++;
     return { hit: false, reason: "high_water_advanced", cached_rowid: entry.highWaterRowid, current_rowid: hw };
   }
-  // Cache hit — bump to end of insertion order so LRU eviction is honest.
-  cache.delete(rendered);
-  cache.set(rendered, entry);
+  // Cache hit — bump to most-recently-used so LRU eviction is honest.
+  cache.get(rendered);
   hitCount++;
   return { hit: true, value: entry.value, age_ms: age };
 };
@@ -203,12 +240,9 @@ export const storeCachedPrompt = <T>(
     insertedAtMs: opts?.nowMs ?? Date.now(),
     value,
   };
+  // BoundedLru enforces both the entry cap and the byte cap (oldest-first)
+  // on set — no manual eviction loop needed.
   cache.set(rendered, entry);
-  while (cache.size > PROMPT_CACHE_MAX_ENTRIES) {
-    const oldestKey = cache.keys().next().value;
-    if (!oldestKey) break;
-    cache.delete(oldestKey);
-  }
 };
 
 /** Drop every entry. Hot-reload of prompt_composer or schema-change
@@ -222,6 +256,7 @@ export const invalidatePromptCache = (): void => {
  *  panel can render this to spot cache regressions. */
 export const promptCacheStats = (): {
   entries: number;
+  bytes: number;
   hits: number;
   misses: number;
   hit_rate: number;
@@ -229,6 +264,7 @@ export const promptCacheStats = (): {
   const totalLookups = hitCount + missCount;
   return {
     entries: cache.size,
+    bytes: cache.bytes,
     hits: hitCount,
     misses: missCount,
     hit_rate: totalLookups === 0 ? 0 : hitCount / totalLookups,

@@ -46,25 +46,42 @@ export type ActivationPayload = {
 
 export type ActivationListener = (payload: ActivationPayload) => void | Promise<void>;
 
-const listeners = new Map<EventKind | "*", Set<ActivationListener>>();
+/** Subscriber options. `needsPayload` is the opt-in for the full event payload.
+ *  By DEFAULT a subscriber receives ONLY the lightweight envelope (event_id,
+ *  ts, kind, directive_id, task_id) — NOT the (potentially large) event
+ *  payload. The payload is propagated only to subscribers that explicitly
+ *  declare they act on event content mid-flight. This bounds the transient
+ *  memory amplification of fan-out: a single large event payload is no longer
+ *  retained-by-reference across every subscriber's async closure when only a
+ *  few subscribers actually read it. */
+export type SubscribeOptions = { needsPayload?: boolean };
+
+type Registration = { listener: ActivationListener; needsPayload: boolean };
+
+const listeners = new Map<EventKind | "*", Set<Registration>>();
 
 /** Subscribe to a specific event kind (or "*" for all). Returns a
  *  disposer that removes the listener. Listeners are called
- *  fire-and-forget — never await their work. */
+ *  fire-and-forget — never await their work.
+ *
+ *  Pass `{ needsPayload: true }` to receive the full event payload; the
+ *  default delivers the lightweight envelope only (id/kind/task/directive). */
 export const onEvent = (
   kind: EventKind | "*",
   listener: ActivationListener,
+  opts?: SubscribeOptions,
 ): (() => void) => {
   let set = listeners.get(kind);
   if (!set) {
     set = new Set();
     listeners.set(kind, set);
   }
-  set.add(listener);
+  const reg: Registration = { listener, needsPayload: opts?.needsPayload === true };
+  set.add(reg);
   return () => {
     const s = listeners.get(kind);
     if (!s) return;
-    s.delete(listener);
+    s.delete(reg);
     if (s.size === 0) listeners.delete(kind);
   };
 };
@@ -75,13 +92,24 @@ export const onEvent = (
 export const publishActivation = (payload: ActivationPayload): void => {
   const kindListeners = listeners.get(payload.kind);
   const wildcardListeners = listeners.get("*");
-  const all: ActivationListener[] = [];
-  if (kindListeners) for (const l of kindListeners) all.push(l);
-  if (wildcardListeners) for (const l of wildcardListeners) all.push(l);
+  const all: Registration[] = [];
+  if (kindListeners) for (const r of kindListeners) all.push(r);
+  if (wildcardListeners) for (const r of wildcardListeners) all.push(r);
   if (all.length === 0) return;
-  for (const l of all) {
+  // Lightweight envelope — id/kind/task/directive only. Computed once and
+  // shared (read-only) so the full payload is NOT retained-by-reference across
+  // subscribers that don't need it.
+  const envelope: ActivationPayload = {
+    event_id: payload.event_id,
+    ts: payload.ts,
+    kind: payload.kind,
+    directive_id: payload.directive_id,
+    task_id: payload.task_id,
+  };
+  for (const r of all) {
+    const delivered = r.needsPayload ? payload : envelope;
     try {
-      const result = l(payload);
+      const result = r.listener(delivered);
       if (result && typeof (result as Promise<void>).then === "function") {
         (result as Promise<void>).catch((err) => {
           logger.debug(
