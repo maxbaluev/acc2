@@ -175,7 +175,18 @@ export type StrategyRankingContext = {
 export type RankedStrategy = {
   artifact_id: string;
   name: string;
+  /** Active ranking score (amendment A12ET3SF). Ranked strategies are no
+   *  longer observational shadow evidence — applyStrategyRouteDeltas folds
+   *  posterior-weighted deltas into route_scores before route selection. */
+  active_score: number;
+  /** Back-compat read for legacy dispatch_decided payloads / views that
+   *  still reference shadow_score. Mirrors active_score; no consumer may
+   *  use the shadow name for behavior. */
   shadow_score: number;
+  /** Posterior-weighted per-lane route deltas this strategy contributes
+   *  (amendment A12ET3SF). Computed from plan.lane_preferences intersected
+   *  with feasible_routes and scaled by active_score × posterior weight. */
+  route_deltas: Record<string, number>;
   /** Per-axis contribution to the score — useful for debugging WHY a
    *  strategy ranked where it did. The closure_audited credit projector
    *  consumes these to update individual axis posteriors. */
@@ -221,7 +232,7 @@ export const rankStrategies = (
     for (const [lane, weight] of Object.entries(s.plan.lane_preferences)) {
       if (ctx.feasible_routes.includes(lane)) laneFeasibility = Math.max(laneFeasibility, weight);
     }
-    const shadowScore =
+    const activeScore =
       posteriorMean * 0.25
       + s.confidence * 0.1
       + goalShapeMatch * 0.2
@@ -229,10 +240,19 @@ export const rankStrategies = (
       + ownerSignalDot * 0.1
       + routingAxisDot * 0.1
       + laneFeasibility * 0.1;
+    // Per-lane route deltas (amendment A12ET3SF): only for FEASIBLE lanes
+    // the strategy prefers. Raw deltas here; applyStrategyRouteDeltas scales
+    // them by active_score × posterior weight and clamps.
+    const routeDeltas: Record<string, number> = {};
+    for (const [lane, weight] of Object.entries(s.plan.lane_preferences)) {
+      if (ctx.feasible_routes.includes(lane)) routeDeltas[lane] = weight;
+    }
     return {
       artifact_id: s.artifact_id,
       name: s.name,
-      shadow_score: shadowScore,
+      active_score: activeScore,
+      shadow_score: activeScore,
+      route_deltas: routeDeltas,
       breakdown: {
         posterior_mean: posteriorMean,
         confidence: s.confidence,
@@ -244,8 +264,65 @@ export const rankStrategies = (
       },
     };
   });
-  ranked.sort((a, b) => b.shadow_score - a.shadow_score);
+  ranked.sort((a, b) => b.active_score - a.active_score);
   return ranked.slice(0, topN);
+};
+
+// ── Amendment A12ET3SF — active strategy route-score adjustment ────────
+//
+// Ranked strategies are no longer observational shadow evidence. A
+// non-empty ranking merges posterior-weighted route_deltas into the
+// route_scores BEFORE chooseHighestScoredRoute, so a learned strategy that
+// prefers a feasible lane can change the selected route. Empty rankings or
+// a thrown ranker are fail-soft: route_scores are returned unchanged and
+// verifier_evidence.strategy_ranker_fail_soft=1.
+//
+// Formula (per rank, per feasible lane preference p):
+//   posteriorWeight = breakdown.posterior_mean × breakdown.confidence
+//   delta           = clamp(p × active_score × posteriorWeight, 0, maxDelta)
+// Deltas accumulate across ranks, then every score is clamped to [0,1].
+
+const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
+
+export const applyStrategyRouteDeltas = (
+  routeScores: Record<string, number>,
+  ranks: RankedStrategy[],
+  feasibleRoutes: ReadonlyArray<string>,
+  opts?: { maxDelta?: number },
+): { route_scores: Record<string, number>; verifier_evidence: Record<string, number> } => {
+  const maxDelta = opts?.maxDelta ?? 0.25;
+  // Fail-soft: no ranks → unchanged scores, record the soft fallback.
+  if (!Array.isArray(ranks) || ranks.length === 0) {
+    return { route_scores: { ...routeScores }, verifier_evidence: { strategy_ranker_fail_soft: 1, strategy_rank_count: 0, strategy_delta_applied: 0 } };
+  }
+  const adjusted: Record<string, number> = { ...routeScores };
+  let totalDelta = 0;
+  try {
+    for (const rank of ranks) {
+      const posteriorWeight = (rank.breakdown?.posterior_mean ?? 0) * (rank.breakdown?.confidence ?? 0);
+      const deltas = rank.route_deltas ?? {};
+      for (const [lane, pref] of Object.entries(deltas)) {
+        if (!feasibleRoutes.includes(lane)) continue;
+        const delta = Math.max(0, Math.min(maxDelta, pref * rank.active_score * posteriorWeight));
+        if (delta <= 0) continue;
+        adjusted[lane] = (adjusted[lane] ?? 0) + delta;
+        totalDelta += delta;
+      }
+    }
+  } catch {
+    // Thrown mid-merge → fail-soft to the original scores.
+    return { route_scores: { ...routeScores }, verifier_evidence: { strategy_ranker_fail_soft: 1, strategy_rank_count: ranks.length, strategy_delta_applied: 0 } };
+  }
+  for (const lane of Object.keys(adjusted)) adjusted[lane] = clamp01(adjusted[lane]!);
+  return {
+    route_scores: adjusted,
+    verifier_evidence: {
+      strategy_ranker_fail_soft: 0,
+      strategy_rank_count: ranks.length,
+      strategy_delta_applied: totalDelta > 0 ? 1 : 0,
+      strategy_total_delta: totalDelta,
+    },
+  };
 };
 
 /** Convenience: build the StrategyRankingContext from telemetry the

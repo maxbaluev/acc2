@@ -15,7 +15,9 @@ import {
   buildRankingContext,
   loadStrategyArtifacts,
   rankStrategies,
+  applyStrategyRouteDeltas,
   type StrategyRankingContext,
+  type RankedStrategy,
 } from "./dispatch_strategy_ranker";
 
 afterAll(() => closeDb());
@@ -164,5 +166,45 @@ describe("dispatch_strategy_ranker — buildRankingContext", () => {
     runViews(db);
     const ctx = buildRankingContext(db, { id: "t_new", directive_id: "d_new", parent_id: null, goal: "test", status: "pending" }, {}, ["opencode_brain"]);
     expect(ctx.residual_band).toBe("unknown");
+  });
+});
+
+// ── Amendment A12ET3SF — active route-delta merge ──────────────────
+describe("applyStrategyRouteDeltas (amendment A12ET3SF)", () => {
+  const mkRank = (name: string, deltas: Record<string, number>, posteriorMean: number, confidence: number, activeScore = 1): RankedStrategy => ({
+    artifact_id: "art_" + name,
+    name,
+    active_score: activeScore,
+    shadow_score: activeScore,
+    route_deltas: deltas,
+    breakdown: { posterior_mean: posteriorMean, confidence, goal_shape_match: 0, residual_band_match: 0, owner_signal_dot: 0, routing_axis_dot: 0, lane_feasibility: 0 },
+  });
+
+  test("adds bounded deltas only for feasible routes", () => {
+    const base = { opencode_brain: 0.4, claude_inline: 0.35 };
+    const ranks = [mkRank("inline_first", { claude_inline: 1, substrate_replay: 1 }, 0.9, 0.9)];
+    const out = applyStrategyRouteDeltas(base, ranks, ["opencode_brain", "claude_inline"]);
+    // claude_inline (feasible) gets a delta; substrate_replay (infeasible) does not appear.
+    expect(out.route_scores.claude_inline).toBeGreaterThan(0.35);
+    expect(out.route_scores.substrate_replay).toBeUndefined();
+    // Delta is bounded by maxDelta (default 0.25).
+    expect(out.route_scores.claude_inline! - 0.35).toBeLessThanOrEqual(0.25 + 1e-9);
+    expect(out.verifier_evidence.strategy_ranker_fail_soft).toBe(0);
+    expect(out.verifier_evidence.strategy_delta_applied).toBe(1);
+  });
+
+  test("empty ranks are fail-soft: route_scores unchanged, strategy_ranker_fail_soft=1", () => {
+    const base = { opencode_brain: 0.5, claude_inline: 0.3 };
+    const out = applyStrategyRouteDeltas(base, [], ["opencode_brain", "claude_inline"]);
+    expect(out.route_scores).toEqual(base);
+    expect(out.verifier_evidence.strategy_ranker_fail_soft).toBe(1);
+  });
+
+  test("a posterior-weighted delta can flip which route is highest", () => {
+    // Base: opencode_brain slightly ahead of claude_inline.
+    const base = { opencode_brain: 0.50, claude_inline: 0.45 };
+    const ranks = [mkRank("inline_first", { claude_inline: 1 }, 0.95, 0.95, 1)];
+    const out = applyStrategyRouteDeltas(base, ranks, ["opencode_brain", "claude_inline"]);
+    expect(out.route_scores.claude_inline).toBeGreaterThan(out.route_scores.opencode_brain!);
   });
 });

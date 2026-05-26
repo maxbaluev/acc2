@@ -513,6 +513,39 @@ const emitSchedulerAdmissionGate = (
   });
 };
 
+// ── Amendment A12ET3SF — unified admission/backoff policy primitive ────
+//
+// Before this amendment scheduler admission/backoff gates were emitted via
+// ad-hoc emitSchedulerAdmissionGate calls whose payloads varied per site.
+// AdmissionPolicyGate collapses them into ONE reusable shape that every
+// admission/backoff decision carries: { name, scope, idempotency_key,
+// recovery_condition }. emitAdmissionPolicyGate stamps those four fields
+// (plus the gate's own payload) and delegates to the existing
+// GATE_NOTIFIED-deduped emitter so repeated identical gates in one window
+// do not duplicate. A gate that omits any of the four fields is a
+// structural regression (pinned by tests).
+export type AdmissionPolicyGate = {
+  /** Stable gate name (e.g. scheduler_draining). */
+  name: string;
+  /** What the gate scopes over. */
+  scope: "task" | "directive" | "runtime" | "resource";
+  /** Idempotency key — repeated identical gates in one window dedupe. */
+  idempotency_key: string;
+  /** The condition under which the gate clears / the work can resume. */
+  recovery_condition: string;
+  /** Gate-specific payload fields. */
+  payload: Record<string, JsonValue>;
+};
+
+const emitAdmissionPolicyGate = (db: Database, task: TaskNode, gate: AdmissionPolicyGate): void => {
+  emitSchedulerAdmissionGate(db, task, gate.name, {
+    scope: gate.scope,
+    idempotency_key: gate.idempotency_key,
+    recovery_condition: gate.recovery_condition,
+    ...gate.payload,
+  });
+};
+
 const emitDispatchIsolatedError = (db: Database, task: TaskNode, err: unknown): void => {
   try {
     emitEvent(db, {
@@ -1313,9 +1346,15 @@ export const schedulerTick = async (
   const ready = readyTasks(db, opts.directiveId);
   if (SCHEDULER_DRAINING) {
     for (const task of ready) {
-      emitSchedulerAdmissionGate(db, task, "scheduler_draining", {
-        reason: "scheduler_admission_paused_for_restart_drain",
-        in_flight: IN_FLIGHT.size,
+      emitAdmissionPolicyGate(db, task, {
+        name: "scheduler_draining",
+        scope: "runtime",
+        idempotency_key: gateKey(task.id, "scheduler_draining"),
+        recovery_condition: "SCHEDULER_DRAINING cleared (restart drain complete)",
+        payload: {
+          reason: "scheduler_admission_paused_for_restart_drain",
+          in_flight: IN_FLIGHT.size,
+        },
       });
     }
     return {
@@ -1448,16 +1487,24 @@ export const schedulerTick = async (
     const noProgressTermination = terminateNoProgressRedispatch(db, task);
     if (noProgressTermination.terminated) {
       skippedFailureCapped.push(task.id);
-      emitSchedulerAdmissionGate(db, task, "scheduler_no_progress_redispatch_terminated", {
-        reason: noProgressTermination.reason ?? "no_progress_redispatch_terminated",
-        dispatch_id: noProgressTermination.dispatch_id ?? null,
-        evidence_event_ids: noProgressTermination.evidence_event_ids ?? [],
-        ...(noProgressTermination.reason === "wait_on_frontier"
-          ? {
-              open_frontier_count: noProgressTermination.open_frontier_count ?? 0,
-              open_frontier_task_ids: noProgressTermination.open_frontier_task_ids ?? [],
-            }
-          : {}),
+      emitAdmissionPolicyGate(db, task, {
+        name: "scheduler_no_progress_redispatch_terminated",
+        scope: "task",
+        idempotency_key: gateKey(task.id, "scheduler_no_progress_redispatch_terminated"),
+        recovery_condition: noProgressTermination.reason === "wait_on_frontier"
+          ? "open coverage frontier drains to 0 (descendants terminalize)"
+          : "task terminalizes or a refinement edge advances progress",
+        payload: {
+          reason: noProgressTermination.reason ?? "no_progress_redispatch_terminated",
+          dispatch_id: noProgressTermination.dispatch_id ?? null,
+          evidence_event_ids: noProgressTermination.evidence_event_ids ?? [],
+          ...(noProgressTermination.reason === "wait_on_frontier"
+            ? {
+                open_frontier_count: noProgressTermination.open_frontier_count ?? 0,
+                open_frontier_task_ids: noProgressTermination.open_frontier_task_ids ?? [],
+              }
+            : {}),
+        },
       });
       continue;
     }
@@ -1565,10 +1612,16 @@ export const schedulerTick = async (
           constraint_artifact_id: conflict.constraint_artifact_id ?? null,
         } as JsonValue,
       });
-      emitSchedulerAdmissionGate(db, task, "scheduler_interference_deferred", {
-        reason: "concurrency_conflict_with_in_flight_directive",
-        conflicting_directive: conflict.conflicting_directive,
-        interaction: conflict.kind,
+      emitAdmissionPolicyGate(db, task, {
+        name: "scheduler_interference_deferred",
+        scope: "directive",
+        idempotency_key: gateKey(task.id, "scheduler_interference_deferred"),
+        recovery_condition: "conflicting in-flight directive terminalizes / releases its slot",
+        payload: {
+          reason: "concurrency_conflict_with_in_flight_directive",
+          conflicting_directive: conflict.conflicting_directive,
+          interaction: conflict.kind,
+        },
       });
       continue;
     }
@@ -1583,10 +1636,16 @@ export const schedulerTick = async (
     }
     if (perDirCount >= maxConcurrentPerDirective && !hasParallelSiblingSlot(db, task)) {
       skippedConcurrencyCap.push(task.id);
-      emitSchedulerAdmissionGate(db, task, "scheduler_per_directive_concurrency_cap", {
-        reason: "scheduler_directive_in_flight_at_cap",
-        directive_in_flight: perDirCount,
-        cap: maxConcurrentPerDirective,
+      emitAdmissionPolicyGate(db, task, {
+        name: "scheduler_per_directive_concurrency_cap",
+        scope: "directive",
+        idempotency_key: gateKey(task.id, "scheduler_per_directive_concurrency_cap"),
+        recovery_condition: "a sibling in this directive terminalizes, freeing a slot below the cap",
+        payload: {
+          reason: "scheduler_directive_in_flight_at_cap",
+          directive_in_flight: perDirCount,
+          cap: maxConcurrentPerDirective,
+        },
       });
       continue;
     }
@@ -1633,16 +1692,22 @@ export const schedulerTick = async (
     const budgetConflict = firstBudgetConflict(resourceUse, economics.resource_cost, resourceBudget);
     if (exclusiveConflict || budgetConflict) {
       skippedConcurrencyCap.push(task.id);
-      emitSchedulerAdmissionGate(db, task, "scheduler_global_concurrency_cap", {
-        reason: "scheduler_resource_budget_exhausted",
-        admission_model: "marginal_value_cost_resource_budget",
-        exhausted_resource: budgetConflict ?? exclusiveConflict ?? null,
-        conflict_kind: exclusiveConflict ? "exclusive_resource" : "capacity",
-        resource_budget: resourceBudget,
-        resource_cost: economics.resource_cost,
-        exclusive_resources: economics.exclusive_resources,
-        expected_value: economics.expected_value,
-        in_flight: IN_FLIGHT.size,
+      emitAdmissionPolicyGate(db, task, {
+        name: "scheduler_global_concurrency_cap",
+        scope: "resource",
+        idempotency_key: gateKey(task.id, "scheduler_global_concurrency_cap"),
+        recovery_condition: "an in-flight task releases the exhausted resource / capacity slot",
+        payload: {
+          reason: "scheduler_resource_budget_exhausted",
+          admission_model: "marginal_value_cost_resource_budget",
+          exhausted_resource: budgetConflict ?? exclusiveConflict ?? null,
+          conflict_kind: exclusiveConflict ? "exclusive_resource" : "capacity",
+          resource_budget: resourceBudget,
+          resource_cost: economics.resource_cost,
+          exclusive_resources: economics.exclusive_resources,
+          expected_value: economics.expected_value,
+          in_flight: IN_FLIGHT.size,
+        },
       });
       continue;
     }

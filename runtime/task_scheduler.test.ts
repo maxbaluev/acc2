@@ -166,6 +166,20 @@ describe("task_scheduler", () => {
         .query("SELECT COUNT(*) AS c FROM events WHERE task_id = ? AND kind IN ('task_failed','dispatcher_violation','task_committed')")
         .get(taskId) as { c: number };
       expect(terminal.c).toBe(0);
+      // Amendment A12ET3SF: the scheduler_draining admission gate must carry
+      // the unified policy-primitive fields (name/scope/idempotency_key/
+      // recovery_condition). A gate that omits any is a structural regression.
+      const gate = db
+        .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'constitutional_gate_decision' AND json_extract(payload, '$.gate') = 'scheduler_draining'")
+        .get(taskId) as { payload: string } | null;
+      expect(gate).not.toBeNull();
+      const gp = JSON.parse(gate!.payload);
+      expect(gp.gate).toBe("scheduler_draining");
+      expect(gp.scope).toBe("runtime");
+      expect(typeof gp.idempotency_key).toBe("string");
+      expect(gp.idempotency_key.length).toBeGreaterThan(0);
+      expect(typeof gp.recovery_condition).toBe("string");
+      expect(gp.recovery_condition.length).toBeGreaterThan(0);
     } finally {
       setSchedulerDraining(false);
       rmSync(tempDir, { recursive: true, force: true });

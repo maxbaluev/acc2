@@ -26,7 +26,7 @@ import { lowRiskInlinePatterns } from "../substrate/views";
 import { parseResourceRefs, resourceMatchesPattern, type ResourceRef } from "./resource_uri";
 import { betaMean as canonicalBetaMean, betaEvidenceConfidence } from "./posterior";
 import { goalShape as computeGoalShape } from "./goal_shape";
-import { buildRankingContext, rankStrategies, type RankedStrategy } from "./dispatch_strategy_ranker";
+import { buildRankingContext, rankStrategies, applyStrategyRouteDeltas, type RankedStrategy } from "./dispatch_strategy_ranker";
 
 /** Default Tier-0 recipe-replay confidence threshold (§15). Recipes seed at
  *  0.5 and accumulate via updateRecipeConfidence; SEVEN successful replays
@@ -50,13 +50,17 @@ export type DispatchDecisionEvidence = {
   routing_axes: Record<string, number>;
   route_scores: DispatchRouteScores;
   verifier_evidence: Record<string, number>;
-  /** Shadow ranking of dispatch_strategy_v1 artifacts (2026-05-17 brain
-   *  design 48SN4XF3WN4KBBCHHCANDRDQRW). Populated by
-   *  dispatch_strategy_ranker — observational only, does NOT change the
-   *  selected route. The closure_audited consumer credits the top
-   *  strategy via its posterior_alpha/beta. When the strategy registry
-   *  is empty or the ranker errors out, this is an empty array (no
-   *  behavioral change). */
+  /** ACTIVE ranking of dispatch_strategy_v1 artifacts (amendment
+   *  A12ET3SF, originally 48SN4XF3WN4KBBCHHCANDRDQRW). Populated by
+   *  dispatch_strategy_ranker. NO LONGER observational: a non-empty ranking
+   *  merges posterior-weighted route_deltas into route_scores BEFORE
+   *  chooseHighestScoredRoute (via applyStrategyRouteDeltas), so a learned
+   *  strategy can change the selected route. Empty registry / ranker error
+   *  is fail-soft (route_scores unchanged, strategy_ranker_fail_soft=1). */
+  strategy_ranks?: RankedStrategy[];
+  /** Back-compat read mirror for legacy dispatch_decided rows / views that
+   *  still reference strategy_shadow_ranks. Always a copy of strategy_ranks;
+   *  no consumer may use the shadow name for behavior. */
   strategy_shadow_ranks?: RankedStrategy[];
 };
 
@@ -464,15 +468,24 @@ export const dispatchEvidencePayload = (decision: DispatchDecision): {
   routing_axes: Record<string, number>;
   route_scores: DispatchRouteScores;
   verifier_evidence: Record<string, number>;
+  strategy_ranks: RankedStrategy[];
   strategy_shadow_ranks: RankedStrategy[];
-} => ({
-  route: decision.route,
-  reason: decision.reason,
-  routing_axes: decision.routing_axes,
-  route_scores: decision.route_scores,
-  verifier_evidence: decision.verifier_evidence,
-  strategy_shadow_ranks: decision.strategy_shadow_ranks ?? [],
-});
+} => {
+  // Amendment A12ET3SF: strategy_ranks is the canonical (active) field;
+  // strategy_shadow_ranks is the back-compat read mirror. Both carry the
+  // same array so legacy consumers/tests keep working while no consumer
+  // uses the shadow name for behavior.
+  const ranks = decision.strategy_ranks ?? decision.strategy_shadow_ranks ?? [];
+  return {
+    route: decision.route,
+    reason: decision.reason,
+    routing_axes: decision.routing_axes,
+    route_scores: decision.route_scores,
+    verifier_evidence: decision.verifier_evidence,
+    strategy_ranks: ranks,
+    strategy_shadow_ranks: ranks,
+  };
+};
 
 /** Build the open-ended routing-axis vector + verifier evidence for a task.
  *
@@ -801,27 +814,30 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
   // static route scores remain the fallback.
   const posteriorAdjusted = applyPeerAccuracyRouteAdjustment(db, task, baseEvidence.route_scores, feasibleRoutes);
 
-  // Shadow ranker (2026-05-17 brain design 48SN4XF3WN4KBBCHHCANDRDQRW):
-  // compute dispatch_strategy_v1 artifact rankings ALONGSIDE the
-  // existing scoreRoutesFromAxes decision. Observational only — the
-  // chosen route is still determined by chooseHighestScoredRoute below.
-  // The rankings ride along on dispatch_decided.payload for the
-  // closure_audited consumer to credit strategy posteriors against
-  // realised outcomes.
-  let strategyShadowRanks: RankedStrategy[] = [];
+  // ACTIVE strategy ranking (amendment A12ET3SF, orig brain design
+  // 48SN4XF3WN4KBBCHHCANDRDQRW): rank dispatch_strategy_v1 artifacts and
+  // MERGE their posterior-weighted route_deltas into route_scores BEFORE
+  // chooseHighestScoredRoute. A non-empty ranking can change the selected
+  // route. Fail-soft: a thrown ranker yields empty ranks → unchanged
+  // scores via applyStrategyRouteDeltas (strategy_ranker_fail_soft=1).
+  let strategyRanks: RankedStrategy[] = [];
   try {
     const ctx = buildRankingContext(db, task, baseEvidence.routing_axes, feasibleRoutes);
-    strategyShadowRanks = rankStrategies(db, ctx, 3);
-  } catch { /* shadow ranking is observational — never block dispatch */ }
+    strategyRanks = rankStrategies(db, ctx, 3);
+  } catch { strategyRanks = []; /* fail-soft below */ }
+
+  const strategyAdjusted = applyStrategyRouteDeltas(posteriorAdjusted.route_scores, strategyRanks, feasibleRoutes);
 
   const routeEvidence = {
     ...baseEvidence,
-    route_scores: posteriorAdjusted.route_scores,
+    route_scores: strategyAdjusted.route_scores,
     verifier_evidence: {
       ...baseEvidence.verifier_evidence,
       ...posteriorAdjusted.verifier_evidence,
+      ...strategyAdjusted.verifier_evidence,
     },
-    strategy_shadow_ranks: strategyShadowRanks,
+    strategy_ranks: strategyRanks,
+    strategy_shadow_ranks: strategyRanks,
   };
   const selectedRoute = chooseHighestScoredRoute(routeEvidence.route_scores, feasibleRoutes);
   const evidence = evidenceForSelectedRoute(routeEvidence, selectedRoute, feasibleRoutes);

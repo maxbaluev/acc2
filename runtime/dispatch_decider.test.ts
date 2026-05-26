@@ -496,3 +496,32 @@ Closure verifier must audit that the proposal cites concrete papers, identifies 
     });
   });
 });
+
+// ── Amendment A12ET3SF — active strategy ranking (not shadow) ──────
+import { seedActArtifacts } from "../substrate/seed";
+
+describe("dispatch_decider — active strategy ranking (amendment A12ET3SF)", () => {
+  test("strategy_ranks is populated and active route-delta merge ran (not payload-only shadow evidence)", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    seedActArtifacts(db);
+    // Make claude_inline feasible so a strategy that prefers it can affect scoring.
+    emitEvent(db, {
+      kind: "knowledge_promoted",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_strat",
+      task_id: "t_strat",
+      payload: { tags: ["low_risk_inline_pattern"], pattern_kind: "glob", pattern: "repo:docs/*.md", score: 0.9, confidence: 0.8 },
+    });
+    const decision = decideDispatch(db, sampleTask({ goal: "fix doc typo", target_resources: ["repo:docs/README.md"] } as Partial<TaskNode>));
+    // Active field is populated and mirrored to the back-compat name.
+    expect(Array.isArray(decision.strategy_ranks)).toBe(true);
+    expect(decision.strategy_ranks!.length).toBeGreaterThan(0);
+    expect(decision.strategy_shadow_ranks).toEqual(decision.strategy_ranks);
+    // The ACTIVE merge ran: verifier_evidence records the strategy rank count
+    // and that fail-soft did NOT trip (ranks were non-empty). If rankings were
+    // payload-only shadow evidence these fields would be absent.
+    expect(decision.verifier_evidence.strategy_rank_count).toBeGreaterThan(0);
+    expect(decision.verifier_evidence.strategy_ranker_fail_soft).toBe(0);
+  });
+});
