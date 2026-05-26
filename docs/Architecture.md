@@ -34,7 +34,7 @@ The loop is universal because residual is universal and breakdown axes are open 
 
 ## 3. Substrate Daemon
 
-The daemon owns the append-only SQLite ledger, MCP surface, worker registry, external ingress, hot reload, restart drain, and health/readiness projections (`SAF9AVJ8HD7W5DK847W72ETXHR`). Fast hot paths stay embedded and local; heavy aggregate reads move to worker-thread contracts rather than network SQL (`A4V81PN9E960S02MWSM4HSM5G4`).
+The daemon owns the hot SQLite ledger and its retention/archival policy, MCP surface, worker registry, external ingress, hot reload, restart drain, and health/readiness projections (`SAF9AVJ8HD7W5DK847W72ETXHR`). The ledger is append-only inside each retention class, but the hot store is bounded: high-volume telemetry may be rolled up or evicted according to a per-kind retention taxonomy, while knowledge, task, action, owner, and amendment rows retain audit-grade provenance. Fast hot paths stay embedded and local; heavy aggregate reads move to worker-thread contracts rather than network SQL (`A4V81PN9E960S02MWSM4HSM5G4`).
 
 Longevity contract: production state is a bounded hot SQLite ledger plus cold sibling archive databases. Events older than the hot-retention window (default target: 30 days unless operations evidence changes it) are moved into monthly `state-archive-YYYY-MM.db` files with provenance and integrity evidence; default views and liveness queries hit only the hot ledger, while explicit history/search paths can join hot + cold archives transparently. High-volume event rollups, per-kind emit budgets, and deferred-row suppression are slope controls, but bounded hot retention is the structural guarantee that multi-year SQLite operation does not turn every aggregate into an all-history scan.
 

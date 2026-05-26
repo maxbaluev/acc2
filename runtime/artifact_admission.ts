@@ -6,9 +6,10 @@
 //      (alpha=1, beta=1, score=0.5, confidence=0.3) — these are the canonical
 //      §11.5 admit values. We allocate the id BEFORE running the fixture so
 //      the runtime invocation has a stable artifact_id to tag the events.
-//   3. Run the fixture under the artifact's declared runtime. For Phase C
-//      only `runtime: 'bun'` is wired; uv / camofox-browser admission returns
-//      `phase_g_runtime_unsupported` and rolls back the row.
+//   3. Run the fixture under the artifact's declared runtime. bun, uv, and
+//      camofox-browser all route through `runArtifactForRuntime`; uv/camofox
+//      may reject with structured `*_runtime_unavailable` when host binaries are
+//      absent, but they are real runners, not Phase-G unsupported stubs.
 //   4. If the fixture run is `ok: true` and the observed residual (computed
 //      from the artifact's `fixtureExpectedResidual` predicate — see below)
 //      falls below `fixtureExpectedResidualBelow`, admit. Otherwise emit

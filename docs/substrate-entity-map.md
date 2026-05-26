@@ -89,7 +89,10 @@ separate seed-population path: views read whatever `events` /
 
 ## Event kinds (canonical union — substrate/types.ts `EventKind`)
 
-119 canonical event kinds. Grouped by lifecycle phase. The `status`
+119 canonical event kinds. (Counts in this document are a snapshot as of
+2026-05-25, generated from `runtime.system_map`; the live totals — event
+kinds, views, tables, artifact rows — are authoritative there and may drift
+from the numbers transcribed here.) Grouped by lifecycle phase. The `status`
 column means the kind contributes to a count exposed by
 `acc admin substrate-status`; `doctor` means the kind has a content
 check in `cli/doctor.ts`; `seed` means rows of this kind are emitted by
@@ -401,6 +404,10 @@ here so future audits do not mistake them for event kinds.
   `mock_bridge_prompt_unrecognized`.
 
 ## Coverage summary
+
+(Counts below are a snapshot as of 2026-05-25, generated from
+`runtime.system_map`; treat `runtime.system_map` as the live, authoritative
+source for table/view/event-kind/artifact totals.)
 
 - 3 base tables + 1 virtual table — all four surfaced in
   `acc admin substrate-status` (events, act_artifact, vec_events) or
