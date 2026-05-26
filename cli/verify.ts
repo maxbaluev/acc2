@@ -80,6 +80,27 @@ const proposalTarget = (payload: Record<string, unknown>): string => {
   return "";
 };
 
+// Every declared target on the proposal, from the top-level fields AND the
+// nested proposed_behavior/proposed_action block. A semantic apply may touch
+// any one of the declared targets (multi-file amendments, or a secondary
+// declared file rather than the first-resolved one). The credit chain closes
+// when the commit GENUINELY changed at least one declared target file — not
+// only the single first-resolved one (k_252 / k_555: file-touch decides, not
+// literal anchor text, and not a single canonical target).
+const proposalTargets = (payload: Record<string, unknown>): string[] => {
+  const targets = new Set<string>();
+  const add = (v: unknown) => { if (typeof v === "string" && v.trim().length > 0) targets.add(v.trim()); };
+  for (const key of ["target_resource", "target"] as const) add(payload[key]);
+  for (const key of ["proposed_behavior", "proposed_action"] as const) {
+    const proposed = payload[key];
+    if (proposed && typeof proposed === "object") {
+      const p = proposed as Record<string, unknown>;
+      for (const field of ["target_resource", "target"] as const) add(p[field]);
+    }
+  }
+  return [...targets];
+};
+
 const stripRepoPrefix = (target: string): string => target.startsWith("repo:") ? target.slice(5) : target;
 
 type VerifyResult = "verified" | "drift" | "missing";
@@ -99,19 +120,32 @@ export const classifyApply = (
   repoRoot: string,
 ): VerifyResult => {
   if (!commitSha) return "missing";
-  const target = proposalTarget(proposalPayload);
+  const targets = proposalTargets(proposalPayload);
   // No declared target ⇒ commit cannot be located against a file; treat as
   // missing (no verifiable apply surface), not a literal text "drift".
-  if (!target) return "missing";
-  const g = verifyCommitTouches(commitSha, target, repoRoot);
-  if (!g.exists) return "missing";
-  // One semantic apply path: a commit that exists and touches the proposed
-  // target IS the verified apply. Correctness of the change is established by
-  // the verifier residual at apply time, NOT by a literal before/after
-  // text-marker match here. Legacy before/after snippets in the proposal are
-  // advisory context only and never form a match gate (k_252 / one-path-apply).
-  if (!g.touchesTarget) return "drift";
-  return "verified";
+  if (targets.length === 0) return "missing";
+  // One semantic apply path: a commit that exists and touches AT LEAST ONE of
+  // the proposed targets IS the verified apply. Correctness of the change is
+  // established by the verifier residual at apply time, NOT by a literal
+  // before/after text-marker match here, and NOT by requiring the single
+  // first-resolved target — any declared target file the commit genuinely
+  // changed closes the credit chain. Legacy before/after snippets in the
+  // proposal are advisory context only and never form a match gate
+  // (k_252 / k_555 / one-path-apply).
+  let commitExists = false;
+  for (const target of targets) {
+    const g = verifyCommitTouches(commitSha, target, repoRoot);
+    if (!g.exists) {
+      // git could not resolve the commit at all ⇒ no verifiable apply surface.
+      return "missing";
+    }
+    commitExists = true;
+    if (g.touchesTarget) return "verified";
+  }
+  // Commit exists but touched none of the declared targets ⇒ drift. The guard
+  // that the commit touches the RIGHT file(s) is preserved: a bogus/unrelated
+  // commit is still refused.
+  return commitExists ? "drift" : "missing";
 };
 
 type AggregateBucket = {

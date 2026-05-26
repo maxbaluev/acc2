@@ -19,6 +19,20 @@ const realApplyTsCommit = (): string => {
   if (!sha) throw new Error("no commit touching cli/apply.ts found");
   return sha;
 };
+
+// A real commit that exists in git but does NOT touch cli/apply.ts. Used to
+// prove the commit-touch guard still refuses a real-but-unrelated commit
+// against a cli/apply.ts-targeted proposal (the proposal routes AUTO_APPLY, so
+// the refusal isolates the --record commit-touch gate, not the apply route).
+const realCommitNotTouchingApplyTs = (): string => {
+  const recent = String(spawnSync("git", ["log", "--format=%h", "-40"], { encoding: "utf8" }).stdout ?? "")
+    .trim().split("\n").filter(Boolean);
+  for (const sha of recent) {
+    const stat = String(spawnSync("git", ["show", "--stat", "--format=", sha], { encoding: "utf8" }).stdout ?? "");
+    if (!stat.includes("cli/apply.ts")) return sha;
+  }
+  throw new Error("no recent commit that avoids cli/apply.ts found");
+};
 import { closeDb, openDb } from "../substrate/db";
 import { getArtifact, insertArtifact } from "../runtime/artifact_store";
 import { lessonImplementationStatus, lessonImplementerQueue } from "../substrate/views";
@@ -728,9 +742,85 @@ describe("runApply gates", () => {
     // line on stdout (the credit chain is not written).
     expect(code).toBe(3);
     expect(cap.out.join("\n")).not.toContain("applied_change_committed");
-    expect(cap.err.join("\n")).toContain("does not exist or does not touch the proposed target");
+    expect(cap.err.join("\n")).toContain("does not exist or does not touch any declared target file");
 
     // No act_tuple_recorded credit envelope was written for this fabricated apply.
+    const act = db
+      .query("SELECT id FROM events WHERE kind = 'act_tuple_recorded' AND json_extract(payload, '$.source_event_id') = ? AND json_extract(payload, '$.verifier_kind') = 'claude_apply_record'")
+      .get(eventId) as { id: string } | null;
+    expect(act).toBeNull();
+  });
+
+  test("semantic apply: --record status=applied SUCCEEDS when the commit touches the target but the literal anchor text is ABSENT (k_252/k_555 credit chain closes)", async () => {
+    // The brain's SEMANTIC APPLY PATH applies the amendment's INTENT, not its
+    // byte-for-byte before/after diff. The literal anchored before/after here
+    // ("NONEXISTENT_ANCHOR_*") never appears in the real cli/apply.ts commit,
+    // yet the commit GENUINELY changed the declared target file. The four-link
+    // credit chain (create→retrieve→mutate→credit) MUST close — the old hard
+    // literal-anchor gate would have refused this, which was the k_252 defect.
+    const eventId = await emitLesson({
+      target_resource: "repo:cli/apply.ts",
+      anchor: "cli/apply.ts apply --record prerequisite",
+      diff: { kind: "anchored_replace_v1", before: "NONEXISTENT_ANCHOR_BEFORE_TEXT", after: "NONEXISTENT_ANCHOR_AFTER_TEXT", occurrence: 1 },
+    });
+    const cap = captureConsole();
+    const code = await runApply([
+      "--record",
+      eventId,
+      "--status",
+      "applied",
+      "--residual",
+      "0",
+      "--commit-sha",
+      realApplyTsCommit(),
+    ]);
+    cap.restore();
+
+    // Accepted (no apply_diff_mismatch refusal) and the credit chain is written.
+    expect(code).toBe(0);
+    expect(cap.err.join("\n")).not.toContain("apply_diff_mismatch");
+    expect(cap.out.join("\n")).toContain("applied_change_committed");
+
+    // The act_tuple_recorded credit envelope exists for this semantic apply.
+    const act = db
+      .query("SELECT id FROM events WHERE kind = 'act_tuple_recorded' AND json_extract(payload, '$.source_event_id') = ? AND json_extract(payload, '$.verifier_kind') = 'claude_apply_record'")
+      .get(eventId) as { id: string } | null;
+    expect(act).not.toBeNull();
+  });
+
+  test("semantic apply: --record status=applied is REFUSED when the (real) commit touches NONE of the declared target files (bogus-commit guard preserved)", async () => {
+    // The commit-touch guard still refuses a real-but-unrelated commit: the
+    // proposal declares a target the cli/apply.ts commit never touched, so the
+    // credit chain must NOT close (a commit cannot fabricate credit for a file
+    // it did not change). This preserves the refusal for commits that touch no
+    // declared target file while dropping the literal-anchor requirement above.
+    // The proposal targets repo:cli/apply.ts (routes AUTO_APPLY, like the
+    // working record tests), but the supplied commit_sha is a REAL commit that
+    // exists in git yet does NOT touch cli/apply.ts — so classifyApply returns
+    // drift and --record must refuse with exit 3. This isolates the commit-touch
+    // gate, not the apply route.
+    const eventId = await emitLesson({
+      target_resource: "repo:cli/apply.ts",
+      anchor: "unrelated commit",
+      diff: { kind: "anchored_replace_v1", before: "x", after: "y", occurrence: 1 },
+    });
+    const cap = captureConsole();
+    const code = await runApply([
+      "--record",
+      eventId,
+      "--status",
+      "applied",
+      "--residual",
+      "0",
+      "--commit-sha",
+      realCommitNotTouchingApplyTs(), // exists in git but touches NO declared target
+    ]);
+    cap.restore();
+
+    expect(code).toBe(3);
+    expect(cap.out.join("\n")).not.toContain("applied_change_committed");
+    expect(cap.err.join("\n")).toContain("does not exist or does not touch any declared target file");
+
     const act = db
       .query("SELECT id FROM events WHERE kind = 'act_tuple_recorded' AND json_extract(payload, '$.source_event_id') = ? AND json_extract(payload, '$.verifier_kind') = 'claude_apply_record'")
       .get(eventId) as { id: string } | null;
