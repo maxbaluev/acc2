@@ -28,6 +28,8 @@ import { originPromotion, originPromotionByGoalShape } from "../substrate/views"
 import { goalShape as computeGoalShape } from "./goal_shape";
 import { poolQuery } from "./sql_pool_singleton";
 import { resolveArtifactId } from "../substrate/migration_runner";
+import { getEventRowById } from "./events";
+import { attachedArchiveSchemas } from "../substrate/db";
 
 export type RetrievalQuery = {
   text: string;
@@ -260,9 +262,39 @@ const readOriginBiasForGoalShapePooled = async (db: Database, goalShape: string)
 // rows, ordering, and scoring are unchanged.
 const POSTERIOR_ARTIFACT_SCORE_SQL =
   "SELECT score FROM act_artifact WHERE id = ? AND runtime IS NOT NULL AND declared_sandbox IS NOT NULL AND superseded_by IS NULL";
-const POSTERIOR_EVENT_PAYLOAD_SQL = "SELECT payload FROM events WHERE id = ?";
 const POSTERIOR_ARTIFACT_BY_ID_SQL = "SELECT score FROM act_artifact WHERE id = ?";
-const POSTERIOR_EVENT_RESIDUAL_SQL = "SELECT residual FROM events WHERE id = ?";
+// Event posterior reads (payload / residual BY id) go through the
+// tier-spanning getEventRowById: hot primary-key lookup first, transparent
+// archive read-through only on a hot miss. We do NOT keep direct
+// `SELECT ... FROM events WHERE id = ?` constants here — an archived
+// candidate / promoted / action_scored row must keep its posterior signal
+// for RLM/credit completeness (amendment 70ECRTQX). act_artifact rows are
+// never archived (the registry table is not the events table) so the two
+// artifact SQL constants above stay hot-only by construction.
+
+/** Tier-spanning pooled by-id event read for the off-loop posterior path.
+ *  Runs the hot point read through `poolQuery` (SQL worker thread) first;
+ *  on a hot miss it probes each ATTACHed archive schema (the pool reader
+ *  connections also attach the archives — see substrate/db.ts openReader).
+ *  Same hot-first / cold-on-miss semantics as getEventRowById, but the
+ *  point reads execute off the dispatch-critical main loop. */
+const pooledEventRowById = async (
+  db: Database,
+  id: string,
+  selectCols: string,
+): Promise<Record<string, unknown> | null> => {
+  const hot = await poolQuery<Record<string, unknown>>(db, `SELECT ${selectCols} FROM events WHERE id = ?`, [id]);
+  if (hot[0]) return hot[0];
+  for (const schema of attachedArchiveSchemas(db)) {
+    try {
+      const cold = await poolQuery<Record<string, unknown>>(db, `SELECT ${selectCols} FROM ${schema}.events WHERE id = ?`, [id]);
+      if (cold[0]) return cold[0];
+    } catch {
+      // malformed/locked archive — try the next one.
+    }
+  }
+  return null;
+};
 
 /** Convert a posterior payload-scan row into a score in [0, 1]; shared by
  *  both the sync and pooled posterior readers so the branch logic is single-
@@ -305,9 +337,9 @@ const readPosterior = (db: Database, eventId: string, kind: string): number => {
   }
   if ((ARTIFACT_LIFECYCLE_KINDS as readonly string[]).includes(kind)) {
     // Pull the score from the registry by looking up via context_refs or
-    // payload.artifact_id. We use a shape-tolerant fallback: scan the event,
-    // look for an artifact_id reference, otherwise return neutral.
-    const row = db.query(POSTERIOR_EVENT_PAYLOAD_SQL).get(eventId) as { payload: string } | null;
+    // payload.artifact_id. Tier-spanning read: an archived lifecycle event
+    // still resolves its artifact_id (hot-first, cold-on-miss).
+    const row = getEventRowById(db, eventId, "payload") as { payload: string } | null;
     const aid = artifactIdFromPayload(row?.payload);
     if (aid) {
       const ca = db.query(POSTERIOR_ARTIFACT_BY_ID_SQL).get(aid) as { score: number } | null;
@@ -316,8 +348,9 @@ const readPosterior = (db: Database, eventId: string, kind: string): number => {
     return 0.5;
   }
   // For non-artifact events, prefer the `residual` column when present
-  // (lower = better → posterior = 1 − residual).
-  const row = db.query(POSTERIOR_EVENT_RESIDUAL_SQL).get(eventId) as { residual: number | null } | null;
+  // (lower = better → posterior = 1 − residual). Tier-spanning so an
+  // archived row keeps its posterior signal for the reranker.
+  const row = getEventRowById(db, eventId, "residual") as { residual: number | null } | null;
   return residualToPosterior(row?.residual);
 };
 
@@ -336,8 +369,8 @@ const readPosteriorPooled = async (db: Database, eventId: string, kind: string):
     return 0.5;
   }
   if ((ARTIFACT_LIFECYCLE_KINDS as readonly string[]).includes(kind)) {
-    const rows = await poolQuery<{ payload: string }>(db, POSTERIOR_EVENT_PAYLOAD_SQL, [eventId]);
-    const aid = artifactIdFromPayload(rows[0]?.payload);
+    const row = await pooledEventRowById(db, eventId, "payload") as { payload: string } | null;
+    const aid = artifactIdFromPayload(row?.payload);
     if (aid) {
       const caRows = await poolQuery<{ score: number }>(db, POSTERIOR_ARTIFACT_BY_ID_SQL, [aid]);
       const ca = caRows[0] ?? null;
@@ -345,8 +378,8 @@ const readPosteriorPooled = async (db: Database, eventId: string, kind: string):
     }
     return 0.5;
   }
-  const rows = await poolQuery<{ residual: number | null }>(db, POSTERIOR_EVENT_RESIDUAL_SQL, [eventId]);
-  return residualToPosterior(rows[0]?.residual);
+  const row = await pooledEventRowById(db, eventId, "residual") as { residual: number | null } | null;
+  return residualToPosterior(row?.residual);
 };
 
 /** Active-artifact membership check. Deliberately SYNCHRONOUS: it runs inside
@@ -772,3 +805,10 @@ export const retrieveWithEmbedding = (
     query_embedding_unavailable: false,
   };
 };
+
+/** Test hook (amendment 70ECRTQX): exposes the synchronous posterior by-id
+ *  read so a test can prove an ARCHIVED + hot-deleted event still yields its
+ *  posterior signal through the tier-spanning getEventRowById (guarantee A).
+ *  This is the exact read the reranker uses for non-artifact event posteriors;
+ *  the pooled `retrieve` path uses the equivalent tier-spanning pooled read. */
+export const __readPosteriorForTest = readPosterior;

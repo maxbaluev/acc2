@@ -2778,17 +2778,22 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     workers.push(() => clearInterval(timer));
   }
 
-  // archival_worker — 6h tick. Hot/cold archival (docs/Architecture.md
-  // commit 6b8ebea + brain KC TE6P3958, conf=0.86). Events older than
-  // archival_retention_days (default 30) move into sibling
-  // state-archive-YYYY-MM.db files; verify-then-delete keeps the hot
-  // ledger bounded so aggregate scans don't grow with production rate.
-  // Opt-OUT via ACC2_DISABLE_WORKERS=archival.
+  // archival_worker — continuous 5-minute tick (ARCHIVAL_TICK_MS,
+  // amendment J9SJZDKA). Hot/cold archival (docs/Architecture.md commit
+  // 6b8ebea + brain KC TE6P3958, conf=0.86). Pressure-aware retention
+  // moves aged hot rows into sibling state-archive-YYYY-MM.db files via
+  // verify-then-delete, keeping the hot ledger CONTINUOUSLY bounded so
+  // aggregate scans + boot + native-memory stay bounded under sustained
+  // production (~36k events/day). The prior 6h tick let the hot table grow
+  // for hours between sweeps; the 5m tick (each sweep row-capped) curates
+  // continuously. Archived rows stay transparently readable via the
+  // tier-spanning getEventRowById, so the bounded hot window costs no
+  // RLM/credit completeness. Opt-OUT via ACC2_DISABLE_WORKERS=archival.
   if (isWorkerEnabled("archival")) {
-    const tickMs = 6 * 60 * 60 * 1000;
-    const { runArchivalSweep, runDropSweep, runTelemetryEvictionSweep } = await import(
+    const { runArchivalSweep, runDropSweep, runTelemetryEvictionSweep, ARCHIVAL_TICK_MS } = await import(
       "./archival_worker"
     );
+    const tickMs = ARCHIVAL_TICK_MS;
     const { resolveDbPath } = await import("./state_paths");
     const dbPath = resolveDbPath();
     markWorkerReady("archival");

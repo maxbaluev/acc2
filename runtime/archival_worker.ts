@@ -39,7 +39,18 @@ import { logger } from "./logger";
 import { poolQuery } from "./sql_pool_singleton";
 import { getThreshold } from "./threshold_registry";
 
-export const ARCHIVAL_TICK_MS = 6 * 60 * 60 * 1000; // 6h
+// Continuous hot-ledger curation (amendment J9SJZDKA, directive
+// 7Z81HBY4813TF0V9T50AWFP9PG). The prior 6h tick let the hot table grow
+// for hours between sweeps — at ~36k events/day that is ~9k rows
+// accumulating per tick before any move-to-cold fired. A 5-minute tick
+// keeps the hot ledger CONTINUOUSLY bounded: each sweep is row-capped
+// (SWEEP_LIMIT) so the tick stays cheap, and pressure-aware retention
+// (below) compresses the cutoff onto younger rows the moment the ledger
+// crosses its soft cap, so the move-to-cold sweep fires on recent rows
+// rather than waiting for a fixed 30-day age. Tier-spanning reads
+// (getEventRowById) keep every archived row transparently readable, so
+// shrinking the hot window costs no RLM/credit completeness.
+export const ARCHIVAL_TICK_MS = 5 * 60 * 1000; // 5m — continuous, row-capped per tick
 const SWEEP_LIMIT = 50_000;
 const COPY_CHUNK = 1000;
 const VERIFY_SAMPLE = 100;
@@ -448,26 +459,44 @@ export type ArchivalSweepOptions = {
 // compaction DELETE path (compactDerivedEvents) nor the telemetry
 // eviction allowlist; both keep their own conservative carve-outs.
 
+// ── Continuously-bounded hot retention (amendment J9SJZDKA) ──────────
+//
+// The prior defaults (30d no-pressure window, 2d floor, 250k/500k row
+// caps, 1.0/2.5 GB size caps) were mistuned for ~36k events/day: the
+// 30-day window meant nothing aged out for a month, and the 250k soft cap
+// = ~7 days of production before pressure even began compressing. The hot
+// table could carry hundreds of thousands of rows indefinitely. These
+// values are RETUNED so the hot ledger stays small CONTINUOUSLY: a short
+// default window, a low soft cap that begins compression after ~1 day of
+// production, and a hard cap reached after ~2 days — so move-to-cold
+// fires aggressively on recent rows. Archived rows remain transparently
+// readable via the tier-spanning getEventRowById, so a small hot window
+// costs nothing in RLM/credit completeness. All overridable via the
+// threshold registry (ArchivalSweepOptions caps / env thresholds).
+
 /** Default retention window (days) when the hot ledger is NOT under
- *  pressure — preserves the original 30-day age-based archival behavior. */
-const DEFAULT_HOT_RETENTION_DAYS = 30;
+ *  pressure. Short by design — at sustained production the pressure policy
+ *  compresses it further; under low production this keeps a week of recent
+ *  context hot without unbounded growth. */
+const DEFAULT_HOT_RETENTION_DAYS = 7;
 /** Floor: even at maximum pressure the policy will not compress the hot
- *  retention window below this many days, so recent operating context
- *  (and any in-flight dispatch chains) stay hot. */
-const MIN_HOT_RETENTION_DAYS = 2;
+ *  retention window below this, so in-flight dispatch chains stay hot. */
+const MIN_HOT_RETENTION_DAYS = 1;
 /** Soft row-count cap: above this, retention starts compressing linearly
- *  from DEFAULT toward MIN as the ledger fills toward the hard cap. */
-const ROW_COUNT_SOFT_CAP = 250_000;
+ *  from DEFAULT toward MIN. ~36k rows ≈ 1 day of production, so pressure
+ *  begins after roughly one day's worth of events accumulates hot. */
+const ROW_COUNT_SOFT_CAP = 40_000;
 /** Hard row-count cap: at/above this the retention window is fully
- *  compressed to MIN_HOT_RETENTION_DAYS — maximum archival pressure. */
-const ROW_COUNT_HARD_CAP = 500_000;
+ *  compressed to MIN_HOT_RETENTION_DAYS — maximum archival pressure.
+ *  ~2 days of production, so the ledger is bounded well under ~100k rows. */
+const ROW_COUNT_HARD_CAP = 80_000;
 /** Soft db-size cap (bytes): page_count × page_size above this also
- *  compresses retention. ~1.0 GB. */
-const DB_SIZE_SOFT_CAP_BYTES = 1_000_000_000;
+ *  compresses retention. ~150 MB. */
+const DB_SIZE_SOFT_CAP_BYTES = 150_000_000;
 /** Hard db-size cap (bytes): at/above this, retention fully compresses.
- *  ~2.5 GB — below the ~3 GB slow-boot ceiling the live DB was trending
- *  toward, so archival fires well before boot cost becomes pathological. */
-const DB_SIZE_HARD_CAP_BYTES = 2_500_000_000;
+ *  ~400 MB — far below the slow-boot / native-memory-meltdown ceiling, so
+ *  archival fires long before boot cost or RSS becomes pathological. */
+const DB_SIZE_HARD_CAP_BYTES = 400_000_000;
 
 export type LedgerPressure = {
   /** Current hot-ledger row count. */
@@ -1109,7 +1138,9 @@ export const runTelemetryEvictionSweep = async (
   return summary;
 };
 
-/** Start the 6-hour archival tick. Returns a stop function. */
+/** Start the continuous (5-minute, ARCHIVAL_TICK_MS) archival tick.
+ *  Each sweep is row-capped so the short cadence stays cheap while keeping
+ *  the hot ledger continuously bounded. Returns a stop function. */
 export const startArchivalWorker = (
   db: Database,
   opts: { stateDbPath: string; tickMs?: number },

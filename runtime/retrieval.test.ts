@@ -12,10 +12,15 @@ import { insertArtifact } from "./artifact_store";
 import { goalShape } from "./goal_shape";
 import { encodeEmbeddingBlob, EMBEDDING_VERSION, EMBEDDING_DIMS } from "./embedder";
 import { EmbeddingIndex } from "./embedding_index";
-import { retrieve, retrieveWithEmbedding } from "./retrieval";
+import { retrieve, retrieveWithEmbedding, __readPosteriorForTest } from "./retrieval";
 import type { RetrievalHit } from "./retrieval";
 import { clearSqlPool, setSqlPool } from "./sql_pool_singleton";
 import type { SqlWorkerPool } from "./sql_worker_pool";
+import { Database as Sqlite } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -695,5 +700,56 @@ describe("off-loop posterior reads (SQL worker pool) are byte-identical to sync"
     // multiplier included). retrieved_at differs by wall-clock so exclude it.
     expect(offloop.hits).toEqual(sync.hits);
     expect(offloop.hits.length).toBeGreaterThan(0);
+  });
+});
+
+describe("retrieval posterior read spans the hot/cold tier (amendment 70ECRTQX, guarantee A)", () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    closeDb();
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-tiered-retrieval-"));
+    dbPath = join(tmpDir, "state.db");
+  });
+  afterEach(() => {
+    closeDb();
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  const archiveRowAndDeleteHot = (db: Database, id: string): void => {
+    const row = db.query("SELECT * FROM events WHERE id = ?").get(id) as Record<string, unknown>;
+    const arch = new Sqlite(join(tmpDir, "state-archive-2026-01.db"), { create: true, strict: true });
+    const cols = Object.keys(row);
+    arch.exec(`CREATE TABLE IF NOT EXISTS events (${cols.map((c) => `${c} ${c === "id" ? "TEXT PRIMARY KEY" : (c === "residual" || c === "predicted_residual" ? "REAL" : "TEXT")}`).join(", ")})`);
+    arch.query(`INSERT INTO events (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...cols.map((c) => row[c] as never));
+    arch.close();
+    db.run("DELETE FROM events WHERE id = ?", [id]);
+  };
+
+  test("readPosterior returns the archived event's residual-derived posterior (not neutral fallback)", () => {
+    const db = openDb(dbPath);
+    // residual 0.1 → posterior 0.9 (1 - residual). A neutral fallback would
+    // be 0.5; asserting 0.9 proves the residual survived archival.
+    const ev = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      payload: { body: "tiered retrieval probe" },
+      residual: 0.1,
+    });
+    expect(__readPosteriorForTest(db, ev.id, "knowledge_candidate")).toBeCloseTo(0.9, 6);
+
+    // Archive + delete from hot.
+    archiveRowAndDeleteHot(db, ev.id);
+    expect(db.query("SELECT id FROM events WHERE id = ?").get(ev.id)).toBeNull();
+
+    // Reopen so the connection ATTACHes the archive.
+    closeDb(dbPath);
+    const db2 = openDb(dbPath);
+
+    // The reranker's posterior read STILL returns 0.9, not the 0.5 neutral
+    // fallback it would silently drop to if the read were hot-only.
+    expect(__readPosteriorForTest(db2, ev.id, "knowledge_candidate")).toBeCloseTo(0.9, 6);
+    closeDb();
   });
 });

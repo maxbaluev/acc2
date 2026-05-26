@@ -57,12 +57,15 @@ describe("F9 SqliteDbPool", () => {
     // steady-state + TRUNCATE size backstop), not by SQLite's autocheckpoint.
     expect(pragmas.autocheckpoint).toBe(0);
     expect(pragmas.busy_timeout).toBe(5000);
-    // 2026-05-21 tuning bump: applyWalPragmas (substrate/db.ts) raised
-    // mmap_size to 1GB for the writer connection so frequently-queried
-    // views stay hot on the 800MB+ production DB. The reader pool
-    // still uses 256MB (applyReaderPragmas). Writer-mmap value follows
-    // the bump.
-    expect(pragmas.mmap_size).toBe(1073741824);
+    // 2026-05-26 native-memory meltdown triage: applyWalPragmas
+    // (substrate/db.ts) LOWERED mmap_size from the prior 1GB tuning to 256MB
+    // for the writer connection — the unbounded hot ledger made mmap +
+    // page-cache + temp-sets balloon native RSS to 5-9GB and segfault, so the
+    // pragmas now TRADE aggregate speed for bounded memory. The tiered hot/cold
+    // architecture (transparent cold-read + continuously-bounded hot ledger)
+    // is the structural follow-through; the 256MB writer mmap stays. Both the
+    // writer and the reader pool use 256MB now.
+    expect(pragmas.mmap_size).toBe(268435456);
   });
 
   test("(b) concurrent reads share pool connections (no queue when under maxReaders)", async () => {

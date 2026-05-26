@@ -182,6 +182,28 @@ CREATE TABLE IF NOT EXISTS event_kind_origin_rollup (
   substrate_origin TEXT NOT NULL,
   PRIMARY KEY (kind, substrate_origin)
 );
+
+-- Writer-maintained retrieval aggregate (amendment CB74X8B2, directive
+-- 7Z81HBY4813TF0V9T50AWFP9PG). This is the cheap, bounded source for the
+-- retrieval origin-bias signal that previously required a full-history
+-- GROUP BY scan over every hot knowledge_candidate / knowledge_promoted
+-- row plus a directive_opened payload reconstruction — a scan that grew
+-- with hot-table size and could materialize large temp sets (the
+-- native-memory meltdown surface). total_count is lifetime; live_count
+-- tracks hot rows only and is decremented by archival deletes, so the
+-- aggregate stays correct as rows move to cold. Maintained incrementally
+-- on every knowledge_candidate / knowledge_promoted insert (one indexed
+-- UPSERT, no scan).
+CREATE TABLE IF NOT EXISTS knowledge_origin_goal_shape_rollup (
+  substrate_origin TEXT NOT NULL,
+  goal_shape       TEXT NOT NULL,
+  kind             TEXT NOT NULL,
+  total_count      INTEGER NOT NULL DEFAULT 0,
+  live_count       INTEGER NOT NULL DEFAULT 0,
+  first_ts         TEXT NOT NULL,
+  last_ts          TEXT NOT NULL,
+  PRIMARY KEY (substrate_origin, goal_shape, kind)
+);
 CREATE TABLE IF NOT EXISTS event_archive_summary (
   id         TEXT PRIMARY KEY,
   kind       TEXT NOT NULL,

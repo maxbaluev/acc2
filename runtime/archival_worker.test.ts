@@ -160,11 +160,12 @@ describe("runArchivalSweep — basic monthly archival", () => {
   });
 
   test("uses threshold registry default when retentionDays not passed", async () => {
-    // Seed an old event > 30 days ago.
+    // Seed an old event well past any retention window.
     seedEventAtTs(db, "2026-01-05T00:00:00.000Z", 1);
-    // No threshold seeded → default 30 applies via getThreshold.
+    // No threshold seeded → retuned default of 7 days applies via getThreshold
+    // (amendment J9SJZDKA shrank the no-pressure default from 30 to 7).
     const summary = await runArchivalSweep(db, { stateDbPath: dbPath, nowMs: NOW });
-    expect(summary.retention_days).toBe(30);
+    expect(summary.retention_days).toBe(7);
     expect(summary.deleted).toBe(1);
   });
 });
@@ -605,15 +606,18 @@ describe("evaluateLedgerCurationPressure — pressure-triggered retention", () =
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  test("no pressure → default 30-day window; row-count above hard cap → floor", () => {
-    // Tiny caps so a handful of rows crosses the hard cap deterministically.
+  test("no pressure → short default window; row-count above hard cap → floor", () => {
+    // Amendment J9SJZDKA retuned the no-pressure default window to 7 days
+    // (was 30) so the hot ledger stays continuously bounded under sustained
+    // ~36k/day production. Tiny caps below keep pressure at 0 so we observe
+    // the unpressured default.
     const low = evaluateLedgerCurationPressure(
       db,
       { stateDbPath: dbPath, rowCountSoftCap: 1_000_000, rowCountHardCap: 2_000_000, dbSizeSoftCapBytes: 1e12, dbSizeHardCapBytes: 2e12, minRetentionDays: 2 },
       NOW,
     );
     expect(low.pressure).toBe(0);
-    expect(low.hot_retention_days).toBe(30);
+    expect(low.hot_retention_days).toBe(7);
     expect(low.pressure_source).toBe("none");
 
     // Seed a few rows so the real row count exceeds the tiny hard cap, then
@@ -629,16 +633,16 @@ describe("evaluateLedgerCurationPressure — pressure-triggered retention", () =
     expect(high.hot_retention_days).toBe(2);
   });
 
-  test("PROOF: archival fires on rows YOUNGER than 30d when row-count pressure is high", async () => {
-    // Seed 40 events all dated 5 days ago — well WITHIN the default 30-day
-    // window, so age-only archival would archive NONE of them.
+  test("PROOF: archival fires on rows YOUNGER than the default window when row-count pressure is high", async () => {
+    // Seed 40 events all dated 3 days ago — within the retuned 7-day default
+    // window (amendment J9SJZDKA), so age-only archival would archive NONE.
     for (let i = 0; i < 40; i++) {
-      const ts = new Date(NOW - 5 * 24 * 60 * 60 * 1000 + i * 1000).toISOString();
+      const ts = new Date(NOW - 3 * 24 * 60 * 60 * 1000 + i * 1000).toISOString();
       seedEventAtTs(db, ts, i);
     }
 
     // Baseline: default policy (no pressure caps crossed) archives nothing —
-    // these rows are only 5 days old.
+    // these rows are only 3 days old (inside the 7-day default window).
     const baseline = await runArchivalSweep(db, {
       stateDbPath: dbPath,
       nowMs: NOW,
@@ -647,7 +651,7 @@ describe("evaluateLedgerCurationPressure — pressure-triggered retention", () =
       dbSizeSoftCapBytes: 1e12,
       dbSizeHardCapBytes: 2e12,
     });
-    expect(baseline.retention_days).toBe(30);
+    expect(baseline.retention_days).toBe(7);
     expect(baseline.deleted).toBe(0);
 
     // Under HIGH row-count pressure (tiny caps), the window compresses to the
@@ -712,5 +716,76 @@ describe("evaluateLedgerCurationPressure — pressure-triggered retention", () =
     // (it is rolled up + evicted on the telemetry path, not the archival
     // path) — the archival sweep must leave every row in place.
     expect(eventsCount(db, "origin_calibration_recorded")).toBe(3);
+  });
+});
+
+describe("bounded hot ledger under sustained load (amendment J9SJZDKA, guarantee B)", () => {
+  let tmpDir: string;
+  let dbPath: string;
+  let db: Database;
+  const NOW = Date.parse("2026-05-26T12:00:00.000Z");
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-bounded-hot-"));
+    dbPath = join(tmpDir, "state.db");
+    db = openDb(dbPath);
+    clearSqlPool();
+  });
+  afterEach(() => {
+    closeDb(dbPath);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("repeated pressure-aware sweeps keep the hot row count bounded as production continues", async () => {
+    // Simulate sustained production: a backlog of archivable rows spread
+    // across the last several days, far exceeding a small soft/hard cap.
+    // With age-only 30-day retention NONE of these (all < 30d old) would
+    // ever archive — the hot table would grow without bound. The retuned
+    // pressure-aware policy compresses the retention window to the floor
+    // once the row count crosses the cap, so move-to-cold fires on these
+    // recent rows and the hot ledger stays bounded.
+    const TOTAL = 300;
+    for (let i = 0; i < TOTAL; i++) {
+      // Spread ages 2..6 days old (all inside the 7-day default window, so
+      // ONLY pressure can trigger archival of them).
+      const ageDays = 2 + (i % 5);
+      const ts = new Date(NOW - ageDays * 24 * 60 * 60 * 1000 + i * 1000).toISOString();
+      seedEventAtTs(db, ts, i);
+    }
+
+    const HOT_CAP = 100; // small explicit caps so the test is deterministic + fast
+    const hotCount = (): number =>
+      (db.query<{ c: number }, []>("SELECT COUNT(*) AS c FROM events WHERE kind = 'directive_opened'").get()!).c;
+
+    expect(hotCount()).toBe(TOTAL); // unbounded before any sweep
+
+    // Run several pressure-aware sweeps (each row-capped). Under high
+    // row-count pressure (count >> hard cap) the window compresses to the
+    // 1-day floor, so the 2..6-day-old rows fall past the cutoff and move
+    // to cold. minRetentionDays: 1 lets the floor archive 2-day-old rows.
+    let lastPressure = 0;
+    for (let sweep = 0; sweep < 6; sweep++) {
+      const summary = await runArchivalSweep(db, {
+        stateDbPath: dbPath,
+        nowMs: NOW,
+        rowCountSoftCap: HOT_CAP,
+        rowCountHardCap: HOT_CAP * 2,
+        dbSizeSoftCapBytes: 1e12,
+        dbSizeHardCapBytes: 2e12,
+        minRetentionDays: 1,
+        sweepLimit: 1000,
+      });
+      lastPressure = summary.pressure ?? 0;
+      if (hotCount() <= HOT_CAP) break;
+    }
+
+    // BOUNDED: after pressure-aware curation the hot ledger sits at/below the
+    // cap — the move-to-cold sweep shrank it on YOUNGER-than-default rows
+    // driven by row-count pressure, NOT by a fixed 30-day age.
+    expect(hotCount()).toBeLessThanOrEqual(HOT_CAP);
+    // And the archived rows are recoverable from the cold sibling (guarantee
+    // A) — they were moved, not lost.
+    const archives = listArchives(dbPath);
+    expect(archives.length).toBeGreaterThan(0);
   });
 });
