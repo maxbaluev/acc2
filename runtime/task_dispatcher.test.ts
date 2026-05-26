@@ -1080,3 +1080,78 @@ describe("task_dispatcher", () => {
     expect(syncCommit?.residual).toBe(0);
   });
 });
+
+// Amendment KN78GX0J — PRE-action owner-control hard gate in the dispatcher.
+describe("task_dispatcher owner-control gate (amendment KN78GX0J)", () => {
+  const SANDBOX: SandboxDecl = {
+    runtime: "bun", fs_read: ["**/*"], fs_write: [], net_allow: [], proc_allow: [],
+    substrate_access: "none", cpu_ms: 100, wall_ms: 100, memory_mb: 64,
+  };
+  const mkArtifact = (db: Database, name: string) => insertArtifact(db, {
+    runtime: "bun", body: name, declaredSandbox: SANDBOX, stateRoot: null,
+    posteriorAlpha: 1, posteriorBeta: 1, score: 0.5, confidence: 0.3,
+    recentResidualMean: 0, recentKillCount: 0, status: "admitted", name,
+    fixtureInput: null, fixtureExpectedResidual: 0.2,
+  });
+
+  const seedRootTask = (db: Database, directiveId: string, taskId: string) => {
+    emitEvent(db, { kind: "directive_opened", substrate_origin: "owner", directive_id: directiveId, task_id: taskId, payload: { directive_text: "do the irreversible thing" } });
+    emitEvent(db, { kind: "task_node_opened", substrate_origin: "substrate_auto", directive_id: directiveId, task_id: taskId, parent_task_id: null, payload: { goal: "do the irreversible thing" } });
+  };
+
+  const irreversibleBridge = (db0: Database) => {
+    let ran = false;
+    const bridge = async (req: BridgeRequest, db: Database): Promise<BridgeResult> => {
+      const action = mkArtifact(db, "owner_gate_action");
+      const verifier = mkArtifact(db, "owner_gate_verifier");
+      emitEvent(db, {
+        kind: "action_predicted",
+        substrate_origin: "opencode",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        action_artifact_id: action.id,
+        verifier_artifact_id: verifier.id,
+        predicted_residual: 0.05,
+        payload: {
+          intent: "irreversible action",
+          target_path: ".",
+          action_summary: "publish a public release",
+          irreversible_effects: [{ kind: "publish", description: "publishes to a public registry" }],
+          owner_state_belief: { uncertainty: 0.05, confidence: 0.95, latent_state: { autonomy: "high" } },
+        },
+        invoker: "opencode",
+      });
+      return { ok: true, final_response: "predicted", usage: { tokens: 0 }, emitted_event_ids: [] };
+    };
+    const runArtifact = async (inv: UnifiedRuntimeInvocation): Promise<UnifiedRuntimeObservation> => {
+      ran = true;
+      return { ok: true, result: { residual: 0 }, irreversibleEffects: [], durationMs: 0, exitCode: 0, stderrTail: "", sandboxWarnings: [] };
+    };
+    return { bridge, runArtifact, didRun: () => ran };
+  };
+
+  test("planned-irreversible artifact is NOT invoked when consent is missing; hidl_action_required emitted, no action_scored success", async () => {
+    const db = openDb(":memory:");
+    const directiveId = "dir_owner_gate";
+    const taskId = newId();
+    seedRootTask(db, directiveId, taskId);
+    const act = irreversibleBridge(db);
+    await dispatchReadyTask(db, { id: taskId, directive_id: directiveId, parent_id: null, goal: "do the irreversible thing", status: "ready" }, act);
+
+    // The artifact MUST NOT have run.
+    expect(act.didRun()).toBe(false);
+
+    // A hidl_action_required gate was emitted.
+    const gate = db.query("SELECT payload FROM events WHERE kind = 'hidl_action_required' AND task_id = ?").get(taskId) as { payload: string } | null;
+    expect(gate).not.toBeNull();
+    expect(JSON.parse(gate!.payload).reason).toBe("irreversible_effect_requires_consent");
+
+    // No successful action_scored landed (residual 0 success path never ran).
+    const scoredSuccess = db.query("SELECT COUNT(*) AS c FROM events WHERE kind = 'action_scored' AND task_id = ? AND residual = 0").get(taskId) as { c: number };
+    expect(scoredSuccess.c).toBe(0);
+
+    // No artifact_observed for the action artifact (proves no execution).
+    const observed = db.query("SELECT COUNT(*) AS c FROM events WHERE kind = 'artifact_observed' AND task_id = ?").get(taskId) as { c: number };
+    expect(observed.c).toBe(0);
+  });
+});

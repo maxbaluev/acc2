@@ -3,7 +3,7 @@
 // consent. Dynamic owner-stated boundaries live in owner_profile.things_to_never_do.
 
 import type { Database } from "bun:sqlite";
-import type { SandboxDecl } from "../substrate/types";
+import type { SandboxDecl, OwnerProfile } from "../substrate/types";
 
 export const OWNER_GATED_PATH_PATTERNS: ReadonlyArray<{ pattern: string; regex: RegExp }> = Object.freeze([]);
 
@@ -33,6 +33,33 @@ export const ownerGateDecision = (_sandbox: SandboxDecl): OwnerGateDecision => (
   requires_consent: false,
   matched_patterns: [],
 });
+
+/** Owner hard-boundary matcher (amendment KN78GX0J). Returns the
+ *  owner_profile.things_to_never_do entries that match any of the supplied
+ *  action/target/capability texts. Matching is case-insensitive substring
+ *  in BOTH directions (a boundary phrase appearing in the action text, OR
+ *  a target/capability appearing inside a boundary phrase) so an owner can
+ *  declare either coarse ("delete production data") or specific
+ *  ("repo:secrets.env") boundaries. NOT a static path enum — the boundaries
+ *  are the owner's own learned strings. */
+export const profileThingsNeverDoMatches = (
+  profile: OwnerProfile | null | undefined,
+  texts: string[],
+): string[] => {
+  const boundaries = profile?.things_to_never_do ?? [];
+  if (boundaries.length === 0) return [];
+  const haystacks = texts
+    .filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+    .map((t) => t.toLowerCase());
+  const matched: string[] = [];
+  for (const boundary of boundaries) {
+    if (typeof boundary !== "string" || boundary.trim().length === 0) continue;
+    const b = boundary.toLowerCase();
+    const hit = haystacks.some((h) => h.includes(b) || b.includes(h));
+    if (hit) matched.push(boundary);
+  }
+  return matched;
+};
 
 /** Look up the cited consent event and verify its shape:
  *    - exists in the events table

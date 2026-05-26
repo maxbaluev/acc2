@@ -26,7 +26,8 @@ import { ARTIFACT_LIFECYCLE_KINDS } from "../substrate/event_kinds";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
 import { poolQuery } from "./sql_pool_singleton";
-import { composePrompt } from "./prompt_composer";
+import { composePrompt, readOwnerProfile } from "./prompt_composer";
+import { evaluateOwnerControlGate } from "./owner_state_transition_verifier";
 import { getReloadable } from "./reloadable";
 
 // Hot-reload deep-improvement (2026-05-17): resolve composePrompt through
@@ -1125,6 +1126,74 @@ export const dispatchReadyTask = async (
         ...(predictedPayload as Record<string, unknown>),
         target_path: ((predictedPayload as Record<string, unknown>).target_path as string) ?? deps.fixtureTargetPath ?? ".",
       } as JsonValue;
+
+      // Amendment KN78GX0J — PRE-ACTION owner-control hard gate.
+      // owner_state_belief is calibration only; explicit consent /
+      // things_to_never_do / irreversible-effect constraints are enforced
+      // HERE, BEFORE the artifact runs. A refusal emits
+      // owner_input_required / hidl_action_required and skips invocation —
+      // no irreversible_effect_recorded after-the-fact, no action_scored
+      // success. This is the structural enforcement (k_252): a learned
+      // owner-state prior can never authorize a protected action.
+      const plannedIrreversible = Array.isArray(predictedPayload.irreversible_effects)
+        ? (predictedPayload.irreversible_effects as Array<Record<string, unknown>>)
+        : [];
+      const declaresIrreversibleSandbox = Array.isArray(actionSandbox.fs_write) && actionSandbox.fs_write.length > 0
+        && predictedPayload.irreversible === true;
+      const irreversibleForGate = plannedIrreversible.length > 0
+        ? plannedIrreversible
+        : (declaresIrreversibleSandbox ? [{ effect_kind: "declared_irreversible", description: "sandbox fs_write + payload.irreversible=true" }] : []);
+      const citedConsent = typeof predictedPayload.owner_consent_event_id === "string" && predictedPayload.owner_consent_event_id.length > 0
+        ? [predictedPayload.owner_consent_event_id as string]
+        : [];
+      const ownerStateBelief = (predictedPayload.owner_state_belief && typeof predictedPayload.owner_state_belief === "object")
+        ? predictedPayload.owner_state_belief as Record<string, unknown>
+        : null;
+      const ownerControl = evaluateOwnerControlGate(db, {
+        directive_id: task.directive_id,
+        task_id: task.id,
+        action_summary: typeof predictedPayload.action_summary === "string" ? predictedPayload.action_summary : (task.goal ?? actionArtifact.id),
+        target_resources: [
+          typeof predictedPayload.target_path === "string" ? predictedPayload.target_path : "",
+          ...(Array.isArray(predictedPayload.target_resources) ? (predictedPayload.target_resources as unknown[]).filter((r): r is string => typeof r === "string") : []),
+        ].filter((s) => s.length > 0),
+        irreversible_effects: irreversibleForGate,
+        requested_capabilities: [...(actionSandbox.fs_write ?? []), ...(actionSandbox.net_allow ?? [])],
+        cited_owner_consent_event_ids: citedConsent,
+        owner_state_belief: ownerStateBelief,
+        owner_profile: readOwnerProfile(db),
+      });
+      if (!ownerControl.allowed) {
+        emitEvent(db, {
+          kind: ownerControl.gate_kind ?? "owner_input_required",
+          substrate_origin: "substrate_auto",
+          directive_id: task.directive_id,
+          task_id: task.id,
+          context_refs: [actionPredicted.id, ...ownerControl.evidence_event_ids],
+          payload: {
+            dispatch_id: dispatchId,
+            reason: ownerControl.reason,
+            summary: ownerControl.summary,
+            suggested_action: ownerControl.suggested_action,
+            matched_boundaries: ownerControl.matched_boundaries,
+            action_artifact_id: actionArtifact.id,
+            owner_state_belief_uncertainty: ownerControl.uncertainty,
+          } as JsonValue,
+        });
+        emitEvent(db, {
+          kind: "brain_dispatch_closed",
+          substrate_origin: "substrate_auto",
+          directive_id: task.directive_id,
+          task_id: task.id,
+          payload: {
+            dispatch_id: dispatchId,
+            reason: "owner_control_gate_refused",
+            gate_kind: ownerControl.gate_kind,
+            events_count: dispatchEvents.length,
+          } as JsonValue,
+        });
+        return { dispatch_id: dispatchId, task_id: task.id, events: dispatchEvents, violations, bridge_result: bridgeResult };
+      }
 
       const actionObs = await runArtifact({
         artifactId: actionArtifact.id,

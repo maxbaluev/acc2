@@ -1705,6 +1705,11 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   // self-feeding). Direct call sites that propose a candidate from
   // owner-stated intent can still invoke recordOwnerProfileAttributeAct
   // explicitly; the emit boundary stays scoped to commits.
+  // Amendment KN78GX0J: this projection records the owner-profile attribute
+  // write for calibration. It is NOT the owner-control enforcement point —
+  // explicit consent / things_to_never_do / irreversible-effect constraints
+  // are enforced PRE-action by evaluateOwnerControlGate
+  // (runtime/owner_state_transition_verifier.ts) before any artifact runs.
   if (input.kind === "owner_profile_recorded") {
     enqueuePostCommitProjection(db, {
       label: "owner_profile_recorded:profile_attr",

@@ -1611,6 +1611,13 @@ const formatLatentState = (latent: Record<string, unknown>, confidence: Record<s
 
 export const buildOwnerStateBeliefSection = (belief: OwnerStateBeliefRow | null): string => {
   const lines: string[] = ["## OWNER STATE BELIEF"];
+  // Amendment KN78GX0J: owner_state_belief is CALIBRATION EVIDENCE ONLY. It
+  // can never AUTHORIZE a sensitive or irreversible action. Explicit owner
+  // consent, things_to_never_do, and irreversible-effect constraints are
+  // enforced by the pre-action owner-control hard gate
+  // (runtime/owner_state_transition_verifier.evaluateOwnerControlGate),
+  // not by this belief and not by prompt text.
+  lines.push("(calibration evidence only — cannot authorize sensitive actions; consent / boundaries / irreversibility are enforced by the owner-control hard gate)");
   if (!belief) {
     lines.push("(no owner_state_hypothesis_recorded row yet — substrate has not formed a latent-state belief)");
     lines.push("Hint: when you have enough owner_input_received / owner_observed_outcome_recorded evidence to form a hypothesis, emit owner_state_hypothesis_recorded with latent_state, per-axis confidence, observation_refs, and uncertainty.");
