@@ -26,6 +26,33 @@ export interface ClosureDeliverableResult {
   uncovered_leaves: string[]; // task_ids whose goal verb implied a deliverable but none was emitted
 }
 
+// Goal-sufficiency convergence (amendment goal_sufficiency_root_commit): the
+// deliverable check is PRESSURE/PROVENANCE, not a commit gate. A root that the
+// closure verifier judged goal-satisfied (residual < 0.3) commits even with
+// uncovered leaves — those leaves are redundant open frontier, reported here so
+// the credit/closure paths can MARK them, never to block the commit.
+export interface ClosureDeliverablePressure {
+  /** True iff every deliverable-shaped leaf produced a concrete artifact. */
+  fully_covered: boolean;
+  /** Leaves still without a deliverable — provenance/pressure, NOT a blocker. */
+  uncovered_leaves: string[];
+  /** Always false: deliverable coverage never blocks a goal-satisfied root. */
+  blocks_commit: false;
+}
+
+/** Classify the deliverable check as commit PRESSURE. Open/uncovered leaves are
+ *  reported for provenance and backprop marking, but the result never blocks a
+ *  goal-satisfied root's commit — goal-sufficiency is the stop rule, coverage
+ *  is the pressure signal. */
+export const closureDeliverablePressure = (
+  db: Database,
+  rootTaskId: string,
+  directiveId?: string,
+): ClosureDeliverablePressure => {
+  const { ok, uncovered_leaves } = checkClosureDeliverables(db, rootTaskId, directiveId);
+  return { fully_covered: ok, uncovered_leaves, blocks_commit: false };
+};
+
 const parsePayload = (raw: string): Record<string, JsonValue> => {
   try { return JSON.parse(raw ?? "{}") as Record<string, JsonValue>; } catch { return {}; }
 };

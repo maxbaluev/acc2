@@ -72,6 +72,13 @@ import { nowIso } from "./ids";
 // it densifies the learning signal without swamping the primary terminal
 // credit each act already received.
 const BACKPROP_BASE_WEIGHT = 0.25;
+// Ungrounded / self-reported closure provenance MARKS (reduces backprop credit
+// weight) but NEVER blocks commit (amendment ungrounded_provenance_weight). When
+// the closure verdict that triggers this dense pass is self-reported rather than
+// substrate-verified, every contributor's distributed weight is multiplied by
+// this factor — the dense signal becomes a fraction of its grounded value. The
+// root still commits (sufficiency over coverage); the credit is just lighter.
+const UNGROUNDED_PROVENANCE_WEIGHT_MULTIPLIER = 0.5; // mark/pressure, never block commit
 // Per refines-hop decay toward the root. A node 2 hops below the root gets
 // BACKPROP_BASE_WEIGHT * BACKPROP_DEPTH_DECAY^2. Distant intermediate work
 // gets a smaller (but non-zero) share of the closure outcome.
@@ -114,6 +121,10 @@ export type DenseClosureCreditInput = {
   /** Numeric closure_residual from the audit payload (already validated by
    *  the caller to be finite). */
   closure_residual: number;
+  /** When true, the closure verdict that triggered this pass is ungrounded /
+   *  self-reported (provenance !== "closure_audit"). Distributed credit weight
+   *  is damped by UNGROUNDED_PROVENANCE_WEIGHT_MULTIPLIER. Marks, never blocks. */
+  ungrounded_provenance?: boolean;
 };
 
 export type DenseClosureCreditResult = {
@@ -384,7 +395,10 @@ export const distributeDenseClosureCredit = (
       // special-cased; weight decays toward the root so deeper intermediate
       // work — closer to the leaves where concrete acts run — keeps more of
       // the base weight. taskDepth 0 (root-adjacent / orphan) is damped most.
-      const weight = BACKPROP_BASE_WEIGHT * Math.pow(BACKPROP_DEPTH_DECAY, Math.max(0, taskDepth - 1));
+      // Ungrounded / self-reported provenance further damps the weight (mark,
+      // never block) — the root still committed; its dense credit is lighter.
+      const provenanceMultiplier = input.ungrounded_provenance ? UNGROUNDED_PROVENANCE_WEIGHT_MULTIPLIER : 1;
+      const weight = BACKPROP_BASE_WEIGHT * Math.pow(BACKPROP_DEPTH_DECAY, Math.max(0, taskDepth - 1)) * provenanceMultiplier;
 
       const kind = classify(db, targetId);
       if (kind === "act_artifact") {

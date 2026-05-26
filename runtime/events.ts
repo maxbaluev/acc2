@@ -755,7 +755,13 @@ const rootTaskCommitBlocker = (db: Database, taskId: string): RootCommitBlocker 
   let closureResidual: number | null = null;
   if (audit) { try { const p = JSON.parse(audit.payload ?? '{}') as { closure_residual?: unknown }; closureResidual = typeof p.closure_residual === 'number' && Number.isFinite(p.closure_residual) ? p.closure_residual : typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null; } catch { closureResidual = typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null; } }
   if (closureResidual === null || closureResidual >= 0.3) return { reason: "missing_clean_closure_audit", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [], open_frontier_count: frontier.open_count };
-  return frontier.open_count > 0 ? { reason: "nonterminal_descendants", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: frontier.open_descendant_task_ids, open_frontier_count: frontier.open_count } : null;
+  // GOAL-SUFFICIENCY (amendment goal_sufficiency_root_commit). A goal-satisfied
+  // root (clean closure audit, residual < 0.3) commits even with redundant open
+  // frontier. The open frontier is emitted as provenance/pressure by the closure
+  // and credit paths, NOT as a commit blocker — coverage no longer gates the
+  // commit, goal sufficiency does. Returns null (commit allowed) regardless of
+  // open_frontier_count once the closure verdict is clean.
+  return null;
 };
 
 const emitProjectedEvent = (

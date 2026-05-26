@@ -223,45 +223,77 @@ describe("directive_closure", () => {
     expect(ids.has(taskId)).toBe(true);
   });
 
-  test("rootCommitReadiness blocks root success while descendants are non-terminal", () => {
+  // GOAL-SUFFICIENCY (amendment goal_sufficiency_root_commit). Supersedes the
+  // old coverage-completeness semantics: a root commits as soon as the directive
+  // GOAL is satisfied (clean closure audit, residual < 0.3) — NOT when every
+  // descendant has terminalized. Open frontier is reported as provenance/pressure
+  // (nonterminal_descendant_task_ids / open_frontier_count) but never blocks.
+  test("rootCommitReadiness commits on goal sufficiency even with open frontier; blocks only without a clean closure", () => {
     const db = openDb(":memory:"); runViews(db);
     const directiveId = newId(); const rootTaskId = newId(); const childA = newId(); const childB = newId();
     emitEvent(db, { kind: "directive_opened", substrate_origin: "owner", directive_id: directiveId, task_id: directiveId, payload: { directive_text: "readiness fixture", lifecycle: "finite" } });
     emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, parent_task_id: null, payload: { goal: "root goal" } });
     for (const id of [childA, childB]) { emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: id, parent_task_id: rootTaskId, payload: { goal: `child ${id}` } }); emitEvent(db, { kind: "task_edge_recorded", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, payload: { kind: "refines", from_task: rootTaskId, to_task: id } }); }
     expect(descendantTaskIds(db, rootTaskId).sort()).toEqual([childA, childB].sort());
+    // No closure audit yet → NOT goal-satisfied → blocks (still true under the redesign).
     expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: false, reason: "missing_clean_closure_audit" });
+    // Clean closure audit (residual < 0.3) → goal-satisfied → COMMIT-READY even
+    // though BOTH children are still open. The open frontier is reported, not gated.
     emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.12, payload: { closure_residual: 0.12 } });
-    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: false, reason: "nonterminal_descendants", nonterminal_descendant_task_ids: expect.arrayContaining([childA, childB]) });
+    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: true, closure_residual: 0.12, open_frontier_count: 2, nonterminal_descendant_task_ids: expect.arrayContaining([childA, childB]) });
+    // Committing the descendants does not change the verdict — it was already ok;
+    // the frontier simply drains to empty (provenance), root stays commit-ready.
     for (const id of [childA, childB]) emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: id, payload: { summary: "child done" } });
-    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: true, closure_residual: 0.12 });
+    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: true, closure_residual: 0.12, open_frontier_count: 0 });
   });
 
-  test("openFrontier counts open decomposition descendants and drains to commit-eligible (frontier_drainer)", () => {
+  // A root that is NOT goal-satisfied (residual >= 0.3) STILL blocks even with no
+  // open frontier — sufficiency is a real gate, not an unconditional pass.
+  test("rootCommitReadiness blocks when the closure audit residual is >= 0.3 (not goal-satisfied)", () => {
+    const db = openDb(":memory:"); runViews(db);
+    const directiveId = newId(); const rootTaskId = newId();
+    emitEvent(db, { kind: "directive_opened", substrate_origin: "owner", directive_id: directiveId, task_id: directiveId, payload: { directive_text: "unsatisfied fixture", lifecycle: "finite" } });
+    emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, parent_task_id: null, payload: { goal: "root goal" } });
+    // High residual = goal NOT met → blocks regardless of (empty) frontier.
+    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.42, payload: { closure_residual: 0.42 } });
+    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: false, reason: "missing_clean_closure_audit", closure_residual: 0.42 });
+  });
+
+  // GOAL-SUFFICIENCY (amendment goal_sufficiency_root_commit). openFrontier is
+  // still the single source of truth for "which descendants are not yet terminal",
+  // but under the redesign the open frontier is PROVENANCE/PRESSURE reported
+  // through rootCommitReadiness — NOT a wait_on_frontier commit blocker. A clean
+  // closure makes the root commit-ready immediately; the frontier merely drains.
+  test("openFrontier reports open descendants as provenance/pressure; a clean closure is commit-ready regardless (goal-sufficiency)", () => {
     const db = openDb(":memory:"); runViews(db);
     const directiveId = newId(); const rootTaskId = newId(); const childA = newId(); const childB = newId();
     emitEvent(db, { kind: "directive_opened", substrate_origin: "owner", directive_id: directiveId, task_id: directiveId, payload: { directive_text: "frontier fixture", lifecycle: "finite" } });
     emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, parent_task_id: null, payload: { goal: "root goal" } });
     for (const id of [childA, childB]) emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: id, parent_task_id: rootTaskId, payload: { goal: `child ${id}` } });
 
-    // Two open descendants → frontier count 2, root NOT terminal-eligible.
+    // Two open descendants → frontier count 2. Without a clean closure the root is
+    // not goal-satisfied, so it still blocks (missing_clean_closure_audit).
     let f = openFrontier(db, rootTaskId);
     expect(f.open_count).toBe(2);
     expect(f.total_descendant_count).toBe(2);
     expect(f.open_descendant_task_ids.sort()).toEqual([childA, childB].sort());
+    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: false, reason: "missing_clean_closure_audit", open_frontier_count: 2 });
 
-    // Clean closure but open frontier → wait_on_frontier, root NOT ok.
+    // Clean closure with open frontier → COMMIT-READY (ok). The open frontier is
+    // reported as provenance (open_frontier_count / nonterminal_descendant_task_ids),
+    // never a wait_on_frontier blocker.
     emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.1, payload: { closure_residual: 0.1 } });
-    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: false, reason: "nonterminal_descendants", status_reason: "wait_on_frontier", open_frontier_count: 2 });
+    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: true, open_frontier_count: 2, nonterminal_descendant_task_ids: expect.arrayContaining([childA, childB]) });
 
-    // Drain one descendant → frontier shrinks, root still parked.
+    // Drain one descendant → frontier shrinks; root stays commit-ready (pressure
+    // is dropping, the verdict never changed).
     emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: childA, payload: { summary: "A done" } });
     f = openFrontier(db, rootTaskId);
     expect(f.open_count).toBe(1);
     expect(f.open_descendant_task_ids).toEqual([childB]);
-    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: false, status_reason: "wait_on_frontier", open_frontier_count: 1 });
+    expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: true, open_frontier_count: 1 });
 
-    // Drain the last descendant → frontier empty, root becomes commit-eligible.
+    // Drain the last descendant → frontier empty; root remains commit-ready.
     emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: childB, payload: { summary: "B done" } });
     expect(openFrontier(db, rootTaskId).open_count).toBe(0);
     expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: true, open_frontier_count: 0 });
