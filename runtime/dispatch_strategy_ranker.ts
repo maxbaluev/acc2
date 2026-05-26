@@ -32,6 +32,159 @@ import type { TaskNode } from "./task_topology";
 
 const STRATEGY_KIND_TAG = "dispatch_strategy_v1";
 
+// ── Universal scored-decision-policy primitive ─────────────────────────
+//
+// Every learnable substrate decision can be represented as an act_artifact
+// row with kind = DECISION_POLICY_KIND. The row's body/payload declare
+// {decision_kind, goal_shape_key|goal_shape_tags, policy_params, ...}. The
+// four-link chain (retrieve → cite → credit) closes UNIVERSALLY through the
+// EXISTING artifact retrieval + posterior + credit envelope — this primitive
+// adds NO new posterior table and NO bespoke score family. A selected policy
+// artifact's id is cited into the governing act; the standard action_scored +
+// dense_closure_credit envelope then moves its NORMAL act_artifact posterior.
+//
+// LEGACY_DISPATCH_STRATEGY_KIND is the pre-existing dispatch_strategy_v1 kind
+// (still ranked by rankStrategies for the dispatch_lane site). DECISION_POLICY_KIND
+// is the universal kind keyed by decision_kind. DISPATCH_DECISION_KIND is the
+// decision_kind discriminator for the dispatch-lane decision site.
+const LEGACY_DISPATCH_STRATEGY_KIND = "dispatch_strategy_v1";
+export const DECISION_POLICY_KIND = "scored_decision_policy_v1";
+export const DISPATCH_DECISION_KIND = "dispatch_lane";
+
+void LEGACY_DISPATCH_STRATEGY_KIND;
+
+/** A retrieved scored_decision_policy_v1 artifact, ranked for a decision site. */
+export type SelectedDecisionPolicy = {
+  /** act_artifact row id — cite THIS into the governing act so credit lands here. */
+  artifact_id: string;
+  decision_kind: string;
+  /** posterior_mean × confidence, the ranking weight (standard act_artifact posterior). */
+  rank_weight: number;
+  score: number;
+  confidence: number;
+  /** Free-form policy params parsed from the artifact body/payload. */
+  policy_params: Record<string, unknown>;
+};
+
+export type SelectDecisionPolicyInput = {
+  /** decision_kind discriminator (e.g. "dispatch_lane", "model_route",
+   *  "capability_resolution", "owner_rendering"). Free string. */
+  decision_kind: string;
+  /** Current goal_shape key/hash to condition on. Reuses existing goal-shape
+   *  machinery; never regex over language. May be null/empty (matches "any"). */
+  goal_shape?: string | null;
+  /** Optional extra match hints folded into the SQL LIKE filter. */
+  trigger?: string | null;
+  artifact_kind?: string | null;
+  evidence?: unknown;
+  /** Max policies to return, highest rank_weight first. */
+  topN?: number;
+};
+
+const extractPolicyParams = (body: string): Record<string, unknown> => {
+  // The policy artifact body declares `const POLICY = {...}` (mirrors the
+  // strategy declaration shape) returning structured params. Reuse the same
+  // brace-balanced literal extractor used for STRATEGY declarations.
+  const start = body.indexOf("const POLICY = ");
+  if (start < 0) return {};
+  const open = body.indexOf("{", start);
+  if (open < 0) return {};
+  let depth = 0;
+  let end = -1;
+  let inString: '"' | "'" | null = null;
+  for (let i = open; i < body.length; i++) {
+    const ch = body[i];
+    if (inString) {
+      if (ch === "\\") { i++; continue; }
+      if (ch === inString) inString = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { inString = ch; continue; }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) { end = i + 1; break; }
+    }
+  }
+  if (end < 0) return {};
+  try {
+    const factory = new Function(`return ${body.slice(open, end)};`);
+    const parsed = factory() as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object") return {};
+    // The declaration nests the tunable knobs under `policy_params`; surface
+    // those directly while keeping the full declaration's other fields
+    // (decision_kind, goal_shape_key, rollout, verifier_handle) merged in so a
+    // caller can read either shape.
+    const nested = parsed.policy_params;
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      return { ...(nested as Record<string, unknown>), ...parsed };
+    }
+    return parsed;
+  } catch {
+    return {};
+  }
+};
+
+/** UNIVERSAL retrieval leg of the four-link chain. Retrieve the best
+ *  scored_decision_policy_v1 artifact(s) for a decision site, keyed by
+ *  decision_kind + current goal_shape, ranked by the STANDARD act_artifact
+ *  posterior (score × confidence). Pure read; no side effects. Returns [] on
+ *  any error (fail-soft: a decision site must never break because a policy
+ *  lookup failed). The caller CITES the returned artifact_id(s) into the
+ *  governing act so the existing credit envelope moves their posteriors. */
+export const selectDecisionPolicyArtifacts = (
+  db: Database,
+  input: SelectDecisionPolicyInput,
+): SelectedDecisionPolicy[] => {
+  const topN = input.topN ?? 1;
+  const goalShape = (input.goal_shape ?? "").trim();
+  type Row = { id: string; body: string; score: number; confidence: number };
+  let rows: Row[];
+  try {
+    // Condition on decision_kind (required) and goal_shape (soft: a policy
+    // tagged goal_shape:any, or matching the current shape, qualifies). The
+    // body/name carry these as free-string tags so retrieval reuses the same
+    // registry + posterior the dispatch strategy ranker already uses.
+    rows = db
+      .query(
+        `SELECT id, body, score, confidence
+         FROM act_artifact_registry_view
+         WHERE kind = '${DECISION_POLICY_KIND}'
+           AND status IN ('admitted', 'promoted')
+           AND (body LIKE ? OR name LIKE ?)
+           AND (? = ''
+                OR body LIKE ? OR name LIKE ?
+                OR body LIKE '%goal_shape_key%''any''%'
+                OR body LIKE '%goal_shape_tags%''any''%'
+                OR body LIKE '%goal_shape:any%')
+         ORDER BY score DESC, confidence DESC
+         LIMIT ${Math.max(1, topN)}`,
+      )
+      .all(
+        `%decision_kind%${input.decision_kind}%`,
+        `%${input.decision_kind}%`,
+        goalShape,
+        `%${goalShape}%`,
+        `%${goalShape}%`,
+      ) as Row[];
+  } catch {
+    return [];
+  }
+  return rows.map((r) => {
+    const params = extractPolicyParams(r.body);
+    const score = r.score ?? 0;
+    const confidence = r.confidence ?? 0;
+    return {
+      artifact_id: r.id,
+      decision_kind: input.decision_kind,
+      rank_weight: score * confidence,
+      score,
+      confidence,
+      policy_params: params,
+    };
+  });
+};
+
 type StrategyDecl = {
   /** Substrate id of the source act_artifact row. */
   artifact_id: string;

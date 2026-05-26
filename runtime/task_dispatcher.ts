@@ -309,9 +309,21 @@ export const dispatchReadyTask = async (
   // selected route's score: a high-scored route predicts a low
   // residual; a defensive-fallback route predicts a higher residual.
   const selectedRouteScore = dispatchDecisionEvidence.route_scores[decision.route] ?? 0.5;
+  // F6 + universal scored-decision-policy. When an admitted dispatch policy
+  // artifact actually moved route_scores toward the chosen route, the downstream
+  // lane residual must credit THAT policy artifact's posterior — not the fixed
+  // dispatch_decider_v1 handle. The governing policy is the strategy rank whose
+  // route_delta for the chosen route is positive (it changed the decision); we
+  // route credit to its act_artifact row by using its id as both the action
+  // handle and a cited artifact. With no governing policy, behaviour is unchanged
+  // (the fixed dispatch_decider_v1 handle keeps receiving the residual).
+  const governingDispatchPolicyId = dispatchDecisionEvidence.strategy_ranks
+    ?.find((rank) => (rank.route_deltas?.[decision.route] ?? 0) > 0)
+    ?.artifact_id;
+  const dispatchActionHandle = governingDispatchPolicyId ?? "dispatch_decider_v1";
   recordInternalAct(db, {
     intent: "select dispatch lane",
-    actionHandle: "dispatch_decider_v1",
+    actionHandle: dispatchActionHandle,
     verifierHandle: "lane_outcome_residual",
     verifierKind: "deterministic_code",
     predictedResidual: 1 - selectedRouteScore,
@@ -321,12 +333,16 @@ export const dispatchReadyTask = async (
     directiveId: task.directive_id,
     taskId: task.id,
     sourceEventId: dispatchDecidedEvent.id,
-    sourceActId: "dispatch_decider_v1:" + dispatchId,
+    sourceActId: dispatchActionHandle + ":" + dispatchId,
+    citedArtifactIds: governingDispatchPolicyId ? [governingDispatchPolicyId] : [],
     extra: {
       route: decision.route,
       reason: decision.reason,
       selected_route_score: selectedRouteScore,
       dispatch_id: dispatchId,
+      ...(governingDispatchPolicyId
+        ? { decision_policy_artifact_id: governingDispatchPolicyId, decision_kind: "dispatch_lane" }
+        : {}),
     },
   });
 
@@ -1454,6 +1470,17 @@ export const dispatchReadyTask = async (
           residual = (verifierObs.result as { residual: number }).residual;
         }
 
+        // Universal scored-decision-policy: the leaf outcome residual is the
+        // same downstream signal that should reach the dispatch-lane policy
+        // artifacts (dispatch_strategy ranks) and any runtime-route scorer that
+        // governed THIS dispatch. Cite their ids on the leaf action_scored so
+        // the SAME credit envelope moves their normal act_artifact posterior —
+        // no parallel posterior, no new metric family. Empty when no policy
+        // governed the route (behaviour unchanged).
+        const downstreamDecisionPolicyArtifactIds = Array.from(new Set([
+          ...(decision.strategy_ranks ?? []).map((rank) => rank.artifact_id),
+          ...(decision.runtime_selection?.scorer_artifact_ids ?? []),
+        ].filter((id): id is string => typeof id === "string" && id.length > 0)));
         const scored = emitEvent(db, {
           kind: "action_scored",
           substrate_origin: "substrate_auto",
@@ -1463,6 +1490,7 @@ export const dispatchReadyTask = async (
           verifier_artifact_id: verifierArtifact.id,
           predicted_residual: actionPredicted.predicted_residual ?? undefined,
           residual,
+          context_refs: [dispatchDecidedEvent.id, ...downstreamDecisionPolicyArtifactIds],
           payload: {
             dispatch_id: dispatchId,
             action_result: actionObs.result ?? null,

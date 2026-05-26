@@ -220,12 +220,20 @@ const collectContributors = (
     const prev = out.get(id);
     if (prev === undefined || taskDepth < prev) out.set(id, taskDepth);
   };
-  const noteDecompositionArtifact = (id: string, taskDepth: number) => {
+  // Root-level structural citations are densely credited when the cited
+  // act_artifact is a structural DECISION: a decomposition strategy predicate
+  // OR a universal scored_decision_policy_v1 row (dispatch lane, model route,
+  // capability resolution, future scheduler decisions). Both shape WHERE/HOW
+  // the directive decomposes, so a root/refinement/capability-author citation
+  // to either must reach dense closure credit. Other root act artifacts remain
+  // excluded. ADDITIVE: this widens the admitted-kind set, it does not change
+  // the credit math.
+  const noteStructuralDecisionArtifact = (id: string, taskDepth: number) => {
     if (!id) return;
     const row = db
       .query<{ kind: string }, [string]>("SELECT kind FROM act_artifact WHERE id = ? LIMIT 1")
       .get(id);
-    if (row?.kind === "decomposition_strategy_predicate") note(id, taskDepth);
+    if (row?.kind === "decomposition_strategy_predicate" || row?.kind === "scored_decision_policy_v1") note(id, taskDepth);
   };
 
   // Acts under these tasks: action_predicted (carries the act tuple's cited
@@ -261,8 +269,8 @@ const collectContributors = (
     for (const r of structuralRows) {
       const d = depth.get(r.task_id) ?? 0;
       const p = jsonObject(r.payload);
-      for (const id of stringArray(p.cited_artifact_ids)) noteDecompositionArtifact(id, d);
-      for (const id of stringArray(safeParseArray(r.context_refs))) noteDecompositionArtifact(id, d);
+      for (const id of stringArray(p.cited_artifact_ids)) noteStructuralDecisionArtifact(id, d);
+      for (const id of stringArray(safeParseArray(r.context_refs))) noteStructuralDecisionArtifact(id, d);
     }
   }
 

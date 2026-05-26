@@ -16,6 +16,8 @@ import {
   loadStrategyArtifacts,
   rankStrategies,
   applyStrategyRouteDeltas,
+  selectDecisionPolicyArtifacts,
+  DECISION_POLICY_KIND,
   type StrategyRankingContext,
   type RankedStrategy,
 } from "./dispatch_strategy_ranker";
@@ -56,6 +58,65 @@ describe("dispatch_strategy_ranker — loadStrategyArtifacts", () => {
     runViews(db);
     // No seedActArtifacts call.
     expect(loadStrategyArtifacts(db)).toEqual([]);
+  });
+});
+
+describe("scored_decision_policy_v1 — universal retrieval (selectDecisionPolicyArtifacts)", () => {
+  test("retrieves a seeded policy by decision_kind + goal_shape:any", () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    seedActArtifacts(db);
+    // The capability_resolution and owner_rendering policies are seeded with
+    // goal_shape_key:any → they match any current goal_shape.
+    const cap = selectDecisionPolicyArtifacts(db, { decision_kind: "capability_resolution", goal_shape: "abc123" });
+    expect(cap.length).toBeGreaterThanOrEqual(1);
+    expect(cap[0]!.decision_kind).toBe("capability_resolution");
+    expect(cap[0]!.artifact_id.length).toBeGreaterThan(0);
+    expect(cap[0]!.policy_params.resolution_strategy).toBe("author_new_artifact");
+
+    const render = selectDecisionPolicyArtifacts(db, { decision_kind: "owner_rendering" });
+    expect(render.length).toBeGreaterThanOrEqual(1);
+    expect(render[0]!.decision_kind).toBe("owner_rendering");
+  });
+
+  test("decision_kind discriminates — capability_resolution does not return model_route rows", () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    seedActArtifacts(db);
+    const cap = selectDecisionPolicyArtifacts(db, { decision_kind: "capability_resolution", topN: 10 });
+    for (const p of cap) {
+      const row = db.query<{ body: string }, [string]>("SELECT body FROM act_artifact WHERE id = ? LIMIT 1").get(p.artifact_id);
+      expect(row!.body.includes("decision_kind: 'capability_resolution'")).toBe(true);
+      expect(row!.body.includes("decision_kind: 'model_route'")).toBe(false);
+    }
+  });
+
+  test("highest score×confidence ranks first; ties stable", () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    seedActArtifacts(db);
+    // Boost one capability policy's posterior so it must rank first.
+    const all = selectDecisionPolicyArtifacts(db, { decision_kind: "capability_resolution", topN: 10 });
+    expect(all.length).toBeGreaterThanOrEqual(1);
+    db.run("UPDATE act_artifact SET score = 0.95, confidence = 0.9 WHERE id = ?", [all[0]!.artifact_id]);
+    const top = selectDecisionPolicyArtifacts(db, { decision_kind: "capability_resolution", topN: 1 })[0]!;
+    expect(top.artifact_id).toBe(all[0]!.artifact_id);
+    expect(top.rank_weight).toBeCloseTo(0.95 * 0.9, 6);
+  });
+
+  test("no matching policy returns [] (fail-soft)", () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    seedActArtifacts(db);
+    expect(selectDecisionPolicyArtifacts(db, { decision_kind: "no_such_decision_kind" })).toEqual([]);
+  });
+
+  test("DECISION_POLICY_KIND is the universal scored_decision_policy_v1 kind", () => {
+    expect(DECISION_POLICY_KIND).toBe("scored_decision_policy_v1");
   });
 });
 

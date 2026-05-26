@@ -284,6 +284,29 @@ CREATE VIEW IF NOT EXISTS artifact_routing_view AS
   ORDER BY routing_score DESC;
 `;
 
+// scored_decision_policy_view — the universal scored-decision-policy registry
+// (2026-05-26). Every learnable substrate decision is a
+// scored_decision_policy_v1 act_artifact row keyed by decision_kind +
+// goal_shape. This view projects those rows ranked by the STANDARD act_artifact
+// posterior (score × confidence) so any decision site / observer can read which
+// policy currently governs which decision_kind. ADDITIVE: it is a NEW view over
+// the existing act_artifact table; it adds no posterior column and no metric
+// family. The policy's posterior is the normal act_artifact posterior moved by
+// the single action_scored + dense_closure_credit envelope.
+const VIEW_SCORED_DECISION_POLICY = `
+CREATE VIEW IF NOT EXISTS scored_decision_policy_view AS
+  SELECT
+    id, name, kind, body, state_root,
+    posterior_alpha, posterior_beta, score, confidence,
+    recent_residual_mean, status,
+    (score * confidence) AS rank_weight,
+    created_at, updated_at
+  FROM act_artifact
+  WHERE kind = 'scored_decision_policy_v1'
+    AND status IN ('admitted', 'promoted')
+  ORDER BY rank_weight DESC, score DESC;
+`;
+
 // embedding_index_view — events plus active executable artifacts with embedding BLOBs.
 // The daemon rebuilds its vector metadata from this view at boot.
 const VIEW_EMBEDDING_INDEX = `
@@ -4565,6 +4588,7 @@ export const VIEW_NAMES = [
   "embedding_index_view",
   "artifact_routing_view",
   "act_artifact_registry_view",
+  "scored_decision_policy_view",
   "failure_view",
   "world_model_view",
   "ready_tasks_view",
@@ -4599,6 +4623,7 @@ const VIEW_DDL: readonly string[] = [
   VIEW_WORLD_MODEL,
   VIEW_ACT_ARTIFACT_REGISTRY,
   VIEW_ARTIFACT_ROUTING,
+  VIEW_SCORED_DECISION_POLICY,
   VIEW_EMBEDDING_INDEX,
   VIEW_ORIGIN_PROMOTION,
   VIEW_ORIGIN_PROMOTION_BY_DIRECTIVE,
@@ -4678,6 +4703,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_WORLD_MODEL);
   db.exec(VIEW_ACT_ARTIFACT_REGISTRY);
   db.exec(VIEW_ARTIFACT_ROUTING);
+  db.exec(VIEW_SCORED_DECISION_POLICY);
   db.exec(VIEW_EMBEDDING_INDEX);
   db.exec(VIEW_ORIGIN_PROMOTION);
   db.exec(VIEW_ORIGIN_PROMOTION_BY_DIRECTIVE);

@@ -47,6 +47,7 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { getArtifact } from "./artifact_store";
+import { selectDecisionPolicyArtifacts } from "./dispatch_strategy_ranker";
 
 // ── Named thresholds (env-tunable tuning knobs) ────────────────────
 
@@ -503,16 +504,35 @@ export const openCapabilityGap = (
 ): OpenedCapabilityGap => {
   // 1. Durable, ledgered trigger. action_artifact_id is the failing artifact
   //    when present (failure path) or null (proactive — nothing to point at).
+  //    Universal scored-decision-policy: HOW to resolve this gap is itself a
+  //    learnable decision. Retrieve the best capability_resolution policy
+  //    artifact for this goal_shape (the SAME retrieval + posterior the
+  //    dispatch ranker uses) and cite it onto the gap event + author task so
+  //    the downstream authoring residual credits that policy artifact's NORMAL
+  //    act_artifact posterior through the standard credit envelope. Fail-soft:
+  //    no policy → empty → behaviour unchanged.
+  const selectedCapabilityPolicy = selectDecisionPolicyArtifacts(db, {
+    decision_kind: "capability_resolution",
+    goal_shape: input.goal_shape,
+    trigger: input.trigger,
+    artifact_kind: input.artifact_kind,
+    evidence: input.fit_evidence ?? input.residual_evidence ?? null,
+  })[0];
+  const selectedCapabilityPolicyId = selectedCapabilityPolicy?.artifact_id;
   emit({
     kind: "capability_gap_detected",
     substrate_origin: "substrate_auto",
     action_artifact_id: input.failing_artifact_id ?? undefined,
+    context_refs: selectedCapabilityPolicyId ? [selectedCapabilityPolicyId] : undefined,
     payload: {
       goal_shape: input.goal_shape,
       failing_artifact_id: input.failing_artifact_id,
       artifact_kind: input.artifact_kind,
       reason: input.reason,
       trigger: input.trigger,
+      ...(selectedCapabilityPolicyId
+        ? { decision_policy_artifact_id: selectedCapabilityPolicyId, decision_kind: "capability_resolution" }
+        : {}),
       ...(input.residual_evidence
         ? { residual_evidence: { mean: input.residual_evidence.mean, observations: input.residual_evidence.observations } }
         : {}),
@@ -557,6 +577,7 @@ export const openCapabilityGap = (
     directive_id: idBase,
     task_id: `${idBase}_root`,
     parent_task_id: null,
+    context_refs: selectedCapabilityPolicyId ? [selectedCapabilityPolicyId] : undefined,
     payload: {
       goal: input.failing_artifact_id
         ? `Author a more-effective replacement for ${input.failing_artifact_id.slice(0, 10)} (goal_shape ${input.goal_shape.slice(0, 8)})`
@@ -565,6 +586,9 @@ export const openCapabilityGap = (
       capability_gap_trigger: input.trigger,
       capability_gap_for_artifact_id: input.failing_artifact_id,
       capability_gap_goal_shape: input.goal_shape,
+      ...(selectedCapabilityPolicyId
+        ? { cited_artifact_ids: [selectedCapabilityPolicyId], decision_policy_artifact_id: selectedCapabilityPolicyId, decision_kind: "capability_resolution" }
+        : {}),
     } as JsonValue,
   });
   return { directive_id: idBase };

@@ -1583,6 +1583,94 @@ const SEED_ARTIFACTS: SeedArtifact[] = [
     fixture_expected_residual: 0.0,
     display_name: "dispatch_strategy_v1:defer_blocked_v1",
   },
+  // ── Universal scored-decision-policy seeds (2026-05-26) ─────────────
+  //
+  // The universal primitive: every learnable substrate decision is a
+  // scored_decision_policy_v1 act_artifact row keyed by decision_kind +
+  // goal_shape. The decision site retrieves the best policy
+  // (selectDecisionPolicyArtifacts), CITES its id into the governing act, and
+  // the SAME action_scored + dense_closure_credit envelope moves its NORMAL
+  // act_artifact posterior. No new posterior table, no bespoke metric family.
+  // These two rows seed the capability_resolution and model_route decision
+  // kinds with uninformative-leaning Beta priors (they learn from cited
+  // outcomes). The dispatch_lane decision_kind reuses the existing
+  // dispatch_strategy_v1 ranker rows above for routing; their credit now flows
+  // to the governing strategy artifact (amendment CEYW7CFG).
+  {
+    seedName: "decision_policy_capability_resolution_author_new_v1",
+    kind: "scored_decision_policy_v1",
+    runtime: "bun",
+    body: [
+      "// scored_decision_policy_v1 — decision_kind: capability_resolution",
+      "// goal_shape_key:any — prefer authoring a fresh fitting artifact over patching the failing one.",
+      "const POLICY = {",
+      "  kind: 'scored_decision_policy_v1', decision_kind: 'capability_resolution',",
+      "  goal_shape_key: 'any', goal_shape_tags: ['any', 'capability_gap'],",
+      "  policy_params: { resolution_strategy: 'author_new_artifact', prefer_replacement_over_patch: true, max_author_attempts: 3 },",
+      "  rollout: { shadow: false }, verifier_handle: 'capability_author_outcome_residual',",
+      "};",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ residual: 0, policy: POLICY }));",
+    ].join("\n"),
+    declared_sandbox: { runtime: "bun", cpu_ms: 500, wall_ms: 1000, memory_mb: 64 },
+    state_root: "decision_policy/capability_resolution",
+    initial_score: 0.5,
+    initial_confidence: 0.3,
+    fixture_input: {},
+    fixture_expected_residual: 0.0,
+    display_name: "scored_decision_policy_v1:capability_resolution:author_new",
+    posterior_alpha_override: 1,
+    posterior_beta_override: 1,
+  },
+  {
+    seedName: "decision_policy_model_route_default_v1",
+    kind: "scored_decision_policy_v1",
+    runtime: "bun",
+    body: [
+      "// scored_decision_policy_v1 — decision_kind: model_route",
+      "// goal_shape_key:any — default brain model-route policy; learns per goal_shape from outcomes.",
+      "const POLICY = {",
+      "  kind: 'scored_decision_policy_v1', decision_kind: 'model_route',",
+      "  goal_shape_key: 'any', goal_shape_tags: ['any'],",
+      "  policy_params: { route: 'default', escalate_on_residual_above: 0.6 },",
+      "  rollout: { shadow: true }, verifier_handle: 'model_route_outcome_residual',",
+      "};",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ residual: 0, policy: POLICY }));",
+    ].join("\n"),
+    declared_sandbox: { runtime: "bun", cpu_ms: 500, wall_ms: 1000, memory_mb: 64 },
+    state_root: "decision_policy/model_route",
+    initial_score: 0.5,
+    initial_confidence: 0.3,
+    fixture_input: {},
+    fixture_expected_residual: 0.0,
+    display_name: "scored_decision_policy_v1:model_route:default",
+    posterior_alpha_override: 1,
+    posterior_beta_override: 1,
+  },
+  {
+    seedName: "decision_policy_owner_rendering_default_v1",
+    kind: "scored_decision_policy_v1",
+    runtime: "bun",
+    body: [
+      "// scored_decision_policy_v1 — decision_kind: owner_rendering",
+      "// goal_shape_key:any — default owner-facing rendering policy; learns per goal_shape from feedback.",
+      "const POLICY = {",
+      "  kind: 'scored_decision_policy_v1', decision_kind: 'owner_rendering',",
+      "  goal_shape_key: 'any', goal_shape_tags: ['any'],",
+      "  policy_params: { strip_internal_ontology: true, honor_owner_profile: true, max_chars: 2000 },",
+      "  rollout: { shadow: false }, verifier_handle: 'owner_rendering_feedback_verifier_v1',",
+      "};",
+      "console.log('@@RESULT@@ ' + JSON.stringify({ residual: 0, policy: POLICY }));",
+    ].join("\n"),
+    declared_sandbox: { runtime: "bun", cpu_ms: 500, wall_ms: 1000, memory_mb: 64 },
+    state_root: "decision_policy/owner_rendering",
+    initial_score: 0.5,
+    initial_confidence: 0.3,
+    fixture_input: {},
+    fixture_expected_residual: 0.0,
+    display_name: "scored_decision_policy_v1:owner_rendering:default",
+    posterior_alpha_override: 1,
+    posterior_beta_override: 1,
+  },
   {
     // C1 (2026-05-18, contract DXQK3VYMCH7930TP20H4QSTP0R):
     // canonical predicate_gate verifier as a registry row so it is

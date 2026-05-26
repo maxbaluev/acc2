@@ -30,6 +30,7 @@ import { classifyBridgeExit, emitPartialEmitDispatchClosed } from "../opencode_b
 import { isCycleViolation } from "../cycle_one_gate";
 import { getBootSessionToken } from "../brain_dispatch_reconciler";
 import { newId } from "../ids";
+import { selectDecisionPolicyArtifacts } from "../dispatch_strategy_ranker";
 import { parseOpencodeAuth } from "../../cli/doctor";
 import type { BridgeFailureReason, BridgeRequest, BridgeResult, SpawnOpts } from "./types";
 import {
@@ -1291,6 +1292,16 @@ export const spawnRealOpencode = async (
       && brainRenderWrapEmitCount < BRAIN_RENDER_WRAP_MAX_EMITS
     ) {
       try {
+        // Universal scored-decision-policy: the brain model-route / owner-
+        // rendering choice is a learnable decision. Retrieve the best
+        // owner_rendering policy artifact (the SAME retrieval + posterior the
+        // dispatch ranker uses) and CITE its id onto the rendered message so a
+        // later owner_rendering_feedback_recorded → action_scored projection
+        // moves its NORMAL act_artifact posterior. Fail-soft: no policy →
+        // empty → behaviour unchanged.
+        const selectedOwnerRenderingPolicyArtifactIds = selectDecisionPolicyArtifacts(db, {
+          decision_kind: "owner_rendering",
+        }).map((p) => p.artifact_id);
         emitEvent(db, {
           kind: "rendered_owner_message_recorded",
           substrate_origin: "opencode",
@@ -1302,10 +1313,17 @@ export const spawnRealOpencode = async (
             surface: "chat",
             renderer: "brain_opencode",
             source_brain_event_id: brainObsEventId,
+            decision_kind: "owner_rendering",
+            ...(selectedOwnerRenderingPolicyArtifactIds.length > 0
+              ? {
+                  selected_policy_artifact_ids: selectedOwnerRenderingPolicyArtifactIds,
+                  owner_rendering_policy_artifact_id: selectedOwnerRenderingPolicyArtifactIds[0],
+                }
+              : {}),
             chars_original: text.length,
             truncated,
           } as JsonValue,
-          context_refs: [brainObsEventId],
+          context_refs: [brainObsEventId, ...selectedOwnerRenderingPolicyArtifactIds],
           invoker: "opencode",
         });
         brainRenderWrapEmitCount++;
