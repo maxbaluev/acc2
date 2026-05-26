@@ -14,8 +14,16 @@ import type { EmbeddingIndex } from "../embedding_index";
 export type McpContext = {
   db: Database;
   /** Caller for any audit event we synthesize. CLI clients default to
-   *  `claude_root`; the brain bridge tags `opencode`. */
+   *  `claude_root`; the brain bridge tags `opencode`. When a per-request peer
+   *  envelope is resolved at ingress (FVW2E0YH) the request-scoped context's
+   *  `invoker` is set from that envelope's origin instead of this default. */
   invoker: SubstrateOrigin;
+  /** Resolved ingress peer envelope (peer_id + kind) for THIS request. Peer
+   *  identity is an ingress invariant: every MCP request resolves a peer
+   *  BEFORE it touches the ledger (defaulting to the well-defined `unknown`
+   *  peer when the caller does not self-identify). Absent only on contexts
+   *  built before ingress resolution wired it (e.g. bare unit-test ctx). */
+  peer?: import("../peer_registry").PeerEnvelope | null;
   /** Optional embedding index handle. When present AND size > 0 the
    *  search tool routes through the reranker; otherwise it falls back to
    *  the recency stand-in (which stays correct on fresh / unembedded
@@ -30,6 +38,15 @@ export type McpContext = {
 export type McpResult =
   | { ok: true; result: JsonValue }
   | { ok: false; error: string };
+
+// ── Peer ingress headers (FVW2E0YH) ────────────────────────────────
+// Canonical HTTP headers a self-identifying peer sets so the MCP ingress
+// layer can resolve a peer envelope per request. A request that omits them
+// resolves to the well-defined `unknown` peer (never silently claude_root).
+export const PEER_ID_HEADER = "x-acc-peer-id";
+export const PEER_KIND_HEADER = "x-acc-peer-kind";
+export const PEER_DIRECTIVE_HEADER = "x-acc-peer-directive-id";
+export const PEER_TASK_HEADER = "x-acc-peer-task-id";
 
 // ── Method names (single source of truth for the whitelist) ────────
 

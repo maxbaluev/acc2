@@ -2,8 +2,20 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 
-export type PeerKind = "opencode" | "claude_terminal" | "claude_agent";
+// PeerKind is the substrate-native vocabulary for source-writing actors.
+// "unknown" is the WELL-DEFINED default peer the ingress resolver assigns when
+// a request arrives without a self-identified peer (FVW2E0YH): a request with
+// no peer identity is never silently attributed to claude_root — it gets the
+// explicit `unknown` envelope so the ledger records that the actor declined to
+// identify, rather than impersonating the orchestrator root.
+export type PeerKind = "opencode" | "claude_terminal" | "claude_agent" | "unknown";
 export type PeerSpawnability = "substrate_spawnable" | "externally_launched";
+
+/** The canonical default peer for un-identified ingress. Mirrors the resource
+ *  governor's UNKNOWN_ACTOR_KEY convention so an anonymous caller is a single,
+ *  explicit, well-known identity rather than a hardcoded orchestrator root. */
+export const UNKNOWN_PEER_ID = "peer-unknown";
+export const UNKNOWN_PEER_KIND: PeerKind = "unknown";
 
 export type PeerRegistration = {
   peer_id: string;
@@ -32,6 +44,7 @@ export type PeerActivity = {
 const originForPeer = (kind?: PeerKind): string => {
   if (kind === "opencode") return "opencode";
   if (kind === "claude_agent") return "claude_agent";
+  if (kind === "unknown") return UNKNOWN_PEER_ID;
   return "claude_root";
 };
 
@@ -167,3 +180,98 @@ export const isLivePeerActingOnTarget = (
   filter: { current_peer_id?: string } = {},
 ): boolean => readPeerActivity(db, { current_peer_id: filter.current_peer_id, target_resource: targetResource, limit: 100 })
   .some((row) => row.in_flight_acts.length > 0);
+
+// ── Ingress invariant (FVW2E0YH) ────────────────────────────────────
+//
+// Peer identity is an INGRESS INVARIANT, not a dormant convenience. Every MCP
+// request/dispatch path must carry a peer envelope (peer_id + kind) BEFORE it
+// touches the ledger. Previously MCP calls landed in one shared context with
+// `invoker` hardcoded to `claude_root` — no per-request actor existed, so two
+// terminals writing the same checkout were indistinguishable in the ledger.
+// These two functions make the dormant registry load-bearing on the live MCP
+// path: resolve a peer from open-ended ingress hints, default to a WELL-DEFINED
+// `unknown` peer when absent, and register/update it so the activity view sees
+// the live caller.
+
+/** A resolved ingress peer envelope. `origin` is the SubstrateOrigin the
+ *  request's ledger writes are attributed to (derived from `kind`), so a
+ *  caller's MCP emissions are no longer all collapsed to claude_root. */
+export type PeerEnvelope = {
+  peer_id: string;
+  kind: PeerKind;
+  /** SubstrateOrigin for ledger attribution, derived from kind. */
+  origin: string;
+};
+
+/** Open-ended hints the ingress layer extracts from a request (HTTP headers,
+ *  configured invoker, dispatch correlation). All optional — a request that
+ *  declines to self-identify resolves to the well-defined unknown peer. */
+export type PeerIngressHints = {
+  peer_id?: string | null;
+  kind?: string | null;
+  directive_id?: string | null;
+  task_id?: string | null;
+  metadata?: JsonValue;
+};
+
+const KNOWN_PEER_KINDS: ReadonlySet<string> = new Set<PeerKind>([
+  "opencode",
+  "claude_terminal",
+  "claude_agent",
+  "unknown",
+]);
+
+/** Coerce an open-ended kind hint to a known PeerKind. Unrecognized values fall
+ *  to `unknown` rather than throwing — ingress must never refuse a request on a
+ *  malformed identity hint; it records the actor as explicitly unknown. */
+const coercePeerKind = (kind?: string | null): PeerKind =>
+  typeof kind === "string" && KNOWN_PEER_KINDS.has(kind) ? (kind as PeerKind) : UNKNOWN_PEER_KIND;
+
+/** Resolve a peer envelope from ingress hints WITHOUT touching the ledger.
+ *  Pure: same hints → same envelope. When `peer_id` is absent the request is
+ *  attributed to the well-defined unknown peer (never silently to claude_root).
+ *  When a `peer_id` is present but the kind is missing/unknown, the kind
+ *  coerces to `unknown` while preserving the caller-supplied id. */
+export const resolvePeerEnvelope = (hints: PeerIngressHints = {}): PeerEnvelope => {
+  const hasId = typeof hints.peer_id === "string" && hints.peer_id.length > 0;
+  if (!hasId) {
+    return { peer_id: UNKNOWN_PEER_ID, kind: UNKNOWN_PEER_KIND, origin: originForPeer(UNKNOWN_PEER_KIND) };
+  }
+  const kind = coercePeerKind(hints.kind);
+  return { peer_id: hints.peer_id as string, kind, origin: originForPeer(kind) };
+};
+
+/** INGRESS INVARIANT entry point: resolve the peer envelope AND register/update
+ *  the peer in the live registry before the request reaches a handler. Returns
+ *  the resolved envelope so the caller can attribute the request's ledger writes
+ *  to it. Best-effort registration: a registry write must never crash a request
+ *  (observability is not a gate), but the resolved envelope is ALWAYS returned
+ *  so the ingress path can carry a peer identity unconditionally. */
+export const resolveIngressPeer = (db: Database, hints: PeerIngressHints = {}): PeerEnvelope => {
+  const envelope = resolvePeerEnvelope(hints);
+  try {
+    // Establish the durable identity row on first sight (peer_registry_view is
+    // anchored on peer_registered) AND stamp a fresh liveness heartbeat. A peer
+    // seen on every request stays live; the registration is idempotent enough
+    // for the view (latest registration wins by ts DESC).
+    registerPeer(db, {
+      peer_id: envelope.peer_id,
+      kind: envelope.kind,
+      spawnability: "externally_launched",
+      directive_id: hints.directive_id ?? null,
+      task_id: hints.task_id ?? null,
+      metadata: hints.metadata ?? ({ ingress: true } as JsonValue),
+    });
+    peerActivity(db, {
+      peer_id: envelope.peer_id,
+      kind: envelope.kind,
+      spawnability: "externally_launched",
+      directive_id: hints.directive_id ?? null,
+      task_id: hints.task_id ?? null,
+      metadata: hints.metadata ?? ({ ingress: true } as JsonValue),
+    });
+  } catch {
+    /* swallow — peer registration is observability at ingress, not a gate */
+  }
+  return envelope;
+};

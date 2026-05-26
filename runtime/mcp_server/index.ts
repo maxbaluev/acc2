@@ -23,7 +23,14 @@
 
 import { FastMCP } from "fastmcp";
 import { logger } from "../logger";
+import { resolveIngressPeer, resolvePeerEnvelope, type PeerIngressHints } from "../peer_registry";
 import type { McpContext, McpResult, McpServerOptions } from "./types";
+import {
+  PEER_DIRECTIVE_HEADER,
+  PEER_ID_HEADER,
+  PEER_KIND_HEADER,
+  PEER_TASK_HEADER,
+} from "./types";
 import {
   AdmitArtifactSchema,
   AmendDirectiveSchema,
@@ -126,12 +133,34 @@ export const profileMcpExecute = (
  *  The caller drives `.start({transportType, …})` — daemon uses `httpStream`,
  *  tests use `stdio`. The server holds no Database reference of its own; all
  *  state flows through `db` via the closure here. */
+/** Map a configured SubstrateOrigin invoker to the peer-kind hint the ingress
+ *  resolver understands. The fastmcp transport does not surface per-request
+ *  HTTP headers to `execute`, so the server-level invoker IS the self-
+ *  identification for this transport; an unrecognized origin resolves to the
+ *  well-defined `unknown` peer (never silently claude_root). */
+const invokerToPeerKind = (invoker: string | undefined): string => {
+  if (invoker === "opencode") return "opencode";
+  if (invoker === "claude_agent") return "claude_agent";
+  if (invoker === "claude_root") return "claude_terminal";
+  return "unknown";
+};
+
 export const createMcpServer = (opts: McpServerOptions): FastMCP => {
+  const invoker = opts.invoker ?? "claude_root";
+  // INGRESS INVARIANT (FVW2E0YH), session leg: the fastmcp transport does not
+  // expose per-request HTTP headers to `execute`, so a fastmcp connection is
+  // ONE self-identified peer for its lifetime. Register/update that peer ONCE
+  // at construction (durable identity row + heartbeat) — emitting a peer row on
+  // every read/search would flood the bounded ledger. Per-request we then only
+  // RESOLVE the envelope (pure, zero ledger writes) and attach it to a request-
+  // scoped ctx so handlers see a peer identity instead of the static default.
+  const sessionPeer = resolveIngressPeer(opts.db, { kind: invokerToPeerKind(invoker) });
   const ctx: McpContext = {
     db: opts.db,
-    invoker: opts.invoker ?? "claude_root",
+    invoker: sessionPeer.origin,
     index: opts.index ?? null,
     ingressState: opts.ingressState ?? null,
+    peer: sessionPeer,
   };
 
   const server = new FastMCP({
@@ -162,7 +191,14 @@ export const createMcpServer = (opts: McpServerOptions): FastMCP => {
     <A>(method: string, handler: (ctx: McpContext, args: A) => McpResult | Promise<McpResult>) =>
     profileMcpExecute(method, async (args: unknown): Promise<string> => {
       try {
-        const result = await handler(ctx, args as A);
+        // INGRESS INVARIANT (FVW2E0YH), request leg: resolve the peer envelope
+        // for THIS request (pure — registration already happened once at
+        // session construction) and attach it to a request-scoped ctx so the
+        // handler's ledger writes are attributed to the session peer's origin
+        // rather than the static claude_root default. Never mutate shared ctx.
+        const peer = resolvePeerEnvelope({ kind: invokerToPeerKind(invoker) });
+        const requestCtx: McpContext = { ...ctx, invoker: peer.origin, peer };
+        const result = await handler(requestCtx, args as A);
         return JSON.stringify(result);
       } catch (err) {
         return JSON.stringify({
@@ -506,9 +542,23 @@ export const handleMcpRequest = async (ctx: McpContext, req: Request): Promise<R
   } catch (err) {
     return Response.json({ ok: false, error: `bad_json:${(err as Error).message}` }, { status: 400 });
   }
+  // INGRESS INVARIANT (FVW2E0YH): derive the peer envelope from request headers
+  // BEFORE the handler touches the ledger. A request that omits the headers
+  // resolves to the well-defined `unknown` peer — it is NEVER silently
+  // attributed to claude_root. Register/update the peer at ingress, then build
+  // a request-scoped context whose invoker is the resolved peer's origin so the
+  // request's ledger writes carry the real per-terminal/per-brain identity.
+  const peerHints: PeerIngressHints = {
+    peer_id: req.headers.get(PEER_ID_HEADER),
+    kind: req.headers.get(PEER_KIND_HEADER),
+    directive_id: req.headers.get(PEER_DIRECTIVE_HEADER),
+    task_id: req.headers.get(PEER_TASK_HEADER),
+  };
+  const peer = resolveIngressPeer(ctx.db, peerHints);
+  const requestCtx: McpContext = { ...ctx, invoker: peer.origin, peer };
   const startedAt = PROFILE_LOOP_ENABLED ? performance.now() : 0;
   try {
-    const result = await handler(ctx, body);
+    const result = await handler(requestCtx, body);
     return Response.json(result, { status: result.ok ? 200 : 400 });
   } catch (err) {
     return Response.json(
