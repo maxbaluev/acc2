@@ -26,6 +26,16 @@ import type { Database } from "bun:sqlite";
 import { emitEvent } from "./events";
 import { getThreshold } from "./threshold_registry";
 
+// Amendment D7GJDRYT — closure provenance. A low closure_residual is only
+// trustworthy when the substrate independently verified it
+// (substrate_verified) or it is grounded by a reliability_profile or a
+// cited action_scored / owner_observed tie. Brain-emitted rows that merely
+// assert a low residual are self_reported; rows that predate this amendment
+// (no provenance field) are legacy_unknown. Neither self_reported nor
+// legacy_unknown low residuals are eligible to commit a root or move dense
+// closure credit — they stay historical/audit-only.
+export type ResidualProvenance = "substrate_verified" | "self_reported" | "legacy_unknown";
+
 export type ClosureAuditSelection = {
   /** Event id of the selected task_closure_audited row. */
   closure_audit_event_id: string;
@@ -35,6 +45,24 @@ export type ClosureAuditSelection = {
   ts: string;
   /** task_id stamped on the audit row. */
   task_id: string;
+  /** Provenance of the residual (amendment D7GJDRYT). substrate_verified
+   *  when the substrate independently scored the closure; self_reported
+   *  when the brain asserted it without substrate verifications; legacy
+   *  rows that predate the amendment parse as legacy_unknown. */
+  residual_provenance: ResidualProvenance;
+  /** Verifier reliability profile attached to the audit, if any. A non-
+   *  empty object is one of the two grounding signals that can make a
+   *  substrate_verified low residual commit-eligible. */
+  reliability_profile: Record<string, unknown> | null;
+  /** Event ids cited as grounding (context_refs + payload.grounding_event_ids).
+   *  A cited action_scored / owner_observed_outcome_recorded among these is
+   *  the other grounding signal. */
+  grounding_event_ids: string[];
+  /** True when this audit may commit a root / move dense credit at the
+   *  default threshold. Computed by isClosureCommitEligible. */
+  commit_eligible: boolean;
+  /** Human/machine reason when commit_eligible is false. */
+  ineligible_reason?: string;
 };
 
 /** Resolve the LATEST directive_amended or directive_root_superseded ts
@@ -79,8 +107,8 @@ export const selectCurrentRootClosureAudit = (
   const cutoff = latestRootSupersessionTs(db, directiveId);
   const rows = cutoff
     ? db
-        .query<{ id: string; ts: string; task_id: string; payload: string }, [string, string, string]>(
-          `SELECT id, ts, task_id, payload FROM events
+        .query<{ id: string; ts: string; task_id: string; payload: string; context_refs: string }, [string, string, string]>(
+          `SELECT id, ts, task_id, payload, context_refs FROM events
             WHERE kind = 'task_closure_audited'
               AND directive_id = ?
               AND task_id = ?
@@ -89,8 +117,8 @@ export const selectCurrentRootClosureAudit = (
         )
         .all(directiveId, currentRootTaskId, cutoff)
     : db
-        .query<{ id: string; ts: string; task_id: string; payload: string }, [string, string]>(
-          `SELECT id, ts, task_id, payload FROM events
+        .query<{ id: string; ts: string; task_id: string; payload: string; context_refs: string }, [string, string]>(
+          `SELECT id, ts, task_id, payload, context_refs FROM events
             WHERE kind = 'task_closure_audited'
               AND directive_id = ?
               AND task_id = ?
@@ -98,21 +126,132 @@ export const selectCurrentRootClosureAudit = (
         )
         .all(directiveId, currentRootTaskId);
   for (const row of rows) {
-    let residual: number | null = null;
-    try {
-      const payload = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
-      if (typeof payload.closure_residual === "number") residual = payload.closure_residual;
-    } catch { /* malformed payload — skip */ }
-    if (residual === null) continue;
-    return {
-      closure_audit_event_id: row.id,
-      closure_residual: residual,
-      ts: row.ts,
-      task_id: row.task_id,
-    };
+    const selection = normalizeClosureAuditPayload(db, row);
+    if (selection === null) continue;
+    return selection;
   }
   return null;
 };
+
+/** Normalize a raw task_closure_audited row into a ClosureAuditSelection,
+ *  resolving residual provenance and grounding (amendment D7GJDRYT).
+ *  Returns null only when the row carries no numeric closure_residual.
+ *
+ *  residual_provenance:
+ *    - substrate_verified — payload.residual_provenance === 'substrate_verified'
+ *      OR the audit carries a non-empty substrate_verifications object (the
+ *      substrate independently scored the closure via verifyClosureAudit).
+ *    - self_reported — payload.residual_provenance === 'self_reported', or
+ *      a brain-origin row with neither substrate_verifications nor a
+ *      reliability_profile.
+ *    - legacy_unknown — no residual_provenance field and no substrate
+ *      verifications (pre-amendment historical rows).
+ *
+ *  commit_eligible is then computed by isClosureCommitEligible. */
+export const normalizeClosureAuditPayload = (
+  db: Database,
+  row: { id: string; ts: string; task_id: string; payload: string; context_refs?: string | string[] | null },
+): ClosureAuditSelection | null => {
+  let payload: Record<string, unknown> = {};
+  try { payload = JSON.parse(row.payload ?? "{}") as Record<string, unknown>; } catch { return null; }
+  if (typeof payload.closure_residual !== "number" || !Number.isFinite(payload.closure_residual)) return null;
+  const residual = payload.closure_residual;
+
+  const substrateVerifications = (payload.substrate_verifications && typeof payload.substrate_verifications === "object" && !Array.isArray(payload.substrate_verifications))
+    ? payload.substrate_verifications as Record<string, unknown>
+    : null;
+  const hasSubstrateVerifications = substrateVerifications !== null && Object.keys(substrateVerifications).length > 0;
+
+  const reliabilityProfile = (payload.reliability_profile && typeof payload.reliability_profile === "object" && !Array.isArray(payload.reliability_profile))
+    ? payload.reliability_profile as Record<string, unknown>
+    : null;
+
+  // Resolve provenance: explicit field wins; otherwise infer from
+  // substrate verifications presence. Rows with neither field and no
+  // verifications are legacy_unknown.
+  let provenance: ResidualProvenance;
+  const declared = typeof payload.residual_provenance === "string" ? payload.residual_provenance : null;
+  if (declared === "substrate_verified" || declared === "self_reported" || declared === "legacy_unknown") {
+    provenance = declared;
+  } else if (hasSubstrateVerifications) {
+    provenance = "substrate_verified";
+  } else {
+    provenance = "legacy_unknown";
+  }
+
+  // Grounding event ids: context_refs ∪ payload.grounding_event_ids.
+  const groundingIds: string[] = [];
+  const pushId = (v: unknown) => { if (typeof v === "string" && v.length > 0 && !groundingIds.includes(v)) groundingIds.push(v); };
+  let refs: string[] = [];
+  if (Array.isArray(row.context_refs)) refs = row.context_refs as string[];
+  else if (typeof row.context_refs === "string") { try { refs = JSON.parse(row.context_refs) as string[]; } catch { refs = []; } }
+  for (const r of refs) pushId(r);
+  if (Array.isArray(payload.grounding_event_ids)) for (const r of payload.grounding_event_ids) pushId(r);
+
+  const selection: ClosureAuditSelection = {
+    closure_audit_event_id: row.id,
+    closure_residual: residual,
+    ts: row.ts,
+    task_id: row.task_id,
+    residual_provenance: provenance,
+    reliability_profile: reliabilityProfile,
+    grounding_event_ids: groundingIds,
+    commit_eligible: false,
+  };
+  const eligibility = computeClosureCommitEligibility(db, selection);
+  selection.commit_eligible = eligibility.eligible;
+  if (!eligibility.eligible && eligibility.reason) selection.ineligible_reason = eligibility.reason;
+  return selection;
+};
+
+/** Does any grounding event id resolve to an action_scored or
+ *  owner_observed_outcome_recorded row? That cited tie is one of the two
+ *  signals that can ground a substrate_verified low residual. */
+const hasGroundingOutcomeTie = (db: Database, groundingIds: string[]): boolean => {
+  for (const id of groundingIds) {
+    const row = db.query("SELECT kind FROM events WHERE id = ?").get(id) as { kind: string } | null;
+    if (row && (row.kind === "action_scored" || row.kind === "owner_observed_outcome_recorded")) return true;
+  }
+  return false;
+};
+
+const computeClosureCommitEligibility = (
+  db: Database,
+  selection: ClosureAuditSelection,
+  threshold = 0.3,
+): { eligible: boolean; reason?: string } => {
+  if (!(selection.closure_residual < threshold)) {
+    return { eligible: false, reason: "closure_residual_at_or_above_threshold" };
+  }
+  // HARD GATE (amendment D7GJDRYT): a low residual is root-commit-eligible
+  // ONLY when substrate_verified. self_reported / legacy_unknown low
+  // residuals are never eligible, no matter how low.
+  if (selection.residual_provenance !== "substrate_verified") {
+    return {
+      eligible: false,
+      reason: selection.residual_provenance === "legacy_unknown"
+        ? "legacy_unknown_provenance"
+        : "self_reported_provenance",
+    };
+  }
+  // substrate_verified low residual still requires grounding: a non-empty
+  // reliability_profile OR a cited action_scored / owner_observed tie.
+  const hasReliability = selection.reliability_profile !== null && Object.keys(selection.reliability_profile).length > 0;
+  if (hasReliability) return { eligible: true };
+  if (hasGroundingOutcomeTie(db, selection.grounding_event_ids)) return { eligible: true };
+  return { eligible: false, reason: "substrate_verified_without_grounding_tie" };
+};
+
+/** HARD GATE (amendment D7GJDRYT): is this closure audit eligible to commit
+ *  a root / move dense closure credit? Rule: closure_residual < threshold
+ *  AND residual_provenance === 'substrate_verified' AND (non-empty
+ *  reliability_profile OR a cited action_scored / owner_observed tie).
+ *  legacy_unknown / self_reported low residuals are never eligible. */
+export const isClosureCommitEligible = (
+  db: Database,
+  selection: ClosureAuditSelection,
+  threshold = 0.3,
+): boolean => computeClosureCommitEligibility(db, selection, threshold).eligible;
 
 /** Time-ordered list of closure_residual values for a refinement lineage
  *  under a directive's CURRENT root window. The plateau detector in
@@ -857,14 +996,35 @@ export const evaluateClosureCommitGate = (
     // malformed JSON; this is defensive.
     closureResidual = 0;
   }
-  // Residual below threshold → commit cleanly. No sibling event needed.
+  // Residual below threshold → still requires closure provenance
+  // (amendment D7GJDRYT). A low residual commits a root ONLY when it is
+  // substrate_verified AND grounded by a reliability_profile or a cited
+  // action_scored / owner_observed tie. self_reported / legacy_unknown low
+  // residuals are NOT clean closures: they fall through to the
+  // owner-override path so an explicit owner consent (or a re-audit that
+  // produces substrate verifications) is required to commit.
   if (closureResidual < threshold) {
-    return {
-      allow: true,
-      threshold,
-      closure_residual: closureResidual,
-      closure_audit_event_id: auditRow.id,
-    };
+    const selection = normalizeClosureAuditPayload(db, {
+      id: auditRow.id,
+      ts: auditRow.ts,
+      task_id: args.task_id,
+      payload: auditRow.payload,
+    });
+    const eligible = selection !== null && isClosureCommitEligible(db, selection, threshold);
+    if (eligible) {
+      return {
+        allow: true,
+        threshold,
+        closure_residual: closureResidual,
+        closure_audit_event_id: auditRow.id,
+      };
+    }
+    // Low but ungrounded — record the provenance refusal and require an
+    // owner override (handled by the shared override path below).
+    discrepancies = [
+      ...discrepancies,
+      "closure_provenance_ineligible:" + (selection?.ineligible_reason ?? "unknown"),
+    ];
   }
   // Residual >= threshold. Check for a fresh owner consent override:
   // owner_input_received with payload.closure_override = true whose ts

@@ -363,3 +363,103 @@ describe("verifyClosureAudit — T0.1 substrate-truth gate", () => {
     });
   });
 });
+
+// ── Amendment D7GJDRYT — closure provenance ────────────────────────
+import { normalizeClosureAuditPayload, isClosureCommitEligible } from "./closure_audit";
+
+describe("closure provenance (amendment D7GJDRYT)", () => {
+  const emitAudit = (db: ReturnType<typeof openDb>, payload: Record<string, unknown>, contextRefs: string[] = []) =>
+    emitEvent(db, {
+      kind: "task_closure_audited",
+      substrate_origin: "brain",
+      directive_id: "dir_prov",
+      task_id: "root_prov",
+      context_refs: contextRefs,
+      payload,
+    });
+
+  const selectLatest = (db: ReturnType<typeof openDb>) => {
+    const row = db.query("SELECT id, ts, task_id, payload, context_refs FROM events WHERE kind = 'task_closure_audited' ORDER BY ts DESC, rowid DESC LIMIT 1").get() as { id: string; ts: string; task_id: string; payload: string; context_refs: string };
+    return normalizeClosureAuditPayload(db, row);
+  };
+
+  test("a HISTORICAL row with no residual_provenance parses as legacy_unknown and is NOT commit-eligible even at residual 0.05", () => {
+    const db = openDb(":memory:");
+    // Simulate a PRE-amendment historical row: the emit boundary now stamps
+    // provenance, so legacy_unknown only applies to rows already in the
+    // ledger without the field. Normalize a synthetic raw row directly.
+    const sel = normalizeClosureAuditPayload(db, {
+      id: "legacy_audit_1",
+      ts: "2026-01-01T00:00:00.000Z",
+      task_id: "root_legacy",
+      payload: JSON.stringify({ closure_residual: 0.05 }),
+      context_refs: null,
+    })!;
+    expect(sel.residual_provenance).toBe("legacy_unknown");
+    expect(sel.commit_eligible).toBe(false);
+    expect(isClosureCommitEligible(db, sel)).toBe(false);
+    expect(sel.ineligible_reason).toBe("legacy_unknown_provenance");
+  });
+
+  test("a freshly EMITTED bare-residual audit is stamped self_reported by the emit boundary (not legacy)", () => {
+    const db = openDb(":memory:");
+    emitAudit(db, { closure_residual: 0.05 });
+    const sel = selectLatest(db)!;
+    expect(sel.residual_provenance).toBe("self_reported");
+    expect(isClosureCommitEligible(db, sel)).toBe(false);
+  });
+
+  test("self_reported low residual is NOT commit-eligible", () => {
+    const db = openDb(":memory:");
+    emitAudit(db, { closure_residual: 0.05, residual_provenance: "self_reported" });
+    const sel = selectLatest(db)!;
+    expect(sel.residual_provenance).toBe("self_reported");
+    expect(isClosureCommitEligible(db, sel)).toBe(false);
+    expect(sel.ineligible_reason).toBe("self_reported_provenance");
+  });
+
+  test("substrate_verified + reliability_profile + residual 0.1 IS commit-eligible", () => {
+    const db = openDb(":memory:");
+    emitAudit(db, { closure_residual: 0.1, residual_provenance: "substrate_verified", reliability_profile: { verifier_kind: "deterministic_code", pass_rate: 0.95 } });
+    const sel = selectLatest(db)!;
+    expect(sel.residual_provenance).toBe("substrate_verified");
+    expect(isClosureCommitEligible(db, sel)).toBe(true);
+    expect(sel.commit_eligible).toBe(true);
+  });
+
+  test("substrate_verified + cited action_scored tie IS commit-eligible without a reliability_profile", () => {
+    const db = openDb(":memory:");
+    const scored = emitEvent(db, { kind: "action_scored", substrate_origin: "substrate_auto", action_artifact_id: "art_x", verifier_artifact_id: "ver_x", residual: 0.1, payload: {} });
+    expect((db.query("SELECT kind FROM events WHERE id = ?").get(scored.id) as { kind: string }).kind).toBe("action_scored");
+    emitAudit(db, { closure_residual: 0.1, residual_provenance: "substrate_verified" }, [scored.id]);
+    const sel = selectLatest(db)!;
+    expect(sel.residual_provenance).toBe("substrate_verified");
+    expect(sel.grounding_event_ids).toContain(scored.id);
+    expect(isClosureCommitEligible(db, sel)).toBe(true);
+  });
+
+  test("substrate_verified low residual WITHOUT any grounding tie is NOT commit-eligible", () => {
+    const db = openDb(":memory:");
+    emitAudit(db, { closure_residual: 0.1, residual_provenance: "substrate_verified" });
+    const sel = selectLatest(db)!;
+    expect(isClosureCommitEligible(db, sel)).toBe(false);
+    expect(sel.ineligible_reason).toBe("substrate_verified_without_grounding_tie");
+  });
+
+  test("commit gate REFUSES a low self_reported residual (records provenance discrepancy)", () => {
+    const db = openDb(":memory:");
+    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: "dir_gate", task_id: "root_gate", residual: 0.05, payload: { closure_residual: 0.05, residual_provenance: "self_reported" } });
+    const decision = evaluateClosureCommitGate(db, { task_id: "root_gate", directive_id: "dir_gate" });
+    expect(decision.allow).toBe(false);
+    if (!decision.allow) {
+      expect(decision.discrepancies.some((d) => d.startsWith("closure_provenance_ineligible"))).toBe(true);
+    }
+  });
+
+  test("commit gate ALLOWS a grounded substrate_verified low residual", () => {
+    const db = openDb(":memory:");
+    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "substrate_auto", directive_id: "dir_ok", task_id: "root_ok", residual: 0.05, payload: { closure_residual: 0.05, residual_provenance: "substrate_verified", reliability_profile: { verified: true } } });
+    const decision = evaluateClosureCommitGate(db, { task_id: "root_ok", directive_id: "dir_ok" });
+    expect(decision.allow).toBe(true);
+  });
+});

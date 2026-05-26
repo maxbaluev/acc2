@@ -240,15 +240,22 @@ const normalizeClosureAuditPayload = (input: EmitEventInput): JsonValue => {
   const residual = payload.closure_residual;
   const hasNumericResidual = typeof residual === "number" && Number.isFinite(residual);
   const hasSource = !!payload.classification_source && typeof payload.classification_source === "object";
-  if (hasNumericResidual || hasSource) return payload;
-  return {
+  // Amendment D7GJDRYT — closure provenance. This is the LEGACY emit path
+  // (no closure_predicate / truth gate). A numeric residual here was
+  // asserted by the emitter without substrate verification, so it is
+  // self_reported unless the emitter explicitly declared a provenance. The
+  // commit/dense-credit gates refuse self_reported low residuals.
+  const withProvenance = (p: Record<string, unknown>): Record<string, unknown> =>
+    typeof p.residual_provenance === "string" ? p : { ...p, residual_provenance: "self_reported" };
+  if (hasNumericResidual || hasSource) return withProvenance(payload) as JsonValue;
+  return withProvenance({
     ...payload,
     classification_source: {
       source: "runtime.emitEvent",
       basis: "task_closure_audited_without_numeric_residual",
       note: "Emitter did not provide a numeric closure_residual; the closure verifier should refine this. Renderers should treat residual as <unset>.",
     },
-  };
+  }) as JsonValue;
 };
 
 /** T0.1 substrate-truth gate at the closure-audit emit boundary.
@@ -364,6 +371,18 @@ const runClosureAuditTruthGate = (db: Database, input: EmitEventInput): JsonValu
   // a checks mirror so the row remains backward-readable.
   const augmented: Record<string, unknown> = { ...result.payload };
   if (Object.keys(brainClaims).length > 0) augmented.checks = brainClaims;
+  // Amendment D7GJDRYT — closure provenance. The truth gate ran
+  // verifyClosureAudit, which independently scored the closure and produced
+  // substrate_verifications. Stamp residual_provenance=substrate_verified
+  // when at least one substrate verification ran; otherwise the residual is
+  // self-reported (the gate fell back to the asserted residual). Only
+  // substrate_verified low residuals are eligible to commit a root / move
+  // dense credit (closure_audit.isClosureCommitEligible). Respect an
+  // explicit emitter-provided residual_provenance when present.
+  if (typeof augmented.residual_provenance !== "string") {
+    const sv = isObject(augmented.substrate_verifications) ? augmented.substrate_verifications : null;
+    augmented.residual_provenance = (sv && Object.keys(sv).length > 0) ? "substrate_verified" : "self_reported";
+  }
   return augmented as JsonValue;
 };
 

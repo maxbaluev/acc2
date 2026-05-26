@@ -690,6 +690,11 @@ describe("task_dispatcher", () => {
         task_id: req.taskId,
         payload: {
           closure_residual: 0.12,
+          // Amendment D7GJDRYT: a clean auto-commit requires commit-eligible
+          // closure provenance (substrate_verified + grounding), not a bare
+          // low residual.
+          residual_provenance: "substrate_verified",
+          reliability_profile: { verified: true },
           breakdown: { goal_solved: 1, sub_tasks_covered: 1, lessons_captured: 1, violation_count: 0 },
           original_goal_text: "long-running goal exceeding bridge window",
           covered_sub_tasks: [],

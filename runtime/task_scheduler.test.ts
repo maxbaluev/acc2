@@ -251,7 +251,7 @@ describe("task_scheduler", () => {
       // a strict `ts > lastDispatch.ts`; nudge the clock so the closure audit
       // lands in a strictly-later millisecond and is seen as a clean closure.
       await Bun.sleep(3);
-      emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.1, payload: { closure_residual: 0.1 } });
+      emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.1, payload: { closure_residual: 0.1, residual_provenance: "substrate_verified", reliability_profile: { verified: true } } });
 
       // Open decomposition descendant — a fixture-D leaf the scheduler can dispatch.
       emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: childTaskId, parent_task_id: rootTaskId, payload: { goal: FIXTURE_D_DIRECTIVE_TEXT, fixture: "fixture_d_count_todos", lifecycle: "finite", urgency: "normal", target_path: tempDir } });
@@ -1330,7 +1330,7 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
         directive_id: directiveId,
         task_id: taskId,
         residual: opts.withClosure,
-        payload: { closure_residual: opts.withClosure },
+        payload: { closure_residual: opts.withClosure, residual_provenance: "substrate_verified", reliability_profile: { verified: true } },
       });
     }
     return { directiveId, taskId };
