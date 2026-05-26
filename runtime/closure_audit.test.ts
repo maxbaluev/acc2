@@ -24,6 +24,8 @@ import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
 import { evaluateClosureCommitGate, verifyClosureAudit } from "./closure_audit";
 import { invalidateThresholdCache, seedThresholdPredicate } from "./threshold_registry";
+import { insertArtifact } from "./artifact_store";
+import type { Database } from "bun:sqlite";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -293,6 +295,10 @@ describe("verifyClosureAudit — T0.1 substrate-truth gate", () => {
           deliverable_kind: "report_body",
           deliverable_artifact_ids: ["report_body_ok"],
           acceptance_criteria: ["CEO Q&A", "90-day plan"],
+          // Deliverable compounding (Component E): owner-facing deliverable
+          // closure must declare a cumulative requirements ledger so closure
+          // can verify monotonic preservation, not just the newest criteria.
+          requirements_ledger: ["CEO Q&A", "90-day plan"],
         },
         asserted_residual: 0.05,
         raw_claim_count: 0,
@@ -391,6 +397,106 @@ describe("verifyClosureAudit — T0.1 substrate-truth gate", () => {
       expect(r.payload.failure_axes).toEqual({});
       const verifications = r.payload.substrate_verifications as Record<string, { verified: boolean }>;
       expect(Object.values(verifications).every((v) => v.verified)).toBe(true);
+    });
+  });
+
+  describe("deliverable closure regression gate (Component E)", () => {
+    const insertDeliverableArtifact = (db: Database, id: string, body: string, supersedes?: string, supersededBy?: string) =>
+      insertArtifact(db, {
+        id,
+        runtime: null,
+        kind: "deliverable_body",
+        body,
+        declaredSandbox: null,
+        stateRoot: null,
+        posteriorAlpha: 1,
+        posteriorBeta: 1,
+        score: 0.5,
+        confidence: 0.3,
+        recentResidualMean: 0,
+        recentKillCount: 0,
+        status: "admitted",
+        name: id,
+        fixtureInput: null,
+        fixtureExpectedResidual: null,
+        supersedes: supersedes ?? null,
+        supersededBy: supersededBy ?? null,
+      });
+
+    const deliverableVerification = (payload: Record<string, unknown>) =>
+      (payload.substrate_verifications as Record<string, { verified: boolean }>)
+        .owner_facing_deliverable_body_inspected;
+
+    test("FAILS closure when the new version drops a previously-satisfied requirement (regression)", () => {
+      const db = openDb(":memory:");
+      // Prior body satisfies the budget requirement; the new head body drops it.
+      insertDeliverableArtifact(db, "rep_v1", "Intro. Summary. Budget breakdown of 50000 USD. Timeline.", undefined, "rep_v2");
+      insertDeliverableArtifact(db, "rep_v2", "Intro. Summary. Timeline. Risk analysis.", "rep_v1");
+
+      const result = verifyClosureAudit(db, {
+        directive_id: "dir_reg",
+        task_id: "task_reg",
+        asserted_residual: 0.05,
+        closure_predicate: {
+          owner_facing_deliverable: true,
+          deliverable_artifact_ids: ["rep_v2"],
+          acceptance_criteria: ["Risk analysis"],
+          requirements_ledger: ["Risk analysis", "Budget breakdown of 50000 USD"],
+          previously_satisfied_requirements: ["Budget breakdown of 50000 USD"],
+        },
+      });
+
+      const check = deliverableVerification(result.payload);
+      expect(check.verified).toBe(false);
+      expect(result.blocked).toBe(true);
+      expect(result.payload.closure_residual).toBe(1.0);
+      const failureAxes = result.payload.failure_axes as Record<string, string>;
+      expect(failureAxes.regressed_previously_satisfied_requirements).toContain("Budget breakdown of 50000 USD");
+    });
+
+    test("PASSES closure when the new version preserves all previously-satisfied requirements and improves", () => {
+      const db = openDb(":memory:");
+      // New head body keeps the budget requirement AND adds risk analysis.
+      insertDeliverableArtifact(db, "rep2_v1", "Intro. Summary. Budget breakdown of 50000 USD. Timeline.", undefined, "rep2_v2");
+      insertDeliverableArtifact(db, "rep2_v2", "Intro. Summary. Budget breakdown of 50000 USD. Timeline. Risk analysis.", "rep2_v1");
+
+      const result = verifyClosureAudit(db, {
+        directive_id: "dir_ok",
+        task_id: "task_ok",
+        asserted_residual: 0.05,
+        closure_predicate: {
+          owner_facing_deliverable: true,
+          deliverable_artifact_ids: ["rep2_v2"],
+          acceptance_criteria: ["Risk analysis"],
+          requirements_ledger: ["Risk analysis", "Budget breakdown of 50000 USD"],
+          previously_satisfied_requirements: ["Budget breakdown of 50000 USD"],
+        },
+      });
+
+      const check = deliverableVerification(result.payload);
+      expect(check.verified).toBe(true);
+      expect(result.blocked).toBe(false);
+      expect(result.payload.closure_residual).toBe(0);
+    });
+
+    test("FAILS closure when an owner-facing deliverable supplies no cumulative requirements ledger", () => {
+      const db = openDb(":memory:");
+      insertDeliverableArtifact(db, "rep3_v1", "Intro. Summary. Conclusion.");
+
+      const result = verifyClosureAudit(db, {
+        directive_id: "dir_noledger",
+        task_id: "task_noledger",
+        asserted_residual: 0.05,
+        closure_predicate: {
+          owner_facing_deliverable: true,
+          deliverable_artifact_ids: ["rep3_v1"],
+          acceptance_criteria: ["Conclusion"],
+        },
+      });
+
+      const check = deliverableVerification(result.payload);
+      expect(check.verified).toBe(false);
+      expect(result.blocked).toBe(true);
     });
   });
 });

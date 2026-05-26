@@ -1150,3 +1150,100 @@ describe("task_dispatcher owner-control gate (amendment KN78GX0J)", () => {
     expect(observed.c).toBe(0);
   });
 });
+
+describe("deliverable compounding dispatch (Component C)", () => {
+  const insertGroundbaseFixture = (db: Database, directiveId: string) => {
+    const dataClass = (id: string, kind: string, body: string, targetResources?: string[], supersededBy?: string) =>
+      insertArtifact(db, {
+        id,
+        runtime: null,
+        kind,
+        body,
+        declaredSandbox: null,
+        stateRoot: null,
+        posteriorAlpha: 1,
+        posteriorBeta: 1,
+        score: 0.5,
+        confidence: 0.3,
+        recentResidualMean: 0,
+        recentKillCount: 0,
+        status: "admitted",
+        name: id,
+        fixtureInput: null,
+        fixtureExpectedResidual: null,
+        targetResources: targetResources ?? null,
+        supersededBy: supersededBy ?? null,
+      });
+    dataClass("gb_body", "deliverable_body", "Prior-best report: intro, summary, analysis.");
+    dataClass("gb_outline", "deliverable_outline_lock", "1. Intro\n2. Summary\n3. Analysis");
+    dataClass("gb_reqs", "deliverable_requirements_ledger", JSON.stringify({ requirements: ["include analysis", "cite sources"] }));
+    dataClass(
+      "gb_root",
+      "deliverable_groundbase",
+      JSON.stringify({
+        current_best_artifact_id: "gb_body",
+        locked_outline_artifact_id: "gb_outline",
+        requirements_ledger_artifact_id: "gb_reqs",
+        satisfied_requirement_ids: ["r1", "r2"],
+      }),
+      [`ledger:directive/${directiveId}`],
+    );
+  };
+
+  test("dispatcher resolves the groundbase via the store selector and inlines it into the brain prompt", async () => {
+    const db = openDb(":memory:");
+    const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
+    insertGroundbaseFixture(db, directiveId);
+    const task = readyTasks(db, directiveId)[0]!;
+
+    let capturedPrompt = "";
+    const base = inMemoryAct({ actionResult: { result: { count: 2 } }, verifierResidual: 0 });
+    const bridge = async (req: BridgeRequest, innerDb: Database): Promise<BridgeResult> => {
+      capturedPrompt = req.prompt;
+      return base.bridge(req, innerDb);
+    };
+
+    await dispatchReadyTask(db, task, { bridge, runArtifact: base.runArtifact });
+    // Server-side inlining: the brain prompt carries the prior-best body +
+    // locked outline + cumulative requirements — no filesystem read required.
+    expect(capturedPrompt).toContain("DELIVERABLE GROUNDBASE");
+    expect(capturedPrompt).toContain("intro, summary, analysis");
+    expect(capturedPrompt).toContain("3. Analysis");
+    expect(capturedPrompt).toContain("include analysis");
+  });
+
+  test("residual-driven refinement edge carries prior-best artifact id + deliverable semantics + targeted-delta contract", async () => {
+    const db = openDb(":memory:");
+    const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
+    insertGroundbaseFixture(db, directiveId);
+    const task = readyTasks(db, directiveId)[0]!;
+
+    // High residual → dispatcher opens a refinement edge (depth 0, below cap).
+    const act = inMemoryAct({ actionResult: { result: { count: 2 } }, verifierResidual: 0.6 });
+    await dispatchReadyTask(db, task, act);
+
+    const edges = db
+      .query("SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND directive_id = ?")
+      .all(directiveId) as Array<{ payload: string }>;
+    const refines = edges
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((p) => p.kind === "refines" && p.from_task === task.id);
+    expect(refines).toBeDefined();
+    expect(refines!.refinement_semantics).toBe("deliverable_compounding_v1");
+    expect(refines!.base_artifact_id).toBe("gb_body");
+    expect(refines!.preserve_previously_satisfied_requirements).toBe(true);
+    expect(refines!.change_scope).toBe("targeted_delta_only");
+    expect(refines!.requirements_count).toBe(2);
+
+    // The refinement task goal carries the deliverable refinement contract.
+    const refinedTaskId = refines!.to_task as string;
+    const refinedNode = db
+      .query("SELECT payload FROM events WHERE kind = 'task_node_opened' AND task_id = ?")
+      .get(refinedTaskId) as { payload: string } | null;
+    expect(refinedNode).not.toBeNull();
+    const goal = (JSON.parse(refinedNode!.payload) as { goal: string }).goal;
+    expect(goal).toContain("DELIVERABLE REFINEMENT CONTRACT");
+    expect(goal).toContain("current_best_artifact_id=gb_body");
+    expect(goal).toContain("supersedes=gb_body");
+  });
+});

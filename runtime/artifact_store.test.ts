@@ -14,6 +14,7 @@ import {
   maybeQuarantine,
   maybeRehabilitate,
   rehabilitationWorkerTick,
+  readDeliverableGroundbase,
   REHABILITATION_COOLDOWN_MS_FOR_TEST,
   REHABILITATION_CONTROLLED_INVOCATIONS_FOR_TEST,
 } from "./artifact_store";
@@ -626,5 +627,87 @@ describe("maybeRehabilitate (Phase H)", () => {
     //    again.
     expect(getArtifact(db, "art_cycle")!.status).toBe("admitted");
     expect(dispatcherCheck(db, "art_cycle")).toEqual({ ok: true });
+  });
+});
+
+// ── Deliverable compounding groundbase selector (Component A) ──────────────
+const insertDataClassArtifact = (
+  db: Database,
+  id: string,
+  opts: { kind: string; body: string; targetResources?: string[]; supersedes?: string | null; supersededBy?: string | null; status?: "admitted" | "promoted" },
+) =>
+  insertArtifact(db, {
+    id,
+    runtime: null,
+    kind: opts.kind,
+    body: opts.body,
+    declaredSandbox: null,
+    stateRoot: null,
+    posteriorAlpha: 1,
+    posteriorBeta: 1,
+    score: 0.5,
+    confidence: 0.3,
+    recentResidualMean: 0,
+    recentKillCount: 0,
+    status: opts.status ?? "admitted",
+    name: id,
+    fixtureInput: null,
+    fixtureExpectedResidual: null,
+    targetResources: opts.targetResources ?? null,
+    supersedes: opts.supersedes ?? null,
+    supersededBy: opts.supersededBy ?? null,
+  });
+
+describe("readDeliverableGroundbase (Component A)", () => {
+  test("assembles current-best body (lineage head), locked outline, and cumulative requirements", () => {
+    const db = openDb(":memory:");
+    const directiveId = "dir_compound_A";
+    const res = `ledger:directive/${directiveId}`;
+
+    // Superseded lineage: v1 -> v2 (head). Groundbase points at v1; selector
+    // must resolve forward to the head body.
+    insertDataClassArtifact(db, "deliv_v1", {
+      kind: "deliverable_body",
+      body: "Report v1 body: intro and summary.",
+      supersededBy: "deliv_v2",
+    });
+    insertDataClassArtifact(db, "deliv_v2", {
+      kind: "deliverable_body",
+      body: "Report v2 body: intro, summary, and recommendations.",
+      supersedes: "deliv_v1",
+    });
+    insertDataClassArtifact(db, "outline_lock", {
+      kind: "deliverable_outline_lock",
+      body: "1. Intro\n2. Summary\n3. Recommendations",
+    });
+    insertDataClassArtifact(db, "reqs_ledger", {
+      kind: "deliverable_requirements_ledger",
+      body: JSON.stringify({ requirements: ["include intro", "include summary", "include recommendations"] }),
+    });
+    insertDataClassArtifact(db, "gb_row", {
+      kind: "deliverable_groundbase",
+      targetResources: [res],
+      body: JSON.stringify({
+        current_best_artifact_id: "deliv_v1",
+        locked_outline_artifact_id: "outline_lock",
+        requirements_ledger_artifact_id: "reqs_ledger",
+        satisfied_requirement_ids: ["r1", "r2"],
+      }),
+    });
+
+    const gb = readDeliverableGroundbase(db, directiveId);
+    expect(gb).not.toBeNull();
+    // Lineage head — v2, not the v1 pointer.
+    expect(gb!.currentBestArtifactId).toBe("deliv_v2");
+    expect(gb!.currentBestBody).toContain("recommendations");
+    expect(gb!.lockedOutline).toContain("Recommendations");
+    expect(gb!.requirementsLedger).toEqual(["include intro", "include summary", "include recommendations"]);
+    expect(gb!.satisfiedRequirementIds).toEqual(["r1", "r2"]);
+    expect(gb!.lineageArtifactIds).toEqual(["deliv_v1", "deliv_v2"]);
+  });
+
+  test("returns null when the directive has no groundbase row", () => {
+    const db = openDb(":memory:");
+    expect(readDeliverableGroundbase(db, "dir_no_groundbase")).toBeNull();
   });
 });

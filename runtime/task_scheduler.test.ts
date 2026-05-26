@@ -1396,9 +1396,26 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
       .query("SELECT payload FROM events WHERE kind = 'task_edge_recorded' AND task_id = ?")
       .get(child!.task_id) as { payload: string } | null;
     expect(edge).not.toBeNull();
-    const ep = JSON.parse(edge!.payload) as { kind: string; from_task: string; to_task: string };
+    const ep = JSON.parse(edge!.payload) as {
+      kind: string;
+      from_task: string;
+      to_task: string;
+      refinement_mode?: string;
+      base_deliverable_evidence_event_ids?: string[];
+      preserve_satisfied_requirements?: boolean;
+      locked_outline_required?: boolean;
+      mutation_contract?: string;
+    };
     expect(ep.kind).toBe("refines");
     expect(ep.from_task).toBe(taskId);
+    // Component D: the refines edge carries deliverable-compounding semantics —
+    // not the generic { kind, from, to }.
+    expect(ep.refinement_mode).toBe("deliverable_compounding");
+    expect(Array.isArray(ep.base_deliverable_evidence_event_ids)).toBe(true);
+    expect(ep.base_deliverable_evidence_event_ids!.length).toBeGreaterThan(0);
+    expect(ep.preserve_satisfied_requirements).toBe(true);
+    expect(ep.locked_outline_required).toBe(true);
+    expect(ep.mutation_contract).toContain("preserve every previously satisfied requirement");
 
     // The deliverable still exists in the ledger (progress not thrown away).
     const kc = db

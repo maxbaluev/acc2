@@ -39,6 +39,19 @@ import { buildBrainSelfAudit, renderBrainSelfAuditSection } from "./brain_intros
 import type { JsonValue, OwnerProfile } from "../substrate/types";
 import { OWNER_PROFILE_DEFAULTS } from "../substrate/types";
 
+export type DeliverableGroundbase = {
+  groundbaseArtifactId: string;
+  currentBestArtifactId: string | null;
+  lockedOutlineArtifactId: string | null;
+  requirementsLedgerArtifactId: string | null;
+  currentBestBody: string;
+  lockedOutline: string;
+  requirementsLedger: string[];
+  satisfiedRequirementIds: string[];
+  lineageArtifactIds: string[];
+  evidenceEventIds: string[];
+};
+
 type PromptComposeOptions = {
   taskId: string;
   budgetTokens?: number;
@@ -48,6 +61,10 @@ type PromptComposeOptions = {
    *  the caller pre-computes — the composer stays synchronous). */
   retrievedKnowledge?: RetrievalResult | null;
   retrievedArtifacts?: RetrievalResult | null;
+  /** Server-side inlined deliverable compounding state. The brain cannot read
+   *  owner-staged filesystem groundbases from its sandbox, so the dispatcher
+   *  must dereference prior-best deliverable artifacts and pass the bytes here. */
+  deliverableGroundbase?: DeliverableGroundbase | null;
   /** When the caller has an EmbeddingIndex but no pre-computed retrieval
    *  result, it can be omitted entirely. Organism-alignment audit
    *  b3qc9ryzj #2/#3 (2026-05-15): for the production path the dispatcher
@@ -2037,6 +2054,15 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
     retrieval_unavailable: opts.retrievalUnavailable?.reason ?? null,
     knowledge_sig: retrievalSignature(opts.retrievedKnowledge),
     artifact_sig: retrievalSignature(opts.retrievedArtifacts),
+    deliverable_groundbase_sig: opts.deliverableGroundbase
+      ? JSON.stringify({
+          groundbase_artifact_id: opts.deliverableGroundbase.groundbaseArtifactId,
+          current_best_artifact_id: opts.deliverableGroundbase.currentBestArtifactId ?? null,
+          lineage_artifact_ids: opts.deliverableGroundbase.lineageArtifactIds,
+          evidence_event_ids: opts.deliverableGroundbase.evidenceEventIds,
+          requirements_count: opts.deliverableGroundbase.requirementsLedger.length,
+        })
+      : null,
     policy_sig: policyArtifactSignature(),
   });
   const cacheKey: CacheKey = {
@@ -2390,6 +2416,32 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   const existingDecompBody = buildExistingDecompositionSection(existingDecomp);
   if (existingDecompBody.length > 0) {
     candidates.push({ name: "existing_decomposition", p: 0, floor: true, body: existingDecompBody });
+  }
+  // Deliverable groundbase — load-bearing compounding floor. Server-inlined by
+  // the dispatcher (the brain cannot read the prior deliverable body from its
+  // sandbox). Positioned BEFORE workflow/emission grammar so the brain refines
+  // the current-best body against the locked outline + cumulative requirements
+  // rather than regenerating from the latest instruction. p=0, floor: never drops.
+  if (opts.deliverableGroundbase) {
+    const g = opts.deliverableGroundbase;
+    const lines = [
+      "DELIVERABLE GROUNDBASE (server-inlined; preserve satisfied requirements):",
+      `  groundbase_artifact_id: ${g.groundbaseArtifactId}`,
+      `  current_best_artifact_id: ${g.currentBestArtifactId ?? "(none)"}`,
+      `  locked_outline_artifact_id: ${g.lockedOutlineArtifactId ?? "(none)"}`,
+      `  requirements_ledger_artifact_id: ${g.requirementsLedgerArtifactId ?? "(none)"}`,
+      `  lineage_artifact_ids: ${g.lineageArtifactIds.join(", ") || "(none)"}`,
+      "  CONTRACT: refine the CURRENT BEST body; do not regenerate from scratch.",
+      "  CONTRACT: preserve every satisfied requirement unless explicitly superseded by owner input.",
+      "  CONTRACT: keep the LOCKED OUTLINE structure; change content only inside that outline unless owner unlocks it.",
+      "LOCKED OUTLINE:",
+      g.lockedOutline || "(none recorded)",
+      "CUMULATIVE REQUIREMENTS LEDGER:",
+      ...(g.requirementsLedger.length > 0 ? g.requirementsLedger.map((r, i) => `${i + 1}. ${r}`) : ["(none recorded)"]),
+      "CURRENT BEST DELIVERABLE BODY:",
+      g.currentBestBody || "(none recorded)",
+    ];
+    candidates.push({ name: "deliverable_groundbase", p: 0, floor: true, body: lines.join("\n") });
   }
   // Proven decomposition strategy — Tier-S1 retrieval-binding leg. Surfaces
   // the outcome-scored decomposition_strategy_predicate row matching this

@@ -1253,3 +1253,70 @@ describe("buildOwnerStateBeliefSection + buildAlignmentActionPolicySection + bui
     expect(body).toContain("breakdown=");
   });
 });
+
+describe("deliverable groundbase prompt section (Component B)", () => {
+  const groundbase = (overrides?: Partial<import("./prompt_composer").DeliverableGroundbase>): import("./prompt_composer").DeliverableGroundbase => ({
+    groundbaseArtifactId: "gb_1",
+    currentBestArtifactId: "deliv_v2",
+    lockedOutlineArtifactId: "outline_1",
+    requirementsLedgerArtifactId: "reqs_1",
+    currentBestBody: "Report v2 body: intro, summary, and recommendations.",
+    lockedOutline: "1. Intro\n2. Summary\n3. Recommendations",
+    requirementsLedger: ["include intro", "include summary", "include recommendations"],
+    satisfiedRequirementIds: ["r1", "r2"],
+    lineageArtifactIds: ["deliv_v1", "deliv_v2"],
+    evidenceEventIds: ["ev_gb", "ev_body"],
+    ...overrides,
+  });
+
+  test("renders a load-bearing groundbase section BEFORE workflow with prior-best body, outline, and requirements", async () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    const composed = await composePrompt(db, { taskId, deliverableGroundbase: groundbase() });
+    const names = composed.sections.map((s) => s.name);
+    expect(names).toContain("deliverable_groundbase");
+    // Positioned before workflow instructions.
+    expect(names.indexOf("deliverable_groundbase")).toBeLessThan(names.indexOf("workflow"));
+    // The composed prompt text inlines the groundbase contents, and the
+    // groundbase block appears before the workflow text.
+    const body = composed.text;
+    expect(body).toContain("DELIVERABLE GROUNDBASE");
+    expect(body).toContain("CURRENT BEST DELIVERABLE BODY:");
+    expect(body).toContain("intro, summary, and recommendations");
+    expect(body).toContain("LOCKED OUTLINE:");
+    expect(body).toContain("3. Recommendations");
+    expect(body).toContain("CUMULATIVE REQUIREMENTS LEDGER:");
+    expect(body).toContain("3. include recommendations");
+    expect(body).toContain("preserve every satisfied requirement");
+  });
+
+  test("groundbase identity is in the cache signature — a changed groundbase is never served stale from cache", async () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    // First compose with v2 groundbase → cache miss, stored.
+    const first = await composePrompt(db, { taskId, deliverableGroundbase: groundbase() });
+    expect(first.text).toContain("intro, summary, and recommendations");
+    // Same task, but the groundbase advanced to v3 (different artifact id + body).
+    const second = await composePrompt(db, {
+      taskId,
+      deliverableGroundbase: groundbase({
+        groundbaseArtifactId: "gb_2",
+        currentBestArtifactId: "deliv_v3",
+        currentBestBody: "Report v3 body: intro, summary, recommendations, and appendix.",
+        lineageArtifactIds: ["deliv_v1", "deliv_v2", "deliv_v3"],
+        evidenceEventIds: ["ev_gb2", "ev_body3"],
+      }),
+    });
+    // If groundbase identity were absent from the cache key, the v2 body would be
+    // served. It must instead reflect v3.
+    expect(second.text).toContain("appendix");
+    expect(second.text).not.toBe(first.text);
+  });
+
+  test("no groundbase option → no deliverable_groundbase section (universal default)", async () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    const composed = await composePrompt(db, { taskId });
+    expect(composed.sections.map((s) => s.name)).not.toContain("deliverable_groundbase");
+  });
+});

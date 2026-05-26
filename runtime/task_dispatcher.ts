@@ -173,6 +173,14 @@ type DispatchDeps = {
    *  (2026-05-15): without this wiring depth-1 retrieval is dead — the
    *  prompt section always fell back to readKnowledgeTopK's recency scan. */
   index?: import("./embedding_index").EmbeddingIndex;
+  /** Deliverable compounding seam: before composePrompt, resolve any active
+   *  deliverable groundbase for this directive and pass it as server-side
+   *  inline prompt bytes. This must NOT rely on brain filesystem reads: the
+   *  dispatcher reads admitted data-class artifacts / lineage rows itself and
+   *  supplies locked_outline_template, current_best_body, requirements_ledger,
+   *  and source artifact ids to the composer. Defaults to
+   *  artifact_store.readDeliverableGroundbase when omitted. */
+  retrieveDeliverableGroundbase?: (db: Database, task: TaskNode) => Promise<import("./prompt_composer").DeliverableGroundbase | null>;
 };
 
 const readEventsForDispatch = async (db: Database, dispatchId: string): Promise<Event[]> => {
@@ -838,6 +846,38 @@ export const dispatchReadyTask = async (
       "policy-artifact retrieval threw — composing prompt with default policy_bundle fallback chain",
     );
   }
+  // Deliverable compounding: resolve the directive's prior-best groundbase
+  // server-side (the brain cannot read it from its sandbox) so the composer can
+  // inline the current-best body + locked outline + cumulative requirements
+  // BEFORE workflow instructions. Resolved once here so it feeds both the cache
+  // key (a stale groundbase must never be served from cache) and composePrompt.
+  const deliverableGroundbase = await timeStage("retrieve_deliverable_groundbase", task.id, async () => {
+    try {
+      if (deps.retrieveDeliverableGroundbase) return await deps.retrieveDeliverableGroundbase(db, task);
+      const artifactStore = await import("./artifact_store");
+      const g = artifactStore.readDeliverableGroundbase(db, task.directive_id);
+      return g
+        ? {
+            groundbaseArtifactId: g.groundbaseArtifactId,
+            currentBestArtifactId: g.currentBestArtifactId,
+            lockedOutlineArtifactId: g.lockedOutlineArtifactId,
+            requirementsLedgerArtifactId: g.requirementsLedgerArtifactId,
+            currentBestBody: g.currentBestBody,
+            lockedOutline: g.lockedOutline,
+            requirementsLedger: g.requirementsLedger,
+            satisfiedRequirementIds: g.satisfiedRequirementIds,
+            lineageArtifactIds: g.lineageArtifactIds,
+            evidenceEventIds: g.evidenceEventIds,
+          }
+        : null;
+    } catch (err) {
+      logger.warn(
+        { where: "dispatcher.deliverableGroundbase", err: (err as Error).message, task_id: task.id },
+        "deliverable groundbase retrieval threw — composing prompt without deliverable_groundbase section",
+      );
+      return null;
+    }
+  });
   const promptCache = await import("./prompt_cache");
   const promptCacheKey = {
     directive_id: task.directive_id,
@@ -845,6 +885,9 @@ export const dispatchReadyTask = async (
     options_signature: JSON.stringify({
       retrievedKnowledgeIds: retrievedKnowledge?.hits.map((h) => h.event_id) ?? [],
       retrievedArtifactIds: retrievedArtifacts?.hits.map((h) => h.event_id) ?? [],
+      deliverableGroundbaseArtifactId: deliverableGroundbase?.groundbaseArtifactId ?? null,
+      deliverableGroundbaseCurrentBest: deliverableGroundbase?.currentBestArtifactId ?? null,
+      deliverableGroundbaseSources: deliverableGroundbase?.evidenceEventIds ?? [],
       retrievalUnavailable,
       retrievedPolicySections: Object.keys(retrievedPolicyArtifacts ?? {}).sort(),
     }),
@@ -860,6 +903,7 @@ export const dispatchReadyTask = async (
       taskId: task.id,
       retrievedKnowledge,
       retrievedArtifacts,
+      deliverableGroundbase,
       retrievalUnavailable,
       retrievedPolicyArtifacts: retrievedPolicyArtifacts as never,
     }));
@@ -1701,9 +1745,13 @@ export const dispatchReadyTask = async (
             });
           } else {
             const refinedTaskId = newId();
+            const deliverableRefinementSuffix = deliverableGroundbase
+              ? ` DELIVERABLE REFINEMENT CONTRACT: use current_best_artifact_id=${deliverableGroundbase.currentBestArtifactId ?? "(none)"} as the base; preserve the locked outline and every previously satisfied requirement; change only the verifier-identified delta; emit the successor artifact with supersedes=${deliverableGroundbase.currentBestArtifactId ?? "(none)"}.`
+              : "";
             const refinementHint =
               `refine: previous attempt returned residual ${residual.toFixed(2)} on goal "${task.goal}" — ` +
-              `investigate why and adjust action/verifier (refinement depth=${depth + 1}).`;
+              `investigate why and adjust action/verifier (refinement depth=${depth + 1}).` +
+              deliverableRefinementSuffix;
             emitEvent(db, {
               kind: "task_node_opened",
               substrate_origin: "substrate_auto",
@@ -1728,6 +1776,15 @@ export const dispatchReadyTask = async (
                 from_task: task.id,
                 to_task: refinedTaskId,
                 kind: "refines",
+                ...(deliverableGroundbase ? {
+                  refinement_semantics: "deliverable_compounding_v1",
+                  base_artifact_id: deliverableGroundbase.currentBestArtifactId ?? null,
+                  groundbase_artifact_id: deliverableGroundbase.groundbaseArtifactId,
+                  locked_outline_present: deliverableGroundbase.lockedOutline.length > 0,
+                  requirements_count: deliverableGroundbase.requirementsLedger.length,
+                  preserve_previously_satisfied_requirements: true,
+                  change_scope: "targeted_delta_only",
+                } : {}),
               } as JsonValue,
             });
             // F6 — universal internal Act scoring. The dispatcher just

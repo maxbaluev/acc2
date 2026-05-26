@@ -322,6 +322,110 @@ export const getArtifact = (db: Database, id: string): ActArtifactRow | null => 
   return mapRow(row);
 };
 
+export type DeliverableGroundbaseRecord = {
+  groundbaseArtifactId: string;
+  currentBestArtifactId: string | null;
+  lockedOutlineArtifactId: string | null;
+  requirementsLedgerArtifactId: string | null;
+  currentBestBody: string;
+  lockedOutline: string;
+  requirementsLedger: string[];
+  satisfiedRequirementIds: string[];
+  lineageArtifactIds: string[];
+  evidenceEventIds: string[];
+};
+
+const parseJsonRecord = (raw: string): Record<string, unknown> => {
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+};
+
+const stringArray = (value: unknown): string[] => Array.isArray(value)
+  ? value.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+  : [];
+
+/** Resolve the head of a supersedes lineage: follow superseded_by links from a
+ *  starting artifact until none remains, returning the most-current row. This is
+ *  the deliverable-compounding "current best" rule — the latest accepted version,
+ *  not whichever id the groundbase pointer was first authored against. */
+const resolveLineageHead = (db: Database, startId: string): ActArtifactRow | null => {
+  let current = getArtifact(db, startId);
+  const seen = new Set<string>();
+  while (current && current.supersededBy && !seen.has(current.id)) {
+    seen.add(current.id);
+    const next = getArtifact(db, current.supersededBy);
+    if (!next) break;
+    current = next;
+  }
+  return current;
+};
+
+/** Collect the full supersedes lineage (oldest → newest) for a head artifact. */
+const collectLineageIds = (db: Database, headId: string): string[] => {
+  const chain: string[] = [];
+  let cursor: ActArtifactRow | null = getArtifact(db, headId);
+  const seen = new Set<string>();
+  while (cursor && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    chain.push(cursor.id);
+    cursor = cursor.supersedes ? getArtifact(db, cursor.supersedes) : null;
+  }
+  return chain.reverse();
+};
+
+/** Return the directive's latest deliverable groundbase, with artifact bodies
+ *  dereferenced server-side so brain prompts never depend on sandboxed
+ *  filesystem reads. Groundbase rows are data-class act_artifact entries:
+ *  kind='deliverable_groundbase', target_resources containing
+ *  ledger:directive/<id> (or state_root = directive id), body JSON containing
+ *  current_best_artifact_id, locked_outline_artifact_id,
+ *  requirements_ledger_artifact_id, and satisfied_requirement_ids. The
+ *  current-best body is resolved through the supersedes lineage HEAD so the
+ *  groundbase always reflects the most-current accepted version. */
+export const readDeliverableGroundbase = (db: Database, directiveId: string): DeliverableGroundbaseRecord | null => {
+  const row = db
+    .query<{ id: string; body: string; source_candidate_id: string | null }, [string, string]>(
+      `SELECT id, body, source_candidate_id FROM act_artifact
+        WHERE kind = 'deliverable_groundbase'
+          AND status IN ('admitted','promoted')
+          AND (target_resources LIKE ? OR state_root = ?)
+        ORDER BY updated_at DESC, rowid DESC
+        LIMIT 1`,
+    )
+    .get(`%ledger:directive/${directiveId}%`, directiveId);
+  if (!row) return null;
+  const payload = parseJsonRecord(row.body);
+  const currentBestPointer = typeof payload.current_best_artifact_id === "string" ? payload.current_best_artifact_id : null;
+  const lockedOutlineArtifactId = typeof payload.locked_outline_artifact_id === "string" ? payload.locked_outline_artifact_id : null;
+  const requirementsLedgerArtifactId = typeof payload.requirements_ledger_artifact_id === "string" ? payload.requirements_ledger_artifact_id : null;
+  // Resolve the HEAD of the supersedes lineage — the most-current accepted body —
+  // rather than whatever id the groundbase pointer was first authored against.
+  const currentBest = currentBestPointer ? resolveLineageHead(db, currentBestPointer) : null;
+  const currentBestArtifactId = currentBest?.id ?? currentBestPointer;
+  const lockedOutline = lockedOutlineArtifactId ? getArtifact(db, lockedOutlineArtifactId) : null;
+  const requirementsLedger = requirementsLedgerArtifactId ? getArtifact(db, requirementsLedgerArtifactId) : null;
+  const parsedRequirements = requirementsLedger ? parseJsonRecord(requirementsLedger.body).requirements : payload.requirements;
+  const lineageArtifactIds = currentBest
+    ? collectLineageIds(db, currentBest.id)
+    : stringArray(payload.lineage_artifact_ids ?? (currentBestArtifactId ? [currentBestArtifactId] : []));
+  return {
+    groundbaseArtifactId: row.id,
+    currentBestArtifactId,
+    lockedOutlineArtifactId,
+    requirementsLedgerArtifactId,
+    currentBestBody: currentBest?.body ?? "",
+    lockedOutline: lockedOutline?.body ?? (typeof payload.locked_outline === "string" ? payload.locked_outline : ""),
+    requirementsLedger: stringArray(parsedRequirements),
+    satisfiedRequirementIds: stringArray(payload.satisfied_requirement_ids),
+    lineageArtifactIds,
+    evidenceEventIds: [row.source_candidate_id, currentBest?.sourceCandidateId, lockedOutline?.sourceCandidateId, requirementsLedger?.sourceCandidateId].filter((v): v is string => typeof v === "string"),
+  };
+};
+
 export const listArtifactsByRuntime = (
   db: Database,
   runtime: Runtime,
