@@ -75,3 +75,37 @@ export const noActiveBrainDispatches = (db: Database): boolean => {
     return true;
   }
 };
+
+/** Count of recent in-flight brain dispatches (the live-orphan signal a
+ *  crash leaves behind). After a native SIGILL/SIGSEGV the daemon's stop()
+ *  never ran, so every `brain_dispatched` row from the dead generation lacks
+ *  a `brain_dispatch_closed`. The watchdog (runtime/daemon_supervisor.ts)
+ *  surfaces this count as recovery evidence — the respawned daemon's boot
+ *  `reconcileBrainDispatchesAtBoot` is what actually closes/repicks them, so
+ *  this probe is observational only (no side effects).
+ *
+ *  Uses the SAME recency window + datetime-normalized comparison as
+ *  `noActiveBrainDispatches` so "recent" means the same thing everywhere:
+ *  orphans older than ACTIVE_BRAIN_DISPATCH_RECENCY_MS are boot-reconciliation's
+ *  job, not a crash-recovery signal. On query failure returns 0 (fail-quiet —
+ *  this is a diagnostic, not a gate). */
+export const recentOrphanDispatchCount = (db: Database): number => {
+  try {
+    const row = db
+      .query(
+        `SELECT COUNT(*) AS n FROM events b
+         WHERE b.kind = 'brain_dispatched'
+           AND NOT EXISTS (
+             SELECT 1 FROM events c
+             WHERE c.kind = 'brain_dispatch_closed'
+               AND c.task_id = b.task_id
+               AND datetime(c.ts) >= datetime(b.ts)
+           )
+           AND datetime(b.ts) > datetime('now', '-1 hour')`,
+      )
+      .get() as { n: number } | null;
+    return row?.n ?? 0;
+  } catch {
+    return 0;
+  }
+};
