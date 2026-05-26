@@ -209,6 +209,12 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // These are discriminators/payload fields, not event kinds.
   "invalid",
   "release_canonical_artifact",
+  // Universal scored-decision-policy primitive (2026-05-26). This is an
+  // act_artifact ROW kind (act_artifact.kind, free-string), declared inside
+  // seed bodies as `kind: 'scored_decision_policy_v1'`. It is NOT an event
+  // kind — the four-link chain flows through the existing action_scored +
+  // act_artifact_score_updated event kinds, not a new event kind.
+  "scored_decision_policy_v1",
 ]);
 
 // ── tests ──────────────────────────────────────────────────────────

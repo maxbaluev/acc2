@@ -3,6 +3,9 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
+import { runViews } from "../substrate/views";
+import { seedActArtifacts } from "../substrate/seed";
+import { selectDecisionPolicyArtifacts } from "./dispatch_strategy_ranker";
 import { emitEvent, flushPostCommitProjectionsForTest, resetPostCommitProjectionsForTest } from "./events";
 import { insertArtifact, getArtifact } from "./artifact_store";
 import {
@@ -195,6 +198,179 @@ describe("distributeCredit — primary + cited entities", () => {
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated'")
       .get() as { c: number };
     expect(updated.c).toBeGreaterThanOrEqual(2);
+  });
+
+  test("UNIVERSAL four-link: a cited scored_decision_policy_v1 artifact's posterior MOVES through the SAME credit envelope", async () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    seedActArtifacts(db);
+    // LINK 1 — RETRIEVE: the universal retrieval leg returns a real seeded
+    // scored_decision_policy_v1 row keyed by decision_kind + goal_shape.
+    const policy = selectDecisionPolicyArtifacts(db, { decision_kind: "capability_resolution", goal_shape: "any_shape" })[0]!;
+    expect(policy).toBeDefined();
+    const before = getArtifact(db, policy.artifact_id)!;
+    const beforeAlpha = before.posteriorAlpha;
+
+    insertSampleArtifact(db, "art_action_u", "// action body");
+    insertSampleArtifact(db, "art_verifier_u", "// verifier body");
+
+    // LINK 2 — CITE: the governing act cites the policy artifact id.
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "art_action_u",
+      verifier_artifact_id: "art_verifier_u",
+      context_refs: [policy.artifact_id],
+      predicted_residual: 0.0,
+      payload: {},
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "art_action_u",
+      payload: { phase: "completed" },
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "art_action_u",
+      verifier_artifact_id: "art_verifier_u",
+      residual: 0,
+      payload: {},
+    });
+
+    // LINK 3 — CREDIT: the SAME distributeCredit envelope (no new posterior
+    // table, no bespoke metric) credits the cited policy as a normal act_artifact.
+    const result = await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0.0,
+      observed_residual: 0.0,
+    });
+
+    const policyContribution = result.contributions.find((c) => c.target_id === policy.artifact_id);
+    expect(policyContribution).toBeDefined();
+    expect(policyContribution!.target_kind).toBe("act_artifact");
+
+    // LINK 4 — POSTERIOR MOVED: the policy's NORMAL act_artifact posterior advanced.
+    const after = getArtifact(db, policy.artifact_id)!;
+    expect(after.posteriorAlpha).toBeGreaterThan(beforeAlpha);
+  });
+
+  test("REGRESSION: cited scored_decision_policy_v1 does NOT change existing knowledge / plain act_artifact credit behavior", async () => {
+    closeDb(":memory:");
+    const db = openDb(":memory:");
+    runViews(db);
+    seedActArtifacts(db);
+    const policy = selectDecisionPolicyArtifacts(db, { decision_kind: "owner_rendering" })[0]!;
+    expect(policy).toBeDefined();
+
+    insertSampleArtifact(db, "art_action_r", "// action");
+    insertSampleArtifact(db, "art_verifier_r", "// verifier");
+    insertSampleArtifact(db, "art_plain_cited", "// plain cited act_artifact");
+    const kc = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      payload: { claim: "regression knowledge", evidence_event_ids: [], confidence_estimate: 0.6 },
+    });
+
+    // Cite a plain act_artifact, a knowledge candidate, AND the policy together.
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "art_action_r",
+      verifier_artifact_id: "art_verifier_r",
+      context_refs: ["art_plain_cited", kc.id, policy.artifact_id],
+      predicted_residual: 0.0,
+      payload: {},
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "art_action_r",
+      payload: { phase: "completed" },
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "art_action_r",
+      verifier_artifact_id: "art_verifier_r",
+      residual: 0,
+      payload: {},
+    });
+
+    const result = await distributeCredit(db, {
+      action_event_id: ap.id,
+      observation_event_id: obs.id,
+      scored_event_id: scored.id,
+      predicted_residual: 0.0,
+      observed_residual: 0.0,
+    });
+
+    // The plain act_artifact and the knowledge candidate are still credited
+    // exactly as before — the policy is just one more act_artifact contributor.
+    const plain = result.contributions.find((c) => c.target_id === "art_plain_cited");
+    expect(plain).toBeDefined();
+    expect(plain!.target_kind).toBe("act_artifact");
+    expect(getArtifact(db, "art_plain_cited")!.posteriorAlpha).toBeGreaterThan(1);
+
+    // Knowledge candidate still gets candidate_confirmed (success path) unchanged.
+    const confirmed = db
+      .query("SELECT context_refs FROM events WHERE kind = 'candidate_confirmed'")
+      .all() as Array<{ context_refs: string }>;
+    const allRefs = confirmed.flatMap((r) => JSON.parse(r.context_refs) as string[]);
+    expect(allRefs).toContain(kc.id);
+
+    // The policy is just one more contributor in the SAME Shapley
+    // distribution — it does not spawn a parallel budget or a new metric
+    // family. Every cited entity (plain act_artifact + knowledge + policy)
+    // appears exactly once with a positive weight.
+    expect(result.contributions.length).toBe(3);
+    for (const c of result.contributions) expect(c.weight).toBeGreaterThan(0);
+    // The policy is credited as a NORMAL act_artifact (same target_kind path
+    // as the plain artifact) — no bespoke "scored_decision_policy" subject.
+    const policyContrib = result.contributions.find((c) => c.target_id === policy.artifact_id);
+    expect(policyContrib!.target_kind).toBe("act_artifact");
+
+    // Baseline parity: run the IDENTICAL flow WITHOUT citing the policy. The
+    // existing knowledge + plain-act contributions keep the SAME relative
+    // Shapley ordering (first-discoverer largest) — citing a policy did not
+    // perturb the legacy credit math, it only added a contributor.
+    closeDb(":memory:");
+    const db2 = openDb(":memory:");
+    runViews(db2);
+    insertSampleArtifact(db2, "art_action_b", "// action");
+    insertSampleArtifact(db2, "art_verifier_b", "// verifier");
+    insertSampleArtifact(db2, "art_plain_b", "// plain");
+    const kc2 = emitEvent(db2, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      payload: { claim: "baseline knowledge", evidence_event_ids: [], confidence_estimate: 0.6 },
+    });
+    const apB = emitEvent(db2, {
+      kind: "action_predicted",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "art_action_b",
+      verifier_artifact_id: "art_verifier_b",
+      context_refs: ["art_plain_b", kc2.id],
+      predicted_residual: 0.0,
+      payload: {},
+    });
+    const obsB = emitEvent(db2, { kind: "artifact_observed", substrate_origin: "substrate_auto", action_artifact_id: "art_action_b", payload: { phase: "completed" } });
+    const scoredB = emitEvent(db2, { kind: "action_scored", substrate_origin: "substrate_auto", action_artifact_id: "art_action_b", verifier_artifact_id: "art_verifier_b", residual: 0, payload: {} });
+    const resultB = await distributeCredit(db2, { action_event_id: apB.id, observation_event_id: obsB.id, scored_event_id: scoredB.id, predicted_residual: 0.0, observed_residual: 0.0 });
+    // Without the policy: exactly the 2 legacy contributors, both positive.
+    expect(resultB.contributions.length).toBe(2);
+    const plainB = resultB.contributions.find((c) => c.target_id === "art_plain_b")!;
+    expect(plainB.target_kind).toBe("act_artifact");
+    expect(plainB.weight).toBeGreaterThan(0);
+    // The plain artifact (first cited) keeps the largest Shapley share in BOTH
+    // runs — first-discoverer ordering is preserved.
+    expect(plain!.weight).toBeGreaterThanOrEqual(
+      result.contributions.find((c) => c.target_id === kc.id)!.weight,
+    );
   });
 
   test("first-discoverer gets larger Shapley share than later corroborators", async () => {

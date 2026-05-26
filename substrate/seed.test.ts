@@ -165,7 +165,11 @@ describe("seedActArtifacts", () => {
     // kind check below.
     const legacyRows = db
       .query(
-        "SELECT kind FROM act_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%' AND state_root NOT LIKE 'render/%' AND state_root NOT LIKE 'substrate/primitive/%' AND state_root NOT LIKE 'substrate/threshold/%' AND state_root NOT LIKE 'release/claude-plugin/%'",
+        // decision_policy/% rows are the universal scored_decision_policy_v1
+        // seeds (2026-05-26) — they declare kind='scored_decision_policy_v1',
+        // so they are excluded from the legacy default-kind check like the
+        // dispatch/threshold/primitive rows.
+        "SELECT kind FROM act_artifact WHERE state_root NOT LIKE 'dispatch/%' AND state_root NOT LIKE 'recipes/%' AND state_root NOT LIKE 'render/%' AND state_root NOT LIKE 'substrate/primitive/%' AND state_root NOT LIKE 'substrate/threshold/%' AND state_root NOT LIKE 'release/claude-plugin/%' AND state_root NOT LIKE 'decision_policy/%'",
       )
       .all() as Array<{ kind: string }>;
     expect(legacyRows.length).toBeGreaterThan(0);

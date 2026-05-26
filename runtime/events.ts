@@ -1499,6 +1499,61 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       /* owner-observed credit retry can be driven from the ledger row */
     });
   }
+  // Universal scored-decision-policy — owner rendering feedback leg.
+  // When an owner_rendering_feedback_recorded event arrives AND the rendered
+  // message it scores cited a scored_decision_policy_v1 (owner_rendering)
+  // artifact, translate the feedback into a NORMAL action_scored row whose
+  // action_artifact_id IS that policy artifact. The single CreditEnvelope
+  // boundary below then moves the policy's STANDARD act_artifact posterior —
+  // no parallel rendering posterior, no bespoke metric. Fail-soft: no source
+  // rendered event, no numeric residual, or no cited policy → no projection.
+  if (input.kind === "owner_rendering_feedback_recorded") {
+    enqueuePostCommitProjection(db, {
+      label: "owner_rendering_feedback_recorded:action_scored",
+      sourceEventId: id,
+      run: () => {
+        const payload = isObject(input.payload) ? input.payload : {};
+        const sourceRenderedEventId = typeof payload.source_rendered_event_id === "string" ? payload.source_rendered_event_id : "";
+        const feedbackResidual = typeof payload.residual === "number" && Number.isFinite(payload.residual)
+          ? Math.max(0, Math.min(1, payload.residual))
+          : null;
+        if (!sourceRenderedEventId || feedbackResidual === null) return;
+        const rendered = db
+          .query<{ context_refs: string; payload: string }, [string]>("SELECT context_refs, payload FROM events WHERE id = ? AND kind = 'rendered_owner_message_recorded' LIMIT 1")
+          .get(sourceRenderedEventId);
+        if (!rendered) return;
+        let refs: string[] = [];
+        try { refs = JSON.parse(rendered.context_refs || "[]") as string[]; } catch { refs = []; }
+        let renderedPayload: Record<string, unknown> = {};
+        try { renderedPayload = JSON.parse(rendered.payload || "{}") as Record<string, unknown>; } catch { renderedPayload = {}; }
+        const explicitPolicyId = typeof renderedPayload.owner_rendering_policy_artifact_id === "string"
+          ? renderedPayload.owner_rendering_policy_artifact_id
+          : "";
+        const policyId = explicitPolicyId || refs.find((ref) => {
+          const row = db.query<{ kind: string }, [string]>("SELECT kind FROM act_artifact WHERE id = ? LIMIT 1").get(ref);
+          return row?.kind === "scored_decision_policy_v1";
+        });
+        if (!policyId) return;
+        emitEvent(db, {
+          kind: "action_scored",
+          substrate_origin: "substrate_auto",
+          directive_id: input.directive_id,
+          task_id: input.task_id,
+          action_artifact_id: policyId,
+          verifier_artifact_id: "owner_rendering_feedback_verifier_v1",
+          outcome: feedbackResidual < 0.3 ? "succeeded" : feedbackResidual > 0.7 ? "failed" : "pending",
+          residual: feedbackResidual,
+          context_refs: [sourceRenderedEventId, policyId, id],
+          payload: {
+            projected_from: "owner_rendering_feedback_recorded",
+            owner_rendering_feedback_event_id: id,
+            rendered_owner_message_event_id: sourceRenderedEventId,
+            feedback_kind: typeof payload.feedback_kind === "string" ? payload.feedback_kind : null,
+          } as JsonValue,
+        });
+      },
+    });
+  }
   // F6 — universal internal Act scoring for closure audit verdicts.
   // task_closure_audited is a substrate-internal verdict (the closure
   // verifier judged whether the directive met its goal). Record it
