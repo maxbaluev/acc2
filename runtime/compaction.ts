@@ -45,8 +45,49 @@ export const COMPACTION_FRAME_RETENTION_MS = 24 * 60 * 60 * 1000;
  *  in steady state, far above realistic frame volume. */
 export const COMPACTION_BATCH_SIZE = 5_000;
 
+/** Derived-telemetry kinds the compaction worker prunes once aged past
+ *  COMPACTION_DERIVED_RETENTION_MS. Amendment SVB4GRXZ7H13QB1S8Z8RE0S7H4:
+ *  live evidence showed state.db at 1.37 GB / 438k events over 12 days, with
+ *  compaction pruning ONLY bridge_frame_received (~1.5% of the ledger) while
+ *  uncompacted telemetry dominated → unbounded hot-ledger growth → slow boot.
+ *
+ *  This set is DELIBERATELY CONSERVATIVE — every member is a pure
+ *  observation/telemetry kind already classified prunable by the archival
+ *  worker (runtime/archival_worker.ts) with NO downstream view / extractor /
+ *  credit / retrieval consumer beyond its active dispatch window:
+ *    - worker_tick_completed / sql_worker_pool_metrics — DROP_KINDS:
+ *      "pure operational telemetry … ZERO credit/knowledge/owner value, no
+ *      downstream references."
+ *    - brain_reasoning_recorded — EPHEMERAL_TELEMETRY_KINDS: read only inside
+ *      the scheduler's RESEARCH_GRACE window (minutes-scale, ≤4 dispatches);
+ *      views.ts references are comments only; archival evicts it at a 1h TTL,
+ *      so a 7-day hot retention is amply safe.
+ *
+ *  Two kinds from the proposal were EXCLUDED as load-bearing:
+ *    - candidate_confirmed — the credit/retrieval citation-binding mechanism
+ *      (runtime/credit.ts, runtime/dense_closure_credit.ts) and a live
+ *      credit_projection consumer in substrate/views.ts. Pruning it would
+ *      sever the causal credit spine. Never compacted here.
+ *    - origin_calibration_recorded — the archival worker rolls these up into
+ *      telemetry_origin_calibration_rollup (retainOriginCalibrationAggregates)
+ *      BEFORE eviction; a plain DELETE would silently lose calibration health
+ *      aggregates. Excluded until/unless an aggregate-preserving path exists. */
+export const COMPACTABLE_DERIVED_EVENT_KINDS: readonly string[] = [
+  "brain_reasoning_recorded",
+  "worker_tick_completed",
+  "sql_worker_pool_metrics",
+];
+
+/** Retention window for derived telemetry. Rows of a
+ *  COMPACTABLE_DERIVED_EVENT_KINDS kind older than this are eligible to prune.
+ *  7 days keeps a generous debugging window while bounding the hot ledger.
+ *  Mirrors the deterministic-fallback rationale of the frame retention: a
+ *  learned policy should eventually drive this through scored evidence. */
+export const COMPACTION_DERIVED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
 export type CompactionReport = {
   pruned_frames: number;
+  pruned_derived: number;
   cutoff_iso: string;
 };
 
@@ -85,23 +126,63 @@ export const compactBridgeFrames = (
     .run(cutoffIso, batchSize);
 
   const pruned = Number(result.changes ?? 0);
-  return { pruned_frames: pruned, cutoff_iso: cutoffIso };
+  return { pruned_frames: pruned, pruned_derived: 0, cutoff_iso: cutoffIso };
+};
+
+/** Prune aged derived-telemetry rows (COMPACTABLE_DERIVED_EVENT_KINDS) older
+ *  than COMPACTION_DERIVED_RETENTION_MS, bounded by batchSize. Returns the
+ *  number of rows actually deleted. Idempotent; safe to call repeatedly.
+ *
+ *  Unlike compactBridgeFrames, these kinds carry no per-task dispatch lifecycle
+ *  — they are pure observation/telemetry with no downstream consumer past their
+ *  short active window (see COMPACTABLE_DERIVED_EVENT_KINDS doc), so age alone
+ *  is the prune predicate. load-bearing kinds (candidate_confirmed,
+ *  origin_calibration_recorded) are intentionally NOT in the set. */
+export const compactDerivedEvents = (
+  db: Database,
+  opts?: { nowMs?: number; batchSize?: number },
+): number => {
+  if (COMPACTABLE_DERIVED_EVENT_KINDS.length === 0) return 0;
+  const nowMs = opts?.nowMs ?? Date.now();
+  const batchSize = opts?.batchSize ?? COMPACTION_BATCH_SIZE;
+  const cutoffIso = new Date(nowMs - COMPACTION_DERIVED_RETENTION_MS).toISOString();
+  const placeholders = COMPACTABLE_DERIVED_EVENT_KINDS.map(() => "?").join(", ");
+  const result = db
+    .query(
+      `DELETE FROM events WHERE id IN (
+         SELECT id FROM events
+         WHERE kind IN (${placeholders})
+           AND ts < ?
+         LIMIT ?
+       )`,
+    )
+    .run(...COMPACTABLE_DERIVED_EVENT_KINDS, cutoffIso, batchSize);
+  return Number(result.changes ?? 0);
 };
 
 /** One compaction worker tick. Prunes frames + emits a substrate event
  *  with the result when pruning happened. Safe to call repeatedly. */
 export const compactionWorkerTick = (db: Database): CompactionReport => {
   try {
-    const report = compactBridgeFrames(db);
-    if (report.pruned_frames > 0) {
+    const frameReport = compactBridgeFrames(db);
+    const prunedDerived = compactDerivedEvents(db);
+    const report: CompactionReport = {
+      pruned_frames: frameReport.pruned_frames,
+      pruned_derived: prunedDerived,
+      cutoff_iso: frameReport.cutoff_iso,
+    };
+    if (report.pruned_frames > 0 || report.pruned_derived > 0) {
       try {
         emitEvent(db, {
           kind: "substrate_compacted",
           substrate_origin: "substrate_auto",
           payload: {
             pruned_frames: report.pruned_frames,
+            pruned_derived: report.pruned_derived,
             cutoff_iso: report.cutoff_iso,
             retention_ms: COMPACTION_FRAME_RETENTION_MS,
+            derived_retention_ms: COMPACTION_DERIVED_RETENTION_MS,
+            compactable_derived_kinds: COMPACTABLE_DERIVED_EVENT_KINDS as unknown as JsonValue,
           } as JsonValue,
         });
       } catch (err) {
@@ -117,6 +198,6 @@ export const compactionWorkerTick = (db: Database): CompactionReport => {
       { where: "compaction.tick", err: (err as Error).message },
       "compaction tick failed",
     );
-    return { pruned_frames: 0, cutoff_iso: new Date().toISOString() };
+    return { pruned_frames: 0, pruned_derived: 0, cutoff_iso: new Date().toISOString() };
   }
 };
