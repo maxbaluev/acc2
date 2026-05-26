@@ -3,7 +3,10 @@ import { closeDb, openDb } from "../substrate/db";
 import { newId } from "./ids";
 import {
   compactBridgeFrames,
+  compactDerivedEvents,
   compactionWorkerTick,
+  COMPACTABLE_DERIVED_EVENT_KINDS,
+  COMPACTION_DERIVED_RETENTION_MS,
   COMPACTION_FRAME_RETENTION_MS,
 } from "./compaction";
 
@@ -108,6 +111,89 @@ describe("compaction.compactBridgeFrames", () => {
   });
 });
 
+describe("compaction.compactDerivedEvents", () => {
+  const oldDerivedTs = (now: number) =>
+    new Date(now - (COMPACTION_DERIVED_RETENTION_MS + 60_000)).toISOString();
+  const youngDerivedTs = (now: number) =>
+    new Date(now - (COMPACTION_DERIVED_RETENTION_MS - 60_000)).toISOString();
+
+  test("prunes derived telemetry rows older than the 7d retention window", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const taskId = newId();
+    const directiveId = newId();
+    for (const kind of COMPACTABLE_DERIVED_EVENT_KINDS) {
+      insertEvent(db, kind, oldDerivedTs(now), taskId, directiveId);
+    }
+    const pruned = compactDerivedEvents(db, { nowMs: now });
+    expect(pruned).toBe(COMPACTABLE_DERIVED_EVENT_KINDS.length);
+    const left = db
+      .query(`SELECT COUNT(*) AS c FROM events WHERE kind IN (${COMPACTABLE_DERIVED_EVENT_KINDS.map(() => "?").join(",")})`)
+      .get(...COMPACTABLE_DERIVED_EVENT_KINDS) as { c: number };
+    expect(left.c).toBe(0);
+  });
+
+  test("keeps derived telemetry rows newer than the retention window", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const taskId = newId();
+    const directiveId = newId();
+    for (const kind of COMPACTABLE_DERIVED_EVENT_KINDS) {
+      insertEvent(db, kind, youngDerivedTs(now), taskId, directiveId);
+    }
+    const pruned = compactDerivedEvents(db, { nowMs: now });
+    expect(pruned).toBe(0);
+    const left = db
+      .query(`SELECT COUNT(*) AS c FROM events WHERE kind IN (${COMPACTABLE_DERIVED_EVENT_KINDS.map(() => "?").join(",")})`)
+      .get(...COMPACTABLE_DERIVED_EVENT_KINDS) as { c: number };
+    expect(left.c).toBe(COMPACTABLE_DERIVED_EVENT_KINDS.length);
+  });
+
+  test("never prunes non-listed kinds even when aged", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const ts = oldDerivedTs(now);
+    const taskId = newId();
+    const directiveId = newId();
+    // candidate_confirmed + origin_calibration_recorded were EXCLUDED as
+    // load-bearing (credit/retrieval binding; calibration rollup). They must
+    // survive the derived sweep regardless of age.
+    insertEvent(db, "candidate_confirmed", ts, taskId, directiveId);
+    insertEvent(db, "origin_calibration_recorded", ts, taskId, directiveId);
+    insertEvent(db, "task_committed", ts, taskId, directiveId);
+    insertEvent(db, "retrieval_binding", ts, taskId, directiveId);
+    const pruned = compactDerivedEvents(db, { nowMs: now });
+    expect(pruned).toBe(0);
+    const counts = db
+      .query("SELECT kind, COUNT(*) AS c FROM events GROUP BY kind")
+      .all() as Array<{ kind: string; c: number }>;
+    expect(counts.length).toBe(4);
+    for (const r of counts) expect(r.c).toBe(1);
+  });
+
+  test("excludes the load-bearing kinds from the compactable set", () => {
+    // Structural guard: the credit/retrieval-binding and calibration-rollup
+    // kinds must never appear in the prune allowlist.
+    expect(COMPACTABLE_DERIVED_EVENT_KINDS).not.toContain("candidate_confirmed");
+    expect(COMPACTABLE_DERIVED_EVENT_KINDS).not.toContain("origin_calibration_recorded");
+  });
+
+  test("respects batchSize cap (bounded write lock window)", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const ts = oldDerivedTs(now);
+    const taskId = newId();
+    const directiveId = newId();
+    for (let i = 0; i < 10; i++) {
+      insertEvent(db, "worker_tick_completed", ts, taskId, directiveId);
+    }
+    const pruned = compactDerivedEvents(db, { nowMs: now, batchSize: 3 });
+    expect(pruned).toBe(3);
+    const left = db.query("SELECT COUNT(*) AS c FROM events WHERE kind = 'worker_tick_completed'").get() as { c: number };
+    expect(left.c).toBe(7);
+  });
+});
+
 describe("compactionWorkerTick", () => {
   test("emits substrate_compacted only when rows were actually pruned", () => {
     const db = openDb(":memory:");
@@ -125,6 +211,32 @@ describe("compactionWorkerTick", () => {
     // Second tick: nothing to prune; do NOT emit a fresh substrate_compacted.
     const r2 = compactionWorkerTick(db);
     expect(r2.pruned_frames).toBe(0);
+    const evt2 = db.query("SELECT COUNT(*) AS c FROM events WHERE kind = 'substrate_compacted'").get() as { c: number };
+    expect(evt2.c).toBe(1);
+  });
+
+  test("prunes aged derived telemetry and reports pruned_derived in the tick", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const oldTs = new Date(now - (COMPACTION_DERIVED_RETENTION_MS + 60_000)).toISOString();
+    const taskId = newId();
+    const directiveId = newId();
+    insertEvent(db, "worker_tick_completed", oldTs, taskId, directiveId);
+    insertEvent(db, "sql_worker_pool_metrics", oldTs, taskId, directiveId);
+    const r1 = compactionWorkerTick(db);
+    expect(r1.pruned_frames).toBe(0);
+    expect(r1.pruned_derived).toBe(2);
+    // substrate_compacted is emitted even when only derived rows were pruned.
+    const evt = db
+      .query("SELECT payload FROM events WHERE kind = 'substrate_compacted'")
+      .all() as Array<{ payload: string }>;
+    expect(evt.length).toBe(1);
+    const payload = JSON.parse(evt[0].payload) as { pruned_derived: number };
+    expect(payload.pruned_derived).toBe(2);
+
+    // Second tick: nothing left to prune; no fresh substrate_compacted.
+    const r2 = compactionWorkerTick(db);
+    expect(r2.pruned_derived).toBe(0);
     const evt2 = db.query("SELECT COUNT(*) AS c FROM events WHERE kind = 'substrate_compacted'").get() as { c: number };
     expect(evt2.c).toBe(1);
   });
