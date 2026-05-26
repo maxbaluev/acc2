@@ -2026,6 +2026,26 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
 
   const directiveText = await readDirectiveGoal(db, task.directive_id);
 
+  // Proven trajectory motif (Tier-S3 retrieval-binding leg) — read EARLY so its
+  // identity folds into the prompt cache signature below AND the retrieved row
+  // is reused at the candidate-push site (a single read; no double-query). A
+  // motif is an outcome-SCORED act_artifact{kind:trajectory_motif_predicate}
+  // whose recurring event-kind sub-sequence is anchored to this directive's own
+  // trajectory-so-far. Its identity (id + effective_score) is a NON-substrate-
+  // tracked retrieval input that changes the composed text — so when the
+  // surfaced motif changes (different row, or its score re-calibrated), the
+  // cache key MUST change. The prompt-cache high-water mark tracks ledger
+  // movement, not the motif row's recalibration; folding the motif signature in
+  // is what makes "retrieved motif changed → recompose" hold.
+  const provenMotif = await subStage(
+    "read_proven_trajectory_motif[pooled]",
+    task.id,
+    () => readProvenTrajectoryMotif(db, task.directive_id),
+  );
+  const provenMotifSignature = provenMotif
+    ? `${provenMotif.predicate_act_artifact_id}:${provenMotif.effective_score.toFixed(4)}`
+    : "-";
+
   // RLMQ_PROMPT_COMP (brain design, 2026-05-23): bounded in-memory
   // composition reuse. The cache key is the task/directive identity plus
   // an options_signature over every NON-substrate input that changes the
@@ -2063,6 +2083,11 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
           requirements_count: opts.deliverableGroundbase.requirementsLedger.length,
         })
       : null,
+    // Composes WITH deliverable_groundbase_sig — both are scored-lineage
+    // retrieval identities that change the composed text. Additive new field;
+    // the surfaced motif's identity (id + score) invalidates the cache when the
+    // retrieved recipe changes, exactly as the groundbase signature does.
+    proven_trajectory_motif_sig: provenMotifSignature,
     policy_sig: policyArtifactSignature(),
   });
   const cacheKey: CacheKey = {
@@ -2461,10 +2486,39 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   // Purely additive: non-floor (drops first under budget pressure),
   // advisory-only, read-only, changes nothing about dispatch/closure. P1 so it
   // lands in normal flow but never displaces a load-bearing section.
-  const provenMotif = await subStage("read_proven_trajectory_motif[pooled]", task.id, () => readProvenTrajectoryMotif(db, task.directive_id));
+  // provenMotif was read EARLY (above, before the cache key) so its identity
+  // could fold into the cache signature; reuse it here — do NOT re-query.
   const provenMotifBody = buildProvenTrajectoryMotifSection(provenMotif);
-  if (provenMotifBody.length > 0) {
+  if (provenMotifBody.length > 0 && provenMotif) {
     candidates.push({ name: "proven_trajectory_motif", p: 1, body: provenMotifBody });
+    // Four-link retrieve leg (k_555: create → RETRIEVE → mutate retrieval
+    // state → credit outcome). Surfacing the motif into the brain prompt is the
+    // retrieval event; emitting a retrieval_binding scoped to this task is the
+    // retrieval-state mutation. dense_closure_credit.collectContributors reads
+    // retrieval_binding rows and credits payload.source_artifact_id against the
+    // directive's closure_residual via applyResidualOutcome — which moves the
+    // motif's act_artifact posterior_alpha/beta. So this single emit closes the
+    // loop: a surfaced motif's posterior is updated by the outcome it informed.
+    // Fail-soft: motif retrieval-binding must never block prompt composition.
+    try {
+      emitEvent(db, {
+        kind: "retrieval_binding",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        context_refs: [provenMotif.predicate_act_artifact_id],
+        payload: {
+          query: directiveText ?? task.goal,
+          source_artifact_id: provenMotif.predicate_act_artifact_id,
+          rendered_snippet: provenMotifBody.slice(0, 200),
+          rank: 0,
+          rerank_score: provenMotif.effective_score,
+          posterior: provenMotif.effective_score,
+          binding_surface: "proven_trajectory_motif",
+          section_name: "proven_trajectory_motif",
+        } as JsonValue,
+      });
+    } catch { /* fail-soft: motif retrieval must never block prompt composition */ }
   }
   await pushPolicySection("runtimes_available", 0, true);
   await pushPolicySection("workflow", 0, true);
