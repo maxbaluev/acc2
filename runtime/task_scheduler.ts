@@ -27,7 +27,7 @@ import type { JsonValue } from "../substrate/types";
 import { readDagForDirective, readyTasks, type TaskNode } from "./task_topology";
 import { dispatchReadyTask } from "./task_dispatcher";
 import { rootCommitReadiness } from "./directive_closure";
-import { decompositionDescendantTaskIds, subtreeHasRecentProgress } from "./task_descendants";
+import { decompositionDescendantTaskIds, subtreeHasRecentProgress, incomingRequiresProgress } from "./task_descendants";
 import { hasFreeHandshakePermit, freeHandshakePermits, observedBrainRssBytes } from "./bridge/opencode";
 import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
 import { emitEvent } from "./events";
@@ -912,6 +912,87 @@ const exclusiveResourcesFromInFlight = (): Set<string> => {
   return used;
 };
 
+// ── Canonical no-progress abandon guard (amendment QSB292NV) ─────────────────
+//
+// k_252 HARD GATE: all no-progress abandon decisions MUST pass the canonical
+// progress/frontier guard before emitting task_abandoned. This is the SINGLE
+// chokepoint every no_structural_progress / task_abandoned path routes through —
+// no caller may emit a no-progress abandon without first asking this guard
+// whether the node is actually idle.
+//
+// ROOT CAUSE it closes (ORG_AUDIT_ROOT_SYNTHESIS_CLOSURE): the prior gate only
+// credited OUTGOING descendant progress (subtreeHasRecentProgress over
+// progressSubtreeTaskIds = parent_task_id descendants + OUTGOING refines/requires
+// edges). A synthesis/closure node is kept alive by INCOMING prerequisite/frontier
+// progress — its required sibling leaves committing via INCOMING requires edges —
+// which that gate missed, so it abandoned a healthy node. A second hazard is a
+// RACE: brain_dispatched fires BEFORE lane execution, so a later scheduler tick
+// could abandon a task that still holds a live/open dispatch lease.
+//
+// The guard returns TRUE (DO NOT ABANDON) if ANY of:
+//   (a) the node's OWN structural progress after sinceMs;
+//   (b) DESCENDANT progress (subtreeHasRecentProgress — outgoing subtree);
+//   (c) INCOMING prerequisite/frontier progress (incomingRequiresProgress —
+//       any requires/refines neighbour committing after sinceMs);
+//   (d) a live/open brain_dispatched lease (brain_dispatched whose dispatch_id
+//       has no matching brain_dispatch_closed and no terminal/closure event yet)
+//       — never abandon a task mid-flight.
+
+/** Live/open dispatch lease check: TRUE iff `taskId` has a `brain_dispatched`
+ *  whose `dispatch_id` has NO matching `brain_dispatch_closed` AND the task has
+ *  no terminal/closure event since that dispatch. Mirrors the open/close
+ *  bracketing used by inFlightDirectivesFromSql, scoped to one task. */
+const hasLiveDispatchLease = (db: Database, taskId: string): boolean => {
+  const openRows = db
+    .query(
+      `SELECT ts, payload FROM events
+        WHERE task_id = ? AND kind = 'brain_dispatched'
+        ORDER BY ts ASC, rowid ASC`,
+    )
+    .all(taskId) as Array<{ ts: string; payload: string | null }>;
+  if (openRows.length === 0) return false;
+  for (const open of openRows) {
+    const p = parseEventPayload(open.payload);
+    const dispatchId = typeof p.dispatch_id === "string" ? p.dispatch_id : undefined;
+    if (!dispatchId) continue;
+    const closed = db
+      .query(
+        `SELECT 1 FROM events
+          WHERE kind = 'brain_dispatch_closed'
+            AND json_extract(payload, '$.dispatch_id') = ? LIMIT 1`,
+      )
+      .get(dispatchId) as { 1: number } | null;
+    if (closed) continue;
+    // Open lease, but if the task already terminalized after this dispatch the
+    // lease is effectively spent — only an open dispatch with no terminal counts.
+    const terminal = db
+      .query(
+        `SELECT 1 FROM events
+          WHERE task_id = ? AND ts >= ?
+            AND kind IN ('task_committed', 'task_failed', 'task_abandoned',
+                         'task_committed_superseded', 'task_blocked', 'task_closure_audited')
+          LIMIT 1`,
+      )
+      .get(taskId, open.ts) as { 1: number } | null;
+    if (!terminal) return true;
+  }
+  return false;
+};
+
+/** Canonical guard: returns TRUE when a no_structural_progress / no-progress
+ *  abandon of `task` MUST be SUPPRESSED because the node is demonstrably alive.
+ *  Every no-progress abandon path routes through this (k_252 hard gate). */
+const shouldSuppressNoProgressAbandon = (db: Database, task: TaskNode, sinceMs: number): boolean => {
+  // (b) descendant (outgoing subtree) progress.
+  if (subtreeHasRecentProgress(db, task.id, sinceMs)) return true;
+  // (c) INCOMING prerequisite/frontier progress — a synthesis/closure node kept
+  // alive by its required sibling leaves committing via incoming requires edges.
+  if (incomingRequiresProgress(db, task.id, sinceMs)) return true;
+  // (d) a live/open brain_dispatched lease — never abandon mid-flight dispatch.
+  if (hasLiveDispatchLease(db, task.id)) return true;
+  return false;
+};
+
 /** Dispatch-termination policy: a task that has already had a brain dispatch
  *  must not be re-dispatched unchanged. Amendment/candidate-only cycles are
  *  real deliverables, but they do not alter task topology/status; the next
@@ -1009,21 +1090,23 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
   const deliverableWithoutClosureOrRefinement = deliverableRows.length > 0 && terminalOrRecursionRows.length === 0;
   if (!noStructuralProgress && !deliverableWithoutClosureOrRefinement) return { terminated: false };
 
-  // ANCESTOR-PROGRESS HARD GATE (amendment ancestor_progress_crediting).
-  // The task's OWN events showed no structural progress — but a deep healthy
-  // graph keeps its ancestors alive THROUGH ITS DESCENDANTS. If any task in this
-  // node's progress subtree (parent_task_id chain + refines/requires edges)
-  // emitted a structural-progress event after this node's last dispatch (or
-  // within the quiet window when the dispatch ts is somehow unusable), this is
-  // NOT a no-progress ancestor: descendant progress refreshes ancestor progress.
-  // Only suppress the no-structural-progress abandon — the deliverable-without-
-  // closure path is the node's OWN unclosed deliverable and is handled below.
+  // CANONICAL NO-PROGRESS ABANDON GUARD (amendment QSB292NV — k_252 hard gate:
+  // all no-progress abandon decisions must pass the canonical progress/frontier
+  // guard before emitting task_abandoned). The task's OWN events showed no
+  // structural progress — but a node is alive if ANY of (b) outgoing-descendant
+  // progress, (c) INCOMING prerequisite/frontier progress (a synthesis/closure
+  // node kept alive by its required sibling leaves committing via incoming
+  // requires edges — the ORG_AUDIT_ROOT_SYNTHESIS_CLOSURE bug the prior
+  // descendant-only gate missed), or (d) a live/open brain_dispatched lease
+  // (don't abandon mid-flight dispatch). Only suppress the no-structural-progress
+  // abandon here — the deliverable-without-closure path is the node's OWN
+  // unclosed deliverable and is handled below.
   if (noStructuralProgress) {
     const lastDispatchMs = new Date(lastDispatch.ts).getTime();
     const sinceMs = Number.isFinite(lastDispatchMs)
       ? lastDispatchMs
       : Date.now() - ANCESTOR_PROGRESS_QUIET_WINDOW_MS;
-    if (subtreeHasRecentProgress(db, task.id, sinceMs)) {
+    if (shouldSuppressNoProgressAbandon(db, task, sinceMs)) {
       return { terminated: false };
     }
   }
@@ -1134,6 +1217,22 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
   const reason = noStructuralProgress
     ? "no_structural_progress_since_last_dispatch"
     : "deliverable_without_closure_or_refinement";
+
+  // CANONICAL ABANDON CHOKEPOINT (amendment QSB292NV — k_252 hard gate: all
+  // no-progress abandon decisions must pass the canonical progress/frontier
+  // guard before emitting task_abandoned). This is the SINGLE emit site for the
+  // no-progress task_abandoned; route it through the guard one last time so no
+  // path (no_structural_progress OR deliverable_without_closure after the audit
+  // cap) can kill a node that has descendant progress, INCOMING prerequisite/
+  // frontier progress, or a live/open dispatch lease.
+  const lastDispatchMs = new Date(lastDispatch.ts).getTime();
+  const guardSinceMs = Number.isFinite(lastDispatchMs)
+    ? lastDispatchMs
+    : Date.now() - ANCESTOR_PROGRESS_QUIET_WINDOW_MS;
+  if (shouldSuppressNoProgressAbandon(db, task, guardSinceMs)) {
+    return { terminated: false };
+  }
+
   const evidenceEventIds = (deliverableRows.length > 0 ? deliverableRows : rows).map((r) => r.id).slice(0, 20);
   const abandonEvt = emitEvent(db, {
     kind: "task_abandoned",

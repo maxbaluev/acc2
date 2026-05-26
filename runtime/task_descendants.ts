@@ -209,3 +209,80 @@ export const subtreeHasRecentProgress = (
   const latest = latestDescendantProgressTs(db, rootTaskId);
   return latest !== null && latest > sinceMs;
 };
+
+// ── Incoming prerequisite/frontier progress (amendment QSB292NV) ─────────────
+//
+// PROBLEM observed (ORG_AUDIT_ROOT_SYNTHESIS_CLOSURE): a synthesis/closure node
+// is kept alive NOT by its OUTGOING descendants but by its INCOMING prerequisite
+// frontier — the required sibling leaves it depends on, which commit via
+// `requires` edges pointing AT it. `progressSubtreeTaskIds` only walks OUTGOING
+// edges (`from_task == candidate`), so the synthesis node's OWN events look idle
+// and the no-progress guard abandoned a healthy node whose prerequisites were
+// still actively committing deliverables.
+//
+// FIX (symmetric to progressSubtreeTaskIds): credit progress from any task
+// connected to this node by a `requires`/`refines` edge in EITHER direction —
+// `to_task == taskId` (the prerequisites this node frontiers on) OR
+// `from_task == taskId` (covered already by progressSubtreeTaskIds, included here
+// for symmetry so the canonical guard has one complete neighbour set). Excludes
+// the node itself.
+
+/** Tasks linked to `taskId` by a `requires`/`refines` edge with `taskId` on the
+ *  INCOMING side (`to_task == taskId`) OR the outgoing side (`from_task == taskId`).
+ *  These are the prerequisite/frontier neighbours whose structural progress keeps
+ *  a synthesis/closure node alive. Excludes `taskId` itself. Pure. */
+export const prerequisiteNeighbourTaskIds = (db: Database, taskId: string): string[] => {
+  const out = new Set<string>();
+  const rows = db
+    .query(
+      `SELECT json_extract(payload, '$.from_task') AS from_task,
+              json_extract(payload, '$.to_task') AS to_task
+         FROM events
+        WHERE kind = 'task_edge_recorded'
+          AND json_extract(payload, '$.kind') IN ('refines', 'requires')
+          AND (json_extract(payload, '$.from_task') = ?
+            OR json_extract(payload, '$.to_task') = ?)`,
+    )
+    .all(taskId, taskId) as Array<{ from_task: string | null; to_task: string | null }>;
+  for (const row of rows) {
+    if (row.from_task && row.from_task !== taskId) out.add(row.from_task);
+    if (row.to_task && row.to_task !== taskId) out.add(row.to_task);
+  }
+  return [...out];
+};
+
+/** The maximum timestamp (epoch ms) of any structural-progress event emitted by
+ *  an INCOMING prerequisite/frontier neighbour of `taskId` (see
+ *  prerequisiteNeighbourTaskIds). Returns null when no neighbour has emitted
+ *  structural progress. Event-sourced and idempotent. */
+export const latestPrerequisiteProgressTs = (db: Database, taskId: string): number | null => {
+  const taskIds = prerequisiteNeighbourTaskIds(db, taskId);
+  if (taskIds.length === 0) return null;
+  const placeholders = taskIds.map(() => "?").join(", ");
+  const kinds = [...ANCESTOR_PROGRESS_KINDS];
+  const kindPlaceholders = kinds.map(() => "?").join(", ");
+  const row = db
+    .query(
+      `SELECT MAX(ts) AS max_ts FROM events
+        WHERE task_id IN (${placeholders})
+          AND kind IN (${kindPlaceholders})`,
+    )
+    .get(...taskIds, ...kinds) as { max_ts: string | null } | null;
+  if (!row?.max_ts) return null;
+  const ms = new Date(row.max_ts).getTime();
+  return Number.isFinite(ms) ? ms : null;
+};
+
+/** Hard gate (symmetric to subtreeHasRecentProgress, for INCOMING edges): did any
+ *  prerequisite/frontier neighbour of `taskId` emit a structural-progress event
+ *  STRICTLY AFTER `sinceMs`? When true, a synthesis/closure node is alive through
+ *  its prerequisites still committing and must NOT be abandoned for
+ *  no_structural_progress. */
+export const incomingRequiresProgress = (
+  db: Database,
+  taskId: string,
+  sinceMs: number,
+): boolean => {
+  const latest = latestPrerequisiteProgressTs(db, taskId);
+  return latest !== null && latest > sinceMs;
+};

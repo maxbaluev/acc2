@@ -1294,12 +1294,24 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
       task_id: taskId,
       payload: { goal: "supercomplex closure test" },
     });
+    const dispatchId = newId();
     emitEvent(db, {
       kind: "brain_dispatched",
       substrate_origin: "substrate_auto",
       directive_id: directiveId,
       task_id: taskId,
-      payload: { dispatch_id: newId() },
+      payload: { dispatch_id: dispatchId },
+    });
+    // The dispatch cycle COMPLETED (it just emitted nothing structural) — close
+    // its lease so the canonical no-progress guard (amendment QSB292NV) does not
+    // treat the task as a live mid-flight dispatch. A genuinely-idle task always
+    // has a closed lease when the next tick re-evaluates it.
+    emitEvent(db, {
+      kind: "brain_dispatch_closed",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { dispatch_id: dispatchId },
     });
     await Bun.sleep(3); // guarantee distinct ms so ts > dispatch.ts holds
     if (opts.withDeliverable !== false) {
@@ -1388,12 +1400,22 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
     // Simulate the child being dispatched and ALSO emitting a deliverable
     // without closure (the loop-risk case). The child is already a
     // closure_audit_redispatch node, so the lineage cap (1) is reached.
+    const childDispatchId = newId();
     emitEvent(db, {
       kind: "brain_dispatched",
       substrate_origin: "substrate_auto",
       directive_id: directiveId,
       task_id: childId,
-      payload: { dispatch_id: newId() },
+      payload: { dispatch_id: childDispatchId },
+    });
+    // Close the lease so the canonical no-progress guard (amendment QSB292NV)
+    // does not treat this completed cycle as a live mid-flight dispatch.
+    emitEvent(db, {
+      kind: "brain_dispatch_closed",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: childId,
+      payload: { dispatch_id: childDispatchId },
     });
     await Bun.sleep(3);
     emitEvent(db, {
@@ -1537,12 +1559,23 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
     // idle subtree (no descendant progress after the root's last dispatch) and
     // the no_structural_progress abandon fires as before.
     await Bun.sleep(3);
+    const rootDispatchId = newId();
     emitEvent(db, {
       kind: "brain_dispatched",
       substrate_origin: "substrate_auto",
       directive_id: directiveId,
       task_id: root,
-      payload: { dispatch_id: newId() },
+      payload: { dispatch_id: rootDispatchId },
+    });
+    // Lease closed: the re-dispatch cycle completed (emitting nothing), so the
+    // canonical guard (amendment QSB292NV) sees no live lease and the abandon
+    // fires on a genuinely-idle root.
+    emitEvent(db, {
+      kind: "brain_dispatch_closed",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: root,
+      payload: { dispatch_id: rootDispatchId },
     });
     await Bun.sleep(3);
 
@@ -1660,12 +1693,23 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
       payload: { claim: "old lesson", confidence: 0.9 },
     });
     await Bun.sleep(3);
+    const idleDispatchId = newId();
     emitEvent(db, {
       kind: "brain_dispatched",
       substrate_origin: "substrate_auto",
       directive_id: directiveId,
       task_id: root,
-      payload: { dispatch_id: newId() },
+      payload: { dispatch_id: idleDispatchId },
+    });
+    // Lease closed — the cycle completed emitting nothing; the canonical guard
+    // (amendment QSB292NV) sees no live lease, no descendant progress, and no
+    // incoming prerequisite progress, so the truly-idle abandon still fires.
+    emitEvent(db, {
+      kind: "brain_dispatch_closed",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: root,
+      payload: { dispatch_id: idleDispatchId },
     });
     await Bun.sleep(3);
 
@@ -1676,6 +1720,222 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
       .get(root) as { failure_kind: string } | null;
     expect(abandoned).not.toBeNull();
     expect(abandoned!.failure_kind).toBe("no_structural_progress_since_last_dispatch");
+  });
+
+  // ── Canonical no-progress abandon guard (amendment QSB292NV) ──────────────
+  // Replays the exact ORG_AUDIT_ROOT_SYNTHESIS_CLOSURE bug: a synthesis/closure
+  // node is kept alive by INCOMING prerequisite/frontier progress — its required
+  // sibling leaves committing via `requires` edges that point AT it. The prior
+  // gate only credited OUTGOING descendant progress, so it abandoned a healthy
+  // synthesis node. The canonical guard must SUPPRESS that abandon; a genuinely
+  // idle node (no own/descendant/prerequisite progress, no live lease) must
+  // STILL abandon at the cap.
+
+  test("canonical guard: synthesis/closure node with INCOMING prerequisite progress after its dispatch is NOT abandoned", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const synthesis = newId();
+    const leafA = newId();
+    const leafB = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      payload: { directive_text: "org audit with synthesis closure", lifecycle: "finite" },
+    });
+    // The synthesis/closure node and its required sibling leaves. The synthesis
+    // node REQUIRES the leaves — edges point FROM each leaf TO the synthesis is
+    // the dependent's view; here we model the prerequisite frontier as edges
+    // INCOMING to the synthesis (to_task == synthesis), the case the old
+    // descendant-only gate missed.
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: synthesis,
+      payload: { goal: "ORG_AUDIT_ROOT_SYNTHESIS_CLOSURE" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: leafA,
+      payload: { goal: "required sibling leaf A" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: leafB,
+      payload: { goal: "required sibling leaf B" },
+    });
+    // INCOMING requires edges: leafA / leafB are prerequisites OF the synthesis
+    // (to_task == synthesis). progressSubtreeTaskIds (outgoing only) does NOT
+    // reach them; prerequisiteNeighbourTaskIds does.
+    emitEvent(db, {
+      kind: "task_edge_recorded",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: leafA,
+      payload: { kind: "requires", from_task: leafA, to_task: synthesis },
+    });
+    emitEvent(db, {
+      kind: "task_edge_recorded",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: leafB,
+      payload: { kind: "requires", from_task: leafB, to_task: synthesis },
+    });
+    // The synthesis node was dispatched and its OWN cycle emitted nothing
+    // structural; its lease is CLOSED (the cycle completed).
+    const synthDispatchId = newId();
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: synthesis,
+      payload: { dispatch_id: synthDispatchId },
+    });
+    emitEvent(db, {
+      kind: "brain_dispatch_closed",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: synthesis,
+      payload: { dispatch_id: synthDispatchId },
+    });
+    await Bun.sleep(3);
+    // But a required sibling leaf COMMITS a deliverable AFTER the synthesis
+    // node's dispatch — incoming prerequisite/frontier progress keeps it alive.
+    emitEvent(db, {
+      kind: "task_committed",
+      substrate_origin: "brain",
+      directive_id: directiveId,
+      task_id: leafA,
+      residual: 0,
+      payload: { summary: "leaf A committed" },
+    });
+
+    await schedulerTick(db, { directiveId });
+
+    const abandoned = db
+      .query("SELECT failure_kind FROM events WHERE task_id = ? AND kind = 'task_abandoned'")
+      .get(synthesis) as { failure_kind: string } | null;
+    expect(abandoned).toBeNull();
+  });
+
+  test("canonical guard: genuinely idle node (no own/descendant/prerequisite progress, no live lease) STILL abandons at the cap", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const idle = newId();
+    const neighbour = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      payload: { directive_text: "idle synthesis node", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: idle,
+      payload: { goal: "idle node with a stale prerequisite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: neighbour,
+      payload: { goal: "prerequisite that went silent" },
+    });
+    emitEvent(db, {
+      kind: "task_edge_recorded",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: neighbour,
+      payload: { kind: "requires", from_task: neighbour, to_task: idle },
+    });
+    // The prerequisite's only progress lands BEFORE the node's dispatch and the
+    // prerequisite then terminalizes (committed) — after the dispatch window the
+    // whole neighbourhood is silent and the prerequisite is no longer ready.
+    emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: neighbour,
+      payload: { claim: "stale prerequisite lesson", confidence: 0.9 },
+    });
+    emitEvent(db, {
+      kind: "task_committed",
+      substrate_origin: "brain",
+      directive_id: directiveId,
+      task_id: neighbour,
+      residual: 0,
+      payload: { summary: "prerequisite committed before the idle node's dispatch" },
+    });
+    await Bun.sleep(3);
+    // Dispatch, lease CLOSED (cycle completed emitting nothing).
+    const idleDispatchId = newId();
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: idle,
+      payload: { dispatch_id: idleDispatchId },
+    });
+    emitEvent(db, {
+      kind: "brain_dispatch_closed",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: idle,
+      payload: { dispatch_id: idleDispatchId },
+    });
+    await Bun.sleep(3);
+
+    await schedulerTick(db, { directiveId });
+
+    const abandoned = db
+      .query("SELECT failure_kind FROM events WHERE task_id = ? AND kind = 'task_abandoned'")
+      .get(idle) as { failure_kind: string } | null;
+    expect(abandoned).not.toBeNull();
+    expect(abandoned!.failure_kind).toBe("no_structural_progress_since_last_dispatch");
+  });
+
+  test("canonical guard: node with a LIVE/open dispatch lease is NOT abandoned mid-flight (race)", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const node = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      payload: { directive_text: "mid-flight node", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: node,
+      payload: { goal: "node with a live dispatch" },
+    });
+    // brain_dispatched fires BEFORE lane execution (task_dispatcher.ts ~255-262);
+    // a later scheduler tick must NOT abandon a task whose dispatch lease is
+    // still open (no brain_dispatch_closed, no terminal/closure event yet).
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: node,
+      payload: { dispatch_id: newId() },
+    });
+    await Bun.sleep(3);
+
+    await schedulerTick(db, { directiveId });
+
+    const abandoned = db
+      .query("SELECT failure_kind FROM events WHERE task_id = ? AND kind = 'task_abandoned'")
+      .get(node) as { failure_kind: string } | null;
+    expect(abandoned).toBeNull();
   });
 });
 
