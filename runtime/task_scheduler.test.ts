@@ -26,10 +26,17 @@ import { newId } from "./ids";
 import { __resetHandshakePermitsForTest } from "./bridge/opencode";
 import { runTelemetryEvictionSweep } from "./archival_worker";
 import { activationListenerCount, clearAllActivationListeners } from "./activation_bus";
+import { ResourceGovernor, _setResourceGovernorForTests } from "./resource_governor";
 
-afterAll(() => closeDb());
+afterAll(() => {
+  closeDb();
+  _setResourceGovernorForTests(null);
+});
 beforeEach(() => {
   closeDb();
+  // Reset the process-singleton governor so a leaked lease from a sibling test
+  // can't shrink this file's global brain-dispatch admission budget.
+  _setResourceGovernorForTests(null);
   _resetSchedulerForTests();
   // The anti-starve handshake gate reads the process-global handshake-permit
   // counter; reset it so a leaked permit from a sibling test file can't block
@@ -492,6 +499,46 @@ describe("task_scheduler", () => {
     } finally {
       Object.defineProperty(process, "memoryUsage", { value: originalMemoryUsage, configurable: true });
       _setHostAvailableReaderForTests(null);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("GLOBAL governor cap blocks new opencode_brain dispatch past the budget (queues, no launch)", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-gov-cap-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      const { taskId } = await openFixtureDCountTodos(db, tempDir);
+      // Install a governor whose GLOBAL brain_slots budget is already exhausted
+      // by an unrelated actor, so this task's brain dispatch cannot be admitted.
+      const gov = new ResourceGovernor({ budgets: { global: { brain_slots: 1 }, perActor: { brain_slots: 99 } } });
+      const occupy = gov.requestLease({ origin: "other", dispatch_id: "occupant" }, { brain_slots: 1 });
+      expect(occupy.admitted).toBe(true); // global cap now full
+      _setResourceGovernorForTests(gov);
+
+      const tick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 5 });
+      // The scheduler MUST NOT launch the brain dispatch past the global cap.
+      expect(tick.dispatched).not.toContain(taskId);
+      expect(tick.brain_in_flight).not.toContain(taskId);
+      expect(tick.skipped_concurrency_cap).toContain(taskId);
+
+      const gate = db
+        .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'constitutional_gate_decision' ORDER BY ts DESC LIMIT 1")
+        .get(taskId) as { payload: string } | null;
+      expect(gate).not.toBeNull();
+      const payload = JSON.parse(gate!.payload) as { gate?: string; reason?: string; cap_source?: string; cap_kind?: string };
+      expect(payload.gate).toBe("brain_concurrency_cap");
+      expect(payload.reason).toBe("queued_at_cap");
+      expect(payload.cap_source).toBe("global_resource_governor");
+      expect(payload.cap_kind).toBe("global");
+
+      // Free the global slot → next tick admits the previously-queued brain.
+      gov.releaseLease(occupy.lease_id);
+      const retry = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 5 });
+      expect(retry.dispatched).toContain(taskId);
+      expect(retry.brain_in_flight).toContain(taskId);
+    } finally {
+      _setResourceGovernorForTests(null);
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 60_000);

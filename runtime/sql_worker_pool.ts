@@ -23,6 +23,7 @@
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { resolve as resolvePath } from "node:path";
+import { getResourceGovernor, type ActorId } from "./resource_governor";
 
 export type SqlPoolConfig = {
   workerCount: number;
@@ -186,8 +187,13 @@ export class SqlWorkerPool {
     job.reject(err);
   }
 
-  /** Submit a SELECT job to the pool. Returns the rows array. */
-  query<T = unknown>(sql: string, params: unknown[] = []): Promise<T[]> {
+  /** Submit a SELECT job to the pool. Returns the rows array.
+   *  `actor` (optional) routes the job through the universal resource governor
+   *  so one terminal/brain cannot monopolise SQL admission and starve another
+   *  (per-actor `sql_jobs` quota + global cap). Callers with no identity omit
+   *  it — the governor debits the shared 'unknown' bucket conservatively. The
+   *  existing `taskQueueLimit` hard backstop stays as a second bound. */
+  query<T = unknown>(sql: string, params: unknown[] = [], actor?: ActorId | null): Promise<T[]> {
     if (this.shuttingDown) {
       return Promise.reject(new Error("sql_pool_shutting_down"));
     }
@@ -195,6 +201,18 @@ export class SqlWorkerPool {
       this.rejectedOverflow++;
       return Promise.reject(new Error(`pool_queue_overflow:in_flight=${this.jobsById.size};limit=${this.cfg.taskQueueLimit}`));
     }
+    // GOVERNOR ADMISSION (fair, bounded): debit one sql_jobs unit for `actor`.
+    // At cap → refuse gracefully (caller retries) instead of letting one actor
+    // saturate the pool. The lease is released when the job settles below.
+    const gov = getResourceGovernor();
+    const lease = gov.requestLease(actor ?? null, { sql_jobs: 1 });
+    if (!lease.admitted) {
+      this.rejectedOverflow++;
+      return Promise.reject(new Error(
+        `governor_sql_admission_refused:${lease.queued_reason};resource=sql_jobs;cap_kind=${lease.cap_kind};actor=${lease.actor_key}`,
+      ));
+    }
+    const releaseGovLease = (): void => gov.releaseLease(lease.lease_id);
     return new Promise<T[]>((resolve, reject) => {
       const id = this.nextJobId++;
       const job: PendingJob = {
@@ -202,8 +220,11 @@ export class SqlWorkerPool {
         sql,
         params,
         enqueuedAt: Date.now(),
-        resolve: (rows: unknown[]) => resolve(rows as T[]),
-        reject,
+        // Release the governor sql_jobs lease on EVERY settle path
+        // (complete / fail / timeout / shutdown) so it can never leak and
+        // permanently shrink an actor's fair share.
+        resolve: (rows: unknown[]) => { releaseGovLease(); resolve(rows as T[]); },
+        reject: (err: Error) => { releaseGovLease(); reject(err); },
         timeoutHandle: null,
         assignedWorker: null,
       };

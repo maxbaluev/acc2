@@ -311,6 +311,32 @@ CREATE TABLE IF NOT EXISTS artifact_kind_metadata (
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_kind_metadata_needs_strategic
   ON artifact_kind_metadata(needs_strategic_grounding);
+
+-- ── Universal resource governor accounting (additive, migration-safe) ──
+-- The governor (runtime/resource_governor.ts) arbitrates fair, bounded
+-- multi-actor resource sharing so N terminals × M brains share one daemon
+-- without melting it. This ADDITIVE table records each admission / refusal
+-- decision (one row per resource dimension touched) so governor_arbitration_view
+-- can surface per-actor fairness and global-cap pressure. Pure additive:
+-- CREATE TABLE IF NOT EXISTS here; ensureGovernorLedgerTable() backfills warm
+-- DBs at runtime. NOT part of the event spine — admission is high-frequency, so
+-- it writes here directly; the spine still carries the
+-- constitutional_gate_decision { gate:'queued_at_cap' } rows the scheduler emits
+-- when it defers. actor_key is the substrate-native identity
+-- (origin:peer|dispatch|directive:<id>, or 'unknown'), NOT a fictional
+-- (terminal_id, brain_id) pair.
+CREATE TABLE IF NOT EXISTS governor_lease_ledger (
+  lease_id            TEXT PRIMARY KEY,
+  actor_key           TEXT NOT NULL,
+  resource            TEXT NOT NULL,
+  amount              REAL NOT NULL,
+  admitted            INTEGER NOT NULL,
+  cap_kind            TEXT,
+  governing_policy_id TEXT,
+  ts                  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_governor_ledger_actor ON governor_lease_ledger(actor_key);
+CREATE INDEX IF NOT EXISTS idx_governor_ledger_ts ON governor_lease_ledger(ts);
 -- C5 provenance indexes (idx_act_artifact_supersedes /
 -- idx_act_artifact_superseded_by) live in db.ts EVENT_HOT_PATH_INDEXES,
 -- which runs AFTER runMigrations adds the supersedes / superseded_by

@@ -37,6 +37,7 @@ import { findDeferringConflict } from "./interference";
 import { isBridgeHealthDegraded } from "./bridge_health";
 import { claimDispatchLease, releaseDispatchLease } from "./dispatch_leases";
 import { closeOrphanedBrainDispatches, getBootSessionToken } from "./brain_dispatch_reconciler";
+import { getResourceGovernor, actorFromContext } from "./resource_governor";
 import { logger } from "./logger";
 
 // Interaction kinds that block another directive's dispatch when one of the
@@ -268,6 +269,12 @@ export const computeBrainDispatchCap = (): number => {
  *  IN_FLIGHT — entries inserted at dispatch, deleted on promise
  *  resolution / rejection / catch. */
 const IN_FLIGHT_BRAIN: Set<string> = new Set();
+// taskId → the governor brain_slots lease held while this brain dispatch is in
+// flight. The GLOBAL admission cap (resource_governor) is THE meltdown-stopper:
+// it bounds total concurrent brain dispatches across ALL terminals/brains/actors
+// so a dispatch/credit/retrieval storm cannot grow unbounded and melt the
+// daemon. Released exactly once via clearInFlightTask on every settle path.
+const IN_FLIGHT_BRAIN_GOV_LEASE: Map<string, string> = new Map();
 
 type DispatchReadyTaskFn = typeof dispatchReadyTask;
 let dispatchReadyTaskForScheduler: DispatchReadyTaskFn = dispatchReadyTask;
@@ -309,6 +316,14 @@ const clearInFlightTask = (taskId: string, db?: Database): void => {
   IN_FLIGHT_RESOURCE_COST.delete(taskId);
   IN_FLIGHT_EXCLUSIVE_RESOURCES.delete(taskId);
   IN_FLIGHT_BRAIN.delete(taskId);
+  // Release the GLOBAL governor brain_slots lease (meltdown-stopper) so the
+  // freed slot re-admits a queued brain next tick. Idempotent: releasing an
+  // absent/already-released lease is a harmless no-op (never underflows).
+  const govLeaseId = IN_FLIGHT_BRAIN_GOV_LEASE.get(taskId);
+  if (govLeaseId) {
+    getResourceGovernor().releaseLease(govLeaseId);
+    IN_FLIGHT_BRAIN_GOV_LEASE.delete(taskId);
+  }
   // Release the durable cross-process lease on completion. Idempotent: a
   // DELETE of an absent row is a no-op, and a release for a task this
   // process never leased (db absent, or lease-write failed at claim) is
@@ -1827,6 +1842,50 @@ export const schedulerTick = async (
       }
     }
 
+    // GLOBAL ADMISSION CAP (the meltdown-stopper). Before launching a brain
+    // dispatch, acquire a global governor brain_slots lease. This bounds TOTAL
+    // concurrent brain dispatches across ALL terminals/brains/actors — the
+    // dispatch/credit/retrieval storm that melts the daemon cannot grow past
+    // the global budget. At cap → QUEUE (task stays ready, re-attempts next
+    // tick); NEVER crash, NEVER over-admit. The per-RAM/handshake gates above
+    // are local heuristics; THIS is the hard process-wide ceiling.
+    if (decision.route === "opencode_brain") {
+      const govActor = actorFromContext({
+        origin: "substrate_auto",
+        directive_id: task.directive_id,
+        dispatch_id: task.id,
+      });
+      const govLease = getResourceGovernor().requestLease(govActor, { brain_slots: 1 });
+      if (!govLease.admitted) {
+        skippedConcurrencyCap.push(task.id);
+        const key = gateKey(task.id, "brain_concurrency_cap");
+        if (!GATE_NOTIFIED.has(key)) {
+          GATE_NOTIFIED.add(key);
+          emitEvent(db, {
+            kind: "constitutional_gate_decision",
+            substrate_origin: "substrate_auto",
+            directive_id: task.directive_id,
+            task_id: task.id,
+            payload: {
+              gate: "brain_concurrency_cap",
+              reason: "queued_at_cap",
+              queued_reason: govLease.queued_reason ?? null,
+              cap_kind: govLease.cap_kind ?? null,
+              exhausted_resource: govLease.exhausted_resource ?? null,
+              actor_key: govLease.actor_key ?? null,
+              cap_source: "global_resource_governor",
+              in_flight_brain: IN_FLIGHT_BRAIN.size,
+              note: "global brain-dispatch admission cap reached; task stays ready and re-attempts next tick — bounds the credit/retrieval storm",
+            } as JsonValue,
+          });
+        }
+        continue;
+      }
+      // Hold the lease for this task's whole in-flight lifetime; released in
+      // clearInFlightTask on every settle path (success/error/timeout).
+      IN_FLIGHT_BRAIN_GOV_LEASE.set(task.id, govLease.lease_id!);
+    }
+
     // opencode_brain lane → actual dispatch.
     if (decision.route === "opencode_brain") {
       // DURABLE CROSS-PROCESS CLAIM (multi-worker-daemon coordination).
@@ -1840,6 +1899,14 @@ export const schedulerTick = async (
       const claim = claimDispatchLease(db, task.id, leaseHolder());
       if (claim.status === "held") {
         skippedConcurrencyCap.push(task.id);
+        // Release the global governor lease we just acquired — this tick is
+        // deferring to a peer daemon, so the slot must return to the budget
+        // (clearInFlightTask is NOT called on this continue path).
+        const heldGovLease = IN_FLIGHT_BRAIN_GOV_LEASE.get(task.id);
+        if (heldGovLease) {
+          getResourceGovernor().releaseLease(heldGovLease);
+          IN_FLIGHT_BRAIN_GOV_LEASE.delete(task.id);
+        }
         emitSchedulerAdmissionGate(db, task, "dispatch_lease_held_by_peer", {
           reason: "dispatch_lease_held_by_another_holder",
           holder: claim.holder,
@@ -2017,6 +2084,12 @@ export const _resetSchedulerForTests = (): void => {
   // so a test that didn't drain leaves IN_FLIGHT_BRAIN populated. Cleared
   // here so the next test's brain dispatch isn't artificially capped.
   IN_FLIGHT_BRAIN.clear();
+  // Release + clear any held global governor brain_slots leases so the next
+  // test starts with a fresh global admission budget (the governor is a
+  // process singleton; a leaked lease would artificially shrink the cap).
+  const gov = getResourceGovernor();
+  for (const leaseId of IN_FLIGHT_BRAIN_GOV_LEASE.values()) gov.releaseLease(leaseId);
+  IN_FLIGHT_BRAIN_GOV_LEASE.clear();
   GATE_NOTIFIED.clear();
   SCHEDULER_DRAINING = false;
 };

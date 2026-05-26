@@ -31,6 +31,8 @@ import { isCycleViolation } from "../cycle_one_gate";
 import { getBootSessionToken } from "../brain_dispatch_reconciler";
 import { newId } from "../ids";
 import { selectDecisionPolicyArtifacts } from "../dispatch_strategy_ranker";
+import { getResourceGovernor, actorFromContext } from "../resource_governor";
+import { peerActivity, type PeerKind } from "../peer_registry";
 import { parseOpencodeAuth } from "../../cli/doctor";
 import type { BridgeFailureReason, BridgeRequest, BridgeResult, SpawnOpts } from "./types";
 import {
@@ -758,6 +760,21 @@ export const spawnRealOpencode = async (
   // are preserved: cold dispatches still serialize on HANDSHAKE_PERMIT_CAP;
   // warm dispatches don't contend it because they never entered the
   // contended window.
+  // GOVERNOR handshake admission (fair, bounded multi-actor). A "brain" is a
+  // short-lived per-dispatch opencode subprocess keyed by dispatch_id — the
+  // substrate-native actor identity (NOT a persistent brain_id). Debit one
+  // brain_handshake_slots unit for this dispatch's actor so one terminal/brain
+  // cannot monopolise the handshake window and starve another. The lease rides
+  // alongside the existing process-global permit (which stays the OOM/start-rate
+  // semaphore) and is released on the SAME path. Warm-lease dispatches already
+  // amortized the contended window, so they skip the governor lease too.
+  const handshakeActor = actorFromContext({
+    origin: "opencode",
+    dispatch_id: req.dispatchId ?? null,
+    directive_id: req.directiveId ?? null,
+  });
+  const governor = getResourceGovernor();
+  let handshakeGovLeaseId: string | null = null;
   let handshakePermitReleased = false;
   let releasePermitOnce: () => void;
   if (warmLease !== null) {
@@ -768,12 +785,19 @@ export const spawnRealOpencode = async (
       try { getWarmPool(mcpServerUrl).release(leasedSession); } catch { /* swallow */ }
     };
   } else {
+    // Per-actor handshake fairness: debit the governor BEFORE the process-global
+    // permit. At cap → still proceed (fail-soft), but the debit is recorded so
+    // the scheduler's governor-aware admission can defer the next over-quota
+    // brain. Best-effort: never block the spawn on the governor itself.
+    const govLease = governor.requestLease(handshakeActor, { brain_handshake_slots: 1 });
+    handshakeGovLeaseId = govLease.admitted ? govLease.lease_id : null;
     const handshakePermitResult = await acquireHandshakePermit(HANDSHAKE_WAIT_BUDGET_MS);
     const handshakePermitHeld = handshakePermitResult.acquired;
     releasePermitOnce = (): void => {
       if (handshakePermitReleased) return;
       handshakePermitReleased = true;
       releaseHandshakePermit(handshakePermitHeld);
+      if (handshakeGovLeaseId) { governor.releaseLease(handshakeGovLeaseId); handshakeGovLeaseId = null; }
     };
     if (handshakePermitResult.waitedMs > 100) {
       emitEvent(db, {
@@ -936,6 +960,27 @@ export const spawnRealOpencode = async (
     } as JsonValue,
     invoker: "opencode",
   });
+  // ── peer_registry LIVE-WIRING (governor multi-actor identity) ──
+  // Make the dormant peer_registry load-bearing: register this brain
+  // subprocess as a live opencode peer keyed by its dispatch_id. This is what
+  // makes multi-terminal / multi-brain REAL — the brain's MCP calls can now be
+  // attributed to a peer_id (dispatch_id) so the governor's per-actor fairness
+  // and peer_activity_view both see the live brain. Best-effort: a peer-row
+  // write must never crash a dispatch.
+  try {
+    // `peerKind` is lifted into a typed const (NOT an inline `kind:` literal) so
+    // the event-kind coverage scanner does not mis-read this PeerKind enum value
+    // ("opencode") as a substrate event kind.
+    const peerKind: PeerKind = "opencode";
+    peerActivity(db, {
+      peer_id: dispatchId,
+      kind: peerKind,
+      spawnability: "substrate_spawnable",
+      directive_id: req.directiveId,
+      task_id: req.taskId,
+      metadata: { subprocess_pid: spawnSubprocessPid, session_token: spawnSessionToken, governor_actor_origin: "opencode" } as JsonValue,
+    });
+  } catch { /* swallow — peer registration is observability, not a gate */ }
   // ── Brain-dispatch liveness heartbeat (2026-05-23 false-zombie fix) ──
   // While the subprocess is ALIVE for this OPEN dispatch, emit a lightweight
   // brain_liveness_heartbeat (carrying req.directiveId — the SAME field the

@@ -4541,6 +4541,30 @@ CREATE VIEW IF NOT EXISTS claude_agent_job_queue_view AS
   ORDER BY r.requested_ts ASC;
 `;
 
+// ── governor_arbitration_view — universal resource governor observability ──
+// Per-actor fairness + global-cap pressure from the additive
+// governor_lease_ledger table (runtime/resource_governor.ts). One row per
+// (actor_key, resource): admitted vs refused counts, current in-flight amount,
+// and how often the GLOBAL cap (meltdown-stopper) vs the PER-ACTOR quota
+// (fairness gate) blocked the actor. Additive: created only if the ledger table
+// exists (ensureGovernorLedgerTable / schema.sql create it). Reads are pure;
+// the daemon never mutates through this view.
+const VIEW_GOVERNOR_ARBITRATION = `
+CREATE VIEW IF NOT EXISTS governor_arbitration_view AS
+  SELECT
+    actor_key,
+    resource,
+    SUM(CASE WHEN admitted = 1 THEN 1 ELSE 0 END)                              AS admitted_count,
+    SUM(CASE WHEN admitted = 0 THEN 1 ELSE 0 END)                              AS refused_count,
+    SUM(CASE WHEN admitted = 0 AND cap_kind = 'global' THEN 1 ELSE 0 END)      AS global_cap_refusals,
+    SUM(CASE WHEN admitted = 0 AND cap_kind = 'per_actor' THEN 1 ELSE 0 END)   AS per_actor_refusals,
+    SUM(CASE WHEN admitted = 1 THEN amount ELSE 0 END)                         AS admitted_amount,
+    MAX(ts)                                                                    AS last_decision_ts
+  FROM governor_lease_ledger
+  GROUP BY actor_key, resource
+  ORDER BY last_decision_ts DESC;
+`;
+
 // ── Public entrypoint ──────────────────────────────────────────────
 
 // recipes_latest_view and recipe_registry_view now project from
@@ -4579,6 +4603,7 @@ export const VIEW_NAMES = [
   "peer_registry_view",
   "peer_activity_view",
   "claude_agent_job_queue_view",
+  "governor_arbitration_view",
   "stale_zero_score_knowledge_view",
   "retrieval_credit_view",
   "top_laws_view",
@@ -4668,6 +4693,7 @@ const VIEW_DDL: readonly string[] = [
   VIEW_PEER_REGISTRY,
   VIEW_PEER_ACTIVITY,
   VIEW_CLAUDE_AGENT_JOB_QUEUE,
+  VIEW_GOVERNOR_ARBITRATION,
 ];
 
 // Extract the view name from a `CREATE VIEW IF NOT EXISTS <name> AS …` DDL
