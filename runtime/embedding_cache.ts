@@ -35,6 +35,7 @@ import type { Database } from "bun:sqlite";
 import { computeEmbedding, EMBEDDING_DIMS, EMBEDDING_MODEL, EMBEDDING_VERSION } from "./embedder";
 import type { EmbeddingResult } from "./embedder";
 import { emitEvent } from "./events";
+import { BoundedLru } from "./bounded_lru";
 
 /** Max cache age (ms) regardless of model-version match. Bounds staleness for
  *  the corner case where the embedding endpoint drifts behind a fixed version
@@ -43,6 +44,15 @@ export const QUERY_EMBEDDING_CACHE_TTL_MS = 60_000;
 
 /** Max in-memory entries before LRU eviction. Universal value. */
 export const QUERY_EMBEDDING_CACHE_MAX_ENTRIES = 500;
+
+/** Byte cap — the real memory governor. Each entry holds a 1536-dim embedding
+ *  (~12 KB as a number[]); 500 entries is ~6 MB, but a misconfigured dim or a
+ *  burst of large queries could grow this. The byte cap bounds it regardless of
+ *  entry count. Universal value (ACC2_EMBEDDING_CACHE_MAX_BYTES overrides). */
+export const QUERY_EMBEDDING_CACHE_MAX_BYTES = (() => {
+  const raw = Number(process.env.ACC2_EMBEDDING_CACHE_MAX_BYTES);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 32 * 1024 * 1024;
+})();
 
 /** Model signature folded into every key — a model/dims/version bump
  *  invalidates the whole cache so a stale-model embedding can never serve a
@@ -54,7 +64,17 @@ type CacheEntry = {
   value: EmbeddingResult;
 };
 
-const cache = new Map<string, CacheEntry>();
+/** Byte estimate of one entry — the embedding number[] dominates (8 bytes per
+ *  JS number) plus small fixed overhead for the version string + bookkeeping. */
+const entryBytes = (entry: CacheEntry): number =>
+  entry.value.embedding.length * 8 + entry.value.version.length * 2 + 32;
+
+const cache = new BoundedLru<CacheEntry>({
+  name: "embedding_cache",
+  maxEntries: QUERY_EMBEDDING_CACHE_MAX_ENTRIES,
+  maxBytes: QUERY_EMBEDDING_CACHE_MAX_BYTES,
+  sizeOf: entryBytes,
+});
 let hitCount = 0;
 let missCount = 0;
 
@@ -103,13 +123,12 @@ export const getCachedQueryEmbedding = async (
   const nowMs = opts?.nowMs ?? Date.now();
   const compute = opts?.compute ?? computeEmbedding;
   const key = renderKey(text);
-  const entry = cache.get(key);
+  const entry = cache.peek(key);
   if (entry) {
     const age = nowMs - entry.insertedAtMs;
     if (age < QUERY_EMBEDDING_CACHE_TTL_MS) {
-      // Bump to end of insertion order for honest LRU.
-      cache.delete(key);
-      cache.set(key, entry);
+      // Bump to most-recently-used for honest LRU.
+      cache.get(key);
       hitCount++;
       recordHit(db, text, age);
       return entry.value;
@@ -122,12 +141,8 @@ export const getCachedQueryEmbedding = async (
   // Never cache a null result — it signals a transient/credential failure, not
   // a deterministic "no embedding" answer. Caching it would suppress recovery.
   if (value) {
+    // BoundedLru enforces both the entry cap and the byte cap on set.
     cache.set(key, { insertedAtMs: nowMs, value });
-    while (cache.size > QUERY_EMBEDDING_CACHE_MAX_ENTRIES) {
-      const oldestKey = cache.keys().next().value;
-      if (!oldestKey) break;
-      cache.delete(oldestKey);
-    }
   }
   return value;
 };
@@ -135,6 +150,7 @@ export const getCachedQueryEmbedding = async (
 /** Telemetry — hit/miss totals plus current size. Mirrors promptCacheStats. */
 export const queryEmbeddingCacheStats = (): {
   entries: number;
+  bytes: number;
   hits: number;
   misses: number;
   hit_rate: number;
@@ -142,6 +158,7 @@ export const queryEmbeddingCacheStats = (): {
   const total = hitCount + missCount;
   return {
     entries: cache.size,
+    bytes: cache.bytes,
     hits: hitCount,
     misses: missCount,
     hit_rate: total === 0 ? 0 : hitCount / total,

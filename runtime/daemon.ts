@@ -34,8 +34,9 @@ import { closeDb, openDb, getAllPoolStats } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { seedActArtifacts } from "../substrate/seed";
 import { emitEvent } from "./events";
-import { subscribe, resetBus, type BusEvent } from "./event_bus";
+import { subscribe, resetBus, reapIdleSubscribers, eventBusSubscriberCount, type BusEvent } from "./event_bus";
 import { onEvent, type ActivationPayload } from "./activation_bus";
+import { getMemoryBudget } from "./memory_budget";
 import type { EventKind } from "../substrate/event_kinds";
 import { ARTIFACT_CANDIDATE_KINDS, EMBEDDABLE_KINDS } from "../substrate/event_kinds";
 import { newAdminToken } from "./ids";
@@ -1320,6 +1321,30 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     void refreshHealthCounts(db).catch(() => { /* keep stale cache */ });
   }, 60_000);
   workers.push(() => clearInterval(healthCountsTick));
+
+  // Memory-pressure circuit breaker (resource-spec GTWD1AV2VH4M5AE957J4H7RFPR).
+  // The ROOT-CAUSE fix for the daemon RSS meltdown (fresh 2.4 GB → 8.6 GB →
+  // SIGILL/segfault): every bounded cache (prompt_cache, embedding_cache,
+  // embedding_index jsEntries) registers with the process MemoryBudget at
+  // module load; this tick samples RSS and drives coordinated eviction when
+  // RSS crosses the soft ceiling, AND reaps idle/dead SSE subscribers so dead
+  // controllers cannot accumulate. Cheap (one process.memoryUsage() + a few
+  // Map walks) so it runs on a tight cadence — the meltdown was a slow climb,
+  // catching it early keeps RSS off the hard ceiling. Eviction emits
+  // telemetry_evicted (throttled) so the shed is on the ledger.
+  const memoryBudget = getMemoryBudget();
+  const memoryPressureTick = setInterval(() => {
+    try {
+      memoryBudget.evictOnPressure("periodic_tick", db);
+      reapIdleSubscribers();
+    } catch (err) {
+      logger.debug(
+        { where: "daemon.memory_pressure_tick", err: String(err) },
+        "memory pressure tick failed (swallowed)",
+      );
+    }
+  }, 15_000);
+  workers.push(() => clearInterval(memoryPressureTick));
 
   // Event-loop-lag monitor (gated behind ACC2_PROFILE_LOOP). Armed in ALL
   // roles — the loop-blocker we are hunting wedges the same shared event
@@ -3735,6 +3760,31 @@ const routeAux = async (
       const mod = await import("./bridge/opencode");
       handshakeGate = mod._handshakeGateStateForTests();
     } catch { /* bridge module may be unloadable in tests; tolerate */ }
+    // Memory budget pressure (resource-spec GTWD1AV2VH4M5AE957J4H7RFPR). The
+    // RSS-meltdown observability: operators reading /health see live RSS vs the
+    // soft/hard ceilings, the RSS slope (the monotonic-climb signal that
+    // preceded the SIGILL), summed tracked cache bytes, and the event-bus
+    // subscriber count (the SSE-controller accumulation signal). Sampling is a
+    // single process.memoryUsage() call — cheap enough to run on every probe.
+    let memory: unknown = null;
+    try {
+      const budget = getMemoryBudget();
+      const sample = budget.sampleMemoryPressure();
+      memory = {
+        rss_bytes: sample.rss_bytes,
+        heap_used_bytes: sample.heap_used_bytes,
+        external_bytes: sample.external_bytes,
+        array_buffers_bytes: sample.array_buffers_bytes,
+        host_total_bytes: sample.host_total_bytes,
+        tracked_cache_bytes: sample.tracked_cache_bytes,
+        rss_slope_bytes_per_min: Math.round(sample.rss_slope_bytes_per_min),
+        soft_ceiling_bytes: sample.soft_ceiling_bytes,
+        hard_ceiling_bytes: sample.hard_ceiling_bytes,
+        pressure_ratio: Number(sample.pressure_ratio.toFixed(3)),
+        registered_caches: budget.registeredCacheNames(),
+        event_bus_subscribers: eventBusSubscriberCount(),
+      };
+    } catch { /* tolerate */ }
     return Response.json({
       status: stuck.length === 0 ? "ok" : "degraded",
       pid: process.pid,
@@ -3757,6 +3807,7 @@ const routeAux = async (
       sql_worker_pool: sqlWorkerPoolStats,
       wal_stats: walStats,
       handshake_gate: handshakeGate,
+      memory,
       credentials,
       loaded_git_head: loadedGitHead,
       // INSTANT-BOOT (2026-05-23): the boot integrity check runs DEFERRED,

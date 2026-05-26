@@ -53,14 +53,97 @@ export type BusEvent = {
 
 export type BusSubscriber = (event: BusEvent) => void;
 
-const subscribers = new Set<BusSubscriber>();
+/** Subscription metadata used for memory-bounding. `session_id` ties a
+ *  subscriber to an MCP session identity so a session teardown can drop its
+ *  SSE controllers; `lastActiveMs` lets the reaper evict idle/dead
+ *  controllers (a crashed SSE client that never unsubscribed). */
+type Subscription = {
+  fn: BusSubscriber;
+  session_id?: string;
+  lastActiveMs: number;
+};
+
+const subscribers = new Map<BusSubscriber, Subscription>();
+
+/** Hard cap on concurrent subscribers — a flood of dead SSE controllers
+ *  (clients that disconnect without the unsubscribe firing) is exactly the
+ *  unbounded-accumulation leak this fix closes. When exceeded, the oldest
+ *  (least-recently-active) subscriber is evicted first. Universal value
+ *  (ACC2_EVENT_BUS_MAX_SUBSCRIBERS overrides). */
+export const EVENT_BUS_MAX_SUBSCRIBERS = (() => {
+  const raw = Number(process.env.ACC2_EVENT_BUS_MAX_SUBSCRIBERS);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 512;
+})();
+
+/** Idle eviction window — a subscriber that has not received a successful
+ *  delivery in this long is treated as dead and reaped. Universal value
+ *  (ACC2_EVENT_BUS_IDLE_MS overrides). */
+export const EVENT_BUS_IDLE_MS = (() => {
+  const raw = Number(process.env.ACC2_EVENT_BUS_IDLE_MS);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 10 * 60_000;
+})();
+
+const evictOldest = (): void => {
+  // Map preserves insertion order; the first key is the oldest registration.
+  // We refine by lastActiveMs so a recently-active old subscriber is spared.
+  let victim: BusSubscriber | undefined;
+  let victimActive = Infinity;
+  for (const [fn, sub] of subscribers) {
+    if (sub.lastActiveMs < victimActive) {
+      victimActive = sub.lastActiveMs;
+      victim = fn;
+    }
+  }
+  if (victim) subscribers.delete(victim);
+};
 
 /** Register a subscriber. Returns an unsubscribe function. Multiple
- *  subscribers can coexist (one per SSE client, one per test, …). */
-export const subscribe = (fn: BusSubscriber): (() => void) => {
-  subscribers.add(fn);
+ *  subscribers can coexist (one per SSE client, one per test, …).
+ *  `opts.session_id` ties the subscriber to an MCP session identity so a
+ *  session teardown can drop its controllers via `unsubscribeSession`. */
+export const subscribe = (
+  fn: BusSubscriber,
+  opts?: { session_id?: string },
+): (() => void) => {
+  subscribers.set(fn, { fn, session_id: opts?.session_id, lastActiveMs: Date.now() });
+  if (subscribers.size > EVENT_BUS_MAX_SUBSCRIBERS) evictOldest();
   return () => { subscribers.delete(fn); };
 };
+
+/** Drop every subscriber tied to one MCP session identity. Called from the
+ *  MCP session reaper / teardown so a dead session cannot leave SSE
+ *  controllers accumulating on the bus. Returns the count dropped. */
+export const unsubscribeSession = (session_id: string): number => {
+  let dropped = 0;
+  for (const [fn, sub] of subscribers) {
+    if (sub.session_id === session_id) {
+      subscribers.delete(fn);
+      dropped++;
+    }
+  }
+  return dropped;
+};
+
+/** Reap subscribers idle longer than `idleMs` (defaults to EVENT_BUS_IDLE_MS).
+ *  A delivery failure already drops the subscriber inline; this catches the
+ *  case where a controller silently stops consuming without throwing. Returns
+ *  the count reaped. */
+export const reapIdleSubscribers = (nowMs?: number, idleMs?: number): number => {
+  const now = nowMs ?? Date.now();
+  const window = idleMs ?? EVENT_BUS_IDLE_MS;
+  let reaped = 0;
+  for (const [fn, sub] of subscribers) {
+    if (now - sub.lastActiveMs > window) {
+      subscribers.delete(fn);
+      reaped++;
+    }
+  }
+  return reaped;
+};
+
+/** Current subscriber count — surfaced in /health so operators can see SSE
+ *  controller accumulation building between probes. */
+export const eventBusSubscriberCount = (): number => subscribers.size;
 
 /** Drop every registered subscriber. Used by the daemon shutdown path and
  *  by tests that want a clean slate between cases. */
@@ -76,9 +159,15 @@ export const publishEvent = (event: BusEvent): void => {
   if (subscribers.size === 0) return;
   // Snapshot so a subscriber that itself calls subscribe/unsubscribe during
   // its handler does not mutate the iterator under us.
-  const snapshot = Array.from(subscribers);
-  for (const fn of snapshot) {
-    try { fn(event); } catch { subscribers.delete(fn); }
+  const snapshot = Array.from(subscribers.values());
+  const now = Date.now();
+  for (const sub of snapshot) {
+    try {
+      sub.fn(event);
+      sub.lastActiveMs = now;
+    } catch {
+      subscribers.delete(sub.fn);
+    }
   }
 };
 

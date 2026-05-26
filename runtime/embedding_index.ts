@@ -25,6 +25,7 @@
 
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { decodeEmbeddingBlob, EMBEDDING_VERSION, upsertVecEventRow } from "./embedder";
+import { BoundedLru } from "./bounded_lru";
 
 export type IndexEntry = {
   event_id: string;
@@ -145,6 +146,41 @@ type Meta = Omit<IndexEntry, "embedding">;
  *  vector lives in vec_events and its metadata is fetched on-demand. */
 type JsEntry = { meta: Meta; vec: Float32Array };
 
+/** Max inline entries before LRU eviction. Production stays at ZERO inline
+ *  entries (every 1536-dim vector lands in vec_events), so this cap only ever
+ *  bites the test/legacy dim-mismatch fallback — but it must exist so a
+ *  pathological seed or a legacy backfill burst can never grow jsEntries
+ *  without bound (the unbounded-jsEntries leak this fix closes). Universal
+ *  value (ACC2_EMBEDDING_INDEX_MAX_INLINE_ENTRIES overrides for tests). */
+export const EMBEDDING_INDEX_MAX_INLINE_ENTRIES = (() => {
+  const raw = Number(process.env.ACC2_EMBEDDING_INDEX_MAX_INLINE_ENTRIES);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 4096;
+})();
+
+/** Byte cap for the inline store. Each JsEntry holds a Float32Array (4 bytes
+ *  per dim) plus metadata; the byte cap is the real governor. Universal value
+ *  (ACC2_EMBEDDING_INDEX_MAX_INLINE_BYTES overrides). */
+export const EMBEDDING_INDEX_MAX_INLINE_BYTES = (() => {
+  const raw = Number(process.env.ACC2_EMBEDDING_INDEX_MAX_INLINE_BYTES);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 32 * 1024 * 1024;
+})();
+
+/** Byte estimate of one inline JsEntry — the Float32Array vector dominates. */
+const jsEntryBytes = (e: JsEntry): number =>
+  e.vec.byteLength + (e.meta.snippet?.length ?? 0) * 2 + 128;
+
+/** Build the bounded inline store. Registered with the process memory budget
+ *  under a stable name so coordinated eviction (evictOnPressure) can shed its
+ *  bytes; eviction is oldest-first and transparent to knn (a freshly-evicted
+ *  inline entry simply re-loads from the DB on the next reloadFromDb). */
+const newJsEntryStore = (): BoundedLru<JsEntry> =>
+  new BoundedLru<JsEntry>({
+    name: "embedding_index_js",
+    maxEntries: EMBEDDING_INDEX_MAX_INLINE_ENTRIES,
+    maxBytes: EMBEDDING_INDEX_MAX_INLINE_BYTES,
+    sizeOf: jsEntryBytes,
+  });
+
 type EventRow = {
   id: string;
   kind: string;
@@ -217,8 +253,10 @@ export class EmbeddingIndex {
     private readonly db: Database,
     /** Test-only inline storage for entries vec_events refused (dim mismatch).
      *  Holds both the enrichment metadata and the raw vector so the
-     *  JS-fallback knn can rank and enrich them. Empty in production. */
-    private jsEntries: Map<string, JsEntry>,
+     *  JS-fallback knn can rank and enrich them. Empty in production. Bounded
+     *  (entry + byte cap) and registered with the process memory budget so it
+     *  can never grow without bound — the leak this fix closes. */
+    private jsEntries: BoundedLru<JsEntry>,
   ) {}
 
   /** Count of embedded rows in the canonical store (vec_events) plus the
@@ -238,7 +276,7 @@ export class EmbeddingIndex {
    *  for tests, stashes dim-mismatch vectors inline). Production DBs have
    *  ~0 backfill rows, so this returns near-instantly. */
   static rebuildFromDb(db: Database): EmbeddingIndex {
-    const jsEntries = new Map<string, JsEntry>();
+    const jsEntries = newJsEntryStore();
     // Only consider rows whose embedding BLOB exists but is NOT already in
     // vec_events. The previous implementation scanned up to 40k rows (and
     // pre-fix ALL ~328k rows, ~298KB payloads, growing to 14GB RSS / OOM)
