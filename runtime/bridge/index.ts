@@ -53,9 +53,24 @@ export {
   opencodeQueryMock,
   opencodeQueryHighResidual,
   opencodeQueryAdversarialCycle2,
+  claudeCodeQueryMock,
+  FIXTURE_CC_IMPLEMENT_MARKER,
 } from "./mock";
 
 export { spawnRealOpencode } from "./opencode";
+export {
+  spawnRealClaudeCode,
+  claudeCodeQuery,
+  claudeEngineBridge,
+  materializeClaudeMcpConfig,
+  DEFAULT_CLAUDE_MODEL,
+} from "./claude";
+export type {
+  EngineBridge,
+  EngineBridgeKind,
+  EngineBridgeSpawn,
+  ClaudeSpawnOpts,
+} from "./types";
 
 export {
   McpWarmPool,

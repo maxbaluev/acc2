@@ -584,6 +584,12 @@ export const EVENT_KINDS = {
   // ── Dispatcher (cycle-1 enforcement) ────────────────────────────────
   brain_dispatched:                        { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   brain_dispatch_closed:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // Substrate-spawned Claude Code bridge lifecycle. These mirror the brain_*
+  // rows for engine-specific observability while dispatch correlation remains
+  // on the shared dispatch_id and generic bridge_* rows.
+  cc_dispatched:                           { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  cc_frame_received:                       { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  cc_dispatch_closed:                      { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   brain_cycle_2_started:                   { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   continue_cycle_requested:                { producer: "brain",     embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   dispatcher_violation:                    { producer: "runtime",   embeddable: false, mirror_inline: true,  health_metric: true, narrative: true },
