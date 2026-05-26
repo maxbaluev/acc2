@@ -559,6 +559,44 @@ const BOOT_HEAVY_PASS_DELAY_MS = (() => {
   return 3_000;
 })();
 
+// DAEMON STABILITY HARDENING (fix #3): generic per-tick wall-clock budget
+// runner for an ordered sequence of named async steps. Pure + clock-injectable
+// so the budget-cut semantics are unit-testable without booting a daemon.
+//
+// Semantics: the FIRST step ALWAYS runs (a tick is never a complete no-op);
+// before each SUBSEQUENT step, if the elapsed wall-clock exceeds `budgetMs`
+// the sweep stops and records the name of the step it cut before. A step that
+// throws is caught (logged by `onError`) and does NOT abort the sweep — a
+// failing extractor must not skip the rest, only a budget overrun does.
+// Returns `{ cutBeforeStep, elapsedMs, ran }` so the caller can emit evidence.
+export type BudgetedStep = { name: string; run: () => Promise<unknown> };
+export type BudgetedSweepResult = { cutBeforeStep: string | null; elapsedMs: number; ran: string[] };
+
+export const runBudgetedSweep = async (
+  steps: BudgetedStep[],
+  opts: { budgetMs: number; now?: () => number; onError?: (name: string, err: unknown) => void },
+): Promise<BudgetedSweepResult> => {
+  const now = opts.now ?? Date.now;
+  const startedMs = now();
+  const ran: string[] = [];
+  let cutBeforeStep: string | null = null;
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]!;
+    // The first step always runs; gate every subsequent step on the budget.
+    if (i > 0 && now() - startedMs > opts.budgetMs) {
+      cutBeforeStep = step.name;
+      break;
+    }
+    try {
+      await step.run();
+      ran.push(step.name);
+    } catch (err) {
+      opts.onError?.(step.name, err);
+    }
+  }
+  return { cutBeforeStep, elapsedMs: now() - startedMs, ran };
+};
+
 const countEvents = (db: Database): number => {
   try {
     const row = db.query("SELECT SUM(live_count) AS n FROM event_kind_rollup").get() as { n: number | null } | null;
@@ -1638,135 +1676,127 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
       extractOwnerProfilePromotions,
     } = await import("../substrate/extractors");
     const { runOwnerAutonomyAdjusterTick } = await import("../substrate/owner_autonomy_adjuster");
+    // DAEMON STABILITY HARDENING (fix #3): per-tick WALL-CLOCK budget for the
+    // whole extractor sweep. Each extractor is INDIVIDUALLY bounded (meta
+    // cursor + EXTRACTOR_SCAN_LIMIT + event-loop yields), but the sweep runs
+    // ~14 of them sequentially with no aggregate cap — on a 424k-row ledger a
+    // slow sweep was observed running >10min, starving every other worker.
+    // Once the budget is exceeded we SKIP the remaining extractors this tick
+    // and emit one evidence row. Skipping is SAFE: every extractor is
+    // cursor-based / idempotent, so a deferred step simply runs on the next
+    // (5-min) tick with the same input window. Override via env for ops.
+    const EXTRACTORS_TICK_BUDGET_MS = (() => {
+      const raw = process.env.ACC2_EXTRACTORS_TICK_BUDGET_MS;
+      if (typeof raw === "string" && raw.length > 0) {
+        const n = parseInt(raw, 10);
+        if (Number.isFinite(n) && n >= 1_000) return n;
+      }
+      return 4 * 60 * 1000; // 4min — under the 5-min cadence, well under the >10min wedge.
+    })();
     const runExtractorsOnce = async (): Promise<void> => {
-      try { await extractKnowledgePromotions(db); } catch (err) {
-        logger.warn({ where: "daemon.extractors.knowledge", err: (err as Error).message }, "knowledge extractor tick failed");
-      }
-      try { await extractActArtifactScores(db); } catch (err) {
-        logger.warn({ where: "daemon.extractors.act_artifact", err: (err as Error).message }, "act artifact extractor tick failed");
-      }
-      // CONSOLIDAT (directive 3XETJCYT): runs AFTER extractActArtifactScores
-      // so the Beta posteriors are freshly recomputed before consolidation
-      // picks the winner of an equivalent artifact pair. Retires the
-      // lower-posterior duplicate by aliasing it to the winner (wave-1
-      // resolveArtifactId mechanism) — closes the evolve-better-code loop.
-      try { await extractArtifactConsolidation(db); } catch (err) {
-        logger.warn({ where: "daemon.extractors.artifact_consolidation", err: (err as Error).message }, "artifact-consolidation extractor tick failed");
-      }
-      try { await extractRecipeCandidates(db); } catch (err) {
-        logger.warn({ where: "daemon.extractors.recipes", err: (err as Error).message }, "recipe extractor tick failed");
-      }
-      try {
-        const semanticDedup = await extractSemanticDedup(db);
-        const redundant = Number((semanticDedup as { redundant_count?: number }).redundant_count ?? 0);
-        const confirmed = Number((semanticDedup as { confirmed_count?: number }).confirmed_count ?? 0);
-        if (redundant >= 10 && redundant > confirmed * 2) {
-          const request = emitEvent(db, {
-            kind: "brain_invocation_request",
+      // Ordered extractor steps. The budgeted-sweep runner gates each step
+      // after the first on the wall-clock budget; a deferred step runs on the
+      // next tick (cursor/idempotent). Comments document each step's purpose.
+      const steps: BudgetedStep[] = [
+        { name: "knowledge", run: () => extractKnowledgePromotions(db) },
+        { name: "act_artifact", run: () => extractActArtifactScores(db) },
+        // CONSOLIDAT (directive 3XETJCYT): runs AFTER extractActArtifactScores
+        // so the Beta posteriors are freshly recomputed before consolidation
+        // picks the winner of an equivalent artifact pair. Retires the
+        // lower-posterior duplicate by aliasing it to the winner (wave-1
+        // resolveArtifactId mechanism) — closes the evolve-better-code loop.
+        { name: "artifact_consolidation", run: () => extractArtifactConsolidation(db) },
+        { name: "recipes", run: () => extractRecipeCandidates(db) },
+        { name: "semantic_dedup", run: async () => {
+          const semanticDedup = await extractSemanticDedup(db);
+          const redundant = Number((semanticDedup as { redundant_count?: number }).redundant_count ?? 0);
+          const confirmed = Number((semanticDedup as { confirmed_count?: number }).confirmed_count ?? 0);
+          if (redundant >= 10 && redundant > confirmed * 2) {
+            const request = emitEvent(db, {
+              kind: "brain_invocation_request",
+              substrate_origin: "substrate_auto",
+              payload: {
+                request_reason: "extractor_dedup_noise_floor_rising",
+                topic_keywords: ["semantic_dedup", "noise_floor", "knowledge_candidate_redundant"],
+                triggering_event_ids: [],
+                cited_artifact_ids: [],
+                cited_knowledge_ids: [],
+                emitter_identity: "extractors.semantic_dedup",
+                urgency: "normal",
+                metrics: { redundant_count: redundant, confirmed_count: confirmed },
+              } as JsonValue,
+            });
+            logger.info({ request_event_id: request.id, redundant, confirmed }, "semantic-dedup extractor requested brain synthesis");
+          }
+        } },
+        // T1.3 cross-candidate semantic corroboration (2026-05-19): scan
+        // unverified knowledge_candidate rows for nearest promoted-knowledge
+        // neighbors via vec_events cosine and emit candidate_confirmed
+        // (confirmation_source=semantic_corroboration) so the long tail of
+        // never-cited candidates can still feed the Beta-posterior promotion
+        // gate. Live evidence: 3324+ candidates vs ~311 promoted (~9.3%).
+        { name: "cross_candidate_corroboration", run: () => extractCrossCandidateCorroboration(db) },
+        // Tier-S2 causal-edge posterior: admit causal_edge_predicate rows for
+        // citation co-occurrence + refinement edges. Bounded 500 acts/tick.
+        { name: "causal_edges", run: async () => {
+          const { extractCausalEdges } = await import("./causal_edge_extractor");
+          await extractCausalEdges(db);
+        } },
+        // Tier-S5 goal-shape predicate: group residuals by goal_shape and
+        // admit/refresh one predicate row per shape. Bounded 5000 events/tick.
+        { name: "goal_shape_predicates", run: async () => {
+          const { extractGoalShapePredicates } = await import("./goal_shape_predicate_extractor");
+          await extractGoalShapePredicates(db);
+        } },
+        // Tier-S3 trajectory-motif posterior: admit predicate rows for frequent
+        // 3-/4-gram event sequences. Bounded 5000 events/tick, top 50 motifs.
+        { name: "trajectory_motifs", run: async () => {
+          const { extractTrajectoryMotifs } = await import("./trajectory_motif_extractor");
+          await extractTrajectoryMotifs(db);
+        } },
+        // Tier-S1 DAG decomposition strategy: bucket completed directives by
+        // DAG shape and admit one decomposition_strategy_predicate per shape.
+        { name: "decomposition_strategy", run: async () => {
+          const { extractDecompositionStrategy } = await import("./decomposition_strategy_extractor");
+          await extractDecompositionStrategy(db);
+        } },
+        // Auto cross-directive interference: emit resource_conflict edges so
+        // the scheduler defers racing dispatches. Idempotent re-dedupe.
+        { name: "directive_interference", run: () => extractDirectiveInterference(db) },
+        // Owner profile promotions: owner_insight_candidate → owner_profile_recorded.
+        { name: "owner_profile", run: () => extractOwnerProfilePromotions(db) },
+        // Outcome-driven autonomy_score adjuster: fold recent outcomes into a
+        // delta on owner_profile.autonomy_score. Idempotent via context_refs.
+        { name: "autonomy_adjuster", run: async () => { runOwnerAutonomyAdjusterTick(db); } },
+      ];
+      const sweep = await runBudgetedSweep(steps, {
+        budgetMs: EXTRACTORS_TICK_BUDGET_MS,
+        onError: (name, err) =>
+          logger.warn({ where: `daemon.extractors.${name}`, err: (err as Error)?.message ?? String(err) }, `${name} extractor tick failed`),
+      });
+      // DAEMON STABILITY HARDENING (fix #3): if the wall-clock budget cut the
+      // sweep short, emit ONE evidence row naming the boundary step + elapsed
+      // time so operators see the sweep was bounded (not silently stuck) and
+      // the deferred steps run next tick. health_metric so a recurring cut
+      // surfaces as a "ledger too big / sweep too slow" symptom.
+      if (sweep.cutBeforeStep !== null) {
+        try {
+          emitEvent(db, {
+            kind: "worker_tick_overrun",
             substrate_origin: "substrate_auto",
             payload: {
-              request_reason: "extractor_dedup_noise_floor_rising",
-              topic_keywords: ["semantic_dedup", "noise_floor", "knowledge_candidate_redundant"],
-              triggering_event_ids: [],
-              cited_artifact_ids: [],
-              cited_knowledge_ids: [],
-              emitter_identity: "extractors.semantic_dedup",
-              urgency: "normal",
-              metrics: { redundant_count: redundant, confirmed_count: confirmed },
+              worker: "extractors",
+              reason: "extractor_sweep_budget_exceeded",
+              budget_ms: EXTRACTORS_TICK_BUDGET_MS,
+              elapsed_ms: sweep.elapsedMs,
+              cut_before_step: sweep.cutBeforeStep,
+              ran_steps: sweep.ran,
             } as JsonValue,
           });
-          logger.info({ request_event_id: request.id, redundant, confirmed }, "semantic-dedup extractor requested brain synthesis");
+        } catch (err) {
+          logger.warn({ where: "daemon.extractors.budget_cut_emit", err: (err as Error).message }, "could not emit extractor sweep budget-cut evidence");
         }
-      } catch (err) {
-        logger.warn({ where: "daemon.extractors.semantic_dedup", err: (err as Error).message }, "semantic-dedup extractor tick failed");
-      }
-      // T1.3 cross-candidate semantic corroboration (2026-05-19): scan
-      // unverified knowledge_candidate rows for nearest promoted-knowledge
-      // neighbors via vec_events cosine and emit candidate_confirmed
-      // (confirmation_source=semantic_corroboration) so the long tail of
-      // never-cited candidates can still feed the Beta-posterior promotion
-      // gate. Live evidence: 3324+ candidates vs ~311 promoted (~9.3%).
-      try { await extractCrossCandidateCorroboration(db); } catch (err) {
-        logger.warn({ where: "daemon.extractors.cross_candidate_corroboration", err: (err as Error).message }, "cross-candidate-corroboration extractor tick failed");
-      }
-      // Tier-S2 causal-edge posterior (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
-      // 2026-05-19): admit causal_edge_predicate rows for citation
-      // co-occurrence and refinement edges so edges between substrate
-      // entities can accumulate their own Beta posterior. Bounded: 500
-      // acts per tick, 14-day window, yields every 25 rows.
-      try {
-        const { extractCausalEdges } = await import("./causal_edge_extractor");
-        await extractCausalEdges(db);
-      } catch (err) {
-        logger.warn({ where: "daemon.extractors.causal_edges", err: (err as Error).message }, "causal-edge extractor tick failed");
-      }
-      // Tier-S5 goal-shape predicate (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
-      // 2026-05-19): scan recent act_artifact_score_updated events, group
-      // residuals by goal_shape, and admit/refresh one
-      // act_artifact{kind:goal_shape_strategy_predicate} row per shape.
-      // Each row scores whether the goal_shape tag PREDICTS trajectory
-      // similarity (low residual variance = good shape) — closes the
-      // feedback loop for posterior-per-goal_class predicates (T2.2,
-      // T2.3, T4.1). Bounded: 5000 events per tick, 14-day window,
-      // yields every 25 distinct shapes.
-      try {
-        const { extractGoalShapePredicates } = await import("./goal_shape_predicate_extractor");
-        await extractGoalShapePredicates(db);
-      } catch (err) {
-        logger.warn({ where: "daemon.extractors.goal_shape_predicates", err: (err as Error).message }, "goal-shape-predicate extractor tick failed");
-      }
-      // Tier-S3 trajectory-motif posterior (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
-      // 2026-05-19): admit trajectory_motif_predicate rows for frequent
-      // multi-event n-grams (3-grams and 4-grams) across directives so
-      // recipe shapes accumulate their own Beta posterior. Complementary
-      // to S2 causal-edge — edges score pairs, motifs score sequences.
-      // Bounded: 5000 events per tick, 30-day window, top 50 motifs,
-      // yields every 25 directives.
-      try {
-        const { extractTrajectoryMotifs } = await import("./trajectory_motif_extractor");
-        await extractTrajectoryMotifs(db);
-      } catch (err) {
-        logger.warn({ where: "daemon.extractors.trajectory_motifs", err: (err as Error).message }, "trajectory-motif extractor tick failed");
-      }
-      // Tier-S1 DAG decomposition strategy (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
-      // 2026-05-19): scan completed directives (those with
-      // task_closure_audited) in a 30-day window, build per-directive
-      // DAG fingerprints (fan_out, max_depth, total_nodes), bucket by
-      // deterministic shape category (wide_shallow / deep_narrow /
-      // balanced / tree_heavy / minimal / other), and admit/refresh one
-      // act_artifact{kind:decomposition_strategy_predicate} row per
-      // shape that meets the 5-sample threshold. Closes the Tier-S
-      // sequence: substrate now learns whether a SHAPE predicts
-      // closure_residual, not just whether a leaf does.
-      try {
-        const { extractDecompositionStrategy } = await import("./decomposition_strategy_extractor");
-        await extractDecompositionStrategy(db);
-      } catch (err) {
-        logger.warn({ where: "daemon.extractors.decomposition_strategy", err: (err as Error).message }, "decomposition-strategy extractor tick failed");
-      }
-      // Auto cross-directive interference (organism-alignment Track C,
-      // 2026-05-15): scan act_artifact.target_resources/target_files for cross-directive
-      // overlap and emit resource_conflict edges so the scheduler defers
-      // racing dispatches. Idempotent — re-runs dedupe against existing
-      // edges.
-      try { await extractDirectiveInterference(db); } catch (err) {
-        logger.warn({ where: "daemon.extractors.directive_interference", err: (err as Error).message }, "directive-interference extractor tick failed");
-      }
-      // Owner profile promotions (Layer-2 conversation-as-learning-surface,
-      // DSGSAZGMF1): owner_insight_candidate → owner_profile_recorded via
-      // confidence ≥ 0.85 / owner-approval bypass / sibling cosine.
-      try { await extractOwnerProfilePromotions(db); } catch (err) {
-        logger.warn({ where: "daemon.extractors.owner_profile", err: (err as Error).message }, "owner-profile extractor tick failed");
-      }
-      // Outcome-driven autonomy_score adjuster (DSGSAZGMF1 follow-up,
-      // 2026-05-15): fold recent applied_change_committed / failed /
-      // irreversible_effect_recorded events into a delta on
-      // owner_profile.autonomy_score. Idempotent via context_refs
-      // back-pointers. Without this, the score is "continuous" in
-      // type but static in practice — every owner sits at the default
-      // forever. With it, the substrate EARNS trust through outcomes.
-      try { runOwnerAutonomyAdjusterTick(db); } catch (err) {
-        logger.warn({ where: "daemon.extractors.autonomy_adjuster", err: (err as Error).message }, "autonomy-adjuster tick failed");
+        logger.warn({ budget_ms: EXTRACTORS_TICK_BUDGET_MS, elapsed_ms: sweep.elapsedMs, cut_before_step: sweep.cutBeforeStep }, "extractor sweep exceeded per-tick budget — deferred remaining steps to next tick");
       }
     };
     let extractorsMarked = false;
@@ -2922,11 +2952,45 @@ export const startDaemon = async (opts: DaemonOpts = {}): Promise<DaemonHandle> 
     // Only now terminate leftovers. Dispatches that completed during the drain
     // have already deregistered their live opencode proc; boot recovery re-picks
     // any killed task whose brain_dispatched lease remains unclosed.
+    //
+    // DAEMON STABILITY HARDENING (fix #5): a restart used to WEDGE when an
+    // in-flight brain subprocess refused to drain within the budget — the
+    // drain helper returned `completed:false` but nothing force-killed the
+    // orphaned proc, so the socket lock could stay held and the next boot's
+    // handshake re-failed against a dead URL. killAllLiveOpencodeProcs now
+    // UNCONDITIONALLY SIGTERM-then-SIGKILLs every still-live proc and returns
+    // the per-proc kill records; we emit a `brain_subprocess_force_terminated`
+    // evidence row (one per forced kill) so the ledger proves exactly which
+    // wedged PIDs were terminated. stop() then continues to lock release —
+    // it can never hang waiting on a stuck child.
     let killedOpencodeProcs = 0;
+    let forcedKills: Array<{ pid: number; sigterm_ok: boolean }> = [];
     try {
       const { killAllLiveOpencodeProcs } = await import("./bridge/opencode");
-      killedOpencodeProcs = killAllLiveOpencodeProcs();
-      if (killedOpencodeProcs > 0) logger.info({ killed_opencode_procs: killedOpencodeProcs }, "daemon shutdown — terminated remaining brain subprocesses after drain");
+      forcedKills = killAllLiveOpencodeProcs();
+      killedOpencodeProcs = forcedKills.length;
+      if (killedOpencodeProcs > 0) {
+        logger.info({ killed_opencode_procs: killedOpencodeProcs, pids: forcedKills.map((k) => k.pid) }, "daemon shutdown — force-terminated remaining brain subprocesses after drain");
+        // Evidence trail: one row per forced kill so an operator (or the next
+        // boot's orphan reconciler) can prove the wedged dispatch was killed
+        // rather than silently abandoned. Best-effort — never blocks teardown.
+        try {
+          emitEvent(db, {
+            kind: "brain_subprocess_force_terminated",
+            substrate_origin: "substrate_auto",
+            payload: {
+              pid: process.pid,
+              reason: drain.completed ? "shutdown_cleanup" : "drain_budget_exceeded",
+              drain_budget_ms: budgetMs,
+              drain_elapsed_ms: drainElapsedMs,
+              forced_kills: forcedKills,
+              killed_count: killedOpencodeProcs,
+            },
+          });
+        } catch (err) {
+          logger.debug({ where: "daemon.stop.emit_force_terminated", err: String(err) }, "db may already be closed");
+        }
+      }
     } catch (err) {
       logger.debug({ where: "daemon.stop.kill_opencode_procs", err: String(err) }, "killAllLiveOpencodeProcs import/call failed (best-effort)");
     }
