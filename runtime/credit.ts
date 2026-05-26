@@ -48,7 +48,7 @@
 
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
-import { getEventById, type EmitEventInput, emitEvent } from "./events";
+import { getEventById, getEventRowById, type EmitEventInput, emitEvent } from "./events";
 import {
   applyResidualOutcome,
   getArtifact,
@@ -203,7 +203,10 @@ const classifyTarget = (db: Database, id: string): "knowledge" | "act_artifact" 
   const resolvedArtifactId = resolveArtifactId(db, id);
   const art = db.query("SELECT 1 AS x FROM act_artifact WHERE id = ?").get(resolvedArtifactId) as { x: number } | null;
   if (art) return "act_artifact";
-  const ev = db.query("SELECT kind FROM events WHERE id = ?").get(id) as { kind: string } | null;
+  // Tier-spanning: an archived knowledge_candidate / knowledge_promoted row
+  // must still classify as knowledge so a cited-but-archived entry receives
+  // credit (guarantee A).
+  const ev = getEventRowById(db, id, "kind") as { kind: string } | null;
   if (ev && (ev.kind === "knowledge_candidate" || ev.kind === "knowledge_promoted")) {
     return "knowledge";
   }
@@ -277,7 +280,7 @@ const resolveOwnerObservedSourceActId = (db: Database, ownerEv: EventLike): stri
 };
 
 const resolveBindingTargets = (db: Database, id: string): string[] => {
-  const row = db.query("SELECT kind, payload FROM events WHERE id = ?").get(id) as { kind: string; payload: string } | null;
+  const row = getEventRowById(db, id, "kind, payload") as { kind: string; payload: string } | null;
   if (!row || row.kind !== "retrieval_binding") return [id];
   try {
     const payload = JSON.parse(row.payload) as Record<string, unknown>;
@@ -302,7 +305,7 @@ const actTupleCitationIds = (db: Database, sourceActId: string | null): string[]
  *  weight) when the field is absent or out of [0,1] — flat-text
  *  candidates that don't carry the rich schema land at neutral weight. */
 const readCandidateConfidenceEstimate = (db: Database, knowledgeId: string): number => {
-  const ev = db.query("SELECT kind, payload FROM events WHERE id = ?").get(knowledgeId) as
+  const ev = getEventRowById(db, knowledgeId, "kind, payload") as
     | { kind: string; payload: string }
     | null;
   if (!ev) return 1;
@@ -312,7 +315,7 @@ const readCandidateConfidenceEstimate = (db: Database, knowledgeId: string): num
       const p = JSON.parse(payloadStr) as Record<string, unknown>;
       const candId = (p.candidate_id as string | undefined) ?? undefined;
       if (candId) {
-        const candEv = db.query("SELECT payload FROM events WHERE id = ?").get(candId) as
+        const candEv = getEventRowById(db, candId, "payload") as
           | { payload: string }
           | null;
         if (candEv) payloadStr = candEv.payload;
@@ -955,7 +958,7 @@ export const distributeCredit = async (
       // extractor reads the fractional contribution.
       const confidenceEstimate = readCandidateConfidenceEstimate(db, targetId);
       const citedKnowledgeOrigin = (() => {
-        const row = db.query(`SELECT substrate_origin FROM events WHERE id = ?`).get(targetId) as { substrate_origin?: string } | null;
+        const row = getEventRowById(db, targetId, "substrate_origin") as { substrate_origin?: string } | null;
         return row?.substrate_origin ?? "unknown";
       })();
       const knowledgeWeight = baseWeight * confidenceEstimate;
@@ -1566,12 +1569,16 @@ export const projectActionScoredToCredit = (
       ? payload.source_act_event_id
       : null;
     const lookupId = actionPredictedEventId ?? sourceActEventId;
-    const predictedRow = lookupId
-      ? db
-          .query<{ id: string; payload: string; context_refs: string }, [string]>(
-            "SELECT id, payload, context_refs FROM events WHERE id = ? AND kind = 'action_predicted'",
-          )
-          .get(lookupId)
+    const predictedRowRaw = lookupId
+      ? getEventRowById(db, lookupId, "id, payload, context_refs, kind") as
+          | { id: string; payload: string; context_refs: string; kind: string }
+          | null
+      : null;
+    // Tier-spanning read keeps the `AND kind = 'action_predicted'` filter
+    // by checking kind in JS (so an archived action_predicted row still
+    // resolves its lineage; guarantee A).
+    const predictedRow = predictedRowRaw && predictedRowRaw.kind === "action_predicted"
+      ? predictedRowRaw
       : null;
     if (lookupId && !predictedRow) {
       // The act_tuple projection path stamps source_act_event_id with
@@ -1582,7 +1589,7 @@ export const projectActionScoredToCredit = (
       // continue with primary action/verifier artifact credit only; if it
       // resolves to no row at all, emit projection_error (the dangling
       // reference is a real audit signal) and still credit primary ids.
-      const anyRow = db.query("SELECT kind FROM events WHERE id = ?").get(lookupId) as { kind: string } | null;
+      const anyRow = getEventRowById(db, lookupId, "kind") as { kind: string } | null;
       if (!anyRow) {
         emitEvent(db, {
           kind: "projection_error",
@@ -1644,7 +1651,7 @@ export const projectActionScoredToCredit = (
     }
     if (citedArtifactIds.size === 0) return; // nothing to credit
     const sourceActPayload = sourceActEventId
-      ? db.query<{ payload: string }, [string]>("SELECT payload FROM events WHERE id = ?").get(sourceActEventId)
+      ? getEventRowById(db, sourceActEventId, "payload") as { payload: string } | null
       : null;
     const sourceAct = sourceActPayload ? JSON.parse(sourceActPayload.payload || "{}") as Record<string, unknown> : {};
     const residualWithheld = payload.residual_withheld === true || sourceAct.residual_withheld === true;
@@ -1999,7 +2006,7 @@ export const buildCreditEnvelope = (
   const seenCausal = new Set<string>();
   for (const ref of contextRefs) {
     if (typeof ref !== "string" || ref.length === 0) continue;
-    const row = db.query("SELECT kind, payload FROM events WHERE id = ?").get(ref) as { kind: string; payload: string } | null;
+    const row = getEventRowById(db, ref, "kind, payload") as { kind: string; payload: string } | null;
     if (row && row.kind === "retrieval_binding") {
       // Retrieval-exposure leg: the scored act cited a binding (cited=true).
       let sourceEventId: string | null = null;
@@ -2230,9 +2237,9 @@ export const bindCitation = (
     // it resolves to any other kind OR no row at all, the citation is
     // decorative — emit retrieval_rejected so the rejection is observable
     // but no Beta posterior moves.
-    const citedRow = db
-      .query<{ kind: string; payload: string }, [string]>("SELECT kind, payload FROM events WHERE id = ?")
-      .get(citedKnowledgeId);
+    const citedRow = getEventRowById(db, citedKnowledgeId, "kind, payload") as
+      | { kind: string; payload: string }
+      | null;
     if (!citedRow || !KNOWLEDGE_BEARING_KINDS.has(citedRow.kind)) {
       emitEvent(db, {
         kind: "retrieval_rejected",
@@ -2327,3 +2334,7 @@ export const bindCitation = (
 export const __extractBodyCitationsForTest = extractBodyCitations;
 export const __collectCitationsForTest = collectCitations;
 export const __residualToBetaDeltasForTest = residualToBetaDeltas;
+/** Test hook (amendment GZHBMX4R): exposes the by-id credit classifier so a
+ *  test can prove an ARCHIVED + hot-deleted knowledge event still classifies
+ *  as "knowledge" through the tier-spanning read (guarantee A). */
+export const __classifyTargetForTest = classifyTarget;

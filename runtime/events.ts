@@ -17,7 +17,7 @@ import {
   PostCommitProjectionQueue,
   type PostCommitProjectionTask,
 } from "./post_commit_projection_queue";
-import { withImmediateTransaction } from "../substrate/db";
+import { withImmediateTransaction, attachedArchiveSchemas } from "../substrate/db";
 
 // ── Non-blocking post-commit projection cascade ──────────────────────────
 // (directive NHY908W0EX5Q72KGWXMASPFEY0, amendment B0DVM2APWX, 2026-05-24).
@@ -142,7 +142,10 @@ export type EmittedEvent = { id: string; ts: string };
 
 type JsonObject = { [k: string]: JsonValue };
 
-const updateEventRollups = (db: Database, row: { kind: string; ts: string; substrate_origin: string }): void => {
+const updateEventRollups = (
+  db: Database,
+  row: { kind: string; ts: string; substrate_origin: string; payload?: JsonValue },
+): void => {
   const day = row.ts.slice(0, 10);
   db.run(
     `INSERT INTO event_kind_rollup (kind, total_count, live_count, first_ts, last_ts)
@@ -168,6 +171,40 @@ const updateEventRollups = (db: Database, row: { kind: string; ts: string; subst
     `INSERT OR IGNORE INTO event_kind_origin_rollup (kind, substrate_origin) VALUES (?, ?)`,
     [row.kind, row.substrate_origin],
   );
+  // Amendment CB74X8B2: writer-maintained retrieval aggregate. Maintain a
+  // bounded (origin, goal_shape, kind) rollup for knowledge candidate /
+  // promoted rows so the retrieval origin-bias signal has a cheap, indexed
+  // source that does NOT require a full-history GROUP BY scan over the hot
+  // events table (the native-memory-meltdown surface). One indexed UPSERT
+  // per knowledge write; no scan. live_count is decremented by the
+  // archival sweep when a row moves to cold (see adjustKnowledgeOriginGoalShapeRollup).
+  if (row.kind === "knowledge_candidate" || row.kind === "knowledge_promoted") {
+    const goalShape = knowledgeGoalShapeFromPayload(row.payload);
+    try {
+      db.run(
+        `INSERT INTO knowledge_origin_goal_shape_rollup
+           (substrate_origin, goal_shape, kind, total_count, live_count, first_ts, last_ts)
+         VALUES (?, ?, ?, 1, 1, ?, ?)
+         ON CONFLICT(substrate_origin, goal_shape, kind) DO UPDATE SET
+           total_count = total_count + 1,
+           live_count = live_count + 1,
+           first_ts = CASE WHEN excluded.first_ts < first_ts THEN excluded.first_ts ELSE first_ts END,
+           last_ts = CASE WHEN excluded.last_ts > last_ts THEN excluded.last_ts ELSE last_ts END`,
+        [row.substrate_origin, goalShape, row.kind, row.ts, row.ts],
+      );
+    } catch { /* pre-migration DBs tolerated until ensureEventRollupTables runs */ }
+  }
+};
+
+/** Derive a goal_shape label for the knowledge-origin rollup from a knowledge
+ *  event payload. Prefers an explicit `goal_shape` / `goal` field; falls back
+ *  to "unknown" when absent. Kept payload-local (no directive scan) so the
+ *  rollup maintenance stays a cheap single UPSERT on the write path. */
+const knowledgeGoalShapeFromPayload = (payload: JsonValue | undefined): string => {
+  if (!isObject(payload)) return "unknown";
+  const direct = payload.goal_shape ?? payload.goal;
+  if (typeof direct === "string" && direct.trim().length > 0) return direct.trim();
+  return "unknown";
 };
 
 type NormalizedActTuple = {
@@ -1388,7 +1425,7 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
         input.invoker ?? null,
       ],
     );
-    updateEventRollups(db, { kind: input.kind, ts, substrate_origin });
+    updateEventRollups(db, { kind: input.kind, ts, substrate_origin, payload: input.payload });
   };
   try {
     withImmediateTransaction(db, insertEventAndRollup);
@@ -1963,10 +2000,45 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
   return { id, ts };
 };
 
+/** Hot-first event identity lookup with transparent cold-read-through.
+ *
+ *  Writes always land in the hot main.events table. Reads first probe hot
+ *  by primary key; ONLY on a miss do they probe each ATTACHed sibling
+ *  state-archive-YYYY-MM.db file's events table (the archive schemas are
+ *  attached read-only by substrate/db.ts at connection open). Archive
+ *  placement is therefore a PERFORMANCE tier, never a correctness boundary
+ *  for RLM/credit/identity reads (guarantee A).
+ *
+ *  Zero added latency on the common hot-hit path: a hot row short-circuits
+ *  before any archive is touched. Cold probing only runs on a hot miss.
+ *
+ *  selectCols lets callers fetch only the columns they need (the credit /
+ *  retrieval by-id reads want `kind` or `payload` or `residual`, not the
+ *  full row) while keeping the identical hot-first/cold-on-miss semantics. */
+export const getEventRowById = (
+  db: Database,
+  id: string,
+  selectCols = "*",
+): Record<string, unknown> | null => {
+  const hot = db.query(`SELECT ${selectCols} FROM events WHERE id = ?`).get(id) as Record<string, unknown> | null;
+  if (hot) return hot;
+  for (const schema of attachedArchiveSchemas(db)) {
+    try {
+      const cold = db.query(`SELECT ${selectCols} FROM ${schema}.events WHERE id = ?`).get(id) as Record<string, unknown> | null;
+      if (cold) return cold;
+    } catch {
+      // A malformed/locked archive must not break the read — continue to
+      // the next attached archive (and ultimately return null on miss).
+    }
+  }
+  return null;
+};
+
 /** Fetch one event by id, parsing the JSON payload + context_refs back to
- *  structured shape. Returns null if no row matches. */
+ *  structured shape. Returns null if no hot or archived row matches.
+ *  Tier-spanning via getEventRowById (guarantee A). */
 export const getEventById = (db: Database, id: string): Event | null => {
-  const row = db.query("SELECT * FROM events WHERE id = ?").get(id) as Record<string, unknown> | null;
+  const row = getEventRowById(db, id);
   if (!row) return null;
   return {
     id: row.id as string,

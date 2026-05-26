@@ -11,13 +11,17 @@
 //       (dispatch_resolved_view), closure scoring, and credit
 //       distribution. Foundational fix 2026-05-17.
 
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import type { Database } from "bun:sqlite";
 import type { EventKind } from "../substrate/types";
 import { getArtifact, insertArtifact } from "./artifact_store";
-import { emitEvent, flushPostCommitProjectionsForTest, postCommitProjectionDepth, resetPostCommitProjectionsForTest } from "./events";
+import { emitEvent, getEventById, getEventRowById, flushPostCommitProjectionsForTest, postCommitProjectionDepth, resetPostCommitProjectionsForTest } from "./events";
+import { runArchivalSweep } from "./archival_worker";
 import { newId } from "./ids";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 afterAll(() => closeDb());
 beforeEach(() => {
@@ -1722,6 +1726,99 @@ describe("event_kind_rollup aggregate consistency (bounded-ledger-retention safe
     expect(liveCount("artifact_kind_inference_uncertain")).toBe(0);
     // Lifetime total is retained across compaction (read-aggregate stays O(1)).
     expect(totalCount("artifact_kind_inference_uncertain")).toBe(telemetryBefore);
+    closeDb();
+  });
+});
+
+describe("events", () => {
+  // ── Tiered hot/cold transparent read-through (directive
+  // 7Z81HBY4813TF0V9T50AWFP9PG, amendments GM9T1S36 + CB74X8B2,
+  // guarantee A). An event ARCHIVED to a sibling state-archive-YYYY-MM.db
+  // and DELETED from hot must STILL be returned by getEventById /
+  // getEventRowById — archival is a performance tier, not a memory-loss
+  // boundary for RLM/credit/identity reads. ──────────────────────────────
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    resetPostCommitProjectionsForTest();
+    closeDb();
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-tiered-events-"));
+    dbPath = join(tmpDir, "state.db");
+  });
+  afterEach(() => {
+    closeDb();
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  const NOW = Date.parse("2026-05-15T12:00:00.000Z");
+  // 90 days old → well past any compressed retention window so the sweep
+  // moves the row to cold regardless of pressure.
+  const OLD_TS = new Date(NOW - 90 * 24 * 60 * 60 * 1000).toISOString();
+
+  test("getEventById reads through sibling archive after hot deletion (transparent cold-read)", async () => {
+    // 1. Create a hot event of an ARCHIVABLE kind (directive_opened is not
+    //    ALWAYS_KEEP) and back-date it so the sweep selects it.
+    const db = openDb(dbPath);
+    const created = emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      payload: { directive_text: "tiered-cold-read-probe", residual: 0.42 },
+      residual: 0.42,
+    });
+    db.run("UPDATE events SET ts = ? WHERE id = ?", [OLD_TS, created.id]);
+
+    // 2. Archive it (real sweep): copies the exact row into
+    //    state-archive-2026-02.db and DELETEs it from hot.
+    const summary = await runArchivalSweep(db, { stateDbPath: dbPath, nowMs: NOW });
+    expect(summary.deleted).toBeGreaterThanOrEqual(1);
+
+    // 3. Prove it is GONE from the hot events table.
+    const hotRow = db.query("SELECT id FROM events WHERE id = ?").get(created.id);
+    expect(hotRow).toBeNull();
+
+    // 4. Reopen the DB so the connection ATTACHes the freshly-created
+    //    sibling archive (attachArchives runs at openDb time).
+    closeDb(dbPath);
+    const db2 = openDb(dbPath);
+
+    // getEventById still returns the archived event, fully parsed.
+    const fetched = getEventById(db2, created.id);
+    expect(fetched).not.toBeNull();
+    expect(fetched!.id).toBe(created.id);
+    expect(fetched!.kind).toBe("directive_opened");
+    expect((fetched!.payload as Record<string, unknown>).directive_text).toBe("tiered-cold-read-probe");
+
+    // getEventRowById (the generic tier-spanning by-id read used by
+    // credit/retrieval) also resolves it, and supports column projection.
+    const kindRow = getEventRowById(db2, created.id, "kind") as { kind: string } | null;
+    expect(kindRow?.kind).toBe("directive_opened");
+    const residualRow = getEventRowById(db2, created.id, "residual") as { residual: number | null } | null;
+    expect(residualRow?.residual).toBe(0.42);
+    closeDb();
+  });
+
+  test("getEventById hot-first: a hot-resident event resolves without any archive", () => {
+    // No archive files exist; the common hot-hit path must short-circuit.
+    const db = openDb(dbPath);
+    const created = emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      payload: { directive_text: "hot-resident" },
+    });
+    const fetched = getEventById(db, created.id);
+    expect(fetched).not.toBeNull();
+    expect(fetched!.id).toBe(created.id);
+    // getEventRowById hot hit too.
+    const row = getEventRowById(db, created.id, "kind");
+    expect((row as { kind: string }).kind).toBe("directive_opened");
+    closeDb();
+  });
+
+  test("getEventById graceful when no archives are attached and id is unknown", () => {
+    const db = openDb(dbPath);
+    expect(getEventById(db, "nonexistent_id")).toBeNull();
+    expect(getEventRowById(db, "nonexistent_id")).toBeNull();
     closeDb();
   });
 });

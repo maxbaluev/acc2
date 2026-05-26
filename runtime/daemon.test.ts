@@ -287,11 +287,23 @@ describe("startDaemon — boot + health + shutdown", () => {
     expect(body.status).toBe("shutting_down");
     expect(isSchedulerDraining()).toBe(true);
 
-    // Give the setTimeout a beat to fire.
-    await new Promise((r) => setTimeout(r, 200));
+    // The /shutdown route schedules the actual teardown on a setTimeout so the
+    // 200-status response flushes first; stop() then drains the SQL pool,
+    // closes the DB, and removes the lock/token files. The true invariant is
+    // "graceful shutdown EVENTUALLY releases the socket lock", not "within a
+    // fixed 200ms". A single sleep-then-check raced the teardown whenever the
+    // process was busy (e.g. right after a preceding daemon boot/teardown in
+    // the same file), leaving the socket file still present at the check —
+    // a flaky failure that did not reflect a real daemon defect. Poll the
+    // invariant with a bounded deadline instead: deterministic, and still
+    // fails loudly if the daemon genuinely never releases the lock.
+    const deadline = Date.now() + 5000;
+    while (existsSync(tmp.socketFile) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
     handle = null;
 
-    // Lockfile removed.
+    // Lockfile removed by the graceful teardown.
     expect(existsSync(tmp.socketFile)).toBe(false);
   });
 

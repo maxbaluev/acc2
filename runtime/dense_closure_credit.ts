@@ -57,7 +57,7 @@
 
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
-import { emitEvent, type EmitEventInput } from "./events";
+import { emitEvent, getEventRowById, type EmitEventInput } from "./events";
 import {
   applyResidualOutcome,
   getArtifact,
@@ -311,7 +311,9 @@ const safeParseArray = (value: string | null | undefined): unknown => {
 const classify = (db: Database, id: string): "act_artifact" | "knowledge" | "unknown" => {
   const art = db.query("SELECT 1 AS x FROM act_artifact WHERE id = ?").get(id) as { x: number } | null;
   if (art) return "act_artifact";
-  const ev = db.query("SELECT kind FROM events WHERE id = ?").get(id) as { kind: string } | null;
+  // Tier-spanning: an archived knowledge-bearing contributor still
+  // classifies as knowledge so dense closure credit reaches it (guarantee A).
+  const ev = getEventRowById(db, id, "kind") as { kind: string } | null;
   if (ev && (ev.kind === "knowledge_candidate" || ev.kind === "knowledge_promoted" || ev.kind === "lesson_extracted")) {
     return "knowledge";
   }

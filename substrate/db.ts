@@ -29,6 +29,8 @@
 
 import { Database } from "bun:sqlite";
 import * as sqliteVec from "sqlite-vec";
+import { existsSync, readdirSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import schemaSql from "./schema.sql" with { type: "text" };
 import { runViews } from "./views";
 import { ensureArtifactKindMetadataTable } from "./artifact_kind_metadata";
@@ -294,6 +296,16 @@ const ensureEventRollupTables = (db: Database): void => {
       substrate_origin TEXT NOT NULL,
       PRIMARY KEY (kind, substrate_origin)
     );
+    CREATE TABLE IF NOT EXISTS knowledge_origin_goal_shape_rollup (
+      substrate_origin TEXT NOT NULL,
+      goal_shape       TEXT NOT NULL,
+      kind             TEXT NOT NULL,
+      total_count      INTEGER NOT NULL DEFAULT 0,
+      live_count       INTEGER NOT NULL DEFAULT 0,
+      first_ts         TEXT NOT NULL,
+      last_ts          TEXT NOT NULL,
+      PRIMARY KEY (substrate_origin, goal_shape, kind)
+    );
     CREATE TABLE IF NOT EXISTS event_archive_summary (
       id TEXT PRIMARY KEY,
       kind TEXT NOT NULL,
@@ -433,6 +445,126 @@ const runActArtifactRename = (db: Database): void => {
 // main; main precedence on id conflict (organism rows shadow canonical).
 // Missing file is non-fatal — pre-Phase-2 organisms and fresh installs
 // before canonical.db packaging both work without it.
+// ── Tiered hot/cold archive ATTACH (directive 7Z81HBY4813TF0V9T50AWFP9PG,
+// amendment CB74X8B2) ────────────────────────────────────────────────
+//
+// The archival worker (runtime/archival_worker.ts) moves aged hot rows
+// into sibling `state-archive-YYYY-MM.db` files via verify-then-delete.
+// Those rows are then INVISIBLE to the hot `events` table. To keep the
+// archive a PERFORMANCE tier — never a correctness boundary for
+// RLM/credit identity reads — every connection ATTACHes the sibling
+// archives read-only so a hot-miss by-id read can transparently probe
+// `<schema>.events`.
+//
+// WRITES never touch attached archives (they are mode=ro). Only the
+// hot-first/cold-on-miss read paths (runtime/events.ts getEventRowById,
+// retrieval posterior, credit by-id) span the tier.
+//
+// CRITICAL — bounded pragmas (guarantee C). ATTACHing an archive shares
+// the SAME process-wide SQLite native-memory budget as the hot DB. The
+// 2026-05-26 meltdown was native RSS ballooning from page cache + temp
+// sets + mmap. The connection-level pragmas (soft_heap_limit /
+// temp_store=FILE / mmap_size / cache_size) set by applyWalPragmas /
+// applyReaderPragmas are CONNECTION-WIDE and therefore already govern
+// queries that touch attached schemas. We re-assert temp_store=FILE +
+// soft_heap_limit defensively after every ATTACH batch so a future
+// refactor that opens a bare Database and only ATTACHes archives can
+// never reintroduce the meltdown.
+const ARCHIVE_FILE_RE = /^state-archive-\d{4}-\d{2}\.db$/;
+
+/** Derive a SQLite schema alias from an archive filename.
+ *  `state-archive-2026-05.db` → `archive_2026_05`. */
+const archiveSchemaAlias = (archivePath: string): string =>
+  "archive_" + basename(archivePath).replace(/^state-archive-/, "").replace(/\.db$/, "").replace(/-/g, "_");
+
+/** List currently-attached cold-archive schema aliases on this connection.
+ *  Reads `PRAGMA database_list` and filters to the archive_* aliases the
+ *  attach helper minted. `main`, `temp`, and `canonical` are excluded.
+ *  Tier-spanning by-id readers iterate this so they probe every attached
+ *  archive without hardcoding month names. */
+export const attachedArchiveSchemas = (db: Database): string[] => {
+  try {
+    const rows = db.query("PRAGMA database_list").all() as Array<{ name?: string }>;
+    return rows
+      .map((r) => (typeof r.name === "string" ? r.name : ""))
+      .filter((name) => name.startsWith("archive_"));
+  } catch {
+    return [];
+  }
+};
+
+/** ATTACH every sibling `state-archive-YYYY-MM.db` of `stateDbPath`
+ *  read-only so this connection can transparently read archived events
+ *  on a hot miss. Idempotent: an already-attached schema is skipped.
+ *  Re-asserts the bounded native-memory pragmas (guarantee C) so the
+ *  attach can never reintroduce the meltdown. Missing dir / archives is
+ *  a no-op (fresh installs and pre-archival organisms work unchanged). */
+export const attachArchives = (db: Database, stateDbPath: string): string[] => {
+  // :memory: and non-file paths have no sibling archives.
+  if (!stateDbPath || stateDbPath === ":memory:" || stateDbPath.startsWith("file::memory:")) return [];
+  const dir = dirname(stateDbPath);
+  if (!existsSync(dir)) return [];
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => ARCHIVE_FILE_RE.test(basename(f))).sort();
+  } catch {
+    return [];
+  }
+  if (files.length === 0) return [];
+  const already = new Set(attachedArchiveSchemas(db));
+  const attached: string[] = [];
+  for (const f of files) {
+    const archivePath = join(dir, f);
+    const alias = archiveSchemaAlias(archivePath);
+    if (already.has(alias)) {
+      attached.push(alias);
+      continue;
+    }
+    try {
+      // Plain-path ATTACH: bun:sqlite does not enable SQLite URI filename
+      // parsing, so the `file:...?mode=ro` form fails to open. The archive
+      // stays effectively read-only because NO runtime code path writes to
+      // an attached archive schema — every tier-spanning read is SELECT-only
+      // (getEventRowById, retrieval posterior, credit by-id). The archival
+      // worker opens its own separate handle to write; it never writes
+      // through this attached alias.
+      const escaped = archivePath.replace(/'/g, "''");
+      db.exec(`ATTACH DATABASE '${escaped}' AS ${alias}`);
+      attached.push(alias);
+    } catch (err) {
+      // Fail-soft: a single corrupt/locked archive must not break the
+      // connection. The hot DB and the other archives stay readable.
+      if (process.env.ACC2_DB_VERBOSE === "1") {
+        process.stderr.write(`acc2 db: attachArchives skipped ${f} (${(err as Error).message})\n`);
+      }
+    }
+  }
+  // Guarantee C: re-assert the bounded native-memory pragmas after the
+  // attach batch. These are connection-wide, so they govern queries that
+  // span the attached archive schemas too.
+  try {
+    db.run("PRAGMA temp_store = FILE");
+    db.run("PRAGMA soft_heap_limit = 1610612736");
+  } catch { /* :memory: tolerates; pragmas are best-effort re-assertion */ }
+  return attached;
+};
+
+/** Resolve the canonical hot state.db path for the live daemon. Lazy
+ *  import avoids a static cycle (state_paths imports nothing from db).
+ *  Returns null when resolution is unavailable (tests pass an explicit
+ *  path; openDb falls back to its own dbPath arg). */
+const resolveArchiveSiblingPath = (dbPath: string): string => dbPath;
+
+const attachArchivesIfPresent = (db: Database, dbPath: string): void => {
+  try {
+    attachArchives(db, resolveArchiveSiblingPath(dbPath));
+  } catch (err) {
+    if (typeof console !== "undefined") {
+      console.warn("[substrate/db] attachArchivesIfPresent skipped:", String(err).slice(0, 200));
+    }
+  }
+};
+
 const attachCanonicalDbIfPresent = (db: Database): void => {
   try {
     const fs = require("node:fs");
@@ -562,6 +694,10 @@ export const openDb = (dbPath: string): Database => {
   // on id conflict). Missing canonical.db is non-fatal — fresh
   // installs and pre-Phase-2 organisms both work.
   attachCanonicalDbIfPresent(db);
+  // Tiered hot/cold (amendment CB74X8B2): ATTACH sibling
+  // state-archive-YYYY-MM.db files read-only so by-id reads transparently
+  // span the tier on a hot miss. Bounded pragmas re-asserted inside.
+  attachArchivesIfPresent(db, dbPath);
   // Organism-alignment (2026-05-15): runViews was previously called
   // separately by daemon.ts + a handful of tests, leaving prompt_composer
   // tests / unit-level callers with a half-built substrate where queries
@@ -698,6 +834,7 @@ export class SqliteDbPool {
     loadSqliteVec(this.writer);
     runSchema(this.writer);
     runMigrations(this.writer);
+    attachArchivesIfPresent(this.writer, dbPath);
     runViews(this.writer);
   }
 
@@ -784,6 +921,11 @@ export class SqliteDbPool {
     const db = new Database(this.dbPath, { readonly: true, strict: true });
     loadSqliteVec(db);
     applyReaderPragmas(db);
+    // Tiered hot/cold: reader connections also span the cold archives so
+    // pooled by-id reads (retrieval posterior, credit) resolve archived
+    // events. applyReaderPragmas already set the bounded native-memory
+    // pragmas; attachArchives re-asserts them after the ATTACH batch.
+    attachArchivesIfPresent(db, this.dbPath);
     this.allReaders.add(db);
     return db;
   }

@@ -1,7 +1,7 @@
 // acc2 credit pipeline tests — Shapley distribution + per-entity posterior
 // updates + event emission (Architecture.md Rule 3, §17 Phase H).
 
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
 import { seedActArtifacts } from "../substrate/seed";
@@ -19,8 +19,14 @@ import {
   __collectCitationsForTest,
   __residualToBetaDeltasForTest,
   __brainAccuracyArtifactIdForTest,
+  __classifyTargetForTest,
 } from "./credit";
+import { getEventById } from "./events";
+import { Database as Sqlite } from "bun:sqlite";
 import type { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 afterAll(() => closeDb());
 beforeEach(() => {
@@ -2595,5 +2601,62 @@ describe("projectCreditEnvelope — single outcome-credit boundary", () => {
     expect(env.causal_citations.map((c) => c.target_id)).toContain(kc.id);
     expect(env.retrieval_exposures.map((e) => e.retrieval_binding_event_id)).toContain(binding);
     expect(env.retrieval_exposures.find((e) => e.retrieval_binding_event_id === binding)!.cited).toBe(true);
+  });
+});
+
+describe("credit by-id reads span the hot/cold tier (amendment GZHBMX4R, guarantee A)", () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    resetPostCommitProjectionsForTest();
+    closeDb();
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-tiered-credit-"));
+    dbPath = join(tmpDir, "state.db");
+  });
+  afterEach(() => {
+    closeDb();
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  // Move a hot events row verbatim into a sibling state-archive file and
+  // DELETE it from hot — the spec-sanctioned manual archive path (the
+  // archival worker ALWAYS_KEEPs knowledge kinds, so a sweep would not move
+  // them; this proves the READ path independent of retention policy).
+  const archiveRowAndDeleteHot = (db: Database, id: string): void => {
+    const row = db.query("SELECT * FROM events WHERE id = ?").get(id) as Record<string, unknown>;
+    const archivePath = join(tmpDir, "state-archive-2026-01.db");
+    const arch = new Sqlite(archivePath, { create: true, strict: true });
+    const cols = Object.keys(row);
+    arch.exec(`CREATE TABLE IF NOT EXISTS events (${cols.map((c) => `${c} ${c === "id" ? "TEXT PRIMARY KEY" : "TEXT"}`).join(", ")})`);
+    arch.query(`INSERT INTO events (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...cols.map((c) => row[c] as never));
+    arch.close();
+    db.run("DELETE FROM events WHERE id = ?", [id]);
+  };
+
+  test("classifyTarget resolves an ARCHIVED knowledge_candidate as 'knowledge'", () => {
+    const db = openDb(dbPath);
+    const kc = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      payload: { body: "tiered credit probe", confidence_estimate: 0.8 },
+    });
+    // Hot-resident: classifies as knowledge.
+    expect(__classifyTargetForTest(db, kc.id)).toBe("knowledge");
+
+    // Archive it + delete from hot.
+    archiveRowAndDeleteHot(db, kc.id);
+    expect(db.query("SELECT id FROM events WHERE id = ?").get(kc.id)).toBeNull();
+
+    // Reopen so the connection ATTACHes the sibling archive.
+    closeDb(dbPath);
+    const db2 = openDb(dbPath);
+
+    // The credit by-id classification STILL resolves it as knowledge — a
+    // cited-but-archived entry keeps receiving credit (guarantee A).
+    expect(__classifyTargetForTest(db2, kc.id)).toBe("knowledge");
+    // And the shared getEventById the credit pipeline uses returns it.
+    expect(getEventById(db2, kc.id)?.kind).toBe("knowledge_candidate");
+    closeDb();
   });
 });
