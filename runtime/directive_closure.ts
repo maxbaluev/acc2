@@ -24,6 +24,14 @@ import { emitEvent } from "./events";
 import { decompositionDescendantTaskIds, openFrontier } from "./task_descendants";
 import { checkClosureDeliverables } from "./closure_deliverable_check";
 
+// Ungrounded / self-reported provenance MARKS (reduces credit weight) but
+// NEVER blocks commit (amendment ungrounded_provenance_weight). When the
+// closure signal's provenance is self-reported (legacy_residual / absent
+// structured payload) rather than substrate-verified (closure_audit), the
+// backprop credit it distributes is damped by this multiplier. Pressure, not
+// a gate — the goal-satisfied root still commits.
+export const UNGROUNDED_PROVENANCE_WEIGHT_MULTIPLIER = 0.5; // mark/pressure, never block commit
+
 type DirectivePayload = { lifecycle?: { kind?: string } | string; urgency?: string };
 
 const readDirectiveLifecycle = (db: Database, directiveId: string): "finite" | "rolling_active" | "unknown" => {
@@ -429,23 +437,48 @@ export type RootCommitReadiness =
 // historical name for existing callers.
 export const descendantTaskIds = decompositionDescendantTaskIds;
 
+// ── Goal-sufficiency signal (amendment goal_sufficiency_root_commit) ──
+// The convergence stop rule. A root COMMITS as soon as the directive GOAL is
+// satisfied — a clean closure audit (residual < 0.3) — not when every leaf of
+// the decomposition frontier has terminalized. This is the shift from
+// COVERAGE-COMPLETENESS (drain every descendant before committing) to
+// GOAL-SUFFICIENCY (commit on the closure verdict; remaining frontier is
+// redundant provenance/pressure, never a commit blocker).
+export type GoalSufficiencySignal = {
+  satisfied: boolean;
+  residual: number | null;
+  marginal_value_residual: number | null;
+  provenance: "closure_audit" | "legacy_residual" | "absent";
+};
+
+export const goalSufficiencySignal = (db: Database, rootTaskId: string): { audit_id: string | null; signal: GoalSufficiencySignal } => {
+  const audit = db.query(`SELECT id, residual, payload FROM events WHERE kind = 'task_closure_audited' AND task_id = ? ORDER BY ts DESC, rowid DESC LIMIT 1`).get(rootTaskId) as { id: string; residual: number | null; payload: string } | null;
+  if (!audit) return { audit_id: null, signal: { satisfied: false, residual: null, marginal_value_residual: null, provenance: "absent" } };
+  try {
+    const p = JSON.parse(audit.payload ?? '{}') as Record<string, unknown>;
+    const residual = typeof p.closure_residual === 'number' && Number.isFinite(p.closure_residual) ? p.closure_residual : typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null;
+    const declaredSatisfied = p.goal_satisfied === true || p.satisfied === true || p.verdict === "satisfied";
+    const marginal = typeof p.marginal_value_residual === 'number' && Number.isFinite(p.marginal_value_residual) ? p.marginal_value_residual : residual;
+    return { audit_id: audit.id, signal: { satisfied: declaredSatisfied || (residual !== null && residual < 0.3), residual, marginal_value_residual: marginal, provenance: "closure_audit" } };
+  } catch {
+    const residual = typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null;
+    return { audit_id: audit.id, signal: { satisfied: residual !== null && residual < 0.3, residual, marginal_value_residual: residual, provenance: "legacy_residual" } };
+  }
+};
+
 export const rootCommitReadiness = (db: Database, rootTaskId: string): RootCommitReadiness => {
   const rootRow = db.query(`SELECT 1 FROM events WHERE kind = 'task_node_opened' AND task_id = ? AND parent_task_id IS NULL LIMIT 1`).get(rootTaskId) as { 1: number } | null;
   if (!rootRow) return { ok: false, reason: "not_root", closure_audit_event_id: null, closure_residual: null, nonterminal_descendant_task_ids: [], open_frontier_count: 0 };
-  const audit = db.query(`SELECT id, residual, payload FROM events WHERE kind = 'task_closure_audited' AND task_id = ? ORDER BY ts DESC, rowid DESC LIMIT 1`).get(rootTaskId) as { id: string; residual: number | null; payload: string } | null;
-  let closureResidual: number | null = null;
-  if (audit) {
-    try { const p = JSON.parse(audit.payload ?? '{}') as { closure_residual?: unknown }; closureResidual = typeof p.closure_residual === 'number' && Number.isFinite(p.closure_residual) ? p.closure_residual : typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null; }
-    catch { closureResidual = typeof audit.residual === 'number' && Number.isFinite(audit.residual) ? audit.residual : null; }
-  }
-  // Coverage frontier: the single source of truth for "are all descendants
-  // terminal?". A root is terminal-eligible only when open_count === 0 — the
-  // scheduler DRAINS the frontier (schedules ready descendants) rather than
-  // re-attempting the doomed commit (amendment frontier_drainer_hard_gate).
+  const { audit_id, signal } = goalSufficiencySignal(db, rootTaskId);
+  // open_frontier_count is reported for provenance/pressure, never to block a
+  // goal-satisfied root. The single source of truth for "which descendants are
+  // not yet terminal" stays openFrontier so the scheduler and this gate agree.
   const frontier = openFrontier(db, rootTaskId);
-  if (closureResidual === null || closureResidual >= 0.3) return { ok: false, reason: "missing_clean_closure_audit", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [], open_frontier_count: frontier.open_count };
-  if (frontier.open_count > 0) return { ok: false, reason: "nonterminal_descendants", status_reason: "wait_on_frontier", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: frontier.open_descendant_task_ids, open_frontier_count: frontier.open_count };
-  return { ok: true, closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [], open_frontier_count: 0 };
+  if (!signal.satisfied || signal.residual === null || signal.residual >= 0.3) return { ok: false, reason: "missing_clean_closure_audit", closure_audit_event_id: audit_id, closure_residual: signal.residual, nonterminal_descendant_task_ids: [], open_frontier_count: frontier.open_count };
+  // Goal-sufficiency is the stop rule. Open descendants become redundant
+  // frontier, not a root-commit blocker, when the closure verifier says the
+  // directive goal is met. The scheduler stops fanning out a satisfied root.
+  return { ok: true, closure_audit_event_id: audit_id, closure_residual: signal.residual, nonterminal_descendant_task_ids: frontier.open_descendant_task_ids, open_frontier_count: frontier.open_count };
 };
 
 /** Upward cascade: when EVERY refines-child of a task has a terminal

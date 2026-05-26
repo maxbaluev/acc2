@@ -246,7 +246,13 @@ describe("task_scheduler", () => {
     }
   }, 60_000);
 
-  test("frontier_drainer: parked root parks as wait_on_frontier while its ready descendant is drained first", async () => {
+  // GOAL-SUFFICIENCY STOP (amendment goal_sufficiency_root_commit). Supersedes the
+  // old frontier_drainer "park the root, drain its frontier first" behavior. A root
+  // with a clean closure (residual < 0.3) is goal-satisfied: the scheduler STOPS
+  // fanning out / draining its remaining frontier and the root COMMITS NOW
+  // (auto-commit on clean closure inside terminateNoProgressRedispatch). The open
+  // descendant is no longer pulled in as a drain target — it is redundant frontier.
+  test("goal-sufficiency stop: a clean-closure root commits and the scheduler stops draining its open frontier", async () => {
     const db = openDb(":memory:");
     const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-frontier-"));
     writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
@@ -255,9 +261,9 @@ describe("task_scheduler", () => {
       const rootTaskId = newId();
       const childTaskId = newId();
 
-      // Root with a prior brain_dispatched + clean closure but an OPEN
-      // decomposition descendant → terminateNoProgressRedispatch parks it as
-      // wait_on_frontier instead of attempting the doomed commit.
+      // Root with a prior brain_dispatched + clean closure and an OPEN
+      // decomposition descendant. Goal-satisfied → terminateNoProgressRedispatch
+      // auto-commits the root rather than parking it on wait_on_frontier.
       emitEvent(db, { kind: "directive_opened", substrate_origin: "owner", directive_id: directiveId, task_id: directiveId, payload: { directive_text: FIXTURE_D_DIRECTIVE_TEXT, fixture: "fixture_d_count_todos", target_path: tempDir, lifecycle: "finite" } });
       emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, parent_task_id: null, payload: { goal: "root goal", lifecycle: "finite", urgency: "normal", target_path: tempDir } });
       emitEvent(db, { kind: "brain_dispatched", substrate_origin: "substrate_auto", directive_id: directiveId, task_id: rootTaskId, payload: { dispatch_id: newId(), session_token: "s", started_at_ms: Date.now() - 60_000 } });
@@ -267,31 +273,34 @@ describe("task_scheduler", () => {
       await Bun.sleep(3);
       emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.1, payload: { closure_residual: 0.1 } });
 
-      // Open decomposition descendant — a fixture-D leaf the scheduler can dispatch.
+      // Open decomposition descendant — under coverage-completeness the scheduler
+      // would have drained this first; under goal-sufficiency it is redundant.
       emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: childTaskId, parent_task_id: rootTaskId, payload: { goal: FIXTURE_D_DIRECTIVE_TEXT, fixture: "fixture_d_count_todos", lifecycle: "finite", urgency: "normal", target_path: tempDir } });
 
       _setDispatchReadyTaskForTests(() => new Promise(() => {}));
       const tick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 5, resourceBudget: { dispatch_slots: 5, brain_slots: 5 } });
 
-      // (a) the parked root does NOT dispatch / commit; (c) the descendant is
-      // drained first (preferred over the parked root).
-      expect(tick.dispatched).toContain(childTaskId);
+      // The goal-satisfied root does NOT re-dispatch — it commits on sufficiency
+      // (terminated → skipped_failure_capped). The commit lands as task_committed.
       expect(tick.dispatched).not.toContain(rootTaskId);
       expect(tick.skipped_failure_capped).toContain(rootTaskId);
+      const committed = db
+        .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'task_committed' ORDER BY ts DESC LIMIT 1")
+        .get(rootTaskId) as { payload: string } | null;
+      expect(committed).not.toBeNull();
 
-      // The parking gate surfaces wait_on_frontier + the open-frontier count.
+      // The redispatch-terminated gate surfaces the goal-sufficiency commit, NOT
+      // wait_on_frontier — coverage is no longer the stop rule.
       const gate = db
         .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'constitutional_gate_decision' ORDER BY ts DESC LIMIT 1")
         .get(rootTaskId) as { payload: string } | null;
       expect(gate).not.toBeNull();
-      const gp = JSON.parse(gate!.payload) as { reason?: string; open_frontier_count?: number };
-      expect(gp.reason).toBe("wait_on_frontier");
-      expect(gp.open_frontier_count).toBe(1);
+      const gp = JSON.parse(gate!.payload) as { reason?: string };
+      expect(gp.reason).not.toBe("wait_on_frontier");
 
-      // (b) once the descendant is terminal, the root is commit-eligible:
-      // openFrontier drains to 0 and rootCommitReadiness goes ok.
-      emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: childTaskId, payload: { summary: "child done" } });
-      expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: true, open_frontier_count: 0 });
+      // rootCommitReadiness is already ok with the open frontier present — the
+      // scheduler did not need to drain the descendant to make the root committable.
+      expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: true, open_frontier_count: 1 });
     } finally {
       _setDispatchReadyTaskForTests();
       rmSync(tempDir, { recursive: true, force: true });
@@ -1524,10 +1533,18 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
     expect(child.c).toBe(0);
   });
 
-  test("root with clean closure but NONTERMINAL descendant is PARKED — no doomed commit, no dispatcher_violation hot-loop", async () => {
+  // GOAL-SUFFICIENCY (amendment goal_sufficiency_root_commit). Supersedes the old
+  // coverage-completeness "park until the child finishes" behavior. A root with a
+  // clean closure audit (residual < 0.3) is GOAL-SATISFIED and COMMITS NOW, even
+  // with an open/nonterminal descendant. The open frontier is redundant
+  // provenance/pressure, never a commit blocker — and committing on sufficiency
+  // (rather than re-attempting a doomed commit) means there is still NO
+  // dispatcher_violation(root_commit_blocked) hot-loop.
+  test("root with clean closure COMMITS on goal sufficiency even with a NONTERMINAL descendant — no dispatcher_violation hot-loop", async () => {
     const db = openDb(":memory:");
     const { directiveId, taskId: root } = await seedDeliverableWithoutClosure(db, { withClosure: 0.1 });
-    // Add a not-yet-terminal child so the root cannot commit (root_commit_blocked).
+    // Add a not-yet-terminal child. Under coverage-completeness this blocked the
+    // root; under goal-sufficiency it is redundant open frontier, not a blocker.
     emitEvent(db, {
       kind: "task_node_opened",
       substrate_origin: "owner",
@@ -1537,17 +1554,18 @@ describe("inFlightDirectivesFromSql + findCrossDirectiveConflict", () => {
       payload: { goal: "child still running" },
     });
 
-    // Pre-fix: the no-progress auto-commit emitted task_committed every tick →
-    // the emit guard converted each to dispatcher_violation(root_commit_blocked),
-    // an unbounded hot-loop. Post-fix: the root is parked until the child finishes.
     for (let i = 0; i < 3; i++) await schedulerTick(db, { directiveId });
 
+    // The goal-satisfied root commits exactly once (auto-commit on clean closure),
+    // not parked indefinitely behind its open frontier.
     const committed = db.query("SELECT COUNT(*) AS c FROM events WHERE task_id = ? AND kind = 'task_committed'").get(root) as { c: number };
-    expect(committed.c).toBe(0); // parked, not doom-committed
+    expect(committed.c).toBe(1); // committed on sufficiency, not parked
+    // The emit-time root-commit blocker no longer gates on coverage, so the commit
+    // is accepted (no root_commit_blocked) — and there is no per-tick hot-loop.
     const violations = db
       .query("SELECT COUNT(*) AS c FROM events WHERE task_id = ? AND kind = 'dispatcher_violation' AND failure_kind = 'root_commit_blocked'")
       .get(root) as { c: number };
-    expect(violations.c).toBe(0); // no hot-loop spam
+    expect(violations.c).toBe(0); // sufficiency commit accepted; no doomed-commit spam
   });
 
   test("root abandoned for no-progress cancels its OPEN descendants — no orphaned-child redispatch storm", async () => {

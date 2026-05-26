@@ -1414,9 +1414,22 @@ export const schedulerTick = async (
   //     cannot make progress until its frontier drains).
   const drainTargetTaskIds = new Set<string>();
   const parkedRootTaskIds = new Set<string>();
+  // GOAL-SUFFICIENCY STOP (amendment goal_sufficiency_root_commit). A root whose
+  // closure verdict already says the directive goal is met (rootCommitReadiness
+  // ok) MUST NOT keep fanning out / draining its remaining frontier — it can
+  // commit now. We collect such roots into sufficiencyStoppedRootIds and STOP
+  // adding their open frontier as drain targets. Only roots that are NOT
+  // goal-satisfied (reason nonterminal_descendants, no clean closure) are parked
+  // and have their frontier drained. This is the fix for over-decomposition +
+  // roots that never commit + redispatch storms: sufficiency, not coverage.
+  const sufficiencyStoppedRootIds = new Set<string>();
   for (const candidate of ready) {
     if (candidate.parent_id !== null) continue; // roots only
     const readiness = rootCommitReadiness(db, candidate.id);
+    if (readiness.ok && readiness.open_frontier_count > 0) {
+      sufficiencyStoppedRootIds.add(candidate.id);
+      continue; // stop fan-out/drain: the root can commit on goal sufficiency.
+    }
     if (!readiness.ok && readiness.reason === "nonterminal_descendants" && readiness.open_frontier_count > 0) {
       parkedRootTaskIds.add(candidate.id);
       for (const id of readiness.nonterminal_descendant_task_ids) drainTargetTaskIds.add(id);
@@ -1425,7 +1438,17 @@ export const schedulerTick = async (
   // A drain target that is ITSELF a parked root (a parked sub-root whose own
   // frontier is open) stays parked: it can't be a useful leaf to dispatch.
   for (const id of parkedRootTaskIds) drainTargetTaskIds.delete(id);
+  // A goal-satisfied root STOPS fan-out: do not drain its frontier. Its open
+  // descendants are redundant; the root commits on sufficiency. Removing them
+  // from the drain set prevents the scheduler from chasing coverage the closure
+  // verdict already deemed unnecessary (amendment goal_sufficiency_root_commit).
+  for (const candidate of ready) {
+    if (!sufficiencyStoppedRootIds.has(candidate.id)) continue;
+    const frontier = rootCommitReadiness(db, candidate.id).nonterminal_descendant_task_ids;
+    for (const id of frontier) drainTargetTaskIds.delete(id);
+  }
   const drainPriorityClass = (taskId: string): number => {
+    if (sufficiencyStoppedRootIds.has(taskId)) return 3; // commit the satisfied root NOW
     if (drainTargetTaskIds.has(taskId)) return 2; // drain the frontier first
     if (parkedRootTaskIds.has(taskId)) return 0; // parked root last — never re-loop
     return 1; // normal work in between

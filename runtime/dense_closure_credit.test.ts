@@ -211,6 +211,64 @@ describe("distributeDenseClosureCredit — high residual (failure) → negative 
   });
 });
 
+// GOAL-SUFFICIENCY (amendment goal_sufficiency_root_commit + ungrounded_provenance_weight):
+// ungrounded / self-reported closure provenance MARKS the dense credit (halves its
+// distributed weight via UNGROUNDED_PROVENANCE_WEIGHT_MULTIPLIER=0.5) but NEVER blocks
+// the pass — the goal-satisfied root still committed, the dense signal is just lighter.
+describe("distributeDenseClosureCredit — ungrounded provenance halves weight, never blocks", () => {
+  test("ungrounded provenance distributes exactly half the weight of grounded; both still run and credit", () => {
+    const db = openDb(":memory:");
+
+    // Grounded directive: substrate-verified closure provenance → full weight.
+    const groundedDir = "dir_prov_grounded";
+    const grounded = seedDirective(db, groundedDir);
+    makeArtifact(db, "art_grounded");
+    seedActCiting(db, groundedDir, grounded.childA, ["art_grounded"], []);
+    const groundedRes = distributeDenseClosureCredit(db, {
+      closure_audit_event_id: "audit_grounded",
+      directive_id: groundedDir,
+      root_task_id: grounded.root,
+      closure_residual: 0.05,
+      // ungrounded_provenance omitted → grounded (full weight).
+    });
+
+    // Ungrounded directive: self-reported provenance → half weight, still runs.
+    const ungroundedDir = "dir_prov_ungrounded";
+    const ungrounded = seedDirective(db, ungroundedDir);
+    makeArtifact(db, "art_ungrounded");
+    seedActCiting(db, ungroundedDir, ungrounded.childA, ["art_ungrounded"], []);
+    const ungroundedRes = distributeDenseClosureCredit(db, {
+      closure_audit_event_id: "audit_ungrounded",
+      directive_id: ungroundedDir,
+      root_task_id: ungrounded.root,
+      closure_residual: 0.05,
+      ungrounded_provenance: true, // MARK: half weight, never block.
+    });
+
+    // Both passes RAN and credited — ungrounded provenance never blocks the pass.
+    expect(groundedRes.ran).toBe(true);
+    expect(ungroundedRes.ran).toBe(true);
+    expect(groundedRes.contributors_credited).toBe(1);
+    expect(ungroundedRes.contributors_credited).toBe(1);
+
+    // The distributed weight on the ungrounded contributor is exactly half the
+    // grounded one (same depth, same residual) — the 0.5 provenance multiplier.
+    const weightFor = (artifactId: string): number => {
+      const rows = denseRows(db, "act_artifact_score_updated").filter((p) => p.artifact_id === artifactId);
+      expect(rows.length).toBe(1);
+      return rows[0]!.weight as number;
+    };
+    const groundedWeight = weightFor("art_grounded");
+    const ungroundedWeight = weightFor("art_ungrounded");
+    expect(ungroundedWeight).toBeCloseTo(groundedWeight * 0.5, 9);
+    expect(ungroundedWeight).toBeLessThan(groundedWeight);
+
+    // The ungrounded contributor STILL gained alpha posterior evidence (lighter,
+    // not zero) — the credit is damped, the root's commit is unaffected.
+    expect(getArtifact(db, "art_ungrounded")!.posteriorAlpha).toBeGreaterThan(1);
+  });
+});
+
 describe("distributeDenseClosureCredit — idempotent", () => {
   test("running twice does not double-credit any contributor", () => {
     const db = openDb(":memory:");
