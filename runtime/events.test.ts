@@ -414,6 +414,7 @@ describe("emitEvent act_tuple_recorded projector", () => {
       "candidate_confirmed",
       "candidate_confirmed",
       "coalition_credit_distributed",
+      "credit_envelope_projected",
       "origin_calibration_recorded",
       "origin_calibration_recorded",
       "origin_calibration_recorded",
@@ -459,6 +460,16 @@ describe("emitEvent act_tuple_recorded projector", () => {
       if (row.kind === "coalition_credit_distributed") {
         const coal = JSON.parse(row.payload);
         expect(typeof coal.projection_key).toBe("string");
+        continue;
+      }
+      // Amendment 4509YBMC: the CreditEnvelope audit row is keyed to the
+      // scored event (projection_key = credit_envelope:{scored_event_id}),
+      // not to the act_tuple's source lifecycle, so it carries no
+      // source_act_id. Pin only its idempotency contract.
+      if (row.kind === "credit_envelope_projected") {
+        const env = JSON.parse(row.payload);
+        expect(typeof env.projection_key).toBe("string");
+        expect(typeof env.scored_event_id).toBe("string");
         continue;
       }
       // 2026-05-24 (non-blocking post-commit cascade, directive
@@ -977,6 +988,7 @@ describe("emitEvent act_tuple_recorded projector", () => {
       applied_change_committed: 1,
       candidate_confirmed: 6,
       coalition_credit_distributed: 1,
+      credit_envelope_projected: 1,
       origin_calibration_recorded: 10,
       retrieval_binding: 4,
       retrieval_rejected: 1,

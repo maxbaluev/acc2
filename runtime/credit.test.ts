@@ -10,6 +10,8 @@ import {
   distributeOwnerObservedOutcomeCredit,
   shapleyWeightsByCorroboration,
   projectActionScoredToCredit,
+  projectCreditEnvelope,
+  buildCreditEnvelope,
   __extractBodyCitationsForTest,
   __collectCitationsForTest,
   __residualToBetaDeltasForTest,
@@ -2231,3 +2233,121 @@ describe("T4.4 coalition credit — multi-artifact joint citation posterior", ()
   });
 });
 
+
+// ── Amendment 4509YBMC — single CreditEnvelope write boundary ──────
+describe("projectCreditEnvelope — single outcome-credit boundary", () => {
+  test("emitting action_scored projects exactly one credit_envelope and drives the deliberate leg", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action body");
+    insertSampleArtifact(db, "art_verifier", "// verifier body");
+    insertSampleArtifact(db, "art_cited", "// cited artifact");
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      predicted_residual: 0,
+      payload: { cited_artifact_ids: ["art_cited"] },
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0,
+      context_refs: [ap.id],
+      payload: { action_predicted_event_id: ap.id },
+    });
+    await flushPostCommitProjectionsForTest();
+    const envelopes = db
+      .query<{ c: number }, [string]>(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'credit_envelope_projected' AND json_extract(payload, '$.scored_event_id') = ?",
+      )
+      .get(scored.id)!;
+    expect(envelopes.c).toBe(1);
+    // The envelope drove the deliberate leg — the cited artifact's posterior moved.
+    const cited = getArtifact(db, "art_cited")!;
+    expect(cited.posteriorAlpha).toBeGreaterThan(1);
+  });
+
+  test("HARD GATE: a second projection for the same scored_event_id is refused — no posterior moves twice", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action body");
+    insertSampleArtifact(db, "art_verifier", "// verifier body");
+    insertSampleArtifact(db, "art_cited", "// cited artifact");
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      predicted_residual: 0,
+      payload: { cited_artifact_ids: ["art_cited"] },
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+      residual: 0,
+      context_refs: [ap.id],
+      payload: { action_predicted_event_id: ap.id },
+    });
+    await flushPostCommitProjectionsForTest();
+    const alphaAfterFirst = getArtifact(db, "art_cited")!.posteriorAlpha;
+
+    const scoredLite = {
+      id: scored.id,
+      payload: JSON.stringify({ action_predicted_event_id: ap.id }),
+      context_refs: JSON.stringify([ap.id]),
+      directive_id: scored.directive_id,
+      task_id: scored.task_id,
+      residual: 0,
+      action_artifact_id: "art_action",
+      verifier_artifact_id: "art_verifier",
+    };
+    // Re-drive twice: each must be refused by the hard gate.
+    const r1 = projectCreditEnvelope(db, scoredLite);
+    const r2 = projectCreditEnvelope(db, scoredLite);
+    expect(r1.projected).toBe(false);
+    expect(r1.reason).toBe("credit_envelope_already_projected");
+    expect(r2.projected).toBe(false);
+
+    const envelopes = db
+      .query<{ c: number }, [string]>(
+        "SELECT COUNT(*) AS c FROM events WHERE kind = 'credit_envelope_projected' AND json_extract(payload, '$.scored_event_id') = ?",
+      )
+      .get(scored.id)!;
+    expect(envelopes.c).toBe(1);
+    expect(getArtifact(db, "art_cited")!.posteriorAlpha).toBeCloseTo(alphaAfterFirst, 9);
+  });
+
+  test("buildCreditEnvelope separates deliberate causal citations from retrieval exposures", () => {
+    const db = openDb(":memory:");
+    const kc = emitEvent(db, { kind: "knowledge_candidate", substrate_origin: "claude_root", payload: { text: "k" } });
+    const binding = emitEvent(db, {
+      kind: "retrieval_binding",
+      substrate_origin: "substrate_auto",
+      payload: { query: "q", source_event_id: kc.id, binding_surface: "prompt", rank: 1 },
+    }).id;
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "claude_inline",
+      residual: 0.05,
+      context_refs: [kc.id, binding],
+      payload: {},
+    });
+    const env = buildCreditEnvelope(db, {
+      id: scored.id,
+      payload: "{}",
+      context_refs: JSON.stringify([kc.id, binding]),
+      directive_id: scored.directive_id,
+      task_id: scored.task_id,
+      residual: 0.05,
+      action_artifact_id: null,
+      verifier_artifact_id: null,
+    });
+    expect(env.causal_citations.map((c) => c.target_id)).toContain(kc.id);
+    expect(env.retrieval_exposures.map((e) => e.retrieval_binding_event_id)).toContain(binding);
+    expect(env.retrieval_exposures.find((e) => e.retrieval_binding_event_id === binding)!.cited).toBe(true);
+  });
+});

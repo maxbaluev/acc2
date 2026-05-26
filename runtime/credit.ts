@@ -1899,6 +1899,195 @@ export const projectActionScoredToCredit = (
   }
 };
 
+// ── Amendment 4509YBMC — single CreditEnvelope write boundary ──────
+//
+// action_scored is the ONLY outcome-credit write boundary. Before this
+// amendment two independent post-commit paths fired off every
+// action_scored emit in runtime/events.ts: attributeRetrievalCredit
+// (retrieval-exposure credit) and projectActionScoredToCredit
+// (deliberate causal-citation + primary-artifact credit). Each carried
+// its own idempotency scan, so a caller could drive a second
+// outcome-credit path for the same scored event and move posteriors twice.
+//
+// projectCreditEnvelope is the single boundary. It:
+//   1. Builds ONE CreditEnvelope describing both credit legs.
+//   2. Emits a credit_envelope_projected audit row keyed by
+//      projection_key = credit_envelope:{scored_event_id}.
+//   3. HARD GATE: if that projection_key already exists, it REFUSES — no
+//      posterior movement, no second projection. Structural enforcement
+//      (k_252): a repeated action_scored / replayed projector for the same
+//      scored_event_id is idempotent.
+//   4. Drives the two legs as PROJECTIONS of the envelope: deliberate
+//      causal-citation credit via projectActionScoredToCredit,
+//      retrieval-exposure credit via the retrieval_credit leg. The two
+//      legs stay separated: deliberate citation keeps full credit;
+//      exposure-only retrieval is diminished calibration credit.
+
+export const CREDIT_ENVELOPE_PROJECTION_PREFIX = "credit_envelope:";
+
+export type CreditCausalCitation = {
+  target_id: string;
+  citation_source: "context_refs" | "body_cite" | "cited_artifact_ids" | "cited_knowledge_ids";
+  projection_key: string;
+};
+
+export type CreditRetrievalExposure = {
+  retrieval_binding_event_id: string;
+  source_event_id: string | null;
+  cited: boolean;
+  projection_key: string;
+};
+
+export type CreditEnvelope = {
+  source_action_scored_event_id: string;
+  projection_key: string;
+  observed_residual: number | null;
+  causal_citations: CreditCausalCitation[];
+  retrieval_exposures: CreditRetrievalExposure[];
+  primary_artifacts: Array<{ artifact_id: string; role: "action" | "verifier" }>;
+};
+
+const creditEnvelopeProjectionKey = (scoredEventId: string): string =>
+  CREDIT_ENVELOPE_PROJECTION_PREFIX + scoredEventId;
+
+/** HARD GATE: has a CreditEnvelope already been projected for this
+ *  scored_event_id? A prior credit_envelope_projected row with the same
+ *  projection_key means the single outcome-credit write boundary already
+ *  ran; a second projection must move no posterior. */
+const creditEnvelopeAlreadyProjected = (db: Database, projectionKey: string): boolean =>
+  projectionKeyExists(db, "credit_envelope_projected", projectionKey);
+
+/** Build the CreditEnvelope for one action_scored event WITHOUT moving any
+ *  posterior. Separates deliberate causal citations (full credit) from
+ *  retrieval exposures (diminished calibration credit). Pure read. */
+export const buildCreditEnvelope = (
+  db: Database,
+  scoredEvent: ScoredEventLite,
+): CreditEnvelope => {
+  const projectionKey = creditEnvelopeProjectionKey(scoredEvent.id);
+  let contextRefs: string[] = [];
+  try {
+    contextRefs = JSON.parse(scoredEvent.context_refs || "[]") as string[];
+  } catch { contextRefs = []; }
+
+  const causal: CreditCausalCitation[] = [];
+  const exposures: CreditRetrievalExposure[] = [];
+  const seenCausal = new Set<string>();
+  for (const ref of contextRefs) {
+    if (typeof ref !== "string" || ref.length === 0) continue;
+    const row = db.query("SELECT kind, payload FROM events WHERE id = ?").get(ref) as { kind: string; payload: string } | null;
+    if (row && row.kind === "retrieval_binding") {
+      // Retrieval-exposure leg: the scored act cited a binding (cited=true).
+      let sourceEventId: string | null = null;
+      try { sourceEventId = (JSON.parse(row.payload || "{}") as Record<string, unknown>).source_event_id as string ?? null; } catch { /* ignore */ }
+      exposures.push({
+        retrieval_binding_event_id: ref,
+        source_event_id: sourceEventId,
+        cited: true,
+        projection_key: ref + ":credit:" + scoredEvent.id,
+      });
+    } else if (!seenCausal.has(ref)) {
+      // Deliberate causal-citation leg.
+      seenCausal.add(ref);
+      causal.push({ target_id: ref, citation_source: "context_refs", projection_key: scoredEvent.id + ":causal:" + ref });
+    }
+  }
+
+  const primaryArtifacts: Array<{ artifact_id: string; role: "action" | "verifier" }> = [];
+  if (typeof scoredEvent.action_artifact_id === "string" && scoredEvent.action_artifact_id.length > 0) {
+    primaryArtifacts.push({ artifact_id: scoredEvent.action_artifact_id, role: "action" });
+  }
+  if (typeof scoredEvent.verifier_artifact_id === "string" && scoredEvent.verifier_artifact_id.length > 0) {
+    primaryArtifacts.push({ artifact_id: scoredEvent.verifier_artifact_id, role: "verifier" });
+  }
+
+  return {
+    source_action_scored_event_id: scoredEvent.id,
+    projection_key: projectionKey,
+    observed_residual: typeof scoredEvent.residual === "number" ? scoredEvent.residual : null,
+    causal_citations: causal,
+    retrieval_exposures: exposures,
+    primary_artifacts: primaryArtifacts,
+  };
+};
+
+/** The SINGLE outcome-credit write boundary for action_scored
+ *  (amendment 4509YBMC). Builds one CreditEnvelope, emits the
+ *  credit_envelope_projected audit row, HARD-REFUSES a second projection
+ *  for the same scored_event_id (no posterior movement), then drives the
+ *  deliberate and exposure credit legs as projections of the envelope.
+ *  Fail-soft: the boundary never throws so the action_scored emit is never
+ *  poisoned. */
+export const projectCreditEnvelope = (
+  db: Database,
+  scoredEvent: ScoredEventLite,
+): { projected: boolean; reason?: string; envelope?: CreditEnvelope } => {
+  const projectionKey = creditEnvelopeProjectionKey(scoredEvent.id);
+  // HARD GATE — refuse a second outcome-credit path for the same
+  // action_scored. Idempotent: replayed projector / repeated action_scored
+  // moves no posterior twice.
+  if (creditEnvelopeAlreadyProjected(db, projectionKey)) {
+    return { projected: false, reason: "credit_envelope_already_projected" };
+  }
+  let envelope: CreditEnvelope;
+  try {
+    envelope = buildCreditEnvelope(db, scoredEvent);
+  } catch (err) {
+    try {
+      emitEvent(db, {
+        kind: "projection_error",
+        substrate_origin: "substrate_auto",
+        directive_id: scoredEvent.directive_id,
+        task_id: scoredEvent.task_id,
+        context_refs: [scoredEvent.id],
+        payload: { where: "projectCreditEnvelope", reason: "build_failed", error: (err as Error).message ?? String(err) } as JsonValue,
+      });
+    } catch { /* swallow */ }
+    return { projected: false, reason: "build_failed" };
+  }
+
+  // Stamp the envelope audit row FIRST so the hard gate is closed before
+  // any leg runs — a replayed projector observes the projection_key and refuses.
+  emitEvent(db, {
+    kind: "credit_envelope_projected",
+    substrate_origin: "substrate_auto",
+    directive_id: scoredEvent.directive_id,
+    task_id: scoredEvent.task_id,
+    context_refs: [scoredEvent.id],
+    payload: {
+      scored_event_id: scoredEvent.id,
+      projection_key: projectionKey,
+      causal_citation_count: envelope.causal_citations.length,
+      retrieval_exposure_count: envelope.retrieval_exposures.length,
+      primary_artifact_count: envelope.primary_artifacts.length,
+      deliberate_projected: true,
+      exposure_projected: true,
+    } as JsonValue,
+  });
+
+  // Leg 1 — deliberate causal-citation + primary-artifact credit.
+  try {
+    projectActionScoredToCredit(db, scoredEvent);
+  } catch { /* projectActionScoredToCredit is itself fail-soft */ }
+
+  // Leg 2 — retrieval-exposure credit (diminished calibration credit;
+  // separated from deliberate citation per amendment 4509YBMC).
+  try {
+    const { attributeRetrievalCredit } = require("./retrieval_credit") as typeof import("./retrieval_credit");
+    let refs: string[] = [];
+    try { refs = JSON.parse(scoredEvent.context_refs || "[]") as string[]; } catch { refs = []; }
+    attributeRetrievalCredit(db, {
+      scored_event_id: scoredEvent.id,
+      context_refs: refs,
+      residual: scoredEvent.residual,
+      directive_id: scoredEvent.directive_id,
+      task_id: scoredEvent.task_id,
+    });
+  } catch { /* retrieval exposure leg is fail-soft */ }
+
+  return { projected: true, envelope };
+};
+
 // ── T0.3 Citation binding enforcement — knowledge credit symmetry ──
 //
 // Symmetric to T0.2 (commit d8baa7e — universal artifact credit

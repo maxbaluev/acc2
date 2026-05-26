@@ -1710,51 +1710,30 @@ export const emitEvent = (db: Database, input: EmitEventInput): EmittedEvent => 
       },
     });
   }
-  // RLM retrieval credit attribution (brain task FX9PZDQ3W932,
-  // 2026-05-18). Every action_scored event walks its context_refs for
-  // retrieval_binding rows and emits retrieval_credit_attributed per
-  // binding so retrieval_credit_view.credit_attributed_count is
-  // non-zero in production. Closes the 88ESCTN8XN6J always-on-consumer
-  // gap for the new credit loop without a 5-min worker delay —
-  // attribution is deterministic given the inputs, so we fire at the
-  // write boundary (same pattern as distributeCredit for
-  // act_tuple_recorded). Synchronous, idempotent via projection_key.
-  if (input.kind === "action_scored") {
-    try {
-      void import("./retrieval_credit").then(({ attributeRetrievalCredit }) => {
-        attributeRetrievalCredit(db, {
-          scored_event_id: id,
-          context_refs: input.context_refs ?? [],
-          residual: input.residual,
-          directive_id: input.directive_id,
-          task_id: input.task_id,
-        });
-      }).catch(() => { /* swallow; can be re-driven from the action_scored row */ });
-    } catch { /* defensive */ }
-  }
-  // T0.2 universal action_scored → act_artifact_score_updated projection.
+  // Amendment 4509YBMC — single CreditEnvelope write boundary.
   //
-  // Live evidence (24h pre-fix): action_scored=2380,
-  // act_artifact_score_updated=123, parity=5.17%. distributeCredit's rich
-  // Shapley pipeline only fires for select code paths and silently skips
-  // when the action_artifact_id isn't a registered act_artifact row
-  // (synthetic-actuator branch). The universal projector closes the gap:
-  // every action_scored emit walks source_act_event_id → action_predicted's
-  // cited_artifact_ids and emits act_artifact_score_updated per cited
-  // artifact, idempotently. The recursion guard
-  // (payload.projected_from === "distribute_credit") prevents
-  // double-credit when distributeCredit itself drives the action_scored
-  // emit. Synchronous so idempotency is race-free.
+  // action_scored is the ONLY outcome-credit write boundary. The two
+  // formerly-independent post-commit paths (attributeRetrievalCredit for
+  // retrieval-exposure credit and projectActionScoredToCredit for
+  // deliberate causal-citation + primary-artifact credit) are now driven
+  // by ONE projection: projectCreditEnvelope. It emits a single
+  // credit_envelope_projected audit row keyed by
+  // projection_key=credit_envelope:{scored_event_id} and HARD-REFUSES a
+  // second outcome-credit projection for the same action_scored (no
+  // posterior movement) — the structural enforcement that makes "one write
+  // boundary" real (k_252). Deliberate vs exposure credit stay separated
+  // inside the envelope legs. Synchronous so the idempotency gate is
+  // race-free. Bridge-exit artifact pairs are still excluded.
   if (input.kind === "action_scored") {
     enqueuePostCommitProjection(db, {
-      label: "action_scored:project_credit",
+      label: "action_scored:credit_envelope",
       sourceEventId: id,
       run: () => {
         const actionArtifactId = typeof input.action_artifact_id === "string" ? input.action_artifact_id : "";
         const verifierArtifactId = typeof input.verifier_artifact_id === "string" ? input.verifier_artifact_id : "";
         if (!isBridgeExitArtifactPair(actionArtifactId, verifierArtifactId)) {
-          const { projectActionScoredToCredit } = require("./credit") as typeof import("./credit");
-          projectActionScoredToCredit(db, {
+          const { projectCreditEnvelope } = require("./credit") as typeof import("./credit");
+          projectCreditEnvelope(db, {
             id,
             payload: JSON.stringify(eventPayload),
             context_refs: JSON.stringify(input.context_refs ?? []),

@@ -129,6 +129,12 @@ export const EVENT_KINDS = {
   // real-mode daemon throws unknown_event_kind and the whole credit tick
   // aborts — the credit loop was double-inert before (scope mismatch +
   // unregistered emit kind).
+  // PROJECTION of CreditEnvelope, not an independent credit driver
+  // (amendment 4509YBMC): causal_edge_credited is an audit projection of
+  // the single envelope write boundary; it does not move a posterior
+  // outside projectCreditEnvelope.
+  // PROJECTION of CreditEnvelope, not an independent credit driver
+  // (amendment 4509YBMC): audit projection of the single envelope boundary.
   causal_edge_credited:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // Tier-S3 trajectory-motif posterior (brain KC G3PR7X6TCD4T57D7T6GXCDY9AW,
   // 2026-05-19): substrate-emitted when the bounded trajectory-motif
@@ -170,6 +176,11 @@ export const EVENT_KINDS = {
 
   // ── Knowledge (Model D) ─────────────────────────────────────────────
   knowledge_candidate:                     { producer: "brain",     embeddable: true,  mirror_inline: true,  health_metric: false, narrative: true },
+  // PROJECTION of CreditEnvelope, not an independent credit driver
+  // (amendment 4509YBMC). candidate_confirmed / candidate_contradicted are
+  // the knowledge-posterior audit surface of the single envelope boundary.
+  // PROJECTION of CreditEnvelope, not an independent credit driver
+  // (amendment 4509YBMC): knowledge-posterior audit surface of the envelope.
   candidate_confirmed:                     { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   candidate_contradicted:                  { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // δ-mem follow-up (2026-05-17): substrate-emitted when the emit-time
@@ -233,7 +244,20 @@ export const EVENT_KINDS = {
   //      { retrieval_binding_event_id, reason, rejected_by, evidence_ref? }
   //    reason is open-ended (k_201): low_similarity, off_task,
   //    declined_concept, contradicts_belief, etc.
+  // PROJECTION of CreditEnvelope, not an independent credit driver
+  // (amendment 4509YBMC). retrieval_credit_attributed rows are emitted
+  // by the retrieval-exposure leg of projectCreditEnvelope; they move no
+  // posterior on their own — the envelope owns the single write boundary.
   retrieval_credit_attributed:             { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // CreditEnvelope audit row (amendment 4509YBMC). Emitted ONCE per
+  // action_scored at the single credit write boundary
+  // (runtime/credit.ts projectCreditEnvelope). projection_key =
+  // credit_envelope:{scored_event_id}. A prior row with the same key is
+  // the HARD idempotency gate: a second outcome-credit projection for the
+  // same action_scored is refused (no posterior movement). The row carries
+  // { scored_event_id, projection_key, deliberate_projected,
+  // exposure_projected } for audit; it moves NO posterior itself.
+  credit_envelope_projected:               { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   retrieval_rejected:                      { producer: "both",      embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   // Substrate-authored when a retrieval_binding injects knowledge from one
   // directive into another directive's prompt/search surface. This makes
@@ -375,6 +399,13 @@ export const EVENT_KINDS = {
   // trying to fix it). Closes the repair-session idempotency window so no
   // further repair dispatch fires for the session.
   artifact_repair_exhausted:               { producer: "runtime", embeddable: false, mirror_inline: false, health_metric: true,  narrative: true },
+  // PROJECTION of CreditEnvelope, not an independent credit driver
+  // (amendment 4509YBMC). act_artifact_score_updated rows are the audit
+  // surface for posterior movement applied by the single envelope boundary
+  // (runtime/credit.ts projectCreditEnvelope → projectActionScoredToCredit /
+  // distributeCredit). They do not move a posterior outside the envelope.
+  // PROJECTION of CreditEnvelope, not an independent credit driver
+  // (amendment 4509YBMC): posterior-movement audit surface of the envelope.
   act_artifact_score_updated:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // T0.2 universal projection — emit-boundary projector for action_scored
   // walks source_act_event_id → action_predicted's cited_artifact_ids and

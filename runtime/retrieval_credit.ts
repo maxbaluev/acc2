@@ -2,6 +2,16 @@
 // credit loop (Phase I1+I1a, brain knowledge_candidate KZE8EXYFWH7C,
 // task FX9PZDQ3W932 RLM_RETRIEVAL_ACTS_MIN_LEAP, 2026-05-18).
 //
+// Amendment 4509YBMC: this module is now the RETRIEVAL-EXPOSURE LEG of the
+// single CreditEnvelope write boundary (runtime/credit.ts
+// projectCreditEnvelope), NOT an independent action_scored post-commit
+// path. It is invoked only through projectCreditEnvelope, which owns the
+// hard idempotency gate (credit_envelope_projected). The
+// retrieval_credit_attributed rows it emits are exposure-credit audit
+// projections of the envelope; they move no posterior on their own.
+// projectRetrievalExposureCredit is exported as the canonical envelope-leg
+// name; attributeRetrievalCredit remains as the implementation.
+//
 // Closes the always-on consumer gap (k_88ESCTN8XN6J): retrieval_binding
 // events accumulate, action_scored events cite them via context_refs,
 // but until something WALKS that join and emits
@@ -115,3 +125,9 @@ export const attributeRetrievalCredit = (
   }
   return emitted;
 };
+
+/** Canonical envelope-leg name for the retrieval-exposure credit
+ *  projection (amendment 4509YBMC). Identical behaviour to
+ *  attributeRetrievalCredit — this leg is driven only by
+ *  projectCreditEnvelope, which owns the hard idempotency gate. */
+export const projectRetrievalExposureCredit = attributeRetrievalCredit;

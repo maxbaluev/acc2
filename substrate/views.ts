@@ -993,6 +993,14 @@ CREATE VIEW IF NOT EXISTS retrieval_credit_view AS
     c.avg_cited_residual,
     COALESCE(r.times_rejected, 0)          AS times_rejected,
     COALESCE(cr.credit_attributed_count, 0) AS credit_attributed_count,
+    -- Amendment 4509YBMC: the CreditEnvelope separates deliberate
+    -- causal citation from prompt exposure-only retrieval.
+    --   causal_citation_count — action_scored rows that DELIBERATELY cited
+    --     this binding via context_refs (the cited=true exposure leg).
+    --   exposure_only_count    — retrieval_rejected rows that flagged this
+    --     binding as exposed-but-not-cited (the diminished-credit leg).
+    COALESCE(c.times_cited, 0)             AS causal_citation_count,
+    COALESCE(r.times_rejected, 0)          AS exposure_only_count,
     CASE
       WHEN COALESCE(c.times_cited, 0) = 0 AND COALESCE(r.times_rejected, 0) = 0 THEN 'unused'
       WHEN COALESCE(c.times_cited, 0) = 0 AND COALESCE(r.times_rejected, 0) > 0 THEN 'rejected'
