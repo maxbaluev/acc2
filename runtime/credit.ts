@@ -1327,23 +1327,47 @@ const recordBrainAccuracy = (db: Database, params: RecordBrainAccuracyParams): v
     } as JsonValue,
   });
   if (updated.confidence >= 0.3 && updated.score < 0.45) {
-    params.emit({
-      kind: "brain_invocation_request",
-      substrate_origin: "substrate_auto",
-      directive_id: params.directive_id,
-      task_id: params.task_id,
-      context_refs: [observationId, params.action_predicted_event_id, params.action_scored_event_id, artifactId],
-      payload: {
-        request_reason: "credit_posterior_calibration_drift",
-        topic_keywords: ["credit", "posterior_calibration", params.goal_shape || "default"],
-        triggering_event_ids: [observationId],
-        cited_artifact_ids: [artifactId],
-        cited_knowledge_ids: [],
-        emitter_identity: "credit.brain_accuracy",
-        urgency: "normal",
-        metrics: { post_score: updated.score, post_confidence: updated.confidence, prediction_error: predictionError },
-      } as JsonValue,
-    });
+    const driftSignature = params.goal_shape || "default";
+    const windowStart = new Date(Date.parse(ts) - 6 * 60 * 60 * 1000).toISOString();
+    const equivalent = db.query<{ x: number }, [string, string, string]>(
+      `SELECT 1 AS x FROM events
+        WHERE kind IN ('brain_invocation_request','brain_invocation_dispatched')
+          AND ts > ?
+          AND json_extract(payload, '$.emitter_identity') = 'credit.brain_accuracy'
+          AND (
+            json_extract(payload, '$.drift_signature') = ?
+            OR EXISTS (SELECT 1 FROM json_each(events.payload, '$.topic_keywords') WHERE value = ?)
+          )
+        LIMIT 1`,
+    ).get(windowStart, driftSignature, driftSignature);
+    const recentEmitterCount = db.query<{ c: number }, [string]>(
+      `SELECT COUNT(*) AS c FROM events
+        WHERE kind = 'brain_invocation_request'
+          AND ts > ?
+          AND json_extract(payload, '$.emitter_identity') = 'credit.brain_accuracy'`,
+    ).get(windowStart)?.c ?? 0;
+    if (!equivalent && recentEmitterCount < 3) {
+      params.emit({
+        kind: "brain_invocation_request",
+        substrate_origin: "substrate_auto",
+        directive_id: params.directive_id,
+        task_id: params.task_id,
+        context_refs: [observationId, params.action_predicted_event_id, params.action_scored_event_id, artifactId],
+        payload: {
+          request_reason: "credit_posterior_calibration_drift",
+          drift_signature: driftSignature,
+          dedup_window_ms: 6 * 60 * 60 * 1000,
+          emitter_window_cap: 3,
+          topic_keywords: ["credit", "posterior_calibration", driftSignature],
+          triggering_event_ids: [observationId],
+          cited_artifact_ids: [artifactId],
+          cited_knowledge_ids: [],
+          emitter_identity: "credit.brain_accuracy",
+          urgency: "normal",
+          metrics: { post_score: updated.score, post_confidence: updated.confidence, prediction_error: predictionError },
+        } as JsonValue,
+      });
+    }
   }
 };
 
