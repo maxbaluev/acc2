@@ -200,7 +200,7 @@ Before adding any new event kind, predicate, worker, MCP method, or `act_artifac
 
 **Audit rule.** Every implementation proposal must classify each proposed entity as one of: folded into existing worker (name the worker), carried by existing event kind via payload extension (name the kind and field), implemented as `act_artifact` row with open `kind` (name the kind), read through existing view (name the view), or genuinely irreducible (prove existing surface fails). A generic "new" claim is insufficient. Closed enums, fixed predicate tables, and parallel registries are substrate violations.
 
-**Current surface inventory.** 239 event kinds (claude=19, runtime=144, brain=18, substrate=54, both=4); 46 views; 28 MCP/runtime methods; 1,673 live `act_artifact` registry rows; 30 registered workers. Worker absorption points: `experience_compression`, `extractors`, `contract_amendment_consumer`, `amendment`, `rendering_audit`, `owner_outcome_followup`, `scheduler`.
+**Current surface inventory.** Do NOT hand-transcribe counts here — frozen numbers drift silently against the live substrate (a prior snapshot of "239 event kinds / 46 views / 1,673 `act_artifact` rows" was already stale by ~5% kinds and ~5x artifact rows within days). Generate the inventory on demand from `runtime.system_map` (event kinds, views, MCP/runtime methods, registered workers) and the `act_artifact` registry (`SELECT kind, COUNT(*) FROM act_artifact GROUP BY kind`); treat that generated view as the single source of truth. Worker absorption points are the stable structural fact worth recording here: `experience_compression`, `extractors`, `contract_amendment_consumer`, `amendment`, `rendering_audit`, `owner_outcome_followup`, `scheduler`.
 
 ## 18. Dataflow Contract
 
